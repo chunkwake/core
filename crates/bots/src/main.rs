@@ -1,8 +1,9 @@
 //! Нагрузочный тест сервера: N офлайн-ботов проходят login и configuration,
 //! затем ходят по кругу (20 пакетов движения в секунду) и отвечают на keep-alive.
 //!
-//! `chunkwake-bots [адрес] [число ботов] [packets.json]`
-//! По умолчанию: `127.0.0.1:25565 100 target/debug/generated/26.3/reports/packets.json`.
+//! `chunkwake-bots [адрес] [число ботов] [packets.json] [разброс в блоках]`
+//! По умолчанию: `127.0.0.1:25565 100 target/debug/generated/26.3/reports/packets.json 0`.
+//! Разброс 0 — все ходят вокруг спавна (худший случай для рассылки).
 
 use chunkwake_data::packets::{Direction, PacketTable, State};
 use chunkwake_net::Connection;
@@ -80,12 +81,13 @@ async fn main() {
             std::process::exit(1);
         });
 
+    let spread: f64 = args.get(4).and_then(|n| n.parse().ok()).unwrap_or(0.0);
     let stats = Arc::new(Stats::default());
     println!("{count} bots → {addr}");
     for i in 0..count {
         let (addr, stats) = (addr.clone(), stats.clone());
         tokio::spawn(async move {
-            if let Err(e) = bot(&addr, i, ids, &stats).await {
+            if let Err(e) = bot(&addr, i, ids, spread, &stats).await {
                 stats.failed.fetch_add(1, Ordering::Relaxed);
                 if stats.failed.load(Ordering::Relaxed) <= 5 {
                     eprintln!("bot {i}: {e}");
@@ -120,7 +122,7 @@ async fn main() {
     }
 }
 
-async fn bot(addr: &str, i: usize, ids: Ids, stats: &Stats) -> Result<(), String> {
+async fn bot(addr: &str, i: usize, ids: Ids, spread: f64, stats: &Stats) -> Result<(), String> {
     let e = |e: chunkwake_net::NetError| format!("{e:?}");
     let started = Instant::now();
     let stream = TcpStream::connect(addr).await.map_err(|e| e.to_string())?;
@@ -190,25 +192,35 @@ async fn bot(addr: &str, i: usize, ids: Ids, stats: &Stats) -> Result<(), String
         .join_us
         .fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
     stats.online.fetch_add(1, Ordering::Relaxed);
-    let result = play(&mut c, i, ids, stats).await;
+    let result = play(&mut c, i, ids, spread, stats).await;
     stats.online.fetch_sub(1, Ordering::Relaxed);
     result
 }
 
-/// Ходит по кругу радиусом 8 блоков вокруг спавна; 20 движений в секунду.
-async fn play(c: &mut Connection, i: usize, ids: Ids, stats: &Stats) -> Result<(), String> {
+/// Ходит по кругу радиусом 8 блоков вокруг своей точки; 20 движений в секунду.
+/// Точка — спавн, сдвинутый на псевдослучайное смещение до `spread` блоков.
+async fn play(
+    c: &mut Connection,
+    i: usize,
+    ids: Ids,
+    spread: f64,
+    stats: &Stats,
+) -> Result<(), String> {
     let e = |e: chunkwake_net::NetError| format!("{e:?}");
     let mut tick = tokio::time::interval(Duration::from_millis(50));
     let mut angle = i as f64;
+    let h = (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let unit = |bits: u64| (bits % 10_000) as f64 / 10_000.0 * 2.0 - 1.0;
+    let (ox, oz) = (8.5 + spread * unit(h), 8.5 + spread * unit(h >> 32));
     loop {
         tokio::select! {
             _ = tick.tick() => {
                 angle += 0.05;
                 let mut w = Writer::new();
                 w.var_int(ids.sb_move_pos)
-                    .f64(8.5 + 8.0 * angle.cos())
+                    .f64(ox + 8.0 * angle.cos())
                     .f64(-60.0)
-                    .f64(8.5 + 8.0 * angle.sin())
+                    .f64(oz + 8.0 * angle.sin())
                     .u8(1); // on ground
                 c.send(&w.buf).await.map_err(e)?;
                 stats.moves_out.fetch_add(1, Ordering::Relaxed);

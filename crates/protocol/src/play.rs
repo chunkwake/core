@@ -374,3 +374,51 @@ pub fn read_move(r: &mut Reader, has_pos: bool, has_rot: bool) -> Result<Move> {
         on_ground: r.u8()? & 1 != 0,
     })
 }
+
+/// `move_entity_pos_rot` с линейной дельтой (шагов 0): смещение в 1/4096 блока.
+pub fn move_entity_pos_rot(
+    id: i32,
+    entity_id: i32,
+    delta: [i16; 3],
+    yaw: f32,
+    pitch: f32,
+    on_ground: bool,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    // Свойства: бит 0 — onGround, остальные — число шагов (0 = линейная дельта).
+    w.var_int(id).var_int(entity_id).var_int(on_ground as i32);
+    for d in delta {
+        w.u16(d as u16);
+    }
+    w.u8(angle(yaw)).u8(angle(pitch));
+    w.buf
+}
+
+/// Позиция в единицах дельты (`VecDeltaCodec.encode`: round(v * 4096)).
+pub fn quantize(pos: [f64; 3]) -> [i64; 3] {
+    pos.map(|v| (v * 4096.0).round() as i64)
+}
+
+/// Дельта между квантованными позициями, если каждая компонента влезает в short.
+pub fn delta(from: [i64; 3], to: [i64; 3]) -> Option<[i16; 3]> {
+    let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    Some([
+        i16::try_from(d[0]).ok()?,
+        i16::try_from(d[1]).ok()?,
+        i16::try_from(d[2]).ok()?,
+    ])
+}
+
+#[cfg(test)]
+mod move_tests {
+    use super::*;
+
+    #[test]
+    fn deltas() {
+        let a = quantize([1.0, 2.0, 3.0]);
+        assert_eq!(delta(a, quantize([1.5, 2.0, 2.0])), Some([2048, 0, -4096]));
+        assert_eq!(delta(a, quantize([9.0, 2.0, 3.0])), None, "8 блоков не влезает");
+        let p = move_entity_pos_rot(0x33, 7, [1, -1, 0], 90.0, 0.0, true);
+        assert_eq!(p, [0x33, 7, 1, 0, 1, 0xff, 0xff, 0, 0, 64, 0]);
+    }
+}

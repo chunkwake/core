@@ -7,7 +7,7 @@ use chunkwake_data::packets::{Direction, PacketTable, State};
 use chunkwake_protocol::Reader;
 use chunkwake_protocol::frame::FrameCodec;
 use chunkwake_protocol::play::{self, Login, Move, PlayerEntry, game_event};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -40,6 +40,7 @@ struct Ids {
     teleport_entity: i32,
     rotate_head: i32,
     remove_entities: i32,
+    move_entity_pos_rot: i32,
 }
 
 pub struct PlayPlan {
@@ -67,6 +68,27 @@ const CHUNK_CACHE_LIMIT: usize = 65_536;
 struct Broadcast {
     skip: Option<Uuid>,
     packet: Frame,
+    /// Событие сущности: получатель сам решает по дальности, слать ли `packet`,
+    /// заспавнить сущность или убрать её.
+    entity: Option<EntityEvent>,
+}
+
+#[derive(Clone, Copy)]
+enum EntityEvent {
+    /// Сущность появилась или сдвинулась; `packet` — дельта для тех, кто её уже видит.
+    At(EntityRef),
+    /// Сущность исчезла; `packet` слать только тем, кто её видел.
+    Gone(i32),
+}
+
+/// Минимум для спавна сущности игрока у нового зрителя.
+#[derive(Clone, Copy)]
+struct EntityRef {
+    entity_id: i32,
+    uuid: Uuid,
+    pos: [f64; 3],
+    yaw: f32,
+    pitch: f32,
 }
 
 /// Игрок онлайн: запись таб-листа и его сущность в мире.
@@ -77,6 +99,31 @@ struct Online {
     pos: [f64; 3],
     yaw: f32,
     pitch: f32,
+    /// Позиция, от которой считаются дельты (последняя разосланная, квантованная).
+    base: [i64; 3],
+    /// Счётчик движений: каждое `SYNC_EVERY`-е — абсолютный телепорт против дрейфа.
+    moves: u32,
+}
+
+impl Online {
+    fn at(&self) -> EntityRef {
+        EntityRef {
+            entity_id: self.entity_id,
+            uuid: self.entry.uuid,
+            pos: self.pos,
+            yaw: self.yaw,
+            pitch: self.pitch,
+        }
+    }
+}
+
+/// Как часто вместо дельты слать абсолютную позицию (у ванилы — раз в 60 тиков).
+const SYNC_EVERY: u32 = 60;
+
+/// Видна ли сущность из чанка `center` при дальности `r` чанков.
+fn near(center: (i32, i32), pos: [f64; 3], r: i32) -> bool {
+    let (x, z) = ((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+    (x - center.0).abs() <= r && (z - center.1).abs() <= r
 }
 
 /// Общее состояние сессий: игроки онлайн и широковещательный канал.
@@ -91,14 +138,27 @@ impl Hub {
     fn frame(&self, packet: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(packet.len() + 5);
         self.codec.encode(packet, &mut out);
+        // Сжатый кадр намного меньше исходной ёмкости; не держим лишнее (кэш чанков).
+        if out.capacity() > out.len() * 2 {
+            out.shrink_to_fit();
+        }
         out
     }
 
     fn send(&self, skip: Option<Uuid>, packet: Vec<u8>) {
+        self.send_entity(skip, packet, None);
+    }
+
+    fn send_entity(&self, skip: Option<Uuid>, packet: Vec<u8>, entity: Option<EntityEvent>) {
         // Ошибка = нет подписчиков; это нормально.
         let _ = self.tx.send(Broadcast {
             skip,
-            packet: Arc::new(self.frame(&packet)),
+            packet: Arc::new(if packet.is_empty() {
+                packet
+            } else {
+                self.frame(&packet)
+            }),
+            entity,
         });
     }
 }
@@ -145,6 +205,7 @@ impl PlayPlan {
                 teleport_entity: cb("teleport_entity")?,
                 rotate_head: cb("rotate_head")?,
                 remove_entities: cb("remove_entities")?,
+                move_entity_pos_rot: cb("move_entity_pos_rot")?,
             },
             login,
             chunk_body,
@@ -241,13 +302,15 @@ impl PlayPlan {
             pos: self.spawn,
             yaw: 0.0,
             pitch: 0.0,
+            base: play::quantize(self.spawn),
+            moves: 0,
         };
         let uuid = me.entry.uuid;
         // Подписка до вставки в список: ни одно событие после снимка не теряется.
         let rx = self.hub.tx.subscribe();
-        let others: Vec<Online> = {
+        let others: Vec<EntityRef> = {
             let mut players = self.hub.players.lock().unwrap();
-            let others = players.values().cloned().collect();
+            let others = players.values().map(Online::at).collect();
             players.insert(uuid, me.clone());
             others
         };
@@ -255,7 +318,9 @@ impl PlayPlan {
             Some(uuid),
             play::player_info_add(ids.player_info_update, std::slice::from_ref(&me.entry)),
         );
-        self.hub.send(Some(uuid), self.spawn_packet(&me));
+        // Спавн каждый получатель строит сам, если новичок в его зоне видимости.
+        self.hub
+            .send_entity(Some(uuid), Vec::new(), Some(EntityEvent::At(me.at())));
         self.hub.send(
             None,
             play::system_chat(
@@ -268,9 +333,10 @@ impl PlayPlan {
         let result = self.session(conn, rx, &me, &others).await;
 
         self.hub.players.lock().unwrap().remove(&uuid);
-        self.hub.send(
+        self.hub.send_entity(
             None,
             play::remove_entities(ids.remove_entities, &[me.entity_id]),
+            Some(EntityEvent::Gone(me.entity_id)),
         );
         self.hub.send(
             None,
@@ -287,44 +353,113 @@ impl PlayPlan {
         result
     }
 
-    fn spawn_packet(&self, p: &Online) -> Vec<u8> {
-        play::add_entity(
+    fn spawn_frame(&self, e: &EntityRef) -> Vec<u8> {
+        self.hub.frame(&play::add_entity(
             self.ids.add_entity,
-            p.entity_id,
-            p.entry.uuid,
+            e.entity_id,
+            e.uuid,
             self.player_type,
-            p.pos,
-            p.yaw,
-            p.pitch,
+            e.pos,
+            e.yaw,
+            e.pitch,
             0,
-        )
+        ))
     }
 
-    /// Новая позиция/поворот игрока: обновить общее состояние и разослать остальным.
+    /// Новая позиция/поворот игрока: обновить общее состояние и разослать дельту.
     fn moved(&self, uuid: Uuid, m: Move) {
-        let updated = {
-            let mut players = self.hub.players.lock().unwrap();
-            players.get_mut(&uuid).map(|p| {
-                if let Some(pos) = m.pos {
-                    p.pos = pos;
-                }
-                if let Some((yaw, pitch)) = m.rot {
-                    (p.yaw, p.pitch) = (yaw, pitch);
-                }
-                (p.entity_id, p.pos, p.yaw, p.pitch)
-            })
-        };
-        let Some((eid, pos, yaw, pitch)) = updated else {
-            return;
-        };
         let ids = self.ids;
-        self.hub.send(
-            Some(uuid),
-            play::teleport_entity(ids.teleport_entity, eid, pos, yaw, pitch, m.on_ground),
-        );
+        let update = {
+            let mut players = self.hub.players.lock().unwrap();
+            let Some(p) = players.get_mut(&uuid) else {
+                return;
+            };
+            if let Some(pos) = m.pos {
+                p.pos = pos;
+            }
+            if let Some((yaw, pitch)) = m.rot {
+                (p.yaw, p.pitch) = (yaw, pitch);
+            }
+            let q = play::quantize(p.pos);
+            p.moves = p.moves.wrapping_add(1);
+            let delta = play::delta(p.base, q).filter(|_| p.moves % SYNC_EVERY != 0);
+            p.base = q;
+            (p.at(), delta)
+        };
+        let (e, delta) = update;
+        let packet = match delta {
+            Some(d) => play::move_entity_pos_rot(
+                ids.move_entity_pos_rot,
+                e.entity_id,
+                d,
+                e.yaw,
+                e.pitch,
+                m.on_ground,
+            ),
+            None => play::teleport_entity(
+                ids.teleport_entity,
+                e.entity_id,
+                e.pos,
+                e.yaw,
+                e.pitch,
+                m.on_ground,
+            ),
+        };
         if m.rot.is_some() {
-            self.hub
-                .send(Some(uuid), play::rotate_head(ids.rotate_head, eid, yaw));
+            // Голова — отдельным кадром в том же сообщении рассылки.
+            let mut framed = self.hub.frame(&packet);
+            framed.extend(
+                self.hub
+                    .frame(&play::rotate_head(ids.rotate_head, e.entity_id, e.yaw)),
+            );
+            let _ = self.hub.tx.send(Broadcast {
+                skip: Some(uuid),
+                packet: Arc::new(framed),
+                entity: Some(EntityEvent::At(e)),
+            });
+            return;
+        }
+        self.hub
+            .send_entity(Some(uuid), packet, Some(EntityEvent::At(e)));
+    }
+
+    /// Пересчёт видимости всех игроков после смены своего чанка.
+    fn refresh_visible(
+        &self,
+        me: Uuid,
+        center: (i32, i32),
+        r: i32,
+        visible: &mut HashSet<i32>,
+        out: &mut Vec<u8>,
+    ) {
+        let all: Vec<EntityRef> = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|p| p.entry.uuid != me)
+            .map(Online::at)
+            .collect();
+        let mut gone = Vec::new();
+        for e in &all {
+            match (near(center, e.pos, r), visible.contains(&e.entity_id)) {
+                (true, false) => {
+                    out.extend(self.spawn_frame(e));
+                    visible.insert(e.entity_id);
+                }
+                (false, true) => {
+                    gone.push(e.entity_id);
+                    visible.remove(&e.entity_id);
+                }
+                _ => {}
+            }
+        }
+        if !gone.is_empty() {
+            out.extend(
+                self.hub
+                    .frame(&play::remove_entities(self.ids.remove_entities, &gone)),
+            );
         }
     }
 
@@ -333,7 +468,7 @@ impl PlayPlan {
         conn: &mut Connection,
         mut rx: broadcast::Receiver<Broadcast>,
         me: &Online,
-        others: &[Online],
+        others: &[EntityRef],
     ) -> Result<(), NetError> {
         let ids = self.ids;
         let uuid = me.entry.uuid;
@@ -363,18 +498,30 @@ impl PlayPlan {
             0.0,
         ))
         .await?;
-        let mut tab: Vec<PlayerEntry> = others.iter().map(|o| o.entry.clone()).collect();
-        tab.push(me.entry.clone());
+        // Таб-лист — все игроки; сущности — только в зоне видимости.
+        let tab: Vec<PlayerEntry> = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .values()
+            .map(|p| p.entry.clone())
+            .collect();
         conn.send(&play::player_info_add(ids.player_info_update, &tab))
             .await?;
-        for o in others {
-            conn.send(&self.spawn_packet(o)).await?;
+        let mut visible: HashSet<i32> = HashSet::new();
+        let mut out = Vec::new();
+        for e in others.iter().filter(|e| near(center, e.pos, r_view)) {
+            out.extend(self.spawn_frame(e));
+            visible.insert(e.entity_id);
+        }
+        if !out.is_empty() {
+            conn.send_frames(&out).await?;
         }
 
         // Keep-alive: шлём раз в 15 с, ответ ждём не дольше 30 с.
         let mut ticker = tokio::time::interval(KEEP_ALIVE_INTERVAL);
         ticker.tick().await;
-        let mut out = Vec::new();
         let mut pending: Option<(i64, Instant)> = None;
         loop {
             tokio::select! {
@@ -399,7 +546,7 @@ impl PlayPlan {
                         let mut next = Some(first);
                         while let Some(b) = next {
                             if b.skip != Some(uuid) {
-                                out.extend_from_slice(&b.packet);
+                                self.deliver(&b, center, r_view, &mut visible, &mut out);
                             }
                             next = rx.try_recv().ok();
                         }
@@ -407,7 +554,7 @@ impl PlayPlan {
                             conn.send_frames(&out).await?;
                         }
                     }
-                    // Отстали — пропущенное не догоняем (позиции обновятся следующими событиями).
+                    // Отстали — пропущенное не догоняем (позиции выровняет периодический телепорт).
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => return Ok(()),
                 },
@@ -431,6 +578,11 @@ impl PlayPlan {
                             if now != center {
                                 self.move_center(conn, center, now, r_view).await?;
                                 center = now;
+                                out.clear();
+                                self.refresh_visible(uuid, center, r_view, &mut visible, &mut out);
+                                if !out.is_empty() {
+                                    conn.send_frames(&out).await?;
+                                }
                             }
                         }
                         self.moved(uuid, m);
@@ -447,6 +599,42 @@ impl PlayPlan {
                         pending = None;
                     }
                     // Остальное (настройки, подтверждение телепорта) — с M3.
+                }
+            }
+        }
+    }
+
+    /// Кладёт в `out` то, что этот получатель должен увидеть из рассылки `b`.
+    fn deliver(
+        &self,
+        b: &Broadcast,
+        center: (i32, i32),
+        r: i32,
+        visible: &mut HashSet<i32>,
+        out: &mut Vec<u8>,
+    ) {
+        match b.entity {
+            None => out.extend_from_slice(&b.packet),
+            Some(EntityEvent::Gone(id)) => {
+                if visible.remove(&id) {
+                    out.extend_from_slice(&b.packet);
+                }
+            }
+            Some(EntityEvent::At(e)) => {
+                match (near(center, e.pos, r), visible.contains(&e.entity_id)) {
+                    (true, true) => out.extend_from_slice(&b.packet),
+                    (true, false) => {
+                        out.extend(self.spawn_frame(&e));
+                        visible.insert(e.entity_id);
+                    }
+                    (false, true) => {
+                        out.extend(self.hub.frame(&play::remove_entities(
+                            self.ids.remove_entities,
+                            &[e.entity_id],
+                        )));
+                        visible.remove(&e.entity_id);
+                    }
+                    (false, false) => {}
                 }
             }
         }
@@ -468,7 +656,14 @@ fn chunks_around(c: (i32, i32), r: i32, skip: Option<((i32, i32), i32)>) -> Vec<
 
 #[cfg(test)]
 mod tests {
-    use super::chunks_around;
+    use super::{chunks_around, near};
+
+    #[test]
+    fn visibility_range() {
+        assert!(near((0, 0), [15.9, 0.0, -16.0], 1));
+        assert!(!near((0, 0), [32.0, 0.0, 0.0], 1));
+        assert!(near((2, 0), [32.0, 0.0, 0.0], 0));
+    }
 
     #[test]
     fn chunk_window_shift() {
