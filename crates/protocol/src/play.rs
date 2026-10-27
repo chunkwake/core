@@ -90,6 +90,14 @@ pub fn level_chunk_with_light(id: i32, x: i32, z: i32, body: &[u8]) -> Vec<u8> {
     w.buf
 }
 
+/// Позиция чанка упакована как в `ChunkPos::pack`: x в младших 32 битах, z в старших.
+pub fn forget_level_chunk(id: i32, x: i32, z: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id);
+    w.i64(((z as i64) << 32) | (x as u32 as i64));
+    w.buf
+}
+
 pub fn chunk_batch_start(id: i32) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id);

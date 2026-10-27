@@ -22,7 +22,10 @@ struct Ids {
     chunk_batch_finished: i32,
     player_position: i32,
     keep_alive: i32,
+    forget_level_chunk: i32,
     sb_keep_alive: i32,
+    sb_move_pos: i32,
+    sb_move_pos_rot: i32,
 }
 
 pub struct PlayPlan {
@@ -50,6 +53,7 @@ impl PlayPlan {
         spawn: [f64; 3],
     ) -> Result<Self, DataError> {
         let cb = |name| packets.id(State::Play, Direction::Clientbound, name);
+        let sb = |name| packets.id(State::Play, Direction::Serverbound, name);
         Ok(Self {
             ids: Ids {
                 login: cb("login")?,
@@ -60,13 +64,63 @@ impl PlayPlan {
                 chunk_batch_finished: cb("chunk_batch_finished")?,
                 player_position: cb("player_position")?,
                 keep_alive: cb("keep_alive")?,
-                sb_keep_alive: packets.id(State::Play, Direction::Serverbound, "keep_alive")?,
+                forget_level_chunk: cb("forget_level_chunk")?,
+                sb_keep_alive: sb("keep_alive")?,
+                sb_move_pos: sb("move_player_pos")?,
+                sb_move_pos_rot: sb("move_player_pos_rot")?,
             },
             login,
             chunk_body,
             spawn,
             next_entity_id: AtomicI32::new(1),
         })
+    }
+
+    async fn send_chunks(
+        &self,
+        conn: &mut Connection,
+        center: (i32, i32),
+        coords: &[(i32, i32)],
+    ) -> Result<(), NetError> {
+        let ids = self.ids;
+        conn.send(&play::set_chunk_cache_center(
+            ids.set_chunk_cache_center,
+            center.0,
+            center.1,
+        ))
+        .await?;
+        conn.send(&play::chunk_batch_start(ids.chunk_batch_start))
+            .await?;
+        for &(x, z) in coords {
+            conn.send(&play::level_chunk_with_light(
+                ids.level_chunk_with_light,
+                x,
+                z,
+                &self.chunk_body,
+            ))
+            .await?;
+        }
+        conn.send(&play::chunk_batch_finished(
+            ids.chunk_batch_finished,
+            coords.len() as i32,
+        ))
+        .await
+    }
+
+    /// Игрок перешёл в другой чанк: выгружаем ушедшие из радиуса, шлём новые.
+    async fn move_center(
+        &self,
+        conn: &mut Connection,
+        old: (i32, i32),
+        new: (i32, i32),
+        r: i32,
+    ) -> Result<(), NetError> {
+        for (x, z) in chunks_around(old, r, Some((new, r))) {
+            conn.send(&play::forget_level_chunk(self.ids.forget_level_chunk, x, z))
+                .await?;
+        }
+        self.send_chunks(conn, new, &chunks_around(new, r, Some((old, r))))
+            .await
     }
 
     pub async fn run(&self, conn: &mut Connection) -> Result<(), NetError> {
@@ -85,35 +139,10 @@ impl PlayPlan {
             (self.spawn[0].floor() as i32) >> 4,
             (self.spawn[2].floor() as i32) >> 4,
         );
-        conn.send(&play::set_chunk_cache_center(
-            ids.set_chunk_cache_center,
-            cx,
-            cz,
-        ))
-        .await?;
-
-        // Чанки радиуса view distance, ближние первыми.
-        let r = login.view_distance;
-        let mut coords: Vec<(i32, i32)> = (-r..=r)
-            .flat_map(|dx| (-r..=r).map(move |dz| (dx, dz)))
-            .collect();
-        coords.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
-        conn.send(&play::chunk_batch_start(ids.chunk_batch_start))
+        let r_view = login.view_distance;
+        self.send_chunks(conn, (cx, cz), &chunks_around((cx, cz), r_view, None))
             .await?;
-        for &(dx, dz) in &coords {
-            conn.send(&play::level_chunk_with_light(
-                ids.level_chunk_with_light,
-                cx + dx,
-                cz + dz,
-                &self.chunk_body,
-            ))
-            .await?;
-        }
-        conn.send(&play::chunk_batch_finished(
-            ids.chunk_batch_finished,
-            coords.len() as i32,
-        ))
-        .await?;
+        let mut center = (cx, cz);
         conn.send(&play::player_position(
             ids.player_position,
             1,
@@ -146,12 +175,52 @@ impl PlayPlan {
                 packet = conn.read_packet() => {
                     let packet = packet?;
                     let mut r = Reader::new(&packet);
-                    if r.var_int()? == ids.sb_keep_alive && pending.is_some_and(|(p, _)| p == r.i64().unwrap_or(0)) {
+                    let id = r.var_int()?;
+                    if id == ids.sb_move_pos || id == ids.sb_move_pos_rot {
+                        let (x, _y, z) = (r.f64()?, r.f64()?, r.f64()?);
+                        let now = ((x.floor() as i32) >> 4, (z.floor() as i32) >> 4);
+                        if now != center {
+                            self.move_center(conn, center, now, r_view).await?;
+                            center = now;
+                        }
+                        continue;
+                    }
+                    if id == ids.sb_keep_alive && pending.is_some_and(|(p, _)| p == r.i64().unwrap_or(0)) {
                         pending = None;
                     }
-                    // Остальное (движение, настройки, подтверждение телепорта) — с M3.
+                    // Остальное (настройки, подтверждение телепорта) — с M3.
                 }
             }
         }
+    }
+}
+
+/// Чанки квадрата радиуса `r` вокруг `c`, ближние первыми, кроме попадающих в `skip`.
+fn chunks_around(c: (i32, i32), r: i32, skip: Option<((i32, i32), i32)>) -> Vec<(i32, i32)> {
+    let inside = |(x, z): (i32, i32), (s, sr): ((i32, i32), i32)| {
+        (x - s.0).abs() <= sr && (z - s.1).abs() <= sr
+    };
+    let mut coords: Vec<(i32, i32)> = (-r..=r)
+        .flat_map(|dx| (-r..=r).map(move |dz| (c.0 + dx, c.1 + dz)))
+        .filter(|&p| !skip.is_some_and(|s| inside(p, s)))
+        .collect();
+    coords.sort_by_key(|&(x, z)| (x - c.0).pow(2) + (z - c.1).pow(2));
+    coords
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chunks_around;
+
+    #[test]
+    fn chunk_window_shift() {
+        assert_eq!(chunks_around((0, 0), 2, None).len(), 25);
+        assert_eq!(chunks_around((0, 0), 2, None)[0], (0, 0));
+        // Шаг на один чанк по x: одна новая колонка из 5 чанков.
+        let new = chunks_around((1, 0), 2, Some(((0, 0), 2)));
+        assert_eq!(new.len(), 5);
+        assert!(new.iter().all(|&(x, _)| x == 3));
+        let gone = chunks_around((0, 0), 2, Some(((1, 0), 2)));
+        assert!(gone.iter().all(|&(x, _)| x == -2));
     }
 }

@@ -10,7 +10,7 @@
 
 ## Первый запуск
 
-Нужен ванильный Minecraft 26.3 `server.jar`: Chunkwake читает из него номер протокола. Сейчас сервер реализует status и login, но ещё не переводит игрока в игровой мир. При `online-mode=true` вход проверяется через Minecraft session server; при `false` имена игроков не проверяются.
+Нужен ванильный Minecraft 26.3 `server.jar`: Chunkwake читает из него номер протокола и данные игры. Сейчас сервер запускает базовый плоский мир; игровые механики ещё в разработке. При `online-mode=true` вход проверяется через Minecraft session server; при `false` имена игроков не проверяются.
 
 Соберите бинарник командой `cargo build --release -p chunkwake-server`. Он появится как `target/release/chunkwake` (Windows: `target\release\chunkwake.exe`). Создайте каталог сервера и положите туда `server.jar`. Затем в интерактивном терминале выполните команды ниже, заменив `chunkwake` на путь к бинарнику, если он не добавлен в `PATH`:
 

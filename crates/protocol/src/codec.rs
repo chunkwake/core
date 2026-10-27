@@ -42,6 +42,10 @@ impl<'a> Reader<'a> {
         Ok(i64::from_be_bytes(self.bytes(8)?.try_into().unwrap()))
     }
 
+    pub fn f64(&mut self) -> Result<f64> {
+        Ok(f64::from_bits(self.i64()? as u64))
+    }
+
     pub fn var_int(&mut self) -> Result<i32> {
         let mut value = 0u32;
         for i in 0..5 {
