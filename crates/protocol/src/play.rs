@@ -446,6 +446,20 @@ pub fn block_update(id: i32, pos: [i32; 3], state: i32) -> Vec<u8> {
     w.buf
 }
 
+/// Несколько блоков одной секции: `SectionPos.asLong` (x, z по 22 бита, y 20),
+/// затем VarLong `state << 12 | x << 8 | z << 4 | y` (локальные координаты).
+pub fn section_blocks_update(id: i32, section: [i32; 3], blocks: &[(u16, u32)]) -> Vec<u8> {
+    let [x, y, z] = section;
+    let pos =
+        ((x as i64 & 0x3f_ffff) << 42) | ((z as i64 & 0x3f_ffff) << 20) | (y as i64 & 0xf_ffff);
+    let mut w = Writer::new();
+    w.var_int(id).i64(pos).var_int(blocks.len() as i32);
+    for &(local, state) in blocks {
+        w.var_long(((state as i64) << 12) | local as i64);
+    }
+    w.buf
+}
+
 pub fn block_changed_ack(id: i32, sequence: i32) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id).var_int(sequence);

@@ -1,6 +1,7 @@
 //! Мир: плоский overworld (bedrock, 2×dirt, grass) и параметры входа игрока.
 
 use crate::config::Properties;
+use crate::storage::WorldStorage;
 use chunkwake_data::packets::PacketTable;
 use chunkwake_data::registries::RegistryData;
 use chunkwake_data::world::{Blocks, DimensionType};
@@ -17,18 +18,21 @@ pub fn build_play_plan(
     packets: &PacketTable,
     registries: &RegistryData,
     props: &Properties,
-) -> Result<PlayPlan, String> {
+    world_dir: &Path,
+) -> Result<(PlayPlan, WorldStorage), String> {
     let s = |e: chunkwake_data::DataError| e.to_string();
     let blocks = Blocks::load(data_dir).map_err(s)?;
     let dim = DimensionType::load(data_dir, DIMENSION).map_err(s)?;
     let biome = registries
         .network_id("worldgen/biome", "minecraft:plains")
         .map_err(s)?;
-    let biome_count = registries
+    let biomes: Vec<String> = registries
         .synchronized
         .iter()
         .find(|r| r.name == "worldgen/biome")
-        .map_or(1, |r| r.entries.len());
+        .map(|r| r.entries.clone())
+        .unwrap_or_default();
+    let biome_count = biomes.len().max(1);
 
     let layers = [
         ("minecraft:bedrock", 1),
@@ -90,11 +94,14 @@ pub fn build_play_plan(
         }
     }
     let world = WorldSpec {
-        template: chunk,
+        template: chunk.clone(),
         min_y: dim.min_y,
         item_blocks,
         spawn,
         player_type,
     };
-    PlayPlan::build(packets, login, world, props.compression_threshold).map_err(s)
+    let plan = PlayPlan::build(packets, login, world, props.compression_threshold).map_err(s)?;
+    let data_version = crate::config::read_world_version(data_dir)?;
+    let storage = WorldStorage::new(world_dir, blocks, biomes, data_version, dim.min_y, chunk);
+    Ok((plan, storage))
 }

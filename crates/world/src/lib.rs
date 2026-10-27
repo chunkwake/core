@@ -1,6 +1,10 @@
 //! chunkwake-world — чанки и их сетевое кодирование (формат 26.3).
 
+pub mod anvil;
+pub mod nbt;
+
 use chunkwake_protocol::Writer;
+use std::sync::Arc;
 
 /// Сколько бит нужно, чтобы записать значения `0..n`.
 pub fn bits_for(n: usize) -> u32 {
@@ -58,18 +62,82 @@ fn write_container(w: &mut Writer, values: &[u32], min_bits: u32, global_bits: u
     }
 }
 
+/// Индексы палитры: байт, пока палитра ≤ 256 записей, иначе u16.
+#[derive(Clone, Debug)]
+enum Indices {
+    Narrow(Box<[u8; 4096]>),
+    Wide(Box<[u16; 4096]>),
+}
+
+impl Indices {
+    fn get(&self, i: usize) -> usize {
+        match self {
+            Indices::Narrow(a) => a[i] as usize,
+            Indices::Wide(a) => a[i] as usize,
+        }
+    }
+}
+
+/// Неоднородная секция: палитра, число блоков каждой записи и индексы.
+#[derive(Clone, Debug)]
+struct Paletted {
+    palette: Vec<u32>,
+    counts: Vec<u16>,
+    idx: Indices,
+}
+
+impl Paletted {
+    fn entry(&mut self, state: u32) -> usize {
+        if let Some(i) = self.palette.iter().position(|&p| p == state) {
+            return i;
+        }
+        // Переиспользуем запись, которой больше нет в секции.
+        if let Some(i) = self.counts.iter().position(|&c| c == 0) {
+            self.palette[i] = state;
+            return i;
+        }
+        self.palette.push(state);
+        self.counts.push(0);
+        if self.palette.len() > 256
+            && let Indices::Narrow(a) = &self.idx
+        {
+            let mut wide = Box::new([0u16; 4096]);
+            for (w, &n) in wide.iter_mut().zip(a.iter()) {
+                *w = n as u16;
+            }
+            self.idx = Indices::Wide(wide);
+        }
+        self.palette.len() - 1
+    }
+}
+
+#[derive(Clone, Debug)]
+enum Storage {
+    Single(u32),
+    Paletted(Arc<Paletted>),
+}
+
 /// Секция 16×16×16: состояния блоков (индекс `(y*16+z)*16+x`) и один биом.
-/// Однородная секция хранит одно значение, иначе — все 4096.
-#[derive(Clone, Debug, PartialEq)]
+/// Однородная — одно значение; иначе палитра с индексами u8/u16 за `Arc`:
+/// клон столбца не копирует блоки, запись копирует только свою секцию.
+#[derive(Clone, Debug)]
 pub struct Section {
-    blocks: Vec<u32>,
+    storage: Storage,
+    non_air: u16,
     pub biome: u32,
+}
+
+impl PartialEq for Section {
+    fn eq(&self, other: &Self) -> bool {
+        self.biome == other.biome && self.blocks() == other.blocks()
+    }
 }
 
 impl Section {
     pub fn filled(state: u32, biome: u32) -> Self {
         Self {
-            blocks: vec![state],
+            storage: Storage::Single(state),
+            non_air: if state == AIR { 0 } else { 4096 },
             biome,
         }
     }
@@ -77,52 +145,66 @@ impl Section {
     /// Из полного массива 4096 состояний (сжимается, если однородный).
     pub fn from_blocks(blocks: Vec<u32>, biome: u32) -> Self {
         assert_eq!(blocks.len(), 4096);
-        let mut s = Self { blocks, biome };
-        s.compact();
+        let mut s = Self::filled(blocks[0], biome);
+        for (i, &b) in blocks.iter().enumerate() {
+            s.set(i, b);
+        }
         s
     }
 
     pub fn get(&self, i: usize) -> u32 {
-        match self.blocks.as_slice() {
-            [b] => *b,
-            all => all[i],
+        match &self.storage {
+            Storage::Single(b) => *b,
+            Storage::Paletted(p) => p.palette[p.idx.get(i)],
         }
     }
 
-    /// Ставит состояние, возвращает прежнее.
+    pub fn is_uniform(&self) -> bool {
+        matches!(self.storage, Storage::Single(_))
+    }
+
+    /// Ставит состояние, возвращает прежнее. O(1), кроме роста палитры.
     pub fn set(&mut self, i: usize, state: u32) -> u32 {
         let old = self.get(i);
-        if old != state {
-            if self.blocks.len() == 1 {
-                self.blocks = vec![old; 4096];
-            }
-            self.blocks[i] = state;
-            self.compact();
+        if old == state {
+            return old;
+        }
+        self.non_air = (self.non_air as i32 + (state != AIR) as i32 - (old != AIR) as i32) as u16;
+        if let Storage::Single(b) = self.storage {
+            self.storage = Storage::Paletted(Arc::new(Paletted {
+                palette: vec![b],
+                counts: vec![4096],
+                idx: Indices::Narrow(Box::new([0; 4096])),
+            }));
+        }
+        let Storage::Paletted(arc) = &mut self.storage else {
+            unreachable!()
+        };
+        let p = Arc::make_mut(arc);
+        let from = p.idx.get(i);
+        let to = p.entry(state);
+        p.counts[from] -= 1;
+        p.counts[to] += 1;
+        match &mut p.idx {
+            Indices::Narrow(a) => a[i] = to as u8,
+            Indices::Wide(a) => a[i] = to as u16,
+        }
+        if p.counts[to] == 4096 {
+            self.storage = Storage::Single(state);
         }
         old
     }
 
-    fn compact(&mut self) {
-        if self.blocks.len() > 1 && self.blocks.iter().all(|&b| b == self.blocks[0]) {
-            self.blocks.truncate(1);
-            self.blocks.shrink_to_fit();
-        }
-    }
-
     /// Все 4096 состояний.
-    pub fn blocks(&self) -> std::borrow::Cow<'_, [u32]> {
-        match self.blocks.as_slice() {
-            [b] => std::borrow::Cow::Owned(vec![*b; 4096]),
-            all => std::borrow::Cow::Borrowed(all),
+    pub fn blocks(&self) -> Vec<u32> {
+        match &self.storage {
+            Storage::Single(b) => vec![*b; 4096],
+            Storage::Paletted(p) => (0..4096).map(|i| p.palette[p.idx.get(i)]).collect(),
         }
     }
 
     fn non_air(&self) -> usize {
-        match self.blocks.as_slice() {
-            [b] if *b == AIR => 0,
-            [_] => 4096,
-            all => all.iter().filter(|&&b| b != AIR).count(),
-        }
+        self.non_air as usize
     }
 }
 
@@ -351,8 +433,14 @@ mod edit_tests {
         assert_eq!(c.set_block(3, 3, 5, AIR), 9);
         assert_eq!(c.block(3, 3, 5), AIR);
         assert_eq!(c.set_block(0, 20, 0, 1), AIR);
-        assert_eq!(c.sections[1].blocks.len(), 4096);
+        assert!(!c.sections[1].is_uniform());
         c.set_block(0, 20, 0, AIR);
-        assert_eq!(c.sections[1].blocks.len(), 1, "снова однородна");
+        assert!(c.sections[1].is_uniform(), "снова однородна");
+        // Клон делит блоки; запись в копию не трогает оригинал.
+        c.set_block(0, 20, 0, 1);
+        let before = c.clone();
+        c.set_block(1, 20, 0, 1);
+        assert_eq!(before.block(1, 20, 0), AIR);
+        assert_eq!(c.block(1, 20, 0), 1);
     }
 }

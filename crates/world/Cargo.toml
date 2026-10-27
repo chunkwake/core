@@ -6,3 +6,4 @@ license.workspace = true
 
 [dependencies]
 chunkwake-protocol = { path = "../protocol" }
+flate2 = "1"

@@ -70,6 +70,8 @@ pub struct Properties {
     pub vanilla_jar: String,
     pub java_path: String,
     pub generated_dir: String,
+    /// Каталог мира (`level-name`), относительно каталога сервера.
+    pub level_name: String,
     pub log_level: tracing_subscriber::filter::LevelFilter,
 }
 
@@ -169,6 +171,7 @@ impl Properties {
             vanilla_jar: vanilla_jar.into(),
             java_path: java_path.into(),
             generated_dir: generated_dir.into(),
+            level_name: value("level-name").into(),
             log_level,
         })
     }
@@ -290,6 +293,18 @@ fn parse_kv(text: &str) -> HashMap<&str, &str> {
 /// Читает `version.json` из ванильного jar.
 /// Файл версии внутри кэша данных: с ним server.jar при запуске не нужен.
 pub const CACHED_VERSION: &str = "version.json";
+
+/// `world_version` (DataVersion чанков) из `version.json` в кэше данных.
+pub fn read_world_version(data_dir: &Path) -> Result<i32, String> {
+    let path = data_dir.join(CACHED_VERSION);
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    v["world_version"]
+        .as_i64()
+        .map(|n| n as i32)
+        .ok_or_else(|| format!("{}: no world_version", path.display()))
+}
 
 /// Версия из готового кэша (`generated/<версия>/version.json`).
 pub fn read_cached_version(data_dir: &Path) -> Option<GameVersion> {

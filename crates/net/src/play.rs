@@ -43,6 +43,7 @@ struct Ids {
     remove_entities: i32,
     move_entity_pos_rot: i32,
     block_update: i32,
+    section_blocks_update: i32,
     block_changed_ack: i32,
     sb_player_action: i32,
     sb_use_item_on: i32,
@@ -59,6 +60,14 @@ pub struct PlayPlan {
     template: ChunkColumn,
     /// Изменённые столбцы и номер их правки (для сверки с кэшем кадров).
     edited: Mutex<HashMap<(i32, i32), (ChunkColumn, u64)>>,
+    /// Номер правки, записанный на диск, по столбцам.
+    saved: Mutex<HashMap<(i32, i32), u64>>,
+    /// Изменения блоков текущего тика: секция → (локальный индекс, состояние).
+    pending_blocks: Mutex<PendingBlocks>,
+    /// Ленивая загрузка с диска: источник и уже прочитанные регионы.
+    source: std::sync::OnceLock<Arc<dyn ChunkSource>>,
+    regions: Mutex<HashSet<(i32, i32)>>,
+    region_load: Mutex<()>,
     min_y: i32,
     /// ID предмета → состояние блока, который он ставит.
     item_blocks: Vec<Option<u32>>,
@@ -77,6 +86,16 @@ type Frame = Arc<Vec<u8>>;
 /// Предел кэша кадров чанков; при переполнении кэш сбрасывается целиком.
 const CHUNK_CACHE_LIMIT: usize = 65_536;
 
+/// Столбец с диска и его координаты.
+pub type LoadedChunk = ((i32, i32), ChunkColumn);
+/// Изменения блоков по секциям: (локальный индекс, состояние).
+type PendingBlocks = HashMap<[i32; 3], Vec<(u16, u32)>>;
+
+/// Источник сохранённых чанков: регион 32×32 читается целиком при первом обращении.
+pub trait ChunkSource: Send + Sync {
+    fn load_region(&self, rx: i32, rz: i32) -> Result<Vec<LoadedChunk>, String>;
+}
+
 /// Кадр для всех игроков; `skip` — кому не слать (обычно автору события).
 #[derive(Clone)]
 struct Broadcast {
@@ -87,6 +106,14 @@ struct Broadcast {
     entity: Option<EntityEvent>,
     /// Движения игроков за тик: получатель берёт только видимые.
     moves: Option<Arc<Vec<MoveItem>>>,
+    /// Изменения блоков за тик по секциям: получатель берёт чанки в своём радиусе.
+    blocks: Option<Arc<Vec<BlockItem>>>,
+}
+
+/// Изменения одной секции за тик, готовый кадр.
+struct BlockItem {
+    chunk: (i32, i32),
+    frame: Vec<u8>,
 }
 
 /// Движение одной сущности в пачке тика: кадр(ы) дельты и состояние для спавна.
@@ -192,6 +219,7 @@ impl Hub {
             }),
             entity,
             moves: None,
+            blocks: None,
         });
     }
 }
@@ -257,6 +285,7 @@ impl PlayPlan {
                 remove_entities: cb("remove_entities")?,
                 move_entity_pos_rot: cb("move_entity_pos_rot")?,
                 block_update: cb("block_update")?,
+                section_blocks_update: cb("section_blocks_update")?,
                 block_changed_ack: cb("block_changed_ack")?,
                 sb_player_action: sb("player_action")?,
                 sb_use_item_on: sb("use_item_on")?,
@@ -267,6 +296,11 @@ impl PlayPlan {
             chunk_body: template.encode_body(),
             template,
             edited: Mutex::new(HashMap::new()),
+            saved: Mutex::new(HashMap::new()),
+            pending_blocks: Mutex::new(HashMap::new()),
+            source: std::sync::OnceLock::new(),
+            regions: Mutex::new(HashSet::new()),
+            region_load: Mutex::new(()),
             min_y,
             item_blocks,
             spawn,
@@ -289,13 +323,11 @@ impl PlayPlan {
         if let Some(f) = self.chunk_frames.lock().unwrap().get(&(x, z)) {
             return f.clone();
         }
-        // Изменённый чанк кодируем из его копии; сжатие — вне блокировок.
-        let edited = self
-            .edited
-            .lock()
-            .unwrap()
-            .get(&(x, z))
-            .map(|(c, rev)| (c.encode_body(), *rev));
+        self.ensure_region(x, z);
+        // Под блокировкой — только дешёвый клон (секции за Arc);
+        // кодирование и сжатие — вне её.
+        let snapshot = self.edited.lock().unwrap().get(&(x, z)).cloned();
+        let edited = snapshot.map(|(c, rev)| (c.encode_body(), rev));
         let (body, rev) = match &edited {
             Some((body, rev)) => (body.as_slice(), *rev),
             None => (self.chunk_body.as_slice(), 0),
@@ -322,6 +354,7 @@ impl PlayPlan {
             return None;
         }
         let key = (x >> 4, z >> 4);
+        self.ensure_region(key.0, key.1);
         let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
         let old = {
             let mut world = self.edited.lock().unwrap();
@@ -335,12 +368,72 @@ impl PlayPlan {
             old
         };
         if old != state {
-            self.hub.send(
-                None,
-                play::block_update(self.ids.block_update, [x, y, z], state as i32),
-            );
+            let local = ((x & 15) << 8 | (z & 15) << 4 | (y & 15)) as u16;
+            self.pending_blocks
+                .lock()
+                .unwrap()
+                .entry([x >> 4, y >> 4, z >> 4])
+                .or_default()
+                .push((local, state));
         }
         Some(old)
+    }
+
+    /// Подключает диск: дальше регионы читаются при первом обращении к их чанкам.
+    pub fn set_source(&self, source: Arc<dyn ChunkSource>) {
+        let _ = self.source.set(source);
+    }
+
+    /// Гарантирует, что регион чанка `(x, z)` прочитан с диска.
+    fn ensure_region(&self, x: i32, z: i32) {
+        let Some(source) = self.source.get() else {
+            return;
+        };
+        let key = (x >> 5, z >> 5);
+        if self.regions.lock().unwrap().contains(&key) {
+            return;
+        }
+        // Один загрузчик: два игрока не читают один регион дважды.
+        let _guard = self.region_load.lock().unwrap();
+        if self.regions.lock().unwrap().contains(&key) {
+            return;
+        }
+        match source.load_region(key.0, key.1) {
+            Ok(columns) => {
+                let mut world = self.edited.lock().unwrap();
+                let mut cache = self.chunk_frames.lock().unwrap();
+                for (pos, c) in columns {
+                    // Правка, сделанная до загрузки, не затирается диском.
+                    if let std::collections::hash_map::Entry::Vacant(e) = world.entry(pos) {
+                        e.insert((c, 0));
+                        cache.remove(&pos);
+                    }
+                }
+            }
+            Err(e) => tracing::error!("region {key:?}: {e}"),
+        }
+        self.regions.lock().unwrap().insert(key);
+    }
+
+    /// Чанк генератора — основа для загрузки сохранённых столбцов.
+    pub fn template(&self) -> &ChunkColumn {
+        &self.template
+    }
+
+    /// Изменённые с последнего сохранения столбцы: копии и номера правок.
+    /// После успешной записи передайте их в [`Self::mark_saved`].
+    pub fn unsaved(&self) -> Vec<((i32, i32), ChunkColumn, u64)> {
+        let world = self.edited.lock().unwrap();
+        let saved = self.saved.lock().unwrap();
+        world
+            .iter()
+            .filter(|(pos, (_, rev))| saved.get(pos) != Some(rev) && *rev != 0)
+            .map(|(pos, (c, rev))| (*pos, c.clone(), *rev))
+            .collect()
+    }
+
+    pub fn mark_saved(&self, chunks: impl IntoIterator<Item = ((i32, i32), u64)>) {
+        self.saved.lock().unwrap().extend(chunks);
     }
 
     fn block(&self, [x, y, z]: [i32; 3]) -> Option<u32> {
@@ -348,6 +441,7 @@ impl PlayPlan {
         if ry < 0 || ry as usize >= self.template.height() {
             return None;
         }
+        self.ensure_region(x >> 4, z >> 4);
         let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
         let world = self.edited.lock().unwrap();
         let column = world
@@ -511,8 +605,51 @@ impl PlayPlan {
             loop {
                 tick.tick().await;
                 let Some(plan) = plan.upgrade() else { return };
+                plan.flush_blocks();
                 plan.flush_moves();
             }
+        });
+    }
+
+    /// Изменения блоков за тик: по кадру на секцию (`block_update` для одного
+    /// блока, иначе `section_blocks_update`), одной рассылкой.
+    fn flush_blocks(&self) {
+        let pending = std::mem::take(&mut *self.pending_blocks.lock().unwrap());
+        if pending.is_empty() {
+            return;
+        }
+        let ids = self.ids;
+        let batch: Vec<BlockItem> = pending
+            .into_iter()
+            .map(|([sx, sy, sz], blocks)| {
+                let packet = match blocks.as_slice() {
+                    [(local, state)] => {
+                        let l = *local as i32;
+                        let pos = [
+                            sx * 16 + (l >> 8),
+                            sy * 16 + (l & 15),
+                            sz * 16 + (l >> 4 & 15),
+                        ];
+                        play::block_update(ids.block_update, pos, *state as i32)
+                    }
+                    _ => play::section_blocks_update(
+                        ids.section_blocks_update,
+                        [sx, sy, sz],
+                        &blocks,
+                    ),
+                };
+                BlockItem {
+                    chunk: (sx, sz),
+                    frame: self.hub.frame(&packet),
+                }
+            })
+            .collect();
+        let _ = self.hub.tx.send(Broadcast {
+            skip: None,
+            packet: Arc::new(Vec::new()),
+            entity: None,
+            moves: None,
+            blocks: Some(Arc::new(batch)),
         });
     }
 
@@ -566,6 +703,7 @@ impl PlayPlan {
             packet: Arc::new(Vec::new()),
             entity: None,
             moves: Some(Arc::new(batch)),
+            blocks: None,
         });
     }
 
@@ -798,6 +936,15 @@ impl PlayPlan {
         visible: &mut HashSet<i32>,
         out: &mut Vec<u8>,
     ) {
+        if let Some(batch) = &b.blocks {
+            for item in batch.iter() {
+                let (x, z) = item.chunk;
+                if (x - center.0).abs() <= r && (z - center.1).abs() <= r {
+                    out.extend_from_slice(&item.frame);
+                }
+            }
+            return;
+        }
         if let Some(batch) = &b.moves {
             for m in batch.iter().filter(|m| m.e.uuid != me) {
                 self.track(&m.e, &m.frame, center, r, visible, out);

@@ -306,6 +306,7 @@ name = "chunkwake-world"
 version = "0.1.0"
 dependencies = [
  "chunkwake-protocol",
+ "flate2",
 ]
 
 [[package]]

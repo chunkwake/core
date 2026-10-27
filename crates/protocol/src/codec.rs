@@ -132,6 +132,16 @@ impl Writer {
         self
     }
 
+    pub fn var_long(&mut self, v: i64) -> &mut Self {
+        let mut v = v as u64;
+        while v >= 0x80 {
+            self.buf.push(v as u8 | 0x80);
+            v >>= 7;
+        }
+        self.buf.push(v as u8);
+        self
+    }
+
     pub fn byte_array(&mut self, b: &[u8]) -> &mut Self {
         self.var_int(b.len() as i32);
         self.buf.extend_from_slice(b);

@@ -3,6 +3,7 @@
 mod cli;
 mod config;
 mod setup_tui;
+mod storage;
 mod world_setup;
 
 use chunkwake_net::Server;
@@ -88,24 +89,41 @@ async fn serve(dir: &Path) -> Result<(), String> {
     })?;
     tracing::info!("listening on {bind}");
 
-    let play = std::sync::Arc::new(world_setup::build_play_plan(
+    let (play, storage) = world_setup::build_play_plan(
         &data_dir,
         &packets,
         &registries,
         &props,
-    )?);
+        &dir.join(&props.level_name),
+    )?;
+    let (play, storage) = (std::sync::Arc::new(play), std::sync::Arc::new(storage));
+    // Регионы читаются с диска при первом обращении к их чанкам.
+    play.set_source(storage.clone());
+    tracing::info!("world: {}", props.level_name);
     play.spawn_tick();
+    storage.spawn_autosave(play.clone());
+
     let mut net = props.net_config(version);
     net.configuration = Some(std::sync::Arc::new(plan));
     let server = Server::new(net);
-    server
-        .serve(listener, move |player, mut conn| {
-            let play = play.clone();
-            tokio::spawn(async move {
-                let result = play.run(&player, &mut conn).await;
-                tracing::info!(name = %player.name, ?result, "player left");
-            });
-        })
-        .await
-        .map_err(|e| e.to_string())
+    let world = play.clone();
+    let serving = server.serve(listener, move |player, mut conn| {
+        let play = play.clone();
+        tokio::spawn(async move {
+            let result = play.run(&player, &mut conn).await;
+            tracing::info!(name = %player.name, ?result, "player left");
+        });
+    });
+    // Ctrl+C: сохранить мир и выйти.
+    tokio::select! {
+        result = serving => result.map_err(|e| e.to_string()),
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("stopping: saving world");
+            let n = tokio::task::spawn_blocking(move || storage.save(&world))
+                .await
+                .map_err(|e| e.to_string())??;
+            tracing::info!("saved {n} chunks");
+            Ok(())
+        }
+    }
 }
