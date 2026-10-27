@@ -81,5 +81,13 @@ pub fn build_play_plan(
     let player_type =
         chunkwake_data::registries::builtin_id(data_dir, "entity_type", "minecraft:player")
             .map_err(s)?;
-    PlayPlan::build(packets, login, chunk.encode_body(), spawn, player_type).map_err(s)
+    PlayPlan::build(
+        packets,
+        login,
+        chunk.encode_body(),
+        spawn,
+        player_type,
+        props.compression_threshold,
+    )
+    .map_err(s)
 }

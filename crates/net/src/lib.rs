@@ -356,6 +356,20 @@ impl Connection {
         }
     }
 
+    /// Отправляет уже закодированные `codec` кадры (общие для многих соединений):
+    /// сжатие сделано один раз, здесь только шифрование и запись.
+    pub async fn send_frames(&mut self, frames: &[u8]) -> Result<(), NetError> {
+        match &mut self.cipher {
+            Some(c) => {
+                let mut out = frames.to_vec();
+                c.encrypt(&mut out);
+                self.stream.write_all(&out).await?;
+            }
+            None => self.stream.write_all(frames).await?,
+        }
+        Ok(())
+    }
+
     pub async fn send(&mut self, packet: &[u8]) -> Result<(), NetError> {
         let mut out = Vec::with_capacity(packet.len() + 5);
         self.codec.encode(packet, &mut out);

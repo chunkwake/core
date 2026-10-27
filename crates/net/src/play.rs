@@ -5,6 +5,7 @@ use crate::{Connection, LoggedIn, NetError};
 use chunkwake_data::DataError;
 use chunkwake_data::packets::{Direction, PacketTable, State};
 use chunkwake_protocol::Reader;
+use chunkwake_protocol::frame::FrameCodec;
 use chunkwake_protocol::play::{self, Login, Move, PlayerEntry, game_event};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -51,13 +52,21 @@ pub struct PlayPlan {
     player_type: i32,
     next_entity_id: AtomicI32,
     hub: Hub,
+    /// Кадры `level_chunk_with_light`, уже сжатые: один раз на чанк для всех игроков.
+    chunk_frames: Mutex<HashMap<(i32, i32), Frame>>,
 }
 
-/// Пакет для всех игроков; `skip` — кому не слать (обычно автору события).
+/// Готовый к записи кадр, общий для многих соединений.
+type Frame = Arc<Vec<u8>>;
+
+/// Предел кэша кадров чанков; при переполнении кэш сбрасывается целиком.
+const CHUNK_CACHE_LIMIT: usize = 65_536;
+
+/// Кадр для всех игроков; `skip` — кому не слать (обычно автору события).
 #[derive(Clone)]
 struct Broadcast {
     skip: Option<Uuid>,
-    packet: Arc<Vec<u8>>,
+    packet: Frame,
 }
 
 /// Игрок онлайн: запись таб-листа и его сущность в мире.
@@ -72,16 +81,24 @@ struct Online {
 
 /// Общее состояние сессий: игроки онлайн и широковещательный канал.
 struct Hub {
+    /// Кодек кадров play (порог сжатия сервера): рассылка кодируется один раз.
+    codec: FrameCodec,
     players: Mutex<HashMap<Uuid, Online>>,
     tx: broadcast::Sender<Broadcast>,
 }
 
 impl Hub {
+    fn frame(&self, packet: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(packet.len() + 5);
+        self.codec.encode(packet, &mut out);
+        out
+    }
+
     fn send(&self, skip: Option<Uuid>, packet: Vec<u8>) {
         // Ошибка = нет подписчиков; это нормально.
         let _ = self.tx.send(Broadcast {
             skip,
-            packet: Arc::new(packet),
+            packet: Arc::new(self.frame(&packet)),
         });
     }
 }
@@ -101,6 +118,7 @@ impl PlayPlan {
         chunk_body: Vec<u8>,
         spawn: [f64; 3],
         player_type: i32,
+        compression_threshold: i32,
     ) -> Result<Self, DataError> {
         let cb = |name| packets.id(State::Play, Direction::Clientbound, name);
         let sb = |name| packets.id(State::Play, Direction::Serverbound, name);
@@ -133,42 +151,66 @@ impl PlayPlan {
             spawn,
             player_type,
             next_entity_id: AtomicI32::new(1),
+            chunk_frames: Mutex::new(HashMap::new()),
             hub: Hub {
+                codec: FrameCodec {
+                    threshold: (compression_threshold >= 0)
+                        .then_some(compression_threshold as usize),
+                },
                 players: Mutex::new(HashMap::new()),
                 tx: broadcast::channel(1024).0,
             },
         })
     }
 
+    /// Сжатый кадр чанка из кэша (кодируется при первом запросе).
+    fn chunk_frame(&self, x: i32, z: i32) -> Frame {
+        if let Some(f) = self.chunk_frames.lock().unwrap().get(&(x, z)) {
+            return f.clone();
+        }
+        // Сжатие вне блокировки: параллельные сессии не ждут друг друга.
+        let packet =
+            play::level_chunk_with_light(self.ids.level_chunk_with_light, x, z, &self.chunk_body);
+        let frame = Arc::new(self.hub.frame(&packet));
+        let mut cache = self.chunk_frames.lock().unwrap();
+        if cache.len() >= CHUNK_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.entry((x, z)).or_insert(frame).clone()
+    }
+
+    /// Центр, пачка чанков и её конец — одним буфером и одной записью в сокет.
     async fn send_chunks(
         &self,
         conn: &mut Connection,
         center: (i32, i32),
         coords: &[(i32, i32)],
+        forget: &[(i32, i32)],
     ) -> Result<(), NetError> {
         let ids = self.ids;
-        conn.send(&play::set_chunk_cache_center(
+        let hub = &self.hub;
+        let frames: Vec<Frame> = coords
+            .iter()
+            .map(|&(x, z)| self.chunk_frame(x, z))
+            .collect();
+        let mut out = Vec::with_capacity(frames.iter().map(|f| f.len()).sum::<usize>() + 64);
+        for &(x, z) in forget {
+            out.extend(hub.frame(&play::forget_level_chunk(ids.forget_level_chunk, x, z)));
+        }
+        out.extend(hub.frame(&play::set_chunk_cache_center(
             ids.set_chunk_cache_center,
             center.0,
             center.1,
-        ))
-        .await?;
-        conn.send(&play::chunk_batch_start(ids.chunk_batch_start))
-            .await?;
-        for &(x, z) in coords {
-            conn.send(&play::level_chunk_with_light(
-                ids.level_chunk_with_light,
-                x,
-                z,
-                &self.chunk_body,
-            ))
-            .await?;
+        )));
+        out.extend(hub.frame(&play::chunk_batch_start(ids.chunk_batch_start)));
+        for f in &frames {
+            out.extend_from_slice(f);
         }
-        conn.send(&play::chunk_batch_finished(
+        out.extend(hub.frame(&play::chunk_batch_finished(
             ids.chunk_batch_finished,
             coords.len() as i32,
-        ))
-        .await
+        )));
+        conn.send_frames(&out).await
     }
 
     /// Игрок перешёл в другой чанк: выгружаем ушедшие из радиуса, шлём новые.
@@ -179,11 +221,8 @@ impl PlayPlan {
         new: (i32, i32),
         r: i32,
     ) -> Result<(), NetError> {
-        for (x, z) in chunks_around(old, r, Some((new, r))) {
-            conn.send(&play::forget_level_chunk(self.ids.forget_level_chunk, x, z))
-                .await?;
-        }
-        self.send_chunks(conn, new, &chunks_around(new, r, Some((old, r))))
+        let forget = chunks_around(old, r, Some((new, r)));
+        self.send_chunks(conn, new, &chunks_around(new, r, Some((old, r))), &forget)
             .await
     }
 
@@ -313,7 +352,7 @@ impl PlayPlan {
             (self.spawn[2].floor() as i32) >> 4,
         );
         let r_view = login.view_distance;
-        self.send_chunks(conn, (cx, cz), &chunks_around((cx, cz), r_view, None))
+        self.send_chunks(conn, (cx, cz), &chunks_around((cx, cz), r_view, None), &[])
             .await?;
         let mut center = (cx, cz);
         conn.send(&play::player_position(
@@ -335,6 +374,7 @@ impl PlayPlan {
         // Keep-alive: шлём раз в 15 с, ответ ждём не дольше 30 с.
         let mut ticker = tokio::time::interval(KEEP_ALIVE_INTERVAL);
         ticker.tick().await;
+        let mut out = Vec::new();
         let mut pending: Option<(i64, Instant)> = None;
         loop {
             tokio::select! {
@@ -353,8 +393,20 @@ impl PlayPlan {
                     }
                 }
                 event = rx.recv() => match event {
-                    Ok(b) if b.skip == Some(uuid) => {}
-                    Ok(b) => conn.send(&b.packet).await?,
+                    Ok(first) => {
+                        // Забираем всё, что уже накопилось, и пишем одним вызовом.
+                        out.clear();
+                        let mut next = Some(first);
+                        while let Some(b) = next {
+                            if b.skip != Some(uuid) {
+                                out.extend_from_slice(&b.packet);
+                            }
+                            next = rx.try_recv().ok();
+                        }
+                        if !out.is_empty() {
+                            conn.send_frames(&out).await?;
+                        }
+                    }
                     // Отстали — пропущенное не догоняем (позиции обновятся следующими событиями).
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => return Ok(()),
