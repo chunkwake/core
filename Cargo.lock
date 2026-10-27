@@ -256,6 +256,7 @@ dependencies = [
  "cfb8",
  "chunkwake-data",
  "chunkwake-protocol",
+ "chunkwake-world",
  "rand 0.8.8",
  "reqwest",
  "rsa",

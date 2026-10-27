@@ -59,22 +59,75 @@ fn write_container(w: &mut Writer, values: &[u32], min_bits: u32, global_bits: u
 }
 
 /// Секция 16×16×16: состояния блоков (индекс `(y*16+z)*16+x`) и один биом.
-#[derive(Clone)]
+/// Однородная секция хранит одно значение, иначе — все 4096.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Section {
-    pub blocks: Vec<u32>,
+    blocks: Vec<u32>,
     pub biome: u32,
 }
 
 impl Section {
     pub fn filled(state: u32, biome: u32) -> Self {
         Self {
-            blocks: vec![state; 4096],
+            blocks: vec![state],
             biome,
+        }
+    }
+
+    /// Из полного массива 4096 состояний (сжимается, если однородный).
+    pub fn from_blocks(blocks: Vec<u32>, biome: u32) -> Self {
+        assert_eq!(blocks.len(), 4096);
+        let mut s = Self { blocks, biome };
+        s.compact();
+        s
+    }
+
+    pub fn get(&self, i: usize) -> u32 {
+        match self.blocks.as_slice() {
+            [b] => *b,
+            all => all[i],
+        }
+    }
+
+    /// Ставит состояние, возвращает прежнее.
+    pub fn set(&mut self, i: usize, state: u32) -> u32 {
+        let old = self.get(i);
+        if old != state {
+            if self.blocks.len() == 1 {
+                self.blocks = vec![old; 4096];
+            }
+            self.blocks[i] = state;
+            self.compact();
+        }
+        old
+    }
+
+    fn compact(&mut self) {
+        if self.blocks.len() > 1 && self.blocks.iter().all(|&b| b == self.blocks[0]) {
+            self.blocks.truncate(1);
+            self.blocks.shrink_to_fit();
+        }
+    }
+
+    /// Все 4096 состояний.
+    pub fn blocks(&self) -> std::borrow::Cow<'_, [u32]> {
+        match self.blocks.as_slice() {
+            [b] => std::borrow::Cow::Owned(vec![*b; 4096]),
+            all => std::borrow::Cow::Borrowed(all),
+        }
+    }
+
+    fn non_air(&self) -> usize {
+        match self.blocks.as_slice() {
+            [b] if *b == AIR => 0,
+            [_] => 4096,
+            all => all.iter().filter(|&&b| b != AIR).count(),
         }
     }
 }
 
 /// Столбец чанка. Считается, что воздух — состояние 0 (`minecraft:air`).
+#[derive(Clone, Debug)]
 pub struct ChunkColumn {
     pub sections: Vec<Section>,
     /// Бит для прямой (глобальной) палитры блоков: ceil(log2(число состояний)).
@@ -102,11 +155,11 @@ impl ChunkColumn {
         column.resize(sections * 16, AIR);
         let sections = (0..sections)
             .map(|i| {
-                let mut s = Section::filled(AIR, biome);
+                let mut blocks = vec![AIR; 4096];
                 for y in 0..16 {
-                    s.blocks[y * 256..(y + 1) * 256].fill(column[i * 16 + y]);
+                    blocks[y * 256..(y + 1) * 256].fill(column[i * 16 + y]);
                 }
-                s
+                Section::from_blocks(blocks, biome)
             })
             .collect();
         Self {
@@ -117,7 +170,17 @@ impl ChunkColumn {
         }
     }
 
-    fn height(&self) -> usize {
+    /// Состояние блока; `y` — от низа мира (0..height), `x`/`z` — 0..16.
+    pub fn block(&self, x: usize, y: usize, z: usize) -> u32 {
+        self.sections[y / 16].get(((y % 16) * 16 + z) * 16 + x)
+    }
+
+    /// Ставит блок, возвращает прежнее состояние.
+    pub fn set_block(&mut self, x: usize, y: usize, z: usize, state: u32) -> u32 {
+        self.sections[y / 16].set(((y % 16) * 16 + z) * 16 + x, state)
+    }
+
+    pub fn height(&self) -> usize {
         self.sections.len() * 16
     }
 
@@ -127,7 +190,7 @@ impl ChunkColumn {
             .map(|xz| {
                 (0..self.height())
                     .rev()
-                    .find(|&y| self.sections[y / 16].blocks[(y % 16) * 256 + xz] != AIR)
+                    .find(|&y| self.sections[y / 16].get((y % 16) * 256 + xz) != AIR)
                     .map_or(0, |y| y as u32 + 1)
             })
             .collect()
@@ -154,9 +217,8 @@ impl ChunkColumn {
         // Секции: short блоков, short жидкостей (26.x), блоки, биомы.
         let mut data = Writer::new();
         for s in &self.sections {
-            let non_air = s.blocks.iter().filter(|&&b| b != AIR).count();
-            data.u16(non_air as u16).u16(0);
-            write_container(&mut data, &s.blocks, 4, self.global_block_bits);
+            data.u16(s.non_air() as u16).u16(0);
+            write_container(&mut data, &s.blocks(), 4, self.global_block_bits);
             write_container(&mut data, &[s.biome; 64], 1, self.global_biome_bits);
         }
         w.byte_array(&data.buf);
@@ -270,5 +332,27 @@ mod tests {
         }
         assert_eq!(r.var_int().unwrap(), 0, "block light arrays");
         assert!(r.remaining().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::*;
+
+    #[test]
+    fn set_and_compact() {
+        let mut c = ChunkColumn::flat(&[(88, 1), (10, 2), (9, 1)], 24, 7, 15, 7, true);
+        assert_eq!(
+            c.sections[1],
+            Section::filled(AIR, 7),
+            "пустая секция однородна"
+        );
+        assert_eq!(c.block(3, 3, 5), 9);
+        assert_eq!(c.set_block(3, 3, 5, AIR), 9);
+        assert_eq!(c.block(3, 3, 5), AIR);
+        assert_eq!(c.set_block(0, 20, 0, 1), AIR);
+        assert_eq!(c.sections[1].blocks.len(), 4096);
+        c.set_block(0, 20, 0, AIR);
+        assert_eq!(c.sections[1].blocks.len(), 1, "снова однородна");
     }
 }

@@ -7,6 +7,7 @@ use chunkwake_data::packets::{Direction, PacketTable, State};
 use chunkwake_protocol::Reader;
 use chunkwake_protocol::frame::FrameCodec;
 use chunkwake_protocol::play::{self, Login, Move, PlayerEntry, game_event};
+use chunkwake_world::ChunkColumn;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -41,6 +42,12 @@ struct Ids {
     rotate_head: i32,
     remove_entities: i32,
     move_entity_pos_rot: i32,
+    block_update: i32,
+    block_changed_ack: i32,
+    sb_player_action: i32,
+    sb_use_item_on: i32,
+    sb_set_creative_mode_slot: i32,
+    sb_set_carried_item: i32,
 }
 
 pub struct PlayPlan {
@@ -48,6 +55,13 @@ pub struct PlayPlan {
     login: Login,
     /// Тело чанка (одинаковое для всех координат плоского мира).
     chunk_body: Vec<u8>,
+    /// Чанк генератора (плоский мир); изменённые чанки — в `edited`.
+    template: ChunkColumn,
+    /// Изменённые столбцы и номер их правки (для сверки с кэшем кадров).
+    edited: Mutex<HashMap<(i32, i32), (ChunkColumn, u64)>>,
+    min_y: i32,
+    /// ID предмета → состояние блока, который он ставит.
+    item_blocks: Vec<Option<u32>>,
     spawn: [f64; 3],
     /// ID типа сущности `minecraft:player` в реестре `entity_type`.
     player_type: i32,
@@ -80,6 +94,9 @@ struct MoveItem {
     e: EntityRef,
     frame: Vec<u8>,
 }
+
+/// Состояние `minecraft:air`.
+const AIR: u32 = 0;
 
 /// Период рассылки движений (тик ванилы).
 const TICK: Duration = Duration::from_millis(50);
@@ -187,15 +204,32 @@ impl std::fmt::Debug for PlayPlan {
     }
 }
 
+/// Мир и данные, нужные сессиям.
+pub struct WorldSpec {
+    /// Чанк генератора: копируется при первой правке столбца.
+    pub template: ChunkColumn,
+    pub min_y: i32,
+    /// ID предмета → состояние блока, который он ставит.
+    pub item_blocks: Vec<Option<u32>>,
+    pub spawn: [f64; 3],
+    /// ID `minecraft:player` в реестре `entity_type`.
+    pub player_type: i32,
+}
+
 impl PlayPlan {
     pub fn build(
         packets: &PacketTable,
         login: Login,
-        chunk_body: Vec<u8>,
-        spawn: [f64; 3],
-        player_type: i32,
+        world: WorldSpec,
         compression_threshold: i32,
     ) -> Result<Self, DataError> {
+        let WorldSpec {
+            template,
+            min_y,
+            item_blocks,
+            spawn,
+            player_type,
+        } = world;
         let cb = |name| packets.id(State::Play, Direction::Clientbound, name);
         let sb = |name| packets.id(State::Play, Direction::Serverbound, name);
         Ok(Self {
@@ -222,9 +256,19 @@ impl PlayPlan {
                 rotate_head: cb("rotate_head")?,
                 remove_entities: cb("remove_entities")?,
                 move_entity_pos_rot: cb("move_entity_pos_rot")?,
+                block_update: cb("block_update")?,
+                block_changed_ack: cb("block_changed_ack")?,
+                sb_player_action: sb("player_action")?,
+                sb_use_item_on: sb("use_item_on")?,
+                sb_set_creative_mode_slot: sb("set_creative_mode_slot")?,
+                sb_set_carried_item: sb("set_carried_item")?,
             },
             login,
-            chunk_body,
+            chunk_body: template.encode_body(),
+            template,
+            edited: Mutex::new(HashMap::new()),
+            min_y,
+            item_blocks,
             spawn,
             player_type,
             next_entity_id: AtomicI32::new(1),
@@ -245,15 +289,71 @@ impl PlayPlan {
         if let Some(f) = self.chunk_frames.lock().unwrap().get(&(x, z)) {
             return f.clone();
         }
-        // Сжатие вне блокировки: параллельные сессии не ждут друг друга.
-        let packet =
-            play::level_chunk_with_light(self.ids.level_chunk_with_light, x, z, &self.chunk_body);
+        // Изменённый чанк кодируем из его копии; сжатие — вне блокировок.
+        let edited = self
+            .edited
+            .lock()
+            .unwrap()
+            .get(&(x, z))
+            .map(|(c, rev)| (c.encode_body(), *rev));
+        let (body, rev) = match &edited {
+            Some((body, rev)) => (body.as_slice(), *rev),
+            None => (self.chunk_body.as_slice(), 0),
+        };
+        let packet = play::level_chunk_with_light(self.ids.level_chunk_with_light, x, z, body);
         let frame = Arc::new(self.hub.frame(&packet));
-        let mut cache = self.chunk_frames.lock().unwrap();
-        if cache.len() >= CHUNK_CACHE_LIMIT {
-            cache.clear();
+        // В кэш — только если чанк не изменили, пока мы его сжимали.
+        let world = self.edited.lock().unwrap();
+        if world.get(&(x, z)).map_or(0, |e| e.1) == rev {
+            let mut cache = self.chunk_frames.lock().unwrap();
+            if cache.len() >= CHUNK_CACHE_LIMIT {
+                cache.clear();
+            }
+            cache.insert((x, z), frame.clone());
         }
-        cache.entry((x, z)).or_insert(frame).clone()
+        frame
+    }
+
+    /// Ставит блок (мировые координаты) и рассылает `block_update`.
+    /// `None` — позиция вне мира по высоте.
+    fn set_block(&self, [x, y, z]: [i32; 3], state: u32) -> Option<u32> {
+        let ry = y - self.min_y;
+        if ry < 0 || ry as usize >= self.template.height() {
+            return None;
+        }
+        let key = (x >> 4, z >> 4);
+        let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
+        let old = {
+            let mut world = self.edited.lock().unwrap();
+            let (column, rev) = world
+                .entry(key)
+                .or_insert_with(|| (self.template.clone(), 0));
+            let old = column.set_block(lx, ry as usize, lz, state);
+            *rev += 1;
+            // Под той же блокировкой: chunk_frame не вставит устаревший кадр.
+            self.chunk_frames.lock().unwrap().remove(&key);
+            old
+        };
+        if old != state {
+            self.hub.send(
+                None,
+                play::block_update(self.ids.block_update, [x, y, z], state as i32),
+            );
+        }
+        Some(old)
+    }
+
+    fn block(&self, [x, y, z]: [i32; 3]) -> Option<u32> {
+        let ry = y - self.min_y;
+        if ry < 0 || ry as usize >= self.template.height() {
+            return None;
+        }
+        let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
+        let world = self.edited.lock().unwrap();
+        let column = world
+            .get(&(x >> 4, z >> 4))
+            .map_or(&self.template, |e| &e.0);
+        Some(column.block(lx, ry as usize, lz))
     }
 
     /// Центр, пачка чанков и её конец — одним буфером и одной записью в сокет.
@@ -568,6 +668,9 @@ impl PlayPlan {
         // Keep-alive: шлём раз в 15 с, ответ ждём не дольше 30 с.
         let mut ticker = tokio::time::interval(KEEP_ALIVE_INTERVAL);
         ticker.tick().await;
+        // Хотбар (ID предметов) и выбранный слот — для установки блоков.
+        let mut hotbar: [Option<i32>; 9] = [None; 9];
+        let mut selected = 0usize;
         let mut pending: Option<(i64, Instant)> = None;
         loop {
             tokio::select! {
@@ -632,6 +735,41 @@ impl PlayPlan {
                             }
                         }
                         self.moved(uuid, m);
+                        continue;
+                    }
+                    if id == ids.sb_set_carried_item {
+                        selected = (r.u16()? as usize).min(8);
+                        continue;
+                    }
+                    if id == ids.sb_set_creative_mode_slot {
+                        let (slot, item) = play::read_creative_slot(&mut r)?;
+                        // Хотбар — слоты 36..=44 инвентаря игрока.
+                        if let Some(h) = hotbar.get_mut((slot - 36) as usize) {
+                            *h = item;
+                        }
+                        continue;
+                    }
+                    if id == ids.sb_player_action {
+                        let a = play::read_player_action(&mut r)?;
+                        // Креатив: блок ломается сразу при начале удара.
+                        if a.action == play::START_DESTROY_BLOCK {
+                            self.set_block(a.pos, AIR);
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, a.sequence)).await?;
+                        }
+                        continue;
+                    }
+                    if id == ids.sb_use_item_on {
+                        let u = play::read_use_item_on(&mut r)?;
+                        let state = hotbar[selected]
+                            .filter(|_| u.hand == 0)
+                            .and_then(|item| self.item_blocks.get(item as usize).copied().flatten());
+                        if let (Some(state), Some(d)) = (state, play::direction_offset(u.face)) {
+                            let target = [u.pos[0] + d[0], u.pos[1] + d[1], u.pos[2] + d[2]];
+                            if self.block(target) == Some(AIR) {
+                                self.set_block(target, state);
+                            }
+                        }
+                        conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                         continue;
                     }
                     if id == ids.sb_chat {

@@ -1,10 +1,10 @@
-//! Мир M2: плоский overworld (bedrock, 2×dirt, grass) и параметры входа игрока.
+//! Мир: плоский overworld (bedrock, 2×dirt, grass) и параметры входа игрока.
 
 use crate::config::Properties;
 use chunkwake_data::packets::PacketTable;
 use chunkwake_data::registries::RegistryData;
 use chunkwake_data::world::{Blocks, DimensionType};
-use chunkwake_net::play::PlayPlan;
+use chunkwake_net::play::{PlayPlan, WorldSpec};
 use chunkwake_protocol::play::{Login, SpawnInfo};
 use chunkwake_world::{ChunkColumn, bits_for};
 use std::path::Path;
@@ -81,13 +81,20 @@ pub fn build_play_plan(
     let player_type =
         chunkwake_data::registries::builtin_id(data_dir, "entity_type", "minecraft:player")
             .map_err(s)?;
-    PlayPlan::build(
-        packets,
-        login,
-        chunk.encode_body(),
+    // Предмет ставит блок с тем же именем (stone → stone); остальные предметы — ничего.
+    let items = chunkwake_data::registries::builtin_entries(data_dir, "item").map_err(s)?;
+    let mut item_blocks = vec![None; items.values().max().map_or(0, |&m| m as usize + 1)];
+    for (name, id) in &items {
+        if name != "minecraft:air" {
+            item_blocks[*id as usize] = blocks.default_state(name).ok().map(|s| s as u32);
+        }
+    }
+    let world = WorldSpec {
+        template: chunk,
+        min_y: dim.min_y,
+        item_blocks,
         spawn,
         player_type,
-        props.compression_threshold,
-    )
-    .map_err(s)
+    };
+    PlayPlan::build(packets, login, world, props.compression_threshold).map_err(s)
 }

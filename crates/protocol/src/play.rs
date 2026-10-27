@@ -417,8 +417,122 @@ mod move_tests {
     fn deltas() {
         let a = quantize([1.0, 2.0, 3.0]);
         assert_eq!(delta(a, quantize([1.5, 2.0, 2.0])), Some([2048, 0, -4096]));
-        assert_eq!(delta(a, quantize([9.0, 2.0, 3.0])), None, "8 блоков не влезает");
+        assert_eq!(
+            delta(a, quantize([9.0, 2.0, 3.0])),
+            None,
+            "8 блоков не влезает"
+        );
         let p = move_entity_pos_rot(0x33, 7, [1, -1, 0], 90.0, 0.0, true);
         assert_eq!(p, [0x33, 7, 1, 0, 1, 0xff, 0xff, 0, 0, 64, 0]);
+    }
+}
+
+/// `BlockPos.asLong`: x — 26 бит (старшие), z — 26, y — 12 (младшие).
+pub fn pack_block_pos([x, y, z]: [i32; 3]) -> i64 {
+    ((x as i64 & 0x3ff_ffff) << 38) | ((z as i64 & 0x3ff_ffff) << 12) | (y as i64 & 0xfff)
+}
+
+pub fn unpack_block_pos(v: i64) -> [i32; 3] {
+    [
+        (v >> 38) as i32,
+        (v << 52 >> 52) as i32,
+        (v << 26 >> 38) as i32,
+    ]
+}
+
+pub fn block_update(id: i32, pos: [i32; 3], state: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).i64(pack_block_pos(pos)).var_int(state);
+    w.buf
+}
+
+pub fn block_changed_ack(id: i32, sequence: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(sequence);
+    w.buf
+}
+
+/// `Direction.get3DDataValue` → смещение соседнего блока.
+pub fn direction_offset(d: i32) -> Option<[i32; 3]> {
+    Some(match d {
+        0 => [0, -1, 0],
+        1 => [0, 1, 0],
+        2 => [0, 0, -1],
+        3 => [0, 0, 1],
+        4 => [-1, 0, 0],
+        5 => [1, 0, 0],
+        _ => return None,
+    })
+}
+
+/// `ServerboundPlayerActionPacket` после ID.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlayerAction {
+    /// 0 — START_DESTROY_BLOCK, 2 — ABORT, 3 — STOP_DESTROY_BLOCK, ...
+    pub action: i32,
+    pub pos: [i32; 3],
+    pub face: u8,
+    pub sequence: i32,
+}
+
+pub const START_DESTROY_BLOCK: i32 = 0;
+pub const STOP_DESTROY_BLOCK: i32 = 3;
+
+pub fn read_player_action(r: &mut Reader) -> Result<PlayerAction> {
+    Ok(PlayerAction {
+        action: r.var_int()?,
+        pos: unpack_block_pos(r.i64()?),
+        face: r.u8()?,
+        sequence: r.var_int()?,
+    })
+}
+
+/// `ServerboundUseItemOnPacket` после ID: рука, BlockHitResult, sequence.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UseItemOn {
+    pub hand: i32,
+    pub pos: [i32; 3],
+    pub face: i32,
+    pub sequence: i32,
+}
+
+pub fn read_use_item_on(r: &mut Reader) -> Result<UseItemOn> {
+    let hand = r.var_int()?;
+    let pos = unpack_block_pos(r.i64()?);
+    let face = r.var_int()?;
+    // Точка попадания (3×float), inside, worldBorderHit.
+    r.bytes(12 + 2)?;
+    Ok(UseItemOn {
+        hand,
+        pos,
+        face,
+        sequence: r.var_int()?,
+    })
+}
+
+/// `ServerboundSetCreativeModeSlotPacket`: слот и ID предмета (None — пусто).
+/// Компоненты предмета не разбираем: нам нужен только тип.
+pub fn read_creative_slot(r: &mut Reader) -> Result<(i16, Option<i32>)> {
+    let slot = r.u16()? as i16;
+    let count = r.var_int()?;
+    Ok((slot, if count > 0 { Some(r.var_int()?) } else { None }))
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+
+    #[test]
+    fn block_pos_roundtrip() {
+        for p in [
+            [0, 0, 0],
+            [1, -64, -1],
+            [-30_000_000, 2047, 29_999_999],
+            [8, -61, 8],
+        ] {
+            assert_eq!(unpack_block_pos(pack_block_pos(p)), p);
+        }
+        // Известное значение: (1, 2, 3).
+        assert_eq!(pack_block_pos([1, 2, 3]), (1 << 38) | (3 << 12) | 2);
     }
 }

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 chunkwake-data = { path = "../data" }
 chunkwake-protocol = { path = "../protocol" }
+chunkwake-world = { path = "../world" }
 aes = "0.8"
 bytes = "1"
 cfb8 = "0.8"
