@@ -276,6 +276,8 @@ version = "0.1.0"
 dependencies = [
  "chunkwake-data",
  "chunkwake-net",
+ "chunkwake-protocol",
+ "chunkwake-world",
  "crossterm",
  "dotenvy",
  "ratatui",
@@ -289,6 +291,9 @@ dependencies = [
 [[package]]
 name = "chunkwake-world"
 version = "0.1.0"
+dependencies = [
+ "chunkwake-protocol",
+]
 
 [[package]]
 name = "cipher"

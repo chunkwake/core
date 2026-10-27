@@ -10,32 +10,67 @@ pub const DEFAULT_PROPERTIES: &str = "\
 # Chunkwake server properties
 server-ip=127.0.0.1
 server-port=25565
+enable-status=true
 motd=A Chunkwake Server
 max-players=20
 online-mode=false
 network-compression-threshold=256
 vanilla-jar=server.jar
+java-path=java
+generated-dir=generated
+log-level=info
+# World and gameplay settings are stored for future versions of Chunkwake.
+level-name=world
+level-seed=
+view-distance=10
+simulation-distance=10
+gamemode=survival
+difficulty=easy
+hardcore=false
+pvp=true
+white-list=false
+allow-flight=false
+spawn-protection=16
 ";
 
 pub const KEYS: &[&str] = &[
     "server-ip",
     "server-port",
+    "enable-status",
     "motd",
     "max-players",
     "online-mode",
     "network-compression-threshold",
     "vanilla-jar",
+    "java-path",
+    "generated-dir",
+    "log-level",
+    "level-name",
+    "level-seed",
+    "view-distance",
+    "simulation-distance",
+    "gamemode",
+    "difficulty",
+    "hardcore",
+    "pvp",
+    "white-list",
+    "allow-flight",
+    "spawn-protection",
 ];
 
 #[derive(Debug)]
 pub struct Properties {
     pub server_ip: String,
     pub server_port: u16,
+    pub enable_status: bool,
     pub motd: String,
     pub max_players: usize,
     pub online_mode: bool,
     pub compression_threshold: i32,
     pub vanilla_jar: String,
+    pub java_path: String,
+    pub generated_dir: String,
+    pub log_level: tracing_subscriber::filter::LevelFilter,
 }
 
 impl Properties {
@@ -67,6 +102,9 @@ impl Properties {
         let online_mode = value("online-mode")
             .parse::<bool>()
             .map_err(|_| "online-mode: use true or false".to_owned())?;
+        let enable_status = value("enable-status")
+            .parse::<bool>()
+            .map_err(|_| "enable-status: use true or false".to_owned())?;
         let compression_threshold = value("network-compression-threshold")
             .parse::<i32>()
             .map_err(|_| {
@@ -79,14 +117,59 @@ impl Properties {
         if vanilla_jar.is_empty() {
             return Err("vanilla-jar: enter a path to the Minecraft server.jar".into());
         }
+        let java_path = value("java-path");
+        if java_path.is_empty() {
+            return Err("java-path: enter a Java executable or path".into());
+        }
+        let generated_dir = value("generated-dir");
+        if generated_dir.is_empty() {
+            return Err("generated-dir: enter a directory".into());
+        }
+        let log_level = match value("log-level") {
+            "error" => tracing_subscriber::filter::LevelFilter::ERROR,
+            "warn" => tracing_subscriber::filter::LevelFilter::WARN,
+            "info" => tracing_subscriber::filter::LevelFilter::INFO,
+            "debug" => tracing_subscriber::filter::LevelFilter::DEBUG,
+            "trace" => tracing_subscriber::filter::LevelFilter::TRACE,
+            _ => return Err("log-level: choose error, warn, info, debug, or trace".into()),
+        };
+        if value("level-name").is_empty() {
+            return Err("level-name: enter a world name".into());
+        }
+        for key in ["view-distance", "simulation-distance"] {
+            let distance = value(key)
+                .parse::<u8>()
+                .map_err(|_| format!("{key}: enter a number from 2 to 32"))?;
+            if !(2..=32).contains(&distance) {
+                return Err(format!("{key}: enter a number from 2 to 32"));
+            }
+        }
+        if !["survival", "creative", "adventure", "spectator"].contains(&value("gamemode")) {
+            return Err("gamemode: choose survival, creative, adventure, or spectator".into());
+        }
+        if !["peaceful", "easy", "normal", "hard"].contains(&value("difficulty")) {
+            return Err("difficulty: choose peaceful, easy, normal, or hard".into());
+        }
+        for key in ["hardcore", "pvp", "white-list", "allow-flight"] {
+            value(key)
+                .parse::<bool>()
+                .map_err(|_| format!("{key}: use true or false"))?;
+        }
+        value("spawn-protection")
+            .parse::<u32>()
+            .map_err(|_| "spawn-protection: enter a non-negative integer".to_owned())?;
         Ok(Self {
             server_ip: server_ip.into(),
             server_port: port,
+            enable_status,
             motd: value("motd").into(),
             max_players,
             online_mode,
             compression_threshold,
             vanilla_jar: vanilla_jar.into(),
+            java_path: java_path.into(),
+            generated_dir: generated_dir.into(),
+            log_level,
         })
     }
 
@@ -105,6 +188,24 @@ impl Properties {
         }
     }
 
+    pub fn java_command(&self, dir: &Path) -> PathBuf {
+        let path = Path::new(&self.java_path);
+        if path.is_absolute() || path.components().count() == 1 {
+            path.to_owned()
+        } else {
+            dir.join(path)
+        }
+    }
+
+    pub fn generated_path(&self, dir: &Path) -> PathBuf {
+        let path = Path::new(&self.generated_dir);
+        if path.is_absolute() {
+            path.to_owned()
+        } else {
+            dir.join(path)
+        }
+    }
+
     pub fn net_config(&self, version: GameVersion) -> NetConfig {
         NetConfig {
             version,
@@ -112,6 +213,7 @@ impl Properties {
             max_players: self.max_players,
             compression_threshold: self.compression_threshold,
             online_mode: self.online_mode,
+            enable_status: self.enable_status,
             session_server: chunkwake_net::auth::MOJANG_SESSION_SERVER.into(),
             configuration: None,
         }
@@ -186,6 +288,27 @@ fn parse_kv(text: &str) -> HashMap<&str, &str> {
 }
 
 /// Читает `version.json` из ванильного jar.
+/// Файл версии внутри кэша данных: с ним server.jar при запуске не нужен.
+pub const CACHED_VERSION: &str = "version.json";
+
+/// Версия из готового кэша (`generated/<версия>/version.json`).
+pub fn read_cached_version(data_dir: &Path) -> Option<GameVersion> {
+    let text = std::fs::read_to_string(data_dir.join(CACHED_VERSION)).ok()?;
+    parse_version_json(&text).ok()
+}
+
+/// Копирует `version.json` из jar в кэш.
+pub fn cache_version(jar: &Path, data_dir: &Path) -> Result<(), String> {
+    let file = std::fs::File::open(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("{}: {e}", jar.display()))?;
+    let mut text = String::new();
+    zip.by_name("version.json")
+        .map_err(|e| e.to_string())?
+        .read_to_string(&mut text)
+        .map_err(|e| e.to_string())?;
+    std::fs::write(data_dir.join(CACHED_VERSION), text).map_err(|e| e.to_string())
+}
+
 pub fn read_vanilla_version(jar: &Path) -> Result<GameVersion, String> {
     let file = std::fs::File::open(jar).map_err(|e| {
         format!("vanilla-jar={}: {e}; place the Minecraft 26.3 server.jar there or run `chunkwake config set vanilla-jar PATH`", jar.display())
@@ -226,6 +349,9 @@ mod tests {
         assert!(p.online_mode);
         assert_eq!(p.compression_threshold, 256);
         assert_eq!(p.server_ip, "127.0.0.1");
+        assert!(p.enable_status);
+        assert_eq!(p.java_path, "java");
+        assert_eq!(effective_value("", "gamemode"), "survival");
     }
 
     #[test]
@@ -239,9 +365,28 @@ mod tests {
             "network-compression-threshold=-2",
             "network-compression-threshold=2147483648",
             "server-ip=bad host",
+            "enable-status=yes",
+            "view-distance=1",
+            "simulation-distance=33",
+            "gamemode=unknown",
+            "difficulty=unknown",
+            "hardcore=yes",
+            "spawn-protection=-1",
+            "log-level=verbose",
         ] {
             assert!(Properties::parse(text).is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn future_settings_preserve_comments_and_unknown_keys() {
+        let original = "# existing\ncustom-setting=kept\ngamemode=survival\n";
+        let updated = set(original, "gamemode", "creative").unwrap();
+        assert_eq!(
+            updated,
+            "# existing\ncustom-setting=kept\ngamemode=creative\n"
+        );
+        Properties::parse(&updated).unwrap();
     }
 
     #[test]

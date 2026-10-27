@@ -102,6 +102,21 @@ impl Writer {
         self
     }
 
+    pub fn i32(&mut self, v: i32) -> &mut Self {
+        self.buf.extend_from_slice(&v.to_be_bytes());
+        self
+    }
+
+    pub fn f32(&mut self, v: f32) -> &mut Self {
+        self.buf.extend_from_slice(&v.to_be_bytes());
+        self
+    }
+
+    pub fn f64(&mut self, v: f64) -> &mut Self {
+        self.buf.extend_from_slice(&v.to_be_bytes());
+        self
+    }
+
     pub fn var_int(&mut self, v: i32) -> &mut Self {
         write_var_int(&mut self.buf, v);
         self

@@ -9,6 +9,13 @@ use tokio::sync::mpsc;
 const PROTOCOL: i32 = 9999;
 
 async fn start(compression: i32) -> (std::net::SocketAddr, mpsc::UnboundedReceiver<LoggedIn>) {
+    start_with_status(compression, true).await
+}
+
+async fn start_with_status(
+    compression: i32,
+    enable_status: bool,
+) -> (std::net::SocketAddr, mpsc::UnboundedReceiver<LoggedIn>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = Server::new(NetConfig {
@@ -20,6 +27,7 @@ async fn start(compression: i32) -> (std::net::SocketAddr, mpsc::UnboundedReceiv
         max_players: 20,
         compression_threshold: compression,
         online_mode: false,
+        enable_status,
         session_server: String::new(),
         configuration: None,
     });
@@ -28,6 +36,14 @@ async fn start(compression: i32) -> (std::net::SocketAddr, mpsc::UnboundedReceiv
         let _ = tx.send(p);
     }));
     (addr, rx)
+}
+
+#[tokio::test]
+async fn disabled_status_closes_connection() {
+    let (addr, _rx) = start_with_status(-1, false).await;
+    let mut c = connect(addr, NextState::Status).await;
+    c.send(&[0x00]).await.unwrap();
+    assert!(c.read_packet().await.is_err());
 }
 
 async fn connect(addr: std::net::SocketAddr, next_state: NextState) -> Connection {

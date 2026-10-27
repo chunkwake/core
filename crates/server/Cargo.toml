@@ -11,6 +11,8 @@ path = "src/main.rs"
 [dependencies]
 chunkwake-data = { path = "../data" }
 chunkwake-net = { path = "../net" }
+chunkwake-protocol = { path = "../protocol" }
+chunkwake-world = { path = "../world" }
 crossterm = "0.29"
 dotenvy = "0.15"
 ratatui = "0.30.2"

@@ -3,6 +3,7 @@
 mod cli;
 mod config;
 mod setup_tui;
+mod world_setup;
 
 use chunkwake_net::Server;
 use std::net::{IpAddr, SocketAddr};
@@ -28,19 +29,37 @@ async fn main() {
 
 async fn serve(dir: &Path) -> Result<(), String> {
     let (props, version) = cli::check(dir)?;
-    tracing_subscriber::fmt().with_target(false).init();
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_max_level(props.log_level)
+        .init();
     tracing::info!("Minecraft {} (protocol {})", version.name, version.protocol);
 
-    // Данные ванилы генерируются из server.jar один раз и кэшируются по версии.
-    let java = std::env::var_os("CHUNKWAKE_JAVA").unwrap_or_else(|| "java".into());
-    tracing::info!("preparing vanilla data (first run takes a few seconds)");
-    let data_dir = chunkwake_data::generator::ensure_generated(
-        Path::new(&java),
-        &props.jar_path(dir),
-        &version.name,
-        &dir.join("generated"),
-    )
-    .map_err(|e| e.to_string())?;
+    // Данные ванилы генерируются из server.jar один раз; дальше jar и Java не нужны.
+    let cache_root = props.generated_path(dir);
+    let data_dir = match chunkwake_data::generator::cached(&cache_root, &version.name) {
+        Some(d) if config::read_cached_version(&d).is_some() => d,
+        _ => {
+            let java = std::env::var_os("CHUNKWAKE_JAVA")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| props.java_command(dir));
+            tracing::info!("extracting vanilla data from server.jar (one-time, a few seconds)");
+            let jar = props.jar_path(dir);
+            let d = chunkwake_data::generator::ensure_generated(
+                &java,
+                &jar,
+                &version.name,
+                &cache_root,
+            )
+            .map_err(|e| e.to_string())?;
+            config::cache_version(&jar, &d)?;
+            tracing::info!(
+                "vanilla data cached in {}; server.jar is no longer needed",
+                d.display()
+            );
+            d
+        }
+    };
     let packets =
         chunkwake_data::packets::PacketTable::load(&data_dir.join("reports/packets.json"))
             .map_err(|e| e.to_string())?;
@@ -69,13 +88,22 @@ async fn serve(dir: &Path) -> Result<(), String> {
     })?;
     tracing::info!("listening on {bind}");
 
+    let play = std::sync::Arc::new(world_setup::build_play_plan(
+        &data_dir,
+        &packets,
+        &registries,
+        &props,
+    )?);
     let mut net = props.net_config(version);
     net.configuration = Some(std::sync::Arc::new(plan));
     let server = Server::new(net);
     server
-        .serve(listener, |player, _conn| {
-            // Play появится в M2; пока соединение закрывается.
-            tracing::info!("{} reached play state", player.name);
+        .serve(listener, move |player, mut conn| {
+            let play = play.clone();
+            tokio::spawn(async move {
+                let result = play.run(&mut conn).await;
+                tracing::info!(name = %player.name, ?result, "player left");
+            });
         })
         .await
         .map_err(|e| e.to_string())

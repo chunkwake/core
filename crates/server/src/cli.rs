@@ -93,7 +93,7 @@ pub async fn execute() -> Result<(), String> {
                 props.server_port,
                 props.jar_path(&cli.dir).display()
             );
-            if !is_loopback(&props.server_ip) {
+            if !is_loopback(&props.server_ip) && !props.online_mode {
                 println!(
                     "Warning: offline-mode does not verify player accounts; limit access to trusted users."
                 );
@@ -101,9 +101,10 @@ pub async fn execute() -> Result<(), String> {
             Ok(())
         }
         Command::Show => {
-            let props = Properties::load(&config_path(&cli.dir))?;
+            let text = config::read(&config_path(&cli.dir))?;
+            Properties::parse(&text)?;
             println!("Chunkwake  ·  Current settings\n");
-            print_summary(&props, &mut io::stdout()).map_err(|e| e.to_string())
+            print_summary(&text, &mut io::stdout()).map_err(|e| e.to_string())
         }
         Command::Set(key, value) => set_config(&cli.dir, &key, &value),
         Command::Help => {
@@ -120,6 +121,13 @@ fn config_path(dir: &Path) -> PathBuf {
 pub fn check(dir: &Path) -> Result<(Properties, GameVersion), String> {
     let props = Properties::load(&config_path(dir))?;
     props.check_supported()?;
+    // Данные уже извлечены: jar больше не нужен.
+    if let Some(version) = chunkwake_data::generator::cached(&props.generated_path(dir), MC_VERSION)
+        .and_then(|d| config::read_cached_version(&d))
+        .filter(|v| v.name == MC_VERSION)
+    {
+        return Ok((props, version));
+    }
     let path = props.jar_path(dir);
     let version = config::read_vanilla_version(&path)?;
     if version.name != MC_VERSION {
@@ -149,18 +157,14 @@ fn is_loopback(ip: &str) -> bool {
         .is_loopback()
 }
 
-fn print_summary<W: Write>(props: &Properties, output: &mut W) -> io::Result<()> {
-    writeln!(output, "server-ip={}", props.server_ip)?;
-    writeln!(output, "server-port={}", props.server_port)?;
-    writeln!(output, "motd={}", props.motd)?;
-    writeln!(output, "max-players={}", props.max_players)?;
-    writeln!(output, "online-mode={}", props.online_mode)?;
-    writeln!(
-        output,
-        "network-compression-threshold={}",
-        props.compression_threshold
-    )?;
-    writeln!(output, "vanilla-jar={}", props.vanilla_jar)
+fn print_summary<W: Write>(text: &str, output: &mut W) -> io::Result<()> {
+    for key in config::KEYS {
+        if *key == "level-name" {
+            writeln!(output, "\n# Saved for future versions; no effect yet")?;
+        }
+        writeln!(output, "{key}={}", config::effective_value(text, key))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

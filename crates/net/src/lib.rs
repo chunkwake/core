@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod configuration;
 pub mod crypto;
+pub mod play;
 
 use bytes::BytesMut;
 use chunkwake_protocol::ProtocolError;
@@ -34,6 +35,8 @@ pub struct NetConfig {
     /// Порог сжатия; отрицательное значение выключает сжатие.
     pub compression_threshold: i32,
     pub online_mode: bool,
+    /// Разрешает status ping в списке серверов.
+    pub enable_status: bool,
     /// Базовый URL session server (по умолчанию Mojang).
     pub session_server: String,
     /// Фаза configuration; `None` — отдать соединение сразу после login.
@@ -128,7 +131,9 @@ impl Server {
         let hs = Handshake::decode(&packet)?;
         match hs.next_state {
             NextState::Status => {
-                self.status(&mut conn).await?;
+                if self.config.enable_status {
+                    self.status(&mut conn).await?;
+                }
                 Ok(None)
             }
             NextState::Login | NextState::Transfer => {

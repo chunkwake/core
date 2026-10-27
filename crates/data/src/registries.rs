@@ -68,6 +68,16 @@ pub struct RegistryData {
 }
 
 impl RegistryData {
+    /// Сетевой ID записи синхронизируемого реестра (`worldgen/biome`, `minecraft:plains`).
+    pub fn network_id(&self, registry: &str, entry: &str) -> Result<i32, DataError> {
+        self.synchronized
+            .iter()
+            .find(|r| r.name == registry)
+            .and_then(|r| r.entries.iter().position(|e| e == entry))
+            .map(|i| i as i32)
+            .ok_or_else(|| DataError::Io(format!("unknown {registry} entry {entry}")))
+    }
+
     /// `root` — каталог вывода генератора (содержит `data/` и `reports/`).
     pub fn load(root: &Path) -> Result<Self, DataError> {
         let data = root.join("data/minecraft");

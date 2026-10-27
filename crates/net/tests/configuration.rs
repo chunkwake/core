@@ -52,6 +52,7 @@ async fn start() -> (std::net::SocketAddr, mpsc::UnboundedReceiver<LoggedIn>) {
         max_players: 20,
         compression_threshold: -1,
         online_mode: false,
+        enable_status: true,
         session_server: String::new(),
         configuration: Some(Arc::new(plan())),
     });

@@ -9,6 +9,12 @@ use std::process::Command;
 /// Пишется последним; меняется при изменении состава кэша.
 const CACHE_MARKER: &str = ".chunkwake-cache-v2";
 
+/// Готовый кэш версии, если он есть: тогда server.jar не нужен.
+pub fn cached(cache_root: &Path, version: &str) -> Option<PathBuf> {
+    let target = cache_root.join(version);
+    target.join(CACHE_MARKER).is_file().then_some(target)
+}
+
 /// Возвращает каталог с `reports/` для версии, при необходимости запуская генератор.
 ///
 /// Кэш: `<cache_root>/<version>/{data,reports}`. Генерация идёт во временный каталог
@@ -20,10 +26,10 @@ pub fn ensure_generated(
     version: &str,
     cache_root: &Path,
 ) -> Result<PathBuf, DataError> {
-    let target = cache_root.join(version);
-    if target.join(CACHE_MARKER).is_file() {
+    if let Some(target) = cached(cache_root, version) {
         return Ok(target);
     }
+    let target = cache_root.join(version);
     let io = |what: &str, p: &Path, e: std::io::Error| {
         DataError::Io(format!("{what} {}: {e}", p.display()))
     };

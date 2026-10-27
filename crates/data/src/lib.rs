@@ -6,6 +6,7 @@
 pub mod generator;
 pub mod packets;
 pub mod registries;
+pub mod world;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DataError {

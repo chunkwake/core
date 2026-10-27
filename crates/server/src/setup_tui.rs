@@ -23,7 +23,25 @@ const WARNING: Color = Color::Rgb(235, 183, 106);
 enum FieldKind {
     Text,
     Toggle,
+    Choice(&'static [&'static str]),
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Section {
+    Network,
+    Server,
+    Runtime,
+    World,
+    Gameplay,
+}
+
+const SECTIONS: [(Section, &str); 5] = [
+    (Section::Network, "🌐 Net"),
+    (Section::Server, "👥 Server"),
+    (Section::Runtime, "⚙ Run"),
+    (Section::World, "🌍 World*"),
+    (Section::Gameplay, "⚔ Play*"),
+];
 
 struct Field {
     key: &'static str,
@@ -31,15 +49,17 @@ struct Field {
     label: &'static str,
     help: &'static str,
     kind: FieldKind,
+    section: Section,
 }
 
-const FIELDS: [Field; 7] = [
+const FIELDS: [Field; 22] = [
     Field {
         key: "server-ip",
         icon: "🌐",
         label: "Listen address",
         help: "Use 127.0.0.1 for this computer only. Use 0.0.0.0 to accept connections from the network.",
         kind: FieldKind::Text,
+        section: Section::Network,
     },
     Field {
         key: "server-port",
@@ -47,6 +67,7 @@ const FIELDS: [Field; 7] = [
         label: "Server port",
         help: "TCP port used by Minecraft clients. Choose a number from 1 to 65535.",
         kind: FieldKind::Text,
+        section: Section::Network,
     },
     Field {
         key: "motd",
@@ -54,6 +75,7 @@ const FIELDS: [Field; 7] = [
         label: "Server name",
         help: "Message shown in the Minecraft server list. This is the motd setting.",
         kind: FieldKind::Text,
+        section: Section::Server,
     },
     Field {
         key: "max-players",
@@ -61,6 +83,7 @@ const FIELDS: [Field; 7] = [
         label: "Player limit",
         help: "Maximum number of connected players. Choose a positive integer.",
         kind: FieldKind::Text,
+        section: Section::Server,
     },
     Field {
         key: "online-mode",
@@ -68,6 +91,7 @@ const FIELDS: [Field; 7] = [
         label: "Authentication",
         help: "On verifies Minecraft accounts. Off accepts unverified names. Press Enter or Space to switch.",
         kind: FieldKind::Toggle,
+        section: Section::Server,
     },
     Field {
         key: "network-compression-threshold",
@@ -75,6 +99,7 @@ const FIELDS: [Field; 7] = [
         label: "Compression",
         help: "Packet size threshold in bytes. Use -1 to disable compression.",
         kind: FieldKind::Text,
+        section: Section::Network,
     },
     Field {
         key: "vanilla-jar",
@@ -82,6 +107,127 @@ const FIELDS: [Field; 7] = [
         label: "Vanilla server jar",
         help: "Path to the Minecraft 26.3 server.jar. Relative paths start in the server directory.",
         kind: FieldKind::Text,
+        section: Section::Runtime,
+    },
+    Field {
+        key: "enable-status",
+        icon: "📡",
+        label: "Server list",
+        help: "Allow Minecraft clients to see this server in their server list.",
+        kind: FieldKind::Toggle,
+        section: Section::Network,
+    },
+    Field {
+        key: "java-path",
+        icon: "☕",
+        label: "Java executable",
+        help: "Java command or path. Relative paths with a directory start in the server directory.",
+        kind: FieldKind::Text,
+        section: Section::Runtime,
+    },
+    Field {
+        key: "generated-dir",
+        icon: "📁",
+        label: "Generated data",
+        help: "Where generated vanilla data is stored. Relative paths start in the server directory.",
+        kind: FieldKind::Text,
+        section: Section::Runtime,
+    },
+    Field {
+        key: "log-level",
+        icon: "▤",
+        label: "Log detail",
+        help: "Press Enter or Space to choose how much the server logs.",
+        kind: FieldKind::Choice(&["error", "warn", "info", "debug", "trace"]),
+        section: Section::Runtime,
+    },
+    Field {
+        key: "level-name",
+        icon: "🌍",
+        label: "World name",
+        help: "Saved for a future world implementation; currently has no effect.",
+        kind: FieldKind::Text,
+        section: Section::World,
+    },
+    Field {
+        key: "level-seed",
+        icon: "✧",
+        label: "World seed",
+        help: "Saved for a future world implementation; currently has no effect.",
+        kind: FieldKind::Text,
+        section: Section::World,
+    },
+    Field {
+        key: "view-distance",
+        icon: "◉",
+        label: "View distance",
+        help: "2–32 chunks. Saved for a future world implementation; currently has no effect.",
+        kind: FieldKind::Text,
+        section: Section::World,
+    },
+    Field {
+        key: "simulation-distance",
+        icon: "◌",
+        label: "Simulation distance",
+        help: "2–32 chunks. Saved for a future world implementation; currently has no effect.",
+        kind: FieldKind::Text,
+        section: Section::World,
+    },
+    Field {
+        key: "gamemode",
+        icon: "🎮",
+        label: "Game mode",
+        help: "Saved for a future gameplay implementation; currently has no effect.",
+        kind: FieldKind::Choice(&["survival", "creative", "adventure", "spectator"]),
+        section: Section::Gameplay,
+    },
+    Field {
+        key: "difficulty",
+        icon: "⚔",
+        label: "Difficulty",
+        help: "Saved for a future gameplay implementation; currently has no effect.",
+        kind: FieldKind::Choice(&["peaceful", "easy", "normal", "hard"]),
+        section: Section::Gameplay,
+    },
+    Field {
+        key: "hardcore",
+        icon: "♥",
+        label: "Hardcore",
+        help: "Saved for a future gameplay implementation; currently has no effect.",
+        kind: FieldKind::Toggle,
+        section: Section::Gameplay,
+    },
+    Field {
+        key: "pvp",
+        icon: "⚔",
+        label: "PvP",
+        help: "Saved for a future gameplay implementation; currently has no effect.",
+        kind: FieldKind::Toggle,
+        section: Section::Gameplay,
+    },
+    Field {
+        key: "white-list",
+        icon: "☷",
+        label: "Allowlist",
+        help: "Saved for a future gameplay implementation; currently has no effect.",
+        kind: FieldKind::Toggle,
+        section: Section::Gameplay,
+    },
+    Field {
+        key: "allow-flight",
+        icon: "✈",
+        label: "Allow flight",
+        help: "Saved for a future gameplay implementation; currently has no effect.",
+        kind: FieldKind::Toggle,
+        section: Section::Gameplay,
+    },
+    Field {
+        key: "spawn-protection",
+        icon: "⌂",
+        label: "Spawn protection",
+        help: "Non-negative radius. Saved for a future gameplay implementation; currently has no effect.",
+        kind: FieldKind::Text,
+        section: Section::Gameplay,
     },
 ];
 
@@ -104,6 +250,7 @@ struct App {
     original: String,
     initial: Vec<String>,
     values: Vec<String>,
+    section: usize,
     selected: usize,
     edit_value: String,
     cursor: usize,
@@ -144,6 +291,7 @@ impl App {
             original,
             initial: values.clone(),
             values,
+            section: 0,
             selected: 0,
             edit_value: String::new(),
             cursor: 0,
@@ -181,26 +329,30 @@ impl App {
         match self.mode {
             Mode::Browse => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    self.selected = self.selected.saturating_sub(1);
+                    self.move_row(-1);
                     self.message = None;
                 }
-                KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
-                    self.selected = (self.selected + 1).min(FIELDS.len() - 1);
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.move_row(1);
                     self.message = None;
                 }
-                KeyCode::Enter => {
-                    if FIELDS[self.selected].kind == FieldKind::Toggle {
-                        self.toggle();
-                    } else {
+                KeyCode::Left | KeyCode::BackTab => self.switch_section(-1),
+                KeyCode::Right | KeyCode::Tab => self.switch_section(1),
+                KeyCode::Enter => match FIELDS[self.selected].kind {
+                    FieldKind::Toggle => self.toggle(),
+                    FieldKind::Choice(options) => self.cycle_choice(options),
+                    FieldKind::Text => {
                         self.edit_value = self.values[self.selected].clone();
                         self.cursor = self.edit_value.chars().count();
                         self.mode = Mode::Edit;
                         self.message = None;
                     }
-                }
-                KeyCode::Char(' ') if FIELDS[self.selected].kind == FieldKind::Toggle => {
-                    self.toggle();
-                }
+                },
+                KeyCode::Char(' ') => match FIELDS[self.selected].kind {
+                    FieldKind::Toggle => self.toggle(),
+                    FieldKind::Choice(options) => self.cycle_choice(options),
+                    FieldKind::Text => {}
+                },
                 KeyCode::Char('s') | KeyCode::F(2) => match self.validate() {
                     Ok(props) => {
                         self.message = None;
@@ -285,6 +437,43 @@ impl App {
         self.message = None;
     }
 
+    fn cycle_choice(&mut self, options: &'static [&'static str]) {
+        let current = options
+            .iter()
+            .position(|&option| option == self.values[self.selected]);
+        self.values[self.selected] =
+            options[current.map_or(0, |index| (index + 1) % options.len())].into();
+        self.message = None;
+    }
+
+    fn move_row(&mut self, direction: isize) {
+        let indices = self.section_indices();
+        let current = indices
+            .iter()
+            .position(|&index| index == self.selected)
+            .unwrap_or(0);
+        let next = current
+            .saturating_add_signed(direction)
+            .min(indices.len() - 1);
+        self.selected = indices[next];
+    }
+
+    fn switch_section(&mut self, direction: isize) {
+        self.section =
+            (self.section as isize + direction).rem_euclid(SECTIONS.len() as isize) as usize;
+        self.selected = self.section_indices()[0];
+        self.message = None;
+    }
+
+    fn section_indices(&self) -> Vec<usize> {
+        let section = SECTIONS[self.section].0;
+        FIELDS
+            .iter()
+            .enumerate()
+            .filter_map(|(index, field)| (field.section == section).then_some(index))
+            .collect()
+    }
+
     fn needs_exposure_confirmation(&self, props: &Properties) -> bool {
         is_public(&props.server_ip)
             && !props.online_mode
@@ -317,11 +506,17 @@ fn display_value(app: &App, index: usize) -> Line<'static> {
     }
     if FIELDS[index].kind == FieldKind::Toggle {
         let (label, color) = match app.values[index].as_str() {
-            "true" => ("●  ON  ·  verified accounts".to_owned(), ACCENT),
-            "false" => ("○  OFF  ·  unverified names".to_owned(), MUTED),
+            "true" => ("●  ON".to_owned(), ACCENT),
+            "false" => ("○  OFF".to_owned(), MUTED),
             value => (format!("?  {value}  ·  press Enter to fix"), WARNING),
         };
         return Line::from(Span::styled(label, Style::default().fg(color)));
+    }
+    if matches!(FIELDS[index].kind, FieldKind::Choice(_)) {
+        return Line::from(Span::styled(
+            format!("‹ {} ›", app.values[index]),
+            Style::default().fg(ACCENT),
+        ));
     }
     Line::from(Span::styled(
         app.values[index].clone(),
@@ -345,11 +540,28 @@ fn draw(frame: &mut Frame, app: &App) {
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Min(9),
             Constraint::Length(4),
         ])
         .split(content);
+    let tabs = SECTIONS
+        .iter()
+        .enumerate()
+        .map(|(index, (_, label))| {
+            Span::styled(
+                format!("  {label}  "),
+                Style::default()
+                    .fg(if index == app.section { TEXT } else { MUTED })
+                    .bg(if index == app.section { SELECTED } else { BG })
+                    .add_modifier(if index == app.section {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            )
+        })
+        .collect::<Vec<_>>();
     frame.render_widget(
         Paragraph::new(Text::from(vec![
             Line::from(vec![
@@ -363,18 +575,30 @@ fn draw(frame: &mut Frame, app: &App) {
                 app.path.display().to_string(),
                 Style::default().fg(MUTED),
             )),
+            Line::from(tabs),
         ])),
         sections[0],
     );
 
+    let planned = matches!(SECTIONS[app.section].0, Section::World | Section::Gameplay);
     frame.render_widget(
-        Paragraph::new("Settings").style(Style::default().fg(MUTED).add_modifier(Modifier::BOLD)),
+        Paragraph::new(if planned {
+            "Settings  ·  * Saved for future versions; no effect yet"
+        } else {
+            "Settings"
+        })
+        .style(
+            Style::default()
+                .fg(if planned { WARNING } else { MUTED })
+                .add_modifier(Modifier::BOLD),
+        ),
         Rect::new(sections[1].x, sections[1].y, sections[1].width, 1),
     );
-    for (index, field) in FIELDS.iter().enumerate() {
+    for (row_index, index) in app.section_indices().into_iter().enumerate() {
+        let field = &FIELDS[index];
         let row = Rect::new(
             sections[1].x,
-            sections[1].y + 1 + index as u16,
+            sections[1].y + 1 + row_index as u16,
             sections[1].width,
             1,
         );
@@ -423,7 +647,7 @@ fn draw(frame: &mut Frame, app: &App) {
     let (hint, keys, important) = match app.mode {
         Mode::Browse => (
             app.message.as_deref().unwrap_or(FIELDS[app.selected].help),
-            "↑↓ Move    Enter Edit    Space Toggle    S Save    Esc Quit",
+            "←→ / Tab Sections    ↑↓ Move    Enter/Space Change    S Save    Esc Quit",
             app.message.is_some(),
         ),
         Mode::Edit => (
@@ -606,5 +830,33 @@ mod tests {
         assert_eq!(app.mode, Mode::Browse);
         assert_eq!(app.handle_key(key(KeyCode::Char('s'))), Action::Save);
         assert!(app.draft().unwrap().contains("online-mode=true"));
+    }
+
+    #[test]
+    fn sections_and_planned_settings_are_keyboard_accessible() {
+        let mut app = app(config::DEFAULT_PROPERTIES);
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(SECTIONS[app.section].0, Section::Server);
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(SECTIONS[app.section].0, Section::World);
+        assert_eq!(FIELDS[app.selected].key, "level-name");
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(FIELDS[app.selected].key, "gamemode");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.values[app.selected], "creative");
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(FIELDS[app.selected].key, "difficulty");
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(app.values[app.selected], "normal");
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(FIELDS[app.selected].key, "hardcore");
+        assert_eq!(app.values[app.selected], "true");
+        let draft = app.draft().unwrap();
+        assert!(draft.contains("gamemode=creative"));
+        assert!(draft.contains("difficulty=normal"));
+        assert!(draft.contains("hardcore=true"));
+        app.validate().unwrap();
     }
 }

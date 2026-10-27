@@ -76,6 +76,7 @@ async fn start(
         max_players: 20,
         compression_threshold: 64,
         online_mode: true,
+        enable_status: true,
         session_server,
         configuration: None,
     });
