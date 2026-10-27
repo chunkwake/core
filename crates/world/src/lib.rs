@@ -1,9 +1,11 @@
 //! chunkwake-world — чанки и их сетевое кодирование (формат 26.3).
 
 pub mod anvil;
+pub mod light;
 pub mod nbt;
 
 use chunkwake_protocol::Writer;
+use light::LightLayer;
 use std::sync::Arc;
 
 /// Сколько бит нужно, чтобы записать значения `0..n`.
@@ -216,6 +218,9 @@ pub struct ChunkColumn {
     pub global_block_bits: u32,
     pub global_biome_bits: u32,
     pub has_skylight: bool,
+    /// Свет по секциям мира (без секций над/под миром).
+    pub sky_light: Vec<LightLayer>,
+    pub block_light: Vec<LightLayer>,
 }
 
 const AIR: u32 = 0;
@@ -244,11 +249,15 @@ impl ChunkColumn {
                 Section::from_blocks(blocks, biome)
             })
             .collect();
+        let n = column.len() / 16;
+        // До `light::relight_column` — небо всюду (как раньше), блочного нет.
         Self {
             sections,
             global_block_bits,
             global_biome_bits,
             has_skylight,
+            sky_light: vec![LightLayer::Uniform(if has_skylight { 15 } else { 0 }); n],
+            block_light: vec![LightLayer::Uniform(0); n],
         }
     }
 
@@ -306,28 +315,52 @@ impl ChunkColumn {
         w.byte_array(&data.buf);
         w.var_int(0); // block entities
 
-        // Свет: секции -1..=n (n+2 бит). Небо — полный свет, блочного нет.
-        let light_sections = self.sections.len() + 2;
-        let all = bit_set(light_sections);
-        let none: &[u8] = &[];
-        let (sky, empty_sky) = if self.has_skylight {
-            (all.as_slice(), none)
-        } else {
-            (none, all.as_slice())
+        // Свет: секции -1..=n (n+2 бит): под миром темно, над миром — небо.
+        let above = LightLayer::Uniform(if self.has_skylight { 15 } else { 0 });
+        let dark = LightLayer::Uniform(0);
+        let sky: Vec<&LightLayer> = std::iter::once(&dark)
+            .chain(&self.sky_light)
+            .chain(std::iter::once(&above))
+            .collect();
+        let block: Vec<&LightLayer> = std::iter::once(&dark)
+            .chain(&self.block_light)
+            .chain(std::iter::once(&dark))
+            .collect();
+        let masks = |layers: &[&LightLayer]| {
+            let lit: Vec<bool> = layers.iter().map(|l| !l.is_zero()).collect();
+            let set = |want: bool| {
+                let mut bytes = vec![0u8; lit.len().div_ceil(8)];
+                for (i, &l) in lit.iter().enumerate() {
+                    if l == want {
+                        bytes[i / 8] |= 1 << (i % 8);
+                    }
+                }
+                // BitSet::toByteArray без хвостовых нулей.
+                while bytes.last() == Some(&0) {
+                    bytes.pop();
+                }
+                bytes
+            };
+            (set(true), set(false))
         };
+        let (sky_mask, empty_sky) = if self.has_skylight {
+            masks(&sky)
+        } else {
+            (Vec::new(), bit_set(sky.len()))
+        };
+        let (block_mask, empty_block) = masks(&block);
         // В 26.3 BitSet кодируется как byte array (BitSet::toByteArray).
-        for mask in [sky, none, empty_sky, all.as_slice()] {
+        for mask in [&sky_mask, &block_mask, &empty_sky, &empty_block] {
             w.byte_array(mask);
         }
-        if self.has_skylight {
-            w.var_int(light_sections as i32);
-            for _ in 0..light_sections {
-                w.byte_array(&[0xff; 2048]);
+        let no_sky = Vec::new();
+        for layers in [if self.has_skylight { &sky } else { &no_sky }, &block] {
+            let lit: Vec<_> = layers.iter().filter(|l| !l.is_zero()).collect();
+            w.var_int(lit.len() as i32);
+            for l in lit {
+                w.byte_array(&l.bytes());
             }
-        } else {
-            w.var_int(0);
         }
-        w.var_int(0); // block light arrays
         w.buf
     }
 }
@@ -398,17 +431,18 @@ mod tests {
         }
         assert!(s.remaining().is_empty());
         assert_eq!(r.var_int().unwrap(), 0, "block entities");
+        // Небо в секциях 0..=24 (бит 0 — под миром, тёмная), блочного света нет.
         for expect in [
-            &[0xff, 0xff, 0xff, 0x03][..],
+            &[0xfe, 0xff, 0xff, 0x03][..],
             &[],
-            &[],
+            &[0x01],
             &[0xff, 0xff, 0xff, 0x03],
         ] {
             let n = r.var_int().unwrap() as usize;
             assert_eq!(r.bytes(n).unwrap(), expect, "light mask");
         }
-        assert_eq!(r.var_int().unwrap(), 26, "sky arrays");
-        for _ in 0..26 {
+        assert_eq!(r.var_int().unwrap(), 25, "sky arrays");
+        for _ in 0..25 {
             assert_eq!(r.var_int().unwrap(), 2048);
             r.bytes(2048).unwrap();
         }

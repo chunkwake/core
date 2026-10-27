@@ -5,6 +5,7 @@ use chunkwake_data::world::Blocks;
 use chunkwake_net::play::{ChunkSource, LoadedChunk, PlayPlan};
 use chunkwake_world::ChunkColumn;
 use chunkwake_world::anvil::{self, Format, Names, RegionStore};
+use chunkwake_world::light::{self, LightTable};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -15,6 +16,7 @@ const AUTOSAVE: Duration = Duration::from_secs(30);
 pub struct WorldStorage {
     store: RegionStore,
     template: ChunkColumn,
+    light: Arc<LightTable>,
     format: Format,
     names: StateNames,
 }
@@ -49,6 +51,7 @@ impl WorldStorage {
         data_version: i32,
         min_y: i32,
         template: ChunkColumn,
+        light: Arc<LightTable>,
     ) -> Self {
         let biome_ids = biomes
             .iter()
@@ -58,6 +61,7 @@ impl WorldStorage {
         Self {
             store: RegionStore::new(world_dir.join("region")),
             template,
+            light,
             format: Format {
                 data_version,
                 min_section: min_y.div_euclid(16),
@@ -116,8 +120,14 @@ impl ChunkSource for WorldStorage {
             .load_region(rx, rz)?
             .iter()
             .map(|(pos, nbt)| {
+                // Чанк без света (сохранён до его появления) освещаем сами.
                 anvil::chunk_from_nbt(nbt, &self.template, self.format, &self.names)
-                    .map(|c| (*pos, c))
+                    .map(|(mut c, lit)| {
+                        if !lit {
+                            light::relight_column(&mut c, &self.light);
+                        }
+                        (*pos, c)
+                    })
                     .map_err(|e| format!("chunk {pos:?}: {e}"))
             })
             .collect()

@@ -8,6 +8,7 @@ use chunkwake_protocol::Reader;
 use chunkwake_protocol::frame::FrameCodec;
 use chunkwake_protocol::play::{self, Login, Move, PlayerEntry, game_event};
 use chunkwake_world::ChunkColumn;
+use chunkwake_world::light::{Engine, LightAccess, LightTable};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -64,6 +65,7 @@ pub struct PlayPlan {
     saved: Mutex<HashMap<(i32, i32), u64>>,
     /// Изменения блоков текущего тика: секция → (локальный индекс, состояние).
     pending_blocks: Mutex<PendingBlocks>,
+    light: Arc<LightTable>,
     /// Ленивая загрузка с диска: источник и уже прочитанные регионы.
     source: std::sync::OnceLock<Arc<dyn ChunkSource>>,
     regions: Mutex<HashSet<(i32, i32)>>,
@@ -90,6 +92,31 @@ const CHUNK_CACHE_LIMIT: usize = 65_536;
 pub type LoadedChunk = ((i32, i32), ChunkColumn);
 /// Изменения блоков по секциям: (локальный индекс, состояние).
 type PendingBlocks = HashMap<[i32; 3], Vec<(u16, u32)>>;
+
+/// Мир для пересчёта света: читает правленые столбцы или шаблон,
+/// при записи копирует шаблон в правленые и запоминает затронутые.
+struct WorldLight<'a> {
+    world: &'a mut HashMap<(i32, i32), (ChunkColumn, u64)>,
+    template: &'a ChunkColumn,
+    touched: HashSet<(i32, i32)>,
+}
+
+impl LightAccess for WorldLight<'_> {
+    fn column(&mut self, cx: i32, cz: i32) -> Option<&ChunkColumn> {
+        Some(self.world.get(&(cx, cz)).map_or(self.template, |e| &e.0))
+    }
+    fn column_mut(&mut self, cx: i32, cz: i32) -> Option<&mut ChunkColumn> {
+        self.touched.insert((cx, cz));
+        let template = self.template;
+        Some(
+            &mut self
+                .world
+                .entry((cx, cz))
+                .or_insert_with(|| (template.clone(), 0))
+                .0,
+        )
+    }
+}
 
 /// Источник сохранённых чанков: регион 32×32 читается целиком при первом обращении.
 pub trait ChunkSource: Send + Sync {
@@ -242,6 +269,8 @@ pub struct WorldSpec {
     pub spawn: [f64; 3],
     /// ID `minecraft:player` в реестре `entity_type`.
     pub player_type: i32,
+    /// Свойства света состояний блоков (шаблон уже освещён).
+    pub light: Arc<LightTable>,
 }
 
 impl PlayPlan {
@@ -257,6 +286,7 @@ impl PlayPlan {
             item_blocks,
             spawn,
             player_type,
+            light,
         } = world;
         let cb = |name| packets.id(State::Play, Direction::Clientbound, name);
         let sb = |name| packets.id(State::Play, Direction::Serverbound, name);
@@ -298,6 +328,7 @@ impl PlayPlan {
             edited: Mutex::new(HashMap::new()),
             saved: Mutex::new(HashMap::new()),
             pending_blocks: Mutex::new(HashMap::new()),
+            light,
             source: std::sync::OnceLock::new(),
             regions: Mutex::new(HashSet::new()),
             region_load: Mutex::new(()),
@@ -354,7 +385,12 @@ impl PlayPlan {
             return None;
         }
         let key = (x >> 4, z >> 4);
-        self.ensure_region(key.0, key.1);
+        // Свет доходит до соседних чанков: их регионы тоже должны быть прочитаны.
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                self.ensure_region(key.0 + dx, key.1 + dz);
+            }
+        }
         let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
         let old = {
             let mut world = self.edited.lock().unwrap();
@@ -362,9 +398,28 @@ impl PlayPlan {
                 .entry(key)
                 .or_insert_with(|| (self.template.clone(), 0));
             let old = column.set_block(lx, ry as usize, lz, state);
+            if old == state {
+                return Some(old);
+            }
             *rev += 1;
+            let mut access = WorldLight {
+                world: &mut world,
+                template: &self.template,
+                touched: HashSet::new(),
+            };
+            Engine::new(&mut access, &self.light, self.template.height()).block_changed([x, ry, z]);
+            let mut touched = access.touched;
+            touched.insert(key);
             // Под той же блокировкой: chunk_frame не вставит устаревший кадр.
-            self.chunk_frames.lock().unwrap().remove(&key);
+            let mut frames = self.chunk_frames.lock().unwrap();
+            for pos in touched {
+                frames.remove(&pos);
+                if pos != key
+                    && let Some(e) = world.get_mut(&pos)
+                {
+                    e.1 += 1;
+                }
+            }
             old
         };
         if old != state {

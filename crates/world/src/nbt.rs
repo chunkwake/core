@@ -69,6 +69,13 @@ impl Tag {
         }
     }
 
+    pub fn as_byte_array(&self) -> Option<&[i8]> {
+        match self {
+            Tag::ByteArray(b) => Some(b),
+            _ => None,
+        }
+    }
+
     pub fn as_long_array(&self) -> Option<&[i64]> {
         match self {
             Tag::LongArray(l) => Some(l),

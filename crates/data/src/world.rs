@@ -4,6 +4,27 @@ use crate::DataError;
 use std::collections::HashMap;
 use std::path::Path;
 
+/// `reports/light.csv` (выгрузка `ChunkwakeLight`): по id состояния
+/// `(излучение, затухание, небесный свет проходит вниз)`.
+pub fn load_light(root: &Path) -> Result<Vec<(u8, u8, bool)>, DataError> {
+    let path = root.join("reports/light.csv");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
+    text.lines()
+        .enumerate()
+        .map(|(i, line)| {
+            let mut f = line.split(',').map(|v| v.trim().parse::<u8>().ok());
+            match (f.next().flatten(), f.next().flatten(), f.next().flatten()) {
+                (Some(e), Some(d), Some(s)) => Ok((e, d, s != 0)),
+                _ => Err(DataError::Format {
+                    file: path.display().to_string(),
+                    msg: format!("line {}: {line:?}", i + 1),
+                }),
+            }
+        })
+        .collect()
+}
+
 fn read_json(path: &Path) -> Result<serde_json::Value, DataError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;

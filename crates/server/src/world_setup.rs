@@ -44,7 +44,10 @@ pub fn build_play_plan(
         states.push((blocks.default_state(name).map_err(s)? as u32, n));
     }
     let top = layers.iter().map(|l| l.1).sum::<usize>() as f64;
-    let chunk = ChunkColumn::flat(
+    let light = std::sync::Arc::new(chunkwake_world::light::LightTable::new(
+        chunkwake_data::world::load_light(data_dir).map_err(s)?,
+    ));
+    let mut chunk = ChunkColumn::flat(
         &states,
         dim.sections(),
         biome as u32,
@@ -52,6 +55,7 @@ pub fn build_play_plan(
         bits_for(biome_count),
         dim.has_skylight,
     );
+    chunkwake_world::light::relight_column(&mut chunk, &light);
 
     let dimension = format!("minecraft:{DIMENSION}");
     let login = Login {
@@ -95,6 +99,7 @@ pub fn build_play_plan(
     }
     let world = WorldSpec {
         template: chunk.clone(),
+        light: light.clone(),
         min_y: dim.min_y,
         item_blocks,
         spawn,
@@ -102,6 +107,14 @@ pub fn build_play_plan(
     };
     let plan = PlayPlan::build(packets, login, world, props.compression_threshold).map_err(s)?;
     let data_version = crate::config::read_world_version(data_dir)?;
-    let storage = WorldStorage::new(world_dir, blocks, biomes, data_version, dim.min_y, chunk);
+    let storage = WorldStorage::new(
+        world_dir,
+        blocks,
+        biomes,
+        data_version,
+        dim.min_y,
+        chunk,
+        light,
+    );
     Ok((plan, storage))
 }

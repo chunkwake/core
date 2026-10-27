@@ -1,6 +1,7 @@
 //! Хранение мира в формате Anvil (`region/r.X.Z.mca`), совместимом с ванилой:
 //! чанк — NBT-compound с секциями `block_states`/`biomes` (палитра + long-массив).
 
+use crate::light::LightLayer;
 use crate::nbt::{self, Compound, Tag};
 use crate::{ChunkColumn, Section, bits_for, pack};
 use flate2::Compression;
@@ -104,6 +105,16 @@ pub fn chunk_to_nbt(
         sec.insert("Y".into(), Tag::Byte((f.min_section + i as i32) as i8));
         sec.insert("block_states".into(), Tag::Compound(states));
         sec.insert("biomes".into(), Tag::Compound(biomes));
+        // Небо пишем всегда (у ванилы отсутствие = «как секция выше»),
+        // блочный — только ненулевой.
+        let bytes =
+            |l: &LightLayer| Tag::ByteArray(l.bytes().into_iter().map(|b| b as i8).collect());
+        if c.has_skylight {
+            sec.insert("SkyLight".into(), bytes(&c.sky_light[i]));
+        }
+        if !c.block_light[i].is_zero() {
+            sec.insert("BlockLight".into(), bytes(&c.block_light[i]));
+        }
         sections.push(Tag::Compound(sec));
     }
     let mut root = Compound::new();
@@ -114,7 +125,7 @@ pub fn chunk_to_nbt(
     root.insert("Status".into(), string("minecraft:full"));
     root.insert("LastUpdate".into(), Tag::Long(0));
     root.insert("InhabitedTime".into(), Tag::Long(0));
-    root.insert("isLightOn".into(), Tag::Byte(0));
+    root.insert("isLightOn".into(), Tag::Byte(1));
     root.insert("sections".into(), Tag::List(sections));
     root.insert("block_entities".into(), Tag::List(vec![]));
     Ok(root)
@@ -122,17 +133,29 @@ pub fn chunk_to_nbt(
 
 /// Чанк из NBT. Размеры и биты берутся из `template`; секции, которых нет в
 /// файле, остаются пустыми (воздух), неизвестные блоки становятся воздухом.
+/// Второе значение — `true`, если свет прочитан из файла; иначе его надо
+/// пересчитать (`light::relight_column`).
 pub fn chunk_from_nbt(
     root: &Compound,
     template: &ChunkColumn,
     f: Format,
     names: &dyn Names,
-) -> Result<ChunkColumn, String> {
+) -> Result<(ChunkColumn, bool), String> {
     let mut c = template.clone();
     let default_biome = template.sections.first().map_or(0, |s| s.biome);
     for s in &mut c.sections {
         *s = Section::filled(0, default_biome);
     }
+    // Свет из файла только у чанков, сохранённых со светом (`isLightOn`).
+    let mut lit = root.get("isLightOn").and_then(Tag::as_i64) == Some(1);
+    let sky_default = LightLayer::Uniform(if c.has_skylight { 15 } else { 0 });
+    let n = c.sections.len();
+    c.sky_light = vec![sky_default; n];
+    c.block_light = vec![LightLayer::Uniform(0); n];
+    let layer = |sec: &Compound, key: &str| {
+        let b = sec.get(key)?.as_byte_array()?;
+        LightLayer::from_bytes(&b.iter().map(|&x| x as u8).collect::<Vec<_>>())
+    };
     let sections = root
         .get("sections")
         .and_then(Tag::as_list)
@@ -142,9 +165,19 @@ pub fn chunk_from_nbt(
             .get("Y")
             .and_then(Tag::as_i64)
             .ok_or("section without Y")? as i32;
-        let Some(slot) = c.sections.get_mut((y - f.min_section) as usize) else {
+        let si = (y - f.min_section) as usize;
+        let Some(slot) = c.sections.get_mut(si) else {
             continue; // секции света над/под миром
         };
+        if let Some(l) = layer(sec, "BlockLight") {
+            c.block_light[si] = l;
+        }
+        if c.has_skylight {
+            match layer(sec, "SkyLight") {
+                Some(l) => c.sky_light[si] = l,
+                None => lit = false,
+            }
+        }
         let biome = sec
             .get("biomes")
             .and_then(Tag::as_compound)
@@ -192,7 +225,7 @@ pub fn chunk_from_nbt(
             }
         };
     }
-    Ok(c)
+    Ok((c, lit))
 }
 
 const SECTOR: usize = 4096;
@@ -394,8 +427,11 @@ mod tests {
         let c = sample();
         let nbt = chunk_to_nbt(&c, (3, -2), F, &Test).unwrap();
         assert_eq!(nbt["yPos"], Tag::Int(-4));
-        let back = chunk_from_nbt(&nbt, &c, F, &Test).unwrap();
+        let (back, lit) = chunk_from_nbt(&nbt, &c, F, &Test).unwrap();
         assert_eq!(back.sections, c.sections);
+        assert!(lit);
+        assert_eq!(back.sky_light, c.sky_light);
+        assert_eq!(back.block_light, c.block_light);
     }
 
     #[test]
