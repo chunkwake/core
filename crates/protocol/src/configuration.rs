@@ -112,7 +112,7 @@ pub(crate) fn write_nbt_string_root(w: &mut Writer, s: &str) {
 }
 
 /// Java modified UTF-8: NUL как 2 байта, символы вне BMP — суррогатными парами.
-fn modified_utf8(s: &str) -> Vec<u8> {
+pub(crate) fn modified_utf8(s: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.len());
     for unit in s.encode_utf16() {
         match unit {

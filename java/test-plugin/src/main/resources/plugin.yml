@@ -1,0 +1,9 @@
+name: ChunkwakeTest
+version: '1.0'
+main: dev.chunkwake.testplugin.ChunkwakeTestPlugin
+api-version: '26.3'
+description: Test plugin for the chunkwake bridge
+commands:
+  hello:
+    description: Says hello
+    usage: /hello

@@ -487,7 +487,7 @@ mod tests {
         relight_column(&mut base, &t);
         let keys = [(-1, -1), (-1, 0), (0, -1), (0, 0)];
         let mut w = World(keys.into_iter().map(|k| (k, base.clone())).collect());
-        let mut put = |w: &mut World, p: [i32; 3], s: u32| {
+        let put = |w: &mut World, p: [i32; 3], s: u32| {
             w.0.get_mut(&(p[0] >> 4, p[2] >> 4))
                 .unwrap()
                 .set_block((p[0] & 15) as usize, p[1] as usize, (p[2] & 15) as usize, s);

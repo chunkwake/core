@@ -7,17 +7,39 @@ use chunkwake_data::packets::{Direction, PacketTable, State};
 use chunkwake_protocol::Reader;
 use chunkwake_protocol::frame::FrameCodec;
 use chunkwake_protocol::play::{self, Login, Move, PlayerEntry, game_event};
+use chunkwake_protocol::text;
 use chunkwake_world::ChunkColumn;
 use chunkwake_world::light::{Engine, LightAccess, LightTable};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Сколько ждать ответа плагинов на отменяемое событие; дольше — не отменено.
+const PLUGIN_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Хуки плагинов (реализует JVM-мост). Вызовы не блокируют: события уходят
+/// в поток плагинов, ответы на отменяемые приходят через `oneshot`.
+pub trait PluginHooks: Send + Sync {
+    /// Вход игрока; сообщение о входе рассылают плагины.
+    fn join(&self, uuid: Uuid, name: &str);
+    fn quit(&self, uuid: Uuid);
+    /// Ломка блока; `None` — слушателей нет, ждать нечего. `true` — отменено.
+    fn block_break(
+        &self,
+        uuid: Uuid,
+        pos: [i32; 3],
+        block: &str,
+    ) -> Option<oneshot::Receiver<bool>>;
+    /// Команда без `/`; `true` — команда известна плагинам.
+    fn command(&self, uuid: Uuid, line: &str) -> oneshot::Receiver<bool>;
+    /// Тик сервера (20/с).
+    fn tick(&self);
+}
 
 #[derive(Debug, Clone, Copy)]
 struct Ids {
@@ -50,6 +72,9 @@ struct Ids {
     sb_use_item_on: i32,
     sb_set_creative_mode_slot: i32,
     sb_set_carried_item: i32,
+    commands: i32,
+    sb_chat_command: i32,
+    sb_chat_command_signed: i32,
 }
 
 pub struct PlayPlan {
@@ -80,6 +105,13 @@ pub struct PlayPlan {
     hub: Hub,
     /// Кадры `level_chunk_with_light`, уже сжатые: один раз на чанк для всех игроков.
     chunk_frames: Mutex<HashMap<(i32, i32), Frame>>,
+    /// Состояние блока → имя (`minecraft:stone`), для событий плагинов.
+    block_names: Arc<Vec<String>>,
+    /// ID `brigadier:string` в `command_argument_type`.
+    string_parser: i32,
+    hooks: std::sync::OnceLock<Arc<dyn PluginHooks>>,
+    /// Команды плагинов для дерева `commands` у клиента.
+    plugin_commands: Mutex<Vec<String>>,
 }
 
 /// Готовый к записи кадр, общий для многих соединений.
@@ -127,6 +159,8 @@ pub trait ChunkSource: Send + Sync {
 #[derive(Clone)]
 struct Broadcast {
     skip: Option<Uuid>,
+    /// Только этому игроку (сообщения плагинов).
+    only: Option<Uuid>,
     packet: Frame,
     /// Событие сущности: получатель сам решает по дальности, слать ли `packet`,
     /// заспавнить сущность или убрать её.
@@ -239,6 +273,7 @@ impl Hub {
         // Ошибка = нет подписчиков; это нормально.
         let _ = self.tx.send(Broadcast {
             skip,
+            only: None,
             packet: Arc::new(if packet.is_empty() {
                 packet
             } else {
@@ -271,6 +306,10 @@ pub struct WorldSpec {
     pub player_type: i32,
     /// Свойства света состояний блоков (шаблон уже освещён).
     pub light: Arc<LightTable>,
+    /// Состояние блока → имя блока.
+    pub block_names: Arc<Vec<String>>,
+    /// ID `brigadier:string` в `command_argument_type`.
+    pub string_parser: i32,
 }
 
 impl PlayPlan {
@@ -287,6 +326,8 @@ impl PlayPlan {
             spawn,
             player_type,
             light,
+            block_names,
+            string_parser,
         } = world;
         let cb = |name| packets.id(State::Play, Direction::Clientbound, name);
         let sb = |name| packets.id(State::Play, Direction::Serverbound, name);
@@ -321,6 +362,9 @@ impl PlayPlan {
                 sb_use_item_on: sb("use_item_on")?,
                 sb_set_creative_mode_slot: sb("set_creative_mode_slot")?,
                 sb_set_carried_item: sb("set_carried_item")?,
+                commands: cb("commands")?,
+                sb_chat_command: sb("chat_command")?,
+                sb_chat_command_signed: sb("chat_command_signed")?,
             },
             login,
             chunk_body: template.encode_body(),
@@ -338,6 +382,10 @@ impl PlayPlan {
             player_type,
             next_entity_id: AtomicI32::new(1),
             chunk_frames: Mutex::new(HashMap::new()),
+            block_names,
+            string_parser,
+            hooks: std::sync::OnceLock::new(),
+            plugin_commands: Mutex::new(Vec::new()),
             hub: Hub {
                 codec: FrameCodec {
                     threshold: (compression_threshold >= 0)
@@ -435,6 +483,45 @@ impl PlayPlan {
     }
 
     /// Подключает диск: дальше регионы читаются при первом обращении к их чанкам.
+    /// Подключает плагины (один раз, до входа игроков).
+    pub fn set_hooks(&self, hooks: Arc<dyn PluginHooks>) {
+        let _ = self.hooks.set(hooks);
+    }
+
+    fn hooks(&self) -> Option<&Arc<dyn PluginHooks>> {
+        self.hooks.get()
+    }
+
+    /// Системное сообщение (JSON-компонент) одному игроку.
+    pub fn send_json(&self, to: Uuid, json: &str) {
+        let packet = self
+            .hub
+            .frame(&text::system_chat_json(self.ids.system_chat, json, false));
+        let _ = self.hub.tx.send(Broadcast {
+            skip: None,
+            only: Some(to),
+            packet: Arc::new(packet),
+            entity: None,
+            moves: None,
+            blocks: None,
+        });
+    }
+
+    /// Системное сообщение (JSON-компонент) всем.
+    pub fn broadcast_json(&self, json: &str) {
+        self.hub.send(
+            None,
+            text::system_chat_json(self.ids.system_chat, json, false),
+        );
+    }
+
+    /// Команды плагинов: запоминаем и обновляем дерево у всех онлайн.
+    pub fn set_commands(&self, names: Vec<String>) {
+        let packet = text::commands(self.ids.commands, &names, self.string_parser);
+        *self.plugin_commands.lock().unwrap() = names;
+        self.hub.send(None, packet);
+    }
+
     pub fn set_source(&self, source: Arc<dyn ChunkSource>) {
         let _ = self.source.set(source);
     }
@@ -589,14 +676,17 @@ impl PlayPlan {
         // Спавн каждый получатель строит сам, если новичок в его зоне видимости.
         self.hub
             .send_entity(Some(uuid), Vec::new(), Some(EntityEvent::At(me.at())));
-        self.hub.send(
-            None,
-            play::system_chat(
-                ids.system_chat,
-                &format!("{} joined the game", me.entry.name),
-                false,
+        match self.hooks() {
+            Some(h) => h.join(uuid, &me.entry.name),
+            None => self.hub.send(
+                None,
+                play::system_chat(
+                    ids.system_chat,
+                    &format!("{} joined the game", me.entry.name),
+                    false,
+                ),
             ),
-        );
+        }
 
         let result = self.session(conn, rx, &me, &others).await;
 
@@ -610,14 +700,17 @@ impl PlayPlan {
             None,
             play::player_info_remove(ids.player_info_remove, &[uuid]),
         );
-        self.hub.send(
-            None,
-            play::system_chat(
-                ids.system_chat,
-                &format!("{} left the game", me.entry.name),
-                false,
+        match self.hooks() {
+            Some(h) => h.quit(uuid),
+            None => self.hub.send(
+                None,
+                play::system_chat(
+                    ids.system_chat,
+                    &format!("{} left the game", me.entry.name),
+                    false,
+                ),
             ),
-        );
+        }
         result
     }
 
@@ -662,6 +755,9 @@ impl PlayPlan {
                 let Some(plan) = plan.upgrade() else { return };
                 plan.flush_blocks();
                 plan.flush_moves();
+                if let Some(h) = plan.hooks() {
+                    h.tick();
+                }
             }
         });
     }
@@ -701,6 +797,7 @@ impl PlayPlan {
             .collect();
         let _ = self.hub.tx.send(Broadcast {
             skip: None,
+            only: None,
             packet: Arc::new(Vec::new()),
             entity: None,
             moves: None,
@@ -755,6 +852,7 @@ impl PlayPlan {
         }
         let _ = self.hub.tx.send(Broadcast {
             skip: None,
+            only: None,
             packet: Arc::new(Vec::new()),
             entity: None,
             moves: Some(Arc::new(batch)),
@@ -814,6 +912,11 @@ impl PlayPlan {
         let mut login = self.login.clone();
         login.entity_id = me.entity_id;
         conn.send(&play::login(ids.login, &login)).await?;
+        if self.hooks().is_some() {
+            let names = self.plugin_commands.lock().unwrap().clone();
+            conn.send(&text::commands(ids.commands, &names, self.string_parser))
+                .await?;
+        }
         conn.send(&play::game_event(
             ids.game_event,
             game_event::LEVEL_CHUNKS_LOAD_START,
@@ -887,7 +990,7 @@ impl PlayPlan {
                         out.clear();
                         let mut next = Some(first);
                         while let Some(b) = next {
-                            if b.skip != Some(uuid) {
+                            if b.skip != Some(uuid) && b.only.is_none_or(|o| o == uuid) {
                                 self.deliver(uuid, &b, center, r_view, &mut visible, &mut out);
                             }
                             next = rx.try_recv().ok();
@@ -946,7 +1049,13 @@ impl PlayPlan {
                         let a = play::read_player_action(&mut r)?;
                         // Креатив: блок ломается сразу при начале удара.
                         if a.action == play::START_DESTROY_BLOCK {
-                            self.set_block(a.pos, AIR);
+                            if self.plugins_cancel_break(uuid, a.pos).await {
+                                // Отменено: вернуть блок клиенту.
+                                let old = self.block(a.pos).unwrap_or(AIR);
+                                conn.send(&play::block_update(ids.block_update, a.pos, old as i32)).await?;
+                            } else {
+                                self.set_block(a.pos, AIR);
+                            }
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, a.sequence)).await?;
                         }
                         continue;
@@ -965,6 +1074,24 @@ impl PlayPlan {
                         conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                         continue;
                     }
+                    if id == ids.sb_chat_command || id == ids.sb_chat_command_signed {
+                        let line = r.string(32767)?.to_owned();
+                        tracing::info!("{} issued server command: /{line}", me.entry.name);
+                        let known = match self.hooks() {
+                            Some(h) => {
+                                let rx = h.command(uuid, &line);
+                                tokio::time::timeout(Duration::from_secs(5), rx)
+                                    .await
+                                    .is_ok_and(|r| r.unwrap_or(false))
+                            }
+                            None => false,
+                        };
+                        if !known {
+                            let msg = serde_json::json!({"text": format!("Unknown command: /{line}"), "color": "red"});
+                            conn.send(&text::system_chat_json(ids.system_chat, &msg.to_string(), false)).await?;
+                        }
+                        continue;
+                    }
                     if id == ids.sb_chat {
                         let text = play::read_chat_message(&mut r)?;
                         let line = format!("<{}> {text}", me.entry.name);
@@ -979,6 +1106,22 @@ impl PlayPlan {
                 }
             }
         }
+    }
+
+    /// Спрашивает плагины, отменить ли ломку блока. Без слушателей — сразу «нет».
+    async fn plugins_cancel_break(&self, uuid: Uuid, pos: [i32; 3]) -> bool {
+        let Some(h) = self.hooks() else { return false };
+        let state = self.block(pos).unwrap_or(AIR);
+        let name = self
+            .block_names
+            .get(state as usize)
+            .map_or("minecraft:air", String::as_str);
+        let Some(rx) = h.block_break(uuid, pos, name) else {
+            return false;
+        };
+        tokio::time::timeout(PLUGIN_TIMEOUT, rx)
+            .await
+            .is_ok_and(|r| r.unwrap_or(false))
     }
 
     /// Кладёт в `out` то, что этот получатель должен увидеть из рассылки `b`.

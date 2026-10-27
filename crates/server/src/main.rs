@@ -102,6 +102,7 @@ async fn serve(dir: &Path) -> Result<(), String> {
     tracing::info!("world: {}", props.level_name);
     play.spawn_tick();
     storage.spawn_autosave(play.clone());
+    start_plugins(dir, &props, &play).await;
 
     let mut net = props.net_config(version);
     net.configuration = Some(std::sync::Arc::new(plan));
@@ -125,5 +126,37 @@ async fn serve(dir: &Path) -> Result<(), String> {
             tracing::info!("saved {n} chunks");
             Ok(())
         }
+    }
+}
+
+/// Paper-плагины из `plugins/`: без API (`java/dist`, `api/`) или Java сервер
+/// работает без них.
+async fn start_plugins(
+    dir: &Path,
+    props: &config::Properties,
+    play: &std::sync::Arc<chunkwake_net::play::PlayPlan>,
+) {
+    let Some(api) = chunkwake_bridge::find_api_dir(dir) else {
+        tracing::warn!(
+            "plugin API not found (build it with `java/gradlew -p java dist`); plugins disabled"
+        );
+        return;
+    };
+    let java = std::env::var_os("CHUNKWAKE_JAVA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| props.java_command(dir));
+    let plugins = dir.join("plugins");
+    let plan = play.clone();
+    let started = tokio::task::spawn_blocking(move || {
+        chunkwake_bridge::Bridge::start(&java, &api, &plugins, &plan)
+    })
+    .await;
+    match started {
+        Ok(Ok((bridge, n))) => {
+            play.set_hooks(bridge);
+            tracing::info!("enabled {n} plugin(s)");
+        }
+        Ok(Err(e)) => tracing::error!("plugins disabled: {e}"),
+        Err(e) => tracing::error!("plugins disabled: {e}"),
     }
 }

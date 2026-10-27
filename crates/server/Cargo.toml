@@ -9,6 +9,7 @@ name = "chunkwake"
 path = "src/main.rs"
 
 [dependencies]
+chunkwake-bridge = { path = "../bridge" }
 chunkwake-data = { path = "../data" }
 chunkwake-net = { path = "../net" }
 chunkwake-protocol = { path = "../protocol" }

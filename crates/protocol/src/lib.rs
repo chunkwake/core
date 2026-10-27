@@ -5,6 +5,7 @@ pub mod configuration;
 pub mod frame;
 pub mod packets;
 pub mod play;
+pub mod text;
 
 pub use codec::{Reader, Writer};
 

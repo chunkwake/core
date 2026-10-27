@@ -104,6 +104,21 @@ pub fn build_play_plan(
         item_blocks,
         spawn,
         player_type,
+        block_names: std::sync::Arc::new(
+            (0..blocks.state_count() as u32)
+                .map(|id| {
+                    blocks
+                        .state(id)
+                        .map_or_else(String::new, |(n, _)| n.to_owned())
+                })
+                .collect(),
+        ),
+        string_parser: chunkwake_data::registries::builtin_id(
+            data_dir,
+            "command_argument_type",
+            "brigadier:string",
+        )
+        .map_err(s)?,
     };
     let plan = PlayPlan::build(packets, login, world, props.compression_threshold).map_err(s)?;
     let data_version = crate::config::read_world_version(data_dir)?;
