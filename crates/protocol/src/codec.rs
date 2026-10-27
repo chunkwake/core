@@ -107,6 +107,12 @@ impl Writer {
         self
     }
 
+    pub fn byte_array(&mut self, b: &[u8]) -> &mut Self {
+        self.var_int(b.len() as i32);
+        self.buf.extend_from_slice(b);
+        self
+    }
+
     pub fn string(&mut self, s: &str) -> &mut Self {
         self.var_int(s.len() as i32);
         self.buf.extend_from_slice(s.as_bytes());

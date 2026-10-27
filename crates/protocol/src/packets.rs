@@ -154,10 +154,74 @@ pub fn login_disconnect(reason_json: &str) -> Vec<u8> {
     w.buf
 }
 
-pub fn login_success(uuid: Uuid, name: &str) -> Vec<u8> {
+/// Свойство игрового профиля (например, `textures`) от session server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileProperty {
+    pub name: String,
+    pub value: String,
+    pub signature: Option<String>,
+}
+
+pub fn login_success(uuid: Uuid, name: &str, properties: &[ProfileProperty]) -> Vec<u8> {
     let mut w = Writer::new();
-    w.var_int(0x02).uuid(uuid).string(name).var_int(0); // 0 свойств профиля
+    w.var_int(0x02)
+        .uuid(uuid)
+        .string(name)
+        .var_int(properties.len() as i32);
+    for p in properties {
+        w.string(&p.name)
+            .string(&p.value)
+            .bool(p.signature.is_some());
+        if let Some(sig) = &p.signature {
+            w.string(sig);
+        }
+    }
     w.buf
+}
+
+/// Encryption Request: пустой server id, публичный ключ (DER SPKI), verify token.
+pub fn encryption_request(
+    public_key_der: &[u8],
+    verify_token: &[u8],
+    authenticate: bool,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(0x01)
+        .string("")
+        .byte_array(public_key_der)
+        .byte_array(verify_token)
+        .bool(authenticate);
+    w.buf
+}
+
+/// Хэш для session server: SHA-1 как знаковое big-endian число в hex (как в ваниле).
+pub fn server_hash(server_id: &str, shared_secret: &[u8], public_key_der: &[u8]) -> String {
+    let mut sha = sha1_smol::Sha1::new();
+    sha.update(server_id.as_bytes());
+    sha.update(shared_secret);
+    sha.update(public_key_der);
+    let mut digest = sha.digest().bytes();
+    let negative = digest[0] & 0x80 != 0;
+    if negative {
+        // Дополнение до двух: инвертировать и прибавить 1.
+        let mut carry = true;
+        for b in digest.iter_mut().rev() {
+            *b = !*b;
+            if carry {
+                let (v, c) = b.overflowing_add(1);
+                *b = v;
+                carry = c;
+            }
+        }
+    }
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    let trimmed = hex.trim_start_matches('0');
+    let trimmed = if trimmed.is_empty() { "0" } else { trimmed };
+    if negative {
+        format!("-{trimmed}")
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 pub fn set_compression(threshold: i32) -> Vec<u8> {
@@ -263,6 +327,15 @@ mod tests {
         assert_eq!(u.get_version_num(), 3);
         assert_eq!(u, offline_uuid("Notch"));
         assert_ne!(u, offline_uuid("notch"));
+    }
+
+    #[test]
+    fn server_hash_vectors() {
+        // Эталонные значения из документации протокола (wiki.vg).
+        let h = |s: &str| server_hash(s, &[], &[]);
+        assert_eq!(h("Notch"), "4ed1f46bbe04bc756bcb17c0c7ce3e4632f06a48");
+        assert_eq!(h("jeb_"), "-7c9d5b0044c130109a5d7b5fb5c317c02b4e28c1");
+        assert_eq!(h("simon"), "88e16a1019277b15d58faf0541e11910eb756f6");
     }
 
     #[test]

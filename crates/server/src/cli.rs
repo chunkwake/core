@@ -297,10 +297,8 @@ mod tests {
     }
 
     #[test]
-    fn doctor_rejects_unsupported_auth_and_missing_jar() {
+    fn doctor_rejects_missing_jar() {
         let dir = temp_dir();
-        config::save(&config_path(&dir), "online-mode=true").unwrap();
-        assert!(check(&dir).unwrap_err().contains("online-mode"));
         config::save(
             &config_path(&dir),
             "online-mode=false\nvanilla-jar=server.jar",

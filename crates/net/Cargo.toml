@@ -6,7 +6,13 @@ license.workspace = true
 
 [dependencies]
 chunkwake-protocol = { path = "../protocol" }
+aes = "0.8"
 bytes = "1"
+cfb8 = "0.8"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+rsa = "0.9"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "time", "sync"] }
 tracing = "0.1"

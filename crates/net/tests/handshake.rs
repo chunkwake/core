@@ -20,6 +20,7 @@ async fn start(compression: i32) -> (std::net::SocketAddr, mpsc::UnboundedReceiv
         max_players: 20,
         compression_threshold: compression,
         online_mode: false,
+        session_server: String::new(),
     });
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::spawn(server.serve(listener, move |p, _conn| {

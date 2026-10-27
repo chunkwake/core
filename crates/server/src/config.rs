@@ -91,9 +91,8 @@ impl Properties {
     }
 
     pub fn check_supported(&self) -> Result<(), String> {
-        if self.online_mode {
-            return Err("online-mode=true: authentication is not implemented yet; set online-mode=false with `chunkwake config set online-mode false`".into());
-        }
+        // Все текущие настройки поддерживаются; сюда добавляются проверки
+        // для опций, реализованных частично.
         Ok(())
     }
 
@@ -113,6 +112,7 @@ impl Properties {
             max_players: self.max_players,
             compression_threshold: self.compression_threshold,
             online_mode: self.online_mode,
+            session_server: chunkwake_net::auth::MOJANG_SESSION_SERVER.into(),
         }
     }
 }

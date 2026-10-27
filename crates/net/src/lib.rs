@@ -1,9 +1,15 @@
 //! chunkwake-net — приём соединений и состояния handshake/status/login.
 
+pub mod auth;
+pub mod crypto;
+
 use bytes::BytesMut;
 use chunkwake_protocol::ProtocolError;
 use chunkwake_protocol::frame::FrameCodec;
-use chunkwake_protocol::packets::{self, Handshake, LoginC2S, NextState, StatusC2S};
+use chunkwake_protocol::packets::{
+    self, Handshake, LoginC2S, NextState, ProfileProperty, StatusC2S,
+};
+use crypto::{ServerKey, StreamCipher};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -27,6 +33,8 @@ pub struct NetConfig {
     /// Порог сжатия; отрицательное значение выключает сжатие.
     pub compression_threshold: i32,
     pub online_mode: bool,
+    /// Базовый URL session server (по умолчанию Mojang).
+    pub session_server: String,
 }
 
 /// Игрок, прошедший login и перешедший в состояние configuration.
@@ -35,6 +43,7 @@ pub struct LoggedIn {
     pub name: String,
     pub uuid: Uuid,
     pub addr: SocketAddr,
+    pub properties: Vec<ProfileProperty>,
 }
 
 #[derive(Debug)]
@@ -59,6 +68,8 @@ impl From<ProtocolError> for NetError {
 pub struct Server {
     config: NetConfig,
     online: AtomicUsize,
+    key: Option<ServerKey>,
+    http: reqwest::Client,
 }
 
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -66,6 +77,11 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 impl Server {
     pub fn new(config: NetConfig) -> Arc<Self> {
         Arc::new(Self {
+            key: config.online_mode.then(ServerKey::generate),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("HTTP client"),
             config,
             online: AtomicUsize::new(0),
         })
@@ -169,14 +185,16 @@ impl Server {
                 .await?;
             return Ok(None);
         }
-        if self.config.online_mode {
-            // Шифрование и Mojang session server — следующий шаг M1.
-            conn.send(&packets::login_disconnect(&text_json(
-                "online-mode is not implemented yet",
-            )))
-            .await?;
-            return Ok(None);
-        }
+        let (name, uuid, properties) = match &self.key {
+            Some(key) => match self.authenticate(&mut conn, key, &name).await? {
+                Some(profile) => (profile.name, profile.uuid, profile.properties),
+                None => return Ok(None),
+            },
+            None => {
+                let uuid = packets::offline_uuid(&name);
+                (name, uuid, Vec::new())
+            }
+        };
         if self.online.load(Ordering::Relaxed) >= self.config.max_players {
             conn.send(&packets::login_disconnect(&text_json(
                 "The server is full!",
@@ -184,14 +202,14 @@ impl Server {
             .await?;
             return Ok(None);
         }
-        let uuid = packets::offline_uuid(&name);
 
         if self.config.compression_threshold >= 0 {
             conn.send(&packets::set_compression(self.config.compression_threshold))
                 .await?;
             conn.codec.threshold = Some(self.config.compression_threshold as usize);
         }
-        conn.send(&packets::login_success(uuid, &name)).await?;
+        conn.send(&packets::login_success(uuid, &name, &properties))
+            .await?;
 
         loop {
             let packet = conn.read_packet().await?;
@@ -202,7 +220,66 @@ impl Server {
             }
         }
         tracing::info!(%name, %uuid, %addr, "player logged in");
-        Ok(Some((LoggedIn { name, uuid, addr }, conn)))
+        Ok(Some((
+            LoggedIn {
+                name,
+                uuid,
+                addr,
+                properties,
+            },
+            conn,
+        )))
+    }
+
+    /// Обмен ключами, включение шифрования и проверка через session server.
+    /// `Ok(None)` — игрок отключён с сообщением.
+    async fn authenticate(
+        &self,
+        conn: &mut Connection,
+        key: &ServerKey,
+        name: &str,
+    ) -> Result<Option<auth::GameProfile>, NetError> {
+        let verify_token: [u8; 4] = rand::random();
+        conn.send(&packets::encryption_request(
+            key.public_der(),
+            &verify_token,
+            true,
+        ))
+        .await?;
+        let packet = conn.read_packet().await?;
+        let LoginC2S::EncryptionResponse {
+            shared_secret,
+            verify_token: token,
+        } = LoginC2S::decode(&packet)?
+        else {
+            return Ok(None);
+        };
+        let secret = key
+            .decrypt(shared_secret)
+            .and_then(|s| <[u8; 16]>::try_from(s).ok());
+        let token_ok = key.decrypt(token).is_some_and(|t| t == verify_token);
+        let (Some(secret), true) = (secret, token_ok) else {
+            return Ok(None);
+        };
+        // С этого момента весь трафик (в т.ч. disconnect) шифруется.
+        conn.enable_encryption(&secret);
+
+        let hash = packets::server_hash("", &secret, key.public_der());
+        match auth::has_joined(&self.http, &self.config.session_server, name, &hash).await {
+            Ok(profile) => Ok(Some(profile)),
+            Err(e) => {
+                tracing::info!(%name, ?e, "authentication failed");
+                let msg = match e {
+                    auth::AuthError::NotAuthenticated => "Failed to verify username!",
+                    auth::AuthError::Http(_) => {
+                        "Authentication servers are down. Please try again later, sorry!"
+                    }
+                };
+                conn.send(&packets::login_disconnect(&text_json(msg)))
+                    .await?;
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -214,11 +291,12 @@ fn text_json(text: &str) -> String {
     serde_json::json!({ "text": text }).to_string()
 }
 
-/// Соединение с клиентом: фрейминг и сжатие поверх TCP.
+/// Соединение с клиентом: шифрование, фрейминг и сжатие поверх TCP.
 pub struct Connection {
     stream: TcpStream,
     buf: BytesMut,
     pub codec: FrameCodec,
+    cipher: Option<StreamCipher>,
 }
 
 impl Connection {
@@ -227,7 +305,13 @@ impl Connection {
             stream,
             buf: BytesMut::with_capacity(4096),
             codec: FrameCodec::default(),
+            cipher: None,
         }
+    }
+
+    /// Включает AES/CFB8 для обоих направлений.
+    pub fn enable_encryption(&mut self, secret: &[u8; 16]) {
+        self.cipher = Some(StreamCipher::new(secret));
     }
 
     pub async fn read_packet(&mut self) -> Result<Vec<u8>, NetError> {
@@ -235,11 +319,15 @@ impl Connection {
             if let Some(packet) = self.codec.decode(&mut self.buf)? {
                 return Ok(packet);
             }
+            let start = self.buf.len();
             let n = tokio::time::timeout(READ_TIMEOUT, self.stream.read_buf(&mut self.buf))
                 .await
                 .map_err(|_| NetError::Timeout)??;
             if n == 0 {
                 return Err(NetError::Io(std::io::ErrorKind::UnexpectedEof.into()));
+            }
+            if let Some(c) = &mut self.cipher {
+                c.decrypt(&mut self.buf[start..]);
             }
         }
     }
@@ -247,6 +335,9 @@ impl Connection {
     pub async fn send(&mut self, packet: &[u8]) -> Result<(), NetError> {
         let mut out = Vec::with_capacity(packet.len() + 5);
         self.codec.encode(packet, &mut out);
+        if let Some(c) = &mut self.cipher {
+            c.encrypt(&mut out);
+        }
         self.stream.write_all(&out).await?;
         Ok(())
     }
