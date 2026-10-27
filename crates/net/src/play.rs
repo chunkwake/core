@@ -71,7 +71,18 @@ struct Broadcast {
     /// Событие сущности: получатель сам решает по дальности, слать ли `packet`,
     /// заспавнить сущность или убрать её.
     entity: Option<EntityEvent>,
+    /// Движения игроков за тик: получатель берёт только видимые.
+    moves: Option<Arc<Vec<MoveItem>>>,
 }
+
+/// Движение одной сущности в пачке тика: кадр(ы) дельты и состояние для спавна.
+struct MoveItem {
+    e: EntityRef,
+    frame: Vec<u8>,
+}
+
+/// Период рассылки движений (тик ванилы).
+const TICK: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Copy)]
 enum EntityEvent {
@@ -103,6 +114,10 @@ struct Online {
     base: [i64; 3],
     /// Счётчик движений: каждое `SYNC_EVERY`-е — абсолютный телепорт против дрейфа.
     moves: u32,
+    /// С прошлого тика были движение / поворот.
+    dirty: bool,
+    rotated: bool,
+    on_ground: bool,
 }
 
 impl Online {
@@ -159,6 +174,7 @@ impl Hub {
                 self.frame(&packet)
             }),
             entity,
+            moves: None,
         });
     }
 }
@@ -304,6 +320,9 @@ impl PlayPlan {
             pitch: 0.0,
             base: play::quantize(self.spawn),
             moves: 0,
+            dirty: false,
+            rotated: false,
+            on_ground: true,
         };
         let uuid = me.entry.uuid;
         // Подписка до вставки в список: ни одно событие после снимка не теряется.
@@ -366,61 +385,88 @@ impl PlayPlan {
         ))
     }
 
-    /// Новая позиция/поворот игрока: обновить общее состояние и разослать дельту.
+    /// Новая позиция/поворот игрока: только обновить состояние. Рассылка — в тике.
     fn moved(&self, uuid: Uuid, m: Move) {
+        let mut players = self.hub.players.lock().unwrap();
+        let Some(p) = players.get_mut(&uuid) else {
+            return;
+        };
+        if let Some(pos) = m.pos {
+            p.pos = pos;
+        }
+        if let Some((yaw, pitch)) = m.rot {
+            (p.yaw, p.pitch) = (yaw, pitch);
+            p.rotated = true;
+        }
+        p.on_ground = m.on_ground;
+        p.dirty = true;
+    }
+
+    /// Запускает тик рассылки движений: раз в 50 мс одна пачка на всех.
+    pub fn spawn_tick(self: &Arc<Self>) {
+        let plan = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(TICK);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let Some(plan) = plan.upgrade() else { return };
+                plan.flush_moves();
+            }
+        });
+    }
+
+    /// Собирает движения за тик в одну рассылку. Без движений ничего не шлёт.
+    fn flush_moves(&self) {
         let ids = self.ids;
-        let update = {
+        let mut batch = Vec::new();
+        {
             let mut players = self.hub.players.lock().unwrap();
-            let Some(p) = players.get_mut(&uuid) else {
-                return;
-            };
-            if let Some(pos) = m.pos {
-                p.pos = pos;
+            for p in players.values_mut().filter(|p| p.dirty) {
+                p.dirty = false;
+                let q = play::quantize(p.pos);
+                p.moves = p.moves.wrapping_add(1);
+                let delta = play::delta(p.base, q).filter(|_| p.moves % SYNC_EVERY != 0);
+                p.base = q;
+                let e = p.at();
+                let packet = match delta {
+                    Some(d) => play::move_entity_pos_rot(
+                        ids.move_entity_pos_rot,
+                        e.entity_id,
+                        d,
+                        e.yaw,
+                        e.pitch,
+                        p.on_ground,
+                    ),
+                    None => play::teleport_entity(
+                        ids.teleport_entity,
+                        e.entity_id,
+                        e.pos,
+                        e.yaw,
+                        e.pitch,
+                        p.on_ground,
+                    ),
+                };
+                let mut frame = self.hub.frame(&packet);
+                if std::mem::take(&mut p.rotated) {
+                    frame.extend(self.hub.frame(&play::rotate_head(
+                        ids.rotate_head,
+                        e.entity_id,
+                        e.yaw,
+                    )));
+                }
+                batch.push(MoveItem { e, frame });
             }
-            if let Some((yaw, pitch)) = m.rot {
-                (p.yaw, p.pitch) = (yaw, pitch);
-            }
-            let q = play::quantize(p.pos);
-            p.moves = p.moves.wrapping_add(1);
-            let delta = play::delta(p.base, q).filter(|_| p.moves % SYNC_EVERY != 0);
-            p.base = q;
-            (p.at(), delta)
-        };
-        let (e, delta) = update;
-        let packet = match delta {
-            Some(d) => play::move_entity_pos_rot(
-                ids.move_entity_pos_rot,
-                e.entity_id,
-                d,
-                e.yaw,
-                e.pitch,
-                m.on_ground,
-            ),
-            None => play::teleport_entity(
-                ids.teleport_entity,
-                e.entity_id,
-                e.pos,
-                e.yaw,
-                e.pitch,
-                m.on_ground,
-            ),
-        };
-        if m.rot.is_some() {
-            // Голова — отдельным кадром в том же сообщении рассылки.
-            let mut framed = self.hub.frame(&packet);
-            framed.extend(
-                self.hub
-                    .frame(&play::rotate_head(ids.rotate_head, e.entity_id, e.yaw)),
-            );
-            let _ = self.hub.tx.send(Broadcast {
-                skip: Some(uuid),
-                packet: Arc::new(framed),
-                entity: Some(EntityEvent::At(e)),
-            });
+        }
+        if batch.is_empty() {
             return;
         }
-        self.hub
-            .send_entity(Some(uuid), packet, Some(EntityEvent::At(e)));
+        let _ = self.hub.tx.send(Broadcast {
+            skip: None,
+            packet: Arc::new(Vec::new()),
+            entity: None,
+            moves: Some(Arc::new(batch)),
+        });
     }
 
     /// Пересчёт видимости всех игроков после смены своего чанка.
@@ -546,7 +592,7 @@ impl PlayPlan {
                         let mut next = Some(first);
                         while let Some(b) = next {
                             if b.skip != Some(uuid) {
-                                self.deliver(&b, center, r_view, &mut visible, &mut out);
+                                self.deliver(uuid, &b, center, r_view, &mut visible, &mut out);
                             }
                             next = rx.try_recv().ok();
                         }
@@ -607,12 +653,19 @@ impl PlayPlan {
     /// Кладёт в `out` то, что этот получатель должен увидеть из рассылки `b`.
     fn deliver(
         &self,
+        me: Uuid,
         b: &Broadcast,
         center: (i32, i32),
         r: i32,
         visible: &mut HashSet<i32>,
         out: &mut Vec<u8>,
     ) {
+        if let Some(batch) = &b.moves {
+            for m in batch.iter().filter(|m| m.e.uuid != me) {
+                self.track(&m.e, &m.frame, center, r, visible, out);
+            }
+            return;
+        }
         match b.entity {
             None => out.extend_from_slice(&b.packet),
             Some(EntityEvent::Gone(id)) => {
@@ -620,23 +673,34 @@ impl PlayPlan {
                     out.extend_from_slice(&b.packet);
                 }
             }
-            Some(EntityEvent::At(e)) => {
-                match (near(center, e.pos, r), visible.contains(&e.entity_id)) {
-                    (true, true) => out.extend_from_slice(&b.packet),
-                    (true, false) => {
-                        out.extend(self.spawn_frame(&e));
-                        visible.insert(e.entity_id);
-                    }
-                    (false, true) => {
-                        out.extend(self.hub.frame(&play::remove_entities(
-                            self.ids.remove_entities,
-                            &[e.entity_id],
-                        )));
-                        visible.remove(&e.entity_id);
-                    }
-                    (false, false) => {}
-                }
+            Some(EntityEvent::At(e)) => self.track(&e, &b.packet, center, r, visible, out),
+        }
+    }
+
+    /// Видимость одной сущности у получателя: дельта, спавн, удаление или ничего.
+    fn track(
+        &self,
+        e: &EntityRef,
+        frame: &[u8],
+        center: (i32, i32),
+        r: i32,
+        visible: &mut HashSet<i32>,
+        out: &mut Vec<u8>,
+    ) {
+        match (near(center, e.pos, r), visible.contains(&e.entity_id)) {
+            (true, true) => out.extend_from_slice(frame),
+            (true, false) => {
+                out.extend(self.spawn_frame(e));
+                visible.insert(e.entity_id);
             }
+            (false, true) => {
+                out.extend(self.hub.frame(&play::remove_entities(
+                    self.ids.remove_entities,
+                    &[e.entity_id],
+                )));
+                visible.remove(&e.entity_id);
+            }
+            (false, false) => {}
         }
     }
 }

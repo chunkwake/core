@@ -94,6 +94,7 @@ async fn serve(dir: &Path) -> Result<(), String> {
         &registries,
         &props,
     )?);
+    play.spawn_tick();
     let mut net = props.net_config(version);
     net.configuration = Some(std::sync::Arc::new(plan));
     let server = Server::new(net);
