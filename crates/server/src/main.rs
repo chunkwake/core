@@ -101,7 +101,7 @@ async fn serve(dir: &Path) -> Result<(), String> {
         .serve(listener, move |player, mut conn| {
             let play = play.clone();
             tokio::spawn(async move {
-                let result = play.run(&mut conn).await;
+                let result = play.run(&player, &mut conn).await;
                 tracing::info!(name = %player.name, ?result, "player left");
             });
         })

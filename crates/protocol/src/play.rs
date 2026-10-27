@@ -1,6 +1,9 @@
 //! Пакеты состояния play (формат 26.3). ID передаются параметром.
 
-use crate::Writer;
+use crate::configuration::write_nbt_string_root;
+use crate::packets::ProfileProperty;
+use crate::{Reader, Result, Writer};
+use uuid::Uuid;
 
 /// `CommonPlayerSpawnInfo` из login/respawn.
 #[derive(Clone, Debug)]
@@ -176,5 +179,103 @@ mod tests {
         let some = login(0x30, &l);
         assert_eq!(none.len(), some.len(), "both 1-byte VarInts");
         assert_ne!(none, some);
+    }
+}
+
+/// `system_chat`: текстовый компонент (NBT-строка) и флаг action bar.
+pub fn system_chat(id: i32, text: &str, overlay: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id);
+    write_nbt_string_root(&mut w, text);
+    w.bool(overlay);
+    w.buf
+}
+
+/// Запись таб-листа для `player_info_update`.
+#[derive(Clone, Debug)]
+pub struct PlayerEntry {
+    pub uuid: Uuid,
+    pub name: String,
+    pub properties: Vec<ProfileProperty>,
+    pub game_mode: i32,
+    pub latency_ms: i32,
+}
+
+/// Действия `ClientboundPlayerInfoUpdatePacket$Action` (порядковые номера в EnumSet).
+const ADD_PLAYER: u8 = 1 << 0;
+const UPDATE_GAME_MODE: u8 = 1 << 2;
+const UPDATE_LISTED: u8 = 1 << 3;
+const UPDATE_LATENCY: u8 = 1 << 4;
+
+/// `player_info_update` с добавлением игроков в таб-лист.
+pub fn player_info_add(id: i32, players: &[PlayerEntry]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id);
+    // EnumSet из 8 действий — фиксированный битсет в 1 байт.
+    w.u8(ADD_PLAYER | UPDATE_GAME_MODE | UPDATE_LISTED | UPDATE_LATENCY);
+    w.var_int(players.len() as i32);
+    for p in players {
+        w.uuid(p.uuid).string(&p.name);
+        w.var_int(p.properties.len() as i32);
+        for prop in &p.properties {
+            w.string(&prop.name)
+                .string(&prop.value)
+                .bool(prop.signature.is_some());
+            if let Some(sig) = &prop.signature {
+                w.string(sig);
+            }
+        }
+        w.var_int(p.game_mode).bool(true).var_int(p.latency_ms);
+    }
+    w.buf
+}
+
+pub fn player_info_remove(id: i32, uuids: &[Uuid]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(uuids.len() as i32);
+    for &u in uuids {
+        w.uuid(u);
+    }
+    w.buf
+}
+
+/// Текст из `ServerboundChatPacket` (поле после ID; подпись и прочее игнорируем).
+pub fn read_chat_message<'a>(r: &mut Reader<'a>) -> Result<&'a str> {
+    r.string(256)
+}
+
+#[cfg(test)]
+mod chat_tests {
+    use super::*;
+
+    #[test]
+    fn player_info_layout() {
+        let u = Uuid::from_u128(7);
+        let p = player_info_add(
+            0x40,
+            &[PlayerEntry {
+                uuid: u,
+                name: "Steve".into(),
+                properties: vec![],
+                game_mode: 1,
+                latency_ms: 5,
+            }],
+        );
+        let mut r = Reader::new(&p);
+        assert_eq!(r.var_int().unwrap(), 0x40);
+        assert_eq!(r.u8().unwrap(), 0b1_1101);
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.uuid().unwrap(), u);
+        assert_eq!(r.string(16).unwrap(), "Steve");
+        assert_eq!(r.var_int().unwrap(), 0);
+        assert_eq!(
+            (
+                r.var_int().unwrap(),
+                r.bool().unwrap(),
+                r.var_int().unwrap()
+            ),
+            (1, true, 5)
+        );
+        assert!(r.remaining().is_empty());
     }
 }

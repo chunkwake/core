@@ -105,7 +105,7 @@ pub fn disconnect(id: i32, text: &str) -> Vec<u8> {
 }
 
 /// Сетевой NBT (без имени корня): тип 8 (String) + u16 длина + modified UTF-8.
-fn write_nbt_string_root(w: &mut Writer, s: &str) {
+pub(crate) fn write_nbt_string_root(w: &mut Writer, s: &str) {
     let bytes = modified_utf8(s);
     w.u8(8).u16(bytes.len() as u16);
     w.buf.extend_from_slice(&bytes);

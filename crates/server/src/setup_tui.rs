@@ -40,7 +40,7 @@ const SECTIONS: [(Section, &str); 5] = [
     (Section::Server, "👥 Server"),
     (Section::Runtime, "⚙ Run"),
     (Section::World, "🌍 World*"),
-    (Section::Gameplay, "⚔ Play*"),
+    (Section::Gameplay, "✦ Play*"),
 ];
 
 struct Field {
@@ -183,7 +183,7 @@ const FIELDS: [Field; 22] = [
     },
     Field {
         key: "difficulty",
-        icon: "⚔",
+        icon: "🔥",
         label: "Difficulty",
         help: "Saved for a future gameplay implementation; currently has no effect.",
         kind: FieldKind::Choice(&["peaceful", "easy", "normal", "hard"]),
@@ -191,7 +191,7 @@ const FIELDS: [Field; 22] = [
     },
     Field {
         key: "hardcore",
-        icon: "♥",
+        icon: "💀",
         label: "Hardcore",
         help: "Saved for a future gameplay implementation; currently has no effect.",
         kind: FieldKind::Toggle,
@@ -207,7 +207,7 @@ const FIELDS: [Field; 22] = [
     },
     Field {
         key: "white-list",
-        icon: "☷",
+        icon: "📋",
         label: "Allowlist",
         help: "Saved for a future gameplay implementation; currently has no effect.",
         kind: FieldKind::Toggle,
@@ -223,7 +223,7 @@ const FIELDS: [Field; 22] = [
     },
     Field {
         key: "spawn-protection",
-        icon: "⌂",
+        icon: "🛡",
         label: "Spawn protection",
         help: "Non-negative radius. Saved for a future gameplay implementation; currently has no effect.",
         kind: FieldKind::Text,
@@ -452,9 +452,7 @@ impl App {
             .iter()
             .position(|&index| index == self.selected)
             .unwrap_or(0);
-        let next = current
-            .saturating_add_signed(direction)
-            .min(indices.len() - 1);
+        let next = (current as isize + direction).rem_euclid(indices.len() as isize) as usize;
         self.selected = indices[next];
     }
 
@@ -858,5 +856,22 @@ mod tests {
         assert!(draft.contains("difficulty=normal"));
         assert!(draft.contains("hardcore=true"));
         app.validate().unwrap();
+    }
+
+    #[test]
+    fn vertical_navigation_wraps_within_section() {
+        let mut app = app(config::DEFAULT_PROPERTIES);
+        let network = app.section_indices();
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.selected, *network.last().unwrap());
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.selected, network[0]);
+
+        app.handle_key(key(KeyCode::Right));
+        let server = app.section_indices();
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.selected, *server.last().unwrap());
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.selected, server[0]);
     }
 }

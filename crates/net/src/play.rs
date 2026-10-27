@@ -1,13 +1,17 @@
 //! Минимальная play-сессия M2: игрок появляется в плоском мире и остаётся
 //! подключённым (keep-alive). Мир статичен, движение не обрабатывается.
 
-use crate::{Connection, NetError};
+use crate::{Connection, LoggedIn, NetError};
 use chunkwake_data::DataError;
 use chunkwake_data::packets::{Direction, PacketTable, State};
 use chunkwake_protocol::Reader;
-use chunkwake_protocol::play::{self, Login, game_event};
+use chunkwake_protocol::play::{self, Login, PlayerEntry, game_event};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::broadcast;
+use uuid::Uuid;
 
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -23,6 +27,10 @@ struct Ids {
     player_position: i32,
     keep_alive: i32,
     forget_level_chunk: i32,
+    player_info_update: i32,
+    player_info_remove: i32,
+    system_chat: i32,
+    sb_chat: i32,
     sb_keep_alive: i32,
     sb_move_pos: i32,
     sb_move_pos_rot: i32,
@@ -35,6 +43,30 @@ pub struct PlayPlan {
     chunk_body: Vec<u8>,
     spawn: [f64; 3],
     next_entity_id: AtomicI32,
+    hub: Hub,
+}
+
+/// Пакет для всех игроков; `skip` — кому не слать (обычно автору события).
+#[derive(Clone)]
+struct Broadcast {
+    skip: Option<Uuid>,
+    packet: Arc<Vec<u8>>,
+}
+
+/// Общее состояние сессий: таб-лист и широковещательный канал.
+struct Hub {
+    players: Mutex<HashMap<Uuid, PlayerEntry>>,
+    tx: broadcast::Sender<Broadcast>,
+}
+
+impl Hub {
+    fn send(&self, skip: Option<Uuid>, packet: Vec<u8>) {
+        // Ошибка = нет подписчиков; это нормально.
+        let _ = self.tx.send(Broadcast {
+            skip,
+            packet: Arc::new(packet),
+        });
+    }
 }
 
 impl std::fmt::Debug for PlayPlan {
@@ -65,6 +97,10 @@ impl PlayPlan {
                 player_position: cb("player_position")?,
                 keep_alive: cb("keep_alive")?,
                 forget_level_chunk: cb("forget_level_chunk")?,
+                player_info_update: cb("player_info_update")?,
+                player_info_remove: cb("player_info_remove")?,
+                system_chat: cb("system_chat")?,
+                sb_chat: sb("chat")?,
                 sb_keep_alive: sb("keep_alive")?,
                 sb_move_pos: sb("move_player_pos")?,
                 sb_move_pos_rot: sb("move_player_pos_rot")?,
@@ -73,6 +109,10 @@ impl PlayPlan {
             chunk_body,
             spawn,
             next_entity_id: AtomicI32::new(1),
+            hub: Hub {
+                players: Mutex::new(HashMap::new()),
+                tx: broadcast::channel(1024).0,
+            },
         })
     }
 
@@ -123,7 +163,57 @@ impl PlayPlan {
             .await
     }
 
-    pub async fn run(&self, conn: &mut Connection) -> Result<(), NetError> {
+    /// Сессия игрока: вход в таб-лист, игра, выход с оповещением остальных.
+    pub async fn run(&self, player: &LoggedIn, conn: &mut Connection) -> Result<(), NetError> {
+        let ids = self.ids;
+        let me = PlayerEntry {
+            uuid: player.uuid,
+            name: player.name.clone(),
+            properties: player.properties.clone(),
+            game_mode: self.login.spawn.game_mode as i32,
+            latency_ms: 0,
+        };
+        // Подписка до вставки в список: ни одно событие после снимка не теряется.
+        let rx = self.hub.tx.subscribe();
+        self.hub.players.lock().unwrap().insert(me.uuid, me.clone());
+        self.hub.send(
+            Some(me.uuid),
+            play::player_info_add(ids.player_info_update, std::slice::from_ref(&me)),
+        );
+        self.hub.send(
+            None,
+            play::system_chat(
+                ids.system_chat,
+                &format!("{} joined the game", me.name),
+                false,
+            ),
+        );
+
+        let result = self.session(conn, rx, me.uuid, &me.name).await;
+
+        self.hub.players.lock().unwrap().remove(&me.uuid);
+        self.hub.send(
+            None,
+            play::player_info_remove(ids.player_info_remove, &[me.uuid]),
+        );
+        self.hub.send(
+            None,
+            play::system_chat(
+                ids.system_chat,
+                &format!("{} left the game", me.name),
+                false,
+            ),
+        );
+        result
+    }
+
+    async fn session(
+        &self,
+        conn: &mut Connection,
+        mut rx: broadcast::Receiver<Broadcast>,
+        me: Uuid,
+        name: &str,
+    ) -> Result<(), NetError> {
         let ids = self.ids;
         let mut login = self.login.clone();
         login.entity_id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
@@ -151,6 +241,10 @@ impl PlayPlan {
             0.0,
         ))
         .await?;
+        let everyone: Vec<PlayerEntry> =
+            self.hub.players.lock().unwrap().values().cloned().collect();
+        conn.send(&play::player_info_add(ids.player_info_update, &everyone))
+            .await?;
 
         // Keep-alive: шлём раз в 15 с, ответ ждём не дольше 30 с.
         let mut ticker = tokio::time::interval(KEEP_ALIVE_INTERVAL);
@@ -172,6 +266,13 @@ impl PlayPlan {
                         }
                     }
                 }
+                event = rx.recv() => match event {
+                    Ok(b) if b.skip == Some(me) => {}
+                    Ok(b) => conn.send(&b.packet).await?,
+                    // Отстали — пропущенное не догоняем (таб-лист обновится следующими событиями).
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return Ok(()),
+                },
                 packet = conn.read_packet() => {
                     let packet = packet?;
                     let mut r = Reader::new(&packet);
@@ -183,6 +284,13 @@ impl PlayPlan {
                             self.move_center(conn, center, now, r_view).await?;
                             center = now;
                         }
+                        continue;
+                    }
+                    if id == ids.sb_chat {
+                        let text = play::read_chat_message(&mut r)?;
+                        let line = format!("<{name}> {text}");
+                        tracing::info!("{line}");
+                        self.hub.send(None, play::system_chat(ids.system_chat, &line, false));
                         continue;
                     }
                     if id == ids.sb_keep_alive && pending.is_some_and(|(p, _)| p == r.i64().unwrap_or(0)) {
