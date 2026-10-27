@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+chunkwake-data = { path = "../data" }
 chunkwake-protocol = { path = "../protocol" }
 aes = "0.8"
 bytes = "1"

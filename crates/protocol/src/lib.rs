@@ -1,6 +1,7 @@
 //! chunkwake-protocol — сетевой протокол Minecraft 26.3: примитивы, фрейминг, пакеты.
 
 pub mod codec;
+pub mod configuration;
 pub mod frame;
 pub mod packets;
 

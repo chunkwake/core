@@ -1,9 +1,9 @@
 //! Команды первоначальной настройки и диагностики.
 
 use crate::config::{self, Properties};
-use crate::{MC_VERSION, serve};
+use crate::{MC_VERSION, serve, setup_tui};
 use chunkwake_net::GameVersion;
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
@@ -51,26 +51,42 @@ impl Cli {
     }
 }
 
+fn help() -> &'static str {
+    "Chunkwake  ·  Minecraft 26.3 server
+
+USAGE
+  chunkwake [--dir PATH] [COMMAND]
+
+COMMANDS
+  setup                   Configure the server interactively
+  doctor                  Check settings and the vanilla server jar
+  config show             Show the current settings
+  config set KEY VALUE    Change one setting
+  run                     Start the server (default)
+
+OPTIONS
+  --dir PATH              Server directory (default: current directory)
+  -h, --help              Show this help
+
+EXAMPLES
+  chunkwake setup --dir ./server
+  chunkwake config set server-port 25570 --dir ./server
+  chunkwake doctor --dir ./server"
+}
+
 fn usage() -> &'static str {
-    "usage: chunkwake [--dir PATH] [run | setup | doctor | config show | config set KEY VALUE]"
+    "run `chunkwake --help` for commands and examples"
 }
 
 pub async fn execute() -> Result<(), String> {
     let cli = Cli::parse(std::env::args().skip(1))?;
     match cli.command {
         Command::Run => serve(&cli.dir).await,
-        Command::Setup => {
-            if !io::stdin().is_terminal() {
-                return Err("setup requires an interactive terminal; run it in a Windows/Linux terminal before starting the service".into());
-            }
-            let mut input = io::stdin().lock();
-            let mut output = io::stdout().lock();
-            setup(&cli.dir, &mut input, &mut output)
-        }
+        Command::Setup => setup_tui::run(&cli.dir),
         Command::Doctor => {
             let (props, version) = check(&cli.dir)?;
             println!(
-                "Ready: Minecraft {} (protocol {}), {}:{}, jar {}",
+                "✓  Ready to start · Minecraft {} (protocol {})\n   Listen address  {}:{}\n   Vanilla jar     {}",
                 version.name,
                 version.protocol,
                 props.server_ip,
@@ -86,11 +102,12 @@ pub async fn execute() -> Result<(), String> {
         }
         Command::Show => {
             let props = Properties::load(&config_path(&cli.dir))?;
+            println!("Chunkwake  ·  Current settings\n");
             print_summary(&props, &mut io::stdout()).map_err(|e| e.to_string())
         }
         Command::Set(key, value) => set_config(&cli.dir, &key, &value),
         Command::Help => {
-            println!("{}", usage());
+            println!("{}", help());
             Ok(())
         }
     }
@@ -126,104 +143,10 @@ fn set_config(dir: &Path, key: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn setup<R: BufRead, W: Write>(dir: &Path, input: &mut R, output: &mut W) -> Result<(), String> {
-    if !dir.is_dir() {
-        return Err(format!(
-            "--dir {} does not exist; create it first",
-            dir.display()
-        ));
-    }
-    let path = config_path(dir);
-    let mut text = if path.exists() {
-        config::read(&path)?
-    } else {
-        config::DEFAULT_PROPERTIES.to_owned()
-    };
-    let current = Properties::parse(&text)?;
-    writeln!(output, "Chunkwake setup: {}", path.display()).map_err(|e| e.to_string())?;
-    writeln!(output, "Press Enter to keep each current value.").map_err(|e| e.to_string())?;
-    for (key, value) in [
-        ("server-ip", current.server_ip.as_str()),
-        ("server-port", &current.server_port.to_string()),
-        ("motd", current.motd.as_str()),
-        ("max-players", &current.max_players.to_string()),
-        ("vanilla-jar", current.vanilla_jar.as_str()),
-    ] {
-        let entered = prompt(input, output, key, value)?;
-        text = config::set(&text, key, &entered)?;
-    }
-    let props = Properties::parse(&text)?;
-    props.check_supported()?;
-    if !is_loopback(&props.server_ip) {
-        writeln!(output, "Warning: this address may expose the server. Offline mode does not verify player accounts.")
-            .map_err(|e| e.to_string())?;
-        if !confirm(input, output, "Use this address?", false)? {
-            return Err("setup cancelled; no changes saved".into());
-        }
-    }
-    writeln!(output, "\nConfiguration:").map_err(|e| e.to_string())?;
-    print_summary(&props, output).map_err(|e| e.to_string())?;
-    writeln!(output, "Jar resolves to: {}", props.jar_path(dir).display())
-        .map_err(|e| e.to_string())?;
-    if !confirm(input, output, "Save configuration?", false)? {
-        return Err("setup cancelled; no changes saved".into());
-    }
-    config::save(&path, &text)?;
-    writeln!(
-        output,
-        "Saved {}. Run `chunkwake doctor --dir {}` to check the jar.",
-        path.display(),
-        dir.display()
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 fn is_loopback(ip: &str) -> bool {
     ip.parse::<IpAddr>()
         .expect("validated server-ip")
         .is_loopback()
-}
-
-fn prompt<R: BufRead, W: Write>(
-    input: &mut R,
-    output: &mut W,
-    key: &str,
-    current: &str,
-) -> Result<String, String> {
-    write!(output, "{key} [{current}]: ").map_err(|e| e.to_string())?;
-    output.flush().map_err(|e| e.to_string())?;
-    let mut line = String::new();
-    if input.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
-        return Err("input ended; setup cancelled without saving".into());
-    }
-    let value = line.trim_end_matches(['\r', '\n']);
-    Ok(if value.is_empty() {
-        current.to_owned()
-    } else {
-        value.to_owned()
-    })
-}
-
-fn confirm<R: BufRead, W: Write>(
-    input: &mut R,
-    output: &mut W,
-    question: &str,
-    default: bool,
-) -> Result<bool, String> {
-    let hint = if default { "Y/n" } else { "y/N" };
-    let answer = prompt(input, output, question, hint)?;
-    if answer == hint {
-        Ok(default)
-    } else {
-        match answer.to_ascii_lowercase().as_str() {
-            "y" | "yes" => Ok(true),
-            "n" | "no" => Ok(false),
-            _ => Err(format!(
-                "{question}: answer y or n; setup cancelled without saving"
-            )),
-        }
-    }
 }
 
 fn print_summary<W: Write>(props: &Properties, output: &mut W) -> io::Result<()> {
@@ -243,7 +166,6 @@ fn print_summary<W: Write>(props: &Properties, output: &mut W) -> io::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use zip::write::SimpleFileOptions;
 
@@ -269,30 +191,6 @@ mod tests {
         );
         let dir = temp_dir();
         assert!(check(&dir).unwrap_err().contains("setup"));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn setup_then_repeat_preserves_custom_lines() {
-        let dir = temp_dir();
-        let mut output = Vec::new();
-        setup(&dir, &mut Cursor::new("\n\nHello\n\n\ny\n"), &mut output).unwrap();
-        let path = config_path(&dir);
-        let first = config::read(&path).unwrap();
-        assert!(first.contains("motd=Hello"));
-        config::save(&path, &format!("# custom\ncustom-key=keep\n{first}")).unwrap();
-        setup(&dir, &mut Cursor::new("\n\n\n\n\ny\n"), &mut output).unwrap();
-        let second = config::read(&path).unwrap();
-        assert!(second.contains("# custom\ncustom-key=keep"));
-        assert!(second.contains("motd=Hello"));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn setup_eof_does_not_write() {
-        let dir = temp_dir();
-        assert!(setup(&dir, &mut Cursor::new(""), &mut Vec::new()).is_err());
-        assert!(!config_path(&dir).exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -324,19 +222,6 @@ mod tests {
         let error = check(&dir).unwrap_err();
         assert!(error.contains("26.4"));
         assert!(error.contains("vanilla-jar"));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn setup_requires_confirmation_for_public_address() {
-        let dir = temp_dir();
-        let result = setup(
-            &dir,
-            &mut Cursor::new("0.0.0.0\n\n\n\n\nn\n"),
-            &mut Vec::new(),
-        );
-        assert!(result.is_err());
-        assert!(!config_path(&dir).exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

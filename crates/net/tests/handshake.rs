@@ -21,6 +21,7 @@ async fn start(compression: i32) -> (std::net::SocketAddr, mpsc::UnboundedReceiv
         compression_threshold: compression,
         online_mode: false,
         session_server: String::new(),
+        configuration: None,
     });
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::spawn(server.serve(listener, move |p, _conn| {
@@ -82,6 +83,9 @@ async fn offline_login_with_compression() {
     assert_eq!(r.var_int().unwrap(), 0x02, "login success");
     let uuid = r.uuid().unwrap();
     assert_eq!(r.string(16).unwrap(), "Steve");
+    assert_eq!(r.var_int().unwrap(), 0, "no properties");
+    let _session_id = r.uuid().unwrap();
+    assert!(r.remaining().is_empty());
     assert_eq!(uuid, chunkwake_protocol::packets::offline_uuid("Steve"));
 
     c.send(&[0x03]).await.unwrap(); // login acknowledged

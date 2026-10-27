@@ -9,7 +9,11 @@ name = "chunkwake"
 path = "src/main.rs"
 
 [dependencies]
+chunkwake-data = { path = "../data" }
 chunkwake-net = { path = "../net" }
+crossterm = "0.29"
+dotenvy = "0.15"
+ratatui = "0.30.2"
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

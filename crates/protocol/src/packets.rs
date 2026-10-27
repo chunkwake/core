@@ -162,7 +162,14 @@ pub struct ProfileProperty {
     pub signature: Option<String>,
 }
 
-pub fn login_success(uuid: Uuid, name: &str, properties: &[ProfileProperty]) -> Vec<u8> {
+/// `login_finished`: GameProfile, затем (с 26.x) `sessionId` — общий UUID
+/// сессии сервера (`ServerConnectionListener.getSessionId`).
+pub fn login_success(
+    uuid: Uuid,
+    name: &str,
+    properties: &[ProfileProperty],
+    session_id: Uuid,
+) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(0x02)
         .uuid(uuid)
@@ -176,6 +183,7 @@ pub fn login_success(uuid: Uuid, name: &str, properties: &[ProfileProperty]) -> 
             w.string(sig);
         }
     }
+    w.uuid(session_id);
     w.buf
 }
 

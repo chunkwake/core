@@ -113,6 +113,7 @@ impl Properties {
             compression_threshold: self.compression_threshold,
             online_mode: self.online_mode,
             session_server: chunkwake_net::auth::MOJANG_SESSION_SERVER.into(),
+            configuration: None,
         }
     }
 }
@@ -163,6 +164,12 @@ pub fn set(text: &str, key: &str, value: &str) -> Result<String, String> {
     let mut result = lines.join(newline);
     result.push_str(newline);
     Ok(result)
+}
+
+pub fn effective_value(text: &str, key: &str) -> String {
+    let mut map = parse_kv(DEFAULT_PROPERTIES);
+    map.extend(parse_kv(text));
+    map[key].to_owned()
 }
 
 pub fn save(path: &Path, text: &str) -> Result<(), String> {

@@ -77,6 +77,7 @@ async fn start(
         compression_threshold: 64,
         online_mode: true,
         session_server,
+        configuration: None,
     });
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::spawn(server.serve(listener, move |p, _conn| {
@@ -155,6 +156,8 @@ async fn online_login_success() {
     assert_eq!(r.string(32767).unwrap(), "dGV4");
     assert!(r.bool().unwrap());
     assert_eq!(r.string(1024).unwrap(), "c2ln");
+    let _session_id = r.uuid().unwrap();
+    assert!(r.remaining().is_empty(), "nothing after sessionId");
 
     c.send(&[0x03]).await.unwrap();
     let player = players.recv().await.unwrap();

@@ -1,6 +1,7 @@
 //! chunkwake-net — приём соединений и состояния handshake/status/login.
 
 pub mod auth;
+pub mod configuration;
 pub mod crypto;
 
 use bytes::BytesMut;
@@ -35,6 +36,8 @@ pub struct NetConfig {
     pub online_mode: bool,
     /// Базовый URL session server (по умолчанию Mojang).
     pub session_server: String,
+    /// Фаза configuration; `None` — отдать соединение сразу после login.
+    pub configuration: Option<Arc<configuration::ConfigurationPlan>>,
 }
 
 /// Игрок, прошедший login и перешедший в состояние configuration.
@@ -70,6 +73,8 @@ pub struct Server {
     online: AtomicUsize,
     key: Option<ServerKey>,
     http: reqwest::Client,
+    /// Случайный UUID сессии сервера; клиент получает его в login_finished.
+    session_id: Uuid,
 }
 
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -84,6 +89,7 @@ impl Server {
                 .expect("HTTP client"),
             config,
             online: AtomicUsize::new(0),
+            session_id: uuid::Builder::from_random_bytes(rand::random()).into_uuid(),
         })
     }
 
@@ -208,8 +214,13 @@ impl Server {
                 .await?;
             conn.codec.threshold = Some(self.config.compression_threshold as usize);
         }
-        conn.send(&packets::login_success(uuid, &name, &properties))
-            .await?;
+        conn.send(&packets::login_success(
+            uuid,
+            &name,
+            &properties,
+            self.session_id,
+        ))
+        .await?;
 
         loop {
             let packet = conn.read_packet().await?;
@@ -220,6 +231,14 @@ impl Server {
             }
         }
         tracing::info!(%name, %uuid, %addr, "player logged in");
+        if let Some(plan) = &self.config.configuration {
+            match plan.run(&mut conn).await? {
+                configuration::Outcome::Finished => {
+                    tracing::info!(%name, "configuration finished");
+                }
+                configuration::Outcome::Rejected => return Ok(None),
+            }
+        }
         Ok(Some((
             LoggedIn {
                 name,
