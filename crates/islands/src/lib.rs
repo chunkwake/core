@@ -1,1 +1,1 @@
-//! pr-islands — см. ARCHITECTURE.md
+//! chunkwake-islands — см. ARCHITECTURE.md

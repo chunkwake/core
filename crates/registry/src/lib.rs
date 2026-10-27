@@ -1,1 +1,1 @@
-//! pr-registry — см. ARCHITECTURE.md
+//! chunkwake-registry — см. ARCHITECTURE.md

@@ -1,4 +1,4 @@
-# Архитектура paper-rust (Minecraft 26.3)
+# Архитектура Chunkwake (Minecraft 26.3)
 
 ## Приоритеты и целевые метрики
 1. **Совместимость с Paper-плагинами — приоритет №1.** При конфликте «скорость vs совместимость» выигрывает совместимость: семантика событий, порядок, синхронность главного потока для обычных плагинов сохраняются как в Paper. Ускорение достигается там, где плагины этого не видят (движок, сеть, I/O, генерация, свет, pathfinding).
@@ -34,7 +34,7 @@ Folia режет мир на регионы фиксированной сетк�
 - **Сеть**: дельты для клиентов строятся из лога, пакеты кодируются один раз и рассылаются всем подписчикам (zero-copy `Bytes`).
 - **Хранение**: WAL → сохранение без лагов и без потери данных при краше; чекпоинты в Anvil.
 - **Встроенный rollback** (как CoreProtect, но бесплатно по CPU) и **детерминированный replay** — баг-репорт = файл лога, воспроизводимый бит-в-бит.
-- Плагины получают этот лог через API (`paper-rust-api`), вместо тысяч мелких событий.
+- Плагины получают этот лог через API (`chunkwake-api`), вместо тысяч мелких событий.
 
 ### 4. Мост к Java нового поколения: Panama FFM + общая память
 - Вместо JNI — **Foreign Function & Memory API** (Java 22+): дешёвые downcall/upcall.
@@ -78,7 +78,7 @@ Cargo workspace:
 - `crates/entity` — ECS (bevy_ecs или собственный), AI, физика, коллизии.
 - `crates/gameplay` — механики ванилы (блоки, редстоун, инвентари, крафт, бой, мобы) — самая длинная часть.
 - `crates/jvm-bridge` — запуск JVM через `jni` crate, загрузка плагинов, маршалинг событий/вызовов, handle-объекты на Rust-сущности.
-- `java/api-impl` — Gradle-модуль: реализация `org.bukkit.*`/Paper/Purpur API (используем официальные paper-api/purpur-api как compile-only, реализуем `CraftServer`-подобный слой поверх native-методов). Опционально — паблишим `paper-rust-api` с расширениями.
+- `java/api-impl` — Gradle-модуль: реализация `org.bukkit.*`/Paper/Purpur API (используем официальные paper-api/purpur-api как compile-only, реализуем `CraftServer`-подобный слой поверх native-методов). Опционально — паблишим `chunkwake-api` с расширениями.
 - `crates/server` — бинарник, конфиги (`server.properties`, `bukkit.yml`, `paper-*.yml`, `purpur.yml` — читаем привычные), консоль, метрики.
 
 Модель потоков для плагинов: как Folia — `RegionScheduler`, `EntityScheduler`, `GlobalRegionScheduler`, `AsyncScheduler`. Плагины, не помеченные `folia-supported: true`, запускаются в **режиме совместимости** (выполнение их задач/событий сериализуется через глобальный lock-тик) — это главное отличие от Folia, которая такие плагины просто не грузит. Режим совместимости — **по умолчанию**; параллельная модель включается только для плагинов, явно её заявивших.
@@ -88,13 +88,13 @@ Cargo workspace:
 
 | Крейт | Роль |
 |---|---|
-| `pr-protocol` | пакеты 26.3 (codegen), VarInt, NBT, компоненты |
-| `pr-net` | соединения, состояния протокола, прокси-forwarding |
-| `pr-registry` | реестры, теги, датапаки |
-| `pr-world` | чанки, палитры, Anvil, свет, генерация |
-| `pr-journal` | event-sourced лог изменений, WAL, rollback/replay |
-| `pr-islands` | динамические острова, планировщик, STM-коммит |
-| `pr-entity` | ECS, AI, физика |
-| `pr-gameplay` | ванильные механики |
-| `pr-bridge` | JVM через Panama FFM, off-heap views, события |
-| `pr-server` | бинарник `paper-rust`, конфиги, консоль |
+| `chunkwake-protocol` | пакеты 26.3 (codegen), VarInt, NBT, компоненты |
+| `chunkwake-net` | соединения, состояния протокола, прокси-forwarding |
+| `chunkwake-registry` | реестры, теги, датапаки |
+| `chunkwake-world` | чанки, палитры, Anvil, свет, генерация |
+| `chunkwake-journal` | event-sourced лог изменений, WAL, rollback/replay |
+| `chunkwake-islands` | динамические острова, планировщик, STM-коммит |
+| `chunkwake-entity` | ECS, AI, физика |
+| `chunkwake-gameplay` | ванильные механики |
+| `chunkwake-bridge` | JVM через Panama FFM, off-heap views, события |
+| `chunkwake-server` | бинарник `chunkwake`, конфиги, консоль |

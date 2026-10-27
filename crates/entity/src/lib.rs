@@ -1,1 +1,1 @@
-//! pr-entity — см. ARCHITECTURE.md
+//! chunkwake-entity — см. ARCHITECTURE.md

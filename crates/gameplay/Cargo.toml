@@ -1,5 +1,5 @@
 [package]
-name = "pr-gameplay"
+name = "chunkwake-gameplay"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,1 +1,1 @@
-//! pr-world — см. ARCHITECTURE.md
+//! chunkwake-world — см. ARCHITECTURE.md

@@ -1,5 +1,5 @@
 [package]
-name = "pr-entity"
+name = "chunkwake-entity"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

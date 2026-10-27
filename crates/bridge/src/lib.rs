@@ -1,1 +1,1 @@
-//! pr-bridge — см. ARCHITECTURE.md
+//! chunkwake-bridge — см. ARCHITECTURE.md

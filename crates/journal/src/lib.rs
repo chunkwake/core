@@ -1,1 +1,1 @@
-//! pr-journal — см. ARCHITECTURE.md
+//! chunkwake-journal — см. ARCHITECTURE.md

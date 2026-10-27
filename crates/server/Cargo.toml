@@ -1,11 +1,17 @@
 [package]
-name = "pr-server"
+name = "chunkwake-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "paper-rust"
+name = "chunkwake"
 path = "src/main.rs"
 
 [dependencies]
+chunkwake-net = { path = "../net" }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+zip = { version = "2", default-features = false, features = ["deflate"] }

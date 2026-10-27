@@ -1,5 +1,5 @@
 [package]
-name = "pr-world"
+name = "chunkwake-world"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

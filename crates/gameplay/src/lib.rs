@@ -1,1 +1,1 @@
-//! pr-gameplay — см. ARCHITECTURE.md
+//! chunkwake-gameplay — см. ARCHITECTURE.md
