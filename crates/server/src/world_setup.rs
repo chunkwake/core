@@ -78,5 +78,8 @@ pub fn build_play_plan(
     };
     // Центр блока над травой.
     let spawn = [8.5, dim.min_y as f64 + top, 8.5];
-    PlayPlan::build(packets, login, chunk.encode_body(), spawn).map_err(s)
+    let player_type =
+        chunkwake_data::registries::builtin_id(data_dir, "entity_type", "minecraft:player")
+            .map_err(s)?;
+    PlayPlan::build(packets, login, chunk.encode_body(), spawn, player_type).map_err(s)
 }

@@ -1,11 +1,11 @@
-//! Минимальная play-сессия M2: игрок появляется в плоском мире и остаётся
-//! подключённым (keep-alive). Мир статичен, движение не обрабатывается.
+//! Play-сессия M2: плоский мир, стриминг чанков, чат, таб-лист и видимость
+//! других игроков. Мир статичен.
 
 use crate::{Connection, LoggedIn, NetError};
 use chunkwake_data::DataError;
 use chunkwake_data::packets::{Direction, PacketTable, State};
 use chunkwake_protocol::Reader;
-use chunkwake_protocol::play::{self, Login, PlayerEntry, game_event};
+use chunkwake_protocol::play::{self, Login, Move, PlayerEntry, game_event};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,6 +34,11 @@ struct Ids {
     sb_keep_alive: i32,
     sb_move_pos: i32,
     sb_move_pos_rot: i32,
+    sb_move_rot: i32,
+    add_entity: i32,
+    teleport_entity: i32,
+    rotate_head: i32,
+    remove_entities: i32,
 }
 
 pub struct PlayPlan {
@@ -42,6 +47,8 @@ pub struct PlayPlan {
     /// Тело чанка (одинаковое для всех координат плоского мира).
     chunk_body: Vec<u8>,
     spawn: [f64; 3],
+    /// ID типа сущности `minecraft:player` в реестре `entity_type`.
+    player_type: i32,
     next_entity_id: AtomicI32,
     hub: Hub,
 }
@@ -53,9 +60,19 @@ struct Broadcast {
     packet: Arc<Vec<u8>>,
 }
 
-/// Общее состояние сессий: таб-лист и широковещательный канал.
+/// Игрок онлайн: запись таб-листа и его сущность в мире.
+#[derive(Clone)]
+struct Online {
+    entry: PlayerEntry,
+    entity_id: i32,
+    pos: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+}
+
+/// Общее состояние сессий: игроки онлайн и широковещательный канал.
 struct Hub {
-    players: Mutex<HashMap<Uuid, PlayerEntry>>,
+    players: Mutex<HashMap<Uuid, Online>>,
     tx: broadcast::Sender<Broadcast>,
 }
 
@@ -83,6 +100,7 @@ impl PlayPlan {
         login: Login,
         chunk_body: Vec<u8>,
         spawn: [f64; 3],
+        player_type: i32,
     ) -> Result<Self, DataError> {
         let cb = |name| packets.id(State::Play, Direction::Clientbound, name);
         let sb = |name| packets.id(State::Play, Direction::Serverbound, name);
@@ -104,10 +122,16 @@ impl PlayPlan {
                 sb_keep_alive: sb("keep_alive")?,
                 sb_move_pos: sb("move_player_pos")?,
                 sb_move_pos_rot: sb("move_player_pos_rot")?,
+                sb_move_rot: sb("move_player_rot")?,
+                add_entity: cb("add_entity")?,
+                teleport_entity: cb("teleport_entity")?,
+                rotate_head: cb("rotate_head")?,
+                remove_entities: cb("remove_entities")?,
             },
             login,
             chunk_body,
             spawn,
+            player_type,
             next_entity_id: AtomicI32::new(1),
             hub: Hub {
                 players: Mutex::new(HashMap::new()),
@@ -163,60 +187,119 @@ impl PlayPlan {
             .await
     }
 
-    /// Сессия игрока: вход в таб-лист, игра, выход с оповещением остальных.
+    /// Сессия игрока: вход в таб-лист и мир, игра, выход с оповещением остальных.
     pub async fn run(&self, player: &LoggedIn, conn: &mut Connection) -> Result<(), NetError> {
         let ids = self.ids;
-        let me = PlayerEntry {
-            uuid: player.uuid,
-            name: player.name.clone(),
-            properties: player.properties.clone(),
-            game_mode: self.login.spawn.game_mode as i32,
-            latency_ms: 0,
+        let me = Online {
+            entry: PlayerEntry {
+                uuid: player.uuid,
+                name: player.name.clone(),
+                properties: player.properties.clone(),
+                game_mode: self.login.spawn.game_mode as i32,
+                latency_ms: 0,
+            },
+            entity_id: self.next_entity_id.fetch_add(1, Ordering::Relaxed),
+            pos: self.spawn,
+            yaw: 0.0,
+            pitch: 0.0,
         };
+        let uuid = me.entry.uuid;
         // Подписка до вставки в список: ни одно событие после снимка не теряется.
         let rx = self.hub.tx.subscribe();
-        self.hub.players.lock().unwrap().insert(me.uuid, me.clone());
+        let others: Vec<Online> = {
+            let mut players = self.hub.players.lock().unwrap();
+            let others = players.values().cloned().collect();
+            players.insert(uuid, me.clone());
+            others
+        };
         self.hub.send(
-            Some(me.uuid),
-            play::player_info_add(ids.player_info_update, std::slice::from_ref(&me)),
+            Some(uuid),
+            play::player_info_add(ids.player_info_update, std::slice::from_ref(&me.entry)),
         );
+        self.hub.send(Some(uuid), self.spawn_packet(&me));
         self.hub.send(
             None,
             play::system_chat(
                 ids.system_chat,
-                &format!("{} joined the game", me.name),
+                &format!("{} joined the game", me.entry.name),
                 false,
             ),
         );
 
-        let result = self.session(conn, rx, me.uuid, &me.name).await;
+        let result = self.session(conn, rx, &me, &others).await;
 
-        self.hub.players.lock().unwrap().remove(&me.uuid);
+        self.hub.players.lock().unwrap().remove(&uuid);
         self.hub.send(
             None,
-            play::player_info_remove(ids.player_info_remove, &[me.uuid]),
+            play::remove_entities(ids.remove_entities, &[me.entity_id]),
+        );
+        self.hub.send(
+            None,
+            play::player_info_remove(ids.player_info_remove, &[uuid]),
         );
         self.hub.send(
             None,
             play::system_chat(
                 ids.system_chat,
-                &format!("{} left the game", me.name),
+                &format!("{} left the game", me.entry.name),
                 false,
             ),
         );
         result
     }
 
+    fn spawn_packet(&self, p: &Online) -> Vec<u8> {
+        play::add_entity(
+            self.ids.add_entity,
+            p.entity_id,
+            p.entry.uuid,
+            self.player_type,
+            p.pos,
+            p.yaw,
+            p.pitch,
+            0,
+        )
+    }
+
+    /// Новая позиция/поворот игрока: обновить общее состояние и разослать остальным.
+    fn moved(&self, uuid: Uuid, m: Move) {
+        let updated = {
+            let mut players = self.hub.players.lock().unwrap();
+            players.get_mut(&uuid).map(|p| {
+                if let Some(pos) = m.pos {
+                    p.pos = pos;
+                }
+                if let Some((yaw, pitch)) = m.rot {
+                    (p.yaw, p.pitch) = (yaw, pitch);
+                }
+                (p.entity_id, p.pos, p.yaw, p.pitch)
+            })
+        };
+        let Some((eid, pos, yaw, pitch)) = updated else {
+            return;
+        };
+        let ids = self.ids;
+        self.hub.send(
+            Some(uuid),
+            play::teleport_entity(ids.teleport_entity, eid, pos, yaw, pitch, m.on_ground),
+        );
+        if m.rot.is_some() {
+            self.hub
+                .send(Some(uuid), play::rotate_head(ids.rotate_head, eid, yaw));
+        }
+    }
+
     async fn session(
         &self,
         conn: &mut Connection,
         mut rx: broadcast::Receiver<Broadcast>,
-        me: Uuid,
-        name: &str,
+        me: &Online,
+        others: &[Online],
     ) -> Result<(), NetError> {
         let ids = self.ids;
+        let uuid = me.entry.uuid;
         let mut login = self.login.clone();
-        login.entity_id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
+        login.entity_id = me.entity_id;
         conn.send(&play::login(ids.login, &login)).await?;
         conn.send(&play::game_event(
             ids.game_event,
@@ -241,10 +324,13 @@ impl PlayPlan {
             0.0,
         ))
         .await?;
-        let everyone: Vec<PlayerEntry> =
-            self.hub.players.lock().unwrap().values().cloned().collect();
-        conn.send(&play::player_info_add(ids.player_info_update, &everyone))
+        let mut tab: Vec<PlayerEntry> = others.iter().map(|o| o.entry.clone()).collect();
+        tab.push(me.entry.clone());
+        conn.send(&play::player_info_add(ids.player_info_update, &tab))
             .await?;
+        for o in others {
+            conn.send(&self.spawn_packet(o)).await?;
+        }
 
         // Keep-alive: шлём раз в 15 с, ответ ждём не дольше 30 с.
         let mut ticker = tokio::time::interval(KEEP_ALIVE_INTERVAL);
@@ -267,9 +353,9 @@ impl PlayPlan {
                     }
                 }
                 event = rx.recv() => match event {
-                    Ok(b) if b.skip == Some(me) => {}
+                    Ok(b) if b.skip == Some(uuid) => {}
                     Ok(b) => conn.send(&b.packet).await?,
-                    // Отстали — пропущенное не догоняем (таб-лист обновится следующими событиями).
+                    // Отстали — пропущенное не догоняем (позиции обновятся следующими событиями).
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => return Ok(()),
                 },
@@ -277,18 +363,30 @@ impl PlayPlan {
                     let packet = packet?;
                     let mut r = Reader::new(&packet);
                     let id = r.var_int()?;
-                    if id == ids.sb_move_pos || id == ids.sb_move_pos_rot {
-                        let (x, _y, z) = (r.f64()?, r.f64()?, r.f64()?);
-                        let now = ((x.floor() as i32) >> 4, (z.floor() as i32) >> 4);
-                        if now != center {
-                            self.move_center(conn, center, now, r_view).await?;
-                            center = now;
+                    let (has_pos, has_rot) = if id == ids.sb_move_pos {
+                        (true, false)
+                    } else if id == ids.sb_move_pos_rot {
+                        (true, true)
+                    } else if id == ids.sb_move_rot {
+                        (false, true)
+                    } else {
+                        (false, false)
+                    };
+                    if has_pos || has_rot {
+                        let m = play::read_move(&mut r, has_pos, has_rot)?;
+                        if let Some([x, _, z]) = m.pos {
+                            let now = ((x.floor() as i32) >> 4, (z.floor() as i32) >> 4);
+                            if now != center {
+                                self.move_center(conn, center, now, r_view).await?;
+                                center = now;
+                            }
                         }
+                        self.moved(uuid, m);
                         continue;
                     }
                     if id == ids.sb_chat {
                         let text = play::read_chat_message(&mut r)?;
-                        let line = format!("<{name}> {text}");
+                        let line = format!("<{}> {text}", me.entry.name);
                         tracing::info!("{line}");
                         self.hub.send(None, play::system_chat(ids.system_chat, &line, false));
                         continue;

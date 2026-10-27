@@ -42,6 +42,12 @@ impl<'a> Reader<'a> {
         Ok(i64::from_be_bytes(self.bytes(8)?.try_into().unwrap()))
     }
 
+    pub fn f32(&mut self) -> Result<f32> {
+        Ok(f32::from_bits(u32::from_be_bytes(
+            self.bytes(4)?.try_into().unwrap(),
+        )))
+    }
+
     pub fn f64(&mut self) -> Result<f64> {
         Ok(f64::from_bits(self.i64()? as u64))
     }

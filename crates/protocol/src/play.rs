@@ -279,3 +279,98 @@ mod chat_tests {
         assert!(r.remaining().is_empty());
     }
 }
+
+/// Угол в градусах → байт (1/256 оборота), как `Mth.packDegrees`.
+pub fn angle(deg: f32) -> u8 {
+    (deg * 256.0 / 360.0).floor() as i32 as u8
+}
+
+/// `add_entity` без начальной скорости (LpVec3 нулевого вектора — один байт 0).
+#[allow(clippy::too_many_arguments)]
+pub fn add_entity(
+    id: i32,
+    entity_id: i32,
+    uuid: Uuid,
+    entity_type: i32,
+    pos: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+    data: i32,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .var_int(entity_id)
+        .uuid(uuid)
+        .var_int(entity_type);
+    for v in pos {
+        w.f64(v);
+    }
+    w.u8(0) // movement
+        .u8(angle(pitch))
+        .u8(angle(yaw))
+        .u8(angle(yaw)) // голова
+        .var_int(data);
+    w.buf
+}
+
+/// `teleport_entity`: абсолютная позиция (PositionMoveRotation), без относительных флагов.
+pub fn teleport_entity(
+    id: i32,
+    entity_id: i32,
+    pos: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+    on_ground: bool,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_id);
+    for v in pos {
+        w.f64(v);
+    }
+    for _ in 0..3 {
+        w.f64(0.0);
+    }
+    w.f32(yaw).f32(pitch).i32(0).bool(on_ground);
+    w.buf
+}
+
+pub fn rotate_head(id: i32, entity_id: i32, yaw: f32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_id).u8(angle(yaw));
+    w.buf
+}
+
+pub fn remove_entities(id: i32, entity_ids: &[i32]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_ids.len() as i32);
+    for &e in entity_ids {
+        w.var_int(e);
+    }
+    w.buf
+}
+
+/// Поля `ServerboundMovePlayerPacket` после ID: что есть в пакете, то `Some`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Move {
+    pub pos: Option<[f64; 3]>,
+    pub rot: Option<(f32, f32)>,
+    pub on_ground: bool,
+}
+
+pub fn read_move(r: &mut Reader, has_pos: bool, has_rot: bool) -> Result<Move> {
+    let pos = if has_pos {
+        Some([r.f64()?, r.f64()?, r.f64()?])
+    } else {
+        None
+    };
+    let rot = if has_rot {
+        Some((r.f32()?, r.f32()?))
+    } else {
+        None
+    };
+    Ok(Move {
+        pos,
+        rot,
+        on_ground: r.u8()? & 1 != 0,
+    })
+}

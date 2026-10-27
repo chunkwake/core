@@ -22,6 +22,7 @@ const WARNING: Color = Color::Rgb(235, 183, 106);
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FieldKind {
     Text,
+    Number { min: i64, max: i64 },
     Toggle,
     Choice(&'static [&'static str]),
 }
@@ -66,7 +67,7 @@ const FIELDS: [Field; 22] = [
         icon: "🔌",
         label: "Server port",
         help: "TCP port used by Minecraft clients. Choose a number from 1 to 65535.",
-        kind: FieldKind::Text,
+        kind: FieldKind::Number { min: 1, max: 65535 },
         section: Section::Network,
     },
     Field {
@@ -82,7 +83,10 @@ const FIELDS: [Field; 22] = [
         icon: "👥",
         label: "Player limit",
         help: "Maximum number of connected players. Choose a positive integer.",
-        kind: FieldKind::Text,
+        kind: FieldKind::Number {
+            min: 1,
+            max: i64::MAX,
+        },
         section: Section::Server,
     },
     Field {
@@ -98,7 +102,10 @@ const FIELDS: [Field; 22] = [
         icon: "⇄",
         label: "Compression",
         help: "Packet size threshold in bytes. Use -1 to disable compression.",
-        kind: FieldKind::Text,
+        kind: FieldKind::Number {
+            min: -1,
+            max: i32::MAX as i64,
+        },
         section: Section::Network,
     },
     Field {
@@ -162,7 +169,7 @@ const FIELDS: [Field; 22] = [
         icon: "◉",
         label: "View distance",
         help: "2–32 chunks. Saved for a future world implementation; currently has no effect.",
-        kind: FieldKind::Text,
+        kind: FieldKind::Number { min: 2, max: 32 },
         section: Section::World,
     },
     Field {
@@ -170,7 +177,7 @@ const FIELDS: [Field; 22] = [
         icon: "◌",
         label: "Simulation distance",
         help: "2–32 chunks. Saved for a future world implementation; currently has no effect.",
-        kind: FieldKind::Text,
+        kind: FieldKind::Number { min: 2, max: 32 },
         section: Section::World,
     },
     Field {
@@ -226,7 +233,10 @@ const FIELDS: [Field; 22] = [
         icon: "🛡",
         label: "Spawn protection",
         help: "Non-negative radius. Saved for a future gameplay implementation; currently has no effect.",
-        kind: FieldKind::Text,
+        kind: FieldKind::Number {
+            min: 0,
+            max: u32::MAX as i64,
+        },
         section: Section::Gameplay,
     },
 ];
@@ -341,7 +351,7 @@ impl App {
                 KeyCode::Enter => match FIELDS[self.selected].kind {
                     FieldKind::Toggle => self.toggle(),
                     FieldKind::Choice(options) => self.cycle_choice(options),
-                    FieldKind::Text => {
+                    FieldKind::Text | FieldKind::Number { .. } => {
                         self.edit_value = self.values[self.selected].clone();
                         self.cursor = self.edit_value.chars().count();
                         self.mode = Mode::Edit;
@@ -351,7 +361,7 @@ impl App {
                 KeyCode::Char(' ') => match FIELDS[self.selected].kind {
                     FieldKind::Toggle => self.toggle(),
                     FieldKind::Choice(options) => self.cycle_choice(options),
-                    FieldKind::Text => {}
+                    FieldKind::Text | FieldKind::Number { .. } => {}
                 },
                 KeyCode::Char('s') | KeyCode::F(2) => match self.validate() {
                     Ok(props) => {
@@ -409,6 +419,23 @@ impl App {
                 KeyCode::Right => {
                     self.cursor = (self.cursor + 1).min(self.edit_value.chars().count());
                 }
+                KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
+                    if matches!(FIELDS[self.selected].kind, FieldKind::Number { .. }) =>
+                {
+                    let step = if key.modifiers.contains(KeyModifiers::SHIFT)
+                        || matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
+                    {
+                        10
+                    } else {
+                        1
+                    };
+                    let delta = if matches!(key.code, KeyCode::Up | KeyCode::PageUp) {
+                        step
+                    } else {
+                        -step
+                    };
+                    self.step_number(delta);
+                }
                 KeyCode::Home => self.cursor = 0,
                 KeyCode::End => self.cursor = self.edit_value.chars().count(),
                 KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -444,6 +471,25 @@ impl App {
         self.values[self.selected] =
             options[current.map_or(0, |index| (index + 1) % options.len())].into();
         self.message = None;
+    }
+
+    fn step_number(&mut self, delta: i64) {
+        let FieldKind::Number { min, max } = FIELDS[self.selected].kind else {
+            return;
+        };
+        match self.edit_value.parse::<i64>() {
+            Ok(value) => {
+                self.edit_value = value.saturating_add(delta).clamp(min, max).to_string();
+                self.cursor = self.edit_value.chars().count();
+                self.message = None;
+            }
+            Err(_) => {
+                self.message = Some(format!(
+                    "{}: enter a valid number before using arrows",
+                    FIELDS[self.selected].key
+                ));
+            }
+        }
     }
 
     fn move_row(&mut self, direction: isize) {
@@ -645,12 +691,20 @@ fn draw(frame: &mut Frame, app: &App) {
     let (hint, keys, important) = match app.mode {
         Mode::Browse => (
             app.message.as_deref().unwrap_or(FIELDS[app.selected].help),
-            "←→ / Tab Sections    ↑↓ Move    Enter/Space Change    S Save    Esc Quit",
+            if matches!(FIELDS[app.selected].kind, FieldKind::Number { .. }) {
+                "←→ / Tab Sections    ↑↓ Move    Enter Adjust/Edit    S Save    Esc Quit"
+            } else {
+                "←→ / Tab Sections    ↑↓ Move    Enter/Space Change    S Save    Esc Quit"
+            },
             app.message.is_some(),
         ),
         Mode::Edit => (
             app.message.as_deref().unwrap_or(FIELDS[app.selected].help),
-            "Enter Apply    Esc Cancel    ←→ Cursor",
+            if matches!(FIELDS[app.selected].kind, FieldKind::Number { .. }) {
+                "↑↓ ±1    Shift+↑↓ / PgUp/PgDn ±10    Enter Apply    Esc Cancel"
+            } else {
+                "Enter Apply    Esc Cancel    ←→ Cursor"
+            },
             app.message.is_some(),
         ),
         Mode::ConfirmExposure => (
@@ -873,5 +927,33 @@ mod tests {
         assert_eq!(app.selected, *server.last().unwrap());
         app.handle_key(key(KeyCode::Down));
         assert_eq!(app.selected, server[0]);
+    }
+
+    #[test]
+    fn numeric_arrows_adjust_and_respect_limits() {
+        let mut app = app(config::DEFAULT_PROPERTIES);
+        app.selected = 3; // max-players
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.edit_value, "21");
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        assert_eq!(app.edit_value, "11");
+        app.handle_key(key(KeyCode::PageUp));
+        assert_eq!(app.edit_value, "21");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.values[3], "21");
+
+        app.selected = 1; // server-port
+        app.handle_key(key(KeyCode::Enter));
+        app.edit_value = "65535".into();
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.edit_value, "65535");
+        app.edit_value = "1".into();
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.edit_value, "1");
+        app.edit_value = "bad".into();
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.edit_value, "bad");
+        assert!(app.message.as_deref().unwrap().contains("server-port"));
     }
 }

@@ -139,6 +139,15 @@ fn read_json(path: &Path) -> Result<serde_json::Value, DataError> {
     serde_json::from_str(&text).map_err(|e| format_err(path, e))
 }
 
+/// ID записи встроенного реестра (`entity_type`, `minecraft:player`) из `registries.json`.
+pub fn builtin_id(root: &Path, registry: &str, entry: &str) -> Result<i32, DataError> {
+    load_builtin_ids(root)?
+        .get(registry)
+        .and_then(|e| e.get(entry))
+        .copied()
+        .ok_or_else(|| DataError::Io(format!("unknown {registry} entry {entry}")))
+}
+
 /// `registries.json`: `{"minecraft:block": {"entries": {"minecraft:stone": {"protocol_id": 1}}}}`.
 fn load_builtin_ids(root: &Path) -> Result<HashMap<String, HashMap<String, i32>>, DataError> {
     let path = root.join("reports/registries.json");
