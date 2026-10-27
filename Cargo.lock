@@ -209,6 +209,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "chunkwake-bots"
+version = "0.1.0"
+dependencies = [
+ "chunkwake-data",
+ "chunkwake-net",
+ "chunkwake-protocol",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "chunkwake-bridge"
 version = "0.1.0"
 
@@ -280,6 +291,7 @@ dependencies = [
  "chunkwake-world",
  "crossterm",
  "dotenvy",
+ "rand 0.8.8",
  "ratatui",
  "serde_json",
  "tokio",
