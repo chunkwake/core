@@ -1,0 +1,11 @@
+[package]
+name = "pr-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "paper-rust"
+path = "src/main.rs"
+
+[dependencies]

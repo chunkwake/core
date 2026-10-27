@@ -1,0 +1,8 @@
+/target
+/run
+/generated
+*.jar
+!java/**/gradle-wrapper.jar
+.gradle/
+build/
+.idea/
