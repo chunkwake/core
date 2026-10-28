@@ -222,6 +222,14 @@ fn survival_data(
             (0..blocks.state_count() as u32)
                 .map(|id| blocks.state(id).map(|(n, p)| (n.to_owned(), p.to_vec())))
                 .collect(),
+            chunkwake_data::world::load_sturdy(data_dir).map_err(s)?,
+            chunkwake_data::world::read_json(&data_dir.join("data/minecraft/tags/block/walls.json"))
+                .ok()
+                .and_then(|j| j["values"].as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect(),
         ),
         hardness: chunkwake_data::world::load_hardness(data_dir).map_err(s)?,
         requires_tool: chunkwake_data::world::load_requires_tool(data_dir).map_err(s)?,

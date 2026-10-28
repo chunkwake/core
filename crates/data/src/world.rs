@@ -44,6 +44,18 @@ pub fn load_hardness(root: &Path) -> Result<Vec<f32>, DataError> {
         .collect()
 }
 
+/// Прочные грани состояний (6-я колонка `light.csv`): биты по граням низ, верх,
+/// север, юг, запад, восток (`isFaceSturdy`).
+pub fn load_sturdy(root: &Path) -> Result<Vec<u8>, DataError> {
+    let path = root.join("reports/light.csv");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
+    Ok(text
+        .lines()
+        .map(|line| line.split(',').nth(5).and_then(|v| v.trim().parse().ok()).unwrap_or(0))
+        .collect())
+}
+
 /// Нужен ли инструмент для дропа (`requiresCorrectToolForDrops`, 5-я колонка `light.csv`).
 pub fn load_requires_tool(root: &Path) -> Result<Vec<bool>, DataError> {
     let path = root.join("reports/light.csv");
@@ -297,7 +309,7 @@ fn plain_conditions(c: &serde_json::Value) -> bool {
     }
 }
 
-pub(crate) fn read_json(path: &Path) -> Result<serde_json::Value, DataError> {
+pub fn read_json(path: &Path) -> Result<serde_json::Value, DataError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
     serde_json::from_str(&text).map_err(|e| DataError::Format {

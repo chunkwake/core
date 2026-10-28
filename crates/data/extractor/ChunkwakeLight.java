@@ -1,5 +1,6 @@
 // Выгрузка свойств состояний блоков: `reports/light.csv`, строка на id
-// состояния: `излучение,затухание,небо_вниз(0/1),твёрдость,нужен_инструмент(0/1)`
+// состояния: `излучение,затухание,небо_вниз(0/1),твёрдость,нужен_инструмент(0/1),прочные_грани`
+// (прочные грани — биты `isFaceSturdy` по `Direction`: низ, верх, север, юг, запад, восток)
 // (твёрдость -1 — неразрушимый; инструмент — `requiresCorrectToolForDrops`).
 //
 // Только рефлексия и java.base: классы сервера новее компилятора, поэтому
@@ -27,6 +28,13 @@ public final class ChunkwakeLight {
         Method requiresTool = base.getMethod("requiresCorrectToolForDrops");
         java.lang.reflect.Field hardness = base.getDeclaredField("destroySpeed");
         hardness.setAccessible(true);
+        Class<?> getter = Class.forName("net.minecraft.world.level.BlockGetter");
+        Class<?> blockPos = Class.forName("net.minecraft.core.BlockPos");
+        Class<?> direction = Class.forName("net.minecraft.core.Direction");
+        Method sturdy = base.getMethod("isFaceSturdy", getter, blockPos, direction);
+        Object empty = Class.forName("net.minecraft.world.level.EmptyBlockGetter").getField("INSTANCE").get(null);
+        Object zero = blockPos.getField("ZERO").get(null);
+        Object[] dirs = direction.getEnumConstants();
 
         int n = (Integer) size.invoke(registry);
         StringBuilder out = new StringBuilder(n * 8);
@@ -36,7 +44,14 @@ public final class ChunkwakeLight {
                     .append(dampening.invoke(state)).append(',')
                     .append((Boolean) skyDown.invoke(state) ? 1 : 0).append(',')
                     .append(hardness.getFloat(state)).append(',')
-                    .append((Boolean) requiresTool.invoke(state) ? 1 : 0).append('\n');
+                    .append((Boolean) requiresTool.invoke(state) ? 1 : 0).append(',');
+            int mask = 0;
+            for (int d = 0; d < dirs.length; d++) {
+                if ((Boolean) sturdy.invoke(state, empty, zero, dirs[d])) {
+                    mask |= 1 << d;
+                }
+            }
+            out.append(mask).append('\n');
         }
         Files.writeString(Path.of(args[0]), out);
         System.exit(0);

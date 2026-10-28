@@ -2445,6 +2445,7 @@ impl PlayPlan {
                                 for &(p, s) in &extra {
                                     self.set_block(p, s);
                                 }
+                                let mut touched = self.update_connections(target);
                                 self.link_chest(target, place);
                                 if let Some(id) = container_entity(&name) {
                                     self.set_block_entity(target, Some(BlockEntity { id: id.into(), nbt: Default::default() }));
@@ -2452,6 +2453,15 @@ impl PlayPlan {
                                 if survival && state.inv.consume_held() {
                                     let held = state.inv.held_slot();
                                     self.send_slots(conn, &mut state.inv, &[held]).await?;
+                                }
+                                // Новое состояние — до подтверждения: иначе клиент откатит
+                                // свой предсказанный блок к воздуху до рассылки тика (мигание).
+                                touched.extend(std::iter::once(target).chain(extra.iter().map(|e| e.0)));
+                                touched.sort();
+                                touched.dedup();
+                                for p in touched {
+                                    let s = self.block(p).unwrap_or(AIR);
+                                    conn.send(&play::block_update(ids.block_update, p, s as i32)).await?;
                                 }
                             }
                         }
@@ -2678,6 +2688,8 @@ impl PlayPlan {
             return Ok(false);
         };
         self.unlink_chest(pos, old);
+        let mut touched = self.update_connections(pos);
+        touched.push(pos);
         // Вторая половина двери, кровати, высокого растения.
         if let Some(o) = self.survival.placement.partner(old) {
             let p = [pos[0] + o[0], pos[1] + o[1], pos[2] + o[2]];
@@ -2685,7 +2697,14 @@ impl PlayPlan {
                 && self.survival.placement.name(s) == self.survival.placement.name(old))
             {
                 self.set_block(p, AIR);
+                touched.push(p);
+                touched.extend(self.update_connections(p));
             }
+        }
+        // До подтверждения ломки — иначе клиент откатит соседей (мигание).
+        for p in touched {
+            let s = self.block(p).unwrap_or(AIR);
+            conn.send(&play::block_update(self.ids.block_update, p, s as i32)).await?;
         }
         // Печь: в блок-сущность её текущее содержимое.
         let removed = self.furnaces.lock().unwrap().remove(&pos);
@@ -3054,6 +3073,28 @@ impl PlayPlan {
             _ => return None,
         };
         Some(Stack { item: self.item_id(rest)?, count: 1, damage: 0 })
+    }
+
+    /// Заборы, стены и стёкла вокруг `pos` (и он сам) пересчитывают соединения
+    /// (`updateShape` соседей).
+    /// Возвращает изменённые блоки.
+    fn update_connections(&self, pos: [i32; 3]) -> Vec<[i32; 3]> {
+        let mut changed = Vec::new();
+        let pl = &self.survival.placement;
+        let at = |p: [i32; 3], d: usize| {
+            let o = crate::placement::step(d);
+            [p[0] + o[0], p[1] + o[1], p[2] + o[2]]
+        };
+        for p in [pos, at(pos, 2), at(pos, 3), at(pos, 4), at(pos, 5), at(pos, 0)] {
+            let Some(s) = self.block(p).filter(|&s| pl.connects(s)) else { continue };
+            let side = |d| self.block(at(p, d)).unwrap_or(AIR);
+            let new = pl.connect(s, [side(2), side(3), side(4), side(5)], side(1));
+            if new != s {
+                self.set_block(p, new);
+                changed.push(p);
+            }
+        }
+        changed
     }
 
     fn chest_at(&self, pos: [i32; 3]) -> Option<ChestState> {

@@ -2,7 +2,7 @@
 //! по взгляду игрока и грани, половины ступеней и плит, настенные варианты,
 //! двухблочные двери, растения и кровати.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Грани как в протоколе: низ, верх, север, юг, запад, восток.
 const DIRS: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
@@ -75,6 +75,29 @@ type Props = Vec<(String, String)>;
 pub struct Placement {
     states: Vec<Option<(String, Props)>>,
     by_key: HashMap<(String, Props), u32>,
+    /// Прочные грани по состоянию (биты по `DIRS`).
+    sturdy: Vec<u8>,
+    /// Тег `minecraft:walls`.
+    walls: HashSet<String>,
+}
+
+/// Чем блок соединяется с соседями (`CrossCollisionBlock`, `WallBlock`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Joint {
+    /// Деревянный забор или нет (`isSameFence`).
+    Fence(bool),
+    Pane,
+    Wall,
+}
+
+/// `Block.isExceptionForConnection`.
+fn exception(name: &str) -> bool {
+    name.ends_with("_leaves")
+        || name.ends_with("shulker_box")
+        || matches!(
+            name,
+            "minecraft:barrier" | "minecraft:carved_pumpkin" | "minecraft:jack_o_lantern" | "minecraft:melon" | "minecraft:pumpkin"
+        )
 }
 
 /// Блоки с `facing` по взгляду игрока, а не к нему.
@@ -94,7 +117,7 @@ fn faces_clicked(name: &str) -> bool {
 }
 
 impl Placement {
-    pub fn new(states: Vec<Option<(String, Props)>>) -> Self {
+    pub fn new(states: Vec<Option<(String, Props)>>, sturdy: Vec<u8>, walls: HashSet<String>) -> Self {
         let mut by_key = HashMap::new();
         for (id, s) in states.iter().enumerate() {
             if let Some((n, p)) = s {
@@ -103,7 +126,77 @@ impl Placement {
                 by_key.insert((n.clone(), p), id as u32);
             }
         }
-        Self { states, by_key }
+        Self { states, by_key, sturdy, walls }
+    }
+
+    fn joint(&self, state: u32) -> Option<Joint> {
+        let name = self.name(state)?;
+        if self.walls.contains(name) {
+            Some(Joint::Wall)
+        } else if name.ends_with("_fence") {
+            Some(Joint::Fence(name != "minecraft:nether_brick_fence"))
+        } else if name.ends_with("glass_pane") || name.ends_with("_bars") {
+            Some(Joint::Pane)
+        } else {
+            None
+        }
+    }
+
+    /// Соединяемый ли блок (забор, стена, стекло, решётка).
+    pub fn connects(&self, state: u32) -> bool {
+        self.joint(state).is_some()
+    }
+
+    fn sturdy(&self, state: u32, face: usize) -> bool {
+        self.sturdy.get(state as usize).is_some_and(|m| m >> face & 1 == 1)
+    }
+
+    /// Калитка поперёк направления `dir` (`FenceGateBlock.connectsToDirection`).
+    fn gate_across(&self, state: u32, dir: usize) -> bool {
+        self.name(state).is_some_and(|n| n.ends_with("_fence_gate"))
+            && self
+                .prop(state, "facing")
+                .and_then(|f| DIRS.iter().position(|d| *d == f))
+                .is_some_and(|f| (f < 4) == (clockwise(dir) < 4))
+    }
+
+    /// Цепляется ли блок вида `j` к соседу `other` в сторону `dir`.
+    fn attaches(&self, j: Joint, other: u32, dir: usize) -> bool {
+        let solid = self.sturdy(other, opposite(dir)) && !self.name(other).is_some_and(exception);
+        let oj = self.joint(other);
+        match j {
+            Joint::Fence(wood) => solid || oj == Some(Joint::Fence(wood)) || self.gate_across(other, dir),
+            Joint::Pane => solid || matches!(oj, Some(Joint::Pane | Joint::Wall)),
+            Joint::Wall => solid || matches!(oj, Some(Joint::Pane | Joint::Wall)) || self.gate_across(other, dir),
+        }
+    }
+
+    /// Состояние соединяемого блока по соседям: `sides` — север, юг, запад, восток,
+    /// `above` — блок сверху (для стен).
+    pub fn connect(&self, state: u32, sides: [u32; 4], above: u32) -> u32 {
+        let Some(j) = self.joint(state) else {
+            return state;
+        };
+        let mut s = state;
+        let on: Vec<bool> = (0..4).map(|i| self.attaches(j, sides[i], i + 2)).collect();
+        for (i, &c) in on.iter().enumerate() {
+            let key = DIRS[i + 2];
+            if j == Joint::Wall {
+                // Высокая сторона, если сверху блок с прочной нижней гранью.
+                let tall = self.sturdy(above, DOWN) || self.joint(above) == Some(Joint::Wall);
+                self.set(&mut s, key, if !c { "none" } else if tall { "tall" } else { "low" });
+            } else {
+                self.set(&mut s, key, if c { "true" } else { "false" });
+            }
+        }
+        if j == Joint::Wall {
+            // Столб — если стена не прямая (`WallBlock.shouldRaisePost`).
+            let [n, so, w, e] = [on[0], on[1], on[2], on[3]];
+            let straight = (n && so && !w && !e) || (w && e && !n && !so);
+            let post = !straight || self.prop(above, "up") == Some("true");
+            self.set(&mut s, "up", if post { "true" } else { "false" });
+        }
+        s
     }
 
     pub fn name(&self, state: u32) -> Option<&str> {
@@ -283,10 +376,17 @@ mod tests {
             }
         }
         add("torch", "minecraft:torch", &[]);
+        for (n, s, w, e) in [("true", "false", "false", "false"), ("true", "false", "false", "true"), ("false", "false", "false", "false")] {
+            add(&format!("fence_{n}{s}{w}{e}"), "minecraft:oak_fence", &[("north", n), ("south", s), ("west", w), ("east", e)]);
+        }
+        add("air", "minecraft:air", &[]);
         for t in ["top", "bottom", "double"] {
             add(&format!("slab_{t}"), "minecraft:oak_slab", &[("type", t)]);
         }
-        (Placement::new(states), ids)
+        let walls = HashSet::from(["minecraft:cobblestone_wall".to_owned()]);
+        let mut sturdy = vec![0u8; states.len()];
+        sturdy[ids["log_y"] as usize] = 63;
+        (Placement::new(states, sturdy, walls), ids)
     }
 
     #[test]
@@ -309,5 +409,16 @@ mod tests {
         assert_eq!(p.place(id["slab_bottom"], &Ctx { face: DOWN, ..c })[0].1, id["slab_top"]);
         assert_eq!(p.merge_slab(id["slab_bottom"], id["slab_bottom"], &c, true), Some(id["slab_double"]));
         assert_eq!(p.merge_slab(id["slab_bottom"], id["slab_bottom"], &Ctx { face: 3, ..c }, true), None);
+    }
+
+    #[test]
+    fn fences_connect() {
+        let (p, id) = table();
+        let f = id["fence_falsefalsefalsefalse"];
+        let air = id["air"];
+        // Забор на севере и бревно на востоке.
+        assert_eq!(p.connect(f, [f, air, air, id["log_y"]], air), id["fence_truefalsefalsetrue"]);
+        // Факел не цепляется.
+        assert_eq!(p.connect(f, [f, air, air, id["torch"]], air), id["fence_truefalsefalsefalse"]);
     }
 }
