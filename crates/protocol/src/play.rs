@@ -74,6 +74,7 @@ pub fn write_spawn_info(w: &mut Writer, s: &SpawnInfo) {
 
 /// Коды `ClientboundGameEventPacket.Type`.
 pub mod game_event {
+    pub const CHANGE_GAME_MODE: u8 = 3;
     pub const LEVEL_CHUNKS_LOAD_START: u8 = 13;
 }
 
@@ -234,6 +235,30 @@ pub fn player_info_add(id: i32, players: &[PlayerEntry]) -> Vec<u8> {
     w.buf
 }
 
+/// `player_info_update` только с режимом игры (таб-лист).
+pub fn player_info_game_mode(id: i32, uuid: Uuid, game_mode: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .u8(UPDATE_GAME_MODE)
+        .var_int(1)
+        .uuid(uuid)
+        .var_int(game_mode);
+    w.buf
+}
+
+/// `player_abilities` по режиму игры (`GameType.updatePlayerAbilities`):
+/// неуязвимость, полёт, мгновенная ломка; скорости полёта и ходьбы ванилы.
+pub fn player_abilities(id: i32, game_mode: u8) -> Vec<u8> {
+    let flags: u8 = match game_mode {
+        1 => 0x01 | 0x04 | 0x08,
+        3 => 0x01 | 0x02 | 0x04,
+        _ => 0,
+    };
+    let mut w = Writer::new();
+    w.var_int(id).u8(flags).f32(0.05).f32(0.1);
+    w.buf
+}
+
 pub fn player_info_remove(id: i32, uuids: &[Uuid]) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id).var_int(uuids.len() as i32);
@@ -301,6 +326,32 @@ pub fn add_entity(
     pitch: f32,
     data: i32,
 ) -> Vec<u8> {
+    add_entity_moving(
+        id,
+        entity_id,
+        uuid,
+        entity_type,
+        pos,
+        [0.0; 3],
+        yaw,
+        pitch,
+        data,
+    )
+}
+
+/// `add_entity` с начальной скоростью (блоков за тик).
+#[allow(clippy::too_many_arguments)]
+pub fn add_entity_moving(
+    id: i32,
+    entity_id: i32,
+    uuid: Uuid,
+    entity_type: i32,
+    pos: [f64; 3],
+    movement: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+    data: i32,
+) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id)
         .var_int(entity_id)
@@ -309,11 +360,47 @@ pub fn add_entity(
     for v in pos {
         w.f64(v);
     }
-    w.u8(0) // movement
-        .u8(angle(pitch))
+    lp_vec3(&mut w, movement);
+    w.u8(angle(pitch))
         .u8(angle(yaw))
         .u8(angle(yaw)) // голова
         .var_int(data);
+    w.buf
+}
+
+/// `LpVec3`: вектор скорости, 15 бит на ось с общим масштабом
+/// (`net.minecraft.network.LpVec3.write`).
+pub fn lp_vec3(w: &mut Writer, v: [f64; 3]) {
+    let v = v.map(|c| {
+        if c.is_nan() {
+            0.0
+        } else {
+            c.clamp(-1.7179869183e10, 1.7179869183e10)
+        }
+    });
+    let max = v[0].abs().max(v[1].abs()).max(v[2].abs());
+    if max < 3.051944088384301e-5 {
+        w.u8(0);
+        return;
+    }
+    let scale = max.ceil() as i64;
+    let more = scale & 3 != scale;
+    let markers = if more { scale & 3 | 4 } else { scale };
+    let pack = |c: f64| ((c / scale as f64 * 0.5 + 0.5) * 32766.0).round() as i64;
+    let packed = markers | pack(v[0]) << 3 | pack(v[1]) << 18 | pack(v[2]) << 33;
+    w.u8(packed as u8)
+        .u8((packed >> 8) as u8)
+        .i32((packed >> 16) as u32 as i32);
+    if more {
+        w.var_int((scale >> 2) as i32);
+    }
+}
+
+/// `set_entity_motion`: скорость сущности (блоков за тик).
+pub fn set_entity_motion(id: i32, entity_id: i32, movement: [f64; 3]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_id);
+    lp_vec3(&mut w, movement);
     w.buf
 }
 

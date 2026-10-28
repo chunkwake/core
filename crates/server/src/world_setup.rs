@@ -22,7 +22,9 @@ pub fn build_play_plan(
     world_dir: &Path,
 ) -> Result<(PlayPlan, WorldStorage), String> {
     let s = |e: chunkwake_data::DataError| e.to_string();
+    let t = std::time::Instant::now();
     let blocks = Blocks::load(data_dir).map_err(s)?;
+    tracing::debug!("blocks: {:?}", t.elapsed());
     let dim = DimensionType::load(data_dir, DIMENSION).map_err(s)?;
     let biome = registries
         .network_id("worldgen/biome", "minecraft:plains")
@@ -57,6 +59,7 @@ pub fn build_play_plan(
         dim.has_skylight,
     );
     chunkwake_world::light::relight_column(&mut chunk, &light);
+    tracing::debug!("light and template chunk: {:?}", t.elapsed());
 
     let dimension = format!("minecraft:{DIMENSION}");
     let login = Login {
@@ -114,12 +117,17 @@ pub fn build_play_plan(
                 })
                 .collect(),
         ),
-        string_parser: chunkwake_data::registries::builtin_id(
-            data_dir,
-            "command_argument_type",
-            "brigadier:string",
-        )
-        .map_err(s)?,
+        parsers: {
+            let parser = |name| {
+                chunkwake_data::registries::builtin_id(data_dir, "command_argument_type", name)
+                    .map_err(s)
+            };
+            chunkwake_protocol::text::CommandParsers {
+                string: parser("brigadier:string")?,
+                integer: parser("brigadier:integer")?,
+                item_stack: parser("minecraft:item_stack")?,
+            }
+        },
         survival: survival_data(data_dir, &blocks, &items, registries, props.difficulty)?,
     };
     let plan = PlayPlan::build(packets, login, world, props.compression_threshold).map_err(s)?;
@@ -132,6 +140,7 @@ pub fn build_play_plan(
         dim.min_y,
         chunk,
         light,
+        items,
     );
     Ok((plan, storage))
 }
@@ -145,7 +154,9 @@ fn survival_data(
     difficulty: Difficulty,
 ) -> Result<SurvivalData, String> {
     let s = |e: chunkwake_data::DataError| e.to_string();
-    let drops_by_block = chunkwake_data::world::load_block_drops(data_dir).map_err(s)?;
+    let t = std::time::Instant::now();
+    let drops_by_block = chunkwake_data::world::load_block_drops_cached(data_dir).map_err(s)?;
+    tracing::debug!("loot tables: {:?}", t.elapsed());
     let drops = (0..blocks.state_count() as u32)
         .map(|id| {
             let (name, _) = blocks.state(id)?;
@@ -155,7 +166,12 @@ fn survival_data(
     Ok(SurvivalData {
         hardness: chunkwake_data::world::load_hardness(data_dir).map_err(s)?,
         drops,
-        items: chunkwake_data::world::load_items(data_dir, items).map_err(s)?,
+        items: {
+            let t = std::time::Instant::now();
+            let v = chunkwake_data::world::load_items_cached(data_dir, items).map_err(s)?;
+            tracing::debug!("item components: {:?}", t.elapsed());
+            v
+        },
         damage_fall: registries
             .network_id("damage_type", "minecraft:fall")
             .map_err(s)?,
@@ -167,5 +183,11 @@ fn survival_data(
             .map_err(s)?,
         difficulty,
         item_ids: items.clone(),
+        item_entity_type: chunkwake_data::registries::builtin_id(
+            data_dir,
+            "entity_type",
+            "minecraft:item",
+        )
+        .map_err(s)?,
     })
 }

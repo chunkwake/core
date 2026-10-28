@@ -92,6 +92,34 @@ pub fn write_root(root: &Compound) -> Vec<u8> {
     out
 }
 
+/// Читает gzip-NBT файл (`playerdata`, `level.dat`); нет файла — `None`.
+pub fn read_gzip_file(path: &std::path::Path) -> Result<Option<Compound>, String> {
+    use std::io::Read;
+    let raw = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("read {}: {e}", path.display())),
+    };
+    let mut data = Vec::new();
+    flate2::read::GzDecoder::new(&raw[..])
+        .read_to_end(&mut data)
+        .map_err(|e| format!("gunzip {}: {e}", path.display()))?;
+    read_root(&data)
+        .map(Some)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Пишет gzip-NBT через временный файл: оборванная запись не портит старый.
+pub fn write_gzip_file(path: &std::path::Path, root: &Compound) -> Result<(), String> {
+    use std::io::Write;
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(&write_root(root)).map_err(|e| e.to_string())?;
+    let bytes = gz.finish().map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("dat_tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))
+}
+
 pub fn read_root(mut data: &[u8]) -> Result<Compound, String> {
     let r = &mut data;
     if take(r, 1)?[0] != 10 {

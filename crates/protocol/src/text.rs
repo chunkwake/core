@@ -153,30 +153,145 @@ const NODE_EXECUTABLE: u8 = 0x04;
 /// `StringArgumentType.greedyString()`.
 const STRING_GREEDY: i32 = 2;
 
-/// Пакет `commands`: корень → литерал каждой команды (исполняемый) → greedy-строка
-/// аргументов. `string_parser` — ID `brigadier:string` в `command_argument_type`.
-pub fn commands(id: i32, names: &[String], string_parser: i32) -> Vec<u8> {
-    let mut w = Writer::new();
-    w.var_int(id);
-    // Узлы: 0 — корень, затем пары (литерал, аргумент).
-    w.var_int(1 + 2 * names.len() as i32);
-    w.u8(NODE_ROOT).var_int(names.len() as i32);
-    for i in 0..names.len() {
-        w.var_int(1 + 2 * i as i32);
+/// ID парсеров аргументов в реестре `command_argument_type`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CommandParsers {
+    /// `brigadier:string`
+    pub string: i32,
+    /// `brigadier:integer`
+    pub integer: i32,
+    /// `minecraft:item_stack`: клиент сам подсказывает предметы из реестра.
+    pub item_stack: i32,
+}
+
+/// Узел дерева Brigadier. `exec` — команду можно выполнить на этом узле.
+#[derive(Clone, Debug)]
+pub enum Node {
+    Literal {
+        name: String,
+        exec: bool,
+        children: Vec<Node>,
+    },
+    Argument {
+        name: String,
+        exec: bool,
+        parser: Parser,
+        children: Vec<Node>,
+    },
+}
+
+/// Парсер аргумента со своими свойствами.
+#[derive(Clone, Copy, Debug)]
+pub enum Parser {
+    GreedyString,
+    /// Целое с минимумом и максимумом.
+    Integer(i32, i32),
+    ItemStack,
+}
+
+impl Node {
+    pub fn literal(name: &str, exec: bool, children: Vec<Node>) -> Self {
+        Node::Literal {
+            name: name.into(),
+            exec,
+            children,
+        }
     }
-    for (i, n) in names.iter().enumerate() {
-        w.u8(NODE_LITERAL | NODE_EXECUTABLE)
-            .var_int(1)
-            .var_int(2 + 2 * i as i32)
-            .string(n);
-        w.u8(NODE_ARGUMENT | NODE_EXECUTABLE)
-            .var_int(0)
-            .string("args")
-            .var_int(string_parser)
-            .var_int(STRING_GREEDY);
+    pub fn argument(name: &str, exec: bool, parser: Parser, children: Vec<Node>) -> Self {
+        Node::Argument {
+            name: name.into(),
+            exec,
+            parser,
+            children,
+        }
+    }
+    fn children(&self) -> &[Node] {
+        match self {
+            Node::Literal { children, .. } | Node::Argument { children, .. } => children,
+        }
+    }
+}
+
+/// Пакет `commands`: корень с узлами `roots`. Узлы пишутся в порядке обхода в
+/// ширину, дети ссылаются на индексы.
+pub fn commands_tree(id: i32, roots: &[Node], parsers: CommandParsers) -> Vec<u8> {
+    // Плоский список: индекс 0 — корень; у каждого узла — индексы детей.
+    let mut flat: Vec<(Option<&Node>, Vec<i32>)> = vec![(None, Vec::new())];
+    let mut queue: Vec<(usize, &Node)> = roots.iter().map(|n| (0, n)).collect();
+    let mut i = 0;
+    while i < queue.len() {
+        let (parent, node) = queue[i];
+        let index = flat.len();
+        flat.push((Some(node), Vec::new()));
+        flat[parent].1.push(index as i32);
+        queue.extend(node.children().iter().map(|c| (index, c)));
+        i += 1;
+    }
+    let mut w = Writer::new();
+    w.var_int(id).var_int(flat.len() as i32);
+    for (node, children) in &flat {
+        let exec = |e: bool| if e { NODE_EXECUTABLE } else { 0 };
+        match node {
+            None => {
+                w.u8(NODE_ROOT);
+            }
+            Some(Node::Literal { exec: e, .. }) => {
+                w.u8(NODE_LITERAL | exec(*e));
+            }
+            Some(Node::Argument { exec: e, .. }) => {
+                w.u8(NODE_ARGUMENT | exec(*e));
+            }
+        }
+        w.var_int(children.len() as i32);
+        for &c in children {
+            w.var_int(c);
+        }
+        match node {
+            None => {}
+            Some(Node::Literal { name, .. }) => {
+                w.string(name);
+            }
+            Some(Node::Argument { name, parser, .. }) => {
+                w.string(name);
+                match *parser {
+                    Parser::GreedyString => {
+                        w.var_int(parsers.string).var_int(STRING_GREEDY);
+                    }
+                    // Флаги: 1 — есть минимум, 2 — есть максимум.
+                    Parser::Integer(min, max) => {
+                        w.var_int(parsers.integer).u8(3).i32(min).i32(max);
+                    }
+                    Parser::ItemStack => {
+                        w.var_int(parsers.item_stack);
+                    }
+                }
+            }
+        }
     }
     w.var_int(0);
     w.buf
+}
+
+/// Команды плагинов: литерал → greedy-строка аргументов.
+pub fn commands(id: i32, names: &[String], string_parser: i32) -> Vec<u8> {
+    let roots: Vec<Node> = names
+        .iter()
+        .map(|n| {
+            Node::literal(
+                n,
+                true,
+                vec![Node::argument("args", true, Parser::GreedyString, vec![])],
+            )
+        })
+        .collect();
+    commands_tree(
+        id,
+        &roots,
+        CommandParsers {
+            string: string_parser,
+            ..Default::default()
+        },
+    )
 }
 
 #[cfg(test)]
@@ -237,6 +352,49 @@ mod tests {
         want.extend([NODE_ARGUMENT | NODE_EXECUTABLE, 0, 4]);
         want.extend(b"args");
         want.extend([5, 2, 0]);
+        assert_eq!(p, want);
+    }
+
+    #[test]
+    fn command_tree_breadth_first() {
+        let roots = [Node::literal(
+            "give",
+            false,
+            vec![Node::argument(
+                "item",
+                true,
+                Parser::ItemStack,
+                vec![Node::argument(
+                    "count",
+                    true,
+                    Parser::Integer(1, 64),
+                    vec![],
+                )],
+            )],
+        )];
+        let p = commands_tree(
+            9,
+            &roots,
+            CommandParsers {
+                string: 5,
+                integer: 3,
+                item_stack: 7,
+            },
+        );
+        let want: Vec<u8> = [
+            vec![9, 4],
+            vec![NODE_ROOT, 1, 1],
+            vec![NODE_LITERAL, 1, 2, 4],
+            b"give".to_vec(),
+            vec![NODE_ARGUMENT | NODE_EXECUTABLE, 1, 3, 4],
+            b"item".to_vec(),
+            vec![7],
+            vec![NODE_ARGUMENT | NODE_EXECUTABLE, 0, 5],
+            b"count".to_vec(),
+            vec![3, 3, 0, 0, 0, 1, 0, 0, 0, 64],
+            vec![0],
+        ]
+        .concat();
         assert_eq!(p, want);
     }
 }

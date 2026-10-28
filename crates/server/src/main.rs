@@ -2,6 +2,7 @@
 
 mod cli;
 mod config;
+mod players;
 mod setup_tui;
 mod storage;
 mod world_setup;
@@ -105,6 +106,7 @@ async fn serve(dir: &Path) -> Result<(), String> {
     let (play, storage) = (std::sync::Arc::new(play), std::sync::Arc::new(storage));
     // Регионы читаются с диска при первом обращении к их чанкам.
     play.set_source(storage.clone());
+    play.set_player_source(storage.clone());
     tracing::info!(
         "world: {} (data loaded in {:.1}s)",
         props.level_name,
@@ -133,7 +135,7 @@ async fn serve(dir: &Path) -> Result<(), String> {
             let n = tokio::task::spawn_blocking(move || storage.save(&world))
                 .await
                 .map_err(|e| e.to_string())??;
-            tracing::info!("saved {n} chunks");
+            tracing::info!("saved {n} chunks and players");
             Ok(())
         }
     }

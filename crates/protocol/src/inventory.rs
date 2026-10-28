@@ -189,6 +189,26 @@ pub fn entity_event(id: i32, entity_id: i32, event: u8) -> Vec<u8> {
     w.buf
 }
 
+/// `set_entity_data` предмета-сущности: `ItemEntity.DATA_ITEM` (индекс 8,
+/// сериализатор `ITEM_STACK` = 7).
+pub fn set_entity_item(id: i32, entity_id: i32, stack: Slot) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_id).u8(8).var_int(7);
+    write_stack(&mut w, stack);
+    w.u8(0xff);
+    w.buf
+}
+
+/// `take_item_entity`: анимация подбора (предмет летит к игроку).
+pub fn take_item_entity(id: i32, item_entity: i32, collector: i32, amount: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .var_int(item_entity)
+        .var_int(collector)
+        .var_int(amount);
+    w.buf
+}
+
 pub const ENTITY_EVENT_DEATH: u8 = 3;
 /// Использование предмета закончено (еда съедена).
 pub const ENTITY_EVENT_USE_ITEM_COMPLETE: u8 = 9;
@@ -243,5 +263,23 @@ mod tests {
             vec![(36, None), (9, Some(Stack { item: 1, count: 3 }))]
         );
         assert_eq!(c.carried, Some(Stack { item: 28, count: 1 }));
+    }
+
+    #[test]
+    fn lp_vec3_matches_vanilla() {
+        let enc = |v| {
+            let mut w = Writer::new();
+            crate::play::lp_vec3(&mut w, v);
+            w.buf
+        };
+        assert_eq!(enc([0.0; 3]), [0]);
+        // Масштаб 1, оси (0.5, 0, -0.5): 24575, 16383, 8192 (round((c*0.5+0.5)*32766)).
+        let p: i64 = 1 | 24575 << 3 | 16383 << 18 | 8192 << 33;
+        let mut want = vec![p as u8, (p >> 8) as u8];
+        want.extend(((p >> 16) as u32).to_be_bytes());
+        assert_eq!(enc([0.5, 0.0, -0.5]), want);
+        // Масштаб 5 не влезает в 2 бита: продолжение varint(1).
+        assert_eq!(enc([5.0, 0.0, 0.0])[0] & 7, 4 | 1);
+        assert_eq!(*enc([5.0, 0.0, 0.0]).last().unwrap(), 1);
     }
 }

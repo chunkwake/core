@@ -1,8 +1,11 @@
 //! Мир на диске: `<level-name>/region/*.mca` (Anvil), загрузка при старте,
 //! автосохранение и сохранение при остановке.
 
+use crate::players::PlayerFiles;
 use chunkwake_data::world::Blocks;
-use chunkwake_net::play::{ChunkSource, LoadedChunk, PlayPlan};
+use chunkwake_net::Uuid;
+use chunkwake_net::play::{ChunkSource, LoadedChunk, PlayPlan, PlayerSource};
+use chunkwake_net::survival::PlayerSave;
 use chunkwake_world::ChunkColumn;
 use chunkwake_world::anvil::{self, Format, Names, RegionStore};
 use chunkwake_world::light::{self, LightTable};
@@ -19,6 +22,7 @@ pub struct WorldStorage {
     light: Arc<LightTable>,
     format: Format,
     names: StateNames,
+    players: PlayerFiles,
 }
 
 struct StateNames {
@@ -44,6 +48,7 @@ impl Names for StateNames {
 
 impl WorldStorage {
     /// `world_dir` — каталог мира; `data_version` — `world_version` из version.json.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         world_dir: &Path,
         blocks: Blocks,
@@ -52,6 +57,7 @@ impl WorldStorage {
         min_y: i32,
         template: ChunkColumn,
         light: Arc<LightTable>,
+        items: HashMap<String, i32>,
     ) -> Self {
         let biome_ids = biomes
             .iter()
@@ -60,6 +66,7 @@ impl WorldStorage {
             .collect();
         Self {
             store: RegionStore::new(world_dir.join("region")),
+            players: PlayerFiles::new(world_dir, data_version, items),
             template,
             light,
             format: Format {
@@ -76,6 +83,12 @@ impl WorldStorage {
 
     /// Записывает изменённые чанки; возвращает их число.
     pub fn save(&self, plan: &PlayPlan) -> Result<usize, String> {
+        // Игроки: ошибка одного не мешает остальным и чанкам.
+        for (uuid, s) in plan.take_player_saves() {
+            if let Err(e) = self.players.save(uuid, &s) {
+                tracing::error!("save player {uuid}: {e}");
+            }
+        }
         let unsaved = plan.unsaved();
         if unsaved.is_empty() {
             return Ok(0);
@@ -111,6 +124,22 @@ impl WorldStorage {
                 }
             }
         });
+    }
+}
+
+impl PlayerSource for WorldStorage {
+    fn load_player(&self, uuid: Uuid) -> Option<PlayerSave> {
+        self.players
+            .load(uuid)
+            .inspect_err(|e| tracing::error!("load player {uuid}: {e}"))
+            .ok()
+            .flatten()
+    }
+
+    fn save_player(&self, uuid: Uuid, save: &PlayerSave) {
+        if let Err(e) = self.players.save(uuid, save) {
+            tracing::error!("save player {uuid}: {e}");
+        }
     }
 }
 

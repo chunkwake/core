@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod configuration;
 pub mod crypto;
+pub mod items;
 pub mod play;
 pub mod survival;
 
@@ -19,7 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use uuid::Uuid;
+pub use uuid::Uuid;
 
 /// Версия игры, на которую рассчитан сервер (из `version.json` ванильного jar).
 #[derive(Clone, Debug)]

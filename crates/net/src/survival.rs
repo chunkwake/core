@@ -47,7 +47,8 @@ impl Inventory {
 
     /// Кладёт предметы: сначала доливает такие же стопки, потом в пустые
     /// слоты. Возвращает изменённые слоты; не влезшее теряется.
-    pub fn add(&mut self, item: i32, mut count: i32, max_stack: i32) -> Vec<usize> {
+    /// Кладёт предметы в инвентарь: изменённые слоты и сколько не влезло.
+    pub fn add(&mut self, item: i32, mut count: i32, max_stack: i32) -> (Vec<usize>, i32) {
         let mut changed = Vec::new();
         for i in Self::storage_order() {
             if count == 0 {
@@ -74,7 +75,7 @@ impl Inventory {
                 changed.push(i);
             }
         }
-        changed
+        (changed, count)
     }
 
     /// Тратит один предмет из руки; `false` — рука пуста.
@@ -94,13 +95,41 @@ impl Inventory {
 
     /// Итог клика от клиента: изменённые слоты и курсор. Пока доверяем клиенту
     /// (проверка по правилам кликов — позже); слоты крафта игнорируем.
-    pub fn apply_click(&mut self, c: &ContainerClick) {
+    /// Применяет клик клиента. Возвращает выброшенное: Q над слотом (THROW)
+    /// или клик за окном (слот -999) — то, что пропало из инвентаря.
+    pub fn apply_click(&mut self, c: &ContainerClick) -> Vec<Stack> {
+        let before = self.totals();
         for &(slot, stack) in &c.changed {
             if (5..SLOTS as i16).contains(&slot) {
                 self.slots[slot as usize] = stack;
             }
         }
         self.carried = c.carried;
+        if c.mode != THROW && c.slot != OUTSIDE {
+            return Vec::new();
+        }
+        let after = self.totals();
+        before
+            .into_iter()
+            .filter_map(|(item, n)| {
+                let gone = n - after.get(&item).copied().unwrap_or(0);
+                (gone > 0).then_some(Stack { item, count: gone })
+            })
+            .collect()
+    }
+
+    /// Сколько каждого предмета в слотах и на курсоре.
+    fn totals(&self) -> std::collections::HashMap<i32, i32> {
+        let mut m = std::collections::HashMap::new();
+        for s in self
+            .slots
+            .iter()
+            .chain(std::iter::once(&self.carried))
+            .flatten()
+        {
+            *m.entry(s.item).or_insert(0) += s.count;
+        }
+        m
     }
 
     pub fn set(&mut self, slot: i16, stack: Slot) -> bool {
@@ -117,6 +146,10 @@ impl Inventory {
         self.state
     }
 }
+
+/// `ContainerInput.THROW` и слот «за окном» в `container_click`.
+const THROW: i32 = 4;
+const OUTSIDE: i16 = -999;
 
 pub const MAX_HEALTH: f32 = 20.0;
 pub const MAX_FOOD: i32 = 20;
@@ -184,7 +217,7 @@ pub struct Vitals {
     last_pos: Option<[f64; 3]>,
     on_ground: bool,
     pub sprinting: bool,
-    exhaustion: f32,
+    pub exhaustion: f32,
     /// Счётчик тиков регенерации или голодания.
     food_timer: u32,
     pub dead: bool,
@@ -335,6 +368,66 @@ impl Vitals {
     }
 }
 
+/// Сохранённое состояние игрока (`playerdata`): слоты — индексы окна игрока.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayerSave {
+    pub pos: [f64; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub health: f32,
+    pub food: i32,
+    pub saturation: f32,
+    pub exhaustion: f32,
+    pub selected: usize,
+    pub slots: Vec<(usize, Stack)>,
+    /// Режим игры (`GameType`); `None` — режим сервера.
+    pub game_mode: Option<u8>,
+}
+
+/// Живое состояние игрока в сессии: инвентарь и здоровье.
+#[derive(Default)]
+pub struct PlayerState {
+    pub inv: Inventory,
+    pub vitals: Vitals,
+    pub game_mode: Option<u8>,
+}
+
+impl PlayerState {
+    pub fn restore(s: &PlayerSave) -> Self {
+        let mut st = Self::default();
+        for &(i, stack) in &s.slots {
+            if i < SLOTS && stack.count > 0 {
+                st.inv.slots[i] = Some(stack);
+            }
+        }
+        st.inv.selected = s.selected.min(8);
+        st.game_mode = s.game_mode.filter(|&m| m <= 3);
+        st.vitals.health = s.health.clamp(0.0, MAX_HEALTH);
+        st.vitals.food = s.food.clamp(0, MAX_FOOD);
+        st.vitals.saturation = s.saturation.clamp(0.0, st.vitals.food as f32);
+        st.vitals.exhaustion = s.exhaustion.clamp(0.0, 40.0);
+        st
+    }
+
+    pub fn save(&self, pos: [f64; 3], yaw: f32, pitch: f32) -> PlayerSave {
+        let v = &self.vitals;
+        PlayerSave {
+            pos,
+            yaw,
+            pitch,
+            health: v.health,
+            food: v.food,
+            saturation: v.saturation,
+            exhaustion: v.exhaustion,
+            selected: self.inv.selected,
+            game_mode: self.game_mode,
+            slots: (0..SLOTS)
+                .filter_map(|i| self.inv.slots[i].map(|s| (i, s)))
+                .collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,12 +437,12 @@ mod tests {
         let mut inv = Inventory::default();
         inv.slots[MAIN] = Some(Stack { item: 1, count: 60 });
         let changed = inv.add(1, 10, 64);
-        assert_eq!(changed, vec![MAIN, HOTBAR]);
+        assert_eq!(changed, (vec![MAIN, HOTBAR], 0));
         assert_eq!(inv.slots[MAIN].unwrap().count, 64);
         assert_eq!(inv.slots[HOTBAR], Some(Stack { item: 1, count: 6 }));
         // Неполные стопки (макс. 1): каждая в свой слот.
         let changed = inv.add(2, 2, 1);
-        assert_eq!(changed, vec![HOTBAR + 1, HOTBAR + 2]);
+        assert_eq!(changed, (vec![HOTBAR + 1, HOTBAR + 2], 0));
     }
 
     #[test]
@@ -456,5 +549,54 @@ mod tests {
         v.saturation = 0.0;
         v.eat(1, 9.6);
         assert_eq!((v.food, v.saturation), (3, 3.0));
+    }
+
+    #[test]
+    fn save_round_trip() {
+        let mut st = PlayerState::default();
+        st.inv.slots[HOTBAR + 2] = Some(Stack { item: 7, count: 3 });
+        st.inv.slots[OFFHAND] = Some(Stack { item: 9, count: 1 });
+        st.inv.selected = 2;
+        st.vitals.health = 7.5;
+        st.vitals.food = 12;
+        st.game_mode = Some(1);
+        let s = st.save([1.0, 2.0, 3.0], 90.0, -10.0);
+        assert_eq!(s.slots.len(), 2);
+        let back = PlayerState::restore(&s);
+        assert_eq!(back.save([1.0, 2.0, 3.0], 90.0, -10.0), s);
+    }
+
+    #[test]
+    fn throw_click_returns_dropped() {
+        let mut inv = Inventory::default();
+        inv.slots[HOTBAR] = Some(Stack { item: 4, count: 10 });
+        let click = |slot, mode, changed, carried| ContainerClick {
+            window: 0,
+            state: 0,
+            slot,
+            button: 0,
+            mode,
+            changed,
+            carried,
+        };
+        // Q над слотом: 10 -> 9.
+        let c = click(
+            HOTBAR as i16,
+            4,
+            vec![(HOTBAR as i16, Some(Stack { item: 4, count: 9 }))],
+            None,
+        );
+        assert_eq!(inv.apply_click(&c), vec![Stack { item: 4, count: 1 }]);
+        // Обычный клик ничего не выбрасывает.
+        let c = click(
+            HOTBAR as i16,
+            0,
+            vec![(HOTBAR as i16, None)],
+            Some(Stack { item: 4, count: 9 }),
+        );
+        assert!(inv.apply_click(&c).is_empty());
+        // Клик за окном с предметом на курсоре.
+        let c = click(-999, 0, vec![], None);
+        assert_eq!(inv.apply_click(&c), vec![Stack { item: 4, count: 9 }]);
     }
 }

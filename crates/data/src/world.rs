@@ -338,6 +338,96 @@ impl DimensionType {
     }
 }
 
+/// Сводка из тысяч мелких файлов (лут, компоненты предметов) в одном файле
+/// рядом с данными: при первом запуске собирается, дальше читается только она.
+/// На холодном диске под антивирусом это секунды вместо десятков.
+const DERIVED_DIR: &str = "chunkwake-derived-v1";
+
+fn derived(root: &Path, file: &str) -> std::path::PathBuf {
+    root.join(DERIVED_DIR).join(file)
+}
+
+/// Пишет файл через временный: оборванная запись не оставит битую сводку.
+fn write_derived(path: &Path, text: &str) -> Result<(), DataError> {
+    let io = |e: std::io::Error| DataError::Io(format!("write {}: {e}", path.display()));
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(io)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, text).map_err(io)?;
+    std::fs::rename(&tmp, path).map_err(io)
+}
+
+/// `load_block_drops` через сводку `drops.tsv` (блок, предмет).
+pub fn load_block_drops_cached(root: &Path) -> Result<HashMap<String, String>, DataError> {
+    let path = derived(root, "drops.tsv");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        return Ok(text
+            .lines()
+            .filter_map(|l| l.split_once('\t'))
+            .map(|(b, i)| (b.to_owned(), i.to_owned()))
+            .collect());
+    }
+    let drops = load_block_drops(root)?;
+    let mut text: Vec<String> = drops.iter().map(|(b, i)| format!("{b}\t{i}")).collect();
+    text.sort();
+    write_derived(&path, &(text.join("\n") + "\n"))?;
+    Ok(drops)
+}
+
+/// `load_items` через сводку `items.tsv`: имя, стопка и для еды — сытость,
+/// насыщение, можно ли всегда, секунды.
+pub fn load_items_cached(
+    root: &Path,
+    items: &HashMap<String, i32>,
+) -> Result<Vec<ItemInfo>, DataError> {
+    let path = derived(root, "items.tsv");
+    let len = items.values().max().map_or(0, |&m| m as usize + 1);
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let mut out = vec![ItemInfo::default(); len];
+        for line in text.lines() {
+            if let Some((id, info)) = parse_item_line(line, items) {
+                out[id] = info;
+            }
+        }
+        return Ok(out);
+    }
+    let out = load_items(root, items)?;
+    let mut lines: Vec<String> = items
+        .iter()
+        .map(|(name, &id)| item_line(name, &out[id as usize]))
+        .collect();
+    lines.sort();
+    write_derived(&path, &(lines.join("\n") + "\n"))?;
+    Ok(out)
+}
+
+fn item_line(name: &str, i: &ItemInfo) -> String {
+    match i.food {
+        Some(f) => format!(
+            "{name}\t{}\t{}\t{}\t{}\t{}",
+            i.max_stack, f.nutrition, f.saturation, f.can_always_eat, f.seconds
+        ),
+        None => format!("{name}\t{}", i.max_stack),
+    }
+}
+
+fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, ItemInfo)> {
+    let mut f = line.split('\t');
+    let id = *items.get(f.next()?)? as usize;
+    let max_stack = f.next()?.parse().ok()?;
+    let food = match (f.next(), f.next(), f.next(), f.next()) {
+        (Some(n), Some(s), Some(a), Some(sec)) => Some(Food {
+            nutrition: n.parse().ok()?,
+            saturation: s.parse().ok()?,
+            can_always_eat: a.parse().ok()?,
+            seconds: sec.parse().ok()?,
+        }),
+        _ => None,
+    };
+    Some((id, ItemInfo { max_stack, food }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,5 +492,29 @@ mod loot_tests {
         assert!(f.can_always_eat);
         assert_eq!(f.seconds, 2.0);
         assert_eq!(parse_food(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn item_line_round_trip() {
+        let items = HashMap::from([("minecraft:bread".to_string(), 3)]);
+        let food = Food {
+            nutrition: 5,
+            saturation: 6.0,
+            can_always_eat: false,
+            seconds: 1.6,
+        };
+        for info in [
+            ItemInfo {
+                max_stack: 64,
+                food: Some(food),
+            },
+            ItemInfo {
+                max_stack: 16,
+                food: None,
+            },
+        ] {
+            let line = item_line("minecraft:bread", &info);
+            assert_eq!(parse_item_line(&line, &items), Some((3, info)));
+        }
     }
 }
