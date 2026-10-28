@@ -109,7 +109,17 @@ pub fn settle(
     min_y: f64,
     solid: impl Fn([i32; 3]) -> bool,
 ) -> Option<[f64; 3]> {
-    let mut d = Dropped::new(pos, vel, Stack { item: 0, count: 1 , damage: 0}, Duration::ZERO);
+    let mut d = Dropped::new(
+        pos,
+        vel,
+        Stack {
+            item: 0,
+            count: 1,
+            damage: 0,
+            extra: 0,
+        },
+        Duration::ZERO,
+    );
     for _ in 0..600 {
         step(&mut d, &solid);
         if d.resting() {
@@ -126,7 +136,7 @@ pub fn settle(
 /// тот же предмет, влезает в одну стопку, хитбоксы 0.25 касаются с запасом
 /// 0.5 по горизонтали.
 pub fn can_merge(a: &Dropped, b: &Dropped, max_stack: i32) -> bool {
-    a.stack.item == b.stack.item
+    a.stack.same_kind(&b.stack)
         && a.stack.count + b.stack.count <= max_stack
         && (a.pos[0] - b.pos[0]).abs() < 0.75
         && (a.pos[2] - b.pos[2]).abs() < 0.75
@@ -222,7 +232,12 @@ mod tests {
             Dropped::new(
                 [x, 64.0, 0.0],
                 [0.0; 3],
-                Stack { item, count, damage: 0 },
+                Stack {
+                    item,
+                    count,
+                    damage: 0,
+                    extra: 0,
+                },
                 Duration::ZERO,
             )
         };
@@ -237,7 +252,12 @@ mod tests {
         let mut d = Dropped::new(
             [0.5, 2.0, 0.5],
             [0.0; 3],
-            Stack { item: 1, count: 1 , damage: 0},
+            Stack {
+                item: 1,
+                count: 1,
+                damage: 0,
+                extra: 0,
+            },
             Duration::ZERO,
         );
         let mut synced = 0;

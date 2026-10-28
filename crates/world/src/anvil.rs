@@ -247,15 +247,25 @@ pub fn chunk_from_nbt(
         .filter_map(Tag::as_compound)
     {
         let int = |k: &str| be.get(k).and_then(Tag::as_i64).map(|v| v as i32);
-        let (Some(id), Some(x), Some(y), Some(z)) = (be.get("id").and_then(Tag::as_str), int("x"), int("y"), int("z"))
-        else {
+        let (Some(id), Some(x), Some(y), Some(z)) = (
+            be.get("id").and_then(Tag::as_str),
+            int("x"),
+            int("y"),
+            int("z"),
+        ) else {
             continue;
         };
         let mut nbt = be.clone();
         for k in ["id", "x", "y", "z", "keepPacked"] {
             nbt.remove(k);
         }
-        c.block_entities.insert([x, y, z], crate::BlockEntity { id: id.to_owned(), nbt });
+        c.block_entities.insert(
+            [x, y, z],
+            crate::BlockEntity {
+                id: id.to_owned(),
+                nbt,
+            },
+        );
     }
     Ok((c, lit))
 }
@@ -293,17 +303,20 @@ impl RegionStore {
         };
         let mut out = BTreeMap::new();
         if bytes.len() < 2 * SECTOR {
-            return Ok(out);
+            return Err(format!("{}: truncated region header", path.display()));
         }
         for i in 0..1024 {
             let loc = u32::from_be_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
             let (offset, count) = ((loc >> 8) as usize * SECTOR, (loc & 0xff) as usize);
-            if offset == 0 || count == 0 || offset + 5 > bytes.len() {
+            if offset == 0 && count == 0 {
                 continue;
+            }
+            if offset < 2 * SECTOR || count == 0 || offset + 5 > bytes.len() {
+                return Err(format!("{}: invalid chunk {i} location", path.display()));
             }
             let len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
             let Some(payload) = bytes.get(offset + 4..offset + 4 + len) else {
-                continue; // обрезанный файл: чанк пропускаем
+                return Err(format!("{}: truncated chunk {i}", path.display()));
             };
             out.insert(i, payload.to_vec());
         }
@@ -349,6 +362,11 @@ impl RegionStore {
             }
             let tmp = path.with_extension("mca.tmp");
             std::fs::write(&tmp, &file).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+            std::fs::File::options()
+                .write(true)
+                .open(&tmp)
+                .and_then(|f| f.sync_all())
+                .map_err(|e| format!("sync {}: {e}", tmp.display()))?;
             std::fs::rename(&tmp, &path).map_err(|e| format!("rename {}: {e}", tmp.display()))?;
         }
         Ok(())
@@ -483,6 +501,22 @@ mod tests {
         all.sort_by_key(|(p, _)| *p);
         assert_eq!(all, vec![((3, -2), a), ((40, 1), b)]);
         assert!(dir.join("r.0.-1.mca").is_file() && dir.join("r.1.0.mca").is_file());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn truncated_region_is_reported_instead_of_silently_dropping_chunks() {
+        let dir =
+            std::env::temp_dir().join(format!("chunkwake-anvil-corrupt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = RegionStore::new(&dir);
+        std::fs::write(dir.join("r.0.0.mca"), [0u8; 12]).unwrap();
+        assert!(
+            store
+                .load_region(0, 0)
+                .unwrap_err()
+                .contains("truncated region header")
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

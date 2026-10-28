@@ -26,6 +26,19 @@ final class Stub {
 
     private Stub() {}
 
+    /** Делегат прокси, созданного {@link #of}; иначе {@code null}. */
+    static Object impl(Object proxy) {
+        return proxy != null && Proxy.isProxyClass(proxy.getClass())
+                && Proxy.getInvocationHandler(proxy) instanceof Handler h ? h.impl : null;
+    }
+
+    private record Handler(Object impl, InvocationHandler call) implements InvocationHandler {
+        @Override
+        public Object invoke(Object proxy, Method m, Object[] args) throws Throwable {
+            return call.invoke(proxy, m, args);
+        }
+    }
+
     static <T> T of(Class<T> iface, Object impl) {
         InvocationHandler h = (proxy, m, args) -> {
             Optional<Method> target = CACHE.get(impl.getClass()).computeIfAbsent(m, k -> find(impl.getClass(), k));
@@ -61,7 +74,7 @@ final class Stub {
             throw new UnsupportedOperationException("chunkwake: " + iface.getSimpleName() + "."
                     + m.getName() + Arrays.toString(m.getParameterTypes()) + " is not implemented yet");
         };
-        return iface.cast(Proxy.newProxyInstance(iface.getClassLoader(), new Class<?>[] {iface}, h));
+        return iface.cast(Proxy.newProxyInstance(iface.getClassLoader(), new Class<?>[] {iface}, new Handler(impl, h)));
     }
 
     private static Optional<Method> find(Class<?> impl, Method m) {

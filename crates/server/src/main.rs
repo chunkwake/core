@@ -1,5 +1,6 @@
 //! Точка входа сервера Chunkwake.
 
+mod backup;
 mod cli;
 mod config;
 mod players;
@@ -29,9 +30,20 @@ async fn main() {
     }
 }
 
+/// Местное время до секунды: `2026-10-28 11:04:32`, без `T`, `Z` и долей секунды.
+struct LogTime;
+
+impl tracing_subscriber::fmt::time::FormatTime for LogTime {
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+        write!(w, "{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
+    }
+}
+
 async fn serve(dir: &Path) -> Result<(), String> {
+    let _server_lock = backup::lock(dir)?;
     let (props, version) = cli::check(dir)?;
     tracing_subscriber::fmt()
+        .with_timer(LogTime)
         .with_target(false)
         .with_max_level(props.log_level)
         .init();
@@ -113,21 +125,20 @@ async fn serve(dir: &Path) -> Result<(), String> {
         props.level_name,
         started.elapsed().as_secs_f64()
     );
-    play.spawn_tick();
-    storage.spawn_autosave(play.clone());
-    start_plugins(dir, &props, &play).await;
+    let tick_task = play.spawn_tick();
+    let autosave_task = storage.spawn_autosave(play.clone());
+    let bridge = start_plugins(dir, &props, &play).await;
 
     let mut net = props.net_config(version);
     net.configuration = Some(std::sync::Arc::new(plan));
     let server = Server::new(net);
     let world = play.clone();
-    let serving = server.serve(listener, move |player, mut conn| {
-        let play = play.clone();
-        tokio::spawn(async move {
-            let result = play.run(&player, &mut conn).await;
-            tracing::info!(name = %player.name, ?result, "player left");
-        });
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let (session_tx, mut session_rx) = tokio::sync::mpsc::unbounded_channel();
+    let serving = server.serve_until(listener, shutdown_rx, move |player, conn| {
+        let _ = session_tx.send((player, conn));
     });
+    let mut sessions = tokio::task::JoinSet::new();
     // Консоль: строки stdin — команды сервера (`op`, `deop`, `list`, `stop`, плагины).
     let (console_tx, mut console) = tokio::sync::mpsc::unbounded_channel::<String>();
     std::thread::Builder::new()
@@ -142,11 +153,31 @@ async fn serve(dir: &Path) -> Result<(), String> {
         })
         .map_err(|e| e.to_string())?;
     tokio::pin!(serving);
-    // Ctrl+C или `stop`: сохранить мир и выйти.
+    let mut serve_error = None;
+    let mut serving_done = false;
+    let mut session_errors = Vec::new();
+    // Ctrl+C или `stop`: завершить соединения, плагины и сохранить мир.
     loop {
         tokio::select! {
-            result = &mut serving => return result.map_err(|e| e.to_string()),
+            result = &mut serving => {
+                serve_error = result.err().map(|e| e.to_string());
+                serving_done = true;
+                break;
+            },
             _ = tokio::signal::ctrl_c() => break,
+            Some((player, mut conn)) = session_rx.recv() => {
+                let play = play.clone();
+                sessions.spawn(async move {
+                    let result = play.run(&player, &mut conn).await;
+                    tracing::info!(name = %player.name, ?result, "player left");
+                });
+            }
+            Some(result) = sessions.join_next(), if !sessions.is_empty() => {
+                if let Err(error) = result {
+                    tracing::error!(%error, "player task failed");
+                    session_errors.push(format!("player task failed: {error}"));
+                }
+            }
             Some(line) = console.recv() => {
                 if line == "stop" {
                     break;
@@ -158,12 +189,71 @@ async fn serve(dir: &Path) -> Result<(), String> {
             }
         }
     }
+    let _ = shutdown_tx.send(true);
+    if !serving_done {
+        serve_error = serving.await.err().map(|e| e.to_string());
+    }
+    while let Ok((player, mut conn)) = session_rx.try_recv() {
+        let play = play.clone();
+        sessions.spawn(async move {
+            let result = play.run(&player, &mut conn).await;
+            tracing::info!(name = %player.name, ?result, "player left");
+        });
+    }
+    play.disconnect_all();
+    let session_timeout = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(result) = sessions.join_next().await {
+            if let Err(error) = result {
+                tracing::error!(%error, "player task failed");
+                session_errors.push(format!("player task failed: {error}"));
+            }
+        }
+    })
+    .await
+    .is_err();
+    if session_timeout {
+        tracing::error!("player shutdown timed out after 10 seconds");
+        sessions.abort_all();
+        while sessions.join_next().await.is_some() {}
+    }
+    tick_task.abort();
+    autosave_task.abort();
+    let _ = tick_task.await;
+    let _ = autosave_task.await;
+    let mut errors = Vec::new();
+    if let Some(error) = serve_error {
+        errors.push(format!("network: {error}"));
+    }
+    errors.extend(session_errors);
+    if session_timeout {
+        errors.push("player shutdown timed out".into());
+    }
+    if let Some(bridge) = bridge {
+        match bridge.shutdown() {
+            Ok(reply) => match tokio::task::spawn_blocking(move || {
+                reply.recv_timeout(std::time::Duration::from_secs(10))
+            })
+            .await
+            {
+                Ok(Ok(true)) => {}
+                Ok(Ok(false)) => errors.push("plugin shutdown failed".into()),
+                Ok(Err(error)) => errors.push(format!("plugin shutdown: {error}")),
+                Err(error) => errors.push(format!("plugin shutdown task: {error}")),
+            },
+            Err(error) => errors.push(format!("plugin shutdown: {error}")),
+        }
+    }
     tracing::info!("stopping: saving world");
-    let n = tokio::task::spawn_blocking(move || storage.save(&world))
-        .await
-        .map_err(|e| e.to_string())??;
-    tracing::info!("saved {n} chunks and players");
-    Ok(())
+    match tokio::task::spawn_blocking(move || storage.save(&world)).await {
+        Ok(Ok(n)) => tracing::info!("saved {n} chunks; pending player snapshots flushed"),
+        Ok(Err(error)) => errors.push(error),
+        Err(error) => errors.push(format!("final save task: {error}")),
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n"))
+    }
 }
 
 /// Paper-плагины из `plugins/`: без API (`java/dist`, `api/`) или Java сервер
@@ -172,12 +262,12 @@ async fn start_plugins(
     dir: &Path,
     props: &config::Properties,
     play: &std::sync::Arc<chunkwake_net::play::PlayPlan>,
-) {
+) -> Option<std::sync::Arc<chunkwake_bridge::Bridge>> {
     let Some(api) = chunkwake_bridge::find_api_dir(dir) else {
         tracing::warn!(
             "plugin API not found (build it with `java/gradlew -p java dist`); plugins disabled"
         );
-        return;
+        return None;
     };
     let java = std::env::var_os("CHUNKWAKE_JAVA")
         .map(std::path::PathBuf::from)
@@ -190,10 +280,17 @@ async fn start_plugins(
     .await;
     match started {
         Ok(Ok((bridge, n))) => {
-            play.set_hooks(bridge);
+            play.set_hooks(bridge.clone());
             tracing::info!("enabled {n} plugin(s)");
+            Some(bridge)
         }
-        Ok(Err(e)) => tracing::error!("plugins disabled: {e}"),
-        Err(e) => tracing::error!("plugins disabled: {e}"),
+        Ok(Err(e)) => {
+            tracing::error!("plugins disabled: {e}");
+            None
+        }
+        Err(e) => {
+            tracing::error!("plugins disabled: {e}");
+            None
+        }
     }
 }

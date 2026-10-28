@@ -116,11 +116,13 @@ final class PlayerImpl {
             List<org.bukkit.potion.PotionEffect> effects = new ArrayList<>();
             for (int i = 1 + InventoryImpl.SIZE; i < lines.length; i++) {
                 String[] e = lines[i].split(" ");
-                if (e.length == 5 && e[0].equals("e")) {
+                if (e.length >= 5 && e[0].equals("e")) {
                     var type = org.bukkit.Registry.EFFECT.get(org.bukkit.NamespacedKey.fromString(e[1]));
                     if (type != null) {
+                        boolean ambient = e.length > 5 && e[5].equals("1");
+                        boolean icon = e.length <= 6 || e[6].equals("1");
                         effects.add(new org.bukkit.potion.PotionEffect(type, Integer.parseInt(e[3]),
-                                Integer.parseInt(e[2]), false, e[4].equals("1"), true));
+                                Integer.parseInt(e[2]), ambient, e[4].equals("1"), icon));
                     }
                 }
             }
@@ -128,9 +130,7 @@ final class PlayerImpl {
             ItemStack[] items = new ItemStack[InventoryImpl.SIZE];
             for (int i = 0; i < items.length; i++) {
                 String l = i + 1 < lines.length ? lines[i + 1] : "-";
-                int sp = l.indexOf(' ');
-                items[i] = sp < 0 ? new StackImpl(org.bukkit.Material.AIR, 0)
-                        : StackImpl.of(l.substring(0, sp), Integer.parseInt(l.substring(sp + 1)));
+                items[i] = StackImpl.parse(l);
             }
             return new State(Double.parseDouble(h[0]), Integer.parseInt(h[1]), Float.parseFloat(h[2]),
                     Float.parseFloat(h[3]), Integer.parseInt(h[4]), Integer.parseInt(h[5]),
@@ -189,13 +189,18 @@ final class PlayerImpl {
     public boolean hasPotionEffect(org.bukkit.potion.PotionEffectType type) { return getPotionEffect(type) != null; }
 
     public boolean addPotionEffect(org.bukkit.potion.PotionEffect effect) {
-        if (!online || isDead()) {
+        return addPotionEffect(effect, false);
+    }
+
+    public boolean addPotionEffect(org.bukkit.potion.PotionEffect effect, boolean force) {
+        if (!online || isDead() || effect == null) {
             return false;
         }
         var old = getPotionEffect(effect.getType());
-        // `MobEffectInstance.update`: слабее или короче — не применяется.
+        // `MobEffectInstance.update`: слабее или короче — не применяется, если не force.
         boolean longer = old != null && !old.isInfinite() && (effect.isInfinite() || effect.getDuration() > old.getDuration());
-        if (old != null && !(effect.getAmplifier() > old.getAmplifier() || (effect.getAmplifier() == old.getAmplifier() && longer))) {
+        if (!force && old != null && !(effect.getAmplifier() > old.getAmplifier()
+                || (effect.getAmplifier() == old.getAmplifier() && longer))) {
             return false;
         }
         var action = old == null ? org.bukkit.event.entity.EntityPotionEffectEvent.Action.ADDED
@@ -208,10 +213,10 @@ final class PlayerImpl {
         }
         var t = effect.getType().getKey();
         return Bridge.playerControl(id, "effect " + t + " " + Math.max(0, Math.min(255, effect.getAmplifier())) + " "
-                + (effect.isInfinite() ? -1 : Math.max(1, effect.getDuration())) + " " + (effect.hasParticles() ? 1 : 0));
+                + (effect.isInfinite() ? -1 : Math.max(1, effect.getDuration())) + " "
+                + (effect.hasParticles() ? 1 : 0) + " " + (effect.isAmbient() ? 1 : 0) + " "
+                + (effect.hasIcon() ? 1 : 0) + " " + (force ? 1 : 0));
     }
-
-    public boolean addPotionEffect(org.bukkit.potion.PotionEffect effect, boolean force) { return addPotionEffect(effect); }
 
     public boolean addPotionEffects(Collection<org.bukkit.potion.PotionEffect> effects) {
         boolean all = true;
@@ -237,10 +242,18 @@ final class PlayerImpl {
 
     public boolean clearActivePotionEffects() {
         var all = new ArrayList<>(state().effects());
-        for (var e : all) {
-            removePotionEffect(e.getType());
+        if (all.isEmpty() || !online) {
+            return false;
         }
-        return !all.isEmpty();
+        var e = new org.bukkit.event.entity.EntityPotionEffectEvent(api, null, null, null,
+                org.bukkit.event.entity.EntityPotionEffectEvent.Cause.PLUGIN,
+                org.bukkit.event.entity.EntityPotionEffectEvent.Action.CLEARED, false);
+        server.api.getPluginManager().callEvent(e);
+        if (e.isCancelled()) {
+            return false;
+        }
+        control("uneffect *");
+        return true;
     }
 
     public int getFoodLevel() { return state().food(); }

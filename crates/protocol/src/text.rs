@@ -45,6 +45,88 @@ pub fn write_component(w: &mut Writer, v: &Value) {
     }
 }
 
+/// Безымянный корень сетевого NBT → JSON (для текстовых компонентов от клиента).
+/// Байт становится `bool` при 0/1 (флаги стиля), массивы — списками чисел.
+pub fn read_component(r: &mut crate::Reader) -> crate::Result<Value> {
+    let tag = r.u8()?;
+    read_payload(r, tag, 0)
+}
+
+fn read_nbt_string(r: &mut crate::Reader) -> crate::Result<String> {
+    let len = r.u16()? as usize;
+    Ok(String::from_utf8_lossy(r.bytes(len)?).into_owned())
+}
+
+fn read_payload(r: &mut crate::Reader, tag: u8, depth: u32) -> crate::Result<Value> {
+    if depth > 64 {
+        return Err(crate::ProtocolError::BadLength(depth as i32));
+    }
+    let i32_of = |r: &mut crate::Reader| -> crate::Result<i32> {
+        let b = r.bytes(4)?;
+        Ok(i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    Ok(match tag {
+        1 => match r.u8()? as i8 {
+            0 => Value::Bool(false),
+            1 => Value::Bool(true),
+            b => Value::from(b),
+        },
+        2 => Value::from(r.u16()? as i16),
+        3 => Value::from(i32_of(r)?),
+        4 => Value::from(r.i64()?),
+        5 => Value::from(r.f32()? as f64),
+        6 => Value::from(r.f64()?),
+        7 => {
+            let n = i32_of(r)?.max(0) as usize;
+            Value::from(
+                r.bytes(n)?
+                    .iter()
+                    .map(|&b| b as i8 as i64)
+                    .collect::<Vec<_>>(),
+            )
+        }
+        8 => Value::String(read_nbt_string(r)?),
+        9 => {
+            let inner = r.u8()?;
+            let n = i32_of(r)?.max(0);
+            let mut out = Vec::new();
+            for _ in 0..n {
+                out.push(read_payload(r, inner, depth + 1)?);
+            }
+            Value::Array(out)
+        }
+        10 => {
+            let mut map = serde_json::Map::new();
+            loop {
+                let t = r.u8()?;
+                if t == TAG_END {
+                    break;
+                }
+                let k = read_nbt_string(r)?;
+                map.insert(k, read_payload(r, t, depth + 1)?);
+            }
+            Value::Object(map)
+        }
+        11 => {
+            let n = i32_of(r)?.max(0);
+            let mut out = Vec::new();
+            for _ in 0..n {
+                out.push(Value::from(i32_of(r)?));
+            }
+            Value::Array(out)
+        }
+        12 => {
+            let n = i32_of(r)?.max(0);
+            let mut out = Vec::new();
+            for _ in 0..n {
+                out.push(Value::from(r.i64()?));
+            }
+            Value::Array(out)
+        }
+        t => return Err(crate::ProtocolError::BadLength(t as i32)),
+    })
+}
+
 fn scalar_text(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),

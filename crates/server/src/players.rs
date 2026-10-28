@@ -28,7 +28,12 @@ pub struct PlayerFiles {
 }
 
 impl PlayerFiles {
-    pub fn new(world_dir: &Path, data_version: i32, item_ids: HashMap<String, i32>, effects: HashMap<String, i32>) -> Self {
+    pub fn new(
+        world_dir: &Path,
+        data_version: i32,
+        item_ids: HashMap<String, i32>,
+        effects: HashMap<String, i32>,
+    ) -> Self {
         let mut item_names =
             vec![String::new(); item_ids.values().max().map_or(0, |&m| m as usize + 1)];
         for (name, &id) in &item_ids {
@@ -71,9 +76,9 @@ impl PlayerFiles {
                     ("id".into(), Tag::String((*names.get(&e.id)?).clone())),
                     ("amplifier".into(), Tag::Byte(e.amplifier as i8)),
                     ("duration".into(), Tag::Int(e.duration)),
-                    ("ambient".into(), Tag::Byte(0)),
-                    ("show_particles".into(), Tag::Byte(e.particles as i8)),
-                    ("show_icon".into(), Tag::Byte(1)),
+                    ("ambient".into(), Tag::Byte(i8::from(e.ambient))),
+                    ("show_particles".into(), Tag::Byte(i8::from(e.particles))),
+                    ("show_icon".into(), Tag::Byte(i8::from(e.show_icon))),
                 ])))
             })
             .collect();
@@ -98,7 +103,10 @@ fn effects_from(root: &Compound, ids: &HashMap<String, i32>) -> Vec<Effect> {
                 id,
                 amplifier: int("amplifier").unwrap_or(0).clamp(0, 255) as u8,
                 duration: int("duration").unwrap_or(0) as i32,
+                ambient: int("ambient").unwrap_or(0) != 0,
                 particles: int("show_particles").unwrap_or(1) != 0,
+                show_icon: int("show_icon").unwrap_or(1) != 0,
+                age: 0,
             })
         })
         .filter(|e| e.duration != 0)
@@ -106,26 +114,11 @@ fn effects_from(root: &Compound, ids: &HashMap<String, i32>) -> Vec<Effect> {
 }
 
 fn stack_nbt(s: Stack, names: &[String]) -> Option<Compound> {
-    let name = names.get(s.item as usize).filter(|n| !n.is_empty())?;
-    let mut c = Compound::from([
-        ("id".into(), Tag::String(name.clone())),
-        ("count".into(), Tag::Int(s.count)),
-    ]);
-    if s.damage > 0 {
-        let comps = Compound::from([("minecraft:damage".into(), Tag::Int(s.damage))]);
-        c.insert("components".into(), Tag::Compound(comps));
-    }
-    Some(c)
+    chunkwake_net::stack_nbt::to_nbt(s, names.get(s.item as usize)?)
 }
 
 fn stack_from(c: &Compound, ids: &HashMap<String, i32>) -> Option<Stack> {
-    let item = *ids.get(c.get("id")?.as_str()?)?;
-    let count = c.get("count").and_then(Tag::as_i64).unwrap_or(1) as i32;
-    let damage = match c.get("components") {
-        Some(Tag::Compound(comps)) => comps.get("minecraft:damage").and_then(Tag::as_i64).unwrap_or(0) as i32,
-        _ => 0,
-    };
-    (count > 0).then_some(Stack { item, count, damage })
+    chunkwake_net::stack_nbt::from_nbt(c, |n| ids.get(n).copied())
 }
 
 pub fn to_nbt(s: &PlayerSave, data_version: i32, names: &[String]) -> Compound {
@@ -265,10 +258,42 @@ mod tests {
             game_mode: Some(1),
             effects: Vec::new(),
             slots: vec![
-                (5, Stack { item: 1, count: 1 , damage: 0}),
-                (10, Stack { item: 1, count: 64 , damage: 0}),
-                (36, Stack { item: 2, count: 1, damage: 7 }),
-                (45, Stack { item: 2, count: 1 , damage: 0}),
+                (
+                    5,
+                    Stack {
+                        item: 1,
+                        count: 1,
+                        damage: 0,
+                        extra: 0,
+                    },
+                ),
+                (
+                    10,
+                    Stack {
+                        item: 1,
+                        count: 64,
+                        damage: 0,
+                        extra: 0,
+                    },
+                ),
+                (
+                    36,
+                    Stack {
+                        item: 2,
+                        count: 1,
+                        damage: 7,
+                        extra: 0,
+                    },
+                ),
+                (
+                    45,
+                    Stack {
+                        item: 2,
+                        count: 1,
+                        damage: 0,
+                        extra: 0,
+                    },
+                ),
             ],
         };
         let root = to_nbt(&s, 4000, &names);

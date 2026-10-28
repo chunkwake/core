@@ -336,7 +336,9 @@ impl ChunkColumn {
             .collect();
         w.var_int(known.len() as i32);
         for ([x, y, z], kind) in known {
-            w.u8(((x & 15) << 4 | (z & 15)) as u8).u16(y as i16 as u16).var_int(kind);
+            w.u8(((x & 15) << 4 | (z & 15)) as u8)
+                .u16(y as i16 as u16)
+                .var_int(kind);
             // Пустой безымянный compound.
             w.u8(10).u8(0);
         }

@@ -58,7 +58,12 @@ impl Furnace {
 
     /// Свойства окна (`ContainerData`): горение, его длительность, прогресс, время.
     pub fn data(&self) -> [i32; 4] {
-        [self.lit_remaining, self.lit_total, self.cook, self.cook_total]
+        [
+            self.lit_remaining,
+            self.lit_total,
+            self.cook,
+            self.cook_total,
+        ]
     }
 
     /// Простаивает: ничего не горит и не остывает.
@@ -77,7 +82,7 @@ impl Furnace {
     /// `setItem(0)`: новое сырьё — прогресс сначала (`getTotalCookTime`).
     pub fn set_slots(&mut self, slots: [Slot; 3], env: &Env) {
         let same = match (self.slots[INPUT], slots[INPUT]) {
-            (Some(a), Some(b)) => a.item == b.item && a.damage == b.damage,
+            (Some(a), Some(b)) => a.same_kind(&b),
             (None, None) => true,
             _ => false,
         };
@@ -158,7 +163,9 @@ impl Furnace {
     }
 
     fn consume_fuel(&mut self, env: &Env) {
-        let Some(f) = self.slots[FUEL].as_mut() else { return };
+        let Some(f) = self.slots[FUEL].as_mut() else {
+            return;
+        };
         let item = f.item;
         f.count -= 1;
         if f.count <= 0 {
@@ -174,6 +181,7 @@ impl Furnace {
                     item: c.result,
                     count: c.count,
                     damage: 0,
+                    extra: 0,
                 })
             }
         }
@@ -181,7 +189,12 @@ impl Furnace {
             && input.item == sponge
             && self.slots[FUEL].is_some_and(|f| f.item == bucket)
         {
-            self.slots[FUEL] = Some(Stack { item: water, count: 1, damage: 0 });
+            self.slots[FUEL] = Some(Stack {
+                item: water,
+                count: 1,
+                damage: 0,
+                extra: 0,
+            });
         }
         if let Some(s) = self.slots[INPUT].as_mut() {
             s.count -= 1;
@@ -203,12 +216,28 @@ mod tests {
     const BUCKET: i32 = 5;
 
     fn st(item: i32, count: i32) -> Slot {
-        Some(Stack { item, count, damage: 0 })
+        Some(Stack {
+            item,
+            count,
+            damage: 0,
+            extra: 0,
+        })
     }
 
     #[allow(clippy::type_complexity)]
-    fn env_for(fast: bool) -> (impl Fn(i32) -> Option<Cook>, impl Fn(i32) -> Option<(i32, f32)>) {
-        let recipe = |i| (i == ORE).then_some(Cook { result: INGOT, count: 1, time: 200 });
+    fn env_for(
+        fast: bool,
+    ) -> (
+        impl Fn(i32) -> Option<Cook>,
+        impl Fn(i32) -> Option<(i32, f32)>,
+    ) {
+        let recipe = |i| {
+            (i == ORE).then_some(Cook {
+                result: INGOT,
+                count: 1,
+                time: 200,
+            })
+        };
         let fuel = move |i| match i {
             COAL => Some(if fast { (800, 2.0) } else { (1600, 1.0) }),
             LAVA => Some((20000, 1.0)),
@@ -220,8 +249,21 @@ mod tests {
     fn run(f: &mut Furnace, fast: bool, ticks: usize) {
         let (recipe, fuel) = env_for(fast);
         let max = |_| 64;
-        let rem = |i| (i == LAVA).then_some(Stack { item: BUCKET, count: 1, damage: 0 });
-        let env = Env { recipe: &recipe, fuel: &fuel, max_stack: &max, remainder: &rem, sponge: None };
+        let rem = |i| {
+            (i == LAVA).then_some(Stack {
+                item: BUCKET,
+                count: 1,
+                damage: 0,
+                extra: 0,
+            })
+        };
+        let env = Env {
+            recipe: &recipe,
+            fuel: &fuel,
+            max_stack: &max,
+            remainder: &rem,
+            sponge: None,
+        };
         for _ in 0..ticks {
             f.tick(&env);
         }
@@ -233,13 +275,22 @@ mod tests {
         let (recipe, fuel) = env_for(false);
         let max = |_| 64;
         let rem = |_| None;
-        let env = Env { recipe: &recipe, fuel: &fuel, max_stack: &max, remainder: &rem, sponge: None };
+        let env = Env {
+            recipe: &recipe,
+            fuel: &fuel,
+            max_stack: &max,
+            remainder: &rem,
+            sponge: None,
+        };
         f.set_slots([st(ORE, 3), st(COAL, 1), None], &env);
         assert_eq!(f.cook_total, 200);
         run(&mut f, false, 199);
         assert_eq!((f.slots[RESULT], f.slots[FUEL]), (None, None));
         run(&mut f, false, 1);
-        assert_eq!((f.slots[INPUT], f.slots[RESULT]), (st(ORE, 2), st(INGOT, 1)));
+        assert_eq!(
+            (f.slots[INPUT], f.slots[RESULT]),
+            (st(ORE, 2), st(INGOT, 1))
+        );
         // В тик зажигания горение не убывает (как в ванилле).
         assert_eq!(f.lit_remaining, 1600 - 199);
         // Без сырья горение продолжается, затем гаснет.

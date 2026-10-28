@@ -81,6 +81,7 @@ final class Events {
             case Bridge.EVENT_PLACE -> place(plugins, p, arg);
             case Bridge.EVENT_MOVE -> move(plugins, p, arg);
             case Bridge.EVENT_INTERACT -> interact(plugins, p, arg);
+            case Bridge.EVENT_POTION -> potion(plugins, p, arg);
             default -> "";
         };
     }
@@ -179,6 +180,42 @@ final class Events {
         return denied ? "c" : "";
     }
 
+    /**
+     * {@code CAUSE ACTION [ключ усиление тики фон частицы значок [старые…]]} → {@code c} или пусто.
+     * Причина COMMAND или EXPIRATION; действие ADDED, CHANGED, REMOVED, CLEARED.
+     */
+    private static String potion(PluginManager plugins, PlayerImpl p, String arg) {
+        String[] f = arg.split(" ");
+        var cause = org.bukkit.event.entity.EntityPotionEffectEvent.Cause.valueOf(f[0]);
+        var action = org.bukkit.event.entity.EntityPotionEffectEvent.Action.valueOf(f[1]);
+        org.bukkit.potion.PotionEffect neu = null;
+        org.bukkit.potion.PotionEffect old = null;
+        if (f.length >= 8) {
+            var type = org.bukkit.Registry.EFFECT.get(NamespacedKey.fromString(f[2]));
+            if (type != null) {
+                var built = potionEffect(type, f, 3);
+                if (action == org.bukkit.event.entity.EntityPotionEffectEvent.Action.REMOVED) {
+                    old = built;
+                } else {
+                    neu = built;
+                    if (action == org.bukkit.event.entity.EntityPotionEffectEvent.Action.CHANGED && f.length >= 13) {
+                        old = potionEffect(type, f, 8);
+                    }
+                }
+            }
+        }
+        boolean override = action == org.bukkit.event.entity.EntityPotionEffectEvent.Action.ADDED
+                || action == org.bukkit.event.entity.EntityPotionEffectEvent.Action.CHANGED;
+        var e = new org.bukkit.event.entity.EntityPotionEffectEvent(p.api, old, neu, null, cause, action, override);
+        plugins.callEvent(e);
+        return e.isCancelled() ? "c" : "";
+    }
+
+    private static org.bukkit.potion.PotionEffect potionEffect(org.bukkit.potion.PotionEffectType type, String[] f, int at) {
+        return new org.bukkit.potion.PotionEffect(type, Integer.parseInt(f[at + 1]), Integer.parseInt(f[at]),
+                f[at + 2].equals("1"), f[at + 3].equals("1"), f[at + 4].equals("1"));
+    }
+
     /** {@code CAUSE amount} → {@code c} или {@code d <итоговый урон>}. */
     private static String damage(PluginManager plugins, PlayerImpl p, String arg) {
         String[] f = arg.split(" ");
@@ -193,6 +230,8 @@ final class Events {
             case FALL -> "minecraft:fall";
             case VOID -> "minecraft:out_of_world";
             case STARVATION -> "minecraft:starve";
+            case POISON, MAGIC -> "minecraft:magic";
+            case WITHER -> "minecraft:wither";
             default -> "minecraft:generic";
         };
     }
@@ -205,11 +244,8 @@ final class Events {
         String[] lines = arg.split("\n", -1);
         List<ItemStack> drops = new ArrayList<>();
         for (int i = 2; i < lines.length; i++) {
-            int sp = lines[i].indexOf(' ');
-            if (sp > 0) {
-                ItemStack s = StackImpl.of(lines[i].substring(0, sp), Integer.parseInt(lines[i].substring(sp + 1)));
-                if (!s.isEmpty()) drops.add(s);
-            }
+            ItemStack s = StackImpl.parse(lines[i]);
+            if (!s.isEmpty()) drops.add(s);
         }
         Component message = lines.length > 1 && !lines[1].isEmpty()
                 ? GsonComponentSerializer.gson().deserialize(lines[1]) : null;
@@ -220,8 +256,8 @@ final class Events {
             out.append(GsonComponentSerializer.gson().serialize(e.deathMessage()));
         }
         for (ItemStack s : e.getDrops()) {
-            String name = StackImpl.name(s);
-            if (name != null) out.append('\n').append(name).append(' ').append(s.getAmount());
+            String line = StackImpl.line(s);
+            if (line != null) out.append('\n').append(line);
         }
         return out.toString();
     }

@@ -2,14 +2,17 @@
 
 pub mod auth;
 pub mod click;
-pub mod furnace;
 pub mod configuration;
 pub mod crypto;
+pub mod furnace;
 pub mod items;
 pub mod live;
+pub mod loot;
 pub mod ops;
 pub mod placement;
 pub mod play;
+pub mod potions;
+pub mod stack_nbt;
 pub mod survival;
 
 use bytes::BytesMut;
@@ -112,13 +115,35 @@ impl Server {
     where
         F: Fn(LoggedIn, Connection) + Send + Sync + 'static,
     {
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        self.serve_until(listener, rx, on_login).await
+    }
+
+    /// Останавливает приём и незавершённые входы при сигнале shutdown.
+    pub async fn serve_until<F>(
+        self: Arc<Self>,
+        listener: TcpListener,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+        on_login: F,
+    ) -> std::io::Result<()>
+    where
+        F: Fn(LoggedIn, Connection) + Send + Sync + 'static,
+    {
         let on_login = Arc::new(on_login);
+        let mut handshakes = tokio::task::JoinSet::new();
         loop {
-            let (stream, addr) = listener.accept().await?;
+            let (stream, addr) = tokio::select! {
+                result = listener.accept() => result?,
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                    continue;
+                }
+                Some(_) = handshakes.join_next(), if !handshakes.is_empty() => continue,
+            };
             let _ = stream.set_nodelay(true);
             let server = self.clone();
             let on_login = on_login.clone();
-            tokio::spawn(async move {
+            handshakes.spawn(async move {
                 match server.handle(stream, addr).await {
                     Ok(Some((player, conn))) => on_login(player, conn),
                     Ok(None) => {}
@@ -126,6 +151,9 @@ impl Server {
                 }
             });
         }
+        handshakes.abort_all();
+        while handshakes.join_next().await.is_some() {}
+        Ok(())
     }
 
     async fn handle(

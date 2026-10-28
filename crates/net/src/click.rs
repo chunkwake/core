@@ -108,7 +108,7 @@ pub struct Menu<'a> {
 }
 
 fn same(a: &Stack, b: &Stack) -> bool {
-    a.item == b.item && a.damage == b.damage
+    a.same_kind(b)
 }
 
 /// Забирает `n` из слота.
@@ -129,8 +129,13 @@ impl Menu<'_> {
     }
 
     fn slot_max(&self, slot: usize, item: i32) -> i32 {
-        let bucket_fuel = self.kind == Kind::Furnace && slot == 1 && Some(item) == self.rules.bucket;
-        if self.kind.armor(slot).is_some() || bucket_fuel { 1 } else { self.max(item) }
+        let bucket_fuel =
+            self.kind == Kind::Furnace && slot == 1 && Some(item) == self.rules.bucket;
+        if self.kind.armor(slot).is_some() || bucket_fuel {
+            1
+        } else {
+            self.max(item)
+        }
     }
 
     fn may_place(&self, slot: usize, s: &Stack) -> bool {
@@ -180,7 +185,10 @@ impl Menu<'_> {
             }
             CLONE if self.rules.creative && self.carried.is_none() => {
                 if let Some(s) = index.and_then(|i| self.slots[i]) {
-                    *self.carried = Some(Stack { count: self.max(s.item), ..s });
+                    *self.carried = Some(Stack {
+                        count: self.max(s.item),
+                        ..s
+                    });
                 }
             }
             THROW if self.carried.is_none() => {
@@ -216,7 +224,10 @@ impl Menu<'_> {
             match *self.carried {
                 None => *self.carried = self.take_output(),
                 Some(c) if same(&c, &result) && c.count + result.count <= self.max(c.item) => {
-                    *self.carried = Some(Stack { count: c.count + result.count, ..c });
+                    *self.carried = Some(Stack {
+                        count: c.count + result.count,
+                        ..c
+                    });
                     self.take_output();
                 }
                 _ => {}
@@ -240,7 +251,9 @@ impl Menu<'_> {
                     if self.may_place(i, &c) {
                         let room = self.slot_max(i, c.item) - s.count;
                         let n = if left { c.count } else { 1 }.min(room.max(0));
-                        if let (Some(dst), Some(_)) = (self.slots[i].as_mut(), split(self.carried, n)) {
+                        if let (Some(dst), Some(_)) =
+                            (self.slots[i].as_mut(), split(self.carried, n))
+                        {
                             dst.count += n;
                         }
                     }
@@ -254,7 +267,11 @@ impl Menu<'_> {
 
     /// `moveItemStackTo`: доливает такие же стопки, затем первая подходящая пустая ячейка.
     fn move_to(&mut self, stack: &mut Stack, range: std::ops::Range<usize>, reverse: bool) -> bool {
-        let order: Vec<usize> = if reverse { range.rev().collect() } else { range.collect() };
+        let order: Vec<usize> = if reverse {
+            range.rev().collect()
+        } else {
+            range.collect()
+        };
         let mut moved = false;
         if self.max(stack.item) > 1 {
             for &j in &order {
@@ -480,7 +497,9 @@ impl Menu<'_> {
             }
             2 => {
                 let drag = std::mem::take(self.drag);
-                let (Some(k), Some(c)) = (drag.kind, *self.carried) else { return };
+                let (Some(k), Some(c)) = (drag.kind, *self.carried) else {
+                    return;
+                };
                 if drag.slots.is_empty() {
                     return;
                 }
@@ -515,18 +534,45 @@ mod tests {
     use super::*;
 
     fn st(item: i32, count: i32) -> Slot {
-        Some(Stack { item, count, damage: 0 })
+        Some(Stack {
+            item,
+            count,
+            damage: 0,
+            extra: 0,
+        })
     }
 
-    fn run(kind: Kind, slots: &mut [Slot], carried: &mut Slot, clicks: &[(i16, i8, i32)]) -> Vec<Stack> {
+    fn run(
+        kind: Kind,
+        slots: &mut [Slot],
+        carried: &mut Slot,
+        clicks: &[(i16, i8, i32)],
+    ) -> Vec<Stack> {
         let max = |item: i32| if item == 9 { 1 } else { 64 };
         let equip = |item: i32| (item == 9).then_some("head");
         let fuel = |item: i32| item == 7;
-        let rules = Rules { max_stack: &max, equip: &equip, smeltable: &|item| item == 1, fuel: &fuel, bucket: Some(8), creative: false };
+        let rules = Rules {
+            max_stack: &max,
+            equip: &equip,
+            smeltable: &|item| item == 1,
+            fuel: &fuel,
+            bucket: Some(8),
+            creative: false,
+        };
         let mut drag = Drag::default();
         let mut craft = |_: &mut [Slot]| {};
-        let mut m = Menu { kind, slots, carried, drag: &mut drag, rules: &rules, craft: &mut craft };
-        clicks.iter().flat_map(|&(s, b, mode)| m.click(s, b, mode)).collect()
+        let mut m = Menu {
+            kind,
+            slots,
+            carried,
+            drag: &mut drag,
+            rules: &rules,
+            craft: &mut craft,
+        };
+        clicks
+            .iter()
+            .flat_map(|&(s, b, mode)| m.click(s, b, mode))
+            .collect()
     }
 
     #[test]
@@ -536,7 +582,12 @@ mod tests {
         let mut carried = None;
         run(Kind::Player, &mut slots, &mut carried, &[(9, 1, PICKUP)]);
         assert_eq!((slots[9], carried), (st(1, 5), st(1, 5)));
-        run(Kind::Player, &mut slots, &mut carried, &[(10, 1, PICKUP), (9, 0, PICKUP)]);
+        run(
+            Kind::Player,
+            &mut slots,
+            &mut carried,
+            &[(10, 1, PICKUP), (9, 0, PICKUP)],
+        );
         assert_eq!((slots[9], slots[10], carried), (st(1, 9), st(1, 1), None));
         // Броня: камень в слот шлема не кладётся, шлем — кладётся.
         carried = st(1, 1);
@@ -554,15 +605,33 @@ mod tests {
         slots[36] = st(1, 60);
         slots[20] = st(9, 1);
         let mut carried = None;
-        run(Kind::Player, &mut slots, &mut carried, &[(9, 0, QUICK_MOVE), (20, 0, QUICK_MOVE)]);
-        assert_eq!((slots[9], slots[36], slots[37]), (None, st(1, 64), st(1, 60)));
+        run(
+            Kind::Player,
+            &mut slots,
+            &mut carried,
+            &[(9, 0, QUICK_MOVE), (20, 0, QUICK_MOVE)],
+        );
+        assert_eq!(
+            (slots[9], slots[36], slots[37]),
+            (None, st(1, 64), st(1, 60))
+        );
         assert_eq!((slots[20], slots[5]), (None, st(9, 1)));
-        let thrown = run(Kind::Player, &mut slots, &mut carried, &[(36, 0, THROW), (37, 1, THROW)]);
+        let thrown = run(
+            Kind::Player,
+            &mut slots,
+            &mut carried,
+            &[(36, 0, THROW), (37, 1, THROW)],
+        );
         assert_eq!(thrown, vec![st(1, 1).unwrap(), st(1, 60).unwrap()]);
         // Сундук: из сундука — в инвентарь с конца.
         let mut chest = vec![None; 27 + 36];
         chest[0] = st(2, 5);
-        run(Kind::Chest(3), &mut chest, &mut carried, &[(0, 0, QUICK_MOVE)]);
+        run(
+            Kind::Chest(3),
+            &mut chest,
+            &mut carried,
+            &[(0, 0, QUICK_MOVE)],
+        );
         assert_eq!(chest[62], st(2, 5));
     }
 
@@ -573,8 +642,16 @@ mod tests {
         slots[4] = st(7, 2);
         slots[5] = st(2, 1);
         let mut carried = None;
-        run(Kind::Furnace, &mut slots, &mut carried, &[(3, 0, QUICK_MOVE), (4, 0, QUICK_MOVE), (5, 0, QUICK_MOVE)]);
-        assert_eq!((slots[0], slots[1], slots[30]), (st(1, 5), st(7, 2), st(2, 1)));
+        run(
+            Kind::Furnace,
+            &mut slots,
+            &mut carried,
+            &[(3, 0, QUICK_MOVE), (4, 0, QUICK_MOVE), (5, 0, QUICK_MOVE)],
+        );
+        assert_eq!(
+            (slots[0], slots[1], slots[30]),
+            (st(1, 5), st(7, 2), st(2, 1))
+        );
         // В результат класть нельзя, а забирать половину — можно.
         slots[2] = st(9, 1);
         carried = st(2, 1);
@@ -594,10 +671,24 @@ mod tests {
             Kind::Player,
             &mut slots,
             &mut carried,
-            &[(OUTSIDE, 0, QUICK_CRAFT), (9, 1, QUICK_CRAFT), (10, 1, QUICK_CRAFT), (11, 1, QUICK_CRAFT), (OUTSIDE, 2, QUICK_CRAFT)],
+            &[
+                (OUTSIDE, 0, QUICK_CRAFT),
+                (9, 1, QUICK_CRAFT),
+                (10, 1, QUICK_CRAFT),
+                (11, 1, QUICK_CRAFT),
+                (OUTSIDE, 2, QUICK_CRAFT),
+            ],
         );
-        assert_eq!((slots[9], slots[10], slots[11], carried), (st(1, 3), st(1, 3), st(1, 3), st(1, 1)));
-        run(Kind::Player, &mut slots, &mut carried, &[(12, 0, PICKUP_ALL)]);
+        assert_eq!(
+            (slots[9], slots[10], slots[11], carried),
+            (st(1, 3), st(1, 3), st(1, 3), st(1, 1))
+        );
+        run(
+            Kind::Player,
+            &mut slots,
+            &mut carried,
+            &[(12, 0, PICKUP_ALL)],
+        );
         assert_eq!((slots[9], carried), (None, st(1, 10)));
         // Обмен с хотбаром.
         slots[9] = st(2, 1);

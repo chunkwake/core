@@ -39,6 +39,34 @@ async fn start_with_status(
 }
 
 #[tokio::test]
+async fn shutdown_stops_accepting_new_connections() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = Server::new(NetConfig {
+        version: GameVersion {
+            name: "26.3".into(),
+            protocol: PROTOCOL,
+        },
+        motd: "hello".into(),
+        max_players: 20,
+        compression_threshold: -1,
+        online_mode: false,
+        enable_status: true,
+        session_server: String::new(),
+        configuration: None,
+    });
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(server.serve_until(listener, rx, |_, _| {}));
+    tx.send(true).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(TcpStream::connect(addr).await.is_err());
+}
+
+#[tokio::test]
 async fn disabled_status_closes_connection() {
     let (addr, _rx) = start_with_status(-1, false).await;
     let mut c = connect(addr, NextState::Status).await;

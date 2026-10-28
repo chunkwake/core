@@ -1,0 +1,22 @@
+[package]
+name = "chunkwake-lab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+chunkwake-bots = { path = "../bots" }
+chunkwake-data = { path = "../data" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+ring = "0.17"
+crossterm = "0.29"
+ratatui = "0.30.2"
+
+[[bin]]
+name = "chunkwake-lab"
+path = "src/main.rs"

@@ -77,8 +77,29 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
         // Эффекты: наложить, затем на следующем тике прочитать из снимка.
         boolean added = p.addPotionEffect(new org.bukkit.potion.PotionEffect(
                 org.bukkit.potion.PotionEffectType.HASTE, 200, 1));
+        var haste = org.bukkit.Registry.EFFECT.get(org.bukkit.NamespacedKey.minecraft("haste"));
+        getLogger().info("haste color: " + (haste == null ? "?" : Integer.toHexString(haste.getColor().asRGB())));
         getServer().getScheduler().runTask(this, () -> getLogger().info("effects: " + p.getName() + " added=" + added
                 + " " + p.getActivePotionEffects() + " haste=" + p.hasPotionEffect(org.bukkit.potion.PotionEffectType.HASTE)));
+        // Чары и имя: в слот 8, затем прочитать обратно из снимка.
+        var pick = new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND_PICKAXE);
+        pick.addEnchantment(org.bukkit.enchantments.Enchantment.EFFICIENCY, 5);
+        pick.editMeta(m -> {
+            m.displayName(net.kyori.adventure.text.Component.text("Test pick"));
+            ((org.bukkit.inventory.meta.Damageable) m).setDamage(7);
+        });
+        getLogger().info("meta set: " + pick);
+        p.getInventory().setItem(8, pick);
+        getServer().getScheduler().runTaskLater(this, () -> {
+            var back = p.getInventory().getItem(8);
+            var meta = back == null ? null : back.getItemMeta();
+            getLogger().info("meta: " + p.getName() + " efficiency="
+                    + (back == null ? 0 : back.getEnchantmentLevel(org.bukkit.enchantments.Enchantment.EFFICIENCY))
+                    + " name=" + (meta == null || !meta.hasDisplayName() ? null
+                            : net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
+                                    .plainText().serialize(meta.displayName()))
+                    + " damage=" + (meta instanceof org.bukkit.inventory.meta.Damageable d ? d.getDamage() : -1));
+        }, 2);
     }
 
     @EventHandler

@@ -9,6 +9,24 @@ pub struct Stack {
     pub item: i32,
     pub count: i32,
     pub damage: i32,
+    /// Остальные компоненты ([`crate::components`]): 0 — нет.
+    pub extra: u32,
+}
+
+impl Stack {
+    pub fn new(item: i32, count: i32) -> Self {
+        Self {
+            item,
+            count,
+            damage: 0,
+            extra: 0,
+        }
+    }
+
+    /// Та же вещь (для складывания в стопку): тип, износ и компоненты.
+    pub fn same_kind(&self, o: &Stack) -> bool {
+        self.item == o.item && self.damage == o.damage && self.extra == o.extra
+    }
 }
 
 /// Номер компонента `minecraft:damage` в реестре `data_component_type` (ставится при старте).
@@ -22,12 +40,7 @@ pub fn write_stack(w: &mut Writer, s: Slot) {
     match s {
         Some(s) if s.count > 0 => {
             w.var_int(s.count).var_int(s.item);
-            let damage = DAMAGE_COMPONENT.load(std::sync::atomic::Ordering::Relaxed);
-            if s.damage > 0 && damage >= 0 {
-                w.var_int(1).var_int(0).var_int(damage).var_int(s.damage);
-            } else {
-                w.var_int(0).var_int(0);
-            }
+            write_patch(w, &s);
         }
         _ => {
             w.var_int(0);
@@ -35,23 +48,101 @@ pub fn write_stack(w: &mut Writer, s: Slot) {
     }
 }
 
-/// Читает `ItemStack` (с компонентами) и возвращает тип и количество.
-/// Компоненты пропускаются вместе с остатком пакета, поэтому стопка с
-/// компонентами допустима только последней.
+/// Патч компонентов стопки: добавленные (износ, чары, имя, описание), удалённых нет.
+/// Если патч пришёл с неизвестным компонентом, он пишется байт в байт.
+fn write_patch(w: &mut Writer, s: &Stack) {
+    use crate::components::{
+        CUSTOM_NAME_COMPONENT, ENCHANTMENTS_COMPONENT, LORE_COMPONENT, get, id_of,
+    };
+    let e = get(s.extra);
+    if let Some(raw) = &e.raw {
+        w.buf.extend_from_slice(raw);
+        return;
+    }
+    let damage = id_of(&DAMAGE_COMPONENT);
+    let (ench, name, lore) = (
+        id_of(&ENCHANTMENTS_COMPONENT),
+        id_of(&CUSTOM_NAME_COMPONENT),
+        id_of(&LORE_COMPONENT),
+    );
+    let parts = [
+        s.damage > 0 && damage >= 0,
+        !e.enchantments.is_empty() && ench >= 0,
+        e.custom_name.is_some() && name >= 0,
+        !e.lore.is_empty() && lore >= 0,
+    ];
+    w.var_int(parts.iter().filter(|&&p| p).count() as i32)
+        .var_int(0);
+    if parts[0] {
+        w.var_int(damage).var_int(s.damage);
+    }
+    if parts[1] {
+        w.var_int(ench).var_int(e.enchantments.len() as i32);
+        for &(id, lvl) in &e.enchantments {
+            w.var_int(id).var_int(lvl);
+        }
+    }
+    let json = |t: &str| {
+        serde_json::from_str(t).unwrap_or_else(|_| serde_json::Value::String(t.to_owned()))
+    };
+    if let (true, Some(n)) = (parts[2], &e.custom_name) {
+        w.var_int(name);
+        crate::text::write_component(w, &json(n));
+    }
+    if parts[3] {
+        w.var_int(lore).var_int(e.lore.len() as i32);
+        for l in &e.lore {
+            crate::text::write_component(w, &json(l));
+        }
+    }
+}
+
+/// Читает `ItemStack` с компонентами: износ, чары, имя и описание.
+/// Неизвестный компонент (состав зелья и т. п.) сохраняется сырым патчем целиком.
+/// Стопка с таким патчем должна быть последним полем пакета: хвост не разбирается.
 pub fn read_stack(r: &mut Reader) -> Result<Slot> {
+    use crate::components::{
+        CUSTOM_NAME_COMPONENT, ENCHANTMENTS_COMPONENT, Extra, LORE_COMPONENT, id_of, intern,
+    };
     let count = r.var_int()?;
     if count <= 0 {
         return Ok(None);
     }
     let item = r.var_int()?;
-    // Патч: добавленные (тип + значение), удалённые (типы). Без добавленных
-    // пропускаем целиком; значения компонентов разбирать не умеем.
-    if r.var_int()? == 0 {
-        for _ in 0..r.var_int()? {
-            r.var_int()?;
+    let mut s = Stack::new(item, count);
+    let mut e = Extra::default();
+    let patch = r.remaining().to_vec();
+    let added = r.var_int()?;
+    let removed = r.var_int()?;
+    let mut known = true;
+    for _ in 0..added {
+        let t = r.var_int()?;
+        if t == id_of(&DAMAGE_COMPONENT) {
+            s.damage = r.var_int()?.max(0);
+        } else if t == id_of(&ENCHANTMENTS_COMPONENT) {
+            for _ in 0..r.var_int()?.clamp(0, 256) {
+                e.enchantments.push((r.var_int()?, r.var_int()?));
+            }
+        } else if t == id_of(&CUSTOM_NAME_COMPONENT) {
+            e.custom_name = Some(crate::text::read_component(r)?.to_string());
+        } else if t == id_of(&LORE_COMPONENT) {
+            for _ in 0..r.var_int()?.clamp(0, 256) {
+                e.lore.push(crate::text::read_component(r)?.to_string());
+            }
+        } else {
+            known = false;
+            break;
         }
     }
-    Ok(Some(Stack { item, count, damage: 0 }))
+    if known {
+        for _ in 0..removed {
+            r.var_int()?;
+        }
+    } else if !patch.is_empty() {
+        e.raw = Some(patch);
+    }
+    s.extra = intern(e);
+    Ok(Some(s))
 }
 
 /// `HashedStack`: есть ли предмет, ID, количество, хэши компонентов.
@@ -69,7 +160,7 @@ fn read_hashed_stack(r: &mut Reader) -> Result<Slot> {
     for _ in 0..r.var_int()? {
         r.var_int()?;
     }
-    Ok((count > 0).then_some(Stack { item, count, damage: 0 }))
+    Ok((count > 0).then_some(Stack::new(item, count)))
 }
 
 /// Окно инвентаря игрока.
@@ -110,17 +201,39 @@ pub fn container_set_content(
 }
 
 /// `ClientboundUpdateMobEffectPacket`: флаги 1 — фоновый, 2 — частицы, 4 — значок.
-pub fn update_mob_effect(id: i32, entity: i32, effect: i32, amplifier: i32, duration: i32, flags: u8) -> Vec<u8> {
+pub fn update_mob_effect(
+    id: i32,
+    entity: i32,
+    effect: i32,
+    amplifier: i32,
+    duration: i32,
+    flags: u8,
+) -> Vec<u8> {
     let mut w = Writer::new();
-    w.var_int(id).var_int(entity).var_int(effect).var_int(amplifier).var_int(duration).u8(flags);
+    w.var_int(id)
+        .var_int(entity)
+        .var_int(effect)
+        .var_int(amplifier)
+        .var_int(duration)
+        .u8(flags);
     w.buf
 }
 
 /// `ClientboundUpdateAttributesPacket` для одного атрибута: база и модификаторы
 /// `(идентификатор, величина, операция)`; операции: 0 прибавить, 1 × базу, 2 × итог.
-pub fn update_attribute(id: i32, entity: i32, attribute: i32, base: f64, modifiers: &[(String, f64, i32)]) -> Vec<u8> {
+pub fn update_attribute(
+    id: i32,
+    entity: i32,
+    attribute: i32,
+    base: f64,
+    modifiers: &[(String, f64, i32)],
+) -> Vec<u8> {
     let mut w = Writer::new();
-    w.var_int(id).var_int(entity).var_int(1).var_int(attribute).f64(base);
+    w.var_int(id)
+        .var_int(entity)
+        .var_int(1)
+        .var_int(attribute)
+        .f64(base);
     w.var_int(modifiers.len() as i32);
     for (name, amount, op) in modifiers {
         w.string(name).f64(*amount).var_int(*op);
@@ -138,7 +251,10 @@ pub fn remove_mob_effect(id: i32, entity: i32, effect: i32) -> Vec<u8> {
 /// `ClientboundContainerSetDataPacket`: свойство окна (прогресс печи).
 pub fn container_set_data(id: i32, window: i32, property: i16, value: i16) -> Vec<u8> {
     let mut w = Writer::new();
-    w.var_int(id).var_int(window).u16(property as u16).u16(value as u16);
+    w.var_int(id)
+        .var_int(window)
+        .u16(property as u16)
+        .u16(value as u16);
     w.buf
 }
 
@@ -197,9 +313,79 @@ pub fn read_container_click(r: &mut Reader) -> Result<ContainerClick> {
 }
 
 /// `ServerboundSetCreativeModeSlotPacket`: слот и стопка.
+///
+/// В отличие от клиентских пакетов, здесь `DataComponentPatch.DELIMITED_STREAM_CODEC`:
+/// у каждого добавленного компонента перед данными стоит длина. Её снимаем, иначе
+/// при отдаче инвентаря клиент читает длину как состав зелья и показывает пустое.
 pub fn read_creative_slot(r: &mut Reader) -> Result<(i16, Slot)> {
     let slot = r.u16()? as i16;
-    Ok((slot, read_stack(r)?))
+    Ok((slot, read_untrusted_stack(r)?))
+}
+
+/// Стопка из креатива: патч с длиной у каждого компонента → обычный патч для ответа клиенту.
+fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
+    use crate::components::{
+        CUSTOM_NAME_COMPONENT, ENCHANTMENTS_COMPONENT, Extra, LORE_COMPONENT, id_of, intern,
+    };
+    let count = r.var_int()?;
+    if count <= 0 {
+        return Ok(None);
+    }
+    let item = r.var_int()?;
+    let mut s = Stack::new(item, count);
+    let mut e = Extra::default();
+    let added = r.var_int()?;
+    let removed = r.var_int()?;
+    if !(0..=256).contains(&added) || !(0..=256).contains(&removed) {
+        return Err(crate::ProtocolError::BadLength(added));
+    }
+    let mut patch = Writer::new();
+    patch.var_int(added).var_int(removed);
+    for _ in 0..added {
+        let kind = r.var_int()?;
+        let len = r.var_int()?;
+        if !(0..=1 << 20).contains(&len) {
+            return Err(crate::ProtocolError::BadLength(len));
+        }
+        let payload = r.bytes(len as usize)?;
+        patch.var_int(kind);
+        patch.buf.extend_from_slice(payload);
+        let mut body = Reader::new(payload);
+        if kind == id_of(&DAMAGE_COMPONENT)
+            && let Ok(d) = body.var_int()
+        {
+            s.damage = d.max(0);
+        } else if kind == id_of(&ENCHANTMENTS_COMPONENT)
+            && let Ok(n) = body.var_int()
+        {
+            for _ in 0..n.clamp(0, 256) {
+                let Ok(id) = body.var_int() else { break };
+                let Ok(lvl) = body.var_int() else { break };
+                e.enchantments.push((id, lvl));
+            }
+        } else if kind == id_of(&CUSTOM_NAME_COMPONENT)
+            && let Ok(text) = crate::text::read_component(&mut body)
+        {
+            e.custom_name = Some(text.to_string());
+        } else if kind == id_of(&LORE_COMPONENT)
+            && let Ok(n) = body.var_int()
+        {
+            for _ in 0..n.clamp(0, 256) {
+                let Ok(line) = crate::text::read_component(&mut body) else {
+                    break;
+                };
+                e.lore.push(line.to_string());
+            }
+        }
+    }
+    for _ in 0..removed {
+        patch.var_int(r.var_int()?);
+    }
+    if added != 0 || removed != 0 {
+        e.raw = Some(patch.buf);
+    }
+    s.extra = intern(e);
+    Ok(Some(s))
 }
 
 pub fn set_held_slot(id: i32, slot: i32) -> Vec<u8> {
@@ -247,6 +433,19 @@ pub fn entity_event(id: i32, entity_id: i32, event: u8) -> Vec<u8> {
     w.buf
 }
 
+/// `set_entity_data`: общие флаги сущности (индекс 0, сериализатор `BYTE` = 0).
+/// Бит 1 — присед, бит 3 — бег, бит 7 — полёт на элитрах.
+pub fn set_entity_flags(id: i32, entity_id: i32, flags: u8) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .var_int(entity_id)
+        .u8(0)
+        .var_int(0)
+        .u8(flags)
+        .u8(0xff);
+    w.buf
+}
+
 /// `set_entity_data` предмета-сущности: `ItemEntity.DATA_ITEM` (индекс 8,
 /// сериализатор `ITEM_STACK` = 7).
 pub fn set_entity_item(id: i32, entity_id: i32, stack: Slot) -> Vec<u8> {
@@ -286,20 +485,57 @@ mod tests {
                 item: 300,
                 count: 64,
                 damage: 0,
+                extra: 0,
             }),
         );
         write_stack(&mut w, None);
         let mut r = Reader::new(&w.buf);
-        assert_eq!(
-            read_stack(&mut r).unwrap(),
-            Some(Stack {
-                item: 300,
-                count: 64
-            ,
-                damage: 0})
-        );
+        assert_eq!(read_stack(&mut r).unwrap(), Some(Stack::new(300, 64)));
         assert_eq!(read_stack(&mut r).unwrap(), None);
         assert!(r.remaining().is_empty());
+    }
+
+    #[test]
+    fn unknown_component_patch_roundtrips() {
+        let mut w = Writer::new();
+        w.var_int(1)
+            .var_int(10)
+            .var_int(1)
+            .var_int(0)
+            .var_int(42)
+            .var_int(7);
+        let original = w.buf.clone();
+        let stack = read_stack(&mut Reader::new(&original)).unwrap();
+        let mut out = Writer::new();
+        write_stack(&mut out, stack);
+        assert_eq!(out.buf, original);
+    }
+
+    #[test]
+    fn creative_slot_drops_component_length_prefix() {
+        let mut w = Writer::new();
+        // Слот 36, зелье ×1, один компонент типа 53 длиной 3 байта.
+        w.u16(36)
+            .var_int(1)
+            .var_int(10)
+            .var_int(1)
+            .var_int(0)
+            .var_int(53)
+            .var_int(3);
+        w.buf.extend_from_slice(&[1, 2, 0]);
+        let (slot, stack) = read_creative_slot(&mut Reader::new(&w.buf)).unwrap();
+        assert_eq!(slot, 36);
+        let mut out = Writer::new();
+        write_stack(&mut out, stack);
+        let mut expect = Writer::new();
+        expect
+            .var_int(1)
+            .var_int(10)
+            .var_int(1)
+            .var_int(0)
+            .var_int(53);
+        expect.buf.extend_from_slice(&[1, 2, 0]);
+        assert_eq!(out.buf, expect.buf);
     }
 
     #[test]
@@ -322,9 +558,28 @@ mod tests {
         assert_eq!(c.state, 5);
         assert_eq!(
             c.changed,
-            vec![(36, None), (9, Some(Stack { item: 1, count: 3 , damage: 0}))]
+            vec![
+                (36, None),
+                (
+                    9,
+                    Some(Stack {
+                        item: 1,
+                        count: 3,
+                        damage: 0,
+                        extra: 0
+                    })
+                )
+            ]
         );
-        assert_eq!(c.carried, Some(Stack { item: 28, count: 1 , damage: 0}));
+        assert_eq!(
+            c.carried,
+            Some(Stack {
+                item: 28,
+                count: 1,
+                damage: 0,
+                extra: 0
+            })
+        );
     }
 
     #[test]

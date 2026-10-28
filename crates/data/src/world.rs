@@ -52,7 +52,12 @@ pub fn load_sturdy(root: &Path) -> Result<Vec<u8>, DataError> {
         .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
     Ok(text
         .lines()
-        .map(|line| line.split(',').nth(5).and_then(|v| v.trim().parse().ok()).unwrap_or(0))
+        .map(|line| {
+            line.split(',')
+                .nth(5)
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0)
+        })
         .collect())
 }
 
@@ -75,7 +80,11 @@ pub fn load_requires_tool(root: &Path) -> Result<Vec<bool>, DataError> {
 }
 
 /// Печи по порядку индексов в [`Fuel`]: обычная, доменная, коптильня.
-pub const FURNACES: [&str; 3] = ["minecraft:furnace", "minecraft:blast_furnace", "minecraft:smoker"];
+pub const FURNACES: [&str; 3] = [
+    "minecraft:furnace",
+    "minecraft:blast_furnace",
+    "minecraft:smoker",
+];
 
 /// Топливо (`minecraft:cooking_fuel`), вычисленное для каждой печи из [`FURNACES`]:
 /// время горения в тиках и множитель скорости готовки.
@@ -87,11 +96,21 @@ pub struct Fuel {
 
 /// Вычисляет `context_int_provider`/`context_float_provider` (число, ссылка,
 /// `div`, `conditional`) для блока печи `block`.
-fn eval_provider(root: &Path, v: &serde_json::Value, float: bool, block: &str, depth: u32) -> Option<f64> {
+fn eval_provider(
+    root: &Path,
+    v: &serde_json::Value,
+    float: bool,
+    block: &str,
+    depth: u32,
+) -> Option<f64> {
     if depth > 16 {
         return None;
     }
-    let dir = if float { "context_float_provider" } else { "context_int_provider" };
+    let dir = if float {
+        "context_float_provider"
+    } else {
+        "context_int_provider"
+    };
     match v {
         serde_json::Value::Number(n) => n.as_f64(),
         serde_json::Value::String(id) => {
@@ -111,7 +130,11 @@ fn eval_provider(root: &Path, v: &serde_json::Value, float: bool, block: &str, d
                 })
             }
             "minecraft:conditional" => {
-                let on = if block_predicate(root, o.get("condition")?, block)? { "on_true" } else { "on_false" };
+                let on = if block_predicate(root, o.get("condition")?, block)? {
+                    "on_true"
+                } else {
+                    "on_false"
+                };
                 eval_provider(root, o.get(on)?, float, block, depth + 1)
             }
             _ => None,
@@ -129,7 +152,12 @@ fn block_predicate(root: &Path, v: &serde_json::Value, block: &str) -> Option<bo
             block_predicate(root, &json, block)
         }
         serde_json::Value::Object(o) if o.get("type")?.as_str()? == "minecraft:match_block" => {
-            Some(o.get("blocks")?.as_array()?.iter().any(|b| b.as_str() == Some(block)))
+            Some(
+                o.get("blocks")?
+                    .as_array()?
+                    .iter()
+                    .any(|b| b.as_str() == Some(block)),
+            )
         }
         _ => None,
     }
@@ -137,7 +165,10 @@ fn block_predicate(root: &Path, v: &serde_json::Value, block: &str) -> Option<bo
 
 fn parse_fuel(root: &Path, c: &serde_json::Value) -> Option<Fuel> {
     let f = c.get("minecraft:cooking_fuel")?;
-    let mut fuel = Fuel { burn: [0; 3], speed: [1.0; 3] };
+    let mut fuel = Fuel {
+        burn: [0; 3],
+        speed: [1.0; 3],
+    };
     for (i, block) in FURNACES.iter().enumerate() {
         fuel.burn[i] = eval_provider(root, f.get("burn_time")?, false, block, 0)? as i32;
         if let Some(s) = f.get("speed_multiplier") {
@@ -156,11 +187,21 @@ pub struct Food {
     pub seconds: f32,
 }
 
+/// Питьё без сытости (`minecraft:potion`): секунды и ID остатка (`-1` — ничего).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Drink {
+    pub seconds: f32,
+    /// ID предмета `minecraft:use_remainder`; `-1` — остатка нет.
+    pub remainder: i32,
+}
+
 /// Свойства предмета, нужные выживанию.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ItemInfo {
     pub max_stack: u8,
     pub food: Option<Food>,
+    /// Питьё с `potion_contents` и без `food`.
+    pub drink: Option<Drink>,
     /// Слот `minecraft:equippable`: `head`, `chest`, `legs`, `feet`, `offhand`…
     pub equip: Option<&'static str>,
     /// `minecraft:max_damage` (0 — предмет не изнашивается).
@@ -173,6 +214,7 @@ impl Default for ItemInfo {
         Self {
             max_stack: 64,
             food: None,
+            drink: None,
             equip: None,
             max_damage: 0,
             fuel: None,
@@ -209,14 +251,22 @@ pub fn load_items(root: &Path, items: &HashMap<String, i32>) -> Result<Vec<ItemI
         {
             out[id as usize].max_stack = n.clamp(1, 99) as u8;
         }
-        if let Some(n) = text.split_once("\"minecraft:max_damage\":").and_then(|(_, rest)| {
-            let digits: String = rest.trim_start().chars().take_while(char::is_ascii_digit).collect();
-            digits.parse::<i32>().ok()
-        }) {
+        if let Some(n) = text
+            .split_once("\"minecraft:max_damage\":")
+            .and_then(|(_, rest)| {
+                let digits: String = rest
+                    .trim_start()
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                digits.parse::<i32>().ok()
+            })
+        {
             out[id as usize].max_damage = n;
         }
-        // Еды немного: такие файлы разбираем целиком.
+        // Еды и зелий немного: такие файлы разбираем целиком.
         if text.contains("\"minecraft:food\"")
+            || text.contains("\"minecraft:potion_contents\"")
             || text.contains("\"minecraft:equippable\"")
             || text.contains("\"minecraft:cooking_fuel\"")
         {
@@ -227,11 +277,32 @@ pub fn load_items(root: &Path, items: &HashMap<String, i32>) -> Result<Vec<ItemI
                 })?;
             let c = &json["components"];
             out[id as usize].food = parse_food(c);
+            out[id as usize].drink = parse_drink(c, items);
             out[id as usize].fuel = parse_fuel(root, c);
-            out[id as usize].equip = c["minecraft:equippable"]["slot"].as_str().and_then(equip_slot);
+            out[id as usize].equip = c["minecraft:equippable"]["slot"]
+                .as_str()
+                .and_then(equip_slot);
         }
     }
     Ok(out)
+}
+
+/// Зелье: есть `potion_contents` и `consumable`, нет `food` (еда идёт своим путём).
+fn parse_drink(c: &serde_json::Value, items: &HashMap<String, i32>) -> Option<Drink> {
+    if c.get("minecraft:food").is_some() || c.get("minecraft:potion_contents").is_none() {
+        return None;
+    }
+    let cons = c.get("minecraft:consumable")?;
+    let seconds = cons
+        .get("consume_seconds")
+        .and_then(|v| v.as_f64())
+        .map_or(DEFAULT_CONSUME_SECONDS, |s| s as f32);
+    let remainder = c
+        .pointer("/minecraft:use_remainder/id")
+        .and_then(|v| v.as_str())
+        .and_then(|n| items.get(n).copied())
+        .unwrap_or(-1);
+    Some(Drink { seconds, remainder })
 }
 
 fn parse_food(c: &serde_json::Value) -> Option<Food> {
@@ -248,65 +319,6 @@ fn parse_food(c: &serde_json::Value) -> Option<Food> {
             .and_then(|v| v.as_f64())
             .map_or(DEFAULT_CONSUME_SECONDS, |s| s as f32),
     })
-}
-
-/// Обычный дроп блока (без шёлкового касания, ножниц и случайностей) из
-/// `data/minecraft/loot_table/blocks/<имя>.json`: блок → предмет.
-pub fn load_block_drops(root: &Path) -> Result<HashMap<String, String>, DataError> {
-    let dir = root.join("data/minecraft/loot_table/blocks");
-    let rd = std::fs::read_dir(&dir)
-        .map_err(|e| DataError::Io(format!("read {}: {e}", dir.display())))?;
-    let mut out = HashMap::new();
-    for entry in rd.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if let Some(item) = read_json(&path)?
-            .get("pools")
-            .and_then(|p| p.get(0))
-            .and_then(pool_drop)
-        {
-            out.insert(format!("minecraft:{name}"), item);
-        }
-    }
-    Ok(out)
-}
-
-fn pool_drop(pool: &serde_json::Value) -> Option<String> {
-    if pool.get("conditions").is_some_and(|c| !plain_conditions(c)) {
-        return None;
-    }
-    pool.get("entries")?.as_array()?.iter().find_map(entry_drop)
-}
-
-fn entry_drop(e: &serde_json::Value) -> Option<String> {
-    for key in ["condition", "conditions"] {
-        if e.get(key).is_some_and(|c| !plain_conditions(c)) {
-            return None;
-        }
-    }
-    match e.get("type")?.as_str()? {
-        "minecraft:item" => Some(e.get("name")?.as_str()?.to_owned()),
-        "minecraft:alternatives" | "minecraft:group" | "minecraft:sequence" => {
-            e.get("children")?.as_array()?.iter().find_map(entry_drop)
-        }
-        _ => None,
-    }
-}
-
-/// Условия, которые выполняются при ломке рукой: выживание при взрыве и т. п.
-/// Шёлковое касание, ножницы, случайные шансы и свойства блока — нет.
-fn plain_conditions(c: &serde_json::Value) -> bool {
-    match c {
-        serde_json::Value::Array(a) => a.iter().all(plain_conditions),
-        serde_json::Value::String(s) => !s.contains("silk_touch") && !s.contains("shears"),
-        serde_json::Value::Object(_) => matches!(
-            c.get("type").and_then(|t| t.as_str()),
-            Some("minecraft:survives_explosion")
-        ),
-        _ => false,
-    }
 }
 
 pub fn read_json(path: &Path) -> Result<serde_json::Value, DataError> {
@@ -481,30 +493,63 @@ pub(crate) fn write_derived(path: &Path, text: &str) -> Result<(), DataError> {
     std::fs::rename(&tmp, path).map_err(io)
 }
 
-/// `load_block_drops` через сводку `drops.tsv` (блок, предмет).
-pub fn load_block_drops_cached(root: &Path) -> Result<HashMap<String, String>, DataError> {
-    let path = derived(root, "drops.tsv");
-    if let Ok(text) = std::fs::read_to_string(&path) {
-        return Ok(text
-            .lines()
-            .filter_map(|l| l.split_once('\t'))
-            .map(|(b, i)| (b.to_owned(), i.to_owned()))
-            .collect());
-    }
-    let drops = load_block_drops(root)?;
-    let mut text: Vec<String> = drops.iter().map(|(b, i)| format!("{b}\t{i}")).collect();
-    text.sort();
-    write_derived(&path, &(text.join("\n") + "\n"))?;
-    Ok(drops)
+/// Таблицы лута блоков (`loot_table/blocks`) и именованные условия
+/// (`predicate/**`, на них ссылаются строкой, например `minecraft:tool/can_silk_touch`).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct BlockLoot {
+    pub tables: HashMap<String, serde_json::Value>,
+    pub predicates: HashMap<String, serde_json::Value>,
 }
 
-/// `load_items` через сводку `items.tsv`: имя, стопка и для еды — сытость,
-/// насыщение, можно ли всегда, секунды.
+/// Лут блоков через сводку `loot.json`.
+pub fn load_block_loot_cached(root: &Path) -> Result<BlockLoot, DataError> {
+    let path = derived(root, "loot.json");
+    if let Ok(text) = std::fs::read_to_string(&path)
+        && let Ok(loot) = serde_json::from_str(&text)
+    {
+        return Ok(loot);
+    }
+    let mut loot = BlockLoot::default();
+    let base = root.join("data/minecraft");
+    let mut files = Vec::new();
+    collect_json(&base.join("loot_table/blocks"), &mut files);
+    for p in files.drain(..) {
+        if let Some(name) = p.file_stem().and_then(|s| s.to_str()) {
+            loot.tables
+                .insert(format!("minecraft:{name}"), read_json(&p)?);
+        }
+    }
+    let pred = base.join("predicate");
+    collect_json(&pred, &mut files);
+    for p in files {
+        if let Ok(rel) = p.with_extension("").strip_prefix(&pred) {
+            let id = rel.to_string_lossy().replace('\\', "/");
+            loot.predicates
+                .insert(format!("minecraft:{id}"), read_json(&p)?);
+        }
+    }
+    let text = serde_json::to_string(&loot).map_err(|e| DataError::Io(e.to_string()))?;
+    write_derived(&path, &text)?;
+    Ok(loot)
+}
+
+fn collect_json(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_json(&p, out);
+        } else if p.extension().is_some_and(|x| x == "json") {
+            out.push(p);
+        }
+    }
+}
+
+/// `load_items` через сводку `items.v2.tsv`: имя, стопка, питьё и для еды — сытость.
 pub fn load_items_cached(
     root: &Path,
     items: &HashMap<String, i32>,
 ) -> Result<Vec<ItemInfo>, DataError> {
-    let path = derived(root, "items.tsv");
+    let path = derived(root, "items.v2.tsv");
     let len = items.values().max().map_or(0, |&m| m as usize + 1);
     if let Ok(text) = std::fs::read_to_string(&path) {
         let mut out = vec![ItemInfo::default(); len];
@@ -527,12 +572,15 @@ pub fn load_items_cached(
 
 /// Слот экипировки (`EquipmentSlot`) по имени.
 fn equip_slot(name: &str) -> Option<&'static str> {
-    ["mainhand", "offhand", "feet", "legs", "chest", "head", "body", "saddle"]
-        .into_iter()
-        .find(|s| *s == name)
+    [
+        "mainhand", "offhand", "feet", "legs", "chest", "head", "body", "saddle",
+    ]
+    .into_iter()
+    .find(|s| *s == name)
 }
 
-/// `name, max_stack, equip (-), max_damage [, nutrition saturation always seconds]` через табуляцию.
+/// `name, max_stack, equip (-), max_damage, fuel, секунды питья (-), остаток (-)`
+/// и для еды — сытость, насыщение, можно ли всегда, секунды. Поля через табуляцию.
 fn item_line(name: &str, i: &ItemInfo) -> String {
     let fuel = i.fuel.map_or("-".to_owned(), |f| {
         format!(
@@ -540,8 +588,20 @@ fn item_line(name: &str, i: &ItemInfo) -> String {
             f.burn[0], f.burn[1], f.burn[2], f.speed[0], f.speed[1], f.speed[2]
         )
     });
+    let drink = match i.drink {
+        Some(d) => format!(
+            "{}\t{}",
+            d.seconds,
+            if d.remainder < 0 {
+                "-".to_owned()
+            } else {
+                d.remainder.to_string()
+            }
+        ),
+        None => "-\t-".to_owned(),
+    };
     let head = format!(
-        "{name}\t{}\t{}\t{}\t{fuel}",
+        "{name}\t{}\t{}\t{}\t{fuel}\t{drink}",
         i.max_stack,
         i.equip.unwrap_or("-"),
         i.max_damage
@@ -565,13 +625,33 @@ fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, I
         "-" => None,
         s => {
             let (b, sp) = s.split_once(';')?;
-            let b: Vec<i32> = b.split(',').map(|x| x.parse().ok()).collect::<Option<_>>()?;
-            let sp: Vec<f32> = sp.split(',').map(|x| x.parse().ok()).collect::<Option<_>>()?;
+            let b: Vec<i32> = b
+                .split(',')
+                .map(|x| x.parse().ok())
+                .collect::<Option<_>>()?;
+            let sp: Vec<f32> = sp
+                .split(',')
+                .map(|x| x.parse().ok())
+                .collect::<Option<_>>()?;
             Some(Fuel {
                 burn: b.try_into().ok()?,
                 speed: sp.try_into().ok()?,
             })
         }
+    };
+    let drink_seconds = f.next()?;
+    let drink_rest = f.next()?;
+    let drink = if drink_seconds == "-" {
+        None
+    } else {
+        Some(Drink {
+            seconds: drink_seconds.parse().ok()?,
+            remainder: if drink_rest == "-" {
+                -1
+            } else {
+                drink_rest.parse().ok()?
+            },
+        })
     };
     let food = match (f.next(), f.next(), f.next(), f.next()) {
         (Some(n), Some(s), Some(a), Some(sec)) => Some(Food {
@@ -587,6 +667,7 @@ fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, I
         ItemInfo {
             max_stack,
             food,
+            drink,
             equip,
             max_damage,
             fuel,
@@ -626,23 +707,6 @@ mod tests {
 #[cfg(test)]
 mod loot_tests {
     use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn stone_drops_cobblestone() {
-        let pool = json!({"entries": [{"type": "minecraft:alternatives", "children": [
-            {"type": "minecraft:item", "condition": "minecraft:tool/can_silk_touch", "name": "minecraft:stone"},
-            {"type": "minecraft:item", "condition": {"type": "minecraft:survives_explosion"}, "name": "minecraft:cobblestone"}
-        ]}], "rolls": 1});
-        assert_eq!(pool_drop(&pool).as_deref(), Some("minecraft:cobblestone"));
-    }
-
-    #[test]
-    fn chance_only_drops_nothing() {
-        let pool = json!({"entries": [{"type": "minecraft:item",
-            "conditions": [{"type": "minecraft:random_chance", "chance": 0.1}], "name": "minecraft:apple"}]});
-        assert_eq!(pool_drop(&pool), None);
-    }
 
     #[test]
     fn food_component() {
@@ -661,6 +725,23 @@ mod loot_tests {
     }
 
     #[test]
+    fn potion_is_a_drink() {
+        let items = HashMap::from([("minecraft:glass_bottle".to_string(), 4)]);
+        let c = serde_json::json!({
+            "minecraft:consumable": {"animation": "drink"},
+            "minecraft:potion_contents": {},
+            "minecraft:use_remainder": {"id": "minecraft:glass_bottle"}
+        });
+        let d = parse_drink(&c, &items).unwrap();
+        assert_eq!((d.seconds, d.remainder), (1.6, 4));
+        let food = serde_json::json!({
+            "minecraft:food": {"nutrition": 1, "saturation": 1.0},
+            "minecraft:potion_contents": {}
+        });
+        assert!(parse_drink(&food, &items).is_none());
+    }
+
+    #[test]
     fn item_line_round_trip() {
         let items = HashMap::from([("minecraft:bread".to_string(), 3)]);
         let food = Food {
@@ -673,9 +754,16 @@ mod loot_tests {
             ItemInfo {
                 max_stack: 64,
                 food: Some(food),
+                drink: Some(Drink {
+                    seconds: 1.6,
+                    remainder: 12,
+                }),
                 equip: Some("head"),
                 max_damage: 165,
-                fuel: Some(Fuel { burn: [1600, 800, 800], speed: [1.0, 2.0, 2.0] }),
+                fuel: Some(Fuel {
+                    burn: [1600, 800, 800],
+                    speed: [1.0, 2.0, 2.0],
+                }),
             },
             ItemInfo {
                 max_stack: 16,

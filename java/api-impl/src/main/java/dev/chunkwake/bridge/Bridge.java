@@ -50,12 +50,13 @@ public final class Bridge {
     static final int ARG_ITEMS = 19;
     static final int ARG_ITEMS_LEN = 20;
     static final int DOWN_WORLD = 21;
-    static final int SLOTS = 22;
+    static final int UP_DISABLE = 22;
+    static final int SLOTS = 23;
 
     /** События с ответом ({@code chunkwake_net::live::Event}). */
     static final int EVENT_DAMAGE = 1, EVENT_DEATH = 2, EVENT_DROP = 3, EVENT_PICKUP = 4, EVENT_GAME_MODE = 5,
             EVENT_CHAT = 6, EVENT_COMMAND_PRE = 7, EVENT_TAB_COMPLETE = 8, EVENT_PLACE = 9, EVENT_MOVE = 10,
-            EVENT_INTERACT = 11;
+            EVENT_INTERACT = 11, EVENT_POTION = 12;
 
     /** Биты маски слушателей. */
     static final long LISTEN_JOIN = 1, LISTEN_QUIT = 2, LISTEN_BLOCK_BREAK = 4;
@@ -89,6 +90,7 @@ public final class Bridge {
         NativeLog.install();
 
         up(linker, UP_ENABLE, "enable", FunctionDescriptor.of(JAVA_INT));
+        up(linker, UP_DISABLE, "disable", FunctionDescriptor.of(JAVA_INT));
         up(linker, UP_TICK, "tick", FunctionDescriptor.ofVoid());
         up(linker, UP_JOIN, "join", FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_INT));
         up(linker, UP_QUIT, "quit", FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG));
@@ -127,6 +129,16 @@ public final class Bridge {
         } catch (Throwable t) {
             Logger.getLogger("Chunkwake").log(Level.SEVERE, "plugin startup failed", t);
             return -1;
+        }
+    }
+
+    static int disable() {
+        try {
+            server.disablePlugins();
+            return 1;
+        } catch (Throwable t) {
+            Logger.getLogger("Chunkwake").log(Level.SEVERE, "plugin shutdown failed", t);
+            return 0;
         }
     }
 

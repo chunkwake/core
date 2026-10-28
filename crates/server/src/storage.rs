@@ -12,6 +12,7 @@ use chunkwake_world::light::{self, LightTable};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 const AUTOSAVE: Duration = Duration::from_secs(30);
@@ -23,6 +24,8 @@ pub struct WorldStorage {
     format: Format,
     names: StateNames,
     players: PlayerFiles,
+    save_lock: Mutex<()>,
+    save_notify: Arc<tokio::sync::Notify>,
 }
 
 struct StateNames {
@@ -68,6 +71,8 @@ impl WorldStorage {
         Self {
             store: RegionStore::new(world_dir.join("region")),
             players: PlayerFiles::new(world_dir, data_version, items, effects),
+            save_lock: Mutex::new(()),
+            save_notify: Arc::new(tokio::sync::Notify::new()),
             template,
             light,
             format: Format {
@@ -84,38 +89,51 @@ impl WorldStorage {
 
     /// Записывает изменённые чанки; возвращает их число.
     pub fn save(&self, plan: &PlayPlan) -> Result<usize, String> {
-        // Игроки: ошибка одного не мешает остальным и чанкам.
-        for (uuid, s) in plan.take_player_saves() {
-            if let Err(e) = self.players.save(uuid, &s) {
-                tracing::error!("save player {uuid}: {e}");
+        let _guard = self.save_lock.lock().unwrap();
+        let mut errors = save_player_batch(
+            plan.pending_player_saves(),
+            |uuid, s| self.players.save(uuid, s),
+            |uuid, s| plan.mark_player_saved(uuid, s),
+        );
+        let unsaved = plan.unsaved();
+        let mut saved = 0;
+        if !unsaved.is_empty() {
+            let nbt = unsaved
+                .iter()
+                .map(|(pos, c, _)| {
+                    Ok((
+                        *pos,
+                        anvil::chunk_to_nbt(c, *pos, self.format, &self.names)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>();
+            match nbt.and_then(|nbt| self.store.save(&nbt).map(|()| nbt.len())) {
+                Ok(n) => {
+                    plan.mark_saved(unsaved.iter().map(|(pos, _, rev)| (*pos, *rev)));
+                    saved = n;
+                }
+                Err(e) => errors.push(format!("save chunks: {e}")),
             }
         }
-        let unsaved = plan.unsaved();
-        if unsaved.is_empty() {
-            return Ok(0);
+        if errors.is_empty() {
+            Ok(saved)
+        } else {
+            Err(errors.join("\n"))
         }
-        let nbt = unsaved
-            .iter()
-            .map(|(pos, c, _)| {
-                Ok((
-                    *pos,
-                    anvil::chunk_to_nbt(c, *pos, self.format, &self.names)?,
-                ))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        self.store.save(&nbt)?;
-        plan.mark_saved(unsaved.iter().map(|(pos, _, rev)| (*pos, *rev)));
-        Ok(nbt.len())
     }
 
     /// Автосохранение каждые 30 с в блокирующем пуле (сжатие и диск не держат сеть).
-    pub fn spawn_autosave(self: &Arc<Self>, plan: Arc<PlayPlan>) {
+    pub fn spawn_autosave(self: &Arc<Self>, plan: Arc<PlayPlan>) -> tokio::task::JoinHandle<()> {
         let storage = self.clone();
+        let notify = self.save_notify.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(AUTOSAVE);
             tick.tick().await;
             loop {
-                tick.tick().await;
+                tokio::select! {
+                    _ = tick.tick() => {},
+                    _ = notify.notified() => {},
+                }
                 let (storage, plan) = (storage.clone(), plan.clone());
                 match tokio::task::spawn_blocking(move || storage.save(&plan)).await {
                     Ok(Ok(0)) => {}
@@ -124,8 +142,23 @@ impl WorldStorage {
                     Err(e) => tracing::error!("autosave task: {e}"),
                 }
             }
-        });
+        })
     }
+}
+
+fn save_player_batch(
+    saves: Vec<(Uuid, PlayerSave)>,
+    mut write: impl FnMut(Uuid, &PlayerSave) -> Result<(), String>,
+    mut acknowledge: impl FnMut(Uuid, &PlayerSave),
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (uuid, save) in saves {
+        match write(uuid, &save) {
+            Ok(()) => acknowledge(uuid, &save),
+            Err(error) => errors.push(format!("save player {uuid}: {error}")),
+        }
+    }
+    errors
 }
 
 impl PlayerSource for WorldStorage {
@@ -137,10 +170,8 @@ impl PlayerSource for WorldStorage {
             .flatten()
     }
 
-    fn save_player(&self, uuid: Uuid, save: &PlayerSave) {
-        if let Err(e) = self.players.save(uuid, save) {
-            tracing::error!("save player {uuid}: {e}");
-        }
+    fn schedule_save(&self) {
+        self.save_notify.notify_one();
     }
 }
 
@@ -161,5 +192,45 @@ impl ChunkSource for WorldStorage {
                     .map_err(|e| format!("chunk {pos:?}: {e}"))
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::save_player_batch;
+    use chunkwake_net::Uuid;
+    use chunkwake_net::survival::PlayerState;
+    use std::collections::HashMap;
+
+    #[test]
+    fn failed_player_write_is_reported_and_retried() {
+        let uuid = Uuid::nil();
+        let save = PlayerState::default().save([1.0, 64.0, 1.0], 0.0, 0.0);
+        let mut pending = HashMap::from([(uuid, save.clone())]);
+        let errors = save_player_batch(
+            pending
+                .iter()
+                .map(|(id, save)| (*id, save.clone()))
+                .collect(),
+            |_, _| Err("disk full".into()),
+            |id, _| {
+                pending.remove(&id);
+            },
+        );
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("disk full"));
+        assert_eq!(pending.get(&uuid), Some(&save));
+        let errors = save_player_batch(
+            pending
+                .iter()
+                .map(|(id, save)| (*id, save.clone()))
+                .collect(),
+            |_, _| Ok(()),
+            |id, _| {
+                pending.remove(&id);
+            },
+        );
+        assert!(errors.is_empty());
+        assert!(pending.is_empty());
     }
 }

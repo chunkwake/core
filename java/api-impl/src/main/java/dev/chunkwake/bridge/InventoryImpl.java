@@ -40,8 +40,8 @@ final class InventoryImpl {
         if (index < 0 || index >= SIZE) {
             throw new ArrayIndexOutOfBoundsException(index);
         }
-        String name = StackImpl.name(item);
-        player.control(name == null ? "slot " + index + " -" : "slot " + index + " " + name + " " + item.getAmount());
+        String line = StackImpl.line(item);
+        player.control("slot " + index + " " + (line == null ? "-" : line));
     }
 
     public ItemStack[] getContents() {
@@ -155,7 +155,8 @@ final class InventoryImpl {
             for (int i = 0; i < STORAGE && amount > 0; i++) {
                 if (!c[i].isEmpty() && c[i].isSimilar(item) && c[i].getAmount() < max) {
                     int add = Math.min(amount, max - c[i].getAmount());
-                    c[i] = new StackImpl(c[i].getType(), c[i].getAmount() + add);
+                    c[i] = c[i].clone();
+                    c[i].setAmount(c[i].getAmount() + add);
                     changed.put(i, c[i]);
                     amount -= add;
                 }
@@ -163,7 +164,8 @@ final class InventoryImpl {
             for (int i = 0; i < STORAGE && amount > 0; i++) {
                 if (c[i].isEmpty()) {
                     int add = Math.min(amount, max);
-                    c[i] = new StackImpl(item.getType(), add);
+                    c[i] = item.clone();
+                    c[i].setAmount(add);
                     changed.put(i, c[i]);
                     amount -= add;
                 }

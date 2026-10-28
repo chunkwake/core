@@ -51,6 +51,10 @@ final class ChunkwakeServer {
         return scheduler;
     }
 
+    void disablePlugins() {
+        plugins.disablePlugins();
+    }
+
     /** Загружает jar из каталога и включает плагины. Возвращает число включённых. */
     int loadAndEnable(File dir) {
         Bukkit.setServer(api);

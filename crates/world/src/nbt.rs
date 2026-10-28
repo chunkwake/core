@@ -117,6 +117,11 @@ pub fn write_gzip_file(path: &std::path::Path, root: &Compound) -> Result<(), St
     let bytes = gz.finish().map_err(|e| e.to_string())?;
     let tmp = path.with_extension("dat_tmp");
     std::fs::write(&tmp, bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::File::options()
+        .write(true)
+        .open(&tmp)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| format!("sync {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))
 }
 

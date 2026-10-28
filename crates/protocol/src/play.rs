@@ -537,10 +537,47 @@ pub fn block_update(id: i32, pos: [i32; 3], state: i32) -> Vec<u8> {
     w.buf
 }
 
+/// `block_event`: крышка сундука (`action` 1, `param` — сколько игроков смотрят).
+/// `block` — ID в реестре `block`, не состояние.
+pub fn block_event(id: i32, pos: [i32; 3], action: u8, param: u8, block: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .i64(pack_block_pos(pos))
+        .u8(action)
+        .u8(param)
+        .var_int(block);
+    w.buf
+}
+
+/// `set_time` 26.3: возраст мира и одна запись часов верхнего мира.
+/// Часы — `minecraft:overworld` (сетевой id 0, записи реестра отсортированы).
+/// Состояние часов: VarLong тиков, доля тика, скорость (`0` — солнце стоит между пакетами).
+pub fn set_time(id: i32, game_time: i64, day_time: i64, ticking: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .i64(game_time)
+        .var_int(1)
+        .var_int(0)
+        .var_long(day_time)
+        .f32(0.0)
+        .f32(if ticking { 1.0 } else { 0.0 });
+    w.buf
+}
+
+/// `change_difficulty`: байт сложности (0 мирный … 3 сложный) и флаг блокировки.
+pub fn change_difficulty(id: i32, difficulty: u8) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).u8(difficulty).bool(false);
+    w.buf
+}
+
 /// `ClientboundBlockDestructionPacket`: трещины на блоке; стадия вне 0..=9 убирает их.
 pub fn block_destruction(id: i32, entity: i32, pos: [i32; 3], stage: i8) -> Vec<u8> {
     let mut w = Writer::new();
-    w.var_int(id).var_int(entity).i64(pack_block_pos(pos)).u8(stage as u8);
+    w.var_int(id)
+        .var_int(entity)
+        .i64(pack_block_pos(pos))
+        .u8(stage as u8);
     w.buf
 }
 
@@ -596,9 +633,13 @@ pub const DROP_ITEM: i32 = 5;
 pub const RELEASE_USE_ITEM: i32 = 6;
 pub const SWAP_ITEM_WITH_OFFHAND: i32 = 7;
 
-/// `ServerboundPlayerCommandPacket.Action` (после ID сущности).
+/// `ServerboundPlayerCommandPacket.Action` (26.3, после ID сущности).
+/// 0 — встать с кровати, 3/4 — прыжок на скакуне, 5 — инвентарь скакуна.
+/// Присед приходит в `player_input`, не здесь.
 pub const START_SPRINTING: i32 = 1;
 pub const STOP_SPRINTING: i32 = 2;
+/// Клиент уже включил бит «полёт на элитрах» локально и ждёт, что сервер его погасит.
+pub const START_FALL_FLYING: i32 = 6;
 
 pub fn read_player_action(r: &mut Reader) -> Result<PlayerAction> {
     Ok(PlayerAction {
@@ -639,6 +680,38 @@ pub fn read_use_item_on(r: &mut Reader) -> Result<UseItemOn> {
 #[cfg(test)]
 mod block_tests {
     use super::*;
+
+    #[test]
+    fn block_event_time_and_difficulty_roundtrip() {
+        let ev = block_event(7, [1, 64, -2], 1, 3, 42);
+        let mut r = crate::Reader::new(&ev);
+        assert_eq!(r.var_int().unwrap(), 7);
+        assert_eq!(unpack_block_pos(r.i64().unwrap()), [1, 64, -2]);
+        assert_eq!(r.u8().unwrap(), 1);
+        assert_eq!(r.u8().unwrap(), 3);
+        assert_eq!(r.var_int().unwrap(), 42);
+
+        let time = set_time(9, 10, 1000, true);
+        let mut r = crate::Reader::new(&time);
+        assert_eq!(r.var_int().unwrap(), 9);
+        assert_eq!(r.i64().unwrap(), 10);
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.var_int().unwrap(), 0);
+        assert_eq!(r.var_int().unwrap(), 1000);
+        assert_eq!(r.f32().unwrap(), 0.0);
+        assert_eq!(r.f32().unwrap(), 1.0);
+        assert!(r.remaining().is_empty());
+
+        let diff = change_difficulty(4, 2);
+        let mut r = crate::Reader::new(&diff);
+        assert_eq!(r.var_int().unwrap(), 4);
+        assert_eq!(r.u8().unwrap(), 2);
+        assert!(!r.bool().unwrap());
+        assert!(r.remaining().is_empty());
+        assert_eq!(START_FALL_FLYING, 6);
+        assert_eq!(START_SPRINTING, 1);
+        assert_eq!(STOP_SPRINTING, 2);
+    }
 
     #[test]
     fn block_pos_roundtrip() {

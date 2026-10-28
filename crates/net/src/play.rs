@@ -15,11 +15,11 @@ use chunkwake_protocol::frame::FrameCodec;
 use chunkwake_protocol::inventory::{self as inv, Slot, Stack};
 use chunkwake_protocol::play::{self, Login, Move, PlayerEntry, game_event};
 use chunkwake_protocol::text;
+use chunkwake_world::light::{Engine, LightAccess, LightTable};
 use chunkwake_world::nbt::{Compound, Tag};
 use chunkwake_world::{BlockEntity, ChunkColumn};
-use chunkwake_world::light::{Engine, LightAccess, LightTable};
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, oneshot};
@@ -91,6 +91,7 @@ struct Ids {
     sb_player_action: i32,
     sb_use_item_on: i32,
     sb_set_creative_mode_slot: i32,
+    sb_pick_item_from_block: i32,
     sb_set_carried_item: i32,
     container_set_content: i32,
     container_set_slot: i32,
@@ -108,6 +109,9 @@ struct Ids {
     sb_player_command: i32,
     sb_use_item: i32,
     commands: i32,
+    block_event: i32,
+    set_time: i32,
+    change_difficulty: i32,
     update_mob_effect: i32,
     update_attributes: i32,
     remove_mob_effect: i32,
@@ -166,6 +170,14 @@ pub struct PlayPlan {
     /// Зеркало онлайн-игроков для плагинов и каналы управления их сессиями.
     live: Mutex<HashMap<Uuid, Live>>,
     controls: Mutex<HashMap<Uuid, tokio::sync::mpsc::UnboundedSender<Control>>>,
+    shutting_down: AtomicBool,
+    /// Кто смотрит сундук или бочку: крышка открыта, пока список не пуст.
+    open_blocks: Mutex<HashMap<[i32; 3], Vec<Uuid>>>,
+    /// Время суток (0..24000). Тик двигает его и шлёт клиенту, клиент сам не считает.
+    day_time: AtomicI64,
+    /// Сколько серверных тиков прошло с запуска (`/time query gametime`).
+    game_time: AtomicI64,
+    tick_meter: Mutex<TickMeter>,
 }
 
 /// Готовый к записи кадр, общий для многих соединений.
@@ -207,7 +219,7 @@ impl LightAccess for WorldLight<'_> {
 /// Сохранённые игроки (`playerdata`): чтение при входе, запись при выходе.
 pub trait PlayerSource: Send + Sync {
     fn load_player(&self, uuid: Uuid) -> Option<PlayerSave>;
-    fn save_player(&self, uuid: Uuid, save: &PlayerSave);
+    fn schedule_save(&self);
 }
 
 /// Источник сохранённых чанков: регион 32×32 читается целиком при первом обращении.
@@ -265,6 +277,7 @@ struct EntityRef {
     pos: [f64; 3],
     yaw: f32,
     pitch: f32,
+    gliding: bool,
 }
 
 /// Игрок онлайн: запись таб-листа и его сущность в мире.
@@ -283,6 +296,8 @@ struct Online {
     dirty: bool,
     rotated: bool,
     on_ground: bool,
+    /// Полёт на элитрах: другим игрокам уходит в метаданных при спавне.
+    gliding: bool,
 }
 
 impl Online {
@@ -293,6 +308,7 @@ impl Online {
             pos: self.pos,
             yaw: self.yaw,
             pitch: self.pitch,
+            gliding: self.gliding,
         }
     }
 }
@@ -381,8 +397,162 @@ pub struct WorldSpec {
 fn builtin_level(name: &str) -> i32 {
     match name {
         "op" | "deop" => ops::LEVEL_ADMINS,
+        "list" | "tps" => 0,
         _ => ops::LEVEL_GAMEMASTERS,
     }
+}
+
+fn is_builtin_name(name: &str) -> bool {
+    matches!(
+        name,
+        "give"
+            | "gamemode"
+            | "op"
+            | "deop"
+            | "effect"
+            | "kill"
+            | "tp"
+            | "teleport"
+            | "say"
+            | "list"
+            | "clear"
+            | "tps"
+            | "time"
+            | "difficulty"
+    )
+}
+
+/// Общие флаги сущности: присед, бег, элитры.
+fn player_flags(sneaking: bool, sprinting: bool, gliding: bool) -> u8 {
+    u8::from(sneaking) << 1 | u8::from(sprinting) << 3 | u8::from(gliding) << 7
+}
+
+fn coord_token(token: &str) -> bool {
+    matches!(
+        token.as_bytes().first(),
+        Some(b'~' | b'+' | b'-' | b'0'..=b'9')
+    )
+}
+
+/// Абсолютная или относительная (`~`, `~1.5`) координата.
+fn coord(token: &str, base: f64) -> Option<f64> {
+    let v = if let Some(rest) = token.strip_prefix('~') {
+        base + if rest.is_empty() {
+            0.0
+        } else {
+            rest.parse().ok()?
+        }
+    } else {
+        token.parse().ok()?
+    };
+    (v.is_finite() && v.abs() < 3.0e7).then_some(v)
+}
+
+fn coords3(a: &str, b: &str, c: &str, base: [f64; 3]) -> Option<[f64; 3]> {
+    Some([coord(a, base[0])?, coord(b, base[1])?, coord(c, base[2])?])
+}
+
+fn angle(token: &str, base: f32) -> Option<f32> {
+    let v = if let Some(rest) = token.strip_prefix('~') {
+        base + if rest.is_empty() {
+            0.0
+        } else {
+            rest.parse().ok()?
+        }
+    } else {
+        token.parse().ok()?
+    };
+    v.is_finite().then_some(v)
+}
+
+/// `day`/`noon`/`night`/`midnight` или тики по модулю суток.
+fn daytime_ticks(token: &str) -> Option<i64> {
+    let named = match token {
+        "day" => Some(1000),
+        "noon" => Some(6000),
+        "night" => Some(13000),
+        "midnight" => Some(18000),
+        _ => None,
+    };
+    named
+        .or_else(|| token.parse::<i64>().ok())
+        .map(|t| t.rem_euclid(24_000))
+}
+
+fn chat_text(text: &str) -> serde_json::Value {
+    serde_json::json!({"text": text})
+}
+
+fn chat_error(text: &str) -> serde_json::Value {
+    serde_json::json!({"text": text, "color": "red"})
+}
+
+/// Сколько последних тиков держим для TPS и MSPT (5 секунд при 20 тиках).
+const TICK_WINDOW: usize = 100;
+
+struct TickMeter {
+    work: VecDeque<f64>,
+    gap: VecDeque<f64>,
+    last: Option<Instant>,
+}
+
+impl TickMeter {
+    fn new() -> Self {
+        Self {
+            work: VecDeque::new(),
+            gap: VecDeque::new(),
+            last: None,
+        }
+    }
+
+    fn record(&mut self, started: Instant) {
+        let now = Instant::now();
+        if let Some(prev) = self.last {
+            push_sample(
+                &mut self.gap,
+                now.duration_since(prev).as_secs_f64() * 1000.0,
+            );
+        }
+        self.last = Some(now);
+        push_sample(&mut self.work, started.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    fn line(&self) -> String {
+        let avg = |q: &VecDeque<f64>| q.iter().sum::<f64>() / q.len() as f64;
+        if self.work.is_empty() {
+            return "TPS: 20.0 MSPT: 0.0".to_owned();
+        }
+        let mspt = avg(&self.work);
+        let tps = if self.gap.is_empty() {
+            20.0
+        } else {
+            (1000.0 / avg(&self.gap)).min(20.0)
+        };
+        format!("TPS: {tps:.1} MSPT: {mspt:.1}")
+    }
+}
+
+fn push_sample(q: &mut VecDeque<f64>, v: f64) {
+    if q.len() == TICK_WINDOW {
+        q.pop_front();
+    }
+    q.push_back(v);
+}
+
+fn tp_node(name: &str) -> text::Node {
+    use text::{Node, Parser};
+    let arg = |label, children| Node::argument(label, true, Parser::Word, children);
+    Node::literal(
+        name,
+        false,
+        vec![arg(
+            "a",
+            vec![arg(
+                "b",
+                vec![arg("c", vec![arg("d", vec![arg("e", vec![])])])],
+            )],
+        )],
+    )
 }
 
 fn permission_event(id: i32, entity: i32, level: i32) -> Vec<u8> {
@@ -427,7 +597,11 @@ pub const CHEST_RIGHT: u8 = 2;
 impl ChestState {
     /// `ChestBlock.getConnectedDirection`.
     fn connected(self) -> u8 {
-        if self.kind == CHEST_LEFT { (self.facing + 1) % 4 } else { (self.facing + 3) % 4 }
+        if self.kind == CHEST_LEFT {
+            (self.facing + 1) % 4
+        } else {
+            (self.facing + 3) % 4
+        }
     }
 }
 
@@ -482,6 +656,8 @@ const GAME_MODES: [&str; 4] = ["survival", "creative", "adventure", "spectator"]
 const MAX_GIVE: i32 = 6400;
 
 pub struct SurvivalData {
+    /// Чары для плагинов по порядку сетевых ID (строки запроса `enchantments`).
+    pub enchantments: Vec<String>,
     /// Твёрдость по состоянию блока (-1 — неразрушимый, 0 — ломается сразу).
     pub hardness: Vec<f32>,
     /// Рецепты верстака и сетки 2×2.
@@ -501,6 +677,9 @@ pub struct SurvivalData {
     pub effects: HashMap<String, i32>,
     /// ID `minecraft:movement_speed` в реестре `attribute`.
     pub attribute_speed: i32,
+    /// ID `minecraft:jump_strength` и `minecraft:gravity`.
+    pub attribute_jump: i32,
+    pub attribute_gravity: i32,
     /// Ориентация ставимых блоков.
     pub placement: crate::placement::Placement,
     /// Нужен ли правильный инструмент для дропа, по состоянию блока.
@@ -511,17 +690,26 @@ pub struct SurvivalData {
     pub block_names: Vec<String>,
     /// Состояние блока по умолчанию по имени (`Block.setType` у плагинов).
     pub block_defaults: HashMap<String, u32>,
+    /// ID типа блока в реестре `block` (для `block_event`, не состояние).
+    pub block_types: HashMap<String, i32>,
     /// Предмет, выпадающий из состояния блока.
-    pub drops: Vec<Option<i32>>,
+    pub loot: chunkwake_data::world::BlockLoot,
     /// Свойства предметов по ID: размер стопки, еда.
     pub items: Vec<chunkwake_data::world::ItemInfo>,
     /// ID `minecraft:fall` и `minecraft:out_of_world` в реестре `damage_type`.
     pub damage_fall: i32,
     pub damage_void: i32,
     pub damage_starve: i32,
-    pub difficulty: Difficulty,
+    pub damage_magic: i32,
+    pub damage_wither: i32,
+    /// Текущая сложность: `/difficulty` меняет её, пока сервер запущен.
+    pub difficulty: AtomicU8,
     /// ID предмета по имени (`minecraft:bread`) для `/give`.
     pub item_ids: HashMap<String, i32>,
+    /// Имя зелья по сетевому ID реестра `potion` (`minecraft:swiftness`).
+    pub potions: Vec<String>,
+    /// Сетевой ID компонента `minecraft:potion_contents`.
+    pub potion_component: i32,
     /// ID `minecraft:item` в реестре `entity_type`.
     pub item_entity_type: i32,
 }
@@ -595,6 +783,7 @@ impl PlayPlan {
                 sb_player_action: sb("player_action")?,
                 sb_use_item_on: sb("use_item_on")?,
                 sb_set_creative_mode_slot: sb("set_creative_mode_slot")?,
+                sb_pick_item_from_block: sb("pick_item_from_block")?,
                 sb_set_carried_item: sb("set_carried_item")?,
                 container_set_content: cb("container_set_content")?,
                 container_set_slot: cb("container_set_slot")?,
@@ -612,6 +801,9 @@ impl PlayPlan {
                 sb_player_command: sb("player_command")?,
                 sb_use_item: sb("use_item")?,
                 commands: cb("commands")?,
+                block_event: cb("block_event")?,
+                set_time: cb("set_time")?,
+                change_difficulty: cb("change_difficulty")?,
                 update_mob_effect: cb("update_mob_effect")?,
                 update_attributes: cb("update_attributes")?,
                 remove_mob_effect: cb("remove_mob_effect")?,
@@ -648,6 +840,11 @@ impl PlayPlan {
             item_names,
             live: Mutex::new(HashMap::new()),
             controls: Mutex::new(HashMap::new()),
+            shutting_down: AtomicBool::new(false),
+            open_blocks: Mutex::new(HashMap::new()),
+            day_time: AtomicI64::new(0),
+            game_time: AtomicI64::new(0),
+            tick_meter: Mutex::new(TickMeter::new()),
             hub: Hub {
                 codec: FrameCodec {
                     threshold: (compression_threshold >= 0)
@@ -875,12 +1072,19 @@ impl PlayPlan {
     /// Снимок игрока для плагинов (формат — [`Live::render`]); `None` — не онлайн.
     pub fn player_state(&self, uuid: Uuid) -> Option<String> {
         let live = self.live.lock().unwrap().get(&uuid)?.clone();
-        Some(live.render(|id| Some(self.item_name(id).to_owned()), |id| self.effect_name(id)))
+        Some(live.render(
+            |id| Some(self.item_name(id).to_owned()),
+            |id| self.effect_name(id),
+        ))
     }
 
     /// Команда плагина сессии игрока (формат — [`Control::parse`]).
     pub fn player_control(&self, uuid: Uuid, line: &str) -> bool {
-        let Some(c) = Control::parse(line, |n| self.item_id(n), |n| self.survival.effects.get(n).copied()) else {
+        let Some(c) = Control::parse(
+            line,
+            |n| self.item_id(n),
+            |n| self.survival.effects.get(n).copied(),
+        ) else {
             return false;
         };
         if let Some(l) = self.live.lock().unwrap().get_mut(&uuid) {
@@ -894,16 +1098,31 @@ impl PlayPlan {
     }
 
     fn effect_name(&self, id: i32) -> Option<String> {
-        self.survival.effects.iter().find(|(_, v)| **v == id).map(|(k, _)| k.clone())
+        self.survival
+            .effects
+            .iter()
+            .find(|(_, v)| **v == id)
+            .map(|(k, _)| k.clone())
     }
 
     /// Запрос плагина к миру: `get x y z` → имя блока, `set x y z имя` → `1`/`0`,
     /// `effects` → эффекты по порядку ID (строки).
     pub fn world_request(&self, line: &str) -> String {
+        if line == "enchantments" {
+            return self.survival.enchantments.join(
+                "
+",
+            );
+        }
         if line == "effects" {
-            let mut all: Vec<(&i32, &String)> = self.survival.effects.iter().map(|(k, v)| (v, k)).collect();
+            let mut all: Vec<(&i32, &String)> =
+                self.survival.effects.iter().map(|(k, v)| (v, k)).collect();
             all.sort();
-            return all.into_iter().map(|(_, k)| k.as_str()).collect::<Vec<_>>().join("\n");
+            return all
+                .into_iter()
+                .map(|(_, k)| k.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
         }
         let mut it = line.split_whitespace();
         let cmd = it.next();
@@ -917,7 +1136,11 @@ impl PlayPlan {
                 .map_or(String::new(), |s| self.state_name(s).to_owned()),
             Some("set") => {
                 let state = it.next().and_then(|name| {
-                    let name = if name.contains(':') { name.to_owned() } else { format!("minecraft:{name}") };
+                    let name = if name.contains(':') {
+                        name.to_owned()
+                    } else {
+                        format!("minecraft:{name}")
+                    };
                     self.survival.block_defaults.get(&name).copied()
                 });
                 match state {
@@ -1018,24 +1241,16 @@ impl PlayPlan {
     pub async fn console_command(&self, line: &str) -> String {
         let mut parts = line.split_whitespace();
         let plain = |v: serde_json::Value| text::plain_text(&v);
+        if let Some(msg) = self.server_command(None, line) {
+            return if msg.is_null() {
+                String::new()
+            } else {
+                plain(msg)
+            };
+        }
         match (parts.next(), parts.next()) {
             (Some("op"), Some(name)) => plain(self.op_command(name, true)),
             (Some("deop"), Some(name)) => plain(self.op_command(name, false)),
-            (Some("list"), None) => {
-                let names: Vec<String> = self
-                    .hub
-                    .players
-                    .lock()
-                    .unwrap()
-                    .values()
-                    .map(|p| p.entry.name.clone())
-                    .collect();
-                format!(
-                    "There are {} players online: {}",
-                    names.len(),
-                    names.join(", ")
-                )
-            }
             _ => {
                 let known = match self.hooks() {
                     Some(h) => {
@@ -1052,6 +1267,339 @@ impl PlayPlan {
                 }
             }
         }
+    }
+
+    /// Встроенные команды, которым хватает канала управления сессией.
+    /// `None` — это `/give`, `/gamemode`, `/effect`, `/op` (их разбирает сессия).
+    fn server_command(&self, actor: Option<(Uuid, &str)>, line: &str) -> Option<serde_json::Value> {
+        let mut parts = line.split_whitespace();
+        let cmd = parts.next()?;
+        let rest: Vec<&str> = parts.collect();
+        let msg = match cmd {
+            "kill" => self.cmd_kill(actor, rest.first().copied()),
+            "tp" | "teleport" => self.cmd_tp(actor, &rest),
+            "say" => self.cmd_say(
+                actor,
+                line.split_once(' ').map(|(_, m)| m.trim()).unwrap_or(""),
+            ),
+            "list" => chat_text(&self.list_text()),
+            "clear" => self.cmd_clear(actor, rest.first().copied()),
+            "tps" => chat_text(&self.tick_meter.lock().unwrap().line()),
+            "time" => self.cmd_time(&rest),
+            "difficulty" => self.cmd_difficulty(rest.first().copied()),
+            _ => return None,
+        };
+        Some(msg)
+    }
+
+    fn list_text(&self) -> String {
+        let names: Vec<String> = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .values()
+            .map(|p| p.entry.name.clone())
+            .collect();
+        if names.is_empty() {
+            "There are 0 players online".to_owned()
+        } else {
+            format!(
+                "There are {} players online: {}",
+                names.len(),
+                names.join(", ")
+            )
+        }
+    }
+
+    fn player_named(&self, name: &str) -> Option<(Uuid, String)> {
+        let players = self.hub.players.lock().unwrap();
+        let p = players
+            .values()
+            .find(|p| p.entry.name.eq_ignore_ascii_case(name))?;
+        Some((p.entry.uuid, p.entry.name.clone()))
+    }
+
+    /// `@s`, `@a` и имя. `@a` только если `everyone`.
+    fn resolve_players(
+        &self,
+        actor: Option<(Uuid, &str)>,
+        token: &str,
+        everyone: bool,
+    ) -> Result<Vec<(Uuid, String)>, &'static str> {
+        if token == "@s" {
+            return actor
+                .map(|(id, name)| vec![(id, name.to_owned())])
+                .ok_or("No player was found");
+        }
+        if token == "@a" && everyone {
+            let players = self.hub.players.lock().unwrap();
+            return Ok(players
+                .values()
+                .map(|p| (p.entry.uuid, p.entry.name.clone()))
+                .collect());
+        }
+        if token == "@a" {
+            return Err("No player was found");
+        }
+        self.player_named(token)
+            .map(|p| vec![p])
+            .ok_or("No player was found")
+    }
+
+    fn cmd_kill(&self, actor: Option<(Uuid, &str)>, target: Option<&str>) -> serde_json::Value {
+        let token = target.unwrap_or("@s");
+        let list = match self.resolve_players(actor, token, true) {
+            Ok(list) if !list.is_empty() => list,
+            _ => return chat_error("No player was found"),
+        };
+        for (id, _) in &list {
+            self.player_control(*id, "health 0");
+        }
+        if list.len() == 1 {
+            chat_text(&format!("Killed {}", list[0].1))
+        } else {
+            chat_text(&format!("Killed {} players", list.len()))
+        }
+    }
+
+    fn cmd_clear(&self, actor: Option<(Uuid, &str)>, target: Option<&str>) -> serde_json::Value {
+        let token = target.unwrap_or("@s");
+        let list = match self.resolve_players(actor, token, true) {
+            Ok(list) if !list.is_empty() => list,
+            _ => return chat_error("No player was found"),
+        };
+        for (id, _) in &list {
+            self.push_control(*id, Control::Clear);
+        }
+        if list.len() == 1 {
+            chat_text(&format!("Cleared the inventory of {}", list[0].1))
+        } else {
+            chat_text(&format!("Cleared the inventory of {} players", list.len()))
+        }
+    }
+
+    fn push_control(&self, uuid: Uuid, c: Control) -> bool {
+        if let Some(live) = self.live.lock().unwrap().get_mut(&uuid) {
+            c.apply(live);
+        }
+        self.controls
+            .lock()
+            .unwrap()
+            .get(&uuid)
+            .is_some_and(|tx| tx.send(c).is_ok())
+    }
+
+    fn teleport_player(&self, uuid: Uuid, pos: [f64; 3], yaw: f32, pitch: f32) -> bool {
+        self.player_control(
+            uuid,
+            &format!("tp {} {} {} {yaw} {pitch}", pos[0], pos[1], pos[2]),
+        )
+    }
+
+    fn cmd_tp(&self, actor: Option<(Uuid, &str)>, args: &[&str]) -> serde_json::Value {
+        let usage = chat_error(
+            "Usage: /tp <player> | /tp <x> <y> <z> | /tp <who> <to> | /tp <who> <x> <y> <z>",
+        );
+        let actor_id = actor.map(|(id, _)| id);
+        let moved = |name: &str, pos: [f64; 3]| {
+            chat_text(&format!(
+                "Teleported {name} to {:.1}, {:.1}, {:.1}",
+                pos[0], pos[1], pos[2]
+            ))
+        };
+        match args {
+            [a, b, c] if coord_token(a) => {
+                let Some(id) = actor_id else { return usage };
+                let Some((name, base, yaw, pitch)) = self.named_pose(id) else {
+                    return chat_error("No player was found");
+                };
+                let Some(pos) = coords3(a, b, c, base) else {
+                    return usage;
+                };
+                if !self.teleport_player(id, pos, yaw, pitch) {
+                    return chat_error("No player was found");
+                }
+                moved(&name, pos)
+            }
+            [a, b, c, yaw_s, pitch_s] if coord_token(a) => {
+                let Some(id) = actor_id else { return usage };
+                let Some((name, base, yaw, pitch)) = self.named_pose(id) else {
+                    return chat_error("No player was found");
+                };
+                let Some(pos) = coords3(a, b, c, base) else {
+                    return usage;
+                };
+                let Some(yaw) = angle(yaw_s, yaw) else {
+                    return usage;
+                };
+                let Some(pitch) = angle(pitch_s, pitch) else {
+                    return usage;
+                };
+                if !self.teleport_player(id, pos, yaw, pitch) {
+                    return chat_error("No player was found");
+                }
+                moved(&name, pos)
+            }
+            [target] => {
+                let Some(id) = actor_id else { return usage };
+                let Some((name, _, yaw, pitch)) = self.named_pose(id) else {
+                    return chat_error("No player was found");
+                };
+                let Some((dest_id, dest_name)) = self.player_named(target) else {
+                    return chat_error("No player was found");
+                };
+                let Some((pos, _, _)) = self.player_at(dest_id) else {
+                    return chat_error("No player was found");
+                };
+                if !self.teleport_player(id, pos, yaw, pitch) {
+                    return chat_error("No player was found");
+                }
+                chat_text(&format!("Teleported {name} to {dest_name}"))
+            }
+            [who, dest] if !coord_token(who) && !coord_token(dest) => {
+                let Ok(list) = self.resolve_players(actor, who, false) else {
+                    return chat_error("No player was found");
+                };
+                let Some((dest_id, dest_name)) = self.player_named(dest) else {
+                    return chat_error("No player was found");
+                };
+                let Some((pos, _, _)) = self.player_at(dest_id) else {
+                    return chat_error("No player was found");
+                };
+                let Some((id, name)) = list.first() else {
+                    return chat_error("No player was found");
+                };
+                let (_, yaw, pitch) = self.player_at(*id).unwrap_or((pos, 0.0, 0.0));
+                if !self.teleport_player(*id, pos, yaw, pitch) {
+                    return chat_error("No player was found");
+                }
+                chat_text(&format!("Teleported {name} to {dest_name}"))
+            }
+            [who, a, b, c] if !coord_token(who) => self
+                .tp_who_coords(actor, who, a, b, c, None)
+                .unwrap_or(usage),
+            [who, a, b, c, yaw_s, pitch_s] if !coord_token(who) => self
+                .tp_who_coords(actor, who, a, b, c, Some((yaw_s, pitch_s)))
+                .unwrap_or(usage),
+            _ => usage,
+        }
+    }
+
+    fn tp_who_coords(
+        &self,
+        actor: Option<(Uuid, &str)>,
+        who: &str,
+        a: &str,
+        b: &str,
+        c: &str,
+        facing: Option<(&str, &str)>,
+    ) -> Option<serde_json::Value> {
+        let (id, name) = self
+            .resolve_players(actor, who, false)
+            .ok()?
+            .into_iter()
+            .next()?;
+        let (base, yaw0, pitch0) = self.player_at(id)?;
+        let pos = coords3(a, b, c, base)?;
+        let yaw = match facing {
+            Some((token, _)) => angle(token, yaw0)?,
+            None => yaw0,
+        };
+        let pitch = match facing {
+            Some((_, token)) => angle(token, pitch0)?,
+            None => pitch0,
+        };
+        self.teleport_player(id, pos, yaw, pitch).then(|| {
+            chat_text(&format!(
+                "Teleported {name} to {:.1}, {:.1}, {:.1}",
+                pos[0], pos[1], pos[2]
+            ))
+        })
+    }
+
+    fn named_pose(&self, uuid: Uuid) -> Option<(String, [f64; 3], f32, f32)> {
+        let players = self.hub.players.lock().unwrap();
+        let p = players.get(&uuid)?;
+        Some((p.entry.name.clone(), p.pos, p.yaw, p.pitch))
+    }
+
+    fn cmd_say(&self, actor: Option<(Uuid, &str)>, message: &str) -> serde_json::Value {
+        if message.is_empty() {
+            return chat_error("Usage: /say <message>");
+        }
+        let name = actor.map_or("Server", |(_, n)| n);
+        let text = format!("[{name}] {message}");
+        let packet = play::system_chat(self.ids.system_chat, &text, false);
+        match actor {
+            Some((id, _)) => self.hub.send(Some(id), packet),
+            None => self.hub.send(None, packet),
+        }
+        chat_text(&text)
+    }
+
+    fn cmd_time(&self, args: &[&str]) -> serde_json::Value {
+        match args {
+            ["set", token] => {
+                let Some(t) = daytime_ticks(token) else {
+                    return chat_error("Usage: /time set <day|noon|night|midnight|ticks>");
+                };
+                self.day_time.store(t, Ordering::Relaxed);
+                self.broadcast_time();
+                chat_text(&format!("Set the time to {t}"))
+            }
+            ["query", "daytime"] => chat_text(&format!(
+                "The time is {}",
+                self.day_time.load(Ordering::Relaxed)
+            )),
+            ["query", "gametime"] => chat_text(&format!(
+                "The game time is {}",
+                self.game_time.load(Ordering::Relaxed)
+            )),
+            _ => chat_error("Usage: /time set <time> | /time query <daytime|gametime>"),
+        }
+    }
+
+    fn cmd_difficulty(&self, arg: Option<&str>) -> serde_json::Value {
+        let Some(name) = arg else {
+            return chat_text(&format!("The difficulty is {}", self.difficulty().name()));
+        };
+        let Some(d) = Difficulty::parse(name) else {
+            return chat_error("Usage: /difficulty <peaceful|easy|normal|hard>");
+        };
+        self.survival.difficulty.store(d.id(), Ordering::Relaxed);
+        self.hub.send(
+            None,
+            play::change_difficulty(self.ids.change_difficulty, d.id()),
+        );
+        chat_text(&format!("Set game difficulty to {}", d.name()))
+    }
+
+    fn difficulty(&self) -> Difficulty {
+        Difficulty::from_id(self.survival.difficulty.load(Ordering::Relaxed))
+    }
+
+    /// Плюс тик игрового времени и рассылка. Скорость часов 0: солнце идёт за пакетом.
+    fn advance_time(&self) {
+        self.game_time.fetch_add(1, Ordering::Relaxed);
+        let _ = self
+            .day_time
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |d| {
+                Some((d + 1).rem_euclid(24_000))
+            });
+        self.broadcast_time();
+    }
+
+    fn broadcast_time(&self) {
+        self.hub.send(
+            None,
+            play::set_time(
+                self.ids.set_time,
+                self.game_time.load(Ordering::Relaxed),
+                self.day_time.load(Ordering::Relaxed),
+                false,
+            ),
+        );
     }
 
     /// Дерево команд для клиента по уровню прав: встроенные и команды плагинов.
@@ -1094,7 +1642,12 @@ impl PlayPlan {
                                     "seconds",
                                     true,
                                     Parser::Integer(1, 1_000_000),
-                                    vec![Node::argument("amplifier", true, Parser::Integer(0, 255), vec![])],
+                                    vec![Node::argument(
+                                        "amplifier",
+                                        true,
+                                        Parser::Integer(0, 255),
+                                        vec![],
+                                    )],
                                 )],
                             )],
                         )],
@@ -1106,7 +1659,12 @@ impl PlayPlan {
                             "targets",
                             true,
                             Parser::Word,
-                            vec![Node::argument("effect", true, Parser::Resource("minecraft:mob_effect"), vec![])],
+                            vec![Node::argument(
+                                "effect",
+                                true,
+                                Parser::Resource("minecraft:mob_effect"),
+                                vec![],
+                            )],
                         )],
                     ),
                 ],
@@ -1140,6 +1698,57 @@ impl PlayPlan {
                     vec![],
                 )],
             ),
+            Node::literal(
+                "kill",
+                true,
+                vec![Node::argument("target", true, Parser::Word, vec![])],
+            ),
+            tp_node("tp"),
+            tp_node("teleport"),
+            Node::literal(
+                "say",
+                false,
+                vec![Node::argument(
+                    "message",
+                    true,
+                    Parser::GreedyString,
+                    vec![],
+                )],
+            ),
+            Node::literal("list", true, vec![]),
+            Node::literal(
+                "clear",
+                true,
+                vec![Node::argument("target", true, Parser::Word, vec![])],
+            ),
+            Node::literal("tps", true, vec![]),
+            Node::literal(
+                "time",
+                false,
+                vec![
+                    Node::literal(
+                        "set",
+                        false,
+                        vec![Node::argument("time", true, Parser::Word, vec![])],
+                    ),
+                    Node::literal(
+                        "query",
+                        false,
+                        vec![
+                            Node::literal("daytime", true, vec![]),
+                            Node::literal("gametime", true, vec![]),
+                        ],
+                    ),
+                ],
+            ),
+            Node::literal(
+                "difficulty",
+                true,
+                ["peaceful", "easy", "normal", "hard"]
+                    .into_iter()
+                    .map(|n| Node::literal(n, true, vec![]))
+                    .collect(),
+            ),
         ];
         // Встроенные — только с нужным уровнем, как ванила прячет их из дерева.
         roots.retain(|n| level >= builtin_level(n.name()));
@@ -1147,7 +1756,12 @@ impl PlayPlan {
             Node::literal(
                 n,
                 true,
-                vec![Node::argument("args", true, Parser::GreedyStringAsk, vec![])],
+                vec![Node::argument(
+                    "args",
+                    true,
+                    Parser::GreedyStringAsk,
+                    vec![],
+                )],
             )
         }));
         text::commands_tree(self.ids.commands, &roots, self.parsers)
@@ -1217,9 +1831,26 @@ impl PlayPlan {
         let _ = self.players_source.set(source);
     }
 
-    /// Снимки игроков с прошлого сохранения (забирает их).
-    pub fn take_player_saves(&self) -> Vec<(Uuid, PlayerSave)> {
-        self.player_saves.lock().unwrap().drain().collect()
+    /// Снимки остаются в памяти до подтверждения успешной записи.
+    pub fn pending_player_saves(&self) -> Vec<(Uuid, PlayerSave)> {
+        self.player_saves
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, save)| (*id, save.clone()))
+            .collect()
+    }
+
+    pub fn mark_player_saved(&self, uuid: Uuid, written: &PlayerSave) {
+        let mut pending = self.player_saves.lock().unwrap();
+        acknowledge_player_save(&mut pending, uuid, written);
+    }
+
+    pub fn disconnect_all(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+        for tx in self.controls.lock().unwrap().values() {
+            let _ = tx.send(Control::Shutdown);
+        }
     }
 
     /// Запомнить состояние игрока для следующего сохранения.
@@ -1333,6 +1964,7 @@ impl PlayPlan {
             dirty: false,
             rotated: false,
             on_ground: true,
+            gliding: false,
         };
         let uuid = me.entry.uuid;
         // Подписка до вставки в список: ни одно событие после снимка не теряется.
@@ -1365,17 +1997,25 @@ impl PlayPlan {
 
         let (control_tx, controls) = tokio::sync::mpsc::unbounded_channel();
         self.controls.lock().unwrap().insert(uuid, control_tx);
+        if self.shutting_down.load(Ordering::Acquire) {
+            let _ = self
+                .controls
+                .lock()
+                .unwrap()
+                .get(&uuid)
+                .unwrap()
+                .send(Control::Shutdown);
+        }
         let result = self
             .session(conn, rx, controls, &me, &others, &mut state)
             .await;
+        self.release_viewer(uuid);
         self.controls.lock().unwrap().remove(&uuid);
         self.live.lock().unwrap().remove(&uuid);
-        // Вышел — сразу на диск (не ждём автосохранения).
+        // Немедленно запрашиваем автосохранение, оставляя снимок до подтверждения записи.
         self.snapshot(uuid, &state);
-        let quit = self.player_saves.lock().unwrap().remove(&uuid);
-        if let (Some(save), Some(source)) = (quit, self.players_source.get()) {
-            let source = source.clone();
-            let _ = tokio::task::spawn_blocking(move || source.save_player(uuid, &save)).await;
+        if let Some(source) = self.players_source.get() {
+            source.schedule_save();
         }
 
         self.hub.players.lock().unwrap().remove(&uuid);
@@ -1403,7 +2043,7 @@ impl PlayPlan {
     }
 
     fn spawn_frame(&self, e: &EntityRef) -> Vec<u8> {
-        self.hub.frame(&play::add_entity(
+        let mut out = self.hub.frame(&play::add_entity(
             self.ids.add_entity,
             e.entity_id,
             e.uuid,
@@ -1412,7 +2052,15 @@ impl PlayPlan {
             e.yaw,
             e.pitch,
             0,
-        ))
+        ));
+        if e.gliding {
+            out.extend(self.hub.frame(&inv::set_entity_flags(
+                self.ids.set_entity_data,
+                e.entity_id,
+                player_flags(false, false, true),
+            )));
+        }
+        out
     }
 
     /// Бросает предмет: клиентам — спавн со скоростью, дальше физику ведёт
@@ -1672,7 +2320,7 @@ impl PlayPlan {
     }
 
     /// Запускает тик рассылки движений: раз в 50 мс одна пачка на всех.
-    pub fn spawn_tick(self: &Arc<Self>) {
+    pub fn spawn_tick(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let plan = Arc::downgrade(self);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(TICK);
@@ -1680,6 +2328,7 @@ impl PlayPlan {
             loop {
                 tick.tick().await;
                 let Some(plan) = plan.upgrade() else { return };
+                let started = Instant::now();
                 plan.tick_items();
                 plan.tick_furnaces();
                 plan.flush_blocks();
@@ -1687,8 +2336,10 @@ impl PlayPlan {
                 if let Some(h) = plan.hooks() {
                     h.tick();
                 }
+                plan.advance_time();
+                plan.tick_meter.lock().unwrap().record(started);
             }
-        });
+        })
     }
 
     /// Изменения блоков за тик: по кадру на секцию (`block_update` для одного
@@ -1849,6 +2500,18 @@ impl PlayPlan {
             login.spawn.game_mode,
         ))
         .await?;
+        conn.send(&play::set_time(
+            ids.set_time,
+            self.game_time.load(Ordering::Relaxed),
+            self.day_time.load(Ordering::Relaxed),
+            false,
+        ))
+        .await?;
+        conn.send(&play::change_difficulty(
+            ids.change_difficulty,
+            self.difficulty().id(),
+        ))
+        .await?;
         let level = self.op_level(uuid);
         conn.send(&self.commands_packet(level)).await?;
         conn.send(&permission_event(ids.entity_event, me.entity_id, level))
@@ -1909,11 +2572,15 @@ impl PlayPlan {
         let mut teleport_id = 1;
         // Поедание: слот хотбара, еда и момент окончания.
         let mut eating: Option<(usize, chunkwake_data::world::Food, Instant)> = None;
+        // Питьё зелья: слот, предмет, компоненты и момент окончания.
+        let mut drinking: Option<(usize, i32, u32, Instant)> = None;
         // Открытое окно (сундук, верстак) и счётчик номеров окон.
         let mut window: Option<Window> = None;
         let mut next_window = 0;
         // Шифт из `player_input` (`isSecondaryUseActive`).
         let mut sneaking = false;
+        // Полёт на элитрах. Клиент включает его сам и гасит только по метаданным.
+        let mut gliding = false;
         let mut food_ticker = tokio::time::interval(TICK);
         food_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         self.send_inventory(conn, &mut state.inv).await?;
@@ -1924,12 +2591,21 @@ impl PlayPlan {
         ))
         .await?;
         self.send_health(conn, &state.vitals).await?;
+        let mut motion = 0u8;
         for e in &state.vitals.effects {
-            conn.send(&inv::update_mob_effect(ids.update_mob_effect, me.entity_id, e.id, e.amplifier as i32, e.duration, e.flags())).await?;
+            conn.send(&inv::update_mob_effect(
+                ids.update_mob_effect,
+                me.entity_id,
+                e.id,
+                e.amplifier as i32,
+                e.duration,
+                e.flags(),
+            ))
+            .await?;
+            motion |= self.motion_mask(e.id);
         }
-        if state.vitals.effects.iter().any(|e| self.moves_speed(e.id)) {
-            self.send_speed(conn, me.entity_id, &state.vitals).await?;
-        }
+        self.sync_motion(conn, me.entity_id, &state.vitals, motion)
+            .await?;
         let mut pending: Option<(i64, Instant)> = None;
         // Ломка (`ServerPlayerGameMode`): тики сессии, текущий блок и отложенная
         // ломка (клиент закончил раньше, чем позволяет прогресс).
@@ -1956,6 +2632,7 @@ impl PlayPlan {
                 }
                 Some(c) = controls.recv() => {
                     match c {
+                        Control::Shutdown => return Ok(()),
                         Control::Health(h) => {
                             if !state.vitals.dead {
                                 state.vitals.health = h.min(survival::MAX_HEALTH);
@@ -1987,6 +2664,17 @@ impl PlayPlan {
                         Control::Slot(w, s) => {
                             state.inv.slots[w] = s;
                             self.send_slots(conn, &mut state.inv, &[w]).await?;
+                            self.refresh_glide(conn, me, state, sneaking, &mut gliding).await?;
+                        }
+                        Control::Clear => {
+                            state.inv.slots = [None; survival::SLOTS];
+                            state.inv.carried = None;
+                            if let Some(w) = window.as_ref() {
+                                self.send_window(conn, &mut state.inv, Some(w), w.id).await?;
+                            } else {
+                                self.send_inventory(conn, &mut state.inv).await?;
+                            }
+                            self.refresh_glide(conn, me, state, sneaking, &mut gliding).await?;
                         }
                         Control::Selected(s) => {
                             state.inv.selected = s;
@@ -2013,24 +2701,11 @@ impl PlayPlan {
                                 self.send_window(conn, &mut state.inv, window.as_ref(), window.as_ref().map_or(0, |w| w.id)).await?;
                             }
                         }
-                        Control::Effect(e) => {
-                            if state.vitals.add_effect(e) {
-                                conn.send(&inv::update_mob_effect(ids.update_mob_effect, me.entity_id, e.id, e.amplifier as i32, e.duration, e.flags())).await?;
-                                if self.moves_speed(e.id) {
-                                    self.send_speed(conn, me.entity_id, &state.vitals).await?;
-                                }
-                            }
+                        Control::Effect { effect: e, force, command } => {
+                            self.grant_effect(conn, me, &mut state.vitals, &mut state.inv, survival, e, force, command).await?;
                         }
-                        Control::ClearEffect(which) => {
-                            let gone: Vec<i32> = state.vitals.effects.iter().map(|e| e.id).filter(|&id| which.is_none_or(|w| w == id)).collect();
-                            state.vitals.effects.retain(|e| !gone.contains(&e.id));
-                            let speed = gone.iter().any(|&id| self.moves_speed(id));
-                            for id in gone {
-                                conn.send(&inv::remove_mob_effect(ids.remove_mob_effect, me.entity_id, id)).await?;
-                            }
-                            if speed {
-                                self.send_speed(conn, me.entity_id, &state.vitals).await?;
-                            }
+                        Control::ClearEffect { id, command } => {
+                            self.revoke_effects(conn, me, &mut state.vitals, id, command).await?;
                         }
                         Control::Teleport(pos, yaw, pitch) => {
                             teleport_id += 1;
@@ -2049,7 +2724,7 @@ impl PlayPlan {
                     game_ticks += 1;
                     let now = digging.or(delayed).and_then(|(pos, start)| {
                         let block = self.block(pos).unwrap_or(AIR);
-                        let p = self.destroy_progress(uuid, block, state.inv.held(), &state.vitals);
+                        let p = self.destroy_progress(uuid, block, state.inv.held(), state.inv.slots[5], &state.vitals);
                         (block != AIR).then(|| (pos, ((p * (game_ticks - start) as f32) * 10.0).min(9.0) as i8))
                     });
                     if now != crack {
@@ -2066,7 +2741,7 @@ impl PlayPlan {
                         if block == AIR {
                             delayed = None;
                         } else {
-                            let p = self.destroy_progress(uuid, block, state.inv.held(), &state.vitals);
+                            let p = self.destroy_progress(uuid, block, state.inv.held(), state.inv.slots[5], &state.vitals);
                             if p * (game_ticks - start + 1) as f32 >= 1.0 {
                                 delayed = None;
                                 self.mine(conn, uuid, pos, block, state).await?;
@@ -2099,10 +2774,19 @@ impl PlayPlan {
                             self.send_slots(conn, &mut state.inv, &changed).await?;
                         }
                     }
-                    if !survival {
-                        continue;
+                    if let Some((slot, item, extra, done)) = drinking
+                        && Instant::now() >= done
+                    {
+                        drinking = None;
+                        let in_hand = slot == state.inv.held_slot() || slot == survival::OFFHAND;
+                        let same = state.inv.slots[slot]
+                            .is_some_and(|s| s.item == item && s.extra == extra);
+                        if in_hand && same && !state.vitals.dead && login.spawn.game_mode != 3 {
+                            self.finish_drink(conn, me, state, slot, survival).await?;
+                        }
                     }
-                    if let Some((slot, food, done)) = eating
+                    if survival
+                        && let Some((slot, food, done)) = eating
                         && Instant::now() >= done
                     {
                         eating = None;
@@ -2116,14 +2800,41 @@ impl PlayPlan {
                             conn.send(&inv::entity_event(ids.entity_event, me.entity_id, inv::ENTITY_EVENT_USE_ITEM_COMPLETE)).await?;
                         }
                     }
-                    let expired = state.vitals.tick_effects();
-                    for &id in &expired {
-                        conn.send(&inv::remove_mob_effect(ids.remove_mob_effect, me.entity_id, id)).await?;
+                    // Длительность тикает и в креативе. Урон от эффектов — только там, где игрок уязвим.
+                    let pulsed = state.vitals.tick_effects(self.effect_kinds());
+                    let mut motion = 0u8;
+                    for e in pulsed.expired {
+                        let name = self.effect_name(e.id).unwrap_or_default();
+                        if self.potion_cancelled(uuid, "EXPIRATION", "REMOVED", &name, None, Some(&e)).await {
+                            state.vitals.effects.push(e);
+                        } else {
+                            conn.send(&inv::remove_mob_effect(ids.remove_mob_effect, me.entity_id, e.id)).await?;
+                            motion |= self.motion_mask(e.id);
+                        }
                     }
-                    if expired.iter().any(|&id| self.moves_speed(id)) {
-                        self.send_speed(conn, me.entity_id, &state.vitals).await?;
+                    self.sync_motion(conn, me.entity_id, &state.vitals, motion).await?;
+                    if !state.vitals.dead {
+                        if pulsed.heal > 0.0 {
+                            state.vitals.heal(pulsed.heal);
+                            self.send_health(conn, &state.vitals).await?;
+                        }
+                        if pulsed.exhaustion > 0.0 {
+                            state.vitals.exhaust(pulsed.exhaustion);
+                        }
+                        if survival && pulsed.poison && let Some(d) = survival::poison_hit(state.vitals.health) {
+                            self.hurt(conn, me, &mut state.vitals, &mut state.inv, d, Cause::Poison).await?;
+                        }
+                        if survival && pulsed.wither && !state.vitals.dead {
+                            self.hurt(conn, me, &mut state.vitals, &mut state.inv, 1.0, Cause::Wither).await?;
+                        }
                     }
-                    let t = state.vitals.tick(self.survival.difficulty);
+                    self.refresh_glide(conn, me, state, sneaking, &mut gliding).await?;
+                    if !survival {
+                        continue;
+                    }
+                    let t = state.vitals.tick(Difficulty::from_id(
+                        self.survival.difficulty.load(Ordering::Relaxed),
+                    ));
                     if let Some(d) = t.starve {
                         self.hurt(conn, me, &mut state.vitals, &mut state.inv, d, Cause::Starve).await?;
                     } else if t.changed {
@@ -2196,7 +2907,8 @@ impl PlayPlan {
                             }
                         }
                         let y = m.pos.map(|p| p[1]);
-                        if let Some(d) = state.vitals.on_move(m.pos, m.on_ground, survival) {
+                        let slow = self.effect_amp(&state.vitals, "minecraft:slow_falling").is_some();
+                        if let Some(d) = state.vitals.on_move(m.pos, m.on_ground, survival, slow) {
                             self.hurt(conn, me, &mut state.vitals, &mut state.inv, d, Cause::Fall).await?;
                         }
                         let below_void = y.is_some_and(|y| y < self.min_y as f64 - survival::VOID_DEPTH);
@@ -2218,12 +2930,30 @@ impl PlayPlan {
                                 }
                             }
                         }
+                        let landed = m.on_ground;
                         self.moved(uuid, m);
+                        if gliding && landed {
+                            self.refresh_glide(conn, me, state, sneaking, &mut gliding).await?;
+                        }
                         continue;
                     }
                     if id == ids.sb_set_carried_item {
                         state.inv.selected = (r.u16()? as usize).min(8);
                         eating = None;
+                        continue;
+                    }
+                    if id == ids.sb_pick_item_from_block {
+                        let pos = play::unpack_block_pos(r.i64()?);
+                        let _include_data = r.bool()?;
+                        if !state.vitals.dead && let Some(item) = self.clone_item(uuid, pos) {
+                            let creative = login.spawn.game_mode == 1;
+                            if let Some(changed) = state.inv.pick(item, creative) {
+                                if !changed.is_empty() {
+                                    self.send_slots(conn, &mut state.inv, &changed).await?;
+                                }
+                                conn.send(&inv::set_held_slot(ids.set_held_slot, state.inv.selected as i32)).await?;
+                            }
+                        }
                         continue;
                     }
                     if id == ids.sb_set_creative_mode_slot {
@@ -2236,6 +2966,7 @@ impl PlayPlan {
                                 }
                             } else {
                                 state.inv.set(slot, stack);
+                                self.refresh_glide(conn, me, state, sneaking, &mut gliding).await?;
                             }
                         }
                         continue;
@@ -2273,6 +3004,7 @@ impl PlayPlan {
                                 self.send_window(conn, &mut state.inv, window.as_ref(), c.window).await?;
                             }
                         }
+                        self.refresh_glide(conn, me, state, sneaking, &mut gliding).await?;
                         continue;
                     }
                     if id == ids.sb_player_input {
@@ -2283,6 +3015,7 @@ impl PlayPlan {
                         let _id = r.var_int()?;
                         self.close_window(&mut state.inv, &mut window, uuid);
                         self.send_inventory(conn, &mut state.inv).await?;
+                        self.refresh_glide(conn, me, state, sneaking, &mut gliding).await?;
                         continue;
                     }
                     if id == ids.sb_use_item {
@@ -2293,6 +3026,7 @@ impl PlayPlan {
                             && self.cancelled(Event::Interact, uuid, || format!("RIGHT_CLICK_AIR ~ ~ ~ SELF {hand_name}")).await
                         {
                             eating = None;
+                            drinking = None;
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                             continue;
                         }
@@ -2301,7 +3035,26 @@ impl PlayPlan {
                             .and_then(|s| self.survival.items.get(s.item as usize))
                             .and_then(|i| i.food)
                             .filter(|f| f.can_always_eat || state.vitals.food < survival::MAX_FOOD);
-                        eating = food.map(|f| (state.inv.held_slot(), f, Instant::now() + Duration::from_secs_f32(f.seconds)));
+                        if let Some(f) = food {
+                            drinking = None;
+                            eating = Some((
+                                state.inv.held_slot(),
+                                f,
+                                Instant::now() + Duration::from_secs_f32(f.seconds),
+                            ));
+                        } else if let Some((slot, item, extra, seconds)) =
+                            self.drink_use(&state.inv, hand, state.vitals.dead, login.spawn.game_mode)
+                        {
+                            eating = None;
+                            drinking = Some((
+                                slot,
+                                item,
+                                extra,
+                                Instant::now() + Duration::from_secs_f32(seconds),
+                            ));
+                        } else {
+                            eating = None;
+                        }
                         conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                         continue;
                     }
@@ -2310,7 +3063,22 @@ impl PlayPlan {
                         match r.var_int()? {
                             play::START_SPRINTING => state.vitals.sprinting = true,
                             play::STOP_SPRINTING => state.vitals.sprinting = false,
+                            play::START_FALL_FLYING => {
+                                // Пакет приходит в воздухе; «на земле» сервер узнаёт следующим движением.
+                                gliding = self.wearing_elytra(&state.inv) && !state.vitals.dead;
+                                self.mark_gliding(uuid, gliding);
+                                self.send_pose(
+                                    conn,
+                                    me,
+                                    player_flags(sneaking, state.vitals.sprinting, gliding),
+                                )
+                                .await?;
+                            }
                             _ => {}
+                        }
+                        // Клиент не пересчитывает Скорость/Замедление сам: бег меняет тот же пакет.
+                        if state.vitals.effects.iter().any(|e| self.moves_speed(e.id)) {
+                            self.send_speed(conn, me.entity_id, &state.vitals).await?;
                         }
                         continue;
                     }
@@ -2351,11 +3119,11 @@ impl PlayPlan {
                                 let mut resync = false;
                                 match a.action {
                                     play::START_DESTROY_BLOCK if mode == 1 => {
-                                        self.break_block(conn, uuid, a.pos, false).await?;
+                                        self.break_block(conn, uuid, a.pos, None).await?;
                                     }
                                     _ if mode >= 2 => resync = a.action != play::ABORT_DESTROY_BLOCK,
                                     play::START_DESTROY_BLOCK => {
-                                        let p = self.destroy_progress(uuid, block, held, &state.vitals);
+                                        let p = self.destroy_progress(uuid, block, held, state.inv.slots[5], &state.vitals);
                                         if block != AIR && p >= 1.0 {
                                             self.mine(conn, uuid, a.pos, block, state).await?;
                                         } else {
@@ -2369,7 +3137,7 @@ impl PlayPlan {
                                     }
                                     play::STOP_DESTROY_BLOCK => match digging {
                                         Some((pos, start)) if pos == a.pos && block != AIR => {
-                                            let p = self.destroy_progress(uuid, block, held, &state.vitals);
+                                            let p = self.destroy_progress(uuid, block, held, state.inv.slots[5], &state.vitals);
                                             if p * (game_ticks - start + 1) as f32 >= 0.7 {
                                                 digging = None;
                                                 self.mine(conn, uuid, a.pos, block, state).await?;
@@ -2405,11 +3173,15 @@ impl PlayPlan {
                                         state.inv.slots[held] = (s.count > n).then_some(Stack { count: s.count - n, ..s });
                                         self.throw(feet, yaw, pitch, Stack { count: n, ..s });
                                         eating = None;
+                                        drinking = None;
                                     }
                                 }
                                 self.send_slots(conn, &mut state.inv, &[held]).await?;
                             }
-                            play::RELEASE_USE_ITEM => eating = None,
+                            play::RELEASE_USE_ITEM => {
+                                eating = None;
+                                drinking = None;
+                            }
                             play::SWAP_ITEM_WITH_OFFHAND => {
                                 let held = state.inv.held_slot();
                                 state.inv.slots.swap(held, survival::OFFHAND);
@@ -2481,9 +3253,16 @@ impl PlayPlan {
                                 w.data = data;
                             }
                             window = Some(w);
+                            if matches!(kind, Kind::Chest(_)) {
+                                let positions = window.as_ref().map(Window::positions).unwrap_or_default();
+                                for (pos, n) in self.container_viewers(uuid, &positions, true) {
+                                    self.show_container(pos, n);
+                                }
+                            }
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                             continue;
                         }
+                        let mut placed = false;
                         let place = state.inv
                             .held()
                             .filter(|_| u.hand == 0 && !state.vitals.dead)
@@ -2537,6 +3316,7 @@ impl PlayPlan {
                                     conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                                     continue;
                                 }
+                                placed = true;
                                 self.set_block(target, place);
                                 for &(p, s) in &extra {
                                     self.set_block(p, s);
@@ -2567,6 +3347,22 @@ impl PlayPlan {
                                 }
                             }
                         }
+                        if !placed
+                            && let Some((slot, item, extra, seconds)) = self.drink_use(
+                                &state.inv,
+                                u.hand,
+                                state.vitals.dead,
+                                login.spawn.game_mode,
+                            )
+                        {
+                            eating = None;
+                            drinking = Some((
+                                slot,
+                                item,
+                                extra,
+                                Instant::now() + Duration::from_secs_f32(seconds),
+                            ));
+                        }
                         conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                         continue;
                     }
@@ -2586,7 +3382,7 @@ impl PlayPlan {
                         // Встроенные без прав — как неизвестные (ванила их не показывает).
                         let builtin = line.split(' ').next().unwrap_or("");
                         let allowed = self.op_level(uuid) >= builtin_level(builtin);
-                        let is_builtin = matches!(builtin, "give" | "gamemode" | "op" | "deop" | "effect");
+                        let is_builtin = is_builtin_name(builtin);
                         if is_builtin && allowed && let Some(name) = line.strip_prefix("op ").or(line.strip_prefix("deop ")) {
                             let msg = self.op_command(name.trim(), builtin == "op");
                             conn.send(&text::system_chat_json(ids.system_chat, &msg.to_string(), false)).await?;
@@ -2595,6 +3391,14 @@ impl PlayPlan {
                         if is_builtin && !allowed {
                             let msg = serde_json::json!({"translate": "command.unknown.command", "color": "red"});
                             conn.send(&text::system_chat_json(ids.system_chat, &msg.to_string(), false)).await?;
+                            continue;
+                        }
+                        if is_builtin && allowed
+                            && let Some(msg) = self.server_command(Some((uuid, me.entry.name.as_str())), &line)
+                        {
+                            if !msg.is_null() {
+                                conn.send(&text::system_chat_json(ids.system_chat, &msg.to_string(), false)).await?;
+                            }
                             continue;
                         }
                         if let Some(arg) = line.strip_prefix("gamemode ") {
@@ -2698,8 +3502,36 @@ impl PlayPlan {
             .map_or("minecraft:air", String::as_str)
     }
 
+    /// Предмет средней кнопки: блок в досягаемости, тот же предмет, что у блока.
+    fn clone_item(&self, uuid: Uuid, pos: [i32; 3]) -> Option<i32> {
+        let (feet, _, _) = self.player_at(uuid)?;
+        let (dx, dy, dz) = (
+            feet[0] - (pos[0] as f64 + 0.5),
+            feet[1] + 1.62 - (pos[1] as f64 + 0.5),
+            feet[2] - (pos[2] as f64 + 0.5),
+        );
+        if dx * dx + dy * dy + dz * dz > 64.0 {
+            return None;
+        }
+        let name = match self.state_name(self.block(pos)?) {
+            "minecraft:water" => "minecraft:water_bucket",
+            "minecraft:lava" => "minecraft:lava_bucket",
+            "minecraft:powder_snow" => "minecraft:powder_snow_bucket",
+            "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" => return None,
+            name => name,
+        };
+        self.item_id(name)
+    }
+
     /// Прогресс ломки за тик предметом в руке: вода у глаз и опора под ногами.
-    fn destroy_progress(&self, uuid: Uuid, state: u32, held: Slot, v: &Vitals) -> f32 {
+    fn destroy_progress(
+        &self,
+        uuid: Uuid,
+        state: u32,
+        held: Slot,
+        helmet: Slot,
+        v: &Vitals,
+    ) -> f32 {
         let hardness = self
             .survival
             .hardness
@@ -2721,7 +3553,20 @@ impl PlayPlan {
             let name = self.state_name(self.block(eye).unwrap_or(AIR));
             name == "minecraft:water" || name == "minecraft:bubble_column"
         });
-        let amp = |name: &str| self.survival.effects.get(name).and_then(|&id| v.effect(id)).map(|e| e.amplifier);
+        let level = |s: Slot, name: &str| {
+            s.map_or(0, |s| {
+                chunkwake_protocol::components::stack_level(s.extra, name)
+            })
+        };
+        // Подводник на шлеме (окно игрока: ячейка 5) снимает штраф воды.
+        let in_water = in_water && level(helmet, "minecraft:aqua_affinity") == 0;
+        let amp = |name: &str| {
+            self.survival
+                .effects
+                .get(name)
+                .and_then(|&id| v.effect(id))
+                .map(|e| e.amplifier)
+        };
         let haste = amp("minecraft:haste").max(amp("minecraft:conduit_power"));
         let dig = survival::dig_multiplier(haste, amp("minecraft:mining_fatigue"));
         survival::destroy_progress(
@@ -2732,6 +3577,7 @@ impl PlayPlan {
             in_water,
             v.on_ground(),
             dig,
+            level(held, "minecraft:efficiency"),
         )
     }
 
@@ -2757,21 +3603,38 @@ impl PlayPlan {
         state: &mut PlayerState,
     ) -> Result<(), NetError> {
         let held = state.inv.held();
-        let drops = self.drops_with(block, held);
+        let drops = self.drops_with(block, held).then_some(held);
         if !self.break_block(conn, uuid, pos, drops).await? {
             return Ok(());
         }
         state.vitals.exhaust(survival::EXHAUSTION_BREAK);
         // `ItemStack.mineBlock`: инструмент изнашивается, если блок ломается не мгновенно.
-        let hardness = self.survival.hardness.get(block as usize).copied().unwrap_or(0.0);
+        let hardness = self
+            .survival
+            .hardness
+            .get(block as usize)
+            .copied()
+            .unwrap_or(0.0);
         let slot = state.inv.held_slot();
         if hardness != 0.0
             && let Some(mut s) = held
             && let Some(tool) = self.tool(held)
         {
-            let max = self.survival.items.get(s.item as usize).map_or(0, |i| i.max_damage);
-            if max > 0 {
-                s.damage += tool.damage_per_block;
+            let max = self
+                .survival
+                .items
+                .get(s.item as usize)
+                .map_or(0, |i| i.max_damage);
+            // Прочность: износ с вероятностью 1/(lvl+1) на каждую единицу.
+            let unbreaking =
+                chunkwake_protocol::components::stack_level(s.extra, "minecraft:unbreaking");
+            let wear = (0..tool.damage_per_block)
+                .filter(|_| {
+                    unbreaking == 0 || rand::random::<u32>().is_multiple_of(unbreaking as u32 + 1)
+                })
+                .count() as i32;
+            if max > 0 && wear > 0 {
+                s.damage += wear;
                 state.inv.slots[slot] = (s.damage < max).then_some(s);
                 self.send_slots(conn, &mut state.inv, &[slot]).await?;
             }
@@ -2786,7 +3649,7 @@ impl PlayPlan {
         conn: &mut Connection,
         uuid: Uuid,
         pos: [i32; 3],
-        drops: bool,
+        drops: Option<Slot>,
     ) -> Result<bool, NetError> {
         if self.plugins_cancel_break(uuid, pos).await {
             // Отменено: вернуть блок клиенту.
@@ -2804,9 +3667,10 @@ impl PlayPlan {
         // Вторая половина двери, кровати, высокого растения.
         if let Some(o) = self.survival.placement.partner(old) {
             let p = [pos[0] + o[0], pos[1] + o[1], pos[2] + o[2]];
-            if self.block(p).is_some_and(|s| self.survival.placement.partner(s).is_some()
-                && self.survival.placement.name(s) == self.survival.placement.name(old))
-            {
+            if self.block(p).is_some_and(|s| {
+                self.survival.placement.partner(s).is_some()
+                    && self.survival.placement.name(s) == self.survival.placement.name(old)
+            }) {
                 self.set_block(p, AIR);
                 touched.push(p);
                 touched.extend(self.update_connections(p));
@@ -2815,7 +3679,8 @@ impl PlayPlan {
         // До подтверждения ломки — иначе клиент откатит соседей (мигание).
         for p in touched {
             let s = self.block(p).unwrap_or(AIR);
-            conn.send(&play::block_update(self.ids.block_update, p, s as i32)).await?;
+            conn.send(&play::block_update(self.ids.block_update, p, s as i32))
+                .await?;
         }
         // Печь: в блок-сущность её текущее содержимое.
         let removed = self.furnaces.lock().unwrap().remove(&pos);
@@ -2824,34 +3689,74 @@ impl PlayPlan {
         }
         // Содержимое сундука — на землю.
         if self.block_entity(pos).is_some() {
-            let center = [pos[0] as f64 + 0.5, pos[1] as f64 + 0.5, pos[2] as f64 + 0.5];
+            let center = [
+                pos[0] as f64 + 0.5,
+                pos[1] as f64 + 0.5,
+                pos[2] as f64 + 0.5,
+            ];
             for s in self.container_items(pos).into_iter().flatten() {
                 let vel = items::pop_velocity(rand::random(), rand::random());
                 self.drop_item(center, vel, s, items::BLOCK_DELAY);
             }
             self.set_block_entity(pos, None);
         }
-        if drops && let Some(item) = self.survival.drops.get(old as usize).copied().flatten() {
+        if let Some(held) = drops {
             let center = [
                 pos[0] as f64 + 0.5,
                 pos[1] as f64 + 0.25,
                 pos[2] as f64 + 0.5,
             ];
-            let vel = items::pop_velocity(rand::random(), rand::random());
-            self.drop_item(center, vel, Stack { item, count: 1 , damage: 0}, items::BLOCK_DELAY);
+            for s in self.block_loot(old, held) {
+                let vel = items::pop_velocity(rand::random(), rand::random());
+                self.drop_item(center, vel, s, items::BLOCK_DELAY);
+            }
         }
         Ok(true)
     }
 
+    /// Дроп блока `state`, сломанного предметом `held`, по таблице лута.
+    fn block_loot(&self, state: u32, held: Slot) -> Vec<Stack> {
+        let Some(block) = self.survival.placement.name(state) else {
+            return Vec::new();
+        };
+        let prop = |k: &str| self.survival.placement.prop(state, k).map(str::to_owned);
+        let level = |n: &str| {
+            held.map_or(0, |s| {
+                chunkwake_protocol::components::stack_level(s.extra, n)
+            })
+        };
+        let ctx = crate::loot::Ctx {
+            prop: &prop,
+            block,
+            tool: held.map(|s| self.item_name(s.item)),
+            level: &level,
+        };
+        crate::loot::roll(&self.survival.loot, &ctx, &mut rand::thread_rng())
+            .into_iter()
+            .filter_map(|(name, count)| {
+                let item = self.item_id(&name)?;
+                Some(Stack::new(item, count.min(self.max_stack(item).max(1))))
+            })
+            .collect()
+    }
+
     fn max_stack(&self, item: i32) -> i32 {
-        self.survival.items.get(item as usize).map_or(64, |i| i.max_stack as i32)
+        self.survival
+            .items
+            .get(item as usize)
+            .map_or(64, |i| i.max_stack as i32)
     }
 
     /// Результат крафта для сетки `size × size`.
     fn craft_result(&self, grid: &[Slot], size: usize) -> Slot {
         let ids: Vec<Option<i32>> = grid.iter().map(|s| s.map(|s| s.item)).collect();
         let (item, count) = self.survival.recipes.find(&ids, size)?;
-        Some(Stack { item, count, damage: 0 })
+        Some(Stack {
+            item,
+            count,
+            damage: 0,
+            extra: 0,
+        })
     }
 
     /// Клик в окне: итог считает сервер (`AbstractContainerMenu.doClick`).
@@ -2870,7 +3775,10 @@ impl PlayPlan {
             if matches!(w.kind, Kind::Chest(_) | Kind::Furnace) {
                 w.slots = self.window_slots(w);
             }
-            (w.kind, w.slots.iter().chain(&inv.slots[9..45]).copied().collect())
+            (
+                w.kind,
+                w.slots.iter().chain(&inv.slots[9..45]).copied().collect(),
+            )
         } else {
             return (Vec::new(), false);
         };
@@ -2916,7 +3824,12 @@ impl PlayPlan {
             .and_then(|w| furnace_kind(self.state_name(self.block(w.pos).unwrap_or(AIR))))
             .unwrap_or(0);
         let smeltable = |item: i32| self.survival.recipes.cooking(fk, item).is_some();
-        let fuel = |item: i32| self.survival.items.get(item as usize).is_some_and(|i| i.fuel.is_some());
+        let fuel = |item: i32| {
+            self.survival
+                .items
+                .get(item as usize)
+                .is_some_and(|i| i.fuel.is_some())
+        };
         let rules = click::Rules {
             max_stack: &max,
             equip: &equip,
@@ -2935,7 +3848,8 @@ impl PlayPlan {
         }
         .click(c.slot, c.button, c.mode);
         fill(&mut view);
-        let same = |a: &Slot, b: &Slot| a.map(|s| (s.item, s.count)) == b.map(|s| (s.item, s.count));
+        let same =
+            |a: &Slot, b: &Slot| a.map(|s| (s.item, s.count)) == b.map(|s| (s.item, s.count));
         let resync = c.state != inv.state
             || view.iter().zip(&expected).any(|(a, b)| !same(a, b))
             || !same(&inv.carried, &c.carried);
@@ -2964,15 +3878,149 @@ impl PlayPlan {
     /// Окно всё ещё у своего блока (сундук не сломали).
     fn window_valid(&self, w: &Window) -> bool {
         match w.kind {
-            Kind::Chest(_) => w.positions().iter().all(|&p| self.block_entity(p).is_some()),
-            Kind::Furnace => self.block(w.pos).is_some_and(|s| furnace_kind(self.state_name(s)).is_some()),
-            _ => self.block(w.pos).is_some_and(|s| self.state_name(s) == "minecraft:crafting_table"),
+            Kind::Chest(_) => w
+                .positions()
+                .iter()
+                .all(|&p| self.block_entity(p).is_some()),
+            Kind::Furnace => self
+                .block(w.pos)
+                .is_some_and(|s| furnace_kind(self.state_name(s)).is_some()),
+            _ => self
+                .block(w.pos)
+                .is_some_and(|s| self.state_name(s) == "minecraft:crafting_table"),
+        }
+    }
+
+    fn wearing_elytra(&self, inv: &Inventory) -> bool {
+        inv.slots[survival::CHEST].is_some_and(|s| self.item_name(s.item) == "minecraft:elytra")
+    }
+
+    fn mark_gliding(&self, uuid: Uuid, gliding: bool) {
+        if let Some(p) = self.hub.players.lock().unwrap().get_mut(&uuid) {
+            p.gliding = gliding;
+        }
+    }
+
+    async fn send_pose(
+        &self,
+        conn: &mut Connection,
+        me: &Online,
+        flags: u8,
+    ) -> Result<(), NetError> {
+        let packet = inv::set_entity_flags(self.ids.set_entity_data, me.entity_id, flags);
+        conn.send(&packet).await?;
+        self.hub.send(Some(me.entry.uuid), packet);
+        Ok(())
+    }
+
+    /// Гасит полёт, если элитры сняты, игрок на земле или мёртв.
+    async fn refresh_glide(
+        &self,
+        conn: &mut Connection,
+        me: &Online,
+        state: &PlayerState,
+        sneaking: bool,
+        gliding: &mut bool,
+    ) -> Result<(), NetError> {
+        if !*gliding {
+            return Ok(());
+        }
+        let ground = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .get(&me.entry.uuid)
+            .is_some_and(|p| p.on_ground);
+        if state.vitals.dead || ground || !self.wearing_elytra(&state.inv) {
+            *gliding = false;
+            self.mark_gliding(me.entry.uuid, false);
+            self.send_pose(
+                conn,
+                me,
+                player_flags(sneaking, state.vitals.sprinting, false),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    fn container_viewers(
+        &self,
+        uuid: Uuid,
+        positions: &[[i32; 3]],
+        add: bool,
+    ) -> Vec<([i32; 3], usize)> {
+        let mut map = self.open_blocks.lock().unwrap();
+        let mut out = Vec::new();
+        for &pos in positions {
+            let n = {
+                let viewers = map.entry(pos).or_default();
+                if add {
+                    if !viewers.contains(&uuid) {
+                        viewers.push(uuid);
+                    }
+                } else {
+                    viewers.retain(|id| *id != uuid);
+                }
+                viewers.len()
+            };
+            if n == 0 {
+                map.remove(&pos);
+            }
+            out.push((pos, n));
+        }
+        out
+    }
+
+    /// Крышка сундука — `block_event`, бочка — свойство `open`.
+    fn show_container(&self, pos: [i32; 3], viewers: usize) {
+        let Some(state) = self.block(pos) else { return };
+        let name = self.state_name(state).to_owned();
+        if name == "minecraft:barrel" {
+            let value = if viewers > 0 { "true" } else { "false" };
+            if let Some(next) = self.survival.placement.with_prop(state, "open", value) {
+                self.set_block(pos, next);
+                self.hub.send(
+                    None,
+                    play::block_update(self.ids.block_update, pos, next as i32),
+                );
+            }
+            return;
+        }
+        if matches!(name.as_str(), "minecraft:chest" | "minecraft:trapped_chest")
+            && let Some(&block) = self.survival.block_types.get(name.as_str())
+        {
+            self.hub.send(
+                None,
+                play::block_event(self.ids.block_event, pos, 1, viewers.min(255) as u8, block),
+            );
+        }
+    }
+
+    fn release_viewer(&self, uuid: Uuid) {
+        let positions: Vec<[i32; 3]> = self
+            .open_blocks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, viewers)| viewers.contains(&uuid))
+            .map(|(pos, _)| *pos)
+            .collect();
+        if positions.is_empty() {
+            return;
+        }
+        for (pos, n) in self.container_viewers(uuid, &positions, false) {
+            self.show_container(pos, n);
         }
     }
 
     /// Закрытие окна: сетка крафта и курсор возвращаются в инвентарь (не влезло — на землю).
     fn close_window(&self, inv: &mut Inventory, window: &mut Option<Window>, uuid: Uuid) {
-        let mut back: Vec<Stack> = inv.slots[1..5].iter_mut().filter_map(Option::take).collect();
+        let mut back: Vec<Stack> = inv.slots[1..5]
+            .iter_mut()
+            .filter_map(Option::take)
+            .collect();
         inv.slots[0] = None;
         if let Some(mut w) = window.take() {
             match w.kind {
@@ -2982,7 +4030,13 @@ impl PlayPlan {
                         e.viewers.retain(|v| *v != uuid);
                     }
                 }
-                _ => {}
+                Kind::Chest(_) => {
+                    let positions = w.positions();
+                    for (pos, n) in self.container_viewers(uuid, &positions, false) {
+                        self.show_container(pos, n);
+                    }
+                }
+                Kind::Player => {}
             }
         }
         back.extend(inv.carried.take());
@@ -3022,8 +4076,14 @@ impl PlayPlan {
     /// Слоты окна из блок-сущностей (двойной сундук — две половины подряд).
     fn window_slots(&self, w: &Window) -> Vec<Slot> {
         match w.kind {
-            Kind::Chest(_) => w.positions().iter().flat_map(|&p| self.container_items(p)).collect(),
-            Kind::Furnace => self.with_furnace(w.pos, |e| e.f.slots.to_vec()).unwrap_or_else(|| vec![None; 3]),
+            Kind::Chest(_) => w
+                .positions()
+                .iter()
+                .flat_map(|&p| self.container_items(p))
+                .collect(),
+            Kind::Furnace => self
+                .with_furnace(w.pos, |e| e.f.slots.to_vec())
+                .unwrap_or_else(|| vec![None; 3]),
             Kind::Crafting if w.slots.is_empty() => vec![None; 10],
             _ => w.slots.clone(),
         }
@@ -3050,7 +4110,10 @@ impl PlayPlan {
                 .lock()
                 .unwrap()
                 .entry(pos)
-                .or_insert(FurnaceEntry { f: fur, viewers: Vec::new() });
+                .or_insert(FurnaceEntry {
+                    f: fur,
+                    viewers: Vec::new(),
+                });
         }
         self.furnaces.lock().unwrap().get_mut(&pos).map(f)
     }
@@ -3059,11 +4122,14 @@ impl PlayPlan {
     fn furnace_tick(&self, f: &mut Furnace) -> bool {
         let k = f.kind;
         let recipe = |item: i32| {
-            self.survival.recipes.cooking(k, item).map(|c| furnace::Cook {
-                result: c.result.0,
-                count: c.result.1,
-                time: c.time,
-            })
+            self.survival
+                .recipes
+                .cooking(k, item)
+                .map(|c| furnace::Cook {
+                    result: c.result.0,
+                    count: c.result.1,
+                    time: c.time,
+                })
         };
         let fuel = |item: i32| {
             let f = self.survival.items.get(item as usize)?.fuel?;
@@ -3076,19 +4142,38 @@ impl PlayPlan {
             .zip(self.item_id("minecraft:bucket"))
             .zip(self.item_id("minecraft:water_bucket"))
             .map(|((s, b), w)| (s, b, w));
-        f.tick(&furnace::Env { recipe: &recipe, fuel: &fuel, max_stack: &max, remainder: &rem, sponge })
+        f.tick(&furnace::Env {
+            recipe: &recipe,
+            fuel: &fuel,
+            max_stack: &max,
+            remainder: &rem,
+            sponge,
+        })
     }
 
     /// Предметы печи из окна игрока `me`: сохранить и показать остальным.
     fn set_furnace_slots(&self, pos: [i32; 3], slots: [Slot; 3], me: Uuid) {
         let k = self.with_furnace(pos, |e| e.f.kind).unwrap_or(0);
         let recipe = |item: i32| {
-            self.survival.recipes.cooking(k, item).map(|c| furnace::Cook { result: c.result.0, count: c.result.1, time: c.time })
+            self.survival
+                .recipes
+                .cooking(k, item)
+                .map(|c| furnace::Cook {
+                    result: c.result.0,
+                    count: c.result.1,
+                    time: c.time,
+                })
         };
         let none = |_: i32| None;
         let max = |item: i32| self.max_stack(item);
         let rem = |_: i32| None;
-        let env = furnace::Env { recipe: &recipe, fuel: &none, max_stack: &max, remainder: &rem, sponge: None };
+        let env = furnace::Env {
+            recipe: &recipe,
+            fuel: &none,
+            max_stack: &max,
+            remainder: &rem,
+            sponge: None,
+        };
         let Some((fur, viewers)) = self.with_furnace(pos, |e| {
             e.f.set_slots(slots, &env);
             (e.f.clone(), e.viewers.clone())
@@ -3110,7 +4195,10 @@ impl PlayPlan {
         nbt.insert("Items".into(), Tag::List(self.items_nbt(&f.slots)));
         nbt.insert("cooking_time_spent".into(), Tag::Short(f.cook as i16));
         nbt.insert("cooking_total_time".into(), Tag::Short(f.cook_total as i16));
-        nbt.insert("lit_time_remaining".into(), Tag::Short(f.lit_remaining as i16));
+        nbt.insert(
+            "lit_time_remaining".into(),
+            Tag::Short(f.lit_remaining as i16),
+        );
         nbt.insert("lit_total_time".into(), Tag::Short(f.lit_total as i16));
         nbt.insert("speed_multiplier".into(), Tag::Float(f.speed));
         let id = FURNACES[f.kind as usize];
@@ -3136,7 +4224,14 @@ impl PlayPlan {
                 let items = before != e.f.slots;
                 let active = !e.f.idle();
                 if changed || active || !e.viewers.is_empty() {
-                    done.push((pos, e.f.clone(), was_lit != e.f.lit(), changed, items, e.viewers.clone()));
+                    done.push((
+                        pos,
+                        e.f.clone(),
+                        was_lit != e.f.lit(),
+                        changed,
+                        items,
+                        e.viewers.clone(),
+                    ));
                 }
                 active || !e.viewers.is_empty()
             });
@@ -3179,11 +4274,18 @@ impl PlayPlan {
     /// Остаток предмета после крафта (`Item.craftRemainder` в `Items`).
     fn craft_remainder(&self, item: i32) -> Slot {
         let rest = match self.item_name(item) {
-            "minecraft:water_bucket" | "minecraft:lava_bucket" | "minecraft:milk_bucket" => "minecraft:bucket",
+            "minecraft:water_bucket" | "minecraft:lava_bucket" | "minecraft:milk_bucket" => {
+                "minecraft:bucket"
+            }
             "minecraft:honey_bottle" | "minecraft:dragon_breath" => "minecraft:glass_bottle",
             _ => return None,
         };
-        Some(Stack { item: self.item_id(rest)?, count: 1, damage: 0 })
+        Some(Stack {
+            item: self.item_id(rest)?,
+            count: 1,
+            damage: 0,
+            extra: 0,
+        })
     }
 
     /// Заборы, стены и стёкла вокруг `pos` (и он сам) пересчитывают соединения
@@ -3196,8 +4298,17 @@ impl PlayPlan {
             let o = crate::placement::step(d);
             [p[0] + o[0], p[1] + o[1], p[2] + o[2]]
         };
-        for p in [pos, at(pos, 2), at(pos, 3), at(pos, 4), at(pos, 5), at(pos, 0)] {
-            let Some(s) = self.block(p).filter(|&s| pl.connects(s)) else { continue };
+        for p in [
+            pos,
+            at(pos, 2),
+            at(pos, 3),
+            at(pos, 4),
+            at(pos, 5),
+            at(pos, 0),
+        ] {
+            let Some(s) = self.block(p).filter(|&s| pl.connects(s)) else {
+                continue;
+            };
             let side = |d| self.block(at(p, d)).unwrap_or(AIR);
             let new = pl.connect(s, [side(2), side(3), side(4), side(5)], side(1));
             if new != s {
@@ -3217,11 +4328,19 @@ impl PlayPlan {
         let c = self.chest_at(pos).filter(|c| c.kind != CHEST_SINGLE)?;
         let other = offset(pos, c.connected());
         let o = self.chest_at(other)?;
-        (o.trapped == c.trapped && o.facing == c.facing && o.kind == 3 - c.kind).then_some((other, c.kind == CHEST_RIGHT))
+        (o.trapped == c.trapped && o.facing == c.facing && o.kind == 3 - c.kind)
+            .then_some((other, c.kind == CHEST_RIGHT))
     }
 
     /// `ChestBlock.getStateForPlacement`: смотрит на игрока, цепляется к соседу.
-    fn chest_placement(&self, pos: [i32; 3], c: ChestState, yaw: f32, face: i32, sneaking: bool) -> u32 {
+    fn chest_placement(
+        &self,
+        pos: [i32; 3],
+        c: ChestState,
+        yaw: f32,
+        face: i32,
+        sneaking: bool,
+    ) -> u32 {
         // `Direction.fromYRot`: юг, запад, север, восток → N0 E1 S2 W3.
         let look = [2u8, 3, 0, 1][((yaw / 90.0 + 0.5).floor() as i32 & 3) as usize];
         let mut facing = (look + 2) % 4;
@@ -3243,7 +4362,11 @@ impl PlayPlan {
             && d % 2 != cf % 2
         {
             facing = d;
-            kind = if (d + 3) % 4 == (cf + 2) % 4 { CHEST_RIGHT } else { CHEST_LEFT };
+            kind = if (d + 3) % 4 == (cf + 2) % 4 {
+                CHEST_RIGHT
+            } else {
+                CHEST_LEFT
+            };
         }
         if kind == CHEST_SINGLE && !sneaking {
             if partner((facing + 1) % 4) == Some(facing) {
@@ -3253,19 +4376,39 @@ impl PlayPlan {
             }
         }
         let want = ChestState { facing, kind, ..c };
-        self.survival.chest_states.get(&want).copied().unwrap_or_else(|| {
-            self.survival.chest_states.get(&ChestState { kind: CHEST_SINGLE, ..want }).copied().unwrap_or(0)
-        })
+        self.survival
+            .chest_states
+            .get(&want)
+            .copied()
+            .unwrap_or_else(|| {
+                self.survival
+                    .chest_states
+                    .get(&ChestState {
+                        kind: CHEST_SINGLE,
+                        ..want
+                    })
+                    .copied()
+                    .unwrap_or(0)
+            })
     }
 
     /// Поставленный двойной сундук: сосед становится второй половиной (`updateShape`).
     fn link_chest(&self, pos: [i32; 3], state: u32) {
-        let Some(c) = self.survival.chests.get(&state).copied().filter(|c| c.kind != CHEST_SINGLE) else {
+        let Some(c) = self
+            .survival
+            .chests
+            .get(&state)
+            .copied()
+            .filter(|c| c.kind != CHEST_SINGLE)
+        else {
             return;
         };
         let other = offset(pos, c.connected());
         if let Some(o) = self.chest_at(other)
-            && let Some(&s) = self.survival.chest_states.get(&ChestState { kind: 3 - c.kind, ..o })
+            && let Some(&s) = self.survival.chest_states.get(&ChestState {
+                kind: 3 - c.kind,
+                ..o
+            })
         {
             self.set_block(other, s);
         }
@@ -3273,12 +4416,23 @@ impl PlayPlan {
 
     /// Сломанная половина: оставшаяся становится одиночной.
     fn unlink_chest(&self, pos: [i32; 3], old: u32) {
-        let Some(c) = self.survival.chests.get(&old).copied().filter(|c| c.kind != CHEST_SINGLE) else {
+        let Some(c) = self
+            .survival
+            .chests
+            .get(&old)
+            .copied()
+            .filter(|c| c.kind != CHEST_SINGLE)
+        else {
             return;
         };
         let other = offset(pos, c.connected());
-        if let Some(o) = self.chest_at(other).filter(|o| o.kind == 3 - c.kind && o.facing == c.facing)
-            && let Some(&s) = self.survival.chest_states.get(&ChestState { kind: CHEST_SINGLE, ..o })
+        if let Some(o) = self
+            .chest_at(other)
+            .filter(|o| o.kind == 3 - c.kind && o.facing == c.facing)
+            && let Some(&s) = self.survival.chest_states.get(&ChestState {
+                kind: CHEST_SINGLE,
+                ..o
+            })
         {
             self.set_block(other, s);
         }
@@ -3327,14 +4481,8 @@ impl PlayPlan {
         for t in be.nbt.get("Items").and_then(Tag::as_list).unwrap_or(&[]) {
             let Some(c) = t.as_compound() else { continue };
             let slot = c.get("Slot").and_then(Tag::as_i64).unwrap_or(-1);
-            let item = c.get("id").and_then(Tag::as_str).and_then(|n| self.item_id(n));
-            let count = c.get("count").and_then(Tag::as_i64).unwrap_or(1) as i32;
-            let damage = match c.get("components") {
-                Some(Tag::Compound(m)) => m.get("minecraft:damage").and_then(Tag::as_i64).unwrap_or(0) as i32,
-                _ => 0,
-            };
-            if let (Some(item), Some(dst)) = (item, slots.get_mut(slot.max(0) as usize).filter(|_| slot >= 0)) {
-                *dst = (count > 0).then_some(Stack { item, count, damage });
+            if let Some(dst) = slots.get_mut(slot.max(0) as usize).filter(|_| slot >= 0) {
+                *dst = crate::stack_nbt::from_nbt(c, |n| self.item_id(n));
             }
         }
         slots
@@ -3359,15 +4507,8 @@ impl PlayPlan {
             .enumerate()
             .filter_map(|(i, s)| {
                 let s = (*s)?;
-                let mut c = Compound::from([
-                    ("Slot".into(), Tag::Byte(i as i8)),
-                    ("id".into(), Tag::String(self.item_name(s.item).to_owned())),
-                    ("count".into(), Tag::Int(s.count)),
-                ]);
-                if s.damage > 0 {
-                    let comps = Compound::from([("minecraft:damage".into(), Tag::Int(s.damage))]);
-                    c.insert("components".into(), Tag::Compound(comps));
-                }
+                let mut c = crate::stack_nbt::to_nbt(s, self.item_name(s.item))?;
+                c.insert("Slot".into(), Tag::Byte(i as i8));
                 Some(Tag::Compound(c))
             })
             .collect()
@@ -3507,18 +4648,28 @@ impl PlayPlan {
         let mut it = line.split_whitespace().skip(1);
         let sub = it.next().unwrap_or("");
         let targets = self.targets(me, it.next().unwrap_or("@s"));
-        let effect = it.next().map(|e| if e.contains(':') { e.to_owned() } else { format!("minecraft:{e}") });
+        let effect = it.next().map(|e| {
+            if e.contains(':') {
+                e.to_owned()
+            } else {
+                format!("minecraft:{e}")
+            }
+        });
         let id = match effect.as_deref() {
             Some(name) => match self.survival.effects.get(name) {
                 Some(&id) => Some(id),
-                None => return serde_json::json!({"translate": "argument.resource.not_found", "with": [name, "minecraft:mob_effect"], "color": "red"}),
+                None => {
+                    return serde_json::json!({"translate": "argument.resource.not_found", "with": [name, "minecraft:mob_effect"], "color": "red"});
+                }
             },
             None => None,
         };
         if targets.is_empty() {
             return serde_json::json!({"translate": "argument.entity.notfound.player", "color": "red"});
         }
-        let effect_name = effect.as_deref().map(|e| serde_json::json!({"translate": format!("effect.{}", e.replace(':', "."))}));
+        let effect_name = effect
+            .as_deref()
+            .map(|e| serde_json::json!({"translate": format!("effect.{}", e.replace(':', "."))}));
         let controls = self.controls.lock().unwrap();
         let send = |c: Control| {
             for (t, _) in &targets {
@@ -3531,22 +4682,44 @@ impl PlayPlan {
         match sub {
             "give" => {
                 let Some(id) = id else { return usage };
-                let seconds = it.next().map_or(Some(30), |s| s.parse::<i32>().ok().filter(|&s| (1..=1_000_000).contains(&s)));
+                let seconds = it.next().map_or(Some(30), |s| {
+                    s.parse::<i32>()
+                        .ok()
+                        .filter(|&s| (1..=1_000_000).contains(&s))
+                });
                 let amplifier = it.next().map_or(Some(0), |s| s.parse::<u8>().ok());
-                let (Some(seconds), Some(amplifier)) = (seconds, amplifier) else { return usage };
-                send(Control::Effect(survival::Effect { id, amplifier, duration: seconds * 20, particles: true }));
+                let (Some(seconds), Some(amplifier)) = (seconds, amplifier) else {
+                    return usage;
+                };
+                send(Control::Effect {
+                    effect: survival::Effect::plain(id, amplifier, seconds * 20),
+                    force: false,
+                    command: true,
+                });
                 match one {
-                    Some(n) => serde_json::json!({"translate": "commands.effect.give.success.single", "with": [effect_name, n]}),
-                    None => serde_json::json!({"translate": "commands.effect.give.success.multiple", "with": [effect_name, targets.len()]}),
+                    Some(n) => {
+                        serde_json::json!({"translate": "commands.effect.give.success.single", "with": [effect_name, n]})
+                    }
+                    None => {
+                        serde_json::json!({"translate": "commands.effect.give.success.multiple", "with": [effect_name, targets.len()]})
+                    }
                 }
             }
             "clear" => {
-                send(Control::ClearEffect(id));
+                send(Control::ClearEffect { id, command: true });
                 match (effect_name, one) {
-                    (Some(e), Some(n)) => serde_json::json!({"translate": "commands.effect.clear.specific.success.single", "with": [e, n]}),
-                    (Some(e), None) => serde_json::json!({"translate": "commands.effect.clear.specific.success.multiple", "with": [e, targets.len()]}),
-                    (None, Some(n)) => serde_json::json!({"translate": "commands.effect.clear.everything.success.single", "with": [n]}),
-                    (None, None) => serde_json::json!({"translate": "commands.effect.clear.everything.success.multiple", "with": [targets.len()]}),
+                    (Some(e), Some(n)) => {
+                        serde_json::json!({"translate": "commands.effect.clear.specific.success.single", "with": [e, n]})
+                    }
+                    (Some(e), None) => {
+                        serde_json::json!({"translate": "commands.effect.clear.specific.success.multiple", "with": [e, targets.len()]})
+                    }
+                    (None, Some(n)) => {
+                        serde_json::json!({"translate": "commands.effect.clear.everything.success.single", "with": [n]})
+                    }
+                    (None, None) => {
+                        serde_json::json!({"translate": "commands.effect.clear.everything.success.multiple", "with": [targets.len()]})
+                    }
                 }
             }
             _ => usage,
@@ -3554,9 +4727,24 @@ impl PlayPlan {
     }
 
     /// Скорость движения у клиента (эффекты Скорость/Замедление; клиент сам их не применяет).
-    async fn send_speed(&self, conn: &mut Connection, entity: i32, v: &Vitals) -> Result<(), NetError> {
-        let amp = |name: &str| self.survival.effects.get(name).and_then(|&id| v.effect(id)).map(|e| e.amplifier);
-        let mods = survival::speed_modifiers(v.sprinting, amp("minecraft:speed"), amp("minecraft:slowness"));
+    async fn send_speed(
+        &self,
+        conn: &mut Connection,
+        entity: i32,
+        v: &Vitals,
+    ) -> Result<(), NetError> {
+        let amp = |name: &str| {
+            self.survival
+                .effects
+                .get(name)
+                .and_then(|&id| v.effect(id))
+                .map(|e| e.amplifier)
+        };
+        let mods = survival::speed_modifiers(
+            v.sprinting,
+            amp("minecraft:speed"),
+            amp("minecraft:slowness"),
+        );
         conn.send(&inv::update_attribute(
             self.ids.update_attributes,
             entity,
@@ -3569,7 +4757,367 @@ impl PlayPlan {
 
     /// Меняет ли эффект скорость движения.
     fn moves_speed(&self, id: i32) -> bool {
-        ["minecraft:speed", "minecraft:slowness"].iter().any(|n| self.survival.effects.get(*n) == Some(&id))
+        ["minecraft:speed", "minecraft:slowness"]
+            .iter()
+            .any(|n| self.survival.effects.get(*n) == Some(&id))
+    }
+
+    fn effect_amp(&self, v: &Vitals, name: &str) -> Option<u8> {
+        self.survival
+            .effects
+            .get(name)
+            .and_then(|&id| v.effect(id))
+            .map(|e| e.amplifier)
+    }
+
+    fn effect_kinds(&self) -> survival::EffectKinds {
+        let id = |n: &str| self.survival.effects.get(n).copied();
+        survival::EffectKinds {
+            regeneration: id("minecraft:regeneration"),
+            poison: id("minecraft:poison"),
+            wither: id("minecraft:wither"),
+            hunger: id("minecraft:hunger"),
+        }
+    }
+
+    /// Биты атрибутов, которые надо переслать: 1 скорость, 2 прыжок, 4 гравитация.
+    fn motion_mask(&self, id: i32) -> u8 {
+        let mut m = 0;
+        if self.moves_speed(id) {
+            m |= 1;
+        }
+        if self.survival.effects.get("minecraft:jump_boost") == Some(&id) {
+            m |= 2;
+        }
+        if self.survival.effects.get("minecraft:slow_falling") == Some(&id) {
+            m |= 4;
+        }
+        m
+    }
+
+    async fn sync_motion(
+        &self,
+        conn: &mut Connection,
+        entity: i32,
+        v: &Vitals,
+        mask: u8,
+    ) -> Result<(), NetError> {
+        if mask & 1 != 0 {
+            self.send_speed(conn, entity, v).await?;
+        }
+        if mask & 2 != 0 {
+            self.send_jump(conn, entity, v).await?;
+        }
+        if mask & 4 != 0 {
+            self.send_gravity(conn, entity, v).await?;
+        }
+        Ok(())
+    }
+
+    async fn send_jump(
+        &self,
+        conn: &mut Connection,
+        entity: i32,
+        v: &Vitals,
+    ) -> Result<(), NetError> {
+        let mods = survival::jump_modifiers(self.effect_amp(v, "minecraft:jump_boost"));
+        conn.send(&inv::update_attribute(
+            self.ids.update_attributes,
+            entity,
+            self.survival.attribute_jump,
+            survival::BASE_JUMP_STRENGTH,
+            &mods,
+        ))
+        .await
+    }
+
+    async fn send_gravity(
+        &self,
+        conn: &mut Connection,
+        entity: i32,
+        v: &Vitals,
+    ) -> Result<(), NetError> {
+        let slow = self.effect_amp(v, "minecraft:slow_falling").is_some();
+        let mods = survival::gravity_modifiers(slow);
+        conn.send(&inv::update_attribute(
+            self.ids.update_attributes,
+            entity,
+            self.survival.attribute_gravity,
+            survival::BASE_GRAVITY,
+            &mods,
+        ))
+        .await
+    }
+
+    /// Рука с питьевым зельем: слот, предмет, компоненты, секунды. Наблюдатель не пьёт.
+    fn drink_use(
+        &self,
+        inv: &Inventory,
+        hand: i32,
+        dead: bool,
+        mode: u8,
+    ) -> Option<(usize, i32, u32, f32)> {
+        if dead || mode == 3 {
+            return None;
+        }
+        let slot = match hand {
+            0 => inv.held_slot(),
+            1 => survival::OFFHAND,
+            _ => return None,
+        };
+        let stack = inv.slots.get(slot)?.as_ref()?;
+        let drink = self.survival.items.get(stack.item as usize)?.drink?;
+        Some((slot, stack.item, stack.extra, drink.seconds))
+    }
+
+    /// Допить: в выживании бутылка вместо зелья, затем эффекты (`POTION_DRINK`).
+    async fn finish_drink(
+        &self,
+        conn: &mut Connection,
+        me: &Online,
+        state: &mut PlayerState,
+        slot: usize,
+        takes_damage: bool,
+    ) -> Result<(), NetError> {
+        let Some(stack) = state.inv.slots[slot] else {
+            return Ok(());
+        };
+        let raw = chunkwake_protocol::components::get(stack.extra).raw.clone();
+        let contents = raw
+            .as_deref()
+            .and_then(|b| crate::potions::read_contents(b, self.survival.potion_component));
+        if takes_damage {
+            let rest = self
+                .survival
+                .items
+                .get(stack.item as usize)
+                .and_then(|i| i.drink)
+                .map(|d| d.remainder)
+                .filter(|&id| id >= 0);
+            if stack.count <= 1 {
+                state.inv.slots[slot] = rest.map(|id| Stack::new(id, 1));
+            } else {
+                state.inv.slots[slot] = Some(Stack {
+                    count: stack.count - 1,
+                    ..stack
+                });
+                if let Some(id) = rest {
+                    let _ = state.inv.add_stack(Stack::new(id, 1), 64);
+                }
+            }
+            self.send_inventory(conn, &mut state.inv).await?;
+        }
+        if let Some(c) = contents {
+            let mut list = Vec::new();
+            if let Some(id) = c.potion
+                && let Some(name) = self
+                    .survival
+                    .potions
+                    .get(id as usize)
+                    .filter(|n| !n.is_empty())
+            {
+                for brew in crate::potions::effects(name) {
+                    if let Some(&eid) = self.survival.effects.get(brew.effect) {
+                        list.push(survival::Effect::plain(eid, brew.amplifier, brew.duration));
+                    }
+                }
+            }
+            for e in c.effects {
+                list.push(survival::Effect {
+                    id: e.id,
+                    amplifier: e.amplifier,
+                    duration: e.duration,
+                    ambient: e.ambient,
+                    particles: e.particles,
+                    show_icon: e.show_icon,
+                    age: 0,
+                });
+            }
+            for e in list {
+                if !survival::will_apply(&state.vitals.effects, e, false) {
+                    continue;
+                }
+                let old = state.vitals.effect(e.id).copied();
+                let action = if old.is_some() { "CHANGED" } else { "ADDED" };
+                let name = self.effect_name(e.id).unwrap_or_default();
+                if self
+                    .potion_cancelled(
+                        me.entry.uuid,
+                        "POTION_DRINK",
+                        action,
+                        &name,
+                        Some(&e),
+                        old.as_ref(),
+                    )
+                    .await
+                {
+                    continue;
+                }
+                self.grant_effect(
+                    conn,
+                    me,
+                    &mut state.vitals,
+                    &mut state.inv,
+                    takes_damage,
+                    e,
+                    false,
+                    false,
+                )
+                .await?;
+            }
+        }
+        conn.send(&inv::entity_event(
+            self.ids.entity_event,
+            me.entity_id,
+            inv::ENTITY_EVENT_USE_ITEM_COMPLETE,
+        ))
+        .await?;
+        Ok(())
+    }
+
+    /// `EntityPotionEffectEvent` с сервера. `true` — отменено.
+    async fn potion_cancelled(
+        &self,
+        uuid: Uuid,
+        cause: &str,
+        action: &str,
+        name: &str,
+        new_effect: Option<&survival::Effect>,
+        old: Option<&survival::Effect>,
+    ) -> bool {
+        let fmt = |e: &survival::Effect| {
+            format!(
+                "{} {} {} {} {}",
+                e.amplifier,
+                e.duration,
+                u8::from(e.ambient),
+                u8::from(e.particles),
+                u8::from(e.show_icon)
+            )
+        };
+        let arg = match (action, new_effect, old) {
+            ("CLEARED", _, _) => format!("{cause} CLEARED"),
+            (_, Some(n), Some(o)) => format!("{cause} {action} {name} {} {}", fmt(n), fmt(o)),
+            (_, Some(n), None) | (_, None, Some(n)) => {
+                format!("{cause} {action} {name} {}", fmt(n))
+            }
+            _ => format!("{cause} {action}"),
+        };
+        self.plugin_event(Event::Potion, uuid, || arg)
+            .await
+            .is_some_and(|r| r.trim() == "c")
+    }
+
+    /// Наложить эффект: для `/effect` сначала событие COMMAND.
+    #[allow(clippy::too_many_arguments)]
+    async fn grant_effect(
+        &self,
+        conn: &mut Connection,
+        me: &Online,
+        v: &mut Vitals,
+        inv: &mut Inventory,
+        takes_damage: bool,
+        e: survival::Effect,
+        force: bool,
+        command: bool,
+    ) -> Result<(), NetError> {
+        if command && !survival::will_apply(&v.effects, e, force) {
+            return Ok(());
+        }
+        if command {
+            let old = v.effect(e.id).copied();
+            let action = if old.is_some() { "CHANGED" } else { "ADDED" };
+            let name = self.effect_name(e.id).unwrap_or_default();
+            if self
+                .potion_cancelled(
+                    me.entry.uuid,
+                    "COMMAND",
+                    action,
+                    &name,
+                    Some(&e),
+                    old.as_ref(),
+                )
+                .await
+            {
+                return Ok(());
+            }
+        }
+        if !v.add_effect(e, force) {
+            return Ok(());
+        }
+        conn.send(&inv::update_mob_effect(
+            self.ids.update_mob_effect,
+            me.entity_id,
+            e.id,
+            e.amplifier as i32,
+            e.duration,
+            e.flags(),
+        ))
+        .await?;
+        self.sync_motion(conn, me.entity_id, v, self.motion_mask(e.id))
+            .await?;
+        let name = self.effect_name(e.id).unwrap_or_default();
+        match survival::instant_effect(&name, e.amplifier) {
+            survival::Instant::Heal(n) if !v.dead => {
+                v.heal(n);
+                self.send_health(conn, v).await?;
+            }
+            survival::Instant::Harm(n) if takes_damage && !v.dead => {
+                self.hurt(conn, me, v, inv, n, Cause::Magic).await?;
+            }
+            survival::Instant::Eat(food, sat) if !v.dead => {
+                v.eat(food, sat);
+                self.send_health(conn, v).await?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Снять эффекты. `/effect clear` вызывает COMMAND (`CLEARED` или `REMOVED`).
+    async fn revoke_effects(
+        &self,
+        conn: &mut Connection,
+        me: &Online,
+        v: &mut Vitals,
+        id: Option<i32>,
+        command: bool,
+    ) -> Result<(), NetError> {
+        let targets: Vec<survival::Effect> = v
+            .effects
+            .iter()
+            .copied()
+            .filter(|e| id.is_none_or(|w| w == e.id))
+            .collect();
+        if targets.is_empty() {
+            return Ok(());
+        }
+        if command {
+            let cancelled = if id.is_none() {
+                self.potion_cancelled(me.entry.uuid, "COMMAND", "CLEARED", "", None, None)
+                    .await
+            } else {
+                let e = targets[0];
+                let name = self.effect_name(e.id).unwrap_or_default();
+                self.potion_cancelled(me.entry.uuid, "COMMAND", "REMOVED", &name, None, Some(&e))
+                    .await
+            };
+            if cancelled {
+                return Ok(());
+            }
+        }
+        let mut motion = 0u8;
+        for e in &targets {
+            conn.send(&inv::remove_mob_effect(
+                self.ids.remove_mob_effect,
+                me.entity_id,
+                e.id,
+            ))
+            .await?;
+            motion |= self.motion_mask(e.id);
+        }
+        v.effects.retain(|e| id.is_some_and(|w| w != e.id));
+        self.sync_motion(conn, me.entity_id, v, motion).await
     }
 
     async fn send_health(&self, conn: &mut Connection, v: &Vitals) -> Result<(), NetError> {
@@ -3592,7 +5140,11 @@ impl PlayPlan {
         amount: f32,
         cause: Cause,
     ) -> Result<(), NetError> {
-        let mut amount = amount;
+        let mut amount = survival::resisted(
+            amount,
+            self.effect_amp(v, "minecraft:resistance"),
+            cause.bypasses_resistance(),
+        );
         if let Some(reply) = self
             .plugin_event(Event::Damage, me.entry.uuid, || {
                 format!("{} {amount}", cause.bukkit())
@@ -3608,12 +5160,17 @@ impl PlayPlan {
                 }
             }
         }
+        if amount <= 0.0 {
+            return Ok(());
+        }
         let died = v.damage(amount);
         self.send_health(conn, v).await?;
         let damage_type = match cause {
             Cause::Fall => Some(self.survival.damage_fall),
             Cause::Void => Some(self.survival.damage_void),
             Cause::Starve => Some(self.survival.damage_starve),
+            Cause::Poison | Cause::Magic => Some(self.survival.damage_magic),
+            Cause::Wither => Some(self.survival.damage_wither),
             Cause::Generic => None,
         };
         if let Some(t) = damage_type {
@@ -3655,7 +5212,8 @@ impl PlayPlan {
                 .plugin_event(Event::Death, me.entry.uuid, || {
                     let mut arg = format!("{}\n{msg}", cause.damage_type());
                     for s in &drops {
-                        arg += &format!("\n{} {}", self.item_name(s.item), s.count);
+                        arg += "\n";
+                        arg += &crate::stack_nbt::to_line(*s, self.item_name(s.item));
                     }
                     arg
                 })
@@ -3704,8 +5262,14 @@ impl PlayPlan {
         if now != center {
             self.move_center(conn, center, now, r_view).await?;
         }
-        conn.send(&play::player_position(self.ids.player_position, teleport_id, pos, yaw, pitch))
-            .await?;
+        conn.send(&play::player_position(
+            self.ids.player_position,
+            teleport_id,
+            pos,
+            yaw,
+            pitch,
+        ))
+        .await?;
         self.moved(
             uuid,
             Move {
@@ -3730,6 +5294,14 @@ impl PlayPlan {
         center: (i32, i32),
         teleport_id: i32,
     ) -> Result<(i32, i32), NetError> {
+        let lingering: Vec<i32> = v.effects.iter().map(|e| e.id).collect();
+        let mut motion = 0u8;
+        for id in lingering {
+            let pkt = inv::remove_mob_effect(self.ids.remove_mob_effect, me.entity_id, id);
+            conn.send(&pkt).await?;
+            self.hub.send(Some(me.entry.uuid), pkt);
+            motion |= self.motion_mask(id);
+        }
         v.respawn();
         v.reset_fall(self.spawn);
         conn.send(&inv::respawn(self.ids.respawn, &login.spawn, 0))
@@ -3758,6 +5330,8 @@ impl PlayPlan {
         .await?;
         self.send_health(conn, v).await?;
         self.send_inventory(conn, inv).await?;
+        // Клиент сам не сбрасывает прыжок и гравитацию вместе с эффектом.
+        self.sync_motion(conn, me.entity_id, v, motion).await?;
         // Остальные: убрать тело и показать игрока заново в точке спавна.
         self.hub.send_entity(
             Some(me.entry.uuid),
@@ -3856,6 +5430,16 @@ impl PlayPlan {
     }
 }
 
+fn acknowledge_player_save(
+    pending: &mut HashMap<Uuid, PlayerSave>,
+    uuid: Uuid,
+    written: &PlayerSave,
+) {
+    if pending.get(&uuid) == Some(written) {
+        pending.remove(&uuid);
+    }
+}
+
 /// Чанки квадрата радиуса `r` вокруг `c`, ближние первыми, кроме попадающих в `skip`.
 fn chunks_around(c: (i32, i32), r: i32, skip: Option<((i32, i32), i32)>) -> Vec<(i32, i32)> {
     let inside = |(x, z): (i32, i32), (s, sr): ((i32, i32), i32)| {
@@ -3871,7 +5455,26 @@ fn chunks_around(c: (i32, i32), r: i32, skip: Option<((i32, i32), i32)>) -> Vec<
 
 #[cfg(test)]
 mod tests {
-    use super::{chunks_around, near};
+    use super::{acknowledge_player_save, chunks_around, near};
+    use crate::survival::PlayerState;
+    use std::collections::HashMap;
+    use uuid::Uuid;
+
+    #[test]
+    fn player_snapshot_is_acknowledged_only_if_still_current() {
+        let id = Uuid::nil();
+        let old = PlayerState::default().save([1.0, 64.0, 1.0], 0.0, 0.0);
+        let newer = PlayerState::default().save([2.0, 64.0, 1.0], 0.0, 0.0);
+        let mut pending = HashMap::from([(id, old.clone())]);
+        // A failed write never calls acknowledge; a later snapshot must survive
+        // even if the earlier write eventually completes.
+        assert_eq!(pending.get(&id), Some(&old));
+        pending.insert(id, newer.clone());
+        acknowledge_player_save(&mut pending, id, &old);
+        assert_eq!(pending.get(&id), Some(&newer));
+        acknowledge_player_save(&mut pending, id, &newer);
+        assert!(!pending.contains_key(&id));
+    }
 
     #[test]
     fn visibility_range() {
@@ -3890,5 +5493,40 @@ mod tests {
         assert!(new.iter().all(|&(x, _)| x == 3));
         let gone = chunks_around((0, 0), 2, Some(((1, 0), 2)));
         assert!(gone.iter().all(|&(x, _)| x == -2));
+    }
+
+    #[test]
+    fn elytra_flag_is_the_high_bit() {
+        assert_eq!(super::player_flags(false, false, true), 0x80);
+        assert_eq!(super::player_flags(true, true, true), 0x80 | 0x08 | 0x02);
+        assert_eq!(super::player_flags(true, true, false) & 0x80, 0);
+    }
+
+    #[test]
+    fn relative_coordinates_and_daytime() {
+        assert_eq!(super::coord("~", 10.0), Some(10.0));
+        assert_eq!(super::coord("~1.5", 10.0), Some(11.5));
+        assert_eq!(super::coord("64", 0.0), Some(64.0));
+        assert_eq!(super::coord("nope", 0.0), None);
+        assert_eq!(super::daytime_ticks("noon"), Some(6000));
+        assert_eq!(super::daytime_ticks("night"), Some(13000));
+        assert_eq!(super::daytime_ticks("24000"), Some(0));
+        assert_eq!(super::daytime_ticks("1000"), Some(1000));
+        assert!(super::coord_token("~"));
+        assert!(!super::coord_token("Steve"));
+    }
+
+    #[test]
+    fn tick_meter_reports_tps_and_mspt() {
+        let mut meter = super::TickMeter::new();
+        assert_eq!(meter.line(), "TPS: 20.0 MSPT: 0.0");
+        meter.work.push_back(5.0);
+        meter.work.push_back(15.0);
+        meter.gap.push_back(50.0);
+        meter.gap.push_back(50.0);
+        assert_eq!(meter.line(), "TPS: 20.0 MSPT: 10.0");
+        meter.gap.clear();
+        meter.gap.push_back(100.0);
+        assert_eq!(meter.line(), "TPS: 10.0 MSPT: 10.0");
     }
 }

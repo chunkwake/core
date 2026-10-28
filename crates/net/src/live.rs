@@ -40,8 +40,12 @@ pub struct Live {
 impl Live {
     /// Первая строка — `health food saturation exhaustion mode selected x y z yaw pitch`, затем
     /// [`BUKKIT_SLOTS`] строк `item count` (или `-`) в порядке Bukkit, затем эффекты
-    /// строками `e имя усиление тики частицы(0/1)`.
-    pub fn render(&self, item_name: impl Fn(i32) -> Option<String>, effect_name: impl Fn(i32) -> Option<String>) -> String {
+    /// строками `e имя усиление тики частицы фон значок` (0/1).
+    pub fn render(
+        &self,
+        item_name: impl Fn(i32) -> Option<String>,
+        effect_name: impl Fn(i32) -> Option<String>,
+    ) -> String {
         let [x, y, z] = self.pos;
         let mut out = format!(
             "{} {} {} {} {} {} {x} {y} {z} {} {}",
@@ -57,14 +61,21 @@ impl Live {
         for i in 0..BUKKIT_SLOTS {
             out.push('\n');
             let stack = bukkit_to_window(i).and_then(|w| self.slots[w]);
-            match stack.and_then(|s| item_name(s.item).map(|n| (n, s.count))) {
-                Some((name, count)) => out += &format!("{name} {count}"),
+            match stack.and_then(|s| item_name(s.item).map(|n| (n, s))) {
+                Some((name, s)) => out += &crate::stack_nbt::to_line(s, &name),
                 None => out.push('-'),
             }
         }
         for e in &self.effects {
             if let Some(name) = effect_name(e.id) {
-                out += &format!("\ne {name} {} {} {}", e.amplifier, e.duration, e.particles as u8);
+                out += &format!(
+                    "\ne {name} {} {} {} {} {}",
+                    e.amplifier,
+                    e.duration,
+                    u8::from(e.particles),
+                    u8::from(e.ambient),
+                    u8::from(e.show_icon)
+                );
             }
         }
         out
@@ -74,6 +85,8 @@ impl Live {
 /// Команда сессии игрока от плагина.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Control {
+    /// Внутреннее: штатно завершить сессию при остановке сервера.
+    Shutdown,
     Health(f32),
     Food(i32),
     Saturation(f32),
@@ -85,14 +98,23 @@ pub enum Control {
     Selected(usize),
     /// Телепорт: позиция, поворот.
     Teleport([f64; 3], f32, f32),
+    /// Очистить инвентарь игрока (`/clear`).
+    Clear,
     /// Внутреннее (не от плагинов): содержимое сундука изменил другой игрок.
     ContainerChanged([i32; 3]),
     /// Внутреннее: тик печи — свойства окна и сменились ли предметы.
     Furnace([i32; 3], [i32; 4], bool),
-    /// Наложить эффект.
-    Effect(crate::survival::Effect),
-    /// Снять эффект (`None` — все).
-    ClearEffect(Option<i32>),
+    /// Наложить эффект. `command` — сессия вызовет событие с причиной COMMAND.
+    Effect {
+        effect: crate::survival::Effect,
+        force: bool,
+        command: bool,
+    },
+    /// Снять эффект (`None` — все). `command` — событие COMMAND.
+    ClearEffect {
+        id: Option<i32>,
+        command: bool,
+    },
 }
 
 impl Control {
@@ -103,8 +125,12 @@ impl Control {
 
     /// Разбор строки от JVM: `health 10`, `food 20`, `mode 1`,
     /// `slot <bukkit> <item> <count>` или `slot <bukkit> -`, `held 3`,
-    /// `effect <имя> <усиление> <тики> <частицы 0/1>`, `uneffect <имя>|*`.
-    pub fn parse(line: &str, item_id: impl Fn(&str) -> Option<i32>, effect_id: impl Fn(&str) -> Option<i32>) -> Option<Self> {
+    /// `effect <имя> <усиление> <тики> <частицы> [фон] [значок] [force]`, `uneffect <имя>|*`.
+    pub fn parse(
+        line: &str,
+        item_id: impl Fn(&str) -> Option<i32>,
+        effect_id: impl Fn(&str) -> Option<i32>,
+    ) -> Option<Self> {
         let mut it = line.split_whitespace();
         let f = |s: Option<&str>| {
             s.and_then(|s| s.parse::<f32>().ok())
@@ -117,34 +143,59 @@ impl Control {
             "exhaustion" => Control::Exhaustion(f(it.next())?.max(0.0)),
             "mode" => Control::GameMode(it.next()?.parse::<u8>().ok().filter(|&m| m <= 3)?),
             "tp" => {
-                let mut n = || it.next().and_then(|s| s.parse::<f64>().ok()).filter(|v| v.is_finite());
+                let mut n = || {
+                    it.next()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .filter(|v| v.is_finite())
+                };
                 let pos = [n()?, n()?, n()?];
                 Control::Teleport(pos, n()? as f32, n()? as f32)
             }
             "effect" => {
                 let id = effect_id(it.next()?)?;
                 let amplifier = it.next()?.parse::<u8>().ok()?;
-                let duration = it.next()?.parse::<i32>().ok().filter(|&d| d == -1 || d > 0)?;
+                let duration = it
+                    .next()?
+                    .parse::<i32>()
+                    .ok()
+                    .filter(|&d| d == -1 || d > 0)?;
                 let particles = it.next().is_none_or(|p| p != "0");
-                Control::Effect(crate::survival::Effect { id, amplifier, duration, particles })
+                let ambient = it.next().is_some_and(|p| p == "1");
+                let show_icon = it.next().is_none_or(|p| p != "0");
+                let force = it.next().is_some_and(|p| p == "1");
+                Control::Effect {
+                    effect: crate::survival::Effect {
+                        id,
+                        amplifier,
+                        duration,
+                        ambient,
+                        particles,
+                        show_icon,
+                        age: 0,
+                    },
+                    force,
+                    command: false,
+                }
             }
-            "uneffect" => match it.next()? {
-                "*" => Control::ClearEffect(None),
-                name => Control::ClearEffect(Some(effect_id(name)?)),
-            },
+            "uneffect" => {
+                let id = match it.next()? {
+                    "*" => None,
+                    name => Some(effect_id(name)?),
+                };
+                Control::ClearEffect { id, command: false }
+            }
             "held" => Control::Selected(it.next()?.parse::<usize>().ok().filter(|&s| s <= 8)?),
             "slot" => {
                 let window = bukkit_to_window(it.next()?.parse().ok()?)?;
-                let stack = match it.next()? {
+                // Остаток строки после номера — стопка (`-` — пусто).
+                let rest = line
+                    .trim_start()
+                    .splitn(3, char::is_whitespace)
+                    .nth(2)?
+                    .trim();
+                let stack = match rest {
                     "-" => None,
-                    name => {
-                        let count: i32 = it.next()?.parse().ok()?;
-                        (count > 0).then_some(Stack {
-                            item: item_id(name)?,
-                            count,
-                            damage: 0,
-                        })
-                    }
+                    l => Some(crate::stack_nbt::from_line(l, &item_id)?),
                 };
                 Control::Slot(window, stack)
             }
@@ -167,11 +218,14 @@ impl Control {
                 live.yaw = yaw;
                 live.pitch = pitch;
             }
-            Control::Effect(e) => {
-                crate::survival::add_effect(&mut live.effects, e);
+            Control::Effect { effect, force, .. } => {
+                crate::survival::add_effect(&mut live.effects, effect, force);
             }
-            Control::ClearEffect(which) => live.effects.retain(|e| which.is_some_and(|w| w != e.id)),
-            Control::ContainerChanged(_) | Control::Furnace(..) => {}
+            Control::ClearEffect { id, .. } => {
+                live.effects.retain(|e| id.is_some_and(|w| w != e.id))
+            }
+            Control::Clear => live.slots = [None; SLOTS],
+            Control::ContainerChanged(_) | Control::Furnace(..) | Control::Shutdown => {}
         }
     }
 }
@@ -205,6 +259,9 @@ pub enum Event {
     Move = 10,
     /// `PlayerInteractEvent`: `ACTION x y z FACE hand` (`~` вместо координат без блока) → `c` или пусто.
     Interact = 11,
+    /// `EntityPotionEffectEvent` от сервера (`/effect`, конец таймера):
+    /// `CAUSE ACTION [ключ усиление тики фон частицы значок …]` → `c` или пусто.
+    Potion = 12,
 }
 
 impl Event {
@@ -220,15 +277,7 @@ pub fn parse_stacks<'a>(
     item_id: impl Fn(&str) -> Option<i32>,
 ) -> Vec<Stack> {
     lines
-        .filter_map(|l| {
-            let (name, count) = l.trim().split_once(' ')?;
-            let count: i32 = count.parse().ok()?;
-            (count > 0).then_some(Stack {
-                item: item_id(name)?,
-                count,
-                damage: 0,
-            })
-        })
+        .filter_map(|l| crate::stack_nbt::from_line(l, &item_id))
         .collect()
 }
 
@@ -273,20 +322,53 @@ mod tests {
             effects: Vec::new(),
         };
         let c = Control::parse_t("slot 0 minecraft:bread 3", ids).unwrap();
-        assert_eq!(c, Control::Slot(36, Some(Stack { item: 2, count: 3 , damage: 0})));
+        assert_eq!(
+            c,
+            Control::Slot(
+                36,
+                Some(Stack {
+                    item: 2,
+                    count: 3,
+                    damage: 0,
+                    extra: 0
+                })
+            )
+        );
         c.apply(&mut live);
-        Control::parse_t("health 7.5", ids).unwrap().apply(&mut live);
+        Control::parse_t("health 7.5", ids)
+            .unwrap()
+            .apply(&mut live);
         let names = |id| match id {
             2 => Some("minecraft:bread".to_owned()),
             _ => None,
         };
         let text = live.render(names, |_| None);
         // Эффекты: наложить в зеркало, снять все.
-        Control::parse_t("effect minecraft:haste 1 200 0", ids).unwrap().apply(&mut live);
-        assert_eq!(live.effects, vec![crate::survival::Effect { id: 2, amplifier: 1, duration: 200, particles: false }]);
-        assert!(live.render(names, |_| Some("minecraft:haste".into())).ends_with("
-e minecraft:haste 1 200 0"));
-        Control::parse_t("uneffect *", ids).unwrap().apply(&mut live);
+        Control::parse_t("effect minecraft:haste 1 200 0", ids)
+            .unwrap()
+            .apply(&mut live);
+        assert_eq!(
+            live.effects,
+            vec![crate::survival::Effect {
+                id: 2,
+                amplifier: 1,
+                duration: 200,
+                ambient: false,
+                particles: false,
+                show_icon: true,
+                age: 0,
+            }]
+        );
+        assert!(
+            live.render(names, |_| Some("minecraft:haste".into()))
+                .ends_with(
+                    "
+e minecraft:haste 1 200 0 0 1"
+                )
+        );
+        Control::parse_t("uneffect *", ids)
+            .unwrap()
+            .apply(&mut live);
         assert!(live.effects.is_empty());
         assert_eq!(Control::parse_t("effect minecraft:nope 0 20", ids), None);
         let mut lines = text.lines();
@@ -309,6 +391,14 @@ e minecraft:haste 1 200 0"));
     #[test]
     fn stacks_from_lines() {
         let s = parse_stacks("minecraft:stone 5\nbad\nminecraft:nope 1\n".lines(), ids);
-        assert_eq!(s, vec![Stack { item: 1, count: 5 , damage: 0}]);
+        assert_eq!(
+            s,
+            vec![Stack {
+                item: 1,
+                count: 5,
+                damage: 0,
+                extra: 0
+            }]
+        );
     }
 }

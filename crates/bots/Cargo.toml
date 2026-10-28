@@ -12,3 +12,4 @@ chunkwake-net = { path = "../net" }
 chunkwake-protocol = { path = "../protocol" }
 tokio = { version = "1", features = ["full"] }
 uuid = "1"
+serde_json = "1"

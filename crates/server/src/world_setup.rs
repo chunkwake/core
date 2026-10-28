@@ -157,37 +157,66 @@ fn survival_data(
 ) -> Result<SurvivalData, String> {
     let s = |e: chunkwake_data::DataError| e.to_string();
     let t = std::time::Instant::now();
-    let drops_by_block = chunkwake_data::world::load_block_drops_cached(data_dir).map_err(s)?;
+    let loot = chunkwake_data::world::load_block_loot_cached(data_dir).map_err(s)?;
     tracing::debug!("loot tables: {:?}", t.elapsed());
-    let drops = (0..blocks.state_count() as u32)
-        .map(|id| {
-            let (name, _) = blocks.state(id)?;
-            items.get(drops_by_block.get(name)?).copied()
-        })
-        .collect();
-    let damage = chunkwake_data::registries::builtin_id(data_dir, "data_component_type", "minecraft:damage")
-        .map_err(s)?;
-    chunkwake_protocol::inventory::DAMAGE_COMPONENT.store(damage, std::sync::atomic::Ordering::Relaxed);
-    let _ = chunkwake_world::BLOCK_ENTITY_TYPES.set(
-        chunkwake_data::registries::builtin_ids(data_dir, "block_entity_type").map_err(s)?,
-    );
+    let damage =
+        chunkwake_data::registries::builtin_id(data_dir, "data_component_type", "minecraft:damage")
+            .map_err(s)?;
+    chunkwake_protocol::inventory::DAMAGE_COMPONENT
+        .store(damage, std::sync::atomic::Ordering::Relaxed);
+    let enchantments;
+    // Чары, имя и описание предметов: номера компонентов и сетевые ID чар.
+    {
+        use chunkwake_protocol::components as c;
+        let component = |name| {
+            chunkwake_data::registries::builtin_id(data_dir, "data_component_type", name).map_err(s)
+        };
+        let order = std::sync::atomic::Ordering::Relaxed;
+        c::ENCHANTMENTS_COMPONENT.store(component("minecraft:enchantments")?, order);
+        c::CUSTOM_NAME_COMPONENT.store(component("minecraft:custom_name")?, order);
+        c::LORE_COMPONENT.store(component("minecraft:lore")?, order);
+        let names: Vec<String> = registries
+            .synchronized
+            .iter()
+            .find(|r| r.name == "enchantment")
+            .map(|r| r.entries.clone())
+            .unwrap_or_default();
+        enchantments = enchantment_lines(data_dir, &names);
+        c::set_enchantments(names);
+    }
+    let _ = chunkwake_world::BLOCK_ENTITY_TYPES
+        .set(chunkwake_data::registries::builtin_ids(data_dir, "block_entity_type").map_err(s)?);
     // Сундуки: свойства `facing`/`type`/`waterlogged` каждого состояния.
-    let chests: std::collections::HashMap<u32, chunkwake_net::play::ChestState> = (0..blocks.state_count() as u32)
-        .filter_map(|id| {
-            let (name, props) = blocks.state(id)?;
-            let trapped = match name {
-                "minecraft:chest" => false,
-                "minecraft:trapped_chest" => true,
-                _ => return None,
-            };
-            let get = |k: &str| props.iter().find(|(p, _)| p == k).map(|(_, v)| v.as_str());
-            let facing = ["north", "east", "south", "west"].iter().position(|f| Some(*f) == get("facing"))? as u8;
-            let kind = ["single", "left", "right"].iter().position(|t| Some(*t) == get("type"))? as u8;
-            Some((id, chunkwake_net::play::ChestState { trapped, facing, kind, waterlogged: get("waterlogged") == Some("true") }))
-        })
-        .collect();
+    let chests: std::collections::HashMap<u32, chunkwake_net::play::ChestState> =
+        (0..blocks.state_count() as u32)
+            .filter_map(|id| {
+                let (name, props) = blocks.state(id)?;
+                let trapped = match name {
+                    "minecraft:chest" => false,
+                    "minecraft:trapped_chest" => true,
+                    _ => return None,
+                };
+                let get = |k: &str| props.iter().find(|(p, _)| p == k).map(|(_, v)| v.as_str());
+                let facing = ["north", "east", "south", "west"]
+                    .iter()
+                    .position(|f| Some(*f) == get("facing"))? as u8;
+                let kind = ["single", "left", "right"]
+                    .iter()
+                    .position(|t| Some(*t) == get("type"))? as u8;
+                Some((
+                    id,
+                    chunkwake_net::play::ChestState {
+                        trapped,
+                        facing,
+                        kind,
+                        waterlogged: get("waterlogged") == Some("true"),
+                    },
+                ))
+            })
+            .collect();
     // Печи: состояние → то же с другим `lit`.
-    let mut by_props: std::collections::HashMap<(String, Vec<(String, String)>), u32> = Default::default();
+    let mut by_props: std::collections::HashMap<(String, Vec<(String, String)>), u32> =
+        Default::default();
     for id in 0..blocks.state_count() as u32 {
         if let Some((name, props)) = blocks.state(id)
             && chunkwake_data::world::FURNACES.contains(&name)
@@ -201,7 +230,11 @@ fn survival_data(
             let flipped: Vec<(String, String)> = props
                 .iter()
                 .map(|(k, v)| {
-                    let v = if k == "lit" { if v == "true" { "false" } else { "true" } } else { v };
+                    let v = if k == "lit" {
+                        if v == "true" { "false" } else { "true" }
+                    } else {
+                        v
+                    };
                     (k.clone(), v.to_owned())
                 })
                 .collect();
@@ -212,28 +245,52 @@ fn survival_data(
     tracing::debug!("recipes: {}", recipes.len());
     let menu = |name| chunkwake_data::registries::builtin_id(data_dir, "menu", name).map_err(s);
     Ok(SurvivalData {
+        enchantments,
         recipes,
         menu_chest: menu("minecraft:generic_9x3")?,
         menu_double_chest: menu("minecraft:generic_9x6")?,
         chests: chests.clone(),
         chest_states: chests.iter().map(|(&id, &c)| (c, id)).collect(),
         menu_crafting: menu("minecraft:crafting")?,
-        menu_furnace: [menu("minecraft:furnace")?, menu("minecraft:blast_furnace")?, menu("minecraft:smoker")?],
+        menu_furnace: [
+            menu("minecraft:furnace")?,
+            menu("minecraft:blast_furnace")?,
+            menu("minecraft:smoker")?,
+        ],
         furnace_lit,
         effects: chunkwake_data::registries::builtin_entries(data_dir, "mob_effect").map_err(s)?,
-        attribute_speed: chunkwake_data::registries::builtin_id(data_dir, "attribute", "minecraft:movement_speed").map_err(s)?,
+        attribute_speed: chunkwake_data::registries::builtin_id(
+            data_dir,
+            "attribute",
+            "minecraft:movement_speed",
+        )
+        .map_err(s)?,
+        attribute_jump: chunkwake_data::registries::builtin_id(
+            data_dir,
+            "attribute",
+            "minecraft:jump_strength",
+        )
+        .map_err(s)?,
+        attribute_gravity: chunkwake_data::registries::builtin_id(
+            data_dir,
+            "attribute",
+            "minecraft:gravity",
+        )
+        .map_err(s)?,
         placement: chunkwake_net::placement::Placement::new(
             (0..blocks.state_count() as u32)
                 .map(|id| blocks.state(id).map(|(n, p)| (n.to_owned(), p.to_vec())))
                 .collect(),
             chunkwake_data::world::load_sturdy(data_dir).map_err(s)?,
-            chunkwake_data::world::read_json(&data_dir.join("data/minecraft/tags/block/walls.json"))
-                .ok()
-                .and_then(|j| j["values"].as_array().cloned())
-                .unwrap_or_default()
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_owned))
-                .collect(),
+            chunkwake_data::world::read_json(
+                &data_dir.join("data/minecraft/tags/block/walls.json"),
+            )
+            .ok()
+            .and_then(|j| j["values"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect(),
         ),
         hardness: chunkwake_data::world::load_hardness(data_dir).map_err(s)?,
         requires_tool: chunkwake_data::world::load_requires_tool(data_dir).map_err(s)?,
@@ -250,11 +307,12 @@ fn survival_data(
                     .map_or(String::new(), |(n, _)| n.to_owned())
             })
             .collect(),
+        block_types: chunkwake_data::registries::builtin_ids(data_dir, "block").map_err(s)?,
         block_defaults: (0..blocks.state_count() as u32)
             .filter_map(|id| blocks.state(id).map(|(n, _)| n.to_owned()))
             .filter_map(|n| blocks.default_state(&n).ok().map(|s| (n, s as u32)))
             .collect(),
-        drops,
+        loot,
         items: {
             let t = std::time::Instant::now();
             let v = chunkwake_data::world::load_items_cached(data_dir, items).map_err(s)?;
@@ -270,8 +328,35 @@ fn survival_data(
         damage_starve: registries
             .network_id("damage_type", "minecraft:starve")
             .map_err(s)?,
-        difficulty,
+        damage_magic: registries
+            .network_id("damage_type", "minecraft:magic")
+            .map_err(s)?,
+        damage_wither: registries
+            .network_id("damage_type", "minecraft:wither")
+            .map_err(s)?,
+        difficulty: std::sync::atomic::AtomicU8::new(difficulty.id()),
         item_ids: items.clone(),
+        potions: {
+            let map = chunkwake_data::registries::builtin_entries(data_dir, "potion").map_err(s)?;
+            let len = map
+                .values()
+                .copied()
+                .max()
+                .map_or(0, |id| (id.max(0) as usize) + 1);
+            let mut names = vec![String::new(); len];
+            for (name, id) in map {
+                if let Some(slot) = names.get_mut(id as usize) {
+                    *slot = name;
+                }
+            }
+            names
+        },
+        potion_component: chunkwake_data::registries::builtin_id(
+            data_dir,
+            "data_component_type",
+            "minecraft:potion_contents",
+        )
+        .map_err(s)?,
         item_entity_type: chunkwake_data::registries::builtin_id(
             data_dir,
             "entity_type",
@@ -279,4 +364,50 @@ fn survival_data(
         )
         .map_err(s)?,
     })
+}
+
+/// Чары для плагинов: `имя макс_уровень вес цена_наковальни мин_база мин_шаг макс_база
+/// макс_шаг сокровище проклятие` (из `data/minecraft/enchantment` и тегов).
+fn enchantment_lines(data_dir: &Path, names: &[String]) -> Vec<String> {
+    let base = data_dir.join("data/minecraft");
+    let read = |p: std::path::PathBuf| {
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    };
+    let tag = |t: &str| -> Vec<String> {
+        read(base.join(format!("tags/enchantment/{t}.json")))
+            .and_then(|v| v.get("values")?.as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect()
+    };
+    let (treasure, curse) = (tag("treasure"), tag("curse"));
+    names
+        .iter()
+        .map(|name| {
+            let path = name.strip_prefix("minecraft:").unwrap_or(name);
+            let v = read(base.join(format!("enchantment/{path}.json"))).unwrap_or_default();
+            let n = |k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(1);
+            let cost = |k: &str, f: &str| {
+                v.get(k)
+                    .and_then(|c| c.get(f))
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(0)
+            };
+            format!(
+                "{name} {} {} {} {} {} {} {} {} {}",
+                n("max_level"),
+                n("weight"),
+                n("anvil_cost"),
+                cost("min_cost", "base"),
+                cost("min_cost", "per_level_above_first"),
+                cost("max_cost", "base"),
+                cost("max_cost", "per_level_above_first"),
+                u8::from(treasure.contains(name)),
+                u8::from(curse.contains(name)),
+            )
+        })
+        .collect()
 }

@@ -488,9 +488,12 @@ mod tests {
         let keys = [(-1, -1), (-1, 0), (0, -1), (0, 0)];
         let mut w = World(keys.into_iter().map(|k| (k, base.clone())).collect());
         let put = |w: &mut World, p: [i32; 3], s: u32| {
-            w.0.get_mut(&(p[0] >> 4, p[2] >> 4))
-                .unwrap()
-                .set_block((p[0] & 15) as usize, p[1] as usize, (p[2] & 15) as usize, s);
+            w.0.get_mut(&(p[0] >> 4, p[2] >> 4)).unwrap().set_block(
+                (p[0] & 15) as usize,
+                p[1] as usize,
+                (p[2] & 15) as usize,
+                s,
+            );
             Engine::new(w, &t, 64).block_changed(p);
         };
         let cave: Vec<[i32; 3]> = (-3..3)
@@ -522,7 +525,9 @@ mod tests {
         relight_column(&mut c, &t);
         let mut seed = 12345u64;
         let mut rnd = |n: u64| {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (seed >> 33) % n
         };
         for step in 0..3000 {

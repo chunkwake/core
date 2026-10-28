@@ -50,7 +50,9 @@ impl Recipes {
 
     /// Рецепт печи `kind` для предмета (первый подходящий, как `RecipeManager`).
     pub fn cooking(&self, kind: u8, item: i32) -> Option<&Cooking> {
-        self.cooking.iter().find(|c| c.kind == kind && c.ingredient.contains(&item))
+        self.cooking
+            .iter()
+            .find(|c| c.kind == kind && c.ingredient.contains(&item))
     }
 
     /// `(предмет, количество)` для квадратной сетки `size × size` (предметы по строкам).
@@ -187,7 +189,11 @@ fn result(json: &serde_json::Value, items: &HashMap<String, i32>) -> Option<(i32
 fn parse(json: &serde_json::Value, tags: &mut ItemTags) -> Option<Recipe> {
     match json["type"].as_str()? {
         "minecraft:crafting_shaped" => {
-            let pattern: Vec<&str> = json["pattern"].as_array()?.iter().filter_map(|l| l.as_str()).collect();
+            let pattern: Vec<&str> = json["pattern"]
+                .as_array()?
+                .iter()
+                .filter_map(|l| l.as_str())
+                .collect();
             let height = pattern.len();
             let width = pattern.iter().map(|l| l.chars().count()).max()?;
             let mut cells = Vec::with_capacity(width * height);
@@ -222,7 +228,8 @@ fn parse(json: &serde_json::Value, tags: &mut ItemTags) -> Option<Recipe> {
 /// Все рецепты верстака из `data/minecraft/recipe`; остальные типы пропускаются.
 pub fn load_recipes(root: &Path, items: &HashMap<String, i32>) -> Result<Recipes, DataError> {
     let dir = root.join("data/minecraft/recipe");
-    let entries = std::fs::read_dir(&dir).map_err(|e| DataError::Io(format!("read {}: {e}", dir.display())))?;
+    let entries = std::fs::read_dir(&dir)
+        .map_err(|e| DataError::Io(format!("read {}: {e}", dir.display())))?;
     let mut paths: Vec<_> = entries
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
@@ -236,21 +243,28 @@ pub fn load_recipes(root: &Path, items: &HashMap<String, i32>) -> Result<Recipes
     let mut list = Vec::new();
     let mut cooking_list = Vec::new();
     for path in paths {
-        let text = std::fs::read_to_string(&path).map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
         let crafting = text.contains("\"minecraft:crafting_sha");
-        let cooking = ["smelting", "blasting", "smoking"].iter().position(|t| text.contains(&format!("\"minecraft:{t}\"")));
+        let cooking = ["smelting", "blasting", "smoking"]
+            .iter()
+            .position(|t| text.contains(&format!("\"minecraft:{t}\"")));
         if !crafting && cooking.is_none() {
             continue;
         }
-        let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| DataError::Format {
-            file: path.display().to_string(),
-            msg: e.to_string(),
-        })?;
+        let json: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| DataError::Format {
+                file: path.display().to_string(),
+                msg: e.to_string(),
+            })?;
         if crafting {
             list.extend(parse(&json, &mut tags));
         } else if let Some(kind) = cooking
-            && json["type"].as_str().is_some_and(|t| t.ends_with(["smelting", "blasting", "smoking"][kind]))
-            && let (Some(ingredient), Some(result)) = (tags.ingredient(&json["ingredient"]), result(&json, items))
+            && json["type"]
+                .as_str()
+                .is_some_and(|t| t.ends_with(["smelting", "blasting", "smoking"][kind]))
+            && let (Some(ingredient), Some(result)) =
+                (tags.ingredient(&json["ingredient"]), result(&json, items))
         {
             cooking_list.push(Cooking {
                 kind: kind as u8,
@@ -261,7 +275,10 @@ pub fn load_recipes(root: &Path, items: &HashMap<String, i32>) -> Result<Recipes
             });
         }
     }
-    Ok(Recipes { list, cooking: cooking_list })
+    Ok(Recipes {
+        list,
+        cooking: cooking_list,
+    })
 }
 
 #[cfg(test)]
@@ -270,10 +287,15 @@ mod tests {
 
     #[test]
     fn shaped_shapeless_and_mirror() {
-        let items: HashMap<String, i32> = [("minecraft:planks", 1), ("minecraft:stick", 2), ("minecraft:log", 3), ("minecraft:axe", 4)]
-            .into_iter()
-            .map(|(k, v)| (k.to_owned(), v))
-            .collect();
+        let items: HashMap<String, i32> = [
+            ("minecraft:planks", 1),
+            ("minecraft:stick", 2),
+            ("minecraft:log", 3),
+            ("minecraft:axe", 4),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
         let mut tags = ItemTags {
             root: Path::new("."),
             items: &items,
@@ -287,7 +309,10 @@ mod tests {
         let planks = serde_json::json!({"type": "minecraft:crafting_shapeless", "ingredients": ["minecraft:log"],
             "result": {"id": "minecraft:planks", "count": 4}});
         let r = Recipes {
-            list: [stick, axe, planks].iter().filter_map(|j| parse(j, &mut tags)).collect(),
+            list: [stick, axe, planks]
+                .iter()
+                .filter_map(|j| parse(j, &mut tags))
+                .collect(),
             cooking: Vec::new(),
         };
         assert_eq!(r.len(), 3);
@@ -297,8 +322,17 @@ mod tests {
         // Топор и его зеркало на верстаке.
         let p = Some(1);
         let s = Some(2);
-        assert_eq!(r.find(&[p, p, None, p, s, None, None, s, None], 3), Some((4, 1)));
-        assert_eq!(r.find(&[p, p, None, s, p, None, s, None, None], 3), Some((4, 1)));
-        assert_eq!(r.find(&[p, s, None, None, None, None, None, None, None], 3), None);
+        assert_eq!(
+            r.find(&[p, p, None, p, s, None, None, s, None], 3),
+            Some((4, 1))
+        );
+        assert_eq!(
+            r.find(&[p, p, None, s, p, None, s, None, None], 3),
+            Some((4, 1))
+        );
+        assert_eq!(
+            r.find(&[p, s, None, None, None, None, None, None, None], 3),
+            None
+        );
     }
 }

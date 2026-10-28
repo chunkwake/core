@@ -184,6 +184,9 @@ final class PluginManagerImpl {
         if (has(org.bukkit.event.player.PlayerInteractEvent.getHandlerList())) {
             mask |= Bridge.listenBit(Bridge.EVENT_INTERACT);
         }
+        if (has(org.bukkit.event.entity.EntityPotionEffectEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_POTION);
+        }
         Bridge.setFlag(Bridge.FLAG_LISTENERS, mask);
     }
 

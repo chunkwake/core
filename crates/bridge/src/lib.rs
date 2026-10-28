@@ -45,8 +45,9 @@ enum Slot {
     ArgItems = 19,
     ArgItemsLen = 20,
     DownWorld = 21,
+    UpDisable = 22,
 }
-const SLOTS: usize = 22;
+const SLOTS: usize = 23;
 
 /// Буфер ответа на событие (смерть с полным инвентарём укладывается с запасом).
 const EVENT_REPLY_CAP: usize = 64 << 10;
@@ -59,6 +60,7 @@ type Table = [AtomicU64; SLOTS];
 static HOST: OnceLock<Weak<PlayPlan>> = OnceLock::new();
 
 enum Call {
+    Disable(mpsc::Sender<bool>),
     Tick,
     Join(Uuid, String),
     Quit(Uuid),
@@ -89,6 +91,12 @@ pub fn find_api_dir(server_dir: &Path) -> Option<PathBuf> {
 }
 
 impl Bridge {
+    /// Завершает плагины на их JVM-потоке и дожидается `onDisable`.
+    pub fn shutdown(&self) -> Result<mpsc::Receiver<bool>, String> {
+        let (tx, rx) = mpsc::channel();
+        self.tx.send(Call::Disable(tx)).map_err(|e| e.to_string())?;
+        Ok(rx)
+    }
     /// Поднимает JVM, загружает и включает плагины из `plugins_dir`.
     /// Блокирует до конца `onEnable` всех плагинов; возвращает мост и число плагинов.
     pub fn start(
@@ -144,6 +152,9 @@ impl Bridge {
             .spawn(move || {
                 let booted = jvm::boot(&jvm_lib, &class_path, table as *const Table as i64)
                     .and_then(|()| {
+                        if get(table, Slot::UpDisable) == 0 {
+                            return Err("plugin API is outdated: rebuild java/dist so plugin shutdown is supported".into());
+                        }
                         let n = unsafe { up::<extern "C" fn() -> i32>(table, Slot::UpEnable)() };
                         if n < 0 {
                             Err("plugin startup failed".into())
@@ -214,6 +225,11 @@ fn run(table: &'static Table, rx: mpsc::Receiver<Call>, tick_queued: &AtomicBool
     };
     for call in rx {
         match call {
+            Call::Disable(reply) => {
+                let ok = unsafe { up::<extern "C" fn() -> i32>(table, Slot::UpDisable)() } != 0;
+                let _ = reply.send(ok);
+                break;
+            }
             Call::Tick => {
                 tick_queued.store(false, Ordering::Release);
                 tick();

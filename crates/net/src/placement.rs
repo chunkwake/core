@@ -105,7 +105,11 @@ fn exception(name: &str) -> bool {
         || name.ends_with("shulker_box")
         || matches!(
             name,
-            "minecraft:barrier" | "minecraft:carved_pumpkin" | "minecraft:jack_o_lantern" | "minecraft:melon" | "minecraft:pumpkin"
+            "minecraft:barrier"
+                | "minecraft:carved_pumpkin"
+                | "minecraft:jack_o_lantern"
+                | "minecraft:melon"
+                | "minecraft:pumpkin"
         )
 }
 
@@ -122,11 +126,18 @@ fn faces_away(name: &str) -> bool {
 
 /// Шестисторонний `facing` по грани клика (стержни, кристаллы).
 fn faces_clicked(name: &str) -> bool {
-    name.ends_with("_rod") || name.ends_with("amethyst_cluster") || name.ends_with("amethyst_bud") || name.ends_with("shulker_box")
+    name.ends_with("_rod")
+        || name.ends_with("amethyst_cluster")
+        || name.ends_with("amethyst_bud")
+        || name.ends_with("shulker_box")
 }
 
 impl Placement {
-    pub fn new(states: Vec<Option<(String, Props)>>, sturdy: Vec<u8>, walls: HashSet<String>) -> Self {
+    pub fn new(
+        states: Vec<Option<(String, Props)>>,
+        sturdy: Vec<u8>,
+        walls: HashSet<String>,
+    ) -> Self {
         let mut by_key = HashMap::new();
         for (id, s) in states.iter().enumerate() {
             if let Some((n, p)) = s {
@@ -135,7 +146,12 @@ impl Placement {
                 by_key.insert((n.clone(), p), id as u32);
             }
         }
-        Self { states, by_key, sturdy, walls }
+        Self {
+            states,
+            by_key,
+            sturdy,
+            walls,
+        }
     }
 
     fn joint(&self, state: u32) -> Option<Joint> {
@@ -157,7 +173,9 @@ impl Placement {
     }
 
     fn sturdy(&self, state: u32, face: usize) -> bool {
-        self.sturdy.get(state as usize).is_some_and(|m| m >> face & 1 == 1)
+        self.sturdy
+            .get(state as usize)
+            .is_some_and(|m| m >> face & 1 == 1)
     }
 
     /// Калитка поперёк направления `dir` (`FenceGateBlock.connectsToDirection`).
@@ -174,9 +192,15 @@ impl Placement {
         let solid = self.sturdy(other, opposite(dir)) && !self.name(other).is_some_and(exception);
         let oj = self.joint(other);
         match j {
-            Joint::Fence(wood) => solid || oj == Some(Joint::Fence(wood)) || self.gate_across(other, dir),
+            Joint::Fence(wood) => {
+                solid || oj == Some(Joint::Fence(wood)) || self.gate_across(other, dir)
+            }
             Joint::Pane => solid || matches!(oj, Some(Joint::Pane | Joint::Wall)),
-            Joint::Wall => solid || matches!(oj, Some(Joint::Pane | Joint::Wall)) || self.gate_across(other, dir),
+            Joint::Wall => {
+                solid
+                    || matches!(oj, Some(Joint::Pane | Joint::Wall))
+                    || self.gate_across(other, dir)
+            }
         }
     }
 
@@ -193,7 +217,17 @@ impl Placement {
             if j == Joint::Wall {
                 // Высокая сторона, если сверху блок с прочной нижней гранью.
                 let tall = self.sturdy(above, DOWN) || self.joint(above) == Some(Joint::Wall);
-                self.set(&mut s, key, if !c { "none" } else if tall { "tall" } else { "low" });
+                self.set(
+                    &mut s,
+                    key,
+                    if !c {
+                        "none"
+                    } else if tall {
+                        "tall"
+                    } else {
+                        "low"
+                    },
+                );
             } else {
                 self.set(&mut s, key, if c { "true" } else { "false" });
             }
@@ -209,7 +243,10 @@ impl Placement {
     }
 
     pub fn name(&self, state: u32) -> Option<&str> {
-        self.states.get(state as usize)?.as_ref().map(|s| s.0.as_str())
+        self.states
+            .get(state as usize)?
+            .as_ref()
+            .map(|s| s.0.as_str())
     }
 
     pub fn prop(&self, state: u32, key: &str) -> Option<&str> {
@@ -222,10 +259,24 @@ impl Placement {
         p.iter().find(|(k, _)| k == key)?;
         let mut p: Props = p
             .iter()
-            .map(|(k, v)| (k.clone(), if k == key { value.to_owned() } else { v.clone() }))
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    if k == key {
+                        value.to_owned()
+                    } else {
+                        v.clone()
+                    },
+                )
+            })
             .collect();
         p.sort();
         self.by_key.get(&(n.clone(), p)).copied()
+    }
+
+    /// Состояние с другим значением свойства, если оно у блока есть.
+    pub fn with_prop(&self, state: u32, key: &str, value: &str) -> Option<u32> {
+        self.with(state, key, value)
     }
 
     /// Ставит свойство, если у блока оно есть и значение допустимо.
@@ -287,13 +338,21 @@ impl Placement {
             let dir = if faces_clicked(&name) {
                 c.face
             } else if name.ends_with("_trapdoor") {
-                if c.face > UP { c.face } else { opposite(player) }
+                if c.face > UP {
+                    c.face
+                } else {
+                    opposite(player)
+                }
             } else if name == "minecraft:hopper" {
                 if c.face > UP { opposite(c.face) } else { DOWN }
             } else if name.ends_with("anvil") {
                 clockwise(player)
             } else if six {
-                if faces_away(&name) { c.looking() } else { opposite(c.looking()) }
+                if faces_away(&name) {
+                    c.looking()
+                } else {
+                    opposite(c.looking())
+                }
             } else if faces_away(&name) {
                 player
             } else {
@@ -302,7 +361,11 @@ impl Placement {
             self.set(&mut s, "facing", DIRS[dir]);
         }
         if self.prop(s, "hanging").is_some() {
-            self.set(&mut s, "hanging", if c.face == DOWN { "true" } else { "false" });
+            self.set(
+                &mut s,
+                "hanging",
+                if c.face == DOWN { "true" } else { "false" },
+            );
         }
         let top = c.top_half();
         if self.prop(s, "type").is_some() && name.ends_with("_slab") {
@@ -321,7 +384,9 @@ impl Placement {
             _ => {}
         }
         if self.prop(s, "part") == Some("foot")
-            && let Some(f) = self.prop(s, "facing").and_then(|f| DIRS.iter().position(|d| *d == f))
+            && let Some(f) = self
+                .prop(s, "facing")
+                .and_then(|f| DIRS.iter().position(|d| *d == f))
             && let Some(head) = self.with(s, "part", "head")
         {
             return vec![([0; 3], s), (step(f), head)];
@@ -346,7 +411,8 @@ impl Placement {
         let o = step(facing);
         let (j, k) = (o[0], o[2]);
         let (d0, d1) = (c.cursor_x, c.cursor_z);
-        if (j < 0 && d1 < 0.5) || (j > 0 && d1 > 0.5) || (k < 0 && d0 > 0.5) || (k > 0 && d0 < 0.5) {
+        if (j < 0 && d1 < 0.5) || (j > 0 && d1 > 0.5) || (k < 0 && d0 > 0.5) || (k > 0 && d0 < 0.5)
+        {
             "right"
         } else {
             "left"
@@ -396,13 +462,22 @@ impl Placement {
     fn rail_live(&self, q: [i32; 3], at: &dyn Fn([i32; 3]) -> u32) -> Vec<usize> {
         self.rail_links(at(q))
             .into_iter()
-            .filter(|&(d, _)| self.rail_near(q, d, at).is_some_and(|n| self.rail_points_to(n, q, at)))
+            .filter(|&(d, _)| {
+                self.rail_near(q, d, at)
+                    .is_some_and(|n| self.rail_points_to(n, q, at))
+            })
             .map(|(d, _)| d)
             .collect()
     }
 
     /// Форма по сторонам (как `RailState.place`): прямая, поворот, подъём к рельсу выше.
-    fn rail_shape(&self, state: u32, pos: [i32; 3], sides: &[usize], at: &dyn Fn([i32; 3]) -> u32) -> u32 {
+    fn rail_shape(
+        &self,
+        state: u32,
+        pos: [i32; 3],
+        sides: &[usize],
+        at: &dyn Fn([i32; 3]) -> u32,
+    ) -> u32 {
         let has = |d| sides.contains(&d);
         let (n, so, w, e) = (has(2), has(3), has(4), has(5));
         let curve = |name: &str| self.with(state, "shape", name);
@@ -495,7 +570,9 @@ impl Placement {
             Some("upper") => return Some([0, -1, 0]),
             _ => {}
         }
-        let f = self.prop(state, "facing").and_then(|f| DIRS.iter().position(|d| *d == f))?;
+        let f = self
+            .prop(state, "facing")
+            .and_then(|f| DIRS.iter().position(|d| *d == f))?;
         match self.prop(state, "part")? {
             "foot" => Some(step(f)),
             "head" => Some(step(opposite(f))),
@@ -509,7 +586,9 @@ mod tests {
     use super::*;
 
     fn props(p: &[(&str, &str)]) -> Props {
-        p.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        p.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     fn table() -> (Placement, HashMap<String, u32>) {
@@ -523,18 +602,42 @@ mod tests {
             add(&format!("log_{a}"), "minecraft:oak_log", &[("axis", a)]);
         }
         for f in ["north", "south", "west", "east"] {
-            add(&format!("furnace_{f}"), "minecraft:furnace", &[("facing", f), ("lit", "false")]);
-            add(&format!("wall_torch_{f}"), "minecraft:wall_torch", &[("facing", f)]);
+            add(
+                &format!("furnace_{f}"),
+                "minecraft:furnace",
+                &[("facing", f), ("lit", "false")],
+            );
+            add(
+                &format!("wall_torch_{f}"),
+                "minecraft:wall_torch",
+                &[("facing", f)],
+            );
             for h in ["top", "bottom"] {
-                add(&format!("stairs_{f}_{h}"), "minecraft:oak_stairs", &[("facing", f), ("half", h)]);
+                add(
+                    &format!("stairs_{f}_{h}"),
+                    "minecraft:oak_stairs",
+                    &[("facing", f), ("half", h)],
+                );
             }
             for h in ["upper", "lower"] {
-                add(&format!("door_{f}_{h}"), "minecraft:oak_door", &[("facing", f), ("half", h)]);
+                add(
+                    &format!("door_{f}_{h}"),
+                    "minecraft:oak_door",
+                    &[("facing", f), ("half", h)],
+                );
             }
         }
         add("torch", "minecraft:torch", &[]);
-        for (n, s, w, e) in [("true", "false", "false", "false"), ("true", "false", "false", "true"), ("false", "false", "false", "false")] {
-            add(&format!("fence_{n}{s}{w}{e}"), "minecraft:oak_fence", &[("north", n), ("south", s), ("west", w), ("east", e)]);
+        for (n, s, w, e) in [
+            ("true", "false", "false", "false"),
+            ("true", "false", "false", "true"),
+            ("false", "false", "false", "false"),
+        ] {
+            add(
+                &format!("fence_{n}{s}{w}{e}"),
+                "minecraft:oak_fence",
+                &[("north", n), ("south", s), ("west", w), ("east", e)],
+            );
         }
         add("air", "minecraft:air", &[]);
         for t in ["top", "bottom", "double"] {
@@ -550,28 +653,87 @@ mod tests {
     fn orientation() {
         let (p, id) = table();
         // Смотрит на север (yaw 180), кликает по верхней грани.
-        let c = Ctx { face: UP, yaw: 180.0, pitch: 0.0, cursor_y: 1.0, cursor_x: 0.5, cursor_z: 0.5, near: [[u32::MAX; 2]; 4] };
-        assert_eq!(p.place(id["furnace_north"], &c), vec![([0; 3], id["furnace_south"])]);
-        assert_eq!(p.place(id["stairs_east_top"], &c), vec![([0; 3], id["stairs_north_bottom"])]);
-        assert_eq!(p.place(id["log_y"], &Ctx { face: 4, ..c }), vec![([0; 3], id["log_x"])]);
+        let c = Ctx {
+            face: UP,
+            yaw: 180.0,
+            pitch: 0.0,
+            cursor_y: 1.0,
+            cursor_x: 0.5,
+            cursor_z: 0.5,
+            near: [[u32::MAX; 2]; 4],
+        };
+        assert_eq!(
+            p.place(id["furnace_north"], &c),
+            vec![([0; 3], id["furnace_south"])]
+        );
+        assert_eq!(
+            p.place(id["stairs_east_top"], &c),
+            vec![([0; 3], id["stairs_north_bottom"])]
+        );
+        assert_eq!(
+            p.place(id["log_y"], &Ctx { face: 4, ..c }),
+            vec![([0; 3], id["log_x"])]
+        );
         // Боковая грань, верх блока — перевёрнутые ступени.
-        assert_eq!(p.place(id["stairs_east_top"], &Ctx { face: 3, cursor_y: 0.8, ..c })[0].1, id["stairs_north_top"]);
-        assert_eq!(p.place(id["torch"], &Ctx { face: 5, ..c }), vec![([0; 3], id["wall_torch_east"])]);
+        assert_eq!(
+            p.place(
+                id["stairs_east_top"],
+                &Ctx {
+                    face: 3,
+                    cursor_y: 0.8,
+                    ..c
+                }
+            )[0]
+            .1,
+            id["stairs_north_top"]
+        );
+        assert_eq!(
+            p.place(id["torch"], &Ctx { face: 5, ..c }),
+            vec![([0; 3], id["wall_torch_east"])]
+        );
         assert_eq!(p.place(id["torch"], &c), vec![([0; 3], id["torch"])]);
         assert_eq!(
             p.place(id["door_west_upper"], &c),
-            vec![([0; 3], id["door_north_lower"]), ([0, 1, 0], id["door_north_upper"])]
+            vec![
+                ([0; 3], id["door_north_lower"]),
+                ([0, 1, 0], id["door_north_upper"])
+            ]
         );
         assert_eq!(p.partner(id["door_north_upper"]), Some([0, -1, 0]));
-        assert_eq!(p.place(id["slab_bottom"], &Ctx { face: DOWN, ..c })[0].1, id["slab_top"]);
-        assert_eq!(p.merge_slab(id["slab_bottom"], id["slab_bottom"], &c, true), Some(id["slab_double"]));
-        assert_eq!(p.merge_slab(id["slab_bottom"], id["slab_bottom"], &Ctx { face: 3, ..c }, true), None);
+        assert_eq!(
+            p.place(id["slab_bottom"], &Ctx { face: DOWN, ..c })[0].1,
+            id["slab_top"]
+        );
+        assert_eq!(
+            p.merge_slab(id["slab_bottom"], id["slab_bottom"], &c, true),
+            Some(id["slab_double"])
+        );
+        assert_eq!(
+            p.merge_slab(
+                id["slab_bottom"],
+                id["slab_bottom"],
+                &Ctx { face: 3, ..c },
+                true
+            ),
+            None
+        );
     }
 
     #[test]
     fn rails_curve_and_join() {
         let mut states = Vec::new();
-        let shapes = ["north_south", "east_west", "ascending_east", "ascending_west", "ascending_north", "ascending_south", "south_east", "south_west", "north_west", "north_east"];
+        let shapes = [
+            "north_south",
+            "east_west",
+            "ascending_east",
+            "ascending_west",
+            "ascending_north",
+            "ascending_south",
+            "south_east",
+            "south_west",
+            "north_west",
+            "north_east",
+        ];
         for sh in shapes {
             states.push(Some(("minecraft:rail".to_owned(), props(&[("shape", sh)]))));
         }
@@ -594,7 +756,10 @@ mod tests {
             [0, 1, -1] => id("north_south"),
             _ => air,
         };
-        assert_eq!(p.rails([0, 0, 0], &world)[0], ([0, 0, 0], id("ascending_north")));
+        assert_eq!(
+            p.rails([0, 0, 0], &world)[0],
+            ([0, 0, 0], id("ascending_north"))
+        );
     }
 
     #[test]
@@ -603,8 +768,14 @@ mod tests {
         let f = id["fence_falsefalsefalsefalse"];
         let air = id["air"];
         // Забор на севере и бревно на востоке.
-        assert_eq!(p.connect(f, [f, air, air, id["log_y"]], air), id["fence_truefalsefalsetrue"]);
+        assert_eq!(
+            p.connect(f, [f, air, air, id["log_y"]], air),
+            id["fence_truefalsefalsetrue"]
+        );
         // Факел не цепляется.
-        assert_eq!(p.connect(f, [f, air, air, id["torch"]], air), id["fence_truefalsefalsefalse"]);
+        assert_eq!(
+            p.connect(f, [f, air, air, id["torch"]], air),
+            id["fence_truefalsefalsefalse"]
+        );
     }
 }
