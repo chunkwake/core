@@ -218,6 +218,11 @@ fn survival_data(
         menu_crafting: menu("minecraft:crafting")?,
         menu_furnace: [menu("minecraft:furnace")?, menu("minecraft:blast_furnace")?, menu("minecraft:smoker")?],
         furnace_lit,
+        placement: chunkwake_net::placement::Placement::new(
+            (0..blocks.state_count() as u32)
+                .map(|id| blocks.state(id).map(|(n, p)| (n.to_owned(), p.to_vec())))
+                .collect(),
+        ),
         hardness: chunkwake_data::world::load_hardness(data_dir).map_err(s)?,
         requires_tool: chunkwake_data::world::load_requires_tool(data_dir).map_err(s)?,
         tools: {

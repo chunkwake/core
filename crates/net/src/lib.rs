@@ -8,6 +8,7 @@ pub mod crypto;
 pub mod items;
 pub mod live;
 pub mod ops;
+pub mod placement;
 pub mod play;
 pub mod survival;
 

@@ -494,6 +494,8 @@ pub struct SurvivalData {
     pub menu_furnace: [i32; 3],
     /// Состояние печи → то же с переключённым `lit`.
     pub furnace_lit: HashMap<u32, u32>,
+    /// Ориентация ставимых блоков.
+    pub placement: crate::placement::Placement,
     /// Нужен ли правильный инструмент для дропа, по состоянию блока.
     pub requires_tool: Vec<bool>,
     /// Компонент `minecraft:tool` по ID предмета.
@@ -2397,12 +2399,36 @@ impl PlayPlan {
                             .filter(|_| u.hand == 0 && !state.vitals.dead)
                             .and_then(|s| self.item_blocks.get(s.item as usize).copied().flatten());
                         if let (Some(mut place), Some(d)) = (place, play::direction_offset(u.face)) {
-                            let target = [u.pos[0] + d[0], u.pos[1] + d[1], u.pos[2] + d[2]];
-                            if let Some(c) = self.survival.chests.get(&place).copied() {
-                                let yaw = self.player_at(uuid).map_or(0.0, |p| p.1);
+                            let mut target = [u.pos[0] + d[0], u.pos[1] + d[1], u.pos[2] + d[2]];
+                            let (yaw, pitch) = self.player_at(uuid).map_or((0.0, 0.0), |p| (p.1, p.2));
+                            let ctx = crate::placement::Ctx {
+                                face: u.face.clamp(0, 5) as usize,
+                                yaw,
+                                pitch,
+                                cursor_y: u.cursor[1],
+                            };
+                            let pl = &self.survival.placement;
+                            let clicked_state = self.block(u.pos).unwrap_or(AIR);
+                            // Плита в плиту — двойная, на месте существующей.
+                            let merged = pl.merge_slab(clicked_state, place, &ctx, true).map(|s| (u.pos, s)).or_else(|| {
+                                pl.merge_slab(self.block(target).unwrap_or(AIR), place, &ctx, false).map(|s| (target, s))
+                            });
+                            let mut extra = Vec::new();
+                            if let Some((pos, s)) = merged {
+                                target = pos;
+                                place = s;
+                            } else if let Some(c) = self.survival.chests.get(&place).copied() {
                                 place = self.chest_placement(target, c, yaw, u.face, sneaking);
+                            } else {
+                                let parts = pl.place(place, &ctx);
+                                place = parts[0].1;
+                                extra = parts[1..]
+                                    .iter()
+                                    .map(|(o, s)| ([target[0] + o[0], target[1] + o[1], target[2] + o[2]], *s))
+                                    .collect();
                             }
-                            if self.block(target) == Some(AIR) {
+                            let free = merged.is_some() || self.block(target) == Some(AIR);
+                            if free && extra.iter().all(|(p, _)| self.block(*p) == Some(AIR)) {
                                 // `BlockPlaceEvent`: отмена — клиенту прежний блок и предмет.
                                 let name = self.state_name(place).to_owned();
                                 if self.cancelled(Event::Place, uuid, || format!(
@@ -2416,6 +2442,9 @@ impl PlayPlan {
                                     continue;
                                 }
                                 self.set_block(target, place);
+                                for &(p, s) in &extra {
+                                    self.set_block(p, s);
+                                }
                                 self.link_chest(target, place);
                                 if let Some(id) = container_entity(&name) {
                                     self.set_block_entity(target, Some(BlockEntity { id: id.into(), nbt: Default::default() }));
@@ -2649,6 +2678,15 @@ impl PlayPlan {
             return Ok(false);
         };
         self.unlink_chest(pos, old);
+        // Вторая половина двери, кровати, высокого растения.
+        if let Some(o) = self.survival.placement.partner(old) {
+            let p = [pos[0] + o[0], pos[1] + o[1], pos[2] + o[2]];
+            if self.block(p).is_some_and(|s| self.survival.placement.partner(s).is_some()
+                && self.survival.placement.name(s) == self.survival.placement.name(old))
+            {
+                self.set_block(p, AIR);
+            }
+        }
         // Печь: в блок-сущность её текущее содержимое.
         let removed = self.furnaces.lock().unwrap().remove(&pos);
         if let Some(e) = removed {
@@ -2856,6 +2894,7 @@ impl PlayPlan {
         match w.kind {
             Kind::Chest(_) => w.positions().iter().flat_map(|&p| self.container_items(p)).collect(),
             Kind::Furnace => self.with_furnace(w.pos, |e| e.f.slots.to_vec()).unwrap_or_else(|| vec![None; 3]),
+            Kind::Crafting if w.slots.is_empty() => vec![None; 10],
             _ => w.slots.clone(),
         }
     }

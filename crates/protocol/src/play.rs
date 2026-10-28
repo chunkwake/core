@@ -615,6 +615,8 @@ pub struct UseItemOn {
     pub hand: i32,
     pub pos: [i32; 3],
     pub face: i32,
+    /// Точка попадания внутри блока.
+    pub cursor: [f32; 3],
     pub sequence: i32,
 }
 
@@ -622,12 +624,14 @@ pub fn read_use_item_on(r: &mut Reader) -> Result<UseItemOn> {
     let hand = r.var_int()?;
     let pos = unpack_block_pos(r.i64()?);
     let face = r.var_int()?;
-    // Точка попадания (3×float), inside, worldBorderHit.
-    r.bytes(12 + 2)?;
+    let cursor = [r.f32()?, r.f32()?, r.f32()?];
+    // inside, worldBorderHit.
+    r.bytes(2)?;
     Ok(UseItemOn {
         hand,
         pos,
         face,
+        cursor,
         sequence: r.var_int()?,
     })
 }
