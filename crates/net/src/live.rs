@@ -214,7 +214,11 @@ impl Control {
             }
             "open" => {
                 let id = it.next()?.parse::<i32>().ok()?;
-                let title = line.trim_start().splitn(3, char::is_whitespace).nth(2)?.trim();
+                let title = line
+                    .trim_start()
+                    .splitn(3, char::is_whitespace)
+                    .nth(2)?
+                    .trim();
                 Control::OpenPlugin(id, title.to_owned())
             }
             "closewin" => Control::CloseWindow,
@@ -340,6 +344,23 @@ pub enum Event {
     InventoryClick = 26,
     /// `InventoryCloseEvent` окна плагина: `id` (без ответа).
     InventoryClose = 27,
+    /// `EntityDamageByEntityEvent` (игрок бьёт моба): `id вид урон крит(1|0)` → `c`, пусто или `d урон`.
+    MobDamage = 28,
+    /// `EntityDeathEvent` моба: `id вид x y z опыт\nпредмет…` → пусто или `опыт\nпредмет…`.
+    MobDeath = 29,
+    /// `PlayerInteractEntityEvent`: `id вид рука` → `c` или пусто.
+    InteractEntity = 30,
+    /// `CreatureSpawnEvent`: `id вид x y z ПРИЧИНА` → `c` или пусто.
+    CreatureSpawn = 31,
+    /// `EntityBreedEvent`: `детёныш мать отец опыт` → `c`, пусто или новый опыт.
+    Breed = 32,
+    /// `PlayerShearEntityEvent`: `id рука` → `c` или пусто.
+    Shear = 33,
+    /// `CampfireStartEvent`: `x y z\nid опыт время\nрезультат\nисходная стопка` → время готовки.
+    CampfireStart = 34,
+    /// `BlockCookEvent`: `x y z\nid опыт время\nсырьё\nрезультат` → `c`, `e` (пустой результат),
+    /// `i стопка` или пусто.
+    Cook = 35,
 }
 
 impl Event {

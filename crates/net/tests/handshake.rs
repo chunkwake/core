@@ -133,6 +133,7 @@ async fn offline_login_with_compression() {
     assert_eq!(uuid, chunkwake_protocol::packets::offline_uuid("Steve"));
 
     c.send(&[0x03]).await.unwrap(); // login acknowledged
+    c.flush().await.unwrap();
     let player = rx.recv().await.unwrap();
     assert_eq!(player.name, "Steve");
     assert_eq!(player.uuid, uuid);

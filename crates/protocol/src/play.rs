@@ -537,6 +537,14 @@ pub fn block_update(id: i32, pos: [i32; 3], state: i32) -> Vec<u8> {
     w.buf
 }
 
+/// `block_entity_data`: позиция, тип блок-сущности и сетевой NBT (без имени).
+pub fn block_entity_data(id: i32, pos: [i32; 3], kind: i32, nbt: &[u8]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).i64(pack_block_pos(pos)).var_int(kind);
+    w.buf.extend_from_slice(nbt);
+    w.buf
+}
+
 /// `block_event`: крышка сундука (`action` 1, `param` — сколько игроков смотрят).
 /// `block` — ID в реестре `block`, не состояние.
 /// `ClientboundSoundPacket`: звук из реестра в точке (координаты × 8), с зерном.
@@ -759,5 +767,98 @@ mod block_tests {
         }
         // Известное значение: (1, 2, 3).
         assert_eq!(pack_block_pos([1, 2, 3]), (1 << 38) | (3 << 12) | 2);
+    }
+}
+
+/// `LpVec3` обратно (`net.minecraft.network.LpVec3.read`).
+pub fn read_lp_vec3(r: &mut Reader) -> Result<[f64; 3]> {
+    let a = r.u8()? as i64;
+    if a == 0 {
+        return Ok([0.0; 3]);
+    }
+    let b = r.u8()? as i64;
+    let c = u32::from_be_bytes(r.bytes(4)?.try_into().unwrap()) as i64;
+    let packed = c << 16 | b << 8 | a;
+    let mut scale = a & 3;
+    if a & 4 != 0 {
+        scale |= (r.var_int()? as i64) << 2;
+    }
+    let unpack = |v: i64| ((v & 32767).min(32766) as f64 * 2.0 / 32766.0 - 1.0) * scale as f64;
+    Ok([
+        unpack(packed >> 3),
+        unpack(packed >> 18),
+        unpack(packed >> 33),
+    ])
+}
+
+/// `interact`: правый клик по сущности (рука, точка на рамке, шифт).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Interact {
+    pub entity: i32,
+    pub hand: i32,
+    pub at: [f64; 3],
+    pub sneaking: bool,
+}
+
+pub fn read_interact(r: &mut Reader) -> Result<Interact> {
+    Ok(Interact {
+        entity: r.var_int()?,
+        hand: r.var_int()?,
+        at: read_lp_vec3(r)?,
+        sneaking: r.bool()?,
+    })
+}
+
+/// Метаданные живого моба (`set_entity_data`): здоровье (9, `FLOAT`), детёныш
+/// (`AgeableMob.DATA_BABY_ID` 16, `BOOLEAN`), шерсть овцы (`Sheep.DATA_WOOL_ID` 18, `BYTE`),
+/// имя (2, `OPTIONAL_COMPONENT`) и его видимость (3, `BOOLEAN`).
+pub fn mob_data(
+    id: i32,
+    entity_id: i32,
+    health: f32,
+    baby: bool,
+    wool: Option<u8>,
+    name: Option<&serde_json::Value>,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_id);
+    w.u8(9).var_int(3).f32(health);
+    w.u8(16).var_int(8).bool(baby);
+    if let Some(wool) = wool {
+        w.u8(18).var_int(0).u8(wool);
+    }
+    if let Some(name) = name {
+        w.u8(2).var_int(6).bool(true);
+        crate::text::write_component(&mut w, name);
+        w.u8(3).var_int(8).bool(true);
+    }
+    w.u8(0xff);
+    w.buf
+}
+
+/// `hurt_animation`: покраснение и наклон от удара с направления `yaw`.
+pub fn hurt_animation(id: i32, entity_id: i32, yaw: f32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_id).f32(yaw);
+    w.buf
+}
+
+#[cfg(test)]
+mod lp_tests {
+    use super::*;
+
+    #[test]
+    fn lp_vec3_roundtrip() {
+        for v in [[0.0, 0.0, 0.0], [0.3, -0.7, 0.45], [5.5, 0.25, -9.0]] {
+            let mut w = Writer::new();
+            lp_vec3(&mut w, v);
+            let back = read_lp_vec3(&mut Reader::new(&w.buf)).unwrap();
+            for i in 0..3 {
+                assert!(
+                    (back[i] - v[i]).abs() < 1e-3 * v[i].abs().max(1.0),
+                    "{v:?} {back:?}"
+                );
+            }
+        }
     }
 }

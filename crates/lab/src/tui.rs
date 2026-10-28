@@ -197,6 +197,7 @@ impl Screen {
                     BenchProfile::Movement,
                     BenchProfile::Exploration,
                     BenchProfile::Redstone,
+                    BenchProfile::Cows,
                 ];
                 let current = profiles
                     .iter()

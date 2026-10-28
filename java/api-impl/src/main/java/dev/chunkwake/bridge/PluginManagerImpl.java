@@ -233,6 +233,32 @@ final class PluginManagerImpl {
         if (has(org.bukkit.event.entity.EntityShootBowEvent.getHandlerList())) {
             mask |= Bridge.listenBit(Bridge.EVENT_SHOOT_BOW);
         }
+        if (has(org.bukkit.event.entity.EntityDamageByEntityEvent.getHandlerList())
+                || has(org.bukkit.event.entity.EntityDamageEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_MOB_DAMAGE);
+        }
+        if (has(org.bukkit.event.entity.EntityDeathEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_MOB_DEATH);
+        }
+        if (has(org.bukkit.event.player.PlayerInteractEntityEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_INTERACT_ENTITY);
+        }
+        if (has(org.bukkit.event.entity.CreatureSpawnEvent.getHandlerList())
+                || has(org.bukkit.event.entity.EntitySpawnEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_CREATURE_SPAWN);
+        }
+        if (has(org.bukkit.event.entity.EntityBreedEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_BREED);
+        }
+        if (has(org.bukkit.event.player.PlayerShearEntityEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_SHEAR);
+        }
+        if (has(org.bukkit.event.block.CampfireStartEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_CAMPFIRE_START);
+        }
+        if (has(org.bukkit.event.block.BlockCookEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_COOK);
+        }
         Bridge.setFlag(Bridge.FLAG_LISTENERS, mask);
     }
 

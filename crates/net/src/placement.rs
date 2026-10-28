@@ -81,9 +81,21 @@ impl Ctx {
 
 type Props = Vec<(String, String)>;
 
+/// Свойства одного блока в смешанной системе счисления: код состояния —
+/// сумма `индекс значения × шаг`, смена свойства — арифметика без строк.
+struct Table {
+    keys: Vec<String>,
+    values: Vec<Vec<String>>,
+    strides: Vec<u32>,
+    /// Код → состояние (`u32::MAX` — такого сочетания нет).
+    states: Vec<u32>,
+}
+
 pub struct Placement {
     states: Vec<Option<(String, Props)>>,
-    by_key: HashMap<(String, Props), u32>,
+    /// По состоянию: таблица блока и код в ней.
+    codes: Vec<(u32, u32)>,
+    tables: Vec<Table>,
     /// Минимальный id состояния с этим именем (настенные варианты).
     by_name: HashMap<String, u32>,
     /// Прочные грани по состоянию (биты по `DIRS`).
@@ -122,6 +134,8 @@ fn faces_away(name: &str) -> bool {
         || name.ends_with("_fence_gate")
         || name.ends_with("_bed")
         || name == "minecraft:observer"
+        || name == "minecraft:campfire"
+        || name == "minecraft:soul_campfire"
 }
 
 /// Шестисторонний `facing` по грани клика (стержни, кристаллы).
@@ -142,22 +156,69 @@ impl Placement {
         sturdy: Vec<u8>,
         walls: HashSet<String>,
     ) -> Self {
-        let mut by_key = HashMap::new();
         let mut by_name = HashMap::new();
+        // Ключи и значения каждого блока в порядке первого появления.
+        let mut table_of: HashMap<&str, usize> = HashMap::new();
+        let mut tables: Vec<Table> = Vec::new();
         for (id, s) in states.iter().enumerate() {
             if let Some((n, p)) = s {
-                let mut p = p.clone();
-                p.sort();
-                by_key.insert((n.clone(), p), id as u32);
                 by_name
                     .entry(n.clone())
                     .and_modify(|m: &mut u32| *m = (*m).min(id as u32))
                     .or_insert(id as u32);
+                let t = *table_of.entry(n.as_str()).or_insert_with(|| {
+                    tables.push(Table {
+                        keys: Vec::new(),
+                        values: Vec::new(),
+                        strides: Vec::new(),
+                        states: Vec::new(),
+                    });
+                    tables.len() - 1
+                });
+                let t = &mut tables[t];
+                for (k, v) in p {
+                    let i = match t.keys.iter().position(|x| x == k) {
+                        Some(i) => i,
+                        None => {
+                            t.keys.push(k.clone());
+                            t.values.push(Vec::new());
+                            t.keys.len() - 1
+                        }
+                    };
+                    if !t.values[i].contains(v) {
+                        t.values[i].push(v.clone());
+                    }
+                }
             }
         }
+        for t in &mut tables {
+            let mut stride = 1u32;
+            for v in &t.values {
+                t.strides.push(stride);
+                stride *= v.len() as u32;
+            }
+            t.states = vec![u32::MAX; stride as usize];
+        }
+        let mut codes = vec![(u32::MAX, 0); states.len()];
+        for (id, s) in states.iter().enumerate() {
+            if let Some((n, p)) = s {
+                let ti = table_of[n.as_str()];
+                let t = &mut tables[ti];
+                let mut code = 0;
+                for (k, v) in p {
+                    let i = t.keys.iter().position(|x| x == k).unwrap_or(0);
+                    let j = t.values[i].iter().position(|x| x == v).unwrap_or(0);
+                    code += j as u32 * t.strides[i];
+                }
+                t.states[code as usize] = id as u32;
+                codes[id] = (ti as u32, code);
+            }
+        }
+        drop(table_of);
         Self {
             states,
-            by_key,
+            codes,
+            tables,
             by_name,
             sturdy,
             walls,
@@ -274,26 +335,14 @@ impl Placement {
     }
 
     fn with(&self, state: u32, key: &str, value: &str) -> Option<u32> {
-        if self.prop(state, key) == Some(value) {
-            return Some(state);
-        }
-        let (n, p) = self.states.get(state as usize)?.as_ref()?;
-        p.iter().find(|(k, _)| k == key)?;
-        let mut p: Props = p
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    if k == key {
-                        value.to_owned()
-                    } else {
-                        v.clone()
-                    },
-                )
-            })
-            .collect();
-        p.sort();
-        self.by_key.get(&(n.clone(), p)).copied()
+        let &(ti, code) = self.codes.get(state as usize)?;
+        let t = self.tables.get(ti as usize)?;
+        let i = t.keys.iter().position(|k| k == key)?;
+        let j = t.values[i].iter().position(|v| v == value)? as u32;
+        let (n, stride) = (t.values[i].len() as u32, t.strides[i]);
+        let cur = code / stride % n;
+        let next = code - cur * stride + j * stride;
+        Some(t.states[next as usize]).filter(|&s| s != u32::MAX)
     }
 
     /// Состояние с другим значением свойства, если оно у блока есть.
@@ -377,6 +426,10 @@ impl Placement {
                 opposite(player)
             };
             self.set(&mut s, "facing", DIRS[dir]);
+        }
+        // Костёр ставится горящим (`CampfireBlock.getStateForPlacement`).
+        if name == "minecraft:campfire" || name == "minecraft:soul_campfire" {
+            self.set(&mut s, "lit", "true");
         }
         if self.prop(s, "hanging").is_some() {
             self.set(
@@ -665,6 +718,38 @@ mod tests {
         let mut sturdy = vec![0u8; states.len()];
         sturdy[ids["log_y"] as usize] = 63;
         (Placement::new(states, sturdy, walls), ids)
+    }
+
+    /// Арифметика таблицы совпадает с перебором состояний (и с неполными наборами, как у забора).
+    #[test]
+    fn with_prop_matches_search() {
+        let (pl, _) = table();
+        for (s, entry) in pl.states.iter().enumerate() {
+            let Some((name, p)) = entry else { continue };
+            for (k, _) in p {
+                for v in [
+                    "true", "false", "north", "east", "top", "double", "x", "upper", "nope",
+                ] {
+                    let mut want: Props = p
+                        .iter()
+                        .map(|(a, b)| (a.clone(), if a == k { v.to_owned() } else { b.clone() }))
+                        .collect();
+                    want.sort();
+                    let expect = pl.states.iter().position(|e| {
+                        e.as_ref().is_some_and(|(n, q)| {
+                            let mut q = q.clone();
+                            q.sort();
+                            n == name && q == want
+                        })
+                    });
+                    assert_eq!(
+                        pl.with_prop(s as u32, k, v),
+                        expect.map(|i| i as u32),
+                        "{name} {k}={v}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

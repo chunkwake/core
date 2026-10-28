@@ -14,9 +14,12 @@ chunkwake-data = { path = "../data" }
 chunkwake-net = { path = "../net" }
 chunkwake-protocol = { path = "../protocol" }
 chunkwake-world = { path = "../world" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 crossterm = "0.29"
 dotenvy = "0.15"
 ratatui = "0.30.2"
+rand = "0.8"
+sha2 = "0.10"
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

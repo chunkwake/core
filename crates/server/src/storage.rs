@@ -9,6 +9,7 @@ use chunkwake_net::survival::PlayerSave;
 use chunkwake_world::ChunkColumn;
 use chunkwake_world::anvil::{self, Format, Names, RegionStore};
 use chunkwake_world::light::{self, LightTable};
+use chunkwake_world::nbt::{Compound, Tag};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -19,6 +20,7 @@ const AUTOSAVE: Duration = Duration::from_secs(30);
 
 pub struct WorldStorage {
     store: RegionStore,
+    entities: RegionStore,
     template: ChunkColumn,
     light: Arc<LightTable>,
     format: Format,
@@ -70,6 +72,7 @@ impl WorldStorage {
             .collect();
         Self {
             store: RegionStore::new(world_dir.join("region")),
+            entities: RegionStore::new(world_dir.join("entities")),
             players: PlayerFiles::new(world_dir, data_version, items, effects),
             save_lock: Mutex::new(()),
             save_notify: Arc::new(tokio::sync::Notify::new()),
@@ -113,6 +116,26 @@ impl WorldStorage {
                     saved = n;
                 }
                 Err(e) => errors.push(format!("save chunks: {e}")),
+            }
+        }
+        let mobs = plan.unsaved_entities();
+        if !mobs.is_empty() {
+            let nbt: Vec<_> = mobs
+                .iter()
+                .map(|(pos, list)| {
+                    let mut root = Compound::new();
+                    root.insert("DataVersion".into(), Tag::Int(self.format.data_version));
+                    root.insert("Position".into(), Tag::IntArray(vec![pos.0, pos.1]));
+                    root.insert(
+                        "Entities".into(),
+                        Tag::List(list.iter().cloned().map(Tag::Compound).collect()),
+                    );
+                    (*pos, root)
+                })
+                .collect();
+            match self.entities.save(&nbt) {
+                Ok(()) => plan.mark_entities_saved(&mobs),
+                Err(e) => errors.push(format!("save entities: {e}")),
             }
         }
         if errors.is_empty() {
@@ -192,6 +215,10 @@ impl ChunkSource for WorldStorage {
                     .map_err(|e| format!("chunk {pos:?}: {e}"))
             })
             .collect()
+    }
+
+    fn load_entities(&self, rx: i32, rz: i32) -> Result<Vec<((i32, i32), Compound)>, String> {
+        self.entities.load_region(rx, rz)
     }
 }
 

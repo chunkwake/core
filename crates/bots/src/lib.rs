@@ -244,7 +244,9 @@ impl Client {
         let mut tick_end = Writer::new();
         tick_end.var_int(self.ids.sb_client_tick_end);
         self.bytes_out += tick_end.buf.len() as u64;
-        self.conn.send(&tick_end.buf).await.map_err(err)
+        self.conn.send(&tick_end.buf).await.map_err(err)?;
+        // Соединение копит кадры: движение должно уйти сейчас, а не к следующему чтению.
+        self.conn.flush().await.map_err(err)
     }
 }
 

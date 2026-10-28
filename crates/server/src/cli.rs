@@ -1,11 +1,18 @@
 //! Команды первоначальной настройки и диагностики.
 
+use crate::backup;
 use crate::config::{self, Properties};
 use crate::{MC_VERSION, serve, setup_tui};
 use chunkwake_net::GameVersion;
 use std::io::{self, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+
+#[derive(Clone, Debug)]
+pub struct Diagnostic {
+    pub key: &'static str,
+    pub message: String,
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
@@ -14,6 +21,12 @@ enum Command {
     Doctor,
     Show,
     Set(String, String),
+    BackupCreate,
+    BackupList,
+    BackupVerify(String),
+    BackupRestore(String),
+    BackupResume,
+    BackupRollback,
     Help,
 }
 
@@ -45,6 +58,12 @@ impl Cli {
             [a, b, key, value] if a == "config" && b == "set" => {
                 Command::Set(key.clone(), value.clone())
             }
+            [a, b] if a == "backup" && b == "create" => Command::BackupCreate,
+            [a, b] if a == "backup" && b == "list" => Command::BackupList,
+            [a, b, id] if a == "backup" && b == "verify" => Command::BackupVerify(id.clone()),
+            [a, b, id] if a == "backup" && b == "restore" => Command::BackupRestore(id.clone()),
+            [a, b] if a == "backup" && b == "resume" => Command::BackupResume,
+            [a, b] if a == "backup" && b == "rollback" => Command::BackupRollback,
             _ => return Err(format!("unknown command; {}", usage())),
         };
         Ok(Self { dir, command })
@@ -59,9 +78,15 @@ USAGE
 
 COMMANDS
   setup                   Configure the server interactively
-  doctor                  Check settings and the vanilla server jar
+  doctor                  Check settings, jar, Java, and port
   config show             Show the current settings
   config set KEY VALUE    Change one setting
+  backup create           Create an offline backup
+  backup list             List completed backups
+  backup verify ID        Check backup checksums
+  backup restore ID       Restore a backup (requires confirmation)
+  backup resume           Finish an interrupted restore
+  backup rollback         Undo an interrupted restore
   run                     Start the server (default)
 
 OPTIONS
@@ -82,8 +107,43 @@ pub async fn execute() -> Result<(), String> {
     let cli = Cli::parse(std::env::args().skip(1))?;
     match cli.command {
         Command::Run => serve(&cli.dir).await,
-        Command::Setup => setup_tui::run(&cli.dir),
+        Command::Setup => {
+            std::fs::create_dir_all(&cli.dir).map_err(|e| format!("{}: {e}", cli.dir.display()))?;
+            let _lock = backup::lock(&cli.dir)?;
+            setup_tui::run(&cli.dir)
+        }
         Command::Doctor => {
+            if let Some(error) = backup::incomplete(&cli.dir) {
+                return Err(error);
+            }
+            let props = Properties::load(&config_path(&cli.dir)).map_err(|error| {
+                if let Some(id) = backup::latest_valid(&cli.dir) {
+                    format!("{error}\nVerified backup available: {id}; run `chunkwake backup restore {id} --dir {}`", cli.dir.display())
+                } else { error }
+            })?;
+            let mut issues = diagnose(&props, &cli.dir);
+            for message in backup::scan_data(&cli.dir)? {
+                issues.push(Diagnostic {
+                    key: "world",
+                    message,
+                });
+            }
+            if !issues.is_empty() {
+                let mut message = issues
+                    .iter()
+                    .map(|issue| issue.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if issues.iter().any(|i| i.key == "world")
+                    && let Some(id) = backup::latest_valid(&cli.dir)
+                {
+                    message += &format!(
+                        "\nVerified backup available: {id}; restore with `chunkwake backup restore {id} --dir {}` after stopping the server",
+                        cli.dir.display()
+                    );
+                }
+                return Err(message);
+            }
             let (props, version) = check(&cli.dir)?;
             println!(
                 "✓  Ready to start · Minecraft {} (protocol {})\n   Listen address  {}:{}\n   Vanilla jar     {}",
@@ -106,7 +166,48 @@ pub async fn execute() -> Result<(), String> {
             println!("Chunkwake  ·  Current settings\n");
             print_summary(&text, &mut io::stdout()).map_err(|e| e.to_string())
         }
-        Command::Set(key, value) => set_config(&cli.dir, &key, &value),
+        Command::Set(key, value) => {
+            let _lock = backup::lock(&cli.dir)?;
+            set_config(&cli.dir, &key, &value)
+        }
+        Command::BackupCreate => {
+            let _lock = backup::lock(&cli.dir)?;
+            let id = backup::create(&cli.dir)?;
+            println!(
+                "Backup {id} created in {}",
+                cli.dir.join("backups").display()
+            );
+            Ok(())
+        }
+        Command::BackupList => {
+            let _lock = backup::lock(&cli.dir)?;
+            for id in backup::list(&cli.dir)? {
+                println!("{id}");
+            }
+            Ok(())
+        }
+        Command::BackupVerify(id) => {
+            let _lock = backup::lock(&cli.dir)?;
+            let count = backup::verify(&cli.dir, &id)?;
+            println!("Backup {id} verified: {count} files");
+            Ok(())
+        }
+        Command::BackupRestore(id) => {
+            let _lock = backup::lock(&cli.dir)?;
+            let safety = backup::restore(&cli.dir, &id)?;
+            println!("Restored {id}. Previous state saved as backup {safety}.");
+            Ok(())
+        }
+        Command::BackupResume | Command::BackupRollback => {
+            let _lock = backup::lock(&cli.dir)?;
+            let rollback = cli.command == Command::BackupRollback;
+            backup::continue_restore(&cli.dir, rollback)?;
+            println!(
+                "Restore {}.",
+                if rollback { "rolled back" } else { "completed" }
+            );
+            Ok(())
+        }
         Command::Help => {
             println!("{}", help());
             Ok(())
@@ -114,11 +215,74 @@ pub async fn execute() -> Result<(), String> {
     }
 }
 
+/// Checks the draft settings without writing them or starting the server.
+pub fn diagnose(props: &Properties, dir: &Path) -> Vec<Diagnostic> {
+    let mut issues = Vec::new();
+    let cache_ready = chunkwake_data::generator::cached(&props.generated_path(dir), MC_VERSION)
+        .and_then(|data| config::read_cached_version(&data))
+        .is_some_and(|version| version.name == MC_VERSION);
+    if !cache_ready {
+        let jar = props.jar_path(dir);
+        match config::read_vanilla_version(&jar) {
+            Ok(version) if version.name == MC_VERSION => {
+                let (setting, java) = match std::env::var_os("CHUNKWAKE_JAVA") {
+                    Some(value) => ("CHUNKWAKE_JAVA", PathBuf::from(value)),
+                    None => ("java-path", props.java_command(dir)),
+                };
+                match std::process::Command::new(&java).arg("-version").output() {
+                    Ok(output) if output.status.success() => {}
+                    Ok(output) => issues.push(Diagnostic {
+                        key: "java-path",
+                        message: format!(
+                            "{setting}={}: Java exited with {}; choose a working Java executable",
+                            java.display(),
+                            output.status
+                        ),
+                    }),
+                    Err(error) => issues.push(Diagnostic {
+                        key: "java-path",
+                        message: format!(
+                            "{setting}={}: {error}; install Java or change {setting}",
+                            java.display()
+                        ),
+                    }),
+                }
+            }
+            Ok(version) => issues.push(Diagnostic {
+                key: "vanilla-jar",
+                message: format!(
+                    "vanilla-jar={}: Minecraft {} found; Chunkwake needs {MC_VERSION}",
+                    jar.display(),
+                    version.name
+                ),
+            }),
+            Err(error) => issues.push(Diagnostic {
+                key: "vanilla-jar",
+                message: error,
+            }),
+        }
+    }
+    let address = format!("{}:{}", props.server_ip, props.server_port);
+    let bind = (props.server_ip.as_str(), props.server_port);
+    if let Err(error) = std::net::TcpListener::bind(bind) {
+        issues.push(Diagnostic {
+            key: "server-port",
+            message: format!(
+                "server-ip/server-port={address}: {error}; choose an available address and port"
+            ),
+        });
+    }
+    issues
+}
+
 fn config_path(dir: &Path) -> PathBuf {
     dir.join("server.properties")
 }
 
 pub fn check(dir: &Path) -> Result<(Properties, GameVersion), String> {
+    if let Some(error) = backup::incomplete(dir) {
+        return Err(error);
+    }
     let props = Properties::load(&config_path(dir))?;
     props.check_supported()?;
     // Данные уже извлечены: jar больше не нужен.
@@ -240,6 +404,29 @@ mod tests {
             "# keep\nserver-port=25565\nunknown=yes\n"
         );
         assert!(set_config(&dir, "unknown", "no").is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn doctor_reports_busy_port_and_missing_java() {
+        let dir = temp_dir();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let file = std::fs::File::create(dir.join("server.jar")).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("version.json", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(br#"{"name":"26.3","protocol_version":777}"#)
+            .unwrap();
+        zip.finish().unwrap();
+        let props = Properties::parse(&format!(
+            "server-port={port}\njava-path=missing-chunkwake-java-command"
+        ))
+        .unwrap();
+        let issues = diagnose(&props, &dir);
+        assert!(issues.iter().any(|issue| issue.key == "server-port"));
+        assert!(issues.iter().any(|issue| issue.key == "java-path"));
+        drop(listener);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

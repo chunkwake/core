@@ -24,6 +24,11 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
     @Override
     public void onEnable() {
         getLogger().info("onEnable on " + getServer().getName() + " " + getServer().getVersion());
+        String bench = System.getenv("CHUNKWAKE_BENCH_MOBS");
+        if (bench != null) {
+            benchMobs(Integer.parseInt(bench));
+            return;
+        }
         getServer().getPluginManager().registerEvents(this, this);
         ItemStack bread = new ItemStack(Material.BREAD, 3);
         getLogger().info("item api: " + bread.getType() + " x" + bread.getAmount() + " max " + bread.getMaxStackSize());
@@ -116,9 +121,59 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
                     + " " + ((org.bukkit.block.data.Waterlogged) w.getBlockAt(50, 200, 0).getBlockData()).isWaterlogged());
         }, 140);
         getServer().getScheduler().runTaskLater(this, () -> getLogger().info("hopper: moves=" + hopperMoves + " pickups=" + hopperPickups), 120);
+        getServer().getScheduler().runTaskLater(this, () -> {
+            org.bukkit.World w = getServer().getWorlds().get(0);
+            var cow = (org.bukkit.entity.Cow) w.spawnEntity(new org.bukkit.Location(w, 0.5, 200, 30.5), org.bukkit.entity.EntityType.COW);
+            var sheep = w.spawn(new org.bukkit.Location(w, 3.5, 200, 30.5), org.bukkit.entity.Sheep.class, s -> s.setColor(org.bukkit.DyeColor.RED));
+            getLogger().info("mob: " + cow.getType() + " health=" + cow.getHealth() + "/" + cow.getMaxHealth() + " adult=" + cow.isAdult()
+                    + " sheep=" + sheep.getColor() + " living=" + w.getLivingEntities().size() + " spawned=" + creatureSpawns);
+            cow.damage(20);
+            getServer().getScheduler().runTaskLater(this, () -> getLogger().info("mob dead: " + cow.isDead() + " valid=" + cow.isValid()), 30);
+        }, 150);
     }
 
-    private int hopperMoves, hopperPickups;
+    private int hopperMoves, hopperPickups, creatureSpawns;
+
+    /** Замер: {@code CHUNKWAKE_BENCH_MOBS=N} — N коров у спавна, TPS/MSPT до и после. */
+    private void benchMobs(int n) {
+        org.bukkit.World w = getServer().getWorlds().get(0);
+        getServer().getScheduler().runTaskLater(this, () -> {
+            getLogger().info("bench before: " + tps());
+            for (int i = 0; i < n; i++) {
+                w.spawnEntity(new org.bukkit.Location(w, (i % 40) - 20 + 0.5, -60, (i / 40) - 12 + 0.5), org.bukkit.entity.EntityType.COW);
+            }
+            getLogger().info("bench spawned " + n + " living=" + w.getLivingEntities().size());
+        }, 200);
+        for (int t = 1; t <= 9; t++) {
+            int at = t;
+            getServer().getScheduler().runTaskLater(this, () -> getLogger().info("bench after " + at * 10 + "s: " + tps()
+                    + " living=" + w.getLivingEntities().size()), 200 + t * 200L);
+        }
+    }
+
+    private static String tps() {
+        try {
+            var m = Class.forName("dev.chunkwake.bridge.Bridge").getDeclaredMethod("world", String.class);
+            m.setAccessible(true);
+            return (String) m.invoke(null, "tps");
+        } catch (ReflectiveOperationException e) {
+            return "?";
+        }
+    }
+
+    @EventHandler
+    public void onCreatureSpawn(org.bukkit.event.entity.CreatureSpawnEvent e) {
+        creatureSpawns++;
+    }
+
+    @EventHandler
+    public void onMobDeath(org.bukkit.event.entity.EntityDeathEvent e) {
+        if (e.getEntity() instanceof org.bukkit.entity.Player) {
+            return;
+        }
+        getLogger().info("mob death: " + e.getEntityType() + " drops=" + e.getDrops().stream().map(i -> i.getType().name()).sorted().toList()
+                + " xp=" + e.getDroppedExp());
+    }
 
     @EventHandler
     public void onMenuClose(org.bukkit.event.inventory.InventoryCloseEvent e) {

@@ -211,6 +211,10 @@ pub struct ItemInfo {
     pub armor: f32,
     /// Сумма `minecraft:armor_toughness` (`add_value`).
     pub toughness: f32,
+    /// Добавка к урону `minecraft:attack_damage` (к базовым 1 игрока).
+    pub attack: f32,
+    /// Добавка к `minecraft:attack_speed` (к базовым 4 игрока).
+    pub attack_speed: f32,
 }
 
 impl Default for ItemInfo {
@@ -224,6 +228,8 @@ impl Default for ItemInfo {
             fuel: None,
             armor: 0.0,
             toughness: 0.0,
+            attack: 0.0,
+            attack_speed: 0.0,
         }
     }
 }
@@ -275,6 +281,7 @@ pub fn load_items(root: &Path, items: &HashMap<String, i32>) -> Result<Vec<ItemI
             || text.contains("\"minecraft:potion_contents\"")
             || text.contains("\"minecraft:equippable\"")
             || text.contains("\"minecraft:cooking_fuel\"")
+            || text.contains("attack_damage")
         {
             let json: serde_json::Value =
                 serde_json::from_str(&text).map_err(|e| DataError::Format {
@@ -291,6 +298,8 @@ pub fn load_items(root: &Path, items: &HashMap<String, i32>) -> Result<Vec<ItemI
             let (armor, toughness) = parse_armor(c);
             out[id as usize].armor = armor;
             out[id as usize].toughness = toughness;
+            out[id as usize].attack = attr_add(c, "attack_damage");
+            out[id as usize].attack_speed = attr_add(c, "attack_speed");
         }
     }
     Ok(out)
@@ -312,6 +321,32 @@ fn parse_drink(c: &serde_json::Value, items: &HashMap<String, i32>) -> Option<Dr
         .and_then(|n| items.get(n).copied())
         .unwrap_or(-1);
     Some(Drink { seconds, remainder })
+}
+
+/// Сумма модификаторов `add_value` атрибута `name` (`minecraft:<name>`).
+fn attr_add(c: &serde_json::Value, name: &str) -> f32 {
+    let raw = &c["minecraft:attribute_modifiers"];
+    let Some(list) = raw
+        .as_array()
+        .or_else(|| raw.get("modifiers").and_then(|m| m.as_array()))
+    else {
+        return 0.0;
+    };
+    list.iter()
+        .filter(|m| {
+            let ty = m
+                .get("type")
+                .or_else(|| m.get("attribute"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let op = m
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("add_value");
+            ty.rsplit([':', '.']).next() == Some(name) && (op == "add_value" || op == "add")
+        })
+        .filter_map(|m| m.get("amount").and_then(|v| v.as_f64()))
+        .sum::<f64>() as f32
 }
 
 /// Очки брони и прочность из `attribute_modifiers` (массив или `{modifiers: [...]}`).
@@ -546,7 +581,7 @@ pub struct BlockLoot {
 
 /// Лут блоков через сводку `loot.json`.
 pub fn load_block_loot_cached(root: &Path) -> Result<BlockLoot, DataError> {
-    let path = derived(root, "loot.json");
+    let path = derived(root, "loot.v2.json");
     if let Ok(text) = std::fs::read_to_string(&path)
         && let Ok(loot) = serde_json::from_str(&text)
     {
@@ -555,6 +590,16 @@ pub fn load_block_loot_cached(root: &Path) -> Result<BlockLoot, DataError> {
     let mut loot = BlockLoot::default();
     let base = root.join("data/minecraft");
     let mut files = Vec::new();
+    // Сущности: `minecraft:entities/<путь>` (у овцы — `entities/sheep/<цвет>`).
+    let entities = base.join("loot_table/entities");
+    collect_json(&entities, &mut files);
+    for p in files.drain(..) {
+        if let Ok(rel) = p.with_extension("").strip_prefix(&entities) {
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            loot.tables
+                .insert(format!("minecraft:entities/{rel}"), read_json(&p)?);
+        }
+    }
     collect_json(&base.join("loot_table/blocks"), &mut files);
     for p in files.drain(..) {
         if let Some(name) = p.file_stem().and_then(|s| s.to_str()) {
@@ -587,12 +632,12 @@ fn collect_json(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
-/// `load_items` через сводку `items.v2.tsv`: имя, стопка, питьё и для еды — сытость.
+/// `load_items` через сводку `items.v3.tsv`: имя, стопка, питьё, броня, урон и для еды — сытость.
 pub fn load_items_cached(
     root: &Path,
     items: &HashMap<String, i32>,
 ) -> Result<Vec<ItemInfo>, DataError> {
-    let path = derived(root, "items.v2.tsv");
+    let path = derived(root, "items.v3.tsv");
     let len = items.values().max().map_or(0, |&m| m as usize + 1);
     if let Ok(text) = std::fs::read_to_string(&path) {
         let mut out = vec![ItemInfo::default(); len];
@@ -622,7 +667,8 @@ fn equip_slot(name: &str) -> Option<&'static str> {
     .find(|s| *s == name)
 }
 
-/// `name, max_stack, equip (-), max_damage, fuel, секунды питья (-), остаток (-)`
+/// `name, max_stack, equip (-), max_damage, fuel, секунды питья (-), остаток (-),
+/// броня, прочность брони, урон, скорость атаки`
 /// и для еды — сытость, насыщение, можно ли всегда, секунды. Поля через табуляцию.
 fn item_line(name: &str, i: &ItemInfo) -> String {
     let fuel = i.fuel.map_or("-".to_owned(), |f| {
@@ -644,10 +690,14 @@ fn item_line(name: &str, i: &ItemInfo) -> String {
         None => "-\t-".to_owned(),
     };
     let head = format!(
-        "{name}\t{}\t{}\t{}\t{fuel}\t{drink}",
+        "{name}\t{}\t{}\t{}\t{fuel}\t{drink}\t{}\t{}\t{}\t{}",
         i.max_stack,
         i.equip.unwrap_or("-"),
-        i.max_damage
+        i.max_damage,
+        i.armor,
+        i.toughness,
+        i.attack,
+        i.attack_speed
     );
     match i.food {
         Some(f) => format!(
@@ -696,6 +746,10 @@ fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, I
             },
         })
     };
+    let armor = f.next()?.parse().ok()?;
+    let toughness = f.next()?.parse().ok()?;
+    let attack = f.next()?.parse().ok()?;
+    let attack_speed = f.next()?.parse().ok()?;
     let food = match (f.next(), f.next(), f.next(), f.next()) {
         (Some(n), Some(s), Some(a), Some(sec)) => Some(Food {
             nutrition: n.parse().ok()?,
@@ -714,8 +768,10 @@ fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, I
             equip,
             max_damage,
             fuel,
-            armor: 0.0,
-            toughness: 0.0,
+            armor,
+            toughness,
+            attack,
+            attack_speed,
         },
     ))
 }
@@ -829,8 +885,10 @@ mod loot_tests {
                     burn: [1600, 800, 800],
                     speed: [1.0, 2.0, 2.0],
                 }),
-                armor: 0.0,
-                toughness: 0.0,
+                armor: 8.0,
+                toughness: 2.0,
+                attack: 5.0,
+                attack_speed: -2.4,
             },
             ItemInfo {
                 max_stack: 16,

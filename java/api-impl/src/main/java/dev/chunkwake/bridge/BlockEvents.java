@@ -4,14 +4,20 @@ import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
 import org.bukkit.Location;
+import org.bukkit.NamespacedKey;
 import org.bukkit.World;
+import org.bukkit.block.Block;
 import org.bukkit.entity.Item;
+import org.bukkit.event.block.BlockCookEvent;
 import org.bukkit.event.block.BlockDispenseEvent;
+import org.bukkit.event.block.CampfireStartEvent;
 import org.bukkit.event.inventory.InventoryMoveItemEvent;
 import org.bukkit.event.inventory.InventoryPickupItemEvent;
 import org.bukkit.event.inventory.InventoryType;
+import org.bukkit.inventory.CampfireRecipe;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.RecipeChoice;
 import org.bukkit.plugin.PluginManager;
 import org.bukkit.util.Vector;
 
@@ -48,8 +54,72 @@ final class BlockEvents {
                 plugins.callEvent(e);
                 yield e.isCancelled() ? "c" : "";
             }
+            case Bridge.EVENT_CAMPFIRE_START -> campfireStart(plugins, world, arg);
+            case Bridge.EVENT_COOK -> cook(plugins, world, arg);
             default -> "";
         };
+    }
+
+    /**
+     * {@code x y z}\n{@code id опыт время}\n{@code результат}\n{@code исходная стопка}
+     * → время готовки ({@link CampfireStartEvent#getTotalCookTime()}).
+     */
+    private static String campfireStart(PluginManager plugins, World world, String arg) {
+        String[] lines = arg.split("\n", -1);
+        if (lines.length < 4) {
+            return "";
+        }
+        Block block = blockAt(world, lines[0]);
+        String[] meta = lines[1].split(" ");
+        float exp = Float.parseFloat(meta[1]);
+        int time = Integer.parseInt(meta[2]);
+        ItemStack result = StackImpl.parse(lines[2]);
+        ItemStack source = StackImpl.parse(lines[3]);
+        CampfireRecipe recipe = recipe(meta[0], result, source, exp, time);
+        var e = new CampfireStartEvent(block, source, recipe);
+        plugins.callEvent(e);
+        return Integer.toString(e.getTotalCookTime());
+    }
+
+    /**
+     * {@code x y z}\n{@code id опыт время}\n{@code сырьё}\n{@code результат}
+     * → {@code c}, {@code e} (пустой результат), {@code i стопка} или пусто.
+     */
+    private static String cook(PluginManager plugins, World world, String arg) {
+        String[] lines = arg.split("\n", -1);
+        if (lines.length < 4) {
+            return "";
+        }
+        Block block = blockAt(world, lines[0]);
+        String[] meta = lines[1].split(" ");
+        ItemStack source = StackImpl.parse(lines[2]);
+        ItemStack result = StackImpl.parse(lines[3]);
+        CampfireRecipe recipe = meta[0].equals("-")
+                ? null
+                : recipe(meta[0], result, source, Float.parseFloat(meta[1]), Integer.parseInt(meta[2]));
+        var e = new BlockCookEvent(block, source, result, recipe);
+        plugins.callEvent(e);
+        if (e.isCancelled()) {
+            return "c";
+        }
+        String now = StackImpl.line(e.getResult());
+        if (now == null) {
+            return "e";
+        }
+        return now.equals(StackImpl.line(result)) ? "" : "i " + now;
+    }
+
+    private static Block blockAt(World world, String line) {
+        String[] p = line.split(" ");
+        return world.getBlockAt(Integer.parseInt(p[0]), Integer.parseInt(p[1]), Integer.parseInt(p[2]));
+    }
+
+    private static CampfireRecipe recipe(String id, ItemStack result, ItemStack source, float exp, int time) {
+        NamespacedKey key = NamespacedKey.fromString(id);
+        if (key == null) {
+            key = NamespacedKey.minecraft("campfire_cooking");
+        }
+        return new CampfireRecipe(key, result, new RecipeChoice.ExactChoice(List.of(source)), exp, time);
     }
 
     /** Инвентарь блока из полей {@code x y z имя}, начиная с {@code at}. */

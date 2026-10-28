@@ -200,8 +200,12 @@ final class ChunkwakeServer {
             }
             return out.toString();
         }
-        if (kind >= Bridge.EVENT_MOVE_ITEM && kind <= Bridge.EVENT_DISPENSE) {
+        if (kind >= Bridge.EVENT_MOVE_ITEM && kind <= Bridge.EVENT_DISPENSE
+                || kind == Bridge.EVENT_CAMPFIRE_START || kind == Bridge.EVENT_COOK) {
             return BlockEvents.fire(api.getPluginManager(), world, kind, arg);
+        }
+        if (kind == Bridge.EVENT_MOB_DEATH || kind == Bridge.EVENT_CREATURE_SPAWN || kind == Bridge.EVENT_BREED) {
+            return MobImpl.fire(api.getPluginManager(), kind, arg);
         }
         if (kind == Bridge.EVENT_PISTON) {
             String[] f = arg.split(" ");
@@ -227,6 +231,9 @@ final class ChunkwakeServer {
         if (kind == Bridge.EVENT_TAB_COMPLETE) {
             List<String> out = commands.tabComplete(p.api, arg);
             return out == null ? "" : String.join("\n", out);
+        }
+        if (kind == Bridge.EVENT_MOB_DAMAGE || kind == Bridge.EVENT_INTERACT_ENTITY || kind == Bridge.EVENT_SHEAR) {
+            return MobImpl.fire(api.getPluginManager(), p, kind, arg);
         }
         return Events.fire(api.getPluginManager(), p, kind, arg);
     }
@@ -439,6 +446,82 @@ final class ChunkwakeServer {
         public UUID getUID() { return new UUID(0, 1); }
         public int getMinHeight() { return -64; }
         public int getMaxHeight() { return 320; }
+
+        public org.bukkit.entity.Entity spawnEntity(org.bukkit.Location l, org.bukkit.entity.EntityType type) {
+            String s = MobImpl.species(type);
+            if (s == null) {
+                throw new UnsupportedOperationException("chunkwake: spawnEntity " + type);
+            }
+            return MobImpl.spawn(l, s);
+        }
+
+        public org.bukkit.entity.Entity spawnEntity(org.bukkit.Location l, org.bukkit.entity.EntityType type,
+                boolean randomize) {
+            return spawnEntity(l, type);
+        }
+
+        public org.bukkit.entity.Entity spawnEntity(org.bukkit.Location l, org.bukkit.entity.EntityType type,
+                org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason reason) {
+            return spawnEntity(l, type);
+        }
+
+        public <T extends org.bukkit.entity.Entity> T spawn(org.bukkit.Location l, Class<T> type) {
+            return spawn(l, type, null);
+        }
+
+        public <T extends org.bukkit.entity.Entity> T spawn(org.bukkit.Location l, Class<T> type,
+                org.bukkit.util.Consumer<? super T> init) {
+            java.util.function.Consumer<? super T> c = init == null ? null : init::accept;
+            return spawn(l, type, c);
+        }
+
+        public <T extends org.bukkit.entity.Entity> T spawn(org.bukkit.Location l, Class<T> type,
+                java.util.function.Consumer<? super T> init) {
+            String s = MobImpl.species(type);
+            if (s == null) {
+                throw new UnsupportedOperationException("chunkwake: spawn " + type.getSimpleName());
+            }
+            T e = type.cast(MobImpl.spawn(l, s));
+            if (init != null) {
+                init.accept(e);
+            }
+            return e;
+        }
+
+        public java.util.List<org.bukkit.entity.Entity> getEntities() {
+            java.util.List<org.bukkit.entity.Entity> out = new java.util.ArrayList<>(Bridge.server.api.getOnlinePlayers());
+            out.addAll(MobImpl.all());
+            return out;
+        }
+
+        public java.util.List<org.bukkit.entity.LivingEntity> getLivingEntities() {
+            java.util.List<org.bukkit.entity.LivingEntity> out = new java.util.ArrayList<>(Bridge.server.api.getOnlinePlayers());
+            out.addAll(MobImpl.all());
+            return out;
+        }
+
+        public <T extends org.bukkit.entity.Entity> java.util.Collection<T> getEntitiesByClass(Class<T> type) {
+            java.util.List<T> out = new java.util.ArrayList<>();
+            for (var e : getEntities()) {
+                if (type.isInstance(e)) {
+                    out.add(type.cast(e));
+                }
+            }
+            return out;
+        }
+
+        public java.util.Collection<org.bukkit.entity.Entity> getNearbyEntities(org.bukkit.Location l, double x,
+                double y, double z) {
+            java.util.List<org.bukkit.entity.Entity> out = new java.util.ArrayList<>();
+            for (var e : getEntities()) {
+                var at = e.getLocation();
+                if (Math.abs(at.getX() - l.getX()) <= x && Math.abs(at.getY() - l.getY()) <= y
+                        && Math.abs(at.getZ() - l.getZ()) <= z) {
+                    out.add(e);
+                }
+            }
+            return out;
+        }
 
         /** Предмет на земле без разброса. */
         public org.bukkit.entity.Item dropItem(org.bukkit.Location l, org.bukkit.inventory.ItemStack s) {

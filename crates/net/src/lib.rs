@@ -1,6 +1,7 @@
 //! chunkwake-net — приём соединений и состояния handshake/status/login.
 
 pub mod arrows;
+pub mod campfire;
 pub mod auth;
 pub mod click;
 pub mod configuration;
@@ -12,6 +13,7 @@ pub mod hoppers;
 pub mod items;
 pub mod live;
 pub mod loot;
+pub mod mobs;
 pub mod ops;
 pub mod orbs;
 pub mod pistons;
@@ -20,6 +22,7 @@ pub mod play;
 pub mod potions;
 pub mod redstone;
 pub mod sounds;
+pub mod ticks;
 pub mod stack_nbt;
 pub mod survival;
 pub mod xp;
@@ -365,7 +368,36 @@ pub struct Connection {
     buf: BytesMut,
     pub codec: FrameCodec,
     cipher: Option<StreamCipher>,
+    /// Закодированные, ещё не отправленные кадры (шифруются при `flush`).
+    out: Vec<u8>,
+    /// Начало `out`, записанное до включения шифрования: уходит открытым.
+    plain: usize,
 }
+
+/// Неотправленный хвост (причина отключения после `send` и `return`) —
+/// без ожидания, сколько примет сокет.
+impl Drop for Connection {
+    fn drop(&mut self) {
+        if self.out.is_empty() {
+            return;
+        }
+        if let Some(c) = &mut self.cipher {
+            c.encrypt(&mut self.out[self.plain..]);
+        }
+        let mut rest = &self.out[..];
+        while !rest.is_empty() {
+            match self.stream.try_write(rest) {
+                Ok(n) if n > 0 => rest = &rest[n..],
+                _ => break,
+            }
+        }
+    }
+}
+
+/// Буфер вывода сбрасывается, дорастая до этого размера.
+const OUT_LIMIT: usize = 64 * 1024;
+/// Сколько памяти буфера держать после сброса.
+const OUT_KEEP: usize = 256 * 1024;
 
 impl Connection {
     pub fn new(stream: TcpStream) -> Self {
@@ -374,15 +406,20 @@ impl Connection {
             buf: BytesMut::with_capacity(4096),
             codec: FrameCodec::default(),
             cipher: None,
+            out: Vec::new(),
+            plain: 0,
         }
     }
 
     /// Включает AES/CFB8 для обоих направлений.
     pub fn enable_encryption(&mut self, secret: &[u8; 16]) {
+        self.plain = self.out.len();
         self.cipher = Some(StreamCipher::new(secret));
     }
 
     pub async fn read_packet(&mut self) -> Result<Vec<u8>, NetError> {
+        // Ответ ждут на отправленное: сначала оно должно уйти.
+        self.flush().await?;
         loop {
             if let Some(packet) = self.codec.decode(&mut self.buf)? {
                 return Ok(packet);
@@ -403,24 +440,39 @@ impl Connection {
     /// Отправляет уже закодированные `codec` кадры (общие для многих соединений):
     /// сжатие сделано один раз, здесь только шифрование и запись.
     pub async fn send_frames(&mut self, frames: &[u8]) -> Result<(), NetError> {
-        match &mut self.cipher {
-            Some(c) => {
-                let mut out = frames.to_vec();
-                c.encrypt(&mut out);
-                self.stream.write_all(&out).await?;
-            }
-            None => self.stream.write_all(frames).await?,
+        if self.out.is_empty() && self.cipher.is_none() {
+            self.stream.write_all(frames).await?;
+            return Ok(());
+        }
+        self.out.extend_from_slice(frames);
+        self.flush().await
+    }
+
+    /// Кадр в буфер; уходит при `flush` (конец итерации сессии, чтение ответа)
+    /// или при переполнении — один syscall на пачку, а не на пакет.
+    pub async fn send(&mut self, packet: &[u8]) -> Result<(), NetError> {
+        self.codec.encode(packet, &mut self.out);
+        if self.out.len() >= OUT_LIMIT {
+            self.flush().await?;
         }
         Ok(())
     }
 
-    pub async fn send(&mut self, packet: &[u8]) -> Result<(), NetError> {
-        let mut out = Vec::with_capacity(packet.len() + 5);
-        self.codec.encode(packet, &mut out);
-        if let Some(c) = &mut self.cipher {
-            c.encrypt(&mut out);
+    /// Шифрует буфер на месте и пишет его целиком.
+    pub async fn flush(&mut self) -> Result<(), NetError> {
+        if self.out.is_empty() {
+            return Ok(());
         }
-        self.stream.write_all(&out).await?;
+        if let Some(c) = &mut self.cipher {
+            c.encrypt(&mut self.out[self.plain..]);
+        }
+        let res = self.stream.write_all(&self.out).await;
+        self.out.clear();
+        self.plain = 0;
+        if self.out.capacity() > OUT_KEEP {
+            self.out.shrink_to(OUT_KEEP);
+        }
+        res?;
         Ok(())
     }
 }

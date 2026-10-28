@@ -33,12 +33,26 @@ pub struct Cooking {
     pub experience: f32,
 }
 
+/// Рецепт костра (`campfire_cooking`). Не вид печи: у печи свои слоты и топливо.
+#[derive(Clone, Debug)]
+pub struct CampfireCook {
+    /// `minecraft:<имя файла>` — ключ рецепта для `CampfireRecipe`.
+    pub id: String,
+    pub ingredient: Ingredient,
+    pub result: (i32, i32),
+    pub time: i32,
+    pub experience: f32,
+}
+
 #[derive(Clone, Debug)]
 pub struct Recipes {
     list: Vec<Recipe>,
     cooking: Vec<Cooking>,
     /// Первый рецепт `(вид печи, предмет)` — тот же, что линейный `find`.
     cooking_at: HashMap<(u8, i32), usize>,
+    campfire: Vec<CampfireCook>,
+    /// Первый рецепт костра для предмета.
+    campfire_at: HashMap<i32, usize>,
 }
 
 fn cooking_at(cooking: &[Cooking]) -> HashMap<(u8, i32), usize> {
@@ -46,6 +60,16 @@ fn cooking_at(cooking: &[Cooking]) -> HashMap<(u8, i32), usize> {
     for (i, c) in cooking.iter().enumerate() {
         for &item in c.ingredient.iter() {
             at.entry((c.kind, item)).or_insert(i);
+        }
+    }
+    at
+}
+
+fn campfire_at(list: &[CampfireCook]) -> HashMap<i32, usize> {
+    let mut at = HashMap::new();
+    for (i, c) in list.iter().enumerate() {
+        for &item in c.ingredient.iter() {
+            at.entry(item).or_insert(i);
         }
     }
     at
@@ -65,6 +89,11 @@ impl Recipes {
         self.cooking_at
             .get(&(kind, item))
             .map(|&i| &self.cooking[i])
+    }
+
+    /// Рецепт костра для предмета (первый подходящий).
+    pub fn campfire(&self, item: i32) -> Option<&CampfireCook> {
+        self.campfire_at.get(&item).map(|&i| &self.campfire[i])
     }
 
     /// `(предмет, количество)` для квадратной сетки `size × size` (предметы по строкам).
@@ -254,6 +283,7 @@ pub fn load_recipes(root: &Path, items: &HashMap<String, i32>) -> Result<Recipes
     };
     let mut list = Vec::new();
     let mut cooking_list = Vec::new();
+    let mut campfire_list = Vec::new();
     for path in paths {
         let text = std::fs::read_to_string(&path)
             .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
@@ -261,7 +291,8 @@ pub fn load_recipes(root: &Path, items: &HashMap<String, i32>) -> Result<Recipes
         let cooking = ["smelting", "blasting", "smoking"]
             .iter()
             .position(|t| text.contains(&format!("\"minecraft:{t}\"")));
-        if !crafting && cooking.is_none() {
+        let campfire = text.contains("\"minecraft:campfire_cooking\"");
+        if !crafting && cooking.is_none() && !campfire {
             continue;
         }
         let json: serde_json::Value =
@@ -285,12 +316,29 @@ pub fn load_recipes(root: &Path, items: &HashMap<String, i32>) -> Result<Recipes
                 time: json["cookingtime"].as_i64().unwrap_or(200) as i32,
                 experience: json["experience"].as_f64().unwrap_or(0.0) as f32,
             });
+        } else if campfire
+            && json["type"]
+                .as_str()
+                .is_some_and(|t| t.ends_with("campfire_cooking"))
+            && let (Some(ingredient), Some(result)) =
+                (tags.ingredient(&json["ingredient"]), result(&json, items))
+        {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("campfire");
+            campfire_list.push(CampfireCook {
+                id: format!("minecraft:{stem}"),
+                ingredient,
+                result,
+                time: json["cookingtime"].as_i64().unwrap_or(600) as i32,
+                experience: json["experience"].as_f64().unwrap_or(0.0) as f32,
+            });
         }
     }
     Ok(Recipes {
         cooking_at: cooking_at(&cooking_list),
+        campfire_at: campfire_at(&campfire_list),
         list,
         cooking: cooking_list,
+        campfire: campfire_list,
     })
 }
 
@@ -326,10 +374,13 @@ mod tests {
             .filter_map(|j| parse(j, &mut tags))
             .collect();
         let cooking = Vec::new();
+        let campfire = Vec::new();
         let r = Recipes {
             cooking_at: cooking_at(&cooking),
+            campfire_at: campfire_at(&campfire),
             list,
             cooking,
+            campfire,
         };
         assert_eq!(r.len(), 3);
         // Палки в любом месте сетки 2×2.
@@ -363,13 +414,34 @@ mod tests {
             experience: 0.0,
         };
         let cooking = vec![cook(0, 5, 10), cook(0, 5, 11), cook(1, 5, 12)];
+        let campfire = vec![
+            CampfireCook {
+                id: "minecraft:cooked_beef_from_campfire_cooking".into(),
+                ingredient: set(7),
+                result: (8, 1),
+                time: 600,
+                experience: 0.35,
+            },
+            CampfireCook {
+                id: "minecraft:second".into(),
+                ingredient: set(7),
+                result: (9, 1),
+                time: 100,
+                experience: 0.0,
+            },
+        ];
         let r = Recipes {
             cooking_at: cooking_at(&cooking),
+            campfire_at: campfire_at(&campfire),
             list: Vec::new(),
             cooking,
+            campfire,
         };
         assert_eq!(r.cooking(0, 5).unwrap().result.0, 10);
         assert_eq!(r.cooking(1, 5).unwrap().result.0, 12);
         assert!(r.cooking(0, 6).is_none());
+        assert_eq!(r.campfire(7).unwrap().result.0, 8);
+        assert_eq!(r.campfire(7).unwrap().time, 600);
+        assert!(r.campfire(5).is_none());
     }
 }

@@ -3,10 +3,16 @@
 use crate::codec::{Reader, var_int_len, write_var_int};
 use crate::{ProtocolError, Result};
 use bytes::{Buf, BytesMut};
-use flate2::Compression;
 use flate2::read::ZlibDecoder;
-use flate2::write::ZlibEncoder;
-use std::io::{Read, Write};
+use flate2::{Compress, Compression, FlushCompress, Status};
+use std::cell::RefCell;
+use std::io::Read;
+
+thread_local! {
+    /// Кодировщик и буфер сжатия потока: переиспользуются между пакетами.
+    static ZLIB: RefCell<(Compress, Vec<u8>)> =
+        RefCell::new((Compress::new(Compression::fast(), true), Vec::new()));
+}
 
 /// Максимальный размер пакета в протоколе (2^21 - 1).
 pub const MAX_PACKET_LEN: usize = 2_097_151;
@@ -72,16 +78,30 @@ impl FrameCodec {
                 out.push(0);
                 out.extend_from_slice(packet);
             }
-            Some(_) => {
-                let mut enc =
-                    ZlibEncoder::new(Vec::with_capacity(packet.len() + 64), Compression::fast());
-                enc.write_all(packet).expect("write to Vec");
-                let compressed = enc.finish().expect("write to Vec");
+            Some(_) => ZLIB.with(|z| {
+                // Состояние zlib (~256 КБ) живёт в потоке и сбрасывается, а не создаётся заново.
+                let (enc, compressed) = &mut *z.borrow_mut();
+                enc.reset();
+                compressed.clear();
+                compressed.reserve(packet.len() / 2 + 64);
+                loop {
+                    let done = enc.total_in() as usize;
+                    let status = enc
+                        .compress_vec(&packet[done..], compressed, FlushCompress::Finish)
+                        .expect("zlib to Vec");
+                    if status == Status::StreamEnd {
+                        break;
+                    }
+                    compressed.reserve(compressed.capacity().max(64));
+                }
                 let data_len = packet.len() as i32;
                 write_var_int(out, (var_int_len(data_len) + compressed.len()) as i32);
                 write_var_int(out, data_len);
-                out.extend_from_slice(&compressed);
-            }
+                out.extend_from_slice(compressed);
+                if compressed.capacity() > 1 << 20 {
+                    compressed.shrink_to(1 << 20);
+                }
+            }),
         }
     }
 }

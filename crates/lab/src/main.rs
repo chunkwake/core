@@ -14,12 +14,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::{sleep, timeout};
 
 mod progress;
+mod report_html;
 mod tui;
 
 const VERSION: &str = "26.3";
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
 const STEP_TIMEOUT: Duration = Duration::from_secs(20);
 const REDSTONE_SIDE: i32 = 8;
+const COW_COUNT: usize = 2_500;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -35,6 +37,7 @@ enum BenchProfile {
     Movement,
     Exploration,
     Redstone,
+    Cows,
 }
 
 impl BenchProfile {
@@ -44,8 +47,9 @@ impl BenchProfile {
             "movement" => Ok(Self::Movement),
             "exploration" => Ok(Self::Exploration),
             "redstone" => Ok(Self::Redstone),
+            "cows" => Ok(Self::Cows),
             _ => Err(format!(
-                "unknown profile {value}; use join-burst, movement, exploration or redstone"
+                "unknown profile {value}; use join-burst, movement, exploration, redstone or cows"
             )),
         }
     }
@@ -56,6 +60,7 @@ impl BenchProfile {
             Self::Movement => "Движение",
             Self::Exploration => "Исследование мира",
             Self::Redstone => "Редстоун",
+            Self::Cows => "2500 коров",
         }
     }
 }
@@ -178,7 +183,7 @@ impl Args {
 }
 
 fn usage() -> &'static str {
-    "chunkwake-lab [smoke|compare|bench] --chunkwake PATH [--jar PATH] [--java PATH] [--work-dir PATH]\n  [--generated-cache PATH] [--accept-vanilla-eula] [--keep-worlds]\n  [--profile join-burst|movement|exploration|redstone] [--bots N] [--warmup SEC] [--duration SEC] [--repetitions N]\n  Run with no arguments to open the TUI. Missing --jar downloads vanilla into the lab cache."
+    "chunkwake-lab [smoke|compare|bench] --chunkwake PATH [--jar PATH] [--java PATH] [--work-dir PATH]\n  [--generated-cache PATH] [--accept-vanilla-eula] [--keep-worlds]\n  [--profile join-burst|movement|exploration|redstone|cows] [--bots N] [--warmup SEC] [--duration SEC] [--repetitions N]\n  Run with no arguments to open the TUI. Missing --jar downloads vanilla into the lab cache."
 }
 
 #[derive(Serialize, Clone)]
@@ -212,9 +217,19 @@ struct Benchmark {
     bytes_out: u64,
     cpu_seconds: Option<f64>,
     rss_peak_bytes: Option<u64>,
+    tps_avg: Option<f64>,
+    mspt_avg: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     redstone: Option<RedstoneResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cows: Option<CowResult>,
     samples: Vec<BenchSample>,
+}
+
+#[derive(Serialize, Clone)]
+struct CowResult {
+    requested: usize,
+    confirmed: usize,
 }
 
 #[derive(Serialize, Clone)]
@@ -223,9 +238,20 @@ struct RedstoneResult {
     observed_transitions: u64,
     lamp_count: usize,
     confirmed_changes: u64,
+    wire_count: usize,
+    wire_changes: u64,
     updates: u64,
     response_p50_ms: f64,
     response_p95_ms: f64,
+    sweeps: Vec<RedstoneSweep>,
+}
+
+#[derive(Serialize, Clone)]
+struct RedstoneSweep {
+    index: u64,
+    lamps: usize,
+    wires: usize,
+    completed_ms: Option<f64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -235,6 +261,8 @@ struct BenchSample {
     failed: usize,
     cpu_seconds: Option<f64>,
     rss_bytes: Option<u64>,
+    tps: Option<f64>,
+    mspt: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -541,7 +569,7 @@ async fn execute() -> Result<(), String> {
         }
     }
     drop(progress);
-    println!("Report: {}", root.join("report.md").display());
+    println!("Report: {}", root.join("report.html").display());
     if report_failed(&report) {
         std::process::exit(1);
     }
@@ -1235,11 +1263,11 @@ fn write_report(root: &Path, report: &Report) -> Result<(), String> {
 
     if report.mode == "bench" {
         md += "## Производительность\n\nВремя входа измеряется от подключения до первой позиции в игровом состоянии. Время запуска показано отдельно выше. p50/p95/p99 вычислены по вошедшим ботам; на малой выборке это лишь ориентир.\n\n";
-        md += "| Сервер | Вошло | Завершило | Ошибки | p50 | p95 | p99 | Процессор | Пик памяти | Получено | Отправлено |\n|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|\n";
+        md += "| Сервер | Вошло | Завершило | Ошибки | p50 | p95 | p99 | TPS | MSPT | Процессор | Пик памяти | Получено | Отправлено |\n|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|\n";
         for run in &report.runs {
             if let Some(b) = &run.benchmark {
                 md += &format!(
-                    "| {} | {} | {} | {} | {:.1} мс | {:.1} мс | {:.1} мс | {} | {} | {} | {} |\n",
+                    "| {} | {} | {} | {} | {:.1} мс | {:.1} мс | {:.1} мс | {} | {} | {} | {} | {} | {} |\n",
                     md_cell(&server_label(&run.server)),
                     b.joined,
                     b.completed,
@@ -1247,6 +1275,12 @@ fn write_report(root: &Path, report: &Report) -> Result<(), String> {
                     b.join_p50_ms,
                     b.join_p95_ms,
                     b.join_p99_ms,
+                    b.tps_avg
+                        .map(|value| format!("{value:.1}"))
+                        .unwrap_or_else(|| "—".into()),
+                    b.mspt_avg
+                        .map(|value| format!("{value:.1} мс"))
+                        .unwrap_or_else(|| "—".into()),
                     b.cpu_seconds
                         .map(|v| format!("{v:.2} с"))
                         .unwrap_or_else(|| "—".into()),
@@ -1259,36 +1293,89 @@ fn write_report(root: &Path, report: &Report) -> Result<(), String> {
             }
         }
         md += "\nРазница в скорости сама по себе не влияет на результат проверки.\n\n";
+        if report.profile == BenchProfile::Cows {
+            md += "### 2500 коров\n\nВ плоском мире вокруг наблюдателя размещаются 2500 коров в сетке 50 × 50. Подготовка и появление всех сущностей подтверждаются журналом до разминки; затем оба сервера измеряются с одинаковыми настройками. TPS вычисляется по приращению `time query gametime` между последовательными замерами, MSPT берётся из `tick query`. Средний MSPT — скользящее значение сервера, поэтому короткий прогон включает часть разминки.\n\n";
+            md += "| Сервер | Запрошено | Подтверждено | TPS | MSPT |\n|:--|--:|--:|--:|--:|\n";
+            for run in &report.runs {
+                if let Some(b) = &run.benchmark
+                    && let Some(cows) = &b.cows
+                {
+                    md += &format!(
+                        "| {} | {} | {} | {} | {} |\n",
+                        md_cell(&server_label(&run.server)),
+                        cows.requested,
+                        cows.confirmed,
+                        b.tps_avg
+                            .map(|v| format!("{v:.1}"))
+                            .unwrap_or_else(|| "—".into()),
+                        b.mspt_avg
+                            .map(|v| format!("{v:.1} мс"))
+                            .unwrap_or_else(|| "—".into())
+                    );
+                }
+            }
+            md += "\n";
+        }
         if report.profile == BenchProfile::Redstone {
-            md += "### Редстоун\n\nСхема: массив 8 × 8 ламп, под ними 64 соединённых редстоуновых провода и слой из 64 опорных блоков. Каждую секунду одна команда `fill` меняет опоры между камнем и редстоуновыми блоками. Оба сервера получают одинаковую схему и команды. Клиенты подтверждают состояние каждой лампы по игровым пакетам. Время отклика — от отправки команды до подтверждения всех 64 ламп; оно включает игровой тик и сеть.\n\n";
-            md += "| Сервер | Переключений | Полных обновлений массива | Подтверждено ламп | Событий блоков | Отклик p50 | Отклик p95 |\n|:--|--:|--:|--:|--:|--:|--:|\n";
+            md += "### Редстоун\n\nСхема: два соседних массива 8 × 8 — 64 лампы и 64 провода на 128 опорных блоках. Каждую секунду одна команда `fill` меняет опоры между камнем и редстоуновыми блоками. Оба сервера получают одинаковую схему и команды. Клиент подтверждает состояния обоих массивов по игровым пакетам. Полный отклик — от отправки команды до подтверждения всех 128 блоков; он включает игровой тик и сеть.\n\n";
+            md += "| Сервер | Переключений | Полных обновлений | Лампы | Провода | Событий блоков | Отклик p50 | Отклик p95 |\n|:--|--:|--:|--:|--:|--:|--:|--:|\n";
             for run in &report.runs {
                 if let Some(r) = run.benchmark.as_ref().and_then(|b| b.redstone.as_ref()) {
                     md += &format!(
-                        "| {} | {} | {} | {} / {} | {} | {:.1} мс | {:.1} мс |\n",
+                        "| {} | {} | {} | {} / {} | {} / {} | {} | {:.1} мс | {:.1} мс |\n",
                         md_cell(&server_label(&run.server)),
                         r.toggles,
                         r.observed_transitions,
                         r.confirmed_changes,
                         r.toggles * r.lamp_count as u64,
+                        r.wire_changes,
+                        r.toggles * r.wire_count as u64,
                         r.updates,
                         r.response_p50_ms,
                         r.response_p95_ms
                     );
                 }
             }
+            md += "\n#### Каждое переключение\n\n| Сервер | № | Лампы | Провода | Полный отклик |\n|:--|--:|--:|--:|--:|\n";
+            for run in &report.runs {
+                if let Some(r) = run.benchmark.as_ref().and_then(|b| b.redstone.as_ref()) {
+                    for sweep in &r.sweeps {
+                        md += &format!(
+                            "| {} | {} | {} / {} | {} / {} | {} |\n",
+                            md_cell(&server_label(&run.server)),
+                            sweep.index,
+                            sweep.lamps,
+                            r.lamp_count,
+                            sweep.wires,
+                            r.wire_count,
+                            sweep
+                                .completed_ms
+                                .map(|ms| format!("{ms:.1} мс"))
+                                .unwrap_or_else(|| "—".into())
+                        );
+                    }
+                }
+            }
             md += "\n";
         }
-        md += "### Динамика по секундам\n\nПоказатели процесса снимаются примерно раз в секунду во время нагрузки. Пропуск означает, что ОС не вернула значение.\n\n| Сервер | Секунда | Подключено | Ошибки | CPU накоплено | Память |\n|:--|--:|--:|--:|--:|--:|\n";
+        md += "### Динамика по секундам\n\nПоказатели процесса и сервера снимаются примерно раз в секунду во время нагрузки. Пропуск означает, что значение недоступно.\n\n| Сервер | Секунда | Подключено | Ошибки | TPS | MSPT | CPU накоплено | Память |\n|:--|--:|--:|--:|--:|--:|--:|--:|\n";
         for run in &report.runs {
             if let Some(b) = &run.benchmark {
                 for sample in &b.samples {
                     md += &format!(
-                        "| {} | {} | {} | {} | {} | {} |\n",
+                        "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
                         md_cell(&server_label(&run.server)),
                         sample.elapsed_secs,
                         sample.connected,
                         sample.failed,
+                        sample
+                            .tps
+                            .map(|v| format!("{v:.1}"))
+                            .unwrap_or_else(|| "—".into()),
+                        sample
+                            .mspt
+                            .map(|v| format!("{v:.1} мс"))
+                            .unwrap_or_else(|| "—".into()),
                         sample
                             .cpu_seconds
                             .map(|v| format!("{v:.2} с"))
@@ -1385,7 +1472,8 @@ fn write_report(root: &Path, report: &Report) -> Result<(), String> {
         }
         md += "\n";
     }
-    fs::write(root.join("report.md"), md).map_err(|e| e.to_string())
+    fs::write(root.join("report.md"), md).map_err(|e| e.to_string())?;
+    report_html::write(root, report)
 }
 
 fn run_failed(run: &Run) -> bool {
@@ -1494,8 +1582,41 @@ fn percentile(values: &[f64], p: f64) -> f64 {
     }
 }
 
+fn number_after(line: &str, marker: &str) -> Option<f64> {
+    let tail = line.split_once(marker)?.1.trim_start();
+    let number: String = tail
+        .chars()
+        .take_while(|character| {
+            character.is_ascii_digit() || *character == '.' || *character == ','
+        })
+        .collect();
+    number.replace(',', ".").parse().ok()
+}
+
+fn parse_tick_log(log: &str) -> (Vec<f64>, Vec<u64>) {
+    let mut mspt = Vec::new();
+    let mut times = Vec::new();
+    for line in log.lines() {
+        if let Some(value) =
+            number_after(line, "MSPT: ").or_else(|| number_after(line, "Average time per tick: "))
+        {
+            mspt.push(value);
+        }
+        if let Some(value) =
+            number_after(line, "The game time is ").or_else(|| number_after(line, "The time is "))
+        {
+            times.push(value as u64);
+        }
+    }
+    (mspt, times)
+}
+
 fn is_fixture_lamp([x, y, z]: [i32; 3]) -> bool {
     (0..REDSTONE_SIDE).contains(&x) && y == -57 && (0..REDSTONE_SIDE).contains(&z)
+}
+
+fn is_fixture_wire([x, y, z]: [i32; 3]) -> bool {
+    (REDSTONE_SIDE..REDSTONE_SIDE * 2).contains(&x) && y == -57 && (0..REDSTONE_SIDE).contains(&z)
 }
 
 async fn benchmark(
@@ -1528,7 +1649,7 @@ async fn benchmark(
             }).await.map_err(|_| "play position timeout".to_owned())??;
             let join_ms = started_join.elapsed().as_secs_f64() * 1000.0;
             let _ = connected_tx.send(join_ms);
-            if profile == BenchProfile::Redstone {
+            if matches!(profile, BenchProfile::Redstone | BenchProfile::Cows) {
                 while !*start_rx.borrow_and_update() {
                     start_rx.changed().await.map_err(|e| e.to_string())?;
                 }
@@ -1539,7 +1660,7 @@ async fn benchmark(
             tick.tick().await;
             let mut angle = i as f64;
             let mut base = None;
-            let finish = warmup + duration + if profile == BenchProfile::Redstone { Duration::from_secs(2) } else { Duration::ZERO };
+            let finish = warmup + duration + if matches!(profile, BenchProfile::Redstone | BenchProfile::Cows) { Duration::from_secs(2) } else { Duration::ZERO };
             while started.elapsed() < finish {
                 if started.elapsed() >= warmup && base.is_none() { base = Some((client.packets_in, client.bytes_in, client.bytes_out)); }
                 tokio::select! {
@@ -1553,18 +1674,18 @@ async fn benchmark(
                                 angle += 0.5;
                                 client.move_to([origin[0] + angle, origin[1], origin[2]]).await?;
                             }
-                            BenchProfile::JoinBurst | BenchProfile::Redstone => {}
+                            BenchProfile::JoinBurst | BenchProfile::Redstone | BenchProfile::Cows => {}
                         }
                     }
                     event = client.next_event() => {
                         match event? {
-                            Event::BlockUpdate(position, state) if is_fixture_lamp(position) => {
+                            Event::BlockUpdate(position, state) if is_fixture_lamp(position) || is_fixture_wire(position) => {
                                 let _ = lamp_tx.send((position, state, Instant::now()));
                             }
                             Event::BlockUpdates(blocks) => {
                                 let received = Instant::now();
                                 for (position, state) in blocks {
-                                    if is_fixture_lamp(position) {
+                                    if is_fixture_lamp(position) || is_fixture_wire(position) {
                                         let _ = lamp_tx.send((position, state, received));
                                     }
                                 }
@@ -1585,23 +1706,61 @@ async fn benchmark(
     drop(lamp_tx);
     let mut connected = 0;
     let mut join_times = Vec::new();
-    if args.profile == BenchProfile::Redstone {
+    if matches!(args.profile, BenchProfile::Redstone | BenchProfile::Cows) {
         let first = timeout(STEP_TIMEOUT, connected_rx.recv())
             .await
             .map_err(|_| "redstone observer did not join before timeout".to_owned())?
             .ok_or("redstone observer exited before joining")?;
         connected = 1;
         join_times.push(first);
-        if server == "vanilla" {
+        if server == "vanilla" && args.profile == BenchProfile::Redstone {
             child.send_console("forceload add 0 0")?;
         }
         sleep(Duration::from_millis(500)).await;
-        child.send_console("fill 0 -58 0 15 -58 7 minecraft:stone")?;
-        child.send_console("fill 8 -57 0 15 -57 7 minecraft:redstone_wire")?;
-        child.send_console("fill 0 -57 0 7 -57 7 minecraft:redstone_lamp[lit=false]")?;
-        sleep(Duration::from_millis(800)).await;
+        if args.profile == BenchProfile::Redstone {
+            child.send_console("fill 0 -58 0 15 -58 7 minecraft:stone")?;
+            child.send_console("fill 8 -57 0 15 -57 7 minecraft:redstone_wire")?;
+            child.send_console("fill 0 -57 0 7 -57 7 minecraft:redstone_lamp[lit=false]")?;
+            sleep(Duration::from_millis(800)).await;
+        } else {
+            let marker = "CHUNKWAKE_LAB_COWS_READY_2500";
+            for index in 0..COW_COUNT {
+                let x = (index % 50) as i32 - 24;
+                let z = (index / 50) as i32 - 24;
+                child.send_console(&format!("summon minecraft:cow {x}.5 -56 {z}.5"))?;
+                if index % 250 == 249 {
+                    progress.update(
+                        Some(server),
+                        &format!("Summoning cows · {} / {COW_COUNT}", index + 1),
+                    );
+                }
+            }
+            child.send_console(&format!("say {marker}"))?;
+            let started = Instant::now();
+            let text = loop {
+                let text = fs::read_to_string(child.dir.join("server.log")).unwrap_or_default();
+                if text.contains(marker) {
+                    break text;
+                }
+                if started.elapsed() > Duration::from_secs(120) {
+                    return Err("timed out while waiting for 2500 cows to spawn".into());
+                }
+                sleep(Duration::from_millis(250)).await;
+            };
+            let confirmed = text.matches("Summoned new").count();
+            if confirmed != COW_COUNT {
+                return Err(format!(
+                    "cow fixture incomplete: {confirmed} / {COW_COUNT} summons confirmed; see server log"
+                ));
+            }
+            progress.update(
+                Some(server),
+                &format!("{confirmed} cows spawned; starting warmup"),
+            );
+            sleep(Duration::from_secs(2)).await;
+        }
     }
-    if args.profile == BenchProfile::Redstone {
+    if matches!(args.profile, BenchProfile::Redstone | BenchProfile::Cows) {
         start_tx.send(true).map_err(|e| e.to_string())?;
     }
     let mut peak = before.map(|(_, rss)| rss);
@@ -1615,10 +1774,14 @@ async fn benchmark(
     let mut observed_transitions = 0;
     let mut updates = 0;
     let mut confirmed_changes = 0;
+    let mut wire_changes = 0;
     let mut response_ms = Vec::new();
-    let mut last_lamp_state = HashMap::new();
-    let mut seen_in_sweep = HashSet::new();
+    let mut last_block_state = HashMap::new();
+    let mut seen_lamps = HashSet::new();
+    let mut seen_wires = HashSet::new();
+    let mut sweeps = Vec::new();
     let mut awaiting = None;
+    let mut completed_ms = None;
     let mut toggle_tick = tokio::time::interval_at(
         tokio::time::Instant::from_std(measurement_started + args.warmup),
         Duration::from_secs(1),
@@ -1628,6 +1791,23 @@ async fn benchmark(
     sample_tick.tick().await;
     while !tasks.is_empty() && Instant::now() < deadline {
         tokio::select! {
+            biased;
+            _ = toggle_tick.tick(), if args.profile == BenchProfile::Redstone && measurement_started.elapsed() < args.warmup + args.duration => {
+                if measurement_started.elapsed() < args.warmup + args.duration {
+                    if toggles > 0 {
+                        confirmed_changes += seen_lamps.len() as u64;
+                        wire_changes += seen_wires.len() as u64;
+                        sweeps.push(RedstoneSweep { index: toggles, lamps: seen_lamps.len(), wires: seen_wires.len(), completed_ms });
+                    }
+                    seen_lamps.clear();
+                    seen_wires.clear();
+                    completed_ms = None;
+                    let next = if toggles % 2 == 0 { "minecraft:redstone_block" } else { "minecraft:stone" };
+                    child.send_console(&format!("fill 0 -58 0 15 -58 7 {next}"))?;
+                    toggles += 1;
+                    awaiting = Some(Instant::now());
+                }
+            }
             Some(join_ms) = connected_rx.recv() => {
                 connected += 1;
                 join_times.push(join_ms);
@@ -1643,33 +1823,26 @@ async fn benchmark(
             }
             Some((position, state, received)) = lamp_rx.recv(), if args.profile == BenchProfile::Redstone => {
                 updates += 1;
-                if last_lamp_state.insert(position, state) != Some(state) {
+                if last_block_state.insert(position, state) != Some(state) {
                     if let Some(sent) = awaiting {
-                        if seen_in_sweep.insert(position) && seen_in_sweep.len() == (REDSTONE_SIDE * REDSTONE_SIDE) as usize {
+                        if is_fixture_lamp(position) { seen_lamps.insert(position); }
+                        if is_fixture_wire(position) { seen_wires.insert(position); }
+                        if completed_ms.is_none() && seen_lamps.len() == (REDSTONE_SIDE * REDSTONE_SIDE) as usize && seen_wires.len() == (REDSTONE_SIDE * REDSTONE_SIDE) as usize {
                             observed_transitions += 1;
-                            confirmed_changes += seen_in_sweep.len() as u64;
-                            seen_in_sweep.clear();
-                            response_ms.push(received.duration_since(sent).as_secs_f64() * 1000.0);
-                            awaiting = None;
+                            let elapsed = received.duration_since(sent).as_secs_f64() * 1000.0;
+                            response_ms.push(elapsed);
+                            completed_ms = Some(elapsed);
                         }
                     }
                 }
             }
-            _ = toggle_tick.tick(), if args.profile == BenchProfile::Redstone && measurement_started.elapsed() < args.warmup + args.duration => {
-                if measurement_started.elapsed() < args.warmup + args.duration {
-                    confirmed_changes += seen_in_sweep.len() as u64;
-                    seen_in_sweep.clear();
-                    let next = if toggles % 2 == 0 { "minecraft:redstone_block" } else { "minecraft:stone" };
-                    child.send_console(&format!("fill 0 -58 0 15 -58 7 {next}"))?;
-                    toggles += 1;
-                    awaiting = Some(Instant::now());
-                }
-            }
             _ = sample_tick.tick() => {
+                child.send_console("tick query")?;
+                child.send_console("time query gametime")?;
                 let stats = process_stats(child.child.id());
                 if let Some((_, rss)) = stats { peak = Some(peak.unwrap_or(0).max(rss)); }
                 let elapsed = measurement_started.elapsed();
-                samples.push(BenchSample { elapsed_secs: elapsed.as_secs(), connected, failed, cpu_seconds: stats.map(|s| (s.0 - before.map_or(0.0, |b| b.0)).max(0.0)), rss_bytes: stats.map(|s| s.1) });
+                samples.push(BenchSample { elapsed_secs: elapsed.as_secs(), connected, failed, cpu_seconds: stats.map(|s| (s.0 - before.map_or(0.0, |b| b.0)).max(0.0)), rss_bytes: stats.map(|s| s.1), tps: None, mspt: None });
                 let phase = if elapsed < args.warmup { "Warmup" } else { "Measuring" };
                 let phase_elapsed = if elapsed < args.warmup { elapsed } else { elapsed.saturating_sub(args.warmup) };
                 let phase_total = if elapsed < args.warmup { args.warmup } else { args.duration };
@@ -1679,14 +1852,60 @@ async fn benchmark(
     }
     failed += tasks.len();
     tasks.abort_all();
-    confirmed_changes += seen_in_sweep.len() as u64;
+    if args.profile == BenchProfile::Redstone && toggles > 0 {
+        confirmed_changes += seen_lamps.len() as u64;
+        wire_changes += seen_wires.len() as u64;
+        sweeps.push(RedstoneSweep {
+            index: toggles,
+            lamps: seen_lamps.len(),
+            wires: seen_wires.len(),
+            completed_ms,
+        });
+    }
+    let (tick_times, game_times) = {
+        let mut parsed = (Vec::new(), Vec::new());
+        for _ in 0..20 {
+            let log = fs::read_to_string(child.dir.join("server.log")).unwrap_or_default();
+            parsed = parse_tick_log(&log);
+            if parsed.0.len() >= samples.len() && parsed.1.len() >= samples.len() {
+                break;
+            }
+            sleep(Duration::from_millis(250)).await;
+        }
+        parsed
+    };
+    for (sample, &mspt) in samples.iter_mut().zip(&tick_times) {
+        sample.mspt = Some(mspt);
+    }
+    for index in 1..samples.len().min(game_times.len()) {
+        let elapsed = samples[index]
+            .elapsed_secs
+            .saturating_sub(samples[index - 1].elapsed_secs);
+        if elapsed > 0 && game_times[index] >= game_times[index - 1] {
+            samples[index].tps =
+                Some((game_times[index] - game_times[index - 1]) as f64 / elapsed as f64);
+        }
+    }
+    let measured: Vec<&BenchSample> = samples
+        .iter()
+        .filter(|sample| sample.elapsed_secs >= args.warmup.as_secs())
+        .collect();
+    let average = |values: Vec<f64>| {
+        (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64)
+    };
+    let tps_avg = average(measured.iter().filter_map(|sample| sample.tps).collect());
+    let mspt_avg = average(measured.iter().filter_map(|sample| sample.mspt).collect());
+    if args.profile == BenchProfile::Cows && (tps_avg.is_none() || mspt_avg.is_none()) {
+        failed += 1;
+        errors.push("не удалось получить MSPT/TPS для профиля 2500 коров".into());
+    }
     let after = process_stats(child.child.id());
     let mut times = join_times;
     times.sort_by(f64::total_cmp);
     response_ms.sort_by(f64::total_cmp);
     if args.profile == BenchProfile::Redstone && observed_transitions == 0 {
         failed += 1;
-        errors.push("массив ламп не завершил ни одного переключения".into());
+        errors.push("массивы ламп и проводов не завершили ни одного переключения".into());
     }
     Ok(Benchmark {
         joined: connected,
@@ -1701,14 +1920,23 @@ async fn benchmark(
         bytes_out: results.iter().map(|r| r.bytes_out).sum(),
         cpu_seconds: before.zip(after).map(|(a, b)| (b.0 - a.0).max(0.0)),
         rss_peak_bytes: peak,
+        tps_avg,
+        mspt_avg,
         redstone: (args.profile == BenchProfile::Redstone).then(|| RedstoneResult {
             toggles,
             observed_transitions,
             lamp_count: (REDSTONE_SIDE * REDSTONE_SIDE) as usize,
             confirmed_changes,
+            wire_count: (REDSTONE_SIDE * REDSTONE_SIDE) as usize,
+            wire_changes,
             updates,
             response_p50_ms: percentile(&response_ms, 0.50),
             response_p95_ms: percentile(&response_ms, 0.95),
+            sweeps,
+        }),
+        cows: (args.profile == BenchProfile::Cows).then(|| CowResult {
+            requested: COW_COUNT,
+            confirmed: COW_COUNT,
         }),
         samples,
     })
@@ -1934,7 +2162,10 @@ mod tests {
                     bytes_out: 50,
                     cpu_seconds: Some(0.1),
                     rss_peak_bytes: Some(1024),
+                    tps_avg: Some(20.0),
+                    mspt_avg: Some(1.0),
                     redstone: None,
+                    cows: None,
                     samples: vec![],
                 }),
             }],
@@ -1948,5 +2179,16 @@ mod tests {
         assert!(md.contains("| Сервер | Вошло | Завершило | Ошибки |"));
         assert!(md.contains("Разница в скорости сама по себе не влияет"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parses_server_tick_queries_without_confusing_target_rate_with_actual_tps() {
+        let chunkwake = "INFO TPS: 19.8 MSPT: 12.4\nINFO The game time is 100\nINFO TPS: 19.9 MSPT: 11.2\nINFO The game time is 119";
+        assert_eq!(
+            parse_tick_log(chunkwake),
+            (vec![12.4, 11.2], vec![100, 119])
+        );
+        let vanilla = "System chat: Target tick rate: 20.0 per second.\nAverage time per tick: 26.3ms (Target: 50.0ms)\nSystem chat: The time is 450\n";
+        assert_eq!(parse_tick_log(vanilla), (vec![26.3], vec![450]));
     }
 }

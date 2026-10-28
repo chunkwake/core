@@ -337,7 +337,8 @@ impl RegionStore {
             let path = self.path(rx, rz);
             let mut region = Self::read_region(&path)?;
             for (i, nbt) in list {
-                let mut enc = ZlibEncoder::new(vec![ZLIB], Compression::default());
+                // Автосейв каждые 30 с: быстрый уровень в 2–3 раза дешевле, файл ~10% больше.
+                let mut enc = ZlibEncoder::new(vec![ZLIB], Compression::fast());
                 enc.write_all(&nbt::write_root(nbt)).expect("write to Vec");
                 region.insert(i, enc.finish().expect("write to Vec"));
             }

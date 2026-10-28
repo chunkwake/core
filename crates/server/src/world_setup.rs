@@ -424,6 +424,16 @@ fn survival_data(
             "minecraft:experience_orb",
         )
         .map_err(s)?,
+        mob_entity_types: {
+            let id =
+                |n| chunkwake_data::registries::builtin_id(data_dir, "entity_type", n).map_err(s);
+            [
+                id("minecraft:cow")?,
+                id("minecraft:pig")?,
+                id("minecraft:sheep")?,
+                id("minecraft:chicken")?,
+            ]
+        },
     })
 }
 

@@ -82,6 +82,21 @@ impl Tag {
             _ => None,
         }
     }
+
+    pub fn as_int_array(&self) -> Option<&[i32]> {
+        match self {
+            Tag::IntArray(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
+/// Compound в сетевом NBT: байт типа и тело без имени. Пустой — `10 0`,
+/// как пакет чанка пишет блок-сущность без данных.
+pub fn write_network(c: &Compound) -> Vec<u8> {
+    let mut out = vec![10];
+    write_compound(&mut out, c);
+    out
 }
 
 /// Корневой compound с пустым именем (формат файлов чанков).

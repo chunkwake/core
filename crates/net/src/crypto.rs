@@ -49,21 +49,20 @@ impl StreamCipher {
         }
     }
 
+    /// Весь срез одним вызовом: бэкенд AES берётся один раз, а не на байт.
     pub fn encrypt(&mut self, data: &mut [u8]) {
-        for b in data {
-            let mut block = GenericArray::from([*b]);
-            self.enc.encrypt_block_mut(&mut block);
-            *b = block[0];
-        }
+        self.enc.encrypt_blocks_mut(as_blocks(data));
     }
 
     pub fn decrypt(&mut self, data: &mut [u8]) {
-        for b in data {
-            let mut block = GenericArray::from([*b]);
-            self.dec.decrypt_block_mut(&mut block);
-            *b = block[0];
-        }
+        self.dec.decrypt_blocks_mut(as_blocks(data));
     }
+}
+
+/// Блок CFB8 — один байт (`GenericArray<u8, U1>`, та же раскладка, что у `u8`).
+fn as_blocks(data: &mut [u8]) -> &mut [GenericArray<u8, cfb8::cipher::consts::U1>] {
+    // SAFETY: `GenericArray<u8, U1>` — `repr(transparent)` над `[u8; 1]`.
+    unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr().cast(), data.len()) }
 }
 
 #[cfg(test)]
@@ -71,6 +70,27 @@ mod tests {
     use super::*;
     use rsa::RsaPublicKey;
     use rsa::pkcs8::DecodePublicKey;
+
+    #[test]
+    fn bulk_matches_per_byte() {
+        let secret = [3u8; 16];
+        let data: Vec<u8> = (0..5000u32).map(|i| (i * 31 % 251) as u8).collect();
+        let mut bulk = data.clone();
+        let mut c = StreamCipher::new(&secret);
+        c.encrypt(&mut bulk[..100]);
+        c.encrypt(&mut bulk[100..]);
+        let mut one = data.clone();
+        let mut e = cfb8::Encryptor::<Aes128>::new((&secret).into(), (&secret).into());
+        for b in &mut one {
+            let mut block = GenericArray::from([*b]);
+            e.encrypt_block_mut(&mut block);
+            *b = block[0];
+        }
+        assert_eq!(bulk, one);
+        let mut d = StreamCipher::new(&secret);
+        d.decrypt(&mut bulk);
+        assert_eq!(bulk, data);
+    }
 
     #[test]
     fn rsa_roundtrip() {

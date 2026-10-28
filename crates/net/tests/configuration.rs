@@ -139,6 +139,7 @@ async fn full_configuration() {
     // Сервер не отдаёт игрока, пока клиент не подтвердил finish.
     assert!(players.try_recv().is_err());
     c.send(&[SB_FINISH as u8]).await.unwrap();
+    c.flush().await.unwrap();
     assert_eq!(players.recv().await.unwrap().name, "Steve");
 }
 

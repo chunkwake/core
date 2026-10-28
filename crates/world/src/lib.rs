@@ -187,6 +187,8 @@ pub struct Section {
     storage: Storage,
     non_air: u16,
     pub biome: u32,
+    /// Закодированный для сети контейнер блоков: клоны делят его, `set` сбрасывает.
+    net: Arc<std::sync::OnceLock<Vec<u8>>>,
 }
 
 impl PartialEq for Section {
@@ -201,6 +203,7 @@ impl Section {
             storage: Storage::Single(state),
             non_air: if state == AIR { 0 } else { 4096 },
             biome,
+            net: Default::default(),
         }
     }
 
@@ -252,6 +255,7 @@ impl Section {
             })),
             non_air,
             biome,
+            net: Default::default(),
         }
     }
 
@@ -273,6 +277,7 @@ impl Section {
             return old;
         }
         self.non_air = (self.non_air as i32 + (state != AIR) as i32 - (old != AIR) as i32) as u16;
+        self.net = Default::default();
         if let Storage::Single(b) = self.storage {
             self.storage = Storage::Paletted(Arc::new(Paletted {
                 palette: vec![b],
@@ -451,24 +456,36 @@ impl ChunkColumn {
             .reserve(self.sections.len().saturating_mul(2048 + 64));
         for s in &self.sections {
             data.u16(s.non_air() as u16).u16(0);
-            write_block_container(&mut data, s, 4, self.global_block_bits);
+            // Неизменённая секция кодируется один раз: после правки блока
+            // пересобирается только её секция, а не все 24.
+            let bits = self.global_block_bits;
+            let bytes = s.net.get_or_init(|| {
+                let mut w = Writer::new();
+                write_block_container(&mut w, s, 4, bits);
+                w.buf
+            });
+            data.buf.extend_from_slice(bytes);
             write_single(&mut data, s.biome);
         }
         w.byte_array(&data.buf);
-        // Блок-сущности: упакованные x/z, y, тип и NBT (клиенту сундуку данные не нужны).
+        // Блок-сущности: упакованные x/z, y, тип и NBT.
+        // Сундуку клиенту данные не нужны. Костру нужны `Items`, иначе еда не видна.
         let types = BLOCK_ENTITY_TYPES.get();
-        let known: Vec<([i32; 3], i32)> = self
+        let known: Vec<(&BlockEntity, i32, [i32; 3])> = self
             .block_entities
             .iter()
-            .filter_map(|(pos, be)| Some((*pos, *types?.get(&be.id)?)))
+            .filter_map(|(pos, be)| Some((be, *types?.get(&be.id)?, *pos)))
             .collect();
         w.var_int(known.len() as i32);
-        for ([x, y, z], kind) in known {
+        for (be, kind, [x, y, z]) in known {
             w.u8(((x & 15) << 4 | (z & 15)) as u8)
                 .u16(y as i16 as u16)
                 .var_int(kind);
-            // Пустой безымянный compound.
-            w.u8(10).u8(0);
+            if be.id == "minecraft:campfire" {
+                w.buf.extend(nbt::write_network(&be.nbt));
+            } else {
+                w.u8(10).u8(0);
+            }
         }
 
         // Свет: секции -1..=n (n+2 бит): под миром темно, над миром — небо.

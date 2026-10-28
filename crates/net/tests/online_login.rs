@@ -161,6 +161,7 @@ async fn online_login_success() {
     assert!(r.remaining().is_empty(), "nothing after sessionId");
 
     c.send(&[0x03]).await.unwrap();
+    c.flush().await.unwrap();
     let player = players.recv().await.unwrap();
     assert_eq!(player.uuid, uuid);
     assert_eq!(player.properties.len(), 1);

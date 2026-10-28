@@ -396,7 +396,8 @@ impl Ctx<'_> {
         }
         // `spread`: сперва вниз, потом в стороны.
         let below = add(p, 0);
-        if self.wall_open(p, 0) && self.passes(below, f.kind) && self.replaceable(below, f.kind, 0) {
+        if self.wall_open(p, 0) && self.passes(below, f.kind) && self.replaceable(below, f.kind, 0)
+        {
             let falling = Fluid::flowing(f.kind, 8, true);
             self.spread_to(&mut out, below, 0, falling);
             let sources = SIDES
@@ -680,7 +681,10 @@ mod tests {
             })
             .collect();
         // Вниз нельзя (целый низ), на восток — спинка; остальные стороны текут.
-        assert!(!to.contains(&[0, -1, 0]) && !to.contains(&[1, 0, 0]), "{to:?}");
+        assert!(
+            !to.contains(&[0, -1, 0]) && !to.contains(&[1, 0, 0]),
+            "{to:?}"
+        );
         assert!(to.contains(&[-1, 0, 0]), "{to:?}");
     }
 
@@ -688,7 +692,11 @@ mod tests {
     fn opposite_slab_halves_close_the_face() {
         let (pl, id) = table();
         // Заводнённая нижняя плита, к востоку — верхняя: вместе грань закрыта.
-        let w = HashMap::from([([0, -1, 0], id["stone"]), ([0, 0, 0], id["low"]), ([1, 0, 0], id["high"])]);
+        let w = HashMap::from([
+            ([0, -1, 0], id["stone"]),
+            ([0, 0, 0], id["low"]),
+            ([1, 0, 0], id["high"]),
+        ]);
         let at = |p: [i32; 3]| w.get(&p).copied().unwrap_or(0);
         let ctx = Ctx { pl: &pl, at: &at };
         assert!(!ctx.wall_open([0, 0, 0], 5));
