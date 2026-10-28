@@ -2,6 +2,7 @@
 //! других игроков. Мир статичен.
 
 use crate::click::{self, Kind};
+use crate::furnace::{self, Furnace};
 use crate::items::{self, Dropped};
 use crate::live::{self, Control, Event, Live};
 use crate::ops::{self, OpList};
@@ -93,6 +94,7 @@ struct Ids {
     sb_set_carried_item: i32,
     container_set_content: i32,
     container_set_slot: i32,
+    container_set_data: i32,
     set_health: i32,
     respawn: i32,
     damage_event: i32,
@@ -148,6 +150,10 @@ pub struct PlayPlan {
     plugin_commands: Mutex<Vec<String>>,
     /// Предметы на земле по ID сущности.
     dropped: Mutex<HashMap<i32, Dropped>>,
+    /// Работающие и открытые печи.
+    furnaces: Mutex<HashMap<[i32; 3], FurnaceEntry>>,
+    /// Печи из загруженных с диска чанков — подхватит тик.
+    pending_furnaces: Mutex<Vec<[i32; 3]>>,
     players_source: std::sync::OnceLock<Arc<dyn PlayerSource>>,
     /// Несохранённые снимки игроков.
     player_saves: Mutex<HashMap<Uuid, PlayerSave>>,
@@ -392,6 +398,8 @@ struct Window {
     /// Вторая половина двойного сундука.
     second: Option<[i32; 3]>,
     slots: Vec<Slot>,
+    /// Последние отправленные свойства окна (печь).
+    data: [i32; 4],
 }
 
 impl Window {
@@ -439,8 +447,24 @@ fn container_entity(block: &str) -> Option<&'static str> {
         "minecraft:chest" => Some("minecraft:chest"),
         "minecraft:trapped_chest" => Some("minecraft:trapped_chest"),
         "minecraft:barrel" => Some("minecraft:barrel"),
+        "minecraft:furnace" => Some("minecraft:furnace"),
+        "minecraft:blast_furnace" => Some("minecraft:blast_furnace"),
+        "minecraft:smoker" => Some("minecraft:smoker"),
         _ => None,
     }
+}
+
+/// Индекс печи в `FURNACES` по имени блока.
+fn furnace_kind(block: &str) -> Option<u8> {
+    FURNACES.iter().position(|f| *f == block).map(|i| i as u8)
+}
+
+use chunkwake_data::world::FURNACES;
+
+/// Печь в памяти: состояние и кто смотрит в её окно.
+struct FurnaceEntry {
+    f: Furnace,
+    viewers: Vec<Uuid>,
 }
 
 /// `Direction` по номеру (как `BlockFace` Bukkit).
@@ -466,6 +490,10 @@ pub struct SurvivalData {
     pub chests: HashMap<u32, ChestState>,
     pub chest_states: HashMap<ChestState, u32>,
     pub menu_crafting: i32,
+    /// Меню печей по порядку `FURNACES`.
+    pub menu_furnace: [i32; 3],
+    /// Состояние печи → то же с переключённым `lit`.
+    pub furnace_lit: HashMap<u32, u32>,
     /// Нужен ли правильный инструмент для дропа, по состоянию блока.
     pub requires_tool: Vec<bool>,
     /// Компонент `minecraft:tool` по ID предмета.
@@ -561,6 +589,7 @@ impl PlayPlan {
                 sb_set_carried_item: sb("set_carried_item")?,
                 container_set_content: cb("container_set_content")?,
                 container_set_slot: cb("container_set_slot")?,
+                container_set_data: cb("container_set_data")?,
                 set_health: cb("set_health")?,
                 respawn: cb("respawn")?,
                 damage_event: cb("damage_event")?,
@@ -598,6 +627,8 @@ impl PlayPlan {
             survival,
             hooks: std::sync::OnceLock::new(),
             plugin_commands: Mutex::new(Vec::new()),
+            furnaces: Mutex::new(HashMap::new()),
+            pending_furnaces: Mutex::new(Vec::new()),
             dropped: Mutex::new(HashMap::new()),
             players_source: std::sync::OnceLock::new(),
             player_saves: Mutex::new(HashMap::new()),
@@ -1084,13 +1115,21 @@ impl PlayPlan {
             Ok(columns) => {
                 let mut world = self.edited.lock().unwrap();
                 let mut cache = self.chunk_frames.lock().unwrap();
+                let mut found = Vec::new();
                 for (pos, c) in columns {
+                    found.extend(
+                        c.block_entities
+                            .iter()
+                            .filter(|(_, be)| FURNACES.contains(&be.id.as_str()))
+                            .map(|(p, _)| *p),
+                    );
                     // Правка, сделанная до загрузки, не затирается диском.
                     if let std::collections::hash_map::Entry::Vacant(e) = world.entry(pos) {
                         e.insert((c, 0));
                         cache.remove(&pos);
                     }
                 }
+                self.pending_furnaces.lock().unwrap().extend(found);
             }
             Err(e) => tracing::error!("region {key:?}: {e}"),
         }
@@ -1582,6 +1621,7 @@ impl PlayPlan {
                 tick.tick().await;
                 let Some(plan) = plan.upgrade() else { return };
                 plan.tick_items();
+                plan.tick_furnaces();
                 plan.flush_blocks();
                 plan.flush_moves();
                 if let Some(h) = plan.hooks() {
@@ -1886,6 +1926,20 @@ impl PlayPlan {
                             state.inv.selected = s;
                             eating = None;
                             conn.send(&inv::set_held_slot(ids.set_held_slot, s as i32)).await?;
+                        }
+                        Control::Furnace(pos, data, items) => {
+                            if let Some(w) = window.as_mut().filter(|w| w.pos == pos) {
+                                for (i, (&v, old)) in data.iter().zip(w.data.iter_mut()).enumerate() {
+                                    if v != *old {
+                                        *old = v;
+                                        conn.send(&inv::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
+                                    }
+                                }
+                                if items {
+                                    w.slots = self.window_slots(w);
+                                    self.send_window(conn, &mut state.inv, window.as_ref(), window.as_ref().map_or(0, |w| w.id)).await?;
+                                }
+                            }
                         }
                         Control::ContainerChanged(pos) => {
                             if let Some(w) = window.as_mut().filter(|w| w.positions().contains(&pos)) {
@@ -2294,6 +2348,7 @@ impl PlayPlan {
                         let kind = match clicked.as_str() {
                             "minecraft:crafting_table" => Some(Kind::Crafting),
                             "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" => Some(Kind::Chest(3)),
+                            n if furnace_kind(n).is_some() => Some(Kind::Furnace),
                             _ => None,
                         };
                         // `useItemOn`: шифт с предметом в руке — не открывать, а ставить.
@@ -2311,14 +2366,28 @@ impl PlayPlan {
                             };
                             let (menu, title) = match kind {
                                 Kind::Crafting => (self.survival.menu_crafting, "container.crafting"),
+                                Kind::Furnace => {
+                                    let k = furnace_kind(&clicked).unwrap_or(0) as usize;
+                                    (self.survival.menu_furnace[k], ["container.furnace", "container.blast_furnace", "container.smoker"][k])
+                                }
                                 Kind::Chest(6) => (self.survival.menu_double_chest, "container.chestDouble"),
                                 _ if clicked == "minecraft:barrel" => (self.survival.menu_chest, "container.barrel"),
                                 _ => (self.survival.menu_chest, "container.chest"),
                             };
-                            let mut w = Window { id: next_window, kind, pos, second, slots: Vec::new() };
+                            let mut w = Window { id: next_window, kind, pos, second, slots: Vec::new(), data: [0; 4] };
                             w.slots = self.window_slots(&w);
                             conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &serde_json::json!({"translate": title}))).await?;
                             self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
+                            if kind == Kind::Furnace {
+                                let data = self.with_furnace(pos, |e| {
+                                    e.viewers.push(uuid);
+                                    e.f.data()
+                                }).unwrap_or_default();
+                                for (i, v) in data.into_iter().enumerate() {
+                                    conn.send(&inv::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
+                                }
+                                w.data = data;
+                            }
                             window = Some(w);
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                             continue;
@@ -2580,6 +2649,11 @@ impl PlayPlan {
             return Ok(false);
         };
         self.unlink_chest(pos, old);
+        // Печь: в блок-сущность её текущее содержимое.
+        let removed = self.furnaces.lock().unwrap().remove(&pos);
+        if let Some(e) = removed {
+            self.save_furnace(pos, &e.f);
+        }
         // Содержимое сундука — на землю.
         if self.block_entity(pos).is_some() {
             let center = [pos[0] as f64 + 0.5, pos[1] as f64 + 0.5, pos[2] as f64 + 0.5];
@@ -2625,7 +2699,7 @@ impl PlayPlan {
         let (kind, mut view) = if c.window == inv::PLAYER_WINDOW {
             (Kind::Player, inv.slots.to_vec())
         } else if let Some(w) = window.as_mut().filter(|w| w.id == c.window) {
-            if matches!(w.kind, Kind::Chest(_)) {
+            if matches!(w.kind, Kind::Chest(_) | Kind::Furnace) {
                 w.slots = self.window_slots(w);
             }
             (w.kind, w.slots.iter().chain(&inv.slots[9..45]).copied().collect())
@@ -2642,7 +2716,7 @@ impl PlayPlan {
         let size = match kind {
             Kind::Player => 2,
             Kind::Crafting => 3,
-            Kind::Chest(_) => 0,
+            Kind::Chest(_) | Kind::Furnace => 0,
         };
         let fill = |slots: &mut [Slot]| {
             if size > 0 {
@@ -2667,9 +2741,20 @@ impl PlayPlan {
         };
         let max = |item: i32| self.max_stack(item);
         let equip = |item: i32| self.survival.items.get(item as usize).and_then(|i| i.equip);
+        // Печь окна: рецепты её вида.
+        let fk = window
+            .as_ref()
+            .filter(|w| w.kind == Kind::Furnace)
+            .and_then(|w| furnace_kind(self.state_name(self.block(w.pos).unwrap_or(AIR))))
+            .unwrap_or(0);
+        let smeltable = |item: i32| self.survival.recipes.cooking(fk, item).is_some();
+        let fuel = |item: i32| self.survival.items.get(item as usize).is_some_and(|i| i.fuel.is_some());
         let rules = click::Rules {
             max_stack: &max,
             equip: &equip,
+            smeltable: &smeltable,
+            fuel: &fuel,
+            bucket: self.item_id("minecraft:bucket"),
             creative,
         };
         let thrown = click::Menu {
@@ -2694,6 +2779,9 @@ impl PlayPlan {
                     w.slots.copy_from_slice(&view[..n]);
                     self.save_window(w, me);
                 }
+                if kind == Kind::Furnace && w.slots[..] != view[..n] {
+                    self.set_furnace_slots(w.pos, [view[0], view[1], view[2]], me);
+                }
                 w.slots.copy_from_slice(&view[..n]);
                 inv.slots[9..45].copy_from_slice(&view[n..]);
             }
@@ -2709,6 +2797,7 @@ impl PlayPlan {
     fn window_valid(&self, w: &Window) -> bool {
         match w.kind {
             Kind::Chest(_) => w.positions().iter().all(|&p| self.block_entity(p).is_some()),
+            Kind::Furnace => self.block(w.pos).is_some_and(|s| furnace_kind(self.state_name(s)).is_some()),
             _ => self.block(w.pos).is_some_and(|s| self.state_name(s) == "minecraft:crafting_table"),
         }
     }
@@ -2717,10 +2806,16 @@ impl PlayPlan {
     fn close_window(&self, inv: &mut Inventory, window: &mut Option<Window>, uuid: Uuid) {
         let mut back: Vec<Stack> = inv.slots[1..5].iter_mut().filter_map(Option::take).collect();
         inv.slots[0] = None;
-        if let Some(mut w) = window.take()
-            && w.kind == Kind::Crafting
-        {
-            back.extend(w.slots[1..10].iter_mut().filter_map(Option::take));
+        if let Some(mut w) = window.take() {
+            match w.kind {
+                Kind::Crafting => back.extend(w.slots[1..10].iter_mut().filter_map(Option::take)),
+                Kind::Furnace => {
+                    if let Some(e) = self.furnaces.lock().unwrap().get_mut(&w.pos) {
+                        e.viewers.retain(|v| *v != uuid);
+                    }
+                }
+                _ => {}
+            }
         }
         back.extend(inv.carried.take());
         inv.drag = Default::default();
@@ -2760,7 +2855,142 @@ impl PlayPlan {
     fn window_slots(&self, w: &Window) -> Vec<Slot> {
         match w.kind {
             Kind::Chest(_) => w.positions().iter().flat_map(|&p| self.container_items(p)).collect(),
+            Kind::Furnace => self.with_furnace(w.pos, |e| e.f.slots.to_vec()).unwrap_or_else(|| vec![None; 3]),
             _ => w.slots.clone(),
+        }
+    }
+
+    /// Печь из памяти или из блок-сущности (`AbstractFurnaceBlockEntity.loadAdditional`).
+    fn with_furnace<R>(&self, pos: [i32; 3], f: impl FnOnce(&mut FurnaceEntry) -> R) -> Option<R> {
+        if !self.furnaces.lock().unwrap().contains_key(&pos) {
+            let kind = furnace_kind(self.state_name(self.block(pos)?))?;
+            let mut fur = Furnace::new(kind);
+            if let Some(be) = self.block_entity(pos) {
+                let items = self.container_items(pos);
+                fur.slots = [items[0], items[1], items[2]];
+                let int = |k: &str| be.nbt.get(k).and_then(Tag::as_i64).unwrap_or(0) as i32;
+                fur.cook = int("cooking_time_spent");
+                fur.cook_total = int("cooking_total_time");
+                fur.lit_remaining = int("lit_time_remaining");
+                fur.lit_total = int("lit_total_time");
+                if let Some(Tag::Float(s)) = be.nbt.get("speed_multiplier") {
+                    fur.speed = *s;
+                }
+            }
+            self.furnaces
+                .lock()
+                .unwrap()
+                .entry(pos)
+                .or_insert(FurnaceEntry { f: fur, viewers: Vec::new() });
+        }
+        self.furnaces.lock().unwrap().get_mut(&pos).map(f)
+    }
+
+    /// Рецепты, топливо и остатки для печи вида `kind`.
+    fn furnace_tick(&self, f: &mut Furnace) -> bool {
+        let k = f.kind;
+        let recipe = |item: i32| {
+            self.survival.recipes.cooking(k, item).map(|c| furnace::Cook {
+                result: c.result.0,
+                count: c.result.1,
+                time: c.time,
+            })
+        };
+        let fuel = |item: i32| {
+            let f = self.survival.items.get(item as usize)?.fuel?;
+            Some((f.burn[k as usize], f.speed[k as usize]))
+        };
+        let max = |item: i32| self.max_stack(item);
+        let rem = |item: i32| self.craft_remainder(item);
+        let sponge = self
+            .item_id("minecraft:wet_sponge")
+            .zip(self.item_id("minecraft:bucket"))
+            .zip(self.item_id("minecraft:water_bucket"))
+            .map(|((s, b), w)| (s, b, w));
+        f.tick(&furnace::Env { recipe: &recipe, fuel: &fuel, max_stack: &max, remainder: &rem, sponge })
+    }
+
+    /// Предметы печи из окна игрока `me`: сохранить и показать остальным.
+    fn set_furnace_slots(&self, pos: [i32; 3], slots: [Slot; 3], me: Uuid) {
+        let k = self.with_furnace(pos, |e| e.f.kind).unwrap_or(0);
+        let recipe = |item: i32| {
+            self.survival.recipes.cooking(k, item).map(|c| furnace::Cook { result: c.result.0, count: c.result.1, time: c.time })
+        };
+        let none = |_: i32| None;
+        let max = |item: i32| self.max_stack(item);
+        let rem = |_: i32| None;
+        let env = furnace::Env { recipe: &recipe, fuel: &none, max_stack: &max, remainder: &rem, sponge: None };
+        let Some((fur, viewers)) = self.with_furnace(pos, |e| {
+            e.f.set_slots(slots, &env);
+            (e.f.clone(), e.viewers.clone())
+        }) else {
+            return;
+        };
+        self.save_furnace(pos, &fur);
+        let controls = self.controls.lock().unwrap();
+        for v in viewers.iter().filter(|v| **v != me) {
+            if let Some(tx) = controls.get(v) {
+                let _ = tx.send(Control::Furnace(pos, fur.data(), true));
+            }
+        }
+    }
+
+    /// Записывает печь в блок-сущность (`saveAdditional`).
+    fn save_furnace(&self, pos: [i32; 3], f: &Furnace) {
+        let mut nbt = Compound::new();
+        nbt.insert("Items".into(), Tag::List(self.items_nbt(&f.slots)));
+        nbt.insert("cooking_time_spent".into(), Tag::Short(f.cook as i16));
+        nbt.insert("cooking_total_time".into(), Tag::Short(f.cook_total as i16));
+        nbt.insert("lit_time_remaining".into(), Tag::Short(f.lit_remaining as i16));
+        nbt.insert("lit_total_time".into(), Tag::Short(f.lit_total as i16));
+        nbt.insert("speed_multiplier".into(), Tag::Float(f.speed));
+        let id = FURNACES[f.kind as usize];
+        self.set_block_entity(pos, Some(BlockEntity { id: id.into(), nbt }));
+    }
+
+    /// Тик печей: горение, готовка, свойство `lit` блока, окна смотрящих.
+    fn tick_furnaces(&self) {
+        let pending = std::mem::take(&mut *self.pending_furnaces.lock().unwrap());
+        for pos in pending {
+            self.with_furnace(pos, |_| ());
+        }
+        let mut done = Vec::new();
+        {
+            let mut map = self.furnaces.lock().unwrap();
+            if map.is_empty() {
+                return;
+            }
+            map.retain(|&pos, e| {
+                let was_lit = e.f.lit();
+                let before = e.f.slots;
+                let changed = self.furnace_tick(&mut e.f);
+                let items = before != e.f.slots;
+                let active = !e.f.idle();
+                if changed || active || !e.viewers.is_empty() {
+                    done.push((pos, e.f.clone(), was_lit != e.f.lit(), changed, items, e.viewers.clone()));
+                }
+                active || !e.viewers.is_empty()
+            });
+        }
+        let controls = self.controls.lock().unwrap();
+        for (pos, f, _, _, items, viewers) in &done {
+            for v in viewers {
+                if let Some(tx) = controls.get(v) {
+                    let _ = tx.send(Control::Furnace(*pos, f.data(), *items));
+                }
+            }
+        }
+        drop(controls);
+        for (pos, f, flip, changed, _, _) in done {
+            if flip
+                && let Some(s) = self.block(pos)
+                && let Some(&lit) = self.survival.furnace_lit.get(&s)
+            {
+                self.set_block(pos, lit);
+            }
+            if changed || f.idle() {
+                self.save_furnace(pos, &f);
+            }
         }
     }
 
@@ -2925,7 +3155,15 @@ impl PlayPlan {
             .block(pos)
             .and_then(|s| container_entity(self.state_name(s)))
             .unwrap_or("minecraft:chest");
-        let items: Vec<Tag> = slots
+        let items = self.items_nbt(slots);
+        let mut nbt = self.block_entity(pos).map(|b| b.nbt).unwrap_or_default();
+        nbt.insert("Items".into(), Tag::List(items));
+        self.set_block_entity(pos, Some(BlockEntity { id: id.into(), nbt }));
+    }
+
+    /// `Items` контейнера: непустые слоты с номерами.
+    fn items_nbt(&self, slots: &[Slot]) -> Vec<Tag> {
+        slots
             .iter()
             .enumerate()
             .filter_map(|(i, s)| {
@@ -2941,10 +3179,7 @@ impl PlayPlan {
                 }
                 Some(Tag::Compound(c))
             })
-            .collect();
-        let mut nbt = self.block_entity(pos).map(|b| b.nbt).unwrap_or_default();
-        nbt.insert("Items".into(), Tag::List(items));
-        self.set_block_entity(pos, Some(BlockEntity { id: id.into(), nbt }));
+            .collect()
     }
 
     async fn send_inventory(

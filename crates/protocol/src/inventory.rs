@@ -109,6 +109,13 @@ pub fn container_set_content(
     w.buf
 }
 
+/// `ClientboundContainerSetDataPacket`: свойство окна (прогресс печи).
+pub fn container_set_data(id: i32, window: i32, property: i16, value: i16) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(window).u16(property as u16).u16(value as u16);
+    w.buf
+}
+
 pub fn container_set_slot(id: i32, window: i32, state: i32, slot: i16, stack: Slot) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id)

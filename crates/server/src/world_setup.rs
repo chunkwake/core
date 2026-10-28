@@ -184,6 +184,28 @@ fn survival_data(
             Some((id, chunkwake_net::play::ChestState { trapped, facing, kind, waterlogged: get("waterlogged") == Some("true") }))
         })
         .collect();
+    // Печи: состояние → то же с другим `lit`.
+    let mut by_props: std::collections::HashMap<(String, Vec<(String, String)>), u32> = Default::default();
+    for id in 0..blocks.state_count() as u32 {
+        if let Some((name, props)) = blocks.state(id)
+            && chunkwake_data::world::FURNACES.contains(&name)
+        {
+            by_props.insert((name.to_owned(), props.to_vec()), id);
+        }
+    }
+    let furnace_lit = by_props
+        .iter()
+        .filter_map(|((name, props), &id)| {
+            let flipped: Vec<(String, String)> = props
+                .iter()
+                .map(|(k, v)| {
+                    let v = if k == "lit" { if v == "true" { "false" } else { "true" } } else { v };
+                    (k.clone(), v.to_owned())
+                })
+                .collect();
+            Some((id, *by_props.get(&(name.clone(), flipped))?))
+        })
+        .collect();
     let recipes = chunkwake_data::recipes::load_recipes(data_dir, items).map_err(s)?;
     tracing::debug!("recipes: {}", recipes.len());
     let menu = |name| chunkwake_data::registries::builtin_id(data_dir, "menu", name).map_err(s);
@@ -194,6 +216,8 @@ fn survival_data(
         chests: chests.clone(),
         chest_states: chests.iter().map(|(&id, &c)| (c, id)).collect(),
         menu_crafting: menu("minecraft:crafting")?,
+        menu_furnace: [menu("minecraft:furnace")?, menu("minecraft:blast_furnace")?, menu("minecraft:smoker")?],
+        furnace_lit,
         hardness: chunkwake_data::world::load_hardness(data_dir).map_err(s)?,
         requires_tool: chunkwake_data::world::load_requires_tool(data_dir).map_err(s)?,
         tools: {

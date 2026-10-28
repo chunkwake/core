@@ -23,6 +23,8 @@ pub enum Kind {
     Chest(usize),
     /// `CraftingMenu`: 0 результат, 1–9 сетка, 10–36, 37–45.
     Crafting,
+    /// `AbstractFurnaceMenu`: 0 сырьё, 1 топливо, 2 результат, 3–29, 30–38.
+    Furnace,
 }
 
 impl Kind {
@@ -31,6 +33,7 @@ impl Kind {
             Kind::Player => 46,
             Kind::Chest(rows) => rows * 9 + 36,
             Kind::Crafting => 46,
+            Kind::Furnace => 39,
         }
     }
 
@@ -40,10 +43,21 @@ impl Kind {
             Kind::Player => 9,
             Kind::Chest(rows) => rows * 9,
             Kind::Crafting => 10,
+            Kind::Furnace => 3,
         }
     }
 
+    /// Слот, куда класть нельзя (результат).
     fn output(self) -> Option<usize> {
+        match self {
+            Kind::Player | Kind::Crafting => Some(0),
+            Kind::Furnace => Some(2),
+            Kind::Chest(_) => None,
+        }
+    }
+
+    /// Результат крафта: забирается целиком и пересчитывается.
+    fn craft_output(self) -> Option<usize> {
         matches!(self, Kind::Player | Kind::Crafting).then_some(0)
     }
 
@@ -68,6 +82,10 @@ impl Kind {
 pub struct Rules<'a> {
     pub max_stack: &'a dyn Fn(i32) -> i32,
     pub equip: &'a dyn Fn(i32) -> Option<&'static str>,
+    /// Для печи: есть ли рецепт и топливо ли это (`isFuel`), ведро ли.
+    pub smeltable: &'a dyn Fn(i32) -> bool,
+    pub fuel: &'a dyn Fn(i32) -> bool,
+    pub bucket: Option<i32>,
     pub creative: bool,
 }
 
@@ -111,12 +129,17 @@ impl Menu<'_> {
     }
 
     fn slot_max(&self, slot: usize, item: i32) -> i32 {
-        if self.kind.armor(slot).is_some() { 1 } else { self.max(item) }
+        let bucket_fuel = self.kind == Kind::Furnace && slot == 1 && Some(item) == self.rules.bucket;
+        if self.kind.armor(slot).is_some() || bucket_fuel { 1 } else { self.max(item) }
     }
 
     fn may_place(&self, slot: usize, s: &Stack) -> bool {
         if self.kind.output() == Some(slot) {
             return false;
+        }
+        if self.kind == Kind::Furnace && slot == 1 {
+            // `FurnaceFuelSlot`: топливо или пустое ведро.
+            return (self.rules.fuel)(s.item) || Some(s.item) == self.rules.bucket;
         }
         match self.kind.armor(slot) {
             Some(want) => (self.rules.equip)(s.item) == Some(want),
@@ -162,7 +185,7 @@ impl Menu<'_> {
             }
             THROW if self.carried.is_none() => {
                 if let Some(i) = index {
-                    if self.kind.output() == Some(i) {
+                    if self.kind.craft_output() == Some(i) {
                         thrown.extend(self.take_output());
                     } else {
                         let n = if button == 0 { 1 } else { i32::MAX };
@@ -188,7 +211,7 @@ impl Menu<'_> {
     }
 
     fn pickup(&mut self, i: usize, left: bool) {
-        if self.kind.output() == Some(i) {
+        if self.kind.craft_output() == Some(i) {
             let Some(result) = self.slots[i] else { return };
             match *self.carried {
                 None => *self.carried = self.take_output(),
@@ -269,7 +292,7 @@ impl Menu<'_> {
         let inv = self.kind.inventory_start();
         let hotbar = inv + 27;
         let end = hotbar + 9;
-        if self.kind.output() == Some(i) {
+        if self.kind.craft_output() == Some(i) {
             // Результат: крафтим, пока влезает и рецепт тот же.
             let Some(first) = self.slots[i] else { return };
             for _ in 0..64 {
@@ -325,6 +348,22 @@ impl Menu<'_> {
                     self.move_to(&mut s, 0..inv, false);
                 }
             }
+            Kind::Furnace => {
+                // `AbstractFurnaceMenu.quickMoveStack`.
+                if i == 2 {
+                    self.move_to(&mut s, inv..end, true);
+                } else if i < inv {
+                    self.move_to(&mut s, inv..end, false);
+                } else if (self.rules.smeltable)(s.item) {
+                    self.move_to(&mut s, 0..1, false);
+                } else if (self.rules.fuel)(s.item) || Some(s.item) == self.rules.bucket {
+                    self.move_to(&mut s, 1..2, false);
+                } else if i < hotbar {
+                    self.move_to(&mut s, hotbar..end, false);
+                } else {
+                    self.move_to(&mut s, inv..hotbar, false);
+                }
+            }
             Kind::Crafting => {
                 if i < inv {
                     self.move_to(&mut s, inv..end, false);
@@ -351,7 +390,7 @@ impl Menu<'_> {
         if target == i {
             return;
         }
-        if self.kind.output() == Some(i) {
+        if self.kind.craft_output() == Some(i) {
             if self.slots[target].is_none() {
                 self.slots[target] = self.take_output();
             }
@@ -482,7 +521,8 @@ mod tests {
     fn run(kind: Kind, slots: &mut [Slot], carried: &mut Slot, clicks: &[(i16, i8, i32)]) -> Vec<Stack> {
         let max = |item: i32| if item == 9 { 1 } else { 64 };
         let equip = |item: i32| (item == 9).then_some("head");
-        let rules = Rules { max_stack: &max, equip: &equip, creative: false };
+        let fuel = |item: i32| item == 7;
+        let rules = Rules { max_stack: &max, equip: &equip, smeltable: &|item| item == 1, fuel: &fuel, bucket: Some(8), creative: false };
         let mut drag = Drag::default();
         let mut craft = |_: &mut [Slot]| {};
         let mut m = Menu { kind, slots, carried, drag: &mut drag, rules: &rules, craft: &mut craft };
@@ -524,6 +564,26 @@ mod tests {
         chest[0] = st(2, 5);
         run(Kind::Chest(3), &mut chest, &mut carried, &[(0, 0, QUICK_MOVE)]);
         assert_eq!(chest[62], st(2, 5));
+    }
+
+    #[test]
+    fn furnace_shift_click() {
+        let mut slots = vec![None; 39];
+        slots[3] = st(1, 5);
+        slots[4] = st(7, 2);
+        slots[5] = st(2, 1);
+        let mut carried = None;
+        run(Kind::Furnace, &mut slots, &mut carried, &[(3, 0, QUICK_MOVE), (4, 0, QUICK_MOVE), (5, 0, QUICK_MOVE)]);
+        assert_eq!((slots[0], slots[1], slots[30]), (st(1, 5), st(7, 2), st(2, 1)));
+        // В результат класть нельзя, а забирать половину — можно.
+        slots[2] = st(9, 1);
+        carried = st(2, 1);
+        run(Kind::Furnace, &mut slots, &mut carried, &[(2, 0, PICKUP)]);
+        assert_eq!(slots[2], st(9, 1));
+        carried = None;
+        slots[2] = st(3, 4);
+        run(Kind::Furnace, &mut slots, &mut carried, &[(2, 1, PICKUP)]);
+        assert_eq!((slots[2], carried), (st(3, 2), st(3, 2)));
     }
 
     #[test]

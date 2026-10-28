@@ -62,6 +62,79 @@ pub fn load_requires_tool(root: &Path) -> Result<Vec<bool>, DataError> {
         .collect()
 }
 
+/// Печи по порядку индексов в [`Fuel`]: обычная, доменная, коптильня.
+pub const FURNACES: [&str; 3] = ["minecraft:furnace", "minecraft:blast_furnace", "minecraft:smoker"];
+
+/// Топливо (`minecraft:cooking_fuel`), вычисленное для каждой печи из [`FURNACES`]:
+/// время горения в тиках и множитель скорости готовки.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fuel {
+    pub burn: [i32; 3],
+    pub speed: [f32; 3],
+}
+
+/// Вычисляет `context_int_provider`/`context_float_provider` (число, ссылка,
+/// `div`, `conditional`) для блока печи `block`.
+fn eval_provider(root: &Path, v: &serde_json::Value, float: bool, block: &str, depth: u32) -> Option<f64> {
+    if depth > 16 {
+        return None;
+    }
+    let dir = if float { "context_float_provider" } else { "context_int_provider" };
+    match v {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(id) => {
+            let (ns, path) = id.split_once(':').unwrap_or(("minecraft", id));
+            let json = read_json(&root.join(format!("data/{ns}/{dir}/{path}.json"))).ok()?;
+            eval_provider(root, &json, float, block, depth + 1)
+        }
+        serde_json::Value::Object(o) => match o.get("type")?.as_str()? {
+            "minecraft:constant" => eval_provider(root, o.get("value")?, float, block, depth + 1),
+            "minecraft:div" => {
+                let l = eval_provider(root, o.get("left")?, float, block, depth + 1)?;
+                let r = eval_provider(root, o.get("right")?, float, block, depth + 1)?;
+                Some(match (float, r == 0.0) {
+                    (_, true) => 0.0,
+                    (true, _) => l / r,
+                    (false, _) => (l as i64 / r as i64) as f64,
+                })
+            }
+            "minecraft:conditional" => {
+                let on = if block_predicate(root, o.get("condition")?, block)? { "on_true" } else { "on_false" };
+                eval_provider(root, o.get(on)?, float, block, depth + 1)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Предикат блока: ссылка на `predicate/…` или `match_block`.
+fn block_predicate(root: &Path, v: &serde_json::Value, block: &str) -> Option<bool> {
+    match v {
+        serde_json::Value::String(id) => {
+            let (ns, path) = id.split_once(':').unwrap_or(("minecraft", id));
+            let json = read_json(&root.join(format!("data/{ns}/predicate/{path}.json"))).ok()?;
+            block_predicate(root, &json, block)
+        }
+        serde_json::Value::Object(o) if o.get("type")?.as_str()? == "minecraft:match_block" => {
+            Some(o.get("blocks")?.as_array()?.iter().any(|b| b.as_str() == Some(block)))
+        }
+        _ => None,
+    }
+}
+
+fn parse_fuel(root: &Path, c: &serde_json::Value) -> Option<Fuel> {
+    let f = c.get("minecraft:cooking_fuel")?;
+    let mut fuel = Fuel { burn: [0; 3], speed: [1.0; 3] };
+    for (i, block) in FURNACES.iter().enumerate() {
+        fuel.burn[i] = eval_provider(root, f.get("burn_time")?, false, block, 0)? as i32;
+        if let Some(s) = f.get("speed_multiplier") {
+            fuel.speed[i] = eval_provider(root, s, true, block, 0)? as f32;
+        }
+    }
+    Some(fuel)
+}
+
 /// Еда: компонент `minecraft:food` и время поедания из `minecraft:consumable`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Food {
@@ -80,6 +153,7 @@ pub struct ItemInfo {
     pub equip: Option<&'static str>,
     /// `minecraft:max_damage` (0 — предмет не изнашивается).
     pub max_damage: i32,
+    pub fuel: Option<Fuel>,
 }
 
 impl Default for ItemInfo {
@@ -89,6 +163,7 @@ impl Default for ItemInfo {
             food: None,
             equip: None,
             max_damage: 0,
+            fuel: None,
         }
     }
 }
@@ -129,7 +204,10 @@ pub fn load_items(root: &Path, items: &HashMap<String, i32>) -> Result<Vec<ItemI
             out[id as usize].max_damage = n;
         }
         // Еды немного: такие файлы разбираем целиком.
-        if text.contains("\"minecraft:food\"") || text.contains("\"minecraft:equippable\"") {
+        if text.contains("\"minecraft:food\"")
+            || text.contains("\"minecraft:equippable\"")
+            || text.contains("\"minecraft:cooking_fuel\"")
+        {
             let json: serde_json::Value =
                 serde_json::from_str(&text).map_err(|e| DataError::Format {
                     file: file.display().to_string(),
@@ -137,6 +215,7 @@ pub fn load_items(root: &Path, items: &HashMap<String, i32>) -> Result<Vec<ItemI
                 })?;
             let c = &json["components"];
             out[id as usize].food = parse_food(c);
+            out[id as usize].fuel = parse_fuel(root, c);
             out[id as usize].equip = c["minecraft:equippable"]["slot"].as_str().and_then(equip_slot);
         }
     }
@@ -443,8 +522,14 @@ fn equip_slot(name: &str) -> Option<&'static str> {
 
 /// `name, max_stack, equip (-), max_damage [, nutrition saturation always seconds]` через табуляцию.
 fn item_line(name: &str, i: &ItemInfo) -> String {
+    let fuel = i.fuel.map_or("-".to_owned(), |f| {
+        format!(
+            "{},{},{};{},{},{}",
+            f.burn[0], f.burn[1], f.burn[2], f.speed[0], f.speed[1], f.speed[2]
+        )
+    });
     let head = format!(
-        "{name}\t{}\t{}\t{}",
+        "{name}\t{}\t{}\t{}\t{fuel}",
         i.max_stack,
         i.equip.unwrap_or("-"),
         i.max_damage
@@ -464,6 +549,18 @@ fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, I
     let max_stack = f.next()?.parse().ok()?;
     let equip = equip_slot(f.next()?);
     let max_damage = f.next()?.parse().ok()?;
+    let fuel = match f.next()? {
+        "-" => None,
+        s => {
+            let (b, sp) = s.split_once(';')?;
+            let b: Vec<i32> = b.split(',').map(|x| x.parse().ok()).collect::<Option<_>>()?;
+            let sp: Vec<f32> = sp.split(',').map(|x| x.parse().ok()).collect::<Option<_>>()?;
+            Some(Fuel {
+                burn: b.try_into().ok()?,
+                speed: sp.try_into().ok()?,
+            })
+        }
+    };
     let food = match (f.next(), f.next(), f.next(), f.next()) {
         (Some(n), Some(s), Some(a), Some(sec)) => Some(Food {
             nutrition: n.parse().ok()?,
@@ -480,6 +577,7 @@ fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, I
             food,
             equip,
             max_damage,
+            fuel,
         },
     ))
 }
@@ -565,6 +663,7 @@ mod loot_tests {
                 food: Some(food),
                 equip: Some("head"),
                 max_damage: 165,
+                fuel: Some(Fuel { burn: [1600, 800, 800], speed: [1.0, 2.0, 2.0] }),
             },
             ItemInfo {
                 max_stack: 16,

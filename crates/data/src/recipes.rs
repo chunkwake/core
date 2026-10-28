@@ -23,9 +23,20 @@ pub enum Recipe {
     },
 }
 
+/// Рецепт печи: `kind` — индекс в `world::FURNACES` (плавка, доменная, копчение).
+#[derive(Clone, Debug)]
+pub struct Cooking {
+    pub kind: u8,
+    pub ingredient: Ingredient,
+    pub result: (i32, i32),
+    pub time: i32,
+    pub experience: f32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Recipes {
     list: Vec<Recipe>,
+    cooking: Vec<Cooking>,
 }
 
 impl Recipes {
@@ -35,6 +46,11 @@ impl Recipes {
 
     pub fn is_empty(&self) -> bool {
         self.list.is_empty()
+    }
+
+    /// Рецепт печи `kind` для предмета (первый подходящий, как `RecipeManager`).
+    pub fn cooking(&self, kind: u8, item: i32) -> Option<&Cooking> {
+        self.cooking.iter().find(|c| c.kind == kind && c.ingredient.contains(&item))
     }
 
     /// `(предмет, количество)` для квадратной сетки `size × size` (предметы по строкам).
@@ -218,18 +234,34 @@ pub fn load_recipes(root: &Path, items: &HashMap<String, i32>) -> Result<Recipes
         memo: HashMap::new(),
     };
     let mut list = Vec::new();
+    let mut cooking_list = Vec::new();
     for path in paths {
         let text = std::fs::read_to_string(&path).map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
-        if !text.contains("\"minecraft:crafting_sha") {
+        let crafting = text.contains("\"minecraft:crafting_sha");
+        let cooking = ["smelting", "blasting", "smoking"].iter().position(|t| text.contains(&format!("\"minecraft:{t}\"")));
+        if !crafting && cooking.is_none() {
             continue;
         }
         let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| DataError::Format {
             file: path.display().to_string(),
             msg: e.to_string(),
         })?;
-        list.extend(parse(&json, &mut tags));
+        if crafting {
+            list.extend(parse(&json, &mut tags));
+        } else if let Some(kind) = cooking
+            && json["type"].as_str().is_some_and(|t| t.ends_with(["smelting", "blasting", "smoking"][kind]))
+            && let (Some(ingredient), Some(result)) = (tags.ingredient(&json["ingredient"]), result(&json, items))
+        {
+            cooking_list.push(Cooking {
+                kind: kind as u8,
+                ingredient,
+                result,
+                time: json["cookingtime"].as_i64().unwrap_or(200) as i32,
+                experience: json["experience"].as_f64().unwrap_or(0.0) as f32,
+            });
+        }
     }
-    Ok(Recipes { list })
+    Ok(Recipes { list, cooking: cooking_list })
 }
 
 #[cfg(test)]
@@ -256,6 +288,7 @@ mod tests {
             "result": {"id": "minecraft:planks", "count": 4}});
         let r = Recipes {
             list: [stick, axe, planks].iter().filter_map(|j| parse(j, &mut tags)).collect(),
+            cooking: Vec::new(),
         };
         assert_eq!(r.len(), 3);
         // Палки в любом месте сетки 2×2.

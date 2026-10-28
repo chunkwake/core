@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod click;
+pub mod furnace;
 pub mod configuration;
 pub mod crypto;
 pub mod items;

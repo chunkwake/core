@@ -80,6 +80,8 @@ pub enum Control {
     Teleport([f64; 3], f32, f32),
     /// Внутреннее (не от плагинов): содержимое сундука изменил другой игрок.
     ContainerChanged([i32; 3]),
+    /// Внутреннее: тик печи — свойства окна и сменились ли предметы.
+    Furnace([i32; 3], [i32; 4], bool),
 }
 
 impl Control {
@@ -137,7 +139,7 @@ impl Control {
                 live.yaw = yaw;
                 live.pitch = pitch;
             }
-            Control::ContainerChanged(_) => {}
+            Control::ContainerChanged(_) | Control::Furnace(..) => {}
         }
     }
 }
