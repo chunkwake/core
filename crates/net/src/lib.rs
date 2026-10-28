@@ -4,6 +4,7 @@ pub mod auth;
 pub mod configuration;
 pub mod crypto;
 pub mod play;
+pub mod survival;
 
 use bytes::BytesMut;
 use chunkwake_protocol::ProtocolError;

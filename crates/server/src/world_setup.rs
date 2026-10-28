@@ -5,7 +5,8 @@ use crate::storage::WorldStorage;
 use chunkwake_data::packets::PacketTable;
 use chunkwake_data::registries::RegistryData;
 use chunkwake_data::world::{Blocks, DimensionType};
-use chunkwake_net::play::{PlayPlan, WorldSpec};
+use chunkwake_net::play::{PlayPlan, SurvivalData, WorldSpec};
+use chunkwake_net::survival::Difficulty;
 use chunkwake_protocol::play::{Login, SpawnInfo};
 use chunkwake_world::{ChunkColumn, bits_for};
 use std::path::Path;
@@ -74,7 +75,7 @@ pub fn build_play_plan(
                 .map_err(s)?,
             dimension,
             hashed_seed: 0,
-            game_mode: 1, // creative: пока нет ни урона, ни голода
+            game_mode: props.game_mode,
             previous_game_mode: None,
             is_debug: false,
             is_flat: true,
@@ -119,6 +120,7 @@ pub fn build_play_plan(
             "brigadier:string",
         )
         .map_err(s)?,
+        survival: survival_data(data_dir, &blocks, &items, registries, props.difficulty)?,
     };
     let plan = PlayPlan::build(packets, login, world, props.compression_threshold).map_err(s)?;
     let data_version = crate::config::read_world_version(data_dir)?;
@@ -132,4 +134,38 @@ pub fn build_play_plan(
         light,
     );
     Ok((plan, storage))
+}
+
+/// Твёрдость и дроп блоков, размеры стопок, типы урона.
+fn survival_data(
+    data_dir: &Path,
+    blocks: &Blocks,
+    items: &std::collections::HashMap<String, i32>,
+    registries: &RegistryData,
+    difficulty: Difficulty,
+) -> Result<SurvivalData, String> {
+    let s = |e: chunkwake_data::DataError| e.to_string();
+    let drops_by_block = chunkwake_data::world::load_block_drops(data_dir).map_err(s)?;
+    let drops = (0..blocks.state_count() as u32)
+        .map(|id| {
+            let (name, _) = blocks.state(id)?;
+            items.get(drops_by_block.get(name)?).copied()
+        })
+        .collect();
+    Ok(SurvivalData {
+        hardness: chunkwake_data::world::load_hardness(data_dir).map_err(s)?,
+        drops,
+        items: chunkwake_data::world::load_items(data_dir, items).map_err(s)?,
+        damage_fall: registries
+            .network_id("damage_type", "minecraft:fall")
+            .map_err(s)?,
+        damage_void: registries
+            .network_id("damage_type", "minecraft:out_of_world")
+            .map_err(s)?,
+        damage_starve: registries
+            .network_id("damage_type", "minecraft:starve")
+            .map_err(s)?,
+        difficulty,
+        item_ids: items.clone(),
+    })
 }

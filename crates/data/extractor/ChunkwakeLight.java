@@ -1,5 +1,5 @@
-// Выгрузка свойств света состояний блоков: `reports/light.csv`, строка на id
-// состояния: `излучение,затухание,небо_вниз(0/1)`.
+// Выгрузка свойств состояний блоков: `reports/light.csv`, строка на id
+// состояния: `излучение,затухание,небо_вниз(0/1),твёрдость` (-1 — неразрушимый).
 //
 // Только рефлексия и java.base: классы сервера новее компилятора, поэтому
 // компилируется без них и запускается на Java сервера:
@@ -23,6 +23,8 @@ public final class ChunkwakeLight {
         Method emission = base.getMethod("getLightEmission");
         Method dampening = base.getMethod("getLightDampening");
         Method skyDown = base.getMethod("propagatesSkylightDown");
+        java.lang.reflect.Field hardness = base.getDeclaredField("destroySpeed");
+        hardness.setAccessible(true);
 
         int n = (Integer) size.invoke(registry);
         StringBuilder out = new StringBuilder(n * 8);
@@ -30,7 +32,8 @@ public final class ChunkwakeLight {
             Object state = byId.invoke(registry, id);
             out.append(emission.invoke(state)).append(',')
                     .append(dampening.invoke(state)).append(',')
-                    .append((Boolean) skyDown.invoke(state) ? 1 : 0).append('\n');
+                    .append((Boolean) skyDown.invoke(state) ? 1 : 0).append(',')
+                    .append(hardness.getFloat(state)).append('\n');
         }
         Files.writeString(Path.of(args[0]), out);
         System.exit(0);

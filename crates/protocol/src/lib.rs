@@ -3,6 +3,7 @@
 pub mod codec;
 pub mod configuration;
 pub mod frame;
+pub mod inventory;
 pub mod packets;
 pub mod play;
 pub mod text;

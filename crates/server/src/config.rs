@@ -72,6 +72,9 @@ pub struct Properties {
     pub generated_dir: String,
     /// Каталог мира (`level-name`), относительно каталога сервера.
     pub level_name: String,
+    /// 0 survival, 1 creative, 2 adventure, 3 spectator.
+    pub game_mode: u8,
+    pub difficulty: chunkwake_net::survival::Difficulty,
     pub log_level: tracing_subscriber::filter::LevelFilter,
 }
 
@@ -172,6 +175,19 @@ impl Properties {
             java_path: java_path.into(),
             generated_dir: generated_dir.into(),
             level_name: value("level-name").into(),
+            game_mode: ["survival", "creative", "adventure", "spectator"]
+                .iter()
+                .position(|m| *m == value("gamemode"))
+                .unwrap_or(0) as u8,
+            difficulty: {
+                use chunkwake_net::survival::Difficulty::*;
+                match value("difficulty") {
+                    "peaceful" => Peaceful,
+                    "normal" => Normal,
+                    "hard" => Hard,
+                    _ => Easy,
+                }
+            },
             log_level,
         })
     }

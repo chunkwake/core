@@ -1,11 +1,13 @@
 //! Play-сессия M2: плоский мир, стриминг чанков, чат, таб-лист и видимость
 //! других игроков. Мир статичен.
 
+use crate::survival::{self, Cause, Difficulty, Inventory, Vitals};
 use crate::{Connection, LoggedIn, NetError};
 use chunkwake_data::DataError;
 use chunkwake_data::packets::{Direction, PacketTable, State};
 use chunkwake_protocol::Reader;
 use chunkwake_protocol::frame::FrameCodec;
+use chunkwake_protocol::inventory::{self as inv, Slot};
 use chunkwake_protocol::play::{self, Login, Move, PlayerEntry, game_event};
 use chunkwake_protocol::text;
 use chunkwake_world::ChunkColumn;
@@ -72,6 +74,16 @@ struct Ids {
     sb_use_item_on: i32,
     sb_set_creative_mode_slot: i32,
     sb_set_carried_item: i32,
+    container_set_content: i32,
+    container_set_slot: i32,
+    set_health: i32,
+    respawn: i32,
+    damage_event: i32,
+    entity_event: i32,
+    sb_container_click: i32,
+    sb_client_command: i32,
+    sb_player_command: i32,
+    sb_use_item: i32,
     commands: i32,
     sb_chat_command: i32,
     sb_chat_command_signed: i32,
@@ -109,6 +121,7 @@ pub struct PlayPlan {
     block_names: Arc<Vec<String>>,
     /// ID `brigadier:string` в `command_argument_type`.
     string_parser: i32,
+    survival: SurvivalData,
     hooks: std::sync::OnceLock<Arc<dyn PluginHooks>>,
     /// Команды плагинов для дерева `commands` у клиента.
     plugin_commands: Mutex<Vec<String>>,
@@ -310,6 +323,27 @@ pub struct WorldSpec {
     pub block_names: Arc<Vec<String>>,
     /// ID `brigadier:string` в `command_argument_type`.
     pub string_parser: i32,
+    pub survival: SurvivalData,
+}
+
+/// Данные для выживания.
+/// Команды сервера (обрабатываются до плагинов).
+const BUILTIN_COMMANDS: &[&str] = &["give"];
+
+pub struct SurvivalData {
+    /// Твёрдость по состоянию блока (-1 — неразрушимый, 0 — ломается сразу).
+    pub hardness: Vec<f32>,
+    /// Предмет, выпадающий из состояния блока.
+    pub drops: Vec<Option<i32>>,
+    /// Свойства предметов по ID: размер стопки, еда.
+    pub items: Vec<chunkwake_data::world::ItemInfo>,
+    /// ID `minecraft:fall` и `minecraft:out_of_world` в реестре `damage_type`.
+    pub damage_fall: i32,
+    pub damage_void: i32,
+    pub damage_starve: i32,
+    pub difficulty: Difficulty,
+    /// ID предмета по имени (`minecraft:bread`) для `/give`.
+    pub item_ids: HashMap<String, i32>,
 }
 
 impl PlayPlan {
@@ -328,6 +362,7 @@ impl PlayPlan {
             light,
             block_names,
             string_parser,
+            survival,
         } = world;
         let cb = |name| packets.id(State::Play, Direction::Clientbound, name);
         let sb = |name| packets.id(State::Play, Direction::Serverbound, name);
@@ -362,6 +397,16 @@ impl PlayPlan {
                 sb_use_item_on: sb("use_item_on")?,
                 sb_set_creative_mode_slot: sb("set_creative_mode_slot")?,
                 sb_set_carried_item: sb("set_carried_item")?,
+                container_set_content: cb("container_set_content")?,
+                container_set_slot: cb("container_set_slot")?,
+                set_health: cb("set_health")?,
+                respawn: cb("respawn")?,
+                damage_event: cb("damage_event")?,
+                entity_event: cb("entity_event")?,
+                sb_container_click: sb("container_click")?,
+                sb_client_command: sb("client_command")?,
+                sb_player_command: sb("player_command")?,
+                sb_use_item: sb("use_item")?,
                 commands: cb("commands")?,
                 sb_chat_command: sb("chat_command")?,
                 sb_chat_command_signed: sb("chat_command_signed")?,
@@ -384,6 +429,7 @@ impl PlayPlan {
             chunk_frames: Mutex::new(HashMap::new()),
             block_names,
             string_parser,
+            survival,
             hooks: std::sync::OnceLock::new(),
             plugin_commands: Mutex::new(Vec::new()),
             hub: Hub {
@@ -517,9 +563,15 @@ impl PlayPlan {
 
     /// Команды плагинов: запоминаем и обновляем дерево у всех онлайн.
     pub fn set_commands(&self, names: Vec<String>) {
-        let packet = text::commands(self.ids.commands, &names, self.string_parser);
         *self.plugin_commands.lock().unwrap() = names;
-        self.hub.send(None, packet);
+        self.hub.send(None, self.commands_packet());
+    }
+
+    /// Дерево команд для клиента: встроенные и команды плагинов.
+    fn commands_packet(&self) -> Vec<u8> {
+        let mut names: Vec<String> = BUILTIN_COMMANDS.iter().map(|&n| n.to_owned()).collect();
+        names.extend(self.plugin_commands.lock().unwrap().iter().cloned());
+        text::commands(self.ids.commands, &names, self.string_parser)
     }
 
     pub fn set_source(&self, source: Arc<dyn ChunkSource>) {
@@ -912,11 +964,7 @@ impl PlayPlan {
         let mut login = self.login.clone();
         login.entity_id = me.entity_id;
         conn.send(&play::login(ids.login, &login)).await?;
-        if self.hooks().is_some() {
-            let names = self.plugin_commands.lock().unwrap().clone();
-            conn.send(&text::commands(ids.commands, &names, self.string_parser))
-                .await?;
-        }
+        conn.send(&self.commands_packet()).await?;
         conn.send(&play::game_event(
             ids.game_event,
             game_event::LEVEL_CHUNKS_LOAD_START,
@@ -964,9 +1012,19 @@ impl PlayPlan {
         // Keep-alive: шлём раз в 15 с, ответ ждём не дольше 30 с.
         let mut ticker = tokio::time::interval(KEEP_ALIVE_INTERVAL);
         ticker.tick().await;
-        // Хотбар (ID предметов) и выбранный слот — для установки блоков.
-        let mut hotbar: [Option<i32>; 9] = [None; 9];
-        let mut selected = 0usize;
+        // Выживание: инвентарь, здоровье. Креатив (1) и наблюдатель (3) урона не получают.
+        let survival = matches!(login.spawn.game_mode, 0 | 2);
+        let mut inv = Inventory::default();
+        let mut vitals = Vitals::default();
+        vitals.reset_fall(self.spawn);
+        let mut last_void: Option<Instant> = None;
+        let mut teleport_id = 1;
+        // Поедание: слот хотбара, еда и момент окончания.
+        let mut eating: Option<(usize, chunkwake_data::world::Food, Instant)> = None;
+        let mut food_ticker = tokio::time::interval(TICK);
+        food_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        self.send_inventory(conn, &mut inv).await?;
+        self.send_health(conn, &vitals).await?;
         let mut pending: Option<(i64, Instant)> = None;
         loop {
             tokio::select! {
@@ -982,6 +1040,28 @@ impl PlayPlan {
                             conn.send(&play::keep_alive(ids.keep_alive, payload)).await?;
                             pending = Some((payload, Instant::now()));
                         }
+                    }
+                }
+                _ = food_ticker.tick(), if survival => {
+                    if let Some((slot, food, done)) = eating
+                        && Instant::now() >= done
+                    {
+                        eating = None;
+                        // Предмет мог смениться (клики): едим, только если еда на месте.
+                        let same = inv.slots[slot].and_then(|s| self.survival.items.get(s.item as usize))
+                            .and_then(|i| i.food) == Some(food);
+                        if same && slot == inv.held_slot() && inv.consume_held() {
+                            vitals.eat(food.nutrition, food.saturation);
+                            self.send_slots(conn, &mut inv, &[slot]).await?;
+                            self.send_health(conn, &vitals).await?;
+                            conn.send(&inv::entity_event(ids.entity_event, me.entity_id, inv::ENTITY_EVENT_USE_ITEM_COMPLETE)).await?;
+                        }
+                    }
+                    let t = vitals.tick(self.survival.difficulty);
+                    if let Some(d) = t.starve {
+                        self.hurt(conn, me, &mut vitals, d, Cause::Starve).await?;
+                    } else if t.changed {
+                        self.send_health(conn, &vitals).await?;
                     }
                 }
                 event = rx.recv() => match event {
@@ -1018,6 +1098,20 @@ impl PlayPlan {
                     };
                     if has_pos || has_rot {
                         let m = play::read_move(&mut r, has_pos, has_rot)?;
+                        if vitals.dead {
+                            continue;
+                        }
+                        let y = m.pos.map(|p| p[1]);
+                        if let Some(d) = vitals.on_move(m.pos, m.on_ground, survival) {
+                            self.hurt(conn, me, &mut vitals, d, Cause::Fall).await?;
+                        }
+                        let below_void = y.is_some_and(|y| y < self.min_y as f64 - survival::VOID_DEPTH);
+                        if survival && below_void
+                            && last_void.is_none_or(|t| t.elapsed() >= TICK * survival::VOID_INTERVAL_TICKS as u32)
+                        {
+                            last_void = Some(Instant::now());
+                            self.hurt(conn, me, &mut vitals, survival::VOID_DAMAGE, Cause::Void).await?;
+                        }
                         if let Some([x, _, z]) = m.pos {
                             let now = ((x.floor() as i32) >> 4, (z.floor() as i32) >> 4);
                             if now != center {
@@ -1034,41 +1128,113 @@ impl PlayPlan {
                         continue;
                     }
                     if id == ids.sb_set_carried_item {
-                        selected = (r.u16()? as usize).min(8);
+                        inv.selected = (r.u16()? as usize).min(8);
+                        eating = None;
                         continue;
                     }
                     if id == ids.sb_set_creative_mode_slot {
-                        let (slot, item) = play::read_creative_slot(&mut r)?;
-                        // Хотбар — слоты 36..=44 инвентаря игрока.
-                        if let Some(h) = hotbar.get_mut((slot - 36) as usize) {
-                            *h = item;
+                        let (slot, stack) = inv::read_creative_slot(&mut r)?;
+                        if !survival {
+                            inv.set(slot, stack);
+                        }
+                        continue;
+                    }
+                    if id == ids.sb_container_click {
+                        let c = inv::read_container_click(&mut r)?;
+                        if c.window == inv::PLAYER_WINDOW {
+                            inv.apply_click(&c);
+                            // Выброс (Q) не поддержан: предметов-сущностей ещё нет — откатываем.
+                            if c.mode == 4 {
+                                self.send_inventory(conn, &mut inv).await?;
+                            }
+                        }
+                        continue;
+                    }
+                    if id == ids.sb_use_item {
+                        let hand = r.var_int()?;
+                        let sequence = r.var_int()?;
+                        let food = inv.held()
+                            .filter(|_| hand == 0 && survival && !vitals.dead)
+                            .and_then(|s| self.survival.items.get(s.item as usize))
+                            .and_then(|i| i.food)
+                            .filter(|f| f.can_always_eat || vitals.food < survival::MAX_FOOD);
+                        eating = food.map(|f| (inv.held_slot(), f, Instant::now() + Duration::from_secs_f32(f.seconds)));
+                        conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
+                        continue;
+                    }
+                    if id == ids.sb_player_command {
+                        let _entity = r.var_int()?;
+                        match r.var_int()? {
+                            play::START_SPRINTING => vitals.sprinting = true,
+                            play::STOP_SPRINTING => vitals.sprinting = false,
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    if id == ids.sb_client_command {
+                        if r.var_int()? == inv::PERFORM_RESPAWN && vitals.dead {
+                            teleport_id += 1;
+                            center = self.respawn(conn, me, &login, &mut vitals, &mut inv, center, teleport_id).await?;
+                            out.clear();
+                            self.refresh_visible(uuid, center, r_view, &mut visible, &mut out);
+                            if !out.is_empty() {
+                                conn.send_frames(&out).await?;
+                            }
                         }
                         continue;
                     }
                     if id == ids.sb_player_action {
                         let a = play::read_player_action(&mut r)?;
-                        // Креатив: блок ломается сразу при начале удара.
-                        if a.action == play::START_DESTROY_BLOCK {
-                            if self.plugins_cancel_break(uuid, a.pos).await {
-                                // Отменено: вернуть блок клиенту.
-                                let old = self.block(a.pos).unwrap_or(AIR);
-                                conn.send(&play::block_update(ids.block_update, a.pos, old as i32)).await?;
-                            } else {
-                                self.set_block(a.pos, AIR);
+                        if vitals.dead {
+                            continue;
+                        }
+                        match a.action {
+                            play::START_DESTROY_BLOCK | play::ABORT_DESTROY_BLOCK | play::STOP_DESTROY_BLOCK => {
+                                let hardness = self.hardness(a.pos);
+                                // Креатив и мгновенные блоки — сразу при ударе; остальное — по
+                                // окончании ломки (время пока не проверяем).
+                                let now = match a.action {
+                                    play::START_DESTROY_BLOCK => !survival || hardness == 0.0,
+                                    play::STOP_DESTROY_BLOCK => survival && hardness >= 0.0,
+                                    _ => false,
+                                };
+                                if now {
+                                    self.break_block(conn, uuid, a.pos, survival, &mut inv).await?;
+                                    if survival {
+                                        vitals.exhaust(survival::EXHAUSTION_BREAK);
+                                    }
+                                }
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, a.sequence)).await?;
                             }
-                            conn.send(&play::block_changed_ack(ids.block_changed_ack, a.sequence)).await?;
+                            // Выбросить предмет нельзя (нет предметов-сущностей): вернуть слот.
+                            play::DROP_ALL_ITEMS | play::DROP_ITEM => {
+                                let held = inv.held_slot();
+                                self.send_slots(conn, &mut inv, &[held]).await?;
+                            }
+                            play::RELEASE_USE_ITEM => eating = None,
+                            play::SWAP_ITEM_WITH_OFFHAND => {
+                                let held = inv.held_slot();
+                                inv.slots.swap(held, survival::OFFHAND);
+                                self.send_slots(conn, &mut inv, &[held, survival::OFFHAND]).await?;
+                            }
+                            _ => {}
                         }
                         continue;
                     }
                     if id == ids.sb_use_item_on {
                         let u = play::read_use_item_on(&mut r)?;
-                        let state = hotbar[selected]
-                            .filter(|_| u.hand == 0)
-                            .and_then(|item| self.item_blocks.get(item as usize).copied().flatten());
+                        let state = inv
+                            .held()
+                            .filter(|_| u.hand == 0 && !vitals.dead)
+                            .and_then(|s| self.item_blocks.get(s.item as usize).copied().flatten());
                         if let (Some(state), Some(d)) = (state, play::direction_offset(u.face)) {
                             let target = [u.pos[0] + d[0], u.pos[1] + d[1], u.pos[2] + d[2]];
                             if self.block(target) == Some(AIR) {
                                 self.set_block(target, state);
+                                if survival && inv.consume_held() {
+                                    let held = inv.held_slot();
+                                    self.send_slots(conn, &mut inv, &[held]).await?;
+                                }
                             }
                         }
                         conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
@@ -1077,6 +1243,11 @@ impl PlayPlan {
                     if id == ids.sb_chat_command || id == ids.sb_chat_command_signed {
                         let line = r.string(32767)?.to_owned();
                         tracing::info!("{} issued server command: /{line}", me.entry.name);
+                        if let Some(args) = line.strip_prefix("give ") {
+                            let msg = self.give(conn, &mut inv, args).await?;
+                            conn.send(&text::system_chat_json(ids.system_chat, &msg.to_string(), false)).await?;
+                            continue;
+                        }
                         let known = match self.hooks() {
                             Some(h) => {
                                 let rx = h.command(uuid, &line);
@@ -1106,6 +1277,216 @@ impl PlayPlan {
                 }
             }
         }
+    }
+
+    fn hardness(&self, pos: [i32; 3]) -> f32 {
+        let state = self.block(pos).unwrap_or(AIR);
+        self.survival
+            .hardness
+            .get(state as usize)
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    /// Ломка блока игроком: плагины, затем мир; в выживании — дроп в инвентарь.
+    async fn break_block(
+        &self,
+        conn: &mut Connection,
+        uuid: Uuid,
+        pos: [i32; 3],
+        survival: bool,
+        inv: &mut Inventory,
+    ) -> Result<(), NetError> {
+        if self.plugins_cancel_break(uuid, pos).await {
+            // Отменено: вернуть блок клиенту.
+            let old = self.block(pos).unwrap_or(AIR);
+            return conn
+                .send(&play::block_update(self.ids.block_update, pos, old as i32))
+                .await;
+        }
+        let Some(old) = self.set_block(pos, AIR) else {
+            return Ok(());
+        };
+        // Предметов-сущностей пока нет: дроп сразу в инвентарь.
+        if survival && let Some(item) = self.survival.drops.get(old as usize).copied().flatten() {
+            let max = self
+                .survival
+                .items
+                .get(item as usize)
+                .map_or(64, |i| i.max_stack);
+            let changed = inv.add(item, 1, max as i32);
+            self.send_slots(conn, inv, &changed).await?;
+        }
+        Ok(())
+    }
+
+    async fn send_inventory(
+        &self,
+        conn: &mut Connection,
+        inv: &mut Inventory,
+    ) -> Result<(), NetError> {
+        let state = inv.next_state();
+        conn.send(&inv::container_set_content(
+            self.ids.container_set_content,
+            inv::PLAYER_WINDOW,
+            state,
+            &inv.slots,
+            inv.carried,
+        ))
+        .await
+    }
+
+    /// Встроенная `/give <предмет> [количество]`: выдаёт предмет себе.
+    async fn give(
+        &self,
+        conn: &mut Connection,
+        inv: &mut Inventory,
+        args: &str,
+    ) -> Result<serde_json::Value, NetError> {
+        let mut it = args.split_whitespace();
+        let name = it.next().unwrap_or("");
+        let name = if name.contains(':') {
+            name.to_owned()
+        } else {
+            format!("minecraft:{name}")
+        };
+        let count = it.next().map_or(Ok(1), str::parse::<i32>);
+        let (Some(&item), Ok(count @ 1..=6400)) = (self.survival.item_ids.get(&name), count) else {
+            return Ok(serde_json::json!({"text": "Usage: /give <item> [1-6400]", "color": "red"}));
+        };
+        let max = self
+            .survival
+            .items
+            .get(item as usize)
+            .map_or(64, |i| i.max_stack);
+        let changed = inv.add(item, count, max as i32);
+        self.send_slots(conn, inv, &changed).await?;
+        Ok(serde_json::json!({"text": format!("Gave {count} {name}")}))
+    }
+
+    async fn send_slots(
+        &self,
+        conn: &mut Connection,
+        inv: &mut Inventory,
+        slots: &[usize],
+    ) -> Result<(), NetError> {
+        let mut out = Vec::new();
+        for &s in slots {
+            let state = inv.next_state();
+            let stack: Slot = inv.slots[s];
+            out.extend(self.hub.frame(&inv::container_set_slot(
+                self.ids.container_set_slot,
+                inv::PLAYER_WINDOW,
+                state,
+                s as i16,
+                stack,
+            )));
+        }
+        if out.is_empty() {
+            return Ok(());
+        }
+        conn.send_frames(&out).await
+    }
+
+    async fn send_health(&self, conn: &mut Connection, v: &Vitals) -> Result<(), NetError> {
+        conn.send(&inv::set_health(
+            self.ids.set_health,
+            v.health,
+            v.food,
+            v.saturation,
+        ))
+        .await
+    }
+
+    /// Урон игроку: здоровье, анимация у всех, при смерти — сообщение и падение.
+    async fn hurt(
+        &self,
+        conn: &mut Connection,
+        me: &Online,
+        v: &mut Vitals,
+        amount: f32,
+        cause: Cause,
+    ) -> Result<(), NetError> {
+        let died = v.damage(amount);
+        self.send_health(conn, v).await?;
+        let damage_type = match cause {
+            Cause::Fall => self.survival.damage_fall,
+            Cause::Void => self.survival.damage_void,
+            Cause::Starve => self.survival.damage_starve,
+        };
+        self.hub.send(
+            None,
+            inv::damage_event(self.ids.damage_event, me.entity_id, damage_type),
+        );
+        if died {
+            self.hub.send(
+                Some(me.entry.uuid),
+                inv::entity_event(self.ids.entity_event, me.entity_id, inv::ENTITY_EVENT_DEATH),
+            );
+            let msg = serde_json::json!({"translate": cause.death_key(), "with": [me.entry.name]});
+            tracing::info!("{} died ({})", me.entry.name, cause.death_key());
+            self.broadcast_json(&msg.to_string());
+        }
+        Ok(())
+    }
+
+    /// Респаун после смерти: новый игрок у клиента в точке спавна, полное
+    /// здоровье; инвентарь сохраняется. Возвращает новый центр чанков.
+    #[allow(clippy::too_many_arguments)]
+    async fn respawn(
+        &self,
+        conn: &mut Connection,
+        me: &Online,
+        login: &Login,
+        v: &mut Vitals,
+        inv: &mut Inventory,
+        center: (i32, i32),
+        teleport_id: i32,
+    ) -> Result<(i32, i32), NetError> {
+        v.respawn();
+        v.reset_fall(self.spawn);
+        conn.send(&inv::respawn(self.ids.respawn, &login.spawn, 0))
+            .await?;
+        let spawn_chunk = (
+            (self.spawn[0].floor() as i32) >> 4,
+            (self.spawn[2].floor() as i32) >> 4,
+        );
+        if spawn_chunk != center {
+            self.move_center(conn, center, spawn_chunk, login.view_distance)
+                .await?;
+        }
+        conn.send(&play::game_event(
+            self.ids.game_event,
+            game_event::LEVEL_CHUNKS_LOAD_START,
+            0.0,
+        ))
+        .await?;
+        conn.send(&play::player_position(
+            self.ids.player_position,
+            teleport_id,
+            self.spawn,
+            0.0,
+            0.0,
+        ))
+        .await?;
+        self.send_health(conn, v).await?;
+        self.send_inventory(conn, inv).await?;
+        // Остальные: убрать тело и показать игрока заново в точке спавна.
+        self.hub.send_entity(
+            Some(me.entry.uuid),
+            play::remove_entities(self.ids.remove_entities, &[me.entity_id]),
+            Some(EntityEvent::Gone(me.entity_id)),
+        );
+        self.moved(
+            me.entry.uuid,
+            Move {
+                pos: Some(self.spawn),
+                rot: Some((0.0, 0.0)),
+                on_ground: true,
+            },
+        );
+        tracing::info!("{} respawned", me.entry.name);
+        Ok(spawn_chunk)
     }
 
     /// Спрашивает плагины, отменить ли ломку блока. Без слушателей — сразу «нет».

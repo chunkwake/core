@@ -52,7 +52,13 @@ pub fn login(id: i32, l: &Login) -> Vec<u8> {
         .bool(l.reduced_debug_info)
         .bool(l.show_death_screen)
         .bool(l.limited_crafting);
-    let s = &l.spawn;
+    write_spawn_info(&mut w, &l.spawn);
+    w.bool(l.online_mode).bool(l.enforces_secure_chat);
+    w.buf
+}
+
+/// `CommonPlayerSpawnInfo`: общий для `login` и `respawn`.
+pub fn write_spawn_info(w: &mut Writer, s: &SpawnInfo) {
     w.var_int(s.dimension_type)
         .string(&s.dimension)
         .i64(s.hashed_seed)
@@ -64,8 +70,6 @@ pub fn login(id: i32, l: &Login) -> Vec<u8> {
         .bool(false) // last death location
         .var_int(s.portal_cooldown)
         .var_int(s.sea_level);
-    w.bool(l.online_mode).bool(l.enforces_secure_chat);
-    w.buf
 }
 
 /// Коды `ClientboundGameEventPacket.Type`.
@@ -482,15 +486,25 @@ pub fn direction_offset(d: i32) -> Option<[i32; 3]> {
 /// `ServerboundPlayerActionPacket` после ID.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlayerAction {
-    /// 0 — START_DESTROY_BLOCK, 2 — ABORT, 3 — STOP_DESTROY_BLOCK, ...
+    /// Код `Action` (см. константы ниже).
     pub action: i32,
     pub pos: [i32; 3],
     pub face: u8,
     pub sequence: i32,
 }
 
+/// `ServerboundPlayerActionPacket.Action`.
 pub const START_DESTROY_BLOCK: i32 = 0;
+pub const ABORT_DESTROY_BLOCK: i32 = 2;
 pub const STOP_DESTROY_BLOCK: i32 = 3;
+pub const DROP_ALL_ITEMS: i32 = 4;
+pub const DROP_ITEM: i32 = 5;
+pub const RELEASE_USE_ITEM: i32 = 6;
+pub const SWAP_ITEM_WITH_OFFHAND: i32 = 7;
+
+/// `ServerboundPlayerCommandPacket.Action` (после ID сущности).
+pub const START_SPRINTING: i32 = 1;
+pub const STOP_SPRINTING: i32 = 2;
 
 pub fn read_player_action(r: &mut Reader) -> Result<PlayerAction> {
     Ok(PlayerAction {
@@ -522,14 +536,6 @@ pub fn read_use_item_on(r: &mut Reader) -> Result<UseItemOn> {
         face,
         sequence: r.var_int()?,
     })
-}
-
-/// `ServerboundSetCreativeModeSlotPacket`: слот и ID предмета (None — пусто).
-/// Компоненты предмета не разбираем: нам нужен только тип.
-pub fn read_creative_slot(r: &mut Reader) -> Result<(i16, Option<i32>)> {
-    let slot = r.u16()? as i16;
-    let count = r.var_int()?;
-    Ok((slot, if count > 0 { Some(r.var_int()?) } else { None }))
 }
 
 #[cfg(test)]

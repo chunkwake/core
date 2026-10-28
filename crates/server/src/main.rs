@@ -44,13 +44,17 @@ async fn serve(dir: &Path) -> Result<(), String> {
             let java = std::env::var_os("CHUNKWAKE_JAVA")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| props.java_command(dir));
-            tracing::info!("extracting vanilla data from server.jar (one-time, a few seconds)");
+            tracing::info!(
+                "extracting vanilla data from server.jar with {} (one-time, usually 10-30s)",
+                java.display()
+            );
             let jar = props.jar_path(dir);
-            let d = chunkwake_data::generator::ensure_generated(
+            let d = chunkwake_data::generator::ensure_generated_with(
                 &java,
                 &jar,
                 &version.name,
                 &cache_root,
+                &|msg| tracing::info!("{msg}"),
             )
             .map_err(|e| e.to_string())?;
             config::cache_version(&jar, &d)?;
@@ -89,6 +93,8 @@ async fn serve(dir: &Path) -> Result<(), String> {
     })?;
     tracing::info!("listening on {bind}");
 
+    tracing::info!("loading world data (blocks, items, loot tables)");
+    let started = std::time::Instant::now();
     let (play, storage) = world_setup::build_play_plan(
         &data_dir,
         &packets,
@@ -99,7 +105,11 @@ async fn serve(dir: &Path) -> Result<(), String> {
     let (play, storage) = (std::sync::Arc::new(play), std::sync::Arc::new(storage));
     // Регионы читаются с диска при первом обращении к их чанкам.
     play.set_source(storage.clone());
-    tracing::info!("world: {}", props.level_name);
+    tracing::info!(
+        "world: {} (data loaded in {:.1}s)",
+        props.level_name,
+        started.elapsed().as_secs_f64()
+    );
     play.spawn_tick();
     storage.spawn_autosave(play.clone());
     start_plugins(dir, &props, &play).await;

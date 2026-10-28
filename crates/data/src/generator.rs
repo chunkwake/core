@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Пишется последним; меняется при изменении состава кэша.
-const CACHE_MARKER: &str = ".chunkwake-cache-v3";
+const CACHE_MARKER: &str = ".chunkwake-cache-v4";
 
 /// Выгрузка свойств света (исходник рядом: `extractor/ChunkwakeLight.java`).
 const LIGHT_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeLight.class");
@@ -28,6 +28,17 @@ pub fn ensure_generated(
     jar: &Path,
     version: &str,
     cache_root: &Path,
+) -> Result<PathBuf, DataError> {
+    ensure_generated_with(java, jar, version, cache_root, &|_| {})
+}
+
+/// То же, с сообщениями о ходе генерации (этапы и «ещё идёт» раз в несколько секунд).
+pub fn ensure_generated_with(
+    java: &Path,
+    jar: &Path,
+    version: &str,
+    cache_root: &Path,
+    progress: &dyn Fn(&str),
 ) -> Result<PathBuf, DataError> {
     if let Some(target) = cached(cache_root, version) {
         return Ok(target);
@@ -50,22 +61,22 @@ pub fn ensure_generated(
     let tmp_abs = std::path::absolute(&tmp_out).map_err(|e| io("resolve", &tmp_out, e))?;
 
     // Бандлер распаковывает библиотеки в текущий каталог — держим их в .work.
-    let output = Command::new(java)
-        .current_dir(&work)
+    progress("[1/2] running the vanilla data generator (reports, registries, loot tables)");
+    let mut cmd = Command::new(java);
+    cmd.current_dir(&work)
         .arg("-DbundlerMainClass=net.minecraft.data.Main")
         .arg("-jar")
         .arg(&jar)
         .arg("--server")
         .arg("--reports")
         .arg("--output")
-        .arg(&tmp_abs)
-        .output()
-        .map_err(|e| {
-            DataError::Generator(format!(
-                "cannot start {}: {e}. Set CHUNKWAKE_JAVA to a Java runtime required by this version",
-                java.display()
-            ))
-        })?;
+        .arg(&tmp_abs);
+    let output = run(cmd, "[1/2] data generator", progress).map_err(|e| {
+        DataError::Generator(format!(
+            "cannot start {}: {e}. Set CHUNKWAKE_JAVA to a Java runtime required by this version",
+            java.display()
+        ))
+    })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let tail: Vec<&str> = stderr.lines().rev().take(5).collect();
@@ -85,7 +96,8 @@ pub fn ensure_generated(
             "no reports/packets.json produced".into(),
         ));
     }
-    extract_light(java, &work, &tmp_abs.join("reports/light.csv"))?;
+    progress("[2/2] extracting block light and hardness");
+    extract_light(java, &work, &tmp_abs.join("reports/light.csv"), progress)?;
     std::fs::write(tmp_out.join(CACHE_MARKER), "").map_err(|e| io("write", &tmp_out, e))?;
     std::fs::rename(&tmp_out, &target).map_err(|e| io("rename", &tmp_out, e))?;
     Ok(target)
@@ -93,7 +105,12 @@ pub fn ensure_generated(
 
 /// Свет состояний блоков: в отчётах генератора его нет, поэтому запускаем
 /// маленький класс на распакованных бандлером `versions/` и `libraries/`.
-fn extract_light(java: &Path, work: &Path, out: &Path) -> Result<(), DataError> {
+fn extract_light(
+    java: &Path,
+    work: &Path,
+    out: &Path,
+    progress: &dyn Fn(&str),
+) -> Result<(), DataError> {
     let io = |what: &str, p: &Path, e: std::io::Error| {
         DataError::Io(format!("{what} {}: {e}", p.display()))
     };
@@ -109,13 +126,13 @@ fn extract_light(java: &Path, work: &Path, out: &Path) -> Result<(), DataError> 
     }
     let classpath = std::env::join_paths(&classpath)
         .map_err(|e| DataError::Generator(format!("classpath: {e}")))?;
-    let output = Command::new(java)
-        .current_dir(work)
+    let mut cmd = Command::new(java);
+    cmd.current_dir(work)
         .arg("-cp")
         .arg(classpath)
         .arg("ChunkwakeLight")
-        .arg(out)
-        .output()
+        .arg(out);
+    let output = run(cmd, "[2/2] light extractor", progress)
         .map_err(|e| DataError::Generator(format!("cannot start {}: {e}", java.display())))?;
     if !output.status.success() || !out.is_file() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -127,6 +144,61 @@ fn extract_light(java: &Path, work: &Path, out: &Path) -> Result<(), DataError> 
         )));
     }
     Ok(())
+}
+
+/// Запускает процесс, собирая вывод, и раз в несколько секунд сообщает, что он ещё идёт.
+fn run(
+    mut cmd: Command,
+    step: &str,
+    progress: &dyn Fn(&str),
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    // Вывод читаем в потоках: иначе заполненный канал остановит процесс.
+    let pipe = |r: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut r) = r {
+                let _ = r.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let out = pipe(
+        child
+            .stdout
+            .take()
+            .map(|r| Box::new(r) as Box<dyn Read + Send>),
+    );
+    let err = pipe(
+        child
+            .stderr
+            .take()
+            .map(|r| Box::new(r) as Box<dyn Read + Send>),
+    );
+    let start = Instant::now();
+    let mut next = Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if start.elapsed() >= next {
+            progress(&format!("{step}: still running ({}s)", next.as_secs()));
+            next += Duration::from_secs(5);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    progress(&format!(
+        "{step}: done in {:.1}s",
+        start.elapsed().as_secs_f64()
+    ));
+    Ok(std::process::Output {
+        status,
+        stdout: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+    })
 }
 
 /// Все `.jar` в каталоге, рекурсивно.
