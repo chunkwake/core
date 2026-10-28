@@ -4,6 +4,8 @@ pub mod auth;
 pub mod click;
 pub mod configuration;
 pub mod crypto;
+pub mod enchanting;
+pub mod sounds;
 pub mod furnace;
 pub mod items;
 pub mod live;
@@ -14,6 +16,7 @@ pub mod play;
 pub mod potions;
 pub mod stack_nbt;
 pub mod survival;
+pub mod xp;
 
 use bytes::BytesMut;
 use chunkwake_protocol::ProtocolError;

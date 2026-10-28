@@ -187,6 +187,12 @@ final class PluginManagerImpl {
         if (has(org.bukkit.event.entity.EntityPotionEffectEvent.getHandlerList())) {
             mask |= Bridge.listenBit(Bridge.EVENT_POTION);
         }
+        if (has(org.bukkit.event.enchantment.PrepareItemEnchantEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_PREPARE_ENCHANT);
+        }
+        if (has(org.bukkit.event.enchantment.EnchantItemEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_ENCHANT);
+        }
         Bridge.setFlag(Bridge.FLAG_LISTENERS, mask);
     }
 

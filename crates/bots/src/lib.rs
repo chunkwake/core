@@ -19,6 +19,7 @@ pub struct Ids {
     keep_alive: i32,
     sb_keep_alive: i32,
     sb_move_pos: i32,
+    sb_client_tick_end: i32,
     player_position: i32,
     sb_accept_teleportation: i32,
 }
@@ -38,6 +39,7 @@ impl Ids {
             keep_alive: id(Play, C, "keep_alive")?,
             sb_keep_alive: id(Play, S, "keep_alive")?,
             sb_move_pos: id(Play, S, "move_player_pos")?,
+            sb_client_tick_end: id(Play, S, "client_tick_end")?,
             player_position: id(Play, C, "player_position")?,
             sb_accept_teleportation: id(Play, S, "accept_teleportation")?,
         })
@@ -160,9 +162,18 @@ impl Client {
                 r.f64().map_err(err)?,
                 r.f64().map_err(err)?,
             ];
+            for _ in 0..3 {
+                r.f64().map_err(err)?;
+            }
+            let yaw = r.f32().map_err(err)?;
+            let pitch = r.f32().map_err(err)?;
             let mut w = Writer::new();
             w.var_int(self.ids.sb_accept_teleportation)
                 .var_int(teleport_id);
+            for coordinate in pos {
+                w.f64(coordinate);
+            }
+            w.f32(yaw).f32(pitch);
             self.bytes_out += w.buf.len() as u64;
             self.conn.send(&w.buf).await.map_err(err)?;
             Ok(Event::Position(pos))
@@ -179,7 +190,11 @@ impl Client {
         }
         w.u8(1);
         self.bytes_out += w.buf.len() as u64;
-        self.conn.send(&w.buf).await.map_err(err)
+        self.conn.send(&w.buf).await.map_err(err)?;
+        let mut tick_end = Writer::new();
+        tick_end.var_int(self.ids.sb_client_tick_end);
+        self.bytes_out += tick_end.buf.len() as u64;
+        self.conn.send(&tick_end.buf).await.map_err(err)
     }
 }
 

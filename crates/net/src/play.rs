@@ -96,6 +96,8 @@ struct Ids {
     container_set_content: i32,
     container_set_slot: i32,
     container_set_data: i32,
+    set_experience: i32,
+    sb_container_button_click: i32,
     set_health: i32,
     respawn: i32,
     damage_event: i32,
@@ -103,6 +105,7 @@ struct Ids {
     sb_container_click: i32,
     sb_container_close: i32,
     sb_player_input: i32,
+    sb_player_abilities: i32,
     open_screen: i32,
     container_close: i32,
     sb_client_command: i32,
@@ -110,6 +113,8 @@ struct Ids {
     sb_use_item: i32,
     commands: i32,
     block_event: i32,
+    sound: i32,
+    level_event: i32,
     set_time: i32,
     change_difficulty: i32,
     update_mob_effect: i32,
@@ -573,6 +578,10 @@ struct Window {
     slots: Vec<Slot>,
     /// Последние отправленные свойства окна (печь).
     data: [i32; 4],
+    /// Последние отправленные свойства стола зачарования.
+    enchant: [i32; 10],
+    /// Варианты стола (после `PrepareItemEnchantEvent`) и для чего они: предмет, полки, зерно.
+    offer: Option<((Slot, i32, i32), crate::enchanting::Offer)>,
 }
 
 impl Window {
@@ -617,6 +626,8 @@ fn offset([x, y, z]: [i32; 3], dir: u8) -> [i32; 3] {
 
 /// Бит шифта в `ServerboundPlayerInputPacket`.
 const INPUT_SHIFT: u8 = 0x20;
+/// Бит `flying` в `ServerboundPlayerAbilitiesPacket`.
+const ABILITY_FLYING: u8 = 0x02;
 
 /// Блок-сущность контейнера по имени блока.
 fn container_entity(block: &str) -> Option<&'static str> {
@@ -656,6 +667,9 @@ const GAME_MODES: [&str; 4] = ["survival", "creative", "adventure", "spectator"]
 const MAX_GIVE: i32 = 6400;
 
 pub struct SurvivalData {
+    /// Стол зачарования: чары, предметы, полки.
+    pub enchanting: chunkwake_data::enchanting::Enchanting,
+    pub menu_enchantment: i32,
     /// Чары для плагинов по порядку сетевых ID (строки запроса `enchantments`).
     pub enchantments: Vec<String>,
     /// Твёрдость по состоянию блока (-1 — неразрушимый, 0 — ломается сразу).
@@ -675,6 +689,10 @@ pub struct SurvivalData {
     pub furnace_lit: HashMap<u32, u32>,
     /// Эффекты по имени (`minecraft:haste`) в реестре `mob_effect`.
     pub effects: HashMap<String, i32>,
+    /// Сетевые ID атрибутов (`attribute`).
+    pub attributes: HashMap<String, i32>,
+    /// Сетевые ID звуков (`sound_event`).
+    pub sounds: HashMap<String, i32>,
     /// ID `minecraft:movement_speed` в реестре `attribute`.
     pub attribute_speed: i32,
     /// ID `minecraft:jump_strength` и `minecraft:gravity`.
@@ -788,6 +806,8 @@ impl PlayPlan {
                 container_set_content: cb("container_set_content")?,
                 container_set_slot: cb("container_set_slot")?,
                 container_set_data: cb("container_set_data")?,
+                set_experience: cb("set_experience")?,
+                sb_container_button_click: sb("container_button_click")?,
                 set_health: cb("set_health")?,
                 respawn: cb("respawn")?,
                 damage_event: cb("damage_event")?,
@@ -795,6 +815,7 @@ impl PlayPlan {
                 sb_container_click: sb("container_click")?,
                 sb_container_close: sb("container_close")?,
                 sb_player_input: sb("player_input")?,
+                sb_player_abilities: sb("player_abilities")?,
                 open_screen: cb("open_screen")?,
                 container_close: cb("container_close")?,
                 sb_client_command: sb("client_command")?,
@@ -802,6 +823,8 @@ impl PlayPlan {
                 sb_use_item: sb("use_item")?,
                 commands: cb("commands")?,
                 block_event: cb("block_event")?,
+                sound: cb("sound")?,
+                level_event: cb("level_event")?,
                 set_time: cb("set_time")?,
                 change_difficulty: cb("change_difficulty")?,
                 update_mob_effect: cb("update_mob_effect")?,
@@ -1167,6 +1190,7 @@ impl PlayPlan {
             yaw,
             pitch,
             effects: v.effects.clone(),
+            xp: st.xp,
         };
         self.live.lock().unwrap().insert(uuid, live);
     }
@@ -2581,6 +2605,8 @@ impl PlayPlan {
         let mut sneaking = false;
         // Полёт на элитрах. Клиент включает его сам и гасит только по метаданным.
         let mut gliding = false;
+        // Креатив/наблюдатель: клиент шлёт `player_abilities`, пока бит включён элитры нельзя.
+        let mut flying = login.spawn.game_mode == 3;
         let mut food_ticker = tokio::time::interval(TICK);
         food_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         self.send_inventory(conn, &mut state.inv).await?;
@@ -2591,6 +2617,7 @@ impl PlayPlan {
         ))
         .await?;
         self.send_health(conn, &state.vitals).await?;
+        self.send_xp(conn, &state.xp).await?;
         let mut motion = 0u8;
         for e in &state.vitals.effects {
             conn.send(&inv::update_mob_effect(
@@ -2607,6 +2634,8 @@ impl PlayPlan {
         self.sync_motion(conn, me.entity_id, &state.vitals, motion)
             .await?;
         let mut pending: Option<(i64, Instant)> = None;
+        // Атрибуты от чар снаряжения, последние отправленные клиенту.
+        let mut ench_attrs = Default::default();
         // Ломка (`ServerPlayerGameMode`): тики сессии, текущий блок и отложенная
         // ломка (клиент закончил раньше, чем позволяет прогресс).
         let mut game_ticks: u64 = 0;
@@ -2659,12 +2688,15 @@ impl PlayPlan {
                                 state.vitals.reset_fall(feet);
                             }
                             self.set_game_mode(conn, uuid, mode, false).await?;
+                            flying = mode == 3;
+                            self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding)
+                                .await?;
                             self.send_health(conn, &state.vitals).await?;
                         }
                         Control::Slot(w, s) => {
                             state.inv.slots[w] = s;
                             self.send_slots(conn, &mut state.inv, &[w]).await?;
-                            self.refresh_glide(conn, me, state, sneaking, &mut gliding).await?;
+                            self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
                         }
                         Control::Clear => {
                             state.inv.slots = [None; survival::SLOTS];
@@ -2674,7 +2706,7 @@ impl PlayPlan {
                             } else {
                                 self.send_inventory(conn, &mut state.inv).await?;
                             }
-                            self.refresh_glide(conn, me, state, sneaking, &mut gliding).await?;
+                            self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
                         }
                         Control::Selected(s) => {
                             state.inv.selected = s;
@@ -2707,6 +2739,21 @@ impl PlayPlan {
                         Control::ClearEffect { id, command } => {
                             self.revoke_effects(conn, me, &mut state.vitals, id, command).await?;
                         }
+                        Control::Xp(change) => {
+                            let old = state.xp.level;
+                            if state.xp.apply(change) {
+                                self.send_xp(conn, &state.xp).await?;
+                                if matches!(change, crate::xp::XpChange::Points(n) if n > 0) {
+                                    self.xp_sounds(me.entry.uuid, old, &state.xp);
+                                } else if state.xp.level > old && state.xp.level % 5 == 0 {
+                                    let f = if state.xp.level > 30 { 1.0 } else { state.xp.level as f32 / 30.0 };
+                                    self.player_sound(me.entry.uuid, "minecraft:entity.player.levelup", f * 0.75, 1.0);
+                                }
+                                if let Some(w) = window.as_mut().filter(|w| w.kind == Kind::Enchanting) {
+                                    self.refresh_enchant(conn, w, state.xp.seed, uuid).await?;
+                                }
+                            }
+                        }
                         Control::Teleport(pos, yaw, pitch) => {
                             teleport_id += 1;
                             center = self.teleport(conn, uuid, pos, yaw, pitch, teleport_id, center, r_view).await?;
@@ -2722,6 +2769,7 @@ impl PlayPlan {
                 }
                 _ = food_ticker.tick() => {
                     game_ticks += 1;
+                    self.sync_enchant_attrs(conn, me.entity_id, &state.inv, &mut ench_attrs).await?;
                     let now = digging.or(delayed).and_then(|(pos, start)| {
                         let block = self.block(pos).unwrap_or(AIR);
                         let p = self.destroy_progress(uuid, block, state.inv.held(), state.inv.slots[5], &state.vitals);
@@ -2798,6 +2846,7 @@ impl PlayPlan {
                             self.send_slots(conn, &mut state.inv, &[slot]).await?;
                             self.send_health(conn, &state.vitals).await?;
                             conn.send(&inv::entity_event(ids.entity_event, me.entity_id, inv::ENTITY_EVENT_USE_ITEM_COMPLETE)).await?;
+                            self.player_sound(uuid, "minecraft:entity.player.burp", 0.5, crate::sounds::pitch_09());
                         }
                     }
                     // Длительность тикает и в креативе. Урон от эффектов — только там, где игрок уязвим.
@@ -2828,7 +2877,7 @@ impl PlayPlan {
                             self.hurt(conn, me, &mut state.vitals, &mut state.inv, 1.0, Cause::Wither).await?;
                         }
                     }
-                    self.refresh_glide(conn, me, state, sneaking, &mut gliding).await?;
+                    self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
                     if !survival {
                         continue;
                     }
@@ -2933,7 +2982,7 @@ impl PlayPlan {
                         let landed = m.on_ground;
                         self.moved(uuid, m);
                         if gliding && landed {
-                            self.refresh_glide(conn, me, state, sneaking, &mut gliding).await?;
+                            self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
                         }
                         continue;
                     }
@@ -2966,7 +3015,7 @@ impl PlayPlan {
                                 }
                             } else {
                                 state.inv.set(slot, stack);
-                                self.refresh_glide(conn, me, state, sneaking, &mut gliding).await?;
+                                self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
                             }
                         }
                         continue;
@@ -2986,6 +3035,9 @@ impl PlayPlan {
                             if resync {
                                 self.send_window(conn, &mut state.inv, window.as_ref(), c.window).await?;
                             }
+                            if let Some(w) = window.as_mut().filter(|w| w.kind == Kind::Enchanting) {
+                                self.refresh_enchant(conn, w, state.xp.seed, uuid).await?;
+                            }
                             let mut kept = false;
                             if let Some((feet, yaw, pitch)) = self.player_at(uuid) {
                                 for s in thrown {
@@ -3004,18 +3056,39 @@ impl PlayPlan {
                                 self.send_window(conn, &mut state.inv, window.as_ref(), c.window).await?;
                             }
                         }
-                        self.refresh_glide(conn, me, state, sneaking, &mut gliding).await?;
+                        self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
                         continue;
                     }
                     if id == ids.sb_player_input {
                         sneaking = r.u8()? & INPUT_SHIFT != 0;
                         continue;
                     }
+                    if id == ids.sb_container_button_click {
+                        let wid = r.var_int()?;
+                        let button = r.var_int()?;
+                        let creative = login.spawn.game_mode == 1;
+                        let done = match window.as_mut().filter(|w| w.id == wid && w.kind == Kind::Enchanting) {
+                            Some(w) => self.enchant(w, button, &mut state.xp, creative, uuid).await,
+                            None => false,
+                        };
+                        if done {
+                            if let Some(w) = window.as_ref() {
+                                self.block_sound(None, "minecraft:block.enchantment_table.use", w.pos, 1.0, crate::sounds::pitch_09());
+                            }
+                            self.send_window(conn, &mut state.inv, window.as_ref(), wid).await?;
+                            self.send_xp(conn, &state.xp).await?;
+                        }
+                        if let Some(w) = window.as_mut().filter(|w| w.kind == Kind::Enchanting) {
+                            self.refresh_enchant(conn, w, state.xp.seed, uuid).await?;
+                        }
+                        self.publish_live(uuid, state, login.spawn.game_mode);
+                        continue;
+                    }
                     if id == ids.sb_container_close {
                         let _id = r.var_int()?;
                         self.close_window(&mut state.inv, &mut window, uuid);
                         self.send_inventory(conn, &mut state.inv).await?;
-                        self.refresh_glide(conn, me, state, sneaking, &mut gliding).await?;
+                        self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
                         continue;
                     }
                     if id == ids.sb_use_item {
@@ -3058,14 +3131,27 @@ impl PlayPlan {
                         conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                         continue;
                     }
+                    if id == ids.sb_player_abilities {
+                        let flags = r.u8()?;
+                        let mayfly = matches!(login.spawn.game_mode, 1 | 3);
+                        flying = mayfly && flags & ABILITY_FLYING != 0;
+                        if flying {
+                            self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding)
+                                .await?;
+                        }
+                        continue;
+                    }
                     if id == ids.sb_player_command {
                         let _entity = r.var_int()?;
                         match r.var_int()? {
                             play::START_SPRINTING => state.vitals.sprinting = true,
                             play::STOP_SPRINTING => state.vitals.sprinting = false,
                             play::START_FALL_FLYING => {
-                                // Пакет приходит в воздухе; «на земле» сервер узнаёт следующим движением.
-                                gliding = self.wearing_elytra(&state.inv) && !state.vitals.dead;
+                                // `canGlide` ложен при креативном полёте: иначе клиент
+                                // планирует (множитель 0.99) и остановка тянется, как в воде.
+                                gliding = !flying
+                                    && self.wearing_elytra(&state.inv)
+                                    && !state.vitals.dead;
                                 self.mark_gliding(uuid, gliding);
                                 self.send_pose(
                                     conn,
@@ -3086,6 +3172,9 @@ impl PlayPlan {
                         if r.var_int()? == inv::PERFORM_RESPAWN && state.vitals.dead {
                             teleport_id += 1;
                             center = self.respawn(conn, me, &login, &mut state.vitals, &mut state.inv, center, teleport_id).await?;
+                            // `keepLevel` по умолчанию выключен: опыт теряется.
+                            state.xp = crate::xp::Experience { seed: state.xp.seed, ..Default::default() };
+                            self.send_xp(conn, &state.xp).await?;
                             out.clear();
                             self.refresh_visible(uuid, center, r_view, &mut visible, &mut out);
                             if !out.is_empty() {
@@ -3211,6 +3300,7 @@ impl PlayPlan {
                         let clicked = self.state_name(self.block(u.pos).unwrap_or(AIR)).to_owned();
                         let kind = match clicked.as_str() {
                             "minecraft:crafting_table" => Some(Kind::Crafting),
+                            "minecraft:enchanting_table" => Some(Kind::Enchanting),
                             "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" => Some(Kind::Chest(3)),
                             n if furnace_kind(n).is_some() => Some(Kind::Furnace),
                             _ => None,
@@ -3230,6 +3320,7 @@ impl PlayPlan {
                             };
                             let (menu, title) = match kind {
                                 Kind::Crafting => (self.survival.menu_crafting, "container.crafting"),
+                                Kind::Enchanting => (self.survival.menu_enchantment, "container.enchant"),
                                 Kind::Furnace => {
                                     let k = furnace_kind(&clicked).unwrap_or(0) as usize;
                                     (self.survival.menu_furnace[k], ["container.furnace", "container.blast_furnace", "container.smoker"][k])
@@ -3238,10 +3329,13 @@ impl PlayPlan {
                                 _ if clicked == "minecraft:barrel" => (self.survival.menu_chest, "container.barrel"),
                                 _ => (self.survival.menu_chest, "container.chest"),
                             };
-                            let mut w = Window { id: next_window, kind, pos, second, slots: Vec::new(), data: [0; 4] };
+                            let mut w = Window { id: next_window, kind, pos, second, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None };
                             w.slots = self.window_slots(&w);
                             conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &serde_json::json!({"translate": title}))).await?;
                             self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
+                            if kind == Kind::Enchanting {
+                                self.refresh_enchant(conn, &mut w, state.xp.seed, uuid).await?;
+                            }
                             if kind == Kind::Furnace {
                                 let data = self.with_furnace(pos, |e| {
                                     e.viewers.push(uuid);
@@ -3256,7 +3350,7 @@ impl PlayPlan {
                             if matches!(kind, Kind::Chest(_)) {
                                 let positions = window.as_ref().map(Window::positions).unwrap_or_default();
                                 for (pos, n) in self.container_viewers(uuid, &positions, true) {
-                                    self.show_container(pos, n);
+                                    self.show_container(pos, n, true);
                                 }
                             }
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
@@ -3318,6 +3412,8 @@ impl PlayPlan {
                                 }
                                 placed = true;
                                 self.set_block(target, place);
+                                let sound = crate::sounds::place_sound(&name, |s| self.survival.sounds.contains_key(s));
+                                self.block_sound(Some(uuid), &sound, target, 1.0, 0.8);
                                 for &(p, s) in &extra {
                                     self.set_block(p, s);
                                 }
@@ -3418,7 +3514,15 @@ impl PlayPlan {
                                 state.vitals.reset_fall(feet);
                             }
                             self.set_game_mode(conn, uuid, mode, true).await?;
+                            flying = mode == 3;
+                            self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding)
+                                .await?;
                             self.send_health(conn, &state.vitals).await?;
+                            continue;
+                        }
+                        if builtin == "xp" || builtin == "experience" {
+                            let msg = self.xp_command(uuid, &line);
+                            conn.send(&text::system_chat_json(ids.system_chat, &msg.to_string(), false)).await?;
                             continue;
                         }
                         if builtin == "effect" {
@@ -3608,6 +3712,22 @@ impl PlayPlan {
             return Ok(());
         }
         state.vitals.exhaust(survival::EXHAUSTION_BREAK);
+        // Опыт за руду (`DropExperienceBlock.spawnAfterBreak`) — сразу игроку, без сфер.
+        let silk = held.map_or(0, |s| {
+            chunkwake_protocol::components::stack_level(s.extra, "minecraft:silk_touch")
+        });
+        if drops.is_some()
+            && silk == 0
+            && let Some((lo, hi)) = crate::xp::ore_range(self.state_name(block))
+        {
+            let n = rand::Rng::gen_range(&mut rand::thread_rng(), lo..=hi);
+            if n > 0 {
+                let old = state.xp.level;
+                state.xp.add_points(n);
+                self.send_xp(conn, &state.xp).await?;
+                self.xp_sounds(uuid, old, &state.xp);
+            }
+        }
         // `ItemStack.mineBlock`: инструмент изнашивается, если блок ломается не мгновенно.
         let hardness = self
             .survival
@@ -3636,6 +3756,11 @@ impl PlayPlan {
             if max > 0 && wear > 0 {
                 s.damage += wear;
                 state.inv.slots[slot] = (s.damage < max).then_some(s);
+                let entity = self.hub.players.lock().unwrap().get(&uuid).map(|p| p.entity_id);
+                if let Some(entity) = entity.filter(|_| s.damage >= max) {
+                    // `broadcastBreakEvent(MAINHAND)`: звук и осколки у всех.
+                    self.hub.send(None, inv::entity_event(self.ids.entity_event, entity, inv::ENTITY_EVENT_BREAK_MAINHAND));
+                }
                 self.send_slots(conn, &mut state.inv, &[slot]).await?;
             }
         }
@@ -3661,6 +3786,11 @@ impl PlayPlan {
         let Some(old) = self.set_block(pos, AIR) else {
             return Ok(false);
         };
+        // Частицы и звук ломки — остальным (ломающий проиграл их сам).
+        self.hub.send(
+            Some(uuid),
+            play::level_event(self.ids.level_event, crate::sounds::DESTROY_BLOCK, pos, old as i32, false),
+        );
         self.unlink_chest(pos, old);
         let mut touched = self.update_connections(pos);
         touched.push(pos);
@@ -3792,7 +3922,7 @@ impl PlayPlan {
         let size = match kind {
             Kind::Player => 2,
             Kind::Crafting => 3,
-            Kind::Chest(_) | Kind::Furnace => 0,
+            Kind::Chest(_) | Kind::Furnace | Kind::Enchanting => 0,
         };
         let fill = |slots: &mut [Slot]| {
             if size > 0 {
@@ -3836,6 +3966,7 @@ impl PlayPlan {
             smeltable: &smeltable,
             fuel: &fuel,
             bucket: self.item_id("minecraft:bucket"),
+            lapis: self.item_id(crate::enchanting::LAPIS),
             creative,
         };
         let thrown = click::Menu {
@@ -3885,6 +4016,9 @@ impl PlayPlan {
             Kind::Furnace => self
                 .block(w.pos)
                 .is_some_and(|s| furnace_kind(self.state_name(s)).is_some()),
+            Kind::Enchanting => self
+                .block(w.pos)
+                .is_some_and(|s| self.state_name(s) == "minecraft:enchanting_table"),
             _ => self
                 .block(w.pos)
                 .is_some_and(|s| self.state_name(s) == "minecraft:crafting_table"),
@@ -3913,13 +4047,14 @@ impl PlayPlan {
         Ok(())
     }
 
-    /// Гасит полёт, если элитры сняты, игрок на земле или мёртв.
+    /// Гасит элитры, если их сняли, игрок на земле, мёртв или включил креативный полёт.
     async fn refresh_glide(
         &self,
         conn: &mut Connection,
         me: &Online,
         state: &PlayerState,
         sneaking: bool,
+        flying: bool,
         gliding: &mut bool,
     ) -> Result<(), NetError> {
         if !*gliding {
@@ -3932,7 +4067,7 @@ impl PlayPlan {
             .unwrap()
             .get(&me.entry.uuid)
             .is_some_and(|p| p.on_ground);
-        if state.vitals.dead || ground || !self.wearing_elytra(&state.inv) {
+        if state.vitals.dead || ground || flying || !self.wearing_elytra(&state.inv) {
             *gliding = false;
             self.mark_gliding(me.entry.uuid, false);
             self.send_pose(
@@ -3974,9 +4109,21 @@ impl PlayPlan {
     }
 
     /// Крышка сундука — `block_event`, бочка — свойство `open`.
-    fn show_container(&self, pos: [i32; 3], viewers: usize) {
+    fn show_container(&self, pos: [i32; 3], viewers: usize, opening: bool) {
         let Some(state) = self.block(pos) else { return };
         let name = self.state_name(state).to_owned();
+        // Звук — на первом открытии и последнем закрытии (`ContainerOpenersCounter`).
+        let kind = match name.as_str() {
+            "minecraft:barrel" => Some("barrel"),
+            "minecraft:chest" | "minecraft:trapped_chest" => Some("chest"),
+            _ => None,
+        };
+        if let Some(kind) = kind
+            && ((opening && viewers == 1) || (!opening && viewers == 0))
+        {
+            let sound = format!("minecraft:block.{kind}.{}", if opening { "open" } else { "close" });
+            self.block_sound(None, &sound, pos, 0.5, crate::sounds::pitch_09());
+        }
         if name == "minecraft:barrel" {
             let value = if viewers > 0 { "true" } else { "false" };
             if let Some(next) = self.survival.placement.with_prop(state, "open", value) {
@@ -4011,7 +4158,7 @@ impl PlayPlan {
             return;
         }
         for (pos, n) in self.container_viewers(uuid, &positions, false) {
-            self.show_container(pos, n);
+            self.show_container(pos, n, false);
         }
     }
 
@@ -4025,6 +4172,7 @@ impl PlayPlan {
         if let Some(mut w) = window.take() {
             match w.kind {
                 Kind::Crafting => back.extend(w.slots[1..10].iter_mut().filter_map(Option::take)),
+                Kind::Enchanting => back.extend(w.slots.iter_mut().filter_map(Option::take)),
                 Kind::Furnace => {
                     if let Some(e) = self.furnaces.lock().unwrap().get_mut(&w.pos) {
                         e.viewers.retain(|v| *v != uuid);
@@ -4033,7 +4181,7 @@ impl PlayPlan {
                 Kind::Chest(_) => {
                     let positions = w.positions();
                     for (pos, n) in self.container_viewers(uuid, &positions, false) {
-                        self.show_container(pos, n);
+                        self.show_container(pos, n, false);
                     }
                 }
                 Kind::Player => {}
@@ -4085,6 +4233,7 @@ impl PlayPlan {
                 .with_furnace(w.pos, |e| e.f.slots.to_vec())
                 .unwrap_or_else(|| vec![None; 3]),
             Kind::Crafting if w.slots.is_empty() => vec![None; 10],
+            Kind::Enchanting if w.slots.is_empty() => vec![None; 2],
             _ => w.slots.clone(),
         }
     }
@@ -4755,6 +4904,87 @@ impl PlayPlan {
         .await
     }
 
+    /// `Level.playSound(except, …)`: звук всем, кроме `skip`.
+    fn play_sound(&self, skip: Option<Uuid>, name: &str, source: i32, pos: [f64; 3], volume: f32, pitch: f32) {
+        let Some(&id) = self.survival.sounds.get(name) else {
+            return;
+        };
+        self.hub.send(
+            skip,
+            play::sound(self.ids.sound, id, source, pos, volume, pitch, rand::random()),
+        );
+    }
+
+    fn block_sound(&self, skip: Option<Uuid>, name: &str, pos: [i32; 3], volume: f32, pitch: f32) {
+        let c = [pos[0] as f64 + 0.5, pos[1] as f64 + 0.5, pos[2] as f64 + 0.5];
+        self.play_sound(skip, name, crate::sounds::BLOCKS, c, volume, pitch);
+    }
+
+    /// Звук у игрока (`Player.playSound` с `null` — слышат все, и он сам).
+    fn player_sound(&self, uuid: Uuid, name: &str, volume: f32, pitch: f32) {
+        if let Some((feet, _, _)) = self.player_at(uuid) {
+            self.play_sound(None, name, crate::sounds::PLAYERS, feet, volume, pitch);
+        }
+    }
+
+    /// Звуки опыта: сфера (`handleTakeItemEntity`) и каждые 5 уровней — `levelup`.
+    fn xp_sounds(&self, uuid: Uuid, old_level: i32, xp: &crate::xp::Experience) {
+        let pitch = (rand::random::<f32>() - rand::random::<f32>()) * 0.35 + 0.9;
+        self.player_sound(uuid, "minecraft:entity.experience_orb.pickup", 0.1, pitch);
+        if xp.level > old_level && xp.level % 5 == 0 {
+            let f = if xp.level > 30 { 1.0 } else { xp.level as f32 / 30.0 };
+            self.player_sound(uuid, "minecraft:entity.player.levelup", f * 0.75, 1.0);
+        }
+    }
+
+    /// Шлёт атрибуты от чар снаряжения (Эффективность, Подводник, Глубинный шаг…),
+    /// если они изменились: клиент сам их не считает.
+    async fn sync_enchant_attrs(
+        &self,
+        conn: &mut Connection,
+        entity: i32,
+        inv: &survival::Inventory,
+        last: &mut std::collections::BTreeMap<String, Vec<(String, f64, i32)>>,
+    ) -> Result<(), NetError> {
+        let ench = |i: usize| inv.slots[i].map(|s| chunkwake_protocol::components::get(s.extra));
+        let slots = [
+            ("mainhand", ench(inv.held_slot())),
+            ("offhand", ench(survival::OFFHAND)),
+            ("head", ench(5)),
+            ("chest", ench(6)),
+            ("legs", ench(7)),
+            ("feet", ench(8)),
+        ];
+        let equipment: Vec<(&str, &[(i32, i32)])> = slots
+            .iter()
+            .filter_map(|(n, x)| x.as_ref().map(|x| (*n, x.enchantments.as_slice())))
+            .collect();
+        let now = crate::enchanting::attribute_modifiers(&self.survival.enchanting, &equipment);
+        if now == *last {
+            return Ok(());
+        }
+        let names: std::collections::BTreeSet<&String> = now.keys().chain(last.keys()).collect();
+        for name in names {
+            let mods = now.get(name).map_or(&[][..], Vec::as_slice);
+            if last.get(name).map_or(&[][..], Vec::as_slice) == mods {
+                continue;
+            }
+            let Some(&id) = self.survival.attributes.get(name.as_str()) else {
+                continue;
+            };
+            conn.send(&inv::update_attribute(
+                self.ids.update_attributes,
+                entity,
+                id,
+                crate::enchanting::attribute_base(name),
+                mods,
+            ))
+            .await?;
+        }
+        *last = now;
+        Ok(())
+    }
+
     /// Меняет ли эффект скорость движения.
     fn moves_speed(&self, id: i32) -> bool {
         ["minecraft:speed", "minecraft:slowness"]
@@ -5120,6 +5350,284 @@ impl PlayPlan {
         self.sync_motion(conn, me.entity_id, v, motion).await
     }
 
+    async fn send_xp(
+        &self,
+        conn: &mut Connection,
+        xp: &crate::xp::Experience,
+    ) -> Result<(), NetError> {
+        conn.send(&inv::set_experience(
+            self.ids.set_experience,
+            xp.progress,
+            xp.level,
+            xp.total,
+        ))
+        .await
+    }
+
+    /// Варианты стола для предмета в окне (зачарованный или незачаряемый — пусто)
+    /// и число полок.
+    fn enchant_offer(&self, w: &Window, seed: i32) -> (crate::enchanting::Offer, i32) {
+        let none = crate::enchanting::Offer {
+            clue: [-1; 3],
+            level: [-1; 3],
+            ..Default::default()
+        };
+        let item = w.slots.first().copied().flatten().filter(|s| {
+            chunkwake_protocol::components::get(s.extra)
+                .enchantments
+                .is_empty()
+        });
+        let Some(s) = item else {
+            return (none, 0);
+        };
+        let e = &self.survival.enchanting;
+        let at = |o: [i32; 3]| {
+            let p = [w.pos[0] + o[0], w.pos[1] + o[1], w.pos[2] + o[2]];
+            self.state_name(self.block(p).unwrap_or(AIR)).to_owned()
+        };
+        let shelves = crate::enchanting::shelves(e, at);
+        (crate::enchanting::offer(e, self.item_name(s.item), shelves, seed), shelves)
+    }
+
+    fn enchant_name(&self, id: i32) -> &str {
+        self.survival
+            .enchanting
+            .defs
+            .iter()
+            .find(|d| d.id == id)
+            .map_or("-", |d| d.name.as_str())
+    }
+
+    fn enchant_id(&self, name: &str) -> Option<i32> {
+        self.survival
+            .enchanting
+            .defs
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| d.id)
+    }
+
+    /// `slotsChanged`: при смене предмета, полок или зерна — новые варианты и
+    /// `PrepareItemEnchantEvent`; затем шлёт изменившиеся свойства стола.
+    async fn refresh_enchant(
+        &self,
+        conn: &mut Connection,
+        w: &mut Window,
+        seed: i32,
+        uuid: Uuid,
+    ) -> Result<(), NetError> {
+        let item = w.slots.first().copied().flatten();
+        let (mut offer, shelves) = self.enchant_offer(w, seed);
+        let key = (item, shelves, seed);
+        if w.offer.as_ref().is_some_and(|(k, _)| *k == key) {
+            offer = w.offer.as_ref().unwrap().1;
+        } else if let Some(s) = item.filter(|_| offer.costs.iter().any(|&c| c > 0)) {
+            let reply = self
+                .plugin_event(Event::PrepareEnchant, uuid, || {
+                    let mut arg = format!(
+                        "{} {} {} {shelves}\n{}",
+                        w.pos[0],
+                        w.pos[1],
+                        w.pos[2],
+                        crate::stack_nbt::to_line(s, self.item_name(s.item))
+                    );
+                    for i in 0..3 {
+                        arg += &format!(
+                            "\n{} {} {}",
+                            offer.costs[i],
+                            if offer.clue[i] < 0 { "-" } else { self.enchant_name(offer.clue[i]) },
+                            offer.level[i]
+                        );
+                    }
+                    arg
+                })
+                .await;
+            match reply.as_deref().map(str::trim) {
+                Some("c") => {
+                    offer = crate::enchanting::Offer {
+                        clue: [-1; 3],
+                        level: [-1; 3],
+                        ..Default::default()
+                    }
+                }
+                Some(r) if !r.is_empty() => {
+                    for (i, line) in r.lines().take(3).enumerate() {
+                        let f: Vec<&str> = line.split(' ').collect();
+                        offer.costs[i] = f.first().and_then(|c| c.parse().ok()).unwrap_or(0);
+                        offer.clue[i] = f.get(1).and_then(|n| self.enchant_id(n)).unwrap_or(-1);
+                        offer.level[i] = f.get(2).and_then(|c| c.parse().ok()).unwrap_or(-1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        w.offer = Some((key, offer));
+        let data = offer.data(seed);
+        for (i, &v) in data.iter().enumerate() {
+            if w.enchant[i] != v {
+                conn.send(&inv::container_set_data(
+                    self.ids.container_set_data,
+                    w.id,
+                    i as i16,
+                    v as i16,
+                ))
+                .await?;
+            }
+        }
+        w.enchant = data;
+        Ok(())
+    }
+
+    /// `EnchantmentMenu.clickMenuButton`: чары варианта `button`, `EnchantItemEvent`,
+    /// списание уровней (`button + 1`) и лазурита (кроме творческого), новое зерно.
+    async fn enchant(
+        &self,
+        w: &mut Window,
+        button: i32,
+        xp: &mut crate::xp::Experience,
+        creative: bool,
+        uuid: Uuid,
+    ) -> bool {
+        use chunkwake_protocol::components;
+        let Some(b) = usize::try_from(button).ok().filter(|&b| b < 3) else {
+            return false;
+        };
+        let Some((_, offer)) = w.offer else {
+            return false;
+        };
+        let mut cost = offer.costs[b];
+        let need = button + 1;
+        let Some(item) = w.slots[0] else {
+            return false;
+        };
+        let lapis_id = self.item_id(crate::enchanting::LAPIS);
+        let lapis = w.slots[1]
+            .filter(|s| Some(s.item) == lapis_id)
+            .map_or(0, |s| s.count);
+        if cost <= 0 || (!creative && (lapis < need || xp.level < cost)) {
+            return false;
+        }
+        let name = self.item_name(item.item);
+        let mut list =
+            crate::enchanting::enchantments(&self.survival.enchanting, name, button, cost, xp.seed);
+        let reply = self
+            .plugin_event(Event::Enchant, uuid, || {
+                let hint = if offer.clue[b] < 0 { "-" } else { self.enchant_name(offer.clue[b]) };
+                let mut arg = format!(
+                    "{} {} {} {cost} {button} {hint} {}\n{}",
+                    w.pos[0],
+                    w.pos[1],
+                    w.pos[2],
+                    offer.level[b],
+                    crate::stack_nbt::to_line(item, name)
+                );
+                for &(id, level) in &list {
+                    arg += &format!("\n{} {level}", self.enchant_name(id));
+                }
+                arg
+            })
+            .await;
+        match reply.as_deref().map(str::trim) {
+            Some("c") => return false,
+            Some(r) if !r.is_empty() => {
+                let mut lines = r.lines();
+                cost = lines.next().and_then(|c| c.parse().ok()).unwrap_or(cost);
+                list = lines
+                    .filter_map(|l| {
+                        let (n, lv) = l.split_once(' ')?;
+                        Some((self.enchant_id(n)?, lv.parse().ok()?))
+                    })
+                    .collect();
+                if !creative && xp.level < cost {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+        if list.is_empty() {
+            return false;
+        }
+        let mut extra = (*components::get(item.extra)).clone();
+        let mut out = item;
+        if name == crate::enchanting::BOOK {
+            out.item = self
+                .item_id(crate::enchanting::ENCHANTED_BOOK)
+                .unwrap_or(item.item);
+            extra.stored = list;
+        } else {
+            extra.enchantments = list;
+        }
+        out.extra = components::intern(extra);
+        w.slots[0] = Some(out);
+        if !creative {
+            w.slots[1] = w.slots[1].and_then(|s| {
+                (s.count > need).then_some(Stack {
+                    count: s.count - need,
+                    ..s
+                })
+            });
+        }
+        xp.enchanted(need, rand::random());
+        true
+    }
+
+    /// `/xp add|set|query <цель> <число> [points|levels]` (как ванильная `/experience`).
+    fn xp_command(&self, me: Uuid, line: &str) -> serde_json::Value {
+        use crate::xp::XpChange;
+        let usage = serde_json::json!({
+            "text": "Usage: /xp add|set <targets> <amount> [points|levels] | /xp query <target> points|levels",
+            "color": "red",
+        });
+        let mut it = line.split_whitespace().skip(1);
+        let sub = it.next().unwrap_or("");
+        let targets = self.targets(me, it.next().unwrap_or("@s"));
+        if targets.is_empty() {
+            return serde_json::json!({"translate": "argument.entity.notfound.player", "color": "red"});
+        }
+        let one = (targets.len() == 1).then(|| targets[0].1.clone());
+        if sub == "query" {
+            let unit = it.next().unwrap_or("points");
+            let Some(xp) = self.live.lock().unwrap().get(&targets[0].0).map(|l| l.xp) else {
+                return usage;
+            };
+            let (key, n) = if unit == "levels" {
+                ("levels", xp.level)
+            } else {
+                ("points", xp.points())
+            };
+            return serde_json::json!({"translate": format!("commands.experience.query.{key}"), "with": [targets[0].1, n]});
+        }
+        let Some(amount) = it.next().and_then(|s| s.parse::<i32>().ok()) else {
+            return usage;
+        };
+        let levels = match it.next().unwrap_or("points") {
+            "points" => false,
+            "levels" => true,
+            _ => return usage,
+        };
+        let change = match (sub, levels) {
+            ("add", false) => XpChange::Points(amount),
+            ("add", true) => XpChange::Levels(amount),
+            ("set", false) => XpChange::SetPoints(amount),
+            ("set", true) if amount >= 0 => XpChange::SetLevel(amount),
+            _ => return usage,
+        };
+        {
+            let controls = self.controls.lock().unwrap();
+            for (t, _) in &targets {
+                if let Some(tx) = controls.get(t) {
+                    let _ = tx.send(Control::Xp(change));
+                }
+            }
+        }
+        let key = format!(
+            "commands.experience.{sub}.{}.success.{}",
+            if levels { "levels" } else { "points" },
+            if one.is_some() { "single" } else { "multiple" }
+        );
+        serde_json::json!({"translate": key, "with": [amount, one.unwrap_or_else(|| targets.len().to_string())]})
+    }
+
     async fn send_health(&self, conn: &mut Connection, v: &Vitals) -> Result<(), NetError> {
         conn.send(&inv::set_health(
             self.ids.set_health,
@@ -5145,6 +5653,17 @@ impl PlayPlan {
             self.effect_amp(v, "minecraft:resistance"),
             cause.bypasses_resistance(),
         );
+        // Чары брони (Защита, Невесомость…): `bypasses_enchantments` из наших причин нет.
+        let prot = {
+            let ench = |i: usize| inv.slots[i].map(|s| chunkwake_protocol::components::get(s.extra));
+            let armor = [("head", ench(5)), ("chest", ench(6)), ("legs", ench(7)), ("feet", ench(8))];
+            let eq: Vec<(&str, &[(i32, i32)])> = armor
+                .iter()
+                .filter_map(|(n, x)| x.as_ref().map(|x| (*n, x.enchantments.as_slice())))
+                .collect();
+            crate::enchanting::damage_protection(&self.survival.enchanting, &eq, cause.damage_type())
+        };
+        amount = crate::enchanting::after_protection(amount, prot);
         if let Some(reply) = self
             .plugin_event(Event::Damage, me.entry.uuid, || {
                 format!("{} {amount}", cause.bukkit())

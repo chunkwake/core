@@ -165,6 +165,7 @@ fn survival_data(
     chunkwake_protocol::inventory::DAMAGE_COMPONENT
         .store(damage, std::sync::atomic::Ordering::Relaxed);
     let enchantments;
+    let enchantment_names;
     // Чары, имя и описание предметов: номера компонентов и сетевые ID чар.
     {
         use chunkwake_protocol::components as c;
@@ -175,6 +176,8 @@ fn survival_data(
         c::ENCHANTMENTS_COMPONENT.store(component("minecraft:enchantments")?, order);
         c::CUSTOM_NAME_COMPONENT.store(component("minecraft:custom_name")?, order);
         c::LORE_COMPONENT.store(component("minecraft:lore")?, order);
+        c::STORED_ENCHANTMENTS_COMPONENT.store(component("minecraft:stored_enchantments")?, order);
+        c::CUSTOM_DATA_COMPONENT.store(component("minecraft:custom_data")?, order);
         let names: Vec<String> = registries
             .synchronized
             .iter()
@@ -182,6 +185,7 @@ fn survival_data(
             .map(|r| r.entries.clone())
             .unwrap_or_default();
         enchantments = enchantment_lines(data_dir, &names);
+        enchantment_names = names.clone();
         c::set_enchantments(names);
     }
     let _ = chunkwake_world::BLOCK_ENTITY_TYPES
@@ -244,6 +248,13 @@ fn survival_data(
     let recipes = chunkwake_data::recipes::load_recipes(data_dir, items).map_err(s)?;
     tracing::debug!("recipes: {}", recipes.len());
     let menu = |name| chunkwake_data::registries::builtin_id(data_dir, "menu", name).map_err(s);
+    let enchanting = chunkwake_data::enchanting::load(data_dir, &enchantment_names).map_err(s)?;
+    tracing::info!(
+        "enchanting: {} enchantments ({} on the table), {} enchantable items",
+        enchanting.defs.len(),
+        enchanting.defs.iter().filter(|d| d.in_table).count(),
+        enchanting.enchantable.len()
+    );
     Ok(SurvivalData {
         enchantments,
         recipes,
@@ -252,6 +263,8 @@ fn survival_data(
         chests: chests.clone(),
         chest_states: chests.iter().map(|(&id, &c)| (c, id)).collect(),
         menu_crafting: menu("minecraft:crafting")?,
+        menu_enchantment: menu("minecraft:enchantment")?,
+        enchanting,
         menu_furnace: [
             menu("minecraft:furnace")?,
             menu("minecraft:blast_furnace")?,
@@ -259,6 +272,8 @@ fn survival_data(
         ],
         furnace_lit,
         effects: chunkwake_data::registries::builtin_entries(data_dir, "mob_effect").map_err(s)?,
+        attributes: chunkwake_data::registries::builtin_entries(data_dir, "attribute").map_err(s)?,
+        sounds: chunkwake_data::registries::builtin_entries(data_dir, "sound_event").map_err(s)?,
         attribute_speed: chunkwake_data::registries::builtin_id(
             data_dir,
             "attribute",

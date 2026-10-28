@@ -12,19 +12,26 @@ use std::sync::{Arc, OnceLock, RwLock};
 pub struct Extra {
     /// `(сетевой ID чара, уровень)` в порядке добавления.
     pub enchantments: Vec<(i32, i32)>,
+    /// Чары, хранимые зачарованной книгой (`stored_enchantments`).
+    pub stored: Vec<(i32, i32)>,
     pub custom_name: Option<String>,
     pub lore: Vec<String>,
     /// Сырой патч компонентов с провода, если в нём было что-то кроме известных
     /// (зелья и прочее). Пишется как есть, чтобы клиент не терял состав.
     pub raw: Option<Vec<u8>>,
+    /// `custom_data`: сетевой NBT (безымянный корневой compound), в т. ч.
+    /// `PublicBukkitValues` плагинов (`PersistentDataContainer`).
+    pub custom_data: Option<Vec<u8>>,
 }
 
 impl Extra {
     pub fn is_empty(&self) -> bool {
         self.enchantments.is_empty()
+            && self.stored.is_empty()
             && self.custom_name.is_none()
             && self.lore.is_empty()
             && self.raw.is_none()
+            && self.custom_data.is_none()
     }
 
     pub fn level(&self, enchantment: i32) -> i32 {
@@ -60,6 +67,7 @@ pub fn intern(mut e: Extra) -> u32 {
     e.custom_name.iter_mut().for_each(canon);
     e.lore.iter_mut().for_each(canon);
     e.enchantments.sort_unstable();
+    e.stored.sort_unstable();
     if let Some(&id) = table().read().unwrap().index.get(&e) {
         return id;
     }
@@ -92,6 +100,8 @@ pub fn get(id: u32) -> Arc<Extra> {
 pub static ENCHANTMENTS_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static CUSTOM_NAME_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static LORE_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+pub static STORED_ENCHANTMENTS_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+pub static CUSTOM_DATA_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 
 pub(crate) fn id_of(c: &AtomicI32) -> i32 {
     c.load(Ordering::Relaxed)

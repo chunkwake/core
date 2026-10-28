@@ -283,6 +283,7 @@ dependencies = [
  "chunkwake-bots",
  "chunkwake-data",
  "crossterm",
+ "dotenvy",
  "ratatui",
  "reqwest",
  "ring",

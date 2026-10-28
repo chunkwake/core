@@ -87,9 +87,15 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
         pick.editMeta(m -> {
             m.displayName(net.kyori.adventure.text.Component.text("Test pick"));
             ((org.bukkit.inventory.meta.Damageable) m).setDamage(7);
+            var pdc = m.getPersistentDataContainer();
+            pdc.set(new org.bukkit.NamespacedKey(this, "owner"), org.bukkit.persistence.PersistentDataType.STRING, p.getName());
+            pdc.set(new org.bukkit.NamespacedKey(this, "uses"), org.bukkit.persistence.PersistentDataType.LONG, 1L << 40);
+            pdc.set(new org.bukkit.NamespacedKey(this, "soulbound"), org.bukkit.persistence.PersistentDataType.BOOLEAN, true);
         });
         getLogger().info("meta set: " + pick);
         p.getInventory().setItem(8, pick);
+        p.giveExpLevels(30);
+        p.giveExp(5);
         getServer().getScheduler().runTaskLater(this, () -> {
             var back = p.getInventory().getItem(8);
             var meta = back == null ? null : back.getItemMeta();
@@ -98,7 +104,15 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
                     + " name=" + (meta == null || !meta.hasDisplayName() ? null
                             : net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
                                     .plainText().serialize(meta.displayName()))
-                    + " damage=" + (meta instanceof org.bukkit.inventory.meta.Damageable d ? d.getDamage() : -1));
+                    + " damage=" + (meta instanceof org.bukkit.inventory.meta.Damageable d ? d.getDamage() : -1)
+                    + " level=" + p.getLevel() + " exp=" + p.getExp()
+                    + " enchant=" + org.bukkit.Registry.ENCHANTMENT.get(org.bukkit.NamespacedKey.minecraft("sharpness")).getMaxLevel()
+                    + " pdc=" + (meta == null ? null : meta.getPersistentDataContainer().get(
+                            new org.bukkit.NamespacedKey(this, "owner"), org.bukkit.persistence.PersistentDataType.STRING))
+                    + "/" + (meta == null ? null : meta.getPersistentDataContainer().get(
+                            new org.bukkit.NamespacedKey(this, "uses"), org.bukkit.persistence.PersistentDataType.LONG))
+                    + "/" + (meta == null ? null : meta.getPersistentDataContainer().get(
+                            new org.bukkit.NamespacedKey(this, "soulbound"), org.bukkit.persistence.PersistentDataType.BOOLEAN)));
         }, 2);
     }
 
@@ -141,6 +155,17 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             event.setCancelled(true);
             event.getPlayer().sendMessage(Component.text("No TNT here", NamedTextColor.RED));
         }
+    }
+
+    @EventHandler
+    public void onPrepareEnchant(org.bukkit.event.enchantment.PrepareItemEnchantEvent event) {
+        getLogger().info("prepare enchant: " + event.getItem().getType() + " bonus=" + event.getEnchantmentBonus());
+    }
+
+    @EventHandler
+    public void onEnchant(org.bukkit.event.enchantment.EnchantItemEvent event) {
+        getLogger().info("enchant: " + event.getItem().getType() + " cost=" + event.getExpLevelCost()
+                + " " + event.getEnchantsToAdd());
     }
 
     @EventHandler

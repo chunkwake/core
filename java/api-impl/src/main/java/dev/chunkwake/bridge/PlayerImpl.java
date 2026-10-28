@@ -110,7 +110,7 @@ final class PlayerImpl {
     /** Снимок игрока: здоровье, голод, режим, инвентарь в индексах Bukkit. */
     record State(double health, int food, float saturation, float exhaustion, int gameMode,
             int selected, double x, double y, double z, float yaw, float pitch, ItemStack[] items,
-            List<org.bukkit.potion.PotionEffect> effects) {
+            List<org.bukkit.potion.PotionEffect> effects, int level, float exp, int totalExp) {
         static State parse(String text) {
             String[] lines = text.split("\n", -1);
             List<org.bukkit.potion.PotionEffect> effects = new ArrayList<>();
@@ -135,7 +135,9 @@ final class PlayerImpl {
             return new State(Double.parseDouble(h[0]), Integer.parseInt(h[1]), Float.parseFloat(h[2]),
                     Float.parseFloat(h[3]), Integer.parseInt(h[4]), Integer.parseInt(h[5]),
                     Double.parseDouble(h[6]), Double.parseDouble(h[7]), Double.parseDouble(h[8]),
-                    Float.parseFloat(h[9]), Float.parseFloat(h[10]), items, effects);
+                    Float.parseFloat(h[9]), Float.parseFloat(h[10]), items, effects,
+                    h.length > 13 ? Integer.parseInt(h[11]) : 0, h.length > 13 ? Float.parseFloat(h[12]) : 0,
+                    h.length > 13 ? Integer.parseInt(h[13]) : 0);
         }
     }
 
@@ -258,6 +260,41 @@ final class PlayerImpl {
 
     public int getFoodLevel() { return state().food(); }
     public void setFoodLevel(int food) { control("food " + food); }
+
+    // --- опыт (`Player.giveExperiencePoints` и соседи — в Rust) ---
+    public int getLevel() { return state().level(); }
+    public void setLevel(int level) {
+        if (level < 0) throw new IllegalArgumentException("Level cannot be negative");
+        control("xp level " + level);
+    }
+    public float getExp() { return state().exp(); }
+    public void setExp(float exp) {
+        if (exp < 0 || exp > 1) throw new IllegalArgumentException("Experience progress must be between 0.0 and 1.0");
+        control("xp progress " + exp);
+    }
+    public int getTotalExperience() { return state().totalExp(); }
+    public void setTotalExperience(int exp) {
+        if (exp < 0) throw new IllegalArgumentException("Total experience points must not be negative");
+        control("xp total " + exp);
+    }
+    public void giveExp(int amount) { control("xp points " + amount); }
+    public void giveExp(int amount, boolean applyMending) { giveExp(amount); }
+    public int applyMending(int amount) { return amount; }
+    public void giveExpLevels(int levels) { control("xp levels " + levels); }
+    /** {@code getXpNeededForNextLevel}. */
+    public int getExpToLevel() {
+        int level = getLevel();
+        return level >= 30 ? 112 + (level - 30) * 9 : level >= 15 ? 37 + (level - 15) * 5 : 7 + level * 2;
+    }
+    public int getExperiencePointsNeededForNextLevel() { return getExpToLevel(); }
+    /** Как {@code CraftPlayer.calculateTotalExperiencePoints}: очки уровней плюс полоска. */
+    public int calculateTotalExperiencePoints() {
+        int level = getLevel();
+        int points = level <= 16 ? level * level + 6 * level
+                : level <= 31 ? (int) (2.5 * level * level - 40.5 * level + 360)
+                : (int) (4.5 * level * level - 162.5 * level + 2220);
+        return points + Math.round(getExp() * getExpToLevel());
+    }
     public float getSaturation() { return state().saturation(); }
     public void setSaturation(float s) { control("saturation " + s); }
     public float getExhaustion() { return state().exhaustion(); }

@@ -799,6 +799,7 @@ pub struct PlayerSave {
     pub game_mode: Option<u8>,
     /// Активные эффекты (`active_effects`).
     pub effects: Vec<Effect>,
+    pub xp: crate::xp::Experience,
 }
 
 /// Живое состояние игрока в сессии: инвентарь и здоровье.
@@ -807,6 +808,7 @@ pub struct PlayerState {
     pub inv: Inventory,
     pub vitals: Vitals,
     pub game_mode: Option<u8>,
+    pub xp: crate::xp::Experience,
 }
 
 impl PlayerState {
@@ -824,6 +826,7 @@ impl PlayerState {
         st.vitals.saturation = s.saturation.clamp(0.0, st.vitals.food as f32);
         st.vitals.exhaustion = s.exhaustion.clamp(0.0, 40.0);
         st.vitals.effects = s.effects.clone();
+        st.xp = s.xp;
         st
     }
 
@@ -840,6 +843,7 @@ impl PlayerState {
             selected: self.inv.selected,
             game_mode: self.game_mode,
             effects: v.effects.clone(),
+            xp: self.xp,
             slots: (0..SLOTS)
                 .filter_map(|i| self.inv.slots[i].map(|s| (i, s)))
                 .collect(),

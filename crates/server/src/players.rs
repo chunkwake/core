@@ -159,6 +159,10 @@ pub fn to_nbt(s: &PlayerSave, data_version: i32, names: &[String]) -> Compound {
         ("foodSaturationLevel".into(), Tag::Float(s.saturation)),
         ("foodExhaustionLevel".into(), Tag::Float(s.exhaustion)),
         ("SelectedItemSlot".into(), Tag::Int(s.selected as i32)),
+        ("XpLevel".into(), Tag::Int(s.xp.level)),
+        ("XpP".into(), Tag::Float(s.xp.progress)),
+        ("XpTotal".into(), Tag::Int(s.xp.total)),
+        ("XpSeed".into(), Tag::Int(s.xp.seed)),
         (
             "playerGameType".into(),
             Tag::Int(s.game_mode.unwrap_or(0) as i32),
@@ -228,6 +232,12 @@ pub fn from_nbt(root: &Compound, ids: &HashMap<String, i32>) -> Option<PlayerSav
             .filter(|m| (0..4).contains(m))
             .map(|m| m as u8),
         effects: Vec::new(),
+        xp: chunkwake_net::xp::Experience {
+            level: root.get("XpLevel").and_then(Tag::as_i64).unwrap_or(0).max(0) as i32,
+            progress: f("XpP").unwrap_or(0.0).clamp(0.0, 1.0),
+            total: root.get("XpTotal").and_then(Tag::as_i64).unwrap_or(0).max(0) as i32,
+            seed: root.get("XpSeed").and_then(Tag::as_i64).unwrap_or(0) as i32,
+        },
     })
 }
 
@@ -257,6 +267,7 @@ mod tests {
             selected: 3,
             game_mode: Some(1),
             effects: Vec::new(),
+            xp: chunkwake_net::xp::Experience { level: 7, progress: 0.5, total: 120, seed: -9 },
             slots: vec![
                 (
                     5,

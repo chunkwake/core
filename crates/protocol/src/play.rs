@@ -539,6 +539,32 @@ pub fn block_update(id: i32, pos: [i32; 3], state: i32) -> Vec<u8> {
 
 /// `block_event`: крышка сундука (`action` 1, `param` — сколько игроков смотрят).
 /// `block` — ID в реестре `block`, не состояние.
+/// `ClientboundSoundPacket`: звук из реестра в точке (координаты × 8), с зерном.
+pub fn sound(id: i32, sound: i32, source: i32, pos: [f64; 3], volume: f32, pitch: f32, seed: i64) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .var_int(sound + 1)
+        .var_int(source)
+        .i32((pos[0] * 8.0) as i32)
+        .i32((pos[1] * 8.0) as i32)
+        .i32((pos[2] * 8.0) as i32)
+        .f32(volume)
+        .f32(pitch)
+        .i64(seed);
+    w.buf
+}
+
+/// `ClientboundLevelEventPacket`: событие мира (2001 — ломка блока с частицами и звуком).
+pub fn level_event(id: i32, event: i32, pos: [i32; 3], data: i32, global: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .i32(event)
+        .i64(pack_block_pos(pos))
+        .i32(data)
+        .bool(global);
+    w.buf
+}
+
 pub fn block_event(id: i32, pos: [i32; 3], action: u8, param: u8, block: i32) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id)

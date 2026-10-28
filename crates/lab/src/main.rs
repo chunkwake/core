@@ -57,7 +57,7 @@ impl Args {
         };
         let mut chunkwake = None;
         let mut jar = None;
-        let mut java = PathBuf::from("java");
+        let mut java = default_java();
         let mut work_dir = PathBuf::from("target/chunkwake-lab");
         let mut generated_cache = None;
         let (mut accept_eula, mut keep_worlds) = (false, false);
@@ -188,6 +188,7 @@ struct Report {
     version: String,
     jar: String,
     chunkwake: String,
+    java: String,
     os: String,
     bots: usize,
     warmup_secs: u64,
@@ -210,6 +211,11 @@ async fn main() {
 }
 
 async fn execute() -> Result<(), String> {
+    if let Err(error) = dotenvy::dotenv()
+        && !error.not_found()
+    {
+        return Err(format!(".env: {error}"));
+    }
     let mut args = Args::parse()?;
     if args.java.components().count() > 1 {
         args.java = ordinary_path(
@@ -256,6 +262,14 @@ async fn execute() -> Result<(), String> {
             "--jar is Minecraft {version}; Chunkwake requires {VERSION}"
         ));
     }
+    let needs_java = args.mode != Mode::Smoke
+        || !generated_cache
+            .join(VERSION)
+            .join("reports/packets.json")
+            .exists();
+    if needs_java {
+        check_java(&args.java, &jar, &version)?;
+    }
     let id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
@@ -273,6 +287,7 @@ async fn execute() -> Result<(), String> {
         version,
         jar: jar.display().to_string(),
         chunkwake: chunkwake.display().to_string(),
+        java: args.java.display().to_string(),
         os: std::env::consts::OS.into(),
         bots: args.bots,
         warmup_secs: args.warmup.as_secs(),
@@ -285,7 +300,7 @@ async fn execute() -> Result<(), String> {
     let expected: BTreeMap<String, String> =
         serde_json::from_str(include_str!("../expected-differences.json"))
             .map_err(|e| e.to_string())?;
-    for iteration in 0..count {
+    'runs: for iteration in 0..count {
         let order = if args.mode == Mode::Smoke {
             vec!["chunkwake"]
         } else if iteration % 2 == 0 {
@@ -306,6 +321,7 @@ async fn execute() -> Result<(), String> {
             )?;
             let mut child = ManagedChild::start(server, &dir, &chunkwake, &jar, &args.java)?;
             let startup = child.ready(port, protocol, &generated_cache).await;
+            let startup_failed = startup.is_err();
             let log_path = root.join(format!("{iteration}-{server}.log"));
             let mut run = Run {
                 server: format!("{server}-{iteration}"),
@@ -382,6 +398,9 @@ async fn execute() -> Result<(), String> {
                 );
             }
             report.runs.push(run);
+            if startup_failed {
+                break 'runs;
+            }
         }
     }
     if args.mode == Mode::Compare {
@@ -409,6 +428,12 @@ async fn execute() -> Result<(), String> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn default_java() -> PathBuf {
+    std::env::var_os("CHUNKWAKE_JAVA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("java"))
 }
 
 fn ordinary_path(path: PathBuf) -> PathBuf {
@@ -443,6 +468,66 @@ fn jar_version(path: &Path) -> Result<(String, i32), String> {
             .as_i64()
             .ok_or("jar version.json: missing protocol_version")? as i32,
     ))
+}
+
+fn jar_main_class_major(path: &Path) -> Result<u16, String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let mut class = zip
+        .by_name("net/minecraft/bundler/Main.class")
+        .map_err(|e| format!("server.jar has no bundler main class: {e}"))?;
+    let mut header = [0u8; 8];
+    class.read_exact(&mut header).map_err(|e| e.to_string())?;
+    if &header[..4] != b"\xca\xfe\xba\xbe" {
+        return Err("invalid Java class header in server.jar".into());
+    }
+    Ok(u16::from_be_bytes([header[6], header[7]]))
+}
+
+fn java_feature(output: &str) -> Option<u16> {
+    let version = output.split('"').nth(1)?;
+    let version = version.strip_prefix("1.").unwrap_or(version);
+    version
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn check_java(java: &Path, jar: &Path, game_version: &str) -> Result<(), String> {
+    let major = jar_main_class_major(jar)?;
+    let required = major.saturating_sub(44);
+    let output = Command::new(java).arg("-version").output().map_err(|e| {
+        format!(
+            "Java {}: {e}; choose a Java installation in the TUI or pass --java PATH",
+            java.display()
+        )
+    })?;
+    if !output.status.success() {
+        return Err(format!(
+            "Java {} -version failed; choose a working Java installation with --java PATH",
+            java.display()
+        ));
+    }
+    let version_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let installed = java_feature(&version_text).ok_or_else(|| {
+        format!(
+            "could not read version of Java {}; output: {}",
+            java.display(),
+            version_text.trim()
+        )
+    })?;
+    if installed < required {
+        return Err(format!(
+            "Java {installed} ({}) is too old for Minecraft {game_version}: server.jar requires Java {required} or newer (class version {major}). Choose another Java executable in the TUI, or pass --java PATH.",
+            java.display()
+        ));
+    }
+    Ok(())
 }
 
 async fn download_jar(path: &Path, version: &str) -> Result<(), String> {
@@ -573,7 +658,7 @@ fn write_config(
 ) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let base = format!(
-        "server-ip=127.0.0.1\nserver-port={port}\nonline-mode=false\nenable-status=true\nmotd=Chunkwake Lab\nmax-players={}\nnetwork-compression-threshold=256\nlevel-name=world\nlevel-seed=12345\nlevel-type=minecraft:flat\nview-distance=2\nsimulation-distance=2\nspawn-protection=0\n",
+        "server-ip=127.0.0.1\nserver-port={port}\nonline-mode=false\nwhite-list=false\nenforce-whitelist=false\nenable-status=true\nmotd=Chunkwake Lab\nmax-players={}\nnetwork-compression-threshold=256\nlevel-name=world\nlevel-seed=12345\nlevel-type=minecraft:flat\nview-distance=2\nsimulation-distance=2\nspawn-protection=0\n",
         bots.max(200) + 10
     );
     let text = if vanilla {
@@ -628,6 +713,16 @@ impl ManagedChild {
             .stdin(Stdio::piped())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(error_log));
+        let temp = dir.join("tmp");
+        fs::create_dir_all(&temp).map_err(|e| e.to_string())?;
+        #[cfg(windows)]
+        {
+            command.env("TEMP", &temp).env("TMP", &temp);
+        }
+        #[cfg(unix)]
+        {
+            command.env("TMPDIR", &temp);
+        }
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -654,9 +749,11 @@ impl ManagedChild {
         let addr = format!("127.0.0.1:{port}");
         while started.elapsed() < READY_TIMEOUT {
             if let Some(exit) = self.child.try_wait().map_err(|e| e.to_string())? {
+                let detail = log_cause(&self.dir.join("server.log"))
+                    .map(|cause| format!(": {cause}"))
+                    .unwrap_or_default();
                 return Err(format!(
-                    "exited {exit}; see {}",
-                    self.dir.join("server.log").display()
+                    "exited before ready ({exit}){detail}; see linked log"
                 ));
             }
             let generated = generated_cache.join(VERSION).join("reports/packets.json");
@@ -723,6 +820,18 @@ impl ManagedChild {
         let _ = self.child.wait();
         self.stopped = true;
     }
+}
+
+fn log_cause(path: &Path) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()?
+        .lines()
+        .rev()
+        .find(|line| {
+            line.contains("Caused by:") || line.starts_with("error:") || line.contains("/ERROR]")
+        })
+        .map(str::trim)
+        .map(str::to_owned)
 }
 
 impl Drop for ManagedChild {
@@ -875,10 +984,11 @@ fn write_report(root: &Path, report: &Report) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     let mut md = format!(
-        "# Chunkwake Lab · {} · Minecraft {}\n\nHost: {} · Bots: {} · Warmup: {} s · Duration: {} s · Repetitions: {}\n\n",
+        "# Chunkwake Lab · {} · Minecraft {}\n\nHost: {} · Java: {} · Bots: {} · Warmup: {} s · Duration: {} s · Repetitions: {}\n\n",
         report.mode,
         report.version,
         report.os,
+        report.java,
         report.bots,
         report.warmup_secs,
         report.duration_secs,
@@ -964,7 +1074,9 @@ async fn benchmark(
                 loop { if let Event::Position(pos) = client.next_event().await? { return Ok::<_, String>(pos); } }
             }).await.map_err(|_| "play position timeout".to_owned())??;
             let started = Instant::now();
-            let mut tick = tokio::time::interval(Duration::from_millis(50));
+            // Vanilla 26.3 rejects more than one position packet in a server tick.
+            let mut tick = tokio::time::interval(Duration::from_millis(100));
+            tick.tick().await;
             let mut angle = i as f64;
             let mut base = None;
             while started.elapsed() < warmup + duration {
@@ -1097,9 +1209,27 @@ mod tests {
             .unwrap();
         zip.write_all(br#"{"name":"26.3","protocol_version":777}"#)
             .unwrap();
+        zip.start_file(
+            "net/minecraft/bundler/Main.class",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(b"\xca\xfe\xba\xbe\x00\x00\x00\x45").unwrap();
         zip.finish().unwrap();
         assert_eq!(jar_version(&path).unwrap(), ("26.3".into(), 777));
+        assert_eq!(jar_main_class_major(&path).unwrap(), 69);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn parses_java_version_output() {
+        assert_eq!(
+            java_feature("openjdk version \"21.0.11\" 2026-04-21"),
+            Some(21)
+        );
+        assert_eq!(java_feature("openjdk version \"25.0.1\""), Some(25));
+        assert_eq!(java_feature("java version \"1.8.0_451\""), Some(8));
+        assert_eq!(java_feature("garbage"), None);
     }
 
     #[test]

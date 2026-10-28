@@ -52,7 +52,8 @@ pub fn write_stack(w: &mut Writer, s: Slot) {
 /// Если патч пришёл с неизвестным компонентом, он пишется байт в байт.
 fn write_patch(w: &mut Writer, s: &Stack) {
     use crate::components::{
-        CUSTOM_NAME_COMPONENT, ENCHANTMENTS_COMPONENT, LORE_COMPONENT, get, id_of,
+        CUSTOM_NAME_COMPONENT, ENCHANTMENTS_COMPONENT, LORE_COMPONENT, STORED_ENCHANTMENTS_COMPONENT,
+        get, id_of,
     };
     let e = get(s.extra);
     if let Some(raw) = &e.raw {
@@ -70,6 +71,8 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         !e.enchantments.is_empty() && ench >= 0,
         e.custom_name.is_some() && name >= 0,
         !e.lore.is_empty() && lore >= 0,
+        !e.stored.is_empty() && id_of(&STORED_ENCHANTMENTS_COMPONENT) >= 0,
+        e.custom_data.is_some() && id_of(&crate::components::CUSTOM_DATA_COMPONENT) >= 0,
     ];
     w.var_int(parts.iter().filter(|&&p| p).count() as i32)
         .var_int(0);
@@ -89,11 +92,22 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         w.var_int(name);
         crate::text::write_component(w, &json(n));
     }
+    if parts[4] {
+        w.var_int(id_of(&STORED_ENCHANTMENTS_COMPONENT))
+            .var_int(e.stored.len() as i32);
+        for &(id, lvl) in &e.stored {
+            w.var_int(id).var_int(lvl);
+        }
+    }
     if parts[3] {
         w.var_int(lore).var_int(e.lore.len() as i32);
         for l in &e.lore {
             crate::text::write_component(w, &json(l));
         }
+    }
+    if let (true, Some(nbt)) = (parts[5], &e.custom_data) {
+        w.var_int(id_of(&crate::components::CUSTOM_DATA_COMPONENT));
+        w.buf.extend_from_slice(nbt);
     }
 }
 
@@ -102,7 +116,8 @@ fn write_patch(w: &mut Writer, s: &Stack) {
 /// Стопка с таким патчем должна быть последним полем пакета: хвост не разбирается.
 pub fn read_stack(r: &mut Reader) -> Result<Slot> {
     use crate::components::{
-        CUSTOM_NAME_COMPONENT, ENCHANTMENTS_COMPONENT, Extra, LORE_COMPONENT, id_of, intern,
+        CUSTOM_NAME_COMPONENT, ENCHANTMENTS_COMPONENT, Extra, LORE_COMPONENT,
+        STORED_ENCHANTMENTS_COMPONENT, id_of, intern,
     };
     let count = r.var_int()?;
     if count <= 0 {
@@ -125,6 +140,10 @@ pub fn read_stack(r: &mut Reader) -> Result<Slot> {
             }
         } else if t == id_of(&CUSTOM_NAME_COMPONENT) {
             e.custom_name = Some(crate::text::read_component(r)?.to_string());
+        } else if t == id_of(&STORED_ENCHANTMENTS_COMPONENT) {
+            for _ in 0..r.var_int()?.clamp(0, 256) {
+                e.stored.push((r.var_int()?, r.var_int()?));
+            }
         } else if t == id_of(&LORE_COMPONENT) {
             for _ in 0..r.var_int()?.clamp(0, 256) {
                 e.lore.push(crate::text::read_component(r)?.to_string());
@@ -325,7 +344,8 @@ pub fn read_creative_slot(r: &mut Reader) -> Result<(i16, Slot)> {
 /// Стопка из креатива: патч с длиной у каждого компонента → обычный патч для ответа клиенту.
 fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
     use crate::components::{
-        CUSTOM_NAME_COMPONENT, ENCHANTMENTS_COMPONENT, Extra, LORE_COMPONENT, id_of, intern,
+        CUSTOM_NAME_COMPONENT, ENCHANTMENTS_COMPONENT, Extra, LORE_COMPONENT,
+        STORED_ENCHANTMENTS_COMPONENT, id_of, intern,
     };
     let count = r.var_int()?;
     if count <= 0 {
@@ -363,6 +383,14 @@ fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
                 let Ok(lvl) = body.var_int() else { break };
                 e.enchantments.push((id, lvl));
             }
+        } else if kind == id_of(&STORED_ENCHANTMENTS_COMPONENT)
+            && let Ok(n) = body.var_int()
+        {
+            for _ in 0..n.clamp(0, 256) {
+                let Ok(id) = body.var_int() else { break };
+                let Ok(lvl) = body.var_int() else { break };
+                e.stored.push((id, lvl));
+            }
         } else if kind == id_of(&CUSTOM_NAME_COMPONENT)
             && let Ok(text) = crate::text::read_component(&mut body)
         {
@@ -391,6 +419,13 @@ fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
 pub fn set_held_slot(id: i32, slot: i32) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id).var_int(slot);
+    w.buf
+}
+
+/// `ClientboundSetExperiencePacket`: полоска, уровень, всего очков.
+pub fn set_experience(id: i32, progress: f32, level: i32, total: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).f32(progress).var_int(level).var_int(total);
     w.buf
 }
 
@@ -467,6 +502,8 @@ pub fn take_item_entity(id: i32, item_entity: i32, collector: i32, amount: i32) 
 }
 
 pub const ENTITY_EVENT_DEATH: u8 = 3;
+/// Сломался предмет в основной руке (`EquipmentSlot.MAINHAND`).
+pub const ENTITY_EVENT_BREAK_MAINHAND: u8 = 47;
 /// Уровень прав игрока для клиента: 24 + уровень (0..=4).
 pub const ENTITY_EVENT_PERMISSION_LEVEL_0: u8 = 24;
 /// Использование предмета закончено (еда съедена).

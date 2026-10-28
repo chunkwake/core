@@ -16,6 +16,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 ring = "0.17"
 crossterm = "0.29"
 ratatui = "0.30.2"
+dotenvy = "0.15"
 
 [[bin]]
 name = "chunkwake-lab"

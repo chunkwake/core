@@ -1,5 +1,5 @@
 //! Interactive front end for the lab. The same Args are used by the headless CLI.
-use super::{Args, Mode};
+use super::{Args, Mode, default_java};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -15,7 +15,7 @@ use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::time::Duration;
 
-const LABELS: [&str; 12] = [
+const LABELS: [&str; 13] = [
     "◆ Scenario",
     "⚙ Chunkwake",
     "◈ Vanilla jar",
@@ -28,6 +28,7 @@ const LABELS: [&str; 12] = [
     "◷ Warmup (s)",
     "◴ Duration (s)",
     "↻ Repetitions",
+    "▶ Start test",
 ];
 
 struct Screen {
@@ -65,7 +66,7 @@ pub fn run() -> Result<Args, String> {
             mode: Mode::Smoke,
             chunkwake,
             jar: PathBuf::new(),
-            java: PathBuf::from("java"),
+            java: default_java(),
             work_dir: PathBuf::from("target/chunkwake-lab"),
             generated_cache: None,
             accept_eula: false,
@@ -113,13 +114,14 @@ pub fn run() -> Result<Args, String> {
             KeyCode::Esc | KeyCode::Char('q') => return Err("cancelled".into()),
             KeyCode::Up => screen.selected = (screen.selected + LABELS.len() - 1) % LABELS.len(),
             KeyCode::Down => screen.selected = (screen.selected + 1) % LABELS.len(),
+            KeyCode::Tab => screen.selected = 12,
             KeyCode::Left => screen.change(-1),
             KeyCode::Right | KeyCode::Char(' ') => screen.change(1),
+            KeyCode::Enter if screen.selected == 12 => return Ok(screen.args),
             KeyCode::Enter if (1..=5).contains(&screen.selected) => {
                 screen.editing = Some(screen.path_value())
             }
             KeyCode::Enter => screen.change(1),
-            KeyCode::F(5) | KeyCode::Char('s') => return Ok(screen.args),
             _ => {}
         }
     }
@@ -228,6 +230,7 @@ impl Screen {
             9 => self.args.warmup.as_secs().to_string(),
             10 => self.args.duration.as_secs().to_string(),
             11 => self.args.repetitions.to_string(),
+            12 => "Press Enter to run".into(),
             _ => String::new(),
         }
     }
@@ -261,10 +264,8 @@ fn draw(f: &mut ratatui::Frame, screen: &Screen) {
         width: panel.width - 4,
         height: panel.height - 2,
     };
-    let header = Paragraph::new(
-        "Choose scenario and settings · F5 runs · missing jar downloads from Mojang",
-    )
-    .style(Style::default().fg(Color::Gray));
+    let header = Paragraph::new("Choose scenario and settings · missing jar downloads from Mojang")
+        .style(Style::default().fg(Color::Gray));
     f.render_widget(
         header,
         Rect {
@@ -279,6 +280,7 @@ fn draw(f: &mut ratatui::Frame, screen: &Screen) {
         ("FILES", 1..6),
         ("OPTIONS", 6..8),
         ("LOAD", 8..12),
+        ("READY", 12..13),
     ];
     let mut rows = Vec::new();
     for (title, range) in groups {
@@ -369,7 +371,7 @@ fn draw(f: &mut ratatui::Frame, screen: &Screen) {
     let footer = if screen.editing.is_some() {
         "ENTER Save path    ESC Cancel edit"
     } else {
-        "↑↓ Field    ←→ Change    ENTER Edit/toggle    F5 Start    ESC Exit"
+        "↑↓ Field    ←→ Change    ENTER Edit/toggle    TAB Start    ESC Exit"
     };
     f.render_widget(
         Paragraph::new(footer).style(Style::default().fg(Color::Cyan)),

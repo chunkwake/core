@@ -56,7 +56,7 @@ public final class Bridge {
     /** События с ответом ({@code chunkwake_net::live::Event}). */
     static final int EVENT_DAMAGE = 1, EVENT_DEATH = 2, EVENT_DROP = 3, EVENT_PICKUP = 4, EVENT_GAME_MODE = 5,
             EVENT_CHAT = 6, EVENT_COMMAND_PRE = 7, EVENT_TAB_COMPLETE = 8, EVENT_PLACE = 9, EVENT_MOVE = 10,
-            EVENT_INTERACT = 11, EVENT_POTION = 12;
+            EVENT_INTERACT = 11, EVENT_POTION = 12, EVENT_PREPARE_ENCHANT = 13, EVENT_ENCHANT = 14;
 
     /** Биты маски слушателей. */
     static final long LISTEN_JOIN = 1, LISTEN_QUIT = 2, LISTEN_BLOCK_BREAK = 4;

@@ -31,6 +31,12 @@ pub fn to_nbt(s: Stack, name: &str) -> Option<Compound> {
             .collect();
         comps.insert("minecraft:enchantments".into(), Tag::Compound(levels));
     }
+    if !e.stored.is_empty() {
+        comps.insert(
+            "minecraft:stored_enchantments".into(),
+            Tag::Compound(levels_nbt(&e.stored)),
+        );
+    }
     if let Some(n) = &e.custom_name {
         comps.insert("minecraft:custom_name".into(), json_to_tag(&parse(n)));
     }
@@ -40,6 +46,13 @@ pub fn to_nbt(s: Stack, name: &str) -> Option<Compound> {
     }
     if !comps.is_empty() {
         c.insert("components".into(), Tag::Compound(comps));
+    }
+    if let Some(custom) = e.custom_data.as_deref().and_then(net_to_compound) {
+        c.entry("components".into())
+            .or_insert_with(|| Tag::Compound(Compound::new()));
+        if let Some(Tag::Compound(comps)) = c.get_mut("components") {
+            comps.insert("minecraft:custom_data".into(), Tag::Compound(custom));
+        }
     }
     if let Some(raw) = &e.raw {
         c.insert(
@@ -72,12 +85,25 @@ pub fn from_nbt(c: &Compound, item_id: impl Fn(&str) -> Option<i32>) -> Option<S
                 }
             }
         }
+        if let Some(Tag::Compound(levels)) = m.get("minecraft:stored_enchantments") {
+            e.stored = levels
+                .iter()
+                .filter_map(|(name, lvl)| {
+                    Some((components::enchantment_id(name)?, lvl.as_i64()? as i32))
+                })
+                .collect();
+        }
         e.custom_name = m
             .get("minecraft:custom_name")
             .map(|t| tag_to_json(t).to_string());
         if let Some(lines) = m.get("minecraft:lore").and_then(Tag::as_list) {
             e.lore = lines.iter().map(|t| tag_to_json(t).to_string()).collect();
         }
+        e.custom_data = m
+            .get("minecraft:custom_data")
+            .and_then(Tag::as_compound)
+            .filter(|c| !c.is_empty())
+            .map(compound_to_net);
     }
     e.raw = c
         .get("chunkwake:component_patch")
@@ -112,11 +138,21 @@ pub fn to_line(s: Stack, name: &str) -> String {
             .collect();
         j.insert("enchantments".into(), Value::Object(levels));
     }
+    if !e.stored.is_empty() {
+        let levels = levels_nbt(&e.stored)
+            .iter()
+            .map(|(k, v)| (k.clone(), tag_to_json(v)))
+            .collect();
+        j.insert("stored".into(), Value::Object(levels));
+    }
     if let Some(n) = &e.custom_name {
         j.insert("name".into(), parse(n));
     }
     if !e.lore.is_empty() {
         j.insert("lore".into(), e.lore.iter().map(|l| parse(l)).collect());
+    }
+    if let Some(custom) = e.custom_data.as_deref().and_then(net_to_compound) {
+        j.insert("custom".into(), typed_compound(&custom));
     }
     // Непонятые сервером компоненты (зелья и т. п.) — шестнадцатеричной строкой, чтобы вернулись целыми.
     if let Some(raw) = &e.raw {
@@ -152,10 +188,26 @@ pub fn from_line(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<St
                 }
             }
         }
+        if let Some(Value::Object(levels)) = j.get("stored") {
+            e.stored = levels
+                .iter()
+                .filter_map(|(name, lvl)| {
+                    Some((
+                        components::enchantment_id(name)?,
+                        lvl.as_i64()?.clamp(1, 255) as i32,
+                    ))
+                })
+                .collect();
+        }
         e.custom_name = j.get("name").filter(|v| !v.is_null()).map(Value::to_string);
         if let Some(Value::Array(lore)) = j.get("lore") {
             e.lore = lore.iter().map(Value::to_string).collect();
         }
+        e.custom_data = j
+            .get("custom")
+            .and_then(untyped_compound)
+            .filter(|c| !c.is_empty())
+            .map(|c| compound_to_net(&c));
         e.raw = j.get("raw").and_then(Value::as_str).and_then(|h| {
             (0..h.len())
                 .step_by(2)
@@ -165,6 +217,84 @@ pub fn from_line(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<St
         s.extra = components::intern(e);
     }
     Some(s)
+}
+
+/// Сетевой NBT (`10` + содержимое) → compound.
+pub fn net_to_compound(net: &[u8]) -> Option<Compound> {
+    let mut named = vec![10, 0, 0];
+    named.extend_from_slice(net.get(1..)?);
+    chunkwake_world::nbt::read_root(&named).ok()
+}
+
+/// Compound → сетевой NBT (корень без имени).
+pub fn compound_to_net(c: &Compound) -> Vec<u8> {
+    let named = chunkwake_world::nbt::write_root(c);
+    let mut out = vec![10];
+    out.extend_from_slice(&named[3..]);
+    out
+}
+
+/// NBT для моста с типами: `{"b":1}`, `{"s":..}`, `{"i":..}`, `{"l":"..."}`,
+/// `{"f":..}`, `{"d":..}`, `{"str":".."}`, `{"ba":[..]}`, `{"ia":[..]}`,
+/// `{"la":["..."]}`, `{"list":[..]}`, `{"c":{..}}`. Compound — объект без обёртки.
+fn typed(t: &Tag) -> Value {
+    let one = |k: &str, v: Value| Value::Object(serde_json::Map::from_iter([(k.to_owned(), v)]));
+    match t {
+        Tag::Byte(v) => one("b", (*v).into()),
+        Tag::Short(v) => one("s", (*v).into()),
+        Tag::Int(v) => one("i", (*v).into()),
+        Tag::Long(v) => one("l", v.to_string().into()),
+        Tag::Float(v) => one("f", (*v as f64).into()),
+        Tag::Double(v) => one("d", (*v).into()),
+        Tag::String(v) => one("str", v.clone().into()),
+        Tag::ByteArray(v) => one("ba", v.iter().map(|&x| Value::from(x)).collect()),
+        Tag::IntArray(v) => one("ia", v.iter().map(|&x| Value::from(x)).collect()),
+        Tag::LongArray(v) => one("la", v.iter().map(|x| Value::from(x.to_string())).collect()),
+        Tag::List(v) => one("list", v.iter().map(typed).collect()),
+        Tag::Compound(c) => one("c", typed_compound(c)),
+    }
+}
+
+fn typed_compound(c: &Compound) -> Value {
+    Value::Object(c.iter().map(|(k, v)| (k.clone(), typed(v))).collect())
+}
+
+fn untyped(v: &Value) -> Option<Tag> {
+    let (k, v) = v.as_object()?.iter().next()?;
+    let arr = || v.as_array().map(Vec::as_slice).unwrap_or_default();
+    Some(match k.as_str() {
+        "b" => Tag::Byte(v.as_i64()? as i8),
+        "s" => Tag::Short(v.as_i64()? as i16),
+        "i" => Tag::Int(v.as_i64()? as i32),
+        "l" => Tag::Long(v.as_str()?.parse().ok()?),
+        "f" => Tag::Float(v.as_f64()? as f32),
+        "d" => Tag::Double(v.as_f64()?),
+        "str" => Tag::String(v.as_str()?.to_owned()),
+        "ba" => Tag::ByteArray(arr().iter().filter_map(|x| Some(x.as_i64()? as i8)).collect()),
+        "ia" => Tag::IntArray(arr().iter().filter_map(|x| Some(x.as_i64()? as i32)).collect()),
+        "la" => Tag::LongArray(arr().iter().filter_map(|x| x.as_str()?.parse().ok()).collect()),
+        "list" => Tag::List(arr().iter().filter_map(untyped).collect()),
+        "c" => Tag::Compound(untyped_compound(v)?),
+        _ => return None,
+    })
+}
+
+fn untyped_compound(v: &Value) -> Option<Compound> {
+    Some(
+        v.as_object()?
+            .iter()
+            .filter_map(|(k, v)| Some((k.clone(), untyped(v)?)))
+            .collect(),
+    )
+}
+
+/// Чары `(ID, уровень)` → `{имя: уровень}`.
+fn levels_nbt(list: &[(i32, i32)]) -> Compound {
+    list.iter()
+        .filter_map(|&(id, lvl)| {
+            Some((components::enchantment_name(id)?.to_owned(), Tag::Int(lvl)))
+        })
+        .collect()
 }
 
 fn parse(text: &str) -> Value {
@@ -223,9 +353,18 @@ mod tests {
         ]);
         let e = Extra {
             enchantments: vec![(0, 5), (1, 3)],
+            stored: vec![(1, 2)],
             custom_name: Some(r#"{"text":"Кирка","italic":false}"#.into()),
             lore: vec![r#""строка""#.into()],
             raw: None,
+            custom_data: Some(compound_to_net(&Compound::from([(
+                "PublicBukkitValues".into(),
+                Tag::Compound(Compound::from([
+                    ("test:n".into(), Tag::Long(1 << 40)),
+                    ("test:a".into(), Tag::IntArray(vec![1, -2])),
+                    ("test:l".into(), Tag::List(vec![Tag::String("x".into())])),
+                ])),
+            )]))),
         };
         let s = Stack {
             item: 7,
@@ -241,6 +380,8 @@ mod tests {
         );
         let back = from_nbt(&c, |n| (n == "minecraft:diamond_pickaxe").then_some(7)).unwrap();
         assert_eq!(back, s);
+        let line = to_line(s, "minecraft:diamond_pickaxe");
+        assert_eq!(from_line(&line, |n| (n == "minecraft:diamond_pickaxe").then_some(7)), Some(s));
 
         let potion = Stack {
             item: 3,

@@ -35,10 +35,12 @@ pub struct Live {
     pub yaw: f32,
     pub pitch: f32,
     pub effects: Vec<crate::survival::Effect>,
+    pub xp: crate::xp::Experience,
 }
 
 impl Live {
-    /// Первая строка — `health food saturation exhaustion mode selected x y z yaw pitch`, затем
+    /// Первая строка — `health food saturation exhaustion mode selected x y z yaw pitch
+    /// уровень полоска всего_опыта`, затем
     /// [`BUKKIT_SLOTS`] строк `item count` (или `-`) в порядке Bukkit, затем эффекты
     /// строками `e имя усиление тики частицы фон значок` (0/1).
     pub fn render(
@@ -48,7 +50,7 @@ impl Live {
     ) -> String {
         let [x, y, z] = self.pos;
         let mut out = format!(
-            "{} {} {} {} {} {} {x} {y} {z} {} {}",
+            "{} {} {} {} {} {} {x} {y} {z} {} {} {} {} {}",
             self.health,
             self.food,
             self.saturation,
@@ -56,7 +58,10 @@ impl Live {
             self.game_mode,
             self.selected,
             self.yaw,
-            self.pitch
+            self.pitch,
+            self.xp.level,
+            self.xp.progress,
+            self.xp.total
         );
         for i in 0..BUKKIT_SLOTS {
             out.push('\n');
@@ -115,6 +120,8 @@ pub enum Control {
         id: Option<i32>,
         command: bool,
     },
+    /// Опыт: `xp points|levels|level|setpoints|progress|total <число>`.
+    Xp(crate::xp::XpChange),
 }
 
 impl Control {
@@ -177,6 +184,21 @@ impl Control {
                     command: false,
                 }
             }
+            "xp" => {
+                use crate::xp::XpChange as X;
+                let kind = it.next()?;
+                let v = it.next()?;
+                let int = || v.parse::<i32>().ok();
+                Control::Xp(match kind {
+                    "points" => X::Points(int()?),
+                    "levels" => X::Levels(int()?),
+                    "level" => X::SetLevel(int()?),
+                    "setpoints" => X::SetPoints(int()?),
+                    "progress" => X::SetProgress(v.parse::<f32>().ok().filter(|p| p.is_finite())?),
+                    "total" => X::SetTotal(int()?),
+                    _ => return None,
+                })
+            }
             "uneffect" => {
                 let id = match it.next()? {
                     "*" => None,
@@ -225,6 +247,9 @@ impl Control {
                 live.effects.retain(|e| id.is_some_and(|w| w != e.id))
             }
             Control::Clear => live.slots = [None; SLOTS],
+            Control::Xp(c) => {
+                live.xp.apply(c);
+            }
             Control::ContainerChanged(_) | Control::Furnace(..) | Control::Shutdown => {}
         }
     }
@@ -262,6 +287,12 @@ pub enum Event {
     /// `EntityPotionEffectEvent` от сервера (`/effect`, конец таймера):
     /// `CAUSE ACTION [ключ усиление тики фон частицы значок …]` → `c` или пусто.
     Potion = 12,
+    /// `PrepareItemEnchantEvent`: `x y z полки\nпредмет\nцена чары уровень`×3 →
+    /// `c`, пусто или три новые строки `цена чары уровень` (`-` — нет).
+    PrepareEnchant = 13,
+    /// `EnchantItemEvent`: `x y z цена кнопка подсказка уровень\nпредмет\nчары уровень…` →
+    /// `c`, пусто или `цена\nчары уровень…`.
+    Enchant = 14,
 }
 
 impl Event {
@@ -320,6 +351,7 @@ mod tests {
             yaw: 90.0,
             pitch: 0.0,
             effects: Vec::new(),
+            xp: Default::default(),
         };
         let c = Control::parse_t("slot 0 minecraft:bread 3", ids).unwrap();
         assert_eq!(
@@ -372,7 +404,7 @@ e minecraft:haste 1 200 0 0 1"
         assert!(live.effects.is_empty());
         assert_eq!(Control::parse_t("effect minecraft:nope 0 20", ids), None);
         let mut lines = text.lines();
-        assert_eq!(lines.next(), Some("7.5 20 5 0 0 0 1 64 -2.5 90 0"));
+        assert_eq!(lines.next(), Some("7.5 20 5 0 0 0 1 64 -2.5 90 0 0 0 0"));
         assert_eq!(lines.next(), Some("minecraft:bread 3"));
         assert_eq!(text.lines().count(), 1 + BUKKIT_SLOTS);
         assert_eq!(

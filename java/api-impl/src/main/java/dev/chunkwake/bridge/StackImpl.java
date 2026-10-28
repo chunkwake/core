@@ -166,9 +166,24 @@ final class StackImpl extends ItemStack {
         List<Component> lore = new ArrayList<>();
         /** Непонятые сервером компоненты (hex), возвращаются как есть. */
         String raw;
+        /** Чары зачарованной книги — как пришли от сервера. */
+        JsonObject stored;
+        /** {@code custom_data}: compound NBT, в нём {@code PublicBukkitValues}. */
+        Map<String, Object> custom = new LinkedHashMap<>();
+
+        /** {@code custom_data} без пустого {@code PublicBukkitValues} (пустой PDC не сохраняется). */
+        Map<String, Object> customOut() {
+            if (custom.get(PDC) instanceof Map<?, ?> m && m.isEmpty()) {
+                Map<String, Object> out = new LinkedHashMap<>(custom);
+                out.remove(PDC);
+                return out;
+            }
+            return custom;
+        }
 
         boolean isEmpty() {
-            return damage == 0 && enchants.isEmpty() && name == null && lore.isEmpty() && raw == null;
+            return damage == 0 && enchants.isEmpty() && name == null && lore.isEmpty() && raw == null
+                    && stored == null && customOut().isEmpty();
         }
 
         Data copy() {
@@ -178,6 +193,10 @@ final class StackImpl extends ItemStack {
             d.name = name;
             d.lore = new ArrayList<>(lore);
             d.raw = raw;
+            d.stored = stored == null ? null : stored.deepCopy();
+            @SuppressWarnings("unchecked")
+            Map<String, Object> c = (Map<String, Object>) PdcImpl.copy(custom);
+            d.custom = c;
             return d;
         }
 
@@ -198,6 +217,8 @@ final class StackImpl extends ItemStack {
                 for (JsonElement l : j.getAsJsonArray("lore")) d.lore.add(gson.deserializeFromTree(l));
             }
             if (j.has("raw")) d.raw = j.get("raw").getAsString();
+            if (j.has("stored")) d.stored = j.getAsJsonObject("stored");
+            if (j.has("custom")) d.custom = PdcImpl.Nbt.decode(j.getAsJsonObject("custom"));
             return d;
         }
 
@@ -219,18 +240,22 @@ final class StackImpl extends ItemStack {
                 j.add("lore", a);
             }
             if (raw != null) j.addProperty("raw", raw);
+            if (stored != null) j.add("stored", stored);
+            if (!customOut().isEmpty()) j.add("custom", PdcImpl.Nbt.encode(customOut()));
             return j.toString();
         }
 
         @Override
         public boolean equals(Object o) {
             return o instanceof Data d && d.damage == damage && d.enchants.equals(enchants)
-                    && Objects.equals(d.name, name) && d.lore.equals(lore) && Objects.equals(d.raw, raw);
+                    && Objects.equals(d.name, name) && d.lore.equals(lore) && Objects.equals(d.raw, raw)
+                    && Objects.equals(d.stored, stored)
+                    && PdcImpl.Nbt.encode(d.customOut()).equals(PdcImpl.Nbt.encode(customOut()));
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(damage, enchants, name, lore, raw);
+            return Objects.hash(damage, enchants, name, lore, raw, stored, PdcImpl.Nbt.encode(customOut()));
         }
 
         @Override
@@ -244,6 +269,9 @@ final class StackImpl extends ItemStack {
      * {@link ItemMeta} и {@link Damageable} над копией компонентов: изменения попадают в
      * стопку через {@link ItemStack#setItemMeta}, как у CraftMetaItem.
      */
+    /** Ключ данных плагинов в {@code custom_data} (как у CraftBukkit). */
+    static final String PDC = "PublicBukkitValues";
+
     static final class MetaImpl {
         final Damageable api = Stub.of(Damageable.class, this);
         final Data data;
@@ -258,6 +286,15 @@ final class StackImpl extends ItemStack {
 
         private static Component fromLegacy(String s) {
             return net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().deserialize(s);
+        }
+
+        public org.bukkit.persistence.PersistentDataContainer getPersistentDataContainer() {
+            if (!(data.custom.get(PDC) instanceof Map<?, ?>)) {
+                data.custom.put(PDC, new LinkedHashMap<String, Object>());
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> tags = (Map<String, Object>) data.custom.get(PDC);
+            return new PdcImpl(tags).api;
         }
 
         public boolean hasDisplayName() { return data.name != null; }

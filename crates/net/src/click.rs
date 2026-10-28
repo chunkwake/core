@@ -25,6 +25,8 @@ pub enum Kind {
     Crafting,
     /// `AbstractFurnaceMenu`: 0 сырьё, 1 топливо, 2 результат, 3–29, 30–38.
     Furnace,
+    /// `EnchantmentMenu`: 0 предмет, 1 лазурит, 2–28, 29–37.
+    Enchanting,
 }
 
 impl Kind {
@@ -34,6 +36,7 @@ impl Kind {
             Kind::Chest(rows) => rows * 9 + 36,
             Kind::Crafting => 46,
             Kind::Furnace => 39,
+            Kind::Enchanting => 38,
         }
     }
 
@@ -44,6 +47,7 @@ impl Kind {
             Kind::Chest(rows) => rows * 9,
             Kind::Crafting => 10,
             Kind::Furnace => 3,
+            Kind::Enchanting => 2,
         }
     }
 
@@ -52,7 +56,7 @@ impl Kind {
         match self {
             Kind::Player | Kind::Crafting => Some(0),
             Kind::Furnace => Some(2),
-            Kind::Chest(_) => None,
+            Kind::Chest(_) | Kind::Enchanting => None,
         }
     }
 
@@ -86,6 +90,8 @@ pub struct Rules<'a> {
     pub smeltable: &'a dyn Fn(i32) -> bool,
     pub fuel: &'a dyn Fn(i32) -> bool,
     pub bucket: Option<i32>,
+    /// Лазурит — единственное, что кладётся во второй слот стола.
+    pub lapis: Option<i32>,
     pub creative: bool,
 }
 
@@ -131,7 +137,8 @@ impl Menu<'_> {
     fn slot_max(&self, slot: usize, item: i32) -> i32 {
         let bucket_fuel =
             self.kind == Kind::Furnace && slot == 1 && Some(item) == self.rules.bucket;
-        if self.kind.armor(slot).is_some() || bucket_fuel {
+        let enchant_item = self.kind == Kind::Enchanting && slot == 0;
+        if self.kind.armor(slot).is_some() || bucket_fuel || enchant_item {
             1
         } else {
             self.max(item)
@@ -141,6 +148,9 @@ impl Menu<'_> {
     fn may_place(&self, slot: usize, s: &Stack) -> bool {
         if self.kind.output() == Some(slot) {
             return false;
+        }
+        if self.kind == Kind::Enchanting && slot == 1 {
+            return Some(s.item) == self.rules.lapis;
         }
         if self.kind == Kind::Furnace && slot == 1 {
             // `FurnaceFuelSlot`: топливо или пустое ведро.
@@ -381,6 +391,17 @@ impl Menu<'_> {
                     self.move_to(&mut s, inv..hotbar, false);
                 }
             }
+            Kind::Enchanting => {
+                // `EnchantmentMenu.quickMoveStack`: лазурит — во второй слот, иначе один предмет — в первый.
+                if i < inv {
+                    self.move_to(&mut s, inv..end, true);
+                } else if Some(s.item) == self.rules.lapis {
+                    self.move_to(&mut s, 1..2, true);
+                } else if self.slots[0].is_none() {
+                    self.slots[0] = Some(Stack { count: 1, ..s });
+                    s.count -= 1;
+                }
+            }
             Kind::Crafting => {
                 if i < inv {
                     self.move_to(&mut s, inv..end, false);
@@ -557,6 +578,7 @@ mod tests {
             smeltable: &|item| item == 1,
             fuel: &fuel,
             bucket: Some(8),
+            lapis: Some(10),
             creative: false,
         };
         let mut drag = Drag::default();

@@ -82,6 +82,8 @@ final class Events {
             case Bridge.EVENT_MOVE -> move(plugins, p, arg);
             case Bridge.EVENT_INTERACT -> interact(plugins, p, arg);
             case Bridge.EVENT_POTION -> potion(plugins, p, arg);
+            case Bridge.EVENT_PREPARE_ENCHANT -> prepareEnchant(plugins, p, arg);
+            case Bridge.EVENT_ENCHANT -> enchant(plugins, p, arg);
             default -> "";
         };
     }
@@ -114,6 +116,82 @@ final class Events {
             return "c";
         }
         return GsonComponentSerializer.gson().serialize(e.renderer().render(p.api, name, e.message(), Audience.empty()));
+    }
+
+    private static org.bukkit.enchantments.Enchantment enchantment(String key) {
+        NamespacedKey k = NamespacedKey.fromString(key);
+        return k == null ? null : org.bukkit.Registry.ENCHANTMENT.get(k);
+    }
+
+    /**
+     * {@code PrepareItemEnchantEvent}: {@code x y z полки}, строка предмета, три
+     * {@code цена чары уровень} ({@code -} — нет) → {@code c}, пусто или три новые строки.
+     */
+    private static String prepareEnchant(PluginManager plugins, PlayerImpl p, String arg) {
+        String[] lines = arg.split("\n", -1);
+        String[] f = lines[0].split(" ");
+        Block table = new BlockImpl(p.getWorld(), Integer.parseInt(f[0]), Integer.parseInt(f[1]),
+                Integer.parseInt(f[2]), "minecraft:enchanting_table").api;
+        org.bukkit.enchantments.EnchantmentOffer[] offers = new org.bukkit.enchantments.EnchantmentOffer[3];
+        for (int i = 0; i < 3; i++) {
+            String[] o = lines[2 + i].split(" ");
+            org.bukkit.enchantments.Enchantment ench = enchantment(o[1]);
+            int cost = Integer.parseInt(o[0]);
+            offers[i] = cost > 0 && ench != null
+                    ? new org.bukkit.enchantments.EnchantmentOffer(ench, Integer.parseInt(o[2]), cost) : null;
+        }
+        String before = offersLine(offers);
+        org.bukkit.event.enchantment.PrepareItemEnchantEvent e = new org.bukkit.event.enchantment.PrepareItemEnchantEvent(
+                p.api, null, table, StackImpl.parse(lines[1]), offers, Integer.parseInt(f[3]));
+        plugins.callEvent(e);
+        if (e.isCancelled()) {
+            return "c";
+        }
+        String after = offersLine(e.getOffers());
+        return after.equals(before) ? "" : after;
+    }
+
+    private static String offersLine(org.bukkit.enchantments.EnchantmentOffer[] offers) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < 3; i++) {
+            org.bukkit.enchantments.EnchantmentOffer o = i < offers.length ? offers[i] : null;
+            if (i > 0) out.append('\n');
+            out.append(o == null ? "0 - -1" : o.getCost() + " " + o.getEnchantment().getKey() + " " + o.getEnchantmentLevel());
+        }
+        return out.toString();
+    }
+
+    /**
+     * {@code EnchantItemEvent}: {@code x y z цена кнопка подсказка уровень}, строка предмета,
+     * {@code чары уровень}… → {@code c}, пусто или {@code цена} и новые чары.
+     */
+    private static String enchant(PluginManager plugins, PlayerImpl p, String arg) {
+        String[] lines = arg.split("\n", -1);
+        String[] f = lines[0].split(" ");
+        Block table = new BlockImpl(p.getWorld(), Integer.parseInt(f[0]), Integer.parseInt(f[1]),
+                Integer.parseInt(f[2]), "minecraft:enchanting_table").api;
+        java.util.Map<org.bukkit.enchantments.Enchantment, Integer> map = new java.util.LinkedHashMap<>();
+        for (int i = 2; i < lines.length; i++) {
+            String[] o = lines[i].split(" ");
+            org.bukkit.enchantments.Enchantment ench = o.length == 2 ? enchantment(o[0]) : null;
+            if (ench != null) map.put(ench, Integer.parseInt(o[1]));
+        }
+        java.util.Map<org.bukkit.enchantments.Enchantment, Integer> before = new java.util.LinkedHashMap<>(map);
+        int cost = Integer.parseInt(f[3]);
+        org.bukkit.event.enchantment.EnchantItemEvent e = new org.bukkit.event.enchantment.EnchantItemEvent(
+                p.api, null, table, StackImpl.parse(lines[1]), cost, map, enchantment(f[5]),
+                Integer.parseInt(f[6]), Integer.parseInt(f[4]));
+        plugins.callEvent(e);
+        // Как в CraftBukkit: пустой набор чар — тоже отмена.
+        if (e.isCancelled() || e.getEnchantsToAdd().isEmpty()) {
+            return "c";
+        }
+        if (e.getExpLevelCost() == cost && e.getEnchantsToAdd().equals(before)) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder().append(e.getExpLevelCost());
+        e.getEnchantsToAdd().forEach((k, v) -> out.append('\n').append(k.getKey()).append(' ').append(v));
+        return out.toString();
     }
 
     /** {@code x y z block ax ay az hand} → {@code c} или пусто. */
