@@ -619,28 +619,7 @@ impl PlayPlan {
                 }
             }
             Act::Shear(pos, color) => {
-                self.play_sound(
-                    None,
-                    "minecraft:entity.sheep.shear",
-                    crate::sounds::PLAYERS,
-                    pos,
-                    1.0,
-                    1.0,
-                );
-                // `Sheep.shear`: 1–3 шерсти своего цвета.
-                let wool = format!("minecraft:{}_wool", SHEEP_COLORS[color as usize % 16]);
-                if let Some(wool) = self.item_id(&wool) {
-                    for _ in 0..1 + rand::random::<u32>() % 3 {
-                        let vel = [
-                            (rand::random::<f64>() - rand::random::<f64>()) * 0.1,
-                            rand::random::<f64>() * 0.05,
-                            (rand::random::<f64>() - rand::random::<f64>()) * 0.1,
-                        ];
-                        let at = [pos[0], pos[1] + 1.0, pos[2]];
-                        self.drop_item(at, vel, Stack::new(wool, 1), items::BLOCK_DELAY);
-                    }
-                }
-                self.refresh_mob(target);
+                self.shear_drops(target, pos, color, crate::sounds::PLAYERS);
                 if !creative {
                     let mut s = stack;
                     inv.slots[slot] = (!self.wear_one(&mut s)).then_some(s);
@@ -674,6 +653,67 @@ impl PlayPlan {
             }
         }
         Some(slots)
+    }
+
+    /// `Sheep.shear`: звук, 1–3 шерсти своего цвета, новые метаданные.
+    fn shear_drops(&self, id: i32, pos: [f64; 3], color: u8, source: i32) {
+        self.play_sound(None, "minecraft:entity.sheep.shear", source, pos, 1.0, 1.0);
+        let wool = format!("minecraft:{}_wool", SHEEP_COLORS[color as usize % 16]);
+        if let Some(wool) = self.item_id(&wool) {
+            for _ in 0..1 + rand::random::<u32>() % 3 {
+                let vel = [
+                    (rand::random::<f64>() - rand::random::<f64>()) * 0.1,
+                    rand::random::<f64>() * 0.05,
+                    (rand::random::<f64>() - rand::random::<f64>()) * 0.1,
+                ];
+                let at = [pos[0], pos[1] + 1.0, pos[2]];
+                self.drop_item(at, vel, Stack::new(wool, 1), items::BLOCK_DELAY);
+            }
+        }
+        self.refresh_mob(id);
+    }
+
+    /// Раздатчик с ножницами (`ShearsDispenseItemBehavior`): первая взрослая
+    /// нестриженая овца в блоке `front`. `true` — постриг.
+    pub(super) fn dispense_shear(&self, front: [i32; 3]) -> bool {
+        let lo = front.map(f64::from);
+        let hit = {
+            let mut mobs = self.mobs.lock().unwrap();
+            mobs.iter_mut().find_map(|(&id, e)| {
+                let m = &mut e.mob;
+                let (w, h) = m.size();
+                let inside = m.pos[0] + w / 2.0 > lo[0]
+                    && m.pos[0] - w / 2.0 < lo[0] + 1.0
+                    && m.pos[2] + w / 2.0 > lo[2]
+                    && m.pos[2] - w / 2.0 < lo[2] + 1.0
+                    && m.pos[1] + h > lo[1]
+                    && m.pos[1] < lo[1] + 1.0;
+                (inside && m.alive() && m.species == Species::Sheep && !m.sheared && !m.is_baby())
+                    .then(|| {
+                        m.sheared = true;
+                        (id, m.pos, m.color)
+                    })
+            })
+        };
+        let Some((id, pos, color)) = hit else {
+            return false;
+        };
+        self.shear_drops(id, pos, color, crate::sounds::BLOCKS);
+        true
+    }
+
+    /// Раздатчик с яйцом призыва: моб в центре блока перед ним.
+    pub(super) fn dispense_egg(&self, item: &str, front: [i32; 3], yaw: f32) -> bool {
+        let Some(species) = item
+            .strip_prefix("minecraft:")
+            .and_then(|n| n.strip_suffix("_spawn_egg"))
+            .and_then(Species::from_name)
+        else {
+            return false;
+        };
+        let pos = [front[0] as f64 + 0.5, front[1] as f64, front[2] as f64 + 0.5];
+        self.spawn_mob(species, pos, yaw, false, Some("DISPENSE_EGG"));
+        true
     }
 
     /// Разослать метаданные моба заново (стрижка, рост).

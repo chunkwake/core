@@ -259,6 +259,9 @@ final class PluginManagerImpl {
         if (has(org.bukkit.event.block.BlockCookEvent.getHandlerList())) {
             mask |= Bridge.listenBit(Bridge.EVENT_COOK);
         }
+        if (has(org.bukkit.event.inventory.PrepareGrindstoneEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_PREPARE_GRINDSTONE);
+        }
         Bridge.setFlag(Bridge.FLAG_LISTENERS, mask);
     }
 

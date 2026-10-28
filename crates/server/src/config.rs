@@ -22,6 +22,8 @@ log-level=info
 # World and gameplay settings are stored for future versions of Chunkwake.
 level-name=world
 level-seed=
+level-type=minecraft:flat
+generator-settings=
 view-distance=10
 simulation-distance=10
 gamemode=survival
@@ -47,6 +49,8 @@ pub const KEYS: &[&str] = &[
     "log-level",
     "level-name",
     "level-seed",
+    "level-type",
+    "generator-settings",
     "view-distance",
     "simulation-distance",
     "gamemode",
@@ -72,6 +76,10 @@ pub struct Properties {
     pub generated_dir: String,
     /// Каталог мира (`level-name`), относительно каталога сервера.
     pub level_name: String,
+    /// Сырые `level-seed`, `level-type`, `generator-settings`: разбираются с данными игры.
+    pub level_seed: String,
+    pub level_type: String,
+    pub generator_settings: String,
     /// 0 survival, 1 creative, 2 adventure, 3 spectator.
     pub game_mode: u8,
     pub difficulty: chunkwake_net::survival::Difficulty,
@@ -177,6 +185,9 @@ impl Properties {
             java_path: java_path.into(),
             generated_dir: generated_dir.into(),
             level_name: value("level-name").into(),
+            level_seed: value("level-seed").into(),
+            level_type: value("level-type").into(),
+            generator_settings: value("generator-settings").into(),
             game_mode: ["survival", "creative", "adventure", "spectator"]
                 .iter()
                 .position(|m| *m == value("gamemode"))

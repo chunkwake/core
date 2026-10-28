@@ -131,6 +131,7 @@ final class ViewImpl {
                 case WORKBENCH -> raw == 0 ? SlotType.RESULT : SlotType.CRAFTING;
                 case FURNACE, BLAST_FURNACE, SMOKER -> raw == 2 ? SlotType.RESULT : raw == 1 ? SlotType.FUEL : SlotType.CRAFTING;
                 case ENCHANTING -> SlotType.CRAFTING;
+                case GRINDSTONE -> raw == 2 ? SlotType.RESULT : SlotType.CRAFTING;
                 default -> SlotType.CONTAINER;
             };
         }

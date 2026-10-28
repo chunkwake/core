@@ -9,6 +9,7 @@ pub mod crypto;
 pub mod enchanting;
 pub mod fluids;
 pub mod furnace;
+pub mod grindstone;
 pub mod hoppers;
 pub mod items;
 pub mod live;

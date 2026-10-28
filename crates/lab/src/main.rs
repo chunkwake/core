@@ -1770,6 +1770,7 @@ async fn benchmark(
     let measurement_started = Instant::now();
     let deadline = measurement_started + args.warmup + args.duration + STEP_TIMEOUT;
     let mut samples = Vec::new();
+    let mut query_times = Vec::new();
     let mut toggles = 0;
     let mut observed_transitions = 0;
     let mut updates = 0;
@@ -1837,6 +1838,7 @@ async fn benchmark(
                 }
             }
             _ = sample_tick.tick() => {
+                query_times.push(Instant::now());
                 child.send_console("tick query")?;
                 child.send_console("time query gametime")?;
                 let stats = process_stats(child.child.id());
@@ -1877,13 +1879,13 @@ async fn benchmark(
     for (sample, &mspt) in samples.iter_mut().zip(&tick_times) {
         sample.mspt = Some(mspt);
     }
-    for index in 1..samples.len().min(game_times.len()) {
-        let elapsed = samples[index]
-            .elapsed_secs
-            .saturating_sub(samples[index - 1].elapsed_secs);
-        if elapsed > 0 && game_times[index] >= game_times[index - 1] {
+    for index in 1..samples.len().min(game_times.len()).min(query_times.len()) {
+        let elapsed = query_times[index]
+            .duration_since(query_times[index - 1])
+            .as_secs_f64();
+        if elapsed > 0.0 && game_times[index] >= game_times[index - 1] {
             samples[index].tps =
-                Some((game_times[index] - game_times[index - 1]) as f64 / elapsed as f64);
+                Some((game_times[index] - game_times[index - 1]) as f64 / elapsed);
         }
     }
     let measured: Vec<&BenchSample> = samples
@@ -1893,7 +1895,15 @@ async fn benchmark(
     let average = |values: Vec<f64>| {
         (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64)
     };
-    let tps_avg = average(measured.iter().filter_map(|sample| sample.tps).collect());
+    let first = samples.iter().position(|sample| sample.elapsed_secs >= args.warmup.as_secs());
+    let last = samples.len().min(game_times.len()).min(query_times.len()).checked_sub(1);
+    let tps_avg = first.zip(last).and_then(|(first, last)| {
+        if last <= first || game_times[last] < game_times[first] {
+            return None;
+        }
+        let elapsed = query_times[last].duration_since(query_times[first]).as_secs_f64();
+        (elapsed > 0.0).then(|| (game_times[last] - game_times[first]) as f64 / elapsed)
+    });
     let mspt_avg = average(measured.iter().filter_map(|sample| sample.mspt).collect());
     if args.profile == BenchProfile::Cows && (tps_avg.is_none() || mspt_avg.is_none()) {
         failed += 1;

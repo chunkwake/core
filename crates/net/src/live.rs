@@ -361,6 +361,8 @@ pub enum Event {
     /// `BlockCookEvent`: `x y z\nid опыт время\nсырьё\nрезультат` → `c`, `e` (пустой результат),
     /// `i стопка` или пусто.
     Cook = 35,
+    /// `PrepareGrindstoneEvent`: `x y z\nвход\nвход\nрезультат` → пусто, `e` или `i стопка`.
+    PrepareGrindstone = 36,
 }
 
 impl Event {

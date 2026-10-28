@@ -109,6 +109,7 @@ final class Events {
             }
             case Bridge.EVENT_POTION -> potion(plugins, p, arg);
             case Bridge.EVENT_PREPARE_ENCHANT -> prepareEnchant(plugins, p, arg);
+            case Bridge.EVENT_PREPARE_GRINDSTONE -> prepareGrindstone(plugins, p, arg);
             case Bridge.EVENT_ENCHANT -> enchant(plugins, p, arg);
             case Bridge.EVENT_PICKUP_XP -> {
                 String[] f = arg.split(" ");
@@ -215,6 +216,61 @@ final class Events {
         }
         String after = offersLine(e.getOffers());
         return after.equals(before) ? "" : after;
+    }
+
+    /**
+     * {@code PrepareGrindstoneEvent}: {@code x y z}, два входа и результат
+     * ({@code -} — пусто) → пусто, {@code e} или {@code i стопка}.
+     */
+    private static String prepareGrindstone(PluginManager plugins, PlayerImpl p, String arg) {
+        String[] lines = arg.split("\n", -1);
+        if (lines.length < 4) {
+            return "";
+        }
+        String[] xyz = lines[0].split(" ");
+        int x = Integer.parseInt(xyz[0]);
+        int y = Integer.parseInt(xyz[1]);
+        int z = Integer.parseInt(xyz[2]);
+        ItemStack top = grindStack(lines[1]);
+        ItemStack extra = grindStack(lines[2]);
+        ItemStack result = grindStack(lines[3]);
+        var inv = Stub.of(org.bukkit.inventory.GrindstoneInventory.class, new GrindTop(
+                p, new Location(p.getWorld(), x, y, z), new ItemStack[] {top, extra, result}));
+        var view = new ViewImpl(p, inv, org.bukkit.event.inventory.InventoryType.GRINDSTONE,
+                Component.translatable("container.grindstone"));
+        var e = new org.bukkit.event.inventory.PrepareGrindstoneEvent(view.api, result);
+        plugins.callEvent(e);
+        String now = StackImpl.line(e.getResult());
+        String before = StackImpl.line(result);
+        if (now == null) {
+            return before == null ? "" : "e";
+        }
+        return now.equals(before) ? "" : "i " + now;
+    }
+
+    private static ItemStack grindStack(String line) {
+        return "-".equals(line) ? null : StackImpl.parse(line);
+    }
+
+    /** Три слота точила: плагин читает входы через {@code getItem}. */
+    record GrindTop(PlayerImpl player, Location location, ItemStack[] slots) {
+        public int getSize() { return 3; }
+        public org.bukkit.event.inventory.InventoryType getType() {
+            return org.bukkit.event.inventory.InventoryType.GRINDSTONE;
+        }
+        public Location getLocation() { return location.clone(); }
+        public ItemStack getItem(int i) { return i >= 0 && i < slots.length ? slots[i] : null; }
+        public ItemStack getResult() { return getItem(2); }
+        public java.util.List<org.bukkit.entity.HumanEntity> getViewers() { return java.util.List.of(player.api); }
+        public boolean isEmpty() {
+            for (ItemStack s : slots) {
+                if (s != null && !s.getType().isAir()) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        public org.bukkit.inventory.InventoryHolder getHolder() { return null; }
     }
 
     private static String offersLine(org.bukkit.enchantments.EnchantmentOffer[] offers) {

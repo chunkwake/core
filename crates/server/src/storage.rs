@@ -217,7 +217,7 @@ impl ChunkSource for WorldStorage {
             .collect()
     }
 
-    fn load_entities(&self, rx: i32, rz: i32) -> Result<Vec<((i32, i32), Compound)>, String> {
+    fn load_entities(&self, rx: i32, rz: i32) -> Result<Vec<chunkwake_net::play::StoredEntities>, String> {
         self.entities.load_region(rx, rz)
     }
 }

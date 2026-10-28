@@ -307,6 +307,7 @@ mod tests {
             primary: items,
             exclusive: HashSet::new(),
             in_table: true,
+            curse: false,
             slots: vec!["mainhand".into()],
             attributes: Vec::new(),
             protection: Vec::new(),

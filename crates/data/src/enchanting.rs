@@ -25,6 +25,8 @@ pub struct EnchantDef {
     pub exclusive: HashSet<String>,
     /// Бывает на столе (тег `in_enchanting_table`).
     pub in_table: bool,
+    /// Тег `#minecraft:curse`: точило такое не снимает.
+    pub curse: bool,
     /// Группы слотов, где чары действуют (`slots`: mainhand, armor, …).
     pub slots: Vec<String>,
     /// Модификаторы атрибутов (`effects."minecraft:attributes"`).
@@ -146,6 +148,7 @@ pub fn load(root: &Path, names: &[String]) -> Result<Enchanting, DataError> {
         memo: HashMap::new(),
     };
     let table = tags.values("enchantment", "#minecraft:in_enchanting_table");
+    let curses = tags.values("enchantment", "#minecraft:curse");
     let mut out = Enchanting::default();
     for (id, name) in names.iter().enumerate() {
         let path = name.strip_prefix("minecraft:").unwrap_or(name);
@@ -188,6 +191,7 @@ pub fn load(root: &Path, names: &[String]) -> Result<Enchanting, DataError> {
             max_step: cost("max_cost", "per_level_above_first"),
             exclusive: set(&mut tags, "enchantment", "exclusive_set"),
             in_table: table.contains(name),
+            curse: curses.contains(name),
             protection: v["effects"]["minecraft:damage_protection"]
                 .as_array()
                 .into_iter()

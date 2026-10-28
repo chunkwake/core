@@ -248,6 +248,8 @@ const CHUNK_CACHE_LIMIT: usize = 65_536;
 
 /// Столбец с диска и его координаты.
 pub type LoadedChunk = ((i32, i32), ChunkColumn);
+/// Чанк `entities/*.mca`: координаты и NBT-корень.
+pub type StoredEntities = ((i32, i32), Compound);
 thread_local! {
     /// Последний загруженный регион, к которому обращался поток: (мир, регион).
     static LAST_REGION: std::cell::Cell<Option<(usize, (i32, i32))>> =
@@ -355,7 +357,7 @@ pub trait PlayerSource: Send + Sync {
 pub trait ChunkSource: Send + Sync {
     fn load_region(&self, rx: i32, rz: i32) -> Result<Vec<LoadedChunk>, String>;
     /// Корни NBT чанков `entities/*.mca` региона.
-    fn load_entities(&self, _rx: i32, _rz: i32) -> Result<Vec<((i32, i32), Compound)>, String> {
+    fn load_entities(&self, _rx: i32, _rz: i32) -> Result<Vec<StoredEntities>, String> {
         Ok(Vec::new())
     }
 }
@@ -947,6 +949,7 @@ pub struct SurvivalData {
     /// Стол зачарования: чары, предметы, полки.
     pub enchanting: chunkwake_data::enchanting::Enchanting,
     pub menu_enchantment: i32,
+    pub menu_grindstone: i32,
     /// Чары для плагинов по порядку сетевых ID (строки запроса `enchantments`).
     pub enchantments: Vec<String>,
     /// Твёрдость по состоянию блока (-1 — неразрушимый, 0 — ломается сразу).
@@ -4131,6 +4134,7 @@ impl PlayPlan {
                 Kind::Crafting => "WORKBENCH",
                 Kind::Furnace => "FURNACE",
                 Kind::Enchanting => "ENCHANTING",
+                Kind::Grindstone => "GRINDSTONE",
                 Kind::Player => "CRAFTING",
             };
             (ty, plugin_of(w.pos).unwrap_or(-1), n, cur)
@@ -4965,6 +4969,9 @@ impl PlayPlan {
                             if let Some(w) = window.as_mut().filter(|w| w.kind == Kind::Enchanting) {
                                 self.refresh_enchant(conn, w, state.xp.seed, uuid).await?;
                             }
+                            if let Some(w) = window.as_mut().filter(|w| w.kind == Kind::Grindstone) {
+                                self.refresh_grindstone(conn, &mut state.inv, w, uuid).await?;
+                            }
                             let mut kept = false;
                             if let Some((feet, yaw, pitch)) = self.player_at(uuid) {
                                 for s in thrown {
@@ -5321,6 +5328,7 @@ impl PlayPlan {
                         let kind = match clicked.as_str() {
                             "minecraft:crafting_table" => Some(Kind::Crafting),
                             "minecraft:enchanting_table" => Some(Kind::Enchanting),
+                            "minecraft:grindstone" => Some(Kind::Grindstone),
                             "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" => Some(Kind::Chest(27)),
                             "minecraft:hopper" => Some(Kind::Chest(5)),
                             "minecraft:dispenser" | "minecraft:dropper" => Some(Kind::Chest(9)),
@@ -5350,6 +5358,7 @@ impl PlayPlan {
                             let (menu, title) = match kind {
                                 Kind::Crafting => (self.survival.menu_crafting, "container.crafting"),
                                 Kind::Enchanting => (self.survival.menu_enchantment, "container.enchant"),
+                                Kind::Grindstone => (self.survival.menu_grindstone, "container.grindstone"),
                                 Kind::Furnace => {
                                     let k = furnace_kind(&clicked).unwrap_or(0) as usize;
                                     (self.survival.menu_furnace[k], ["container.furnace", "container.blast_furnace", "container.smoker"][k])
@@ -6104,16 +6113,27 @@ impl PlayPlan {
         let size = match kind {
             Kind::Player => 2,
             Kind::Crafting => 3,
-            Kind::Chest(_) | Kind::Furnace | Kind::Enchanting => 0,
+            Kind::Chest(_) | Kind::Furnace | Kind::Enchanting | Kind::Grindstone => 0,
         };
         let fill = |slots: &mut [Slot]| {
-            if size > 0 {
+            if kind == Kind::Grindstone {
+                slots[2] = self.grind_result(slots[0], slots[1]);
+            } else if size > 0 {
                 slots[0] = self.craft_result(&slots[1..=size * size], size);
             }
         };
         // `ResultSlot.onTake`: остаток (ведро, бутылка) — в опустевшую ячейку, иначе в инвентарь.
         let mut leftovers = Vec::new();
+        let mut grind_xp = 0;
+        let mut grind_took = false;
         let mut craft = |slots: &mut [Slot]| {
+            if kind == Kind::Grindstone {
+                grind_xp += self.grind_experience(slots[0]) + self.grind_experience(slots[1]);
+                grind_took = true;
+                slots[0] = None;
+                slots[1] = None;
+                return;
+            }
             for s in &mut slots[1..=size * size] {
                 if let Some(x) = s {
                     let rest = self.craft_remainder(x.item);
@@ -6142,6 +6162,7 @@ impl PlayPlan {
                 .get(item as usize)
                 .is_some_and(|i| i.fuel.is_some())
         };
+        let grindable = |s: &Stack| crate::grindstone::acceptable(s, self.item_max_damage(s.item));
         let rules = click::Rules {
             max_stack: &max,
             equip: &equip,
@@ -6149,6 +6170,7 @@ impl PlayPlan {
             fuel: &fuel,
             bucket: self.item_id("minecraft:bucket"),
             lapis: self.item_id(crate::enchanting::LAPIS),
+            grindable: &grindable,
             creative,
         };
         let thrown = click::Menu {
@@ -6163,7 +6185,9 @@ impl PlayPlan {
         fill(&mut view);
         let same =
             |a: &Slot, b: &Slot| a.map(|s| (s.item, s.count)) == b.map(|s| (s.item, s.count));
-        let resync = c.state != inv.state
+        // Точило меняет чары и износ: сравнение смотрит только предмет и число.
+        let resync = kind == Kind::Grindstone
+            || c.state != inv.state
             || view.iter().zip(&expected).any(|(a, b)| !same(a, b))
             || !same(&inv.carried, &c.carried);
         let mut thrown = thrown;
@@ -6185,7 +6209,101 @@ impl PlayPlan {
         for s in leftovers {
             thrown.extend(inv.add_stack(s, self.max_stack(s.item)));
         }
+        if grind_took
+            && let Some(pos) = window.as_ref().map(|w| w.pos)
+        {
+            self.grind_taken(pos, grind_xp);
+        }
         (thrown, resync)
+    }
+
+    fn item_max_damage(&self, item: i32) -> i32 {
+        self.survival
+            .items
+            .get(item as usize)
+            .map_or(0, |i| i.max_damage)
+    }
+
+    fn grind_result(&self, top: Slot, bottom: Slot) -> Slot {
+        // Замыкания живут до конца вызова: `Ctx` держит на них ссылки.
+        let max_damage = |item| self.item_max_damage(item);
+        let max_stack = |item| self.max_stack(item);
+        let curse = |id| {
+            self.survival
+                .enchanting
+                .defs
+                .iter()
+                .find(|d| d.id == id)
+                .is_some_and(|d| d.curse)
+        };
+        let min_cost = |id, level| {
+            self.survival
+                .enchanting
+                .defs
+                .iter()
+                .find(|d| d.id == id)
+                .map_or(0, |d| d.min_cost(level))
+        };
+        let ctx = crate::grindstone::Ctx {
+            enchanted_book: self.item_id(crate::enchanting::ENCHANTED_BOOK).unwrap_or(-1),
+            book: self.item_id(crate::enchanting::BOOK).unwrap_or(-1),
+            max_damage: &max_damage,
+            max_stack: &max_stack,
+            curse: &curse,
+            min_cost: &min_cost,
+        };
+        crate::grindstone::compute(top, bottom, &ctx)
+    }
+
+    fn grind_experience(&self, stack: Slot) -> i32 {
+        let max_damage = |item| self.item_max_damage(item);
+        let max_stack = |item| self.max_stack(item);
+        let curse = |id| {
+            self.survival
+                .enchanting
+                .defs
+                .iter()
+                .find(|d| d.id == id)
+                .is_some_and(|d| d.curse)
+        };
+        let min_cost = |id, level| {
+            self.survival
+                .enchanting
+                .defs
+                .iter()
+                .find(|d| d.id == id)
+                .map_or(0, |d| d.min_cost(level))
+        };
+        let ctx = crate::grindstone::Ctx {
+            enchanted_book: self.item_id(crate::enchanting::ENCHANTED_BOOK).unwrap_or(-1),
+            book: self.item_id(crate::enchanting::BOOK).unwrap_or(-1),
+            max_damage: &max_damage,
+            max_stack: &max_stack,
+            curse: &curse,
+            min_cost: &min_cost,
+        };
+        crate::grindstone::experience_of(stack, &ctx)
+    }
+
+    /// Забор результата: сферы в центре блока и звук точила.
+    fn grind_taken(&self, pos: [i32; 3], n: i32) {
+        let roll = if n <= 0 {
+            0
+        } else {
+            let half = (n + 1) / 2;
+            rand::Rng::gen_range(&mut rand::thread_rng(), 0..half)
+        };
+        let amount = crate::grindstone::xp_amount(n, roll);
+        if amount > 0 {
+            self.spawn_orbs(
+                [pos[0] as f64 + 0.5, pos[1] as f64 + 0.5, pos[2] as f64 + 0.5],
+                amount,
+            );
+        }
+        self.hub.send(
+            None,
+            play::level_event(self.ids.level_event, 1042, pos, 0, false),
+        );
     }
 
     /// Окно всё ещё у своего блока (сундук не сломали).
@@ -6201,6 +6319,9 @@ impl PlayPlan {
             Kind::Enchanting => self
                 .block(w.pos)
                 .is_some_and(|s| self.state_name(s) == "minecraft:enchanting_table"),
+            Kind::Grindstone => self
+                .block(w.pos)
+                .is_some_and(|s| self.state_name(s) == "minecraft:grindstone"),
             _ => self
                 .block(w.pos)
                 .is_some_and(|s| self.state_name(s) == "minecraft:crafting_table"),
@@ -6358,6 +6479,11 @@ impl PlayPlan {
             match w.kind {
                 Kind::Crafting => back.extend(w.slots[1..10].iter_mut().filter_map(Option::take)),
                 Kind::Enchanting => back.extend(w.slots.iter_mut().filter_map(Option::take)),
+                Kind::Grindstone => {
+                    for slot in w.slots.iter_mut().take(2) {
+                        back.extend(slot.take());
+                    }
+                }
                 Kind::Furnace => {
                     if let Some(e) = self.furnaces.lock().unwrap().get_mut(&w.pos) {
                         e.viewers.retain(|v| *v != uuid);
@@ -6419,6 +6545,7 @@ impl PlayPlan {
                 .unwrap_or_else(|| vec![None; 3]),
             Kind::Crafting if w.slots.is_empty() => vec![None; 10],
             Kind::Enchanting if w.slots.is_empty() => vec![None; 2],
+            Kind::Grindstone if w.slots.is_empty() => vec![None; 3],
             _ => w.slots.clone(),
         }
     }
@@ -6618,6 +6745,12 @@ impl PlayPlan {
                 ]
             })
             .collect();
+        // Живые мобы жмут все плиты, как игроки.
+        let mut feet = feet;
+        feet.extend(self.mobs.lock().unwrap().values().filter(|e| e.mob.alive()).map(|e| {
+            let p = e.mob.pos;
+            [p[0].floor() as i32, (p[1] + 0.01).floor() as i32, p[2].floor() as i32]
+        }));
         let mut on: HashMap<[i32; 3], usize> = HashMap::new();
         for f in feet {
             if self
@@ -7903,6 +8036,24 @@ impl PlayPlan {
                     damage: st.damage + 1,
                     ..st
                 });
+                Some(true)
+            }
+            // Ножницы стригут овцу перед раздатчиком (−1 прочности); нет овцы — осечка.
+            "minecraft:shears" => {
+                if !self.dispense_shear(front) {
+                    return Some(false);
+                }
+                let mut s = st;
+                me.slots[i] = (!self.wear_one(&mut s)).then_some(s);
+                Some(true)
+            }
+            // Яйцо призыва: моб перед раздатчиком, лицом по направлению выброса.
+            n if n.ends_with("_spawn_egg") => {
+                let yaw = [0.0, 0.0, 180.0, 0.0, 90.0, 270.0][facing.min(5)];
+                if !self.dispense_egg(n, front, yaw) {
+                    return None;
+                }
+                crate::hoppers::take_one(&mut me.slots, i);
                 Some(true)
             }
             _ => None,
@@ -9995,6 +10146,55 @@ impl PlayPlan {
 
     /// `slotsChanged`: при смене предмета, полок или зерна — новые варианты и
     /// `PrepareItemEnchantEvent`; затем шлёт изменившиеся свойства стола.
+    /// `PrepareGrindstoneEvent` после клика: плагин может подменить результат.
+    async fn refresh_grindstone(
+        &self,
+        conn: &mut Connection,
+        inv: &mut Inventory,
+        w: &mut Window,
+        uuid: Uuid,
+    ) -> Result<(), NetError> {
+        let (top, bottom, result) = (
+            w.slots.first().copied().flatten(),
+            w.slots.get(1).copied().flatten(),
+            w.slots.get(2).copied().flatten(),
+        );
+        let Some(reply) = self
+            .plugin_event(Event::PrepareGrindstone, uuid, || {
+                format!(
+                    "{} {} {}\n{}\n{}\n{}",
+                    w.pos[0],
+                    w.pos[1],
+                    w.pos[2],
+                    self.slot_line(top),
+                    self.slot_line(bottom),
+                    self.slot_line(result),
+                )
+            })
+            .await
+        else {
+            return Ok(());
+        };
+        let next = match reply.trim() {
+            "" => return Ok(()),
+            "e" => None,
+            s => {
+                let Some(rest) = s.strip_prefix("i ") else {
+                    return Ok(());
+                };
+                crate::stack_nbt::from_line(rest, |n| self.item_id(n))
+            }
+        };
+        if w.slots.get(2).copied().flatten() == next {
+            return Ok(());
+        }
+        if let Some(slot) = w.slots.get_mut(2) {
+            *slot = next;
+            self.send_window(conn, inv, Some(w), w.id).await?;
+        }
+        Ok(())
+    }
+
     async fn refresh_enchant(
         &self,
         conn: &mut Connection,

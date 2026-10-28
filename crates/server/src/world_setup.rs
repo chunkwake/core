@@ -1,4 +1,6 @@
-//! Мир: плоский overworld (bedrock, 2×dirt, grass) и параметры входа игрока.
+//! Мир: плоский overworld по `level.dat` / `server.properties` и параметры входа игрока.
+
+mod level;
 
 use crate::config::Properties;
 use crate::storage::WorldStorage;
@@ -26,8 +28,29 @@ pub fn build_play_plan(
     let blocks = Blocks::load(data_dir).map_err(s)?;
     tracing::debug!("blocks: {:?}", t.elapsed());
     let dim = DimensionType::load(data_dir, DIMENSION).map_err(s)?;
+    let data_version = crate::config::read_world_version(data_dir)?;
+    let level = level::load_or_create(
+        world_dir,
+        data_dir,
+        &props.level_seed,
+        &props.level_type,
+        &props.generator_settings,
+        data_version,
+    )?;
+    tracing::info!(
+        "world: seed {}, flat {}",
+        level.seed,
+        level
+            .flat
+            .layers
+            .iter()
+            .map(|(b, h)| format!("{h}×{}", b.trim_start_matches("minecraft:")))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     let biome = registries
-        .network_id("worldgen/biome", "minecraft:plains")
+        .network_id("worldgen/biome", &level.flat.biome)
+        .or_else(|_| registries.network_id("worldgen/biome", "minecraft:plains"))
         .map_err(s)?;
     let biomes: Vec<String> = registries
         .synchronized
@@ -37,16 +60,11 @@ pub fn build_play_plan(
         .unwrap_or_default();
     let biome_count = biomes.len().max(1);
 
-    let layers = [
-        ("minecraft:bedrock", 1),
-        ("minecraft:dirt", 2),
-        ("minecraft:grass_block", 1),
-    ];
     let mut states = Vec::new();
-    for (name, n) in layers {
-        states.push((blocks.default_state(name).map_err(s)? as u32, n));
+    for (name, n) in &level.flat.layers {
+        states.push((blocks.default_state(name).map_err(s)? as u32, *n));
     }
-    let top = layers.iter().map(|l| l.1).sum::<usize>() as f64;
+    let top = level.flat.layers.iter().map(|l| l.1).sum::<usize>() as f64;
     let light = std::sync::Arc::new(chunkwake_world::light::LightTable::new(
         chunkwake_data::world::load_light(data_dir).map_err(s)?,
     ));
@@ -77,7 +95,7 @@ pub fn build_play_plan(
                 .network_id("dimension_type", &dimension)
                 .map_err(s)?,
             dimension,
-            hashed_seed: 0,
+            hashed_seed: level::hashed_seed(level.seed),
             game_mode: props.game_mode,
             previous_game_mode: None,
             is_debug: false,
@@ -88,8 +106,12 @@ pub fn build_play_plan(
         online_mode: props.online_mode,
         enforces_secure_chat: false,
     };
-    // Центр блока над травой.
-    let spawn = [8.5, dim.min_y as f64 + top, 8.5];
+    // Центр блока над верхним слоем; пустой мир — у уровня моря.
+    let spawn = if level.flat.layers.iter().any(|(b, _)| b != "minecraft:air") {
+        [8.5, dim.min_y as f64 + top, 8.5]
+    } else {
+        [8.5, 64.0, 8.5]
+    };
     let player_type =
         chunkwake_data::registries::builtin_id(data_dir, "entity_type", "minecraft:player")
             .map_err(s)?;
@@ -133,7 +155,6 @@ pub fn build_play_plan(
         survival: survival_data(data_dir, &blocks, &items, registries, props.difficulty)?,
     };
     let plan = PlayPlan::build(packets, login, world, props.compression_threshold).map_err(s)?;
-    let data_version = crate::config::read_world_version(data_dir)?;
     let storage = WorldStorage::new(
         world_dir,
         blocks,
@@ -276,6 +297,7 @@ fn survival_data(
         chest_states: chests.iter().map(|(&id, &c)| (c, id)).collect(),
         menu_crafting: menu("minecraft:crafting")?,
         menu_enchantment: menu("minecraft:enchantment")?,
+        menu_grindstone: menu("minecraft:grindstone")?,
         enchanting,
         menu_furnace: [
             menu("minecraft:furnace")?,

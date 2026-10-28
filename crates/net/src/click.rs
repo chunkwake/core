@@ -27,6 +27,8 @@ pub enum Kind {
     Furnace,
     /// `EnchantmentMenu`: 0 предмет, 1 лазурит, 2–28, 29–37.
     Enchanting,
+    /// `GrindstoneMenu`: 0 и 1 входы, 2 результат, 3–29, 30–38.
+    Grindstone,
 }
 
 impl Kind {
@@ -35,7 +37,7 @@ impl Kind {
             Kind::Player => 46,
             Kind::Chest(n) => n + 36,
             Kind::Crafting => 46,
-            Kind::Furnace => 39,
+            Kind::Furnace | Kind::Grindstone => 39,
             Kind::Enchanting => 38,
         }
     }
@@ -46,7 +48,7 @@ impl Kind {
             Kind::Player => 9,
             Kind::Chest(n) => n,
             Kind::Crafting => 10,
-            Kind::Furnace => 3,
+            Kind::Furnace | Kind::Grindstone => 3,
             Kind::Enchanting => 2,
         }
     }
@@ -55,14 +57,18 @@ impl Kind {
     fn output(self) -> Option<usize> {
         match self {
             Kind::Player | Kind::Crafting => Some(0),
-            Kind::Furnace => Some(2),
+            Kind::Furnace | Kind::Grindstone => Some(2),
             Kind::Chest(_) | Kind::Enchanting => None,
         }
     }
 
-    /// Результат крафта: забирается целиком и пересчитывается.
+    /// Результат крафта или точила: забирается целиком и пересчитывается.
     fn craft_output(self) -> Option<usize> {
-        matches!(self, Kind::Player | Kind::Crafting).then_some(0)
+        match self {
+            Kind::Player | Kind::Crafting => Some(0),
+            Kind::Grindstone => Some(2),
+            _ => None,
+        }
     }
 
     /// Слот брони и её `EquipmentSlot`.
@@ -92,6 +98,8 @@ pub struct Rules<'a> {
     pub bucket: Option<i32>,
     /// Лазурит — единственное, что кладётся во второй слот стола.
     pub lapis: Option<i32>,
+    /// Точило: изнашиваемый предмет или стопка с чарами, без сырого патча.
+    pub grindable: &'a dyn Fn(&Stack) -> bool,
     pub creative: bool,
 }
 
@@ -138,7 +146,8 @@ impl Menu<'_> {
         let bucket_fuel =
             self.kind == Kind::Furnace && slot == 1 && Some(item) == self.rules.bucket;
         let enchant_item = self.kind == Kind::Enchanting && slot == 0;
-        if self.kind.armor(slot).is_some() || bucket_fuel || enchant_item {
+        let grind_input = self.kind == Kind::Grindstone && slot < 2;
+        if self.kind.armor(slot).is_some() || bucket_fuel || enchant_item || grind_input {
             1
         } else {
             self.max(item)
@@ -151,6 +160,9 @@ impl Menu<'_> {
         }
         if self.kind == Kind::Enchanting && slot == 1 {
             return Some(s.item) == self.rules.lapis;
+        }
+        if self.kind == Kind::Grindstone && slot < 2 {
+            return (self.rules.grindable)(s);
         }
         if self.kind == Kind::Furnace && slot == 1 {
             // `FurnaceFuelSlot`: топливо или пустое ведро.
@@ -221,9 +233,10 @@ impl Menu<'_> {
         thrown
     }
 
-    /// Забирает результат крафта целиком и пересчитывает его.
+    /// Забирает результат крафта или точила целиком и пересчитывает его.
     fn take_output(&mut self) -> Slot {
-        let out = self.slots[0].take()?;
+        let i = self.kind.craft_output()?;
+        let out = self.slots.get_mut(i)?.take()?;
         (self.craft)(self.slots);
         Some(out)
     }
@@ -400,6 +413,27 @@ impl Menu<'_> {
                 } else if self.slots[0].is_none() {
                     self.slots[0] = Some(Stack { count: 1, ..s });
                     s.count -= 1;
+                }
+            }
+            Kind::Grindstone => {
+                // Входы — в инвентарь. Из инвентаря по штуке в каждый свободный вход
+                // (`move_to` останавливается на первой пустой ячейке).
+                if i < inv {
+                    self.move_to(&mut s, inv..end, true);
+                } else {
+                    let before = s.count;
+                    for _ in 0..2 {
+                        if s.count == 0 || !self.move_to(&mut s, 0..2, false) {
+                            break;
+                        }
+                    }
+                    if s.count == before {
+                        if i < hotbar {
+                            self.move_to(&mut s, hotbar..end, false);
+                        } else {
+                            self.move_to(&mut s, inv..hotbar, false);
+                        }
+                    }
                 }
             }
             Kind::Crafting => {
@@ -579,6 +613,7 @@ mod tests {
             fuel: &fuel,
             bucket: Some(8),
             lapis: Some(10),
+            grindable: &|_| false,
             creative: false,
         };
         let mut drag = Drag::default();
