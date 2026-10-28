@@ -4,7 +4,7 @@ use crate::play::{SpawnInfo, write_spawn_info};
 use crate::{Reader, Result, Writer};
 
 /// Стопка предметов: ID в реестре `item`, количество и износ (`minecraft:damage`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Stack {
     pub item: i32,
     pub count: i32,
@@ -52,8 +52,8 @@ pub fn write_stack(w: &mut Writer, s: Slot) {
 /// Если патч пришёл с неизвестным компонентом, он пишется байт в байт.
 fn write_patch(w: &mut Writer, s: &Stack) {
     use crate::components::{
-        CUSTOM_NAME_COMPONENT, ENCHANTMENTS_COMPONENT, LORE_COMPONENT, STORED_ENCHANTMENTS_COMPONENT,
-        get, id_of,
+        CHARGED_PROJECTILES_COMPONENT, CUSTOM_NAME_COMPONENT, ENCHANTMENTS_COMPONENT,
+        LORE_COMPONENT, STORED_ENCHANTMENTS_COMPONENT, get, id_of,
     };
     let e = get(s.extra);
     if let Some(raw) = &e.raw {
@@ -73,6 +73,7 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         !e.lore.is_empty() && lore >= 0,
         !e.stored.is_empty() && id_of(&STORED_ENCHANTMENTS_COMPONENT) >= 0,
         e.custom_data.is_some() && id_of(&crate::components::CUSTOM_DATA_COMPONENT) >= 0,
+        !e.charged.is_empty() && id_of(&CHARGED_PROJECTILES_COMPONENT) >= 0,
     ];
     w.var_int(parts.iter().filter(|&&p| p).count() as i32)
         .var_int(0);
@@ -109,6 +110,13 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         w.var_int(id_of(&crate::components::CUSTOM_DATA_COMPONENT));
         w.buf.extend_from_slice(nbt);
     }
+    if parts[6] {
+        w.var_int(id_of(&CHARGED_PROJECTILES_COMPONENT))
+            .var_int(e.charged.len() as i32);
+        for st in &e.charged {
+            write_stack(w, Some(*st));
+        }
+    }
 }
 
 /// Читает `ItemStack` с компонентами: износ, чары, имя и описание.
@@ -116,8 +124,8 @@ fn write_patch(w: &mut Writer, s: &Stack) {
 /// Стопка с таким патчем должна быть последним полем пакета: хвост не разбирается.
 pub fn read_stack(r: &mut Reader) -> Result<Slot> {
     use crate::components::{
-        CUSTOM_NAME_COMPONENT, ENCHANTMENTS_COMPONENT, Extra, LORE_COMPONENT,
-        STORED_ENCHANTMENTS_COMPONENT, id_of, intern,
+        CHARGED_PROJECTILES_COMPONENT, CUSTOM_NAME_COMPONENT, ENCHANTMENTS_COMPONENT, Extra,
+        LORE_COMPONENT, STORED_ENCHANTMENTS_COMPONENT, id_of, intern,
     };
     let count = r.var_int()?;
     if count <= 0 {
@@ -147,6 +155,14 @@ pub fn read_stack(r: &mut Reader) -> Result<Slot> {
         } else if t == id_of(&LORE_COMPONENT) {
             for _ in 0..r.var_int()?.clamp(0, 256) {
                 e.lore.push(crate::text::read_component(r)?.to_string());
+            }
+        } else if id_of(&CHARGED_PROJECTILES_COMPONENT) >= 0
+            && t == id_of(&CHARGED_PROJECTILES_COMPONENT)
+        {
+            for _ in 0..r.var_int()?.clamp(0, 16) {
+                if let Some(st) = read_stack(r)? {
+                    e.charged.push(st);
+                }
             }
         } else {
             known = false;
@@ -344,8 +360,8 @@ pub fn read_creative_slot(r: &mut Reader) -> Result<(i16, Slot)> {
 /// Стопка из креатива: патч с длиной у каждого компонента → обычный патч для ответа клиенту.
 fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
     use crate::components::{
-        CUSTOM_NAME_COMPONENT, ENCHANTMENTS_COMPONENT, Extra, LORE_COMPONENT,
-        STORED_ENCHANTMENTS_COMPONENT, id_of, intern,
+        CHARGED_PROJECTILES_COMPONENT, CUSTOM_NAME_COMPONENT, ENCHANTMENTS_COMPONENT, Extra,
+        LORE_COMPONENT, STORED_ENCHANTMENTS_COMPONENT, id_of, intern,
     };
     let count = r.var_int()?;
     if count <= 0 {
@@ -403,6 +419,15 @@ fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
                     break;
                 };
                 e.lore.push(line.to_string());
+            }
+        } else if id_of(&CHARGED_PROJECTILES_COMPONENT) >= 0
+            && kind == id_of(&CHARGED_PROJECTILES_COMPONENT)
+            && let Ok(n) = body.var_int()
+        {
+            for _ in 0..n.clamp(0, 16) {
+                if let Ok(Some(st)) = read_stack(&mut body) {
+                    e.charged.push(st);
+                }
             }
         }
     }
@@ -491,6 +516,18 @@ pub fn set_entity_item(id: i32, entity_id: i32, stack: Slot) -> Vec<u8> {
     w.buf
 }
 
+/// Величина сферы опыта (`ExperienceOrb.DATA_VALUE`, индекс 8, int).
+pub fn set_orb_value(id: i32, entity_id: i32, value: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .var_int(entity_id)
+        .u8(8)
+        .var_int(1)
+        .var_int(value)
+        .u8(0xff);
+    w.buf
+}
+
 /// `take_item_entity`: анимация подбора (предмет летит к игроку).
 pub fn take_item_entity(id: i32, item_entity: i32, collector: i32, amount: i32) -> Vec<u8> {
     let mut w = Writer::new();
@@ -504,6 +541,8 @@ pub fn take_item_entity(id: i32, item_entity: i32, collector: i32, amount: i32) 
 pub const ENTITY_EVENT_DEATH: u8 = 3;
 /// Сломался предмет в основной руке (`EquipmentSlot.MAINHAND`).
 pub const ENTITY_EVENT_BREAK_MAINHAND: u8 = 47;
+/// Сломался предмет во второй руке.
+pub const ENTITY_EVENT_BREAK_OFFHAND: u8 = 48;
 /// Уровень прав игрока для клиента: 24 + уровень (0..=4).
 pub const ENTITY_EVENT_PERMISSION_LEVEL_0: u8 = 24;
 /// Использование предмета закончено (еда съедена).

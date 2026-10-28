@@ -120,6 +120,7 @@ async fn serve(dir: &Path) -> Result<(), String> {
     play.set_source(storage.clone());
     play.set_player_source(storage.clone());
     play.set_ops(chunkwake_net::ops::OpList::load(dir.join("ops.json"))?);
+    play.set_spawn_protection(props.spawn_protection as i32);
     tracing::info!(
         "world: {} (data loaded in {:.1}s)",
         props.level_name,
@@ -169,7 +170,7 @@ async fn serve(dir: &Path) -> Result<(), String> {
                 let play = play.clone();
                 sessions.spawn(async move {
                     let result = play.run(&player, &mut conn).await;
-                    tracing::info!(name = %player.name, ?result, "player left");
+                    log_player_exit(&player.name, result);
                 });
             }
             Some(result) = sessions.join_next(), if !sessions.is_empty() => {
@@ -197,7 +198,7 @@ async fn serve(dir: &Path) -> Result<(), String> {
         let play = play.clone();
         sessions.spawn(async move {
             let result = play.run(&player, &mut conn).await;
-            tracing::info!(name = %player.name, ?result, "player left");
+            log_player_exit(&player.name, result);
         });
     }
     play.disconnect_all();
@@ -256,6 +257,23 @@ async fn serve(dir: &Path) -> Result<(), String> {
     }
 }
 
+fn log_player_exit(name: &str, result: Result<(), chunkwake_net::NetError>) {
+    match result {
+        Ok(()) => tracing::info!(%name, "player left"),
+        Err(chunkwake_net::NetError::Io(error))
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            ) =>
+        {
+            tracing::info!(%name, "player disconnected");
+        }
+        Err(error) => tracing::warn!(%name, ?error, "player session ended with an error"),
+    }
+}
+
 /// Paper-плагины из `plugins/`: без API (`java/dist`, `api/`) или Java сервер
 /// работает без них.
 async fn start_plugins(
@@ -263,6 +281,23 @@ async fn start_plugins(
     props: &config::Properties,
     play: &std::sync::Arc<chunkwake_net::play::PlayPlan>,
 ) -> Option<std::sync::Arc<chunkwake_bridge::Bridge>> {
+    let plugins = dir.join("plugins");
+    let has_plugins = match std::fs::read_dir(&plugins) {
+        Ok(entries) => entries.filter_map(Result::ok).any(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("jar"))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            tracing::warn!("cannot inspect {}: {error}", plugins.display());
+            return None;
+        }
+    };
+    if !has_plugins {
+        return None;
+    }
     let Some(api) = chunkwake_bridge::find_api_dir(dir) else {
         tracing::warn!(
             "plugin API not found (build it with `java/gradlew -p java dist`); plugins disabled"
@@ -272,7 +307,6 @@ async fn start_plugins(
     let java = std::env::var_os("CHUNKWAKE_JAVA")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| props.java_command(dir));
-    let plugins = dir.join("plugins");
     let plan = play.clone();
     let started = tokio::task::spawn_blocking(move || {
         chunkwake_bridge::Bridge::start(&java, &api, &plugins, &plan)

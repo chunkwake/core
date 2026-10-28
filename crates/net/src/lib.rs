@@ -1,19 +1,25 @@
 //! chunkwake-net — приём соединений и состояния handshake/status/login.
 
+pub mod arrows;
 pub mod auth;
 pub mod click;
 pub mod configuration;
 pub mod crypto;
 pub mod enchanting;
-pub mod sounds;
+pub mod fluids;
 pub mod furnace;
+pub mod hoppers;
 pub mod items;
 pub mod live;
 pub mod loot;
 pub mod ops;
+pub mod orbs;
+pub mod pistons;
 pub mod placement;
 pub mod play;
 pub mod potions;
+pub mod redstone;
+pub mod sounds;
 pub mod stack_nbt;
 pub mod survival;
 pub mod xp;

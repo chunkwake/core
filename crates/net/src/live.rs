@@ -105,6 +105,8 @@ pub enum Control {
     Teleport([f64; 3], f32, f32),
     /// Очистить инвентарь игрока (`/clear`).
     Clear,
+    /// Внутреннее: урон извне сессии (стрела из раздатчика).
+    Hurt(f32, crate::survival::Cause),
     /// Внутреннее (не от плагинов): содержимое сундука изменил другой игрок.
     ContainerChanged([i32; 3]),
     /// Внутреннее: тик печи — свойства окна и сменились ли предметы.
@@ -250,7 +252,10 @@ impl Control {
             Control::Xp(c) => {
                 live.xp.apply(c);
             }
-            Control::ContainerChanged(_) | Control::Furnace(..) | Control::Shutdown => {}
+            Control::ContainerChanged(_)
+            | Control::Furnace(..)
+            | Control::Shutdown
+            | Control::Hurt(..) => {}
         }
     }
 }
@@ -262,8 +267,8 @@ impl Control {
 pub enum Event {
     /// `EntityDamageEvent`: `<CAUSE> <amount>` → `c` (отмена) или `d <amount>`.
     Damage = 1,
-    /// `PlayerDeathEvent`: `<damage_type>\n<message json>\n<item count>…` →
-    /// `<keepInventory 0|1>\n<message json или пусто>\n<item count>…`.
+    /// `PlayerDeathEvent`: `<damage_type> <опыт>\n<message json>\n<item count>…` →
+    /// `<keepInventory> <keepLevel> <опыт> <newLevel> <newExp> <newTotalExp>\n<message json или пусто>\n<item count>…`.
     Death = 2,
     /// `PlayerDropItemEvent`: `<item> <count>` → `c` или пусто.
     Drop = 3,
@@ -293,6 +298,28 @@ pub enum Event {
     /// `EnchantItemEvent`: `x y z цена кнопка подсказка уровень\nпредмет\nчары уровень…` →
     /// `c`, пусто или `цена\nчары уровень…`.
     Enchant = 14,
+    /// `PlayerPickupExperienceEvent`: `величина x y z` → `c` или пусто.
+    PickupXp = 15,
+    /// `PlayerItemMendEvent`: `слот починка опыт предмет` → `c`, пусто или новая починка.
+    Mend = 16,
+    /// `PlayerExpChangeEvent`: `очки` → пусто или новые очки.
+    ExpChange = 17,
+    /// `BlockRedstoneEvent`: `x y z старый новый` → пусто или новая сила.
+    Redstone = 18,
+    /// `BlockPistonExtendEvent`/`BlockPistonRetractEvent`:
+    /// `x y z грань 1|0 x,y,z;…` → `c` или пусто.
+    Piston = 19,
+    /// `InventoryMoveItemEvent`: `откуда x y z тип куда x y z тип 1|0 предмет` → `c`, пусто или `i предмет`.
+    MoveItem = 20,
+    /// `InventoryPickupItemEvent` (воронка берёт с земли): `x y z предмет` → `c` или пусто.
+    HopperPickup = 21,
+    /// `BlockDispenseEvent`: `x y z vx vy vz предмет` → `c` или пусто.
+    Dispense = 22,
+    /// `PlayerBucketEmptyEvent`/`PlayerBucketFillEvent`:
+    /// `EMPTY|FILL x y z FACE ведро hand` (x y z — блок под взглядом) → `c` или пусто.
+    Bucket = 23,
+    /// `PlayerPickupArrowEvent`: `x y z` воткнутой стрелы → `c` или пусто.
+    PickupArrow = 24,
 }
 
 impl Event {

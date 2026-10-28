@@ -179,6 +179,36 @@ final class ChunkwakeServer {
 
     /** Событие с ответом из Rust (формат — {@link Events}). */
     String event(int kind, UUID id, String arg) {
+        if (kind == Bridge.EVENT_REDSTONE) {
+            // Без игрока: x y z старая новая → новая сила, если плагин её сменил.
+            String[] f = arg.split(" ");
+            int now = Integer.parseInt(f[4]);
+            var e = new org.bukkit.event.block.BlockRedstoneEvent(
+                    world.getBlockAt(Integer.parseInt(f[0]), Integer.parseInt(f[1]), Integer.parseInt(f[2])),
+                    Integer.parseInt(f[3]), now);
+            api.getPluginManager().callEvent(e);
+            return e.getNewCurrent() == now ? "" : Integer.toString(e.getNewCurrent());
+        }
+        if (kind >= Bridge.EVENT_MOVE_ITEM && kind <= Bridge.EVENT_DISPENSE) {
+            return BlockEvents.fire(api.getPluginManager(), world, kind, arg);
+        }
+        if (kind == Bridge.EVENT_PISTON) {
+            String[] f = arg.split(" ");
+            var piston = world.getBlockAt(Integer.parseInt(f[0]), Integer.parseInt(f[1]), Integer.parseInt(f[2]));
+            var face = org.bukkit.block.BlockFace.valueOf(f[3].toUpperCase(java.util.Locale.ROOT));
+            List<org.bukkit.block.Block> moved = new java.util.ArrayList<>();
+            if (f.length > 5) {
+                for (String b : f[5].split(";")) {
+                    String[] c = b.split(",");
+                    moved.add(world.getBlockAt(Integer.parseInt(c[0]), Integer.parseInt(c[1]), Integer.parseInt(c[2])));
+                }
+            }
+            org.bukkit.event.block.BlockPistonEvent e = f[4].equals("1")
+                    ? new org.bukkit.event.block.BlockPistonExtendEvent(piston, moved, face)
+                    : new org.bukkit.event.block.BlockPistonRetractEvent(piston, moved, face);
+            api.getPluginManager().callEvent(e);
+            return e.isCancelled() ? "c" : "";
+        }
         PlayerImpl p = online.get(id);
         if (p == null) {
             return "";
@@ -253,6 +283,23 @@ final class ChunkwakeServer {
     // --- Server ---
 
     public String getName() { return "Chunkwake"; }
+
+    public org.bukkit.block.data.BlockData createBlockData(org.bukkit.Material m) {
+        return BlockDataImpl.parse(Bridge.world("defaultdata " + m.getKey()));
+    }
+
+    public org.bukkit.block.data.BlockData createBlockData(String data) {
+        String name = data.contains("[") ? data.substring(0, data.indexOf('[')) : data;
+        if (!name.contains(":")) {
+            name = "minecraft:" + name;
+        }
+        org.bukkit.block.data.BlockData base = BlockDataImpl.parse(Bridge.world("defaultdata " + name));
+        return data.contains("[") ? base.merge(BlockDataImpl.parse(name + data.substring(data.indexOf('[')))) : base;
+    }
+
+    public org.bukkit.block.data.BlockData createBlockData(org.bukkit.Material m, String data) {
+        return createBlockData(m.getKey() + (data == null ? "" : data));
+    }
     /** Сообщение об отказе в правах — как `messages.no-permission` Paper по умолчанию. */
     public Component permissionMessage() {
         return Component.text("I'm sorry, but you do not have permission to perform this command. "
@@ -362,5 +409,24 @@ final class ChunkwakeServer {
         public UUID getUID() { return new UUID(0, 1); }
         public int getMinHeight() { return -64; }
         public int getMaxHeight() { return 320; }
+
+        /** Предмет на земле без разброса. */
+        public org.bukkit.entity.Item dropItem(org.bukkit.Location l, org.bukkit.inventory.ItemStack s) {
+            return drop(l, s, false);
+        }
+
+        /** Предмет с разбросом, как из сломанного блока. */
+        public org.bukkit.entity.Item dropItemNaturally(org.bukkit.Location l, org.bukkit.inventory.ItemStack s) {
+            return drop(l, s, true);
+        }
+
+        private org.bukkit.entity.Item drop(org.bukkit.Location l, org.bukkit.inventory.ItemStack s, boolean natural) {
+            String line = StackImpl.line(s);
+            if (line == null) {
+                throw new IllegalArgumentException("Cannot drop air");
+            }
+            Bridge.world("dropitem " + l.getX() + " " + l.getY() + " " + l.getZ() + " " + (natural ? 1 : 0) + " " + line);
+            return Stub.of(org.bukkit.entity.Item.class, new BlockEvents.GroundItem(l.clone(), s.clone()));
+        }
     }
 }

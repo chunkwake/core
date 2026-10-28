@@ -73,7 +73,8 @@ impl FrameCodec {
                 out.extend_from_slice(packet);
             }
             Some(_) => {
-                let mut enc = ZlibEncoder::new(Vec::new(), Compression::fast());
+                let mut enc =
+                    ZlibEncoder::new(Vec::with_capacity(packet.len() + 64), Compression::fast());
                 enc.write_all(packet).expect("write to Vec");
                 let compressed = enc.finish().expect("write to Vec");
                 let data_len = packet.len() as i32;

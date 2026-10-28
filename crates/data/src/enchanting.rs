@@ -51,10 +51,19 @@ pub struct AttrEffect {
 #[derive(Clone, Debug)]
 pub enum LevelValue {
     Constant(f32),
-    Linear { base: f32, per: f32 },
-    LevelsSquared { added: f32 },
+    Linear {
+        base: f32,
+        per: f32,
+    },
+    LevelsSquared {
+        added: f32,
+    },
     Fraction(Box<LevelValue>, Box<LevelValue>),
-    Clamped { value: Box<LevelValue>, min: f32, max: f32 },
+    Clamped {
+        value: Box<LevelValue>,
+        min: f32,
+        max: f32,
+    },
 }
 
 impl LevelValue {
@@ -63,20 +72,25 @@ impl LevelValue {
             return Some(LevelValue::Constant(n as f32));
         }
         let f = |k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
-        Some(match v.get("type")?.as_str()?.trim_start_matches("minecraft:") {
-            "linear" => LevelValue::Linear { base: f("base"), per: f("per_level_above_first") },
-            "levels_squared" => LevelValue::LevelsSquared { added: f("added") },
-            "fraction" => LevelValue::Fraction(
-                Box::new(LevelValue::parse(v.get("numerator")?)?),
-                Box::new(LevelValue::parse(v.get("denominator")?)?),
-            ),
-            "clamped" => LevelValue::Clamped {
-                value: Box::new(LevelValue::parse(v.get("value")?)?),
-                min: f("min"),
-                max: f("max"),
+        Some(
+            match v.get("type")?.as_str()?.trim_start_matches("minecraft:") {
+                "linear" => LevelValue::Linear {
+                    base: f("base"),
+                    per: f("per_level_above_first"),
+                },
+                "levels_squared" => LevelValue::LevelsSquared { added: f("added") },
+                "fraction" => LevelValue::Fraction(
+                    Box::new(LevelValue::parse(v.get("numerator")?)?),
+                    Box::new(LevelValue::parse(v.get("denominator")?)?),
+                ),
+                "clamped" => LevelValue::Clamped {
+                    value: Box::new(LevelValue::parse(v.get("value")?)?),
+                    min: f("min"),
+                    max: f("max"),
+                },
+                _ => return None,
             },
-            _ => return None,
-        })
+        )
     }
 
     pub fn calc(&self, level: i32) -> f32 {
@@ -105,7 +119,9 @@ impl EnchantDef {
 
     /// `Enchantment.areCompatible`: разные и не исключают друг друга.
     pub fn compatible(&self, other: &EnchantDef) -> bool {
-        self.id != other.id && !self.exclusive.contains(&other.name) && !other.exclusive.contains(&self.name)
+        self.id != other.id
+            && !self.exclusive.contains(&other.name)
+            && !other.exclusive.contains(&self.name)
     }
 }
 
@@ -125,7 +141,10 @@ pub struct Enchanting {
 /// Чары в сетевом порядке `names`.
 pub fn load(root: &Path, names: &[String]) -> Result<Enchanting, DataError> {
     let base = root.join("data/minecraft");
-    let mut tags = Tags { root, memo: HashMap::new() };
+    let mut tags = Tags {
+        root,
+        memo: HashMap::new(),
+    };
     let table = tags.values("enchantment", "#minecraft:in_enchanting_table");
     let mut out = Enchanting::default();
     for (id, name) in names.iter().enumerate() {
@@ -135,13 +154,20 @@ pub fn load(root: &Path, names: &[String]) -> Result<Enchanting, DataError> {
             continue;
         };
         let n = |k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(1) as i32;
-        let cost = |k: &str, f: &str| v.get(k).and_then(|c| c.get(f)).and_then(|x| x.as_i64()).unwrap_or(0) as i32;
+        let cost = |k: &str, f: &str| {
+            v.get(k)
+                .and_then(|c| c.get(f))
+                .and_then(|x| x.as_i64())
+                .unwrap_or(0) as i32
+        };
         let set = |tags: &mut Tags, kind: &str, k: &str| -> HashSet<String> {
             match v.get(k) {
                 Some(serde_json::Value::String(s)) => tags.values(kind, s),
-                Some(serde_json::Value::Array(a)) => {
-                    a.iter().filter_map(|e| e.as_str()).flat_map(|s| tags.values(kind, s)).collect()
-                }
+                Some(serde_json::Value::Array(a)) => a
+                    .iter()
+                    .filter_map(|e| e.as_str())
+                    .flat_map(|s| tags.values(kind, s))
+                    .collect(),
                 _ => HashSet::new(),
             }
         };
@@ -188,7 +214,12 @@ pub fn load(root: &Path, names: &[String]) -> Result<Enchanting, DataError> {
                     Some((tags_req, value))
                 })
                 .collect(),
-            slots: v["slots"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(str::to_owned)).collect(),
+            slots: v["slots"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|s| s.as_str().map(str::to_owned))
+                .collect(),
             attributes: v["effects"]["minecraft:attributes"]
                 .as_array()
                 .into_iter()
@@ -224,14 +255,24 @@ pub fn load(root: &Path, names: &[String]) -> Result<Enchanting, DataError> {
             .split_once("\"minecraft:enchantable\"")
             .and_then(|(_, rest)| rest.split_once("\"value\":"))
             .and_then(|(_, rest)| {
-                rest.trim_start().chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok()
+                rest.trim_start()
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse()
+                    .ok()
             });
         if let Some(v) = value {
             out.enchantable.insert(item.clone(), v);
         }
     }
     let mut order = Vec::new();
-    tags.ordered("enchantment", "#minecraft:in_enchanting_table", &mut order, 0);
+    tags.ordered(
+        "enchantment",
+        "#minecraft:in_enchanting_table",
+        &mut order,
+        0,
+    );
     for name in order {
         if let Some(i) = out.defs.iter().position(|d| d.name == name)
             && !out.table.contains(&i)
@@ -264,7 +305,13 @@ impl Tags<'_> {
 
     /// Как `add`, но в порядке файлов тегов.
     fn ordered(&self, kind: &str, entry: &str, out: &mut Vec<String>, depth: u32) {
-        let ns = |s: &str| if s.contains(':') { s.to_owned() } else { format!("minecraft:{s}") };
+        let ns = |s: &str| {
+            if s.contains(':') {
+                s.to_owned()
+            } else {
+                format!("minecraft:{s}")
+            }
+        };
         let Some(tag) = entry.strip_prefix('#') else {
             out.push(ns(entry));
             return;
@@ -274,7 +321,9 @@ impl Tags<'_> {
         }
         let tag = ns(tag);
         let (space, path) = tag.split_once(':').unwrap_or(("minecraft", &tag));
-        let file = self.root.join(format!("data/{space}/tags/{kind}/{path}.json"));
+        let file = self
+            .root
+            .join(format!("data/{space}/tags/{kind}/{path}.json"));
         let Ok(json) = crate::world::read_json(&file) else {
             return;
         };
@@ -286,7 +335,13 @@ impl Tags<'_> {
     }
 
     fn add(&self, kind: &str, entry: &str, out: &mut HashSet<String>, depth: u32) {
-        let ns = |s: &str| if s.contains(':') { s.to_owned() } else { format!("minecraft:{s}") };
+        let ns = |s: &str| {
+            if s.contains(':') {
+                s.to_owned()
+            } else {
+                format!("minecraft:{s}")
+            }
+        };
         let Some(tag) = entry.strip_prefix('#') else {
             out.insert(ns(entry));
             return;
@@ -296,7 +351,9 @@ impl Tags<'_> {
         }
         let tag = ns(tag);
         let (space, path) = tag.split_once(':').unwrap_or(("minecraft", &tag));
-        let file = self.root.join(format!("data/{space}/tags/{kind}/{path}.json"));
+        let file = self
+            .root
+            .join(format!("data/{space}/tags/{kind}/{path}.json"));
         let Ok(json) = crate::world::read_json(&file) else {
             return;
         };

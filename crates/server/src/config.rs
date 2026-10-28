@@ -75,6 +75,8 @@ pub struct Properties {
     /// 0 survival, 1 creative, 2 adventure, 3 spectator.
     pub game_mode: u8,
     pub difficulty: chunkwake_net::survival::Difficulty,
+    /// Радиус `spawn-protection`. 0 — защита выключена.
+    pub spawn_protection: u32,
     pub log_level: tracing_subscriber::filter::LevelFilter,
 }
 
@@ -160,7 +162,7 @@ impl Properties {
                 .parse::<bool>()
                 .map_err(|_| format!("{key}: use true or false"))?;
         }
-        value("spawn-protection")
+        let spawn_protection = value("spawn-protection")
             .parse::<u32>()
             .map_err(|_| "spawn-protection: enter a non-negative integer".to_owned())?;
         Ok(Self {
@@ -189,6 +191,7 @@ impl Properties {
                 }
             },
             log_level,
+            spawn_protection,
         })
     }
 

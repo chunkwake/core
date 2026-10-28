@@ -43,12 +43,22 @@ final class BlockImpl {
 
     public void setType(Material type) { setType(type, true); }
 
-    /** Состояние по умолчанию для типа (физику не считаем). */
+    /** Состояние по умолчанию для типа; с физикой соседи (редстоун) обновятся в тике. */
     public void setType(Material type, boolean physics) {
         if (!type.isBlock()) {
             throw new IllegalArgumentException("Material " + type + " is not a block");
         }
-        Bridge.world("set " + x + " " + y + " " + z + " " + type.getKey());
+        Bridge.world("set " + x + " " + y + " " + z + " " + type.getKey() + (physics ? " 1" : " 0"));
+    }
+
+    public org.bukkit.block.data.BlockData getBlockData() {
+        return BlockDataImpl.parse(Bridge.world("data " + x + " " + y + " " + z));
+    }
+
+    public void setBlockData(org.bukkit.block.data.BlockData data) { setBlockData(data, true); }
+
+    public void setBlockData(org.bukkit.block.data.BlockData data, boolean physics) {
+        Bridge.world("set " + x + " " + y + " " + z + " " + data.getAsString() + (physics ? " 1" : " 0"));
     }
 
     @Override

@@ -93,12 +93,13 @@ pub fn build_play_plan(
     let player_type =
         chunkwake_data::registries::builtin_id(data_dir, "entity_type", "minecraft:player")
             .map_err(s)?;
-    // Предмет ставит блок с тем же именем (stone → stone); остальные предметы — ничего.
+    // Предмет ставит блок с тем же именем (stone → stone), кроме пыли, семян и ягод.
     let items = chunkwake_data::registries::builtin_entries(data_dir, "item").map_err(s)?;
     let mut item_blocks = vec![None; items.values().max().map_or(0, |&m| m as usize + 1)];
     for (name, id) in &items {
         if name != "minecraft:air" {
-            item_blocks[*id as usize] = blocks.default_state(name).ok().map(|s| s as u32);
+            let block = block_name_for_item(name);
+            item_blocks[*id as usize] = blocks.default_state(block).ok().map(|s| s as u32);
         }
     }
     let world = WorldSpec {
@@ -178,6 +179,7 @@ fn survival_data(
         c::LORE_COMPONENT.store(component("minecraft:lore")?, order);
         c::STORED_ENCHANTMENTS_COMPONENT.store(component("minecraft:stored_enchantments")?, order);
         c::CUSTOM_DATA_COMPONENT.store(component("minecraft:custom_data")?, order);
+        c::CHARGED_PROJECTILES_COMPONENT.store(component("minecraft:charged_projectiles")?, order);
         let names: Vec<String> = registries
             .synchronized
             .iter()
@@ -260,6 +262,8 @@ fn survival_data(
         recipes,
         menu_chest: menu("minecraft:generic_9x3")?,
         menu_double_chest: menu("minecraft:generic_9x6")?,
+        menu_hopper: menu("minecraft:hopper")?,
+        menu_3x3: menu("minecraft:generic_3x3")?,
         chests: chests.clone(),
         chest_states: chests.iter().map(|(&id, &c)| (c, id)).collect(),
         menu_crafting: menu("minecraft:crafting")?,
@@ -272,7 +276,8 @@ fn survival_data(
         ],
         furnace_lit,
         effects: chunkwake_data::registries::builtin_entries(data_dir, "mob_effect").map_err(s)?,
-        attributes: chunkwake_data::registries::builtin_entries(data_dir, "attribute").map_err(s)?,
+        attributes: chunkwake_data::registries::builtin_entries(data_dir, "attribute")
+            .map_err(s)?,
         sounds: chunkwake_data::registries::builtin_entries(data_dir, "sound_event").map_err(s)?,
         attribute_speed: chunkwake_data::registries::builtin_id(
             data_dir,
@@ -346,6 +351,33 @@ fn survival_data(
         damage_magic: registries
             .network_id("damage_type", "minecraft:magic")
             .map_err(s)?,
+        damage_arrow: registries
+            .network_id("damage_type", "minecraft:arrow")
+            .map_err(s)?,
+        snowball_entity_type: chunkwake_data::registries::builtin_id(
+            data_dir,
+            "entity_type",
+            "minecraft:snowball",
+        )
+        .map_err(s)?,
+        egg_entity_type: chunkwake_data::registries::builtin_id(
+            data_dir,
+            "entity_type",
+            "minecraft:egg",
+        )
+        .map_err(s)?,
+        arrow_entity_type: chunkwake_data::registries::builtin_id(
+            data_dir,
+            "entity_type",
+            "minecraft:arrow",
+        )
+        .map_err(s)?,
+        firework_entity_type: chunkwake_data::registries::builtin_id(
+            data_dir,
+            "entity_type",
+            "minecraft:firework_rocket",
+        )
+        .map_err(s)?,
         damage_wither: registries
             .network_id("damage_type", "minecraft:wither")
             .map_err(s)?,
@@ -376,6 +408,12 @@ fn survival_data(
             data_dir,
             "entity_type",
             "minecraft:item",
+        )
+        .map_err(s)?,
+        orb_entity_type: chunkwake_data::registries::builtin_id(
+            data_dir,
+            "entity_type",
+            "minecraft:experience_orb",
         )
         .map_err(s)?,
     })
@@ -425,4 +463,55 @@ fn enchantment_lines(data_dir: &Path, names: &[String]) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// Предмет, который ставит блок с другим именем (`ItemNameBlockItem`).
+fn block_name_for_item(item: &str) -> &str {
+    match item {
+        "minecraft:redstone" => "minecraft:redstone_wire",
+        "minecraft:string" => "minecraft:tripwire",
+        "minecraft:wheat_seeds" => "minecraft:wheat",
+        "minecraft:carrot" => "minecraft:carrots",
+        "minecraft:potato" => "minecraft:potatoes",
+        "minecraft:beetroot_seeds" => "minecraft:beetroots",
+        "minecraft:melon_seeds" => "minecraft:melon_stem",
+        "minecraft:pumpkin_seeds" => "minecraft:pumpkin_stem",
+        "minecraft:torchflower_seeds" => "minecraft:torchflower_crop",
+        "minecraft:pitcher_pod" => "minecraft:pitcher_crop",
+        "minecraft:cocoa_beans" => "minecraft:cocoa",
+        "minecraft:sweet_berries" => "minecraft:sweet_berry_bush",
+        "minecraft:glow_berries" => "minecraft:cave_vines",
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::block_name_for_item;
+
+    #[test]
+    fn redstone_item_places_wire() {
+        // `default_state` вызывается уже с именем блока, поэтому id пыли хранит состояние провода.
+        let cases = [
+            ("minecraft:redstone", "minecraft:redstone_wire"),
+            ("minecraft:string", "minecraft:tripwire"),
+            ("minecraft:wheat_seeds", "minecraft:wheat"),
+            ("minecraft:carrot", "minecraft:carrots"),
+            ("minecraft:potato", "minecraft:potatoes"),
+            ("minecraft:beetroot_seeds", "minecraft:beetroots"),
+            ("minecraft:melon_seeds", "minecraft:melon_stem"),
+            ("minecraft:pumpkin_seeds", "minecraft:pumpkin_stem"),
+            ("minecraft:torchflower_seeds", "minecraft:torchflower_crop"),
+            ("minecraft:pitcher_pod", "minecraft:pitcher_crop"),
+            ("minecraft:cocoa_beans", "minecraft:cocoa"),
+            ("minecraft:sweet_berries", "minecraft:sweet_berry_bush"),
+            ("minecraft:glow_berries", "minecraft:cave_vines"),
+            ("minecraft:stone", "minecraft:stone"),
+            ("minecraft:repeater", "minecraft:repeater"),
+            ("minecraft:stick", "minecraft:stick"),
+        ];
+        for (item, block) in cases {
+            assert_eq!(block_name_for_item(item), block);
+        }
+    }
 }

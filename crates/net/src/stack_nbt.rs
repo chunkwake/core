@@ -9,6 +9,15 @@ use serde_json::Value;
 
 /// `{id, count, components}`; `None` — у предмета нет имени.
 pub fn to_nbt(s: Stack, name: &str) -> Option<Compound> {
+    named_nbt(s, name, &|_| None)
+}
+
+/// Как [`to_nbt`], и вложенные снаряды арбалета по именам предметов.
+pub fn named_nbt(
+    s: Stack,
+    name: &str,
+    item_name: &dyn Fn(i32) -> Option<String>,
+) -> Option<Compound> {
     if name.is_empty() {
         return None;
     }
@@ -44,6 +53,17 @@ pub fn to_nbt(s: Stack, name: &str) -> Option<Compound> {
         let lines = e.lore.iter().map(|l| json_to_tag(&parse(l))).collect();
         comps.insert("minecraft:lore".into(), Tag::List(lines));
     }
+    if !e.charged.is_empty() {
+        let list = e
+            .charged
+            .iter()
+            .filter_map(|st| {
+                let name = item_name(st.item)?;
+                named_nbt(*st, &name, item_name).map(Tag::Compound)
+            })
+            .collect();
+        comps.insert("minecraft:charged_projectiles".into(), Tag::List(list));
+    }
     if !comps.is_empty() {
         c.insert("components".into(), Tag::Compound(comps));
     }
@@ -65,6 +85,10 @@ pub fn to_nbt(s: Stack, name: &str) -> Option<Compound> {
 
 /// Обратно; неизвестные компоненты пропускаются.
 pub fn from_nbt(c: &Compound, item_id: impl Fn(&str) -> Option<i32>) -> Option<Stack> {
+    from_nbt_ref(c, &item_id)
+}
+
+fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>) -> Option<Stack> {
     let item = item_id(c.get("id")?.as_str()?)?;
     let count = c.get("count").and_then(Tag::as_i64).unwrap_or(1) as i32;
     if count <= 0 {
@@ -104,6 +128,15 @@ pub fn from_nbt(c: &Compound, item_id: impl Fn(&str) -> Option<i32>) -> Option<S
             .and_then(Tag::as_compound)
             .filter(|c| !c.is_empty())
             .map(compound_to_net);
+        if let Some(list) = m
+            .get("minecraft:charged_projectiles")
+            .and_then(Tag::as_list)
+        {
+            e.charged = list
+                .iter()
+                .filter_map(|t| from_nbt_ref(t.as_compound()?, item_id))
+                .collect();
+        }
     }
     e.raw = c
         .get("chunkwake:component_patch")
@@ -155,6 +188,22 @@ pub fn to_line(s: Stack, name: &str) -> String {
         j.insert("custom".into(), typed_compound(&custom));
     }
     // Непонятые сервером компоненты (зелья и т. п.) — шестнадцатеричной строкой, чтобы вернулись целыми.
+    if !e.charged.is_empty() {
+        j.insert(
+            "charged".into(),
+            e.charged
+                .iter()
+                .map(|st| {
+                    serde_json::json!({
+                        "item": st.item,
+                        "count": st.count,
+                        "damage": st.damage,
+                        "extra": st.extra,
+                    })
+                })
+                .collect(),
+        );
+    }
     if let Some(raw) = &e.raw {
         j.insert(
             "raw".into(),
@@ -208,6 +257,20 @@ pub fn from_line(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<St
             .and_then(untyped_compound)
             .filter(|c| !c.is_empty())
             .map(|c| compound_to_net(&c));
+        if let Some(Value::Array(list)) = j.get("charged") {
+            e.charged = list
+                .iter()
+                .filter_map(|v| {
+                    Some(Stack {
+                        item: v.get("item")?.as_i64()? as i32,
+                        count: v.get("count").and_then(Value::as_i64).unwrap_or(1) as i32,
+                        damage: v.get("damage").and_then(Value::as_i64).unwrap_or(0).max(0) as i32,
+                        extra: v.get("extra").and_then(Value::as_i64).unwrap_or(0) as u32,
+                    })
+                })
+                .filter(|st| st.count > 0)
+                .collect();
+        }
         e.raw = j.get("raw").and_then(Value::as_str).and_then(|h| {
             (0..h.len())
                 .step_by(2)
@@ -270,9 +333,24 @@ fn untyped(v: &Value) -> Option<Tag> {
         "f" => Tag::Float(v.as_f64()? as f32),
         "d" => Tag::Double(v.as_f64()?),
         "str" => Tag::String(v.as_str()?.to_owned()),
-        "ba" => Tag::ByteArray(arr().iter().filter_map(|x| Some(x.as_i64()? as i8)).collect()),
-        "ia" => Tag::IntArray(arr().iter().filter_map(|x| Some(x.as_i64()? as i32)).collect()),
-        "la" => Tag::LongArray(arr().iter().filter_map(|x| x.as_str()?.parse().ok()).collect()),
+        "ba" => Tag::ByteArray(
+            arr()
+                .iter()
+                .filter_map(|x| Some(x.as_i64()? as i8))
+                .collect(),
+        ),
+        "ia" => Tag::IntArray(
+            arr()
+                .iter()
+                .filter_map(|x| Some(x.as_i64()? as i32))
+                .collect(),
+        ),
+        "la" => Tag::LongArray(
+            arr()
+                .iter()
+                .filter_map(|x| x.as_str()?.parse().ok())
+                .collect(),
+        ),
         "list" => Tag::List(arr().iter().filter_map(untyped).collect()),
         "c" => Tag::Compound(untyped_compound(v)?),
         _ => return None,
@@ -357,6 +435,7 @@ mod tests {
             custom_name: Some(r#"{"text":"Кирка","italic":false}"#.into()),
             lore: vec![r#""строка""#.into()],
             raw: None,
+            charged: Vec::new(),
             custom_data: Some(compound_to_net(&Compound::from([(
                 "PublicBukkitValues".into(),
                 Tag::Compound(Compound::from([
@@ -381,7 +460,10 @@ mod tests {
         let back = from_nbt(&c, |n| (n == "minecraft:diamond_pickaxe").then_some(7)).unwrap();
         assert_eq!(back, s);
         let line = to_line(s, "minecraft:diamond_pickaxe");
-        assert_eq!(from_line(&line, |n| (n == "minecraft:diamond_pickaxe").then_some(7)), Some(s));
+        assert_eq!(
+            from_line(&line, |n| (n == "minecraft:diamond_pickaxe").then_some(7)),
+            Some(s)
+        );
 
         let potion = Stack {
             item: 3,

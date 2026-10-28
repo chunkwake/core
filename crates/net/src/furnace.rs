@@ -18,6 +18,8 @@ pub struct Furnace {
     pub cook_total: i32,
     /// Множитель скорости от текущего топлива.
     pub speed: f32,
+    /// Накопленный опыт рецептов (`recipesUsed`): отдаётся, когда забирают результат.
+    pub xp: f32,
 }
 
 /// Рецепт для печи: результат, количество, время готовки.
@@ -26,6 +28,8 @@ pub struct Cook {
     pub result: i32,
     pub count: i32,
     pub time: i32,
+    /// Опыт рецепта за единицу.
+    pub experience: f32,
 }
 
 /// Внешние данные: рецепты, топливо, размеры стопок, остатки.
@@ -49,6 +53,7 @@ impl Furnace {
             cook: 0,
             cook_total: 0,
             speed: 1.0,
+            xp: 0.0,
         }
     }
 
@@ -173,7 +178,16 @@ impl Furnace {
         }
     }
 
+    /// `awardUsedRecipesAndPopExperience`: целая часть и дробная — с вероятностью.
+    pub fn take_xp(&mut self, roll: f32) -> i32 {
+        let whole = self.xp.floor();
+        let frac = self.xp - whole;
+        self.xp = 0.0;
+        whole as i32 + i32::from(frac > 0.0 && roll < frac)
+    }
+
     fn burn(&mut self, c: Cook, env: &Env) {
+        self.xp += c.experience;
         match self.slots[RESULT].as_mut() {
             Some(r) => r.count += c.count,
             None => {
@@ -236,6 +250,7 @@ mod tests {
                 result: INGOT,
                 count: 1,
                 time: 200,
+                experience: 0.7,
             })
         };
         let fuel = move |i| match i {
@@ -284,6 +299,13 @@ mod tests {
         };
         f.set_slots([st(ORE, 3), st(COAL, 1), None], &env);
         assert_eq!(f.cook_total, 200);
+        let mut g = Furnace::new(0);
+        g.xp = 2.1;
+        // 2 целых и 0.1 с вероятностью: бросок 0.05 — да, 0.5 — нет.
+        assert_eq!(g.take_xp(0.05), 3);
+        g.xp = 2.1;
+        assert_eq!(g.take_xp(0.5), 2);
+        assert_eq!(g.xp, 0.0);
         run(&mut f, false, 199);
         assert_eq!((f.slots[RESULT], f.slots[FUEL]), (None, None));
         run(&mut f, false, 1);

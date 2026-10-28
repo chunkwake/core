@@ -540,7 +540,15 @@ pub fn block_update(id: i32, pos: [i32; 3], state: i32) -> Vec<u8> {
 /// `block_event`: крышка сундука (`action` 1, `param` — сколько игроков смотрят).
 /// `block` — ID в реестре `block`, не состояние.
 /// `ClientboundSoundPacket`: звук из реестра в точке (координаты × 8), с зерном.
-pub fn sound(id: i32, sound: i32, source: i32, pos: [f64; 3], volume: f32, pitch: f32, seed: i64) -> Vec<u8> {
+pub fn sound(
+    id: i32,
+    sound: i32,
+    source: i32,
+    pos: [f64; 3],
+    volume: f32,
+    pitch: f32,
+    seed: i64,
+) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id)
         .var_int(sound + 1)

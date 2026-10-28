@@ -4,7 +4,7 @@ use chunkwake_bots::{Client, Event, Ids, status};
 use chunkwake_data::packets::PacketTable;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -13,18 +13,51 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::{sleep, timeout};
 
-mod tui;
 mod progress;
+mod tui;
 
 const VERSION: &str = "26.3";
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
 const STEP_TIMEOUT: Duration = Duration::from_secs(20);
+const REDSTONE_SIDE: i32 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Smoke,
     Compare,
     Bench,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum BenchProfile {
+    JoinBurst,
+    Movement,
+    Exploration,
+    Redstone,
+}
+
+impl BenchProfile {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "join-burst" => Ok(Self::JoinBurst),
+            "movement" => Ok(Self::Movement),
+            "exploration" => Ok(Self::Exploration),
+            "redstone" => Ok(Self::Redstone),
+            _ => Err(format!(
+                "unknown profile {value}; use join-burst, movement, exploration or redstone"
+            )),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::JoinBurst => "Одновременный вход",
+            Self::Movement => "Движение",
+            Self::Exploration => "Исследование мира",
+            Self::Redstone => "Редстоун",
+        }
+    }
 }
 
 struct Args {
@@ -40,6 +73,7 @@ struct Args {
     warmup: Duration,
     duration: Duration,
     repetitions: usize,
+    profile: BenchProfile,
 }
 
 impl Args {
@@ -63,6 +97,7 @@ impl Args {
         let mut generated_cache = None;
         let (mut accept_eula, mut keep_worlds) = (false, false);
         let (mut bots, mut warmup, mut duration, mut repetitions) = (20, 10, 30, 3);
+        let mut profile = BenchProfile::Movement;
         while let Some(flag) = it.next() {
             match flag.as_str() {
                 "--chunkwake" => {
@@ -110,6 +145,9 @@ impl Args {
                         .parse()
                         .map_err(|_| "--repetitions requires a positive number")?
                 }
+                "--profile" => {
+                    profile = BenchProfile::parse(&it.next().ok_or("--profile requires a value")?)?
+                }
                 _ => return Err(format!("unknown option {flag}\n{}", usage())),
             }
         }
@@ -134,12 +172,13 @@ impl Args {
             warmup: Duration::from_secs(warmup),
             duration: Duration::from_secs(duration),
             repetitions,
+            profile,
         })
     }
 }
 
 fn usage() -> &'static str {
-    "chunkwake-lab [smoke|compare|bench] --chunkwake PATH [--jar PATH] [--java PATH] [--work-dir PATH]\n  [--generated-cache PATH] [--accept-vanilla-eula] [--keep-worlds]\n  [--bots N] [--warmup SEC] [--duration SEC] [--repetitions N]\n  Run with no arguments to open the TUI. Missing --jar downloads vanilla into the lab cache."
+    "chunkwake-lab [smoke|compare|bench] --chunkwake PATH [--jar PATH] [--java PATH] [--work-dir PATH]\n  [--generated-cache PATH] [--accept-vanilla-eula] [--keep-worlds]\n  [--profile join-burst|movement|exploration|redstone] [--bots N] [--warmup SEC] [--duration SEC] [--repetitions N]\n  Run with no arguments to open the TUI. Missing --jar downloads vanilla into the lab cache."
 }
 
 #[derive(Serialize, Clone)]
@@ -162,6 +201,7 @@ struct Run {
 #[derive(Serialize, Clone)]
 struct Benchmark {
     joined: usize,
+    completed: usize,
     failed: usize,
     errors: Vec<String>,
     join_p50_ms: f64,
@@ -172,6 +212,29 @@ struct Benchmark {
     bytes_out: u64,
     cpu_seconds: Option<f64>,
     rss_peak_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    redstone: Option<RedstoneResult>,
+    samples: Vec<BenchSample>,
+}
+
+#[derive(Serialize, Clone)]
+struct RedstoneResult {
+    toggles: u64,
+    observed_transitions: u64,
+    lamp_count: usize,
+    confirmed_changes: u64,
+    updates: u64,
+    response_p50_ms: f64,
+    response_p95_ms: f64,
+}
+
+#[derive(Serialize, Clone)]
+struct BenchSample {
+    elapsed_secs: u64,
+    connected: usize,
+    failed: usize,
+    cpu_seconds: Option<f64>,
+    rss_bytes: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -195,6 +258,7 @@ struct Report {
     warmup_secs: u64,
     duration_secs: u64,
     repetitions: usize,
+    profile: BenchProfile,
     runs: Vec<Run>,
     differences: Vec<Difference>,
     errors: Vec<String>,
@@ -218,7 +282,7 @@ async fn execute() -> Result<(), String> {
         return Err(format!(".env: {error}"));
     }
     let mut args = Args::parse()?;
-    let progress = progress::Progress::new(std::env::args_os().len() == 1)?;
+    let progress = progress::Progress::new(std::env::args_os().len() == 1, args.mode)?;
     progress.update(None, "Preparing test workspace");
     if args.java.components().count() > 1 {
         args.java = ordinary_path(
@@ -247,7 +311,7 @@ async fn execute() -> Result<(), String> {
     };
     if !requested_jar.exists() {
         progress.update(None, "Downloading vanilla server.jar");
-        download_jar(&requested_jar, VERSION).await?;
+        download_jar(&requested_jar, VERSION, &progress).await?;
     } else {
         progress.update(None, "Using cached vanilla server.jar");
     }
@@ -300,6 +364,7 @@ async fn execute() -> Result<(), String> {
         warmup_secs: args.warmup.as_secs(),
         duration_secs: args.duration.as_secs(),
         repetitions: count,
+        profile: args.profile,
         runs: Vec::new(),
         differences: Vec::new(),
         errors: Vec::new(),
@@ -329,7 +394,9 @@ async fn execute() -> Result<(), String> {
             )?;
             let mut child = ManagedChild::start(server, &dir, &chunkwake, &jar, &args.java)?;
             progress.update(Some(server), "Starting server and waiting for readiness");
-            let startup = child.ready(port, protocol, &generated_cache).await;
+            let startup = child
+                .ready(port, protocol, &generated_cache, &progress)
+                .await;
             let startup_failed = startup.is_err();
             let log_path = root.join(format!("{iteration}-{server}.log"));
             let mut run = Run {
@@ -351,13 +418,45 @@ async fn execute() -> Result<(), String> {
                         Ok(ids) => {
                             let addr = format!("127.0.0.1:{port}");
                             if args.mode == Mode::Bench {
-                                match benchmark(&addr, ids, protocol, &args, &child, &progress, server).await {
-                                    Ok(b) => run.benchmark = Some(b),
+                                match benchmark(
+                                    &addr, ids, protocol, &args, &mut child, &progress, server,
+                                )
+                                .await
+                                {
+                                    Ok(b) => {
+                                        progress.update(
+                                            Some(server),
+                                            &format!(
+                                                "{} / {} bots · {} failed · join p95 {:.1} ms",
+                                                b.joined, args.bots, b.failed, b.join_p95_ms
+                                            ),
+                                        );
+                                        run.benchmark = Some(b);
+                                    }
                                     Err(e) => report.errors.push(format!("{server}: {e}")),
                                 }
                             } else {
-                                progress.update(Some(server), "Checking status, login, movement and keep-alive");
-                                run.cases = scenario(&addr, ids, protocol).await;
+                                progress.update(
+                                    Some(server),
+                                    "Checking status, login, movement and keep-alive",
+                                );
+                                let scenario = scenario(&addr, ids, protocol);
+                                tokio::pin!(scenario);
+                                let started = Instant::now();
+                                run.cases = loop {
+                                    tokio::select! {
+                                        cases = &mut scenario => break cases,
+                                        _ = sleep(Duration::from_secs(3)) => progress.update(Some(server), &format!("Client scenario running · {} s", started.elapsed().as_secs())),
+                                    }
+                                };
+                                let passed = run.cases.iter().filter(|c| c.error.is_none()).count();
+                                progress.update(
+                                    Some(server),
+                                    &format!(
+                                        "{passed} / {} scenario checks passed",
+                                        run.cases.len()
+                                    ),
+                                );
                             }
                         }
                         Err(e) => report.errors.push(format!("{server}: protocol table: {e}")),
@@ -384,7 +483,10 @@ async fn execute() -> Result<(), String> {
                 )?;
                 let mut restarted =
                     ManagedChild::start(server, &dir, &chunkwake, &jar, &args.java)?;
-                if let Err(e) = restarted.ready(port, protocol, &generated_cache).await {
+                if let Err(e) = restarted
+                    .ready(port, protocol, &generated_cache, &progress)
+                    .await
+                {
                     run.cases.push(case_error("restart", e));
                 } else {
                     let table = generated_cache.join(VERSION).join("reports/packets.json");
@@ -410,7 +512,14 @@ async fn execute() -> Result<(), String> {
                     root.join(format!("{iteration}-{server}-restart.log")),
                 );
             }
-            progress.update(Some(server), if startup_failed { "Startup failed" } else { "Run complete" });
+            progress.update(
+                Some(server),
+                if startup_failed {
+                    "Startup failed"
+                } else {
+                    "Run complete; results saved"
+                },
+            );
             report.runs.push(run);
             if startup_failed {
                 break 'runs;
@@ -433,15 +542,7 @@ async fn execute() -> Result<(), String> {
     }
     drop(progress);
     println!("Report: {}", root.join("report.md").display());
-    let failed = !report.errors.is_empty()
-        || report.runs.iter().any(|r| {
-            r.cases.iter().any(|c| c.error.is_some())
-                || r.benchmark
-                    .as_ref()
-                    .is_some_and(|b| b.failed > 0 || b.joined == 0)
-        })
-        || report.differences.iter().any(|d| !d.expected);
-    if failed {
+    if report_failed(&report) {
         std::process::exit(1);
     }
     Ok(())
@@ -547,7 +648,12 @@ fn check_java(java: &Path, jar: &Path, game_version: &str) -> Result<(), String>
     Ok(())
 }
 
-async fn download_jar(path: &Path, version: &str) -> Result<(), String> {
+async fn download_jar(
+    path: &Path,
+    version: &str,
+    progress: &progress::Progress,
+) -> Result<(), String> {
+    progress.update(None, "Fetching Minecraft version manifest");
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(600))
         .build()
@@ -568,6 +674,7 @@ async fn download_jar(path: &Path, version: &str) -> Result<(), String> {
         .and_then(|v| v["url"].as_str())
         .ok_or_else(|| format!("Minecraft {version} is not in the official version manifest"))?;
     official_url(url)?;
+    progress.update(None, "Fetching server.jar metadata");
     let details: Value = client
         .get(url)
         .send()
@@ -589,9 +696,12 @@ async fn download_jar(path: &Path, version: &str) -> Result<(), String> {
         .as_u64()
         .ok_or("official manifest has no server jar size")?;
     official_url(url)?;
-    println!(
-        "Downloading Minecraft {version} server.jar from Mojang ({:.1} MiB)...",
-        size as f64 / 1_048_576.0
+    progress.update(
+        None,
+        &format!(
+            "Downloading Minecraft {version} server.jar from Mojang ({:.1} MiB)",
+            size as f64 / 1_048_576.0
+        ),
     );
     let mut response = client
         .get(url)
@@ -607,6 +717,7 @@ async fn download_jar(path: &Path, version: &str) -> Result<(), String> {
         let mut file = File::create(&temp).map_err(|e| e.to_string())?;
         let mut digest = ring::digest::Context::new(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY);
         let mut received = 0u64;
+        let mut last_percent = 0u64;
         while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
             file.write_all(&chunk).map_err(|e| e.to_string())?;
             digest.update(&chunk);
@@ -614,7 +725,20 @@ async fn download_jar(path: &Path, version: &str) -> Result<(), String> {
             if received > size {
                 return Err("server jar exceeds manifest size".to_owned());
             }
+            let percent = received.saturating_mul(100) / size.max(1);
+            if percent >= last_percent + 10 {
+                progress.update(
+                    None,
+                    &format!(
+                        "Downloading server.jar · {percent}% ({:.1} / {:.1} MiB)",
+                        received as f64 / 1_048_576.0,
+                        size as f64 / 1_048_576.0
+                    ),
+                );
+                last_percent = percent;
+            }
         }
+        progress.update(None, "Verifying server.jar checksum");
         file.sync_all().map_err(|e| e.to_string())?;
         if received != size {
             return Err(format!("server jar truncated: {received} of {size} bytes"));
@@ -702,6 +826,19 @@ struct ManagedChild {
 }
 
 impl ManagedChild {
+    fn send_console(&mut self, line: &str) -> Result<(), String> {
+        let stdin = self
+            .child
+            .stdin
+            .as_mut()
+            .ok_or("server console is closed")?;
+        stdin
+            .write_all(line.as_bytes())
+            .map_err(|e| e.to_string())?;
+        stdin.write_all(b"\n").map_err(|e| e.to_string())?;
+        stdin.flush().map_err(|e| e.to_string())
+    }
+
     fn start(
         server: &str,
         dir: &Path,
@@ -761,10 +898,20 @@ impl ManagedChild {
         port: u16,
         protocol: i32,
         generated_cache: &Path,
+        progress: &progress::Progress,
     ) -> Result<Duration, String> {
         let started = Instant::now();
+        let mut last_update = 0;
         let addr = format!("127.0.0.1:{port}");
         while started.elapsed() < READY_TIMEOUT {
+            let seconds = started.elapsed().as_secs();
+            if seconds >= last_update + 3 {
+                progress.update(
+                    Some(&self.server),
+                    &format!("Waiting for readiness · {seconds} s"),
+                );
+                last_update = seconds;
+            }
             if let Some(exit) = self.child.try_wait().map_err(|e| e.to_string())? {
                 let detail = log_cause(&self.dir.join("server.log"))
                     .map(|cause| format!(": {cause}"))
@@ -880,7 +1027,10 @@ async fn scenario(addr: &str, ids: Ids, protocol: i32) -> Vec<Case> {
                 "status_protocol",
                 json!(response["version"]["protocol"]),
             ));
-            cases.push(case("status_motd", json!(response["description"])));
+            cases.push(case(
+                "status_motd",
+                json!(motd_text(&response["description"])),
+            ));
             cases.push(case(
                 "status_max_players",
                 json!(response["players"]["max"]),
@@ -970,6 +1120,26 @@ async fn persistence(addr: &str, ids: Ids, protocol: i32, target: Option<[f64; 3
     }
 }
 
+fn motd_text(description: &Value) -> String {
+    match description {
+        Value::String(text) => text.clone(),
+        Value::Object(map) => {
+            let mut text = map
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            if let Some(extra) = map.get("extra").and_then(Value::as_array) {
+                for part in extra {
+                    text.push_str(&motd_text(part));
+                }
+            }
+            text
+        }
+        _ => description.to_string(),
+    }
+}
+
 fn compare(runs: &[Run], expected: &BTreeMap<String, String>) -> Vec<Difference> {
     if runs.len() < 2 {
         return Vec::new();
@@ -1001,75 +1171,331 @@ fn write_report(root: &Path, report: &Report) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     let mut md = format!(
-        "# Chunkwake Lab · {} · Minecraft {}\n\nHost: {} · Java: {} · Bots: {} · Warmup: {} s · Duration: {} s · Repetitions: {}\n\n",
-        report.mode,
-        report.version,
-        report.os,
-        report.java,
-        report.bots,
-        report.warmup_secs,
-        report.duration_secs,
-        report.repetitions
+        "# ◈ Отчёт Chunkwake Lab\n\n> **{}** · {} · Minecraft {}\n\n",
+        if report_failed(report) {
+            "❌ Есть ошибки"
+        } else {
+            "✅ Проверки пройдены"
+        },
+        report_mode(&report.mode),
+        report.version
     );
-    for run in &report.runs {
+    md += "## Параметры запуска\n\n| Параметр | Значение |\n|:--|:--|\n";
+    md += &format!("| Платформа | {} |\n", platform_label(&report.os));
+    md += &format!("| Java | `{}` |\n", md_cell(&report.java));
+    md += &format!("| Chunkwake | `{}` |\n", md_cell(&report.chunkwake));
+    md += &format!("| Файл vanilla server.jar | `{}` |\n", md_cell(&report.jar));
+    if report.mode == "bench" {
         md += &format!(
-            "## {}\n\nStartup: {} ms · [log]({})\n\n",
-            run.server, run.startup_ms, run.log
+            "| Профиль | {} |\n| Нагрузка | Ботов: {} · разминка: {} с · замер: {} с · повторов: {} |\n\n",
+            report.profile.label(),
+            report.bots,
+            report.warmup_secs,
+            report.duration_secs,
+            report.repetitions
         );
-        for c in &run.cases {
-            md += &format!(
-                "- {}: {}{}\n",
-                c.id,
-                c.value,
-                c.error
-                    .as_ref()
-                    .map(|e| format!(" — ERROR: {e}"))
-                    .unwrap_or_default()
-            );
+    } else {
+        md += "| Сценарий | Статус, вход, перемещение, поддержание соединения и сохранение позиции |\n\n";
+    }
+    if report.mode == "smoke" {
+        md += "> Режим **smoke** выполняет один сценарий с одним игроком только на Chunkwake. Параметры ботов и повторов относятся к **bench**. Для запуска обоих серверов выберите **compare** или **bench**.\n\n";
+    } else if report.mode == "compare" {
+        md += "> Режим **compare** выполняет по одному сценарию с одним игроком на каждом сервере. Количество ботов и повторов задаётся в **bench**.\n\n";
+    }
+
+    md += "## Результаты запусков\n\n| Сервер | Итог | Запуск | Подробности | Журнал |\n|:--|:--|--:|:--|:--|\n";
+    for run in &report.runs {
+        let result = if run_failed(run) {
+            "❌ Ошибка"
+        } else {
+            "✅ Успешно"
+        };
+        let detail = if let Some(b) = &run.benchmark {
+            format!(
+                "Вошло: {} · завершило: {} · ошибок: {} · p95: {:.1} мс",
+                b.joined, b.completed, b.failed, b.join_p95_ms
+            )
+        } else {
+            format!(
+                "Проверок пройдено: {} из {}",
+                run.cases.iter().filter(|c| c.error.is_none()).count(),
+                run.cases.len()
+            )
+        };
+        md += &format!(
+            "| **{}** | {} | {} мс | {} | [Открыть]({}) |\n",
+            md_cell(&server_label(&run.server)),
+            result,
+            run.startup_ms,
+            detail,
+            run.log
+        );
+    }
+    md += "\n";
+
+    if report.mode == "bench" {
+        md += "## Производительность\n\nВремя входа измеряется от подключения до первой позиции в игровом состоянии. Время запуска показано отдельно выше. p50/p95/p99 вычислены по вошедшим ботам; на малой выборке это лишь ориентир.\n\n";
+        md += "| Сервер | Вошло | Завершило | Ошибки | p50 | p95 | p99 | Процессор | Пик памяти | Получено | Отправлено |\n|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|\n";
+        for run in &report.runs {
+            if let Some(b) = &run.benchmark {
+                md += &format!(
+                    "| {} | {} | {} | {} | {:.1} мс | {:.1} мс | {:.1} мс | {} | {} | {} | {} |\n",
+                    md_cell(&server_label(&run.server)),
+                    b.joined,
+                    b.completed,
+                    b.failed,
+                    b.join_p50_ms,
+                    b.join_p95_ms,
+                    b.join_p99_ms,
+                    b.cpu_seconds
+                        .map(|v| format!("{v:.2} с"))
+                        .unwrap_or_else(|| "—".into()),
+                    b.rss_peak_bytes
+                        .map(pretty_bytes)
+                        .unwrap_or_else(|| "—".into()),
+                    pretty_bytes(b.bytes_in),
+                    pretty_bytes(b.bytes_out)
+                );
+            }
         }
-        if let Some(b) = &run.benchmark {
-            md += &format!(
-                "\nJoined: {} · Failed: {} · Join p50/p95/p99: {:.1}/{:.1}/{:.1} ms · RX payload {} bytes · TX payload {} bytes · CPU {:?} s · peak RSS {:?} bytes\n",
-                b.joined,
-                b.failed,
-                b.join_p50_ms,
-                b.join_p95_ms,
-                b.join_p99_ms,
-                b.bytes_in,
-                b.bytes_out,
-                b.cpu_seconds,
-                b.rss_peak_bytes
-            );
-            for error in &b.errors {
-                md += &format!("- Bot error: {error}\n");
+        md += "\nРазница в скорости сама по себе не влияет на результат проверки.\n\n";
+        if report.profile == BenchProfile::Redstone {
+            md += "### Редстоун\n\nСхема: массив 8 × 8 ламп, под ними 64 соединённых редстоуновых провода и слой из 64 опорных блоков. Каждую секунду одна команда `fill` меняет опоры между камнем и редстоуновыми блоками. Оба сервера получают одинаковую схему и команды. Клиенты подтверждают состояние каждой лампы по игровым пакетам. Время отклика — от отправки команды до подтверждения всех 64 ламп; оно включает игровой тик и сеть.\n\n";
+            md += "| Сервер | Переключений | Полных обновлений массива | Подтверждено ламп | Событий блоков | Отклик p50 | Отклик p95 |\n|:--|--:|--:|--:|--:|--:|--:|\n";
+            for run in &report.runs {
+                if let Some(r) = run.benchmark.as_ref().and_then(|b| b.redstone.as_ref()) {
+                    md += &format!(
+                        "| {} | {} | {} | {} / {} | {} | {:.1} мс | {:.1} мс |\n",
+                        md_cell(&server_label(&run.server)),
+                        r.toggles,
+                        r.observed_transitions,
+                        r.confirmed_changes,
+                        r.toggles * r.lamp_count as u64,
+                        r.updates,
+                        r.response_p50_ms,
+                        r.response_p95_ms
+                    );
+                }
+            }
+            md += "\n";
+        }
+        md += "### Динамика по секундам\n\nПоказатели процесса снимаются примерно раз в секунду во время нагрузки. Пропуск означает, что ОС не вернула значение.\n\n| Сервер | Секунда | Подключено | Ошибки | CPU накоплено | Память |\n|:--|--:|--:|--:|--:|--:|\n";
+        for run in &report.runs {
+            if let Some(b) = &run.benchmark {
+                for sample in &b.samples {
+                    md += &format!(
+                        "| {} | {} | {} | {} | {} | {} |\n",
+                        md_cell(&server_label(&run.server)),
+                        sample.elapsed_secs,
+                        sample.connected,
+                        sample.failed,
+                        sample
+                            .cpu_seconds
+                            .map(|v| format!("{v:.2} с"))
+                            .unwrap_or_else(|| "—".into()),
+                        sample
+                            .rss_bytes
+                            .map(pretty_bytes)
+                            .unwrap_or_else(|| "—".into())
+                    );
+                }
+            }
+        }
+        md += "\n";
+    } else {
+        if report.mode == "smoke" {
+            md += "## Проверки сценария\n\n| Проверка | Chunkwake |\n|:--|:--|\n";
+        } else {
+            md += "## Проверки сценария\n\n| Проверка | Chunkwake | Vanilla |\n|:--|:--|:--|\n";
+        }
+        let ours = report
+            .runs
+            .iter()
+            .find(|r| r.server.starts_with("chunkwake"));
+        let vanilla = report.runs.iter().find(|r| r.server.starts_with("vanilla"));
+        if let Some(ours) = ours {
+            for case in &ours.cases {
+                if report.mode == "smoke" {
+                    md += &format!(
+                        "| {} | {} |\n",
+                        md_cell(case_label(&case.id)),
+                        case_cell(Some(case))
+                    );
+                } else {
+                    let other = vanilla.and_then(|r| r.cases.iter().find(|c| c.id == case.id));
+                    md += &format!(
+                        "| {} | {} | {} |\n",
+                        md_cell(case_label(&case.id)),
+                        case_cell(Some(case)),
+                        case_cell(other)
+                    );
+                }
             }
         }
         md += "\n";
     }
-    for d in &report.differences {
-        md += &format!(
-            "- Difference {}: Chunkwake {} / vanilla {}{}\n",
-            d.id,
-            d.chunkwake,
-            d.vanilla,
-            d.reason
+
+    if !report.differences.is_empty() {
+        md += "## Различия в поведении\n\n| Проверка | Chunkwake | Vanilla | Оценка |\n|:--|:--|:--|:--|\n";
+        for d in &report.differences {
+            let classification = d
+                .reason
                 .as_ref()
-                .map(|r| format!(" · known: {r}"))
-                .unwrap_or_default()
-        );
+                .map(|r| format!("🟡 Известное отличие: {}", md_cell(r)))
+                .unwrap_or_else(|| "🔴 Новое отличие".into());
+            md += &format!(
+                "| {} | {} | {} | {} |\n",
+                md_cell(case_label(&d.id)),
+                md_cell(&report_value(&d.chunkwake)),
+                md_cell(&report_value(&d.vanilla)),
+                classification
+            );
+        }
+        md += "\n";
+    } else if report.mode == "compare" {
+        md += "## Различия в поведении\n\n✅ В проверенных сценариях различий не обнаружено.\n\n";
     }
-    for e in &report.errors {
-        md += &format!("- Error: {e}\n");
+    let bot_errors = report.runs.iter().flat_map(|r| {
+        r.benchmark
+            .as_ref()
+            .into_iter()
+            .flat_map(move |b| b.errors.iter().map(move |e| (&r.server, e)))
+    });
+    let mut issues = report
+        .errors
+        .iter()
+        .map(|e| ("Лаборатория", e.as_str()))
+        .collect::<Vec<_>>();
+    issues.extend(bot_errors.map(|(server, e)| (server.as_str(), e.as_str())));
+    for run in &report.runs {
+        for case in &run.cases {
+            if let Some(error) = &case.error {
+                issues.push((run.server.as_str(), error.as_str()));
+            }
+        }
+    }
+    if !issues.is_empty() {
+        md += "## Ошибки и замечания\n\n| Источник | Подробности |\n|:--|:--|\n";
+        for (source, error) in issues {
+            md += &format!(
+                "| {} | {} |\n",
+                md_cell(&server_label(source)),
+                md_cell(error)
+            );
+        }
+        md += "\n";
     }
     fs::write(root.join("report.md"), md).map_err(|e| e.to_string())
 }
 
+fn run_failed(run: &Run) -> bool {
+    run.cases.iter().any(|c| c.error.is_some())
+        || run
+            .benchmark
+            .as_ref()
+            .is_some_and(|b| b.failed > 0 || b.joined == 0)
+        || (run.cases.is_empty() && run.benchmark.is_none())
+}
+
+fn report_failed(report: &Report) -> bool {
+    !report.errors.is_empty()
+        || report.runs.iter().any(run_failed)
+        || report.differences.iter().any(|d| !d.expected)
+}
+
+fn report_mode(mode: &str) -> &str {
+    match mode {
+        "smoke" => "Быстрая проверка",
+        "compare" => "Сравнение с vanilla",
+        "bench" => "Нагрузочный тест",
+        _ => mode,
+    }
+}
+
+fn platform_label(os: &str) -> &str {
+    match os {
+        "windows" => "Windows",
+        "linux" => "Linux",
+        "macos" => "macOS",
+        _ => os,
+    }
+}
+
+fn server_label(server: &str) -> String {
+    server
+        .replacen("vanilla", "Vanilla", 1)
+        .replacen("chunkwake", "Chunkwake", 1)
+}
+
+fn case_label(id: &str) -> &str {
+    match id {
+        "status" => "Отклик сервера",
+        "status_protocol" => "Версия протокола",
+        "status_motd" => "Сообщение сервера (MOTD)",
+        "status_max_players" => "Лимит игроков",
+        "offline_login" => "Вход игрока",
+        "play_position" => "Начальная позиция",
+        "move_target" => "Цель перемещения",
+        "movement" => "Перемещение",
+        "keep_alive" => "Поддержание соединения",
+        "restart" => "Повторный запуск",
+        "position_persisted" => "Позиция после перезапуска",
+        _ => id,
+    }
+}
+
+fn report_value(value: &Value) -> String {
+    match value {
+        Value::Bool(true) => "да".into(),
+        Value::Bool(false) => "нет".into(),
+        Value::String(text) => text.clone(),
+        Value::Null => "—".into(),
+        _ => value.to_string(),
+    }
+}
+
+fn case_cell(case: Option<&Case>) -> String {
+    match case {
+        Some(c) if c.error.is_none() => format!("✅ {}", md_cell(&report_value(&c.value))),
+        Some(c) => format!(
+            "❌ {}",
+            md_cell(c.error.as_deref().unwrap_or("неизвестная ошибка"))
+        ),
+        None => "—".into(),
+    }
+}
+
+fn md_cell(value: &str) -> String {
+    value.replace('|', "\\|").replace(['\r', '\n'], " ")
+}
+
+fn pretty_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024 * 1024) as f64)
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 #[derive(Default)]
 struct BotResult {
-    join_ms: f64,
     packets: u64,
     bytes_in: u64,
     bytes_out: u64,
+}
+
+fn percentile(values: &[f64], p: f64) -> f64 {
+    if values.is_empty() {
+        0.0
+    } else {
+        values[((values.len() - 1) as f64 * p).round() as usize]
+    }
+}
+
+fn is_fixture_lamp([x, y, z]: [i32; 3]) -> bool {
+    (0..REDSTONE_SIDE).contains(&x) && y == -57 && (0..REDSTONE_SIDE).contains(&z)
 }
 
 async fn benchmark(
@@ -1077,52 +1503,136 @@ async fn benchmark(
     ids: Ids,
     protocol: i32,
     args: &Args,
-    child: &ManagedChild,
+    child: &mut ManagedChild,
     progress: &progress::Progress,
     server: &str,
 ) -> Result<Benchmark, String> {
+    let before = process_stats(child.child.id());
     let mut tasks = tokio::task::JoinSet::new();
+    let (connected_tx, mut connected_rx) = tokio::sync::mpsc::unbounded_channel::<f64>();
+    let (lamp_tx, mut lamp_rx) = tokio::sync::mpsc::unbounded_channel::<([i32; 3], i32, Instant)>();
+    let (start_tx, start_rx) = tokio::sync::watch::channel(false);
     for i in 0..args.bots {
         let addr = addr.to_owned();
         let warmup = args.warmup;
         let duration = args.duration;
+        let connected_tx = connected_tx.clone();
+        let lamp_tx = lamp_tx.clone();
+        let profile = args.profile;
+        let mut start_rx = start_rx.clone();
         tasks.spawn(async move {
+            let started_join = Instant::now();
             let mut client = timeout(STEP_TIMEOUT, Client::connect(&addr, &format!("lab{i}"), ids, protocol, VERSION)).await.map_err(|_| "login timeout".to_owned())??;
-            let join_ms = client.join_time.as_secs_f64() * 1000.0;
             let origin = timeout(STEP_TIMEOUT, async {
                 loop { if let Event::Position(pos) = client.next_event().await? { return Ok::<_, String>(pos); } }
             }).await.map_err(|_| "play position timeout".to_owned())??;
+            let join_ms = started_join.elapsed().as_secs_f64() * 1000.0;
+            let _ = connected_tx.send(join_ms);
+            if profile == BenchProfile::Redstone {
+                while !*start_rx.borrow_and_update() {
+                    start_rx.changed().await.map_err(|e| e.to_string())?;
+                }
+            }
             let started = Instant::now();
             // Vanilla 26.3 rejects more than one position packet in a server tick.
-            let mut tick = tokio::time::interval(Duration::from_millis(100));
+            let mut tick = tokio::time::interval(Duration::from_millis(if profile == BenchProfile::JoinBurst { 1000 } else { 100 }));
             tick.tick().await;
             let mut angle = i as f64;
             let mut base = None;
-            while started.elapsed() < warmup + duration {
+            let finish = warmup + duration + if profile == BenchProfile::Redstone { Duration::from_secs(2) } else { Duration::ZERO };
+            while started.elapsed() < finish {
                 if started.elapsed() >= warmup && base.is_none() { base = Some((client.packets_in, client.bytes_in, client.bytes_out)); }
                 tokio::select! {
                     _ = tick.tick() => {
-                        angle += 0.05;
-                        client.move_to([origin[0] + 2.0 * angle.cos(), origin[1], origin[2] + 2.0 * angle.sin()]).await?;
+                        match profile {
+                            BenchProfile::Movement => {
+                                angle += 0.05;
+                                client.move_to([origin[0] + 2.0 * angle.cos(), origin[1], origin[2] + 2.0 * angle.sin()]).await?;
+                            }
+                            BenchProfile::Exploration => {
+                                angle += 0.5;
+                                client.move_to([origin[0] + angle, origin[1], origin[2]]).await?;
+                            }
+                            BenchProfile::JoinBurst | BenchProfile::Redstone => {}
+                        }
                     }
-                    event = client.next_event() => { event?; }
+                    event = client.next_event() => {
+                        match event? {
+                            Event::BlockUpdate(position, state) if is_fixture_lamp(position) => {
+                                let _ = lamp_tx.send((position, state, Instant::now()));
+                            }
+                            Event::BlockUpdates(blocks) => {
+                                let received = Instant::now();
+                                for (position, state) in blocks {
+                                    if is_fixture_lamp(position) {
+                                        let _ = lamp_tx.send((position, state, received));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
             let (p, rx, tx) = base.unwrap_or((0, 0, 0));
-            Ok::<BotResult, String>(BotResult { join_ms, packets: client.packets_in - p, bytes_in: client.bytes_in - rx, bytes_out: client.bytes_out - tx })
+            Ok::<BotResult, String>(BotResult { packets: client.packets_in - p, bytes_in: client.bytes_in - rx, bytes_out: client.bytes_out - tx })
         });
-        sleep(Duration::from_millis(5)).await;
+        if args.profile != BenchProfile::JoinBurst {
+            sleep(Duration::from_millis(5)).await;
+        }
     }
-    sleep(args.warmup).await;
-    let before = process_stats(child.child.id());
+    drop(connected_tx);
+    drop(lamp_tx);
+    let mut connected = 0;
+    let mut join_times = Vec::new();
+    if args.profile == BenchProfile::Redstone {
+        let first = timeout(STEP_TIMEOUT, connected_rx.recv())
+            .await
+            .map_err(|_| "redstone observer did not join before timeout".to_owned())?
+            .ok_or("redstone observer exited before joining")?;
+        connected = 1;
+        join_times.push(first);
+        if server == "vanilla" {
+            child.send_console("forceload add 0 0")?;
+        }
+        sleep(Duration::from_millis(500)).await;
+        child.send_console("fill 0 -58 0 15 -58 7 minecraft:stone")?;
+        child.send_console("fill 8 -57 0 15 -57 7 minecraft:redstone_wire")?;
+        child.send_console("fill 0 -57 0 7 -57 7 minecraft:redstone_lamp[lit=false]")?;
+        sleep(Duration::from_millis(800)).await;
+    }
+    if args.profile == BenchProfile::Redstone {
+        start_tx.send(true).map_err(|e| e.to_string())?;
+    }
     let mut peak = before.map(|(_, rss)| rss);
     let mut results = Vec::new();
     let mut failed = 0;
     let mut errors = Vec::new();
-    let deadline = Instant::now() + args.warmup + args.duration + STEP_TIMEOUT;
     let measurement_started = Instant::now();
+    let deadline = measurement_started + args.warmup + args.duration + STEP_TIMEOUT;
+    let mut samples = Vec::new();
+    let mut toggles = 0;
+    let mut observed_transitions = 0;
+    let mut updates = 0;
+    let mut confirmed_changes = 0;
+    let mut response_ms = Vec::new();
+    let mut last_lamp_state = HashMap::new();
+    let mut seen_in_sweep = HashSet::new();
+    let mut awaiting = None;
+    let mut toggle_tick = tokio::time::interval_at(
+        tokio::time::Instant::from_std(measurement_started + args.warmup),
+        Duration::from_secs(1),
+    );
+    toggle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut sample_tick = tokio::time::interval(Duration::from_secs(1));
+    sample_tick.tick().await;
     while !tasks.is_empty() && Instant::now() < deadline {
         tokio::select! {
+            Some(join_ms) = connected_rx.recv() => {
+                connected += 1;
+                join_times.push(join_ms);
+                progress.update(Some(server), &format!("Connected {connected} / {} bots", args.bots));
+            }
             result = tasks.join_next() => {
                 match result {
                     Some(Ok(Ok(data))) => results.push(data),
@@ -1131,40 +1641,76 @@ async fn benchmark(
                     None => break,
                 }
             }
-            _ = sleep(Duration::from_secs(1)) => {
-                if let Some((_, rss)) = process_stats(child.child.id()) { peak = Some(peak.unwrap_or(0).max(rss)); }
+            Some((position, state, received)) = lamp_rx.recv(), if args.profile == BenchProfile::Redstone => {
+                updates += 1;
+                if last_lamp_state.insert(position, state) != Some(state) {
+                    if let Some(sent) = awaiting {
+                        if seen_in_sweep.insert(position) && seen_in_sweep.len() == (REDSTONE_SIDE * REDSTONE_SIDE) as usize {
+                            observed_transitions += 1;
+                            confirmed_changes += seen_in_sweep.len() as u64;
+                            seen_in_sweep.clear();
+                            response_ms.push(received.duration_since(sent).as_secs_f64() * 1000.0);
+                            awaiting = None;
+                        }
+                    }
+                }
+            }
+            _ = toggle_tick.tick(), if args.profile == BenchProfile::Redstone && measurement_started.elapsed() < args.warmup + args.duration => {
+                if measurement_started.elapsed() < args.warmup + args.duration {
+                    confirmed_changes += seen_in_sweep.len() as u64;
+                    seen_in_sweep.clear();
+                    let next = if toggles % 2 == 0 { "minecraft:redstone_block" } else { "minecraft:stone" };
+                    child.send_console(&format!("fill 0 -58 0 15 -58 7 {next}"))?;
+                    toggles += 1;
+                    awaiting = Some(Instant::now());
+                }
+            }
+            _ = sample_tick.tick() => {
+                let stats = process_stats(child.child.id());
+                if let Some((_, rss)) = stats { peak = Some(peak.unwrap_or(0).max(rss)); }
                 let elapsed = measurement_started.elapsed();
+                samples.push(BenchSample { elapsed_secs: elapsed.as_secs(), connected, failed, cpu_seconds: stats.map(|s| (s.0 - before.map_or(0.0, |b| b.0)).max(0.0)), rss_bytes: stats.map(|s| s.1) });
                 let phase = if elapsed < args.warmup { "Warmup" } else { "Measuring" };
                 let phase_elapsed = if elapsed < args.warmup { elapsed } else { elapsed.saturating_sub(args.warmup) };
                 let phase_total = if elapsed < args.warmup { args.warmup } else { args.duration };
-                progress.update(Some(server), &format!("{phase} {} / {} s · {} / {} bots finished · {} failed", phase_elapsed.as_secs().min(phase_total.as_secs()), phase_total.as_secs(), results.len() + failed, args.bots, failed));
+                progress.update(Some(server), &format!("{phase} {} / {} s · {connected} / {} connected · {} failed", phase_elapsed.as_secs().min(phase_total.as_secs()), phase_total.as_secs(), args.bots, failed));
             }
         }
     }
     failed += tasks.len();
     tasks.abort_all();
+    confirmed_changes += seen_in_sweep.len() as u64;
     let after = process_stats(child.child.id());
-    let mut times = results.iter().map(|r| r.join_ms).collect::<Vec<_>>();
+    let mut times = join_times;
     times.sort_by(f64::total_cmp);
-    let percentile = |p: f64| -> f64 {
-        if times.is_empty() {
-            0.0
-        } else {
-            times[((times.len() - 1) as f64 * p).round() as usize]
-        }
-    };
+    response_ms.sort_by(f64::total_cmp);
+    if args.profile == BenchProfile::Redstone && observed_transitions == 0 {
+        failed += 1;
+        errors.push("массив ламп не завершил ни одного переключения".into());
+    }
     Ok(Benchmark {
-        joined: results.len(),
+        joined: connected,
+        completed: results.len(),
         failed,
         errors,
-        join_p50_ms: percentile(0.50),
-        join_p95_ms: percentile(0.95),
-        join_p99_ms: percentile(0.99),
+        join_p50_ms: percentile(&times, 0.50),
+        join_p95_ms: percentile(&times, 0.95),
+        join_p99_ms: percentile(&times, 0.99),
         packets_in: results.iter().map(|r| r.packets).sum(),
         bytes_in: results.iter().map(|r| r.bytes_in).sum(),
         bytes_out: results.iter().map(|r| r.bytes_out).sum(),
         cpu_seconds: before.zip(after).map(|(a, b)| (b.0 - a.0).max(0.0)),
         rss_peak_bytes: peak,
+        redstone: (args.profile == BenchProfile::Redstone).then(|| RedstoneResult {
+            toggles,
+            observed_transitions,
+            lamp_count: (REDSTONE_SIDE * REDSTONE_SIDE) as usize,
+            confirmed_changes,
+            updates,
+            response_p50_ms: percentile(&response_ms, 0.50),
+            response_p95_ms: percentile(&response_ms, 0.95),
+        }),
+        samples,
     })
 }
 
@@ -1209,6 +1755,14 @@ fn process_stats(pid: u32) -> Option<(f64, u64)> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn benchmark_profiles_parse_or_reject_unknown_name() {
+        for name in ["join-burst", "movement", "exploration", "redstone"] {
+            assert!(BenchProfile::parse(name).is_ok());
+        }
+        assert!(BenchProfile::parse("redston").is_err());
+    }
 
     #[test]
     fn official_manifest_hosts_only() {
@@ -1284,5 +1838,115 @@ mod tests {
         );
         assert!(known[0].expected);
         assert_eq!(known[0].reason.as_deref(), Some("tracked gap"));
+    }
+
+    #[test]
+    fn motd_normalizes_plain_and_component_responses() {
+        assert_eq!(motd_text(&json!("Chunkwake Lab")), "Chunkwake Lab");
+        assert_eq!(
+            motd_text(&json!({"text":"Chunkwake ","extra":[{"text":"Lab"}]})),
+            "Chunkwake Lab"
+        );
+    }
+
+    #[test]
+    fn markdown_report_shows_side_by_side_checks_and_known_gaps() {
+        let root = std::env::temp_dir().join(format!("lab-report-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let report = Report {
+            mode: "compare".into(),
+            version: VERSION.into(),
+            jar: "server.jar".into(),
+            chunkwake: "chunkwake".into(),
+            java: "java".into(),
+            os: "test".into(),
+            bots: 1,
+            warmup_secs: 0,
+            duration_secs: 1,
+            repetitions: 1,
+            profile: BenchProfile::Movement,
+            runs: vec![
+                Run {
+                    server: "chunkwake-0".into(),
+                    cases: vec![case("status", json!("a|b"))],
+                    startup_ms: 20,
+                    log: "chunkwake.log".into(),
+                    benchmark: None,
+                },
+                Run {
+                    server: "vanilla-0".into(),
+                    cases: vec![case("status", json!("c"))],
+                    startup_ms: 40,
+                    log: "vanilla.log".into(),
+                    benchmark: None,
+                },
+            ],
+            differences: vec![Difference {
+                id: "status".into(),
+                chunkwake: json!("a|b"),
+                vanilla: json!("c"),
+                expected: true,
+                reason: Some("tracked gap".into()),
+            }],
+            errors: vec![],
+        };
+        write_report(&root, &report).unwrap();
+        let md = fs::read_to_string(root.join("report.md")).unwrap();
+        assert!(md.contains("**✅ Проверки пройдены**"));
+        assert!(md.contains("| Проверка | Chunkwake | Vanilla |"));
+        assert!(md.contains("a\\|b"));
+        assert!(md.contains("🟡 Известное отличие: tracked gap"));
+        assert!(md.contains("Отклик сервера"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn markdown_benchmark_uses_russian_labels() {
+        let root = std::env::temp_dir().join(format!("lab-bench-report-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let report = Report {
+            mode: "bench".into(),
+            version: VERSION.into(),
+            jar: "server.jar".into(),
+            chunkwake: "chunkwake".into(),
+            java: "java".into(),
+            os: "windows".into(),
+            bots: 1,
+            warmup_secs: 0,
+            duration_secs: 1,
+            repetitions: 1,
+            profile: BenchProfile::Movement,
+            runs: vec![Run {
+                server: "chunkwake-0".into(),
+                cases: vec![],
+                startup_ms: 10,
+                log: "chunkwake.log".into(),
+                benchmark: Some(Benchmark {
+                    joined: 1,
+                    completed: 1,
+                    failed: 0,
+                    errors: vec![],
+                    join_p50_ms: 5.0,
+                    join_p95_ms: 5.0,
+                    join_p99_ms: 5.0,
+                    packets_in: 1,
+                    bytes_in: 100,
+                    bytes_out: 50,
+                    cpu_seconds: Some(0.1),
+                    rss_peak_bytes: Some(1024),
+                    redstone: None,
+                    samples: vec![],
+                }),
+            }],
+            differences: vec![],
+            errors: vec![],
+        };
+        write_report(&root, &report).unwrap();
+        let md = fs::read_to_string(root.join("report.md")).unwrap();
+        assert!(md.contains("Нагрузочный тест"));
+        assert!(md.contains("## Производительность"));
+        assert!(md.contains("| Сервер | Вошло | Завершило | Ошибки |"));
+        assert!(md.contains("Разница в скорости сама по себе не влияет"));
+        fs::remove_dir_all(root).unwrap();
     }
 }

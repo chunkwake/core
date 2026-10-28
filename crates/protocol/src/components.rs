@@ -3,6 +3,7 @@
 //! Стопка остаётся `Copy`: набор компонентов хранится один раз в общей
 //! таблице, а в [`crate::inventory::Stack::extra`] — его номер (0 — нет).
 
+use crate::inventory::Stack;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -22,6 +23,8 @@ pub struct Extra {
     /// `custom_data`: сетевой NBT (безымянный корневой compound), в т. ч.
     /// `PublicBukkitValues` плагинов (`PersistentDataContainer`).
     pub custom_data: Option<Vec<u8>>,
+    /// `minecraft:charged_projectiles`: чем заряжен арбалет.
+    pub charged: Vec<Stack>,
 }
 
 impl Extra {
@@ -32,6 +35,7 @@ impl Extra {
             && self.lore.is_empty()
             && self.raw.is_none()
             && self.custom_data.is_none()
+            && self.charged.is_empty()
     }
 
     pub fn level(&self, enchantment: i32) -> i32 {
@@ -102,6 +106,7 @@ pub static CUSTOM_NAME_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static LORE_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static STORED_ENCHANTMENTS_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static CUSTOM_DATA_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+pub static CHARGED_PROJECTILES_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 
 pub(crate) fn id_of(c: &AtomicI32) -> i32 {
     c.load(Ordering::Relaxed)

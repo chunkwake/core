@@ -142,6 +142,18 @@ impl Inventory {
         }
     }
 
+    /// Тратит один предмет из слота; `false` — слот пуст.
+    pub fn consume_at(&mut self, slot: usize) -> bool {
+        let Some(s) = self.slots.get_mut(slot).and_then(|s| s.as_mut()) else {
+            return false;
+        };
+        s.count -= 1;
+        if s.count <= 0 {
+            self.slots[slot] = None;
+        }
+        true
+    }
+
     /// Тратит один предмет из руки; `false` — рука пуста.
     pub fn consume_held(&mut self) -> bool {
         let slot = &mut self.slots[HOTBAR + self.selected];
@@ -195,6 +207,8 @@ pub enum Cause {
     Wither,
     /// Мгновенный урон (`minecraft:magic`).
     Magic,
+    /// Стрела (`minecraft:arrow`).
+    Arrow,
 }
 
 impl Cause {
@@ -207,6 +221,7 @@ impl Cause {
             Cause::Generic => "death.attack.generic",
             Cause::Poison | Cause::Magic => "death.attack.magic",
             Cause::Wither => "death.attack.wither",
+            Cause::Arrow => "death.attack.arrow",
         }
     }
 
@@ -220,6 +235,7 @@ impl Cause {
             Cause::Poison => "POISON",
             Cause::Wither => "WITHER",
             Cause::Magic => "MAGIC",
+            Cause::Arrow => "PROJECTILE",
         }
     }
 
@@ -232,12 +248,21 @@ impl Cause {
             Cause::Generic => "minecraft:generic",
             Cause::Poison | Cause::Magic => "minecraft:magic",
             Cause::Wither => "minecraft:wither",
+            Cause::Arrow => "minecraft:arrow",
         }
     }
 
     /// Пустота (`bypasses_resistance`) и голод (`bypasses_effects`) не режутся Сопротивлением.
     pub fn bypasses_resistance(self) -> bool {
         matches!(self, Cause::Void | Cause::Starve)
+    }
+
+    /// Пустота, голод и магия не режутся бронёй (`bypasses_armor`).
+    pub fn bypasses_armor(self) -> bool {
+        matches!(
+            self,
+            Cause::Void | Cause::Starve | Cause::Magic | Cause::Poison
+        )
     }
 }
 
@@ -511,6 +536,13 @@ pub fn instant_effect(name: &str, amplifier: u8) -> Instant {
     }
 }
 
+/// `CombatRules.getDamageAfterAbsorb`: броня и toughness до чар защиты.
+pub fn after_armor(amount: f32, armor: f32, toughness: f32) -> f32 {
+    let f = 2.0 + toughness / 4.0;
+    let g = (armor - amount / f).clamp(armor * 0.2, 20.0);
+    amount * (1.0 - g / 25.0)
+}
+
 /// Сопротивление: `урон * max(0, 1 − 0.2 * (уровень))`. `bypass` — пустота и голод.
 pub fn resisted(amount: f32, amplifier: Option<u8>, bypass: bool) -> f32 {
     if bypass {
@@ -776,6 +808,10 @@ impl Vitals {
     }
 
     /// Телепорт (вход, респаун): падение с прежней высоты не считается.
+    pub fn clear_fall(&mut self) {
+        self.fall = 0.0;
+    }
+
     pub fn reset_fall(&mut self, pos: [f64; 3]) {
         self.fall = 0.0;
         self.last_pos = Some(pos);
@@ -1217,5 +1253,17 @@ mod tests {
         beacon.particles = false;
         beacon.show_icon = false;
         assert_eq!(beacon.flags(), 1);
+    }
+
+    #[test]
+    fn armor_absorbs_before_enchants() {
+        // Алмазный нагрудник: 8 брони, 2 toughness. 4 урона → 2.976.
+        let left = after_armor(4.0, 8.0, 2.0);
+        assert!((left - 2.976).abs() < 0.001, "{left}");
+        assert_eq!(after_armor(4.0, 0.0, 0.0), 4.0);
+        assert!(Cause::Magic.bypasses_armor());
+        assert!(Cause::Poison.bypasses_armor());
+        assert!(!Cause::Fall.bypasses_armor());
+        assert!(!Cause::Arrow.bypasses_armor());
     }
 }

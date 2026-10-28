@@ -19,7 +19,7 @@ pub const OUTSIDE: i16 = -999;
 pub enum Kind {
     /// `InventoryMenu`: 0 результат, 1–4 сетка, 5–8 броня, 9–35, 36–44, 45 вторая рука.
     Player,
-    /// `ChestMenu` на `rows` рядов.
+    /// Контейнер из `n` слотов и инвентарь (`ChestMenu`, `HopperMenu`, `DispenserMenu`).
     Chest(usize),
     /// `CraftingMenu`: 0 результат, 1–9 сетка, 10–36, 37–45.
     Crafting,
@@ -33,7 +33,7 @@ impl Kind {
     pub fn size(self) -> usize {
         match self {
             Kind::Player => 46,
-            Kind::Chest(rows) => rows * 9 + 36,
+            Kind::Chest(n) => n + 36,
             Kind::Crafting => 46,
             Kind::Furnace => 39,
             Kind::Enchanting => 38,
@@ -44,7 +44,7 @@ impl Kind {
     pub fn inventory_start(self) -> usize {
         match self {
             Kind::Player => 9,
-            Kind::Chest(rows) => rows * 9,
+            Kind::Chest(n) => n,
             Kind::Crafting => 10,
             Kind::Furnace => 3,
             Kind::Enchanting => 2,
@@ -649,7 +649,7 @@ mod tests {
         let mut chest = vec![None; 27 + 36];
         chest[0] = st(2, 5);
         run(
-            Kind::Chest(3),
+            Kind::Chest(27),
             &mut chest,
             &mut carried,
             &[(0, 0, QUICK_MOVE)],

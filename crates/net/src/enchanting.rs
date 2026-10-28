@@ -134,7 +134,13 @@ pub fn enchantments(
     enchantments_rng(e, item, slot, cost, seed).0
 }
 
-fn enchantments_rng(e: &Enchanting, item: &str, slot: i32, cost: i32, seed: i32) -> (Vec<(i32, i32)>, JavaRandom) {
+fn enchantments_rng(
+    e: &Enchanting,
+    item: &str,
+    slot: i32,
+    cost: i32,
+    seed: i32,
+) -> (Vec<(i32, i32)>, JavaRandom) {
     let mut r = JavaRandom::new(seed.wrapping_add(slot) as i64);
     let mut list = select(e, item, cost, &mut r);
     if item == BOOK && list.len() > 1 {
@@ -202,7 +208,11 @@ fn pick<'a>(avail: &[(&'a EnchantDef, i32)], r: &mut JavaRandom) -> Option<(&'a 
 
 /// `EnchantmentHelper.getDamageProtection`: сумма защиты от чар брони для
 /// типа урона `damage_type`.
-pub fn damage_protection(e: &Enchanting, equipment: &[(&str, &[(i32, i32)])], damage_type: &str) -> f32 {
+pub fn damage_protection(
+    e: &Enchanting,
+    equipment: &[(&str, &[(i32, i32)])],
+    damage_type: &str,
+) -> f32 {
     let mut sum = 0.0;
     for &(slot, list) in equipment {
         for &(id, level) in list {
@@ -213,7 +223,10 @@ pub fn damage_protection(e: &Enchanting, equipment: &[(&str, &[(i32, i32)])], da
                 continue;
             }
             for (req, value) in &d.protection {
-                if req.iter().all(|(set, want)| set.contains(damage_type) == *want) {
+                if req
+                    .iter()
+                    .all(|(set, want)| set.contains(damage_type) == *want)
+                {
                     sum += value.calc(level);
                 }
             }
@@ -344,7 +357,11 @@ mod tests {
         let m = attribute_modifiers(&e, &[("mainhand", &[(0, 5)]), ("head", &[(0, 3)])]);
         assert_eq!(
             m["minecraft:mining_efficiency"],
-            vec![("minecraft:enchantment.efficiency/mainhand".to_owned(), 26.0, 0)]
+            vec![(
+                "minecraft:enchantment.efficiency/mainhand".to_owned(),
+                26.0,
+                0
+            )]
         );
     }
 

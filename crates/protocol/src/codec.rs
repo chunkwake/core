@@ -64,6 +64,18 @@ impl<'a> Reader<'a> {
         Err(ProtocolError::VarIntTooLong)
     }
 
+    pub fn var_long(&mut self) -> Result<i64> {
+        let mut value = 0u64;
+        for i in 0..10 {
+            let byte = self.u8()?;
+            value |= ((byte & 0x7f) as u64) << (7 * i);
+            if byte & 0x80 == 0 {
+                return Ok(value as i64);
+            }
+        }
+        Err(ProtocolError::VarIntTooLong)
+    }
+
     pub fn string(&mut self, max_chars: usize) -> Result<&'a str> {
         let len = self.var_int()?;
         if len < 0 || len as usize > max_chars * 3 {
@@ -71,7 +83,8 @@ impl<'a> Reader<'a> {
         }
         let s =
             std::str::from_utf8(self.bytes(len as usize)?).map_err(|_| ProtocolError::BadUtf8)?;
-        if s.chars().count() > max_chars {
+        // Символ занимает хотя бы байт: при `len <= max_chars` лимит уже соблюдён.
+        if len as usize > max_chars && s.chars().count() > max_chars {
             return Err(ProtocolError::StringTooLong { max: max_chars });
         }
         Ok(s)
@@ -202,6 +215,16 @@ mod tests {
         w.var_int(-1);
         assert_eq!(w.buf, [0xff, 0xff, 0xff, 0xff, 0x0f]);
         assert!(Reader::new(&[0xff; 6]).var_int().is_err());
+    }
+
+    #[test]
+    fn var_long_roundtrip_for_section_block_updates() {
+        for value in [0, 1, 127, 128, 4095, (123_456_i64 << 12) | 0xabc, i64::MAX] {
+            let mut w = Writer::new();
+            w.var_long(value);
+            assert_eq!(Reader::new(&w.buf).var_long().unwrap(), value);
+        }
+        assert!(Reader::new(&[0xff; 11]).var_long().is_err());
     }
 
     #[test]

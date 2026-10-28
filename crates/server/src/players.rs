@@ -114,7 +114,9 @@ fn effects_from(root: &Compound, ids: &HashMap<String, i32>) -> Vec<Effect> {
 }
 
 fn stack_nbt(s: Stack, names: &[String]) -> Option<Compound> {
-    chunkwake_net::stack_nbt::to_nbt(s, names.get(s.item as usize)?)
+    chunkwake_net::stack_nbt::named_nbt(s, names.get(s.item as usize)?, &|id| {
+        names.get(id as usize).cloned()
+    })
 }
 
 fn stack_from(c: &Compound, ids: &HashMap<String, i32>) -> Option<Stack> {
@@ -233,9 +235,17 @@ pub fn from_nbt(root: &Compound, ids: &HashMap<String, i32>) -> Option<PlayerSav
             .map(|m| m as u8),
         effects: Vec::new(),
         xp: chunkwake_net::xp::Experience {
-            level: root.get("XpLevel").and_then(Tag::as_i64).unwrap_or(0).max(0) as i32,
+            level: root
+                .get("XpLevel")
+                .and_then(Tag::as_i64)
+                .unwrap_or(0)
+                .max(0) as i32,
             progress: f("XpP").unwrap_or(0.0).clamp(0.0, 1.0),
-            total: root.get("XpTotal").and_then(Tag::as_i64).unwrap_or(0).max(0) as i32,
+            total: root
+                .get("XpTotal")
+                .and_then(Tag::as_i64)
+                .unwrap_or(0)
+                .max(0) as i32,
             seed: root.get("XpSeed").and_then(Tag::as_i64).unwrap_or(0) as i32,
         },
     })
@@ -267,7 +277,12 @@ mod tests {
             selected: 3,
             game_mode: Some(1),
             effects: Vec::new(),
-            xp: chunkwake_net::xp::Experience { level: 7, progress: 0.5, total: 120, seed: -9 },
+            xp: chunkwake_net::xp::Experience {
+                level: 7,
+                progress: 0.5,
+                total: 120,
+                seed: -9,
+            },
             slots: vec![
                 (
                     5,

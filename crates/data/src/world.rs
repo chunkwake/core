@@ -207,6 +207,10 @@ pub struct ItemInfo {
     /// `minecraft:max_damage` (0 — предмет не изнашивается).
     pub max_damage: i32,
     pub fuel: Option<Fuel>,
+    /// Сумма `minecraft:armor` (`add_value`).
+    pub armor: f32,
+    /// Сумма `minecraft:armor_toughness` (`add_value`).
+    pub toughness: f32,
 }
 
 impl Default for ItemInfo {
@@ -218,6 +222,8 @@ impl Default for ItemInfo {
             equip: None,
             max_damage: 0,
             fuel: None,
+            armor: 0.0,
+            toughness: 0.0,
         }
     }
 }
@@ -282,6 +288,9 @@ pub fn load_items(root: &Path, items: &HashMap<String, i32>) -> Result<Vec<ItemI
             out[id as usize].equip = c["minecraft:equippable"]["slot"]
                 .as_str()
                 .and_then(equip_slot);
+            let (armor, toughness) = parse_armor(c);
+            out[id as usize].armor = armor;
+            out[id as usize].toughness = toughness;
         }
     }
     Ok(out)
@@ -303,6 +312,40 @@ fn parse_drink(c: &serde_json::Value, items: &HashMap<String, i32>) -> Option<Dr
         .and_then(|n| items.get(n).copied())
         .unwrap_or(-1);
     Some(Drink { seconds, remainder })
+}
+
+/// Очки брони и прочность из `attribute_modifiers` (массив или `{modifiers: [...]}`).
+fn parse_armor(c: &serde_json::Value) -> (f32, f32) {
+    let raw = &c["minecraft:attribute_modifiers"];
+    let Some(list) = raw
+        .as_array()
+        .or_else(|| raw.get("modifiers").and_then(|m| m.as_array()))
+    else {
+        return (0.0, 0.0);
+    };
+    let mut armor = 0.0;
+    let mut toughness = 0.0;
+    for m in list {
+        let ty = m
+            .get("type")
+            .or_else(|| m.get("attribute"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let amount = m.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+        let op = m
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .unwrap_or("add_value");
+        if op != "add_value" && op != "add" {
+            continue;
+        }
+        if ty.ends_with("armor_toughness") || ty.ends_with("generic.armor_toughness") {
+            toughness += amount;
+        } else if ty.ends_with(":armor") || ty.ends_with("generic.armor") || ty == "armor" {
+            armor += amount;
+        }
+    }
+    (armor, toughness)
 }
 
 fn parse_food(c: &serde_json::Value) -> Option<Food> {
@@ -671,6 +714,8 @@ fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, I
             equip,
             max_damage,
             fuel,
+            armor: 0.0,
+            toughness: 0.0,
         },
     ))
 }
@@ -742,6 +787,26 @@ mod loot_tests {
     }
 
     #[test]
+    fn armor_modifiers_sum() {
+        let list = serde_json::json!({
+            "minecraft:attribute_modifiers": {
+                "modifiers": [
+                    {"type": "minecraft:armor", "amount": 8.0, "operation": "add_value"},
+                    {"type": "minecraft:armor_toughness", "amount": 2.0, "operation": "add_value"},
+                    {"type": "minecraft:armor", "amount": 1.0, "operation": "add_multiplied_base"}
+                ]
+            }
+        });
+        assert_eq!(parse_armor(&list), (8.0, 2.0));
+        let flat = serde_json::json!({
+            "minecraft:attribute_modifiers": [
+                {"attribute": "minecraft:generic.armor", "amount": 3, "operation": "add"}
+            ]
+        });
+        assert_eq!(parse_armor(&flat), (3.0, 0.0));
+    }
+
+    #[test]
     fn item_line_round_trip() {
         let items = HashMap::from([("minecraft:bread".to_string(), 3)]);
         let food = Food {
@@ -764,6 +829,8 @@ mod loot_tests {
                     burn: [1600, 800, 800],
                     speed: [1.0, 2.0, 2.0],
                 }),
+                armor: 0.0,
+                toughness: 0.0,
             },
             ItemInfo {
                 max_stack: 16,

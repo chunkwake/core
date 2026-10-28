@@ -39,39 +39,88 @@ pub fn pack(values: &[u32], bits: u32) -> Vec<u64> {
         .collect()
 }
 
-/// Paletted container: бит на запись, палитра, long-массив без префикса длины.
-fn write_container(w: &mut Writer, values: &[u32], min_bits: u32, global_bits: u32) {
-    let mut palette: Vec<u32> = Vec::new();
-    for &v in values {
-        if !palette.contains(&v) {
-            palette.push(v);
-            if palette.len() > 256 {
-                break;
-            }
+/// Каждый long `SimpleBitStorage` для `n` значений `at(0..n)`.
+/// Расклад тот же, что у [`pack`]: частичный последний long дополнен нулями.
+pub(crate) fn emit_packed(
+    n: usize,
+    bits: u32,
+    mut at: impl FnMut(usize) -> u32,
+    mut emit: impl FnMut(u64),
+) {
+    let per_long = (64 / bits) as usize;
+    let mut i = 0;
+    while i < n {
+        let mut acc = 0u64;
+        let mut slot = 0;
+        while slot < per_long && i < n {
+            acc |= u64::from(at(i)) << (slot as u32 * bits);
+            slot += 1;
+            i += 1;
+        }
+        emit(acc);
+    }
+}
+
+/// Состояния в порядке первого появления, не во внутреннем порядке слотов.
+/// `limit` — порог сети: как только записей стало больше, хвост секции не смотрится
+/// (прямая палитра). `None` — обойти все 4096, как Anvil.
+pub(crate) fn first_seen_palette(section: &Section, limit: Option<usize>) -> Vec<u32> {
+    let mut palette = Vec::new();
+    for i in 0..4096 {
+        let v = section.get(i);
+        if palette.contains(&v) {
+            continue;
+        }
+        palette.push(v);
+        if limit.is_some_and(|n| palette.len() > n) {
+            break;
         }
     }
+    palette
+}
+
+pub(crate) fn palette_index(palette: &[u32], state: u32) -> u32 {
+    palette.iter().position(|&p| p == state).unwrap() as u32
+}
+
+/// Одно значение: бит на запись = 0, палитра из одной записи, без long-массива.
+fn write_single(w: &mut Writer, state: u32) {
+    w.u8(0).var_int(state as i32);
+}
+
+/// Блоки секции в формате paletted container. Байты те же, что у массива из 4096 состояний:
+/// однородная секция пишется сразу, смешанная — двумя проходами по индексам.
+fn write_block_container(w: &mut Writer, section: &Section, min_bits: u32, global_bits: u32) {
+    if section.is_uniform() {
+        write_single(w, section.get(0));
+        return;
+    }
+    let palette = first_seen_palette(section, Some(256));
     if palette.len() == 1 {
-        w.u8(0).var_int(palette[0] as i32);
+        write_single(w, palette[0]);
         return;
     }
     let indirect_bits = bits_for(palette.len()).max(min_bits);
-    let (bits, data) = if palette.len() <= 256 && indirect_bits <= 8 {
+    if palette.len() <= 256 && indirect_bits <= 8 {
         w.u8(indirect_bits as u8).var_int(palette.len() as i32);
-        for &p in &palette {
-            w.var_int(p as i32);
+        for &state in &palette {
+            w.var_int(state as i32);
         }
-        let idx: Vec<u32> = values
-            .iter()
-            .map(|v| palette.iter().position(|p| p == v).unwrap() as u32)
-            .collect();
-        (indirect_bits, pack(&idx, indirect_bits))
+        let bits = indirect_bits;
+        emit_packed(
+            4096,
+            bits,
+            |i| palette_index(&palette, section.get(i)),
+            |long| w.buf.extend_from_slice(&long.to_be_bytes()),
+        );
     } else {
         w.u8(global_bits as u8);
-        (global_bits, pack(values, global_bits))
-    };
-    debug_assert!(bits > 0);
-    for l in data {
-        w.buf.extend_from_slice(&l.to_be_bytes());
+        emit_packed(
+            4096,
+            global_bits,
+            |i| section.get(i),
+            |long| w.buf.extend_from_slice(&long.to_be_bytes()),
+        );
     }
 }
 
@@ -158,11 +207,52 @@ impl Section {
     /// Из полного массива 4096 состояний (сжимается, если однородный).
     pub fn from_blocks(blocks: Vec<u32>, biome: u32) -> Self {
         assert_eq!(blocks.len(), 4096);
-        let mut s = Self::filled(blocks[0], biome);
-        for (i, &b) in blocks.iter().enumerate() {
-            s.set(i, b);
+        Self::from_states(biome, |i| blocks[i])
+    }
+
+    /// 4096 состояний одним проходом. `get(i)` равен `at(i)`, одно значение — `filled`.
+    pub(crate) fn from_states(biome: u32, mut at: impl FnMut(usize) -> u32) -> Self {
+        let mut palette = Vec::new();
+        let mut counts = Vec::new();
+        let mut idx = Box::new([0u16; 4096]);
+        let mut non_air = 0u16;
+        for i in 0..4096 {
+            let state = at(i);
+            if state != AIR {
+                non_air += 1;
+            }
+            let slot = match palette.iter().position(|&p| p == state) {
+                Some(slot) => slot,
+                None => {
+                    palette.push(state);
+                    counts.push(0);
+                    palette.len() - 1
+                }
+            };
+            counts[slot] += 1;
+            idx[i] = slot as u16;
         }
-        s
+        if palette.len() == 1 {
+            return Self::filled(palette[0], biome);
+        }
+        let indices = if palette.len() <= 256 {
+            let mut narrow = Box::new([0u8; 4096]);
+            for (dst, &src) in narrow.iter_mut().zip(idx.iter()) {
+                *dst = src as u8;
+            }
+            Indices::Narrow(narrow)
+        } else {
+            Indices::Wide(idx)
+        };
+        Self {
+            storage: Storage::Paletted(Arc::new(Paletted {
+                palette,
+                counts,
+                idx: indices,
+            })),
+            non_air,
+            biome,
+        }
     }
 
     pub fn get(&self, i: usize) -> u32 {
@@ -255,11 +345,13 @@ impl ChunkColumn {
         column.resize(sections * 16, AIR);
         let sections = (0..sections)
             .map(|i| {
-                let mut blocks = vec![AIR; 4096];
-                for y in 0..16 {
-                    blocks[y * 256..(y + 1) * 256].fill(column[i * 16 + y]);
+                let base = i * 16;
+                let state = column[base];
+                if column[base..base + 16].iter().all(|&s| s == state) {
+                    Section::filled(state, biome)
+                } else {
+                    Section::from_states(biome, |idx| column[base + idx / 256])
                 }
-                Section::from_blocks(blocks, biome)
             })
             .collect();
         let n = column.len() / 16;
@@ -290,15 +382,48 @@ impl ChunkColumn {
     }
 
     /// Высота столбца: y верхнего непустого блока - min_y + 1 (0 — пустой).
+    /// Целиком пустая секция пропускается, целиком занятая закрывает все ещё
+    /// пустые столбцы. Ноль в результате значит «блок не найден», найденная
+    /// высота всегда ≥ 1.
     fn heightmap(&self) -> Vec<u32> {
-        (0..256)
-            .map(|xz| {
-                (0..self.height())
-                    .rev()
-                    .find(|&y| self.sections[y / 16].get((y % 16) * 256 + xz) != AIR)
-                    .map_or(0, |y| y as u32 + 1)
-            })
-            .collect()
+        let mut out = vec![0u32; 256];
+        let mut pending = 256usize;
+        for si in (0..self.sections.len()).rev() {
+            if pending == 0 {
+                break;
+            }
+            let section = &self.sections[si];
+            match section.non_air() {
+                0 => continue,
+                4096 => {
+                    let h = (si * 16 + 16) as u32;
+                    for hgt in &mut out {
+                        if *hgt == 0 {
+                            *hgt = h;
+                        }
+                    }
+                    break;
+                }
+                _ => {
+                    for local_y in (0..16).rev() {
+                        if pending == 0 {
+                            break;
+                        }
+                        let base = local_y * 256;
+                        for (xz, hgt) in out.iter_mut().enumerate() {
+                            if *hgt != 0 {
+                                continue;
+                            }
+                            if section.get(base + xz) != AIR {
+                                *hgt = (si * 16 + local_y + 1) as u32;
+                                pending -= 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Тело `level_chunk_with_light` после координат: ChunkData + LightData.
@@ -320,11 +445,14 @@ impl ChunkColumn {
         }
 
         // Секции: short блоков, short жидкостей (26.x), блоки, биомы.
+        // Биом секции один, поэтому контейнер биомов — всегда одна запись.
         let mut data = Writer::new();
+        data.buf
+            .reserve(self.sections.len().saturating_mul(2048 + 64));
         for s in &self.sections {
             data.u16(s.non_air() as u16).u16(0);
-            write_container(&mut data, &s.blocks(), 4, self.global_block_bits);
-            write_container(&mut data, &[s.biome; 64], 1, self.global_biome_bits);
+            write_block_container(&mut data, s, 4, self.global_block_bits);
+            write_single(&mut data, s.biome);
         }
         w.byte_array(&data.buf);
         // Блок-сущности: упакованные x/z, y, тип и NBT (клиенту сундуку данные не нужны).
@@ -386,7 +514,8 @@ impl ChunkColumn {
             let lit: Vec<_> = layers.iter().filter(|l| !l.is_zero()).collect();
             w.var_int(lit.len() as i32);
             for l in lit {
-                w.byte_array(&l.bytes());
+                w.var_int(2048);
+                l.write_bytes(&mut w.buf);
             }
         }
         w.buf
@@ -406,7 +535,7 @@ fn bit_set(n: usize) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chunkwake_protocol::Reader;
+    use chunkwake_protocol::{Reader, Writer};
 
     #[test]
     fn bits_and_packing() {
@@ -476,6 +605,169 @@ mod tests {
         }
         assert_eq!(r.var_int().unwrap(), 0, "block light arrays");
         assert!(r.remaining().is_empty());
+    }
+
+    /// Старый кодировщик: эталон байтов, с которым сверяется путь без массива на 4096.
+    fn legacy_container(w: &mut Writer, values: &[u32], min_bits: u32, global_bits: u32) {
+        let mut palette: Vec<u32> = Vec::new();
+        for &v in values {
+            if !palette.contains(&v) {
+                palette.push(v);
+                if palette.len() > 256 {
+                    break;
+                }
+            }
+        }
+        if palette.len() == 1 {
+            w.u8(0).var_int(palette[0] as i32);
+            return;
+        }
+        let indirect_bits = bits_for(palette.len()).max(min_bits);
+        let data = if palette.len() <= 256 && indirect_bits <= 8 {
+            w.u8(indirect_bits as u8).var_int(palette.len() as i32);
+            for &p in &palette {
+                w.var_int(p as i32);
+            }
+            let idx: Vec<u32> = values
+                .iter()
+                .map(|v| palette.iter().position(|p| p == v).unwrap() as u32)
+                .collect();
+            pack(&idx, indirect_bits)
+        } else {
+            w.u8(global_bits as u8);
+            pack(values, global_bits)
+        };
+        for l in data {
+            w.buf.extend_from_slice(&l.to_be_bytes());
+        }
+    }
+
+    fn section_bytes(body: &[u8]) -> Vec<u8> {
+        let mut r = Reader::new(body);
+        let maps = r.var_int().unwrap();
+        for _ in 0..maps {
+            r.var_int().unwrap();
+            let n = r.var_int().unwrap() as usize;
+            r.bytes(n * 8).unwrap();
+        }
+        let len = r.var_int().unwrap() as usize;
+        r.bytes(len).unwrap().to_vec()
+    }
+
+    fn legacy_sections(c: &ChunkColumn) -> Vec<u8> {
+        let mut w = Writer::new();
+        for s in &c.sections {
+            w.u16(s.non_air() as u16).u16(0);
+            legacy_container(&mut w, &s.blocks(), 4, c.global_block_bits);
+            legacy_container(&mut w, &[s.biome; 64], 1, c.global_biome_bits);
+        }
+        w.buf
+    }
+
+    fn assert_sections_match(c: &ChunkColumn) {
+        assert_eq!(section_bytes(&c.encode_body()), legacy_sections(c));
+    }
+
+    #[test]
+    fn containers_match_expanded_scan() {
+        assert_sections_match(&ChunkColumn::flat(
+            &[(88, 1), (10, 2), (9, 1)],
+            24,
+            7,
+            15,
+            7,
+            true,
+        ));
+
+        // Слот состояния 1 обнуляется и занимается заново: внутренний порядок
+        // палитры (0, 1, 2, 3) не совпадает с первым появлением (3, 2, 1, 0).
+        let mut reused = ChunkColumn::flat(&[], 1, 7, 15, 6, false);
+        reused.set_block(0, 0, 0, 1);
+        reused.set_block(1, 0, 0, 2);
+        reused.set_block(0, 0, 0, 3);
+        reused.set_block(2, 0, 0, 1);
+        assert_sections_match(&reused);
+
+        // Ровно 256 состояний — ещё косвенная палитра на 8 бит.
+        let mut indirect = ChunkColumn::flat(&[], 1, 3, 15, 6, false);
+        for i in 0..255 {
+            indirect.set_block(i % 16, 0, i / 16, (i + 1) as u32);
+        }
+        assert_sections_match(&indirect);
+
+        // 257 состояний — прямая палитра, в long'ах сами id.
+        let mut direct = ChunkColumn::flat(&[], 1, 3, 9, 6, false);
+        for i in 0..256 {
+            direct.set_block(i % 16, 0, i / 16, (i + 1) as u32);
+        }
+        assert_sections_match(&direct);
+    }
+
+    /// Старый поклеточный проход: эталон тех же 256 высот.
+    fn legacy_heightmap(c: &ChunkColumn) -> Vec<u32> {
+        (0..256)
+            .map(|xz| {
+                (0..c.height())
+                    .rev()
+                    .find(|&y| c.sections[y / 16].get((y % 16) * 256 + xz) != AIR)
+                    .map_or(0, |y| y as u32 + 1)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn heightmap_skips_uniform_sections() {
+        let flat = ChunkColumn::flat(&[(88, 1), (10, 2), (9, 1)], 24, 7, 15, 7, true);
+        let hm = flat.heightmap();
+        assert_eq!(hm, legacy_heightmap(&flat));
+        assert!(hm.iter().all(|&h| h == 4));
+
+        // Верхняя секция смешанная, нижняя целиком камень.
+        // Уже найденная высота не затирается высотой сплошной секции.
+        let mut c = ChunkColumn::flat(&[(1, 16)], 2, 0, 4, 1, false);
+        c.set_block(0, 16, 0, 2);
+        c.set_block(1, 31, 0, 2);
+        let hm = c.heightmap();
+        assert_eq!(hm, legacy_heightmap(&c));
+        assert_eq!(hm[0], 17);
+        assert_eq!(hm[1], 32);
+        assert_eq!(hm[2], 16);
+
+        let mut mixed = ChunkColumn::flat(&[], 2, 0, 4, 1, false);
+        mixed.set_block(3, 5, 4, 9);
+        mixed.set_block(3, 20, 4, 9);
+        let hm = mixed.heightmap();
+        assert_eq!(hm, legacy_heightmap(&mixed));
+        assert_eq!(hm[4 * 16 + 3], 21);
+        assert_eq!(hm[0], 0);
+    }
+
+    #[test]
+    fn from_states_matches_sets() {
+        let stepwise = |blocks: &[u32]| {
+            let mut s = Section::filled(blocks[0], 7);
+            for (i, &b) in blocks.iter().enumerate() {
+                s.set(i, b);
+            }
+            s
+        };
+        let mut blocks = vec![0u32; 4096];
+        blocks[0] = 3;
+        blocks[1] = 2;
+        blocks[2] = 1;
+        blocks[100] = 3;
+        let built = Section::from_blocks(blocks.clone(), 7);
+        let step = stepwise(&blocks);
+        assert_eq!(built, step);
+        assert_eq!(built.non_air(), step.non_air());
+
+        for (i, block) in blocks.iter_mut().take(300).enumerate() {
+            *block = (i + 1) as u32;
+        }
+        let built = Section::from_blocks(blocks.clone(), 7);
+        let step = stepwise(&blocks);
+        assert_eq!(built, step);
+        assert_eq!(built.non_air(), step.non_air());
     }
 }
 

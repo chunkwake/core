@@ -40,9 +40,30 @@ impl LightLayer {
 
     /// Массив как в `DataLayer::getData` (2048 байт, младший ниббл — чётный индекс).
     pub fn bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(2048);
+        self.write_bytes(&mut out);
+        out
+    }
+
+    /// Те же 2048 байт, что у [`Self::bytes`], дописанные в `out`.
+    pub fn write_bytes(&self, out: &mut Vec<u8>) {
         match self {
-            LightLayer::Uniform(v) => vec![v | v << 4; 2048],
-            LightLayer::Full(a) => a.to_vec(),
+            LightLayer::Uniform(v) => {
+                let n = out.len();
+                out.resize(n + 2048, v | v << 4);
+            }
+            LightLayer::Full(a) => out.extend_from_slice(a.as_ref()),
+        }
+    }
+
+    /// Те же байты со знаком, как NBT `ByteArray` света. Один буфер, без промежуточного `Vec<u8>`.
+    pub fn write_i8(&self, out: &mut Vec<i8>) {
+        match self {
+            LightLayer::Uniform(v) => {
+                let n = out.len();
+                out.resize(n + 2048, (v | v << 4) as i8);
+            }
+            LightLayer::Full(a) => out.extend(a.iter().map(|&b| b as i8)),
         }
     }
 
@@ -100,6 +121,13 @@ impl LightTable {
 
     pub fn sky_down(&self, state: u32) -> bool {
         self.sky_down.get(state as usize).copied().unwrap_or(false)
+    }
+
+    /// Излучение, затухание и проход неба вниз совпали — поле света от замены не меняется.
+    pub fn same_light(&self, a: u32, b: u32) -> bool {
+        self.emission(a) == self.emission(b)
+            && self.dampening(a) == self.dampening(b)
+            && self.sky_down(a) == self.sky_down(b)
     }
 }
 
@@ -187,6 +215,24 @@ impl<'a, A: LightAccess> Engine<'a, A> {
         }
     }
 
+    /// Состояние и свет клетки внутри мира. Вне высоты и без столбца — `None`.
+    fn cell(&mut self, kind: Kind, p: [i32; 3]) -> Option<(u32, u8)> {
+        if p[1] < 0 || p[1] >= self.height {
+            return None;
+        }
+        let c = self.access.column(p[0] >> 4, p[2] >> 4)?;
+        let si = (p[1] >> 4) as usize;
+        let i = index(p);
+        Some((c.sections[si].get(i), c.light(kind)[si].get(i)))
+    }
+
+    /// Запись ниббла, который уже отличается от текущего. Столбец создаётся только здесь.
+    fn write_changed(&mut self, kind: Kind, p: [i32; 3], v: u8) {
+        if let Some(c) = self.access.column_mut(p[0] >> 4, p[2] >> 4) {
+            c.light_mut(kind)[(p[1] >> 4) as usize].set(index(p), v);
+        }
+    }
+
     /// Состояние блока; вне мира по высоте — `None`.
     fn state(&mut self, p: [i32; 3]) -> Option<u32> {
         if p[1] < 0 || p[1] >= self.height {
@@ -246,7 +292,7 @@ impl<'a, A: LightAccess> Engine<'a, A> {
                     }
                     continue;
                 }
-                let Some(nl) = self.get(kind, n) else {
+                let Some((state, nl)) = self.cell(kind, n) else {
                     continue;
                 };
                 if nl == 0 {
@@ -254,12 +300,13 @@ impl<'a, A: LightAccess> Engine<'a, A> {
                 }
                 let sky_column = kind == Kind::Sky && dir == DOWN && lvl == 15 && nl == 15;
                 if nl < lvl || sky_column {
-                    self.set(kind, n, 0);
+                    // Сначала ноль: остальной BFS должен увидеть пустую клетку до излучения.
+                    self.write_changed(kind, n, 0);
                     self.dec.push_back((n, nl));
                     if kind == Kind::Block {
-                        let e = self.state(n).map_or(0, |s| self.table.emission(s));
+                        let e = self.table.emission(state);
                         if e > 0 {
-                            self.set(kind, n, e);
+                            self.write_changed(kind, n, e);
                             self.inc.push_back(n);
                         }
                     }
@@ -280,8 +327,7 @@ impl<'a, A: LightAccess> Engine<'a, A> {
             }
             for (dir, d) in DIRS.iter().enumerate() {
                 let n = [q[0] + d[0], q[1] + d[1], q[2] + d[2]];
-                let Some(state) = self.state(n) else { continue };
-                let Some(nl) = self.get(kind, n) else {
+                let Some((state, nl)) = self.cell(kind, n) else {
                     continue;
                 };
                 let new = if kind == Kind::Sky
@@ -294,7 +340,7 @@ impl<'a, A: LightAccess> Engine<'a, A> {
                     lvl.saturating_sub(self.table.dampening(state).max(1))
                 };
                 if new > nl {
-                    self.set(kind, n, new);
+                    self.write_changed(kind, n, new);
                     self.inc.push_back(n);
                 }
             }
@@ -331,12 +377,30 @@ pub fn relight_column(c: &mut ChunkColumn, table: &LightTable) {
         for (x, row) in top.iter_mut().enumerate() {
             for (z, h) in row.iter_mut().enumerate() {
                 let mut y = height;
+                let (x, z) = (x as i32, z as i32);
                 while y > 0 {
-                    let s = e.state([x as i32, y - 1, z as i32]).unwrap_or(0);
-                    if !table.sky_down(s) {
+                    let si = ((y - 1) >> 4) as usize;
+                    let sec = &e.access.0.sections[si];
+                    let bottom = si as i32 * 16;
+                    if sec.is_uniform() {
+                        // Вся секция одного состояния: либо пропустить, либо стоп на верхней клетке.
+                        if table.sky_down(sec.get(0)) {
+                            y = bottom;
+                            continue;
+                        }
                         break;
                     }
-                    y -= 1;
+                    let mut blocked = false;
+                    while y > bottom {
+                        if !table.sky_down(sec.get(index([x, y - 1, z]))) {
+                            blocked = true;
+                            break;
+                        }
+                        y -= 1;
+                    }
+                    if blocked {
+                        break;
+                    }
                 }
                 *h = y;
             }
@@ -378,9 +442,10 @@ pub fn relight_column(c: &mut ChunkColumn, table: &LightTable) {
             continue;
         }
         for i in 0..4096i32 {
-            let p = [i & 15, si as i32 * 16 + (i >> 8), (i >> 4) & 15];
-            let em = e.state(p).map_or(0, |s| table.emission(s));
+            let state = e.access.0.sections[si].get(i as usize);
+            let em = table.emission(state);
             if em > 0 {
+                let p = [i & 15, si as i32 * 16 + (i >> 8), (i >> 4) & 15];
                 e.set(Kind::Block, p, em);
                 e.inc.push_back(p);
             }
@@ -405,6 +470,33 @@ mod tests {
     fn flat() -> ChunkColumn {
         // Камень 4 слоя, высота 4 секции.
         ChunkColumn::flat(&[(1, 4)], 4, 0, 2, 0, true)
+    }
+
+    #[test]
+    fn same_light_ignores_shape() {
+        let t = table();
+        assert!(t.same_light(0, 3));
+        assert!(!t.same_light(0, 1));
+        assert!(!t.same_light(0, 2));
+        assert!(t.same_light(9, 9));
+    }
+
+    #[test]
+    fn light_bytes_match_direct_write() {
+        let uniform = LightLayer::Uniform(15);
+        let mut buf = Vec::new();
+        uniform.write_bytes(&mut buf);
+        assert_eq!(buf, vec![0xff; 2048]);
+        let mut full = LightLayer::Full(Arc::new([0; 2048]));
+        full.set(3, 9);
+        let mut buf = Vec::new();
+        full.write_bytes(&mut buf);
+        let mut expect = vec![0u8; 2048];
+        expect[1] = 9 << 4;
+        assert_eq!(buf, expect);
+        let mut signed = Vec::new();
+        full.write_i8(&mut signed);
+        assert_eq!(signed, expect.iter().map(|&b| b as i8).collect::<Vec<_>>());
     }
 
     #[test]

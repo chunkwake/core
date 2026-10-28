@@ -38,6 +38,45 @@ public final class Registries implements RegistryAccess {
      * поля в этот момент ещё были бы null.
      */
     private KeyedRegistry<ItemType> items;
+    private KeyedRegistry<org.bukkit.block.BlockType> blocks;
+    private KeyedRegistry<org.bukkit.inventory.MenuType> menus;
+
+    /** Меню 26.3 (`menu`): нужны `MenuType` и `InventoryType` при инициализации. */
+    private static final List<String> MENUS = List.of("generic_9x1", "generic_9x2", "generic_9x3", "generic_9x4",
+            "generic_9x5", "generic_9x6", "generic_3x3", "crafter_3x3", "anvil", "beacon", "blast_furnace",
+            "brewing_stand", "crafting", "enchantment", "furnace", "grindstone", "hopper", "lectern", "loom",
+            "merchant", "shulker_box", "smithing", "smoker", "cartography_table", "stonecutter");
+
+    private synchronized KeyedRegistry<org.bukkit.inventory.MenuType> menus() {
+        if (menus == null) {
+            menus = new KeyedRegistry<>(
+                    k -> k.getNamespace().equals("minecraft") && MENUS.contains(k.getKey())
+                            ? Stub.of(org.bukkit.inventory.MenuType.Typed.class, new MenuTypeImpl(k)) : null,
+                    () -> MENUS.stream().map(NamespacedKey::minecraft));
+        }
+        return menus;
+    }
+
+    /** {@link org.bukkit.inventory.MenuType}: ключ (окна плагинов пока не открываются). */
+    static final class MenuTypeImpl {
+        private final NamespacedKey key;
+
+        MenuTypeImpl(NamespacedKey key) {
+            this.key = key;
+        }
+
+        public NamespacedKey getKey() { return key; }
+        public net.kyori.adventure.key.Key key() { return key; }
+        public Class<? extends org.bukkit.inventory.InventoryView> getInventoryViewClass() {
+            return org.bukkit.inventory.InventoryView.class;
+        }
+        public boolean isEnabledByFeature(org.bukkit.World world) { return true; }
+
+        @Override
+        public String toString() {
+            return key.toString();
+        }
+    }
     private KeyedRegistry<DamageType> damageTypes;
     private KeyedRegistry<org.bukkit.potion.PotionEffectType> effects;
     private KeyedRegistry<org.bukkit.enchantments.Enchantment> enchantments;
@@ -86,6 +125,42 @@ public final class Registries implements RegistryAccess {
         return items;
     }
 
+    /** Блоки из таблицы сервера: запрос по ключу, полный список кусками. */
+    private synchronized KeyedRegistry<org.bukkit.block.BlockType> blocks() {
+        if (blocks == null) {
+            blocks = new KeyedRegistry<>(
+                    k -> isBlock(k) ? Stub.of(org.bukkit.block.BlockType.class, new BlockTypeImpl(k)) : null,
+                    () -> blockKeys().stream());
+        }
+        return blocks;
+    }
+
+    private static final Map<NamespacedKey, Boolean> IS_BLOCK = new ConcurrentHashMap<>();
+    private static volatile List<NamespacedKey> blockKeys;
+
+    static boolean isBlock(NamespacedKey k) {
+        return IS_BLOCK.computeIfAbsent(k, key -> "1".equals(Bridge.world("isblock " + key)));
+    }
+
+    private static List<NamespacedKey> blockKeys() {
+        if (blockKeys == null) {
+            List<NamespacedKey> out = new java.util.ArrayList<>();
+            while (true) {
+                String part = Bridge.world("blocks " + out.size());
+                if (part.isEmpty()) {
+                    break;
+                }
+                for (String n : part.split("\n")) {
+                    if (!n.isEmpty()) {
+                        out.add(NamespacedKey.fromString(n));
+                    }
+                }
+            }
+            blockKeys = List.copyOf(out);
+        }
+        return blockKeys;
+    }
+
     private synchronized KeyedRegistry<DamageType> damageTypes() {
         if (damageTypes == null) {
             damageTypes = new KeyedRegistry<>(k -> Stub.of(DamageType.class, new DamageTypeImpl(k)), Stream::empty);
@@ -112,6 +187,8 @@ public final class Registries implements RegistryAccess {
     @SuppressWarnings("unchecked")
     public <T extends Keyed> Registry<T> getRegistry(Class<T> type) {
         if (type == ItemType.class) return (Registry<T>) items();
+        if (type == org.bukkit.block.BlockType.class) return (Registry<T>) blocks();
+        if (type == org.bukkit.inventory.MenuType.class) return (Registry<T>) menus();
         if (type == DamageType.class) return (Registry<T>) damageTypes();
         if (type == org.bukkit.potion.PotionEffectType.class) return (Registry<T>) effects();
         if (type == org.bukkit.enchantments.Enchantment.class) return (Registry<T>) enchantments();
@@ -122,6 +199,8 @@ public final class Registries implements RegistryAccess {
     @SuppressWarnings("unchecked")
     public <T extends Keyed> Registry<T> getRegistry(RegistryKey<T> key) {
         if (key == RegistryKey.ITEM) return (Registry<T>) items();
+        if (key == RegistryKey.BLOCK) return (Registry<T>) blocks();
+        if (key == RegistryKey.MENU) return (Registry<T>) menus();
         if (key == RegistryKey.DAMAGE_TYPE) return (Registry<T>) damageTypes();
         if (key == RegistryKey.MOB_EFFECT) return (Registry<T>) effects();
         if (key == RegistryKey.ENCHANTMENT) return (Registry<T>) enchantments();
@@ -175,7 +254,10 @@ public final class Registries implements RegistryAccess {
         public Material asMaterial() { return Material.matchMaterial(key.toString()); }
         public int getMaxStackSize() { return ITEM_STACKS.getOrDefault(key, 64); }
         public short getMaxDurability() { return 0; }
-        public boolean hasBlockType() { return false; }
+        public boolean hasBlockType() { return isBlock(key); }
+        public org.bukkit.block.BlockType getBlockType() {
+            return isBlock(key) ? Stub.of(org.bukkit.block.BlockType.class, new BlockTypeImpl(key)) : null;
+        }
         public boolean isEdible() { return false; }
         public String getTranslationKey() { return "item." + key.getNamespace() + "." + key.getKey(); }
         public String translationKey() { return getTranslationKey(); }
@@ -185,6 +267,45 @@ public final class Registries implements RegistryAccess {
         @Override
         public String toString() {
             return key.toString();
+        }
+    }
+
+    /** {@link org.bukkit.block.BlockType}: ключ, материал, предмет. */
+    static final class BlockTypeImpl {
+        private final NamespacedKey key;
+
+        BlockTypeImpl(NamespacedKey key) {
+            this.key = key;
+        }
+
+        public NamespacedKey getKey() { return key; }
+        public net.kyori.adventure.key.Key key() { return key; }
+        public Material asMaterial() { return Material.matchMaterial(key.toString()); }
+        public boolean hasItemType() { return ITEM_STACKS.containsKey(key); }
+        public ItemType getItemType() {
+            return hasItemType() ? Stub.of(ItemType.class, new ItemTypeImpl(key)) : null;
+        }
+        public boolean isAir() {
+            String k = key.getKey();
+            return k.equals("air") || k.equals("cave_air") || k.equals("void_air");
+        }
+        public boolean isBlock() { return true; }
+        public String getTranslationKey() { return "block." + key.getNamespace() + "." + key.getKey(); }
+        public String translationKey() { return getTranslationKey(); }
+
+        @Override
+        public String toString() {
+            return key.toString();
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof BlockTypeImpl b && b.key.equals(key);
+        }
+
+        @Override
+        public int hashCode() {
+            return key.hashCode();
         }
     }
 

@@ -40,6 +40,12 @@ final class Stub {
     }
 
     static <T> T of(Class<T> iface, Object impl) {
+        return iface.cast(ofAll(new Class<?>[] {iface}, impl));
+    }
+
+    /** Прокси сразу нескольких интерфейсов (например {@code BlockData} + {@code Directional}). */
+    static Object ofAll(Class<?>[] ifaces, Object impl) {
+        Class<?> iface = ifaces[ifaces.length - 1];
         InvocationHandler h = (proxy, m, args) -> {
             Optional<Method> target = CACHE.get(impl.getClass()).computeIfAbsent(m, k -> find(impl.getClass(), k));
             if (target.isPresent()) {
@@ -74,7 +80,7 @@ final class Stub {
             throw new UnsupportedOperationException("chunkwake: " + iface.getSimpleName() + "."
                     + m.getName() + Arrays.toString(m.getParameterTypes()) + " is not implemented yet");
         };
-        return iface.cast(Proxy.newProxyInstance(iface.getClassLoader(), new Class<?>[] {iface}, new Handler(impl, h)));
+        return Proxy.newProxyInstance(iface.getClassLoader(), ifaces, new Handler(impl, h));
     }
 
     private static Optional<Method> find(Class<?> impl, Method m) {

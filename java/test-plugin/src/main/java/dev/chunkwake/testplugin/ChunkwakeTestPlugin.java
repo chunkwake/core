@@ -31,6 +31,123 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             ticks += 100;
             getLogger().info("scheduler: " + ticks + " ticks");
         }, 100, 100);
+        // Редстоун: поршень от редстоун-блока и поршень через провод.
+        getServer().getScheduler().runTaskLater(this, () -> {
+            org.bukkit.World w = getServer().getWorlds().get(0);
+            w.getBlockAt(0, 200, -1).setType(Material.STONE);
+            w.getBlockAt(0, 200, 0).setType(Material.PISTON);
+            w.getBlockAt(0, 200, 1).setType(Material.REDSTONE_BLOCK);
+            for (int x = 10; x <= 13; x++) {
+                w.getBlockAt(x, 199, 0).setType(Material.STONE);
+            }
+            w.getBlockAt(10, 200, -1).setType(Material.STONE);
+            w.getBlockAt(10, 200, 0).setType(Material.PISTON);
+            w.getBlockAt(11, 200, 0).setType(Material.REDSTONE_WIRE);
+            w.getBlockAt(12, 200, 0).setType(Material.REDSTONE_WIRE);
+            w.getBlockAt(13, 200, 0).setType(Material.REDSTONE_BLOCK);
+            // Воронка над сундуком: предмет падает, воронка втягивает и отдаёт вниз.
+            w.getBlockAt(20, 199, 0).setType(Material.CHEST);
+            w.getBlockAt(20, 200, 0).setType(Material.HOPPER);
+            w.dropItem(new org.bukkit.Location(w, 20.5, 201.2, 0.5), new ItemStack(Material.DIAMOND, 3));
+            // Жидкости: вода растекается по полу, лава у воды — обсидиан.
+            for (int x = 28; x <= 38; x++) {
+                for (int z = -4; z <= 4; z++) {
+                    w.getBlockAt(x, 199, z).setType(Material.STONE);
+                }
+            }
+            w.getBlockAt(33, 200, 0).setType(Material.WATER);
+            w.getBlockAt(40, 200, 0).setType(Material.LAVA);
+            w.getBlockAt(41, 200, 0).setType(Material.WATER);
+            // Заводнённые ступени — источник воды; сундук рядом вода не смывает.
+            for (int x = 50; x <= 54; x++) {
+                w.getBlockAt(x, 199, 0).setType(Material.STONE);
+            }
+            w.getBlockAt(50, 200, 0).setBlockData(getServer().createBlockData("minecraft:oak_stairs[waterlogged=true]"));
+            w.getBlockAt(52, 200, 0).setType(Material.CHEST);
+            // Раздатчик со стрелами: воронка сверху подаёт, редстоун-блок запускает.
+            w.getBlockAt(60, 200, 0).setBlockData(getServer().createBlockData("minecraft:dispenser[facing=east]"), false);
+            w.getBlockAt(60, 201, 0).setType(Material.HOPPER);
+            w.dropItem(new org.bukkit.Location(w, 60.5, 202.2, 0.5), new ItemStack(Material.ARROW, 2));
+            w.dropItem(new org.bukkit.Location(w, 60.5, 202.2, 0.5), new ItemStack(Material.SNOWBALL, 1));
+            w.getBlockAt(66, 200, 0).setType(Material.STONE);
+            // Флай-машина (двусторонний двигатель): липкие поршни друг к другу через щель.
+            fly(w, Material.OBSERVER, 100, 0, org.bukkit.block.BlockFace.WEST);
+            fly(w, Material.PISTON, 101, 0, org.bukkit.block.BlockFace.EAST);
+            w.getBlockAt(100, 210, 1).setType(Material.SLIME_BLOCK);
+            w.getBlockAt(101, 210, 1).setType(Material.SLIME_BLOCK);
+            w.getBlockAt(103, 210, 0).setType(Material.SLIME_BLOCK);
+            w.getBlockAt(104, 210, 0).setType(Material.SLIME_BLOCK);
+            fly(w, Material.STICKY_PISTON, 103, 1, org.bukkit.block.BlockFace.WEST);
+            fly(w, Material.OBSERVER, 104, 1, org.bukkit.block.BlockFace.EAST);
+        }, 40);
+        // Запуск: блок перед правым наблюдателем.
+        getServer().getScheduler().runTaskLater(this,
+                () -> getServer().getWorlds().get(0).getBlockAt(105, 210, 1).setType(Material.STONE), 50);
+        getServer().getScheduler().runTaskLater(this,
+                () -> getServer().getWorlds().get(0).getBlockAt(59, 200, 0).setType(Material.REDSTONE_BLOCK), 110);
+        getServer().getScheduler().runTaskLater(this,
+                () -> getServer().getWorlds().get(0).getBlockAt(59, 200, 0).setType(Material.AIR), 125);
+        getServer().getScheduler().runTaskLater(this,
+                () -> getServer().getWorlds().get(0).getBlockAt(59, 200, 0).setType(Material.REDSTONE_BLOCK), 135);
+        // Через 6 с: где задний наблюдатель и цела ли машина (8 блоков).
+        getServer().getScheduler().runTaskLater(this, () -> {
+            org.bukkit.World w = getServer().getWorlds().get(0);
+            int rear = -1, blocks = 0;
+            for (int x = 98; x <= 140; x++) {
+                for (int z = 0; z <= 1; z++) {
+                    Material m = w.getBlockAt(x, 210, z).getType();
+                    if (m == Material.OBSERVER && z == 0) rear = x;
+                    if (m == Material.OBSERVER || m == Material.SLIME_BLOCK || m == Material.PISTON || m == Material.STICKY_PISTON
+                            || m == Material.MOVING_PISTON) blocks++;
+                }
+            }
+            getLogger().info("fly: rear observer x=" + rear + " blocks=" + blocks);
+        }, 170);
+        getServer().getScheduler().runTaskLater(this, () -> {
+            org.bukkit.World w = getServer().getWorlds().get(0);
+            getLogger().info("redstone: direct=" + w.getBlockAt(0, 200, -2).getType() + "/" + w.getBlockAt(0, 200, -1).getType()
+                    + " wire=" + w.getBlockAt(10, 200, -2).getType() + "/" + w.getBlockAt(10, 200, -1).getType());
+        }, 60);
+        getServer().getScheduler().runTaskLater(this, () -> {
+            org.bukkit.World w = getServer().getWorlds().get(0);
+            getLogger().info("fluids: flow=" + w.getBlockAt(33, 200, 2).getType() + " fall=" + w.getBlockAt(33, 199, 5).getType() + " edge=" + w.getBlockAt(33, 200, 4).getType()
+                    + " meet=" + w.getBlockAt(40, 200, 0).getType()
+                    + " logged=" + w.getBlockAt(50, 200, 1).getType() + "/" + w.getBlockAt(52, 200, 0).getType()
+                    + " " + ((org.bukkit.block.data.Waterlogged) w.getBlockAt(50, 200, 0).getBlockData()).isWaterlogged());
+        }, 140);
+        getServer().getScheduler().runTaskLater(this, () -> getLogger().info("hopper: moves=" + hopperMoves + " pickups=" + hopperPickups), 120);
+    }
+
+    private int hopperMoves, hopperPickups;
+
+    @EventHandler
+    public void onDispense(org.bukkit.event.block.BlockDispenseEvent e) {
+        getLogger().info("dispense: " + e.getItem().getType() + " at " + e.getBlock().getX());
+    }
+
+    private static void fly(org.bukkit.World w, Material m, int x, int z, org.bukkit.block.BlockFace face) {
+        org.bukkit.block.Block b = w.getBlockAt(x, 210, z);
+        org.bukkit.block.data.Directional d = (org.bukkit.block.data.Directional) m.createBlockData();
+        d.setFacing(face);
+        b.setBlockData(d, false);
+    }
+
+    @EventHandler
+    public void onMove(org.bukkit.event.inventory.InventoryMoveItemEvent e) {
+        hopperMoves++;
+        if (hopperMoves == 1) {
+            getLogger().info("move event: " + e.getItem().getType() + " " + e.getSource().getType() + " -> " + e.getDestination().getType());
+        }
+    }
+
+    @EventHandler
+    public void onHopperPickup(org.bukkit.event.inventory.InventoryPickupItemEvent e) {
+        hopperPickups++;
+    }
+
+    @EventHandler
+    public void onPiston(org.bukkit.event.block.BlockPistonExtendEvent e) {
+        getLogger().info("piston event: extend " + e.getBlocks().size() + " " + e.getDirection());
     }
 
     @Override

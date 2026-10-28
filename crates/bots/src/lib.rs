@@ -21,7 +21,10 @@ pub struct Ids {
     sb_move_pos: i32,
     sb_client_tick_end: i32,
     player_position: i32,
+    block_update: i32,
+    section_blocks_update: i32,
     sb_accept_teleportation: i32,
+    sb_player_loaded: i32,
 }
 
 impl Ids {
@@ -41,7 +44,10 @@ impl Ids {
             sb_move_pos: id(Play, S, "move_player_pos")?,
             sb_client_tick_end: id(Play, S, "client_tick_end")?,
             player_position: id(Play, C, "player_position")?,
+            block_update: id(Play, C, "block_update")?,
+            section_blocks_update: id(Play, C, "section_blocks_update")?,
             sb_accept_teleportation: id(Play, S, "accept_teleportation")?,
+            sb_player_loaded: id(Play, S, "player_loaded")?,
         })
     }
 }
@@ -54,11 +60,14 @@ pub struct Client {
     pub bytes_in: u64,
     pub bytes_out: u64,
     pub keep_alives: u64,
+    sent_player_loaded: bool,
 }
 
 #[derive(Debug, PartialEq)]
 pub enum Event {
     Position([f64; 3]),
+    BlockUpdate([i32; 3], i32),
+    BlockUpdates(Vec<([i32; 3], i32)>),
     KeepAlive,
     Other,
 }
@@ -139,6 +148,7 @@ impl Client {
             bytes_in: 0,
             bytes_out: 0,
             keep_alives: 0,
+            sent_player_loaded: false,
         })
     }
 
@@ -176,7 +186,47 @@ impl Client {
             w.f32(yaw).f32(pitch);
             self.bytes_out += w.buf.len() as u64;
             self.conn.send(&w.buf).await.map_err(err)?;
+            if !self.sent_player_loaded {
+                let mut loaded = Writer::new();
+                loaded.var_int(self.ids.sb_player_loaded);
+                self.bytes_out += loaded.buf.len() as u64;
+                self.conn.send(&loaded.buf).await.map_err(err)?;
+                self.sent_player_loaded = true;
+            }
             Ok(Event::Position(pos))
+        } else if id == self.ids.block_update {
+            let packed = r.i64().map_err(err)?;
+            let position = [
+                (packed >> 38) as i32,
+                (packed << 52 >> 52) as i32,
+                (packed << 26 >> 38) as i32,
+            ];
+            Ok(Event::BlockUpdate(position, r.var_int().map_err(err)?))
+        } else if id == self.ids.section_blocks_update {
+            let packed = r.i64().map_err(err)?;
+            let section = [
+                (packed >> 42) as i32,
+                (packed << 44 >> 44) as i32,
+                (packed << 22 >> 42) as i32,
+            ];
+            let count = r.var_int().map_err(err)?;
+            if !(0..=4096).contains(&count) {
+                return Err(format!("invalid section block count {count}"));
+            }
+            let mut blocks = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                let entry = r.var_long().map_err(err)? as u64;
+                let local = entry & 0xfff;
+                blocks.push((
+                    [
+                        section[0] * 16 + ((local >> 8) & 15) as i32,
+                        section[1] * 16 + (local & 15) as i32,
+                        section[2] * 16 + ((local >> 4) & 15) as i32,
+                    ],
+                    (entry >> 12) as i32,
+                ));
+            }
+            Ok(Event::BlockUpdates(blocks))
         } else {
             Ok(Event::Other)
         }

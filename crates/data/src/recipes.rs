@@ -33,10 +33,22 @@ pub struct Cooking {
     pub experience: f32,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Recipes {
     list: Vec<Recipe>,
     cooking: Vec<Cooking>,
+    /// Первый рецепт `(вид печи, предмет)` — тот же, что линейный `find`.
+    cooking_at: HashMap<(u8, i32), usize>,
+}
+
+fn cooking_at(cooking: &[Cooking]) -> HashMap<(u8, i32), usize> {
+    let mut at = HashMap::new();
+    for (i, c) in cooking.iter().enumerate() {
+        for &item in c.ingredient.iter() {
+            at.entry((c.kind, item)).or_insert(i);
+        }
+    }
+    at
 }
 
 impl Recipes {
@@ -50,9 +62,9 @@ impl Recipes {
 
     /// Рецепт печи `kind` для предмета (первый подходящий, как `RecipeManager`).
     pub fn cooking(&self, kind: u8, item: i32) -> Option<&Cooking> {
-        self.cooking
-            .iter()
-            .find(|c| c.kind == kind && c.ingredient.contains(&item))
+        self.cooking_at
+            .get(&(kind, item))
+            .map(|&i| &self.cooking[i])
     }
 
     /// `(предмет, количество)` для квадратной сетки `size × size` (предметы по строкам).
@@ -276,6 +288,7 @@ pub fn load_recipes(root: &Path, items: &HashMap<String, i32>) -> Result<Recipes
         }
     }
     Ok(Recipes {
+        cooking_at: cooking_at(&cooking_list),
         list,
         cooking: cooking_list,
     })
@@ -308,12 +321,15 @@ mod tests {
             "pattern": ["##", "#|", " |"], "result": {"id": "minecraft:axe"}});
         let planks = serde_json::json!({"type": "minecraft:crafting_shapeless", "ingredients": ["minecraft:log"],
             "result": {"id": "minecraft:planks", "count": 4}});
+        let list: Vec<Recipe> = [stick, axe, planks]
+            .iter()
+            .filter_map(|j| parse(j, &mut tags))
+            .collect();
+        let cooking = Vec::new();
         let r = Recipes {
-            list: [stick, axe, planks]
-                .iter()
-                .filter_map(|j| parse(j, &mut tags))
-                .collect(),
-            cooking: Vec::new(),
+            cooking_at: cooking_at(&cooking),
+            list,
+            cooking,
         };
         assert_eq!(r.len(), 3);
         // Палки в любом месте сетки 2×2.
@@ -334,5 +350,26 @@ mod tests {
             r.find(&[p, s, None, None, None, None, None, None, None], 3),
             None
         );
+    }
+
+    #[test]
+    fn cooking_index_keeps_the_first_recipe() {
+        let set = |id| Arc::new(HashSet::from([id]));
+        let cook = |kind, item, result| Cooking {
+            kind,
+            ingredient: set(item),
+            result: (result, 1),
+            time: 200,
+            experience: 0.0,
+        };
+        let cooking = vec![cook(0, 5, 10), cook(0, 5, 11), cook(1, 5, 12)];
+        let r = Recipes {
+            cooking_at: cooking_at(&cooking),
+            list: Vec::new(),
+            cooking,
+        };
+        assert_eq!(r.cooking(0, 5).unwrap().result.0, 10);
+        assert_eq!(r.cooking(1, 5).unwrap().result.0, 12);
+        assert!(r.cooking(0, 6).is_none());
     }
 }

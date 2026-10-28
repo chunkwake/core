@@ -84,6 +84,8 @@ type Props = Vec<(String, String)>;
 pub struct Placement {
     states: Vec<Option<(String, Props)>>,
     by_key: HashMap<(String, Props), u32>,
+    /// Минимальный id состояния с этим именем (настенные варианты).
+    by_name: HashMap<String, u32>,
     /// Прочные грани по состоянию (биты по `DIRS`).
     sturdy: Vec<u8>,
     /// Тег `minecraft:walls`.
@@ -120,8 +122,6 @@ fn faces_away(name: &str) -> bool {
         || name.ends_with("_fence_gate")
         || name.ends_with("_bed")
         || name == "minecraft:observer"
-        || name == "minecraft:repeater"
-        || name == "minecraft:comparator"
 }
 
 /// Шестисторонний `facing` по грани клика (стержни, кристаллы).
@@ -133,22 +133,32 @@ fn faces_clicked(name: &str) -> bool {
 }
 
 impl Placement {
+    pub fn default_state(&self, name: &str) -> Option<u32> {
+        self.by_name.get(name).copied()
+    }
+
     pub fn new(
         states: Vec<Option<(String, Props)>>,
         sturdy: Vec<u8>,
         walls: HashSet<String>,
     ) -> Self {
         let mut by_key = HashMap::new();
+        let mut by_name = HashMap::new();
         for (id, s) in states.iter().enumerate() {
             if let Some((n, p)) = s {
                 let mut p = p.clone();
                 p.sort();
                 by_key.insert((n.clone(), p), id as u32);
+                by_name
+                    .entry(n.clone())
+                    .and_modify(|m: &mut u32| *m = (*m).min(id as u32))
+                    .or_insert(id as u32);
             }
         }
         Self {
             states,
             by_key,
+            by_name,
             sturdy,
             walls,
         }
@@ -172,7 +182,8 @@ impl Placement {
         self.joint(state).is_some()
     }
 
-    fn sturdy(&self, state: u32, face: usize) -> bool {
+    /// Прочная ли грань `face` (`isFaceSturdy`, грани по `DIRS`).
+    pub fn sturdy(&self, state: u32, face: usize) -> bool {
         self.sturdy
             .get(state as usize)
             .is_some_and(|m| m >> face & 1 == 1)
@@ -211,7 +222,7 @@ impl Placement {
             return state;
         };
         let mut s = state;
-        let on: Vec<bool> = (0..4).map(|i| self.attaches(j, sides[i], i + 2)).collect();
+        let on: [bool; 4] = std::array::from_fn(|i| self.attaches(j, sides[i], i + 2));
         for (i, &c) in on.iter().enumerate() {
             let key = DIRS[i + 2];
             if j == Joint::Wall {
@@ -249,12 +260,23 @@ impl Placement {
             .map(|s| s.0.as_str())
     }
 
+    /// Все свойства состояния (по имени).
+    pub fn props(&self, state: u32) -> &[(String, String)] {
+        self.states
+            .get(state as usize)
+            .and_then(|s| s.as_ref())
+            .map_or(&[], |s| s.1.as_slice())
+    }
+
     pub fn prop(&self, state: u32, key: &str) -> Option<&str> {
         let (_, p) = self.states.get(state as usize)?.as_ref()?;
         p.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
     }
 
     fn with(&self, state: u32, key: &str, value: &str) -> Option<u32> {
+        if self.prop(state, key) == Some(value) {
+            return Some(state);
+        }
         let (n, p) = self.states.get(state as usize)?.as_ref()?;
         p.iter().find(|(k, _)| k == key)?;
         let mut p: Props = p
@@ -294,16 +316,12 @@ impl Placement {
             Some((head, tail)) => format!("{ns}:{head}_wall_{tail}"),
             None => format!("{ns}:wall_{path}"),
         };
-        self.by_key
-            .iter()
-            .filter(|((n, _), _)| *n == wall)
-            .map(|(_, &id)| id)
-            .min()
+        self.by_name.get(&wall).copied()
     }
 
     /// Состояния для установки: `(смещение от цели, состояние)`, первое — сам блок.
     pub fn place(&self, default: u32, c: &Ctx) -> Vec<([i32; 3], u32)> {
-        let Some(name) = self.name(default).map(str::to_owned) else {
+        let Some(name) = self.name(default) else {
             return vec![([0; 3], default)];
         };
         let mut s = default;
@@ -335,7 +353,7 @@ impl Placement {
             self.set(&mut s, "facing", DIRS[facing]);
         } else if self.prop(s, "facing").is_some() {
             let six = self.with(s, "facing", "up").is_some();
-            let dir = if faces_clicked(&name) {
+            let dir = if faces_clicked(name) {
                 c.face
             } else if name.ends_with("_trapdoor") {
                 if c.face > UP {
@@ -348,12 +366,12 @@ impl Placement {
             } else if name.ends_with("anvil") {
                 clockwise(player)
             } else if six {
-                if faces_away(&name) {
+                if faces_away(name) {
                     c.looking()
                 } else {
                     opposite(c.looking())
                 }
-            } else if faces_away(&name) {
+            } else if faces_away(name) {
                 player
             } else {
                 opposite(player)
@@ -376,7 +394,7 @@ impl Placement {
             Some("upper" | "lower") => {
                 self.set(&mut s, "half", "lower");
                 if self.prop(s, "hinge").is_some() {
-                    self.set(&mut s, "hinge", self.hinge(&name, player, c));
+                    self.set(&mut s, "hinge", self.hinge(name, player, c));
                 }
                 let upper = self.with(s, "half", "upper").unwrap_or(s);
                 return vec![([0; 3], s), ([0, 1, 0], upper)];

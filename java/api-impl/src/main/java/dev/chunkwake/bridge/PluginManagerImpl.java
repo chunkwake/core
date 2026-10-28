@@ -193,6 +193,38 @@ final class PluginManagerImpl {
         if (has(org.bukkit.event.enchantment.EnchantItemEvent.getHandlerList())) {
             mask |= Bridge.listenBit(Bridge.EVENT_ENCHANT);
         }
+        if (has(com.destroystokyo.paper.event.player.PlayerPickupExperienceEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_PICKUP_XP);
+        }
+        if (has(org.bukkit.event.player.PlayerItemMendEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_MEND);
+        }
+        if (has(org.bukkit.event.player.PlayerExpChangeEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_EXP_CHANGE);
+        }
+        if (has(org.bukkit.event.block.BlockRedstoneEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_REDSTONE);
+        }
+        if (has(org.bukkit.event.block.BlockPistonExtendEvent.getHandlerList())
+                || has(org.bukkit.event.block.BlockPistonRetractEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_PISTON);
+        }
+        if (has(org.bukkit.event.inventory.InventoryMoveItemEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_MOVE_ITEM);
+        }
+        if (has(org.bukkit.event.inventory.InventoryPickupItemEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_HOPPER_PICKUP);
+        }
+        if (has(org.bukkit.event.block.BlockDispenseEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_DISPENSE);
+        }
+        if (has(org.bukkit.event.player.PlayerBucketEmptyEvent.getHandlerList())
+                || has(org.bukkit.event.player.PlayerBucketFillEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_BUCKET);
+        }
+        if (has(org.bukkit.event.player.PlayerPickupArrowEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_PICKUP_ARROW);
+        }
         Bridge.setFlag(Bridge.FLAG_LISTENERS, mask);
     }
 

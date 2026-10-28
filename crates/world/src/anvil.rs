@@ -3,7 +3,7 @@
 
 use crate::light::LightLayer;
 use crate::nbt::{self, Compound, Tag};
-use crate::{ChunkColumn, Section, bits_for, pack};
+use crate::{ChunkColumn, Section, bits_for, emit_packed, first_seen_palette, palette_index};
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
@@ -26,16 +26,12 @@ pub struct Format {
     pub min_section: i32,
 }
 
-/// Распаковка `SimpleBitStorage` (обратная к `pack`).
-fn unpack(data: &[i64], bits: u32, n: usize) -> Vec<u32> {
+/// Одно значение `SimpleBitStorage` (обратное к `pack`).
+fn unpack_at(data: &[i64], bits: u32, i: usize) -> u32 {
     let per_long = (64 / bits) as usize;
     let mask = (1u64 << bits) - 1;
-    (0..n)
-        .map(|i| {
-            let l = data.get(i / per_long).copied().unwrap_or(0) as u64;
-            ((l >> ((i % per_long) as u32 * bits)) & mask) as u32
-        })
-        .collect()
+    let l = data.get(i / per_long).copied().unwrap_or(0) as u64;
+    ((l >> ((i % per_long) as u32 * bits)) & mask) as u32
 }
 
 fn string(s: &str) -> Tag {
@@ -43,23 +39,23 @@ fn string(s: &str) -> Tag {
 }
 
 /// Палитра + данные, как в `PalettedContainer` ванилы. `None` для данных — одно значение.
-fn palettize(values: &[u32], min_bits: u32) -> (Vec<u32>, Option<Vec<i64>>) {
-    let mut palette: Vec<u32> = Vec::new();
-    let idx: Vec<u32> = values
-        .iter()
-        .map(|v| match palette.iter().position(|p| p == v) {
-            Some(i) => i as u32,
-            None => {
-                palette.push(*v);
-                palette.len() as u32 - 1
-            }
-        })
-        .collect();
+/// Порядок палитры — первое появление в секции, не порядок внутренних слотов.
+fn palettize(s: &Section, min_bits: u32) -> (Vec<u32>, Option<Vec<i64>>) {
+    if s.is_uniform() {
+        return (vec![s.get(0)], None);
+    }
+    let palette = first_seen_palette(s, None);
     if palette.len() == 1 {
         return (palette, None);
     }
     let bits = bits_for(palette.len()).max(min_bits);
-    let data = pack(&idx, bits).into_iter().map(|l| l as i64).collect();
+    let mut data = Vec::with_capacity(4096usize.div_ceil((64 / bits) as usize));
+    emit_packed(
+        4096,
+        bits,
+        |i| palette_index(&palette, s.get(i)),
+        |long| data.push(long as i64),
+    );
     (palette, Some(data))
 }
 
@@ -71,7 +67,7 @@ pub fn chunk_to_nbt(
 ) -> Result<Compound, String> {
     let mut sections = Vec::with_capacity(c.sections.len());
     for (i, s) in c.sections.iter().enumerate() {
-        let (palette, data) = palettize(&s.blocks(), 4);
+        let (palette, data) = palettize(s, 4);
         let mut states = Compound::new();
         let palette = palette
             .iter()
@@ -107,8 +103,11 @@ pub fn chunk_to_nbt(
         sec.insert("biomes".into(), Tag::Compound(biomes));
         // Небо пишем всегда (у ванилы отсутствие = «как секция выше»),
         // блочный — только ненулевой.
-        let bytes =
-            |l: &LightLayer| Tag::ByteArray(l.bytes().into_iter().map(|b| b as i8).collect());
+        let bytes = |l: &LightLayer| {
+            let mut raw = Vec::with_capacity(2048);
+            l.write_i8(&mut raw);
+            Tag::ByteArray(raw)
+        };
         if c.has_skylight {
             sec.insert("SkyLight".into(), bytes(&c.sky_light[i]));
         }
@@ -230,11 +229,10 @@ pub fn chunk_from_nbt(
             ([one], _) | ([one, ..], None) => Section::filled(*one, biome),
             (_, Some(data)) => {
                 let bits = bits_for(palette.len()).max(4);
-                let blocks = unpack(data, bits, 4096)
-                    .into_iter()
-                    .map(|i| palette.get(i as usize).copied().unwrap_or(0))
-                    .collect();
-                Section::from_blocks(blocks, biome)
+                Section::from_states(biome, |i| {
+                    let id = unpack_at(data, bits, i) as usize;
+                    palette.get(id).copied().unwrap_or(0)
+                })
             }
         };
     }
@@ -482,6 +480,40 @@ mod tests {
         assert!(lit);
         assert_eq!(back.sky_light, c.sky_light);
         assert_eq!(back.block_light, c.block_light);
+    }
+
+    #[test]
+    fn reused_slot_palette_is_first_seen() {
+        let mut c = ChunkColumn::flat(&[], 1, 0, 2, 0, true);
+        c.set_block(0, 0, 0, 1);
+        c.set_block(1, 0, 0, 2);
+        c.set_block(0, 0, 0, 3);
+        c.set_block(2, 0, 0, 1);
+        let nbt = chunk_to_nbt(&c, (0, 0), F, &Test).unwrap();
+        let sec = nbt["sections"].as_list().unwrap()[0].as_compound().unwrap();
+        let states = sec["block_states"].as_compound().unwrap();
+        let ids: Vec<u32> = states["palette"]
+            .as_list()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                let e = e.as_compound().unwrap();
+                let name = e["Name"].as_str().unwrap();
+                let props: Vec<(String, String)> = e
+                    .get("Properties")
+                    .and_then(Tag::as_compound)
+                    .map(|p| {
+                        p.iter()
+                            .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_owned()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Test.block_id(name, &props).unwrap()
+            })
+            .collect();
+        assert_eq!(ids, [3, 2, 1, 0]);
+        let (back, _) = chunk_from_nbt(&nbt, &c, F, &Test).unwrap();
+        assert_eq!(back.sections, c.sections);
     }
 
     #[test]

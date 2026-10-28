@@ -81,9 +81,42 @@ final class Events {
             case Bridge.EVENT_PLACE -> place(plugins, p, arg);
             case Bridge.EVENT_MOVE -> move(plugins, p, arg);
             case Bridge.EVENT_INTERACT -> interact(plugins, p, arg);
+            case Bridge.EVENT_BUCKET -> bucket(plugins, p, arg);
+            case Bridge.EVENT_PICKUP_ARROW -> {
+                String[] f = arg.split(" ");
+                Location at = new Location(p.getWorld(), Double.parseDouble(f[0]), Double.parseDouble(f[1]), Double.parseDouble(f[2]));
+                var e = new org.bukkit.event.player.PlayerPickupArrowEvent(p.api, item(p, "minecraft:arrow", 1),
+                        Stub.of(org.bukkit.entity.Arrow.class, new ArrowImpl(at)));
+                plugins.callEvent(e);
+                yield e.isCancelled() ? "c" : "";
+            }
             case Bridge.EVENT_POTION -> potion(plugins, p, arg);
             case Bridge.EVENT_PREPARE_ENCHANT -> prepareEnchant(plugins, p, arg);
             case Bridge.EVENT_ENCHANT -> enchant(plugins, p, arg);
+            case Bridge.EVENT_PICKUP_XP -> {
+                String[] f = arg.split(" ");
+                var e = new com.destroystokyo.paper.event.player.PlayerPickupExperienceEvent(p.api,
+                        orb(p, Integer.parseInt(f[0]), Double.parseDouble(f[1]), Double.parseDouble(f[2]),
+                                Double.parseDouble(f[3])));
+                plugins.callEvent(e);
+                yield e.isCancelled() ? "c" : "";
+            }
+            case Bridge.EVENT_MEND -> {
+                String[] f = arg.split(" ", 4);
+                int repair = Integer.parseInt(f[1]);
+                Location at = p.api.getLocation();
+                var e = new org.bukkit.event.player.PlayerItemMendEvent(p.api, StackImpl.parse(f[3]),
+                        EquipmentSlot.valueOf(f[0]), orb(p, Integer.parseInt(f[2]), at.getX(), at.getY(), at.getZ()),
+                        repair);
+                plugins.callEvent(e);
+                yield e.isCancelled() ? "c" : e.getRepairAmount() == repair ? "" : Integer.toString(e.getRepairAmount());
+            }
+            case Bridge.EVENT_EXP_CHANGE -> {
+                int amount = Integer.parseInt(arg.trim());
+                var e = new org.bukkit.event.player.PlayerExpChangeEvent(p.api, amount);
+                plugins.callEvent(e);
+                yield e.getAmount() == amount ? "" : Integer.toString(e.getAmount());
+            }
             default -> "";
         };
     }
@@ -116,6 +149,22 @@ final class Events {
             return "c";
         }
         return GsonComponentSerializer.gson().serialize(e.renderer().render(p.api, name, e.message(), Audience.empty()));
+    }
+
+    /** Сфера опыта для событий: величина и место. */
+    static org.bukkit.entity.ExperienceOrb orb(PlayerImpl p, int value, double x, double y, double z) {
+        return Stub.of(org.bukkit.entity.ExperienceOrb.class, new OrbImpl(value, new Location(p.getWorld(), x, y, z)));
+    }
+
+    record OrbImpl(int value, Location location) {
+        public int getExperience() { return value; }
+        public int getCount() { return 1; }
+        public Location getLocation() { return location.clone(); }
+        public World getWorld() { return location.getWorld(); }
+        public org.bukkit.entity.EntityType getType() { return org.bukkit.entity.EntityType.EXPERIENCE_ORB; }
+        public org.bukkit.entity.ExperienceOrb.SpawnReason getSpawnReason() {
+            return org.bukkit.entity.ExperienceOrb.SpawnReason.UNKNOWN;
+        }
     }
 
     private static org.bukkit.enchantments.Enchantment enchantment(String key) {
@@ -239,6 +288,22 @@ final class Events {
     }
 
     /** {@code ACTION x y z FACE hand} ({@code ~} — без блока) → {@code c} или пусто. */
+    /** {@code EMPTY|FILL x y z FACE ведро hand} → {@code c} или пусто. */
+    private static String bucket(PluginManager plugins, PlayerImpl p, String arg) {
+        String[] f = arg.split(" ");
+        Block block = p.getWorld().getBlockAt(Integer.parseInt(f[1]), Integer.parseInt(f[2]), Integer.parseInt(f[3]));
+        BlockFace face = BlockFace.valueOf(f[4]);
+        org.bukkit.Material bucket = org.bukkit.Material.matchMaterial(f[5]);
+        EquipmentSlot hand = EquipmentSlot.valueOf(f[6]);
+        ItemStack held = p.api.getInventory().getItem(hand);
+        org.bukkit.event.Cancellable e = f[0].equals("EMPTY")
+                ? new org.bukkit.event.player.PlayerBucketEmptyEvent(p.api, block, block.getRelative(face.getOppositeFace()),
+                        face, bucket, held, hand)
+                : new org.bukkit.event.player.PlayerBucketFillEvent(p.api, block, block, face, bucket, held, hand);
+        plugins.callEvent((org.bukkit.event.Event) e);
+        return e.isCancelled() ? "c" : "";
+    }
+
     private static String interact(PluginManager plugins, PlayerImpl p, String arg) {
         String[] f = arg.split(" ");
         Action action = Action.valueOf(f[0]);
@@ -327,9 +392,16 @@ final class Events {
         }
         Component message = lines.length > 1 && !lines[1].isEmpty()
                 ? GsonComponentSerializer.gson().deserialize(lines[1]) : null;
-        PlayerDeathEvent e = new PlayerDeathEvent(p.api, source(lines[0]), drops, 0, message, false);
+        String[] head = lines[0].split(" ");
+        int droppedExp = head.length > 1 ? Integer.parseInt(head[1]) : 0;
+        PlayerDeathEvent e = new PlayerDeathEvent(p.api, source(head[0]), drops, droppedExp, message, true);
         plugins.callEvent(e);
-        StringBuilder out = new StringBuilder(e.getKeepInventory() ? "1" : "0").append('\n');
+        // keepInventory keepLevel опыт-сферами newLevel newExp newTotalExp
+        StringBuilder out = new StringBuilder(e.getKeepInventory() ? "1" : "0")
+                .append(e.getKeepLevel() ? " 1 " : " 0 ")
+                .append(e.shouldDropExperience() ? e.getDroppedExp() : 0)
+                .append(' ').append(e.getNewLevel()).append(' ').append(e.getNewExp())
+                .append(' ').append(e.getNewTotalExp()).append('\n');
         if (e.deathMessage() != null) {
             out.append(GsonComponentSerializer.gson().serialize(e.deathMessage()));
         }
@@ -383,6 +455,20 @@ final class Events {
     }
 
     /** Сущность-предмет для событий выброса и подбора. */
+    /** Воткнутая стрела для {@code PlayerPickupArrowEvent}. */
+    record ArrowImpl(Location location) {
+        public Location getLocation() { return location.clone(); }
+        public World getWorld() { return location.getWorld(); }
+        public boolean isInBlock() { return true; }
+        public boolean isValid() { return true; }
+        public double getDamage() { return 2.0; }
+        public org.bukkit.entity.EntityType getType() { return org.bukkit.entity.EntityType.ARROW; }
+        public org.bukkit.entity.AbstractArrow.PickupStatus getPickupStatus() {
+            return org.bukkit.entity.AbstractArrow.PickupStatus.ALLOWED;
+        }
+        public ItemStack getItemStack() { return new ItemStack(org.bukkit.Material.ARROW); }
+    }
+
     private static Item item(PlayerImpl p, String name, int count) {
         return Stub.of(Item.class, new ItemEntityImpl(p, StackImpl.of(name, count)));
     }

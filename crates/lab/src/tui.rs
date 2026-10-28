@@ -1,5 +1,5 @@
 //! Interactive front end for the lab. The same Args are used by the headless CLI.
-use super::{Args, Mode, default_java};
+use super::{Args, BenchProfile, Mode, default_java};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -12,10 +12,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use std::io::{self, IsTerminal};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const LABELS: [&str; 13] = [
+const LABELS: [&str; 14] = [
     "◆ Scenario",
     "⚙ Chunkwake",
     "◈ Vanilla jar",
@@ -24,6 +24,7 @@ const LABELS: [&str; 13] = [
     "◇ Data cache",
     "✓ Vanilla EULA",
     "▤ Keep worlds",
+    "◉ Profile",
     "♟ Bots",
     "◷ Warmup (s)",
     "◴ Duration (s)",
@@ -53,17 +54,10 @@ pub fn run() -> Result<Args, String> {
         );
     }
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-    let chunkwake = executable
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join(if cfg!(windows) {
-            "chunkwake.exe"
-        } else {
-            "chunkwake"
-        });
+    let chunkwake = default_chunkwake_path(&executable);
     let mut screen = Screen {
         args: Args {
-            mode: Mode::Smoke,
+            mode: Mode::Compare,
             chunkwake,
             jar: PathBuf::new(),
             java: default_java(),
@@ -75,6 +69,7 @@ pub fn run() -> Result<Args, String> {
             warmup: Duration::from_secs(10),
             duration: Duration::from_secs(30),
             repetitions: 3,
+            profile: BenchProfile::Movement,
         },
         selected: 0,
         editing: None,
@@ -112,12 +107,12 @@ pub fn run() -> Result<Args, String> {
         }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return Err("cancelled".into()),
-            KeyCode::Up => screen.selected = (screen.selected + LABELS.len() - 1) % LABELS.len(),
-            KeyCode::Down => screen.selected = (screen.selected + 1) % LABELS.len(),
-            KeyCode::Tab => screen.selected = 12,
+            KeyCode::Up => screen.select_move(-1),
+            KeyCode::Down => screen.select_move(1),
+            KeyCode::Tab => screen.selected = 13,
             KeyCode::Left => screen.change(-1),
             KeyCode::Right | KeyCode::Char(' ') => screen.change(1),
-            KeyCode::Enter if screen.selected == 12 => return Ok(screen.args),
+            KeyCode::Enter if screen.selected == 13 => return Ok(screen.args),
             KeyCode::Enter if (1..=5).contains(&screen.selected) => {
                 screen.editing = Some(screen.path_value())
             }
@@ -127,7 +122,33 @@ pub fn run() -> Result<Args, String> {
     }
 }
 
+fn default_chunkwake_path(executable: &Path) -> PathBuf {
+    let binary_dir = executable
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let release_dir = if binary_dir.file_name().is_some_and(|name| name == "debug") {
+        binary_dir.parent().unwrap_or(binary_dir).join("release")
+    } else {
+        binary_dir.to_path_buf()
+    };
+    release_dir.join(if cfg!(windows) {
+        "chunkwake.exe"
+    } else {
+        "chunkwake"
+    })
+}
+
 impl Screen {
+    fn select_move(&mut self, direction: i32) {
+        loop {
+            self.selected =
+                (self.selected as i32 + direction).rem_euclid(LABELS.len() as i32) as usize;
+            if self.args.mode == Mode::Bench || !(8..=12).contains(&self.selected) {
+                break;
+            }
+        }
+    }
+
     fn path_value(&self) -> String {
         match self.selected {
             1 => self.args.chunkwake.display().to_string(),
@@ -170,18 +191,32 @@ impl Screen {
             }
             6 => self.args.accept_eula = !self.args.accept_eula,
             7 => self.args.keep_worlds = !self.args.keep_worlds,
-            8 => self.args.bots = (self.args.bots as i64 + step).clamp(1, 1000) as usize,
-            9 => {
+            8 => {
+                let profiles = [
+                    BenchProfile::JoinBurst,
+                    BenchProfile::Movement,
+                    BenchProfile::Exploration,
+                    BenchProfile::Redstone,
+                ];
+                let current = profiles
+                    .iter()
+                    .position(|p| *p == self.args.profile)
+                    .unwrap_or(0);
+                self.args.profile =
+                    profiles[(current as i64 + step).rem_euclid(profiles.len() as i64) as usize];
+            }
+            9 => self.args.bots = (self.args.bots as i64 + step).clamp(1, 1000) as usize,
+            10 => {
                 self.args.warmup = Duration::from_secs(
                     (self.args.warmup.as_secs() as i64 + step).clamp(0, 3600) as u64,
                 )
             }
-            10 => {
+            11 => {
                 self.args.duration = Duration::from_secs(
                     (self.args.duration.as_secs() as i64 + step).clamp(1, 3600) as u64,
                 )
             }
-            11 => {
+            12 => {
                 self.args.repetitions = (self.args.repetitions as i64 + step).clamp(1, 20) as usize
             }
             _ => {}
@@ -193,9 +228,9 @@ impl Screen {
             0 => format!(
                 "‹ {} ›",
                 match self.args.mode {
-                    Mode::Smoke => "Smoke · Chunkwake",
-                    Mode::Compare => "Compare · vanilla",
-                    Mode::Bench => "Bench · both",
+                    Mode::Smoke => "Smoke · only Chunkwake",
+                    Mode::Compare => "Compare · both servers",
+                    Mode::Bench => "Bench · both servers",
                 }
             ),
             1 => self.args.chunkwake.display().to_string(),
@@ -226,11 +261,12 @@ impl Screen {
                 "○ No"
             }
             .into(),
-            8 => self.args.bots.to_string(),
-            9 => self.args.warmup.as_secs().to_string(),
-            10 => self.args.duration.as_secs().to_string(),
-            11 => self.args.repetitions.to_string(),
-            12 => "Press Enter to run".into(),
+            8 => format!("‹ {} ›", self.args.profile.label()),
+            9 => self.args.bots.to_string(),
+            10 => self.args.warmup.as_secs().to_string(),
+            11 => self.args.duration.as_secs().to_string(),
+            12 => self.args.repetitions.to_string(),
+            13 => "Press Enter to run".into(),
             _ => String::new(),
         }
     }
@@ -279,11 +315,14 @@ fn draw(f: &mut ratatui::Frame, screen: &Screen) {
         ("RUN", 0..1),
         ("FILES", 1..6),
         ("OPTIONS", 6..8),
-        ("LOAD", 8..12),
-        ("READY", 12..13),
+        ("LOAD", 8..13),
+        ("READY", 13..14),
     ];
     let mut rows = Vec::new();
     for (title, range) in groups {
+        if title == "LOAD" && screen.args.mode != Mode::Bench {
+            continue;
+        }
         rows.push((None, title));
         for index in range {
             rows.push((Some(index), ""));
@@ -382,4 +421,22 @@ fn draw(f: &mut ratatui::Frame, screen: &Screen) {
             height: 1,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_lab_defaults_to_release_server() {
+        let path = default_chunkwake_path(Path::new("target/debug/chunkwake-lab.exe"));
+        assert_eq!(
+            path,
+            PathBuf::from("target/release").join(if cfg!(windows) {
+                "chunkwake.exe"
+            } else {
+                "chunkwake"
+            })
+        );
+    }
 }

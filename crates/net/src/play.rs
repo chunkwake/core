@@ -52,7 +52,6 @@ pub trait PluginHooks: Send + Sync {
     /// Событие с ответом (формат — в [`Event`]); `None` — слушателей нет.
     fn event(&self, kind: Event, uuid: Uuid, arg: String) -> Option<oneshot::Receiver<String>>;
 }
-
 #[derive(Debug, Clone, Copy)]
 struct Ids {
     login: i32,
@@ -146,6 +145,8 @@ pub struct PlayPlan {
     /// ID предмета → состояние блока, который он ставит.
     item_blocks: Vec<Option<u32>>,
     spawn: [f64; 3],
+    /// Радиус `spawn-protection`. 0 — выключено. Не-оператор не ломает и не ставит внутри.
+    spawn_protection: std::sync::atomic::AtomicI32,
     /// ID типа сущности `minecraft:player` в реестре `entity_type`.
     player_type: i32,
     next_entity_id: AtomicI32,
@@ -162,8 +163,32 @@ pub struct PlayPlan {
     plugin_commands: Mutex<Vec<String>>,
     /// Предметы на земле по ID сущности.
     dropped: Mutex<HashMap<i32, Dropped>>,
+    /// Сферы опыта.
+    orbs: Mutex<HashMap<i32, crate::orbs::Orb>>,
     /// Работающие и открытые печи.
     furnaces: Mutex<HashMap<[i32; 3], FurnaceEntry>>,
+    /// Отложенные тики редстоуна (`scheduleTick`): позиция и тик сервера.
+    redstone_ticks: Mutex<Vec<([i32; 3], u64)>>,
+    /// Летящие и воткнутые стрелы по id сущности.
+    arrows: Mutex<HashMap<i32, crate::arrows::Arrow>>,
+    /// Отложенные тики жидкостей (`FlowingFluid`): место и тик.
+    fluid_ticks: Mutex<Vec<([i32; 3], u64)>>,
+    /// Переключения факелов за последние тики — для перегорания.
+    torch_toggles: Mutex<HashMap<[i32; 3], Vec<u64>>>,
+    /// До какого тика перегоревший факел нельзя зажечь снова (`BURNOUT_COOLDOWN`).
+    torch_cool: Mutex<HashMap<[i32; 3], u64>>,
+    /// Игроки на нажимных плитах: позиция плиты и сколько их.
+    plates: Mutex<HashMap<[i32; 3], usize>>,
+    /// Воронки мира и их пауза в тиках.
+    hoppers: Mutex<HashMap<[i32; 3], u32>>,
+    /// Блоки, поставленные плагинами с физикой: соседей обновит тик.
+    deferred_updates: Mutex<Vec<[i32; 3]>>,
+    /// Блоки в движении от поршней: тик сервера и что поставить на место.
+    piston_moves: Mutex<Vec<(u64, Moves)>>,
+    /// Выходы компараторов (`OutputSignal`), загружаются из блок-сущности.
+    comparators: Mutex<HashMap<[i32; 3], i32>>,
+    /// Тики сервера (для редстоуна).
+    server_ticks: std::sync::atomic::AtomicU64,
     /// Печи из загруженных с диска чанков — подхватит тик.
     pending_furnaces: Mutex<Vec<[i32; 3]>>,
     players_source: std::sync::OnceLock<Arc<dyn PlayerSource>>,
@@ -183,6 +208,10 @@ pub struct PlayPlan {
     /// Сколько серверных тиков прошло с запуска (`/time query gametime`).
     game_time: AtomicI64,
     tick_meter: Mutex<TickMeter>,
+    /// Регенерация, отравление, иссушение, голод — id из реестра, один раз при старте.
+    effect_kinds: survival::EffectKinds,
+    /// `wet_sponge`, `bucket`, `water_bucket` для тика печи.
+    sponge: Option<(i32, i32, i32)>,
 }
 
 /// Готовый к записи кадр, общий для многих соединений.
@@ -218,6 +247,100 @@ impl LightAccess for WorldLight<'_> {
                 .or_insert_with(|| (template.clone(), 0))
                 .0,
         )
+    }
+}
+
+/// Окрестность 3×3: свет одного блока не уходит дальше соседнего чанка.
+fn around_chunk(key: (i32, i32)) -> impl Iterator<Item = (i32, i32)> {
+    (-1..=1).flat_map(move |dx| (-1..=1).map(move |dz| (key.0 + dx, key.1 + dz)))
+}
+
+/// Столбцы и номера правок, которые BFS может прочитать.
+struct Neighborhood {
+    revs: HashMap<(i32, i32), u64>,
+    columns: HashMap<(i32, i32), ChunkColumn>,
+}
+
+fn snapshot_neighborhood(
+    world: &HashMap<(i32, i32), (ChunkColumn, u64)>,
+    key: (i32, i32),
+) -> Neighborhood {
+    let mut snap = Neighborhood {
+        revs: HashMap::new(),
+        columns: HashMap::new(),
+    };
+    for pos in around_chunk(key) {
+        if let Some((column, rev)) = world.get(&pos) {
+            snap.revs.insert(pos, *rev);
+            snap.columns.insert(pos, column.clone());
+        }
+    }
+    snap
+}
+
+fn neighborhood_same(
+    world: &HashMap<(i32, i32), (ChunkColumn, u64)>,
+    key: (i32, i32),
+    revs: &HashMap<(i32, i32), u64>,
+) -> bool {
+    around_chunk(key).all(|pos| world.get(&pos).map(|e| e.1) == revs.get(&pos).copied())
+}
+
+/// Тот же BFS, что под замком, но на копии столбцов.
+struct Spread {
+    columns: HashMap<(i32, i32), ChunkColumn>,
+    touched: HashSet<(i32, i32)>,
+}
+
+fn spread_light(
+    columns: HashMap<(i32, i32), ChunkColumn>,
+    template: &ChunkColumn,
+    light: &LightTable,
+    height: usize,
+    at: [i32; 3],
+) -> Spread {
+    let mut world: HashMap<_, _> = columns.into_iter().map(|(k, c)| (k, (c, 0u64))).collect();
+    let mut access = WorldLight {
+        world: &mut world,
+        template,
+        touched: HashSet::new(),
+    };
+    Engine::new(&mut access, light, height).block_changed(at);
+    let touched = std::mem::take(&mut access.touched);
+    drop(access);
+    Spread {
+        columns: world.into_iter().map(|(k, (c, _))| (k, c)).collect(),
+        touched,
+    }
+}
+
+/// Записывает свет и сбрасывает кадры. Номер правки растёт у каждого
+/// затронутого столбца, включая свой: сжатие кадра идёт без замка.
+/// `computed == None` — BFS уже правил `world`.
+fn write_light(
+    world: &mut HashMap<(i32, i32), (ChunkColumn, u64)>,
+    frames: &mut HashMap<(i32, i32), Frame>,
+    key: (i32, i32),
+    computed: Option<HashMap<(i32, i32), ChunkColumn>>,
+    touched: HashSet<(i32, i32)>,
+) {
+    let mut touched = touched;
+    touched.insert(key);
+    for pos in touched {
+        frames.remove(&pos);
+        if let Some(map) = computed.as_ref() {
+            let Some(column) = map.get(&pos).cloned() else {
+                continue;
+            };
+            if let Some(e) = world.get_mut(&pos) {
+                e.0 = column;
+                e.1 += 1;
+            } else {
+                world.insert(pos, (column, 1));
+            }
+        } else if let Some(e) = world.get_mut(&pos) {
+            e.1 += 1;
+        }
     }
 }
 
@@ -261,6 +384,16 @@ struct MoveItem {
 }
 
 /// Состояние `minecraft:air`.
+/// Контейнер для воронок: позиции частей, слоты подряд, печь ли, имя блока.
+struct Cont {
+    parts: Vec<[i32; 3]>,
+    slots: Vec<Slot>,
+    furnace: bool,
+    name: String,
+}
+
+/// Блоки на конечных местах после движения поршня.
+type Moves = Vec<([i32; 3], u32, Option<BlockEntity>)>;
 const AIR: u32 = 0;
 
 /// Период рассылки движений (тик ванилы).
@@ -303,6 +436,8 @@ struct Online {
     on_ground: bool,
     /// Полёт на элитрах: другим игрокам уходит в метаданных при спавне.
     gliding: bool,
+    /// Живой и не наблюдатель: к нему тянутся сферы опыта.
+    collects: bool,
 }
 
 impl Online {
@@ -323,6 +458,54 @@ const SNAPSHOT_TICKS: u32 = 100;
 
 /// Как часто вместо дельты слать абсолютную позицию (у ванилы — раз в 60 тиков).
 const SYNC_EVERY: u32 = 60;
+
+/// Глаза стоящего игрока: ноги + 1.62.
+fn eye_of(feet: [f64; 3]) -> [f64; 3] {
+    [feet[0], feet[1] + 1.62, feet[2]]
+}
+
+/// `spawn-protection`: чебышёв от блока спавна строго меньше радиуса.
+fn in_spawn(spawn: [f64; 3], radius: i32, pos: [i32; 3]) -> bool {
+    if radius <= 0 {
+        return false;
+    }
+    let dx = (pos[0] - spawn[0].floor() as i32).abs();
+    let dz = (pos[2] - spawn[2].floor() as i32).abs();
+    dx.max(dz) < radius
+}
+
+/// Квадрат расстояния от глаз до ближайшей точки блока не больше `reach`².
+fn block_reach(eye: [f64; 3], block: [i32; 3], reach: f64) -> bool {
+    let mut d2 = 0.0;
+    for i in 0..3 {
+        let b = block[i] as f64;
+        let c = eye[i].clamp(b, b + 1.0);
+        let d = eye[i] - c;
+        d2 += d * d;
+    }
+    d2 <= reach * reach
+}
+
+/// Полный куб пересекает хитбокс игрока 0.6×1.8.
+fn player_hits_cube(feet: [f64; 3], block: [i32; 3]) -> bool {
+    let min = [feet[0] - 0.3, feet[1], feet[2] - 0.3];
+    let max = [feet[0] + 0.3, feet[1] + 1.8, feet[2] + 0.3];
+    (0..3).all(|i| {
+        let b = block[i] as f64;
+        min[i] < b + 1.0 && max[i] > b
+    })
+}
+
+/// Доля урона от падения, которая остаётся на блоке приземления.
+fn fall_kept(name: &str) -> f32 {
+    if name == "minecraft:slime_block" || name.ends_with("_bed") {
+        0.0
+    } else if name == "minecraft:hay_block" {
+        0.2
+    } else {
+        1.0
+    }
+}
 
 /// Видна ли сущность из чанка `center` при дальности `r` чанков.
 fn near(center: (i32, i32), pos: [f64; 3], r: i32) -> bool {
@@ -635,10 +818,22 @@ fn container_entity(block: &str) -> Option<&'static str> {
         "minecraft:chest" => Some("minecraft:chest"),
         "minecraft:trapped_chest" => Some("minecraft:trapped_chest"),
         "minecraft:barrel" => Some("minecraft:barrel"),
+        "minecraft:hopper" => Some("minecraft:hopper"),
+        "minecraft:dispenser" => Some("minecraft:dispenser"),
+        "minecraft:dropper" => Some("minecraft:dropper"),
         "minecraft:furnace" => Some("minecraft:furnace"),
         "minecraft:blast_furnace" => Some("minecraft:blast_furnace"),
         "minecraft:smoker" => Some("minecraft:smoker"),
         _ => None,
+    }
+}
+
+/// Слотов в контейнере: воронка 5, раздатчик и выбрасыватель 9, сундук и бочка 27.
+fn container_size(block: &str) -> usize {
+    match block {
+        "minecraft:hopper" => 5,
+        "minecraft:dispenser" | "minecraft:dropper" => 9,
+        _ => 27,
     }
 }
 
@@ -661,6 +856,36 @@ const FACES: [&str; 6] = ["DOWN", "UP", "NORTH", "SOUTH", "WEST", "EAST"];
 /// Высота глаз стоящего игрока (`Player.getStandingEyeHeight`).
 const EYE_HEIGHT: f64 = 1.62;
 
+/// Что сделал `use_item` с луком или арбалетом.
+enum RangedUse {
+    Ignore,
+    /// Начато натяжение: слот оружия.
+    Draw(usize),
+    /// Выстрел уже произведён (заряженный арбалет).
+    Done,
+}
+
+struct OwnedShot {
+    uuid: Uuid,
+    eye: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+    yaw_offset: f64,
+    speed: f64,
+    base: f64,
+    crit: bool,
+    punch: i32,
+    pierce: i32,
+    rocket: bool,
+}
+
+fn charged_extra(extra: u32, charged: Vec<Stack>) -> u32 {
+    let mut e = (*chunkwake_protocol::components::get(extra)).clone();
+    e.charged = charged;
+    e.raw = None;
+    chunkwake_protocol::components::intern(e)
+}
+
 /// Режимы игры по номерам (`GameType`).
 const GAME_MODES: [&str; 4] = ["survival", "creative", "adventure", "spectator"];
 /// Предел `/give` за раз.
@@ -679,6 +904,9 @@ pub struct SurvivalData {
     /// Типы меню (`menu`): сундук 9×3, двойной 9×6 и верстак.
     pub menu_chest: i32,
     pub menu_double_chest: i32,
+    /// Меню воронки и раздатчика/выбрасывателя (`generic_3x3`).
+    pub menu_hopper: i32,
+    pub menu_3x3: i32,
     /// Состояния сундуков (`ChestBlock`): свойства по состоянию и обратно.
     pub chests: HashMap<u32, ChestState>,
     pub chest_states: HashMap<ChestState, u32>,
@@ -720,6 +948,11 @@ pub struct SurvivalData {
     pub damage_starve: i32,
     pub damage_magic: i32,
     pub damage_wither: i32,
+    pub damage_arrow: i32,
+    pub arrow_entity_type: i32,
+    pub firework_entity_type: i32,
+    pub snowball_entity_type: i32,
+    pub egg_entity_type: i32,
     /// Текущая сложность: `/difficulty` меняет её, пока сервер запущен.
     pub difficulty: AtomicU8,
     /// ID предмета по имени (`minecraft:bread`) для `/give`.
@@ -730,6 +963,7 @@ pub struct SurvivalData {
     pub potion_component: i32,
     /// ID `minecraft:item` в реестре `entity_type`.
     pub item_entity_type: i32,
+    pub orb_entity_type: i32,
 }
 
 impl PlayPlan {
@@ -763,6 +997,19 @@ impl PlayPlan {
         for (name, &id) in &survival.item_ids {
             item_names[id as usize] = name.clone();
         }
+        let effect_kinds = survival::EffectKinds {
+            regeneration: survival.effects.get("minecraft:regeneration").copied(),
+            poison: survival.effects.get("minecraft:poison").copied(),
+            wither: survival.effects.get("minecraft:wither").copied(),
+            hunger: survival.effects.get("minecraft:hunger").copied(),
+        };
+        let sponge = survival
+            .item_ids
+            .get("minecraft:wet_sponge")
+            .copied()
+            .zip(survival.item_ids.get("minecraft:bucket").copied())
+            .zip(survival.item_ids.get("minecraft:water_bucket").copied())
+            .map(|((s, b), w)| (s, b, w));
         Ok(Self {
             ids: Ids {
                 login: cb("login")?,
@@ -846,6 +1093,7 @@ impl PlayPlan {
             min_y,
             item_blocks,
             spawn,
+            spawn_protection: std::sync::atomic::AtomicI32::new(0),
             player_type,
             next_entity_id: AtomicI32::new(1),
             chunk_frames: Mutex::new(HashMap::new()),
@@ -855,8 +1103,20 @@ impl PlayPlan {
             hooks: std::sync::OnceLock::new(),
             plugin_commands: Mutex::new(Vec::new()),
             furnaces: Mutex::new(HashMap::new()),
+            redstone_ticks: Mutex::new(Vec::new()),
+            arrows: Mutex::new(HashMap::new()),
+            fluid_ticks: Mutex::new(Vec::new()),
+            torch_toggles: Mutex::new(HashMap::new()),
+            torch_cool: Mutex::new(HashMap::new()),
+            plates: Mutex::new(HashMap::new()),
+            comparators: Mutex::new(HashMap::new()),
+            piston_moves: Mutex::new(Vec::new()),
+            deferred_updates: Mutex::new(Vec::new()),
+            hoppers: Mutex::new(HashMap::new()),
+            server_ticks: std::sync::atomic::AtomicU64::new(0),
             pending_furnaces: Mutex::new(Vec::new()),
             dropped: Mutex::new(HashMap::new()),
+            orbs: Mutex::new(HashMap::new()),
             players_source: std::sync::OnceLock::new(),
             player_saves: Mutex::new(HashMap::new()),
             ops: std::sync::OnceLock::new(),
@@ -868,6 +1128,8 @@ impl PlayPlan {
             day_time: AtomicI64::new(0),
             game_time: AtomicI64::new(0),
             tick_meter: Mutex::new(TickMeter::new()),
+            effect_kinds,
+            sponge,
             hub: Hub {
                 codec: FrameCodec {
                     threshold: (compression_threshold >= 0)
@@ -915,12 +1177,7 @@ impl PlayPlan {
             return None;
         }
         let key = (x >> 4, z >> 4);
-        // Свет доходит до соседних чанков: их регионы тоже должны быть прочитаны.
-        for dx in -1..=1 {
-            for dz in -1..=1 {
-                self.ensure_region(key.0 + dx, key.1 + dz);
-            }
-        }
+        self.ensure_region(key.0, key.1);
         let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
         let old = {
             let mut world = self.edited.lock().unwrap();
@@ -932,36 +1189,118 @@ impl PlayPlan {
                 return Some(old);
             }
             *rev += 1;
-            let mut access = WorldLight {
-                world: &mut world,
-                template: &self.template,
-                touched: HashSet::new(),
-            };
-            Engine::new(&mut access, &self.light, self.template.height()).block_changed([x, ry, z]);
-            let mut touched = access.touched;
-            touched.insert(key);
-            // Под той же блокировкой: chunk_frame не вставит устаревший кадр.
-            let mut frames = self.chunk_frames.lock().unwrap();
-            for pos in touched {
-                frames.remove(&pos);
-                if pos != key
-                    && let Some(e) = world.get_mut(&pos)
-                {
-                    e.1 += 1;
-                }
-            }
             old
         };
-        if old != state {
-            let local = ((x & 15) << 8 | (z & 15) << 4 | (y & 15)) as u16;
-            self.pending_blocks
-                .lock()
-                .unwrap()
-                .entry([x >> 4, y >> 4, z >> 4])
-                .or_default()
-                .push((local, state));
+        if self.light.same_light(old, state) {
+            // Кадр чанка кэшируется без сверки ревизии: иначе клиент получит старый блок.
+            self.chunk_frames.lock().unwrap().remove(&key);
+        } else {
+            // Свет доходит до соседних чанков: их регионы тоже должны быть прочитаны.
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    if dx != 0 || dz != 0 {
+                        self.ensure_region(key.0 + dx, key.1 + dz);
+                    }
+                }
+            }
+            let snap = {
+                let world = self.edited.lock().unwrap();
+                snapshot_neighborhood(&world, key)
+            };
+            let spread = spread_light(
+                snap.columns,
+                &self.template,
+                &self.light,
+                self.template.height(),
+                [x, ry, z],
+            );
+            let mut world = self.edited.lock().unwrap();
+            // Под той же блокировкой: chunk_frame не вставит устаревший кадр.
+            let mut frames = self.chunk_frames.lock().unwrap();
+            if neighborhood_same(&world, key, &snap.revs) {
+                write_light(
+                    &mut world,
+                    &mut frames,
+                    key,
+                    Some(spread.columns),
+                    spread.touched,
+                );
+            } else {
+                let mut access = WorldLight {
+                    world: &mut world,
+                    template: &self.template,
+                    touched: HashSet::new(),
+                };
+                Engine::new(&mut access, &self.light, self.template.height())
+                    .block_changed([x, ry, z]);
+                let touched = std::mem::take(&mut access.touched);
+                drop(access);
+                write_light(&mut world, &mut frames, key, None, touched);
+            }
         }
+        let local = ((x & 15) << 8 | (z & 15) << 4 | (y & 15)) as u16;
+        self.pending_blocks
+            .lock()
+            .unwrap()
+            .entry([x >> 4, y >> 4, z >> 4])
+            .or_default()
+            .push((local, state));
+        self.observe([x, y, z]);
+        self.wake_fluids([x, y, z]);
         Some(old)
+    }
+
+    /// Наблюдатели, смотрящие на изменённый `changed`, дают импульс через 2 тика.
+    fn observe(&self, changed: [i32; 3]) {
+        for d in 0..6 {
+            let n = crate::redstone::step(changed, d);
+            let Some(s) = self.block(n) else { continue };
+            if !crate::redstone::is_observer(self.state_name(s)) {
+                continue;
+            }
+            let pl = &self.survival.placement;
+            if pl.prop(s, "powered") != Some("true")
+                && crate::redstone::watching(d, pl.prop(s, "facing").unwrap_or(""))
+            {
+                self.schedule(n, 2);
+            }
+        }
+    }
+
+    /// Выход компаратора: из памяти или блок-сущности.
+    fn comparator_output(&self, p: [i32; 3]) -> i32 {
+        if let Some(&v) = self.comparators.lock().unwrap().get(&p) {
+            return v;
+        }
+        let v = self
+            .block_entity(p)
+            .and_then(|be| be.nbt.get("OutputSignal").and_then(Tag::as_i64))
+            .unwrap_or(0) as i32;
+        self.comparators.lock().unwrap().insert(p, v);
+        v
+    }
+
+    /// Заполненность контейнера в `p` для компаратора.
+    fn analog_at(&self, p: [i32; 3]) -> Option<i32> {
+        let s = self.block(p)?;
+        let name = self.state_name(s);
+        let full = |slots: &[Slot]| {
+            slots
+                .iter()
+                .flatten()
+                .map(|st| (st.count, self.max_stack(st.item)))
+                .collect::<Vec<_>>()
+        };
+        if furnace_kind(name).is_some() {
+            let slots = self.with_furnace(p, |e| e.f.slots)?;
+            return Some(crate::redstone::fullness(full(&slots), 3));
+        }
+        container_entity(name)?;
+        let mut slots = self.container_items(p);
+        if let Some((other, _)) = self.chest_partner(p) {
+            slots.extend(self.container_items(other));
+        }
+        Some(crate::redstone::fullness(full(&slots), slots.len()))
     }
 
     /// Подключает диск: дальше регионы читаются при первом обращении к их чанкам.
@@ -1004,6 +1343,11 @@ impl PlayPlan {
         for uuid in online {
             self.send_to(uuid, self.commands_packet(self.op_level(uuid)));
         }
+    }
+
+    pub fn set_spawn_protection(&self, radius: i32) {
+        self.spawn_protection
+            .store(radius.max(0), Ordering::Relaxed);
     }
 
     pub fn set_ops(&self, ops: OpList) {
@@ -1129,8 +1473,64 @@ impl PlayPlan {
     }
 
     /// Запрос плагина к миру: `get x y z` → имя блока, `set x y z имя` → `1`/`0`,
-    /// `effects` → эффекты по порядку ID (строки).
+    /// `effects` → эффекты по порядку ID (строки), `isblock имя` → `1`/`0`,
+    /// `blocks с` → имена блоков по порядку начиная с номера `с` (кусок до 7 КБ).
     pub fn world_request(&self, line: &str) -> String {
+        // `dropitem x y z разброс предмет`: `World.dropItem(Naturally)`.
+        if let Some(rest) = line.strip_prefix("dropitem ") {
+            let f: Vec<&str> = rest.splitn(5, ' ').collect();
+            let num = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok());
+            if let (Some(x), Some(y), Some(z), Some(line)) = (num(0), num(1), num(2), f.get(4))
+                && let Some(stack) = crate::stack_nbt::from_line(line, |n| self.item_id(n))
+            {
+                let (at, vel) = if f.get(3) == Some(&"1") {
+                    // `dropItemNaturally`: сдвиг до ±0.25 и скорость выпавшего из блока.
+                    let r: [f64; 3] = rand::random();
+                    (
+                        [
+                            x + r[0] * 0.5 - 0.25,
+                            y + r[1] * 0.5 - 0.25,
+                            z + r[2] * 0.5 - 0.25,
+                        ],
+                        items::pop_velocity(rand::random(), rand::random()),
+                    )
+                } else {
+                    ([x, y, z], [0.0; 3])
+                };
+                self.drop_item(at, vel, stack, items::BLOCK_DELAY);
+                return "1".into();
+            }
+            return "0".into();
+        }
+        if let Some(name) = line.strip_prefix("defaultdata ") {
+            return self
+                .survival
+                .block_defaults
+                .get(name)
+                .map_or(String::new(), |&s| self.state_string(s));
+        }
+        if let Some(name) = line.strip_prefix("isblock ") {
+            return if self.survival.block_defaults.contains_key(name) {
+                "1"
+            } else {
+                "0"
+            }
+            .into();
+        }
+        if let Some(from) = line.strip_prefix("blocks ") {
+            let from: usize = from.trim().parse().unwrap_or(0);
+            let mut names: Vec<&String> = self.survival.block_defaults.keys().collect();
+            names.sort();
+            let mut out = String::new();
+            for n in names.into_iter().skip(from) {
+                if out.len() + n.len() + 1 > 7000 {
+                    break;
+                }
+                out.push_str(n);
+                out.push('\n');
+            }
+            return out;
+        }
         if line == "enchantments" {
             return self.survival.enchantments.join(
                 "
@@ -1157,17 +1557,20 @@ impl PlayPlan {
             Some("get") => self
                 .block([x, y, z])
                 .map_or(String::new(), |s| self.state_name(s).to_owned()),
+            Some("data") => self
+                .block([x, y, z])
+                .map_or(String::new(), |s| self.state_string(s)),
             Some("set") => {
-                let state = it.next().and_then(|name| {
-                    let name = if name.contains(':') {
-                        name.to_owned()
-                    } else {
-                        format!("minecraft:{name}")
-                    };
-                    self.survival.block_defaults.get(&name).copied()
-                });
+                let state = it.next().and_then(|spec| self.parse_state(spec));
+                let physics = it.next() != Some("0");
                 match state {
-                    Some(s) if self.set_block([x, y, z], s).is_some() => "1".into(),
+                    Some(s) if self.set_block([x, y, z], s).is_some() => {
+                        // Поток плагинов: физику — в тик, иначе события редстоуна ждали бы сами себя.
+                        if physics {
+                            self.deferred_updates.lock().unwrap().push([x, y, z]);
+                        }
+                        "1".into()
+                    }
                     _ => "0".into(),
                 }
             }
@@ -1206,6 +1609,26 @@ impl PlayPlan {
         let h = self.hooks().filter(|h| h.listens(kind))?;
         let rx = h.event(kind, uuid, arg())?;
         tokio::time::timeout(PLUGIN_TIMEOUT, rx).await.ok()?.ok()
+    }
+
+    /// Событие без игрока из синхронного кода (тик): поток ждёт ответа
+    /// плагинов, как главный поток Paper. Без слушателей — сразу `None`.
+    fn sync_event(&self, kind: Event, arg: impl FnOnce() -> String) -> Option<String> {
+        let h = self.hooks().filter(|h| h.listens(kind))?;
+        let rx = h.event(kind, Uuid::nil(), arg())?;
+        let rt = tokio::runtime::Handle::try_current().ok()?;
+        tokio::task::block_in_place(|| {
+            rt.block_on(async { tokio::time::timeout(PLUGIN_TIMEOUT, rx).await.ok()?.ok() })
+        })
+    }
+
+    /// `BlockRedstoneEvent`: новая сила (плагин может сменить).
+    fn redstone_event(&self, pos: [i32; 3], old: i32, new: i32) -> i32 {
+        self.sync_event(Event::Redstone, || {
+            format!("{} {} {} {old} {new}", pos[0], pos[1], pos[2])
+        })
+        .and_then(|r| r.trim().parse::<i32>().ok())
+        .map_or(new, |v| v.clamp(0, 15))
     }
 
     /// Отменено ли событие (`c` в ответе).
@@ -1311,9 +1734,117 @@ impl PlayPlan {
             "tps" => chat_text(&self.tick_meter.lock().unwrap().line()),
             "time" => self.cmd_time(&rest),
             "difficulty" => self.cmd_difficulty(rest.first().copied()),
+            "setblock" if actor.is_none() => self.cmd_setblock(&rest),
+            "fill" if actor.is_none() => self.cmd_fill(&rest),
             _ => return None,
         };
         Some(msg)
+    }
+
+    /// Console-only block placement for repeatable server-side fixtures.
+    fn cmd_setblock(&self, args: &[&str]) -> serde_json::Value {
+        if args.len() != 4 {
+            return chat_text("Usage: setblock <x> <y> <z> <block[state=value]>");
+        }
+        let position = match args[..3]
+            .iter()
+            .map(|value| value.parse::<i32>())
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(values) => [values[0], values[1], values[2]],
+            Err(_) => return chat_text("Invalid block position"),
+        };
+        let Some(state) = self.console_block_state(args[3]) else {
+            return chat_text("Unknown or invalid block state");
+        };
+        if self.set_block(position, state).is_none() {
+            return chat_text("Block position is outside the world");
+        }
+        self.redstone_update(&crate::redstone::around(position));
+        chat_text("Block placed")
+    }
+
+    fn console_block_state(&self, spec: &str) -> Option<u32> {
+        let (name, properties) = match spec.split_once('[') {
+            Some((name, tail)) => {
+                let properties = tail.strip_suffix(']')?;
+                (name, Some(properties))
+            }
+            None => (spec, None),
+        };
+        let mut state = self.survival.placement.default_state(name)?;
+        if let Some(properties) = properties {
+            for pair in properties.split(',') {
+                let (key, value) = pair.split_once('=')?;
+                state = self.survival.placement.with_prop(state, key, value)?;
+            }
+        }
+        Some(state)
+    }
+
+    /// Bounded console fill for reproducible lab fixtures.
+    fn cmd_fill(&self, args: &[&str]) -> serde_json::Value {
+        if args.len() != 7 {
+            return chat_text("Usage: fill <x1> <y1> <z1> <x2> <y2> <z2> <block[state=value]>");
+        }
+        let coordinates = match args[..6]
+            .iter()
+            .map(|value| value.parse::<i32>())
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(values) => values,
+            Err(_) => return chat_text("Invalid fill position"),
+        };
+        let Some(state) = self.console_block_state(args[6]) else {
+            return chat_text("Unknown or invalid block state");
+        };
+        let (x1, x2) = (
+            coordinates[0].min(coordinates[3]),
+            coordinates[0].max(coordinates[3]),
+        );
+        let (y1, y2) = (
+            coordinates[1].min(coordinates[4]),
+            coordinates[1].max(coordinates[4]),
+        );
+        let (z1, z2) = (
+            coordinates[2].min(coordinates[5]),
+            coordinates[2].max(coordinates[5]),
+        );
+        let dimensions = [
+            i64::from(x2) - i64::from(x1) + 1,
+            i64::from(y2) - i64::from(y1) + 1,
+            i64::from(z2) - i64::from(z1) + 1,
+        ];
+        if dimensions.iter().any(|size| *size > 4096) {
+            return chat_text("Fill is limited to 4096 blocks");
+        }
+        let volume = dimensions.into_iter().product::<i64>();
+        if volume > 4096 {
+            return chat_text("Fill is limited to 4096 blocks");
+        }
+        if y1 < self.min_y || y2 >= self.min_y + self.template.height() as i32 {
+            return chat_text("Fill is outside the world");
+        }
+        let mut origins = HashSet::new();
+        let mut changed = 0;
+        for y in y1..=y2 {
+            for z in z1..=z2 {
+                for x in x1..=x2 {
+                    let position = [x, y, z];
+                    if self
+                        .set_block(position, state)
+                        .is_some_and(|old| old != state)
+                    {
+                        changed += 1;
+                        origins.extend(crate::redstone::around(position));
+                    }
+                }
+            }
+        }
+        if !origins.is_empty() {
+            self.redstone_update(&origins.into_iter().collect::<Vec<_>>());
+        }
+        chat_text(&format!("Filled {changed} blocks"))
     }
 
     fn list_text(&self) -> String {
@@ -1814,7 +2345,14 @@ impl PlayPlan {
                 let mut world = self.edited.lock().unwrap();
                 let mut cache = self.chunk_frames.lock().unwrap();
                 let mut found = Vec::new();
+                let mut hoppers = Vec::new();
                 for (pos, c) in columns {
+                    hoppers.extend(
+                        c.block_entities
+                            .iter()
+                            .filter(|(_, be)| be.id == "minecraft:hopper")
+                            .map(|(p, _)| *p),
+                    );
                     found.extend(
                         c.block_entities
                             .iter()
@@ -1828,6 +2366,10 @@ impl PlayPlan {
                     }
                 }
                 self.pending_furnaces.lock().unwrap().extend(found);
+                self.hoppers
+                    .lock()
+                    .unwrap()
+                    .extend(hoppers.into_iter().map(|p| (p, 0)));
             }
             Err(e) => tracing::error!("region {key:?}: {e}"),
         }
@@ -1906,6 +2448,33 @@ impl PlayPlan {
         Some(column.block(lx, ry as usize, lz))
     }
 
+    /// `f` по пачке, затем склейка в исходном порядке. Пул — по числу ядер.
+    fn map_chunks<T, R>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R>
+    where
+        T: Sync,
+        R: Send,
+    {
+        let n = items.len();
+        let workers = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1)
+            .min(n);
+        if workers <= 1 {
+            return items.iter().map(f).collect();
+        }
+        let mut out = Vec::with_capacity(n);
+        std::thread::scope(|scope| {
+            let mut joins = Vec::with_capacity(workers);
+            for batch in items.chunks(n.div_ceil(workers)) {
+                joins.push(scope.spawn(|| batch.iter().map(&f).collect::<Vec<_>>()));
+            }
+            for join in joins {
+                out.extend(join.join().expect("chunk frame"));
+            }
+        });
+        out
+    }
+
     /// Центр, пачка чанков и её конец — одним буфером и одной записью в сокет.
     async fn send_chunks(
         &self,
@@ -1916,10 +2485,7 @@ impl PlayPlan {
     ) -> Result<(), NetError> {
         let ids = self.ids;
         let hub = &self.hub;
-        let frames: Vec<Frame> = coords
-            .iter()
-            .map(|&(x, z)| self.chunk_frame(x, z))
-            .collect();
+        let frames = Self::map_chunks(coords, |&(x, z)| self.chunk_frame(x, z));
         let mut out = Vec::with_capacity(frames.iter().map(|f| f.len()).sum::<usize>() + 64);
         for &(x, z) in forget {
             out.extend(hub.frame(&play::forget_level_chunk(ids.forget_level_chunk, x, z)));
@@ -1989,6 +2555,7 @@ impl PlayPlan {
             rotated: false,
             on_ground: true,
             gliding: false,
+            collects: true,
         };
         let uuid = me.entry.uuid;
         // Подписка до вставки в список: ни одно событие после снимка не теряется.
@@ -2115,6 +2682,281 @@ impl PlayPlan {
         );
     }
 
+    /// `ExperienceOrb.award`: сферы на `amount` очков в точке `pos`.
+    fn spawn_orbs(&self, pos: [f64; 3], amount: i32) {
+        for value in crate::orbs::award(amount) {
+            // `tryMergeToExisting`: та же величина рядом — в неё (+1 к счёту).
+            {
+                let roll = rand::Rng::gen_range(&mut rand::thread_rng(), 0..40);
+                let mut orbs = self.orbs.lock().unwrap();
+                if let Some(o) = orbs.iter_mut().find_map(|(&id, o)| {
+                    (crate::orbs::touching(pos, o.pos, 0.0)
+                        && crate::orbs::can_absorb_spawn(id, roll, value, o))
+                    .then_some(o)
+                }) {
+                    o.count += 1;
+                    o.age = 0;
+                    continue;
+                }
+            }
+            let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
+            let vel = crate::orbs::spawn_velocity(rand::random());
+            let orb = crate::orbs::Orb {
+                pos,
+                vel,
+                on_ground: false,
+                value,
+                count: 1,
+                age: 0,
+            };
+            self.orbs.lock().unwrap().insert(id, orb);
+            for p in self.orb_packets(id, &orb) {
+                self.hub.send(None, p);
+            }
+        }
+    }
+
+    fn orb_packets(&self, id: i32, o: &crate::orbs::Orb) -> [Vec<u8>; 2] {
+        [
+            play::add_entity_moving(
+                self.ids.add_entity,
+                id,
+                Uuid::from_u128(id as u128 | 1 << 64),
+                self.survival.orb_entity_type,
+                o.pos,
+                o.vel,
+                0.0,
+                0.0,
+                0,
+            ),
+            inv::set_orb_value(self.ids.set_entity_data, id, o.value),
+        ]
+    }
+
+    fn orb_frames(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (&id, o) in self.orbs.lock().unwrap().iter() {
+            for p in self.orb_packets(id, o) {
+                out.extend(self.hub.frame(&p));
+            }
+        }
+        out
+    }
+
+    /// Тик сфер: тяга к ближайшему игроку в 8 блоках, физика, исчезновение.
+    fn tick_orbs(&self) {
+        let mut orbs = self.orbs.lock().unwrap();
+        if orbs.is_empty() {
+            return;
+        }
+        // Наблюдатели и мёртвые сферы не притягивают (`EntitySelector.NO_SPECTATORS`).
+        let players: Vec<[f64; 3]> = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|p| p.collects)
+            .map(|p| p.pos)
+            .collect();
+        let min_y = self.min_y;
+        let solid = |p: [i32; 3]| p[1] >= min_y && self.block(p).is_none_or(|b| b != AIR);
+        let mut syncs = Vec::new();
+        let mut gone = Vec::new();
+        for (&id, o) in orbs.iter_mut() {
+            let near = players
+                .iter()
+                .map(|p| {
+                    (
+                        p,
+                        (p[0] - o.pos[0]).powi(2)
+                            + (p[1] - o.pos[1]).powi(2)
+                            + (p[2] - o.pos[2]).powi(2),
+                    )
+                })
+                .filter(|(_, d)| *d < crate::orbs::FOLLOW_RANGE.powi(2))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(p, _)| *p);
+            if crate::orbs::step(o, near, solid) {
+                syncs.push((id, o.pos, o.vel, o.on_ground));
+            }
+            if o.age >= crate::orbs::LIFETIME_TICKS || o.pos[1] < min_y as f64 - items::VOID_DEPTH {
+                gone.push(id);
+            }
+        }
+        for id in &gone {
+            orbs.remove(id);
+        }
+        // `scanForMerges` раз в 20 тиков: соседние сферы той же величины сливаются.
+        let ids: Vec<i32> = orbs
+            .iter()
+            .filter(|(_, o)| o.age % 20 == 1)
+            .map(|(&id, _)| id)
+            .collect();
+        for a in ids {
+            let Some(&oa) = orbs.get(&a) else { continue };
+            let others: Vec<i32> = orbs
+                .iter()
+                .filter(|&(&b, ob)| {
+                    b != a && ob.value == oa.value && crate::orbs::touching(oa.pos, ob.pos, 0.5)
+                })
+                .map(|(&b, _)| b)
+                .collect();
+            for b in others {
+                if let Some(ob) = orbs.remove(&b) {
+                    let o = orbs.get_mut(&a).unwrap();
+                    o.count += ob.count;
+                    o.age = o.age.min(ob.age);
+                    gone.push(b);
+                }
+            }
+        }
+        drop(orbs);
+        for (id, pos, vel, on_ground) in syncs {
+            if gone.contains(&id) {
+                continue;
+            }
+            self.hub.send(
+                None,
+                play::teleport_entity(self.ids.teleport_entity, id, pos, 0.0, 0.0, on_ground),
+            );
+            self.hub.send(
+                None,
+                play::set_entity_motion(self.ids.set_entity_motion, id, vel),
+            );
+        }
+        if !gone.is_empty() {
+            self.hub
+                .send(None, play::remove_entities(self.ids.remove_entities, &gone));
+        }
+    }
+
+    /// Сфера у ног игрока (`ExperienceOrb.playerTouch`): ID, величина, позиция.
+    fn orb_near(&self, feet: [f64; 3]) -> Option<(i32, i32, [f64; 3])> {
+        self.orbs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, o)| items::in_reach(feet, o.pos))
+            .map(|(&id, o)| (id, o.value, o.pos))
+    }
+
+    /// Забрать одну сферу из `id` (слитая отдаёт по одной, исчезает на последней).
+    fn take_orb(&self, id: i32, collector: i32) -> bool {
+        let mut orbs = self.orbs.lock().unwrap();
+        let Some(o) = orbs.get_mut(&id) else {
+            return false;
+        };
+        o.count -= 1;
+        let last = o.count == 0;
+        if last {
+            orbs.remove(&id);
+        }
+        drop(orbs);
+        // Клиент на подбор сферы сам играет её звук.
+        self.hub.send(
+            None,
+            inv::take_item_entity(self.ids.take_item_entity, id, collector, 1),
+        );
+        if last {
+            self.hub
+                .send(None, play::remove_entities(self.ids.remove_entities, &[id]));
+        }
+        true
+    }
+
+    /// Подбор сферы: `PlayerPickupExperienceEvent` (отмена — сфера остаётся),
+    /// Починка с `PlayerItemMendEvent`, остаток через `PlayerExpChangeEvent`.
+    /// `true` — сфера забрана.
+    async fn absorb_orb(
+        &self,
+        conn: &mut Connection,
+        uuid: Uuid,
+        collector: i32,
+        state: &mut PlayerState,
+        (id, value, pos): (i32, i32, [f64; 3]),
+    ) -> Result<bool, NetError> {
+        if self
+            .cancelled(Event::PickupXp, uuid, || {
+                format!("{value} {} {} {}", pos[0], pos[1], pos[2])
+            })
+            .await
+        {
+            return Ok(false);
+        }
+        if !self.take_orb(id, collector) {
+            return Ok(false);
+        }
+        let slots = [state.inv.held_slot(), survival::OFFHAND, 5, 6, 7, 8];
+        let names = ["HAND", "OFF_HAND", "HEAD", "CHEST", "LEGS", "FEET"];
+        let mut left = value;
+        let mut changed = Vec::new();
+        // `repairPlayerItems`: случайный повреждённый предмет с Починкой, пока есть опыт.
+        while left > 0 {
+            let open: Vec<usize> = (0..slots.len())
+                .filter(|&k| {
+                    state.inv.slots[slots[k]].is_some_and(|s| {
+                        s.damage > 0
+                            && chunkwake_protocol::components::stack_level(
+                                s.extra,
+                                "minecraft:mending",
+                            ) > 0
+                    })
+                })
+                .collect();
+            if open.is_empty() {
+                break;
+            }
+            let k = open[rand::Rng::gen_range(&mut rand::thread_rng(), 0..open.len())];
+            let Some(mut s) = state.inv.slots[slots[k]] else {
+                break;
+            };
+            let mut repair = crate::orbs::mend_repair(left, s.damage);
+            let reply = self
+                .plugin_event(Event::Mend, uuid, || {
+                    format!(
+                        "{} {repair} {left} {}",
+                        names[k],
+                        crate::stack_nbt::to_line(s, self.item_name(s.item))
+                    )
+                })
+                .await;
+            match reply.as_deref().map(str::trim) {
+                Some("c") => break,
+                Some(r) if !r.is_empty() => {
+                    repair = r.parse::<i32>().unwrap_or(repair).clamp(0, s.damage)
+                }
+                _ => {}
+            }
+            if repair <= 0 {
+                break;
+            }
+            s.damage -= repair;
+            state.inv.slots[slots[k]] = Some(s);
+            changed.push(slots[k]);
+            left = crate::orbs::mend_left(left, repair);
+        }
+        if !changed.is_empty() {
+            changed.dedup();
+            self.send_slots(conn, &mut state.inv, &changed).await?;
+        }
+        if left > 0
+            && let Some(r) = self
+                .plugin_event(Event::ExpChange, uuid, || left.to_string())
+                .await
+            && let Ok(n) = r.trim().parse::<i32>()
+        {
+            left = n;
+        }
+        if left != 0 {
+            let old = state.xp.level;
+            state.xp.add_points(left);
+            self.send_xp(conn, &state.xp).await?;
+            self.xp_sounds(uuid, old, &state.xp);
+        }
+        Ok(true)
+    }
+
     /// Игрок бросает предмет вперёд (`Player.drop`).
     fn throw(&self, feet: [f64; 3], yaw: f32, pitch: f32, stack: Stack) {
         self.drop_item(
@@ -2162,7 +3004,18 @@ impl PlayPlan {
             .collect()
     }
 
-    fn pickup(
+    /// Воткнутые стрелы, до которых дотягивается игрок.
+    fn arrow_candidates(&self, feet: [f64; 3]) -> Vec<(i32, [f64; 3])> {
+        let arrows = self.arrows.lock().unwrap();
+        arrows
+            .iter()
+            .filter(|(_, a)| a.stuck && items::in_reach(feet, a.pos))
+            .map(|(&id, a)| (id, a.pos))
+            .collect()
+    }
+
+    /// Воткнутые стрелы у ног (`AbstractArrow.playerTouch`): в инвентарь, если есть место.
+    fn pickup_arrows(
         &self,
         collector: i32,
         feet: [f64; 3],
@@ -2170,6 +3023,47 @@ impl PlayPlan {
         vetoed: &HashSet<i32>,
     ) -> Vec<usize> {
         let mut changed = Vec::new();
+        let near: Vec<i32> = self
+            .arrow_candidates(feet)
+            .into_iter()
+            .map(|(id, _)| id)
+            .filter(|id| !vetoed.contains(id))
+            .collect();
+        let Some(item) = self.item_id("minecraft:arrow").filter(|_| !near.is_empty()) else {
+            return changed;
+        };
+        let mut taken = Vec::new();
+        for id in near {
+            let mut trial = inv.clone();
+            let (slots, left) = trial.add(item, 1, 64);
+            if left > 0 || self.arrows.lock().unwrap().remove(&id).is_none() {
+                continue;
+            }
+            *inv = trial;
+            changed.extend(slots);
+            self.hub.send(
+                None,
+                inv::take_item_entity(self.ids.take_item_entity, id, collector, 1),
+            );
+            taken.push(id);
+        }
+        if !taken.is_empty() {
+            self.hub.send(
+                None,
+                play::remove_entities(self.ids.remove_entities, &taken),
+            );
+        }
+        changed
+    }
+
+    fn pickup(
+        &self,
+        collector: i32,
+        feet: [f64; 3],
+        inv: &mut Inventory,
+        vetoed: &HashSet<i32>,
+    ) -> Vec<usize> {
+        let mut changed = self.pickup_arrows(collector, feet, inv, vetoed);
         let mut dropped = self.dropped.lock().unwrap();
         if dropped.is_empty() {
             return changed;
@@ -2316,6 +3210,489 @@ impl PlayPlan {
         }
     }
 
+    /// Тик стрел: полёт, втыкание, попадание в игроков, подбор воткнутых, исчезновение.
+    fn tick_arrows(&self) {
+        use crate::arrows as ar;
+        if self.arrows.lock().unwrap().is_empty() {
+            return;
+        }
+        let players: Vec<(Uuid, [f64; 3], bool, i32)> = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .values()
+            .map(|p| (p.entry.uuid, p.pos, p.collects, p.entity_id))
+            .collect();
+        let alive: Vec<(Uuid, [f64; 3])> =
+            players.iter().filter(|p| p.2).map(|p| (p.0, p.1)).collect();
+        let alive_ids: Vec<(Uuid, i32)> =
+            players.iter().filter(|p| p.2).map(|p| (p.0, p.3)).collect();
+        let solid = |c: [i32; 3]| {
+            let Some(s) = self.block(c) else {
+                return c[1] < self.min_y;
+            };
+            let n = self.state_name(s);
+            !matches!(
+                n,
+                "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | ""
+            ) && crate::fluids::fluid_of(n, None).is_none()
+                && !self.fluid_replaceable(c)
+        };
+        let water = |c: [i32; 3]| {
+            self.block(c)
+                .and_then(|s| crate::fluids::state_fluid(&self.survival.placement, s))
+                .is_some_and(|f| f.kind == crate::fluids::Kind::Water)
+        };
+        let mut gone = Vec::new();
+        let mut stuck = Vec::new();
+        let mut broken = Vec::new();
+        let mut hurt = Vec::new();
+        {
+            let mut arrows = self.arrows.lock().unwrap();
+            for (&id, a) in arrows.iter_mut() {
+                let punch = a.punch;
+                for hit in ar::step(a, &alive, solid, water) {
+                    match hit {
+                        ar::Hit::Pop => {
+                            broken.push((id, true, a.pos));
+                            gone.push(id);
+                        }
+                        ar::Hit::Block if a.thrown => {
+                            broken.push((id, false, a.pos));
+                            gone.push(id);
+                        }
+                        ar::Hit::Block => stuck.push((id, a.pos)),
+                        ar::Hit::Player(k, d, vel) => {
+                            if a.thrown {
+                                broken.push((id, false, a.pos));
+                                gone.push(id);
+                            } else {
+                                hurt.push((alive_ids[k], d, punch, vel));
+                                if a.stopped {
+                                    gone.push(id);
+                                }
+                            }
+                        }
+                    }
+                }
+                if a.stuck {
+                    if a.age >= ar::DESPAWN || a.pos[1] < self.min_y as f64 - 64.0 {
+                        gone.push(id);
+                    }
+                } else if a.pos[1] < self.min_y as f64 - 64.0 {
+                    gone.push(id);
+                }
+            }
+            gone.sort_unstable();
+            gone.dedup();
+            for id in &gone {
+                arrows.remove(id);
+            }
+        }
+        for (id, rocket, pos) in broken {
+            if rocket {
+                self.play_sound(
+                    None,
+                    "minecraft:entity.firework_rocket.blast",
+                    crate::sounds::NEUTRAL,
+                    pos,
+                    1.0,
+                    1.0,
+                );
+            }
+            self.hub.send(
+                None,
+                inv::entity_event(self.ids.entity_event, id, crate::arrows::EVENT_BREAK),
+            );
+        }
+        for (id, pos) in stuck {
+            self.hub.send(
+                None,
+                play::teleport_entity(self.ids.teleport_entity, id, pos, 0.0, 0.0, false),
+            );
+            self.hub.send(
+                None,
+                play::set_entity_motion(self.ids.set_entity_motion, id, [0.0; 3]),
+            );
+            self.block_sound(
+                None,
+                "minecraft:entity.arrow.hit",
+                pos.map(|c| c.floor() as i32),
+                1.0,
+                1.0,
+            );
+        }
+        for ((uuid, entity), d, punch, vel) in hurt {
+            self.push_control(uuid, Control::Hurt(d, Cause::Arrow));
+            if punch > 0 {
+                let h = (vel[0] * vel[0] + vel[2] * vel[2]).sqrt();
+                if h > 1e-6 {
+                    let s = punch as f64 * 0.6;
+                    self.hub.send(
+                        None,
+                        play::set_entity_motion(
+                            self.ids.set_entity_motion,
+                            entity,
+                            [vel[0] / h * s, 0.1, vel[2] / h * s],
+                        ),
+                    );
+                }
+            }
+        }
+        if !gone.is_empty() {
+            self.hub
+                .send(None, play::remove_entities(self.ids.remove_entities, &gone));
+        }
+    }
+
+    /// Выпустить снаряд (стрела, снежок, яйцо): сущность у клиентов, полёт — в `tick_arrows`.
+    fn shoot_arrow(&self, pos: [f64; 3], vel: [f64; 3], entity_type: i32, thrown: bool) {
+        self.launch(entity_type, crate::arrows::Arrow::flight(pos, vel, thrown));
+    }
+
+    fn hand_index(inv: &survival::Inventory, hand: i32) -> Option<usize> {
+        match hand {
+            0 => Some(inv.held_slot()),
+            1 => Some(survival::OFFHAND),
+            _ => None,
+        }
+    }
+
+    /// Стрела или (для арбалета) ракета: вторая рука, основная, хотбар, остальной инвентарь.
+    fn projectile_slot(&self, inv: &survival::Inventory, crossbow: bool) -> Option<usize> {
+        let want = |s: Stack| {
+            let n = self.item_name(s.item);
+            n == "minecraft:arrow" || (crossbow && n == "minecraft:firework_rocket")
+        };
+        let held = inv.held_slot();
+        let mut order = vec![survival::OFFHAND, held];
+        order.extend((36..45).filter(|i| *i != held));
+        order.extend(9..36);
+        order
+            .into_iter()
+            .find(|&i| inv.slots.get(i).and_then(|s| *s).is_some_and(want))
+    }
+
+    fn wear_one(&self, stack: &mut Stack) -> bool {
+        let max = self
+            .survival
+            .items
+            .get(stack.item as usize)
+            .map_or(0, |i| i.max_damage);
+        if max <= 0 {
+            return false;
+        }
+        let unbreaking =
+            chunkwake_protocol::components::stack_level(stack.extra, "minecraft:unbreaking");
+        if unbreaking != 0 && !rand::random::<u32>().is_multiple_of(unbreaking as u32 + 1) {
+            return false;
+        }
+        stack.damage += 1;
+        stack.damage >= max
+    }
+
+    fn break_in_hand(&self, entity: i32, offhand: bool) {
+        let event = if offhand {
+            inv::ENTITY_EVENT_BREAK_OFFHAND
+        } else {
+            inv::ENTITY_EVENT_BREAK_MAINHAND
+        };
+        self.hub.send(
+            None,
+            inv::entity_event(self.ids.entity_event, entity, event),
+        );
+    }
+
+    fn launch(&self, entity_type: i32, arrow: crate::arrows::Arrow) {
+        let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
+        let (pos, vel) = (arrow.pos, arrow.vel);
+        self.arrows.lock().unwrap().insert(id, arrow);
+        let (yaw, pitch) = crate::arrows::rotation(vel);
+        self.hub.send(
+            None,
+            play::add_entity_moving(
+                self.ids.add_entity,
+                id,
+                Uuid::from_u128(rand::random()),
+                entity_type,
+                pos,
+                vel,
+                pitch,
+                yaw,
+                0,
+            ),
+        );
+    }
+
+    fn shoot_owned(&self, shot: OwnedShot) {
+        let dir = crate::arrows::aim(shot.yaw as f64, shot.pitch as f64, shot.yaw_offset);
+        let spread = if shot.rocket {
+            0.0
+        } else {
+            crate::arrows::BOW_SPREAD
+        };
+        let vel = crate::arrows::shoot(dir, shot.speed, spread, rand::random());
+        let mut arrow = crate::arrows::Arrow::flight(shot.eye, vel, false);
+        arrow.owner = Some(shot.uuid);
+        arrow.left_owner = false;
+        arrow.base_damage = shot.base;
+        arrow.crit = shot.crit;
+        arrow.punch = shot.punch;
+        arrow.pierce = shot.pierce;
+        arrow.firework = shot.rocket;
+        let ty = if shot.rocket {
+            self.survival.firework_entity_type
+        } else {
+            self.survival.arrow_entity_type
+        };
+        self.launch(ty, arrow);
+    }
+
+    /// Правый клик по луку или арбалету. Заряженный арбалет стреляет сразу.
+    async fn use_ranged(
+        &self,
+        conn: &mut Connection,
+        uuid: Uuid,
+        entity: i32,
+        inv: &mut survival::Inventory,
+        hand: i32,
+        mode: u8,
+    ) -> Result<RangedUse, NetError> {
+        if mode == 3 {
+            return Ok(RangedUse::Ignore);
+        }
+        let Some(slot) = Self::hand_index(inv, hand) else {
+            return Ok(RangedUse::Ignore);
+        };
+        let Some(stack) = inv.slots[slot] else {
+            return Ok(RangedUse::Ignore);
+        };
+        match self.item_name(stack.item) {
+            "minecraft:crossbow"
+                if !chunkwake_protocol::components::get(stack.extra)
+                    .charged
+                    .is_empty() =>
+            {
+                self.fire_crossbow(conn, uuid, entity, inv, slot, mode)
+                    .await?;
+                Ok(RangedUse::Done)
+            }
+            "minecraft:crossbow" | "minecraft:bow" => Ok(RangedUse::Draw(slot)),
+            _ => Ok(RangedUse::Ignore),
+        }
+    }
+
+    /// Отпускание: лук стреляет, арбалет вкладывает снаряд, если зарядка дошла.
+    #[allow(clippy::too_many_arguments)]
+    async fn release_draw(
+        &self,
+        conn: &mut Connection,
+        uuid: Uuid,
+        entity: i32,
+        inv: &mut survival::Inventory,
+        slot: usize,
+        start: u64,
+        now: u64,
+        mode: u8,
+    ) -> Result<(), NetError> {
+        let Some(stack) = inv.slots[slot] else {
+            return Ok(());
+        };
+        let ticks = now.saturating_sub(start) as u32;
+        match self.item_name(stack.item) {
+            "minecraft:bow" => {
+                self.release_bow(conn, uuid, entity, inv, slot, ticks, mode)
+                    .await
+            }
+            "minecraft:crossbow" => {
+                let quick = chunkwake_protocol::components::stack_level(
+                    stack.extra,
+                    "minecraft:quick_charge",
+                );
+                if ticks < crate::arrows::crossbow_charge(quick) {
+                    return Ok(());
+                }
+                self.load_crossbow(conn, uuid, inv, slot, mode).await
+            }
+            _ => Ok(()),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn release_bow(
+        &self,
+        conn: &mut Connection,
+        uuid: Uuid,
+        entity: i32,
+        inv: &mut survival::Inventory,
+        slot: usize,
+        ticks: u32,
+        mode: u8,
+    ) -> Result<(), NetError> {
+        let power = crate::arrows::bow_power(ticks);
+        if power < 0.1 {
+            return Ok(());
+        }
+        let Some(stack) = inv.slots[slot] else {
+            return Ok(());
+        };
+        let creative = mode == 1;
+        let infinity =
+            chunkwake_protocol::components::stack_level(stack.extra, "minecraft:infinity") > 0;
+        let ammo = self.projectile_slot(inv, false);
+        if ammo.is_none() && !creative {
+            return Ok(());
+        }
+        let plain = ammo.is_none_or(|i| {
+            inv.slots[i].is_some_and(|s| self.item_name(s.item) == "minecraft:arrow")
+        });
+        let mut changed = vec![slot];
+        if let Some(i) = ammo.filter(|_| !creative && !(infinity && plain)) {
+            inv.consume_at(i);
+            changed.push(i);
+        }
+        let Some((feet, yaw, pitch)) = self.player_at(uuid) else {
+            return Ok(());
+        };
+        let level = chunkwake_protocol::components::stack_level(stack.extra, "minecraft:power");
+        let base = if level <= 0 {
+            crate::arrows::BASE_DAMAGE
+        } else {
+            crate::arrows::BASE_DAMAGE + 0.5 + 0.5 * level as f64
+        };
+        let punch = chunkwake_protocol::components::stack_level(stack.extra, "minecraft:punch");
+        self.shoot_owned(OwnedShot {
+            uuid,
+            eye: eye_of(feet),
+            yaw,
+            pitch,
+            yaw_offset: 0.0,
+            speed: crate::arrows::BOW_SPEED * power,
+            base,
+            crit: power >= 1.0,
+            punch,
+            pierce: 0,
+            rocket: false,
+        });
+        if !creative && let Some(mut s) = inv.slots[slot] {
+            let broke = self.wear_one(&mut s);
+            inv.slots[slot] = (!broke).then_some(s);
+            if broke {
+                self.break_in_hand(entity, slot == survival::OFFHAND);
+            }
+        }
+        let pitch_s = 1.0 / (rand::random::<f32>() * 0.4 + 1.2) + power as f32 * 0.5;
+        self.player_sound(uuid, "minecraft:entity.arrow.shoot", 1.0, pitch_s);
+        changed.sort_unstable();
+        changed.dedup();
+        self.send_slots(conn, inv, &changed).await
+    }
+
+    async fn load_crossbow(
+        &self,
+        conn: &mut Connection,
+        uuid: Uuid,
+        inv: &mut survival::Inventory,
+        slot: usize,
+        mode: u8,
+    ) -> Result<(), NetError> {
+        let Some(stack) = inv.slots[slot] else {
+            return Ok(());
+        };
+        let creative = mode == 1;
+        let ammo = self.projectile_slot(inv, true);
+        let projectile = if let Some(i) = ammo {
+            let Some(s) = inv.slots[i] else {
+                return Ok(());
+            };
+            if !creative {
+                inv.consume_at(i);
+            }
+            Stack { count: 1, ..s }
+        } else if creative && let Some(id) = self.item_id("minecraft:arrow") {
+            Stack::new(id, 1)
+        } else {
+            return Ok(());
+        };
+        let mut next = stack;
+        next.extra = charged_extra(stack.extra, vec![projectile]);
+        inv.slots[slot] = Some(next);
+        let mut changed = vec![slot];
+        if let Some(i) = ammo.filter(|_| !creative) {
+            changed.push(i);
+        }
+        self.player_sound(uuid, "minecraft:item.crossbow.loading_end", 1.0, 1.0);
+        self.send_slots(conn, inv, &changed).await
+    }
+
+    async fn fire_crossbow(
+        &self,
+        conn: &mut Connection,
+        uuid: Uuid,
+        entity: i32,
+        inv: &mut survival::Inventory,
+        slot: usize,
+        mode: u8,
+    ) -> Result<(), NetError> {
+        let Some(stack) = inv.slots[slot] else {
+            return Ok(());
+        };
+        let loaded = chunkwake_protocol::components::get(stack.extra)
+            .charged
+            .clone();
+        if loaded.is_empty() {
+            return Ok(());
+        }
+        let Some((feet, yaw, pitch)) = self.player_at(uuid) else {
+            return Ok(());
+        };
+        let multi =
+            chunkwake_protocol::components::stack_level(stack.extra, "minecraft:multishot") > 0;
+        let pierce = chunkwake_protocol::components::stack_level(stack.extra, "minecraft:piercing");
+        let offsets: &[f64] = if multi {
+            &crate::arrows::MULTISHOT_YAW
+        } else {
+            &[0.0]
+        };
+        let eye = eye_of(feet);
+        for ammo in &loaded {
+            let name = self.item_name(ammo.item);
+            let rocket = name == "minecraft:firework_rocket";
+            let speed = if rocket {
+                crate::arrows::CROSSBOW_ROCKET
+            } else {
+                crate::arrows::CROSSBOW_ARROW
+            };
+            for &off in offsets {
+                self.shoot_owned(OwnedShot {
+                    uuid,
+                    eye,
+                    yaw,
+                    pitch,
+                    yaw_offset: off,
+                    speed,
+                    base: crate::arrows::BASE_DAMAGE,
+                    crit: false,
+                    punch: 0,
+                    pierce: if rocket { 0 } else { pierce },
+                    rocket,
+                });
+            }
+        }
+        let mut next = stack;
+        next.extra = charged_extra(stack.extra, Vec::new());
+        let creative = mode == 1;
+        if !creative && self.wear_one(&mut next) {
+            inv.slots[slot] = None;
+            self.break_in_hand(entity, slot == survival::OFFHAND);
+        } else {
+            inv.slots[slot] = Some(next);
+        }
+        self.player_sound(uuid, "minecraft:item.crossbow.shoot", 1.0, 1.0);
+        self.send_slots(conn, inv, &[slot]).await
+    }
+
     /// Позиция ног и поворот игрока.
     fn player_at(&self, uuid: Uuid) -> Option<([f64; 3], f32, f32)> {
         self.hub
@@ -2354,7 +3731,10 @@ impl PlayPlan {
                 let Some(plan) = plan.upgrade() else { return };
                 let started = Instant::now();
                 plan.tick_items();
+                plan.tick_arrows();
+                plan.tick_orbs();
                 plan.tick_furnaces();
+                plan.tick_redstone();
                 plan.flush_blocks();
                 plan.flush_moves();
                 if let Some(h) = plan.hooks() {
@@ -2581,6 +3961,7 @@ impl PlayPlan {
             visible.insert(e.entity_id);
         }
         out.extend(self.dropped_frames());
+        out.extend(self.orb_frames());
         if !out.is_empty() {
             conn.send_frames(&out).await?;
         }
@@ -2592,10 +3973,13 @@ impl PlayPlan {
         let mut survival = matches!(login.spawn.game_mode, 0 | 2);
         state.vitals.reset_fall(me.pos);
         let mut saved_ticks: u32 = 0;
+        // `takeXpDelay`: сферы — не чаще раза в 2 тика.
+        let mut xp_delay: u32 = 0;
         let mut last_void: Option<Instant> = None;
         let mut teleport_id = 1;
         // Поедание: слот хотбара, еда и момент окончания.
         let mut eating: Option<(usize, chunkwake_data::world::Food, Instant)> = None;
+        let mut drawing: Option<(usize, u64)> = None;
         // Питьё зелья: слот, предмет, компоненты и момент окончания.
         let mut drinking: Option<(usize, i32, u32, Instant)> = None;
         // Открытое окно (сундук, верстак) и счётчик номеров окон.
@@ -2634,8 +4018,10 @@ impl PlayPlan {
         self.sync_motion(conn, me.entity_id, &state.vitals, motion)
             .await?;
         let mut pending: Option<(i64, Instant)> = None;
-        // Атрибуты от чар снаряжения, последние отправленные клиенту.
+        // Атрибуты от чар снаряжения, последние отправленные клиенту,
+        // и шесть слотов (предмет, extra), по которым карта не пересчитывается.
         let mut ench_attrs = Default::default();
+        let mut ench_gear = [(-1, 0); 6];
         // Ломка (`ServerPlayerGameMode`): тики сессии, текущий блок и отложенная
         // ломка (клиент закончил раньше, чем позволяет прогресс).
         let mut game_ticks: u64 = 0;
@@ -2662,12 +4048,17 @@ impl PlayPlan {
                 Some(c) = controls.recv() => {
                     match c {
                         Control::Shutdown => return Ok(()),
+                        Control::Hurt(d, cause) => {
+                            if !state.vitals.dead && matches!(login.spawn.game_mode, 0 | 2) {
+                                self.hurt(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, d, cause).await?;
+                            }
+                        }
                         Control::Health(h) => {
                             if !state.vitals.dead {
                                 state.vitals.health = h.min(survival::MAX_HEALTH);
                                 self.send_health(conn, &state.vitals).await?;
                                 if h <= 0.0 && state.vitals.damage(0.0) {
-                                    self.die(conn, me, &mut state.inv, Cause::Generic).await?;
+                                    self.die(conn, me, &mut state.inv, &mut state.xp, Cause::Generic).await?;
                                 }
                             }
                         }
@@ -2734,7 +4125,7 @@ impl PlayPlan {
                             }
                         }
                         Control::Effect { effect: e, force, command } => {
-                            self.grant_effect(conn, me, &mut state.vitals, &mut state.inv, survival, e, force, command).await?;
+                            self.grant_effect(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, survival, e, force, command).await?;
                         }
                         Control::ClearEffect { id, command } => {
                             self.revoke_effects(conn, me, &mut state.vitals, id, command).await?;
@@ -2743,12 +4134,7 @@ impl PlayPlan {
                             let old = state.xp.level;
                             if state.xp.apply(change) {
                                 self.send_xp(conn, &state.xp).await?;
-                                if matches!(change, crate::xp::XpChange::Points(n) if n > 0) {
-                                    self.xp_sounds(me.entry.uuid, old, &state.xp);
-                                } else if state.xp.level > old && state.xp.level % 5 == 0 {
-                                    let f = if state.xp.level > 30 { 1.0 } else { state.xp.level as f32 / 30.0 };
-                                    self.player_sound(me.entry.uuid, "minecraft:entity.player.levelup", f * 0.75, 1.0);
-                                }
+                                self.xp_sounds(me.entry.uuid, old, &state.xp);
                                 if let Some(w) = window.as_mut().filter(|w| w.kind == Kind::Enchanting) {
                                     self.refresh_enchant(conn, w, state.xp.seed, uuid).await?;
                                 }
@@ -2769,7 +4155,7 @@ impl PlayPlan {
                 }
                 _ = food_ticker.tick() => {
                     game_ticks += 1;
-                    self.sync_enchant_attrs(conn, me.entity_id, &state.inv, &mut ench_attrs).await?;
+                    self.sync_enchant_attrs(conn, me.entity_id, &state.inv, &mut ench_attrs, &mut ench_gear).await?;
                     let now = digging.or(delayed).and_then(|(pos, start)| {
                         let block = self.block(pos).unwrap_or(AIR);
                         let p = self.destroy_progress(uuid, block, state.inv.held(), state.inv.slots[5], &state.vitals);
@@ -2804,7 +4190,13 @@ impl PlayPlan {
                         saved_ticks = 0;
                         self.snapshot(uuid, state);
                     }
-                    if !state.vitals.dead && login.spawn.game_mode != 3
+                    let collects = !state.vitals.dead && login.spawn.game_mode != 3;
+                    if let Some(p) = self.hub.players.lock().unwrap().get_mut(&uuid)
+                        && p.collects != collects
+                    {
+                        p.collects = collects;
+                    }
+                    if collects
                         && let Some((feet, _, _)) = self.player_at(uuid)
                     {
                         // Отменённые плагинами подборы (`EntityPickupItemEvent`).
@@ -2817,9 +4209,23 @@ impl PlayPlan {
                                 }
                             }
                         }
+                        if self.hooks().is_some_and(|h| h.listens(Event::PickupArrow)) {
+                            for (id, p) in self.arrow_candidates(feet) {
+                                if self.cancelled(Event::PickupArrow, uuid, || format!("{} {} {}", p[0], p[1], p[2])).await {
+                                    vetoed.insert(id);
+                                }
+                            }
+                        }
                         let changed = self.pickup(me.entity_id, feet, &mut state.inv, &vetoed);
                         if !changed.is_empty() {
                             self.send_slots(conn, &mut state.inv, &changed).await?;
+                        }
+                        if xp_delay > 0 {
+                            xp_delay -= 1;
+                        } else if let Some(orb) = self.orb_near(feet)
+                            && self.absorb_orb(conn, uuid, me.entity_id, state, orb).await?
+                        {
+                            xp_delay = crate::orbs::TAKE_DELAY;
                         }
                     }
                     if let Some((slot, item, extra, done)) = drinking
@@ -2841,7 +4247,10 @@ impl PlayPlan {
                         // Предмет мог смениться (клики): едим, только если еда на месте.
                         let same = state.inv.slots[slot].and_then(|s| self.survival.items.get(s.item as usize))
                             .and_then(|i| i.food) == Some(food);
-                        if same && slot == state.inv.held_slot() && state.inv.consume_held() {
+                        if same
+                            && (slot == state.inv.held_slot() || slot == survival::OFFHAND)
+                            && state.inv.consume_at(slot)
+                        {
                             state.vitals.eat(food.nutrition, food.saturation);
                             self.send_slots(conn, &mut state.inv, &[slot]).await?;
                             self.send_health(conn, &state.vitals).await?;
@@ -2871,10 +4280,10 @@ impl PlayPlan {
                             state.vitals.exhaust(pulsed.exhaustion);
                         }
                         if survival && pulsed.poison && let Some(d) = survival::poison_hit(state.vitals.health) {
-                            self.hurt(conn, me, &mut state.vitals, &mut state.inv, d, Cause::Poison).await?;
+                            self.hurt(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, d, Cause::Poison).await?;
                         }
                         if survival && pulsed.wither && !state.vitals.dead {
-                            self.hurt(conn, me, &mut state.vitals, &mut state.inv, 1.0, Cause::Wither).await?;
+                            self.hurt(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, 1.0, Cause::Wither).await?;
                         }
                     }
                     self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
@@ -2885,7 +4294,7 @@ impl PlayPlan {
                         self.survival.difficulty.load(Ordering::Relaxed),
                     ));
                     if let Some(d) = t.starve {
-                        self.hurt(conn, me, &mut state.vitals, &mut state.inv, d, Cause::Starve).await?;
+                        self.hurt(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, d, Cause::Starve).await?;
                     } else if t.changed {
                         self.send_health(conn, &state.vitals).await?;
                     }
@@ -2957,15 +4366,26 @@ impl PlayPlan {
                         }
                         let y = m.pos.map(|p| p[1]);
                         let slow = self.effect_amp(&state.vitals, "minecraft:slow_falling").is_some();
+                        let in_water = m.pos.is_some_and(|p| self.standing_in_water(p));
                         if let Some(d) = state.vitals.on_move(m.pos, m.on_ground, survival, slow) {
-                            self.hurt(conn, me, &mut state.vitals, &mut state.inv, d, Cause::Fall).await?;
+                            let scale = if in_water {
+                                0.0
+                            } else {
+                                m.pos.map_or(1.0, |p| self.fall_scale(p))
+                            };
+                            if scale > 0.0 {
+                                self.hurt(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, d * scale, Cause::Fall).await?;
+                            }
+                        }
+                        if in_water {
+                            state.vitals.clear_fall();
                         }
                         let below_void = y.is_some_and(|y| y < self.min_y as f64 - survival::VOID_DEPTH);
                         if survival && below_void
                             && last_void.is_none_or(|t| t.elapsed() >= TICK * survival::VOID_INTERVAL_TICKS as u32)
                         {
                             last_void = Some(Instant::now());
-                            self.hurt(conn, me, &mut state.vitals, &mut state.inv, survival::VOID_DAMAGE, Cause::Void).await?;
+                            self.hurt(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, survival::VOID_DAMAGE, Cause::Void).await?;
                         }
                         if let Some([x, _, z]) = m.pos {
                             let now = ((x.floor() as i32) >> 4, (z.floor() as i32) >> 4);
@@ -3103,15 +4523,42 @@ impl PlayPlan {
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                             continue;
                         }
-                        let food = state.inv.held()
-                            .filter(|_| hand == 0 && survival && !state.vitals.dead)
+                        if !state.vitals.dead && login.spawn.game_mode != 3
+                            && self.use_bucket(conn, uuid, &mut state.inv, hand, survival).await?
+                        {
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
+                            continue;
+                        }
+                        match self.use_ranged(
+                            conn, uuid, me.entity_id, &mut state.inv, hand, login.spawn.game_mode,
+                        ).await? {
+                            RangedUse::Draw(slot) => {
+                                eating = None;
+                                drinking = None;
+                                drawing = Some((slot, game_ticks));
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
+                                continue;
+                            }
+                            RangedUse::Done => {
+                                eating = None;
+                                drinking = None;
+                                drawing = None;
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
+                                continue;
+                            }
+                            RangedUse::Ignore => {}
+                        }
+                        let food_slot = Self::hand_index(&state.inv, hand)
+                            .filter(|_| survival && !state.vitals.dead);
+                        let food = food_slot
+                            .and_then(|i| state.inv.slots[i])
                             .and_then(|s| self.survival.items.get(s.item as usize))
                             .and_then(|i| i.food)
                             .filter(|f| f.can_always_eat || state.vitals.food < survival::MAX_FOOD);
-                        if let Some(f) = food {
+                        if let (Some(slot), Some(f)) = (food_slot, food) {
                             drinking = None;
                             eating = Some((
-                                state.inv.held_slot(),
+                                slot,
                                 f,
                                 Instant::now() + Duration::from_secs_f32(f.seconds),
                             ));
@@ -3172,8 +4619,7 @@ impl PlayPlan {
                         if r.var_int()? == inv::PERFORM_RESPAWN && state.vitals.dead {
                             teleport_id += 1;
                             center = self.respawn(conn, me, &login, &mut state.vitals, &mut state.inv, center, teleport_id).await?;
-                            // `keepLevel` по умолчанию выключен: опыт теряется.
-                            state.xp = crate::xp::Experience { seed: state.xp.seed, ..Default::default() };
+                            // Опыт после смерти выставлен в `die`.
                             self.send_xp(conn, &state.xp).await?;
                             out.clear();
                             self.refresh_visible(uuid, center, r_view, &mut visible, &mut out);
@@ -3205,8 +4651,15 @@ impl PlayPlan {
                                 // `handleBlockBreakAction`: креатив ломает сразу, приключение
                                 // и наблюдатель не ломают, выживание — по прогрессу.
                                 let mode = login.spawn.game_mode;
+                                let reach = if mode == 1 { 5.0 } else { 4.5 };
+                                let in_reach = self.player_at(uuid).is_some_and(|(p, _, _)| {
+                                    block_reach(eye_of(p), a.pos, reach)
+                                });
                                 let mut resync = false;
-                                match a.action {
+                                let protected = self.spawn_blocked(uuid, a.pos);
+                                if (!in_reach || protected) && a.action != play::ABORT_DESTROY_BLOCK {
+                                    resync = true;
+                                } else { match a.action {
                                     play::START_DESTROY_BLOCK if mode == 1 => {
                                         self.break_block(conn, uuid, a.pos, None).await?;
                                     }
@@ -3245,7 +4698,7 @@ impl PlayPlan {
                                         }
                                         digging = None;
                                     }
-                                }
+                                } }
                                 if resync {
                                     let s = self.block(a.pos).unwrap_or(AIR);
                                     conn.send(&play::block_update(ids.block_update, a.pos, s as i32)).await?;
@@ -3268,6 +4721,19 @@ impl PlayPlan {
                                 self.send_slots(conn, &mut state.inv, &[held]).await?;
                             }
                             play::RELEASE_USE_ITEM => {
+                                if let Some((slot, start)) = drawing.take() {
+                                    self.release_draw(
+                                        conn,
+                                        uuid,
+                                        me.entity_id,
+                                        &mut state.inv,
+                                        slot,
+                                        start,
+                                        game_ticks,
+                                        login.spawn.game_mode,
+                                    )
+                                    .await?;
+                                }
                                 eating = None;
                                 drinking = None;
                             }
@@ -3301,7 +4767,9 @@ impl PlayPlan {
                         let kind = match clicked.as_str() {
                             "minecraft:crafting_table" => Some(Kind::Crafting),
                             "minecraft:enchanting_table" => Some(Kind::Enchanting),
-                            "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" => Some(Kind::Chest(3)),
+                            "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" => Some(Kind::Chest(27)),
+                            "minecraft:hopper" => Some(Kind::Chest(5)),
+                            "minecraft:dispenser" | "minecraft:dropper" => Some(Kind::Chest(9)),
                             n if furnace_kind(n).is_some() => Some(Kind::Furnace),
                             _ => None,
                         };
@@ -3309,7 +4777,7 @@ impl PlayPlan {
                         let bypass = sneaking && (state.inv.held().is_some() || state.inv.slots[survival::OFFHAND].is_some());
                         if !state.vitals.dead && login.spawn.game_mode != 3 && !bypass && u.hand == 0 {
                             let yaw = self.player_at(uuid).map_or(0.0, |p| p.1);
-                            if self.toggle_block(conn, uuid, u.pos, yaw).await? {
+                            if self.use_switch(conn, uuid, u.pos).await? || self.toggle_block(conn, uuid, u.pos, yaw).await? {
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                                 continue;
                             }
@@ -3321,7 +4789,7 @@ impl PlayPlan {
                             let pair = self.chest_partner(u.pos);
                             let (kind, pos, second) = match (kind, pair) {
                                 (Kind::Chest(_), Some((partner, clicked_right))) => {
-                                    if clicked_right { (Kind::Chest(6), u.pos, Some(partner)) } else { (Kind::Chest(6), partner, Some(u.pos)) }
+                                    if clicked_right { (Kind::Chest(54), u.pos, Some(partner)) } else { (Kind::Chest(54), partner, Some(u.pos)) }
                                 }
                                 _ => (kind, u.pos, None),
                             };
@@ -3332,7 +4800,9 @@ impl PlayPlan {
                                     let k = furnace_kind(&clicked).unwrap_or(0) as usize;
                                     (self.survival.menu_furnace[k], ["container.furnace", "container.blast_furnace", "container.smoker"][k])
                                 }
-                                Kind::Chest(6) => (self.survival.menu_double_chest, "container.chestDouble"),
+                                Kind::Chest(54) => (self.survival.menu_double_chest, "container.chestDouble"),
+                                Kind::Chest(5) => (self.survival.menu_hopper, "container.hopper"),
+                                Kind::Chest(9) => (self.survival.menu_3x3, if clicked == "minecraft:dropper" { "container.dropper" } else { "container.dispenser" }),
                                 _ if clicked == "minecraft:barrel" => (self.survival.menu_chest, "container.barrel"),
                                 _ => (self.survival.menu_chest, "container.chest"),
                             };
@@ -3364,9 +4834,10 @@ impl PlayPlan {
                             continue;
                         }
                         let mut placed = false;
-                        let place = state.inv
-                            .held()
-                            .filter(|_| u.hand == 0 && !state.vitals.dead)
+                        let hand_slot = Self::hand_index(&state.inv, u.hand);
+                        let place = hand_slot
+                            .and_then(|i| state.inv.slots[i])
+                            .filter(|_| !state.vitals.dead)
                             .and_then(|s| self.item_blocks.get(s.item as usize).copied().flatten());
                         if let (Some(mut place), Some(d)) = (place, play::direction_offset(u.face)) {
                             let mut target = [u.pos[0] + d[0], u.pos[1] + d[1], u.pos[2] + d[2]];
@@ -3403,8 +4874,22 @@ impl PlayPlan {
                                     .map(|(o, s)| ([target[0] + o[0], target[1] + o[1], target[2] + o[2]], *s))
                                     .collect();
                             }
-                            let free = merged.is_some() || self.block(target) == Some(AIR);
-                            if free && extra.iter().all(|(p, _)| self.block(*p) == Some(AIR)) {
+                            // Жидкость заменяема; в источник воды заводняемый блок встаёт заводнённым.
+                            let here = self.block(target).unwrap_or(AIR);
+                            let liquid = crate::fluids::fluid_of(self.state_name(here), None).is_some();
+                            if crate::fluids::state_fluid(pl, here).is_some_and(|f| f.source && f.kind == crate::fluids::Kind::Water)
+                                && let Some(w) = pl.with_prop(place, "waterlogged", "true")
+                            {
+                                place = w;
+                            }
+                            let free = merged.is_some() || here == AIR || liquid;
+                            let reach = if login.spawn.game_mode == 1 { 5.0 } else { 4.5 };
+                            let feet = self.player_at(uuid).map(|p| p.0);
+                            let in_reach = feet.is_some_and(|p| block_reach(eye_of(p), target, reach));
+                            let full = (0..6).all(|f| pl.sturdy(place, f));
+                            let inside = full && feet.is_some_and(|p| player_hits_cube(p, target));
+                            let protected = self.spawn_blocked(uuid, target);
+                            if free && in_reach && !inside && !protected && extra.iter().all(|(p, _)| self.block(*p) == Some(AIR)) {
                                 // `BlockPlaceEvent`: отмена — клиенту прежний блок и предмет.
                                 let name = self.state_name(place).to_owned();
                                 if self.cancelled(Event::Place, uuid, || format!(
@@ -3424,6 +4909,19 @@ impl PlayPlan {
                                 for &(p, s) in &extra {
                                     self.set_block(p, s);
                                 }
+                                // Дверь у включённого рычага сразу открыта (`getStateForPlacement`: `powered`).
+                                self.refresh_openable(target, false);
+                                // Провод ставится крестом (`getStateForPlacement`), дальше — форма и сила.
+                                if crate::redstone::is_wire(&name) {
+                                    let mut n = place;
+                                    for k in ["north", "south", "west", "east"] {
+                                        if let Some(m) = self.survival.placement.with_prop(n, k, "side") {
+                                            n = m;
+                                        }
+                                    }
+                                    self.set_block(target, n);
+                                }
+                                self.redstone_update(&crate::redstone::around(target));
                                 let mut touched = self.update_connections(target);
                                 // Рельсы: форма нового и перестройка соседей (`RailState`).
                                 let rails = self.survival.placement.rails(target, &|p| self.block(p).unwrap_or(AIR));
@@ -3435,9 +4933,8 @@ impl PlayPlan {
                                 if let Some(id) = container_entity(&name) {
                                     self.set_block_entity(target, Some(BlockEntity { id: id.into(), nbt: Default::default() }));
                                 }
-                                if survival && state.inv.consume_held() {
-                                    let held = state.inv.held_slot();
-                                    self.send_slots(conn, &mut state.inv, &[held]).await?;
+                                if survival && let Some(i) = hand_slot && state.inv.consume_at(i) {
+                                    self.send_slots(conn, &mut state.inv, &[i]).await?;
                                 }
                                 // Новое состояние — до подтверждения: иначе клиент откатит
                                 // свой предсказанный блок к воздуху до рассылки тика (мигание).
@@ -3448,9 +4945,30 @@ impl PlayPlan {
                                     let s = self.block(p).unwrap_or(AIR);
                                     conn.send(&play::block_update(ids.block_update, p, s as i32)).await?;
                                 }
+                            } else if free && (!in_reach || inside || protected) {
+                                let s = self.block(target).unwrap_or(here);
+                                conn.send(&play::block_update(ids.block_update, target, s as i32)).await?;
+                            }
+                        }
+                        if !placed {
+                            match self.use_ranged(
+                                conn, uuid, me.entity_id, &mut state.inv, u.hand, login.spawn.game_mode,
+                            ).await? {
+                                RangedUse::Draw(slot) => {
+                                    eating = None;
+                                    drinking = None;
+                                    drawing = Some((slot, game_ticks));
+                                }
+                                RangedUse::Done => {
+                                    eating = None;
+                                    drinking = None;
+                                    drawing = None;
+                                }
+                                RangedUse::Ignore => {}
                             }
                         }
                         if !placed
+                            && drawing.is_none()
                             && let Some((slot, item, extra, seconds)) = self.drink_use(
                                 &state.inv,
                                 u.hand,
@@ -3606,6 +5124,34 @@ impl PlayPlan {
         held.and_then(|s| self.survival.tools.get(s.item as usize)?.as_ref())
     }
 
+    fn spawn_blocked(&self, uuid: Uuid, pos: [i32; 3]) -> bool {
+        let radius = self.spawn_protection.load(Ordering::Relaxed);
+        radius > 0 && self.op_level(uuid) == 0 && in_spawn(self.spawn, radius, pos)
+    }
+
+    fn standing_in_water(&self, feet: [f64; 3]) -> bool {
+        let p = [
+            feet[0].floor() as i32,
+            feet[1].floor() as i32,
+            feet[2].floor() as i32,
+        ];
+        self.block(p).is_some_and(|s| {
+            let n = self.state_name(s);
+            n == "minecraft:water"
+                || n == "minecraft:bubble_column"
+                || self.survival.placement.prop(s, "waterlogged") == Some("true")
+        })
+    }
+
+    fn fall_scale(&self, feet: [f64; 3]) -> f32 {
+        let below = [
+            feet[0].floor() as i32,
+            (feet[1] - 0.2).floor() as i32,
+            feet[2].floor() as i32,
+        ];
+        fall_kept(self.block(below).map_or("", |s| self.state_name(s)))
+    }
+
     fn state_name(&self, state: u32) -> &str {
         self.survival
             .block_names
@@ -3729,10 +5275,14 @@ impl PlayPlan {
         {
             let n = rand::Rng::gen_range(&mut rand::thread_rng(), lo..=hi);
             if n > 0 {
-                let old = state.xp.level;
-                state.xp.add_points(n);
-                self.send_xp(conn, &state.xp).await?;
-                self.xp_sounds(uuid, old, &state.xp);
+                self.spawn_orbs(
+                    [
+                        pos[0] as f64 + 0.5,
+                        pos[1] as f64 + 0.5,
+                        pos[2] as f64 + 0.5,
+                    ],
+                    n,
+                );
             }
         }
         // `ItemStack.mineBlock`: инструмент изнашивается, если блок ломается не мгновенно.
@@ -3763,10 +5313,23 @@ impl PlayPlan {
             if max > 0 && wear > 0 {
                 s.damage += wear;
                 state.inv.slots[slot] = (s.damage < max).then_some(s);
-                let entity = self.hub.players.lock().unwrap().get(&uuid).map(|p| p.entity_id);
+                let entity = self
+                    .hub
+                    .players
+                    .lock()
+                    .unwrap()
+                    .get(&uuid)
+                    .map(|p| p.entity_id);
                 if let Some(entity) = entity.filter(|_| s.damage >= max) {
                     // `broadcastBreakEvent(MAINHAND)`: звук и осколки у всех.
-                    self.hub.send(None, inv::entity_event(self.ids.entity_event, entity, inv::ENTITY_EVENT_BREAK_MAINHAND));
+                    self.hub.send(
+                        None,
+                        inv::entity_event(
+                            self.ids.entity_event,
+                            entity,
+                            inv::ENTITY_EVENT_BREAK_MAINHAND,
+                        ),
+                    );
                 }
                 self.send_slots(conn, &mut state.inv, &[slot]).await?;
             }
@@ -3793,10 +5356,25 @@ impl PlayPlan {
         let Some(old) = self.set_block(pos, AIR) else {
             return Ok(false);
         };
+        // Сломан включённый рычаг или кнопка — сигнал пропадает.
+        if self.survival.placement.prop(old, "powered") == Some("true") && {
+            let n = self.state_name(old);
+            crate::redstone::is_lever(n) || crate::redstone::is_button(n)
+        } {
+            self.update_power(old, pos);
+        } else {
+            self.redstone_update(&crate::redstone::around(pos));
+        }
         // Частицы и звук ломки — остальным (ломающий проиграл их сам).
         self.hub.send(
             Some(uuid),
-            play::level_event(self.ids.level_event, crate::sounds::DESTROY_BLOCK, pos, old as i32, false),
+            play::level_event(
+                self.ids.level_event,
+                crate::sounds::DESTROY_BLOCK,
+                pos,
+                old as i32,
+                false,
+            ),
         );
         self.unlink_chest(pos, old);
         let mut touched = self.update_connections(pos);
@@ -3820,8 +5398,23 @@ impl PlayPlan {
                 .await?;
         }
         // Печь: в блок-сущность её текущее содержимое.
+        self.comparators.lock().unwrap().remove(&pos);
+        self.piston_broken(pos, old);
+        self.hoppers.lock().unwrap().remove(&pos);
         let removed = self.furnaces.lock().unwrap().remove(&pos);
-        if let Some(e) = removed {
+        if let Some(mut e) = removed {
+            // Опыт за сготовленное — сферами на месте печи.
+            let xp = e.f.take_xp(rand::random());
+            if xp > 0 {
+                self.spawn_orbs(
+                    [
+                        pos[0] as f64 + 0.5,
+                        pos[1] as f64 + 0.5,
+                        pos[2] as f64 + 0.5,
+                    ],
+                    xp,
+                );
+            }
             self.save_furnace(pos, &e.f);
         }
         // Содержимое сундука — на землю.
@@ -4128,7 +5721,10 @@ impl PlayPlan {
         if let Some(kind) = kind
             && ((opening && viewers == 1) || (!opening && viewers == 0))
         {
-            let sound = format!("minecraft:block.{kind}.{}", if opening { "open" } else { "close" });
+            let sound = format!(
+                "minecraft:block.{kind}.{}",
+                if opening { "open" } else { "close" }
+            );
             self.block_sound(None, &sound, pos, 0.5, crate::sounds::pitch_09());
         }
         if name == "minecraft:barrel" {
@@ -4258,6 +5854,9 @@ impl PlayPlan {
                 fur.cook_total = int("cooking_total_time");
                 fur.lit_remaining = int("lit_time_remaining");
                 fur.lit_total = int("lit_total_time");
+                if let Some(Tag::Float(x)) = be.nbt.get("chunkwake:experience") {
+                    fur.xp = *x;
+                }
                 if let Some(Tag::Float(s)) = be.nbt.get("speed_multiplier") {
                     fur.speed = *s;
                 }
@@ -4285,6 +5884,7 @@ impl PlayPlan {
                     result: c.result.0,
                     count: c.result.1,
                     time: c.time,
+                    experience: c.experience,
                 })
         };
         let fuel = |item: i32| {
@@ -4293,17 +5893,12 @@ impl PlayPlan {
         };
         let max = |item: i32| self.max_stack(item);
         let rem = |item: i32| self.craft_remainder(item);
-        let sponge = self
-            .item_id("minecraft:wet_sponge")
-            .zip(self.item_id("minecraft:bucket"))
-            .zip(self.item_id("minecraft:water_bucket"))
-            .map(|((s, b), w)| (s, b, w));
         f.tick(&furnace::Env {
             recipe: &recipe,
             fuel: &fuel,
             max_stack: &max,
             remainder: &rem,
-            sponge,
+            sponge: self.sponge,
         })
     }
 
@@ -4318,6 +5913,7 @@ impl PlayPlan {
                     result: c.result.0,
                     count: c.result.1,
                     time: c.time,
+                    experience: c.experience,
                 })
         };
         let none = |_: i32| None;
@@ -4330,12 +5926,26 @@ impl PlayPlan {
             remainder: &rem,
             sponge: None,
         };
-        let Some((fur, viewers)) = self.with_furnace(pos, |e| {
+        let Some((fur, viewers, xp)) = self.with_furnace(pos, |e| {
+            // Результат забрали — опыт за всё сготовленное (`FurnaceResultSlot`).
+            let taken = e.f.slots[furnace::RESULT].map_or(0, |r| r.count)
+                > slots[furnace::RESULT].map_or(0, |r| r.count);
             e.f.set_slots(slots, &env);
-            (e.f.clone(), e.viewers.clone())
+            let xp = if taken {
+                e.f.take_xp(rand::random())
+            } else {
+                0
+            };
+            (e.f.clone(), e.viewers.clone(), xp)
         }) else {
             return;
         };
+        if xp > 0
+            && let Some((feet, _, _)) = self.player_at(me)
+        {
+            self.spawn_orbs(feet, xp);
+        }
+        self.redstone_update(&crate::redstone::around(pos));
         self.save_furnace(pos, &fur);
         let controls = self.controls.lock().unwrap();
         for v in viewers.iter().filter(|v| **v != me) {
@@ -4357,8 +5967,1898 @@ impl PlayPlan {
         );
         nbt.insert("lit_total_time".into(), Tag::Short(f.lit_total as i16));
         nbt.insert("speed_multiplier".into(), Tag::Float(f.speed));
+        if f.xp > 0.0 {
+            nbt.insert("chunkwake:experience".into(), Tag::Float(f.xp));
+        }
         let id = FURNACES[f.kind as usize];
         self.set_block_entity(pos, Some(BlockEntity { id: id.into(), nbt }));
+    }
+
+    /// Тик редстоуна: плиты под игроками и отложенные тики (кнопки, факелы,
+    /// повторители, лампы, плиты).
+    fn tick_redstone(&self) {
+        let now = self
+            .server_ticks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let deferred = std::mem::take(&mut *self.deferred_updates.lock().unwrap());
+        for p in deferred {
+            self.redstone_update(&crate::redstone::around(p));
+        }
+        self.scan_plates();
+        self.tick_fluids(now);
+        self.finish_moves(now);
+        self.tick_hoppers();
+        let due: Vec<[i32; 3]> = {
+            let mut list = self.redstone_ticks.lock().unwrap();
+            if list.is_empty() {
+                return;
+            }
+            let due = list.iter().filter(|b| b.1 <= now).map(|b| b.0).collect();
+            list.retain(|b| b.1 > now);
+            due
+        };
+        for pos in due {
+            self.scheduled_tick(pos, now);
+        }
+    }
+
+    /// Отложить тик блока в `pos` через `delay` тиков, если ещё не отложен.
+    fn schedule(&self, pos: [i32; 3], delay: u64) {
+        self.enqueue_tick(pos, delay, false);
+    }
+
+    /// Смена входа диода: срок тика становится `delay` от текущего тика.
+    fn reschedule(&self, pos: [i32; 3], delay: u64) {
+        self.enqueue_tick(pos, delay, true);
+    }
+
+    fn enqueue_tick(&self, pos: [i32; 3], delay: u64, replace: bool) {
+        let at = self.server_ticks.load(std::sync::atomic::Ordering::Relaxed) + delay;
+        let mut list = self.redstone_ticks.lock().unwrap();
+        if let Some(tick) = list.iter_mut().find(|t| t.0 == pos) {
+            if replace {
+                tick.1 = at;
+            }
+        } else {
+            list.push((pos, at));
+        }
+    }
+
+    /// Игроки на плитах: нажать свободную (`checkPressed`), счёт для утяжелённых.
+    fn scan_plates(&self) {
+        let feet: Vec<[i32; 3]> = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|p| p.collects)
+            .map(|p| {
+                [
+                    p.pos[0].floor() as i32,
+                    (p.pos[1] + 0.01).floor() as i32,
+                    p.pos[2].floor() as i32,
+                ]
+            })
+            .collect();
+        let mut on: HashMap<[i32; 3], usize> = HashMap::new();
+        for f in feet {
+            if self
+                .block(f)
+                .is_some_and(|s| crate::redstone::is_plate(self.state_name(s)))
+            {
+                *on.entry(f).or_default() += 1;
+            }
+        }
+        // Предметы жмут деревянные и утяжелённые плиты (каменные — только живые).
+        let items: Vec<[i32; 3]> = self
+            .dropped
+            .lock()
+            .unwrap()
+            .values()
+            .map(|d| {
+                [
+                    d.pos[0].floor() as i32,
+                    (d.pos[1] + 0.01).floor() as i32,
+                    d.pos[2].floor() as i32,
+                ]
+            })
+            .collect();
+        for f in items {
+            if self.block(f).is_some_and(|s| {
+                let n = self.state_name(s);
+                crate::redstone::is_plate(n) && !crate::redstone::living_only(n)
+            }) {
+                *on.entry(f).or_default() += 1;
+            }
+        }
+        let fresh: Vec<[i32; 3]> = on.keys().copied().collect();
+        *self.plates.lock().unwrap() = on;
+        for p in fresh {
+            let Some(state) = self.block(p) else { continue };
+            let pl = &self.survival.placement;
+            let name = self.state_name(state);
+            let pressed = pl.prop(state, "powered") == Some("true")
+                || pl.prop(state, "power").is_some_and(|v| v != "0");
+            // Утяжелённая плита пересчитывает силу каждый тик, пока на ней кто-то есть.
+            if !pressed || crate::redstone::weighted(name).is_some() {
+                self.update_plate(p);
+            }
+        }
+    }
+
+    /// Пересчитать плиту (`checkPressed`): сила, звук, соседи, повторная проверка.
+    fn update_plate(&self, p: [i32; 3]) {
+        let Some(state) = self.block(p) else { return };
+        let name = self.state_name(state).to_owned();
+        if !crate::redstone::is_plate(&name) {
+            return;
+        }
+        let pl = &self.survival.placement;
+        let count = self.plates.lock().unwrap().get(&p).copied().unwrap_or(0);
+        let mut power = crate::redstone::plate_power(&name, count);
+        let was = if crate::redstone::weighted(&name).is_some() {
+            pl.prop(state, "power")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+        } else if pl.prop(state, "powered") == Some("true") {
+            15
+        } else {
+            0
+        };
+        if was != power {
+            power = self.redstone_event(p, was, power);
+        }
+        let (old, next) = if crate::redstone::weighted(&name).is_some() {
+            let old: i32 = pl
+                .prop(state, "power")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            (old, pl.with_prop(state, "power", &power.to_string()))
+        } else {
+            let old = if pl.prop(state, "powered") == Some("true") {
+                15
+            } else {
+                0
+            };
+            (
+                old,
+                pl.with_prop(state, "powered", if power > 0 { "true" } else { "false" }),
+            )
+        };
+        if power > 0 {
+            self.schedule(p, crate::redstone::plate_ticks(&name));
+        }
+        if (old > 0) == (power > 0) && old == power {
+            return;
+        }
+        if let Some(next) = next {
+            self.set_block(p, next);
+        }
+        if (old > 0) != (power > 0) {
+            self.block_sound(
+                None,
+                &crate::redstone::plate_sound(&name, power > 0),
+                p,
+                1.0,
+                1.0,
+            );
+        }
+        self.redstone_update(&crate::redstone::around(p));
+        self.redstone_update(&crate::redstone::around(crate::redstone::step(p, 0)));
+    }
+
+    /// Отложенный тик блока: кнопка отжимается, факел гаснет или загорается,
+    /// повторитель переключается, лампа гаснет, плита проверяется.
+    fn scheduled_tick(&self, pos: [i32; 3], now: u64) {
+        use crate::redstone as rs;
+        let Some(state) = self.block(pos) else { return };
+        let name = self.state_name(state).to_owned();
+        let pl = &self.survival.placement;
+        let at = |p: [i32; 3]| self.block(p).unwrap_or(AIR);
+        let w = rs::World {
+            pl,
+            at: &at,
+            output: &|p| self.comparator_output(p),
+            analog: &|p| self.analog_at(p),
+        };
+        if rs::is_button(&name) {
+            if let Some(off) = pl.with_prop(state, "powered", "false") {
+                self.set_block(pos, off);
+                let (sound, v, p) = rs::click_sound(&name, false);
+                self.block_sound(None, &sound, pos, v, p);
+                self.update_power(off, pos);
+            }
+        } else if rs::is_plate(&name) {
+            self.update_plate(pos);
+        } else if crate::pistons::is_piston(&name) {
+            self.check_piston(pos);
+        } else if name == "minecraft:dispenser" || name == "minecraft:dropper" {
+            self.dispense(pos);
+        } else if rs::is_observer(&name) {
+            // Импульс: включиться на 2 тика, затем погаснуть.
+            let on = pl.prop(state, "powered") != Some("true");
+            if on {
+                self.schedule(pos, 2);
+            }
+            if let Some(n) = pl.with_prop(state, "powered", if on { "true" } else { "false" }) {
+                let back = w.observer_back(pos);
+                self.set_block(pos, n);
+                self.redstone_update(&rs::around(back));
+            }
+        } else if rs::is_comparator(&name) {
+            let out = w.comparator_target(pos);
+            let old = self.comparator_output(pos);
+            let powered = if out > 0 { "true" } else { "false" };
+            if out != old || pl.prop(state, "powered") != Some(powered) {
+                self.comparators.lock().unwrap().insert(pos, out);
+                let mut nbt = self.block_entity(pos).map(|b| b.nbt).unwrap_or_default();
+                nbt.insert("OutputSignal".into(), Tag::Int(out));
+                self.set_block_entity(
+                    pos,
+                    Some(BlockEntity {
+                        id: "minecraft:comparator".into(),
+                        nbt,
+                    }),
+                );
+                if let Some(n) = pl.with_prop(state, "powered", powered) {
+                    self.set_block(pos, n);
+                }
+                let front = w.repeater_front(pos);
+                self.redstone_update(&rs::around(pos));
+                self.redstone_update(&rs::around(front));
+            }
+        } else if rs::is_lamp(&name) {
+            if pl.prop(state, "lit") == Some("true")
+                && !w.powered(pos)
+                && let Some(off) = pl.with_prop(state, "lit", "false")
+            {
+                self.set_block(pos, off);
+            }
+        } else if rs::is_torch(&name) {
+            let lit = pl.prop(state, "lit") == Some("true");
+            let off = w.torch_off(pos);
+            // `isToggledTooFrequently`: 8 переключений за 60 тиков — перегорел.
+            let mut toggles = self.torch_toggles.lock().unwrap();
+            let list = toggles.entry(pos).or_default();
+            list.retain(|&t| t + rs::BURNOUT_WINDOW > now);
+            let mut cools = self.torch_cool.lock().unwrap();
+            let next = if lit && off {
+                list.push(now);
+                if list.len() >= rs::BURNOUT_COUNT {
+                    let pitch = 2.6 + (rand::random::<f32>() - rand::random::<f32>()) * 0.8;
+                    self.block_sound(None, rs::BURNOUT, pos, 0.5, pitch);
+                    cools.insert(pos, now + rs::BURNOUT_COOLDOWN);
+                    self.schedule(pos, rs::BURNOUT_COOLDOWN);
+                }
+                Some("false")
+            } else if !lit && !off && cools.get(&pos).is_some_and(|until| *until > now) {
+                None
+            } else if !lit && !off && list.len() < rs::BURNOUT_COUNT {
+                cools.remove(&pos);
+                Some("true")
+            } else {
+                None
+            };
+            drop(cools);
+            if list.is_empty() {
+                toggles.remove(&pos);
+            }
+            drop(toggles);
+            if let Some(v) = next
+                && let Some(n) = pl.with_prop(state, "lit", v)
+            {
+                self.set_block(pos, n);
+                self.redstone_update(&rs::around(pos));
+                self.redstone_update(&rs::around(rs::step(pos, 1)));
+            }
+        } else if rs::is_repeater(&name) {
+            if w.repeater_locked(pos) {
+                return;
+            }
+            let powered = pl.prop(state, "powered") == Some("true");
+            let input = w.repeater_input(pos);
+            // К концу задержки вход уже выключен — импульс не проходит.
+            if powered == input {
+                return;
+            }
+            let next = if input { "true" } else { "false" };
+            if let Some(n) = pl.with_prop(state, "powered", next) {
+                let front = w.repeater_front(pos);
+                self.set_block(pos, n);
+                self.redstone_update(&rs::around(pos));
+                self.redstone_update(&rs::around(front));
+            }
+        }
+    }
+
+    /// Изменение около `origins`: опоры компонентов, форма и сила проводов,
+    /// реакция дверей, ламп, факелов и повторителей (`neighborChanged`).
+    fn redstone_update(&self, origins: &[[i32; 3]]) {
+        use crate::redstone as rs;
+        let pl = &self.survival.placement;
+        let mut pending: Vec<[i32; 3]> = origins.to_vec();
+        for _ in 0..64 {
+            if pending.is_empty() {
+                break;
+            }
+            let at = |p: [i32; 3]| self.block(p).unwrap_or(AIR);
+            let w = rs::World {
+                pl,
+                at: &at,
+                output: &|p| self.comparator_output(p),
+                analog: &|p| self.analog_at(p),
+            };
+            let mut next: Vec<[i32; 3]> = Vec::new();
+            let mut wires = Vec::new();
+            for &p in &pending {
+                let s = at(p);
+                if s == AIR {
+                    continue;
+                }
+                // Опора в незагруженном чанке — не трогать.
+                if w.supported(p) == Some(false)
+                    && (0..6).all(|d| self.block(rs::step(p, d)).is_some())
+                {
+                    self.pop_block(p, s);
+                    next.extend(rs::around(p));
+                    continue;
+                }
+                if !rs::is_wire(self.state_name(s)) {
+                    continue;
+                }
+                let shape = w.wire_shape(p);
+                let mut n = s;
+                for (i, v) in shape.iter().enumerate() {
+                    if let Some(m) = pl.with_prop(n, rs::DIRS[i + 2], v) {
+                        n = m;
+                    }
+                }
+                if n != s {
+                    self.set_block(p, n);
+                    next.extend(rs::around(p));
+                }
+                wires.push(p);
+            }
+            for (p, power) in w.solve(&wires) {
+                let s = at(p);
+                let old: i32 = pl
+                    .prop(s, "power")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                let power = if old == power {
+                    power
+                } else {
+                    self.redstone_event(p, old, power)
+                };
+                if let Some(n) = pl.with_prop(s, "power", &power.to_string())
+                    && n != s
+                {
+                    self.set_block(p, n);
+                    next.extend(rs::around(p));
+                }
+            }
+            for &p in &pending {
+                let s = at(p);
+                let name = self.state_name(s);
+                if rs::openable(name) {
+                    self.refresh_openable(p, true);
+                } else if rs::is_lamp(name) {
+                    let lit = pl.prop(s, "lit") == Some("true");
+                    let powered = w.powered(p);
+                    if powered && !lit {
+                        if self.redstone_event(p, 0, 15) == 15
+                            && let Some(n) = pl.with_prop(s, "lit", "true")
+                        {
+                            self.set_block(p, n);
+                        }
+                    } else if !powered && lit {
+                        self.schedule(p, 4);
+                    }
+                } else if rs::is_torch(name) {
+                    if (pl.prop(s, "lit") == Some("true")) == w.torch_off(p) {
+                        self.schedule(p, 2);
+                    }
+                } else if crate::pistons::is_piston(name) {
+                    self.check_piston(p);
+                } else if name == "minecraft:hopper" {
+                    // Сигнал выключает воронку (`HopperBlock.checkPoweredState`).
+                    let enabled = if w.powered(p) { "false" } else { "true" };
+                    if let Some(n) = pl.with_prop(s, "enabled", enabled)
+                        && n != s
+                    {
+                        self.set_block(p, n);
+                    }
+                    self.hoppers.lock().unwrap().entry(p).or_insert(0);
+                } else if name == "minecraft:dispenser" || name == "minecraft:dropper" {
+                    // Фронт сигнала (и квази-связность сверху) — выдать через 4 тика.
+                    let powered = w.powered(p) || w.powered(rs::step(p, 1));
+                    let triggered = pl.prop(s, "triggered") == Some("true");
+                    if powered != triggered {
+                        if powered {
+                            self.schedule(p, crate::hoppers::DISPENSE_DELAY);
+                        }
+                        if let Some(n) =
+                            pl.with_prop(s, "triggered", if powered { "true" } else { "false" })
+                        {
+                            self.set_block(p, n);
+                        }
+                    }
+                } else if rs::is_comparator(name) {
+                    if w.comparator_target(p) != self.comparator_output(p) {
+                        self.reschedule(p, 2);
+                    }
+                } else if rs::is_repeater(name) {
+                    let locked = w.repeater_locked(p);
+                    if let Some(n) =
+                        pl.with_prop(s, "locked", if locked { "true" } else { "false" })
+                        && n != s
+                    {
+                        self.set_block(p, n);
+                    }
+                    if !locked && (pl.prop(s, "powered") == Some("true")) != w.repeater_input(p) {
+                        self.reschedule(p, crate::redstone::repeater_delay(pl, s));
+                    }
+                }
+            }
+            next.sort();
+            next.dedup();
+            pending = next;
+        }
+    }
+
+    /// Поршень в `p`: выдвинуться или втянуться по сигналу (`checkIfExtend`).
+    fn check_piston(&self, p: [i32; 3]) {
+        use crate::pistons as ps;
+        let Some(s) = self.block(p) else { return };
+        let pl = &self.survival.placement;
+        let name = self.state_name(s).to_owned();
+        let Some(f) = pl
+            .prop(s, "facing")
+            .and_then(|v| crate::redstone::DIRS.iter().position(|d| *d == v))
+        else {
+            return;
+        };
+        let extended = pl.prop(s, "extended") == Some("true");
+        let at = |q: [i32; 3]| self.block(q).unwrap_or(AIR);
+        let w = crate::redstone::World {
+            pl,
+            at: &at,
+            output: &|q| self.comparator_output(q),
+            analog: &|q| self.analog_at(q),
+        };
+        let hardness = |st: u32| {
+            self.survival
+                .hardness
+                .get(st as usize)
+                .copied()
+                .unwrap_or(0.0)
+        };
+        let c = ps::Ctx {
+            pl,
+            at: &at,
+            hardness: &hardness,
+            min_y: self.min_y,
+            max_y: self.min_y + self.template.height() as i32 - 1,
+        };
+        let should = c.powered(&w, p, f);
+        if should == extended {
+            return;
+        }
+        let head = crate::redstone::step(p, f);
+        let front = crate::redstone::step(head, f);
+        // Втягивание во время выдвижения (`triggerEvent`): движение доезжает сразу,
+        // а липкий не тянет блок, который ещё ехал (тип 2 — «выплёвывает»).
+        let mut spit = false;
+        if !should {
+            let front_moving = self
+                .piston_moves
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, m)| m.iter().any(|(q, _, _)| *q == front));
+            if self.land_now(&[p, head, front]) {
+                spit = front_moving;
+            }
+        }
+        // Выдвижение, пока ещё едет, — проверить после остановки.
+        if should
+            && self
+                .piston_moves
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, m)| m.iter().any(|(q, _, _)| *q == p || *q == head))
+        {
+            self.schedule(p, ps::MOVE_TICKS);
+            return;
+        }
+        let sticky = name == "minecraft:sticky_piston";
+        let ty = if sticky { "sticky" } else { "normal" };
+        let block = self
+            .survival
+            .block_types
+            .get(name.as_str())
+            .copied()
+            .unwrap_or(0);
+        let mut finals = Vec::new();
+        if should {
+            let Some(plan) = ps::resolve(&c, p, f, true) else {
+                return;
+            };
+            if self.piston_event(p, f, true, &plan.push) {
+                return;
+            }
+            self.hub.send(
+                None,
+                play::block_event(self.ids.block_event, p, 0, f as u8, block),
+            );
+            self.piston_move(&plan, f, f, ty, &mut finals);
+            self.claim(&[head]);
+            if let Some(h) = self.moving_state(f, ty) {
+                self.set_block(head, h);
+            }
+            if let Some(h) = self
+                .survival
+                .block_defaults
+                .get("minecraft:piston_head")
+                .and_then(|&d| pl.with_prop(d, "facing", crate::redstone::DIRS[f]))
+                .and_then(|d| pl.with_prop(d, "type", ty))
+                .and_then(|d| pl.with_prop(d, "short", "false"))
+            {
+                finals.push((head, h, None));
+            }
+            if let Some(e) = pl.with_prop(s, "extended", "true") {
+                self.set_block(p, e);
+            }
+            let pitch = rand::random::<f32>() * 0.25 + 0.6;
+            self.block_sound(None, "minecraft:block.piston.extend", p, 0.5, pitch);
+        } else {
+            let fs = at(front);
+            let plan = if sticky && !spit && fs != AIR && c.reaction(fs) == ps::Reaction::Normal {
+                // `moveBlocks` убирает голову до поиска: иначе она — неподвижный блок на пути.
+                let clear = |q: [i32; 3]| if q == head { AIR } else { at(q) };
+                let c2 = ps::Ctx { at: &clear, ..c };
+                ps::resolve(&c2, p, f, false)
+            } else {
+                None
+            };
+            let moved = plan.as_ref().map_or(&[][..], |pl| &pl.push[..]);
+            if self.piston_event(p, f, false, moved) {
+                return;
+            }
+            self.hub.send(
+                None,
+                play::block_event(self.ids.block_event, p, 1, f as u8, block),
+            );
+            self.claim(&[p]);
+            if let Some(m) = self.moving_state(f, ty) {
+                self.set_block(p, m);
+            }
+            if let Some(e) = pl.with_prop(s, "extended", "false") {
+                finals.push((p, e, None));
+            }
+            if at(head) != AIR && self.state_name(at(head)) == "minecraft:piston_head" {
+                self.set_block(head, AIR);
+            }
+            if let Some(plan) = plan {
+                self.piston_move(&plan, f ^ 1, f, ty, &mut finals);
+            }
+            let pitch = rand::random::<f32>() * 0.15 + 0.6;
+            self.block_sound(None, "minecraft:block.piston.contract", p, 0.5, pitch);
+        }
+        let due = self.server_ticks.load(std::sync::atomic::Ordering::Relaxed) + ps::MOVE_TICKS;
+        self.piston_moves.lock().unwrap().push((due, finals));
+        self.redstone_update(&crate::redstone::around(head));
+    }
+
+    /// Новое движение занимает места: прежние незаконченные движения туда уже не приедут.
+    fn claim(&self, at: &[[i32; 3]]) {
+        for (_, m) in self.piston_moves.lock().unwrap().iter_mut() {
+            m.retain(|(q, _, _)| !at.contains(q));
+        }
+    }
+
+    /// `moving_piston` с направлением и типом.
+    fn moving_state(&self, f: usize, ty: &str) -> Option<u32> {
+        let pl = &self.survival.placement;
+        let d = *self
+            .survival
+            .block_defaults
+            .get("minecraft:moving_piston")?;
+        pl.with_prop(d, "facing", crate::redstone::DIRS[f])
+            .and_then(|d| pl.with_prop(d, "type", ty))
+    }
+
+    /// `moveBlocks`: ломает хрупкие, освобождает старые места, ставит `moving_piston`
+    /// на новые; настоящие блоки — в `finals` до конца движения.
+    fn piston_move(
+        &self,
+        plan: &crate::pistons::Plan,
+        dir: usize,
+        facing: usize,
+        ty: &str,
+        finals: &mut Moves,
+    ) {
+        for &d in plan.destroy.iter().rev() {
+            if let Some(ds) = self.block(d) {
+                self.pop_block(d, ds);
+            }
+        }
+        let states: Vec<u32> = plan
+            .push
+            .iter()
+            .map(|&q| self.block(q).unwrap_or(AIR))
+            .collect();
+        let carried: Vec<Option<BlockEntity>> =
+            plan.push.iter().map(|&q| self.block_entity(q)).collect();
+        let dests: Vec<[i32; 3]> = plan
+            .push
+            .iter()
+            .map(|&q| crate::redstone::step(q, dir))
+            .collect();
+        for &q in plan.push.iter().rev() {
+            if !dests.contains(&q) {
+                self.set_block(q, AIR);
+                self.set_block_entity(q, None);
+            }
+        }
+        self.claim(&dests);
+        // Тип `moving_piston` — липкий или обычный, как у самого поршня.
+        let moving = self.moving_state(facing, ty);
+        for (i, &d) in dests.iter().enumerate() {
+            if let Some(m) = moving {
+                self.set_block(d, m);
+            }
+            finals.push((d, states[i], carried[i].clone()));
+        }
+    }
+
+    /// Блоки, доехавшие до места: настоящие состояния вместо `moving_piston`.
+    fn finish_moves(&self, now: u64) {
+        let touched = self.land_moves(|m| m.0 <= now);
+        self.redstone_update(&touched);
+    }
+
+    /// `PistonMovingBlockEntity.finalTick` для движений, задевающих `at`, сразу;
+    /// соседи обновятся в следующем тике. `true` — что-то ещё ехало.
+    fn land_now(&self, at: &[[i32; 3]]) -> bool {
+        let touched = self.land_moves(|m| m.1.iter().any(|(q, _, _)| at.contains(q)));
+        let any = !touched.is_empty();
+        self.deferred_updates.lock().unwrap().extend(touched);
+        any
+    }
+
+    /// Поставить настоящие блоки движений, выбранных `pick`; изменённые места вокруг.
+    fn land_moves(&self, pick: impl Fn(&(u64, Moves)) -> bool) -> Vec<[i32; 3]> {
+        let due: Vec<Moves> = {
+            let mut moves = self.piston_moves.lock().unwrap();
+            if moves.is_empty() {
+                return Vec::new();
+            }
+            let (due, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut *moves)
+                .into_iter()
+                .partition(|m| pick(m));
+            *moves = keep;
+            due.into_iter().map(|m| m.1).collect()
+        };
+        let mut touched = Vec::new();
+        for (p, st, be) in due.into_iter().flatten() {
+            if self
+                .block(p)
+                .is_some_and(|s| self.state_name(s) == "minecraft:moving_piston")
+            {
+                self.set_block(p, st);
+                self.set_block_entity(p, be);
+                touched.extend(crate::redstone::around(p));
+                // `ObserverBlock.onPlace`: приехал включённым без своего тика — гаснет сразу.
+                let pl = &self.survival.placement;
+                // `updateFromNeighbourShapes` → `ObserverBlock.updateShape`: выключенный
+                // наблюдатель, доехав, всегда даёт импульс — на этом держатся флай-машины.
+                if crate::redstone::is_observer(self.state_name(st))
+                    && pl.prop(st, "powered") != Some("true")
+                {
+                    self.schedule(p, 2);
+                }
+                if crate::redstone::is_observer(self.state_name(st))
+                    && pl.prop(st, "powered") == Some("true")
+                    && !self.redstone_ticks.lock().unwrap().iter().any(|t| t.0 == p)
+                    && let Some(off) = pl.with_prop(st, "powered", "false")
+                {
+                    self.set_block(p, off);
+                    let at = |q: [i32; 3]| self.block(q).unwrap_or(AIR);
+                    let w = crate::redstone::World {
+                        pl,
+                        at: &at,
+                        output: &|q| self.comparator_output(q),
+                        analog: &|q| self.analog_at(q),
+                    };
+                    touched.extend(crate::redstone::around(w.observer_back(p)));
+                }
+            }
+        }
+        touched.sort();
+        touched.dedup();
+        touched
+    }
+
+    /// `BlockPistonExtendEvent` / `BlockPistonRetractEvent`; `true` — отменено.
+    fn piston_event(&self, p: [i32; 3], f: usize, extend: bool, moved: &[[i32; 3]]) -> bool {
+        self.sync_event(Event::Piston, || {
+            let list: Vec<String> = moved
+                .iter()
+                .map(|q| format!("{},{},{}", q[0], q[1], q[2]))
+                .collect();
+            format!(
+                "{} {} {} {} {} {}",
+                p[0],
+                p[1],
+                p[2],
+                crate::redstone::DIRS[f],
+                u8::from(extend),
+                list.join(";")
+            )
+        })
+        .is_some_and(|r| r.trim() == "c")
+    }
+
+    /// Сломана голова поршня — ломается и основание; сломано выдвинутое основание — исчезает голова.
+    fn piston_broken(&self, pos: [i32; 3], old: u32) {
+        let pl = &self.survival.placement;
+        let name = self.state_name(old);
+        let Some(f) = pl
+            .prop(old, "facing")
+            .and_then(|v| crate::redstone::DIRS.iter().position(|d| *d == v))
+        else {
+            return;
+        };
+        if name == "minecraft:piston_head" {
+            let base = crate::redstone::step(pos, f ^ 1);
+            if let Some(b) = self.block(base)
+                && crate::pistons::is_piston(self.state_name(b))
+                && pl.prop(b, "extended") == Some("true")
+            {
+                self.pop_block(base, b);
+            }
+        } else if crate::pistons::is_piston(name) && pl.prop(old, "extended") == Some("true") {
+            let head = crate::redstone::step(pos, f);
+            if self
+                .block(head)
+                .is_some_and(|h| self.state_name(h) == "minecraft:piston_head")
+            {
+                self.set_block(head, AIR);
+            }
+        }
+    }
+
+    /// Содержимое контейнера в `p` для воронок и выбрасывателей.
+    fn cont_get(&self, p: [i32; 3]) -> Option<Cont> {
+        let name = self.state_name(self.block(p)?).to_owned();
+        if furnace_kind(&name).is_some() {
+            let slots = self.with_furnace(p, |e| e.f.slots)?;
+            return Some(Cont {
+                parts: vec![p],
+                slots: slots.to_vec(),
+                furnace: true,
+                name,
+            });
+        }
+        container_entity(&name)?;
+        let mut parts = vec![p];
+        // Двойной сундук: правая половина первой (`CompoundContainer`).
+        if let Some((other, right)) = self.chest_partner(p) {
+            if right {
+                parts.push(other)
+            } else {
+                parts.insert(0, other)
+            }
+        }
+        let slots = parts
+            .iter()
+            .flat_map(|&q| self.container_items(q))
+            .collect();
+        Some(Cont {
+            parts,
+            slots,
+            furnace: false,
+            name,
+        })
+    }
+
+    /// Записать контейнер и показать изменения тем, у кого он открыт.
+    fn cont_put(&self, c: &Cont) {
+        if c.furnace {
+            if let [a, b, r] = c.slots[..] {
+                self.set_furnace_slots(c.parts[0], [a, b, r], Uuid::nil());
+            }
+            return;
+        }
+        let n = c.slots.len() / c.parts.len();
+        for (i, &p) in c.parts.iter().enumerate() {
+            self.save_container(p, &c.slots[i * n..(i + 1) * n]);
+        }
+        let controls = self.controls.lock().unwrap();
+        for tx in controls.values() {
+            for &p in &c.parts {
+                let _ = tx.send(Control::ContainerChanged(p));
+            }
+        }
+    }
+
+    fn is_fuel(&self, item: i32) -> bool {
+        self.survival
+            .items
+            .get(item as usize)
+            .is_some_and(|i| i.fuel.is_some())
+    }
+
+    /// `InventoryMoveItemEvent`: `None` — отменено, иначе предмет (плагин может заменить).
+    fn move_event(&self, from: &Cont, to: &Cont, source_first: bool, item: Stack) -> Option<Stack> {
+        let reply = self.sync_event(Event::MoveItem, || {
+            let (a, b) = (from.parts[0], to.parts[0]);
+            format!(
+                "{} {} {} {} {} {} {} {} {} {}",
+                a[0],
+                a[1],
+                a[2],
+                from.name,
+                b[0],
+                b[1],
+                b[2],
+                to.name,
+                u8::from(source_first),
+                crate::stack_nbt::to_line(item, self.item_name(item.item))
+            )
+        });
+        match reply.as_deref().map(str::trim) {
+            Some("c") => None,
+            Some(r) if r.starts_with("i ") => {
+                crate::stack_nbt::from_line(&r[2..], |n| self.item_id(n))
+                    .map(|s| Stack { count: 1, ..s })
+                    .or(Some(item))
+            }
+            _ => Some(item),
+        }
+    }
+
+    /// Тик воронок: у каждой с вышедшей паузой — шаг переноса.
+    fn tick_hoppers(&self) {
+        let ready: Vec<[i32; 3]> = {
+            let mut map = self.hoppers.lock().unwrap();
+            if map.is_empty() {
+                return;
+            }
+            let mut ready = Vec::new();
+            for (p, cd) in map.iter_mut() {
+                if *cd > 0 {
+                    *cd -= 1;
+                } else {
+                    ready.push(*p);
+                }
+            }
+            ready
+        };
+        for p in ready {
+            match self.hopper_step(p) {
+                Some(moved) => {
+                    let enabled = self.block(p).is_some_and(|s| {
+                        self.survival.placement.prop(s, "enabled") != Some("false")
+                    });
+                    // Включённая воронка ждёт 8 тиков и после неудачной попытки.
+                    if moved || enabled {
+                        self.hoppers
+                            .lock()
+                            .unwrap()
+                            .insert(p, crate::hoppers::COOLDOWN);
+                    }
+                }
+                None => {
+                    self.hoppers.lock().unwrap().remove(&p);
+                }
+            }
+        }
+    }
+
+    /// `HopperBlockEntity.tryMoveItems`: отдать один предмет вперёд, взять один
+    /// сверху (из контейнера или с земли). `None` — воронки здесь больше нет.
+    fn hopper_step(&self, p: [i32; 3]) -> Option<bool> {
+        use crate::hoppers as hp;
+        let s = self.block(p)?;
+        if self.state_name(s) != "minecraft:hopper" {
+            return None;
+        }
+        let pl = &self.survival.placement;
+        if pl.prop(s, "enabled") == Some("false") {
+            return Some(false);
+        }
+        let mut me = self.cont_get(p)?;
+        let max = |item: i32| self.max_stack(item);
+        let mut moved = false;
+        let f = pl
+            .prop(s, "facing")
+            .and_then(|v| crate::redstone::DIRS.iter().position(|d| *d == v))
+            .unwrap_or(0);
+        // Отдать: первый непустой слот, что влезает в цель.
+        if me.slots.iter().any(Option::is_some)
+            && let Some(mut t) = self.cont_get(crate::redstone::step(p, f))
+        {
+            for i in 0..me.slots.len() {
+                let Some(st) = me.slots[i] else { continue };
+                let allowed =
+                    hp::insert_slots(t.furnace, t.slots.len(), f ^ 1, self.is_fuel(st.item));
+                let mut trial = t.slots.clone();
+                if !hp::insert_one(&mut trial, &allowed, st, max) {
+                    continue;
+                }
+                let one = Stack { count: 1, ..st };
+                let Some(item) = self.move_event(&me, &t, true, one) else {
+                    break;
+                };
+                if item == one {
+                    t.slots = trial;
+                } else if !hp::insert_one(&mut t.slots, &allowed, item, max) {
+                    break;
+                }
+                hp::take_one(&mut me.slots, i);
+                if t.name == "minecraft:hopper" && t.slots.iter().flatten().count() == 1 {
+                    self.hoppers
+                        .lock()
+                        .unwrap()
+                        .insert(t.parts[0], hp::COOLDOWN);
+                }
+                self.cont_put(&t);
+                moved = true;
+                break;
+            }
+        }
+        // Взять сверху.
+        let full = me
+            .slots
+            .iter()
+            .all(|s| s.is_some_and(|s| s.count >= self.max_stack(s.item)));
+        let above = crate::redstone::step(p, 1);
+        if !full {
+            if let Some(mut a) = self.cont_get(above) {
+                let all: Vec<usize> = (0..me.slots.len()).collect();
+                for i in hp::extract_slots(a.furnace, a.slots.len()) {
+                    let Some(st) = a.slots[i] else { continue };
+                    if a.furnace && i == 1 && self.item_name(st.item) != "minecraft:bucket" {
+                        continue;
+                    }
+                    let mut trial = me.slots.clone();
+                    if !hp::insert_one(&mut trial, &all, st, max) {
+                        continue;
+                    }
+                    if self
+                        .move_event(&a, &me, false, Stack { count: 1, ..st })
+                        .is_none()
+                    {
+                        break;
+                    }
+                    me.slots = trial;
+                    hp::take_one(&mut a.slots, i);
+                    self.cont_put(&a);
+                    moved = true;
+                    break;
+                }
+            } else if !self
+                .block(above)
+                .is_some_and(|b| (0..6).all(|d| pl.sturdy(b, d)))
+            {
+                moved |= self.hopper_suck(p, &mut me);
+            }
+        }
+        if moved {
+            self.cont_put(&me);
+        }
+        Some(moved)
+    }
+
+    /// Воронка втягивает предметы с земли над собой (`addItem(container, ItemEntity)`).
+    fn hopper_suck(&self, p: [i32; 3], me: &mut Cont) -> bool {
+        let found: Vec<(i32, Stack)> = self
+            .dropped
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, d)| crate::hoppers::in_suck_area(p, d.pos))
+            .map(|(&id, d)| (id, d.stack))
+            .collect();
+        let mut any = false;
+        for (id, st) in found {
+            if self
+                .sync_event(Event::HopperPickup, || {
+                    format!(
+                        "{} {} {} {}",
+                        p[0],
+                        p[1],
+                        p[2],
+                        crate::stack_nbt::to_line(st, self.item_name(st.item))
+                    )
+                })
+                .is_some_and(|r| r.trim() == "c")
+            {
+                continue;
+            }
+            let left = crate::hoppers::insert_all(&mut me.slots, st, |i| self.max_stack(i));
+            if left == st.count {
+                continue;
+            }
+            any = true;
+            let mut dropped = self.dropped.lock().unwrap();
+            if left == 0 {
+                dropped.remove(&id);
+                drop(dropped);
+                self.hub
+                    .send(None, play::remove_entities(self.ids.remove_entities, &[id]));
+            } else if let Some(d) = dropped.get_mut(&id) {
+                d.stack.count = left;
+                let stack = d.stack;
+                drop(dropped);
+                self.hub.send(
+                    None,
+                    inv::set_entity_item(self.ids.set_entity_data, id, Some(stack)),
+                );
+            }
+        }
+        any
+    }
+
+    /// Выбрасыватель и раздатчик (`DispenserBlock.dispenseFrom`): случайный
+    /// непустой слот; выбрасыватель кладёт в контейнер перед собой, иначе
+    /// предмет вылетает с дымом и звуком.
+    fn dispense(&self, pos: [i32; 3]) {
+        use crate::hoppers as hp;
+        let Some(s) = self.block(pos) else { return };
+        let pl = &self.survival.placement;
+        let Some(mut me) = self.cont_get(pos) else {
+            return;
+        };
+        let full: Vec<usize> = (0..me.slots.len())
+            .filter(|&i| me.slots[i].is_some())
+            .collect();
+        if full.is_empty() {
+            self.hub.send(
+                None,
+                play::level_event(self.ids.level_event, hp::EVENT_FAIL, pos, 0, false),
+            );
+            return;
+        }
+        let i = full[rand::Rng::gen_range(&mut rand::thread_rng(), 0..full.len())];
+        let Some(st) = me.slots[i] else { return };
+        let one = Stack { count: 1, ..st };
+        let f = pl
+            .prop(s, "facing")
+            .and_then(|v| crate::redstone::DIRS.iter().position(|d| *d == v))
+            .unwrap_or(2);
+        let front = crate::redstone::step(pos, f);
+        if me.name == "minecraft:dropper"
+            && let Some(mut t) = self.cont_get(front)
+        {
+            let allowed = hp::insert_slots(t.furnace, t.slots.len(), f ^ 1, self.is_fuel(st.item));
+            let mut trial = t.slots.clone();
+            if hp::insert_one(&mut trial, &allowed, one, |it| self.max_stack(it)) {
+                if self.move_event(&me, &t, true, one).is_some() {
+                    t.slots = trial;
+                    hp::take_one(&mut me.slots, i);
+                    self.cont_put(&t);
+                    self.cont_put(&me);
+                }
+            } else {
+                self.hub.send(
+                    None,
+                    play::level_event(self.ids.level_event, hp::EVENT_FAIL, pos, 0, false),
+                );
+            }
+            return;
+        }
+        let d = crate::placement::step(f);
+        let r: [f64; 4] = rand::random();
+        let (at, vel) = hp::dispense_motion(pos, d, r);
+        if self
+            .sync_event(Event::Dispense, || {
+                format!(
+                    "{} {} {} {} {} {} {}",
+                    pos[0],
+                    pos[1],
+                    pos[2],
+                    vel[0],
+                    vel[1],
+                    vel[2],
+                    crate::stack_nbt::to_line(one, self.item_name(one.item))
+                )
+            })
+            .is_some_and(|r| r.trim() == "c")
+        {
+            return;
+        }
+        // Особые действия раздатчика (`DispenseItemBehavior`): вёдра, огниво.
+        if me.name == "minecraft:dispenser" {
+            match self.dispense_special(&mut me, i, st, front, f) {
+                Some(true) => {
+                    self.cont_put(&me);
+                    // Снаряды звучат сами (`EVENT_LAUNCH`).
+                    let projectile = matches!(
+                        self.item_name(st.item),
+                        "minecraft:arrow" | "minecraft:snowball" | "minecraft:egg"
+                    );
+                    if !projectile {
+                        self.hub.send(
+                            None,
+                            play::level_event(
+                                self.ids.level_event,
+                                hp::EVENT_DISPENSE,
+                                pos,
+                                0,
+                                false,
+                            ),
+                        );
+                    }
+                    return;
+                }
+                Some(false) => {
+                    self.hub.send(
+                        None,
+                        play::level_event(self.ids.level_event, hp::EVENT_FAIL, pos, 0, false),
+                    );
+                    return;
+                }
+                None => {}
+            }
+        }
+        hp::take_one(&mut me.slots, i);
+        self.cont_put(&me);
+        self.drop_item(at, vel, one, std::time::Duration::ZERO);
+        self.hub.send(
+            None,
+            play::level_event(self.ids.level_event, hp::EVENT_DISPENSE, pos, 0, false),
+        );
+        self.hub.send(
+            None,
+            play::level_event(self.ids.level_event, hp::EVENT_SMOKE, pos, f as i32, false),
+        );
+    }
+
+    /// Действие раздатчика для предмета в слоте `i`: `Some(true)` — сделано,
+    /// `Some(false)` — осечка, `None` — обычный выброс.
+    fn dispense_special(
+        &self,
+        me: &mut Cont,
+        i: usize,
+        st: Stack,
+        front: [i32; 3],
+        facing: usize,
+    ) -> Option<bool> {
+        use crate::fluids as fl;
+        let name = self.item_name(st.item).to_owned();
+        let front_state = self.block(front)?;
+        let front_name = self.state_name(front_state).to_owned();
+        let empty = matches!(
+            front_name.as_str(),
+            "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
+        );
+        let open = empty || self.fluid_replaceable(front);
+        match name.as_str() {
+            // Полное ведро: вылить, в слоте остаётся пустое (`DispenseItemBehavior` для `BucketItem`).
+            "minecraft:water_bucket" | "minecraft:lava_bucket" => {
+                let kind = if name == "minecraft:water_bucket" {
+                    fl::Kind::Water
+                } else {
+                    fl::Kind::Lava
+                };
+                let here = fl::state_fluid(&self.survival.placement, front_state);
+                let soak = kind == fl::Kind::Water && self.waterloggable(front);
+                if !open && here.is_none() && !soak {
+                    return None;
+                }
+                if here.is_some_and(|f| f.source && f.kind == kind) {
+                    return None;
+                }
+                self.pour(front, kind);
+                let sound = if kind == fl::Kind::Water {
+                    "minecraft:item.bucket.empty"
+                } else {
+                    "minecraft:item.bucket.empty_lava"
+                };
+                self.block_sound(None, sound, front, 1.0, 1.0);
+                me.slots[i] = Some(Stack {
+                    item: self.item_id("minecraft:bucket")?,
+                    count: 1,
+                    damage: 0,
+                    extra: 0,
+                });
+                Some(true)
+            }
+            // Пустое ведро: зачерпнуть источник перед собой.
+            "minecraft:bucket" => {
+                let f =
+                    fl::state_fluid(&self.survival.placement, front_state).filter(|f| f.source)?;
+                let (filled, sound) = match f.kind {
+                    fl::Kind::Water => ("minecraft:water_bucket", "minecraft:item.bucket.fill"),
+                    fl::Kind::Lava => ("minecraft:lava_bucket", "minecraft:item.bucket.fill_lava"),
+                };
+                let item = self.item_id(filled)?;
+                let full = Stack {
+                    item,
+                    count: 1,
+                    damage: 0,
+                    extra: 0,
+                };
+                if st.count == 1 {
+                    me.slots[i] = Some(full);
+                } else {
+                    me.slots[i] = Some(Stack {
+                        count: st.count - 1,
+                        ..st
+                    });
+                    if crate::hoppers::insert_all(&mut me.slots, full, |_| 1) > 0 {
+                        let c = front.map(|v| v as f64 + 0.5);
+                        self.drop_item(c, [0.0, 0.1, 0.0], full, std::time::Duration::ZERO);
+                    }
+                }
+                self.drain(front);
+                self.block_sound(None, sound, front, 1.0, 1.0);
+                Some(true)
+            }
+            // Стрела (`ProjectileDispenseBehavior`): из центра грани, сила 1.1, разброс 6.
+            "minecraft:arrow" | "minecraft:snowball" | "minecraft:egg" => {
+                let d = crate::placement::step(facing);
+                let at = [
+                    front[0] as f64 + 0.5 - 0.3 * d[0] as f64,
+                    front[1] as f64 + 0.5 - 0.3 * d[1] as f64,
+                    front[2] as f64 + 0.5 - 0.3 * d[2] as f64,
+                ];
+                let dir = [d[0] as f64, d[1] as f64 + 0.1, d[2] as f64];
+                let vel = crate::arrows::shoot(
+                    dir,
+                    crate::arrows::DISPENSE_POWER,
+                    crate::arrows::DISPENSE_SPREAD,
+                    rand::random(),
+                );
+                let (ty, thrown) = match name.as_str() {
+                    "minecraft:snowball" => (self.survival.snowball_entity_type, true),
+                    "minecraft:egg" => (self.survival.egg_entity_type, true),
+                    _ => (self.survival.arrow_entity_type, false),
+                };
+                self.shoot_arrow(at, vel, ty, thrown);
+                // `ProjectileDispenseBehavior.playSound`: свой звук запуска вместо щелчка.
+                let disp = crate::redstone::step(front, facing ^ 1);
+                self.hub.send(
+                    None,
+                    play::level_event(
+                        self.ids.level_event,
+                        crate::arrows::EVENT_LAUNCH,
+                        disp,
+                        0,
+                        false,
+                    ),
+                );
+                self.hub.send(
+                    None,
+                    play::level_event(
+                        self.ids.level_event,
+                        crate::hoppers::EVENT_SMOKE,
+                        disp,
+                        facing as i32,
+                        false,
+                    ),
+                );
+                crate::hoppers::take_one(&mut me.slots, i);
+                Some(true)
+            }
+            // Броня (`EquipmentDispenseItemBehavior`): на игрока перед раздатчиком в пустой слот.
+            n if crate::arrows::armor_slot(n).is_some() => {
+                let slot = crate::arrows::armor_slot(n)?;
+                let target = {
+                    let mut live = self.live.lock().unwrap();
+                    let pos: Vec<(Uuid, [f64; 3])> = self
+                        .hub
+                        .players
+                        .lock()
+                        .unwrap()
+                        .values()
+                        .filter(|p| p.collects)
+                        .map(|p| (p.entry.uuid, p.pos))
+                        .collect();
+                    let found = pos.into_iter().find(|(u, f)| {
+                        crate::arrows::in_cell(*f, front)
+                            && live.get(u).is_some_and(|l| l.slots[slot].is_none())
+                    });
+                    if let Some((u, _)) = found
+                        && let Some(l) = live.get_mut(&u)
+                    {
+                        l.slots[slot] = Some(Stack { count: 1, ..st });
+                    }
+                    found.map(|f| f.0)
+                };
+                let uuid = target?;
+                self.push_control(uuid, Control::Slot(slot, Some(Stack { count: 1, ..st })));
+                crate::hoppers::take_one(&mut me.slots, i);
+                Some(true)
+            }
+            // Огниво: огонь в пустоте перед раздатчиком, −1 прочности.
+            "minecraft:flint_and_steel" => {
+                if !empty {
+                    return Some(false);
+                }
+                let fire = *self.survival.block_defaults.get("minecraft:fire")?;
+                self.set_block(front, fire);
+                self.block_sound(None, "minecraft:item.flintandsteel.use", front, 1.0, 1.0);
+                let max = self
+                    .survival
+                    .items
+                    .get(st.item as usize)
+                    .map_or(64, |i| i.max_damage);
+                me.slots[i] = (st.damage + 1 < max).then_some(Stack {
+                    damage: st.damage + 1,
+                    ..st
+                });
+                Some(true)
+            }
+            _ => None,
+        }
+    }
+
+    /// Жидкости в `p` и вокруг: лава у воды застывает, остальные — тик через задержку.
+    fn wake_fluids(&self, p: [i32; 3]) {
+        use crate::fluids as fl;
+        for d in 0..7 {
+            let n = if d == 6 {
+                p
+            } else {
+                crate::redstone::step(p, d)
+            };
+            let Some(s) = self.block(n) else { continue };
+            let pl = &self.survival.placement;
+            let Some(f) = fl::state_fluid(pl, s) else {
+                continue;
+            };
+            if f.kind == fl::Kind::Lava {
+                let at = |q: [i32; 3]| self.block(q).unwrap_or(AIR);
+                let c = fl::Ctx { pl, at: &at };
+                if let Some(b) = c.lava_meets(n) {
+                    if let Some(&id) = self.survival.block_defaults.get(b) {
+                        self.set_block(n, id);
+                        self.fizz(n);
+                    }
+                    continue;
+                }
+            }
+            let at = self.server_ticks.load(std::sync::atomic::Ordering::Relaxed) + f.kind.delay();
+            let mut list = self.fluid_ticks.lock().unwrap();
+            if !list.iter().any(|t| t.0 == n) {
+                list.push((n, at));
+            }
+        }
+    }
+
+    /// Ведро в руке (`BucketItem.use`): пустое черпает источник под взглядом,
+    /// полное выливает перед блоком. `false` — в руке не ведро или некуда.
+    async fn use_bucket(
+        &self,
+        conn: &mut Connection,
+        uuid: Uuid,
+        inv: &mut Inventory,
+        hand: i32,
+        survival: bool,
+    ) -> Result<bool, NetError> {
+        use crate::fluids as fl;
+        let slot = if hand == 0 {
+            inv.held_slot()
+        } else {
+            survival::OFFHAND
+        };
+        let Some(held) = inv.slots[slot] else {
+            return Ok(false);
+        };
+        let bucket = self.item_name(held.item).to_owned();
+        let pour = match bucket.as_str() {
+            "minecraft:bucket" => None,
+            "minecraft:water_bucket" => Some(fl::Kind::Water),
+            "minecraft:lava_bucket" => Some(fl::Kind::Lava),
+            _ => return Ok(false),
+        };
+        let Some((feet, yaw, pitch)) = self.player_at(uuid) else {
+            return Ok(false);
+        };
+        let (y, p) = (yaw.to_radians() as f64, pitch.to_radians() as f64);
+        let dir = [-y.sin() * p.cos(), -p.sin(), y.cos() * p.cos()];
+        let eye = [feet[0], feet[1] + EYE_HEIGHT, feet[2]];
+        let pl = &self.survival.placement;
+        let fluid = |q: [i32; 3]| fl::state_fluid(pl, self.block(q).unwrap_or(AIR));
+        let solid = |q: [i32; 3]| {
+            let n = self.state_name(self.block(q).unwrap_or(AIR));
+            !matches!(
+                n,
+                "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | ""
+            ) && fl::fluid_of(n, None).is_none()
+        };
+        // Пустое ведро видит источники, полное — только блоки.
+        let hit = fl::trace(eye, dir, 4.5, |q| {
+            solid(q) || (pour.is_none() && fluid(q).is_some_and(|f| f.source))
+        });
+        let Some((at, face)) = hit else {
+            return Ok(false);
+        };
+        let hand_name = if hand == 0 { "HAND" } else { "OFF_HAND" };
+        let face_name = FACES.get(face).copied().unwrap_or("UP");
+        let (target, result, sound) = match pour {
+            None => {
+                let Some(f) = fluid(at).filter(|f| f.source) else {
+                    return Ok(false);
+                };
+                let (filled, sound) = match f.kind {
+                    fl::Kind::Water => ("minecraft:water_bucket", "minecraft:item.bucket.fill"),
+                    fl::Kind::Lava => ("minecraft:lava_bucket", "minecraft:item.bucket.fill_lava"),
+                };
+                (at, filled, sound)
+            }
+            Some(kind) => {
+                // Заводняемый блок (ступени, плиты, забор…) — вода внутрь;
+                // заменяемый (трава) — льём в него, иначе перед ним.
+                let target = if kind == fl::Kind::Water && self.waterloggable(at) {
+                    at
+                } else if solid(at) && !self.fluid_replaceable(at) {
+                    crate::redstone::step(at, face)
+                } else {
+                    at
+                };
+                if solid(target)
+                    && !self.fluid_replaceable(target)
+                    && !(kind == fl::Kind::Water && self.waterloggable(target))
+                {
+                    return Ok(false);
+                }
+                let sound = if kind == fl::Kind::Water {
+                    "minecraft:item.bucket.empty"
+                } else {
+                    "minecraft:item.bucket.empty_lava"
+                };
+                (target, "minecraft:bucket", sound)
+            }
+        };
+        let action = if pour.is_some() { "EMPTY" } else { "FILL" };
+        if self
+            .cancelled(Event::Bucket, uuid, || {
+                format!(
+                    "{action} {} {} {} {face_name} {bucket} {hand_name}",
+                    target[0], target[1], target[2]
+                )
+            })
+            .await
+        {
+            // Вернуть клиенту то, что он уже предсказал.
+            let s = self.block(target).unwrap_or(AIR);
+            conn.send(&play::block_update(self.ids.block_update, target, s as i32))
+                .await?;
+            self.send_slots(conn, inv, &[slot]).await?;
+            return Ok(true);
+        }
+        match pour {
+            None => self.drain(target),
+            Some(kind) => self.pour(target, kind),
+        }
+        self.block_sound(None, sound, target, 1.0, 1.0);
+        if survival {
+            let Some(item) = self.item_id(result) else {
+                return Ok(true);
+            };
+            if held.count == 1 {
+                inv.slots[slot] = Some(Stack {
+                    item,
+                    count: 1,
+                    damage: 0,
+                    extra: 0,
+                });
+                self.send_slots(conn, inv, &[slot]).await?;
+            } else {
+                inv.slots[slot] = Some(Stack {
+                    count: held.count - 1,
+                    ..held
+                });
+                let (mut changed, left) = inv.add(item, 1, 16);
+                changed.push(slot);
+                self.send_slots(conn, inv, &changed).await?;
+                if left > 0 {
+                    let one = Stack {
+                        item,
+                        count: 1,
+                        damage: 0,
+                        extra: 0,
+                    };
+                    self.drop_item(
+                        eye,
+                        [dir[0] * 0.3, 0.1, dir[2] * 0.3],
+                        one,
+                        items::THROW_DELAY,
+                    );
+                }
+            }
+        } else if pour.is_none()
+            && !inv
+                .slots
+                .iter()
+                .any(|s| s.is_some_and(|s| self.item_name(s.item) == result))
+        {
+            // Креатив: полное ведро добавляется, пустое остаётся.
+            if let Some(item) = self.item_id(result) {
+                let (changed, _) = inv.add(item, 1, 1);
+                self.send_slots(conn, inv, &changed).await?;
+            }
+        }
+        Ok(true)
+    }
+
+    /// Блок со свойством `waterlogged=false`: вода из ведра заходит внутрь.
+    fn waterloggable(&self, p: [i32; 3]) -> bool {
+        self.block(p)
+            .is_some_and(|s| self.survival.placement.prop(s, "waterlogged") == Some("false"))
+    }
+
+    /// Вылить источник в `p`: заводнить блок, смыть растение или занять пустоту.
+    fn pour(&self, p: [i32; 3], kind: crate::fluids::Kind) {
+        let Some(s) = self.block(p) else { return };
+        let pl = &self.survival.placement;
+        if kind == crate::fluids::Kind::Water
+            && let Some(w) = pl
+                .prop(s, "waterlogged")
+                .filter(|v| *v == "false")
+                .and_then(|_| pl.with_prop(s, "waterlogged", "true"))
+        {
+            self.set_block(p, w);
+            return;
+        }
+        let n = self.state_name(s);
+        let empty = matches!(
+            n,
+            "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
+        );
+        if !empty && crate::fluids::fluid_of(n, None).is_none() {
+            self.pop_block(p, s);
+        }
+        self.set_block(
+            p,
+            self.fluid_state(Some(crate::fluids::Fluid::source(kind))),
+        );
+    }
+
+    /// Зачерпнуть источник в `p`: снять заводнение или оставить воздух.
+    fn drain(&self, p: [i32; 3]) {
+        let Some(s) = self.block(p) else { return };
+        let pl = &self.survival.placement;
+        if pl.prop(s, "waterlogged") == Some("true") {
+            if let Some(d) = pl.with_prop(s, "waterlogged", "false") {
+                self.set_block(p, d);
+            }
+            return;
+        }
+        self.set_block(p, AIR);
+    }
+
+    /// Блок, который жидкость смывает (`canBeReplaced` для жидкостей):
+    /// растения, факелы, снег слоем, редстоун-пыль и подобное без коллизии.
+    fn fluid_replaceable(&self, p: [i32; 3]) -> bool {
+        let Some(s) = self.block(p) else { return false };
+        let n = self.state_name(s);
+        let path = n.strip_prefix("minecraft:").unwrap_or(n);
+        matches!(
+            path,
+            "short_grass"
+                | "tall_grass"
+                | "fern"
+                | "large_fern"
+                | "dead_bush"
+                | "redstone_wire"
+                | "torch"
+                | "wall_torch"
+                | "redstone_torch"
+                | "redstone_wall_torch"
+                | "lever"
+                | "rail"
+                | "tripwire"
+                | "fire"
+                | "vine"
+                | "seagrass"
+                | "snow"
+                | "dandelion"
+                | "poppy"
+                | "wheat"
+                | "carrots"
+                | "potatoes"
+                | "beetroots"
+        ) || path.ends_with("_sapling")
+            || path.ends_with("_tulip")
+            || path.ends_with("_button")
+    }
+
+    /// `minecraft:piston[extended=false,facing=north]` (`BlockData.getAsString`).
+    fn state_string(&self, s: u32) -> String {
+        let pl = &self.survival.placement;
+        let props = pl.props(s);
+        let name = self.state_name(s);
+        if props.is_empty() {
+            return name.to_owned();
+        }
+        let list: Vec<String> = props.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        format!("{name}[{}]", list.join(","))
+    }
+
+    /// Обратное к `state_string`: имя (можно без `minecraft:`) и свойства.
+    fn parse_state(&self, spec: &str) -> Option<u32> {
+        let (name, props) = match spec.split_once('[') {
+            Some((n, p)) => (n, p.trim_end_matches(']')),
+            None => (spec, ""),
+        };
+        let name = if name.contains(':') {
+            name.to_owned()
+        } else {
+            format!("minecraft:{name}")
+        };
+        let mut s = *self.survival.block_defaults.get(&name)?;
+        for kv in props.split(',').filter(|kv| !kv.is_empty()) {
+            let (k, v) = kv.split_once('=')?;
+            s = self.survival.placement.with_prop(s, k.trim(), v.trim())?;
+        }
+        Some(s)
+    }
+
+    /// Шипение лавы (`LevelEvent.LAVA_FIZZ`).
+    fn fizz(&self, p: [i32; 3]) {
+        self.hub.send(
+            None,
+            play::level_event(self.ids.level_event, crate::fluids::FIZZ, p, 0, false),
+        );
+    }
+
+    /// Состояние блока жидкости (`None` — воздух).
+    fn fluid_state(&self, f: Option<crate::fluids::Fluid>) -> u32 {
+        let Some(f) = f else { return AIR };
+        let Some(&d) = self.survival.block_defaults.get(f.kind.block()) else {
+            return AIR;
+        };
+        self.survival
+            .placement
+            .with_prop(d, "level", &f.level().to_string())
+            .unwrap_or(d)
+    }
+
+    /// Наступившие тики жидкостей: растекание, высыхание, смыв, застывание.
+    fn tick_fluids(&self, now: u64) {
+        use crate::fluids as fl;
+        let due: Vec<[i32; 3]> = {
+            let mut list = self.fluid_ticks.lock().unwrap();
+            if list.is_empty() {
+                return;
+            }
+            let due = list.iter().filter(|t| t.1 <= now).map(|t| t.0).collect();
+            list.retain(|t| t.1 > now);
+            due
+        };
+        for p in due {
+            let changes = {
+                let at = |q: [i32; 3]| self.block(q).unwrap_or(AIR);
+                fl::Ctx {
+                    pl: &self.survival.placement,
+                    at: &at,
+                }
+                .tick(p)
+            };
+            for c in changes {
+                match c {
+                    fl::Change::Set { pos, fluid, wash } => {
+                        if wash && let Some(s) = self.block(pos) {
+                            // Лава сжигает без дропа, вода смывает с дропом.
+                            if fluid.is_some_and(|f| f.kind == fl::Kind::Lava) {
+                                self.fizz(pos);
+                            } else {
+                                self.pop_block(pos, s);
+                            }
+                        }
+                        self.set_block(pos, self.fluid_state(fluid));
+                    }
+                    fl::Change::Solidify { pos, block } => {
+                        if let Some(&id) = self.survival.block_defaults.get(block) {
+                            self.set_block(pos, id);
+                            self.fizz(pos);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Компонент без опоры выпадает предметом (`canSurvive` → `destroyBlock`).
+    fn pop_block(&self, p: [i32; 3], s: u32) {
+        self.set_block(p, AIR);
+        self.hub.send(
+            None,
+            play::level_event(
+                self.ids.level_event,
+                crate::sounds::DESTROY_BLOCK,
+                p,
+                s as i32,
+                false,
+            ),
+        );
+        let center = [p[0] as f64 + 0.5, p[1] as f64 + 0.25, p[2] as f64 + 0.5];
+        for st in self.block_loot(s, None) {
+            let vel = items::pop_velocity(rand::random(), rand::random());
+            self.drop_item(center, vel, st, items::BLOCK_DELAY);
+        }
+    }
+
+    /// Рычаг или кнопка под рукой: переключить, звук, питание соседей.
+    async fn use_switch(
+        &self,
+        conn: &mut Connection,
+        uuid: Uuid,
+        pos: [i32; 3],
+    ) -> Result<bool, NetError> {
+        let Some(state) = self.block(pos) else {
+            return Ok(false);
+        };
+        let name = self.state_name(state).to_owned();
+        let pl = &self.survival.placement;
+        // Повторитель: задержка 1→4 по кругу (`RepeaterBlock.useWithoutItem`).
+        if crate::redstone::is_repeater(&name) {
+            let d = pl
+                .prop(state, "delay")
+                .and_then(|v| v.parse::<u8>().ok())
+                .unwrap_or(1)
+                % 4
+                + 1;
+            if let Some(n) = pl.with_prop(state, "delay", &d.to_string()) {
+                self.set_block(pos, n);
+                conn.send(&play::block_update(self.ids.block_update, pos, n as i32))
+                    .await?;
+            }
+            return Ok(true);
+        }
+        // Компаратор: сравнение ↔ вычитание (`ComparatorBlock.useWithoutItem`).
+        if crate::redstone::is_comparator(&name) {
+            let sub = pl.prop(state, "mode") == Some("subtract");
+            if let Some(n) = pl.with_prop(state, "mode", if sub { "compare" } else { "subtract" }) {
+                self.set_block(pos, n);
+                conn.send(&play::block_update(self.ids.block_update, pos, n as i32))
+                    .await?;
+                self.block_sound(
+                    None,
+                    "minecraft:block.comparator.click",
+                    pos,
+                    0.3,
+                    if sub { 0.5 } else { 0.55 },
+                );
+                self.schedule(pos, 2);
+            }
+            return Ok(true);
+        }
+        // Провод без соединений: крест ↔ точка (`RedStoneWireBlock.useWithoutItem`).
+        if crate::redstone::is_wire(&name) {
+            let sides =
+                ["north", "south", "west", "east"].map(|k| pl.prop(state, k).unwrap_or("none"));
+            let cross = sides.iter().all(|v| *v == "side");
+            let dot = sides.iter().all(|v| *v == "none");
+            if !cross && !dot {
+                return Ok(false);
+            }
+            let mut n = state;
+            for k in ["north", "south", "west", "east"] {
+                if let Some(m) = pl.with_prop(n, k, if cross { "none" } else { "side" }) {
+                    n = m;
+                }
+            }
+            self.set_block(pos, n);
+            self.redstone_update(&crate::redstone::around(pos));
+            let now = self.block(pos).unwrap_or(n);
+            conn.send(&play::block_update(self.ids.block_update, pos, now as i32))
+                .await?;
+            return Ok(now != state);
+        }
+        let lever = crate::redstone::is_lever(&name);
+        if !lever && !crate::redstone::is_button(&name) {
+            return Ok(false);
+        }
+        let on = self.survival.placement.prop(state, "powered") != Some("true");
+        // Нажатая кнопка не отжимается рукой.
+        if !lever && !on {
+            return Ok(true);
+        }
+        // `BlockRedstoneEvent`: плагин может не дать переключить.
+        let (old, new) = if on { (0, 15) } else { (15, 0) };
+        if (self.redstone_event(pos, old, new) > 0) != on {
+            return Ok(true);
+        }
+        let Some(next) =
+            self.survival
+                .placement
+                .with_prop(state, "powered", if on { "true" } else { "false" })
+        else {
+            return Ok(false);
+        };
+        self.set_block(pos, next);
+        conn.send(&play::block_update(self.ids.block_update, pos, next as i32))
+            .await?;
+        let (sound, v, p) = crate::redstone::click_sound(&name, on);
+        // Кнопку клиент озвучивает сам, рычаг — нет.
+        self.block_sound(if lever { None } else { Some(uuid) }, &sound, pos, v, p);
+        if !lever {
+            self.schedule(pos, crate::redstone::button_ticks(&name));
+        }
+        self.update_power(next, pos);
+        Ok(true)
+    }
+
+    /// Есть ли сигнал у блока `pos` (`hasNeighborSignal`).
+    fn powered_at(&self, pos: [i32; 3]) -> bool {
+        let at = |p: [i32; 3]| self.block(p).unwrap_or(AIR);
+        crate::redstone::World {
+            pl: &self.survival.placement,
+            at: &at,
+            output: &|p| self.comparator_output(p),
+            analog: &|p| self.analog_at(p),
+        }
+        .powered(pos)
+    }
+
+    /// После переключения рычага или кнопки в `pos`: соседи его и блока, к
+    /// которому он прикреплён (сильный сигнал).
+    fn update_power(&self, source: u32, pos: [i32; 3]) {
+        let pl = &self.survival.placement;
+        let face = pl.prop(source, "face").unwrap_or("wall");
+        let facing = pl.prop(source, "facing").unwrap_or("north");
+        let base = crate::redstone::attached(pos, face, facing);
+        let mut all = crate::redstone::around(pos);
+        all.extend(crate::redstone::around(base));
+        all.sort();
+        all.dedup();
+        self.redstone_update(&all);
+    }
+
+    /// `neighborChanged` двери, люка или калитки в `c`: открыть или закрыть по
+    /// сигналу. `sound` — со звуком (при установке ванила молчит). Возвращает
+    /// изменённые позиции.
+    fn refresh_openable(&self, c: [i32; 3], sound: bool) -> Vec<[i32; 3]> {
+        let pl = &self.survival.placement;
+        let mut out = Vec::new();
+        let Some(state) = self.block(c) else {
+            return out;
+        };
+        let name = self.state_name(state).to_owned();
+        if !crate::redstone::openable(&name) {
+            return out;
+        }
+        // Дверь: сигнал любой из половин.
+        let other = pl
+            .partner(state)
+            .filter(|_| name.ends_with("_door"))
+            .map(|o| crate::redstone::add(c, o))
+            .filter(|&p| self.block(p).is_some_and(|s| pl.name(s) == pl.name(state)));
+        let mut power = self.powered_at(c) || other.is_some_and(|p| self.powered_at(p));
+        if pl.prop(state, "powered") == Some(if power { "true" } else { "false" }) {
+            return out;
+        }
+        let old = if power { 0 } else { 15 };
+        power = self.redstone_event(c, old, 15 - old) > 0;
+        let value = if power { "true" } else { "false" };
+        let was_open = pl.prop(state, "open") == Some("true");
+        for p in std::iter::once(c).chain(other) {
+            if let Some(s) = self.block(p)
+                && let Some(n) = pl
+                    .with_prop(s, "powered", value)
+                    .and_then(|n| pl.with_prop(n, "open", value))
+            {
+                self.set_block(p, n);
+                out.push(p);
+            }
+        }
+        if sound
+            && was_open != power
+            && let Some(sound) = crate::sounds::door_sound(&name, power)
+        {
+            self.block_sound(None, &sound, c, 1.0, crate::sounds::pitch_09());
+        }
+        out
     }
 
     /// Тик печей: горение, готовка, свойство `lit` блока, окна смотрящих.
@@ -4401,6 +7901,11 @@ impl PlayPlan {
             }
         }
         drop(controls);
+        for (pos, _, _, _, items, _) in &done {
+            if *items {
+                self.redstone_update(&crate::redstone::around(*pos));
+            }
+        }
         for (pos, f, flip, changed, _, _) in done {
             if flip
                 && let Some(s) = self.block(pos)
@@ -4417,7 +7922,8 @@ impl PlayPlan {
     /// Сохраняет сундук окна и сообщает остальным, у кого он открыт.
     fn save_window(&self, w: &Window, me: Uuid) {
         for (i, &pos) in w.positions().iter().enumerate() {
-            self.save_container(pos, &w.slots[i * 27..(i + 1) * 27]);
+            let n = w.slots.len() / w.positions().len();
+            self.save_container(pos, &w.slots[i * n..(i + 1) * n]);
         }
         let controls = self.controls.lock().unwrap();
         for (_, tx) in controls.iter().filter(|(id, _)| **id != me) {
@@ -4630,7 +8136,10 @@ impl PlayPlan {
 
     /// 27 слотов сундука из `Items` его блок-сущности.
     fn container_items(&self, pos: [i32; 3]) -> Vec<Slot> {
-        let mut slots = vec![None; 27];
+        let size = self
+            .block(pos)
+            .map_or(27, |s| container_size(self.state_name(s)));
+        let mut slots = vec![None; size];
         let Some(be) = self.block_entity(pos) else {
             return slots;
         };
@@ -4654,6 +8163,8 @@ impl PlayPlan {
         let mut nbt = self.block_entity(pos).map(|b| b.nbt).unwrap_or_default();
         nbt.insert("Items".into(), Tag::List(items));
         self.set_block_entity(pos, Some(BlockEntity { id: id.into(), nbt }));
+        // Компараторы рядом читают заполненность.
+        self.redstone_update(&crate::redstone::around(pos));
     }
 
     /// `Items` контейнера: непустые слоты с номерами.
@@ -4663,7 +8174,10 @@ impl PlayPlan {
             .enumerate()
             .filter_map(|(i, s)| {
                 let s = (*s)?;
-                let mut c = crate::stack_nbt::to_nbt(s, self.item_name(s.item))?;
+                let mut c = crate::stack_nbt::named_nbt(s, self.item_name(s.item), &|id| {
+                    let n = self.item_name(id);
+                    (n != "minecraft:air").then(|| n.to_owned())
+                })?;
                 c.insert("Slot".into(), Tag::Byte(i as i8));
                 Some(Tag::Compound(c))
             })
@@ -4935,7 +8449,8 @@ impl PlayPlan {
         };
         if open && name.ends_with("_fence_gate") {
             // Как в ваниле: открывается от игрока — если смотрит на него, разворот.
-            let dir = ["south", "west", "north", "east"][((yaw.rem_euclid(360.0) / 90.0 + 0.5) as usize) % 4];
+            let dir = ["south", "west", "north", "east"]
+                [((yaw.rem_euclid(360.0) / 90.0 + 0.5) as usize) % 4];
             let back = |d: &str| match d {
                 "north" => "south",
                 "south" => "north",
@@ -4957,25 +8472,46 @@ impl PlayPlan {
         }
         for &(p, s) in &changed {
             self.set_block(p, s);
-            conn.send(&play::block_update(self.ids.block_update, p, s as i32)).await?;
+            conn.send(&play::block_update(self.ids.block_update, p, s as i32))
+                .await?;
         }
         self.block_sound(Some(uuid), &sound, pos, 1.0, crate::sounds::pitch_09());
         Ok(true)
     }
 
     /// `Level.playSound(except, …)`: звук всем, кроме `skip`.
-    fn play_sound(&self, skip: Option<Uuid>, name: &str, source: i32, pos: [f64; 3], volume: f32, pitch: f32) {
+    fn play_sound(
+        &self,
+        skip: Option<Uuid>,
+        name: &str,
+        source: i32,
+        pos: [f64; 3],
+        volume: f32,
+        pitch: f32,
+    ) {
         let Some(&id) = self.survival.sounds.get(name) else {
             return;
         };
         self.hub.send(
             skip,
-            play::sound(self.ids.sound, id, source, pos, volume, pitch, rand::random()),
+            play::sound(
+                self.ids.sound,
+                id,
+                source,
+                pos,
+                volume,
+                pitch,
+                rand::random(),
+            ),
         );
     }
 
     fn block_sound(&self, skip: Option<Uuid>, name: &str, pos: [i32; 3], volume: f32, pitch: f32) {
-        let c = [pos[0] as f64 + 0.5, pos[1] as f64 + 0.5, pos[2] as f64 + 0.5];
+        let c = [
+            pos[0] as f64 + 0.5,
+            pos[1] as f64 + 0.5,
+            pos[2] as f64 + 0.5,
+        ];
         self.play_sound(skip, name, crate::sounds::BLOCKS, c, volume, pitch);
     }
 
@@ -4988,10 +8524,12 @@ impl PlayPlan {
 
     /// Звуки опыта: сфера (`handleTakeItemEntity`) и каждые 5 уровней — `levelup`.
     fn xp_sounds(&self, uuid: Uuid, old_level: i32, xp: &crate::xp::Experience) {
-        let pitch = (rand::random::<f32>() - rand::random::<f32>()) * 0.35 + 0.9;
-        self.player_sound(uuid, "minecraft:entity.experience_orb.pickup", 0.1, pitch);
         if xp.level > old_level && xp.level % 5 == 0 {
-            let f = if xp.level > 30 { 1.0 } else { xp.level as f32 / 30.0 };
+            let f = if xp.level > 30 {
+                1.0
+            } else {
+                xp.level as f32 / 30.0
+            };
             self.player_sound(uuid, "minecraft:entity.player.levelup", f * 0.75, 1.0);
         }
     }
@@ -5004,7 +8542,20 @@ impl PlayPlan {
         entity: i32,
         inv: &survival::Inventory,
         last: &mut std::collections::BTreeMap<String, Vec<(String, f64, i32)>>,
+        gear: &mut [(i32, u32); 6],
     ) -> Result<(), NetError> {
+        let piece = |i: usize| inv.slots[i].map(|s| (s.item, s.extra)).unwrap_or((-1, 0));
+        let gear_now = [
+            piece(inv.held_slot()),
+            piece(survival::OFFHAND),
+            piece(5),
+            piece(6),
+            piece(7),
+            piece(8),
+        ];
+        if gear_now == *gear {
+            return Ok(());
+        }
         let ench = |i: usize| inv.slots[i].map(|s| chunkwake_protocol::components::get(s.extra));
         let slots = [
             ("mainhand", ench(inv.held_slot())),
@@ -5020,6 +8571,7 @@ impl PlayPlan {
             .collect();
         let now = crate::enchanting::attribute_modifiers(&self.survival.enchanting, &equipment);
         if now == *last {
+            *gear = gear_now;
             return Ok(());
         }
         let names: std::collections::BTreeSet<&String> = now.keys().chain(last.keys()).collect();
@@ -5041,6 +8593,7 @@ impl PlayPlan {
             .await?;
         }
         *last = now;
+        *gear = gear_now;
         Ok(())
     }
 
@@ -5060,13 +8613,7 @@ impl PlayPlan {
     }
 
     fn effect_kinds(&self) -> survival::EffectKinds {
-        let id = |n: &str| self.survival.effects.get(n).copied();
-        survival::EffectKinds {
-            regeneration: id("minecraft:regeneration"),
-            poison: id("minecraft:poison"),
-            wither: id("minecraft:wither"),
-            hunger: id("minecraft:hunger"),
-        }
+        self.effect_kinds
     }
 
     /// Биты атрибутов, которые надо переслать: 1 скорость, 2 прыжок, 4 гравитация.
@@ -5247,6 +8794,7 @@ impl PlayPlan {
                     me,
                     &mut state.vitals,
                     &mut state.inv,
+                    &mut state.xp,
                     takes_damage,
                     e,
                     false,
@@ -5305,6 +8853,7 @@ impl PlayPlan {
         me: &Online,
         v: &mut Vitals,
         inv: &mut Inventory,
+        xp: &mut crate::xp::Experience,
         takes_damage: bool,
         e: survival::Effect,
         force: bool,
@@ -5352,7 +8901,7 @@ impl PlayPlan {
                 self.send_health(conn, v).await?;
             }
             survival::Instant::Harm(n) if takes_damage && !v.dead => {
-                self.hurt(conn, me, v, inv, n, Cause::Magic).await?;
+                self.hurt(conn, me, v, inv, xp, n, Cause::Magic).await?;
             }
             survival::Instant::Eat(food, sat) if !v.dead => {
                 v.eat(food, sat);
@@ -5445,7 +8994,10 @@ impl PlayPlan {
             self.state_name(self.block(p).unwrap_or(AIR)).to_owned()
         };
         let shelves = crate::enchanting::shelves(e, at);
-        (crate::enchanting::offer(e, self.item_name(s.item), shelves, seed), shelves)
+        (
+            crate::enchanting::offer(e, self.item_name(s.item), shelves, seed),
+            shelves,
+        )
     }
 
     fn enchant_name(&self, id: i32) -> &str {
@@ -5494,7 +9046,11 @@ impl PlayPlan {
                         arg += &format!(
                             "\n{} {} {}",
                             offer.costs[i],
-                            if offer.clue[i] < 0 { "-" } else { self.enchant_name(offer.clue[i]) },
+                            if offer.clue[i] < 0 {
+                                "-"
+                            } else {
+                                self.enchant_name(offer.clue[i])
+                            },
                             offer.level[i]
                         );
                     }
@@ -5571,7 +9127,11 @@ impl PlayPlan {
             crate::enchanting::enchantments(&self.survival.enchanting, name, button, cost, xp.seed);
         let reply = self
             .plugin_event(Event::Enchant, uuid, || {
-                let hint = if offer.clue[b] < 0 { "-" } else { self.enchant_name(offer.clue[b]) };
+                let hint = if offer.clue[b] < 0 {
+                    "-"
+                } else {
+                    self.enchant_name(offer.clue[b])
+                };
                 let mut arg = format!(
                     "{} {} {} {cost} {button} {hint} {}\n{}",
                     w.pos[0],
@@ -5698,12 +9258,14 @@ impl PlayPlan {
     }
 
     /// Урон игроку: здоровье, анимация у всех, при смерти — сообщение и падение.
+    #[allow(clippy::too_many_arguments)]
     async fn hurt(
         &self,
         conn: &mut Connection,
         me: &Online,
         v: &mut Vitals,
         inv: &mut Inventory,
+        xp: &mut crate::xp::Experience,
         amount: f32,
         cause: Cause,
     ) -> Result<(), NetError> {
@@ -5712,15 +9274,38 @@ impl PlayPlan {
             self.effect_amp(v, "minecraft:resistance"),
             cause.bypasses_resistance(),
         );
+        if !cause.bypasses_armor() {
+            let (armor, toughness) = (5..=8).fold((0.0, 0.0), |(a, t), i| {
+                let Some(stack) = inv.slots[i] else {
+                    return (a, t);
+                };
+                let info = self.survival.items.get(stack.item as usize);
+                (
+                    a + info.map_or(0.0, |n| n.armor),
+                    t + info.map_or(0.0, |n| n.toughness),
+                )
+            });
+            amount = survival::after_armor(amount, armor, toughness);
+        }
         // Чары брони (Защита, Невесомость…): `bypasses_enchantments` из наших причин нет.
         let prot = {
-            let ench = |i: usize| inv.slots[i].map(|s| chunkwake_protocol::components::get(s.extra));
-            let armor = [("head", ench(5)), ("chest", ench(6)), ("legs", ench(7)), ("feet", ench(8))];
+            let ench =
+                |i: usize| inv.slots[i].map(|s| chunkwake_protocol::components::get(s.extra));
+            let armor = [
+                ("head", ench(5)),
+                ("chest", ench(6)),
+                ("legs", ench(7)),
+                ("feet", ench(8)),
+            ];
             let eq: Vec<(&str, &[(i32, i32)])> = armor
                 .iter()
                 .filter_map(|(n, x)| x.as_ref().map(|x| (*n, x.enchantments.as_slice())))
                 .collect();
-            crate::enchanting::damage_protection(&self.survival.enchanting, &eq, cause.damage_type())
+            crate::enchanting::damage_protection(
+                &self.survival.enchanting,
+                &eq,
+                cause.damage_type(),
+            )
         };
         amount = crate::enchanting::after_protection(amount, prot);
         if let Some(reply) = self
@@ -5749,6 +9334,7 @@ impl PlayPlan {
             Cause::Starve => Some(self.survival.damage_starve),
             Cause::Poison | Cause::Magic => Some(self.survival.damage_magic),
             Cause::Wither => Some(self.survival.damage_wither),
+            Cause::Arrow => Some(self.survival.damage_arrow),
             Cause::Generic => None,
         };
         if let Some(t) = damage_type {
@@ -5758,7 +9344,7 @@ impl PlayPlan {
             );
         }
         if died {
-            self.die(conn, me, inv, cause).await?;
+            self.die(conn, me, inv, xp, cause).await?;
         }
         Ok(())
     }
@@ -5769,6 +9355,7 @@ impl PlayPlan {
         conn: &mut Connection,
         me: &Online,
         inv: &mut Inventory,
+        xp: &mut crate::xp::Experience,
         cause: Cause,
     ) -> Result<(), NetError> {
         {
@@ -5783,12 +9370,20 @@ impl PlayPlan {
                 .flatten()
                 .copied()
                 .collect();
-            let msg = serde_json::json!({"translate": cause.death_key(), "with": [me.entry.name]});
+            let msg = if cause == Cause::Arrow {
+                serde_json::json!({"translate": cause.death_key(), "with": [me.entry.name, {"translate": "entity.minecraft.arrow"}]})
+            } else {
+                serde_json::json!({"translate": cause.death_key(), "with": [me.entry.name]})
+            };
             let mut message = Some(msg.to_string());
             let mut keep = false;
+            // `getBaseExperienceReward`: уровень × 7, не больше 100 (keepInventory — 0).
+            let mut dropped_xp = (xp.level * 7).min(100);
+            let mut keep_level = false;
+            let mut new = (0, 0, 0);
             let reply = self
                 .plugin_event(Event::Death, me.entry.uuid, || {
-                    let mut arg = format!("{}\n{msg}", cause.damage_type());
+                    let mut arg = format!("{} {dropped_xp}\n{msg}", cause.damage_type());
                     for s in &drops {
                         arg += "\n";
                         arg += &crate::stack_nbt::to_line(*s, self.item_name(s.item));
@@ -5798,7 +9393,17 @@ impl PlayPlan {
                 .await;
             if let Some(reply) = reply {
                 let mut lines = reply.lines();
-                keep = lines.next() == Some("1");
+                let head: Vec<i32> = lines
+                    .next()
+                    .unwrap_or("")
+                    .split(' ')
+                    .map(|f| f.parse().unwrap_or(0))
+                    .collect();
+                let f = |i: usize| head.get(i).copied().unwrap_or(0);
+                keep = f(0) == 1;
+                keep_level = f(1) == 1;
+                dropped_xp = f(2).max(0);
+                new = (f(3).max(0), f(4).max(0), f(5).max(0));
                 message = lines.next().filter(|m| !m.is_empty()).map(str::to_owned);
                 drops = live::parse_stacks(lines, |n| self.item_id(n));
             }
@@ -5809,10 +9414,25 @@ impl PlayPlan {
                 self.send_inventory(conn, inv).await?;
             }
             if let Some((feet, _, _)) = self.player_at(me.entry.uuid) {
+                if dropped_xp > 0 {
+                    self.spawn_orbs(feet, dropped_xp);
+                }
                 for s in drops {
                     let vel = items::scatter_velocity(rand::random(), rand::random());
                     self.drop_item(items::throw_origin(feet), vel, s, items::THROW_DELAY);
                 }
+            }
+            // Без keepLevel опыт сменится на newLevel/newExp/newTotalExp (`ServerPlayer.reset`);
+            // клиенту — при возрождении.
+            if !keep_level {
+                let mut next = crate::xp::Experience {
+                    seed: xp.seed,
+                    level: new.0,
+                    ..Default::default()
+                };
+                next.add_points(new.1);
+                next.total = new.2;
+                *xp = next;
             }
             tracing::info!("{} died ({})", me.entry.name, cause.death_key());
             if let Some(m) = message {
@@ -6035,7 +9655,7 @@ fn chunks_around(c: (i32, i32), r: i32, skip: Option<((i32, i32), i32)>) -> Vec<
 mod tests {
     use super::{acknowledge_player_save, chunks_around, near};
     use crate::survival::PlayerState;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use uuid::Uuid;
 
     #[test]
@@ -6106,5 +9726,143 @@ mod tests {
         meter.gap.clear();
         meter.gap.push_back(100.0);
         assert_eq!(meter.line(), "TPS: 10.0 MSPT: 10.0");
+    }
+
+    #[test]
+    fn parallel_chunk_map_matches_sequential() {
+        let coords = chunks_around((5, -3), 2, None);
+        let codec = chunkwake_protocol::frame::FrameCodec {
+            threshold: Some(256),
+        };
+        let encode = |&(x, z): &(i32, i32)| {
+            let mut packet = Vec::new();
+            packet.extend(x.to_le_bytes());
+            packet.extend(z.to_le_bytes());
+            packet.extend(std::iter::repeat_n((x as u8).wrapping_add(z as u8), 3000));
+            let mut out = Vec::new();
+            codec.encode(&packet, &mut out);
+            out
+        };
+        let seq: Vec<_> = coords.iter().map(encode).collect();
+        let par = super::PlayPlan::map_chunks(&coords, encode);
+        assert_eq!(par, seq);
+    }
+
+    fn assert_same_light(
+        left: &HashMap<(i32, i32), (chunkwake_world::ChunkColumn, u64)>,
+        right: &HashMap<(i32, i32), (chunkwake_world::ChunkColumn, u64)>,
+    ) {
+        let mut keys: Vec<_> = left.keys().copied().chain(right.keys().copied()).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        for key in keys {
+            let (a, rev_a) = &left[&key];
+            let (b, rev_b) = &right[&key];
+            assert_eq!(rev_a, rev_b, "{key:?}");
+            assert_eq!(a.sky_light, b.sky_light, "{key:?}");
+            assert_eq!(a.block_light, b.block_light, "{key:?}");
+        }
+    }
+
+    fn edit_locked(
+        world: &mut HashMap<(i32, i32), (chunkwake_world::ChunkColumn, u64)>,
+        template: &chunkwake_world::ChunkColumn,
+        light: &chunkwake_world::light::LightTable,
+        [x, y, z]: [i32; 3],
+        state: u32,
+    ) {
+        let key = (x >> 4, z >> 4);
+        let (column, rev) = world.entry(key).or_insert_with(|| (template.clone(), 0));
+        let old = column.set_block((x & 15) as usize, y as usize, (z & 15) as usize, state);
+        if old == state {
+            return;
+        }
+        *rev += 1;
+        let mut access = super::WorldLight {
+            world,
+            template,
+            touched: HashSet::new(),
+        };
+        chunkwake_world::light::Engine::new(&mut access, light, template.height())
+            .block_changed([x, y, z]);
+        let touched = std::mem::take(&mut access.touched);
+        drop(access);
+        let mut frames = HashMap::new();
+        super::write_light(world, &mut frames, key, None, touched);
+    }
+
+    fn edit_off_lock(
+        world: &mut HashMap<(i32, i32), (chunkwake_world::ChunkColumn, u64)>,
+        template: &chunkwake_world::ChunkColumn,
+        light: &chunkwake_world::light::LightTable,
+        [x, y, z]: [i32; 3],
+        state: u32,
+    ) {
+        let key = (x >> 4, z >> 4);
+        let (column, rev) = world.entry(key).or_insert_with(|| (template.clone(), 0));
+        let old = column.set_block((x & 15) as usize, y as usize, (z & 15) as usize, state);
+        if old == state {
+            return;
+        }
+        *rev += 1;
+        let snap = super::snapshot_neighborhood(world, key);
+        let spread =
+            super::spread_light(snap.columns, template, light, template.height(), [x, y, z]);
+        let mut frames = HashMap::new();
+        assert!(super::neighborhood_same(world, key, &snap.revs));
+        super::write_light(
+            world,
+            &mut frames,
+            key,
+            Some(spread.columns),
+            spread.touched,
+        );
+    }
+
+    #[test]
+    fn light_off_lock_matches_locked_run() {
+        use chunkwake_world::light::relight_column;
+        let light = chunkwake_world::light::LightTable::new([
+            (0, 0, true),
+            (0, 15, false),
+            (14, 0, true),
+            (0, 0, true),
+        ]);
+        let mut template = chunkwake_world::ChunkColumn::flat(&[(1, 4)], 4, 0, 2, 0, true);
+        relight_column(&mut template, &light);
+        let mut locked = HashMap::new();
+        let mut off = HashMap::new();
+        let edits = [
+            ([15, 4, 8], 2u32),
+            ([16, 5, 8], 1),
+            ([15, 4, 8], 0),
+            ([3, 10, 3], 1),
+            ([3, 3, 3], 0),
+            ([3, 10, 3], 3),
+        ];
+        for (pos, state) in edits {
+            edit_locked(&mut locked, &template, &light, pos, state);
+            edit_off_lock(&mut off, &template, &light, pos, state);
+        }
+        assert_same_light(&locked, &off);
+    }
+
+    #[test]
+    fn reach_and_body_and_fall() {
+        let eye = super::eye_of([0.5, 64.0, 0.5]);
+        assert!(super::block_reach(eye, [0, 64, 0], 4.5));
+        assert!(!super::block_reach(eye, [5, 64, 0], 4.5));
+        assert!(super::block_reach(eye, [5, 64, 0], 5.0));
+        assert!(super::player_hits_cube([0.5, 64.0, 0.5], [0, 65, 0]));
+        assert!(!super::player_hits_cube([0.5, 64.0, 0.5], [2, 64, 0]));
+        assert_eq!(super::fall_kept("minecraft:hay_block"), 0.2);
+        assert_eq!(super::fall_kept("minecraft:slime_block"), 0.0);
+        assert_eq!(super::fall_kept("minecraft:red_bed"), 0.0);
+        assert_eq!(super::fall_kept("minecraft:stone"), 1.0);
+        let spawn = [8.5, 64.0, 8.5];
+        assert!(super::in_spawn(spawn, 16, [8, 64, 8]));
+        assert!(super::in_spawn(spawn, 16, [23, 64, 8]));
+        assert!(!super::in_spawn(spawn, 16, [24, 64, 8]));
+        assert!(!super::in_spawn(spawn, 0, [8, 64, 8]));
     }
 }
