@@ -7,3 +7,14 @@ commands:
   hello:
     description: Says hello
     usage: /hello
+  kit:
+    description: Heals and gives bread
+    usage: /kit
+    permission: chunkwake.test.kit
+  up:
+    description: Teleports up onto a glass block
+    usage: /up [height]
+permissions:
+  chunkwake.test.kit:
+    description: Use /kit
+    default: op

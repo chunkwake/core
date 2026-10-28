@@ -127,7 +127,20 @@ pub fn chunk_to_nbt(
     root.insert("InhabitedTime".into(), Tag::Long(0));
     root.insert("isLightOn".into(), Tag::Byte(1));
     root.insert("sections".into(), Tag::List(sections));
-    root.insert("block_entities".into(), Tag::List(vec![]));
+    let block_entities = c
+        .block_entities
+        .iter()
+        .map(|(&[x, y, z], be)| {
+            let mut t = be.nbt.clone();
+            t.insert("id".into(), string(&be.id));
+            t.insert("x".into(), Tag::Int(x));
+            t.insert("y".into(), Tag::Int(y));
+            t.insert("z".into(), Tag::Int(z));
+            t.insert("keepPacked".into(), Tag::Byte(0));
+            Tag::Compound(t)
+        })
+        .collect();
+    root.insert("block_entities".into(), Tag::List(block_entities));
     Ok(root)
 }
 
@@ -224,6 +237,25 @@ pub fn chunk_from_nbt(
                 Section::from_blocks(blocks, biome)
             }
         };
+    }
+    c.block_entities.clear();
+    for be in root
+        .get("block_entities")
+        .and_then(Tag::as_list)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(Tag::as_compound)
+    {
+        let int = |k: &str| be.get(k).and_then(Tag::as_i64).map(|v| v as i32);
+        let (Some(id), Some(x), Some(y), Some(z)) = (be.get("id").and_then(Tag::as_str), int("x"), int("y"), int("z"))
+        else {
+            continue;
+        };
+        let mut nbt = be.clone();
+        for k in ["id", "x", "y", "z", "keepPacked"] {
+            nbt.remove(k);
+        }
+        c.block_entities.insert([x, y, z], crate::BlockEntity { id: id.to_owned(), nbt });
     }
     Ok((c, lit))
 }

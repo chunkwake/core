@@ -1,5 +1,6 @@
 // Выгрузка свойств состояний блоков: `reports/light.csv`, строка на id
-// состояния: `излучение,затухание,небо_вниз(0/1),твёрдость` (-1 — неразрушимый).
+// состояния: `излучение,затухание,небо_вниз(0/1),твёрдость,нужен_инструмент(0/1)`
+// (твёрдость -1 — неразрушимый; инструмент — `requiresCorrectToolForDrops`).
 //
 // Только рефлексия и java.base: классы сервера новее компилятора, поэтому
 // компилируется без них и запускается на Java сервера:
@@ -23,6 +24,7 @@ public final class ChunkwakeLight {
         Method emission = base.getMethod("getLightEmission");
         Method dampening = base.getMethod("getLightDampening");
         Method skyDown = base.getMethod("propagatesSkylightDown");
+        Method requiresTool = base.getMethod("requiresCorrectToolForDrops");
         java.lang.reflect.Field hardness = base.getDeclaredField("destroySpeed");
         hardness.setAccessible(true);
 
@@ -33,7 +35,8 @@ public final class ChunkwakeLight {
             out.append(emission.invoke(state)).append(',')
                     .append(dampening.invoke(state)).append(',')
                     .append((Boolean) skyDown.invoke(state) ? 1 : 0).append(',')
-                    .append(hardness.getFloat(state)).append('\n');
+                    .append(hardness.getFloat(state)).append(',')
+                    .append((Boolean) requiresTool.invoke(state) ? 1 : 0).append('\n');
         }
         Files.writeString(Path.of(args[0]), out);
         System.exit(0);

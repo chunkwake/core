@@ -5,7 +5,9 @@
 
 pub mod generator;
 pub mod packets;
+pub mod recipes;
 pub mod registries;
+pub mod tools;
 pub mod world;
 
 #[derive(Debug, thiserror::Error)]

@@ -1,7 +1,8 @@
 //! Инвентарь игрока и выживание: здоровье, урон от падения и пустоты, смерть.
 //! Логика без сети: сессия применяет результат и шлёт пакеты.
 
-use chunkwake_protocol::inventory::{ContainerClick, Slot, Stack};
+use chunkwake_data::tools::Tool;
+use chunkwake_protocol::inventory::{Slot, Stack};
 
 /// Слоты окна инвентаря игрока: 0 — результат крафта, 1–4 — сетка, 5–8 — броня,
 /// 9–35 — основной, 36–44 — хотбар, 45 — вторая рука.
@@ -18,6 +19,8 @@ pub struct Inventory {
     pub selected: usize,
     /// `stateId` окна: растёт при каждом изменении со стороны сервера.
     pub state: i32,
+    /// Перетаскивание по слотам (между пакетами клика).
+    pub drag: crate::click::Drag,
 }
 
 impl Default for Inventory {
@@ -27,6 +30,7 @@ impl Default for Inventory {
             carried: None,
             selected: 0,
             state: 0,
+            drag: Default::default(),
         }
     }
 }
@@ -70,12 +74,28 @@ impl Inventory {
             }
             if self.slots[i].is_none() {
                 let n = count.min(max_stack);
-                self.slots[i] = Some(Stack { item, count: n });
+                self.slots[i] = Some(Stack { item, count: n , damage: 0});
                 count -= n;
                 changed.push(i);
             }
         }
         (changed, count)
+    }
+
+    /// Кладёт стопку как есть (с износом): изношенная — только в пустой слот.
+    /// Возвращает не влезшее.
+    pub fn add_stack(&mut self, s: Stack, max_stack: i32) -> Option<Stack> {
+        if s.damage == 0 {
+            let (_, left) = self.add(s.item, s.count, max_stack);
+            return (left > 0).then_some(Stack { count: left, ..s });
+        }
+        match Self::storage_order().find(|&i| self.slots[i].is_none()) {
+            Some(i) => {
+                self.slots[i] = Some(s);
+                None
+            }
+            None => Some(s),
+        }
     }
 
     /// Тратит один предмет из руки; `false` — рука пуста.
@@ -93,45 +113,6 @@ impl Inventory {
         }
     }
 
-    /// Итог клика от клиента: изменённые слоты и курсор. Пока доверяем клиенту
-    /// (проверка по правилам кликов — позже); слоты крафта игнорируем.
-    /// Применяет клик клиента. Возвращает выброшенное: Q над слотом (THROW)
-    /// или клик за окном (слот -999) — то, что пропало из инвентаря.
-    pub fn apply_click(&mut self, c: &ContainerClick) -> Vec<Stack> {
-        let before = self.totals();
-        for &(slot, stack) in &c.changed {
-            if (5..SLOTS as i16).contains(&slot) {
-                self.slots[slot as usize] = stack;
-            }
-        }
-        self.carried = c.carried;
-        if c.mode != THROW && c.slot != OUTSIDE {
-            return Vec::new();
-        }
-        let after = self.totals();
-        before
-            .into_iter()
-            .filter_map(|(item, n)| {
-                let gone = n - after.get(&item).copied().unwrap_or(0);
-                (gone > 0).then_some(Stack { item, count: gone })
-            })
-            .collect()
-    }
-
-    /// Сколько каждого предмета в слотах и на курсоре.
-    fn totals(&self) -> std::collections::HashMap<i32, i32> {
-        let mut m = std::collections::HashMap::new();
-        for s in self
-            .slots
-            .iter()
-            .chain(std::iter::once(&self.carried))
-            .flatten()
-        {
-            *m.entry(s.item).or_insert(0) += s.count;
-        }
-        m
-    }
-
     pub fn set(&mut self, slot: i16, stack: Slot) -> bool {
         if (0..SLOTS as i16).contains(&slot) {
             self.slots[slot as usize] = stack;
@@ -147,9 +128,6 @@ impl Inventory {
     }
 }
 
-/// `ContainerInput.THROW` и слот «за окном» в `container_click`.
-const THROW: i32 = 4;
-const OUTSIDE: i16 = -999;
 
 pub const MAX_HEALTH: f32 = 20.0;
 pub const MAX_FOOD: i32 = 20;
@@ -166,6 +144,8 @@ pub enum Cause {
     Fall,
     Void,
     Starve,
+    /// Смерть без урона (`Player.setHealth(0)` плагином).
+    Generic,
 }
 
 impl Cause {
@@ -175,8 +155,63 @@ impl Cause {
             Cause::Fall => "death.attack.fall",
             Cause::Void => "death.attack.outOfWorld",
             Cause::Starve => "death.attack.starve",
+            Cause::Generic => "death.attack.generic",
         }
     }
+
+    /// `EntityDamageEvent.DamageCause` Bukkit.
+    pub fn bukkit(self) -> &'static str {
+        match self {
+            Cause::Fall => "FALL",
+            Cause::Void => "VOID",
+            Cause::Starve => "STARVATION",
+            Cause::Generic => "CUSTOM",
+        }
+    }
+
+    /// Ключ в реестре `damage_type`.
+    pub fn damage_type(self) -> &'static str {
+        match self {
+            Cause::Fall => "minecraft:fall",
+            Cause::Void => "minecraft:out_of_world",
+            Cause::Starve => "minecraft:starve",
+            Cause::Generic => "minecraft:generic",
+        }
+    }
+}
+
+/// Годится ли предмет для дропа блока (`Player.hasCorrectToolForDrops`).
+pub fn correct_tool(requires_tool: bool, tool: Option<&Tool>, block: &str) -> bool {
+    !requires_tool || tool.is_some_and(|t| t.correct_for_drops(block))
+}
+
+/// Прогресс ломки за тик (`BlockBehaviour.getDestroyProgress` и
+/// `Player.getDestroySpeed` без чар и эффектов): ≥ 1 — блок ломается сразу.
+pub fn destroy_progress(
+    hardness: f32,
+    requires_tool: bool,
+    tool: Option<&Tool>,
+    block: &str,
+    in_water: bool,
+    on_ground: bool,
+) -> f32 {
+    if hardness == -1.0 {
+        return 0.0;
+    }
+    let mut speed = tool.map_or(1.0, |t| t.speed(block));
+    // `submerged_mining_speed` по умолчанию 0.2; в воздухе — в 5 раз медленнее.
+    if in_water {
+        speed *= 0.2;
+    }
+    if !on_ground {
+        speed /= 5.0;
+    }
+    let divisor = if correct_tool(requires_tool, tool, block) {
+        30.0
+    } else {
+        100.0
+    };
+    speed / hardness / divisor
 }
 
 /// Сложность (`difficulty` в `server.properties`): от неё зависит голод.
@@ -279,6 +314,10 @@ impl Vitals {
     }
 
     /// Применяет урон; `true` — игрок умер.
+    pub fn on_ground(&self) -> bool {
+        self.on_ground
+    }
+
     pub fn damage(&mut self, amount: f32) -> bool {
         if self.dead {
             return false;
@@ -432,14 +471,63 @@ impl PlayerState {
 mod tests {
     use super::*;
 
+    /// Время ломки в тиках, как у ванилы: прогресс копится до 1.
+    fn ticks(p: f32) -> u32 {
+        (1.0 / p).ceil() as u32
+    }
+
+    #[test]
+    fn destroy_times_match_vanilla() {
+        use chunkwake_data::tools::ToolRule;
+        use std::sync::Arc;
+        let pickaxe = Tool {
+            damage_per_block: 1,
+            default_speed: 1.0,
+            rules: vec![ToolRule {
+                blocks: Arc::new(["minecraft:stone".to_owned()].into()),
+                speed: Some(2.0),
+                correct_for_drops: Some(true),
+            }],
+        };
+        let stone = |tool, water, ground| {
+            destroy_progress(1.5, true, tool, "minecraft:stone", water, ground)
+        };
+        // Камень рукой — 7.5 с, деревянной киркой — 1.15 с (23 тика).
+        assert_eq!(ticks(stone(None, false, true)), 150);
+        assert_eq!(ticks(stone(Some(&pickaxe), false, true)), 23);
+        // Под водой и в прыжке — в 5 раз медленнее каждое.
+        assert_eq!(ticks(stone(Some(&pickaxe), true, true)), 113);
+        assert_eq!(ticks(stone(Some(&pickaxe), false, false)), 113);
+        // Земля рукой (инструмент не нужен) — 0.75 с; трава — мгновенно; бедрок — никогда.
+        assert_eq!(
+            ticks(destroy_progress(
+                0.5,
+                false,
+                None,
+                "minecraft:dirt",
+                false,
+                true
+            )),
+            15
+        );
+        assert!(destroy_progress(0.0, false, None, "minecraft:short_grass", false, true) >= 1.0);
+        assert_eq!(
+            destroy_progress(-1.0, false, None, "minecraft:bedrock", false, true),
+            0.0
+        );
+        assert!(!correct_tool(true, None, "minecraft:stone"));
+        assert!(correct_tool(true, Some(&pickaxe), "minecraft:stone"));
+        assert!(correct_tool(false, None, "minecraft:dirt"));
+    }
+
     #[test]
     fn add_merges_then_fills_hotbar_first() {
         let mut inv = Inventory::default();
-        inv.slots[MAIN] = Some(Stack { item: 1, count: 60 });
+        inv.slots[MAIN] = Some(Stack { item: 1, count: 60 , damage: 0});
         let changed = inv.add(1, 10, 64);
         assert_eq!(changed, (vec![MAIN, HOTBAR], 0));
         assert_eq!(inv.slots[MAIN].unwrap().count, 64);
-        assert_eq!(inv.slots[HOTBAR], Some(Stack { item: 1, count: 6 }));
+        assert_eq!(inv.slots[HOTBAR], Some(Stack { item: 1, count: 6 , damage: 0}));
         // Неполные стопки (макс. 1): каждая в свой слот.
         let changed = inv.add(2, 2, 1);
         assert_eq!(changed, (vec![HOTBAR + 1, HOTBAR + 2], 0));
@@ -451,7 +539,7 @@ mod tests {
             selected: 2,
             ..Default::default()
         };
-        inv.slots[HOTBAR + 2] = Some(Stack { item: 5, count: 1 });
+        inv.slots[HOTBAR + 2] = Some(Stack { item: 5, count: 1 , damage: 0});
         assert!(inv.consume_held());
         assert_eq!(inv.held(), None);
         assert!(!inv.consume_held());
@@ -554,8 +642,8 @@ mod tests {
     #[test]
     fn save_round_trip() {
         let mut st = PlayerState::default();
-        st.inv.slots[HOTBAR + 2] = Some(Stack { item: 7, count: 3 });
-        st.inv.slots[OFFHAND] = Some(Stack { item: 9, count: 1 });
+        st.inv.slots[HOTBAR + 2] = Some(Stack { item: 7, count: 3 , damage: 0});
+        st.inv.slots[OFFHAND] = Some(Stack { item: 9, count: 1 , damage: 0});
         st.inv.selected = 2;
         st.vitals.health = 7.5;
         st.vitals.food = 12;
@@ -566,37 +654,4 @@ mod tests {
         assert_eq!(back.save([1.0, 2.0, 3.0], 90.0, -10.0), s);
     }
 
-    #[test]
-    fn throw_click_returns_dropped() {
-        let mut inv = Inventory::default();
-        inv.slots[HOTBAR] = Some(Stack { item: 4, count: 10 });
-        let click = |slot, mode, changed, carried| ContainerClick {
-            window: 0,
-            state: 0,
-            slot,
-            button: 0,
-            mode,
-            changed,
-            carried,
-        };
-        // Q над слотом: 10 -> 9.
-        let c = click(
-            HOTBAR as i16,
-            4,
-            vec![(HOTBAR as i16, Some(Stack { item: 4, count: 9 }))],
-            None,
-        );
-        assert_eq!(inv.apply_click(&c), vec![Stack { item: 4, count: 1 }]);
-        // Обычный клик ничего не выбрасывает.
-        let c = click(
-            HOTBAR as i16,
-            0,
-            vec![(HOTBAR as i16, None)],
-            Some(Stack { item: 4, count: 9 }),
-        );
-        assert!(inv.apply_click(&c).is_empty());
-        // Клик за окном с предметом на курсоре.
-        let c = click(-999, 0, vec![], None);
-        assert_eq!(inv.apply_click(&c), vec![Stack { item: 4, count: 9 }]);
-    }
 }

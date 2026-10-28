@@ -4,13 +4,14 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockFace;
 
-/** {@link Block}: снимок блока на момент события. */
+/** {@link Block}: живой блок мира (тип читается из Rust; {@code key} — снимок события). */
 final class BlockImpl {
     final Block api = Stub.of(Block.class, this);
     private final World world;
     private final int x, y, z;
-    /** Ключ блока, например {@code minecraft:stone}. */
+    /** Ключ блока на момент события, например {@code minecraft:stone}; {@code null} — читать из мира. */
     private final String key;
 
     BlockImpl(World world, int x, int y, int z, String key) {
@@ -26,10 +27,38 @@ final class BlockImpl {
     public int getZ() { return z; }
     public World getWorld() { return world; }
     public Location getLocation() { return new Location(world, x, y, z); }
+    public Block getRelative(int dx, int dy, int dz) { return new BlockImpl(world, x + dx, y + dy, z + dz, null).api; }
+    public Block getRelative(BlockFace f) { return getRelative(f.getModX(), f.getModY(), f.getModZ()); }
+    public Block getRelative(BlockFace f, int n) {
+        return getRelative(f.getModX() * n, f.getModY() * n, f.getModZ() * n);
+    }
 
     public Material getType() {
-        Material m = Material.matchMaterial(key);
+        String k = key != null ? key : Bridge.world("get " + x + " " + y + " " + z);
+        Material m = k.isEmpty() ? null : Material.matchMaterial(k);
         return m == null ? Material.AIR : m;
+    }
+
+    public boolean isEmpty() { return getType().isAir(); }
+
+    public void setType(Material type) { setType(type, true); }
+
+    /** Состояние по умолчанию для типа (физику не считаем). */
+    public void setType(Material type, boolean physics) {
+        if (!type.isBlock()) {
+            throw new IllegalArgumentException("Material " + type + " is not a block");
+        }
+        Bridge.world("set " + x + " " + y + " " + z + " " + type.getKey());
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof BlockImpl b && b.x == x && b.y == y && b.z == z;
+    }
+
+    @Override
+    public int hashCode() {
+        return (x * 31 + y) * 31 + z;
     }
 
     @Override

@@ -44,6 +44,24 @@ pub fn load_hardness(root: &Path) -> Result<Vec<f32>, DataError> {
         .collect()
 }
 
+/// Нужен ли инструмент для дропа (`requiresCorrectToolForDrops`, 5-я колонка `light.csv`).
+pub fn load_requires_tool(root: &Path) -> Result<Vec<bool>, DataError> {
+    let path = root.join("reports/light.csv");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
+    text.lines()
+        .enumerate()
+        .map(|(i, line)| match line.split(',').nth(4).map(str::trim) {
+            Some("0") => Ok(false),
+            Some("1") => Ok(true),
+            _ => Err(DataError::Format {
+                file: path.display().to_string(),
+                msg: format!("line {}: no requires-tool flag in {line:?}", i + 1),
+            }),
+        })
+        .collect()
+}
+
 /// Еда: компонент `minecraft:food` и время поедания из `minecraft:consumable`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Food {
@@ -58,6 +76,10 @@ pub struct Food {
 pub struct ItemInfo {
     pub max_stack: u8,
     pub food: Option<Food>,
+    /// Слот `minecraft:equippable`: `head`, `chest`, `legs`, `feet`, `offhand`…
+    pub equip: Option<&'static str>,
+    /// `minecraft:max_damage` (0 — предмет не изнашивается).
+    pub max_damage: i32,
 }
 
 impl Default for ItemInfo {
@@ -65,6 +87,8 @@ impl Default for ItemInfo {
         Self {
             max_stack: 64,
             food: None,
+            equip: None,
+            max_damage: 0,
         }
     }
 }
@@ -98,14 +122,22 @@ pub fn load_items(root: &Path, items: &HashMap<String, i32>) -> Result<Vec<ItemI
         {
             out[id as usize].max_stack = n.clamp(1, 99) as u8;
         }
+        if let Some(n) = text.split_once("\"minecraft:max_damage\":").and_then(|(_, rest)| {
+            let digits: String = rest.trim_start().chars().take_while(char::is_ascii_digit).collect();
+            digits.parse::<i32>().ok()
+        }) {
+            out[id as usize].max_damage = n;
+        }
         // Еды немного: такие файлы разбираем целиком.
-        if text.contains("\"minecraft:food\"") {
+        if text.contains("\"minecraft:food\"") || text.contains("\"minecraft:equippable\"") {
             let json: serde_json::Value =
                 serde_json::from_str(&text).map_err(|e| DataError::Format {
                     file: file.display().to_string(),
                     msg: e.to_string(),
                 })?;
-            out[id as usize].food = parse_food(&json["components"]);
+            let c = &json["components"];
+            out[id as usize].food = parse_food(c);
+            out[id as usize].equip = c["minecraft:equippable"]["slot"].as_str().and_then(equip_slot);
         }
     }
     Ok(out)
@@ -186,7 +218,7 @@ fn plain_conditions(c: &serde_json::Value) -> bool {
     }
 }
 
-fn read_json(path: &Path) -> Result<serde_json::Value, DataError> {
+pub(crate) fn read_json(path: &Path) -> Result<serde_json::Value, DataError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
     serde_json::from_str(&text).map_err(|e| DataError::Format {
@@ -343,12 +375,12 @@ impl DimensionType {
 /// На холодном диске под антивирусом это секунды вместо десятков.
 const DERIVED_DIR: &str = "chunkwake-derived-v1";
 
-fn derived(root: &Path, file: &str) -> std::path::PathBuf {
+pub(crate) fn derived(root: &Path, file: &str) -> std::path::PathBuf {
     root.join(DERIVED_DIR).join(file)
 }
 
 /// Пишет файл через временный: оборванная запись не оставит битую сводку.
-fn write_derived(path: &Path, text: &str) -> Result<(), DataError> {
+pub(crate) fn write_derived(path: &Path, text: &str) -> Result<(), DataError> {
     let io = |e: std::io::Error| DataError::Io(format!("write {}: {e}", path.display()));
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(io)?;
@@ -402,13 +434,27 @@ pub fn load_items_cached(
     Ok(out)
 }
 
+/// Слот экипировки (`EquipmentSlot`) по имени.
+fn equip_slot(name: &str) -> Option<&'static str> {
+    ["mainhand", "offhand", "feet", "legs", "chest", "head", "body", "saddle"]
+        .into_iter()
+        .find(|s| *s == name)
+}
+
+/// `name, max_stack, equip (-), max_damage [, nutrition saturation always seconds]` через табуляцию.
 fn item_line(name: &str, i: &ItemInfo) -> String {
+    let head = format!(
+        "{name}\t{}\t{}\t{}",
+        i.max_stack,
+        i.equip.unwrap_or("-"),
+        i.max_damage
+    );
     match i.food {
         Some(f) => format!(
-            "{name}\t{}\t{}\t{}\t{}\t{}",
-            i.max_stack, f.nutrition, f.saturation, f.can_always_eat, f.seconds
+            "{head}\t{}\t{}\t{}\t{}",
+            f.nutrition, f.saturation, f.can_always_eat, f.seconds
         ),
-        None => format!("{name}\t{}", i.max_stack),
+        None => head,
     }
 }
 
@@ -416,6 +462,8 @@ fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, I
     let mut f = line.split('\t');
     let id = *items.get(f.next()?)? as usize;
     let max_stack = f.next()?.parse().ok()?;
+    let equip = equip_slot(f.next()?);
+    let max_damage = f.next()?.parse().ok()?;
     let food = match (f.next(), f.next(), f.next(), f.next()) {
         (Some(n), Some(s), Some(a), Some(sec)) => Some(Food {
             nutrition: n.parse().ok()?,
@@ -425,7 +473,15 @@ fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, I
         }),
         _ => None,
     };
-    Some((id, ItemInfo { max_stack, food }))
+    Some((
+        id,
+        ItemInfo {
+            max_stack,
+            food,
+            equip,
+            max_damage,
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -507,10 +563,13 @@ mod loot_tests {
             ItemInfo {
                 max_stack: 64,
                 food: Some(food),
+                equip: Some("head"),
+                max_damage: 165,
             },
             ItemInfo {
                 max_stack: 16,
                 food: None,
+                ..Default::default()
             },
         ] {
             let line = item_line("minecraft:bread", &info);

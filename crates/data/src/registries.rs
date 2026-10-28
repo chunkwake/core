@@ -155,6 +155,13 @@ pub fn builtin_id(root: &Path, registry: &str, entry: &str) -> Result<i32, DataE
         .ok_or_else(|| DataError::Io(format!("unknown {registry} entry {entry}")))
 }
 
+/// Все записи встроенного реестра (`block_entity_type`) с их номерами.
+pub fn builtin_ids(root: &Path, registry: &str) -> Result<HashMap<String, i32>, DataError> {
+    load_builtin_ids(root)?
+        .remove(registry)
+        .ok_or_else(|| DataError::Io(format!("unknown registry {registry}")))
+}
+
 /// `registries.json`: `{"minecraft:block": {"entries": {"minecraft:stone": {"protocol_id": 1}}}}`.
 fn load_builtin_ids(root: &Path) -> Result<HashMap<String, HashMap<String, i32>>, DataError> {
     let path = root.join("reports/registries.json");

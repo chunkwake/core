@@ -66,7 +66,7 @@ public final class ApiBridge implements InternalAPIBridge {
     @Override public <M, L> GameRule<L> legacyGameRuleBridge(GameRule<M> r, Function<L, M> a, Function<M, L> b, Class<L> c) { throw todo("legacyGameRuleBridge"); }
     @Override public Set<Pose> validMannequinPoses() { throw todo("validMannequinPoses"); }
     @Override public PoiType.Occupancy createOccupancy(String s) { throw todo("createOccupancy"); }
-    @Override public DamageSource.Builder createDamageSourceBuilder(DamageType t) { throw todo("createDamageSourceBuilder"); }
+    @Override public DamageSource.Builder createDamageSourceBuilder(DamageType t) { return Events.sourceBuilder(t); }
     @Override public DamageEffect getDamageEffect(String s) { throw todo("getDamageEffect"); }
     @Override public String getTranslationKey(EntityType t) { throw todo("getTranslationKey"); }
     @Override public SpawnCategory getSpawnCategory(EntityType t) { throw todo("getSpawnCategory"); }
@@ -74,7 +74,7 @@ public final class ApiBridge implements InternalAPIBridge {
     @Override public boolean hasDefaultEntityAttributes(NamespacedKey k) { throw todo("hasDefaultEntityAttributes"); }
     @Override public Attributable getDefaultEntityAttributes(NamespacedKey k) { throw todo("getDefaultEntityAttributes"); }
     @Override public String getStatisticCriteriaKey(Statistic s) { throw todo("getStatisticCriteriaKey"); }
-    @Override public ItemStack createEmptyStack() { throw todo("createEmptyStack"); }
+    @Override public ItemStack createEmptyStack() { return new StackImpl(org.bukkit.Material.AIR, 0); }
     @Override public Component resolveWithContext(Component c, CommandSender s, Entity e, boolean b) { return c; }
     @Override public ComponentFlattener componentFlattener() { return ComponentFlattener.basic(); }
     @Override public <C> PersistentDataKey<C> createPersistentDataKey(Key k, PersistentDataType<?, C> t) { throw todo("createPersistentDataKey"); }

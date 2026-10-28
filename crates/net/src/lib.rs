@@ -1,9 +1,12 @@
 //! chunkwake-net — приём соединений и состояния handshake/status/login.
 
 pub mod auth;
+pub mod click;
 pub mod configuration;
 pub mod crypto;
 pub mod items;
+pub mod live;
+pub mod ops;
 pub mod play;
 pub mod survival;
 

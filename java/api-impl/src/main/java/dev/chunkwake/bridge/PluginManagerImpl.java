@@ -163,6 +163,27 @@ final class PluginManagerImpl {
         if (has(org.bukkit.event.player.PlayerJoinEvent.getHandlerList())) mask |= Bridge.LISTEN_JOIN;
         if (has(org.bukkit.event.player.PlayerQuitEvent.getHandlerList())) mask |= Bridge.LISTEN_QUIT;
         if (has(org.bukkit.event.block.BlockBreakEvent.getHandlerList())) mask |= Bridge.LISTEN_BLOCK_BREAK;
+        if (has(org.bukkit.event.entity.EntityDamageEvent.getHandlerList())) mask |= Bridge.listenBit(Bridge.EVENT_DAMAGE);
+        if (has(org.bukkit.event.entity.EntityDeathEvent.getHandlerList())) mask |= Bridge.listenBit(Bridge.EVENT_DEATH);
+        if (has(org.bukkit.event.player.PlayerDropItemEvent.getHandlerList())) mask |= Bridge.listenBit(Bridge.EVENT_DROP);
+        if (has(org.bukkit.event.entity.EntityPickupItemEvent.getHandlerList())) mask |= Bridge.listenBit(Bridge.EVENT_PICKUP);
+        if (has(org.bukkit.event.player.PlayerGameModeChangeEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_GAME_MODE);
+        }
+        if (has(io.papermc.paper.event.player.AsyncChatEvent.getHandlerList())
+                || has(org.bukkit.event.player.AsyncPlayerChatEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_CHAT);
+        }
+        if (has(org.bukkit.event.player.PlayerCommandPreprocessEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_COMMAND_PRE);
+        }
+        // Таб-комплит команд плагинов нужен всегда (TabCompleter, а не слушатель).
+        mask |= Bridge.listenBit(Bridge.EVENT_TAB_COMPLETE);
+        if (has(org.bukkit.event.block.BlockPlaceEvent.getHandlerList())) mask |= Bridge.listenBit(Bridge.EVENT_PLACE);
+        if (has(org.bukkit.event.player.PlayerMoveEvent.getHandlerList())) mask |= Bridge.listenBit(Bridge.EVENT_MOVE);
+        if (has(org.bukkit.event.player.PlayerInteractEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_INTERACT);
+        }
         Bridge.setFlag(Bridge.FLAG_LISTENERS, mask);
     }
 
@@ -174,13 +195,16 @@ final class PluginManagerImpl {
         return e instanceof Cancellable c && c.isCancelled();
     }
 
-    // --- права (MVP: хранение без вычисления) ---
+    // --- права: реестр как у SimplePluginManager, умолчания считаются по запросу ---
 
     public Permission getPermission(String name) {
         return permissions.get(name.toLowerCase(java.util.Locale.ROOT));
     }
 
     public void addPermission(Permission perm) {
+        if (getPermission(perm.getName()) != null) {
+            throw new IllegalArgumentException("The permission " + perm.getName() + " is already defined!");
+        }
         permissions.put(perm.getName().toLowerCase(java.util.Locale.ROOT), perm);
     }
 
@@ -197,7 +221,13 @@ final class PluginManagerImpl {
     }
 
     public Set<Permission> getDefaultPermissions(boolean op) {
-        return Set.of();
+        Set<Permission> out = new java.util.HashSet<>();
+        for (Permission p : permissions.values()) {
+            if (p.getDefault().getValue(op)) {
+                out.add(p);
+            }
+        }
+        return out;
     }
 
     public void recalculatePermissionDefaults(Permission perm) {}

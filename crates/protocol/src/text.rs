@@ -122,6 +122,37 @@ fn payload(w: &mut Writer, v: &Value) {
     }
 }
 
+/// Текст компонента для лога: `text` и `extra`; у `translate` — ключ и аргументы.
+pub fn plain_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Array(items) => items.iter().map(plain_text).collect(),
+        Value::Object(o) => {
+            let mut out = match (o.get("text"), o.get("translate")) {
+                (Some(t), _) => plain_text(t),
+                (None, Some(Value::String(key))) => {
+                    let args: Vec<String> = o
+                        .get("with")
+                        .and_then(Value::as_array)
+                        .map(|a| a.iter().map(plain_text).collect())
+                        .unwrap_or_default();
+                    if args.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{key} {}", args.join(" "))
+                    }
+                }
+                _ => String::new(),
+            };
+            if let Some(extra) = o.get("extra") {
+                out += &plain_text(extra);
+            }
+            out
+        }
+        other => other.to_string(),
+    }
+}
+
 /// Список NBT однороден: одинаковые скаляры — как есть, иначе каждый элемент —
 /// компонент-компаунд (строка → `{"text": ...}`).
 fn list(w: &mut Writer, items: &[Value]) {
@@ -150,6 +181,7 @@ const NODE_ROOT: u8 = 0;
 const NODE_LITERAL: u8 = 1;
 const NODE_ARGUMENT: u8 = 2;
 const NODE_EXECUTABLE: u8 = 0x04;
+const NODE_CUSTOM_SUGGESTIONS: u8 = 0x10;
 /// `StringArgumentType.greedyString()`.
 const STRING_GREEDY: i32 = 2;
 
@@ -184,12 +216,20 @@ pub enum Node {
 #[derive(Clone, Copy, Debug)]
 pub enum Parser {
     GreedyString,
+    /// Greedy-строка с подсказками от сервера (`minecraft:ask_server`).
+    GreedyStringAsk,
     /// Целое с минимумом и максимумом.
     Integer(i32, i32),
     ItemStack,
 }
 
 impl Node {
+    pub fn name(&self) -> &str {
+        match self {
+            Node::Literal { name, .. } | Node::Argument { name, .. } => name,
+        }
+    }
+
     pub fn literal(name: &str, exec: bool, children: Vec<Node>) -> Self {
         Node::Literal {
             name: name.into(),
@@ -238,8 +278,15 @@ pub fn commands_tree(id: i32, roots: &[Node], parsers: CommandParsers) -> Vec<u8
             Some(Node::Literal { exec: e, .. }) => {
                 w.u8(NODE_LITERAL | exec(*e));
             }
-            Some(Node::Argument { exec: e, .. }) => {
-                w.u8(NODE_ARGUMENT | exec(*e));
+            Some(Node::Argument {
+                exec: e, parser, ..
+            }) => {
+                let ask = if matches!(parser, Parser::GreedyStringAsk) {
+                    NODE_CUSTOM_SUGGESTIONS
+                } else {
+                    0
+                };
+                w.u8(NODE_ARGUMENT | exec(*e) | ask);
             }
         }
         w.var_int(children.len() as i32);
@@ -257,6 +304,11 @@ pub fn commands_tree(id: i32, roots: &[Node], parsers: CommandParsers) -> Vec<u8
                     Parser::GreedyString => {
                         w.var_int(parsers.string).var_int(STRING_GREEDY);
                     }
+                    Parser::GreedyStringAsk => {
+                        w.var_int(parsers.string)
+                            .var_int(STRING_GREEDY)
+                            .string("minecraft:ask_server");
+                    }
                     // Флаги: 1 — есть минимум, 2 — есть максимум.
                     Parser::Integer(min, max) => {
                         w.var_int(parsers.integer).u8(3).i32(min).i32(max);
@@ -269,6 +321,20 @@ pub fn commands_tree(id: i32, roots: &[Node], parsers: CommandParsers) -> Vec<u8
         }
     }
     w.var_int(0);
+    w.buf
+}
+
+/// `ClientboundCommandSuggestionsPacket`: заменяемый участок и варианты без подсказок.
+pub fn command_suggestions(id: i32, tx: i32, start: i32, len: i32, matches: &[&str]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .var_int(tx)
+        .var_int(start)
+        .var_int(len)
+        .var_int(matches.len() as i32);
+    for m in matches {
+        w.string(m).bool(false);
+    }
     w.buf
 }
 

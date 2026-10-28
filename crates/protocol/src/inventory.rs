@@ -3,12 +3,16 @@
 use crate::play::{SpawnInfo, write_spawn_info};
 use crate::{Reader, Result, Writer};
 
-/// Стопка предметов без компонентов: ID в реестре `item` и количество.
+/// Стопка предметов: ID в реестре `item`, количество и износ (`minecraft:damage`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stack {
     pub item: i32,
     pub count: i32,
+    pub damage: i32,
 }
+
+/// Номер компонента `minecraft:damage` в реестре `data_component_type` (ставится при старте).
+pub static DAMAGE_COMPONENT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 /// Слот: `None` — пусто.
 pub type Slot = Option<Stack>;
@@ -17,7 +21,13 @@ pub type Slot = Option<Stack>;
 pub fn write_stack(w: &mut Writer, s: Slot) {
     match s {
         Some(s) if s.count > 0 => {
-            w.var_int(s.count).var_int(s.item).var_int(0).var_int(0);
+            w.var_int(s.count).var_int(s.item);
+            let damage = DAMAGE_COMPONENT.load(std::sync::atomic::Ordering::Relaxed);
+            if s.damage > 0 && damage >= 0 {
+                w.var_int(1).var_int(0).var_int(damage).var_int(s.damage);
+            } else {
+                w.var_int(0).var_int(0);
+            }
         }
         _ => {
             w.var_int(0);
@@ -41,7 +51,7 @@ pub fn read_stack(r: &mut Reader) -> Result<Slot> {
             r.var_int()?;
         }
     }
-    Ok(Some(Stack { item, count }))
+    Ok(Some(Stack { item, count, damage: 0 }))
 }
 
 /// `HashedStack`: есть ли предмет, ID, количество, хэши компонентов.
@@ -59,11 +69,26 @@ fn read_hashed_stack(r: &mut Reader) -> Result<Slot> {
     for _ in 0..r.var_int()? {
         r.var_int()?;
     }
-    Ok((count > 0).then_some(Stack { item, count }))
+    Ok((count > 0).then_some(Stack { item, count, damage: 0 }))
 }
 
 /// Окно инвентаря игрока.
 pub const PLAYER_WINDOW: i32 = 0;
+
+/// `ClientboundOpenScreenPacket`: номер окна, тип меню (`menu`) и заголовок.
+pub fn open_screen(id: i32, window: i32, menu: i32, title: &serde_json::Value) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(window).var_int(menu);
+    crate::text::write_component(&mut w, title);
+    w.buf
+}
+
+/// `ClientboundContainerClosePacket`.
+pub fn container_close(id: i32, window: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(window);
+    w.buf
+}
 
 pub fn container_set_content(
     id: i32,
@@ -210,6 +235,8 @@ pub fn take_item_entity(id: i32, item_entity: i32, collector: i32, amount: i32) 
 }
 
 pub const ENTITY_EVENT_DEATH: u8 = 3;
+/// Уровень прав игрока для клиента: 24 + уровень (0..=4).
+pub const ENTITY_EVENT_PERMISSION_LEVEL_0: u8 = 24;
 /// Использование предмета закончено (еда съедена).
 pub const ENTITY_EVENT_USE_ITEM_COMPLETE: u8 = 9;
 
@@ -225,6 +252,7 @@ mod tests {
             Some(Stack {
                 item: 300,
                 count: 64,
+                damage: 0,
             }),
         );
         write_stack(&mut w, None);
@@ -234,7 +262,8 @@ mod tests {
             Some(Stack {
                 item: 300,
                 count: 64
-            })
+            ,
+                damage: 0})
         );
         assert_eq!(read_stack(&mut r).unwrap(), None);
         assert!(r.remaining().is_empty());
@@ -260,9 +289,9 @@ mod tests {
         assert_eq!(c.state, 5);
         assert_eq!(
             c.changed,
-            vec![(36, None), (9, Some(Stack { item: 1, count: 3 }))]
+            vec![(36, None), (9, Some(Stack { item: 1, count: 3 , damage: 0}))]
         );
-        assert_eq!(c.carried, Some(Stack { item: 28, count: 1 }));
+        assert_eq!(c.carried, Some(Stack { item: 28, count: 1 , damage: 0}));
     }
 
     #[test]

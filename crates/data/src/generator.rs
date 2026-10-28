@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Пишется последним; меняется при изменении состава кэша.
-const CACHE_MARKER: &str = ".chunkwake-cache-v4";
+const CACHE_MARKER: &str = ".chunkwake-cache-v6";
 
 /// Выгрузка свойств света (исходник рядом: `extractor/ChunkwakeLight.java`).
 const LIGHT_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeLight.class");

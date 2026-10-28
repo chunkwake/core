@@ -16,13 +16,19 @@ import java.util.concurrent.ConcurrentHashMap;
  * чего не хватает плагину.
  */
 final class Stub {
-    private static final Map<Method, Optional<Method>> CACHE = new ConcurrentHashMap<>();
+    /** Метод делегата по методу интерфейса — отдельно для каждого класса делегата. */
+    private static final ClassValue<Map<Method, Optional<Method>>> CACHE = new ClassValue<>() {
+        @Override
+        protected Map<Method, Optional<Method>> computeValue(Class<?> type) {
+            return new ConcurrentHashMap<>();
+        }
+    };
 
     private Stub() {}
 
     static <T> T of(Class<T> iface, Object impl) {
         InvocationHandler h = (proxy, m, args) -> {
-            Optional<Method> target = CACHE.computeIfAbsent(m, k -> find(impl.getClass(), k));
+            Optional<Method> target = CACHE.get(impl.getClass()).computeIfAbsent(m, k -> find(impl.getClass(), k));
             if (target.isPresent()) {
                 try {
                     return target.get().invoke(impl, args);

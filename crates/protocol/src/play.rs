@@ -537,6 +537,13 @@ pub fn block_update(id: i32, pos: [i32; 3], state: i32) -> Vec<u8> {
     w.buf
 }
 
+/// `ClientboundBlockDestructionPacket`: трещины на блоке; стадия вне 0..=9 убирает их.
+pub fn block_destruction(id: i32, entity: i32, pos: [i32; 3], stage: i8) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity).i64(pack_block_pos(pos)).u8(stage as u8);
+    w.buf
+}
+
 /// Несколько блоков одной секции: `SectionPos.asLong` (x, z по 22 бита, y 20),
 /// затем VarLong `state << 12 | x << 8 | z << 4 | y` (локальные координаты).
 pub fn section_blocks_update(id: i32, section: [i32; 3], blocks: &[(u16, u32)]) -> Vec<u8> {

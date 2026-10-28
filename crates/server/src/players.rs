@@ -63,16 +63,25 @@ impl PlayerFiles {
 
 fn stack_nbt(s: Stack, names: &[String]) -> Option<Compound> {
     let name = names.get(s.item as usize).filter(|n| !n.is_empty())?;
-    Some(Compound::from([
+    let mut c = Compound::from([
         ("id".into(), Tag::String(name.clone())),
         ("count".into(), Tag::Int(s.count)),
-    ]))
+    ]);
+    if s.damage > 0 {
+        let comps = Compound::from([("minecraft:damage".into(), Tag::Int(s.damage))]);
+        c.insert("components".into(), Tag::Compound(comps));
+    }
+    Some(c)
 }
 
 fn stack_from(c: &Compound, ids: &HashMap<String, i32>) -> Option<Stack> {
     let item = *ids.get(c.get("id")?.as_str()?)?;
     let count = c.get("count").and_then(Tag::as_i64).unwrap_or(1) as i32;
-    (count > 0).then_some(Stack { item, count })
+    let damage = match c.get("components") {
+        Some(Tag::Compound(comps)) => comps.get("minecraft:damage").and_then(Tag::as_i64).unwrap_or(0) as i32,
+        _ => 0,
+    };
+    (count > 0).then_some(Stack { item, count, damage })
 }
 
 pub fn to_nbt(s: &PlayerSave, data_version: i32, names: &[String]) -> Compound {
@@ -210,10 +219,10 @@ mod tests {
             selected: 3,
             game_mode: Some(1),
             slots: vec![
-                (5, Stack { item: 1, count: 1 }),
-                (10, Stack { item: 1, count: 64 }),
-                (36, Stack { item: 2, count: 5 }),
-                (45, Stack { item: 2, count: 1 }),
+                (5, Stack { item: 1, count: 1 , damage: 0}),
+                (10, Stack { item: 1, count: 64 , damage: 0}),
+                (36, Stack { item: 2, count: 1, damage: 7 }),
+                (45, Stack { item: 2, count: 1 , damage: 0}),
             ],
         };
         let root = to_nbt(&s, 4000, &names);

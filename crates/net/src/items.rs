@@ -109,7 +109,7 @@ pub fn settle(
     min_y: f64,
     solid: impl Fn([i32; 3]) -> bool,
 ) -> Option<[f64; 3]> {
-    let mut d = Dropped::new(pos, vel, Stack { item: 0, count: 1 }, Duration::ZERO);
+    let mut d = Dropped::new(pos, vel, Stack { item: 0, count: 1 , damage: 0}, Duration::ZERO);
     for _ in 0..600 {
         step(&mut d, &solid);
         if d.resting() {
@@ -222,7 +222,7 @@ mod tests {
             Dropped::new(
                 [x, 64.0, 0.0],
                 [0.0; 3],
-                Stack { item, count },
+                Stack { item, count, damage: 0 },
                 Duration::ZERO,
             )
         };
@@ -237,7 +237,7 @@ mod tests {
         let mut d = Dropped::new(
             [0.5, 2.0, 0.5],
             [0.0; 3],
-            Stack { item: 1, count: 1 },
+            Stack { item: 1, count: 1 , damage: 0},
             Duration::ZERO,
         );
         let mut synced = 0;

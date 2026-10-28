@@ -10,6 +10,7 @@
 
 mod jvm;
 
+use chunkwake_net::live::Event;
 use chunkwake_net::play::{PlayPlan, PluginHooks};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -36,8 +37,19 @@ enum Slot {
     ArgPluginsDir = 11,
     ArgPluginsDirLen = 12,
     DownSetCommands = 13,
+    DownOpLevel = 14,
+    DownSetOp = 15,
+    UpEvent = 16,
+    DownPlayerState = 17,
+    DownPlayerControl = 18,
+    ArgItems = 19,
+    ArgItemsLen = 20,
+    DownWorld = 21,
 }
-const SLOTS: usize = 14;
+const SLOTS: usize = 22;
+
+/// Буфер ответа на событие (смерть с полным инвентарём укладывается с запасом).
+const EVENT_REPLY_CAP: usize = 64 << 10;
 
 const LISTEN_BLOCK_BREAK: u64 = 4;
 
@@ -52,6 +64,7 @@ enum Call {
     Quit(Uuid),
     BlockBreak(Uuid, [i32; 3], String, oneshot::Sender<bool>),
     Command(Uuid, String, oneshot::Sender<bool>),
+    Event(Event, Uuid, String, oneshot::Sender<String>),
 }
 
 /// Мост к JVM: хуки для `PlayPlan`.
@@ -100,10 +113,26 @@ impl Bridge {
             Slot::DownSetCommands,
             set_commands as *const () as u64,
         );
+        set(table, Slot::DownOpLevel, op_level as *const () as u64);
+        set(table, Slot::DownSetOp, set_op as *const () as u64);
+        set(
+            table,
+            Slot::DownPlayerState,
+            player_state as *const () as u64,
+        );
+        set(
+            table,
+            Slot::DownPlayerControl,
+            player_control as *const () as u64,
+        );
+        set(table, Slot::DownWorld, world as *const () as u64);
         let dir: &'static str =
             Box::leak(plugins_dir.to_string_lossy().into_owned().into_boxed_str());
         set(table, Slot::ArgPluginsDir, dir.as_ptr() as u64);
         set(table, Slot::ArgPluginsDirLen, dir.len() as u64);
+        let items: &'static str = Box::leak(plan.item_list().into_boxed_str());
+        set(table, Slot::ArgItems, items.as_ptr() as u64);
+        set(table, Slot::ArgItemsLen, items.len() as u64);
 
         let (tx, rx) = mpsc::channel::<Call>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<i32, String>>();
@@ -167,15 +196,18 @@ fn run(table: &'static Table, rx: mpsc::Receiver<Call>, tick_queued: &AtomicBool
     type QuitFn = extern "C" fn(i64, i64);
     type BreakFn = extern "C" fn(i64, i64, i32, i32, i32, *const u8, i32) -> i32;
     type CommandFn = extern "C" fn(i64, i64, *const u8, i32) -> i32;
-    let (tick, join, quit, block_break, command) = unsafe {
+    type EventFn = extern "C" fn(i32, i64, i64, *const u8, i32, *mut u8, i32) -> i32;
+    let (tick, join, quit, block_break, command, event) = unsafe {
         (
             up::<extern "C" fn()>(table, Slot::UpTick),
             up::<JoinFn>(table, Slot::UpJoin),
             up::<QuitFn>(table, Slot::UpQuit),
             up::<BreakFn>(table, Slot::UpBlockBreak),
             up::<CommandFn>(table, Slot::UpCommand),
+            up::<EventFn>(table, Slot::UpEvent),
         )
     };
+    let mut reply_buf = vec![0u8; EVENT_REPLY_CAP];
     let id = |u: Uuid| {
         let (hi, lo) = u.as_u64_pair();
         (hi as i64, lo as i64)
@@ -203,6 +235,24 @@ fn run(table: &'static Table, rx: mpsc::Receiver<Call>, tick_queued: &AtomicBool
                 let (hi, lo) = id(u);
                 let known = command(hi, lo, line.as_ptr(), line.len() as i32);
                 let _ = reply.send(known != 0);
+            }
+            Call::Event(kind, u, arg, reply) => {
+                let (hi, lo) = id(u);
+                let n = event(
+                    kind as i32,
+                    hi,
+                    lo,
+                    arg.as_ptr(),
+                    arg.len() as i32,
+                    reply_buf.as_mut_ptr(),
+                    reply_buf.len() as i32,
+                );
+                let text = usize::try_from(n)
+                    .ok()
+                    .and_then(|n| reply_buf.get(..n))
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .unwrap_or_default();
+                let _ = reply.send(text);
             }
         }
     }
@@ -237,6 +287,19 @@ impl PluginHooks for Bridge {
         let (reply, rx) = oneshot::channel();
         let _ = self.tx.send(Call::Command(uuid, line.to_owned(), reply));
         rx
+    }
+
+    fn listens(&self, kind: Event) -> bool {
+        get(self.table, Slot::FlagListeners) & kind.listener_bit() != 0
+    }
+
+    fn event(&self, kind: Event, uuid: Uuid, arg: String) -> Option<oneshot::Receiver<String>> {
+        if !self.listens(kind) {
+            return None;
+        }
+        let (reply, rx) = oneshot::channel();
+        self.tx.send(Call::Event(kind, uuid, arg, reply)).ok()?;
+        Some(rx)
     }
 
     fn tick(&self) {
@@ -290,6 +353,45 @@ extern "C" fn set_commands(ptr: *const u8, len: i32) {
                 .collect(),
         );
     }
+}
+
+extern "C" fn op_level(hi: i64, lo: i64) -> i32 {
+    host().map_or(0, |p| p.op_level(Uuid::from_u64_pair(hi as u64, lo as u64)))
+}
+
+extern "C" fn set_op(hi: i64, lo: i64, op: i32) {
+    if let Some(plan) = host() {
+        plan.set_op(Uuid::from_u64_pair(hi as u64, lo as u64), op != 0);
+    }
+}
+
+/// Снимок игрока в `out`; возвращает длину (больше `cap` — буфер мал), -1 — не онлайн.
+extern "C" fn player_state(hi: i64, lo: i64, out: *mut u8, cap: i32) -> i32 {
+    let uuid = Uuid::from_u64_pair(hi as u64, lo as u64);
+    let Some(text) = host().and_then(|p| p.player_state(uuid)) else {
+        return -1;
+    };
+    if text.len() <= cap.max(0) as usize && !out.is_null() {
+        unsafe { std::ptr::copy_nonoverlapping(text.as_ptr(), out, text.len()) };
+    }
+    text.len() as i32
+}
+
+extern "C" fn player_control(hi: i64, lo: i64, ptr: *const u8, len: i32) -> i32 {
+    let line = unsafe { text(ptr, len) };
+    let uuid = Uuid::from_u64_pair(hi as u64, lo as u64);
+    host().is_some_and(|p| p.player_control(uuid, line)) as i32
+}
+
+/// Запрос к миру (`get`/`set`, см. `PlayPlan::world_request`); ответ в `out`, длина.
+extern "C" fn world(ptr: *const u8, len: i32, out: *mut u8, cap: i32) -> i32 {
+    let line = unsafe { text(ptr, len) };
+    let reply = host().map(|p| p.world_request(line)).unwrap_or_default();
+    let n = reply.len().min(cap.max(0) as usize);
+    if !out.is_null() {
+        unsafe { std::ptr::copy_nonoverlapping(reply.as_ptr(), out, n) };
+    }
+    n as i32
 }
 
 extern "C" fn log(level: i32, ptr: *const u8, len: i32) {

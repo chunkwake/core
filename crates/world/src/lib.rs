@@ -6,7 +6,18 @@ pub mod nbt;
 
 use chunkwake_protocol::Writer;
 use light::LightLayer;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, OnceLock};
+
+/// Блок-сущность (сундук, бочка…): `id` и NBT как в Anvil (без `id`/`x`/`y`/`z`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlockEntity {
+    pub id: String,
+    pub nbt: nbt::Compound,
+}
+
+/// Номера `block_entity_type` по имени (ставятся при старте): нужны пакету чанка.
+pub static BLOCK_ENTITY_TYPES: OnceLock<HashMap<String, i32>> = OnceLock::new();
 
 /// Сколько бит нужно, чтобы записать значения `0..n`.
 pub fn bits_for(n: usize) -> u32 {
@@ -221,6 +232,8 @@ pub struct ChunkColumn {
     /// Свет по секциям мира (без секций над/под миром).
     pub sky_light: Vec<LightLayer>,
     pub block_light: Vec<LightLayer>,
+    /// Блок-сущности по мировым координатам.
+    pub block_entities: BTreeMap<[i32; 3], BlockEntity>,
 }
 
 const AIR: u32 = 0;
@@ -258,6 +271,7 @@ impl ChunkColumn {
             has_skylight,
             sky_light: vec![LightLayer::Uniform(if has_skylight { 15 } else { 0 }); n],
             block_light: vec![LightLayer::Uniform(0); n],
+            block_entities: BTreeMap::new(),
         }
     }
 
@@ -313,7 +327,19 @@ impl ChunkColumn {
             write_container(&mut data, &[s.biome; 64], 1, self.global_biome_bits);
         }
         w.byte_array(&data.buf);
-        w.var_int(0); // block entities
+        // Блок-сущности: упакованные x/z, y, тип и NBT (клиенту сундуку данные не нужны).
+        let types = BLOCK_ENTITY_TYPES.get();
+        let known: Vec<([i32; 3], i32)> = self
+            .block_entities
+            .iter()
+            .filter_map(|(pos, be)| Some((*pos, *types?.get(&be.id)?)))
+            .collect();
+        w.var_int(known.len() as i32);
+        for ([x, y, z], kind) in known {
+            w.u8(((x & 15) << 4 | (z & 15)) as u8).u16(y as i16 as u16).var_int(kind);
+            // Пустой безымянный compound.
+            w.u8(10).u8(0);
+        }
 
         // Свет: секции -1..=n (n+2 бит): под миром темно, над миром — небо.
         let above = LightLayer::Uniform(if self.has_skylight { 15 } else { 0 });

@@ -107,6 +107,7 @@ async fn serve(dir: &Path) -> Result<(), String> {
     // Регионы читаются с диска при первом обращении к их чанкам.
     play.set_source(storage.clone());
     play.set_player_source(storage.clone());
+    play.set_ops(chunkwake_net::ops::OpList::load(dir.join("ops.json"))?);
     tracing::info!(
         "world: {} (data loaded in {:.1}s)",
         props.level_name,
@@ -127,18 +128,42 @@ async fn serve(dir: &Path) -> Result<(), String> {
             tracing::info!(name = %player.name, ?result, "player left");
         });
     });
-    // Ctrl+C: сохранить мир и выйти.
-    tokio::select! {
-        result = serving => result.map_err(|e| e.to_string()),
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("stopping: saving world");
-            let n = tokio::task::spawn_blocking(move || storage.save(&world))
-                .await
-                .map_err(|e| e.to_string())??;
-            tracing::info!("saved {n} chunks and players");
-            Ok(())
+    // Консоль: строки stdin — команды сервера (`op`, `deop`, `list`, `stop`, плагины).
+    let (console_tx, mut console) = tokio::sync::mpsc::unbounded_channel::<String>();
+    std::thread::Builder::new()
+        .name("console".into())
+        .spawn(move || {
+            for line in std::io::stdin().lines().map_while(Result::ok) {
+                let line = line.trim().trim_start_matches('/').to_owned();
+                if !line.is_empty() && console_tx.send(line).is_err() {
+                    break;
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    tokio::pin!(serving);
+    // Ctrl+C или `stop`: сохранить мир и выйти.
+    loop {
+        tokio::select! {
+            result = &mut serving => return result.map_err(|e| e.to_string()),
+            _ = tokio::signal::ctrl_c() => break,
+            Some(line) = console.recv() => {
+                if line == "stop" {
+                    break;
+                }
+                let reply = world.console_command(&line).await;
+                if !reply.is_empty() {
+                    tracing::info!("{reply}");
+                }
+            }
         }
     }
+    tracing::info!("stopping: saving world");
+    let n = tokio::task::spawn_blocking(move || storage.save(&world))
+        .await
+        .map_err(|e| e.to_string())??;
+    tracing::info!("saved {n} chunks and players");
+    Ok(())
 }
 
 /// Paper-плагины из `plugins/`: без API (`java/dist`, `api/`) или Java сервер

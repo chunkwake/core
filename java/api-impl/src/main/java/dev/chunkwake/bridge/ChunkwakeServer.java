@@ -83,6 +83,15 @@ final class ChunkwakeServer {
         for (JavaPlugin plugin : loaded) {
             commands.registerAll(plugin.getName().toLowerCase(java.util.Locale.ROOT),
                     PluginCommandYamlParser.parse(plugin));
+            // Права из plugin.yml — до onEnable (`CraftServer.enablePlugin`).
+            for (org.bukkit.permissions.Permission perm : plugin.getDescription().getPermissions()) {
+                try {
+                    plugins.addPermission(perm);
+                } catch (IllegalArgumentException e) {
+                    logger.log(Level.WARNING, "Plugin " + plugin.getName() + " tried to register permission '"
+                            + perm.getName() + "' but it's already registered", e);
+                }
+            }
             plugins.enablePlugin(plugin);
             if (plugin.isEnabled()) {
                 enabled++;
@@ -164,6 +173,19 @@ final class ChunkwakeServer {
         return e.isCancelled();
     }
 
+    /** Событие с ответом из Rust (формат — {@link Events}). */
+    String event(int kind, UUID id, String arg) {
+        PlayerImpl p = online.get(id);
+        if (p == null) {
+            return "";
+        }
+        if (kind == Bridge.EVENT_TAB_COMPLETE) {
+            List<String> out = commands.tabComplete(p.api, arg);
+            return out == null ? "" : String.join("\n", out);
+        }
+        return Events.fire(api.getPluginManager(), p, kind, arg);
+    }
+
     /** true — команда известна (выполнена или упала с сообщением). */
     boolean command(UUID id, String line) {
         CommandSender sender = id.getMostSignificantBits() == 0 && id.getLeastSignificantBits() == 0
@@ -227,6 +249,11 @@ final class ChunkwakeServer {
     // --- Server ---
 
     public String getName() { return "Chunkwake"; }
+    /** Сообщение об отказе в правах — как `messages.no-permission` Paper по умолчанию. */
+    public Component permissionMessage() {
+        return Component.text("I'm sorry, but you do not have permission to perform this command. "
+                + "Please contact the server administrators if you believe that this is in error.", NamedTextColor.RED);
+    }
     public String getVersion() { return VERSION + "-chunkwake (MC: " + VERSION + ")"; }
     public String getBukkitVersion() { return VERSION + "-R0.1-SNAPSHOT"; }
     public String getMinecraftVersion() { return VERSION; }
@@ -320,6 +347,14 @@ final class ChunkwakeServer {
     /** Единственный мир (MVP). */
     static final class WorldImpl {
         public String getName() { return "world"; }
+        public org.bukkit.block.Block getBlockAt(int x, int y, int z) {
+            return new BlockImpl(Bridge.server.world, x, y, z, null).api;
+        }
+        public org.bukkit.block.Block getBlockAt(org.bukkit.Location l) {
+            return getBlockAt(l.getBlockX(), l.getBlockY(), l.getBlockZ());
+        }
+        public org.bukkit.Material getType(int x, int y, int z) { return getBlockAt(x, y, z).getType(); }
+        public void setType(int x, int y, int z, org.bukkit.Material m) { getBlockAt(x, y, z).setType(m); }
         public UUID getUID() { return new UUID(0, 1); }
         public int getMinHeight() { return -64; }
         public int getMaxHeight() { return 320; }
