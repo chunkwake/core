@@ -26,6 +26,10 @@ fn opposite(dir: usize) -> usize {
 }
 
 /// По часовой стрелке (вид сверху).
+fn counter_clockwise(dir: usize) -> usize {
+    opposite(clockwise(dir))
+}
+
 fn clockwise(dir: usize) -> usize {
     match dir {
         2 => 5,
@@ -45,6 +49,11 @@ pub struct Ctx {
     pub pitch: f32,
     /// Высота точки клика внутри блока, 0–1.
     pub cursor_y: f32,
+    /// Точка клика по X и Z относительно ставимого блока.
+    pub cursor_x: f32,
+    pub cursor_z: f32,
+    /// Соседи по сторонам север, юг, запад, восток: на уровне блока и выше.
+    pub near: [[u32; 2]; 4],
 }
 
 impl Ctx {
@@ -303,6 +312,9 @@ impl Placement {
             Some("top" | "bottom") => self.set(&mut s, "half", if top { "top" } else { "bottom" }),
             Some("upper" | "lower") => {
                 self.set(&mut s, "half", "lower");
+                if self.prop(s, "hinge").is_some() {
+                    self.set(&mut s, "hinge", self.hinge(&name, player, c));
+                }
                 let upper = self.with(s, "half", "upper").unwrap_or(s);
                 return vec![([0; 3], s), ([0, 1, 0], upper)];
             }
@@ -315,6 +327,151 @@ impl Placement {
             return vec![([0; 3], s), (step(f), head)];
         }
         vec![([0; 3], s)]
+    }
+
+    /// `DoorBlock.getHinge`: петли к полным блокам и от соседней двери, иначе по точке клика.
+    fn hinge(&self, name: &str, facing: usize, c: &Ctx) -> &'static str {
+        let near = |d: usize| c.near[d - 2];
+        let full = |st: u32| self.sturdy.get(st as usize) == Some(&63);
+        let door = |st: u32| self.name(st) == Some(name) && self.prop(st, "half") == Some("lower");
+        let (l, r) = (near(counter_clockwise(facing)), near(clockwise(facing)));
+        let i = -(full(l[0]) as i32) - full(l[1]) as i32 + full(r[0]) as i32 + full(r[1]) as i32;
+        let (ld, rd) = (door(l[0]), door(r[0]));
+        if (ld && !rd) || i > 0 {
+            return "right";
+        }
+        if (rd && !ld) || i < 0 {
+            return "left";
+        }
+        let o = step(facing);
+        let (j, k) = (o[0], o[2]);
+        let (d0, d1) = (c.cursor_x, c.cursor_z);
+        if (j < 0 && d1 < 0.5) || (j > 0 && d1 > 0.5) || (k < 0 && d0 > 0.5) || (k > 0 && d0 < 0.5) {
+            "right"
+        } else {
+            "left"
+        }
+    }
+
+    fn is_rail(&self, state: u32) -> bool {
+        self.name(state).is_some_and(|n| n.ends_with("rail")) && self.prop(state, "shape").is_some()
+    }
+
+    /// Стороны, куда ведёт форма рельса, и подъём (+1) в ту сторону.
+    fn rail_links(&self, state: u32) -> Vec<(usize, i32)> {
+        let (n, so, w, e) = (2, 3, 4, 5);
+        match self.prop(state, "shape").unwrap_or("") {
+            "north_south" => vec![(n, 0), (so, 0)],
+            "east_west" => vec![(w, 0), (e, 0)],
+            "ascending_north" => vec![(n, 1), (so, 0)],
+            "ascending_south" => vec![(n, 0), (so, 1)],
+            "ascending_east" => vec![(w, 0), (e, 1)],
+            "ascending_west" => vec![(w, 1), (e, 0)],
+            "south_east" => vec![(so, 0), (e, 0)],
+            "south_west" => vec![(so, 0), (w, 0)],
+            "north_west" => vec![(n, 0), (w, 0)],
+            "north_east" => vec![(n, 0), (e, 0)],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Рельс рядом в сторону `d`: на уровне, выше или ниже (`RailState.getRail`).
+    fn rail_near(&self, pos: [i32; 3], d: usize, at: &dyn Fn([i32; 3]) -> u32) -> Option<[i32; 3]> {
+        let o = step(d);
+        [0, 1, -1]
+            .into_iter()
+            .map(|dy| [pos[0] + o[0], pos[1] + dy, pos[2] + o[2]])
+            .find(|&p| self.is_rail(at(p)))
+    }
+
+    /// Ведёт ли рельс в `q` к блоку `p` (по горизонтали).
+    fn rail_points_to(&self, q: [i32; 3], p: [i32; 3], at: &dyn Fn([i32; 3]) -> u32) -> bool {
+        self.rail_links(at(q)).iter().any(|&(d, _)| {
+            let o = step(d);
+            q[0] + o[0] == p[0] && q[2] + o[2] == p[2]
+        })
+    }
+
+    /// Живые связи рельса: стороны, где рельс действительно есть.
+    fn rail_live(&self, q: [i32; 3], at: &dyn Fn([i32; 3]) -> u32) -> Vec<usize> {
+        self.rail_links(at(q))
+            .into_iter()
+            .filter(|&(d, _)| self.rail_near(q, d, at).is_some_and(|n| self.rail_points_to(n, q, at)))
+            .map(|(d, _)| d)
+            .collect()
+    }
+
+    /// Форма по сторонам (как `RailState.place`): прямая, поворот, подъём к рельсу выше.
+    fn rail_shape(&self, state: u32, pos: [i32; 3], sides: &[usize], at: &dyn Fn([i32; 3]) -> u32) -> u32 {
+        let has = |d| sides.contains(&d);
+        let (n, so, w, e) = (has(2), has(3), has(4), has(5));
+        let curve = |name: &str| self.with(state, "shape", name);
+        let mut shape = if (n || so) && !w && !e {
+            "north_south"
+        } else if (w || e) && !n && !so {
+            "east_west"
+        } else if so && e && !n && !w && curve("south_east").is_some() {
+            "south_east"
+        } else if so && w && !n && !e && curve("south_west").is_some() {
+            "south_west"
+        } else if n && w && !so && !e && curve("north_west").is_some() {
+            "north_west"
+        } else if n && e && !so && !w && curve("north_east").is_some() {
+            "north_east"
+        } else if n || so {
+            "north_south"
+        } else if w || e {
+            "east_west"
+        } else {
+            return state;
+        };
+        let above = |d: usize| {
+            let o = step(d);
+            self.is_rail(at([pos[0] + o[0], pos[1] + 1, pos[2] + o[2]]))
+        };
+        if shape == "north_south" {
+            if above(2) {
+                shape = "ascending_north";
+            } else if above(3) {
+                shape = "ascending_south";
+            }
+        } else if shape == "east_west" {
+            if above(5) {
+                shape = "ascending_east";
+            } else if above(4) {
+                shape = "ascending_west";
+            }
+        }
+        curve(shape).unwrap_or(state)
+    }
+
+    /// Новый рельс в `pos`: его форма и перестроенные к нему соседи.
+    pub fn rails(&self, pos: [i32; 3], at: &dyn Fn([i32; 3]) -> u32) -> Vec<([i32; 3], u32)> {
+        let state = at(pos);
+        if !self.is_rail(state) {
+            return Vec::new();
+        }
+        // Соседи со свободной связью или уже ведущие сюда.
+        let free: Vec<(usize, [i32; 3])> = (2..6)
+            .filter_map(|d| self.rail_near(pos, d, at).map(|q| (d, q)))
+            .filter(|&(_, q)| self.rail_live(q, at).len() < 2 || self.rail_points_to(q, pos, at))
+            .collect();
+        let dirs: Vec<usize> = free.iter().map(|f| f.0).collect();
+        let me = self.rail_shape(state, pos, &dirs, at);
+        let mut out = vec![(pos, me)];
+        let view = |p: [i32; 3]| if p == pos { me } else { at(p) };
+        for (d, q) in free {
+            if !self.rail_links(me).iter().any(|l| l.0 == d) || self.rail_points_to(q, pos, &view) {
+                continue;
+            }
+            let mut sides = self.rail_live(q, &view);
+            sides.push(opposite(d));
+            let qs = self.rail_shape(at(q), q, &sides, &view);
+            if qs != at(q) {
+                out.push((q, qs));
+            }
+        }
+        out
     }
 
     /// Плита в плиту того же вида: двойная (`SlabBlock.canBeReplaced`).
@@ -393,7 +550,7 @@ mod tests {
     fn orientation() {
         let (p, id) = table();
         // Смотрит на север (yaw 180), кликает по верхней грани.
-        let c = Ctx { face: UP, yaw: 180.0, pitch: 0.0, cursor_y: 1.0 };
+        let c = Ctx { face: UP, yaw: 180.0, pitch: 0.0, cursor_y: 1.0, cursor_x: 0.5, cursor_z: 0.5, near: [[u32::MAX; 2]; 4] };
         assert_eq!(p.place(id["furnace_north"], &c), vec![([0; 3], id["furnace_south"])]);
         assert_eq!(p.place(id["stairs_east_top"], &c), vec![([0; 3], id["stairs_north_bottom"])]);
         assert_eq!(p.place(id["log_y"], &Ctx { face: 4, ..c }), vec![([0; 3], id["log_x"])]);
@@ -409,6 +566,35 @@ mod tests {
         assert_eq!(p.place(id["slab_bottom"], &Ctx { face: DOWN, ..c })[0].1, id["slab_top"]);
         assert_eq!(p.merge_slab(id["slab_bottom"], id["slab_bottom"], &c, true), Some(id["slab_double"]));
         assert_eq!(p.merge_slab(id["slab_bottom"], id["slab_bottom"], &Ctx { face: 3, ..c }, true), None);
+    }
+
+    #[test]
+    fn rails_curve_and_join() {
+        let mut states = Vec::new();
+        let shapes = ["north_south", "east_west", "ascending_east", "ascending_west", "ascending_north", "ascending_south", "south_east", "south_west", "north_west", "north_east"];
+        for sh in shapes {
+            states.push(Some(("minecraft:rail".to_owned(), props(&[("shape", sh)]))));
+        }
+        states.push(Some(("minecraft:air".to_owned(), Vec::new())));
+        let p = Placement::new(states, vec![0; 11], HashSet::new());
+        let id = |sh: &str| shapes.iter().position(|x| *x == sh).unwrap() as u32;
+        let air = 10;
+        // Рельс на (0,0,1) смотрит север–юг; новый на (0,0,0) и сосед на востоке (1,0,0).
+        let world = |q: [i32; 3]| match q {
+            [0, 0, 0] => id("north_south"),
+            [0, 0, 1] => id("north_south"),
+            [1, 0, 0] => id("east_west"),
+            _ => air,
+        };
+        let out = p.rails([0, 0, 0], &world);
+        assert_eq!(out[0], ([0, 0, 0], id("south_east")));
+        // Рельс выше на севере — подъём.
+        let world = |q: [i32; 3]| match q {
+            [0, 0, 0] => id("north_south"),
+            [0, 1, -1] => id("north_south"),
+            _ => air,
+        };
+        assert_eq!(p.rails([0, 0, 0], &world)[0], ([0, 0, 0], id("ascending_north")));
     }
 
     #[test]

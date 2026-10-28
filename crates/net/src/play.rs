@@ -2406,6 +2406,12 @@ impl PlayPlan {
                                 yaw,
                                 pitch,
                                 cursor_y: u.cursor[1],
+                                cursor_x: (u.pos[0] - target[0]) as f32 + u.cursor[0],
+                                cursor_z: (u.pos[2] - target[2]) as f32 + u.cursor[2],
+                                near: [[0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]].map(|d| {
+                                    let p = [target[0] + d[0], target[1], target[2] + d[2]];
+                                    [self.block(p).unwrap_or(AIR), self.block([p[0], p[1] + 1, p[2]]).unwrap_or(AIR)]
+                                }),
                             };
                             let pl = &self.survival.placement;
                             let clicked_state = self.block(u.pos).unwrap_or(AIR);
@@ -2446,6 +2452,12 @@ impl PlayPlan {
                                     self.set_block(p, s);
                                 }
                                 let mut touched = self.update_connections(target);
+                                // Рельсы: форма нового и перестройка соседей (`RailState`).
+                                let rails = self.survival.placement.rails(target, &|p| self.block(p).unwrap_or(AIR));
+                                for (p, st) in rails {
+                                    self.set_block(p, st);
+                                    touched.push(p);
+                                }
                                 self.link_chest(target, place);
                                 if let Some(id) = container_entity(&name) {
                                     self.set_block_entity(target, Some(BlockEntity { id: id.into(), nbt: Default::default() }));
