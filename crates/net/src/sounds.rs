@@ -65,6 +65,40 @@ pub fn place_sound(block: &str, exists: impl Fn(&str) -> bool) -> String {
     format!("minecraft:block.{group}.place")
 }
 
+/// Открывается ли рукой и каким звуком (`BlockSetType`/`WoodType`): двери, люки,
+/// калитки; железные — только сигналом (`None`).
+pub fn toggle_sound(block: &str, open: bool) -> Option<String> {
+    let path = block.strip_prefix("minecraft:").unwrap_or(block);
+    let kind = if path.ends_with("_trapdoor") {
+        "trapdoor"
+    } else if path.ends_with("_door") {
+        "door"
+    } else if path.ends_with("_fence_gate") {
+        "fence_gate"
+    } else {
+        return None;
+    };
+    if path.starts_with("iron_") {
+        return None;
+    }
+    let set = if path.contains("copper") {
+        "copper"
+    } else if path.starts_with("cherry") {
+        "cherry_wood"
+    } else if path.starts_with("bamboo") {
+        "bamboo_wood"
+    } else if path.starts_with("crimson") || path.starts_with("warped") {
+        "nether_wood"
+    } else if kind == "fence_gate" {
+        ""
+    } else {
+        "wooden"
+    };
+    let sep = if set.is_empty() { "" } else { "_" };
+    let action = if open { "open" } else { "close" };
+    Some(format!("minecraft:block.{set}{sep}{kind}.{action}"))
+}
+
 /// Ванильный разброс высоты: `random.nextFloat() * 0.1 + 0.9`.
 pub fn pitch_09() -> f32 {
     rand::random::<f32>() * 0.1 + 0.9
@@ -83,6 +117,13 @@ mod tests {
         assert_eq!(place_sound("minecraft:white_wool", none), "minecraft:block.wool.place");
         assert_eq!(place_sound("minecraft:dirt", none), "minecraft:block.gravel.place");
         assert_eq!(place_sound("minecraft:glass_pane", none), "minecraft:block.glass.place");
+        assert_eq!(toggle_sound("minecraft:oak_door", true).as_deref(), Some("minecraft:block.wooden_door.open"));
+        assert_eq!(toggle_sound("minecraft:oak_fence_gate", false).as_deref(), Some("minecraft:block.fence_gate.close"));
+        assert_eq!(
+            toggle_sound("minecraft:waxed_oxidized_copper_trapdoor", true).as_deref(),
+            Some("minecraft:block.copper_trapdoor.open")
+        );
+        assert_eq!(toggle_sound("minecraft:iron_door", true), None);
         let own = |s: &str| s == "minecraft:block.deepslate_bricks.place";
         assert_eq!(place_sound("minecraft:deepslate_bricks", own), "minecraft:block.deepslate_bricks.place");
     }

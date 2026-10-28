@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::{sleep, timeout};
 
 mod tui;
+mod progress;
 
 const VERSION: &str = "26.3";
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -217,6 +218,8 @@ async fn execute() -> Result<(), String> {
         return Err(format!(".env: {error}"));
     }
     let mut args = Args::parse()?;
+    let progress = progress::Progress::new(std::env::args_os().len() == 1)?;
+    progress.update(None, "Preparing test workspace");
     if args.java.components().count() > 1 {
         args.java = ordinary_path(
             fs::canonicalize(&args.java)
@@ -243,7 +246,10 @@ async fn execute() -> Result<(), String> {
         args.jar.clone()
     };
     if !requested_jar.exists() {
+        progress.update(None, "Downloading vanilla server.jar");
         download_jar(&requested_jar, VERSION).await?;
+    } else {
+        progress.update(None, "Using cached vanilla server.jar");
     }
     let jar = ordinary_path(
         fs::canonicalize(&requested_jar)
@@ -268,6 +274,7 @@ async fn execute() -> Result<(), String> {
             .join("reports/packets.json")
             .exists();
     if needs_java {
+        progress.update(None, "Checking Java and Minecraft version");
         check_java(&args.java, &jar, &version)?;
     }
     let id = SystemTime::now()
@@ -309,6 +316,7 @@ async fn execute() -> Result<(), String> {
             vec!["vanilla", "chunkwake"]
         };
         for server in order {
+            progress.run(server, iteration + 1, count);
             let dir = root.join(format!("{iteration}-{server}"));
             let port = free_port()?;
             write_config(
@@ -320,6 +328,7 @@ async fn execute() -> Result<(), String> {
                 args.bots,
             )?;
             let mut child = ManagedChild::start(server, &dir, &chunkwake, &jar, &args.java)?;
+            progress.update(Some(server), "Starting server and waiting for readiness");
             let startup = child.ready(port, protocol, &generated_cache).await;
             let startup_failed = startup.is_err();
             let log_path = root.join(format!("{iteration}-{server}.log"));
@@ -332,6 +341,7 @@ async fn execute() -> Result<(), String> {
             };
             match startup {
                 Ok(_) => {
+                    progress.update(Some(server), "Ready; running client workload");
                     let table_path = generated_cache.join(VERSION).join("reports/packets.json");
                     // First Chunkwake start generates the shared protocol table.
                     match PacketTable::load(&table_path)
@@ -341,11 +351,12 @@ async fn execute() -> Result<(), String> {
                         Ok(ids) => {
                             let addr = format!("127.0.0.1:{port}");
                             if args.mode == Mode::Bench {
-                                match benchmark(&addr, ids, protocol, &args, &child).await {
+                                match benchmark(&addr, ids, protocol, &args, &child, &progress, server).await {
                                     Ok(b) => run.benchmark = Some(b),
                                     Err(e) => report.errors.push(format!("{server}: {e}")),
                                 }
                             } else {
+                                progress.update(Some(server), "Checking status, login, movement and keep-alive");
                                 run.cases = scenario(&addr, ids, protocol).await;
                             }
                         }
@@ -354,11 +365,13 @@ async fn execute() -> Result<(), String> {
                 }
                 Err(e) => report.errors.push(format!("{server}: startup: {e}")),
             }
+            progress.update(Some(server), "Stopping server and saving world");
             if let Err(e) = child.stop().await {
                 report.errors.push(format!("{server}: stop: {e}"));
             }
             let _ = fs::copy(dir.join("server.log"), &log_path);
             if args.mode != Mode::Bench && !run.cases.is_empty() {
+                progress.update(Some(server), "Restarting to check saved player state");
                 // A new process validates that player state survives the shutdown.
                 let port = free_port()?;
                 write_config(
@@ -397,6 +410,7 @@ async fn execute() -> Result<(), String> {
                     root.join(format!("{iteration}-{server}-restart.log")),
                 );
             }
+            progress.update(Some(server), if startup_failed { "Startup failed" } else { "Run complete" });
             report.runs.push(run);
             if startup_failed {
                 break 'runs;
@@ -404,8 +418,10 @@ async fn execute() -> Result<(), String> {
         }
     }
     if args.mode == Mode::Compare {
+        progress.update(None, "Comparing scenario results");
         report.differences = compare(&report.runs, &expected);
     }
+    progress.update(None, "Writing report and cleaning up");
     write_report(&root, &report)?;
     if !args.keep_worlds {
         for entry in fs::read_dir(&root).map_err(|e| e.to_string())? {
@@ -415,6 +431,7 @@ async fn execute() -> Result<(), String> {
             }
         }
     }
+    drop(progress);
     println!("Report: {}", root.join("report.md").display());
     let failed = !report.errors.is_empty()
         || report.runs.iter().any(|r| {
@@ -1061,6 +1078,8 @@ async fn benchmark(
     protocol: i32,
     args: &Args,
     child: &ManagedChild,
+    progress: &progress::Progress,
+    server: &str,
 ) -> Result<Benchmark, String> {
     let mut tasks = tokio::task::JoinSet::new();
     for i in 0..args.bots {
@@ -1101,6 +1120,7 @@ async fn benchmark(
     let mut failed = 0;
     let mut errors = Vec::new();
     let deadline = Instant::now() + args.warmup + args.duration + STEP_TIMEOUT;
+    let measurement_started = Instant::now();
     while !tasks.is_empty() && Instant::now() < deadline {
         tokio::select! {
             result = tasks.join_next() => {
@@ -1113,6 +1133,11 @@ async fn benchmark(
             }
             _ = sleep(Duration::from_secs(1)) => {
                 if let Some((_, rss)) = process_stats(child.child.id()) { peak = Some(peak.unwrap_or(0).max(rss)); }
+                let elapsed = measurement_started.elapsed();
+                let phase = if elapsed < args.warmup { "Warmup" } else { "Measuring" };
+                let phase_elapsed = if elapsed < args.warmup { elapsed } else { elapsed.saturating_sub(args.warmup) };
+                let phase_total = if elapsed < args.warmup { args.warmup } else { args.duration };
+                progress.update(Some(server), &format!("{phase} {} / {} s · {} / {} bots finished · {} failed", phase_elapsed.as_secs().min(phase_total.as_secs()), phase_total.as_secs(), results.len() + failed, args.bots, failed));
             }
         }
     }

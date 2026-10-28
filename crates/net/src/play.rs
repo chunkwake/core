@@ -3307,6 +3307,13 @@ impl PlayPlan {
                         };
                         // `useItemOn`: шифт с предметом в руке — не открывать, а ставить.
                         let bypass = sneaking && (state.inv.held().is_some() || state.inv.slots[survival::OFFHAND].is_some());
+                        if !state.vitals.dead && login.spawn.game_mode != 3 && !bypass && u.hand == 0 {
+                            let yaw = self.player_at(uuid).map_or(0.0, |p| p.1);
+                            if self.toggle_block(conn, uuid, u.pos, yaw).await? {
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                                continue;
+                            }
+                        }
                         if let Some(kind) = kind.filter(|_| !state.vitals.dead && login.spawn.game_mode != 3 && !bypass) {
                             self.close_window(&mut state.inv, &mut window, uuid);
                             next_window = next_window % 100 + 1;
@@ -4902,6 +4909,58 @@ impl PlayPlan {
             &mods,
         ))
         .await
+    }
+
+    /// `DoorBlock`/`TrapDoorBlock`/`FenceGateBlock.useWithoutItem`: открыть или закрыть
+    /// (дверь — обе половины), звук остальным. Калитка открывается от игрока.
+    async fn toggle_block(
+        &self,
+        conn: &mut Connection,
+        uuid: Uuid,
+        pos: [i32; 3],
+        yaw: f32,
+    ) -> Result<bool, NetError> {
+        let Some(state) = self.block(pos) else {
+            return Ok(false);
+        };
+        let pl = &self.survival.placement;
+        let name = self.state_name(state).to_owned();
+        let open = pl.prop(state, "open") != Some("true");
+        let Some(sound) = crate::sounds::toggle_sound(&name, open) else {
+            return Ok(false);
+        };
+        let value = if open { "true" } else { "false" };
+        let Some(mut next) = pl.with_prop(state, "open", value) else {
+            return Ok(false);
+        };
+        if open && name.ends_with("_fence_gate") {
+            // Как в ваниле: открывается от игрока — если смотрит на него, разворот.
+            let dir = ["south", "west", "north", "east"][((yaw.rem_euclid(360.0) / 90.0 + 0.5) as usize) % 4];
+            let back = |d: &str| match d {
+                "north" => "south",
+                "south" => "north",
+                "east" => "west",
+                _ => "east",
+            };
+            if pl.prop(state, "facing") == Some(back(dir)) {
+                next = pl.with_prop(next, "facing", dir).unwrap_or(next);
+            }
+        }
+        let mut changed = vec![(pos, next)];
+        if let Some(o) = pl.partner(state).filter(|_| name.ends_with("_door")) {
+            let p = [pos[0] + o[0], pos[1] + o[1], pos[2] + o[2]];
+            if let Some(other) = self.block(p).filter(|&s| pl.name(s) == pl.name(state))
+                && let Some(n) = pl.with_prop(other, "open", value)
+            {
+                changed.push((p, n));
+            }
+        }
+        for &(p, s) in &changed {
+            self.set_block(p, s);
+            conn.send(&play::block_update(self.ids.block_update, p, s as i32)).await?;
+        }
+        self.block_sound(Some(uuid), &sound, pos, 1.0, crate::sounds::pitch_09());
+        Ok(true)
     }
 
     /// `Level.playSound(except, …)`: звук всем, кроме `skip`.
