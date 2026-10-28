@@ -109,6 +109,32 @@ pub fn container_set_content(
     w.buf
 }
 
+/// `ClientboundUpdateMobEffectPacket`: флаги 1 — фоновый, 2 — частицы, 4 — значок.
+pub fn update_mob_effect(id: i32, entity: i32, effect: i32, amplifier: i32, duration: i32, flags: u8) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity).var_int(effect).var_int(amplifier).var_int(duration).u8(flags);
+    w.buf
+}
+
+/// `ClientboundUpdateAttributesPacket` для одного атрибута: база и модификаторы
+/// `(идентификатор, величина, операция)`; операции: 0 прибавить, 1 × базу, 2 × итог.
+pub fn update_attribute(id: i32, entity: i32, attribute: i32, base: f64, modifiers: &[(String, f64, i32)]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity).var_int(1).var_int(attribute).f64(base);
+    w.var_int(modifiers.len() as i32);
+    for (name, amount, op) in modifiers {
+        w.string(name).f64(*amount).var_int(*op);
+    }
+    w.buf
+}
+
+/// `ClientboundRemoveMobEffectPacket`.
+pub fn remove_mob_effect(id: i32, entity: i32, effect: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity).var_int(effect);
+    w.buf
+}
+
 /// `ClientboundContainerSetDataPacket`: свойство окна (прогресс печи).
 pub fn container_set_data(id: i32, window: i32, property: i16, value: i16) -> Vec<u8> {
     let mut w = Writer::new();

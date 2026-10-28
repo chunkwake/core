@@ -74,6 +74,11 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
                 + " op=" + p.isOp() + " kit=" + p.hasPermission("chunkwake.test.kit"));
         event.getPlayer().sendMessage(Component.text("Welcome to chunkwake, " + event.getPlayer().getName(),
                 NamedTextColor.GOLD));
+        // Эффекты: наложить, затем на следующем тике прочитать из снимка.
+        boolean added = p.addPotionEffect(new org.bukkit.potion.PotionEffect(
+                org.bukkit.potion.PotionEffectType.HASTE, 200, 1));
+        getServer().getScheduler().runTask(this, () -> getLogger().info("effects: " + p.getName() + " added=" + added
+                + " " + p.getActivePotionEffects() + " haste=" + p.hasPotionEffect(org.bukkit.potion.PotionEffectType.HASTE)));
     }
 
     @EventHandler

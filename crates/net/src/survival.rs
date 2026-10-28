@@ -186,7 +186,7 @@ pub fn correct_tool(requires_tool: bool, tool: Option<&Tool>, block: &str) -> bo
 }
 
 /// Прогресс ломки за тик (`BlockBehaviour.getDestroyProgress` и
-/// `Player.getDestroySpeed` без чар и эффектов): ≥ 1 — блок ломается сразу.
+/// `Player.getDestroySpeed` без чар; `dig` — множитель эффектов): ≥ 1 — блок ломается сразу.
 pub fn destroy_progress(
     hardness: f32,
     requires_tool: bool,
@@ -194,11 +194,12 @@ pub fn destroy_progress(
     block: &str,
     in_water: bool,
     on_ground: bool,
+    dig: f32,
 ) -> f32 {
     if hardness == -1.0 {
         return 0.0;
     }
-    let mut speed = tool.map_or(1.0, |t| t.speed(block));
+    let mut speed = tool.map_or(1.0, |t| t.speed(block)) * dig;
     // `submerged_mining_speed` по умолчанию 0.2; в воздухе — в 5 раз медленнее.
     if in_water {
         speed *= 0.2;
@@ -242,6 +243,77 @@ pub struct FoodTick {
     pub starve: Option<f32>,
 }
 
+/// Активный эффект (`MobEffectInstance`): ID в `mob_effect`, усиление,
+/// оставшиеся тики (-1 — бесконечный), показывать ли частицы.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Effect {
+    pub id: i32,
+    pub amplifier: u8,
+    pub duration: i32,
+    pub particles: bool,
+}
+
+impl Effect {
+    /// Флаги пакета `update_mob_effect`: частицы и значок.
+    pub fn flags(&self) -> u8 {
+        if self.particles { 2 | 4 } else { 4 }
+    }
+}
+
+/// Скорость движения игрока без модификаторов (`Player.createAttributes`).
+pub const BASE_MOVEMENT_SPEED: f64 = 0.1;
+
+/// Модификаторы `movement_speed`: бег и эффекты Скорость/Замедление
+/// (`MobEffects`: +20% и −15% от итога за уровень).
+pub fn speed_modifiers(sprinting: bool, speed: Option<u8>, slowness: Option<u8>) -> Vec<(String, f64, i32)> {
+    let mut out = Vec::new();
+    if sprinting {
+        out.push(("minecraft:sprinting".to_owned(), 0.3, 2));
+    }
+    if let Some(a) = speed {
+        out.push(("minecraft:effect.speed".to_owned(), 0.2 * (a as f64 + 1.0), 2));
+    }
+    if let Some(a) = slowness {
+        out.push(("minecraft:effect.slowness".to_owned(), -0.15 * (a as f64 + 1.0), 2));
+    }
+    out
+}
+
+/// Множитель скорости ломки от эффектов (`Player.getDestroySpeed`):
+/// `haste` — сильнейшее из Спешки и Силы источника, `fatigue` — Утомление.
+pub fn dig_multiplier(haste: Option<u8>, fatigue: Option<u8>) -> f32 {
+    let mut m = haste.map_or(1.0, |a| 1.0 + (a as f32 + 1.0) * 0.2);
+    if let Some(a) = fatigue {
+        m *= match a {
+            0 => 0.3,
+            1 => 0.09,
+            2 => 0.0027,
+            _ => 8.1e-4,
+        };
+    }
+    m
+}
+
+/// `MobEffectInstance.update`: сильнее заменяет, равный по силе продлевает.
+/// `false` — не применён (уже есть сильнее или дольше).
+pub fn add_effect(effects: &mut Vec<Effect>, e: Effect) -> bool {
+    match effects.iter_mut().find(|x| x.id == e.id) {
+        Some(x) => {
+            let longer = x.duration != -1 && (e.duration == -1 || e.duration > x.duration);
+            if e.amplifier > x.amplifier || (e.amplifier == x.amplifier && longer) {
+                *x = e;
+                true
+            } else {
+                false
+            }
+        }
+        None => {
+            effects.push(e);
+            true
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Vitals {
     pub health: f32,
@@ -256,6 +328,7 @@ pub struct Vitals {
     /// Счётчик тиков регенерации или голодания.
     food_timer: u32,
     pub dead: bool,
+    pub effects: Vec<Effect>,
 }
 
 impl Default for Vitals {
@@ -271,6 +344,7 @@ impl Default for Vitals {
             exhaustion: 0.0,
             food_timer: 0,
             dead: false,
+            effects: Vec::new(),
         }
     }
 }
@@ -332,6 +406,32 @@ impl Vitals {
     }
 
     /// Тик сервера (`FoodData.tick`): трата сытости, регенерация, голодание.
+    /// Тик эффектов: убывание длительности; возвращает ID истёкших.
+    pub fn tick_effects(&mut self) -> Vec<i32> {
+        let mut gone = Vec::new();
+        self.effects.retain_mut(|e| {
+            if e.duration > 0 {
+                e.duration -= 1;
+            }
+            let alive = e.duration != 0;
+            if !alive {
+                gone.push(e.id);
+            }
+            alive
+        });
+        gone
+    }
+
+    /// Новый эффект (`MobEffectInstance.update`): сильнее заменяет, равный продлевает.
+    /// `false` — не применён (уже есть сильнее или дольше).
+    pub fn add_effect(&mut self, e: Effect) -> bool {
+        add_effect(&mut self.effects, e)
+    }
+
+    pub fn effect(&self, id: i32) -> Option<&Effect> {
+        self.effects.iter().find(|e| e.id == id)
+    }
+
     pub fn tick(&mut self, difficulty: Difficulty) -> FoodTick {
         let mut out = FoodTick::default();
         if self.dead {
@@ -421,6 +521,8 @@ pub struct PlayerSave {
     pub slots: Vec<(usize, Stack)>,
     /// Режим игры (`GameType`); `None` — режим сервера.
     pub game_mode: Option<u8>,
+    /// Активные эффекты (`active_effects`).
+    pub effects: Vec<Effect>,
 }
 
 /// Живое состояние игрока в сессии: инвентарь и здоровье.
@@ -445,6 +547,7 @@ impl PlayerState {
         st.vitals.food = s.food.clamp(0, MAX_FOOD);
         st.vitals.saturation = s.saturation.clamp(0.0, st.vitals.food as f32);
         st.vitals.exhaustion = s.exhaustion.clamp(0.0, 40.0);
+        st.vitals.effects = s.effects.clone();
         st
     }
 
@@ -460,6 +563,7 @@ impl PlayerState {
             exhaustion: v.exhaustion,
             selected: self.inv.selected,
             game_mode: self.game_mode,
+            effects: v.effects.clone(),
             slots: (0..SLOTS)
                 .filter_map(|i| self.inv.slots[i].map(|s| (i, s)))
                 .collect(),
@@ -490,7 +594,7 @@ mod tests {
             }],
         };
         let stone = |tool, water, ground| {
-            destroy_progress(1.5, true, tool, "minecraft:stone", water, ground)
+            destroy_progress(1.5, true, tool, "minecraft:stone", water, ground, 1.0)
         };
         // Камень рукой — 7.5 с, деревянной киркой — 1.15 с (23 тика).
         assert_eq!(ticks(stone(None, false, true)), 150);
@@ -506,13 +610,17 @@ mod tests {
                 None,
                 "minecraft:dirt",
                 false,
-                true
+                true,
+                1.0
             )),
             15
         );
-        assert!(destroy_progress(0.0, false, None, "minecraft:short_grass", false, true) >= 1.0);
+        assert!(destroy_progress(0.0, false, None, "minecraft:short_grass", false, true, 1.0) >= 1.0);
+        // Спешка II — ×1.4, Утомление I — ×0.3.
+        assert!((dig_multiplier(Some(1), None) - 1.4).abs() < 1e-6);
+        assert!((dig_multiplier(None, Some(0)) - 0.3).abs() < 1e-6);
         assert_eq!(
-            destroy_progress(-1.0, false, None, "minecraft:bedrock", false, true),
+            destroy_progress(-1.0, false, None, "minecraft:bedrock", false, true, 1.0),
             0.0
         );
         assert!(!correct_tool(true, None, "minecraft:stone"));

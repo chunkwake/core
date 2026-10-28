@@ -108,6 +108,9 @@ struct Ids {
     sb_player_command: i32,
     sb_use_item: i32,
     commands: i32,
+    update_mob_effect: i32,
+    update_attributes: i32,
+    remove_mob_effect: i32,
     sb_chat_command: i32,
     sb_chat_command_signed: i32,
 }
@@ -494,6 +497,10 @@ pub struct SurvivalData {
     pub menu_furnace: [i32; 3],
     /// Состояние печи → то же с переключённым `lit`.
     pub furnace_lit: HashMap<u32, u32>,
+    /// Эффекты по имени (`minecraft:haste`) в реестре `mob_effect`.
+    pub effects: HashMap<String, i32>,
+    /// ID `minecraft:movement_speed` в реестре `attribute`.
+    pub attribute_speed: i32,
     /// Ориентация ставимых блоков.
     pub placement: crate::placement::Placement,
     /// Нужен ли правильный инструмент для дропа, по состоянию блока.
@@ -605,6 +612,9 @@ impl PlayPlan {
                 sb_player_command: sb("player_command")?,
                 sb_use_item: sb("use_item")?,
                 commands: cb("commands")?,
+                update_mob_effect: cb("update_mob_effect")?,
+                update_attributes: cb("update_attributes")?,
+                remove_mob_effect: cb("remove_mob_effect")?,
                 sb_chat_command: sb("chat_command")?,
                 sb_chat_command_signed: sb("chat_command_signed")?,
             },
@@ -865,12 +875,12 @@ impl PlayPlan {
     /// Снимок игрока для плагинов (формат — [`Live::render`]); `None` — не онлайн.
     pub fn player_state(&self, uuid: Uuid) -> Option<String> {
         let live = self.live.lock().unwrap().get(&uuid)?.clone();
-        Some(live.render(|id| Some(self.item_name(id).to_owned())))
+        Some(live.render(|id| Some(self.item_name(id).to_owned()), |id| self.effect_name(id)))
     }
 
     /// Команда плагина сессии игрока (формат — [`Control::parse`]).
     pub fn player_control(&self, uuid: Uuid, line: &str) -> bool {
-        let Some(c) = Control::parse(line, |n| self.item_id(n)) else {
+        let Some(c) = Control::parse(line, |n| self.item_id(n), |n| self.survival.effects.get(n).copied()) else {
             return false;
         };
         if let Some(l) = self.live.lock().unwrap().get_mut(&uuid) {
@@ -883,8 +893,18 @@ impl PlayPlan {
             .is_some_and(|tx| tx.send(c).is_ok())
     }
 
-    /// Запрос плагина к миру: `get x y z` → имя блока, `set x y z имя` → `1`/`0`.
+    fn effect_name(&self, id: i32) -> Option<String> {
+        self.survival.effects.iter().find(|(_, v)| **v == id).map(|(k, _)| k.clone())
+    }
+
+    /// Запрос плагина к миру: `get x y z` → имя блока, `set x y z имя` → `1`/`0`,
+    /// `effects` → эффекты по порядку ID (строки).
     pub fn world_request(&self, line: &str) -> String {
+        if line == "effects" {
+            let mut all: Vec<(&i32, &String)> = self.survival.effects.iter().map(|(k, v)| (v, k)).collect();
+            all.sort();
+            return all.into_iter().map(|(_, k)| k.as_str()).collect::<Vec<_>>().join("\n");
+        }
         let mut it = line.split_whitespace();
         let cmd = it.next();
         let mut n = || it.next().and_then(|s| s.parse::<i32>().ok());
@@ -923,6 +943,7 @@ impl PlayPlan {
             pos,
             yaw,
             pitch,
+            effects: v.effects.clone(),
         };
         self.live.lock().unwrap().insert(uuid, live);
     }
@@ -1052,6 +1073,43 @@ impl PlayPlan {
                         vec![],
                     )],
                 )],
+            ),
+            // effect give <цель> <эффект> [секунды] [усиление] | effect clear [цель] [эффект]
+            Node::literal(
+                "effect",
+                false,
+                vec![
+                    Node::literal(
+                        "give",
+                        false,
+                        vec![Node::argument(
+                            "targets",
+                            false,
+                            Parser::Word,
+                            vec![Node::argument(
+                                "effect",
+                                true,
+                                Parser::Resource("minecraft:mob_effect"),
+                                vec![Node::argument(
+                                    "seconds",
+                                    true,
+                                    Parser::Integer(1, 1_000_000),
+                                    vec![Node::argument("amplifier", true, Parser::Integer(0, 255), vec![])],
+                                )],
+                            )],
+                        )],
+                    ),
+                    Node::literal(
+                        "clear",
+                        true,
+                        vec![Node::argument(
+                            "targets",
+                            true,
+                            Parser::Word,
+                            vec![Node::argument("effect", true, Parser::Resource("minecraft:mob_effect"), vec![])],
+                        )],
+                    ),
+                ],
             ),
             // gamemode <режим>
             Node::literal(
@@ -1866,6 +1924,12 @@ impl PlayPlan {
         ))
         .await?;
         self.send_health(conn, &state.vitals).await?;
+        for e in &state.vitals.effects {
+            conn.send(&inv::update_mob_effect(ids.update_mob_effect, me.entity_id, e.id, e.amplifier as i32, e.duration, e.flags())).await?;
+        }
+        if state.vitals.effects.iter().any(|e| self.moves_speed(e.id)) {
+            self.send_speed(conn, me.entity_id, &state.vitals).await?;
+        }
         let mut pending: Option<(i64, Instant)> = None;
         // Ломка (`ServerPlayerGameMode`): тики сессии, текущий блок и отложенная
         // ломка (клиент закончил раньше, чем позволяет прогресс).
@@ -1947,6 +2011,25 @@ impl PlayPlan {
                             if let Some(w) = window.as_mut().filter(|w| w.positions().contains(&pos)) {
                                 w.slots = self.window_slots(w);
                                 self.send_window(conn, &mut state.inv, window.as_ref(), window.as_ref().map_or(0, |w| w.id)).await?;
+                            }
+                        }
+                        Control::Effect(e) => {
+                            if state.vitals.add_effect(e) {
+                                conn.send(&inv::update_mob_effect(ids.update_mob_effect, me.entity_id, e.id, e.amplifier as i32, e.duration, e.flags())).await?;
+                                if self.moves_speed(e.id) {
+                                    self.send_speed(conn, me.entity_id, &state.vitals).await?;
+                                }
+                            }
+                        }
+                        Control::ClearEffect(which) => {
+                            let gone: Vec<i32> = state.vitals.effects.iter().map(|e| e.id).filter(|&id| which.is_none_or(|w| w == id)).collect();
+                            state.vitals.effects.retain(|e| !gone.contains(&e.id));
+                            let speed = gone.iter().any(|&id| self.moves_speed(id));
+                            for id in gone {
+                                conn.send(&inv::remove_mob_effect(ids.remove_mob_effect, me.entity_id, id)).await?;
+                            }
+                            if speed {
+                                self.send_speed(conn, me.entity_id, &state.vitals).await?;
                             }
                         }
                         Control::Teleport(pos, yaw, pitch) => {
@@ -2032,6 +2115,13 @@ impl PlayPlan {
                             self.send_health(conn, &state.vitals).await?;
                             conn.send(&inv::entity_event(ids.entity_event, me.entity_id, inv::ENTITY_EVENT_USE_ITEM_COMPLETE)).await?;
                         }
+                    }
+                    let expired = state.vitals.tick_effects();
+                    for &id in &expired {
+                        conn.send(&inv::remove_mob_effect(ids.remove_mob_effect, me.entity_id, id)).await?;
+                    }
+                    if expired.iter().any(|&id| self.moves_speed(id)) {
+                        self.send_speed(conn, me.entity_id, &state.vitals).await?;
                     }
                     let t = state.vitals.tick(self.survival.difficulty);
                     if let Some(d) = t.starve {
@@ -2496,7 +2586,7 @@ impl PlayPlan {
                         // Встроенные без прав — как неизвестные (ванила их не показывает).
                         let builtin = line.split(' ').next().unwrap_or("");
                         let allowed = self.op_level(uuid) >= builtin_level(builtin);
-                        let is_builtin = matches!(builtin, "give" | "gamemode" | "op" | "deop");
+                        let is_builtin = matches!(builtin, "give" | "gamemode" | "op" | "deop" | "effect");
                         if is_builtin && allowed && let Some(name) = line.strip_prefix("op ").or(line.strip_prefix("deop ")) {
                             let msg = self.op_command(name.trim(), builtin == "op");
                             conn.send(&text::system_chat_json(ids.system_chat, &msg.to_string(), false)).await?;
@@ -2525,6 +2615,11 @@ impl PlayPlan {
                             }
                             self.set_game_mode(conn, uuid, mode, true).await?;
                             self.send_health(conn, &state.vitals).await?;
+                            continue;
+                        }
+                        if builtin == "effect" {
+                            let msg = self.effect_command(uuid, &line);
+                            conn.send(&text::system_chat_json(ids.system_chat, &msg.to_string(), false)).await?;
                             continue;
                         }
                         if let Some(args) = line.strip_prefix("give ") {
@@ -2626,6 +2721,9 @@ impl PlayPlan {
             let name = self.state_name(self.block(eye).unwrap_or(AIR));
             name == "minecraft:water" || name == "minecraft:bubble_column"
         });
+        let amp = |name: &str| self.survival.effects.get(name).and_then(|&id| v.effect(id)).map(|e| e.amplifier);
+        let haste = amp("minecraft:haste").max(amp("minecraft:conduit_power"));
+        let dig = survival::dig_multiplier(haste, amp("minecraft:mining_fatigue"));
         survival::destroy_progress(
             hardness,
             requires,
@@ -2633,6 +2731,7 @@ impl PlayPlan {
             self.state_name(state),
             in_water,
             v.on_ground(),
+            dig,
         )
     }
 
@@ -3386,6 +3485,91 @@ impl PlayPlan {
             return Ok(());
         }
         conn.send_frames(&out).await
+    }
+
+    /// Цели команды: `@s`/`@p` — сам, `@a` — все, иначе имя игрока.
+    fn targets(&self, me: Uuid, token: &str) -> Vec<(Uuid, String)> {
+        let players = self.hub.players.lock().unwrap();
+        let all = players.iter().map(|(id, p)| (*id, p.entry.name.clone()));
+        match token {
+            "@s" | "@p" => all.filter(|(id, _)| *id == me).collect(),
+            "@a" => all.collect(),
+            name => all.filter(|(_, n)| n.eq_ignore_ascii_case(name)).collect(),
+        }
+    }
+
+    /// `/effect give <цель> <эффект> [секунды] [усиление]`, `/effect clear [цель] [эффект]`.
+    fn effect_command(&self, me: Uuid, line: &str) -> serde_json::Value {
+        let usage = serde_json::json!({
+            "text": "Usage: /effect give <targets> <effect> [seconds] [amplifier] | /effect clear [targets] [effect]",
+            "color": "red",
+        });
+        let mut it = line.split_whitespace().skip(1);
+        let sub = it.next().unwrap_or("");
+        let targets = self.targets(me, it.next().unwrap_or("@s"));
+        let effect = it.next().map(|e| if e.contains(':') { e.to_owned() } else { format!("minecraft:{e}") });
+        let id = match effect.as_deref() {
+            Some(name) => match self.survival.effects.get(name) {
+                Some(&id) => Some(id),
+                None => return serde_json::json!({"translate": "argument.resource.not_found", "with": [name, "minecraft:mob_effect"], "color": "red"}),
+            },
+            None => None,
+        };
+        if targets.is_empty() {
+            return serde_json::json!({"translate": "argument.entity.notfound.player", "color": "red"});
+        }
+        let effect_name = effect.as_deref().map(|e| serde_json::json!({"translate": format!("effect.{}", e.replace(':', "."))}));
+        let controls = self.controls.lock().unwrap();
+        let send = |c: Control| {
+            for (t, _) in &targets {
+                if let Some(tx) = controls.get(t) {
+                    let _ = tx.send(c.clone());
+                }
+            }
+        };
+        let one = (targets.len() == 1).then(|| targets[0].1.clone());
+        match sub {
+            "give" => {
+                let Some(id) = id else { return usage };
+                let seconds = it.next().map_or(Some(30), |s| s.parse::<i32>().ok().filter(|&s| (1..=1_000_000).contains(&s)));
+                let amplifier = it.next().map_or(Some(0), |s| s.parse::<u8>().ok());
+                let (Some(seconds), Some(amplifier)) = (seconds, amplifier) else { return usage };
+                send(Control::Effect(survival::Effect { id, amplifier, duration: seconds * 20, particles: true }));
+                match one {
+                    Some(n) => serde_json::json!({"translate": "commands.effect.give.success.single", "with": [effect_name, n]}),
+                    None => serde_json::json!({"translate": "commands.effect.give.success.multiple", "with": [effect_name, targets.len()]}),
+                }
+            }
+            "clear" => {
+                send(Control::ClearEffect(id));
+                match (effect_name, one) {
+                    (Some(e), Some(n)) => serde_json::json!({"translate": "commands.effect.clear.specific.success.single", "with": [e, n]}),
+                    (Some(e), None) => serde_json::json!({"translate": "commands.effect.clear.specific.success.multiple", "with": [e, targets.len()]}),
+                    (None, Some(n)) => serde_json::json!({"translate": "commands.effect.clear.everything.success.single", "with": [n]}),
+                    (None, None) => serde_json::json!({"translate": "commands.effect.clear.everything.success.multiple", "with": [targets.len()]}),
+                }
+            }
+            _ => usage,
+        }
+    }
+
+    /// Скорость движения у клиента (эффекты Скорость/Замедление; клиент сам их не применяет).
+    async fn send_speed(&self, conn: &mut Connection, entity: i32, v: &Vitals) -> Result<(), NetError> {
+        let amp = |name: &str| self.survival.effects.get(name).and_then(|&id| v.effect(id)).map(|e| e.amplifier);
+        let mods = survival::speed_modifiers(v.sprinting, amp("minecraft:speed"), amp("minecraft:slowness"));
+        conn.send(&inv::update_attribute(
+            self.ids.update_attributes,
+            entity,
+            self.survival.attribute_speed,
+            survival::BASE_MOVEMENT_SPEED,
+            &mods,
+        ))
+        .await
+    }
+
+    /// Меняет ли эффект скорость движения.
+    fn moves_speed(&self, id: i32) -> bool {
+        ["minecraft:speed", "minecraft:slowness"].iter().any(|n| self.survival.effects.get(*n) == Some(&id))
     }
 
     async fn send_health(&self, conn: &mut Connection, v: &Vitals) -> Result<(), NetError> {

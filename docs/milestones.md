@@ -14,7 +14,8 @@
   - Ориентация при установке (`getStateForPlacement`): оси брёвен, `facing` по взгляду/грани, верх/низ ступеней и люков, плиты и их слияние, настенные факелы/таблички/флаги, кнопки и рычаги, фонари, двери, высокие растения и кровати целиком (ломаются обе половины).
   - Соединения заборов, стен, стёкол и решёток (`CrossCollisionBlock`, `WallBlock`): по прочным граням соседей (`isFaceSturdy`, 6-я колонка `light.csv`, кэш v8), калиткам и тегу `walls`; пересчёт при установке и ломке.
   - Петли дверей (`DoorBlock.getHinge`) и форма рельсов (`RailState`): прямые, повороты, подъёмы, соседи перестраиваются к новому рельсу.
-  - Дальше: чары и эффекты в скорости ломки, мобы.
+  - Эффекты: `/effect give|clear` (цели `@s`, `@a`, имя), таймеры, `update_mob_effect`/`remove_mob_effect`, Спешка/Сила источника/Утомление в скорости ломки, сброс при смерти. Сохраняются в `playerdata` (`active_effects`); Скорость/Замедление — через `update_attributes`. Плагины: `addPotionEffect(s)`, `removePotionEffect`, `getActivePotionEffects`, `hasPotionEffect`, `clearActivePotionEffects`, `EntityPotionEffectEvent` (PLUGIN), реестр `Registry.EFFECT`.
+  - Дальше: компоненты предметов (чары, имена) — нужны для «Эффективности» и `ItemMeta` плагинов; мобы.
 - **M6 — расширение API.** Покрытие Bukkit API по приоритету популярных плагинов: LuckPerms, Vault, EssentialsX, WorldEdit/FAWE, WorldGuard, PlaceholderAPI, ProtocolLib/PacketEvents (отдельный слой эмуляции packet API).
 - **M7 — генерация мира, редстоун, остальная ванила** (итеративно, по фич-матрице).
 - **M8 — производительность и стабильность.** Профилирование, нагрузочные тесты, fuzzing протокола, длительные soak-тесты.

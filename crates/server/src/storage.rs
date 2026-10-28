@@ -58,6 +58,7 @@ impl WorldStorage {
         template: ChunkColumn,
         light: Arc<LightTable>,
         items: HashMap<String, i32>,
+        effects: HashMap<String, i32>,
     ) -> Self {
         let biome_ids = biomes
             .iter()
@@ -66,7 +67,7 @@ impl WorldStorage {
             .collect();
         Self {
             store: RegionStore::new(world_dir.join("region")),
-            players: PlayerFiles::new(world_dir, data_version, items),
+            players: PlayerFiles::new(world_dir, data_version, items, effects),
             template,
             light,
             format: Format {

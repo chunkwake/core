@@ -215,9 +215,9 @@ public final class Bridge {
     static String world(String line) {
         try (Arena a = Arena.ofConfined()) {
             byte[] b = line.getBytes(StandardCharsets.UTF_8);
-            MemorySegment out = a.allocate(256);
+            MemorySegment out = a.allocate(8192);
             int n = (int) world.invokeExact(a.allocateFrom(java.lang.foreign.ValueLayout.JAVA_BYTE, b), b.length,
-                    out, 256);
+                    out, 8192);
             return string(out, n);
         } catch (Throwable t) {
             throw new IllegalStateException(t);

@@ -194,6 +194,8 @@ pub struct CommandParsers {
     pub integer: i32,
     /// `minecraft:item_stack`: клиент сам подсказывает предметы из реестра.
     pub item_stack: i32,
+    /// `minecraft:resource` (ключ из реестра, например эффект).
+    pub resource: i32,
 }
 
 /// Узел дерева Brigadier. `exec` — команду можно выполнить на этом узле.
@@ -221,6 +223,10 @@ pub enum Parser {
     /// Целое с минимумом и максимумом.
     Integer(i32, i32),
     ItemStack,
+    /// Одно слово (`brigadier:string`, `SINGLE_WORD`).
+    Word,
+    /// Ключ реестра (`minecraft:resource`), например `minecraft:mob_effect`.
+    Resource(&'static str),
 }
 
 impl Node {
@@ -315,6 +321,12 @@ pub fn commands_tree(id: i32, roots: &[Node], parsers: CommandParsers) -> Vec<u8
                     }
                     Parser::ItemStack => {
                         w.var_int(parsers.item_stack);
+                    }
+                    Parser::Word => {
+                        w.var_int(parsers.string).var_int(0);
+                    }
+                    Parser::Resource(registry) => {
+                        w.var_int(parsers.resource).string(registry);
                     }
                 }
             }
@@ -445,6 +457,7 @@ mod tests {
                 string: 5,
                 integer: 3,
                 item_stack: 7,
+                resource: 8,
             },
         );
         let want: Vec<u8> = [

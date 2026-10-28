@@ -34,12 +34,14 @@ pub struct Live {
     pub pos: [f64; 3],
     pub yaw: f32,
     pub pitch: f32,
+    pub effects: Vec<crate::survival::Effect>,
 }
 
 impl Live {
     /// Первая строка — `health food saturation exhaustion mode selected x y z yaw pitch`, затем
-    /// [`BUKKIT_SLOTS`] строк `item count` (или `-`) в порядке Bukkit.
-    pub fn render(&self, item_name: impl Fn(i32) -> Option<String>) -> String {
+    /// [`BUKKIT_SLOTS`] строк `item count` (или `-`) в порядке Bukkit, затем эффекты
+    /// строками `e имя усиление тики частицы(0/1)`.
+    pub fn render(&self, item_name: impl Fn(i32) -> Option<String>, effect_name: impl Fn(i32) -> Option<String>) -> String {
         let [x, y, z] = self.pos;
         let mut out = format!(
             "{} {} {} {} {} {} {x} {y} {z} {} {}",
@@ -58,6 +60,11 @@ impl Live {
             match stack.and_then(|s| item_name(s.item).map(|n| (n, s.count))) {
                 Some((name, count)) => out += &format!("{name} {count}"),
                 None => out.push('-'),
+            }
+        }
+        for e in &self.effects {
+            if let Some(name) = effect_name(e.id) {
+                out += &format!("\ne {name} {} {} {}", e.amplifier, e.duration, e.particles as u8);
             }
         }
         out
@@ -82,12 +89,22 @@ pub enum Control {
     ContainerChanged([i32; 3]),
     /// Внутреннее: тик печи — свойства окна и сменились ли предметы.
     Furnace([i32; 3], [i32; 4], bool),
+    /// Наложить эффект.
+    Effect(crate::survival::Effect),
+    /// Снять эффект (`None` — все).
+    ClearEffect(Option<i32>),
 }
 
 impl Control {
+    #[cfg(test)]
+    fn parse_t(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<Self> {
+        Self::parse(line, item_id, |n| (n == "minecraft:haste").then_some(2))
+    }
+
     /// Разбор строки от JVM: `health 10`, `food 20`, `mode 1`,
-    /// `slot <bukkit> <item> <count>` или `slot <bukkit> -`, `held 3`.
-    pub fn parse(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<Self> {
+    /// `slot <bukkit> <item> <count>` или `slot <bukkit> -`, `held 3`,
+    /// `effect <имя> <усиление> <тики> <частицы 0/1>`, `uneffect <имя>|*`.
+    pub fn parse(line: &str, item_id: impl Fn(&str) -> Option<i32>, effect_id: impl Fn(&str) -> Option<i32>) -> Option<Self> {
         let mut it = line.split_whitespace();
         let f = |s: Option<&str>| {
             s.and_then(|s| s.parse::<f32>().ok())
@@ -104,6 +121,17 @@ impl Control {
                 let pos = [n()?, n()?, n()?];
                 Control::Teleport(pos, n()? as f32, n()? as f32)
             }
+            "effect" => {
+                let id = effect_id(it.next()?)?;
+                let amplifier = it.next()?.parse::<u8>().ok()?;
+                let duration = it.next()?.parse::<i32>().ok().filter(|&d| d == -1 || d > 0)?;
+                let particles = it.next().is_none_or(|p| p != "0");
+                Control::Effect(crate::survival::Effect { id, amplifier, duration, particles })
+            }
+            "uneffect" => match it.next()? {
+                "*" => Control::ClearEffect(None),
+                name => Control::ClearEffect(Some(effect_id(name)?)),
+            },
             "held" => Control::Selected(it.next()?.parse::<usize>().ok().filter(|&s| s <= 8)?),
             "slot" => {
                 let window = bukkit_to_window(it.next()?.parse().ok()?)?;
@@ -139,6 +167,10 @@ impl Control {
                 live.yaw = yaw;
                 live.pitch = pitch;
             }
+            Control::Effect(e) => {
+                crate::survival::add_effect(&mut live.effects, e);
+            }
+            Control::ClearEffect(which) => live.effects.retain(|e| which.is_some_and(|w| w != e.id)),
             Control::ContainerChanged(_) | Control::Furnace(..) => {}
         }
     }
@@ -238,31 +270,40 @@ mod tests {
             pos: [1.0, 64.0, -2.5],
             yaw: 90.0,
             pitch: 0.0,
+            effects: Vec::new(),
         };
-        let c = Control::parse("slot 0 minecraft:bread 3", ids).unwrap();
+        let c = Control::parse_t("slot 0 minecraft:bread 3", ids).unwrap();
         assert_eq!(c, Control::Slot(36, Some(Stack { item: 2, count: 3 , damage: 0})));
         c.apply(&mut live);
-        Control::parse("health 7.5", ids).unwrap().apply(&mut live);
+        Control::parse_t("health 7.5", ids).unwrap().apply(&mut live);
         let names = |id| match id {
             2 => Some("minecraft:bread".to_owned()),
             _ => None,
         };
-        let text = live.render(names);
+        let text = live.render(names, |_| None);
+        // Эффекты: наложить в зеркало, снять все.
+        Control::parse_t("effect minecraft:haste 1 200 0", ids).unwrap().apply(&mut live);
+        assert_eq!(live.effects, vec![crate::survival::Effect { id: 2, amplifier: 1, duration: 200, particles: false }]);
+        assert!(live.render(names, |_| Some("minecraft:haste".into())).ends_with("
+e minecraft:haste 1 200 0"));
+        Control::parse_t("uneffect *", ids).unwrap().apply(&mut live);
+        assert!(live.effects.is_empty());
+        assert_eq!(Control::parse_t("effect minecraft:nope 0 20", ids), None);
         let mut lines = text.lines();
         assert_eq!(lines.next(), Some("7.5 20 5 0 0 0 1 64 -2.5 90 0"));
         assert_eq!(lines.next(), Some("minecraft:bread 3"));
         assert_eq!(text.lines().count(), 1 + BUKKIT_SLOTS);
         assert_eq!(
-            Control::parse("slot 3 -", ids),
+            Control::parse_t("slot 3 -", ids),
             Some(Control::Slot(39, None))
         );
-        assert_eq!(Control::parse("mode 9", ids), None);
+        assert_eq!(Control::parse_t("mode 9", ids), None);
         assert_eq!(
-            Control::parse("tp 1 2.5 3 90 -10", ids),
+            Control::parse_t("tp 1 2.5 3 90 -10", ids),
             Some(Control::Teleport([1.0, 2.5, 3.0], 90.0, -10.0))
         );
-        assert_eq!(Control::parse("tp 1 NaN 3 0 0", ids), None);
-        assert_eq!(Control::parse("slot 0 minecraft:nope 1", ids), None);
+        assert_eq!(Control::parse_t("tp 1 NaN 3 0 0", ids), None);
+        assert_eq!(Control::parse_t("slot 0 minecraft:nope 1", ids), None);
     }
 
     #[test]

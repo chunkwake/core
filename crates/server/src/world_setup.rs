@@ -126,6 +126,7 @@ pub fn build_play_plan(
                 string: parser("brigadier:string")?,
                 integer: parser("brigadier:integer")?,
                 item_stack: parser("minecraft:item_stack")?,
+                resource: parser("minecraft:resource")?,
             }
         },
         survival: survival_data(data_dir, &blocks, &items, registries, props.difficulty)?,
@@ -141,6 +142,7 @@ pub fn build_play_plan(
         chunk,
         light,
         items,
+        chunkwake_data::registries::builtin_entries(data_dir, "mob_effect").map_err(s)?,
     );
     Ok((plan, storage))
 }
@@ -218,6 +220,8 @@ fn survival_data(
         menu_crafting: menu("minecraft:crafting")?,
         menu_furnace: [menu("minecraft:furnace")?, menu("minecraft:blast_furnace")?, menu("minecraft:smoker")?],
         furnace_lit,
+        effects: chunkwake_data::registries::builtin_entries(data_dir, "mob_effect").map_err(s)?,
+        attribute_speed: chunkwake_data::registries::builtin_id(data_dir, "attribute", "minecraft:movement_speed").map_err(s)?,
         placement: chunkwake_net::placement::Placement::new(
             (0..blocks.state_count() as u32)
                 .map(|id| blocks.state(id).map(|(n, p)| (n.to_owned(), p.to_vec())))

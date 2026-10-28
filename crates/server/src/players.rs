@@ -1,7 +1,7 @@
 //! Игроки на диске: `<level-name>/playerdata/<uuid>.dat` (gzip NBT, как у ванилы).
 
 use chunkwake_net::Uuid;
-use chunkwake_net::survival::PlayerSave;
+use chunkwake_net::survival::{Effect, PlayerSave};
 use chunkwake_protocol::inventory::Stack;
 use chunkwake_world::nbt::{self, Compound, Tag};
 use std::collections::HashMap;
@@ -23,10 +23,12 @@ pub struct PlayerFiles {
     data_version: i32,
     item_names: Vec<String>,
     item_ids: HashMap<String, i32>,
+    /// Реестр `mob_effect`: имя → ID.
+    effects: HashMap<String, i32>,
 }
 
 impl PlayerFiles {
-    pub fn new(world_dir: &Path, data_version: i32, item_ids: HashMap<String, i32>) -> Self {
+    pub fn new(world_dir: &Path, data_version: i32, item_ids: HashMap<String, i32>, effects: HashMap<String, i32>) -> Self {
         let mut item_names =
             vec![String::new(); item_ids.values().max().map_or(0, |&m| m as usize + 1)];
         for (name, &id) in &item_ids {
@@ -37,6 +39,7 @@ impl PlayerFiles {
             data_version,
             item_names,
             item_ids,
+            effects,
         }
     }
 
@@ -48,17 +51,58 @@ impl PlayerFiles {
         let Some(root) = nbt::read_gzip_file(&self.path(uuid))? else {
             return Ok(None);
         };
-        Ok(from_nbt(&root, &self.item_ids))
+        let mut s = from_nbt(&root, &self.item_ids);
+        if let Some(s) = s.as_mut() {
+            s.effects = effects_from(&root, &self.effects);
+        }
+        Ok(s)
     }
 
     pub fn save(&self, uuid: Uuid, s: &PlayerSave) -> Result<(), String> {
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| format!("create {}: {e}", self.dir.display()))?;
-        nbt::write_gzip_file(
-            &self.path(uuid),
-            &to_nbt(s, self.data_version, &self.item_names),
-        )
+        let mut root = to_nbt(s, self.data_version, &self.item_names);
+        let names: HashMap<i32, &String> = self.effects.iter().map(|(n, &id)| (id, n)).collect();
+        let list: Vec<Tag> = s
+            .effects
+            .iter()
+            .filter_map(|e| {
+                Some(Tag::Compound(Compound::from([
+                    ("id".into(), Tag::String((*names.get(&e.id)?).clone())),
+                    ("amplifier".into(), Tag::Byte(e.amplifier as i8)),
+                    ("duration".into(), Tag::Int(e.duration)),
+                    ("ambient".into(), Tag::Byte(0)),
+                    ("show_particles".into(), Tag::Byte(e.particles as i8)),
+                    ("show_icon".into(), Tag::Byte(1)),
+                ])))
+            })
+            .collect();
+        if !list.is_empty() {
+            root.insert("active_effects".into(), Tag::List(list));
+        }
+        nbt::write_gzip_file(&self.path(uuid), &root)
     }
+}
+
+/// `active_effects` ванилы (`MobEffectInstance.CODEC`).
+fn effects_from(root: &Compound, ids: &HashMap<String, i32>) -> Vec<Effect> {
+    root.get("active_effects")
+        .and_then(Tag::as_list)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|t| {
+            let c = t.as_compound()?;
+            let id = *ids.get(c.get("id")?.as_str()?)?;
+            let int = |k: &str| c.get(k).and_then(Tag::as_i64);
+            Some(Effect {
+                id,
+                amplifier: int("amplifier").unwrap_or(0).clamp(0, 255) as u8,
+                duration: int("duration").unwrap_or(0) as i32,
+                particles: int("show_particles").unwrap_or(1) != 0,
+            })
+        })
+        .filter(|e| e.duration != 0)
+        .collect()
 }
 
 fn stack_nbt(s: Stack, names: &[String]) -> Option<Compound> {
@@ -190,6 +234,7 @@ pub fn from_nbt(root: &Compound, ids: &HashMap<String, i32>) -> Option<PlayerSav
             .and_then(Tag::as_i64)
             .filter(|m| (0..4).contains(m))
             .map(|m| m as u8),
+        effects: Vec::new(),
     })
 }
 
@@ -218,6 +263,7 @@ mod tests {
             exhaustion: 1.25,
             selected: 3,
             game_mode: Some(1),
+            effects: Vec::new(),
             slots: vec![
                 (5, Stack { item: 1, count: 1 , damage: 0}),
                 (10, Stack { item: 1, count: 64 , damage: 0}),
