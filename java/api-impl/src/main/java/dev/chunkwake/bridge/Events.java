@@ -90,6 +90,23 @@ final class Events {
                 plugins.callEvent(e);
                 yield e.isCancelled() ? "c" : "";
             }
+            case Bridge.EVENT_INVENTORY_CLICK -> inventoryClick(plugins, p, arg);
+            case Bridge.EVENT_INVENTORY_CLOSE -> {
+                p.inventoryClosed(Integer.parseInt(arg.trim()));
+                yield "";
+            }
+            case Bridge.EVENT_SHOOT_BOW -> {
+                // оружие снаряд сила рука тратить
+                String[] f = arg.split(" ");
+                boolean consume = f.length < 5 || f[4].equals("1");
+                var bow = new ItemStack(org.bukkit.Material.matchMaterial(f[0]));
+                var ammo = new ItemStack(org.bukkit.Material.matchMaterial(f[1]));
+                var e = new org.bukkit.event.entity.EntityShootBowEvent(p.api, bow, ammo,
+                        Stub.of(org.bukkit.entity.Arrow.class, new ArrowImpl(p.api.getEyeLocation())),
+                        org.bukkit.inventory.EquipmentSlot.valueOf(f[3]), Float.parseFloat(f[2]), consume);
+                plugins.callEvent(e);
+                yield e.isCancelled() ? "c" : e.shouldConsumeItem() != consume ? (e.shouldConsumeItem() ? "1" : "0") : "";
+            }
             case Bridge.EVENT_POTION -> potion(plugins, p, arg);
             case Bridge.EVENT_PREPARE_ENCHANT -> prepareEnchant(plugins, p, arg);
             case Bridge.EVENT_ENCHANT -> enchant(plugins, p, arg);
@@ -455,6 +472,83 @@ final class Events {
     }
 
     /** Сущность-предмет для событий выброса и подбора. */
+    /** {@code InventoryClickEvent}: {@code тип окно размер слот кнопка режим\nтекущий\nкурсор}. */
+    private static String inventoryClick(PluginManager plugins, PlayerImpl p, String arg) {
+        String[] l = arg.split("\n", -1);
+        String[] f = l[0].split(" ");
+        var type = org.bukkit.event.inventory.InventoryType.valueOf(f[0]);
+        int pid = Integer.parseInt(f[1]), size = Integer.parseInt(f[2]);
+        int raw = Integer.parseInt(f[3]), button = Integer.parseInt(f[4]), mode = Integer.parseInt(f[5]);
+        ItemStack cur = l.length > 1 && !l[1].equals("-") ? StackImpl.parse(l[1]) : null;
+        ItemStack cursor = l.length > 2 && !l[2].equals("-") ? StackImpl.parse(l[2]) : null;
+        ViewImpl view = pid > 0 ? p.viewFor(pid) : null;
+        if (view == null) {
+            view = type == org.bukkit.event.inventory.InventoryType.CRAFTING ? p.craftingView()
+                    : new ViewImpl(p, ViewImpl.blockTop(p, type, size), type, net.kyori.adventure.text.Component.translatable(
+                            "container." + type.name().toLowerCase(java.util.Locale.ROOT)));
+        }
+        view.clicked(raw, cur, cursor);
+        boolean outside = raw == -999;
+        org.bukkit.event.inventory.ClickType click;
+        org.bukkit.event.inventory.InventoryAction action;
+        int key = -1;
+        switch (mode) {
+            case 0 -> {
+                click = outside
+                        ? (button == 0 ? org.bukkit.event.inventory.ClickType.WINDOW_BORDER_LEFT : org.bukkit.event.inventory.ClickType.WINDOW_BORDER_RIGHT)
+                        : (button == 0 ? org.bukkit.event.inventory.ClickType.LEFT : org.bukkit.event.inventory.ClickType.RIGHT);
+                if (outside) {
+                    action = cursor == null ? org.bukkit.event.inventory.InventoryAction.NOTHING
+                            : button == 0 ? org.bukkit.event.inventory.InventoryAction.DROP_ALL_CURSOR
+                            : org.bukkit.event.inventory.InventoryAction.DROP_ONE_CURSOR;
+                } else if (cursor == null) {
+                    action = cur == null ? org.bukkit.event.inventory.InventoryAction.NOTHING
+                            : button == 0 ? org.bukkit.event.inventory.InventoryAction.PICKUP_ALL
+                            : org.bukkit.event.inventory.InventoryAction.PICKUP_HALF;
+                } else if (cur == null || cur.isSimilar(cursor)) {
+                    action = button == 0 ? org.bukkit.event.inventory.InventoryAction.PLACE_ALL
+                            : org.bukkit.event.inventory.InventoryAction.PLACE_ONE;
+                } else {
+                    action = org.bukkit.event.inventory.InventoryAction.SWAP_WITH_CURSOR;
+                }
+            }
+            case 1 -> {
+                click = button == 0 ? org.bukkit.event.inventory.ClickType.SHIFT_LEFT : org.bukkit.event.inventory.ClickType.SHIFT_RIGHT;
+                action = cur == null ? org.bukkit.event.inventory.InventoryAction.NOTHING
+                        : org.bukkit.event.inventory.InventoryAction.MOVE_TO_OTHER_INVENTORY;
+            }
+            case 2 -> {
+                click = button == 40 ? org.bukkit.event.inventory.ClickType.SWAP_OFFHAND : org.bukkit.event.inventory.ClickType.NUMBER_KEY;
+                key = button == 40 ? -1 : button;
+                action = org.bukkit.event.inventory.InventoryAction.HOTBAR_SWAP;
+            }
+            case 3 -> {
+                click = org.bukkit.event.inventory.ClickType.MIDDLE;
+                action = org.bukkit.event.inventory.InventoryAction.CLONE_STACK;
+            }
+            case 4 -> {
+                click = button == 0 ? org.bukkit.event.inventory.ClickType.DROP : org.bukkit.event.inventory.ClickType.CONTROL_DROP;
+                action = cur == null ? org.bukkit.event.inventory.InventoryAction.NOTHING
+                        : button == 0 ? org.bukkit.event.inventory.InventoryAction.DROP_ONE_SLOT
+                        : org.bukkit.event.inventory.InventoryAction.DROP_ALL_SLOT;
+            }
+            case 6 -> {
+                click = org.bukkit.event.inventory.ClickType.DOUBLE_CLICK;
+                action = org.bukkit.event.inventory.InventoryAction.COLLECT_TO_CURSOR;
+            }
+            default -> {
+                click = org.bukkit.event.inventory.ClickType.UNKNOWN;
+                action = org.bukkit.event.inventory.InventoryAction.UNKNOWN;
+            }
+        }
+        var slotType = view.getSlotType(raw);
+        var e = key >= 0
+                ? new org.bukkit.event.inventory.InventoryClickEvent(view.api, slotType, raw, click, action, key)
+                : new org.bukkit.event.inventory.InventoryClickEvent(view.api, slotType, raw, click, action);
+        plugins.callEvent(e);
+        return e.isCancelled() ? "c" : "";
+    }
+
     /** Воткнутая стрела для {@code PlayerPickupArrowEvent}. */
     record ArrowImpl(Location location) {
         public Location getLocation() { return location.clone(); }

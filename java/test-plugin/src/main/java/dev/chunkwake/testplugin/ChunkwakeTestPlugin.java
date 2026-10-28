@@ -121,6 +121,24 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
     private int hopperMoves, hopperPickups;
 
     @EventHandler
+    public void onMenuClose(org.bukkit.event.inventory.InventoryCloseEvent e) {
+        getLogger().info("menu closed: " + e.getPlayer().getName() + " size=" + e.getInventory().getSize());
+    }
+
+    @EventHandler
+    public void onMenuClick(org.bukkit.event.inventory.InventoryClickEvent e) {
+        getLogger().info("menu click: " + e.getRawSlot() + " " + e.getClick() + " " + e.getAction() + " " + e.getCurrentItem());
+        if (e.getView().getTopInventory().getSize() == 18 && e.getRawSlot() < 18) {
+            e.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onShootBow(org.bukkit.event.entity.EntityShootBowEvent e) {
+        getLogger().info("shoot: " + e.getBow().getType() + " " + e.getConsumable().getType() + " force=" + e.getForce() + " " + e.getHand());
+    }
+
+    @EventHandler
     public void onDispense(org.bukkit.event.block.BlockDispenseEvent e) {
         getLogger().info("dispense: " + e.getItem().getType() + " at " + e.getBlock().getX());
     }
@@ -191,6 +209,23 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
                 + " op=" + p.isOp() + " kit=" + p.hasPermission("chunkwake.test.kit"));
         event.getPlayer().sendMessage(Component.text("Welcome to chunkwake, " + event.getPlayer().getName(),
                 NamedTextColor.GOLD));
+        // Окно плагина: создать, наполнить, открыть, прочитать вид, закрыть.
+        getServer().getScheduler().runTaskLater(this, () -> {
+            var menu = getServer().createInventory(null, 18, Component.text("Test menu"));
+            menu.setItem(4, new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND, 3));
+            var left = menu.addItem(new org.bukkit.inventory.ItemStack(org.bukkit.Material.STONE, 70));
+            var view = p.openInventory(menu);
+            getLogger().info("menu: open=" + (view != null) + " top=" + p.getOpenInventory().getTopInventory().getSize()
+                    + " slot4=" + menu.getItem(4).getType() + "x" + menu.getItem(4).getAmount()
+                    + " first=" + menu.getItem(0).getAmount() + "+" + menu.getItem(1).getAmount() + " left=" + left.size()
+                    + " viewers=" + menu.getViewers().size());
+            getServer().getScheduler().runTaskLater(this, () -> p.closeInventory(), 5);
+            var sharp = org.bukkit.enchantments.Enchantment.SHARPNESS;
+            getLogger().info("enchant rules: sword=" + sharp.canEnchantItem(new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND_SWORD))
+                    + " boots=" + sharp.canEnchantItem(new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND_BOOTS))
+                    + " smite=" + sharp.conflictsWith(org.bukkit.enchantments.Enchantment.SMITE)
+                    + " unbreaking=" + sharp.conflictsWith(org.bukkit.enchantments.Enchantment.UNBREAKING));
+        }, 20);
         // Эффекты: наложить, затем на следующем тике прочитать из снимка.
         boolean added = p.addPotionEffect(new org.bukkit.potion.PotionEffect(
                 org.bukkit.potion.PotionEffectType.HASTE, 200, 1));

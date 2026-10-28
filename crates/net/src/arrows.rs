@@ -48,6 +48,8 @@ pub struct Arrow {
     pierced_n: u8,
     /// Попадание в сущность закончило полёт.
     pub stopped: bool,
+    /// `PickupStatus.CREATIVE_ONLY`: стрела Бесконечности или креатива — не подбирается.
+    pub creative_only: bool,
 }
 
 impl Arrow {
@@ -69,6 +71,7 @@ impl Arrow {
             pierced: [0; 4],
             pierced_n: 0,
             stopped: false,
+            creative_only: false,
         }
     }
 }

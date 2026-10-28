@@ -407,7 +407,8 @@ public final class Registries implements RegistryAccess {
     /**
      * {@link org.bukkit.enchantments.Enchantment} по данным {@code data/minecraft/enchantment}:
      * {@code имя макс вес наковальня мин_база мин_шаг макс_база макс_шаг сокровище проклятие}.
-     * Совместимость с предметами и исключения пока не проверяются.
+     * Предметы ({@code supported_items}) и несовместимые чары ({@code exclusive_set}) —
+     * запросом {@code enchantinfo} при первой проверке.
      */
     static final class EnchantmentImpl extends org.bukkit.enchantments.Enchantment {
         private final NamespacedKey key;
@@ -436,8 +437,51 @@ public final class Registries implements RegistryAccess {
         }
         @Override public boolean isTreasure() { return treasure; }
         @Override public boolean isCursed() { return curse; }
-        @Override public boolean conflictsWith(org.bukkit.enchantments.Enchantment other) { return false; }
-        @Override public boolean canEnchantItem(ItemStack item) { return item != null && !item.isEmpty(); }
+        private java.util.Set<String> supported, exclusive;
+
+        private synchronized void info() {
+            if (supported == null) {
+                String[] l = Bridge.world("enchantinfo " + key).split("\n", -1);
+                supported = words(l.length > 0 ? l[0] : "");
+                exclusive = words(l.length > 1 ? l[1] : "");
+            }
+        }
+
+        private static java.util.Set<String> words(String s) {
+            return s.isBlank() ? java.util.Set.of() : java.util.Set.of(s.trim().split(" "));
+        }
+
+        /** {@code Enchantment.areCompatible}: та же или из {@code exclusive_set} одной из двух. */
+        @Override public boolean conflictsWith(org.bukkit.enchantments.Enchantment other) {
+            if (other == null) {
+                return false;
+            }
+            if (other.getKey().equals(key)) {
+                return true;
+            }
+            info();
+            if (exclusive.contains(other.getKey().toString())) {
+                return true;
+            }
+            return other instanceof EnchantmentImpl o && (o.info0().contains(key.toString()));
+        }
+
+        private java.util.Set<String> info0() {
+            info();
+            return exclusive;
+        }
+
+        /** {@code Enchantment.canEnchant}: предмет из {@code supported_items} (книга — всегда). */
+        @Override public boolean canEnchantItem(ItemStack item) {
+            if (item == null || item.isEmpty()) {
+                return false;
+            }
+            if (item.getType() == org.bukkit.Material.BOOK || item.getType() == org.bukkit.Material.ENCHANTED_BOOK) {
+                return true;
+            }
+            info();
+            return supported.contains(item.getType().getKey().toString());
+        }
         /** Как {@code Enchantment.getFullname}: проклятия красные, уровень римскими при макс > 1. */
         @Override public net.kyori.adventure.text.Component displayName(int level) {
             net.kyori.adventure.text.Component c = description().color(curse

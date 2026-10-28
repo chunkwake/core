@@ -124,6 +124,10 @@ pub enum Control {
     },
     /// Опыт: `xp points|levels|level|setpoints|progress|total <число>`.
     Xp(crate::xp::XpChange),
+    /// Открыть окно плагина: `open <id> <заголовок JSON>`.
+    OpenPlugin(i32, String),
+    /// Закрыть открытое окно (`closewin`).
+    CloseWindow,
 }
 
 impl Control {
@@ -208,6 +212,12 @@ impl Control {
                 };
                 Control::ClearEffect { id, command: false }
             }
+            "open" => {
+                let id = it.next()?.parse::<i32>().ok()?;
+                let title = line.trim_start().splitn(3, char::is_whitespace).nth(2)?.trim();
+                Control::OpenPlugin(id, title.to_owned())
+            }
+            "closewin" => Control::CloseWindow,
             "held" => Control::Selected(it.next()?.parse::<usize>().ok().filter(|&s| s <= 8)?),
             "slot" => {
                 let window = bukkit_to_window(it.next()?.parse().ok()?)?;
@@ -253,6 +263,8 @@ impl Control {
                 live.xp.apply(c);
             }
             Control::ContainerChanged(_)
+            | Control::OpenPlugin(..)
+            | Control::CloseWindow
             | Control::Furnace(..)
             | Control::Shutdown
             | Control::Hurt(..) => {}
@@ -320,6 +332,14 @@ pub enum Event {
     Bucket = 23,
     /// `PlayerPickupArrowEvent`: `x y z` воткнутой стрелы → `c` или пусто.
     PickupArrow = 24,
+    /// `EntityShootBowEvent`: `оружие снаряд сила рука тратить(1|0)` → `c`, пусто
+    /// или `1`/`0` — плагин сменил `setConsumeItem`.
+    ShootBow = 25,
+    /// `InventoryClickEvent`: `тип окно размер слот кнопка режим\nтекущий\nкурсор`
+    /// (окно — id инвентаря плагина или -1, стопки — строки или `-`) → `c` или пусто.
+    InventoryClick = 26,
+    /// `InventoryCloseEvent` окна плагина: `id` (без ответа).
+    InventoryClose = 27,
 }
 
 impl Event {

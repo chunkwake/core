@@ -163,6 +163,64 @@ final class PlayerImpl {
     }
 
     public PlayerInventory getInventory() { return inventory.api; }
+
+    /** Открытое окно плагина (null — своё окно игрока или окно блока). */
+    private volatile ViewImpl openView;
+    private volatile PluginInventory openInv;
+
+    public org.bukkit.inventory.InventoryView openInventory(org.bukkit.inventory.Inventory inv) {
+        if (!(Stub.impl(inv) instanceof PluginInventory pi)) {
+            if (inv == inventory.api) {
+                return getOpenInventory();
+            }
+            throw new UnsupportedOperationException("chunkwake: openInventory " + inv.getType());
+        }
+        ViewImpl view = new ViewImpl(this, inv, pi.type, pi.title);
+        var e = new org.bukkit.event.inventory.InventoryOpenEvent(view.api);
+        server.api.getPluginManager().callEvent(e);
+        if (e.isCancelled()) {
+            return null;
+        }
+        Component title = e.titleOverride() != null ? e.titleOverride() : pi.title;
+        openView = view;
+        openInv = pi;
+        pi.viewers.add(api);
+        control("open " + pi.id + " " + GsonComponentSerializer.gson().serialize(title));
+        return view.api;
+    }
+
+    public org.bukkit.inventory.InventoryView getOpenInventory() {
+        ViewImpl v = openView;
+        return v != null ? v.api : craftingView().api;
+    }
+
+    ViewImpl craftingView() {
+        return new ViewImpl(this, ViewImpl.blockTop(this, org.bukkit.event.inventory.InventoryType.CRAFTING, 5),
+                org.bukkit.event.inventory.InventoryType.CRAFTING, Component.translatable("container.crafting"));
+    }
+
+    /** Вид для события клика: открытое окно плагина, если клик в нём. */
+    ViewImpl viewFor(int pluginInv) {
+        ViewImpl v = openView;
+        PluginInventory pi = openInv;
+        return v != null && pi != null && pi.id == pluginInv ? v : null;
+    }
+
+    public void closeInventory() { control("closewin"); }
+    public void closeInventory(org.bukkit.event.inventory.InventoryCloseEvent.Reason reason) { closeInventory(); }
+
+    /** Rust закрыл окно плагина {@code id}: событие и сброс вида. */
+    void inventoryClosed(int id) {
+        ViewImpl v = openView;
+        PluginInventory pi = openInv;
+        if (v == null || pi == null || pi.id != id) {
+            return;
+        }
+        openView = null;
+        openInv = null;
+        pi.viewers.remove(api);
+        server.api.getPluginManager().callEvent(new org.bukkit.event.inventory.InventoryCloseEvent(v.api));
+    }
     public ItemStack getItemOnCursor() { return new StackImpl(org.bukkit.Material.AIR, 0); }
     public double getHealth() { return state().health(); }
     public double getMaxHealth() { return 20.0; }

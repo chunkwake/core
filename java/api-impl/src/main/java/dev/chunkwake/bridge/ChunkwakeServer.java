@@ -180,14 +180,25 @@ final class ChunkwakeServer {
     /** Событие с ответом из Rust (формат — {@link Events}). */
     String event(int kind, UUID id, String arg) {
         if (kind == Bridge.EVENT_REDSTONE) {
-            // Без игрока: x y z старая новая → новая сила, если плагин её сменил.
-            String[] f = arg.split(" ");
-            int now = Integer.parseInt(f[4]);
-            var e = new org.bukkit.event.block.BlockRedstoneEvent(
-                    world.getBlockAt(Integer.parseInt(f[0]), Integer.parseInt(f[1]), Integer.parseInt(f[2])),
-                    Integer.parseInt(f[3]), now);
-            api.getPluginManager().callEvent(e);
-            return e.getNewCurrent() == now ? "" : Integer.toString(e.getNewCurrent());
+            // Без игрока, пачкой через `;`: x y z старая новая → новая сила по
+            // каждому (пусто — плагин не менял).
+            String[] items = arg.split(";", -1);
+            StringBuilder out = new StringBuilder();
+            for (int i = 0; i < items.length; i++) {
+                String[] f = items[i].split(" ");
+                int now = Integer.parseInt(f[4]);
+                var e = new org.bukkit.event.block.BlockRedstoneEvent(
+                        world.getBlockAt(Integer.parseInt(f[0]), Integer.parseInt(f[1]), Integer.parseInt(f[2])),
+                        Integer.parseInt(f[3]), now);
+                api.getPluginManager().callEvent(e);
+                if (i > 0) {
+                    out.append(';');
+                }
+                if (e.getNewCurrent() != now) {
+                    out.append(e.getNewCurrent());
+                }
+            }
+            return out.toString();
         }
         if (kind >= Bridge.EVENT_MOVE_ITEM && kind <= Bridge.EVENT_DISPENSE) {
             return BlockEvents.fire(api.getPluginManager(), world, kind, arg);
@@ -283,6 +294,25 @@ final class ChunkwakeServer {
     // --- Server ---
 
     public String getName() { return "Chunkwake"; }
+
+    public org.bukkit.inventory.Inventory createInventory(org.bukkit.inventory.InventoryHolder h, int size) {
+        return PluginInventory.create(h, org.bukkit.event.inventory.InventoryType.CHEST, size, null);
+    }
+    public org.bukkit.inventory.Inventory createInventory(org.bukkit.inventory.InventoryHolder h, int size, String title) {
+        return PluginInventory.create(h, org.bukkit.event.inventory.InventoryType.CHEST, size, legacy(title));
+    }
+    public org.bukkit.inventory.Inventory createInventory(org.bukkit.inventory.InventoryHolder h, int size, Component title) {
+        return PluginInventory.create(h, org.bukkit.event.inventory.InventoryType.CHEST, size, title);
+    }
+    public org.bukkit.inventory.Inventory createInventory(org.bukkit.inventory.InventoryHolder h, org.bukkit.event.inventory.InventoryType t) {
+        return PluginInventory.create(h, t, t.getDefaultSize(), null);
+    }
+    public org.bukkit.inventory.Inventory createInventory(org.bukkit.inventory.InventoryHolder h, org.bukkit.event.inventory.InventoryType t, String title) {
+        return PluginInventory.create(h, t, t.getDefaultSize(), legacy(title));
+    }
+    public org.bukkit.inventory.Inventory createInventory(org.bukkit.inventory.InventoryHolder h, org.bukkit.event.inventory.InventoryType t, Component title) {
+        return PluginInventory.create(h, t, t.getDefaultSize(), title);
+    }
 
     public org.bukkit.block.data.BlockData createBlockData(org.bukkit.Material m) {
         return BlockDataImpl.parse(Bridge.world("defaultdata " + m.getKey()));

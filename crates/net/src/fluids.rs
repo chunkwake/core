@@ -206,6 +206,29 @@ impl Ctx<'_> {
         !solidish && (0..6).all(|f| !self.pl.sturdy(s, f))
     }
 
+    /// `canPassThroughWall`: грань между `p` и соседом по `d` не закрыта
+    /// ни одним из блоков (заводнённая ступень не льёт сквозь спинку).
+    fn wall_open(&self, p: [i32; 3], d: usize) -> bool {
+        let (a, b) = ((self.at)(p), (self.at)(add(p, d)));
+        if self.pl.sturdy(a, d) || self.pl.sturdy(b, d ^ 1) {
+            return false;
+        }
+        // `mergedFaceOccludes`: нижняя и верхняя половины боковой грани вместе — целая.
+        !matches!((self.half(a, d), self.half(b, d)), (Some(x), Some(y)) if x != y)
+    }
+
+    /// Боковая грань плиты: `Some(true)` — верхняя половина, `Some(false)` — нижняя.
+    fn half(&self, s: u32, d: usize) -> Option<bool> {
+        if d < 2 || !self.name(s).ends_with("_slab") {
+            return None;
+        }
+        match self.pl.prop(s, "type")? {
+            "top" => Some(true),
+            "bottom" => Some(false),
+            _ => None,
+        }
+    }
+
     /// `isSourceBlockOfThisType`.
     fn own_source(&self, p: [i32; 3], kind: Kind) -> bool {
         self.fluid(p).is_some_and(|f| f.kind == kind && f.source)
@@ -235,7 +258,10 @@ impl Ctx<'_> {
         let mut max = 0u8;
         let mut sources = 0;
         for d in SIDES {
-            if let Some(f) = self.fluid(add(p, d)).filter(|f| f.kind == kind) {
+            if let Some(f) = self
+                .fluid(add(p, d))
+                .filter(|f| f.kind == kind && self.wall_open(p, d))
+            {
                 if f.source {
                     sources += 1;
                 }
@@ -251,7 +277,7 @@ impl Ctx<'_> {
                 return Some(Fluid::source(kind));
             }
         }
-        if self.fluid(add(p, 1)).is_some_and(|f| f.kind == kind) {
+        if self.wall_open(p, 1) && self.fluid(add(p, 1)).is_some_and(|f| f.kind == kind) {
             return Some(Fluid::flowing(kind, 8, true));
         }
         let k = max.saturating_sub(kind.drop_off());
@@ -266,8 +292,8 @@ impl Ctx<'_> {
                 continue;
             }
             let rel = add(p, d);
-            if self.passes(rel, kind) {
-                if self.hole(add(rel, 0), kind) {
+            if self.wall_open(p, d) && self.passes(rel, kind) {
+                if self.wall_open(rel, 0) && self.hole(add(rel, 0), kind) {
                     return depth;
                 }
                 if depth < kind.slope() {
@@ -284,13 +310,13 @@ impl Ctx<'_> {
         let mut out = Vec::new();
         for d in SIDES {
             let rel = add(p, d);
-            if !self.passes(rel, kind) {
+            if !self.wall_open(p, d) || !self.passes(rel, kind) {
                 continue;
             }
             let Some(nf) = self.new_liquid(rel, kind) else {
                 continue;
             };
-            let dist = if self.hole(add(rel, 0), kind) {
+            let dist = if self.wall_open(rel, 0) && self.hole(add(rel, 0), kind) {
                 0
             } else {
                 self.slope(rel, 1, d ^ 1, kind)
@@ -370,7 +396,7 @@ impl Ctx<'_> {
         }
         // `spread`: сперва вниз, потом в стороны.
         let below = add(p, 0);
-        if self.passes(below, f.kind) && self.replaceable(below, f.kind, 0) {
+        if self.wall_open(p, 0) && self.passes(below, f.kind) && self.replaceable(below, f.kind, 0) {
             let falling = Fluid::flowing(f.kind, 8, true);
             self.spread_to(&mut out, below, 0, falling);
             let sources = SIDES
@@ -382,7 +408,7 @@ impl Ctx<'_> {
             }
             return out;
         }
-        if f.source || !self.hole(below, f.kind) {
+        if f.source || !(self.wall_open(p, 0) && self.hole(below, f.kind)) {
             self.sides(&mut out, p, f);
         }
         out
@@ -514,9 +540,28 @@ mod tests {
         )));
         ids.insert("top".to_owned(), states.len() as u32);
         states.push(Some(("minecraft:stone_slab".to_owned(), Vec::new())));
+        ids.insert("back".to_owned(), states.len() as u32);
+        states.push(Some((
+            "minecraft:stone_stairs".to_owned(),
+            vec![("waterlogged".to_owned(), "true".to_owned())],
+        )));
+        for (k, t) in [("low", "bottom"), ("high", "top")] {
+            ids.insert(k.to_owned(), states.len() as u32);
+            states.push(Some((
+                "minecraft:oak_slab".to_owned(),
+                vec![
+                    ("type".to_owned(), t.to_owned()),
+                    ("waterlogged".to_owned(), "true".to_owned()),
+                ],
+            )));
+        }
         let mut sturdy = vec![0u8; states.len()];
         sturdy[1] = 63;
         sturdy[ids["top"] as usize] = 1 << 1;
+        // Спинка ступени — на восток, низ целый.
+        sturdy[ids["back"] as usize] = 1 | 1 << 5;
+        sturdy[ids["low"] as usize] = 1;
+        sturdy[ids["high"] as usize] = 1 << 1;
         (Placement::new(states, sturdy, Default::default()), ids)
     }
 
@@ -619,6 +664,35 @@ mod tests {
             [1, 2, 3, 4].map(|l| id[&format!("water{l}")])
         );
         assert_eq!(lvl([33, 199, 5]), id["water8"]);
+    }
+
+    #[test]
+    fn waterlogged_respects_faces() {
+        let (pl, id) = table();
+        let w = HashMap::from([([0, 0, 0], id["back"])]);
+        let at = |p: [i32; 3]| w.get(&p).copied().unwrap_or(0);
+        let ch = Ctx { pl: &pl, at: &at }.tick([0, 0, 0]);
+        let to: Vec<[i32; 3]> = ch
+            .iter()
+            .filter_map(|c| match c {
+                Change::Set { pos, .. } => Some(*pos),
+                _ => None,
+            })
+            .collect();
+        // Вниз нельзя (целый низ), на восток — спинка; остальные стороны текут.
+        assert!(!to.contains(&[0, -1, 0]) && !to.contains(&[1, 0, 0]), "{to:?}");
+        assert!(to.contains(&[-1, 0, 0]), "{to:?}");
+    }
+
+    #[test]
+    fn opposite_slab_halves_close_the_face() {
+        let (pl, id) = table();
+        // Заводнённая нижняя плита, к востоку — верхняя: вместе грань закрыта.
+        let w = HashMap::from([([0, -1, 0], id["stone"]), ([0, 0, 0], id["low"]), ([1, 0, 0], id["high"])]);
+        let at = |p: [i32; 3]| w.get(&p).copied().unwrap_or(0);
+        let ctx = Ctx { pl: &pl, at: &at };
+        assert!(!ctx.wall_open([0, 0, 0], 5));
+        assert!(ctx.wall_open([0, 0, 0], 4));
     }
 
     #[test]

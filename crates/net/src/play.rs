@@ -136,6 +136,9 @@ pub struct PlayPlan {
     saved: Mutex<HashMap<(i32, i32), u64>>,
     /// Изменения блоков текущего тика: секция → (локальный индекс, состояние).
     pending_blocks: Mutex<PendingBlocks>,
+    /// Правка мира целиком (установка с формой и сигналом, тик редстоуна):
+    /// рассылка не видит промежуточных состояний, иначе клиент мигает.
+    world_edit: Mutex<()>,
     light: Arc<LightTable>,
     /// Ленивая загрузка с диска: источник и уже прочитанные регионы.
     source: std::sync::OnceLock<Arc<dyn ChunkSource>>,
@@ -171,6 +174,9 @@ pub struct PlayPlan {
     redstone_ticks: Mutex<Vec<([i32; 3], u64)>>,
     /// Летящие и воткнутые стрелы по id сущности.
     arrows: Mutex<HashMap<i32, crate::arrows::Arrow>>,
+    /// Инвентари плагинов (`Bukkit.createInventory`) по номеру.
+    plugin_invs: Mutex<HashMap<i32, PluginInv>>,
+    next_plugin_inv: std::sync::atomic::AtomicI32,
     /// Отложенные тики жидкостей (`FlowingFluid`): место и тик.
     fluid_ticks: Mutex<Vec<([i32; 3], u64)>>,
     /// Переключения факелов за последние тики — для перегорания.
@@ -247,70 +253,6 @@ impl LightAccess for WorldLight<'_> {
                 .or_insert_with(|| (template.clone(), 0))
                 .0,
         )
-    }
-}
-
-/// Окрестность 3×3: свет одного блока не уходит дальше соседнего чанка.
-fn around_chunk(key: (i32, i32)) -> impl Iterator<Item = (i32, i32)> {
-    (-1..=1).flat_map(move |dx| (-1..=1).map(move |dz| (key.0 + dx, key.1 + dz)))
-}
-
-/// Столбцы и номера правок, которые BFS может прочитать.
-struct Neighborhood {
-    revs: HashMap<(i32, i32), u64>,
-    columns: HashMap<(i32, i32), ChunkColumn>,
-}
-
-fn snapshot_neighborhood(
-    world: &HashMap<(i32, i32), (ChunkColumn, u64)>,
-    key: (i32, i32),
-) -> Neighborhood {
-    let mut snap = Neighborhood {
-        revs: HashMap::new(),
-        columns: HashMap::new(),
-    };
-    for pos in around_chunk(key) {
-        if let Some((column, rev)) = world.get(&pos) {
-            snap.revs.insert(pos, *rev);
-            snap.columns.insert(pos, column.clone());
-        }
-    }
-    snap
-}
-
-fn neighborhood_same(
-    world: &HashMap<(i32, i32), (ChunkColumn, u64)>,
-    key: (i32, i32),
-    revs: &HashMap<(i32, i32), u64>,
-) -> bool {
-    around_chunk(key).all(|pos| world.get(&pos).map(|e| e.1) == revs.get(&pos).copied())
-}
-
-/// Тот же BFS, что под замком, но на копии столбцов.
-struct Spread {
-    columns: HashMap<(i32, i32), ChunkColumn>,
-    touched: HashSet<(i32, i32)>,
-}
-
-fn spread_light(
-    columns: HashMap<(i32, i32), ChunkColumn>,
-    template: &ChunkColumn,
-    light: &LightTable,
-    height: usize,
-    at: [i32; 3],
-) -> Spread {
-    let mut world: HashMap<_, _> = columns.into_iter().map(|(k, c)| (k, (c, 0u64))).collect();
-    let mut access = WorldLight {
-        world: &mut world,
-        template,
-        touched: HashSet::new(),
-    };
-    Engine::new(&mut access, light, height).block_changed(at);
-    let touched = std::mem::take(&mut access.touched);
-    drop(access);
-    Spread {
-        columns: world.into_iter().map(|(k, (c, _))| (k, c)).collect(),
-        touched,
     }
 }
 
@@ -752,6 +694,21 @@ fn permission_event(id: i32, entity: i32, level: i32) -> Vec<u8> {
 }
 
 /// Открытое окно с блоком мира (сундук, верстак): его слоты без инвентаря игрока.
+/// Инвентарь плагина: слоты и тип меню клиента.
+struct PluginInv {
+    slots: Vec<Slot>,
+    menu: i32,
+}
+
+/// Окно плагина хранится как сундук с условной позицией вне мира.
+fn plugin_pos(id: i32) -> [i32; 3] {
+    [i32::MIN, i32::MIN, id]
+}
+
+fn plugin_of(pos: [i32; 3]) -> Option<i32> {
+    (pos[0] == i32::MIN && pos[1] == i32::MIN).then_some(pos[2])
+}
+
 struct Window {
     id: i32,
     kind: Kind,
@@ -877,6 +834,8 @@ struct OwnedShot {
     punch: i32,
     pierce: i32,
     rocket: bool,
+    /// Стрела не подбирается (Бесконечность, креатив, `setConsumeItem(false)`).
+    creative_only: bool,
 }
 
 fn charged_extra(extra: u32, charged: Vec<Stack>) -> u32 {
@@ -907,6 +866,8 @@ pub struct SurvivalData {
     /// Меню воронки и раздатчика/выбрасывателя (`generic_3x3`).
     pub menu_hopper: i32,
     pub menu_3x3: i32,
+    /// `generic_9x1` … `generic_9x6` для окон плагинов.
+    pub menu_rows: [i32; 6],
     /// Состояния сундуков (`ChestBlock`): свойства по состоянию и обратно.
     pub chests: HashMap<u32, ChestState>,
     pub chest_states: HashMap<ChestState, u32>,
@@ -1086,6 +1047,7 @@ impl PlayPlan {
             edited: Mutex::new(HashMap::new()),
             saved: Mutex::new(HashMap::new()),
             pending_blocks: Mutex::new(HashMap::new()),
+            world_edit: Mutex::new(()),
             light,
             source: std::sync::OnceLock::new(),
             regions: Mutex::new(HashSet::new()),
@@ -1105,6 +1067,8 @@ impl PlayPlan {
             furnaces: Mutex::new(HashMap::new()),
             redstone_ticks: Mutex::new(Vec::new()),
             arrows: Mutex::new(HashMap::new()),
+            plugin_invs: Mutex::new(HashMap::new()),
+            next_plugin_inv: std::sync::atomic::AtomicI32::new(1),
             fluid_ticks: Mutex::new(Vec::new()),
             torch_toggles: Mutex::new(HashMap::new()),
             torch_cool: Mutex::new(HashMap::new()),
@@ -1203,40 +1167,20 @@ impl PlayPlan {
                     }
                 }
             }
-            let snap = {
-                let world = self.edited.lock().unwrap();
-                snapshot_neighborhood(&world, key)
-            };
-            let spread = spread_light(
-                snap.columns,
-                &self.template,
-                &self.light,
-                self.template.height(),
-                [x, ry, z],
-            );
+            // BFS света одного блока короче копии девяти столбцов: прямо под замком.
             let mut world = self.edited.lock().unwrap();
             // Под той же блокировкой: chunk_frame не вставит устаревший кадр.
             let mut frames = self.chunk_frames.lock().unwrap();
-            if neighborhood_same(&world, key, &snap.revs) {
-                write_light(
-                    &mut world,
-                    &mut frames,
-                    key,
-                    Some(spread.columns),
-                    spread.touched,
-                );
-            } else {
-                let mut access = WorldLight {
-                    world: &mut world,
-                    template: &self.template,
-                    touched: HashSet::new(),
-                };
-                Engine::new(&mut access, &self.light, self.template.height())
-                    .block_changed([x, ry, z]);
-                let touched = std::mem::take(&mut access.touched);
-                drop(access);
-                write_light(&mut world, &mut frames, key, None, touched);
-            }
+            let mut access = WorldLight {
+                world: &mut world,
+                template: &self.template,
+                touched: HashSet::new(),
+            };
+            Engine::new(&mut access, &self.light, self.template.height())
+                .block_changed([x, ry, z]);
+            let touched = std::mem::take(&mut access.touched);
+            drop(access);
+            write_light(&mut world, &mut frames, key, None, touched);
         }
         let local = ((x & 15) << 8 | (z & 15) << 4 | (y & 15)) as u16;
         self.pending_blocks
@@ -1476,6 +1420,9 @@ impl PlayPlan {
     /// `effects` → эффекты по порядку ID (строки), `isblock имя` → `1`/`0`,
     /// `blocks с` → имена блоков по порядку начиная с номера `с` (кусок до 7 КБ).
     pub fn world_request(&self, line: &str) -> String {
+        if let Some(rest) = line.strip_prefix("inv ") {
+            return self.plugin_inv_request(rest);
+        }
         // `dropitem x y z разброс предмет`: `World.dropItem(Naturally)`.
         if let Some(rest) = line.strip_prefix("dropitem ") {
             let f: Vec<&str> = rest.splitn(5, ' ').collect();
@@ -1530,6 +1477,18 @@ impl PlayPlan {
                 out.push('\n');
             }
             return out;
+        }
+        // `enchantinfo имя`: предметы `supported_items`, затем `exclusive_set` (через пробел).
+        if let Some(name) = line.strip_prefix("enchantinfo ") {
+            let Some(d) = self.survival.enchanting.defs.iter().find(|d| d.name == name.trim()) else {
+                return String::new();
+            };
+            let join = |set: &HashSet<String>| {
+                let mut v: Vec<&str> = set.iter().map(String::as_str).collect();
+                v.sort_unstable();
+                v.join(" ")
+            };
+            return format!("{}\n{}", join(&d.supported), join(&d.exclusive));
         }
         if line == "enchantments" {
             return self.survival.enchantments.join(
@@ -1629,6 +1588,28 @@ impl PlayPlan {
         })
         .and_then(|r| r.trim().parse::<i32>().ok())
         .map_or(new, |v| v.clamp(0, 15))
+    }
+
+    /// `BlockRedstoneEvent` пачкой — один вызов плагинов на всю сеть проводов.
+    fn redstone_events(&self, changes: &[([i32; 3], i32, i32)]) -> Vec<i32> {
+        let reply = self.sync_event(Event::Redstone, || {
+            changes
+                .iter()
+                .map(|(p, old, new)| format!("{} {} {} {old} {new}", p[0], p[1], p[2]))
+                .collect::<Vec<_>>()
+                .join(";")
+        });
+        let mut parts = reply.as_deref().map(|r| r.split(';'));
+        changes
+            .iter()
+            .map(|&(_, _, new)| {
+                parts
+                    .as_mut()
+                    .and_then(|i| i.next())
+                    .and_then(|v| v.trim().parse::<i32>().ok())
+                    .map_or(new, |v| v.clamp(0, 15))
+            })
+            .collect()
     }
 
     /// Отменено ли событие (`c` в ответе).
@@ -3009,7 +2990,7 @@ impl PlayPlan {
         let arrows = self.arrows.lock().unwrap();
         arrows
             .iter()
-            .filter(|(_, a)| a.stuck && items::in_reach(feet, a.pos))
+            .filter(|(_, a)| a.stuck && !a.creative_only && items::in_reach(feet, a.pos))
             .map(|(&id, a)| (id, a.pos))
             .collect()
     }
@@ -3441,6 +3422,7 @@ impl PlayPlan {
         arrow.punch = shot.punch;
         arrow.pierce = shot.pierce;
         arrow.firework = shot.rocket;
+        arrow.creative_only = shot.creative_only;
         let ty = if shot.rocket {
             self.survival.firework_entity_type
         } else {
@@ -3547,8 +3529,24 @@ impl PlayPlan {
         let plain = ammo.is_none_or(|i| {
             inv.slots[i].is_some_and(|s| self.item_name(s.item) == "minecraft:arrow")
         });
+        let ammo_name = ammo
+            .and_then(|i| inv.slots[i])
+            .map_or("minecraft:arrow", |s| self.item_name(s.item));
+        let Some(consume) = self
+            .shoot_bow_event(
+                uuid,
+                stack.item,
+                ammo_name,
+                power,
+                slot,
+                !creative && !(infinity && plain),
+            )
+            .await
+        else {
+            return self.send_slots(conn, inv, &[slot]).await;
+        };
         let mut changed = vec![slot];
-        if let Some(i) = ammo.filter(|_| !creative && !(infinity && plain)) {
+        if let Some(i) = ammo.filter(|_| consume) {
             inv.consume_at(i);
             changed.push(i);
         }
@@ -3574,6 +3572,7 @@ impl PlayPlan {
             punch,
             pierce: 0,
             rocket: false,
+            creative_only: !consume,
         });
         if !creative && let Some(mut s) = inv.slots[slot] {
             let broke = self.wear_one(&mut s);
@@ -3647,6 +3646,14 @@ impl PlayPlan {
         let Some((feet, yaw, pitch)) = self.player_at(uuid) else {
             return Ok(());
         };
+        // Снаряд арбалета уже потрачен при зарядке: `setConsumeItem` тут ни на что не влияет.
+        if self
+            .shoot_bow_event(uuid, stack.item, self.item_name(loaded[0].item), 1.0, slot, true)
+            .await
+            .is_none()
+        {
+            return self.send_slots(conn, inv, &[slot]).await;
+        }
         let multi =
             chunkwake_protocol::components::stack_level(stack.extra, "minecraft:multishot") > 0;
         let pierce = chunkwake_protocol::components::stack_level(stack.extra, "minecraft:piercing");
@@ -3677,6 +3684,8 @@ impl PlayPlan {
                     punch: 0,
                     pierce: if rocket { 0 } else { pierce },
                     rocket,
+                    // Мультивыстрел: боковые стрелы не подбираются (`Projectile.pickup`).
+                    creative_only: off != 0.0 || mode == 1,
                 });
             }
         }
@@ -3691,6 +3700,178 @@ impl PlayPlan {
         }
         self.player_sound(uuid, "minecraft:item.crossbow.shoot", 1.0, 1.0);
         self.send_slots(conn, inv, &[slot]).await
+    }
+
+    /// `EntityShootBowEvent` перед выстрелом: `None` — плагин отменил,
+    /// иначе тратить ли снаряд (`setConsumeItem`).
+    async fn shoot_bow_event(
+        &self,
+        uuid: Uuid,
+        weapon: i32,
+        ammo: &str,
+        force: f64,
+        slot: usize,
+        consume: bool,
+    ) -> Option<bool> {
+        let hand = if slot == survival::OFFHAND {
+            "OFF_HAND"
+        } else {
+            "HAND"
+        };
+        let weapon = self.item_name(weapon);
+        let c = u8::from(consume);
+        match self
+            .plugin_event(Event::ShootBow, uuid, || {
+                format!("{weapon} {ammo} {force} {hand} {c}")
+            })
+            .await
+            .as_deref()
+            .map(str::trim)
+        {
+            Some("c") => None,
+            Some("1") => Some(true),
+            Some("0") => Some(false),
+            _ => Some(consume),
+        }
+    }
+
+    /// Инвентари плагинов: `new <размер> chest|hopper|dispenser` → номер,
+    /// `get <id>` → строки слотов (`-` — пусто), `set <id> <слот> <стопка|->`.
+    fn plugin_inv_request(&self, line: &str) -> String {
+        let mut it = line.splitn(4, ' ');
+        let cmd = it.next().unwrap_or("");
+        let num = |s: Option<&str>| s.and_then(|v| v.trim().parse::<i32>().ok());
+        match cmd {
+            "new" => {
+                let Some(size) = num(it.next()).filter(|&n| n > 0 && n <= 54) else {
+                    return String::new();
+                };
+                let menu = match it.next().map(str::trim) {
+                    Some("hopper") if size == 5 => self.survival.menu_hopper,
+                    Some("dispenser") if size == 9 => self.survival.menu_3x3,
+                    _ if size % 9 == 0 => self.survival.menu_rows[size as usize / 9 - 1],
+                    _ => return String::new(),
+                };
+                let id = self.next_plugin_inv.fetch_add(1, Ordering::Relaxed);
+                self.plugin_invs.lock().unwrap().insert(
+                    id,
+                    PluginInv {
+                        slots: vec![None; size as usize],
+                        menu,
+                    },
+                );
+                id.to_string()
+            }
+            "get" => {
+                let Some(id) = num(it.next()) else {
+                    return String::new();
+                };
+                let invs = self.plugin_invs.lock().unwrap();
+                let Some(p) = invs.get(&id) else {
+                    return String::new();
+                };
+                p.slots
+                    .iter()
+                    .map(|s| match s {
+                        Some(s) => crate::stack_nbt::to_line(*s, self.item_name(s.item)),
+                        None => "-".to_owned(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            "set" => {
+                let (Some(id), Some(slot), Some(rest)) = (num(it.next()), num(it.next()), it.next())
+                else {
+                    return "0".into();
+                };
+                let stack = match rest.trim() {
+                    "-" => None,
+                    l => match crate::stack_nbt::from_line(l, |n| self.item_id(n)) {
+                        Some(s) => Some(s),
+                        None => return "0".into(),
+                    },
+                };
+                {
+                    let mut invs = self.plugin_invs.lock().unwrap();
+                    let Some(cell) = invs
+                        .get_mut(&id)
+                        .and_then(|p| p.slots.get_mut(slot as usize))
+                    else {
+                        return "0".into();
+                    };
+                    *cell = stack;
+                }
+                let pos = plugin_pos(id);
+                for tx in self.controls.lock().unwrap().values() {
+                    let _ = tx.send(Control::ContainerChanged(pos));
+                }
+                "1".into()
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// Строка стопки для плагинов (`-` — пусто).
+    fn slot_line(&self, s: Slot) -> String {
+        s.map_or_else(
+            || "-".to_owned(),
+            |s| crate::stack_nbt::to_line(s, self.item_name(s.item)),
+        )
+    }
+
+    /// `InventoryClickEvent` до применения клика; `true` — плагин отменил.
+    async fn click_cancelled(
+        &self,
+        uuid: Uuid,
+        inv: &Inventory,
+        window: Option<&Window>,
+        c: &inv::ContainerClick,
+    ) -> bool {
+        if c.mode == 5 || !self.hooks().is_some_and(|h| h.listens(Event::InventoryClick)) {
+            return false;
+        }
+        let (ty, pid, top, current) = if c.window == inv::PLAYER_WINDOW {
+            let cur = usize::try_from(c.slot).ok().and_then(|i| inv.slots.get(i).copied().flatten());
+            ("CRAFTING", -1, 5, cur)
+        } else if let Some(w) = window.filter(|w| w.id == c.window) {
+            let n = w.slots.len();
+            let cur = usize::try_from(c.slot).ok().and_then(|i| {
+                if i < n {
+                    w.slots[i]
+                } else {
+                    inv.slots.get(9 + i - n).copied().flatten()
+                }
+            });
+            let ty = match w.kind {
+                Kind::Chest(5) => "HOPPER",
+                Kind::Chest(9) if plugin_of(w.pos).is_none() => "DISPENSER",
+                Kind::Chest(_) => "CHEST",
+                Kind::Crafting => "WORKBENCH",
+                Kind::Furnace => "FURNACE",
+                Kind::Enchanting => "ENCHANTING",
+                Kind::Player => "CRAFTING",
+            };
+            (ty, plugin_of(w.pos).unwrap_or(-1), n, cur)
+        } else {
+            return false;
+        };
+        let (cur, cursor) = (self.slot_line(current), self.slot_line(inv.carried));
+        self.cancelled(Event::InventoryClick, uuid, || {
+            format!(
+                "{ty} {pid} {top} {} {} {}\n{cur}\n{cursor}",
+                c.slot, c.button, c.mode
+            )
+        })
+        .await
+    }
+
+    /// Закрыть окно; для окна плагина — `InventoryCloseEvent`.
+    async fn close_with_event(&self, inv: &mut Inventory, window: &mut Option<Window>, uuid: Uuid) {
+        if let Some(pid) = window.as_ref().and_then(|w| plugin_of(w.pos)) {
+            self.plugin_event(Event::InventoryClose, uuid, || pid.to_string())
+                .await;
+        }
+        self.close_window(inv, window, uuid);
     }
 
     /// Позиция ног и поворот игрока.
@@ -3734,8 +3915,11 @@ impl PlayPlan {
                 plan.tick_arrows();
                 plan.tick_orbs();
                 plan.tick_furnaces();
-                plan.tick_redstone();
-                plan.flush_blocks();
+                {
+                    let _edit = plan.world_edit.lock().unwrap();
+                    plan.tick_redstone();
+                    plan.flush_blocks();
+                }
                 plan.flush_moves();
                 if let Some(h) = plan.hooks() {
                     h.tick();
@@ -3756,7 +3940,12 @@ impl PlayPlan {
         let ids = self.ids;
         let batch: Vec<BlockItem> = pending
             .into_iter()
-            .map(|([sx, sy, sz], blocks)| {
+            .map(|([sx, sy, sz], mut blocks)| {
+                // Последняя запись позиции побеждает: промежуточные не рассылаются.
+                let mut seen = HashSet::new();
+                blocks.reverse();
+                blocks.retain(|(local, _)| seen.insert(*local));
+                blocks.reverse();
                 let packet = match blocks.as_slice() {
                     [(local, state)] => {
                         let l = *local as i32;
@@ -4088,6 +4277,31 @@ impl PlayPlan {
                             state.inv.slots[w] = s;
                             self.send_slots(conn, &mut state.inv, &[w]).await?;
                             self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
+                        }
+                        Control::OpenPlugin(pid, title) => {
+                            let menu = self.plugin_invs.lock().unwrap().get(&pid).map(|p| (p.slots.len(), p.menu));
+                            if let Some((size, menu)) = menu.filter(|_| !state.vitals.dead) {
+                                if let Some(w) = window.as_ref() {
+                                    conn.send(&inv::container_close(ids.container_close, w.id)).await?;
+                                }
+                                self.close_with_event(&mut state.inv, &mut window, uuid).await;
+                                next_window = next_window % 100 + 1;
+                                let pos = plugin_pos(pid);
+                                let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None };
+                                w.slots = self.window_slots(&w);
+                                let title = serde_json::from_str(&title).unwrap_or_else(|_| serde_json::json!({"translate": "container.chest"}));
+                                conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &title)).await?;
+                                self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
+                                window = Some(w);
+                                self.container_viewers(uuid, &[pos], true);
+                            }
+                        }
+                        Control::CloseWindow => {
+                            if let Some(w) = window.as_ref() {
+                                conn.send(&inv::container_close(ids.container_close, w.id)).await?;
+                                self.close_with_event(&mut state.inv, &mut window, uuid).await;
+                                self.send_inventory(conn, &mut state.inv).await?;
+                            }
                         }
                         Control::Clear => {
                             state.inv.slots = [None; survival::SLOTS];
@@ -4449,6 +4663,10 @@ impl PlayPlan {
                             self.send_inventory(conn, &mut state.inv).await?;
                             continue;
                         }
+                        if self.click_cancelled(uuid, &state.inv, window.as_ref(), &c).await {
+                            self.send_window(conn, &mut state.inv, window.as_ref(), c.window).await?;
+                            continue;
+                        }
                         {
                             let creative = login.spawn.game_mode == 1;
                             let (thrown, resync) = self.click(&mut state.inv, &mut window, &c, creative, uuid);
@@ -4506,7 +4724,7 @@ impl PlayPlan {
                     }
                     if id == ids.sb_container_close {
                         let _id = r.var_int()?;
-                        self.close_window(&mut state.inv, &mut window, uuid);
+                        self.close_with_event(&mut state.inv, &mut window, uuid).await;
                         self.send_inventory(conn, &mut state.inv).await?;
                         self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
                         continue;
@@ -4903,6 +5121,16 @@ impl PlayPlan {
                                     continue;
                                 }
                                 placed = true;
+                                // Провод ставится крестом (`getStateForPlacement`), дальше — форма и сила.
+                                if crate::redstone::is_wire(&name) {
+                                    for k in ["north", "south", "west", "east"] {
+                                        if let Some(m) = self.survival.placement.with_prop(place, k, "side") {
+                                            place = m;
+                                        }
+                                    }
+                                }
+                                // Одна правка: тик не разошлёт промежуточные состояния.
+                                let edit = self.world_edit.lock().unwrap();
                                 self.set_block(target, place);
                                 let sound = crate::sounds::place_sound(&name, |s| self.survival.sounds.contains_key(s));
                                 self.block_sound(Some(uuid), &sound, target, 1.0, 0.8);
@@ -4911,16 +5139,6 @@ impl PlayPlan {
                                 }
                                 // Дверь у включённого рычага сразу открыта (`getStateForPlacement`: `powered`).
                                 self.refresh_openable(target, false);
-                                // Провод ставится крестом (`getStateForPlacement`), дальше — форма и сила.
-                                if crate::redstone::is_wire(&name) {
-                                    let mut n = place;
-                                    for k in ["north", "south", "west", "east"] {
-                                        if let Some(m) = self.survival.placement.with_prop(n, k, "side") {
-                                            n = m;
-                                        }
-                                    }
-                                    self.set_block(target, n);
-                                }
                                 self.redstone_update(&crate::redstone::around(target));
                                 let mut touched = self.update_connections(target);
                                 // Рельсы: форма нового и перестройка соседей (`RailState`).
@@ -4933,6 +5151,7 @@ impl PlayPlan {
                                 if let Some(id) = container_entity(&name) {
                                     self.set_block_entity(target, Some(BlockEntity { id: id.into(), nbt: Default::default() }));
                                 }
+                                drop(edit);
                                 if survival && let Some(i) = hand_slot && state.inv.consume_at(i) {
                                     self.send_slots(conn, &mut state.inv, &[i]).await?;
                                 }
@@ -4945,9 +5164,16 @@ impl PlayPlan {
                                     let s = self.block(p).unwrap_or(AIR);
                                     conn.send(&play::block_update(ids.block_update, p, s as i32)).await?;
                                 }
-                            } else if free && (!in_reach || inside || protected) {
-                                let s = self.block(target).unwrap_or(here);
-                                conn.send(&play::block_update(ids.block_update, target, s as i32)).await?;
+                            } else {
+                                // Отказ: вернуть клиенту настоящие блоки, иначе предсказание
+                                // останется призраком (ваниль шлёт кликнутый блок и цель).
+                                let mut back = vec![u.pos, target];
+                                back.extend(extra.iter().map(|e| e.0));
+                                for p in back {
+                                    if let Some(s) = self.block(p) {
+                                        conn.send(&play::block_update(ids.block_update, p, s as i32)).await?;
+                                    }
+                                }
                             }
                         }
                         if !placed {
@@ -5353,6 +5579,8 @@ impl PlayPlan {
                 .await?;
             return Ok(false);
         }
+        // Одна правка: тик не разошлёт промежуточные состояния соседей.
+        let edit = self.world_edit.lock().unwrap();
         let Some(old) = self.set_block(pos, AIR) else {
             return Ok(false);
         };
@@ -5391,6 +5619,7 @@ impl PlayPlan {
                 touched.extend(self.update_connections(p));
             }
         }
+        drop(edit);
         // До подтверждения ломки — иначе клиент откатит соседей (мигание).
         for p in touched {
             let s = self.block(p).unwrap_or(AIR);
@@ -5609,10 +5838,10 @@ impl PlayPlan {
     /// Окно всё ещё у своего блока (сундук не сломали).
     fn window_valid(&self, w: &Window) -> bool {
         match w.kind {
-            Kind::Chest(_) => w
-                .positions()
-                .iter()
-                .all(|&p| self.block_entity(p).is_some()),
+            Kind::Chest(_) => w.positions().iter().all(|&p| match plugin_of(p) {
+                Some(id) => self.plugin_invs.lock().unwrap().contains_key(&id),
+                None => self.block_entity(p).is_some(),
+            }),
             Kind::Furnace => self
                 .block(w.pos)
                 .is_some_and(|s| furnace_kind(self.state_name(s)).is_some()),
@@ -6279,11 +6508,20 @@ impl PlayPlan {
         use crate::redstone as rs;
         let pl = &self.survival.placement;
         let mut pending: Vec<[i32; 3]> = origins.to_vec();
+        // Блоки волны: один лок мира на позицию, а не на каждый запрос сигнала.
+        let cache: std::cell::RefCell<HashMap<[i32; 3], Option<u32>>> = Default::default();
+        let get = |p: [i32; 3]| *cache.borrow_mut().entry(p).or_insert_with(|| self.block(p));
+        let put = |p: [i32; 3], n: u32| {
+            self.set_block(p, n);
+            cache.borrow_mut().insert(p, Some(n));
+        };
+        // Провода, чья сеть уже решена в этом вызове: повторный `solve` дал бы то же.
+        let mut solved: HashSet<[i32; 3]> = HashSet::new();
         for _ in 0..64 {
             if pending.is_empty() {
                 break;
             }
-            let at = |p: [i32; 3]| self.block(p).unwrap_or(AIR);
+            let at = |p: [i32; 3]| get(p).unwrap_or(AIR);
             let w = rs::World {
                 pl,
                 at: &at,
@@ -6299,9 +6537,11 @@ impl PlayPlan {
                 }
                 // Опора в незагруженном чанке — не трогать.
                 if w.supported(p) == Some(false)
-                    && (0..6).all(|d| self.block(rs::step(p, d)).is_some())
+                    && (0..6).all(|d| get(rs::step(p, d)).is_some())
                 {
                     self.pop_block(p, s);
+                    cache.borrow_mut().clear();
+                    solved.clear();
                     next.extend(rs::around(p));
                     continue;
                 }
@@ -6316,26 +6556,37 @@ impl PlayPlan {
                     }
                 }
                 if n != s {
-                    self.set_block(p, n);
+                    solved.clear();
+                    put(p, n);
                     next.extend(rs::around(p));
                 }
-                wires.push(p);
+                if !solved.contains(&p) {
+                    wires.push(p);
+                }
             }
+            // Изменённые провода сети — одним событием плагинам.
+            let mut changes = Vec::new();
             for (p, power) in w.solve(&wires) {
-                let s = at(p);
+                solved.insert(p);
                 let old: i32 = pl
-                    .prop(s, "power")
+                    .prop(at(p), "power")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0);
-                let power = if old == power {
-                    power
-                } else {
-                    self.redstone_event(p, old, power)
-                };
+                if old != power {
+                    changes.push((p, old, power));
+                }
+            }
+            let powers = if changes.is_empty() {
+                Vec::new()
+            } else {
+                self.redstone_events(&changes)
+            };
+            for (&(p, _, _), power) in changes.iter().zip(powers) {
+                let s = at(p);
                 if let Some(n) = pl.with_prop(s, "power", &power.to_string())
                     && n != s
                 {
-                    self.set_block(p, n);
+                    put(p, n);
                     next.extend(rs::around(p));
                 }
             }
@@ -6344,6 +6595,7 @@ impl PlayPlan {
                 let name = self.state_name(s);
                 if rs::openable(name) {
                     self.refresh_openable(p, true);
+                    cache.borrow_mut().clear();
                 } else if rs::is_lamp(name) {
                     let lit = pl.prop(s, "lit") == Some("true");
                     let powered = w.powered(p);
@@ -6351,7 +6603,7 @@ impl PlayPlan {
                         if self.redstone_event(p, 0, 15) == 15
                             && let Some(n) = pl.with_prop(s, "lit", "true")
                         {
-                            self.set_block(p, n);
+                            put(p, n);
                         }
                     } else if !powered && lit {
                         self.schedule(p, 4);
@@ -6362,13 +6614,15 @@ impl PlayPlan {
                     }
                 } else if crate::pistons::is_piston(name) {
                     self.check_piston(p);
+                    cache.borrow_mut().clear();
+                    solved.clear();
                 } else if name == "minecraft:hopper" {
                     // Сигнал выключает воронку (`HopperBlock.checkPoweredState`).
                     let enabled = if w.powered(p) { "false" } else { "true" };
                     if let Some(n) = pl.with_prop(s, "enabled", enabled)
                         && n != s
                     {
-                        self.set_block(p, n);
+                        put(p, n);
                     }
                     self.hoppers.lock().unwrap().entry(p).or_insert(0);
                 } else if name == "minecraft:dispenser" || name == "minecraft:dropper" {
@@ -6382,7 +6636,7 @@ impl PlayPlan {
                         if let Some(n) =
                             pl.with_prop(s, "triggered", if powered { "true" } else { "false" })
                         {
-                            self.set_block(p, n);
+                            put(p, n);
                         }
                     }
                 } else if rs::is_comparator(name) {
@@ -6395,7 +6649,7 @@ impl PlayPlan {
                         pl.with_prop(s, "locked", if locked { "true" } else { "false" })
                         && n != s
                     {
-                        self.set_block(p, n);
+                        put(p, n);
                     }
                     if !locked && (pl.prop(s, "powered") == Some("true")) != w.repeater_input(p) {
                         self.reschedule(p, crate::redstone::repeater_delay(pl, s));
@@ -8136,6 +8390,14 @@ impl PlayPlan {
 
     /// 27 слотов сундука из `Items` его блок-сущности.
     fn container_items(&self, pos: [i32; 3]) -> Vec<Slot> {
+        if let Some(id) = plugin_of(pos) {
+            return self
+                .plugin_invs
+                .lock()
+                .unwrap()
+                .get(&id)
+                .map_or_else(Vec::new, |p| p.slots.clone());
+        }
         let size = self
             .block(pos)
             .map_or(27, |s| container_size(self.state_name(s)));
@@ -8155,6 +8417,12 @@ impl PlayPlan {
 
     /// Сохраняет слоты сундука в его блок-сущность (`Items` как в ванилле).
     fn save_container(&self, pos: [i32; 3], slots: &[Slot]) {
+        if let Some(id) = plugin_of(pos) {
+            if let Some(p) = self.plugin_invs.lock().unwrap().get_mut(&id) {
+                p.slots = slots.to_vec();
+            }
+            return;
+        }
         let id = self
             .block(pos)
             .and_then(|s| container_entity(self.state_name(s)))
@@ -9655,7 +9923,7 @@ fn chunks_around(c: (i32, i32), r: i32, skip: Option<((i32, i32), i32)>) -> Vec<
 mod tests {
     use super::{acknowledge_player_save, chunks_around, near};
     use crate::survival::PlayerState;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use uuid::Uuid;
 
     #[test]
@@ -9746,105 +10014,6 @@ mod tests {
         let seq: Vec<_> = coords.iter().map(encode).collect();
         let par = super::PlayPlan::map_chunks(&coords, encode);
         assert_eq!(par, seq);
-    }
-
-    fn assert_same_light(
-        left: &HashMap<(i32, i32), (chunkwake_world::ChunkColumn, u64)>,
-        right: &HashMap<(i32, i32), (chunkwake_world::ChunkColumn, u64)>,
-    ) {
-        let mut keys: Vec<_> = left.keys().copied().chain(right.keys().copied()).collect();
-        keys.sort_unstable();
-        keys.dedup();
-        for key in keys {
-            let (a, rev_a) = &left[&key];
-            let (b, rev_b) = &right[&key];
-            assert_eq!(rev_a, rev_b, "{key:?}");
-            assert_eq!(a.sky_light, b.sky_light, "{key:?}");
-            assert_eq!(a.block_light, b.block_light, "{key:?}");
-        }
-    }
-
-    fn edit_locked(
-        world: &mut HashMap<(i32, i32), (chunkwake_world::ChunkColumn, u64)>,
-        template: &chunkwake_world::ChunkColumn,
-        light: &chunkwake_world::light::LightTable,
-        [x, y, z]: [i32; 3],
-        state: u32,
-    ) {
-        let key = (x >> 4, z >> 4);
-        let (column, rev) = world.entry(key).or_insert_with(|| (template.clone(), 0));
-        let old = column.set_block((x & 15) as usize, y as usize, (z & 15) as usize, state);
-        if old == state {
-            return;
-        }
-        *rev += 1;
-        let mut access = super::WorldLight {
-            world,
-            template,
-            touched: HashSet::new(),
-        };
-        chunkwake_world::light::Engine::new(&mut access, light, template.height())
-            .block_changed([x, y, z]);
-        let touched = std::mem::take(&mut access.touched);
-        drop(access);
-        let mut frames = HashMap::new();
-        super::write_light(world, &mut frames, key, None, touched);
-    }
-
-    fn edit_off_lock(
-        world: &mut HashMap<(i32, i32), (chunkwake_world::ChunkColumn, u64)>,
-        template: &chunkwake_world::ChunkColumn,
-        light: &chunkwake_world::light::LightTable,
-        [x, y, z]: [i32; 3],
-        state: u32,
-    ) {
-        let key = (x >> 4, z >> 4);
-        let (column, rev) = world.entry(key).or_insert_with(|| (template.clone(), 0));
-        let old = column.set_block((x & 15) as usize, y as usize, (z & 15) as usize, state);
-        if old == state {
-            return;
-        }
-        *rev += 1;
-        let snap = super::snapshot_neighborhood(world, key);
-        let spread =
-            super::spread_light(snap.columns, template, light, template.height(), [x, y, z]);
-        let mut frames = HashMap::new();
-        assert!(super::neighborhood_same(world, key, &snap.revs));
-        super::write_light(
-            world,
-            &mut frames,
-            key,
-            Some(spread.columns),
-            spread.touched,
-        );
-    }
-
-    #[test]
-    fn light_off_lock_matches_locked_run() {
-        use chunkwake_world::light::relight_column;
-        let light = chunkwake_world::light::LightTable::new([
-            (0, 0, true),
-            (0, 15, false),
-            (14, 0, true),
-            (0, 0, true),
-        ]);
-        let mut template = chunkwake_world::ChunkColumn::flat(&[(1, 4)], 4, 0, 2, 0, true);
-        relight_column(&mut template, &light);
-        let mut locked = HashMap::new();
-        let mut off = HashMap::new();
-        let edits = [
-            ([15, 4, 8], 2u32),
-            ([16, 5, 8], 1),
-            ([15, 4, 8], 0),
-            ([3, 10, 3], 1),
-            ([3, 3, 3], 0),
-            ([3, 10, 3], 3),
-        ];
-        for (pos, state) in edits {
-            edit_locked(&mut locked, &template, &light, pos, state);
-            edit_off_lock(&mut off, &template, &light, pos, state);
-        }
-        assert_same_light(&locked, &off);
     }
 
     #[test]

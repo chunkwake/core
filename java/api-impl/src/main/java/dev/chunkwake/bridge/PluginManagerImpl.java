@@ -225,6 +225,14 @@ final class PluginManagerImpl {
         if (has(org.bukkit.event.player.PlayerPickupArrowEvent.getHandlerList())) {
             mask |= Bridge.listenBit(Bridge.EVENT_PICKUP_ARROW);
         }
+        if (has(org.bukkit.event.inventory.InventoryClickEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_INVENTORY_CLICK);
+        }
+        // Закрытие окна плагина нужно и мосту: по нему сбрасывается открытый вид.
+        mask |= Bridge.listenBit(Bridge.EVENT_INVENTORY_CLOSE);
+        if (has(org.bukkit.event.entity.EntityShootBowEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_SHOOT_BOW);
+        }
         Bridge.setFlag(Bridge.FLAG_LISTENERS, mask);
     }
 

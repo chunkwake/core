@@ -671,14 +671,16 @@ pub fn watching(d: usize, facing: &str) -> bool {
 
 /// Позиции, которые задевает изменение в `p` (`updateNeighborsAt` и соседи соседей).
 pub fn around(p: [i32; 3]) -> Vec<[i32; 3]> {
-    let mut out = vec![p];
-    for d in 0..6 {
-        let n = step(p, d);
-        out.push(n);
-        for e in 0..6 {
-            let m = step(n, e);
-            if !out.contains(&m) {
-                out.push(m);
+    // Все сдвиги с манхэттенским расстоянием ≤ 2 (25 штук), ближние первыми.
+    let mut out = Vec::with_capacity(25);
+    for dist in 0..=2 {
+        for dx in -2i32..=2 {
+            for dy in -2i32..=2 {
+                for dz in -2i32..=2 {
+                    if dx.abs() + dy.abs() + dz.abs() == dist {
+                        out.push([p[0] + dx, p[1] + dy, p[2] + dz]);
+                    }
+                }
             }
         }
     }
