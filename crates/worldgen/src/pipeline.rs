@@ -30,6 +30,9 @@ const VEIN_DENSITIES: [&str; 4] = [
 pub struct Blocks {
     pub states: Vec<u32>,
     pub biomes: Option<Vec<u32>>,
+    /// Карты `WORLD_SURFACE_WG` и `OCEAN_FLOOR_WG` после рельефа: считаются
+    /// при первой декорации, до записей фич.
+    pub worldgen_heights: Option<Arc<[[i32; 256]; 2]>>,
 }
 
 /// Скомпилированная стадия поверхности.
@@ -225,6 +228,18 @@ impl Overworld {
         let mut chunks: [Option<Blocks>; 9] = Default::default();
         for (i, slot) in chunks.iter_mut().enumerate() {
             *slot = protos.remove(&at(i));
+            if let Some(c) = slot
+                && c.worldgen_heights.is_none()
+            {
+                let mut maps = [[0; 256]; 2];
+                for (map, kind) in maps.iter_mut().zip([Heightmap::WorldSurfaceWg, Heightmap::OceanFloorWg]) {
+                    for (column, h) in map.iter_mut().enumerate() {
+                        *h = column_height(&c.states, column, self.noise.height, kind, &features.palette)
+                            + self.noise.min_y;
+                    }
+                }
+                c.worldgen_heights = Some(Arc::new(maps));
+            }
         }
         let biomes: HashSet<u32> = chunks
             .iter()
@@ -292,7 +307,7 @@ impl Overworld {
                     .top_material(&chunk, x, y, z, cx, cz, heights, fluid)
             });
         }
-        Blocks { states, biomes }
+        Blocks { states, biomes, worldgen_heights: None }
     }
 
     fn view<'a>(
@@ -417,7 +432,7 @@ fn collect_states(v: &Value, state: &dyn Fn(&str) -> Option<u32>, out: &mut Hash
 }
 
 /// Две карты высот чанка по столбцам `z * 16 + x`.
-type Heights = [[i32; 256]; 2];
+type Heights = [[i32; 256]; 4];
 
 /// Регион 3×3 прото-чанков вокруг декорируемого (`WorldGenRegion`).
 struct Region<'a> {
@@ -478,7 +493,7 @@ impl feature::Level for Region<'_> {
         let Some(maps) = heights[s].as_mut() else {
             return;
         };
-        for (k, kind) in [Heightmap::WorldSurface, Heightmap::OceanFloor].into_iter().enumerate() {
+        for (k, kind) in Heightmap::ALL.into_iter().enumerate() {
             let h = &mut maps[k][column];
             if self.palette.hits(kind, state) {
                 *h = (*h).max(y + 1);
@@ -500,18 +515,25 @@ impl feature::Level for Region<'_> {
         let Some(c) = self.chunks[s].as_ref() else {
             return min_y;
         };
+        let column = ((z & 15) * 16 + (x & 15)) as usize;
+        match kind {
+            Heightmap::WorldSurfaceWg | Heightmap::OceanFloorWg => {
+                let wg = c.worldgen_heights.as_ref().expect("worldgen heightmaps");
+                return wg[usize::from(kind == Heightmap::OceanFloorWg)][column];
+            }
+            _ => {}
+        }
         let mut heights = self.heights.borrow_mut();
         let maps = heights[s].get_or_insert_with(|| {
-            let mut maps = Box::new([[0; 256]; 2]);
-            for (k, kind) in [Heightmap::WorldSurface, Heightmap::OceanFloor].into_iter().enumerate() {
+            let mut maps = Box::new([[0; 256]; 4]);
+            for (k, kind) in Heightmap::ALL.into_iter().enumerate() {
                 for (column, h) in maps[k].iter_mut().enumerate() {
                     *h = column_height(&c.states, column, self.noise.height, kind, self.palette) + min_y;
                 }
             }
             maps
         });
-        let k = usize::from(kind == Heightmap::OceanFloor);
-        maps[k][((z & 15) * 16 + (x & 15)) as usize]
+        maps[kind.index()][column]
     }
     fn biome(&self, x: i32, y: i32, z: i32) -> u32 {
         let Some(s) = self.slot(x, z) else {

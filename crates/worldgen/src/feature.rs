@@ -5,7 +5,8 @@
 //! каждая фича пересевает генератор, так что пропуск не сдвигает остальные.
 
 use crate::carver::{HeightP, IntP};
-use crate::random::{Bits, Worldgen};
+use crate::noise::{NormalNoise, Simplex};
+use crate::random::{Bits, Legacy, Worldgen};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -31,20 +32,106 @@ pub trait Level {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Heightmap {
-    /// `WORLD_SURFACE_WG`: всё, кроме воздуха.
+    /// `WORLD_SURFACE(_WG)`: всё, кроме воздуха.
     WorldSurface,
-    /// `OCEAN_FLOOR_WG`: блоки, мешающие движению.
+    /// `OCEAN_FLOOR(_WG)`: тег `blocks_motion_in_heightmap`.
     OceanFloor,
+    /// `MOTION_BLOCKING`: тот же тег или жидкость.
+    MotionBlocking,
+    /// `MOTION_BLOCKING_NO_LEAVES`: тег без листвы или жидкость.
+    MotionBlockingNoLeaves,
+    /// `WORLD_SURFACE_WG` и `OCEAN_FLOOR_WG`: те же правила, но карта
+    /// застывает после рельефа — прото-чанк в статусе `TERRAIN` при записи
+    /// фич обновляет лишь итоговые карты.
+    WorldSurfaceWg,
+    OceanFloorWg,
 }
 
 impl Heightmap {
+    pub const ALL: [Heightmap; 4] = [
+        Self::WorldSurface,
+        Self::OceanFloor,
+        Self::MotionBlocking,
+        Self::MotionBlockingNoLeaves,
+    ];
+
     fn parse(name: &str) -> Result<Self, String> {
         match name {
-            "WORLD_SURFACE_WG" | "WORLD_SURFACE" => Ok(Self::WorldSurface),
-            "OCEAN_FLOOR_WG" | "OCEAN_FLOOR" | "MOTION_BLOCKING" | "MOTION_BLOCKING_NO_LEAVES" => {
-                Ok(Self::OceanFloor)
-            }
+            "WORLD_SURFACE" => Ok(Self::WorldSurface),
+            "OCEAN_FLOOR" => Ok(Self::OceanFloor),
+            "WORLD_SURFACE_WG" => Ok(Self::WorldSurfaceWg),
+            "OCEAN_FLOOR_WG" => Ok(Self::OceanFloorWg),
+            "MOTION_BLOCKING" => Ok(Self::MotionBlocking),
+            "MOTION_BLOCKING_NO_LEAVES" => Ok(Self::MotionBlockingNoLeaves),
             other => Err(format!("heightmap {other} is not supported")),
+        }
+    }
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Жидкость состояния (`getFluidState`): источник и течение различаются,
+/// как `minecraft:water` и `minecraft:flowing_water`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Fluid {
+    #[default]
+    None,
+    Water,
+    FlowingWater,
+    Lava,
+    FlowingLava,
+}
+
+impl Fluid {
+    pub fn is_water(self) -> bool {
+        matches!(self, Self::Water | Self::FlowingWater)
+    }
+    pub fn is_lava(self) -> bool {
+        matches!(self, Self::Lava | Self::FlowingLava)
+    }
+}
+
+/// Чем блок проверяет `canSurvive` — по классу блока ванили.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum Survive {
+    #[default]
+    Always,
+    /// `VegetationBlock`: снизу `supports_vegetation`.
+    Vegetation,
+    /// `DryVegetationBlock`: снизу `supports_dry_vegetation`.
+    Dry,
+    /// `DoublePlantBlock`: нижняя половина как растение, верхняя — над нижней.
+    Double,
+    Seagrass,
+    TallSeagrass,
+    SugarCane,
+    Cactus,
+    /// Нужна прочная грань снизу (`LeafLitterBlock`).
+    SturdyBelow,
+    MossyCarpet,
+    Mushroom,
+    Snow,
+}
+
+impl Survive {
+    fn of_class(class: &str) -> Self {
+        match class {
+            "FlowerBlock" | "TallGrassBlock" | "BushBlock" | "SaplingBlock" | "FireflyBushBlock"
+            | "FlowerBedBlock" | "SweetBerryBushBlock" | "EyeblossomBlock" | "AzaleaBlock"
+            | "WitherRoseBlock" => Self::Vegetation,
+            "DryVegetationBlock" | "ShortDryGrassBlock" | "TallDryGrassBlock" => Self::Dry,
+            "DoublePlantBlock" | "TallFlowerBlock" => Self::Double,
+            "SeagrassBlock" => Self::Seagrass,
+            "TallSeagrassBlock" => Self::TallSeagrass,
+            "SugarCaneBlock" => Self::SugarCane,
+            "CactusBlock" => Self::Cactus,
+            "LeafLitterBlock" => Self::SturdyBelow,
+            "MossyCarpetBlock" => Self::MossyCarpet,
+            "MushroomBlock" => Self::Mushroom,
+            "SnowLayerBlock" => Self::Snow,
+            _ => Self::Always,
         }
     }
 }
@@ -58,11 +145,38 @@ pub struct Palette {
     props: Vec<Vec<(String, String)>>,
     /// Имя блока → номер и его состояния по порядку.
     blocks: HashMap<String, (u32, Vec<u32>)>,
+    /// Номер блока → его состояния.
+    by_block: Vec<Vec<u32>>,
     defaults: HashMap<String, u32>,
     air: Vec<bool>,
-    fluid: Vec<bool>,
+    fluid: Vec<Fluid>,
+    /// `isSolid`, `canBeReplaced`, `LiquidBlock` по состоянию.
+    solid: Vec<bool>,
+    replaceable: Vec<bool>,
+    liquid: Vec<bool>,
+    /// Биты `isFaceSturdy` по `Direction`: низ, верх, север, юг, запад, восток.
+    sturdy: Vec<u8>,
+    survive: Vec<Survive>,
+    /// Теги карт высот: `blocks_motion_in_heightmap` и без листвы.
+    motion: Arc<Vec<bool>>,
+    motion_no_leaves: Arc<Vec<bool>>,
     tags: HashMap<String, Arc<Vec<bool>>>,
     tag_dir: std::path::PathBuf,
+    /// Теги, которые читает `canSurvive`.
+    support: Support,
+}
+
+#[derive(Default)]
+struct Support {
+    vegetation: Arc<Vec<bool>>,
+    dry: Arc<Vec<bool>>,
+    cane: Arc<Vec<bool>>,
+    cane_adjacent: Arc<Vec<bool>>,
+    cactus: Arc<Vec<bool>>,
+    no_seagrass: Arc<Vec<bool>>,
+    mushroom: Arc<Vec<bool>>,
+    no_snow: Arc<Vec<bool>>,
+    snow: Arc<Vec<bool>>,
 }
 
 impl Palette {
@@ -95,27 +209,127 @@ impl Palette {
             .keys()
             .filter_map(|n| default(n).map(|s| (n.clone(), s)))
             .collect();
+        let n = states.len();
         let mut p = Self {
-            air: vec![false; states.len()],
-            fluid: vec![false; states.len()],
+            air: vec![false; n],
+            fluid: vec![Fluid::None; n],
+            solid: vec![false; n],
+            replaceable: vec![false; n],
+            liquid: vec![false; n],
+            sturdy: vec![0; n],
+            survive: vec![Survive::Always; n],
+            motion: Arc::new(Vec::new()),
+            motion_no_leaves: Arc::new(Vec::new()),
+            by_block: {
+                let mut v = vec![Vec::new(); blocks.len()];
+                for (id, list) in blocks.values() {
+                    v[*id as usize] = list.clone();
+                }
+                v
+            },
             block_of,
             props,
             blocks,
             defaults,
             tags: HashMap::new(),
             tag_dir: data_dir.join("data/minecraft/tags/block"),
+            support: Support::default(),
         };
         for name in ["minecraft:air", "minecraft:cave_air", "minecraft:void_air"] {
             for s in p.states_of(name) {
                 p.air[s as usize] = true;
             }
         }
-        for name in ["minecraft:water", "minecraft:lava"] {
+        // `reports/worldgen_blocks.csv`: жидкость, isSolid, canBeReplaced, класс.
+        let rows = std::fs::read_to_string(data_dir.join("reports/worldgen_blocks.csv")).unwrap_or_default();
+        for (id, line) in rows.lines().enumerate().take(n) {
+            let mut f = line.split(',');
+            let fluid = f.next().unwrap_or("0");
+            p.solid[id] = f.next() == Some("1");
+            p.replaceable[id] = f.next() == Some("1");
+            let class = f.next().unwrap_or("");
+            p.liquid[id] = class == "LiquidBlock";
+            p.survive[id] = Survive::of_class(class);
+            p.fluid[id] = match fluid {
+                "1" => Fluid::Water,
+                "2" => Fluid::Lava,
+                _ => Fluid::None,
+            };
+        }
+        // Течение — у состояний с уровнем больше нуля; без выгрузки жидкость
+        // узнаём по имени блока.
+        for (name, (src, flow)) in [
+            ("minecraft:water", (Fluid::Water, Fluid::FlowingWater)),
+            ("minecraft:lava", (Fluid::Lava, Fluid::FlowingLava)),
+        ] {
             for s in p.states_of(name) {
-                p.fluid[s as usize] = true;
+                let level = p.prop(s, "level").unwrap_or("0");
+                p.fluid[s as usize] = if level == "0" { src } else { flow };
+                p.liquid[s as usize] = true;
             }
         }
+        // `reports/light.csv`: шестой столбец — маска прочных граней.
+        let light = std::fs::read_to_string(data_dir.join("reports/light.csv")).unwrap_or_default();
+        for (id, line) in light.lines().enumerate().take(n) {
+            p.sturdy[id] = line.rsplit(',').next().and_then(|m| m.trim().parse().ok()).unwrap_or(0);
+        }
+        p.motion = p.tag("minecraft:blocks_motion_in_heightmap").unwrap_or_default();
+        p.motion_no_leaves = p
+            .tag("minecraft:blocks_motion_in_heightmap_no_leaves")
+            .unwrap_or_default();
+        let mut tag = |name: &str| p.tag(name).unwrap_or_default();
+        p.support = Support {
+            vegetation: tag("minecraft:supports_vegetation"),
+            dry: tag("minecraft:supports_dry_vegetation"),
+            cane: tag("minecraft:supports_sugar_cane"),
+            cane_adjacent: tag("minecraft:supports_sugar_cane_adjacently"),
+            cactus: tag("minecraft:supports_cactus"),
+            no_seagrass: tag("minecraft:cannot_support_seagrass"),
+            mushroom: tag("minecraft:overrides_mushroom_light_requirement"),
+            no_snow: tag("minecraft:cannot_support_snow_layer"),
+            snow: tag("minecraft:support_override_snow_layer"),
+        };
         p
+    }
+
+    /// Значение свойства состояния.
+    pub fn prop(&self, state: u32, key: &str) -> Option<&str> {
+        self.props
+            .get(state as usize)?
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// То же состояние с другим значением свойства (`trySetValue`): без
+    /// такого свойства — `None`.
+    pub fn with_prop(&self, state: u32, key: &str, value: &str) -> Option<u32> {
+        let props = self.props.get(state as usize)?;
+        props.iter().find(|(k, _)| k == key)?;
+        let list = self.by_block.get(*self.block_of.get(state as usize)? as usize)?;
+        list.iter().copied().find(|&s| {
+            self.props[s as usize]
+                .iter()
+                .zip(props)
+                .all(|((k, v), (k0, v0))| k == k0 && if k == key { v == value } else { v == v0 })
+        })
+    }
+
+    pub fn fluid(&self, state: u32) -> Fluid {
+        self.fluid.get(state as usize).copied().unwrap_or_default()
+    }
+
+    fn flag(list: &[bool], state: u32) -> bool {
+        list.get(state as usize).copied().unwrap_or(false)
+    }
+
+    /// `isFaceSturdy(dir)`, `dir` в порядке `Direction`.
+    pub fn sturdy(&self, state: u32, dir: usize) -> bool {
+        self.sturdy.get(state as usize).is_some_and(|m| m >> dir & 1 != 0)
+    }
+
+    fn same_block(&self, a: u32, b: u32) -> bool {
+        self.block_of.get(a as usize).is_some_and(|x| Some(x) == self.block_of.get(b as usize))
     }
 
     fn states_of(&self, block: &str) -> Vec<u32> {
@@ -126,16 +340,17 @@ impl Palette {
         self.air.get(state as usize).copied().unwrap_or(false)
     }
 
-    /// Мешает ли движению (`blocksMotion`): пока всё твёрдое, кроме жидкостей.
-    pub fn blocks_motion(&self, state: u32) -> bool {
-        !self.is_air(state) && !self.fluid.get(state as usize).copied().unwrap_or(false)
-    }
-
     /// Учитывает ли карта высот `kind` это состояние.
     pub fn hits(&self, kind: Heightmap, state: u32) -> bool {
         match kind {
-            Heightmap::WorldSurface => !self.is_air(state),
-            Heightmap::OceanFloor => self.blocks_motion(state),
+            Heightmap::WorldSurface | Heightmap::WorldSurfaceWg => !self.is_air(state),
+            Heightmap::OceanFloor | Heightmap::OceanFloorWg => Self::flag(&self.motion, state),
+            Heightmap::MotionBlocking => {
+                Self::flag(&self.motion, state) || self.fluid(state) != Fluid::None
+            }
+            Heightmap::MotionBlockingNoLeaves => {
+                Self::flag(&self.motion_no_leaves, state) || self.fluid(state) != Fluid::None
+            }
         }
     }
 
@@ -152,8 +367,11 @@ impl Palette {
         let (name, overrides) = match v {
             Value::String(s) => (s.as_str(), None),
             _ => (
-                v["Name"].as_str().ok_or("block state: no Name")?,
-                v["Properties"].as_object(),
+                v["Name"]
+                    .as_str()
+                    .or_else(|| v["id"].as_str())
+                    .ok_or("block state: no Name")?,
+                v["Properties"].as_object().or_else(|| v["properties"].as_object()),
             ),
         };
         let base = *self
@@ -312,6 +530,54 @@ pub struct Ore {
 enum Feature {
     Ore(Ore),
     ScatteredOre(Ore),
+    /// `simple_block`: провайдер и `schedule_tick`.
+    SimpleBlock(Provider),
+    /// `random_selector`: по очереди `nextFloat() < chance`, иначе по умолчанию.
+    RandomSelector(Vec<(f32, Arc<Placed>)>, Arc<Placed>),
+    /// `simple_random_selector`: одна из списка равновероятно.
+    SimpleRandomSelector(Vec<Arc<Placed>>),
+    /// `weighted_random_selector`: общий вес и (вес, фича).
+    WeightedSelector(i32, Vec<(i32, Arc<Placed>)>),
+    /// `block_column`: слои (высота, провайдер), направление, допустимые
+    /// клетки и `prioritize_tip`.
+    BlockColumn(Vec<(IntP, Provider)>, [i32; 3], Predicate, bool),
+    VegetationPatch(Box<Patch>),
+    /// `random_boolean_selector`: `nextBoolean()` — первая, иначе вторая.
+    BooleanSelector(Arc<Placed>, Arc<Placed>),
+    Tree(Arc<tree::Tree>),
+    FallenTree(Arc<tree::Fallen>),
+    HugeMushroom(Box<Mushroom>),
+}
+
+/// `huge_red_mushroom` и `huge_brown_mushroom`.
+#[derive(Clone, Debug)]
+struct Mushroom {
+    red: bool,
+    cap: Provider,
+    stem: Provider,
+    radius: i32,
+    on: Predicate,
+    replaceable: Arc<Vec<bool>>,
+    leaves: Arc<Vec<bool>>,
+}
+
+mod tree;
+
+/// `VegetationPatchFeature` и его залитый водой вариант.
+#[derive(Clone, Debug)]
+struct Patch {
+    replaceable: Arc<Vec<bool>>,
+    ground: Provider,
+    vegetation: Arc<Placed>,
+    /// Направление внутрь поверхности: вниз у пола, вверх у потолка.
+    inwards: usize,
+    depth: IntP,
+    extra_bottom: f32,
+    vertical_range: i32,
+    vegetation_chance: f32,
+    radius: IntP,
+    extra_edge: f32,
+    waterlogged: bool,
 }
 
 /// `PlacementModifier`.
@@ -324,11 +590,65 @@ enum Modifier {
     Rarity(i32),
     Heightmap(Heightmap),
     Fixed(Vec<[i32; 3]>),
+    /// `random_chance`.
+    Chance(f32),
+    /// `environment_scan`: шаг, цель, где можно идти, число шагов.
+    Scan([i32; 3], Predicate, Predicate, i32),
+    /// `noise_threshold_count`: уровень, ниже, выше.
+    NoiseThreshold(f64, i32, i32),
+    /// `noise_based_count`: отношение, масштаб, сдвиг.
+    NoiseBased(i32, f64, f64),
+    Offset(IntP, IntP, IntP),
+    Filter(Predicate),
+    /// `surface_water_depth_filter`.
+    WaterDepth(i32),
+    /// `surface_relative_threshold_filter`.
+    Relative(Heightmap, i32, i32),
 }
 
 impl Modifier {
-    fn parse(v: &Value, min_y: i32, height: i32) -> Result<Self, String> {
+    fn parse(v: &Value, palette: &mut Palette, min_y: i32, height: i32) -> Result<Self, String> {
+        let int = |k: &str, d: i64| v[k].as_i64().unwrap_or(d) as i32;
         match v["type"].as_str().unwrap_or("") {
+            "minecraft:noise_threshold_count" => Ok(Self::NoiseThreshold(
+                v["noise_level"].as_f64().unwrap_or(0.0),
+                int("below_noise", 0),
+                int("above_noise", 0),
+            )),
+            "minecraft:noise_based_count" => Ok(Self::NoiseBased(
+                int("noise_to_count_ratio", 0),
+                v["noise_factor"].as_f64().unwrap_or(1.0),
+                v["noise_offset"].as_f64().unwrap_or(0.0),
+            )),
+            "minecraft:offset" => Ok(Self::Offset(
+                IntP::parse(&v["x"])?,
+                IntP::parse(&v["y"])?,
+                IntP::parse(&v["z"])?,
+            )),
+            "minecraft:block_predicate_filter" => {
+                Ok(Self::Filter(Predicate::parse(&v["predicate"], palette)?))
+            }
+            "minecraft:surface_water_depth_filter" => Ok(Self::WaterDepth(int("max_water_depth", 0))),
+            "minecraft:surface_relative_threshold_filter" => Ok(Self::Relative(
+                Heightmap::parse(v["heightmap"].as_str().unwrap_or(""))?,
+                int("min_inclusive", i32::MIN as i64),
+                int("max_inclusive", i32::MAX as i64),
+            )),
+            "minecraft:environment_scan" => {
+                let d = v["direction_of_search"].as_str().unwrap_or("");
+                let d = DIRECTION_NAMES.iter().position(|n| *n == d).ok_or("environment_scan: direction")?;
+                let allowed = match &v["allowed_search_condition"] {
+                    Value::Null => Predicate::True,
+                    a => Predicate::parse(a, palette)?,
+                };
+                Ok(Self::Scan(
+                    DIRS[d],
+                    Predicate::parse(&v["target_condition"], palette)?,
+                    allowed,
+                    int("max_steps", 0),
+                ))
+            }
+            "minecraft:random_chance" => Ok(Self::Chance(v["chance"].as_f64().unwrap_or(0.0) as f32)),
             "minecraft:count" => Ok(Self::Count(IntP::parse(&v["count"])?)),
             "minecraft:in_square" => Ok(Self::InSquare),
             "minecraft:height_range" => Ok(Self::Height(HeightP::parse(&v["height"], min_y, height)?)),
@@ -427,6 +747,16 @@ impl Features {
                 global.insert((step, name.as_str()), i as u32);
                 let placed = read("placed_feature", name)
                     .and_then(|v| parse_placed(&v, &read, &mut palette, min_y, height));
+                if let Err(e) = &placed
+                    && std::env::var_os("CHUNKWAKE_FEATURE_ERRORS").is_some()
+                {
+                    eprintln!("{name}: {e}");
+                }
+                // `CHUNKWAKE_ONLY_FEATURES=a,b` — только эти фичи (для сверки).
+                let placed = match std::env::var("CHUNKWAKE_ONLY_FEATURES") {
+                    Ok(only) if !only.split(',').any(|n| name.ends_with(n)) => Err(String::new()),
+                    _ => placed,
+                };
                 list.push(placed.ok().map(Arc::new));
             }
             steps.push(list);
@@ -486,7 +816,7 @@ impl Features {
                     continue;
                 };
                 r.set_feature_seed(seed, index as i32, step as i32);
-                let key = (step as u32, index);
+                let key = Some((step as u32, index));
                 self.place(level, placed, key, &mut r, [ox, self.min_y, oz]);
             }
         }
@@ -497,7 +827,7 @@ impl Features {
         &self,
         level: &mut dyn Level,
         placed: &Placed,
-        key: (u32, u32),
+        key: Option<(u32, u32)>,
         r: &mut Worldgen,
         origin: [i32; 3],
     ) {
@@ -508,7 +838,7 @@ impl Features {
         &self,
         level: &mut dyn Level,
         placed: &Placed,
-        key: (u32, u32),
+        key: Option<(u32, u32)>,
         r: &mut Worldgen,
         pos: [i32; 3],
         at: usize,
@@ -538,7 +868,7 @@ impl Features {
             }
             Modifier::Biome => {
                 let b = level.biome(x, y, z);
-                if self.has.get(&b).is_some_and(|s| s.contains(&key)) {
+                if key.is_some_and(|key| self.has.get(&b).is_some_and(|s| s.contains(&key))) {
                     self.modify(level, placed, key, r, pos, next);
                 }
             }
@@ -551,6 +881,72 @@ impl Features {
                 let ny = level.surface(*kind, x, z);
                 if ny > level.min_y() {
                     self.modify(level, placed, key, r, [x, ny, z], next);
+                }
+            }
+            Modifier::Scan(dir, target, allowed, steps) => {
+                let pal = &self.palette;
+                if !allowed.test(&*level, pal, pos) {
+                    return;
+                }
+                let (lo, hi) = (level.min_y(), level.min_y() + level.height());
+                let mut at = pos;
+                for _ in 0..*steps {
+                    if target.test(&*level, pal, at) {
+                        self.modify(level, placed, key, r, at, next);
+                        return;
+                    }
+                    at = add(at, *dir);
+                    if at[1] < lo || at[1] >= hi {
+                        return;
+                    }
+                    if !allowed.test(&*level, pal, at) {
+                        break;
+                    }
+                }
+                if target.test(&*level, pal, at) {
+                    self.modify(level, placed, key, r, at, next);
+                }
+            }
+            Modifier::Chance(chance) => {
+                if r.next_float() < *chance {
+                    self.modify(level, placed, key, r, pos, next);
+                }
+            }
+            Modifier::NoiseThreshold(level_at, below, above) => {
+                let noise = biome_info_noise().get(x as f64 / 200.0, z as f64 / 200.0);
+                let n = if (noise as f64) < *level_at { *below } else { *above };
+                for _ in 0..n {
+                    self.modify(level, placed, key, r, pos, next);
+                }
+            }
+            Modifier::NoiseBased(ratio, factor, offset) => {
+                let noise = biome_info_noise().get(x as f64 / factor, z as f64 / factor);
+                let n = ((noise as f64 + offset) * *ratio as f64).ceil() as i32;
+                for _ in 0..n {
+                    self.modify(level, placed, key, r, pos, next);
+                }
+            }
+            Modifier::Offset(dx, dy, dz) => {
+                let (a, b) = (dx.sample(r), dy.sample(r));
+                let c = dz.sample(r);
+                self.modify(level, placed, key, r, [x + a, y + b, z + c], next);
+            }
+            Modifier::Filter(p) => {
+                if p.test(&*level, &self.palette, pos) {
+                    self.modify(level, placed, key, r, pos, next);
+                }
+            }
+            Modifier::WaterDepth(max) => {
+                let floor = level.surface(Heightmap::OceanFloor, x, z);
+                let top = level.surface(Heightmap::WorldSurface, x, z);
+                if top - floor <= *max {
+                    self.modify(level, placed, key, r, pos, next);
+                }
+            }
+            Modifier::Relative(kind, min, max) => {
+                let h = level.surface(*kind, x, z) as i64;
+                if h + *min as i64 <= y as i64 && y as i64 <= h + *max as i64 {
+                    self.modify(level, placed, key, r, pos, next);
                 }
             }
             Modifier::Fixed(list) => {
@@ -568,6 +964,310 @@ impl Features {
         match f {
             Feature::Ore(ore) => self.ore(level, ore, r, pos),
             Feature::ScatteredOre(ore) => self.scattered_ore(level, ore, r, pos),
+            Feature::SimpleBlock(p) => self.simple_block(level, p, r, pos),
+            Feature::RandomSelector(list, default) => {
+                for (chance, placed) in list {
+                    if r.next_float() < *chance {
+                        self.place(level, placed, None, r, pos);
+                        return;
+                    }
+                }
+                self.place(level, default, None, r, pos);
+            }
+            Feature::WeightedSelector(total, list) => {
+                if *total <= 0 {
+                    return;
+                }
+                let mut i = r.next_int_bound(*total);
+                for (w, placed) in list {
+                    if i < *w {
+                        self.place(level, placed, None, r, pos);
+                        return;
+                    }
+                    i -= w;
+                }
+            }
+            Feature::BooleanSelector(yes, no) => {
+                let f = if r.next_bool() { yes } else { no };
+                self.place(level, f, None, r, pos);
+            }
+            Feature::VegetationPatch(patch) => self.vegetation_patch(level, patch, r, pos),
+            Feature::Tree(t) => t.place(self, level, r, pos),
+            Feature::FallenTree(t) => t.place(self, level, r, pos),
+            Feature::HugeMushroom(m) => self.huge_mushroom(level, m, r, pos),
+            Feature::BlockColumn(layers, dir, allowed, tip) => {
+                self.block_column(level, layers, *dir, allowed, *tip, r, pos)
+            }
+            Feature::SimpleRandomSelector(list) => {
+                let i = r.next_int_bound(list.len() as i32) as usize;
+                self.place(level, &list[i], None, r, pos);
+            }
+        }
+    }
+
+    /// `VegetationPatchFeature.place`; множества точек обходятся в порядке
+    /// `HashSet` Java.
+    fn vegetation_patch(&self, level: &mut dyn Level, p: &Patch, r: &mut Worldgen, origin: [i32; 3]) {
+        let pal = &self.palette;
+        let xr = p.radius.sample(r) + 1;
+        let zr = p.radius.sample(r) + 1;
+        let inwards = DIRS[p.inwards];
+        let outwards = DIRS[p.inwards ^ 1];
+        let mut surface = Vec::new();
+        for dx in -xr..=xr {
+            let x_edge = dx == -xr || dx == xr;
+            for dz in -zr..=zr {
+                let z_edge = dz == -zr || dz == zr;
+                let corner = x_edge && z_edge;
+                let edge = (x_edge || z_edge) && !corner;
+                if corner || (edge && (p.extra_edge == 0.0 || r.next_float() > p.extra_edge)) {
+                    continue;
+                }
+                let mut pos = add(origin, [dx, 0, dz]);
+                let mut i = 0;
+                while i < p.vertical_range && pal.is_air(level.get(pos[0], pos[1], pos[2])) {
+                    pos = add(pos, inwards);
+                    i += 1;
+                }
+                let mut i = 0;
+                while i < p.vertical_range && !pal.is_air(level.get(pos[0], pos[1], pos[2])) {
+                    pos = add(pos, outwards);
+                    i += 1;
+                }
+                let mut below = add(pos, inwards);
+                let below_state = level.get(below[0], below[1], below[2]);
+                if !pal.is_air(level.get(pos[0], pos[1], pos[2])) || !pal.sturdy(below_state, p.inwards ^ 1) {
+                    continue;
+                }
+                let depth = p.depth.sample(r)
+                    + i32::from(p.extra_bottom > 0.0 && r.next_float() < p.extra_bottom);
+                let ground = below;
+                // `placeGround`.
+                let mut placed = true;
+                for i in 0..depth {
+                    let Some(state) = p.ground.get(&*level, pal, r, below) else {
+                        continue;
+                    };
+                    let current = level.get(below[0], below[1], below[2]);
+                    if pal.same_block(state, current) {
+                        continue;
+                    }
+                    if !Palette::flag(&p.replaceable, current) {
+                        placed = i != 0;
+                        break;
+                    }
+                    if level.can_write(below[0], below[2]) {
+                        level.set(below[0], below[1], below[2], state);
+                    }
+                    below = add(below, inwards);
+                }
+                if placed {
+                    surface.push(ground);
+                }
+            }
+        }
+        let mut surface = java_set_order(surface);
+        if p.waterlogged {
+            let exposed = |level: &dyn Level, at: [i32; 3]| {
+                [2usize, 5, 3, 4, 0].iter().any(|&d| {
+                    let [x, y, z] = add(at, DIRS[d]);
+                    !pal.sturdy(level.get(x, y, z), d ^ 1)
+                })
+            };
+            surface = java_set_order(surface.into_iter().filter(|&at| !exposed(&*level, at)).collect());
+            let water = pal.defaults.get("minecraft:water").copied().unwrap_or(0);
+            for &[x, y, z] in &surface {
+                if level.can_write(x, z) {
+                    level.set(x, y, z, water);
+                }
+            }
+        }
+        for at in surface {
+            if p.vegetation_chance > 0.0 && r.next_float() < p.vegetation_chance {
+                if p.waterlogged {
+                    self.place(level, &p.vegetation, None, r, at);
+                    let s = level.get(at[0], at[1], at[2]);
+                    if pal.prop(s, "waterlogged") == Some("false")
+                        && let Some(wet) = pal.with_prop(s, "waterlogged", "true")
+                        && level.can_write(at[0], at[2])
+                    {
+                        level.set(at[0], at[1], at[2], wet);
+                    }
+                } else {
+                    self.place(level, &p.vegetation, None, r, add(at, outwards));
+                }
+            }
+        }
+    }
+
+    /// `AbstractHugeMushroomFeature.place`.
+    fn huge_mushroom(&self, level: &mut dyn Level, m: &Mushroom, r: &mut Worldgen, o: [i32; 3]) {
+        let pal = &self.palette;
+        let mut h = r.next_int_bound(3) + 4;
+        if r.next_int_bound(12) == 0 {
+            h *= 2;
+        }
+        let top = level.min_y() + level.height() - 1;
+        if o[1] < level.min_y() + 1 || o[1] + h + 1 > top || !m.on.test(&*level, pal, add(o, [0, -1, 0])) {
+            return;
+        }
+        for dy in 0..=h {
+            // У красного радиус берётся с высотой -1 — проверяется только ствол.
+            let radius = if m.red || dy <= 3 { 0 } else { m.radius };
+            for dx in -radius..=radius {
+                for dz in -radius..=radius {
+                    let s = level.get(o[0] + dx, o[1] + dy, o[2] + dz);
+                    if !pal.is_air(s) && !Palette::flag(&m.leaves, s) {
+                        return;
+                    }
+                }
+            }
+        }
+        let put = |level: &mut dyn Level, [x, y, z]: [i32; 3], state: u32| {
+            let cur = level.get(x, y, z);
+            if (pal.is_air(cur) || Palette::flag(&m.replaceable, cur)) && level.can_write(x, z) {
+                level.set(x, y, z, state);
+            }
+        };
+        let faces = |mut s: u32, list: &[(&str, bool)]| {
+            if list.iter().all(|(k, _)| pal.prop(s, k).is_some()) {
+                for (k, v) in list {
+                    s = pal.with_prop(s, k, if *v { "true" } else { "false" }).unwrap_or(s);
+                }
+            }
+            s
+        };
+        let rad = m.radius;
+        if m.red {
+            for dy in h - 3..=h {
+                let radius = if dy < h { rad } else { rad - 1 };
+                let center = rad - 2;
+                for dx in -radius..=radius {
+                    for dz in -radius..=radius {
+                        let x_edge = dx == -radius || dx == radius;
+                        let z_edge = dz == -radius || dz == radius;
+                        if dy >= h || x_edge != z_edge {
+                            let Some(s) = m.cap.get(&*level, pal, r, o) else { continue };
+                            let s = faces(s, &[
+                                ("up", dy >= h - 1),
+                                ("west", dx < -center),
+                                ("east", dx > center),
+                                ("north", dz < -center),
+                                ("south", dz > center),
+                            ]);
+                            put(level, add(o, [dx, dy, dz]), s);
+                        }
+                    }
+                }
+            }
+        } else {
+            for dx in -rad..=rad {
+                for dz in -rad..=rad {
+                    let (min_x, max_x, min_z, max_z) = (dx == -rad, dx == rad, dz == -rad, dz == rad);
+                    let (x_edge, z_edge) = (min_x || max_x, min_z || max_z);
+                    if x_edge && z_edge {
+                        continue;
+                    }
+                    let Some(s) = m.cap.get(&*level, pal, r, o) else { continue };
+                    let s = faces(s, &[
+                        ("west", min_x || z_edge && dx == 1 - rad),
+                        ("east", max_x || z_edge && dx == rad - 1),
+                        ("north", min_z || x_edge && dz == 1 - rad),
+                        ("south", max_z || x_edge && dz == rad - 1),
+                    ]);
+                    put(level, add(o, [dx, h, dz]), s);
+                }
+            }
+        }
+        for dy in 0..h {
+            if let Some(s) = m.stem.get(&*level, pal, r, o) {
+                put(level, add(o, [0, dy, 0]), s);
+            }
+        }
+    }
+
+    /// `BlockColumnFeature.place`: проверка идёт со сдвигом на клетку вперёд.
+    #[allow(clippy::too_many_arguments)]
+    fn block_column(
+        &self,
+        level: &mut dyn Level,
+        layers: &[(IntP, Provider)],
+        dir: [i32; 3],
+        allowed: &Predicate,
+        tip: bool,
+        r: &mut Worldgen,
+        pos: [i32; 3],
+    ) {
+        let mut heights: Vec<i32> = layers.iter().map(|l| l.0.sample(r)).collect();
+        let total: i32 = heights.iter().sum();
+        if total == 0 {
+            return;
+        }
+        let mut next = add(pos, dir);
+        for y in 0..total {
+            if !allowed.test(&*level, &self.palette, next) {
+                let mut remove = total - y;
+                let order: Vec<usize> = if tip {
+                    (0..heights.len()).collect()
+                } else {
+                    (0..heights.len()).rev().collect()
+                };
+                for i in order {
+                    if remove <= 0 {
+                        break;
+                    }
+                    let take = heights[i].min(remove);
+                    remove -= take;
+                    heights[i] -= take;
+                }
+                break;
+            }
+            next = add(next, dir);
+        }
+        let mut at = pos;
+        for (i, (_, provider)) in layers.iter().enumerate() {
+            for _ in 0..heights[i] {
+                if let Some(s) = provider.get(&*level, &self.palette, r, at)
+                    && level.can_write(at[0], at[2])
+                {
+                    level.set(at[0], at[1], at[2], s);
+                }
+                at = add(at, dir);
+            }
+        }
+    }
+
+    /// `SimpleBlockFeature.place`.
+    fn simple_block(&self, level: &mut dyn Level, p: &Provider, r: &mut Worldgen, pos: [i32; 3]) {
+        let pal = &self.palette;
+        let Some(state) = p.get(&*level, pal, r, pos) else {
+            return;
+        };
+        if !can_survive(&*level, pal, state, pos) {
+            return;
+        }
+        let [x, y, z] = pos;
+        if !level.can_write(x, z) {
+            return;
+        }
+        if matches!(pal.survive.get(state as usize), Some(Survive::Double | Survive::TallSeagrass)) {
+            let above = level.get(x, y + 1, z);
+            if !pal.is_air(above)
+                && (pal.fluid(state) != pal.fluid(above) || !Palette::flag(&pal.replaceable, above))
+            {
+                return;
+            }
+            // `DoublePlantBlock.placeAt`: обе половины, вода из мира.
+            let half = |half: &str, at: [i32; 3]| {
+                let s = pal.with_prop(state, "half", half).unwrap_or(state);
+                let wet = pal.fluid(level.get(at[0], at[1], at[2])) == Fluid::Water;
+                pal.with_prop(s, "waterlogged", if wet { "true" } else { "false" }).unwrap_or(s)
+            };
+            let (lower, upper) = (half("lower", pos), half("upper", [x, y + 1, z]));
+            level.set(x, y, z, lower);
+            level.set(x, y + 1, z, upper);
+        } else {
+            level.set(x, y, z, state);
         }
     }
 
@@ -630,7 +1330,7 @@ impl Features {
         let size_xz = 2 * (ceil_spread + max_radius);
         let size_y = 2 * (2 + max_radius);
         let reachable = (xs..=xs + size_xz).any(|x| {
-            (zs..=zs + size_xz).any(|z| ys <= level.surface(Heightmap::OceanFloor, x, z))
+            (zs..=zs + size_xz).any(|z| ys <= level.surface(Heightmap::OceanFloorWg, x, z))
         });
         if !reachable {
             return;
@@ -748,28 +1448,528 @@ impl Features {
     }
 }
 
+type Read<'a> = dyn Fn(&str, &str) -> Result<Value, String> + 'a;
+
+/// Порядок обхода `HashSet<BlockPos>` Java после вставки точек по порядку:
+/// корзины по `hashCode` при итоговой ёмкости, внутри корзины — порядок
+/// вставки (деревья корзин не моделируются).
+fn java_set_order(points: Vec<[i32; 3]>) -> Vec<[i32; 3]> {
+    let mut seen = HashSet::new();
+    let points: Vec<[i32; 3]> = points.into_iter().filter(|p| seen.insert(*p)).collect();
+    let mut cap = 16usize;
+    while points.len() > cap * 3 / 4 {
+        cap *= 2;
+    }
+    let bucket = |&[x, y, z]: &[i32; 3]| {
+        let h = (y.wrapping_add(z.wrapping_mul(31))).wrapping_mul(31).wrapping_add(x);
+        let h = h ^ ((h as u32) >> 16) as i32;
+        h as u32 as usize & (cap - 1)
+    };
+    let mut order: Vec<(usize, usize)> = points.iter().enumerate().map(|(i, p)| (bucket(p), i)).collect();
+    order.sort_unstable();
+    order.into_iter().map(|(_, i)| points[i]).collect()
+}
+
+/// `PlacementUtils.BIOME_INFO_NOISE`: шум счётчиков по шуму биома.
+fn biome_info_noise() -> &'static Simplex {
+    static NOISE: std::sync::OnceLock<Simplex> = std::sync::OnceLock::new();
+    NOISE.get_or_init(|| Simplex::new(&mut Legacy::new(2345), true))
+}
+
+/// Направления в порядке `Direction`: низ, верх, север, юг, запад, восток.
+const DIRS: [[i32; 3]; 6] = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]];
+const DIRECTION_NAMES: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
+
+fn offset(v: &Value) -> [i32; 3] {
+    let mut o = [0; 3];
+    for (i, c) in v["offset"].as_array().into_iter().flatten().take(3).enumerate() {
+        o[i] = c.as_i64().unwrap_or(0) as i32;
+    }
+    o
+}
+
+fn add(a: [i32; 3], b: [i32; 3]) -> [i32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+/// Список блоков или тег (`HolderSet<Block>`) как маска по состояниям.
+fn block_set(v: &Value, palette: &mut Palette) -> Result<Arc<Vec<bool>>, String> {
+    if let Some(tag) = v.as_str().and_then(|s| s.strip_prefix('#')) {
+        return palette.tag(tag);
+    }
+    let names: Vec<&str> = match v {
+        Value::String(s) => vec![s.as_str()],
+        _ => v.as_array().into_iter().flatten().filter_map(Value::as_str).collect(),
+    };
+    let mut ids = HashSet::new();
+    for n in names {
+        ids.insert(palette.block(n)?);
+    }
+    Ok(Arc::new(palette.block_of.iter().map(|b| ids.contains(b)).collect()))
+}
+
+/// `BlockPredicate` со сдвигом от проверяемой точки.
+#[derive(Clone, Debug)]
+enum Predicate {
+    True,
+    Blocks([i32; 3], Arc<Vec<bool>>),
+    Fluids([i32; 3], Vec<Fluid>),
+    Survive([i32; 3], u32),
+    Solid([i32; 3]),
+    Replaceable([i32; 3]),
+    Sturdy([i32; 3], usize),
+    InsideWorld([i32; 3]),
+    AllOf(Vec<Predicate>),
+    AnyOf(Vec<Predicate>),
+    Not(Box<Predicate>),
+}
+
+impl Predicate {
+    fn parse(v: &Value, palette: &mut Palette) -> Result<Self, String> {
+        let o = offset(v);
+        let list = |palette: &mut Palette| -> Result<Vec<Predicate>, String> {
+            v["predicates"]
+                .as_array()
+                .ok_or("block predicate: no predicates")?
+                .iter()
+                .map(|p| Predicate::parse(p, palette))
+                .collect()
+        };
+        match v["type"].as_str().unwrap_or("") {
+            "minecraft:true" => Ok(Self::True),
+            "minecraft:matching_blocks" => Ok(Self::Blocks(o, block_set(&v["blocks"], palette)?)),
+            "minecraft:matching_block_tag" => {
+                Ok(Self::Blocks(o, palette.tag(v["tag"].as_str().unwrap_or(""))?))
+            }
+            "minecraft:matching_fluids" => {
+                let names: Vec<&str> = match &v["fluids"] {
+                    Value::String(s) => vec![s.as_str()],
+                    f => f.as_array().into_iter().flatten().filter_map(Value::as_str).collect(),
+                };
+                let mut fluids = Vec::new();
+                for n in names {
+                    fluids.extend_from_slice(match n {
+                        "minecraft:empty" => &[Fluid::None][..],
+                        "minecraft:water" => &[Fluid::Water],
+                        "minecraft:flowing_water" => &[Fluid::FlowingWater],
+                        "minecraft:lava" => &[Fluid::Lava],
+                        "minecraft:flowing_lava" => &[Fluid::FlowingLava],
+                        "#minecraft:water" => &[Fluid::Water, Fluid::FlowingWater],
+                        "#minecraft:lava" => &[Fluid::Lava, Fluid::FlowingLava],
+                        other => return Err(format!("fluid {other} is not supported")),
+                    });
+                }
+                Ok(Self::Fluids(o, fluids))
+            }
+            "minecraft:would_survive" => Ok(Self::Survive(o, palette.state(&v["state"])?)),
+            "minecraft:solid" => Ok(Self::Solid(o)),
+            "minecraft:replaceable" => Ok(Self::Replaceable(o)),
+            "minecraft:has_sturdy_face" => {
+                let d = v["direction"].as_str().unwrap_or("");
+                let d = DIRECTION_NAMES
+                    .iter()
+                    .position(|n| *n == d)
+                    .ok_or_else(|| format!("direction {d}"))?;
+                Ok(Self::Sturdy(o, d))
+            }
+            "minecraft:inside_world_bounds" => Ok(Self::InsideWorld(o)),
+            "minecraft:all_of" => Ok(Self::AllOf(list(palette)?)),
+            "minecraft:any_of" => Ok(Self::AnyOf(list(palette)?)),
+            "minecraft:not" => Ok(Self::Not(Box::new(Self::parse(&v["predicate"], palette)?))),
+            other => Err(format!("block predicate {other} is not supported")),
+        }
+    }
+
+    fn test(&self, level: &dyn Level, pal: &Palette, pos: [i32; 3]) -> bool {
+        let at = |o: &[i32; 3]| {
+            let [x, y, z] = add(pos, *o);
+            level.get(x, y, z)
+        };
+        match self {
+            Self::True => true,
+            Self::Blocks(o, mask) => Palette::flag(mask, at(o)),
+            Self::Fluids(o, list) => list.contains(&pal.fluid(at(o))),
+            Self::Survive(o, state) => can_survive(level, pal, *state, add(pos, *o)),
+            Self::Solid(o) => Palette::flag(&pal.solid, at(o)),
+            Self::Replaceable(o) => Palette::flag(&pal.replaceable, at(o)),
+            Self::Sturdy(o, d) => pal.sturdy(at(o), *d),
+            Self::InsideWorld(o) => {
+                let y = pos[1] + o[1];
+                level.min_y() <= y && y < level.min_y() + level.height()
+            }
+            Self::AllOf(list) => list.iter().all(|p| p.test(level, pal, pos)),
+            Self::AnyOf(list) => list.iter().any(|p| p.test(level, pal, pos)),
+            Self::Not(p) => !p.test(level, pal, pos),
+        }
+    }
+}
+
+/// Шум провайдера: `NormalNoise` с сидом `LegacyRandomSource`.
+#[derive(Clone)]
+struct ProviderNoise(Arc<crate::noise::Stack>);
+
+impl std::fmt::Debug for ProviderNoise {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProviderNoise")
+    }
+}
+
+impl ProviderNoise {
+    fn parse(v: &Value, seed: i64) -> Result<Self, String> {
+        Ok(Self(Arc::new(NormalNoise::from_json(v)?.create_legacy(seed))))
+    }
+
+    fn get(&self, x: f64, y: f64, z: f64) -> f32 {
+        self.0.get(x, y, z)
+    }
+}
+
+/// `BlockStateProvider`.
+#[derive(Clone, Debug)]
+enum Provider {
+    Simple(u32),
+    Weighted(i32, Vec<(i32, u32)>),
+    Noise { noise: ProviderNoise, scale: f32, states: Vec<u32> },
+    Threshold {
+        noise: ProviderNoise,
+        scale: f32,
+        threshold: f32,
+        high_chance: f32,
+        default: u32,
+        low: Vec<u32>,
+        high: Vec<u32>,
+    },
+    Dual {
+        noise: ProviderNoise,
+        scale: f32,
+        states: Vec<u32>,
+        slow: ProviderNoise,
+        slow_scale: f32,
+        variety: (i32, i32),
+    },
+    RandomizedInt(Box<Provider>, String, IntP),
+    /// `rotated`: источник и направление (`None` — случайное).
+    Rotated(Box<Provider>, Option<usize>),
+    /// `random_block`: состояния по умолчанию блоков набора.
+    RandomBlock(Vec<u32>),
+    RuleBased(Vec<(Predicate, Provider)>, Option<Box<Provider>>),
+}
+
+impl Provider {
+    fn parse(v: &Value, read: &Read, palette: &mut Palette) -> Result<Self, String> {
+        if let Value::String(name) = v {
+            return Self::parse(&read("block_state_provider", name)?, read, palette);
+        }
+        let Some(kind) = v["type"].as_str() else {
+            return Ok(Self::Simple(palette.state(v)?));
+        };
+        let states = |k: &str, palette: &Palette| -> Result<Vec<u32>, String> {
+            v[k].as_array()
+                .ok_or_else(|| format!("provider: no {k}"))?
+                .iter()
+                .map(|s| palette.state(s))
+                .collect()
+        };
+        let seed = v["seed"].as_i64().unwrap_or(0);
+        let f32_of = |k: &str| v[k].as_f64().unwrap_or(0.0) as f32;
+        match kind {
+            "minecraft:simple_state_provider" => Ok(Self::Simple(palette.state(&v["state"])?)),
+            "minecraft:weighted" => {
+                let mut list = Vec::new();
+                for e in v["entries"].as_array().ok_or("weighted: no entries")? {
+                    list.push((e["weight"].as_i64().unwrap_or(1) as i32, palette.state(&e["data"])?));
+                }
+                let total = list.iter().map(|e| e.0).sum();
+                Ok(Self::Weighted(total, list))
+            }
+            "minecraft:noise" => Ok(Self::Noise {
+                noise: ProviderNoise::parse(&v["noise"], seed)?,
+                scale: f32_of("scale"),
+                states: states("states", palette)?,
+            }),
+            "minecraft:noise_threshold" => Ok(Self::Threshold {
+                noise: ProviderNoise::parse(&v["noise"], seed)?,
+                scale: f32_of("scale"),
+                threshold: f32_of("threshold"),
+                high_chance: f32_of("high_chance"),
+                default: palette.state(&v["default_state"])?,
+                low: states("low_states", palette)?,
+                high: states("high_states", palette)?,
+            }),
+            "minecraft:dual_noise" => {
+                let range = &v["variety"];
+                let (min, max) = match range.as_array() {
+                    Some(a) => (
+                        a.first().and_then(Value::as_i64).unwrap_or(1),
+                        a.get(1).and_then(Value::as_i64).unwrap_or(1),
+                    ),
+                    None => {
+                        let n = range.as_i64().unwrap_or(1);
+                        (n, n)
+                    }
+                };
+                Ok(Self::Dual {
+                    noise: ProviderNoise::parse(&v["noise"], seed)?,
+                    scale: f32_of("scale"),
+                    states: states("states", palette)?,
+                    slow: ProviderNoise::parse(&v["slow_noise"], seed)?,
+                    slow_scale: f32_of("slow_scale"),
+                    variety: (min as i32, max as i32),
+                })
+            }
+            "minecraft:randomized_int" => Ok(Self::RandomizedInt(
+                Box::new(Self::parse(&v["source"], read, palette)?),
+                v["property"].as_str().unwrap_or("").to_owned(),
+                IntP::parse(&v["values"])?,
+            )),
+            "minecraft:rotated" => {
+                let dir = match v["direction"].as_str() {
+                    Some(d) => Some(
+                        DIRECTION_NAMES
+                            .iter()
+                            .position(|n| *n == d)
+                            .ok_or_else(|| format!("direction {d}"))?,
+                    ),
+                    None => None,
+                };
+                Ok(Self::Rotated(Box::new(Self::parse(&v["state"], read, palette)?), dir))
+            }
+            "minecraft:random_block" => {
+                let mask = block_set(&v["blocks"], palette)?;
+                // Порядок элементов набора — порядок блоков в реестре.
+                let mut list: Vec<(u32, u32)> = palette
+                    .blocks
+                    .iter()
+                    .filter(|(_, (_, states))| states.first().is_some_and(|&st| mask[st as usize]))
+                    .filter_map(|(name, (id, _))| Some((*id, *palette.defaults.get(name)?)))
+                    .collect();
+                list.sort_unstable();
+                let defaults = list.into_iter().map(|e| e.1).collect();
+                Ok(Self::RandomBlock(defaults))
+            }
+            "minecraft:rule_based" => {
+                let mut rules = Vec::new();
+                for e in v["rules"].as_array().into_iter().flatten() {
+                    rules.push((
+                        Predicate::parse(&e["if_true"], palette)?,
+                        Self::parse(&e["then"], read, palette)?,
+                    ));
+                }
+                let fallback = match &v["fallback"] {
+                    Value::Null => None,
+                    f => Some(Box::new(Self::parse(f, read, palette)?)),
+                };
+                Ok(Self::RuleBased(rules, fallback))
+            }
+            other => Err(format!("state provider {other} is not supported")),
+        }
+    }
+
+    /// `getOptionalState`: `None`, если провайдеру нечего поставить.
+    fn get(&self, level: &dyn Level, pal: &Palette, r: &mut Worldgen, pos: [i32; 3]) -> Option<u32> {
+        let [x, y, z] = pos;
+        // `NoiseProvider.getRandomState`.
+        let pick = |states: &[u32], v: f32| {
+            let t = ((1.0 + v) / 2.0).clamp(0.0, 0.9999);
+            states[(t * states.len() as f32) as usize]
+        };
+        let sample = |noise: &ProviderNoise, scale: f32| {
+            let s = scale as f64;
+            noise.get(x as f64 * s, y as f64 * s, z as f64 * s)
+        };
+        Some(match self {
+            Self::Simple(s) => *s,
+            Self::Weighted(total, list) => {
+                let mut i = r.next_int_bound(*total);
+                let mut out = list[0].1;
+                for (w, s) in list {
+                    if i < *w {
+                        out = *s;
+                        break;
+                    }
+                    i -= w;
+                }
+                out
+            }
+            Self::Noise { noise, scale, states } => pick(states, sample(noise, *scale)),
+            Self::Threshold { noise, scale, threshold, high_chance, default, low, high } => {
+                if (sample(noise, *scale) as f64) < *threshold as f64 {
+                    low[r.next_int_bound(low.len() as i32) as usize]
+                } else if r.next_float() < *high_chance {
+                    high[r.next_int_bound(high.len() as i32) as usize]
+                } else {
+                    *default
+                }
+            }
+            Self::Dual { noise, scale, states, slow, slow_scale, variety } => {
+                // Медленный шум: `pos * slowScale` во float.
+                let slow_at = |dx: i32, dz: i32| {
+                    let s = *slow_scale;
+                    slow.get(
+                        ((x + dx) as f32 * s) as f64,
+                        (y as f32 * s) as f64,
+                        ((z + dz) as f32 * s) as f64,
+                    )
+                };
+                let v = slow_at(0, 0) as f64;
+                let (lo, hi) = (variety.0 as f64, variety.1 as f64 + 1.0);
+                let t = ((v + 1.0) / 2.0).clamp(0.0, 1.0);
+                let n = (lo + t * (hi - lo)) as i32;
+                let local: Vec<u32> = (0..n)
+                    .map(|i| pick(states, slow_at(i * 54545, i * 34234)))
+                    .collect();
+                pick(&local, sample(noise, *scale))
+            }
+            Self::RandomizedInt(source, prop, values) => {
+                let s = source.get(level, pal, r, pos)?;
+                if pal.prop(s, prop).is_none() {
+                    return Some(s);
+                }
+                let v = values.sample(r);
+                pal.with_prop(s, prop, &v.to_string()).unwrap_or(s)
+            }
+            Self::Rotated(source, dir) => {
+                let d = match dir {
+                    Some(d) => *d,
+                    None => r.next_int_bound(6) as usize,
+                };
+                let s = source.get(level, pal, r, pos)?;
+                let axis = ["y", "y", "z", "z", "x", "x"][d];
+                let s = pal.with_prop(s, "axis", axis).unwrap_or(s);
+                let s = pal.with_prop(s, "facing", DIRECTION_NAMES[d]).unwrap_or(s);
+                if d >= 2 {
+                    pal.with_prop(s, "horizontal_facing", DIRECTION_NAMES[d]).unwrap_or(s)
+                } else {
+                    s
+                }
+            }
+            Self::RandomBlock(list) => {
+                if list.is_empty() {
+                    return None;
+                }
+                list[r.next_int_bound(list.len() as i32) as usize]
+            }
+            Self::RuleBased(rules, fallback) => {
+                for (p, then) in rules {
+                    if p.test(level, pal, pos)
+                        && let Some(s) = then.get(level, pal, r, pos)
+                    {
+                        return Some(s);
+                    }
+                }
+                return fallback.as_ref()?.get(level, pal, r, pos);
+            }
+        })
+    }
+}
+
+/// `BlockState.canSurvive` для классов растений, которые ставят фичи.
+fn can_survive(level: &dyn Level, pal: &Palette, state: u32, [x, y, z]: [i32; 3]) -> bool {
+    let below = level.get(x, y - 1, z);
+    let sup = &pal.support;
+    let flag = Palette::flag;
+    let upper = || pal.prop(state, "half") == Some("upper");
+    let on_lower = || pal.same_block(below, state) && pal.prop(below, "half") == Some("lower");
+    let seagrass = || pal.sturdy(below, 1) && !flag(&sup.no_seagrass, below);
+    const SIDES: [[i32; 2]; 4] = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+    match pal.survive.get(state as usize).copied().unwrap_or_default() {
+        Survive::Always => true,
+        Survive::Vegetation => flag(&sup.vegetation, below),
+        Survive::Dry => flag(&sup.dry, below),
+        Survive::Double => {
+            if upper() {
+                on_lower()
+            } else {
+                flag(&sup.vegetation, below)
+            }
+        }
+        Survive::Seagrass => seagrass(),
+        Survive::TallSeagrass => {
+            if upper() {
+                on_lower()
+            } else {
+                seagrass() && pal.fluid(level.get(x, y, z)) == Fluid::Water
+            }
+        }
+        Survive::SugarCane => {
+            if pal.same_block(below, state) {
+                return true;
+            }
+            flag(&sup.cane, below)
+                && SIDES.iter().any(|[dx, dz]| {
+                    let s = level.get(x + dx, y - 1, z + dz);
+                    pal.fluid(s).is_water() || flag(&sup.cane_adjacent, s)
+                })
+        }
+        Survive::Cactus => {
+            for [dx, dz] in SIDES {
+                let s = level.get(x + dx, y, z + dz);
+                if flag(&pal.solid, s) || pal.fluid(s).is_lava() {
+                    return false;
+                }
+            }
+            (pal.same_block(below, state) || flag(&sup.cactus, below))
+                && !flag(&pal.liquid, level.get(x, y + 1, z))
+        }
+        Survive::SturdyBelow => pal.sturdy(below, 1),
+        Survive::MossyCarpet => {
+            if pal.prop(state, "bottom") == Some("true") {
+                !pal.is_air(below)
+            } else {
+                pal.same_block(below, state) && pal.prop(below, "bottom") == Some("true")
+            }
+        }
+        // Свет на генерации не считается: остаётся проверка опоры.
+        Survive::Mushroom => {
+            flag(&sup.mushroom, below) || (flag(&pal.solid, below) && pal.sturdy(below, 1))
+        }
+        Survive::Snow => {
+            if flag(&sup.no_snow, below) {
+                return false;
+            }
+            flag(&sup.snow, below)
+                || pal.sturdy(below, 1)
+                || (pal.same_block(below, state) && pal.prop(below, "layers") == Some("8"))
+        }
+    }
+}
+
 fn parse_placed(
     v: &Value,
-    read: &dyn Fn(&str, &str) -> Result<Value, String>,
+    read: &Read,
     palette: &mut Palette,
     min_y: i32,
     height: i32,
 ) -> Result<Placed, String> {
+    // Ссылка на `placed_feature` строкой или встроенная фича с размещением.
+    let v = match v {
+        Value::String(name) => &read("placed_feature", name)?,
+        v => v,
+    };
     let feature = match &v["feature"] {
         Value::String(name) => read("feature", name)?,
         inline => inline.clone(),
     };
-    let feature = parse_feature(&feature, palette)?;
+    let feature = parse_feature(&feature, read, palette, min_y, height)?;
     let placement = v["placement"]
         .as_array()
         .into_iter()
         .flatten()
-        .map(|m| Modifier::parse(m, min_y, height))
+        .map(|m| Modifier::parse(m, palette, min_y, height))
         .collect::<Result<_, _>>()?;
     Ok(Placed { feature, placement })
 }
 
-fn parse_feature(v: &Value, palette: &mut Palette) -> Result<Feature, String> {
+fn parse_feature(
+    v: &Value,
+    read: &Read,
+    palette: &mut Palette,
+    min_y: i32,
+    height: i32,
+) -> Result<Feature, String> {
+    let placed = |v: &Value, palette: &mut Palette| -> Result<Arc<Placed>, String> {
+        Ok(Arc::new(parse_placed(v, read, palette, min_y, height)?))
+    };
     let ore = |palette: &mut Palette| -> Result<Ore, String> {
         let mut targets = Vec::new();
         for t in v["targets"].as_array().ok_or("ore: no targets")? {
@@ -784,6 +1984,86 @@ fn parse_feature(v: &Value, palette: &mut Palette) -> Result<Feature, String> {
     match v["type"].as_str().unwrap_or("") {
         "minecraft:ore" => Ok(Feature::Ore(ore(palette)?)),
         "minecraft:scattered_ore" => Ok(Feature::ScatteredOre(ore(palette)?)),
+        "minecraft:simple_block" => Ok(Feature::SimpleBlock(Provider::parse(&v["to_place"], read, palette)?)),
+        "minecraft:random_selector" => {
+            let mut list = Vec::new();
+            for e in v["features"].as_array().ok_or("random_selector: no features")? {
+                list.push((e["chance"].as_f64().unwrap_or(0.0) as f32, placed(&e["feature"], palette)?));
+            }
+            Ok(Feature::RandomSelector(list, placed(&v["default"], palette)?))
+        }
+        "minecraft:random_boolean_selector" => Ok(Feature::BooleanSelector(
+            placed(&v["feature_true"], palette)?,
+            placed(&v["feature_false"], palette)?,
+        )),
+        "minecraft:weighted_random_selector" => {
+            let mut list = Vec::new();
+            for e in v["features"].as_array().ok_or("weighted_random_selector: no features")? {
+                list.push((e["weight"].as_i64().unwrap_or(1) as i32, placed(&e["data"], palette)?));
+            }
+            Ok(Feature::WeightedSelector(list.iter().map(|e| e.0).sum(), list))
+        }
+        kind @ ("minecraft:vegetation_patch" | "minecraft:waterlogged_vegetation_patch") => {
+            let f = |k: &str| v[k].as_f64().unwrap_or(0.0) as f32;
+            Ok(Feature::VegetationPatch(Box::new(Patch {
+                replaceable: block_set(&v["replaceable"], palette)?,
+                ground: Provider::parse(&v["ground_state"], read, palette)?,
+                vegetation: placed(&v["vegetation_feature"], palette)?,
+                inwards: if v["surface"].as_str() == Some("ceiling") { 1 } else { 0 },
+                depth: IntP::parse(&v["depth"])?,
+                extra_bottom: f("extra_bottom_block_chance"),
+                vertical_range: v["vertical_range"].as_i64().unwrap_or(0) as i32,
+                vegetation_chance: f("vegetation_chance"),
+                radius: IntP::parse(&v["xz_radius"])?,
+                extra_edge: f("extra_edge_column_chance"),
+                waterlogged: kind == "minecraft:waterlogged_vegetation_patch",
+            })))
+        }
+        "minecraft:tree" => Ok(Feature::Tree(Arc::new(tree::Tree::parse(
+            v,
+            palette,
+            &mut |v, palette| Provider::parse(v, read, palette),
+            &mut |v, palette| placed(v, palette),
+        )?))),
+        kind @ ("minecraft:huge_red_mushroom" | "minecraft:huge_brown_mushroom") => {
+            Ok(Feature::HugeMushroom(Box::new(Mushroom {
+                red: kind == "minecraft:huge_red_mushroom",
+                cap: Provider::parse(&v["cap_provider"], read, palette)?,
+                stem: Provider::parse(&v["stem_provider"], read, palette)?,
+                radius: v["foliage_radius"].as_i64().unwrap_or(2) as i32,
+                on: Predicate::parse(&v["can_place_on"], palette)?,
+                replaceable: palette.tag("minecraft:replaceable_by_mushrooms")?,
+                leaves: palette.tag("minecraft:leaves")?,
+            })))
+        }
+        "minecraft:fallen_tree" => Ok(Feature::FallenTree(Arc::new(tree::Fallen::parse(
+            v,
+            palette,
+            &mut |v, palette| Provider::parse(v, read, palette),
+            &mut |v, palette| placed(v, palette),
+        )?))),
+        "minecraft:block_column" => {
+            let mut layers = Vec::new();
+            for l in v["layers"].as_array().ok_or("block_column: no layers")? {
+                layers.push((IntP::parse(&l["height"])?, Provider::parse(&l["provider"], read, palette)?));
+            }
+            let d = v["direction"].as_str().unwrap_or("up");
+            let d = DIRECTION_NAMES.iter().position(|n| *n == d).ok_or("block_column: direction")?;
+            Ok(Feature::BlockColumn(
+                layers,
+                DIRS[d],
+                Predicate::parse(&v["allowed_placement"], palette)?,
+                v["prioritize_tip"].as_bool().unwrap_or(false),
+            ))
+        }
+        "minecraft:simple_random_selector" => Ok(Feature::SimpleRandomSelector(
+            v["features"]
+                .as_array()
+                .ok_or("simple_random_selector: no features")?
+                .iter()
+                .map(|e| placed(e, palette))
+                .collect::<Result<_, _>>()?,
+        )),
         other => Err(format!("feature {other} is not supported")),
     }
 }

@@ -83,6 +83,8 @@ pub enum IntP {
     Clamped(Box<IntP>, i32, i32),
     /// `weighted_list`: общий вес и пары (вес, провайдер) по порядку.
     Weighted(i32, Vec<(i32, IntP)>),
+    /// `trapezoid`: min, max, plateau.
+    Trapezoid(i32, i32, i32),
 }
 
 impl IntP {
@@ -108,6 +110,11 @@ impl IntP {
                 Box::new(Self::parse(&v["source"])?),
                 i("min_inclusive")?,
                 i("max_inclusive")?,
+            )),
+            "minecraft:trapezoid" => Ok(Self::Trapezoid(
+                i("min")?,
+                i("max")?,
+                v["plateau"].as_i64().unwrap_or(0) as i32,
             )),
             "minecraft:weighted_list" => {
                 let mut items = Vec::new();
@@ -139,6 +146,19 @@ impl IntP {
                 min + r.next_int_bound(a)
             }
             Self::Clamped(ref source, min, max) => source.sample(r).clamp(min, max),
+            Self::Trapezoid(min, max, plateau) => {
+                if plateau == 0 && max == -min {
+                    return r.next_int_bound(max + 1) - r.next_int_bound(max + 1);
+                }
+                let range = max - min;
+                if plateau == range {
+                    return r.next_int_bound(range + 1) + min;
+                }
+                let start = (range - plateau) / 2;
+                let end = range - start;
+                let a = r.next_int_bound(end + 1);
+                min + a + r.next_int_bound(start + 1)
+            }
             // `WeightedList.getRandomOrThrow`: первый, чей накопленный вес больше броска.
             Self::Weighted(total, ref items) => {
                 let mut pick = r.next_int_bound(total);

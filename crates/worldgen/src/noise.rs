@@ -2,7 +2,7 @@
 //! `NormalNoise`. Всё во float, как в ванили: точечный `get` и объёмный
 //! `add_to_volume` считаются разными путями и должны совпасть с ними бит в бит.
 
-use crate::random::{Positional, Xoroshiro};
+use crate::random::{Bits, Legacy, Positional, Xoroshiro};
 use crate::volume::Volume;
 use serde_json::Value;
 
@@ -87,21 +87,116 @@ pub struct Perlin {
     smear: Option<f64>,
 }
 
+/// Что берут конструкторы шумов: `nextDouble` и `nextInt(bound)` своего
+/// источника (у Xoroshiro `nextInt` свой, по Лемиру).
+pub trait NoiseRandom {
+    fn next_double(&mut self) -> f64;
+    fn next_int_bound(&mut self, bound: i32) -> i32;
+}
+
+impl NoiseRandom for Xoroshiro {
+    fn next_double(&mut self) -> f64 {
+        Xoroshiro::next_double(self)
+    }
+    fn next_int_bound(&mut self, bound: i32) -> i32 {
+        Xoroshiro::next_int_bound(self, bound)
+    }
+}
+
+impl NoiseRandom for Legacy {
+    fn next_double(&mut self) -> f64 {
+        Bits::next_double(self)
+    }
+    fn next_int_bound(&mut self, bound: i32) -> i32 {
+        Bits::next_int_bound(self, bound)
+    }
+}
+
+/// `String.hashCode` Java.
+pub fn java_hash(s: &str) -> i32 {
+    s.encode_utf16()
+        .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
+}
+
+/// Таблица перестановок `GradientNoise`: сдвиги, затем тасовка.
+fn shuffle(r: &mut impl NoiseRandom) -> [u8; 256] {
+    let mut perms = [0u8; 256];
+    for (i, p) in perms.iter_mut().enumerate() {
+        *p = i as u8;
+    }
+    for i in 0..256 {
+        let o = r.next_int_bound(256 - i as i32) as usize;
+        perms.swap(i, o + i);
+    }
+    perms
+}
+
+/// `SimplexNoise` (двумерный срез): `Biome.BIOME_INFO_NOISE` для числа
+/// цветов и травы.
+pub struct Simplex {
+    perms: [u8; 256],
+    off: [f64; 2],
+}
+
+impl Simplex {
+    /// `discard_offset` — `new SimplexNoise(random, true)`: смещения
+    /// бросаются, но умножаются на ноль.
+    pub fn new(r: &mut impl NoiseRandom, discard_offset: bool) -> Self {
+        let scale = if discard_offset { 0.0 } else { 256.0 };
+        let off = [r.next_double() * scale, r.next_double() * scale];
+        r.next_double();
+        Self {
+            perms: shuffle(r),
+            off,
+        }
+    }
+
+    fn permute(&self, x: i32) -> i32 {
+        self.perms[(x & 0xFF) as usize] as i32
+    }
+
+    fn corner(index: i32, x: f64, y: f64) -> f64 {
+        let t = 0.5 - x * x - y * y;
+        if t < 0.0 {
+            return 0.0;
+        }
+        let g = GRADIENT[index as usize];
+        let t = t * t;
+        t * t * (g[0] as f64 * x + g[1] as f64 * y)
+    }
+
+    pub fn get(&self, x: f64, y: f64) -> f32 {
+        let sqrt3 = 3f64.sqrt();
+        let f2 = 0.5 * (sqrt3 - 1.0);
+        let g2 = (3.0 - sqrt3) / 6.0;
+        let (xin, yin) = (x + self.off[0], y + self.off[1]);
+        let s = (xin + yin) * f2;
+        let i = (xin + s).floor() as i32;
+        let j = (yin + s).floor() as i32;
+        let t = (i + j) as f64 * g2;
+        let x0 = xin - (i as f64 - t);
+        let y0 = yin - (j as f64 - t);
+        let (i1, j1) = if x0 > y0 { (1, 0) } else { (0, 1) };
+        let x1 = x0 - i1 as f64 + g2;
+        let y1 = y0 - j1 as f64 + g2;
+        let x2 = x0 - 1.0 + 2.0 * g2;
+        let y2 = y0 - 1.0 + 2.0 * g2;
+        let (ii, jj) = (i & 0xFF, j & 0xFF);
+        let g0 = self.permute(ii + self.permute(jj)) % 12;
+        let g1 = self.permute(ii + i1 + self.permute(jj + j1)) % 12;
+        let gi2 = self.permute(ii + 1 + self.permute(jj + 1)) % 12;
+        (70.0 * (Self::corner(g0, x0, y0) + Self::corner(g1, x1, y1) + Self::corner(gi2, x2, y2))) as f32
+    }
+}
+
 impl Perlin {
-    pub fn new(r: &mut Xoroshiro, smear: Option<f64>) -> Self {
+    pub fn new(r: &mut impl NoiseRandom, smear: Option<f64>) -> Self {
         let off = [
             r.next_double() * 256.0,
             r.next_double() * 256.0,
             r.next_double() * 256.0,
         ];
-        let mut perms = [0u8; 256];
-        for (i, p) in perms.iter_mut().enumerate() {
-            *p = i as u8;
-        }
-        for i in 0..256 {
-            let o = r.next_int_bound(256 - i as i32) as usize;
-            perms.swap(i, o + i);
-        }
+        let perms = shuffle(r);
         Self { perms, off, smear }
     }
 
@@ -339,6 +434,26 @@ impl NormalNoise {
             target * 0.3333333333333333 / (dev * 2f64.sqrt())
         };
         Ok(Self { octaves, norm })
+    }
+
+    /// `create(new WorldgenRandom(new LegacyRandomSource(seed)))`: шум
+    /// провайдеров блоков с собственным сидом.
+    pub fn create_legacy(&self, seed: i64) -> Stack {
+        let mut r = Legacy::new(seed);
+        let first = r.next_long();
+        let second = r.next_long();
+        let mut stack = Stack::default();
+        for &(index, freq, amp) in &self.octaves {
+            let hash = java_hash(&format!("octave_{index}")) as i64;
+            let factor = (self.norm * amp) as f32;
+            stack.add(Perlin::new(&mut Legacy::new(hash ^ first), None), freq, factor);
+            stack.add(
+                Perlin::new(&mut Legacy::new(hash ^ second), None),
+                freq * INPUT_FACTOR,
+                factor,
+            );
+        }
+        stack
     }
 
     /// `NormalNoise.create`: две стопки октав, вторая со сдвигом частоты.

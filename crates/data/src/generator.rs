@@ -15,6 +15,9 @@ const LIGHT_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeLight.class
 /// Выгрузка климатических параметров биомов (`extractor/ChunkwakeBiomes.java`).
 const BIOME_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeBiomes.class");
 
+/// Выгрузка жидкостей и классов блоков для фич (`extractor/ChunkwakeWorldgen.java`).
+const WORLDGEN_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeWorldgen.class");
+
 /// Готовый кэш версии, если он есть: тогда server.jar не нужен.
 pub fn cached(cache_root: &Path, version: &str) -> Option<PathBuf> {
     let target = cache_root.join(version);
@@ -110,6 +113,8 @@ pub fn ensure_generated_with(
         .map_err(|e| io("write", &class_dir.join("ChunkwakeLight.class"), e))?;
     std::fs::write(class_dir.join("ChunkwakeBiomes.class"), BIOME_EXTRACTOR)
         .map_err(|e| io("write", &class_dir.join("ChunkwakeBiomes.class"), e))?;
+    std::fs::write(class_dir.join("ChunkwakeWorldgen.class"), WORLDGEN_EXTRACTOR)
+        .map_err(|e| io("write", &class_dir.join("ChunkwakeWorldgen.class"), e))?;
 
     let mut classpath =
         vec![std::path::absolute(&class_dir).map_err(|e| io("resolve", &class_dir, e))?];
@@ -137,6 +142,16 @@ pub fn ensure_generated_with(
         "ChunkwakeBiomes",
         &tmp_abs.join("reports/biomes.csv"),
         "[3/3] biome extractor",
+        progress,
+    )?;
+    progress("[3/3] extracting block fluids and classes for worldgen");
+    run_extractor(
+        java,
+        &work,
+        &classpath,
+        "ChunkwakeWorldgen",
+        &tmp_abs.join("reports/worldgen_blocks.csv"),
+        "[3/3] worldgen extractor",
         progress,
     )?;
     std::fs::write(tmp_out.join(CACHE_MARKER), "").map_err(|e| io("write", &tmp_out, e))?;

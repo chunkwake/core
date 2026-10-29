@@ -493,8 +493,15 @@ fn compare_blocks(regions: &Path, data: &Path, seed: i64, radius: i32) -> Result
     let (mut checked, mut bad) = (0, 0usize);
     let mut pairs: HashMap<(String, String), usize> = HashMap::new();
     let mut biome_bad = 0usize;
-    for cx in -radius..radius {
-        for cz in -radius..radius {
+    // `CHUNKWAKE_REVERSE=1` — запрашивать чанки в обратном порядке: фичи
+    // через границу чанка зависят от порядка декорации.
+    let mut order: Vec<(i32, i32)> =
+        (-radius..radius).flat_map(|cx| (-radius..radius).map(move |cz| (cx, cz))).collect();
+    if std::env::var_os("CHUNKWAKE_REVERSE").is_some() {
+        order.reverse();
+    }
+    for (cx, cz) in order {
+        {
             let Some(nbt) = chunks.get(&(cx, cz)) else {
                 continue;
             };
@@ -508,6 +515,13 @@ fn compare_blocks(regions: &Path, data: &Path, seed: i64, radius: i32) -> Result
                         let b = short(want.block(x, y, z));
                         if a != b {
                             bad += 1;
+                            // `CHUNKWAKE_WHERE=наше,ваниль` — координаты такой пары.
+                            if let Ok(w) = std::env::var("CHUNKWAKE_WHERE")
+                                && w == format!("{a},{b}")
+                            {
+                                let wy = y as i32 + min_y;
+                                println!("    {} {wy} {}", cx * 16 + x as i32, cz * 16 + z as i32);
+                            }
                             *pairs.entry((a, b)).or_insert(0) += 1;
                         }
                     }
@@ -526,7 +540,12 @@ fn compare_blocks(regions: &Path, data: &Path, seed: i64, radius: i32) -> Result
     }
     let mut top: Vec<_> = pairs.into_iter().collect();
     top.sort_by(|a, b| b.1.cmp(&a.1));
-    for ((a, b), n) in top.iter().take(30) {
+    // `CHUNKWAKE_GREP=подстрока` — все пары с ней вместо первых 30.
+    let grep = std::env::var("CHUNKWAKE_GREP").ok();
+    let shown = top.iter().filter(|((a, b), _)| {
+        grep.as_deref().is_none_or(|g| a.contains(g) || b.contains(g))
+    });
+    for ((a, b), n) in shown.take(if grep.is_some() { usize::MAX } else { 30 }) {
         println!("  {n:>6}  наше {a:<22} ваниль {b}");
     }
     println!("блоков расходится {bad} в {checked} чанках, клеток биомов {biome_bad}");
