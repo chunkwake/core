@@ -14,17 +14,18 @@
 
 ## Генерация и измерения
 
-Мир сейчас плоский: `ChunkColumn::flat` в `crates/server/src/world_setup.rs`. `level-seed` лежит в `server.properties` и в мастере настройки, в структуру мира не читается. Ключа `level-type` в `crates/server/src/config.rs` нет.
+Плоский мир собирается `ChunkColumn::flat`. `level-type=minecraft:normal` заполняет недостающий чанк шумом оверворлда (камень, воздух, вода, лава), расставляет биомы по климату и наносит поверхностный слой (трава, земля, песок, снег, deepslate, руды меди и железа). Карверов, деревьев, травы и построек нет.
 
 | Фича | Статус | Этап | Заметка |
 |---|---|---|---|
 | Плоский мир | готово | M2/M3 | `ChunkColumn::flat`, один оверворлд |
 | Сид из `level-seed` | готово | M7 | Число или `String.hashCode`, пусто — случайный; хранится в `level.dat` (`WorldGenSettings.seed`), клиенту — `hashed_seed` (SHA-256). Плагинам `World.getSeed` пока не отдаётся |
-| Тип мира | частично | M7 | `level-type=minecraft:flat`, `generator-settings` — JSON слоёв или пресет `flat_level_generator_preset` (`classic_flat`, `desert`, `the_void`…); слои и биом в `level.dat`. `normal` и прочие пока падают на плоский мир с предупреждением; у `the_void` нет стартовой платформы |
-| Рельеф оверворлда | нет | M7 | Шум высоты |
-| Биомы и поверхность | нет | M7 | Сетевые id `worldgen/biome` уже грузятся, это не генератор |
-| Пещеры и водоносные слои | нет | M7 | |
-| Руды, деревья, растительность | нет | M7 | |
+| Тип мира | частично | M7 | `level-type=minecraft:flat`, `generator-settings` — JSON слоёв или пресет `flat_level_generator_preset` (`classic_flat`, `desert`, `the_void`…); слои и биом в `level.dat`. `normal` — шум оверворлда, в `level.dat` тип `minecraft:noise`, без поверхности и биомов. `large_biomes`, `amplified`, `single_biome_surface` по-прежнему плоские с предупреждением; у `the_void` нет стартовой платформы |
+| Рельеф оверворлда | готово | M7 | Шум `final_density` и акифер: камень, воздух, вода и лава совпадают с ванилью и подставляются, если чанка нет на диске. Сверка с `server.jar` через region-файлы: расхождения только там, где ванила прогоняет карверы и фичи |
+| Биомы | готово | M7 | `MultiNoiseBiomeSource` по шести осям климата (`temperature`, `vegetation`, `continents`, `erosion`, `depth`, `ridges`) из `noise_settings`: 7594 точки `ParameterPoint` выгружает `ChunkwakeBiomes` в `reports/biomes.csv`. Биом на секцию — палитра 4×4×4 в сети и в Anvil, как у ванили. Сверка с ванилью: 24576 клеток, расхождений нет. Поиск биома — k-d дерево вместо перебора 7594 точек: 45 → 7 мс на чанк |
+| Поверхностный слой | готово | M7 | Все правила `material_rule` (`block`, `sequence`, `condition`, `biome`, `noise_threshold`, `y_above`, `not`, `hole`, `steep`, `vertical_gradient`, `ore_vein`, `bandlands`, `above_preliminary_surface`) и все условия `material_condition`. Трава, земля, песок, гравий, глина, снег, лёд, deepslate ниже нуля, руды меди и железа. Стенд `vanilla_regions` запускает настоящий `server.jar` и сравнивает `.mca`: биомы с «дрожанием» границ (`BiomeManager`), 0 расхождений по клеткам биомов на 64 чанка; оставшиеся расхождения блоков — фичи (руды, растения). `hashed_seed` для клиента теперь little-endian, как у ванили |
+| Пещеры и водоносные слои | готово | M7 | Пещеры из `final_density` (noodle, cheese, spaghetti, pillars) и карверы `cave`, `cave_extra_underground`, `canyon`: соседи в радиусе 8 чанков, `setLargeFeatureSeed`, `CarvingMask`, заливка акифером, `topMaterial` под снятой травой. Сверка с ванилью: 0 расхождений по камню, воздуху и жидкостям, кроме мест фич и структур |
+| Руды, деревья, растительность | частично | M7 | Жилы меди и железа из `ore_vein` в правилах поверхности. Руд по `placed_feature` (уголь, алмаз, красный камень, лазурит), деревьев, травы и цветов нет |
 | Структуры оверворлда | нет | M7 | |
 | Нижний мир: измерение | нет | M7 | Отдельный мир, до его генерации |
 | Генерация Нижнего мира | нет | M7 | После измерения |

@@ -24,8 +24,8 @@ level-name=world
 level-seed=
 level-type=minecraft:flat
 generator-settings=
-view-distance=10
-simulation-distance=10
+view-distance=8
+simulation-distance=6
 gamemode=survival
 difficulty=easy
 hardcore=false
@@ -80,6 +80,10 @@ pub struct Properties {
     pub level_seed: String,
     pub level_type: String,
     pub generator_settings: String,
+    /// Радиус прорисовки: сколько чанков уходит клиенту.
+    pub view_distance: u8,
+    /// Радиус симуляции: где тикают блоки и сущности. Не больше прорисовки.
+    pub simulation_distance: u8,
     /// 0 survival, 1 creative, 2 adventure, 3 spectator.
     pub game_mode: u8,
     pub difficulty: chunkwake_net::survival::Difficulty,
@@ -151,14 +155,18 @@ impl Properties {
         if value("level-name").is_empty() {
             return Err("level-name: enter a world name".into());
         }
-        for key in ["view-distance", "simulation-distance"] {
-            let distance = value(key)
+        let distance = |key: &str| -> Result<u8, String> {
+            let text = value(key);
+            let n = text
                 .parse::<u8>()
                 .map_err(|_| format!("{key}: enter a number from 2 to 32"))?;
-            if !(2..=32).contains(&distance) {
+            if !(2..=32).contains(&n) {
                 return Err(format!("{key}: enter a number from 2 to 32"));
             }
-        }
+            Ok(n)
+        };
+        let view_distance = distance("view-distance")?;
+        let simulation_distance = distance("simulation-distance")?;
         if !["survival", "creative", "adventure", "spectator"].contains(&value("gamemode")) {
             return Err("gamemode: choose survival, creative, adventure, or spectator".into());
         }
@@ -188,6 +196,8 @@ impl Properties {
             level_seed: value("level-seed").into(),
             level_type: value("level-type").into(),
             generator_settings: value("generator-settings").into(),
+            view_distance,
+            simulation_distance,
             game_mode: ["survival", "creative", "adventure", "spectator"]
                 .iter()
                 .position(|m| *m == value("gamemode"))
@@ -324,18 +334,6 @@ fn parse_kv(text: &str) -> HashMap<&str, &str> {
 /// Файл версии внутри кэша данных: с ним server.jar при запуске не нужен.
 pub const CACHED_VERSION: &str = "version.json";
 
-/// `world_version` (DataVersion чанков) из `version.json` в кэше данных.
-pub fn read_world_version(data_dir: &Path) -> Result<i32, String> {
-    let path = data_dir.join(CACHED_VERSION);
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-    v["world_version"]
-        .as_i64()
-        .map(|n| n as i32)
-        .ok_or_else(|| format!("{}: no world_version", path.display()))
-}
-
 /// Версия из готового кэша (`generated/<версия>/version.json`).
 pub fn read_cached_version(data_dir: &Path) -> Option<GameVersion> {
     let text = std::fs::read_to_string(data_dir.join(CACHED_VERSION)).ok()?;
@@ -397,6 +395,31 @@ mod tests {
         assert!(p.enable_status);
         assert_eq!(p.java_path, "java");
         assert_eq!(effective_value("", "gamemode"), "survival");
+        // Прорисовка и симуляция: по умолчанию 8 и 6, как в этом плане.
+        assert_eq!(p.view_distance, 8);
+        assert_eq!(p.simulation_distance, 6);
+        assert_eq!(effective_value("", "view-distance"), "8");
+        assert_eq!(effective_value("", "simulation-distance"), "6");
+    }
+
+    #[test]
+    fn distances_come_from_the_file() {
+        let p = Properties::parse("view-distance=12\nsimulation-distance=4").unwrap();
+        assert_eq!(p.view_distance, 12);
+        assert_eq!(p.simulation_distance, 4);
+        assert_eq!(
+            effective_value("view-distance=5", "view-distance"),
+            "5",
+            "файл важнее умолчания"
+        );
+    }
+
+    #[test]
+    fn simulation_is_clamped_by_view_distance() {
+        // Сервер отдаёт клиенту прорисовку не меньше симуляции; за пределами
+        // прорисовки чанков нет, поэтому симуляция обрезается.
+        let p = Properties::parse("view-distance=4\nsimulation-distance=16").unwrap();
+        assert_eq!(p.simulation_distance.min(p.view_distance), 4);
     }
 
     #[test]

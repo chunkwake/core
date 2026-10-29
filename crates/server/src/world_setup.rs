@@ -4,31 +4,59 @@ mod level;
 
 use crate::config::Properties;
 use crate::storage::WorldStorage;
-use chunkwake_data::packets::PacketTable;
-use chunkwake_data::registries::RegistryData;
-use chunkwake_data::world::{Blocks, DimensionType};
+use chunkwake_data::boot::Boot;
+use chunkwake_data::registries::{Builtin, RegistryData};
+use chunkwake_data::world::Blocks;
 use chunkwake_net::play::{PlayPlan, SurvivalData, WorldSpec};
 use chunkwake_net::survival::Difficulty;
 use chunkwake_protocol::play::{Login, SpawnInfo};
 use chunkwake_world::{ChunkColumn, bits_for};
 use std::path::Path;
+use std::sync::Arc;
 
-const VIEW_DISTANCE: i32 = 8;
 const DIMENSION: &str = "overworld";
+
+/// Части образа, которые нужны только выживанию.
+struct Loaded {
+    hardness: Vec<f32>,
+    sturdy: Vec<u8>,
+    requires_tool: Vec<bool>,
+    item_info: Vec<chunkwake_data::world::ItemInfo>,
+    tools: Vec<Option<chunkwake_data::tools::Tool>>,
+    recipes: chunkwake_data::recipes::Recipes,
+    enchanting: chunkwake_data::enchanting::Enchanting,
+    enchantment_names: Vec<String>,
+    enchantment_lines: Vec<String>,
+}
 
 pub fn build_play_plan(
     data_dir: &Path,
-    packets: &PacketTable,
-    registries: &RegistryData,
+    boot: Boot,
     props: &Properties,
     world_dir: &Path,
 ) -> Result<(PlayPlan, WorldStorage), String> {
     let s = |e: chunkwake_data::DataError| e.to_string();
     let t = std::time::Instant::now();
-    let blocks = Blocks::load(data_dir).map_err(s)?;
-    tracing::debug!("blocks: {:?}", t.elapsed());
-    let dim = DimensionType::load(data_dir, DIMENSION).map_err(s)?;
-    let data_version = crate::config::read_world_version(data_dir)?;
+    let Boot {
+        world_version,
+        packets,
+        builtin,
+        registries,
+        blocks,
+        dimension: dim,
+        light: light_rows,
+        items: item_info,
+        tools,
+        recipes,
+        enchanting,
+        enchantment_names,
+        enchantment_lines,
+        hardness,
+        sturdy,
+        requires_tool,
+        ..
+    } = boot;
+    let data_version = world_version;
     let level = level::load_or_create(
         world_dir,
         data_dir,
@@ -37,19 +65,24 @@ pub fn build_play_plan(
         &props.generator_settings,
         data_version,
     )?;
-    tracing::info!(
-        "world: seed {}, flat {}",
-        level.seed,
-        level
-            .flat
-            .layers
-            .iter()
-            .map(|(b, h)| format!("{h}×{}", b.trim_start_matches("minecraft:")))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    match &level.kind {
+        level::Kind::Noise => tracing::info!("world: seed {}, noise", level.seed),
+        level::Kind::Flat(flat) => tracing::info!(
+            "world: seed {}, flat {}",
+            level.seed,
+            flat.layers
+                .iter()
+                .map(|(b, h)| format!("{h}×{}", b.trim_start_matches("minecraft:")))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+    let biome_name = match &level.kind {
+        level::Kind::Flat(flat) => flat.biome.as_str(),
+        level::Kind::Noise => "minecraft:plains",
+    };
     let biome = registries
-        .network_id("worldgen/biome", &level.flat.biome)
+        .network_id("worldgen/biome", biome_name)
         .or_else(|_| registries.network_id("worldgen/biome", "minecraft:plains"))
         .map_err(s)?;
     let biomes: Vec<String> = registries
@@ -59,15 +92,24 @@ pub fn build_play_plan(
         .map(|r| r.entries.clone())
         .unwrap_or_default();
     let biome_count = biomes.len().max(1);
+    // Имя → сетевой ID: климат выбирает биом по имени, сервер по своему реестру.
+    let biome_ids: std::collections::HashMap<String, u32> = biomes
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.clone(), i as u32))
+        .collect();
 
     let mut states = Vec::new();
-    for (name, n) in &level.flat.layers {
-        states.push((blocks.default_state(name).map_err(s)? as u32, *n));
+    if let level::Kind::Flat(flat) = &level.kind {
+        for (name, n) in &flat.layers {
+            states.push((blocks.default_state(name).map_err(s)? as u32, *n));
+        }
     }
-    let top = level.flat.layers.iter().map(|l| l.1).sum::<usize>() as f64;
-    let light = std::sync::Arc::new(chunkwake_world::light::LightTable::new(
-        chunkwake_data::world::load_light(data_dir).map_err(s)?,
-    ));
+    let top = match &level.kind {
+        level::Kind::Flat(flat) => flat.layers.iter().map(|l| l.1).sum::<usize>() as f64,
+        level::Kind::Noise => 0.0,
+    };
+    let light = std::sync::Arc::new(chunkwake_world::light::LightTable::new(light_rows));
     let mut chunk = ChunkColumn::flat(
         &states,
         dim.sections(),
@@ -77,7 +119,59 @@ pub fn build_play_plan(
         dim.has_skylight,
     );
     chunkwake_world::light::relight_column(&mut chunk, &light);
-    tracing::debug!("light and template chunk: {:?}", t.elapsed());
+
+    let block_bits = bits_for(blocks.state_count());
+    let biome_bits = bits_for(biome_count);
+    let (terrain, spawn_noise, sea_level, is_flat) = match &level.kind {
+        level::Kind::Flat(_) => (None, None, 63, true),
+        level::Kind::Noise => {
+            let mut loaded = chunkwake_worldgen::Generator::load_with_version(
+                data_dir,
+                level.seed,
+                Some(data_version),
+            )?;
+            if loaded.min_y != dim.min_y || loaded.height != dim.height {
+                return Err(format!(
+                    "noise settings y {} height {} do not match the overworld y {} height {}",
+                    loaded.min_y, loaded.height, dim.min_y, dim.height
+                ));
+            }
+            // Биомы выбирает климат (`MultiNoiseBiomeSource`), а не один plains.
+            loaded.bind_biomes(biome_ids.clone());
+            let climate = loaded.has_biomes();
+            let noise = std::sync::Arc::new(loaded);
+            let sea = noise.sea_level;
+            let stand = stand_on_solid(&noise.fill(0, 0), noise.height, dim.min_y);
+            let biome_id = biome as u32;
+            let sky = dim.has_skylight;
+            // Шум, поверхность и карверы — один конвейер генератора.
+            let state = |name: &str| blocks.default_state(name).ok().map(|s| s as u32);
+            let overworld = chunkwake_worldgen::pipeline::Overworld::new(noise, &state, &biome_ids)?;
+            if !overworld.has_surface() {
+                tracing::warn!("no material_rule in the data cache: the world keeps bare stone");
+            }
+            // Свет считает пролив при отправке: здесь только блоки.
+            let built: std::sync::Arc<dyn Fn(i32, i32) -> ChunkColumn + Send + Sync> =
+                std::sync::Arc::new(move |cx, cz| {
+                    let chunk = overworld.chunk(cx, cz);
+                    match chunk.biomes {
+                        Some(biomes) => ChunkColumn::from_blocks_with_biomes(
+                            &chunk.states, &biomes, block_bits, biome_bits, sky,
+                        ),
+                        None => ChunkColumn::from_blocks(
+                            &chunk.states, biome_id, block_bits, biome_bits, sky,
+                        ),
+                    }
+                });
+            if !climate {
+                tracing::warn!(
+                    "reports/biomes.csv is missing: the noise world keeps a single biome. \
+                     Delete the data cache or rebuild it to get real biomes"
+                );
+            }
+            (Some(built), Some(stand), sea, false)
+        }
+    };
 
     let dimension = format!("minecraft:{DIMENSION}");
     let login = Login {
@@ -85,8 +179,9 @@ pub fn build_play_plan(
         hardcore: false,
         dimensions: vec![dimension.clone()],
         max_players: props.max_players as i32,
-        view_distance: VIEW_DISTANCE,
-        simulation_distance: VIEW_DISTANCE,
+        view_distance: props.view_distance as i32,
+        // За пределами прорисовки чанков нет, поэтому симуляция не больше неё.
+        simulation_distance: props.simulation_distance.min(props.view_distance) as i32,
         reduced_debug_info: false,
         show_death_screen: true,
         limited_crafting: false,
@@ -99,24 +194,30 @@ pub fn build_play_plan(
             game_mode: props.game_mode,
             previous_game_mode: None,
             is_debug: false,
-            is_flat: true,
+            is_flat,
             portal_cooldown: 0,
-            sea_level: 63,
+            sea_level,
         },
         online_mode: props.online_mode,
         enforces_secure_chat: false,
     };
-    // Центр блока над верхним слоем; пустой мир — у уровня моря.
-    let spawn = if level.flat.layers.iter().any(|(b, _)| b != "minecraft:air") {
+    // Плоский мир: центр блока над верхним слоем, пустой — у уровня моря.
+    // Нормальный: верхний твёрдый блок столбца 8,8 чанка 0,0.
+    tracing::debug!("world: level and template {} ms", t.elapsed().as_millis());
+    let spawn = if let Some(y) = spawn_noise {
+        [8.5, y, 8.5]
+    } else if let level::Kind::Flat(flat) = &level.kind
+        && flat.layers.iter().any(|(b, _)| b != "minecraft:air")
+    {
         [8.5, dim.min_y as f64 + top, 8.5]
     } else {
         [8.5, 64.0, 8.5]
     };
     let player_type =
-        chunkwake_data::registries::builtin_id(data_dir, "entity_type", "minecraft:player")
+        chunkwake_data::registries::builtin_id_of(&builtin, "entity_type", "minecraft:player")
             .map_err(s)?;
     // Предмет ставит блок с тем же именем (stone → stone), кроме пыли, семян и ягод.
-    let items = chunkwake_data::registries::builtin_entries(data_dir, "item").map_err(s)?;
+    let items = chunkwake_data::registries::builtin_entries_of(&builtin, "item").map_err(s)?;
     let mut item_blocks = vec![None; items.values().max().map_or(0, |&m| m as usize + 1)];
     for (name, id) in &items {
         if name != "minecraft:air" {
@@ -124,25 +225,31 @@ pub fn build_play_plan(
             item_blocks[*id as usize] = blocks.default_state(block).ok().map(|s| s as u32);
         }
     }
+    // Имя состояния нужно и миру, и правилам инструментов — один общий список.
+    let block_names = Arc::new(state_names(&blocks));
+    let loaded = Loaded {
+        hardness,
+        sturdy,
+        requires_tool,
+        item_info,
+        tools,
+        recipes,
+        enchanting,
+        enchantment_names,
+        enchantment_lines,
+    };
     let world = WorldSpec {
         template: chunk.clone(),
+        terrain,
         light: light.clone(),
         min_y: dim.min_y,
         item_blocks,
         spawn,
         player_type,
-        block_names: std::sync::Arc::new(
-            (0..blocks.state_count() as u32)
-                .map(|id| {
-                    blocks
-                        .state(id)
-                        .map_or_else(String::new, |(n, _)| n.to_owned())
-                })
-                .collect(),
-        ),
+        block_names: block_names.clone(),
         parsers: {
             let parser = |name| {
-                chunkwake_data::registries::builtin_id(data_dir, "command_argument_type", name)
+                chunkwake_data::registries::builtin_id_of(&builtin, "command_argument_type", name)
                     .map_err(s)
             };
             chunkwake_protocol::text::CommandParsers {
@@ -152,9 +259,19 @@ pub fn build_play_plan(
                 resource: parser("minecraft:resource")?,
             }
         },
-        survival: survival_data(data_dir, &blocks, &items, registries, props.difficulty)?,
+        survival: survival_data(
+            data_dir,
+            &blocks,
+            &block_names,
+            &items,
+            &builtin,
+            &registries,
+            loaded,
+            props.difficulty,
+        )?,
     };
-    let plan = PlayPlan::build(packets, login, world, props.compression_threshold).map_err(s)?;
+    let plan = PlayPlan::build(&packets, login, world, props.compression_threshold).map_err(s)?;
+    tracing::debug!("world: play plan {} ms", t.elapsed().as_millis());
     let storage = WorldStorage::new(
         world_dir,
         blocks,
@@ -164,84 +281,56 @@ pub fn build_play_plan(
         chunk,
         light,
         items,
-        chunkwake_data::registries::builtin_entries(data_dir, "mob_effect").map_err(s)?,
+        chunkwake_data::registries::builtin_entries_of(&builtin, "mob_effect").map_err(s)?,
     );
     Ok((plan, storage))
 }
 
-/// Твёрдость и дроп блоков, размеры стопок, типы урона.
-fn survival_data(
-    data_dir: &Path,
+/// Имя блока по каждому состоянию: пустая строка у пропущенных ID.
+fn state_names(blocks: &Blocks) -> Vec<String> {
+    (0..blocks.state_count() as u32)
+        .map(|id| {
+            blocks
+                .state(id)
+                .map_or_else(String::new, |(n, _)| n.to_owned())
+        })
+        .collect()
+}
+
+/// Состояния сундуков: по состоянию свойства `facing`, `type` и `waterlogged`.
+fn chest_states(
     blocks: &Blocks,
-    items: &std::collections::HashMap<String, i32>,
-    registries: &RegistryData,
-    difficulty: Difficulty,
-) -> Result<SurvivalData, String> {
-    let s = |e: chunkwake_data::DataError| e.to_string();
-    let t = std::time::Instant::now();
-    let loot = chunkwake_data::world::load_block_loot_cached(data_dir).map_err(s)?;
-    tracing::debug!("loot tables: {:?}", t.elapsed());
-    let damage =
-        chunkwake_data::registries::builtin_id(data_dir, "data_component_type", "minecraft:damage")
-            .map_err(s)?;
-    chunkwake_protocol::inventory::DAMAGE_COMPONENT
-        .store(damage, std::sync::atomic::Ordering::Relaxed);
-    let enchantments;
-    let enchantment_names;
-    // Чары, имя и описание предметов: номера компонентов и сетевые ID чар.
-    {
-        use chunkwake_protocol::components as c;
-        let component = |name| {
-            chunkwake_data::registries::builtin_id(data_dir, "data_component_type", name).map_err(s)
-        };
-        let order = std::sync::atomic::Ordering::Relaxed;
-        c::ENCHANTMENTS_COMPONENT.store(component("minecraft:enchantments")?, order);
-        c::CUSTOM_NAME_COMPONENT.store(component("minecraft:custom_name")?, order);
-        c::LORE_COMPONENT.store(component("minecraft:lore")?, order);
-        c::STORED_ENCHANTMENTS_COMPONENT.store(component("minecraft:stored_enchantments")?, order);
-        c::CUSTOM_DATA_COMPONENT.store(component("minecraft:custom_data")?, order);
-        c::CHARGED_PROJECTILES_COMPONENT.store(component("minecraft:charged_projectiles")?, order);
-        let names: Vec<String> = registries
-            .synchronized
-            .iter()
-            .find(|r| r.name == "enchantment")
-            .map(|r| r.entries.clone())
-            .unwrap_or_default();
-        enchantments = enchantment_lines(data_dir, &names);
-        enchantment_names = names.clone();
-        c::set_enchantments(names);
-    }
-    let _ = chunkwake_world::BLOCK_ENTITY_TYPES
-        .set(chunkwake_data::registries::builtin_ids(data_dir, "block_entity_type").map_err(s)?);
-    // Сундуки: свойства `facing`/`type`/`waterlogged` каждого состояния.
-    let chests: std::collections::HashMap<u32, chunkwake_net::play::ChestState> =
-        (0..blocks.state_count() as u32)
-            .filter_map(|id| {
-                let (name, props) = blocks.state(id)?;
-                let trapped = match name {
-                    "minecraft:chest" => false,
-                    "minecraft:trapped_chest" => true,
-                    _ => return None,
-                };
-                let get = |k: &str| props.iter().find(|(p, _)| p == k).map(|(_, v)| v.as_str());
-                let facing = ["north", "east", "south", "west"]
-                    .iter()
-                    .position(|f| Some(*f) == get("facing"))? as u8;
-                let kind = ["single", "left", "right"]
-                    .iter()
-                    .position(|t| Some(*t) == get("type"))? as u8;
-                Some((
-                    id,
-                    chunkwake_net::play::ChestState {
-                        trapped,
-                        facing,
-                        kind,
-                        waterlogged: get("waterlogged") == Some("true"),
-                    },
-                ))
-            })
-            .collect();
-    // Печи: состояние → то же с другим `lit`.
+) -> std::collections::HashMap<u32, chunkwake_net::play::ChestState> {
+    (0..blocks.state_count() as u32)
+        .filter_map(|id| {
+            let (name, props) = blocks.state(id)?;
+            let trapped = match name {
+                "minecraft:chest" => false,
+                "minecraft:trapped_chest" => true,
+                _ => return None,
+            };
+            let get = |k: &str| props.iter().find(|(p, _)| p == k).map(|(_, v)| v.as_str());
+            let facing = ["north", "east", "south", "west"]
+                .iter()
+                .position(|f| Some(*f) == get("facing"))? as u8;
+            let kind = ["single", "left", "right"]
+                .iter()
+                .position(|t| Some(*t) == get("type"))? as u8;
+            Some((
+                id,
+                chunkwake_net::play::ChestState {
+                    trapped,
+                    facing,
+                    kind,
+                    waterlogged: get("waterlogged") == Some("true"),
+                },
+            ))
+        })
+        .collect()
+}
+
+/// Состояние печи → то же с другим `lit`.
+fn furnace_states(blocks: &Blocks) -> std::collections::HashMap<u32, u32> {
     let mut by_props: std::collections::HashMap<(String, Vec<(String, String)>), u32> =
         Default::default();
     for id in 0..blocks.state_count() as u32 {
@@ -251,7 +340,7 @@ fn survival_data(
             by_props.insert((name.to_owned(), props.to_vec()), id);
         }
     }
-    let furnace_lit = by_props
+    by_props
         .iter()
         .filter_map(|((name, props), &id)| {
             let flipped: Vec<(String, String)> = props
@@ -267,19 +356,74 @@ fn survival_data(
                 .collect();
             Some((id, *by_props.get(&(name.clone(), flipped))?))
         })
-        .collect();
-    let recipes = chunkwake_data::recipes::load_recipes(data_dir, items).map_err(s)?;
-    tracing::debug!("recipes: {}", recipes.len());
-    let menu = |name| chunkwake_data::registries::builtin_id(data_dir, "menu", name).map_err(s);
-    let enchanting = chunkwake_data::enchanting::load(data_dir, &enchantment_names).map_err(s)?;
+        .collect()
+}
+
+/// Ноги игрока на блоке над верхним камнем столбца 8,8. Нет камня — уровень моря.
+fn stand_on_solid(fill: &[chunkwake_worldgen::Fill], height: i32, min_y: i32) -> f64 {
+    for y in (0..height).rev() {
+        let i = ((y * 16 + 8) * 16 + 8) as usize;
+        if fill.get(i) == Some(&chunkwake_worldgen::Fill::Solid) {
+            return (min_y + y + 1) as f64;
+        }
+    }
+    64.0
+}
+
+/// Твёрдость и дроп блоков, размеры стопок, типы урона.
+#[allow(clippy::too_many_arguments)]
+fn survival_data(
+    data_dir: &Path,
+    blocks: &Blocks,
+    block_names: &Arc<Vec<String>>,
+    items: &std::collections::HashMap<String, i32>,
+    builtin: &Builtin,
+    registries: &RegistryData,
+    loaded: Loaded,
+    difficulty: Difficulty,
+) -> Result<SurvivalData, String> {
+    let s = |e: chunkwake_data::DataError| e.to_string();
+    // Таблицы лута разбираются в фоне: приём игроков их не ждёт.
+    let loot = chunkwake_data::world::LootSource::load_in_background(data_dir);
+    let damage = chunkwake_data::registries::builtin_id_of(
+        builtin,
+        "data_component_type",
+        "minecraft:damage",
+    )
+    .map_err(s)?;
+    chunkwake_protocol::inventory::DAMAGE_COMPONENT
+        .store(damage, std::sync::atomic::Ordering::Relaxed);
+    // Чары, имя и описание предметов: номера компонентов и сетевые ID чар.
+    {
+        use chunkwake_protocol::components as c;
+        let component = |name| {
+            chunkwake_data::registries::builtin_id_of(builtin, "data_component_type", name)
+                .map_err(s)
+        };
+        let order = std::sync::atomic::Ordering::Relaxed;
+        c::ENCHANTMENTS_COMPONENT.store(component("minecraft:enchantments")?, order);
+        c::CUSTOM_NAME_COMPONENT.store(component("minecraft:custom_name")?, order);
+        c::LORE_COMPONENT.store(component("minecraft:lore")?, order);
+        c::STORED_ENCHANTMENTS_COMPONENT.store(component("minecraft:stored_enchantments")?, order);
+        c::CUSTOM_DATA_COMPONENT.store(component("minecraft:custom_data")?, order);
+        c::CHARGED_PROJECTILES_COMPONENT.store(component("minecraft:charged_projectiles")?, order);
+        c::set_enchantments(loaded.enchantment_names.clone());
+    }
+    let _ = chunkwake_world::BLOCK_ENTITY_TYPES
+        .set(chunkwake_data::registries::builtin_ids_of(builtin, "block_entity_type").map_err(s)?);
+    // Сундуки: свойства `facing`/`type`/`waterlogged` каждого состояния.
+    let chests = chest_states(blocks);
+    let furnace_lit = furnace_states(blocks);
+    let recipes = loaded.recipes;
     tracing::info!(
         "enchanting: {} enchantments ({} on the table), {} enchantable items",
-        enchanting.defs.len(),
-        enchanting.defs.iter().filter(|d| d.in_table).count(),
-        enchanting.enchantable.len()
+        loaded.enchanting.defs.len(),
+        loaded.enchanting.defs.iter().filter(|d| d.in_table).count(),
+        loaded.enchanting.enchantable.len()
     );
-    Ok(SurvivalData {
-        enchantments,
+    let menu = |name| chunkwake_data::registries::builtin_id_of(builtin, "menu", name).map_err(s);
+    let survival = SurvivalData {
+        enchantments: loaded.enchantment_lines,
         recipes,
         menu_chest: menu("minecraft:generic_9x3")?,
         menu_double_chest: menu("minecraft:generic_9x6")?,
@@ -298,40 +442,40 @@ fn survival_data(
         menu_crafting: menu("minecraft:crafting")?,
         menu_enchantment: menu("minecraft:enchantment")?,
         menu_grindstone: menu("minecraft:grindstone")?,
-        enchanting,
+        enchanting: loaded.enchanting,
         menu_furnace: [
             menu("minecraft:furnace")?,
             menu("minecraft:blast_furnace")?,
             menu("minecraft:smoker")?,
         ],
         furnace_lit,
-        effects: chunkwake_data::registries::builtin_entries(data_dir, "mob_effect").map_err(s)?,
-        attributes: chunkwake_data::registries::builtin_entries(data_dir, "attribute")
+        effects: chunkwake_data::registries::builtin_entries_of(builtin, "mob_effect")
             .map_err(s)?,
-        sounds: chunkwake_data::registries::builtin_entries(data_dir, "sound_event").map_err(s)?,
-        attribute_speed: chunkwake_data::registries::builtin_id(
-            data_dir,
+        attributes: chunkwake_data::registries::builtin_entries_of(builtin, "attribute")
+            .map_err(s)?,
+        sounds: chunkwake_data::registries::builtin_entries_of(builtin, "sound_event")
+            .map_err(s)?,
+        attribute_speed: chunkwake_data::registries::builtin_id_of(
+            builtin,
             "attribute",
             "minecraft:movement_speed",
         )
         .map_err(s)?,
-        attribute_jump: chunkwake_data::registries::builtin_id(
-            data_dir,
+        attribute_jump: chunkwake_data::registries::builtin_id_of(
+            builtin,
             "attribute",
             "minecraft:jump_strength",
         )
         .map_err(s)?,
-        attribute_gravity: chunkwake_data::registries::builtin_id(
-            data_dir,
+        attribute_gravity: chunkwake_data::registries::builtin_id_of(
+            builtin,
             "attribute",
             "minecraft:gravity",
         )
         .map_err(s)?,
-        placement: chunkwake_net::placement::Placement::new(
-            (0..blocks.state_count() as u32)
-                .map(|id| blocks.state(id).map(|(n, p)| (n.to_owned(), p.to_vec())))
-                .collect(),
-            chunkwake_data::world::load_sturdy(data_dir).map_err(s)?,
+        placement: chunkwake_net::placement::Placement::with_states(
+            blocks.states(),
+            loaded.sturdy,
             chunkwake_data::world::read_json(
                 &data_dir.join("data/minecraft/tags/block/walls.json"),
             )
@@ -342,33 +486,14 @@ fn survival_data(
             .filter_map(|v| v.as_str().map(str::to_owned))
             .collect(),
         ),
-        hardness: chunkwake_data::world::load_hardness(data_dir).map_err(s)?,
-        requires_tool: chunkwake_data::world::load_requires_tool(data_dir).map_err(s)?,
-        tools: {
-            let t = std::time::Instant::now();
-            let v = chunkwake_data::tools::load_tools_cached(data_dir, items).map_err(s)?;
-            tracing::debug!("tools: {:?}", t.elapsed());
-            v
-        },
-        block_names: (0..blocks.state_count() as u32)
-            .map(|id| {
-                blocks
-                    .state(id)
-                    .map_or(String::new(), |(n, _)| n.to_owned())
-            })
-            .collect(),
-        block_types: chunkwake_data::registries::builtin_ids(data_dir, "block").map_err(s)?,
-        block_defaults: (0..blocks.state_count() as u32)
-            .filter_map(|id| blocks.state(id).map(|(n, _)| n.to_owned()))
-            .filter_map(|n| blocks.default_state(&n).ok().map(|s| (n, s as u32)))
-            .collect(),
+        hardness: loaded.hardness,
+        requires_tool: loaded.requires_tool,
+        tools: loaded.tools,
+        block_names: block_names.clone(),
+        block_types: chunkwake_data::registries::builtin_ids_of(builtin, "block").map_err(s)?,
+        block_defaults: blocks.defaults(),
         loot,
-        items: {
-            let t = std::time::Instant::now();
-            let v = chunkwake_data::world::load_items_cached(data_dir, items).map_err(s)?;
-            tracing::debug!("item components: {:?}", t.elapsed());
-            v
-        },
+        items: loaded.item_info,
         damage_fall: registries
             .network_id("damage_type", "minecraft:fall")
             .map_err(s)?,
@@ -384,26 +509,26 @@ fn survival_data(
         damage_arrow: registries
             .network_id("damage_type", "minecraft:arrow")
             .map_err(s)?,
-        snowball_entity_type: chunkwake_data::registries::builtin_id(
-            data_dir,
+        snowball_entity_type: chunkwake_data::registries::builtin_id_of(
+            builtin,
             "entity_type",
             "minecraft:snowball",
         )
         .map_err(s)?,
-        egg_entity_type: chunkwake_data::registries::builtin_id(
-            data_dir,
+        egg_entity_type: chunkwake_data::registries::builtin_id_of(
+            builtin,
             "entity_type",
             "minecraft:egg",
         )
         .map_err(s)?,
-        arrow_entity_type: chunkwake_data::registries::builtin_id(
-            data_dir,
+        arrow_entity_type: chunkwake_data::registries::builtin_id_of(
+            builtin,
             "entity_type",
             "minecraft:arrow",
         )
         .map_err(s)?,
-        firework_entity_type: chunkwake_data::registries::builtin_id(
-            data_dir,
+        firework_entity_type: chunkwake_data::registries::builtin_id_of(
+            builtin,
             "entity_type",
             "minecraft:firework_rocket",
         )
@@ -414,7 +539,8 @@ fn survival_data(
         difficulty: std::sync::atomic::AtomicU8::new(difficulty.id()),
         item_ids: items.clone(),
         potions: {
-            let map = chunkwake_data::registries::builtin_entries(data_dir, "potion").map_err(s)?;
+            let map =
+                chunkwake_data::registries::builtin_entries_of(builtin, "potion").map_err(s)?;
             let len = map
                 .values()
                 .copied()
@@ -428,27 +554,27 @@ fn survival_data(
             }
             names
         },
-        potion_component: chunkwake_data::registries::builtin_id(
-            data_dir,
+        potion_component: chunkwake_data::registries::builtin_id_of(
+            builtin,
             "data_component_type",
             "minecraft:potion_contents",
         )
         .map_err(s)?,
-        item_entity_type: chunkwake_data::registries::builtin_id(
-            data_dir,
+        item_entity_type: chunkwake_data::registries::builtin_id_of(
+            builtin,
             "entity_type",
             "minecraft:item",
         )
         .map_err(s)?,
-        orb_entity_type: chunkwake_data::registries::builtin_id(
-            data_dir,
+        orb_entity_type: chunkwake_data::registries::builtin_id_of(
+            builtin,
             "entity_type",
             "minecraft:experience_orb",
         )
         .map_err(s)?,
         mob_entity_types: {
             let id =
-                |n| chunkwake_data::registries::builtin_id(data_dir, "entity_type", n).map_err(s);
+                |n| chunkwake_data::registries::builtin_id_of(builtin, "entity_type", n).map_err(s);
             [
                 id("minecraft:cow")?,
                 id("minecraft:pig")?,
@@ -456,53 +582,8 @@ fn survival_data(
                 id("minecraft:chicken")?,
             ]
         },
-    })
-}
-
-/// Чары для плагинов: `имя макс_уровень вес цена_наковальни мин_база мин_шаг макс_база
-/// макс_шаг сокровище проклятие` (из `data/minecraft/enchantment` и тегов).
-fn enchantment_lines(data_dir: &Path, names: &[String]) -> Vec<String> {
-    let base = data_dir.join("data/minecraft");
-    let read = |p: std::path::PathBuf| {
-        std::fs::read_to_string(p)
-            .ok()
-            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
     };
-    let tag = |t: &str| -> Vec<String> {
-        read(base.join(format!("tags/enchantment/{t}.json")))
-            .and_then(|v| v.get("values")?.as_array().cloned())
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_owned))
-            .collect()
-    };
-    let (treasure, curse) = (tag("treasure"), tag("curse"));
-    names
-        .iter()
-        .map(|name| {
-            let path = name.strip_prefix("minecraft:").unwrap_or(name);
-            let v = read(base.join(format!("enchantment/{path}.json"))).unwrap_or_default();
-            let n = |k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(1);
-            let cost = |k: &str, f: &str| {
-                v.get(k)
-                    .and_then(|c| c.get(f))
-                    .and_then(|x| x.as_i64())
-                    .unwrap_or(0)
-            };
-            format!(
-                "{name} {} {} {} {} {} {} {} {} {}",
-                n("max_level"),
-                n("weight"),
-                n("anvil_cost"),
-                cost("min_cost", "base"),
-                cost("min_cost", "per_level_above_first"),
-                cost("max_cost", "base"),
-                cost("max_cost", "per_level_above_first"),
-                u8::from(treasure.contains(name)),
-                u8::from(curse.contains(name)),
-            )
-        })
-        .collect()
+    Ok(survival)
 }
 
 /// Предмет, который ставит блок с другим именем (`ItemNameBlockItem`).

@@ -7,10 +7,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Пишется последним; меняется при изменении состава кэша.
-const CACHE_MARKER: &str = ".chunkwake-cache-v8";
+const CACHE_MARKER: &str = ".chunkwake-cache-v9";
 
 /// Выгрузка свойств света (исходник рядом: `extractor/ChunkwakeLight.java`).
 const LIGHT_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeLight.class");
+
+/// Выгрузка климатических параметров биомов (`extractor/ChunkwakeBiomes.java`).
+const BIOME_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeBiomes.class");
 
 /// Готовый кэш версии, если он есть: тогда server.jar не нужен.
 pub fn cached(cache_root: &Path, version: &str) -> Option<PathBuf> {
@@ -96,28 +99,17 @@ pub fn ensure_generated_with(
             "no reports/packets.json produced".into(),
         ));
     }
-    progress("[2/2] extracting block light and hardness");
-    extract_light(java, &work, &tmp_abs.join("reports/light.csv"), progress)?;
-    std::fs::write(tmp_out.join(CACHE_MARKER), "").map_err(|e| io("write", &tmp_out, e))?;
-    std::fs::rename(&tmp_out, &target).map_err(|e| io("rename", &tmp_out, e))?;
-    Ok(target)
-}
-
-/// Свет состояний блоков: в отчётах генератора его нет, поэтому запускаем
-/// маленький класс на распакованных бандлером `versions/` и `libraries/`.
-fn extract_light(
-    java: &Path,
-    work: &Path,
-    out: &Path,
-    progress: &dyn Fn(&str),
-) -> Result<(), DataError> {
+    // Свет и климат биомов в отчётах генератора не лежат: их выгружают
+    // маленькие классы на распакованных бандлером `versions/` и `libraries/`.
+    let class_dir = work.join("chunkwake-extractor");
     let io = |what: &str, p: &Path, e: std::io::Error| {
         DataError::Io(format!("{what} {}: {e}", p.display()))
     };
-    let class_dir = work.join("chunkwake-extractor");
     std::fs::create_dir_all(&class_dir).map_err(|e| io("create", &class_dir, e))?;
-    let class = class_dir.join("ChunkwakeLight.class");
-    std::fs::write(&class, LIGHT_EXTRACTOR).map_err(|e| io("write", &class, e))?;
+    std::fs::write(class_dir.join("ChunkwakeLight.class"), LIGHT_EXTRACTOR)
+        .map_err(|e| io("write", &class_dir.join("ChunkwakeLight.class"), e))?;
+    std::fs::write(class_dir.join("ChunkwakeBiomes.class"), BIOME_EXTRACTOR)
+        .map_err(|e| io("write", &class_dir.join("ChunkwakeBiomes.class"), e))?;
 
     let mut classpath =
         vec![std::path::absolute(&class_dir).map_err(|e| io("resolve", &class_dir, e))?];
@@ -126,19 +118,55 @@ fn extract_light(
     }
     let classpath = std::env::join_paths(&classpath)
         .map_err(|e| DataError::Generator(format!("classpath: {e}")))?;
+
+    progress("[2/3] extracting block light and hardness");
+    run_extractor(
+        java,
+        &work,
+        &classpath,
+        "ChunkwakeLight",
+        &tmp_abs.join("reports/light.csv"),
+        "[2/3] light extractor",
+        progress,
+    )?;
+    progress("[3/3] extracting overworld biome parameters");
+    run_extractor(
+        java,
+        &work,
+        &classpath,
+        "ChunkwakeBiomes",
+        &tmp_abs.join("reports/biomes.csv"),
+        "[3/3] biome extractor",
+        progress,
+    )?;
+    std::fs::write(tmp_out.join(CACHE_MARKER), "").map_err(|e| io("write", &tmp_out, e))?;
+    std::fs::rename(&tmp_out, &target).map_err(|e| io("rename", &tmp_out, e))?;
+    Ok(target)
+}
+
+/// Один выгрузчик: класс на общем classpath, результат — файл `out`.
+fn run_extractor(
+    java: &Path,
+    work: &Path,
+    classpath: &std::ffi::OsStr,
+    main: &str,
+    out: &Path,
+    step: &str,
+    progress: &dyn Fn(&str),
+) -> Result<(), DataError> {
     let mut cmd = Command::new(java);
     cmd.current_dir(work)
         .arg("-cp")
         .arg(classpath)
-        .arg("ChunkwakeLight")
+        .arg(main)
         .arg(out);
-    let output = run(cmd, "[2/2] light extractor", progress)
+    let output = run(cmd, step, progress)
         .map_err(|e| DataError::Generator(format!("cannot start {}: {e}", java.display())))?;
     if !output.status.success() || !out.is_file() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let tail: Vec<&str> = stderr.lines().rev().take(5).collect();
         return Err(DataError::Generator(format!(
-            "light extractor exit {}: {}",
+            "{main} exit {}: {}",
             output.status,
             tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
         )));

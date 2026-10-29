@@ -47,6 +47,39 @@ impl TickQueue {
         }
         due
     }
+
+    /// То же, но берёт только позиции, прошедшие `include`; остальные остаются
+    /// в очереди на свой срок. Нужно, когда часть мира не тикает: отложенная
+    /// работа за пределами симуляции не должна пропадать.
+    pub fn take_due_in(&mut self, now: u64, include: impl Fn([i32; 3]) -> bool) -> Vec<[i32; 3]> {
+        let mut due = Vec::new();
+        let mut keep: Vec<(u64, Vec<[i32; 3]>)> = Vec::new();
+        while let Some(entry) = self.by_time.first_entry() {
+            if *entry.key() > now {
+                break;
+            }
+            let (t, list) = entry.remove_entry();
+            let mut rest = Vec::new();
+            for p in list {
+                if self.at.get(&p) != Some(&t) {
+                    continue; // устаревшая запись
+                }
+                if include(p) {
+                    self.at.remove(&p);
+                    due.push(p);
+                } else {
+                    rest.push(p);
+                }
+            }
+            if !rest.is_empty() {
+                keep.push((t, rest));
+            }
+        }
+        for (t, list) in keep {
+            self.by_time.entry(t).or_default().extend(list);
+        }
+        due
+    }
 }
 
 #[cfg(test)]
@@ -65,6 +98,22 @@ mod tests {
         assert_eq!(q.take_due(5), vec![[1, 0, 0], [0, 0, 0]]);
         assert!(q.contains([2, 0, 0]));
         assert_eq!(q.take_due(9), vec![[2, 0, 0]]);
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn take_due_in_keeps_outside_ticks_for_later() {
+        let mut q = TickQueue::default();
+        q.schedule([0, 0, 0], 1, false);
+        q.schedule([100, 0, 0], 1, false);
+        q.schedule([100, 0, 0], 1, false); // повтор не плодит записей
+        q.schedule([0, 0, 0], 2, false);
+        // Снаружи симуляции — только чанк (0, 0).
+        let inside = |p: [i32; 3]| p[0] >> 4 == 0;
+        assert_eq!(q.take_due_in(5, inside), vec![[0, 0, 0]]);
+        // Дальняя позиция не пропала: её тик ещё ждёт своего часа.
+        assert!(q.contains([100, 0, 0]));
+        assert_eq!(q.take_due_in(5, |_| true), vec![[100, 0, 0]]);
         assert!(q.is_empty());
     }
 }

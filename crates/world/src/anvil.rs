@@ -3,7 +3,9 @@
 
 use crate::light::LightLayer;
 use crate::nbt::{self, Compound, Tag};
-use crate::{ChunkColumn, Section, bits_for, emit_packed, first_seen_palette, palette_index};
+use crate::{
+    Biomes, ChunkColumn, Section, bits_for, emit_packed, first_seen_palette, pack, palette_index,
+};
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
@@ -15,6 +17,8 @@ use std::path::{Path, PathBuf};
 pub trait Names {
     fn block_name(&self, id: u32) -> Option<(&str, &[(String, String)])>;
     fn block_id(&self, name: &str, props: &[(String, String)]) -> Option<u32>;
+    /// Состояние по умолчанию: нужно, когда в файле нет свойств блока.
+    fn block_default(&self, name: &str) -> Option<u32>;
     fn biome_name(&self, id: u32) -> Option<&str>;
     fn biome_id(&self, name: &str) -> Option<u32>;
 }
@@ -69,21 +73,27 @@ pub fn chunk_to_nbt(
     for (i, s) in c.sections.iter().enumerate() {
         let (palette, data) = palettize(s, 4);
         let mut states = Compound::new();
+        // NBT-список однотипен: либо все записи строки (ни у одного блока нет
+        // свойств), либо все компаунды `{"id", "properties"}`.
+        let any_props = palette
+            .iter()
+            .any(|&id| names.block_name(id).is_some_and(|(_, p)| !p.is_empty()));
         let palette = palette
             .iter()
             .map(|&id| {
                 let (name, props) = names
                     .block_name(id)
                     .ok_or_else(|| format!("unknown block state {id}"))?;
-                let mut e = Compound::new();
-                e.insert("Name".into(), string(name));
-                if !props.is_empty() {
-                    let p = props
-                        .iter()
-                        .map(|(k, v)| (k.clone(), string(v)))
-                        .collect::<BTreeMap<_, _>>();
-                    e.insert("Properties".into(), Tag::Compound(p));
+                if !any_props {
+                    return Ok(Tag::String(name.to_owned()));
                 }
+                let mut e = Compound::new();
+                e.insert("id".into(), string(name));
+                let p = props
+                    .iter()
+                    .map(|(k, v)| (k.clone(), string(v)))
+                    .collect::<BTreeMap<_, _>>();
+                e.insert("properties".into(), Tag::Compound(p));
                 Ok(Tag::Compound(e))
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -91,11 +101,34 @@ pub fn chunk_to_nbt(
         if let Some(d) = data {
             states.insert("data".into(), Tag::LongArray(d));
         }
-        let biome = names
-            .biome_name(s.biome)
-            .ok_or_else(|| format!("unknown biome {}", s.biome))?;
+        let cells = s.biome.cells();
+        let mut bpalette: Vec<&str> = Vec::new();
+        let mut bidx = [0u32; 64];
+        for (i, &c) in cells.iter().enumerate() {
+            let name = names
+                .biome_name(c)
+                .ok_or_else(|| format!("unknown biome {c}"))?;
+            let slot = match bpalette.iter().position(|&p| p == name) {
+                Some(slot) => slot,
+                None => {
+                    bpalette.push(name);
+                    bpalette.len() - 1
+                }
+            };
+            bidx[i] = slot as u32;
+        }
         let mut biomes = Compound::new();
-        biomes.insert("palette".into(), Tag::List(vec![string(biome)]));
+        biomes.insert(
+            "palette".into(),
+            Tag::List(bpalette.iter().map(|n| string(n)).collect()),
+        );
+        if bpalette.len() > 1 {
+            let bits = bits_for(bpalette.len()).max(1);
+            biomes.insert(
+                "data".into(),
+                Tag::LongArray(pack(&bidx, bits).into_iter().map(|v| v as i64).collect()),
+            );
+        }
 
         let mut sec = Compound::new();
         sec.insert("Y".into(), Tag::Byte((f.min_section + i as i32) as i8));
@@ -143,6 +176,44 @@ pub fn chunk_to_nbt(
     Ok(root)
 }
 
+/// Биомы секции из `biomes`: палитра с `data` или один биом без данных.
+/// Неизвестные имена — `default`, как и раньше с единственным биомом.
+fn biomes_from_nbt(sec: &Compound, names: &dyn Names, default: u32) -> [u32; 64] {
+    let mut out = [default; 64];
+    let Some(b) = sec.get("biomes").and_then(Tag::as_compound) else {
+        return out;
+    };
+    let Some(palette) = b.get("palette").and_then(Tag::as_list) else {
+        return out;
+    };
+    let ids: Vec<u32> = palette
+        .iter()
+        .map(|e| {
+            e.as_str()
+                .and_then(|n| names.biome_id(n))
+                .unwrap_or(default)
+        })
+        .collect();
+    let Some(first) = ids.first().copied() else {
+        return out;
+    };
+    out.fill(first);
+    if ids.len() == 1 {
+        return out;
+    }
+    let Some(data) = b.get("data").and_then(Tag::as_long_array) else {
+        return out;
+    };
+    let bits = bits_for(ids.len()).max(1);
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = ids
+            .get(unpack_at(data, bits, i) as usize)
+            .copied()
+            .unwrap_or(default);
+    }
+    out
+}
+
 /// Чанк из NBT. Размеры и биты берутся из `template`; секции, которых нет в
 /// файле, остаются пустыми (воздух), неизвестные блоки становятся воздухом.
 /// Второе значение — `true`, если свет прочитан из файла; иначе его надо
@@ -154,7 +225,10 @@ pub fn chunk_from_nbt(
     names: &dyn Names,
 ) -> Result<(ChunkColumn, bool), String> {
     let mut c = template.clone();
-    let default_biome = template.sections.first().map_or(0, |s| s.biome);
+    let default_biome = template
+        .sections
+        .first()
+        .map_or(0, |s| s.biome.uniform().unwrap_or(0));
     for s in &mut c.sections {
         *s = Section::filled(0, default_biome);
     }
@@ -190,14 +264,9 @@ pub fn chunk_from_nbt(
                 None => lit = false,
             }
         }
-        let biome = sec
-            .get("biomes")
-            .and_then(Tag::as_compound)
-            .and_then(|b| b.get("palette")?.as_list()?.first()?.as_str())
-            .and_then(|n| names.biome_id(n))
-            .unwrap_or(default_biome);
+        let biome = biomes_from_nbt(sec, names, default_biome);
         let Some(states) = sec.get("block_states").and_then(Tag::as_compound) else {
-            *slot = Section::filled(0, biome);
+            *slot = Section::with_biomes(0, &biome);
             continue;
         };
         let palette: Vec<u32> = states
@@ -205,34 +274,57 @@ pub fn chunk_from_nbt(
             .and_then(Tag::as_list)
             .ok_or("block_states without palette")?
             .iter()
-            .map(|e| {
-                let e = e.as_compound()?;
-                let name = e.get("Name")?.as_str()?;
-                let props: Vec<(String, String)> = e
-                    .get("Properties")
-                    .and_then(Tag::as_compound)
-                    .map(|p| {
-                        p.iter()
-                            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                names.block_id(name, &props)
+            .map(|e| -> Option<u32> {
+                // 26.3: без свойств — просто строка `"minecraft:stone"`,
+                // со свойствами — `{"id": "…", "properties": {…}}`
+                // (старый `Name`/`Properties` тоже читаем).
+                let (name, props): (&str, Vec<(String, String)>) = match e {
+                    Tag::String(s) => (s.as_str(), Vec::new()),
+                    Tag::Compound(c) => {
+                        let name = c
+                            .get("")
+                            .and_then(Tag::as_str)
+                            .or_else(|| c.get("id").and_then(Tag::as_str))
+                            .or_else(|| c.get("Name").and_then(Tag::as_str))?;
+                        let props = c
+                            .get("properties")
+                            .or_else(|| c.get("Properties"))
+                            .and_then(Tag::as_compound)
+                            .map(|p| {
+                                p.iter()
+                                    .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        (name, props)
+                    }
+                    _ => return None,
+                };
+                match names.block_id(name, &props) {
+                    Some(id) => Some(id),
+                    // В файле нет свойств, а у блока они есть (`deepslate`):
+                    // берём состояние по умолчанию, иначе блок станет воздухом.
+                    None if props.is_empty() => names.block_default(name),
+                    None => None,
+                }
             })
             .map(|id| id.unwrap_or(0))
             .collect();
+
         *slot = match (
             palette.as_slice(),
             states.get("data").and_then(Tag::as_long_array),
         ) {
-            ([], _) => Section::filled(0, biome),
-            ([one], _) | ([one, ..], None) => Section::filled(*one, biome),
+            ([], _) => Section::with_biomes(0, &biome),
+            ([one], _) | ([one, ..], None) => Section::with_biomes(*one, &biome),
             (_, Some(data)) => {
                 let bits = bits_for(palette.len()).max(4);
-                Section::from_states(biome, |i| {
+                let mut s = Section::from_states(biome[0], |i| {
                     let id = unpack_at(data, bits, i) as usize;
                     palette.get(id).copied().unwrap_or(0)
-                })
+                });
+                s.biome = Biomes::from_cells(&biome);
+                s
             }
         };
     }
@@ -451,11 +543,24 @@ mod tests {
         fn block_id(&self, name: &str, props: &[(String, String)]) -> Option<u32> {
             (0..4).find(|&id| self.block_name(id) == Some((name, props)))
         }
+        fn block_default(&self, name: &str) -> Option<u32> {
+            self.block_id(name, &[])
+        }
         fn biome_name(&self, id: u32) -> Option<&str> {
-            (id == 0).then_some("minecraft:plains")
+            match id {
+                0 => Some("minecraft:plains"),
+                1 => Some("minecraft:desert"),
+                2 => Some("minecraft:forest"),
+                _ => None,
+            }
         }
         fn biome_id(&self, name: &str) -> Option<u32> {
-            (name == "minecraft:plains").then_some(0)
+            match name {
+                "minecraft:plains" => Some(0),
+                "minecraft:desert" => Some(1),
+                "minecraft:forest" => Some(2),
+                _ => None,
+            }
         }
     }
 
@@ -484,6 +589,23 @@ mod tests {
     }
 
     #[test]
+    fn mixed_biomes_roundtrip_through_anvil() {
+        let mut c = ChunkColumn::flat(&[], 1, 1, 2, 0, true);
+        let mut cells = vec![1u32; 64];
+        cells[3] = 2;
+        c.sections[0].biome = Biomes::from_cells(&cells);
+        let nbt = chunk_to_nbt(&c, (0, 0), F, &Test).unwrap();
+        let sec = nbt["sections"].as_list().unwrap()[0].as_compound().unwrap();
+        let biomes = sec["biomes"].as_compound().unwrap();
+        assert_eq!(biomes["palette"].as_list().unwrap().len(), 2);
+        assert!(biomes.get("data").is_some(), "palette of 2 needs data");
+        let (back, _) = chunk_from_nbt(&nbt, &c, F, &Test).unwrap();
+        assert_eq!(back.sections[0].biome, c.sections[0].biome);
+        assert_eq!(back.sections[0].biome_at(3, 0, 0), 2);
+        assert_eq!(back.sections[0].biome_at(0, 0, 0), 1);
+    }
+
+    #[test]
     fn reused_slot_palette_is_first_seen() {
         let mut c = ChunkColumn::flat(&[], 1, 0, 2, 0, true);
         c.set_block(0, 0, 0, 1);
@@ -499,9 +621,14 @@ mod tests {
             .iter()
             .map(|e| {
                 let e = e.as_compound().unwrap();
-                let name = e["Name"].as_str().unwrap();
+                // 26.3: имя без свойств лежит под пустым ключом.
+                let name = e
+                    .get("")
+                    .and_then(Tag::as_str)
+                    .or_else(|| e.get("id").and_then(Tag::as_str))
+                    .unwrap();
                 let props: Vec<(String, String)> = e
-                    .get("Properties")
+                    .get("properties")
                     .and_then(Tag::as_compound)
                     .map(|p| {
                         p.iter()

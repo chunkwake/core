@@ -25,6 +25,13 @@ pub struct Ids {
     section_blocks_update: i32,
     sb_accept_teleportation: i32,
     sb_player_loaded: i32,
+    add_entity: i32,
+    move_entity_pos_rot: i32,
+    move_entity_pos: i32,
+    move_entity_rot: i32,
+    teleport_entity: i32,
+    remove_entities: i32,
+    set_time: i32,
 }
 
 impl Ids {
@@ -48,6 +55,13 @@ impl Ids {
             section_blocks_update: id(Play, C, "section_blocks_update")?,
             sb_accept_teleportation: id(Play, S, "accept_teleportation")?,
             sb_player_loaded: id(Play, S, "player_loaded")?,
+            add_entity: id(Play, C, "add_entity")?,
+            move_entity_pos_rot: id(Play, C, "move_entity_pos_rot")?,
+            move_entity_pos: id(Play, C, "move_entity_pos")?,
+            move_entity_rot: id(Play, C, "move_entity_rot")?,
+            teleport_entity: id(Play, C, "teleport_entity")?,
+            remove_entities: id(Play, C, "remove_entities")?,
+            set_time: id(Play, C, "set_time")?,
         })
     }
 }
@@ -69,7 +83,130 @@ pub enum Event {
     BlockUpdate([i32; 3], i32),
     BlockUpdates(Vec<([i32; 3], i32)>),
     KeepAlive,
+    /// Сущность появилась (или переехала телепортом): её текущая позиция.
+    EntitySpawned {
+        entity_id: i32,
+        kind: i32,
+        pos: [f64; 3],
+    },
+    /// Сущность сдвинулась на дельту (в блоках) относительно прежней позиции.
+    EntityMoved {
+        entity_id: i32,
+        delta: [f64; 3],
+    },
+    EntityRemoved(Vec<i32>),
+    /// Игровое время из `set_time`: сервер шлёт раз в 20 тиков.
+    GameTime(i64),
     Other,
+}
+
+/// Что бот знает о чужой сущности.
+#[derive(Debug, Clone, Copy)]
+pub struct EntityTrack {
+    pub entity_id: i32,
+    /// Тип сущности из `add_entity`; -1 — неизвестен (только телепорт).
+    pub kind: i32,
+    /// Последняя известная позиция.
+    pub pos: [f64; 3],
+    /// Просуммированный путь по горизонтали (блоков).
+    pub path: f64,
+    /// Сколько пакетов движения получено.
+    pub moves: u32,
+    /// Сколько тиков сущность уже наблюдается.
+    pub watched: u32,
+    /// Самый длинный шаг за один пакет (блоков): скорость, когда моб идёт.
+    pub longest_step: f64,
+}
+
+/// Учёт чужих сущностей по событиям клиента: путь и число пакетов движения.
+#[derive(Default)]
+pub struct Entities {
+    by_id: std::collections::HashMap<i32, EntityTrack>,
+}
+
+impl Entities {
+    /// Применяет событие; `true` — оно относилось к сущности.
+    pub fn apply(&mut self, event: &Event) -> bool {
+        match event {
+            Event::EntitySpawned {
+                entity_id,
+                kind,
+                pos,
+            } => {
+                self.by_id.insert(
+                    *entity_id,
+                    EntityTrack {
+                        entity_id: *entity_id,
+                        kind: if *kind >= 0 { *kind } else { 0 },
+                        pos: *pos,
+                        path: 0.0,
+                        moves: 0,
+                        watched: 0,
+                        longest_step: 0.0,
+                    },
+                );
+                true
+            }
+            Event::EntityMoved { entity_id, delta } => {
+                if let Some(e) = self.by_id.get_mut(entity_id) {
+                    e.pos = [
+                        e.pos[0] + delta[0],
+                        e.pos[1] + delta[1],
+                        e.pos[2] + delta[2],
+                    ];
+                    e.path += (delta[0] * delta[0] + delta[2] * delta[2]).sqrt();
+                    e.longest_step = e
+                        .longest_step
+                        .max((delta[0] * delta[0] + delta[2] * delta[2]).sqrt());
+                    e.moves += 1;
+                }
+                true
+            }
+            Event::EntityRemoved(ids) => {
+                for id in ids {
+                    self.by_id.remove(id);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Тик наблюдения для всех сущностей.
+    pub fn tick(&mut self) {
+        for e in self.by_id.values_mut() {
+            e.watched += 1;
+        }
+    }
+
+    pub fn get(&self, entity_id: i32) -> Option<&EntityTrack> {
+        self.by_id.get(&entity_id)
+    }
+
+    /// Все сущности, отсортированные по id.
+    pub fn all(&self) -> Vec<EntityTrack> {
+        let mut v: Vec<_> = self.by_id.values().copied().collect();
+        v.sort_by_key(|e| e.entity_id);
+        v
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_id.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_id.is_empty()
+    }
+
+    /// Сбросить накопленный путь, оставив позиции: удобно для замера за окно.
+    pub fn reset_paths(&mut self) {
+        for e in self.by_id.values_mut() {
+            e.path = 0.0;
+            e.moves = 0;
+            e.watched = 0;
+            e.longest_step = 0.0;
+        }
+    }
 }
 
 impl Client {
@@ -227,6 +364,62 @@ impl Client {
                 ));
             }
             Ok(Event::BlockUpdates(blocks))
+        } else if id == self.ids.add_entity {
+            let entity_id = r.var_int().map_err(err)?;
+            let _uuid = r.uuid().map_err(err)?;
+            let kind = r.var_int().map_err(err)?;
+            let pos = [
+                r.f64().map_err(err)?,
+                r.f64().map_err(err)?,
+                r.f64().map_err(err)?,
+            ];
+            Ok(Event::EntitySpawned {
+                entity_id,
+                kind,
+                pos,
+            })
+        } else if id == self.ids.teleport_entity {
+            let entity_id = r.var_int().map_err(err)?;
+            let pos = [
+                r.f64().map_err(err)?,
+                r.f64().map_err(err)?,
+                r.f64().map_err(err)?,
+            ];
+            Ok(Event::EntitySpawned {
+                entity_id,
+                kind: -1,
+                pos,
+            })
+        } else if id == self.ids.move_entity_rot {
+            Ok(Event::Other)
+        } else if id == self.ids.move_entity_pos_rot || id == self.ids.move_entity_pos {
+            let entity_id = r.var_int().map_err(err)?;
+            let props = r.var_int().map_err(err)?;
+            // Младший бит — onGround, остальные — число шагов (0 — линейная дельта).
+            let steps = props >> 1;
+            let mut raw = [0i64; 3];
+            for v in &mut raw {
+                *v = if steps == 0 {
+                    r.u16().map_err(err)? as i16 as i64
+                } else {
+                    r.var_int().map_err(err)? as i64
+                };
+            }
+            let scale = 4096.0 / (1i64 << steps.min(30)) as f64;
+            Ok(Event::EntityMoved {
+                entity_id,
+                delta: raw.map(|v| v as f64 / scale),
+            })
+        } else if id == self.ids.remove_entities {
+            let count = r.var_int().map_err(err)?;
+            let mut ids = Vec::new();
+            for _ in 0..count.max(0) {
+                ids.push(r.var_int().map_err(err)?);
+            }
+            Ok(Event::EntityRemoved(ids))
+        } else if id == self.ids.set_time {
+            let game_time = r.i64().map_err(err)?;
+            Ok(Event::GameTime(game_time))
         } else {
             Ok(Event::Other)
         }

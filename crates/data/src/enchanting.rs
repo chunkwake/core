@@ -289,6 +289,52 @@ pub fn load(root: &Path, names: &[String]) -> Result<Enchanting, DataError> {
     Ok(out)
 }
 
+/// Строки чар для плагинов: `имя макс_уровень вес цена_наковальни мин_база мин_шаг
+/// макс_база макс_шаг сокровище проклятие` (из `data/minecraft/enchantment` и тегов).
+pub fn plugin_lines(root: &Path, names: &[String]) -> Vec<String> {
+    let base = root.join("data/minecraft");
+    let read = |p: std::path::PathBuf| {
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    };
+    let tag = |t: &str| -> Vec<String> {
+        read(base.join(format!("tags/enchantment/{t}.json")))
+            .and_then(|v| v.get("values")?.as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect()
+    };
+    let (treasure, curse) = (tag("treasure"), tag("curse"));
+    names
+        .iter()
+        .map(|name| {
+            let path = name.strip_prefix("minecraft:").unwrap_or(name);
+            let v = read(base.join(format!("enchantment/{path}.json"))).unwrap_or_default();
+            let n = |k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(1);
+            let cost = |k: &str, f: &str| {
+                v.get(k)
+                    .and_then(|c| c.get(f))
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(0)
+            };
+            format!(
+                "{name} {} {} {} {} {} {} {} {} {}",
+                n("max_level"),
+                n("weight"),
+                n("anvil_cost"),
+                cost("min_cost", "base"),
+                cost("min_cost", "per_level_above_first"),
+                cost("max_cost", "base"),
+                cost("max_cost", "per_level_above_first"),
+                u8::from(treasure.contains(name)),
+                u8::from(curse.contains(name)),
+            )
+        })
+        .collect()
+}
+
 /// Разворачивает теги `data/<ns>/tags/<kind>/<path>.json` (с вложенными) в имена.
 struct Tags<'a> {
     root: &'a Path,

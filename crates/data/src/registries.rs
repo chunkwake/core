@@ -61,11 +61,14 @@ pub struct RegistryTags {
     pub tags: Vec<(String, Vec<i32>)>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct RegistryData {
     pub synchronized: Vec<Registry>,
     pub tags: Vec<RegistryTags>,
 }
+
+/// `reports/registries.json`: реестр → запись → числовой ID.
+pub type Builtin = HashMap<String, HashMap<String, i32>>;
 
 impl RegistryData {
     /// Сетевой ID записи синхронизируемого реестра (`worldgen/biome`, `minecraft:plains`).
@@ -80,8 +83,14 @@ impl RegistryData {
 
     /// `root` — каталог вывода генератора (содержит `data/` и `reports/`).
     pub fn load(root: &Path) -> Result<Self, DataError> {
+        Self::load_with(root, &load_builtin(root)?)
+    }
+
+    /// То же, но `registries.json` уже прочитан вызывающим: в образе запуска
+    /// он разбирается один раз на весь сервер.
+    pub fn load_with(root: &Path, builtin: &Builtin) -> Result<Self, DataError> {
         let data = root.join("data/minecraft");
-        let mut ids: HashMap<String, HashMap<String, i32>> = load_builtin_ids(root)?;
+        let mut ids = builtin.clone();
 
         let mut synchronized = Vec::new();
         for name in SYNCHRONIZED {
@@ -141,14 +150,25 @@ fn read_json(path: &Path) -> Result<serde_json::Value, DataError> {
 
 /// Все записи встроенного реестра (`item`) с их ID.
 pub fn builtin_entries(root: &Path, registry: &str) -> Result<HashMap<String, i32>, DataError> {
-    load_builtin_ids(root)?
-        .remove(registry)
+    builtin_entries_of(&load_builtin(root)?, registry)
+}
+
+/// То же для уже прочитанного `registries.json`.
+pub fn builtin_entries_of(builtin: &Builtin, registry: &str) -> Result<HashMap<String, i32>, DataError> {
+    builtin
+        .get(registry)
+        .cloned()
         .ok_or_else(|| DataError::Io(format!("unknown registry {registry}")))
 }
 
 /// ID записи встроенного реестра (`entity_type`, `minecraft:player`) из `registries.json`.
 pub fn builtin_id(root: &Path, registry: &str, entry: &str) -> Result<i32, DataError> {
-    load_builtin_ids(root)?
+    builtin_id_of(&load_builtin(root)?, registry, entry)
+}
+
+/// То же для уже прочитанного `registries.json`.
+pub fn builtin_id_of(builtin: &Builtin, registry: &str, entry: &str) -> Result<i32, DataError> {
+    builtin
         .get(registry)
         .and_then(|e| e.get(entry))
         .copied()
@@ -156,14 +176,12 @@ pub fn builtin_id(root: &Path, registry: &str, entry: &str) -> Result<i32, DataE
 }
 
 /// Все записи встроенного реестра (`block_entity_type`) с их номерами.
-pub fn builtin_ids(root: &Path, registry: &str) -> Result<HashMap<String, i32>, DataError> {
-    load_builtin_ids(root)?
-        .remove(registry)
-        .ok_or_else(|| DataError::Io(format!("unknown registry {registry}")))
+pub fn builtin_ids_of(builtin: &Builtin, registry: &str) -> Result<HashMap<String, i32>, DataError> {
+    builtin_entries_of(builtin, registry)
 }
 
 /// `registries.json`: `{"minecraft:block": {"entries": {"minecraft:stone": {"protocol_id": 1}}}}`.
-fn load_builtin_ids(root: &Path) -> Result<HashMap<String, HashMap<String, i32>>, DataError> {
+pub fn load_builtin(root: &Path) -> Result<Builtin, DataError> {
     let path = root.join("reports/registries.json");
     let json = read_json(&path)?;
     let obj = json

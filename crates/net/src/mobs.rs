@@ -303,6 +303,17 @@ fn collide(pos: [f64; 3], half: f64, h: f64, axis: usize, d: f64, w: &World) -> 
     allowed
 }
 
+/// `LivingEntity.getFrictionInfluencedSpeed`: на обычном блоке (`friction` 0.6,
+/// `friction_modifier` 1.0 → `f = 0.6`) это `speed * 0.216 / f³`, то есть `speed`.
+/// На скользком блоке (лёд, `f` больше 0.6) скорость выше.
+fn friction_speed(speed: f64, friction: f64) -> f64 {
+    if friction > 0.6 {
+        speed * 0.21600002 / (friction * friction * friction)
+    } else {
+        speed
+    }
+}
+
 fn in_water(m: &Mob, w: &World) -> bool {
     (w.water)([
         m.pos[0].floor() as i32,
@@ -316,11 +327,19 @@ fn in_water(m: &Mob, w: &World) -> bool {
 pub fn travel(m: &mut Mob, forward: f64, w: &World) -> bool {
     let water = in_water(m, w);
     let accel = if water {
-        0.02
+        // `travelInWater`: `moveRelative(0.02, input)`, `input.zza` — скорость моба.
+        0.02 * forward
     } else if m.on_ground {
-        forward
+        // `LivingEntity.travelInAir`: `moveRelative(getFrictionInfluencedSpeed(f), input)`,
+        // где `input.zza` уже равен скорости моба (`Mob.setSpeed` вызывает `setZza(f)`).
+        // Поэтому на земле ускорение — скорость в квадрате: корова с `movement_speed`
+        // 0.2 разгоняется на 0.04 за тик, а не на 0.2.
+        let friction = friction_speed(m.species.speed(), GROUND_FRICTION);
+        friction * forward
     } else {
-        AIR_ACCEL * forward.signum() * (forward != 0.0) as i32 as f64
+        // В воздухе `getFrictionInfluencedSpeed` — это `getFlyingSpeed()` (0.02),
+        // и он тоже умножается на `zza`.
+        AIR_ACCEL * forward
     };
     if forward != 0.0 {
         let yaw = (m.yaw as f64).to_radians();
@@ -582,6 +601,53 @@ mod tests {
         for _ in 0..60 {
             travel(m, 0.0, w);
         }
+    }
+
+    /// Скорость ходьбы закреплена на ванильном значении.
+    ///
+    /// Сверено с байткодом 26.3. `travelInAir` передаёт в `moveRelative`
+    /// `getFrictionInfluencedSpeed(f)`, а `input.zza` у моба равен его скорости
+    /// (`Mob.setSpeed` вызывает `setZza(f)`). На обычном блоке
+    /// `f = computeModifiedFriction(0.6, friction_modifier=1.0) = 0.6`, поэтому
+    /// `getFrictionInfluencedSpeed = getSpeed() * 0.216 / f³ = getSpeed()`.
+    /// Итоговое ускорение за тик — `speed²`, установившаяся скорость —
+    /// `speed² / (1 - 0.6 * 0.91)`: для коровы (0.2) это 0.0881 блока за тик.
+    #[test]
+    fn walk_speed_matches_vanilla() {
+        let w = World {
+            solid: &floor,
+            water: &no_water,
+        };
+        let mut m = Mob::new(Species::Cow, [0.5, 64.0, 0.5], 1);
+        m.on_ground = true;
+        m.goal = Goal::Walk {
+            to: [1000.0, 64.0, 0.5],
+            speed: Species::Cow.speed(),
+            ticks: 10_000,
+        };
+        let mut rnd = || 0.5;
+        let mut s = Senses {
+            players: &[],
+            rand: &mut rnd,
+        };
+        // Первые тики — разгон от нуля; установившаяся скорость дальше.
+        for _ in 0..150 {
+            tick(&mut m, &w, &mut s);
+        }
+        let start = m.pos;
+        let ticks = 100u32;
+        for _ in 0..ticks {
+            tick(&mut m, &w, &mut s);
+        }
+        let per_tick = (m.pos[0] - start[0]) / ticks as f64;
+        let speed = Species::Cow.speed();
+        let expected = friction_speed(speed, 0.6) * speed / (1.0 - GROUND_FRICTION);
+        assert!(
+            (per_tick - expected).abs() < 1e-4,
+            "cow walks {per_tick:.5} blocks/tick, vanilla gives {expected:.5}"
+        );
+        // И это заметно медленнее прежней ошибочной формулы (speed/(1-slip)).
+        assert!(per_tick < 0.09, "cow still too fast: {per_tick:.5}");
     }
 
     #[test]

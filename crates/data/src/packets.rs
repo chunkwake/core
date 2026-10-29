@@ -15,6 +15,11 @@ pub enum State {
 
 impl State {
     fn key(self) -> &'static str {
+        self.name()
+    }
+
+    /// Путь состояния в `packets.json`.
+    pub fn name(self) -> &'static str {
         match self {
             Self::Handshake => "handshake",
             Self::Status => "status",
@@ -33,6 +38,11 @@ pub enum Direction {
 
 impl Direction {
     fn key(self) -> &'static str {
+        self.name()
+    }
+
+    /// Направление в `packets.json`.
+    pub fn name(self) -> &'static str {
         match self {
             Self::Clientbound => "clientbound",
             Self::Serverbound => "serverbound",
@@ -70,6 +80,28 @@ pub const HARDCODED: &[(State, Direction, &str, i32)] = {
 };
 
 impl PacketTable {
+    /// Таблица из готовых записей: состояния, направления, имена без `minecraft:`.
+    pub fn from_entries(
+        entries: impl IntoIterator<Item = (State, Direction, String, i32)>,
+    ) -> Self {
+        let mut ids = HashMap::new();
+        for (state, dir, name, id) in entries {
+            let name = match name.strip_prefix("minecraft:") {
+                Some(name) => name.to_owned(),
+                None => name,
+            };
+            ids.insert((state, dir, name), id);
+        }
+        Self { ids }
+    }
+
+    /// Все записи в произвольном порядке: имя без `minecraft:`.
+    pub fn entries(&self) -> impl Iterator<Item = (State, Direction, &str, i32)> {
+        self.ids
+            .iter()
+            .map(|((state, dir, name), &id)| (*state, *dir, name.as_str(), id))
+    }
+
     pub fn load(path: &Path) -> Result<Self, DataError> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;

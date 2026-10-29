@@ -3,6 +3,7 @@
 //! Данные Mojang не хранятся в репозитории: сервер генерирует их из
 //! `server.jar` пользователя и кэширует по имени версии.
 
+pub mod boot;
 pub mod enchanting;
 pub mod generator;
 pub mod packets;

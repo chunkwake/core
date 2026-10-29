@@ -88,6 +88,50 @@ fn write_single(w: &mut Writer, state: u32) {
     w.u8(0).var_int(state as i32);
 }
 
+/// Биомы секции в сети: контейнер на 64 записи, минимум 1 бит на запись
+/// (`Strategy.createForBiomes`). Порядок клеток — `x + 4*z + 16*y`.
+fn write_biome_container(w: &mut Writer, biomes: &Biomes, global_bits: u32) {
+    if let Some(one) = biomes.uniform() {
+        write_single(w, one);
+        return;
+    }
+    let cells = biomes.cells();
+    let palette: Vec<u32> = {
+        let mut p = Vec::new();
+        for &c in &cells {
+            if !p.contains(&c) {
+                p.push(c);
+            }
+        }
+        p
+    };
+    if palette.len() == 1 {
+        write_single(w, palette[0]);
+        return;
+    }
+    let bits = bits_for(palette.len()).max(1);
+    if palette.len() <= 256 && bits <= 8 {
+        w.u8(bits as u8).var_int(palette.len() as i32);
+        for &b in &palette {
+            w.var_int(b as i32);
+        }
+        emit_packed(
+            64,
+            bits,
+            |i| palette_index(&palette, cells[i]),
+            |long| w.buf.extend_from_slice(&long.to_be_bytes()),
+        );
+    } else {
+        w.u8(global_bits as u8);
+        emit_packed(
+            64,
+            global_bits,
+            |i| cells[i],
+            |long| w.buf.extend_from_slice(&long.to_be_bytes()),
+        );
+    }
+}
+
 /// Блоки секции в формате paletted container. Байты те же, что у массива из 4096 состояний:
 /// однородная секция пишется сразу, смешанная — двумя проходами по индексам.
 fn write_block_container(w: &mut Writer, section: &Section, min_bits: u32, global_bits: u32) {
@@ -179,14 +223,75 @@ enum Storage {
     Paletted(Arc<Paletted>),
 }
 
-/// Секция 16×16×16: состояния блоков (индекс `(y*16+z)*16+x`) и один биом.
+/// Биомы секции: одно значение на все 64 клетки 4×4×4 или палитра.
+/// Порядок клеток — как у `PalettedContainer` для биомов: `x + 4*z + 16*y`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Biomes {
+    Single(u32),
+    Paletted(Arc<BiomePalette>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BiomePalette {
+    pub palette: Vec<u32>,
+    /// Индекс палитры на клетку, 64 записи.
+    pub idx: [u8; 64],
+}
+
+impl Biomes {
+    pub fn get(&self, i: usize) -> u32 {
+        match self {
+            Biomes::Single(b) => *b,
+            Biomes::Paletted(p) => p.palette[p.idx[i] as usize],
+        }
+    }
+
+    pub fn uniform(&self) -> Option<u32> {
+        match self {
+            Biomes::Single(b) => Some(*b),
+            Biomes::Paletted(_) => None,
+        }
+    }
+
+    /// Все 64 клетки.
+    pub fn cells(&self) -> Vec<u32> {
+        match self {
+            Biomes::Single(b) => vec![*b; 64],
+            Biomes::Paletted(p) => (0..64).map(|i| p.palette[p.idx[i] as usize]).collect(),
+        }
+    }
+
+    /// Все 64 клетки одним значением, если они совпадают.
+    pub fn from_cells(cells: &[u32]) -> Self {
+        assert_eq!(cells.len(), 64, "biomes: expected 64 cells");
+        let first = cells[0];
+        if cells.iter().all(|&c| c == first) {
+            return Biomes::Single(first);
+        }
+        let mut palette: Vec<u32> = Vec::new();
+        let mut idx = [0u8; 64];
+        for (i, &c) in cells.iter().enumerate() {
+            let slot = match palette.iter().position(|&p| p == c) {
+                Some(slot) => slot,
+                None => {
+                    palette.push(c);
+                    palette.len() - 1
+                }
+            };
+            idx[i] = slot as u8;
+        }
+        Biomes::Paletted(Arc::new(BiomePalette { palette, idx }))
+    }
+}
+
+/// Секция 16×16×16: состояния блоков (индекс `(y*16+z)*16+x`) и биомы 4×4×4.
 /// Однородная — одно значение; иначе палитра с индексами u8/u16 за `Arc`:
 /// клон столбца не копирует блоки, запись копирует только свою секцию.
 #[derive(Clone, Debug)]
 pub struct Section {
     storage: Storage,
     non_air: u16,
-    pub biome: u32,
+    pub biome: Biomes,
     /// Закодированный для сети контейнер блоков: клоны делят его, `set` сбрасывает.
     net: Arc<std::sync::OnceLock<Vec<u8>>>,
 }
@@ -202,9 +307,21 @@ impl Section {
         Self {
             storage: Storage::Single(state),
             non_air: if state == AIR { 0 } else { 4096 },
-            biome,
+            biome: Biomes::Single(biome),
             net: Default::default(),
         }
+    }
+
+    /// Состояние и биомы секции: `biomes` — 64 клетки 4×4×4.
+    pub fn with_biomes(state: u32, biomes: &[u32]) -> Self {
+        let mut s = Self::filled(state, 0);
+        s.biome = Biomes::from_cells(biomes);
+        s
+    }
+
+    /// Биом клетки 4×4×4 по локальным `x, y, z` в 0..4.
+    pub fn biome_at(&self, x: usize, y: usize, z: usize) -> u32 {
+        self.biome.get(x + 4 * z + 16 * y)
     }
 
     /// Из полного массива 4096 состояний (сжимается, если однородный).
@@ -254,7 +371,7 @@ impl Section {
                 idx: indices,
             })),
             non_air,
-            biome,
+            biome: Biomes::Single(biome),
             net: Default::default(),
         }
     }
@@ -372,6 +489,68 @@ impl ChunkColumn {
         }
     }
 
+    /// То же, но с биомами по клеткам 4×4×4: по 64 на секцию, порядок
+    /// `x + 4*z + 16*y`. Длина — `секции * 64`.
+    pub fn from_blocks_with_biomes(
+        states: &[u32],
+        biomes: &[u32],
+        global_block_bits: u32,
+        global_biome_bits: u32,
+        has_skylight: bool,
+    ) -> Self {
+        let mut c = Self::from_blocks(
+            states,
+            biomes.first().copied().unwrap_or(0),
+            global_block_bits,
+            global_biome_bits,
+            has_skylight,
+        );
+        if biomes.len() == c.sections.len() * 64 {
+            for (s, cells) in c.sections.iter_mut().zip(biomes.chunks(64)) {
+                s.biome = Biomes::from_cells(cells);
+            }
+        }
+        c
+    }
+
+    /// Столбец из состояний длины `высота * 256`. Индекс `((y * 16 + z) * 16 + x)`,
+    /// `y` от низа мира — тот же порядок, что у `Generator::fill`. Одинаковая
+    /// секция сжимается. Свет до вызова `light::relight_column` — полное небо.
+    pub fn from_blocks(
+        states: &[u32],
+        biome: u32,
+        global_block_bits: u32,
+        global_biome_bits: u32,
+        has_skylight: bool,
+    ) -> Self {
+        assert!(
+            !states.is_empty() && states.len().is_multiple_of(4096),
+            "from_blocks: expected full sections, got {}",
+            states.len()
+        );
+        let n = states.len() / 4096;
+        let sections = states
+            .chunks(4096)
+            .map(|sec| {
+                let state = sec[0];
+                if sec.iter().all(|&s| s == state) {
+                    Section::filled(state, biome)
+                } else {
+                    Section::from_blocks(sec.to_vec(), biome)
+                }
+            })
+            .collect();
+        Self {
+            sections,
+            global_block_bits,
+            global_biome_bits,
+            has_skylight,
+            sky_light: vec![LightLayer::Uniform(if has_skylight { 15 } else { 0 }); n],
+            block_light: vec![LightLayer::Uniform(0); n],
+            block_entities: BTreeMap::new(),
+        }
+    }
+
     /// Состояние блока; `y` — от низа мира (0..height), `x`/`z` — 0..16.
     pub fn block(&self, x: usize, y: usize, z: usize) -> u32 {
         self.sections[y / 16].get(((y % 16) * 16 + z) * 16 + x)
@@ -450,7 +629,6 @@ impl ChunkColumn {
         }
 
         // Секции: short блоков, short жидкостей (26.x), блоки, биомы.
-        // Биом секции один, поэтому контейнер биомов — всегда одна запись.
         let mut data = Writer::new();
         data.buf
             .reserve(self.sections.len().saturating_mul(2048 + 64));
@@ -465,7 +643,7 @@ impl ChunkColumn {
                 w.buf
             });
             data.buf.extend_from_slice(bytes);
-            write_single(&mut data, s.biome);
+            write_biome_container(&mut data, &s.biome, self.global_biome_bits);
         }
         w.byte_array(&data.buf);
         // Блок-сущности: упакованные x/z, y, тип и NBT.
@@ -567,6 +745,103 @@ mod tests {
         assert_eq!(packed[1], 1);
         assert_eq!(bit_set(26), [0xff, 0xff, 0xff, 0x03]);
         assert_eq!(bit_set(16), [0xff, 0xff]);
+    }
+
+    #[test]
+    fn from_blocks_follows_fill_order_and_blocks_sky() {
+        // Одна секция. Камень (1) в (x=1, y=3, z=2), остальное воздух.
+        let mut states = vec![0u32; 4096];
+        states[((3 * 16 + 2) * 16 + 1) as usize] = 1;
+        let mut c = ChunkColumn::from_blocks(&states, 7, 4, 2, true);
+        assert_eq!(c.block(1, 3, 2), 1);
+        assert_eq!(c.block(0, 0, 0), 0);
+        assert_eq!(c.sections[0].biome, Biomes::Single(7));
+        assert!(!c.sections[0].is_uniform());
+        let air = ChunkColumn::from_blocks(&[0; 4096], 7, 4, 2, true);
+        assert!(air.sections[0].is_uniform());
+        // 0 — воздух, небо проходит; 1 — камень, небо стоит.
+        let table = light::LightTable::new([(0, 1, true), (0, 15, false)]);
+        light::relight_column(&mut c, &table);
+        let at = |x: i32, y: i32, z: i32| {
+            c.light(light::Kind::Sky)[0].get(((((y & 15) << 8) | (z << 4) | x) as usize) & 4095)
+        };
+        assert_eq!(at(1, 4, 2), 15);
+        assert_eq!(at(1, 3, 2), 0);
+        assert_eq!(at(0, 0, 0), 15);
+    }
+
+    #[test]
+    fn mixed_biomes_survive_network_and_anvil() {
+        let mut biomes = vec![1u32; 24 * 64];
+        // Третья секция (y 32..47), клетка (x=1, z=2, y=3) — пустыня.
+        biomes[2 * 64 + 1 + 4 * 2 + 16 * 3] = 9;
+        let states = vec![0u32; 24 * 4096];
+        let c = ChunkColumn::from_blocks_with_biomes(&states, &biomes, 15, 7, true);
+        assert_eq!(c.sections[0].biome, Biomes::Single(1));
+        assert_eq!(c.sections[2].biome_at(1, 3, 2), 9);
+        assert_eq!(c.sections[2].biome_at(0, 0, 0), 1);
+        // Сеть: в теле чанка у третьей секции палитра из двух биомов.
+        let body = c.encode_body();
+        let mut r = Reader::new(&body);
+        let maps = r.var_int().unwrap();
+        for _ in 0..maps {
+            r.var_int().unwrap();
+            let n = r.var_int().unwrap() as usize;
+            r.bytes(n * 8).unwrap();
+        }
+        let len = r.var_int().unwrap() as usize;
+        let data = r.bytes(len).unwrap().to_vec();
+        let mut d = Reader::new(&data);
+        for _ in 0..2 {
+            d.u16().unwrap();
+            d.u16().unwrap();
+            skip_block_container(&mut d);
+            skip_biome_container(&mut d);
+        }
+        d.u16().unwrap();
+        d.u16().unwrap();
+        skip_block_container(&mut d);
+        // Третья секция: палитра 1|9 и 64 записи.
+        assert_eq!(d.u8().unwrap(), 1, "one bit per biome cell");
+        assert_eq!(d.var_int().unwrap(), 2);
+        assert_eq!(d.var_int().unwrap(), 1);
+        assert_eq!(d.var_int().unwrap(), 9);
+    }
+
+    /// Пропуск контейнера блоков секции (4..8 бит, палитра или глобальная).
+    fn skip_block_container(r: &mut Reader<'_>) {
+        let bits = r.u8().unwrap();
+        if bits == 0 {
+            r.var_int().unwrap();
+            return;
+        }
+        if bits <= 8 {
+            let n = r.var_int().unwrap() as usize;
+            for _ in 0..n {
+                r.var_int().unwrap();
+            }
+            let longs = 4096usize.div_ceil(64 / bits as usize);
+            r.bytes(longs * 8).unwrap();
+        } else {
+            let longs = 4096usize.div_ceil(64 / bits as usize);
+            r.bytes(longs * 8).unwrap();
+        }
+    }
+
+    fn skip_biome_container(r: &mut Reader<'_>) {
+        let bits = r.u8().unwrap();
+        if bits == 0 {
+            r.var_int().unwrap();
+            return;
+        }
+        if bits <= 8 {
+            let n = r.var_int().unwrap() as usize;
+            for _ in 0..n {
+                r.var_int().unwrap();
+            }
+        }
+        let longs = 64usize.div_ceil(64 / bits as usize);
+        r.bytes(longs * 8).unwrap();
     }
 
     #[test]
@@ -676,7 +951,7 @@ mod tests {
         for s in &c.sections {
             w.u16(s.non_air() as u16).u16(0);
             legacy_container(&mut w, &s.blocks(), 4, c.global_block_bits);
-            legacy_container(&mut w, &[s.biome; 64], 1, c.global_biome_bits);
+            legacy_container(&mut w, &s.biome.cells(), 1, c.global_biome_bits);
         }
         w.buf
     }

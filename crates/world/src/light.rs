@@ -5,7 +5,7 @@
 //! Полный пересчёт — только для столбца без сохранённого света.
 
 use crate::ChunkColumn;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 /// Свет секции: одно значение на все 4096 блоков или ниббл-массив за `Arc`.
@@ -367,72 +367,13 @@ pub fn relight_column(c: &mut ChunkColumn, table: &LightTable) {
     c.sky_light = vec![LightLayer::Uniform(0); n];
     c.block_light = vec![LightLayer::Uniform(0); n];
     let has_sky = c.has_skylight;
+    let tops = has_sky.then(|| column_sky_top(c, table));
     let mut access = Single(c);
     let mut e = Engine::new(&mut access, table, height as usize);
 
-    if has_sky {
-        // Небо сверху вниз до первого блока, который его задерживает;
-        // в очередь — клетки на границе тени (дальше идёт BFS).
-        let mut top = [[0i32; 16]; 16];
-        for (x, row) in top.iter_mut().enumerate() {
-            for (z, h) in row.iter_mut().enumerate() {
-                let mut y = height;
-                let (x, z) = (x as i32, z as i32);
-                while y > 0 {
-                    let si = ((y - 1) >> 4) as usize;
-                    let sec = &e.access.0.sections[si];
-                    let bottom = si as i32 * 16;
-                    if sec.is_uniform() {
-                        // Вся секция одного состояния: либо пропустить, либо стоп на верхней клетке.
-                        if table.sky_down(sec.get(0)) {
-                            y = bottom;
-                            continue;
-                        }
-                        break;
-                    }
-                    let mut blocked = false;
-                    while y > bottom {
-                        if !table.sky_down(sec.get(index([x, y - 1, z]))) {
-                            blocked = true;
-                            break;
-                        }
-                        y -= 1;
-                    }
-                    if blocked {
-                        break;
-                    }
-                }
-                *h = y;
-            }
-        }
-        // Секции целиком над рельефом — сразу 15, без поклеточной записи.
-        let lowest = top.iter().flatten().copied().max().unwrap_or(0);
-        let first_open = ((lowest + 15) / 16) as usize;
-        for layer in &mut e.access.0.sky_light[first_open.min(n)..] {
-            *layer = LightLayer::Uniform(15);
-        }
-        for x in 0..16i32 {
-            for z in 0..16i32 {
-                let h = top[x as usize][z as usize];
-                for y in h..(first_open as i32 * 16).min(height) {
-                    e.set(Kind::Sky, [x, y, z], 15);
-                }
-                // Граница: самая нижняя светлая клетка и клетки рядом с более
-                // глубокой тенью у соседних столбцов.
-                let mut edge = h;
-                for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                    let (nx, nz) = (x + dx, z + dz);
-                    if (0..16).contains(&nx) && (0..16).contains(&nz) {
-                        edge = edge.max(top[nx as usize][nz as usize]);
-                    }
-                }
-                for y in h..edge.min(height).max(h + 1) {
-                    if y < height {
-                        e.inc.push_back([x, y, z]);
-                    }
-                }
-            }
-        }
+    if let Some(tops) = tops {
+        // Столбец один и лежит в чанке (0, 0): локальные координаты совпадают с мировыми.
+        paint_sky(&mut e, &tops, 0, 0, height, n);
         e.increase(Kind::Sky);
     }
 
@@ -452,9 +393,207 @@ pub fn relight_column(c: &mut ChunkColumn, table: &LightTable) {
         }
     }
     e.increase(Kind::Block);
+    drop(e);
+    drop(access);
 
     for l in c.sky_light.iter_mut().chain(c.block_light.iter_mut()) {
         l.compact();
+    }
+}
+
+/// Высота неба по столбцам 16×16: y первой клетки, куда небо ещё доходит.
+fn column_sky_top(col: &ChunkColumn, table: &LightTable) -> [[i32; 16]; 16] {
+    let height = col.height() as i32;
+    let mut top = [[0i32; 16]; 16];
+    for (x, row) in top.iter_mut().enumerate() {
+        for (z, h) in row.iter_mut().enumerate() {
+            let mut y = height;
+            let (x, z) = (x as i32, z as i32);
+            while y > 0 {
+                let si = ((y - 1) >> 4) as usize;
+                let sec = &col.sections[si];
+                let bottom = si as i32 * 16;
+                if sec.is_uniform() {
+                    // Вся секция одного состояния: либо пропустить, либо стоп на верхней клетке.
+                    if table.sky_down(sec.get(0)) {
+                        y = bottom;
+                        continue;
+                    }
+                    break;
+                }
+                let mut blocked = false;
+                while y > bottom {
+                    if !table.sky_down(sec.get(index([x, y - 1, z]))) {
+                        blocked = true;
+                        break;
+                    }
+                    y -= 1;
+                }
+                if blocked {
+                    break;
+                }
+            }
+            *h = y;
+        }
+    }
+    top
+}
+
+/// Небо чанка `(ox, oz)` и очередь роста. Координаты в очереди мировые.
+fn paint_sky<A: LightAccess>(
+    e: &mut Engine<A>,
+    tops: &[[i32; 16]; 16],
+    ox: i32,
+    oz: i32,
+    height: i32,
+    sections: usize,
+) {
+    let lowest = tops.iter().flatten().copied().max().unwrap_or(0);
+    let first_open = ((lowest + 15) / 16) as usize;
+    if let Some(col) = e.access.column_mut(ox, oz) {
+        for layer in &mut col.sky_light[first_open.min(sections)..] {
+            *layer = LightLayer::Uniform(15);
+        }
+    }
+    let base_x = ox * 16;
+    let base_z = oz * 16;
+    for x in 0..16i32 {
+        for z in 0..16i32 {
+            let h = tops[x as usize][z as usize];
+            for y in h..(first_open as i32 * 16).min(height) {
+                e.set(Kind::Sky, [base_x + x, y, base_z + z], 15);
+            }
+            // Граница: самая нижняя светлая клетка и клетки рядом с более
+            // глубокой тенью у соседних столбцов.
+            let mut edge = h;
+            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let (nx, nz) = (x + dx, z + dz);
+                if (0..16).contains(&nx) && (0..16).contains(&nz) {
+                    edge = edge.max(tops[nx as usize][nz as usize]);
+                }
+            }
+            for y in h..edge.min(height).max(h + 1) {
+                if y < height {
+                    e.inc.push_back([base_x + x, y, base_z + z]);
+                }
+            }
+        }
+    }
+}
+
+struct Area<'a> {
+    columns: &'a mut HashMap<(i32, i32), ChunkColumn>,
+    touched: &'a mut HashSet<(i32, i32)>,
+}
+
+impl LightAccess for Area<'_> {
+    fn column(&mut self, cx: i32, cz: i32) -> Option<&ChunkColumn> {
+        self.columns.get(&(cx, cz))
+    }
+    fn column_mut(&mut self, cx: i32, cz: i32) -> Option<&mut ChunkColumn> {
+        self.touched.insert((cx, cz));
+        self.columns.get_mut(&(cx, cz))
+    }
+}
+
+/// Свет нового чанка `origin` и пролив через грань с соседями, которые уже лежат
+/// в `columns`. Чужака нет — шаблон не подставляется. Соседей с нуля не гасим.
+/// Возвращает чанки, где свет записан.
+pub fn spread_chunk(
+    columns: &mut HashMap<(i32, i32), ChunkColumn>,
+    origin: (i32, i32),
+    table: &LightTable,
+) -> Vec<(i32, i32)> {
+    let Some(col) = columns.get_mut(&origin) else {
+        return Vec::new();
+    };
+    let height = col.height() as i32;
+    let n = col.sections.len();
+    let has_sky = col.has_skylight;
+    col.sky_light = vec![LightLayer::Uniform(0); n];
+    col.block_light = vec![LightLayer::Uniform(0); n];
+    let tops = has_sky.then(|| column_sky_top(col, table));
+    let mut touched = HashSet::from([origin]);
+    let mut area = Area {
+        columns,
+        touched: &mut touched,
+    };
+    let mut e = Engine::new(&mut area, table, height as usize);
+    if let Some(tops) = tops {
+        paint_sky(&mut e, &tops, origin.0, origin.1, height, n);
+        queue_faces(&mut e, Kind::Sky, origin, height);
+        e.increase(Kind::Sky);
+    }
+    queue_emitters(&mut e, origin, table);
+    queue_faces(&mut e, Kind::Block, origin, height);
+    e.increase(Kind::Block);
+    drop(e);
+    drop(area);
+    for pos in &touched {
+        if let Some(c) = columns.get_mut(pos) {
+            for l in c.sky_light.iter_mut().chain(c.block_light.iter_mut()) {
+                l.compact();
+            }
+        }
+    }
+    touched.into_iter().collect()
+}
+
+/// Клетки общей грани соседних чанков, откуда свет может войти в новый.
+fn queue_faces<A: LightAccess>(e: &mut Engine<A>, kind: Kind, origin: (i32, i32), height: i32) {
+    let (cx, cz) = origin;
+    let faces = [
+        (cx - 1, cz, cx * 16 - 1, None),
+        (cx + 1, cz, cx * 16 + 16, None),
+        (cx, cz - 1, cz * 16 - 1, Some(())),
+        (cx, cz + 1, cz * 16 + 16, Some(())),
+    ];
+    for (nx, nz, edge, along_x) in faces {
+        if e.access.column(nx, nz).is_none() {
+            continue;
+        }
+        for y in 0..height {
+            for i in 0..16 {
+                let (x, z) = if along_x.is_none() {
+                    (edge, nz * 16 + i)
+                } else {
+                    (nx * 16 + i, edge)
+                };
+                if e.get(kind, [x, y, z]).unwrap_or(0) > 1 {
+                    e.inc.push_back([x, y, z]);
+                }
+            }
+        }
+    }
+}
+
+fn queue_emitters<A: LightAccess>(e: &mut Engine<A>, origin: (i32, i32), table: &LightTable) {
+    let Some(col) = e.access.column(origin.0, origin.1) else {
+        return;
+    };
+    let mut lights = Vec::new();
+    for si in 0..col.sections.len() {
+        let sec = &col.sections[si];
+        if sec.is_uniform() && table.emission(sec.get(0)) == 0 {
+            continue;
+        }
+        for i in 0..4096i32 {
+            let em = table.emission(sec.get(i as usize));
+            if em > 0 {
+                lights.push((
+                    [
+                        origin.0 * 16 + (i & 15),
+                        si as i32 * 16 + (i >> 8),
+                        origin.1 * 16 + ((i >> 4) & 15),
+                    ],
+                    em,
+                ));
+            }
+        }
+    }
+    for (p, em) in lights {
+        e.set(Kind::Block, p, em);
+        e.inc.push_back(p);
     }
 }
 
@@ -512,6 +651,22 @@ mod tests {
         relight_column(&mut c, &t);
         assert_eq!(c.light(Kind::Block)[0].get(index([5, 4, 5])), 14);
         assert_eq!(c.light(Kind::Block)[0].get(index([5, 5, 7])), 11);
+    }
+
+    #[test]
+    fn spread_carries_sky_across_the_border() {
+        let t = table();
+        let mut open = ChunkColumn::flat(&[], 4, 0, 2, 0, true);
+        relight_column(&mut open, &t);
+        let mut cave = ChunkColumn::flat(&[(1, 64)], 4, 0, 2, 0, true);
+        cave.set_block(0, 10, 8, 0);
+        let mut map = HashMap::new();
+        map.insert((0, 0), open);
+        map.insert((1, 0), cave);
+        spread_chunk(&mut map, (1, 0), &t);
+        let got = map[&(1, 0)].light(Kind::Sky)[0].get(index([0, 10, 8]));
+        assert!(got > 0, "sky {got} did not cross the border");
+        assert_eq!(map[&(0, 0)].light(Kind::Sky)[0].get(index([15, 10, 8])), 15);
     }
 
     struct World(std::collections::HashMap<(i32, i32), ChunkColumn>);

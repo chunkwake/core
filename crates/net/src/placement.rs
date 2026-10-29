@@ -3,6 +3,7 @@
 //! двухблочные двери, растения и кровати.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Грани как в протоколе: низ, верх, север, юг, запад, восток.
 const DIRS: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
@@ -92,7 +93,7 @@ struct Table {
 }
 
 pub struct Placement {
-    states: Vec<Option<(String, Props)>>,
+    states: Arc<Vec<Option<(String, Props)>>>,
     /// По состоянию: таблица блока и код в ней.
     codes: Vec<(u32, u32)>,
     tables: Vec<Table>,
@@ -153,6 +154,15 @@ impl Placement {
 
     pub fn new(
         states: Vec<Option<(String, Props)>>,
+        sturdy: Vec<u8>,
+        walls: HashSet<String>,
+    ) -> Self {
+        Self::with_states(Arc::new(states), sturdy, walls)
+    }
+
+    /// То же, но список состояний уже есть у вызывающего: копии не нужны.
+    pub fn with_states(
+        states: Arc<Vec<Option<(String, Props)>>>,
         sturdy: Vec<u8>,
         walls: HashSet<String>,
     ) -> Self {

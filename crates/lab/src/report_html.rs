@@ -1,4 +1,4 @@
-//! Offline HTML presentation of the machine-readable lab report.
+//! HTML presentation of the machine-readable lab report. Charting loads from a pinned CDN.
 
 use super::Report;
 use serde::Serialize;
@@ -95,5 +95,19 @@ mod tests {
         let log = embedded_log(Path::new("this-log-does-not-exist.chunkwake-test"));
         assert!(log.missing);
         assert!(log.text.is_empty());
+    }
+
+    #[test]
+    fn large_log_keeps_only_the_last_five_mebibytes() {
+        let path =
+            std::env::temp_dir().join(format!("chunkwake-lab-log-tail-{}", std::process::id()));
+        let mut data = vec![b'a'; LOG_LIMIT as usize + 8];
+        data[LOG_LIMIT as usize + 7] = b'z';
+        fs::write(&path, data).unwrap();
+        let log = embedded_log(&path);
+        fs::remove_file(path).unwrap();
+        assert_eq!(log.truncated_bytes, 8);
+        assert_eq!(log.text.len(), LOG_LIMIT as usize);
+        assert!(log.text.ends_with('z'));
     }
 }

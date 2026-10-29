@@ -11,3 +11,11 @@ license = "GPL-3.0-only"
 lto = "fat"
 codegen-units = 1
 panic = "abort"
+
+# Шум и свет — горячий путь генерации: в debug они медленнее на порядок,
+# а отлаживают их всё равно тестами, не пошагово.
+[profile.dev.package.chunkwake-worldgen]
+opt-level = 3
+
+[profile.dev.package.chunkwake-world]
+opt-level = 3

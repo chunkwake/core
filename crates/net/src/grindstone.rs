@@ -172,11 +172,7 @@ mod tests {
             max_stack: &|item| if item == GEM { 16 } else { 1 },
             curse: &|id| id == BIND || id == VANISH,
             min_cost: &|id, lvl| {
-                if id == SHARP {
-                    1 + 11 * (lvl - 1)
-                } else {
-                    25
-                }
+                if id == SHARP { 1 + 11 * (lvl - 1) } else { 25 }
             },
         }
     }

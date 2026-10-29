@@ -48,6 +48,7 @@ async fn serve(dir: &Path) -> Result<(), String> {
         .with_max_level(props.log_level)
         .init();
     tracing::info!("Minecraft {} (protocol {})", version.name, version.protocol);
+    let boot_started = std::time::Instant::now();
 
     // Данные ванилы генерируются из server.jar один раз; дальше jar и Java не нужны.
     let cache_root = props.generated_path(dir);
@@ -78,20 +79,23 @@ async fn serve(dir: &Path) -> Result<(), String> {
             d
         }
     };
-    let packets =
-        chunkwake_data::packets::PacketTable::load(&data_dir.join("reports/packets.json"))
-            .map_err(|e| e.to_string())?;
+    let boot = {
+        let started = std::time::Instant::now();
+        let boot = chunkwake_data::boot::load_or_build(&data_dir).map_err(|e| e.to_string())?;
+        tracing::info!(
+            "data: {} packet ids, {} registries (boot image in {} ms)",
+            boot.packets.len(),
+            boot.registries.tags.len(),
+            started.elapsed().as_millis()
+        );
+        boot
+    };
+    let packets = &boot.packets;
     packets.verify_hardcoded().map_err(|e| e.to_string())?;
-    tracing::info!("loaded {} packet ids", packets.len());
-
-    let registries =
-        chunkwake_data::registries::RegistryData::load(&data_dir).map_err(|e| e.to_string())?;
-    let plan = chunkwake_net::configuration::ConfigurationPlan::build(
-        &packets,
-        &registries,
-        &version.name,
-    )
-    .map_err(|e| e.to_string())?;
+    let registries = &boot.registries;
+    let plan =
+        chunkwake_net::configuration::ConfigurationPlan::build(packets, registries, &version.name)
+            .map_err(|e| e.to_string())?;
     tracing::info!(
         "prepared {} synchronized registries and tags for {} registries ({} KiB)",
         registries.synchronized.len(),
@@ -106,25 +110,31 @@ async fn serve(dir: &Path) -> Result<(), String> {
     })?;
     tracing::info!("listening on {bind}");
 
-    tracing::info!("loading world data (blocks, items, loot tables)");
     let started = std::time::Instant::now();
-    let (play, storage) = world_setup::build_play_plan(
-        &data_dir,
-        &packets,
-        &registries,
-        &props,
-        &dir.join(&props.level_name),
-    )?;
+    let (play, storage) =
+        world_setup::build_play_plan(&data_dir, boot, &props, &dir.join(&props.level_name))?;
     let (play, storage) = (std::sync::Arc::new(play), std::sync::Arc::new(storage));
     // Регионы читаются с диска при первом обращении к их чанкам.
     play.set_source(storage.clone());
     play.set_player_source(storage.clone());
+    // Генерация чанков — на своих потоках, чтобы тик не ждал счёта.
+    play.set_self_weak();
+    play.set_gen_pool(chunkwake_net::chunkgen::GenPool::new(
+        chunkwake_net::chunkgen::workers(),
+    ));
     play.set_ops(chunkwake_net::ops::OpList::load(dir.join("ops.json"))?);
     play.set_spawn_protection(props.spawn_protection as i32);
     tracing::info!(
-        "world: {} (data loaded in {:.1}s)",
+        "world: {} (world in {} ms, up in {} ms)",
         props.level_name,
-        started.elapsed().as_secs_f64()
+        started.elapsed().as_millis(),
+        boot_started.elapsed().as_millis()
+    );
+    // Видно, какие дистанции реально применяются: симуляция обрезается по прорисовке.
+    tracing::info!(
+        "chunks: view distance {}, simulation distance {}",
+        props.view_distance,
+        props.simulation_distance.min(props.view_distance)
     );
     let tick_task = play.spawn_tick();
     let autosave_task = storage.spawn_autosave(play.clone());

@@ -135,6 +135,13 @@ impl PlayPlan {
         if self.mobs.lock().unwrap().is_empty() {
             return;
         }
+        // Мобы вне радиуса симуляции спят: как в ванили, где тик идёт только
+        // по чанкам рядом с игроками.
+        let simulated: HashSet<(i32, i32)> = self.simulated.lock().unwrap().clone();
+        let awake = |pos: [f64; 3]| {
+            simulated.is_empty()
+                || simulated.contains(&((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4))
+        };
         // Игроки и еда в руках (основная и вторая).
         let hands: Vec<([f64; 3], [Option<String>; 2])> = {
             let live = self.live.lock().unwrap();
@@ -181,6 +188,11 @@ impl PlayPlan {
         {
             let mut mobs = self.mobs.lock().unwrap();
             for (&id, e) in mobs.iter_mut() {
+                // Выгруженный чанк не тикает: иначе исследование мира копит
+                // работу, которую никто не видит.
+                if !awake(e.mob.pos) {
+                    continue;
+                }
                 let species = e.mob.species;
                 let players: Vec<([f64; 3], bool)> = hands
                     .iter()
@@ -711,7 +723,11 @@ impl PlayPlan {
         else {
             return false;
         };
-        let pos = [front[0] as f64 + 0.5, front[1] as f64, front[2] as f64 + 0.5];
+        let pos = [
+            front[0] as f64 + 0.5,
+            front[1] as f64,
+            front[2] as f64 + 0.5,
+        ];
         self.spawn_mob(species, pos, yaw, false, Some("DISPENSE_EGG"));
         true
     }
@@ -734,6 +750,7 @@ impl PlayPlan {
         let mut grazed = Vec::new();
         let mut grown = Vec::new();
         let mut births = Vec::new();
+        let simulated: HashSet<(i32, i32)> = self.simulated.lock().unwrap().clone();
         {
             let mut mobs = self.mobs.lock().unwrap();
             if mobs.is_empty() {
@@ -790,6 +807,15 @@ impl PlayPlan {
             for (&id, e) in mobs.iter_mut() {
                 let m = &mut e.mob;
                 if !m.alive() {
+                    continue;
+                }
+                // Вне симуляции животное не стареет, не несётся и не ест.
+                if !simulated.is_empty()
+                    && !simulated.contains(&(
+                        (m.pos[0].floor() as i32) >> 4,
+                        (m.pos[2].floor() as i32) >> 4,
+                    ))
+                {
                     continue;
                 }
                 if m.age == -1 {
@@ -1085,17 +1111,26 @@ impl PlayPlan {
             .is_some_and(|s| self.state_name(s) == "minecraft:grass_block")
     }
 
-    /// Верхний непрозрачный для спавна блок столбца.
+    /// Верхний непрозрачный для спавна блок столбца. Один проход по столбцу
+    /// под одним замком: `block()` на каждый из 384 блоков брал мьютекс и
+    /// пересчитывал ключ, а при заселении чанка это делается на каждую попытку.
     fn top_solid(&self, x: i32, z: i32) -> Option<i32> {
-        let top = self.min_y + self.template.height() as i32 - 1;
-        (self.min_y..=top).rev().find(|&y| {
-            self.block([x, y, z]).is_some_and(|s| {
-                !matches!(
-                    self.state_name(s),
-                    "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | ""
-                )
-            })
-        })
+        let world = self.edited.read().unwrap();
+        let key = (x >> 4, z >> 4);
+        let template = &self.template;
+        let column = world.get(&key).map_or(template, |e| &e.0);
+        let sky = |s: u32| {
+            !matches!(
+                self.state_name(s),
+                "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | ""
+            )
+        };
+        let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
+        let height = template.height();
+        (0..height)
+            .rev()
+            .find(|&ry| sky(column.block(lx, ry, lz)))
+            .map(|ry| ry as i32 + self.min_y)
     }
 
     /// Чанки `entities/*.mca` к записи: где есть мобы, где они были и новые заселённые.
@@ -1317,5 +1352,30 @@ mod tests {
         assert_eq!(sheep_color(0.5), 0);
         assert_eq!(sheep_color(0.01), 15);
         assert_eq!(sheep_color(0.181), 6);
+    }
+
+    /// Дельта считается от последней разосланной позиции: сумма дельт равна
+    /// смещению моба, а не удваивает его. Именно здесь была бы скорость «в 2-3 раза».
+    #[test]
+    fn move_deltas_sum_to_displacement() {
+        let mut sent = play::quantize([0.5, 64.0, 0.5]);
+        let mut pos = [0.5, 64.0, 0.5];
+        let mut decoded = [0.5, 64.0, 0.5];
+        // Шаг 0.44 блока за тик — установившаяся скорость коровы.
+        for _ in 0..20 {
+            pos[0] += 0.44;
+            let q = play::quantize(pos);
+            let delta = play::delta(sent, q).expect("короткий шаг помещается в short");
+            sent = q;
+            for i in 0..3 {
+                decoded[i] += f64::from(delta[i]) / 4096.0;
+            }
+        }
+        assert!(
+            (decoded[0] - pos[0]).abs() < 1e-3,
+            "клиент прошёл {:.4}, моб сместился {:.4}",
+            decoded[0],
+            pos[0]
+        );
     }
 }

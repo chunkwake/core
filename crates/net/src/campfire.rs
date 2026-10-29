@@ -22,7 +22,11 @@ pub enum Action {
     /// Слоты этого тика просмотрены.
     Done,
     /// Слот дошёл до срока. Прогресс уже увеличен, слот ещё занят.
-    Ready { slot: usize, source: Stack, result: Stack },
+    Ready {
+        slot: usize,
+        source: Stack,
+        result: Stack,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -192,10 +196,7 @@ mod tests {
             Action::Ready { slot, result, .. } => {
                 assert_eq!(slot, 0);
                 assert_eq!((result.item, result.count), (2, 1));
-                assert_eq!(
-                    c.finish(slot, Finish::Drop(Some(result))),
-                    Some(result)
-                );
+                assert_eq!(c.finish(slot, Finish::Drop(Some(result))), Some(result));
             }
             Action::Done => panic!("600th tick should finish"),
         }

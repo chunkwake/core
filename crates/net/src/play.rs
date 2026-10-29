@@ -134,6 +134,8 @@ pub struct PlayPlan {
     chunk_body: Vec<u8>,
     /// Чанк генератора (плоский мир); изменённые чанки — в `edited`.
     template: ChunkColumn,
+    /// Нормальный мир: столбцы, которых нет на диске. Плоский мир — `None`.
+    terrain: Option<Arc<dyn Fn(i32, i32) -> ChunkColumn + Send + Sync>>,
     /// Изменённые столбцы и номер их правки (для сверки с кэшем кадров).
     edited: std::sync::RwLock<Columns>,
     /// Номер правки, записанный на диск, по столбцам.
@@ -150,6 +152,10 @@ pub struct PlayPlan {
     source: std::sync::OnceLock<Arc<dyn ChunkSource>>,
     regions: Mutex<HashSet<(i32, i32)>>,
     region_load: Mutex<()>,
+    /// Пул генерации: тяжёлый счёт чанков идёт вне задачи сессии.
+    gen_pool: std::sync::OnceLock<Arc<crate::chunkgen::GenPool>>,
+    /// Слабая ссылка на себя: задачам пула нужен `'static` доступ к плану.
+    self_weak: std::sync::OnceLock<std::sync::Weak<Self>>,
     min_y: i32,
     /// ID предмета → состояние блока, который он ставит.
     item_blocks: Vec<Option<u32>>,
@@ -229,6 +235,8 @@ pub struct PlayPlan {
     shutting_down: AtomicBool,
     /// Кто смотрит сундук или бочку: крышка открыта, пока список не пуст.
     open_blocks: Mutex<HashMap<[i32; 3], Vec<Uuid>>>,
+    /// Чанки в радиусе симуляции вокруг игроков: только они тикают.
+    simulated: Mutex<HashSet<(i32, i32)>>,
     /// Время суток (0..24000). Тик двигает его и шлёт клиенту, клиент сам не считает.
     day_time: AtomicI64,
     /// Сколько серверных тиков прошло с запуска (`/time query gametime`).
@@ -242,6 +250,24 @@ pub struct PlayPlan {
 
 /// Готовый к записи кадр, общий для многих соединений.
 type Frame = Arc<Vec<u8>>;
+
+/// Поток генерации уступает обычному тику: ядра заняты, но не в ущерб ему.
+#[cfg(windows)]
+pub(crate) fn background_priority() {
+    unsafe extern "system" {
+        fn GetCurrentThread() -> *mut std::ffi::c_void;
+        fn SetThreadPriority(handle: *mut std::ffi::c_void, priority: i32) -> i32;
+    }
+    /// `THREAD_PRIORITY_BELOW_NORMAL`.
+    const BELOW_NORMAL: i32 = -1;
+    // SAFETY: псевдо-дескриптор текущего потока (-2), меняется только его приоритет.
+    unsafe {
+        SetThreadPriority(GetCurrentThread(), BELOW_NORMAL);
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn background_priority() {}
 
 /// Предел кэша кадров чанков; при переполнении кэш сбрасывается целиком.
 const CHUNK_CACHE_LIMIT: usize = 65_536;
@@ -287,11 +313,11 @@ type Columns = HashMap<(i32, i32), (ChunkColumn, u64), std::hash::BuildHasherDef
 /// Изменения блоков по секциям: (локальный индекс, состояние).
 type PendingBlocks = HashMap<[i32; 3], Vec<(u16, u32)>>;
 
-/// Мир для пересчёта света: читает правленые столбцы или шаблон,
-/// при записи копирует шаблон в правленые и запоминает затронутые.
+/// Мир для пересчёта света. Плоский мир подставляет шаблон, нормальный —
+/// отсутствующий чанк просто не виден, чтобы не засветить рельеф травой.
 struct WorldLight<'a> {
     world: &'a mut Columns,
-    template: &'a ChunkColumn,
+    fallback: Option<&'a ChunkColumn>,
     touched: HashSet<(i32, i32)>,
     /// Последний записанный столбец: BFS пишет в один подряд, без лишних вставок.
     last: Option<(i32, i32)>,
@@ -299,21 +325,29 @@ struct WorldLight<'a> {
 
 impl LightAccess for WorldLight<'_> {
     fn column(&mut self, cx: i32, cz: i32) -> Option<&ChunkColumn> {
-        Some(self.world.get(&(cx, cz)).map_or(self.template, |e| &e.0))
+        if let Some(e) = self.world.get(&(cx, cz)) {
+            return Some(&e.0);
+        }
+        self.fallback
     }
     fn column_mut(&mut self, cx: i32, cz: i32) -> Option<&mut ChunkColumn> {
+        if !self.world.contains_key(&(cx, cz)) {
+            let template = self.fallback?;
+            self.touched.insert((cx, cz));
+            self.last = Some((cx, cz));
+            return Some(
+                &mut self
+                    .world
+                    .entry((cx, cz))
+                    .or_insert_with(|| (template.clone(), 0))
+                    .0,
+            );
+        }
         if self.last != Some((cx, cz)) {
             self.touched.insert((cx, cz));
             self.last = Some((cx, cz));
         }
-        let template = self.template;
-        Some(
-            &mut self
-                .world
-                .entry((cx, cz))
-                .or_insert_with(|| (template.clone(), 0))
-                .0,
-        )
+        Some(&mut self.world.get_mut(&(cx, cz)).unwrap().0)
     }
 }
 
@@ -520,6 +554,20 @@ fn near(center: (i32, i32), pos: [f64; 3], r: i32) -> bool {
     (x - center.0).abs() <= r && (z - center.1).abs() <= r
 }
 
+/// Чанк, в котором лежит позиция.
+fn chunk_of(pos: [f64; 3]) -> (i32, i32) {
+    ((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4)
+}
+
+/// Квадрат чанков радиуса `r` вокруг `center` — как `chunks_around`, но без порядка.
+fn chunk_square(center: (i32, i32), r: i32, out: &mut HashSet<(i32, i32)>) {
+    for x in (center.0 - r)..=(center.0 + r) {
+        for z in (center.1 - r)..=(center.1 + r) {
+            out.insert((x, z));
+        }
+    }
+}
+
 /// Общее состояние сессий: игроки онлайн и широковещательный канал.
 struct Hub {
     /// Кодек кадров play (порог сжатия сервера): рассылка кодируется один раз.
@@ -541,6 +589,18 @@ impl Hub {
 
     fn send(&self, skip: Option<Uuid>, packet: Vec<u8>) {
         self.send_entity(skip, packet, None);
+    }
+
+    /// Уже сжатый кадр всем: соседний чанк после пролива света.
+    fn send_ready(&self, frame: Frame) {
+        let _ = self.tx.send(Broadcast {
+            skip: None,
+            only: None,
+            packet: frame,
+            entity: None,
+            moves: None,
+            blocks: None,
+        });
     }
 
     /// Много пакетов всем — одной рассылкой: кадры подряд, одно пробуждение
@@ -591,6 +651,8 @@ impl std::fmt::Debug for PlayPlan {
 pub struct WorldSpec {
     /// Чанк генератора: копируется при первой правке столбца.
     pub template: ChunkColumn,
+    /// Нормальный мир: сгенерировать недостающий чанк. Плоский — `None`.
+    pub terrain: Option<Arc<dyn Fn(i32, i32) -> ChunkColumn + Send + Sync>>,
     pub min_y: i32,
     /// ID предмета → состояние блока, который он ставит.
     pub item_blocks: Vec<Option<u32>>,
@@ -731,18 +793,23 @@ impl TickMeter {
         push_sample(&mut self.work, started.elapsed().as_secs_f64() * 1000.0);
     }
 
+    /// Частота тика без обрезки сверху: ускоренный цикл видно как TPS выше 20.
     fn line(&self) -> String {
         let avg = |q: &VecDeque<f64>| q.iter().sum::<f64>() / q.len() as f64;
         if self.work.is_empty() {
-            return "TPS: 20.0 MSPT: 0.0".to_owned();
+            return "TPS: 20.0 MSPT: 0.0 interval: 50.0 ms".to_owned();
         }
         let mspt = avg(&self.work);
-        let tps = if self.gap.is_empty() {
-            20.0
+        if self.gap.is_empty() {
+            return format!("TPS: 20.0 MSPT: {mspt:.1} interval: 50.0 ms");
+        }
+        let gap = avg(&self.gap);
+        let tps = if gap <= 0.0 {
+            f64::INFINITY
         } else {
-            (1000.0 / avg(&self.gap)).min(20.0)
+            1000.0 / gap
         };
-        format!("TPS: {tps:.1} MSPT: {mspt:.1}")
+        format!("TPS: {tps:.1} MSPT: {mspt:.1} interval: {gap:.1} ms")
     }
 }
 
@@ -990,13 +1057,13 @@ pub struct SurvivalData {
     /// Компонент `minecraft:tool` по ID предмета.
     pub tools: Vec<Option<chunkwake_data::tools::Tool>>,
     /// Имя блока по состоянию (для правил инструментов).
-    pub block_names: Vec<String>,
+    pub block_names: Arc<Vec<String>>,
     /// Состояние блока по умолчанию по имени (`Block.setType` у плагинов).
     pub block_defaults: HashMap<String, u32>,
     /// ID типа блока в реестре `block` (для `block_event`, не состояние).
     pub block_types: HashMap<String, i32>,
     /// Предмет, выпадающий из состояния блока.
-    pub loot: chunkwake_data::world::BlockLoot,
+    pub loot: Arc<chunkwake_data::world::LootSource>,
     /// Свойства предметов по ID: размер стопки, еда.
     pub items: Vec<chunkwake_data::world::ItemInfo>,
     /// ID `minecraft:fall` и `minecraft:out_of_world` в реестре `damage_type`.
@@ -1034,6 +1101,7 @@ impl PlayPlan {
     ) -> Result<Self, DataError> {
         let WorldSpec {
             template,
+            terrain,
             min_y,
             item_blocks,
             spawn,
@@ -1146,6 +1214,7 @@ impl PlayPlan {
             login,
             chunk_body: template.encode_body(),
             template,
+            terrain,
             edited: std::sync::RwLock::new(Columns::default()),
             saved: Mutex::new(HashMap::new()),
             dirty: Mutex::default(),
@@ -1155,6 +1224,8 @@ impl PlayPlan {
             source: std::sync::OnceLock::new(),
             regions: Mutex::new(HashSet::new()),
             region_load: Mutex::new(()),
+            gen_pool: std::sync::OnceLock::new(),
+            self_weak: std::sync::OnceLock::new(),
             min_y,
             item_blocks,
             spawn,
@@ -1199,6 +1270,7 @@ impl PlayPlan {
             controls: Mutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
             open_blocks: Mutex::new(HashMap::new()),
+            simulated: Mutex::new(HashSet::new()),
             day_time: AtomicI64::new(0),
             game_time: AtomicI64::new(0),
             tick_meter: Mutex::new(TickMeter::new()),
@@ -1217,12 +1289,12 @@ impl PlayPlan {
 
     /// Сжатый кадр чанка из кэша (кодируется при первом запросе).
     fn chunk_frame(&self, x: i32, z: i32) -> Frame {
-        // Кэш кадров общий и прогревается заранее: заселение — до него.
-        self.populate_chunk(x, z);
         if let Some(f) = self.chunk_frames.lock().unwrap().get(&(x, z)) {
             return f.clone();
         }
+        // Рельеф уже вставлен волной. Мобы — после него, не на плоском шаблоне.
         self.ensure_region(x, z);
+        self.populate_chunk(x, z);
         // Под блокировкой — только дешёвый клон (секции за Arc);
         // кодирование и сжатие — вне её.
         let snapshot = self.edited.read().unwrap().get(&(x, z)).cloned();
@@ -1251,15 +1323,18 @@ impl PlayPlan {
     }
 
     /// Ставит блок (мировые координаты) и рассылает `block_update`.
-    /// `None` — позиция вне мира по высоте.
+    /// `None` — позиция вне мира по высоте или чанк шума ещё не сгенерирован.
     fn set_block(&self, [x, y, z]: [i32; 3], state: u32) -> Option<u32> {
         let ry = y - self.min_y;
         if ry < 0 || ry as usize >= self.template.height() {
             return None;
         }
         let key = (x >> 4, z >> 4);
-        self.ensure_region(key.0, key.1);
         let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
+        // Чанк шума появится при отправке игроку, а не из тика.
+        if self.terrain.is_some() && !self.edited.read().unwrap().contains_key(&key) {
+            return None;
+        }
         let old = {
             let mut world = self.edited.write().unwrap();
             let (column, rev) = world
@@ -1277,21 +1352,15 @@ impl PlayPlan {
             // Кадр чанка кэшируется без сверки ревизии: иначе клиент получит старый блок.
             self.chunk_frames.lock().unwrap().remove(&key);
         } else {
-            // Свет доходит до соседних чанков: их регионы тоже должны быть прочитаны.
-            for dx in -1..=1 {
-                for dz in -1..=1 {
-                    if dx != 0 || dz != 0 {
-                        self.ensure_region(key.0 + dx, key.1 + dz);
-                    }
-                }
-            }
+            // Свет доходит до соседних чанков, но читает только загруженное:
+            // это вызывается и из тика, диск тут ждать нельзя.
             // BFS света одного блока короче копии девяти столбцов: прямо под замком.
             let mut world = self.edited.write().unwrap();
             // Под той же блокировкой: chunk_frame не вставит устаревший кадр.
             let mut frames = self.chunk_frames.lock().unwrap();
             let mut access = WorldLight {
                 world: &mut world,
-                template: &self.template,
+                fallback: self.terrain.is_none().then_some(&self.template),
                 touched: HashSet::new(),
                 last: None,
             };
@@ -2471,7 +2540,24 @@ impl PlayPlan {
         let _ = self.source.set(source);
     }
 
+    /// Пул генерации создаётся один раз и переживает сессии игроков.
+    /// Пока пула нет (тесты без мира), генерация идёт прямо в сессии.
+    pub fn set_gen_pool(&self, pool: Arc<crate::chunkgen::GenPool>) {
+        let _ = self.gen_pool.set(pool);
+    }
+
+    /// Слабая ссылка на себя: задачам пула нужен `'static` доступ к плану.
+    pub fn set_self_weak(self: &Arc<Self>) {
+        let _ = self.self_weak.set(Arc::downgrade(self));
+    }
+
     /// Гарантирует, что регион чанка `(x, z)` прочитан с диска.
+    ///
+    /// Вызывается только с потоков генерации (задачи пула) и загрузки чанков,
+    /// но не из тика и не из задачи сессии игрока: разбор региона — это до
+    /// 1024 чанков NBT, на тике он превращался в замирание мира.
+    /// Загрузка синхронна намеренно: `generate_chunk` должен видеть уже
+    /// прочитанный столбец, иначе сгенерирует поверх сохранённого.
     fn ensure_region(&self, x: i32, z: i32) {
         let Some(source) = self.source.get() else {
             return;
@@ -2492,47 +2578,7 @@ impl PlayPlan {
             return;
         }
         match source.load_region(key.0, key.1) {
-            Ok(columns) => {
-                let mut world = self.edited.write().unwrap();
-                let mut cache = self.chunk_frames.lock().unwrap();
-                let mut found = Vec::new();
-                let mut hoppers = Vec::new();
-                // Сохранённые чанки уже сгенерированы: мобов при генерации им не положено.
-                self.populated
-                    .lock()
-                    .unwrap()
-                    .extend(columns.iter().map(|(pos, _)| *pos));
-                for (pos, c) in columns {
-                    hoppers.extend(
-                        c.block_entities
-                            .iter()
-                            .filter(|(_, be)| be.id == "minecraft:hopper")
-                            .map(|(p, _)| *p),
-                    );
-                    found.extend(
-                        c.block_entities
-                            .iter()
-                            .filter(|(_, be)| FURNACES.contains(&be.id.as_str()))
-                            .map(|(p, _)| *p),
-                    );
-                    self.pending_campfires.lock().unwrap().extend(
-                        c.block_entities
-                            .iter()
-                            .filter(|(_, be)| be.id == "minecraft:campfire")
-                            .map(|(p, _)| *p),
-                    );
-                    // Правка, сделанная до загрузки, не затирается диском.
-                    if let std::collections::hash_map::Entry::Vacant(e) = world.entry(pos) {
-                        e.insert((c, 0));
-                        cache.remove(&pos);
-                    }
-                }
-                self.pending_furnaces.lock().unwrap().extend(found);
-                self.hoppers
-                    .lock()
-                    .unwrap()
-                    .extend(hoppers.into_iter().map(|p| (p, 0)));
-            }
+            Ok(columns) => self.install_region(columns),
             Err(e) => tracing::error!("region {key:?}: {e}"),
         }
         match source.load_entities(key.0, key.1) {
@@ -2540,6 +2586,130 @@ impl PlayPlan {
             Err(e) => tracing::error!("entities {key:?}: {e}"),
         }
         self.regions.lock().unwrap().insert(key);
+    }
+
+    /// Вставляет прочитанный регион: только те столбцы, которых ещё нет,
+    /// поэтому правка, сделанная до загрузки, не затирается диском.
+    fn install_region(&self, columns: Vec<LoadedChunk>) {
+        let mut world = self.edited.write().unwrap();
+        let mut cache = self.chunk_frames.lock().unwrap();
+        let mut found = Vec::new();
+        let mut hoppers = Vec::new();
+        // Сохранённые чанки уже сгенерированы: мобов при генерации им не положено.
+        self.populated
+            .lock()
+            .unwrap()
+            .extend(columns.iter().map(|(pos, _)| *pos));
+        for (pos, c) in columns {
+            hoppers.extend(
+                c.block_entities
+                    .iter()
+                    .filter(|(_, be)| be.id == "minecraft:hopper")
+                    .map(|(p, _)| *p),
+            );
+            found.extend(
+                c.block_entities
+                    .iter()
+                    .filter(|(_, be)| FURNACES.contains(&be.id.as_str()))
+                    .map(|(p, _)| *p),
+            );
+            self.pending_campfires.lock().unwrap().extend(
+                c.block_entities
+                    .iter()
+                    .filter(|(_, be)| be.id == "minecraft:campfire")
+                    .map(|(p, _)| *p),
+            );
+            if let std::collections::hash_map::Entry::Vacant(e) = world.entry(pos) {
+                e.insert((c, 0));
+                cache.remove(&pos);
+            }
+        }
+        self.pending_furnaces.lock().unwrap().extend(found);
+        self.hoppers
+            .lock()
+            .unwrap()
+            .extend(hoppers.into_iter().map(|p| (p, 0)));
+    }
+
+    /// Блоки чанка, если его ещё нет. `true` — столбец только что вставлен.
+    /// Диск не затирается. Свет ставит [`Self::spread_commit`], не этот вызов.
+    fn generate_chunk(&self, x: i32, z: i32) -> bool {
+        self.ensure_region(x, z);
+        let Some(generate) = &self.terrain else {
+            return false;
+        };
+        if self.edited.read().unwrap().contains_key(&(x, z)) {
+            return false;
+        }
+        let mut column = generate(x, z);
+        // Заготовка `from_blocks` — небо 15 везде. До пролива это не свет.
+        let n = column.sections.len();
+        column.sky_light = vec![chunkwake_world::light::LightLayer::Uniform(0); n];
+        column.block_light = vec![chunkwake_world::light::LightLayer::Uniform(0); n];
+        let mut world = self.edited.write().unwrap();
+        if let std::collections::hash_map::Entry::Vacant(e) = world.entry((x, z)) {
+            e.insert((column, 0));
+            self.chunk_frames.lock().unwrap().remove(&(x, z));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Пролив света нового чанка в соседей и обратно. Соседи, чей кадр уже
+    /// уходил клиенту, возвращаются — их надо переслать.
+    fn spread_commit(&self, x: i32, z: i32) -> Vec<(i32, i32)> {
+        if self.terrain.is_none() {
+            return Vec::new();
+        }
+        // Сосед с диска должен быть в памяти, иначе грань останется тёмной.
+        for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            self.ensure_region(x + dx, z + dz);
+        }
+        let mut columns = HashMap::new();
+        let mut revs = HashMap::new();
+        {
+            let world = self.edited.read().unwrap();
+            let Some((col, rev)) = world.get(&(x, z)) else {
+                return Vec::new();
+            };
+            columns.insert((x, z), col.clone());
+            revs.insert((x, z), *rev);
+            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let n = (x + dx, z + dz);
+                if let Some((col, rev)) = world.get(&n) {
+                    columns.insert(n, col.clone());
+                    revs.insert(n, *rev);
+                }
+            }
+        }
+        let touched = chunkwake_world::light::spread_chunk(&mut columns, (x, z), &self.light);
+        let mut world = self.edited.write().unwrap();
+        let mut frames = self.chunk_frames.lock().unwrap();
+        let mut dirty = self.dirty.lock().unwrap();
+        let mut resent = Vec::new();
+        for pos in touched {
+            let Some(updated) = columns.get(&pos) else {
+                continue;
+            };
+            let Some(entry) = world.get_mut(&pos) else {
+                continue;
+            };
+            if revs.get(&pos).copied() != Some(entry.1) {
+                continue;
+            }
+            entry.0.sky_light = updated.sky_light.clone();
+            entry.0.block_light = updated.block_light.clone();
+            let had = frames.remove(&pos).is_some();
+            if pos != (x, z) {
+                entry.1 += 1;
+                dirty.insert(pos);
+                if had {
+                    resent.push(pos);
+                }
+            }
+        }
+        resent
     }
 
     /// Чанк генератора — основа для загрузки сохранённых столбцов.
@@ -2617,47 +2787,86 @@ impl PlayPlan {
         if ry < 0 || ry as usize >= self.template.height() {
             return None;
         }
-        self.ensure_region(x >> 4, z >> 4);
         let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
         let world = self.edited.read().unwrap();
-        let column = world
-            .get(&(x >> 4, z >> 4))
-            .map_or(&self.template, |e| &e.0);
-        Some(column.block(lx, ry as usize, lz))
+        // Диск не читается: тик видит только загруженное, как и в ванили.
+        // Плоский мир подставляет шаблон, у шума нечего подставить.
+        match world.get(&(x >> 4, z >> 4)) {
+            Some(e) => Some(e.0.block(lx, ry as usize, lz)),
+            None if self.terrain.is_none() => Some(self.template.block(lx, ry as usize, lz)),
+            None => None,
+        }
     }
 
-    /// `f` по пачке, затем склейка в исходном порядке. Пул — по числу ядер.
-    fn map_chunks<T, R>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R>
+    /// Пересобирает набор чанков, которые тикают: квадрат радиуса
+    /// `simulation-distance` вокруг каждого игрока. Зовётся раз в тик.
+    fn refresh_simulated(&self) {
+        let r = self.login.simulation_distance;
+        let mut set = HashSet::new();
+        {
+            let players = self.hub.players.lock().unwrap();
+            for p in players.values() {
+                chunk_square(chunk_of(p.pos), r, &mut set);
+            }
+        }
+        *self.simulated.lock().unwrap() = set;
+    }
+
+    /// Сколько чанков в наборе — для тестов и `/tps`.
+    pub fn simulated_chunks(&self) -> usize {
+        self.simulated.lock().unwrap().len()
+    }
+
+    /// Задать набор напрямую: тесты и загрузка без игроков.
+    pub fn set_simulated(&self, chunks: impl IntoIterator<Item = (i32, i32)>) {
+        *self.simulated.lock().unwrap() = chunks.into_iter().collect();
+    }
+
+    /// `f` по пачке на `workers` потоках, результат в исходном порядке.
+    #[cfg(test)]
+    fn map_limited<T, R>(items: &[T], workers: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R>
     where
         T: Sync,
         R: Send,
     {
-        static CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-        let n = items.len();
-        // Поток на пару чанков дороже их сжатия: параллелим от 8 штук.
-        let cores = *CORES.get_or_init(|| {
-            std::thread::available_parallelism()
-                .map(|p| p.get())
-                .unwrap_or(1)
-        });
-        let workers = cores.min(n / 4);
-        if workers <= 1 {
+        let workers = workers.max(1).min(items.len().max(1));
+        if workers <= 1 || items.len() <= 1 {
             return items.iter().map(f).collect();
         }
-        let mut out = Vec::with_capacity(n);
+        let mut out = Vec::with_capacity(items.len());
         std::thread::scope(|scope| {
             let mut joins = Vec::with_capacity(workers);
-            for batch in items.chunks(n.div_ceil(workers)) {
-                joins.push(scope.spawn(|| batch.iter().map(&f).collect::<Vec<_>>()));
+            for batch in items.chunks(items.len().div_ceil(workers)) {
+                joins.push(scope.spawn(|| {
+                    background_priority();
+                    batch.iter().map(&f).collect::<Vec<_>>()
+                }));
             }
             for join in joins {
-                out.extend(join.join().expect("chunk frame"));
+                out.extend(join.join().expect("chunk wave"));
             }
         });
         out
     }
 
-    /// Центр, пачка чанков и её конец — одним буфером и одной записью в сокет.
+    async fn send_batch(&self, conn: &mut Connection, frames: &[Frame]) -> Result<(), NetError> {
+        let mut out = Vec::new();
+        out.extend(
+            self.hub
+                .frame(&play::chunk_batch_start(self.ids.chunk_batch_start)),
+        );
+        for f in frames {
+            out.extend_from_slice(f);
+        }
+        out.extend(self.hub.frame(&play::chunk_batch_finished(
+            self.ids.chunk_batch_finished,
+            frames.len() as i32,
+        )));
+        conn.send_frames(&out).await
+    }
+
+    /// Центр, затем чанки: кэш сразу, промахи — задачами в пул генерации.
+    /// Сессия только отправляет готовое, поэтому тик не ждёт счёта.
     async fn send_chunks(
         &self,
         conn: &mut Connection,
@@ -2667,35 +2876,93 @@ impl PlayPlan {
     ) -> Result<(), NetError> {
         let ids = self.ids;
         let hub = &self.hub;
-        // Готовые кадры — одним замком; потоки — только под промахи кэша.
-        let mut frames: Vec<Option<Frame>> = {
-            let cache = self.chunk_frames.lock().unwrap();
-            coords.iter().map(|c| cache.get(c).cloned()).collect()
-        };
-        let misses: Vec<usize> = (0..coords.len()).filter(|&i| frames[i].is_none()).collect();
-        let built = Self::map_chunks(&misses, |&i| self.chunk_frame(coords[i].0, coords[i].1));
-        for (i, f) in misses.into_iter().zip(built) {
-            frames[i] = Some(f);
-        }
-        let frames: Vec<Frame> = frames.into_iter().flatten().collect();
-        let mut out = Vec::with_capacity(frames.iter().map(|f| f.len()).sum::<usize>() + 64);
+        let mut prefix = Vec::new();
         for &(x, z) in forget {
-            out.extend(hub.frame(&play::forget_level_chunk(ids.forget_level_chunk, x, z)));
+            prefix.extend(hub.frame(&play::forget_level_chunk(ids.forget_level_chunk, x, z)));
         }
-        out.extend(hub.frame(&play::set_chunk_cache_center(
+        prefix.extend(hub.frame(&play::set_chunk_cache_center(
             ids.set_chunk_cache_center,
             center.0,
             center.1,
         )));
-        out.extend(hub.frame(&play::chunk_batch_start(ids.chunk_batch_start)));
-        for f in &frames {
-            out.extend_from_slice(f);
+        conn.send_frames(&prefix).await?;
+
+        let (cached, misses) = {
+            let cache = self.chunk_frames.lock().unwrap();
+            let mut cached = Vec::new();
+            let mut misses = Vec::new();
+            for &c in coords {
+                if let Some(f) = cache.get(&c) {
+                    cached.push(f.clone());
+                } else {
+                    misses.push(c);
+                }
+            }
+            (cached, misses)
+        };
+        if misses.is_empty() {
+            return self.send_batch(conn, &cached).await;
         }
-        out.extend(hub.frame(&play::chunk_batch_finished(
-            ids.chunk_batch_finished,
-            coords.len() as i32,
-        )));
-        conn.send_frames(&out).await
+        if !cached.is_empty() {
+            self.send_batch(conn, &cached).await?;
+        }
+        // Ближние первыми: очередь пула — порядок постановки.
+        let mut misses = misses;
+        misses.sort_by_key(|&(x, z)| (x - center.0).pow(2) + (z - center.1).pow(2));
+
+        // Без пула (тесты) считаем здесь же, чтобы не менять поведение.
+        let Some(pool) = self.gen_pool.get().cloned() else {
+            let frames = misses
+                .iter()
+                .map(|&(x, z)| self.build_chunk(x, z).0)
+                .collect::<Vec<_>>();
+            return self.send_batch(conn, &frames).await;
+        };
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Frame>();
+        let Some(plan) = self.self_weak.get().and_then(|w| w.upgrade()) else {
+            return Ok(());
+        };
+        for &(x, z) in &misses {
+            let plan = plan.clone();
+            let task_pool = pool.clone();
+            let tx = tx.clone();
+            pool.submit(Box::new(move || {
+                let (frame, resent) = plan.build_chunk(x, z);
+                task_pool.done();
+                let _ = tx.send(frame);
+                // Соседи, чей кадр клиент уже видел, уходят всем: у света нет
+                // отдельного пакета, только новый чанк целиком.
+                for (nx, nz) in resent {
+                    plan.hub.send_ready(plan.chunk_frame(nx, nz));
+                }
+            }));
+        }
+        // Свой отправитель не нужен: канал закроется, когда задачи закончатся.
+        drop(tx);
+        let count = misses.len();
+        let mut pending = Vec::with_capacity(count.min(64));
+        while let Some(frame) = rx.recv().await {
+            pending.push(frame);
+            // Пачку отправляем по накоплению, а не по одному пакету на чанк.
+            if pending.len() >= 16 || pool.pending() == 0 {
+                self.send_batch(conn, &pending).await?;
+                pending.clear();
+            }
+        }
+        if !pending.is_empty() {
+            self.send_batch(conn, &pending).await?;
+        }
+        Ok(())
+    }
+
+    /// Чанк целиком: генерация, свет, кадр. `true` в паре — соседи для пересылки.
+    fn build_chunk(&self, x: i32, z: i32) -> (Frame, Vec<(i32, i32)>) {
+        let mut resent = Vec::new();
+        if self.generate_chunk(x, z) {
+            resent = self.spread_commit(x, z);
+        }
+        (self.chunk_frame(x, z), resent)
     }
 
     /// Игрок перешёл в другой чанк: выгружаем ушедшие из радиуса, шлём новые.
@@ -2954,10 +3221,15 @@ impl PlayPlan {
             .map(|p| p.pos)
             .collect();
         let min_y = self.min_y;
+        let simulated: HashSet<(i32, i32)> = self.simulated.lock().unwrap().clone();
         let solid = |p: [i32; 3]| p[1] >= min_y && self.block(p).is_none_or(|b| b != AIR);
         let mut syncs = Vec::new();
         let mut gone = Vec::new();
         for (&id, o) in orbs.iter_mut() {
+            // Сфера вне симуляции висит на месте, пока чанк не начнут тикать.
+            if !simulated.is_empty() && !simulated.contains(&chunk_of(o.pos)) {
+                continue;
+            }
             let near = players
                 .iter()
                 .map(|p| {
@@ -3335,12 +3607,20 @@ impl PlayPlan {
         }
         let now = Instant::now();
         let min_y = self.min_y;
+        // Предметы вне радиуса симуляции стоят: как чанки, которые не тикают.
+        let simulated: HashSet<(i32, i32)> = self.simulated.lock().unwrap().clone();
+        let asleep = |d: &crate::items::Dropped| {
+            !simulated.is_empty() && !simulated.contains(&chunk_of(d.pos))
+        };
         let solid = |p: [i32; 3]| p[1] >= min_y && self.block(p).is_none_or(|b| b != AIR);
         let mut syncs = Vec::new();
         let mut gone = Vec::new();
         // Кого проверять на слияние: летящих раз в 2 тика, лежащих раз в 40 (как ванила).
         let mut merging = Vec::new();
         for (&id, d) in dropped.iter_mut() {
+            if asleep(d) {
+                continue;
+            }
             if d.resting() {
                 d.age += 1;
                 if d.age.is_multiple_of(40) {
@@ -3500,9 +3780,14 @@ impl PlayPlan {
         let mut stuck = Vec::new();
         let mut broken = Vec::new();
         let mut hurt = Vec::new();
+        let simulated: HashSet<(i32, i32)> = self.simulated.lock().unwrap().clone();
         {
             let mut arrows = self.arrows.lock().unwrap();
             for (&id, a) in arrows.iter_mut() {
+                // Стрела в нетикающем чанке висит в воздухе, как и в ванили.
+                if !simulated.is_empty() && !simulated.contains(&chunk_of(a.pos)) {
+                    continue;
+                }
                 let punch = a.punch;
                 for hit in ar::step(a, &alive, solid, water) {
                     match hit {
@@ -4197,6 +4482,7 @@ impl PlayPlan {
                 tick.tick().await;
                 let Some(plan) = plan.upgrade() else { return };
                 let started = Instant::now();
+                plan.refresh_simulated();
                 plan.tick_items();
                 plan.tick_arrows();
                 plan.tick_mobs();
@@ -6209,9 +6495,7 @@ impl PlayPlan {
         for s in leftovers {
             thrown.extend(inv.add_stack(s, self.max_stack(s.item)));
         }
-        if grind_took
-            && let Some(pos) = window.as_ref().map(|w| w.pos)
-        {
+        if grind_took && let Some(pos) = window.as_ref().map(|w| w.pos) {
             self.grind_taken(pos, grind_xp);
         }
         (thrown, resync)
@@ -6245,7 +6529,9 @@ impl PlayPlan {
                 .map_or(0, |d| d.min_cost(level))
         };
         let ctx = crate::grindstone::Ctx {
-            enchanted_book: self.item_id(crate::enchanting::ENCHANTED_BOOK).unwrap_or(-1),
+            enchanted_book: self
+                .item_id(crate::enchanting::ENCHANTED_BOOK)
+                .unwrap_or(-1),
             book: self.item_id(crate::enchanting::BOOK).unwrap_or(-1),
             max_damage: &max_damage,
             max_stack: &max_stack,
@@ -6275,7 +6561,9 @@ impl PlayPlan {
                 .map_or(0, |d| d.min_cost(level))
         };
         let ctx = crate::grindstone::Ctx {
-            enchanted_book: self.item_id(crate::enchanting::ENCHANTED_BOOK).unwrap_or(-1),
+            enchanted_book: self
+                .item_id(crate::enchanting::ENCHANTED_BOOK)
+                .unwrap_or(-1),
             book: self.item_id(crate::enchanting::BOOK).unwrap_or(-1),
             max_damage: &max_damage,
             max_stack: &max_stack,
@@ -6296,7 +6584,11 @@ impl PlayPlan {
         let amount = crate::grindstone::xp_amount(n, roll);
         if amount > 0 {
             self.spawn_orbs(
-                [pos[0] as f64 + 0.5, pos[1] as f64 + 0.5, pos[2] as f64 + 0.5],
+                [
+                    pos[0] as f64 + 0.5,
+                    pos[1] as f64 + 0.5,
+                    pos[2] as f64 + 0.5,
+                ],
                 amount,
             );
         }
@@ -6690,8 +6982,14 @@ impl PlayPlan {
             .server_ticks
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
+        let simulated: HashSet<(i32, i32)> = self.simulated.lock().unwrap().clone();
         let deferred = std::mem::take(&mut *self.deferred_updates.lock().unwrap());
         for p in deferred {
+            // Правка плагина в нетикающем чанке подождёт своей симуляции.
+            if !simulated.is_empty() && !simulated.contains(&(p[0] >> 4, p[2] >> 4)) {
+                self.deferred_updates.lock().unwrap().push(p);
+                continue;
+            }
             self.redstone_update(&crate::redstone::around(p));
         }
         self.scan_plates();
@@ -6703,7 +7001,10 @@ impl PlayPlan {
             if list.is_empty() {
                 return;
             }
-            list.take_due(now)
+            // Расписание вдалеке не теряется: тик подождёт, пока чанк в симуляции.
+            list.take_due_in(now, |p| {
+                simulated.is_empty() || simulated.contains(&(p[0] >> 4, p[2] >> 4))
+            })
         };
         for pos in due {
             self.scheduled_tick(pos, now);
@@ -6747,10 +7048,21 @@ impl PlayPlan {
             .collect();
         // Живые мобы жмут все плиты, как игроки.
         let mut feet = feet;
-        feet.extend(self.mobs.lock().unwrap().values().filter(|e| e.mob.alive()).map(|e| {
-            let p = e.mob.pos;
-            [p[0].floor() as i32, (p[1] + 0.01).floor() as i32, p[2].floor() as i32]
-        }));
+        feet.extend(
+            self.mobs
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|e| e.mob.alive())
+                .map(|e| {
+                    let p = e.mob.pos;
+                    [
+                        p[0].floor() as i32,
+                        (p[1] + 0.01).floor() as i32,
+                        p[2].floor() as i32,
+                    ]
+                }),
+        );
         let mut on: HashMap<[i32; 3], usize> = HashMap::new();
         for f in feet {
             if self
@@ -7558,8 +7870,13 @@ impl PlayPlan {
             if map.is_empty() {
                 return;
             }
+            let simulated: HashSet<(i32, i32)> = self.simulated.lock().unwrap().clone();
             let mut ready = Vec::new();
             for (p, cd) in map.iter_mut() {
+                // Воронка вне симуляции не переносит: перенос — это работа тика.
+                if !simulated.is_empty() && !simulated.contains(&(p[0] >> 4, p[2] >> 4)) {
+                    continue;
+                }
                 if *cd > 0 {
                     *cd -= 1;
                 } else {
@@ -7863,18 +8180,18 @@ impl PlayPlan {
         let name = self.item_name(st.item).to_owned();
         let front_state = self.block(front)?;
         let front_name = self.state_name(front_state).to_owned();
-        if front_name == "minecraft:campfire" || front_name == "minecraft:soul_campfire" {
-            if let Some(offer) = self.campfire_offer(st.item) {
-                if self.campfire_room(front) {
-                    let time = self.campfire_start_sync(front, st, &offer);
-                    if self.campfire_place(front, st, time) {
-                        crate::hoppers::take_one(&mut me.slots, i);
-                        return Some(true);
-                    }
+        if (front_name == "minecraft:campfire" || front_name == "minecraft:soul_campfire")
+            && let Some(offer) = self.campfire_offer(st.item)
+        {
+            if self.campfire_room(front) {
+                let time = self.campfire_start_sync(front, st, &offer);
+                if self.campfire_place(front, st, time) {
+                    crate::hoppers::take_one(&mut me.slots, i);
+                    return Some(true);
                 }
-                // Рецепт есть, слот нет — предмет вылетает, как обычный выброс.
-                return None;
             }
+            // Рецепт есть, слот нет — предмет вылетает, как обычный выброс.
+            return None;
         }
         let empty = matches!(
             front_name.as_str(),
@@ -8388,7 +8705,11 @@ impl PlayPlan {
             if list.is_empty() {
                 return;
             }
-            list.take_due(now)
+            // Вне симуляции тик откладывается, а не теряется.
+            let simulated: HashSet<(i32, i32)> = self.simulated.lock().unwrap().clone();
+            list.take_due_in(now, |p| {
+                simulated.is_empty() || simulated.contains(&(p[0] >> 4, p[2] >> 4))
+            })
         };
         for p in due {
             let changes = {
@@ -8869,8 +9190,12 @@ impl PlayPlan {
                 self.with_campfire(pos, |_| ());
             }
         }
+        let simulated: HashSet<(i32, i32)> = self.simulated.lock().unwrap().clone();
         let positions: Vec<[i32; 3]> = self.campfires.lock().unwrap().keys().copied().collect();
         for pos in positions {
+            if !simulated.is_empty() && !simulated.contains(&(pos[0] >> 4, pos[2] >> 4)) {
+                continue;
+            }
             self.tick_campfire(pos);
         }
     }
@@ -8984,7 +9309,12 @@ impl PlayPlan {
             if map.is_empty() {
                 return;
             }
+            let simulated: HashSet<(i32, i32)> = self.simulated.lock().unwrap().clone();
             map.retain(|&pos, e| {
+                // Печь вне симуляции стоит: без топлива время не идёт.
+                if !simulated.is_empty() && !simulated.contains(&(pos[0] >> 4, pos[2] >> 4)) {
+                    return true;
+                }
                 let was_lit = e.f.lit();
                 let before = e.f.slots;
                 let changed = self.furnace_tick(&mut e.f);
@@ -9213,21 +9543,22 @@ impl PlayPlan {
 
     fn block_entity(&self, pos: [i32; 3]) -> Option<BlockEntity> {
         let key = (pos[0] >> 4, pos[2] >> 4);
-        self.ensure_region(key.0, key.1);
         let world = self.edited.read().unwrap();
-        world
-            .get(&key)
-            .map_or(&self.template, |e| &e.0)
-            .block_entities
-            .get(&pos)
-            .cloned()
+        // Диск не читается: это вызывается и из тика.
+        match world.get(&key) {
+            Some(e) => e.0.block_entities.get(&pos).cloned(),
+            None if self.terrain.is_none() => self.template.block_entities.get(&pos).cloned(),
+            None => None,
+        }
     }
 
     /// Ставит или убирает блок-сущность; чанк сохранится и перекодируется.
     fn set_block_entity(&self, pos: [i32; 3], be: Option<BlockEntity>) {
         let key = (pos[0] >> 4, pos[2] >> 4);
-        self.ensure_region(key.0, key.1);
         let mut world = self.edited.write().unwrap();
+        if self.terrain.is_some() && !world.contains_key(&key) {
+            return;
+        }
         let (column, rev) = world
             .entry(key)
             .or_insert_with(|| (self.template.clone(), 0));
@@ -10830,7 +11161,7 @@ fn chunks_around(c: (i32, i32), r: i32, skip: Option<((i32, i32), i32)>) -> Vec<
 mod tests {
     use super::{acknowledge_player_save, chunks_around, near};
     use crate::survival::PlayerState;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use uuid::Uuid;
 
     #[test]
@@ -10850,6 +11181,28 @@ mod tests {
     }
 
     #[test]
+    fn same_mod3_group_never_shares_a_face() {
+        // Пролив пишет свой чанк и четыре его грани. У двух чанков одной
+        // группы по mod 3 эти пятёрки не пересекаются, иначе параллельный
+        // пролив затёр бы чужую запись.
+        let group = |(x, z): (i32, i32)| (x.rem_euclid(3), z.rem_euclid(3));
+        let cross = |(x, z): (i32, i32)| [(x, z), (x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)];
+        let ring: Vec<(i32, i32)> = (-8..=8)
+            .flat_map(|x| (-8..=8).map(move |z| (x, z)))
+            .collect();
+        for (i, &a) in ring.iter().enumerate() {
+            for &b in &ring[i + 1..] {
+                if group(a) != group(b) {
+                    continue;
+                }
+                for p in cross(a) {
+                    assert!(!cross(b).contains(&p), "{a:?} and {b:?} both write {p:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn visibility_range() {
         assert!(near((0, 0), [15.9, 0.0, -16.0], 1));
         assert!(!near((0, 0), [32.0, 0.0, 0.0], 1));
@@ -10866,6 +11219,33 @@ mod tests {
         assert!(new.iter().all(|&(x, _)| x == 3));
         let gone = chunks_around((0, 0), 2, Some(((1, 0), 2)));
         assert!(gone.iter().all(|&(x, _)| x == -2));
+    }
+
+    #[test]
+    fn simulation_square_covers_exactly_the_radius() {
+        let mut set = HashSet::new();
+        super::chunk_square((0, 0), 1, &mut set);
+        assert_eq!(set.len(), 9, "радиус 1 — это 3×3 чанка");
+        assert!(set.contains(&(1, 1)));
+        assert!(!set.contains(&(2, 0)));
+        // Центр со сдвигом: квадрат едет вместе с ним, без далёких чанков.
+        let mut set = HashSet::new();
+        super::chunk_square((10, -4), 2, &mut set);
+        assert_eq!(set.len(), 25);
+        assert!(set.contains(&(12, -2)));
+        assert!(
+            set.contains(&(8, -4)),
+            "ровно два чанка влево — ещё в радиусе"
+        );
+        assert!(!set.contains(&(7, -4)), "три чанка влево — уже за радиусом");
+        assert!(!set.contains(&(13, -4)));
+    }
+
+    #[test]
+    fn chunk_of_maps_negative_positions_like_the_server() {
+        assert_eq!(super::chunk_of([0.5, 64.0, 0.5]), (0, 0));
+        assert_eq!(super::chunk_of([-0.5, 64.0, -0.5]), (-1, -1));
+        assert_eq!(super::chunk_of([-16.5, 64.0, 15.9]), (-2, 0));
     }
 
     #[test]
@@ -10892,15 +11272,24 @@ mod tests {
     #[test]
     fn tick_meter_reports_tps_and_mspt() {
         let mut meter = super::TickMeter::new();
-        assert_eq!(meter.line(), "TPS: 20.0 MSPT: 0.0");
+        assert_eq!(meter.line(), "TPS: 20.0 MSPT: 0.0 interval: 50.0 ms");
         meter.work.push_back(5.0);
         meter.work.push_back(15.0);
         meter.gap.push_back(50.0);
         meter.gap.push_back(50.0);
-        assert_eq!(meter.line(), "TPS: 20.0 MSPT: 10.0");
+        assert_eq!(meter.line(), "TPS: 20.0 MSPT: 10.0 interval: 50.0 ms");
         meter.gap.clear();
         meter.gap.push_back(100.0);
-        assert_eq!(meter.line(), "TPS: 10.0 MSPT: 10.0");
+        assert_eq!(meter.line(), "TPS: 10.0 MSPT: 10.0 interval: 100.0 ms");
+    }
+
+    /// Ускоренный цикл виден: раньше обрезка `min(20.0)` скрывала его.
+    #[test]
+    fn tick_meter_shows_faster_than_twenty() {
+        let mut meter = super::TickMeter::new();
+        meter.work.push_back(1.0);
+        meter.gap.push_back(25.0);
+        assert_eq!(meter.line(), "TPS: 40.0 MSPT: 1.0 interval: 25.0 ms");
     }
 
     #[test]
@@ -10919,7 +11308,7 @@ mod tests {
             out
         };
         let seq: Vec<_> = coords.iter().map(encode).collect();
-        let par = super::PlayPlan::map_chunks(&coords, encode);
+        let par = super::PlayPlan::map_limited(&coords, 4, encode);
         assert_eq!(par, seq);
     }
 

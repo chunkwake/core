@@ -76,6 +76,22 @@ fn campfire_at(list: &[CampfireCook]) -> HashMap<i32, usize> {
 }
 
 impl Recipes {
+    /// Сборка из готовых частей: индексы поиска строятся здесь же.
+    pub fn from_parts(list: Vec<Recipe>, cooking: Vec<Cooking>, campfire: Vec<CampfireCook>) -> Self {
+        Self {
+            cooking_at: cooking_at(&cooking),
+            campfire_at: campfire_at(&campfire),
+            list,
+            cooking,
+            campfire,
+        }
+    }
+
+    /// Части для образа запуска.
+    pub fn parts(&self) -> (&[Recipe], &[Cooking], &[CampfireCook]) {
+        (&self.list, &self.cooking, &self.campfire)
+    }
+
     pub fn len(&self) -> usize {
         self.list.len()
     }
@@ -323,7 +339,10 @@ pub fn load_recipes(root: &Path, items: &HashMap<String, i32>) -> Result<Recipes
             && let (Some(ingredient), Some(result)) =
                 (tags.ingredient(&json["ingredient"]), result(&json, items))
         {
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("campfire");
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("campfire");
             campfire_list.push(CampfireCook {
                 id: format!("minecraft:{stem}"),
                 ingredient,

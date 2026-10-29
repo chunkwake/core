@@ -1,8 +1,9 @@
 //! chunkwake-net — приём соединений и состояния handshake/status/login.
 
 pub mod arrows;
-pub mod campfire;
 pub mod auth;
+pub mod campfire;
+pub mod chunkgen;
 pub mod click;
 pub mod configuration;
 pub mod crypto;
@@ -23,9 +24,9 @@ pub mod play;
 pub mod potions;
 pub mod redstone;
 pub mod sounds;
-pub mod ticks;
 pub mod stack_nbt;
 pub mod survival;
+pub mod ticks;
 pub mod xp;
 
 use bytes::BytesMut;

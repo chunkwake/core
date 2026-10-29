@@ -3,6 +3,7 @@
 use crate::DataError;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 /// `reports/light.csv` (выгрузка `ChunkwakeLight`): по id состояния
 /// `(излучение, затухание, небесный свет проходит вниз)`.
@@ -25,59 +26,83 @@ pub fn load_light(root: &Path) -> Result<Vec<(u8, u8, bool)>, DataError> {
         .collect()
 }
 
-/// Твёрдость состояний блоков (4-я колонка `reports/light.csv`); -1 — неразрушимый.
-pub fn load_hardness(root: &Path) -> Result<Vec<f32>, DataError> {
+/// Все четыре колонки `light.csv` за одно чтение файла: строки выгрузки
+/// `ChunkwakeLight` нужны серверу вместе, а файл весит полмегабайта.
+pub struct LightRows {
+    /// `(излучение, затухание, небесный свет проходит вниз)`.
+    pub light: Vec<(u8, u8, bool)>,
+    /// Твёрдость; -1 — неразрушимый.
+    pub hardness: Vec<f32>,
+    /// Прочные грани по битам низ, верх, север, юг, запад, восток.
+    pub sturdy: Vec<u8>,
+    /// `requiresCorrectToolForDrops`.
+    pub requires_tool: Vec<bool>,
+}
+
+/// Строки `reports/light.csv` одним проходом.
+pub fn load_light_rows(root: &Path) -> Result<LightRows, DataError> {
     let path = root.join("reports/light.csv");
     let text = std::fs::read_to_string(&path)
         .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
-    text.lines()
-        .enumerate()
-        .map(|(i, line)| {
-            line.split(',')
-                .nth(3)
-                .and_then(|v| v.trim().parse::<f32>().ok())
-                .ok_or_else(|| DataError::Format {
-                    file: path.display().to_string(),
-                    msg: format!("line {}: no hardness in {line:?}", i + 1),
-                })
-        })
-        .collect()
+    let bad = |i: usize, line: &str, msg: &str| DataError::Format {
+        file: path.display().to_string(),
+        msg: format!("line {}: {msg} {line:?}", i + 1),
+    };
+    let n = text.lines().count();
+    let mut rows = LightRows {
+        light: Vec::with_capacity(n),
+        hardness: Vec::with_capacity(n),
+        sturdy: Vec::with_capacity(n),
+        requires_tool: Vec::with_capacity(n),
+    };
+    for (i, line) in text.lines().enumerate() {
+        let mut f = line.split(',').map(str::trim);
+        let emission = f
+            .next()
+            .and_then(|v| v.parse::<u8>().ok())
+            .ok_or_else(|| bad(i, line, "no emission"))?;
+        let dampening = f
+            .next()
+            .and_then(|v| v.parse::<u8>().ok())
+            .ok_or_else(|| bad(i, line, "no dampening"))?;
+        let down = f
+            .next()
+            .and_then(|v| v.parse::<u8>().ok())
+            .ok_or_else(|| bad(i, line, "no skylight flag"))?;
+        let hardness = f
+            .next()
+            .and_then(|v| v.parse::<f32>().ok())
+            .ok_or_else(|| bad(i, line, "no hardness"))?;
+        let requires_tool = match f.next() {
+            Some("0") => false,
+            Some("1") => true,
+            _ => return Err(bad(i, line, "no requires-tool flag")),
+        };
+        let sturdy = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+        rows.light.push((emission, dampening, down != 0));
+        rows.hardness.push(hardness);
+        rows.sturdy.push(sturdy);
+        rows.requires_tool.push(requires_tool);
+    }
+    Ok(rows)
+}
+
+/// Твёрдость состояний блоков (4-я колонка `reports/light.csv`); -1 — неразрушимый.
+pub fn load_hardness(root: &Path) -> Result<Vec<f32>, DataError> {
+    Ok(load_light_rows(root)?.hardness)
 }
 
 /// Прочные грани состояний (6-я колонка `light.csv`): биты по граням низ, верх,
 /// север, юг, запад, восток (`isFaceSturdy`).
 pub fn load_sturdy(root: &Path) -> Result<Vec<u8>, DataError> {
-    let path = root.join("reports/light.csv");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
-    Ok(text
-        .lines()
-        .map(|line| {
-            line.split(',')
-                .nth(5)
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(0)
-        })
-        .collect())
+    Ok(load_light_rows(root)?.sturdy)
 }
 
 /// Нужен ли инструмент для дропа (`requiresCorrectToolForDrops`, 5-я колонка `light.csv`).
 pub fn load_requires_tool(root: &Path) -> Result<Vec<bool>, DataError> {
-    let path = root.join("reports/light.csv");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
-    text.lines()
-        .enumerate()
-        .map(|(i, line)| match line.split(',').nth(4).map(str::trim) {
-            Some("0") => Ok(false),
-            Some("1") => Ok(true),
-            _ => Err(DataError::Format {
-                file: path.display().to_string(),
-                msg: format!("line {}: no requires-tool flag in {line:?}", i + 1),
-            }),
-        })
-        .collect()
+    Ok(load_light_rows(root)?.requires_tool)
 }
+
 
 /// Печи по порядку индексов в [`Fuel`]: обычная, доменная, коптильня.
 pub const FURNACES: [&str; 3] = [
@@ -417,9 +442,18 @@ pub struct Blocks {
     defaults: HashMap<String, i32>,
     max_id: i64,
     /// ID состояния → имя блока и свойства (отсортированы по ключу).
-    states: Vec<Option<(String, Properties)>>,
-    /// Обратный индекс: `name[k=v,...]` → ID.
-    by_key: HashMap<String, u32>,
+    states: Arc<Vec<Option<(String, Properties)>>>,
+    /// Обратный индекс: `name[k=v,...]` → ID. Строится при первом запросе.
+    by_key: std::sync::OnceLock<HashMap<String, u32>>,
+}
+
+/// Обратный индекс — производное значение, поэтому сравнивается только содержимое.
+impl PartialEq for Blocks {
+    fn eq(&self, other: &Self) -> bool {
+        self.max_id == other.max_id
+            && self.defaults == other.defaults
+            && self.states == other.states
+    }
 }
 
 impl Blocks {
@@ -436,7 +470,6 @@ impl Blocks {
         let mut defaults = HashMap::with_capacity(obj.len());
         let mut max_id = 0;
         let mut states = Vec::new();
-        let mut by_key = HashMap::new();
         for (name, block) in obj {
             for s in block["states"].as_array().into_iter().flatten() {
                 let id = s["id"]
@@ -450,7 +483,6 @@ impl Blocks {
                     .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_owned()))
                     .collect();
                 props.sort();
-                by_key.insert(state_key(name, &props), id as u32);
                 if states.len() <= id as usize {
                     states.resize(id as usize + 1, None);
                 }
@@ -468,8 +500,8 @@ impl Blocks {
         Ok(Self {
             defaults,
             max_id,
-            states,
-            by_key,
+            states: Arc::new(states),
+            by_key: std::sync::OnceLock::new(),
         })
     }
 
@@ -491,7 +523,47 @@ impl Blocks {
     pub fn state_id(&self, name: &str, props: &[(String, String)]) -> Option<u32> {
         let mut props = props.to_vec();
         props.sort();
-        self.by_key.get(&state_key(name, &props)).copied()
+        self.by_key()?.get(&state_key(name, &props)).copied()
+    }
+
+    /// Обратный индекс строится при первом обращении: серверу он нужен
+    /// для сохранённых чанков, а не для запуска.
+    fn by_key(&self) -> Option<&HashMap<String, u32>> {
+        if let Some(map) = self.by_key.get() {
+            return Some(map);
+        }
+        let mut map = HashMap::with_capacity(self.states.len());
+        for (id, s) in self.states.iter().enumerate() {
+            if let Some((name, props)) = s {
+                map.insert(state_key(name, props), id as u32);
+            }
+        }
+        Some(self.by_key.get_or_init(|| map))
+    }
+
+    /// Устойчивый взгляд на содержимое для образа запуска.
+    #[allow(clippy::type_complexity)]
+    pub fn parts(&self) -> (&HashMap<String, i32>, i64, &[Option<(String, Properties)>]) {
+        (&self.defaults, self.max_id, &self.states)
+    }
+
+    /// Общий список состояний: `Placement` берёт его без копии.
+    pub fn states(&self) -> Arc<Vec<Option<(String, Properties)>>> {
+        self.states.clone()
+    }
+
+    /// Обратно из [`Self::parts`]: обратный индекс строится при первом запросе.
+    pub fn from_parts(
+        defaults: HashMap<String, i32>,
+        max_id: i64,
+        states: Vec<Option<(String, Properties)>>,
+    ) -> Self {
+        Self {
+            defaults,
+            max_id,
+            states: Arc::new(states),
+            by_key: std::sync::OnceLock::new(),
+        }
     }
 
     pub fn default_state(&self, name: &str) -> Result<i32, DataError> {
@@ -499,6 +571,14 @@ impl Blocks {
             .get(name)
             .copied()
             .ok_or_else(|| DataError::Io(format!("unknown block {name}")))
+    }
+
+    /// Состояние по умолчанию для каждого имени блока (для `Block.setType`).
+    pub fn defaults(&self) -> HashMap<String, u32> {
+        self.defaults
+            .iter()
+            .map(|(name, id)| (name.clone(), *id as u32))
+            .collect()
     }
 }
 
@@ -562,12 +642,21 @@ pub(crate) fn derived(root: &Path, file: &str) -> std::path::PathBuf {
 
 /// Пишет файл через временный: оборванная запись не оставит битую сводку.
 pub(crate) fn write_derived(path: &Path, text: &str) -> Result<(), DataError> {
+    write_atomic(path, text.as_bytes())
+}
+
+/// То же для двоичного образа.
+pub(crate) fn write_derived_bytes(path: &Path, bytes: &[u8]) -> Result<(), DataError> {
+    write_atomic(path, bytes)
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), DataError> {
     let io = |e: std::io::Error| DataError::Io(format!("write {}: {e}", path.display()));
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(io)?;
     }
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, text).map_err(io)?;
+    std::fs::write(&tmp, bytes).map_err(io)?;
     std::fs::rename(&tmp, path).map_err(io)
 }
 
@@ -628,6 +717,97 @@ fn collect_json(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
             collect_json(&p, out);
         } else if p.extension().is_some_and(|x| x == "json") {
             out.push(p);
+        }
+    }
+}
+
+/// Лут, разбираемый в фоне: сервер принимает игроков, не дожидаясь таблиц,
+/// а первый дроп ждёт готовности.
+pub struct LootSource {
+    value: std::sync::OnceLock<BlockLoot>,
+    ready: std::sync::Mutex<bool>,
+    signal: std::sync::Condvar,
+}
+
+impl std::fmt::Debug for LootSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LootSource")
+            .field("ready", &self.value.get().is_some())
+            .finish()
+    }
+}
+
+impl Default for LootSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::ops::Deref for LootSource {
+    type Target = BlockLoot;
+
+    /// Ждёт разбора, если он ещё идёт: несколько десятков миллисекунд.
+    fn deref(&self) -> &BlockLoot {
+        if let Some(v) = self.value.get() {
+            return v;
+        }
+        let mut ready = self.ready.lock().unwrap();
+        while !*ready {
+            ready = self.signal.wait(ready).unwrap();
+        }
+        drop(ready);
+        // Готовность выставлена уже после заполнения.
+        self.value.get().expect("loot is ready")
+    }
+}
+
+impl LootSource {
+    pub fn new() -> Self {
+        Self {
+            value: std::sync::OnceLock::new(),
+            ready: std::sync::Mutex::new(false),
+            signal: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Загружает таблицы на своём потоке; ошибки уходят в лог, лут остаётся пустым.
+    /// Готовность выставляется всегда: падение потока не должно подвесить дроп.
+    pub fn load_in_background(root: &Path) -> Arc<Self> {
+        let source = Arc::new(Self::new());
+        let this = source.clone();
+        let root = root.to_path_buf();
+        let spawned = std::thread::Builder::new()
+            .name("loot".into())
+            .spawn(move || {
+                // Отметка на случай паники: `Deref` ждёт именно её.
+                let _ready = MarkReady(this.clone());
+                let loot = load_block_loot_cached(&root).unwrap_or_else(|error| {
+                    tracing::warn!("loot tables: {error}");
+                    BlockLoot::default()
+                });
+                this.set(loot);
+            });
+        if let Err(error) = spawned {
+            tracing::warn!("loot tables: cannot start loader: {error}");
+            source.set(BlockLoot::default());
+        }
+        source
+    }
+
+    pub fn set(&self, loot: BlockLoot) {
+        let _ = self.value.set(loot);
+        *self.ready.lock().unwrap() = true;
+        self.signal.notify_all();
+    }
+}
+
+/// Отмечает готовность при выходе из области видимости, включая панику.
+struct MarkReady(Arc<LootSource>);
+
+impl Drop for MarkReady {
+    fn drop(&mut self) {
+        if self.0.value.get().is_none() {
+            self.0.set(BlockLoot::default());
         }
     }
 }
@@ -779,6 +959,39 @@ fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, I
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loot_source_waits_for_background_parse() {
+        let dir = std::env::temp_dir().join(format!("chunkwake-loot-{}", std::process::id()));
+        let base = dir.join("data/minecraft");
+        std::fs::create_dir_all(base.join("loot_table/blocks")).unwrap();
+        std::fs::write(
+            base.join("loot_table/blocks/stone.json"),
+            r#"{"pools":[{"rolls":1,"entries":[{"type":"minecraft:item","name":"minecraft:stone"}]}]}"#,
+        )
+        .unwrap();
+        let source = LootSource::load_in_background(&dir);
+        // Первое обращение ждёт разбора, а не отдаёт пустые таблицы.
+        assert!(source.tables.contains_key("minecraft:stone"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn light_rows_are_one_pass() {
+        let dir = std::env::temp_dir().join(format!("chunkwake-light-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("reports")).unwrap();
+        std::fs::write(
+            dir.join("reports/light.csv"),
+            "0,15,1,-1.0,0,0\n15,0,0,1.5,1,63\n",
+        )
+        .unwrap();
+        let rows = load_light_rows(&dir).unwrap();
+        assert_eq!(rows.light, vec![(0, 15, true), (15, 0, false)]);
+        assert_eq!(rows.hardness, vec![-1.0, 1.5]);
+        assert_eq!(rows.sturdy, vec![0, 63]);
+        assert_eq!(rows.requires_tool, vec![false, true]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn default_states() {

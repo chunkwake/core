@@ -43,6 +43,9 @@ impl Names for StateNames {
     fn block_id(&self, name: &str, props: &[(String, String)]) -> Option<u32> {
         self.blocks.state_id(name, props)
     }
+    fn block_default(&self, name: &str) -> Option<u32> {
+        self.blocks.default_state(name).ok().map(|s| s as u32)
+    }
     fn biome_name(&self, id: u32) -> Option<&str> {
         self.biomes.get(id as usize).map(String::as_str)
     }
@@ -217,7 +220,11 @@ impl ChunkSource for WorldStorage {
             .collect()
     }
 
-    fn load_entities(&self, rx: i32, rz: i32) -> Result<Vec<chunkwake_net::play::StoredEntities>, String> {
+    fn load_entities(
+        &self,
+        rx: i32,
+        rz: i32,
+    ) -> Result<Vec<chunkwake_net::play::StoredEntities>, String> {
         self.entities.load_region(rx, rz)
     }
 }

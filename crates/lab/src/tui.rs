@@ -193,6 +193,7 @@ impl Screen {
             7 => self.args.keep_worlds = !self.args.keep_worlds,
             8 => {
                 let profiles = [
+                    BenchProfile::All,
                     BenchProfile::JoinBurst,
                     BenchProfile::Movement,
                     BenchProfile::Exploration,
