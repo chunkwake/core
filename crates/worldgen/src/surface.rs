@@ -36,6 +36,8 @@ pub struct Vein {
     pub density: usize,
     pub richness: usize,
     pub gap: usize,
+    /// Поток `getOrCreateRandomFactory("minecraft:ore")` в [`Stage::randoms`].
+    pub random: usize,
 }
 
 /// Условие правила.
@@ -219,7 +221,10 @@ impl Rules {
                 let density = self.density(&v["density"])?;
                 let richness = self.density(&v["richness"])?;
                 let gap = self.density(&v["filler_gap"])?;
+                let next = self.random_ids.len();
+                let random = *self.random_ids.entry("minecraft:ore".to_owned()).or_insert(next);
                 Rule::OreVein(Box::new(Vein {
+                    random,
                     ore,
                     raw_ore,
                     filler,
@@ -735,7 +740,8 @@ impl<'a> Stage<'a> {
         if density <= 0.0 {
             return None;
         }
-        let mut rng = self.random.at(bx, by, bz);
+        let factory = self.randoms.get(vein.random).copied().unwrap_or(*self.random);
+        let mut rng = factory.at(bx, by, bz);
         if next_float(&mut rng) > density {
             return None;
         }
@@ -1009,6 +1015,7 @@ mod tests {
             density: 0,
             richness: 1,
             gap: 2,
+            random: 0,
         }));
         let random = Xoroshiro::from_seed(1).fork_positional();
         let stage = Stage {

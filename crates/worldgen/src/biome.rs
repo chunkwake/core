@@ -234,6 +234,16 @@ impl BiomeSource {
     pub fn len(&self) -> usize {
         self.points.len()
     }
+
+    /// Имена биомов без повторов в порядке точек.
+    pub fn names(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        self.points
+            .iter()
+            .filter(|p| seen.insert(p.name.as_str()))
+            .map(|p| p.name.clone())
+            .collect()
+    }
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 //! `minecraft:canyon`, перенесённые с ванили 26.3 бит в бит. Карвер только
 //! размечает маску (`CarvingMask`); блоки по ней меняет генератор.
 
-use crate::random::Legacy;
+use crate::random::{Bits, Legacy};
 use serde_json::Value;
 
 /// `Mth.SIN`: таблица синуса на 65536 значений.
@@ -57,7 +57,7 @@ impl FloatP {
         }
     }
 
-    pub fn sample(&self, r: &mut Legacy) -> f32 {
+    pub fn sample(&self, r: &mut impl Bits) -> f32 {
         match *self {
             Self::Const(v) => v,
             // `Mth.randomBetween`.
@@ -79,6 +79,10 @@ pub enum IntP {
     Uniform(i32, i32),
     VeryBiasedToBottom(i32, i32),
     BiasedToBottom(i32, i32),
+    /// `clamped`: значение источника, зажатое в `[min, max]`.
+    Clamped(Box<IntP>, i32, i32),
+    /// `weighted_list`: общий вес и пары (вес, провайдер) по порядку.
+    Weighted(i32, Vec<(i32, IntP)>),
 }
 
 impl IntP {
@@ -100,11 +104,28 @@ impl IntP {
             "minecraft:biased_to_bottom" => {
                 Ok(Self::BiasedToBottom(i("min_inclusive")?, i("max_inclusive")?))
             }
+            "minecraft:clamped" => Ok(Self::Clamped(
+                Box::new(Self::parse(&v["source"])?),
+                i("min_inclusive")?,
+                i("max_inclusive")?,
+            )),
+            "minecraft:weighted_list" => {
+                let mut items = Vec::new();
+                for e in v["distribution"].as_array().ok_or("weighted_list: no distribution")? {
+                    let w = e["weight"].as_i64().ok_or("weighted_list: no weight")? as i32;
+                    items.push((w, Self::parse(&e["data"])?));
+                }
+                let total = items.iter().map(|(w, _)| w).sum();
+                if total <= 0 {
+                    return Err("weighted_list: empty".into());
+                }
+                Ok(Self::Weighted(total, items))
+            }
             other => Err(format!("int provider {other} is not supported")),
         }
     }
 
-    pub fn sample(&self, r: &mut Legacy) -> i32 {
+    pub fn sample(&self, r: &mut impl Bits) -> i32 {
         match *self {
             Self::Const(v) => v,
             Self::Uniform(min, max) => r.next_int_bound(max - min + 1) + min,
@@ -116,6 +137,18 @@ impl IntP {
             Self::BiasedToBottom(min, max) => {
                 let a = r.next_int_bound(max - min + 1) + 1;
                 min + r.next_int_bound(a)
+            }
+            Self::Clamped(ref source, min, max) => source.sample(r).clamp(min, max),
+            // `WeightedList.getRandomOrThrow`: первый, чей накопленный вес больше броска.
+            Self::Weighted(total, ref items) => {
+                let mut pick = r.next_int_bound(total);
+                for (w, p) in items {
+                    if pick < *w {
+                        return p.sample(r);
+                    }
+                    pick -= w;
+                }
+                unreachable!("weight sum is total")
             }
         }
     }
@@ -134,11 +167,15 @@ pub fn anchor(v: &Value, min_y: i32, height: i32) -> Result<i32, String> {
     }
 }
 
-/// `HeightProvider`: только `uniform` и константа — других у карверов нет.
+/// `HeightProvider` с якорями, уже разрешёнными в мировой y.
 #[derive(Clone, Debug)]
 pub enum HeightP {
     Const(i32),
     Uniform(i32, i32),
+    Trapezoid(i32, i32, i32),
+    /// `biased_to_bottom` / `very_biased_to_bottom`: min, max, inner.
+    Biased(i32, i32, i32),
+    VeryBiased(i32, i32, i32),
 }
 
 impl HeightP {
@@ -149,16 +186,56 @@ impl HeightP {
                 anchor(&v["max_inclusive"], min_y, height)?,
             )),
             Some("minecraft:constant") => Ok(Self::Const(anchor(&v["value"], min_y, height)?)),
+            Some(t @ ("minecraft:trapezoid"
+            | "minecraft:biased_to_bottom"
+            | "minecraft:very_biased_to_bottom")) => {
+                let min = anchor(&v["min_inclusive"], min_y, height)?;
+                let max = anchor(&v["max_inclusive"], min_y, height)?;
+                Ok(match t {
+                    "minecraft:trapezoid" => {
+                        Self::Trapezoid(min, max, v["plateau"].as_i64().unwrap_or(0) as i32)
+                    }
+                    "minecraft:biased_to_bottom" => {
+                        Self::Biased(min, max, v["inner"].as_i64().unwrap_or(1) as i32)
+                    }
+                    _ => Self::VeryBiased(min, max, v["inner"].as_i64().unwrap_or(1) as i32),
+                })
+            }
             None => Ok(Self::Const(anchor(v, min_y, height)?)),
             Some(other) => Err(format!("height provider {other} is not supported")),
         }
     }
 
-    pub fn sample(&self, r: &mut Legacy) -> i32 {
+    pub fn sample(&self, r: &mut impl Bits) -> i32 {
         match *self {
             Self::Const(y) => y,
             Self::Uniform(min, max) if min > max => min,
             Self::Uniform(min, max) => r.next_int_bound(max - min + 1) + min,
+            Self::Trapezoid(min, max, _) if min > max => min,
+            Self::Trapezoid(min, max, plateau) => {
+                let range = max - min;
+                if plateau >= range {
+                    return r.between_inclusive(min, max);
+                }
+                let start = (range - plateau) / 2;
+                let end = range - start;
+                min + r.between_inclusive(0, end) + r.between_inclusive(0, start)
+            }
+            Self::Biased(min, max, inner) => {
+                if max - min - inner < 0 {
+                    return min;
+                }
+                let n = r.next_int_bound(max - min - inner + 1);
+                r.next_int_bound(n + inner) + min
+            }
+            Self::VeryBiased(min, max, inner) => {
+                if max - min - inner < 0 {
+                    return min;
+                }
+                let upper = r.next_between(min + inner, max);
+                let biased = r.next_between(min, upper - 1);
+                r.next_between(min, biased - 1 + inner)
+            }
         }
     }
 }

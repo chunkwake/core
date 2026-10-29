@@ -126,8 +126,90 @@ impl Positional {
     }
 }
 
+/// `BitRandomSource`: всё, что ванильный `RandomSource` строит из `next(bits)`.
+/// Сиды `WorldgenRandom` тоже здесь — они не зависят от источника битов.
+pub trait Bits {
+    fn next(&mut self, bits: u32) -> i32;
+    fn set_seed(&mut self, seed: i64);
+
+    fn next_int(&mut self) -> i32 {
+        self.next(32)
+    }
+
+    /// `BitRandomSource.nextInt(bound)`.
+    fn next_int_bound(&mut self, bound: i32) -> i32 {
+        if bound & (bound - 1) == 0 {
+            return ((bound as i64 * self.next(31) as i64) >> 31) as i32;
+        }
+        loop {
+            let sample = self.next(31);
+            let modulo = sample % bound;
+            if sample.wrapping_sub(modulo).wrapping_add(bound - 1) >= 0 {
+                return modulo;
+            }
+        }
+    }
+
+    /// `Mth.nextInt(random, min, max)`: при `min >= max` — `min` без броска.
+    fn next_between(&mut self, min: i32, max: i32) -> i32 {
+        if min >= max {
+            min
+        } else {
+            self.next_int_bound(max - min + 1) + min
+        }
+    }
+
+    /// `Mth.randomBetweenInclusive`: бросок всегда.
+    fn between_inclusive(&mut self, min: i32, max: i32) -> i32 {
+        self.next_int_bound(max - min + 1) + min
+    }
+
+    fn next_long(&mut self) -> i64 {
+        let upper = self.next(32) as i64;
+        let lower = self.next(32) as i64;
+        (upper << 32).wrapping_add(lower)
+    }
+
+    fn next_bool(&mut self) -> bool {
+        self.next(1) != 0
+    }
+
+    fn next_float(&mut self) -> f32 {
+        self.next(24) as f32 * 5.9604645e-8
+    }
+
+    fn next_double(&mut self) -> f64 {
+        let upper = self.next(26) as i64;
+        let lower = self.next(27) as i64;
+        ((upper << 27) + lower) as f64 * 1.110223e-16f32 as f64
+    }
+
+    /// `WorldgenRandom.setLargeFeatureSeed`: карверы и старты структур.
+    fn set_large_feature_seed(&mut self, seed: i64, cx: i32, cz: i32) {
+        self.set_seed(seed);
+        let xs = self.next_long();
+        let zs = self.next_long();
+        self.set_seed((cx as i64).wrapping_mul(xs) ^ (cz as i64).wrapping_mul(zs) ^ seed);
+    }
+
+    /// `WorldgenRandom.setDecorationSeed`: сид декорации чанка.
+    fn set_decoration_seed(&mut self, seed: i64, x: i32, z: i32) -> i64 {
+        self.set_seed(seed);
+        let xs = self.next_long() | 1;
+        let zs = self.next_long() | 1;
+        let result = (x as i64).wrapping_mul(xs).wrapping_add((z as i64).wrapping_mul(zs)) ^ seed;
+        self.set_seed(result);
+        result
+    }
+
+    /// `WorldgenRandom.setFeatureSeed`.
+    fn set_feature_seed(&mut self, seed: i64, index: i32, step: i32) {
+        self.set_seed(seed.wrapping_add(index as i64).wrapping_add(10000 * step as i64));
+    }
+}
+
 /// `LegacyRandomSource` / `SingleThreadedRandomSource` (линейный конгруэнтный
-/// генератор `java.util.Random`) вместе с сидами `WorldgenRandom`.
+/// генератор `java.util.Random`).
 #[derive(Clone, Debug)]
 pub struct Legacy {
     seed: i64,
@@ -142,75 +224,41 @@ impl Legacy {
             seed: (seed ^ LCG_MUL) & LCG_MASK,
         }
     }
+}
 
-    pub fn set_seed(&mut self, seed: i64) {
+impl Bits for Legacy {
+    fn set_seed(&mut self, seed: i64) {
         self.seed = (seed ^ LCG_MUL) & LCG_MASK;
     }
 
-    pub fn next(&mut self, bits: u32) -> i32 {
+    fn next(&mut self, bits: u32) -> i32 {
         self.seed = self.seed.wrapping_mul(LCG_MUL).wrapping_add(11) & LCG_MASK;
         (self.seed >> (48 - bits)) as i32
     }
+}
 
-    pub fn next_int(&mut self) -> i32 {
-        self.next(32)
-    }
+/// `new WorldgenRandom(new XoroshiroRandomSource(..))` декорации: методы
+/// `LegacyRandomSource`, но биты — старшие биты `nextLong` Xoroshiro.
+#[derive(Clone, Debug)]
+pub struct Worldgen {
+    x: Xoroshiro,
+}
 
-    /// `BitRandomSource.nextInt(bound)`.
-    pub fn next_int_bound(&mut self, bound: i32) -> i32 {
-        if bound & (bound - 1) == 0 {
-            return ((bound as i64 * self.next(31) as i64) >> 31) as i32;
-        }
-        loop {
-            let sample = self.next(31);
-            let modulo = sample % bound;
-            if sample.wrapping_sub(modulo).wrapping_add(bound - 1) >= 0 {
-                return modulo;
-            }
+impl Worldgen {
+    pub fn new(seed: i64) -> Self {
+        Self {
+            x: Xoroshiro::from_seed(seed),
         }
     }
+}
 
-    pub fn next_long(&mut self) -> i64 {
-        let upper = self.next(32) as i64;
-        let lower = self.next(32) as i64;
-        (upper << 32).wrapping_add(lower)
+impl Bits for Worldgen {
+    fn set_seed(&mut self, seed: i64) {
+        self.x = Xoroshiro::from_seed(seed);
     }
 
-    pub fn next_bool(&mut self) -> bool {
-        self.next(1) != 0
-    }
-
-    pub fn next_float(&mut self) -> f32 {
-        self.next(24) as f32 * 5.9604645e-8
-    }
-
-    pub fn next_double(&mut self) -> f64 {
-        let upper = self.next(26) as i64;
-        let lower = self.next(27) as i64;
-        ((upper << 27) + lower) as f64 * 1.110223e-16f32 as f64
-    }
-
-    /// `WorldgenRandom.setLargeFeatureSeed`: карверы и старты структур.
-    pub fn set_large_feature_seed(&mut self, seed: i64, cx: i32, cz: i32) {
-        self.set_seed(seed);
-        let xs = self.next_long();
-        let zs = self.next_long();
-        self.set_seed((cx as i64).wrapping_mul(xs) ^ (cz as i64).wrapping_mul(zs) ^ seed);
-    }
-
-    /// `WorldgenRandom.setDecorationSeed`: сид декорации чанка.
-    pub fn set_decoration_seed(&mut self, seed: i64, x: i32, z: i32) -> i64 {
-        self.set_seed(seed);
-        let xs = self.next_long() | 1;
-        let zs = self.next_long() | 1;
-        let result = (x as i64).wrapping_mul(xs).wrapping_add((z as i64).wrapping_mul(zs)) ^ seed;
-        self.set_seed(result);
-        result
-    }
-
-    /// `WorldgenRandom.setFeatureSeed`.
-    pub fn set_feature_seed(&mut self, seed: i64, index: i32, step: i32) {
-        self.set_seed(seed.wrapping_add(index as i64).wrapping_add(10000 * step as i64));
+    fn next(&mut self, bits: u32) -> i32 {
+        ((self.x.next_long() as u64) >> (64 - bits)) as i32
     }
 }
 

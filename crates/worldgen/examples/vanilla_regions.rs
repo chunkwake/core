@@ -453,6 +453,15 @@ fn compare_blocks(regions: &Path, data: &Path, seed: i64, radius: i32) -> Result
     let state = |n: &str| blocks.default_state(n).ok().map(|s| s as u32);
     let overworld =
         chunkwake_worldgen::pipeline::Overworld::new(std::sync::Arc::new(noise), &state, &biomes)?;
+    // `CHUNKWAKE_NO_FEATURES=1` — сверка без декорации.
+    let overworld = if std::env::var_os("CHUNKWAKE_NO_FEATURES").is_some() {
+        overworld
+    } else {
+        overworld.with_features(data, &blocks.states(), &state, &biomes)?
+    };
+    if let Some((done, all)) = overworld.feature_coverage() {
+        println!("фичи: перенесено {done} из {all}");
+    }
     let names = FileNames {
         blocks: &blocks,
         biomes: &biomes,

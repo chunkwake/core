@@ -5,6 +5,7 @@ pub mod aquifer;
 pub mod biome;
 pub mod carver;
 pub mod density;
+pub mod feature;
 pub mod noise;
 pub mod pipeline;
 pub mod random;
@@ -14,7 +15,7 @@ pub mod volume;
 use aquifer::{Aquifer, Fluid, Samplers};
 use density::{Compiler, Ctx, Df, S};
 use noise::NormalNoise;
-use random::{Positional, Xoroshiro};
+use random::{Bits, Positional, Xoroshiro};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
@@ -645,6 +646,16 @@ impl Generator {
     }
     pub fn has_biomes(&self) -> bool {
         !self.biomes.is_empty()
+    }
+
+    /// Биомы источника в порядке `possibleBiomes()`: первое появление в
+    /// списке точек климата.
+    pub fn biome_order(&self) -> Vec<String> {
+        self.biomes.names()
+    }
+
+    pub fn seed(&self) -> i64 {
+        self.seed
     }
 
     /// Биомы чанка по клеткам 4×4×4 (`ChunkGenerator.createBiomes`): по 64 на

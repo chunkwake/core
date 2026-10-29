@@ -140,7 +140,7 @@ fn main() {
         rules.clone(),
         conditions.clone(),
         names.clone(),
-        biome_ids,
+        biome_ids.clone(),
         &noise_names,
         &density_names,
         noise.surface_random(),
@@ -260,6 +260,27 @@ fn main() {
         total as f64 / (1024.0 * 1024.0),
         total as f64 / n / 1024.0
     );
+
+    // Конвейер сервера целиком: прото-чанки и декорация фичами.
+    let state = |name: &str| blocks.default_state(name).ok().map(|s| s as u32);
+    let noise = std::sync::Arc::new(noise);
+    for features in [false, true] {
+        let overworld =
+            chunkwake_worldgen::pipeline::Overworld::new(noise.clone(), &state, &biome_ids).unwrap();
+        let overworld = if features {
+            overworld
+                .with_features(data, &blocks.states(), &state, &biome_ids)
+                .unwrap()
+        } else {
+            overworld
+        };
+        let t = Instant::now();
+        for &(x, z) in &coords {
+            std::hint::black_box(overworld.chunk(x, z));
+        }
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        row(if features { "pipeline+ft" } else { "pipeline" }, ms);
+    }
 }
 
 /// Имена состояний, которые упоминают правила.

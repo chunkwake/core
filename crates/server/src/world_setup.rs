@@ -146,7 +146,11 @@ pub fn build_play_plan(
             let sky = dim.has_skylight;
             // Шум, поверхность и карверы — один конвейер генератора.
             let state = |name: &str| blocks.default_state(name).ok().map(|s| s as u32);
-            let overworld = chunkwake_worldgen::pipeline::Overworld::new(noise, &state, &biome_ids)?;
+            let overworld = chunkwake_worldgen::pipeline::Overworld::new(noise, &state, &biome_ids)?
+                .with_features(data_dir, &blocks.states(), &state, &biome_ids)?;
+            if let Some((done, all)) = overworld.feature_coverage() {
+                tracing::info!("worldgen features: {done} of {all} ported");
+            }
             if !overworld.has_surface() {
                 tracing::warn!("no material_rule in the data cache: the world keeps bare stone");
             }
