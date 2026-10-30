@@ -1,20 +1,28 @@
-//! HTTP-эндпоинт метрик: `/metrics` для Prometheus и `/snapshot` для CLI.
+//! HTTP-эндпоинт метрик: `/metrics` для Prometheus, `/snapshot` для CLI и
+//! живой дашборд в браузере с потоком SSE.
 //!
 //! Свой минимальный HTTP/1.1 вместо `hyper`: нужен один GET без TLS,
 //! апгрейдов и тела запроса. Сервер пишет только по запросу, поэтому
-//! `chunkwake top` может опросить его в любой момент.
+//! `chunkwake top` может опросить его в любой момент. Долгоживущее
+//! соединение одно — SSE для страницы: она не опрашивает `/snapshot` раз в
+//! секунду, а получает кадр сразу после каждой публикации снимка.
 
-use crate::snapshot::{prometheus, Snapshot};
-use std::sync::{Arc, RwLock};
+use crate::snapshot::{Snapshot, prometheus};
+use crate::web;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::broadcast::error::RecvError;
+
+/// Последний снимок и история, общие для сэмплера и эндпоинтов.
+pub use crate::live::Shared;
+
 /// Сколько ждать запрос, прежде чем закрыть соединение.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Предел заголовков: запрос больше — рвём соединение.
 const MAX_REQUEST: usize = 8 * 1024;
-
-/// Последний снимок, который отдают эндпоинты.
-pub type Shared = Arc<RwLock<Snapshot>>;
+/// Пауза без обновлений, после которой в SSE-поток уходит комментарий:
+/// так прокси и браузер не решают, что соединение умерло.
+const SSE_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Сколько портов подряд пробуем, если настроенный занят.
 ///
@@ -94,18 +102,35 @@ async fn handle(mut stream: TcpStream, snapshot: Shared) -> Result<(), std::io::
         .and_then(|line| line.split_whitespace().nth(1))
         .unwrap_or("/");
     let path = path.split('?').next().unwrap_or("/");
+
+    // Поток событий отвечает сам: у него нет `Content-Length` и конец ответа
+    // определяется закрытием соединения.
+    if path == "/api/events" {
+        return events(stream, snapshot).await;
+    }
+
     let (status, content_type, body) = match path {
+        "/" | "/index.html" => ("200 OK", "text/html; charset=utf-8", web::INDEX.into()),
         "/metrics" => {
-            let text = prometheus(&snapshot.read().unwrap());
+            let text = prometheus(&snapshot.read().unwrap().snapshot());
             ("200 OK", "text/plain; version=0.0.4; charset=utf-8", text)
         }
-        "/snapshot" | "/snapshot.json" => {
-            let text = serde_json::to_string_pretty(&*snapshot.read().unwrap())
+        "/snapshot" | "/snapshot.json" | "/api/snapshot" => {
+            let text = serde_json::to_string_pretty(&snapshot.read().unwrap().snapshot())
                 .unwrap_or_else(|_| "{}".into());
             ("200 OK", "application/json", text)
         }
-        "/" | "/health" => ("200 OK", "text/plain; charset=utf-8", "ok\n".into()),
-        _ => ("404 Not Found", "text/plain; charset=utf-8", "not found\n".into()),
+        "/api/history" => {
+            let text = serde_json::to_string(&snapshot.read().unwrap().history())
+                .unwrap_or_else(|_| "[]".into());
+            ("200 OK", "application/json", text)
+        }
+        "/health" => ("200 OK", "text/plain; charset=utf-8", "ok\n".into()),
+        _ => (
+            "404 Not Found",
+            "text/plain; charset=utf-8",
+            "not found\n".into(),
+        ),
     };
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
@@ -113,6 +138,60 @@ async fn handle(mut stream: TcpStream, snapshot: Shared) -> Result<(), std::io::
     );
     stream.write_all(response.as_bytes()).await?;
     stream.write_all(body.as_bytes()).await?;
+    stream.flush().await
+}
+
+/// SSE для дашборда: история сразу целиком, дальше по кадру на публикацию.
+///
+/// Снимок сериализуется под коротким read-локом и никогда — через `.await`:
+/// иначе медленный браузер останавливал бы сэмплер. Канал передаёт сигнал без
+/// данных, поэтому отставший подписчик получает `Lagged` и просто берёт свежий
+/// снимок, а не догоняет очередь из ста секунд.
+async fn events(mut stream: TcpStream, live: Shared) -> Result<(), std::io::Error> {
+    let (history, mut rx) = {
+        let guard = live.read().unwrap();
+        (guard.history(), guard.subscribe())
+    };
+    let head = concat!(
+        "HTTP/1.1 200 OK\r\n",
+        "Content-Type: text/event-stream; charset=utf-8\r\n",
+        "Cache-Control: no-store\r\n",
+        "X-Accel-Buffering: no\r\n",
+        "Connection: keep-alive\r\n\r\n",
+    );
+    stream.write_all(head.as_bytes()).await?;
+    write_frame(
+        &mut stream,
+        "history",
+        &serde_json::to_string(&history).unwrap_or_else(|_| "[]".into()),
+    )
+    .await?;
+
+    loop {
+        match tokio::time::timeout(SSE_KEEPALIVE, rx.recv()).await {
+            Ok(Ok(())) | Ok(Err(RecvError::Lagged(_))) => {}
+            Ok(Err(RecvError::Closed)) => return Ok(()),
+            // Тишина: держим соединение живым комментарием.
+            Err(_) => {
+                stream.write_all(b": keepalive\n\n").await?;
+                stream.flush().await?;
+                continue;
+            }
+        }
+        let snapshot = live.read().unwrap().snapshot();
+        let json = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".into());
+        write_frame(&mut stream, "tick", &json).await?;
+    }
+}
+
+/// Один кадр SSE: JSON без переводов строк, поэтому `data:` — одна строка.
+async fn write_frame(
+    stream: &mut TcpStream,
+    event: &str,
+    json: &str,
+) -> Result<(), std::io::Error> {
+    let frame = format!("event: {event}\ndata: {json}\n\n");
+    stream.write_all(frame.as_bytes()).await?;
     stream.flush().await
 }
 
@@ -145,7 +224,8 @@ async fn fetch_port(host: &str, port: u16) -> Result<Snapshot, String> {
     .map_err(|_| format!("connect {host}:{port}: таймаут"))?
     .map_err(|e| format!("connect {host}:{port}: {e}"))?;
     let mut stream = connect;
-    let request = format!("GET /snapshot HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    let request =
+        format!("GET /api/snapshot HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     stream
         .write_all(request.as_bytes())
         .await
@@ -160,9 +240,7 @@ async fn fetch_port(host: &str, port: u16) -> Result<Snapshot, String> {
     .await
     .map_err(|_| format!("{host}:{port}: нет ответа"))?
     .map_err(|e| e.to_string())?;
-    let (head, payload) = body
-        .split_once("\r\n\r\n")
-        .ok_or("ответ без заголовков")?;
+    let (head, payload) = body.split_once("\r\n\r\n").ok_or("ответ без заголовков")?;
     if !head.starts_with("HTTP/1.1 200") {
         return Err(format!(
             "сервер метрик ответил: {}",
@@ -175,41 +253,165 @@ async fn fetch_port(host: &str, port: u16) -> Result<Snapshot, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::live::Live;
+    use std::sync::{Arc, RwLock};
+
+    fn shared() -> Shared {
+        Arc::new(RwLock::new(Live::new()))
+    }
+
+    /// Один запрос к серверу: возвращает весь ответ целиком.
+    async fn get(port: u16, path: &str) -> String {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let request = format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut body = String::new();
+        stream.read_to_string(&mut body).await.unwrap();
+        body
+    }
 
     #[tokio::test]
     async fn serves_metrics_and_snapshot() {
-        let snapshot: Shared = Arc::new(RwLock::new(Snapshot::default()));
-        let port = spawn(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0, snapshot)
-            .await
-            .unwrap();
+        let snapshot = shared();
+        let port = spawn(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            0,
+            snapshot,
+        )
+        .await
+        .unwrap();
         let fetched = fetch("127.0.0.1", port).await.unwrap();
         assert_eq!(fetched.tick.rate, 0.0);
         // `/metrics` содержит обязательные имена.
-        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-        stream
-            .write_all(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
-            .await
-            .unwrap();
-        let mut body = String::new();
-        stream.read_to_string(&mut body).await.unwrap();
+        let body = get(port, "/metrics").await;
         assert!(body.contains("chunkwake_up 1"));
         assert!(body.contains("chunkwake_tps{window=\"1m\"}"));
     }
 
     #[tokio::test]
     async fn unknown_path_is_404() {
-        let snapshot: Shared = Arc::new(RwLock::new(Snapshot::default()));
-        let port = spawn(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0, snapshot)
-            .await
-            .unwrap();
+        let snapshot = shared();
+        let port = spawn(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            0,
+            snapshot,
+        )
+        .await
+        .unwrap();
+        let body = get(port, "/nope").await;
+        assert!(body.starts_with("HTTP/1.1 404"));
+    }
+
+    /// Дашборд отдаётся с корня, `/health` остаётся простым «ok».
+    #[tokio::test]
+    async fn root_serves_dashboard() {
+        let snapshot = shared();
+        let port = spawn(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            0,
+            snapshot,
+        )
+        .await
+        .unwrap();
+        let body = get(port, "/").await;
+        assert!(body.starts_with("HTTP/1.1 200"));
+        assert!(body.contains("text/html"));
+        assert!(body.contains("<title>Chunkwake"));
+        assert!(body.contains("/api/events"));
+
+        let health = get(port, "/health").await;
+        assert!(health.ends_with("ok\n"));
+    }
+
+    #[tokio::test]
+    async fn history_starts_empty_and_follows_publications() {
+        let live = shared();
+        let port = spawn(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            0,
+            live.clone(),
+        )
+        .await
+        .unwrap();
+        let body = get(port, "/api/history").await;
+        assert!(body.ends_with("[]"), "история пуста до первой публикации");
+
+        live.write().unwrap().publish(Snapshot {
+            at: "1700000000".into(),
+            tick: crate::snapshot::TickReport {
+                tps_now: 19.5,
+                ..Default::default()
+            },
+            ..Snapshot::default()
+        });
+
+        let body = get(port, "/api/history").await;
+        let (_, payload) = body.split_once("\r\n\r\n").unwrap();
+        let points: Vec<crate::live::HistoryPoint> = serde_json::from_str(payload).unwrap();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].at, 1_700_000_000);
+    }
+
+    /// Поток присылает историю сразу и кадр на каждую публикацию.
+    #[tokio::test]
+    async fn events_stream_history_then_ticks() {
+        let live = shared();
+        let port = spawn(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            0,
+            live.clone(),
+        )
+        .await
+        .unwrap();
         let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         stream
-            .write_all(b"GET /nope HTTP/1.1\r\nHost: x\r\n\r\n")
+            .write_all(b"GET /api/events HTTP/1.1\r\nHost: x\r\n\r\n")
             .await
             .unwrap();
-        let mut body = String::new();
-        stream.read_to_string(&mut body).await.unwrap();
-        assert!(body.starts_with("HTTP/1.1 404"));
+
+        // Первый кадр — история; читаем до пустой строки, отделяющей её.
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            let read =
+                tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut byte))
+                    .await
+                    .expect("кадр истории")
+                    .unwrap();
+            assert!(read > 0, "соединение закрылось");
+            head.push(byte[0]);
+            if head.ends_with(b"\n\n") {
+                break;
+            }
+        }
+        let head = String::from_utf8(head).unwrap();
+        assert!(head.contains("text/event-stream"));
+        assert!(head.contains("event: history"));
+
+        // Публикация снимка превращается в кадр `tick` с полным содержимым.
+        live.write().unwrap().publish(Snapshot {
+            at: "1700000001".into(),
+            tick: crate::snapshot::TickReport {
+                tps_now: 18.75,
+                ..Default::default()
+            },
+            ..Snapshot::default()
+        });
+        let mut frame = String::new();
+        loop {
+            let mut chunk = [0u8; 512];
+            let read =
+                tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut chunk))
+                    .await
+                    .expect("кадр тика")
+                    .unwrap();
+            assert!(read > 0, "соединение закрылось");
+            frame.push_str(&String::from_utf8_lossy(&chunk[..read]));
+            if frame.contains("event: tick") && frame.contains("\"at\":\"1700000001\"") {
+                break;
+            }
+        }
+        assert!(frame.contains("18.75"));
     }
 
     /// Настроенный порт занят — сервер слушает следующий, а клиент его находит.
@@ -228,7 +430,7 @@ mod tests {
             .expect("свободная пара портов");
         let busy = TcpListener::from_std(busy).unwrap();
 
-        let snapshot: Shared = Arc::new(RwLock::new(Snapshot::default()));
+        let snapshot = shared();
         let bound = spawn(localhost, port, snapshot).await.unwrap();
         assert_eq!(bound, port + 1, "занятый порт пропущен");
 

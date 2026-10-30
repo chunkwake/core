@@ -173,7 +173,12 @@ pub fn prometheus(snapshot: &Snapshot) -> String {
         snapshot.tick.tps_15m
     ));
 
-    header(&mut out, "chunkwake_tick_rate", "gauge", "Configured tick rate");
+    header(
+        &mut out,
+        "chunkwake_tick_rate",
+        "gauge",
+        "Configured tick rate",
+    );
     out.push_str(&format!("chunkwake_tick_rate {}\n", snapshot.tick.rate));
     header(
         &mut out,
@@ -203,12 +208,14 @@ pub fn prometheus(snapshot: &Snapshot) -> String {
         "chunkwake_mspt{{quantile=\"max\"}} {}\n",
         snapshot.tick.mspt_worst
     ));
-    out.push_str(&format!(
-        "chunkwake_mspt_last {}\n",
-        snapshot.tick.mspt_now
-    ));
+    out.push_str(&format!("chunkwake_mspt_last {}\n", snapshot.tick.mspt_now));
 
-    header(&mut out, "chunkwake_ticks_total", "counter", "Ticks since start");
+    header(
+        &mut out,
+        "chunkwake_ticks_total",
+        "counter",
+        "Ticks since start",
+    );
     out.push_str(&format!("chunkwake_ticks_total {}\n", snapshot.tick.total));
     header(
         &mut out,
@@ -281,7 +288,12 @@ pub fn prometheus(snapshot: &Snapshot) -> String {
         "chunkwake_system_memory_total_bytes {}\n",
         snapshot.proc.total_memory
     ));
-    header(&mut out, "chunkwake_cpu_core_percent", "gauge", "Load of one core");
+    header(
+        &mut out,
+        "chunkwake_cpu_core_percent",
+        "gauge",
+        "Load of one core",
+    );
     for (index, core) in snapshot.proc.cores.iter().enumerate() {
         out.push_str(&format!(
             "chunkwake_cpu_core_percent{{core=\"{index}\"}} {}\n",

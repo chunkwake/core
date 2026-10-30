@@ -54,21 +54,20 @@ impl ProcessSampler {
     pub fn new() -> Self {
         // Первый опрос нужен, чтобы система знала ядра и запомнила счётчики:
         // загрузку `sysinfo` считает как разницу с этим опросом.
-        let system =
-            System::new_with_specifics(
-                RefreshKind::nothing()
-                    .with_cpu(sysinfo::CpuRefreshKind::everything())
-                    .with_memory(sysinfo::MemoryRefreshKind::everything()),
-            )
-            .or_else(|error| {
-                tracing_free_log(&format!("metrics: cannot read system info: {error}"));
-                System::new()
-            })
-            .map(|mut system| {
-                system.refresh_cpu_usage();
-                system
-            })
-            .ok();
+        let system = System::new_with_specifics(
+            RefreshKind::nothing()
+                .with_cpu(sysinfo::CpuRefreshKind::everything())
+                .with_memory(sysinfo::MemoryRefreshKind::everything()),
+        )
+        .or_else(|error| {
+            tracing_free_log(&format!("metrics: cannot read system info: {error}"));
+            System::new()
+        })
+        .map(|mut system| {
+            system.refresh_cpu_usage();
+            system
+        })
+        .ok();
         let brand = system
             .as_ref()
             .and_then(|system| system.cpus().first())

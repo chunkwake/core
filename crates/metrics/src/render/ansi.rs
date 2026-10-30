@@ -4,7 +4,7 @@
 //! периодическая печать в лог. Цвета — обычные SGR; `--no-color` даёт
 //! чистый текст для логов.
 
-use crate::render::{bar, load_color, tps_color, Section};
+use crate::render::{Section, bar, load_color, tps_color};
 use crate::snapshot::Snapshot;
 use std::fmt::Write;
 
@@ -46,11 +46,7 @@ pub fn render(snapshot: &Snapshot, section: Section, color: bool) -> String {
         snapshot.version,
         snapshot.uptime_text()
     );
-    let _ = writeln!(
-        out,
-        "{}",
-        paint.wrap("1;36", &format!("{:=^72}", title))
-    );
+    let _ = writeln!(out, "{}", paint.wrap("1;36", &format!("{:=^72}", title)));
 
     if matches!(section, Section::All | Section::Tick) {
         tick_section(&mut out, snapshot, &paint);
@@ -91,9 +87,7 @@ fn tick_section(out: &mut String, s: &Snapshot, paint: &Paint) {
     let _ = writeln!(
         out,
         "  rate  {:>6.0}/s  {}   ticks {}",
-        tick.rate,
-        state,
-        tick.total
+        tick.rate, state, tick.total
     );
     let _ = writeln!(
         out,
@@ -106,12 +100,7 @@ fn tick_section(out: &mut String, s: &Snapshot, paint: &Paint) {
     let _ = writeln!(
         out,
         "  MSPT  last {:6.2}  1m avg {:6.2}  p50 {:6.2}  p95 {:6.2}  p99 {:6.2}  max {:6.2}",
-        tick.mspt_now,
-        tick.mspt_1m,
-        tick.mspt_p50,
-        tick.mspt_p95,
-        tick.mspt_p99,
-        tick.mspt_worst
+        tick.mspt_now, tick.mspt_1m, tick.mspt_p50, tick.mspt_p95, tick.mspt_p99, tick.mspt_worst
     );
     let budget = s.limits.target_mspt;
     let _ = writeln!(
@@ -133,7 +122,10 @@ fn tick_section(out: &mut String, s: &Snapshot, paint: &Paint) {
     let _ = writeln!(
         out,
         "  late  {} ticks since start",
-        paint.named(if tick.late == 0 { "green" } else { "yellow" }, &tick.late.to_string())
+        paint.named(
+            if tick.late == 0 { "green" } else { "yellow" },
+            &tick.late.to_string()
+        )
     );
 }
 
@@ -149,24 +141,27 @@ fn cpu_section(out: &mut String, s: &Snapshot, paint: &Paint) {
     let _ = writeln!(
         out,
         "  system {}%  {}",
-        paint.named(load_color(f64::from(s.proc.cpu_total)), &format!("{:5.1}", s.proc.cpu_total)),
+        paint.named(
+            load_color(f64::from(s.proc.cpu_total)),
+            &format!("{:5.1}", s.proc.cpu_total)
+        ),
         paint.named(
             load_color(f64::from(s.proc.cpu_total)),
             &bar(f64::from(s.proc.cpu_total), 100.0, 40)
         )
     );
-        // Загрузка процесса может быть больше 100 % — это сумма по потокам.
-        let cores = s.proc.cores.len().max(1) as f32;
-        let machine_share = (s.proc.process_cpu / cores).clamp(0.0, 100.0);
-        let _ = writeln!(
-            out,
-            "  server {:>6.1}% of one core ({machine_share:.1}% of {cores} cores)  {}",
-            s.proc.process_cpu,
-            paint.named(
-                load_color(f64::from(machine_share)),
-                &bar(f64::from(machine_share), 100.0, 40)
-            )
-        );
+    // Загрузка процесса может быть больше 100 % — это сумма по потокам.
+    let cores = s.proc.cores.len().max(1) as f32;
+    let machine_share = (s.proc.process_cpu / cores).clamp(0.0, 100.0);
+    let _ = writeln!(
+        out,
+        "  server {:>6.1}% of one core ({machine_share:.1}% of {cores} cores)  {}",
+        s.proc.process_cpu,
+        paint.named(
+            load_color(f64::from(machine_share)),
+            &bar(f64::from(machine_share), 100.0, 40)
+        )
+    );
     let per_row = 8;
     for chunk in s.proc.cores.chunks(per_row) {
         let mut line = String::from("  ");
@@ -200,7 +195,11 @@ fn memory_section(out: &mut String, s: &Snapshot, paint: &Paint) {
     );
     let used = s.memory_used_gib();
     let total = s.memory_total_gib();
-    let percent = if total > 0.0 { used / total * 100.0 } else { 0.0 };
+    let percent = if total > 0.0 {
+        used / total * 100.0
+    } else {
+        0.0
+    };
     let _ = writeln!(
         out,
         "  host  {:>6.2} / {:.2} GiB {}  {}%",
@@ -256,10 +255,7 @@ fn net_section(out: &mut String, s: &Snapshot, paint: &Paint) {
     );
     match (net.ping_avg, net.ping_max) {
         (Some(avg), Some(max)) => {
-            let _ = writeln!(
-                out,
-                "  ping    avg {avg:.0} ms  max {max:.0} ms"
-            );
+            let _ = writeln!(out, "  ping    avg {avg:.0} ms  max {max:.0} ms");
         }
         _ => {
             let _ = writeln!(out, "  ping    —");

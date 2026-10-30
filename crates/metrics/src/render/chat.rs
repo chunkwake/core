@@ -4,9 +4,9 @@
 //! строка — отдельный элемент `extra`, полоски рисуются `█`/`░` фиксированной
 //! длины, а подробности уходят в `hoverEvent` — так экран не забивается.
 
-use crate::render::{bar, load_color, tps_color, Section};
+use crate::render::{Section, bar, load_color, tps_color};
 use crate::snapshot::Snapshot;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Строка компонента: цветной текст.
 #[allow(dead_code)]
@@ -132,7 +132,11 @@ pub fn render(snapshot: &Snapshot, section: Section) -> Value {
         );
         let used = snapshot.memory_used_gib();
         let total = snapshot.memory_total_gib();
-        let percent = if total > 0.0 { used / total * 100.0 } else { 0.0 };
+        let percent = if total > 0.0 {
+            used / total * 100.0
+        } else {
+            0.0
+        };
         push(
             &mut extra,
             json!({

@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Chunkwake · Метрики</title>
+<style>
+  :root{
+    --bg:#0b1018;--surface:#141d28;--surface2:#1b2837;--stroke:#2a394a;
+    --text:#e9f1fa;--muted:#95a7bb;--cyan:#65cce9;--violet:#b69af2;
+    --green:#79d4aa;--red:#f18b96;--amber:#e8bd76;
+  }
+  *{box-sizing:border-box}
+  html,body{min-height:100%}
+  body{
+    margin:0;background:radial-gradient(ellipse 80% 40% at 50% -8%,#16304a 0,transparent 70%),var(--bg);
+    color:var(--text);font:13px/1.45 "Inter","Segoe UI",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  b,td.num,.kpi b,.core b,.row b{font-variant-numeric:tabular-nums}
+  .shell{width:min(1360px,calc(100% - 32px));margin:auto;padding:18px 0 34px}
+
+  /* шапка */
+  .bar{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap;
+    padding:0 0 12px;border-bottom:1px solid var(--stroke);margin-bottom:16px}
+  .brand{display:flex;align-items:center;gap:11px;min-width:0}
+  .logo{width:32px;height:32px;flex:none;display:grid;place-items:center;border-radius:9px;
+    background:linear-gradient(150deg,#1d4a63,#3b3170);color:var(--cyan);
+    box-shadow:0 0 22px #42bce43d}
+  .logo svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+  .brand h1{margin:0;font-size:15px;letter-spacing:.01em;font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .brand small{display:block;color:var(--muted);font-size:11px;letter-spacing:.04em}
+  .badges{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+  .pill{display:inline-flex;align-items:center;gap:6px;border:1px solid #33475d;border-radius:6px;
+    padding:4px 9px;background:#182533;color:#d7e6f5;font-size:11px;font-weight:650;white-space:nowrap}
+  .pill.ok{color:var(--green);border-color:#2f6049;background:#16302459}
+  .pill.warn{color:var(--amber);border-color:#6a5330;background:#2a211659}
+  .pill.bad{color:var(--red);border-color:#6d3742;background:#2b171c59}
+  .pill.cyan{color:var(--cyan);border-color:#2d5568;background:#13273559}
+  .pill i{width:7px;height:7px;border-radius:50%;background:currentColor;box-shadow:0 0 8px currentColor}
+
+  /* KPI */
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:9px;margin-bottom:16px}
+  .kpi{position:relative;overflow:hidden;border:1px solid var(--stroke);border-radius:9px;
+    background:linear-gradient(160deg,#16222f,#111a25);padding:10px 13px 11px}
+  .kpi:before{content:"";position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--accent,#2a394a)}
+  .kpi .k{display:block;color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.13em}
+  .kpi b{display:block;font-size:23px;line-height:1.2;letter-spacing:-.03em;margin:3px 0 1px}
+  .kpi .s{color:var(--muted);font-size:11px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+  /* панели */
+  .panel{border:1px solid var(--stroke);border-radius:9px;background:var(--surface);padding:11px 13px 12px;min-width:0}
+  .panel-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:9px;flex-wrap:wrap}
+  .panel-head h2{margin:0;font-size:12px;font-weight:750;letter-spacing:.06em;text-transform:uppercase;color:#dbe8f5}
+  .panel-head .note{color:var(--muted);font-size:10px;letter-spacing:.05em;text-transform:uppercase}
+  .legend{display:flex;gap:11px;color:var(--muted);font-size:10px;flex-wrap:wrap}
+  .legend span{display:inline-flex;align-items:center;gap:5px}
+  .legend i{width:9px;height:2px;border-radius:2px;background:currentColor;display:inline-block}
+
+  .charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:9px;margin-bottom:9px}
+  .cv{position:relative;height:132px}
+  .cv canvas{display:block;width:100%;height:100%}
+
+  .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:9px;margin-bottom:9px}
+
+  /* ядра */
+  .cores{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:5px 14px}
+  .core{display:grid;grid-template-columns:18px minmax(0,1fr) 34px;align-items:center;gap:7px}
+  .core-id{color:var(--muted);font-size:10px;text-align:right;font-variant-numeric:tabular-nums}
+  .core .track{height:5px;border-radius:3px;background:#22303f;overflow:hidden}
+  .core .track i{display:block;height:100%;border-radius:3px;background:var(--green);transition:width .25s linear}
+  .core.warn .track i{background:var(--amber)}
+  .core.bad .track i{background:var(--red)}
+  .core b{font-size:10px;color:#c9d8e7;text-align:right;font-weight:600}
+
+  /* таблицы-строки */
+  .rows{display:grid;gap:0}
+  .row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:4px 1px;
+    border-bottom:1px solid #22303e}
+  .row:last-child{border-bottom:0}
+  .row span{color:var(--muted);font-size:11px}
+  .row b{font-size:12px;font-weight:650}
+  .row b.good{color:var(--green)}.row b.warn{color:var(--amber)}.row b.bad{color:var(--red)}
+  .row b.dim{color:var(--muted);font-weight:500}
+
+  .bar-line{display:flex;align-items:center;gap:9px;margin:2px 0 8px}
+  .bar-line .track{flex:1;height:6px;border-radius:3px;background:#22303f;overflow:hidden}
+  .bar-line .track i{display:block;height:100%;background:var(--green);transition:width .3s linear}
+  .bar-line b{font-size:11px;color:#c9d8e7;min-width:52px;text-align:right}
+
+  footer{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;color:#718699;
+    font-size:10px;letter-spacing:.04em;margin-top:12px;padding-top:10px;border-top:1px solid var(--stroke)}
+  footer a{color:var(--cyan);text-decoration:none}
+  footer a:hover{text-decoration:underline}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--red);display:inline-block;box-shadow:0 0 8px currentColor}
+  .dot.ok{background:var(--green)}
+  .warn-text{color:var(--amber)}
+  @media(max-width:640px){.shell{width:calc(100% - 20px)}.kpi b{font-size:19px}}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="bar">
+    <div class="brand">
+      <span class="logo"><svg viewBox="0 0 24 24"><path d="M3 17V7l6-4 6 4v10l-6 4-6-4Z"/><path d="M9 3v10l6 4"/></svg></span>
+      <div>
+        <h1 id="motd">Chunkwake</h1>
+        <small id="sub">—</small>
+      </div>
+    </div>
+    <div class="badges">
+      <span class="pill" id="state">—</span>
+      <span class="pill" id="uptime">uptime —</span>
+      <span class="pill" id="conn"><i></i><span id="conn-text">подключение…</span></span>
+    </div>
+  </header>
+
+  <section class="kpis">
+    <div class="kpi" style="--accent:#2f6d86"><span class="k">TPS</span><b id="k-tps">—</b><span class="s" id="k-tps-s">—</span></div>
+    <div class="kpi" style="--accent:#4b3f7a"><span class="k">MSPT</span><b id="k-mspt">—</b><span class="s" id="k-mspt-s">—</span></div>
+    <div class="kpi" style="--accent:#2f6249"><span class="k">CPU машины</span><b id="k-cpu">—</b><span class="s" id="k-cpu-s">—</span></div>
+    <div class="kpi" style="--accent:#7a5a34"><span class="k">RSS</span><b id="k-rss">—</b><span class="s" id="k-rss-s">—</span></div>
+    <div class="kpi" style="--accent:#2f6249"><span class="k">Игроки</span><b id="k-players">—</b><span class="s" id="k-players-s">—</span></div>
+    <div class="kpi" style="--accent:#43506b"><span class="k">Чанки</span><b id="k-chunks">—</b><span class="s" id="k-chunks-s">—</span></div>
+  </section>
+
+  <section class="charts">
+    <div class="panel">
+      <div class="panel-head"><h2>TPS</h2><div class="legend"><span style="color:#65cce9"><i></i>сейчас</span><span style="color:#4a6a83"><i></i>цель</span></div></div>
+      <div class="cv"><canvas id="ch-tps"></canvas></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>MSPT</h2><div class="legend"><span style="color:#b69af2"><i></i>последний</span><span style="color:#e8bd76"><i></i>p95</span><span style="color:#7d5d63"><i></i>бюджет</span></div></div>
+      <div class="cv"><canvas id="ch-mspt"></canvas></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Процессор</h2><div class="legend"><span style="color:#79d4aa"><i></i>машина</span><span style="color:#65cce9"><i></i>сервер</span></div></div>
+      <div class="cv"><canvas id="ch-cpu"></canvas></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Память процесса</h2><div class="legend"><span style="color:#b69af2"><i></i>RSS, МиБ</span></div></div>
+      <div class="cv"><canvas id="ch-ram"></canvas></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Сеть</h2><div class="legend"><span style="color:#65cce9"><i></i>вход</span><span style="color:#b69af2"><i></i>выход</span></div></div>
+      <div class="cv"><canvas id="ch-net"></canvas></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Игроки онлайн</h2><div class="legend"><span style="color:#e8bd76"><i></i>игроки</span></div></div>
+      <div class="cv"><canvas id="ch-players"></canvas></div>
+    </div>
+  </section>
+
+  <section class="panel" style="margin-bottom:9px">
+    <div class="panel-head"><h2>Ядра</h2><span class="note" id="cores-note">—</span></div>
+    <div class="cores" id="cores"></div>
+  </section>
+
+  <section class="grid2">
+    <div class="panel">
+      <div class="panel-head"><h2>Тик</h2><span class="note" id="tick-state">—</span></div>
+      <div class="bar-line">
+        <span style="color:var(--muted);font-size:11px;min-width:52px">бюджет</span>
+        <div class="track"><i id="budget-fill" style="width:0%"></i></div>
+        <b id="budget-pct">—</b>
+      </div>
+      <div class="rows" id="tick-rows"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Мир</h2><span class="note" id="world-note">—</span></div>
+      <div class="rows" id="world-rows"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Сеть</h2><span class="note" id="net-note">—</span></div>
+      <div class="rows" id="net-rows"></div>
+    </div>
+  </section>
+
+  <footer>
+    <span><i class="dot" id="foot-dot"></i> обновление раз в секунду · история 15 минут</span>
+    <span id="foot-meta">Chunkwake</span>
+  </footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var CAP = 900;
+  var C = {cyan:"#65cce9", violet:"#b69af2", green:"#79d4aa", amber:"#e8bd76",
+           red:"#f18b96", muted:"#95a7bb", grid:"#2a394a", target:"#4a6a83", budget:"#7d5d63"};
+  var history = [];
+  var last = null;
+  var bootAt = null;        // когда сервер стартовал, по локальным часам
+  var lastEventAt = 0;
+  var connected = false;
+
+  function el(id){ return document.getElementById(id); }
+  function setText(id, text){ var n = el(id); if (n && n.textContent !== text) n.textContent = text; }
+  function one(v, d){ return (v === null || v === undefined || !isFinite(v)) ? "—" : Number(v).toFixed(d); }
+  function int(v){ return (v === null || v === undefined || !isFinite(v)) ? "—" : Math.round(v).toLocaleString("ru-RU"); }
+  function mib(bytes){ return (bytes || 0) / 1048576; }
+  function dur(sec){
+    sec = Math.max(0, Math.floor(sec));
+    var d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600),
+        m = Math.floor(sec % 3600 / 60), s = sec % 60;
+    function p(n){ return (n < 10 ? "0" : "") + n; }
+    return (d > 0 ? d + "d " : "") + p(h) + ":" + p(m) + ":" + p(s);
+  }
+  function shortDur(sec){
+    sec = Math.max(0, Math.floor(sec));
+    if (sec >= 60) return Math.floor(sec / 60) + ":" + ("0" + (sec % 60)).slice(-2);
+    return sec + "с";
+  }
+
+  /* ---------- графики на canvas ---------- */
+  function setup(cv){
+    var rect = cv.getBoundingClientRect();
+    var w = Math.max(40, Math.round(rect.width)), h = Math.max(30, Math.round(rect.height));
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+      cv.width = Math.round(w * dpr);
+      cv.height = Math.round(h * dpr);
+    }
+    var ctx = cv.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    return {ctx: ctx, w: w, h: h};
+  }
+  function niceCeil(v){
+    if (!isFinite(v) || v <= 0) return 1;
+    var exp = Math.floor(Math.log10(v)), base = Math.pow(10, exp), n = v / base;
+    var step = n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10;
+    return step * base;
+  }
+  function drawChart(id, series, opts){
+    var cv = el(id);
+    if (!cv) return;
+    var s = setup(cv), ctx = s.ctx, w = s.w, h = s.h;
+    var dec = opts.decimals === undefined ? 1 : opts.decimals;
+    var pad = {l: 44, r: 10, t: 10, b: 16};
+    var pw = Math.max(10, w - pad.l - pad.r), ph = Math.max(10, h - pad.t - pad.b);
+    var values = series[0].values, n = values.length;
+    var targets = opts.targets || [];
+    var max = 0;
+    series.forEach(function(ser){ ser.values.forEach(function(v){ if (isFinite(v) && v > max) max = v; }); });
+    targets.forEach(function(t){ if (t.value > max) max = t.value; });
+    max = niceCeil(Math.max(max, 1e-9) * 1.1);
+    function ypix(v){ return pad.t + ph - (v / max) * ph; }
+    function xpix(i){ return n <= 1 ? pad.l + pw : pad.l + (i / (n - 1)) * pw; }
+
+    ctx.font = '10px ui-monospace,"Cascadia Code",Consolas,monospace';
+    ctx.textBaseline = "middle";
+    for (var g = 0; g <= 4; g++) {
+      var val = max * g / 4;
+      var py = Math.round(ypix(val)) + 0.5;
+      ctx.globalAlpha = g === 0 ? 0.85 : 0.4;
+      ctx.strokeStyle = C.grid;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(pad.l, py);
+      ctx.lineTo(pad.l + pw, py);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = C.muted;
+      ctx.textAlign = "right";
+      ctx.fillText(max >= 1000 ? Math.round(val).toLocaleString("ru-RU") : Number(val.toFixed(dec > 0 && max < 10 ? 1 : 0)), pad.l - 7, py);
+    }
+
+    if (n < 2) {
+      ctx.fillStyle = C.muted;
+      ctx.textAlign = "center";
+      ctx.fillText("собираем данные…", pad.l + pw / 2, pad.t + ph / 2);
+      return;
+    }
+
+    ctx.fillStyle = C.muted;
+    ctx.textBaseline = "top";
+    [[0, "left"], [Math.floor((n - 1) / 2), "center"], [n - 1, "right"]].forEach(function(st){
+      ctx.textAlign = st[1];
+      var label = st[0] === n - 1 ? "сейчас" : "−" + shortDur(n - 1 - st[0]);
+      ctx.fillText(label, xpix(st[0]), pad.t + ph + 4);
+    });
+    ctx.textBaseline = "middle";
+
+    targets.forEach(function(t){
+      if (t.value > max) return;
+      var ty = Math.round(ypix(t.value)) + 0.5;
+      ctx.save();
+      ctx.strokeStyle = t.color || C.target;
+      ctx.setLineDash([4, 4]);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(pad.l, ty);
+      ctx.lineTo(pad.l + pw, ty);
+      ctx.stroke();
+      ctx.restore();
+    });
+
+    series.forEach(function(ser){
+      var vals = ser.values, i;
+      if (ser.fill) {
+        var grad = ctx.createLinearGradient(0, pad.t, 0, pad.t + ph);
+        grad.addColorStop(0, ser.color + "55");
+        grad.addColorStop(1, ser.color + "00");
+        ctx.beginPath();
+        ctx.moveTo(xpix(0), pad.t + ph);
+        for (i = 0; i < vals.length; i++) ctx.lineTo(xpix(i), ypix(isFinite(vals[i]) ? Math.min(vals[i], max) : 0));
+        ctx.lineTo(xpix(vals.length - 1), pad.t + ph);
+        ctx.closePath();
+        ctx.fillStyle = grad;
+        ctx.fill();
+      }
+      ctx.beginPath();
+      for (i = 0; i < vals.length; i++) {
+        var v = isFinite(vals[i]) ? Math.min(vals[i], max) : 0;
+        if (i === 0) ctx.moveTo(xpix(i), ypix(v)); else ctx.lineTo(xpix(i), ypix(v));
+      }
+      ctx.strokeStyle = ser.color;
+      ctx.lineWidth = 1.8;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.stroke();
+    });
+  }
+
+  function col(key){
+    var out = [];
+    for (var i = 0; i < history.length; i++) out.push(history[i][key]);
+    return out;
+  }
+  /** Скорость изменения счётчика в точках; `scale` — 1024 для КиБ, 1 для байт. */
+  function rateOf(key, scale){
+    var out = [];
+    for (var i = 0; i < history.length; i++) {
+      if (i === 0) { out.push(0); continue; }
+      var dt = Math.max(1, history[i].at - history[i - 1].at);
+      var dv = history[i][key] - history[i - 1][key];
+      out.push(Math.max(0, dv / dt) / scale);
+    }
+    return out;
+  }
+
+  function renderCharts(){
+    var rate = last ? last.tick.rate : 20;
+    var budget = last ? last.limits.target_mspt : 50;
+    drawChart("ch-tps", [{values: col("tps"), color: C.cyan, fill: true}],
+      {decimals: 1, targets: [{value: rate, color: C.target}]});
+    drawChart("ch-mspt", [{values: col("mspt"), color: C.violet, fill: true},
+      {values: col("mspt_p95"), color: C.amber}],
+      {decimals: 2, targets: [{value: budget, color: C.budget}]});
+    drawChart("ch-cpu", [{values: col("cpu_system"), color: C.green, fill: true},
+      {values: col("cpu_process"), color: C.cyan}], {decimals: 0});
+    drawChart("ch-ram", [{values: col("rss_mib"), color: C.violet, fill: true}], {decimals: 0});
+    drawChart("ch-net", [{values: rateOf("bytes_in", 1024), color: C.cyan, fill: true},
+      {values: rateOf("bytes_out", 1024), color: C.violet}], {decimals: 1});
+    drawChart("ch-players", [{values: col("players"), color: C.amber, fill: true}], {decimals: 0});
+  }
+
+  /* ---------- панели ---------- */
+  function setRows(id, rows){
+    var html = "";
+    for (var i = 0; i < rows.length; i++) {
+      var tone = rows[i][2] || "dim";
+      html += '<div class="row"><span>' + rows[i][0] + '</span><b class="' + tone + '">' + rows[i][1] + "</b></div>";
+    }
+    el(id).innerHTML = html;
+  }
+
+  function renderCores(proc){
+    var cores = proc.cores || [];
+    setText("cores-note", (proc.cpu_brand || "CPU") + (proc.cpu_mhz ? " · " + proc.cpu_mhz + " МГц" : "") + " · " + cores.length + " ядер");
+    var html = "";
+    for (var i = 0; i < cores.length; i++) {
+      var v = Math.max(0, Math.min(100, cores[i].usage || 0));
+      var klass = v < 70 ? "" : v < 90 ? " warn" : " bad";
+      html += '<div class="core' + klass + '"><span class="core-id">' + i +
+              '</span><div class="track"><i style="width:' + v.toFixed(1) + '%"></i></div><b>' +
+              v.toFixed(0) + "%</b></div>";
+    }
+    el("cores").innerHTML = html || '<span class="note">нет данных о ядрах</span>';
+  }
+
+  function render(snapshot){
+    if (!snapshot) return;
+    var tick = snapshot.tick, proc = snapshot.proc, world = snapshot.world,
+        net = snapshot.net, limits = snapshot.limits;
+
+    setText("motd", snapshot.motd || "Chunkwake");
+    setText("sub", "Chunkwake " + (snapshot.version || "—"));
+    setText("foot-meta", "Chunkwake " + (snapshot.version || "") + (proc.cpu_brand ? " · " + proc.cpu_brand : ""));
+
+    if (bootAt === null) bootAt = Date.now() / 1000 - (snapshot.uptime || 0);
+
+    var statePill = el("state");
+    if (tick.frozen) { statePill.className = "pill warn"; statePill.textContent = "заморожен"; }
+    else if (tick.sprint) { statePill.className = "pill cyan"; statePill.textContent = "ускоренный прогон"; }
+    else { statePill.className = "pill ok"; statePill.textContent = "работает"; }
+
+    /* KPI */
+    setText("k-tps", one(tick.tps_now, 1));
+    setText("k-tps-s", "1м " + one(tick.tps_1m, 1) + " · 5м " + one(tick.tps_5m, 1) + " · 15м " + one(tick.tps_15m, 1));
+    setText("k-mspt", one(tick.mspt_now, 2) + " мс");
+    setText("k-mspt-s", "p95 " + one(tick.mspt_p95, 2) + " · p99 " + one(tick.mspt_p99, 2) + " · бюджет " + one(limits.target_mspt, 0));
+    setText("k-cpu", one(proc.cpu_total, 1) + "%");
+    setText("k-cpu-s", "сервер " + one(proc.process_cpu, 1) + "% ядра");
+    setText("k-rss", one(mib(proc.rss), 0) + " МиБ");
+    setText("k-rss-s", "виртуальная " + one(mib(proc.vsz), 0) + " МиБ" + (proc.threads ? " · потоков " + proc.threads : ""));
+    setText("k-players", int(world.players) + "/" + int(world.max_players));
+    setText("k-players-s", "мобов " + int(world.mobs) + " · предметов " + int(world.dropped_items));
+    setText("k-chunks", int(world.simulated_chunks));
+    setText("k-chunks-s", "известно миру " + int(world.loaded_chunks) + " · view " + limits.view_distance + " sim " + limits.simulation_distance);
+
+    renderCores(proc);
+
+    /* тик */
+    setText("tick-state", tick.frozen ? "заморожен" : tick.sprint ? "sprint" : "в работе");
+    var share = limits.target_mspt > 0 ? Math.min(100, tick.mspt_1m / limits.target_mspt * 100) : 0;
+    var fill = el("budget-fill");
+    fill.style.width = share.toFixed(1) + "%";
+    fill.style.background = share < 50 ? C.green : share < 90 ? C.amber : C.red;
+    setText("budget-pct", Math.round(share) + "%");
+    setRows("tick-rows", [
+      ["частота тика", one(tick.rate, 0) + "/с", "good"],
+      ["тиков всего", int(tick.total), "good"],
+      ["опоздавших тиков", int(tick.late), tick.late === 0 ? "good" : "warn"],
+      ["MSPT 1м / p50", one(tick.mspt_1m, 2) + " / " + one(tick.mspt_p50, 2) + " мс", "good"],
+      ["худший тик", one(tick.mspt_worst, 2) + " мс", tick.mspt_worst > limits.target_mspt ? "warn" : "dim"],
+      ["бюджет тика", one(limits.target_mspt, 1) + " мс", "dim"]
+    ]);
+
+    /* мир */
+    setText("world-note", limits.view_distance + " обзора · " + limits.simulation_distance + " симуляции");
+    setRows("world-rows", [
+      ["игроки", int(world.players) + " / " + int(world.max_players), "good"],
+      ["мобы", int(world.mobs), "good"],
+      ["предметы / стрелы / сферы", int(world.dropped_items) + " / " + int(world.arrows) + " / " + int(world.orbs), "good"],
+      ["чанки simulated / loaded", int(world.simulated_chunks) + " / " + int(world.loaded_chunks), "good"],
+      ["редстоун / жидкость / воронки", int(world.redstone_queue) + " / " + int(world.fluid_queue) + " / " + int(world.hopper_queue), "good"],
+      ["печи / костры", int(world.furnaces) + " / " + int(world.campfires), "good"],
+      ["генерация очередь / воркеры", int(world.gen_pending) + " / " + int(world.gen_workers),
+        world.gen_pending > (world.gen_workers || 1) * 8 ? "warn" : "good"]
+    ]);
+
+    /* сеть */
+    var rates = rateOf("bytes_in", 1), outRates = rateOf("bytes_out", 1);
+    var inRate = rates.length ? rates[rates.length - 1] : 0;
+    var outRate = outRates.length ? outRates[outRates.length - 1] : 0;
+    setText("net-note", "сжатие с " + int(limits.compression_threshold) + " байт");
+    setRows("net-rows", [
+      ["вход / выход", mib(net.bytes_in).toFixed(1) + " / " + mib(net.bytes_out).toFixed(1) + " МиБ", "good"],
+      ["скорость", (inRate / 1024).toFixed(1) + " / " + (outRate / 1024).toFixed(1) + " КиБ/с", "good"],
+      ["пакеты in / out", int(net.packets_in) + " / " + int(net.packets_out), "good"],
+      ["пинг avg / max", (net.ping_avg === null || net.ping_avg === undefined)
+        ? "—" : one(net.ping_avg, 0) + " / " + one(net.ping_max, 0) + " мс",
+        (net.ping_avg === null || net.ping_avg === undefined) ? "dim" : "good"]
+    ]);
+
+    renderCharts();
+  }
+
+  /* ---------- данные ---------- */
+  function pointOf(s){
+    return {
+      at: Number(s.at) || Math.floor(Date.now() / 1000),
+      tps: s.tick.tps_now, mspt: s.tick.mspt_now, mspt_p95: s.tick.mspt_p95,
+      cpu_system: s.proc.cpu_total, cpu_process: s.proc.process_cpu,
+      rss_mib: mib(s.proc.rss), host_used_gib: (s.proc.used_memory || 0) / 1073741824,
+      players: s.world.players, mobs: s.world.mobs, chunks: s.world.simulated_chunks,
+      bytes_in: s.net.bytes_in, bytes_out: s.net.bytes_out,
+      ping: s.net.ping_avg || 0
+    };
+  }
+  function pushPoint(p){
+    var tail = history[history.length - 1];
+    if (tail && tail.at === p.at) { history[history.length - 1] = p; return; }
+    history.push(p);
+    if (history.length > CAP) history.shift();
+  }
+  function apply(snapshot, push){
+    last = snapshot;
+    lastEventAt = Date.now();
+    if (push) pushPoint(pointOf(snapshot));
+    render(snapshot);
+  }
+  function setConn(ok, text){
+    connected = ok;
+    el("conn").className = "pill " + (ok ? "ok" : "bad");
+    setText("conn-text", text);
+    el("foot-dot").className = "dot" + (ok ? " ok" : "");
+  }
+
+  var source = null;
+  function connect(){
+    if (source) source.close();
+    source = new EventSource("/api/events");
+    source.addEventListener("open", function(){ setConn(true, "поток метрик"); });
+    source.addEventListener("history", function(ev){
+      try {
+        var points = JSON.parse(ev.data);
+        if (Array.isArray(points) && points.length) history = points.slice(-CAP);
+        lastEventAt = Date.now();
+      } catch (_) {}
+    });
+    source.addEventListener("tick", function(ev){
+      try { apply(JSON.parse(ev.data), true); setConn(true, "поток метрик"); } catch (_) {}
+    });
+    source.addEventListener("error", function(){
+      setConn(false, connected ? "переподключение…" : "нет потока");
+    });
+  }
+
+  /** Страховка: если поток молчит, тянем снимок вручную. */
+  function watchdog(){
+    if (Date.now() - lastEventAt < 3500) return;
+    fetch("/api/snapshot", {cache: "no-store"})
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(s){ if (s) apply(s, true); else setConn(false, "нет данных"); })
+      .catch(function(){ setConn(false, "нет данных"); });
+  }
+
+  function tickClock(){
+    if (bootAt !== null) setText("uptime", "uptime " + dur(Date.now() / 1000 - bootAt));
+  }
+
+  var resizeTimer = null;
+  window.addEventListener("resize", function(){
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(renderCharts, 120);
+  });
+
+  connect();
+  setInterval(watchdog, 2000);
+  setInterval(tickClock, 1000);
+  window.addEventListener("beforeunload", function(){ if (source) source.close(); });
+})();
+</script>
+</body>
+</html>
