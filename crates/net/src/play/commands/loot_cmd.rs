@@ -27,13 +27,158 @@ pub(super) fn loot(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     match path.first().copied() {
         Some("give") => give(ctx, call.source, &path, &mut input),
         Some("spawn") => spawn(ctx, call.source, &mut input),
-        Some("insert") | Some("replace") => Outcome::Feedback(json!({
-            "text": "loot into a container is not supported yet: containers here keep no slots; \
-                     use \"loot give players <targets> loot <table>\" or \"loot spawn <pos> loot <table>\"",
-            "color": "red",
-        })),
+        Some("insert") => insert(ctx, call.source, &mut input),
+        Some("replace") => replace_block(ctx, call.source, &mut input),
         _ => usage("/loot give players <targets> loot <table>"),
     }
+}
+
+/// Куда положить лут из `/loot insert` и `/loot replace block`.
+///
+/// Следующее слово после таблицы — `fish`/`kill`/`loot`/`mine`. Поддержаны
+/// только `loot`: у остальных нужен источник урона или удочка.
+fn container_source(
+    ctx: &Context<'_>,
+    source: &Source,
+    input: &mut args::Input<'_>,
+    usage_text: &str,
+) -> Result<Vec<Stack>, Outcome> {
+    let Some(word) = input.word() else {
+        return Err(usage(usage_text));
+    };
+    match word {
+        "loot" => {}
+        "kill" | "fish" | "mine" => {
+            return Err(Outcome::Feedback(json!({
+                "text": format!(
+                    "loot … {word} is not supported yet: this server rolls loot tables, not kills, \
+                     fishing or mining; use \"… loot <table>\""
+                ),
+                "color": "red",
+            })));
+        }
+        other => {
+            return Err(Outcome::Feedback(json!({
+                "text": format!(
+                    "expected the word \"loot\" before the table name, got \"{other}\""
+                ),
+                "color": "red",
+            })));
+        }
+    }
+    let Some(table) = input.word() else {
+        return Err(usage(usage_text));
+    };
+    roll_table(ctx, source, table)
+}
+
+/// `/loot insert <pos> loot <table>`: положить лут в контейнер.
+fn insert(ctx: &Context<'_>, source: &Source, input: &mut args::Input<'_>) -> Outcome {
+    const USAGE: &str = "/loot insert <pos> loot <table>";
+    let Some(pos) = read_block_pos(ctx, source, input, USAGE) else {
+        return usage(USAGE);
+    };
+    let rolled = match container_source(ctx, source, input, USAGE) {
+        Ok(list) => list,
+        Err(outcome) => return outcome,
+    };
+    if ctx.plan.container_slots(pos).is_none() {
+        return failed(
+            "commands.loot.replace.block.notAContainer",
+            vec![json!(pos[0]), json!(pos[1]), json!(pos[2])],
+        );
+    }
+    if rolled.is_empty() {
+        return failed("commands.loot.failed", Vec::new());
+    }
+    let mut placed = 0;
+    for stack in rolled {
+        if ctx.plan.container_add(pos, stack) {
+            placed += 1;
+        }
+    }
+    if placed == 0 {
+        return failed("commands.loot.failed", Vec::new());
+    }
+    Outcome::Feedback(translate(
+        "commands.loot.insert.success",
+        vec![json!(placed), json!(pos[0]), json!(pos[1]), json!(pos[2])],
+    ))
+}
+
+/// `/loot replace block <pos> <slot> [count] loot <table>`.
+fn replace_block(ctx: &Context<'_>, source: &Source, input: &mut args::Input<'_>) -> Outcome {
+    const USAGE: &str = "/loot replace block <pos> <slot> [count] loot <table>";
+    let Some(pos) = read_block_pos(ctx, source, input, USAGE) else {
+        return usage(USAGE);
+    };
+    let Some(slot_token) = input.word() else {
+        return usage(USAGE);
+    };
+    let Ok(slot) = slot_token.parse::<usize>() else {
+        return Outcome::Feedback(json!({
+            "text": format!("slot must be a number from 0, got \"{slot_token}\""),
+            "color": "red",
+        }));
+    };
+    let count = match input.peek_word() {
+        Some(word) if word.parse::<usize>().is_ok() => {
+            input.word();
+            word.parse::<usize>().ok()
+        }
+        _ => None,
+    };
+    let rolled = match container_source(ctx, source, input, USAGE) {
+        Ok(list) => list,
+        Err(outcome) => return outcome,
+    };
+    let mut rolled = rolled;
+    let Some(mut slots) = ctx.plan.container_slots(pos) else {
+        return failed(
+            "commands.loot.replace.block.notAContainer",
+            vec![json!(pos[0]), json!(pos[1]), json!(pos[2])],
+        );
+    };
+    if slot >= slots.len() {
+        return failed("commands.loot.replace.block.noSuchSlot", vec![json!(slot)]);
+    }
+    if rolled.is_empty() {
+        return failed("commands.loot.failed", Vec::new());
+    }
+    let limit = count.unwrap_or(1);
+    let mut written = 0;
+    for stack in rolled.drain(..).take(limit) {
+        let index = slot + written;
+        if index >= slots.len() {
+            break;
+        }
+        slots[index] = Some(stack);
+        written += 1;
+    }
+    if written == 0 {
+        return failed("commands.loot.failed", Vec::new());
+    }
+    ctx.plan.set_container_slots(pos, &slots);
+    Outcome::Feedback(translate(
+        "commands.loot.replace.success",
+        vec![json!(written), json!(pos[0]), json!(pos[1]), json!(pos[2])],
+    ))
+}
+
+/// Позиция блока из трёх слов (`~` считается от исполнителя).
+fn read_block_pos(
+    ctx: &Context<'_>,
+    source: &Source,
+    input: &mut args::Input<'_>,
+    _usage: &str,
+) -> Option<[i32; 3]> {
+    let (x, y, z) = (input.word()?, input.word()?, input.word()?);
+    let coords = args::coords3(x, y, z)?;
+    Some(args::block_pos(
+        coords,
+        call_base(ctx, source),
+        basis_of(ctx, source),
+    ))
 }
 
 fn give(ctx: &Context<'_>, source: &Source, path: &[&str], input: &mut args::Input<'_>) -> Outcome {
@@ -56,11 +201,25 @@ fn give(ctx: &Context<'_>, source: &Source, path: &[&str], input: &mut args::Inp
     let Some(word) = input.word() else {
         return usage("/loot give players <targets> loot <table>");
     };
-    if word != "loot" {
-        return Outcome::Feedback(json!({
-            "text": format!("expected the word \"loot\" before the table name, got \"{word}\""),
-            "color": "red",
-        }));
+    match word {
+        "loot" => {}
+        "kill" | "fish" | "mine" => {
+            return Outcome::Feedback(json!({
+                "text": format!(
+                    "loot give … {word} is not supported yet: this server rolls loot tables only, \
+                     use \"loot give players <targets> loot <table>\""
+                ),
+                "color": "red",
+            }));
+        }
+        other => {
+            return Outcome::Feedback(json!({
+                "text": format!(
+                    "expected the word \"loot\" before the table name, got \"{other}\""
+                ),
+                "color": "red",
+            }));
+        }
     }
     let Some(table) = input.word() else {
         return usage("/loot give players <targets> loot <table>");
@@ -219,7 +378,7 @@ fn failed(key: &str, with: Vec<Value>) -> Outcome {
 
 pub(super) fn specs() -> Vec<super::dispatch::Spec> {
     use super::dispatch::Spec;
-    use super::registry::{GAMEMASTERS, ent, loot_table, vec3};
+    use super::registry::{GAMEMASTERS, block_pos, ent, int, loot_table, vec3};
     let targets = Spec::arg(
         "players",
         GAMEMASTERS,
@@ -250,12 +409,52 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
             )],
         )],
     );
+    let loot_branch = |children: Vec<Spec>| {
+        Spec::group(
+            "loot",
+            GAMEMASTERS,
+            vec![Spec::arg_leaf(
+                "loot_table",
+                GAMEMASTERS,
+                loot_table(),
+                loot,
+            )],
+        )
+        .with_children(children)
+    };
+    let insert = Spec::arg(
+        "targetPos",
+        GAMEMASTERS,
+        block_pos(),
+        vec![loot_branch(Vec::new())],
+    );
+    let slot = Spec::arg(
+        "slot",
+        GAMEMASTERS,
+        chunkwake_protocol::text::Parser::ItemSlot,
+        vec![
+            Spec::arg(
+                "count",
+                GAMEMASTERS,
+                int(1, 99),
+                vec![loot_branch(Vec::new())],
+            ),
+            loot_branch(Vec::new()),
+        ],
+    );
+    let replace_block = Spec::arg("targetPos", GAMEMASTERS, block_pos(), vec![slot]);
     vec![
         Spec::group(
             "loot",
             GAMEMASTERS,
             vec![
                 Spec::group("give", GAMEMASTERS, vec![targets]),
+                Spec::group("insert", GAMEMASTERS, vec![insert]),
+                Spec::group(
+                    "replace",
+                    GAMEMASTERS,
+                    vec![Spec::group("block", GAMEMASTERS, vec![replace_block])],
+                ),
                 Spec::group("spawn", GAMEMASTERS, vec![spawn]),
             ],
         )

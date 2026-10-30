@@ -1297,6 +1297,43 @@ fn loot_rolls_block_entity_and_reports_unknown_tables() {
         &format!("loot spawn 8 {y} 8 loot minecraft:chests/abandoned_mineshaft"),
     );
     assert!(chest.contains("commands.loot.spawn"), "{chest}");
+    let y = y;
+    assert!(
+        run(&plan, &format!("setblock 20 {y} 20 minecraft:chest"))
+            .contains("commands.setblock.success")
+    );
+    let inserted = run(
+        &plan,
+        &format!("loot insert 20 {y} 20 loot minecraft:blocks/stone"),
+    );
+    assert!(
+        inserted.contains("commands.loot.insert.success"),
+        "{inserted}"
+    );
+    // Предмет должен лежать в сундуке, а не только в ответе команды.
+    let inside = run(&plan, &format!("data get block 20 {y} 20 Items"));
+    assert!(inside.contains("stone"), "{inside}");
+    let replaced = run(
+        &plan,
+        &format!("loot replace block 20 {y} 20 0 loot minecraft:blocks/dirt"),
+    );
+    assert!(
+        replaced.contains("commands.loot.replace.success"),
+        "{replaced}"
+    );
+    let replaced_items = run(&plan, &format!("data get block 20 {y} 20 Items"));
+    assert!(replaced_items.contains("dirt"), "{replaced_items}");
+    let not_container = run(
+        &plan,
+        &format!("loot insert 8 {y} 8 loot minecraft:blocks/stone"),
+    );
+    assert!(
+        not_container.contains("commands.loot.replace.block.notAContainer")
+            || not_container.contains("argument.resource"),
+        "{not_container}"
+    );
+    let kill = run(&plan, "loot give Ada kill @e[type=minecraft:cow,limit=1]");
+    assert!(kill.contains("not supported"), "{kill}");
 }
 
 #[test]

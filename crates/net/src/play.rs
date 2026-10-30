@@ -9452,6 +9452,99 @@ impl PlayPlan {
         );
     }
 
+    /// Слоты контейнера в позиции (`/loot insert|replace`): сундук, бочка, воронка.
+    pub(crate) fn container_slots(&self, pos: [i32; 3]) -> Option<Vec<Slot>> {
+        let name = self.block(pos).map(|s| self.state_name(s))?;
+        // Печь и костёр хранят слоты в своих структурах, а не в `Items`.
+        if furnace_kind(name).is_some() || name.ends_with("campfire") {
+            return None;
+        }
+        if !name.ends_with("chest")
+            && !name.ends_with("barrel")
+            && !name.ends_with("hopper")
+            && !name.ends_with("dispenser")
+            && !name.ends_with("dropper")
+            && !name.ends_with("shulker_box")
+        {
+            return None;
+        }
+        Some(self.container_items(pos))
+    }
+
+    /// Записывает слоты контейнера и рассылает `block_entity_data`.
+    ///
+    /// `None` — в позиции не контейнер. Возвращает `false`, если чанк не
+    /// материализован, а запись некуда положить.
+    pub(crate) fn set_container_slots(&self, pos: [i32; 3], slots: &[Slot]) -> Option<bool> {
+        // Свежий сундук ещё не имеет блок-сущности: её создаёт первая запись.
+        let (id, mut nbt) = match self.block_entity(pos) {
+            Some(old) => (old.id, old.nbt),
+            None => {
+                let name = self.block(pos).map(|s| self.state_name(s))?;
+                (container_entity(name)?.to_owned(), Compound::new())
+            }
+        };
+        nbt.insert("Items".into(), Tag::List(self.items_nbt(slots)));
+        self.set_block_entity(
+            pos,
+            Some(chunkwake_world::BlockEntity {
+                id: id.clone(),
+                nbt: nbt.clone(),
+            }),
+        );
+        if let Some(types) = chunkwake_world::BLOCK_ENTITY_TYPES.get()
+            && let Some(&kind) = types.get(&id)
+        {
+            let bytes = chunkwake_world::nbt::write_network(&nbt);
+            self.hub.send(
+                None,
+                play::block_entity_data(self.ids.block_entity_data, pos, kind, &bytes),
+            );
+        }
+        Some(true)
+    }
+
+    /// Добавляет предмет в контейнер: свободный слот или докладывает к стопке.
+    ///
+    /// Возвращает `true`, если предмет целиком поместился.
+    pub(crate) fn container_add(&self, pos: [i32; 3], stack: Stack) -> bool {
+        let Some(mut slots) = self.container_slots(pos) else {
+            return false;
+        };
+        let limit = self.max_stack(stack.item).max(1);
+        // Сначала к существующим стопкам, потом в пустые слоты: как `Container.addItem`.
+        let mut left = stack.count;
+        for slot in slots.iter_mut().flatten() {
+            if left == 0 {
+                break;
+            }
+            if slot.item == stack.item && slot.damage == stack.damage && slot.extra == stack.extra {
+                let room = limit - slot.count;
+                let take = room.min(left);
+                slot.count += take;
+                left -= take;
+            }
+        }
+        for slot in slots.iter_mut() {
+            if left == 0 {
+                break;
+            }
+            if slot.is_none() {
+                let take = limit.min(left);
+                *slot = Some(Stack {
+                    count: take,
+                    ..stack
+                });
+                left -= take;
+            }
+        }
+        if left == stack.count {
+            return false;
+        }
+        self.set_container_slots(pos, &slots);
+        left == 0
+    }
+
     fn campfire_start_arg(&self, pos: [i32; 3], held: Stack, offer: &CampOffer) -> String {
         let result = Stack {
             item: offer.result_item,

@@ -72,6 +72,19 @@ impl<'a> Input<'a> {
         self.rest
     }
 
+    /// Следующее слово без его изъятия: нужно, чтобы отличить число от слова.
+    pub fn peek_word(&self) -> Option<&'a str> {
+        let rest = self.rest.trim_start();
+        if rest.is_empty() {
+            return None;
+        }
+        if let Some(body) = rest.strip_prefix('"') {
+            return closing_quote(body).map(|end| &body[..end]).or(Some(body));
+        }
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        Some(&rest[..end])
+    }
+
     /// Следующее слово: до пробела или целиком строка в кавычках.
     pub fn word(&mut self) -> Option<&'a str> {
         self.rest = self.rest.trim_start();
