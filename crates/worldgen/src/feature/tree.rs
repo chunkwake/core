@@ -570,7 +570,8 @@ impl Tree {
         }
     }
 
-    pub(super) fn place(&self, features: &Features, level: &mut dyn Level, r: &mut Worldgen, origin: Pos) {
+    /// `TreeFeature.place`: поставлено ли дерево.
+    pub(super) fn place(&self, features: &Features, level: &mut dyn Level, r: &mut Worldgen, origin: Pos) -> bool {
         let mut c = Ctx {
             features,
             level,
@@ -582,12 +583,13 @@ impl Tree {
             decorations: JavaSet::new(),
         };
         if !self.do_place(&mut c, origin) || (c.trunks.is_empty() && c.foliage.is_empty()) {
-            return;
+            return false;
         }
         for d in &self.decorators {
             self.tags.decorate(&mut c, d);
         }
         self.update_leaves(&mut c);
+        true
     }
 
     fn do_place(&self, c: &mut Ctx, origin: Pos) -> bool {

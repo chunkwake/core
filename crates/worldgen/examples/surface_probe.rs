@@ -114,6 +114,9 @@ fn main() {
         randoms: &randoms,
         preliminary: &preliminary,
         random: &g.surface_random(),
+        clay_offset: noise_list
+            .iter()
+            .position(|(n, _)| n == "minecraft:clay_bands_offset"),
     };
     stage.build(&mut chunk, cx, cz);
     drop(chunk);

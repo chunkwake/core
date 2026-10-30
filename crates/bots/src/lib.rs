@@ -32,6 +32,7 @@ pub struct Ids {
     teleport_entity: i32,
     remove_entities: i32,
     set_time: i32,
+    level_chunk: i32,
 }
 
 impl Ids {
@@ -62,6 +63,7 @@ impl Ids {
             teleport_entity: id(Play, C, "teleport_entity")?,
             remove_entities: id(Play, C, "remove_entities")?,
             set_time: id(Play, C, "set_time")?,
+            level_chunk: id(Play, C, "level_chunk_with_light")?,
         })
     }
 }
@@ -72,6 +74,12 @@ pub struct Client {
     pub join_time: Duration,
     pub packets_in: u64,
     pub bytes_in: u64,
+    /// Пришедшие `level_chunk_with_light`.
+    pub chunks_in: u64,
+    /// Пакеты с этим ID сохраняются целиком в `captured` (без ID): отладка
+    /// кодирования против декодера клиента.
+    pub capture: Option<i32>,
+    pub captured: Vec<Vec<u8>>,
     pub bytes_out: u64,
     pub keep_alives: u64,
     sent_player_loaded: bool,
@@ -282,6 +290,9 @@ impl Client {
             ids,
             join_time: started.elapsed(),
             packets_in: 0,
+            chunks_in: 0,
+            capture: None,
+            captured: Vec::new(),
             bytes_in: 0,
             bytes_out: 0,
             keep_alives: 0,
@@ -295,6 +306,12 @@ impl Client {
         self.bytes_in += p.len() as u64;
         let mut r = Reader::new(&p);
         let id = r.var_int().map_err(err)?;
+        if id == self.ids.level_chunk {
+            self.chunks_in += 1;
+        }
+        if self.capture == Some(id) {
+            self.captured.push(r.remaining().to_vec());
+        }
         if id == self.ids.keep_alive {
             let mut w = Writer::new();
             w.var_int(self.ids.sb_keep_alive).i64(r.i64().map_err(err)?);

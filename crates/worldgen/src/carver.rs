@@ -27,12 +27,18 @@ pub fn cos(v: f64) -> f32 {
     sin_table()[((v * 10430.378350470453 + 16384.0) as i64 & 65535) as usize]
 }
 
+/// `ClampedNormalFloat.sample`: `Mth.clamp(Mth.normal(..))`.
+pub fn clamped_normal(r: &mut impl Bits, mean: f32, deviation: f32, min: f32, max: f32) -> f32 {
+    (mean + r.next_gaussian() as f32 * deviation).clamp(min, max)
+}
+
 /// `FloatProvider`.
 #[derive(Clone, Debug)]
 pub enum FloatP {
     Const(f32),
     Uniform(f32, f32),
     Trapezoid { min: f32, max: f32, plateau: f32 },
+    ClampedNormal { mean: f32, deviation: f32, min: f32, max: f32 },
 }
 
 impl FloatP {
@@ -53,6 +59,12 @@ impl FloatP {
                 max: f("max")?,
                 plateau: f("plateau")?,
             }),
+            "minecraft:clamped_normal" => Ok(Self::ClampedNormal {
+                mean: f("mean")?,
+                deviation: f("deviation")?,
+                min: f("min")?,
+                max: f("max")?,
+            }),
             other => Err(format!("float provider {other} is not supported")),
         }
     }
@@ -68,6 +80,7 @@ impl FloatP {
                 let end = range - start;
                 min + r.next_float() * end + r.next_float() * start
             }
+            Self::ClampedNormal { mean, deviation, min, max } => clamped_normal(r, mean, deviation, min, max),
         }
     }
 }
@@ -85,6 +98,8 @@ pub enum IntP {
     Weighted(i32, Vec<(i32, IntP)>),
     /// `trapezoid`: min, max, plateau.
     Trapezoid(i32, i32, i32),
+    /// `clamped_normal`: среднее, отклонение, границы; бросок — `Mth.clamp(normal)`.
+    ClampedNormal { mean: f32, deviation: f32, min: i32, max: i32 },
 }
 
 impl IntP {
@@ -116,6 +131,14 @@ impl IntP {
                 i("max")?,
                 v["plateau"].as_i64().unwrap_or(0) as i32,
             )),
+            // `UniformInt` из `ClampedNormalInt`: границы целые, среднее и
+            // отклонение дробные.
+            "minecraft:clamped_normal" => Ok(Self::ClampedNormal {
+                mean: v["mean"].as_f64().unwrap_or(0.0) as f32,
+                deviation: v["deviation"].as_f64().unwrap_or(0.0) as f32,
+                min: i("min_inclusive")?,
+                max: i("max_inclusive")?,
+            }),
             "minecraft:weighted_list" => {
                 let mut items = Vec::new();
                 for e in v["distribution"].as_array().ok_or("weighted_list: no distribution")? {
@@ -129,6 +152,25 @@ impl IntP {
                 Ok(Self::Weighted(total, items))
             }
             other => Err(format!("int provider {other} is not supported")),
+        }
+    }
+
+    /// `minInclusive()` и `maxInclusive()`.
+    pub fn bounds(&self) -> (i32, i32) {
+        match self {
+            Self::Const(v) => (*v, *v),
+            Self::Uniform(a, b) | Self::VeryBiasedToBottom(a, b) | Self::BiasedToBottom(a, b) | Self::Trapezoid(a, b, _) => {
+                (*a, *b)
+            }
+            Self::Clamped(src, lo, hi) => {
+                let (a, b) = src.bounds();
+                (a.max(*lo), b.min(*hi))
+            }
+            Self::ClampedNormal { min, max, .. } => (*min, *max),
+            Self::Weighted(_, list) => list.iter().fold((i32::MAX, i32::MIN), |(lo, hi), (_, p)| {
+                let (a, b) = p.bounds();
+                (lo.min(a), hi.max(b))
+            }),
         }
     }
 
@@ -146,6 +188,9 @@ impl IntP {
                 min + r.next_int_bound(a)
             }
             Self::Clamped(ref source, min, max) => source.sample(r).clamp(min, max),
+            Self::ClampedNormal { mean, deviation, min, max } => {
+                clamped_normal(r, mean, deviation, min as f32, max as f32) as i32
+            }
             Self::Trapezoid(min, max, plateau) => {
                 if plateau == 0 && max == -min {
                     return r.next_int_bound(max + 1) - r.next_int_bound(max + 1);

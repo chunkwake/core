@@ -332,28 +332,36 @@ impl Section {
 
     /// 4096 состояний одним проходом. `get(i)` равен `at(i)`, одно значение — `filled`.
     pub(crate) fn from_states(biome: u32, mut at: impl FnMut(usize) -> u32) -> Self {
+        // Палитра секции — единицы элементов (камень, воздух, вода, руда),
+        // поэтому линейный `position` по `Vec` дешевле хэша; вырожденные
+        // секции одного состояния отсекаются ниже отдельным проходом.
         let mut palette = Vec::new();
         let mut counts = Vec::new();
         let mut idx = Box::new([0u16; 4096]);
         let mut non_air = 0u16;
-        for i in 0..4096 {
-            let state = at(i);
+        let first = at(0);
+        let mut uniform = true;
+        for (i, slot) in idx.iter_mut().enumerate() {
+            let state = if i == 0 { first } else { at(i) };
+            if state != first {
+                uniform = false;
+            }
             if state != AIR {
                 non_air += 1;
             }
-            let slot = match palette.iter().position(|&p| p == state) {
-                Some(slot) => slot,
+            let s = match palette.iter().position(|&p| p == state) {
+                Some(s) => s,
                 None => {
                     palette.push(state);
-                    counts.push(0);
+                    counts.push(0usize);
                     palette.len() - 1
                 }
             };
-            counts[slot] += 1;
-            idx[i] = slot as u16;
+            counts[s] += 1;
+            *slot = s as u16;
         }
-        if palette.len() == 1 {
-            return Self::filled(palette[0], biome);
+        if uniform {
+            return Self::filled(first, biome);
         }
         let indices = if palette.len() <= 256 {
             let mut narrow = Box::new([0u8; 4096]);
@@ -367,7 +375,7 @@ impl Section {
         Self {
             storage: Storage::Paletted(Arc::new(Paletted {
                 palette,
-                counts,
+                counts: counts.into_iter().map(|c| c as u16).collect(),
                 idx: indices,
             })),
             non_air,
@@ -431,6 +439,38 @@ impl Section {
     fn non_air(&self) -> usize {
         self.non_air as usize
     }
+
+    /// Блоки с жидкостью (`LevelChunkSection.fluidCount`): вода, лава и
+    /// затопленные. Без таблицы [`set_fluid_states`] — ноль.
+    fn fluids(&self) -> u16 {
+        let Some(table) = FLUID_STATES.get() else {
+            return 0;
+        };
+        let is = |s: u32| table.get(s as usize).copied().unwrap_or(false);
+        match &self.storage {
+            Storage::Single(s) => {
+                if is(*s) {
+                    4096
+                } else {
+                    0
+                }
+            }
+            Storage::Paletted(_) => {
+                if self.non_air == 0 {
+                    return 0;
+                }
+                (0..4096).filter(|&i| is(self.get(i))).count() as u16
+            }
+        }
+    }
+}
+
+static FLUID_STATES: std::sync::OnceLock<Vec<bool>> = std::sync::OnceLock::new();
+
+/// Таблица «в состоянии есть жидкость» по ID состояния: клиент 26.x читает
+/// число таких блоков в секции и по нему решает, есть ли в ней жидкость.
+pub fn set_fluid_states(table: Vec<bool>) {
+    let _ = FLUID_STATES.set(table);
 }
 
 /// Столбец чанка. Считается, что воздух — состояние 0 (`minecraft:air`).
@@ -633,7 +673,7 @@ impl ChunkColumn {
         data.buf
             .reserve(self.sections.len().saturating_mul(2048 + 64));
         for s in &self.sections {
-            data.u16(s.non_air() as u16).u16(0);
+            data.u16(s.non_air() as u16).u16(s.fluids());
             // Неизменённая секция кодируется один раз: после правки блока
             // пересобирается только её секция, а не все 24.
             let bits = self.global_block_bits;

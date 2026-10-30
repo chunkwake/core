@@ -7,13 +7,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Пишется последним; меняется при изменении состава кэша.
-const CACHE_MARKER: &str = ".chunkwake-cache-v9";
+const CACHE_MARKER: &str = ".chunkwake-cache-v10";
 
 /// Выгрузка свойств света (исходник рядом: `extractor/ChunkwakeLight.java`).
 const LIGHT_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeLight.class");
 
 /// Выгрузка климатических параметров биомов (`extractor/ChunkwakeBiomes.java`).
 const BIOME_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeBiomes.class");
+
+/// Выгрузка коллизии и трения блоков (`extractor/ChunkwakeShapes.java`).
+const SHAPES_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeShapes.class");
 
 /// Выгрузка жидкостей и классов блоков для фич (`extractor/ChunkwakeWorldgen.java`).
 const WORLDGEN_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeWorldgen.class");
@@ -115,6 +118,8 @@ pub fn ensure_generated_with(
         .map_err(|e| io("write", &class_dir.join("ChunkwakeBiomes.class"), e))?;
     std::fs::write(class_dir.join("ChunkwakeWorldgen.class"), WORLDGEN_EXTRACTOR)
         .map_err(|e| io("write", &class_dir.join("ChunkwakeWorldgen.class"), e))?;
+    std::fs::write(class_dir.join("ChunkwakeShapes.class"), SHAPES_EXTRACTOR)
+        .map_err(|e| io("write", &class_dir.join("ChunkwakeShapes.class"), e))?;
 
     let mut classpath =
         vec![std::path::absolute(&class_dir).map_err(|e| io("resolve", &class_dir, e))?];
@@ -152,6 +157,16 @@ pub fn ensure_generated_with(
         "ChunkwakeWorldgen",
         &tmp_abs.join("reports/worldgen_blocks.csv"),
         "[3/3] worldgen extractor",
+        progress,
+    )?;
+    progress("[3/3] extracting block collision shapes");
+    run_extractor(
+        java,
+        &work,
+        &classpath,
+        "ChunkwakeShapes",
+        &tmp_abs.join("reports/shapes.csv"),
+        "[3/3] shapes extractor",
         progress,
     )?;
     std::fs::write(tmp_out.join(CACHE_MARKER), "").map_err(|e| io("write", &tmp_out, e))?;

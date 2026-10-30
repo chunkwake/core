@@ -263,52 +263,299 @@ const NODE_ROOT: u8 = 0;
 const NODE_LITERAL: u8 = 1;
 const NODE_ARGUMENT: u8 = 2;
 const NODE_EXECUTABLE: u8 = 0x04;
+/// У узла есть `redirect`: после детей идёт индекс узла, куда переходит разбор.
+const NODE_REDIRECT: u8 = 0x08;
 const NODE_CUSTOM_SUGGESTIONS: u8 = 0x10;
 /// `StringArgumentType.greedyString()`.
 const STRING_GREEDY: i32 = 2;
+/// `StringArgumentType.singleWord()`.
+const STRING_SINGLE_WORD: i32 = 0;
+/// `StringArgumentType.quotablePhrase()`.
+const STRING_QUOTABLE: i32 = 1;
+
+/// Все имена парсеров аргументов в реестре `command_argument_type`.
+///
+/// Порядок совпадает с ванильным реестром: так проще сверять с
+/// `reports/registries.json` и не забыть ни одного типа.
+pub const ARGUMENT_TYPES: &[&str] = &[
+    "brigadier:bool",
+    "brigadier:double",
+    "brigadier:float",
+    "brigadier:integer",
+    "brigadier:long",
+    "brigadier:string",
+    "minecraft:angle",
+    "minecraft:block_pos",
+    "minecraft:block_predicate",
+    "minecraft:block_state",
+    "minecraft:column_pos",
+    "minecraft:component",
+    "minecraft:context_float_provider",
+    "minecraft:context_int_provider",
+    "minecraft:dialog",
+    "minecraft:dimension",
+    "minecraft:entity",
+    "minecraft:entity_anchor",
+    "minecraft:feature",
+    "minecraft:float_range",
+    "minecraft:function",
+    "minecraft:game_profile",
+    "minecraft:gamemode",
+    "minecraft:heightmap",
+    "minecraft:hex_color",
+    "minecraft:int_range",
+    "minecraft:item_predicate",
+    "minecraft:item_slot",
+    "minecraft:item_slots",
+    "minecraft:item_stack",
+    "minecraft:loot_modifier",
+    "minecraft:loot_predicate",
+    "minecraft:loot_table",
+    "minecraft:message",
+    "minecraft:nbt_compound_tag",
+    "minecraft:nbt_path",
+    "minecraft:nbt_tag",
+    "minecraft:objective",
+    "minecraft:objective_criteria",
+    "minecraft:operation",
+    "minecraft:particle",
+    "minecraft:resource",
+    "minecraft:resource_key",
+    "minecraft:resource_location",
+    "minecraft:resource_or_tag",
+    "minecraft:resource_or_tag_key",
+    "minecraft:resource_selector",
+    "minecraft:rotation",
+    "minecraft:score_holder",
+    "minecraft:scoreboard_slot",
+    "minecraft:slot_source",
+    "minecraft:style",
+    "minecraft:swing_animation",
+    "minecraft:swizzle",
+    "minecraft:team",
+    "minecraft:team_color",
+    "minecraft:template_mirror",
+    "minecraft:template_rotation",
+    "minecraft:time",
+    "minecraft:uuid",
+    "minecraft:vec2",
+    "minecraft:vec3",
+];
 
 /// ID парсеров аргументов в реестре `command_argument_type`.
-#[derive(Clone, Copy, Debug, Default)]
+///
+/// Раньше это была структура из четырёх полей: остальные типы приходилось
+/// выдавать за `brigadier:string`, и клиент не подсвечивал ни селекторы,
+/// ни координаты, ни реестровые ключи.
+#[derive(Clone, Debug, Default)]
 pub struct CommandParsers {
-    /// `brigadier:string`
-    pub string: i32,
-    /// `brigadier:integer`
-    pub integer: i32,
-    /// `minecraft:item_stack`: клиент сам подсказывает предметы из реестра.
-    pub item_stack: i32,
-    /// `minecraft:resource` (ключ из реестра, например эффект).
-    pub resource: i32,
+    ids: std::collections::HashMap<&'static str, i32>,
+}
+
+impl CommandParsers {
+    /// Собирает таблицу из замыкания «имя → ID»; отсутствующий тип — ошибка.
+    pub fn load<E>(
+        mut lookup: impl FnMut(&'static str) -> Result<i32, E>,
+    ) -> Result<Self, E> {
+        let mut ids = std::collections::HashMap::with_capacity(ARGUMENT_TYPES.len());
+        for name in ARGUMENT_TYPES {
+            ids.insert(*name, lookup(name)?);
+        }
+        Ok(Self { ids })
+    }
+
+    /// ID типа; 0 — таблица не заполнена (тесты, сервер без данных).
+    pub fn id(&self, name: &str) -> i32 {
+        self.ids.get(name).copied().unwrap_or(0)
+    }
+
+    /// Подставляет ID вручную: нужно тестам и минимальным сборкам.
+    pub fn set(&mut self, name: &'static str, id: i32) {
+        self.ids.insert(name, id);
+    }
 }
 
 /// Узел дерева Brigadier. `exec` — команду можно выполнить на этом узле.
+///
+/// `redirect` — имя корневой команды, куда узел передаёт разбор (ванильные
+/// алиасы `tell` → `msg` и цикл `execute`). Клиент по нему подсказывает
+/// аргументы чужой ветки, а сервер — продолжает разбор.
 #[derive(Clone, Debug)]
 pub enum Node {
     Literal {
         name: String,
         exec: bool,
+        redirect: Option<String>,
         children: Vec<Node>,
     },
     Argument {
         name: String,
         exec: bool,
         parser: Parser,
+        redirect: Option<String>,
         children: Vec<Node>,
     },
 }
 
+/// `brigadier:string`: как читать слово.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StringMode {
+    /// `SINGLE_WORD`: одно слово без пробелов.
+    Word,
+    /// `QUOTABLE_PHRASE`: слово или строка в кавычках.
+    Quotable,
+    /// `GREEDY_PHRASE`: весь остаток строки.
+    Greedy,
+}
+
 /// Парсер аргумента со своими свойствами.
-#[derive(Clone, Copy, Debug)]
+///
+/// Клиент по типу аргумента выбирает подсветку и подсказки: селекторы,
+/// координаты, режимы игры, ключи реестров. `Raw` — тип, у которого свойств
+/// нет (или он нам пока не нужен): пишется только ID.
+#[derive(Clone, Debug)]
 pub enum Parser {
-    GreedyString,
-    /// Greedy-строка с подсказками от сервера (`minecraft:ask_server`).
-    GreedyStringAsk,
+    Bool,
+    Double(f64, f64),
+    Float(f32, f32),
     /// Целое с минимумом и максимумом.
     Integer(i32, i32),
+    Long(i64, i64),
+    /// `brigadier:string`.
+    String(StringMode),
+    /// Greedy-строка с подсказками от сервера (`minecraft:ask_server`).
+    GreedyStringAsk,
+    Angle,
+    BlockPos,
+    ColumnPos,
+    BlockState,
+    BlockPredicate,
+    Vec2,
+    Vec3,
+    Rotation,
+    Anchor,
+    /// `minecraft:time`: минимальное значение в тиках.
+    Time(i32),
+    Gamemode,
+    /// `minecraft:game_profile`: имя игрока (в т.ч. офлайн).
+    GameProfile,
+    /// `minecraft:entity` / `minecraft:game_profile`: только игроки и/или одна цель.
+    Entity { players_only: bool, single: bool },
+    /// `minecraft:score_holder`: `multiple` разрешает `*`.
+    ScoreHolder { multiple: bool },
+    Component,
+    Message,
     ItemStack,
-    /// Одно слово (`brigadier:string`, `SINGLE_WORD`).
-    Word,
+    ItemPredicate,
+    ItemSlot,
+    ItemSlots,
     /// Ключ реестра (`minecraft:resource`), например `minecraft:mob_effect`.
     Resource(&'static str),
+    ResourceKey(&'static str),
+    ResourceOrTag(&'static str),
+    ResourceOrTagKey(&'static str),
+    ResourceLocation,
+    ResourceSelector(&'static str),
+    Objective,
+    ObjectiveCriteria,
+    Operation,
+    Particle,
+    ScoreboardSlot,
+    Team,
+    TeamColor,
+    Heightmap,
+    Dimension,
+    Swizzle,
+    TemplateMirror,
+    TemplateRotation,
+    Uuid,
+    IntRange,
+    FloatRange,
+    Style,
+    NbtCompoundTag,
+    NbtTag,
+    NbtPath,
+    LootTable,
+    LootPredicate,
+    LootModifier,
+    Feature,
+    Function,
+    Dialog,
+    HexColor,
+    /// Тип без свойств: пишется только ID.
+    Raw(&'static str),
+}
+
+impl Parser {
+    /// Имя типа в реестре `command_argument_type`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Parser::Bool => "brigadier:bool",
+            Parser::Double(..) => "brigadier:double",
+            Parser::Float(..) => "brigadier:float",
+            Parser::Integer(..) => "brigadier:integer",
+            Parser::Long(..) => "brigadier:long",
+            Parser::String(_) | Parser::GreedyStringAsk => "brigadier:string",
+            Parser::Angle => "minecraft:angle",
+            Parser::BlockPos => "minecraft:block_pos",
+            Parser::ColumnPos => "minecraft:column_pos",
+            Parser::BlockState => "minecraft:block_state",
+            Parser::BlockPredicate => "minecraft:block_predicate",
+            Parser::Vec2 => "minecraft:vec2",
+            Parser::Vec3 => "minecraft:vec3",
+            Parser::Rotation => "minecraft:rotation",
+            Parser::Anchor => "minecraft:entity_anchor",
+            Parser::Time(_) => "minecraft:time",
+            Parser::Gamemode => "minecraft:gamemode",
+            Parser::GameProfile => "minecraft:game_profile",
+            Parser::Entity { .. } => "minecraft:entity",
+            Parser::ScoreHolder { .. } => "minecraft:score_holder",
+            Parser::Component => "minecraft:component",
+            Parser::Message => "minecraft:message",
+            Parser::ItemStack => "minecraft:item_stack",
+            Parser::ItemPredicate => "minecraft:item_predicate",
+            Parser::ItemSlot => "minecraft:item_slot",
+            Parser::ItemSlots => "minecraft:item_slots",
+            Parser::Resource(_) => "minecraft:resource",
+            Parser::ResourceKey(_) => "minecraft:resource_key",
+            Parser::ResourceOrTag(_) => "minecraft:resource_or_tag",
+            Parser::ResourceOrTagKey(_) => "minecraft:resource_or_tag_key",
+            Parser::ResourceLocation => "minecraft:resource_location",
+            Parser::ResourceSelector(_) => "minecraft:resource_selector",
+            Parser::Objective => "minecraft:objective",
+            Parser::ObjectiveCriteria => "minecraft:objective_criteria",
+            Parser::Operation => "minecraft:operation",
+            Parser::Particle => "minecraft:particle",
+            Parser::ScoreboardSlot => "minecraft:scoreboard_slot",
+            Parser::Team => "minecraft:team",
+            Parser::TeamColor => "minecraft:team_color",
+            Parser::Heightmap => "minecraft:heightmap",
+            Parser::Dimension => "minecraft:dimension",
+            Parser::Swizzle => "minecraft:swizzle",
+            Parser::TemplateMirror => "minecraft:template_mirror",
+            Parser::TemplateRotation => "minecraft:template_rotation",
+            Parser::Uuid => "minecraft:uuid",
+            Parser::IntRange => "minecraft:int_range",
+            Parser::FloatRange => "minecraft:float_range",
+            Parser::Style => "minecraft:style",
+            Parser::NbtCompoundTag => "minecraft:nbt_compound_tag",
+            Parser::NbtTag => "minecraft:nbt_tag",
+            Parser::NbtPath => "minecraft:nbt_path",
+            Parser::LootTable => "minecraft:loot_table",
+            Parser::LootPredicate => "minecraft:loot_predicate",
+            Parser::LootModifier => "minecraft:loot_modifier",
+            Parser::Feature => "minecraft:feature",
+            Parser::Function => "minecraft:function",
+            Parser::Dialog => "minecraft:dialog",
+            Parser::HexColor => "minecraft:hex_color",
+            Parser::Raw(name) => name,
+        }
+    }
+
+    /// Строка с подсказками от сервера (`minecraft:ask_server`).
+    pub fn asks_server(&self) -> bool {
+        matches!(self, Parser::GreedyStringAsk)
+    }
 }
 
 impl Node {
@@ -322,6 +569,7 @@ impl Node {
         Node::Literal {
             name: name.into(),
             exec,
+            redirect: None,
             children,
         }
     }
@@ -330,9 +578,30 @@ impl Node {
             name: name.into(),
             exec,
             parser,
+            redirect: None,
             children,
         }
     }
+
+    /// Тот же узел, передающий разбор другой корневой команде (ванильные
+    /// алиасы и цикл `/execute`).
+    pub fn redirect_to(mut self, target: &str) -> Self {
+        match &mut self {
+            Node::Literal { redirect, .. } | Node::Argument { redirect, .. } => {
+                *redirect = Some(target.into());
+            }
+        }
+        self
+    }
+
+    fn redirect(&self) -> Option<&str> {
+        match self {
+            Node::Literal { redirect, .. } | Node::Argument { redirect, .. } => {
+                redirect.as_deref()
+            }
+        }
+    }
+
     fn children(&self) -> &[Node] {
         match self {
             Node::Literal { children, .. } | Node::Argument { children, .. } => children,
@@ -355,31 +624,54 @@ pub fn commands_tree(id: i32, roots: &[Node], parsers: CommandParsers) -> Vec<u8
         queue.extend(node.children().iter().map(|c| (index, c)));
         i += 1;
     }
+    // Корни идут первыми и в порядке `roots`: индекс узла — позиция в очереди.
+    let root_index = |name: &str| -> Option<i32> {
+        roots
+            .iter()
+            .position(|n| n.name() == name)
+            .map(|p| p as i32 + 1)
+    };
     let mut w = Writer::new();
     w.var_int(id).var_int(flat.len() as i32);
     for (node, children) in &flat {
         let exec = |e: bool| if e { NODE_EXECUTABLE } else { 0 };
+        let redirect = node.and_then(|n| n.redirect());
+        let flag = |base: u8| {
+            let mut flags = base;
+            if redirect.is_some() {
+                flags |= NODE_REDIRECT;
+            }
+            flags
+        };
         match node {
             None => {
                 w.u8(NODE_ROOT);
             }
             Some(Node::Literal { exec: e, .. }) => {
-                w.u8(NODE_LITERAL | exec(*e));
+                w.u8(flag(NODE_LITERAL | exec(*e)));
             }
             Some(Node::Argument {
                 exec: e, parser, ..
             }) => {
-                let ask = if matches!(parser, Parser::GreedyStringAsk) {
+                let ask = if parser.asks_server() {
                     NODE_CUSTOM_SUGGESTIONS
                 } else {
                     0
                 };
-                w.u8(NODE_ARGUMENT | exec(*e) | ask);
+                w.u8(flag(NODE_ARGUMENT | exec(*e) | ask));
             }
         }
         w.var_int(children.len() as i32);
         for &c in children {
             w.var_int(c);
+        }
+        // `redirect` идёт между детьми и именем: индекс узла, куда переходит
+        // разбор. Неизвестная цель — ошибка сборки, а не молчаливое 0.
+        if let Some(target) = redirect {
+            let index = root_index(target).unwrap_or_else(|| {
+                panic!("redirect на неизвестную команду {target}")
+            });
+            w.var_int(index);
         }
         match node {
             None => {}
@@ -388,34 +680,118 @@ pub fn commands_tree(id: i32, roots: &[Node], parsers: CommandParsers) -> Vec<u8
             }
             Some(Node::Argument { name, parser, .. }) => {
                 w.string(name);
-                match *parser {
-                    Parser::GreedyString => {
-                        w.var_int(parsers.string).var_int(STRING_GREEDY);
-                    }
-                    Parser::GreedyStringAsk => {
-                        w.var_int(parsers.string)
-                            .var_int(STRING_GREEDY)
-                            .string("minecraft:ask_server");
-                    }
-                    // Флаги: 1 — есть минимум, 2 — есть максимум.
-                    Parser::Integer(min, max) => {
-                        w.var_int(parsers.integer).u8(3).i32(min).i32(max);
-                    }
-                    Parser::ItemStack => {
-                        w.var_int(parsers.item_stack);
-                    }
-                    Parser::Word => {
-                        w.var_int(parsers.string).var_int(0);
-                    }
-                    Parser::Resource(registry) => {
-                        w.var_int(parsers.resource).string(registry);
-                    }
-                }
+                write_parser(&mut w, parser, &parsers);
             }
         }
     }
     w.var_int(0);
     w.buf
+}
+
+/// Свойства парсера после его ID (`ArgumentTypeInfo` ванилы в кодировке сети).
+fn write_parser(w: &mut Writer, parser: &Parser, parsers: &CommandParsers) {
+    w.var_int(parsers.id(parser.kind()));
+    match parser {
+        Parser::Bool => {}
+        // Флаги диапазона: 1 — есть минимум, 2 — есть максимум.
+        Parser::Double(min, max) => {
+            w.u8(3).f64(*min).f64(*max);
+        }
+        Parser::Float(min, max) => {
+            w.u8(3).f32(*min).f32(*max);
+        }
+        Parser::Long(min, max) => {
+            w.u8(3).i64(*min).i64(*max);
+        }
+        Parser::Integer(min, max) => {
+            w.u8(3).i32(*min).i32(*max);
+        }
+        Parser::String(mode) => {
+            let mode = match mode {
+                StringMode::Word => STRING_SINGLE_WORD,
+                StringMode::Quotable => STRING_QUOTABLE,
+                StringMode::Greedy => STRING_GREEDY,
+            };
+            w.var_int(mode);
+        }
+        Parser::GreedyStringAsk => {
+            w.var_int(STRING_GREEDY).string("minecraft:ask_server");
+        }
+        Parser::Time(min) => {
+            w.i32(*min);
+        }
+        Parser::Entity {
+            players_only,
+            single,
+        } => {
+            // `EntityArgument.Info.serializeToNetwork`: один байт флагов,
+            // бит 0 — одна цель, бит 1 — только игроки. Две строки здесь
+            // сдвигали весь пакет, и клиент не мог его декодировать.
+            let mut flags = 0u8;
+            if *single {
+                flags |= 1;
+            }
+            if *players_only {
+                flags |= 2;
+            }
+            w.u8(flags);
+        }
+        Parser::ScoreHolder { multiple } => {
+            w.u8(u8::from(*multiple));
+        }
+        Parser::Resource(registry)
+        | Parser::ResourceKey(registry)
+        | Parser::ResourceOrTag(registry)
+        | Parser::ResourceOrTagKey(registry)
+        | Parser::ResourceSelector(registry) => {
+            w.string(registry);
+        }
+        Parser::Raw(_)
+        | Parser::Angle
+        | Parser::BlockPos
+        | Parser::ColumnPos
+        | Parser::BlockState
+        | Parser::BlockPredicate
+        | Parser::Vec2
+        | Parser::Vec3
+        | Parser::Rotation
+        | Parser::Anchor
+        | Parser::Gamemode
+        | Parser::GameProfile
+        | Parser::Component
+        | Parser::Message
+        | Parser::ItemStack
+        | Parser::ItemPredicate
+        | Parser::ItemSlot
+        | Parser::ItemSlots
+        | Parser::ResourceLocation
+        | Parser::Objective
+        | Parser::ObjectiveCriteria
+        | Parser::Operation
+        | Parser::Particle
+        | Parser::ScoreboardSlot
+        | Parser::Team
+        | Parser::TeamColor
+        | Parser::Heightmap
+        | Parser::Dimension
+        | Parser::Swizzle
+        | Parser::TemplateMirror
+        | Parser::TemplateRotation
+        | Parser::Uuid
+        | Parser::IntRange
+        | Parser::FloatRange
+        | Parser::Style
+        | Parser::NbtCompoundTag
+        | Parser::NbtTag
+        | Parser::NbtPath
+        | Parser::LootTable
+        | Parser::LootPredicate
+        | Parser::LootModifier
+        | Parser::Feature
+        | Parser::Function
+        | Parser::Dialog
+        | Parser::HexColor => {}
+    }
 }
 
 /// `ClientboundCommandSuggestionsPacket`: заменяемый участок и варианты без подсказок.
@@ -440,18 +816,18 @@ pub fn commands(id: i32, names: &[String], string_parser: i32) -> Vec<u8> {
             Node::literal(
                 n,
                 true,
-                vec![Node::argument("args", true, Parser::GreedyString, vec![])],
+                vec![Node::argument(
+                    "args",
+                    true,
+                    Parser::String(StringMode::Greedy),
+                    vec![],
+                )],
             )
         })
         .collect();
-    commands_tree(
-        id,
-        &roots,
-        CommandParsers {
-            string: string_parser,
-            ..Default::default()
-        },
-    )
+    let mut parsers = CommandParsers::default();
+    parsers.set("brigadier:string", string_parser);
+    commands_tree(id, &roots, parsers)
 }
 
 #[cfg(test)]
@@ -532,16 +908,16 @@ mod tests {
                 )],
             )],
         )];
-        let p = commands_tree(
-            9,
-            &roots,
-            CommandParsers {
-                string: 5,
-                integer: 3,
-                item_stack: 7,
-                resource: 8,
-            },
-        );
+        let mut parsers = CommandParsers::default();
+        for (name, id) in [
+            ("brigadier:string", 5),
+            ("brigadier:integer", 3),
+            ("minecraft:item_stack", 7),
+            ("minecraft:resource", 8),
+        ] {
+            parsers.set(name, id);
+        }
+        let p = commands_tree(9, &roots, parsers);
         let want: Vec<u8> = [
             vec![9, 4],
             vec![NODE_ROOT, 1, 1],
@@ -557,5 +933,289 @@ mod tests {
         ]
         .concat();
         assert_eq!(p, want);
+    }
+
+    /// Каждый ванильный тип аргумента есть в таблице: ID не подменяется нулём.
+    #[test]
+    fn all_argument_types_have_ids() {
+        let parsers = CommandParsers::load(|name| Ok::<_, ()>(ARGUMENT_TYPES
+            .iter()
+            .position(|n| *n == name)
+            .unwrap() as i32
+            + 1))
+        .unwrap();
+        for (index, name) in ARGUMENT_TYPES.iter().enumerate() {
+            assert_eq!(parsers.id(name), index as i32 + 1, "{name}");
+        }
+    }
+
+    /// Селектор пишется по ванильному формату: `minecraft:entity` — один
+    /// байт флагов. Раньше здесь были две строки («players», «multiple»),
+    /// и клиент не мог декодировать весь пакет `commands`.
+    #[test]
+    fn entity_parser_writes_flag_byte() {
+        let roots = [Node::literal(
+            "kill",
+            false,
+            vec![Node::argument(
+                "targets",
+                true,
+                Parser::Entity {
+                    players_only: true,
+                    single: true,
+                },
+                vec![],
+            )],
+        )];
+        let mut parsers = CommandParsers::default();
+        parsers.set("minecraft:entity", 20);
+        let p = commands_tree(1, &roots, parsers);
+        let want: Vec<u8> = [
+            vec![1, 3],
+            vec![NODE_ROOT, 1, 1],
+            vec![NODE_LITERAL, 1, 2, 4],
+            b"kill".to_vec(),
+            vec![NODE_ARGUMENT | NODE_EXECUTABLE, 0, 7],
+            b"targets".to_vec(),
+            vec![20, 0b11],
+            vec![0],
+        ]
+        .concat();
+        assert_eq!(p, want);
+    }
+
+    /// Читает пакет так, как это делает клиент: любое расхождение в
+    /// свойствах парсера сдвигает поток, и узлы перестают разбираться.
+    mod decode {
+        use super::*;
+
+        /// Ожидаемые свойства парсера в формате сети.
+        struct Reader<'a> {
+            data: &'a [u8],
+            at: usize,
+        }
+
+        impl<'a> Reader<'a> {
+            fn new(data: &'a [u8]) -> Self {
+                Self { data, at: 0 }
+            }
+
+            fn u8(&mut self) -> u8 {
+                let v = self.data[self.at];
+                self.at += 1;
+                v
+            }
+
+            fn var_int(&mut self) -> i32 {
+                let mut value = 0u32;
+                for shift in 0..5 {
+                    let byte = self.u8();
+                    value |= u32::from(byte & 0x7f) << (7 * shift);
+                    if byte & 0x80 == 0 {
+                        break;
+                    }
+                }
+                value as i32
+            }
+
+            fn string(&mut self) -> String {
+                let len = self.var_int() as usize;
+                let text = String::from_utf8(self.data[self.at..self.at + len].to_vec()).unwrap();
+                self.at += len;
+                text
+            }
+
+            fn f32(&mut self) -> f32 {
+                let v = f32::from_be_bytes(self.data[self.at..self.at + 4].try_into().unwrap());
+                self.at += 4;
+                v
+            }
+
+            fn f64(&mut self) -> f64 {
+                let v = f64::from_be_bytes(self.data[self.at..self.at + 8].try_into().unwrap());
+                self.at += 8;
+                v
+            }
+
+            fn i32(&mut self) -> i32 {
+                let v = i32::from_be_bytes(self.data[self.at..self.at + 4].try_into().unwrap());
+                self.at += 4;
+                v
+            }
+
+            fn i64(&mut self) -> i64 {
+                let v = i64::from_be_bytes(self.data[self.at..self.at + 8].try_into().unwrap());
+                self.at += 8;
+                v
+            }
+        }
+
+        /// Свойства парсера по его имени — как их читает `ArgumentTypeInfo`.
+        fn skip_properties(reader: &mut Reader<'_>, kind: &str, names: &[&str]) {
+            let id = reader.var_int();
+            let name = names
+                .get(id as usize - 1)
+                .copied()
+                .unwrap_or_else(|| panic!("парсер #{id} вне таблицы"));
+            assert_eq!(name, kind, "парсер #{id}");
+            match kind {
+                "brigadier:bool" => {}
+                "brigadier:double" => {
+                    let flags = reader.u8();
+                    if flags & 1 != 0 {
+                        reader.f64();
+                    }
+                    if flags & 2 != 0 {
+                        reader.f64();
+                    }
+                }
+                "brigadier:float" => {
+                    let flags = reader.u8();
+                    if flags & 1 != 0 {
+                        reader.f32();
+                    }
+                    if flags & 2 != 0 {
+                        reader.f32();
+                    }
+                }
+                "brigadier:integer" => {
+                    let flags = reader.u8();
+                    if flags & 1 != 0 {
+                        reader.i32();
+                    }
+                    if flags & 2 != 0 {
+                        reader.i32();
+                    }
+                }
+                "brigadier:long" => {
+                    let flags = reader.u8();
+                    if flags & 1 != 0 {
+                        reader.i64();
+                    }
+                    if flags & 2 != 0 {
+                        reader.i64();
+                    }
+                }
+                "brigadier:string" => {
+                    let _ = reader.var_int();
+                }
+                "minecraft:entity" => {
+                    // Один байт: бит 0 — одна цель, бит 1 — только игроки.
+                    let _ = reader.u8();
+                }
+                "minecraft:score_holder" => {
+                    let _ = reader.u8();
+                }
+                "minecraft:time" => {
+                    let _ = reader.i32();
+                }
+                "minecraft:resource"
+                | "minecraft:resource_key"
+                | "minecraft:resource_or_tag"
+                | "minecraft:resource_or_tag_key"
+                | "minecraft:resource_selector" => {
+                    let _ = reader.string();
+                }
+                // У остальных типов свойств нет: только ID.
+                _ => {}
+            }
+        }
+
+        /// Полный разбор пакета `commands`; паникует на любом сдвиге.
+        pub fn decode(data: &[u8], names: &[&str]) {
+            let mut reader = Reader::new(data);
+            let _packet_id = reader.var_int();
+            let count = reader.var_int();
+            assert!(count > 0, "пустой пакет");
+            for _ in 0..count {
+                let flags = reader.u8();
+                let children = reader.var_int();
+                for _ in 0..children {
+                    let index = reader.var_int();
+                    assert!(
+                        index < count,
+                        "ребёнок {index} вне пакета из {count} узлов"
+                    );
+                }
+                // `redirect` читается до имени: индекс узла-цели.
+                if flags & NODE_REDIRECT != 0 {
+                    let index = reader.var_int();
+                    assert!(
+                        index < count,
+                        "redirect {index} вне пакета из {count} узлов"
+                    );
+                }
+                let node = flags & 0x03;
+                if node == NODE_ROOT {
+                    continue;
+                }
+                assert!(
+                    node == NODE_LITERAL || node == NODE_ARGUMENT,
+                    "неизвестный тип узла {node}"
+                );
+                let _name = reader.string();
+                if node == NODE_ARGUMENT {
+                    let kind = names
+                        .get(reader.var_int() as usize - 1)
+                        .copied()
+                        .unwrap_or_else(|| panic!("парсер вне таблицы"));
+                    // `skip_properties` перечитает ID; отдаём поток ему.
+                    reader.at -= 1;
+                    skip_properties(&mut reader, kind, names);
+                    if flags & NODE_CUSTOM_SUGGESTIONS != 0 {
+                        let _ = reader.string();
+                    }
+                }
+            }
+            assert_eq!(reader.var_int(), 0, "нет завершающего корня");
+            assert_eq!(reader.at, data.len(), "лишние байты после пакета");
+        }
+    }
+
+    /// Все парсеры, которые встречаются в нашем дереве, читаются клиентским
+    /// разбором: это защита от сдвига свойств (как было с `entity`).
+    #[test]
+    fn every_parser_decodes_like_the_client() {
+        let parsers = CommandParsers::load(|name| {
+            Ok::<_, ()>(
+                ARGUMENT_TYPES
+                    .iter()
+                    .position(|n| *n == name)
+                    .unwrap_or(0) as i32
+                    + 1,
+            )
+        })
+        .unwrap();
+        // По одному узлу на каждый тип парсера.
+        let mut roots = Vec::new();
+        for (index, name) in ARGUMENT_TYPES.iter().enumerate() {
+            let parser = match *name {
+                "brigadier:bool" => Parser::Bool,
+                "brigadier:double" => Parser::Double(0.0, 1.0),
+                "brigadier:float" => Parser::Float(0.0, 1.0),
+                "brigadier:integer" => Parser::Integer(0, 10),
+                "brigadier:long" => Parser::Long(0, 10),
+                "brigadier:string" => Parser::String(StringMode::Greedy),
+                "minecraft:entity" => Parser::Entity {
+                    players_only: true,
+                    single: false,
+                },
+                "minecraft:score_holder" => Parser::ScoreHolder { multiple: true },
+                "minecraft:time" => Parser::Time(0),
+                "minecraft:resource"
+                | "minecraft:resource_key"
+                | "minecraft:resource_or_tag"
+                | "minecraft:resource_or_tag_key"
+                | "minecraft:resource_selector" => Parser::Resource("minecraft:test"),
+                other => Parser::Raw(Box::leak(other.to_string().into_boxed_str())),
+            };
+            roots.push(Node::literal(
+                &format!("cmd{index}"),
+                false,
+                vec![Node::argument("arg", true, parser, vec![])],
+            ));
+        }
+        let packet = commands_tree(0x42, &roots, parsers);
+        decode::decode(&packet, ARGUMENT_TYPES);
     }
 }

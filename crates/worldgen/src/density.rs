@@ -1020,6 +1020,60 @@ impl S {
         }
     }
 
+    /// Диапазон `y`, вне которого плотность равна константе, и эта константа.
+    ///
+    /// `None` — плотность зависит от `y` везде, сэмплировать нужно всё.
+    ///
+    /// Жилы руды (`ore_vein`) считаются объёмом на весь чанк, но их плотность
+    /// из данных — `range_choice` по `minecraft:y`: выше 50 блоков она равна
+    /// −1.0. Считать там дерево незачем: это 7 мс из 20 на чанк.
+    pub fn y_constant_outside(&self) -> Option<(i32, i32, f32)> {
+        match self {
+            // `minecraft:y` — градиент по y с шагом 1: констант нет.
+            S::Gradient(axis, ..) if *axis == 1 => None,
+            S::Const(v) => Some((i32::MIN, i32::MAX, *v)),
+            S::Noise(..)
+            | S::ShiftedXz(..)
+            | S::ShiftedXyz(..)
+            | S::ShiftB(..)
+            | S::Spline(..)
+            | S::FindTop(..)
+            | S::Interpolated(..)
+            | S::Cached(..) => None,
+            // Ветки, которые не меняют `y`-зависимость.
+            S::ConstAdd(s, _)
+            | S::ConstSub(_, s)
+            | S::ConstMul(s, _)
+            | S::ConstDiv(_, s)
+            | S::ConstMin(s, _)
+            | S::ConstMax(s, _)
+            | S::Unary(_, s)
+            | S::Clamp(s, ..)
+            | S::SliceX(s, _)
+            | S::SliceZ(s, _) => s.y_constant_outside(),
+            S::SliceXz(s, ..) => s.y_constant_outside(),
+            // Срез по y фиксирует ось: значение постоянно вне одной точки,
+            // но сэмплировать всё равно нужно только её — объёмом это
+            // выражается «нигде», поэтому такой узел считаем переменным.
+            S::SliceY(..) => None,
+            // Вне диапазона выбирается ветка «когда вне». Она должна быть
+            // постоянной **и** не зависеть от `y`: `Some` от
+            // `y_constant_outside` у константы, у шума — `None`, поэтому
+            // проверка ниже отсекает ветки, которые меняются по x/z.
+            S::RangeChoice(ch, lo, hi) => match ch[2].y_constant_outside() {
+                // `(MIN, MAX, v)` — настоящая константа; диапазон от ветки —
+                // значит она сама зависит от y внутри своей полосы, и вне
+                // общей полосы поведение уже не «константа везде».
+                Some((i32::MIN, i32::MAX, v)) => {
+                    // `hi` исключается: вне `[lo, hi)` значение равно `v`.
+                    Some((lo.floor() as i32, hi.ceil() as i32, v))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     pub fn value(&self, ctx: &mut Ctx, x: i32, y: i32, z: i32) -> f32 {
         match self {
             S::Const(v) => *v,
@@ -1091,7 +1145,8 @@ impl S {
                     return input.value(ctx, x, y, z);
                 }
                 let v = Volume::new([2, 2, 2], [x - xi, y - yi, z - zi], [*cxz, *cy, *cxz]);
-                let mut b = vec![0f32; 8];
+                // Стек вместо `vec![0f32; 8]`: вызов идёт на каждую клетку.
+                let mut b = [0f32; 8];
                 input.volume(ctx, &mut b, &v);
                 lerp3(
                     xi as f32 / *cxz as f32,

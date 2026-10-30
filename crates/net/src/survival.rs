@@ -212,6 +212,19 @@ pub enum Cause {
 }
 
 impl Cause {
+    /// Тип урона из `/damage … <type>`: неизвестный — обычный урон.
+    pub fn from_damage_type(name: &str) -> Self {
+        match name.strip_prefix("minecraft:").unwrap_or(name) {
+            "fall" => Cause::Fall,
+            "out_of_world" => Cause::Void,
+            "starve" => Cause::Starve,
+            "magic" | "indirect_magic" | "thorns" | "sonic_boom" => Cause::Magic,
+            "wither" => Cause::Wither,
+            "arrow" | "trident" | "mob_projectile" => Cause::Arrow,
+            _ => Cause::Generic,
+        }
+    }
+
     /// Ключ сообщения о смерти и тип урона в реестре `damage_type`.
     pub fn death_key(self) -> &'static str {
         match self {

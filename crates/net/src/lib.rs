@@ -374,6 +374,8 @@ pub struct Connection {
     out: Vec<u8>,
     /// Начало `out`, записанное до включения шифрования: уходит открытым.
     plain: usize,
+    /// Сколько байт уже ушло в сокет: по разнице видно объём записи.
+    written_bytes: u64,
 }
 
 /// Неотправленный хвост (причина отключения после `send` и `return`) —
@@ -410,6 +412,7 @@ impl Connection {
             cipher: None,
             out: Vec::new(),
             plain: 0,
+            written_bytes: 0,
         }
     }
 
@@ -419,8 +422,12 @@ impl Connection {
         self.cipher = Some(StreamCipher::new(secret));
     }
 
-    pub async fn read_packet(&mut self) -> Result<Vec<u8>, NetError> {
-        // Ответ ждут на отправленное: сначала оно должно уйти.
+    /// Сколько байт уже ушло в сокет: по разнице видно объём записи.
+    pub fn written(&self) -> u64 {
+        self.written_bytes
+    }
+
+    pub async fn read_packet(&mut self) -> Result<Vec<u8>, NetError> {        // Ответ ждут на отправленное: сначала оно должно уйти.
         self.flush().await?;
         loop {
             if let Some(packet) = self.codec.decode(&mut self.buf)? {
@@ -444,6 +451,7 @@ impl Connection {
     pub async fn send_frames(&mut self, frames: &[u8]) -> Result<(), NetError> {
         if self.out.is_empty() && self.cipher.is_none() {
             self.stream.write_all(frames).await?;
+            self.written_bytes += frames.len() as u64;
             return Ok(());
         }
         self.out.extend_from_slice(frames);
@@ -468,6 +476,7 @@ impl Connection {
         if let Some(c) = &mut self.cipher {
             c.encrypt(&mut self.out[self.plain..]);
         }
+        let written = self.out.len() as u64;
         let res = self.stream.write_all(&self.out).await;
         self.out.clear();
         self.plain = 0;
@@ -475,6 +484,7 @@ impl Connection {
             self.out.shrink_to(OUT_KEEP);
         }
         res?;
+        self.written_bytes += written;
         Ok(())
     }
 }

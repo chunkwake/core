@@ -33,6 +33,9 @@ pvp=true
 white-list=false
 allow-flight=false
 spawn-protection=16
+metrics-enabled=true
+metrics-bind=127.0.0.1
+metrics-port=25585
 ";
 
 pub const KEYS: &[&str] = &[
@@ -60,6 +63,9 @@ pub const KEYS: &[&str] = &[
     "white-list",
     "allow-flight",
     "spawn-protection",
+    "metrics-enabled",
+    "metrics-bind",
+    "metrics-port",
 ];
 
 #[derive(Debug)]
@@ -89,6 +95,12 @@ pub struct Properties {
     pub difficulty: chunkwake_net::survival::Difficulty,
     /// Радиус `spawn-protection`. 0 — защита выключена.
     pub spawn_protection: u32,
+    /// `white-list`: пускать только имена из белого списка.
+    pub white_list: bool,
+    /// HTTP с `/metrics` и `/snapshot` (`chunkwake top`).
+    pub metrics_enabled: bool,
+    pub metrics_ip: String,
+    pub metrics_port: u16,
     pub log_level: tracing_subscriber::filter::LevelFilter,
 }
 
@@ -181,6 +193,19 @@ impl Properties {
         let spawn_protection = value("spawn-protection")
             .parse::<u32>()
             .map_err(|_| "spawn-protection: enter a non-negative integer".to_owned())?;
+        let metrics_enabled = value("metrics-enabled")
+            .parse::<bool>()
+            .map_err(|_| "metrics-enabled: use true or false".to_owned())?;
+        let metrics_ip = value("metrics-bind").to_owned();
+        metrics_ip
+            .parse::<IpAddr>()
+            .map_err(|_| "metrics-bind: use an IPv4 or IPv6 address, such as 127.0.0.1".to_owned())?;
+        let metrics_port = value("metrics-port")
+            .parse::<u16>()
+            .map_err(|_| "metrics-port: enter a number from 1 to 65535".to_owned())?;
+        if metrics_port == 0 {
+            return Err("metrics-port: enter a number from 1 to 65535".into());
+        }
         Ok(Self {
             server_ip: server_ip.into(),
             server_port: port,
@@ -213,6 +238,10 @@ impl Properties {
             },
             log_level,
             spawn_protection,
+            white_list: value("white-list").parse().unwrap_or(false),
+            metrics_enabled,
+            metrics_ip,
+            metrics_port,
         })
     }
 

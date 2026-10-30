@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 /// Плотности жил в порядке [`surface::Vein`].
 const VEIN_DENSITIES: [&str; 4] = [
@@ -26,7 +26,7 @@ const VEIN_DENSITIES: [&str; 4] = [
 
 /// Блоки чанка по индексу `((y - min_y) * 16 + z) * 16 + x` и его биомы
 /// по клеткам 4×4×4 (`None` — климата нет, мир из одного биома).
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Blocks {
     pub states: Vec<u32>,
     pub biomes: Option<Vec<u32>>,
@@ -50,20 +50,82 @@ pub struct Overworld {
     stone: u32,
     features: Option<Features>,
     area: Mutex<Area>,
+    /// Будит ждущих, когда прото-чанк построен или декорация вернула область.
+    wake: Condvar,
 }
 
 /// Прото-чанки, ещё нужные декорации, и что уже сделано.
+///
+/// Замок держится только на учёт: прото-чанки строятся и декорируются вне
+/// него. Декорация забирает свою область 3×3 из `protos` (чанки становятся
+/// `busy`), и несоседние области декорируются параллельно, как в ваниле.
+/// Порядок декорации пересекающихся областей — порядок прихода запросов.
 #[derive(Default)]
 struct Area {
+    /// Прото-чанки ещё не отданных чанков и их соседей.
     protos: HashMap<(i32, i32), Blocks>,
-    /// Чанки, чья декорация уже прошла (её записи лежат в прото-чанках).
+    /// Чанки, чья декорация уже прошла: повторно фичи не ставятся.
     decorated: HashSet<(i32, i32)>,
-    /// Отданные чанки: их прото-чанк больше никто не меняет.
+    /// Отданные чанки. Их прото-чанк больше никому не нужен: область 3×3,
+    /// задевающая отданный чанк, центрирована на его соседе, а все соседи
+    /// отданного уже декорированы. Поэтому он уходит из `protos` сразу.
+    ///
+    /// Раньше отданные держались до предела памяти и вытеснялись вместе с
+    /// отметкой `decorated`: на радиусе 24 и больше предел превышался, и
+    /// соседей декорировали повторно, а запись фичи в уже отданный чанк
+    /// терялась — деревья обрезались по границе чанка.
     done: HashSet<(i32, i32)>,
+    /// Прото-чанки, которые сейчас строит какой-то поток.
+    building: HashSet<(i32, i32)>,
+    /// Чанки, забранные декорацией: их нет в `protos`, пока она идёт.
+    busy: HashSet<(i32, i32)>,
+    /// Центры идущих декораций.
+    decorating: HashSet<(i32, i32)>,
+    /// Центры идущих запросов `chunk` (с кратностью): их области 5×5 не
+    /// вытесняются, пока запрос ждёт соседей без замка.
+    active: HashMap<(i32, i32), u32>,
 }
 
-/// Прото-чанков сверх этого — повод выбросить те, что только читаются.
-const AREA_SOFT_LIMIT: usize = 1024;
+impl Area {
+    /// Выбрасывает прото-чанки сверх предела, но только чистые: ни одна
+    /// декорация в них ещё не писала, и построенный заново будет тем же.
+    /// Такие копятся за краем прорисовки (область 5×5 запроса шире радиуса)
+    /// и у чанков, выпавших из очереди, когда игрок улетел.
+    ///
+    /// Обход всех ключей дорогой: на радиусе 24 `protos` держит больше
+    /// двух тысяч столбцов, и вызов на каждый чанк превращался в проход по
+    /// всему словарю под общим замком. Поэтому чистим, только когда запас
+    /// вырос заметно, и сразу до половины предела.
+    fn evict(&mut self) {
+        if self.protos.len() <= AREA_SOFT_LIMIT + AREA_EVICT_SLACK {
+            return;
+        }
+        let touched = |p: &(i32, i32)| {
+            (-1..=1).any(|dz| (-1..=1).any(|dx| self.decorated.contains(&(p.0 + dx, p.1 + dz))))
+    };
+        let pinned = |p: &(i32, i32)| {
+            self.active
+                .keys()
+                .any(|c| (c.0 - p.0).abs() <= 2 && (c.1 - p.1).abs() <= 2)
+        };
+        let clean: Vec<(i32, i32)> = self
+            .protos
+            .keys()
+            .filter(|p| !touched(p) && !pinned(p))
+            .copied()
+            .collect();
+        let excess = self.protos.len() - AREA_SOFT_LIMIT / 2;
+        for p in clean.into_iter().take(excess) {
+            self.protos.remove(&p);
+        }
+    }
+}
+
+/// Прото-чанков сверх этого — повод выбросить чистые (по ~393 КБ каждый).
+const AREA_SOFT_LIMIT: usize = 2048;
+/// Запас сверх предела, после которого чистка того стоит: обход словаря
+/// на каждый чанк дороже, чем подержать лишнюю тысячу столбцов.
+const AREA_EVICT_SLACK: usize = 1024;
 
 impl Overworld {
     /// `state` — состояние блока по имени (`minecraft:stone`); `biome_ids` —
@@ -92,6 +154,7 @@ impl Overworld {
             stone,
             features: None,
             area: Mutex::new(Area::default()),
+            wake: Condvar::new(),
         })
     }
 
@@ -125,6 +188,11 @@ impl Overworld {
     /// Перенесённые и все фичи оверворлда.
     pub fn feature_coverage(&self) -> Option<(usize, usize)> {
         self.features.as_ref().map(Features::coverage)
+    }
+
+    /// Фичи, которые не разобрались: имя и причина.
+    pub fn feature_failures(&self) -> &[(String, String)] {
+        self.features.as_ref().map_or(&[], Features::failures)
     }
 
     /// Есть ли правила поверхности: без них мир остаётся голым камнем.
@@ -178,59 +246,134 @@ impl Overworld {
 
     /// Готовый чанк: прото-чанк и фичи всех соседей. Свет — забота
     /// вызывающего.
-    pub fn chunk(&self, cx: i32, cz: i32) -> Blocks {
+    ///
+    /// `None` — чанк уже отдан раньше (декорация ушла вместе с ним), и
+    /// строить его заново незачем: вызывающий держит готовый столбец.
+    ///
+    /// Порядок декорации — порядок запросов, как у ванилы: чанк декорируется
+    /// один раз, при первой области 3×3, которой он понадобился, и его записи
+    /// остаются в прото-чанках соседей. Перестановка этого порядка меняет
+    /// результат (проверено: трава 3001 → 2872 на сиде 12345); несоседние
+    /// области декорируются параллельно.
+    ///
+    /// Отданный прото-чанк уходит из области (см. [`Area::done`]) и заново
+    /// не строится: область 5×5 следующего запроса его пропускает.
+    pub fn chunk(&self, cx: i32, cz: i32) -> Option<Blocks> {
         let Some(features) = &self.features else {
-            return self.proto(cx, cz);
+            return Some(self.proto(cx, cz));
         };
-        let around = |r: i32| (-r..=r).flat_map(move |dz| (-r..=r).map(move |dx| (cx + dx, cz + dz)));
-        // Прото-чанки строятся без замка: это самая тяжёлая часть.
-        let missing: Vec<(i32, i32)> = {
-            let area = self.area.lock().unwrap();
-            around(2).filter(|p| !area.protos.contains_key(p)).collect()
-        };
-        let fresh: Vec<_> = missing.into_iter().map(|p| (p, self.proto(p.0, p.1))).collect();
         let mut area = self.area.lock().unwrap();
-        for (p, b) in fresh {
-            area.protos.entry(p).or_insert(b);
-        }
-        if area.done.contains(&(cx, cz)) {
-            // Чанк уже отдавали: соседи задекорированы, и их записи в него не
-            // повторятся. Собираем заново на копии области.
-            let mut copy: HashMap<(i32, i32), Blocks> = around(2)
-                .filter_map(|p| Some((p, area.protos.get(&p)?.clone())))
-                .collect();
-            drop(area);
-            copy.insert((cx, cz), self.proto(cx, cz));
-            for n in around(1) {
-                self.decorate(features, &mut copy, n);
-            }
-            return copy.remove(&(cx, cz)).expect("own proto chunk");
-        }
-        for n in around(1) {
-            if area.decorated.insert(n) {
-                self.decorate(features, &mut area.protos, n);
+        *area.active.entry((cx, cz)).or_default() += 1;
+        let out = self.chunk_locked(features, area, cx, cz);
+        let mut area = self.area.lock().unwrap();
+        if let std::collections::hash_map::Entry::Occupied(mut e) = area.active.entry((cx, cz)) {
+            *e.get_mut() -= 1;
+            if *e.get() == 0 {
+                e.remove();
             }
         }
-        area.done.insert((cx, cz));
-        let out = area.protos.remove(&(cx, cz)).expect("own proto chunk");
-        if area.protos.len() > AREA_SOFT_LIMIT {
-            // Отданные чанки, построенные заново лишь для чтения соседями.
-            let done = std::mem::take(&mut area.done);
-            area.protos.retain(|p, _| !done.contains(p));
-            area.done = done;
-        }
+        area.evict();
+        drop(area);
+        // Раньше здесь на `None` строился полный прото-чанк впустую (16 мс),
+        // чтобы вызывающий его выбросил.
         out
     }
 
-    /// `applyBiomeDecoration` чанка `(cx, cz)` над его областью 3×3.
-    fn decorate(&self, features: &Features, protos: &mut HashMap<(i32, i32), Blocks>, (cx, cz): (i32, i32)) {
-        let at = |i: usize| (cx + i as i32 % 3 - 1, cz + i as i32 / 3 - 1);
-        let mut chunks: [Option<Blocks>; 9] = Default::default();
-        for (i, slot) in chunks.iter_mut().enumerate() {
-            *slot = protos.remove(&at(i));
-            if let Some(c) = slot
-                && c.worldgen_heights.is_none()
-            {
+    /// Тело [`Self::chunk`] под замком области; `None` — чанк уже отдан.
+    fn chunk_locked<'a>(
+        &'a self,
+        features: &Features,
+        mut area: std::sync::MutexGuard<'a, Area>,
+        cx: i32,
+        cz: i32,
+    ) -> Option<Blocks> {
+        let around = |r: i32| (-r..=r).flat_map(move |dz| (-r..=r).map(move |dx| (cx + dx, cz + dz)));
+        // Прото-чанки 5×5: по одному за раз, ближние к центру первыми. Каждый
+        // строит один поток, остальные берут следующий свободный. Раньше
+        // первый запрос в новой области забирал все 25 и строил их подряд
+        // (~0.5 с), а соседние запросы ждали его — на краю мира вся
+        // параллельность пропадала, и рядом с игроком было пусто.
+        loop {
+            let mine = around(2)
+                .filter(|p| {
+                    !area.protos.contains_key(p)
+                        && !area.busy.contains(p)
+                        && !area.building.contains(p)
+                        && !area.done.contains(p)
+                })
+                .min_by_key(|p| (p.0 - cx).abs().max((p.1 - cz).abs()));
+            if let Some(p) = mine {
+                area.building.insert(p);
+                drop(area);
+                let b = self.proto(p.0, p.1);
+                area = self.area.lock().unwrap();
+                area.building.remove(&p);
+                area.protos.entry(p).or_insert(b);
+                self.wake.notify_all();
+                continue;
+            }
+            if around(2).any(|p| area.building.contains(&p)) {
+                area = self.wake.wait(area).unwrap();
+                continue;
+            }
+            break;
+        }
+        if !area.done.contains(&(cx, cz)) {
+            for n in around(1) {
+                // Своя область 3×3 должна быть на месте: её может держать
+                // чужая декорация.
+                loop {
+                    if area.decorated.contains(&n) {
+                        break;
+                    }
+                    let region = (-1..=1).flat_map(|dz| (-1..=1).map(move |dx| (n.0 + dx, n.1 + dz)));
+                    if region.clone().any(|p| area.busy.contains(&p)) {
+                        area = self.wake.wait(area).unwrap();
+                        continue;
+                    }
+                    area.decorated.insert(n);
+                    area.decorating.insert(n);
+                    let at = |i: usize| (n.0 + i as i32 % 3 - 1, n.1 + i as i32 / 3 - 1);
+                    let mut chunks: [Option<Blocks>; 9] = Default::default();
+                    for (i, slot) in chunks.iter_mut().enumerate() {
+                        *slot = area.protos.remove(&at(i));
+                        if slot.is_some() {
+                            area.busy.insert(at(i));
+                        }
+                    }
+                    drop(area);
+                    let chunks = self.decorate(features, chunks, n);
+                    area = self.area.lock().unwrap();
+                    for (i, slot) in chunks.into_iter().enumerate() {
+                        if let Some(c) = slot {
+                            area.busy.remove(&at(i));
+                            area.protos.insert(at(i), c);
+                        }
+                    }
+                    area.decorating.remove(&n);
+                    self.wake.notify_all();
+                    break;
+                }
+            }
+            // Декорации соседей, начатые другими потоками, должны закончиться.
+            while around(1).any(|p| area.decorating.contains(&p)) {
+                area = self.wake.wait(area).unwrap();
+            }
+            // Тот же чанк мог отдать параллельный запрос, пока этот ждал.
+            if area.done.insert((cx, cz)) {
+                return Some(area.protos.remove(&(cx, cz)).expect("own proto chunk stays in the area"));
+            }
+        }
+        // Повторный запрос отданного чанка: декорация уже ушла с ним, вызов
+        // вернёт только основу (вызывающий держит готовый столбец и её отбросит).
+        None
+    }
+
+    /// `applyBiomeDecoration` чанка `(cx, cz)` над его областью 3×3,
+    /// забранной из общей области.
+    fn decorate(&self, features: &Features, mut chunks: [Option<Blocks>; 9], (cx, cz): (i32, i32)) -> [Option<Blocks>; 9] {
+        for c in chunks.iter_mut().flatten() {
+            if c.worldgen_heights.is_none() {
                 let mut maps = [[0; 256]; 2];
                 for (map, kind) in maps.iter_mut().zip([Heightmap::WorldSurfaceWg, Heightmap::OceanFloorWg]) {
                     for (column, h) in map.iter_mut().enumerate() {
@@ -259,17 +402,19 @@ impl Overworld {
             heights: RefCell::new(Default::default()),
         };
         features.decorate(&mut region, cx, cz, &biomes);
-        for (i, slot) in region.chunks.into_iter().enumerate() {
-            if let Some(c) = slot {
-                protos.insert(at(i), c);
-            }
-        }
+        region.chunks
     }
 
     /// Прото-чанк: шум, поверхность, карверы.
+    ///
+    /// `CHUNKWAKE_PROF=1` печатает время стадий в stderr: без этого видно
+    /// только «20 мс на чанк» и непонятно, что оптимизировать.
     fn proto(&self, cx: i32, cz: i32) -> Blocks {
+        let prof = std::env::var_os("CHUNKWAKE_PROF").is_some();
+        let t0 = std::time::Instant::now();
         let noise = &*self.noise;
         let mut terrain = noise.terrain(cx, cz);
+        let t_noise = t0.elapsed().as_secs_f64() * 1000.0;
         let c = self.carve;
         let mut states: Vec<u32> = terrain
             .fills
@@ -283,18 +428,27 @@ impl Overworld {
             .collect();
         // Климат считается один раз на чанк: биомы нужны и стадии
         // поверхности, и палитре секций.
+        let t = std::time::Instant::now();
         let biomes = noise.biomes(cx, cz);
+        let t_biomes = t.elapsed().as_secs_f64() * 1000.0;
         let own = biomes.as_deref().unwrap_or(&[]);
         let memo = RefCell::new(BiomeMemo::default());
+        let t = std::time::Instant::now();
         let preliminary = noise.preliminary(cx, cz);
+        let t_prelim = t.elapsed().as_secs_f64() * 1000.0;
         let random = noise.surface_random();
+        let t = std::time::Instant::now();
         if let Some(s) = &self.surface {
             let mut chunk = self.view(&mut states, cx, cz, own, &memo);
             s.stage(noise, &preliminary, &random).build(&mut chunk, cx, cz);
         }
+        let t_surface = t.elapsed().as_secs_f64() * 1000.0;
         // Карверы после поверхности (`generateCarvers`): тоннели и каньоны,
         // залитые акифером того же чанка.
+        let t = std::time::Instant::now();
+        let mut carved = false;
         if let Some(mask) = noise.carving_mask(cx, cz) {
+            carved = true;
             let mut heights: Option<Vec<usize>> = None;
             noise.carve(&mut terrain, &mask, &c, &mut states, |st, x, y, z, fluid| {
                 let s = self.surface.as_ref()?;
@@ -307,7 +461,25 @@ impl Overworld {
                     .top_material(&chunk, x, y, z, cx, cz, heights, fluid)
             });
         }
+        let t_carve = t.elapsed().as_secs_f64() * 1000.0;
+        if prof {
+            eprintln!(
+                "proto {cx} {cz}: шум {t_noise:.2} | биомы {t_biomes:.2} | \
+                 предв. поверхность {t_prelim:.2} | поверхность {t_surface:.2} | \
+                 карверы {t_carve:.2}{} = {:.2} мс",
+                if carved { "" } else { " (нет)" },
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         Blocks { states, biomes, worldgen_heights: None }
+    }
+
+    /// Прото-чанк без декорации: для золотого теста генерации.
+    ///
+    /// Фичи зависят от порядка запросов, а рельеф и поверхность — нет,
+    /// поэтому эталон ловит именно их.
+    pub fn proto_for_test(&self, cx: i32, cz: i32) -> Blocks {
+        self.proto(cx, cz)
     }
 
     fn view<'a>(
@@ -350,6 +522,10 @@ impl Surface {
             randoms: &self.randoms,
             preliminary,
             random,
+            clay_offset: self
+                .noises
+                .iter()
+                .position(|(n, _)| n == "minecraft:clay_bands_offset"),
         }
     }
 }
@@ -526,14 +702,38 @@ impl feature::Level for Region<'_> {
         let mut heights = self.heights.borrow_mut();
         let maps = heights[s].get_or_insert_with(|| {
             let mut maps = Box::new([[0; 256]; 4]);
-            for (k, kind) in Heightmap::ALL.into_iter().enumerate() {
-                for (column, h) in maps[k].iter_mut().enumerate() {
-                    *h = column_height(&c.states, column, self.noise.height, kind, self.palette) + min_y;
+            // Один проход по столбцу сверху вниз на все четыре карты: у
+            // каждого типа своя крайняя найденная высота, ниже искать уже
+            // нечего. Раньше каждая карта сканировала столбец заново — в
+            // четыре раза больше работы на чанк.
+            for column in 0..256usize {
+                let mut found = [0i32; 4];
+                let mut left: Vec<Heightmap> = Heightmap::ALL.to_vec();
+                for ry in (0..self.noise.height).rev() {
+                    let state = c.states[ry as usize * 256 + column];
+                    let mut i = 0;
+                    while i < left.len() {
+                        if self.palette.hits(left[i], state) {
+                            found[left[i].index()] = ry + 1;
+                            left.swap_remove(i);
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    if left.is_empty() {
+                        break;
+                    }
+                }
+                for (k, h) in maps.iter_mut().map(|m| &mut m[column]).enumerate() {
+                    *h = found[k] + min_y;
                 }
             }
             maps
         });
         maps[kind.index()][column]
+    }
+    fn sea_level(&self) -> i32 {
+        self.noise.sea_level
     }
     fn biome(&self, x: i32, y: i32, z: i32) -> u32 {
         let Some(s) = self.slot(x, z) else {

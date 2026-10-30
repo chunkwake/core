@@ -66,7 +66,7 @@ impl PlayPlan {
 
     /// Новый моб в мире; возвращает ID сущности. `reason` — причина для
     /// `CreatureSpawnEvent` (`None` — без события: спавн по запросу плагина).
-    pub(super) fn spawn_mob(
+    pub(crate) fn spawn_mob(
         &self,
         species: Species,
         pos: [f64; 3],
@@ -137,7 +137,7 @@ impl PlayPlan {
         }
         // Мобы вне радиуса симуляции спят: как в ванили, где тик идёт только
         // по чанкам рядом с игроками.
-        let simulated: HashSet<(i32, i32)> = self.simulated.lock().unwrap().clone();
+        let simulated = self.simulated_set();
         let awake = |pos: [f64; 3]| {
             simulated.is_empty()
                 || simulated.contains(&((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4))
@@ -160,16 +160,22 @@ impl PlayPlan {
                 })
                 .collect()
         };
-        let solid = |c: [i32; 3]| {
+        let physics = self.survival.physics.as_deref();
+        let shape = |c: [i32; 3]| -> &[[f64; 6]] {
             let Some(s) = self.block(c) else {
-                return c[1] < self.min_y;
+                return if c[1] < self.min_y { mb::FULL } else { &[] };
             };
+            if let Some(p) = physics {
+                return p.boxes_of(s);
+            }
+            // Старый кэш без форм: всё твёрдое — полный куб.
             let n = self.state_name(s);
-            !matches!(
+            let solid = !matches!(
                 n,
                 "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | ""
             ) && crate::fluids::fluid_of(n, None).is_none()
-                && !self.fluid_replaceable(c)
+                && !self.fluid_replaceable(c);
+            if solid { mb::FULL } else { &[] }
         };
         let water = |c: [i32; 3]| {
             self.block(c)
@@ -177,7 +183,7 @@ impl PlayPlan {
                 .is_some_and(|f| f.kind == crate::fluids::Kind::Water)
         };
         let world = mb::World {
-            solid: &solid,
+            shape: &shape,
             water: &water,
         };
         let mut rng = rand::thread_rng();
@@ -750,7 +756,7 @@ impl PlayPlan {
         let mut grazed = Vec::new();
         let mut grown = Vec::new();
         let mut births = Vec::new();
-        let simulated: HashSet<(i32, i32)> = self.simulated.lock().unwrap().clone();
+        let simulated = self.simulated_set();
         {
             let mut mobs = self.mobs.lock().unwrap();
             if mobs.is_empty() {
@@ -915,7 +921,7 @@ impl PlayPlan {
     }
 }
 
-/// `creature` у равнин: (вид, вес, размер группы).
+/// `creature` у равнин — для плоского мира без климата.
 const PLAINS_CREATURES: [(Species, u32, u32); 4] = [
     (Species::Sheep, 12, 4),
     (Species::Pig, 10, 4),
@@ -924,7 +930,7 @@ const PLAINS_CREATURES: [(Species, u32, u32); 4] = [
 ];
 
 /// `creature_world_gen_spawn_probability` по умолчанию.
-const CREATURE_GEN_CHANCE: f64 = 0.1;
+const CREATURE_GEN_CHANCE: f32 = 0.1;
 
 fn list_f64(t: Option<&Tag>) -> Vec<f64> {
     match t {
@@ -1057,23 +1063,47 @@ impl PlayPlan {
         }
         // Регион с диска помечает свои чанки заселёнными.
         self.ensure_region(cx, cz);
+        // Рельефа ещё нет: не сажать мобов на плоский шаблон (они оказывались
+        // в океане, когда настоящий чанк приходил позже).
+        if self.terrain.is_some() && !self.edited.read().unwrap().contains_key(&(cx, cz)) {
+            return;
+        }
         if !self.populated.lock().unwrap().insert((cx, cz)) {
             return;
         }
         self.entity_new.lock().unwrap().insert((cx, cz));
-        let total: u32 = PLAINS_CREATURES.iter().map(|c| c.1).sum();
+        // Список `creature` биома в центре чанка; океан и реки — пустые.
+        // Неизвестные виды остаются в весах, их группа просто пропускается.
+        let (chance, list): (f32, Vec<(Option<Species>, u32, u32, u32)>) =
+            match self.chunk_biome(cx, cz).and_then(|b| self.survival.creature_spawns.get(b as usize)) {
+                Some(b) => (
+                    b.chance,
+                    b.entries.iter().map(|(n, w, lo, hi)| (Species::from_name(n), *w, *lo, *hi)).collect(),
+                ),
+                None if self.survival.creature_spawns.is_empty() => (
+                    CREATURE_GEN_CHANCE,
+                    PLAINS_CREATURES.iter().map(|&(s, w, c)| (Some(s), w, c, c)).collect(),
+                ),
+                None => return,
+            };
+        let total: u32 = list.iter().map(|c| c.1).sum();
+        if total == 0 {
+            return;
+        }
         let mut rng = rand::thread_rng();
         use rand::Rng;
-        while rng.r#gen::<f64>() < CREATURE_GEN_CHANCE {
+        while rng.r#gen::<f32>() < chance {
             let mut pick = rng.gen_range(0..total);
-            let &(species, _, count) = PLAINS_CREATURES
+            let &(species, _, lo, hi) = list
                 .iter()
                 .find(|c| {
                     let hit = pick < c.1;
                     pick = pick.saturating_sub(c.1);
                     hit
                 })
-                .unwrap_or(&PLAINS_CREATURES[0]);
+                .unwrap_or(&list[0]);
+            let count = rng.gen_range(lo..=hi.max(lo));
+            let Some(species) = species else { continue };
             let (mut x, mut z) = (
                 cx * 16 + rng.gen_range(0..16),
                 cz * 16 + rng.gen_range(0..16),
@@ -1103,6 +1133,15 @@ impl PlayPlan {
                 z = (z0 + rng.gen_range(-5..=5)).clamp(cz * 16, cz * 16 + 15);
             }
         }
+    }
+
+    /// Биом (сетевой ID) в центре чанка на высоте поверхности.
+    fn chunk_biome(&self, cx: i32, cz: i32) -> Option<u32> {
+        let y = self.top_solid(cx * 16 + 8, cz * 16 + 8)?;
+        let world = self.edited.read().unwrap();
+        let column = world.get(&(cx, cz)).map_or(&self.template, |e| &e.0);
+        let ry = ((y - self.min_y).max(0) as usize).min(column.sections.len() * 16 - 1);
+        Some(column.sections[ry / 16].biome_at(2, (ry % 16) / 4, 2))
     }
 
     /// `animals_spawnable_on` / `EatBlockGoal`: блок травы (любое состояние).

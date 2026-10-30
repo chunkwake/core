@@ -1,0 +1,139 @@
+# Наблюдаемость
+
+Сервер умеет показывать актуальную нагрузку без интерактивных панелей и без
+внешних агентов: снимок снимается раз в секунду и отдаётся тремя способами.
+
+| Способ | Когда нужен |
+|---|---|
+| `/top` в игре | посмотреть нагрузку из чата, не переключаясь в терминал |
+| `chunkwake top` | разовый снимок или `--watch` в соседнем окне |
+| `GET /metrics` | Prometheus и Grafana |
+| `GET /snapshot` | `chunkwake top` и лаборатория (JSON) |
+
+## Что меряется
+
+**Тик.** Кольцевой буфер на 18 000 тиков (15 минут). Считаются TPS по окнам
+1/5/15 минут, средний MSPT за минуту, перцентили p50/p95/p99, худший тик за
+всё время и число опоздавших тиков (интервал больше целевого на 10 %).
+
+**Процесс и машина.** Загрузка по каждому ядру, средняя по машине, доля
+процесса в процентах одного ядра, RSS и виртуальная память, память системы.
+
+**Мир.** Игроки, мобы, предметы, стрелы, сферы опыта, чанки в симуляции и
+известные миру, очереди редстоуна/жидкостей/воронок, печи, костры, задачи
+пула генерации.
+
+**Сеть.** Байты и пакеты в обе стороны, средний и худший пинг по RTT
+`keep_alive`.
+
+## `/top`
+
+```
+/top            всё
+/top tick       только тик
+/top cpu        только процессор
+/top mem        память
+/top world      мир
+/top net        сеть
+```
+
+Каждая строка — отдельный элемент компонента, подробности — в подсказке при
+наведении, поэтому экран не забивается цифрами. Полоска `█░` показывает
+загрузку: зелёная до 70 %, жёлтая до 90 %, красная выше.
+
+## `chunkwake top`
+
+```console
+$ chunkwake top --dir ./server
+================= My Server · 26.3 · up 02:14:07 =================
+── TICK
+  rate      20/s  running   ticks 161234
+  TPS   now  20.0  1m  19.9  5m  20.0  15m  20.0
+  MSPT  last   0.31  1m avg   0.28  p50   0.21  p95   0.60  p99   1.10  max  12.40
+  budget  50.0 ms  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  0%
+  late  3 ticks since start
+── CPU
+  AMD Ryzen 9 7945HX with Radeon Graphics · 32 cores · 2501 MHz
+  system  11.4%  █████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+  server   7.9% of one core (0.2% of 32 cores)  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+...
+```
+
+Параметры:
+
+| Флаг | Значение по умолчанию | Что делает |
+|---|---|---|
+| `--dir PATH` | текущий каталог | где взять `server.properties` с `metrics-*` |
+| `--host HOST` | `metrics-bind` | адрес эндпоинта |
+| `--port PORT` | `metrics-port` | порт эндпоинта |
+| `--watch SEC` | — | перерисовывать каждые SEC секунд |
+| `--json` | — | печатать снимок как JSON |
+| `--no-color` | — | без ANSI-цветов (для логов) |
+
+## Настройки
+
+```properties
+metrics-enabled=true
+metrics-bind=127.0.0.1
+metrics-port=25585
+```
+
+По умолчанию эндпоинт слушает только loopback: метрики не должны уходить
+наружу без явного решения.
+
+Если `metrics-port` занят (например, остался прошлый сервер или рядом второй
+экземпляр), сервер пробует следующие два порта — `25586`, `25587` — и пишет
+в лог, на каком слушает:
+
+```
+WARN metrics on http://127.0.0.1:25586/metrics (port 25585 is busy; `chunkwake top --port 25586` or update metrics-port)
+```
+
+`chunkwake top` перебирает те же три порта, поэтому без флагов находит сервер
+и после сдвига.
+
+## Метрики Prometheus
+
+```
+chunkwake_up
+chunkwake_tps{window="1m"|"5m"|"15m"}
+chunkwake_tick_rate
+chunkwake_tick_frozen
+chunkwake_mspt{quantile="0.5"|"0.95"|"0.99"|"max"}
+chunkwake_mspt_last
+chunkwake_ticks_total
+chunkwake_late_ticks_total
+chunkwake_process_cpu_percent
+chunkwake_process_rss_bytes
+chunkwake_process_threads
+chunkwake_system_cpu_percent
+chunkwake_system_memory_used_bytes
+chunkwake_system_memory_total_bytes
+chunkwake_cpu_core_percent{core="0"}
+chunkwake_players
+chunkwake_entities
+chunkwake_dropped_items
+chunkwake_chunks_simulated
+chunkwake_chunks_loaded
+chunkwake_chunkgen_pending
+chunkwake_network_bytes_total{direction="in"|"out"}
+chunkwake_network_packets_total{direction="in"|"out"}
+chunkwake_ping_milliseconds
+chunkwake_uptime_seconds
+```
+
+Пример `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: chunkwake
+    static_configs:
+      - targets: ["127.0.0.1:25585"]
+```
+
+## Профиль тика
+
+`/debug start` (или `/perf start`) пишет в `debug/profile-<время>.txt` строки
+`тик<TAB>MSPT`; `/debug stop` возвращает путь. Профиль ограничен пятью
+минутами тиков, дальше запись прекращается. Это не полноценный `spark`: стеков
+и разбивки по подсистемам пока нет.

@@ -4,6 +4,7 @@ mod level;
 
 use crate::config::Properties;
 use crate::storage::WorldStorage;
+use crate::MC_VERSION;
 use chunkwake_data::boot::Boot;
 use chunkwake_data::registries::{Builtin, RegistryData};
 use chunkwake_data::world::Blocks;
@@ -146,27 +147,34 @@ pub fn build_play_plan(
             let sky = dim.has_skylight;
             // Шум, поверхность и карверы — один конвейер генератора.
             let state = |name: &str| blocks.default_state(name).ok().map(|s| s as u32);
+            chunkwake_world::set_fluid_states(fluid_states(&blocks.states()));
             let overworld = chunkwake_worldgen::pipeline::Overworld::new(noise, &state, &biome_ids)?
                 .with_features(data_dir, &blocks.states(), &state, &biome_ids)?;
             if let Some((done, all)) = overworld.feature_coverage() {
                 tracing::info!("worldgen features: {done} of {all} ported");
+                for (name, why) in overworld.feature_failures().iter().take(5) {
+                    tracing::warn!("worldgen feature {name}: {why}");
+                }
             }
             if !overworld.has_surface() {
                 tracing::warn!("no material_rule in the data cache: the world keeps bare stone");
             }
             // Свет считает пролив при отправке: здесь только блоки.
-            let built: std::sync::Arc<dyn Fn(i32, i32) -> ChunkColumn + Send + Sync> =
-                std::sync::Arc::new(move |cx, cz| {
-                    let chunk = overworld.chunk(cx, cz);
-                    match chunk.biomes {
-                        Some(biomes) => ChunkColumn::from_blocks_with_biomes(
-                            &chunk.states, &biomes, block_bits, biome_bits, sky,
-                        ),
-                        None => ChunkColumn::from_blocks(
-                            &chunk.states, biome_id, block_bits, biome_bits, sky,
-                        ),
-                    }
-                });
+            let built: std::sync::Arc<
+                dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync,
+            > = std::sync::Arc::new(move |cx, cz| {
+                // `None` — чанк уже отдан: генератор его не повторяет, и
+                // вызывающему нужен готовый столбец из мира, а не копия.
+                let chunk = overworld.chunk(cx, cz)?;
+                Some(match chunk.biomes {
+                    Some(biomes) => ChunkColumn::from_blocks_with_biomes(
+                        &chunk.states, &biomes, block_bits, biome_bits, sky,
+                    ),
+                    None => ChunkColumn::from_blocks(
+                        &chunk.states, biome_id, block_bits, biome_bits, sky,
+                    ),
+                })
+            });
             if !climate {
                 tracing::warn!(
                     "reports/biomes.csv is missing: the noise world keeps a single biome. \
@@ -251,18 +259,10 @@ pub fn build_play_plan(
         spawn,
         player_type,
         block_names: block_names.clone(),
-        parsers: {
-            let parser = |name| {
-                chunkwake_data::registries::builtin_id_of(&builtin, "command_argument_type", name)
-                    .map_err(s)
-            };
-            chunkwake_protocol::text::CommandParsers {
-                string: parser("brigadier:string")?,
-                integer: parser("brigadier:integer")?,
-                item_stack: parser("minecraft:item_stack")?,
-                resource: parser("minecraft:resource")?,
-            }
-        },
+        parsers: chunkwake_protocol::text::CommandParsers::load(|name| {
+            chunkwake_data::registries::builtin_id_of(&builtin, "command_argument_type", name)
+                .map_err(s)
+        })?,
         survival: survival_data(
             data_dir,
             &blocks,
@@ -275,6 +275,25 @@ pub fn build_play_plan(
         )?,
     };
     let plan = PlayPlan::build(&packets, login, world, props.compression_threshold).map_err(s)?;
+    let mut plan = plan;
+    // Командам нужны настройки сервера: правила, белый список и каталог `/reload`.
+    // Командам нужны настройки сервера: правила, белый список и каталог `/reload`.
+    // Каталог сервера — родитель каталога мира: там `ops.json` и `server.properties`.
+    let server_dir = world_dir.parent().unwrap_or(world_dir);
+    let version_protocol = crate::config::read_cached_version(data_dir)
+        .map_or(0, |v| v.protocol);
+    plan.configure(
+        &chunkwake_net::play::commands::PlanConfig {
+            level_name: &props.level_name,
+            motd: &props.motd,
+            seed: level.seed,
+            version_name: &MC_VERSION,
+            version_protocol,
+            server_dir,
+            whitelist: props.white_list,
+        },
+        world_dir,
+    );
     tracing::debug!("world: play plan {} ms", t.elapsed().as_millis());
     let storage = WorldStorage::new(
         world_dir,
@@ -586,8 +605,54 @@ fn survival_data(
                 id("minecraft:chicken")?,
             ]
         },
+        creature_spawns: creature_spawns(data_dir, registries),
+        physics: chunkwake_data::world::load_physics(data_dir).ok().map(std::sync::Arc::new),
     };
     Ok(survival)
+}
+
+/// Мирные мобы биомов для заселения новых чанков.
+fn creature_spawns(data_dir: &Path, registries: &RegistryData) -> Vec<chunkwake_net::play::CreatureSpawns> {
+    let names = registries
+        .synchronized
+        .iter()
+        .find(|r| r.name == "worldgen/biome")
+        .map(|r| r.entries.clone())
+        .unwrap_or_default();
+    names
+        .iter()
+        .map(|name| {
+            let (ns, path) = name.split_once(':').unwrap_or(("minecraft", name));
+            let file = data_dir.join("data").join(ns).join("worldgen/biome").join(format!("{path}.json"));
+            let Some(v) = std::fs::read(&file)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            else {
+                return Default::default();
+            };
+            let attrs = &v["attributes"];
+            let chance = attrs["minecraft:gameplay/creature_world_gen_spawn_probability"]
+                .as_f64()
+                .unwrap_or(0.1) as f32;
+            let list = &attrs["minecraft:gameplay/natural_mob_spawns"]["argument"]["spawns_by_category"]["creature"];
+            let entries = list
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| {
+                    let kind = e["type"].as_str()?.to_string();
+                    let weight = e["weight"].as_u64()? as u32;
+                    let c = &e["count"];
+                    let (lo, hi) = match c.as_u64() {
+                        Some(n) => (n as u32, n as u32),
+                        None => (c["min_inclusive"].as_u64()? as u32, c["max_inclusive"].as_u64()? as u32),
+                    };
+                    Some((kind, weight, lo, hi))
+                })
+                .collect();
+            chunkwake_net::play::CreatureSpawns { chance, entries }
+        })
+        .collect()
 }
 
 /// Предмет, который ставит блок с другим именем (`ItemNameBlockItem`).
@@ -639,4 +704,26 @@ mod tests {
             assert_eq!(block_name_for_item(item), block);
         }
     }
+}
+
+/// Состояния с жидкостью: вода, лава, пузырьки, водоросли и всё затопленное.
+fn fluid_states(states: &[Option<(String, chunkwake_data::world::Properties)>]) -> Vec<bool> {
+    const ALWAYS: &[&str] = &[
+        "minecraft:water",
+        "minecraft:lava",
+        "minecraft:bubble_column",
+        "minecraft:kelp",
+        "minecraft:kelp_plant",
+        "minecraft:seagrass",
+        "minecraft:tall_seagrass",
+    ];
+    states
+        .iter()
+        .map(|s| {
+            s.as_ref().is_some_and(|(name, props)| {
+                ALWAYS.contains(&name.as_str())
+                    || props.iter().any(|(k, v)| k == "waterlogged" && v == "true")
+            })
+        })
+        .collect()
 }

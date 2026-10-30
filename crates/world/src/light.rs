@@ -481,19 +481,122 @@ fn paint_sky<A: LightAccess>(
     }
 }
 
+/// Столбцы пачки в плотной сетке: BFS трогает столбец на каждой клетке, и
+/// хэш-таблица на этом пути съедала большую часть времени света.
 struct Area<'a> {
-    columns: &'a mut HashMap<(i32, i32), ChunkColumn>,
-    touched: &'a mut HashSet<(i32, i32)>,
+    x0: i32,
+    z0: i32,
+    w: i32,
+    d: i32,
+    cells: Vec<Option<(i32, i32, &'a mut ChunkColumn)>>,
+    touched: Vec<bool>,
+}
+
+impl<'a> Area<'a> {
+    fn new(columns: &'a mut HashMap<(i32, i32), ChunkColumn>, origins: impl IntoIterator<Item = (i32, i32)>) -> Self {
+        let (mut x0, mut z0, mut x1, mut z1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for &(x, z) in columns.keys() {
+            (x0, z0, x1, z1) = (x0.min(x), z0.min(z), x1.max(x), z1.max(z));
+        }
+        let (w, d) = if columns.is_empty() { (0, 0) } else { (x1 - x0 + 1, z1 - z0 + 1) };
+        let mut cells: Vec<Option<(i32, i32, &mut ChunkColumn)>> = (0..w * d).map(|_| None).collect();
+        for (&(x, z), c) in columns.iter_mut() {
+            cells[((z - z0) * w + (x - x0)) as usize] = Some((x, z, c));
+        }
+        let mut area = Self { x0, z0, w, d, touched: vec![false; cells.len()], cells };
+        for (x, z) in origins {
+            if let Some(i) = area.slot(x, z) {
+                area.touched[i] = true;
+            }
+        }
+        area
+    }
+
+    fn slot(&self, cx: i32, cz: i32) -> Option<usize> {
+        let (x, z) = (cx - self.x0, cz - self.z0);
+        (x >= 0 && z >= 0 && x < self.w && z < self.d).then(|| (z * self.w + x) as usize)
+    }
+
+    /// Столбцы, где свет записан; их слои ужимаются обратно.
+    fn finish(self) -> Vec<(i32, i32)> {
+        let mut out = Vec::new();
+        for (cell, touched) in self.cells.into_iter().zip(self.touched) {
+            if let (Some((x, z, c)), true) = (cell, touched) {
+                for l in c.sky_light.iter_mut().chain(c.block_light.iter_mut()) {
+                    l.compact();
+                }
+                out.push((x, z));
+            }
+        }
+        out
+    }
 }
 
 impl LightAccess for Area<'_> {
     fn column(&mut self, cx: i32, cz: i32) -> Option<&ChunkColumn> {
-        self.columns.get(&(cx, cz))
+        let i = self.slot(cx, cz)?;
+        self.cells[i].as_ref().map(|c| &*c.2)
     }
     fn column_mut(&mut self, cx: i32, cz: i32) -> Option<&mut ChunkColumn> {
-        self.touched.insert((cx, cz));
-        self.columns.get_mut(&(cx, cz))
+        let i = self.slot(cx, cz)?;
+        let c = self.cells[i].as_mut()?;
+        self.touched[i] = true;
+        Some(&mut *c.2)
     }
+}
+
+/// Свет пачки новых чанков сразу: `origins` сбрасываются, небо и излучатели
+/// всех сразу ставятся в очередь, и один пролив доводит свет до соседей.
+///
+/// Отличие от [`spread_chunk`] по одному чанку принципиально: если два
+/// соседних новых чанка проливать по очереди, первый видит у второго нулевой
+/// свет, а второй потом не пересчитывает первого — на границе остаётся тёмный
+/// шов. Здесь оба видят друг друга до пролива, поэтому шва нет.
+/// Возвращает чанки, где свет изменился (свои плюс затронутые соседи).
+pub fn spread_wave(
+    columns: &mut HashMap<(i32, i32), ChunkColumn>,
+    origins: &HashSet<(i32, i32)>,
+    table: &LightTable,
+) -> Vec<(i32, i32)> {
+    let mut prepared = Vec::new();
+    for &pos in origins {
+        let Some(col) = columns.get_mut(&pos) else {
+            continue;
+        };
+        let n = col.sections.len();
+        col.sky_light = vec![LightLayer::Uniform(0); n];
+        col.block_light = vec![LightLayer::Uniform(0); n];
+        let tops = col.has_skylight.then(|| column_sky_top(col, table));
+        prepared.push((pos, tops, col.height() as i32, n));
+    }
+    if prepared.is_empty() {
+        return Vec::new();
+    }
+    let height = prepared[0].2;
+    let mut area = Area::new(columns, prepared.iter().map(|p| p.0));
+    let mut e = Engine::new(&mut area, table, height as usize);
+    // Небо всех новых чанков — до пролива: иначе первый в списке «не видит»
+    // остальные и затеняет их грани.
+    for (pos, tops, h, n) in &prepared {
+        if let Some(tops) = tops {
+            paint_sky(&mut e, tops, pos.0, pos.1, *h, *n);
+        }
+    }
+    for (pos, tops, h, _) in &prepared {
+        if tops.is_some() {
+            queue_faces(&mut e, Kind::Sky, *pos, *h);
+        }
+    }
+    e.increase(Kind::Sky);
+    for (pos, _, _, _) in &prepared {
+        queue_emitters(&mut e, *pos, table);
+    }
+    for (pos, _, h, _) in &prepared {
+        queue_faces(&mut e, Kind::Block, *pos, *h);
+    }
+    e.increase(Kind::Block);
+    drop(e);
+    area.finish()
 }
 
 /// Свет нового чанка `origin` и пролив через грань с соседями, которые уже лежат
@@ -513,11 +616,7 @@ pub fn spread_chunk(
     col.sky_light = vec![LightLayer::Uniform(0); n];
     col.block_light = vec![LightLayer::Uniform(0); n];
     let tops = has_sky.then(|| column_sky_top(col, table));
-    let mut touched = HashSet::from([origin]);
-    let mut area = Area {
-        columns,
-        touched: &mut touched,
-    };
+    let mut area = Area::new(columns, [origin]);
     let mut e = Engine::new(&mut area, table, height as usize);
     if let Some(tops) = tops {
         paint_sky(&mut e, &tops, origin.0, origin.1, height, n);
@@ -528,15 +627,7 @@ pub fn spread_chunk(
     queue_faces(&mut e, Kind::Block, origin, height);
     e.increase(Kind::Block);
     drop(e);
-    drop(area);
-    for pos in &touched {
-        if let Some(c) = columns.get_mut(pos) {
-            for l in c.sky_light.iter_mut().chain(c.block_light.iter_mut()) {
-                l.compact();
-            }
-        }
-    }
-    touched.into_iter().collect()
+    area.finish()
 }
 
 /// Клетки общей грани соседних чанков, откуда свет может войти в новый.
@@ -679,6 +770,117 @@ mod tests {
         }
     }
 
+    /// Два чанка с пещерой через общую границу и факелом у самой границы.
+    /// Факел в чанке 0, его свет должен уйти в чанк 1.
+    fn seam_setup(t: &LightTable) -> HashMap<(i32, i32), ChunkColumn> {
+        let mut map = HashMap::new();
+        for cx in 0..2i32 {
+            let mut c = ChunkColumn::flat(&[(1, 64)], 4, 0, 2, 0, true);
+            // Тоннель y=10..=11 вдоль z=8, пересекающий границу x=15/16.
+            let xs: Vec<usize> = if cx == 0 { (12..16).collect() } else { (0..4).collect() };
+            for x in xs {
+                for y in 10..12 {
+                    c.set_block(x, y, 8, 0);
+                }
+            }
+            relight_column(&mut c, t);
+            map.insert((cx, 0), c);
+        }
+        // Факел в дальнем конце тоннеля чанка 0.
+        map.get_mut(&(0, 0)).unwrap().set_block(12, 10, 8, 2);
+        relight_column(map.get_mut(&(0, 0)).unwrap(), t);
+        map
+    }
+
+    /// Эталон: свет всех столбцов разом, как посчитанный с нуля.
+    fn reference(
+        map: &HashMap<(i32, i32), ChunkColumn>,
+        t: &LightTable,
+    ) -> HashMap<(i32, i32), ChunkColumn> {
+        let mut ref_map = map.clone();
+        for c in ref_map.values_mut() {
+            let n = c.sections.len();
+            c.sky_light = vec![LightLayer::Uniform(0); n];
+            c.block_light = vec![LightLayer::Uniform(0); n];
+        }
+        let origins: HashSet<(i32, i32)> = ref_map.keys().copied().collect();
+        spread_wave(&mut ref_map, &origins, t);
+        ref_map
+    }
+
+    fn light_at(map: &HashMap<(i32, i32), ChunkColumn>, kind: Kind, p: [i32; 3]) -> u8 {
+        map[&(p[0] >> 4, p[2] >> 4)].light(kind)[(p[1] >> 4) as usize].get(index(p))
+    }
+
+    /// Волна по пачке чанков совпадает с эталоном, и свет реально переходит
+    /// границу — то есть соседи видят друг друга до пролива.
+    #[test]
+    fn wave_lights_neighbouring_chunks_without_a_seam() {
+        let t = table();
+        let mut map = seam_setup(&t);
+        let want = reference(&map, &t);
+        let origins: HashSet<(i32, i32)> = map.keys().copied().collect();
+        spread_wave(&mut map, &origins, &t);
+        for (pos, got) in &map {
+            let exp = &want[pos];
+            for kind in [Kind::Sky, Kind::Block] {
+                for y in 0..got.height() as i32 {
+                    for i in 0..256i32 {
+                        let p = [pos.0 * 16 + (i & 15), y, pos.1 * 16 + (i >> 4)];
+                        assert_eq!(
+                            light_at(&map, kind, p),
+                            light_at(&want, kind, p),
+                            "{kind:?} at {p:?}"
+                        );
+                    }
+                }
+            }
+            let _ = exp;
+        }
+        // Свет прошёл границу: иначе тест прошёл бы на нулях.
+        assert_eq!(light_at(&map, Kind::Block, [12, 10, 8]), 14);
+        assert_eq!(light_at(&map, Kind::Block, [15, 10, 8]), 11);
+        assert_eq!(
+            light_at(&map, Kind::Block, [16, 10, 8]),
+            10,
+            "block light did not cross the border"
+        );
+    }
+
+    /// Настоящая причина тёмных швов: `spread_commit` записывал свет в соседа
+    /// только если ревизия соседа не успела измениться. Если сосед посчитал
+    /// свой свет, пока этот ещё не был освещён, запись отбрасывалась и не
+    /// повторялась — на границе навсегда оставалась тень. Здесь этот отброс
+    /// воспроизводится явно.
+    #[test]
+    fn dropped_write_leaves_a_dark_seam() {
+        let t = table();
+        let base = seam_setup(&t);
+        let want = reference(&base, &t);
+
+        // Чанк 1 светится, пока чанк 0 ещё тёмный.
+        let mut race = base.clone();
+        for pos in [(0, 0), (1, 0)] {
+            let c = race.get_mut(&pos).unwrap();
+            let n = c.sections.len();
+            c.sky_light = vec![LightLayer::Uniform(0); n];
+            c.block_light = vec![LightLayer::Uniform(0); n];
+        }
+        spread_chunk(&mut race, (1, 0), &t);
+        // Чанк 0 светится после и пишет в соседа, но ревизия чанка 1 уже
+        // изменилась, поэтому запись отбрасывается — как в `commit_light`.
+        let touched = spread_chunk(&mut race, (0, 0), &t);
+        assert!(touched.contains(&(1, 0)), "пролив должен был дойти до соседа");
+        let dropped = base.clone();
+        race.insert((1, 0), dropped[&(1, 0)].clone());
+
+        let seam = light_at(&race, Kind::Block, [16, 10, 8]);
+        let proper = light_at(&want, Kind::Block, [16, 10, 8]);
+        assert!(
+            seam < proper,
+            "отброшенная запись обязана дать тёмный шов: {seam} против {proper}"
+        );
+    }
     fn light(w: &mut World, kind: Kind, p: [i32; 3]) -> u8 {
         w.0[&(p[0] >> 4, p[2] >> 4)].light(kind)[(p[1] >> 4) as usize].get(index(p))
     }

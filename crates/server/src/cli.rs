@@ -27,6 +27,13 @@ enum Command {
     BackupRestore(String),
     BackupResume,
     BackupRollback,
+    Top {
+        host: Option<String>,
+        port: Option<u16>,
+        watch: Option<u64>,
+        json: bool,
+        color: bool,
+    },
     Help,
 }
 
@@ -64,10 +71,52 @@ impl Cli {
             [a, b, id] if a == "backup" && b == "restore" => Command::BackupRestore(id.clone()),
             [a, b] if a == "backup" && b == "resume" => Command::BackupResume,
             [a, b] if a == "backup" && b == "rollback" => Command::BackupRollback,
+            [s, rest @ ..] if s == "top" => parse_top(rest)?,
             _ => return Err(format!("unknown command; {}", usage())),
         };
         Ok(Self { dir, command })
     }
+}
+
+/// `chunkwake top [--host H] [--port P] [--watch SEC] [--json] [--no-color]`.
+fn parse_top(args: &[String]) -> Result<Command, String> {
+    let mut host = None;
+    let mut port = None;
+    let mut watch = None;
+    let mut json = false;
+    let mut color = true;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--host" => host = Some(it.next().ok_or("--host requires a value")?.clone()),
+            "--port" => {
+                let value = it.next().ok_or("--port requires a value")?;
+                port = Some(
+                    value
+                        .parse::<u16>()
+                        .map_err(|_| format!("--port {value}: expected 1..65535"))?,
+                );
+            }
+            "--watch" => {
+                let value = it.next().ok_or("--watch requires seconds")?;
+                watch = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| format!("--watch {value}: expected seconds"))?,
+                );
+            }
+            "--json" => json = true,
+            "--no-color" => color = false,
+            other => return Err(format!("unknown option {other}; {}", usage())),
+        }
+    }
+    Ok(Command::Top {
+        host,
+        port,
+        watch,
+        json,
+        color,
+    })
 }
 
 fn help() -> &'static str {
@@ -79,6 +128,7 @@ USAGE
 COMMANDS
   setup                   Configure the server interactively
   doctor                  Check settings, jar, Java, and port
+  top                     Show live load once (CPU, TPS, MSPT, memory)
   config show             Show the current settings
   config set KEY VALUE    Change one setting
   backup create           Create an offline backup
@@ -93,10 +143,18 @@ OPTIONS
   --dir PATH              Server directory (default: current directory)
   -h, --help              Show this help
 
+TOP OPTIONS
+  --host HOST             Metrics address (default: metrics-bind, then 127.0.0.1)
+  --port PORT             Metrics port (default: metrics-port, then 25585)
+  --watch SEC             Redraw every SEC seconds until Ctrl+C
+  --json                  Print the raw snapshot instead of a table
+  --no-color              Plain text without ANSI colours
+
 EXAMPLES
   chunkwake setup --dir ./server
   chunkwake config set server-port 25570 --dir ./server
-  chunkwake doctor --dir ./server"
+  chunkwake doctor --dir ./server
+  chunkwake top --dir ./server --watch 2"
 }
 
 fn usage() -> &'static str {
@@ -208,6 +266,13 @@ pub async fn execute() -> Result<(), String> {
             );
             Ok(())
         }
+        Command::Top {
+            host,
+            port,
+            watch,
+            json,
+            color,
+        } => top(&cli.dir, host, port, watch, json, color).await,
         Command::Help => {
             println!("{}", help());
             Ok(())
@@ -215,9 +280,88 @@ pub async fn execute() -> Result<(), String> {
     }
 }
 
+/// `chunkwake top`: снимок нагрузки с работающего сервера.
+///
+/// По умолчанию — один снимок в терминал; `--watch` перерисовывает его на
+/// месте (без интерактивного ввода), `--json` отдаёт машинный формат.
+async fn top(
+    dir: &Path,
+    host: Option<String>,
+    port: Option<u16>,
+    watch: Option<u64>,
+    json: bool,
+    color: bool,
+) -> Result<(), String> {
+    // Адрес берём из настроек сервера: тот же, что в `metrics-bind`.
+    let props = Properties::load(&config_path(dir)).ok();
+    let host = host
+        .or_else(|| props.as_ref().map(|p| p.metrics_ip.clone()))
+        .unwrap_or_else(|| "127.0.0.1".into());
+    let port = port
+        .or_else(|| props.as_ref().map(|p| p.metrics_port))
+        .unwrap_or(25585);
+    let once = || async {
+        chunkwake_metrics::http::fetch(&host, port)
+            .await
+            .map_err(|e| format!("{e}\nIs the server running with metrics-enabled=true?"))
+    };
+    let Some(period) = watch else {
+        let snapshot = once().await?;
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&snapshot).map_err(|e| e.to_string())?
+            );
+        } else {
+            print!(
+                "{}",
+                chunkwake_metrics::render::ansi::render(
+                    &snapshot,
+                    chunkwake_metrics::render::Section::All,
+                    color,
+                )
+            );
+        }
+        return Ok(());
+    };
+    // Перерисовка на месте: `ESC[H` + `ESC[2J`, без альтернативного экрана.
+    let period = std::time::Duration::from_secs(period.max(1));
+    loop {
+        match once().await {
+            Ok(snapshot) => {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&snapshot).map_err(|e| e.to_string())?
+                    );
+                } else if color {
+                    print!(
+                        "\x1b[H\x1b[2J{}",
+                        chunkwake_metrics::render::ansi::render(
+                            &snapshot,
+                            chunkwake_metrics::render::Section::All,
+                            true,
+                        )
+                    );
+                } else {
+                    println!(
+                        "{}",
+                        chunkwake_metrics::render::ansi::render(
+                            &snapshot,
+                            chunkwake_metrics::render::Section::All,
+                            false,
+                        )
+                    );
+                }
+            }
+            Err(error) => eprintln!("{error}"),
+        }
+        tokio::time::sleep(period).await;
+    }
+}
+
 /// Checks the draft settings without writing them or starting the server.
-pub fn diagnose(props: &Properties, dir: &Path) -> Vec<Diagnostic> {
-    let mut issues = Vec::new();
+pub fn diagnose(props: &Properties, dir: &Path) -> Vec<Diagnostic> {    let mut issues = Vec::new();
     let cache_ready = chunkwake_data::generator::cached(&props.generated_path(dir), MC_VERSION)
         .and_then(|data| config::read_cached_version(&data))
         .is_some_and(|version| version.name == MC_VERSION);
@@ -347,6 +491,37 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn top_parses_options() {
+        let cli = Cli::parse([
+            "top".into(),
+            "--port".into(),
+            "25590".into(),
+            "--watch".into(),
+            "2".into(),
+            "--no-color".into(),
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Top {
+                port,
+                watch,
+                color,
+                json,
+                host,
+            } => {
+                assert_eq!(port, Some(25590));
+                assert_eq!(watch, Some(2));
+                assert!(!color);
+                assert!(!json);
+                assert!(host.is_none());
+            }
+            other => panic!("не top: {other:?}"),
+        }
+        assert!(Cli::parse(["top".into(), "--port".into(), "x".into()]).is_err());
+        assert!(Cli::parse(["top".into(), "--bogus".into()]).is_err());
     }
 
     #[test]

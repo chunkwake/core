@@ -105,6 +105,8 @@ pub enum Control {
     Teleport([f64; 3], f32, f32),
     /// Очистить инвентарь игрока (`/clear`).
     Clear,
+    /// Выдать предмет (`/give`): ID предмета и количество.
+    Give(i32, i32),
     /// Внутреннее: урон извне сессии (стрела из раздатчика).
     Hurt(f32, crate::survival::Cause),
     /// Внутреннее (не от плагинов): содержимое сундука изменил другой игрок.
@@ -128,6 +130,10 @@ pub enum Control {
     OpenPlugin(i32, String),
     /// Закрыть открытое окно (`closewin`).
     CloseWindow,
+    /// Отключить игрока с причиной (`/kick`).
+    Kick(String),
+    /// Переслать на другой сервер (`/transfer`).
+    Transfer(String, u16),
 }
 
 impl Control {
@@ -263,12 +269,15 @@ impl Control {
                 live.effects.retain(|e| id.is_some_and(|w| w != e.id))
             }
             Control::Clear => live.slots = [None; SLOTS],
+            Control::Give(..) => {}
             Control::Xp(c) => {
                 live.xp.apply(c);
             }
             Control::ContainerChanged(_)
             | Control::OpenPlugin(..)
             | Control::CloseWindow
+            | Control::Kick(_)
+            | Control::Transfer(..)
             | Control::Furnace(..)
             | Control::Shutdown
             | Control::Hurt(..) => {}

@@ -6,11 +6,13 @@ license.workspace = true
 
 [dependencies]
 chunkwake-data = { path = "../data" }
+chunkwake-metrics = { path = "../metrics" }
 chunkwake-protocol = { path = "../protocol" }
 chunkwake-world = { path = "../world" }
 aes = "0.8"
 bytes = "1"
 cfb8 = "0.8"
+crossbeam-channel = "0.5"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rsa = "0.9"
@@ -23,3 +25,6 @@ uuid = { version = "1", features = ["serde"] }
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 chunkwake-worldgen = { path = "../worldgen" }
+
+[features]
+bench = []

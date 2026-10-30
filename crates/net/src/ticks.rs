@@ -15,8 +15,19 @@ impl TickQueue {
         self.at.is_empty()
     }
 
+    /// Сколько позиций ждёт своего срока.
+    pub fn len(&self) -> usize {
+        self.at.len()
+    }
+
     pub fn contains(&self, pos: [i32; 3]) -> bool {
         self.at.contains_key(&pos)
+    }
+
+    /// Снимает запланированный тик: блок сломали, воронку убрали. Устаревшая
+    /// запись в `by_time` безвредна — её отсеет `take_due*` по `at`.
+    pub fn remove(&mut self, pos: [i32; 3]) {
+        self.at.remove(&pos);
     }
 
     /// Ставит тик; уже стоящий меняет срок только при `replace`.

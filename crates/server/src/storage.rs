@@ -203,21 +203,37 @@ impl PlayerSource for WorldStorage {
 
 impl ChunkSource for WorldStorage {
     fn load_region(&self, rx: i32, rz: i32) -> Result<Vec<LoadedChunk>, String> {
-        self.store
+        let mut out: Vec<((i32, i32), ChunkColumn, bool)> = self
+            .store
             .load_region(rx, rz)?
             .iter()
             .map(|(pos, nbt)| {
-                // Чанк без света (сохранён до его появления) освещаем сами.
                 anvil::chunk_from_nbt(nbt, &self.template, self.format, &self.names)
-                    .map(|(mut c, lit)| {
-                        if !lit {
-                            light::relight_column(&mut c, &self.light);
-                        }
-                        (*pos, c)
-                    })
+                    .map(|(c, lit)| (*pos, c, lit))
                     .map_err(|e| format!("chunk {pos:?}: {e}"))
             })
-            .collect()
+            .collect::<Result<_, _>>()?;
+        // Чанк без света в файле (сохранён до его появления, `isLightOn=0`)
+        // нельзя освещать поодиночке: `relight_column` не видит соседей и
+        // оставляет тёмные грани. Пока такие есть, светим весь регион сразу —
+        // `spread_wave` для них и пролив от соседей для остальных.
+        let dark: Vec<(i32, i32)> = out
+            .iter()
+            .filter(|(_, _, lit)| !lit)
+            .map(|(pos, _, _)| *pos)
+            .collect();
+        if !dark.is_empty() {
+            let mut columns: HashMap<(i32, i32), ChunkColumn> = out
+                .drain(..)
+                .map(|(pos, c, _)| (pos, c))
+                .collect();
+            let origins: std::collections::HashSet<(i32, i32)> = dark.iter().copied().collect();
+            light::spread_wave(&mut columns, &origins, &self.light);
+            // Соседи, у которых свет был, тоже получили пролив от тёмных —
+            // их столбцы в `columns` уже обновлены.
+            out = columns.into_iter().map(|(pos, c)| (pos, c, true)).collect();
+        }
+        Ok(out.into_iter().map(|(pos, c, _)| (pos, c)).collect())
     }
 
     fn load_entities(

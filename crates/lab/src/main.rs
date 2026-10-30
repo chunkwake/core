@@ -39,6 +39,8 @@ enum BenchProfile {
     Exploration,
     Redstone,
     Cows,
+    /// Без игроков: спавн загружен, мир не делает ничего. Меряет чистый тик.
+    Idle,
 }
 
 impl BenchProfile {
@@ -50,8 +52,9 @@ impl BenchProfile {
             "exploration" => Ok(Self::Exploration),
             "redstone" => Ok(Self::Redstone),
             "cows" => Ok(Self::Cows),
+            "idle" => Ok(Self::Idle),
             _ => Err(format!(
-                "unknown profile {value}; use all, join-burst, movement, exploration, redstone or cows"
+                "unknown profile {value}; use all, join-burst, movement, exploration, redstone, cows or idle"
             )),
         }
     }
@@ -64,7 +67,13 @@ impl BenchProfile {
             Self::Exploration => "Исследование мира",
             Self::Redstone => "Редстоун",
             Self::Cows => "2500 коров",
+            Self::Idle => "Простой",
         }
+    }
+
+    /// Нужен ли хотя бы один бот: `Idle` меряет сервер без подключений.
+    fn needs_bots(self) -> bool {
+        self != Self::Idle
     }
 }
 
@@ -78,6 +87,7 @@ fn run_schedule(
     } else if profile == BenchProfile::All {
         vec![
             None,
+            Some(BenchProfile::Idle),
             Some(BenchProfile::JoinBurst),
             Some(BenchProfile::Movement),
             Some(BenchProfile::Exploration),
@@ -1728,7 +1738,9 @@ async fn benchmark(
     let (connected_tx, mut connected_rx) = tokio::sync::mpsc::unbounded_channel::<f64>();
     let (lamp_tx, mut lamp_rx) = tokio::sync::mpsc::unbounded_channel::<([i32; 3], i32, Instant)>();
     let (start_tx, start_rx) = tokio::sync::watch::channel(false);
-    for i in 0..args.bots {
+    // `Idle` меряет сервер без подключений: ботов не запускаем вовсе.
+    let bot_count = if args.profile.needs_bots() { args.bots } else { 0 };
+    for i in 0..bot_count {
         let addr = addr.to_owned();
         let warmup = args.warmup;
         let duration = args.duration;
@@ -1769,7 +1781,11 @@ async fn benchmark(
                                 angle += 0.5;
                                 client.move_to([origin[0] + angle, origin[1], origin[2]]).await?;
                             }
-                            BenchProfile::All | BenchProfile::JoinBurst | BenchProfile::Redstone | BenchProfile::Cows => {}
+                            BenchProfile::All
+                            | BenchProfile::JoinBurst
+                            | BenchProfile::Redstone
+                            | BenchProfile::Cows
+                            | BenchProfile::Idle => {}
                         }
                     }
                     event = client.next_event() => {
@@ -1885,7 +1901,9 @@ async fn benchmark(
     toggle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut sample_tick = tokio::time::interval(Duration::from_secs(1));
     sample_tick.tick().await;
-    while !tasks.is_empty() && Instant::now() < deadline {
+    while (args.profile == BenchProfile::Idle || !tasks.is_empty())
+        && Instant::now() < deadline
+    {
         tokio::select! {
             biased;
             _ = toggle_tick.tick(), if args.profile == BenchProfile::Redstone && measurement_started.elapsed() < args.warmup + args.duration => {
@@ -2100,6 +2118,7 @@ mod tests {
     fn benchmark_profiles_parse_or_reject_unknown_name() {
         for name in [
             "all",
+            "idle",
             "join-burst",
             "movement",
             "exploration",
@@ -2114,9 +2133,10 @@ mod tests {
     #[test]
     fn all_profile_runs_checks_once_and_every_load_profile_per_repetition() {
         let schedule = run_schedule(Mode::Bench, BenchProfile::All, 2);
-        assert_eq!(schedule.len(), 11);
+        assert_eq!(schedule.len(), 13);
         assert_eq!(schedule[0], (None, 0));
         for (index, profile) in [
+            BenchProfile::Idle,
             BenchProfile::JoinBurst,
             BenchProfile::Movement,
             BenchProfile::Exploration,

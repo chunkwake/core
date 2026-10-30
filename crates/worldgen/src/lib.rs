@@ -64,12 +64,12 @@ pub struct Generator {
     biome_carvers: HashMap<String, Vec<usize>>,
     /// Карверы по чанку-источнику (`carverBiome`): одна точка климата
     /// на чанк, но её спрашивают 289 соседей.
-    source_biomes: std::sync::Mutex<HashMap<ChunkPos, Option<Arc<[usize]>>>>,
+    source_biomes: Vec<std::sync::Mutex<HashMap<ChunkPos, Option<Arc<[usize]>>>>>,
     /// `BiomeManager.obfuscateSeed`: сид «дрожания» границ биомов.
     zoom_seed: i64,
     /// Биомы уже посчитанных чанков: «дрожание» границы заглядывает к соседу,
     /// а соседа всё равно генерировать — как биомы в чанках региона ванили.
-    biome_cache: std::sync::Mutex<HashMap<ChunkPos, Arc<[u32]>>>,
+    biome_cache: Vec<std::sync::Mutex<HashMap<ChunkPos, Arc<[u32]>>>>,
 }
 
 
@@ -237,6 +237,19 @@ fn write_cache(path: &Path, rows: &[(String, String)], world_version: i32) {
     if std::fs::write(&tmp, &bytes).is_ok() {
         let _ = std::fs::rename(&tmp, path);
     }
+}
+
+/// Ограничение кэша биомов на шард. Один чанк — 1536 u32 (24 секции × 64
+/// клетки), то есть ~6 КиБ; 512 чанков на шард — ~3 МБ, 32 шарда — ~96 МБ.
+const BIOME_CACHE_SHARD: usize = 512;
+
+/// Шардов кэша биомов. Промах стоит ~4 мс климата, поэтому замок должен
+/// быть мелким: с одним общим мьютексом все потоки генерации выстраивались
+/// в очередь на каждом промахе.
+const BIOME_SHARDS: usize = 32;
+
+fn biome_shard(cx: i32, cz: i32) -> usize {
+    ((cx.wrapping_mul(73_856_093) ^ cz.wrapping_mul(19_349_663)) as u32 as usize) % BIOME_SHARDS
 }
 
 impl Generator {
@@ -423,9 +436,13 @@ impl Generator {
             seed,
             carvers: Vec::new(),
             biome_carvers: HashMap::new(),
-            source_biomes: std::sync::Mutex::new(HashMap::new()),
+            source_biomes: (0..BIOME_SHARDS)
+                .map(|_| std::sync::Mutex::new(HashMap::new()))
+                .collect(),
             zoom_seed: biome::zoom_seed(seed),
-            biome_cache: std::sync::Mutex::new(HashMap::new()),
+            biome_cache: (0..BIOME_SHARDS)
+                .map(|_| std::sync::Mutex::new(HashMap::new()))
+                .collect(),
         })
     }
 
@@ -476,7 +493,8 @@ impl Generator {
     /// Карверы чанка-источника по биому в квартовой клетке его угла на y=0
     /// (`getBiomeGenerationSettingsForCarver`).
     fn source_carvers(&self, sx: i32, sz: i32) -> Option<Arc<[usize]>> {
-        if let Some(hit) = self.source_biomes.lock().unwrap().get(&(sx, sz)) {
+        let shard = &self.source_biomes[biome_shard(sx, sz)];
+        if let Some(hit) = shard.lock().unwrap().get(&(sx, sz)) {
             return hit.clone();
         }
         let p = self.climate_at(sx * 4, 0, sz * 4);
@@ -490,9 +508,9 @@ impl Generator {
             .and_then(|n| self.biome_carvers.get(n))
             .filter(|l| !l.is_empty())
             .map(|l| Arc::from(l.as_slice()));
-        let mut cache = self.source_biomes.lock().unwrap();
+        let mut cache = shard.lock().unwrap();
         // Кэш ограничен: игрок, улетевший далеко, не должен копить его вечно.
-        if cache.len() > 1 << 16 {
+        if cache.len() > 1 << 12 {
             cache.clear();
         }
         cache.insert((sx, sz), found.clone());
@@ -666,14 +684,23 @@ impl Generator {
     }
 
     fn cached_biomes(&self, cx: i32, cz: i32) -> Option<Arc<[u32]>> {
-        if let Some(hit) = self.biome_cache.lock().unwrap().get(&(cx, cz)) {
+        let shard = &self.biome_cache[biome_shard(cx, cz)];
+        if let Some(hit) = shard.lock().unwrap().get(&(cx, cz)) {
             return Some(hit.clone());
         }
+        // Считаем без замка: климат дорогой, держать его под общим мьютексом
+        // значит сериализовать все потоки генерации.
         let ids: Arc<[u32]> = self.compute_biomes(cx, cz)?.into();
-        let mut cache = self.biome_cache.lock().unwrap();
-        // Около 6 КиБ на чанк: держим не больше пары тысяч.
-        if cache.len() >= 2048 {
-            cache.clear();
+        let mut cache = shard.lock().unwrap();
+        if cache.len() >= BIOME_CACHE_SHARD {
+            let drop: Vec<(i32, i32)> = cache
+                .keys()
+                .take(BIOME_CACHE_SHARD / 2)
+                .copied()
+                .collect();
+            for k in drop {
+                cache.remove(&k);
+            }
         }
         cache.insert((cx, cz), ids.clone());
         Some(ids)
@@ -682,12 +709,23 @@ impl Generator {
     fn compute_biomes(&self, cx: i32, cz: i32) -> Option<Vec<u32>> {
         let points = self.climate(cx, cz)?;
         let mut ids = Vec::with_capacity(points.len());
+        let mut hint = None;
+        let mut names: Vec<(usize, u32)> = Vec::new();
         for p in &points {
             let mut q = [0i64; 6];
             for (q, v) in q.iter_mut().zip(p) {
                 *q = biome::quantize(*v);
             }
-            ids.push(self.biomes.biome(&q).unwrap_or(u32::MAX));
+            hint = self.biomes.find_from(&q, hint);
+            let id = hint.map_or(u32::MAX, |h| {
+                if let Some(&(_, id)) = names.iter().find(|(p, _)| *p == h) {
+                    return id;
+                }
+                let id = self.biomes.id_of(h).unwrap_or(u32::MAX);
+                names.push((h, id));
+                id
+            });
+            ids.push(id);
         }
         Some(ids)
     }

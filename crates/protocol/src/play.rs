@@ -591,6 +591,120 @@ pub fn block_event(id: i32, pos: [i32; 3], action: u8, param: u8, block: i32) ->
     w.buf
 }
 
+/// `ClientboundSetTitleTextPacket` / `set_subtitle_text` / `set_action_bar_text`:
+/// текстовый компонент без дополнительных полей.
+pub fn plain_component_packet(id: i32, text: &serde_json::Value) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id);
+    crate::text::write_component(&mut w, text);
+    w.buf
+}
+
+/// `ClientboundSetTitlesAnimationPacket`: тики появления, пребывания, исчезновения.
+pub fn titles_animation(id: i32, fade_in: i32, stay: i32, fade_out: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).i32(fade_in).i32(stay).i32(fade_out);
+    w.buf
+}
+
+/// `ClientboundClearTitlesPacket`: сбросить заголовок (`reset` — сразу).
+pub fn clear_titles(id: i32, reset: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).bool(reset);
+    w.buf
+}
+
+/// `ClientboundStopSoundPacket`: остановить звук (`sound` — `None` значит все).
+pub fn stop_sound(id: i32, sound: Option<i32>, source: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id);
+    // Флаги: 1 — есть источник, 2 — есть звук.
+    let mut flags = 0u8;
+    if source > 0 {
+        flags |= 1;
+    }
+    if sound.is_some() {
+        flags |= 2;
+    }
+    w.u8(flags);
+    if flags & 1 != 0 {
+        w.var_int(source);
+    }
+    if let Some(sound) = sound {
+        // Реестровые ID звуков сдвинуты на 1: 0 у ванилы значит «нет звука».
+        w.var_int(sound + 1);
+    }
+    w.buf
+}
+
+/// `ClientboundSetObjectivePacket`: `mode` 0 — создать, 1 — убрать, 2 — обновить.
+pub fn set_objective(
+    id: i32,
+    name: &str,
+    mode: u8,
+    display_name: &serde_json::Value,
+    render_type: i32,
+    has_number_format: bool,
+    has_display_name: bool,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).string(name).u8(mode);
+    if mode != 1 {
+        crate::text::write_component(&mut w, display_name);
+        w.var_int(render_type);
+        // OPTIONAL_NUMBER_FORMAT: 0 — нет формата.
+        w.bool(has_number_format);
+    }
+    w.bool(!has_display_name || mode != 1);
+    w.buf
+}
+
+/// `ClientboundSetScorePacket`: значение счёта держателя.
+pub fn set_score(
+    id: i32,
+    holder: &str,
+    objective: &str,
+    value: i32,
+    display_name: Option<&serde_json::Value>,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).string(holder).var_int(value);
+    match display_name {
+        Some(name) => {
+            w.bool(true);
+            crate::text::write_component(&mut w, name);
+        }
+        None => {
+            w.bool(false);
+        }
+    }
+    w.string(objective);
+    w.buf
+}
+
+/// `ClientboundResetScorePacket`: снять счёт (или всю цель держателя).
+pub fn reset_score(id: i32, holder: &str, objective: Option<&str>) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).string(holder);
+    match objective {
+        Some(objective) => {
+            w.bool(true);
+            w.string(objective);
+        }
+        None => {
+            w.bool(false);
+        }
+    }
+    w.buf
+}
+
+/// `ClientboundSetDisplayObjectivePacket`: цель в слоте (`sidebar`, `list`, `below_name`).
+pub fn set_display_objective(id: i32, slot: &str, objective: &str) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).string(slot).string(objective);
+    w.buf
+}
+
 /// `set_time` 26.3: возраст мира и одна запись часов верхнего мира.
 /// Часы — `minecraft:overworld` (сетевой id 0, записи реестра отсортированы).
 /// Состояние часов: VarLong тиков, доля тика, скорость (`0` — солнце стоит между пакетами).

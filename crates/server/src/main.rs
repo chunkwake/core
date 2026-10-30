@@ -8,12 +8,11 @@ mod setup_tui;
 mod storage;
 mod world_setup;
 
+use chunkwake_server::MC_VERSION;
 use chunkwake_net::Server;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use tokio::net::TcpListener;
-
-pub const MC_VERSION: &str = "26.3";
 
 #[tokio::main]
 async fn main() {
@@ -137,6 +136,8 @@ async fn serve(dir: &Path) -> Result<(), String> {
         props.simulation_distance.min(props.view_distance)
     );
     let tick_task = play.spawn_tick();
+    // Метрики: сэмплер процесса раз в секунду, снимок — для `/top` и HTTP.
+    let _metrics = start_metrics(&props, &play);
     let autosave_task = storage.spawn_autosave(play.clone());
     let bridge = start_plugins(dir, &props, &play).await;
 
@@ -267,8 +268,60 @@ async fn serve(dir: &Path) -> Result<(), String> {
     }
 }
 
-fn log_player_exit(name: &str, result: Result<(), chunkwake_net::NetError>) {
-    match result {
+/// Запускает сэмплер процесса и HTTP-эндпоинт метрик.
+///
+/// Сэмплер опрашивает `sysinfo` раз в секунду: загрузку CPU он считает как
+/// разницу между опросами, поэтому делать это из команды `/top` нельзя.
+/// Снимок в памяти общий для `/metrics`, `/snapshot` и `chunkwake top`.
+fn start_metrics(
+    props: &config::Properties,
+    play: &std::sync::Arc<chunkwake_net::play::PlayPlan>,
+) -> Option<chunkwake_metrics::http::Shared> {
+    if !props.metrics_enabled {
+        tracing::info!("metrics disabled (metrics-enabled=false)");
+        return None;
+    }
+    let snapshot: chunkwake_metrics::http::Shared =
+        std::sync::Arc::new(std::sync::RwLock::new(chunkwake_metrics::Snapshot::default()));
+    let play_sampler = play.clone();
+    let snapshot_sampler = snapshot.clone();
+    tokio::spawn(async move {
+        let mut sampler = chunkwake_metrics::ProcessSampler::new();
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            let proc_stats = sampler.sample();
+            play_sampler.set_proc_stats(proc_stats.clone());
+            let mut fresh = play_sampler.load_snapshot();
+            fresh.proc = proc_stats;
+            if let Ok(mut slot) = snapshot_sampler.write() {
+                *slot = fresh;
+            }
+        }
+    });
+    let ip: std::net::IpAddr = props
+        .metrics_ip
+        .parse()
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    let port = props.metrics_port;
+    let snapshot_server = snapshot.clone();
+    tokio::spawn(async move {
+        match chunkwake_metrics::http::spawn(ip, port, snapshot_server).await {
+            Ok(bound) if bound == port => tracing::info!("metrics on http://{ip}:{bound}/metrics"),
+            // Порт был занят: говорим явно, иначе `chunkwake top` без флагов
+            // будет искать сервер на «правильном» порту и не найдёт.
+            Ok(bound) => tracing::warn!(
+                "metrics on http://{ip}:{bound}/metrics (port {port} is busy; \
+                 `chunkwake top --port {bound}` or update metrics-port)"
+            ),
+            Err(error) => tracing::error!("metrics disabled: {error}"),
+        }
+    });
+    Some(snapshot)
+}
+
+fn log_player_exit(name: &str, result: Result<(), chunkwake_net::NetError>) {    match result {
         Ok(()) => tracing::info!(%name, "player left"),
         Err(chunkwake_net::NetError::Io(error))
             if matches!(

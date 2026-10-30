@@ -468,6 +468,39 @@ pub struct Stage<'a> {
     /// Предварительная поверхность (`chunk_surface_level`) по квартовой сетке.
     pub preliminary: &'a [f32],
     pub random: &'a Positional,
+    /// Индекс шума `minecraft:clay_bands_offset` для полос бедлендов.
+    pub clay_offset: Option<usize>,
+}
+
+/// Кэш шумов столбца: значение на индекс шума.
+///
+/// Шум условия зависит только от x/z, поэтому считается один раз на столбец.
+/// Массив вместо `Vec<(usize, f32)>`: линейный поиск по нему шёл на каждый
+/// блок каждого столбца (384 × 256 проверок на чанк).
+pub(super) struct NoiseCache {
+    values: Vec<f32>,
+}
+
+impl NoiseCache {
+    pub(super) fn new(noises: usize) -> Self {
+        Self {
+            values: vec![f32::NAN; noises],
+        }
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.values.fill(f32::NAN);
+    }
+
+    pub(super) fn get(&self, id: usize) -> Option<f32> {
+        self.values.get(id).copied().filter(|v| !v.is_nan())
+    }
+
+    pub(super) fn set(&mut self, id: usize, value: f32) {
+        if let Some(slot) = self.values.get_mut(id) {
+            *slot = value;
+        }
+    }
 }
 
 /// `MaterialRuleContext`: состояние одного столбца между вызовами правил.
@@ -493,14 +526,30 @@ impl<'a> Stage<'a> {
         // иначе каждая клетка заново проходит дерево интерполяции.
         let veins = self.vein_volumes(cx, cz);
         // Карта высот `WORLD_SURFACE_WG` считается до стадии и по ней же ищется
-        // уклон. Без кэша `surface()` сканирует 384 блока пять раз на столбец.
-        let heights: Vec<usize> = (0..256)
-            .map(|i| chunk.surface(i % 16, i / 16))
-            .collect();
+        // уклон. Один проход снизу вверх на всё 16×16: `chunk.surface()` на
+        // каждый столбец сканировал 384 блока заново, то есть ~98 тыс.
+        // проверок на чанк.
+        let heights: Vec<usize> = {
+            let mut out = vec![0usize; 256];
+            let mut pending = 256usize;
+            for y in (0..self.height as usize).rev() {
+                if pending == 0 {
+                    break;
+                }
+                for (column, h) in out.iter_mut().enumerate() {
+                    if *h == 0 && chunk.kind(chunk.get(column % 16, y, column / 16)) != Kind::Air {
+                        *h = y + 1;
+                        pending -= 1;
+                    }
+                }
+            }
+            out
+        };
         // `noiseSamplers2d` ванили: шум условия зависит только от x/z, поэтому
-        // считается один раз на столбец, а не на каждый блок. Кэш ленивый —
-        // заранее считать все шумы дороже, чем посчитать два нужных.
-        let mut noise_cache: Vec<(usize, f32)> = Vec::new();
+        // считается один раз на столбец, а не на каждый блок. Кэш — массив по
+        // индексу шума (`f32::NAN` — ещё не считан): раньше это был `Vec` с
+        // линейным поиском на **каждый блок** столбца.
+        let mut noise_cache = NoiseCache::new(self.noises.len());
         for z in 0..16usize {
             for x in 0..16usize {
                 self.column(
@@ -524,33 +573,63 @@ impl<'a> Stage<'a> {
         if self.densities.is_empty() {
             return Vec::new();
         }
+        let prof = std::env::var_os("CHUNKWAKE_PROF").is_some();
+        let t = std::time::Instant::now();
         let volume = crate::volume::Volume::blocks(
             [16, self.height, 16],
             [cx * 16, self.min_y, cz * 16],
         );
         let mut ctx = crate::density::Ctx::default();
-        self.densities
+        let out = self.densities
             .iter()
             .map(|d| {
                 if d.pointwise() {
                     return None;
                 }
-                let mut buf = vec![0f32; volume.len()];
-                d.volume(&mut ctx, &mut buf, &volume);
-                // Порядок `Volume` — `y + (x + z*16)*height`; перекладываем
-                // в порядок клеток чанка, чтобы дальше читать напрямую.
-                let mut out = vec![0f32; buf.len()];
-                for y in 0..self.height as usize {
+                // Плотность жилы постоянна вне `y ∈ [lo, hi)` (у меди и железа
+                // выше 50 блоков — −1.0). Считаем объём только по этому
+                // диапазону, остальное заполняем константой: раньше дерево
+                // проходило 384 уровня, из них 334 давали одно и то же.
+                let band = d.y_constant_outside();
+                let (y0, y1, fill) = match band {
+                    Some((lo, hi, v)) => (
+                        (lo - self.min_y).clamp(0, self.height),
+                        (hi - self.min_y).clamp(0, self.height),
+                        v,
+                    ),
+                    None => (0, self.height, 0.0),
+                };
+                let mut out = vec![fill; volume.len()];
+                if y0 >= y1 {
+                    return Some(out);
+                }
+                // Порядок `Volume` — `y + (x + z*16)*height`; считаем полосу
+                // высотой `y1 - y0` и раскладываем сразу в порядок клеток
+                // чанка, чтобы дальше читать напрямую.
+                let band_volume = crate::volume::Volume::blocks(
+                    [16, y1 - y0, 16],
+                    [cx * 16, self.min_y + y0, cz * 16],
+                );
+                let mut buf = vec![0f32; band_volume.len()];
+                d.volume(&mut ctx, &mut buf, &band_volume);
+                for y in y0..y1 {
                     for z in 0..16usize {
                         for x in 0..16usize {
-                            out[y * 256 + z * 16 + x] =
-                                buf[volume.index(x as i32, y as i32, z as i32)];
+                            out[y as usize * 256 + z * 16 + x] =
+                                buf[band_volume.index(x as i32, y - y0, z as i32)];
                         }
                     }
                 }
                 Some(out)
             })
-            .collect()
+            .collect::<Vec<_>>();
+        if prof {
+            eprintln!(
+                "  жилы: {:.2} мс",
+                t.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        out
     }
 
     /// `MaterialSystem.topMaterial`: правило для одной клетки, которой карвер
@@ -584,7 +663,7 @@ impl<'a> Stage<'a> {
         // Жилы здесь считаются по точке: объёма чанка у этой стадии нет.
         let veins = vec![None; self.densities.len()];
         let at = y * 256 + z * 16 + x;
-        let mut noise_cache = Vec::new();
+        let mut noise_cache = NoiseCache::new(self.noises.len());
         self.eval(
             chunk, &mut c, self.rule, x, y, z, bx, by, bz, &veins, at, &mut noise_cache,
         )
@@ -600,7 +679,7 @@ impl<'a> Stage<'a> {
         bz: i32,
         veins: &[Option<Vec<f32>>],
         heights: &[usize],
-        noise_cache: &mut Vec<(usize, f32)>,
+        noise_cache: &mut NoiseCache,
     ) {
         noise_cache.clear();
         let mut c = Context::default();
@@ -679,7 +758,7 @@ impl<'a> Stage<'a> {
         bz: i32,
         veins: &[Option<Vec<f32>>],
         at: usize,
-        noise_cache: &mut Vec<(usize, f32)>,
+        noise_cache: &mut NoiseCache,
     ) -> Option<u32> {
         match rule {
             Rule::Block(state) => Some(*state),
@@ -704,11 +783,10 @@ impl<'a> Stage<'a> {
             Rule::Bandlands(bands) => {
                 let bands = self.bands.get(*bands)?;
                 // Смещение полос шумом `clay_bands_offset`, как `getBand`.
-                // Шум зависит только от x/z — берём из кэша столбца.
-                let id = self
-                    .noises
-                    .iter()
-                    .position(|(n, _)| n == "minecraft:clay_bands_offset")?;
+                // Индекс шума найден при компиляции: поиск по имени на
+                // каждую клетку полос бедлендов был линейным проходом по
+                // всем шумам поверхности.
+                let id = self.clay_offset?;
                 let offset = (self.column_noise(id, bx, bz, noise_cache) * 4.0).round() as i32;
                 let i = (by + offset).rem_euclid(bands.len() as i32) as usize;
                 bands.get(i).copied()
@@ -718,15 +796,15 @@ impl<'a> Stage<'a> {
 
     /// Шум условия на столбец: первый запрос считает и кладёт в кэш,
     /// остальные блоки столбца читают готовое значение.
-    fn column_noise(&self, id: usize, bx: i32, bz: i32, cache: &mut Vec<(usize, f32)>) -> f32 {
-        if let Some(&(_, v)) = cache.iter().find(|(k, _)| *k == id) {
+    fn column_noise(&self, id: usize, bx: i32, bz: i32, cache: &mut NoiseCache) -> f32 {
+        if let Some(v) = cache.get(id) {
             return v;
         }
         let v = self
             .noises
             .get(id)
             .map_or(0.0, |(_, n)| n.get(bx as f64, 0.0, bz as f64));
-        cache.push((id, v));
+        cache.set(id, v);
         v
     }
 
@@ -772,7 +850,7 @@ impl<'a> Stage<'a> {
         bx: i32,
         by: i32,
         bz: i32,
-        noise_cache: &mut Vec<(usize, f32)>,
+        noise_cache: &mut NoiseCache,
     ) -> bool {
         match cond {
             Cond::StoneDepth {
@@ -821,11 +899,15 @@ impl<'a> Stage<'a> {
                         + c.surface_depth * surface_depth_multiplier
             }
             Cond::Biome(ids) => {
+                // Биом постоянен внутри клетки 4×4×4, поэтому ответ кэшируется
+                // по `y / 4`, а не по каждому блоку: иначе `zoomed_biome`
+                // («дрожание» границ) считался на каждый из 384 блоков столбца.
+                let cell_y = y / 4;
                 let b = match c.biome {
-                    Some((at, b)) if at == y => b,
+                    Some((at, b)) if at == cell_y => b,
                     _ => {
-                        let b = chunk.biome(x, y, z);
-                        c.biome = Some((y, b));
+                        let b = chunk.biome(x, cell_y * 4, z);
+                        c.biome = Some((cell_y, b));
                         b
                     }
                 };
@@ -988,6 +1070,7 @@ mod tests {
             randoms: &[],
             preliminary: &[],
             random: &random,
+            clay_offset: None,
         };
         stage.build(&mut chunk, 0, 0);
         assert_eq!(chunk.get(8, 40, 8), GRASS, "верхний блок — трава");
@@ -1028,6 +1111,7 @@ mod tests {
             randoms: &[],
             preliminary: &[],
             random: &random,
+            clay_offset: None,
         };
         stage.build(&mut chunk, 0, 0);
         assert_eq!(chunk.get(3, 10, 3), 9);
@@ -1061,6 +1145,7 @@ mod tests {
             randoms: &[],
             preliminary: &[],
             random: &random,
+            clay_offset: None,
         };
         let volumes = stage.vein_volumes(0, 0);
         assert_eq!(volumes.len(), 1);
@@ -1078,5 +1163,67 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Плотность, постоянная вне полосы `y`, даёт тот же объём, что полный
+    /// счёт по всем уровням: это и есть смысл пропуска константной части.
+    #[test]
+    fn vein_band_matches_full_sampling() {
+        let height = 32usize;
+        // «y» — градиент по высоте; `range_choice` по нему: внутри полосы
+        // тоже градиент (переменный), снаружи — константа. Анализ должен
+        // увидеть, что снаружи полосы значение постоянно.
+        let axis_y = || {
+            crate::density::S::Gradient(
+                1,
+                crate::density::Grad::Clamp {
+                    from: 0,
+                    min: 0,
+                    max: 1000,
+                },
+                0.0,
+                1.0,
+            )
+        };
+        let banded = std::sync::Arc::new(crate::density::S::RangeChoice(
+            Box::new([axis_y(), axis_y(), crate::density::S::Const(-1.0)]),
+            0.0,
+            8.0,
+        ));
+        assert_eq!(
+            banded.y_constant_outside(),
+            Some((0, 8, -1.0)),
+            "вне [0, 8) значение постоянно: верхняя граница исключается"
+        );
+        // Шум вне полосы — не константа: анализ обязан вернуть `None`,
+        // иначе сэмплирование пропустит жилу там, где она есть.
+        let noisy_outside = crate::density::S::RangeChoice(
+            Box::new([axis_y(), axis_y(), axis_y()]),
+            0.0,
+            8.0,
+        );
+        assert_eq!(noisy_outside.y_constant_outside(), None);
+        let densities = vec![banded.clone()];
+        let rule = Rule::Block(1);
+        let random = crate::random::Xoroshiro::from_seed(1).fork_positional();
+        let stage = Stage {
+            rule: &rule,
+            min_y: 0,
+            height: height as i32,
+            noises: &[],
+            bands: &[],
+            densities: &densities,
+            randoms: &[],
+            preliminary: &[],
+            random: &random,
+            clay_offset: None,
+        };
+        let volumes = stage.vein_volumes(0, 0);
+        // Градиент считается по точке: объёма нет, но именно так жилы и
+        // работают в этом случае — проверяем, что значения верные.
+        assert!(volumes[0].is_none(), "градиент по y — точечная плотность");
+        let mut ctx = crate::density::Ctx::default();
+        assert_eq!(densities[0].value(&mut ctx, 0, 20, 0), -1.0, "выше полосы");
+        assert_eq!(densities[0].value(&mut ctx, 0, 3, 0), 3.0, "внутри полосы");
     }
 }

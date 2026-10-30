@@ -436,6 +436,30 @@ impl NormalNoise {
         Ok(Self { octaves, norm })
     }
 
+    /// `NormalNoise.createParity`: базовая амплитуда подобрана так, чтобы
+    /// нормировка совпала со старой (до 26.x).
+    pub fn parity(first_octave: i32, amplitudes: &[f64]) -> Self {
+        let n = amplitudes.len() as i32;
+        let json = |base_amp: f64| {
+            serde_json::json!({
+                "base_octave": first_octave,
+                "octave_count": n,
+                "base_amplitude": base_amp,
+                "amplitude_modifiers": amplitudes,
+            })
+        };
+        let unit = Self::from_json(&json(1.0)).expect("parity noise");
+        let base_amp = if unit.norm == 0.0 {
+            1.0
+        } else {
+            let used: Vec<i32> = (0..n).filter(|&i| amplitudes[i as usize] != 0.0).collect();
+            let span = used.last().unwrap_or(&0) - used.first().unwrap_or(&0);
+            let old = 0.5 * 0.3333333333333333 / (0.1 * (1.0 + 1.0 / (span + 1) as f64));
+            old / unit.norm
+        };
+        Self::from_json(&json(base_amp)).expect("parity noise")
+    }
+
     /// `create(new WorldgenRandom(new LegacyRandomSource(seed)))`: шум
     /// провайдеров блоков с собственным сидом.
     pub fn create_legacy(&self, seed: i64) -> Stack {

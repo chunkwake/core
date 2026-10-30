@@ -184,6 +184,26 @@ pub trait Bits {
         ((upper << 27) + lower) as f64 * 1.110223e-16f32 as f64
     }
 
+    /// Отложенное второе значение `MarsagliaPolarGaussian`.
+    fn gaussian_slot(&mut self) -> &mut Option<f64>;
+
+    /// `MarsagliaPolarGaussian.nextGaussian` поверх `nextDouble`.
+    fn next_gaussian(&mut self) -> f64 {
+        if let Some(g) = self.gaussian_slot().take() {
+            return g;
+        }
+        loop {
+            let x = 2.0 * self.next_double() - 1.0;
+            let y = 2.0 * self.next_double() - 1.0;
+            let rr = x * x + y * y;
+            if rr < 1.0 && rr != 0.0 {
+                let m = (-2.0 * rr.ln() / rr).sqrt();
+                *self.gaussian_slot() = Some(y * m);
+                return x * m;
+            }
+        }
+    }
+
     /// `WorldgenRandom.setLargeFeatureSeed`: карверы и старты структур.
     fn set_large_feature_seed(&mut self, seed: i64, cx: i32, cz: i32) {
         self.set_seed(seed);
@@ -213,6 +233,7 @@ pub trait Bits {
 #[derive(Clone, Debug)]
 pub struct Legacy {
     seed: i64,
+    gaussian: Option<f64>,
 }
 
 const LCG_MUL: i64 = 0x5DEECE66D;
@@ -222,6 +243,7 @@ impl Legacy {
     pub fn new(seed: i64) -> Self {
         Self {
             seed: (seed ^ LCG_MUL) & LCG_MASK,
+            gaussian: None,
         }
     }
 }
@@ -229,6 +251,11 @@ impl Legacy {
 impl Bits for Legacy {
     fn set_seed(&mut self, seed: i64) {
         self.seed = (seed ^ LCG_MUL) & LCG_MASK;
+        self.gaussian = None;
+    }
+
+    fn gaussian_slot(&mut self) -> &mut Option<f64> {
+        &mut self.gaussian
     }
 
     fn next(&mut self, bits: u32) -> i32 {
@@ -242,12 +269,15 @@ impl Bits for Legacy {
 #[derive(Clone, Debug)]
 pub struct Worldgen {
     x: Xoroshiro,
+    /// `WorldgenRandom.setSeed` не сбрасывает гауссиан `LegacyRandomSource`.
+    gaussian: Option<f64>,
 }
 
 impl Worldgen {
     pub fn new(seed: i64) -> Self {
         Self {
             x: Xoroshiro::from_seed(seed),
+            gaussian: None,
         }
     }
 }
@@ -255,6 +285,10 @@ impl Worldgen {
 impl Bits for Worldgen {
     fn set_seed(&mut self, seed: i64) {
         self.x = Xoroshiro::from_seed(seed);
+    }
+
+    fn gaussian_slot(&mut self) -> &mut Option<f64> {
+        &mut self.gaussian
     }
 
     fn next(&mut self, bits: u32) -> i32 {

@@ -10,7 +10,7 @@ use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// Имена состояний блоков и биомов ↔ их ID (сетевые/внутренние).
@@ -366,6 +366,14 @@ const ZLIB: u8 = 2;
 /// Чанк с координатами и его NBT-корнем.
 pub type StoredChunk = ((i32, i32), Compound);
 
+/// Почему запись по месту не удалась.
+enum InPlace {
+    /// Нет файла или payload не влез в свои сектора — нужна пересборка.
+    NeedRebuild,
+    /// Настоящая ошибка ввода-вывода.
+    Failed(String),
+}
+
 /// Каталог `region/` одного измерения.
 pub struct RegionStore {
     dir: PathBuf,
@@ -414,7 +422,12 @@ impl RegionStore {
     }
 
     /// Записывает чанки (NBT-корни), сохраняя остальные чанки их регионов.
-    /// Файл пишется во временный и атомарно заменяет старый.
+    ///
+    /// Изменённые чанки пишутся **по своим секторам** в существующий файл:
+    /// раньше один изменённый блок читал весь регион, собирал его заново в
+    /// новый буфер и переписывал целиком — три полные копии региона на
+    /// автосейв. Пересборка файла нужна лишь когда payload не влезает в
+    /// выделенные ему сектора.
     pub fn save(&self, chunks: &[StoredChunk]) -> Result<(), String> {
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| format!("create {}: {e}", self.dir.display()))?;
@@ -425,41 +438,148 @@ impl RegionStore {
                 .or_default()
                 .push((region_index(*pos), nbt));
         }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as u32);
+        let mut touched: Vec<PathBuf> = Vec::new();
         for ((rx, rz), list) in by_region {
             let path = self.path(rx, rz);
-            let mut region = Self::read_region(&path)?;
+            // Сжатые payload'ы только изменённых чанков.
+            let mut fresh: Vec<(usize, Vec<u8>)> = Vec::with_capacity(list.len());
             for (i, nbt) in list {
                 // Автосейв каждые 30 с: быстрый уровень в 2–3 раза дешевле, файл ~10% больше.
                 let mut enc = ZlibEncoder::new(vec![ZLIB], Compression::fast());
                 enc.write_all(&nbt::write_root(nbt)).expect("write to Vec");
-                region.insert(i, enc.finish().expect("write to Vec"));
+                fresh.push((i, enc.finish().expect("write to Vec")));
             }
-            let mut file = vec![0u8; 2 * SECTOR];
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs() as u32);
-            for (i, payload) in &region {
-                let sectors = (4 + payload.len()).div_ceil(SECTOR);
-                if sectors > 255 {
-                    return Err(format!("chunk {i} in {} is too large", path.display()));
-                }
-                let offset = file.len() / SECTOR;
-                file[i * 4..i * 4 + 4]
-                    .copy_from_slice(&(((offset as u32) << 8) | sectors as u32).to_be_bytes());
-                file[SECTOR + i * 4..SECTOR + i * 4 + 4].copy_from_slice(&now.to_be_bytes());
-                file.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-                file.extend_from_slice(payload);
-                file.resize(file.len().div_ceil(SECTOR) * SECTOR, 0);
+            match self.write_in_place(&path, &fresh, now) {
+                Ok(()) => {}
+                // Не влезло в свои сектора — тогда пересборка файла.
+                Err(InPlace::NeedRebuild) => self.rebuild_region(&path, &fresh, now)?,
+                Err(InPlace::Failed(e)) => return Err(e),
             }
-            let tmp = path.with_extension("mca.tmp");
-            std::fs::write(&tmp, &file).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-            std::fs::File::options()
-                .write(true)
-                .open(&tmp)
-                .and_then(|f| f.sync_all())
-                .map_err(|e| format!("sync {}: {e}", tmp.display()))?;
-            std::fs::rename(&tmp, &path).map_err(|e| format!("rename {}: {e}", tmp.display()))?;
+            touched.push(path);
         }
+        // Один `fsync` на всю пачку: регионы пишутся в общий проход.
+        for path in touched {
+            let file = std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .map_err(|e| format!("open {}: {e}", path.display()))?;
+            file.sync_all()
+                .map_err(|e| format!("sync {}: {e}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    /// Пишет изменённые чанки прямо в их сектора. `Err(NeedRebuild)` — если
+    /// для какого-то чанка места не хватило или файла ещё нет.
+    fn write_in_place(
+        &self,
+        path: &Path,
+        fresh: &[(usize, Vec<u8>)],
+        now: u32,
+    ) -> Result<(), InPlace> {
+        let mut file = match std::fs::OpenOptions::new().read(true).write(true).open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(InPlace::NeedRebuild),
+            Err(e) => return Err(InPlace::Failed(format!("open {}: {e}", path.display()))),
+        };
+        let len = file
+            .metadata()
+            .map_err(|e| InPlace::Failed(format!("stat {}: {e}", path.display())))?
+            .len();
+        if len < 2 * SECTOR as u64 {
+            return Err(InPlace::NeedRebuild);
+        }
+        let mut header = [0u8; 2 * SECTOR];
+        file.read_exact(&mut header)
+            .map_err(|e| InPlace::Failed(format!("read {}: {e}", path.display())))?;
+        // Куда писать конец файла: за последним занятым сектором.
+        let mut end = 2 * SECTOR as u64;
+        for i in 0..1024 {
+            let loc = u32::from_be_bytes(header[i * 4..i * 4 + 4].try_into().unwrap());
+            if loc == 0 {
+                continue;
+            }
+            let offset = (loc >> 8) as u64 * SECTOR as u64;
+            let count = (loc & 0xff) as u64;
+            end = end.max(offset + count * SECTOR as u64);
+        }
+        for (i, payload) in fresh {
+            let need = (4 + payload.len()).div_ceil(SECTOR);
+            if need > 255 {
+                return Err(InPlace::Failed(format!(
+                    "chunk {i} in {} is too large",
+                    path.display()
+                )));
+            }
+            let loc = u32::from_be_bytes(header[i * 4..i * 4 + 4].try_into().unwrap());
+            let (offset, count) = ((loc >> 8) as u64 * SECTOR as u64, (loc & 0xff) as u64);
+            let (at, sectors) = if offset != 0 && need as u64 <= count {
+                // Место есть: пишем на старое место, хвост секторов оставляем.
+                (offset, count)
+            } else {
+                // Места нет: берём сектора в конце файла.
+                let at = end;
+                end += need as u64 * SECTOR as u64;
+                (at, need as u64)
+            };
+            let mut buf = Vec::with_capacity(4 + payload.len());
+            buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            buf.extend_from_slice(payload);
+            buf.resize(need as usize * SECTOR, 0);
+            file.seek(SeekFrom::Start(at))
+                .and_then(|_| file.write_all(&buf))
+                .map_err(|e| InPlace::Failed(format!("write {}: {e}", path.display())))?;
+            // Заголовок: где лежит чанк и сколько секторов ему выделено.
+            // На старом месте остаётся исходное `count` (место уже занято),
+            // на новом — ровно `need`.
+            let loc = ((at / SECTOR as u64) as u32) << 8 | sectors as u32;
+            file.seek(SeekFrom::Start(*i as u64 * 4))
+                .and_then(|_| file.write_all(&loc.to_be_bytes()))
+                .map_err(|e| InPlace::Failed(format!("header {}: {e}", path.display())))?;
+            file.seek(SeekFrom::Start(SECTOR as u64 + *i as u64 * 4))
+                .and_then(|_| file.write_all(&now.to_be_bytes()))
+                .map_err(|e| InPlace::Failed(format!("timestamp {}: {e}", path.display())))?;
+        }
+        Ok(())
+    }
+
+    /// Пересобирает регион целиком: нужен только когда payload не влез в свои
+    /// сектора. Файл пишется во временный и атомарно заменяет старый.
+    fn rebuild_region(
+        &self,
+        path: &Path,
+        fresh: &[(usize, Vec<u8>)],
+        now: u32,
+    ) -> Result<(), String> {
+        let mut region = Self::read_region(path)?;
+        for (i, payload) in fresh {
+            region.insert(*i, payload.clone());
+        }
+        let mut file = vec![0u8; 2 * SECTOR];
+        for (i, payload) in &region {
+            let sectors = (4 + payload.len()).div_ceil(SECTOR);
+            if sectors > 255 {
+                return Err(format!("chunk {i} in {} is too large", path.display()));
+            }
+            let offset = file.len() / SECTOR;
+            file[i * 4..i * 4 + 4]
+                .copy_from_slice(&(((offset as u32) << 8) | sectors as u32).to_be_bytes());
+            file[SECTOR + i * 4..SECTOR + i * 4 + 4].copy_from_slice(&now.to_be_bytes());
+            file.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            file.extend_from_slice(payload);
+            file.resize(file.len().div_ceil(SECTOR) * SECTOR, 0);
+        }
+        let tmp = path.with_extension("mca.tmp");
+        std::fs::write(&tmp, &file).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        std::fs::File::options()
+            .write(true)
+            .open(&tmp)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| format!("sync {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", tmp.display()))?;
         Ok(())
     }
 
@@ -642,6 +762,29 @@ mod tests {
         assert_eq!(ids, [3, 2, 1, 0]);
         let (back, _) = chunk_from_nbt(&nbt, &c, F, &Test).unwrap();
         assert_eq!(back.sections, c.sections);
+    }
+
+    #[test]
+    fn in_place_save_keeps_other_chunks() {
+        // Правка одного чанка не должна терять соседей и должна обновлять
+        // именно его: это путь `write_in_place`, а не пересборки региона.
+        let dir = std::env::temp_dir().join(format!("chunkwake-anvil-inplace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = RegionStore::new(&dir);
+        let c = sample();
+        let a = chunk_to_nbt(&c, (0, 0), F, &Test).unwrap();
+        let b = chunk_to_nbt(&c, (1, 0), F, &Test).unwrap();
+        store.save(&[((0, 0), a.clone()), ((1, 0), b.clone())]).unwrap();
+        // Меняем первый чанк и сохраняем только его.
+        let mut changed = a.clone();
+        changed.insert("LastUpdate".into(), Tag::Long(777));
+        store.save(&[((0, 0), changed.clone())]).unwrap();
+        let loaded = store.load_region(0, 0).unwrap();
+        let by_pos: BTreeMap<_, _> = loaded.into_iter().collect();
+        assert_eq!(by_pos.get(&(1, 0)), Some(&b), "сосед не должен пострадать");
+        let got = by_pos.get(&(0, 0)).expect("изменённый чанк на месте");
+        assert_eq!(got.get("LastUpdate").and_then(Tag::as_i64), Some(777));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -10,6 +10,7 @@ use crate::random::{Bits, Legacy, Worldgen};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
+use std::time::Instant;
 use std::sync::Arc;
 
 /// По ID состояния блока его имя и свойства, как в реестре сервера.
@@ -26,6 +27,8 @@ pub trait Level {
     fn can_write(&self, x: i32, z: i32) -> bool;
     /// `getHeight(type, x, z)`: первый свободный y над столбцом.
     fn surface(&self, kind: Heightmap, x: i32, z: i32) -> i32;
+    /// `getSeaLevel`.
+    fn sea_level(&self) -> i32;
     /// `getBiome(pos)` с «дрожанием» границ.
     fn biome(&self, x: i32, y: i32, z: i32) -> u32;
 }
@@ -164,6 +167,11 @@ pub struct Palette {
     tag_dir: std::path::PathBuf,
     /// Теги, которые читает `canSurvive`.
     support: Support,
+    /// Сид мира: шумы фич вроде жеод строятся от него.
+    world_seed: i64,
+    /// Биом замораживает воду (`Biome.shouldFreeze`: базовая температура < 0.15).
+    /// Индекс — сетевой ID биома; до заполнения в `Features::load` — пусто.
+    freeze: Vec<bool>,
 }
 
 #[derive(Default)]
@@ -234,6 +242,8 @@ impl Palette {
             tags: HashMap::new(),
             tag_dir: data_dir.join("data/minecraft/tags/block"),
             support: Support::default(),
+            world_seed: 0,
+            freeze: Vec::new(),
         };
         for name in ["minecraft:air", "minecraft:cave_air", "minecraft:void_air"] {
             for s in p.states_of(name) {
@@ -338,6 +348,12 @@ impl Palette {
 
     pub fn is_air(&self, state: u32) -> bool {
         self.air.get(state as usize).copied().unwrap_or(false)
+    }
+
+    /// `Biome.shouldFreeze`: базовая температура ниже 0.15. Неизвестный
+    /// биом не замораживает — лучше без льда, чем лёд в пустыне.
+    pub fn biome_freezes(&self, biome: u32) -> bool {
+        self.freeze.get(biome as usize).copied().unwrap_or(false)
     }
 
     /// Учитывает ли карта высот `kind` это состояние.
@@ -547,7 +563,42 @@ enum Feature {
     Tree(Arc<tree::Tree>),
     FallenTree(Arc<tree::Fallen>),
     HugeMushroom(Box<Mushroom>),
+    Disk(Arc<misc::Disk>),
+    Spring(Arc<misc::Spring>),
+    Vines,
+    Blob(Arc<misc::Blob>),
+    BlueIce,
+    Lake(Arc<misc::Lake>),
+    MonsterRoom(Arc<misc::MonsterRoom>),
+    Geode(Arc<misc::Geode>),
+    RootSystem(Arc<misc::RootSystem>),
+    Multiface(Arc<misc::Multiface>),
+    Speleothem(Arc<misc::Speleothem>),
+    LargeDripstone(Arc<misc::LargeDripstone>),
+    SpeleothemCluster(Arc<misc::SpeleothemCluster>),
+    /// `sequence`: фичи по порядку в одной точке.
+    Sequence(Vec<Arc<Placed>>),
+    /// `freeze_top_layer`: лёд и снег на поверхности холодных биомов.
+    FreezeTopLayer,
+    /// `underwater_magma`: магма под морским дном.
+    UnderwaterMagma(Arc<misc::UnderwaterMagma>),
+    /// `bamboo`: стебли бамбука; доля `probability` — саженцы на подзоле.
+    Bamboo(f32),
+    /// `spike`: ледяные шипы (`ice_spike`).
+    IceSpike(Arc<misc::IceSpike>),
+    /// `iceberg`: айсберг с синим или пакованным льдом.
+    Iceberg(misc::Iceberg),
+    /// `coral_tree`, `coral_claw`, `coral_mushroom`: коралл из одной фичи.
+    CoralTree(String, Arc<Placed>),
+    /// `overlay`: встроенные фичи поверх друг друга, каждая в своей точке.
+    Overlay(Vec<Arc<Placed>>),
+    /// `sculk_patch`: скалк в тёмных пещерах.
+    SculkPatch(Arc<misc::SculkPatch>),
+    /// `no_op`: ничего не ставит (`NoOpFeature`).
+    NoOp,
 }
+
+mod misc;
 
 /// `huge_red_mushroom` и `huge_brown_mushroom`.
 #[derive(Clone, Debug)]
@@ -604,6 +655,17 @@ enum Modifier {
     WaterDepth(i32),
     /// `surface_relative_threshold_filter`.
     Relative(Heightmap, i32, i32),
+    /// `count_on_every_layer`: стопка копий в каждой точке столбца — как
+    /// `noise_based_count`, но смещение по y считается на каждую копию.
+    OnEveryLayer(i32, f64, f64),
+    /// `cuboid`: случайная точка в полом коробе (`CuboidPlacement`).
+    Cuboid {
+        /// `include_edges`, `include_interior` — какие клетки участвуют.
+        edges: bool,
+        interior: bool,
+        xz: IntP,
+        y: IntP,
+    },
 }
 
 impl Modifier {
@@ -668,6 +730,19 @@ impl Modifier {
                     })
                     .collect(),
             )),
+            // `CountOnEveryLayerPlacement`: число копий от того же шума, что у
+            // `noise_based_count`; каждая копия ищет свой слой в столбце.
+            "minecraft:count_on_every_layer" => Ok(Self::OnEveryLayer(
+                int("noise_to_count_ratio", 0),
+                v["noise_factor"].as_f64().unwrap_or(1.0),
+                v["noise_offset"].as_f64().unwrap_or(0.0),
+            )),
+            "minecraft:cuboid" => Ok(Self::Cuboid {
+                edges: v["include_edges"].as_bool().unwrap_or(true),
+                interior: v["include_interior"].as_bool().unwrap_or(true),
+                xz: IntP::parse(&v["xz_size"])?,
+                y: IntP::parse(&v["y_size"])?,
+            }),
             other => Err(format!("placement {other} is not supported")),
         }
     }
@@ -688,6 +763,9 @@ pub struct Features {
     by_biome: HashMap<u32, Vec<Vec<u32>>>,
     /// Биом → все его фичи (`(шаг, номер)`) для фильтра `minecraft:biome`.
     has: HashMap<u32, HashSet<(u32, u32)>>,
+    /// Фичи, которые не разобрались: имя и причина. Пустой список у полного
+    /// набора; нужен, чтобы отчёт при старте называл дыры, а не только счёт.
+    failures: Vec<(String, String)>,
     pub palette: Palette,
     seed: i64,
     min_y: i32,
@@ -708,6 +786,7 @@ impl Features {
         min_y: i32,
         height: i32,
     ) -> Result<Self, String> {
+        palette.world_seed = seed;
         let wg = data_dir.join("data/minecraft/worldgen");
         let read = |dir: &str, name: &str| -> Result<Value, String> {
             let path = name.strip_prefix("minecraft:").unwrap_or(name);
@@ -722,6 +801,13 @@ impl Features {
                 continue;
             };
             let biome = read("biome", name)?;
+            // `Biome.shouldFreeze`: базовая температура ниже 0.15 (`getBaseTemperature`).
+            let temps = biome["temperature"].as_f64().unwrap_or(0.5);
+            let i = id as usize;
+            if palette.freeze.len() <= i {
+                palette.freeze.resize(i + 1, false);
+            }
+            palette.freeze[i] = temps < 0.15;
             let steps = biome["features"]
                 .as_array()
                 .into_iter()
@@ -741,16 +827,19 @@ impl Features {
         let order = sort_features(sources.iter().map(|(_, s)| s.as_slice()));
         let mut steps: Vec<Vec<Option<Arc<Placed>>>> = Vec::new();
         let mut global: HashMap<(usize, &str), u32> = HashMap::new();
+        let mut failures: Vec<(String, String)> = Vec::new();
         for (step, names) in order.iter().enumerate() {
             let mut list = Vec::with_capacity(names.len());
             for (i, name) in names.iter().enumerate() {
                 global.insert((step, name.as_str()), i as u32);
                 let placed = read("placed_feature", name)
                     .and_then(|v| parse_placed(&v, &read, &mut palette, min_y, height));
-                if let Err(e) = &placed
-                    && std::env::var_os("CHUNKWAKE_FEATURE_ERRORS").is_some()
-                {
-                    eprintln!("{name}: {e}");
+                if let Err(e) = &placed {
+                    // `CHUNKWAKE_FEATURE_ERRORS=1` — те же причины в stderr.
+                    if std::env::var_os("CHUNKWAKE_FEATURE_ERRORS").is_some() {
+                        eprintln!("{name}: {e}");
+                    }
+                    failures.push((name.clone(), e.clone()));
                 }
                 // `CHUNKWAKE_ONLY_FEATURES=a,b` — только эти фичи (для сверки).
                 let placed = match std::env::var("CHUNKWAKE_ONLY_FEATURES") {
@@ -781,10 +870,16 @@ impl Features {
             steps,
             by_biome,
             has,
+            failures,
             palette,
             seed,
             min_y,
         })
+    }
+
+    /// Фичи, которые не разобрались: имя и причина.
+    pub fn failures(&self) -> &[(String, String)] {
+        &self.failures
     }
 
     /// Сколько фич каждого шага перенесено — для отчёта при старте.
@@ -800,9 +895,12 @@ impl Features {
         let (ox, oz) = (cx * 16, cz * 16);
         let mut r = Worldgen::new(0);
         let seed = r.set_decoration_seed(self.seed, ox, oz);
+        // `CHUNKWAKE_PROF=1` — время по шагам декорации в stderr.
+        let prof = std::env::var_os("CHUNKWAKE_PROF").is_some();
         // Шаги без фич (`DECORATION_STEPS` и больше) пока пусты: там только
         // структуры, которых ещё нет.
         for step in 0..self.steps.len().min(DECORATION_STEPS) {
+            let t_step = prof.then(Instant::now);
             let mut wanted: Vec<u32> = biomes
                 .iter()
                 .filter_map(|b| self.by_biome.get(b)?.get(step))
@@ -819,7 +917,37 @@ impl Features {
                 let key = Some((step as u32, index));
                 self.place(level, placed, key, &mut r, [ox, self.min_y, oz]);
             }
+            if let Some(t) = t_step {
+                let us = t.elapsed().as_micros();
+                if us > 500 {
+                    eprintln!("  step {step}: {us} мкс");
+                }
+            }
         }
+    }
+
+    /// `PlacedFeature.place` с ответом «поставлено ли». Честный ответ пока
+    /// даёт только дерево без модификаторов; остальное считается успехом.
+    fn place_ok(&self, level: &mut dyn Level, placed: &Placed, r: &mut Worldgen, origin: [i32; 3]) -> bool {
+        match &placed.feature {
+            Feature::Tree(t) if placed.placement.is_empty() => t.place(self, level, r, origin),
+            _ => {
+                self.place(level, placed, None, r, origin);
+                true
+            }
+        }
+    }
+
+    /// Уже размещённая фича в готовой точке — без повторных модификаторов.
+    /// Нужна вложенным фичам (`coral_tree`), где точка вычислена внешней фичей.
+    fn place_feature_at(
+        &self,
+        level: &mut dyn Level,
+        placed: &Placed,
+        r: &mut Worldgen,
+        pos: [i32; 3],
+    ) {
+        self.place(level, placed, None, r, pos);
     }
 
     /// `FeaturePlacer.placeWithBiomeCheck`: модификаторы в глубину, по порядку.
@@ -926,6 +1054,42 @@ impl Features {
                     self.modify(level, placed, key, r, pos, next);
                 }
             }
+            Modifier::OnEveryLayer(ratio, factor, offset) => {
+                // `CountOnEveryLayerPlacement`: сначала число слоёв по шуму,
+                // затем для каждой копии — свой y в столбце от `MOTION_BLOCKING`.
+                let noise = biome_info_noise().get(x as f64 / factor, z as f64 / factor);
+                let layers = ((noise as f64 + offset) * *ratio as f64).ceil() as i32;
+                if layers <= 0 {
+                    return;
+                }
+                let top = level.surface(Heightmap::MotionBlocking, x, z);
+                for i in 0..layers {
+                    let ny = top - i;
+                    if ny <= level.min_y() {
+                        return;
+                    }
+                    self.modify(level, placed, key, r, [x, ny, z], next);
+                }
+            }
+            Modifier::Cuboid { edges, interior, xz, y: ysize } => {
+                // `CuboidPlacement`: точка на полом коробе вокруг центра.
+                let sx = xz.sample(r).max(1);
+                let sy = ysize.sample(r).max(1);
+                let (hx, hy) = (sx / 2, sy / 2);
+                let mut chosen = [x, y, z];
+                // Грани короба и его нутро; флаги говорят, что включать.
+                for _ in 0..16 {
+                    let dx = r.next_int_bound(sx + 1) - hx;
+                    let dz = r.next_int_bound(sx + 1) - hx;
+                    let dy = r.next_int_bound(sy + 1) - hy;
+                    let on_edge = dx.abs() == hx || dz.abs() == hx || dy.abs() == hy;
+                    if (*edges && on_edge) || (*interior && !on_edge) {
+                        chosen = [x + dx, y + dy, z + dz];
+                        break;
+                    }
+                }
+                self.modify(level, placed, key, r, chosen, next);
+            }
             Modifier::Offset(dx, dy, dz) => {
                 let (a, b) = (dx.sample(r), dy.sample(r));
                 let c = dz.sample(r);
@@ -992,9 +1156,42 @@ impl Features {
                 self.place(level, f, None, r, pos);
             }
             Feature::VegetationPatch(patch) => self.vegetation_patch(level, patch, r, pos),
-            Feature::Tree(t) => t.place(self, level, r, pos),
+            Feature::Tree(t) => {
+                t.place(self, level, r, pos);
+            }
             Feature::FallenTree(t) => t.place(self, level, r, pos),
             Feature::HugeMushroom(m) => self.huge_mushroom(level, m, r, pos),
+            Feature::Disk(d) => d.place(self, level, r, pos),
+            Feature::Spring(s) => s.place(self, level, pos),
+            Feature::Vines => misc::vines(self, level, pos),
+            Feature::Blob(b) => b.place(self, level, r, pos),
+            Feature::BlueIce => misc::blue_ice(self, level, r, pos),
+            Feature::Lake(l) => l.place(self, level, r, pos),
+            Feature::MonsterRoom(m) => m.place(self, level, r, pos),
+            Feature::Geode(g) => g.place(self, level, r, pos),
+            Feature::RootSystem(s) => s.place(self, level, r, pos),
+            Feature::Sequence(list) => {
+                for p in list {
+                    self.place(level, p, None, r, pos);
+                }
+            }
+            Feature::FreezeTopLayer => misc::freeze_top_layer(self, level, pos),
+            Feature::UnderwaterMagma(m) => m.place(self, level, r, pos),
+            Feature::Bamboo(chance) => misc::bamboo(self, level, r, pos, *chance),
+            Feature::IceSpike(s) => s.place(self, level, r, pos),
+            Feature::Iceberg(i) => i.place(self, level, r, pos),
+            Feature::CoralTree(kind, inner) => misc::coral(self, level, r, pos, kind, inner),
+            Feature::Overlay(list) => {
+                for p in list {
+                    self.place(level, p, None, r, pos);
+                }
+            }
+            Feature::SculkPatch(s) => s.place(self, level, r, pos),
+            Feature::NoOp => {}
+            Feature::Multiface(m) => m.place(self, level, r, pos),
+            Feature::Speleothem(s) => s.place(self, level, r, pos),
+            Feature::LargeDripstone(d) => d.place(self, level, r, pos),
+            Feature::SpeleothemCluster(s) => s.place(self, level, r, pos),
             Feature::BlockColumn(layers, dir, allowed, tip) => {
                 self.block_column(level, layers, *dir, allowed, *tip, r, pos)
             }
@@ -2036,6 +2233,69 @@ fn parse_feature(
                 leaves: palette.tag("minecraft:leaves")?,
             })))
         }
+        "minecraft:disk" => {
+            let provider = Provider::parse(&v["state_provider"], read, palette)?;
+            Ok(Feature::Disk(Arc::new(misc::Disk::parse(v, palette, provider)?)))
+        }
+        "minecraft:spring_feature" => Ok(Feature::Spring(Arc::new(misc::Spring::parse(v, palette)?))),
+        "minecraft:vines" => Ok(Feature::Vines),
+        "minecraft:block_blob" => Ok(Feature::Blob(Arc::new(misc::Blob::parse(v, palette)?))),
+        "minecraft:blue_ice" => Ok(Feature::BlueIce),
+        "minecraft:lake" => {
+            let fluid = Provider::parse(&v["fluid"], read, palette)?;
+            let barrier = Provider::parse(&v["barrier"], read, palette)?;
+            Ok(Feature::Lake(Arc::new(misc::Lake::parse(v, palette, fluid, barrier)?)))
+        }
+        "minecraft:geode" => {
+            let seed = palette.world_seed;
+            let geode = misc::Geode::parse(v, palette, &mut |v, palette| Provider::parse(v, read, palette), seed)?;
+            Ok(Feature::Geode(Arc::new(geode)))
+        }
+        "minecraft:root_system" => {
+            let tree = placed(&v["feature"], palette)?;
+            let system = misc::RootSystem::parse(v, palette, &mut |v, palette| Provider::parse(v, read, palette), tree)?;
+            Ok(Feature::RootSystem(Arc::new(system)))
+        }
+        "minecraft:multiface_growth" => Ok(Feature::Multiface(Arc::new(misc::Multiface::parse(v, palette)?))),
+        "minecraft:large_dripstone" => Ok(Feature::LargeDripstone(Arc::new(misc::LargeDripstone::parse(v, palette)?))),
+        "minecraft:speleothem" => Ok(Feature::Speleothem(Arc::new(misc::Speleothem::parse(v, palette)?))),
+        "minecraft:speleothem_cluster" => {
+            Ok(Feature::SpeleothemCluster(Arc::new(misc::SpeleothemCluster::parse(v, palette)?)))
+        }
+        "minecraft:monster_room" => Ok(Feature::MonsterRoom(Arc::new(misc::MonsterRoom::parse(palette)?))),
+        "minecraft:sequence" => Ok(Feature::Sequence(
+            v["features"]
+                .as_array()
+                .ok_or("sequence: no features")?
+                .iter()
+                .map(|e| placed(e, palette))
+                .collect::<Result<_, _>>()?,
+        )),
+        "minecraft:freeze_top_layer" => Ok(Feature::FreezeTopLayer),
+        "minecraft:underwater_magma" => Ok(Feature::UnderwaterMagma(Arc::new(
+            misc::UnderwaterMagma::parse(v)?,
+        ))),
+        "minecraft:bamboo" => Ok(Feature::Bamboo(
+            v["probability"].as_f64().unwrap_or(0.0) as f32,
+        )),
+        "minecraft:spike" => Ok(Feature::IceSpike(Arc::new(misc::IceSpike::parse(v, palette)?))),
+        "minecraft:iceberg" => Ok(Feature::Iceberg(misc::Iceberg::parse(v, palette)?)),
+        "minecraft:coral_tree" | "minecraft:coral_claw" | "minecraft:coral_mushroom" => {
+            Ok(Feature::CoralTree(
+                v["type"].as_str().unwrap_or("").to_owned(),
+                placed(&v["feature"], palette)?,
+            ))
+        }
+        "minecraft:overlay" => Ok(Feature::Overlay(
+            v["features"]
+                .as_array()
+                .ok_or("overlay: no features")?
+                .iter()
+                .map(|e| placed(e, palette))
+                .collect::<Result<_, _>>()?,
+        )),
+        "minecraft:sculk_patch" => Ok(Feature::SculkPatch(Arc::new(misc::SculkPatch::parse(v, palette)?))),
+        "minecraft:no_op" => Ok(Feature::NoOp),
         "minecraft:fallen_tree" => Ok(Feature::FallenTree(Arc::new(tree::Fallen::parse(
             v,
             palette,
@@ -2146,5 +2406,57 @@ mod tests {
         let out = sort_features([a.as_slice(), b.as_slice()].into_iter());
         assert_eq!(out[0], vec!["a", "b", "c"]);
         assert_eq!(out[1], vec!["x"]);
+    }
+
+    /// Декорация не должна молча откатываться: каждая фича биомов
+    /// оверворлда разбирается, кроме тех, что требуют NBT-шаблонов.
+    /// `CHUNKWAKE_DATA` — каталог `generated/26.3`; без него тест пропускается.
+    #[test]
+    fn overworld_features_parse() {
+        let Some(data) = std::env::var_os("CHUNKWAKE_DATA").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let registries = chunkwake_data::registries::RegistryData::load(&data).unwrap();
+        let biome_ids: HashMap<String, u32> = registries
+            .synchronized
+            .iter()
+            .find(|r| r.name == "worldgen/biome")
+            .map(|r| {
+                r.entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.clone(), i as u32))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let blocks = chunkwake_data::world::Blocks::load(&data).unwrap();
+        let mut noise = crate::Generator::load_with_version(&data, 1, None).unwrap();
+        noise.bind_biomes(biome_ids.clone());
+        let state = |n: &str| blocks.default_state(n).ok().map(|s| s as u32);
+        let features = Features::load(
+            &data,
+            Palette::new(&data, &blocks.states(), &state),
+            &noise.biome_order(),
+            &biome_ids,
+            1,
+            noise.min_y,
+            noise.height,
+        )
+        .unwrap();
+        // Фичи из NBT-шаблонов: их поставит этап структур.
+        const NEEDS_TEMPLATE: [&str; 4] = [
+            "minecraft:desert_well",
+            "minecraft:rooted_sulfur_spring",
+            "minecraft:fossil_upper",
+            "minecraft:fossil_lower",
+        ];
+        let unexpected: Vec<_> = features
+            .failures()
+            .iter()
+            .filter(|(name, _)| !NEEDS_TEMPLATE.contains(&name.as_str()))
+            .collect();
+        assert!(unexpected.is_empty(), "фичи без причины: {unexpected:?}");
+        let (done, all) = features.coverage();
+        assert_eq!(all - done, NEEDS_TEMPLATE.len(), "{done} из {all}");
     }
 }

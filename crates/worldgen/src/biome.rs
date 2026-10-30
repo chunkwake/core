@@ -119,8 +119,13 @@ impl Index {
 
     /// Минимум штрафа и лучшая точка. Обход в глубину с отсечением по оценке:
     /// узлы с оценкой не меньше текущего минимума не смотрятся.
-    fn find(&self, points: &[Point], point: &[i64; 6]) -> Option<(usize, i64)> {
-        let mut best: Option<(usize, i64)> = None;
+    ///
+    /// `hint` — прошлый ответ (`lastResult` у ванили): соседние клетки почти
+    /// всегда того же биома, и его штраф сразу отсекает почти всё дерево.
+    fn find(&self, points: &[Point], point: &[i64; 6], hint: Option<usize>) -> Option<(usize, i64)> {
+        // Порог на единицу выше штрафа подсказки: точки с тем же штрафом и
+        // меньшим номером по-прежнему находятся, ответ не зависит от подсказки.
+        let mut best: Option<(usize, i64)> = hint.map(|id| (usize::MAX, fitness(&points[id], point) + 1));
         let mut stack = vec![self.root];
         while let Some(node) = stack.pop() {
             let bound = Self::lower_bound(&self.boxes[node], point);
@@ -216,8 +221,18 @@ impl BiomeSource {
     /// `ParameterList.findValue`: минимум суммы квадратов расстояний.
     /// `point` уже квантован и лежит в порядке [`AXES`].
     pub fn find(&self, point: &[i64; 6]) -> Option<&Point> {
-        let (id, _) = self.index.find(&self.points, point)?;
+        let (id, _) = self.index.find(&self.points, point, None)?;
         self.points.get(id)
+    }
+
+    /// Номер точки для `point`, поиск от прошлого ответа `hint`.
+    pub fn find_from(&self, point: &[i64; 6], hint: Option<usize>) -> Option<usize> {
+        self.index.find(&self.points, point, hint).map(|(id, _)| id)
+    }
+
+    /// Сетевой ID биома точки номер `id`.
+    pub fn id_of(&self, id: usize) -> Option<u32> {
+        self.ids.get(&self.points[id].name).copied()
     }
 
     /// Сетевой ID биома для квантованной точки климата; без привязки — `None`.

@@ -506,7 +506,10 @@ fn compare_blocks(regions: &Path, data: &Path, seed: i64, radius: i32) -> Result
                 continue;
             };
             let (want, _) = anvil::chunk_from_nbt(nbt, &template, format, &names)?;
-            let ours = overworld.chunk(cx, cz);
+            // `None` — чанк уже отдан раньше в этом проходе; сверять нечего.
+            let Some(ours) = overworld.chunk(cx, cz) else {
+                continue;
+            };
             checked += 1;
             for y in 0..height as usize {
                 for z in 0..16 {

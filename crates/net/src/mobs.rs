@@ -248,11 +248,24 @@ impl Mob {
     }
 }
 
-/// Мир для моба: твёрдый ли блок и вода ли в нём.
-pub struct World<'a> {
-    pub solid: &'a dyn Fn([i32; 3]) -> bool,
+/// Мир для моба: коробки коллизии блока (`getCollisionShape`, в долях блока
+/// `x0 y0 z0 x1 y1 z1`) и вода ли в нём.
+///
+/// У замыкания формы два независимых времени жизни: `'s` — сама ссылка на
+/// замыкание, `'r` — возвращаемый срез. Слить их в одно нельзя: замыкание
+/// обычно возвращает `&'static` (готовые константы форм), и тогда требование
+/// «ссылка живёт столько же» запрещало бы брать замыкание из локальной
+/// переменной.
+pub struct World<'a, 's, 'r> {
+    pub shape: &'s dyn Fn([i32; 3]) -> &'r [[f64; 6]],
     pub water: &'a dyn Fn([i32; 3]) -> bool,
 }
+
+/// Полный куб.
+pub const FULL: &[[f64; 6]] = &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
+
+/// `maxUpStep` сухопутных мобов.
+const STEP: f64 = 0.6;
 
 /// Окружение для ИИ: игроки рядом (`ноги`, держит ли еду этого вида) и случайные числа.
 pub struct Senses<'a> {
@@ -262,45 +275,109 @@ pub struct Senses<'a> {
 
 const EPS: f64 = 1e-7;
 
-/// Сколько можно пройти по оси `axis` на `d`, не входя в твёрдые блоки
-/// (`Shapes.collide` для полных кубов).
-fn collide(pos: [f64; 3], half: f64, h: f64, axis: usize, d: f64, w: &World) -> f64 {
-    if d == 0.0 {
-        return 0.0;
-    }
-    let lo = [pos[0] - half, pos[1], pos[2] - half];
-    let hi = [pos[0] + half, pos[1] + h, pos[2] + half];
-    let (mut a, mut b) = (lo, hi);
-    if d > 0.0 {
-        b[axis] += d;
-    } else {
-        a[axis] += d;
-    }
-    let mut allowed = d;
-    let r = |v: f64| v.floor() as i32;
-    let up = |v: f64| (v - EPS).floor() as i32;
-    for x in r(a[0] + EPS)..=up(b[0]) {
-        for y in r(a[1] + EPS)..=up(b[1]) {
-            for z in r(a[2] + EPS)..=up(b[2]) {
-                if !(w.solid)([x, y, z]) {
-                    continue;
-                }
-                let c = [x as f64, y as f64, z as f64][axis];
-                if d > 0.0 {
-                    let gap = c - hi[axis];
-                    if gap >= -EPS {
-                        allowed = allowed.min(gap.max(0.0));
-                    }
-                } else {
-                    let gap = c + 1.0 - lo[axis];
-                    if gap <= EPS {
-                        allowed = allowed.max(gap.min(0.0));
+/// Коробки блоков, задевающих область `lo..hi`, в мировых координатах. Снизу
+/// берётся лишний слой: забор и стена выше своего блока.
+fn colliders(lo: [f64; 3], hi: [f64; 3], w: &World) -> Vec<[f64; 6]> {
+    let mut out = Vec::new();
+    let r = |v: f64| (v - EPS).floor() as i32;
+    for x in r(lo[0])..=r(hi[0] + 2.0 * EPS) {
+        for y in r(lo[1]) - 1..=r(hi[1] + 2.0 * EPS) {
+            for z in r(lo[2])..=r(hi[2] + 2.0 * EPS) {
+                for b in (w.shape)([x, y, z]) {
+                    let a = [
+                        b[0] + x as f64,
+                        b[1] + y as f64,
+                        b[2] + z as f64,
+                        b[3] + x as f64,
+                        b[4] + y as f64,
+                        b[5] + z as f64,
+                    ];
+                    if a[3] > lo[0] && a[0] < hi[0] && a[4] > lo[1] && a[1] < hi[1] && a[5] > lo[2] && a[2] < hi[2] {
+                        out.push(a);
                     }
                 }
             }
         }
     }
-    allowed
+    out
+}
+
+/// `Shapes.collide`: сколько коробка `lo..hi` пройдёт по оси `axis` на `d`.
+fn collide(lo: [f64; 3], hi: [f64; 3], axis: usize, mut d: f64, boxes: &[[f64; 6]]) -> f64 {
+    if d == 0.0 {
+        return 0.0;
+    }
+    let (o1, o2) = ((axis + 1) % 3, (axis + 2) % 3);
+    for b in boxes {
+        let overlaps = |o: usize| b[o + 3] - EPS > lo[o] && b[o] + EPS < hi[o];
+        if !overlaps(o1) || !overlaps(o2) {
+            continue;
+        }
+        if d > 0.0 && b[axis] >= hi[axis] - EPS {
+            d = d.min(b[axis] - hi[axis]);
+        } else if d < 0.0 && b[axis + 3] <= lo[axis] + EPS {
+            d = d.max(b[axis + 3] - lo[axis]);
+        }
+    }
+    d
+}
+
+/// `Entity.collideWithShapes`: оси по `Direction.axisStepOrder` — Y, затем
+/// большая из X и Z.
+fn collide_all(lo: [f64; 3], hi: [f64; 3], mv: [f64; 3], boxes: &[[f64; 6]]) -> [f64; 3] {
+    let order = if mv[0].abs() < mv[2].abs() { [1, 2, 0] } else { [1, 0, 2] };
+    let mut done = [0.0; 3];
+    for axis in order {
+        let l = [lo[0] + done[0], lo[1] + done[1], lo[2] + done[2]];
+        let h = [hi[0] + done[0], hi[1] + done[1], hi[2] + done[2]];
+        done[axis] = collide(l, h, axis, mv[axis], boxes);
+    }
+    done
+}
+
+/// `Entity.collide` с подъёмом на ступень `step`.
+fn collide_move(pos: [f64; 3], half: f64, h: f64, mv: [f64; 3], on_ground: bool, step: f64, w: &World) -> [f64; 3] {
+    let lo = [pos[0] - half, pos[1], pos[2] - half];
+    let hi = [pos[0] + half, pos[1] + h, pos[2] + half];
+    let span = |a: [f64; 3], b: [f64; 3], m: [f64; 3]| {
+        let l = [a[0] + m[0].min(0.0), a[1] + m[1].min(0.0), a[2] + m[2].min(0.0)];
+        let u = [b[0] + m[0].max(0.0), b[1] + m[1].max(0.0), b[2] + m[2].max(0.0)];
+        (l, u)
+    };
+    let (l, u) = span(lo, hi, mv);
+    let got = collide_all(lo, hi, mv, &colliders(l, u, w));
+    let landed = got[1] != mv[1] && mv[1] < 0.0;
+    if step <= 0.0 || !(landed || on_ground) || (got[0] == mv[0] && got[2] == mv[2]) {
+        return got;
+    }
+    let shift = if landed { got[1] } else { 0.0 };
+    let glo = [lo[0], lo[1] + shift, lo[2]];
+    let ghi = [hi[0], hi[1] + shift, hi[2]];
+    let (mut l, u) = span(glo, ghi, [mv[0], step, mv[2]]);
+    if !landed {
+        l[1] -= 1.0e-5f32 as f64;
+    }
+    let boxes = colliders(l, u, w);
+    // `collectCandidateStepUpHeights`: верхние и нижние грани коробок от пола.
+    let skip = got[1] as f32;
+    let mut heights: Vec<f32> = Vec::new();
+    for b in &boxes {
+        for y in [b[1], b[4]] {
+            let rel = (y - glo[1]) as f32;
+            if rel >= 0.0 && rel != skip && rel as f64 <= step && !heights.contains(&rel) {
+                heights.push(rel);
+            }
+        }
+    }
+    heights.sort_by(f32::total_cmp);
+    let flat = got[0] * got[0] + got[2] * got[2];
+    for h in heights {
+        let up = collide_all(glo, ghi, [mv[0], h as f64, mv[2]], &boxes);
+        if up[0] * up[0] + up[2] * up[2] > flat {
+            return [up[0], up[1] + shift, up[2]];
+        }
+    }
+    got
 }
 
 /// `LivingEntity.getFrictionInfluencedSpeed`: на обычном блоке (`friction` 0.6,
@@ -349,13 +426,9 @@ pub fn travel(m: &mut Mob, forward: f64, w: &World) -> bool {
     let (wd, h) = m.size();
     let half = wd / 2.0;
     let want = m.vel;
-    let dy = collide(m.pos, half, h, 1, want[1], w);
-    m.pos[1] += dy;
-    let dx = collide(m.pos, half, h, 0, want[0], w);
-    m.pos[0] += dx;
-    let dz = collide(m.pos, half, h, 2, want[2], w);
-    m.pos[2] += dz;
-    m.on_ground = want[1] < 0.0 && dy > want[1];
+    let [dx, dy, dz] = collide_move(m.pos, half, h, want, m.on_ground, STEP, w);
+    m.pos = [m.pos[0] + dx, m.pos[1] + dy, m.pos[2] + dz];
+    m.on_ground = want[1] < 0.0 && dy != want[1];
     let blocked = (dx - want[0]).abs() > EPS || (dz - want[2]).abs() > EPS;
     if (dy - want[1]).abs() > EPS {
         m.vel[1] = 0.0;
@@ -593,8 +666,15 @@ mod tests {
         p[1] < 64
     }
 
-    fn no_water(_: [i32; 3]) -> bool {
-        false
+    /// Мир-пол без воды: пара владеемых замыканий под `World`.
+    fn flat_world(
+        f: &dyn Fn([i32; 3]) -> bool,
+    ) -> (
+        Box<dyn Fn([i32; 3]) -> &'static [[f64; 6]] + '_>,
+        Box<dyn Fn([i32; 3]) -> bool>,
+    ) {
+        let shape = move |p: [i32; 3]| if f(p) { FULL } else { &[] };
+        (Box::new(shape), Box::new(|_: [i32; 3]| false))
     }
 
     fn settle(m: &mut Mob, w: &World) {
@@ -614,10 +694,8 @@ mod tests {
     /// `speed² / (1 - 0.6 * 0.91)`: для коровы (0.2) это 0.0881 блока за тик.
     #[test]
     fn walk_speed_matches_vanilla() {
-        let w = World {
-            solid: &floor,
-            water: &no_water,
-        };
+        let (shape, water) = flat_world(&floor);
+        let w = World { shape: &*shape, water: &*water };
         let mut m = Mob::new(Species::Cow, [0.5, 64.0, 0.5], 1);
         m.on_ground = true;
         m.goal = Goal::Walk {
@@ -652,10 +730,8 @@ mod tests {
 
     #[test]
     fn falls_and_lands() {
-        let w = World {
-            solid: &floor,
-            water: &no_water,
-        };
+        let (shape, water) = flat_world(&floor);
+        let w = World { shape: &*shape, water: &*water };
         let mut m = Mob::new(Species::Cow, [0.5, 70.0, 0.5], 1);
         settle(&mut m, &w);
         assert!((m.pos[1] - 64.0).abs() < 1e-6, "{:?}", m.pos);
@@ -664,10 +740,8 @@ mod tests {
 
     #[test]
     fn chicken_glides() {
-        let w = World {
-            solid: &floor,
-            water: &no_water,
-        };
+        let (shape, water) = flat_world(&floor);
+        let w = World { shape: &*shape, water: &*water };
         let mut c = Mob::new(Species::Chicken, [0.5, 80.0, 0.5], 1);
         let mut p = Mob::new(Species::Pig, [0.5, 80.0, 0.5], 2);
         for _ in 0..10 {
@@ -677,14 +751,74 @@ mod tests {
         assert!(c.pos[1] > p.pos[1] + 1.0, "{} {}", c.pos[1], p.pos[1]);
     }
 
+    /// Пол y < 64 и неполный блок `top` в столбце x = 3 на y = 64.
+    fn ledge(top: &'static [[f64; 6]]) -> impl Fn([i32; 3]) -> &'static [[f64; 6]] {
+        move |p| {
+            if p[1] < 64 {
+                FULL
+            } else if p[1] == 64 && p[0] == 3 {
+                top
+            } else {
+                &[]
+            }
+        }
+    }
+
+    const SLAB: &[[f64; 6]] = &[[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]];
+    const PATH: &[[f64; 6]] = &[[0.0, 0.0, 0.0, 1.0, 0.9375, 1.0]];
+
+    #[test]
+    fn rests_on_partial_blocks() {
+        for (top, y) in [(SLAB, 64.5), (PATH, 64.9375)] {
+            let w = World {
+                shape: &ledge(top),
+                water: &|_| false,
+            };
+            let mut m = Mob::new(Species::Cow, [3.5, 70.0, 0.5], 1);
+            settle(&mut m, &w);
+            assert!((m.pos[1] - y).abs() < 1e-9, "{:?} on {top:?}", m.pos);
+            assert!(m.on_ground);
+        }
+    }
+
+    #[test]
+    fn steps_onto_slab_without_jump() {
+        let w = World {
+            shape: &ledge(SLAB),
+            water: &|_| false,
+        };
+        let mut m = Mob::new(Species::Pig, [0.5, 64.0, 0.5], 1);
+        m.on_ground = true;
+        let mut highest: f64 = 64.0;
+        for _ in 0..60 {
+            m.yaw = -90.0;
+            travel(&mut m, 0.25, &w);
+            highest = highest.max(m.pos[1]);
+            if m.pos[0] > 3.6 {
+                break;
+            }
+        }
+        assert!(m.pos[0] > 3.0, "stuck at {:?}", m.pos);
+        assert!((highest - 64.5).abs() < 1e-9, "climbed to {highest}, not a slab step");
+    }
+
+    #[test]
+    fn walks_through_flowers() {
+        let w = World {
+            shape: &ledge(&[]),
+            water: &|_| false,
+        };
+        let mut m = Mob::new(Species::Cow, [3.5, 70.0, 0.5], 1);
+        settle(&mut m, &w);
+        assert!((m.pos[1] - 64.0).abs() < 1e-9, "{:?}", m.pos);
+    }
+
     #[test]
     fn wall_stops_and_jumps() {
         // Стена из одного блока на x = 3: моб упирается, прыгает и забирается.
         let wall = |p: [i32; 3]| p[1] < 64 || (p[0] == 3 && p[1] == 64);
-        let w = World {
-            solid: &wall,
-            water: &no_water,
-        };
+        let (shape, water) = flat_world(&wall);
+        let w = World { shape: &*shape, water: &*water };
         let mut m = Mob::new(Species::Pig, [0.5, 64.0, 0.5], 1);
         m.on_ground = true;
         m.goal = Goal::Walk {
@@ -713,10 +847,8 @@ mod tests {
 
     #[test]
     fn panics_away_from_attacker() {
-        let w = World {
-            solid: &floor,
-            water: &no_water,
-        };
+        let (shape, water) = flat_world(&floor);
+        let w = World { shape: &*shape, water: &*water };
         let mut m = Mob::new(Species::Cow, [0.5, 64.0, 0.5], 1);
         m.on_ground = true;
         assert_eq!(
@@ -739,10 +871,8 @@ mod tests {
 
     #[test]
     fn dies_and_despawns() {
-        let w = World {
-            solid: &floor,
-            water: &no_water,
-        };
+        let (shape, water) = flat_world(&floor);
+        let w = World { shape: &*shape, water: &*water };
         let mut m = Mob::new(Species::Chicken, [0.5, 64.0, 0.5], 1);
         assert_eq!(hurt(&mut m, 10.0, None, 0.0), Some(true));
         let mut rnd = || 0.5;
@@ -756,10 +886,8 @@ mod tests {
 
     #[test]
     fn follows_food() {
-        let w = World {
-            solid: &floor,
-            water: &no_water,
-        };
+        let (shape, water) = flat_world(&floor);
+        let w = World { shape: &*shape, water: &*water };
         let mut m = Mob::new(Species::Sheep, [0.5, 64.0, 0.5], 1);
         m.on_ground = true;
         let players = [([0.5, 64.0, 8.5], true)];

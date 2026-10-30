@@ -5,24 +5,29 @@
 //! работают с приоритетом ниже обычного, поэтому тик их вытесняет, а не наоборот.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Одна задача пула: готовая работа без параметров.
 pub type Job = Box<dyn FnOnce() + Send + 'static>;
 
 /// Очередь задач и потоки-исполнители. Живёт столько же, сколько мир.
+///
+/// Очередь — `crossbeam_channel` с несколькими получателями. Раньше стоял
+/// `std::sync::mpsc` за общим `Mutex`, и замок держался **на время `recv()`**:
+/// простаивающие потоки выстраивались в очередь на замке, а выдача задачи
+/// сериализовалась через него. Здесь каждый поток забирает задачу сам.
 pub struct GenPool {
-    queue: Mutex<Sender<Job>>,
+    queue: crossbeam_channel::Sender<Job>,
     /// Сколько задач ещё не выполнено: по нему видно, успевает ли пул.
     pending: AtomicUsize,
+    /// Сколько потоков заведено (`/top` показывает глубину пула).
+    workers: usize,
 }
 
 impl GenPool {
     /// `workers` потоков; вызывающий сам оставляет ядро тику.
     pub fn new(workers: usize) -> Arc<Self> {
-        let (tx, rx) = std::sync::mpsc::channel::<Job>();
-        let rx = Arc::new(Mutex::new(rx));
+        let (tx, rx) = crossbeam_channel::unbounded::<Job>();
         let workers = workers.max(1);
         for i in 0..workers {
             let rx = rx.clone();
@@ -30,29 +35,29 @@ impl GenPool {
                 .name(format!("chunk-gen-{i}"))
                 .spawn(move || {
                     crate::play::background_priority();
-                    loop {
-                        // Замок держится только на ожидании задачи, не на самой работе.
-                        let job = {
-                            let guard = rx.lock().unwrap();
-                            guard.recv()
-                        };
-                        let Ok(job) = job else { return };
+                    // Пока есть отправитель, `recv` ждёт задачу без замка.
+                    while let Ok(job) = rx.recv() {
                         job();
                     }
                 })
                 .expect("spawn chunk generation thread");
         }
         Arc::new(Self {
-            queue: Mutex::new(tx),
+            queue: tx,
             pending: AtomicUsize::new(0),
+            workers,
         })
+    }
+
+    /// Сколько потоков генерации заведено.
+    pub fn workers(&self) -> usize {
+        self.workers
     }
 
     /// Ставит задачу в очередь. Порядок очереди — порядок отправки: ближние первыми.
     pub fn submit(&self, job: Job) {
         self.pending.fetch_add(1, Ordering::Relaxed);
-        let tx = self.queue.lock().unwrap();
-        if tx.send(job).is_err() {
+        if self.queue.send(job).is_err() {
             self.pending.fetch_sub(1, Ordering::Relaxed);
         }
     }

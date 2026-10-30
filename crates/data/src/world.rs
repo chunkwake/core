@@ -1114,3 +1114,69 @@ mod loot_tests {
         }
     }
 }
+
+/// Физика состояний блоков из `reports/shapes.csv` (выгрузка `ChunkwakeShapes`).
+#[derive(Debug, Clone, Default)]
+pub struct BlockPhysics {
+    /// `Block.getFriction` по id состояния.
+    pub friction: Vec<f32>,
+    /// `getSpeedFactor` (душевой песок, мёд).
+    pub speed: Vec<f32>,
+    /// `getJumpFactor` (мёд).
+    pub jump: Vec<f32>,
+    /// Индекс формы в `boxes` по id состояния.
+    pub shape: Vec<u32>,
+    /// Разные формы коллизии: коробки `x0 y0 z0 x1 y1 z1` в долях блока.
+    pub boxes: Vec<Vec<[f64; 6]>>,
+}
+
+impl BlockPhysics {
+    /// Коробки коллизии состояния; неизвестное — полный куб.
+    pub fn boxes_of(&self, state: u32) -> &[[f64; 6]] {
+        const FULL: &[[f64; 6]] = &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
+        self.shape
+            .get(state as usize)
+            .map_or(FULL, |&i| self.boxes[i as usize].as_slice())
+    }
+}
+
+/// Строки `reports/shapes.csv`: `трение,скорость,прыжок,коробки через |`.
+pub fn load_physics(root: &Path) -> Result<BlockPhysics, DataError> {
+    let path = root.join("reports/shapes.csv");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
+    let bad = |i: usize, line: &str| DataError::Format {
+        file: path.display().to_string(),
+        msg: format!("line {}: {line:?}", i + 1),
+    };
+    let mut out = BlockPhysics::default();
+    let mut seen: HashMap<String, u32> = HashMap::new();
+    for (i, line) in text.lines().enumerate() {
+        let mut f = line.splitn(4, ',');
+        let mut num = || f.next().and_then(|v| v.trim().parse::<f32>().ok());
+        let (Some(fr), Some(sp), Some(ju)) = (num(), num(), num()) else {
+            return Err(bad(i, line));
+        };
+        let shape = f.next().unwrap_or("").trim();
+        let next = seen.len() as u32;
+        let idx = match seen.get(shape) {
+            Some(&k) => k,
+            None => {
+                let mut boxes = Vec::new();
+                for b in shape.split('|').filter(|b| !b.is_empty()) {
+                    let v: Vec<f64> = b.split(' ').filter_map(|x| x.parse().ok()).collect();
+                    let a: [f64; 6] = v.try_into().map_err(|_| bad(i, line))?;
+                    boxes.push(a);
+                }
+                out.boxes.push(boxes);
+                seen.insert(shape.to_string(), next);
+                next
+            }
+        };
+        out.friction.push(fr);
+        out.speed.push(sp);
+        out.jump.push(ju);
+        out.shape.push(idx);
+    }
+    Ok(out)
+}

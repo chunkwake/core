@@ -192,6 +192,9 @@ fn main() {
                 randoms: &randoms,
                 preliminary: &prelim[i],
                 random: &noise.surface_random(),
+                clay_offset: noise_list
+                    .iter()
+                    .position(|(n, _)| n == "minecraft:clay_bands_offset"),
             };
             stage.build(&mut chunks[i], cx, cz);
         }
@@ -211,7 +214,7 @@ fn main() {
         .collect();
     let column_ms = t.elapsed().as_secs_f64() * 1000.0;
 
-    let t = Instant::now();
+    let _t = Instant::now();
     let mut map: HashMap<(i32, i32), ChunkColumn> =
         coords.iter().copied().zip(columns.drain(..)).collect();
     let mut light_ms = 0.0;
