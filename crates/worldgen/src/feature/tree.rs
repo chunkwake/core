@@ -3,8 +3,8 @@
 //! Java — порядок их обхода решает, в каком порядке декораторы тратят
 //! случайные числа.
 
-use super::{add, block_set, Features, Level, Palette, Placed, Provider, DIRECTION_NAMES};
-use crate::carver::{cos, IntP};
+use super::{DIRECTION_NAMES, Features, Level, Palette, Placed, Provider, add, block_set};
+use crate::carver::{IntP, cos};
 use crate::random::{Bits, Worldgen};
 use serde_json::Value;
 use std::sync::Arc;
@@ -22,11 +22,17 @@ pub(super) struct JavaSet {
 
 impl JavaSet {
     pub(super) fn new() -> Self {
-        Self { buckets: vec![Vec::new(); 16], len: 0 }
+        Self {
+            buckets: vec![Vec::new(); 16],
+            len: 0,
+        }
     }
 
     fn hash(&[x, y, z]: &Pos) -> u32 {
-        let h = y.wrapping_add(z.wrapping_mul(31)).wrapping_mul(31).wrapping_add(x) as u32;
+        let h = y
+            .wrapping_add(z.wrapping_mul(31))
+            .wrapping_mul(31)
+            .wrapping_add(x) as u32;
         h ^ (h >> 16)
     }
 
@@ -154,17 +160,41 @@ impl Tags {
 
 #[derive(Clone, Debug)]
 enum Size {
-    Two { limit: i32, lower: i32, upper: i32 },
-    Three { limit: i32, upper_limit: i32, lower: i32, middle: i32, upper: i32 },
+    Two {
+        limit: i32,
+        lower: i32,
+        upper: i32,
+    },
+    Three {
+        limit: i32,
+        upper_limit: i32,
+        lower: i32,
+        middle: i32,
+        upper: i32,
+    },
 }
 
 impl Size {
     fn at(&self, h: i32, yo: i32) -> i32 {
         match *self {
-            Self::Two { limit, lower, upper } => {
-                if yo < limit { lower } else { upper }
+            Self::Two {
+                limit,
+                lower,
+                upper,
+            } => {
+                if yo < limit {
+                    lower
+                } else {
+                    upper
+                }
             }
-            Self::Three { limit, upper_limit, lower, middle, upper } => {
+            Self::Three {
+                limit,
+                upper_limit,
+                lower,
+                middle,
+                upper,
+            } => {
                 if yo < limit {
                     lower
                 } else if yo >= h - upper_limit {
@@ -185,10 +215,26 @@ enum TrunkKind {
     DarkOak,
     Giant,
     MegaJungle,
-    Bending { min_leaves: i32, bend: IntP },
-    Upwards { steps: IntP, chance: f32, length: IntP, through: Arc<Vec<bool>> },
-    Cherry { count: IntP, horizontal: IntP, start: (i32, i32), end: IntP },
-    Poplar { above: IntP, branches: IntP },
+    Bending {
+        min_leaves: i32,
+        bend: IntP,
+    },
+    Upwards {
+        steps: IntP,
+        chance: f32,
+        length: IntP,
+        through: Arc<Vec<bool>>,
+    },
+    Cherry {
+        count: IntP,
+        horizontal: IntP,
+        start: (i32, i32),
+        end: IntP,
+    },
+    Poplar {
+        above: IntP,
+        branches: IntP,
+    },
 }
 
 #[derive(Debug)]
@@ -211,8 +257,17 @@ enum FoliageKind {
     DarkOak,
     MegaJungle(i32),
     RandomSpread(IntP, i32),
-    Cherry { height: IntP, wide_hole: f32, corner_hole: f32, hanging: f32, extension: f32 },
-    Poplar { height: IntP, side_hole: f32 },
+    Cherry {
+        height: IntP,
+        wide_hole: f32,
+        corner_hole: f32,
+        hanging: f32,
+        extension: f32,
+    },
+    Poplar {
+        height: IntP,
+        side_hole: f32,
+    },
 }
 
 #[derive(Debug)]
@@ -233,7 +288,12 @@ struct Attachment {
 
 impl Attachment {
     fn new(pos: Pos, radius_offset: i32, double: bool) -> Self {
-        Self { pos, radius_offset, height_offset: 0, double }
+        Self {
+            pos,
+            radius_offset,
+            height_offset: 0,
+            double,
+        }
     }
 }
 
@@ -257,12 +317,33 @@ enum Decorator {
     TrunkVine,
     Cocoa(f32),
     AlterGround(Provider),
-    AttachedToLeaves { chance: f32, xz: i32, y: i32, provider: Provider, empty: i32, dirs: Vec<usize> },
-    AttachedToLogs { chance: f32, provider: Provider, dirs: Vec<usize> },
-    PlaceOnGround { tries: i32, radius: i32, height: i32, provider: Provider },
+    AttachedToLeaves {
+        chance: f32,
+        xz: i32,
+        y: i32,
+        provider: Provider,
+        empty: i32,
+        dirs: Vec<usize>,
+    },
+    AttachedToLogs {
+        chance: f32,
+        provider: Provider,
+        dirs: Vec<usize>,
+    },
+    PlaceOnGround {
+        tries: i32,
+        radius: i32,
+        height: i32,
+        provider: Provider,
+    },
     CreakingHeart(f32),
     ShelfMushroom(f32),
-    PaleMoss { leaves: f32, trunk: f32, ground: f32, patch: Option<Arc<Placed>> },
+    PaleMoss {
+        leaves: f32,
+        trunk: f32,
+        ground: f32,
+        patch: Option<Arc<Placed>>,
+    },
 }
 
 #[derive(Debug)]
@@ -347,9 +428,13 @@ impl Tree {
             "minecraft:blob_foliage_placer" => FoliageKind::Blob(int(f, "height", 0)),
             "minecraft:fancy_foliage_placer" => FoliageKind::Fancy(int(f, "height", 0)),
             "minecraft:bush_foliage_placer" => FoliageKind::Bush(int(f, "height", 0)),
-            "minecraft:spruce_foliage_placer" => FoliageKind::Spruce(IntP::parse(&f["trunk_height"])?),
+            "minecraft:spruce_foliage_placer" => {
+                FoliageKind::Spruce(IntP::parse(&f["trunk_height"])?)
+            }
             "minecraft:pine_foliage_placer" => FoliageKind::Pine(IntP::parse(&f["height"])?),
-            "minecraft:mega_pine_foliage_placer" => FoliageKind::MegaPine(IntP::parse(&f["crown_height"])?),
+            "minecraft:mega_pine_foliage_placer" => {
+                FoliageKind::MegaPine(IntP::parse(&f["crown_height"])?)
+            }
             "minecraft:acacia_foliage_placer" => FoliageKind::Acacia,
             "minecraft:dark_oak_foliage_placer" => FoliageKind::DarkOak,
             "minecraft:jungle_foliage_placer" => FoliageKind::MegaJungle(int(f, "height", 0)),
@@ -571,7 +656,13 @@ impl Tree {
     }
 
     /// `TreeFeature.place`: поставлено ли дерево.
-    pub(super) fn place(&self, features: &Features, level: &mut dyn Level, r: &mut Worldgen, origin: Pos) -> bool {
+    pub(super) fn place(
+        &self,
+        features: &Features,
+        level: &mut dyn Level,
+        r: &mut Worldgen,
+        origin: Pos,
+    ) -> bool {
         let mut c = Ctx {
             features,
             level,
@@ -647,10 +738,17 @@ impl Tree {
 
     fn foliage_height(&self, c: &mut Ctx, h: i32) -> i32 {
         match &self.foliage.kind {
-            FoliageKind::Blob(n) | FoliageKind::Fancy(n) | FoliageKind::Bush(n) | FoliageKind::MegaJungle(n) => *n,
+            FoliageKind::Blob(n)
+            | FoliageKind::Fancy(n)
+            | FoliageKind::Bush(n)
+            | FoliageKind::MegaJungle(n) => *n,
             FoliageKind::Spruce(trunk) => (h - trunk.sample(c.r)).max(4),
-            FoliageKind::Pine(p) | FoliageKind::MegaPine(p) | FoliageKind::RandomSpread(p, _) => p.sample(c.r),
-            FoliageKind::Cherry { height, .. } | FoliageKind::Poplar { height, .. } => height.sample(c.r),
+            FoliageKind::Pine(p) | FoliageKind::MegaPine(p) | FoliageKind::RandomSpread(p, _) => {
+                p.sample(c.r)
+            }
+            FoliageKind::Cherry { height, .. } | FoliageKind::Poplar { height, .. } => {
+                height.sample(c.r)
+            }
             FoliageKind::Acacia => 0,
             FoliageKind::DarkOak => 4,
         }
@@ -704,7 +802,11 @@ impl Tree {
         let next = step(pos, dir, 1);
         let width = manhattan(pos, origin);
         let list = if width > roots.max_width - 3 && width <= roots.max_width {
-            if c.r.next_float() < roots.skew { vec![below, up(next, -1)] } else { vec![below] }
+            if c.r.next_float() < roots.skew {
+                vec![below, up(next, -1)]
+            } else {
+                vec![below]
+            }
         } else if width > roots.max_width || c.r.next_float() < roots.skew {
             vec![below]
         } else if c.r.next_bool() {
@@ -725,7 +827,9 @@ impl Tree {
 
     fn waterlogged(&self, c: &Ctx, p: Pos, s: u32) -> u32 {
         let wet = c.pal.fluid(c.get(p)).is_water();
-        c.pal.with_prop(s, "waterlogged", if wet { "true" } else { "false" }).unwrap_or(s)
+        c.pal
+            .with_prop(s, "waterlogged", if wet { "true" } else { "false" })
+            .unwrap_or(s)
     }
 
     fn place_root(&self, c: &mut Ctx, roots: &Roots, p: Pos) {
@@ -840,7 +944,9 @@ impl Tree {
                 out.push(Attachment::new([tx, ey, tz], 0, true));
                 for ox in -1..=2 {
                     for oz in -1..=2 {
-                        if (!(0..=1).contains(&ox) || !(0..=1).contains(&oz)) && c.r.next_int_bound(3) <= 0 {
+                        if (!(0..=1).contains(&ox) || !(0..=1).contains(&oz))
+                            && c.r.next_int_bound(3) <= 0
+                        {
                             let len = c.r.next_int_bound(3) + 2;
                             for by in 0..len {
                                 self.place_log(c, [x + ox, ey - by - 1, z + oz]);
@@ -863,7 +969,11 @@ impl Tree {
                         bz = (1.5f32 + crate::carver::sin(angle as f64) * b as f32) as i32;
                         self.place_log(c, [o[0] + bx, o[1] + bh - 3 + b / 2, o[2] + bz]);
                     }
-                    out.push(Attachment::new([o[0] + bx, o[1] + bh, o[2] + bz], -2, false));
+                    out.push(Attachment::new(
+                        [o[0] + bx, o[1] + bh, o[2] + bz],
+                        -2,
+                        false,
+                    ));
                     bh -= 2 + c.r.next_int_bound(4);
                 }
                 out
@@ -896,7 +1006,12 @@ impl Tree {
                 }
                 out
             }
-            TrunkKind::Upwards { steps, chance, length, .. } => {
+            TrunkKind::Upwards {
+                steps,
+                chance,
+                length,
+                ..
+            } => {
                 let mut out = Vec::new();
                 for hp in 0..h {
                     let cy = o[1] + hp;
@@ -914,11 +1029,17 @@ impl Tree {
                 }
                 out
             }
-            TrunkKind::Cherry { count, horizontal, start, end } => {
+            TrunkKind::Cherry {
+                count,
+                horizontal,
+                start,
+                end,
+            } => {
                 self.below_trunk(c, up(o, -1));
                 let first = (h - 1 + c.r.next_int_bound(start.1 - start.0 + 1) + start.0).max(0);
                 let second_max = start.1 - 1;
-                let mut second = (h - 1 + c.r.next_int_bound(second_max - start.0 + 1) + start.0).max(0);
+                let mut second =
+                    (h - 1 + c.r.next_int_bound(second_max - start.0 + 1) + start.0).max(0);
                 if second >= first {
                     second += 1;
                 }
@@ -940,9 +1061,29 @@ impl Tree {
                     out.push(Attachment::new(up(o, trunk_h), 0, false));
                 }
                 let dir = c.r.next_int_bound(4) as usize;
-                out.push(self.cherry_branch(c, h, o, dir, dir, first, first < trunk_h - 1, horizontal, end));
+                out.push(self.cherry_branch(
+                    c,
+                    h,
+                    o,
+                    dir,
+                    dir,
+                    first,
+                    first < trunk_h - 1,
+                    horizontal,
+                    end,
+                ));
                 if both {
-                    out.push(self.cherry_branch(c, h, o, dir, (dir + 2) % 4, second, second < trunk_h - 1, horizontal, end));
+                    out.push(self.cherry_branch(
+                        c,
+                        h,
+                        o,
+                        dir,
+                        (dir + 2) % 4,
+                        second,
+                        second < trunk_h - 1,
+                        horizontal,
+                        end,
+                    ));
                 }
                 out
             }
@@ -1053,7 +1194,11 @@ impl Tree {
             log = step(log, HORIZONTAL[dir], 1);
             self.place_log_with(c, log, axis);
         }
-        let vertical: Pos = if target[1] > log[1] { [0, 1, 0] } else { [0, -1, 0] };
+        let vertical: Pos = if target[1] > log[1] {
+            [0, 1, 0]
+        } else {
+            [0, -1, 0]
+        };
         loop {
             let d = manhattan(log, target);
             if d == 0 {
@@ -1089,7 +1234,11 @@ impl Tree {
                         let dx = o[0] - start[0];
                         let dz = o[2] - start[2];
                         let bh = start[1] as f64 - ((dx * dx + dz * dz) as f64).sqrt() * 0.381;
-                        let top = if bh > trunk_top as f64 { trunk_top } else { bh as i32 };
+                        let top = if bh > trunk_top as f64 {
+                            trunk_top
+                        } else {
+                            bh as i32
+                        };
                         let base = [o[0], top, o[2]];
                         if self.limb(c, base, start, false) {
                             coords.push((start, base[1]));
@@ -1120,7 +1269,13 @@ impl Tree {
         }
         let d = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
         let steps = d[0].abs().max(d[1].abs()).max(d[2].abs());
-        let f = |v: i32| if steps == 0 { 0.0 } else { v as f32 / steps as f32 };
+        let f = |v: i32| {
+            if steps == 0 {
+                0.0
+            } else {
+                v as f32 / steps as f32
+            }
+        };
         let (dx, dy, dz) = (f(d[0]), f(d[1]), f(d[2]));
         for i in 0..=steps {
             let p = [
@@ -1132,7 +1287,13 @@ impl Tree {
                 let xd = (p[0] - start[0]).abs();
                 let zd = (p[2] - start[2]).abs();
                 let m = xd.max(zd);
-                let axis = if m == 0 { "y" } else if xd == m { "x" } else { "z" };
+                let axis = if m == 0 {
+                    "y"
+                } else if xd == m {
+                    "x"
+                } else {
+                    "z"
+                };
                 self.place_log_with(c, p, Some(axis));
             } else if !self.is_free(c, p) {
                 return false;
@@ -1151,7 +1312,10 @@ impl Tree {
         let mut s = c.state(&self.foliage_provider, p);
         if c.pal.prop(s, "waterlogged").is_some() {
             let wet = c.pal.fluid(here) == super::Fluid::Water;
-            s = c.pal.with_prop(s, "waterlogged", if wet { "true" } else { "false" }).unwrap_or(s);
+            s = c
+                .pal
+                .with_prop(s, "waterlogged", if wet { "true" } else { "false" })
+                .unwrap_or(s);
         }
         c.foliage.insert(p);
         c.put(p, s);
@@ -1169,7 +1333,9 @@ impl Tree {
                 a * a + b * b > (r * r) as f32
             }
             FoliageKind::Spruce(_) | FoliageKind::Pine(_) => dx == r && dz == r && r > 0,
-            FoliageKind::MegaPine(_) | FoliageKind::MegaJungle(_) => dx + dz >= 7 || dx * dx + dz * dz > r * r,
+            FoliageKind::MegaPine(_) | FoliageKind::MegaJungle(_) => {
+                dx + dz >= 7 || dx * dx + dz * dz > r * r
+            }
             FoliageKind::Acacia => {
                 if y == 0 {
                     (dx > 1 || dz > 1) && dx != 0 && dz != 0
@@ -1185,7 +1351,11 @@ impl Tree {
                 }
             }
             FoliageKind::RandomSpread(..) | FoliageKind::Poplar { .. } => false,
-            FoliageKind::Cherry { wide_hole, corner_hole, .. } => {
+            FoliageKind::Cherry {
+                wide_hole,
+                corner_hole,
+                ..
+            } => {
                 if y == -1 && (dx == r || dz == r) && c.r.next_float() < *wide_hole {
                     return true;
                 }
@@ -1228,7 +1398,16 @@ impl Tree {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn leaves_row_hanging(&self, c: &mut Ctx, o: Pos, r: i32, y: i32, double: bool, chance: f32, ext: f32) {
+    fn leaves_row_hanging(
+        &self,
+        c: &mut Ctx,
+        o: Pos,
+        r: i32,
+        y: i32,
+        double: bool,
+        chance: f32,
+        ext: f32,
+    ) {
         self.leaves_row(c, o, r, y, double);
         let off = i32::from(double);
         let log = up(o, -1);
@@ -1257,7 +1436,15 @@ impl Tree {
         self.try_leaf(c, p)
     }
 
-    fn create_foliage(&self, c: &mut Ctx, _h: i32, a: Attachment, fh: i32, radius: i32, offset: i32) {
+    fn create_foliage(
+        &self,
+        c: &mut Ctx,
+        _h: i32,
+        a: Attachment,
+        fh: i32,
+        radius: i32,
+        offset: i32,
+    ) {
         let double = a.double;
         let fho = fh + a.height_offset;
         match &self.foliage.kind {
@@ -1320,7 +1507,11 @@ impl Tree {
                 for yy in p[1] - fho + offset..=p[1] + offset {
                     let yo = p[1] - yy;
                     let smooth = radius + a.radius_offset + floor_f(yo as f32 / fho as f32 * 3.5);
-                    let jagged = if yo > 0 && smooth == prev && yy & 1 == 0 { smooth + 1 } else { smooth };
+                    let jagged = if yo > 0 && smooth == prev && yy & 1 == 0 {
+                        smooth + 1
+                    } else {
+                        smooth
+                    };
                     self.leaves_row(c, [p[0], yy, p[2]], jagged, 0, double);
                     prev = smooth;
                 }
@@ -1346,7 +1537,11 @@ impl Tree {
                 }
             }
             FoliageKind::MegaJungle(_) => {
-                let lh = if double { fh } else { 1 + c.r.next_int_bound(2) } + a.height_offset;
+                let lh = if double {
+                    fh
+                } else {
+                    1 + c.r.next_int_bound(2)
+                } + a.height_offset;
                 let mut yo = offset;
                 while yo >= offset - lh {
                     let r = radius + a.radius_offset + 1 - yo;
@@ -1362,7 +1557,9 @@ impl Tree {
                     self.try_leaf(c, add(a.pos, [dx, dy, dz]));
                 }
             }
-            FoliageKind::Cherry { hanging, extension, .. } => {
+            FoliageKind::Cherry {
+                hanging, extension, ..
+            } => {
                 let p = up(a.pos, offset);
                 let r = radius + a.radius_offset - 1;
                 self.leaves_row(c, p, r - 2, fho - 3, double);
@@ -1375,7 +1572,9 @@ impl Tree {
                 self.leaves_row_hanging(c, p, r, -1, double, *hanging, *extension);
                 self.leaves_row_hanging(c, p, r - 1, -2, double, *hanging, *extension);
             }
-            FoliageKind::Poplar { side_hole, .. } => self.poplar(c, a, fho, radius, offset, *side_hole),
+            FoliageKind::Poplar { side_hole, .. } => {
+                self.poplar(c, a, fho, radius, offset, *side_hole)
+            }
         }
     }
 
@@ -1399,7 +1598,8 @@ impl Tree {
                 r
             }
         };
-        let inside = |r: i32, ax: i32, az: i32, cut: i32, extra: i32| ax + az <= r * 2 - (cut + extra);
+        let inside =
+            |r: i32, ax: i32, az: i32, cut: i32, extra: i32| ax + az <= r * 2 - (cut + extra);
         let row = |c: &mut Ctx, r: i32, y: i32| {
             let off = i32::from(double);
             for dx in -r..=r + off {
@@ -1451,7 +1651,6 @@ impl Tree {
         row(c, r - 1, 0);
         row(c, (r - 2).clamp(1, 2), -1);
     }
-
 }
 
 impl Tags {
@@ -1463,7 +1662,10 @@ impl Tags {
     }
 
     fn vine(&self, c: &mut Ctx, p: Pos, side: &str) {
-        let s = c.pal.with_prop(self.vine, side, "true").unwrap_or(self.vine);
+        let s = c
+            .pal
+            .with_prop(self.vine, side, "true")
+            .unwrap_or(self.vine);
         self.set_decoration(c, p, s);
     }
 
@@ -1491,8 +1693,12 @@ impl Tags {
         let leaves = c.foliage.sorted_by_y();
         let roots = c.roots.sorted_by_y();
         // Стороны лиан: (сдвиг, свойство).
-        const VINES: [(Pos, &str); 4] =
-            [([-1, 0, 0], "east"), ([1, 0, 0], "west"), ([0, 0, -1], "south"), ([0, 0, 1], "north")];
+        const VINES: [(Pos, &str); 4] = [
+            ([-1, 0, 0], "east"),
+            ([1, 0, 0], "west"),
+            ([0, 0, -1], "south"),
+            ([0, 0, 1], "north"),
+        ];
         match d {
             Decorator::Beehive(p) => {
                 if logs.is_empty() || c.r.next_float() >= *p {
@@ -1516,8 +1722,14 @@ impl Tags {
                     let j = c.r.next_int_bound(i as i32) as usize;
                     spots.swap(i - 1, j);
                 }
-                if let Some(&p) = spots.iter().find(|&&p| c.is_air(p) && c.is_air(step(p, HORIZONTAL[2], 1))) {
-                    let s = c.pal.with_prop(self.bee_nest, "facing", "south").unwrap_or(self.bee_nest);
+                if let Some(&p) = spots
+                    .iter()
+                    .find(|&&p| c.is_air(p) && c.is_air(step(p, HORIZONTAL[2], 1)))
+                {
+                    let s = c
+                        .pal
+                        .with_prop(self.bee_nest, "facing", "south")
+                        .unwrap_or(self.bee_nest);
                     self.set_decoration(c, p, s);
                     let bees = 2 + c.r.next_int_bound(2);
                     for _ in 0..bees {
@@ -1567,7 +1779,10 @@ impl Tags {
                             let at = step(log, HORIZONTAL[(i + 2) % 4], 1);
                             if c.is_air(at) {
                                 let age = c.r.next_int_bound(3).to_string();
-                                let s = c.pal.with_prop(self.cocoa, "age", &age).unwrap_or(self.cocoa);
+                                let s = c
+                                    .pal
+                                    .with_prop(self.cocoa, "age", &age)
+                                    .unwrap_or(self.cocoa);
                                 let s = c.pal.with_prop(s, "facing", name).unwrap_or(s);
                                 self.set_decoration(c, at, s);
                             }
@@ -1594,7 +1809,14 @@ impl Tags {
                     }
                 }
             }
-            Decorator::AttachedToLeaves { chance, xz, y, provider, empty, dirs } => {
+            Decorator::AttachedToLeaves {
+                chance,
+                xz,
+                y,
+                provider,
+                empty,
+                dirs,
+            } => {
                 let mut black = std::collections::HashSet::new();
                 for leaf in Self::shuffled(c, &leaves) {
                     let d = dirs[c.r.next_int_bound(dirs.len() as i32) as usize];
@@ -1615,7 +1837,11 @@ impl Tags {
                     }
                 }
             }
-            Decorator::AttachedToLogs { chance, provider, dirs } => {
+            Decorator::AttachedToLogs {
+                chance,
+                provider,
+                dirs,
+            } => {
                 for log in Self::shuffled(c, &logs) {
                     let d = dirs[c.r.next_int_bound(dirs.len() as i32) as usize];
                     let at = add(log, super::DIRS[d]);
@@ -1625,7 +1851,12 @@ impl Tags {
                     }
                 }
             }
-            Decorator::PlaceOnGround { tries, radius, height, provider } => {
+            Decorator::PlaceOnGround {
+                tries,
+                radius,
+                height,
+                provider,
+            } => {
                 let list = Self::lowest(&logs, &roots);
                 let Some(&o) = list.first() else {
                     return;
@@ -1652,7 +1883,9 @@ impl Tags {
                         && !Palette::flag(&self.leaves, ground);
                     if (c.pal.is_air(top) || top == self.vine || c.pal.same_block(top, self.vine))
                         && solid_render
-                        && c.level.surface(super::Heightmap::MotionBlockingNoLeaves, x, z) <= above[1]
+                        && c.level
+                            .surface(super::Heightmap::MotionBlockingNoLeaves, x, z)
+                            <= above[1]
                     {
                         let s = c.state(provider, above);
                         self.set_decoration(c, above, s);
@@ -1664,16 +1897,26 @@ impl Tags {
                     return;
                 }
                 let list = Self::shuffled(c, &logs);
-                let found = list.into_iter().find(|&l| super::DIRS.iter().all(|&d| c.has(&self.logs, add(l, d))));
+                let found = list
+                    .into_iter()
+                    .find(|&l| super::DIRS.iter().all(|&d| c.has(&self.logs, add(l, d))));
                 if let Some(at) = found {
                     let s = self.creaking_heart;
-                    let s = c.pal.with_prop(s, "creaking_heart_state", "dormant").unwrap_or(s);
+                    let s = c
+                        .pal
+                        .with_prop(s, "creaking_heart_state", "dormant")
+                        .unwrap_or(s);
                     let s = c.pal.with_prop(s, "natural", "true").unwrap_or(s);
                     self.set_decoration(c, at, s);
                 }
             }
             Decorator::ShelfMushroom(p) => self.shelf_mushroom(c, *p, &logs),
-            Decorator::PaleMoss { leaves: lp, trunk, ground, patch } => {
+            Decorator::PaleMoss {
+                leaves: lp,
+                trunk,
+                ground,
+                patch,
+            } => {
                 let list = Self::shuffled(c, &logs);
                 let Some(origin) = list.iter().copied().min_by_key(|p| p[1]) else {
                     return;
@@ -1741,14 +1984,21 @@ impl Tags {
         let m = self.shelf_mushroom;
         let has = |c: &Ctx, at: Pos| c.pal.same_block(c.get(at), m);
         let replaceable = |c: &Ctx, at: Pos| {
-            let water = |q: Pos| c.pal.fluid(c.get(q)) == super::Fluid::Water && c.pal.same_block(c.get(q), c.pal.defaults["minecraft:water"]);
+            let water = |q: Pos| {
+                c.pal.fluid(c.get(q)) == super::Fluid::Water
+                    && c.pal
+                        .same_block(c.get(q), c.pal.defaults["minecraft:water"])
+            };
             Palette::flag(&c.pal.replaceable, c.get(at))
                 && !(water(at) || HORIZONTAL.iter().any(|&d| water(step(at, d, 1))))
         };
         let place = |c: &mut Ctx, at: Pos, facing: usize| {
             let age = c.r.next_int_bound(2).to_string();
             let s = c.pal.with_prop(m, "age", &age).unwrap_or(m);
-            let s = c.pal.with_prop(s, "facing", DIRECTION_NAMES[HORIZONTAL_DIR[facing]]).unwrap_or(s);
+            let s = c
+                .pal
+                .with_prop(s, "facing", DIRECTION_NAMES[HORIZONTAL_DIR[facing]])
+                .unwrap_or(s);
             self.set_decoration(c, at, s);
         };
         let (first, last) = (logs[0], logs[logs.len() - 1]);
@@ -1788,7 +2038,6 @@ impl Tags {
             }
         }
     }
-
 }
 
 impl Tree {
@@ -1817,7 +2066,8 @@ impl Tree {
         }
         let span = [hi[0] - lo[0] + 1, hi[1] - lo[1] + 1, hi[2] - lo[2] + 1];
         let inside = |p: &Pos| (0..3).all(|i| lo[i] <= p[i] && p[i] <= hi[i]);
-        let index = |p: &Pos| (((p[0] - lo[0]) * span[1] + p[1] - lo[1]) * span[2] + p[2] - lo[2]) as usize;
+        let index =
+            |p: &Pos| (((p[0] - lo[0]) * span[1] + p[1] - lo[1]) * span[2] + p[2] - lo[2]) as usize;
         let mut shape = vec![false; (span[0] * span[1] * span[2]) as usize];
         for p in c.decorations.iter().chain(c.roots.iter()) {
             if inside(p) {
@@ -1854,7 +2104,9 @@ impl Tree {
                     let dist = if Palette::flag(&self.tags.no_decay, s) {
                         Some(0)
                     } else {
-                        c.pal.prop(s, "distance").and_then(|v| v.parse::<usize>().ok())
+                        c.pal
+                            .prop(s, "distance")
+                            .and_then(|v| v.parse::<usize>().ok())
                     };
                     if let Some(dist) = dist {
                         let nd = dist.min(smallest + 1);
@@ -1907,7 +2159,11 @@ impl Fallen {
         placed: &mut PlacedFn,
     ) -> Result<Self, String> {
         let mut list = |k: &str, pal: &mut Palette| -> Result<Vec<Decorator>, String> {
-            v[k].as_array().into_iter().flatten().map(|d| parse_decorator(d, pal, provider, placed)).collect()
+            v[k].as_array()
+                .into_iter()
+                .flatten()
+                .map(|d| parse_decorator(d, pal, provider, placed))
+                .collect()
         };
         let stump = list("stump_decorators", pal)?;
         let log = list("log_decorators", pal)?;
@@ -1946,7 +2202,13 @@ impl Fallen {
         }
     }
 
-    pub(super) fn place(&self, features: &Features, level: &mut dyn Level, r: &mut Worldgen, origin: Pos) {
+    pub(super) fn place(
+        &self,
+        features: &Features,
+        level: &mut dyn Level,
+        r: &mut Worldgen,
+        origin: Pos,
+    ) {
         let mut c = Ctx {
             features,
             level,

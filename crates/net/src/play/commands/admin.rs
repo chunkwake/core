@@ -2,12 +2,12 @@
 //! `/ban-ip`, `/banlist`, `/pardon`, `/pardon-ip`, `/save-all`, `/save-off`,
 //! `/save-on`, `/publish`, `/unpublish`, `/transfer`, `/reload`.
 
+use super::Context;
 use super::args;
-use super::dispatch::{translate, Call, Outcome};
+use super::dispatch::{Call, Outcome, translate};
 use super::entity::usage;
 use super::state::AccessList;
-use super::Context;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// `/op <targets>`.
 pub(super) fn op(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
@@ -121,7 +121,10 @@ pub(super) fn whitelist(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
             }
             Outcome::Feedback(translate(
                 "commands.whitelist.list",
-                vec![json!({"text": access.whitelist.join(", ")}), Value::from(access.whitelist.len())],
+                vec![
+                    json!({"text": access.whitelist.join(", ")}),
+                    Value::from(access.whitelist.len()),
+                ],
             ))
         }
         "reload" => {
@@ -184,8 +187,7 @@ fn ban_common(ctx: &Context<'_>, call: &Call<'_>, list: AccessList) -> Outcome {
 /// [`Call::path`].
 pub(super) fn banlist(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     let mut input = call.t();
-    let ips = call.path.first().map(String::as_str) == Some("ips")
-        || input.word() == Some("ips");
+    let ips = call.path.first().map(String::as_str) == Some("ips") || input.word() == Some("ips");
     let access = ctx.vars().access();
     let list = if ips {
         access.banned_ips
@@ -249,7 +251,10 @@ pub(super) fn save_on(ctx: &Context<'_>, _call: &Call<'_>) -> Outcome {
 /// `/publish [port]`.
 pub(super) fn publish(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     let mut input = call.t();
-    let port = input.word().and_then(|t| args::int(t, 1, 65_535)).unwrap_or(25565);
+    let port = input
+        .word()
+        .and_then(|t| args::int(t, 1, 65_535))
+        .unwrap_or(25565);
     ctx.vars().set_published(Some(port as u16));
     Outcome::Feedback(translate(
         "commands.publish.started",
@@ -269,7 +274,10 @@ pub(super) fn transfer(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     let Some(host) = input.word() else {
         return usage("/transfer <host> [<port>] [<players>]");
     };
-    let port = input.word().and_then(|t| args::int(t, 1, 65_535)).unwrap_or(25565);
+    let port = input
+        .word()
+        .and_then(|t| args::int(t, 1, 65_535))
+        .unwrap_or(25565);
     let token = input.word().unwrap_or("@a");
     let targets = match ctx.select(call.source, token, false) {
         Ok(list) => list,
@@ -280,7 +288,11 @@ pub(super) fn transfer(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     }
     Outcome::Feedback(translate(
         "commands.transfer.success",
-        vec![json!({"text": host}), Value::from(port), Value::from(targets.len())],
+        vec![
+            json!({"text": host}),
+            Value::from(port),
+            Value::from(targets.len()),
+        ],
     ))
 }
 
@@ -294,7 +306,7 @@ pub(super) fn reload(ctx: &Context<'_>, _call: &Call<'_>) -> Outcome {
 /// `commands.json` 26.3.
 pub(super) fn specs() -> Vec<super::dispatch::Spec> {
     use super::dispatch::Spec;
-    use super::registry::{ent, game_profile, message, word, ADMINS, OWNERS};
+    use super::registry::{ADMINS, OWNERS, ent, game_profile, message, word};
 
     // `/op`, `/deop`, `/pardon`: цель — `minecraft:game_profile` (имя игрока,
     // в том числе офлайн).
@@ -312,9 +324,8 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
             "kick",
             ADMINS,
             vec![
-                Spec::arg_leaf("targets", ADMINS, ent(true, false), kick).with_children(vec![
-                    Spec::arg_leaf("reason", ADMINS, message(), kick),
-                ]),
+                Spec::arg_leaf("targets", ADMINS, ent(true, false), kick)
+                    .with_children(vec![Spec::arg_leaf("reason", ADMINS, message(), kick)]),
             ],
         ),
         Spec::group(
@@ -341,18 +352,20 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
             "ban",
             ADMINS,
             vec![
-                Spec::arg_leaf("targets", ADMINS, game_profile(), ban).with_children(vec![
-                    Spec::arg_leaf("reason", ADMINS, message(), ban),
-                ]),
+                Spec::arg_leaf("targets", ADMINS, game_profile(), ban)
+                    .with_children(vec![Spec::arg_leaf("reason", ADMINS, message(), ban)]),
             ],
         ),
         Spec::group(
             "ban-ip",
             ADMINS,
             vec![
-                args_group("target", ADMINS, word(), ban_ip).with_children(vec![
-                    Spec::arg_leaf("reason", ADMINS, message(), ban_ip),
-                ]),
+                args_group("target", ADMINS, word(), ban_ip).with_children(vec![Spec::arg_leaf(
+                    "reason",
+                    ADMINS,
+                    message(),
+                    ban_ip,
+                )]),
             ],
         ),
         Spec::exec(

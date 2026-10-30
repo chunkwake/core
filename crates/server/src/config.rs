@@ -95,6 +95,12 @@ pub struct Properties {
     pub difficulty: chunkwake_net::survival::Difficulty,
     /// Радиус `spawn-protection`. 0 — защита выключена.
     pub spawn_protection: u32,
+    /// `hardcore`: сердечко хардкора в пакете входа.
+    pub hardcore: bool,
+    /// Стартовое правило `pvp`, если мир его ещё не сохранил.
+    pub pvp: bool,
+    /// `allow-flight`: выживание и приключение тоже могут летать.
+    pub allow_flight: bool,
     /// `white-list`: пускать только имена из белого списка.
     pub white_list: bool,
     /// HTTP с `/metrics` и `/snapshot` (`chunkwake top`).
@@ -185,11 +191,15 @@ impl Properties {
         if !["peaceful", "easy", "normal", "hard"].contains(&value("difficulty")) {
             return Err("difficulty: choose peaceful, easy, normal, or hard".into());
         }
-        for key in ["hardcore", "pvp", "white-list", "allow-flight"] {
+        let flag = |key: &str| -> Result<bool, String> {
             value(key)
                 .parse::<bool>()
-                .map_err(|_| format!("{key}: use true or false"))?;
-        }
+                .map_err(|_| format!("{key}: use true or false"))
+        };
+        let hardcore = flag("hardcore")?;
+        let pvp = flag("pvp")?;
+        let white_list = flag("white-list")?;
+        let allow_flight = flag("allow-flight")?;
         let spawn_protection = value("spawn-protection")
             .parse::<u32>()
             .map_err(|_| "spawn-protection: enter a non-negative integer".to_owned())?;
@@ -197,9 +207,9 @@ impl Properties {
             .parse::<bool>()
             .map_err(|_| "metrics-enabled: use true or false".to_owned())?;
         let metrics_ip = value("metrics-bind").to_owned();
-        metrics_ip
-            .parse::<IpAddr>()
-            .map_err(|_| "metrics-bind: use an IPv4 or IPv6 address, such as 127.0.0.1".to_owned())?;
+        metrics_ip.parse::<IpAddr>().map_err(|_| {
+            "metrics-bind: use an IPv4 or IPv6 address, such as 127.0.0.1".to_owned()
+        })?;
         let metrics_port = value("metrics-port")
             .parse::<u16>()
             .map_err(|_| "metrics-port: enter a number from 1 to 65535".to_owned())?;
@@ -238,7 +248,10 @@ impl Properties {
             },
             log_level,
             spawn_protection,
-            white_list: value("white-list").parse().unwrap_or(false),
+            hardcore,
+            pvp,
+            allow_flight,
+            white_list,
             metrics_enabled,
             metrics_ip,
             metrics_port,
@@ -288,6 +301,7 @@ impl Properties {
             enable_status: self.enable_status,
             session_server: chunkwake_net::auth::MOJANG_SESSION_SERVER.into(),
             configuration: None,
+            admit: None,
         }
     }
 }
@@ -427,6 +441,9 @@ mod tests {
         // Прорисовка и симуляция: по умолчанию 8 и 6, как в этом плане.
         assert_eq!(p.view_distance, 8);
         assert_eq!(p.simulation_distance, 6);
+        assert!(!p.hardcore);
+        assert!(p.pvp);
+        assert!(!p.allow_flight);
         assert_eq!(effective_value("", "view-distance"), "8");
         assert_eq!(effective_value("", "simulation-distance"), "6");
     }

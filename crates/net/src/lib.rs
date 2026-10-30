@@ -65,6 +65,18 @@ pub struct NetConfig {
     pub session_server: String,
     /// Фаза configuration; `None` — отдать соединение сразу после login.
     pub configuration: Option<Arc<configuration::ConfigurationPlan>>,
+    /// Отказ во входе: `Some(причина)` — бан или белый список. `None` — пускать всех.
+    pub admit: Option<Admit>,
+}
+
+/// Проверка входа. Отдельный тип, потому что замыкание не реализует `Debug`.
+#[derive(Clone)]
+pub struct Admit(pub Arc<dyn Fn(&str, Uuid, SocketAddr) -> Option<String> + Send + Sync>);
+
+impl std::fmt::Debug for Admit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Admit(..)")
+    }
 }
 
 /// Игрок, прошедший login и перешедший в состояние configuration.
@@ -255,6 +267,16 @@ impl Server {
                 (name, uuid, Vec::new())
             }
         };
+        if let Some(reason) = self
+            .config
+            .admit
+            .as_ref()
+            .and_then(|admit| (admit.0)(&name, uuid, addr))
+        {
+            conn.send(&packets::login_disconnect(&text_json(&reason)))
+                .await?;
+            return Ok(None);
+        }
         if self.online.load(Ordering::Relaxed) >= self.config.max_players {
             conn.send(&packets::login_disconnect(&text_json(
                 "The server is full!",

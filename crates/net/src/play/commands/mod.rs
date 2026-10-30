@@ -12,18 +12,31 @@
 pub mod access;
 pub mod admin;
 pub mod args;
+pub mod attribute;
 pub mod chat;
 pub mod data;
+pub mod dialog;
 pub mod dispatch;
 pub mod entity;
 pub mod execute;
+pub mod extra;
+pub mod item;
+pub mod item_cmd;
+pub mod living;
+pub mod loot_cmd;
 pub mod meta;
 pub mod net;
+pub mod particle;
 pub mod perf;
+pub mod place_cmd;
 pub mod registry;
+pub mod ret;
 pub mod scoreboard;
 pub mod selector;
+pub mod snbt;
 pub mod state;
+pub mod team;
+pub mod waypoint;
 pub mod world;
 
 use crate::play::{PlayPlan, SurvivalData};
@@ -42,10 +55,7 @@ pub struct Context<'a> {
 
 impl<'a> Context<'a> {
     pub fn new(plan: &'a PlayPlan) -> Self {
-        Self {
-            plan,
-            origin: None,
-        }
+        Self { plan, origin: None }
     }
 
     /// Тот же мир, но с точкой выполнения цепочки `/execute`.
@@ -71,6 +81,10 @@ pub struct PlanConfig<'a> {
     pub server_dir: &'a std::path::Path,
     /// `white-list` из `server.properties`.
     pub whitelist: bool,
+    /// Стартовое `pvp`, если в `gamerules.json` ключа ещё нет.
+    pub pvp: bool,
+    /// `allow-flight`: выживание и приключение тоже могут летать.
+    pub allow_flight: bool,
 }
 
 impl<'a> Context<'a> {
@@ -130,6 +144,56 @@ impl<'a> Context<'a> {
             return Err(args::ArgError::new("argument.entity.notfound.player"));
         }
         Ok(out)
+    }
+
+    /// Первая цель по селектору или `None`.
+    ///
+    /// Для `limit=1` этого достаточно, а полный снимок мира (игроки, мобы,
+    /// предметы) собирать незачем.
+    pub fn select_first(
+        &self,
+        source: &Source,
+        token: &str,
+        allow_entities: bool,
+    ) -> Option<Target> {
+        let selector = Selector::parse(token).ok()?;
+        if !selector.wants_one() {
+            return None;
+        }
+        if selector.entities && !allow_entities && selector.kind != selector::Kind::AllEntities {
+            return None;
+        }
+        if selector.kind() == selector::Kind::Self_ {
+            return self.plan.command_target(source.uuid?);
+        }
+        // Игроки идут первыми в снимке, поэтому `@p` находит ближайшего,
+        // но `sort=nearest` среди мобов без полного снимка не считается.
+        if selector.kind() == selector::Kind::Nearest && selector.sort == selector::Sort::Nearest {
+            let targets = self.targets();
+            let me = source
+                .uuid
+                .and_then(|uuid| targets.iter().find(|t| t.uuid == uuid).cloned());
+            return selector
+                .apply(me.as_ref(), &targets, |t| t.tags.clone())
+                .ok()
+                .and_then(|list| list.into_iter().next());
+        }
+        let target = self.command_target_by_name(&selector.name)?;
+        selector
+            .apply(Some(&target), std::slice::from_ref(&target), |t| {
+                t.tags.clone()
+            })
+            .ok()
+            .and_then(|list| list.into_iter().next())
+    }
+
+    /// Цель по имени без полного снимка мира.
+    fn command_target_by_name(&self, name: &str) -> Option<Target> {
+        if name.is_empty() {
+            return None;
+        }
+        let uuid = self.plan.player_uuid_by_name(name)?;
+        self.plan.command_target(uuid)
     }
 
     /// Правила сервера.
@@ -205,6 +269,18 @@ pub fn commands_packet(plan: &PlayPlan, level: i32) -> Vec<u8> {
 pub fn suggestions(plan: &PlayPlan, line: &str, level: i32) -> Vec<String> {
     let line = line.trim_start_matches('/');
     let mut out = registry::tree().suggest(line, level);
+    if let Some((registry, prefix)) = registry::tree().pending_resource(line, level)
+        && registry == "minecraft:worldgen/structure"
+    {
+        out.extend(
+            plan.structure_names
+                .iter()
+                .filter(|name| structure_match(name, prefix))
+                .cloned(),
+        );
+        out.sort();
+        out.dedup();
+    }
     // Имена плагинов — только на верхнем уровне.
     if !line.contains(char::is_whitespace) {
         out.extend(
@@ -217,4 +293,28 @@ pub fn suggestions(plan: &PlayPlan, line: &str, level: i32) -> Vec<String> {
         out.dedup();
     }
     out
+}
+
+/// `village` совпадает с `minecraft:village_plains`, `#vil` — с `#minecraft:village`.
+fn structure_match(name: &str, prefix: &str) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    let prefix = prefix.to_ascii_lowercase();
+    let name_l = name.to_ascii_lowercase();
+    if name_l.starts_with(&prefix) {
+        return true;
+    }
+    let tag = name_l.starts_with('#');
+    if tag != prefix.starts_with('#') {
+        return false;
+    }
+    let bare = name_l.trim_start_matches('#');
+    let path = bare.split_once(':').map(|(_, p)| p).unwrap_or(bare);
+    let typed = prefix.trim_start_matches('#');
+    let typed = typed.split_once(':').map(|(_, p)| p).unwrap_or(typed);
+    if typed.is_empty() {
+        return tag;
+    }
+    path.starts_with(typed)
 }

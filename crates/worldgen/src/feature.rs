@@ -10,8 +10,8 @@ use crate::random::{Bits, Legacy, Worldgen};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
-use std::time::Instant;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// По ID состояния блока его имя и свойства, как в реестре сервера.
 pub type States = [Option<(String, Vec<(String, String)>)>];
@@ -31,6 +31,9 @@ pub trait Level {
     fn sea_level(&self) -> i32;
     /// `getBiome(pos)` с «дрожанием» границ.
     fn biome(&self, x: i32, y: i32, z: i32) -> u32;
+    /// Клетка, чью форму надо пересчитать после декорации соседей
+    /// (`markPosForPostProcessing`). По умолчанию некуда записать.
+    fn mark_shape(&mut self, _x: i32, _y: i32, _z: i32) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,8 +124,15 @@ enum Survive {
 impl Survive {
     fn of_class(class: &str) -> Self {
         match class {
-            "FlowerBlock" | "TallGrassBlock" | "BushBlock" | "SaplingBlock" | "FireflyBushBlock"
-            | "FlowerBedBlock" | "SweetBerryBushBlock" | "EyeblossomBlock" | "AzaleaBlock"
+            "FlowerBlock"
+            | "TallGrassBlock"
+            | "BushBlock"
+            | "SaplingBlock"
+            | "FireflyBushBlock"
+            | "FlowerBedBlock"
+            | "SweetBerryBushBlock"
+            | "EyeblossomBlock"
+            | "AzaleaBlock"
             | "WitherRoseBlock" => Self::Vegetation,
             "DryVegetationBlock" | "ShortDryGrassBlock" | "TallDryGrassBlock" => Self::Dry,
             "DoublePlantBlock" | "TallFlowerBlock" => Self::Double,
@@ -157,6 +167,9 @@ pub struct Palette {
     solid: Vec<bool>,
     replaceable: Vec<bool>,
     liquid: Vec<bool>,
+    /// Коллизия — один полный куб. Для блоков этих шаблонов это совпадает
+    /// с `isCollisionShapeFullBlock && !hasDynamicShape`.
+    full_cube: Vec<bool>,
     /// Биты `isFaceSturdy` по `Direction`: низ, верх, север, юг, запад, восток.
     sturdy: Vec<u8>,
     survive: Vec<Survive>,
@@ -190,11 +203,7 @@ struct Support {
 impl Palette {
     /// `states` — по ID состояния имя блока и свойства (как в реестре сервера);
     /// `default` — состояние блока по умолчанию.
-    pub fn new(
-        data_dir: &Path,
-        states: &States,
-        default: &dyn Fn(&str) -> Option<u32>,
-    ) -> Self {
+    pub fn new(data_dir: &Path, states: &States, default: &dyn Fn(&str) -> Option<u32>) -> Self {
         let mut blocks: HashMap<String, (u32, Vec<u32>)> = HashMap::new();
         let mut block_of = Vec::with_capacity(states.len());
         let mut props = Vec::with_capacity(states.len());
@@ -224,6 +233,7 @@ impl Palette {
             solid: vec![false; n],
             replaceable: vec![false; n],
             liquid: vec![false; n],
+            full_cube: vec![false; n],
             sturdy: vec![0; n],
             survive: vec![Survive::Always; n],
             motion: Arc::new(Vec::new()),
@@ -251,7 +261,8 @@ impl Palette {
             }
         }
         // `reports/worldgen_blocks.csv`: жидкость, isSolid, canBeReplaced, класс.
-        let rows = std::fs::read_to_string(data_dir.join("reports/worldgen_blocks.csv")).unwrap_or_default();
+        let rows = std::fs::read_to_string(data_dir.join("reports/worldgen_blocks.csv"))
+            .unwrap_or_default();
         for (id, line) in rows.lines().enumerate().take(n) {
             let mut f = line.split(',');
             let fluid = f.next().unwrap_or("0");
@@ -281,9 +292,15 @@ impl Palette {
         // `reports/light.csv`: шестой столбец — маска прочных граней.
         let light = std::fs::read_to_string(data_dir.join("reports/light.csv")).unwrap_or_default();
         for (id, line) in light.lines().enumerate().take(n) {
-            p.sturdy[id] = line.rsplit(',').next().and_then(|m| m.trim().parse().ok()).unwrap_or(0);
+            p.sturdy[id] = line
+                .rsplit(',')
+                .next()
+                .and_then(|m| m.trim().parse().ok())
+                .unwrap_or(0);
         }
-        p.motion = p.tag("minecraft:blocks_motion_in_heightmap").unwrap_or_default();
+        p.motion = p
+            .tag("minecraft:blocks_motion_in_heightmap")
+            .unwrap_or_default();
         p.motion_no_leaves = p
             .tag("minecraft:blocks_motion_in_heightmap_no_leaves")
             .unwrap_or_default();
@@ -299,7 +316,29 @@ impl Palette {
             no_snow: tag("minecraft:cannot_support_snow_layer"),
             snow: tag("minecraft:support_override_snow_layer"),
         };
+        let shapes =
+            std::fs::read_to_string(data_dir.join("reports/shapes.csv")).unwrap_or_default();
+        for (id, line) in shapes.lines().enumerate().take(n) {
+            let shape = line.splitn(4, ',').nth(3).unwrap_or("").trim();
+            p.full_cube[id] = full_cube_shape(shape);
+        }
         p
+    }
+
+    fn is_full_cube(&self, state: u32) -> bool {
+        self.full_cube.get(state as usize).copied().unwrap_or(false)
+    }
+
+    fn block_index(&self, state: u32) -> Option<u32> {
+        self.block_of
+            .get(state as usize)
+            .copied()
+            .filter(|id| *id != u32::MAX)
+    }
+
+    /// Блок-жидкость (`water` / `lava`), не затопленная ступень.
+    fn is_liquid(&self, state: u32) -> bool {
+        self.liquid.get(state as usize).copied().unwrap_or(false)
     }
 
     /// Значение свойства состояния.
@@ -316,7 +355,9 @@ impl Palette {
     pub fn with_prop(&self, state: u32, key: &str, value: &str) -> Option<u32> {
         let props = self.props.get(state as usize)?;
         props.iter().find(|(k, _)| k == key)?;
-        let list = self.by_block.get(*self.block_of.get(state as usize)? as usize)?;
+        let list = self
+            .by_block
+            .get(*self.block_of.get(state as usize)? as usize)?;
         list.iter().copied().find(|&s| {
             self.props[s as usize]
                 .iter()
@@ -335,15 +376,22 @@ impl Palette {
 
     /// `isFaceSturdy(dir)`, `dir` в порядке `Direction`.
     pub fn sturdy(&self, state: u32, dir: usize) -> bool {
-        self.sturdy.get(state as usize).is_some_and(|m| m >> dir & 1 != 0)
+        self.sturdy
+            .get(state as usize)
+            .is_some_and(|m| m >> dir & 1 != 0)
     }
 
     fn same_block(&self, a: u32, b: u32) -> bool {
-        self.block_of.get(a as usize).is_some_and(|x| Some(x) == self.block_of.get(b as usize))
+        self.block_of
+            .get(a as usize)
+            .is_some_and(|x| Some(x) == self.block_of.get(b as usize))
     }
 
     fn states_of(&self, block: &str) -> Vec<u32> {
-        self.blocks.get(block).map(|b| b.1.clone()).unwrap_or_default()
+        self.blocks
+            .get(block)
+            .map(|b| b.1.clone())
+            .unwrap_or_default()
     }
 
     pub fn is_air(&self, state: u32) -> bool {
@@ -387,7 +435,9 @@ impl Palette {
                     .as_str()
                     .or_else(|| v["id"].as_str())
                     .ok_or("block state: no Name")?,
-                v["Properties"].as_object().or_else(|| v["properties"].as_object()),
+                v["Properties"]
+                    .as_object()
+                    .or_else(|| v["properties"].as_object()),
             ),
         };
         let base = *self
@@ -422,11 +472,7 @@ impl Palette {
         }
         let mut blocks = HashSet::new();
         self.collect_tag(name, &mut blocks, &mut HashSet::new())?;
-        let mask: Vec<bool> = self
-            .block_of
-            .iter()
-            .map(|b| blocks.contains(b))
-            .collect();
+        let mask: Vec<bool> = self.block_of.iter().map(|b| blocks.contains(b)).collect();
         let mask = Arc::new(mask);
         self.tags.insert(name.to_owned(), mask.clone());
         Ok(mask)
@@ -443,8 +489,7 @@ impl Palette {
         }
         let path = name.strip_prefix("minecraft:").unwrap_or(name);
         let file = self.tag_dir.join(format!("{path}.json"));
-        let text =
-            std::fs::read_to_string(&file).map_err(|e| format!("tag {name}: {e}"))?;
+        let text = std::fs::read_to_string(&file).map_err(|e| format!("tag {name}: {e}"))?;
         let v: Value = serde_json::from_str(&text).map_err(|e| format!("tag {name}: {e}"))?;
         for e in v["values"].as_array().into_iter().flatten() {
             let (id, required) = match e {
@@ -498,9 +543,9 @@ impl Rule {
         match v["predicate_type"].as_str().unwrap_or("") {
             "minecraft:always_true" => Ok(Self::True),
             "minecraft:tag_match" => Ok(Self::Tag(palette.tag(v["tag"].as_str().unwrap_or(""))?)),
-            "minecraft:block_match" => {
-                Ok(Self::Block(palette.block(v["block"].as_str().unwrap_or(""))?))
-            }
+            "minecraft:block_match" => Ok(Self::Block(
+                palette.block(v["block"].as_str().unwrap_or(""))?,
+            )),
             "minecraft:blockstate_match" => Ok(Self::State(palette.state(&v["block_state"])?)),
             "minecraft:random_block_match" => Ok(Self::RandomBlock(
                 palette.block(v["block"].as_str().unwrap_or(""))?,
@@ -557,6 +602,8 @@ enum Feature {
     /// `block_column`: слои (высота, провайдер), направление, допустимые
     /// клетки и `prioritize_tip`.
     BlockColumn(Vec<(IntP, Provider)>, [i32; 3], Predicate, bool),
+    /// `block_pile`: стог сена, тыквы, снега и льда в деревнях.
+    BlockPile(Provider),
     VegetationPatch(Box<Patch>),
     /// `random_boolean_selector`: `nextBoolean()` — первая, иначе вторая.
     BooleanSelector(Arc<Placed>, Arc<Placed>),
@@ -596,6 +643,35 @@ enum Feature {
     SculkPatch(Arc<misc::SculkPatch>),
     /// `no_op`: ничего не ставит (`NoOpFeature`).
     NoOp,
+    /// `void_start_platform`: квадрат 33×33 на `minY + 3` у нуля мира.
+    VoidPlatform(u32, u32),
+    /// `template`: взвешенный NBT-шаблон и случайный поворот.
+    Template(Arc<template::TemplateFeature>),
+    /// `fossil`: пара шаблонов, пустые углы и два списка процессоров.
+    Fossil(Arc<template::Fossil>),
+}
+
+pub(crate) mod mineshaft;
+pub(crate) mod monument;
+mod pyramid;
+mod shore;
+pub(crate) mod stronghold;
+pub(crate) mod structure;
+mod template;
+pub(crate) use template::{load_public, place_public, size_public};
+
+fn full_cube_shape(shape: &str) -> bool {
+    if shape.is_empty() || shape.contains('|') {
+        return false;
+    }
+    let v: Vec<f64> = shape.split(' ').filter_map(|x| x.parse().ok()).collect();
+    v.len() == 6
+        && v[0].abs() < 1e-4
+        && v[1].abs() < 1e-4
+        && v[2].abs() < 1e-4
+        && (v[3] - 1.0).abs() < 1e-4
+        && (v[4] - 1.0).abs() < 1e-4
+        && (v[5] - 1.0).abs() < 1e-4
 }
 
 mod misc;
@@ -666,6 +742,8 @@ enum Modifier {
         xz: IntP,
         y: IntP,
     },
+    /// `randomly_selected`: один модификатор из списка, `nextInt(len)`.
+    RandomlySelected(Vec<Modifier>),
 }
 
 impl Modifier {
@@ -690,7 +768,9 @@ impl Modifier {
             "minecraft:block_predicate_filter" => {
                 Ok(Self::Filter(Predicate::parse(&v["predicate"], palette)?))
             }
-            "minecraft:surface_water_depth_filter" => Ok(Self::WaterDepth(int("max_water_depth", 0))),
+            "minecraft:surface_water_depth_filter" => {
+                Ok(Self::WaterDepth(int("max_water_depth", 0)))
+            }
             "minecraft:surface_relative_threshold_filter" => Ok(Self::Relative(
                 Heightmap::parse(v["heightmap"].as_str().unwrap_or(""))?,
                 int("min_inclusive", i32::MIN as i64),
@@ -698,7 +778,10 @@ impl Modifier {
             )),
             "minecraft:environment_scan" => {
                 let d = v["direction_of_search"].as_str().unwrap_or("");
-                let d = DIRECTION_NAMES.iter().position(|n| *n == d).ok_or("environment_scan: direction")?;
+                let d = DIRECTION_NAMES
+                    .iter()
+                    .position(|n| *n == d)
+                    .ok_or("environment_scan: direction")?;
                 let allowed = match &v["allowed_search_condition"] {
                     Value::Null => Predicate::True,
                     a => Predicate::parse(a, palette)?,
@@ -710,10 +793,14 @@ impl Modifier {
                     int("max_steps", 0),
                 ))
             }
-            "minecraft:random_chance" => Ok(Self::Chance(v["chance"].as_f64().unwrap_or(0.0) as f32)),
+            "minecraft:random_chance" => {
+                Ok(Self::Chance(v["chance"].as_f64().unwrap_or(0.0) as f32))
+            }
             "minecraft:count" => Ok(Self::Count(IntP::parse(&v["count"])?)),
             "minecraft:in_square" => Ok(Self::InSquare),
-            "minecraft:height_range" => Ok(Self::Height(HeightP::parse(&v["height"], min_y, height)?)),
+            "minecraft:height_range" => {
+                Ok(Self::Height(HeightP::parse(&v["height"], min_y, height)?))
+            }
             "minecraft:biome" => Ok(Self::Biome),
             "minecraft:rarity_filter" => Ok(Self::Rarity(v["chance"].as_i64().unwrap_or(1) as i32)),
             "minecraft:heightmap" => Ok(Self::Heightmap(Heightmap::parse(
@@ -726,7 +813,11 @@ impl Modifier {
                     .flatten()
                     .filter_map(|p| {
                         let p = p.as_array()?;
-                        Some([p.first()?.as_i64()? as i32, p.get(1)?.as_i64()? as i32, p.get(2)?.as_i64()? as i32])
+                        Some([
+                            p.first()?.as_i64()? as i32,
+                            p.get(1)?.as_i64()? as i32,
+                            p.get(2)?.as_i64()? as i32,
+                        ])
                     })
                     .collect(),
             )),
@@ -743,6 +834,19 @@ impl Modifier {
                 xz: IntP::parse(&v["xz_size"])?,
                 y: IntP::parse(&v["y_size"])?,
             }),
+            "minecraft:randomly_selected" => {
+                let list = v["placements"]
+                    .as_array()
+                    .ok_or("randomly_selected: no placements")?;
+                if list.is_empty() {
+                    return Err("randomly_selected: empty".into());
+                }
+                Ok(Self::RandomlySelected(
+                    list.iter()
+                        .map(|m| Self::parse(m, palette, min_y, height))
+                        .collect::<Result<_, _>>()?,
+                ))
+            }
             other => Err(format!("placement {other} is not supported")),
         }
     }
@@ -769,6 +873,7 @@ pub struct Features {
     pub palette: Palette,
     seed: i64,
     min_y: i32,
+    pub(crate) structures: Option<Arc<structure::Structures>>,
 }
 
 /// Число шагов `GenerationStep.Decoration`.
@@ -833,7 +938,7 @@ impl Features {
             for (i, name) in names.iter().enumerate() {
                 global.insert((step, name.as_str()), i as u32);
                 let placed = read("placed_feature", name)
-                    .and_then(|v| parse_placed(&v, &read, &mut palette, min_y, height));
+                    .and_then(|v| parse_placed(&v, &read, &mut palette, min_y, height, data_dir));
                 if let Err(e) = &placed {
                     // `CHUNKWAKE_FEATURE_ERRORS=1` — те же причины в stderr.
                     if std::env::var_os("CHUNKWAKE_FEATURE_ERRORS").is_some() {
@@ -866,6 +971,8 @@ impl Features {
             }
             by_biome.insert(*id, per);
         }
+        let structures =
+            structure::Structures::load(data_dir, &mut palette, biome_ids, &read, min_y, height)?;
         Ok(Self {
             steps,
             by_biome,
@@ -874,6 +981,7 @@ impl Features {
             palette,
             seed,
             min_y,
+            structures: Some(Arc::new(structures)),
         })
     }
 
@@ -891,15 +999,27 @@ impl Features {
 
     /// `applyBiomeDecoration` чанка `(cx, cz)`; `biomes` — биомы, что есть
     /// в секциях региона 3×3.
-    pub fn decorate(&self, level: &mut dyn Level, cx: i32, cz: i32, biomes: &HashSet<u32>) {
+    pub(crate) fn decorate(
+        &self,
+        level: &mut dyn Level,
+        cx: i32,
+        cz: i32,
+        biomes: &HashSet<u32>,
+        columns: Option<&dyn structure::Columns>,
+    ) {
         let (ox, oz) = (cx * 16, cz * 16);
         let mut r = Worldgen::new(0);
         let seed = r.set_decoration_seed(self.seed, ox, oz);
         // `CHUNKWAKE_PROF=1` — время по шагам декорации в stderr.
         let prof = std::env::var_os("CHUNKWAKE_PROF").is_some();
-        // Шаги без фич (`DECORATION_STEPS` и больше) пока пусты: там только
-        // структуры, которых ещё нет.
         for step in 0..self.steps.len().min(DECORATION_STEPS) {
+            // Шаг 3 — `underground_structures`, шаг 4 — `surface_structures`.
+            // Куски пишутся до фич шага. У каждой структуры свой `setFeatureSeed`.
+            if step == 3 || step == 4 {
+                if let (Some(structures), Some(columns)) = (&self.structures, columns) {
+                    structures.place(self, level, cx, cz, columns, &mut r, seed, step as i32);
+                }
+            }
             let t_step = prof.then(Instant::now);
             let mut wanted: Vec<u32> = biomes
                 .iter()
@@ -928,7 +1048,13 @@ impl Features {
 
     /// `PlacedFeature.place` с ответом «поставлено ли». Честный ответ пока
     /// даёт только дерево без модификаторов; остальное считается успехом.
-    fn place_ok(&self, level: &mut dyn Level, placed: &Placed, r: &mut Worldgen, origin: [i32; 3]) -> bool {
+    fn place_ok(
+        &self,
+        level: &mut dyn Level,
+        placed: &Placed,
+        r: &mut Worldgen,
+        origin: [i32; 3],
+    ) -> bool {
         match &placed.feature {
             Feature::Tree(t) if placed.placement.is_empty() => t.place(self, level, r, origin),
             _ => {
@@ -1042,7 +1168,11 @@ impl Features {
             }
             Modifier::NoiseThreshold(level_at, below, above) => {
                 let noise = biome_info_noise().get(x as f64 / 200.0, z as f64 / 200.0);
-                let n = if (noise as f64) < *level_at { *below } else { *above };
+                let n = if (noise as f64) < *level_at {
+                    *below
+                } else {
+                    *above
+                };
                 for _ in 0..n {
                     self.modify(level, placed, key, r, pos, next);
                 }
@@ -1071,7 +1201,12 @@ impl Features {
                     self.modify(level, placed, key, r, [x, ny, z], next);
                 }
             }
-            Modifier::Cuboid { edges, interior, xz, y: ysize } => {
+            Modifier::Cuboid {
+                edges,
+                interior,
+                xz,
+                y: ysize,
+            } => {
                 // `CuboidPlacement`: точка на полом коробе вокруг центра.
                 let sx = xz.sample(r).max(1);
                 let sy = ysize.sample(r).max(1);
@@ -1121,6 +1256,17 @@ impl Features {
                     }
                 }
             }
+            Modifier::RandomlySelected(list) => {
+                let i = r.next_int_bound(list.len() as i32) as usize;
+                let mut placement = Vec::with_capacity(1 + placed.placement.len() - next);
+                placement.push(list[i].clone());
+                placement.extend_from_slice(&placed.placement[next..]);
+                let tmp = Placed {
+                    feature: placed.feature.clone(),
+                    placement,
+                };
+                self.modify(level, &tmp, key, r, pos, 0);
+            }
         }
     }
 
@@ -1129,6 +1275,7 @@ impl Features {
             Feature::Ore(ore) => self.ore(level, ore, r, pos),
             Feature::ScatteredOre(ore) => self.scattered_ore(level, ore, r, pos),
             Feature::SimpleBlock(p) => self.simple_block(level, p, r, pos),
+            Feature::BlockPile(p) => self.block_pile(level, p, r, pos),
             Feature::RandomSelector(list, default) => {
                 for (chance, placed) in list {
                     if r.next_float() < *chance {
@@ -1188,6 +1335,9 @@ impl Features {
             }
             Feature::SculkPatch(s) => s.place(self, level, r, pos),
             Feature::NoOp => {}
+            Feature::VoidPlatform(stone, cobble) => {
+                place_void_platform(level, pos, *stone, *cobble);
+            }
             Feature::Multiface(m) => m.place(self, level, r, pos),
             Feature::Speleothem(s) => s.place(self, level, r, pos),
             Feature::LargeDripstone(d) => d.place(self, level, r, pos),
@@ -1199,12 +1349,20 @@ impl Features {
                 let i = r.next_int_bound(list.len() as i32) as usize;
                 self.place(level, &list[i], None, r, pos);
             }
+            Feature::Template(t) => t.place(&self.palette, level, r, pos),
+            Feature::Fossil(f) => f.place(&self.palette, level, r, pos),
         }
     }
 
     /// `VegetationPatchFeature.place`; множества точек обходятся в порядке
     /// `HashSet` Java.
-    fn vegetation_patch(&self, level: &mut dyn Level, p: &Patch, r: &mut Worldgen, origin: [i32; 3]) {
+    fn vegetation_patch(
+        &self,
+        level: &mut dyn Level,
+        p: &Patch,
+        r: &mut Worldgen,
+        origin: [i32; 3],
+    ) {
         let pal = &self.palette;
         let xr = p.radius.sample(r) + 1;
         let zr = p.radius.sample(r) + 1;
@@ -1233,7 +1391,9 @@ impl Features {
                 }
                 let mut below = add(pos, inwards);
                 let below_state = level.get(below[0], below[1], below[2]);
-                if !pal.is_air(level.get(pos[0], pos[1], pos[2])) || !pal.sturdy(below_state, p.inwards ^ 1) {
+                if !pal.is_air(level.get(pos[0], pos[1], pos[2]))
+                    || !pal.sturdy(below_state, p.inwards ^ 1)
+                {
                     continue;
                 }
                 let depth = p.depth.sample(r)
@@ -1271,7 +1431,12 @@ impl Features {
                     !pal.sturdy(level.get(x, y, z), d ^ 1)
                 })
             };
-            surface = java_set_order(surface.into_iter().filter(|&at| !exposed(&*level, at)).collect());
+            surface = java_set_order(
+                surface
+                    .into_iter()
+                    .filter(|&at| !exposed(&*level, at))
+                    .collect(),
+            );
             let water = pal.defaults.get("minecraft:water").copied().unwrap_or(0);
             for &[x, y, z] in &surface {
                 if level.can_write(x, z) {
@@ -1305,7 +1470,10 @@ impl Features {
             h *= 2;
         }
         let top = level.min_y() + level.height() - 1;
-        if o[1] < level.min_y() + 1 || o[1] + h + 1 > top || !m.on.test(&*level, pal, add(o, [0, -1, 0])) {
+        if o[1] < level.min_y() + 1
+            || o[1] + h + 1 > top
+            || !m.on.test(&*level, pal, add(o, [0, -1, 0]))
+        {
             return;
         }
         for dy in 0..=h {
@@ -1329,7 +1497,9 @@ impl Features {
         let faces = |mut s: u32, list: &[(&str, bool)]| {
             if list.iter().all(|(k, _)| pal.prop(s, k).is_some()) {
                 for (k, v) in list {
-                    s = pal.with_prop(s, k, if *v { "true" } else { "false" }).unwrap_or(s);
+                    s = pal
+                        .with_prop(s, k, if *v { "true" } else { "false" })
+                        .unwrap_or(s);
                 }
             }
             s
@@ -1344,14 +1514,19 @@ impl Features {
                         let x_edge = dx == -radius || dx == radius;
                         let z_edge = dz == -radius || dz == radius;
                         if dy >= h || x_edge != z_edge {
-                            let Some(s) = m.cap.get(&*level, pal, r, o) else { continue };
-                            let s = faces(s, &[
-                                ("up", dy >= h - 1),
-                                ("west", dx < -center),
-                                ("east", dx > center),
-                                ("north", dz < -center),
-                                ("south", dz > center),
-                            ]);
+                            let Some(s) = m.cap.get(&*level, pal, r, o) else {
+                                continue;
+                            };
+                            let s = faces(
+                                s,
+                                &[
+                                    ("up", dy >= h - 1),
+                                    ("west", dx < -center),
+                                    ("east", dx > center),
+                                    ("north", dz < -center),
+                                    ("south", dz > center),
+                                ],
+                            );
                             put(level, add(o, [dx, dy, dz]), s);
                         }
                     }
@@ -1360,18 +1535,24 @@ impl Features {
         } else {
             for dx in -rad..=rad {
                 for dz in -rad..=rad {
-                    let (min_x, max_x, min_z, max_z) = (dx == -rad, dx == rad, dz == -rad, dz == rad);
+                    let (min_x, max_x, min_z, max_z) =
+                        (dx == -rad, dx == rad, dz == -rad, dz == rad);
                     let (x_edge, z_edge) = (min_x || max_x, min_z || max_z);
                     if x_edge && z_edge {
                         continue;
                     }
-                    let Some(s) = m.cap.get(&*level, pal, r, o) else { continue };
-                    let s = faces(s, &[
-                        ("west", min_x || z_edge && dx == 1 - rad),
-                        ("east", max_x || z_edge && dx == rad - 1),
-                        ("north", min_z || x_edge && dz == 1 - rad),
-                        ("south", max_z || x_edge && dz == rad - 1),
-                    ]);
+                    let Some(s) = m.cap.get(&*level, pal, r, o) else {
+                        continue;
+                    };
+                    let s = faces(
+                        s,
+                        &[
+                            ("west", min_x || z_edge && dx == 1 - rad),
+                            ("east", max_x || z_edge && dx == rad - 1),
+                            ("north", min_z || x_edge && dz == 1 - rad),
+                            ("south", max_z || x_edge && dz == rad - 1),
+                        ],
+                    );
                     put(level, add(o, [dx, h, dz]), s);
                 }
             }
@@ -1434,6 +1615,75 @@ impl Features {
         }
     }
 
+    /// `BlockPileFeature.place`: круг по `x` быстрее `y`, затем `z`.
+    fn block_pile(
+        &self,
+        level: &mut dyn Level,
+        provider: &Provider,
+        r: &mut Worldgen,
+        pos: [i32; 3],
+    ) {
+        if pos[1] < level.min_y() + 5 {
+            return;
+        }
+        let wx = 2 + r.next_int_bound(2);
+        let wz = 2 + r.next_int_bound(2);
+        let (x0, x1) = (pos[0] - wx, pos[0] + wx);
+        let (y0, y1) = (pos[1], pos[1] + 1);
+        let (z0, z1) = (pos[2] - wz, pos[2] + wz);
+        let (sx, sy, sz) = (x1 - x0 + 1, y1 - y0 + 1, z1 - z0 + 1);
+        let n = sx * sy * sz;
+        let path = self.palette.blocks.get("minecraft:dirt_path").map(|b| b.0);
+        for index in 0..n {
+            let dx = index % sx;
+            let div = index / sx;
+            let dy = div % sy;
+            let dz = div / sy;
+            let at = [x0 + dx, y0 + dy, z0 + dz];
+            let ox = pos[0] - at[0];
+            let oz = pos[2] - at[2];
+            let dist = (ox * ox + oz * oz) as f32;
+            let threshold = r.next_float() * 10.0 - r.next_float() * 6.0;
+            let place = if dist <= threshold {
+                true
+            } else {
+                (r.next_float() as f64) < 0.031
+            };
+            if place {
+                self.try_pile(level, provider, r, at, path);
+            }
+        }
+    }
+
+    fn try_pile(
+        &self,
+        level: &mut dyn Level,
+        provider: &Provider,
+        r: &mut Worldgen,
+        at: [i32; 3],
+        path: Option<u32>,
+    ) {
+        if !self.palette.is_air(level.get(at[0], at[1], at[2])) {
+            return;
+        }
+        let below = [at[0], at[1] - 1, at[2]];
+        let ground = level.get(below[0], below[1], below[2]);
+        let ok = if path.is_some_and(|id| self.palette.block_index(ground) == Some(id)) {
+            r.next_bool()
+        } else {
+            self.palette.sturdy(ground, 1)
+        };
+        if !ok {
+            return;
+        }
+        let Some(state) = provider.get(&*level, &self.palette, r, at) else {
+            return;
+        };
+        if level.can_write(at[0], at[2]) {
+            level.set(at[0], at[1], at[2], state);
+        }
+    }
+
     /// `SimpleBlockFeature.place`.
     fn simple_block(&self, level: &mut dyn Level, p: &Provider, r: &mut Worldgen, pos: [i32; 3]) {
         let pal = &self.palette;
@@ -1447,7 +1697,10 @@ impl Features {
         if !level.can_write(x, z) {
             return;
         }
-        if matches!(pal.survive.get(state as usize), Some(Survive::Double | Survive::TallSeagrass)) {
+        if matches!(
+            pal.survive.get(state as usize),
+            Some(Survive::Double | Survive::TallSeagrass)
+        ) {
             let above = level.get(x, y + 1, z);
             if !pal.is_air(above)
                 && (pal.fluid(state) != pal.fluid(above) || !Palette::flag(&pal.replaceable, above))
@@ -1458,7 +1711,8 @@ impl Features {
             let half = |half: &str, at: [i32; 3]| {
                 let s = pal.with_prop(state, "half", half).unwrap_or(state);
                 let wet = pal.fluid(level.get(at[0], at[1], at[2])) == Fluid::Water;
-                pal.with_prop(s, "waterlogged", if wet { "true" } else { "false" }).unwrap_or(s)
+                pal.with_prop(s, "waterlogged", if wet { "true" } else { "false" })
+                    .unwrap_or(s)
             };
             let (lower, upper) = (half("lower", pos), half("upper", [x, y + 1, z]));
             level.set(x, y, z, lower);
@@ -1542,7 +1796,8 @@ impl Features {
             let yy = y0 + s * (y1 - y0);
             let zz = z0 + s * (z1 - z0);
             let ss = r.next_double() * size as f64 / 16.0;
-            let rad = (((crate::carver::sin((std::f32::consts::PI * step) as f64) + 1.0) as f64) * ss
+            let rad = (((crate::carver::sin((std::f32::consts::PI * step) as f64) + 1.0) as f64)
+                * ss
                 + 1.0)
                 / 2.0;
             *d = [xx, yy, zz, rad];
@@ -1595,7 +1850,8 @@ impl Features {
                         if xd * xd + yd * yd + zd * zd >= 1.0 || y < min_y || y >= max_y {
                             continue;
                         }
-                        let bit = (x - xs + (y - ys) * size_xz + (z - zs) * size_xz * size_y) as usize;
+                        let bit =
+                            (x - xs + (y - ys) * size_xz + (z - zs) * size_xz * size_y) as usize;
                         // Индекс может выйти за набор у краёв: `BitSet` растёт сам.
                         if bit >= tested.len() {
                             tested.resize(bit + 1, false);
@@ -1621,7 +1877,13 @@ impl Features {
     }
 
     /// `ScatteredOreFeature.place`.
-    fn scattered_ore(&self, level: &mut dyn Level, ore: &Ore, r: &mut Worldgen, [ox, oy, oz]: [i32; 3]) {
+    fn scattered_ore(
+        &self,
+        level: &mut dyn Level,
+        ore: &Ore,
+        r: &mut Worldgen,
+        [ox, oy, oz]: [i32; 3],
+    ) {
         let tries = r.next_int_bound(ore.size + 1);
         for i in 0..tries {
             let d = i.min(7) as f32;
@@ -1658,11 +1920,17 @@ fn java_set_order(points: Vec<[i32; 3]>) -> Vec<[i32; 3]> {
         cap *= 2;
     }
     let bucket = |&[x, y, z]: &[i32; 3]| {
-        let h = (y.wrapping_add(z.wrapping_mul(31))).wrapping_mul(31).wrapping_add(x);
+        let h = (y.wrapping_add(z.wrapping_mul(31)))
+            .wrapping_mul(31)
+            .wrapping_add(x);
         let h = h ^ ((h as u32) >> 16) as i32;
         h as u32 as usize & (cap - 1)
     };
-    let mut order: Vec<(usize, usize)> = points.iter().enumerate().map(|(i, p)| (bucket(p), i)).collect();
+    let mut order: Vec<(usize, usize)> = points
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (bucket(p), i))
+        .collect();
     order.sort_unstable();
     order.into_iter().map(|(_, i)| points[i]).collect()
 }
@@ -1674,12 +1942,25 @@ fn biome_info_noise() -> &'static Simplex {
 }
 
 /// Направления в порядке `Direction`: низ, верх, север, юг, запад, восток.
-const DIRS: [[i32; 3]; 6] = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]];
+const DIRS: [[i32; 3]; 6] = [
+    [0, -1, 0],
+    [0, 1, 0],
+    [0, 0, -1],
+    [0, 0, 1],
+    [-1, 0, 0],
+    [1, 0, 0],
+];
 const DIRECTION_NAMES: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
 
 fn offset(v: &Value) -> [i32; 3] {
     let mut o = [0; 3];
-    for (i, c) in v["offset"].as_array().into_iter().flatten().take(3).enumerate() {
+    for (i, c) in v["offset"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(3)
+        .enumerate()
+    {
         o[i] = c.as_i64().unwrap_or(0) as i32;
     }
     o
@@ -1696,13 +1977,20 @@ fn block_set(v: &Value, palette: &mut Palette) -> Result<Arc<Vec<bool>>, String>
     }
     let names: Vec<&str> = match v {
         Value::String(s) => vec![s.as_str()],
-        _ => v.as_array().into_iter().flatten().filter_map(Value::as_str).collect(),
+        _ => v
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect(),
     };
     let mut ids = HashSet::new();
     for n in names {
         ids.insert(palette.block(n)?);
     }
-    Ok(Arc::new(palette.block_of.iter().map(|b| ids.contains(b)).collect()))
+    Ok(Arc::new(
+        palette.block_of.iter().map(|b| ids.contains(b)).collect(),
+    ))
 }
 
 /// `BlockPredicate` со сдвигом от проверяемой точки.
@@ -1719,6 +2007,8 @@ enum Predicate {
     AllOf(Vec<Predicate>),
     AnyOf(Vec<Predicate>),
     Not(Box<Predicate>),
+    /// `volume_match`: каждая клетка `min`…`max` проходит вложенный предикат.
+    Volume([i32; 3], [i32; 3], Box<Predicate>),
 }
 
 impl Predicate {
@@ -1732,16 +2022,33 @@ impl Predicate {
                 .map(|p| Predicate::parse(p, palette))
                 .collect()
         };
-        match v["type"].as_str().unwrap_or("") {
-            "minecraft:true" => Ok(Self::True),
-            "minecraft:matching_blocks" => Ok(Self::Blocks(o, block_set(&v["blocks"], palette)?)),
-            "minecraft:matching_block_tag" => {
-                Ok(Self::Blocks(o, palette.tag(v["tag"].as_str().unwrap_or(""))?))
+        match predicate_kind(v) {
+            "minecraft:true" | "minecraft:always_true" => Ok(Self::True),
+            "minecraft:volume_match" => {
+                let inner = v
+                    .get("match")
+                    .or_else(|| v.get("predicate"))
+                    .ok_or("volume_match: no match")?;
+                Ok(Self::Volume(
+                    ivec(&v["min"]),
+                    ivec(&v["max"]),
+                    Box::new(Self::parse(inner, palette)?),
+                ))
             }
+            "minecraft:matching_blocks" => Ok(Self::Blocks(o, block_set(&v["blocks"], palette)?)),
+            "minecraft:matching_block_tag" => Ok(Self::Blocks(
+                o,
+                palette.tag(v["tag"].as_str().unwrap_or(""))?,
+            )),
             "minecraft:matching_fluids" => {
                 let names: Vec<&str> = match &v["fluids"] {
                     Value::String(s) => vec![s.as_str()],
-                    f => f.as_array().into_iter().flatten().filter_map(Value::as_str).collect(),
+                    f => f
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect(),
                 };
                 let mut fluids = Vec::new();
                 for n in names {
@@ -1797,8 +2104,38 @@ impl Predicate {
             Self::AllOf(list) => list.iter().all(|p| p.test(level, pal, pos)),
             Self::AnyOf(list) => list.iter().any(|p| p.test(level, pal, pos)),
             Self::Not(p) => !p.test(level, pal, pos),
+            Self::Volume(min, max, inner) => {
+                if (0..3).any(|i| min[i] > max[i]) {
+                    return true;
+                }
+                for x in min[0]..=max[0] {
+                    for z in min[2]..=max[2] {
+                        for y in min[1]..=max[1] {
+                            if !inner.test(level, pal, [pos[0] + x, pos[1] + y, pos[2] + z]) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                true
+            }
         }
     }
+}
+
+fn predicate_kind(v: &Value) -> &str {
+    v["type"]
+        .as_str()
+        .or_else(|| v["predicate_type"].as_str())
+        .unwrap_or("")
+}
+
+fn ivec(v: &Value) -> [i32; 3] {
+    let mut o = [0; 3];
+    for (i, c) in v.as_array().into_iter().flatten().take(3).enumerate() {
+        o[i] = c.as_i64().unwrap_or(0) as i32;
+    }
+    o
 }
 
 /// Шум провайдера: `NormalNoise` с сидом `LegacyRandomSource`.
@@ -1813,7 +2150,9 @@ impl std::fmt::Debug for ProviderNoise {
 
 impl ProviderNoise {
     fn parse(v: &Value, seed: i64) -> Result<Self, String> {
-        Ok(Self(Arc::new(NormalNoise::from_json(v)?.create_legacy(seed))))
+        Ok(Self(Arc::new(
+            NormalNoise::from_json(v)?.create_legacy(seed),
+        )))
     }
 
     fn get(&self, x: f64, y: f64, z: f64) -> f32 {
@@ -1826,7 +2165,11 @@ impl ProviderNoise {
 enum Provider {
     Simple(u32),
     Weighted(i32, Vec<(i32, u32)>),
-    Noise { noise: ProviderNoise, scale: f32, states: Vec<u32> },
+    Noise {
+        noise: ProviderNoise,
+        scale: f32,
+        states: Vec<u32>,
+    },
     Threshold {
         noise: ProviderNoise,
         scale: f32,
@@ -1874,7 +2217,10 @@ impl Provider {
             "minecraft:weighted" => {
                 let mut list = Vec::new();
                 for e in v["entries"].as_array().ok_or("weighted: no entries")? {
-                    list.push((e["weight"].as_i64().unwrap_or(1) as i32, palette.state(&e["data"])?));
+                    list.push((
+                        e["weight"].as_i64().unwrap_or(1) as i32,
+                        palette.state(&e["data"])?,
+                    ));
                 }
                 let total = list.iter().map(|e| e.0).sum();
                 Ok(Self::Weighted(total, list))
@@ -1929,7 +2275,10 @@ impl Provider {
                     ),
                     None => None,
                 };
-                Ok(Self::Rotated(Box::new(Self::parse(&v["state"], read, palette)?), dir))
+                Ok(Self::Rotated(
+                    Box::new(Self::parse(&v["state"], read, palette)?),
+                    dir,
+                ))
             }
             "minecraft:random_block" => {
                 let mask = block_set(&v["blocks"], palette)?;
@@ -1963,7 +2312,13 @@ impl Provider {
     }
 
     /// `getOptionalState`: `None`, если провайдеру нечего поставить.
-    fn get(&self, level: &dyn Level, pal: &Palette, r: &mut Worldgen, pos: [i32; 3]) -> Option<u32> {
+    fn get(
+        &self,
+        level: &dyn Level,
+        pal: &Palette,
+        r: &mut Worldgen,
+        pos: [i32; 3],
+    ) -> Option<u32> {
         let [x, y, z] = pos;
         // `NoiseProvider.getRandomState`.
         let pick = |states: &[u32], v: f32| {
@@ -1988,8 +2343,20 @@ impl Provider {
                 }
                 out
             }
-            Self::Noise { noise, scale, states } => pick(states, sample(noise, *scale)),
-            Self::Threshold { noise, scale, threshold, high_chance, default, low, high } => {
+            Self::Noise {
+                noise,
+                scale,
+                states,
+            } => pick(states, sample(noise, *scale)),
+            Self::Threshold {
+                noise,
+                scale,
+                threshold,
+                high_chance,
+                default,
+                low,
+                high,
+            } => {
                 if (sample(noise, *scale) as f64) < *threshold as f64 {
                     low[r.next_int_bound(low.len() as i32) as usize]
                 } else if r.next_float() < *high_chance {
@@ -1998,7 +2365,14 @@ impl Provider {
                     *default
                 }
             }
-            Self::Dual { noise, scale, states, slow, slow_scale, variety } => {
+            Self::Dual {
+                noise,
+                scale,
+                states,
+                slow,
+                slow_scale,
+                variety,
+            } => {
                 // Медленный шум: `pos * slowScale` во float.
                 let slow_at = |dx: i32, dz: i32| {
                     let s = *slow_scale;
@@ -2035,7 +2409,8 @@ impl Provider {
                 let s = pal.with_prop(s, "axis", axis).unwrap_or(s);
                 let s = pal.with_prop(s, "facing", DIRECTION_NAMES[d]).unwrap_or(s);
                 if d >= 2 {
-                    pal.with_prop(s, "horizontal_facing", DIRECTION_NAMES[d]).unwrap_or(s)
+                    pal.with_prop(s, "horizontal_facing", DIRECTION_NAMES[d])
+                        .unwrap_or(s)
                 } else {
                     s
                 }
@@ -2131,12 +2506,42 @@ fn can_survive(level: &dyn Level, pal: &Palette, state: u32, [x, y, z]: [i32; 3]
     }
 }
 
+/// Свой кусок платформы: чанк не дальше 1 от `(0, 0)`, блоки внутри квадрата.
+fn place_void_platform(level: &mut dyn Level, pos: [i32; 3], stone: u32, cobble: u32) {
+    let cx = pos[0].div_euclid(16);
+    let cz = pos[2].div_euclid(16);
+    if !crate::void_platform_chunk(cx, cz) {
+        return;
+    }
+    let y = crate::void_platform_y(level.min_y());
+    let x0 = cx * 16;
+    let z0 = cz * 16;
+    for dz in 0..16 {
+        for dx in 0..16 {
+            let x = x0 + dx;
+            let z = z0 + dz;
+            let Some(kind) = crate::void_platform_block(x, z) else {
+                continue;
+            };
+            if !level.can_write(x, z) {
+                continue;
+            }
+            let state = match kind {
+                crate::VoidPlatformBlock::Cobblestone => cobble,
+                crate::VoidPlatformBlock::Stone => stone,
+            };
+            level.set(x, y, z, state);
+        }
+    }
+}
+
 fn parse_placed(
     v: &Value,
     read: &Read,
     palette: &mut Palette,
     min_y: i32,
     height: i32,
+    data_dir: &Path,
 ) -> Result<Placed, String> {
     // Ссылка на `placed_feature` строкой или встроенная фича с размещением.
     let v = match v {
@@ -2147,7 +2552,7 @@ fn parse_placed(
         Value::String(name) => read("feature", name)?,
         inline => inline.clone(),
     };
-    let feature = parse_feature(&feature, read, palette, min_y, height)?;
+    let feature = parse_feature(&feature, read, palette, min_y, height, data_dir)?;
     let placement = v["placement"]
         .as_array()
         .into_iter()
@@ -2163,14 +2568,20 @@ fn parse_feature(
     palette: &mut Palette,
     min_y: i32,
     height: i32,
+    data_dir: &Path,
 ) -> Result<Feature, String> {
     let placed = |v: &Value, palette: &mut Palette| -> Result<Arc<Placed>, String> {
-        Ok(Arc::new(parse_placed(v, read, palette, min_y, height)?))
+        Ok(Arc::new(parse_placed(
+            v, read, palette, min_y, height, data_dir,
+        )?))
     };
     let ore = |palette: &mut Palette| -> Result<Ore, String> {
         let mut targets = Vec::new();
         for t in v["targets"].as_array().ok_or("ore: no targets")? {
-            targets.push((Rule::parse(&t["target"], palette)?, palette.state(&t["state"])?));
+            targets.push((
+                Rule::parse(&t["target"], palette)?,
+                palette.state(&t["state"])?,
+            ));
         }
         Ok(Ore {
             targets,
@@ -2181,13 +2592,31 @@ fn parse_feature(
     match v["type"].as_str().unwrap_or("") {
         "minecraft:ore" => Ok(Feature::Ore(ore(palette)?)),
         "minecraft:scattered_ore" => Ok(Feature::ScatteredOre(ore(palette)?)),
-        "minecraft:simple_block" => Ok(Feature::SimpleBlock(Provider::parse(&v["to_place"], read, palette)?)),
+        "minecraft:block_pile" => Ok(Feature::BlockPile(Provider::parse(
+            &v["state_provider"],
+            read,
+            palette,
+        )?)),
+        "minecraft:simple_block" => Ok(Feature::SimpleBlock(Provider::parse(
+            &v["to_place"],
+            read,
+            palette,
+        )?)),
         "minecraft:random_selector" => {
             let mut list = Vec::new();
-            for e in v["features"].as_array().ok_or("random_selector: no features")? {
-                list.push((e["chance"].as_f64().unwrap_or(0.0) as f32, placed(&e["feature"], palette)?));
+            for e in v["features"]
+                .as_array()
+                .ok_or("random_selector: no features")?
+            {
+                list.push((
+                    e["chance"].as_f64().unwrap_or(0.0) as f32,
+                    placed(&e["feature"], palette)?,
+                ));
             }
-            Ok(Feature::RandomSelector(list, placed(&v["default"], palette)?))
+            Ok(Feature::RandomSelector(
+                list,
+                placed(&v["default"], palette)?,
+            ))
         }
         "minecraft:random_boolean_selector" => Ok(Feature::BooleanSelector(
             placed(&v["feature_true"], palette)?,
@@ -2195,10 +2624,19 @@ fn parse_feature(
         )),
         "minecraft:weighted_random_selector" => {
             let mut list = Vec::new();
-            for e in v["features"].as_array().ok_or("weighted_random_selector: no features")? {
-                list.push((e["weight"].as_i64().unwrap_or(1) as i32, placed(&e["data"], palette)?));
+            for e in v["features"]
+                .as_array()
+                .ok_or("weighted_random_selector: no features")?
+            {
+                list.push((
+                    e["weight"].as_i64().unwrap_or(1) as i32,
+                    placed(&e["data"], palette)?,
+                ));
             }
-            Ok(Feature::WeightedSelector(list.iter().map(|e| e.0).sum(), list))
+            Ok(Feature::WeightedSelector(
+                list.iter().map(|e| e.0).sum(),
+                list,
+            ))
         }
         kind @ ("minecraft:vegetation_patch" | "minecraft:waterlogged_vegetation_patch") => {
             let f = |k: &str| v[k].as_f64().unwrap_or(0.0) as f32;
@@ -2206,7 +2644,11 @@ fn parse_feature(
                 replaceable: block_set(&v["replaceable"], palette)?,
                 ground: Provider::parse(&v["ground_state"], read, palette)?,
                 vegetation: placed(&v["vegetation_feature"], palette)?,
-                inwards: if v["surface"].as_str() == Some("ceiling") { 1 } else { 0 },
+                inwards: if v["surface"].as_str() == Some("ceiling") {
+                    1
+                } else {
+                    0
+                },
                 depth: IntP::parse(&v["depth"])?,
                 extra_bottom: f("extra_bottom_block_chance"),
                 vertical_range: v["vertical_range"].as_i64().unwrap_or(0) as i32,
@@ -2235,34 +2677,58 @@ fn parse_feature(
         }
         "minecraft:disk" => {
             let provider = Provider::parse(&v["state_provider"], read, palette)?;
-            Ok(Feature::Disk(Arc::new(misc::Disk::parse(v, palette, provider)?)))
+            Ok(Feature::Disk(Arc::new(misc::Disk::parse(
+                v, palette, provider,
+            )?)))
         }
-        "minecraft:spring_feature" => Ok(Feature::Spring(Arc::new(misc::Spring::parse(v, palette)?))),
+        "minecraft:spring_feature" => {
+            Ok(Feature::Spring(Arc::new(misc::Spring::parse(v, palette)?)))
+        }
         "minecraft:vines" => Ok(Feature::Vines),
         "minecraft:block_blob" => Ok(Feature::Blob(Arc::new(misc::Blob::parse(v, palette)?))),
         "minecraft:blue_ice" => Ok(Feature::BlueIce),
         "minecraft:lake" => {
             let fluid = Provider::parse(&v["fluid"], read, palette)?;
             let barrier = Provider::parse(&v["barrier"], read, palette)?;
-            Ok(Feature::Lake(Arc::new(misc::Lake::parse(v, palette, fluid, barrier)?)))
+            Ok(Feature::Lake(Arc::new(misc::Lake::parse(
+                v, palette, fluid, barrier,
+            )?)))
         }
         "minecraft:geode" => {
             let seed = palette.world_seed;
-            let geode = misc::Geode::parse(v, palette, &mut |v, palette| Provider::parse(v, read, palette), seed)?;
+            let geode = misc::Geode::parse(
+                v,
+                palette,
+                &mut |v, palette| Provider::parse(v, read, palette),
+                seed,
+            )?;
             Ok(Feature::Geode(Arc::new(geode)))
         }
         "minecraft:root_system" => {
             let tree = placed(&v["feature"], palette)?;
-            let system = misc::RootSystem::parse(v, palette, &mut |v, palette| Provider::parse(v, read, palette), tree)?;
+            let system = misc::RootSystem::parse(
+                v,
+                palette,
+                &mut |v, palette| Provider::parse(v, read, palette),
+                tree,
+            )?;
             Ok(Feature::RootSystem(Arc::new(system)))
         }
-        "minecraft:multiface_growth" => Ok(Feature::Multiface(Arc::new(misc::Multiface::parse(v, palette)?))),
-        "minecraft:large_dripstone" => Ok(Feature::LargeDripstone(Arc::new(misc::LargeDripstone::parse(v, palette)?))),
-        "minecraft:speleothem" => Ok(Feature::Speleothem(Arc::new(misc::Speleothem::parse(v, palette)?))),
-        "minecraft:speleothem_cluster" => {
-            Ok(Feature::SpeleothemCluster(Arc::new(misc::SpeleothemCluster::parse(v, palette)?)))
-        }
-        "minecraft:monster_room" => Ok(Feature::MonsterRoom(Arc::new(misc::MonsterRoom::parse(palette)?))),
+        "minecraft:multiface_growth" => Ok(Feature::Multiface(Arc::new(misc::Multiface::parse(
+            v, palette,
+        )?))),
+        "minecraft:large_dripstone" => Ok(Feature::LargeDripstone(Arc::new(
+            misc::LargeDripstone::parse(v, palette)?,
+        ))),
+        "minecraft:speleothem" => Ok(Feature::Speleothem(Arc::new(misc::Speleothem::parse(
+            v, palette,
+        )?))),
+        "minecraft:speleothem_cluster" => Ok(Feature::SpeleothemCluster(Arc::new(
+            misc::SpeleothemCluster::parse(v, palette)?,
+        ))),
+        "minecraft:monster_room" => Ok(Feature::MonsterRoom(Arc::new(misc::MonsterRoom::parse(
+            palette,
+        )?))),
         "minecraft:sequence" => Ok(Feature::Sequence(
             v["features"]
                 .as_array()
@@ -2276,9 +2742,11 @@ fn parse_feature(
             misc::UnderwaterMagma::parse(v)?,
         ))),
         "minecraft:bamboo" => Ok(Feature::Bamboo(
-            v["probability"].as_f64().unwrap_or(0.0) as f32,
+            v["probability"].as_f64().unwrap_or(0.0) as f32
         )),
-        "minecraft:spike" => Ok(Feature::IceSpike(Arc::new(misc::IceSpike::parse(v, palette)?))),
+        "minecraft:spike" => Ok(Feature::IceSpike(Arc::new(misc::IceSpike::parse(
+            v, palette,
+        )?))),
         "minecraft:iceberg" => Ok(Feature::Iceberg(misc::Iceberg::parse(v, palette)?)),
         "minecraft:coral_tree" | "minecraft:coral_claw" | "minecraft:coral_mushroom" => {
             Ok(Feature::CoralTree(
@@ -2294,8 +2762,15 @@ fn parse_feature(
                 .map(|e| placed(e, palette))
                 .collect::<Result<_, _>>()?,
         )),
-        "minecraft:sculk_patch" => Ok(Feature::SculkPatch(Arc::new(misc::SculkPatch::parse(v, palette)?))),
+        "minecraft:sculk_patch" => Ok(Feature::SculkPatch(Arc::new(misc::SculkPatch::parse(
+            v, palette,
+        )?))),
         "minecraft:no_op" => Ok(Feature::NoOp),
+        "minecraft:void_start_platform" => {
+            let stone = palette.state(&Value::String("minecraft:stone".into()))?;
+            let cobble = palette.state(&Value::String("minecraft:cobblestone".into()))?;
+            Ok(Feature::VoidPlatform(stone, cobble))
+        }
         "minecraft:fallen_tree" => Ok(Feature::FallenTree(Arc::new(tree::Fallen::parse(
             v,
             palette,
@@ -2305,10 +2780,16 @@ fn parse_feature(
         "minecraft:block_column" => {
             let mut layers = Vec::new();
             for l in v["layers"].as_array().ok_or("block_column: no layers")? {
-                layers.push((IntP::parse(&l["height"])?, Provider::parse(&l["provider"], read, palette)?));
+                layers.push((
+                    IntP::parse(&l["height"])?,
+                    Provider::parse(&l["provider"], read, palette)?,
+                ));
             }
             let d = v["direction"].as_str().unwrap_or("up");
-            let d = DIRECTION_NAMES.iter().position(|n| *n == d).ok_or("block_column: direction")?;
+            let d = DIRECTION_NAMES
+                .iter()
+                .position(|n| *n == d)
+                .ok_or("block_column: direction")?;
             Ok(Feature::BlockColumn(
                 layers,
                 DIRS[d],
@@ -2316,6 +2797,12 @@ fn parse_feature(
                 v["prioritize_tip"].as_bool().unwrap_or(false),
             ))
         }
+        "minecraft:template" => Ok(Feature::Template(Arc::new(
+            template::TemplateFeature::parse(v, read, palette, data_dir)?,
+        ))),
+        "minecraft:fossil" => Ok(Feature::Fossil(Arc::new(template::Fossil::parse(
+            v, read, palette, data_dir,
+        )?))),
         "minecraft:simple_random_selector" => Ok(Feature::SimpleRandomSelector(
             v["features"]
                 .as_array()
@@ -2378,7 +2865,13 @@ pub fn sort_features<'a>(sources: impl Iterator<Item = &'a [Vec<String>]>) -> Ve
         out.push(node);
     }
     for &node in edges.keys() {
-        dfs(&edges, &mut discovered, &mut BTreeSet::new(), &mut sorted, node);
+        dfs(
+            &edges,
+            &mut discovered,
+            &mut BTreeSet::new(),
+            &mut sorted,
+            node,
+        );
     }
     sorted.reverse();
     (0..max_step)
@@ -2399,7 +2892,9 @@ mod tests {
     #[test]
     fn sorter_merges_chains() {
         let s = |v: &[&[&str]]| -> Vec<Vec<String>> {
-            v.iter().map(|x| x.iter().map(|s| s.to_string()).collect()).collect()
+            v.iter()
+                .map(|x| x.iter().map(|s| s.to_string()).collect())
+                .collect()
         };
         let a = s(&[&["a", "c"], &["x"]]);
         let b = s(&[&["a", "b", "c"]]);
@@ -2409,8 +2904,8 @@ mod tests {
     }
 
     /// Декорация не должна молча откатываться: каждая фича биомов
-    /// оверворлда разбирается, кроме тех, что требуют NBT-шаблонов.
-    /// `CHUNKWAKE_DATA` — каталог `generated/26.3`; без него тест пропускается.
+    /// оверворлда разбирается. `CHUNKWAKE_DATA` — каталог `generated/26.3`;
+    /// без него тест пропускается.
     #[test]
     fn overworld_features_parse() {
         let Some(data) = std::env::var_os("CHUNKWAKE_DATA").map(std::path::PathBuf::from) else {
@@ -2443,20 +2938,58 @@ mod tests {
             noise.height,
         )
         .unwrap();
-        // Фичи из NBT-шаблонов: их поставит этап структур.
-        const NEEDS_TEMPLATE: [&str; 4] = [
-            "minecraft:desert_well",
-            "minecraft:rooted_sulfur_spring",
-            "minecraft:fossil_upper",
-            "minecraft:fossil_lower",
-        ];
-        let unexpected: Vec<_> = features
-            .failures()
-            .iter()
-            .filter(|(name, _)| !NEEDS_TEMPLATE.contains(&name.as_str()))
-            .collect();
-        assert!(unexpected.is_empty(), "фичи без причины: {unexpected:?}");
+        assert!(
+            features.failures().is_empty(),
+            "фичи без причины: {:?}",
+            features.failures()
+        );
         let (done, all) = features.coverage();
-        assert_eq!(all - done, NEEDS_TEMPLATE.len(), "{done} из {all}");
+        assert_eq!(done, all, "{done} из {all}");
+        assert_eq!(all, 171);
+        let structures = features.structures.as_ref().expect("structures");
+        assert_eq!(structures.structure_count(), 34);
+        assert_eq!(
+            structures.feature_seed("minecraft:village_plains"),
+            Some((4, 40))
+        );
+        assert_eq!(
+            structures.feature_seed("minecraft:pillager_outpost"),
+            Some((4, 27))
+        );
+        assert_eq!(
+            structures.feature_seed("minecraft:abandoned_camp_forest"),
+            Some((4, 5))
+        );
+        assert_eq!(
+            structures.feature_seed("minecraft:desert_pyramid"),
+            Some((4, 19))
+        );
+        assert_eq!(
+            structures.feature_seed("minecraft:jungle_pyramid"),
+            Some((4, 22))
+        );
+        assert_eq!(structures.feature_seed("minecraft:igloo"), Some((4, 21)));
+        assert_eq!(
+            structures.feature_seed("minecraft:shipwreck"),
+            Some((4, 35))
+        );
+        assert_eq!(
+            structures.feature_seed("minecraft:shipwreck_beached"),
+            Some((4, 36))
+        );
+        assert_eq!(
+            structures.feature_seed("minecraft:swamp_hut"),
+            Some((4, 38))
+        );
+        assert_eq!(structures.feature_seed("minecraft:mineshaft"), Some((3, 1)));
+        assert_eq!(
+            structures.feature_seed("minecraft:mineshaft_mesa"),
+            Some((3, 2))
+        );
+        assert_eq!(structures.feature_seed("minecraft:monument"), Some((4, 24)));
+        assert_eq!(
+            structures.feature_seed("minecraft:stronghold"),
+            Some((4, 37))
+        );
     }
 }

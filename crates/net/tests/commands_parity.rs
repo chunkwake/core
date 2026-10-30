@@ -82,38 +82,14 @@ const EXTENSIONS: &[&str] = &["top", "tps"];
 /// Команды ванили, которых у нас пока нет: этап C и позже.
 const NOT_YET: &[&str] = &[
     "advancement",
-    "attribute",
-    "bossbar",
-    "clone",
     "compute",
     "datapack",
-    "dialog",
-    "enchant",
     "fetchprofile",
-    "fillbiome",
     "function",
-    "item",
     "jfr",
-    "locate",
-    "loot",
-    "particle",
-    "place",
-    "posteffect",
-    "random",
     "recipe",
-    "return",
-    "ride",
     "schedule",
-    "spectate",
-    "spreadplayers",
-    "stopwatch",
-    "swing",
-    "tag",
-    "team",
     "test",
-    "trigger",
-    "waypoint",
-    "worldborder",
 ];
 
 #[test]
@@ -266,7 +242,9 @@ fn aliases_resolve_through_redirect() {
         ("xp", "experience"),
     ] {
         // Разбор алиаса находит узел цели, а не сам алиас.
-        let resolved = tree.parse(alias).unwrap_or_else(|| panic!("{alias} не разобрался"));
+        let resolved = tree
+            .parse(alias)
+            .unwrap_or_else(|| panic!("{alias} не разобрался"));
         assert_ne!(resolved.spec.name, alias, "{alias} не развернулся");
         let target_spec = tree.spec(target).expect("цель алиаса объявлена");
         let reaches = std::ptr::eq(resolved.spec, target_spec)
@@ -506,11 +484,18 @@ fn compare_node(
 /// Команды, у которых ванильное дерево шире нашего обработчика: сверяем только
 /// то, что мы объявили, и не требуем отсутствующих ветвей.
 const SHAPE_SUBSET: &[&str] = &[
-    "execute", "data", "scoreboard", "title", "playsound", "stopsound", "forceloop",
+    "execute",
+    "data",
+    "scoreboard",
+    "title",
+    "playsound",
+    "stopsound",
+    "forceloop",
 ];
 
 #[test]
-fn nodes_match_vanilla_shape() {    let Some(dir) = reports_dir() else {
+fn nodes_match_vanilla_shape() {
+    let Some(dir) = reports_dir() else {
         eprintln!("reports/commands.json не найден: сверка формы пропущена");
         return;
     };
@@ -522,12 +507,73 @@ fn nodes_match_vanilla_shape() {    let Some(dir) = reports_dir() else {
     let mut diffs = Vec::new();
     // Сверяем команды, где клиенту важно видеть наши узлы: цель прав.
     for name in [
-        "give", "effect", "gamemode", "defaultgamemode", "kill", "clear", "teleport",
-        "damage", "rotate", "spawnpoint", "setblock", "fill", "summon", "weather",
-        "setworldspawn", "time", "tick", "difficulty", "say", "me", "msg", "teammsg",
-        "tellraw", "execute", "scoreboard", "op", "deop", "kick", "whitelist", "ban",
-        "banlist", "pardon", "data", "forceload", "list", "help", "seed", "version",
-        "save-all", "stop", "reload", "playsound", "stopsound",
+        "give",
+        "effect",
+        "gamemode",
+        "defaultgamemode",
+        "kill",
+        "clear",
+        "teleport",
+        "damage",
+        "rotate",
+        "spawnpoint",
+        "setblock",
+        "fill",
+        "summon",
+        "weather",
+        "setworldspawn",
+        "time",
+        "tick",
+        "difficulty",
+        "say",
+        "me",
+        "msg",
+        "teammsg",
+        "tellraw",
+        "execute",
+        "scoreboard",
+        "op",
+        "deop",
+        "kick",
+        "whitelist",
+        "ban",
+        "banlist",
+        "pardon",
+        "data",
+        "forceload",
+        "locate",
+        "list",
+        "help",
+        "seed",
+        "version",
+        "save-all",
+        "stop",
+        "reload",
+        "playsound",
+        "stopsound",
+        "team",
+        "clone",
+        "worldborder",
+        "tag",
+        "swing",
+        "spectate",
+        "ride",
+        "trigger",
+        "random",
+        "bossbar",
+        "enchant",
+        "spreadplayers",
+        "stopwatch",
+        "posteffect",
+        "attribute",
+        "fillbiome",
+        "waypoint",
+        "dialog",
+        "particle",
+        "return",
+        "item",
+        "loot",
+        "place",
     ] {
         let Some(spec) = tree.spec(name) else {
             diffs.push(format!("{name}: не объявлена"));
@@ -542,7 +588,11 @@ fn nodes_match_vanilla_shape() {    let Some(dir) = reports_dir() else {
         }
         compare_node(spec, vanilla, name, &mut diffs);
     }
-    assert!(diffs.is_empty(), "дерево разошлось с 26.3:\n{}", diffs.join("\n"));
+    assert!(
+        diffs.is_empty(),
+        "дерево разошлось с 26.3:\n{}",
+        diffs.join("\n")
+    );
 }
 #[test]
 fn tps_line_contract() {

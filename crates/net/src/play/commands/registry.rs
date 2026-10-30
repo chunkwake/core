@@ -8,7 +8,10 @@
 //! (`list`, `me`, `msg`, `teammsg`) доступны всем.
 
 use super::dispatch::{Handler, Spec};
-use super::{admin, chat, data, entity, execute, meta, scoreboard, world};
+use super::{
+    admin, attribute, chat, data, dialog, entity, execute, extra, item_cmd, living, loot_cmd, meta,
+    particle, place_cmd, ret, scoreboard, team as team_cmd, waypoint, world,
+};
 use chunkwake_protocol::text::Parser;
 use std::sync::OnceLock;
 
@@ -42,6 +45,11 @@ pub fn greedy() -> Parser {
 /// Целое в диапазоне.
 pub fn int(min: i32, max: i32) -> Parser {
     Parser::Integer(min, max)
+}
+
+/// `brigadier:bool`.
+pub fn boolean() -> Parser {
+    Parser::Bool
 }
 
 /// `minecraft:time`: значение в тиках с минимумом.
@@ -87,6 +95,16 @@ pub fn vec3() -> Parser {
 /// `minecraft:entity_anchor`: `feet` или `eyes`.
 pub fn anchor() -> Parser {
     Parser::Anchor
+}
+
+/// `minecraft:team`.
+pub fn team() -> Parser {
+    Parser::Team
+}
+
+/// `minecraft:team_color`.
+pub fn team_color() -> Parser {
+    Parser::TeamColor
 }
 
 /// `minecraft:score_holder` и `minecraft:objective` для `/scoreboard`.
@@ -194,6 +212,21 @@ pub fn block_pos() -> Parser {
     Parser::BlockPos
 }
 
+/// `minecraft:loot_table`: ключ таблицы лута (`/loot`).
+pub fn loot_table() -> Parser {
+    Parser::LootTable
+}
+
+/// `minecraft:template_mirror`.
+pub fn template_mirror() -> Parser {
+    Parser::TemplateMirror
+}
+
+/// `minecraft:template_rotation`.
+pub fn template_rotation() -> Parser {
+    Parser::TemplateRotation
+}
+
 /// `minecraft:entity_type` через реестр сущностей.
 pub fn entity_type() -> Parser {
     Parser::Resource("minecraft:entity_type")
@@ -213,8 +246,19 @@ pub fn commands() -> Vec<Spec> {
     out.extend(meta::specs());
     out.extend(admin::specs());
     out.extend(scoreboard::specs());
+    out.extend(team_cmd::specs());
     out.extend(data::specs());
     out.extend(execute::specs());
+    out.extend(living::specs());
+    out.extend(extra::specs());
+    out.extend(attribute::specs());
+    out.extend(waypoint::specs());
+    out.extend(dialog::specs());
+    out.extend(particle::specs());
+    out.extend(ret::specs());
+    out.extend(item_cmd::specs());
+    out.extend(loot_cmd::specs());
+    out.extend(place_cmd::specs());
     out
 }
 /// Таблица строится один раз: разбор идёт на каждую команду игрока.
@@ -325,7 +369,10 @@ mod tests {
             let nodes = tree().nodes_for(level);
             assert!(!nodes.is_empty());
             for node in &nodes {
-                assert!(matches!(node, chunkwake_protocol::text::Node::Literal { .. }));
+                assert!(matches!(
+                    node,
+                    chunkwake_protocol::text::Node::Literal { .. }
+                ));
             }
         }
         assert!(tree().nodes_for(0).len() < tree().nodes_for(4).len());

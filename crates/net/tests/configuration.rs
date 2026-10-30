@@ -55,6 +55,7 @@ async fn start() -> (std::net::SocketAddr, mpsc::UnboundedReceiver<LoggedIn>) {
         enable_status: true,
         session_server: String::new(),
         configuration: Some(Arc::new(plan())),
+        admit: None,
     });
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::spawn(server.serve(listener, move |p, _conn| {

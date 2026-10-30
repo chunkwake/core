@@ -7,6 +7,7 @@
 //! держится область прото-чанков (после карверов): декорация чанка берёт
 //! его 3×3, готовый чанк требует 5×5.
 
+use crate::feature::structure::{Beard, Columns};
 use crate::feature::{self, Features, Heightmap};
 use crate::surface::{self, Chunk as _, Kind, Rule};
 use crate::{BiomeMemo, CarveBlocks, Fill, Generator};
@@ -15,14 +16,6 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
-
-/// Плотности жил в порядке [`surface::Vein`].
-const VEIN_DENSITIES: [&str; 4] = [
-    "minecraft:overworld/ore_vein/copper_density",
-    "minecraft:overworld/ore_vein/iron_density",
-    "minecraft:overworld/ore_vein/richness",
-    "minecraft:overworld/ore_vein/gap",
-];
 
 /// Блоки чанка по индексу `((y - min_y) * 16 + z) * 16 + x` и его биомы
 /// по клеткам 4×4×4 (`None` — климата нет, мир из одного биома).
@@ -33,6 +26,9 @@ pub struct Blocks {
     /// Карты `WORLD_SURFACE_WG` и `OCEAN_FLOOR_WG` после рельефа: считаются
     /// при первой декорации, до записей фич.
     pub worldgen_heights: Option<Arc<[[i32; 256]; 2]>>,
+    /// Заборы шахты: форма сторон считается заново, когда чанк отдают и
+    /// соседи в радиусе 1 уже декорированы (`postProcessGeneration`).
+    shape_posts: Vec<[i32; 3]>,
 }
 
 /// Скомпилированная стадия поверхности.
@@ -49,6 +45,8 @@ pub struct Overworld {
     carve: CarveBlocks,
     stone: u32,
     features: Option<Features>,
+    /// Небородая `WORLD_SURFACE_WG`: высота постановки структур.
+    base_heights: Mutex<HashMap<(i32, i32), Arc<NoiseMaps>>>,
     area: Mutex<Area>,
     /// Будит ждущих, когда прото-чанк построен или декорация вернула область.
     wake: Condvar,
@@ -102,7 +100,7 @@ impl Area {
         }
         let touched = |p: &(i32, i32)| {
             (-1..=1).any(|dz| (-1..=1).any(|dx| self.decorated.contains(&(p.0 + dx, p.1 + dz))))
-    };
+        };
         let pinned = |p: &(i32, i32)| {
             self.active
                 .keys()
@@ -153,8 +151,39 @@ impl Overworld {
             carve,
             stone,
             features: None,
+            base_heights: Mutex::new(HashMap::new()),
             area: Mutex::new(Area::default()),
             wake: Condvar::new(),
+        })
+    }
+
+    /// Ближайший биом для `/locate biome`. Имя — `plains` или `minecraft:plains`.
+    ///
+    /// Поиск идёт на высоте игрока, а в ответ подставляется поверхность
+    /// столбца: иначе `/tp` по клику оставляет ноги внутри холма.
+    pub fn locate_biome(&self, name: &str, origin: [i32; 3]) -> Option<[i32; 3]> {
+        let mut hit = self.noise.find_biome(name, origin, 4_096)?;
+        if let Some(cols) = self.columns() {
+            hit[1] = cols.base_height(hit[0], hit[2]);
+        }
+        Some(hit)
+    }
+
+    /// Ближайшая поставленная структура для `/locate structure`. Чанк не строится.
+    pub fn locate_structure(&self, name: &str, origin: [i32; 3]) -> Option<[i32; 3]> {
+        let structures = self.features.as_ref()?.structures.as_ref()?;
+        structures.nearest(&self.columns()?, origin, name)
+    }
+
+    fn columns(&self) -> Option<Cols<'_>> {
+        let features = self.features.as_ref()?;
+        Some(Cols {
+            noise: &self.noise,
+            surface: self.surface.as_ref(),
+            carve: self.carve,
+            stone: self.stone,
+            palette: &features.palette,
+            heights: &self.base_heights,
         })
     }
 
@@ -168,15 +197,16 @@ impl Overworld {
         default: &dyn Fn(&str) -> Option<u32>,
         biome_ids: &HashMap<String, u32>,
     ) -> Result<Self, String> {
-        if !self.noise.has_biomes() {
+        let n = &self.noise;
+        let order = n.feature_biomes();
+        if order.is_empty() {
             return Ok(self);
         }
         let palette = feature::Palette::new(data_dir, states, default);
-        let n = &self.noise;
         self.features = Some(Features::load(
             data_dir,
             palette,
-            &n.biome_order(),
+            &order,
             biome_ids,
             n.seed(),
             n.min_y,
@@ -209,9 +239,14 @@ impl Overworld {
         state: &dyn Fn(&str) -> Option<u32>,
         biome_ids: &HashMap<String, u32>,
     ) -> Result<Option<Surface>, String> {
-        let (rules, conditions) = noise.surface_files();
-        if rules.is_empty() {
+        let (files, conditions) = noise.surface_files();
+        let (id, inline) = noise.surface_rule()?;
+        if files.is_empty() && inline.is_none() {
             return Ok(None);
+        }
+        let mut rules = files.clone();
+        if let Some(rule) = inline {
+            rules.insert(id.to_owned(), rule.clone());
         }
         let mut names = HashMap::new();
         for rule in rules.values() {
@@ -219,9 +254,9 @@ impl Overworld {
         }
         let noises = noise.surface_noises();
         let noise_names: Vec<String> = noises.iter().map(|(n, _)| n.clone()).collect();
-        let densities: Vec<String> = VEIN_DENSITIES.iter().map(|s| (*s).to_owned()).collect();
+        let densities = noise.vein_names().to_vec();
         let mut compiled = surface::Rules::new(
-            rules.clone(),
+            rules,
             conditions.clone(),
             names.clone(),
             biome_ids.clone(),
@@ -232,8 +267,8 @@ impl Overworld {
             noise.height,
         );
         let rule = compiled
-            .top("minecraft:overworld")
-            .map_err(|e| format!("material_rule overworld: {e}"))?;
+            .top(id)
+            .map_err(|e| format!("material_rule {id}: {e}"))?;
         let bands = compiled.bands(&names);
         let randoms = compiled.into_randoms();
         Ok(Some(Surface {
@@ -287,7 +322,8 @@ impl Overworld {
         cx: i32,
         cz: i32,
     ) -> Option<Blocks> {
-        let around = |r: i32| (-r..=r).flat_map(move |dz| (-r..=r).map(move |dx| (cx + dx, cz + dz)));
+        let around =
+            |r: i32| (-r..=r).flat_map(move |dz| (-r..=r).map(move |dx| (cx + dx, cz + dz)));
         // Прото-чанки 5×5: по одному за раз, ближние к центру первыми. Каждый
         // строит один поток, остальные берут следующий свободный. Раньше
         // первый запрос в новой области забирал все 25 и строил их подряд
@@ -305,7 +341,7 @@ impl Overworld {
             if let Some(p) = mine {
                 area.building.insert(p);
                 drop(area);
-                let b = self.proto(p.0, p.1);
+                let b = self.proto_at(p.0, p.1, Some(features));
                 area = self.area.lock().unwrap();
                 area.building.remove(&p);
                 area.protos.entry(p).or_insert(b);
@@ -326,7 +362,8 @@ impl Overworld {
                     if area.decorated.contains(&n) {
                         break;
                     }
-                    let region = (-1..=1).flat_map(|dz| (-1..=1).map(move |dx| (n.0 + dx, n.1 + dz)));
+                    let region =
+                        (-1..=1).flat_map(|dz| (-1..=1).map(move |dx| (n.0 + dx, n.1 + dz)));
                     if region.clone().any(|p| area.busy.contains(&p)) {
                         area = self.wake.wait(area).unwrap();
                         continue;
@@ -361,7 +398,12 @@ impl Overworld {
             }
             // Тот же чанк мог отдать параллельный запрос, пока этот ждал.
             if area.done.insert((cx, cz)) {
-                return Some(area.protos.remove(&(cx, cz)).expect("own proto chunk stays in the area"));
+                self.refresh_shapes(features, &mut area, cx, cz);
+                return Some(
+                    area.protos
+                        .remove(&(cx, cz))
+                        .expect("own proto chunk stays in the area"),
+                );
             }
         }
         // Повторный запрос отданного чанка: декорация уже ушла с ним, вызов
@@ -369,16 +411,87 @@ impl Overworld {
         None
     }
 
+    /// Стороны заборов шахты и решёток крепости по уже декорированным соседям.
+    /// Чанк, которого нет в области, сторону не меняет: его блоки ушли вместе
+    /// с отдачей.
+    fn refresh_shapes(&self, features: &Features, area: &mut Area, cx: i32, cz: i32) {
+        self.refresh_chunk_shapes(features, area, cx, cz, true);
+        // Уходящий чанк последний раз видит готовых соседей: их клетки на
+        // границе получают свою сторону от него. Их собственный список
+        // пометок не чистим — они ещё не отданы.
+        for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            self.refresh_chunk_shapes(features, area, cx + dx, cz + dz, false);
+        }
+    }
+
+    fn refresh_chunk_shapes(
+        &self,
+        features: &Features,
+        area: &mut Area,
+        cx: i32,
+        cz: i32,
+        own: bool,
+    ) {
+        let Some(chunk) = area.protos.get(&(cx, cz)) else {
+            return;
+        };
+        if chunk.shape_posts.is_empty() {
+            return;
+        }
+        let posts = chunk.shape_posts.clone();
+        let min_y = self.noise.min_y;
+        let height = self.noise.height;
+        let updates =
+            crate::feature::mineshaft::fence_updates(&features.palette, &posts, |x, y, z| {
+                let ry = y - min_y;
+                if ry < 0 || ry >= height {
+                    return None;
+                }
+                let chunk = area.protos.get(&(x >> 4, z >> 4))?;
+                let i = (ry as usize * 16 + (z & 15) as usize) * 16 + (x & 15) as usize;
+                chunk.states.get(i).copied()
+            });
+        for ([x, y, z], state) in updates {
+            let Some(chunk) = area.protos.get_mut(&(x >> 4, z >> 4)) else {
+                continue;
+            };
+            let ry = y - min_y;
+            if ry < 0 || ry >= height {
+                continue;
+            }
+            let i = (ry as usize * 16 + (z & 15) as usize) * 16 + (x & 15) as usize;
+            if let Some(slot) = chunk.states.get_mut(i) {
+                *slot = state;
+            }
+        }
+        if own && let Some(chunk) = area.protos.get_mut(&(cx, cz)) {
+            chunk.shape_posts.clear();
+        }
+    }
+
     /// `applyBiomeDecoration` чанка `(cx, cz)` над его областью 3×3,
     /// забранной из общей области.
-    fn decorate(&self, features: &Features, mut chunks: [Option<Blocks>; 9], (cx, cz): (i32, i32)) -> [Option<Blocks>; 9] {
+    fn decorate(
+        &self,
+        features: &Features,
+        mut chunks: [Option<Blocks>; 9],
+        (cx, cz): (i32, i32),
+    ) -> [Option<Blocks>; 9] {
         for c in chunks.iter_mut().flatten() {
             if c.worldgen_heights.is_none() {
                 let mut maps = [[0; 256]; 2];
-                for (map, kind) in maps.iter_mut().zip([Heightmap::WorldSurfaceWg, Heightmap::OceanFloorWg]) {
+                for (map, kind) in maps
+                    .iter_mut()
+                    .zip([Heightmap::WorldSurfaceWg, Heightmap::OceanFloorWg])
+                {
                     for (column, h) in map.iter_mut().enumerate() {
-                        *h = column_height(&c.states, column, self.noise.height, kind, &features.palette)
-                            + self.noise.min_y;
+                        *h = column_height(
+                            &c.states,
+                            column,
+                            self.noise.height,
+                            kind,
+                            &features.palette,
+                        ) + self.noise.min_y;
                     }
                 }
                 c.worldgen_heights = Some(Arc::new(maps));
@@ -401,7 +514,15 @@ impl Overworld {
             memo: RefCell::new(Default::default()),
             heights: RefCell::new(Default::default()),
         };
-        features.decorate(&mut region, cx, cz, &biomes);
+        let cols = Cols {
+            noise: &self.noise,
+            surface: self.surface.as_ref(),
+            carve: self.carve,
+            stone: self.stone,
+            palette: &features.palette,
+            heights: &self.base_heights,
+        };
+        features.decorate(&mut region, cx, cz, &biomes, Some(&cols));
         region.chunks
     }
 
@@ -410,10 +531,33 @@ impl Overworld {
     /// `CHUNKWAKE_PROF=1` печатает время стадий в stderr: без этого видно
     /// только «20 мс на чанк» и непонятно, что оптимизировать.
     fn proto(&self, cx: i32, cz: i32) -> Blocks {
+        self.proto_at(cx, cz, None)
+    }
+
+    fn proto_at(&self, cx: i32, cz: i32, features: Option<&Features>) -> Blocks {
         let prof = std::env::var_os("CHUNKWAKE_PROF").is_some();
         let t0 = std::time::Instant::now();
+        let structures = features.and_then(|f| f.structures.clone());
+        let beard = if let Some(structures) = &structures {
+            let features = features.expect("features");
+            let cols = Cols {
+                noise: &self.noise,
+                surface: self.surface.as_ref(),
+                carve: self.carve,
+                stone: self.stone,
+                palette: &features.palette,
+                heights: &self.base_heights,
+            };
+            structures.beard_at(&cols, cx, cz)
+        } else {
+            Beard::default()
+        };
         let noise = &*self.noise;
-        let mut terrain = noise.terrain(cx, cz);
+        let mut terrain = if beard.is_empty() {
+            noise.terrain(cx, cz)
+        } else {
+            noise.terrain_beard(cx, cz, &beard)
+        };
         let t_noise = t0.elapsed().as_secs_f64() * 1000.0;
         let c = self.carve;
         let mut states: Vec<u32> = terrain
@@ -440,7 +584,8 @@ impl Overworld {
         let t = std::time::Instant::now();
         if let Some(s) = &self.surface {
             let mut chunk = self.view(&mut states, cx, cz, own, &memo);
-            s.stage(noise, &preliminary, &random).build(&mut chunk, cx, cz);
+            s.stage(noise, &preliminary, &random)
+                .build(&mut chunk, cx, cz);
         }
         let t_surface = t.elapsed().as_secs_f64() * 1000.0;
         // Карверы после поверхности (`generateCarvers`): тоннели и каньоны,
@@ -450,16 +595,22 @@ impl Overworld {
         if let Some(mask) = noise.carving_mask(cx, cz) {
             carved = true;
             let mut heights: Option<Vec<usize>> = None;
-            noise.carve(&mut terrain, &mask, &c, &mut states, |st, x, y, z, fluid| {
-                let s = self.surface.as_ref()?;
-                let chunk = self.view(st, cx, cz, own, &memo);
-                let heights = heights.get_or_insert_with(|| {
-                    (0..256).map(|i| chunk.surface(i % 16, i / 16)).collect()
-                });
-                let y = (y - noise.min_y) as usize;
-                s.stage(noise, &preliminary, &random)
-                    .top_material(&chunk, x, y, z, cx, cz, heights, fluid)
-            });
+            noise.carve(
+                &mut terrain,
+                &mask,
+                &c,
+                &mut states,
+                |st, x, y, z, fluid| {
+                    let s = self.surface.as_ref()?;
+                    let chunk = self.view(st, cx, cz, own, &memo);
+                    let heights = heights.get_or_insert_with(|| {
+                        (0..256).map(|i| chunk.surface(i % 16, i / 16)).collect()
+                    });
+                    let y = (y - noise.min_y) as usize;
+                    s.stage(noise, &preliminary, &random)
+                        .top_material(&chunk, x, y, z, cx, cz, heights, fluid)
+                },
+            );
         }
         let t_carve = t.elapsed().as_secs_f64() * 1000.0;
         if prof {
@@ -471,7 +622,12 @@ impl Overworld {
                 t0.elapsed().as_secs_f64() * 1000.0
             );
         }
-        Blocks { states, biomes, worldgen_heights: None }
+        Blocks {
+            states,
+            biomes,
+            worldgen_heights: None,
+            shape_posts: Vec::new(),
+        }
     }
 
     /// Прото-чанк без декорации: для золотого теста генерации.
@@ -640,7 +796,10 @@ impl Region<'_> {
             return None;
         }
         let slot = self.slot(x, z)?;
-        Some((slot, (ry as usize * 16 + (z & 15) as usize) * 16 + (x & 15) as usize))
+        Some((
+            slot,
+            (ry as usize * 16 + (z & 15) as usize) * 16 + (x & 15) as usize,
+        ))
     }
 }
 
@@ -735,6 +894,14 @@ impl feature::Level for Region<'_> {
     fn sea_level(&self) -> i32 {
         self.noise.sea_level
     }
+    fn mark_shape(&mut self, x: i32, y: i32, z: i32) {
+        let Some(s) = self.slot(x, z) else {
+            return;
+        };
+        if let Some(c) = self.chunks[s].as_mut() {
+            c.shape_posts.push([x, y, z]);
+        }
+    }
     fn biome(&self, x: i32, y: i32, z: i32) -> u32 {
         let Some(s) = self.slot(x, z) else {
             return 0;
@@ -749,9 +916,156 @@ impl feature::Level for Region<'_> {
 }
 
 /// Первый свободный y (от низа мира) над столбцом, ниже `below`.
-fn column_height(states: &[u32], column: usize, below: i32, kind: Heightmap, palette: &feature::Palette) -> i32 {
+fn column_height(
+    states: &[u32],
+    column: usize,
+    below: i32,
+    kind: Heightmap,
+    palette: &feature::Palette,
+) -> i32 {
     (0..below.max(0) as usize)
         .rev()
         .find(|&ry| palette.hits(kind, states[ry * 256 + column]))
         .map_or(0, |ry| ry as i32 + 1)
+}
+
+/// Столбцы для постановки структур: небородая высота и биомы чанка.
+struct Cols<'a> {
+    noise: &'a Generator,
+    surface: Option<&'a Surface>,
+    carve: CarveBlocks,
+    stone: u32,
+    palette: &'a feature::Palette,
+    heights: &'a Mutex<HashMap<(i32, i32), Arc<NoiseMaps>>>,
+}
+
+/// Небородая высота шума: поверхность мира и дно океана.
+struct NoiseMaps {
+    surface: [i32; 256],
+    floor: [i32; 256],
+}
+
+impl Columns for Cols<'_> {
+    fn seed(&self) -> i64 {
+        self.noise.seed()
+    }
+    fn min_y(&self) -> i32 {
+        self.noise.min_y
+    }
+    fn max_y(&self) -> i32 {
+        self.noise.min_y + self.noise.height
+    }
+    fn sea_level(&self) -> i32 {
+        self.noise.sea_level
+    }
+    fn base_height(&self, x: i32, z: i32) -> i32 {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let column = (z.rem_euclid(16) * 16 + x.rem_euclid(16)) as usize;
+        self.chunk_heights(cx, cz).surface[column]
+    }
+    fn ocean_floor(&self, x: i32, z: i32) -> i32 {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let column = (z.rem_euclid(16) * 16 + x.rem_euclid(16)) as usize;
+        self.chunk_heights(cx, cz).floor[column]
+    }
+    fn biome_at(&self, x: i32, y: i32, z: i32) -> Option<u32> {
+        let biomes = self.noise.biomes(x.div_euclid(16), z.div_euclid(16))?;
+        let qy = y.div_euclid(4) - self.noise.min_y.div_euclid(4);
+        if qy < 0 {
+            return None;
+        }
+        let qx = x.rem_euclid(16) >> 2;
+        let qz = z.rem_euclid(16) >> 2;
+        biomes.get((qy * 16 + qz * 4 + qx) as usize).copied()
+    }
+    fn column_has(&self, x: i32, z: i32, biomes: &HashSet<u32>) -> bool {
+        let Some(cells) = self.noise.biomes(x.div_euclid(16), z.div_euclid(16)) else {
+            return false;
+        };
+        let qx = (x.rem_euclid(16) >> 2) as usize;
+        let qz = (z.rem_euclid(16) >> 2) as usize;
+        let quarters = (self.noise.height / 4) as usize;
+        (0..quarters).any(|qy| {
+            cells
+                .get(qy * 16 + qz * 4 + qx)
+                .is_some_and(|id| biomes.contains(id))
+        })
+    }
+}
+
+impl Cols<'_> {
+    fn chunk_heights(&self, cx: i32, cz: i32) -> Arc<NoiseMaps> {
+        if let Some(hit) = self.heights.lock().unwrap().get(&(cx, cz)) {
+            return Arc::clone(hit);
+        }
+        let built = self.compute_heights(cx, cz);
+        let mut cache = self.heights.lock().unwrap();
+        if let Some(hit) = cache.get(&(cx, cz)) {
+            return Arc::clone(hit);
+        }
+        if cache.len() >= 8192 {
+            cache.clear();
+        }
+        cache.insert((cx, cz), Arc::clone(&built));
+        built
+    }
+
+    /// `getBaseHeight`: шум и поверхность, без карверов и без своей бороды.
+    /// Рядом — первый свободный `OCEAN_FLOOR_WG` того же столбца.
+    fn compute_heights(&self, cx: i32, cz: i32) -> Arc<NoiseMaps> {
+        let terrain = self.noise.terrain(cx, cz);
+        let c = self.carve;
+        let mut states: Vec<u32> = terrain
+            .fills
+            .iter()
+            .map(|f| match f {
+                Fill::Air => c.air,
+                Fill::Solid => self.stone,
+                Fill::Water => c.water,
+                Fill::Lava => c.lava,
+            })
+            .collect();
+        let biomes = self.noise.biomes(cx, cz);
+        let own = biomes.as_deref().unwrap_or(&[]);
+        let memo = RefCell::new(BiomeMemo::default());
+        let preliminary = self.noise.preliminary(cx, cz);
+        let random = self.noise.surface_random();
+        if let Some(s) = self.surface {
+            let mut chunk = View {
+                states: &mut states,
+                biomes: own,
+                air: c.air,
+                water: c.water,
+                lava: c.lava,
+                height: self.noise.height as usize,
+                noise: self.noise,
+                cx,
+                cz,
+                memo: &memo,
+            };
+            s.stage(self.noise, &preliminary, &random)
+                .build(&mut chunk, cx, cz);
+        }
+        let mut surface = [0i32; 256];
+        let mut floor = [0i32; 256];
+        for column in 0..256 {
+            surface[column] = column_height(
+                &states,
+                column,
+                self.noise.height,
+                Heightmap::WorldSurfaceWg,
+                self.palette,
+            ) + self.noise.min_y;
+            floor[column] = column_height(
+                &states,
+                column,
+                self.noise.height,
+                Heightmap::OceanFloorWg,
+                self.palette,
+            ) + self.noise.min_y;
+        }
+        Arc::new(NoiseMaps { surface, floor })
+    }
 }

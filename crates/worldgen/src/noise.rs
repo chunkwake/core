@@ -185,7 +185,8 @@ impl Simplex {
         let g0 = self.permute(ii + self.permute(jj)) % 12;
         let g1 = self.permute(ii + i1 + self.permute(jj + j1)) % 12;
         let gi2 = self.permute(ii + 1 + self.permute(jj + 1)) % 12;
-        (70.0 * (Self::corner(g0, x0, y0) + Self::corner(g1, x1, y1) + Self::corner(gi2, x2, y2))) as f32
+        (70.0 * (Self::corner(g0, x0, y0) + Self::corner(g1, x1, y1) + Self::corner(gi2, x2, y2)))
+            as f32
     }
 }
 
@@ -470,7 +471,11 @@ impl NormalNoise {
         for &(index, freq, amp) in &self.octaves {
             let hash = java_hash(&format!("octave_{index}")) as i64;
             let factor = (self.norm * amp) as f32;
-            stack.add(Perlin::new(&mut Legacy::new(hash ^ first), None), freq, factor);
+            stack.add(
+                Perlin::new(&mut Legacy::new(hash ^ first), None),
+                freq,
+                factor,
+            );
             stack.add(
                 Perlin::new(&mut Legacy::new(hash ^ second), None),
                 freq * INPUT_FACTOR,

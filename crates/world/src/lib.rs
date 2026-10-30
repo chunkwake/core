@@ -440,6 +440,14 @@ impl Section {
         self.non_air as usize
     }
 
+    /// Секция из одного состояния, включая воздух.
+    fn uniform_state(&self) -> Option<u32> {
+        match &self.storage {
+            Storage::Single(state) => Some(*state),
+            Storage::Paletted(_) => None,
+        }
+    }
+
     /// Блоки с жидкостью (`LevelChunkSection.fluidCount`): вода, лава и
     /// затопленные. Без таблицы [`set_fluid_states`] — ноль.
     fn fluids(&self) -> u16 {
@@ -467,10 +475,36 @@ impl Section {
 
 static FLUID_STATES: std::sync::OnceLock<Vec<bool>> = std::sync::OnceLock::new();
 
+/// Биты класса карты высот по ID состояния.
+/// 1 — `WORLD_SURFACE` (не воздух), 2 — `MOTION_BLOCKING`, 4 — без листвы.
+static HEIGHT_CLASS: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
+/// Таблица для трёх клиентских карт высот. Без неё все три совпадают с
+/// «любой не-воздух»: так устроены тесты, пока сервер не загрузил теги.
+pub fn set_height_classes(table: Vec<u8>) {
+    let _ = HEIGHT_CLASS.set(table);
+}
+
 /// Таблица «в состоянии есть жидкость» по ID состояния: клиент 26.x читает
 /// число таких блоков в секции и по нему решает, есть ли в ней жидкость.
 pub fn set_fluid_states(table: Vec<bool>) {
     let _ = FLUID_STATES.set(table);
+}
+
+/// Биты карты высот состояния. Без таблицы не-воздух считается поверхностью.
+pub fn height_bits(state: u32) -> u8 {
+    HEIGHT_CLASS
+        .get()
+        .and_then(|table| table.get(state as usize).copied())
+        .unwrap_or(if state == AIR { 0 } else { 1 })
+}
+
+/// В состоянии есть жидкость (вода, лава, водолаз).
+pub fn is_fluid_state(state: u32) -> bool {
+    FLUID_STATES
+        .get()
+        .and_then(|table| table.get(state as usize).copied())
+        .unwrap_or(false)
 }
 
 /// Столбец чанка. Считается, что воздух — состояние 0 (`minecraft:air`).
@@ -601,6 +635,29 @@ impl ChunkColumn {
         self.sections[y / 16].set(((y % 16) * 16 + z) * 16 + x, state)
     }
 
+    /// Биом клетки 4×4×4. `x`/`z` — 0..16, `y` — от низа мира. Возвращает прежний id.
+    pub fn set_biome(&mut self, x: usize, y: usize, z: usize, biome: u32) -> u32 {
+        let section = &mut self.sections[y / 16];
+        let index = (x / 4) + 4 * (z / 4) + 16 * ((y % 16) / 4);
+        let old = section.biome.get(index);
+        if old == biome {
+            return old;
+        }
+        let mut cells = section.biome.cells();
+        cells[index] = biome;
+        section.biome = Biomes::from_cells(&cells);
+        old
+    }
+
+    /// Биомы секций в том виде, в каком их ждёт пакет `chunks_biomes`.
+    pub fn encode_biomes(&self) -> Vec<u8> {
+        let mut data = Writer::new();
+        for section in &self.sections {
+            write_biome_container(&mut data, &section.biome, self.global_biome_bits);
+        }
+        data.buf
+    }
+
     pub fn height(&self) -> usize {
         self.sections.len() * 16
     }
@@ -610,39 +667,69 @@ impl ChunkColumn {
     /// пустые столбцы. Ноль в результате значит «блок не найден», найденная
     /// высота всегда ≥ 1.
     fn heightmap(&self) -> Vec<u32> {
-        let mut out = vec![0u32; 256];
-        let mut pending = 256usize;
+        self.classified_heightmaps(|_| 0b111)[0].clone()
+    }
+
+    /// Три клиентские карты: поверхность, движение, движение без листвы.
+    /// Без таблицы классов лист считается землёй, и миникарта рисует пещеру.
+    fn client_heightmaps(&self) -> [Vec<u32>; 3] {
+        if let Some(class) = HEIGHT_CLASS.get() {
+            return self.classified_heightmaps(|state| {
+                class.get(state as usize).copied().unwrap_or(0)
+            });
+        }
+        let hm = self.heightmap();
+        [hm.clone(), hm.clone(), hm]
+    }
+
+    fn classified_heightmaps(&self, class_of: impl Fn(u32) -> u8) -> [Vec<u32>; 3] {
+        let mut out = [vec![0u32; 256], vec![0u32; 256], vec![0u32; 256]];
+        let mut pending = [256usize; 3];
+        let bits_of = |state: u32| if state == AIR { 0 } else { class_of(state) };
         for si in (0..self.sections.len()).rev() {
-            if pending == 0 {
+            if pending.iter().all(|&n| n == 0) {
                 break;
             }
             let section = &self.sections[si];
-            match section.non_air() {
-                0 => continue,
-                4096 => {
-                    let h = (si * 16 + 16) as u32;
-                    for hgt in &mut out {
+            if let Some(state) = section.uniform_state() {
+                let bits = bits_of(state);
+                if bits == 0 {
+                    continue;
+                }
+                let h = (si * 16 + 16) as u32;
+                for kind in 0..3 {
+                    if bits & (1 << kind) == 0 {
+                        continue;
+                    }
+                    for hgt in &mut out[kind] {
                         if *hgt == 0 {
                             *hgt = h;
+                            pending[kind] -= 1;
                         }
                     }
+                }
+                continue;
+            }
+            if section.non_air() == 0 {
+                continue;
+            }
+            for local_y in (0..16).rev() {
+                if pending.iter().all(|&n| n == 0) {
                     break;
                 }
-                _ => {
-                    for local_y in (0..16).rev() {
-                        if pending == 0 {
-                            break;
+                let base = local_y * 256;
+                let h = (si * 16 + local_y + 1) as u32;
+                for xz in 0..256 {
+                    let bits = bits_of(section.get(base + xz));
+                    if bits == 0 {
+                        continue;
+                    }
+                    for kind in 0..3 {
+                        if bits & (1 << kind) == 0 || out[kind][xz] != 0 {
+                            continue;
                         }
-                        let base = local_y * 256;
-                        for (xz, hgt) in out.iter_mut().enumerate() {
-                            if *hgt != 0 {
-                                continue;
-                            }
-                            if section.get(base + xz) != AIR {
-                                *hgt = (si * 16 + local_y + 1) as u32;
-                                pending -= 1;
-                            }
-                        }
+                        out[kind][xz] = h;
+                        pending[kind] -= 1;
                     }
                 }
             }
@@ -655,15 +742,15 @@ impl ChunkColumn {
         let mut w = Writer::new();
 
         // Heightmaps: map<VarInt тип, long[]>; клиенту нужны типы с Usage.CLIENT.
+        // Листва входит только в WORLD_SURFACE. Иначе миникарта считает игрока
+        // под землёй и рисует пещеру по нулевому блочному свету.
         let bits = bits_for(self.height() + 1);
-        let hm = pack(&self.heightmap(), bits);
-        const WORLD_SURFACE: i32 = 1;
-        const MOTION_BLOCKING: i32 = 4;
-        const MOTION_BLOCKING_NO_LEAVES: i32 = 5;
+        const KINDS: [i32; 3] = [1, 4, 5];
         w.var_int(3);
-        for kind in [WORLD_SURFACE, MOTION_BLOCKING, MOTION_BLOCKING_NO_LEAVES] {
-            w.var_int(kind).var_int(hm.len() as i32);
-            for l in &hm {
+        for (kind, hm) in KINDS.into_iter().zip(self.client_heightmaps()) {
+            let packed = pack(&hm, bits);
+            w.var_int(kind).var_int(packed.len() as i32);
+            for l in packed {
                 w.buf.extend_from_slice(&l.to_be_bytes());
             }
         }
@@ -1072,6 +1159,21 @@ mod tests {
         assert_eq!(hm, legacy_heightmap(&mixed));
         assert_eq!(hm[4 * 16 + 3], 21);
         assert_eq!(hm[0], 0);
+    }
+
+    #[test]
+    fn motion_heightmap_ignores_leaves() {
+        let mut c = ChunkColumn::flat(&[(1, 4)], 2, 0, 4, 1, false);
+        c.set_block(0, 10, 0, 2);
+        let maps = c.classified_heightmaps(|state| match state {
+            1 => 0b111,
+            2 => 0b001,
+            _ => 0,
+        });
+        assert_eq!(maps[0][0], 11, "листва входит в поверхность");
+        assert_eq!(maps[1][0], 4, "движение останавливается на камне");
+        assert_eq!(maps[2][0], 4);
+        assert_eq!(maps[0][1], 4);
     }
 
     #[test]

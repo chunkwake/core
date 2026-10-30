@@ -1,9 +1,9 @@
 //! Служебные команды: `/help`, `/list`, `/seed`, `/time`, `/tick`, `/tps`,
 //! `/perf`, `/top`, `/version`, `/difficulty`, `/stop`, `/setidletimeout`.
 
-use super::args;
-use super::dispatch::{translate, Call, Outcome};
 use super::Context;
+use super::args;
+use super::dispatch::{Call, Outcome, translate};
 use serde_json::Value;
 
 /// `/help [команда]`: список доступных команд или её использование.
@@ -65,12 +65,22 @@ pub(super) fn help(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
 }
 
 /// `/list [uuids]`: сколько игроков онлайн и кто они.
-pub(super) fn list(ctx: &Context<'_>, _call: &Call<'_>) -> Outcome {
+pub(super) fn list(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     let players = ctx.plan.online_players();
+    let uuids = call.path.iter().any(|p| p == "uuids");
     if players.is_empty() {
         return Outcome::text("There are 0 of a max of 0 players online:");
     }
-    let mut names: Vec<String> = players.iter().map(|p| p.name.clone()).collect();
+    let mut names: Vec<String> = players
+        .iter()
+        .map(|p| {
+            if uuids {
+                format!("{} ({})", p.name, p.uuid)
+            } else {
+                p.name.clone()
+            }
+        })
+        .collect();
     names.sort();
     let max = ctx.plan.max_players();
     Outcome::text(format!(
@@ -130,10 +140,7 @@ pub(super) fn time(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
                 // алиасом для старых скриптов лаборатории.
                 "time" | "daytime" => ("commands.time.query.daytime", ctx.plan.day_time()),
                 "gametime" => ("commands.time.query.gametime", ctx.plan.game_time()),
-                "day" => (
-                    "commands.time.query.day",
-                    ctx.plan.game_time() / 24_000,
-                ),
+                "day" => ("commands.time.query.day", ctx.plan.game_time() / 24_000),
                 _ => return usage("/time query <gametime|time>"),
             };
             Outcome::Feedback(translate(key, vec![Value::from(value)]))
@@ -183,7 +190,10 @@ pub(super) fn tick(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         }
         "unfreeze" => {
             ctx.plan.set_tick_frozen(false);
-            Outcome::Feedback(translate("commands.tick.rate.success", vec![Value::from(20)]))
+            Outcome::Feedback(translate(
+                "commands.tick.rate.success",
+                vec![Value::from(20)],
+            ))
         }
         "step" => {
             // `step stop` — литерал дерева; `step <time>` — аргумент.
@@ -256,13 +266,13 @@ pub(super) fn top(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     Outcome::Feedback(crate::play::commands::perf::render(&snapshot, section))
 }
 
-    /// `/version`.
-    pub(super) fn version(ctx: &Context<'_>, _call: &Call<'_>) -> Outcome {
-        let (name, protocol) = ctx.plan.version();
-        Outcome::text(format!(
-            "This server is running Chunkwake on Minecraft {name} (protocol {protocol})"
-        ))
-    }
+/// `/version`.
+pub(super) fn version(ctx: &Context<'_>, _call: &Call<'_>) -> Outcome {
+    let (name, protocol) = ctx.plan.version();
+    Outcome::text(format!(
+        "This server is running Chunkwake on Minecraft {name} (protocol {protocol})"
+    ))
+}
 
 /// `/difficulty <level>`: уровень приходит литералом дерева.
 pub(super) fn difficulty(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
@@ -378,7 +388,7 @@ pub(super) fn debug(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
 /// Узлы дерева служебных команд.
 pub(super) fn specs() -> Vec<super::dispatch::Spec> {
     use super::dispatch::Spec;
-    use super::registry::{arg, int, word, ADMINS, EVERYONE, GAMEMASTERS, OWNERS};
+    use super::registry::{ADMINS, EVERYONE, GAMEMASTERS, OWNERS, arg, int, word};
 
     vec![
         Spec::exec(
@@ -411,12 +421,22 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
                 Spec::group(
                     "set",
                     GAMEMASTERS,
-                    vec![Spec::arg_leaf("time", GAMEMASTERS, super::registry::time(0), time)],
+                    vec![Spec::arg_leaf(
+                        "time",
+                        GAMEMASTERS,
+                        super::registry::time(0),
+                        time,
+                    )],
                 ),
                 Spec::group(
                     "add",
                     GAMEMASTERS,
-                    vec![Spec::arg_leaf("time", GAMEMASTERS, super::registry::time(i32::MIN), time)],
+                    vec![Spec::arg_leaf(
+                        "time",
+                        GAMEMASTERS,
+                        super::registry::time(i32::MIN),
+                        time,
+                    )],
                 ),
                 Spec::group(
                     "query",
@@ -426,7 +446,7 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
                         Spec::literal_leaf("time", GAMEMASTERS, time),
                     ],
                 ),
-            ]
+            ],
         )
         .with_handler(time),
         Spec::exec(

@@ -2,9 +2,9 @@
 
 mod level;
 
+use crate::MC_VERSION;
 use crate::config::Properties;
 use crate::storage::WorldStorage;
-use crate::MC_VERSION;
 use chunkwake_data::boot::Boot;
 use chunkwake_data::registries::{Builtin, RegistryData};
 use chunkwake_data::world::Blocks;
@@ -12,6 +12,7 @@ use chunkwake_net::play::{PlayPlan, SurvivalData, WorldSpec};
 use chunkwake_net::survival::Difficulty;
 use chunkwake_protocol::play::{Login, SpawnInfo};
 use chunkwake_world::{ChunkColumn, bits_for};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -67,7 +68,17 @@ pub fn build_play_plan(
         data_version,
     )?;
     match &level.kind {
-        level::Kind::Noise => tracing::info!("world: seed {}, noise", level.seed),
+        level::Kind::Noise(noise) => {
+            if let Some(biome) = &noise.biome {
+                tracing::info!(
+                    "world: seed {}, noise {}, biome {biome}",
+                    level.seed,
+                    noise.settings
+                );
+            } else {
+                tracing::info!("world: seed {}, noise {}", level.seed, noise.settings);
+            }
+        }
         level::Kind::Flat(flat) => tracing::info!(
             "world: seed {}, flat {}",
             level.seed,
@@ -80,7 +91,7 @@ pub fn build_play_plan(
     }
     let biome_name = match &level.kind {
         level::Kind::Flat(flat) => flat.biome.as_str(),
-        level::Kind::Noise => "minecraft:plains",
+        level::Kind::Noise(noise) => noise.biome.as_deref().unwrap_or("minecraft:plains"),
     };
     let biome = registries
         .network_id("worldgen/biome", biome_name)
@@ -108,7 +119,7 @@ pub fn build_play_plan(
     }
     let top = match &level.kind {
         level::Kind::Flat(flat) => flat.layers.iter().map(|l| l.1).sum::<usize>() as f64,
-        level::Kind::Noise => 0.0,
+        level::Kind::Noise(_) => 0.0,
     };
     let light = std::sync::Arc::new(chunkwake_world::light::LightTable::new(light_rows));
     let mut chunk = ChunkColumn::flat(
@@ -123,13 +134,20 @@ pub fn build_play_plan(
 
     let block_bits = bits_for(blocks.state_count());
     let biome_bits = bits_for(biome_count);
-    let (terrain, spawn_noise, sea_level, is_flat) = match &level.kind {
-        level::Kind::Flat(_) => (None, None, 63, true),
-        level::Kind::Noise => {
-            let mut loaded = chunkwake_worldgen::Generator::load_with_version(
+    let poi_tags = chunkwake_net::play::load_poi_tags(data_dir);
+    let structure_names = chunkwake_net::play::structure_names(data_dir);
+    chunkwake_world::set_fluid_states(fluid_states(&blocks.states()));
+    chunkwake_world::set_height_classes(height_classes(data_dir, &blocks.states())?);
+    let (terrain, locate_biome, locate_structure, spawn_noise, sea_level, is_flat) = match &level
+        .kind
+    {
+        level::Kind::Flat(_) => (None, None, None, None, 63, true),
+        level::Kind::Noise(noise) => {
+            let mut loaded = chunkwake_worldgen::Generator::load_settings(
                 data_dir,
                 level.seed,
                 Some(data_version),
+                &noise.settings,
             )?;
             if loaded.min_y != dim.min_y || loaded.height != dim.height {
                 return Err(format!(
@@ -138,7 +156,12 @@ pub fn build_play_plan(
                 ));
             }
             // Биомы выбирает климат (`MultiNoiseBiomeSource`), а не один plains.
+            // `single_biome_surface` подменяет климат одним биомом.
             loaded.bind_biomes(biome_ids.clone());
+            let fixed = noise.biome.is_some();
+            if let Some(name) = &noise.biome {
+                loaded.set_fixed_biome(name, &biome_ids)?;
+            }
             let climate = loaded.has_biomes();
             let noise = std::sync::Arc::new(loaded);
             let sea = noise.sea_level;
@@ -147,9 +170,9 @@ pub fn build_play_plan(
             let sky = dim.has_skylight;
             // Шум, поверхность и карверы — один конвейер генератора.
             let state = |name: &str| blocks.default_state(name).ok().map(|s| s as u32);
-            chunkwake_world::set_fluid_states(fluid_states(&blocks.states()));
-            let overworld = chunkwake_worldgen::pipeline::Overworld::new(noise, &state, &biome_ids)?
-                .with_features(data_dir, &blocks.states(), &state, &biome_ids)?;
+            let overworld =
+                chunkwake_worldgen::pipeline::Overworld::new(noise, &state, &biome_ids)?
+                    .with_features(data_dir, &blocks.states(), &state, &biome_ids)?;
             if let Some((done, all)) = overworld.feature_coverage() {
                 tracing::info!("worldgen features: {done} of {all} ported");
                 for (name, why) in overworld.feature_failures().iter().take(5) {
@@ -160,35 +183,60 @@ pub fn build_play_plan(
                 tracing::warn!("no material_rule in the data cache: the world keeps bare stone");
             }
             // Свет считает пролив при отправке: здесь только блоки.
-            let built: std::sync::Arc<
-                dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync,
-            > = std::sync::Arc::new(move |cx, cz| {
-                // `None` — чанк уже отдан: генератор его не повторяет, и
-                // вызывающему нужен готовый столбец из мира, а не копия.
-                let chunk = overworld.chunk(cx, cz)?;
-                Some(match chunk.biomes {
-                    Some(biomes) => ChunkColumn::from_blocks_with_biomes(
-                        &chunk.states, &biomes, block_bits, biome_bits, sky,
-                    ),
-                    None => ChunkColumn::from_blocks(
-                        &chunk.states, biome_id, block_bits, biome_bits, sky,
-                    ),
-                })
+            // Тот же генератор отвечает `/locate biome`, не строя чанк.
+            let overworld = std::sync::Arc::new(overworld);
+            let locate_world = overworld.clone();
+            let locate: std::sync::Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync> =
+                std::sync::Arc::new(move |name, origin| locate_world.locate_biome(name, origin));
+            let locate_struct_world = overworld.clone();
+            let locate_structure: std::sync::Arc<
+                dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync,
+            > = std::sync::Arc::new(move |name, origin| {
+                locate_struct_world.locate_structure(name, origin)
             });
-            if !climate {
+            let built: std::sync::Arc<dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync> =
+                std::sync::Arc::new(move |cx, cz| {
+                    // `None` — чанк уже отдан: генератор его не повторяет, и
+                    // вызывающему нужен готовый столбец из мира, а не копия.
+                    let chunk = overworld.chunk(cx, cz)?;
+                    Some(match chunk.biomes {
+                        Some(biomes) => ChunkColumn::from_blocks_with_biomes(
+                            &chunk.states,
+                            &biomes,
+                            block_bits,
+                            biome_bits,
+                            sky,
+                        ),
+                        None => ChunkColumn::from_blocks(
+                            &chunk.states,
+                            biome_id,
+                            block_bits,
+                            biome_bits,
+                            sky,
+                        ),
+                    })
+                });
+            if !fixed && !climate {
                 tracing::warn!(
                     "reports/biomes.csv is missing: the noise world keeps a single biome. \
                      Delete the data cache or rebuild it to get real biomes"
                 );
             }
-            (Some(built), Some(stand), sea, false)
+            (
+                Some(built),
+                Some(locate),
+                Some(locate_structure),
+                Some(stand),
+                sea,
+                false,
+            )
         }
     };
 
     let dimension = format!("minecraft:{DIMENSION}");
     let login = Login {
         entity_id: 0,
-        hardcore: false,
+        hardcore: props.hardcore,
         dimensions: vec![dimension.clone()],
         max_players: props.max_players as i32,
         view_distance: props.view_distance as i32,
@@ -216,14 +264,26 @@ pub fn build_play_plan(
     // Плоский мир: центр блока над верхним слоем, пустой — у уровня моря.
     // Нормальный: верхний твёрдый блок столбца 8,8 чанка 0,0.
     tracing::debug!("world: level and template {} ms", t.elapsed().as_millis());
+    let void_platform = matches!(&level.kind, level::Kind::Flat(flat) if flat.void_platform());
     let spawn = if let Some(y) = spawn_noise {
         [8.5, y, 8.5]
+    } else if void_platform {
+        // Ноги на блоке над булыжником `(8, minY+3, 8)`.
+        [8.5, (dim.min_y + 4) as f64, 8.5]
     } else if let level::Kind::Flat(flat) = &level.kind
         && flat.layers.iter().any(|(b, _)| b != "minecraft:air")
     {
         [8.5, dim.min_y as f64 + top, 8.5]
     } else {
         [8.5, 64.0, 8.5]
+    };
+    let void_blocks = if void_platform {
+        Some((
+            blocks.default_state("minecraft:stone").map_err(s)? as u32,
+            blocks.default_state("minecraft:cobblestone").map_err(s)? as u32,
+        ))
+    } else {
+        None
     };
     let player_type =
         chunkwake_data::registries::builtin_id_of(&builtin, "entity_type", "minecraft:player")
@@ -253,6 +313,11 @@ pub fn build_play_plan(
     let world = WorldSpec {
         template: chunk.clone(),
         terrain,
+        locate_biome,
+        locate_structure,
+        poi_tags,
+        structure_names,
+        void_platform: void_blocks,
         light: light.clone(),
         min_y: dim.min_y,
         item_blocks,
@@ -280,8 +345,11 @@ pub fn build_play_plan(
     // Командам нужны настройки сервера: правила, белый список и каталог `/reload`.
     // Каталог сервера — родитель каталога мира: там `ops.json` и `server.properties`.
     let server_dir = world_dir.parent().unwrap_or(world_dir);
-    let version_protocol = crate::config::read_cached_version(data_dir)
-        .map_or(0, |v| v.protocol);
+    let version_protocol = crate::config::read_cached_version(data_dir).map_or(0, |v| v.protocol);
+    plan.set_particle_types(
+        chunkwake_data::registries::builtin_ids_of(&builtin, "particle_type").map_err(s)?,
+    );
+    plan.set_command_lang(command_language(&props.jar_path(server_dir)));
     plan.configure(
         &chunkwake_net::play::commands::PlanConfig {
             level_name: &props.level_name,
@@ -291,6 +359,8 @@ pub fn build_play_plan(
             version_protocol,
             server_dir,
             whitelist: props.white_list,
+            pvp: props.pvp,
+            allow_flight: props.allow_flight,
         },
         world_dir,
     );
@@ -606,13 +676,29 @@ fn survival_data(
             ]
         },
         creature_spawns: creature_spawns(data_dir, registries),
-        physics: chunkwake_data::world::load_physics(data_dir).ok().map(std::sync::Arc::new),
+        physics: chunkwake_data::world::load_physics(data_dir)
+            .ok()
+            .map(std::sync::Arc::new),
+        item_tags: chunkwake_net::play::load_registry_tags(data_dir, "item"),
+        block_tags: chunkwake_net::play::load_registry_tags(data_dir, "block"),
+        biome_names: registries
+            .synchronized
+            .iter()
+            .find(|r| r.name == "worldgen/biome")
+            .map(|r| r.entries.clone())
+            .unwrap_or_default(),
+        biome_tags: chunkwake_net::play::load_registry_tags(data_dir, "worldgen/biome"),
+        data_dir: data_dir.to_owned(),
+        block_states: blocks.states(),
     };
     Ok(survival)
 }
 
 /// Мирные мобы биомов для заселения новых чанков.
-fn creature_spawns(data_dir: &Path, registries: &RegistryData) -> Vec<chunkwake_net::play::CreatureSpawns> {
+fn creature_spawns(
+    data_dir: &Path,
+    registries: &RegistryData,
+) -> Vec<chunkwake_net::play::CreatureSpawns> {
     let names = registries
         .synchronized
         .iter()
@@ -706,6 +792,100 @@ mod tests {
     }
 }
 
+/// Биты карт высот: 1 поверхность, 2 движение, 4 движение без листвы.
+/// Листва не поднимает карты движения — иначе миникарта считает игрока в пещере.
+fn height_classes(
+    data_dir: &Path,
+    states: &[Option<(String, chunkwake_data::world::Properties)>],
+) -> Result<Vec<u8>, String> {
+    let motion = block_tag(data_dir, "#minecraft:blocks_motion_in_heightmap")?;
+    let bare = block_tag(data_dir, "#minecraft:blocks_motion_in_heightmap_no_leaves")?;
+    const ALWAYS: &[&str] = &[
+        "minecraft:water",
+        "minecraft:lava",
+        "minecraft:bubble_column",
+        "minecraft:kelp",
+        "minecraft:kelp_plant",
+        "minecraft:seagrass",
+        "minecraft:tall_seagrass",
+    ];
+    Ok(states
+        .iter()
+        .map(|s| {
+            let Some((name, props)) = s else {
+                return 0;
+            };
+            let fluid = ALWAYS.contains(&name.as_str())
+                || props.iter().any(|(k, v)| k == "waterlogged" && v == "true");
+            let mut bits = 0u8;
+            if !matches!(
+                name.as_str(),
+                "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
+            ) {
+                bits |= 1;
+            }
+            if motion.contains(name) || fluid {
+                bits |= 2;
+            }
+            if bare.contains(name) || fluid {
+                bits |= 4;
+            }
+            bits
+        })
+        .collect())
+}
+
+/// Тег блоков `data/<ns>/tags/block`, вместе с вложенными `#тегами`.
+fn block_tag(root: &Path, spec: &str) -> Result<HashSet<String>, String> {
+    fn resolve(
+        root: &Path,
+        spec: &str,
+        memo: &mut HashMap<String, HashSet<String>>,
+        visiting: &mut HashSet<String>,
+    ) -> Result<HashSet<String>, String> {
+        if let Some(hit) = memo.get(spec) {
+            return Ok(hit.clone());
+        }
+        if !visiting.insert(spec.to_owned()) {
+            return Ok(HashSet::new());
+        }
+        let mut out = HashSet::new();
+        if let Some(tag) = spec.strip_prefix('#') {
+            let tag = ns(tag);
+            let (namespace, path) = tag.split_once(':').unwrap_or(("minecraft", tag.as_str()));
+            let file = root.join(format!("data/{namespace}/tags/block/{path}.json"));
+            let text = std::fs::read_to_string(&file).map_err(|e| format!("{file:?}: {e}"))?;
+            let json: serde_json::Value =
+                serde_json::from_str(&text).map_err(|e| format!("{file:?}: {e}"))?;
+            for v in json["values"].as_array().into_iter().flatten() {
+                let id = v.as_str().or_else(|| v["id"].as_str()).unwrap_or("");
+                if id.is_empty() {
+                    continue;
+                }
+                if id.starts_with('#') {
+                    out.extend(resolve(root, id, memo, visiting)?);
+                } else {
+                    out.insert(ns(id));
+                }
+            }
+        } else {
+            out.insert(ns(spec));
+        }
+        visiting.remove(spec);
+        memo.insert(spec.to_owned(), out.clone());
+        Ok(out)
+    }
+    resolve(root, spec, &mut HashMap::new(), &mut HashSet::new())
+}
+
+fn ns(name: &str) -> String {
+    if name.contains(':') {
+        name.to_owned()
+    } else {
+        format!("minecraft:{name}")
+    }
+}
+
 /// Состояния с жидкостью: вода, лава, пузырьки, водоросли и всё затопленное.
 fn fluid_states(states: &[Option<(String, chunkwake_data::world::Properties)>]) -> Vec<bool> {
     const ALWAYS: &[&str] = &[
@@ -726,4 +906,47 @@ fn fluid_states(states: &[Option<(String, chunkwake_data::world::Properties)>]) 
             })
         })
         .collect()
+}
+
+/// `en_us.json` из ванильного jar. Нет файла — консоль оставляет ключ, но пишет почему.
+fn command_language(jar: &Path) -> HashMap<String, String> {
+    let file = match std::fs::File::open(jar) {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!(
+                "console command errors stay as translation keys: cannot open {}: {error}",
+                jar.display()
+            );
+            return HashMap::new();
+        }
+    };
+    let mut zip = match zip::ZipArchive::new(file) {
+        Ok(zip) => zip,
+        Err(error) => {
+            tracing::warn!(
+                "console command errors stay as translation keys: {}: {error}",
+                jar.display()
+            );
+            return HashMap::new();
+        }
+    };
+    let mut entry = match zip.by_name("assets/minecraft/lang/en_us.json") {
+        Ok(entry) => entry,
+        Err(error) => {
+            tracing::warn!("console command errors stay as translation keys: en_us.json: {error}");
+            return HashMap::new();
+        }
+    };
+    let mut text = String::new();
+    if let Err(error) = std::io::Read::read_to_string(&mut entry, &mut text) {
+        tracing::warn!("console command errors stay as translation keys: en_us.json: {error}");
+        return HashMap::new();
+    }
+    match serde_json::from_str(&text) {
+        Ok(lang) => lang,
+        Err(error) => {
+            tracing::warn!("console command errors stay as translation keys: en_us.json: {error}");
+            HashMap::new()
+        }
+    }
 }

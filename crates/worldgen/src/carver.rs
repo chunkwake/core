@@ -37,8 +37,17 @@ pub fn clamped_normal(r: &mut impl Bits, mean: f32, deviation: f32, min: f32, ma
 pub enum FloatP {
     Const(f32),
     Uniform(f32, f32),
-    Trapezoid { min: f32, max: f32, plateau: f32 },
-    ClampedNormal { mean: f32, deviation: f32, min: f32, max: f32 },
+    Trapezoid {
+        min: f32,
+        max: f32,
+        plateau: f32,
+    },
+    ClampedNormal {
+        mean: f32,
+        deviation: f32,
+        min: f32,
+        max: f32,
+    },
 }
 
 impl FloatP {
@@ -80,7 +89,12 @@ impl FloatP {
                 let end = range - start;
                 min + r.next_float() * end + r.next_float() * start
             }
-            Self::ClampedNormal { mean, deviation, min, max } => clamped_normal(r, mean, deviation, min, max),
+            Self::ClampedNormal {
+                mean,
+                deviation,
+                min,
+                max,
+            } => clamped_normal(r, mean, deviation, min, max),
         }
     }
 }
@@ -99,7 +113,12 @@ pub enum IntP {
     /// `trapezoid`: min, max, plateau.
     Trapezoid(i32, i32, i32),
     /// `clamped_normal`: среднее, отклонение, границы; бросок — `Mth.clamp(normal)`.
-    ClampedNormal { mean: f32, deviation: f32, min: i32, max: i32 },
+    ClampedNormal {
+        mean: f32,
+        deviation: f32,
+        min: i32,
+        max: i32,
+    },
 }
 
 impl IntP {
@@ -115,12 +134,14 @@ impl IntP {
         match v["type"].as_str().unwrap_or("") {
             "minecraft:constant" => Ok(Self::Const(i("value")?)),
             "minecraft:uniform" => Ok(Self::Uniform(i("min_inclusive")?, i("max_inclusive")?)),
-            "minecraft:very_biased_to_bottom" => {
-                Ok(Self::VeryBiasedToBottom(i("min_inclusive")?, i("max_inclusive")?))
-            }
-            "minecraft:biased_to_bottom" => {
-                Ok(Self::BiasedToBottom(i("min_inclusive")?, i("max_inclusive")?))
-            }
+            "minecraft:very_biased_to_bottom" => Ok(Self::VeryBiasedToBottom(
+                i("min_inclusive")?,
+                i("max_inclusive")?,
+            )),
+            "minecraft:biased_to_bottom" => Ok(Self::BiasedToBottom(
+                i("min_inclusive")?,
+                i("max_inclusive")?,
+            )),
             "minecraft:clamped" => Ok(Self::Clamped(
                 Box::new(Self::parse(&v["source"])?),
                 i("min_inclusive")?,
@@ -141,7 +162,10 @@ impl IntP {
             }),
             "minecraft:weighted_list" => {
                 let mut items = Vec::new();
-                for e in v["distribution"].as_array().ok_or("weighted_list: no distribution")? {
+                for e in v["distribution"]
+                    .as_array()
+                    .ok_or("weighted_list: no distribution")?
+                {
                     let w = e["weight"].as_i64().ok_or("weighted_list: no weight")? as i32;
                     items.push((w, Self::parse(&e["data"])?));
                 }
@@ -159,18 +183,21 @@ impl IntP {
     pub fn bounds(&self) -> (i32, i32) {
         match self {
             Self::Const(v) => (*v, *v),
-            Self::Uniform(a, b) | Self::VeryBiasedToBottom(a, b) | Self::BiasedToBottom(a, b) | Self::Trapezoid(a, b, _) => {
-                (*a, *b)
-            }
+            Self::Uniform(a, b)
+            | Self::VeryBiasedToBottom(a, b)
+            | Self::BiasedToBottom(a, b)
+            | Self::Trapezoid(a, b, _) => (*a, *b),
             Self::Clamped(src, lo, hi) => {
                 let (a, b) = src.bounds();
                 (a.max(*lo), b.min(*hi))
             }
             Self::ClampedNormal { min, max, .. } => (*min, *max),
-            Self::Weighted(_, list) => list.iter().fold((i32::MAX, i32::MIN), |(lo, hi), (_, p)| {
-                let (a, b) = p.bounds();
-                (lo.min(a), hi.max(b))
-            }),
+            Self::Weighted(_, list) => {
+                list.iter().fold((i32::MAX, i32::MIN), |(lo, hi), (_, p)| {
+                    let (a, b) = p.bounds();
+                    (lo.min(a), hi.max(b))
+                })
+            }
         }
     }
 
@@ -188,9 +215,12 @@ impl IntP {
                 min + r.next_int_bound(a)
             }
             Self::Clamped(ref source, min, max) => source.sample(r).clamp(min, max),
-            Self::ClampedNormal { mean, deviation, min, max } => {
-                clamped_normal(r, mean, deviation, min as f32, max as f32) as i32
-            }
+            Self::ClampedNormal {
+                mean,
+                deviation,
+                min,
+                max,
+            } => clamped_normal(r, mean, deviation, min as f32, max as f32) as i32,
             Self::Trapezoid(min, max, plateau) => {
                 if plateau == 0 && max == -min {
                     return r.next_int_bound(max + 1) - r.next_int_bound(max + 1);
@@ -251,9 +281,11 @@ impl HeightP {
                 anchor(&v["max_inclusive"], min_y, height)?,
             )),
             Some("minecraft:constant") => Ok(Self::Const(anchor(&v["value"], min_y, height)?)),
-            Some(t @ ("minecraft:trapezoid"
-            | "minecraft:biased_to_bottom"
-            | "minecraft:very_biased_to_bottom")) => {
+            Some(
+                t @ ("minecraft:trapezoid"
+                | "minecraft:biased_to_bottom"
+                | "minecraft:very_biased_to_bottom"),
+            ) => {
                 let min = anchor(&v["min_inclusive"], min_y, height)?;
                 let max = anchor(&v["max_inclusive"], min_y, height)?;
                 Ok(match t {
@@ -741,6 +773,9 @@ mod tests {
         m.carve(0, 312, 15);
         let mut seen = Vec::new();
         m.visit(|x, z, a, b| seen.push((x, z, a, b)));
-        assert_eq!(seen, vec![(0, 15, 312, 312), (1, 2, 10, 11), (1, 2, 13, 13)]);
+        assert_eq!(
+            seen,
+            vec![(0, 15, 312, 312), (1, 2, 10, 11), (1, 2, 13, 13)]
+        );
     }
 }

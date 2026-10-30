@@ -30,6 +30,7 @@ async fn start_with_status(
         enable_status,
         session_server: String::new(),
         configuration: None,
+        admit: None,
     });
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::spawn(server.serve(listener, move |p, _conn| {
@@ -54,6 +55,7 @@ async fn shutdown_stops_accepting_new_connections() {
         enable_status: true,
         session_server: String::new(),
         configuration: None,
+        admit: None,
     });
     let (tx, rx) = tokio::sync::watch::channel(false);
     let task = tokio::spawn(server.serve_until(listener, rx, |_, _| {}));
@@ -137,6 +139,38 @@ async fn offline_login_with_compression() {
     let player = rx.recv().await.unwrap();
     assert_eq!(player.name, "Steve");
     assert_eq!(player.uuid, uuid);
+}
+
+#[tokio::test]
+async fn banned_name_is_rejected_at_login() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = Server::new(NetConfig {
+        version: GameVersion {
+            name: "26.3".into(),
+            protocol: PROTOCOL,
+        },
+        motd: "hello".into(),
+        max_players: 20,
+        compression_threshold: -1,
+        online_mode: false,
+        enable_status: true,
+        session_server: String::new(),
+        configuration: None,
+        admit: Some(chunkwake_net::Admit(std::sync::Arc::new(|name, _uuid, _addr| {
+            (name == "Steve").then(|| "You are banned from this server.".to_owned())
+        }))),
+    });
+    tokio::spawn(server.serve(listener, |_, _| {}));
+    let mut c = connect(addr, NextState::Login).await;
+    let mut w = Writer::new();
+    w.var_int(0x00).string("Steve").uuid(uuid::Uuid::nil());
+    c.send(&w.buf).await.unwrap();
+    let p = c.read_packet().await.unwrap();
+    let mut r = Reader::new(&p);
+    assert_eq!(r.var_int().unwrap(), 0x00, "login disconnect");
+    let reason = r.string(32767).unwrap();
+    assert!(reason.contains("banned"), "{reason}");
 }
 
 #[tokio::test]

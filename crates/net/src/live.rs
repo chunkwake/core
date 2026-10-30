@@ -105,8 +105,21 @@ pub enum Control {
     Teleport([f64; 3], f32, f32),
     /// Очистить инвентарь игрока (`/clear`).
     Clear,
-    /// Выдать предмет (`/give`): ID предмета и количество.
-    Give(i32, i32),
+    /// Снять до `max` штук предметов из списка (`/clear`).
+    /// `extra == 0` и `damage == None` — любые компоненты.
+    ClearItem {
+        items: Vec<i32>,
+        extra: u32,
+        damage: Option<i32>,
+        max: i32,
+    },
+    /// Выдать предмет (`/give`): id, количество, компоненты и износ.
+    Give {
+        item: i32,
+        count: i32,
+        extra: u32,
+        damage: i32,
+    },
     /// Внутреннее: урон извне сессии (стрела из раздатчика).
     Hurt(f32, crate::survival::Cause),
     /// Внутреннее (не от плагинов): содержимое сундука изменил другой игрок.
@@ -269,7 +282,37 @@ impl Control {
                 live.effects.retain(|e| id.is_some_and(|w| w != e.id))
             }
             Control::Clear => live.slots = [None; SLOTS],
-            Control::Give(..) => {}
+            Control::ClearItem {
+                ref items,
+                extra,
+                damage,
+                max,
+            } => {
+                let _ = crate::survival::take_selected_slots(
+                    &mut live.slots,
+                    Some(items),
+                    extra,
+                    damage,
+                    max,
+                );
+            }
+            Control::Give {
+                item,
+                count,
+                extra,
+                damage,
+            } => {
+                let mut inv = crate::survival::Inventory {
+                    slots: live.slots,
+                    carried: None,
+                    selected: live.selected,
+                    state: 0,
+                    drag: Default::default(),
+                };
+                let max = if damage > 0 { 1 } else { 64 };
+                inv.add_components(item, count, max, extra, damage);
+                live.slots = inv.slots;
+            }
             Control::Xp(c) => {
                 live.xp.apply(c);
             }

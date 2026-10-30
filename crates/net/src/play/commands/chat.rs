@@ -4,11 +4,11 @@
 //! Всё уходит теми же пакетами, что и обычный чат, поэтому мод-клиент видит
 //! команды как ванильные сообщения: `system_chat`, `sound`, `title`.
 
-use super::args;
-use super::dispatch::{text_component, translate, Call, Outcome};
-use super::entity::usage;
 use super::Context;
-use serde_json::{json, Value};
+use super::args;
+use super::dispatch::{Call, Outcome, text_component, translate};
+use super::entity::usage;
+use serde_json::{Value, json};
 
 /// `/say <message>`: сообщение от имени сервера или игрока.
 pub(super) fn say(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
@@ -80,9 +80,14 @@ pub(super) fn teammsg(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     if text.is_empty() {
         return usage("/teammsg <message>");
     }
+    let Some(recipients) = ctx.plan.team_recipients(&call.source.name) else {
+        return Outcome::Feedback(translate("commands.teammsg.failed", Vec::new()));
+    };
     let line = format!("[{}] {text}", call.source.name);
-    let packet = chunkwake_protocol::play::system_chat(ctx.plan.chat_packet_id(), &line, false);
-    ctx.plan.broadcast_packet(packet);
+    let component = serde_json::json!({"text": line}).to_string();
+    for uuid in recipients {
+        ctx.plan.send_json(uuid, &component);
+    }
     Outcome::Silent
 }
 
@@ -138,7 +143,8 @@ pub(super) fn title(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
                 return usage("/title <targets> times <fadeIn> <stay> <fadeOut>");
             };
             for target in &targets {
-                ctx.plan.send_title_animation(target.uuid, fade_in, stay, fade_out);
+                ctx.plan
+                    .send_title_animation(target.uuid, fade_in, stay, fade_out);
             }
             Outcome::Feedback(translate(
                 "commands.title.times.success",
@@ -190,6 +196,23 @@ fn name_of(targets: &[super::selector::Target]) -> Value {
     }
 }
 
+fn is_sound_source(token: &str) -> bool {
+    matches!(
+        token,
+        "ambient"
+            | "block"
+            | "hostile"
+            | "master"
+            | "music"
+            | "neutral"
+            | "player"
+            | "record"
+            | "ui"
+            | "voice"
+            | "weather"
+    )
+}
+
 /// `/playsound <sound> <source> <targets> [pos] [volume] [pitch]`.
 ///
 /// Источник — литерал дерева (`master`, `player`, …), поэтому он приходит в
@@ -197,51 +220,95 @@ fn name_of(targets: &[super::selector::Target]) -> Value {
 pub(super) fn playsound(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     let mut input = call.t();
     let Some(sound) = input.word() else {
-        return usage("/playsound <sound> <source> <targets> [volume] [pitch]");
+        return usage("/playsound <sound> <source> <targets> [pos] [volume] [pitch]");
     };
     let sound = args::resource_name(sound);
-    // `pos` необязателен: координаты отличаем по форме токена.
-    let mut next = input.word();
-    if next.is_some_and(args::is_coord) {
-        // Три координаты: позиция перед целью не поддерживается нашим
-        // проигрыванием (звук идёт от цели), но строка должна разбираться.
-        for _ in 0..3 {
-            let _ = input.word();
-        }
-        next = input.word();
-    }
-    let Some(token) = next else {
-        return usage("/playsound <sound> <source> <targets> [volume] [pitch]");
+    // Источник — литерал дерева, но он стоит после аргумента звука, поэтому
+    // в `path` не попадает и остаётся в строке.
+    let source = input
+        .rest()
+        .split_whitespace()
+        .next()
+        .filter(|token| is_sound_source(token))
+        .and_then(|_| input.word())
+        .and_then(sound_source_id)
+        .unwrap_or(0);
+    let Some(token) = input.word() else {
+        return usage("/playsound <sound> <source> <targets> [pos] [volume] [pitch]");
     };
     let targets = match ctx.select(call.source, token, false) {
         Ok(list) => list,
         Err(e) => return Outcome::Feedback(e.component()),
     };
-    // Позиция перед объёмом допустима и в ванильной ветке с целью.
-    if input.word().is_some_and(args::is_coord) {
-        for _ in 0..3 {
-            let _ = input.word();
+    let (origin, yaw, pitch_look) = if let Some(pose) = ctx.execution_origin() {
+        pose
+    } else {
+        call.source
+            .uuid
+            .and_then(|uuid| ctx.pose(uuid))
+            .unwrap_or((call.position(ctx), 0.0, 0.0))
+    };
+    let at = if input
+        .rest()
+        .split_whitespace()
+        .next()
+        .is_some_and(args::is_coord)
+    {
+        let (x, y, z) = (input.word(), input.word(), input.word());
+        match (x, y, z) {
+            (Some(x), Some(y), Some(z)) => match args::coords3(x, y, z) {
+                Some(coords) => {
+                    Some(args::Basis::from_rotation(yaw, pitch_look).resolve(coords, origin))
+                }
+                None => return Outcome::Feedback(translate("argument.pos.invalid", Vec::new())),
+            },
+            _ => return usage("/playsound <sound> <source> <targets> [pos] [volume] [pitch]"),
         }
-    }
+    } else {
+        None
+    };
     let volume = input
         .word()
         .map_or(1.0, |t| args::float(t, 0.0, 1000.0).unwrap_or(1.0));
     let pitch = input
         .word()
         .map_or(1.0, |t| args::float(t, 0.0, 2.0).unwrap_or(1.0));
+    let min_volume = input
+        .word()
+        .map_or(0.0, |t| args::float(t, 0.0, 1.0).unwrap_or(0.0));
+    if !ctx.plan.survival.sounds.contains_key(&sound) {
+        return Outcome::Feedback(translate(
+            "argument.sound.unknown",
+            vec![Value::String(sound)],
+        ));
+    }
     let mut played = 0;
     for target in &targets {
-        if ctx
-            .plan
-            .play_named_sound(&sound, target.uuid, target.pos, volume as f32, pitch as f32)
-        {
+        let (pos, heard) = match at {
+            Some(origin) if distance(target.pos, origin) > volume * 16.0 => {
+                if min_volume <= 0.0 {
+                    continue;
+                }
+                (target.pos, min_volume)
+            }
+            Some(origin) => (origin, volume),
+            None => (target.pos, volume),
+        };
+        if ctx.plan.play_named_sound_from(
+            &sound,
+            target.uuid,
+            pos,
+            heard as f32,
+            pitch as f32,
+            source,
+        ) {
             played += 1;
         }
     }
     if played == 0 {
         return Outcome::Feedback(translate(
-            "argument.sound.unknown",
-            vec![Value::String(sound)],
+            "commands.playsound.failed",
+            vec![name_of(&targets)],
         ));
     }
     Outcome::Feedback(translate(
@@ -250,19 +317,27 @@ pub(super) fn playsound(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     ))
 }
 
-/// `/stopsound <targets> [sound]`.
+/// `/stopsound <targets> [<source>] [<sound>]`.
 pub(super) fn stopsound(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     let mut input = call.t();
     let Some(token) = input.word() else {
-        return usage("/stopsound <targets> [sound]");
+        return usage("/stopsound <targets> [<source>] [<sound>]");
     };
     let targets = match ctx.select(call.source, token, false) {
         Ok(list) => list,
         Err(e) => return Outcome::Feedback(e.component()),
     };
-    let sound = input.word().map(args::resource_name);
+    let (source, sound) = match input.word() {
+        None => (None, None),
+        Some("*") => (None, input.word().map(args::resource_name)),
+        Some(token) if is_sound_source(token) => (
+            sound_source_id(token),
+            input.word().map(args::resource_name),
+        ),
+        Some(token) => (None, Some(args::resource_name(token))),
+    };
     for target in &targets {
-        ctx.plan.stop_sound(target.uuid, sound.as_deref());
+        ctx.plan.stop_sound(target.uuid, sound.as_deref(), source);
     }
     match sound {
         Some(sound) => Outcome::Feedback(translate(
@@ -276,10 +351,34 @@ pub(super) fn stopsound(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     }
 }
 
+fn sound_source_id(token: &str) -> Option<i32> {
+    Some(match token {
+        "master" => 0,
+        "music" => 1,
+        "record" => 2,
+        "weather" => 3,
+        "block" => 4,
+        "hostile" => 5,
+        "neutral" => 6,
+        "player" => 7,
+        "ambient" => 8,
+        "voice" => 9,
+        "ui" => 10,
+        _ => return None,
+    })
+}
+
+fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
 /// Узлы дерева команд общения: форма сверена с ванильным `commands.json` 26.3.
 pub(super) fn specs() -> Vec<super::dispatch::Spec> {
     use super::dispatch::Spec;
-    use super::registry::{ent, GAMEMASTERS, EVERYONE};
+    use super::registry::{EVERYONE, GAMEMASTERS, ent};
 
     // `minecraft:message`, а не greedy-строка: клиент понимает, что тут
     // свободный текст, и не подсвечивает его как ошибку.
@@ -299,9 +398,8 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
             name,
             EVERYONE,
             vec![
-                args_group("targets", EVERYONE, ent(true, false), msg).with_children(vec![
-                    Spec::arg_leaf("message", EVERYONE, message(), msg),
-                ]),
+                args_group("targets", EVERYONE, ent(true, false), msg)
+                    .with_children(vec![Spec::arg_leaf("message", EVERYONE, message(), msg)]),
             ],
         )
     };
@@ -366,18 +464,22 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
                         GAMEMASTERS,
                         vec![
                             Spec::arg_leaf("fadeIn", GAMEMASTERS, super::registry::time(0), title)
-                                .with_children(vec![Spec::arg_leaf(
-                                    "stay",
-                                    GAMEMASTERS,
-                                    super::registry::time(0),
-                                    title,
-                                )
-                                .with_children(vec![Spec::arg_leaf(
-                                    "fadeOut",
-                                    GAMEMASTERS,
-                                    super::registry::time(0),
-                                    title,
-                                )])]),
+                                .with_children(vec![
+                                    Spec::arg_leaf(
+                                        "stay",
+                                        GAMEMASTERS,
+                                        super::registry::time(0),
+                                        title,
+                                    )
+                                    .with_children(vec![
+                                        Spec::arg_leaf(
+                                            "fadeOut",
+                                            GAMEMASTERS,
+                                            super::registry::time(0),
+                                            title,
+                                        ),
+                                    ]),
+                                ]),
                         ],
                     ),
                     Spec::group(
@@ -402,18 +504,25 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
 /// источник — литерал дерева (`master`, `player`, …), как в ванили.
 fn playsound_spec() -> super::dispatch::Spec {
     use super::dispatch::Spec;
-    use super::registry::{ent, float, vec3, GAMEMASTERS};
+    use super::registry::{GAMEMASTERS, ent, float, vec3};
     let mut sources = Vec::new();
     for source in [
         "ambient", "block", "hostile", "master", "music", "neutral", "player", "record", "ui",
         "voice", "weather",
     ] {
         let pos = Spec::arg_leaf("pos", GAMEMASTERS, vec3(), playsound).with_children(vec![
-            Spec::arg_leaf("volume", GAMEMASTERS, float(0.0, 3.4e38), playsound).with_children(vec![
-                Spec::arg_leaf("pitch", GAMEMASTERS, float(0.0, 2.0), playsound).with_children(vec![
-                    Spec::arg_leaf("minVolume", GAMEMASTERS, float(0.0, 1.0), playsound),
-                ]),
-            ]),
+            Spec::arg_leaf("volume", GAMEMASTERS, float(0.0, 3.4e38), playsound).with_children(
+                vec![
+                    Spec::arg_leaf("pitch", GAMEMASTERS, float(0.0, 2.0), playsound).with_children(
+                        vec![Spec::arg_leaf(
+                            "minVolume",
+                            GAMEMASTERS,
+                            float(0.0, 1.0),
+                            playsound,
+                        )],
+                    ),
+                ],
+            ),
         ]);
         let targets = args_group("targets", GAMEMASTERS, ent(true, false), playsound)
             .with_children(vec![pos]);
@@ -432,7 +541,7 @@ fn playsound_spec() -> super::dispatch::Spec {
 /// `/stopsound <targets> <source|*>` — источник тоже литерал.
 fn stopsound_spec() -> super::dispatch::Spec {
     use super::dispatch::Spec;
-    use super::registry::{ent, GAMEMASTERS};
+    use super::registry::{GAMEMASTERS, ent};
     let sound = || {
         Spec::arg_leaf(
             "sound",
@@ -452,8 +561,7 @@ fn stopsound_spec() -> super::dispatch::Spec {
         "stopsound",
         GAMEMASTERS,
         vec![
-            args_group("targets", GAMEMASTERS, ent(true, false), stopsound)
-                .with_children(sources),
+            args_group("targets", GAMEMASTERS, ent(true, false), stopsound).with_children(sources),
         ],
     )
 }

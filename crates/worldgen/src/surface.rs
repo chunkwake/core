@@ -222,7 +222,10 @@ impl Rules {
                 let richness = self.density(&v["richness"])?;
                 let gap = self.density(&v["filler_gap"])?;
                 let next = self.random_ids.len();
-                let random = *self.random_ids.entry("minecraft:ore".to_owned()).or_insert(next);
+                let random = *self
+                    .random_ids
+                    .entry("minecraft:ore".to_owned())
+                    .or_insert(next);
                 Rule::OreVein(Box::new(Vein {
                     random,
                     ore,
@@ -575,12 +578,11 @@ impl<'a> Stage<'a> {
         }
         let prof = std::env::var_os("CHUNKWAKE_PROF").is_some();
         let t = std::time::Instant::now();
-        let volume = crate::volume::Volume::blocks(
-            [16, self.height, 16],
-            [cx * 16, self.min_y, cz * 16],
-        );
+        let volume =
+            crate::volume::Volume::blocks([16, self.height, 16], [cx * 16, self.min_y, cz * 16]);
         let mut ctx = crate::density::Ctx::default();
-        let out = self.densities
+        let out = self
+            .densities
             .iter()
             .map(|d| {
                 if d.pointwise() {
@@ -624,10 +626,7 @@ impl<'a> Stage<'a> {
             })
             .collect::<Vec<_>>();
         if prof {
-            eprintln!(
-                "  жилы: {:.2} мс",
-                t.elapsed().as_secs_f64() * 1000.0
-            );
+            eprintln!("  жилы: {:.2} мс", t.elapsed().as_secs_f64() * 1000.0);
         }
         out
     }
@@ -665,7 +664,18 @@ impl<'a> Stage<'a> {
         let at = y * 256 + z * 16 + x;
         let mut noise_cache = NoiseCache::new(self.noises.len());
         self.eval(
-            chunk, &mut c, self.rule, x, y, z, bx, by, bz, &veins, at, &mut noise_cache,
+            chunk,
+            &mut c,
+            self.rule,
+            x,
+            y,
+            z,
+            bx,
+            by,
+            bz,
+            &veins,
+            at,
+            &mut noise_cache,
         )
     }
 
@@ -808,7 +818,15 @@ impl<'a> Stage<'a> {
         v
     }
 
-    fn vein(&self, vein: &Vein, veins: &[Option<Vec<f32>>], at: usize, bx: i32, by: i32, bz: i32) -> Option<u32> {
+    fn vein(
+        &self,
+        vein: &Vein,
+        veins: &[Option<Vec<f32>>],
+        at: usize,
+        bx: i32,
+        by: i32,
+        bz: i32,
+    ) -> Option<u32> {
         let sample = |i: usize| match veins.get(i) {
             Some(Some(v)) => v[at],
             Some(None) => self.densities[i].value(&mut crate::density::Ctx::default(), bx, by, bz),
@@ -818,7 +836,11 @@ impl<'a> Stage<'a> {
         if density <= 0.0 {
             return None;
         }
-        let factory = self.randoms.get(vein.random).copied().unwrap_or(*self.random);
+        let factory = self
+            .randoms
+            .get(vein.random)
+            .copied()
+            .unwrap_or(*self.random);
         let mut rng = factory.at(bx, by, bz);
         if next_float(&mut rng) > density {
             return None;
@@ -1197,11 +1219,8 @@ mod tests {
         );
         // Шум вне полосы — не константа: анализ обязан вернуть `None`,
         // иначе сэмплирование пропустит жилу там, где она есть.
-        let noisy_outside = crate::density::S::RangeChoice(
-            Box::new([axis_y(), axis_y(), axis_y()]),
-            0.0,
-            8.0,
-        );
+        let noisy_outside =
+            crate::density::S::RangeChoice(Box::new([axis_y(), axis_y(), axis_y()]), 0.0, 8.0);
         assert_eq!(noisy_outside.y_constant_outside(), None);
         let densities = vec![banded.clone()];
         let rule = Rule::Block(1);

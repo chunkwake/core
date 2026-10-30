@@ -1074,18 +1074,26 @@ impl PlayPlan {
         self.entity_new.lock().unwrap().insert((cx, cz));
         // Список `creature` биома в центре чанка; океан и реки — пустые.
         // Неизвестные виды остаются в весах, их группа просто пропускается.
-        let (chance, list): (f32, Vec<(Option<Species>, u32, u32, u32)>) =
-            match self.chunk_biome(cx, cz).and_then(|b| self.survival.creature_spawns.get(b as usize)) {
-                Some(b) => (
-                    b.chance,
-                    b.entries.iter().map(|(n, w, lo, hi)| (Species::from_name(n), *w, *lo, *hi)).collect(),
-                ),
-                None if self.survival.creature_spawns.is_empty() => (
-                    CREATURE_GEN_CHANCE,
-                    PLAINS_CREATURES.iter().map(|&(s, w, c)| (Some(s), w, c, c)).collect(),
-                ),
-                None => return,
-            };
+        let (chance, list): (f32, Vec<(Option<Species>, u32, u32, u32)>) = match self
+            .chunk_biome(cx, cz)
+            .and_then(|b| self.survival.creature_spawns.get(b as usize))
+        {
+            Some(b) => (
+                b.chance,
+                b.entries
+                    .iter()
+                    .map(|(n, w, lo, hi)| (Species::from_name(n), *w, *lo, *hi))
+                    .collect(),
+            ),
+            None if self.survival.creature_spawns.is_empty() => (
+                CREATURE_GEN_CHANCE,
+                PLAINS_CREATURES
+                    .iter()
+                    .map(|&(s, w, c)| (Some(s), w, c, c))
+                    .collect(),
+            ),
+            None => return,
+        };
         let total: u32 = list.iter().map(|c| c.1).sum();
         if total == 0 {
             return;

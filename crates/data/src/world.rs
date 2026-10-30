@@ -103,7 +103,6 @@ pub fn load_requires_tool(root: &Path) -> Result<Vec<bool>, DataError> {
     Ok(load_light_rows(root)?.requires_tool)
 }
 
-
 /// Печи по порядку индексов в [`Fuel`]: обычная, доменная, коптильня.
 pub const FURNACES: [&str; 3] = [
     "minecraft:furnace",
@@ -660,17 +659,38 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), DataError> {
     std::fs::rename(&tmp, path).map_err(io)
 }
 
-/// Таблицы лута блоков (`loot_table/blocks`) и именованные условия
-/// (`predicate/**`, на них ссылаются строкой, например `minecraft:tool/can_silk_touch`).
+/// Таблицы лута (`loot_table/**`) и именованные условия (`predicate/**`,
+/// на них ссылаются строкой, например `minecraft:tool/can_silk_touch`).
+///
+/// Ключ таблицы — путь от `loot_table` без расширения: `minecraft:blocks/stone`,
+/// `minecraft:entities/zombie`, `minecraft:chests/abandoned_mineshaft`.
+/// `/loot` берёт таблицу по этому же ключу.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct BlockLoot {
     pub tables: HashMap<String, serde_json::Value>,
     pub predicates: HashMap<String, serde_json::Value>,
 }
 
-/// Лут блоков через сводку `loot.json`.
+impl BlockLoot {
+    /// Таблица по ключу. Старые ключи блоков без `blocks/` тоже понимаются:
+    /// так их видел дроп блоков до появления `/loot`.
+    pub fn table(&self, name: &str) -> Option<&serde_json::Value> {
+        let name = if name.contains(':') {
+            name.to_owned()
+        } else {
+            format!("minecraft:{name}")
+        };
+        self.tables.get(&name).or_else(|| {
+            let path = name.strip_prefix("minecraft:")?;
+            self.tables.get(&format!("minecraft:blocks/{path}"))
+        })
+    }
+}
+
+/// Лут через сводку `loot.json`.
 pub fn load_block_loot_cached(root: &Path) -> Result<BlockLoot, DataError> {
-    let path = derived(root, "loot.v2.json");
+    // v3: ключом стала полная дорожка таблицы, а не одно имя файла.
+    let path = derived(root, "loot.v3.json");
     if let Ok(text) = std::fs::read_to_string(&path)
         && let Ok(loot) = serde_json::from_str(&text)
     {
@@ -679,22 +699,18 @@ pub fn load_block_loot_cached(root: &Path) -> Result<BlockLoot, DataError> {
     let mut loot = BlockLoot::default();
     let base = root.join("data/minecraft");
     let mut files = Vec::new();
-    // Сущности: `minecraft:entities/<путь>` (у овцы — `entities/sheep/<цвет>`).
-    let entities = base.join("loot_table/entities");
-    collect_json(&entities, &mut files);
+    let tables = base.join("loot_table");
+    collect_json(&tables, &mut files);
     for p in files.drain(..) {
-        if let Ok(rel) = p.with_extension("").strip_prefix(&entities) {
-            let rel = rel.to_string_lossy().replace('\\', "/");
-            loot.tables
-                .insert(format!("minecraft:entities/{rel}"), read_json(&p)?);
-        }
-    }
-    collect_json(&base.join("loot_table/blocks"), &mut files);
-    for p in files.drain(..) {
-        if let Some(name) = p.file_stem().and_then(|s| s.to_str()) {
-            loot.tables
-                .insert(format!("minecraft:{name}"), read_json(&p)?);
-        }
+        // Путь как он записан в моде и в `/loot`: `chests/village/...`,
+        // `entities/zombie`, `blocks/stone`.
+        let stem = p.with_extension("");
+        let Ok(rel) = stem.strip_prefix(&tables) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        loot.tables
+            .insert(format!("minecraft:{rel}"), read_json(&p)?);
     }
     let pred = base.join("predicate");
     collect_json(&pred, &mut files);
@@ -972,7 +988,7 @@ mod tests {
         .unwrap();
         let source = LootSource::load_in_background(&dir);
         // Первое обращение ждёт разбора, а не отдаёт пустые таблицы.
-        assert!(source.tables.contains_key("minecraft:stone"));
+        assert!(source.tables.contains_key("minecraft:blocks/stone"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

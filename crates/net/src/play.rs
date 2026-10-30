@@ -57,6 +57,22 @@ struct Ids {
     login: i32,
     game_event: i32,
     set_chunk_cache_center: i32,
+    set_default_spawn_position: i32,
+    initialize_border: i32,
+    set_border_center: i32,
+    set_border_lerp_size: i32,
+    set_border_size: i32,
+    set_border_warning_delay: i32,
+    set_border_warning_distance: i32,
+    set_camera: i32,
+    swing_animation: i32,
+    set_passengers: i32,
+    boss_event: i32,
+    post_effects: i32,
+    chunks_biomes: i32,
+    waypoint: i32,
+    clear_dialog: i32,
+    level_particles: i32,
     level_chunk_with_light: i32,
     chunk_batch_start: i32,
     chunk_batch_finished: i32,
@@ -136,6 +152,7 @@ struct Ids {
     set_score: i32,
     reset_score: i32,
     set_display_objective: i32,
+    transfer: i32,
 }
 
 pub struct PlayPlan {
@@ -145,8 +162,20 @@ pub struct PlayPlan {
     chunk_body: Vec<u8>,
     /// Чанк генератора (плоский мир); изменённые чанки — в `edited`.
     template: ChunkColumn,
+    /// Плоский `the_void`: камень и булыжник стартовой платформы.
+    void_platform: Option<(u32, u32)>,
     /// Нормальный мир: столбцы, которых нет на диске. Плоский мир — `None`.
     terrain: Option<Arc<dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync>>,
+    /// `/locate biome`: ближайшая точка биома от блока. `None` — плоский мир.
+    locate_biome: Option<Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync>>,
+    /// `/locate structure`: ближайший старт поставленной структуры. `None` — плоский мир.
+    locate_structure: Option<Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync>>,
+    /// Тег точки интереса (`minecraft:village`) → типы.
+    poi_tags: HashMap<String, HashSet<String>>,
+    /// Id и `#теги` `worldgen/structure` для tab-complete. Клиенту этот реестр не шлётся.
+    structure_names: Vec<String>,
+    /// Точки интереса загруженных чанков: чанк → позиции и тип.
+    pois: Mutex<HashMap<(i32, i32), Vec<([i32; 3], String)>>>,
     /// Изменённые столбцы и номер их правки (для сверки с кэшем кадров).
     edited: std::sync::RwLock<Columns>,
     /// Номер правки, записанный на диск, по столбцам.
@@ -270,7 +299,7 @@ pub struct PlayPlan {
     simulated: Mutex<Arc<HashSet<(i32, i32)>>>,
     /// Состав, для которого посчитан `simulated`: радиус и чанки игроков.
     /// Пока он тот же, набор не пересобирается.
-    simulated_key: Mutex<Option<(i32, Vec<(i32, i32)>)>>,
+    simulated_key: Mutex<Option<(i32, Vec<(i32, i32)>, Vec<(i32, i32)>)>>,
     /// Время суток (0..24000). Тик двигает его и шлёт клиенту, клиент сам не считает.
     day_time: AtomicI64,
     /// Сколько серверных тиков прошло с запуска (`/time query gametime`).
@@ -310,10 +339,37 @@ pub struct PlayPlan {
     pub(crate) save_requested: AtomicBool,
     /// Белый список включён (`/whitelist on`).
     pub(crate) whitelist_enabled: AtomicBool,
+    /// `allow-flight`: выживание и приключение тоже могут летать.
+    pub(crate) allow_flight: AtomicBool,
     /// Каталог сервера для `/reload` (`ops.json`).
     pub(crate) reload_dir: Option<std::path::PathBuf>,
     /// Таблица счёта `scoreboard`.
     pub(crate) scoreboard: Mutex<crate::play::commands::scoreboard::Scoreboard>,
+    /// Команды `/team`.
+    pub(crate) teams: Mutex<crate::play::commands::team::Board>,
+    /// Хвост NBT сущности, который не является живым полем (`CustomName` и т. п.).
+    pub(crate) entity_extra: Mutex<HashMap<Uuid, Compound>>,
+    /// Метки `/tag`. Ключ — UUID цели, у моба он выводится из id сущности.
+    pub(crate) entity_tags: Mutex<HashMap<Uuid, Vec<String>>>,
+    /// Последовательности `/random`: имя → состояние генератора.
+    pub(crate) random_seq: Mutex<HashMap<String, u64>>,
+    /// Полоски `/bossbar`.
+    pub(crate) boss_bars: Mutex<HashMap<String, crate::play::commands::extra::BossBar>>,
+    /// Секундомеры `/stopwatch` (реальное время, не тики).
+    pub(crate) stopwatches: Mutex<HashMap<String, crate::play::commands::extra::Watch>>,
+    /// Экранные эффекты `/posteffect` по игроку.
+    pub(crate) post_effects: Mutex<HashMap<Uuid, Vec<String>>>,
+    /// База и модификаторы `/attribute` по UUID сущности.
+    pub(crate) entity_attributes:
+        Mutex<HashMap<Uuid, HashMap<String, crate::play::commands::attribute::AttrState>>>,
+    /// Цвет и стиль `/waypoint` по UUID игрока.
+    pub(crate) waypoints: Mutex<HashMap<Uuid, crate::play::commands::waypoint::WaypointIcon>>,
+    /// Протокольные id `particle_type` для `/particle`.
+    particle_types: Mutex<HashMap<String, i32>>,
+    /// `en_us.json` из ванильного jar: фразы команд в консоли.
+    command_lang: Mutex<HashMap<String, String>>,
+    /// Связи `execute on`: vehicle, passengers и остальные, если они уже есть.
+    pub(crate) links: Mutex<HashMap<Uuid, crate::play::commands::execute::Links>>,
     /// Имя мира (`level-name`) для сообщений.
     pub(crate) level_name: String,
     /// Версия игры для `/version` и снимка.
@@ -356,9 +412,7 @@ impl DebugProfile {
 
     fn write(&mut self, tick: u64, work_ms: f64) {
         use std::io::Write;
-        if self.ticks < 20 * 60 * 5
-            && writeln!(self.file, "{tick}\t{work_ms:.3}").is_ok()
-        {
+        if self.ticks < 20 * 60 * 5 && writeln!(self.file, "{tick}\t{work_ms:.3}").is_ok() {
             self.ticks += 1;
         }
     }
@@ -445,6 +499,41 @@ type Columns = HashMap<(i32, i32), (ChunkColumn, u64), std::hash::BuildHasherDef
 /// Изменения блоков по секциям: (локальный индекс, состояние).
 type PendingBlocks = HashMap<[i32; 3], Vec<(u16, u32)>>;
 
+/// Платформа `the_void` поверх шаблона. `None` — чанк платформу не пересекает.
+fn stamp_void(
+    template: &ChunkColumn,
+    cx: i32,
+    cz: i32,
+    min_y: i32,
+    stone: u32,
+    cobble: u32,
+    light: &LightTable,
+) -> Option<ChunkColumn> {
+    if !chunkwake_worldgen::void_platform_chunk(cx, cz) {
+        return None;
+    }
+    let mut column = template.clone();
+    let y = (chunkwake_worldgen::void_platform_y(min_y) - min_y) as usize;
+    let x0 = cx * 16;
+    let z0 = cz * 16;
+    for lz in 0..16 {
+        for lx in 0..16 {
+            let x = x0 + lx;
+            let z = z0 + lz;
+            let Some(kind) = chunkwake_worldgen::void_platform_block(x, z) else {
+                continue;
+            };
+            let state = match kind {
+                chunkwake_worldgen::VoidPlatformBlock::Cobblestone => cobble,
+                chunkwake_worldgen::VoidPlatformBlock::Stone => stone,
+            };
+            column.set_block(lx as usize, y, lz as usize, state);
+        }
+    }
+    chunkwake_world::light::relight_column(&mut column, light);
+    Some(column)
+}
+
 /// Мир для пересчёта света. Плоский мир подставляет шаблон, нормальный —
 /// отсутствующий чанк просто не виден, чтобы не засветить рельеф травой.
 struct WorldLight<'a> {
@@ -453,16 +542,38 @@ struct WorldLight<'a> {
     touched: HashSet<(i32, i32)>,
     /// Последний записанный столбец: BFS пишет в один подряд, без лишних вставок.
     last: Option<(i32, i32)>,
+    /// Платформа void: столбец, если чанк не равен плоскому шаблону.
+    special: Option<&'a dyn Fn(i32, i32) -> Option<ChunkColumn>>,
+}
+
+impl WorldLight<'_> {
+    /// Платформа void, если её ещё нет в мире: свет должен видеть камень, не воздух.
+    fn ensure_special(&mut self, cx: i32, cz: i32) {
+        if self.world.contains_key(&(cx, cz)) {
+            return;
+        }
+        let Some(make) = self.special else {
+            return;
+        };
+        let Some(column) = make(cx, cz) else {
+            return;
+        };
+        self.touched.insert((cx, cz));
+        self.last = Some((cx, cz));
+        self.world.insert((cx, cz), (column, 0));
+    }
 }
 
 impl LightAccess for WorldLight<'_> {
     fn column(&mut self, cx: i32, cz: i32) -> Option<&ChunkColumn> {
+        self.ensure_special(cx, cz);
         if let Some(e) = self.world.get(&(cx, cz)) {
             return Some(&e.0);
         }
         self.fallback
     }
     fn column_mut(&mut self, cx: i32, cz: i32) -> Option<&mut ChunkColumn> {
+        self.ensure_special(cx, cz);
         if !self.world.contains_key(&(cx, cz)) {
             let template = self.fallback?;
             self.touched.insert((cx, cz));
@@ -778,6 +889,165 @@ impl std::fmt::Debug for PlayPlan {
     }
 }
 
+/// Теги точек интереса из каталога данных. Нет каталога — пустая карта.
+pub fn load_poi_tags(data_dir: &std::path::Path) -> HashMap<String, HashSet<String>> {
+    poi::load_tags(data_dir)
+}
+
+/// Теги `data/minecraft/tags/<folder>`, вместе с вложенными папками и `#тегами`.
+pub fn load_registry_tags(
+    data_dir: &std::path::Path,
+    folder: &str,
+) -> HashMap<String, HashSet<String>> {
+    let dir = data_dir.join("data/minecraft/tags").join(folder);
+    let mut raw: HashMap<String, Vec<String>> = HashMap::new();
+    collect_tag_files(&dir, "", &mut raw);
+    let mut out = HashMap::new();
+    for name in raw.keys() {
+        let mut set = HashSet::new();
+        let mut seen = HashSet::new();
+        expand_tag(&raw, name, &mut set, &mut seen);
+        out.insert(name.clone(), set);
+    }
+    out
+}
+
+fn collect_tag_files(dir: &std::path::Path, prefix: &str, raw: &mut HashMap<String, Vec<String>>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name_os = entry.file_name();
+            let Some(name) = name_os.to_str() else {
+                continue;
+            };
+            let next = if prefix.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            collect_tag_files(&path, &next, raw);
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let id = if prefix.is_empty() {
+            format!("minecraft:{stem}")
+        } else {
+            format!("minecraft:{prefix}/{stem}")
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let values = value["values"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                entry
+                    .as_str()
+                    .or_else(|| entry.get("id").and_then(|id| id.as_str()))
+                    .map(str::to_owned)
+            })
+            .collect();
+        raw.insert(id, values);
+    }
+}
+
+fn expand_tag(
+    raw: &HashMap<String, Vec<String>>,
+    name: &str,
+    set: &mut HashSet<String>,
+    seen: &mut HashSet<String>,
+) {
+    if !seen.insert(name.to_owned()) {
+        return;
+    }
+    let Some(values) = raw.get(name) else {
+        return;
+    };
+    for value in values {
+        if let Some(tag) = value.strip_prefix('#') {
+            let tag = if tag.contains(':') {
+                tag.to_owned()
+            } else {
+                format!("minecraft:{tag}")
+            };
+            expand_tag(raw, &tag, set, seen);
+        } else if value.contains(':') {
+            set.insert(value.clone());
+        } else if !value.is_empty() {
+            set.insert(format!("minecraft:{value}"));
+        }
+    }
+}
+
+/// Имена `worldgen/structure` и их `#теги` для подсказок `/locate structure`.
+pub fn structure_names(data_dir: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_json_ids(
+        &data_dir.join("data/minecraft/worldgen/structure"),
+        "",
+        false,
+        &mut out,
+    );
+    collect_json_ids(
+        &data_dir.join("data/minecraft/tags/worldgen/structure"),
+        "",
+        true,
+        &mut out,
+    );
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn collect_json_ids(dir: &std::path::Path, prefix: &str, tag: bool, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let next = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            collect_json_ids(&path, &next, tag, out);
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let id = if prefix.is_empty() {
+            stem.to_owned()
+        } else {
+            format!("{prefix}/{stem}")
+        };
+        if tag {
+            out.push(format!("#minecraft:{id}"));
+        } else {
+            out.push(format!("minecraft:{id}"));
+        }
+    }
+}
+
 /// Мир и данные, нужные сессиям.
 pub struct WorldSpec {
     /// Чанк генератора: копируется при первой правке столбца.
@@ -787,6 +1057,16 @@ pub struct WorldSpec {
     /// `None` от замыкания — чанк уже отдан раньше: генератор его не
     /// повторяет, и вставлять в мир нечего.
     pub terrain: Option<Arc<dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync>>,
+    /// `/locate biome`. `None` — плоский мир или климат не загружен.
+    pub locate_biome: Option<Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync>>,
+    /// `/locate structure`. `None` — плоский мир или генератор без структур.
+    pub locate_structure: Option<Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync>>,
+    /// Теги `point_of_interest_type` из датапака.
+    pub poi_tags: HashMap<String, HashSet<String>>,
+    /// Id и `#теги` структур для `/locate structure`.
+    pub structure_names: Vec<String>,
+    /// Плоский `the_void`: камень и булыжник платформы. `None` — шаблон как есть.
+    pub void_platform: Option<(u32, u32)>,
     pub min_y: i32,
     /// ID предмета → состояние блока, который он ставит.
     pub item_blocks: Vec<Option<u32>>,
@@ -926,6 +1206,7 @@ use chunkwake_data::world::FURNACES;
 /// Ванильные команды: дерево, права, селекторы и обработчики.
 pub mod commands;
 mod mobs;
+mod poi;
 mod stream;
 
 /// Заселение мира для бенчмарков и тестов: мобы и предметы без сокетов.
@@ -952,7 +1233,12 @@ pub mod bench {
             let a = i as f64 * 0.9;
             let r = 4.0 + (i % 5) as f64;
             let pos = [center[0] + r * a.cos(), center[1], center[2] + r * a.sin()];
-            plan.drop_item(pos, [0.0, 0.0, 0.0], Stack::new(1, 1), std::time::Duration::ZERO);
+            plan.drop_item(
+                pos,
+                [0.0, 0.0, 0.0],
+                Stack::new(1, 1),
+                std::time::Duration::ZERO,
+            );
         }
         made
     }
@@ -1098,6 +1384,18 @@ pub struct SurvivalData {
     pub creature_spawns: Vec<CreatureSpawns>,
     /// Коллизия и трение блоков; `None` — старый кэш без `shapes.csv`.
     pub physics: Option<Arc<chunkwake_data::world::BlockPhysics>>,
+    /// Тег предмета (`minecraft:dirt`) → id предметов.
+    pub item_tags: HashMap<String, HashSet<String>>,
+    /// Тег блока → id блоков. `/fill … replace #тег`.
+    pub block_tags: HashMap<String, HashSet<String>>,
+    /// Имя биома по сетевому ID (`worldgen/biome`).
+    pub biome_names: Vec<String>,
+    /// Тег биома (`minecraft:is_forest`) → имена биомов.
+    pub biome_tags: HashMap<String, HashSet<String>>,
+    /// Каталог данных: `/place template` читает из него `.nbt`.
+    pub data_dir: std::path::PathBuf,
+    /// Состояния блоков (`reports/blocks.json`): палитра шаблонов.
+    pub block_states: Arc<Vec<Option<(String, chunkwake_data::world::Properties)>>>,
 }
 
 /// `natural_mob_spawns.creature` и `creature_world_gen_spawn_probability` биома.
@@ -1106,6 +1404,26 @@ pub struct CreatureSpawns {
     pub chance: f32,
     /// Вид, вес, размер группы от и до.
     pub entries: Vec<(String, u32, u32, u32)>,
+}
+
+/// Красный ответ и ключи провала: их пишем в консоль отдельно от успеха.
+fn command_error(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object.get("color").and_then(|color| color.as_str()) == Some("red") {
+        return true;
+    }
+    let key = object
+        .get("translate")
+        .and_then(|key| key.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    key.contains("failed")
+        || key.contains("unknown")
+        || key.contains("notfound")
+        || key.contains("not_found")
+        || key.contains("invalid")
 }
 
 impl PlayPlan {
@@ -1118,6 +1436,11 @@ impl PlayPlan {
         let WorldSpec {
             template,
             terrain,
+            locate_biome,
+            locate_structure,
+            poi_tags,
+            structure_names,
+            void_platform,
             min_y,
             item_blocks,
             spawn,
@@ -1160,6 +1483,22 @@ impl PlayPlan {
                 login: cb("login")?,
                 game_event: cb("game_event")?,
                 set_chunk_cache_center: cb("set_chunk_cache_center")?,
+                set_default_spawn_position: cb("set_default_spawn_position")?,
+                initialize_border: cb("initialize_border")?,
+                set_border_center: cb("set_border_center")?,
+                set_border_lerp_size: cb("set_border_lerp_size")?,
+                set_border_size: cb("set_border_size")?,
+                set_border_warning_delay: cb("set_border_warning_delay")?,
+                set_border_warning_distance: cb("set_border_warning_distance")?,
+                set_camera: cb("set_camera")?,
+                swing_animation: cb("swing_animation")?,
+                set_passengers: cb("set_passengers")?,
+                boss_event: cb("boss_event")?,
+                post_effects: cb("post_effects")?,
+                chunks_biomes: cb("chunks_biomes")?,
+                waypoint: cb("waypoint")?,
+                clear_dialog: cb("clear_dialog")?,
+                level_particles: cb("level_particles")?,
                 level_chunk_with_light: cb("level_chunk_with_light")?,
                 chunk_batch_start: cb("chunk_batch_start")?,
                 chunk_batch_finished: cb("chunk_batch_finished")?,
@@ -1238,11 +1577,18 @@ impl PlayPlan {
                 set_score: cb("set_score")?,
                 reset_score: cb("reset_score")?,
                 set_display_objective: cb("set_display_objective")?,
+                transfer: cb("transfer")?,
             },
             login,
             chunk_body: template.encode_body(),
             template,
+            void_platform,
             terrain,
+            locate_biome,
+            locate_structure,
+            poi_tags,
+            structure_names,
+            pois: Mutex::new(HashMap::new()),
             edited: std::sync::RwLock::new(Columns::default()),
             saved: Mutex::new(HashMap::new()),
             dirty: Mutex::default(),
@@ -1262,7 +1608,7 @@ impl PlayPlan {
             player_type,
             next_entity_id: AtomicI32::new(1),
             chunk_frames: Mutex::new(HashMap::new()),
-    spawn_frames: Mutex::new(HashMap::new()),
+            spawn_frames: Mutex::new(HashMap::new()),
             block_names,
             parsers,
             survival,
@@ -1322,8 +1668,21 @@ impl PlayPlan {
             default_game_mode: std::sync::atomic::AtomicU8::new(login_game_mode),
             save_requested: AtomicBool::new(false),
             whitelist_enabled: AtomicBool::new(false),
+            allow_flight: AtomicBool::new(false),
             reload_dir: None,
             scoreboard: Mutex::new(crate::play::commands::scoreboard::Scoreboard::default()),
+            teams: Mutex::new(crate::play::commands::team::Board::default()),
+            entity_extra: Mutex::new(HashMap::new()),
+            entity_tags: Mutex::new(HashMap::new()),
+            random_seq: Mutex::new(HashMap::new()),
+            boss_bars: Mutex::new(HashMap::new()),
+            stopwatches: Mutex::new(HashMap::new()),
+            post_effects: Mutex::new(HashMap::new()),
+            entity_attributes: Mutex::new(HashMap::new()),
+            waypoints: Mutex::new(HashMap::new()),
+            particle_types: Mutex::new(HashMap::new()),
+            command_lang: Mutex::new(HashMap::new()),
+            links: Mutex::new(HashMap::new()),
             level_name: String::new(),
             version_name: String::new(),
             version_protocol: 0,
@@ -1349,6 +1708,8 @@ impl PlayPlan {
         // Рельеф уже вставлен волной. Мобы — после него, не на плоском шаблоне.
         self.ensure_region(x, z);
         self.populate_chunk(x, z);
+        // Платформа void не в общем шаблоне: после диска, чтобы сохранённый чанк победил.
+        self.materialize_void(x, z);
         // Под блокировкой — только дешёвый клон (секции за Arc);
         // кодирование и сжатие — вне её.
         let snapshot = self.edited.read().unwrap().get(&(x, z)).cloned();
@@ -1376,6 +1737,127 @@ impl PlayPlan {
         frame
     }
 
+    /// Столбец платформы void, если этот чанк её пересекает.
+    fn void_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+        let (stone, cobble) = self.void_platform?;
+        stamp_void(
+            &self.template,
+            cx,
+            cz,
+            self.min_y,
+            stone,
+            cobble,
+            &self.light,
+        )
+    }
+
+    /// После чтения региона: платформа, если диск её не принёс.
+    fn materialize_void(&self, cx: i32, cz: i32) {
+        if self.void_platform.is_none() || !chunkwake_worldgen::void_platform_chunk(cx, cz) {
+            return;
+        }
+        if self.edited.read().unwrap().contains_key(&(cx, cz)) {
+            return;
+        }
+        let Some(column) = self.void_column(cx, cz) else {
+            return;
+        };
+        let list = self.collect_pois(cx, cz, &column);
+        self.edited
+            .write()
+            .unwrap()
+            .entry((cx, cz))
+            .or_insert((column, 0));
+        self.store_pois(cx, cz, list);
+    }
+
+    /// Блок плоского мира, которого ещё нет в `edited`: шаблон или платформа.
+    fn flat_block(&self, x: i32, y: i32, z: i32, lx: usize, ry: usize, lz: usize) -> u32 {
+        if let Some((stone, cobble)) = self.void_platform
+            && y == chunkwake_worldgen::void_platform_y(self.min_y)
+            && let Some(kind) = chunkwake_worldgen::void_platform_block(x, z)
+        {
+            return match kind {
+                chunkwake_worldgen::VoidPlatformBlock::Cobblestone => cobble,
+                chunkwake_worldgen::VoidPlatformBlock::Stone => stone,
+            };
+        }
+        self.template.block(lx, ry, lz)
+    }
+
+    /// Точки интереса столбца: обход один раз при первой установке чанка.
+    fn collect_pois(&self, cx: i32, cz: i32, column: &ChunkColumn) -> Vec<([i32; 3], String)> {
+        let mut found = Vec::new();
+        let height = column.height();
+        for y in 0..height {
+            for z in 0..16 {
+                for x in 0..16 {
+                    let state = column.block(x, y, z);
+                    let Some(kind) = poi::of_block(self.state_name(state)) else {
+                        continue;
+                    };
+                    found.push((
+                        [
+                            cx * 16 + x as i32,
+                            self.min_y + y as i32,
+                            cz * 16 + z as i32,
+                        ],
+                        kind.to_owned(),
+                    ));
+                }
+            }
+        }
+        found
+    }
+
+    fn store_pois(&self, cx: i32, cz: i32, list: Vec<([i32; 3], String)>) {
+        let mut map = self.pois.lock().unwrap();
+        if list.is_empty() {
+            map.remove(&(cx, cz));
+        } else {
+            map.insert((cx, cz), list);
+        }
+    }
+
+    /// Одна клетка после `/setblock`: чанк уже проиндексирован целиком.
+    fn note_poi(&self, pos: [i32; 3], state: u32) {
+        let key = (pos[0] >> 4, pos[2] >> 4);
+        let mut map = self.pois.lock().unwrap();
+        let list = map.entry(key).or_default();
+        list.retain(|(at, _)| *at != pos);
+        if let Some(kind) = poi::of_block(self.state_name(state)) {
+            list.push((pos, kind.to_owned()));
+        }
+        if list.is_empty() {
+            map.remove(&key);
+        }
+    }
+
+    /// Ближайшая точка интереса среди уже загруженных чанков. Радиус — 256 чанков.
+    pub(crate) fn locate_poi(&self, name: &str, origin: [i32; 3]) -> Option<[i32; 3]> {
+        let types = poi::query(&self.poi_tags, name)?;
+        let (cx, cz) = (origin[0] >> 4, origin[2] >> 4);
+        let map = self.pois.lock().unwrap();
+        let mut best: Option<([i32; 3], i64)> = None;
+        for ((x, z), list) in map.iter() {
+            if (x - cx).abs() > 256 || (z - cz).abs() > 256 {
+                continue;
+            }
+            for (pos, kind) in list {
+                if !types.contains(kind) {
+                    continue;
+                }
+                let dist = (pos[0] as i64 - origin[0] as i64).pow(2)
+                    + (pos[1] as i64 - origin[1] as i64).pow(2)
+                    + (pos[2] as i64 - origin[2] as i64).pow(2);
+                if best.is_none_or(|(_, d)| dist < d) {
+                    best = Some((*pos, dist));
+                }
+            }
+        }
+        best.map(|(pos, _)| pos)
+    }
+
     /// Ставит блок (мировые координаты) и рассылает `block_update`.
     /// `None` — позиция вне мира по высоте или чанк шума ещё не сгенерирован.
     fn set_block(&self, [x, y, z]: [i32; 3], state: u32) -> Option<u32> {
@@ -1389,19 +1871,28 @@ impl PlayPlan {
         if self.terrain.is_some() && !self.edited.read().unwrap().contains_key(&key) {
             return None;
         }
-        let old = {
+        self.materialize_void(key.0, key.1);
+        let template = &self.template;
+        let (old, inserted) = {
             let mut world = self.edited.write().unwrap();
-            let (column, rev) = world
-                .entry(key)
-                .or_insert_with(|| (self.template.clone(), 0));
+            let inserted = !world.contains_key(&key);
+            let (column, rev) = world.entry(key).or_insert_with(|| (template.clone(), 0));
             let old = column.set_block(lx, ry as usize, lz, state);
             if old == state {
                 return Some(old);
             }
             *rev += 1;
             self.dirty.lock().unwrap().insert(key);
-            old
+            (old, inserted)
         };
+        if inserted {
+            if let Some((column, _)) = self.edited.read().unwrap().get(&key) {
+                let list = self.collect_pois(key.0, key.1, column);
+                self.store_pois(key.0, key.1, list);
+            }
+        } else {
+            self.note_poi([x, y, z], state);
+        }
         if self.light.same_light(old, state) {
             // Кадр чанка кэшируется без сверки ревизии: иначе клиент получит старый блок.
             self.chunk_frames.lock().unwrap().remove(&key);
@@ -1409,14 +1900,23 @@ impl PlayPlan {
             // Свет доходит до соседних чанков, но читает только загруженное:
             // это вызывается и из тика, диск тут ждать нельзя.
             // BFS света одного блока короче копии девяти столбцов: прямо под замком.
+            let platform = self.void_platform;
+            let min_y = self.min_y;
+            let template = &self.template;
+            let light = &self.light;
+            let make = |cx: i32, cz: i32| {
+                let (stone, cobble) = platform?;
+                stamp_void(template, cx, cz, min_y, stone, cobble, light)
+            };
             let mut world = self.edited.write().unwrap();
             // Под той же блокировкой: chunk_frame не вставит устаревший кадр.
             let mut frames = self.chunk_frames.lock().unwrap();
             let mut access = WorldLight {
                 world: &mut world,
-                fallback: self.terrain.is_none().then_some(&self.template),
+                fallback: self.terrain.is_none().then_some(template),
                 touched: HashSet::new(),
                 last: None,
+                special: platform.is_some().then_some(&make as _),
             };
             Engine::new(&mut access, &self.light, self.template.height()).block_changed([x, ry, z]);
             let touched = std::mem::take(&mut access.touched);
@@ -1536,6 +2036,22 @@ impl PlayPlan {
             .store(radius.max(0), Ordering::Relaxed);
     }
 
+    /// Id частиц из реестра `particle_type` (`/particle`).
+    pub fn set_particle_types(&self, types: HashMap<String, i32>) {
+        *self.particle_types.lock().unwrap() = types;
+    }
+
+    /// Строки `en_us.json`: консоль подставляет их вместо ключей перевода.
+    pub fn set_command_lang(&self, lang: HashMap<String, String>) {
+        *self.command_lang.lock().unwrap() = lang;
+    }
+
+    /// Фраза команды для лога. Клиенту уходит исходный компонент.
+    pub fn command_text(&self, value: &serde_json::Value) -> String {
+        let lang = self.command_lang.lock().unwrap();
+        chunkwake_protocol::text::console_line(value, &lang)
+    }
+
     pub fn set_ops(&self, ops: OpList) {
         let _ = self.ops.set(ops);
     }
@@ -1618,8 +2134,62 @@ impl PlayPlan {
             .map_or("minecraft:air", String::as_str)
     }
 
+    /// Имя предмета для сообщений команды (`/item`).
+    pub(crate) fn item_name_of(&self, id: i32) -> &str {
+        self.item_name(id)
+    }
+
+    /// ID предмета по полному имени (`/loot`).
+    pub(crate) fn item_id_named(&self, name: &str) -> Option<i32> {
+        self.item_id(name)
+    }
+
     fn item_id(&self, name: &str) -> Option<i32> {
         self.survival.item_ids.get(name).copied()
+    }
+
+    /// Игрок в таб-листе и зеркале без сокета: команды видят его как онлайн.
+    pub fn present_player(&self, uuid: Uuid, name: &str) {
+        let pos = self.spawn;
+        let entity_id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
+        let me = Online {
+            entry: PlayerEntry {
+                uuid,
+                name: name.to_owned(),
+                properties: Vec::new(),
+                game_mode: 0,
+                latency_ms: 0,
+            },
+            entity_id,
+            pos,
+            yaw: 0.0,
+            pitch: 0.0,
+            base: play::quantize(pos),
+            moves: 0,
+            dirty: false,
+            rotated: false,
+            on_ground: true,
+            gliding: false,
+            collects: true,
+        };
+        self.hub.players.lock().unwrap().insert(uuid, me);
+        self.live.lock().unwrap().insert(
+            uuid,
+            Live {
+                health: 20.0,
+                food: 20,
+                saturation: 5.0,
+                exhaustion: 0.0,
+                game_mode: 0,
+                selected: 0,
+                slots: [None; survival::SLOTS],
+                pos,
+                yaw: 0.0,
+                pitch: 0.0,
+                effects: Vec::new(),
+                xp: Default::default(),
+            },
+        );
     }
 
     /// Снимок игрока для плагинов (формат — [`Live::render`]); `None` — не онлайн.
@@ -1924,24 +2494,21 @@ impl PlayPlan {
     /// Команда из консоли сервера: встроенные через диспетчер, иначе —
     /// плагинам от имени консоли. Возвращает текст ответа для лога.
     pub async fn console_command(&self, line: &str) -> String {
-        let plain = |v: serde_json::Value| text::plain_text(&v);
         let source = crate::play::commands::dispatch::Source::console();
         if let Some(outcome) = crate::play::commands::execute(self, &source, line) {
             return match outcome {
-                crate::play::commands::dispatch::Outcome::Feedback(msg) => plain(msg),
+                crate::play::commands::dispatch::Outcome::Feedback(msg) => self.command_text(&msg),
                 crate::play::commands::dispatch::Outcome::Broadcast(msg) => {
                     self.broadcast_json(&msg.to_string());
-                    plain(msg)
+                    self.command_text(&msg)
                 }
                 crate::play::commands::dispatch::Outcome::Silent => String::new(),
             };
         }
         let known = match self.hooks() {
-            Some(h) => {
-                tokio::time::timeout(Duration::from_secs(5), h.command(Uuid::nil(), line))
-                    .await
-                    .is_ok_and(|r| r.unwrap_or(false))
-            }
+            Some(h) => tokio::time::timeout(Duration::from_secs(5), h.command(Uuid::nil(), line))
+                .await
+                .is_ok_and(|r| r.unwrap_or(false)),
             None => false,
         };
         if known {
@@ -1969,12 +2536,7 @@ impl PlayPlan {
         yaw: f32,
         pitch: f32,
     ) -> Option<crate::play::commands::dispatch::Outcome> {
-        crate::play::commands::execute_with(
-            self,
-            source,
-            line,
-            Some((pos, yaw, pitch)),
-        )
+        crate::play::commands::execute_with(self, source, line, Some((pos, yaw, pitch)))
     }
 
     fn difficulty(&self) -> Difficulty {
@@ -1996,10 +2558,7 @@ impl PlayPlan {
 
     /// Телепорт игрока (`Player.teleport`).
     fn teleport_player(&self, uuid: Uuid, pos: [f64; 3], yaw: f32, pitch: f32) -> bool {
-        self.push_control(
-            uuid,
-            Control::Teleport(pos, yaw, pitch),
-        )
+        self.push_control(uuid, Control::Teleport(pos, yaw, pitch))
     }
 
     /// Сколько столбцов мира прочитано с диска.
@@ -2100,6 +2659,7 @@ impl PlayPlan {
         let mut cache = self.chunk_frames.lock().unwrap();
         let mut found = Vec::new();
         let mut hoppers = Vec::new();
+        let mut indexed = Vec::new();
         // Сохранённые чанки уже сгенерированы: мобов при генерации им не положено.
         self.populated
             .lock()
@@ -2125,9 +2685,15 @@ impl PlayPlan {
                     .map(|(p, _)| *p),
             );
             if let std::collections::hash_map::Entry::Vacant(e) = world.entry(pos) {
+                indexed.push((pos, self.collect_pois(pos.0, pos.1, &c)));
                 e.insert((c, 0));
                 cache.remove(&pos);
             }
+        }
+        drop(world);
+        drop(cache);
+        for ((cx, cz), list) in indexed {
+            self.store_pois(cx, cz, list);
         }
         self.pending_furnaces.lock().unwrap().extend(found);
         // Чанк с диска: воронки встают в очередь на ближайший тик.
@@ -2158,10 +2724,13 @@ impl PlayPlan {
         let n = column.sections.len();
         column.sky_light = vec![chunkwake_world::light::LightLayer::Uniform(0); n];
         column.block_light = vec![chunkwake_world::light::LightLayer::Uniform(0); n];
+        let list = self.collect_pois(x, z, &column);
         let mut world = self.edited.write().unwrap();
         if let std::collections::hash_map::Entry::Vacant(e) = world.entry((x, z)) {
             e.insert((column, 0));
+            drop(world);
             self.chunk_frames.lock().unwrap().remove(&(x, z));
+            self.store_pois(x, z, list);
             true
         } else {
             false
@@ -2253,10 +2822,17 @@ impl PlayPlan {
         let Some((pos, yaw, pitch)) = self.player_at(uuid) else {
             return;
         };
-        self.player_saves
-            .lock()
-            .unwrap()
-            .insert(uuid, st.save(pos, yaw, pitch));
+        let mut save = st.save(pos, yaw, pitch);
+        // `/spawnpoint` живёт отдельно от инвентаря: снимок не должен его стирать.
+        match self.spawn_points.lock().unwrap().get(&uuid).copied() {
+            Some(spawn) => save.spawn = spawn,
+            None => {
+                if let Some(prev) = self.player_saves.lock().unwrap().get(&uuid) {
+                    save.spawn = prev.spawn;
+                }
+            }
+        }
+        self.player_saves.lock().unwrap().insert(uuid, save);
     }
 
     pub fn mark_saved(&self, chunks: impl IntoIterator<Item = ((i32, i32), u64)>) {
@@ -2279,12 +2855,15 @@ impl PlayPlan {
         }
         let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
         let key = (x >> 4, z >> 4);
-        let world = self.edited.read().unwrap();
+        let found = {
+            let world = self.edited.read().unwrap();
+            world.get(&key).map(|e| e.0.block(lx, ry as usize, lz))
+        };
         // Диск не читается: тик видит только загруженное, как и в ванили.
         // Плоский мир подставляет шаблон, у шума нечего подставить.
-        match world.get(&key) {
-            Some(e) => Some(e.0.block(lx, ry as usize, lz)),
-            None if self.terrain.is_none() => Some(self.template.block(lx, ry as usize, lz)),
+        match found {
+            Some(state) => Some(state),
+            None if self.terrain.is_none() => Some(self.flat_block(x, y, z, lx, ry as usize, lz)),
             None => None,
         }
     }
@@ -2295,14 +2874,19 @@ impl PlayPlan {
     /// позициям игроков (чанк + радиус), а не по всему набору.
     fn refresh_simulated(&self) {
         let r = self.login.simulation_distance;
-        // Ключ состава: чанки игроков. Дешёвая проверка «ничего не изменилось».
+        // Ключ состава: чанки игроков и `/forceload`. Дешёвая проверка «ничего не изменилось».
         let mut key: Vec<(i32, i32)> = {
             let players = self.hub.players.lock().unwrap();
             players.values().map(|p| chunk_of(p.pos)).collect()
         };
         key.sort_unstable();
+        let mut forced: Vec<(i32, i32)> = self.forced.lock().unwrap().iter().copied().collect();
+        forced.sort_unstable();
         let mut last = self.simulated_key.lock().unwrap();
-        if last.as_ref().is_some_and(|(lr, lk)| *lr == r && lk == &key) {
+        if last
+            .as_ref()
+            .is_some_and(|(lr, lk, lf)| *lr == r && lk == &key && lf == &forced)
+        {
             return;
         }
         let mut set = HashSet::new();
@@ -2312,7 +2896,8 @@ impl PlayPlan {
                 chunk_square(chunk_of(p.pos), r, &mut set);
             }
         }
-        *last = Some((r, key));
+        set.extend(forced.iter().copied());
+        *last = Some((r, key, forced));
         drop(last);
         *self.simulated.lock().unwrap() = Arc::new(set);
     }
@@ -2492,6 +3077,12 @@ impl PlayPlan {
                     .and_then(|s| s.load_player(player.uuid))
             })
             .filter(|s| s.health > 0.0 && s.pos.iter().all(|c| c.is_finite()));
+        if let Some(spawn) = save.as_ref().and_then(|s| s.spawn) {
+            self.spawn_points
+                .lock()
+                .unwrap()
+                .insert(player.uuid, Some(spawn));
+        }
         let (pos, yaw, pitch) = save
             .as_ref()
             .map_or((self.spawn, 0.0, 0.0), |s| (s.pos, s.yaw, s.pitch));
@@ -3131,7 +3722,9 @@ impl PlayPlan {
         }
         let mut dropped = self.dropped.lock().unwrap();
         for id in near {
-            let Some(d) = dropped.get_mut(&id) else { continue };
+            let Some(d) = dropped.get_mut(&id) else {
+                continue;
+            };
             if now < d.pickup_at || !items::in_reach(feet, d.pos) || vetoed.contains(&id) {
                 continue;
             }
@@ -4108,6 +4701,10 @@ impl PlayPlan {
         if !self.hub.players.lock().unwrap().is_empty() {
             return false;
         }
+        // `/forceload` держит чанк в симуляции и без игроков рядом.
+        if !self.forced.lock().unwrap().is_empty() {
+            return false;
+        }
         if !self.mobs.lock().unwrap().is_empty()
             || !self.dropped.lock().unwrap().is_empty()
             || !self.arrows.lock().unwrap().is_empty()
@@ -4317,6 +4914,35 @@ impl PlayPlan {
         }
     }
 
+    /// Точка спавна и стартовая граница мира. Xaero ждёт оба пакета:
+    /// спавн задаёт мир карты, граница включает локальную отрисовку.
+    async fn send_map_markers(&self, conn: &mut Connection) -> Result<(), NetError> {
+        // `/setworldspawn` важнее спавна создания мира: карта и возрождение
+        // должны идти за ним.
+        let here = self.vars.world_spawn().unwrap_or(self.spawn);
+        let pos = [
+            here[0].floor() as i32,
+            here[1].floor() as i32,
+            here[2].floor() as i32,
+        ];
+        conn.send(&play::set_default_spawn_position(
+            self.ids.set_default_spawn_position,
+            &self.login.spawn.dimension,
+            pos,
+            0.0,
+            0.0,
+        ))
+        .await?;
+        let now = self.game_time.load(Ordering::Relaxed);
+        let border = self.vars.border_at(now).login(now);
+        conn.send(&play::initialize_border_state(
+            self.ids.initialize_border,
+            border,
+        ))
+        .await?;
+        Ok(())
+    }
+
     async fn session(
         &self,
         conn: &mut Connection,
@@ -4332,9 +4958,16 @@ impl PlayPlan {
         login.entity_id = me.entity_id;
         login.spawn.game_mode = state.game_mode.unwrap_or(login.spawn.game_mode);
         conn.send(&play::login(ids.login, &login)).await?;
+        // Спавн и граница — до чанков: Xaero по ним выбирает мир и включает
+        // локальную карту. Без спавна тайлы так и не пишутся.
+        self.send_map_markers(conn).await?;
+        for packet in self.joined_packets(uuid) {
+            conn.send(&packet).await?;
+        }
         conn.send(&play::player_abilities(
             ids.player_abilities,
             login.spawn.game_mode,
+            self.allow_flight.load(Ordering::Relaxed),
         ))
         .await?;
         conn.send(&play::set_time(
@@ -4403,6 +5036,9 @@ impl PlayPlan {
         // Keep-alive: шлём раз в 15 с, ответ ждём не дольше 30 с.
         let mut ticker = tokio::time::interval(KEEP_ALIVE_INTERVAL);
         ticker.tick().await;
+        // `/setidletimeout`: минуты без игровых пакетов. Ноль — без таймаута.
+        // Ответ keep-alive не считается действием.
+        let mut last_action = Instant::now();
         // Выживание: инвентарь, здоровье. Креатив (1) и наблюдатель (3) урона не получают.
         let mut survival = matches!(login.spawn.game_mode, 0 | 2);
         state.vitals.reset_fall(me.pos);
@@ -4449,7 +5085,7 @@ impl PlayPlan {
             .await?;
             motion |= self.motion_mask(e.id);
         }
-        self.sync_motion(conn, me.entity_id, &state.vitals, motion)
+        self.sync_motion(conn, me.entry.uuid, me.entity_id, &state.vitals, motion)
             .await?;
         let mut pending: Option<(i64, Instant)> = None;
         // Атрибуты от чар снаряжения, последние отправленные клиенту,
@@ -4492,15 +5128,29 @@ impl PlayPlan {
                             pending = Some((payload, Instant::now()));
                         }
                     }
+                    let idle = self.vars.idle_timeout();
+                    if idle > 0 && last_action.elapsed() >= Duration::from_secs(idle as u64 * 60) {
+                        return Err(NetError::Timeout);
+                    }
                 }
                 Some(c) = controls.recv() => {
                     match c {
                         Control::Shutdown => return Ok(()),
-                        // Кик и пересылка завершают сессию.
-                        Control::Kick(_) | Control::Transfer(..) => return Ok(()),
-                        Control::Give(item, count) => {
+                        Control::Kick(_) => return Ok(()),
+                        Control::Transfer(host, port) => {
+                            conn.send(&play::transfer(ids.transfer, &host, port)).await?;
+                            conn.flush().await?;
+                            return Ok(());
+                        }
+                        Control::Give {
+                            item,
+                            count,
+                            extra,
+                            damage,
+                        } => {
                             let max = self.max_stack(item);
-                            let (changed, _) = state.inv.add(item, count, max);
+                            let (changed, _) =
+                                state.inv.add_components(item, count, max, extra, damage);
                             self.send_slots(conn, &mut state.inv, &changed).await?;
                         }
                         Control::Hurt(d, cause) => {
@@ -4579,6 +5229,20 @@ impl PlayPlan {
                             }
                             self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
                         }
+                        Control::ClearItem {
+                            items,
+                            extra,
+                            damage,
+                            max,
+                        } => {
+                            let _ = state.inv.take_selected(Some(&items), extra, damage, max);
+                            if let Some(w) = window.as_ref() {
+                                self.send_window(conn, &mut state.inv, Some(w), w.id).await?;
+                            } else {
+                                self.send_inventory(conn, &mut state.inv).await?;
+                            }
+                            self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
+                        }
                         Control::Selected(s) => {
                             state.inv.selected = s;
                             eating = None;
@@ -4635,7 +5299,7 @@ impl PlayPlan {
                 }
                 _ = food_ticker.tick() => {
                     game_ticks += 1;
-                    self.sync_enchant_attrs(conn, me.entity_id, &state.inv, &mut ench_attrs, &mut ench_gear).await?;
+                    self.sync_enchant_attrs(conn, uuid, me.entity_id, &state.inv, &mut ench_attrs, &mut ench_gear).await?;
                     let now = digging.or(delayed).and_then(|(pos, start)| {
                         let block = self.block(pos).unwrap_or(AIR);
                         let p = self.destroy_progress(uuid, block, state.inv.held(), state.inv.slots[5], &state.vitals);
@@ -4750,7 +5414,7 @@ impl PlayPlan {
                             motion |= self.motion_mask(e.id);
                         }
                     }
-                    self.sync_motion(conn, me.entity_id, &state.vitals, motion).await?;
+                    self.sync_motion(conn, uuid, me.entity_id, &state.vitals, motion).await?;
                     if !state.vitals.dead {
                         if pulsed.heal > 0.0 {
                             state.vitals.heal(pulsed.heal);
@@ -4803,6 +5467,9 @@ impl PlayPlan {
                     self.count_bytes_in(packet.len() as u64);
                     let mut r = Reader::new(&packet);
                     let id = r.var_int()?;
+                    if id != ids.sb_keep_alive {
+                        last_action = Instant::now();
+                    }
                     let (has_pos, has_rot) = if id == ids.sb_move_pos {
                         (true, false)
                     } else if id == ids.sb_move_pos_rot {
@@ -5091,7 +5758,8 @@ impl PlayPlan {
                     }
                     if id == ids.sb_player_abilities {
                         let flags = r.u8()?;
-                        let mayfly = matches!(login.spawn.game_mode, 1 | 3);
+                        let mayfly = self.allow_flight.load(Ordering::Relaxed)
+                            || matches!(login.spawn.game_mode, 1 | 3);
                         flying = mayfly && flags & ABILITY_FLYING != 0;
                         if flying {
                             self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding)
@@ -5122,7 +5790,7 @@ impl PlayPlan {
                         }
                         // Клиент не пересчитывает Скорость/Замедление сам: бег меняет тот же пакет.
                         if state.vitals.effects.iter().any(|e| self.moves_speed(e.id)) {
-                            self.send_speed(conn, me.entity_id, &state.vitals).await?;
+                            self.send_speed(conn, uuid, me.entity_id, &state.vitals).await?;
                         }
                         continue;
                     }
@@ -5567,6 +6235,13 @@ impl PlayPlan {
                                 crate::play::commands::dispatch::Outcome::Feedback(msg) => {
                                     // Игроку без прав ванила отвечает «неизвестная команда».
                                     if !msg.is_null() {
+                                        if command_error(&msg) {
+                                            tracing::warn!(
+                                                "{}: {}",
+                                                me.entry.name,
+                                                self.command_text(&msg)
+                                            );
+                                        }
                                         conn.send(&text::system_chat_json(
                                             ids.system_chat,
                                             &msg.to_string(),
@@ -5592,6 +6267,7 @@ impl PlayPlan {
                             None => false,
                         };
                         if !known {
+                            tracing::warn!("{}: Unknown command: /{line}", me.entry.name);
                             let msg = serde_json::json!({"text": format!("Unknown command: /{line}"), "color": "red"});
                             conn.send(&text::system_chat_json(ids.system_chat, &msg.to_string(), false)).await?;
                         }
@@ -5995,6 +6671,41 @@ impl PlayPlan {
             }
         }
         Ok(true)
+    }
+
+    /// Ломает блок командой (`setblock destroy`, `fill destroy`): частицы и дроп.
+    pub(crate) fn break_drops(&self, pos: [i32; 3]) {
+        let Some(old) = self.block(pos) else { return };
+        if self.state_name(old).ends_with(":air") {
+            return;
+        }
+        self.hub.send(
+            None,
+            play::level_event(
+                self.ids.level_event,
+                crate::sounds::DESTROY_BLOCK,
+                pos,
+                old as i32,
+                false,
+            ),
+        );
+        let center = [
+            pos[0] as f64 + 0.5,
+            pos[1] as f64 + 0.5,
+            pos[2] as f64 + 0.5,
+        ];
+        if self.block_entity(pos).is_some() {
+            for stack in self.container_items(pos).into_iter().flatten() {
+                let vel = items::pop_velocity(rand::random(), rand::random());
+                self.drop_item(center, vel, stack, items::BLOCK_DELAY);
+            }
+            self.set_block_entity(pos, None);
+        }
+        let drop_at = [center[0], pos[1] as f64 + 0.25, center[2]];
+        for stack in self.block_loot(old, None) {
+            let vel = items::pop_velocity(rand::random(), rand::random());
+            self.drop_item(drop_at, vel, stack, items::BLOCK_DELAY);
+        }
     }
 
     /// Дроп блока `state`, сломанного предметом `held`, по таблице лута.
@@ -6713,7 +7424,13 @@ impl PlayPlan {
         // Некого проверять — плит касаться не нужно. Раньше здесь каждый тик
         // собирались пустые списки, брался замок и `plates` заменялся пустым
         // словарём, то есть простой сервер платил за полный обход.
-        if self.hub.players.lock().unwrap().values().all(|p| !p.collects)
+        if self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .values()
+            .all(|p| !p.collects)
             && self.mobs.lock().unwrap().values().all(|e| !e.mob.alive())
             && self.dropped.lock().unwrap().is_empty()
         {
@@ -7639,10 +8356,11 @@ impl PlayPlan {
                 hp::take_one(&mut me.slots, i);
                 if t.name == "minecraft:hopper" && t.slots.iter().flatten().count() == 1 {
                     let now = self.server_ticks.load(std::sync::atomic::Ordering::Relaxed);
-                    self.hopper_ticks
-                        .lock()
-                        .unwrap()
-                        .schedule(t.parts[0], now + u64::from(hp::COOLDOWN), true);
+                    self.hopper_ticks.lock().unwrap().schedule(
+                        t.parts[0],
+                        now + u64::from(hp::COOLDOWN),
+                        true,
+                    );
                 }
                 self.cont_put(&t);
                 moved = true;
@@ -9259,13 +9977,13 @@ impl PlayPlan {
     /// Ставит или убирает блок-сущность; чанк сохранится и перекодируется.
     fn set_block_entity(&self, pos: [i32; 3], be: Option<BlockEntity>) {
         let key = (pos[0] >> 4, pos[2] >> 4);
-        let mut world = self.edited.write().unwrap();
-        if self.terrain.is_some() && !world.contains_key(&key) {
+        if self.terrain.is_some() && !self.edited.read().unwrap().contains_key(&key) {
             return;
         }
-        let (column, rev) = world
-            .entry(key)
-            .or_insert_with(|| (self.template.clone(), 0));
+        self.materialize_void(key.0, key.1);
+        let template = &self.template;
+        let mut world = self.edited.write().unwrap();
+        let (column, rev) = world.entry(key).or_insert_with(|| (template.clone(), 0));
         match be {
             Some(be) => {
                 column.block_entities.insert(pos, be);
@@ -9401,8 +10119,12 @@ impl PlayPlan {
             mode as f32,
         ))
         .await?;
-        conn.send(&play::player_abilities(ids.player_abilities, mode))
-            .await?;
+        conn.send(&play::player_abilities(
+            ids.player_abilities,
+            mode,
+            self.allow_flight.load(Ordering::Relaxed),
+        ))
+        .await?;
         if let Some(p) = self.hub.players.lock().unwrap().get_mut(&uuid) {
             p.entry.game_mode = mode as i32;
         }
@@ -9450,11 +10172,11 @@ impl PlayPlan {
         conn.send_frames(&out).await
     }
 
-
     /// Скорость движения у клиента (эффекты Скорость/Замедление; клиент сам их не применяет).
     async fn send_speed(
         &self,
         conn: &mut Connection,
+        uuid: Uuid,
         entity: i32,
         v: &Vitals,
     ) -> Result<(), NetError> {
@@ -9465,16 +10187,23 @@ impl PlayPlan {
                 .and_then(|&id| v.effect(id))
                 .map(|e| e.amplifier)
         };
-        let mods = survival::speed_modifiers(
+        let mut mods = survival::speed_modifiers(
             v.sprinting,
             amp("minecraft:speed"),
             amp("minecraft:slowness"),
+        );
+        mods.extend(self.enchant_attribute_modifiers(uuid, "minecraft:movement_speed"));
+        let mods = self.merge_attribute_modifiers(uuid, "minecraft:movement_speed", &mods);
+        let base = self.attribute_base(
+            uuid,
+            "minecraft:movement_speed",
+            survival::BASE_MOVEMENT_SPEED,
         );
         conn.send(&inv::update_attribute(
             self.ids.update_attributes,
             entity,
             self.survival.attribute_speed,
-            survival::BASE_MOVEMENT_SPEED,
+            base,
             &mods,
         ))
         .await
@@ -9594,6 +10323,7 @@ impl PlayPlan {
     async fn sync_enchant_attrs(
         &self,
         conn: &mut Connection,
+        uuid: Uuid,
         entity: i32,
         inv: &survival::Inventory,
         last: &mut std::collections::BTreeMap<String, Vec<(String, f64, i32)>>,
@@ -9638,12 +10368,16 @@ impl PlayPlan {
             let Some(&id) = self.survival.attributes.get(name.as_str()) else {
                 continue;
             };
+            let mut merged = mods.to_vec();
+            merged.extend(self.live_motion_modifiers(uuid, name));
+            let merged = self.merge_attribute_modifiers(uuid, name, &merged);
+            let base = self.attribute_base(uuid, name, self.attribute_fallback(uuid, name));
             conn.send(&inv::update_attribute(
                 self.ids.update_attributes,
                 entity,
                 id,
-                crate::enchanting::attribute_base(name),
-                mods,
+                base,
+                &merged,
             ))
             .await?;
         }
@@ -9689,18 +10423,19 @@ impl PlayPlan {
     async fn sync_motion(
         &self,
         conn: &mut Connection,
+        uuid: Uuid,
         entity: i32,
         v: &Vitals,
         mask: u8,
     ) -> Result<(), NetError> {
         if mask & 1 != 0 {
-            self.send_speed(conn, entity, v).await?;
+            self.send_speed(conn, uuid, entity, v).await?;
         }
         if mask & 2 != 0 {
-            self.send_jump(conn, entity, v).await?;
+            self.send_jump(conn, uuid, entity, v).await?;
         }
         if mask & 4 != 0 {
-            self.send_gravity(conn, entity, v).await?;
+            self.send_gravity(conn, uuid, entity, v).await?;
         }
         Ok(())
     }
@@ -9708,15 +10443,22 @@ impl PlayPlan {
     async fn send_jump(
         &self,
         conn: &mut Connection,
+        uuid: Uuid,
         entity: i32,
         v: &Vitals,
     ) -> Result<(), NetError> {
         let mods = survival::jump_modifiers(self.effect_amp(v, "minecraft:jump_boost"));
+        let mods = self.merge_attribute_modifiers(uuid, "minecraft:jump_strength", &mods);
+        let base = self.attribute_base(
+            uuid,
+            "minecraft:jump_strength",
+            survival::BASE_JUMP_STRENGTH,
+        );
         conn.send(&inv::update_attribute(
             self.ids.update_attributes,
             entity,
             self.survival.attribute_jump,
-            survival::BASE_JUMP_STRENGTH,
+            base,
             &mods,
         ))
         .await
@@ -9725,19 +10467,60 @@ impl PlayPlan {
     async fn send_gravity(
         &self,
         conn: &mut Connection,
+        uuid: Uuid,
         entity: i32,
         v: &Vitals,
     ) -> Result<(), NetError> {
         let slow = self.effect_amp(v, "minecraft:slow_falling").is_some();
         let mods = survival::gravity_modifiers(slow);
+        let mods = self.merge_attribute_modifiers(uuid, "minecraft:gravity", &mods);
+        let base = self.attribute_base(uuid, "minecraft:gravity", survival::BASE_GRAVITY);
         conn.send(&inv::update_attribute(
             self.ids.update_attributes,
             entity,
             self.survival.attribute_gravity,
-            survival::BASE_GRAVITY,
+            base,
             &mods,
         ))
         .await
+    }
+
+    /// Эффекты скорости, прыжка и гравитации из зеркала игрока.
+    fn live_motion_modifiers(&self, uuid: Uuid, name: &str) -> Vec<(String, f64, i32)> {
+        let amp = |effect: &str| {
+            let id = *self.survival.effects.get(effect)?;
+            self.live
+                .lock()
+                .unwrap()
+                .get(&uuid)?
+                .effects
+                .iter()
+                .find(|active| active.id == id)
+                .map(|active| active.amplifier)
+        };
+        match name {
+            "minecraft:movement_speed" => {
+                survival::speed_modifiers(false, amp("minecraft:speed"), amp("minecraft:slowness"))
+            }
+            "minecraft:jump_strength" => survival::jump_modifiers(amp("minecraft:jump_boost")),
+            "minecraft:gravity" => {
+                survival::gravity_modifiers(amp("minecraft:slow_falling").is_some())
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Запасная база, если команда её не меняла: игрок, моб или ноль.
+    fn attribute_fallback(&self, uuid: Uuid, name: &str) -> f64 {
+        if self.hub.players.lock().unwrap().contains_key(&uuid) {
+            return match name {
+                "minecraft:movement_speed" => survival::BASE_MOVEMENT_SPEED,
+                "minecraft:jump_strength" => survival::BASE_JUMP_STRENGTH,
+                "minecraft:gravity" => survival::BASE_GRAVITY,
+                _ => crate::enchanting::attribute_base(name),
+            };
+        }
+        crate::enchanting::attribute_base(name)
     }
 
     /// Рука с питьевым зельем: слот, предмет, компоненты, секунды. Наблюдатель не пьёт.
@@ -9947,7 +10730,7 @@ impl PlayPlan {
             e.flags(),
         ))
         .await?;
-        self.sync_motion(conn, me.entity_id, v, self.motion_mask(e.id))
+        self.sync_motion(conn, me.entry.uuid, me.entity_id, v, self.motion_mask(e.id))
             .await?;
         let name = self.effect_name(e.id).unwrap_or_default();
         match survival::instant_effect(&name, e.amplifier) {
@@ -10010,7 +10793,8 @@ impl PlayPlan {
             motion |= self.motion_mask(e.id);
         }
         v.effects.retain(|e| id.is_some_and(|w| w != e.id));
-        self.sync_motion(conn, me.entity_id, v, motion).await
+        self.sync_motion(conn, me.entry.uuid, me.entity_id, v, motion)
+            .await
     }
 
     async fn send_xp(
@@ -10547,12 +11331,25 @@ impl PlayPlan {
             motion |= self.motion_mask(id);
         }
         v.respawn();
-        v.reset_fall(self.spawn);
+        let spawn = self
+            .spawn_points
+            .lock()
+            .unwrap()
+            .get(&me.entry.uuid)
+            .copied()
+            .flatten()
+            .map(|[x, y, z]| [x as f64 + 0.5, y as f64, z as f64 + 0.5])
+            .unwrap_or_else(|| self.vars.world_spawn().unwrap_or(self.spawn));
+        v.reset_fall(spawn);
         conn.send(&inv::respawn(self.ids.respawn, &login.spawn, 0))
             .await?;
+        self.send_map_markers(conn).await?;
+        for packet in self.joined_packets(me.entry.uuid) {
+            conn.send(&packet).await?;
+        }
         let spawn_chunk = (
-            (self.spawn[0].floor() as i32) >> 4,
-            (self.spawn[2].floor() as i32) >> 4,
+            (spawn[0].floor() as i32) >> 4,
+            (spawn[2].floor() as i32) >> 4,
         );
         if spawn_chunk != stream.center() {
             self.stream_move(conn, stream, spawn_chunk).await?;
@@ -10566,7 +11363,7 @@ impl PlayPlan {
         conn.send(&play::player_position(
             self.ids.player_position,
             teleport_id,
-            self.spawn,
+            spawn,
             0.0,
             0.0,
         ))
@@ -10574,7 +11371,8 @@ impl PlayPlan {
         self.send_health(conn, v).await?;
         self.send_inventory(conn, inv).await?;
         // Клиент сам не сбрасывает прыжок и гравитацию вместе с эффектом.
-        self.sync_motion(conn, me.entity_id, v, motion).await?;
+        self.sync_motion(conn, me.entry.uuid, me.entity_id, v, motion)
+            .await?;
         // Остальные: убрать тело и показать игрока заново в точке спавна.
         self.hub.send_entity(
             Some(me.entry.uuid),
@@ -10584,7 +11382,7 @@ impl PlayPlan {
         self.moved(
             me.entry.uuid,
             Move {
-                pos: Some(self.spawn),
+                pos: Some(spawn),
                 rot: Some((0.0, 0.0)),
                 on_ground: true,
             },

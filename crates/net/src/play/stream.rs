@@ -86,7 +86,11 @@ impl PlayPlan {
 
     /// Вход в мир: весь радиус через поток, ближние чанки первыми. Клиент
     /// видит землю под ногами сразу, а не после счёта всех 4225 чанков.
-    pub(super) async fn stream_start(&self, conn: &mut Connection, s: &mut ChunkStream) -> Result<(), NetError> {
+    pub(super) async fn stream_start(
+        &self,
+        conn: &mut Connection,
+        s: &mut ChunkStream,
+    ) -> Result<(), NetError> {
         let all = chunks_around(s.center, s.radius, None);
         self.stream_enter(conn, s, s.center, &[], all).await
     }
@@ -104,7 +108,10 @@ impl PlayPlan {
         let ids = self.ids;
         let mut prefix = Vec::new();
         for &(x, z) in forget {
-            prefix.extend(self.hub.frame(&play::forget_level_chunk(ids.forget_level_chunk, x, z)));
+            prefix.extend(
+                self.hub
+                    .frame(&play::forget_level_chunk(ids.forget_level_chunk, x, z)),
+            );
         }
         prefix.extend(self.hub.frame(&play::set_chunk_cache_center(
             ids.set_chunk_cache_center,
@@ -113,10 +120,13 @@ impl PlayPlan {
         )));
         conn.send_frames(&prefix).await?;
         // Ушедшие из радиуса больше не нужны: ни отправлять, ни считать.
-        s.waiting.retain(|&p| (p.0 - new.0).abs() <= r && (p.1 - new.1).abs() <= r);
+        s.waiting
+            .retain(|&p| (p.0 - new.0).abs() <= r && (p.1 - new.1).abs() <= r);
         let center = new;
-        s.queue.retain(|&p| (p.0 - center.0).abs() <= r && (p.1 - center.1).abs() <= r);
-        s.built.retain(|&p| (p.0 - center.0).abs() <= r + 1 && (p.1 - center.1).abs() <= r + 1);
+        s.queue
+            .retain(|&p| (p.0 - center.0).abs() <= r && (p.1 - center.1).abs() <= r);
+        s.built
+            .retain(|&p| (p.0 - center.0).abs() <= r + 1 && (p.1 - center.1).abs() <= r + 1);
 
         let mut cached = Vec::new();
         {
@@ -142,7 +152,12 @@ impl PlayPlan {
         s.sort_queue();
         self.stream_pump(s);
         // Уже построенные (с диска или от другого игрока) могут уйти сразу.
-        let have: Vec<(i32, i32)> = s.waiting.iter().copied().filter(|p| s.built.contains(p)).collect();
+        let have: Vec<(i32, i32)> = s
+            .waiting
+            .iter()
+            .copied()
+            .filter(|p| s.built.contains(p))
+            .collect();
         self.stream_send(s, &have);
         Ok(())
     }
@@ -248,4 +263,3 @@ impl PlayPlan {
         self.send_batch(conn, &frames).await
     }
 }
-

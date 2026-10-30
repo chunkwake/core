@@ -126,6 +126,76 @@ impl Inventory {
         (changed, count)
     }
 
+    /// Как [`add`], но стопки с износом или компонентами сливаются только с такими же.
+    pub fn add_components(
+        &mut self,
+        item: i32,
+        mut count: i32,
+        max_stack: i32,
+        extra: u32,
+        damage: i32,
+    ) -> (Vec<usize>, i32) {
+        if extra == 0 && damage == 0 {
+            return self.add(item, count, max_stack);
+        }
+        let max_stack = max_stack.max(1);
+        let mut changed = Vec::new();
+        for i in Self::storage_order() {
+            if count == 0 {
+                break;
+            }
+            if let Some(stack) = &mut self.slots[i]
+                && stack.item == item
+                && stack.damage == damage
+                && stack.extra == extra
+                && stack.count < max_stack
+            {
+                let n = count.min(max_stack - stack.count);
+                stack.count += n;
+                count -= n;
+                changed.push(i);
+            }
+        }
+        for i in Self::storage_order() {
+            if count == 0 {
+                break;
+            }
+            if self.slots[i].is_none() {
+                let n = count.min(max_stack);
+                self.slots[i] = Some(Stack {
+                    item,
+                    count: n,
+                    damage,
+                    extra,
+                });
+                count -= n;
+                changed.push(i);
+            }
+        }
+        (changed, count)
+    }
+
+    /// Снимает стопки, прошедшие фильтр `/clear`, из слотов и курсора.
+    pub fn take_selected(
+        &mut self,
+        ids: Option<&[i32]>,
+        extra: u32,
+        damage: Option<i32>,
+        max: i32,
+    ) -> i32 {
+        let mut left = max.max(0);
+        let from_slots = take_selected_slots(&mut self.slots, ids, extra, damage, left);
+        left -= from_slots;
+        from_slots
+            + take_selected_slots(
+                std::slice::from_mut(&mut self.carried),
+                ids,
+                extra,
+                damage,
+                left,
+            )
+    }
+
     /// Кладёт стопку как есть (с износом и компонентами): такая — только в пустой слот.
     /// Возвращает не влезшее.
     pub fn add_stack(&mut self, s: Stack, max_stack: i32) -> Option<Stack> {
@@ -152,6 +222,14 @@ impl Inventory {
             self.slots[slot] = None;
         }
         true
+    }
+
+    /// Снимает до `max` штук `item` (`None` — любые) из слотов и курсора.
+    pub fn take_matching(&mut self, item: Option<i32>, max: i32) -> i32 {
+        let mut left = max.max(0);
+        let from_slots = take_slots(&mut self.slots, item, left);
+        left -= from_slots;
+        from_slots + take_slots(std::slice::from_mut(&mut self.carried), item, left)
     }
 
     /// Тратит один предмет из руки; `false` — рука пуста.
@@ -832,6 +910,150 @@ impl Vitals {
     }
 }
 
+/// Снимает до `max` штук. `item == None` — любые слоты. Возвращает, сколько снято.
+pub fn take_slots(slots: &mut [Slot], item: Option<i32>, mut max: i32) -> i32 {
+    if max <= 0 {
+        return 0;
+    }
+    let mut removed = 0;
+    for slot in slots {
+        if max == 0 {
+            break;
+        }
+        let Some(mut stack) = *slot else { continue };
+        if item.is_some_and(|id| stack.item != id) {
+            continue;
+        }
+        let n = stack.count.min(max);
+        stack.count -= n;
+        max -= n;
+        removed += n;
+        *slot = (stack.count > 0).then_some(stack);
+    }
+    removed
+}
+
+/// Сколько снимет фильтр `/clear`, не меняя слоты.
+pub fn query_count(
+    slots: &[Slot],
+    ids: Option<&[i32]>,
+    extra: u32,
+    damage: Option<i32>,
+    max: i32,
+) -> i32 {
+    let mut left = max.max(0);
+    let mut removed = 0;
+    for slot in slots {
+        if left == 0 {
+            break;
+        }
+        let Some(stack) = slot else { continue };
+        if !stack_selected(stack, ids, extra, damage) {
+            continue;
+        }
+        let n = stack.count.min(left);
+        left -= n;
+        removed += n;
+    }
+    removed
+}
+
+/// Снимает стопки фильтра. `ids == None` — любой предмет.
+pub fn take_selected_slots(
+    slots: &mut [Slot],
+    ids: Option<&[i32]>,
+    extra: u32,
+    damage: Option<i32>,
+    mut max: i32,
+) -> i32 {
+    if max <= 0 {
+        return 0;
+    }
+    let mut removed = 0;
+    for slot in slots {
+        if max == 0 {
+            break;
+        }
+        let Some(mut stack) = *slot else { continue };
+        if !stack_selected(&stack, ids, extra, damage) {
+            continue;
+        }
+        let n = stack.count.min(max);
+        stack.count -= n;
+        max -= n;
+        removed += n;
+        *slot = (stack.count > 0).then_some(stack);
+    }
+    removed
+}
+
+/// Заданные компоненты есть у стопки. Пустой `want` не ограничивает компоненты.
+pub fn components_satisfy(have: u32, want: u32) -> bool {
+    if want == 0 {
+        return true;
+    }
+    let want = chunkwake_protocol::components::get(want);
+    let have = chunkwake_protocol::components::get(have);
+    if !want.enchantments.is_empty()
+        && want
+            .enchantments
+            .iter()
+            .any(|enchant| !have.enchantments.contains(enchant))
+    {
+        return false;
+    }
+    if !want.stored.is_empty()
+        && want.stored.iter().any(|enchant| !have.stored.contains(enchant))
+    {
+        return false;
+    }
+    if want.custom_name.is_some() && want.custom_name != have.custom_name {
+        return false;
+    }
+    if !want.lore.is_empty() && want.lore != have.lore {
+        return false;
+    }
+    if want.custom_data.is_some() && want.custom_data != have.custom_data {
+        return false;
+    }
+    if want.rest.is_some() && want.rest != have.rest {
+        return false;
+    }
+    if !want.charged.is_empty() && want.charged != have.charged {
+        return false;
+    }
+    true
+}
+
+fn stack_selected(stack: &Stack, ids: Option<&[i32]>, extra: u32, damage: Option<i32>) -> bool {
+    if ids.is_some_and(|ids| !ids.contains(&stack.item)) {
+        return false;
+    }
+    if damage.is_some_and(|value| value != stack.damage) {
+        return false;
+    }
+    components_satisfy(stack.extra, extra)
+}
+
+/// Сколько снимет [`take_slots`], не меняя слоты.
+pub fn matching_count(slots: &[Slot], item: Option<i32>, max: i32) -> i32 {
+    let mut left = max.max(0);
+    let mut removed = 0;
+    for slot in slots {
+        if left == 0 {
+            break;
+        }
+        let Some(stack) = slot else { continue };
+        if item.is_some_and(|id| stack.item != id) {
+            continue;
+        }
+        let n = stack.count.min(left);
+        removed += n;
+        left -= n;
+    }
+    removed
+}
+
 /// Сохранённое состояние игрока (`playerdata`): слоты — индексы окна игрока.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayerSave {
@@ -849,6 +1071,8 @@ pub struct PlayerSave {
     /// Активные эффекты (`active_effects`).
     pub effects: Vec<Effect>,
     pub xp: crate::xp::Experience,
+    /// Точка возрождения (`SpawnX`/`SpawnY`/`SpawnZ`); `None` — спавн мира.
+    pub spawn: Option<[i32; 3]>,
 }
 
 /// Живое состояние игрока в сессии: инвентарь и здоровье.
@@ -893,6 +1117,7 @@ impl PlayerState {
             game_mode: self.game_mode,
             effects: v.effects.clone(),
             xp: self.xp,
+            spawn: None,
             slots: (0..SLOTS)
                 .filter_map(|i| self.inv.slots[i].map(|s| (i, s)))
                 .collect(),

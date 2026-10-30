@@ -45,7 +45,7 @@ fn roll_table(
     out: &mut Vec<(String, i32)>,
     depth: u8,
 ) {
-    let Some(table) = loot.tables.get(name) else {
+    let Some(table) = loot.table(name) else {
         return;
     };
     let e = Eval { loot, c };

@@ -122,10 +122,16 @@ impl Index {
     ///
     /// `hint` — прошлый ответ (`lastResult` у ванили): соседние клетки почти
     /// всегда того же биома, и его штраф сразу отсекает почти всё дерево.
-    fn find(&self, points: &[Point], point: &[i64; 6], hint: Option<usize>) -> Option<(usize, i64)> {
+    fn find(
+        &self,
+        points: &[Point],
+        point: &[i64; 6],
+        hint: Option<usize>,
+    ) -> Option<(usize, i64)> {
         // Порог на единицу выше штрафа подсказки: точки с тем же штрафом и
         // меньшим номером по-прежнему находятся, ответ не зависит от подсказки.
-        let mut best: Option<(usize, i64)> = hint.map(|id| (usize::MAX, fitness(&points[id], point) + 1));
+        let mut best: Option<(usize, i64)> =
+            hint.map(|id| (usize::MAX, fitness(&points[id], point) + 1));
         let mut stack = vec![self.root];
         while let Some(node) = stack.pop() {
             let bound = Self::lower_bound(&self.boxes[node], point);

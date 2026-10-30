@@ -1,8 +1,8 @@
 //! Небольшие фичи: диски, родники, лианы, валуны, синий лёд, озёра и
 //! данжи (`monster_room`).
 
-use super::{add, block_set, Features, Fluid, Level, Palette, Predicate, Provider, DIRS};
-use crate::carver::{clamped_normal, FloatP, IntP};
+use super::{DIRS, Features, Fluid, Level, Palette, Predicate, Provider, add, block_set};
+use crate::carver::{FloatP, IntP, clamped_normal};
 use crate::random::{Bits, Worldgen};
 use serde_json::Value;
 use std::sync::Arc;
@@ -24,12 +24,17 @@ fn put(level: &mut dyn Level, [x, y, z]: Pos, state: u32) {
 }
 
 fn block(pal: &Palette, name: &str) -> Result<u32, String> {
-    pal.defaults.get(name).copied().ok_or_else(|| format!("no block {name}"))
+    pal.defaults
+        .get(name)
+        .copied()
+        .ok_or_else(|| format!("no block {name}"))
 }
 
 /// `isSolidRender`, приближённо: твёрдый блок с полными гранями, не листва.
 fn solid_render(pal: &Palette, leaves: &[bool], s: u32) -> bool {
-    Palette::flag(&pal.solid, s) && pal.sturdy.get(s as usize) == Some(&63) && !Palette::flag(leaves, s)
+    Palette::flag(&pal.solid, s)
+        && pal.sturdy.get(s as usize) == Some(&63)
+        && !Palette::flag(leaves, s)
 }
 
 /// `DiskFeature`.
@@ -109,7 +114,10 @@ impl Spring {
         }
         let sides = [[-1, 0, 0], [1, 0, 0], [0, 0, -1], [0, 0, 1], [0, -1, 0]];
         let rocks = sides.iter().filter(|&&d| ok(add(o, d))).count() as i32;
-        let holes = sides.iter().filter(|&&d| pal.is_air(get(level, add(o, d)))).count() as i32;
+        let holes = sides
+            .iter()
+            .filter(|&&d| pal.is_air(get(level, add(o, d))))
+            .count() as i32;
         if rocks == self.rocks && holes == self.holes {
             put(level, o, self.state);
         }
@@ -172,7 +180,14 @@ impl Blob {
                     }
                 }
             }
-            o = add(o, [-1 + r.next_int_bound(2), -r.next_int_bound(2), -1 + r.next_int_bound(2)]);
+            o = add(
+                o,
+                [
+                    -1 + r.next_int_bound(2),
+                    -r.next_int_bound(2),
+                    -1 + r.next_int_bound(2),
+                ],
+            );
         }
     }
 }
@@ -183,7 +198,8 @@ pub(super) fn blue_ice(f: &Features, level: &mut dyn Level, r: &mut Worldgen, o:
     if o[1] > level.sea_level() - 1 {
         return;
     }
-    let is = |level: &dyn Level, p: Pos, name: &str| pal.same_block(get(level, p), pal.defaults[name]);
+    let is =
+        |level: &dyn Level, p: Pos, name: &str| pal.same_block(get(level, p), pal.defaults[name]);
     let water = |level: &dyn Level, p: Pos| is(level, p, "minecraft:water");
     if !water(&*level, o) && !water(&*level, add(o, [0, -1, 0])) {
         return;
@@ -216,7 +232,7 @@ pub(super) fn blue_ice(f: &Features, level: &mut dyn Level, r: &mut Worldgen, o:
     }
 }
 
-/// `LakeFeature` (в ванили остались только лавовые).
+/// `LakeFeature`. Лава и водяной `sulfur_pool`.
 #[derive(Debug)]
 pub(super) struct Lake {
     fluid: Provider,
@@ -227,7 +243,12 @@ pub(super) struct Lake {
 }
 
 impl Lake {
-    pub(super) fn parse(v: &Value, pal: &mut Palette, fluid: Provider, barrier: Provider) -> Result<Self, String> {
+    pub(super) fn parse(
+        v: &Value,
+        pal: &mut Palette,
+        fluid: Provider,
+        barrier: Provider,
+    ) -> Result<Self, String> {
         Ok(Self {
             fluid,
             barrier,
@@ -317,7 +338,9 @@ impl Lake {
                     for yy in 0..8 {
                         if edge(xx, zz, yy) && (yy < 4 || r.next_int_bound(2) != 0) {
                             let p = add(o, [xx, yy, zz]);
-                            if Palette::flag(&pal.solid, get(level, p)) && self.to_barrier.test(&*level, pal, p) {
+                            if Palette::flag(&pal.solid, get(level, p))
+                                && self.to_barrier.test(&*level, pal, p)
+                            {
                                 put(level, p, barrier);
                             }
                         }
@@ -325,8 +348,32 @@ impl Lake {
                 }
             }
         }
-        // Заморозка поверхности нужна только водяным озёрам, а их в ванили нет.
-        debug_assert!(pal.fluid(fluid) != Fluid::Water, "water lakes need shouldFreeze");
+        // `LakeFeature`: водяная жидкость замораживает плоскость y = 4,
+        // если `shouldFreeze(..., false)` и предикат воздуха. Свет блоков
+        // при генерации ещё ноль, поэтому порог яркости 10 всегда пройден.
+        if pal.fluid(fluid) == Fluid::Water
+            && let Some(&ice) = pal.defaults.get("minecraft:ice")
+            && let Some(&water) = pal.defaults.get("minecraft:water")
+        {
+            let top = level.min_y() + level.height();
+            for xx in 0..16 {
+                for zz in 0..16 {
+                    let p = add(o, [xx, 4, zz]);
+                    if p[1] < level.min_y() || p[1] >= top {
+                        continue;
+                    }
+                    if !pal.biome_freezes(level.biome(p[0], p[1], p[2])) {
+                        continue;
+                    }
+                    if !pal.same_block(get(level, p), water) {
+                        continue;
+                    }
+                    if self.to_air.test(&*level, pal, p) {
+                        put(level, p, ice);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -352,7 +399,14 @@ impl MonsterRoom {
     }
 }
 
-fn monster_room(f: &Features, level: &mut dyn Level, r: &mut Worldgen, o: Pos, blocked: &[bool], leaves: &[bool]) {
+fn monster_room(
+    f: &Features,
+    level: &mut dyn Level,
+    r: &mut Worldgen,
+    o: Pos,
+    blocked: &[bool],
+    leaves: &[bool],
+) {
     let pal = &f.palette;
     let solid = |level: &dyn Level, p: Pos| Palette::flag(&pal.solid, get(level, p));
     let air_at = |level: &dyn Level, p: Pos| pal.is_air(get(level, p));
@@ -421,7 +475,10 @@ fn monster_room(f: &Features, level: &mut dyn Level, r: &mut Worldgen, o: Pos, b
             if !air_at(&*level, p) {
                 continue;
             }
-            let walls = HORIZONTAL.iter().filter(|&&d| solid(&*level, add(p, d))).count();
+            let walls = HORIZONTAL
+                .iter()
+                .filter(|&&d| solid(&*level, add(p, d)))
+                .count();
             if walls == 1 {
                 let s = reorient(pal, leaves, &*level, p, chest);
                 let placed = !Palette::flag(blocked, get(level, p));
@@ -462,7 +519,10 @@ fn reorient(pal: &Palette, leaves: &[bool], level: &dyn Level, p: Pos, chest: u3
         Some(d) => (d + 2) % 4,
         None => {
             let current = pal.prop(chest, "facing").unwrap_or("north");
-            let mut d = HORIZONTAL_NAMES.iter().position(|n| *n == current).unwrap_or(0);
+            let mut d = HORIZONTAL_NAMES
+                .iter()
+                .position(|n| *n == current)
+                .unwrap_or(0);
             if render(d) {
                 d = (d + 2) % 4;
             }
@@ -475,7 +535,8 @@ fn reorient(pal: &Palette, leaves: &[bool], level: &dyn Level, p: Pos, chest: u3
             d
         }
     };
-    pal.with_prop(chest, "facing", HORIZONTAL_NAMES[facing]).unwrap_or(chest)
+    pal.with_prop(chest, "facing", HORIZONTAL_NAMES[facing])
+        .unwrap_or(chest)
 }
 
 /// `GeodeFeature`.
@@ -529,10 +590,15 @@ impl Geode {
         let wall_max = match &v["outer_wall_distance"] {
             Value::Null => 5,
             Value::Number(x) => x.as_i64().unwrap_or(5) as i32,
-            x => x["max_inclusive"].as_i64().ok_or("geode: outer_wall_distance")? as i32,
+            x => x["max_inclusive"]
+                .as_i64()
+                .ok_or("geode: outer_wall_distance")? as i32,
         };
         let mut placements = Vec::new();
-        for p in b["inner_placements"].as_array().ok_or("geode: inner_placements")? {
+        for p in b["inner_placements"]
+            .as_array()
+            .ok_or("geode: inner_placements")?
+        {
             placements.push(pal.state(p)?);
         }
         let l = &v["layers"];
@@ -557,7 +623,9 @@ impl Geode {
             crack_offset: int(c, "crack_point_offset", 2),
             potential_chance: flt(v, "use_potential_placements_chance", 0.35),
             alternate_chance: flt(v, "use_alternate_layer0_chance", 0.0),
-            require_alternate: v["placements_require_layer0_alternate"].as_bool().unwrap_or(true),
+            require_alternate: v["placements_require_layer0_alternate"]
+                .as_bool()
+                .unwrap_or(true),
             wall: uniform("outer_wall_distance", 4, 5)?,
             wall_max,
             points: uniform("distribution_points", 3, 4)?,
@@ -578,8 +646,8 @@ impl Geode {
         let innermost = 1.0 / (self.layers[1] + adjust).sqrt();
         let inner_crust = 1.0 / (self.layers[2] + adjust).sqrt();
         let outer_crust = 1.0 / (self.layers[3] + adjust).sqrt();
-        let crack_size =
-            1.0 / (self.crack_size + r.next_double() / 2.0 + if n > 3 { adjust } else { 0.0 }).sqrt();
+        let crack_size = 1.0
+            / (self.crack_size + r.next_double() / 2.0 + if n > 3 { adjust } else { 0.0 }).sqrt();
         let crack = r.next_float() < self.crack_chance;
         let mut invalid = 0;
         let mut points: Vec<(Pos, i32)> = Vec::new();
@@ -611,7 +679,11 @@ impl Geode {
             }
         }
         let dist = |a: Pos, b: Pos| {
-            let d = [(a[0] - b[0]) as f64, (a[1] - b[1]) as f64, (a[2] - b[2]) as f64];
+            let d = [
+                (a[0] - b[0]) as f64,
+                (a[1] - b[1]) as f64,
+                (a[2] - b[2]) as f64,
+            ];
             d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
         };
         let safe = |level: &mut dyn Level, p: Pos, s: u32| {
@@ -631,7 +703,8 @@ impl Geode {
             for dy in lo..=hi {
                 for dx in lo..=hi {
                     let p = add(o, [dx, dy, dz]);
-                    let noise = self.noise.get(p[0] as f64, p[1] as f64, p[2] as f64) as f64 * self.noise_mul;
+                    let noise = self.noise.get(p[0] as f64, p[1] as f64, p[2] as f64) as f64
+                        * self.noise_mul;
                     let mut shell = 0.0;
                     for &(q, off) in &points {
                         shell += 1.0 / (dist(p, q) + off as f64).sqrt() + noise;
@@ -652,7 +725,9 @@ impl Geode {
                     } else if shell >= innermost {
                         let alt = (r.next_float() as f64) < self.alternate_chance;
                         with(level, r, if alt { &self.alternate } else { &self.inner }, p);
-                        if (!self.require_alternate || alt) && (r.next_float() as f64) < self.potential_chance {
+                        if (!self.require_alternate || alt)
+                            && (r.next_float() as f64) < self.potential_chance
+                        {
                             potential.push(p);
                         }
                     } else if shell >= inner_crust {
@@ -673,9 +748,13 @@ impl Geode {
                 let here = get(level, at);
                 // `getFluidState().isSource()`.
                 let source = matches!(pal.fluid(here), Fluid::Water | Fluid::Lava);
-                s = pal.with_prop(s, "waterlogged", if source { "true" } else { "false" }).unwrap_or(s);
+                s = pal
+                    .with_prop(s, "waterlogged", if source { "true" } else { "false" })
+                    .unwrap_or(s);
                 // `canClusterGrowAtState`: воздух или полная вода.
-                if pal.is_air(here) || (pal.same_block(here, water) && pal.fluid(here) == Fluid::Water) {
+                if pal.is_air(here)
+                    || (pal.same_block(here, water) && pal.fluid(here) == Fluid::Water)
+                {
                     safe(level, at, s);
                     break;
                 }
@@ -752,7 +831,11 @@ impl RootSystem {
         if self.level_test > 0 {
             // `Direction.from2DDataValue`: юг, запад, север, восток.
             for d in [[0, 0, 1], [-1, 0, 0], [0, 0, -1], [1, 0, 0]] {
-                let c = [p[0] + d[0] * self.level_test, p[1], p[2] + d[2] * self.level_test];
+                let c = [
+                    p[0] + d[0] * self.level_test,
+                    p[1],
+                    p[2] + d[2] * self.level_test,
+                ];
                 let below = get(level, add(c, [0, -self.deviation, 0]));
                 let above = get(level, add(c, [0, self.deviation, 0]));
                 if pal.is_air(below) || !pal.is_air(above) {
@@ -910,14 +993,22 @@ impl Multiface {
     }
 
     /// `MultifaceBlock.getStateForPlacement`.
-    fn state_for(&self, pal: &Palette, level: &dyn Level, old: u32, p: Pos, d: usize) -> Option<u32> {
+    fn state_for(
+        &self,
+        pal: &Palette,
+        level: &dyn Level,
+        old: u32,
+        p: Pos,
+        d: usize,
+    ) -> Option<u32> {
         if !self.valid(pal, level, old, p, d) {
             return None;
         }
         let base = if self.is(pal, old) {
             old
         } else if Self::water_source(pal, old) {
-            pal.with_prop(self.block, "waterlogged", "true").unwrap_or(self.block)
+            pal.with_prop(self.block, "waterlogged", "true")
+                .unwrap_or(self.block)
         } else {
             self.block
         };
@@ -925,13 +1016,26 @@ impl Multiface {
     }
 
     /// `stateCanBeReplaced` конфигурации распространения.
-    fn replaceable(&self, pal: &Palette, level: &dyn Level, source: Pos, p: Pos, d: usize, existing: u32) -> bool {
-        let default = pal.is_air(existing) || self.is(pal, existing) || Self::water_source(pal, existing);
+    fn replaceable(
+        &self,
+        pal: &Palette,
+        level: &dyn Level,
+        source: Pos,
+        p: Pos,
+        d: usize,
+        existing: u32,
+    ) -> bool {
+        let default =
+            pal.is_air(existing) || self.is(pal, existing) || Self::water_source(pal, existing);
         if !self.sculk {
             return default;
         }
         let against = get(level, add(p, DIRS[d]));
-        if self.sculk_blocks.iter().any(|&b| pal.same_block(against, b)) {
+        if self
+            .sculk_blocks
+            .iter()
+            .any(|&b| pal.same_block(against, b))
+        {
             return false;
         }
         let manhattan = (0..3).map(|i| (source[i] - p[i]).abs()).sum::<i32>();
@@ -949,19 +1053,34 @@ impl Multiface {
     }
 
     /// `getSpreadFromFaceTowardDirection` + `spreadToFace`.
-    fn spread_toward(&self, pal: &Palette, level: &mut dyn Level, state: u32, p: Pos, from: usize, to: usize) -> bool {
+    fn spread_toward(
+        &self,
+        pal: &Palette,
+        level: &mut dyn Level,
+        state: u32,
+        p: Pos,
+        from: usize,
+        to: usize,
+    ) -> bool {
         if to / 2 == from / 2 {
             return false;
         }
         let other_source = self.sculk && !self.is(pal, state);
-        if !(other_source || (Self::has_face(pal, state, from) && !Self::has_face(pal, state, to))) {
+        if !(other_source || (Self::has_face(pal, state, from) && !Self::has_face(pal, state, to)))
+        {
             return false;
         }
         // `SAME_POSITION`, `SAME_PLANE`, `WRAP_AROUND`.
-        let spots = [(p, to), (add(p, DIRS[to]), from), (add(add(p, DIRS[to]), DIRS[from]), to ^ 1)];
+        let spots = [
+            (p, to),
+            (add(p, DIRS[to]), from),
+            (add(add(p, DIRS[to]), DIRS[from]), to ^ 1),
+        ];
         for (at, face) in spots {
             let existing = get(level, at);
-            if self.replaceable(pal, &*level, p, at, face, existing) && self.valid(pal, &*level, existing, at, face) {
+            if self.replaceable(pal, &*level, p, at, face, existing)
+                && self.valid(pal, &*level, existing, at, face)
+            {
                 if let Some(s) = self.state_for(pal, &*level, existing, at, face) {
                     put(level, at, s);
                     return true;
@@ -972,7 +1091,15 @@ impl Multiface {
         false
     }
 
-    fn place_growth(&self, pal: &Palette, level: &mut dyn Level, r: &mut Worldgen, p: Pos, old: u32, dirs: &[usize]) -> bool {
+    fn place_growth(
+        &self,
+        pal: &Palette,
+        level: &mut dyn Level,
+        r: &mut Worldgen,
+        p: Pos,
+        old: u32,
+        dirs: &[usize],
+    ) -> bool {
         for &d in dirs {
             if !Palette::flag(&self.on, get(level, add(p, DIRS[d]))) {
                 continue;
@@ -1007,7 +1134,11 @@ impl Multiface {
             return;
         }
         for &search in &dirs {
-            let except: Vec<usize> = self.valid_dirs().into_iter().filter(|&d| d != search ^ 1).collect();
+            let except: Vec<usize> = self
+                .valid_dirs()
+                .into_iter()
+                .filter(|&d| d != search ^ 1)
+                .collect();
             let placement = shuffled(r, except);
             // Ванильный цикл каждый раз ставит точку `origin + направление`.
             let p = add(o, DIRS[search]);
@@ -1063,7 +1194,15 @@ impl SpeleoBlocks {
     }
 
     /// `SpeleothemUtils.growSpeleothem`: `d` — направление острия.
-    fn grow(&self, pal: &Palette, level: &mut dyn Level, start: Pos, d: usize, height: i32, merged: bool) {
+    fn grow(
+        &self,
+        pal: &Palette,
+        level: &mut dyn Level,
+        start: Pos,
+        d: usize,
+        height: i32,
+        merged: bool,
+    ) {
         if !self.is_base(pal, get(level, add(start, DIRS[d ^ 1]))) {
             return;
         }
@@ -1082,10 +1221,14 @@ impl SpeleoBlocks {
         let pointed = self.pointed;
         let mut p = start;
         for thickness in parts {
-            let mut s = pal.with_prop(pointed, "vertical_direction", face).unwrap_or(pointed);
+            let mut s = pal
+                .with_prop(pointed, "vertical_direction", face)
+                .unwrap_or(pointed);
             s = pal.with_prop(s, "thickness", thickness).unwrap_or(s);
             let water = pal.fluid(get(level, p)).is_water();
-            s = pal.with_prop(s, "waterlogged", if water { "true" } else { "false" }).unwrap_or(s);
+            s = pal
+                .with_prop(s, "waterlogged", if water { "true" } else { "false" })
+                .unwrap_or(s);
             put(level, p, s);
             p = add(p, DIRS[d]);
         }
@@ -1143,7 +1286,9 @@ impl Speleothem {
             let p3 = add(p2, DIRS[r.next_int_bound(6) as usize]);
             self.b.place_base(level, p3);
         }
-        let height = if r.next_float() < self.taller && self.b.empty_or_water(pal, get(level, add(o, DIRS[d]))) {
+        let height = if r.next_float() < self.taller
+            && self.b.empty_or_water(pal, get(level, add(o, DIRS[d])))
+        {
             2
         } else {
             1
@@ -1184,7 +1329,11 @@ pub(super) struct SpeleothemCluster {
 
 impl SpeleothemCluster {
     pub(super) fn parse(v: &Value, pal: &mut Palette) -> Result<Self, String> {
-        let int = |k: &str| v[k].as_i64().map(|x| x as i32).ok_or(format!("speleothem_cluster: {k}"));
+        let int = |k: &str| {
+            v[k].as_i64()
+                .map(|x| x as i32)
+                .ok_or(format!("speleothem_cluster: {k}"))
+        };
         Ok(Self {
             b: SpeleoBlocks::parse(v, pal)?,
             search: int("floor_to_ceiling_search_range")?,
@@ -1195,7 +1344,9 @@ impl SpeleothemCluster {
             thickness: IntP::parse(&v["speleothem_block_layer_thickness"])?,
             density: FloatP::parse(&v["density"])?,
             wetness: FloatP::parse(&v["wetness"])?,
-            chance_at_max: v["chance_of_speleothem_at_max_distance_from_center"].as_f64().unwrap_or(0.0) as f32,
+            chance_at_max: v["chance_of_speleothem_at_max_distance_from_center"]
+                .as_f64()
+                .unwrap_or(0.0) as f32,
             edge: int("max_distance_from_edge_affecting_chance_of_speleothem")?,
             center: int("max_distance_from_center_affecting_height_bias")?,
             base_stone: pal.tag("minecraft:base_stone_overworld")?,
@@ -1224,7 +1375,18 @@ impl SpeleothemCluster {
                 } else {
                     self.chance_at_max + t * (1.0 - self.chance_at_max)
                 };
-                self.column(pal, level, r, add(o, [dx, 0, dz]), dx, dz, wetness, chance as f64, height, density);
+                self.column(
+                    pal,
+                    level,
+                    r,
+                    add(o, [dx, 0, dz]),
+                    dx,
+                    dz,
+                    wetness,
+                    chance as f64,
+                    height,
+                    density,
+                );
             }
         }
     }
@@ -1250,7 +1412,19 @@ impl SpeleothemCluster {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn column(&self, pal: &Palette, level: &mut dyn Level, r: &mut Worldgen, p: Pos, dx: i32, dz: i32, wet: f32, chance: f64, cluster: i32, density: f32) {
+    fn column(
+        &self,
+        pal: &Palette,
+        level: &mut dyn Level,
+        r: &mut Worldgen,
+        p: Pos,
+        dx: i32,
+        dz: i32,
+        wet: f32,
+        chance: f64,
+        cluster: i32,
+        density: f32,
+    ) {
         let Some((base_floor, ceiling)) = self.scan(pal, &*level, p) else {
             return;
         };
@@ -1260,7 +1434,10 @@ impl SpeleothemCluster {
         let at = |y: i32| [p[0], y, p[2]];
         let want_pool = r.next_float() < wet;
         let mut floor = base_floor;
-        if want_pool && let Some(fy) = base_floor && self.can_pool(pal, &*level, at(fy)) {
+        if want_pool
+            && let Some(fy) = base_floor
+            && self.can_pool(pal, &*level, at(fy))
+        {
             floor = Some(fy - 1);
             put(level, at(fy), self.b.water);
         }
@@ -1326,7 +1503,10 @@ impl SpeleothemCluster {
 
     fn can_pool(&self, pal: &Palette, level: &dyn Level, p: Pos) -> bool {
         let s = get(level, p);
-        if pal.same_block(s, self.b.water) || pal.same_block(s, self.b.base) || pal.same_block(s, self.b.pointed) {
+        if pal.same_block(s, self.b.water)
+            || pal.same_block(s, self.b.base)
+            || pal.same_block(s, self.b.pointed)
+        {
             return false;
         }
         if pal.fluid(get(level, add(p, [0, 1, 0]))).is_water() {
@@ -1421,7 +1601,11 @@ pub(super) struct LargeDripstone {
 
 impl LargeDripstone {
     pub(super) fn parse(v: &Value, pal: &mut Palette) -> Result<Self, String> {
-        let flt = |k: &str| v[k].as_f64().map(|x| x as f32).ok_or(format!("large_dripstone: {k}"));
+        let flt = |k: &str| {
+            v[k].as_f64()
+                .map(|x| x as f32)
+                .ok_or(format!("large_dripstone: {k}"))
+        };
         Ok(Self {
             replaceable: block_set(&v["replaceable_blocks"], pal)?,
             search: v["floor_to_ceiling_search_range"].as_i64().unwrap_or(30) as i32,
@@ -1455,7 +1639,9 @@ impl LargeDripstone {
         }
         // `Column.scan`: края — основание (капельник или заменяемое) или лава.
         let edge = |s: u32| {
-            pal.same_block(s, self.dripstone) || Palette::flag(&self.replaceable, s) || pal.same_block(s, self.lava)
+            pal.same_block(s, self.dripstone)
+                || Palette::flag(&self.replaceable, s)
+                || pal.same_block(s, self.lava)
         };
         let scan = |step: i32| {
             let mut y = o[1];
@@ -1505,7 +1691,11 @@ impl LargeDripstone {
                 max: 16 - radius,
             }
         } else {
-            Wind { origin_y: 0, speed: None, max: 0 }
+            Wind {
+                origin_y: 0,
+                speed: None,
+                max: 0,
+            }
         };
         let top_ok = self.embed(pal, &*level, &mut top, &wind);
         let bottom_ok = self.embed(pal, &*level, &mut bottom, &wind);
@@ -1555,7 +1745,14 @@ impl LargeDripstone {
         false
     }
 
-    fn place_blocks(&self, pal: &Palette, level: &mut dyn Level, r: &mut Worldgen, d: &Large, wind: &Wind) {
+    fn place_blocks(
+        &self,
+        pal: &Palette,
+        level: &mut dyn Level,
+        r: &mut Worldgen,
+        d: &Large,
+        wind: &Wind,
+    ) {
         for dx in -d.radius..=d.radius {
             for dz in -d.radius..=d.radius {
                 let dist = ((dx * dx + dz * dz) as f32).sqrt();
@@ -1647,7 +1844,9 @@ impl UnderwaterMagma {
     pub(super) fn parse(v: &Value) -> Result<Self, String> {
         Ok(Self {
             search: v["floor_search_range"].as_i64().unwrap_or(5) as i32,
-            chance: v["placement_probability_per_valid_position"].as_f64().unwrap_or(0.5) as f32,
+            chance: v["placement_probability_per_valid_position"]
+                .as_f64()
+                .unwrap_or(0.5) as f32,
             radius: v["placement_radius_around_floor"].as_i64().unwrap_or(1) as i32,
         })
     }
@@ -1660,36 +1859,48 @@ impl UnderwaterMagma {
         ) else {
             return;
         };
-        // Дно ниже точки: первая не-вода.
-        let mut floor: Option<Pos> = None;
-        for y in (o[1] - self.search..=o[1]).rev() {
-            let p = [o[0], y, o[2]];
-            let s = get(level, p);
-            if s != water && !pal.is_air(s) {
-                floor = Some(p);
-                break;
-            }
-        }
-        let Some(floor) = floor else {
-            return;
-        };
-        if get(level, add(floor, [0, 1, 0])) != water {
+        // Точка старта — вода. Пол — первая не-вода на спуске, не дальше
+        // `search - 1` шага (`Column.scan` вниз).
+        if !pal.same_block(get(level, o), water) {
             return;
         }
+        let mut y = o[1];
+        let mut step = 1;
+        while step < self.search && pal.same_block(get(level, [o[0], y, o[2]]), water) {
+            y -= 1;
+            step += 1;
+        }
+        if pal.same_block(get(level, [o[0], y, o[2]]), water) {
+            return;
+        }
+        // `betweenClosed`: x, затем y, затем z. Бросок на каждую клетку,
+        // магма — только в закрытом твёрдом блоке, не в воде.
         let rad = self.radius;
-        for dx in -rad..=rad {
-            for dz in -rad..=rad {
-                for dy in -rad..=rad {
-                    if r.next_float() >= self.chance {
-                        continue;
-                    }
-                    let p = add(floor, [dx, dy, dz]);
-                    if get(level, p) == water {
-                        put(level, p, magma);
-                    }
-                }
+        let span = (rad * 2 + 1) as usize;
+        let end = span * span * span;
+        for index in 0..end {
+            if r.next_float() >= self.chance {
+                continue;
+            }
+            let x = (index % span) as i32;
+            let slice = index / span;
+            let yy = (slice % span) as i32;
+            let z = (slice / span) as i32;
+            let p = [o[0] - rad + x, y - rad + yy, o[2] - rad + z];
+            if self.enclosed(pal, water, level, p) {
+                put(level, p, magma);
             }
         }
+    }
+
+    /// Клетка не вода и не воздух, а низ и четыре стороны закрыты полным кубом.
+    fn enclosed(&self, pal: &Palette, water: u32, level: &dyn Level, p: Pos) -> bool {
+        let here = get(level, p);
+        if pal.is_air(here) || pal.same_block(here, water) {
+            return false;
+        }
+        let covers = |q: Pos| pal.is_full_cube(get(level, q));
+        covers([p[0], p[1] - 1, p[2]]) && HORIZONTAL.iter().all(|d| covers(add(p, *d)))
     }
 }
 
@@ -1700,10 +1911,14 @@ pub(super) fn bamboo(f: &Features, level: &mut dyn Level, r: &mut Worldgen, o: P
         return;
     };
     let below = add(o, [0, -1, 0]);
-    let soil = ["minecraft:grass_block", "minecraft:dirt", "minecraft:podzol"]
-        .iter()
-        .filter_map(|n| pal.defaults.get(*n).copied())
-        .any(|s| pal.same_block(get(level, below), s));
+    let soil = [
+        "minecraft:grass_block",
+        "minecraft:dirt",
+        "minecraft:podzol",
+    ]
+    .iter()
+    .filter_map(|n| pal.defaults.get(*n).copied())
+    .any(|s| pal.same_block(get(level, below), s));
     if !soil || !pal.is_air(get(level, o)) {
         return;
     }
@@ -1951,7 +2166,15 @@ impl SculkPatch {
                 } else if r.next_int_bound(4) == 0 {
                     let p = add(o, [r.next_int_bound(3) - 1, 0, r.next_int_bound(3) - 1]);
                     if pal.is_air(get(level, p)) {
-                        put(level, p, if r.next_int_bound(2) == 0 { self.shrieker } else { self.sensor });
+                        put(
+                            level,
+                            p,
+                            if r.next_int_bound(2) == 0 {
+                                self.shrieker
+                            } else {
+                                self.sensor
+                            },
+                        );
                     }
                 }
             }

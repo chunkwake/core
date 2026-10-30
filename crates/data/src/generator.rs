@@ -3,6 +3,7 @@
 //! `java -DbundlerMainClass=net.minecraft.data.Main -jar server.jar --reports --output <dir>`
 
 use crate::DataError;
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -169,6 +170,10 @@ pub fn ensure_generated_with(
         "[3/3] shapes extractor",
         progress,
     )?;
+    // Шаблоны структур не входят в вывод генератора данных: они лежат
+    // в jar версии. Пишем их в тот же временный каталог до маркера.
+    progress("copying structure templates");
+    copy_structures(&jar, &tmp_out)?;
     std::fs::write(tmp_out.join(CACHE_MARKER), "").map_err(|e| io("write", &tmp_out, e))?;
     std::fs::rename(&tmp_out, &target).map_err(|e| io("rename", &tmp_out, e))?;
     Ok(target)
@@ -259,6 +264,145 @@ fn run(
     })
 }
 
+/// В кэше уже есть хотя бы один `.nbt` шаблон.
+pub fn structures_present(data_dir: &Path) -> bool {
+    fn any_nbt(dir: &Path) -> bool {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if any_nbt(&path) {
+                    return true;
+                }
+            } else if path.extension().is_some_and(|e| e == "nbt") {
+                return true;
+            }
+        }
+        false
+    }
+    any_nbt(&data_dir.join("data/minecraft/structure"))
+}
+
+/// Дописывает `data/minecraft/structure/**/*.nbt` из `server.jar` (или из
+/// вложенного jar версии) в готовый кэш. Каталог с шаблонами не трогает
+/// и `reports/` не пересоздаёт. Возвращает число скопированных файлов;
+/// ноль — шаблоны уже были.
+pub fn copy_structures(jar: &Path, data_dir: &Path) -> Result<usize, DataError> {
+    if structures_present(data_dir) {
+        return Ok(0);
+    }
+    let io = |what: &str, p: &Path, e: std::io::Error| {
+        DataError::Io(format!("{what} {}: {e}", p.display()))
+    };
+    let file = std::fs::File::open(jar).map_err(|e| io("open", jar, e))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| DataError::Format {
+        file: jar.display().to_string(),
+        msg: e.to_string(),
+    })?;
+    let staging = data_dir.join("data/minecraft/.structure-partial");
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging).map_err(|e| io("remove", &staging, e))?;
+    }
+    let mut count = write_structures(&mut archive, &staging, jar)?;
+    if count == 0 {
+        let nested = nested_version_jar(&mut archive, jar)?;
+        let mut inner =
+            zip::ZipArchive::new(std::io::Cursor::new(nested)).map_err(|e| DataError::Format {
+                file: jar.display().to_string(),
+                msg: e.to_string(),
+            })?;
+        count = write_structures(&mut inner, &staging, jar)?;
+    }
+    if count == 0 {
+        return Err(DataError::Format {
+            file: jar.display().to_string(),
+            msg: "no data/minecraft/structure/*.nbt".into(),
+        });
+    }
+    let dest = data_dir.join("data/minecraft/structure");
+    if dest.exists() {
+        std::fs::remove_dir_all(&dest).map_err(|e| io("remove", &dest, e))?;
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| io("create", parent, e))?;
+    }
+    std::fs::rename(&staging, &dest).map_err(|e| io("rename", &staging, e))?;
+    Ok(count)
+}
+
+fn is_structure_entry(name: &str) -> bool {
+    let name = name.trim_start_matches('/');
+    name.starts_with("data/minecraft/structure/") && name.ends_with(".nbt") && !name.ends_with('/')
+}
+
+fn write_structures<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    dest: &Path,
+    jar: &Path,
+) -> Result<usize, DataError> {
+    let names: Vec<String> = archive
+        .file_names()
+        .filter(|name| is_structure_entry(name))
+        .map(|name| name.trim_start_matches('/').to_owned())
+        .collect();
+    let io = |what: &str, p: &Path, e: std::io::Error| {
+        DataError::Io(format!("{what} {}: {e}", p.display()))
+    };
+    for name in &names {
+        let mut file = archive.by_name(name).map_err(|e| DataError::Format {
+            file: jar.display().to_string(),
+            msg: format!("{name}: {e}"),
+        })?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(|e| DataError::Format {
+            file: jar.display().to_string(),
+            msg: format!("{name}: {e}"),
+        })?;
+        let rel = name.trim_start_matches("data/minecraft/structure/");
+        let path = dest.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| io("create", parent, e))?;
+        }
+        std::fs::write(&path, bytes).map_err(|e| io("write", &path, e))?;
+    }
+    Ok(names.len())
+}
+
+fn nested_version_jar<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    jar: &Path,
+) -> Result<Vec<u8>, DataError> {
+    let name = {
+        let mut found = None;
+        for entry in archive.file_names() {
+            if entry.starts_with("META-INF/versions/") && entry.ends_with(".jar") {
+                found = Some(entry.to_owned());
+                break;
+            }
+        }
+        found
+    };
+    let Some(name) = name else {
+        return Err(DataError::Format {
+            file: jar.display().to_string(),
+            msg: "no version jar and no structure templates".into(),
+        });
+    };
+    let mut file = archive.by_name(&name).map_err(|e| DataError::Format {
+        file: jar.display().to_string(),
+        msg: format!("{name}: {e}"),
+    })?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|e| DataError::Format {
+            file: jar.display().to_string(),
+            msg: format!("{name}: {e}"),
+        })?;
+    Ok(bytes)
+}
+
 /// Все `.jar` в каталоге, рекурсивно.
 fn jars(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -271,5 +415,51 @@ fn jars(dir: &Path, out: &mut Vec<PathBuf>) {
         } else if p.extension().is_some_and(|e| e == "jar") {
             out.push(std::path::absolute(&p).unwrap_or(p));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Дописывает шаблоны в уже собранный кэш, не снося `reports/`.
+    #[test]
+    fn structures_fill_existing_cache() {
+        let Some(data) = std::env::var_os("CHUNKWAKE_DATA").map(PathBuf::from) else {
+            return;
+        };
+        let marker = data.join(CACHE_MARKER);
+        if !marker.is_file() {
+            return;
+        }
+        if structures_present(&data) {
+            return;
+        }
+        let jar = std::env::var_os("CHUNKWAKE_JAR")
+            .map(PathBuf::from)
+            .filter(|p| p.is_file())
+            .or_else(|| {
+                let mut dir = data.clone();
+                for _ in 0..4 {
+                    if !dir.pop() {
+                        break;
+                    }
+                    let jar = dir.join("server.jar");
+                    if jar.is_file() {
+                        return Some(jar);
+                    }
+                }
+                None
+            });
+        let Some(jar) = jar else {
+            panic!("structure templates are missing and server.jar was not found");
+        };
+        let reports = data.join("reports/packets.json");
+        let before = reports.metadata().unwrap().modified().unwrap();
+        let n = copy_structures(&jar, &data).unwrap();
+        assert!(n > 0);
+        assert!(structures_present(&data));
+        assert!(data.join("data/minecraft/structure/desert_well/well.nbt").is_file());
+        assert_eq!(reports.metadata().unwrap().modified().unwrap(), before);
     }
 }

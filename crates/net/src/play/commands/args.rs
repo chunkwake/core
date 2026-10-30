@@ -98,6 +98,62 @@ impl<'a> Input<'a> {
         Some(word)
     }
 
+    /// Следующий токен до пробела вне кавычек, `[]` и `{}`.
+    ///
+    /// `item[minecraft:custom_name="a b"]` и `{Foo:1, Bar:"x y"}` — одно слово.
+    pub fn balanced(&mut self) -> Option<&'a str> {
+        self.rest = self.rest.trim_start();
+        if self.rest.is_empty() {
+            return None;
+        }
+        let bytes = self.rest.as_bytes();
+        let mut i = 0;
+        let mut curly = 0i32;
+        let mut square = 0i32;
+        let mut quote = 0u8;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if quote != 0 {
+                if c == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if c == quote {
+                    quote = 0;
+                }
+                i += 1;
+                continue;
+            }
+            match c {
+                b'"' | b'\'' => {
+                    quote = c;
+                    i += 1;
+                }
+                b'{' => {
+                    curly += 1;
+                    i += 1;
+                }
+                b'}' => {
+                    curly -= 1;
+                    i += 1;
+                }
+                b'[' => {
+                    square += 1;
+                    i += 1;
+                }
+                b']' => {
+                    square -= 1;
+                    i += 1;
+                }
+                c if c.is_ascii_whitespace() && curly <= 0 && square <= 0 => break,
+                _ => i += 1,
+            }
+        }
+        let word = &self.rest[..i];
+        self.rest = self.rest[i..].trim_start();
+        (!word.is_empty()).then_some(word)
+    }
+
     /// Весь остаток одной строкой: внешние кавычки снимаются.
     ///
     /// Строка в кавычках может стоять в начале: тогда берётся только она
@@ -269,7 +325,10 @@ pub fn rotation(yaw: &str, pitch: &str, base: (f32, f32)) -> Option<(f32, f32)> 
 
 /// Целое в диапазоне.
 pub fn int(token: &str, min: i32, max: i32) -> Option<i32> {
-    token.parse::<i32>().ok().filter(|v| (min..=max).contains(v))
+    token
+        .parse::<i32>()
+        .ok()
+        .filter(|v| (min..=max).contains(v))
 }
 
 /// Время: число, число с `d`/`s`/`t` (дни, секунды, тики).
@@ -373,9 +432,7 @@ pub fn accepts(parser: &Parser, token: &str) -> bool {
         Parser::Double(..) | Parser::Float(..) => token.parse::<f64>().is_ok(),
         Parser::Bool => matches!(token, "true" | "false"),
         Parser::BlockPos | Parser::ColumnPos | Parser::Vec3 | Parser::Vec2 => {
-            token
-                .split_whitespace()
-                .all(|t| Coord::parse(t).is_some())
+            token.split_whitespace().all(|t| Coord::parse(t).is_some())
         }
         Parser::Angle | Parser::Time(_) => time_ticks(token).is_some() || is_coord(token),
         Parser::Gamemode => gamemode(token).is_some(),
@@ -385,14 +442,13 @@ pub fn accepts(parser: &Parser, token: &str) -> bool {
         }
         Parser::ScoreHolder { .. } => token == "*" || !is_coord(token),
         Parser::String(_) | Parser::GreedyStringAsk | Parser::Message | Parser::Component => true,
-        Parser::ItemStack | Parser::ItemPredicate | Parser::ResourceLocation => {
-            !token.is_empty()
-        }
+        Parser::ItemStack | Parser::ItemPredicate | Parser::ResourceLocation => !token.is_empty(),
         Parser::Rotation => {
             let mut it = token.split_whitespace();
             let a = it.next();
             let b = it.next();
-            a.map(|a| Coord::parse(a).is_some() || a.parse::<f32>().is_ok()).unwrap_or(false)
+            a.map(|a| Coord::parse(a).is_some() || a.parse::<f32>().is_ok())
+                .unwrap_or(false)
                 && b.is_none_or(|b| Coord::parse(b).is_some() || b.parse::<f32>().is_ok())
         }
         _ => true,

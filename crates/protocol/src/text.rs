@@ -235,6 +235,97 @@ pub fn plain_text(v: &Value) -> String {
     }
 }
 
+/// Текст для консоли сервера: ключ `translate` подставляется в строку из `en_us`.
+///
+/// Клиенту по-прежнему уходит ключ. В логе оператор видит фразу.
+/// Нет строки в словаре — ключ и аргументы через запятую, не слипшаяся строка.
+pub fn console_line(v: &Value, lang: &std::collections::HashMap<String, String>) -> String {
+    match v {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| console_line(item, lang))
+            .collect::<Vec<_>>()
+            .join(""),
+        Value::Object(object) => {
+            let mut out = if let Some(Value::String(key)) = object.get("translate") {
+                let args = object
+                    .get("with")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .map(|item| console_line(item, lang))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if let Some(template) = lang.get(key) {
+                    apply_format(template, &args)
+                } else if let Some(text) = object.get("text") {
+                    console_line(text, lang)
+                } else if args.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{key}: {}", args.join(", "))
+                }
+            } else if let Some(text) = object.get("text") {
+                console_line(text, lang)
+            } else {
+                String::new()
+            };
+            if let Some(extra) = object.get("extra") {
+                out.push_str(&console_line(extra, lang));
+            }
+            out
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Подстановка `%s`, `%1$s` и `%%`, как в строках перевода Minecraft.
+pub fn apply_format(template: &str, args: &[String]) -> String {
+    let mut out = String::new();
+    let mut chars = template.chars().peekable();
+    let mut next = 0usize;
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            out.push(ch);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('%') => {
+                chars.next();
+                out.push('%');
+            }
+            Some(digit) if digit.is_ascii_digit() => {
+                let mut index = 0usize;
+                while let Some(digit) = chars.peek().copied().filter(|ch| ch.is_ascii_digit()) {
+                    chars.next();
+                    index = index * 10 + (digit as usize - '0' as usize);
+                }
+                if chars.peek() == Some(&'$') {
+                    chars.next();
+                }
+                if chars.peek() == Some(&'s') {
+                    chars.next();
+                }
+                if let Some(arg) = index.checked_sub(1).and_then(|index| args.get(index)) {
+                    out.push_str(arg);
+                }
+            }
+            Some('s') => {
+                chars.next();
+                if let Some(arg) = args.get(next) {
+                    out.push_str(arg);
+                }
+                next += 1;
+            }
+            _ => out.push('%'),
+        }
+    }
+    out
+}
+
 /// Список NBT однороден: одинаковые скаляры — как есть, иначе каждый элемент —
 /// компонент-компаунд (строка → `{"text": ...}`).
 fn list(w: &mut Writer, items: &[Value]) {
@@ -354,9 +445,7 @@ pub struct CommandParsers {
 
 impl CommandParsers {
     /// Собирает таблицу из замыкания «имя → ID»; отсутствующий тип — ошибка.
-    pub fn load<E>(
-        mut lookup: impl FnMut(&'static str) -> Result<i32, E>,
-    ) -> Result<Self, E> {
+    pub fn load<E>(mut lookup: impl FnMut(&'static str) -> Result<i32, E>) -> Result<Self, E> {
         let mut ids = std::collections::HashMap::with_capacity(ARGUMENT_TYPES.len());
         for name in ARGUMENT_TYPES {
             ids.insert(*name, lookup(name)?);
@@ -440,9 +529,14 @@ pub enum Parser {
     /// `minecraft:game_profile`: имя игрока (в т.ч. офлайн).
     GameProfile,
     /// `minecraft:entity` / `minecraft:game_profile`: только игроки и/или одна цель.
-    Entity { players_only: bool, single: bool },
+    Entity {
+        players_only: bool,
+        single: bool,
+    },
     /// `minecraft:score_holder`: `multiple` разрешает `*`.
-    ScoreHolder { multiple: bool },
+    ScoreHolder {
+        multiple: bool,
+    },
     Component,
     Message,
     ItemStack,
@@ -596,9 +690,7 @@ impl Node {
 
     fn redirect(&self) -> Option<&str> {
         match self {
-            Node::Literal { redirect, .. } | Node::Argument { redirect, .. } => {
-                redirect.as_deref()
-            }
+            Node::Literal { redirect, .. } | Node::Argument { redirect, .. } => redirect.as_deref(),
         }
     }
 
@@ -668,9 +760,8 @@ pub fn commands_tree(id: i32, roots: &[Node], parsers: CommandParsers) -> Vec<u8
         // `redirect` идёт между детьми и именем: индекс узла, куда переходит
         // разбор. Неизвестная цель — ошибка сборки, а не молчаливое 0.
         if let Some(target) = redirect {
-            let index = root_index(target).unwrap_or_else(|| {
-                panic!("redirect на неизвестную команду {target}")
-            });
+            let index = root_index(target)
+                .unwrap_or_else(|| panic!("redirect на неизвестную команду {target}"));
             w.var_int(index);
         }
         match node {
@@ -938,11 +1029,9 @@ mod tests {
     /// Каждый ванильный тип аргумента есть в таблице: ID не подменяется нулём.
     #[test]
     fn all_argument_types_have_ids() {
-        let parsers = CommandParsers::load(|name| Ok::<_, ()>(ARGUMENT_TYPES
-            .iter()
-            .position(|n| *n == name)
-            .unwrap() as i32
-            + 1))
+        let parsers = CommandParsers::load(|name| {
+            Ok::<_, ()>(ARGUMENT_TYPES.iter().position(|n| *n == name).unwrap() as i32 + 1)
+        })
         .unwrap();
         for (index, name) in ARGUMENT_TYPES.iter().enumerate() {
             assert_eq!(parsers.id(name), index as i32 + 1, "{name}");
@@ -1132,10 +1221,7 @@ mod tests {
                 let children = reader.var_int();
                 for _ in 0..children {
                     let index = reader.var_int();
-                    assert!(
-                        index < count,
-                        "ребёнок {index} вне пакета из {count} узлов"
-                    );
+                    assert!(index < count, "ребёнок {index} вне пакета из {count} узлов");
                 }
                 // `redirect` читается до имени: индекс узла-цели.
                 if flags & NODE_REDIRECT != 0 {
@@ -1177,13 +1263,7 @@ mod tests {
     #[test]
     fn every_parser_decodes_like_the_client() {
         let parsers = CommandParsers::load(|name| {
-            Ok::<_, ()>(
-                ARGUMENT_TYPES
-                    .iter()
-                    .position(|n| *n == name)
-                    .unwrap_or(0) as i32
-                    + 1,
-            )
+            Ok::<_, ()>(ARGUMENT_TYPES.iter().position(|n| *n == name).unwrap_or(0) as i32 + 1)
         })
         .unwrap();
         // По одному узлу на каждый тип парсера.
@@ -1217,5 +1297,32 @@ mod tests {
         }
         let packet = commands_tree(0x42, &roots, parsers);
         decode::decode(&packet, ARGUMENT_TYPES);
+    }
+
+    #[test]
+    fn console_line_uses_the_english_template() {
+        let mut lang = std::collections::HashMap::new();
+        lang.insert("particle.notFound".into(), "Unknown particle: %s".into());
+        lang.insert(
+            "commands.function.success.single.result".into(),
+            "Function '%2$s' returned %1$s".into(),
+        );
+        let missing = serde_json::json!({
+            "translate": "particle.notFound",
+            "with": ["minecraft:nope"],
+            "color": "red",
+        });
+        assert_eq!(
+            console_line(&missing, &lang),
+            "Unknown particle: minecraft:nope"
+        );
+        let indexed = serde_json::json!({
+            "translate": "commands.function.success.single.result",
+            "with": ["3", {"text": "foo"}],
+        });
+        assert_eq!(console_line(&indexed, &lang), "Function 'foo' returned 3");
+        assert_eq!(apply_format("100%% done", &[]), "100% done");
+        let bare = serde_json::json!({"translate": "missing.key", "with": ["a"]});
+        assert_eq!(console_line(&bare, &lang), "missing.key: a");
     }
 }

@@ -95,6 +95,27 @@ pub fn translate(key: &str, with: Vec<Value>) -> Value {
     }
 }
 
+/// Точка для `commands.locate.*.success`: перевод ждёт один аргумент, не три числа.
+///
+/// `chat.square_brackets` → `[…]`, внутри `chat.coordinates` (`x, y, z`).
+/// Клик подставляет `/tp`.
+pub fn coordinates(pos: [i32; 3]) -> Value {
+    let command = format!("/tp @s {} {} {}", pos[0], pos[1], pos[2]);
+    serde_json::json!({
+        "translate": "chat.square_brackets",
+        "with": [{
+            "translate": "chat.coordinates",
+            "with": [pos[0], pos[1], pos[2]]
+        }],
+        "color": "green",
+        "click_event": {"action": "suggest_command", "command": command},
+        "hover_event": {
+            "action": "show_text",
+            "value": {"translate": "chat.coordinates.tooltip"}
+        }
+    })
+}
+
 /// Обработчик команды: источник, путь литералов и остаток строки.
 pub type Handler = fn(&super::Context<'_>, &Call<'_>) -> Outcome;
 
@@ -337,11 +358,19 @@ pub struct Resolved<'a> {
 /// Таблица объявленных команд.
 pub struct Tree {
     specs: Vec<Spec>,
+    /// Имя верхней команды → индекс в `specs`. Линейный поиск по 200 командам
+    /// был на каждый вызов, включая каждый вложенный `/execute … run`.
+    roots: std::collections::HashMap<String, usize>,
 }
 
 impl Tree {
     pub fn new(specs: Vec<Spec>) -> Self {
-        Self { specs }
+        let roots = specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| (spec.name.clone(), index))
+            .collect();
+        Self { specs, roots }
     }
 
     pub fn specs(&self) -> &[Spec] {
@@ -362,7 +391,7 @@ impl Tree {
     }
 
     pub fn spec(&self, name: &str) -> Option<&Spec> {
-        self.specs.iter().find(|s| s.name == name)
+        self.roots.get(name).map(|index| &self.specs[*index])
     }
 
     pub fn level_of(&self, name: &str) -> Option<i32> {
@@ -377,19 +406,22 @@ impl Tree {
         // Алиас (`/tell` → `/msg`, `/tp` → `/teleport`, `/xp` →
         // `/experience`): имя заменяется на целевое, и разбор идёт заново.
         // Редиректы внутри веток (`/execute as …`) нужны только клиенту.
-        let mut line = line.trim().to_owned();
+        let mut line = line.trim();
+        let mut owned: String;
         let mut level = 0;
         for _ in 0..4 {
-            let (head, rest) = split_head(&line);
+            let (head, rest) = split_head(line);
             let root = self.spec(head)?;
             level = level.max(root.level);
-            match root.redirect.clone() {
+            match root.redirect.as_deref() {
                 Some(target) => {
-                    line = if rest.is_empty() {
-                        target
+                    // Аллоцируем только когда есть алиас, а не на каждый вызов.
+                    owned = if rest.is_empty() {
+                        target.to_owned()
                     } else {
                         format!("{target} {rest}")
                     };
+                    line = owned.as_str();
                 }
                 None => return Some(self.descend(root, rest, level)),
             }
@@ -439,7 +471,11 @@ impl Tree {
         // выполняет ближайшего предка с обработчиком — он разбирает хвост сам.
         // Сверху вниз запоминаем последний исполнимый узел пути.
         if spec.handler.is_none() {
-            let mut found = if root.handler.is_some() { Some(root) } else { None };
+            let mut found = if root.handler.is_some() {
+                Some(root)
+            } else {
+                None
+            };
             let mut walk = root;
             for literal in &path {
                 match walk
@@ -463,8 +499,11 @@ impl Tree {
         // Группа без обработчика (`/weather`): ищем единственного исполнителя
         // среди потомков, чтобы вызов нашёл обработчик и не потерял права.
         while spec.handler.is_none() {
-            let mut executable: Vec<&Spec> =
-                spec.children.iter().filter(|c| c.handler.is_some()).collect();
+            let mut executable: Vec<&Spec> = spec
+                .children
+                .iter()
+                .filter(|c| c.handler.is_some())
+                .collect();
             let only = match executable.len() {
                 1 => executable.pop(),
                 _ => None,
@@ -509,7 +548,9 @@ impl Tree {
         };
         let mut out: Vec<String> = children
             .iter()
-            .filter(|child| level >= child.level && child.name.starts_with(prefix))
+            .filter(|child| {
+                child.parser.is_none() && level >= child.level && child.name.starts_with(prefix)
+            })
             .map(|child| child.name.clone())
             .collect();
         out.sort();
@@ -535,6 +576,42 @@ impl Tree {
                 .find(|c| c.parser.is_none() && c.name == *word)?;
         }
         Some(spec)
+    }
+
+    /// Аргумент-реестр под курсором (`/locate structure …`) и уже набранный префикс.
+    ///
+    /// Клиент сам знает синхронизированные реестры (`worldgen/biome`). Структуры
+    /// туда не входят, поэтому id и `#теги` отдаёт сервер.
+    pub fn pending_resource<'a>(
+        &self,
+        line: &'a str,
+        level: i32,
+    ) -> Option<(&'static str, &'a str)> {
+        let trimmed = line.trim_start();
+        let (body, prefix) = match trimmed.rfind(char::is_whitespace) {
+            Some(i) => (&trimmed[..i], &trimmed[i + 1..]),
+            None => return None,
+        };
+        let words: Vec<&str> = body.split_whitespace().collect();
+        let (first, rest) = words.split_first()?;
+        let root = self.spec(first)?;
+        let node = self.walk_from(root, rest)?;
+        let arg = node.children.iter().find(|c| {
+            level >= c.level
+                && matches!(
+                    c.parser,
+                    Some(
+                        chunkwake_protocol::text::Parser::ResourceOrTag(_)
+                            | chunkwake_protocol::text::Parser::ResourceOrTagKey(_)
+                    )
+                )
+        })?;
+        let reg = match arg.parser.as_ref()? {
+            chunkwake_protocol::text::Parser::ResourceOrTag(r)
+            | chunkwake_protocol::text::Parser::ResourceOrTagKey(r) => *r,
+            _ => return None,
+        };
+        Some((reg, prefix))
     }
 }
 

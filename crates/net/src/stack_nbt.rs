@@ -435,6 +435,7 @@ mod tests {
             custom_name: Some(r#"{"text":"Кирка","italic":false}"#.into()),
             lore: vec![r#""строка""#.into()],
             raw: None,
+            rest: None,
             charged: Vec::new(),
             custom_data: Some(compound_to_net(&Compound::from([(
                 "PublicBukkitValues".into(),

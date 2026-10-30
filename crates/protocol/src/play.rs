@@ -90,6 +90,205 @@ pub fn set_chunk_cache_center(id: i32, x: i32, z: i32) -> Vec<u8> {
     w.buf
 }
 
+/// `set_default_spawn_position`: измерение, `BlockPos` и угол взгляда спавна.
+/// Без этого пакета Xaero не выбирает мир карты и не рисует тайлы.
+pub fn set_default_spawn_position(
+    id: i32,
+    dimension: &str,
+    pos: [i32; 3],
+    yaw: f32,
+    pitch: f32,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .string(dimension)
+        .i64(pack_block_pos(pos))
+        .f32(yaw)
+        .f32(pitch);
+    w.buf
+}
+
+/// Снимок границы для `initialize_border`.
+#[derive(Clone, Copy, Debug)]
+pub struct BorderState {
+    pub center_x: f64,
+    pub center_z: f64,
+    /// Диаметр в начале анимации. Без анимации равен `new_size`.
+    pub old_size: f64,
+    pub new_size: f64,
+    /// Оставшееся время сдвига, миллисекунды. 0 — граница уже стоит.
+    pub lerp_millis: i64,
+    pub warning_blocks: i32,
+    pub warning_time: i32,
+}
+
+impl BorderState {
+    /// Ванильный `WorldBorder`: центр в нуле, диаметр 59999968.
+    pub fn vanilla() -> Self {
+        const SIZE: f64 = 5.9999968e7;
+        Self {
+            center_x: 0.0,
+            center_z: 0.0,
+            old_size: SIZE,
+            new_size: SIZE,
+            lerp_millis: 0,
+            warning_blocks: 5,
+            warning_time: 15,
+        }
+    }
+}
+
+/// `initialize_border` с ванильными значениями `WorldBorder`.
+/// Xaero по этому пакету понимает, что сервер без мода, и включает локальную карту.
+pub fn initialize_border(id: i32) -> Vec<u8> {
+    initialize_border_state(id, BorderState::vanilla())
+}
+
+/// `initialize_border` с текущей границей мира.
+pub fn initialize_border_state(id: i32, border: BorderState) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .f64(border.center_x)
+        .f64(border.center_z)
+        .f64(border.old_size)
+        .f64(border.new_size)
+        .var_long(border.lerp_millis.max(0))
+        .var_int(29999984)
+        .var_int(border.warning_blocks)
+        .var_int(border.warning_time);
+    w.buf
+}
+
+/// `set_border_center`: новый центр границы.
+pub fn set_border_center(id: i32, x: f64, z: f64) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).f64(x).f64(z);
+    w.buf
+}
+
+/// `set_border_size`: диаметр без анимации.
+pub fn set_border_size(id: i32, size: f64) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).f64(size);
+    w.buf
+}
+
+/// `set_border_lerp_size`: старый и новый диаметр и время сдвига в миллисекундах.
+pub fn set_border_lerp_size(id: i32, old: f64, new: f64, millis: i64) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).f64(old).f64(new).var_long(millis.max(0));
+    w.buf
+}
+
+/// `set_border_warning_delay`: за сколько тиков экран краснеет у границы.
+pub fn set_border_warning_delay(id: i32, ticks: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(ticks);
+    w.buf
+}
+
+/// `set_border_warning_distance`: за сколько блоков до границы экран краснеет.
+pub fn set_border_warning_distance(id: i32, blocks: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(blocks);
+    w.buf
+}
+
+/// `set_camera`: чья сущность становится камерой (`/spectate`).
+pub fn set_camera(id: i32, entity_id: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_id);
+    w.buf
+}
+
+/// `swing_animation`: рука, вид взмаха (`none`/`whack`/`stab`) и длительность.
+pub fn swing_animation(id: i32, entity_id: i32, hand: i32, kind: i32, duration: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .var_int(entity_id)
+        .var_int(hand)
+        .var_int(kind)
+        .var_int(duration);
+    w.buf
+}
+
+/// `boss_event` ADD: имя, заполнение 0..1, цвет, деление и флаги (небо, музыка, туман).
+pub fn boss_event_add(
+    id: i32,
+    uuid: Uuid,
+    name: &serde_json::Value,
+    progress: f32,
+    color: i32,
+    overlay: i32,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).uuid(uuid).var_int(0);
+    crate::text::write_component(&mut w, name);
+    w.f32(progress.clamp(0.0, 1.0))
+        .var_int(color)
+        .var_int(overlay)
+        .u8(0);
+    w.buf
+}
+
+/// `boss_event` REMOVE.
+pub fn boss_event_remove(id: i32, uuid: Uuid) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).uuid(uuid).var_int(1);
+    w.buf
+}
+
+/// `boss_event` UPDATE_PROGRESS.
+pub fn boss_event_progress(id: i32, uuid: Uuid, progress: f32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .uuid(uuid)
+        .var_int(2)
+        .f32(progress.clamp(0.0, 1.0));
+    w.buf
+}
+
+/// `boss_event` UPDATE_NAME.
+pub fn boss_event_name(id: i32, uuid: Uuid, name: &serde_json::Value) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).uuid(uuid).var_int(3);
+    crate::text::write_component(&mut w, name);
+    w.buf
+}
+
+/// `boss_event` UPDATE_STYLE: цвет и деление.
+pub fn boss_event_style(id: i32, uuid: Uuid, color: i32, overlay: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .uuid(uuid)
+        .var_int(4)
+        .var_int(color)
+        .var_int(overlay);
+    w.buf
+}
+
+/// `post_effects`: полный список эффектов экрана игрока.
+pub fn post_effects(id: i32, effects: &[String]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(effects.len() as i32);
+    for effect in effects {
+        w.string(effect);
+    }
+    w.buf
+}
+
+/// `set_passengers`: кто сидит на сущности (`/ride`).
+pub fn set_passengers(id: i32, vehicle: i32, passengers: &[i32]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .var_int(vehicle)
+        .var_int(passengers.len() as i32);
+    for entity in passengers {
+        w.var_int(*entity);
+    }
+    w.buf
+}
+
 /// `level_chunk_with_light`: координаты + заранее закодированное тело чанка.
 pub fn level_chunk_with_light(id: i32, x: i32, z: i32, body: &[u8]) -> Vec<u8> {
     let mut w = Writer::new();
@@ -185,6 +384,161 @@ mod tests {
         assert_eq!(none.len(), some.len(), "both 1-byte VarInts");
         assert_ne!(none, some);
     }
+
+    #[test]
+    fn spawn_and_border_packets() {
+        let pkt = set_default_spawn_position(7, "minecraft:overworld", [8, -60, 8], 0.0, 90.0);
+        let mut r = Reader::new(&pkt);
+        assert_eq!(r.var_int().unwrap(), 7);
+        assert_eq!(r.string(256).unwrap(), "minecraft:overworld");
+        assert_eq!(unpack_block_pos(r.i64().unwrap()), [8, -60, 8]);
+        assert_eq!(r.f32().unwrap(), 0.0);
+        assert_eq!(r.f32().unwrap(), 90.0);
+        assert!(r.remaining().is_empty());
+
+        let border = initialize_border(3);
+        let mut r = Reader::new(&border);
+        assert_eq!(r.var_int().unwrap(), 3);
+        assert_eq!((r.f64().unwrap(), r.f64().unwrap()), (0.0, 0.0));
+        assert_eq!(r.f64().unwrap(), 5.9999968e7);
+        assert_eq!(r.f64().unwrap(), 5.9999968e7);
+        assert_eq!(r.var_long().unwrap(), 0);
+        assert_eq!(r.var_int().unwrap(), 29999984);
+        assert_eq!(r.var_int().unwrap(), 5);
+        assert_eq!(r.var_int().unwrap(), 15);
+        assert!(r.remaining().is_empty());
+    }
+
+    #[test]
+    fn border_swing_and_passengers_packets() {
+        let center = set_border_center(1, 4.0, -2.0);
+        let mut r = Reader::new(&center);
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!((r.f64().unwrap(), r.f64().unwrap()), (4.0, -2.0));
+        assert!(r.remaining().is_empty());
+
+        let size = set_border_size(2, 32.0);
+        let mut r = Reader::new(&size);
+        assert_eq!(r.var_int().unwrap(), 2);
+        assert_eq!(r.f64().unwrap(), 32.0);
+
+        let lerp = set_border_lerp_size(3, 32.0, 64.0, 1000);
+        let mut r = Reader::new(&lerp);
+        assert_eq!(r.var_int().unwrap(), 3);
+        assert_eq!(r.f64().unwrap(), 32.0);
+        assert_eq!(r.f64().unwrap(), 64.0);
+        assert_eq!(r.var_long().unwrap(), 1000);
+
+        let swing = swing_animation(4, 9, 1, 2, 6);
+        let mut r = Reader::new(&swing);
+        assert_eq!(r.var_int().unwrap(), 4);
+        assert_eq!(r.var_int().unwrap(), 9);
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.var_int().unwrap(), 2);
+        assert_eq!(r.var_int().unwrap(), 6);
+        assert!(r.remaining().is_empty());
+
+        let ride = set_passengers(5, 3, &[8, 9]);
+        let mut r = Reader::new(&ride);
+        assert_eq!(r.var_int().unwrap(), 5);
+        assert_eq!(r.var_int().unwrap(), 3);
+        assert_eq!(r.var_int().unwrap(), 2);
+        assert_eq!(r.var_int().unwrap(), 8);
+        assert_eq!(r.var_int().unwrap(), 9);
+        assert!(r.remaining().is_empty());
+    }
+
+    #[test]
+    fn boss_and_post_effect_packets() {
+        let uuid = Uuid::from_u128(7);
+        let gone = boss_event_remove(9, uuid);
+        let mut r = Reader::new(&gone);
+        assert_eq!(r.var_int().unwrap(), 9);
+        assert_eq!(r.uuid().unwrap(), uuid);
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert!(r.remaining().is_empty());
+
+        let progress = boss_event_progress(9, uuid, 0.25);
+        let mut r = Reader::new(&progress);
+        assert_eq!(r.var_int().unwrap(), 9);
+        assert_eq!(r.uuid().unwrap(), uuid);
+        assert_eq!(r.var_int().unwrap(), 2);
+        assert_eq!(r.f32().unwrap(), 0.25);
+        assert!(r.remaining().is_empty());
+
+        let effects = post_effects(4, &["minecraft:blur".into(), "minecraft:creeper".into()]);
+        let mut r = Reader::new(&effects);
+        assert_eq!(r.var_int().unwrap(), 4);
+        assert_eq!(r.var_int().unwrap(), 2);
+        assert_eq!(r.string(64).unwrap(), "minecraft:blur");
+        assert_eq!(r.string(64).unwrap(), "minecraft:creeper");
+        assert!(r.remaining().is_empty());
+
+        let biomes = chunks_biomes(13, &[(0, 0, &[1, 2, 3])]);
+        let mut r = Reader::new(&biomes);
+        assert_eq!(r.var_int().unwrap(), 13);
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.i64().unwrap(), 0);
+        assert_eq!(r.var_int().unwrap(), 3);
+        assert_eq!(r.remaining(), &[1, 2, 3]);
+
+        let survival = player_abilities(1, 0, false);
+        assert_eq!(survival[1], 0);
+        let allowed = player_abilities(1, 0, true);
+        assert_eq!(allowed[1], 0x04);
+
+        let point = waypoint_position(141, 0, uuid, "minecraft:default", Some(0xFF5555), [1, 2, 3]);
+        let mut r = Reader::new(&point);
+        assert_eq!(r.var_int().unwrap(), 141);
+        assert_eq!(r.var_int().unwrap(), 0);
+        assert!(r.bool().unwrap());
+        assert_eq!(r.uuid().unwrap(), uuid);
+        assert_eq!(r.string(64).unwrap(), "minecraft:default");
+        assert!(r.bool().unwrap());
+        assert_eq!(r.u8().unwrap(), 0xFF);
+        assert_eq!(r.u8().unwrap(), 0x55);
+        assert_eq!(r.u8().unwrap(), 0x55);
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.var_int().unwrap(), 2);
+        assert_eq!(r.var_int().unwrap(), 3);
+        assert!(r.remaining().is_empty());
+
+        let clear = clear_dialog(142);
+        let mut r = Reader::new(&clear);
+        assert_eq!(r.var_int().unwrap(), 142);
+        assert!(r.remaining().is_empty());
+
+        let flame = level_particles(48, 16, true, [1.0, 2.0, 3.0], [0.1, 0.0, 0.0], 0.5, 4);
+        let mut r = Reader::new(&flame);
+        assert_eq!(r.var_int().unwrap(), 48);
+        assert_eq!(r.var_int().unwrap(), 16);
+        assert!(r.bool().unwrap());
+        assert!(!r.bool().unwrap());
+        assert_eq!(r.f64().unwrap(), 1.0);
+        assert_eq!(r.f64().unwrap(), 2.0);
+        assert_eq!(r.f64().unwrap(), 3.0);
+        assert_eq!(r.f32().unwrap(), 0.1);
+        assert_eq!(r.f32().unwrap(), 0.0);
+        assert_eq!(r.f32().unwrap(), 0.0);
+        assert_eq!(r.f32().unwrap(), 0.5);
+        assert_eq!(r.f32().unwrap(), 0.5);
+        assert_eq!(r.f32().unwrap(), 0.5);
+        assert_eq!(r.var_int().unwrap(), 4);
+        assert_eq!(r.var_int().unwrap(), 0);
+        assert!(r.remaining().is_empty());
+    }
+}
+
+/// `chunks_biomes`: позиции чанков (`ChunkPos.pack`) и контейнеры биомов секций.
+pub fn chunks_biomes(id: i32, chunks: &[(i32, i32, &[u8])]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(chunks.len() as i32);
+    for &(x, z, data) in chunks {
+        let packed = (x as u32 as u64) | ((z as u32 as u64) << 32);
+        w.i64(packed as i64).byte_array(data);
+    }
+    w.buf
 }
 
 /// `system_chat`: текстовый компонент (NBT-строка) и флаг action bar.
@@ -246,14 +600,90 @@ pub fn player_info_game_mode(id: i32, uuid: Uuid, game_mode: i32) -> Vec<u8> {
     w.buf
 }
 
+/// `waypoint`: операция (`TRACK` 0, `UNTRACK` 1, `UPDATE` 2) и точка с позицией.
+///
+/// Иконка — идентификатор стиля и необязательный цвет RGB. Позиция — три varint.
+pub fn waypoint_position(
+    id: i32,
+    operation: i32,
+    uuid: Uuid,
+    style: &str,
+    color: Option<i32>,
+    pos: [i32; 3],
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .var_int(operation)
+        .bool(true)
+        .uuid(uuid)
+        .string(style);
+    match color {
+        Some(rgb) => {
+            w.bool(true)
+                .u8(((rgb >> 16) & 0xff) as u8)
+                .u8(((rgb >> 8) & 0xff) as u8)
+                .u8((rgb & 0xff) as u8);
+        }
+        None => {
+            w.bool(false);
+        }
+    }
+    w.var_int(1).var_int(pos[0]).var_int(pos[1]).var_int(pos[2]);
+    w.buf
+}
+
+/// `clear_dialog`: пустой пакет, клиент закрывает открытый диалог.
+pub fn clear_dialog(id: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id);
+    w.buf
+}
+
+/// `level_particles` для простой частицы: id типа, затем позиция и разброс.
+///
+/// Три скорости — одно значение, как у короткого конструктора пакета.
+/// `randomization` 0 — `DEFAULT`.
+pub fn level_particles(
+    id: i32,
+    particle: i32,
+    force: bool,
+    pos: [f64; 3],
+    delta: [f32; 3],
+    speed: f32,
+    count: i32,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .var_int(particle)
+        .bool(force)
+        .bool(false)
+        .f64(pos[0])
+        .f64(pos[1])
+        .f64(pos[2])
+        .f32(delta[0])
+        .f32(delta[1])
+        .f32(delta[2])
+        .f32(speed)
+        .f32(speed)
+        .f32(speed)
+        .var_int(count)
+        .var_int(0);
+    w.buf
+}
+
 /// `player_abilities` по режиму игры (`GameType.updatePlayerAbilities`):
 /// неуязвимость, полёт, мгновенная ломка; скорости полёта и ходьбы ванилы.
-pub fn player_abilities(id: i32, game_mode: u8) -> Vec<u8> {
-    let flags: u8 = match game_mode {
+///
+/// `allow_flight` включает бит may-fly и в выживании с приключением.
+pub fn player_abilities(id: i32, game_mode: u8, allow_flight: bool) -> Vec<u8> {
+    let mut flags: u8 = match game_mode {
         1 => 0x01 | 0x04 | 0x08,
         3 => 0x01 | 0x02 | 0x04,
         _ => 0,
     };
+    if allow_flight {
+        flags |= 0x04;
+    }
     let mut w = Writer::new();
     w.var_int(id).u8(flags).f32(0.05).f32(0.1);
     w.buf
@@ -545,8 +975,13 @@ pub fn block_entity_data(id: i32, pos: [i32; 3], kind: i32, nbt: &[u8]) -> Vec<u
     w.buf
 }
 
-/// `block_event`: крышка сундука (`action` 1, `param` — сколько игроков смотрят).
-/// `block` — ID в реестре `block`, не состояние.
+/// `ClientboundTransferPacket`: клиент переподключается к `host:port`.
+pub fn transfer(id: i32, host: &str, port: u16) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).string(host).var_int(i32::from(port));
+    w.buf
+}
+
 /// `ClientboundSoundPacket`: звук из реестра в точке (координаты × 8), с зерном.
 pub fn sound(
     id: i32,
@@ -581,6 +1016,8 @@ pub fn level_event(id: i32, event: i32, pos: [i32; 3], data: i32, global: bool) 
     w.buf
 }
 
+/// `block_event`: крышка сундука (`action` 1, `param` — сколько игроков смотрят).
+/// `block` — ID в реестре `block`, не состояние.
 pub fn block_event(id: i32, pos: [i32; 3], action: u8, param: u8, block: i32) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id)
@@ -615,19 +1052,21 @@ pub fn clear_titles(id: i32, reset: bool) -> Vec<u8> {
 }
 
 /// `ClientboundStopSoundPacket`: остановить звук (`sound` — `None` значит все).
-pub fn stop_sound(id: i32, sound: Option<i32>, source: i32) -> Vec<u8> {
+///
+/// Источник `Some(0)` — категория `master`. `None` — категория не задана.
+pub fn stop_sound(id: i32, sound: Option<i32>, source: Option<i32>) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id);
     // Флаги: 1 — есть источник, 2 — есть звук.
     let mut flags = 0u8;
-    if source > 0 {
+    if source.is_some() {
         flags |= 1;
     }
     if sound.is_some() {
         flags |= 2;
     }
     w.u8(flags);
-    if flags & 1 != 0 {
+    if let Some(source) = source {
         w.var_int(source);
     }
     if let Some(sound) = sound {
@@ -637,6 +1076,14 @@ pub fn stop_sound(id: i32, sound: Option<i32>, source: i32) -> Vec<u8> {
     w.buf
 }
 
+/// Формат числа на счёте: пусто, стиль или фиксированный текст.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NumberFormat {
+    Blank,
+    Styled(serde_json::Value),
+    Fixed(serde_json::Value),
+}
+
 /// `ClientboundSetObjectivePacket`: `mode` 0 — создать, 1 — убрать, 2 — обновить.
 pub fn set_objective(
     id: i32,
@@ -644,7 +1091,7 @@ pub fn set_objective(
     mode: u8,
     display_name: &serde_json::Value,
     render_type: i32,
-    has_number_format: bool,
+    format: Option<&NumberFormat>,
     has_display_name: bool,
 ) -> Vec<u8> {
     let mut w = Writer::new();
@@ -652,11 +1099,35 @@ pub fn set_objective(
     if mode != 1 {
         crate::text::write_component(&mut w, display_name);
         w.var_int(render_type);
-        // OPTIONAL_NUMBER_FORMAT: 0 — нет формата.
-        w.bool(has_number_format);
+        // OPTIONAL_NUMBER_FORMAT: 0 — нет формата. Тело идёт сразу за флагом.
+        match format {
+            Some(format) => {
+                w.bool(true);
+                write_number_format(&mut w, format);
+            }
+            None => {
+                w.bool(false);
+            }
+        }
     }
     w.bool(!has_display_name || mode != 1);
     w.buf
+}
+
+fn write_number_format(w: &mut Writer, format: &NumberFormat) {
+    match format {
+        NumberFormat::Blank => {
+            w.var_int(0);
+        }
+        NumberFormat::Styled(value) => {
+            w.var_int(1);
+            crate::text::write_component(w, value);
+        }
+        NumberFormat::Fixed(value) => {
+            w.var_int(2);
+            crate::text::write_component(w, value);
+        }
+    }
 }
 
 /// `ClientboundSetScorePacket`: значение счёта держателя.

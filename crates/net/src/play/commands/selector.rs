@@ -92,7 +92,7 @@ impl Selector {
             "@a" => Kind::AllPlayers,
             "@e" => Kind::AllEntities,
             other if other.starts_with('@') => {
-                return Err(ArgError::new("argument.entity.selector.unknown"))
+                return Err(ArgError::new("argument.entity.selector.unknown"));
             }
             _ => Kind::Named,
         };
@@ -230,10 +230,7 @@ impl Selector {
             "tag" => self.tags.push((value.to_owned(), !negated)),
             "scores" => {
                 // `scores={objective=1..5,other=..3}` — вложенные скобки.
-                let inner = value
-                    .trim_start_matches('{')
-                    .trim_end_matches('}')
-                    .trim();
+                let inner = value.trim_start_matches('{').trim_end_matches('}').trim();
                 for pair in inner.split(',').filter(|p| !p.trim().is_empty()) {
                     let (objective, range) = pair
                         .split_once('=')
@@ -277,99 +274,98 @@ impl Selector {
             self.kind,
             Kind::Self_ | Kind::Nearest | Kind::Random | Kind::AllPlayers
         );
-        let mut out: Vec<Target> = match self.kind {
-            Kind::Self_ => {
-                let source =
-                    source.ok_or_else(|| ArgError::new("argument.entity.notfound.entity"))?;
-                vec![source.clone()]
+        // `type=` и `name=` разбираются в фильтре один раз, а не на каждую цель:
+        // иначе на каждый `@e` приходилось `format!` и `to_lowercase`.
+        let kind = self.kind_filter.as_deref().map(TypeFilter::new);
+        let name_filter = self.name_filter.as_deref().map(NameFilter::new);
+        // Метки есть только у целей, которых нет в снимке: у остальных они уже там.
+        let needs_tags = !self.tags.is_empty();
+
+        if self.kind == Kind::Self_ {
+            let source = source.ok_or_else(|| ArgError::new("argument.entity.notfound.entity"))?;
+            if !self.matches(
+                source,
+                origin,
+                player_only,
+                kind.as_ref(),
+                name_filter.as_ref(),
+                &tags_of,
+            ) {
+                return Err(ArgError::new("argument.entity.notfound.entity"));
             }
-            Kind::Named => targets
-                .iter()
-                .filter(|t| t.name.eq_ignore_ascii_case(&self.name))
-                .cloned()
-                .collect(),
-            _ => targets.to_vec(),
-        };
-        out.retain(|t| {
-            if player_only && t.game_mode.is_none() {
-                return false;
-            }
-            if let Some(kind) = &self.kind_filter {
-                let want = super::args::resource_name(kind);
-                // Имена мобов в снимке уже с пространством: `minecraft:cow`.
-                if !t.name.eq_ignore_ascii_case(&want) && !format!("minecraft:{}", t.name).eq(&want)
-                {
-                    // `type=` относится к типу сущности, а не к имени игрока.
-                    if t.game_mode.is_some() && want != "minecraft:player" {
-                        return false;
-                    }
-                }
-            }
-            if let Some((min, max)) = self.distance {
-                let d = distance(t.pos, origin);
-                if d < min || d > max {
-                    return false;
-                }
-            }
-            if let Some(volume) = self.volume {
-                for index in 0..3 {
-                    let delta = t.pos[index] - origin[index];
-                    if delta < 0.0 || delta > volume[index] {
-                        return false;
-                    }
-                }
-            }
-            if let Some(mode) = self.gamemode
-                && t.game_mode != Some(mode)
-            {
-                return false;
-            }
-            if let Some(name) = &self.name_filter {
-                match name.strip_prefix('!') {
-                    Some(negated) => {
-                        if t.name.eq_ignore_ascii_case(negated) {
-                            return false;
-                        }
-                    }
-                    None => {
-                        // Ванила сравнивает имя как шаблон с `*`.
-                        if !wildcard(name, &t.name) {
-                            return false;
-                        }
-                    }
-                }
-            }
-            if let Some((yaw, pitch)) = self.yaw.zip(self.pitch) {
-                // Поле зрения: разница углов в пределах половины обзора.
-                let dyaw = wrap_degrees(t.yaw - yaw).abs();
-                let dpitch = (t.pitch - pitch).abs();
-                if dyaw > 45.0 || dpitch > 45.0 {
-                    return false;
-                }
-            }
-            if !self.tags.is_empty() {
-                let held = tags_of(t);
-                for (tag, want) in &self.tags {
-                    if held.iter().any(|h| h == tag) != *want {
-                        return false;
-                    }
-                }
-            }
-            true
-        });
-        if self.kind == Kind::Self_ && out.is_empty() {
-            return Err(ArgError::new("argument.entity.notfound.entity"));
+            return Ok(vec![source.clone()]);
         }
+
+        // Снимок перебирается без клонирования: клонируются только совпавшие.
+        let candidates: Box<dyn Iterator<Item = &Target> + '_> = match self.kind {
+            Kind::Named => Box::new(
+                targets
+                    .iter()
+                    .filter(|t| t.name.eq_ignore_ascii_case(&self.name)),
+            ),
+            _ => Box::new(targets.iter()),
+        };
+        let mut out: Vec<Target> = candidates
+            .filter(|t| {
+                self.matches(
+                    t,
+                    origin,
+                    player_only,
+                    kind.as_ref(),
+                    name_filter.as_ref(),
+                    &tags_of,
+                )
+            })
+            .cloned()
+            .collect();
+        let _ = needs_tags;
+
         // Сортировка и лимит.
+        let one = match self.limit {
+            Some(limit) => limit == 1,
+            None => matches!(self.kind, Kind::Nearest | Kind::Random | Kind::Named),
+        };
+        // Для одной цели сортировать весь список незачем: выбираем минимум.
+        if one {
+            let pick = match self.sort {
+                Sort::Nearest => out
+                    .iter()
+                    .min_by(|a, b| {
+                        squared(a.pos, origin)
+                            .total_cmp(&squared(b.pos, origin))
+                            .then(a.entity_id.cmp(&b.entity_id))
+                    })
+                    .cloned(),
+                Sort::Furthest => out
+                    .iter()
+                    .max_by(|a, b| {
+                        squared(a.pos, origin)
+                            .total_cmp(&squared(b.pos, origin))
+                            .then(b.entity_id.cmp(&a.entity_id))
+                    })
+                    .cloned(),
+                Sort::Random => {
+                    use rand::Rng;
+                    let pick = if out.is_empty() {
+                        None
+                    } else {
+                        Some(rand::thread_rng().gen_range(0..out.len()))
+                    };
+                    pick.map(|i| out.swap_remove(i))
+                }
+                Sort::Arbitrary => out.first().cloned(),
+            };
+            return Ok(pick.into_iter().collect());
+        }
         match self.sort {
             Sort::Nearest => out.sort_by(|a, b| {
-                distance(a.pos, origin)
-                    .total_cmp(&distance(b.pos, origin))
+                squared(a.pos, origin)
+                    .total_cmp(&squared(b.pos, origin))
                     .then(a.entity_id.cmp(&b.entity_id))
             }),
             Sort::Furthest => out.sort_by(|a, b| {
-                distance(b.pos, origin)
-                    .total_cmp(&distance(a.pos, origin))
+                squared(b.pos, origin)
+                    .total_cmp(&squared(a.pos, origin))
                     .then(a.entity_id.cmp(&b.entity_id))
             }),
             Sort::Random => {
@@ -380,10 +376,76 @@ impl Selector {
         }
         if let Some(limit) = self.limit {
             out.truncate(limit);
-        } else if matches!(self.kind, Kind::Nearest | Kind::Random | Kind::Named) {
-            out.truncate(1);
         }
         Ok(out)
+    }
+
+    /// Подходит ли цель под условия селектора.    #[allow(clippy::too_many_arguments)]
+    fn matches(
+        &self,
+        target: &Target,
+        origin: [f64; 3],
+        player_only: bool,
+        kind: Option<&TypeFilter>,
+        name: Option<&NameFilter>,
+        tags_of: &impl Fn(&Target) -> Vec<String>,
+    ) -> bool {
+        if player_only && target.game_mode.is_none() {
+            return false;
+        }
+        if let Some(kind) = kind
+            && !kind.matches(target)
+        {
+            return false;
+        }
+        if let Some((min, max)) = self.distance {
+            // Сравнение по квадрату: корень нужен только для ответа, не для отбора.
+            let d = squared(target.pos, origin);
+            let lo = if min <= 0.0 { 0.0 } else { min * min };
+            let hi = if max.is_finite() {
+                max * max
+            } else {
+                f64::INFINITY
+            };
+            if d < lo || d > hi {
+                return false;
+            }
+        }
+        if let Some(volume) = self.volume {
+            for index in 0..3 {
+                let delta = target.pos[index] - origin[index];
+                if delta < 0.0 || delta > volume[index] {
+                    return false;
+                }
+            }
+        }
+        if let Some(mode) = self.gamemode
+            && target.game_mode != Some(mode)
+        {
+            return false;
+        }
+        if let Some(name) = name
+            && !name.matches(&target.name)
+        {
+            return false;
+        }
+        if let Some((yaw, pitch)) = self.yaw.zip(self.pitch) {
+            // Поле зрения: разница углов в пределах половины обзора.
+            let dyaw = wrap_degrees(target.yaw - yaw).abs();
+            let dpitch = (target.pitch - pitch).abs();
+            if dyaw > 45.0 || dpitch > 45.0 {
+                return false;
+            }
+        }
+        if !self.tags.is_empty() {
+            let held = tags_of(target);
+            for (tag, want) in &self.tags {
+                if held.iter().any(|h| h == tag) != *want {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Ожидается ровно одна цель: `@p`, `@r`, `@s`, имя, `limit=1`.
@@ -391,9 +453,21 @@ impl Selector {
         self.single
     }
 
+    /// Кому хватит одной цели: `@p`/`@r`/имя или явный `limit=1`.    ///
+    /// Обработчикам вроде `/waypoint` нужен один игрок, но снимок мира им
+    /// не нужен: вместо перебора всех целей достаточно взять первого.
+    pub fn wants_one(&self) -> bool {
+        self.single || self.limit == Some(1)
+    }
+
     /// Есть ли отбор, кроме «все игроки»: `/tp @a` из консоли.
     pub fn is_broad(&self) -> bool {
         matches!(self.kind, Kind::AllPlayers | Kind::AllEntities)
+    }
+
+    /// Вид селектора (`@s` и `@p` нужны вызывающему без полного снимка).
+    pub fn kind(&self) -> Kind {
+        self.kind
     }
 }
 
@@ -422,10 +496,64 @@ fn range_of(token: &str) -> Result<(f64, f64), ArgError> {
     }
 }
 
-/// Расстояние между точками.
-fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
+/// Квадрат расстояния: для отбора и сортировки корень не нужен.
+fn squared(a: [f64; 3], b: [f64; 3]) -> f64 {
     let (dx, dy, dz) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
-    (dx * dx + dy * dy + dz * dz).sqrt()
+    dx * dx + dy * dy + dz * dz
+}
+
+/// `type=` разобранный один раз: полное имя и его короткая форма.
+struct TypeFilter {
+    want: String,
+    /// `cow` совпадает и с целью `minecraft:cow`, и с целью `cow`.
+    short: String,
+}
+
+impl TypeFilter {
+    fn new(raw: &str) -> Self {
+        let want = super::args::resource_name(raw);
+        let short = want
+            .strip_prefix("minecraft:")
+            .map_or_else(|| want.clone(), str::to_owned);
+        Self { want, short }
+    }
+
+    /// Игрок — это `type=player`; у моба имя цели и есть его тип.
+    fn matches(&self, target: &Target) -> bool {
+        if target.game_mode.is_some() {
+            return self.short == "player";
+        }
+        // Имена мобов в снимке уже с пространством: `minecraft:cow`.
+        target.name.eq_ignore_ascii_case(&self.want)
+            || target.name.eq_ignore_ascii_case(&self.short)
+    }
+}
+
+/// `name=` разобранный один раз: точное сравнение или шаблон с `*`.
+enum NameFilter {
+    Exact(String),
+    Negated(String),
+    Pattern(String),
+}
+
+impl NameFilter {
+    fn new(raw: &str) -> Self {
+        if let Some(negated) = raw.strip_prefix('!') {
+            return Self::Negated(negated.to_owned());
+        }
+        if raw.contains('*') {
+            return Self::Pattern(raw.to_ascii_lowercase());
+        }
+        Self::Exact(raw.to_owned())
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        match self {
+            Self::Exact(want) => name.eq_ignore_ascii_case(want),
+            Self::Negated(want) => !name.eq_ignore_ascii_case(want),
+            Self::Pattern(pattern) => wildcard_lower(pattern, name),
+        }
+    }
 }
 
 /// Угол в пределах `(-180, 180]`.
@@ -441,34 +569,76 @@ fn wrap_degrees(deg: f32) -> f32 {
 
 /// Шаблон имени с `*` (звёздочек может быть несколько).
 pub fn wildcard(pattern: &str, name: &str) -> bool {
-    let (pattern, name) = (pattern.to_lowercase(), name.to_lowercase());
-    if !pattern.contains('*') {
-        return pattern == name;
+    if pattern.contains('*') {
+        // Шаблон приводится к нижнему регистру один раз, имя — по буквам ниже.
+        return wildcard_lower(&pattern.to_ascii_lowercase(), name);
     }
-    // Жадный поиск по частям между звёздочками.
-    let parts: Vec<&str> = pattern.split('*').collect();
-    let mut rest = name.as_str();
-    for (index, part) in parts.iter().enumerate() {
+    pattern.eq_ignore_ascii_case(name)
+}
+
+/// То же, но шаблон уже в нижнем регистре: имя не аллоцируется.
+///
+/// Семантика ванильная: первая часть шаблона якорится к началу имени,
+/// средние ищутся где угодно, хвост после последней звёздочки — в конце.
+fn wildcard_lower(pattern: &str, name: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern.eq_ignore_ascii_case(name);
+    }
+    let mut parts = pattern.split('*');
+    let tail = parts.next_back().unwrap_or("");
+    let mut rest = name;
+    for (index, part) in parts.enumerate() {
         if part.is_empty() {
             continue;
         }
         if index == 0 {
-            if !rest.starts_with(part) {
+            if !starts_with_ignore_case(rest, part) {
                 return false;
             }
             rest = &rest[part.len()..];
             continue;
         }
-        let Some(found) = rest.find(part) else {
+        let Some(at) = find_ignore_case(rest, part) else {
             return false;
         };
-        rest = &rest[found + part.len()..];
+        rest = &rest[at + part.len()..];
     }
-    // Хвост после последней звёздочки должен совпасть с концом имени.
-    match parts.last() {
-        Some(tail) if !tail.is_empty() => name.ends_with(tail),
-        _ => true,
+    tail.is_empty() || ends_with_ignore_case(name, tail)
+}
+
+fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
+    text.as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
+fn ends_with_ignore_case(text: &str, suffix: &str) -> bool {
+    text.as_bytes()
+        .len()
+        .checked_sub(suffix.len())
+        .and_then(|at| text.as_bytes().get(at..))
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix.as_bytes()))
+}
+
+fn find_ignore_case(text: &str, part: &str) -> Option<usize> {
+    if part.is_empty() {
+        return Some(0);
     }
+    let haystack = text.as_bytes();
+    let needle = part.as_bytes();
+    if needle.len() > haystack.len() {
+        return None;
+    }
+    let first = needle[0].to_ascii_lowercase();
+    for start in 0..=haystack.len() - needle.len() {
+        if haystack[start].to_ascii_lowercase() != first {
+            continue;
+        }
+        if haystack[start..start + needle.len()].eq_ignore_ascii_case(needle) {
+            return Some(start);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -518,7 +688,9 @@ mod tests {
         assert!(s.apply(None, &players(), |_| Vec::new()).is_err());
         let me = target("Alice", [0.0; 3], Some(0));
         assert_eq!(
-            s.apply(Some(&me), &players(), |_| Vec::new()).unwrap().len(),
+            s.apply(Some(&me), &players(), |_| Vec::new())
+                .unwrap()
+                .len(),
             1
         );
     }
@@ -577,5 +749,39 @@ mod tests {
         assert!(wildcard("*e", "Alice"));
         assert!(wildcard("*li*", "Alice"));
         assert!(!wildcard("b*", "Alice"));
+        // Первая часть якорится к началу, средняя ищется где угодно.
+        assert!(wildcard("Al*ce", "Alice"));
+        assert!(!wildcard("li*ce", "Alice"));
+        assert!(wildcard("A*L*E", "Alice"));
+        assert!(wildcard("*", "Alice"));
+        assert!(wildcard("alice", "ALICE"));
+        assert!(!wildcard("*z", "Alice"));
+    }
+
+    #[test]
+    fn distance_boundaries_are_inclusive() {
+        let all = players();
+        // Ровно 10 блоков от начала координат: граница входит в диапазон.
+        let s = Selector::parse("@a[distance=10]").unwrap();
+        let out = s.apply(None, &all, |_| Vec::new()).unwrap();
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].name, "Bob");
+        let s = Selector::parse("@a[distance=0..10]").unwrap();
+        assert_eq!(s.apply(None, &all, |_| Vec::new()).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn single_pick_matches_sorting() {
+        let all = players();
+        for query in ["@a[sort=nearest,limit=1]", "@a[sort=furthest,limit=1]"] {
+            let sorted = Selector::parse(query).unwrap();
+            let one = sorted.apply(None, &all, |_| Vec::new()).unwrap();
+            assert_eq!(one.len(), 1, "{query}");
+        }
+        // `@e[type=player]` видит игроков, `type=minecraft:cow` над снимком игроков пуст.
+        let s = Selector::parse("@e[type=player]").unwrap();
+        assert_eq!(s.apply(None, &all, |_| Vec::new()).unwrap().len(), 3);
+        let s = Selector::parse("@e[type=minecraft:cow]").unwrap();
+        assert!(s.apply(None, &all, |_| Vec::new()).unwrap().is_empty());
     }
 }

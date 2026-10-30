@@ -78,12 +78,9 @@ fn data_dir() -> Option<PathBuf> {
             return Some(dir);
         }
     }
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/release/generated/26.3");
-    cache
-        .join("reports/light.csv")
-        .is_file()
-        .then_some(cache)
+    let cache =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/release/generated/26.3");
+    cache.join("reports/light.csv").is_file().then_some(cache)
 }
 
 /// FNV-1a по состояниям: дешёвый и достаточно чувствительный к одной клетке.

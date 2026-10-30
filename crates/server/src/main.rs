@@ -78,6 +78,15 @@ async fn serve(dir: &Path) -> Result<(), String> {
             d
         }
     };
+    // Уже собранный кэш не пересоздаём: если шаблонов структур нет, дописываем
+    // их из jar. `reports/` при этом не трогается.
+    if !chunkwake_data::generator::structures_present(&data_dir) {
+        let jar = props.jar_path(dir);
+        tracing::info!("copying structure templates from {}", jar.display());
+        let copied = chunkwake_data::generator::copy_structures(&jar, &data_dir)
+            .map_err(|e| e.to_string())?;
+        tracing::info!("copied {copied} structure templates");
+    }
     let boot = {
         let started = std::time::Instant::now();
         let boot = chunkwake_data::boot::load_or_build(&data_dir).map_err(|e| e.to_string())?;
@@ -143,6 +152,10 @@ async fn serve(dir: &Path) -> Result<(), String> {
 
     let mut net = props.net_config(version);
     net.configuration = Some(std::sync::Arc::new(plan));
+    let gate = play.clone();
+    net.admit = Some(chunkwake_net::Admit(std::sync::Arc::new(move |name, uuid, addr| {
+        gate.admission_denied(name, uuid, addr)
+    })));
     let server = Server::new(net);
     let world = play.clone();
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -272,7 +285,9 @@ async fn serve(dir: &Path) -> Result<(), String> {
 ///
 /// Сэмплер опрашивает `sysinfo` раз в секунду: загрузку CPU он считает как
 /// разницу между опросами, поэтому делать это из команды `/top` нельзя.
-/// Снимок в памяти общий для `/metrics`, `/snapshot` и `chunkwake top`.
+/// Снимок и история в памяти общие для `/metrics`, `/snapshot`, `/api/events`
+/// и `chunkwake top`; каждая публикация будит подписчиков SSE, поэтому
+/// дашборд в браузере не опрашивает сервер сам.
 fn start_metrics(
     props: &config::Properties,
     play: &std::sync::Arc<chunkwake_net::play::PlayPlan>,
@@ -281,10 +296,10 @@ fn start_metrics(
         tracing::info!("metrics disabled (metrics-enabled=false)");
         return None;
     }
-    let snapshot: chunkwake_metrics::http::Shared =
-        std::sync::Arc::new(std::sync::RwLock::new(chunkwake_metrics::Snapshot::default()));
+    let live: chunkwake_metrics::http::Shared =
+        std::sync::Arc::new(std::sync::RwLock::new(chunkwake_metrics::Live::new()));
     let play_sampler = play.clone();
-    let snapshot_sampler = snapshot.clone();
+    let live_sampler = live.clone();
     tokio::spawn(async move {
         let mut sampler = chunkwake_metrics::ProcessSampler::new();
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -295,8 +310,8 @@ fn start_metrics(
             play_sampler.set_proc_stats(proc_stats.clone());
             let mut fresh = play_sampler.load_snapshot();
             fresh.proc = proc_stats;
-            if let Ok(mut slot) = snapshot_sampler.write() {
-                *slot = fresh;
+            if let Ok(mut slot) = live_sampler.write() {
+                slot.publish(fresh);
             }
         }
     });
@@ -305,20 +320,23 @@ fn start_metrics(
         .parse()
         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     let port = props.metrics_port;
-    let snapshot_server = snapshot.clone();
+    let live_server = live.clone();
     tokio::spawn(async move {
-        match chunkwake_metrics::http::spawn(ip, port, snapshot_server).await {
-            Ok(bound) if bound == port => tracing::info!("metrics on http://{ip}:{bound}/metrics"),
+        match chunkwake_metrics::http::spawn(ip, port, live_server).await {
+            // Ссылка на дашборд — первое, что нужно, когда открываешь сервер.
+            Ok(bound) if bound == port => {
+                tracing::info!("dashboard on http://{ip}:{bound}/ (metrics on /metrics)")
+            }
             // Порт был занят: говорим явно, иначе `chunkwake top` без флагов
             // будет искать сервер на «правильном» порту и не найдёт.
             Ok(bound) => tracing::warn!(
-                "metrics on http://{ip}:{bound}/metrics (port {port} is busy; \
+                "dashboard on http://{ip}:{bound}/ (port {port} is busy; \
                  `chunkwake top --port {bound}` or update metrics-port)"
             ),
             Err(error) => tracing::error!("metrics disabled: {error}"),
         }
     });
-    Some(snapshot)
+    Some(live)
 }
 
 fn log_player_exit(name: &str, result: Result<(), chunkwake_net::NetError>) {    match result {

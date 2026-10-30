@@ -11,13 +11,40 @@ use std::path::Path;
 pub struct Flat {
     pub layers: Vec<(String, usize)>,
     pub biome: String,
+    /// `features` пресета: у `the_void` от него зависит стартовая платформа.
+    pub features: bool,
 }
 
-/// Плоские слои или шум оверворлда (`level-type=minecraft:normal`).
+impl Flat {
+    /// Пресет `the_void` с включёнными фичами: платформа 33×33 на `minY + 3`.
+    pub fn void_platform(&self) -> bool {
+        self.features && is_void_biome(&self.biome)
+    }
+}
+
+/// Шум оверворлда: имя `noise_settings` и, для `single_biome_surface`, один биом.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Noise {
+    /// `minecraft:overworld`, `minecraft:large_biomes` или `minecraft:amplified`.
+    pub settings: String,
+    /// `Some` — `minecraft:fixed`. `None` — `multi_noise` оверворлда.
+    pub biome: Option<String>,
+}
+
+impl Noise {
+    pub fn overworld() -> Self {
+        Self {
+            settings: "minecraft:overworld".into(),
+            biome: None,
+        }
+    }
+}
+
+/// Плоские слои или шум (`level-type`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
     Flat(Flat),
-    Noise,
+    Noise(Noise),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,6 +74,26 @@ pub fn hashed_seed(seed: i64) -> i64 {
     chunkwake_worldgen::biome::zoom_seed(seed)
 }
 
+fn namespaced(name: &str) -> String {
+    let name = name.trim();
+    if name.contains(':') {
+        name.to_owned()
+    } else {
+        format!("minecraft:{name}")
+    }
+}
+
+fn preset_key(level_type: &str) -> &str {
+    level_type
+        .trim()
+        .strip_prefix("minecraft:")
+        .unwrap_or(level_type.trim())
+}
+
+fn is_void_biome(name: &str) -> bool {
+    name == "minecraft:the_void" || name == "the_void"
+}
+
 /// Слои из JSON `{"layers":[{"block","height"}],"biome"}` (как `generator-settings`).
 fn flat_from_json(v: &Value) -> Result<Flat, String> {
     let layers = v["layers"]
@@ -69,6 +116,7 @@ fn flat_from_json(v: &Value) -> Result<Flat, String> {
     Ok(Flat {
         layers,
         biome: v["biome"].as_str().unwrap_or("minecraft:plains").to_owned(),
+        features: v["features"].as_bool().unwrap_or(false),
     })
 }
 
@@ -83,25 +131,8 @@ fn preset(data_dir: &Path, name: &str) -> Result<Flat, String> {
     flat_from_json(&v["settings"])
 }
 
-/// Слои по `level-type` и `generator-settings`: JSON, имя пресета или `classic_flat`.
-pub fn flat_settings(data_dir: &Path, level_type: &str, settings: &str) -> Result<Flat, String> {
-    let kind = level_type
-        .trim()
-        .strip_prefix("minecraft:")
-        .unwrap_or(level_type.trim());
-    match kind {
-        "" | "flat" => {}
-        "large_biomes" | "amplified" | "single_biome_surface" => {
-            tracing::warn!(
-                "level-type={level_type}: terrain generation is not implemented yet, using a flat world"
-            );
-        }
-        _ => {
-            return Err(format!(
-                "level-type={level_type}: use minecraft:flat or minecraft:normal"
-            ));
-        }
-    }
+/// Слои по `generator-settings`: JSON, имя пресета или `classic_flat`.
+pub fn flat_settings(data_dir: &Path, settings: &str) -> Result<Flat, String> {
     let s = settings.trim();
     if s.starts_with('{') {
         let v: Value = serde_json::from_str(s).map_err(|e| format!("generator-settings: {e}"))?;
@@ -113,16 +144,78 @@ pub fn flat_settings(data_dir: &Path, level_type: &str, settings: &str) -> Resul
     }
 }
 
-/// Тип из настроек: `normal` — шум, остальное поддерживаемое — плоские слои.
-fn resolve_kind(data_dir: &Path, level_type: &str, settings: &str) -> Result<Kind, String> {
-    let kind = level_type
-        .trim()
-        .strip_prefix("minecraft:")
-        .unwrap_or(level_type.trim());
-    if kind == "normal" {
-        return Ok(Kind::Noise);
+/// `{"biome":"minecraft:desert"}` в `generator-settings` одиночного биома.
+fn biome_override(settings: &str) -> Result<Option<String>, String> {
+    let s = settings.trim();
+    if !s.starts_with('{') {
+        return Ok(None);
     }
-    Ok(Kind::Flat(flat_settings(data_dir, level_type, settings)?))
+    let v: Value = serde_json::from_str(s).map_err(|e| format!("generator-settings: {e}"))?;
+    Ok(v["biome"].as_str().map(namespaced))
+}
+
+/// Оверворлд пресета `worldgen/world_preset/<имя>.json`.
+fn noise_preset(data_dir: &Path, name: &str, generator_settings: &str) -> Result<Noise, String> {
+    let path = data_dir.join(format!("data/minecraft/worldgen/world_preset/{name}.json"));
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("world preset {name}: {e}"))?;
+    let v: Value = serde_json::from_str(&text).map_err(|e| format!("world preset {name}: {e}"))?;
+    let generator = &v["dimensions"]["minecraft:overworld"]["generator"];
+    let typ = generator["type"].as_str().unwrap_or("");
+    if typ != "minecraft:noise" {
+        return Err(format!(
+            "world preset {name}: overworld generator is {typ}, not minecraft:noise"
+        ));
+    }
+    let settings = match &generator["settings"] {
+        Value::String(s) => namespaced(s),
+        _ => {
+            return Err(format!(
+                "world preset {name}: inline noise settings are not supported"
+            ));
+        }
+    };
+    let source = &generator["biome_source"];
+    let mut biome = match source["type"].as_str().unwrap_or("") {
+        "minecraft:multi_noise" => None,
+        "minecraft:fixed" => Some(namespaced(
+            source["biome"].as_str().unwrap_or("minecraft:plains"),
+        )),
+        other => {
+            return Err(format!(
+                "world preset {name}: biome source {other} is not supported"
+            ));
+        }
+    };
+    // Ванильный выделенный сервер биом не выбирает и оставляет plains из пресета.
+    // JSON с полем `biome` — то, что клиент пишет в `level.dat` при настройке.
+    if biome.is_some()
+        && let Some(over) = biome_override(generator_settings)?
+    {
+        biome = Some(over);
+    }
+    Ok(Noise { settings, biome })
+}
+
+/// Тип из настроек: плоские слои или шум пресета.
+fn resolve_kind(data_dir: &Path, level_type: &str, settings: &str) -> Result<Kind, String> {
+    let kind = preset_key(level_type);
+    match kind {
+        "" | "flat" => Ok(Kind::Flat(flat_settings(data_dir, settings)?)),
+        "normal" | "large_biomes" | "amplified" | "single_biome_surface" => {
+            Ok(Kind::Noise(noise_preset(data_dir, kind, settings)?))
+        }
+        _ => Err(format!(
+            "level-type={level_type}: use minecraft:flat, minecraft:normal, minecraft:large_biomes, minecraft:amplified or minecraft:single_biome_surface"
+        )),
+    }
+}
+
+fn flag(tag: Option<&Tag>) -> bool {
+    match tag {
+        Some(Tag::Byte(b)) => *b != 0,
+        Some(Tag::Int(b)) => *b != 0,
+        _ => false,
+    }
 }
 
 /// `level.dat` → сид и тип (`Data.WorldGenSettings`); чужой генератор — `None`.
@@ -147,7 +240,24 @@ fn read_level(root: &Compound) -> Option<(i64, Option<Kind>)> {
             return None;
         };
         match g.get("type") {
-            Some(Tag::String(t)) if t == "minecraft:noise" => return Some(Kind::Noise),
+            Some(Tag::String(t)) if t == "minecraft:noise" => {
+                // Старый файл без `biome_source` — мультишум оверворлда.
+                let mut noise = Noise::overworld();
+                if let Some(Tag::String(s)) = g.get("settings") {
+                    noise.settings = s.clone();
+                }
+                noise.biome = match g.get("biome_source") {
+                    Some(Tag::Compound(src)) => match src.get("type") {
+                        Some(Tag::String(t)) if t == "minecraft:fixed" => match src.get("biome") {
+                            Some(Tag::String(b)) => Some(b.clone()),
+                            _ => Some("minecraft:plains".into()),
+                        },
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                return Some(Kind::Noise(noise));
+            }
             Some(Tag::String(t)) if t == "minecraft:flat" => {}
             _ => return None,
         }
@@ -175,7 +285,11 @@ fn read_level(root: &Compound) -> Option<(i64, Option<Kind>)> {
             Some(Tag::String(b)) => b.clone(),
             _ => "minecraft:plains".into(),
         };
-        Some(Kind::Flat(Flat { layers, biome }))
+        Some(Kind::Flat(Flat {
+            layers,
+            biome,
+            features: flag(st.get("features")),
+        }))
     })();
     Some((*seed, generator))
 }
@@ -183,10 +297,23 @@ fn read_level(root: &Compound) -> Option<(i64, Option<Kind>)> {
 fn level_nbt(level: &Level, data_version: i32, name: &str) -> Compound {
     let s = |v: &str| Tag::String(v.to_owned());
     let generator = match &level.kind {
-        Kind::Noise => Compound::from([
-            ("type".into(), s("minecraft:noise")),
-            ("settings".into(), s("minecraft:overworld")),
-        ]),
+        Kind::Noise(noise) => {
+            let biome_source = match &noise.biome {
+                None => Compound::from([
+                    ("type".into(), s("minecraft:multi_noise")),
+                    ("preset".into(), s("minecraft:overworld")),
+                ]),
+                Some(biome) => Compound::from([
+                    ("type".into(), s("minecraft:fixed")),
+                    ("biome".into(), s(biome)),
+                ]),
+            };
+            Compound::from([
+                ("type".into(), s("minecraft:noise")),
+                ("settings".into(), s(&noise.settings)),
+                ("biome_source".into(), Tag::Compound(biome_source)),
+            ])
+        }
         Kind::Flat(flat) => {
             let layers = flat
                 .layers
@@ -205,7 +332,7 @@ fn level_nbt(level: &Level, data_version: i32, name: &str) -> Compound {
                     Tag::Compound(Compound::from([
                         ("layers".into(), Tag::List(layers)),
                         ("biome".into(), s(&flat.biome)),
-                        ("features".into(), Tag::Byte(0)),
+                        ("features".into(), Tag::Byte(i8::from(flat.features))),
                         ("lakes".into(), Tag::Byte(0)),
                     ])),
                 ),
@@ -299,7 +426,7 @@ mod tests {
 
     #[test]
     fn json_layers() {
-        let v: Value = serde_json::from_str(r#"{"layers":[{"block":"bedrock","height":1},{"block":"minecraft:stone","height":3}],"biome":"minecraft:desert"}"#).unwrap();
+        let v: Value = serde_json::from_str(r#"{"layers":[{"block":"bedrock","height":1},{"block":"minecraft:stone","height":3}],"biome":"minecraft:desert","features":true}"#).unwrap();
         let f = flat_from_json(&v).unwrap();
         assert_eq!(
             f.layers,
@@ -309,6 +436,7 @@ mod tests {
             ]
         );
         assert_eq!(f.biome, "minecraft:desert");
+        assert!(f.features);
     }
 
     #[test]
@@ -321,6 +449,7 @@ mod tests {
                     ("minecraft:sand".into(), 5),
                 ],
                 biome: "minecraft:desert".into(),
+                features: false,
             }),
         };
         let (seed, kind) = read_level(&level_nbt(&level, 4000, "w")).unwrap();
@@ -329,13 +458,136 @@ mod tests {
     }
 
     #[test]
+    fn void_flat_keeps_features() {
+        let level = Level {
+            seed: 1,
+            kind: Kind::Flat(Flat {
+                layers: vec![("minecraft:air".into(), 1)],
+                biome: "minecraft:the_void".into(),
+                features: true,
+            }),
+        };
+        let (_, kind) = read_level(&level_nbt(&level, 4000, "w")).unwrap();
+        let Some(Kind::Flat(flat)) = kind else {
+            panic!("expected flat");
+        };
+        assert!(flat.void_platform());
+        assert!(flat.features);
+    }
+
+    #[test]
     fn noise_level_dat_roundtrip() {
         let level = Level {
             seed: 7,
-            kind: Kind::Noise,
+            kind: Kind::Noise(Noise::overworld()),
         };
         let (seed, kind) = read_level(&level_nbt(&level, 4000, "w")).unwrap();
         assert_eq!(seed, 7);
-        assert_eq!(kind, Some(Kind::Noise));
+        assert_eq!(kind, Some(level.kind));
+    }
+
+    #[test]
+    fn noise_presets_roundtrip() {
+        for (settings, biome) in [
+            ("minecraft:large_biomes", None),
+            ("minecraft:amplified", None),
+            ("minecraft:overworld", Some("minecraft:desert".into())),
+        ] {
+            let level = Level {
+                seed: 9,
+                kind: Kind::Noise(Noise {
+                    settings: settings.into(),
+                    biome: biome.clone(),
+                }),
+            };
+            let (_, kind) = read_level(&level_nbt(&level, 4000, "w")).unwrap();
+            assert_eq!(kind, Some(level.kind), "{settings}");
+        }
+    }
+
+    #[test]
+    fn old_noise_without_biome_source_is_overworld() {
+        let s = |v: &str| Tag::String(v.to_owned());
+        let generator = Compound::from([
+            ("type".into(), s("minecraft:noise")),
+            ("settings".into(), s("minecraft:overworld")),
+        ]);
+        let overworld = Compound::from([
+            ("type".into(), s("minecraft:overworld")),
+            ("generator".into(), Tag::Compound(generator)),
+        ]);
+        let root = Compound::from([(
+            "Data".into(),
+            Tag::Compound(Compound::from([(
+                "WorldGenSettings".into(),
+                Tag::Compound(Compound::from([
+                    ("seed".into(), Tag::Long(3)),
+                    (
+                        "dimensions".into(),
+                        Tag::Compound(Compound::from([(
+                            "minecraft:overworld".into(),
+                            Tag::Compound(overworld),
+                        )])),
+                    ),
+                ])),
+            )])),
+        )]);
+        let (seed, kind) = read_level(&root).unwrap();
+        assert_eq!(seed, 3);
+        assert_eq!(kind, Some(Kind::Noise(Noise::overworld())));
+    }
+
+    /// Пресеты из выгрузки 26.3. Без `CHUNKWAKE_DATA` тест пропускается.
+    #[test]
+    fn presets_match_vanilla_files() {
+        let Some(data) = std::env::var_os("CHUNKWAKE_DATA") else {
+            return;
+        };
+        let data = Path::new(&data);
+        let large = resolve_kind(data, "minecraft:large_biomes", "").unwrap();
+        assert_eq!(
+            large,
+            Kind::Noise(Noise {
+                settings: "minecraft:large_biomes".into(),
+                biome: None,
+            })
+        );
+        let amplified = resolve_kind(data, "amplified", "").unwrap();
+        assert_eq!(
+            amplified,
+            Kind::Noise(Noise {
+                settings: "minecraft:amplified".into(),
+                biome: None,
+            })
+        );
+        let single = resolve_kind(data, "minecraft:single_biome_surface", "").unwrap();
+        assert_eq!(
+            single,
+            Kind::Noise(Noise {
+                settings: "minecraft:overworld".into(),
+                biome: Some("minecraft:plains".into()),
+            })
+        );
+        let desert = resolve_kind(
+            data,
+            "single_biome_surface",
+            r#"{"biome":"minecraft:desert"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            desert,
+            Kind::Noise(Noise {
+                settings: "minecraft:overworld".into(),
+                biome: Some("minecraft:desert".into()),
+            })
+        );
+        let normal = resolve_kind(data, "minecraft:normal", "").unwrap();
+        assert_eq!(normal, Kind::Noise(Noise::overworld()));
+        let void = resolve_kind(data, "minecraft:flat", "the_void").unwrap();
+        let Kind::Flat(flat) = void else {
+            panic!("the_void is flat");
+        };
+        assert_eq!(flat.biome, "minecraft:the_void");
+        assert!(flat.void_platform());
     }
 }

@@ -25,6 +25,10 @@ pub struct Extra {
     pub custom_data: Option<Vec<u8>>,
     /// `minecraft:charged_projectiles`: чем заряжен арбалет.
     pub charged: Vec<Stack>,
+    /// Хвост командного `item_stack`, который не лёг в известные поля
+    /// (`minecraft:potion_contents` и прочее). В патч клиента не пишется:
+    /// сырой `raw` заменил бы уже разобранные чары и имя.
+    pub rest: Option<String>,
 }
 
 impl Extra {
@@ -36,6 +40,7 @@ impl Extra {
             && self.raw.is_none()
             && self.custom_data.is_none()
             && self.charged.is_empty()
+            && self.rest.is_none()
     }
 
     pub fn level(&self, enchantment: i32) -> i32 {

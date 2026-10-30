@@ -142,7 +142,7 @@ pub fn to_nbt(s: &PlayerSave, data_version: i32, names: &[String]) -> Compound {
         c.insert("Slot".into(), Tag::Byte(slot as i8));
         inventory.push(Tag::Compound(c));
     }
-    Compound::from([
+    let mut root = Compound::from([
         ("DataVersion".into(), Tag::Int(data_version)),
         (
             "Dimension".into(),
@@ -171,7 +171,19 @@ pub fn to_nbt(s: &PlayerSave, data_version: i32, names: &[String]) -> Compound {
         ),
         ("Inventory".into(), Tag::List(inventory)),
         ("equipment".into(), Tag::Compound(equipment)),
-    ])
+    ]);
+    if let Some([x, y, z]) = s.spawn {
+        root.insert("SpawnX".into(), Tag::Int(x));
+        root.insert("SpawnY".into(), Tag::Int(y));
+        root.insert("SpawnZ".into(), Tag::Int(z));
+        root.insert("SpawnForced".into(), Tag::Byte(1));
+    }
+    root
+}
+
+fn spawn_from(root: &Compound) -> Option<[i32; 3]> {
+    let n = |k: &str| root.get(k).and_then(Tag::as_i64).map(|v| v as i32);
+    Some([n("SpawnX")?, n("SpawnY")?, n("SpawnZ")?])
 }
 
 pub fn from_nbt(root: &Compound, ids: &HashMap<String, i32>) -> Option<PlayerSave> {
@@ -234,6 +246,7 @@ pub fn from_nbt(root: &Compound, ids: &HashMap<String, i32>) -> Option<PlayerSav
             .filter(|m| (0..4).contains(m))
             .map(|m| m as u8),
         effects: Vec::new(),
+        spawn: spawn_from(root),
         xp: chunkwake_net::xp::Experience {
             level: root
                 .get("XpLevel")
@@ -283,6 +296,7 @@ mod tests {
                 total: 120,
                 seed: -9,
             },
+            spawn: Some([8, 64, -2]),
             slots: vec![
                 (
                     5,

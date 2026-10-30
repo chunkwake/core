@@ -212,19 +212,35 @@ pub trait Bits {
         self.set_seed((cx as i64).wrapping_mul(xs) ^ (cz as i64).wrapping_mul(zs) ^ seed);
     }
 
+    /// `WorldgenRandom.setLargeFeatureWithSalt`: клетка `random_spread`.
+    fn set_large_feature_with_salt(&mut self, seed: i64, x: i32, z: i32, salt: i32) {
+        let mixed = (x as i64)
+            .wrapping_mul(341873128712)
+            .wrapping_add((z as i64).wrapping_mul(132897987541))
+            .wrapping_add(seed)
+            .wrapping_add(salt as i64);
+        self.set_seed(mixed);
+    }
+
     /// `WorldgenRandom.setDecorationSeed`: сид декорации чанка.
     fn set_decoration_seed(&mut self, seed: i64, x: i32, z: i32) -> i64 {
         self.set_seed(seed);
         let xs = self.next_long() | 1;
         let zs = self.next_long() | 1;
-        let result = (x as i64).wrapping_mul(xs).wrapping_add((z as i64).wrapping_mul(zs)) ^ seed;
+        let result = (x as i64)
+            .wrapping_mul(xs)
+            .wrapping_add((z as i64).wrapping_mul(zs))
+            ^ seed;
         self.set_seed(result);
         result
     }
 
     /// `WorldgenRandom.setFeatureSeed`.
     fn set_feature_seed(&mut self, seed: i64, index: i32, step: i32) {
-        self.set_seed(seed.wrapping_add(index as i64).wrapping_add(10000 * step as i64));
+        self.set_seed(
+            seed.wrapping_add(index as i64)
+                .wrapping_add(10000 * step as i64),
+        );
     }
 }
 
@@ -279,6 +295,16 @@ impl Worldgen {
             x: Xoroshiro::from_seed(seed),
             gaussian: None,
         }
+    }
+
+    /// `XoroshiroRandomSource.nextBoolean`: младший бит одного `nextLong`.
+    pub(crate) fn next_boolean(&mut self) -> bool {
+        self.x.next_long() & 1 != 0
+    }
+
+    /// `XoroshiroRandomSource.nextLong`, один шаг генератора.
+    pub(crate) fn next_raw_long(&mut self) -> i64 {
+        self.x.next_long()
     }
 }
 

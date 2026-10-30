@@ -1,12 +1,12 @@
 //! Команды над сущностями: `/tp`, `/give`, `/kill`, `/clear`, `/effect`,
 //! `/xp`, `/damage`, `/rotate`, `/spawnpoint`, `/defaultgamemode`.
 
-use super::args::{self, Input};
-use super::dispatch::{text_component, translate, Call, Outcome};
-use super::selector::Target;
 use super::Context;
+use super::args;
+use super::dispatch::{Call, Outcome, text_component, translate};
+use super::selector::Target;
 use crate::live::Control;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 /// Сколько предметов отдаёт `/give` за раз (ванильный предел).
@@ -14,10 +14,7 @@ const MAX_GIVE: i32 = 6400;
 
 /// Ошибка «цель не найдена» ванильными ключами.
 fn no_targets() -> Outcome {
-    Outcome::Feedback(translate(
-        "argument.entity.notfound.player",
-        Vec::new(),
-    ))
+    Outcome::Feedback(translate("argument.entity.notfound.player", Vec::new()))
 }
 
 /// Успех команды с одной целью или несколькими — ванильные ключи различаются.
@@ -31,80 +28,248 @@ fn success(single: &str, many: &str, targets: &[Target], with: Vec<Value>) -> Ou
     }
 }
 
-/// `/tp` и `/teleport`: ванильные формы.
+/// `/tp` и `/teleport`.
+///
+/// Первое слово — либо начало координат (`/tp ^ ^5 ^`), либо цель. Раньше
+/// координата читалась дважды и первое слово терялось, поэтому `/tp ^ ^5 ^`
+/// не добирало трёх чисел. `^` считается от взгляда исполнителя, а без
+/// `facing` и углов поворот цели не сбрасывается в ноль.
 pub(super) fn teleport(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
-    let mut input = call.t();
-    let Some(first) = input.word() else {
-        return usage("/tp <targets> <location> | /tp <targets> <destination>");
+    let words = call.t().tokens();
+    let plan = match read_teleport(&words) {
+        Ok(plan) => plan,
+        Err(text) => return usage(text),
     };
-    // Первое слово: координата — телепорт себя, иначе — чья.
-    let targets = if args::is_coord(first) {
-        let Some(uuid) = call.source.uuid else {
-            return usage("/tp <targets> <location>");
-        };
-        // Координаты начинаются с первого слова: вернём его в разбор.
-        input = Input::new(call.rest);
-        let _ = input.word();
-        vec![entity_of(ctx, uuid)]
-    } else {
-        match ctx.select(call.source, first, false) {
+    let (base, look_yaw, look_pitch) = source_pose(ctx, call);
+    let targets = match &plan.who {
+        None => {
+            let Some(uuid) = call.source.uuid else {
+                return usage("/tp <location>|<destination>");
+            };
+            vec![entity_of(ctx, uuid)]
+        }
+        Some(token) => match ctx.select(call.source, token, true) {
             Ok(list) => list,
             Err(e) => return Outcome::Feedback(e.component()),
-        }
+        },
     };
-    let Some(anchor) = input.word() else {
-        return usage("/tp <targets> <location>");
-    };
-    // `/tp <who> <player>` — в точку игрока.
-    if !args::is_coord(anchor) && !targets.is_empty() {
-        let Some(dest) = ctx.targets().iter().find(|t| t.name.eq_ignore_ascii_case(anchor)).cloned()
-        else {
-            return no_targets();
-        };
-        let moved = move_all(ctx, &targets, dest.pos, dest.yaw, dest.pitch);
-        return success(
-            "commands.teleport.success.entity.single",
-            "commands.teleport.success.entity.multiple",
-            &moved.0,
-            vec![name_of(&moved.0), json!({"text": dest.name})],
-        );
+    if targets.is_empty() {
+        return no_targets();
     }
-    // Координаты: три или пять слов.
-    let mut tokens = vec![anchor.to_owned()];
-    for _ in 0..4 {
-        if let Some(word) = input.word() {
-            tokens.push(word.to_owned());
-        }
-    }
-    let base = targets
-        .first()
-        .map(|t| t.pos)
-        .unwrap_or_else(|| call.position(ctx));
-    let Some(coord) = parse_xyz(&tokens, base) else {
-        return usage("/tp <targets> <x> <y> <z> [<yaw> <pitch>]");
-    };
-    let (yaw, pitch) = match (tokens.get(3), tokens.get(4)) {
-        (Some(yaw), Some(pitch)) => {
-            let Some((yaw, pitch)) = args::rotation(yaw, pitch, (0.0, 0.0)) else {
-                return usage("/tp <targets> <x> <y> <z> [<yaw> <pitch>]");
+    match plan.dest {
+        Dest::Entity(token) => {
+            let Some(dest) = ctx
+                .select(call.source, &token, true)
+                .ok()
+                .and_then(|list| list.into_iter().next())
+            else {
+                return no_targets();
             };
-            (yaw, pitch)
+            let (moved, _) = move_all(ctx, &targets, dest.pos, Some((dest.yaw, dest.pitch)));
+            if moved.is_empty() {
+                return no_targets();
+            }
+            success(
+                "commands.teleport.success.entity.single",
+                "commands.teleport.success.entity.multiple",
+                &moved,
+                vec![name_of(&moved), json!({"text": dest.name})],
+            )
         }
-        _ => (0.0, 0.0),
-    };
-    let (moved, _) = move_all(ctx, &targets, coord, yaw, pitch);
-    success(
-        "commands.teleport.success.location.single",
-        "commands.teleport.success.location.multiple",
-        &moved,
-        vec![name_of(&moved), Value::from(coord[0]), Value::from(coord[1]), Value::from(coord[2])],
-    )
+        Dest::Location {
+            coords,
+            facing,
+            rotation,
+        } => {
+            let basis = args::Basis::from_rotation(look_yaw, look_pitch);
+            let pos = basis.resolve(coords, base);
+            let turn = match facing {
+                Facing::None => rotation
+                    .and_then(|(yaw, pitch)| args::rotation(&yaw, &pitch, (look_yaw, look_pitch))),
+                Facing::Pos(at) => {
+                    let point = basis.resolve(at, base);
+                    Some(look_at(pos, point))
+                }
+                Facing::Entity { token, eyes } => {
+                    let Some(dest) = ctx
+                        .select(call.source, &token, true)
+                        .ok()
+                        .and_then(|list| list.into_iter().next())
+                    else {
+                        return no_targets();
+                    };
+                    let mut point = dest.pos;
+                    if eyes {
+                        point[1] += 1.62;
+                    }
+                    Some(look_at(pos, point))
+                }
+            };
+            let (moved, _) = move_all(ctx, &targets, pos, turn);
+            if moved.is_empty() {
+                return no_targets();
+            }
+            success(
+                "commands.teleport.success.location.single",
+                "commands.teleport.success.location.multiple",
+                &moved,
+                vec![
+                    name_of(&moved),
+                    Value::from(pos[0]),
+                    Value::from(pos[1]),
+                    Value::from(pos[2]),
+                ],
+            )
+        }
+    }
 }
 
-/// Три координаты из токенов (если их меньше — ошибка).
-fn parse_xyz(tokens: &[String], base: [f64; 3]) -> Option<[f64; 3]> {
-    let c = args::coords3(tokens.first()?, tokens.get(1)?, tokens.get(2)?)?;
-    Some(super::args::Basis::from_rotation(0.0, 0.0).resolve(c, base))
+/// Куда смотрит и откуда считается `~` и `^`: цепочка `/execute`, иначе игрок.
+fn source_pose(ctx: &Context<'_>, call: &Call<'_>) -> ([f64; 3], f32, f32) {
+    if let Some(origin) = ctx.execution_origin() {
+        return origin;
+    }
+    call.source
+        .uuid
+        .and_then(|uuid| ctx.pose(uuid))
+        .unwrap_or((ctx.spawn(), 0.0, 0.0))
+}
+
+/// Углы взгляда из точки на цель.
+fn look_at(from: [f64; 3], to: [f64; 3]) -> (f32, f32) {
+    let (dx, dy, dz) = (to[0] - from[0], to[1] - from[1], to[2] - from[2]);
+    let horizontal = (dx * dx + dz * dz).sqrt();
+    let yaw = (-dx).atan2(dz).to_degrees() as f32;
+    let pitch = (-dy).atan2(horizontal).to_degrees() as f32;
+    (yaw, pitch)
+}
+
+/// Разобранный `/tp`.
+struct TeleportPlan {
+    /// `None` — телепортируем себя.
+    who: Option<String>,
+    dest: Dest,
+}
+
+enum Dest {
+    Entity(String),
+    Location {
+        coords: [args::Coord; 3],
+        facing: Facing,
+        /// Явный `<yaw> <pitch>`, если нет `facing`.
+        rotation: Option<(String, String)>,
+    },
+}
+
+enum Facing {
+    None,
+    Pos([args::Coord; 3]),
+    Entity { token: String, eyes: bool },
+}
+
+/// Разбор строки `/tp` без мира: координаты не теряют первое слово.
+fn read_teleport(words: &[&str]) -> Result<TeleportPlan, &'static str> {
+    const USAGE: &str = "/tp <location>|<destination> | /tp <targets> <location>|<destination>";
+    if words.is_empty() {
+        return Err(USAGE);
+    }
+    if args::is_coord(words[0]) {
+        let (coords, facing, rotation) = read_location(words)?;
+        return Ok(TeleportPlan {
+            who: None,
+            dest: Dest::Location {
+                coords,
+                facing,
+                rotation,
+            },
+        });
+    }
+    if words.len() == 1 {
+        return Ok(TeleportPlan {
+            who: None,
+            dest: Dest::Entity(words[0].to_owned()),
+        });
+    }
+    if args::is_coord(words[1]) {
+        let (coords, facing, rotation) = read_location(&words[1..])?;
+        return Ok(TeleportPlan {
+            who: Some(words[0].to_owned()),
+            dest: Dest::Location {
+                coords,
+                facing,
+                rotation,
+            },
+        });
+    }
+    if words.len() != 2 {
+        return Err(USAGE);
+    }
+    Ok(TeleportPlan {
+        who: Some(words[0].to_owned()),
+        dest: Dest::Entity(words[1].to_owned()),
+    })
+}
+
+/// Три координаты и необязательные `facing` или углы.
+fn read_location(
+    words: &[&str],
+) -> Result<([args::Coord; 3], Facing, Option<(String, String)>), &'static str> {
+    const USAGE: &str = "/tp <x> <y> <z> [<yaw> <pitch>|facing <pos>|facing entity <target>]";
+    if words.len() < 3 {
+        return Err(USAGE);
+    }
+    let Some(coords) = args::coords3(words[0], words[1], words[2]) else {
+        return Err(USAGE);
+    };
+    let local = coords
+        .iter()
+        .filter(|c| matches!(c, args::Coord::Local(_)))
+        .count();
+    if local != 0 && local != 3 {
+        return Err("/tp: ^ must be used for all three coordinates");
+    }
+    let tail = &words[3..];
+    if tail.is_empty() {
+        return Ok((coords, Facing::None, None));
+    }
+    if tail[0] == "facing" {
+        if tail.get(1) == Some(&"entity") {
+            let Some(token) = tail.get(2) else {
+                return Err(USAGE);
+            };
+            let eyes = match tail.get(3) {
+                None | Some(&"feet") => false,
+                Some(&"eyes") => true,
+                Some(_) => return Err(USAGE),
+            };
+            if tail.len() > 4 {
+                return Err(USAGE);
+            }
+            return Ok((
+                coords,
+                Facing::Entity {
+                    token: (*token).to_owned(),
+                    eyes,
+                },
+                None,
+            ));
+        }
+        if tail.len() != 4 {
+            return Err(USAGE);
+        }
+        let Some(at) = args::coords3(tail[1], tail[2], tail[3]) else {
+            return Err(USAGE);
+        };
+        return Ok((coords, Facing::Pos(at), None));
+    }
+    if tail.len() != 2 {
+        return Err(USAGE);
+    }
+    Ok((
+        coords,
+        Facing::None,
+        Some((tail[0].to_owned(), tail[1].to_owned())),
+    ))
 }
 
 /// Перемещает цели, возвращает сдвинутые и пропущенные.
@@ -112,8 +277,7 @@ fn move_all(
     ctx: &Context<'_>,
     targets: &[Target],
     pos: [f64; 3],
-    yaw: f32,
-    pitch: f32,
+    turn: Option<(f32, f32)>,
 ) -> (Vec<Target>, Vec<Uuid>) {
     let mut moved = Vec::new();
     let mut skipped = Vec::new();
@@ -122,6 +286,8 @@ fn move_all(
             skipped.push(target.uuid);
             continue;
         }
+        // Без `facing` и углов оставляем текущий поворот, а не смотрим на юг.
+        let (yaw, pitch) = turn.unwrap_or((target.yaw, target.pitch));
         if ctx.plan.teleport_to(target.uuid, pos, yaw, pitch) {
             moved.push(target.clone());
         } else {
@@ -141,19 +307,16 @@ fn name_of(targets: &[Target]) -> Value {
 
 /// Цель по UUID (для `@s` в консоли — ошибка).
 fn entity_of(ctx: &Context<'_>, uuid: Uuid) -> Target {
-    ctx.targets()
-        .into_iter()
-        .find(|t| t.uuid == uuid)
-        .unwrap_or(Target {
-            uuid,
-            name: "Server".into(),
-            entity_id: -1,
-            pos: ctx.spawn(),
-            yaw: 0.0,
-            pitch: 0.0,
-            game_mode: Some(0),
-            tags: Vec::new(),
-        })
+    ctx.plan.command_target(uuid).unwrap_or(Target {
+        uuid,
+        name: "Server".into(),
+        entity_id: -1,
+        pos: ctx.spawn(),
+        yaw: 0.0,
+        pitch: 0.0,
+        game_mode: Some(0),
+        tags: Vec::new(),
+    })
 }
 
 /// `/give <targets> <item> [count]`.
@@ -166,7 +329,7 @@ pub(super) fn give(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         Ok(list) => list,
         Err(e) => return Outcome::Feedback(e.component()),
     };
-    let Some(item) = input.word() else {
+    let Some(item) = input.balanced() else {
         return usage("/give <targets> <item> [count]");
     };
     let count = match input.word() {
@@ -176,18 +339,23 @@ pub(super) fn give(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         },
         None => 1,
     };
-    // `item_stack` может прийти с компонентами: `bread[...]` — берём только имя.
-    let name = item.split(['[', '{']).next().unwrap_or("");
-    let name = args::resource_name(name);
-    let Some(&name_id) = ctx.survival().item_ids.get(&name) else {
+    let Some(parsed) = super::item::parse_item(item, &ctx.survival().item_ids) else {
         return Outcome::Feedback(translate(
             "argument.item.id.invalid",
-            vec![Value::String(name)],
+            vec![Value::String(item.to_owned())],
         ));
     };
+    let name = item.split(['[', '{']).next().unwrap_or(item);
+    let name = args::resource_name(name);
     let mut given = 0;
     for target in &targets {
-        if ctx.plan.give_item(target.uuid, name_id, count) {
+        if ctx.plan.give_item(
+            target.uuid,
+            parsed.id,
+            count,
+            parsed.extra,
+            parsed.damage.unwrap_or(0),
+        ) {
             given += 1;
         }
     }
@@ -236,10 +404,59 @@ pub(super) fn clear(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         Ok(list) => list,
         Err(e) => return Outcome::Feedback(e.component()),
     };
-    let Some(first) = targets.first().cloned() else {
+    if targets.is_empty() {
         return no_targets();
+    }
+    let item = match input.balanced() {
+        None => None,
+        Some(token) if token.starts_with('#') => {
+            match super::item::tag_ids(&ctx.survival().item_tags, &ctx.survival().item_ids, token) {
+                Some(ids) => Some((ids, 0, None)),
+                None => {
+                    return Outcome::Feedback(translate(
+                        "argument.item.tag.unknown",
+                        vec![Value::String(token.to_owned())],
+                    ));
+                }
+            }
+        }
+        Some(token) => {
+            let Some(parsed) = super::item::parse_item(token, &ctx.survival().item_ids) else {
+                return Outcome::Feedback(translate(
+                    "argument.item.id.invalid",
+                    vec![Value::String(token.to_owned())],
+                ));
+            };
+            Some((vec![parsed.id], parsed.extra, parsed.damage))
+        }
     };
-    let removed = ctx.plan.clear_inventory(first.uuid);
+    let max = match input.word() {
+        None => i32::MAX,
+        Some(token) => match args::int(token, 0, i32::MAX) {
+            Some(n) => n,
+            None => return usage("/clear [targets] [item] [maxCount]"),
+        },
+    };
+    let mut removed = 0;
+    for target in &targets {
+        removed += match &item {
+            Some((ids, extra, damage)) => ctx.plan.clear_items(
+                target.uuid,
+                ids,
+                *extra,
+                *damage,
+                max.saturating_sub(removed),
+            ),
+            None => ctx.plan.clear_inventory(target.uuid),
+        };
+    }
+    if item.is_some() && removed == 0 {
+        return Outcome::Feedback(translate(
+            "commands.clear.failed.single",
+            vec![json!({"text": targets[0].name})],
+        ));
+    }
+    let first = &targets[0];
     match targets.len() {
         1 => Outcome::Feedback(translate(
             "commands.clear.success.single",
@@ -247,7 +464,7 @@ pub(super) fn clear(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         )),
         n => Outcome::Feedback(translate(
             "commands.clear.success.multiple",
-            vec![Value::from(removed * n as i32), Value::from(n)],
+            vec![Value::from(removed), Value::from(n)],
         )),
     }
 }
@@ -286,7 +503,10 @@ pub(super) fn effect(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     let Some(&id) = ctx.survival().effects.get(&effect) else {
         return Outcome::Feedback(translate(
             "argument.resource.not_found",
-            vec![Value::String(effect), Value::String("minecraft:mob_effect".into())],
+            vec![
+                Value::String(effect),
+                Value::String("minecraft:mob_effect".into()),
+            ],
         ));
     };
     let effect_text = translate(&format!("effect.{}", effect.replace(':', ".")), Vec::new());
@@ -305,6 +525,7 @@ pub(super) fn effect(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     // путь, а не в аргументы; бесконечность у нас — отрицательная длительность.
     let ticks = match (call.path.get(1).map(String::as_str), input.word()) {
         (Some("infinite"), _) => -1,
+        (_, Some("infinite")) => -1,
         (_, Some(token)) => match args::int(token, 1, 1_000_000) {
             Some(n) => n * 20,
             None => return usage("/effect give <targets> <effect> [seconds|infinite] [amplifier]"),
@@ -318,8 +539,20 @@ pub(super) fn effect(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         },
         None => 0,
     };
+    // `hideParticles`: ванильный флаг прячет частицы, у эффекта поле наоборот.
+    let particles = match input.word() {
+        None => true,
+        Some("true") => false,
+        Some("false") => true,
+        Some(_) => {
+            return usage(
+                "/effect give <targets> <effect> [seconds|infinite] [amplifier] [hideParticles]",
+            );
+        }
+    };
     for target in &targets {
-        ctx.plan.give_effect(target.uuid, id, amplifier as u8, ticks);
+        ctx.plan
+            .give_effect(target.uuid, id, amplifier as u8, ticks, particles);
     }
     success(
         "commands.effect.give.success.single",
@@ -377,10 +610,15 @@ pub(super) fn xp(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         _ => return usage("/xp add|set <targets> <amount> [points|levels]"),
     };
     for target in &targets {
-        ctx.plan.push_control(target.uuid, Control::Xp(change.clone()));
+        ctx.plan
+            .push_control(target.uuid, Control::Xp(change.clone()));
     }
     let unit = if levels { "levels" } else { "points" };
-    let kind = if targets.len() == 1 { "single" } else { "multiple" };
+    let kind = if targets.len() == 1 {
+        "single"
+    } else {
+        "multiple"
+    };
     Outcome::Feedback(translate(
         &format!("commands.experience.{sub}.{unit}.success.{kind}"),
         vec![
@@ -417,7 +655,10 @@ pub(super) fn damage(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     let Some(first) = targets.first().cloned() else {
         return no_targets();
     };
-    if ctx.plan.push_control(first.uuid, Control::Hurt(amount, cause)) {
+    if ctx
+        .plan
+        .push_control(first.uuid, Control::Hurt(amount, cause))
+    {
         success(
             "commands.damage.success",
             "commands.damage.success",
@@ -563,10 +804,7 @@ pub(super) fn gamemode(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     let mode_text = translate(&format!("gameMode.{}", gamemode_name(mode)), Vec::new());
     // Себе — `success.self`, другому — `success.single` с именем.
     if targets.len() == 1 && Some(targets[0].uuid) == call.source.uuid {
-        Outcome::Feedback(translate(
-            "commands.gamemode.success.self",
-            vec![mode_text],
-        ))
+        Outcome::Feedback(translate("commands.gamemode.success.self", vec![mode_text]))
     } else {
         success(
             "commands.gamemode.success.other",
@@ -596,7 +834,7 @@ fn args_group(
 /// `experience`, как в ванили.
 pub(super) fn specs() -> Vec<super::dispatch::Spec> {
     use super::dispatch::Spec;
-    use super::registry::{ent, float, int, GAMEMASTERS};
+    use super::registry::{GAMEMASTERS, ent, float, int};
     let players = || ent(true, false);
     let single_entity = || ent(false, true);
     vec![
@@ -621,32 +859,58 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
         Spec::group(
             "effect",
             GAMEMASTERS,
-            vec![                Spec::group(
+            vec![
+                Spec::group(
                     "give",
                     GAMEMASTERS,
                     vec![
                         args_group("targets", GAMEMASTERS, players(), effect).with_children(vec![
-                            Spec::arg_leaf("effect", GAMEMASTERS, super::registry::mob_effect(), effect)
-                                .with_children(vec![
-                                    Spec::arg_leaf("seconds", GAMEMASTERS, int(1, 1_000_000), effect)
-                                        .with_children(vec![Spec::arg_leaf(
+                            Spec::arg_leaf(
+                                "effect",
+                                GAMEMASTERS,
+                                super::registry::mob_effect(),
+                                effect,
+                            )
+                            .with_children(vec![
+                                Spec::arg_leaf("seconds", GAMEMASTERS, int(1, 1_000_000), effect)
+                                    .with_children(vec![
+                                        Spec::arg_leaf(
                                             "amplifier",
                                             GAMEMASTERS,
                                             int(0, 255),
                                             effect,
-                                        )]),
-                                    Spec::exec(
-                                        "infinite",
-                                        GAMEMASTERS,
-                                        effect,
-                                        vec![Spec::arg_leaf(
+                                        )
+                                        .with_children(
+                                            vec![Spec::arg_leaf(
+                                                "hideParticles",
+                                                GAMEMASTERS,
+                                                super::registry::boolean(),
+                                                effect,
+                                            )],
+                                        ),
+                                    ]),
+                                Spec::exec(
+                                    "infinite",
+                                    GAMEMASTERS,
+                                    effect,
+                                    vec![
+                                        Spec::arg_leaf(
                                             "amplifier",
                                             GAMEMASTERS,
                                             int(0, 255),
                                             effect,
-                                        )],
-                                    ),
-                                ]),
+                                        )
+                                        .with_children(
+                                            vec![Spec::arg_leaf(
+                                                "hideParticles",
+                                                GAMEMASTERS,
+                                                super::registry::boolean(),
+                                                effect,
+                                            )],
+                                        ),
+                                    ],
+                                ),
+                            ]),
                         ]),
                     ],
                 ),
@@ -655,9 +919,14 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
                     GAMEMASTERS,
                     effect,
                     vec![
-                        Spec::arg_leaf("targets", GAMEMASTERS, players(), effect).with_children(vec![
-                            Spec::arg_leaf("effect", GAMEMASTERS, super::registry::mob_effect(), effect),
-                        ]),
+                        Spec::arg_leaf("targets", GAMEMASTERS, players(), effect).with_children(
+                            vec![Spec::arg_leaf(
+                                "effect",
+                                GAMEMASTERS,
+                                super::registry::mob_effect(),
+                                effect,
+                            )],
+                        ),
                     ],
                 ),
             ],
@@ -668,8 +937,18 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
             "gamemode",
             GAMEMASTERS,
             vec![
-                Spec::arg_leaf("gamemode", GAMEMASTERS, super::registry::gamemode(), gamemode)
-                    .with_children(vec![Spec::arg_leaf("target", GAMEMASTERS, players(), gamemode)]),
+                Spec::arg_leaf(
+                    "gamemode",
+                    GAMEMASTERS,
+                    super::registry::gamemode(),
+                    gamemode,
+                )
+                .with_children(vec![Spec::arg_leaf(
+                    "target",
+                    GAMEMASTERS,
+                    players(),
+                    gamemode,
+                )]),
             ],
         )
         .with_handler(gamemode),
@@ -693,7 +972,12 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
             "kill",
             GAMEMASTERS,
             kill,
-            vec![Spec::arg_leaf("targets", GAMEMASTERS, ent(false, false), kill)],
+            vec![Spec::arg_leaf(
+                "targets",
+                GAMEMASTERS,
+                ent(false, false),
+                kill,
+            )],
         ),
         // clear [targets] [item] [maxCount]: корень исполняем.
         Spec::exec(
@@ -702,32 +986,36 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
             clear,
             vec![
                 Spec::arg_leaf("targets", GAMEMASTERS, players(), clear).with_children(vec![
-                    Spec::arg_leaf("item", GAMEMASTERS, super::registry::item_predicate(), clear)
-                        .with_children(vec![Spec::arg_leaf(
-                            "maxCount",
-                            GAMEMASTERS,
-                            int(0, i32::MAX),
-                            clear,
-                        )]),
+                    Spec::arg_leaf(
+                        "item",
+                        GAMEMASTERS,
+                        super::registry::item_predicate(),
+                        clear,
+                    )
+                    .with_children(vec![Spec::arg_leaf(
+                        "maxCount",
+                        GAMEMASTERS,
+                        int(0, i32::MAX),
+                        clear,
+                    )]),
                 ]),
             ],
         ),
         // teleport и алиас tp
         tp_spec("teleport"),
-        Spec::alias("tp", GAMEMASTERS, "teleport"),        // damage <target> <amount> [damageType]
+        Spec::alias("tp", GAMEMASTERS, "teleport"), // damage <target> <amount> [damageType]
         Spec::group(
             "damage",
             GAMEMASTERS,
             vec![
                 args_group("target", GAMEMASTERS, single_entity(), damage).with_children(vec![
-                    Spec::arg_leaf("amount", GAMEMASTERS, float(0.0, 3.4e38), damage).with_children(
-                        vec![Spec::arg_leaf(
+                    Spec::arg_leaf("amount", GAMEMASTERS, float(0.0, 3.4e38), damage)
+                        .with_children(vec![Spec::arg_leaf(
                             "damageType",
                             GAMEMASTERS,
                             super::registry::damage_type(),
                             damage,
-                        )],
-                    ),
+                        )]),
                 ]),
             ],
         ),
@@ -765,7 +1053,7 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
 /// `experience`, как в ванили.
 fn experience_spec(name: &str) -> super::dispatch::Spec {
     use super::dispatch::Spec;
-    use super::registry::{arg, ent, int, GAMEMASTERS};
+    use super::registry::{GAMEMASTERS, arg, ent, int};
     let units = || {
         vec![
             Spec::literal_leaf("levels", GAMEMASTERS, xp),
@@ -810,7 +1098,7 @@ fn experience_spec(name: &str) -> super::dispatch::Spec {
 /// ванили, поэтому клиент принимает и `/tp ~ ~ ~`, и `/tp Alice`.
 fn tp_spec(name: &str) -> super::dispatch::Spec {
     use super::dispatch::Spec;
-    use super::registry::{anchor, ent, vec3, GAMEMASTERS};
+    use super::registry::{GAMEMASTERS, anchor, ent, vec3};
     let location = || {
         let facing_pos = Spec::arg_leaf("facingLocation", GAMEMASTERS, vec3(), teleport);
         let facing_entity = Spec::group(
@@ -827,7 +1115,12 @@ fn tp_spec(name: &str) -> super::dispatch::Spec {
             ],
         );
         let facing = Spec::group("facing", GAMEMASTERS, vec![facing_entity, facing_pos]);
-        let rotation = Spec::arg_leaf("rotation", GAMEMASTERS, super::registry::rotation(), teleport);
+        let rotation = Spec::arg_leaf(
+            "rotation",
+            GAMEMASTERS,
+            super::registry::rotation(),
+            teleport,
+        );
         Spec::arg_leaf("location", GAMEMASTERS, vec3(), teleport)
             .with_children(vec![facing, rotation])
     };
@@ -846,3 +1139,53 @@ fn tp_spec(name: &str) -> super::dispatch::Spec {
     .with_handler(teleport)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::read_teleport;
+
+    #[test]
+    fn local_teleport_keeps_all_three_coordinates() {
+        // Раньше первое слово съедалось, и `/tp ^ ^5 ^` не добирало тройки.
+        let plan = read_teleport(&["^", "^5", "^"]).unwrap();
+        assert!(plan.who.is_none());
+        let super::Dest::Location {
+            coords,
+            facing,
+            rotation,
+        } = plan.dest
+        else {
+            panic!("ожидались координаты");
+        };
+        assert!(matches!(facing, super::Facing::None));
+        assert!(rotation.is_none());
+        assert!(
+            coords
+                .iter()
+                .all(|c| matches!(c, super::args::Coord::Local(_)))
+        );
+        assert!(matches!(coords[1], super::args::Coord::Local(v) if (v - 5.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn facing_entity_is_not_a_rotation() {
+        let plan = read_teleport(&["^", "^5", "^", "facing", "entity", "qtless", "eyes"]).unwrap();
+        let super::Dest::Location { facing, .. } = plan.dest else {
+            panic!("ожидались координаты");
+        };
+        match facing {
+            super::Facing::Entity { token, eyes } => {
+                assert_eq!(token, "qtless");
+                assert!(eyes);
+            }
+            _ => panic!("ожидался facing entity"),
+        }
+    }
+
+    #[test]
+    fn named_destination_is_not_coordinates() {
+        let plan = read_teleport(&["Alice"]).unwrap();
+        assert!(matches!(plan.dest, super::Dest::Entity(name) if name == "Alice"));
+        let plan = read_teleport(&["Bob", "Alice"]).unwrap();
+        assert_eq!(plan.who.as_deref(), Some("Bob"));
+    }
+}

@@ -10,6 +10,7 @@ pub mod noise;
 pub mod pipeline;
 pub mod random;
 pub mod surface;
+pub mod templates;
 pub mod volume;
 
 use aquifer::{Aquifer, Fluid, Samplers};
@@ -21,6 +22,36 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use volume::Volume;
+
+/// Блок стартовой платформы `the_void` (`VoidStartPlatformFeature`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VoidPlatformBlock {
+    Stone,
+    Cobblestone,
+}
+
+/// Квадрат 33×33: от `(-8, -8)` до `(24, 24)`, центр `(8, 8)` — булыжник.
+/// `None` — клетка вне платформы.
+pub fn void_platform_block(x: i32, z: i32) -> Option<VoidPlatformBlock> {
+    if (x - 8).abs().max((z - 8).abs()) > 16 {
+        return None;
+    }
+    Some(if x == 8 && z == 8 {
+        VoidPlatformBlock::Cobblestone
+    } else {
+        VoidPlatformBlock::Stone
+    })
+}
+
+/// Чанк, в который фича пишет свою часть платформы: Чебышёв до `(0, 0)` не больше 1.
+pub fn void_platform_chunk(cx: i32, cz: i32) -> bool {
+    cx.abs().max(cz.abs()) <= 1
+}
+
+/// Высота платформы: три блока над дном мира (`minY + 3`).
+pub fn void_platform_y(min_y: i32) -> i32 {
+    min_y + 3
+}
 
 /// Блок после заполнения шумом (`doFill`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,8 +101,24 @@ pub struct Generator {
     /// Биомы уже посчитанных чанков: «дрожание» границы заглядывает к соседу,
     /// а соседа всё равно генерировать — как биомы в чанках региона ванили.
     biome_cache: Vec<std::sync::Mutex<HashMap<ChunkPos, Arc<[u32]>>>>,
+    /// `single_biome_surface`: имя биома и его сетевой ID. Климат для выбора
+    /// биома не считается, рельеф — как у выбранных `noise_settings`.
+    fixed_biome: Option<String>,
+    fixed_biome_id: Option<u32>,
+    /// Плотности жил в том же порядке, что [`Self::vein_densities`].
+    vein_names: Vec<String>,
+    /// Правило поверхности выбранных настроек: файл `overworld` или своё.
+    surface_choice: SurfaceChoice,
 }
 
+/// Откуда брать правило поверхности.
+#[derive(Clone, Debug)]
+enum SurfaceChoice {
+    /// Имя в `worldgen/material_rule`.
+    Named(String),
+    /// Объект `surface_rule` из `noise_settings`, отличный от файла оверворлда.
+    Inline(Value),
+}
 
 /// Координаты чанка `(cx, cz)`.
 type ChunkPos = (i32, i32);
@@ -116,21 +163,20 @@ pub struct CarveBlocks {
 const CACHE_DIR: &str = "chunkwake-derived-v2";
 const CACHE_FILE: &str = "worldgen.v1.bin";
 const CACHE_MAGIC: u32 = 0x434B_5747; // "CKWG"
-const CACHE_SCHEMA: u32 = 2;
+const CACHE_SCHEMA: u32 = 3;
 
 fn cache_path(data_dir: &Path) -> std::path::PathBuf {
     data_dir.join(CACHE_DIR).join(CACHE_FILE)
 }
 
-/// `worldgen` целиком: `noise_settings/overworld`, параметры шумов и функции
-/// плотности. Кэш только для этого мира, поэтому читается лишь для `normal`.
+/// `worldgen` целиком: все `noise_settings`, параметры шумов и функции
+/// плотности. Кэш общий: какой файл собирать, выбирает загрузчик.
 fn worldgen_text(data_dir: &Path) -> Result<Vec<(String, String)>, String> {
     let wg = data_dir.join("data/minecraft/worldgen");
-    let mut out = vec![(
-        "@noise_settings/overworld".to_owned(),
-        std::fs::read_to_string(wg.join("noise_settings/overworld.json"))
-            .map_err(|e| format!("noise_settings/overworld.json: {e}"))?,
-    )];
+    let mut out = Vec::new();
+    for (name, text) in read_tree(&wg.join("noise_settings"))? {
+        out.push((format!("@noise_settings/{name}"), text));
+    }
     for (name, text) in read_tree(&wg.join("density_function"))? {
         out.push((format!("@density_function/{name}"), text));
     }
@@ -208,7 +254,10 @@ fn read_cache(path: &Path, world_version: i32) -> Option<Vec<(String, String)>> 
     }
     // Кэш старого формата собрали до правил поверхности: без них мир будет
     // голым камнем, поэтому такой файл считаем устаревшим.
-    if !out.iter().any(|(name, _)| name.starts_with("@material_rule/")) {
+    if !out
+        .iter()
+        .any(|(name, _)| name.starts_with("@material_rule/"))
+    {
         return None;
     }
     Some(out)
@@ -260,11 +309,28 @@ impl Generator {
 
     /// То же, но `world_version` позволяет переиспользовать кэш `worldgen`:
     /// без него дерево JSON читается заново на каждый запуск.
+    /// Собирает `minecraft:overworld`.
     pub fn load_with_version(
         data_dir: &Path,
         seed: i64,
         world_version: Option<i32>,
     ) -> Result<Self, String> {
+        Self::load_settings(data_dir, seed, world_version, "minecraft:overworld")
+    }
+
+    /// Как [`Self::load_with_version`], но `settings` — имя `noise_settings`
+    /// (`minecraft:overworld`, `minecraft:large_biomes`, `minecraft:amplified`).
+    pub fn load_settings(
+        data_dir: &Path,
+        seed: i64,
+        world_version: Option<i32>,
+        settings: &str,
+    ) -> Result<Self, String> {
+        let settings_name = if settings.contains(':') {
+            settings.to_owned()
+        } else {
+            format!("minecraft:{settings}")
+        };
         let rows = match world_version.and_then(|v| read_cache(&cache_path(data_dir), v)) {
             Some(rows) => rows,
             None => {
@@ -275,7 +341,7 @@ impl Generator {
                 rows
             }
         };
-        let mut settings = Value::Null;
+        let mut settings_files = HashMap::new();
         let mut registry = HashMap::new();
         let mut noises = HashMap::new();
         let mut rules = HashMap::new();
@@ -285,8 +351,8 @@ impl Generator {
         for (name, text) in rows {
             let value: Value =
                 serde_json::from_str(&text).map_err(|e| format!("worldgen {name}: {e}"))?;
-            if name == "@noise_settings/overworld" {
-                settings = value;
+            if let Some(id) = name.strip_prefix("@noise_settings/") {
+                settings_files.insert(id.to_owned(), value);
             } else if let Some(id) = name.strip_prefix("@noise/") {
                 noises.insert(id.to_owned(), NormalNoise::from_json(&value)?);
             } else if let Some(id) = name.strip_prefix("@density_function/") {
@@ -301,9 +367,9 @@ impl Generator {
                 biome_files.insert(id.to_owned(), value);
             }
         }
-        if settings.is_null() {
-            return Err("worldgen: no noise_settings/overworld".into());
-        }
+        let settings = settings_files
+            .remove(&settings_name)
+            .ok_or_else(|| format!("worldgen: no noise settings {settings_name}"))?;
         let mut g = Self::assemble(
             data_dir, seed, settings, registry, noises, rules, conditions,
         )?;
@@ -324,7 +390,10 @@ impl Generator {
         for biome in names {
             let list = match &biomes[biome]["carvers"] {
                 Value::String(one) => vec![one.clone()],
-                Value::Array(a) => a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect(),
+                Value::Array(a) => a
+                    .iter()
+                    .filter_map(|x| x.as_str().map(str::to_owned))
+                    .collect(),
                 _ => Vec::new(),
             };
             let mut ids = Vec::with_capacity(list.len());
@@ -391,15 +460,23 @@ impl Generator {
         let biomes = read_biomes(data_dir)?;
         // Предварительная поверхность и стадия поверхности.
         let preliminary = get(&settings["noise_router"]["chunk_surface_level"])?;
-        // Плотности жил: нужны поштучно на каждую клетку, а не объёмом.
-        let vein_densities = [
-            "minecraft:overworld/ore_vein/copper_density",
-            "minecraft:overworld/ore_vein/iron_density",
-            "minecraft:overworld/ore_vein/richness",
-            "minecraft:overworld/ore_vein/gap",
-        ];
-        let mut densities = Vec::with_capacity(vein_densities.len());
-        for name in vein_densities {
+        // Плотности жил: сначала четыре оверворлда (их индексы уже в правилах),
+        // затем имена из выбранного `surface_rule`, если они другие.
+        let surface_choice = surface_choice(&settings, &rules);
+        let mut vein_names = default_vein_names();
+        if let Some(rule) = rules.get("minecraft:overworld") {
+            collect_vein_names(rule, &mut vein_names);
+        }
+        match &surface_choice {
+            SurfaceChoice::Inline(rule) => collect_vein_names(rule, &mut vein_names),
+            SurfaceChoice::Named(id) => {
+                if let Some(rule) = rules.get(id) {
+                    collect_vein_names(rule, &mut vein_names);
+                }
+            }
+        }
+        let mut densities = Vec::with_capacity(vein_names.len());
+        for name in &vein_names {
             let value = density_values
                 .get(name)
                 .cloned()
@@ -443,6 +520,10 @@ impl Generator {
             biome_cache: (0..BIOME_SHARDS)
                 .map(|_| std::sync::Mutex::new(HashMap::new()))
                 .collect(),
+            fixed_biome: None,
+            fixed_biome_id: None,
+            vein_names,
+            surface_choice,
         })
     }
 
@@ -454,6 +535,16 @@ impl Generator {
 
     /// То же, что [`Self::fill`], но с акифером для стадии карверов.
     pub fn terrain(&self, cx: i32, cz: i32) -> Terrain<'_> {
+        self.terrain_beard(cx, cz, &feature::structure::Beard::default())
+    }
+
+    /// Рельеф с добавкой `beard_thin` к финальной плотности, до акифера.
+    pub(crate) fn terrain_beard(
+        &self,
+        cx: i32,
+        cz: i32,
+        beard: &feature::structure::Beard,
+    ) -> Terrain<'_> {
         let v = Volume::blocks([16, self.height, 16], [cx * 16, self.min_y, cz * 16]);
         let mut ctx = Ctx::default();
         let mut aquifer = Aquifer::new(
@@ -469,8 +560,11 @@ impl Generator {
         for z in 0..16 {
             for x in 0..16 {
                 for y in (0..self.height).rev() {
-                    let d = density[v.index(x, y, z)];
                     let (bx, by, bz) = (v.block_x(x), v.block_y(y), v.block_z(z));
+                    let mut d = density[v.index(x, y, z)];
+                    if !beard.is_empty() {
+                        d += beard.delta(bx, by, bz);
+                    }
                     let fill = match aquifer.substance(&mut ctx, bx, by, bz, d as f64) {
                         None => Fill::Solid,
                         Some(Fluid::Air) => Fill::Air,
@@ -493,6 +587,13 @@ impl Generator {
     /// Карверы чанка-источника по биому в квартовой клетке его угла на y=0
     /// (`getBiomeGenerationSettingsForCarver`).
     fn source_carvers(&self, sx: i32, sz: i32) -> Option<Arc<[usize]>> {
+        if let Some(name) = &self.fixed_biome {
+            return self
+                .biome_carvers
+                .get(name)
+                .filter(|l| !l.is_empty())
+                .map(|l| Arc::from(l.as_slice()));
+        }
         let shard = &self.source_biomes[biome_shard(sx, sz)];
         if let Some(hit) = shard.lock().unwrap().get(&(sx, sz)) {
             return hit.clone();
@@ -520,7 +621,7 @@ impl Generator {
     /// Маска вырезов чанка (`generateCarvers`): карверы всех чанков в
     /// радиусе 8. Верхние 7 блоков мира защищены, как у не обновляемого чанка.
     pub fn carving_mask(&self, cx: i32, cz: i32) -> Option<carver::Mask> {
-        if self.carvers.is_empty() || self.biomes.is_empty() {
+        if self.carvers.is_empty() || (self.fixed_biome.is_none() && self.biomes.is_empty()) {
             return None;
         }
         let max_y = self.min_y + self.height - 1 - 7;
@@ -637,6 +738,9 @@ impl Generator {
         for rule in self.rules.values().chain(self.conditions.values()) {
             collect_noises(rule, &mut names);
         }
+        if let SurfaceChoice::Inline(rule) = &self.surface_choice {
+            collect_noises(rule, &mut names);
+        }
         names.sort();
         names.dedup();
         // `surface` и `surface_secondary` нужны всегда: стадия берёт их по
@@ -662,6 +766,24 @@ impl Generator {
     pub fn bind_biomes(&mut self, ids: HashMap<String, u32>) {
         self.biomes.bind(ids);
     }
+
+    /// `single_biome_surface`: каждая клетка — этот биом, климат его не выбирает.
+    pub fn set_fixed_biome(
+        &mut self,
+        name: &str,
+        ids: &HashMap<String, u32>,
+    ) -> Result<(), String> {
+        let id = *ids
+            .get(name)
+            .ok_or_else(|| format!("biome {name} is not in the registry"))?;
+        self.fixed_biome = Some(name.to_owned());
+        self.fixed_biome_id = Some(id);
+        Ok(())
+    }
+
+    pub fn fixed_biome(&self) -> Option<&str> {
+        self.fixed_biome.as_deref()
+    }
     pub fn has_biomes(&self) -> bool {
         !self.biomes.is_empty()
     }
@@ -670,6 +792,27 @@ impl Generator {
     /// списке точек климата.
     pub fn biome_order(&self) -> Vec<String> {
         self.biomes.names()
+    }
+
+    /// Биомы, чьи фичи грузит декорация: один фиксированный или все климатические.
+    pub fn feature_biomes(&self) -> Vec<String> {
+        if let Some(name) = &self.fixed_biome {
+            return vec![name.clone()];
+        }
+        self.biome_order()
+    }
+
+    /// Имена плотностей жил в порядке [`Self::vein_densities`].
+    pub fn vein_names(&self) -> &[String] {
+        &self.vein_names
+    }
+
+    /// Имя правила поверхности или встроенный объект настроек.
+    pub fn surface_rule(&self) -> Result<(&str, Option<&Value>), String> {
+        match &self.surface_choice {
+            SurfaceChoice::Named(id) => Ok((id, None)),
+            SurfaceChoice::Inline(rule) => Ok(("@selected", Some(rule))),
+        }
     }
 
     pub fn seed(&self) -> i64 {
@@ -693,11 +836,7 @@ impl Generator {
         let ids: Arc<[u32]> = self.compute_biomes(cx, cz)?.into();
         let mut cache = shard.lock().unwrap();
         if cache.len() >= BIOME_CACHE_SHARD {
-            let drop: Vec<(i32, i32)> = cache
-                .keys()
-                .take(BIOME_CACHE_SHARD / 2)
-                .copied()
-                .collect();
+            let drop: Vec<(i32, i32)> = cache.keys().take(BIOME_CACHE_SHARD / 2).copied().collect();
             for k in drop {
                 cache.remove(&k);
             }
@@ -707,6 +846,10 @@ impl Generator {
     }
 
     fn compute_biomes(&self, cx: i32, cz: i32) -> Option<Vec<u32>> {
+        if let Some(id) = self.fixed_biome_id {
+            let cells = (self.height / 4) as usize * 16;
+            return Some(vec![id; cells]);
+        }
         let points = self.climate(cx, cz)?;
         let mut ids = Vec::with_capacity(points.len());
         let mut hint = None;
@@ -825,9 +968,8 @@ impl Generator {
             known
         } else {
             let first = cell(px, py, pz);
-            let uniform = (1..8).all(|i| {
-                cell(px + (i >> 2 & 1), py + (i >> 1 & 1), pz + (i & 1)) == first
-            });
+            let uniform =
+                (1..8).all(|i| cell(px + (i >> 2 & 1), py + (i >> 1 & 1), pz + (i & 1)) == first);
             let v = if uniform { first } else { MIXED };
             if let Some(i) = slot {
                 memo.parents[i] = v;
@@ -854,6 +996,69 @@ impl Generator {
         self.biomes.biome(&q)
     }
 
+    /// Имя биома блока (`minecraft:plains`). Фиксированный мир отвечает им
+    /// на любую точку; климатический — клеткой 4×4×4.
+    pub fn biome_name_at(&self, x: i32, y: i32, z: i32) -> Option<String> {
+        if let Some(name) = &self.fixed_biome {
+            return Some(name.clone());
+        }
+        if self.biomes.is_empty() {
+            return None;
+        }
+        let p = self.climate_at(x >> 2, y >> 2, z >> 2);
+        let mut q = [0i64; 6];
+        for (q, v) in q.iter_mut().zip(&p) {
+            *q = biome::quantize(*v);
+        }
+        self.biomes.name(&q).map(str::to_owned)
+    }
+
+    /// Ближайшая точка биома `name` в квадрате радиуса `radius` блоков.
+    ///
+    /// Сначала шаг 32 (кольца от игрока), чтобы команда не обходила каждый
+    /// блок; первое совпадение — ответ. `None` — в радиусе такого биома нет
+    /// или климат не посчитан.
+    pub fn find_biome(&self, name: &str, origin: [i32; 3], radius: i32) -> Option<[i32; 3]> {
+        let want = if name.contains(':') {
+            name.to_owned()
+        } else {
+            format!("minecraft:{name}")
+        };
+        let (ox, oy, oz) = (
+            origin[0],
+            origin[1].clamp(self.min_y, self.min_y + self.height - 1),
+            origin[2],
+        );
+        let hit = |x: i32, z: i32| {
+            self.biome_name_at(x, oy, z)
+                .is_some_and(|n| n == want)
+                .then_some([x, oy, z])
+        };
+        if let Some(p) = hit(ox, oz) {
+            return Some(p);
+        }
+        let step = 32;
+        let mut r = step;
+        while r <= radius {
+            let mut x = ox - r;
+            while x <= ox + r {
+                if let Some(p) = hit(x, oz - r).or_else(|| hit(x, oz + r)) {
+                    return Some(p);
+                }
+                x += step;
+            }
+            let mut z = oz - r + step;
+            while z < oz + r {
+                if let Some(p) = hit(ox - r, z).or_else(|| hit(ox + r, z)) {
+                    return Some(p);
+                }
+                z += step;
+            }
+            r += step;
+        }
+        None
+    }
+
     /// Имя биома для сырой точки климата — для тестов и сверки.
     pub fn biome_name(&self, point: &[f32; 6]) -> Option<&str> {
         let mut q = [0i64; 6];
@@ -875,6 +1080,66 @@ impl Generator {
         let t = std::time::Instant::now();
         self.climate[i].volume(&mut ctx, &mut buf, &v);
         t.elapsed().as_secs_f64() * 1000.0
+    }
+}
+
+/// Четыре плотности жил оверворлда. Индексы в уже скомпилированных правилах
+/// смотрят сюда; дополнительные имена дописываются в конец.
+fn default_vein_names() -> Vec<String> {
+    [
+        "minecraft:overworld/ore_vein/copper_density",
+        "minecraft:overworld/ore_vein/iron_density",
+        "minecraft:overworld/ore_vein/richness",
+        "minecraft:overworld/ore_vein/gap",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn push_unique(names: &mut Vec<String>, name: &str) {
+    if !names.iter().any(|n| n == name) {
+        names.push(name.to_owned());
+    }
+}
+
+/// Имена `density` / `richness` / `filler_gap` у правил `ore_vein`.
+fn collect_vein_names(v: &Value, names: &mut Vec<String>) {
+    match v {
+        Value::Object(map) => {
+            if map.get("type").and_then(|t| t.as_str()) == Some("minecraft:ore_vein") {
+                for key in ["density", "richness", "filler_gap"] {
+                    if let Some(name) = map.get(key).and_then(|x| x.as_str()) {
+                        push_unique(names, name);
+                    }
+                }
+            }
+            for child in map.values() {
+                collect_vein_names(child, names);
+            }
+        }
+        Value::Array(list) => {
+            for child in list {
+                collect_vein_names(child, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Совпадает с файлом `material_rule/overworld` — берём его. Иначе правило
+/// из самих `noise_settings`.
+fn surface_choice(settings: &Value, rules: &HashMap<String, Value>) -> SurfaceChoice {
+    match &settings["surface_rule"] {
+        Value::String(id) => SurfaceChoice::Named(id.clone()),
+        Value::Null => SurfaceChoice::Named("minecraft:overworld".into()),
+        other => {
+            if rules.get("minecraft:overworld").is_some_and(|r| r == other) {
+                SurfaceChoice::Named("minecraft:overworld".into())
+            } else {
+                SurfaceChoice::Inline(other.clone())
+            }
+        }
     }
 }
 
@@ -924,7 +1189,8 @@ mod tests {
     use super::*;
 
     fn temp(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("chunkwake-worldgen-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("chunkwake-worldgen-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("worldgen.v1.bin")
     }
@@ -977,5 +1243,94 @@ mod tests {
         write_cache(&path, &rows(true), 5023);
         assert!(read_cache(&path, 4900).is_none());
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn void_platform_is_33_square() {
+        let mut stone = 0;
+        let mut cobble = 0;
+        for z in -16..40 {
+            for x in -16..40 {
+                match void_platform_block(x, z) {
+                    Some(VoidPlatformBlock::Stone) => stone += 1,
+                    Some(VoidPlatformBlock::Cobblestone) => cobble += 1,
+                    None => {}
+                }
+            }
+        }
+        assert_eq!(stone + cobble, 33 * 33);
+        assert_eq!(cobble, 1);
+        assert_eq!(
+            void_platform_block(8, 8),
+            Some(VoidPlatformBlock::Cobblestone)
+        );
+        assert_eq!(void_platform_block(-8, -8), Some(VoidPlatformBlock::Stone));
+        assert_eq!(void_platform_block(24, 24), Some(VoidPlatformBlock::Stone));
+        assert_eq!(void_platform_block(-9, 8), None);
+        assert_eq!(void_platform_block(25, 8), None);
+        assert_eq!(void_platform_block(8, -9), None);
+        assert_eq!(void_platform_block(8, 25), None);
+        assert!(void_platform_chunk(0, 0));
+        assert!(void_platform_chunk(-1, 1));
+        assert!(!void_platform_chunk(2, 0));
+        assert_eq!(void_platform_y(-64), -61);
+    }
+
+    #[test]
+    fn identical_surface_rule_uses_overworld_file() {
+        let rule = serde_json::json!({"type": "minecraft:sequence", "sequence": []});
+        let mut rules = HashMap::new();
+        rules.insert("minecraft:overworld".into(), rule.clone());
+        let settings = serde_json::json!({"surface_rule": rule});
+        assert!(matches!(
+            surface_choice(&settings, &rules),
+            SurfaceChoice::Named(id) if id == "minecraft:overworld"
+        ));
+    }
+
+    #[test]
+    fn different_surface_rule_stays_inline() {
+        let mut rules = HashMap::new();
+        rules.insert(
+            "minecraft:overworld".into(),
+            serde_json::json!({"type": "minecraft:block"}),
+        );
+        let settings = serde_json::json!({"surface_rule": {"type": "minecraft:sequence"}});
+        assert!(matches!(
+            surface_choice(&settings, &rules),
+            SurfaceChoice::Inline(_)
+        ));
+    }
+
+    #[test]
+    fn vein_names_keep_overworld_order_and_append_extras() {
+        let mut names = default_vein_names();
+        let rule = serde_json::json!({
+            "type": "minecraft:ore_vein",
+            "density": "minecraft:overworld/ore_vein/copper_density",
+            "richness": "minecraft:custom/rich",
+            "filler_gap": "minecraft:overworld/ore_vein/gap"
+        });
+        collect_vein_names(&rule, &mut names);
+        assert_eq!(names[0], "minecraft:overworld/ore_vein/copper_density");
+        assert_eq!(names.len(), 5);
+        assert_eq!(names[4], "minecraft:custom/rich");
+    }
+
+    /// `large_biomes` и `amplified` собираются из тех же данных, что оверворлд.
+    /// Без `CHUNKWAKE_DATA` тест пропускается.
+    #[test]
+    fn alternate_noise_settings_compile() {
+        let Some(data) = std::env::var_os("CHUNKWAKE_DATA").map(std::path::PathBuf::from) else {
+            return;
+        };
+        for name in [
+            "minecraft:overworld",
+            "minecraft:large_biomes",
+            "minecraft:amplified",
+        ] {
+            Generator::load_settings(&data, 1, None, name)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
     }
 }
