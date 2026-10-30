@@ -75,7 +75,7 @@
 | `scoreboard objectives` | 2 | цели счёта | `modify` — `displayname`, `rendertype` и `numberformat` (`blank`, `fixed`, `styled`; голое слово сбрасывает формат). Формат цели уходит в `set_objective` |
 | `scoreboard players` | 2 | значения счёта | `display numberformat` хранится на счёте и в `set_score` не пишется; `enable` открывает цель `trigger` |
 | `data get\|merge\|modify` | 2 | NBT блока и сущности | путь `Foo.Bar[0]`, `merge`, `modify set\|merge\|append\|prepend\|insert` |
-| `execute … run <command>` | 2 | цепочка контекстов | `align`, `anchored`, `on`, `store` в счёт и в NBT блока или сущности; `if`/`unless` — `biome`, `blocks`, `data`, `loaded`, `items`, `score matches`; `positioned over` ставит Y по карте высот |
+| `execute … run <command>` | 2 | цепочка контекстов | `align`, `anchored`, `on`, `store` в счёт и в NBT блока или сущности; `summon` ставит сущность и продолжает от её имени; `if`/`unless` — `biome`, `blocks`, `data`, `loaded`, `items`, `slots`, `score matches`; `positioned over` ставит Y по карте высот |
 | `tag` | 2 | метки сущностей | до 1024 меток; селектор `tag=` их видит |
 | `swing` | 2 | взмах руки | `mainhand`/`offhand`, анимации `none`/`whack`/`stab`; предмет и снаряд — `notliving` |
 | `spectate` | 2 | камера наблюдателя | только режим spectator; пакет `set_camera` |

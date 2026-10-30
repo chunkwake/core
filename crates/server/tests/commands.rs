@@ -608,6 +608,49 @@ fn locate_poi_finds_a_composter_and_mansion_is_missing() {
 }
 
 #[test]
+fn execute_slots_and_summon() {
+    let plan = world!();
+    let y = plan.spawn_point()[1].floor() as i32;
+    assert!(
+        run(&plan, &format!("setblock 30 {y} 30 minecraft:chest"))
+            .contains("commands.setblock.success")
+    );
+    // Пустой сундук: слот не совпадает.
+    let empty = run(
+        &plan,
+        &format!("execute if slots block 30 {y} 30 container.0 minecraft:cobblestone run say yes"),
+    );
+    assert!(empty.is_empty(), "{empty}");
+    let placed = run(
+        &plan,
+        &format!("loot replace block 30 {y} 30 0 loot minecraft:blocks/stone"),
+    );
+    assert!(
+        placed.contains("commands.loot.replace.success"),
+        "replace: {placed}"
+    );
+    // Без шёлкового касания `blocks/stone` даёт булыжник.
+    let filled = run(
+        &plan,
+        &format!("execute if slots block 30 {y} 30 container.0 minecraft:cobblestone run say yes"),
+    );
+    assert!(filled.contains("yes"), "{filled}");
+    let wrong = run(
+        &plan,
+        &format!("execute if slots block 30 {y} 30 container.0 minecraft:dirt run say yes"),
+    );
+    assert!(wrong.is_empty(), "{wrong}");
+
+    // `execute summon`: моб появляется, хвост идёт от его имени.
+    let summon = run(&plan, "execute summon minecraft:cow run say moo");
+    assert!(summon.contains("moo"), "{summon}");
+    assert_eq!(plan.mob_count(), 1);
+    let before = plan.mob_count();
+    run(&plan, "execute summon minecraft:pig run say tail");
+    assert_eq!(plan.mob_count(), before + 1, "summon tail did not run");
+}
+
+#[test]
 fn execute_conditions_height_and_numberformat() {
     let plan = world!();
     let y = plan.spawn_point()[1].floor() as i32;

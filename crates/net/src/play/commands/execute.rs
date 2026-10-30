@@ -321,6 +321,48 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
                     ),
                 ],
             ),
+            // `slots`: ровно один слот и его стопка, в отличие от `items`.
+            literal_branch(
+                "slots",
+                vec![
+                    literal_branch(
+                        "block",
+                        vec![Spec::arg(
+                            "source",
+                            GAMEMASTERS,
+                            super::registry::block_pos(),
+                            vec![Spec::arg(
+                                "slot",
+                                GAMEMASTERS,
+                                chunkwake_protocol::text::Parser::ItemSlot,
+                                vec![branch(
+                                    "item",
+                                    super::registry::item_predicate(),
+                                    Vec::new(),
+                                )],
+                            )],
+                        )],
+                    ),
+                    literal_branch(
+                        "entity",
+                        vec![Spec::arg(
+                            "source",
+                            GAMEMASTERS,
+                            entities(),
+                            vec![Spec::arg(
+                                "slot",
+                                GAMEMASTERS,
+                                chunkwake_protocol::text::Parser::ItemSlot,
+                                vec![branch(
+                                    "item",
+                                    super::registry::item_predicate(),
+                                    Vec::new(),
+                                )],
+                            )],
+                        )],
+                    ),
+                ],
+            ),
         ]
     };
     let children = vec![
@@ -387,6 +429,7 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
                 literal_branch("success", store_targets()),
             ],
         ),
+        literal_branch("summon", vec![branch("entity", entities(), Vec::new())]),
         run,
     ];
     vec![Spec::exec("execute", GAMEMASTERS, execute, children)]
@@ -555,6 +598,12 @@ fn run_chain(ctx: &Context<'_>, exec: &Exec, rest: &str, budget: &mut usize) -> 
             "store" => {
                 return store_value(ctx, &exec, tail, budget);
             }
+            "summon" => {
+                let mut budget_now = *budget;
+                let outcome = summon_then(ctx, &exec, tail, &mut budget_now);
+                *budget = budget_now;
+                return outcome;
+            }
             "rotated" => {
                 let (yaw, tail2) = split(tail);
                 let (pitch, next) = split(tail2);
@@ -638,9 +687,10 @@ fn run_chain(ctx: &Context<'_>, exec: &Exec, rest: &str, budget: &mut usize) -> 
                     "data" => data_test(ctx, &exec, tail2),
                     "loaded" => loaded_test(ctx, &exec, tail2),
                     "items" => items_test(ctx, &exec, tail2),
+                    "slots" => slots_test(ctx, &exec, tail2),
                     _ => {
                         return Outcome::Feedback(error_component(
-                            "/execute if|unless <entity|block|score|biome|blocks|data|loaded|items> …",
+                            "/execute if|unless <entity|block|score|biome|blocks|data|loaded|items|slots> …",
                         ));
                     }
                 };
@@ -662,6 +712,36 @@ fn run_chain(ctx: &Context<'_>, exec: &Exec, rest: &str, budget: &mut usize) -> 
             }
         }
     }
+}
+
+/// `execute summon <entity> …`: ставит сущность и выполняет хвост от её имени.
+fn summon_then(ctx: &Context<'_>, exec: &Exec, tail: &str, budget: &mut usize) -> Outcome {
+    let (token, next) = split(tail);
+    let name = super::args::resource_name(token);
+    let Some(species) = crate::mobs::Species::from_name(&name) else {
+        return Outcome::Feedback(translate(
+            "argument.entity.id.invalid",
+            vec![serde_json::json!(name)],
+        ));
+    };
+    let Some(entity_id) = ctx.plan.summon_mob(species, exec.pos) else {
+        return Outcome::Feedback(translate("commands.summon.failed", Vec::new()));
+    };
+    // Моб уже в снимке: его UUID выводится из `entity_id`.
+    let Some(target) = ctx.plan.command_target(entity_uuid(entity_id)) else {
+        return Outcome::Feedback(translate("commands.summon.failed", Vec::new()));
+    };
+    let mut branch = exec.clone();
+    branch.source = Source::player(target.uuid, target.name.clone(), exec.source.level);
+    branch.pos = target.pos;
+    (branch.yaw, branch.pitch) = (target.yaw, target.pitch);
+    branch.eyes = false;
+    run_chain(ctx, &branch, next, budget)
+}
+
+/// UUID моба выводится из `entity_id` (та же схема, что у целей селектора).
+fn entity_uuid(entity_id: i32) -> Uuid {
+    Uuid::from_u128(u128::from(entity_id as u32).rotate_left(32))
 }
 
 /// `execute on <relation>`: пассажир и транспорт, если связь уже записана.
@@ -1262,6 +1342,76 @@ fn items_test<'a>(
             .map(|stack| stack.count)
             .sum::<i32>()
             >= 1
+    });
+    Ok((ok, text))
+}
+
+/// `execute if slots <block|entity> … <slot> <item>`.
+///
+/// Отличие от `if items`: сравнивается ровно указанный слот и его стопка,
+/// включая компоненты. Несколько целей — каждая должна совпасть.
+fn slots_test<'a>(
+    ctx: &Context<'_>,
+    exec: &Exec,
+    text: &'a str,
+) -> Result<(bool, &'a str), Outcome> {
+    let (kind, text) = split(text);
+    let (stacks, text) = match kind {
+        "block" => {
+            let Some((pos, text)) = take_block(exec, text) else {
+                return Err(Outcome::Feedback(error_component(
+                    "/execute if slots block <pos> <slot> <item>",
+                )));
+            };
+            let (slot, text) = split(text);
+            let Some(which) = container_slots(slot) else {
+                return Err(Outcome::Feedback(error_component(
+                    "/execute if slots block <pos> <slot> <item>",
+                )));
+            };
+            let all = ctx.plan.container_items(pos);
+            let chosen = match which {
+                None => all,
+                Some(index) => all.get(index).copied().into_iter().collect(),
+            };
+            (vec![chosen], text)
+        }
+        "entity" => {
+            let (token, text) = split(text);
+            let (slot, text) = split(text);
+            let list = ctx.select(&exec.source, token, false).unwrap_or_default();
+            if list.is_empty() {
+                return Ok((false, split(text).1));
+            }
+            let Some(windows) = entity_windows(ctx, &list, slot) else {
+                return Err(Outcome::Feedback(error_component(
+                    "/execute if slots entity <targets> <slot> <item>",
+                )));
+            };
+            let groups = windows
+                .into_iter()
+                .map(|(uuid, windows)| ctx.plan.player_windows(uuid, &windows))
+                .collect();
+            (groups, text)
+        }
+        _ => {
+            return Err(Outcome::Feedback(error_component(
+                "/execute if slots <block|entity> …",
+            )));
+        }
+    };
+    let (item, text) = split(text);
+    if item.is_empty() {
+        return Err(Outcome::Feedback(error_component(
+            "/execute if slots <block|entity> <target> <slot> <item>",
+        )));
+    }
+    // В отличие от `items`, пустой слот не совпадает: сравнивается одна стопка.
+    let ok = stacks.iter().all(|group| {
+        group
+            .iter()
+            .flatten()
+            .any(|stack| item_matches(ctx, stack, item))
     });
     Ok((ok, text))
 }
