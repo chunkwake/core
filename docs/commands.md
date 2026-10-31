@@ -71,7 +71,7 @@
 | `version` | 2 | версия сервера | — |
 | `setworldspawn` | 2 | точка появления мира | — || `worldborder` | 2 | граница мира | центр, диаметр, предупреждение и урон хранятся и уходят клиенту; урон игроку на кромке пока не считается |
 | `forceload` | 2 | чанк остаётся в симуляции | очередь подгрузки с диска отдельно не ведётся |
-| `locate biome\|poi\|structure` | 2 | биом по климату; структура по сиду; точка интереса по блокам загруженных чанков | биом: радиус 4096, шаг 32, высота в ответе — поверхность столбца. Структура: деревни, аванпосты, заброшенные лагеря, пустынные пирамиды, джунглевые храмы, хижины, иглу, кораблекрушения, шахты, океанский монумент и крепость; остальные id — «не найдено». `poi` чанки не создаёт, радиус 256 |
+| `locate biome\|poi\|structure` | 2 | биом по климату; структура по сиду; точка интереса по блокам загруженных чанков | биом: радиус 4096, шаг 32, высота в ответе — поверхность столбца. Структура: деревни, аванпосты, заброшенные лагеря, пустынные пирамиды, джунглевые храмы, хижины, иглу, кораблекрушения, шахты, океанский монумент, крепость и лесной особняк; остальные id — «не найдено». `poi` чанки не создаёт, радиус 256 |
 | `scoreboard objectives` | 2 | цели счёта | `modify` — `displayname`, `rendertype` и `numberformat` (`blank`, `fixed`, `styled`; голое слово сбрасывает формат). Формат цели уходит в `set_objective` |
 | `scoreboard players` | 2 | значения счёта | `display numberformat` хранится на счёте и в `set_score` не пишется; `enable` открывает цель `trigger` |
 | `data get\|merge\|modify` | 2 | NBT блока и сущности | путь `Foo.Bar[0]`, `merge`, `modify set\|merge\|append\|prepend\|insert` |
@@ -91,7 +91,7 @@
 | `fillbiome` | 2 | биом в коробке | чанки должны быть загружены; клиенту уходит `chunks_biomes`; объём ограничен `max_block_modifications` |
 | `waypoint` | 2 | цвет и стиль путевой точки | точка есть у игрока; моб и предмет — `argument.waypoint.invalid`. Команда точку не создаёт. Клиенту уходит `waypoint` |
 | `dialog` | 2 | закрыть диалог | `clear` шлёт пустой `clear_dialog`. `show` отвечает «не найден»: реестра диалогов нет |
-| `particle` | 2 | частицы у игроков рядом | простые типы (`flame`, `heart`, …) уходят `level_particles`. `dust`, `block`, `item` и прочие с телом пакета — `particle.invalidOptions`. Дальше 32 блоков нужна `force` (до 512) |
+| `particle` | 2 | частицы у игроков рядом | простые типы (`flame`, `heart`, …) уходят `level_particles`. `dust` принимает `<r> <g> <b> <scale>`. `block`, `item`, `vibration` и прочие с телом пакета — `particle.invalidOptions`. Дальше 32 блоков нужна `force` (до 512) |
 | `return` | 2 | выход из функции | функций нет: любая форма отвечает, что команда работает только внутри функции |
 | `item` | 2 | предмет в слот | только `replace entity <targets> <slots> with <item> [count]`. Слоты: `weapon`, `weapon.mainhand`, `weapon.offhand`, `weapon.*`, `armor.head`…`armor.feet`, `armor.*`, `hotbar.N`, `inventory.N`, `container.N`. У моба слотов нет — `commands.item.target.no_such_slot`. Ветки `block`, `from`, `modify`, `fill`, `override` в дереве не объявлены |
 | `loot` | 2 | выдать или выбросить по таблице | `give players … loot`, `spawn <pos> loot`, `insert <pos> loot`, `replace block <pos> <slot> [count] loot`. Ключ таблицы — путь от `loot_table` (`minecraft:blocks/stone`, `minecraft:chests/abandoned_mineshaft`). `kill`, `fish`, `mine` отвечают, что нужен источник урона или удочка. `replace entity` не объявлен |

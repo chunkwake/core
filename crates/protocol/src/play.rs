@@ -527,6 +527,31 @@ mod tests {
         assert_eq!(r.var_int().unwrap(), 4);
         assert_eq!(r.var_int().unwrap(), 0);
         assert!(r.remaining().is_empty());
+
+        // `dust`: тело из цвета ARGB и масштаба идёт сразу после id типа.
+        let body = dust_body(0xFF11_2233u32 as i32, 1.5);
+        let dust = level_particles_with(48, 14, Some(&body), false, [0.0; 3], [0.0; 3], 0.0, 1);
+        let mut r = Reader::new(&dust);
+        assert_eq!(r.var_int().unwrap(), 48);
+        assert_eq!(r.var_int().unwrap(), 14);
+        // Цвет ARGB — четыре байта: старшие и младшие половины.
+        let high = r.u16().unwrap() as u32;
+        let low = r.u16().unwrap() as u32;
+        assert_eq!((high << 16) | low, 0xFF11_2233u32, "цвет ARGB в теле dust");
+        assert_eq!(r.f32().unwrap(), 1.5);
+        // Дальше: force, alwaysShow, позиция (3×f64), разброс (3×f32), три скорости,
+        // количество и тип рандомизации.
+        assert!(!r.bool().unwrap());
+        assert!(!r.bool().unwrap());
+        for _ in 0..3 {
+            assert_eq!(r.f64().unwrap(), 0.0);
+        }
+        for _ in 0..6 {
+            assert_eq!(r.f32().unwrap(), 0.0);
+        }
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.var_int().unwrap(), 0);
+        assert!(r.remaining().is_empty());
     }
 }
 
@@ -652,10 +677,29 @@ pub fn level_particles(
     speed: f32,
     count: i32,
 ) -> Vec<u8> {
+    level_particles_with(id, particle, None, force, pos, delta, speed, count)
+}
+
+/// `level_particles` с телом частицы: у `dust` это цвет ARGB и масштаб.
+///
+/// Порядок полей тела — порядок `STREAM_CODEC` самого варианта: id типа
+/// пишется кодеком реестра, дальше идут поля опций.
+pub fn level_particles_with(
+    id: i32,
+    particle: i32,
+    body: Option<&[u8]>,
+    force: bool,
+    pos: [f64; 3],
+    delta: [f32; 3],
+    speed: f32,
+    count: i32,
+) -> Vec<u8> {
     let mut w = Writer::new();
-    w.var_int(id)
-        .var_int(particle)
-        .bool(force)
+    w.var_int(id).var_int(particle);
+    if let Some(body) = body {
+        w.buf.extend_from_slice(body);
+    }
+    w.bool(force)
         .bool(false)
         .f64(pos[0])
         .f64(pos[1])
@@ -668,6 +712,13 @@ pub fn level_particles(
         .f32(speed)
         .var_int(count)
         .var_int(0);
+    w.buf
+}
+
+/// Тело `DustParticleOptions`: цвет ARGB и масштаб.
+pub fn dust_body(argb: i32, scale: f32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.i32(argb).f32(scale);
     w.buf
 }
 

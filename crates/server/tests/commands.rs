@@ -1236,7 +1236,14 @@ fn dialog_clear_and_simple_particles() {
     assert!(flame.contains("commands.particle.success"), "{flame}");
     assert!(flame.contains("minecraft:flame"), "{flame}");
     let dust = run(&plan, "particle minecraft:dust");
-    assert!(dust.contains("particle.invalidOptions"), "{dust}");
+    assert!(
+        dust.contains("particle.invalidOptions") || dust.contains("/particle"),
+        "{dust}"
+    );
+    let colored = run(&plan, "particle minecraft:dust 1 0 0 1");
+    assert!(colored.contains("commands.particle.success"), "{colored}");
+    let bad = run(&plan, "particle minecraft:dust 2 0 0 1");
+    assert!(bad.contains("argument.float.range"), "{bad}");
     let missing = run(&plan, "particle minecraft:not_a_particle");
     assert!(missing.contains("particle.notFound"), "{missing}");
 }

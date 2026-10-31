@@ -12,12 +12,13 @@ use crate::play::PlayPlan;
 use serde_json::{Value, json};
 
 /// Типы, у которых после id в пакете есть свои поля.
+///
+/// `dust` поддержан отдельно: у него три канала цвета и масштаб.
 const COMPLEX: &[&str] = &[
     "minecraft:block",
     "minecraft:block_crumble",
     "minecraft:block_marker",
     "minecraft:dragon_breath",
-    "minecraft:dust",
     "minecraft:dust_color_transition",
     "minecraft:dust_pillar",
     "minecraft:effect",
@@ -57,9 +58,18 @@ pub(super) fn particle(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     let Some(id) = ctx.plan.particle_id(&name) else {
         return failed("particle.notFound", vec![Value::String(name)]);
     };
-    if COMPLEX.contains(&name.as_str()) {
-        return failed("particle.invalidOptions", vec![Value::String(name)]);
-    }
+    // Тело частицы: у `dust` это цвет и масштаб, остальные с телом пока не читаются.
+    let body = match name.as_str() {
+        "minecraft:dust" => match dust_options(&mut input) {
+            Ok(Some(body)) => Some(body),
+            Ok(None) => return usage("/particle minecraft:dust <r> <g> <b> <scale> [pos] …"),
+            Err(outcome) => return outcome,
+        },
+        other if COMPLEX.contains(&other) => {
+            return failed("particle.invalidOptions", vec![Value::String(name)]);
+        }
+        _ => None,
+    };
     let (origin, yaw, pitch) = look(ctx, call);
     let basis = Basis::from_rotation(yaw, pitch);
     let mut pos = origin;
@@ -133,9 +143,10 @@ pub(super) fn particle(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
             Err(outcome) => return outcome,
         }
     };
-    let packet = chunkwake_protocol::play::level_particles(
+    let packet = chunkwake_protocol::play::level_particles_with(
         ctx.plan.ids.level_particles,
         id,
+        body.as_deref(),
         force,
         pos,
         delta,
@@ -156,6 +167,50 @@ pub(super) fn particle(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         "commands.particle.success",
         vec![Value::String(name)],
     ))
+}
+
+/// Тело `dust`: три канала 0..1 и масштаб.
+///
+/// `Ok(None)` — числа не прочитались (это уже позиция), `Err` — вне диапазона.
+fn dust_options(input: &mut args::Input<'_>) -> Result<Option<Vec<u8>>, Outcome> {
+    let mut channels = [0u8; 3];
+    for (index, channel) in channels.iter_mut().enumerate() {
+        let Some(token) = input.peek_word() else {
+            return Ok(None);
+        };
+        let Ok(value) = token.parse::<f32>() else {
+            return Ok(None);
+        };
+        if !(0.0..=1.0).contains(&value) || !value.is_finite() {
+            return Err(failed(
+                "argument.float.range",
+                vec![json!(0.0), json!(1.0), json!({"text": token}), json!(index)],
+            ));
+        }
+        input.word();
+        *channel = (value * 255.0).round() as u8;
+    }
+    let Some(scale_token) = input.word() else {
+        return Ok(None);
+    };
+    let Ok(scale) = scale_token.parse::<f32>() else {
+        return Ok(None);
+    };
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err(failed(
+            "argument.float.low",
+            vec![json!(0), json!({"text": scale_token})],
+        ));
+    }
+    // `ARGB.color`: непрозрачный цвет из трёх каналов.
+    let argb = 0xFF00_0000u32
+        | (u32::from(channels[0]) << 16)
+        | (u32::from(channels[1]) << 8)
+        | u32::from(channels[2]);
+    Ok(Some(chunkwake_protocol::play::dust_body(
+        argb as i32,
+        scale,
+    )))
 }
 
 fn peek_coord(input: &args::Input<'_>) -> bool {
