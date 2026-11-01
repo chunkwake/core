@@ -18,14 +18,138 @@ use tokio::net::TcpListener;
 async fn main() {
     // Локальные переменные окружения (например, CHUNKWAKE_JAVA) из .env в текущем
     // каталоге или выше. Переменные, уже заданные в окружении, не перезаписываются.
-    if let Err(error) = dotenvy::dotenv()
-        && !error.not_found()
-    {
+    //
+    // Случай, который стоил отладки: `.env` в корне репозитория задаёт
+    // CHUNKWAKE_JAVA, и запуск сервера из подкаталога молча подхватывал его —
+    // `doctor` проверял не ту Java, что стоит в `java-path`. Поэтому сначала
+    // ищем `.env` в каталоге сервера (он передаётся `--dir`), и только потом
+    // поднимаемся выше.
+    if let Err(error) = dotenv_in_server_dir() {
         eprintln!("warning: .env: {error}");
     }
     if let Err(error) = cli::execute().await {
         eprintln!("error: {error}");
         std::process::exit(1);
+    }
+}
+
+/// `.env` из каталога сервера, затем обычный поиск вверх по дереву.
+///
+/// Отсутствие файла — обычный случай, не повод для предупреждения.
+fn dotenv_in_server_dir() -> Result<(), dotenvy::Error> {
+    let dir = std::env::args()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find(|pair| pair[0] == "--dir")
+        .map(|pair| std::path::PathBuf::from(&pair[1]))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let local = dir.join(".env");
+    let result = if local.is_file() {
+        dotenvy::from_path(&local)
+    } else {
+        dotenvy::dotenv().map(|_| ())
+    };
+    match result {
+        Ok(()) => Ok(()),
+        // Нет файла — не ошибка: переменные берутся из окружения.
+        Err(error) if error.not_found() => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Логи: консоль и `logs/latest.log` рядом с `server.properties`.
+///
+/// Служба запускает сервер без перенаправления вывода, поэтому лог нужен
+/// файлом — иначе от запуска не остаётся ничего. Файл пишется неблокирующе
+/// (отдельный поток `tracing-appender`): диск не должен тормозить тик.
+///
+/// Не удалось создать каталог или файл — работаем только с консолью. Это
+/// важнее, чем лог: read-only установка не должна из-за него не стартовать.
+fn init_logging(dir: &Path, level: tracing::level_filters::LevelFilter) -> Result<(), String> {
+    let logs = dir.join("logs");
+    let fallback = || {
+        tracing_subscriber::fmt()
+            .with_timer(LogTime)
+            .with_target(false)
+            .with_max_level(level)
+            .init();
+    };
+    if let Err(error) = std::fs::create_dir_all(&logs) {
+        fallback();
+        tracing::warn!("logs: {}: {error}; logging to console only", logs.display());
+        return Ok(());
+    }
+    // Суточные файлы (`chunkwake.2026-11-01.log`) не дают логу расти без
+    // предела; `latest.log` — то, что читают в инструкциях и в службе.
+    // Симлинк не используем: в Windows он требует особых прав.
+    let daily = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("chunkwake")
+        .filename_suffix("log")
+        .max_log_files(14)
+        .build(&logs);
+    let daily = match daily {
+        Ok(daily) => daily,
+        Err(error) => {
+            fallback();
+            tracing::warn!("logs: {error}; logging to console only");
+            return Ok(());
+        }
+    };
+    let latest = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(logs.join("latest.log"))
+    {
+        Ok(file) => file,
+        Err(error) => {
+            fallback();
+            tracing::warn!("logs/latest.log: {error}; logging to console only");
+            return Ok(());
+        }
+    };
+    let (file, guard) = tracing_appender::non_blocking(daily);
+    // Страж живёт до конца процесса: на его сбросе буфер дописывается на диск.
+    std::mem::forget(guard);
+    let latest = std::sync::Arc::new(std::sync::Mutex::new(latest));
+    tracing_subscriber::fmt()
+        .with_timer(LogTime)
+        .with_target(false)
+        .with_max_level(level)
+        .with_writer(move || Tee {
+            file: file.clone(),
+            latest: latest.clone(),
+            console: std::io::stdout(),
+        })
+        .init();
+    Ok(())
+}
+
+/// Пишет строку в консоль, суточный файл и `latest.log`: смотреть лог в
+/// терминале по-прежнему нужно, а службе нужен файл с постоянным именем.
+struct Tee {
+    file: tracing_appender::non_blocking::NonBlocking,
+    latest: std::sync::Arc<std::sync::Mutex<std::fs::File>>,
+    console: std::io::Stdout,
+}
+
+impl std::io::Write for Tee {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // Ошибки файлов глотаем: без лога сервер должен продолжать работать.
+        let _ = std::io::Write::write_all(&mut self.file, buf);
+        if let Ok(mut latest) = self.latest.lock() {
+            let _ = latest.write_all(buf);
+        }
+        std::io::Write::write_all(&mut self.console, buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = std::io::Write::flush(&mut self.file);
+        if let Ok(mut latest) = self.latest.lock() {
+            let _ = latest.flush();
+        }
+        std::io::Write::flush(&mut self.console)
     }
 }
 
@@ -41,11 +165,7 @@ impl tracing_subscriber::fmt::time::FormatTime for LogTime {
 async fn serve(dir: &Path) -> Result<(), String> {
     let _server_lock = backup::lock(dir)?;
     let (props, version) = cli::check(dir)?;
-    tracing_subscriber::fmt()
-        .with_timer(LogTime)
-        .with_target(false)
-        .with_max_level(props.log_level)
-        .init();
+    init_logging(dir, props.log_level)?;
     tracing::info!("Minecraft {} (protocol {})", version.name, version.protocol);
     let boot_started = std::time::Instant::now();
 
@@ -439,7 +559,7 @@ async fn start_plugins(
     if !has_plugins {
         return None;
     }
-    let Some(api) = chunkwake_bridge::find_api_dir(dir) else {
+    let Some(api) = chunkwake_bridge::find_api_dir(&props.api_path(dir)) else {
         tracing::warn!(
             "plugin API not found (build it with `java/gradlew -p java dist`); plugins disabled"
         );

@@ -1,6 +1,6 @@
 # api-impl
 
-Реализация Bukkit/Paper API поверх Rust-ядра. Мост — Panama FFM (Java 22+, собирается под Java 25, как paper-api 26.x).
+Реализация Bukkit/Paper API поверх Rust-ядра. Мост — Panama FFM (Java 22+), но сам API собирается под **Java 25**, как paper-api 26.x: классы в `chunkwake-api.jar` — class file 69, и на Java 21 плагины не запустятся. `doctor` проверяет версию, если в `plugins/` есть jar'ы.
 
 ## Сборка
 

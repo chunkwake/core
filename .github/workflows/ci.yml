@@ -1,4 +1,4 @@
-name: CI
+﻿name: CI
 on:
   push:
     branches: ["ver/**"]
@@ -95,7 +95,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          # Linux собирается под musl, а не под glibc: glibc-бинарник с
+          # ubuntu-latest требует glibc 2.39 и падает на Debian 12 с
+          # «GLIBC_2.xx not found». musl линкуется статически и работает везде.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact: linux-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: windows-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -106,6 +115,14 @@ jobs:
           java-version: "25"
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # musl-линкер и заголовки для статической сборки; `cc` соберёт под них
+      # и C-часть mimalloc.
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       # Тот же ключ, что у job `rust`: кэш переиспользуется, jar не качается
       # повторно и дерево данных уже собрано.
@@ -166,13 +183,13 @@ jobs:
           test -f java/dist/chunkwake-api.jar
 
       - name: Build release
-        run: cargo build --release -p chunkwake-server
+        run: cargo build --release --target ${{ matrix.target }} -p chunkwake-server
 
       - name: Assert embedded data
         shell: bash
         run: |
           set -euo pipefail
-          exe=target/release/chunkwake
+          exe=target/${{ matrix.target }}/release/chunkwake
           if [ "$RUNNER_OS" = "Windows" ]; then exe="$exe.exe"; fi
           # Пустой `server.properties` — валиден: `Properties::parse` берёт
           # дефолты и накладывает на них файл. Порт сдвинут, чтобы не ловить
@@ -186,6 +203,50 @@ jobs:
             exit 1
           fi
 
+      # Linux-релиз должен запускаться на чужой машине без наших библиотек.
+      - name: Assert static linking
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe=target/${{ matrix.target }}/release/chunkwake
+          # У musl-сборки не должно быть зависимости от glibc вообще.
+          if readelf -d "$exe" 2>/dev/null | grep -q "libc.so.6"; then
+            echo "бинарь всё ещё требует glibc" >&2
+            exit 1
+          fi
+          # `file` показывает, статический ли бинарь: у musl без динамического
+          # интерпретатора строка «statically linked».
+          file "$exe"
+          echo "проверка glibc пройдена"
+
+      # Плагины требуют Java 25: без неё `doctor` обязан об этом сказать.
+      - name: Assert java check
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe=target/${{ matrix.target }}/release/chunkwake
+          if [ "$RUNNER_OS" = "Windows" ]; then exe="$exe.exe"; fi
+          mkdir -p java-probe/plugins
+          cp java/dist/plugins/chunkwake-test-plugin.jar java-probe/plugins/
+          # Путь заведомо неверный: doctor должен сказать про плагины и Java,
+          # а не промолчать. CHUNKWAKE_JAVA сбрасываем, иначе он перекроет.
+          printf 'server-ip=127.0.0.1\nserver-port=25597\njava-path=definitely-not-java\n' \
+            > java-probe/server.properties
+          unset CHUNKWAKE_JAVA
+          if "$exe" doctor --dir java-probe > java.txt 2>&1; then
+            echo "doctor не заметил отсутствующую Java при наличии плагинов" >&2
+            cat java.txt
+            exit 1
+          fi
+          if ! grep -qi "java" java.txt; then
+            echo "сообщение doctor не упоминает Java" >&2
+            cat java.txt
+            exit 1
+          fi
+          echo "проверка Java работает"
+          cat java.txt
+
       # Встроенный API проверяется запуском: рядом с бинарником нет `api/`,
       # и если он не развернулся из архива, плагин не включится. Проверять
       # наличие строки в бинаре бессмысленно — jar сжат.
@@ -193,18 +254,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          exe=target/release/chunkwake
+          exe=target/${{ matrix.target }}/release/chunkwake
           if [ "$RUNNER_OS" = "Windows" ]; then exe="$exe.exe"; fi
           mkdir -p apiprobe/plugins
           printf 'server-ip=127.0.0.1\nserver-port=25598\n' > apiprobe/server.properties
           # Плагин-пустышка: важно, что JVM поднялась и включила его из `api/`,
           # который развернулся из бинаря, а не лежал рядом.
-          cp java/test-plugin/build/libs/*.jar apiprobe/plugins/ 2>/dev/null || true
-          if [ ! -d java/test-plugin/build/libs ]; then
+          cp java/dist/plugins/chunkwake-test-plugin.jar apiprobe/plugins/ 2>/dev/null || true
+          if [ ! -f java/dist/plugins/chunkwake-test-plugin.jar ]; then
             echo "нет собранного тестового плагина; проверяю только распаковку API"
           fi
-          "$exe" doctor --dir apiprobe | tee api-doctor.txt
-          # `doctor` не стартует JVM, поэтому смотрим сам каталог после старта.
           timeout 90 "$exe" run --dir apiprobe > api-run.txt 2>&1 || true
           if [ ! -f apiprobe/api/chunkwake-api.jar ]; then
             echo "API не развернулся из бинаря — релиз не самодостаточен" >&2
@@ -217,26 +276,31 @@ jobs:
             echo "в архиве API подозрительно мало библиотек" >&2
             exit 1
           fi
+          # Лог обязан появиться файлом: служба без перенаправления иначе
+          # теряет его целиком.
+          if [ ! -f apiprobe/logs/latest.log ]; then
+            echo "лог не пишется в файл" >&2
+            exit 1
+          fi
 
-      # Бинарь плюс README: всё остальное (данные игры, API плагинов) встроено.
-      # Плагины и мир создаются при первом запуске рядом с бинарником.
+      # Бинарь, README и LICENSE: всё остальное (данные игры, API плагинов)
+      # встроено. Плагины и мир создаются при первом запуске рядом.
       - name: Package
         shell: bash
         run: |
           set -euo pipefail
-          name="chunkwake-${MC_VERSION}-${{ runner.os }}"
+          name="chunkwake-${MC_VERSION}-${{ matrix.artifact }}"
           mkdir -p "dist/$name"
-          exe=target/release/chunkwake
+          exe=target/${{ matrix.target }}/release/chunkwake
           if [ "$RUNNER_OS" = "Windows" ]; then exe="$exe.exe"; fi
           cp "$exe" "dist/$name/"
-          cp README.md "dist/$name/"
+          cp README.md LICENSE "dist/$name/"
           # Размер виден в журнале: встроенный API добавляет ~34 МБ, и если
           # однажды он молча пропадёт, это заметят по цифре.
           ls -l "dist/$name"
-          du -h "$exe"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: chunkwake-${{ env.MC_VERSION }}-${{ runner.os }}
+          name: chunkwake-${{ env.MC_VERSION }}-${{ matrix.artifact }}
           path: dist/chunkwake-*
           if-no-files-found: error

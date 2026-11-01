@@ -17,14 +17,19 @@ pub struct Diagnostic {
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Run,
-    Setup,
+    Setup {
+        yes: bool,
+    },
     Doctor,
     Show,
     Set(String, String),
     BackupCreate,
     BackupList,
     BackupVerify(String),
-    BackupRestore(String),
+    BackupRestore {
+        id: String,
+        yes: bool,
+    },
     BackupResume,
     BackupRollback,
     Top {
@@ -58,7 +63,8 @@ impl Cli {
         let command = match command.as_slice() {
             [] => Command::Run,
             [s] if s == "run" => Command::Run,
-            [s] if s == "setup" => Command::Setup,
+            [s] if s == "setup" => Command::Setup { yes: false },
+            [s, flag] if s == "setup" && flag == "--yes" => Command::Setup { yes: true },
             [s] if s == "doctor" => Command::Doctor,
             [s] if s == "--help" || s == "-h" || s == "help" => Command::Help,
             [a, b] if a == "config" && b == "show" => Command::Show,
@@ -68,7 +74,16 @@ impl Cli {
             [a, b] if a == "backup" && b == "create" => Command::BackupCreate,
             [a, b] if a == "backup" && b == "list" => Command::BackupList,
             [a, b, id] if a == "backup" && b == "verify" => Command::BackupVerify(id.clone()),
-            [a, b, id] if a == "backup" && b == "restore" => Command::BackupRestore(id.clone()),
+            [a, b, id] if a == "backup" && b == "restore" => Command::BackupRestore {
+                id: id.clone(),
+                yes: false,
+            },
+            [a, b, id, flag] if a == "backup" && b == "restore" && flag == "--yes" => {
+                Command::BackupRestore {
+                    id: id.clone(),
+                    yes: true,
+                }
+            }
             [a, b] if a == "backup" && b == "resume" => Command::BackupResume,
             [a, b] if a == "backup" && b == "rollback" => Command::BackupRollback,
             [s, rest @ ..] if s == "top" => parse_top(rest)?,
@@ -143,6 +158,13 @@ OPTIONS
   --dir PATH              Server directory (default: current directory)
   -h, --help              Show this help
 
+SETUP OPTIONS
+  --yes                   Write the default settings without a terminal
+                          (for SSH without -t, containers and scripts)
+
+BACKUP RESTORE OPTIONS
+  --yes                   Skip the interactive confirmation
+
 TOP OPTIONS
   --host HOST             Metrics address (default: metrics-bind, then 127.0.0.1)
   --port PORT             Metrics port (default: metrics-port, then 25585)
@@ -165,10 +187,14 @@ pub async fn execute() -> Result<(), String> {
     let cli = Cli::parse(std::env::args().skip(1))?;
     match cli.command {
         Command::Run => serve(&cli.dir).await,
-        Command::Setup => {
+        Command::Setup { yes } => {
             std::fs::create_dir_all(&cli.dir).map_err(|e| format!("{}: {e}", cli.dir.display()))?;
             let _lock = backup::lock(&cli.dir)?;
-            setup_tui::run(&cli.dir)
+            if yes {
+                setup_defaults(&cli.dir)
+            } else {
+                setup_tui::run(&cli.dir)
+            }
         }
         Command::Doctor => {
             if let Some(error) = backup::incomplete(&cli.dir) {
@@ -253,9 +279,9 @@ pub async fn execute() -> Result<(), String> {
             println!("Backup {id} verified: {count} files");
             Ok(())
         }
-        Command::BackupRestore(id) => {
+        Command::BackupRestore { id, yes } => {
             let _lock = backup::lock(&cli.dir)?;
-            let safety = backup::restore(&cli.dir, &id)?;
+            let safety = backup::restore_ask(&cli.dir, &id, yes)?;
             println!("Restored {id}. Previous state saved as backup {safety}.");
             Ok(())
         }
@@ -484,7 +510,7 @@ pub fn diagnose(props: &Properties, dir: &Path) -> Vec<Diagnostic> {
     });
     if wants_plugins
         && !chunkwake_bridge::api_embedded()
-        && chunkwake_bridge::find_api_dir(dir).is_none()
+        && chunkwake_bridge::find_api_dir(&props.api_path(dir)).is_none()
     {
         issues.push(Diagnostic {
             key: "plugin-api",
@@ -494,11 +520,109 @@ pub fn diagnose(props: &Properties, dir: &Path) -> Vec<Diagnostic> {
                     .into(),
         });
     }
+    // Плагинам нужна JVM, а API собран под Java 25 (class file 69). Проверка
+    // не была завязана на плагины вообще: при встроенных данных ветка Java
+    // выше не выполняется, и «плагины есть, Java 21» проходило молча.
+    if wants_plugins && let Some(issue) = java_issue(props, dir) {
+        issues.push(issue);
+    }
     issues
+}
+
+/// Минимальная Java для плагинов: API собран с `--release` из paper-api 26.x.
+const MIN_JAVA: u32 = 25;
+
+/// Первая неподходящая Java из настроек; `None` — версия подходит.
+fn java_issue(props: &Properties, dir: &Path) -> Option<Diagnostic> {
+    let (setting, java) = match std::env::var_os("CHUNKWAKE_JAVA") {
+        Some(value) => ("CHUNKWAKE_JAVA", PathBuf::from(value)),
+        None => ("java-path", props.java_command(dir)),
+    };
+    let output = match std::process::Command::new(&java).arg("-version").output() {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            return Some(Diagnostic {
+                key: "java-path",
+                message: format!(
+                    "{setting}={}: Java exited with {}; install Java {MIN_JAVA} or newer for plugins",
+                    java.display(),
+                    output.status
+                ),
+            });
+        }
+        Err(error) => {
+            return Some(Diagnostic {
+                key: "java-path",
+                message: format!(
+                    "{setting}={}: {error}; install Java {MIN_JAVA} or newer to run plugins",
+                    java.display()
+                ),
+            });
+        }
+    };
+    let major = java_major(&output);
+    match major {
+        Some(major) if major >= MIN_JAVA => None,
+        // `-version` пишет в stderr; не разобрали — не мешаем запуску,
+        // настоящая ошибка всё равно всплывёт при загрузке JVM.
+        None => None,
+        Some(major) => Some(Diagnostic {
+            key: "java-path",
+            message: format!(
+                "{setting}={}: Java {major} found, but plugins need Java {MIN_JAVA} or newer",
+                java.display()
+            ),
+        }),
+    }
+}
+
+/// Мажорная версия из вывода `java -version` (`openjdk version "25.0.4"`).
+fn java_major(output: &std::process::Output) -> Option<u32> {
+    // Разные JVM пишут приветствие в stdout или stderr.
+    let text = if output.stdout.is_empty() {
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    } else {
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let start = text.find('"')? + 1;
+    let rest = &text[start..];
+    let end = rest.find('"')?;
+    let version = &rest[..end];
+    // Старые JVM писали `1.8.0_392` — мажор вторым числом.
+    let mut parts = version.split('.');
+    let first = parts.next()?;
+    if first == "1" {
+        parts.next()?.parse().ok()
+    } else {
+        first.parse().ok()
+    }
 }
 
 fn config_path(dir: &Path) -> PathBuf {
     dir.join("server.properties")
+}
+
+/// `setup --yes`: конфиг по умолчанию без интерактивного терминала.
+///
+/// Нужен там, где TUI запустить нечем — по SSH без `-t`, в контейнере, в CI,
+/// из сценария установки. Существующий файл не перезаписывается: значения
+/// меняют через `config set`, чтобы не потерять настройки живущего сервера.
+fn setup_defaults(dir: &Path) -> Result<(), String> {
+    let path = config_path(dir);
+    if path.is_file() {
+        println!(
+            "{} already exists; change values with `chunkwake config set KEY VALUE`",
+            path.display()
+        );
+        return Ok(());
+    }
+    config::save(&path, config::DEFAULT_PROPERTIES)?;
+    println!("written {}", path.display());
+    println!(
+        "change values with `chunkwake config set KEY VALUE --dir {}`",
+        dir.display()
+    );
+    Ok(())
 }
 
 pub fn check(dir: &Path) -> Result<(Properties, GameVersion), String> {
@@ -629,6 +753,80 @@ mod tests {
         let dir = temp_dir();
         assert!(check(&dir).unwrap_err().contains("setup"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `--yes` разбирается у `setup` и `backup restore`: без него эти команды
+    /// требовали терминал и не годились для службы и CI.
+    #[test]
+    fn yes_flags_are_parsed() {
+        assert_eq!(
+            Cli::parse(["setup".into()]).unwrap().command,
+            Command::Setup { yes: false }
+        );
+        assert_eq!(
+            Cli::parse(["setup".into(), "--yes".into()])
+                .unwrap()
+                .command,
+            Command::Setup { yes: true }
+        );
+        assert_eq!(
+            Cli::parse(["backup".into(), "restore".into(), "abc".into()])
+                .unwrap()
+                .command,
+            Command::BackupRestore {
+                id: "abc".into(),
+                yes: false
+            }
+        );
+        assert_eq!(
+            Cli::parse([
+                "backup".into(),
+                "restore".into(),
+                "abc".into(),
+                "--yes".into()
+            ])
+            .unwrap()
+            .command,
+            Command::BackupRestore {
+                id: "abc".into(),
+                yes: true
+            }
+        );
+    }
+
+    /// `setup --yes` создаёт конфиг по умолчанию и не затирает существующий.
+    #[test]
+    fn setup_yes_writes_defaults_once() {
+        let dir = temp_dir();
+        setup_defaults(&dir).unwrap();
+        let path = config_path(&dir);
+        assert!(path.is_file());
+        let first = std::fs::read_to_string(&path).unwrap();
+        assert!(first.contains("server-port="));
+        // Правка на месте переживает повторный запуск.
+        config::save(&path, "server-port=25570\n").unwrap();
+        setup_defaults(&dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "server-port=25570\n"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Мажор берётся из приветствия JVM: `25.0.4` это 25, а `1.8.0_392` — 8.
+    #[test]
+    fn java_major_reads_both_version_styles() {
+        let out = |text: &str| std::process::Output {
+            status: Default::default(),
+            stdout: Vec::new(),
+            stderr: text.as_bytes().to_vec(),
+        };
+        assert_eq!(
+            java_major(&out("openjdk version \"25.0.4.1\" 2026-08-18 LTS")),
+            Some(25)
+        );
+        assert_eq!(java_major(&out("java version \"1.8.0_392\"")), Some(8));
+        assert_eq!(java_major(&out("нет кавычек")), None);
     }
 
     #[test]

@@ -1,0 +1,45 @@
+[Unit]
+Description=Chunkwake Minecraft server
+Documentation=https://github.com/chunkwake/core
+# Сеть нужна сразу: сервер слушает порт и проверяет вход через session server.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Отдельный пользователь: сервер не должен работать от root.
+# Создать заранее: useradd --system --home /srv/chunkwake --shell /usr/sbin/nologin chunkwake
+User=chunkwake
+Group=chunkwake
+WorkingDirectory=/srv/chunkwake
+ExecStart=/usr/local/bin/chunkwake run --dir /srv/chunkwake
+
+# Состояние вне каталога установки: бинарник можно держать в /usr/local/bin,
+# а распакованные данные игры (27 МБ) и API плагинов (37 МБ) — здесь.
+Environment=CHUNKWAKE_HOME=/var/lib/chunkwake
+StateDirectory=chunkwake
+
+# Плагины требуют Java 25; если она не в PATH, укажите путь явно:
+# Environment=CHUNKWAKE_JAVA=/usr/lib/jvm/temurin-25-jre/bin/java
+
+# Остановка через `stop` в консоли сервера; SIGTERM досылается как Ctrl+C,
+# по нему сервер закрывает соединения, выгружает плагины и сохраняет мир.
+KillSignal=SIGINT
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=5
+
+# Логи: сервер пишет их сам в /srv/chunkwake/logs/latest.log. Здесь — только
+# то, что попало в консоль до инициализации логов.
+StandardOutput=journal
+StandardError=journal
+
+# Ограничения: сервер сам раздаёт память между потоками, ему не нужен root.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/chunkwake /var/lib/chunkwake
+
+[Install]
+WantedBy=multi-user.target

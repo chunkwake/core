@@ -308,12 +308,29 @@ impl Properties {
         }
     }
 
+    /// Каталог сгенерированных данных игры.
+    ///
+    /// `CHUNKWAKE_HOME` переопределяет базу, если она не задана абсолютным
+    /// путём в `generated-dir`: так установку можно держать только для чтения
+    /// (бинарник в `/usr/local/bin`, данные в `/var/lib/chunkwake`), а первый
+    /// запуск пишет ~27 МБ распакованного архива.
     pub fn generated_path(&self, dir: &Path) -> PathBuf {
         let path = Path::new(&self.generated_dir);
         if path.is_absolute() {
-            path.to_owned()
-        } else {
-            dir.join(path)
+            return path.to_owned();
+        }
+        match std::env::var_os("CHUNKWAKE_HOME") {
+            Some(home) => Path::new(&home).join(path),
+            None => dir.join(path),
+        }
+    }
+
+    /// Каталог состояния для распакованного API плагинов: раньше он всегда
+    /// лежал рядом с `server.properties`, что на read-only каталоге падало.
+    pub fn api_path(&self, dir: &Path) -> PathBuf {
+        match std::env::var_os("CHUNKWAKE_HOME") {
+            Some(home) => Path::new(&home).join("api"),
+            None => dir.join("api"),
         }
     }
 

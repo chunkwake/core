@@ -83,12 +83,14 @@ pub struct Bridge {
     tick_queued: Arc<AtomicBool>,
 }
 
-/// Где искать API: встроенный архив (распаковывается в `<server>/api`),
-/// `CHUNKWAKE_PLUGIN_API`, `<server>/api`, `java/dist` (dev).
-pub fn find_api_dir(server_dir: &Path) -> Option<PathBuf> {
-    let embedded = server_dir.join("api");
+/// Где искать API: встроенный архив (распаковывается в `api_dir`),
+/// `CHUNKWAKE_PLUGIN_API`, `api_dir`, `java/dist` (dev).
+///
+/// `api_dir` — обычно `<server>/api`; при read-only установке вызывающий
+/// передаёт каталог из `CHUNKWAKE_HOME`.
+pub fn find_api_dir(api_dir: &Path) -> Option<PathBuf> {
     if api_bundle::present() {
-        match api_bundle::ensure(&embedded) {
+        match api_bundle::ensure(api_dir) {
             Ok(Some(dir)) => return Some(dir),
             Ok(None) => {}
             Err(error) => {
@@ -98,7 +100,7 @@ pub fn find_api_dir(server_dir: &Path) -> Option<PathBuf> {
     }
     let candidates = [
         std::env::var_os("CHUNKWAKE_PLUGIN_API").map(PathBuf::from),
-        Some(embedded),
+        Some(api_dir.to_path_buf()),
         Some(PathBuf::from("java/dist")),
     ];
     candidates

@@ -394,7 +394,20 @@ fn replace_from(dir: &Path, id: &str, allow_damaged: bool) -> Result<(), String>
     Ok(())
 }
 
+/// `backup restore ID`: подтверждение вводит человек (`RESTORE <id>`).
+///
+/// Неинтерактивный вариант — [`restore_ask`] с `yes = true`.
+#[allow(dead_code)]
 pub fn restore(dir: &Path, id: &str) -> Result<String, String> {
+    restore_ask(dir, id, false)
+}
+
+/// `backup restore ID --yes`: подтверждение приходит флагом, а не со stdin.
+///
+/// Без TTY (служба, CI, контейнер) чтение `RESTORE <id>` из stdin либо
+/// вернуло бы пустую строку, либо ждало вечно — восстановление было
+/// недоступно там, где оно нужнее всего.
+pub fn restore_ask(dir: &Path, id: &str, yes: bool) -> Result<String, String> {
     if let Some(error) = incomplete(dir) {
         return Err(error);
     }
@@ -411,14 +424,16 @@ pub fn restore(dir: &Path, id: &str) -> Result<String, String> {
             .collect::<Vec<_>>()
             .join(", ")
     );
-    print!("Type RESTORE {id} to continue: ");
-    io::stdout().flush().map_err(|e| e.to_string())?;
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|e| e.to_string())?;
-    if answer.trim() != format!("RESTORE {id}") {
-        return Err("restore cancelled".into());
+    if !yes {
+        print!("Type RESTORE {id} to continue: ");
+        io::stdout().flush().map_err(|e| e.to_string())?;
+        let mut answer = String::new();
+        io::stdin()
+            .read_line(&mut answer)
+            .map_err(|e| e.to_string())?;
+        if answer.trim() != format!("RESTORE {id}") {
+            return Err("restore cancelled".into());
+        }
     }
     restore_confirmed(dir, id)
 }
