@@ -110,3 +110,124 @@ jobs:
             echo "кэш данных не собрался, тесты идут без сверок"
           fi
           cargo test --workspace
+
+  release:
+    needs: rust
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Тот же ключ, что у job `rust`: кэш переиспользуется, jar не качается
+      # повторно и дерево данных уже собрано.
+      - name: Cache server.jar and generated data
+        uses: actions/cache@v4
+        with:
+          path: |
+            server.jar
+            generated
+            target/vanilla-cache
+          key: vanilla-${{ env.MC_VERSION }}-${{ runner.os }}-${{ hashFiles('crates/datacache/**', 'crates/data/build.rs') }}
+
+      - name: Download server.jar
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f server.jar ]; then
+            echo "server.jar уже в кэше"
+            exit 0
+          fi
+          manifest=https://piston-meta.mojang.com/mc/game/version_manifest_v2.json
+          meta=$(curl -fsSL "$manifest" \
+            | jq -r --arg v "$MC_VERSION" '.versions[] | select(.id == $v) | .url')
+          if [ -z "$meta" ]; then
+            echo "версии $MC_VERSION нет в манифесте Mojang" >&2
+            exit 1
+          fi
+          read -r url sha1 < <(curl -fsSL "$meta" \
+            | jq -r '.downloads.server | "\(.url) \(.sha1)"')
+          curl -fsSL -o server.jar "$url"
+          echo "$sha1  server.jar" | sha1sum -c -
+
+      - name: Download server.jar
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path server.jar) { Write-Host 'server.jar уже в кэше'; exit 0 }
+          $manifest = Invoke-RestMethod 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json'
+          $entry = $manifest.versions | Where-Object { $_.id -eq $env:MC_VERSION }
+          if (-not $entry) { throw "версии $($env:MC_VERSION) нет в манифесте Mojang" }
+          $meta = Invoke-RestMethod $entry.url
+          $server = $meta.downloads.server
+          Invoke-WebRequest $server.url -OutFile server.jar
+          $actual = (Get-FileHash server.jar -Algorithm SHA1).Hash.ToLower()
+          if ($actual -ne $server.sha1) {
+            throw "SHA-1 не совпал: ждали $($server.sha1), получили $actual"
+          }
+
+      # `CHUNKWAKE_BUNDLE` не задан, поэтому `build.rs` упаковывает дерево
+      # данных в бинарь. Проверка ниже падает, если архив всё-таки пустой:
+      # урезанный артефакт публиковать нельзя.
+      - name: Resolve vanilla data
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CHUNKWAKE_JAR=$GITHUB_WORKSPACE/server.jar" >> "$GITHUB_ENV"
+          for dir in generated/26.3 target/vanilla-cache/26.3; do
+            if [ -f "$dir/reports/packets.json" ]; then
+              echo "CHUNKWAKE_DATA=$(cd "$dir" && pwd)" >> "$GITHUB_ENV"
+              echo "готовый кэш: $dir"
+              break
+            fi
+          done
+
+      - name: Build release
+        run: cargo build --release -p chunkwake-server
+
+      - name: Assert embedded data
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe=target/release/chunkwake
+          if [ "$RUNNER_OS" = "Windows" ]; then exe="$exe.exe"; fi
+          # Пустой `server.properties` — валиден: `Properties::parse` берёт
+          # дефолты и накладывает на них файл. Порт сдвинут, чтобы не ловить
+          # занятый 25565 на раннере.
+          mkdir -p probe
+          printf 'server-ip=127.0.0.1\nserver-port=25599\n' > probe/server.properties
+          # Без встроенных данных `doctor` ругается на `vanilla-jar` и падает.
+          "$exe" doctor --dir probe | tee doctor.txt
+          if ! grep -q "embedded" doctor.txt; then
+            echo "в бинаре нет ванильных данных — релиз неполный" >&2
+            exit 1
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="chunkwake-${MC_VERSION}-${{ runner.os }}"
+          mkdir -p "dist/$name"
+          exe=target/release/chunkwake
+          if [ "$RUNNER_OS" = "Windows" ]; then exe="$exe.exe"; fi
+          cp "$exe" "dist/$name/"
+          cp README.md "dist/$name/"
+          ls -l "dist/$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chunkwake-${{ env.MC_VERSION }}-${{ runner.os }}
+          path: dist/chunkwake-*
+          if-no-files-found: error
