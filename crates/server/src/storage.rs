@@ -18,6 +18,18 @@ use std::time::Duration;
 
 const AUTOSAVE: Duration = Duration::from_secs(30);
 
+/// Каталог регионов оверворлда. Мир 26.3 держит чанки в
+/// `dimensions/minecraft/overworld/region`; если такого каталога ещё нет,
+/// а старый `region/` есть — читаем старый, чтобы не потерять мир.
+fn region_dir(world_dir: &Path) -> std::path::PathBuf {
+    let dimension = world_dir.join("dimensions/minecraft/overworld/region");
+    if dimension.is_dir() || !world_dir.join("region").is_dir() {
+        dimension
+    } else {
+        world_dir.join("region")
+    }
+}
+
 pub struct WorldStorage {
     store: RegionStore,
     entities: RegionStore,
@@ -73,9 +85,13 @@ impl WorldStorage {
             .enumerate()
             .map(|(i, n)| (n.clone(), i as u32))
             .collect();
+        // С 26.3 чанки лежат в `dimensions/minecraft/<измерение>/region`.
+        // Старый `region/` читаем как запасной путь: миры до переезда живы.
+        let region = region_dir(world_dir);
+        let entities = region.with_file_name("entities");
         Self {
-            store: RegionStore::new(world_dir.join("region")),
-            entities: RegionStore::new(world_dir.join("entities")),
+            store: RegionStore::new(region),
+            entities: RegionStore::new(entities),
             players: PlayerFiles::new(world_dir, data_version, items, effects),
             save_lock: Mutex::new(()),
             save_notify: Arc::new(tokio::sync::Notify::new()),
@@ -223,10 +239,8 @@ impl ChunkSource for WorldStorage {
             .map(|(pos, _, _)| *pos)
             .collect();
         if !dark.is_empty() {
-            let mut columns: HashMap<(i32, i32), ChunkColumn> = out
-                .drain(..)
-                .map(|(pos, c, _)| (pos, c))
-                .collect();
+            let mut columns: HashMap<(i32, i32), ChunkColumn> =
+                out.drain(..).map(|(pos, c, _)| (pos, c)).collect();
             let origins: std::collections::HashSet<(i32, i32)> = dark.iter().copied().collect();
             light::spread_wave(&mut columns, &origins, &self.light);
             // Соседи, у которых свет был, тоже получили пролив от тёмных —
@@ -247,10 +261,41 @@ impl ChunkSource for WorldStorage {
 
 #[cfg(test)]
 mod tests {
-    use super::save_player_batch;
+    use super::{region_dir, save_player_batch};
     use chunkwake_net::Uuid;
     use chunkwake_net::survival::PlayerState;
     use std::collections::HashMap;
+
+    /// Мир 26.3 держит чанки в `dimensions/minecraft/<измерение>/region`;
+    /// старый `region/` берётся только когда нового каталога ещё нет.
+    #[test]
+    fn region_lives_in_dimension_folder() {
+        let base = std::env::temp_dir().join(format!("chunkwake-region-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("dimensions/minecraft/overworld/region")).unwrap();
+        let fresh = region_dir(&base);
+        assert!(
+            fresh.ends_with("dimensions/minecraft/overworld/region"),
+            "{fresh:?}"
+        );
+
+        // Мир до переезда: только `region/`, его и берём.
+        let legacy = base.join("legacy");
+        std::fs::create_dir_all(legacy.join("region")).unwrap();
+        let old = region_dir(&legacy);
+        assert!(old.ends_with("region") && !old.to_string_lossy().contains("dimensions"));
+
+        // Пустой мир: пишем сразу в ванильный путь.
+        let empty = base.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let next = region_dir(&empty);
+        assert!(
+            next.ends_with("dimensions/minecraft/overworld/region"),
+            "{next:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn failed_player_write_is_reported_and_retried() {

@@ -154,7 +154,10 @@ pub fn builtin_entries(root: &Path, registry: &str) -> Result<HashMap<String, i3
 }
 
 /// То же для уже прочитанного `registries.json`.
-pub fn builtin_entries_of(builtin: &Builtin, registry: &str) -> Result<HashMap<String, i32>, DataError> {
+pub fn builtin_entries_of(
+    builtin: &Builtin,
+    registry: &str,
+) -> Result<HashMap<String, i32>, DataError> {
     builtin
         .get(registry)
         .cloned()
@@ -176,7 +179,10 @@ pub fn builtin_id_of(builtin: &Builtin, registry: &str, entry: &str) -> Result<i
 }
 
 /// Все записи встроенного реестра (`block_entity_type`) с их номерами.
-pub fn builtin_ids_of(builtin: &Builtin, registry: &str) -> Result<HashMap<String, i32>, DataError> {
+pub fn builtin_ids_of(
+    builtin: &Builtin,
+    registry: &str,
+) -> Result<HashMap<String, i32>, DataError> {
     builtin_entries_of(builtin, registry)
 }
 

@@ -235,7 +235,7 @@ fn orientation(facing: u8) -> (bool, Rot) {
 
 /// `RandomState.getOrCreateRandomFactory("minecraft:worldgen_region_random")`
 /// на минимальном блоке центрального чанка региона. Это `level.getRandom()`.
-fn region_random(seed: i64, cx: i32, cz: i32) -> Xoroshiro {
+fn region_random(seed: i64, cx: i32, cz: i32) -> crate::random::Rng {
     let world = Xoroshiro::from_seed(seed).fork_positional();
     world
         .from_hash_of("minecraft:worldgen_region_random")
@@ -273,7 +273,7 @@ struct Draw<'a> {
     pal: &'a Palette,
     level: &'a mut dyn Level,
     decor: &'a mut Worldgen,
-    region: Xoroshiro,
+    region: crate::random::Rng,
     chunk: Bounds,
     min: [i32; 3],
     max: [i32; 3],
@@ -334,6 +334,7 @@ impl Draw<'_> {
         self.pal.is_air(self.level.get(p[0], p[1], p[2]))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fill(
         &mut self,
         x0: i32,
@@ -395,7 +396,7 @@ impl Draw<'_> {
         }
     }
 
-    fn chest(&mut self, x: i32, y: i32, z: i32) -> bool {
+    fn chest(&mut self, x: i32, y: i32, z: i32, table: &str) -> bool {
         let p = self.world(x, y, z);
         let chest = self.block("minecraft:chest");
         if !self.chunk.contains(p) || self.pal.same_block(self.level.get(p[0], p[1], p[2]), chest) {
@@ -405,18 +406,36 @@ impl Draw<'_> {
         if self.level.can_write(p[0], p[2]) {
             self.level.set(p[0], p[1], p[2], state);
         }
-        self.decor.next_long();
+        // `createChest`: `setLootTable(table, random.nextLong())`.
+        let seed = self.decor.next_long();
+        if self.level.can_write(p[0], p[2]) {
+            super::template::set_loot(self.level, p, table, seed);
+        }
         true
     }
 
-    fn dispenser(&mut self, x: i32, y: i32, z: i32, facing: &str) -> bool {
+    fn dispenser(&mut self, x: i32, y: i32, z: i32, facing: &str, table: &str) -> bool {
         let p = self.world(x, y, z);
         let base = self.block("minecraft:dispenser");
         if !self.chunk.contains(p) || self.pal.same_block(self.level.get(p[0], p[1], p[2]), base) {
             return false;
         }
         self.put(self.with(base, "facing", facing), x, y, z);
-        self.decor.next_long();
+        // `createDispenser`: та же пара `LootTable` + `LootTableSeed`.
+        let seed = self.decor.next_long();
+        if self.chunk.contains(p) && self.level.can_write(p[0], p[2]) {
+            let mut nbt = chunkwake_world::nbt::Compound::new();
+            nbt.insert(
+                "LootTable".into(),
+                chunkwake_world::nbt::Tag::String(table.to_owned()),
+            );
+            nbt.insert(
+                "LootTableSeed".into(),
+                chunkwake_world::nbt::Tag::Long(seed),
+            );
+            self.level
+                .set_block_entity(p[0], p[1], p[2], "minecraft:dispenser", nbt);
+        }
         true
     }
 
@@ -617,7 +636,7 @@ impl Draw<'_> {
         }
         self.put(blue, 10, 0, 10);
         let mut x = 0;
-        while x <= w - 1 {
+        while x < w {
             self.put(cut, x, 2, 1);
             self.put(orange, x, 2, 2);
             self.put(cut, x, 2, 3);
@@ -706,7 +725,12 @@ impl Draw<'_> {
         self.put(chisel, 10, -10, 13);
         self.put(cut, 10, -11, 13);
         for (sx, sz) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
-            self.chest(10 + sx * 2, -11, 10 + sz * 2);
+            self.chest(
+                10 + sx * 2,
+                -11,
+                10 + sz * 2,
+                "minecraft:chests/desert_pyramid",
+            );
         }
         self.cellar();
         self.suspicious();
@@ -963,7 +987,13 @@ impl Draw<'_> {
             1,
         );
         self.put(mossy, 3, -3, 1);
-        self.dispenser(3, -2, 1, "north");
+        self.dispenser(
+            3,
+            -2,
+            1,
+            "north",
+            "minecraft:chests/jungle_temple_dispenser",
+        );
         self.put(self.with(vine, "south", "true"), 3, -2, 2);
         self.put(
             self.with(self.with(hook, "facing", "north"), "attached", "true"),
@@ -1005,10 +1035,10 @@ impl Draw<'_> {
         );
         self.put(mossy, 9, -3, 4);
         self.put(ns, 9, -2, 4);
-        self.dispenser(9, -2, 3, "west");
+        self.dispenser(9, -2, 3, "west", "minecraft:chests/jungle_temple_dispenser");
         self.put(self.with(vine, "east", "true"), 8, -1, 3);
         self.put(self.with(vine, "east", "true"), 8, -2, 3);
-        self.chest(8, -3, 3);
+        self.chest(8, -3, 3, "minecraft:chests/jungle_temple");
         self.put(mossy, 9, -3, 2);
         self.put(mossy, 8, -3, 1);
         self.put(mossy, 4, -3, 5);
@@ -1061,7 +1091,7 @@ impl Draw<'_> {
             -2,
             10,
         );
-        self.chest(9, -3, 10);
+        self.chest(9, -3, 10, "minecraft:chests/jungle_temple");
     }
 
     /// `SwampHutPiece.postProcess`. Ведьма и кошка не пишутся.

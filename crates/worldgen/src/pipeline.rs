@@ -29,10 +29,12 @@ pub struct Blocks {
     /// Заборы шахты: форма сторон считается заново, когда чанк отдают и
     /// соседи в радиусе 1 уже декорированы (`postProcessGeneration`).
     shape_posts: Vec<[i32; 3]>,
+    /// Блок-сущности структур (LootTable + LootTableSeed у сундуков).
+    pub block_entities: Vec<([i32; 3], String, chunkwake_world::nbt::Compound)>,
 }
 
 /// Скомпилированная стадия поверхности.
-struct Surface {
+pub(crate) struct Surface {
     rule: Rule,
     noises: Vec<(String, Arc<crate::noise::Stack>)>,
     bands: Vec<Vec<u32>>,
@@ -133,17 +135,37 @@ impl Overworld {
         state: &dyn Fn(&str) -> Option<u32>,
         biome_ids: &HashMap<String, u32>,
     ) -> Result<Self, String> {
+        Self::new_for(
+            noise,
+            state,
+            biome_ids,
+            "minecraft:stone",
+            "minecraft:water",
+        )
+    }
+
+    /// Как [`Self::new`], но с блоком вместо `minecraft:stone` и с настройками
+    /// своего измерения: у Нижнего мира `default_block` — `netherrack`,
+    /// карверы там не ставит берёзу и мицелий.
+    pub fn new_for(
+        noise: Arc<Generator>,
+        state: &dyn Fn(&str) -> Option<u32>,
+        biome_ids: &HashMap<String, u32>,
+        default_block: &str,
+        default_fluid: &str,
+    ) -> Result<Self, String> {
         let need = |name: &str| state(name).ok_or_else(|| format!("no block state {name}"));
         let carve = CarveBlocks {
             air: need("minecraft:air")?,
             water: need("minecraft:water")?,
             lava: need("minecraft:lava")?,
+            liquid: need(default_fluid)?,
             bedrock: need("minecraft:bedrock")?,
             grass: need("minecraft:grass_block")?,
             mycelium: need("minecraft:mycelium")?,
             dirt: need("minecraft:dirt")?,
         };
-        let stone = need("minecraft:stone")?;
+        let stone = need(default_block)?;
         let surface = Self::compile_surface(&noise, state, biome_ids)?;
         Ok(Self {
             noise,
@@ -441,16 +463,22 @@ impl Overworld {
         let posts = chunk.shape_posts.clone();
         let min_y = self.noise.min_y;
         let height = self.noise.height;
-        let updates =
-            crate::feature::mineshaft::fence_updates(&features.palette, &posts, |x, y, z| {
-                let ry = y - min_y;
-                if ry < 0 || ry >= height {
-                    return None;
-                }
-                let chunk = area.protos.get(&(x >> 4, z >> 4))?;
-                let i = (ry as usize * 16 + (z & 15) as usize) * 16 + (x & 15) as usize;
-                chunk.states.get(i).copied()
-            });
+        let get = |x: i32, y: i32, z: i32| -> Option<u32> {
+            let ry = y - min_y;
+            if ry < 0 || ry >= height {
+                return None;
+            }
+            let chunk = area.protos.get(&(x >> 4, z >> 4))?;
+            let i = (ry as usize * 16 + (z & 15) as usize) * 16 + (x & 15) as usize;
+            chunk.states.get(i).copied()
+        };
+        let mut updates = crate::feature::mineshaft::fence_updates(&features.palette, &posts, get);
+        // Стены `cobblestone_wall` пересобираются тем же проходом.
+        updates.extend(crate::feature::mineshaft::wall_updates(
+            &features.palette,
+            &posts,
+            get,
+        ));
         for ([x, y, z], state) in updates {
             let Some(chunk) = area.protos.get_mut(&(x >> 4, z >> 4)) else {
                 continue;
@@ -566,6 +594,8 @@ impl Overworld {
             .map(|f| match f {
                 Fill::Air => c.air,
                 Fill::Solid => self.stone,
+                // `default_fluid` настроек: в оверворлде вода, в Аду лава.
+                Fill::Liquid => c.liquid,
                 Fill::Water => c.water,
                 Fill::Lava => c.lava,
             })
@@ -582,7 +612,11 @@ impl Overworld {
         let t_prelim = t.elapsed().as_secs_f64() * 1000.0;
         let random = noise.surface_random();
         let t = std::time::Instant::now();
-        if let Some(s) = &self.surface {
+        // `CHUNKWAKE_NO_SURFACE=1` — сверка без стадии поверхности: видно,
+        // что именно она меняет, отдельно от рельефа и акуифера.
+        if let Some(s) = &self.surface
+            && std::env::var_os("CHUNKWAKE_NO_SURFACE").is_none()
+        {
             let mut chunk = self.view(&mut states, cx, cz, own, &memo);
             s.stage(noise, &preliminary, &random)
                 .build(&mut chunk, cx, cz);
@@ -627,6 +661,7 @@ impl Overworld {
             biomes,
             worldgen_heights: None,
             shape_posts: Vec::new(),
+            block_entities: Vec::new(),
         }
     }
 
@@ -902,6 +937,21 @@ impl feature::Level for Region<'_> {
             c.shape_posts.push([x, y, z]);
         }
     }
+    fn set_block_entity(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        id: &str,
+        nbt: chunkwake_world::nbt::Compound,
+    ) {
+        let Some(s) = self.slot(x, z) else {
+            return;
+        };
+        if let Some(c) = self.chunks[s].as_mut() {
+            c.block_entities.push(([x, y, z], id.to_owned(), nbt));
+        }
+    }
     fn biome(&self, x: i32, y: i32, z: i32) -> u32 {
         let Some(s) = self.slot(x, z) else {
             return 0;
@@ -930,17 +980,17 @@ fn column_height(
 }
 
 /// Столбцы для постановки структур: небородая высота и биомы чанка.
-struct Cols<'a> {
-    noise: &'a Generator,
-    surface: Option<&'a Surface>,
-    carve: CarveBlocks,
-    stone: u32,
-    palette: &'a feature::Palette,
-    heights: &'a Mutex<HashMap<(i32, i32), Arc<NoiseMaps>>>,
+pub(crate) struct Cols<'a> {
+    pub(crate) noise: &'a Generator,
+    pub(crate) surface: Option<&'a Surface>,
+    pub(crate) carve: CarveBlocks,
+    pub(crate) stone: u32,
+    pub(crate) palette: &'a feature::Palette,
+    pub(crate) heights: &'a Mutex<HashMap<(i32, i32), Arc<NoiseMaps>>>,
 }
 
 /// Небородая высота шума: поверхность мира и дно океана.
-struct NoiseMaps {
+pub(crate) struct NoiseMaps {
     surface: [i32; 256],
     floor: [i32; 256],
 }
@@ -1023,6 +1073,8 @@ impl Cols<'_> {
             .map(|f| match f {
                 Fill::Air => c.air,
                 Fill::Solid => self.stone,
+                // `default_fluid` настроек: в оверворлде вода, в Аду лава.
+                Fill::Liquid => c.liquid,
                 Fill::Water => c.water,
                 Fill::Lava => c.lava,
             })

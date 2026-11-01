@@ -104,25 +104,182 @@ impl Xoroshiro {
     pub fn fork_positional(&mut self) -> Positional {
         let lo = self.next_long();
         let hi = self.next_long();
-        Positional { lo, hi }
+        Positional {
+            lo,
+            hi,
+            legacy: false,
+        }
     }
 }
 
-/// `XoroshiroPositionalRandomFactory`.
+/// `PositionalRandomFactory` мира: у оверворлда `Xoroshiro`, у Нижнего мира и
+/// Края — `LegacyPositionalRandomFactory` (`legacy_random_source` в настройках).
+///
+/// У Xoroshiro фабрика держит пару сидов, у `Legacy` — один (`lo`), `hi` не
+/// используется.
 #[derive(Clone, Copy, Debug)]
 pub struct Positional {
     pub lo: i64,
     pub hi: i64,
+    pub legacy: bool,
+}
+
+/// Источник, который отдают `at` и `fromHashOf`: у оверворлда Xoroshiro, у
+/// Нижнего мира — линейный конгруэнтный `LegacyRandomSource`.
+#[derive(Clone, Debug)]
+pub enum Rng {
+    /// Второе поле — отложенный гауссиан: у Xoroshiro его нет в самом
+    /// источнике, но `nextGaussian` нужен стадии поверхности.
+    Xoro(Xoroshiro, Option<f64>),
+    Legacy(Legacy),
+}
+
+impl Rng {
+    pub fn next_int_bound(&mut self, bound: i32) -> i32 {
+        Bits::next_int_bound(self, bound)
+    }
+    pub fn next_long(&mut self) -> i64 {
+        Bits::next_long(self)
+    }
+    pub fn next_float(&mut self) -> f32 {
+        Bits::next_float(self)
+    }
+    pub fn next_double(&mut self) -> f64 {
+        Bits::next_double(self)
+    }
+    pub fn next_bool(&mut self) -> bool {
+        Bits::next_bool(self)
+    }
+    pub fn next_int(&mut self) -> i32 {
+        Bits::next_int(self)
+    }
+    /// `RandomSource.forkPositional`: одна или две пары сидов.
+    pub fn fork_positional(&mut self) -> Positional {
+        if let Self::Legacy(_) = self {
+            let seed = Bits::next_long(self);
+            return Positional {
+                lo: seed,
+                hi: 0,
+                legacy: true,
+            };
+        }
+        let lo = Bits::next_long(self);
+        let hi = Bits::next_long(self);
+        Positional {
+            lo,
+            hi,
+            legacy: false,
+        }
+    }
+    /// Какой источник даёт `nextLong`: для `BlendedNoise` с `legacy` это LCG.
+    pub fn is_legacy(&self) -> bool {
+        matches!(self, Self::Legacy(_))
+    }
+}
+
+impl Bits for Rng {
+    fn set_seed(&mut self, seed: i64) {
+        match self {
+            Self::Xoro(x, g) => {
+                *x = Xoroshiro::from_seed(seed);
+                *g = None;
+            }
+            Self::Legacy(l) => l.set_seed(seed),
+        }
+    }
+    fn gaussian_slot(&mut self) -> &mut Option<f64> {
+        match self {
+            Self::Xoro(_, g) => g,
+            Self::Legacy(l) => l.gaussian_slot(),
+        }
+    }
+    fn next(&mut self, bits: u32) -> i32 {
+        match self {
+            Self::Xoro(x, _) => ((x.next_long() as u64) >> (64 - bits)) as i32,
+            Self::Legacy(l) => l.next(bits),
+        }
+    }
+    // `XoroshiroRandomSource` свои `nextInt`, `nextLong`, `nextDouble` и
+    // `nextFloat` строит не через `next(bits)`, поэтому передаём напрямую.
+    fn next_int(&mut self) -> i32 {
+        match self {
+            Self::Xoro(x, _) => x.next_int(),
+            Self::Legacy(l) => Bits::next_int(l),
+        }
+    }
+    fn next_int_bound(&mut self, bound: i32) -> i32 {
+        match self {
+            Self::Xoro(x, _) => x.next_int_bound(bound),
+            Self::Legacy(l) => Bits::next_int_bound(l, bound),
+        }
+    }
+    fn next_long(&mut self) -> i64 {
+        match self {
+            Self::Xoro(x, _) => x.next_long(),
+            Self::Legacy(l) => Bits::next_long(l),
+        }
+    }
+    fn next_bool(&mut self) -> bool {
+        match self {
+            Self::Xoro(x, _) => x.next_bool(),
+            Self::Legacy(l) => Bits::next_bool(l),
+        }
+    }
+    fn next_float(&mut self) -> f32 {
+        match self {
+            Self::Xoro(x, _) => x.next_float(),
+            Self::Legacy(l) => Bits::next_float(l),
+        }
+    }
+    fn next_double(&mut self) -> f64 {
+        match self {
+            Self::Xoro(x, _) => x.next_double(),
+            Self::Legacy(l) => Bits::next_double(l),
+        }
+    }
 }
 
 impl Positional {
-    pub fn at(&self, x: i32, y: i32, z: i32) -> Xoroshiro {
-        Xoroshiro::new(pos_seed(x, y, z) ^ self.lo, self.hi)
+    /// `RandomSource.create(seed).forkPositional()`: у оверворлда Xoroshiro,
+    /// у Нижнего мира (`legacy_random_source`) — `Legacy`.
+    ///
+    /// `RandomState` строит `randomAlgorithm.newInstance(seed).forkPositional()`,
+    /// а `LegacyRandomSource.forkPositional` — это
+    /// `new LegacyPositionalRandomFactory(this.nextLong())`: сид фабрики не
+    /// равен сиду мира, сначала тратится один `nextLong`.
+    pub fn from_seed(seed: i64, legacy: bool) -> Self {
+        if legacy {
+            return Self {
+                lo: Bits::next_long(&mut Legacy::new(seed)),
+                hi: 0,
+                legacy: true,
+            };
+        }
+        let mut r = Xoroshiro::from_seed(seed);
+        let lo = r.next_long();
+        let hi = r.next_long();
+        Self {
+            lo,
+            hi,
+            legacy: false,
+        }
     }
 
-    pub fn from_hash_of(&self, name: &str) -> Xoroshiro {
+    pub fn at(&self, x: i32, y: i32, z: i32) -> Rng {
+        if self.legacy {
+            // `LegacyPositionalRandomFactory.at`: `getSeed(x, y, z) ^ seed`.
+            return Rng::Legacy(Legacy::new(pos_seed(x, y, z) ^ self.lo));
+        }
+        Rng::Xoro(Xoroshiro::new(pos_seed(x, y, z) ^ self.lo, self.hi), None)
+    }
+
+    pub fn from_hash_of(&self, name: &str) -> Rng {
+        if self.legacy {
+            // `LegacyPositionalRandomFactory.fromHashOf`: `name.hashCode() ^ seed`.
+            return Rng::Legacy(Legacy::new(super::noise::java_hash(name) as i64 ^ self.lo));
+        }
         let (lo, hi) = hash_of(name);
-        Xoroshiro::new(lo ^ self.lo, hi ^ self.hi)
+        Rng::Xoro(Xoroshiro::new(lo ^ self.lo, hi ^ self.hi), None)
     }
 }
 
@@ -284,41 +441,54 @@ impl Bits for Legacy {
 /// `LegacyRandomSource`, но биты — старшие биты `nextLong` Xoroshiro.
 #[derive(Clone, Debug)]
 pub struct Worldgen {
-    x: Xoroshiro,
+    x: Rng,
     /// `WorldgenRandom.setSeed` не сбрасывает гауссиан `LegacyRandomSource`.
     gaussian: Option<f64>,
 }
 
 impl Worldgen {
-    pub fn new(seed: i64) -> Self {
+    /// Готовый источник (например, `forkPositional().at(...)`).
+    pub fn from_rng(r: Rng) -> Self {
         Self {
-            x: Xoroshiro::from_seed(seed),
+            x: r,
             gaussian: None,
         }
     }
 
-    /// `XoroshiroRandomSource.nextBoolean`: младший бит одного `nextLong`.
-    pub(crate) fn next_boolean(&mut self) -> bool {
-        self.x.next_long() & 1 != 0
+    /// Готовый Xoroshiro: `forkPositional().at(...)` оверворлда.
+    pub fn from_xoroshiro(x: Xoroshiro) -> Self {
+        Self::from_rng(Rng::Xoro(x, None))
     }
 
-    /// `XoroshiroRandomSource.nextLong`, один шаг генератора.
+    pub fn new(seed: i64) -> Self {
+        Self::from_xoroshiro(Xoroshiro::from_seed(seed))
+    }
+
+    /// `RandomSource.nextBoolean`: младший бит одного `nextLong`.
+    pub(crate) fn next_boolean(&mut self) -> bool {
+        Bits::next_long(&mut self.x) & 1 != 0
+    }
+
+    /// `RandomSource.nextLong`, один шаг генератора.
     pub(crate) fn next_raw_long(&mut self) -> i64 {
-        self.x.next_long()
+        Bits::next_long(&mut self.x)
     }
 }
 
 impl Bits for Worldgen {
     fn set_seed(&mut self, seed: i64) {
-        self.x = Xoroshiro::from_seed(seed);
+        Bits::set_seed(&mut self.x, seed);
     }
 
     fn gaussian_slot(&mut self) -> &mut Option<f64> {
         &mut self.gaussian
     }
 
+    // `WorldgenRandom extends LegacyRandomSource`: `nextInt`, `nextLong`,
+    // `nextFloat`, `nextDouble` и `nextBoolean` идут от `next(bits)`, а не от
+    // собственных методов Xoroshiro. Поэтому только `next` и переопределён.
     fn next(&mut self, bits: u32) -> i32 {
-        ((self.x.next_long() as u64) >> (64 - bits)) as i32
+        Bits::next(&mut self.x, bits)
     }
 }
 

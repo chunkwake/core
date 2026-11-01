@@ -287,6 +287,8 @@ pub enum Cause {
     Magic,
     /// Стрела (`minecraft:arrow`).
     Arrow,
+    /// За границей мира (`minecraft:outside_border`).
+    OutsideBorder,
 }
 
 impl Cause {
@@ -299,6 +301,7 @@ impl Cause {
             "magic" | "indirect_magic" | "thorns" | "sonic_boom" => Cause::Magic,
             "wither" => Cause::Wither,
             "arrow" | "trident" | "mob_projectile" => Cause::Arrow,
+            "outside_border" => Cause::OutsideBorder,
             _ => Cause::Generic,
         }
     }
@@ -313,6 +316,7 @@ impl Cause {
             Cause::Poison | Cause::Magic => "death.attack.magic",
             Cause::Wither => "death.attack.wither",
             Cause::Arrow => "death.attack.arrow",
+            Cause::OutsideBorder => "death.attack.outsideBorder",
         }
     }
 
@@ -327,6 +331,7 @@ impl Cause {
             Cause::Wither => "WITHER",
             Cause::Magic => "MAGIC",
             Cause::Arrow => "PROJECTILE",
+            Cause::OutsideBorder => "WORLD_BORDER",
         }
     }
 
@@ -340,6 +345,7 @@ impl Cause {
             Cause::Poison | Cause::Magic => "minecraft:magic",
             Cause::Wither => "minecraft:wither",
             Cause::Arrow => "minecraft:arrow",
+            Cause::OutsideBorder => "minecraft:outside_border",
         }
     }
 
@@ -1003,7 +1009,10 @@ pub fn components_satisfy(have: u32, want: u32) -> bool {
         return false;
     }
     if !want.stored.is_empty()
-        && want.stored.iter().any(|enchant| !have.stored.contains(enchant))
+        && want
+            .stored
+            .iter()
+            .any(|enchant| !have.stored.contains(enchant))
     {
         return false;
     }

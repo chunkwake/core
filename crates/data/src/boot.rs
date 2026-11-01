@@ -97,27 +97,61 @@ pub fn read_world_version(root: &Path) -> Result<i32, DataError> {
 }
 
 fn build(root: &Path, world_version: i32) -> Result<Boot, DataError> {
+    // Источники независимы (`builtin` нужен только части из них), поэтому
+    // чтение и разбор идут параллельно: старт сервера — это 1.5 с на
+    // `blocks.json` и столько же на свет плюс остальное, и всё это на одном
+    // потоке в ожидании диска и парсера JSON.
     let builtin = crate::registries::load_builtin(root)?;
-    let packets = PacketTable::load(&root.join("reports/packets.json"))?;
     let registries = RegistryData::load_with(root, &builtin)?;
-    let blocks = Blocks::load(root)?;
-    let rows = crate::world::load_light_rows(root)?;
-    let dimension = crate::world::DimensionType::load(root, "overworld")?;
-
     let items_map = builtin
         .get("item")
         .cloned()
         .ok_or_else(|| DataError::Io("unknown registry item".into()))?;
-    let items = crate::world::load_items_cached(root, &items_map)?;
-    let tools = crate::tools::load_tools_cached(root, &items_map)?;
-    let recipes = crate::recipes::load_recipes(root, &items_map)?;
     let enchantment_names: Vec<String> = registries
         .synchronized
         .iter()
         .find(|r| r.name == "enchantment")
         .map(|r| r.entries.clone())
         .unwrap_or_default();
-    let enchanting = crate::enchanting::load(root, &enchantment_names)?;
+
+    let (packets, blocks, rows, dimension, items, tools, recipes, enchanting) =
+        std::thread::scope(|scope| {
+            macro_rules! spawn {
+                ($body:expr) => {
+                    scope.spawn(move || $body)
+                };
+            }
+            let packets = spawn!(PacketTable::load(&root.join("reports/packets.json")));
+            let blocks = spawn!(Blocks::load(root));
+            let rows = spawn!(crate::world::load_light_rows(root));
+            let dimension = spawn!(crate::world::DimensionType::load(root, "overworld"));
+            // Ссылки берутся заново в каждом потоке: `move` замыкание
+            // забирало бы `items_map` себе и первым же его съедало.
+            let map = &items_map;
+            let items = spawn!(crate::world::load_items_cached(root, map));
+            let tools = spawn!(crate::tools::load_tools_cached(root, map));
+            let recipes = spawn!(crate::recipes::load_recipes(root, map));
+            let names = &enchantment_names;
+            let enchanting = spawn!(crate::enchanting::load(root, names));
+            // Порядок соединения — порядок запуска: ошибка называется той
+            // части, которая действительно упала.
+            fn join<T>(
+                h: std::thread::ScopedJoinHandle<'_, Result<T, DataError>>,
+            ) -> Result<T, DataError> {
+                h.join().expect("data loader thread")
+            }
+            let out = (
+                join(packets)?,
+                join(blocks)?,
+                join(rows)?,
+                join(dimension)?,
+                join(items)?,
+                join(tools)?,
+                join(recipes)?,
+                join(enchanting)?,
+            );
+            Ok::<_, DataError>(out)
+        })?;
     let enchantment_lines = crate::enchanting::plugin_lines(root, &enchantment_names);
 
     Ok(Boot {
@@ -376,11 +410,10 @@ fn w_items(w: &mut W, items: &[ItemInfo]) {
             w.f32(d.seconds);
             w.i32(d.remainder);
         });
-        w.u8(
-            i.equip
-                .and_then(|e| EQUIP.iter().position(|s| *s == e))
-                .map_or(0, |p| p as u8 + 1),
-        );
+        w.u8(i
+            .equip
+            .and_then(|e| EQUIP.iter().position(|s| *s == e))
+            .map_or(0, |p| p as u8 + 1));
         w.i32(i.max_damage);
         w.opt(i.fuel, |w, f: Fuel| {
             for v in f.burn {
@@ -516,7 +549,14 @@ fn w_enchanting(w: &mut W, e: &Enchanting) {
     for d in &e.defs {
         w.i32(d.id);
         w.str(&d.name);
-        for v in [d.max_level, d.weight, d.min_base, d.min_step, d.max_base, d.max_step] {
+        for v in [
+            d.max_level,
+            d.weight,
+            d.min_base,
+            d.min_step,
+            d.max_base,
+            d.max_step,
+        ] {
             w.i32(v);
         }
         w.set(&d.supported);
@@ -633,7 +673,10 @@ impl<'a> R<'a> {
         Ok(out)
     }
 
-    fn opt<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, DataError>) -> Result<Option<T>, DataError> {
+    fn opt<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, DataError>,
+    ) -> Result<Option<T>, DataError> {
         match self.u8()? {
             0 => Ok(None),
             1 => Ok(Some(f(self)?)),
@@ -707,7 +750,8 @@ fn decode(bytes: &[u8], world_version: i32) -> Result<Boot, DataError> {
         "boot image sections: registries and blocks {} ms, survival {} ms",
         sections.as_millis(),
         started.elapsed().as_millis() - sections.as_millis()
-    );    Ok(Boot {
+    );
+    Ok(Boot {
         world_version,
         packets,
         builtin,
@@ -792,10 +836,7 @@ fn r_registries(r: &mut R<'_>) -> Result<RegistryData, DataError> {
             tags: list,
         });
     }
-    Ok(RegistryData {
-        synchronized,
-        tags,
-    })
+    Ok(RegistryData { synchronized, tags })
 }
 
 fn r_blocks(r: &mut R<'_>) -> Result<Blocks, DataError> {
@@ -997,10 +1038,7 @@ fn r_level_value(r: &mut R<'_>) -> Result<LevelValue, DataError> {
             per: r.f32()?,
         },
         2 => LevelsSquared { added: r.f32()? },
-        3 => Fraction(
-            Box::new(r_level_value(r)?),
-            Box::new(r_level_value(r)?),
-        ),
+        3 => Fraction(Box::new(r_level_value(r)?), Box::new(r_level_value(r)?)),
         4 => Clamped {
             value: Box::new(r_level_value(r)?),
             min: r.f32()?,
@@ -1143,7 +1181,10 @@ mod tests {
         let mut builtin = Builtin::new();
         builtin.insert(
             "item".into(),
-            HashMap::from([("minecraft:stone".to_owned(), 1), ("minecraft:bread".to_owned(), 2)]),
+            HashMap::from([
+                ("minecraft:stone".to_owned(), 1),
+                ("minecraft:bread".to_owned(), 2),
+            ]),
         );
         let mut registries = RegistryData::default();
         registries.synchronized.push(Registry {
@@ -1249,9 +1290,7 @@ mod tests {
                 },
             )],
         });
-        enchanting
-            .enchantable
-            .insert("minecraft:stone".into(), 5);
+        enchanting.enchantable.insert("minecraft:stone".into(), 5);
         enchanting.providers.insert("minecraft:bookshelf".into());
         enchanting.table.push(0);
         Boot {
@@ -1308,10 +1347,8 @@ mod tests {
         );
         assert_eq!(back.blocks.state_count(), boot.blocks.state_count());
         assert_eq!(
-            back.blocks.state_id(
-                "minecraft:oak_log",
-                &[("axis".to_owned(), "x".to_owned())]
-            ),
+            back.blocks
+                .state_id("minecraft:oak_log", &[("axis".to_owned(), "x".to_owned())]),
             Some(3)
         );
         assert_eq!(back.recipes.len(), boot.recipes.len());

@@ -177,17 +177,14 @@ impl Piece {
             {
                 level.set(pos[0], pos[1], pos[2], block(pal, "minecraft:air"));
             }
-            let loot = if clear_chest {
-                meta == "chest"
-            } else {
-                matches!(
-                    meta.as_str(),
-                    "map_chest" | "treasure_chest" | "supply_chest"
-                )
+            let table = match meta.as_str() {
+                "chest" if clear_chest => Some("minecraft:chests/igloo_chest"),
+                "map_chest" => Some("minecraft:chests/shipwreck_map"),
+                "treasure_chest" => Some("minecraft:chests/shipwreck_treasure"),
+                "supply_chest" => Some("minecraft:chests/shipwreck_supply"),
+                _ => None,
             };
-            if !loot {
-                continue;
-            }
+            let Some(table) = table else { continue };
             let below = [pos[0], pos[1] - 1, pos[2]];
             if window.contains(below)
                 && is_block(
@@ -196,7 +193,9 @@ impl Piece {
                     "minecraft:chest",
                 )
             {
-                decor.next_long();
+                // `createChest`: `setLootTable(table, random.nextLong())`.
+                let seed = decor.next_long();
+                template::set_loot(level, below, table, seed);
             }
         }
         let Role::Igloo { top: true, .. } = &self.role else {
@@ -350,6 +349,7 @@ pub(super) fn build(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn igloo(
     template: Arc<Template>,
     rot: Rot,

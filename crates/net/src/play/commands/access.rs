@@ -304,11 +304,7 @@ impl PlayPlan {
     /// Очищает инвентарь; возвращает, сколько предметов было (по зеркалу).
     pub(crate) fn clear_inventory(&self, uuid: Uuid) -> i32 {
         let count = self.live.lock().unwrap().get(&uuid).map_or(0, |l| {
-            l.slots
-                .iter()
-                .flatten()
-                .map(|s| s.count as i32)
-                .sum::<i32>()
+            l.slots.iter().flatten().map(|s| s.count).sum::<i32>()
         });
         self.push_control(uuid, Control::Clear);
         count
@@ -503,6 +499,22 @@ impl PlayPlan {
     /// Замер тика, снятый снаружи (лаборатория, тесты).
     pub fn record_tick_sample(&self, work_ms: f64, gap_ms: f64) {
         self.ticks.lock().unwrap().record(work_ms, gap_ms);
+    }
+
+    /// Подключает приёмник профиля по фазам тика (сервер: `Live`).
+    ///
+    /// Без приёмника замеры не собираются вовсе: лаборатория и тесты
+    /// не должны платить за профилировщик.
+    pub fn set_profile_sink(&self, sink: crate::play::ProfileSink) {
+        *self.profile_sink.lock().unwrap() = Some(sink);
+        self.set_profiling(true);
+    }
+
+    /// Включает и выключает сбор профиля по фазам: пока он выключен, тик не
+    /// берёт замки профиля и не читает часы системы.
+    pub(crate) fn set_profiling(&self, on: bool) {
+        self.profiling
+            .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// `/tick rate`.
@@ -725,7 +737,12 @@ impl PlayPlan {
         } else {
             forced.remove(&chunk);
         }
-        forced.len()
+        let len = forced.len();
+        drop(forced);
+        // Чанк под forceload — это работа и без игроков рядом: иначе тик
+        // остался бы «простаивающим» и не пересчитал бы набор симуляции.
+        self.mark_work();
+        len
     }
 
     /// Сложность мира (`/difficulty`).

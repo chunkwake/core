@@ -583,10 +583,10 @@ fn read_number_format(
 
 fn component_value(raw: &str) -> Value {
     let raw = raw.trim();
-    if raw.starts_with('{') || raw.starts_with('[') || raw.starts_with('"') {
-        if let Ok(value) = serde_json::from_str(raw) {
-            return value;
-        }
+    if (raw.starts_with('{') || raw.starts_with('[') || raw.starts_with('"'))
+        && let Ok(value) = serde_json::from_str(raw)
+    {
+        return value;
     }
     json!({"text": raw})
 }
@@ -863,7 +863,7 @@ mod tests {
         board.display.insert("sidebar".into(), "kills".into());
         assert!(board.remove_objective("kills"));
         assert!(board.display.is_empty());
-        assert!(board.scores.get("kills").is_none());
+        assert!(!board.scores.contains_key("kills"));
         assert!(!board.remove_objective("kills"));
     }
 

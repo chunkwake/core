@@ -4,6 +4,9 @@
 use super::*;
 use crate::mobs::{self as mb, Mob, Species};
 
+/// Группа спавна: вид, вес, минимум и максимум.
+type SpawnEntry = (Option<Species>, u32, u32, u32);
+
 /// Моб и то, что о нём уже знают клиенты.
 pub(super) struct MobEntry {
     pub mob: Mob,
@@ -85,6 +88,7 @@ impl PlayPlan {
         }
         let packets = self.mob_packets(id, &m);
         self.mobs.lock().unwrap().insert(id, MobEntry::new(m));
+        self.mark_work();
         // Моб уже в мире (плагин может спросить о нём), но клиентам — только после события.
         if let Some(reason) = reason
             && self
@@ -105,9 +109,9 @@ impl PlayPlan {
         if !self.mobs.lock().unwrap().contains_key(&id) {
             return None;
         }
-        for p in packets {
-            self.hub.send(None, p);
-        }
+        // Три пакета спавна — одной рассылкой: одно сжатие и одно
+        // пробуждение получателей вместо трёх.
+        self.hub.send_many(packets);
         Some(id)
     }
 
@@ -125,12 +129,16 @@ impl PlayPlan {
     /// Тик мобов: ИИ, физика, рассылка движений, звуки, исчезновение мёртвых.
     pub(super) fn tick_mobs(&self) {
         let loaded = std::mem::take(&mut *self.mobs_loaded.lock().unwrap());
-        for e in loaded {
-            let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
-            for p in self.mob_packets(id, &e.mob) {
-                self.hub.send(None, p);
+        if !loaded.is_empty() {
+            // Все пакеты появления с диска — одной рассылкой.
+            let mut frames = Vec::new();
+            for e in loaded {
+                let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
+                frames.extend(self.mob_packets(id, &e.mob));
+                self.mobs.lock().unwrap().insert(id, e);
             }
-            self.mobs.lock().unwrap().insert(id, e);
+            self.hub.send_many(frames);
+            self.mark_work();
         }
         if self.mobs.lock().unwrap().is_empty() {
             return;
@@ -142,8 +150,10 @@ impl PlayPlan {
             simulated.is_empty()
                 || simulated.contains(&((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4))
         };
-        // Игроки и еда в руках (основная и вторая).
-        let hands: Vec<([f64; 3], [Option<String>; 2])> = {
+        // Игроки и еда в руках (основная и вторая). Строки берутся один раз
+        // на тик, а не на каждого моба: раньше здесь на моба строился `Vec`
+        // с `is_food` по строкам предметов.
+        let hands: Vec<([f64; 3], [Option<&str>; 2])> = {
             let live = self.live.lock().unwrap();
             let players = self.hub.players.lock().unwrap();
             players
@@ -152,40 +162,30 @@ impl PlayPlan {
                 .map(|p| {
                     let held = live.get(&p.entry.uuid).map_or([None, None], |l| {
                         [
-                            l.slots[36 + l.selected].map(|s| self.item_name(s.item).to_owned()),
-                            l.slots[survival::OFFHAND].map(|s| self.item_name(s.item).to_owned()),
+                            l.slots[36 + l.selected].map(|s| self.item_name(s.item)),
+                            l.slots[survival::OFFHAND].map(|s| self.item_name(s.item)),
                         ]
                     });
                     (p.pos, held)
                 })
                 .collect()
         };
-        let physics = self.survival.physics.as_deref();
-        let shape = |c: [i32; 3]| -> &[[f64; 6]] {
-            let Some(s) = self.block(c) else {
-                return if c[1] < self.min_y { mb::FULL } else { &[] };
-            };
-            if let Some(p) = physics {
-                return p.boxes_of(s);
+        // Кого приманивает еда — по видам, один проход на вид за тик, а не на моба.
+        let mut food_by_species: Vec<Vec<[f64; 3]>> = vec![Vec::new(); mb::Species::ALL.len()];
+        {
+            let mut seen = [false; mb::Species::ALL.len()];
+            for (pos, held) in &hands {
+                for species in mb::Species::ALL {
+                    let slot = species as usize;
+                    if !seen[slot] && held.iter().flatten().any(|n| species.is_food(n)) {
+                        seen[slot] = true;
+                        food_by_species[slot].push(*pos);
+                    }
+                }
             }
-            // Старый кэш без форм: всё твёрдое — полный куб.
-            let n = self.state_name(s);
-            let solid = !matches!(
-                n,
-                "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | ""
-            ) && crate::fluids::fluid_of(n, None).is_none()
-                && !self.fluid_replaceable(c);
-            if solid { mb::FULL } else { &[] }
-        };
-        let water = |c: [i32; 3]| {
-            self.block(c)
-                .and_then(|s| crate::fluids::state_fluid(&self.survival.placement, s))
-                .is_some_and(|f| f.kind == crate::fluids::Kind::Water)
-        };
-        let world = mb::World {
-            shape: &shape,
-            water: &water,
-        };
+        }
+        let physics = self.survival.physics.as_deref();
+        let _ = physics;
         let mut rng = rand::thread_rng();
         let mut rand = || rand::Rng::r#gen::<f64>(&mut rng);
         let mut packets = Vec::new();
@@ -193,76 +193,85 @@ impl PlayPlan {
         let mut sounds = Vec::new();
         {
             let mut mobs = self.mobs.lock().unwrap();
-            for (&id, e) in mobs.iter_mut() {
-                // Выгруженный чанк не тикает: иначе исследование мира копит
-                // работу, которую никто не видит.
-                if !awake(e.mob.pos) {
-                    continue;
-                }
-                let species = e.mob.species;
-                let players: Vec<([f64; 3], bool)> = hands
-                    .iter()
-                    .map(|(p, h)| (*p, h.iter().flatten().any(|n| species.is_food(n))))
-                    .collect();
-                let mut senses = mb::Senses {
-                    players: &players,
-                    rand: &mut rand,
-                };
-                if mb::tick(&mut e.mob, &world, &mut senses) {
-                    gone.push(id);
-                    continue;
-                }
-                let m = &e.mob;
-                if m.alive() {
-                    e.ambient -= 1;
-                    if e.ambient <= 0 {
-                        e.ambient = 80 + rand::random::<i32>().rem_euclid(120);
-                        sounds.push((
-                            format!("{}.ambient", species.sound()),
-                            m.pos,
-                            species.volume(),
-                            m.is_baby(),
-                        ));
+            // Один замок мира на всю фазу: коробки коллизий читаются тысячами раз.
+            self.with_world(|w| {
+                for (&id, e) in mobs.iter_mut() {
+                    // Выгруженный чанк не тикает: иначе исследование мира копит
+                    // работу, которую никто не видит.
+                    if !awake(e.mob.pos) {
+                        continue;
+                    }
+                    let species = e.mob.species;
+                    // Замыкания мира — по два указателя, без аллокаций: они лишь
+                    // держат ссылку на `WorldView` этой фазы.
+                    let shape = |c: [i32; 3]| self.shape_at(w.block(c), c);
+                    let water = |c: [i32; 3]| self.water_at(w.block(c));
+                    let world = mb::World {
+                        shape: &shape,
+                        water: &water,
+                    };
+                    let mut senses = mb::Senses {
+                        // Уже отфильтрованные по виду: моб видит только тех, кто
+                        // держит его еду, и строки предметов не сравниваются.
+                        players: &food_by_species[species as usize],
+                        rand: &mut rand,
+                    };
+                    if mb::tick(&mut e.mob, &world, &mut senses) {
+                        gone.push(id);
+                        continue;
+                    }
+                    let m = &e.mob;
+                    if m.alive() {
+                        e.ambient -= 1;
+                        if e.ambient <= 0 {
+                            e.ambient = 80 + rand::random::<i32>().rem_euclid(120);
+                            sounds.push((
+                                format!("{}.ambient", species.sound()),
+                                m.pos,
+                                species.volume(),
+                                m.is_baby(),
+                            ));
+                        }
+                    }
+                    let q = play::quantize(m.pos);
+                    let rot = (m.yaw, m.pitch, m.head_yaw);
+                    let moved = q != e.sent;
+                    let turned =
+                        (rot.0 - e.sent_rot.0).abs() > 1.0 || (rot.1 - e.sent_rot.1).abs() > 1.0;
+                    if moved || turned {
+                        e.moves += 1;
+                        let packet = match play::delta(e.sent, q).filter(|_| e.moves % 60 != 0) {
+                            Some(d) => play::move_entity_pos_rot(
+                                self.ids.move_entity_pos_rot,
+                                id,
+                                d,
+                                m.yaw,
+                                m.pitch,
+                                m.on_ground,
+                            ),
+                            None => play::teleport_entity(
+                                self.ids.teleport_entity,
+                                id,
+                                m.pos,
+                                m.yaw,
+                                m.pitch,
+                                m.on_ground,
+                            ),
+                        };
+                        packets.push(packet);
+                        e.sent = q;
+                        (e.sent_rot.0, e.sent_rot.1) = (rot.0, rot.1);
+                    }
+                    if (rot.2 - e.sent_rot.2).abs() > 1.0 {
+                        packets.push(play::rotate_head(self.ids.rotate_head, id, m.head_yaw));
+                        e.sent_rot.2 = rot.2;
                     }
                 }
-                let q = play::quantize(m.pos);
-                let rot = (m.yaw, m.pitch, m.head_yaw);
-                let moved = q != e.sent;
-                let turned =
-                    (rot.0 - e.sent_rot.0).abs() > 1.0 || (rot.1 - e.sent_rot.1).abs() > 1.0;
-                if moved || turned {
-                    e.moves += 1;
-                    let packet = match play::delta(e.sent, q).filter(|_| e.moves % 60 != 0) {
-                        Some(d) => play::move_entity_pos_rot(
-                            self.ids.move_entity_pos_rot,
-                            id,
-                            d,
-                            m.yaw,
-                            m.pitch,
-                            m.on_ground,
-                        ),
-                        None => play::teleport_entity(
-                            self.ids.teleport_entity,
-                            id,
-                            m.pos,
-                            m.yaw,
-                            m.pitch,
-                            m.on_ground,
-                        ),
-                    };
-                    packets.push(packet);
-                    e.sent = q;
-                    (e.sent_rot.0, e.sent_rot.1) = (rot.0, rot.1);
-                }
-                if (rot.2 - e.sent_rot.2).abs() > 1.0 {
-                    packets.push(play::rotate_head(self.ids.rotate_head, id, m.head_yaw));
-                    e.sent_rot.2 = rot.2;
-                }
-            }
+            });
         }
-        for p in packets {
-            self.hub.send(None, p);
-        }
+        // Движения и повороты всех мобов тика — одной рассылкой: при стаде,
+        // где сдвинулись все, это одна запись в канал вместо сотни.
+        self.hub.send_many(packets);
         for (name, pos, vol, baby) in sounds {
             self.play_sound(
                 None,
@@ -286,6 +295,33 @@ impl PlayPlan {
                 self.mob_loot(id, &e);
             }
         }
+    }
+
+    /// Коробки коллизии блока для моба: `getCollisionShape` 26.3.
+    ///
+    /// Формы берутся из отчёта `shapes.csv` (`BlockPhysics`), а без него —
+    /// старый грубый вариант: всё твёрдое — полный куб, жидкости и
+    /// заменяемое — ничего.
+    fn shape_at(&self, s: Option<u32>, c: [i32; 3]) -> &[[f64; 6]] {
+        let Some(s) = s else {
+            return if c[1] < self.min_y { mb::FULL } else { &[] };
+        };
+        if let Some(p) = self.survival.physics.as_deref() {
+            return p.boxes_of(s);
+        }
+        // Без `shapes.csv`: всё твёрдое — полный куб. Флаг считается при
+        // сборке мира по именам, сравнения строк здесь нет.
+        if chunkwake_world::has_flag(s, chunkwake_world::flags::SOLID) {
+            mb::FULL
+        } else {
+            &[]
+        }
+    }
+
+    /// Вода ли в блоке (`state_fluid`).
+    fn water_at(&self, s: Option<u32>) -> bool {
+        s.and_then(|s| crate::fluids::state_fluid(&self.survival.placement, s))
+            .is_some_and(|f| f.kind == crate::fluids::Kind::Water)
     }
 
     /// Лут и опыт умершего моба (`LivingEntity.dropAllDeathLoot`).
@@ -1074,7 +1110,7 @@ impl PlayPlan {
         self.entity_new.lock().unwrap().insert((cx, cz));
         // Список `creature` биома в центре чанка; океан и реки — пустые.
         // Неизвестные виды остаются в весах, их группа просто пропускается.
-        let (chance, list): (f32, Vec<(Option<Species>, u32, u32, u32)>) = match self
+        let (chance, list): (f32, Vec<SpawnEntry>) = match self
             .chunk_biome(cx, cz)
             .and_then(|b| self.survival.creature_spawns.get(b as usize))
         {
@@ -1155,7 +1191,7 @@ impl PlayPlan {
     /// `animals_spawnable_on` / `EatBlockGoal`: блок травы (любое состояние).
     fn is_grass(&self, pos: [i32; 3]) -> bool {
         self.block(pos)
-            .is_some_and(|s| self.state_name(s) == "minecraft:grass_block")
+            .is_some_and(|s| chunkwake_world::has_flag(s, chunkwake_world::flags::GRASS))
     }
 
     /// Верхний непрозрачный для спавна блок столбца. Один проход по столбцу

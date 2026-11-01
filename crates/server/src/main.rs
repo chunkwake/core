@@ -8,8 +8,8 @@ mod setup_tui;
 mod storage;
 mod world_setup;
 
-use chunkwake_server::MC_VERSION;
 use chunkwake_net::Server;
+use chunkwake_server::MC_VERSION;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use tokio::net::TcpListener;
@@ -49,44 +49,11 @@ async fn serve(dir: &Path) -> Result<(), String> {
     tracing::info!("Minecraft {} (protocol {})", version.name, version.protocol);
     let boot_started = std::time::Instant::now();
 
-    // Данные ванилы генерируются из server.jar один раз; дальше jar и Java не нужны.
+    // Данные ванилы встраиваются в бинарь при сборке и распаковываются один
+    // раз; дальше ни jar, ни Java не нужны. Если в этой сборке встроенных
+    // данных нет, остаётся прежний путь: кэш, а без него генератор из jar.
     let cache_root = props.generated_path(dir);
-    let data_dir = match chunkwake_data::generator::cached(&cache_root, &version.name) {
-        Some(d) if config::read_cached_version(&d).is_some() => d,
-        _ => {
-            let java = std::env::var_os("CHUNKWAKE_JAVA")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| props.java_command(dir));
-            tracing::info!(
-                "extracting vanilla data from server.jar with {} (one-time, usually 10-30s)",
-                java.display()
-            );
-            let jar = props.jar_path(dir);
-            let d = chunkwake_data::generator::ensure_generated_with(
-                &java,
-                &jar,
-                &version.name,
-                &cache_root,
-                &|msg| tracing::info!("{msg}"),
-            )
-            .map_err(|e| e.to_string())?;
-            config::cache_version(&jar, &d)?;
-            tracing::info!(
-                "vanilla data cached in {}; server.jar is no longer needed",
-                d.display()
-            );
-            d
-        }
-    };
-    // Уже собранный кэш не пересоздаём: если шаблонов структур нет, дописываем
-    // их из jar. `reports/` при этом не трогается.
-    if !chunkwake_data::generator::structures_present(&data_dir) {
-        let jar = props.jar_path(dir);
-        tracing::info!("copying structure templates from {}", jar.display());
-        let copied = chunkwake_data::generator::copy_structures(&jar, &data_dir)
-            .map_err(|e| e.to_string())?;
-        tracing::info!("copied {copied} structure templates");
-    }
+    let data_dir = vanilla_data(&props, &version, dir, &cache_root)?;
     let boot = {
         let started = std::time::Instant::now();
         let boot = chunkwake_data::boot::load_or_build(&data_dir).map_err(|e| e.to_string())?;
@@ -153,9 +120,9 @@ async fn serve(dir: &Path) -> Result<(), String> {
     let mut net = props.net_config(version);
     net.configuration = Some(std::sync::Arc::new(plan));
     let gate = play.clone();
-    net.admit = Some(chunkwake_net::Admit(std::sync::Arc::new(move |name, uuid, addr| {
-        gate.admission_denied(name, uuid, addr)
-    })));
+    net.admit = Some(chunkwake_net::Admit(std::sync::Arc::new(
+        move |name, uuid, addr| gate.admission_denied(name, uuid, addr),
+    )));
     let server = Server::new(net);
     let world = play.clone();
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -281,6 +248,80 @@ async fn serve(dir: &Path) -> Result<(), String> {
     }
 }
 
+/// Каталог ванильных данных: встроенный архив, готовый кэш или генератор из jar.
+///
+/// Порядок такой, что обычный запуск релизной сборки не трогает ни диск
+/// (после первой распаковки), ни Java: архив внутри бинаря распаковывается в
+/// `generated/<версия>` и дальше читается как обычный кэш. Сборка без
+/// встроенных данных (dev без `generated/`, CI) идёт прежним путём через jar.
+fn vanilla_data(
+    props: &config::Properties,
+    version: &chunkwake_net::GameVersion,
+    dir: &Path,
+    cache_root: &Path,
+) -> Result<std::path::PathBuf, String> {
+    if chunkwake_data::bundle::present() {
+        let started = std::time::Instant::now();
+        let ready_before = chunkwake_data::bundle::extracted(&cache_root.join(&version.name));
+        if !ready_before {
+            tracing::info!(
+                "unpacking vanilla data from the binary into {} (first start only)",
+                cache_root.join(&version.name).display()
+            );
+        }
+        let data =
+            chunkwake_data::bundle::ensure(cache_root, &version.name).map_err(|e| e.to_string())?;
+        if ready_before {
+            tracing::debug!(
+                "vanilla data: embedded bundle ready in {} ms ({})",
+                started.elapsed().as_millis(),
+                data.display()
+            );
+        } else {
+            tracing::info!(
+                "vanilla data ready in {} ({} ms)",
+                data.display(),
+                started.elapsed().as_millis()
+            );
+        }
+        return Ok(data);
+    }
+    if let Some(data) = chunkwake_data::cache::cached(cache_root, &version.name)
+        .filter(|d| config::read_cached_version(d).is_some())
+    {
+        // Кэш мог остаться от сборки с бандлом: шаблоны и язык уже внутри.
+        return Ok(data);
+    }
+    let java = std::env::var_os("CHUNKWAKE_JAVA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| props.java_command(dir));
+    let Some(jar) = props.jar_path(dir) else {
+        return Err(format!(
+            "no vanilla data: this build has none embedded and vanilla-jar is empty; \
+             put server.jar in {} or run `chunkwake config set vanilla-jar server.jar`",
+            dir.display()
+        ));
+    };
+    tracing::info!(
+        "extracting vanilla data from server.jar with {} (one-time, usually 10-30s)",
+        java.display()
+    );
+    let data = chunkwake_data::cache::ensure_generated_with(
+        &java,
+        &jar,
+        &version.name,
+        cache_root,
+        &|msg| tracing::info!("{msg}"),
+    )
+    .map_err(|e| e.to_string())?;
+    config::cache_version(&jar, &data)?;
+    tracing::info!(
+        "vanilla data cached in {}; server.jar is no longer needed",
+        data.display()
+    );
+    Ok(data)
+}
+
 /// Запускает сэмплер процесса и HTTP-эндпоинт метрик.
 ///
 /// Сэмплер опрашивает `sysinfo` раз в секунду: загрузку CPU он считает как
@@ -298,6 +339,19 @@ fn start_metrics(
     }
     let live: chunkwake_metrics::http::Shared =
         std::sync::Arc::new(std::sync::RwLock::new(chunkwake_metrics::Live::new()));
+    // Профиль по фазам приходит из самого тика, а не из сэмплера: только тик
+    // знает, сколько заняла каждая подсистема, и только он попадает в секунду
+    // переменное число раз.
+    {
+        let live_profile = live.clone();
+        play.set_profile_sink(std::sync::Arc::new(
+            move |at: u64, marks: &[f32; chunkwake_metrics::PHASE_COUNT]| {
+                if let Ok(mut slot) = live_profile.write() {
+                    slot.publish_profile(at, marks);
+                }
+            },
+        ));
+    }
     let play_sampler = play.clone();
     let live_sampler = live.clone();
     tokio::spawn(async move {
@@ -321,8 +375,13 @@ fn start_metrics(
         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     let port = props.metrics_port;
     let live_server = live.clone();
+    let access = if props.metrics_token.is_empty() {
+        chunkwake_metrics::http::Access::local()
+    } else {
+        chunkwake_metrics::http::Access::with_token(props.metrics_token.clone())
+    };
     tokio::spawn(async move {
-        match chunkwake_metrics::http::spawn(ip, port, live_server).await {
+        match chunkwake_metrics::http::spawn(ip, port, live_server, access).await {
             // Ссылка на дашборд — первое, что нужно, когда открываешь сервер.
             Ok(bound) if bound == port => {
                 tracing::info!("dashboard on http://{ip}:{bound}/ (metrics on /metrics)")
@@ -339,7 +398,8 @@ fn start_metrics(
     Some(live)
 }
 
-fn log_player_exit(name: &str, result: Result<(), chunkwake_net::NetError>) {    match result {
+fn log_player_exit(name: &str, result: Result<(), chunkwake_net::NetError>) {
+    match result {
         Ok(()) => tracing::info!(%name, "player left"),
         Err(chunkwake_net::NetError::Io(error))
             if matches!(

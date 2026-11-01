@@ -33,14 +33,16 @@ enum Section {
     Network,
     Server,
     Runtime,
+    Metrics,
     World,
     Gameplay,
 }
 
-const SECTIONS: [(Section, &str); 5] = [
+const SECTIONS: [(Section, &str); 6] = [
     (Section::Network, "🌐 Net"),
     (Section::Server, "👥 Server"),
     (Section::Runtime, "⚙ Run"),
+    (Section::Metrics, "📊 Metrics"),
     (Section::World, "🌍 World*"),
     (Section::Gameplay, "✦ Play*"),
 ];
@@ -54,7 +56,7 @@ struct Field {
     section: Section,
 }
 
-const FIELDS: [Field; 22] = [
+const FIELDS: [Field; 26] = [
     Field {
         key: "server-ip",
         icon: "🌐",
@@ -113,7 +115,7 @@ const FIELDS: [Field; 22] = [
         key: "vanilla-jar",
         icon: "📦",
         label: "Vanilla server jar",
-        help: "Path to the Minecraft 26.3 server.jar. Relative paths start in the server directory.",
+        help: "Optional. Data is embedded in the binary; the jar is only needed to rebuild the data cache. Relative paths start in the server directory.",
         kind: FieldKind::Text,
         section: Section::Runtime,
     },
@@ -239,6 +241,41 @@ const FIELDS: [Field; 22] = [
             max: u32::MAX as i64,
         },
         section: Section::Gameplay,
+    },
+    // Новые поля в конце: индексы массива используются позиционно
+    // (`values[0]` — адрес, `values[4]` — online-mode), и вставка в
+    // середину сдвинула бы их.
+    Field {
+        key: "metrics-enabled",
+        icon: "📊",
+        label: "Dashboard",
+        help: "Serve live metrics on a local HTTP port: the browser dashboard, Prometheus /metrics and `chunkwake top`.",
+        kind: FieldKind::Toggle,
+        section: Section::Metrics,
+    },
+    Field {
+        key: "metrics-bind",
+        icon: "🔗",
+        label: "Dashboard address",
+        help: "Keep 127.0.0.1 for this computer only. 0.0.0.0 opens the dashboard to the network — that requires a token.",
+        kind: FieldKind::Text,
+        section: Section::Metrics,
+    },
+    Field {
+        key: "metrics-port",
+        icon: "🔌",
+        label: "Dashboard port",
+        help: "TCP port for metrics and the dashboard. If it is busy, the server tries the next two ports.",
+        kind: FieldKind::Number { min: 1, max: 65535 },
+        section: Section::Metrics,
+    },
+    Field {
+        key: "metrics-token",
+        icon: "🔑",
+        label: "Access token",
+        help: "Required when the dashboard listens outside this computer. Open http://address:port/?token=... once; the browser then keeps a cookie. Leave empty for local-only access.",
+        kind: FieldKind::Text,
+        section: Section::Metrics,
     },
 ];
 
@@ -635,6 +672,19 @@ impl App {
             && !props.online_mode
             && (self.initial[0] != self.values[0] || self.initial[4] != self.values[4])
     }
+
+    /// Требует ли дашборд токен, но он не задан.
+    ///
+    /// Сервер откажется стартовать в такой конфигурации, поэтому TUI должен
+    /// сказать об этом до сохранения, а не оставить админа с мёртвым
+    /// эндпоинтом после перезапуска.
+    fn metrics_token_missing(&self, props: &Properties) -> bool {
+        let public = props
+            .metrics_ip
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| !ip.is_loopback());
+        props.metrics_enabled && public && props.metrics_token.is_empty()
+    }
 }
 
 fn is_public(ip: &str) -> bool {
@@ -712,7 +762,7 @@ fn draw_compact(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                "⚙ Chunkwake  /  Setup",
+                concat!("⚙ Chunkwake v", env!("CARGO_PKG_VERSION"), "  /  Setup"),
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!("    {status}"), Style::default().fg(WARNING)),
@@ -988,6 +1038,10 @@ fn draw(frame: &mut Frame, app: &App) {
                     "⚙  Chunkwake",
                     Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
                 ),
+                Span::styled(
+                    concat!(" v", env!("CARGO_PKG_VERSION")),
+                    Style::default().fg(MUTED),
+                ),
                 Span::styled("   /   Setup", Style::default().fg(TEXT)),
             ]),
             Line::from(Span::styled(
@@ -1229,6 +1283,16 @@ fn draw(frame: &mut Frame, app: &App) {
                 "Current value"
             };
             let detail = issue.map_or(field.help, |issue| issue.message.as_str());
+            // Пока админ настраивает дашборд, сразу видно, что внешний
+            // адрес без токена сервер не примет.
+            let token_warning = if field.section == Section::Metrics {
+                app.draft()
+                    .ok()
+                    .and_then(|text| Properties::parse(&text).ok())
+                    .is_some_and(|props| app.metrics_token_missing(&props))
+            } else {
+                false
+            };
             frame.render_widget(
                 Paragraph::new(Text::from(vec![
                     Line::from(Span::styled(
@@ -1245,6 +1309,15 @@ fn draw(frame: &mut Frame, app: &App) {
                     Line::from(Span::styled(
                         detail,
                         Style::default().fg(if issue.is_some() { WARNING } else { MUTED }),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        if token_warning {
+                            "! Needs a token: the dashboard listens outside this computer"
+                        } else {
+                            ""
+                        },
+                        Style::default().fg(WARNING),
                     )),
                     Line::from(""),
                     Line::from(Span::styled(
@@ -1383,7 +1456,7 @@ pub fn run(dir: &Path) -> Result<(), String> {
             app.save()?;
             println!("✓ Configuration saved to {}", app.path.display());
             println!(
-                "  Run `chunkwake doctor --dir {}` to check the jar.",
+                "  Run `chunkwake doctor --dir {}` to check readiness.",
                 dir.display()
             );
         }
@@ -1480,10 +1553,18 @@ mod tests {
                     !rendered.contains("Resize the terminal"),
                     "{width}x{height}"
                 );
+                // Версия видна прямо в шапке: та же, что в `--version`.
+                assert!(
+                    rendered.contains(concat!("Chunkwake v", env!("CARGO_PKG_VERSION"))),
+                    "нет версии в шапке: {width}x{height}"
+                );
             }
         }
         let mut gameplay = app(config::DEFAULT_PROPERTIES);
-        gameplay.section = 4;
+        gameplay.section = SECTIONS
+            .iter()
+            .position(|(section, _)| *section == Section::Gameplay)
+            .expect("секция Gameplay");
         gameplay.selected = *gameplay.section_indices().last().unwrap();
         let mut terminal = Terminal::new(TestBackend::new(50, 11)).unwrap();
         terminal.draw(|frame| draw(frame, &gameplay)).unwrap();
@@ -1495,6 +1576,35 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("Spawn protection"));
+    }
+
+    /// Вкладка дашборда рисуется и показывает все четыре настройки.
+    #[test]
+    fn metrics_section_renders_all_fields() {
+        let mut app = app(config::DEFAULT_PROPERTIES);
+        app.section = SECTIONS
+            .iter()
+            .position(|(section, _)| *section == Section::Metrics)
+            .expect("секция Metrics");
+        app.selected = app.section_indices()[0];
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        for label in [
+            "Metrics",
+            "Dashboard",
+            "Dashboard address",
+            "Dashboard port",
+            "Access token",
+        ] {
+            assert!(rendered.contains(label), "нет подписи {label}: {rendered}");
+        }
     }
 
     #[test]
@@ -1544,11 +1654,100 @@ mod tests {
         assert!(app.draft().unwrap().contains("online-mode=true"));
     }
 
+    /// Поля дашборда есть в TUI и пишутся в черновик конфига.
+    #[test]
+    fn metrics_fields_are_editable_and_saved() {
+        let mut app = app(config::DEFAULT_PROPERTIES);
+        app.section = SECTIONS
+            .iter()
+            .position(|(section, _)| *section == Section::Metrics)
+            .expect("секция Metrics");
+        let rows = app.section_indices();
+        let keys: Vec<&str> = rows.iter().map(|index| FIELDS[*index].key).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "metrics-enabled",
+                "metrics-bind",
+                "metrics-port",
+                "metrics-token"
+            ]
+        );
+
+        // Токен: открыть строку, стереть, ввести.
+        let token = rows[3];
+        app.selected = token;
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::Edit);
+        app.edit_value = "0123456789abcdef".into();
+        app.cursor = app.edit_value.chars().count();
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.field_dirty(token), "изменение видно в списке");
+        let draft = app.draft().unwrap();
+        assert!(draft.contains("metrics-token=0123456789abcdef"), "{draft}");
+        app.validate().expect("конфиг проходит проверку");
+    }
+
+    /// Внешний адрес без токена TUI замечает: сервер с таким конфигом не
+    /// поднимется, и лучше узнать об этом до сохранения.
+    #[test]
+    fn public_dashboard_without_token_is_flagged() {
+        let mut app = app(config::DEFAULT_PROPERTIES);
+        let bind = FIELDS
+            .iter()
+            .position(|field| field.key == "metrics-bind")
+            .expect("metrics-bind");
+        app.selected = bind;
+        app.handle_key(key(KeyCode::Enter));
+        app.edit_value = "0.0.0.0".into();
+        app.cursor = app.edit_value.chars().count();
+        app.handle_key(key(KeyCode::Enter));
+
+        let props = app.validate().expect("разбор проходит");
+        assert!(app.metrics_token_missing(&props), "нужен токен");
+
+        // С токеном предупреждение снимается.
+        let token = FIELDS
+            .iter()
+            .position(|field| field.key == "metrics-token")
+            .expect("metrics-token");
+        app.selected = token;
+        app.handle_key(key(KeyCode::Enter));
+        app.edit_value = "0123456789abcdef".into();
+        app.cursor = app.edit_value.chars().count();
+        app.handle_key(key(KeyCode::Enter));
+        let props = app.validate().expect("разбор проходит");
+        assert!(!app.metrics_token_missing(&props));
+    }
+
+    /// Короткий токен TUI не принимает: подобрать его слишком легко.
+    /// Проверка срабатывает при вводе, значение остаётся прежним.
+    #[test]
+    fn short_metrics_token_is_rejected() {
+        let mut app = app(config::DEFAULT_PROPERTIES);
+        let token = FIELDS
+            .iter()
+            .position(|field| field.key == "metrics-token")
+            .expect("metrics-token");
+        app.selected = token;
+        app.handle_key(key(KeyCode::Enter));
+        app.edit_value = "short".into();
+        app.cursor = app.edit_value.chars().count();
+        app.handle_key(key(KeyCode::Enter));
+        // Ввод отклонён: сообщение показано, поле не изменилось.
+        let message = app.message.as_deref().unwrap_or("");
+        assert!(message.contains("16"), "{message}");
+        assert!(app.values[token].is_empty(), "короткий токен не сохранён");
+        assert_eq!(app.mode, Mode::Edit, "остаёмся в правке, чтобы исправить");
+    }
+
     #[test]
     fn sections_and_planned_settings_are_keyboard_accessible() {
         let mut app = app(config::DEFAULT_PROPERTIES);
         app.handle_key(key(KeyCode::Right));
         assert_eq!(SECTIONS[app.section].0, Section::Server);
+        // Tab идёт по вкладкам в порядке SECTIONS: Runtime, Metrics, World.
+        app.handle_key(key(KeyCode::Tab));
         app.handle_key(key(KeyCode::Tab));
         app.handle_key(key(KeyCode::Tab));
         assert_eq!(SECTIONS[app.section].0, Section::World);
@@ -1620,7 +1819,13 @@ mod tests {
     #[test]
     fn random_seed_is_generated_only_on_seed_row_and_saved() {
         let mut app = app(config::DEFAULT_PROPERTIES);
-        app.section = 3;
+        // Секции идут Network, Server, Runtime, Metrics, World, Gameplay:
+        // ищем World по имени, а не по номеру, чтобы добавление вкладки
+        // не ломало тест.
+        app.section = SECTIONS
+            .iter()
+            .position(|(section, _)| *section == Section::World)
+            .expect("секция World");
         app.selected = app.section_indices()[1];
         assert_eq!(FIELDS[app.selected].key, "level-seed");
         app.handle_key(key(KeyCode::Char('r')));
@@ -1654,8 +1859,11 @@ mod tests {
         assert_eq!(app.handle_key(key(KeyCode::Char('d'))), Action::Quit);
     }
 
+    /// Правка любого поля снимает результат doctor: он относился к старым
+    /// значениям. Ошибки данных при встроенном архиве нет, поэтому здесь
+    /// проверяется сам сброс, а не конкретная ошибка jar.
     #[test]
-    fn doctor_marks_missing_jar_and_clears_after_change() {
+    fn doctor_marks_issues_and_clears_after_change() {
         let path = std::env::temp_dir().join(format!(
             "chunkwake-doctor-ui-{}-missing/server.properties",
             std::process::id()
@@ -1663,7 +1871,9 @@ mod tests {
         let mut app = App::from_text(path, config::DEFAULT_PROPERTIES.into()).unwrap();
         app.handle_key(key(KeyCode::Char('d')));
         assert!(app.doctor_checked);
-        assert!(app.issues.iter().any(|issue| issue.key == "vanilla-jar"));
+        if !chunkwake_data::bundle::present() {
+            assert!(app.issues.iter().any(|issue| issue.key == "vanilla-jar"));
+        }
         app.selected = 6;
         app.handle_key(key(KeyCode::Enter));
         app.edit_value = "other.jar".into();

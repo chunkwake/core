@@ -1435,9 +1435,7 @@ fn entity_windows(
 ) -> Option<Vec<(Uuid, Vec<usize>)>> {
     let mut out = Vec::new();
     for target in targets {
-        if target.game_mode.is_none() {
-            return None;
-        }
+        target.game_mode?;
         let windows = player_windows(ctx, target.uuid, token)?;
         out.push((target.uuid, windows));
     }

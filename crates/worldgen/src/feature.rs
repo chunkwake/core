@@ -34,6 +34,17 @@ pub trait Level {
     /// Клетка, чью форму надо пересчитать после декорации соседей
     /// (`markPosForPostProcessing`). По умолчанию некуда записать.
     fn mark_shape(&mut self, _x: i32, _y: i32, _z: i32) {}
+    /// `Level.setBlockEntity` для сундуков структур: ванила пишет в них
+    /// `LootTable` и `LootTableSeed`, а не готовые предметы.
+    fn set_block_entity(
+        &mut self,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _id: &str,
+        _nbt: chunkwake_world::nbt::Compound,
+    ) {
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,6 +169,8 @@ pub struct Palette {
     props: Vec<Vec<(String, String)>>,
     /// Имя блока → номер и его состояния по порядку.
     blocks: HashMap<String, (u32, Vec<u32>)>,
+    /// Номер блока → его имя.
+    block_names: Vec<String>,
     /// Номер блока → его состояния.
     by_block: Vec<Vec<u32>>,
     defaults: HashMap<String, u32>,
@@ -247,6 +260,13 @@ impl Palette {
             },
             block_of,
             props,
+            block_names: {
+                let mut v = vec![String::new(); blocks.len()];
+                for (name, (id, _)) in &blocks {
+                    v[*id as usize] = name.clone();
+                }
+                v
+            },
             blocks,
             defaults,
             tags: HashMap::new(),
@@ -334,6 +354,12 @@ impl Palette {
             .get(state as usize)
             .copied()
             .filter(|id| *id != u32::MAX)
+    }
+
+    /// Имя блока по состоянию (`BlockState.getBlock` и его реестровый ключ).
+    pub fn block_name(&self, state: u32) -> Option<&str> {
+        let id = self.block_index(state)?;
+        self.block_names.get(id as usize).map(String::as_str)
     }
 
     /// Блок-жидкость (`water` / `lava`), не затопленная ступень.
@@ -651,8 +677,11 @@ enum Feature {
     Fossil(Arc<template::Fossil>),
 }
 
+pub(crate) mod mansion;
 pub(crate) mod mineshaft;
 pub(crate) mod monument;
+pub(crate) mod ocean_ruin;
+pub(crate) mod portal;
 mod pyramid;
 mod shore;
 pub(crate) mod stronghold;
@@ -1015,10 +1044,10 @@ impl Features {
         for step in 0..self.steps.len().min(DECORATION_STEPS) {
             // Шаг 3 — `underground_structures`, шаг 4 — `surface_structures`.
             // Куски пишутся до фич шага. У каждой структуры свой `setFeatureSeed`.
-            if step == 3 || step == 4 {
-                if let (Some(structures), Some(columns)) = (&self.structures, columns) {
-                    structures.place(self, level, cx, cz, columns, &mut r, seed, step as i32);
-                }
+            if (step == 3 || step == 4)
+                && let (Some(structures), Some(columns)) = (&self.structures, columns)
+            {
+                structures.place(self, level, cx, cz, columns, &mut r, seed, step as i32);
             }
             let t_step = prof.then(Instant::now);
             let mut wanted: Vec<u32> = biomes
@@ -1033,6 +1062,10 @@ impl Features {
                 let Some(placed) = &self.steps[step][index as usize] else {
                     continue;
                 };
+                // `CHUNKWAKE_FEATURE_TRACE=1` — какой индекс и сид у фичи.
+                if std::env::var_os("CHUNKWAKE_FEATURE_TRACE").is_some() {
+                    eprintln!("step {step} index {index}");
+                }
                 r.set_feature_seed(seed, index as i32, step as i32);
                 let key = Some((step as u32, index));
                 self.place(level, placed, key, &mut r, [ox, self.min_y, oz]);
@@ -1326,7 +1359,14 @@ impl Features {
             Feature::UnderwaterMagma(m) => m.place(self, level, r, pos),
             Feature::Bamboo(chance) => misc::bamboo(self, level, r, pos, *chance),
             Feature::IceSpike(s) => s.place(self, level, r, pos),
-            Feature::Iceberg(i) => i.place(self, level, r, pos),
+            Feature::Iceberg(i) => {
+                // `CHUNKWAKE_ICE_TRACE=1` — какой айсберг и где: по имени
+                // состояния видно, `packed` это или `blue`.
+                if std::env::var_os("CHUNKWAKE_ICE_TRACE").is_some() {
+                    eprintln!("iceberg {} at {pos:?}", i.state_name());
+                }
+                i.place(self, level, r, pos)
+            }
             Feature::CoralTree(kind, inner) => misc::coral(self, level, r, pos, kind, inner),
             Feature::Overlay(list) => {
                 for p in list {
@@ -2947,7 +2987,7 @@ mod tests {
         assert_eq!(done, all, "{done} из {all}");
         assert_eq!(all, 171);
         let structures = features.structures.as_ref().expect("structures");
-        assert_eq!(structures.structure_count(), 34);
+        assert_eq!(structures.structure_count(), 45);
         assert_eq!(
             structures.feature_seed("minecraft:village_plains"),
             Some((4, 40))
@@ -2990,6 +3030,26 @@ mod tests {
         assert_eq!(
             structures.feature_seed("minecraft:stronghold"),
             Some((4, 37))
+        );
+        assert_eq!(
+            structures.feature_seed("minecraft:trial_chambers"),
+            Some((3, 4))
+        );
+        assert_eq!(
+            structures.feature_seed("minecraft:ocean_ruin_cold"),
+            Some((4, 25))
+        );
+        assert_eq!(
+            structures.feature_seed("minecraft:ocean_ruin_warm"),
+            Some((4, 26))
+        );
+        assert_eq!(
+            structures.feature_seed("minecraft:ruined_portal"),
+            Some((4, 28))
+        );
+        assert_eq!(
+            structures.feature_seed("minecraft:ruined_portal_swamp"),
+            Some((4, 34))
         );
     }
 }

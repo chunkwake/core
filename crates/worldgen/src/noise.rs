@@ -2,7 +2,7 @@
 //! `NormalNoise`. Всё во float, как в ванили: точечный `get` и объёмный
 //! `add_to_volume` считаются разными путями и должны совпасть с ними бит в бит.
 
-use crate::random::{Bits, Legacy, Positional, Xoroshiro};
+use crate::random::{Bits, Legacy, Positional, Rng, Xoroshiro};
 use crate::volume::Volume;
 use serde_json::Value;
 
@@ -100,6 +100,15 @@ impl NoiseRandom for Xoroshiro {
     }
     fn next_int_bound(&mut self, bound: i32) -> i32 {
         Xoroshiro::next_int_bound(self, bound)
+    }
+}
+
+impl NoiseRandom for Rng {
+    fn next_double(&mut self) -> f64 {
+        Bits::next_double(self)
+    }
+    fn next_int_bound(&mut self, bound: i32) -> i32 {
+        Bits::next_int_bound(self, bound)
     }
 }
 
@@ -357,6 +366,17 @@ impl Stack {
         self.layers.push(Layer { noise, freq, amp });
     }
 
+    /// `NoiseStack.Builder.addStack`: частоты перемножаются, амплитуды тоже.
+    pub fn add_stack(&mut self, other: &Stack, freq: f64, amp: f32) {
+        for l in &other.layers {
+            self.layers.push(Layer {
+                noise: l.noise.clone(),
+                freq: l.freq * freq,
+                amp: l.amp * amp,
+            });
+        }
+    }
+
     pub fn get(&self, x: f64, y: f64, z: f64) -> f32 {
         let mut v = 0f32;
         for l in &self.layers {
@@ -385,6 +405,32 @@ const PERLIN_DEVIATION: f64 = 0.2702247831245211;
 const INPUT_FACTOR: f64 = 1.0181268882175227;
 
 impl NormalNoise {
+    /// `NormalNoise.createForLegacyNetherBiome`: две стопки октав от
+    /// `LegacyRandomSource`, каждая — `LegacyFbmInitializer`. Октавы с нулевой
+    /// амплитудой не создаются, но `skipOctave` им всё равно тратит 262 броска.
+    pub fn create_legacy_nether(&self, r: &mut Legacy) -> Stack {
+        let amplitudes: Vec<f64> = if self.octaves.is_empty() {
+            Vec::new()
+        } else {
+            self.octaves.iter().map(|o| o.2).collect()
+        };
+        let first = legacy_fbm_nether(r, self.base_octave(), &amplitudes);
+        let second = legacy_fbm_nether(r, self.base_octave(), &amplitudes);
+        let value_factor = (self.norm * self.base_amplitude()) as f32;
+        let mut stack = Stack::default();
+        stack.add_stack(&first, 1.0, value_factor);
+        stack.add_stack(&second, INPUT_FACTOR, value_factor);
+        stack
+    }
+
+    fn base_octave(&self) -> i32 {
+        self.octaves.first().map_or(-7, |o| o.0)
+    }
+
+    fn base_amplitude(&self) -> f64 {
+        self.octaves.first().map_or(1.0, |o| o.2.abs())
+    }
+
     pub fn from_json(v: &Value) -> Result<Self, String> {
         let base_amp = v["base_amplitude"].as_f64().unwrap_or(1.0);
         let base = v["base_octave"].as_i64().ok_or("noise: no base_octave")? as i32;
@@ -486,7 +532,7 @@ impl NormalNoise {
     }
 
     /// `NormalNoise.create`: две стопки октав, вторая со сдвигом частоты.
-    pub fn create(&self, r: &mut Xoroshiro) -> Stack {
+    pub fn create(&self, r: &mut Rng) -> Stack {
         let first = r.fork_positional();
         let second = r.fork_positional();
         let mut stack = Stack::default();
@@ -509,7 +555,7 @@ impl NormalNoise {
 }
 
 /// `BlendedNoise.createFbm`: октавы размазанного шума от крупной к мелкой.
-pub fn blended_fbm(r: &mut Xoroshiro, first_octave: i32, smear_y: f64, value: f64) -> Stack {
+pub fn blended_fbm(r: &mut Rng, first_octave: i32, smear_y: f64, value: f64) -> Stack {
     let octaves = -first_octave + 1;
     let mut factor = 1.0;
     let mut value = value / (2f64.powi(octaves) - 1.0);
@@ -525,4 +571,44 @@ pub fn blended_fbm(r: &mut Xoroshiro, first_octave: i32, smear_y: f64, value: f6
 /// Позиционная фабрика, общая для всех шумов мира.
 pub fn instantiate(params: &NormalNoise, world: &Positional, id: &str) -> Stack {
     params.create(&mut world.from_hash_of(id))
+}
+
+/// `LegacyFbmInitializer.createForLegacyNetherBiome`.
+fn legacy_fbm_nether(r: &mut Legacy, first_octave: i32, amplitudes: &[f64]) -> Stack {
+    let octaves = amplitudes.len() as i32;
+    let zero_index = -first_octave;
+    let mut levels: Vec<Option<Perlin>> = vec![None; amplitudes.len()];
+    let zero_octave = Perlin::new(r, None);
+    if zero_index >= 0 && zero_index < octaves && amplitudes[zero_index as usize] != 0.0 {
+        levels[zero_index as usize] = Some(zero_octave);
+    }
+    for i in (0..zero_index).rev() {
+        if i < octaves {
+            if amplitudes[i as usize] != 0.0 {
+                levels[i as usize] = Some(Perlin::new(r, None));
+            } else {
+                // `skipOctave`: `consumeCount(262)`.
+                for _ in 0..262 {
+                    Bits::next_int(r);
+                }
+            }
+        } else {
+            for _ in 0..262 {
+                Bits::next_int(r);
+            }
+        }
+    }
+    let factor = 2f64.powi(-zero_index);
+    let value_factor = 2f64.powi(octaves - 1) / (2f64.powi(octaves) - 1.0);
+    let mut stack = Stack::default();
+    let mut factor = factor;
+    let mut value_factor = value_factor;
+    for (i, level) in levels.into_iter().enumerate() {
+        if let Some(noise) = level {
+            stack.add(noise, factor, (value_factor * amplitudes[i]) as f32);
+        }
+        factor *= 2.0;
+        value_factor /= 2.0;
+    }
+    stack
 }

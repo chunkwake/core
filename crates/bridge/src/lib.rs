@@ -12,9 +12,9 @@ mod jvm;
 
 use chunkwake_net::live::Event;
 use chunkwake_net::play::{PlayPlan, PluginHooks};
+use crossbeam_channel as mpsc;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc;
 use std::sync::{Arc, OnceLock, Weak};
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -46,8 +46,9 @@ enum Slot {
     ArgItemsLen = 20,
     DownWorld = 21,
     UpDisable = 22,
+    DownPlayerVersion = 23,
 }
-const SLOTS: usize = 23;
+const SLOTS: usize = 24;
 
 /// Буфер ответа на событие (смерть с полным инвентарём укладывается с запасом).
 const EVENT_REPLY_CAP: usize = 64 << 10;
@@ -60,7 +61,7 @@ type Table = [AtomicU64; SLOTS];
 static HOST: OnceLock<Weak<PlayPlan>> = OnceLock::new();
 
 enum Call {
-    Disable(mpsc::Sender<bool>),
+    Disable(std::sync::mpsc::Sender<bool>),
     Tick,
     Join(Uuid, String),
     Quit(Uuid),
@@ -92,8 +93,8 @@ pub fn find_api_dir(server_dir: &Path) -> Option<PathBuf> {
 
 impl Bridge {
     /// Завершает плагины на их JVM-потоке и дожидается `onDisable`.
-    pub fn shutdown(&self) -> Result<mpsc::Receiver<bool>, String> {
-        let (tx, rx) = mpsc::channel();
+    pub fn shutdown(&self) -> Result<std::sync::mpsc::Receiver<bool>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
         self.tx.send(Call::Disable(tx)).map_err(|e| e.to_string())?;
         Ok(rx)
     }
@@ -133,6 +134,11 @@ impl Bridge {
             Slot::DownPlayerControl,
             player_control as *const () as u64,
         );
+        set(
+            table,
+            Slot::DownPlayerVersion,
+            player_version as *const () as u64,
+        );
         set(table, Slot::DownWorld, world as *const () as u64);
         let dir: &'static str =
             Box::leak(plugins_dir.to_string_lossy().into_owned().into_boxed_str());
@@ -142,8 +148,8 @@ impl Bridge {
         set(table, Slot::ArgItems, items.as_ptr() as u64);
         set(table, Slot::ArgItemsLen, items.len() as u64);
 
-        let (tx, rx) = mpsc::channel::<Call>();
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<i32, String>>();
+        let (tx, rx) = mpsc::unbounded::<Call>();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<i32, String>>();
         let tick_queued = Arc::new(AtomicBool::new(false));
         let queued = tick_queued.clone();
         std::thread::Builder::new()
@@ -382,15 +388,32 @@ extern "C" fn set_op(hi: i64, lo: i64, op: i32) {
 }
 
 /// Снимок игрока в `out`; возвращает длину (больше `cap` — буфер мал), -1 — не онлайн.
+///
+/// Текст кэшируется на стороне мира по отпечатку состояния, поэтому здесь
+/// остаётся одна копия — прямо из общего буфера в память JVM.
 extern "C" fn player_state(hi: i64, lo: i64, out: *mut u8, cap: i32) -> i32 {
     let uuid = Uuid::from_u64_pair(hi as u64, lo as u64);
-    let Some(text) = host().and_then(|p| p.player_state(uuid)) else {
+    let Some((_, text)) = host().and_then(|p| p.player_state_shared(uuid)) else {
         return -1;
     };
-    if text.len() <= cap.max(0) as usize && !out.is_null() {
-        unsafe { std::ptr::copy_nonoverlapping(text.as_ptr(), out, text.len()) };
+    let bytes = text.as_bytes();
+    if bytes.len() <= cap.max(0) as usize && !out.is_null() {
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
+        return bytes.len() as i32;
     }
-    text.len() as i32
+    bytes.len() as i32
+}
+
+/// Отпечаток состояния игрока; -1 — не онлайн.
+///
+/// Дешёвый вызов: Java сверяет его и разбирает строку снимка только когда
+/// состояние действительно изменилось. Для плагина это невидимо — значения
+/// в те же моменты те же, что отдавал пересбор снимка на каждый геттер.
+extern "C" fn player_version(hi: i64, lo: i64) -> i64 {
+    let uuid = Uuid::from_u64_pair(hi as u64, lo as u64);
+    host()
+        .and_then(|p| p.state_version(uuid))
+        .map_or(-1, |v| v as i64)
 }
 
 extern "C" fn player_control(hi: i64, lo: i64, ptr: *const u8, len: i32) -> i32 {

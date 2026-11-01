@@ -142,13 +142,25 @@ final class PlayerImpl {
     }
 
     private State last;
+    /** Отпечаток состояния, для которого собран {@link #last}. */
+    private long lastVersion = Long.MIN_VALUE;
     private final InventoryImpl inventory = new InventoryImpl(this);
 
     /** Текущий снимок; после выхода — последний известный. */
     State state() {
-        String text = online ? Bridge.playerState(id) : null;
-        if (text != null) {
-            last = State.parse(text);
+        if (online) {
+            // Сначала дешёвый отпечаток: пока состояние не менялось, разбор
+            // снимается с прошлого результата. Значения те же, что отдавал
+            // пересбор снимка на каждый геттер.
+            long version = Bridge.playerVersion(id);
+            if (version >= 0 && version == lastVersion && last != null) {
+                return last;
+            }
+            String text = Bridge.playerState(id);
+            if (text != null) {
+                last = State.parse(text);
+                lastVersion = version;
+            }
         }
         if (last == null) {
             throw new IllegalStateException("chunkwake: no state for " + name);

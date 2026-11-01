@@ -115,7 +115,10 @@ fn main() {
     let biome_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let t = Instant::now();
-    let prelim: Vec<Vec<f32>> = coords.iter().map(|&(x, z)| noise.preliminary(x, z)).collect();
+    let prelim: Vec<Vec<f32>> = coords
+        .iter()
+        .map(|&(x, z)| noise.preliminary(x, z))
+        .collect();
     let prelim_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     // Правила компилируются один раз, как на сервере при старте мира.
@@ -168,7 +171,7 @@ fn main() {
                 .map(|f| match f {
                     chunkwake_worldgen::Fill::Air => 0,
                     chunkwake_worldgen::Fill::Solid => stone,
-                    chunkwake_worldgen::Fill::Water => water,
+                    chunkwake_worldgen::Fill::Liquid | chunkwake_worldgen::Fill::Water => water,
                     chunkwake_worldgen::Fill::Lava => lava,
                 })
                 .collect(),
@@ -208,7 +211,9 @@ fn main() {
             if c.biomes.is_empty() {
                 ChunkColumn::from_blocks(&c.states, 0, block_bits, biome_bits, true)
             } else {
-                ChunkColumn::from_blocks_with_biomes(&c.states, &c.biomes, block_bits, biome_bits, true)
+                ChunkColumn::from_blocks_with_biomes(
+                    &c.states, &c.biomes, block_bits, biome_bits, true,
+                )
             }
         })
         .collect();
@@ -256,7 +261,15 @@ fn main() {
     row("zlib", zlib_ms);
     row(
         "итого",
-        fill_ms + carve_ms + biome_ms + prelim_ms + surface_ms + column_ms + light_ms + encode_ms + zlib_ms,
+        fill_ms
+            + carve_ms
+            + biome_ms
+            + prelim_ms
+            + surface_ms
+            + column_ms
+            + light_ms
+            + encode_ms
+            + zlib_ms,
     );
     println!(
         "сжатый поток {:.1} МиБ, {:.1} КиБ/чанк",
@@ -269,7 +282,8 @@ fn main() {
     let noise = std::sync::Arc::new(noise);
     for features in [false, true] {
         let overworld =
-            chunkwake_worldgen::pipeline::Overworld::new(noise.clone(), &state, &biome_ids).unwrap();
+            chunkwake_worldgen::pipeline::Overworld::new(noise.clone(), &state, &biome_ids)
+                .unwrap();
         let overworld = if features {
             overworld
                 .with_features(data, &blocks.states(), &state, &biome_ids)
@@ -292,16 +306,16 @@ fn collect_states(
     blocks: &chunkwake_data::world::Blocks,
     out: &mut HashMap<String, u32>,
 ) {
-    if let Some(name) = v.get("result_state").and_then(|s| s.as_str()) {
-        if let Ok(state) = blocks.default_state(name) {
-            out.insert(name.to_owned(), state as u32);
-        }
+    if let Some(name) = v.get("result_state").and_then(|s| s.as_str())
+        && let Ok(state) = blocks.default_state(name)
+    {
+        out.insert(name.to_owned(), state as u32);
     }
     for key in ["ore_block", "raw_ore_block", "filler_block"] {
-        if let Some(name) = v.get(key).and_then(|s| s.as_str()) {
-            if let Ok(state) = blocks.default_state(name) {
-                out.insert(name.to_owned(), state as u32);
-            }
+        if let Some(name) = v.get(key).and_then(|s| s.as_str())
+            && let Ok(state) = blocks.default_state(name)
+        {
+            out.insert(name.to_owned(), state as u32);
         }
     }
     match v {

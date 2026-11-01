@@ -28,7 +28,7 @@ impl NetStats {
     /// Снимок для [`chunkwake_metrics::NetCounters`].
     pub fn snapshot(
         &self,
-        pings: &std::collections::HashMap<uuid::Uuid, f32>,
+        pings: &std::collections::HashMap<uuid::Uuid, f32, rustc_hash::FxBuildHasher>,
     ) -> chunkwake_metrics::NetCounters {
         let ping_avg = if pings.is_empty() {
             None
@@ -59,7 +59,7 @@ mod tests {
         stats.add_in(100);
         stats.add_in(50);
         stats.add_out(400, 3);
-        let snapshot = stats.snapshot(&std::collections::HashMap::new());
+        let snapshot = stats.snapshot(&Default::default());
         assert_eq!(snapshot.bytes_in, 150);
         assert_eq!(snapshot.packets_in, 2);
         assert_eq!(snapshot.bytes_out, 400);
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn ping_average_and_max() {
         let stats = NetStats::default();
-        let mut pings = std::collections::HashMap::new();
+        let mut pings = std::collections::HashMap::with_hasher(rustc_hash::FxBuildHasher);
         pings.insert(uuid::Uuid::from_u128(1), 10.0);
         pings.insert(uuid::Uuid::from_u128(2), 30.0);
         let snapshot = stats.snapshot(&pings);

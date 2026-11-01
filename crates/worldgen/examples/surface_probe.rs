@@ -89,7 +89,7 @@ fn main() {
             chunkwake_worldgen::Fill::Solid => {
                 blocks.default_state("minecraft:stone").unwrap() as u32
             }
-            chunkwake_worldgen::Fill::Water => {
+            chunkwake_worldgen::Fill::Liquid | chunkwake_worldgen::Fill::Water => {
                 blocks.default_state("minecraft:water").unwrap() as u32
             }
             chunkwake_worldgen::Fill::Lava => {
@@ -119,7 +119,6 @@ fn main() {
             .position(|(n, _)| n == "minecraft:clay_bands_offset"),
     };
     stage.build(&mut chunk, cx, cz);
-    drop(chunk);
 
     let mut top = 0;
     for y in (0..g.height).rev() {
@@ -150,16 +149,16 @@ fn collect(
     blocks: &chunkwake_data::world::Blocks,
     out: &mut std::collections::HashMap<String, u32>,
 ) {
-    if let Some(name) = v.get("result_state").and_then(|s| s.as_str()) {
-        if let Ok(state) = blocks.default_state(name) {
-            out.insert(name.to_owned(), state as u32);
-        }
+    if let Some(name) = v.get("result_state").and_then(|s| s.as_str())
+        && let Ok(state) = blocks.default_state(name)
+    {
+        out.insert(name.to_owned(), state as u32);
     }
     for key in ["ore_block", "raw_ore_block", "filler_block"] {
-        if let Some(name) = v.get(key).and_then(|s| s.as_str()) {
-            if let Ok(state) = blocks.default_state(name) {
-                out.insert(name.to_owned(), state as u32);
-            }
+        if let Some(name) = v.get(key).and_then(|s| s.as_str())
+            && let Ok(state) = blocks.default_state(name)
+        {
+            out.insert(name.to_owned(), state as u32);
         }
     }
     match v {

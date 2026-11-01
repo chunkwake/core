@@ -45,7 +45,10 @@ fn main() {
         }
     }
     let proto_ms = t.elapsed().as_secs_f64() * 1000.0;
-    println!("прото-чанк:            {:>8.2} ms/чанк ({n} чанков)", proto_ms / n as f64);
+    println!(
+        "прото-чанк:            {:>8.2} ms/чанк ({n} чанков)",
+        proto_ms / n as f64
+    );
 
     let full = Overworld::new(noise.clone(), &state, &biome_ids)
         .unwrap()
@@ -59,7 +62,10 @@ fn main() {
     }
     let all_ms = t.elapsed().as_secs_f64() * 1000.0;
     println!("с декорацией:          {:>8.2} ms/чанк", all_ms / n as f64);
-    println!("декорация:             {:>8.2} ms/чанк", (all_ms - proto_ms) / n as f64);
+    println!(
+        "декорация:             {:>8.2} ms/чанк",
+        (all_ms - proto_ms) / n as f64
+    );
 
     // Параллельность: та же пачка на N потоках. Один `Overworld` на всех —
     // именно так работает пул генерации сервера.
@@ -78,7 +84,7 @@ fn main() {
         );
         let _ = &full;
         let t = Instant::now();
-        let per = (coords.len() + workers - 1) / workers;
+        let per = coords.len().div_ceil(workers);
         std::thread::scope(|s| {
             for chunk in coords.chunks(per) {
                 let ow = ow.clone();

@@ -121,7 +121,10 @@ fn main() {
         let _ = bytes;
         if i == 1 && first_none {
             first_none = false;
-            println!("первое кольцо готово через {} ms", started.elapsed().as_millis());
+            println!(
+                "первое кольцо готово через {} ms",
+                started.elapsed().as_millis()
+            );
         }
         if i % 8 == 0 || i == rings.len() - 1 {
             println!(

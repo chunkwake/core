@@ -25,7 +25,8 @@ fn main() {
             let c = match f {
                 Fill::Air => b'A',
                 Fill::Solid => b'S',
-                Fill::Water => b'W',
+                // `default_fluid` — вода в оверворлде; буква та же, что у воды.
+                Fill::Liquid | Fill::Water => b'W',
                 Fill::Lava => b'L',
             };
             if c != want[i] {

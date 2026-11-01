@@ -529,6 +529,10 @@ pub struct Compiler {
     registry: HashMap<String, Value>,
     noise_params: HashMap<String, NormalNoise>,
     world: Positional,
+    /// `legacy_random_source` настроек: у Ада и Края свои сиды шумов.
+    legacy: bool,
+    /// Сид мира: `new LegacyRandomSource(seed)` для `old_blended_noise`.
+    seed: i64,
     noises: HashMap<String, Arc<Stack>>,
     prepared: HashMap<String, (usize, u8)>,
     next_id: usize,
@@ -541,10 +545,23 @@ impl Compiler {
         noise_params: HashMap<String, NormalNoise>,
         world: Positional,
     ) -> Self {
+        Self::with_legacy(registry, noise_params, world, false, 0)
+    }
+
+    /// Вариант для настроек с `legacy_random_source` (Ад, Край).
+    pub fn with_legacy(
+        registry: HashMap<String, Value>,
+        noise_params: HashMap<String, NormalNoise>,
+        world: Positional,
+        legacy: bool,
+        seed: i64,
+    ) -> Self {
         Self {
             registry,
             noise_params,
             world,
+            legacy,
+            seed,
             noises: HashMap::new(),
             prepared: HashMap::new(),
             next_id: 0,
@@ -622,7 +639,19 @@ impl Compiler {
             .noise_params
             .get(name)
             .ok_or_else(|| format!("noise {name} not found"))?;
-        let n = Arc::new(noise::instantiate(params, &self.world, name));
+        // `RandomState.DensityFunction.CompileContext.createNoiseSampler`:
+        // у Ада `temperature` и `vegetation` строятся иначе — двумя стопками
+        // `LegacyFbmInitializer` от `new LegacyRandomSource(seed + 0|1)`.
+        let n =
+            if self.legacy && name == "minecraft:nether/temperature" {
+                Arc::new(params.create_legacy_nether(&mut crate::random::Legacy::new(self.seed)))
+            } else if self.legacy && name == "minecraft:nether/vegetation" {
+                Arc::new(params.create_legacy_nether(&mut crate::random::Legacy::new(
+                    self.seed.wrapping_add(1),
+                )))
+            } else {
+                Arc::new(noise::instantiate(params, &self.world, name))
+            };
         self.noises.insert(name.to_owned(), n.clone());
         Ok(n)
     }
@@ -661,7 +690,15 @@ impl Compiler {
                 y_factor,
                 smear,
             } => {
-                let mut r = self.world.from_hash_of("minecraft:terrain");
+                // `RandomState.DensityFunction.CompileContext.createRandom`:
+                // у `legacy_random_source` (Ад и Край) `BlendedNoise.NOISE_SEED`
+                // — это `new LegacyRandomSource(seed)`, иначе позиционная
+                // фабрика мира от `minecraft:terrain`.
+                let mut r = if self.legacy {
+                    crate::random::Rng::Legacy(crate::random::Legacy::new(self.seed))
+                } else {
+                    self.world.from_hash_of("minecraft:terrain")
+                };
                 let xz_m = 684.412 * xz_scale;
                 let y_m = 684.412 * y_scale;
                 let limit_smear = y_m * smear;
@@ -969,6 +1006,7 @@ fn spline_eval(s: &Spl, coord: &mut dyn FnMut(usize) -> f32) -> f32 {
         } => {
             let input = coord(*c);
             // `Mth.binarySearch(0, n, i -> input < locs[i]) - 1`
+            #[allow(clippy::neg_cmp_op_on_partial_ord)]
             let start = locs.partition_point(|&l| !(input < l)) as isize - 1;
             let last = locs.len() - 1;
             let extend = |value: f32, i: usize| {
@@ -1320,7 +1358,9 @@ impl S {
                 ch[2].volume(ctx, &mut other, v);
                 for i in 0..n {
                     let x = input[i];
-                    if !(x >= *lo) || !(x < *hi) {
+                    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+                    let outside = !(x >= *lo) || !(x < *hi);
+                    if outside {
                         out[i] = other[i];
                     }
                 }
@@ -1600,10 +1640,12 @@ fn interpolate_blocks(input: &S, cxz: i32, cy: i32, ctx: &mut Ctx, out: &mut [f3
                         let a1 = lerp(ax, v01, v11);
                         let step = (a1 - a0) * inv_y;
                         let mut val = a0 + step * y0 as f32;
-                        let mut at = v.index(ox + x, oy + y0, oz + z);
-                        for _ in y0..=y1 {
-                            out[at] = val;
-                            at += 1;
+                        let at = v.index(ox + x, oy + y0, oz + z);
+                        // Индекс идёт подряд: это то же, что `index(.., y0, ..) + k`,
+                        // и счётчик `at` считается один раз на весь столбец.
+                        let start = at;
+                        for (k, _) in (y0..=y1).enumerate() {
+                            out[start + k] = val;
                             val += step;
                         }
                     }

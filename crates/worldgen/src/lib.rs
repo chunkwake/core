@@ -16,7 +16,7 @@ pub mod volume;
 use aquifer::{Aquifer, Fluid, Samplers};
 use density::{Compiler, Ctx, Df, S};
 use noise::NormalNoise;
-use random::{Bits, Positional, Xoroshiro};
+use random::{Bits, Positional};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
@@ -57,8 +57,10 @@ pub fn void_platform_y(min_y: i32) -> i32 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fill {
     Air,
-    /// `default_block` (камень).
+    /// `default_block` (в оверворлде камень, в Аду незеррак).
     Solid,
+    /// `default_fluid` (оверворлд — вода, Ад — лава).
+    Liquid,
     Water,
     Lava,
 }
@@ -68,11 +70,18 @@ pub struct Generator {
     pub min_y: i32,
     pub height: i32,
     pub sea_level: i32,
+    /// `spawn_target` настроек: точки для поиска спавна мира.
+    spawn_target: Vec<Vec<(String, i64, i64)>>,
+    /// `default_fluid`: в оверворлде вода, в Аду лава.
+    default_fluid: Fluid,
     final_density: Arc<S>,
-    aquifer: Samplers,
+    /// `None` — у настроек нет `aquifers` (Нижний мир, Край).
+    aquifer: Option<Samplers>,
     aquifer_random: Positional,
     /// Шесть осей климата в порядке [`biome::AXES`].
     climate: [Arc<S>; 6],
+    /// Имя плотности климата (`minecraft:overworld/continents`) → номер оси.
+    climate_names: HashMap<String, usize>,
     biomes: biome::BiomeSource,
     /// Предварительная поверхность (`chunk_surface_level`) для правил.
     preliminary: Arc<S>,
@@ -95,7 +104,7 @@ pub struct Generator {
     biome_carvers: HashMap<String, Vec<usize>>,
     /// Карверы по чанку-источнику (`carverBiome`): одна точка климата
     /// на чанк, но её спрашивают 289 соседей.
-    source_biomes: Vec<std::sync::Mutex<HashMap<ChunkPos, Option<Arc<[usize]>>>>>,
+    source_biomes: Vec<BiomeSlotCache>,
     /// `BiomeManager.obfuscateSeed`: сид «дрожания» границ биомов.
     zoom_seed: i64,
     /// Биомы уже посчитанных чанков: «дрожание» границы заглядывает к соседу,
@@ -151,12 +160,17 @@ pub struct CarveBlocks {
     pub air: u32,
     pub water: u32,
     pub lava: u32,
+    /// `default_fluid` настроек: в Аду это лава, хотя карверы кладут воду.
+    pub liquid: u32,
     /// `#minecraft:uncarvable`.
     pub bedrock: u32,
     pub grass: u32,
     pub mycelium: u32,
     pub dirt: u32,
 }
+
+/// Кэш биомов одного зонального слота.
+type BiomeSlotCache = std::sync::Mutex<HashMap<ChunkPos, Option<Arc<[usize]>>>>;
 
 /// Каталог `worldgen` одним файлом: сотня мелких открытий на холодном диске
 /// стоит дороже, чем разбор уже прочитанного текста.
@@ -427,26 +441,36 @@ impl Generator {
         rules: HashMap<String, Value>,
         conditions: HashMap<String, Value>,
     ) -> Result<Self, String> {
-        let world = Xoroshiro::from_seed(seed).fork_positional();
+        // `RandomState.create`: при `legacy_random_source` (Нижний мир, Край)
+        // фабрика — `LegacyPositionalRandomFactory`, иначе Xoroshiro.
+        let legacy = settings["legacy_random_source"].as_bool().unwrap_or(false);
+        let world = Positional::from_seed(seed, legacy);
         // Плотности жил берутся из того же каталога, что рельеф: копия нужна,
         // потому что компилятор забирает реестр себе.
         let density_values = registry.clone();
         let noise_params = noises.clone();
-        let mut c = Compiler::new(registry, noises, world);
+        let mut c = Compiler::with_legacy(registry, noises, world, legacy, seed);
         let mut get = |v: &Value| Df::parse(v).and_then(|d| c.sampler(&d));
-        let aq = &settings["aquifers"];
-        let aquifer = Samplers {
-            barrier: get(&aq["barrier"])?,
-            floodedness: get(&aq["fluid_level_floodedness"])?,
-            spread: get(&aq["fluid_level_spread"])?,
-            lava: get(&aq["lava"])?,
-            exclusion: get(&aq["exclusion"])?,
-            surface: get(&aq["surface_level"])?,
+        // `aquifers` у Нижнего мира и Края нет: там `Aquifer.createDisabled`,
+        // а `barrier` и остальные функции роутера называются иначе.
+        let aquifer = match &settings["aquifers"] {
+            Value::Null => None,
+            aq => Some(Samplers {
+                barrier: get(&aq["barrier"])?,
+                floodedness: get(&aq["fluid_level_floodedness"])?,
+                spread: get(&aq["fluid_level_spread"])?,
+                lava: get(&aq["lava"])?,
+                exclusion: get(&aq["exclusion"])?,
+                surface: get(&aq["surface_level"])?,
+            }),
         };
         let final_density = get(&settings["noise_router"]["final_density"])?;
         // Оси климата из роутера: `humidity` там называется `vegetation`,
         // `continentalness` — `continents`, `weirdness` — `ridges`.
         let mut climate = Vec::with_capacity(6);
+        // Имя плотности в `spawn_target` → номер оси. Ключи роутера
+        // (`temperature`, `vegetation`, …) — это те же имена.
+        let mut climate_names: HashMap<String, usize> = HashMap::new();
         for axis in biome::AXES {
             let key = match axis {
                 "humidity" => "vegetation",
@@ -454,10 +478,23 @@ impl Generator {
                 "weirdness" => "ridges",
                 other => other,
             };
+            // Номер оси — по порядку `AXES`, а не по числу записей в карте.
+            let index = climate.len();
+            climate_names.insert(format!("minecraft:overworld/{key}"), index);
+            climate_names.insert(format!("minecraft:nether/{key}"), index);
             climate.push(get(&settings["noise_router"][key])?);
         }
         let climate: [Arc<S>; 6] = climate.try_into().expect("six climate axes");
-        let biomes = read_biomes(data_dir)?;
+        // `read_biomes`: у Ада свой пресет (`Preset.NETHER`), в `biomes.csv`
+        // лежит только оверворлд.
+        let biomes = if settings["legacy_random_source"].as_bool().unwrap_or(false)
+            && settings["noise"]["min_y"].as_i64() == Some(0)
+            && settings["noise"]["height"].as_i64() == Some(128)
+        {
+            biome::BiomeSource::nether()
+        } else {
+            read_biomes(data_dir)?
+        };
         // Предварительная поверхность и стадия поверхности.
         let preliminary = get(&settings["noise_router"]["chunk_surface_level"])?;
         // Плотности жил: сначала четыре оверворлда (их индексы уже в правилах),
@@ -465,6 +502,9 @@ impl Generator {
         let surface_choice = surface_choice(&settings, &rules);
         let mut vein_names = default_vein_names();
         if let Some(rule) = rules.get("minecraft:overworld") {
+            collect_vein_names(rule, &mut vein_names);
+        }
+        if let Some(rule) = rules.get("minecraft:nether") {
             collect_vein_names(rule, &mut vein_names);
         }
         match &surface_choice {
@@ -486,6 +526,27 @@ impl Generator {
         let int = |v: &Value| v.as_i64().map(|x| x as i32);
         let min_y = int(&settings["noise"]["min_y"]).ok_or("noise_settings: no min_y")?;
         let height = int(&settings["noise"]["height"]).ok_or("noise_settings: no height")?;
+        // `spawn_target`: точки, по которым ванила ищет спавн мира.
+        let mut spawn_target: Vec<Vec<(String, i64, i64)>> = Vec::new();
+        for point in settings["spawn_target"].as_array().into_iter().flatten() {
+            let mut list = Vec::new();
+            for (name, range) in point.as_object().into_iter().flatten() {
+                let (Some(lo), Some(hi)) = (
+                    range.get(0).and_then(Value::as_f64),
+                    range.get(1).and_then(Value::as_f64),
+                ) else {
+                    continue;
+                };
+                list.push((
+                    name.clone(),
+                    biome::quantize(lo as f32),
+                    biome::quantize(hi as f32),
+                ));
+            }
+            if !list.is_empty() {
+                spawn_target.push(list);
+            }
+        }
         // Шумы поверхности: параметры уже прочитаны из `worldgen/noise`.
         let mut surface_noise_params = HashMap::new();
         for (name, params) in &noise_params {
@@ -494,11 +555,22 @@ impl Generator {
         Ok(Self {
             min_y,
             height,
+            spawn_target,
             sea_level: int(&settings["sea_level"]).ok_or("noise_settings: no sea_level")?,
+            // `default_fluid`: в Аду `minecraft:lava`, иначе `minecraft:water`.
+            default_fluid: if settings["default_fluid"]
+                .as_str()
+                .is_some_and(|n| n.contains("lava"))
+            {
+                Fluid::Lava
+            } else {
+                Fluid::Water
+            },
             final_density,
             aquifer,
             aquifer_random: world.from_hash_of("minecraft:aquifer").fork_positional(),
             climate,
+            climate_names,
             biomes,
             preliminary,
             rules,
@@ -548,9 +620,10 @@ impl Generator {
         let v = Volume::blocks([16, self.height, 16], [cx * 16, self.min_y, cz * 16]);
         let mut ctx = Ctx::default();
         let mut aquifer = Aquifer::new(
-            &self.aquifer,
+            self.aquifer.as_ref(),
             self.aquifer_random,
             self.sea_level,
+            self.default_fluid,
             &mut ctx,
             &v,
         );
@@ -567,9 +640,11 @@ impl Generator {
                     }
                     let fill = match aquifer.substance(&mut ctx, bx, by, bz, d as f64) {
                         None => Fill::Solid,
-                        Some(Fluid::Air) => Fill::Air,
-                        Some(Fluid::Water) => Fill::Water,
+                        // `globalFluidPicker`: `default_fluid` настроек, а не
+                        // всегда вода — в Аду это лава.
+                        Some(Fluid::Water) => Fill::Liquid,
                         Some(Fluid::Lava) => Fill::Lava,
+                        Some(Fluid::Air) => Fill::Air,
                     };
                     out[((y * 16 + z) * 16 + x) as usize] = fill;
                 }
@@ -697,8 +772,138 @@ impl Generator {
         });
     }
 
-    /// `chunk_surface_level` по квартовой сетке 4×4: по одному значению на
-    /// клетку столбца, как интерполяция ванили.
+    /// Финальная плотность в точке (`final_density` без акуифера). Нужна
+    /// сверке с ванилью: по знаку видно, камень там или жидкость.
+    pub fn debug_density(&self, x: i32, y: i32, z: i32) -> f32 {
+        let mut ctx = Ctx::default();
+        self.final_density.value(&mut ctx, x, y, z)
+    }
+
+    /// Плотность из объёма чанка (как её видит `doFill`): с интерполяцией
+    /// `interpolated`, в отличие от точечного [`Self::debug_density`].
+    pub fn debug_volume_density(&self, cx: i32, cz: i32, x: i32, y: i32, z: i32) -> Option<f32> {
+        let v =
+            crate::volume::Volume::blocks([16, self.height, 16], [cx * 16, self.min_y, cz * 16]);
+        let mut ctx = Ctx::default();
+        let mut buf = vec![0f32; v.len()];
+        self.final_density.volume(&mut ctx, &mut buf, &v);
+        let lx = x - cx * 16;
+        let lz = z - cz * 16;
+        let ly = y - self.min_y;
+        if !(0..16).contains(&lx) || !(0..16).contains(&lz) || !(0..self.height).contains(&ly) {
+            return None;
+        }
+        Some(buf[v.index(lx, ly, lz)])
+    }
+
+    /// `Aquifer.Config` этого мира: `None` — акуиферов нет.
+    pub fn aquifers(&self) -> Option<&aquifer::Samplers> {
+        self.aquifer.as_ref()
+    }
+
+    /// Отладка границ акуифера для чанка: `skip_above_y` и сетка.
+    pub fn debug_aquifer_skip(&self, cx: i32, cz: i32) -> String {
+        let Some(s) = self.aquifer.as_ref() else {
+            return "no aquifers".into();
+        };
+        let v =
+            crate::volume::Volume::blocks([16, self.height, 16], [cx * 16, self.min_y, cz * 16]);
+        let mut ctx = Ctx::default();
+        let aq = aquifer::Aquifer::new(
+            Some(s),
+            self.aquifer_random,
+            self.sea_level,
+            self.default_fluid,
+            &mut ctx,
+            &v,
+        );
+        format!("skip_above_y {} (для чанка {cx},{cz})", aq.skip_above())
+    }
+
+    /// Входы акуифера в точке: плотность, `chunk_surface_level`, barrier,
+    /// floodedness, spread, lava, exclusion. Нужна сверке с ванилью.
+    pub fn debug_aquifer(&self, x: i32, y: i32, z: i32) -> [f32; 7] {
+        let mut ctx = Ctx::default();
+        let d = self.final_density.value(&mut ctx, x, y, z);
+        let Some(s) = self.aquifer.as_ref() else {
+            return [d, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        };
+        // Ровно те же координаты, что сэмплирует выгрузка ванили: так
+        // сравниваются сами функции шума, без пересчёта сеток акуифера.
+        [
+            d,
+            s.surface.value(&mut ctx, x, y, z),
+            s.barrier.value(&mut ctx, x, y, z),
+            s.floodedness.value(&mut ctx, x, y, z),
+            s.spread.value(&mut ctx, x, y, z),
+            s.lava.value(&mut ctx, x, y, z),
+            s.exclusion.value(&mut ctx, x, y, z),
+        ]
+    }
+
+    /// `NoiseSpawnFinder.findSpawnPosition`: точка спавна мира. Первый
+    /// кандидат — `(0, 0)`, затем два радиальных прохода с шагом 512 и 32.
+    pub fn spawn_position(&self) -> Option<[i32; 3]> {
+        if self.spawn_target.is_empty() {
+            return None;
+        }
+        let mut best = self.spawn_fitness(0, 0);
+        // `radialSearch` вызывается дважды, и второй проход начинает от
+        // лучшей точки первого: `searchOrigin = this.result.location()`.
+        for (max_radius, step) in [(2048.0f32, 512.0f32), (512.0f32, 32.0f32)] {
+            let origin = (best.1, best.2);
+            let mut angle = 0.0f32;
+            let mut radius = step;
+            while radius <= max_radius {
+                let x = origin.0 + (angle.sin() as f64 * radius as f64) as i32;
+                let z = origin.1 + (angle.cos() as f64 * radius as f64) as i32;
+                let candidate = self.spawn_fitness(x, z);
+                if candidate < best {
+                    best = candidate;
+                }
+                angle += step / radius;
+                if angle as f64 > std::f64::consts::PI * 2.0 {
+                    angle = 0.0;
+                    radius += step;
+                }
+            }
+        }
+        Some([best.1, 0, best.2])
+    }
+
+    /// `NoiseSpawnFinder.getSpawnPositionAndFitness`: меньше — лучше.
+    /// Возвращает `(фитнес, x, z)`.
+    fn spawn_fitness(&self, x: i32, z: i32) -> (i64, i32, i32) {
+        let qx = (x >> 2) << 2;
+        let qz = (z >> 2) << 2;
+        let mut ctx = Ctx::default();
+        let mut min = i64::MAX;
+        for point in &self.spawn_target {
+            let mut fitness = 0i64;
+            for (name, lo, hi) in point {
+                let Some(&index) = self.climate_names.get(name) else {
+                    continue;
+                };
+                let value = biome::quantize(self.climate[index].value(&mut ctx, qx, 0, qz));
+                // `Parameter.distance`: только выход за диапазон.
+                let d = if value > *hi {
+                    value - hi
+                } else if value < *lo {
+                    lo - value
+                } else {
+                    0
+                };
+                fitness += d * d;
+            }
+            min = min.min(fitness);
+        }
+        let with_distance = min
+            .saturating_mul(2048 * 2048)
+            .saturating_add((x as i64) * (x as i64) + (z as i64) * (z as i64));
+        (with_distance, x, z)
+    }
+
+    /// `chunk_surface_level` по квартовой сетке 4×4: по одному значению на    /// клетку столбца, как интерполяция ванили.
     pub fn preliminary(&self, cx: i32, cz: i32) -> Vec<f32> {
         // Как `MaterialRuleContext.preliminarySurfaceVolume`: объём 16×1×16
         // с шагом 1 в y=0, значение на каждый блок столбца.
@@ -879,7 +1084,7 @@ impl Generator {
         if self.biomes.is_empty() {
             return None;
         }
-        let quarters = (self.height / 4) as i32;
+        let quarters = self.height / 4;
         // Шаг 4 блока — квартовая решётка ванили (`QuartPos.toBlock`).
         let v = Volume::new([4, quarters, 4], [cx * 16, self.min_y, cz * 16], [4, 4, 4]);
         let mut ctx = Ctx::default();
@@ -920,6 +1125,7 @@ impl Generator {
     /// клетка выбирается с «дрожанием» и может лежать в соседнем чанке.
     /// `own` — биомы этого чанка по [`Self::biomes`], `memo` — кэш соседних
     /// клеток на время одного чанка.
+    #[allow(clippy::too_many_arguments)]
     pub fn zoomed_biome(
         &self,
         cx: i32,
@@ -1073,7 +1279,7 @@ impl Generator {
         let Some(i) = biome::AXES.iter().position(|a| *a == axis) else {
             return 0.0;
         };
-        let quarters = (self.height / 4) as i32;
+        let quarters = self.height / 4;
         let v = Volume::new([4, quarters, 4], [cx * 16, self.min_y, cz * 16], [4, 4, 4]);
         let mut ctx = Ctx::default();
         let mut buf = vec![0f32; v.len()];
@@ -1127,17 +1333,26 @@ fn collect_vein_names(v: &Value, names: &mut Vec<String>) {
     }
 }
 
-/// Совпадает с файлом `material_rule/overworld` — берём его. Иначе правило
-/// из самих `noise_settings`.
+/// Имя правила поверхности из настроек. Ключ `surface_rule` — старый формат
+/// (оверворлд), в 26.3 файлы пишут `material_rule` (`minecraft:overworld`,
+/// `minecraft:nether`). Правило в самих настройках берём как есть.
 fn surface_choice(settings: &Value, rules: &HashMap<String, Value>) -> SurfaceChoice {
-    match &settings["surface_rule"] {
-        Value::String(id) => SurfaceChoice::Named(id.clone()),
+    let named = settings
+        .get("surface_rule")
+        .or_else(|| settings.get("material_rule"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    match named {
+        Value::String(id) => SurfaceChoice::Named(id),
         Value::Null => SurfaceChoice::Named("minecraft:overworld".into()),
         other => {
-            if rules.get("minecraft:overworld").is_some_and(|r| r == other) {
+            if rules
+                .get("minecraft:overworld")
+                .is_some_and(|r| r == &other)
+            {
                 SurfaceChoice::Named("minecraft:overworld".into())
             } else {
-                SurfaceChoice::Inline(other.clone())
+                SurfaceChoice::Inline(other)
             }
         }
     }

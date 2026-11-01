@@ -39,14 +39,60 @@ pub struct Live {
 }
 
 impl Live {
+    /// Отпечаток состояния: всё, что попадает в [`Self::render`].
+    ///
+    /// Кэш текста снимка сверяет отпечаток, а не счётчик изменений: счётчик
+    /// надо поднимать в каждом месте, где правится зеркало, и одна забытая
+    /// строчка молча отдала бы плагину устаревшее состояние. Отпечаток
+    /// считается по самим полям, поэтому промахнуться невозможно.
+    pub fn fingerprint(&self) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher};
+        self.health.to_bits().hash(&mut h);
+        self.food.hash(&mut h);
+        self.saturation.to_bits().hash(&mut h);
+        self.exhaustion.to_bits().hash(&mut h);
+        self.game_mode.hash(&mut h);
+        self.selected.hash(&mut h);
+        for v in self.pos {
+            v.to_bits().hash(&mut h);
+        }
+        self.yaw.to_bits().hash(&mut h);
+        self.pitch.to_bits().hash(&mut h);
+        self.xp.level.hash(&mut h);
+        self.xp.progress.to_bits().hash(&mut h);
+        self.xp.total.hash(&mut h);
+        // Слоты: `Option<Stack>` — сравнивается всё, что печатается в строку.
+        for s in &self.slots {
+            match s {
+                Some(s) => {
+                    s.item.hash(&mut h);
+                    s.count.hash(&mut h);
+                    s.damage.hash(&mut h);
+                    s.extra.hash(&mut h);
+                }
+                None => 0u8.hash(&mut h),
+            }
+        }
+        for e in &self.effects {
+            e.id.hash(&mut h);
+            e.amplifier.hash(&mut h);
+            e.duration.hash(&mut h);
+            e.particles.hash(&mut h);
+            e.ambient.hash(&mut h);
+            e.show_icon.hash(&mut h);
+        }
+        h.finish()
+    }
+
     /// Первая строка — `health food saturation exhaustion mode selected x y z yaw pitch
     /// уровень полоска всего_опыта`, затем
     /// [`BUKKIT_SLOTS`] строк `item count` (или `-`) в порядке Bukkit, затем эффекты
     /// строками `e имя усиление тики частицы фон значок` (0/1).
-    pub fn render(
-        &self,
-        item_name: impl Fn(i32) -> Option<String>,
-        effect_name: impl Fn(i32) -> Option<String>,
+    pub fn render<'a>(
+        &'a self,
+        item_name: impl Fn(i32) -> Option<&'a str>,
+        effect_name: impl Fn(i32) -> Option<&'a str>,
     ) -> String {
         let [x, y, z] = self.pos;
         let mut out = format!(
@@ -67,7 +113,7 @@ impl Live {
             out.push('\n');
             let stack = bukkit_to_window(i).and_then(|w| self.slots[w]);
             match stack.and_then(|s| item_name(s.item).map(|n| (n, s))) {
-                Some((name, s)) => out += &crate::stack_nbt::to_line(s, &name),
+                Some((name, s)) => out += &crate::stack_nbt::to_line(s, name),
                 None => out.push('-'),
             }
         }
@@ -492,11 +538,13 @@ mod tests {
         Control::parse_t("health 7.5", ids)
             .unwrap()
             .apply(&mut live);
-        let names = |id| match id {
-            2 => Some("minecraft:bread".to_owned()),
-            _ => None,
-        };
-        let text = live.render(names, |_| None);
+        let text = live.render(
+            |id| match id {
+                2 => Some("minecraft:bread"),
+                _ => None,
+            },
+            |_| None,
+        );
         // Эффекты: наложить в зеркало, снять все.
         Control::parse_t("effect minecraft:haste 1 200 0", ids)
             .unwrap()
@@ -514,11 +562,17 @@ mod tests {
             }]
         );
         assert!(
-            live.render(names, |_| Some("minecraft:haste".into()))
-                .ends_with(
-                    "
+            live.render(
+                |id| match id {
+                    2 => Some("minecraft:bread"),
+                    _ => None,
+                },
+                |_| Some("minecraft:haste")
+            )
+            .ends_with(
+                "
 e minecraft:haste 1 200 0 0 1"
-                )
+            )
         );
         Control::parse_t("uneffect *", ids)
             .unwrap()

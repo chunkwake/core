@@ -34,14 +34,10 @@ fn main() {
     let mut noise = chunkwake_worldgen::Generator::load_with_version(data, seed, None).unwrap();
     noise.bind_biomes(biome_ids.clone());
     let state = |n: &str| blocks.default_state(n).ok().map(|s| s as u32);
-    let workers = chunkwake_worldgen::pipeline::Overworld::new(
-        Arc::new(noise),
-        &state,
-        &biome_ids,
-    )
-    .unwrap()
-    .with_features(data, &blocks.states(), &state, &biome_ids)
-    .unwrap();
+    let workers = chunkwake_worldgen::pipeline::Overworld::new(Arc::new(noise), &state, &biome_ids)
+        .unwrap()
+        .with_features(data, &blocks.states(), &state, &biome_ids)
+        .unwrap();
 
     // Кольца от центра, как при входе игрока: ближние первыми.
     let mut rings: Vec<Vec<(i32, i32)>> = vec![Vec::new(); (radius + 1) as usize];

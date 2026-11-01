@@ -33,12 +33,11 @@ impl PlayPlan {
         let tick = {
             let ticks = self.ticks.lock().unwrap();
             let last_minute = ticks.window(chunkwake_metrics::tick::PERCENTILE_TICKS);
-            let win = |n: usize| ticks.window(n).map(|w| w.tps).unwrap_or(ticks.rate());
             TickReport {
                 tps_now: last_minute.map_or(ticks.rate(), |w| w.tps),
-                tps_1m: win(chunkwake_metrics::tick::PERCENTILE_TICKS),
-                tps_5m: win(chunkwake_metrics::tick::PERCENTILE_TICKS * 5),
-                tps_15m: win(chunkwake_metrics::tick::PERCENTILE_TICKS * 15),
+                tps_1m: ticks.tps_over(chunkwake_metrics::tick::PERCENTILE_TICKS),
+                tps_5m: ticks.tps_over(chunkwake_metrics::tick::PERCENTILE_TICKS * 5),
+                tps_15m: ticks.tps_over(chunkwake_metrics::tick::PERCENTILE_TICKS * 15),
                 mspt_now: ticks.last_work(),
                 mspt_1m: last_minute.map_or(0.0, |w| w.mspt_avg),
                 mspt_p50: last_minute.map_or(0.0, |w| w.mspt_p50),
@@ -101,16 +100,24 @@ impl PlayPlan {
             return false;
         }
         *slot = crate::play::DebugProfile::create(&self.debug_dir);
-        slot.is_some()
+        let started = slot.is_some();
+        drop(slot);
+        self.set_profiling(started);
+        started
     }
 
     /// Останавливает профиль и отдаёт путь к файлу.
     pub fn stop_debug_profile(&self) -> Option<std::path::PathBuf> {
-        self.debug_profile
+        let path = self
+            .debug_profile
             .lock()
             .unwrap()
             .take()
-            .map(|profile| profile.path)
+            .map(|profile| profile.path);
+        if path.is_some() {
+            self.set_profiling(false);
+        }
+        path
     }
 }
 

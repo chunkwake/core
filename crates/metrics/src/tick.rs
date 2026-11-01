@@ -204,15 +204,48 @@ impl TickStats {
         self.samples.back().map_or(0.0, |s| s.work)
     }
 
+    /// Средний TPS за окно `ticks` назад — без копий и сортировки.
+    ///
+    /// Для `/top` нужны только средние TPS за 1/5/15 минут, а `window()`
+    /// собирает срез и сортирует его ради перцентилей. Три лишние сортировки
+    /// по 6–18 тыс. `f64` раз в секунду шли под замком тика — здесь один
+    /// проход по кольцу.
+    pub fn tps_over(&self, ticks: usize) -> f64 {
+        let skip = self.samples.len().saturating_sub(ticks);
+        let mut sum = 0.0;
+        let mut n = 0usize;
+        for s in self.samples.iter().skip(skip) {
+            if s.gap > 0.0 {
+                sum += s.gap;
+                n += 1;
+            }
+        }
+        if n == 0 {
+            self.rate
+        } else {
+            1000.0 / (sum / n as f64)
+        }
+    }
+
     /// Снимок окна `ticks` назад; `None` — замеров нет.
     pub fn window(&self, ticks: usize) -> Option<WindowStats> {
         let skip = self.samples.len().saturating_sub(ticks);
-        let slice: Vec<&Sample> = self.samples.iter().skip(skip).collect();
-        if slice.is_empty() {
+        if skip == self.samples.len() {
             return None;
         }
-        let mut work: Vec<f64> = slice.iter().map(|s| s.work).collect();
-        let gaps: Vec<f64> = slice.iter().map(|s| s.gap).filter(|g| *g > 0.0).collect();
+        // Один буфер на `work` и один проход: раньше здесь были `Vec<&Sample>`,
+        // `Vec<f64>` для `work` и ещё один для `gaps`.
+        let n = self.samples.len() - skip;
+        let mut work: Vec<f64> = Vec::with_capacity(n);
+        let mut gap_sum = 0.0;
+        let mut gap_n = 0usize;
+        for s in self.samples.iter().skip(skip) {
+            work.push(s.work);
+            if s.gap > 0.0 {
+                gap_sum += s.gap;
+                gap_n += 1;
+            }
+        }
         let avg = |values: &[f64]| {
             if values.is_empty() {
                 0.0
@@ -220,14 +253,14 @@ impl TickStats {
                 values.iter().sum::<f64>() / values.len() as f64
             }
         };
-        let tps = if gaps.is_empty() {
+        let tps = if gap_n == 0 {
             self.rate
         } else {
-            1000.0 / avg(&gaps)
+            1000.0 / (gap_sum / gap_n as f64)
         };
         work.sort_by(f64::total_cmp);
         Some(WindowStats {
-            samples: slice.len(),
+            samples: n,
             mspt_avg: avg(&work),
             mspt_p50: percentile(&work, 50.0),
             mspt_p95: percentile(&work, 95.0),

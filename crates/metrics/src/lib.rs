@@ -11,6 +11,7 @@
 pub mod http;
 pub mod live;
 pub mod proc;
+pub mod profile;
 pub mod render;
 pub mod snapshot;
 pub mod tick;
@@ -19,5 +20,9 @@ pub mod web;
 pub use live::{HistoryPoint, Live};
 pub use proc::ProcessSampler;
 pub use proc::{CoreLoad, ProcStats};
+pub use profile::{
+    GROUP_COUNT, GROUPS, PHASE_COUNT, PHASE_LABELS, PHASES, PhaseGroup, ProfileBucket, Stopwatch,
+    TickProfile,
+};
 pub use snapshot::{Limits, NetCounters, Snapshot, TickReport, WorldCounters};
 pub use tick::TickStats;

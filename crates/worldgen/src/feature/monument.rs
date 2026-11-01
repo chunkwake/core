@@ -325,9 +325,9 @@ pub fn build(rng: &mut Legacy, sx: i32, sz: i32) -> Vec<Piece> {
     }
     let off = world_at(facing, shell_min, shell_max, 9, 0, 22);
     for piece in pieces.iter_mut().skip(1) {
-        for axis in 0..3 {
-            piece.min[axis] += off[axis];
-            piece.max[axis] += off[axis];
+        for (axis, o) in off.iter().enumerate() {
+            piece.min[axis] += o;
+            piece.max[axis] += o;
         }
     }
     let wing_roll = rng.next_int();
@@ -722,6 +722,7 @@ impl<'a> Draw<'a> {
         self.level.get(pos[0], pos[1], pos[2])
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn cuboid(&mut self, x0: i32, y0: i32, z0: i32, x1: i32, y1: i32, z1: i32, state: u32) {
         if x0 > x1 || y0 > y1 || z0 > z1 {
             return;
@@ -760,6 +761,7 @@ impl<'a> Draw<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fill_only(&mut self, x0: i32, y0: i32, z0: i32, x1: i32, y1: i32, z1: i32, state: u32) {
         if x0 > x1 || y0 > y1 || z0 > z1 {
             return;

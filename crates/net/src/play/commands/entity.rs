@@ -211,9 +211,10 @@ fn read_teleport(words: &[&str]) -> Result<TeleportPlan, &'static str> {
 }
 
 /// Три координаты и необязательные `facing` или углы.
-fn read_location(
-    words: &[&str],
-) -> Result<([args::Coord; 3], Facing, Option<(String, String)>), &'static str> {
+/// Разобранная цель: координаты, поворот и (для `facing entity`) имя.
+type LocationArg = ([args::Coord; 3], Facing, Option<(String, String)>);
+
+fn read_location(words: &[&str]) -> Result<LocationArg, &'static str> {
     const USAGE: &str = "/tp <x> <y> <z> [<yaw> <pitch>|facing <pos>|facing entity <target>]";
     if words.len() < 3 {
         return Err(USAGE);
@@ -610,8 +611,7 @@ pub(super) fn xp(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         _ => return usage("/xp add|set <targets> <amount> [points|levels]"),
     };
     for target in &targets {
-        ctx.plan
-            .push_control(target.uuid, Control::Xp(change.clone()));
+        ctx.plan.push_control(target.uuid, Control::Xp(change));
     }
     let unit = if levels { "levels" } else { "points" };
     let kind = if targets.len() == 1 {

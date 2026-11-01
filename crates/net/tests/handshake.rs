@@ -157,9 +157,11 @@ async fn banned_name_is_rejected_at_login() {
         enable_status: true,
         session_server: String::new(),
         configuration: None,
-        admit: Some(chunkwake_net::Admit(std::sync::Arc::new(|name, _uuid, _addr| {
-            (name == "Steve").then(|| "You are banned from this server.".to_owned())
-        }))),
+        admit: Some(chunkwake_net::Admit(std::sync::Arc::new(
+            |name, _uuid, _addr| {
+                (name == "Steve").then(|| "You are banned from this server.".to_owned())
+            },
+        ))),
     });
     tokio::spawn(server.serve(listener, |_, _| {}));
     let mut c = connect(addr, NextState::Login).await;

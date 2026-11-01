@@ -66,6 +66,51 @@ pub fn render(snapshot: &Snapshot, section: Section, color: bool) -> String {
     out
 }
 
+/// Профиль тика для терминала: понятные группы, от тяжёлой к лёгкой.
+///
+/// Показываем группы, а не 18 внутренних фаз: «хопперы и механизмы»
+/// объясняет админу, что его тормозит, а «отложенные правки плагинов» —
+/// нет. Точные фазы остаются в `/api/profile` и в подробном режиме дашборда.
+///
+/// Профиль приходит отдельно от снимка (его снимает тик, а не сэмплер),
+/// поэтому функция принимает уже готовую последнюю секунду.
+pub fn render_profile(bucket: &crate::profile::ProfileBucket, color: bool) -> String {
+    let paint = Paint { enabled: color };
+    let mut out = String::with_capacity(1024);
+    heading(&mut out, &paint, "PROFILE");
+    let total = bucket.total_per_tick();
+    let mut shown = 0;
+    for group in bucket.groups_by_cost() {
+        let ms = bucket.group_per_tick(group);
+        if ms <= 0.005 {
+            continue;
+        }
+        let entry = &crate::profile::GROUPS[group];
+        let share = if total > 0.0 { ms / total * 100.0 } else { 0.0 };
+        let _ = writeln!(
+            out,
+            "  {:<22} {:>6.2} ms/тик {:>4.0}%  {}",
+            entry.label,
+            ms,
+            share,
+            paint.named(
+                load_color(f64::from(share)),
+                &bar(f64::from(share), 100.0, 18)
+            )
+        );
+        shown += 1;
+    }
+    if shown == 0 {
+        let _ = writeln!(out, "  тик почти пустой: подсистемы ничего не делают");
+    }
+    let _ = writeln!(
+        out,
+        "  {:<22} {:>6.2} ms/тик   ({} тиков в секунде)",
+        "итого", total, bucket.ticks
+    );
+    out
+}
+
 fn heading(out: &mut String, paint: &Paint, name: &str) {
     let _ = writeln!(out, "{}", paint.wrap("1;36", &format!("── {name} ")));
 }
@@ -268,10 +313,12 @@ mod tests {
     use super::*;
 
     fn sample() -> Snapshot {
-        let mut s = Snapshot::default();
-        s.motd = "Test".into();
-        s.version = "26.3".into();
-        s.uptime = 3_725;
+        let mut s = Snapshot {
+            motd: "Test".into(),
+            version: "26.3".into(),
+            uptime: 3_725,
+            ..Snapshot::default()
+        };
         s.tick.tps_now = 20.0;
         s.tick.tps_1m = 19.9;
         s.tick.tps_5m = 19.8;
@@ -344,5 +391,42 @@ mod tests {
         assert!(line.contains("1m"));
         assert!(line.contains("5m"));
         assert!(line.contains("15m"));
+    }
+
+    /// Профиль в терминале: группы идут от тяжёлой к лёгкой, время — на тик.
+    #[test]
+    fn profile_lists_heaviest_groups_first() {
+        use crate::profile::{PH_CAMPFIRES, PH_MOBS, PH_ORBS, ProfileBucket};
+        let mut bucket = ProfileBucket {
+            at: 1,
+            ticks: 10,
+            ..ProfileBucket::default()
+        };
+        bucket.total[PH_MOBS] = 100.0; // 10 мс/тик — мобы
+        bucket.total[PH_ORBS] = 40.0; // 4 мс/тик — предметы и снаряды
+        bucket.total[PH_CAMPFIRES] = 10.0; // 1 мс/тик — механизмы
+        let text = render_profile(&bucket, false);
+        assert!(text.contains("PROFILE"));
+        assert!(text.contains("10.00"), "{text}");
+        // Человеческие названия групп, а не внутренние фазы.
+        let mobs = text.find("Мобы и животные").expect("группа мобов");
+        let items = text.find("Предметы и снаряды").expect("группа предметов");
+        let machines = text.find("Хопперы и механизмы").expect("группа механизмов");
+        assert!(mobs < items, "мобы дороже предметов");
+        assert!(items < machines, "предметы дороже механизмов");
+    }
+
+    /// Пустой тик не печатает строк с нулями: это шум, а не данные.
+    #[test]
+    fn empty_profile_says_so() {
+        use crate::profile::ProfileBucket;
+        let bucket = ProfileBucket {
+            at: 1,
+            ticks: 20,
+            ..ProfileBucket::default()
+        };
+        let text = render_profile(&bucket, false);
+        assert!(text.contains("тик почти пустой"), "{text}");
+        assert!(text.contains("итого"));
     }
 }

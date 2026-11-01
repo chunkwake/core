@@ -35,6 +35,24 @@ pub(super) fn of_block(name: &str) -> Option<&'static str> {
     })
 }
 
+/// Бит группы [`chunkwake_world::poi_bits`] по имени блока.
+///
+/// Скан столбца спрашивает это у каждого из 98 тыс. блоков, поэтому группа
+/// считается один раз на имя при сборке мира, а не на блок.
+pub fn group_of(name: &str) -> u16 {
+    use chunkwake_world::poi_bits as b;
+    match of_block(name) {
+        None => 0,
+        Some(_) if name.ends_with("_bed") => b::HOME,
+        Some("minecraft:bell") => b::MEETING,
+        Some("minecraft:bee_nest" | "minecraft:beehive") => b::BEEHIVE,
+        Some("minecraft:nether_portal" | "minecraft:lodestone" | "minecraft:lightning_rod") => {
+            b::OTHER
+        }
+        Some(_) => b::JOB,
+    }
+}
+
 /// Теги `point_of_interest_type`. Каталога нет — пустая карта, мир всё равно встаёт.
 pub fn load_tags(data_dir: &Path) -> HashMap<String, HashSet<String>> {
     let dir = data_dir.join("data/minecraft/tags/point_of_interest_type");

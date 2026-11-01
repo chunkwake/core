@@ -8,6 +8,7 @@
 
 use super::{Bits, Fluid, Heightmap, Level, Palette, Predicate, Worldgen};
 use crate::random::Legacy;
+use crate::templates::Mirror;
 use chunkwake_world::nbt::{self, Compound, Tag};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -42,7 +43,8 @@ impl Rot {
 struct Piece {
     pos: [i32; 3],
     state: u32,
-    nbt: bool,
+    /// Блочная сущность из шаблона (`setBlockEntity` ставит её как есть).
+    nbt: Option<chunkwake_world::nbt::Compound>,
     /// `mode=DATA` у структурного блока. Сортировку куска не меняет.
     marker: Option<String>,
 }
@@ -119,10 +121,18 @@ pub(crate) enum Processor {
     Protected(Arc<Vec<bool>>),
     /// `rule`: первое совпадение заменяет состояние. `append_loot` состояние не меняет.
     Rule(Vec<ProcRule>),
+    /// `block_age`: разрушение камня, ступеней, плит, стен и обсидиана.
+    Age(f32),
+    /// `lava_submerged_block`: неполный блок в лаве остаётся лавой.
+    LavaSubmerged,
+    /// `blackstone_replace`: камень и его производные меняются на чернокамень.
+    Blackstone,
+    /// `block_ignore`: структурные блоки (и воздух, если пещеры нет) не ставятся.
+    IgnoreStructureBlock { air_pocket: f32 },
 }
 
 #[derive(Clone, Debug)]
-enum RuleInput {
+pub(crate) enum RuleInput {
     Block(u32),
     State(u32),
     Tag(Arc<Vec<bool>>),
@@ -134,16 +144,18 @@ enum RuleInput {
 }
 
 #[derive(Clone, Debug)]
-enum RuleAt {
+pub(crate) enum RuleAt {
     Pred(Predicate),
     Block(u32),
+    /// `always_true`.
+    Always,
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct ProcRule {
-    input: RuleInput,
-    at: RuleAt,
-    output: u32,
+    pub(crate) input: RuleInput,
+    pub(crate) at: RuleAt,
+    pub(crate) output: u32,
 }
 
 /// Включающие границы, как `BoundingBox.isInside`.
@@ -435,7 +447,10 @@ pub(crate) fn load_template(
             raw.push(Piece {
                 pos,
                 state,
-                nbt: block.get("nbt").is_some(),
+                nbt: block
+                    .get("nbt")
+                    .and_then(chunkwake_world::nbt::Tag::as_compound)
+                    .cloned(),
                 marker: data_marker(block),
             });
         }
@@ -489,7 +504,8 @@ pub(crate) fn place_public(
     };
     let air = pal.blocks.get("minecraft:air").map(|b| b.0);
     let mut out = Vec::new();
-    for pieces in &template.palettes {
+    // `break` в конце и раньше: цикл по палитрам по сути однократный.
+    if let Some(pieces) = template.palettes.first() {
         for piece in pieces {
             let [x, y, z] = piece.pos;
             // `StructureTemplate.transform`: зеркало, затем поворот вокруг нуля.
@@ -514,11 +530,9 @@ pub(crate) fn place_public(
             out.push(Placed {
                 pos: [origin[0] + x, origin[1] + y, origin[2] + z],
                 state,
-                has_nbt: piece.nbt,
+                has_nbt: piece.nbt.is_some(),
             });
         }
-        // Ванила берёт одну палитру по позиции; для команды первая — верная.
-        break;
     }
     out
 }
@@ -711,7 +725,7 @@ fn sort_pieces(palette: &Palette, raw: Vec<Piece>) -> Vec<Piece> {
     let mut other = Vec::new();
     let mut with_nbt = Vec::new();
     for piece in raw {
-        if piece.nbt {
+        if piece.nbt.is_some() {
             with_nbt.push(piece);
         } else if palette.is_full_cube(piece.state) {
             full.push(piece);
@@ -734,10 +748,10 @@ fn sort_pieces(palette: &Palette, raw: Vec<Piece>) -> Vec<Piece> {
 }
 
 fn int3(tag: &Tag) -> Option<[i32; 3]> {
-    if let Some(values) = tag.as_int_array() {
-        if values.len() >= 3 {
-            return Some([values[0], values[1], values[2]]);
-        }
+    if let Some(values) = tag.as_int_array()
+        && values.len() >= 3
+    {
+        return Some([values[0], values[1], values[2]]);
     }
     let list = tag.as_list()?;
     if list.len() < 3 {
@@ -836,6 +850,7 @@ pub(crate) fn pivoted_bounds(
 /// Шаблон иглу или корабля. `ignore_air` — не затирать мир воздухом.
 /// `waterlog_blocks` — `APPLY_WATERLOGGING`. Маркеры `DATA` возвращаются
 /// все, в том числе вне окна: сундук внутри окна крутит `nextLong`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn place_anchored(
     pal: &Palette,
     level: &mut dyn Level,
@@ -909,8 +924,11 @@ pub(crate) fn place_anchored(
         if fill_later {
             to_fill.push(world);
         }
-        if piece.nbt && container(pal, piece.state) {
-            r.next_long();
+        // `placeInWorld`: NBT шаблона. У иглу и корабля сундук-мишень лова
+        // помечен `structure_block`, а NBT-сундук здесь — обычный контейнер
+        // с готовыми `Items`; `nextLong` при этом всё равно бросается.
+        if let Some(nbt) = &piece.nbt {
+            place_template_nbt(pal, level, world, state, nbt, r);
         }
     }
     if waterlog_blocks {
@@ -923,9 +941,398 @@ pub(crate) fn place_anchored(
     markers
 }
 
+/// `StructureTemplate.transform`: зеркало, затем поворот вокруг опоры.
+pub(crate) fn transform_mirror(
+    mirror: Mirror,
+    rot: Rot,
+    x: i32,
+    y: i32,
+    z: i32,
+    pivot: [i32; 3],
+) -> [i32; 3] {
+    let (x, z) = match mirror {
+        Mirror::None => (x, z),
+        Mirror::LeftRight => (x, -z),
+        Mirror::FrontBack => (-x, z),
+    };
+    transform_pivot(rot, x, y, z, pivot)
+}
+
+/// `StructureTemplate.getBoundingBox` для шаблона с зеркалом и поворотом.
+pub(crate) fn mirrored_bounds(
+    origin: [i32; 3],
+    mirror: Mirror,
+    rot: Rot,
+    size: [i32; 3],
+) -> ([i32; 3], [i32; 3]) {
+    let mut min = [0; 3];
+    let mut max = [0; 3];
+    let a = transform_mirror(mirror, rot, 0, 0, 0, [0, 0, 0]);
+    let b = transform_mirror(
+        mirror,
+        rot,
+        size[0] - 1,
+        size[1] - 1,
+        size[2] - 1,
+        [0, 0, 0],
+    );
+    for i in 0..3 {
+        let (lo, hi) = (a[i].min(b[i]), a[i].max(b[i]));
+        min[i] = origin[i] + lo;
+        max[i] = origin[i] + hi;
+    }
+    (min, max)
+}
+
+/// `getZeroPositionWithTransform(zero, mirror, rotation, sizeX, sizeZ)`.
+pub(crate) fn zero_with_transform(
+    zero: [i32; 3],
+    mirror: Mirror,
+    rot: Rot,
+    size_x: i32,
+    size_z: i32,
+) -> [i32; 3] {
+    let size_x = size_x - 1;
+    let size_z = size_z - 1;
+    let dx = if mirror == Mirror::FrontBack {
+        size_x
+    } else {
+        0
+    };
+    let dz = if mirror == Mirror::LeftRight {
+        size_z
+    } else {
+        0
+    };
+    let (ox, oz) = match rot {
+        Rot::None => (dx, dz),
+        Rot::Cw90 => (size_z - dz, dx),
+        Rot::Cw180 => (size_x - dx, size_z - dz),
+        Rot::Ccw90 => (dz, size_x - dx),
+    };
+    [zero[0] + ox, zero[1], zero[2] + oz]
+}
+
+/// Куски океанской руины: `block_rot`, `block_ignore` и подозрительный блок.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn place_ruin(
+    pal: &Palette,
+    level: &mut dyn Level,
+    template: &Template,
+    origin: [i32; 3],
+    rot: Rot,
+    integrity: f32,
+    warm: bool,
+    window: Bounds,
+    world_seed: i64,
+) -> Vec<([i32; 3], Option<String>)> {
+    if template.palettes.is_empty() {
+        return Vec::new();
+    }
+    let index = palette_index(template.palettes.len(), origin);
+    let Some(blocks) = template.palettes.get(index) else {
+        return Vec::new();
+    };
+    let structure_block = pal.blocks.get("minecraft:structure_block").map(|b| b.0);
+    // `CappedProcessor.finalizeProcessing`: `RandomSource.createThreadLocalInstance(seed)`
+    // — это `SingleThreadedRandomSource`, то есть `Legacy`, а не Xoroshiro.
+    // `forkPositional` у него даёт фабрику от одного `nextLong`.
+    let mut cap = {
+        let mut base = Legacy::new(world_seed);
+        let positional = base.next_long();
+        Legacy::new(palette_seed(origin[0], origin[1], origin[2]) ^ positional)
+    };
+    let from = if warm {
+        pal.blocks["minecraft:sand"].0
+    } else {
+        pal.blocks["minecraft:gravel"].0
+    };
+    let to = if warm {
+        pal.defaults["minecraft:suspicious_sand"]
+    } else {
+        pal.defaults["minecraft:suspicious_gravel"]
+    };
+
+    // Первый проход: `block_rot` и `block_ignore`. `CappedProcessor`
+    // объявляет `evaluatesEntirePieceState`, поэтому `processBlockInfos`
+    // прогоняет процессоры по всему куску, а не только по текущему чанку:
+    // от этого зависят индексы в `finalizeProcessing`.
+    struct Candidate {
+        world: [i32; 3],
+        state: u32,
+    }
+    // `BlockIgnoreProcessor` в `processBlockInfos` возвращает `null` для
+    // структурных блоков: в список обработки они не попадают, иначе
+    // разъехались бы индексы `finalizeProcessing`.
+    let mut markers: Vec<([i32; 3], String)> = Vec::new();
+    let mut kept: Vec<Candidate> = Vec::new();
+    let mut placed = Vec::new();
+    for piece in blocks {
+        let shifted = transform(rot, piece.pos[0], piece.pos[1], piece.pos[2]);
+        let world = [
+            origin[0] + shifted[0],
+            origin[1] + shifted[1],
+            origin[2] + shifted[2],
+        ];
+        let block = pal.block_index(piece.state);
+        if structure_block.is_some_and(|id| block == Some(id)) {
+            if let Some(meta) = &piece.marker {
+                markers.push((world, meta.clone()));
+            }
+            continue;
+        }
+        // `BlockIgnoreProcessor.STRUCTURE_AND_AIR`.
+        if pal.is_air(piece.state) {
+            continue;
+        }
+        // `BlockRotProcessor`: свой `Legacy` от мировой позиции.
+        let roll = Legacy::new(palette_seed(world[0], world[1], world[2])).next_float();
+        if roll > integrity {
+            continue;
+        }
+        kept.push(Candidate {
+            world,
+            state: piece.state,
+        });
+    }
+
+    // `CappedProcessor.finalizeProcessing`: перемешать индексы и заменить до пяти.
+    let mut order: Vec<usize> = (0..kept.len()).collect();
+    shuffle(&mut order, &mut cap);
+    let table = if warm {
+        "minecraft:archaeology/ocean_ruin_warm"
+    } else {
+        "minecraft:archaeology/ocean_ruin_cold"
+    };
+    let mut loot: Vec<Option<i64>> = vec![None; kept.len()];
+    let mut replaced = 0;
+    for &i in &order {
+        if replaced >= 5 {
+            break;
+        }
+        if pal.block_index(kept[i].state) != Some(from) {
+            continue;
+        }
+        kept[i].state = to;
+        // `AppendLoot.apply`: `LootTable` плюс `nextLong` от `RuleProcessor`,
+        // у которого свой `RandomSource.create(Mth.getSeed(pos))` на блок.
+        let mut rule_rng = Legacy::new(palette_seed(
+            kept[i].world[0],
+            kept[i].world[1],
+            kept[i].world[2],
+        ));
+        loot[i] = Some(rule_rng.next_long());
+        replaced += 1;
+    }
+
+    let mut out = Vec::new();
+    for (i, item) in kept.into_iter().enumerate() {
+        let inside = window.contains(item.world);
+        if !inside || !level.can_write(item.world[0], item.world[2]) {
+            continue;
+        }
+        let state = rotate_state(pal, item.state, rot);
+        level.set(item.world[0], item.world[1], item.world[2], state);
+        placed.push(item.world);
+        if let Some(seed) = loot[i] {
+            let mut nbt = chunkwake_world::nbt::Compound::new();
+            nbt.insert(
+                "LootTable".into(),
+                chunkwake_world::nbt::Tag::String(table.to_owned()),
+            );
+            nbt.insert(
+                "LootTableSeed".into(),
+                chunkwake_world::nbt::Tag::Long(seed),
+            );
+            level.set_block_entity(
+                item.world[0],
+                item.world[1],
+                item.world[2],
+                "minecraft:brushable_block",
+                nbt,
+            );
+        }
+    }
+    // Маркеры куска идут в `handleDataMarker`, а не в блоки.
+    for (world, meta) in markers {
+        if window.contains(world) {
+            out.push((world, Some(meta)));
+        }
+    }
+    settle_stairs(pal, level, &placed);
+    settle_fences(pal, level, &placed);
+    out
+}
+
+/// `StructureTemplate.placeInWorld` с зеркалом и процессорами.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn place_with(
+    pal: &Palette,
+    level: &mut dyn Level,
+    template: &Template,
+    origin: [i32; 3],
+    pivot: [i32; 3],
+    mirror: Mirror,
+    rot: Rot,
+    processors: &[Processor],
+    r: &mut Worldgen,
+    window: Bounds,
+) {
+    if template.palettes.is_empty() {
+        return;
+    }
+    let index = palette_index(template.palettes.len(), origin);
+    let Some(blocks) = template.palettes.get(index) else {
+        return;
+    };
+    let mut placed = Vec::new();
+    for piece in blocks {
+        let shifted =
+            transform_mirror(mirror, rot, piece.pos[0], piece.pos[1], piece.pos[2], pivot);
+        let world = [
+            origin[0] + shifted[0],
+            origin[1] + shifted[1],
+            origin[2] + shifted[2],
+        ];
+        if !window.contains(world) || !level.can_write(world[0], world[2]) {
+            continue;
+        }
+        let mut state = Some(piece.state);
+        for processor in processors {
+            let Some(current) = state else { break };
+            // Процессоры видят состояние до зеркала и поворота.
+            state = processor.apply(pal, level, current, world, r, true);
+        }
+        let Some(state) = state else { continue };
+        let state = mirror_state(pal, state, mirror, rot);
+        if skipped(pal, state) || !level.can_write(world[0], world[2]) {
+            continue;
+        }
+        // LiquidSettings.APPLY_WATERLOGGING: вода мира заливает проходимые блоки.
+        level.set(
+            world[0],
+            world[1],
+            world[2],
+            waterlog(pal, level, world, state),
+        );
+        placed.push(world);
+        if let Some(block) = pal.block_index(state)
+            && pal
+                .blocks
+                .iter()
+                .any(|(name, (id, _))| *id == block && name.ends_with("_wall"))
+        {
+            level.mark_shape(world[0], world[1], world[2]);
+        }
+        // `placeInWorld`: NBT шаблона. У руин портала таблица приходит из
+        // шаблона, а семя — общий `random.nextLong()` фичи.
+        if let Some(nbt) = &piece.nbt {
+            place_template_nbt(pal, level, world, state, nbt, r);
+        }
+    }
+    settle_stairs(pal, level, &placed);
+    settle_fences(pal, level, &placed);
+}
+
+/// `getBoundingBox(position, rotation, pivot, mirror, size)`.
+pub(crate) fn mirrored_bounds_pivot(
+    origin: [i32; 3],
+    mirror: Mirror,
+    rot: Rot,
+    size: [i32; 3],
+    pivot: [i32; 3],
+) -> ([i32; 3], [i32; 3]) {
+    let a = transform_mirror(mirror, rot, 0, 0, 0, pivot);
+    let b = transform_mirror(mirror, rot, size[0] - 1, size[1] - 1, size[2] - 1, pivot);
+    let mut min = [0; 3];
+    let mut max = [0; 3];
+    for i in 0..3 {
+        min[i] = origin[i] + a[i].min(b[i]);
+        max[i] = origin[i] + a[i].max(b[i]);
+    }
+    (min, max)
+}
+
+/// `StructureTemplate.placeInWorld` без процессоров, но с зеркалом.
+///
+/// `ignore_air` и `waterlog` — как у `BlockIgnoreProcessor.STRUCTURE_BLOCK`:
+/// структурные блоки не ставятся, вода в шаблоне заменяет блок мира.
+/// Возвращает маркеры (`mode=DATA`) и точки, где был сундук из шаблона:
+/// ванила съедает `nextLong` лута на каждой такой клетке.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn place_mirrored(
+    pal: &Palette,
+    level: &mut dyn Level,
+    template: &Template,
+    origin: [i32; 3],
+    mirror: Mirror,
+    rot: Rot,
+    window: Bounds,
+    r: &mut Worldgen,
+) -> Vec<([i32; 3], Option<String>)> {
+    let mut out = Vec::new();
+    if template.palettes.is_empty() {
+        return out;
+    }
+    let index = palette_index(template.palettes.len(), origin);
+    let Some(blocks) = template.palettes.get(index) else {
+        return out;
+    };
+    let structure_block = pal.blocks.get("minecraft:structure_block").map(|b| b.0);
+    let mut placed = Vec::new();
+    for piece in blocks {
+        let shifted = transform_mirror(
+            mirror,
+            rot,
+            piece.pos[0],
+            piece.pos[1],
+            piece.pos[2],
+            [0, 0, 0],
+        );
+        let world = [
+            origin[0] + shifted[0],
+            origin[1] + shifted[1],
+            origin[2] + shifted[2],
+        ];
+        let block = pal.block_index(piece.state);
+        if structure_block.is_some_and(|id| block == Some(id)) {
+            if let Some(meta) = &piece.marker {
+                out.push((world, Some(meta.clone())));
+            }
+            continue;
+        }
+        if !window.contains(world) || !level.can_write(world[0], world[2]) {
+            continue;
+        }
+        if skipped(pal, piece.state) {
+            continue;
+        }
+        let state = mirror_state(pal, piece.state, mirror, rot);
+        level.set(world[0], world[1], world[2], state);
+        placed.push(world);
+        // `WallBlock` пересобирает стороны в пост-обработке чанка.
+        if let Some(block) = pal.block_index(state)
+            && pal
+                .blocks
+                .iter()
+                .any(|(name, (id, _))| *id == block && name.ends_with("_wall"))
+        {
+            level.mark_shape(world[0], world[1], world[2]);
+        }
+        if let Some(nbt) = &piece.nbt
+            && place_template_nbt(pal, level, world, state, nbt, r)
+        {
+            // Сундук-маркер `Chest*` уже поставлен; блок-сущность пишется сюда.
+            out.push((world, None));
+        }
+    }
+    settle_stairs(pal, level, &placed);
+    settle_fences(pal, level, &placed);
+    out
+}
+
 /// Соседи `placeInWorld`: вверх, затем север, восток, юг, запад. Вниз не смотрит.
 const WATER_DONORS: [[i32; 3]; 5] = [[0, 1, 0], [0, 0, -1], [1, 0, 0], [0, 0, 1], [-1, 0, 0]];
-
 /// Доливает источник с соседа в блоки, которые умеют быть затопленными.
 fn spread_water(
     pal: &Palette,
@@ -1213,15 +1620,155 @@ fn data_marker(block: &Compound) -> Option<String> {
     )
 }
 
-fn container(pal: &Palette, state: u32) -> bool {
-    let block = pal.block_index(state);
-    [
-        "minecraft:chest",
-        "minecraft:trapped_chest",
-        "minecraft:barrel",
-    ]
-    .into_iter()
-    .any(|name| pal.blocks.get(name).is_some_and(|b| block == Some(b.0)))
+/// `StructureTemplate.placeInWorld`: у блока с NBT ванила ставит `BARRIER`,
+/// затем `loadWithComponents`, а `RandomizableContainer` получает
+/// `LootTableSeed` из `random.nextLong()`. Готовые `Items` шаблона
+/// переносятся как есть.
+pub(crate) fn set_template_nbt(
+    level: &mut dyn Level,
+    world: [i32; 3],
+    state: u32,
+    nbt: &chunkwake_world::nbt::Compound,
+    seed: Option<i64>,
+    id: &str,
+) {
+    let _ = state;
+    let mut nbt = nbt.clone();
+    // `id` и координаты Anvil дописывает сам, они повторяются.
+    nbt.remove("id");
+    // `RandomizableContainerBlockEntity.trySaveLootTable`: семя пишется
+    // только вместе с таблицей, иначе его нет.
+    if let Some(seed) = seed {
+        if nbt.contains_key("LootTable") {
+            nbt.insert(
+                "LootTableSeed".into(),
+                chunkwake_world::nbt::Tag::Long(seed),
+            );
+        }
+    } else {
+        nbt.remove("LootTableSeed");
+    }
+    level.set_block_entity(world[0], world[1], world[2], id, nbt);
+}
+
+/// Постановка блока шаблона, у которого есть NBT: контейнеры получают
+/// `LootTableSeed` из генератора фичи, прочие (`campfire`, `trial_spawner`,
+/// вывески) — как есть. Возвращает `true`, если генератор сдвинулся.
+pub(crate) fn place_template_nbt(
+    pal: &Palette,
+    level: &mut dyn Level,
+    world: [i32; 3],
+    state: u32,
+    nbt: &chunkwake_world::nbt::Compound,
+    r: &mut Worldgen,
+) -> bool {
+    let Some(name) = pal.block_name(state) else {
+        return false;
+    };
+    let Some(id) = entity_id(name) else {
+        return false;
+    };
+    // `placeInWorld`: `nextLong` бросается только у `RandomizableContainer`.
+    let seed = randomizable(name).map(|_| r.next_long());
+    set_template_nbt(level, world, state, nbt, seed, id);
+    seed.is_some()
+}
+
+/// `RandomizableContainer.setLootTable(table, random.nextLong())`: ванила
+/// пишет в сундук пару `LootTable` + `LootTableSeed`, а не готовые предметы.
+/// Содержимое считается при первом открытии тем же сидом.
+pub(crate) fn set_loot(level: &mut dyn Level, world: [i32; 3], table: &str, seed: i64) {
+    let mut nbt = chunkwake_world::nbt::Compound::new();
+    nbt.insert(
+        "LootTable".into(),
+        chunkwake_world::nbt::Tag::String(table.to_owned()),
+    );
+    nbt.insert(
+        "LootTableSeed".into(),
+        chunkwake_world::nbt::Tag::Long(seed),
+    );
+    level.set_block_entity(world[0], world[1], world[2], "minecraft:chest", nbt);
+}
+
+/// `RandomizableContainer` — единственные блоки, которым `placeInWorld`
+/// дописывает `LootTableSeed`. Список сверен с классами 26.3:
+/// `ChestBlockEntity` (сундуки, включая медные — у них тип `CHEST`),
+/// `BarrelBlockEntity`, `DispenserBlockEntity`, `HopperBlockEntity`,
+/// `CrafterBlockEntity`, `ShulkerBoxBlockEntity`, `DecoratedPotBlockEntity`.
+/// Печь, коптильня, плавильня, варочная стойка и костёр — контейнеры, но не
+/// `RandomizableContainer`: семя им не бросается.
+fn randomizable(name: &str) -> Option<&'static str> {
+    if name == "minecraft:chest"
+        || name == "minecraft:trapped_chest"
+        || (name.starts_with("minecraft:") && name.ends_with("_chest") && name.contains("copper"))
+    {
+        return Some("minecraft:chest");
+    }
+    Some(match name {
+        "minecraft:barrel" => "minecraft:barrel",
+        "minecraft:dispenser" => "minecraft:dispenser",
+        "minecraft:dropper" => "minecraft:dropper",
+        "minecraft:hopper" => "minecraft:hopper",
+        "minecraft:crafter" => "minecraft:crafter",
+        "minecraft:decorated_pot" => "minecraft:decorated_pot",
+        _ if name.ends_with("_shulker_box") || name == "minecraft:shulker_box" => {
+            "minecraft:shulker_box"
+        }
+        _ => return None,
+    })
+}
+
+/// Тип блок-сущности по имени блока (`Block.getBlockEntityType`) для блоков,
+/// что встречаются в шаблонах структур. `None` — блок-сущности нет.
+fn entity_id(name: &str) -> Option<&'static str> {
+    if let Some(id) = randomizable(name) {
+        return Some(id);
+    }
+    Some(match name {
+        "minecraft:campfire" | "minecraft:soul_campfire" => "minecraft:campfire",
+        "minecraft:bell" => "minecraft:bell",
+        "minecraft:furnace" => "minecraft:furnace",
+        "minecraft:blast_furnace" => "minecraft:blast_furnace",
+        "minecraft:smoker" => "minecraft:smoker",
+        "minecraft:brewing_stand" => "minecraft:brewing_stand",
+        "minecraft:lectern" => "minecraft:lectern",
+        "minecraft:comparator" => "minecraft:comparator",
+        "minecraft:sculk_sensor" => "minecraft:sculk_sensor",
+        "minecraft:calibrated_sculk_sensor" => "minecraft:calibrated_sculk_sensor",
+        "minecraft:sculk_catalyst" => "minecraft:sculk_catalyst",
+        "minecraft:sculk_shrieker" => "minecraft:sculk_shrieker",
+        "minecraft:trial_spawner" => "minecraft:trial_spawner",
+        "minecraft:vault" => "minecraft:vault",
+        "minecraft:creaking_heart" => "minecraft:creaking_heart",
+        "minecraft:suspicious_sand" | "minecraft:suspicious_gravel" => "minecraft:brushable_block",
+        "minecraft:spawner" => "minecraft:mob_spawner",
+        "minecraft:ender_chest" => "minecraft:ender_chest",
+        "minecraft:structure_block" => "minecraft:structure_block",
+        "minecraft:jigsaw" => "minecraft:jigsaw",
+        "minecraft:chiseled_bookshelf" => "minecraft:chiseled_bookshelf",
+        _ if name.starts_with("minecraft:")
+            && name.ends_with("_chest")
+            && name.contains("copper") =>
+        {
+            "minecraft:chest"
+        }
+        // Вывески и баннеры: `SignBlock` и `BannerBlock` дают свои типы.
+        _ if name.ends_with("_wall_sign")
+            || name.ends_with("_sign")
+            || name.ends_with("_hanging_sign") =>
+        {
+            "minecraft:sign"
+        }
+        _ if name.ends_with("_wall_banner") || name.ends_with("_banner") => "minecraft:banner",
+        _ if name.ends_with("_wall_head")
+            || name.ends_with("_head")
+            || name.ends_with("_skull") =>
+        {
+            "minecraft:skull"
+        }
+        _ if name.ends_with("_golem_statue") => "minecraft:copper_golem_statue",
+        _ => return None,
+    })
 }
 
 /// Чанк точки, расширенный на 16 по x/z. `maxY` — `getMaxY()`, верх невключительной
@@ -1252,6 +1799,7 @@ fn empty_corners(pal: &Palette, level: &dyn Level, box_: Bounds) -> i32 {
     n
 }
 
+#[allow(clippy::too_many_arguments)]
 fn place_in_world(
     pal: &Palette,
     level: &mut dyn Level,
@@ -1301,6 +1849,10 @@ fn place_in_world(
             world[2],
             waterlog(pal, level, world, state),
         );
+        // `placeInWorld`: свой NBT шаблона плюс `LootTableSeed`.
+        if let Some(nbt) = &piece.nbt {
+            place_template_nbt(pal, level, world, state, nbt, r);
+        }
     }
     true
 }
@@ -1354,8 +1906,202 @@ impl Processor {
                 }
                 Some(state)
             }
+            Self::Age(mossiness) => {
+                // `BlockAgeProcessor`: свой `Legacy` от позиции; порядок вызовов
+                // внутри ветки важен так же, как значения.
+                let mut rng = Legacy::new(palette_seed(world[0], world[1], world[2]));
+                Some(age_block(pal, state, *mossiness, &mut rng))
+            }
+            Self::LavaSubmerged => {
+                // `LavaSubmergedBlockProcessor`: лава под неполным блоком остаётся.
+                let was_lava = pal
+                    .block_index(level.get(world[0], world[1], world[2]))
+                    .is_some_and(|id| pal.blocks.get("minecraft:lava").is_some_and(|b| b.0 == id));
+                if was_lava && !pal.is_full_cube(state) {
+                    return Some(pal.defaults["minecraft:lava"]);
+                }
+                Some(state)
+            }
+            Self::Blackstone => Some(blackstone(pal, state)),
+            Self::IgnoreStructureBlock { air_pocket } => {
+                // `BlockIgnoreProcessor`: структурный блок всегда, воздух — если
+                // пещеры нет (иначе шаблон вырезает её сам).
+                let Some(block) = pal.block_index(state) else {
+                    return Some(state);
+                };
+                let is_structure = pal
+                    .blocks
+                    .get("minecraft:structure_block")
+                    .is_some_and(|b| b.0 == block);
+                if is_structure {
+                    return None;
+                }
+                if *air_pocket == 0.0 && pal.is_air(state) {
+                    return None;
+                }
+                Some(state)
+            }
         }
     }
+}
+
+/// `BlockAgeProcessor.processBlock`: только камень, ступени, плиты, стены и
+/// обсидиан. Порядок бросков повторяет байткод.
+fn age_block(pal: &Palette, state: u32, mossiness: f32, rng: &mut Legacy) -> u32 {
+    let name = |id: u32| {
+        pal.blocks
+            .iter()
+            .find(|(_, (b, _))| *b == id)
+            .map(|(n, _)| n.clone())
+    };
+    let Some(block) = pal.block_index(state) else {
+        return state;
+    };
+    let Some(name) = name(block) else {
+        return state;
+    };
+    let short = name.strip_prefix("minecraft:").unwrap_or(&name);
+    if matches!(short, "stone_bricks" | "stone" | "chiseled_stone_bricks") {
+        if rng.next_float() >= 0.5 {
+            return state;
+        }
+        let cracked = pal.defaults["minecraft:cracked_stone_bricks"];
+        let stairs = random_facing_stairs(pal, "minecraft:stone_brick_stairs", rng);
+        let mossy = pal.defaults["minecraft:mossy_stone_bricks"];
+        let mossy_stairs = random_facing_stairs(pal, "minecraft:mossy_stone_brick_stairs", rng);
+        if rng.next_float() < mossiness {
+            return if rng.next_int_bound(2) == 0 {
+                mossy
+            } else {
+                mossy_stairs
+            };
+        }
+        return if rng.next_int_bound(2) == 0 {
+            cracked
+        } else {
+            stairs
+        };
+    }
+    if short.ends_with("_stairs") {
+        if rng.next_float() >= 0.5 {
+            return state;
+        }
+        let non_mossy = [
+            pal.defaults["minecraft:stone_slab"],
+            pal.defaults["minecraft:stone_brick_slab"],
+        ];
+        let mossy_stairs = with_props(
+            pal,
+            pal.defaults["minecraft:mossy_stone_brick_stairs"],
+            state,
+        );
+        let mossy_slab = pal.defaults["minecraft:mossy_stone_brick_slab"];
+        if rng.next_float() < mossiness {
+            return if rng.next_int_bound(2) == 0 {
+                mossy_stairs
+            } else {
+                mossy_slab
+            };
+        }
+        return non_mossy[rng.next_int_bound(2) as usize];
+    }
+    if short.ends_with("_slab") {
+        if rng.next_float() < mossiness {
+            return with_props(pal, pal.defaults["minecraft:mossy_stone_brick_slab"], state);
+        }
+        return state;
+    }
+    if short.ends_with("_wall") {
+        if rng.next_float() < mossiness {
+            return with_props(pal, pal.defaults["minecraft:mossy_stone_brick_wall"], state);
+        }
+        return state;
+    }
+    if short == "obsidian" && rng.next_float() < 0.15 {
+        return pal.defaults["minecraft:crying_obsidian"];
+    }
+    state
+}
+
+/// `getRandomFacingStairs`: `nextInt(4)` на сторону, потом `getRandom(Half)`.
+fn random_facing_stairs(pal: &Palette, name: &str, rng: &mut Legacy) -> u32 {
+    const FACINGS: [&str; 4] = ["north", "east", "south", "west"];
+    let mut state = pal.defaults[name];
+    let dir = FACINGS[rng.next_int_bound(4) as usize];
+    if let Some(next) = pal.with_prop(state, "facing", dir) {
+        state = next;
+    }
+    let half = if rng.next_int_bound(2) == 0 {
+        "bottom"
+    } else {
+        "top"
+    };
+    if let Some(next) = pal.with_prop(state, "half", half) {
+        state = next;
+    }
+    state
+}
+
+/// `withPropertiesOf`: переносит совпадающие по имени свойства.
+fn with_props(pal: &Palette, target: u32, source: u32) -> u32 {
+    let mut state = target;
+    for key in [
+        "facing", "half", "type", "north", "east", "south", "west", "up",
+    ] {
+        let Some(value) = pal.prop(source, key).map(str::to_owned) else {
+            continue;
+        };
+        if let Some(next) = pal.with_prop(state, key, &value) {
+            state = next;
+        }
+    }
+    state
+}
+
+/// `BlackstoneReplaceProcessor`: камень и его производные на чернокамень.
+fn blackstone(pal: &Palette, state: u32) -> u32 {
+    const MAP: [(&str, &str); 23] = [
+        ("cobblestone", "blackstone"),
+        ("mossy_cobblestone", "blackstone"),
+        ("stone", "polished_blackstone"),
+        ("stone_bricks", "polished_blackstone_bricks"),
+        ("mossy_stone_bricks", "polished_blackstone_bricks"),
+        ("cobblestone_stairs", "blackstone_stairs"),
+        ("mossy_cobblestone_stairs", "blackstone_stairs"),
+        ("stone_stairs", "polished_blackstone_stairs"),
+        ("stone_brick_stairs", "polished_blackstone_brick_stairs"),
+        (
+            "mossy_stone_brick_stairs",
+            "polished_blackstone_brick_stairs",
+        ),
+        ("cobblestone_slab", "blackstone_slab"),
+        ("mossy_cobblestone_slab", "blackstone_slab"),
+        ("smooth_stone_slab", "polished_blackstone_slab"),
+        ("stone_slab", "polished_blackstone_slab"),
+        ("stone_brick_slab", "polished_blackstone_brick_slab"),
+        ("mossy_stone_brick_slab", "polished_blackstone_brick_slab"),
+        ("stone_brick_wall", "polished_blackstone_brick_wall"),
+        ("mossy_stone_brick_wall", "polished_blackstone_brick_wall"),
+        ("cobblestone_wall", "blackstone_wall"),
+        ("mossy_cobblestone_wall", "blackstone_wall"),
+        ("chiseled_stone_bricks", "chiseled_polished_blackstone"),
+        ("cracked_stone_bricks", "cracked_polished_blackstone_bricks"),
+        ("iron_bars", "iron_chain"),
+    ];
+    let Some(block) = pal.block_index(state) else {
+        return state;
+    };
+    for (from, to) in MAP {
+        let from_id = pal.blocks.get(&format!("minecraft:{from}")).map(|b| b.0);
+        if from_id != Some(block) {
+            continue;
+        }
+        let Some(target) = pal.blocks.get(&format!("minecraft:{to}")) else {
+            return state;
+        };
+        return with_props(pal, target.1.first().copied().unwrap_or(target.0), state);
+    }
+    state
 }
 
 impl RuleInput {
@@ -1382,6 +2128,7 @@ impl RuleAt {
             Self::Block(id) => {
                 pal.block_index(level.get(world[0], world[1], world[2])) == Some(*id)
             }
+            Self::Always => true,
         }
     }
 }
@@ -1407,6 +2154,7 @@ fn palette_seed(x: i32, y: i32, z: i32) -> i64 {
 
 /// Постановка куска пула. Палитра не трогает генератор декорации.
 /// `ignore_air` — `legacy_single_pool_element`. `gravity` — `terrain_matching`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn place_pool(
     pal: &Palette,
     level: &mut dyn Level,
@@ -1488,6 +2236,10 @@ pub(crate) fn place_pool(
             world[2],
             waterlog(pal, level, world, state),
         );
+        // `placeInWorld`: свой NBT шаблона плюс `LootTableSeed`.
+        if let Some(nbt) = &piece.nbt {
+            place_template_nbt(pal, level, world, state, nbt, r);
+        }
     }
     true
 }
@@ -1529,7 +2281,7 @@ pub(crate) fn shuffled_jigsaws(
         })
         .collect();
     shuffle(&mut list, r);
-    list.sort_by(|a, b| b.selection_priority.cmp(&a.selection_priority));
+    list.sort_by_key(|b| std::cmp::Reverse(b.selection_priority));
     list
 }
 
@@ -1694,6 +2446,8 @@ mod tests {
         min_y: i32,
         height: i32,
         floor: i32,
+        /// `Level.setBlockEntity`: так же, как у чанка конвейера.
+        entities: Vec<([i32; 3], String, chunkwake_world::nbt::Compound)>,
     }
 
     impl Grid {
@@ -1706,6 +2460,7 @@ mod tests {
                 min_y: origin[1],
                 height: size[1],
                 floor: origin[1] + size[1] / 2,
+                entities: Vec::new(),
             }
         }
 
@@ -1753,6 +2508,16 @@ mod tests {
         fn biome(&self, _: i32, _: i32, _: i32) -> u32 {
             0
         }
+        fn set_block_entity(
+            &mut self,
+            x: i32,
+            y: i32,
+            z: i32,
+            id: &str,
+            nbt: chunkwake_world::nbt::Compound,
+        ) {
+            self.entities.push(([x, y, z], id.to_owned(), nbt));
+        }
     }
 
     /// Размер колодца, угол без поворота, `structure_void` не пишется,
@@ -1799,13 +2564,13 @@ mod tests {
                     Piece {
                         pos: [0, 0, 0],
                         state: void_state,
-                        nbt: false,
+                        nbt: None,
                         marker: None,
                     },
                     Piece {
                         pos: [1, 0, 0],
                         state: sand,
-                        nbt: false,
+                        nbt: None,
                         marker: None,
                     },
                 ],
@@ -1898,6 +2663,67 @@ mod tests {
         );
         let written = grid.blocks.iter().filter(|&&s| s != stone).count();
         assert_eq!(written, KEPT);
+    }
+
+    /// Лут контейнеров шаблона: ванила пишет `LootTable` из шаблона и семя
+    /// `random.nextLong()` каждой `RandomizableContainer`, а не готовые
+    /// предметы. Проверяем и то, и то на настоящих шаблонах структур.
+    #[test]
+    fn template_containers_get_loot_table_and_seed() {
+        let Some((data, pal)) = palette() else {
+            return;
+        };
+        let stone = pal.state(&Value::String("minecraft:stone".into())).unwrap();
+        let air = pal.state(&Value::String("minecraft:air".into())).unwrap();
+        let cases = [
+            (
+                "minecraft:ruined_portal/portal_1",
+                "minecraft:chests/ruined_portal",
+            ),
+            (
+                "minecraft:village/plains/houses/plains_small_house_1",
+                "minecraft:chests/village/village_plains_house",
+            ),
+        ];
+        for (name, table) in cases {
+            let Ok(template) = load_template(&data, &pal, name) else {
+                continue;
+            };
+            let mut grid = Grid::new([-24, 0, -24], [64, 32, 64], stone, air);
+            place_in_world(
+                &pal,
+                &mut grid,
+                &template,
+                Rot::None,
+                [0, 2, 0],
+                &[],
+                &mut Worldgen::new(31),
+                None,
+            );
+            let chests: Vec<_> = template.palettes[0]
+                .iter()
+                .filter(|p| {
+                    pal.block_index(p.state) == pal.blocks.get("minecraft:chest").map(|b| b.0)
+                })
+                .collect();
+            if chests.is_empty() {
+                continue;
+            }
+            for piece in &chests {
+                let world = [piece.pos[0], piece.pos[1] + 2, piece.pos[2]];
+                let hit = grid
+                    .entities
+                    .iter()
+                    .find(|(pos, _, _)| *pos == world)
+                    .unwrap_or_else(|| panic!("{name}: нет блок-сущности в {world:?}"));
+                assert_eq!(hit.1, "minecraft:chest", "{name}");
+                let tag = hit.2.get("LootTable").and_then(|t| t.as_str());
+                assert_eq!(tag, Some(table), "{name}: таблица");
+                let seed = hit.2.get("LootTableSeed").and_then(|t| t.as_i64());
+                assert!(seed.is_some_and(|s| s != 0), "{name}: семя {seed:?}");
+            }
+            assert_eq!(grid.entities.len(), chests.len(), "{name}: лишние NBT");
+        }
     }
 
     #[test]

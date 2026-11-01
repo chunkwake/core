@@ -5,7 +5,7 @@
 //! правило подменяет состояние. Контекст (`MaterialRuleContext`) знает глубину
 //! поверхности, высоту воды, глубину камня и уклон по карте высот.
 
-use crate::random::{Positional, Xoroshiro};
+use crate::random::{Positional, Rng, Xoroshiro};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -119,6 +119,7 @@ pub struct Rules {
 }
 
 impl Rules {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         rules: HashMap<String, Value>,
         conditions: HashMap<String, Value>,
@@ -257,6 +258,38 @@ impl Rules {
     }
 
     fn condition(&mut self, id: &str) -> Result<Cond, String> {
+        // Встроенные условия реестра `material_condition`: файлов у них нет,
+        // ванила регистрирует их кодом (`VanillaMaterialConditions`).
+        // `stoneDepthCheck(offset, add_surface_depth, secondary_range, surface)`.
+        let builtin = |offset: i32, add: bool, secondary: i32, ceiling: bool| Cond::StoneDepth {
+            offset,
+            add_surface_depth: add,
+            secondary_depth_range: secondary,
+            ceiling,
+        };
+        match id {
+            "minecraft:on_floor" => return Ok(builtin(0, false, 0, false)),
+            "minecraft:under_floor" => return Ok(builtin(0, true, 0, false)),
+            "minecraft:deep_under_floor" => return Ok(builtin(0, true, 6, false)),
+            "minecraft:very_deep_under_floor" => return Ok(builtin(0, true, 30, false)),
+            "minecraft:on_ceiling" => return Ok(builtin(0, false, 0, true)),
+            "minecraft:under_ceiling" => return Ok(builtin(0, true, 0, true)),
+            "minecraft:not_underwater" => {
+                return Ok(Cond::Water {
+                    offset: -1,
+                    surface_depth_multiplier: 0,
+                    add_stone_depth: false,
+                });
+            }
+            "minecraft:not_under_deep_water" => {
+                return Ok(Cond::Water {
+                    offset: -6,
+                    surface_depth_multiplier: 0,
+                    add_stone_depth: false,
+                });
+            }
+            _ => {}
+        }
         let value = self
             .conditions
             .get(id)
@@ -305,7 +338,7 @@ impl Rules {
             i += 1;
         }
         // `makeBands`: по несколько отрезков случайной длины.
-        let mut paint = |rng: &mut Xoroshiro, color: u32| {
+        let mut paint = |rng: &mut Rng, color: u32| {
             let length = rng_int(rng, 6, 15);
             for _ in 0..length {
                 let len = rng.next_int_bound(3) + 3;
@@ -319,7 +352,7 @@ impl Rules {
         };
         let mut rng = factory.from_hash_of("minecraft:clay_bands");
         // Первые три цвета идут подряд, как в ваниле.
-        let mut first = Xoroshiro::new(rng.next_long(), rng.next_long());
+        let mut first = Rng::Xoro(Xoroshiro::new(rng.next_long(), rng.next_long()), None);
         paint(&mut first, pick("minecraft:yellow_terracotta"));
         paint(&mut first, pick("minecraft:brown_terracotta"));
         paint(&mut first, pick("minecraft:red_terracotta"));
@@ -422,7 +455,7 @@ impl Rules {
 }
 
 /// `nextIntBetweenInclusive(a, b)`.
-fn rng_int(rng: &mut Xoroshiro, a: i32, b: i32) -> i32 {
+fn rng_int(rng: &mut Rng, a: i32, b: i32) -> i32 {
     a + rng.next_int_bound(b - a + 1)
 }
 
@@ -702,7 +735,8 @@ impl<'a> Stage<'a> {
 
         let mut y = heights[z * 16 + x] as i32;
         let mut stone_above = 0;
-        // Глубина от потолка: считается один раз, у первого камня снизу вверх.
+        // `nextCeilingStoneY`: `stoneDepthBelow` пересчитывается на каждом
+        // новом слое камня, когда прежний потолок оказался не выше текущего.
         let mut ceiling = i32::MAX;
         while y >= 0 {
             let state = chunk.get(x, y as usize, z);
@@ -721,8 +755,8 @@ impl<'a> Stage<'a> {
                 }
                 Kind::Solid => {}
             }
-            if ceiling == i32::MAX {
-                // `stoneDepthBelow`: первый не-камень под текущим.
+            if ceiling >= y {
+                // Первый не-камень под текущим; дальше вниз — `WAY_BELOW_MIN_Y`.
                 let mut below = y - 1;
                 while below >= 0 && chunk.kind(chunk.get(x, below as usize, z)) == Kind::Solid {
                     below -= 1;
@@ -1004,12 +1038,12 @@ impl<'a> Stage<'a> {
 
 /// `RandomSource.nextFloat` — 24 старших бита.
 /// `nextFloat`: старшие 24 бита без знака.
-fn next_float(rng: &mut Xoroshiro) -> f32 {
+fn next_float(rng: &mut Rng) -> f32 {
     rng.next_float()
 }
 
 /// `nextDouble`: 53 бита, а не float — от него глубина поверхности.
-fn next_double(rng: &mut Xoroshiro) -> f64 {
+fn next_double(rng: &mut Rng) -> f64 {
     rng.next_double()
 }
 
@@ -1160,7 +1194,7 @@ mod tests {
         let stage = Stage {
             rule: &rule,
             min_y: 0,
-            height: height as i32,
+            height,
             noises: &[],
             bands: &[],
             densities: &densities,

@@ -77,7 +77,11 @@ fn campfire_at(list: &[CampfireCook]) -> HashMap<i32, usize> {
 
 impl Recipes {
     /// Сборка из готовых частей: индексы поиска строятся здесь же.
-    pub fn from_parts(list: Vec<Recipe>, cooking: Vec<Cooking>, campfire: Vec<CampfireCook>) -> Self {
+    pub fn from_parts(
+        list: Vec<Recipe>,
+        cooking: Vec<Cooking>,
+        campfire: Vec<CampfireCook>,
+    ) -> Self {
         Self {
             cooking_at: cooking_at(&cooking),
             campfire_at: campfire_at(&campfire),

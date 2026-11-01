@@ -747,9 +747,7 @@ fn execute_conditions_height_and_numberformat() {
 
     let raised = run(
         &plan,
-        &format!(
-            "execute positioned 8 0 8 positioned over world_surface run setblock ~ ~-1 ~ minecraft:glass"
-        ),
+        "execute positioned 8 0 8 positioned over world_surface run setblock ~ ~-1 ~ minecraft:glass",
     );
     assert!(raised.contains("commands.setblock.success"), "{raised}");
     assert_eq!(
@@ -1347,7 +1345,6 @@ fn loot_rolls_block_entity_and_reports_unknown_tables() {
         &format!("loot spawn 8 {y} 8 loot minecraft:chests/abandoned_mineshaft"),
     );
     assert!(chest.contains("commands.loot.spawn"), "{chest}");
-    let y = y;
     assert!(
         run(&plan, &format!("setblock 20 {y} 20 minecraft:chest"))
             .contains("commands.setblock.success")

@@ -78,6 +78,7 @@ pub struct Live {
     snapshot: Snapshot,
     published: bool,
     history: VecDeque<HistoryPoint>,
+    profile: crate::profile::TickProfile,
     tx: broadcast::Sender<()>,
 }
 
@@ -99,6 +100,7 @@ impl Live {
             snapshot: Snapshot::default(),
             published: false,
             history: VecDeque::with_capacity(HISTORY_SECONDS),
+            profile: crate::profile::TickProfile::new(),
             tx,
         }
     }
@@ -117,6 +119,22 @@ impl Live {
     /// История от старых точек к новым.
     pub fn history(&self) -> Vec<HistoryPoint> {
         self.history.iter().copied().collect()
+    }
+
+    /// Профиль по фазам тика: закрытые секунды от старых к новым.
+    pub fn profile(&self) -> Vec<crate::profile::ProfileBucket> {
+        self.profile.history()
+    }
+
+    /// Последняя закрытая секунда профиля — её отдаёт поток SSE.
+    pub fn latest_profile(&self) -> Option<crate::profile::ProfileBucket> {
+        self.profile.latest()
+    }
+
+    /// Профиль приходит отдельно от снимка: его снимает тик, а не сэмплер,
+    /// и в секунду попадает разное число тиков.
+    pub fn publish_profile(&mut self, at: u64, marks: &[f32; crate::profile::PHASE_COUNT]) {
+        self.profile.record(at, marks);
     }
 
     /// Кладёт новый снимок: добавляет точку истории и будит подписчиков.
@@ -204,5 +222,24 @@ mod tests {
         live.publish(Snapshot::default());
         assert!(live.published());
         assert!(rx.try_recv().is_ok());
+    }
+
+    /// Профиль живёт рядом с историей, но публикуется независимо: тик
+    /// присылает его сам, секундными корзинами.
+    #[test]
+    fn profile_is_collected_separately() {
+        let mut live = Live::new();
+        assert!(live.profile().is_empty());
+        let marks = [0.25_f32; crate::profile::PHASE_COUNT];
+        for _ in 0..5 {
+            live.publish_profile(10, &marks);
+        }
+        live.publish_profile(11, &marks);
+        let buckets = live.profile();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].at, 10);
+        assert_eq!(buckets[0].ticks, 5);
+        // Снимок при этом остаётся нетронутым: профиль не часть Snapshot.
+        assert!(!live.published());
     }
 }

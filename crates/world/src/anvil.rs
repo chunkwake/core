@@ -3,9 +3,7 @@
 
 use crate::light::LightLayer;
 use crate::nbt::{self, Compound, Tag};
-use crate::{
-    Biomes, ChunkColumn, Section, bits_for, emit_packed, first_seen_palette, pack, palette_index,
-};
+use crate::{Biomes, ChunkColumn, Section, bits_for, emit_packed, pack};
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
@@ -48,18 +46,14 @@ fn palettize(s: &Section, min_bits: u32) -> (Vec<u32>, Option<Vec<i64>>) {
     if s.is_uniform() {
         return (vec![s.get(0)], None);
     }
-    let palette = first_seen_palette(s, None);
+    // Палитра и индексы — одним разбором секции, без поиска по состояниям.
+    let (palette, indices) = s.first_seen_pack();
     if palette.len() == 1 {
         return (palette, None);
     }
     let bits = bits_for(palette.len()).max(min_bits);
     let mut data = Vec::with_capacity(4096usize.div_ceil((64 / bits) as usize));
-    emit_packed(
-        4096,
-        bits,
-        |i| palette_index(&palette, s.get(i)),
-        |long| data.push(long as i64),
-    );
+    emit_packed(4096, bits, |i| indices[i], |long| data.push(long as i64));
     (palette, Some(data))
 }
 
@@ -224,23 +218,29 @@ pub fn chunk_from_nbt(
     f: Format,
     names: &dyn Names,
 ) -> Result<(ChunkColumn, bool), String> {
-    let mut c = template.clone();
     let default_biome = template
         .sections
         .first()
         .map_or(0, |s| s.biome.uniform().unwrap_or(0));
-    for s in &mut c.sections {
-        *s = Section::filled(0, default_biome);
-    }
+    // Столбец собирается заново, а не клонируется из шаблона: клон скопировал
+    // бы все секции (по `Arc` на каждую) и тут же заменил их пустыми. От
+    // шаблона нужны только размеры и флаги.
+    let n = template.sections.len();
+    let has_skylight = template.has_skylight;
+    let mut c = ChunkColumn {
+        sections: vec![Section::filled(0, default_biome); n],
+        global_block_bits: template.global_block_bits,
+        global_biome_bits: template.global_biome_bits,
+        has_skylight,
+        sky_light: vec![LightLayer::Uniform(if has_skylight { 15 } else { 0 }); n],
+        block_light: vec![LightLayer::Uniform(0); n],
+        block_entities: std::collections::BTreeMap::new(),
+    };
     // Свет из файла только у чанков, сохранённых со светом (`isLightOn`).
     let mut lit = root.get("isLightOn").and_then(Tag::as_i64) == Some(1);
-    let sky_default = LightLayer::Uniform(if c.has_skylight { 15 } else { 0 });
-    let n = c.sections.len();
-    c.sky_light = vec![sky_default; n];
-    c.block_light = vec![LightLayer::Uniform(0); n];
     let layer = |sec: &Compound, key: &str| {
         let b = sec.get(key)?.as_byte_array()?;
-        LightLayer::from_bytes(&b.iter().map(|&x| x as u8).collect::<Vec<_>>())
+        LightLayer::from_i8(b)
     };
     let sections = root
         .get("sections")
@@ -363,6 +363,103 @@ pub fn chunk_from_nbt(
 const SECTOR: usize = 4096;
 const ZLIB: u8 = 2;
 
+/// Сколько потоков отдать сжатию: чанки независимы, но на маленьком
+/// автосейве лишние потоки дороже работы.
+fn pack_threads(chunks: usize) -> usize {
+    let cores = std::thread::available_parallelism().map_or(1, |p| p.get());
+    cores.min(chunks.max(1)).min(8)
+}
+
+/// NBT + zlib для списка чанков; порядок сохраняется.
+///
+/// На одном чанке потоки не заводятся: накладные расходы на пробуждение
+/// больше самой работы, а автосейв изредка пишет пару блоков.
+pub fn compress_chunks(list: &[(usize, &Compound)]) -> Vec<(usize, Vec<u8>)> {
+    let encode = |nbt: &Compound| {
+        // Автосейв каждые 30 с: быстрый уровень в 2–3 раза дешевле, файл ~10% больше.
+        let mut enc = ZlibEncoder::new(vec![ZLIB], Compression::fast());
+        enc.write_all(&nbt::write_root(nbt)).expect("write to Vec");
+        enc.finish().expect("write to Vec")
+    };
+    let threads = pack_threads(list.len());
+    if threads <= 1 {
+        return list.iter().map(|(i, nbt)| (*i, encode(nbt))).collect();
+    }
+    // Пакеты по `threads`, результат собирается в исходном порядке: индекс
+    // чанка в регионе важен, и перемешивание сломало бы файл.
+    let batch = list.len().div_ceil(threads);
+    let parts: Vec<Vec<(usize, Vec<u8>)>> = std::thread::scope(|scope| {
+        let mut joins = Vec::with_capacity(threads);
+        for part in list.chunks(batch) {
+            joins
+                .push(scope.spawn(move || part.iter().map(|(i, nbt)| (*i, encode(nbt))).collect()));
+        }
+        joins
+            .into_iter()
+            .map(|j| j.join().expect("chunk compression"))
+            .collect()
+    });
+    parts.into_iter().flatten().collect()
+}
+
+/// Распаковка и разбор чанков региона по потокам; порядок входного списка
+/// сохраняется.
+///
+/// Работа на чанк независима (свой zlib-поток, свой NBT), поэтому она
+/// раскладывается по потокам так же, как сжатие при записи. Ошибки
+/// возвращаются как есть — их соберёт вызывающий и назовёт первый.
+fn decompress_parallel<T, E>(
+    slices: Vec<(usize, std::ops::Range<usize>)>,
+    decode: impl Fn((usize, std::ops::Range<usize>)) -> Result<T, E> + Sync,
+) -> Vec<(usize, Result<T, E>)>
+where
+    T: Send,
+    E: Send,
+{
+    // Потолок ниже, чем у сжатия: загрузку региона зовут из пула генерации,
+    // где потоков уже почти столько же, сколько ядер. Вложенный `scope` на
+    // восемь потоков там только отнимал бы ядра у тика.
+    let threads = pack_threads(slices.len()).min(4);
+    if threads <= 1 {
+        return slices.into_iter().map(|s| (s.0, decode(s))).collect();
+    }
+    let batch = slices.len().div_ceil(threads);
+    let parts: Vec<Vec<(usize, Result<T, E>)>> = std::thread::scope(|scope| {
+        let mut joins = Vec::with_capacity(threads);
+        for part in slices.chunks(batch) {
+            let decode = &decode;
+            joins.push(scope.spawn(move || {
+                part.iter()
+                    .map(|s| (s.0, decode((s.0, s.1.clone()))))
+                    .collect()
+            }));
+        }
+        joins
+            .into_iter()
+            .map(|j| j.join().expect("chunk decompression"))
+            .collect()
+    });
+    parts.into_iter().flatten().collect()
+}
+
+/// Сжатие пачки чанков без записи в файл — для бенчмарка и профиля.
+pub fn compress_for_bench(chunks: &[Compound]) -> usize {
+    let list: Vec<(usize, &Compound)> = chunks.iter().enumerate().collect();
+    compress_chunks(&list).iter().map(|(_, v)| v.len()).sum()
+}
+
+/// То же в одном потоке: с ним сравнивается параллельный вариант.
+pub fn compress_for_bench_sequential(chunks: &[Compound]) -> usize {
+    chunks
+        .iter()
+        .map(|nbt| {
+            let mut enc = ZlibEncoder::new(vec![ZLIB], Compression::fast());
+            enc.write_all(&nbt::write_root(nbt)).expect("write to Vec");
+            enc.finish().expect("write to Vec").len()
+        })
+        .sum()
+}
+
 /// Чанк с координатами и его NBT-корнем.
 pub type StoredChunk = ((i32, i32), Compound);
 
@@ -383,6 +480,9 @@ fn region_index((x, z): (i32, i32)) -> usize {
     ((x & 31) + (z & 31) * 32) as usize
 }
 
+/// Файл региона и срезы payload'ов чанков в нём.
+type RegionPayloads = (Vec<u8>, Vec<(usize, std::ops::Range<usize>)>);
+
 impl RegionStore {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
@@ -392,14 +492,32 @@ impl RegionStore {
         self.dir.join(format!("r.{rx}.{rz}.mca"))
     }
 
-    /// Сжатые данные чанков региона по индексу (0..1024).
+    /// Сжатые данные чанков региона по индексу (0..1024), каждый — своей копией.
+    ///
+    /// Для пересборки файла: там payload'ы смешиваются с новыми и живут дольше
+    /// одного прохода. Горячий путь чтения — [`Self::read_region_slices`].
     fn read_region(path: &Path) -> Result<BTreeMap<usize, Vec<u8>>, String> {
+        let (bytes, slices) = Self::read_region_slices(path)?;
+        Ok(slices
+            .into_iter()
+            .map(|(i, r)| (i, bytes[r].to_vec()))
+            .collect())
+    }
+
+    /// Сжатые payload'ы чанков региона: общий буфер файла и срезы в нём.
+    ///
+    /// Раньше каждый чанк копировался в свой `Vec` — на регион 32×32 это сотни
+    /// килобайт лишних копий и столько же аллокаций, хотя распаковка читает
+    /// payload один раз и сразу выбрасывает.
+    fn read_region_slices(path: &Path) -> Result<RegionPayloads, String> {
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((Vec::new(), Vec::new()));
+            }
             Err(e) => return Err(format!("read {}: {e}", path.display())),
         };
-        let mut out = BTreeMap::new();
+        let mut out = Vec::new();
         if bytes.len() < 2 * SECTOR {
             return Err(format!("{}: truncated region header", path.display()));
         }
@@ -413,12 +531,14 @@ impl RegionStore {
                 return Err(format!("{}: invalid chunk {i} location", path.display()));
             }
             let len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
-            let Some(payload) = bytes.get(offset + 4..offset + 4 + len) else {
+            let start = offset + 4;
+            let end = start + len;
+            if end > bytes.len() {
                 return Err(format!("{}: truncated chunk {i}", path.display()));
-            };
-            out.insert(i, payload.to_vec());
+            }
+            out.push((i, start..end));
         }
-        Ok(out)
+        Ok((bytes, out))
     }
 
     /// Записывает чанки (NBT-корни), сохраняя остальные чанки их регионов.
@@ -444,14 +564,11 @@ impl RegionStore {
         let mut touched: Vec<PathBuf> = Vec::new();
         for ((rx, rz), list) in by_region {
             let path = self.path(rx, rz);
-            // Сжатые payload'ы только изменённых чанков.
-            let mut fresh: Vec<(usize, Vec<u8>)> = Vec::with_capacity(list.len());
-            for (i, nbt) in list {
-                // Автосейв каждые 30 с: быстрый уровень в 2–3 раза дешевле, файл ~10% больше.
-                let mut enc = ZlibEncoder::new(vec![ZLIB], Compression::fast());
-                enc.write_all(&nbt::write_root(nbt)).expect("write to Vec");
-                fresh.push((i, enc.finish().expect("write to Vec")));
-            }
+            // NBT + zlib по чанкам независимы: раскладываем их по потокам,
+            // а файл пишем по-прежнему последовательно. Автосейв — самое
+            // дорогое после тика, и на одном потоке он занимал одно ядро
+            // впустую.
+            let fresh: Vec<(usize, Vec<u8>)> = compress_chunks(&list);
             match self.write_in_place(&path, &fresh, now) {
                 Ok(()) => {}
                 // Не влезло в свои сектора — тогда пересборка файла.
@@ -480,7 +597,11 @@ impl RegionStore {
         fresh: &[(usize, Vec<u8>)],
         now: u32,
     ) -> Result<(), InPlace> {
-        let mut file = match std::fs::OpenOptions::new().read(true).write(true).open(path) {
+        let mut file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+        {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(InPlace::NeedRebuild),
             Err(e) => return Err(InPlace::Failed(format!("open {}: {e}", path.display()))),
@@ -528,7 +649,7 @@ impl RegionStore {
             let mut buf = Vec::with_capacity(4 + payload.len());
             buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
             buf.extend_from_slice(payload);
-            buf.resize(need as usize * SECTOR, 0);
+            buf.resize(need * SECTOR, 0);
             file.seek(SeekFrom::Start(at))
                 .and_then(|_| file.write_all(&buf))
                 .map_err(|e| InPlace::Failed(format!("write {}: {e}", path.display())))?;
@@ -584,24 +705,39 @@ impl RegionStore {
     }
 
     /// Все чанки одного региона как NBT-корни (нет файла — пусто).
+    ///
+    /// Чанки распаковываются и разбираются параллельно: zlib и NBT по чанкам
+    /// независимы, а порядок восстанавливается по позиции. Раньше регион
+    /// читался строго по одному чанку в одном потоке, и вход игрока в
+    /// исследованный мир ждал весь регион.
     pub fn load_region(&self, rx: i32, rz: i32) -> Result<Vec<StoredChunk>, String> {
         let path = self.path(rx, rz);
-        let name = path.display();
-        let mut out = Vec::new();
-        for (i, payload) in Self::read_region(&path)? {
-            let pos = (rx * 32 + (i % 32) as i32, rz * 32 + (i / 32) as i32);
+        let (bytes, slices) = Self::read_region_slices(&path)?;
+        if slices.is_empty() {
+            return Ok(Vec::new());
+        }
+        let name = path.display().to_string();
+        let decode = |(i, range): (usize, std::ops::Range<usize>)| {
+            let payload = &bytes[range];
             let (kind, data) = payload.split_first().ok_or("empty chunk")?;
             if *kind != ZLIB {
-                return Err(format!("{name}: chunk {pos:?} uses compression {kind}"));
+                return Err(format!("{name}: chunk {i} uses compression {kind}"));
             }
-            let mut raw = Vec::new();
+            // Распакованный NBT растёт реаллокациями, если не задать ёмкость:
+            // zlib-поток знает размер только в конце, но запас в четверть
+            // сжатого payload покрывает обычный коэффициент входа чанка.
+            let mut raw = Vec::with_capacity(data.len().saturating_mul(4).max(4096));
             ZlibDecoder::new(data)
                 .read_to_end(&mut raw)
-                .map_err(|e| format!("{name}: chunk {pos:?}: {e}"))?;
-            out.push((
-                pos,
-                nbt::read_root(&raw).map_err(|e| format!("{name}: {e}"))?,
-            ));
+                .map_err(|e| format!("{name}: chunk {i}: {e}"))?;
+            nbt::read_root(&raw).map_err(|e| format!("{name}: {e}"))
+        };
+        let parsed = decompress_parallel(slices, decode);
+        let mut out = Vec::with_capacity(parsed.len());
+        for (i, root) in parsed {
+            let root = root?;
+            let pos = (rx * 32 + (i % 32) as i32, rz * 32 + (i / 32) as i32);
+            out.push((pos, root));
         }
         Ok(out)
     }
@@ -768,13 +904,16 @@ mod tests {
     fn in_place_save_keeps_other_chunks() {
         // Правка одного чанка не должна терять соседей и должна обновлять
         // именно его: это путь `write_in_place`, а не пересборки региона.
-        let dir = std::env::temp_dir().join(format!("chunkwake-anvil-inplace-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("chunkwake-anvil-inplace-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = RegionStore::new(&dir);
         let c = sample();
         let a = chunk_to_nbt(&c, (0, 0), F, &Test).unwrap();
         let b = chunk_to_nbt(&c, (1, 0), F, &Test).unwrap();
-        store.save(&[((0, 0), a.clone()), ((1, 0), b.clone())]).unwrap();
+        store
+            .save(&[((0, 0), a.clone()), ((1, 0), b.clone())])
+            .unwrap();
         // Меняем первый чанк и сохраняем только его.
         let mut changed = a.clone();
         changed.insert("LastUpdate".into(), Tag::Long(777));

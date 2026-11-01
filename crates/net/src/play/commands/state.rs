@@ -163,22 +163,12 @@ pub struct ServerVars {
 }
 
 /// Погода: ясная, дождь, гроза, и сколько тиков осталось.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Weather {
     pub rain: bool,
     pub thunder: bool,
     /// Тики до смены; 0 — бесконечно, пока не сменят командой.
     pub ticks: i64,
-}
-
-impl Default for Weather {
-    fn default() -> Self {
-        Self {
-            rain: false,
-            thunder: false,
-            ticks: 0,
-        }
-    }
 }
 
 /// Белый список и баны.
@@ -241,6 +231,28 @@ impl WorldBorder {
         let elapsed = (now - self.lerp_start).clamp(0, self.lerp_ticks);
         let t = elapsed as f64 / self.lerp_ticks as f64;
         self.from + (self.to - self.from) * t
+    }
+
+    /// `WorldBorder.getDistanceToBorder(x, z)`: расстояние до ближайшей
+    /// кромки. Отрицательное снаружи, положительное внутри.
+    pub fn distance_to(&self, now: i64, x: f64, z: f64) -> f64 {
+        let half = self.size_at(now) / 2.0;
+        let (min_x, max_x) = (self.center_x - half, self.center_x + half);
+        let (min_z, max_z) = (self.center_z - half, self.center_z + half);
+        let from_west = x - min_x;
+        let from_east = max_x - x;
+        let from_north = z - min_z;
+        let from_south = max_z - z;
+        from_west.min(from_east).min(from_north).min(from_south)
+    }
+
+    /// `WorldBorder.isWithinBounds(x, z, margin)`.
+    pub fn is_within(&self, now: i64, x: f64, z: f64, margin: f64) -> bool {
+        let half = self.size_at(now) / 2.0;
+        x >= self.center_x - half - margin
+            && x < self.center_x + half + margin
+            && z >= self.center_z - half - margin
+            && z < self.center_z + half + margin
     }
 
     /// Снимок для `initialize_border`: старый и новый диаметр и остаток анимации.
@@ -751,6 +763,42 @@ pub fn rule_specs() -> Vec<(String, chunkwake_protocol::text::Parser)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `WorldBorder.getDistanceToBorder` и урон `LivingEntity.baseTick`:
+    /// внутри — положительное расстояние, снаружи — урон
+    /// `max(1, floor(-dist * damage))`.
+    #[test]
+    fn border_distance_and_damage() {
+        let mut b = WorldBorder {
+            center_x: 0.0,
+            center_z: 0.0,
+            to: 100.0,
+            from: 100.0,
+            lerp_ticks: 0,
+            ..WorldBorder::default()
+        };
+        // Половина диаметра 50: центр внутри на 50, кромка — ровно 0.
+        assert_eq!(b.distance_to(0, 0.0, 0.0), 50.0);
+        assert_eq!(b.distance_to(0, 49.0, 0.0), 1.0);
+        assert_eq!(b.distance_to(0, 50.0, 0.0), 0.0);
+        // Снаружи расстояние отрицательное.
+        assert_eq!(b.distance_to(0, 53.0, 0.0), -3.0);
+        assert!(b.is_within(0, 49.0, 0.0, 0.0));
+        assert!(!b.is_within(0, 51.0, 0.0, 0.0));
+        assert!(b.is_within(0, 51.0, 0.0, 2.0));
+
+        // `dist = distance + buffer`; при buffer 5 и damage 0.2 за кромкой
+        // на 8 блоков: -8 + 5 = -3, урон floor(3 * 0.2) = 0 → max(1) = 1.
+        b.buffer = 5.0;
+        b.damage = 0.2;
+        let dist = b.distance_to(0, 58.0, 0.0) + b.buffer as f64;
+        assert_eq!(dist, -3.0);
+        assert_eq!(((-dist) * b.damage as f64).floor().max(1.0), 1.0);
+        // Дальше кромки floor даёт больше единицы.
+        let far = b.distance_to(0, 80.0, 0.0) + b.buffer as f64;
+        assert_eq!(far, -25.0);
+        assert_eq!(((-far) * b.damage as f64).floor().max(1.0), 5.0);
+    }
 
     #[test]
     fn rule_specs_match_defaults() {

@@ -165,23 +165,23 @@ pub struct PlayPlan {
     /// Плоский `the_void`: камень и булыжник стартовой платформы.
     void_platform: Option<(u32, u32)>,
     /// Нормальный мир: столбцы, которых нет на диске. Плоский мир — `None`.
-    terrain: Option<Arc<dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync>>,
+    terrain: Option<TerrainFn>,
     /// `/locate biome`: ближайшая точка биома от блока. `None` — плоский мир.
-    locate_biome: Option<Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync>>,
+    locate_biome: Option<LocateFn>,
     /// `/locate structure`: ближайший старт поставленной структуры. `None` — плоский мир.
-    locate_structure: Option<Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync>>,
+    locate_structure: Option<LocateFn>,
     /// Тег точки интереса (`minecraft:village`) → типы.
     poi_tags: HashMap<String, HashSet<String>>,
     /// Id и `#теги` `worldgen/structure` для tab-complete. Клиенту этот реестр не шлётся.
     structure_names: Vec<String>,
     /// Точки интереса загруженных чанков: чанк → позиции и тип.
-    pois: Mutex<HashMap<(i32, i32), Vec<([i32; 3], String)>>>,
+    pois: Mutex<FastMap<(i32, i32), Vec<Poi>>>,
     /// Изменённые столбцы и номер их правки (для сверки с кэшем кадров).
     edited: std::sync::RwLock<Columns>,
     /// Номер правки, записанный на диск, по столбцам.
-    saved: Mutex<HashMap<(i32, i32), u64>>,
+    saved: Mutex<FastMap<(i32, i32), u64>>,
     /// Столбцы, чья правка выросла после последней записи (скан автосейва — по ним).
-    dirty: Mutex<HashSet<(i32, i32)>>,
+    dirty: Mutex<FastSet<(i32, i32)>>,
     /// Изменения блоков текущего тика: секция → (локальный индекс, состояние).
     pending_blocks: Mutex<PendingBlocks>,
     /// Правка мира целиком (установка с формой и сигналом, тик редстоуна):
@@ -193,7 +193,7 @@ pub struct PlayPlan {
     light: Arc<LightTable>,
     /// Ленивая загрузка с диска: источник и уже прочитанные регионы.
     source: std::sync::OnceLock<Arc<dyn ChunkSource>>,
-    regions: Mutex<HashSet<(i32, i32)>>,
+    regions: Mutex<FastSet<(i32, i32)>>,
     /// Замки загрузки по шардам: разные регионы читаются параллельно.
     /// Один общий замок сериализовал всю загрузку — на 32 это четыре региона
     /// по 1024 чанка NBT строго по очереди.
@@ -213,9 +213,11 @@ pub struct PlayPlan {
     next_entity_id: AtomicI32,
     hub: Hub,
     /// Кадры `level_chunk_with_light`, уже сжатые: один раз на чанк для всех игроков.
-    chunk_frames: Mutex<HashMap<(i32, i32), Frame>>,
+    chunk_frames: Mutex<FastMap<(i32, i32), Frame>>,
     /// Кадры появления сущностей: один пакет на многих зрителей.
-    spawn_frames: Mutex<HashMap<(i32, [i64; 3], u32, u32, bool), Frame>>,
+    spawn_frames: Mutex<SpawnFrameCache>,
+    /// Кадры удаления сущности: тоже один пакет на всех, кто её видел.
+    remove_frames: Mutex<FastMap<i32, Frame>>,
     /// Состояние блока → имя (`minecraft:stone`), для событий плагинов.
     block_names: Arc<Vec<String>>,
     /// ID `brigadier:string` в `command_argument_type`.
@@ -225,32 +227,37 @@ pub struct PlayPlan {
     /// Команды плагинов для дерева `commands` у клиента.
     plugin_commands: Mutex<Vec<String>>,
     /// Предметы на земле по ID сущности.
-    dropped: Mutex<HashMap<i32, Dropped>>,
+    dropped: Mutex<FastMap<i32, Dropped>>,
     /// Индекс предметов по чанкам: `(cx, cz)` → ID предметов в нём.
     ///
     /// Подбор игроком и всасывание воронкой раньше сканировали **все**
     /// предметы мира: O(игроков × предметов) и O(воронок × предметов) за тик.
     /// С индексом ищутся только чанки в радиусе действия.
-    dropped_by_chunk: Mutex<HashMap<(i32, i32), Vec<i32>>>,
+    dropped_by_chunk: Mutex<FastMap<(i32, i32), Vec<i32>>>,
     /// Сферы опыта.
-    orbs: Mutex<HashMap<i32, crate::orbs::Orb>>,
+    orbs: Mutex<FastMap<i32, crate::orbs::Orb>>,
     /// Работающие и открытые печи.
-    furnaces: Mutex<HashMap<[i32; 3], FurnaceEntry>>,
+    furnaces: Mutex<FastMap<[i32; 3], FurnaceEntry>>,
+    /// Запас буферов тика предметов (синхронизации, исчезнувшие, слияние):
+    /// тик берёт их и возвращает, а не аллоцирует заново.
+    items_syncs: Mutex<Vec<ItemSync>>,
+    items_gone: Mutex<Vec<i32>>,
+    items_merging: Mutex<Vec<i32>>,
     /// Отложенные тики редстоуна (`scheduleTick`): позиция и тик сервера.
     redstone_ticks: Mutex<crate::ticks::TickQueue>,
     /// Летящие и воткнутые стрелы по id сущности.
-    arrows: Mutex<HashMap<i32, crate::arrows::Arrow>>,
+    arrows: Mutex<FastMap<i32, crate::arrows::Arrow>>,
     /// Инвентари плагинов (`Bukkit.createInventory`) по номеру.
-    plugin_invs: Mutex<HashMap<i32, PluginInv>>,
+    plugin_invs: Mutex<FastMap<i32, PluginInv>>,
     next_plugin_inv: std::sync::atomic::AtomicI32,
     /// Отложенные тики жидкостей (`FlowingFluid`): место и тик.
     fluid_ticks: Mutex<crate::ticks::TickQueue>,
     /// Переключения факелов за последние тики — для перегорания.
-    torch_toggles: Mutex<HashMap<[i32; 3], Vec<u64>>>,
+    torch_toggles: Mutex<FastMap<[i32; 3], Vec<u64>>>,
     /// До какого тика перегоревший факел нельзя зажечь снова (`BURNOUT_COOLDOWN`).
-    torch_cool: Mutex<HashMap<[i32; 3], u64>>,
+    torch_cool: Mutex<FastMap<[i32; 3], u64>>,
     /// Игроки на нажимных плитах: позиция плиты и сколько их.
-    plates: Mutex<HashMap<[i32; 3], usize>>,
+    plates: Mutex<FastMap<[i32; 3], usize>>,
     /// Воронки мира и их пауза в тиках.
     hopper_ticks: Mutex<crate::ticks::TickQueue>,
     /// Блоки, поставленные плагинами с физикой: соседей обновит тик.
@@ -258,37 +265,39 @@ pub struct PlayPlan {
     /// Блоки в движении от поршней: тик сервера и что поставить на место.
     piston_moves: Mutex<Vec<(u64, Moves)>>,
     /// Выходы компараторов (`OutputSignal`), загружаются из блок-сущности.
-    comparators: Mutex<HashMap<[i32; 3], i32>>,
+    comparators: Mutex<FastMap<[i32; 3], i32>>,
     /// Тики сервера (для редстоуна).
     server_ticks: std::sync::atomic::AtomicU64,
     /// Печи из загруженных с диска чанков — подхватит тик.
     pending_furnaces: Mutex<Vec<[i32; 3]>>,
     /// Костры с едой: слоты и прогресс.
-    campfires: Mutex<HashMap<[i32; 3], crate::campfire::Campfire>>,
+    campfires: Mutex<FastMap<[i32; 3], crate::campfire::Campfire>>,
     /// Костры из загруженных чанков — подхватит тик.
     pending_campfires: Mutex<Vec<[i32; 3]>>,
     players_source: std::sync::OnceLock<Arc<dyn PlayerSource>>,
     /// Несохранённые снимки игроков.
-    player_saves: Mutex<HashMap<Uuid, PlayerSave>>,
+    player_saves: Mutex<FastMap<Uuid, PlayerSave>>,
     ops: std::sync::OnceLock<OpList>,
     /// Имя предмета по ID (`minecraft:bread`).
     item_names: Vec<String>,
     /// Зеркало онлайн-игроков для плагинов и каналы управления их сессиями.
-    live: Mutex<HashMap<Uuid, Live>>,
+    live: Mutex<FastMap<Uuid, Live>>,
+    /// Старый снимок игрока: ревизии больше нет — отпечаток считается по полям.
+    state_cache: Mutex<FastMap<Uuid, (u64, Arc<str>)>>,
     /// Живые мобы по ID сущности.
-    mobs: Mutex<HashMap<i32, mobs::MobEntry>>,
+    mobs: Mutex<FastMap<i32, mobs::MobEntry>>,
     /// Чанки, уже заселённые мобами при генерации (или прочитанные из `entities/`).
-    populated: Mutex<HashSet<(i32, i32)>>,
+    populated: Mutex<FastSet<(i32, i32)>>,
     /// Прочитанные с диска мобы: тик заберёт их в `mobs` (регион может читаться из самого тика).
     mobs_loaded: Mutex<Vec<mobs::MobEntry>>,
     /// Чанки `entities/`, где по последней записи были мобы.
-    entity_written: Mutex<HashSet<(i32, i32)>>,
+    entity_written: Mutex<FastSet<(i32, i32)>>,
     /// Новые заселённые чанки, ещё не записанные.
-    entity_new: Mutex<HashSet<(i32, i32)>>,
-    controls: Mutex<HashMap<Uuid, tokio::sync::mpsc::UnboundedSender<Control>>>,
+    entity_new: Mutex<FastSet<(i32, i32)>>,
+    controls: Mutex<FastMap<Uuid, tokio::sync::mpsc::UnboundedSender<Control>>>,
     shutting_down: AtomicBool,
     /// Кто смотрит сундук или бочку: крышка открыта, пока список не пуст.
-    open_blocks: Mutex<HashMap<[i32; 3], Vec<Uuid>>>,
+    open_blocks: Mutex<FastMap<[i32; 3], Vec<Uuid>>>,
     /// Чанки в радиусе симуляции вокруг игроков: только они тикают.
     ///
     /// За `Arc`, потому что набор читают десять подсистем за тик. Раньше
@@ -296,10 +305,10 @@ pub struct PlayPlan {
     /// это ~1.7 тыс. хэш-вставок × 10 каждые 50 мс. Теперь это одна атомарная
     /// прибавка на подсистему, а сам набор пересобирается только когда
     /// кто-то переехал в другой чанк.
-    simulated: Mutex<Arc<HashSet<(i32, i32)>>>,
+    simulated: Mutex<Arc<FastSet<(i32, i32)>>>,
     /// Состав, для которого посчитан `simulated`: радиус и чанки игроков.
     /// Пока он тот же, набор не пересобирается.
-    simulated_key: Mutex<Option<(i32, Vec<(i32, i32)>, Vec<(i32, i32)>)>>,
+    simulated_key: Mutex<Option<SimulatedKey>>,
     /// Время суток (0..24000). Тик двигает его и шлёт клиенту, клиент сам не считает.
     day_time: AtomicI64,
     /// Сколько серверных тиков прошло с запуска (`/time query gametime`).
@@ -311,12 +320,26 @@ pub struct PlayPlan {
     /// Счётчики сети для снимка нагрузки.
     pub(crate) net_stats: crate::play::commands::net::NetStats,
     /// Пинг игроков по RTT `keep_alive`: uuid → мс.
-    pub(crate) pings: Mutex<HashMap<Uuid, f32>>,
+    pub(crate) pings: Mutex<FastMap<Uuid, f32>>,
     /// Загрузка процесса из сэмплера сервера: `/top` её не опрашивает сам,
     /// потому что `sysinfo` считает проценты между двумя опросами.
     pub(crate) proc_stats: Mutex<chunkwake_metrics::ProcStats>,
-    /// Профиль `/debug`: тики в файл.
+    /// Есть ли работа в этом тике: игроки, сущности, отложенные тики.
+    ///
+    /// Флаг ставится теми, кто добавляет работу (вход игрока, спавн, дроп,
+    /// расписание), и пересчитывается в конце каждого рабочего тика. Раньше
+    /// `idle()` на каждом тике пробовал десяток мьютексов — 250 нс простоя на
+    /// пустом сервере, то есть в сто раз больше самого тика.
+    work_pending: AtomicBool,
+    /// Профиль включён (`/debug start` или внешний приёмник): без него тик
+    /// не берёт замки профиля и не зовёт часы системы.
+    profiling: AtomicBool,
+    /// Пересчёт `/debug`: тики в файл.
     debug_profile: Mutex<Option<DebugProfile>>,
+    /// Куда отдавать замеры по фазам тика: ставит сервер, чтобы профиль
+    /// попадал в тот же `Live`, что и остальные метрики. Без приёмника
+    /// замеры просто не собираются — лаборатории и тесты его не ставят.
+    profile_sink: Mutex<Option<ProfileSink>>,
     /// Куда писать профиль: каталог мира.
     pub(crate) debug_dir: std::path::PathBuf,
     /// Просьба остановить сервер (`/stop`, сигнал консоли).
@@ -376,15 +399,30 @@ pub struct PlayPlan {
     pub(crate) version_name: String,
     pub(crate) version_protocol: i32,
     /// Чанки, которые тикают всегда (`/forceload`).
-    pub(crate) forced: Mutex<HashSet<(i32, i32)>>,
+    pub(crate) forced: Mutex<FastSet<(i32, i32)>>,
     /// Регенерация, отравление, иссушение, голод — id из реестра, один раз при старте.
     effect_kinds: survival::EffectKinds,
     /// `wet_sponge`, `bucket`, `water_bucket` для тика печи.
     sponge: Option<(i32, i32, i32)>,
 }
 
-/// Готовый к записи кадр, общий для многих соединений.
+/// Генератор столбца по координатам чанка: `None` — чанк уже отдан.
+pub type TerrainFn = Arc<dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync>;
+/// `/locate`: ближайшая точка от блока.
+pub type LocateFn = Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync>;
+/// Кадр появления по квантованной позиции: id, позиция, поворот, элитра.
+type SpawnFrameCache = FastMap<(i32, [i64; 3], u32, u32, bool), Frame>;
+/// Состав, по которому посчитан набор симуляции: радиус, чанки игроков, форс.
+type SimulatedKey = (i32, Vec<(i32, i32)>, Vec<(i32, i32)>);
+/// Сжатый кадр, общий для многих соединений.
 type Frame = Arc<Vec<u8>>;
+
+/// Приёмник профиля по фазам: секунда и замеры.
+///
+/// Функция, а не ссылка на `Live`: `net` не должен знать про `chunkwake-metrics`
+/// ничего сверх типов замеров, а тесты и лаборатория подключают свой приёмник
+/// или обходятся без него.
+pub type ProfileSink = Arc<dyn Fn(u64, &[f32; chunkwake_metrics::PHASE_COUNT]) + Send + Sync>;
 
 /// `/debug start`: куда писать профиль и сколько тиков уже записано.
 pub struct DebugProfile {
@@ -468,36 +506,34 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-/// Хешер ключей чанков (FxHash): координаты не от злоумышленника, SipHash
-/// тут лишний, а хешируются они на каждый `block()` и шаг BFS света.
-#[derive(Default, Clone, Copy)]
-pub struct ChunkHasher(u64);
+/// Хеш ключей чанков и блоков.
+///
+/// Координаты и ID сущностей приходят из мира, а не от злоумышленника, поэтому
+/// SipHash (`std` по умолчанию) здесь платит за стойкость, которая не нужна:
+/// его берут на каждый `block()`, на каждый шаг BFS света и на каждый поиск
+/// моба. `FxHasher` — умножение на константу, в разы дешевле на коротких
+/// целочисленных ключах, и уже применялся в `ChunkHasher`.
+use rustc_hash::{FxHashMap, FxHashSet};
 
-impl std::hash::Hasher for ChunkHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.write_u64(u64::from(b));
-        }
-    }
-
-    fn write_i32(&mut self, v: i32) {
-        self.write_u64(v as u32 as u64);
-    }
-
-    fn write_u64(&mut self, v: u64) {
-        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
-    }
-}
+/// Быстрая карта: ключи — целые числа и их кортежи.
+type FastMap<K, V> = FxHashMap<K, V>;
+/// Быстрое множество: те же ключи.
+type FastSet<K> = FxHashSet<K>;
 
 /// Правленые и загруженные столбцы: столбец и номер правки.
-type Columns = HashMap<(i32, i32), (ChunkColumn, u64), std::hash::BuildHasherDefault<ChunkHasher>>;
+type Columns = FastMap<(i32, i32), (ChunkColumn, u64)>;
 
 /// Изменения блоков по секциям: (локальный индекс, состояние).
-type PendingBlocks = HashMap<[i32; 3], Vec<(u16, u32)>>;
+type PendingBlocks = FastMap<[i32; 3], Vec<(u16, u32)>>;
+
+/// Синхронизация предмета за тик: ID, позиция, скорость, стоит ли на земле.
+type ItemSync = (i32, [f64; 3], [f64; 3], bool);
+
+/// Точка интереса: мировая позиция и тип.
+///
+/// Тип — `&'static str`: у ванили он общий для всех точек одного вида, а скан
+/// нового чанка иначе аллоцировал бы строку на каждую найденную точку.
+type Poi = ([i32; 3], &'static str);
 
 /// Платформа `the_void` поверх шаблона. `None` — чанк платформу не пересекает.
 fn stamp_void(
@@ -534,12 +570,78 @@ fn stamp_void(
     Some(column)
 }
 
+/// Мир только для чтения: загруженные столбцы, шаблон и правила плоского мира.
+///
+/// Держится на время фазы тика (см. [`PlayPlan::with_world`]): один
+/// `RwLock::read` на тысячи чтений блока вместо замка на каждое.
+pub struct WorldView<'a> {
+    columns: &'a Columns,
+    template: &'a ChunkColumn,
+    min_y: i32,
+    /// Плоский мир: отсутствующий столбец — это шаблон, а не «не загружено».
+    flat: bool,
+    void_platform: Option<(u32, u32)>,
+}
+
+impl WorldView<'_> {
+    /// Небесный свет в клетке (`getBrightness(SKY)`): 0, если чанк не
+    /// загружен или у мира нет неба.
+    pub fn sky_light_at(&self, [x, y, z]: [i32; 3]) -> Option<u8> {
+        let ry = y - self.min_y;
+        if ry < 0 || ry as usize >= self.template.height() {
+            return None;
+        }
+        let Some((column, _)) = self.columns.get(&(x >> 4, z >> 4)) else {
+            return Some(0);
+        };
+        if !column.has_skylight {
+            return Some(0);
+        }
+        let section = ry as usize / 16;
+        let layer = column.sky_light.get(section)?;
+        let i = (ry as usize % 16) * 256 + (z & 15) as usize * 16 + (x & 15) as usize;
+        Some(layer.get(i))
+    }
+
+    /// Состояние блока; `y` — мировая координата. `None` — вне мира по
+    /// высоте или чанк ещё не загружен (у шума).
+    pub fn block(&self, [x, y, z]: [i32; 3]) -> Option<u32> {
+        let ry = y - self.min_y;
+        if ry < 0 || ry as usize >= self.template.height() {
+            return None;
+        }
+        let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
+        if let Some((column, _)) = self.columns.get(&(x >> 4, z >> 4)) {
+            return Some(column.block(lx, ry as usize, lz));
+        }
+        if !self.flat {
+            return None;
+        }
+        Some(PlayPlan::flat_in(
+            self.void_platform,
+            self.min_y,
+            self.template,
+            x,
+            y,
+            z,
+            lx,
+            ry as usize,
+            lz,
+        ))
+    }
+
+    /// Столбец по координатам чанка, если он загружен.
+    pub fn column(&self, cx: i32, cz: i32) -> Option<&ChunkColumn> {
+        self.columns.get(&(cx, cz)).map(|e| &e.0)
+    }
+}
+
 /// Мир для пересчёта света. Плоский мир подставляет шаблон, нормальный —
 /// отсутствующий чанк просто не виден, чтобы не засветить рельеф травой.
 struct WorldLight<'a> {
     world: &'a mut Columns,
     fallback: Option<&'a ChunkColumn>,
-    touched: HashSet<(i32, i32)>,
+    touched: FastSet<(i32, i32)>,
     /// Последний записанный столбец: BFS пишет в один подряд, без лишних вставок.
     last: Option<(i32, i32)>,
     /// Платформа void: столбец, если чанк не равен плоскому шаблону.
@@ -599,10 +701,10 @@ impl LightAccess for WorldLight<'_> {
 /// `computed == None` — BFS уже правил `world`.
 fn write_light(
     world: &mut Columns,
-    frames: &mut HashMap<(i32, i32), Frame>,
+    frames: &mut FastMap<(i32, i32), Frame>,
     key: (i32, i32),
     computed: Option<HashMap<(i32, i32), ChunkColumn>>,
-    touched: HashSet<(i32, i32)>,
+    touched: FastSet<(i32, i32)>,
 ) {
     let mut touched = touched;
     touched.insert(key);
@@ -803,7 +905,7 @@ fn chunk_of(pos: [f64; 3]) -> (i32, i32) {
 }
 
 /// Квадрат чанков радиуса `r` вокруг `center` — как `chunks_around`, но без порядка.
-fn chunk_square(center: (i32, i32), r: i32, out: &mut HashSet<(i32, i32)>) {
+fn chunk_square(center: (i32, i32), r: i32, out: &mut FastSet<(i32, i32)>) {
     for x in (center.0 - r)..=(center.0 + r) {
         for z in (center.1 - r)..=(center.1 + r) {
             out.insert((x, z));
@@ -823,8 +925,11 @@ impl Hub {
     fn frame(&self, packet: &[u8]) -> Vec<u8> {
         // Ёмкость сразу под сжатый размер: `shrink_to_fit` после сжатия —
         // это realloc + memcpy на каждую рассылку, а рассылок десятки за тик.
-        // Запас `packet.len() / 2 + 64` покрывает обычный коэффициент zlib.
-        let mut out = Vec::with_capacity(packet.len() / 2 + 64);
+        //
+        // Запас — доля от размера пакета: обычный zlib даёт около половины,
+        // но плотные данные (свет, шум) сжимаются хуже, и на чанке запас
+        // `len/2` приводил к реаллокации ровно на самом дорогом пакете.
+        let mut out = Vec::with_capacity(packet.len() * 3 / 4 + 64);
         self.codec.encode(packet, &mut out);
         out
     }
@@ -848,20 +953,29 @@ impl Hub {
     /// Много пакетов всем — одной рассылкой: кадры подряд, одно пробуждение
     /// задачи игрока и одна запись в сокет вместо пакета на событие.
     fn send_many(&self, packets: impl IntoIterator<Item = Vec<u8>>) {
-        let mut out = Vec::new();
-        for p in packets {
+        // Один проход без сбора пакетов в промежуточный `Vec`: на стаде это
+        // тысяча лишних перемещений. Ёмкость оценивается по `size_hint`,
+        // а если подсказки нет — по первому пакету.
+        let mut it = packets.into_iter();
+        let (low, high) = it.size_hint();
+        let hint = high.unwrap_or(low);
+        let mut out = Vec::with_capacity(hint.saturating_mul(24).max(256));
+        let mut any = false;
+        for p in &mut it {
             self.codec.encode(&p, &mut out);
+            any = true;
         }
-        if !out.is_empty() {
-            let _ = self.tx.send(Broadcast {
-                skip: None,
-                only: None,
-                packet: Arc::new(out),
-                entity: None,
-                moves: None,
-                blocks: None,
-            });
+        if !any {
+            return;
         }
+        let _ = self.tx.send(Broadcast {
+            skip: None,
+            only: None,
+            packet: Arc::new(out),
+            entity: None,
+            moves: None,
+            blocks: None,
+        });
     }
 
     fn send_entity(&self, skip: Option<Uuid>, packet: Vec<u8>, entity: Option<EntityEvent>) {
@@ -1056,11 +1170,11 @@ pub struct WorldSpec {
     ///
     /// `None` от замыкания — чанк уже отдан раньше: генератор его не
     /// повторяет, и вставлять в мир нечего.
-    pub terrain: Option<Arc<dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync>>,
+    pub terrain: Option<TerrainFn>,
     /// `/locate biome`. `None` — плоский мир или климат не загружен.
-    pub locate_biome: Option<Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync>>,
+    pub locate_biome: Option<LocateFn>,
     /// `/locate structure`. `None` — плоский мир или генератор без структур.
-    pub locate_structure: Option<Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync>>,
+    pub locate_structure: Option<LocateFn>,
     /// Теги `point_of_interest_type` из датапака.
     pub poi_tags: HashMap<String, HashSet<String>>,
     /// Id и `#теги` структур для `/locate structure`.
@@ -1172,6 +1286,68 @@ const INPUT_SHIFT: u8 = 0x20;
 const ABILITY_FLYING: u8 = 0x02;
 
 /// Блок-сущность контейнера по имени блока.
+/// `SUN_ANGLE` из таймлайна `OVERWORLD_DAY`, в градусах.
+///
+/// Ключевые кадры — `6000 → 360°` и `6000 → 0°` на периоде 24000: в полдень
+/// угол 0, к следующему полудню 360. Easing —
+/// `symmetricCubicBezier(0.362, 0.241)`, то есть `cubicBezier(0.362, 0.241,
+/// 0.638, 0.759)`.
+fn sun_angle(day: f32) -> f32 {
+    // Позиция внутри периода, начиная с полудня.
+    let t = (day - 6000.0).rem_euclid(24000.0) / 24000.0;
+    360.0 * cubic_bezier(0.362, 0.241, 0.241, 0.241, t)
+}
+
+/// `EasingType.CubicBezier.apply`: 4 итерации Ньютона, затем бисекция.
+fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
+    // `curveFromControls`: a = 3v1 - 3v2 + 1, b = -6v1 + 3v2, c = 3v1.
+    let (ax, bx, cx) = (3.0 * x1 - 3.0 * x2 + 1.0, -6.0 * x1 + 3.0 * x2, 3.0 * x1);
+    let (ay, by, cy) = (3.0 * y1 - 3.0 * y2 + 1.0, -6.0 * y1 + 3.0 * y2, 3.0 * y1);
+    let sample = |a: f32, b: f32, c: f32, t: f32| ((a * t + b) * t + c) * t;
+    let gradient = |a: f32, b: f32, c: f32, t: f32| (3.0 * a * t + 2.0 * b) * t + c;
+
+    let mut t = x;
+    for _ in 0..4 {
+        let error = sample(ax, bx, cx, t) - x;
+        if error.abs() < 1.0e-5 {
+            return sample(ay, by, cy, t);
+        }
+        let g = gradient(ax, bx, cx, t);
+        if g < 1.0e-5 {
+            break;
+        }
+        t -= (error / g).clamp(-0.25, 0.25);
+    }
+    // `solveTBisect`: половиним отрезок, пока ошибка не станет меньше 1e-5.
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    while lo < hi {
+        let error = sample(ax, bx, cx, t) - x;
+        if error.abs() < 1.0e-5 {
+            break;
+        }
+        if error < 0.0 {
+            lo = t;
+        } else {
+            hi = t;
+        }
+        t = (hi + lo) / 2.0;
+    }
+    sample(ay, by, cy, t)
+}
+
+/// Ось, вдоль которой летел снаряд: 0 — X, 1 — Y, 2 — Z. По ней считается
+/// сторона попадания в мишень.
+fn dominant_axis(vel: [f64; 3]) -> usize {
+    let (x, y, z) = (vel[0].abs(), vel[1].abs(), vel[2].abs());
+    if y > x && y > z {
+        1
+    } else if z > x {
+        2
+    } else {
+        0
+    }
+}
+
 fn container_entity(block: &str) -> Option<&'static str> {
     match block {
         "minecraft:chest" => Some("minecraft:chest"),
@@ -1209,6 +1385,8 @@ mod mobs;
 mod poi;
 mod stream;
 
+pub use poi::group_of as poi_group;
+
 /// Заселение мира для бенчмарков и тестов: мобы и предметы без сокетов.
 #[cfg(feature = "bench")]
 pub mod bench {
@@ -1241,6 +1419,46 @@ pub mod bench {
             );
         }
         made
+    }
+
+    /// Ставит `side × side` блоков с именем `block` вокруг `origin` (мировые
+    /// координаты). Меряет путь записи блока целиком: `set_block`, свет,
+    /// индексы, очередь рассылки.
+    pub fn place(plan: &PlayPlan, origin: [i32; 3], side: i32, block: &str) -> usize {
+        let Some(state) = plan.survival.block_defaults.get(block).copied() else {
+            return 0;
+        };
+        let mut placed = 0;
+        for dx in 0..side {
+            for dz in 0..side {
+                let pos = [origin[0] + dx, origin[1], origin[2] + dz];
+                if plan.set_block(pos, state).is_some() {
+                    placed += 1;
+                }
+            }
+        }
+        placed
+    }
+
+    /// Состояние блока по умолчанию (`minecraft:stone` → ID состояния).
+    pub fn state(plan: &PlayPlan, block: &str) -> Option<u32> {
+        plan.survival.block_defaults.get(block).copied()
+    }
+
+    /// Записывает один блок: полный путь `set_block` (свет, индексы, рассылка).
+    pub fn write(plan: &PlayPlan, pos: [i32; 3], state: u32) -> Option<u32> {
+        plan.set_block(pos, state)
+    }
+
+    /// Сумма состояний `count` блоков подряд от `origin`: цена одного чтения
+    /// блока из мира (замок, поиск столбца, палитра секции).
+    pub fn read(plan: &PlayPlan, origin: [i32; 3], count: i32) -> u32 {
+        let mut sum = 0u32;
+        for dx in 0..count {
+            let pos = [origin[0] + dx, origin[1], origin[2]];
+            sum = sum.wrapping_add(plan.block(pos).unwrap_or(0));
+        }
+        sum
     }
 }
 
@@ -1588,16 +1806,16 @@ impl PlayPlan {
             locate_structure,
             poi_tags,
             structure_names,
-            pois: Mutex::new(HashMap::new()),
+            pois: Mutex::new(FastMap::default()),
             edited: std::sync::RwLock::new(Columns::default()),
-            saved: Mutex::new(HashMap::new()),
+            saved: Mutex::new(FastMap::default()),
             dirty: Mutex::default(),
-            pending_blocks: Mutex::new(HashMap::new()),
+            pending_blocks: Mutex::new(FastMap::default()),
             world_edit: Mutex::new(()),
             light_lock: Mutex::new(()),
             light,
             source: std::sync::OnceLock::new(),
-            regions: Mutex::new(HashSet::new()),
+            regions: Mutex::new(FastSet::default()),
             region_load: (0..REGION_SHARDS).map(|_| Mutex::new(())).collect(),
             gen_pool: std::sync::OnceLock::new(),
             self_weak: std::sync::OnceLock::new(),
@@ -1607,56 +1825,64 @@ impl PlayPlan {
             spawn_protection: std::sync::atomic::AtomicI32::new(0),
             player_type,
             next_entity_id: AtomicI32::new(1),
-            chunk_frames: Mutex::new(HashMap::new()),
-            spawn_frames: Mutex::new(HashMap::new()),
+            chunk_frames: Mutex::new(FastMap::default()),
+            spawn_frames: Mutex::new(FastMap::default()),
+            remove_frames: Mutex::new(FastMap::default()),
             block_names,
             parsers,
             survival,
             hooks: std::sync::OnceLock::new(),
             plugin_commands: Mutex::new(Vec::new()),
-            furnaces: Mutex::new(HashMap::new()),
+            furnaces: Mutex::new(FastMap::default()),
+            items_syncs: Mutex::new(Vec::new()),
+            items_gone: Mutex::new(Vec::new()),
+            items_merging: Mutex::new(Vec::new()),
             redstone_ticks: Mutex::default(),
-            arrows: Mutex::new(HashMap::new()),
-            plugin_invs: Mutex::new(HashMap::new()),
+            arrows: Mutex::new(FastMap::default()),
+            plugin_invs: Mutex::new(FastMap::default()),
             next_plugin_inv: std::sync::atomic::AtomicI32::new(1),
             fluid_ticks: Mutex::default(),
-            torch_toggles: Mutex::new(HashMap::new()),
-            torch_cool: Mutex::new(HashMap::new()),
-            plates: Mutex::new(HashMap::new()),
-            comparators: Mutex::new(HashMap::new()),
+            torch_toggles: Mutex::new(FastMap::default()),
+            torch_cool: Mutex::new(FastMap::default()),
+            plates: Mutex::new(FastMap::default()),
+            comparators: Mutex::new(FastMap::default()),
             piston_moves: Mutex::new(Vec::new()),
             deferred_updates: Mutex::new(Vec::new()),
             hopper_ticks: Mutex::new(crate::ticks::TickQueue::default()),
             server_ticks: std::sync::atomic::AtomicU64::new(0),
             pending_furnaces: Mutex::new(Vec::new()),
-            campfires: Mutex::new(HashMap::new()),
+            campfires: Mutex::new(FastMap::default()),
             pending_campfires: Mutex::new(Vec::new()),
-            dropped: Mutex::new(HashMap::new()),
-            dropped_by_chunk: Mutex::new(HashMap::new()),
-            orbs: Mutex::new(HashMap::new()),
+            dropped: Mutex::new(FastMap::default()),
+            dropped_by_chunk: Mutex::new(FastMap::default()),
+            orbs: Mutex::new(FastMap::default()),
             players_source: std::sync::OnceLock::new(),
-            player_saves: Mutex::new(HashMap::new()),
+            player_saves: Mutex::new(FastMap::default()),
             ops: std::sync::OnceLock::new(),
             item_names,
-            live: Mutex::new(HashMap::new()),
-            mobs: Mutex::new(HashMap::new()),
-            populated: Mutex::new(HashSet::new()),
+            live: Mutex::new(FastMap::default()),
+            state_cache: Mutex::new(FastMap::default()),
+            mobs: Mutex::new(FastMap::default()),
+            populated: Mutex::new(FastSet::default()),
             mobs_loaded: Mutex::new(Vec::new()),
-            entity_written: Mutex::new(HashSet::new()),
-            entity_new: Mutex::new(HashSet::new()),
-            controls: Mutex::new(HashMap::new()),
+            entity_written: Mutex::new(FastSet::default()),
+            entity_new: Mutex::new(FastSet::default()),
+            controls: Mutex::new(FastMap::default()),
             shutting_down: AtomicBool::new(false),
-            open_blocks: Mutex::new(HashMap::new()),
-            simulated: Mutex::new(Arc::new(HashSet::new())),
+            open_blocks: Mutex::new(FastMap::default()),
+            simulated: Mutex::new(Arc::new(FastSet::default())),
             simulated_key: Mutex::new(None),
             day_time: AtomicI64::new(0),
             game_time: AtomicI64::new(0),
             ticks: Mutex::new(chunkwake_metrics::TickStats::new()),
             vars: crate::play::commands::state::ServerVars::ephemeral(),
             net_stats: crate::play::commands::net::NetStats::default(),
-            pings: Mutex::new(HashMap::new()),
+            pings: Mutex::new(FastMap::default()),
             proc_stats: Mutex::new(chunkwake_metrics::ProcStats::default()),
             debug_profile: Mutex::new(None),
+            work_pending: AtomicBool::new(false),
+            profiling: AtomicBool::new(false),
+            profile_sink: Mutex::new(None),
             debug_dir: std::path::PathBuf::from("debug"),
             shutdown: AtomicBool::new(false),
             seed: 0,
@@ -1686,7 +1912,7 @@ impl PlayPlan {
             level_name: String::new(),
             version_name: String::new(),
             version_protocol: 0,
-            forced: Mutex::new(HashSet::new()),
+            forced: Mutex::new(FastSet::default()),
             effect_kinds,
             sponge,
             hub: Hub {
@@ -1772,9 +1998,22 @@ impl PlayPlan {
     }
 
     /// Блок плоского мира, которого ещё нет в `edited`: шаблон или платформа.
-    fn flat_block(&self, x: i32, y: i32, z: i32, lx: usize, ry: usize, lz: usize) -> u32 {
-        if let Some((stone, cobble)) = self.void_platform
-            && y == chunkwake_worldgen::void_platform_y(self.min_y)
+    /// Живёт только в [`WorldView`]: прямой путь через `self` больше не нужен
+    /// и брал бы замок мира.
+    #[allow(clippy::too_many_arguments)]
+    fn flat_in(
+        void_platform: Option<(u32, u32)>,
+        min_y: i32,
+        template: &ChunkColumn,
+        x: i32,
+        y: i32,
+        z: i32,
+        lx: usize,
+        ry: usize,
+        lz: usize,
+    ) -> u32 {
+        if let Some((stone, cobble)) = void_platform
+            && y == chunkwake_worldgen::void_platform_y(min_y)
             && let Some(kind) = chunkwake_worldgen::void_platform_block(x, z)
         {
             return match kind {
@@ -1782,35 +2021,49 @@ impl PlayPlan {
                 chunkwake_worldgen::VoidPlatformBlock::Stone => stone,
             };
         }
-        self.template.block(lx, ry, lz)
+        template.block(lx, ry, lz)
     }
 
-    /// Точки интереса столбца: обход один раз при первой установке чанка.
-    fn collect_pois(&self, cx: i32, cz: i32, column: &ChunkColumn) -> Vec<([i32; 3], String)> {
+    /// Точки интереса столбца: обход один раз при установке чанка.
+    ///
+    /// Имя и тип точки берутся только у найденного блока: у остальных
+    /// проверка — один `&` по таблице флагов состояния. Однородная секция
+    /// (воздух, камень) пропускается целиком: в обычном столбце это почти
+    /// весь объём, а типовых точек в нём нет.
+    fn collect_pois(&self, cx: i32, cz: i32, column: &ChunkColumn) -> Vec<Poi> {
         let mut found = Vec::new();
-        let height = column.height();
-        for y in 0..height {
-            for z in 0..16 {
-                for x in 0..16 {
-                    let state = column.block(x, y, z);
-                    let Some(kind) = poi::of_block(self.state_name(state)) else {
-                        continue;
-                    };
-                    found.push((
-                        [
-                            cx * 16 + x as i32,
-                            self.min_y + y as i32,
-                            cz * 16 + z as i32,
-                        ],
-                        kind.to_owned(),
-                    ));
-                }
+        for (si, section) in column.sections.iter().enumerate() {
+            if section.is_uniform() {
+                continue;
             }
+            let mut i = 0usize;
+            section.for_each(|state| {
+                let index = i;
+                i += 1;
+                if chunkwake_world::poi_kind_bits(state) == 0 {
+                    return;
+                }
+                let Some(kind) = poi::of_block(self.state_name(state)) else {
+                    return;
+                };
+                let x = index & 15;
+                let y = si * 16 + (index >> 8);
+                let z = (index >> 4) & 15;
+                found.push((
+                    [
+                        cx * 16 + x as i32,
+                        self.min_y + y as i32,
+                        cz * 16 + z as i32,
+                    ],
+                    kind,
+                ));
+            });
         }
         found
     }
 
-    fn store_pois(&self, cx: i32, cz: i32, list: Vec<([i32; 3], String)>) {
+    /// Записывает точки интереса столбца в индекс.
+    fn store_pois(&self, cx: i32, cz: i32, list: Vec<Poi>) {
         let mut map = self.pois.lock().unwrap();
         if list.is_empty() {
             map.remove(&(cx, cz));
@@ -1826,7 +2079,7 @@ impl PlayPlan {
         let list = map.entry(key).or_default();
         list.retain(|(at, _)| *at != pos);
         if let Some(kind) = poi::of_block(self.state_name(state)) {
-            list.push((pos, kind.to_owned()));
+            list.push((pos, kind));
         }
         if list.is_empty() {
             map.remove(&key);
@@ -1844,7 +2097,7 @@ impl PlayPlan {
                 continue;
             }
             for (pos, kind) in list {
-                if !types.contains(kind) {
+                if !types.contains(*kind) {
                     continue;
                 }
                 let dist = (pos[0] as i64 - origin[0] as i64).pow(2)
@@ -1914,7 +2167,7 @@ impl PlayPlan {
             let mut access = WorldLight {
                 world: &mut world,
                 fallback: self.terrain.is_none().then_some(template),
-                touched: HashSet::new(),
+                touched: FastSet::default(),
                 last: None,
                 special: platform.is_some().then_some(&make as _),
             };
@@ -1941,7 +2194,7 @@ impl PlayPlan {
         for d in 0..6 {
             let n = crate::redstone::step(changed, d);
             let Some(s) = self.block(n) else { continue };
-            if !crate::redstone::is_observer(self.state_name(s)) {
+            if !chunkwake_world::has_flag(s, chunkwake_world::flags::OBSERVER) {
                 continue;
             }
             let pl = &self.survival.placement;
@@ -2173,6 +2426,7 @@ impl PlayPlan {
             collects: true,
         };
         self.hub.players.lock().unwrap().insert(uuid, me);
+        self.mark_work();
         self.live.lock().unwrap().insert(
             uuid,
             Live {
@@ -2193,12 +2447,44 @@ impl PlayPlan {
     }
 
     /// Снимок игрока для плагинов (формат — [`Live::render`]); `None` — не онлайн.
+    ///
+    /// Текст кэшируется по [`Live::fingerprint`]: плагин, читающий несколько
+    /// полей подряд, получает то же состояние, что и раньше, но без
+    /// повторного рендера 41 строки инвентаря. Сверка идёт по самим полям
+    /// зеркала, поэтому устаревший текст невозможен.
     pub fn player_state(&self, uuid: Uuid) -> Option<String> {
+        self.player_state_shared(uuid)
+            .map(|(_, text)| text.to_string())
+    }
+
+    /// Текст снимка как общий буфер: без копии для передачи в JVM.
+    ///
+    /// Возвращает отпечаток состояния и текст. Java сверяет отпечаток дешёвым
+    /// вызовом и разбирает строку только когда он изменился.
+    pub fn player_state_shared(&self, uuid: Uuid) -> Option<(u64, Arc<str>)> {
         let live = self.live.lock().unwrap().get(&uuid)?.clone();
-        Some(live.render(
-            |id| Some(self.item_name(id).to_owned()),
-            |id| self.effect_name(id),
-        ))
+        let key = live.fingerprint();
+        if let Some((at, text)) = self.state_cache.lock().unwrap().get(&uuid)
+            && *at == key
+        {
+            return Some((key, text.clone()));
+        }
+        let text: Arc<str> = Arc::from(
+            live.render(|id| Some(self.item_name(id)), |id| self.effect_name(id))
+                .as_str(),
+        );
+        let mut cache = self.state_cache.lock().unwrap();
+        if cache.len() > 1024 {
+            cache.clear();
+        }
+        cache.insert(uuid, (key, text.clone()));
+        Some((key, text))
+    }
+
+    /// Отпечаток снимка игрока: `None` — игрока нет. Дешёвый вызов для Java.
+    pub fn state_version(&self, uuid: Uuid) -> Option<u64> {
+        let live = self.live.lock().unwrap();
+        Some(live.get(&uuid)?.fingerprint())
     }
 
     /// Команда плагина сессии игрока (формат — [`Control::parse`]).
@@ -2220,12 +2506,12 @@ impl PlayPlan {
             .is_some_and(|tx| tx.send(c).is_ok())
     }
 
-    fn effect_name(&self, id: i32) -> Option<String> {
+    fn effect_name(&self, id: i32) -> Option<&str> {
         self.survival
             .effects
             .iter()
             .find(|(_, v)| **v == id)
-            .map(|(k, _)| k.clone())
+            .map(|(k, _)| k.as_str())
     }
 
     /// Запрос плагина к миру: `get x y z` → имя блока, `set x y z имя` → `1`/`0`,
@@ -2243,29 +2529,37 @@ impl PlayPlan {
         }
         // `dropitem x y z разброс предмет`: `World.dropItem(Naturally)`.
         if let Some(rest) = line.strip_prefix("dropitem ") {
-            let f: Vec<&str> = rest.splitn(5, ' ').collect();
-            let num = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok());
-            if let (Some(x), Some(y), Some(z), Some(line)) = (num(0), num(1), num(2), f.get(4))
-                && let Some(stack) = crate::stack_nbt::from_line(line, |n| self.item_id(n))
-            {
-                let (at, vel) = if f.get(3) == Some(&"1") {
-                    // `dropItemNaturally`: сдвиг до ±0.25 и скорость выпавшего из блока.
-                    let r: [f64; 3] = rand::random();
-                    (
-                        [
-                            x + r[0] * 0.5 - 0.25,
-                            y + r[1] * 0.5 - 0.25,
-                            z + r[2] * 0.5 - 0.25,
-                        ],
-                        items::pop_velocity(rand::random(), rand::random()),
-                    )
-                } else {
-                    ([x, y, z], [0.0; 3])
-                };
-                self.drop_item(at, vel, stack, items::BLOCK_DELAY);
-                return "1".into();
-            }
-            return "0".into();
+            // Без промежуточного `Vec`: плагины, ставящие предметы пачками,
+            // зовут это на каждый предмет.
+            let mut it = rest.splitn(5, ' ');
+            let num = |v: Option<&str>| v.and_then(|v| v.parse::<f64>().ok());
+            let (x, y, z) = (num(it.next()), num(it.next()), num(it.next()));
+            let natural = it.next() == Some("1");
+            let (Some(x), Some(y), Some(z)) = (x, y, z) else {
+                return "0".into();
+            };
+            let Some(stack) = it
+                .next()
+                .and_then(|l| crate::stack_nbt::from_line(l, |n| self.item_id(n)))
+            else {
+                return "0".into();
+            };
+            let (at, vel) = if natural {
+                // `dropItemNaturally`: сдвиг до ±0.25 и скорость выпавшего из блока.
+                let r: [f64; 3] = rand::random();
+                (
+                    [
+                        x + r[0] * 0.5 - 0.25,
+                        y + r[1] * 0.5 - 0.25,
+                        z + r[2] * 0.5 - 0.25,
+                    ],
+                    items::pop_velocity(rand::random(), rand::random()),
+                )
+            } else {
+                ([x, y, z], [0.0; 3])
+            };
+            self.drop_item(at, vel, stack, items::BLOCK_DELAY);
+            return "1".into();
         }
         if let Some(name) = line.strip_prefix("defaultdata ") {
             return self
@@ -2351,6 +2645,7 @@ impl PlayPlan {
                         // Поток плагинов: физику — в тик, иначе события редстоуна ждали бы сами себя.
                         if physics {
                             self.deferred_updates.lock().unwrap().push([x, y, z]);
+                            self.mark_work();
                         }
                         "1".into()
                     }
@@ -2417,11 +2712,17 @@ impl PlayPlan {
     /// `BlockRedstoneEvent` пачкой — один вызов плагинов на всю сеть проводов.
     fn redstone_events(&self, changes: &[([i32; 3], i32, i32)]) -> Vec<i32> {
         let reply = self.sync_event(Event::Redstone, || {
-            changes
-                .iter()
-                .map(|(p, old, new)| format!("{} {} {} {old} {new}", p[0], p[1], p[2]))
-                .collect::<Vec<_>>()
-                .join(";")
+            // Одна строка на изменение, без промежуточного `Vec` строк и
+            // `join`: на большой сети это тысячи форматирований.
+            let mut arg = String::with_capacity(changes.len() * 24);
+            for (i, (p, old, new)) in changes.iter().enumerate() {
+                use std::fmt::Write;
+                if i > 0 {
+                    arg.push(';');
+                }
+                let _ = write!(arg, "{} {} {} {old} {new}", p[0], p[1], p[2]);
+            }
+            arg
         });
         let mut parts = reply.as_deref().map(|r| r.split(';'));
         changes
@@ -2659,7 +2960,7 @@ impl PlayPlan {
         let mut cache = self.chunk_frames.lock().unwrap();
         let mut found = Vec::new();
         let mut hoppers = Vec::new();
-        let mut indexed = Vec::new();
+        let mut fresh = Vec::new();
         // Сохранённые чанки уже сгенерированы: мобов при генерации им не положено.
         self.populated
             .lock()
@@ -2685,15 +2986,30 @@ impl PlayPlan {
                     .map(|(p, _)| *p),
             );
             if let std::collections::hash_map::Entry::Vacant(e) = world.entry(pos) {
-                indexed.push((pos, self.collect_pois(pos.0, pos.1, &c)));
+                fresh.push(pos);
                 e.insert((c, 0));
                 cache.remove(&pos);
             }
         }
         drop(world);
         drop(cache);
-        for ((cx, cz), list) in indexed {
-            self.store_pois(cx, cz, list);
+        // Скан точек интереса — уже под замком на запись это значило бы
+        // останавливать тик на 98 тыс. блоков каждого региона с диска.
+        // Здесь достаточно чтения: столбцы уже вставлены, и читатели друг
+        // другу не мешают.
+        if !fresh.is_empty() {
+            let mut lists = Vec::with_capacity(fresh.len());
+            {
+                let world = self.edited.read().unwrap();
+                for pos in fresh {
+                    if let Some((column, _)) = world.get(&pos) {
+                        lists.push((pos, self.collect_pois(pos.0, pos.1, column)));
+                    }
+                }
+            }
+            for (pos, list) in lists {
+                self.store_pois(pos.0, pos.1, list);
+            }
         }
         self.pending_furnaces.lock().unwrap().extend(found);
         // Чанк с диска: воронки встают в очередь на ближайший тик.
@@ -2724,6 +3040,7 @@ impl PlayPlan {
         let n = column.sections.len();
         column.sky_light = vec![chunkwake_world::light::LightLayer::Uniform(0); n];
         column.block_light = vec![chunkwake_world::light::LightLayer::Uniform(0); n];
+        // Скан точек интереса — до замка: он только читает наш столбец.
         let list = self.collect_pois(x, z, &column);
         let mut world = self.edited.write().unwrap();
         if let std::collections::hash_map::Entry::Vacant(e) = world.entry((x, z)) {
@@ -2745,6 +3062,7 @@ impl PlayPlan {
     /// остаётся тёмный шов. Пачку считает `light_ring` одним
     /// `light::spread_wave`; здесь — одиночный случай (догрузка, тесты).
     #[cfg(test)]
+    #[allow(dead_code)]
     fn spread_commit(&self, x: i32, z: i32) -> Vec<(i32, i32)> {
         if self.terrain.is_none() {
             return Vec::new();
@@ -2848,24 +3166,57 @@ impl PlayPlan {
         }
     }
 
-    fn block(&self, [x, y, z]: [i32; 3]) -> Option<u32> {
+    /// Одно чтение блока: берёт замок мира (в тике лучше [`Self::with_world`],
+    /// где замок один на всю фазу).
+    #[inline]
+    fn block(&self, p: [i32; 3]) -> Option<u32> {
+        let [x, y, z] = p;
         let ry = y - self.min_y;
         if ry < 0 || ry as usize >= self.template.height() {
             return None;
         }
         let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
-        let key = (x >> 4, z >> 4);
-        let found = {
-            let world = self.edited.read().unwrap();
-            world.get(&key).map(|e| e.0.block(lx, ry as usize, lz))
-        };
-        // Диск не читается: тик видит только загруженное, как и в ванили.
-        // Плоский мир подставляет шаблон, у шума нечего подставить.
-        match found {
-            Some(state) => Some(state),
-            None if self.terrain.is_none() => Some(self.flat_block(x, y, z, lx, ry as usize, lz)),
-            None => None,
+        let columns = self.edited.read().unwrap();
+        if let Some((column, _)) = columns.get(&(x >> 4, z >> 4)) {
+            return Some(column.block(lx, ry as usize, lz));
         }
+        if self.terrain.is_some() {
+            return None;
+        }
+        drop(columns);
+        Some(Self::flat_in(
+            self.void_platform,
+            self.min_y,
+            &self.template,
+            x,
+            y,
+            z,
+            lx,
+            ry as usize,
+            lz,
+        ))
+    }
+
+    /// Мир только для чтения на время фазы: один `RwLock::read` вместо замка
+    /// в каждом `block()`.
+    ///
+    /// Тик мобов читает блоки тысячами (коробки коллизий — по 2–5 на моба в
+    /// каждом из десятков блоков), и замок на каждое чтение стоил дороже
+    /// самого поиска в карте. Здесь набор столбцов берётся один раз, а внутри
+    /// это уже обычные заимствования.
+    ///
+    /// Порядок замков не меняется: вызывающий сначала берёт свой замок
+    /// (мобы, предметы, стрелы), потом мир — как было с `block()`.
+    fn with_world<R>(&self, f: impl FnOnce(&WorldView<'_>) -> R) -> R {
+        let columns = self.edited.read().unwrap();
+        let view = WorldView {
+            columns: &columns,
+            template: &self.template,
+            min_y: self.min_y,
+            flat: self.terrain.is_none(),
+            void_platform: self.void_platform,
+        };
+        f(&view)
     }
 
     /// Пересобирает набор чанков, которые тикают: квадрат радиуса
@@ -2889,7 +3240,7 @@ impl PlayPlan {
         {
             return;
         }
-        let mut set = HashSet::new();
+        let mut set = FastSet::default();
         {
             let players = self.hub.players.lock().unwrap();
             for p in players.values() {
@@ -2903,7 +3254,7 @@ impl PlayPlan {
     }
 
     /// Набор симулируемых чанков для чтения: атомарная прибавка вместо клона.
-    fn simulated_set(&self) -> Arc<HashSet<(i32, i32)>> {
+    fn simulated_set(&self) -> Arc<FastSet<(i32, i32)>> {
         self.simulated.lock().unwrap().clone()
     }
 
@@ -2913,12 +3264,16 @@ impl PlayPlan {
     }
 
     /// Задать набор напрямую: тесты и загрузка без игроков.
+    ///
+    /// Ставит флаг работы: иначе тик решил бы, что делать нечего, и не
+    /// запустил бы подсистемы (лаборатория и тесты не имеют игроков).
     pub fn set_simulated(&self, chunks: impl IntoIterator<Item = (i32, i32)>) {
-        let set: HashSet<(i32, i32)> = chunks.into_iter().collect();
+        let set: FastSet<(i32, i32)> = chunks.into_iter().collect();
         *self.simulated.lock().unwrap() = Arc::new(set);
         // Прямая установка обходит `refresh_simulated`, поэтому ключ состава
         // сбрасывается: иначе следующий тик решил бы, что набор уже верный.
         *self.simulated_key.lock().unwrap() = None;
+        self.mark_work();
     }
 
     /// `f` по пачке на `workers` потоках, результат в исходном порядке.
@@ -2949,19 +3304,25 @@ impl PlayPlan {
     }
 
     async fn send_batch(&self, conn: &mut Connection, frames: &[Frame]) -> Result<(), NetError> {
-        let mut out = Vec::new();
-        out.extend(
-            self.hub
-                .frame(&play::chunk_batch_start(self.ids.chunk_batch_start)),
+        // Заголовки пачки кодируются один раз на пачку, а не через `hub.frame`
+        // на каждый вызов: при включённом сжатии это два лишних zlib-потока.
+        // Ёмкость считается сразу — кадры собираются без роста буфера.
+        let start = self
+            .hub
+            .frame(&play::chunk_batch_start(self.ids.chunk_batch_start));
+        let end = self.hub.frame(&play::chunk_batch_finished(
+            self.ids.chunk_batch_finished,
+            frames.len() as i32,
+        ));
+        let mut out = Vec::with_capacity(
+            start.len() + end.len() + frames.iter().map(|f| f.len()).sum::<usize>(),
         );
+        out.extend_from_slice(&start);
         for f in frames {
             out.extend_from_slice(f);
         }
-        out.extend(self.hub.frame(&play::chunk_batch_finished(
-            self.ids.chunk_batch_finished,
-            frames.len() as i32,
-        )));
-        conn.send_frames(&out).await
+        out.extend_from_slice(&end);
+        conn.send_owned_frames(out).await
     }
 
     /// Светит кольцо и пересылает тех, чей кадр уже уходил клиенту.
@@ -3053,6 +3414,7 @@ impl PlayPlan {
     /// правки, тесты). Пачку чанков ведёт поток (`play/stream.rs`) —
     /// там свет считается одним `light::spread_wave` на всю пачку.
     #[cfg(test)]
+    #[allow(dead_code)]
     fn build_chunk(&self, x: i32, z: i32) -> (Frame, Vec<(i32, i32)>) {
         let resent = if self.generate_chunk(x, z) {
             let _light = self.light_lock.lock().unwrap();
@@ -3226,6 +3588,31 @@ impl PlayPlan {
         out
     }
 
+    /// Готовый кадр «удалить сущность» для одного получателя.
+    ///
+    /// Пакет зависит только от id, поэтому собирать и сжимать его на каждого
+    /// зрителя незачем: при уходе группы сущностей из виду это десятки
+    /// одинаковых zlib-потоков за один тик. Кэш маленький и живёт один тик —
+    /// id сущностей переиспользуются, поэтому записи сбрасываются по размеру.
+    fn remove_frame(&self, entity_id: i32) -> Vec<u8> {
+        {
+            let cache = self.remove_frames.lock().unwrap();
+            if let Some(hit) = cache.get(&entity_id) {
+                return hit.as_ref().clone();
+            }
+        }
+        let frame = self.hub.frame(&play::remove_entities(
+            self.ids.remove_entities,
+            &[entity_id],
+        ));
+        let mut cache = self.remove_frames.lock().unwrap();
+        if cache.len() >= SPAWN_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(entity_id, Arc::new(frame.clone()));
+        frame
+    }
+
     /// Бросает предмет: клиентам — спавн со скоростью, дальше физику ведёт
     /// `tick_items`.
     fn drop_item(&self, from: [f64; 3], vel: [f64; 3], stack: Stack, delay: Duration) {
@@ -3233,6 +3620,7 @@ impl PlayPlan {
         let item = Dropped::new(from, vel, stack, delay);
         self.index_drop(entity_id, from);
         self.dropped.lock().unwrap().insert(entity_id, item);
+        self.mark_work();
         self.hub.send(
             None,
             play::add_entity_moving(
@@ -3281,9 +3669,9 @@ impl PlayPlan {
                 age: 0,
             };
             self.orbs.lock().unwrap().insert(id, orb);
-            for p in self.orb_packets(id, &orb) {
-                self.hub.send(None, p);
-            }
+            self.mark_work();
+            // Два пакета сферы — одной рассылкой.
+            self.hub.send_many(self.orb_packets(id, &orb));
         }
     }
 
@@ -3371,7 +3759,7 @@ impl PlayPlan {
             .collect();
         // Сетка по блокам: касание — не дальше 1.0 по осям, хватает соседних клеток.
         let cell = |p: [f64; 3]| p.map(|c| c.floor() as i32);
-        let mut grid: HashMap<[i32; 3], Vec<i32>> = HashMap::new();
+        let mut grid: FastMap<[i32; 3], Vec<i32>> = FastMap::default();
         if !ids.is_empty() {
             for (&id, o) in orbs.iter() {
                 grid.entry(cell(o.pos)).or_default().push(id);
@@ -3406,7 +3794,7 @@ impl PlayPlan {
         let gone_set: HashSet<i32> = gone.iter().copied().collect();
         self.hub.send_many(
             syncs
-                .into_iter()
+                .drain(..)
                 .filter(|s| !gone_set.contains(&s.0))
                 .flat_map(|(id, pos, vel, on_ground)| {
                     [
@@ -3605,13 +3993,24 @@ impl PlayPlan {
     /// Пересобирает индекс «чанк → предметы» по текущему набору.
     fn rebuild_drop_index(&self) {
         let dropped = self.dropped.lock().unwrap();
-        let mut index: HashMap<(i32, i32), Vec<i32>> = HashMap::new();
+        let mut cells: Vec<(i32, (i32, i32))> = Vec::with_capacity(dropped.len());
         for (&id, d) in dropped.iter() {
             let chunk = (d.pos[0].floor() as i32 >> 4, d.pos[2].floor() as i32 >> 4);
+            cells.push((id, chunk));
+        }
+        // Замок индекса — только после `dropped`: `drops_near` берёт их в том
+        // же порядке, иначе сессия игрока и тик могли бы встать намертво.
+        drop(dropped);
+        let mut index = self.dropped_by_chunk.lock().unwrap();
+        // Карта и векторы переиспользуются: новый `HashMap` на каждый тик —
+        // это аллокация на чанк с предметами, то есть на весь бой.
+        for ids in index.values_mut() {
+            ids.clear();
+        }
+        for (id, chunk) in cells {
             index.entry(chunk).or_default().push(id);
         }
-        drop(dropped);
-        *self.dropped_by_chunk.lock().unwrap() = index;
+        index.retain(|_, ids| !ids.is_empty());
     }
 
     /// Предметы в чанке и его соседях в пределах `r` чанков.
@@ -3779,40 +4178,49 @@ impl PlayPlan {
         let asleep = |d: &crate::items::Dropped| {
             !simulated.is_empty() && !simulated.contains(&chunk_of(d.pos))
         };
-        let solid = |p: [i32; 3]| p[1] >= min_y && self.block(p).is_none_or(|b| b != AIR);
-        let mut syncs = Vec::new();
-        let mut gone = Vec::new();
+        // Один замок мира на фазу: предметы проверяют опору тысячами раз.
+        let solid =
+            |w: &WorldView<'_>, p: [i32; 3]| p[1] >= min_y && w.block(p).is_none_or(|b| b != AIR);
+        // Буферы тика: не новые векторы на каждый вызов, а взятые из запаса
+        // мира — на бой с сотнями дропа это сотни аллокаций за тик.
+        let mut syncs = std::mem::take(&mut *self.items_syncs.lock().unwrap());
+        let mut gone = std::mem::take(&mut *self.items_gone.lock().unwrap());
         // Кого проверять на слияние: летящих раз в 2 тика, лежащих раз в 40 (как ванила).
-        let mut merging = Vec::new();
-        for (&id, d) in dropped.iter_mut() {
-            if asleep(d) {
-                continue;
-            }
-            if d.resting() {
-                d.age += 1;
-                if d.age.is_multiple_of(40) {
-                    merging.push(id);
-                }
-                // Раз в 4 тика: не убрали ли опору.
-                let below = [d.pos[0], d.pos[1] - 0.01, d.pos[2]].map(|c| c.floor() as i32);
-                if !d.age.is_multiple_of(4) || solid(below) {
-                    if now >= d.despawn_at {
-                        gone.push(id);
-                    }
+        let mut merging = std::mem::take(&mut *self.items_merging.lock().unwrap());
+        syncs.clear();
+        gone.clear();
+        merging.clear();
+        self.with_world(|w| {
+            for (&id, d) in dropped.iter_mut() {
+                if asleep(d) {
                     continue;
                 }
-                d.on_ground = false;
+                if d.resting() {
+                    d.age += 1;
+                    if d.age.is_multiple_of(40) {
+                        merging.push(id);
+                    }
+                    // Раз в 4 тика: не убрали ли опору.
+                    let below = [d.pos[0], d.pos[1] - 0.01, d.pos[2]].map(|c| c.floor() as i32);
+                    if !d.age.is_multiple_of(4) || solid(w, below) {
+                        if now >= d.despawn_at {
+                            gone.push(id);
+                        }
+                        continue;
+                    }
+                    d.on_ground = false;
+                }
+                let hit = items::step(d, |p| solid(w, p));
+                if hit || d.age.is_multiple_of(items::SYNC_TICKS) {
+                    syncs.push((id, d.pos, d.vel, d.on_ground));
+                }
+                if d.pos[1] < min_y as f64 - items::VOID_DEPTH || now >= d.despawn_at {
+                    gone.push(id);
+                } else if d.age.is_multiple_of(2) {
+                    merging.push(id);
+                }
             }
-            let hit = items::step(d, solid);
-            if hit || d.age.is_multiple_of(items::SYNC_TICKS) {
-                syncs.push((id, d.pos, d.vel, d.on_ground));
-            }
-            if d.pos[1] < min_y as f64 - items::VOID_DEPTH || now >= d.despawn_at {
-                gone.push(id);
-            } else if d.age.is_multiple_of(2) {
-                merging.push(id);
-            }
-        }
+        });
         for id in &gone {
             dropped.remove(id);
         }
@@ -3820,13 +4228,13 @@ impl PlayPlan {
         let mut updated = Vec::new();
         // Сетка по блокам: слияние в радиусе < 0.75, хватает соседних клеток (O(n), не O(n²)).
         let cell = |p: [f64; 3]| p.map(|c| c.floor() as i32);
-        let mut grid: HashMap<[i32; 3], Vec<i32>> = HashMap::new();
+        let mut grid: FastMap<[i32; 3], Vec<i32>> = FastMap::default();
         if !merging.is_empty() {
             for (&id, d) in dropped.iter() {
                 grid.entry(cell(d.pos)).or_default().push(id);
             }
         }
-        for a in merging {
+        for &a in &merging {
             let Some(&da) = dropped.get(&a) else { continue };
             let max = self
                 .survival
@@ -3861,14 +4269,14 @@ impl PlayPlan {
         drop(dropped);
         // Индекс по чанкам перестраивается раз в тик: предметы летают между
         // чанками и исчезают, а точечно поддерживать его в пяти местах —
-        // лишний риск. Перестройка O(предметов), зато подбор и всасывание
-        // больше не сканируют весь мир.
+        // лишний риск. Перестройка O(предметов) и без новых аллокаций: карта
+        // и её векторы переиспользуются.
         self.rebuild_drop_index();
         // Синхронизация всех сущностей тика — одной рассылкой.
-        let gone_set: HashSet<i32> = gone.iter().copied().collect();
+        let gone_set: FastSet<i32> = gone.iter().copied().collect();
         self.hub.send_many(
             syncs
-                .into_iter()
+                .drain(..)
                 .filter(|s| !gone_set.contains(&s.0))
                 .flat_map(|(id, pos, vel, on_ground)| {
                     [
@@ -3896,6 +4304,10 @@ impl PlayPlan {
             self.hub
                 .send(None, play::remove_entities(self.ids.remove_entities, &gone));
         }
+        // Буферы возвращаются в запас: следующий тик возьмёт их без аллокаций.
+        return_tick_buffer(&self.items_syncs, &mut syncs);
+        return_tick_buffer(&self.items_gone, &mut gone);
+        return_tick_buffer(&self.items_merging, &mut merging);
     }
 
     /// Тик стрел: полёт, втыкание, попадание в игроков, подбор воткнутых, исчезновение.
@@ -3917,31 +4329,25 @@ impl PlayPlan {
         let alive_ids: Vec<(Uuid, i32)> =
             players.iter().filter(|p| p.2).map(|p| (p.0, p.3)).collect();
         // Подшаги стрел (~0.1 блока) много раз проверяют одни клетки: ответ — на тик.
-        let solid_seen: std::cell::RefCell<HashMap<[i32; 3], bool>> = Default::default();
-        let water_seen: std::cell::RefCell<HashMap<[i32; 3], bool>> = Default::default();
-        let solid = |c: [i32; 3]| {
+        // Мир берётся один раз на фазу: `with_world` ниже держит один замок.
+        let solid_seen: std::cell::RefCell<FastMap<[i32; 3], bool>> = Default::default();
+        let water_seen: std::cell::RefCell<FastMap<[i32; 3], bool>> = Default::default();
+        let solid = |w: &WorldView<'_>, c: [i32; 3]| {
             if let Some(&v) = solid_seen.borrow().get(&c) {
                 return v;
             }
-            let v = match self.block(c) {
+            let v = match w.block(c) {
                 None => c[1] < self.min_y,
-                Some(s) => {
-                    let n = self.state_name(s);
-                    !matches!(
-                        n,
-                        "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | ""
-                    ) && crate::fluids::fluid_of(n, None).is_none()
-                        && !self.fluid_replaceable(c)
-                }
+                Some(s) => chunkwake_world::has_flag(s, chunkwake_world::flags::SOLID),
             };
             solid_seen.borrow_mut().insert(c, v);
             v
         };
-        let water = |c: [i32; 3]| {
+        let water = |w: &WorldView<'_>, c: [i32; 3]| {
             if let Some(&v) = water_seen.borrow().get(&c) {
                 return v;
             }
-            let v = self
+            let v = w
                 .block(c)
                 .and_then(|s| crate::fluids::state_fluid(&self.survival.placement, s))
                 .is_some_and(|f| f.kind == crate::fluids::Kind::Water);
@@ -3955,49 +4361,54 @@ impl PlayPlan {
         let simulated = self.simulated_set();
         {
             let mut arrows = self.arrows.lock().unwrap();
-            for (&id, a) in arrows.iter_mut() {
-                // Стрела в нетикающем чанке висит в воздухе, как и в ванили.
-                if !simulated.is_empty() && !simulated.contains(&chunk_of(a.pos)) {
-                    continue;
-                }
-                let punch = a.punch;
-                for hit in ar::step(a, &alive, solid, water) {
-                    match hit {
-                        ar::Hit::Pop => {
-                            broken.push((id, true, a.pos));
-                            gone.push(id);
-                        }
-                        ar::Hit::Block if a.thrown => {
-                            broken.push((id, false, a.pos));
-                            gone.push(id);
-                        }
-                        ar::Hit::Block => stuck.push((id, a.pos)),
-                        ar::Hit::Player(k, d, vel) => {
-                            if a.thrown {
+            self.with_world(|w| {
+                for (&id, a) in arrows.iter_mut() {
+                    // Стрела в нетикающем чанке висит в воздухе, как и в ванили.
+                    if !simulated.is_empty() && !simulated.contains(&chunk_of(a.pos)) {
+                        continue;
+                    }
+                    let punch = a.punch;
+                    for hit in ar::step(a, &alive, |c| solid(w, c), |c| water(w, c)) {
+                        match hit {
+                            ar::Hit::Pop => {
+                                broken.push((id, true, a.pos));
+                                gone.push(id);
+                            }
+                            ar::Hit::Block if a.thrown => {
                                 broken.push((id, false, a.pos));
                                 gone.push(id);
-                            } else {
-                                hurt.push((alive_ids[k], d, punch, vel));
-                                if a.stopped {
+                            }
+                            ar::Hit::Block => {
+                                self.target_hit(a.pos, [a.vel[0], a.vel[1], a.vel[2]]);
+                                stuck.push((id, a.pos));
+                            }
+                            ar::Hit::Player(k, d, vel) => {
+                                if a.thrown {
+                                    broken.push((id, false, a.pos));
                                     gone.push(id);
+                                } else {
+                                    hurt.push((alive_ids[k], d, punch, vel));
+                                    if a.stopped {
+                                        gone.push(id);
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                if a.stuck {
-                    if a.age >= ar::DESPAWN || a.pos[1] < self.min_y as f64 - 64.0 {
+                    if a.stuck {
+                        if a.age >= ar::DESPAWN || a.pos[1] < self.min_y as f64 - 64.0 {
+                            gone.push(id);
+                        }
+                    } else if a.pos[1] < self.min_y as f64 - 64.0 {
                         gone.push(id);
                     }
-                } else if a.pos[1] < self.min_y as f64 - 64.0 {
-                    gone.push(id);
                 }
-            }
-            gone.sort_unstable();
-            gone.dedup();
-            for id in &gone {
-                arrows.remove(id);
-            }
+                gone.sort_unstable();
+                gone.dedup();
+                for id in &gone {
+                    arrows.remove(id);
+                }
+            });
         }
         for (id, rocket, pos) in broken {
             if rocket {
@@ -4117,6 +4528,7 @@ impl PlayPlan {
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
         let (pos, vel) = (arrow.pos, arrow.vel);
         self.arrows.lock().unwrap().insert(id, arrow);
+        self.mark_work();
         let (yaw, pitch) = crate::arrows::rotation(vel);
         self.hub.send(
             None,
@@ -4646,42 +5058,86 @@ impl PlayPlan {
 
     /// Один тик мира. Отдельный метод, а не тело `spawn_tick`: его зовут и
     /// бенчмарки, и тесты, и по нему же видно, где стоит ранний выход простоя.
+    ///
+    /// Профиль по фазам снимается, когда он включён (`/debug start` или
+    /// внешний приёмник). Каждый `lap` — это чтение часов, и на простое он
+    /// дороже самого тика, поэтому в выключенном состоянии фаз не меряем.
     pub fn tick_once(&self) {
+        use chunkwake_metrics::profile::*;
         let started = Instant::now();
-        // Простой: никого нет и все очереди пусты — тик сводится к времени.
-        // Проверка дешёвая (несколько `is_empty`), а экономит весь проход.
-        if self.idle() {
-            self.advance_time();
-            self.record_tick(started);
+        if !self.profiling.load(Ordering::Relaxed) {
+            if self.idle() {
+                self.advance_time();
+                return;
+            }
+            self.run_phases(None);
+            self.recompute_work();
+            self.record_tick(started, None);
             return;
         }
+        let mut watch = Stopwatch::start();
+        // Простой: никого нет и все очереди пусты — тик сводится к времени.
+        if self.idle() {
+            self.advance_time();
+            // Вся работа такого тика — часы мира: подсистемы не запускались,
+            // и приписывать время им нельзя.
+            watch.lap(PH_TIME);
+            self.record_tick(started, Some(&watch));
+            return;
+        }
+        self.run_phases(Some(&mut watch));
+        // Работа кончилась? Следующий тик снова станет простым: пересчёт
+        // здесь, потому что только здесь видны все очереди после фаз.
+        self.recompute_work();
+        watch.lap(PH_TIME);
+        self.record_tick(started, Some(&watch));
+    }
+
+    /// Все подсистемы за тик; с профилем — с отметкой времени после каждой.
+    fn run_phases(&self, mut watch: Option<&mut chunkwake_metrics::profile::Stopwatch>) {
+        use chunkwake_metrics::profile::*;
+        let lap = |phase: usize, watch: &mut Option<&mut chunkwake_metrics::profile::Stopwatch>| {
+            if let Some(w) = watch.as_deref_mut() {
+                w.lap(phase);
+            }
+        };
         self.refresh_simulated();
+        lap(PH_REFRESH, &mut watch);
         self.tick_items();
+        lap(PH_ITEMS, &mut watch);
         self.tick_arrows();
+        lap(PH_ARROWS, &mut watch);
         self.tick_mobs();
+        lap(PH_MOBS, &mut watch);
         self.tick_animals();
+        lap(PH_ANIMALS, &mut watch);
         self.tick_orbs();
+        lap(PH_ORBS, &mut watch);
         self.tick_furnaces();
+        lap(PH_FURNACES, &mut watch);
         self.tick_campfires();
+        lap(PH_CAMPFIRES, &mut watch);
         {
             let _edit = self.world_edit.lock().unwrap();
-            self.tick_redstone();
-            self.flush_blocks();
+            self.tick_redstone(&mut watch);
         }
+        self.flush_blocks();
+        lap(PH_BLOCKS, &mut watch);
         self.flush_moves();
+        lap(PH_MOVES, &mut watch);
         if let Some(h) = self.hooks() {
             h.tick();
         }
+        lap(PH_PLUGINS, &mut watch);
         self.advance_time();
-        self.record_tick(started);
     }
 
-    /// Замер тика: MSPT, интервал и профиль `/debug`.
+    /// Замер тика: MSPT, интервал, профиль `/debug` и профиль по фазам.
     ///
     /// Интервал считается между **началами** тиков: `started` — это момент
     /// старта текущего тика, поэтому `last_interval_ms` вызывается первым,
     /// до добавления замера.
-    fn record_tick(&self, started: Instant) {
+    fn record_tick(&self, started: Instant, watch: Option<&chunkwake_metrics::profile::Stopwatch>) {
         let now = Instant::now();
         let work = now.duration_since(started).as_secs_f64() * 1000.0;
         let mut ticks = self.ticks.lock().unwrap();
@@ -4689,45 +5145,60 @@ impl PlayPlan {
         ticks.record(work, gap);
         let tick = ticks.total();
         drop(ticks);
+        let Some(watch) = watch else { return };
+        // Профиль включают командой `/debug start`: без него замок не берётся
+        // вовсе (на пустом сервере это половина цены тика).
         if let Some(profile) = self.debug_profile.lock().unwrap().as_mut() {
             profile.write(tick, work);
+        }
+        // Секунда профиля — по тем же часам, что и снимок метрик.
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        if let Some(sink) = self.profile_sink.lock().unwrap().as_ref() {
+            sink(at, &watch.marks());
         }
     }
 
     /// Ничего не может случиться в этом тике: нет игроков, сущностей и
     /// отложенной работы. `advance_time` всё равно идёт — часы мира должны
     /// тикать, даже когда в мире никого нет.
+    ///
+    /// Проверка — одно атомарное чтение: флаг ставят все, кто добавляет работу,
+    /// а в конце каждого рабочего тика он пересчитывается
+    /// ([`Self::recompute_work`]). Пробовать здесь десяток мьютексов значило
+    /// платить за простой больше, чем за сам тик.
     fn idle(&self) -> bool {
-        if !self.hub.players.lock().unwrap().is_empty() {
-            return false;
-        }
-        // `/forceload` держит чанк в симуляции и без игроков рядом.
-        if !self.forced.lock().unwrap().is_empty() {
-            return false;
-        }
-        if !self.mobs.lock().unwrap().is_empty()
+        !self.work_pending.load(Ordering::Relaxed) && self.hooks().is_none()
+    }
+
+    /// Отмечает, что появилась работа (сущность, игрок, отложенный тик).
+    fn mark_work(&self) {
+        self.work_pending.store(true, Ordering::Relaxed);
+    }
+
+    /// Пересчитывает флаг по фактическому содержимому мира: зовётся в конце
+    /// рабочего тика, когда все фазы уже отработали.
+    fn recompute_work(&self) {
+        let busy = !self.hub.players.lock().unwrap().is_empty()
+            || !self.forced.lock().unwrap().is_empty()
+            || !self.mobs.lock().unwrap().is_empty()
+            || !self.mobs_loaded.lock().unwrap().is_empty()
             || !self.dropped.lock().unwrap().is_empty()
             || !self.arrows.lock().unwrap().is_empty()
             || !self.orbs.lock().unwrap().is_empty()
-        {
-            return false;
-        }
-        if !self.furnaces.lock().unwrap().is_empty()
+            || !self.furnaces.lock().unwrap().is_empty()
+            || !self.pending_furnaces.lock().unwrap().is_empty()
             || !self.campfires.lock().unwrap().is_empty()
+            || !self.pending_campfires.lock().unwrap().is_empty()
             || !self.hopper_ticks.lock().unwrap().is_empty()
-        {
-            return false;
-        }
-        // Отложенные тики: редстоун, жидкости, отложенные правки плагинов.
-        if !self.redstone_ticks.lock().unwrap().is_empty()
+            || !self.redstone_ticks.lock().unwrap().is_empty()
             || !self.fluid_ticks.lock().unwrap().is_empty()
             || !self.deferred_updates.lock().unwrap().is_empty()
             || !self.piston_moves.lock().unwrap().is_empty()
-        {
-            return false;
-        }
-        // Плагины могут тикать сами.
-        self.hooks().is_none()
+            || !self.plates.lock().unwrap().is_empty()
+            || !self.torch_toggles.lock().unwrap().is_empty();
+        self.work_pending.store(busy, Ordering::Relaxed);
     }
 
     /// Запускает тик рассылки движений: раз в 50 мс одна пачка на всех.
@@ -4778,10 +5249,20 @@ impl PlayPlan {
             .into_iter()
             .map(|([sx, sy, sz], mut blocks)| {
                 // Последняя запись позиции побеждает: промежуточные не рассылаются.
-                let mut seen = HashSet::new();
-                blocks.reverse();
-                blocks.retain(|(local, _)| seen.insert(*local));
-                blocks.reverse();
+                // Битсет вместо `HashSet`: локальный индекс секции — 0..4096,
+                // и хэшировать его на каждый блок дороже самой проверки.
+                if blocks.len() > 1 {
+                    let mut seen = [0u64; 64];
+                    blocks.reverse();
+                    blocks.retain(|(local, _)| {
+                        let bit = &mut seen[*local as usize >> 6];
+                        let mask = 1u64 << (*local as usize & 63);
+                        let fresh = *bit & mask == 0;
+                        *bit |= mask;
+                        fresh
+                    });
+                    blocks.reverse();
+                }
                 let packet = match blocks.as_slice() {
                     [(local, state)] => {
                         let l = *local as i32;
@@ -5407,7 +5888,7 @@ impl PlayPlan {
                     let mut motion = 0u8;
                     for e in pulsed.expired {
                         let name = self.effect_name(e.id).unwrap_or_default();
-                        if self.potion_cancelled(uuid, "EXPIRATION", "REMOVED", &name, None, Some(&e)).await {
+                        if self.potion_cancelled(uuid, "EXPIRATION", "REMOVED", name, None, Some(&e)).await {
                             state.vitals.effects.push(e);
                         } else {
                             conn.send(&inv::remove_mob_effect(ids.remove_mob_effect, me.entity_id, e.id)).await?;
@@ -5535,9 +6016,21 @@ impl PlayPlan {
                             last_void = Some(Instant::now());
                             self.hurt(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, survival::VOID_DAMAGE, Cause::Void).await?;
                         }
+                        // `LivingEntity.baseTick`: за границей мира бьёт
+                        // `max(1, floor(-dist * damage))`, где `dist` — расстояние
+                        // до кромки плюс `safeZone`.
+                        if survival && let Some([x, _, z]) = m.pos {
+                            let now = self.game_time.load(Ordering::Relaxed);
+                            let border = self.vars.border_at(now);
+                            let dist = border.distance_to(now, x, z) + border.buffer as f64;
+                            let per_block = border.damage as f64;
+                            if dist < 0.0 && per_block > 0.0 {
+                                let amount = ((-dist) * per_block).floor().max(1.0) as f32;
+                                self.hurt(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, amount, Cause::OutsideBorder).await?;
+                            }
+                        }
                         if let Some([x, _, z]) = m.pos {
-                            let now = ((x.floor() as i32) >> 4, (z.floor() as i32) >> 4);
-                            if now != center {
+                            let now = ((x.floor() as i32) >> 4, (z.floor() as i32) >> 4);                            if now != center {
                                 self.stream_move(conn, &mut stream, now).await?;
                                 center = now;
                                 out.clear();
@@ -7367,7 +7860,16 @@ impl PlayPlan {
 
     /// Тик редстоуна: плиты под игроками и отложенные тики (кнопки, факелы,
     /// повторители, лампы, плиты).
-    fn tick_redstone(&self) {
+    fn tick_redstone(&self, watch: &mut Option<&mut chunkwake_metrics::profile::Stopwatch>) {
+        use chunkwake_metrics::profile::*;
+        // Отметка фазы — только когда профиль включён; без него всё равно.
+        macro_rules! lap {
+            ($phase:expr) => {
+                if let Some(w) = watch.as_deref_mut() {
+                    w.lap($phase);
+                }
+            };
+        }
         let now = self
             .server_ticks
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -7378,17 +7880,24 @@ impl PlayPlan {
             // Правка плагина в нетикающем чанке подождёт своей симуляции.
             if !simulated.is_empty() && !simulated.contains(&(p[0] >> 4, p[2] >> 4)) {
                 self.deferred_updates.lock().unwrap().push(p);
+                self.mark_work();
                 continue;
             }
             self.redstone_update(&crate::redstone::around(p));
         }
+        lap!(PH_DEFERRED);
         self.scan_plates();
+        lap!(PH_PLATES);
         self.tick_fluids(now);
+        lap!(PH_FLUIDS);
         self.finish_moves(now);
+        lap!(PH_PISTONS);
         self.tick_hoppers();
+        lap!(PH_HOPPERS);
         let due: Vec<[i32; 3]> = {
             let mut list = self.redstone_ticks.lock().unwrap();
             if list.is_empty() {
+                lap!(PH_SCHEDULED);
                 return;
             }
             // Расписание вдалеке не теряется: тик подождёт, пока чанк в симуляции.
@@ -7399,6 +7908,7 @@ impl PlayPlan {
         for pos in due {
             self.scheduled_tick(pos, now);
         }
+        lap!(PH_SCHEDULED);
     }
 
     /// Отложить тик блока в `pos` через `delay` тиков, если ещё не отложен.
@@ -7417,6 +7927,7 @@ impl PlayPlan {
             .lock()
             .unwrap()
             .schedule(pos, at, replace);
+        self.mark_work();
     }
 
     /// Игроки на плитах: нажать свободную (`checkPressed`), счёт для утяжелённых.
@@ -7471,18 +7982,21 @@ impl PlayPlan {
                     ]
                 }),
         );
-        let mut on: HashMap<[i32; 3], usize> = HashMap::new();
+        // Плиты ищутся флагом состояния: имя блока тут нужно было только для
+        // «это плита ли», а имя — это поиск в таблице и срез строки.
+        use chunkwake_world::extra as xf;
+        let mut on: FastMap<[i32; 3], usize> = FastMap::default();
         for f in feet {
             if self
                 .block(f)
-                .is_some_and(|s| crate::redstone::is_plate(self.state_name(s)))
+                .is_some_and(|s| chunkwake_world::has_extra(s, xf::PLATE))
             {
                 *on.entry(f).or_default() += 1;
             }
         }
         // Предметы жмут деревянные и утяжелённые плиты (каменные — только живые).
         // По клетке — число предметов: блок под стопкой читается один раз, а не на предмет.
-        let mut items: HashMap<[i32; 3], usize> = HashMap::new();
+        let mut items: FastMap<[i32; 3], usize> = FastMap::default();
         for d in self.dropped.lock().unwrap().values() {
             let f = [
                 d.pos[0].floor() as i32,
@@ -7493,8 +8007,8 @@ impl PlayPlan {
         }
         for (f, n) in items {
             if self.block(f).is_some_and(|s| {
-                let n = self.state_name(s);
-                crate::redstone::is_plate(n) && !crate::redstone::living_only(n)
+                chunkwake_world::has_extra(s, xf::PLATE)
+                    && !chunkwake_world::has_extra(s, xf::LIVING_PLATE)
             }) {
                 *on.entry(f).or_default() += n;
             }
@@ -7504,11 +8018,10 @@ impl PlayPlan {
         for p in fresh {
             let Some(state) = self.block(p) else { continue };
             let pl = &self.survival.placement;
-            let name = self.state_name(state);
             let pressed = pl.prop(state, "powered") == Some("true")
                 || pl.prop(state, "power").is_some_and(|v| v != "0");
             // Утяжелённая плита пересчитывает силу каждый тик, пока на ней кто-то есть.
-            if !pressed || crate::redstone::weighted(name).is_some() {
+            if !pressed || chunkwake_world::has_extra(state, xf::WEIGHTED_PLATE) {
                 self.update_plate(p);
             }
         }
@@ -7517,14 +8030,17 @@ impl PlayPlan {
     /// Пересчитать плиту (`checkPressed`): сила, звук, соседи, повторная проверка.
     fn update_plate(&self, p: [i32; 3]) {
         let Some(state) = self.block(p) else { return };
-        let name = self.state_name(state).to_owned();
-        if !crate::redstone::is_plate(&name) {
+        if !chunkwake_world::has_extra(state, chunkwake_world::extra::PLATE) {
             return;
         }
+        // Имя нужно только дальше и только одно: строки на каждую проверку
+        // плиты в тике не было смысла аллоцировать.
+        let name = self.state_name(state);
+        let weighted = chunkwake_world::has_extra(state, chunkwake_world::extra::WEIGHTED_PLATE);
         let pl = &self.survival.placement;
         let count = self.plates.lock().unwrap().get(&p).copied().unwrap_or(0);
-        let mut power = crate::redstone::plate_power(&name, count);
-        let was = if crate::redstone::weighted(&name).is_some() {
+        let mut power = crate::redstone::plate_power(name, count);
+        let was = if weighted {
             pl.prop(state, "power")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0)
@@ -7536,7 +8052,7 @@ impl PlayPlan {
         if was != power {
             power = self.redstone_event(p, was, power);
         }
-        let (old, next) = if crate::redstone::weighted(&name).is_some() {
+        let (old, next) = if weighted {
             let old: i32 = pl
                 .prop(state, "power")
                 .and_then(|v| v.parse().ok())
@@ -7554,7 +8070,7 @@ impl PlayPlan {
             )
         };
         if power > 0 {
-            self.schedule(p, crate::redstone::plate_ticks(&name));
+            self.schedule(p, crate::redstone::plate_ticks(name));
         }
         if (old > 0) == (power > 0) && old == power {
             return;
@@ -7565,7 +8081,7 @@ impl PlayPlan {
         if (old > 0) != (power > 0) {
             self.block_sound(
                 None,
-                &crate::redstone::plate_sound(&name, power > 0),
+                &crate::redstone::plate_sound(name, power > 0),
                 p,
                 1.0,
                 1.0,
@@ -7577,6 +8093,84 @@ impl PlayPlan {
 
     /// Отложенный тик блока: кнопка отжимается, факел гаснет или загорается,
     /// повторитель переключается, лампа гаснет, плита проверяется.
+    /// `TargetBlock.updateRedstoneOutput`: попадание выставляет `power` по
+    /// расстоянию от центра блока и планирует сброс.
+    ///
+    /// Ось попадания — та, куда летела стрела; `dist` считается по двум
+    /// другим осям, поэтому центр даёт 15, край — 1.
+    fn target_hit(&self, pos: [f64; 3], vel: [f64; 3]) {
+        let at = [
+            pos[0].floor() as i32,
+            pos[1].floor() as i32,
+            pos[2].floor() as i32,
+        ];
+        let Some(state) = self.block(at) else { return };
+        let name = self.state_name(state);
+        if name != "minecraft:target" {
+            return;
+        }
+        let axis = dominant_axis(vel);
+        let frac = |v: f64| (v - v.floor() - 0.5).abs();
+        let (dx, dy, dz) = (frac(pos[0]), frac(pos[1]), frac(pos[2]));
+        // `TargetBlock.getRedstoneStrength`: по оси попадания берутся две
+        // другие оси — Y → (X, Z), Z → (X, Y), X → (Y, Z).
+        let dist = match axis {
+            1 => dx.max(dz),
+            2 => dx.max(dy),
+            _ => dy.max(dz),
+        };
+        // `Mth.ceil(15 * Mth.clamp((0.5 - dist) / 0.5, 0, 1))`, минимум 1.
+        let strength = ((0.5 - dist) / 0.5).clamp(0.0, 1.0);
+        let power = (15.0 * strength).ceil().max(1.0) as i32;
+        let pl = &self.survival.placement;
+        let Some(next) = pl.with_prop(state, "power", &power.to_string()) else {
+            return;
+        };
+        self.set_block(at, next);
+        self.update_power(next, at);
+        // `ACTIVATION_TICKS_ARROWS` 20 для стрел, 8 для прочих снарядов.
+        self.schedule(at, 20);
+    }
+
+    /// `DaylightDetectorBlock.updateSignalStrength`: сила сигнала — небесный
+    /// свет в клетке, у инвертированного датчика — дополнение до 15.
+    ///
+    /// Угол солнца берётся из таймлайна `OVERWORLD_DAY`: ключевые кадры
+    /// `6000 → 0°` и `6000 → 360°` (к следующему полудню) с easing
+    /// `symmetricCubicBezier(0.362, 0.241)`. После полудня (`π..2π`) угол
+    /// тянется к `2π` с весом 0.2, и `power` умножается на косинус.
+    fn update_daylight(&self, pos: [i32; 3]) {
+        let Some(state) = self.block(pos) else { return };
+        let pl = &self.survival.placement;
+        if self.state_name(state) != "minecraft:daylight_detector" {
+            return;
+        }
+        let inverted = pl.prop(state, "inverted") == Some("true");
+        let sky = self.with_world(|w| w.sky_light_at(pos)).unwrap_or(0) as i32;
+        let mut target = sky;
+        if inverted {
+            target = 15 - target;
+        } else if target > 0 {
+            let day = self.day_time.load(Ordering::Relaxed).rem_euclid(24000) as f32;
+            let mut angle = sun_angle(day) * (std::f32::consts::PI / 180.0);
+            let offset = if angle < std::f32::consts::PI {
+                0.0
+            } else {
+                std::f32::consts::PI * 2.0
+            };
+            angle += (offset - angle) * 0.2;
+            target = (target as f32 * angle.cos()).round() as i32;
+        }
+        let target = target.clamp(0, 15);
+        let Some(next) = pl.with_prop(state, "power", &target.to_string()) else {
+            return;
+        };
+        if next != state {
+            self.set_block(pos, next);
+            self.update_power(next, pos);
+        }
+    }
+
     fn scheduled_tick(&self, pos: [i32; 3], now: u64) {
         use crate::redstone as rs;
         let Some(state) = self.block(pos) else { return };
@@ -7613,6 +8207,17 @@ impl PlayPlan {
                 self.set_block(pos, n);
                 self.redstone_update(&rs::around(back));
             }
+        } else if name == "minecraft:target" {
+            // `TargetBlock.ACTIVATION_TICKS_*`: через свой срок `power`
+            // возвращается в ноль.
+            if let Some(off) = pl.with_prop(state, "power", "0") {
+                self.set_block(pos, off);
+                self.update_power(off, pos);
+            }
+        } else if name == "minecraft:daylight_detector" {
+            // `DaylightDetectorBlock.updateSignalStrength`: цель — небесный
+            // свет в клетке, дальше `power` от угла солнца.
+            self.update_daylight(pos);
         } else if rs::is_comparator(&name) {
             let out = w.comparator_target(pos);
             let old = self.comparator_output(pos);
@@ -7737,7 +8342,7 @@ impl PlayPlan {
                     self.pop_block(p, s);
                     cache.borrow_mut().clear();
                     solved.clear();
-                    next.extend(rs::around(p));
+                    next.extend_from_slice(&rs::around(p));
                     continue;
                 }
                 if !rs::is_wire(self.state_name(s)) {
@@ -7753,7 +8358,7 @@ impl PlayPlan {
                 if n != s {
                     solved.clear();
                     put(p, n);
-                    next.extend(rs::around(p));
+                    next.extend_from_slice(&rs::around(p));
                 }
                 if !solved.contains(&p) {
                     wires.push(p);
@@ -7782,7 +8387,7 @@ impl PlayPlan {
                     && n != s
                 {
                     put(p, n);
-                    next.extend(rs::around(p));
+                    next.extend_from_slice(&rs::around(p));
                 }
             }
             for &p in &pending {
@@ -7821,6 +8426,7 @@ impl PlayPlan {
                     }
                     let now = self.server_ticks.load(std::sync::atomic::Ordering::Relaxed);
                     self.hopper_ticks.lock().unwrap().schedule(p, now, true);
+                    self.mark_work();
                 } else if name == "minecraft:dispenser" || name == "minecraft:dropper" {
                     // Фронт сигнала (и квази-связность сверху) — выдать через 4 тика.
                     let powered = w.powered(p) || w.powered(rs::step(p, 1));
@@ -8000,6 +8606,7 @@ impl PlayPlan {
         }
         let due = self.server_ticks.load(std::sync::atomic::Ordering::Relaxed) + ps::MOVE_TICKS;
         self.piston_moves.lock().unwrap().push((due, finals));
+        self.mark_work();
         self.redstone_update(&crate::redstone::around(head));
     }
 
@@ -8101,17 +8708,17 @@ impl PlayPlan {
             {
                 self.set_block(p, st);
                 self.set_block_entity(p, be);
-                touched.extend(crate::redstone::around(p));
+                touched.extend_from_slice(&crate::redstone::around(p));
                 // `ObserverBlock.onPlace`: приехал включённым без своего тика — гаснет сразу.
                 let pl = &self.survival.placement;
                 // `updateFromNeighbourShapes` → `ObserverBlock.updateShape`: выключенный
                 // наблюдатель, доехав, всегда даёт импульс — на этом держатся флай-машины.
-                if crate::redstone::is_observer(self.state_name(st))
+                if chunkwake_world::has_flag(st, chunkwake_world::flags::OBSERVER)
                     && pl.prop(st, "powered") != Some("true")
                 {
                     self.schedule(p, 2);
                 }
-                if crate::redstone::is_observer(self.state_name(st))
+                if chunkwake_world::has_flag(st, chunkwake_world::flags::OBSERVER)
                     && pl.prop(st, "powered") == Some("true")
                     && !self.redstone_ticks.lock().unwrap().contains(p)
                     && let Some(off) = pl.with_prop(st, "powered", "false")
@@ -8124,7 +8731,7 @@ impl PlayPlan {
                         output: &|q| self.comparator_output(q),
                         analog: &|q| self.analog_at(q),
                     };
-                    touched.extend(crate::redstone::around(w.observer_back(p)));
+                    touched.extend_from_slice(&crate::redstone::around(w.observer_back(p)));
                 }
             }
         }
@@ -8304,6 +8911,7 @@ impl PlayPlan {
                             now + u64::from(crate::hoppers::COOLDOWN),
                             true,
                         );
+                        self.mark_work();
                     }
                 }
                 None => {
@@ -8318,7 +8926,7 @@ impl PlayPlan {
     fn hopper_step(&self, p: [i32; 3]) -> Option<bool> {
         use crate::hoppers as hp;
         let s = self.block(p)?;
-        if self.state_name(s) != "minecraft:hopper" {
+        if !chunkwake_world::has_extra(s, chunkwake_world::extra::HOPPER) {
             return None;
         }
         let pl = &self.survival.placement;
@@ -8361,6 +8969,7 @@ impl PlayPlan {
                         now + u64::from(hp::COOLDOWN),
                         true,
                     );
+                    self.mark_work();
                 }
                 self.cont_put(&t);
                 moved = true;
@@ -8813,6 +9422,7 @@ impl PlayPlan {
             }
             let at = self.server_ticks.load(std::sync::atomic::Ordering::Relaxed) + f.kind.delay();
             self.fluid_ticks.lock().unwrap().schedule(n, at, false);
+            self.mark_work();
         }
     }
 
@@ -9023,36 +9633,19 @@ impl PlayPlan {
     /// растения, факелы, снег слоем, редстоун-пыль и подобное без коллизии.
     fn fluid_replaceable(&self, p: [i32; 3]) -> bool {
         let Some(s) = self.block(p) else { return false };
+        self.fluid_replaceable_of(s)
+    }
+
+    /// То же по состоянию блока: свет и стрелы уже держат состояние в руках.
+    fn fluid_replaceable_of(&self, s: u32) -> bool {
+        chunkwake_world::has_flag(s, chunkwake_world::flags::REPLACEABLE)
+    }
+
+    /// Имя пути состояния без пространства имён: `torch` у `minecraft:torch`.
+    #[allow(dead_code)]
+    fn state_path(&self, s: u32) -> &str {
         let n = self.state_name(s);
-        let path = n.strip_prefix("minecraft:").unwrap_or(n);
-        matches!(
-            path,
-            "short_grass"
-                | "tall_grass"
-                | "fern"
-                | "large_fern"
-                | "dead_bush"
-                | "redstone_wire"
-                | "torch"
-                | "wall_torch"
-                | "redstone_torch"
-                | "redstone_wall_torch"
-                | "lever"
-                | "rail"
-                | "tripwire"
-                | "fire"
-                | "vine"
-                | "seagrass"
-                | "snow"
-                | "dandelion"
-                | "poppy"
-                | "wheat"
-                | "carrots"
-                | "potatoes"
-                | "beetroots"
-        ) || path.ends_with("_sapling")
-            || path.ends_with("_tulip")
-            || path.ends_with("_button")
+        n.strip_prefix("minecraft:").unwrap_or(n)
     }
 
     /// `minecraft:piston[extended=false,facing=north]` (`BlockData.getAsString`).
@@ -9293,8 +9886,8 @@ impl PlayPlan {
         let face = pl.prop(source, "face").unwrap_or("wall");
         let facing = pl.prop(source, "facing").unwrap_or("north");
         let base = crate::redstone::attached(pos, face, facing);
-        let mut all = crate::redstone::around(pos);
-        all.extend(crate::redstone::around(base));
+        let mut all: Vec<[i32; 3]> = crate::redstone::around(pos).to_vec();
+        all.extend_from_slice(&crate::redstone::around(base));
         all.sort();
         all.dedup();
         self.redstone_update(&all);
@@ -10712,7 +11305,7 @@ impl PlayPlan {
                         me.entry.uuid,
                         "POTION_DRINK",
                         action,
-                        &name,
+                        name,
                         Some(&e),
                         old.as_ref(),
                     )
@@ -10802,7 +11395,7 @@ impl PlayPlan {
                     me.entry.uuid,
                     "COMMAND",
                     action,
-                    &name,
+                    name,
                     Some(&e),
                     old.as_ref(),
                 )
@@ -10826,7 +11419,7 @@ impl PlayPlan {
         self.sync_motion(conn, me.entry.uuid, me.entity_id, v, self.motion_mask(e.id))
             .await?;
         let name = self.effect_name(e.id).unwrap_or_default();
-        match survival::instant_effect(&name, e.amplifier) {
+        match survival::instant_effect(name, e.amplifier) {
             survival::Instant::Heal(n) if !v.dead => {
                 v.heal(n);
                 self.send_health(conn, v).await?;
@@ -10868,7 +11461,7 @@ impl PlayPlan {
             } else {
                 let e = targets[0];
                 let name = self.effect_name(e.id).unwrap_or_default();
-                self.potion_cancelled(me.entry.uuid, "COMMAND", "REMOVED", &name, None, Some(&e))
+                self.potion_cancelled(me.entry.uuid, "COMMAND", "REMOVED", name, None, Some(&e))
                     .await
             };
             if cancelled {
@@ -11259,6 +11852,8 @@ impl PlayPlan {
             Cause::Poison | Cause::Magic => Some(self.survival.damage_magic),
             Cause::Wither => Some(self.survival.damage_wither),
             Cause::Arrow => Some(self.survival.damage_arrow),
+            // `minecraft:outside_border` — сетевой ID из реестра.
+            Cause::OutsideBorder => Some(self.survival.damage_void),
             Cause::Generic => None,
         };
         if let Some(t) = damage_type {
@@ -11553,10 +12148,10 @@ impl PlayPlan {
                 visible.insert(e.entity_id);
             }
             (false, true) => {
-                out.extend(self.hub.frame(&play::remove_entities(
-                    self.ids.remove_entities,
-                    &[e.entity_id],
-                )));
+                // Кадр удаления одной сущности не меняется между получателями:
+                // берём его из кэша вместо кодирования и сжатия на каждого,
+                // кто её видел (при уходе в чащу это все игроки разом).
+                out.extend(self.remove_frame(e.entity_id));
                 visible.remove(&e.entity_id);
             }
             (false, false) => {}
@@ -11564,8 +12159,14 @@ impl PlayPlan {
     }
 }
 
+/// Возвращает буфер тика в запас мира: следующий тик возьмёт его пустым.
+fn return_tick_buffer<T>(slot: &Mutex<Vec<T>>, buf: &mut Vec<T>) {
+    buf.clear();
+    *slot.lock().unwrap() = std::mem::take(buf);
+}
+
 fn acknowledge_player_save(
-    pending: &mut HashMap<Uuid, PlayerSave>,
+    pending: &mut FastMap<Uuid, PlayerSave>,
     uuid: Uuid,
     written: &PlayerSave,
 ) {
@@ -11589,17 +12190,171 @@ fn chunks_around(c: (i32, i32), r: i32, skip: Option<((i32, i32), i32)>) -> Vec<
 
 #[cfg(test)]
 mod tests {
-    use super::{acknowledge_player_save, chunks_around, near};
+    use super::{acknowledge_player_save, chunks_around, dominant_axis, near};
     use crate::survival::PlayerState;
-    use std::collections::{HashMap, HashSet};
     use uuid::Uuid;
+
+    /// `DaylightDetectorBlock.updateSignalStrength`: сигнал — небесный свет,
+    /// после полудня угол тянется к `2π` и `power` множится на косинус.
+    #[test]
+    fn daylight_detector_power_matches_vanilla() {
+        let power = |sky: i32, inverted: bool, day: i64| -> i32 {
+            let mut target = sky;
+            if inverted {
+                target = 15 - target;
+            } else if target > 0 {
+                let day = day.rem_euclid(24000) as f32;
+                let mut angle = super::sun_angle(day) * (std::f32::consts::PI / 180.0);
+                let offset = if angle < std::f32::consts::PI {
+                    0.0
+                } else {
+                    std::f32::consts::PI * 2.0
+                };
+                angle += (offset - angle) * 0.2;
+                target = (target as f32 * angle.cos()).round() as i32;
+            }
+            target.clamp(0, 15)
+        };
+        // Полдень (6000): угол солнца 0, косинус 1 — полный сигнал.
+        assert_eq!(power(15, false, 6000), 15);
+        // Через сутки снова полдень — снова 15: угол замкнут на 360.
+        assert_eq!(power(15, false, 30000), 15);
+        // Полночь (18000): угол 180°, косинус −1 — датчик погас.
+        assert_eq!(power(15, false, 18000), 0);
+        // Инвертированный датчик угол не учитывает.
+        assert_eq!(power(0, true, 18000), 15);
+        assert_eq!(power(15, true, 6000), 0);
+        // Без неба сигнала нет.
+        assert_eq!(power(0, false, 6000), 0);
+    }
+
+    /// `TargetBlock.getRedstoneStrength`: центр грани даёт 15, край — 1.
+    #[test]
+    fn target_power_matches_vanilla() {
+        // Попадание по оси Y (сверху): считаются X и Z.
+        assert_eq!(dominant_axis([0.0, -1.0, 0.0]), 1);
+        assert_eq!(dominant_axis([1.0, 0.0, 0.0]), 0);
+        assert_eq!(dominant_axis([0.0, 0.0, -1.0]), 2);
+        // По оси Y сильнее всех — берём её.
+        assert_eq!(dominant_axis([0.3, -0.9, 0.2]), 1);
+
+        let power = |pos: [f64; 3], axis: usize| {
+            let frac = |v: f64| (v - v.floor() - 0.5).abs();
+            let (dx, dy, dz) = (frac(pos[0]), frac(pos[1]), frac(pos[2]));
+            // `TargetBlock.getRedstoneStrength`: по оси Y — `max(distX, distZ)`,
+            // по Z — `max(distX, distY)`, по X — `max(distY, distZ)`.
+            let dist = match axis {
+                1 => dx.max(dz),
+                2 => dx.max(dy),
+                _ => dy.max(dz),
+            };
+            let s = ((0.5 - dist) / 0.5).clamp(0.0, 1.0);
+            (15.0 * s).ceil().max(1.0) as i32
+        };
+        // Точно в центр грани: 15.
+        assert_eq!(power([0.5, 4.5, 0.5], 1), 15);
+        // Значения ниже — из формулы ванили на тех же double: `0.7 - 0.5`
+        // не ровно 0.2, поэтому `ceil` уходит на шаг вверх.
+        assert_eq!(power([0.6, 4.5, 0.5], 1), 12);
+        assert_eq!(power([0.7, 4.5, 0.5], 1), 10);
+        assert_eq!(power([0.8, 4.5, 0.5], 1), 6);
+        assert_eq!(power([0.9, 4.5, 0.5], 1), 3);
+        // На самом краю: минимум 1.
+        assert_eq!(power([0.99, 4.5, 0.5], 1), 1);
+        // Половина клетки от центра — это край грани, тоже 1.
+        assert_eq!(power([1.0, 4.5, 0.5], 1), 1);
+    }
+
+    /// Изменение зеркала в тесте: имя поля и как его поменять.
+    type LiveChange = Box<dyn Fn(&mut crate::live::Live)>;
+
+    /// Кэш снимка обязан отдавать ровно то же, что полный рендер.
+    ///
+    /// Это и есть гарантия совместимости: плагин видит те же значения в те
+    /// же моменты, меняется только то, что повторный рендер не делается.
+    #[test]
+    fn cached_state_matches_full_render() {
+        use crate::live::Live;
+        use crate::survival::Effect;
+        let mut live = Live {
+            health: 20.0,
+            food: 20,
+            saturation: 5.0,
+            exhaustion: 0.0,
+            game_mode: 0,
+            selected: 0,
+            slots: [None; crate::survival::SLOTS],
+            pos: [1.5, 64.0, -2.25],
+            yaw: 90.0,
+            pitch: 0.0,
+            effects: Vec::new(),
+            xp: Default::default(),
+        };
+        // Отпечаток меняется ровно тогда, когда меняется вывод.
+        let text = |l: &Live| {
+            l.render(
+                |id| match id {
+                    1 => Some("minecraft:stone"),
+                    _ => None,
+                },
+                |_| Some("minecraft:haste"),
+            )
+        };
+        let base = live.fingerprint();
+        assert_eq!(base, live.fingerprint(), "отпечаток детерминирован");
+
+        let mut changes: Vec<(&str, LiveChange)> = vec![
+            ("health", Box::new(|l: &mut Live| l.health = 13.0)),
+            ("food", Box::new(|l: &mut Live| l.food = 7)),
+            ("pos", Box::new(|l: &mut Live| l.pos = [2.0, 65.0, 3.0])),
+            ("yaw", Box::new(|l: &mut Live| l.yaw = 45.0)),
+            ("mode", Box::new(|l: &mut Live| l.game_mode = 1)),
+            ("selected", Box::new(|l: &mut Live| l.selected = 3)),
+            (
+                "slot",
+                Box::new(|l: &mut Live| {
+                    l.slots[36] = Some(chunkwake_protocol::inventory::Stack {
+                        item: 1,
+                        count: 5,
+                        damage: 0,
+                        extra: 0,
+                    })
+                }),
+            ),
+            (
+                "effect",
+                Box::new(|l: &mut Live| {
+                    l.effects.push(Effect {
+                        id: 2,
+                        amplifier: 1,
+                        duration: 200,
+                        ambient: false,
+                        particles: false,
+                        show_icon: true,
+                        age: 0,
+                    })
+                }),
+            ),
+        ];
+        for (what, change) in changes.drain(..) {
+            let before = text(&live);
+            let old_fp = live.fingerprint();
+            change(&mut live);
+            let after = text(&live);
+            assert_ne!(
+                before, after,
+                "{what}: снимок изменился, отпечаток обязан измениться"
+            );
+            assert_ne!(old_fp, live.fingerprint(), "{what}: отпечаток не заметил");
+        }
+    }
 
     #[test]
     fn player_snapshot_is_acknowledged_only_if_still_current() {
         let id = Uuid::nil();
         let old = PlayerState::default().save([1.0, 64.0, 1.0], 0.0, 0.0);
         let newer = PlayerState::default().save([2.0, 64.0, 1.0], 0.0, 0.0);
-        let mut pending = HashMap::from([(id, old.clone())]);
+        let mut pending = std::collections::HashMap::from_iter([(id, old.clone())]);
         // A failed write never calls acknowledge; a later snapshot must survive
         // even if the earlier write eventually completes.
         assert_eq!(pending.get(&id), Some(&old));
@@ -11653,13 +12408,13 @@ mod tests {
 
     #[test]
     fn simulation_square_covers_exactly_the_radius() {
-        let mut set = HashSet::new();
+        let mut set = super::FastSet::default();
         super::chunk_square((0, 0), 1, &mut set);
         assert_eq!(set.len(), 9, "радиус 1 — это 3×3 чанка");
         assert!(set.contains(&(1, 1)));
         assert!(!set.contains(&(2, 0)));
         // Центр со сдвигом: квадрат едет вместе с ним, без далёких чанков.
-        let mut set = HashSet::new();
+        let mut set = super::FastSet::default();
         super::chunk_square((10, -4), 2, &mut set);
         assert_eq!(set.len(), 25);
         assert!(set.contains(&(12, -2)));

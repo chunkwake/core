@@ -74,6 +74,23 @@ impl LightLayer {
         Some(layer)
     }
 
+    /// То же из `ByteArray` NBT: байты там знаковые, а раскладка нибблов та же.
+    ///
+    /// Ради этого раньше делали `iter().map(..).collect::<Vec<u8>>()` — на чанк
+    /// два слоя по 2048 байт, то есть до 48 аллокаций на регион.
+    pub fn from_i8(b: &[i8]) -> Option<Self> {
+        if b.len() != 2048 {
+            return None;
+        }
+        let mut bytes = [0u8; 2048];
+        for (dst, &src) in bytes.iter_mut().zip(b) {
+            *dst = src as u8;
+        }
+        let mut layer = LightLayer::Full(Arc::new(bytes));
+        layer.compact();
+        Some(layer)
+    }
+
     pub fn is_zero(&self) -> bool {
         match self {
             LightLayer::Uniform(v) => *v == 0,
@@ -215,6 +232,14 @@ impl<'a, A: LightAccess> Engine<'a, A> {
         }
     }
 
+    /// Запись, когда текущее значение уже известно вызывающему: `relight`
+    /// только что прочитал его тем же `cell`, и второй поиск столбца лишний.
+    fn put_known(&mut self, kind: Kind, p: [i32; 3], v: u8) {
+        if let Some(c) = self.access.column_mut(p[0] >> 4, p[2] >> 4) {
+            c.light_mut(kind)[(p[1] >> 4) as usize].set(index(p), v);
+        }
+    }
+
     /// Состояние и свет клетки внутри мира. Вне высоты и без столбца — `None`.
     fn cell(&mut self, kind: Kind, p: [i32; 3]) -> Option<(u32, u8)> {
         if p[1] < 0 || p[1] >= self.height {
@@ -227,6 +252,10 @@ impl<'a, A: LightAccess> Engine<'a, A> {
     }
 
     /// Запись ниббла, который уже отличается от текущего. Столбец создаётся только здесь.
+    ///
+    /// Оставлено для путей, где текущее значение неизвестно; BFS пишет через
+    /// [`Self::put_known`], потому что уровень только что прочитан `cell`.
+    #[allow(dead_code)]
     fn write_changed(&mut self, kind: Kind, p: [i32; 3], v: u8) {
         if let Some(c) = self.access.column_mut(p[0] >> 4, p[2] >> 4) {
             c.light_mut(kind)[(p[1] >> 4) as usize].set(index(p), v);
@@ -301,12 +330,13 @@ impl<'a, A: LightAccess> Engine<'a, A> {
                 let sky_column = kind == Kind::Sky && dir == DOWN && lvl == 15 && nl == 15;
                 if nl < lvl || sky_column {
                     // Сначала ноль: остальной BFS должен увидеть пустую клетку до излучения.
-                    self.write_changed(kind, n, 0);
+                    // Уровень `nl` уже прочитан `cell` — второй поиск столбца не нужен.
+                    self.put_known(kind, n, 0);
                     self.dec.push_back((n, nl));
                     if kind == Kind::Block {
                         let e = self.table.emission(state);
                         if e > 0 {
-                            self.write_changed(kind, n, e);
+                            self.put_known(kind, n, e);
                             self.inc.push_back(n);
                         }
                     }
@@ -340,7 +370,7 @@ impl<'a, A: LightAccess> Engine<'a, A> {
                     lvl.saturating_sub(self.table.dampening(state).max(1))
                 };
                 if new > nl {
-                    self.write_changed(kind, n, new);
+                    self.put_known(kind, n, new);
                     self.inc.push_back(n);
                 }
             }
@@ -393,8 +423,9 @@ pub fn relight_column(c: &mut ChunkColumn, table: &LightTable) {
         }
     }
     e.increase(Kind::Block);
-    drop(e);
-    drop(access);
+    // `e` держит `&mut access`, а тот — `&mut c`; ниже нужен сам `c`.
+    // Оба типа не реализуют `Drop`, поэтому заимствования заканчиваются
+    // здесь по NLL, и вызов `drop` только продлевал бы их.
 
     for l in c.sky_light.iter_mut().chain(c.block_light.iter_mut()) {
         l.compact();
@@ -493,17 +524,32 @@ struct Area<'a> {
 }
 
 impl<'a> Area<'a> {
-    fn new(columns: &'a mut HashMap<(i32, i32), ChunkColumn>, origins: impl IntoIterator<Item = (i32, i32)>) -> Self {
+    fn new(
+        columns: &'a mut HashMap<(i32, i32), ChunkColumn>,
+        origins: impl IntoIterator<Item = (i32, i32)>,
+    ) -> Self {
         let (mut x0, mut z0, mut x1, mut z1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
         for &(x, z) in columns.keys() {
             (x0, z0, x1, z1) = (x0.min(x), z0.min(z), x1.max(x), z1.max(z));
         }
-        let (w, d) = if columns.is_empty() { (0, 0) } else { (x1 - x0 + 1, z1 - z0 + 1) };
-        let mut cells: Vec<Option<(i32, i32, &mut ChunkColumn)>> = (0..w * d).map(|_| None).collect();
+        let (w, d) = if columns.is_empty() {
+            (0, 0)
+        } else {
+            (x1 - x0 + 1, z1 - z0 + 1)
+        };
+        let mut cells: Vec<Option<(i32, i32, &mut ChunkColumn)>> =
+            (0..w * d).map(|_| None).collect();
         for (&(x, z), c) in columns.iter_mut() {
             cells[((z - z0) * w + (x - x0)) as usize] = Some((x, z, c));
         }
-        let mut area = Self { x0, z0, w, d, touched: vec![false; cells.len()], cells };
+        let mut area = Self {
+            x0,
+            z0,
+            w,
+            d,
+            touched: vec![false; cells.len()],
+            cells,
+        };
         for (x, z) in origins {
             if let Some(i) = area.slot(x, z) {
                 area.touched[i] = true;
@@ -514,7 +560,12 @@ impl<'a> Area<'a> {
 
     fn slot(&self, cx: i32, cz: i32) -> Option<usize> {
         let (x, z) = (cx - self.x0, cz - self.z0);
-        (x >= 0 && z >= 0 && x < self.w && z < self.d).then(|| (z * self.w + x) as usize)
+        // Чанк вне прямоугольника области — самый частый промах (BFS смотрит
+        // за границу края мира): сравнения дешевле умножения и `Vec::get`.
+        if x < 0 || z < 0 || x >= self.w || z >= self.d {
+            return None;
+        }
+        Some((z * self.w + x) as usize)
     }
 
     /// Столбцы, где свет записан; их слои ужимаются обратно.
@@ -522,8 +573,12 @@ impl<'a> Area<'a> {
         let mut out = Vec::new();
         for (cell, touched) in self.cells.into_iter().zip(self.touched) {
             if let (Some((x, z, c)), true) = (cell, touched) {
+                // `compact` только у полных слоёв: у `Uniform` ужимать нечего,
+                // а проверок на столбец здесь сотни.
                 for l in c.sky_light.iter_mut().chain(c.block_light.iter_mut()) {
-                    l.compact();
+                    if matches!(l, LightLayer::Full(_)) {
+                        l.compact();
+                    }
                 }
                 out.push((x, z));
             }
@@ -777,7 +832,11 @@ mod tests {
         for cx in 0..2i32 {
             let mut c = ChunkColumn::flat(&[(1, 64)], 4, 0, 2, 0, true);
             // Тоннель y=10..=11 вдоль z=8, пересекающий границу x=15/16.
-            let xs: Vec<usize> = if cx == 0 { (12..16).collect() } else { (0..4).collect() };
+            let xs: Vec<usize> = if cx == 0 {
+                (12..16).collect()
+            } else {
+                (0..4).collect()
+            };
             for x in xs {
                 for y in 10..12 {
                     c.set_block(x, y, 8, 0);
@@ -870,7 +929,10 @@ mod tests {
         // Чанк 0 светится после и пишет в соседа, но ревизия чанка 1 уже
         // изменилась, поэтому запись отбрасывается — как в `commit_light`.
         let touched = spread_chunk(&mut race, (0, 0), &t);
-        assert!(touched.contains(&(1, 0)), "пролив должен был дойти до соседа");
+        assert!(
+            touched.contains(&(1, 0)),
+            "пролив должен был дойти до соседа"
+        );
         let dropped = base.clone();
         race.insert((1, 0), dropped[&(1, 0)].clone());
 

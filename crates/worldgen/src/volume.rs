@@ -48,9 +48,8 @@ impl Volume {
     /// `indexOfBlock`: индекс блока или `None`, если его нет в решётке.
     pub fn index_of(&self, x: i32, y: i32, z: i32) -> Option<usize> {
         let r = [x - self.min[0], y - self.min[1], z - self.min[2]];
-        for a in 0..3 {
-            if r[a] < 0 || r[a] >= self.size[a] * self.step[a] || r[a].rem_euclid(self.step[a]) != 0
-            {
+        for (a, &v) in r.iter().enumerate() {
+            if v < 0 || v >= self.size[a] * self.step[a] || v.rem_euclid(self.step[a]) != 0 {
                 return None;
             }
         }

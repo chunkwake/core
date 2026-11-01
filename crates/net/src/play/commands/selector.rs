@@ -613,8 +613,7 @@ fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
 }
 
 fn ends_with_ignore_case(text: &str, suffix: &str) -> bool {
-    text.as_bytes()
-        .len()
+    text.len()
         .checked_sub(suffix.len())
         .and_then(|at| text.as_bytes().get(at..))
         .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix.as_bytes()))

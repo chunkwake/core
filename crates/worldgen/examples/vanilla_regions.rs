@@ -18,6 +18,9 @@ use chunkwake_world::nbt::Compound;
 use chunkwake_world::{ChunkColumn, bits_for};
 use chunkwake_worldgen::Generator;
 use std::collections::{HashMap, HashSet};
+
+/// Разобранная блок-сущность: id, таблица лута и семя.
+type EntityMap<'a> = HashMap<[i32; 3], (&'a str, Option<&'a str>, Option<i64>)>;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -49,6 +52,7 @@ fn main() {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     jar: &Path,
     java: &Path,
@@ -440,7 +444,7 @@ fn compare(
             .map(|f| match f {
                 chunkwake_worldgen::Fill::Air => 0,
                 chunkwake_worldgen::Fill::Solid => 1,
-                chunkwake_worldgen::Fill::Water => 2,
+                chunkwake_worldgen::Fill::Liquid | chunkwake_worldgen::Fill::Water => 2,
                 chunkwake_worldgen::Fill::Lava => 3,
             })
             .collect();
@@ -449,6 +453,8 @@ fn compare(
                 air: 0,
                 water: 2,
                 lava: 3,
+                // `default_fluid` оверворлда — вода.
+                liquid: 2,
                 bedrock: u32::MAX,
                 grass: u32::MAX - 1,
                 mycelium: u32::MAX - 2,
@@ -531,13 +537,13 @@ fn compare(
     }
     if std::env::var_os("CHUNKWAKE_NAMES").is_some() {
         let mut v: Vec<_> = vanilla_names.into_iter().collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
+        v.sort_by_key(|e| std::cmp::Reverse(e.1));
         for (n, c) in v.iter().take(25) {
             println!("  {c:>6}  {n}");
         }
     }
     let mut top: Vec<_> = pairs.into_iter().collect();
-    top.sort_by(|a, b| b.1.cmp(&a.1));
+    top.sort_by_key(|e| std::cmp::Reverse(e.1));
     for ((ours, theirs, band), n) in top.iter().take(14) {
         println!(
             "  {n:>6}  наше {ours:<6} ваниль {theirs:<6} y {band}..{}",
@@ -558,7 +564,7 @@ fn fill_name(fill: chunkwake_worldgen::Fill) -> &'static str {
     match fill {
         chunkwake_worldgen::Fill::Air => "air",
         chunkwake_worldgen::Fill::Solid => "solid",
-        chunkwake_worldgen::Fill::Water => "water",
+        chunkwake_worldgen::Fill::Liquid | chunkwake_worldgen::Fill::Water => "water",
         chunkwake_worldgen::Fill::Lava => "lava",
     }
 }
@@ -726,6 +732,11 @@ fn compare_blocks(
     let (mut checked, mut bad) = (0, 0usize);
     let mut pairs: HashMap<(String, String), usize> = HashMap::new();
     let mut biome_bad = 0usize;
+    // `CHUNKWAKE_BELOOT=1` — сверка блок-сущностей контейнеров: тип,
+    // `LootTable` и `LootTableSeed` в тех же клетках.
+    let beloot = std::env::var_os("CHUNKWAKE_BELOOT").is_some();
+    let (mut be_seen, mut be_bad) = (0, 0usize);
+    let mut be_report = 0usize;
     // `CHUNKWAKE_REVERSE=1` — запрашивать чанки в обратном порядке: фичи
     // через границу чанка зависят от порядка декорации.
     let mut order = chunk_square(radius);
@@ -771,10 +782,75 @@ fn compare_blocks(
                     }
                 }
             }
+            if beloot {
+                // Контейнеры: `id`, `LootTable`, `LootTableSeed`. `components`
+                // ванила пишет всегда, у нас он пустой — сверяем только то,
+                // что задаёт содержимое.
+                let mut mine: EntityMap = HashMap::new();
+                for ([x, y, z], id, nbt) in &ours.block_entities {
+                    // Список чанка может держать и соседей: фиксируем только свои.
+                    if (x >> 4, z >> 4) != (cx, cz) {
+                        continue;
+                    }
+                    let table = nbt.get("LootTable").and_then(|t| t.as_str());
+                    let seed = nbt.get("LootTableSeed").and_then(|t| t.as_i64());
+                    mine.insert([*x, *y, *z], (id.as_str(), table, seed));
+                }
+                for (pos, be) in &want.block_entities {
+                    // Сверяем только то, что пишет наш конвейер: контейнеры
+                    // структур (`RandomizableContainer`) — по таблице и семени.
+                    let container = be.nbt.contains_key("LootTable")
+                        || [
+                            "minecraft:chest",
+                            "minecraft:trapped_chest",
+                            "minecraft:barrel",
+                            "minecraft:dispenser",
+                            "minecraft:hopper",
+                            "minecraft:decorated_pot",
+                        ]
+                        .contains(&be.id.as_str());
+                    if !container {
+                        continue;
+                    }
+                    be_seen += 1;
+                    let table = be.nbt.get("LootTable").and_then(|t| t.as_str());
+                    let seed = be.nbt.get("LootTableSeed").and_then(|t| t.as_i64());
+                    let got = mine.get(pos).copied();
+                    let same = got.is_some_and(|(id, t, s)| id == be.id && t == table && s == seed);
+                    if !same {
+                        if be_report < 64 {
+                            let block = ours
+                                .states
+                                .get(
+                                    (((pos[1] - min_y) * 16 + (pos[2] & 15)) * 16 + (pos[0] & 15))
+                                        as usize,
+                                )
+                                .map_or("?".to_owned(), |s| short(*s));
+                            println!(
+                                "    be {pos:?} ваниль {} {table:?} {seed:?} / наше {got:?} блок {block}",
+                                be.id
+                            );
+                        }
+                        be_report += 1;
+                        be_bad += 1;
+                    }
+                }
+                for (pos, (id, table, seed)) in &mine {
+                    if want.block_entities.contains_key(pos) {
+                        continue;
+                    }
+                    // Лишняя блок-сущность там, где у ванили её нет.
+                    if be_report < 64 {
+                        println!("    be {pos:?} лишняя {id} {table:?} {seed:?}");
+                    }
+                    be_report += 1;
+                    be_bad += 1;
+                }
+            }
         }
     }
     let mut top: Vec<_> = pairs.into_iter().collect();
-    top.sort_by(|a, b| b.1.cmp(&a.1));
+    top.sort_by_key(|e| std::cmp::Reverse(e.1));
     // `CHUNKWAKE_GREP=подстрока` — все пары с ней вместо первых 30.
     let grep = std::env::var("CHUNKWAKE_GREP").ok();
     let shown = top.iter().filter(|((a, b), _)| {
@@ -785,6 +861,9 @@ fn compare_blocks(
         println!("  {n:>6}  наше {a:<22} ваниль {b}");
     }
     println!("блоков расходится {bad} в {checked} чанках, клеток биомов {biome_bad}");
+    if beloot {
+        println!("контейнеров {be_seen}, расходятся {be_bad}");
+    }
     Ok(())
 }
 
@@ -902,7 +981,7 @@ fn compare_flat(
         }
     }
     let mut top: Vec<_> = pairs.into_iter().collect();
-    top.sort_by(|a, b| b.1.cmp(&a.1));
+    top.sort_by_key(|e| std::cmp::Reverse(e.1));
     for ((a, b), n) in top.iter().take(30) {
         println!("  {n:>6}  наше {a:<22} ваниль {b}");
     }

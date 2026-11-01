@@ -1739,7 +1739,11 @@ async fn benchmark(
     let (lamp_tx, mut lamp_rx) = tokio::sync::mpsc::unbounded_channel::<([i32; 3], i32, Instant)>();
     let (start_tx, start_rx) = tokio::sync::watch::channel(false);
     // `Idle` меряет сервер без подключений: ботов не запускаем вовсе.
-    let bot_count = if args.profile.needs_bots() { args.bots } else { 0 };
+    let bot_count = if args.profile.needs_bots() {
+        args.bots
+    } else {
+        0
+    };
     for i in 0..bot_count {
         let addr = addr.to_owned();
         let warmup = args.warmup;
@@ -1901,9 +1905,7 @@ async fn benchmark(
     toggle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut sample_tick = tokio::time::interval(Duration::from_secs(1));
     sample_tick.tick().await;
-    while (args.profile == BenchProfile::Idle || !tasks.is_empty())
-        && Instant::now() < deadline
-    {
+    while (args.profile == BenchProfile::Idle || !tasks.is_empty()) && Instant::now() < deadline {
         tokio::select! {
             biased;
             _ = toggle_tick.tick(), if args.profile == BenchProfile::Redstone && measurement_started.elapsed() < args.warmup + args.duration => {

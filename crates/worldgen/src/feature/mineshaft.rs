@@ -478,6 +478,7 @@ impl Piece {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn corridor(
         &self,
         pal: &Palette,
@@ -578,6 +579,7 @@ impl Piece {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn support(
         &self,
         pal: &Palette,
@@ -693,7 +695,7 @@ impl Piece {
                 mats.torch_north,
             );
         }
-        if y0 <= y1 - 1 {
+        if y0 < y1 {
             let mut posts = Vec::new();
             for y in y0..=(y1 - 1) {
                 posts.push(self.world(x0, y, z));
@@ -703,6 +705,7 @@ impl Piece {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn cobweb(
         &self,
         pal: &Palette,
@@ -724,6 +727,7 @@ impl Piece {
         self.paint(pal, level, window, mats, x, y, z, mats.cobweb);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn chest(
         &self,
         pal: &Palette,
@@ -749,9 +753,12 @@ impl Piece {
             mats.rail_ew
         };
         self.paint(pal, level, window, mats, x, y, z, rail);
+        // `createMinecart`: вагонетка с сундуком — сущность, а не блок-сущность.
+        // Сущности не пишутся, поэтому здесь только расход семени.
         r.next_raw_long();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn hang(
         &self,
         pal: &Palette,
@@ -774,6 +781,7 @@ impl Piece {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn pillar(
         &self,
         pal: &Palette,
@@ -831,6 +839,7 @@ impl Piece {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn plank_floor(
         &self,
         pal: &Palette,
@@ -851,6 +860,7 @@ impl Piece {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fill(
         &self,
         pal: &Palette,
@@ -883,6 +893,7 @@ impl Piece {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn maybe_fill(
         &self,
         pal: &Palette,
@@ -923,6 +934,7 @@ impl Piece {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn maybe_block(
         &self,
         pal: &Palette,
@@ -941,6 +953,7 @@ impl Piece {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn paint(
         &self,
         pal: &Palette,
@@ -965,6 +978,7 @@ impl Piece {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn sphere(
         &self,
         pal: &Palette,
@@ -1644,11 +1658,23 @@ pub(crate) fn fence_updates(
 ) -> Vec<([i32; 3], u32)> {
     let woods = wood_fence_ids(pal);
     let bars = block_ids(pal, "minecraft:iron_bars");
+    // `BaseTorchBlock.updateShape`: стоящий факел падает без опоры снизу.
+    let floor_torches = block_ids(pal, "minecraft:torch");
+    let wall_torches = block_ids(pal, "minecraft:wall_torch");
+    let ladders = block_ids(pal, "minecraft:ladder");
     let sides = [
         ("north", [0, 0, -1], 3usize),
         ("south", [0, 0, 1], 2),
         ("west", [-1, 0, 0], 5),
         ("east", [1, 0, 0], 4),
+    ];
+    // Опора настенного факела и лестницы: клетка `pos.relative(facing
+    // .getOpposite())`, прочна её грань, смотрящая в сторону `facing`.
+    let support = [
+        ("north", [0, 0, 1], 2usize),
+        ("south", [0, 0, -1], 3),
+        ("west", [1, 0, 0], 4),
+        ("east", [-1, 0, 0], 5),
     ];
     let mut out = Vec::new();
     for pos in posts {
@@ -1656,6 +1682,35 @@ pub(crate) fn fence_updates(
             continue;
         };
         let id = block_id(pal, current);
+        if floor_torches.contains(&id) {
+            let below = get(pos[0], pos[1] - 1, pos[2]);
+            if below.is_some_and(|b| !pal.sturdy(b, 1)) {
+                out.push((*pos, pal.defaults["minecraft:air"]));
+            }
+            continue;
+        }
+        if wall_torches.contains(&id) || ladders.contains(&id) {
+            // `WallTorchBlock.canSurvive` и `LadderBlock.canSurvive`: опора в
+            // клетке `pos.relative(facing.getOpposite())`, и прочна её грань,
+            // смотрящая в сторону `facing`.
+            let Some(facing) = pal.prop(current, "facing") else {
+                continue;
+            };
+            let found = support
+                .iter()
+                .find(|(name, _, _)| *name == facing)
+                .map(|(_, d, f)| (*d, *f));
+            let Some((delta, face)) = found else {
+                continue;
+            };
+            let Some(support) = get(pos[0] + delta[0], pos[1] + delta[1], pos[2] + delta[2]) else {
+                continue;
+            };
+            if !pal.sturdy(support, face) {
+                out.push((*pos, pal.defaults["minecraft:air"]));
+            }
+            continue;
+        }
         let is_fence = woods.contains(&id);
         let is_bars = bars.contains(&id);
         if !is_fence && !is_bars {
@@ -1684,6 +1739,91 @@ pub(crate) fn fence_updates(
         }
     }
     out
+}
+
+/// `WallBlock.sideUpdate`: стороны получают `none`/`low`/`tall`, пост `up` —
+/// `shouldRaisePost`. Формы аппроксимируются полным кубом сверху.
+pub(crate) fn wall_updates(
+    pal: &Palette,
+    posts: &[[i32; 3]],
+    get: impl Fn(i32, i32, i32) -> Option<u32>,
+) -> Vec<([i32; 3], u32)> {
+    let walls = wall_ids(pal);
+    let sides = [
+        ("north", [0, 0, -1], 3usize),
+        ("south", [0, 0, 1], 2),
+        ("west", [-1, 0, 0], 5),
+        ("east", [1, 0, 0], 4),
+    ];
+    let mut out = Vec::new();
+    for pos in posts {
+        let Some(current) = get(pos[0], pos[1], pos[2]) else {
+            continue;
+        };
+        if !walls.contains(&block_id(pal, current)) {
+            continue;
+        }
+        // `aboveShape` — нижняя грань блока сверху. Тестовая грань стены — узкая
+        // полоса 2×9 в сторону `dir`, её закрывает полный куб или рука стены
+        // сверху в ту же сторону. Пост 8×8 полосу не накрывает.
+        let above = get(pos[0], pos[1] + 1, pos[2]);
+        let above_id = above.map(|a| block_id(pal, a));
+        let above_full = above.is_some_and(|a| pal.is_full_cube(a));
+        let mut state = current;
+        for (prop, delta, face) in sides {
+            let Some(neighbor) = get(pos[0] + delta[0], pos[1] + delta[1], pos[2] + delta[2])
+            else {
+                continue;
+            };
+            let connects = walls.contains(&block_id(pal, neighbor)) || pal.sturdy(neighbor, face);
+            let arm = above_id.is_some_and(|id| walls.contains(&id))
+                && above.is_some_and(|a| pal.prop(a, prop) != Some("none"));
+            let value = if !connects {
+                "none"
+            } else if above_full || arm {
+                "tall"
+            } else {
+                "low"
+            };
+            if let Some(next) = pal.with_prop(state, prop, value) {
+                state = next;
+            }
+        }
+        // `shouldRaisePost`: сосед сверху с постом → пост; угол → пост;
+        // высокая пара по одной оси → без поста; иначе навес закрывает.
+        let above_post = above.is_some_and(|a| {
+            walls.contains(&block_id(pal, a)) && pal.prop(a, "up") == Some("true")
+        });
+        let side = |prop: &str| pal.prop(state, prop).unwrap_or("none");
+        let (n, e, s, w) = (side("north"), side("east"), side("south"), side("west"));
+        let corner = (n == "none" && s == "none" && w == "none" && e == "none")
+            || ((n == "none") != (s == "none"))
+            || ((w == "none") != (e == "none"));
+        let high = (n == "tall" && s == "tall") || (e == "tall" && w == "tall");
+        let up = if above_post || corner {
+            true
+        } else if high {
+            false
+        } else {
+            above_full || above_post
+        };
+        if let Some(next) = pal.with_prop(state, "up", if up { "true" } else { "false" }) {
+            state = next;
+        }
+        if state != current {
+            out.push((*pos, state));
+        }
+    }
+    out
+}
+
+/// `shouldRaisePost`: пост есть у угла, у стены с высокой парой и под навесом.
+fn wall_ids(pal: &Palette) -> HashSet<u32> {
+    pal.blocks
+        .iter()
+        .filter(|(name, _)| name.ends_with("_wall"))
+        .map(|(_, (id, _))| *id)
+        .collect()
 }
 
 fn block_ids(pal: &Palette, name: &str) -> HashSet<u32> {

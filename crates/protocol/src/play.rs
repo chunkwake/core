@@ -684,6 +684,7 @@ pub fn level_particles(
 ///
 /// Порядок полей тела — порядок `STREAM_CODEC` самого варианта: id типа
 /// пишется кодеком реестра, дальше идут поля опций.
+#[allow(clippy::too_many_arguments)]
 pub fn level_particles_with(
     id: i32,
     particle: i32,

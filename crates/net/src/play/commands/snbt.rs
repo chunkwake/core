@@ -219,14 +219,14 @@ impl<'a> P<'a> {
             return Some(Tag::Byte(0));
         }
         let token = self.raw_token()?;
-        Some(number_tag(&token).unwrap_or_else(|| Tag::String(token)))
+        Some(number_tag(&token).unwrap_or(Tag::String(token)))
     }
 
     fn word(&mut self, lit: &str) -> bool {
         self.skip();
         let rest = &self.s[self.i..];
-        if rest.starts_with(lit) {
-            let after = rest[lit.len()..].chars().next();
+        if let Some(tail) = rest.strip_prefix(lit) {
+            let after = tail.chars().next();
             if after.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_') {
                 self.i += lit.len();
                 return true;

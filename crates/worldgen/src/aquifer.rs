@@ -43,16 +43,18 @@ pub struct Samplers {
     pub surface: Arc<S>,
 }
 
-fn global(sea: i32, y: i32) -> Status {
+fn global(sea: i32, y: i32, default_fluid: Fluid) -> Status {
     if y < LAVA_LEVEL.min(sea) {
         Status {
             level: LAVA_LEVEL,
             fluid: Fluid::Lava,
         }
     } else {
+        // `createFluidPicker`: `new FluidStatus(seaLevel, settings.defaultFluid())`,
+        // в Аду это лава, а не вода.
         Status {
             level: sea,
-            fluid: Fluid::Water,
+            fluid: default_fluid,
         }
     }
 }
@@ -117,9 +119,12 @@ fn clampd(v: f64, lo: f64, hi: f64) -> f64 {
 }
 
 pub struct Aquifer<'a> {
-    s: &'a Samplers,
+    /// `None` — `Aquifer.createDisabled`: только `globalFluidPicker`, без шума.
+    s: Option<&'a Samplers>,
     random: Positional,
     sea: i32,
+    /// `default_fluid` настроек: в Аду лава.
+    default_fluid: Fluid,
     min_grid: [i32; 3],
     size_x: i32,
     size_z: i32,
@@ -130,7 +135,39 @@ pub struct Aquifer<'a> {
 }
 
 impl<'a> Aquifer<'a> {
-    pub fn new(s: &'a Samplers, random: Positional, sea: i32, ctx: &mut Ctx, v: &Volume) -> Self {
+    /// `Aquifer.createDisabled(globalFluidPicker)`: у Нижнего мира и Края
+    /// акуиферов нет, жидкость выбирает только глобальный подбор.
+    pub fn disabled(sea: i32, v: &Volume, default_fluid: Fluid) -> Self {
+        Self {
+            s: None,
+            random: Positional {
+                lo: 0,
+                hi: 0,
+                legacy: false,
+            },
+            sea,
+            default_fluid,
+            min_grid: [0; 3],
+            size_x: 0,
+            size_z: 0,
+            cache: Vec::new(),
+            locations: Vec::new(),
+            skip_above_y: v.max_block(1),
+            surface_cache: HashMap::new(),
+        }
+    }
+
+    pub fn new(
+        s: Option<&'a Samplers>,
+        random: Positional,
+        sea: i32,
+        default_fluid: Fluid,
+        ctx: &mut Ctx,
+        v: &Volume,
+    ) -> Self {
+        let Some(s) = s else {
+            return Self::disabled(sea, v, default_fluid);
+        };
         let min_x = grid_xz(v.min[0] - 5);
         let max_x = grid_xz(v.max_block(0) - 5) + 1;
         let min_y = grid_y(v.min[1] + 1) - 1;
@@ -142,9 +179,10 @@ impl<'a> Aquifer<'a> {
         let size_z = max_z - min_z + 1;
         let total = (size_x * size_y * size_z) as usize;
         let mut a = Self {
-            s,
+            s: Some(s),
             random,
             sea,
+            default_fluid,
             min_grid: [min_x, min_y, min_z],
             size_x,
             size_z,
@@ -165,6 +203,11 @@ impl<'a> Aquifer<'a> {
         a
     }
 
+    /// `skipSamplingAboveY`: выше этой высоты акуифер не считается.
+    pub fn skip_above(&self) -> i32 {
+        self.skip_above_y
+    }
+
     fn max_surface_level(&mut self, ctx: &mut Ctx, x0: i32, z0: i32, x1: i32, z1: i32) -> i32 {
         let (qx0, qx1, qz0, qz1) = (x0 >> 2, x1 >> 2, z0 >> 2, z1 >> 2);
         let v = Volume::new(
@@ -173,7 +216,10 @@ impl<'a> Aquifer<'a> {
             [4, 1, 4],
         );
         let mut b = vec![0f32; v.len()];
-        self.s.surface.volume(ctx, &mut b, &v);
+        self.s
+            .expect("aquifer samplers")
+            .surface
+            .volume(ctx, &mut b, &v);
         let mut max = i32::MIN;
         for z in 0..v.size[2] {
             for x in 0..v.size[0] {
@@ -191,7 +237,12 @@ impl<'a> Aquifer<'a> {
         if let Some(&l) = self.surface_cache.get(&(qx, qz)) {
             return l;
         }
-        let l = (self.s.surface.value(ctx, qx, 0, qz) as f64).floor() as i32;
+        let l = (self
+            .s
+            .expect("aquifer samplers")
+            .surface
+            .value(ctx, qx, 0, qz) as f64)
+            .floor() as i32;
         self.surface_cache.insert((qx, qz), l);
         l
     }
@@ -215,7 +266,11 @@ impl<'a> Aquifer<'a> {
         if density > 0.0 {
             return None;
         }
-        let g = global(self.sea, y);
+        let Some(_) = self.s else {
+            // `createDisabled.computeSubstance`: `globalFluidPicker.at(blockY)`.
+            return Some(global(self.sea, y, self.default_fluid).at(y));
+        };
+        let g = global(self.sea, y, self.default_fluid);
         if y > self.skip_above_y {
             return Some(g.at(y));
         }
@@ -267,7 +322,9 @@ impl<'a> Aquifer<'a> {
         if sim12 <= 0.0 {
             return Some(fluid);
         }
-        if fluid == Fluid::Water && global(self.sea, y - 1).at(y - 1) == Fluid::Lava {
+        if fluid == Fluid::Water
+            && global(self.sea, y - 1, self.default_fluid).at(y - 1) == Fluid::Lava
+        {
             return Some(fluid);
         }
         let mut barrier = f64::NAN;
@@ -328,7 +385,11 @@ impl<'a> Aquifer<'a> {
             0.0
         } else {
             if barrier.is_nan() {
-                *barrier = self.s.barrier.value(ctx, x, y, z) as f64;
+                *barrier = self
+                    .s
+                    .expect("aquifer samplers")
+                    .barrier
+                    .value(ctx, x, y, z) as f64;
             }
             *barrier
         };
@@ -346,7 +407,7 @@ impl<'a> Aquifer<'a> {
     }
 
     fn compute_fluid(&mut self, ctx: &mut Ctx, x: i32, y: i32, z: i32) -> Status {
-        let g = global(self.sea, y);
+        let g = global(self.sea, y, self.default_fluid);
         let mut lowest = i32::MAX;
         let top = y + 12;
         let bottom = y - 12;
@@ -362,7 +423,7 @@ impl<'a> Aquifer<'a> {
             }
             let pokes = top > adjusted;
             if pokes || start {
-                let at_surface = global(self.sea, adjusted);
+                let at_surface = global(self.sea, adjusted, self.default_fluid);
                 if at_surface.at(adjusted) != Fluid::Air {
                     if start {
                         center_under = true;
@@ -392,7 +453,13 @@ impl<'a> Aquifer<'a> {
         lowest: i32,
         center_under: bool,
     ) -> i32 {
-        let (partial, full) = if self.s.exclusion.value(ctx, x, y, z) > 0.0 {
+        let (partial, full) = if self
+            .s
+            .expect("aquifer samplers")
+            .exclusion
+            .value(ctx, x, y, z)
+            > 0.0
+        {
             (-1.0, -1.0)
         } else {
             let below = lowest + 8 - y;
@@ -401,7 +468,14 @@ impl<'a> Aquifer<'a> {
             } else {
                 0.0
             };
-            let noise = clampd(self.s.floodedness.value(ctx, x, y, z) as f64, -1.0, 1.0);
+            let noise = clampd(
+                self.s
+                    .expect("aquifer samplers")
+                    .floodedness
+                    .value(ctx, x, y, z) as f64,
+                -1.0,
+                1.0,
+            );
             let full_threshold = map(factor, 1.0, 0.0, -0.3, 0.8);
             let partial_threshold = map(factor, 1.0, 0.0, -0.8, 0.4);
             (noise - partial_threshold, noise - full_threshold)
@@ -411,7 +485,12 @@ impl<'a> Aquifer<'a> {
         } else if partial > 0.0 {
             let (cx, cy, cz) = (x.div_euclid(16), y.div_euclid(40), z.div_euclid(16));
             let middle = cy * 40 + 20;
-            let spread = (self.s.spread.value(ctx, cx, cy, cz) * 10.0) as f64;
+            let spread = (self
+                .s
+                .expect("aquifer samplers")
+                .spread
+                .value(ctx, cx, cy, cz)
+                * 10.0) as f64;
             let quantized = (spread / 3.0).floor() as i32 * 3;
             lowest.min(middle + quantized)
         } else {
@@ -430,7 +509,11 @@ impl<'a> Aquifer<'a> {
     ) -> Fluid {
         if level <= -10 && level != WAY_BELOW_MIN_Y && g.fluid != Fluid::Lava {
             let (cx, cy, cz) = (x.div_euclid(64), y.div_euclid(40), z.div_euclid(64));
-            let lava = self.s.lava.value(ctx, cx, cy, cz) as f64;
+            let lava = self
+                .s
+                .expect("aquifer samplers")
+                .lava
+                .value(ctx, cx, cy, cz) as f64;
             if lava.abs() > 0.3 {
                 return Fluid::Lava;
             }

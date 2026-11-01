@@ -1,8 +1,11 @@
 //! Деревни и пиллагерские аванпосты: `random_spread`, пулы и `JigsawPlacement`.
 //! Сундуки остаются состояниями блоков, лут и мобы не пишутся.
 
+use super::mansion;
 use super::mineshaft::{self, Cfg as ShaftCfg};
 use super::monument;
+use super::ocean_ruin;
+use super::portal;
 use super::pyramid::{self, Which};
 use super::shore::{self, Body};
 use super::stronghold;
@@ -10,10 +13,13 @@ use super::template::{self, JigInfo, Processor, ROTS, Rot, Template};
 use super::{Bits, Features, Legacy, Level, Palette, Worldgen};
 use serde_json::Value;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+
+/// Кэш раскладки структуры по (набор, x, z).
+type LayoutCache = Mutex<HashMap<(usize, i32, i32), Option<Arc<Layout>>>>;
 
 /// Столбцы мира для высоты старта и проверки биома. Высота — без бороды
 /// и без карверов (`getBaseHeight`).
@@ -39,6 +45,8 @@ struct BeardBox {
     ground: i32,
     /// `TerrainAdjustment.BURY`. Иначе коробка считается как `beard_thin`.
     bury: bool,
+    /// `TerrainAdjustment.ENCAPSULATE`: свой `dy` и половинный масштаб по XZ.
+    encapsulate: bool,
 }
 
 /// Добавка `beard_thin` к финальной плотности. Пустая ничего не меняет.
@@ -62,7 +70,11 @@ impl Beard {
         for b in &self.boxes {
             let dx = 0.max((b.min[0] - x).max(x - b.max[0]));
             let dz = 0.max((b.min[2] - z).max(z - b.max[2]));
-            if b.bury {
+            if b.encapsulate {
+                // `ENCAPSULATE`: `dy` от границ коробки, все轴 вполовину.
+                let dy = 0.max((b.min[1] - y).max(y - b.max[1]));
+                sum += bury_contrib(dx as f32 / 2.0, dy as f32 / 2.0, dz as f32 / 2.0) * 0.8;
+            } else if b.bury {
                 let dy = (y - b.ground) as f32 / 2.0;
                 sum += bury_contrib(dx as f32, dy, dz as f32);
             } else {
@@ -157,6 +169,12 @@ enum Elem {
     Monument(Arc<monument::Piece>),
     /// Кусок крепости.
     Stronghold(Arc<stronghold::Piece>),
+    /// Кусок лесного особняка.
+    Mansion(Arc<mansion::Piece>),
+    /// Руины портала.
+    Portal(Arc<portal::Piece>),
+    /// Куски океанской руины.
+    Ruin(Arc<ocean_ruin::Piece>),
 }
 
 impl Elem {
@@ -170,7 +188,10 @@ impl Elem {
             | Self::Shore(_)
             | Self::Shaft(_)
             | Self::Monument(_)
-            | Self::Stronghold(_) => true,
+            | Self::Stronghold(_)
+            | Self::Mansion(_)
+            | Self::Portal(_)
+            | Self::Ruin(_) => true,
         }
     }
 
@@ -239,6 +260,18 @@ impl Elem {
                 piece.place(&features.palette, level, r, window);
                 true
             }
+            Self::Mansion(piece) => {
+                piece.place(&features.palette, level, r, window);
+                true
+            }
+            Self::Portal(piece) => {
+                piece.place(&features.palette, level, r, window);
+                true
+            }
+            Self::Ruin(piece) => {
+                piece.place(&features.palette, level, r, window, features.seed);
+                true
+            }
         }
     }
 }
@@ -274,6 +307,20 @@ struct Kind {
     monument: Option<HashSet<u32>>,
     /// Крепость: старт — членство в кольцах, куски собираются отдельно.
     stronghold: bool,
+    /// Особняк: сетка-лабиринт из шаблонов, шаблоны грузятся при загрузке.
+    mansion: bool,
+    /// Руины портала: наборы размещения.
+    portal: Option<Vec<portal::Setup>>,
+    /// Океанская руина: тёплая или холодная.
+    ruin: Option<ocean_ruin::Cfg>,
+    /// `start_height` jigsaw: своя высота вместо `WORLD_SURFACE_WG`.
+    start_height: Option<(i32, i32)>,
+    /// `ENCAPSULATE` вместо `beard_thin`.
+    encapsulate: bool,
+    /// `pool_aliases`: связки, раскрываются один раз в точку старта.
+    aliases: Vec<PoolAlias>,
+    /// `dimension_padding`: отступ от низа и верха мира.
+    padding: (i32, i32),
 }
 
 struct Set {
@@ -304,22 +351,30 @@ struct RingSlot {
     at: Option<(i32, i32)>,
 }
 
-struct Piece {
+pub(crate) struct Piece {
     element: Arc<Elem>,
-    pos: [i32; 3],
+    pub(crate) pos: [i32; 3],
     rot: Rot,
     ground: i32,
-    min: [i32; 3],
-    max: [i32; 3],
+    pub(crate) min: [i32; 3],
+    pub(crate) max: [i32; 3],
     rigid: bool,
     junctions: Vec<[i32; 3]>,
 }
 
-struct Layout {
-    pieces: Vec<Piece>,
+pub(crate) struct Layout {
+    pub(crate) pieces: Vec<Piece>,
     beard: bool,
     /// `TerrainAdjustment.BURY`, отдельно от `beard_thin`.
     bury: bool,
+    /// После установки кусков нужны постаменты (`WoodlandMansionStructure.afterPlace`).
+    mansion: bool,
+    /// Руины портала: кусок ставится своим кодом (`RuinedPortalPiece.postProcess`).
+    portal: bool,
+    /// Океанская руина: высота считается при постановке.
+    ruin: bool,
+    /// `ENCAPSULATE`: коробка входит в бороду с половинным масштабом.
+    encapsulate: bool,
     step: i32,
     seed_index: i32,
 }
@@ -328,8 +383,14 @@ struct Layout {
 pub(crate) struct Structures {
     sets: Vec<Set>,
     pools: HashMap<String, Pool>,
+    /// Шаблоны `woodland_mansion/*`, по имени без префикса.
+    templates: HashMap<String, Arc<template::Template>>,
+    /// Шаблоны руин портала.
+    portals: portal::Loaded,
+    /// Шаблоны океанских руин.
+    ruins: ocean_ruin::Loaded,
     empty: Arc<Elem>,
-    cache: Mutex<HashMap<(usize, i32, i32), Option<Arc<Layout>>>>,
+    cache: LayoutCache,
     /// Кольца крепости на сид мира. Финальный чанк заполняется по мере надобности.
     ring_cache: Mutex<HashMap<i64, Vec<RingSlot>>>,
     /// Тег `minecraft:village` → id структур из `tags/worldgen/structure`.
@@ -356,6 +417,7 @@ impl Structures {
             templates: HashMap::new(),
             features: HashMap::new(),
             seeds: feature_seeds(data_dir)?,
+            alias_names: HashSet::new(),
         };
         let mut sets = Vec::new();
         for name in [
@@ -370,6 +432,10 @@ impl Structures {
             "minecraft:mineshafts",
             "minecraft:ocean_monuments",
             "minecraft:strongholds",
+            "minecraft:woodland_mansions",
+            "minecraft:ruined_portals",
+            "minecraft:ocean_ruins",
+            "minecraft:trial_chambers",
         ] {
             sets.push(loader.set(name)?);
         }
@@ -382,6 +448,9 @@ impl Structures {
         Ok(Self {
             sets,
             pools: loader.pools,
+            templates: load_mansion_templates(data_dir, palette)?,
+            portals: portal::load(data_dir, palette)?,
+            ruins: ocean_ruin::load(data_dir, palette)?,
             empty: Arc::new(Elem::Empty),
             cache: Mutex::new(HashMap::new()),
             ring_cache: Mutex::new(HashMap::new()),
@@ -398,7 +467,7 @@ impl Structures {
     pub(crate) fn beard_at(&self, columns: &dyn Columns, cx: i32, cz: i32) -> Beard {
         let mut beard = Beard::default();
         for (_, _, _, layout) in self.nearby(cx, cz, REACH, columns) {
-            if !layout.beard && !layout.bury {
+            if !layout.beard && !layout.bury && !layout.encapsulate {
                 continue;
             }
             for piece in &layout.pieces {
@@ -408,6 +477,7 @@ impl Structures {
                         max: piece.max,
                         ground: piece.min[1] + piece.ground,
                         bury: layout.bury,
+                        encapsulate: layout.encapsulate,
                     });
                 }
                 if layout.beard {
@@ -517,9 +587,7 @@ impl Structures {
         }
         let n = self.sets[si].kinds.len();
         let accept = |ki: usize| -> Option<Option<[i32; 3]>> {
-            if self.kind_starts(si, ki, sx, sz, columns).is_none() {
-                return None;
-            }
+            self.kind_starts(si, ki, sx, sz, columns)?;
             if !wanted.contains(&self.sets[si].kinds[ki].name) {
                 return Some(None);
             }
@@ -580,10 +648,42 @@ impl Structures {
             let biome = columns.biome_at(sx * 16, 0, sz * 16)?;
             return kind.biomes.contains(&biome).then_some(());
         }
+        if kind.mansion {
+            return mansion_start(kind, sx, sz, columns.seed(), columns).map(|_| ());
+        }
+        if kind.ruin.is_some() {
+            return ocean_ruin::can_start(columns, sx, sz, &kind.biomes);
+        }
+        if kind.portal.is_some() {
+            let piece = portal::build(
+                &self.portals,
+                kind.portal.as_ref()?,
+                sx,
+                sz,
+                columns.seed(),
+                columns,
+            )?;
+            // `isValidBiome` смотрит биом в точке старта — в ней же стоит шаблон.
+            let biome = columns.biome_at(piece.origin[0], piece.origin[1], piece.origin[2])?;
+            return kind.biomes.contains(&biome).then_some(());
+        }
         let mut rng = Legacy::new(0);
         rng.set_large_feature_seed(columns.seed(), sx, sz);
+        let planned_y = kind.start_height.map(|(lo, hi)| {
+            if lo > hi {
+                lo
+            } else {
+                rng.between_inclusive(lo, hi)
+            }
+        });
         let rot = ROTS[rng.next_int_bound(4) as usize];
-        let pool = self.pools.get(&kind.start_pool)?;
+        let alias_map = resolve_aliases(
+            &kind.aliases,
+            [sx * 16, planned_y.unwrap_or(0), sz * 16],
+            columns.seed(),
+        );
+        let start_name = aliased(&alias_map, &kind.start_pool);
+        let pool = self.pools.get(&start_name)?;
         let element = pick(&self.empty, pool, &mut rng).clone();
         if element.is_empty() {
             return None;
@@ -592,13 +692,15 @@ impl Structures {
         let (min, max) = bounds(&element, origin, rot)?;
         let center_x = (max[0] + min[0]) / 2;
         let center_z = (max[2] + min[2]) / 2;
+        // `isValidBiome` у jigsaw смотрит точку старта: `start_height` плюс
+        // проекция на карту высот, а без проекции — просто `start_height`.
         let stub_y = if kind.project {
             if !columns.column_has(center_x, center_z, &kind.biomes) {
                 return None;
             }
-            columns.base_height(center_x, center_z)
+            planned_y.unwrap_or(0) + columns.base_height(center_x, center_z)
         } else {
-            0
+            planned_y.unwrap_or(0)
         };
         let biome = columns.biome_at(center_x, stub_y, center_z)?;
         kind.biomes.contains(&biome).then_some(())
@@ -642,6 +744,7 @@ impl Structures {
 
     /// Куски, чья коробка задевает декорируемый чанк. Перед кусками одной
     /// структуры генератор сбрасывается `setFeatureSeed` её индекса.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn place(
         &self,
         features: &Features,
@@ -679,6 +782,20 @@ impl Structures {
                     continue;
                 }
                 piece.element.place(features, level, piece, r, window);
+            }
+            // Руины портала и океанские руины ставятся своими Elem; общих
+            // действий после кусков у них нет.
+            let _ = (layout.portal, layout.ruin);
+            if layout.mansion {
+                let boxes: Vec<([i32; 3], [i32; 3])> =
+                    layout.pieces.iter().map(|p| (p.min, p.max)).collect();
+                mansion::after_place(
+                    &features.palette,
+                    level,
+                    &boxes,
+                    window,
+                    features.palette.defaults["minecraft:cobblestone"],
+                );
             }
         }
     }
@@ -840,32 +957,63 @@ impl Structures {
         if kind.stronghold {
             return self.assemble_stronghold(&kind, sx, sz, seed, columns);
         }
+        if kind.mansion {
+            return self.assemble_mansion(&kind, sx, sz, seed, columns);
+        }
+        if kind.portal.is_some() {
+            return self.assemble_portal(&kind, sx, sz, seed, columns);
+        }
+        if kind.ruin.is_some() {
+            return self.assemble_ruin(&kind, sx, sz, seed, columns);
+        }
         let mut rng = Legacy::new(0);
         rng.set_large_feature_seed(seed, sx, sz);
+        // `JigsawStructure.findGenerationPoint`: `start_height.sample` идёт
+        // ПЕРВЫМ броском, а `Rotation.getRandom` — уже внутри `addPieces`.
+        let planned_y = kind.start_height.map(|(lo, hi)| {
+            if lo > hi {
+                lo
+            } else {
+                rng.between_inclusive(lo, hi)
+            }
+        });
         let rot = ROTS[rng.next_int_bound(4) as usize];
-        let pool = self.pools.get(&kind.start_pool)?;
+        let origin = [sx * 16, 0, sz * 16];
+        // `PoolAliasLookup.create(poolAliases, startPos, seed)`: `startPos` — угол
+        // чанка с уже выбранной высотой.
+        let alias_map = resolve_aliases(
+            &kind.aliases,
+            [origin[0], planned_y.unwrap_or(0), origin[2]],
+            seed,
+        );
+        let start_name = aliased(&alias_map, &kind.start_pool);
+        let pool = self.pools.get(&start_name)?;
         let element = pick(&self.empty, pool, &mut rng).clone();
         if element.is_empty() {
             return None;
         }
-        let origin = [sx * 16, 0, sz * 16];
         let (mut min, mut max) = bounds(&element, origin, rot)?;
         let center_x = (max[0] + min[0]) / 2;
         let center_z = (max[2] + min[2]) / 2;
         let mut pos = origin;
-        let stub_y = if kind.project {
-            if !columns.column_has(center_x, center_z, &kind.biomes) {
-                return None;
-            }
-            let surface = columns.base_height(center_x, center_z);
+        let stub_y = {
+            // `JigsawPlacement.addPieces`: `bottomY` — либо `start_height`,
+            // либо `startPos.y + firstFreeHeight` по проекции. Проекция
+            // прибавляется к высоте старта, а не заменяет её.
             let ground_y = min[1] + 1;
-            let dy = surface - ground_y;
+            let bottom_y = if kind.project {
+                if !columns.column_has(center_x, center_z, &kind.biomes) {
+                    return None;
+                }
+                planned_y.unwrap_or(0) + columns.base_height(center_x, center_z)
+            } else {
+                planned_y?
+            };
+            let dy = bottom_y - ground_y;
             min[1] += dy;
             max[1] += dy;
             pos[1] += dy;
-            surface
-        } else {
-            0
+            bottom_y
         };
         let biome = columns.biome_at(center_x, stub_y, center_z)?;
         if !kind.biomes.contains(&biome) {
@@ -885,12 +1033,12 @@ impl Structures {
         if kind.size > 0 {
             let allowed_min = [
                 center_x - kind.horizontal,
-                (stub_y - kind.vertical).max(columns.min_y()),
+                (stub_y - kind.vertical).max(columns.min_y() + kind.padding.0),
                 center_z - kind.horizontal,
             ];
             let allowed_max = [
                 center_x + kind.horizontal,
-                (stub_y + kind.vertical).min(columns.max_y()),
+                (stub_y + kind.vertical).min(columns.max_y() - kind.padding.1),
                 center_z + kind.horizontal,
             ];
             let space = Rc::new(RefCell::new(Space {
@@ -908,6 +1056,7 @@ impl Structures {
                 0,
                 &space,
                 &mut queue,
+                &alias_map,
             );
             while let Some(job) = queue.pop() {
                 self.try_children(
@@ -919,6 +1068,7 @@ impl Structures {
                     job.depth,
                     &job.space,
                     &mut queue,
+                    &alias_map,
                 );
             }
         }
@@ -926,6 +1076,10 @@ impl Structures {
             pieces,
             beard: kind.beard,
             bury: false,
+            mansion: false,
+            portal: false,
+            ruin: false,
+            encapsulate: kind.encapsulate,
             step: kind.step,
             seed_index: kind.seed_index,
         })
@@ -964,6 +1118,10 @@ impl Structures {
             pieces,
             beard: false,
             bury: false,
+            mansion: false,
+            portal: false,
+            ruin: false,
+            encapsulate: kind.encapsulate,
             step: kind.step,
             seed_index: kind.seed_index,
         })
@@ -1006,6 +1164,147 @@ impl Structures {
             pieces,
             beard: false,
             bury: true,
+            mansion: false,
+            portal: false,
+            ruin: false,
+            encapsulate: kind.encapsulate,
+            step: kind.step,
+            seed_index: kind.seed_index,
+        })
+    }
+
+    /// Лесной особняк: поворот, старт по четырём углам следа и куски.
+    fn assemble_mansion(
+        &self,
+        kind: &Kind,
+        sx: i32,
+        sz: i32,
+        seed: i64,
+        columns: &dyn Columns,
+    ) -> Option<Layout> {
+        let (start, rot) = mansion_start(kind, sx, sz, seed, columns)?;
+        let mut rng = Legacy::new(0);
+        rng.set_large_feature_seed(seed, sx, sz);
+        // `findGenerationPoint` уже снял `Rotation.getRandom`; куски продолжают
+        // тот же генератор.
+        let _ = rng.next_int_bound(4);
+        let built = mansion::build(&self.templates, sx, sz, start[1], rot, &mut rng);
+        if built.is_empty() {
+            return None;
+        }
+        let pieces: Vec<Piece> = built
+            .into_iter()
+            .map(|piece| {
+                let (min, max) = piece.bounds();
+                Piece {
+                    element: Arc::new(Elem::Mansion(Arc::new(piece))),
+                    pos: [sx * 16, 0, sz * 16],
+                    rot: Rot::None,
+                    ground: 0,
+                    min,
+                    max,
+                    rigid: true,
+                    junctions: Vec::new(),
+                }
+            })
+            .collect();
+        let _ = rot;
+        Some(Layout {
+            pieces,
+            beard: false,
+            bury: false,
+            mansion: true,
+            portal: false,
+            ruin: false,
+            encapsulate: kind.encapsulate,
+            step: kind.step,
+            seed_index: kind.seed_index,
+        })
+    }
+
+    /// Океанские руины: набор шаблонов с высотой, считаемой при постановке.
+    fn assemble_ruin(
+        &self,
+        kind: &Kind,
+        sx: i32,
+        sz: i32,
+        seed: i64,
+        columns: &dyn Columns,
+    ) -> Option<Layout> {
+        let cfg = kind.ruin?;
+        ocean_ruin::can_start(columns, sx, sz, &kind.biomes)?;
+        let built = ocean_ruin::build(&self.ruins, cfg, sx, sz, seed);
+        if built.is_empty() {
+            return None;
+        }
+        let pieces: Vec<Piece> = built
+            .into_iter()
+            .map(|piece| {
+                let (min, max) = piece.bounds();
+                Piece {
+                    element: Arc::new(Elem::Ruin(Arc::new(piece))),
+                    pos: [sx * 16, 0, sz * 16],
+                    rot: Rot::None,
+                    ground: 0,
+                    min,
+                    max,
+                    rigid: true,
+                    junctions: Vec::new(),
+                }
+            })
+            .collect();
+        Some(Layout {
+            pieces,
+            beard: false,
+            bury: false,
+            mansion: false,
+            portal: false,
+            ruin: true,
+            encapsulate: false,
+            step: kind.step,
+            seed_index: kind.seed_index,
+        })
+    }
+
+    /// Руины портала: один кусок, высота по `findSuitableY`.
+    fn assemble_portal(
+        &self,
+        kind: &Kind,
+        sx: i32,
+        sz: i32,
+        seed: i64,
+        columns: &dyn Columns,
+    ) -> Option<Layout> {
+        let setups = kind.portal.as_ref()?;
+        let piece = portal::build(&self.portals, setups, sx, sz, seed, columns)?;
+        Some(Layout {
+            pieces: vec![Piece {
+                element: Arc::new(Elem::Portal(Arc::new(piece))),
+                pos: [sx * 16, 0, sz * 16],
+                rot: Rot::None,
+                ground: 0,
+                min: [0; 3],
+                max: [0; 3],
+                rigid: true,
+                junctions: Vec::new(),
+            }]
+            .into_iter()
+            .map(|mut p| {
+                let (min, max) = match &*p.element {
+                    Elem::Portal(piece) => piece.bounds(),
+                    _ => unreachable!(),
+                };
+                p.min = min;
+                p.max = max;
+                p
+            })
+            .collect(),
+            beard: false,
+            bury: false,
+            mansion: false,
+            portal: true,
+            ruin: false,
+            encapsulate: kind.encapsulate,
             step: kind.step,
             seed_index: kind.seed_index,
         })
@@ -1172,6 +1471,10 @@ impl Structures {
             pieces,
             beard: false,
             bury: false,
+            mansion: false,
+            portal: false,
+            ruin: false,
+            encapsulate: kind.encapsulate,
             step: kind.step,
             seed_index: kind.seed_index,
         })
@@ -1207,6 +1510,10 @@ impl Structures {
             }],
             beard: false,
             bury: false,
+            mansion: false,
+            portal: false,
+            ruin: false,
+            encapsulate: kind.encapsulate,
             step: kind.step,
             seed_index: kind.seed_index,
         })
@@ -1247,11 +1554,16 @@ impl Structures {
             pieces,
             beard: false,
             bury: false,
+            mansion: false,
+            portal: false,
+            ruin: false,
+            encapsulate: kind.encapsulate,
             step: kind.step,
             seed_index: kind.seed_index,
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn try_children(
         &self,
         pieces: &mut Vec<Piece>,
@@ -1262,6 +1574,7 @@ impl Structures {
         depth: i32,
         space: &Rc<RefCell<Space>>,
         queue: &mut Queue,
+        alias_map: &HashMap<String, String>,
     ) {
         let parent = &pieces[index];
         let parent_min = parent.min;
@@ -1281,11 +1594,13 @@ impl Structures {
                 parent_jig.pos[2] + front[2],
             ];
             let from_bottom = parent_jig.pos[1] - parent_min[1];
+            // `poolAliasLookup.lookup(sourceJigsaw.pool())`.
+            let source_pool = aliased(alias_map, &parent_jig.pool);
             let (primary_templates, fallback_name) = {
-                let Some(primary) = self.pools.get(&parent_jig.pool) else {
+                let Some(primary) = self.pools.get(&source_pool) else {
                     continue;
                 };
-                if primary.templates.is_empty() && parent_jig.pool != "minecraft:empty" {
+                if primary.templates.is_empty() && source_pool != "minecraft:empty" {
                     continue;
                 }
                 (primary.templates.clone(), primary.fallback.clone())
@@ -1339,7 +1654,7 @@ impl Structures {
                     let expand = if kind.expansion && yspan <= 16 {
                         child_jigs
                             .iter()
-                            .map(|j| self.expand_amount(j, zmin, zmax))
+                            .map(|j| self.expand_amount(j, zmin, zmax, alias_map))
                             .max()
                             .unwrap_or(0)
                     } else {
@@ -1357,6 +1672,8 @@ impl Structures {
                         let Some((bmin, bmax)) = bounds(candidate, place, rot) else {
                             continue;
                         };
+                        // `JigsawBlock.getFrontFacing(source).getStepY()`: у
+                        // ванили это шаг фронта РОДИТЕЛЯ, не ребёнка.
                         let step_y = front[1];
                         let vertical = from_bottom - child_jig.pos[1] + step_y;
                         let child_rigid = candidate.rigid();
@@ -1416,7 +1733,7 @@ impl Structures {
                                 ],
                             ],
                         });
-                        if depth + 1 <= kind.size {
+                        if depth < kind.size {
                             queue.push(
                                 parent_jig.placement_priority,
                                 Job {
@@ -1440,13 +1757,20 @@ impl Structures {
         }
     }
 
-    fn expand_amount(&self, jig: &JigInfo, min: [i32; 3], max: [i32; 3]) -> i32 {
+    fn expand_amount(
+        &self,
+        jig: &JigInfo,
+        min: [i32; 3],
+        max: [i32; 3],
+        aliases: &HashMap<String, String>,
+    ) -> i32 {
         let s = step(&jig.front);
         let front = [jig.pos[0] + s[0], jig.pos[1] + s[1], jig.pos[2] + s[2]];
         if !inside_box(min, max, front) {
             return 0;
         }
-        let Some(pool) = self.pools.get(&jig.pool) else {
+        let name = aliased(aliases, &jig.pool);
+        let Some(pool) = self.pools.get(&name) else {
             return 0;
         };
         let fallback = self
@@ -1464,22 +1788,32 @@ struct Job {
     space: Rc<RefCell<Space>>,
 }
 
+/// `SequencedPriorityIterator`: очередь на каждый приоритет, всегда берётся
+/// самый высокий. Кэш «текущего» приоритета повторяет ванильный: при
+/// добавлении с приоритетом не ниже текущего кэш переключается на новую
+/// очередь, и старая продолжает ждать, пока не опустеет новая.
 #[derive(Default)]
 struct Queue {
-    map: BTreeMap<i32, VecDeque<Job>>,
+    map: HashMap<i32, VecDeque<Job>>,
+    current: Option<i32>,
 }
 
 impl Queue {
     fn push(&mut self, priority: i32, job: Job) {
         self.map.entry(priority).or_default().push_back(job);
+        if self.current.is_none_or(|c| priority >= c) {
+            self.current = Some(priority);
+        }
     }
 
     fn pop(&mut self) -> Option<Job> {
-        let key = *self.map.keys().next_back()?;
+        let key = self.current?;
         let q = self.map.get_mut(&key)?;
         let job = q.pop_front()?;
         if q.is_empty() {
             self.map.remove(&key);
+            // `switchCacheToNextHighestPrioQueue`: следующий по убыванию.
+            self.current = self.map.keys().copied().max();
         }
         Some(job)
     }
@@ -1518,6 +1852,255 @@ const DECORATION: &[&str] = &[
 
 /// Индекс `setFeatureSeed`: реестр сортируется по идентификатору, внутри шага
 /// номер — порядок встречи в этом списке.
+/// Шаблоны особняка: все файлы `structure/woodland_mansion/*.nbt`.
+fn load_mansion_templates(
+    data_dir: &Path,
+    palette: &Palette,
+) -> Result<HashMap<String, Arc<template::Template>>, String> {
+    let dir = data_dir.join("data/minecraft/structure/woodland_mansion");
+    let mut out = HashMap::new();
+    for entry in std::fs::read_dir(&dir).map_err(|e| format!("mansion templates: {e}"))? {
+        let entry = entry.map_err(|e| format!("mansion templates: {e}"))?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("nbt") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let id = format!("minecraft:woodland_mansion/{stem}");
+        let loaded = template::load_template(data_dir, palette, &id)?;
+        out.insert(stem.to_owned(), Arc::new(loaded));
+    }
+    Ok(out)
+}
+
+/// Старт особняка: `findGenerationPoint` без проверки биома.
+///
+/// Биом проверяется по всему столбцу центра чанка (`couldValidBiomeExistIn
+/// TerrainColumn`), затем поворот, высота по четырём углам 5×5 и порог 60.
+fn mansion_start(
+    kind: &Kind,
+    sx: i32,
+    sz: i32,
+    seed: i64,
+    columns: &dyn Columns,
+) -> Option<([i32; 3], Rot)> {
+    let x = sx * 16 + 7;
+    let z = sz * 16 + 7;
+    if !columns.column_has(x, z, &kind.biomes) {
+        return None;
+    }
+    let mut rng = Legacy::new(0);
+    rng.set_large_feature_seed(seed, sx, sz);
+    let rot = ROTS[rng.next_int_bound(4) as usize];
+    let (ox, oz) = match rot {
+        Rot::None => (5, 5),
+        Rot::Cw90 => (-5, 5),
+        Rot::Cw180 => (-5, -5),
+        Rot::Ccw90 => (5, -5),
+    };
+    // `Structure.getLowestY` по четырём углам `WORLD_SURFACE_WG`.
+    let y = [
+        columns.base_height(x, z) - 1,
+        columns.base_height(x, z + oz) - 1,
+        columns.base_height(x + ox, z) - 1,
+        columns.base_height(x + ox, z + oz) - 1,
+    ]
+    .into_iter()
+    .min()?;
+    if y < 60 {
+        return None;
+    }
+    Some(([x, y, z], rot))
+}
+
+/// `VerticalAnchor`: `absolute`, `above_bottom`, `below_top`.
+fn anchor(v: &Value) -> i32 {
+    if let Some(abs) = v["absolute"].as_i64() {
+        return abs as i32;
+    }
+    // `WorldGenerationContext` в этих настройках не нужен: оба края
+    // триальных камер заданы абсолютно.
+    if let Some(above) = v["above_bottom"].as_i64() {
+        return ABOVE_BOTTOM.with(|m| *m.borrow()) + above as i32;
+    }
+    if let Some(below) = v["below_top"].as_i64() {
+        return BELOW_TOP.with(|m| *m.borrow()) - below as i32;
+    }
+    0
+}
+
+thread_local! {
+    /// Низ и верх мира для `above_bottom`/`below_top` в `start_height`.
+    pub(crate) static ABOVE_BOTTOM: std::cell::RefCell<i32> = const { std::cell::RefCell::new(-64) };
+    pub(crate) static BELOW_TOP: std::cell::RefCell<i32> = const { std::cell::RefCell::new(320) };
+}
+
+/// `PoolAliasBinding`: `direct` фиксирован, `random` — один взвешенный выбор,
+/// `random_group` — выбор группы, внутри которой пары раскрываются по порядку.
+#[derive(Clone, Debug)]
+pub(crate) enum PoolAlias {
+    Direct {
+        alias: String,
+        target: String,
+    },
+    Random {
+        alias: String,
+        targets: Vec<(String, i32)>,
+    },
+    Group {
+        groups: Vec<(Vec<PoolAlias>, i32)>,
+    },
+}
+
+fn load_pool_aliases(v: &Value) -> Result<Vec<PoolAlias>, String> {
+    let mut out = Vec::new();
+    let Some(list) = v.as_array() else {
+        return Ok(out);
+    };
+    for alias in list {
+        out.push(parse_alias(alias)?);
+    }
+    Ok(out)
+}
+
+fn parse_alias(v: &Value) -> Result<PoolAlias, String> {
+    match v["type"].as_str().unwrap_or("") {
+        "minecraft:direct" => Ok(PoolAlias::Direct {
+            alias: mc(v["alias"].as_str().unwrap_or("")),
+            target: mc(v["target"].as_str().unwrap_or("")),
+        }),
+        "minecraft:random" => {
+            let mut targets = Vec::new();
+            for t in v["targets"].as_array().into_iter().flatten() {
+                targets.push((
+                    mc(t["data"].as_str().unwrap_or("")),
+                    t["weight"].as_i64().unwrap_or(1) as i32,
+                ));
+            }
+            Ok(PoolAlias::Random {
+                alias: mc(v["alias"].as_str().unwrap_or("")),
+                targets,
+            })
+        }
+        "minecraft:random_group" => {
+            let mut groups = Vec::new();
+            for group in v["groups"].as_array().into_iter().flatten() {
+                let mut inner = Vec::new();
+                for entry in group["data"].as_array().into_iter().flatten() {
+                    inner.push(parse_alias(entry)?);
+                }
+                groups.push((inner, group["weight"].as_i64().unwrap_or(1) as i32));
+            }
+            Ok(PoolAlias::Group { groups })
+        }
+        other => Err(format!("pool alias {other}")),
+    }
+}
+
+/// `PoolAliasLookup.create`: один `RandomSource` от `forkPositional().at(pos)`,
+/// затем пары раскрываются по порядку. Повторный псевдоним перезаписывает.
+fn resolve_aliases(bindings: &[PoolAlias], pos: [i32; 3], seed: i64) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    if bindings.is_empty() {
+        return out;
+    }
+    let mut base = crate::random::Xoroshiro::from_seed(seed);
+    let factory = base.fork_positional();
+    let mut rng = Worldgen::from_rng(factory.at(pos[0], pos[1], pos[2]));
+    for binding in bindings {
+        binding.resolve(&mut rng, &mut out);
+    }
+    out
+}
+
+impl PoolAlias {
+    /// Имена псевдонимов: файлов для них нет, грузить нечего.
+    fn collect_names(&self, out: &mut HashSet<String>) {
+        match self {
+            Self::Direct { alias, .. } => {
+                out.insert(alias.clone());
+            }
+            Self::Random { alias, .. } => {
+                out.insert(alias.clone());
+            }
+            Self::Group { groups } => {
+                for (inner, _) in groups {
+                    for binding in inner {
+                        binding.collect_names(out);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Цели псевдонимов: на них могут ссылаться только отсюда, поэтому их
+    /// нужно загрузить явно.
+    fn collect_targets(&self, out: &mut HashSet<String>) {
+        match self {
+            Self::Direct { target, .. } => {
+                out.insert(target.clone());
+            }
+            Self::Random { targets, .. } => out.extend(targets.iter().map(|(t, _)| t.clone())),
+            Self::Group { groups } => {
+                for (inner, _) in groups {
+                    for binding in inner {
+                        binding.collect_targets(out);
+                    }
+                }
+            }
+        }
+    }
+
+    fn resolve(&self, rng: &mut Worldgen, out: &mut HashMap<String, String>) {
+        match self {
+            Self::Direct { alias, target } => {
+                out.insert(alias.clone(), target.clone());
+            }
+            Self::Random { alias, targets } => {
+                let total: i32 = targets.iter().map(|(_, w)| *w).sum();
+                if total <= 0 {
+                    return;
+                }
+                let mut roll = rng.next_int_bound(total);
+                for (target, weight) in targets {
+                    roll -= *weight;
+                    if roll < 0 {
+                        out.insert(alias.clone(), target.clone());
+                        return;
+                    }
+                }
+            }
+            Self::Group { groups } => {
+                let total: i32 = groups.iter().map(|(_, w)| *w).sum();
+                if total <= 0 {
+                    return;
+                }
+                let mut roll = rng.next_int_bound(total);
+                for (inner, weight) in groups {
+                    roll -= *weight;
+                    if roll < 0 {
+                        for binding in inner {
+                            binding.resolve(rng, out);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `PoolAliasLookup`: имя пула заменяется на цель псевдонима.
+/// `PoolAliasLookup.lookup` по уже раскрытой карте.
+fn aliased(aliases: &HashMap<String, String>, name: &str) -> String {
+    aliases
+        .get(name)
+        .cloned()
+        .unwrap_or_else(|| name.to_owned())
+}
+
 fn feature_seeds(data_dir: &Path) -> Result<HashMap<String, (i32, i32)>, String> {
     let dir = data_dir.join("data/minecraft/worldgen/structure");
     let mut rows = Vec::new();
@@ -1563,6 +2146,8 @@ struct Loader<'a> {
     features: HashMap<String, Arc<super::Placed>>,
     /// Имя структуры → (шаг декорации, индекс `setFeatureSeed`).
     seeds: HashMap<String, (i32, i32)>,
+    /// Имена псевдонимов пулов: файлов для них нет, подставляются в рантайме.
+    alias_names: HashSet<String>,
 }
 
 struct RawSet {
@@ -1640,6 +2225,7 @@ impl Loader<'_> {
                 z["chunk_count"].as_i64().unwrap_or(0) as i32,
             ))
         });
+        let _ = &self.alias_names;
         let mut kinds = Vec::new();
         let mut weights = Vec::new();
         for entry in v["structures"].as_array().into_iter().flatten() {
@@ -1663,6 +2249,7 @@ impl Loader<'_> {
 
     fn ring_set(&mut self, name: &str, place: &Value, v: &Value) -> Result<RawSet, String> {
         let preferred = self.biomes(place["preferred_biomes"].as_str().unwrap_or(""))?;
+        let _ = &self.alias_names;
         let mut kinds = Vec::new();
         let mut weights = Vec::new();
         for entry in v["structures"].as_array().into_iter().flatten() {
@@ -1703,11 +2290,14 @@ impl Loader<'_> {
             Some("minecraft:mineshaft") => return self.shaft_kind(name, &v),
             Some("minecraft:ocean_monument") => return self.monument_kind(name, &v),
             Some("minecraft:stronghold") => return self.stronghold_kind(name, &v),
+            Some("minecraft:woodland_mansion") => return self.mansion_kind(name, &v),
+            Some("minecraft:ruined_portal") => return self.portal_kind(name, &v),
+            Some("minecraft:ocean_ruin") => return self.ruin_kind(name, &v),
             Some("minecraft:jigsaw") => {}
             _ => return Err(format!("{name}: not jigsaw")),
         }
         let adapt = v["terrain_adaptation"].as_str().unwrap_or("none");
-        if adapt != "beard_thin" && adapt != "none" {
+        if adapt != "beard_thin" && adapt != "none" && adapt != "encapsulate" {
             return Err(format!("{name}: terrain {adapt}"));
         }
         let project = match v.get("project_start_to_heightmap").and_then(|s| s.as_str()) {
@@ -1718,6 +2308,22 @@ impl Loader<'_> {
         let (horizontal, vertical) = distance(&v["max_distance_from_center"]);
         let start = mc(v["start_pool"].as_str().unwrap_or(""));
         self.ensure_pool(&start)?;
+        let start_height = match v.get("start_height") {
+            Some(h) if !h.is_null() => {
+                Some((anchor(&h["min_inclusive"]), anchor(&h["max_inclusive"])))
+            }
+            _ => None,
+        };
+        let aliases = load_pool_aliases(&v["pool_aliases"])?;
+        let mut alias_targets = HashSet::new();
+        for alias in &aliases {
+            alias.collect_names(&mut self.alias_names);
+            alias.collect_targets(&mut alias_targets);
+        }
+        // На цели псевдонимов из пулов не ссылаются — грузим явно.
+        for target in alias_targets {
+            self.ensure_pool(&target)?;
+        }
         let biomes = self.biomes(v["biomes"].as_str().unwrap_or(""))?;
         let id = mc(name);
         let (step, seed_index) = self
@@ -1735,6 +2341,20 @@ impl Loader<'_> {
             project,
             biomes,
             beard: adapt == "beard_thin",
+            start_height,
+            encapsulate: adapt == "encapsulate",
+            aliases,
+            // `DimensionPadding.CODEC` принимает и число, и `{bottom, top}`.
+            padding: match v.get("dimension_padding") {
+                Some(p) if !p.is_null() => match p.as_i64() {
+                    Some(n) => (n as i32, n as i32),
+                    None => (
+                        p["bottom"].as_i64().unwrap_or(0) as i32,
+                        p["top"].as_i64().unwrap_or(0) as i32,
+                    ),
+                },
+                _ => (0, 0),
+            },
             step,
             seed_index,
             scattered: None,
@@ -1742,6 +2362,9 @@ impl Loader<'_> {
             shaft: None,
             monument: None,
             stronghold: false,
+            mansion: false,
+            portal: None,
+            ruin: None,
         })
     }
 
@@ -1774,6 +2397,13 @@ impl Loader<'_> {
             shaft: None,
             monument: None,
             stronghold: false,
+            mansion: false,
+            portal: None,
+            ruin: None,
+            start_height: None,
+            encapsulate: false,
+            aliases: Vec::new(),
+            padding: (0, 0),
         })
     }
 
@@ -1817,6 +2447,13 @@ impl Loader<'_> {
             shaft: None,
             monument: None,
             stronghold: false,
+            mansion: false,
+            portal: None,
+            ruin: None,
+            start_height: None,
+            encapsulate: false,
+            aliases: Vec::new(),
+            padding: (0, 0),
         })
     }
 
@@ -1851,6 +2488,13 @@ impl Loader<'_> {
             shaft: Some(ShaftCfg { mesa, blocking }),
             monument: None,
             stronghold: false,
+            mansion: false,
+            portal: None,
+            ruin: None,
+            start_height: None,
+            encapsulate: false,
+            aliases: Vec::new(),
+            padding: (0, 0),
         })
     }
 
@@ -1884,6 +2528,13 @@ impl Loader<'_> {
             shaft: None,
             monument: Some(around),
             stronghold: false,
+            mansion: false,
+            portal: None,
+            ruin: None,
+            start_height: None,
+            encapsulate: false,
+            aliases: Vec::new(),
+            padding: (0, 0),
         })
     }
 
@@ -1916,6 +2567,157 @@ impl Loader<'_> {
             shaft: None,
             monument: None,
             stronghold: true,
+            mansion: false,
+            portal: None,
+            ruin: None,
+            start_height: None,
+            encapsulate: false,
+            aliases: Vec::new(),
+            padding: (0, 0),
+        })
+    }
+
+    /// Особняк: сетка-лабиринт из шаблонов `woodland_mansion/*`.
+    fn mansion_kind(&mut self, name: &str, v: &Value) -> Result<Kind, String> {
+        let adapt = v["terrain_adaptation"].as_str().unwrap_or("none");
+        if adapt != "none" {
+            return Err(format!("{name}: terrain {adapt}"));
+        }
+        let biomes = self.biomes(v["biomes"].as_str().unwrap_or(""))?;
+        let id = mc(name);
+        let (step, seed_index) = self
+            .seeds
+            .get(&id)
+            .copied()
+            .ok_or_else(|| format!("{name}: no decoration index"))?;
+        Ok(Kind {
+            name: id,
+            start_pool: String::new(),
+            size: 0,
+            horizontal: 0,
+            vertical: 0,
+            expansion: false,
+            project: false,
+            biomes,
+            beard: false,
+            step,
+            seed_index,
+            scattered: None,
+            shore: None,
+            shaft: None,
+            monument: None,
+            stronghold: false,
+            mansion: true,
+            portal: None,
+            ruin: None,
+            start_height: None,
+            encapsulate: false,
+            aliases: Vec::new(),
+            padding: (0, 0),
+        })
+    }
+
+    /// Руины портала: наборы `setups` и шаблоны `ruined_portal/*`.
+    fn portal_kind(&mut self, name: &str, v: &Value) -> Result<Kind, String> {
+        let adapt = v["terrain_adaptation"].as_str().unwrap_or("none");
+        if adapt != "none" {
+            return Err(format!("{name}: terrain {adapt}"));
+        }
+        let biomes = self.biomes(v["biomes"].as_str().unwrap_or(""))?;
+        let mut setups = Vec::new();
+        for entry in v["setups"].as_array().ok_or("portal: no setups")? {
+            let placement = portal::Placement::parse(entry["placement"].as_str().unwrap_or(""))
+                .ok_or_else(|| format!("{name}: placement"))?;
+            setups.push(portal::Setup {
+                placement,
+                air_pocket: entry["air_pocket_probability"].as_f64().unwrap_or(0.0) as f32,
+                mossiness: entry["mossiness"].as_f64().unwrap_or(0.0) as f32,
+                overgrown: entry["overgrown"].as_bool().unwrap_or(false),
+                vines: entry["vines"].as_bool().unwrap_or(false),
+                can_be_cold: entry["can_be_cold"].as_bool().unwrap_or(false),
+                blackstone: entry["replace_with_blackstone"].as_bool().unwrap_or(false),
+                weight: entry["weight"].as_f64().unwrap_or(1.0) as f32,
+            });
+        }
+        let id = mc(name);
+        let (step, seed_index) = self
+            .seeds
+            .get(&id)
+            .copied()
+            .ok_or_else(|| format!("{name}: no decoration index"))?;
+        Ok(Kind {
+            name: id,
+            start_pool: String::new(),
+            size: 0,
+            horizontal: 0,
+            vertical: 0,
+            expansion: false,
+            project: false,
+            biomes,
+            beard: false,
+            step,
+            seed_index,
+            scattered: None,
+            shore: None,
+            shaft: None,
+            monument: None,
+            stronghold: false,
+            mansion: false,
+            portal: Some(setups),
+            ruin: None,
+            start_height: None,
+            encapsulate: false,
+            aliases: Vec::new(),
+            padding: (0, 0),
+        })
+    }
+
+    /// Океанская руина: тёплая или холодная, шаблоны грузятся заранее.
+    fn ruin_kind(&mut self, name: &str, v: &Value) -> Result<Kind, String> {
+        let adapt = v["terrain_adaptation"].as_str().unwrap_or("none");
+        if adapt != "none" {
+            return Err(format!("{name}: terrain {adapt}"));
+        }
+        let warm = match v["biome_temp"].as_str().unwrap_or("") {
+            "warm" => true,
+            "cold" => false,
+            other => return Err(format!("{name}: biome_temp {other}")),
+        };
+        let biomes = self.biomes(v["biomes"].as_str().unwrap_or(""))?;
+        let id = mc(name);
+        let (step, seed_index) = self
+            .seeds
+            .get(&id)
+            .copied()
+            .ok_or_else(|| format!("{name}: no decoration index"))?;
+        Ok(Kind {
+            name: id,
+            start_pool: String::new(),
+            size: 0,
+            horizontal: 0,
+            vertical: 0,
+            expansion: false,
+            project: false,
+            biomes,
+            beard: false,
+            step,
+            seed_index,
+            scattered: None,
+            shore: None,
+            shaft: None,
+            monument: None,
+            stronghold: false,
+            mansion: false,
+            portal: None,
+            ruin: Some(ocean_ruin::Cfg {
+                warm,
+                large_probability: v["large_probability"].as_f64().unwrap_or(0.0) as f32,
+                cluster_probability: v["cluster_probability"].as_f64().unwrap_or(0.0) as f32,
+            }),
+            start_height: None,
+            encapsulate: false,
+            aliases: Vec::new(),
+            padding: (0, 0),
         })
     }
 
@@ -1924,7 +2726,6 @@ impl Loader<'_> {
         self.walk_biome(spec, &mut out, &mut HashSet::new())?;
         Ok(out)
     }
-
     fn walk_biome(
         &self,
         spec: &str,
@@ -1992,6 +2793,7 @@ impl Loader<'_> {
                 templates.push(Arc::clone(&el));
             }
         }
+        // StructureTemplatePool.getMaxSize: max(primary, fallback) по Y.
         let max_size = templates
             .iter()
             .filter(|e| !e.is_empty())
@@ -2086,6 +2888,7 @@ impl Loader<'_> {
             let missing: Vec<String> = names
                 .into_iter()
                 .filter(|n| !self.pools.contains_key(n))
+                .filter(|n| !self.alias_names.contains(n))
                 .collect();
             if missing.is_empty() {
                 return Ok(());
@@ -2105,7 +2908,10 @@ fn collect_pools(el: &Elem, out: &mut HashSet<String>) {
         | Elem::Shore(_)
         | Elem::Shaft(_)
         | Elem::Monument(_)
-        | Elem::Stronghold(_) => {}
+        | Elem::Stronghold(_)
+        | Elem::Mansion(_)
+        | Elem::Portal(_)
+        | Elem::Ruin(_) => {}
         Elem::List { parts, .. } => {
             for p in parts {
                 collect_pools(p, out);
@@ -2140,7 +2946,10 @@ fn jigsaws(el: &Elem, pos: [i32; 3], rot: Rot, rng: &mut impl Bits) -> Vec<JigIn
         | Elem::Shore(_)
         | Elem::Shaft(_)
         | Elem::Monument(_)
-        | Elem::Stronghold(_) => Vec::new(),
+        | Elem::Stronghold(_)
+        | Elem::Mansion(_)
+        | Elem::Portal(_)
+        | Elem::Ruin(_) => Vec::new(),
         Elem::Feature { .. } => vec![JigInfo {
             pos,
             front: "down".into(),
@@ -2162,7 +2971,10 @@ fn bounds(el: &Elem, pos: [i32; 3], rot: Rot) -> Option<([i32; 3], [i32; 3])> {
         | Elem::Shore(_)
         | Elem::Shaft(_)
         | Elem::Monument(_)
-        | Elem::Stronghold(_) => None,
+        | Elem::Stronghold(_)
+        | Elem::Mansion(_)
+        | Elem::Portal(_)
+        | Elem::Ruin(_) => None,
         Elem::Feature { .. } => Some((pos, pos)),
         Elem::Single { template, .. } => {
             let b = template::template_bounds(pos, rot, template.size);
@@ -2415,6 +3227,227 @@ mod tests {
     use super::*;
 
     #[test]
+    fn trial_prefix_detail() {
+        let Some(data) = std::env::var_os("CHUNKWAKE_DATA").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let path = std::path::Path::new(
+            r"E:\paper_rust\target\trial-12345\world\dimensions\minecraft\overworld\region",
+        );
+        if !path.is_dir() {
+            return;
+        }
+        let registries = chunkwake_data::registries::RegistryData::load(&data).unwrap();
+        let biome_ids: std::collections::HashMap<String, u32> = registries
+            .synchronized
+            .iter()
+            .find(|r| r.name == "worldgen/biome")
+            .map(|r| {
+                r.entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.clone(), i as u32))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let blocks = chunkwake_data::world::Blocks::load(&data).unwrap();
+        let states = blocks.states();
+        let state = |n: &str| blocks.default_state(n).ok().map(|s| s as u32);
+        let mut palette = crate::feature::Palette::new(&data, &states, &state);
+        let read = |dir: &str, name: &str| -> Result<serde_json::Value, String> {
+            let path = name.strip_prefix("minecraft:").unwrap_or(name);
+            let text = std::fs::read_to_string(
+                data.join("data/minecraft/worldgen")
+                    .join(dir)
+                    .join(format!("{path}.json")),
+            )
+            .map_err(|e| format!("{dir} {name}: {e}"))?;
+            serde_json::from_str(&text).map_err(|e| format!("{dir} {name}: {e}"))
+        };
+        let structures =
+            Structures::load(&data, &mut palette, &biome_ids, &read, -64, 384).unwrap();
+        let mut noise = crate::Generator::load_with_version(&data, 12345, None).unwrap();
+        noise.bind_biomes(biome_ids.clone());
+        let cols = crate::pipeline::Cols {
+            noise: &noise,
+            surface: None,
+            carve: crate::CarveBlocks {
+                air: 0,
+                water: 0,
+                lava: 0,
+                liquid: 0,
+                bedrock: 0,
+                grass: 0,
+                mycelium: 0,
+                dirt: 0,
+            },
+            stone: 0,
+            palette: &palette,
+            heights: &std::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+        let (si, ki) = structures
+            .sets
+            .iter()
+            .enumerate()
+            .find_map(|(si, set)| {
+                set.kinds
+                    .iter()
+                    .position(|k| k.name.contains("trial"))
+                    .map(|ki| (si, ki))
+            })
+            .expect("trial kind");
+        let layout = structures.assemble(si, ki, 0, 14, &cols).expect("layout");
+
+        let store = chunkwake_world::anvil::RegionStore::new(path);
+        let chunks = store.load_region(0, 0).unwrap();
+        let (_, root) = chunks.iter().find(|(p, _)| *p == (0, 14)).unwrap();
+        let children = root
+            .get("structures")
+            .and_then(|t| t.as_compound())
+            .and_then(|c| c.get("starts"))
+            .and_then(|t| t.as_compound())
+            .and_then(|c| c.get("minecraft:trial_chambers"))
+            .and_then(|t| t.as_compound())
+            .and_then(|c| c.get("Children"))
+            .and_then(|t| t.as_list())
+            .unwrap();
+        println!("van {} ours {}", children.len(), layout.pieces.len());
+        let needle = [18, -29, 256];
+        for (i, p) in layout.pieces.iter().enumerate() {
+            if p.min == needle {
+                println!("ours has 148-child at index {i}");
+            }
+        }
+        for (i, c) in children.iter().enumerate() {
+            let c = c.as_compound().unwrap();
+            let bb = c.get("BB").and_then(|t| t.as_int_array()).unwrap_or(&[]);
+            if bb.len() == 6 && bb[0] == needle[0] && bb[1] == needle[1] && bb[2] == needle[2] {
+                println!("vanilla has it at index {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn trial_matches_vanilla_pieces() {
+        let Some(data) = std::env::var_os("CHUNKWAKE_DATA").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let path = std::path::Path::new(
+            r"E:\paper_rust\target\trial-12345\world\dimensions\minecraft\overworld\region",
+        );
+        if !path.is_dir() {
+            return;
+        }
+        let registries = chunkwake_data::registries::RegistryData::load(&data).unwrap();
+        let biome_ids: std::collections::HashMap<String, u32> = registries
+            .synchronized
+            .iter()
+            .find(|r| r.name == "worldgen/biome")
+            .map(|r| {
+                r.entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.clone(), i as u32))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let blocks = chunkwake_data::world::Blocks::load(&data).unwrap();
+        let states = blocks.states();
+        let state = |n: &str| blocks.default_state(n).ok().map(|s| s as u32);
+        let mut palette = crate::feature::Palette::new(&data, &states, &state);
+        let read = |dir: &str, name: &str| -> Result<serde_json::Value, String> {
+            let path = name.strip_prefix("minecraft:").unwrap_or(name);
+            let text = std::fs::read_to_string(
+                data.join("data/minecraft/worldgen")
+                    .join(dir)
+                    .join(format!("{path}.json")),
+            )
+            .map_err(|e| format!("{dir} {name}: {e}"))?;
+            serde_json::from_str(&text).map_err(|e| format!("{dir} {name}: {e}"))
+        };
+        let structures =
+            Structures::load(&data, &mut palette, &biome_ids, &read, -64, 384).unwrap();
+        let mut noise = crate::Generator::load_with_version(&data, 12345, None).unwrap();
+        noise.bind_biomes(biome_ids.clone());
+        let cols = crate::pipeline::Cols {
+            noise: &noise,
+            surface: None,
+            carve: crate::CarveBlocks {
+                air: 0,
+                water: 0,
+                lava: 0,
+                liquid: 0,
+                bedrock: 0,
+                grass: 0,
+                mycelium: 0,
+                dirt: 0,
+            },
+            stone: 0,
+            palette: &palette,
+            heights: &std::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+        let (si, ki) = structures
+            .sets
+            .iter()
+            .enumerate()
+            .find_map(|(si, set)| {
+                set.kinds
+                    .iter()
+                    .position(|k| k.name.contains("trial"))
+                    .map(|ki| (si, ki))
+            })
+            .expect("trial kind");
+        let layout = structures.assemble(si, ki, 0, 14, &cols).expect("layout");
+
+        let store = chunkwake_world::anvil::RegionStore::new(path);
+        let chunks = store.load_region(0, 0).unwrap();
+        let (_, root) = chunks.iter().find(|(p, _)| *p == (0, 14)).unwrap();
+        let children = root
+            .get("structures")
+            .and_then(|t| t.as_compound())
+            .and_then(|c| c.get("starts"))
+            .and_then(|t| t.as_compound())
+            .and_then(|c| c.get("minecraft:trial_chambers"))
+            .and_then(|t| t.as_compound())
+            .and_then(|c| c.get("Children"))
+            .and_then(|t| t.as_list())
+            .unwrap();
+        assert_eq!(children.len(), layout.pieces.len(), "число кусков");
+        let mut bad = 0;
+        for (i, (c, p)) in children.iter().zip(layout.pieces.iter()).enumerate() {
+            let c = c.as_compound().unwrap();
+            let bb = c.get("BB").and_then(|t| t.as_int_array()).unwrap_or(&[]);
+            // `StructurePiece` пишет поворот как `O` — 2D-данные `Direction`.
+            let rot_str = c.get("rotation").and_then(|t| t.as_str()).unwrap_or("");
+            let rot_ok_str = match p.rot {
+                Rot::None => rot_str == "NONE",
+                Rot::Cw90 => rot_str == "CLOCKWISE_90",
+                Rot::Cw180 => rot_str == "CLOCKWISE_180",
+                Rot::Ccw90 => rot_str == "COUNTERCLOCKWISE_90",
+            };
+            let rot_ok = rot_ok_str;
+            let same = rot_ok
+                && bb.len() == 6
+                && p.min[0] == bb[0]
+                && p.min[1] == bb[1]
+                && p.min[2] == bb[2]
+                && p.max[0] == bb[3]
+                && p.max[1] == bb[4]
+                && p.max[2] == bb[5];
+            if !same {
+                if bad < 3 {
+                    println!(
+                        "{i}: rot van {rot_str:?} ours {:?} bb {bb:?} vs {:?}..{:?}",
+                        p.rot, p.min, p.max
+                    );
+                }
+                bad += 1;
+            }
+        }
+        assert_eq!(bad, 0, "коробки расходятся");
+    }
+
+    #[test]
     fn legacy_type_1_bound_truncates() {
         // `1.0f / 0.2f` в Java — ровно 5, усечение даёт 5.
         assert_eq!((1.0f32 / 0.2f32) as i32, 5);
@@ -2477,11 +3510,12 @@ mod tests {
             .one_biome("minecraft:village_plains")
             .expect("у деревни есть биом");
         let cols = FlatCols { seed: 7, biome };
-        assert!(
-            structures
-                .nearest(&cols, [0, 64, 0], "minecraft:stronghold")
-                .is_none()
-        );
+        // Крепость теперь ищется по кольцам: в равнине биом подходит.
+        let keep = structures
+            .nearest(&cols, [0, 64, 0], "minecraft:stronghold")
+            .expect("крепость");
+        assert_eq!(keep[0].rem_euclid(16), 8);
+        assert_eq!(keep[2].rem_euclid(16), 8);
         let pos = structures
             .nearest(&cols, [0, 64, 0], "#minecraft:village")
             .expect("деревня");
@@ -2604,6 +3638,7 @@ mod tests {
                 max: [0, 70, 0],
                 ground: 64,
                 bury: false,
+                encapsulate: false,
             }],
             junctions: Vec::new(),
         };

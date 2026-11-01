@@ -18,6 +18,9 @@ use std::sync::Arc;
 
 const DIMENSION: &str = "overworld";
 
+/// `/locate`: ближайшая точка от блока. Функция нужна и биомам, и структурам.
+type Locate = std::sync::Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync>;
+
 /// Части образа, которые нужны только выживанию.
 struct Loaded {
     hardness: Vec<f32>,
@@ -121,7 +124,10 @@ pub fn build_play_plan(
         level::Kind::Flat(flat) => flat.layers.iter().map(|l| l.1).sum::<usize>() as f64,
         level::Kind::Noise(_) => 0.0,
     };
+    let t_light = std::time::Instant::now();
     let light = std::sync::Arc::new(chunkwake_world::light::LightTable::new(light_rows));
+    tracing::debug!("light table {} ms", t_light.elapsed().as_millis());
+    let t_chunk = std::time::Instant::now();
     let mut chunk = ChunkColumn::flat(
         &states,
         dim.sections(),
@@ -130,13 +136,19 @@ pub fn build_play_plan(
         bits_for(biome_count),
         dim.has_skylight,
     );
+    tracing::debug!("template column {} ms", t_chunk.elapsed().as_millis());
+    let t_relight = std::time::Instant::now();
     chunkwake_world::light::relight_column(&mut chunk, &light);
+    tracing::debug!("template relight {} ms", t_relight.elapsed().as_millis());
 
     let block_bits = bits_for(blocks.state_count());
     let biome_bits = bits_for(biome_count);
     let poi_tags = chunkwake_net::play::load_poi_tags(data_dir);
     let structure_names = chunkwake_net::play::structure_names(data_dir);
     chunkwake_world::set_fluid_states(fluid_states(&blocks.states()));
+    chunkwake_world::set_state_flags(state_flags(&blocks.states()));
+    chunkwake_world::set_extra_flags(extra_flags(&blocks.states()));
+    chunkwake_world::set_poi_bits(poi_bits(&blocks.states()));
     chunkwake_world::set_height_classes(height_classes(data_dir, &blocks.states())?);
     let (terrain, locate_biome, locate_structure, spawn_noise, sea_level, is_flat) = match &level
         .kind
@@ -165,7 +177,18 @@ pub fn build_play_plan(
             let climate = loaded.has_biomes();
             let noise = std::sync::Arc::new(loaded);
             let sea = noise.sea_level;
-            let stand = stand_on_solid(&noise.fill(0, 0), noise.height, dim.min_y);
+            // `NoiseSpawnFinder.findSpawnPosition` даёт точку `(x, 0, z)`;
+            // высоту берём по столбцу этой точки, как `ServerLevel`.
+            let stand = noise
+                .spawn_position()
+                .map(|p| {
+                    let cx = p[0].div_euclid(16);
+                    let cz = p[2].div_euclid(16);
+                    let y =
+                        stand_on_solid(&noise.fill(cx, cz), noise.height, dim.min_y, p[0], p[2]);
+                    [p[0] as f64 + 0.5, y, p[2] as f64 + 0.5]
+                })
+                .unwrap_or([8.5, 64.0, 8.5]);
             let biome_id = biome as u32;
             let sky = dim.has_skylight;
             // Шум, поверхность и карверы — один конвейер генератора.
@@ -186,12 +209,10 @@ pub fn build_play_plan(
             // Тот же генератор отвечает `/locate biome`, не строя чанк.
             let overworld = std::sync::Arc::new(overworld);
             let locate_world = overworld.clone();
-            let locate: std::sync::Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync> =
+            let locate: Locate =
                 std::sync::Arc::new(move |name, origin| locate_world.locate_biome(name, origin));
             let locate_struct_world = overworld.clone();
-            let locate_structure: std::sync::Arc<
-                dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync,
-            > = std::sync::Arc::new(move |name, origin| {
+            let locate_structure: Locate = std::sync::Arc::new(move |name, origin| {
                 locate_struct_world.locate_structure(name, origin)
             });
             let built: std::sync::Arc<dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync> =
@@ -199,7 +220,7 @@ pub fn build_play_plan(
                     // `None` — чанк уже отдан: генератор его не повторяет, и
                     // вызывающему нужен готовый столбец из мира, а не копия.
                     let chunk = overworld.chunk(cx, cz)?;
-                    Some(match chunk.biomes {
+                    let mut column = match chunk.biomes {
                         Some(biomes) => ChunkColumn::from_blocks_with_biomes(
                             &chunk.states,
                             &biomes,
@@ -214,7 +235,19 @@ pub fn build_play_plan(
                             biome_bits,
                             sky,
                         ),
-                    })
+                    };
+                    // Лут структур: ванила кладёт в сундук `LootTable` и
+                    // `LootTableSeed`, содержимое считается при открытии.
+                    for ([x, y, z], id, nbt) in &chunk.block_entities {
+                        column.block_entities.insert(
+                            [*x, *y, *z],
+                            chunkwake_world::BlockEntity {
+                                id: id.clone(),
+                                nbt: nbt.clone(),
+                            },
+                        );
+                    }
+                    Some(column)
                 });
             if !fixed && !climate {
                 tracing::warn!(
@@ -262,11 +295,11 @@ pub fn build_play_plan(
         enforces_secure_chat: false,
     };
     // Плоский мир: центр блока над верхним слоем, пустой — у уровня моря.
-    // Нормальный: верхний твёрдый блок столбца 8,8 чанка 0,0.
+    // Нормальный: точка `NoiseSpawnFinder` и высота её столбца.
     tracing::debug!("world: level and template {} ms", t.elapsed().as_millis());
     let void_platform = matches!(&level.kind, level::Kind::Flat(flat) if flat.void_platform());
-    let spawn = if let Some(y) = spawn_noise {
-        [8.5, y, 8.5]
+    let spawn = if let Some(p) = spawn_noise {
+        p
     } else if void_platform {
         // Ноги на блоке над булыжником `(8, minY+3, 8)`.
         [8.5, (dim.min_y + 4) as f64, 8.5]
@@ -342,20 +375,19 @@ pub fn build_play_plan(
     let plan = PlayPlan::build(&packets, login, world, props.compression_threshold).map_err(s)?;
     let mut plan = plan;
     // Командам нужны настройки сервера: правила, белый список и каталог `/reload`.
-    // Командам нужны настройки сервера: правила, белый список и каталог `/reload`.
     // Каталог сервера — родитель каталога мира: там `ops.json` и `server.properties`.
     let server_dir = world_dir.parent().unwrap_or(world_dir);
     let version_protocol = crate::config::read_cached_version(data_dir).map_or(0, |v| v.protocol);
     plan.set_particle_types(
         chunkwake_data::registries::builtin_ids_of(&builtin, "particle_type").map_err(s)?,
     );
-    plan.set_command_lang(command_language(&props.jar_path(server_dir)));
+    plan.set_command_lang(command_language(data_dir));
     plan.configure(
         &chunkwake_net::play::commands::PlanConfig {
             level_name: &props.level_name,
             motd: &props.motd,
             seed: level.seed,
-            version_name: &MC_VERSION,
+            version_name: MC_VERSION,
             version_protocol,
             server_dir,
             whitelist: props.white_list,
@@ -453,9 +485,17 @@ fn furnace_states(blocks: &Blocks) -> std::collections::HashMap<u32, u32> {
 }
 
 /// Ноги игрока на блоке над верхним камнем столбца 8,8. Нет камня — уровень моря.
-fn stand_on_solid(fill: &[chunkwake_worldgen::Fill], height: i32, min_y: i32) -> f64 {
+fn stand_on_solid(
+    fill: &[chunkwake_worldgen::Fill],
+    height: i32,
+    min_y: i32,
+    x: i32,
+    z: i32,
+) -> f64 {
+    let lx = (x & 15) as usize;
+    let lz = (z & 15) as usize;
     for y in (0..height).rev() {
-        let i = ((y * 16 + 8) * 16 + 8) as usize;
+        let i = (y as usize * 16 + lz) * 16 + lx;
         if fill.get(i) == Some(&chunkwake_worldgen::Fill::Solid) {
             return (min_y + y + 1) as f64;
         }
@@ -761,37 +801,6 @@ fn block_name_for_item(item: &str) -> &str {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::block_name_for_item;
-
-    #[test]
-    fn redstone_item_places_wire() {
-        // `default_state` вызывается уже с именем блока, поэтому id пыли хранит состояние провода.
-        let cases = [
-            ("minecraft:redstone", "minecraft:redstone_wire"),
-            ("minecraft:string", "minecraft:tripwire"),
-            ("minecraft:wheat_seeds", "minecraft:wheat"),
-            ("minecraft:carrot", "minecraft:carrots"),
-            ("minecraft:potato", "minecraft:potatoes"),
-            ("minecraft:beetroot_seeds", "minecraft:beetroots"),
-            ("minecraft:melon_seeds", "minecraft:melon_stem"),
-            ("minecraft:pumpkin_seeds", "minecraft:pumpkin_stem"),
-            ("minecraft:torchflower_seeds", "minecraft:torchflower_crop"),
-            ("minecraft:pitcher_pod", "minecraft:pitcher_crop"),
-            ("minecraft:cocoa_beans", "minecraft:cocoa"),
-            ("minecraft:sweet_berries", "minecraft:sweet_berry_bush"),
-            ("minecraft:glow_berries", "minecraft:cave_vines"),
-            ("minecraft:stone", "minecraft:stone"),
-            ("minecraft:repeater", "minecraft:repeater"),
-            ("minecraft:stick", "minecraft:stick"),
-        ];
-        for (item, block) in cases {
-            assert_eq!(block_name_for_item(item), block);
-        }
-    }
-}
-
 /// Биты карт высот: 1 поверхность, 2 движение, 4 движение без листвы.
 /// Листва не поднимает карты движения — иначе миникарта считает игрока в пещере.
 fn height_classes(
@@ -908,45 +917,182 @@ fn fluid_states(states: &[Option<(String, chunkwake_data::world::Properties)>]) 
         .collect()
 }
 
-/// `en_us.json` из ванильного jar. Нет файла — консоль оставляет ключ, но пишет почему.
-fn command_language(jar: &Path) -> HashMap<String, String> {
-    let file = match std::fs::File::open(jar) {
-        Ok(file) => file,
-        Err(error) => {
-            tracing::warn!(
-                "console command errors stay as translation keys: cannot open {}: {error}",
-                jar.display()
-            );
-            return HashMap::new();
-        }
-    };
-    let mut zip = match zip::ZipArchive::new(file) {
-        Ok(zip) => zip,
+/// Второй байт флагов состояния: плиты и воронка.
+///
+/// Отдельно от [`state_flags`], потому что первый байт читается в коллизиях
+/// мобов и свете, и расширять его ради редких проверок не нужно.
+fn extra_flags(states: &[Option<(String, chunkwake_data::world::Properties)>]) -> Vec<u8> {
+    use chunkwake_world::extra as xf;
+    states
+        .iter()
+        .map(|s| {
+            let Some((name, _)) = s else { return 0 };
+            let path = name.strip_prefix("minecraft:").unwrap_or(name);
+            let mut bits = 0u8;
+            if path.ends_with("_pressure_plate") {
+                bits |= xf::PLATE;
+                if matches!(
+                    path,
+                    "light_weighted_pressure_plate" | "heavy_weighted_pressure_plate"
+                ) {
+                    bits |= xf::WEIGHTED_PLATE;
+                } else if path.contains("stone") {
+                    bits |= xf::LIVING_PLATE;
+                }
+            }
+            if path == "hopper" {
+                bits |= xf::HOPPER;
+            }
+            bits
+        })
+        .collect()
+}
+
+/// Биты «состояние — точка интереса» по именам состояний.
+///
+/// Те же имена, что в `poi::of_block`, но считается один раз за старт:
+/// скан нового чанка иначе сравнивал бы строки на каждом из 98 тыс. блоков.
+fn poi_bits(states: &[Option<(String, chunkwake_data::world::Properties)>]) -> Vec<u16> {
+    use chunkwake_net::play::poi_group;
+    states
+        .iter()
+        .map(|s| s.as_ref().map_or(0, |(name, _)| poi_group(name)))
+        .collect()
+}
+
+/// Флаги состояний для горячих проверок: воздух, твёрдость, наблюдатель,
+/// трава, смываемое, пыль, факел, открываемое.
+///
+/// Считается один раз при сборке мира. Всё это тик спрашивает у блоков
+/// миллионы раз за сессию (коллизии мобов, свет, наблюдатели, жидкости), и
+/// сравнение имён там стоило дороже самого поиска блока.
+fn state_flags(states: &[Option<(String, chunkwake_data::world::Properties)>]) -> Vec<u8> {
+    use chunkwake_world::flags as f;
+    states
+        .iter()
+        .map(|s| {
+            let Some((name, _props)) = s else { return 0 };
+            let path = name.strip_prefix("minecraft:").unwrap_or(name);
+            let mut bits = 0u8;
+            let air = matches!(path, "air" | "cave_air" | "void_air");
+            if air {
+                bits |= f::AIR;
+            }
+            if matches!(
+                path,
+                "short_grass"
+                    | "tall_grass"
+                    | "fern"
+                    | "large_fern"
+                    | "dead_bush"
+                    | "redstone_wire"
+                    | "torch"
+                    | "wall_torch"
+                    | "redstone_torch"
+                    | "redstone_wall_torch"
+                    | "lever"
+                    | "rail"
+                    | "tripwire"
+                    | "fire"
+                    | "vine"
+                    | "seagrass"
+                    | "snow"
+                    | "dandelion"
+                    | "poppy"
+                    | "wheat"
+                    | "carrots"
+                    | "potatoes"
+                    | "beetroots"
+            ) || path.ends_with("_sapling")
+                || path.ends_with("_tulip")
+                || path.ends_with("_button")
+            {
+                bits |= f::REPLACEABLE;
+            }
+            // Твёрдое для коллизий: не воздух, не жидкость и не смываемое.
+            // Затопленный блок (ступени, забор) по-прежнему твёрдый — так же,
+            // как в старой проверке по имени, где `fluid_of(name, None)` у
+            // такого блока `None`.
+            let fluid = matches!(path, "water" | "lava" | "bubble_column");
+            if !air && !fluid && bits & f::REPLACEABLE == 0 {
+                bits |= f::SOLID;
+            }
+            if path == "observer" {
+                bits |= f::OBSERVER;
+            }
+            if path == "grass_block" {
+                bits |= f::GRASS;
+            }
+            if path == "redstone_wire" {
+                bits |= f::WIRE;
+            }
+            if matches!(path, "redstone_torch" | "redstone_wall_torch") {
+                bits |= f::TORCH;
+            }
+            if path.ends_with("_door")
+                || path.ends_with("_trapdoor")
+                || path.ends_with("_fence_gate")
+            {
+                bits |= f::OPENABLE;
+            }
+            bits
+        })
+        .collect()
+}
+
+/// `en_us.json` для сообщений консоли: `assets/minecraft/lang` из каталога
+/// данных (он же лежит во встроенном архиве). Нет файла — консоль оставляет
+/// ключ, но пишет почему.
+fn command_language(data_dir: &Path) -> HashMap<String, String> {
+    let file = data_dir.join("assets/minecraft/lang/en_us.json");
+    match std::fs::read_to_string(&file) {
+        Ok(text) => match serde_json::from_str(&text) {
+            Ok(lang) => lang,
+            Err(error) => {
+                tracing::warn!(
+                    "console command errors stay as translation keys: {}: {error}",
+                    file.display()
+                );
+                HashMap::new()
+            }
+        },
         Err(error) => {
             tracing::warn!(
                 "console command errors stay as translation keys: {}: {error}",
-                jar.display()
+                file.display()
             );
-            return HashMap::new();
-        }
-    };
-    let mut entry = match zip.by_name("assets/minecraft/lang/en_us.json") {
-        Ok(entry) => entry,
-        Err(error) => {
-            tracing::warn!("console command errors stay as translation keys: en_us.json: {error}");
-            return HashMap::new();
-        }
-    };
-    let mut text = String::new();
-    if let Err(error) = std::io::Read::read_to_string(&mut entry, &mut text) {
-        tracing::warn!("console command errors stay as translation keys: en_us.json: {error}");
-        return HashMap::new();
-    }
-    match serde_json::from_str(&text) {
-        Ok(lang) => lang,
-        Err(error) => {
-            tracing::warn!("console command errors stay as translation keys: en_us.json: {error}");
             HashMap::new()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::block_name_for_item;
+
+    #[test]
+    fn redstone_item_places_wire() {
+        // `default_state` вызывается уже с именем блока, поэтому id пыли хранит состояние провода.
+        let cases = [
+            ("minecraft:redstone", "minecraft:redstone_wire"),
+            ("minecraft:string", "minecraft:tripwire"),
+            ("minecraft:wheat_seeds", "minecraft:wheat"),
+            ("minecraft:carrot", "minecraft:carrots"),
+            ("minecraft:potato", "minecraft:potatoes"),
+            ("minecraft:beetroot_seeds", "minecraft:beetroots"),
+            ("minecraft:melon_seeds", "minecraft:melon_stem"),
+            ("minecraft:pumpkin_seeds", "minecraft:pumpkin_stem"),
+            ("minecraft:torchflower_seeds", "minecraft:torchflower_crop"),
+            ("minecraft:pitcher_pod", "minecraft:pitcher_crop"),
+            ("minecraft:cocoa_beans", "minecraft:cocoa"),
+            ("minecraft:sweet_berries", "minecraft:sweet_berry_bush"),
+            ("minecraft:glow_berries", "minecraft:cave_vines"),
+            ("minecraft:stone", "minecraft:stone"),
+            ("minecraft:repeater", "minecraft:repeater"),
+            ("minecraft:stick", "minecraft:stick"),
+        ];
+        for (item, block) in cases {
+            assert_eq!(block_name_for_item(item), block);
         }
     }
 }

@@ -825,7 +825,7 @@ fn enchant_one(
         let Some(player) = live.get(&target.uuid) else {
             return Err("commands.enchant.failed.entity");
         };
-        let window = 36 + usize::from(player.selected).min(8);
+        let window = 36 + player.selected.min(8);
         let Some(stack) = player.slots.get(window).copied().flatten() else {
             return Err("commands.enchant.failed.itemless");
         };
@@ -1208,10 +1208,10 @@ fn location(token: &str) -> Option<String> {
 
 fn component_value(raw: &str) -> Value {
     let raw = raw.trim();
-    if raw.starts_with('{') || raw.starts_with('[') || raw.starts_with('"') {
-        if let Ok(value) = serde_json::from_str(raw) {
-            return value;
-        }
+    if (raw.starts_with('{') || raw.starts_with('[') || raw.starts_with('"'))
+        && let Ok(value) = serde_json::from_str(raw)
+    {
+        return value;
     }
     json!({"text": raw})
 }

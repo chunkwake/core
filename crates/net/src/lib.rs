@@ -69,9 +69,12 @@ pub struct NetConfig {
     pub admit: Option<Admit>,
 }
 
+/// Проверка входа: `Some(причина)` — отказать.
+pub type AdmitFn = Arc<dyn Fn(&str, Uuid, SocketAddr) -> Option<String> + Send + Sync>;
+
 /// Проверка входа. Отдельный тип, потому что замыкание не реализует `Debug`.
 #[derive(Clone)]
-pub struct Admit(pub Arc<dyn Fn(&str, Uuid, SocketAddr) -> Option<String> + Send + Sync>);
+pub struct Admit(pub AdmitFn);
 
 impl std::fmt::Debug for Admit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -424,6 +427,13 @@ impl Drop for Connection {
 const OUT_LIMIT: usize = 64 * 1024;
 /// Сколько памяти буфера держать после сброса.
 const OUT_KEEP: usize = 256 * 1024;
+/// Выше этого буфер ужимается: пачка чанков при входе игрока — единицы
+/// мегабайт, и держать их за каждым соединением до конца сессии незачем.
+///
+/// Раньше ужимали всё, что больше `OUT_KEEP`, то есть на каждой пачке
+/// 257 КиБ — а это переезд буфера и `memcpy`. Обычная пачка чанков при
+/// входе (96 × ~4.7 КиБ) в новый порог влезает и остаётся на месте.
+const OUT_MAX_KEEP: usize = 2 * 1024 * 1024;
 
 impl Connection {
     pub fn new(stream: TcpStream) -> Self {
@@ -449,7 +459,8 @@ impl Connection {
         self.written_bytes
     }
 
-    pub async fn read_packet(&mut self) -> Result<Vec<u8>, NetError> {        // Ответ ждут на отправленное: сначала оно должно уйти.
+    pub async fn read_packet(&mut self) -> Result<Vec<u8>, NetError> {
+        // Ответ ждут на отправленное: сначала оно должно уйти.
         self.flush().await?;
         loop {
             if let Some(packet) = self.codec.decode(&mut self.buf)? {
@@ -470,13 +481,36 @@ impl Connection {
 
     /// Отправляет уже закодированные `codec` кадры (общие для многих соединений):
     /// сжатие сделано один раз, здесь только шифрование и запись.
+    ///
+    /// Кадры пишутся по одному, без сборки в промежуточный буфер: пачка
+    /// чанков — это сотни килобайт, и склеивать её только ради того, чтобы
+    /// тут же скопировать в буфер соединения (под шифрование), значило
+    /// платить двумя копиями вместо одной.
     pub async fn send_frames(&mut self, frames: &[u8]) -> Result<(), NetError> {
+        if frames.is_empty() {
+            return Ok(());
+        }
         if self.out.is_empty() && self.cipher.is_none() {
             self.stream.write_all(frames).await?;
             self.written_bytes += frames.len() as u64;
             return Ok(());
         }
+        // Копия всё равно нужна: шифрование идёт на месте, по буферу записи.
+        // Но она одна — та, что делает `extend_from_slice`, без промежуточной
+        // сборки у вызывающего.
         self.out.extend_from_slice(frames);
+        self.flush().await
+    }
+
+    /// Пишет кадр, который уже лежит готовым у отправителя: буфер соединения
+    /// освобождается до копирования, чтобы не держать две копии пачки.
+    pub async fn send_owned_frames(&mut self, mut frame: Vec<u8>) -> Result<(), NetError> {
+        if self.out.is_empty() && self.cipher.is_none() {
+            self.written_bytes += frame.len() as u64;
+            return self.stream.write_all(&frame).await.map_err(Into::into);
+        }
+        self.flush().await?;
+        std::mem::swap(&mut self.out, &mut frame);
         self.flush().await
     }
 
@@ -502,7 +536,7 @@ impl Connection {
         let res = self.stream.write_all(&self.out).await;
         self.out.clear();
         self.plain = 0;
-        if self.out.capacity() > OUT_KEEP {
+        if self.out.capacity() > OUT_MAX_KEEP {
             self.out.shrink_to(OUT_KEEP);
         }
         res?;

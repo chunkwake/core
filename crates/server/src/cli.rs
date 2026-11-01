@@ -203,13 +203,16 @@ pub async fn execute() -> Result<(), String> {
                 return Err(message);
             }
             let (props, version) = check(&cli.dir)?;
+            let data = if chunkwake_data::bundle::present() {
+                "embedded".to_owned()
+            } else {
+                props
+                    .jar_path(&cli.dir)
+                    .map_or_else(|| "—".to_owned(), |p| p.display().to_string())
+            };
             println!(
-                "✓  Ready to start · Minecraft {} (protocol {})\n   Listen address  {}:{}\n   Vanilla jar     {}",
-                version.name,
-                version.protocol,
-                props.server_ip,
-                props.server_port,
-                props.jar_path(&cli.dir).display()
+                "✓  Ready to start · Minecraft {} (protocol {})\n   Listen address  {}:{}\n   Vanilla data    {}",
+                version.name, version.protocol, props.server_ip, props.server_port, data
             );
             if !is_loopback(&props.server_ip) && !props.online_mode {
                 println!(
@@ -292,21 +295,45 @@ async fn top(
     json: bool,
     color: bool,
 ) -> Result<(), String> {
-    // Адрес берём из настроек сервера: тот же, что в `metrics-bind`.
+    // Адрес берём из настроек сервера: тот же, что в `metrics-bind`. Но
+    // `0.0.0.0` и `::` — адреса прослушивания, а не подключения: с ними
+    // соединение падает, поэтому локальный сервер ищем на loopback.
     let props = Properties::load(&config_path(dir)).ok();
     let host = host
-        .or_else(|| props.as_ref().map(|p| p.metrics_ip.clone()))
+        .or_else(|| {
+            props
+                .as_ref()
+                .map(|p| match p.metrics_ip.parse::<IpAddr>() {
+                    Ok(ip) if ip.is_unspecified() => "127.0.0.1".to_owned(),
+                    _ => p.metrics_ip.clone(),
+                })
+        })
         .unwrap_or_else(|| "127.0.0.1".into());
     let port = port
         .or_else(|| props.as_ref().map(|p| p.metrics_port))
         .unwrap_or(25585);
+    // Токен читаем оттуда же, откуда сервер: если дашборд открыт в сеть,
+    // `top` без него получил бы 401 вместо цифр.
+    let token = props
+        .as_ref()
+        .map(|p| p.metrics_token.clone())
+        .filter(|t| !t.is_empty());
+    let token_ref = token.as_deref();
     let once = || async {
-        chunkwake_metrics::http::fetch(&host, port)
+        chunkwake_metrics::http::fetch(&host, port, token_ref)
             .await
             .map_err(|e| format!("{e}\nIs the server running with metrics-enabled=true?"))
     };
+    // Профиль тянем отдельно и отдельно печатаем: он не часть снимка и без
+    // него `top` продолжает работать (старый сервер его ещё не отдаёт).
+    let profile = || async {
+        chunkwake_metrics::http::fetch_profile(&host, port, token_ref)
+            .await
+            .ok()
+    };
     let Some(period) = watch else {
         let snapshot = once().await?;
+        let prof = profile().await;
         if json {
             println!(
                 "{}",
@@ -321,6 +348,12 @@ async fn top(
                     color,
                 )
             );
+            if let Some(bucket) = prof {
+                print!(
+                    "{}",
+                    chunkwake_metrics::render::ansi::render_profile(&bucket, color)
+                );
+            }
         }
         return Ok(());
     };
@@ -329,6 +362,7 @@ async fn top(
     loop {
         match once().await {
             Ok(snapshot) => {
+                let prof = profile().await;
                 if json {
                     println!(
                         "{}",
@@ -343,6 +377,12 @@ async fn top(
                             true,
                         )
                     );
+                    if let Some(bucket) = &prof {
+                        print!(
+                            "{}",
+                            chunkwake_metrics::render::ansi::render_profile(bucket, true)
+                        );
+                    }
                 } else {
                     println!(
                         "{}",
@@ -352,6 +392,12 @@ async fn top(
                             false,
                         )
                     );
+                    if let Some(bucket) = &prof {
+                        print!(
+                            "{}",
+                            chunkwake_metrics::render::ansi::render_profile(bucket, false)
+                        );
+                    }
                 }
             }
             Err(error) => eprintln!("{error}"),
@@ -361,48 +407,59 @@ async fn top(
 }
 
 /// Checks the draft settings without writing them or starting the server.
-pub fn diagnose(props: &Properties, dir: &Path) -> Vec<Diagnostic> {    let mut issues = Vec::new();
-    let cache_ready = chunkwake_data::generator::cached(&props.generated_path(dir), MC_VERSION)
+pub fn diagnose(props: &Properties, dir: &Path) -> Vec<Diagnostic> {
+    let mut issues = Vec::new();
+    // Данные игры: встроенный архив, готовый кэш или — в сборке без бандла —
+    // jar и Java. Отсутствие jar при встроенных данных ошибкой не считается.
+    let cache_ready = chunkwake_data::cache::cached(&props.generated_path(dir), MC_VERSION)
         .and_then(|data| config::read_cached_version(&data))
         .is_some_and(|version| version.name == MC_VERSION);
-    if !cache_ready {
-        let jar = props.jar_path(dir);
-        match config::read_vanilla_version(&jar) {
-            Ok(version) if version.name == MC_VERSION => {
-                let (setting, java) = match std::env::var_os("CHUNKWAKE_JAVA") {
-                    Some(value) => ("CHUNKWAKE_JAVA", PathBuf::from(value)),
-                    None => ("java-path", props.java_command(dir)),
-                };
-                match std::process::Command::new(&java).arg("-version").output() {
-                    Ok(output) if output.status.success() => {}
-                    Ok(output) => issues.push(Diagnostic {
-                        key: "java-path",
-                        message: format!(
-                            "{setting}={}: Java exited with {}; choose a working Java executable",
-                            java.display(),
-                            output.status
-                        ),
-                    }),
-                    Err(error) => issues.push(Diagnostic {
-                        key: "java-path",
-                        message: format!(
-                            "{setting}={}: {error}; install Java or change {setting}",
-                            java.display()
-                        ),
-                    }),
+    let bundled = chunkwake_data::bundle::present();
+    if !cache_ready && !bundled {
+        match props.jar_path(dir) {
+            Some(jar) => match config::read_vanilla_version(&jar) {
+                Ok(version) if version.name == MC_VERSION => {
+                    let (setting, java) = match std::env::var_os("CHUNKWAKE_JAVA") {
+                        Some(value) => ("CHUNKWAKE_JAVA", PathBuf::from(value)),
+                        None => ("java-path", props.java_command(dir)),
+                    };
+                    match std::process::Command::new(&java).arg("-version").output() {
+                        Ok(output) if output.status.success() => {}
+                        Ok(output) => issues.push(Diagnostic {
+                            key: "java-path",
+                            message: format!(
+                                "{setting}={}: Java exited with {}; choose a working Java executable",
+                                java.display(),
+                                output.status
+                            ),
+                        }),
+                        Err(error) => issues.push(Diagnostic {
+                            key: "java-path",
+                            message: format!(
+                                "{setting}={}: {error}; install Java or change {setting}",
+                                java.display()
+                            ),
+                        }),
+                    }
                 }
-            }
-            Ok(version) => issues.push(Diagnostic {
+                Ok(version) => issues.push(Diagnostic {
+                    key: "vanilla-jar",
+                    message: format!(
+                        "vanilla-jar={}: Minecraft {} found; Chunkwake needs {MC_VERSION}",
+                        jar.display(),
+                        version.name
+                    ),
+                }),
+                Err(error) => issues.push(Diagnostic {
+                    key: "vanilla-jar",
+                    message: error,
+                }),
+            },
+            None => issues.push(Diagnostic {
                 key: "vanilla-jar",
-                message: format!(
-                    "vanilla-jar={}: Minecraft {} found; Chunkwake needs {MC_VERSION}",
-                    jar.display(),
-                    version.name
-                ),
-            }),
-            Err(error) => issues.push(Diagnostic {
-                key: "vanilla-jar",
-                message: error,
+                message: "vanilla-jar is empty and this build has no embedded data; \
+                          set it to the Minecraft server.jar so the data can be built"
+                    .into(),
             }),
         }
     }
@@ -429,14 +486,30 @@ pub fn check(dir: &Path) -> Result<(Properties, GameVersion), String> {
     }
     let props = Properties::load(&config_path(dir))?;
     props.check_supported()?;
-    // Данные уже извлечены: jar больше не нужен.
-    if let Some(version) = chunkwake_data::generator::cached(&props.generated_path(dir), MC_VERSION)
+    // Данные уже есть: кэш от прошлого запуска или встроенный архив, —
+    // тогда ни jar, ни Java не нужны.
+    if let Some(version) = chunkwake_data::cache::cached(&props.generated_path(dir), MC_VERSION)
         .and_then(|d| config::read_cached_version(&d))
         .filter(|v| v.name == MC_VERSION)
     {
         return Ok((props, version));
     }
-    let path = props.jar_path(dir);
+    if let Some(text) = chunkwake_data::bundle::version_json() {
+        let version =
+            config::version_from_json(&text).map_err(|e| format!("embedded data: {e}"))?;
+        if version.name != MC_VERSION {
+            return Err(format!(
+                "embedded data is Minecraft {}, but Chunkwake supports {}; rebuild the binary",
+                version.name, MC_VERSION
+            ));
+        }
+        return Ok((props, version));
+    }
+    let Some(path) = props.jar_path(dir) else {
+        return Err("vanilla-jar is empty and this build has no embedded data; \
+             run `chunkwake config set vanilla-jar server.jar`"
+            .into());
+    };
     let version = config::read_vanilla_version(&path)?;
     if version.name != MC_VERSION {
         return Err(format!(
@@ -538,7 +611,20 @@ mod tests {
     }
 
     #[test]
-    fn doctor_rejects_missing_jar() {
+    fn doctor_rejects_missing_jar_without_embedded_data() {
+        if chunkwake_data::bundle::present() {
+            // В этой сборке данные встроены: jar не нужен, проверять нечего.
+            let dir = temp_dir();
+            config::save(
+                &config_path(&dir),
+                "online-mode=false\nvanilla-jar=server.jar",
+            )
+            .unwrap();
+            let (_, version) = check(&dir).unwrap();
+            assert_eq!(version.name, MC_VERSION);
+            std::fs::remove_dir_all(dir).unwrap();
+            return;
+        }
         let dir = temp_dir();
         config::save(
             &config_path(&dir),
@@ -547,14 +633,23 @@ mod tests {
         .unwrap();
         assert!(check(&dir).unwrap_err().contains("vanilla-jar"));
         let props = Properties::load(&config_path(&dir)).unwrap();
-        assert_eq!(props.jar_path(&dir), dir.join("server.jar"));
+        assert_eq!(props.jar_path(&dir), Some(dir.join("server.jar")));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Пустой `vanilla-jar` — допустимый выбор: данные обычно встроены.
+    #[test]
+    fn empty_vanilla_jar_is_allowed() {
+        let props = Properties::parse("vanilla-jar=").unwrap();
+        assert_eq!(props.vanilla_jar, None);
+        assert_eq!(props.jar_path(Path::new("/srv")), None);
     }
 
     #[test]
     fn doctor_rejects_wrong_jar_version() {
+        // Версию из jar проверяет `read_vanilla_version`; отдельно от бандла,
+        // потому что при встроенных данных jar вообще не открывается.
         let dir = temp_dir();
-        config::save(&config_path(&dir), "vanilla-jar=server.jar").unwrap();
         let file = std::fs::File::create(dir.join("server.jar")).unwrap();
         let mut zip = zip::ZipWriter::new(file);
         zip.start_file("version.json", SimpleFileOptions::default())
@@ -562,9 +657,16 @@ mod tests {
         zip.write_all(br#"{"name":"26.4","protocol_version":999}"#)
             .unwrap();
         zip.finish().unwrap();
-        let error = check(&dir).unwrap_err();
-        assert!(error.contains("26.4"));
-        assert!(error.contains("vanilla-jar"));
+        let version = config::read_vanilla_version(&dir.join("server.jar")).unwrap();
+        assert_eq!(version.name, "26.4");
+        assert_eq!(version.protocol, 999);
+
+        if !chunkwake_data::bundle::present() {
+            config::save(&config_path(&dir), "vanilla-jar=server.jar").unwrap();
+            let error = check(&dir).unwrap_err();
+            assert!(error.contains("26.4"), "{error}");
+            assert!(error.contains("vanilla-jar"), "{error}");
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -584,6 +686,20 @@ mod tests {
 
     #[test]
     fn doctor_reports_busy_port_and_missing_java() {
+        if chunkwake_data::bundle::present() {
+            // Во встроенной сборке Java для данных не нужна: проверяем порт,
+            // а java-path к делу не относится.
+            let dir = temp_dir();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let props = Properties::parse(&format!("server-port={port}")).unwrap();
+            let issues = diagnose(&props, &dir);
+            assert!(issues.iter().any(|issue| issue.key == "server-port"));
+            assert!(!issues.iter().any(|issue| issue.key == "java-path"));
+            drop(listener);
+            std::fs::remove_dir_all(dir).unwrap();
+            return;
+        }
         let dir = temp_dir();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();

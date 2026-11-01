@@ -1,26 +1,34 @@
-//! Запуск ванильного генератора данных с кэшем по версии.
+//! Кэш ванильных данных: запуск генератора из `server.jar`, шаблоны структур,
+//! упаковка готового дерева в архив и его распаковка.
 //!
-//! `java -DbundlerMainClass=net.minecraft.data.Main -jar server.jar --reports --output <dir>`
+//! Крейт отдельный, потому что им пользуются двое: сервер (когда кэша нет, а
+//! `server.jar` есть) и `build.rs` крейта `chunkwake-data`, который кладёт
+//! готовый набор внутрь бинаря. Рантайму ничего из этого не нужно: он читает
+//! уже распакованное дерево.
 
-use crate::DataError;
+mod archive;
+
+pub use archive::{ArchiveError, TOP_LEVEL, is_wanted, pack, pack_with, unpack, unpack_parallel};
+
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Пишется последним; меняется при изменении состава кэша.
-const CACHE_MARKER: &str = ".chunkwake-cache-v10";
+pub const CACHE_MARKER: &str = ".chunkwake-cache-v10";
 
-/// Выгрузка свойств света (исходник рядом: `extractor/ChunkwakeLight.java`).
-const LIGHT_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeLight.class");
+/// Вложенные `.jar` версии лежат здесь (бандлер распаковывает сервер сюда).
+const VERSION_JAR_PREFIX: &str = "META-INF/versions/";
 
-/// Выгрузка климатических параметров биомов (`extractor/ChunkwakeBiomes.java`).
-const BIOME_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeBiomes.class");
-
-/// Выгрузка коллизии и трения блоков (`extractor/ChunkwakeShapes.java`).
-const SHAPES_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeShapes.class");
-
-/// Выгрузка жидкостей и классов блоков для фич (`extractor/ChunkwakeWorldgen.java`).
-const WORLDGEN_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeWorldgen.class");
+#[derive(Debug, thiserror::Error)]
+pub enum CacheError {
+    #[error("{0}")]
+    Io(String),
+    #[error("data generator failed: {0}")]
+    Generator(String),
+    #[error("{file}: {msg}")]
+    Format { file: String, msg: String },
+}
 
 /// Готовый кэш версии, если он есть: тогда server.jar не нужен.
 pub fn cached(cache_root: &Path, version: &str) -> Option<PathBuf> {
@@ -38,7 +46,7 @@ pub fn ensure_generated(
     jar: &Path,
     version: &str,
     cache_root: &Path,
-) -> Result<PathBuf, DataError> {
+) -> Result<PathBuf, CacheError> {
     ensure_generated_with(java, jar, version, cache_root, &|_| {})
 }
 
@@ -49,13 +57,13 @@ pub fn ensure_generated_with(
     version: &str,
     cache_root: &Path,
     progress: &dyn Fn(&str),
-) -> Result<PathBuf, DataError> {
+) -> Result<PathBuf, CacheError> {
     if let Some(target) = cached(cache_root, version) {
         return Ok(target);
     }
     let target = cache_root.join(version);
     let io = |what: &str, p: &Path, e: std::io::Error| {
-        DataError::Io(format!("{what} {}: {e}", p.display()))
+        CacheError::Io(format!("{what} {}: {e}", p.display()))
     };
     // Кэш старого формата (без маркера) пересоздаём.
     if target.exists() {
@@ -82,7 +90,7 @@ pub fn ensure_generated_with(
         .arg("--output")
         .arg(&tmp_abs);
     let output = run(cmd, "[1/2] data generator", progress).map_err(|e| {
-        DataError::Generator(format!(
+        CacheError::Generator(format!(
             "cannot start {}: {e}. Set CHUNKWAKE_JAVA to a Java runtime required by this version",
             java.display()
         ))
@@ -95,14 +103,14 @@ pub fn ensure_generated_with(
         } else {
             ""
         };
-        return Err(DataError::Generator(format!(
+        return Err(CacheError::Generator(format!(
             "exit {}{hint}: {}",
             output.status,
             tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
         )));
     }
     if !tmp_out.join("reports/packets.json").is_file() {
-        return Err(DataError::Generator(
+        return Err(CacheError::Generator(
             "no reports/packets.json produced".into(),
         ));
     }
@@ -110,15 +118,18 @@ pub fn ensure_generated_with(
     // маленькие классы на распакованных бандлером `versions/` и `libraries/`.
     let class_dir = work.join("chunkwake-extractor");
     let io = |what: &str, p: &Path, e: std::io::Error| {
-        DataError::Io(format!("{what} {}: {e}", p.display()))
+        CacheError::Io(format!("{what} {}: {e}", p.display()))
     };
     std::fs::create_dir_all(&class_dir).map_err(|e| io("create", &class_dir, e))?;
     std::fs::write(class_dir.join("ChunkwakeLight.class"), LIGHT_EXTRACTOR)
         .map_err(|e| io("write", &class_dir.join("ChunkwakeLight.class"), e))?;
     std::fs::write(class_dir.join("ChunkwakeBiomes.class"), BIOME_EXTRACTOR)
         .map_err(|e| io("write", &class_dir.join("ChunkwakeBiomes.class"), e))?;
-    std::fs::write(class_dir.join("ChunkwakeWorldgen.class"), WORLDGEN_EXTRACTOR)
-        .map_err(|e| io("write", &class_dir.join("ChunkwakeWorldgen.class"), e))?;
+    std::fs::write(
+        class_dir.join("ChunkwakeWorldgen.class"),
+        WORLDGEN_EXTRACTOR,
+    )
+    .map_err(|e| io("write", &class_dir.join("ChunkwakeWorldgen.class"), e))?;
     std::fs::write(class_dir.join("ChunkwakeShapes.class"), SHAPES_EXTRACTOR)
         .map_err(|e| io("write", &class_dir.join("ChunkwakeShapes.class"), e))?;
 
@@ -128,7 +139,7 @@ pub fn ensure_generated_with(
         jars(&work.join(dir), &mut classpath);
     }
     let classpath = std::env::join_paths(&classpath)
-        .map_err(|e| DataError::Generator(format!("classpath: {e}")))?;
+        .map_err(|e| CacheError::Generator(format!("classpath: {e}")))?;
 
     progress("[2/3] extracting block light and hardness");
     run_extractor(
@@ -174,10 +185,24 @@ pub fn ensure_generated_with(
     // в jar версии. Пишем их в тот же временный каталог до маркера.
     progress("copying structure templates");
     copy_structures(&jar, &tmp_out)?;
+    // Язык клиента нужен консоли команд: он тоже живёт только в jar.
+    let _ = copy_lang(&jar, &tmp_out);
     std::fs::write(tmp_out.join(CACHE_MARKER), "").map_err(|e| io("write", &tmp_out, e))?;
     std::fs::rename(&tmp_out, &target).map_err(|e| io("rename", &tmp_out, e))?;
     Ok(target)
 }
+
+/// Выгрузка свойств света (исходник рядом: `extractor/ChunkwakeLight.java`).
+const LIGHT_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeLight.class");
+
+/// Выгрузка климатических параметров биомов (`extractor/ChunkwakeBiomes.java`).
+const BIOME_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeBiomes.class");
+
+/// Выгрузка коллизии и трения блоков (`extractor/ChunkwakeShapes.java`).
+const SHAPES_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeShapes.class");
+
+/// Выгрузка жидкостей и классов блоков для фич (`extractor/ChunkwakeWorldgen.java`).
+const WORLDGEN_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeWorldgen.class");
 
 /// Один выгрузчик: класс на общем classpath, результат — файл `out`.
 fn run_extractor(
@@ -188,7 +213,7 @@ fn run_extractor(
     out: &Path,
     step: &str,
     progress: &dyn Fn(&str),
-) -> Result<(), DataError> {
+) -> Result<(), CacheError> {
     let mut cmd = Command::new(java);
     cmd.current_dir(work)
         .arg("-cp")
@@ -196,11 +221,11 @@ fn run_extractor(
         .arg(main)
         .arg(out);
     let output = run(cmd, step, progress)
-        .map_err(|e| DataError::Generator(format!("cannot start {}: {e}", java.display())))?;
+        .map_err(|e| CacheError::Generator(format!("cannot start {}: {e}", java.display())))?;
     if !output.status.success() || !out.is_file() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let tail: Vec<&str> = stderr.lines().rev().take(5).collect();
-        return Err(DataError::Generator(format!(
+        return Err(CacheError::Generator(format!(
             "{main} exit {}: {}",
             output.status,
             tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
@@ -289,15 +314,15 @@ pub fn structures_present(data_dir: &Path) -> bool {
 /// вложенного jar версии) в готовый кэш. Каталог с шаблонами не трогает
 /// и `reports/` не пересоздаёт. Возвращает число скопированных файлов;
 /// ноль — шаблоны уже были.
-pub fn copy_structures(jar: &Path, data_dir: &Path) -> Result<usize, DataError> {
+pub fn copy_structures(jar: &Path, data_dir: &Path) -> Result<usize, CacheError> {
     if structures_present(data_dir) {
         return Ok(0);
     }
     let io = |what: &str, p: &Path, e: std::io::Error| {
-        DataError::Io(format!("{what} {}: {e}", p.display()))
+        CacheError::Io(format!("{what} {}: {e}", p.display()))
     };
     let file = std::fs::File::open(jar).map_err(|e| io("open", jar, e))?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| DataError::Format {
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| CacheError::Format {
         file: jar.display().to_string(),
         msg: e.to_string(),
     })?;
@@ -305,18 +330,30 @@ pub fn copy_structures(jar: &Path, data_dir: &Path) -> Result<usize, DataError> 
     if staging.exists() {
         std::fs::remove_dir_all(&staging).map_err(|e| io("remove", &staging, e))?;
     }
-    let mut count = write_structures(&mut archive, &staging, jar)?;
+    let mut count = write_prefix(
+        &mut archive,
+        "data/minecraft/structure/",
+        ".nbt",
+        &staging,
+        jar,
+    )?;
     if count == 0 {
         let nested = nested_version_jar(&mut archive, jar)?;
         let mut inner =
-            zip::ZipArchive::new(std::io::Cursor::new(nested)).map_err(|e| DataError::Format {
+            zip::ZipArchive::new(std::io::Cursor::new(nested)).map_err(|e| CacheError::Format {
                 file: jar.display().to_string(),
                 msg: e.to_string(),
             })?;
-        count = write_structures(&mut inner, &staging, jar)?;
+        count = write_prefix(
+            &mut inner,
+            "data/minecraft/structure/",
+            ".nbt",
+            &staging,
+            jar,
+        )?;
     }
     if count == 0 {
-        return Err(DataError::Format {
+        return Err(CacheError::Format {
             file: jar.display().to_string(),
             msg: "no data/minecraft/structure/*.nbt".into(),
         });
@@ -332,35 +369,122 @@ pub fn copy_structures(jar: &Path, data_dir: &Path) -> Result<usize, DataError> 
     Ok(count)
 }
 
-fn is_structure_entry(name: &str) -> bool {
-    let name = name.trim_start_matches('/');
-    name.starts_with("data/minecraft/structure/") && name.ends_with(".nbt") && !name.ends_with('/')
+/// Пишет `assets/minecraft/lang/*.json` из `server.jar` в кэш: консоль команд
+/// берёт оттуда `en_us.json`. Нет файла в кэше — не ошибка, ключи останутся
+/// ключами.
+pub fn copy_lang(jar: &Path, data_dir: &Path) -> Result<usize, CacheError> {
+    let dest = data_dir.join("assets/minecraft/lang");
+    if dest.is_dir() {
+        return Ok(0);
+    }
+    let file = std::fs::File::open(jar)
+        .map_err(|e| CacheError::Io(format!("open {}: {e}", jar.display())))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| CacheError::Format {
+        file: jar.display().to_string(),
+        msg: e.to_string(),
+    })?;
+    let mut count = write_prefix(&mut archive, "assets/minecraft/lang/", ".json", &dest, jar)?;
+    if count == 0 {
+        let nested = nested_version_jar(&mut archive, jar)?;
+        let mut inner =
+            zip::ZipArchive::new(std::io::Cursor::new(nested)).map_err(|e| CacheError::Format {
+                file: jar.display().to_string(),
+                msg: e.to_string(),
+            })?;
+        count = write_prefix(&mut inner, "assets/minecraft/lang/", ".json", &dest, jar)?;
+    }
+    Ok(count)
 }
 
-fn write_structures<R: Read + Seek>(
+/// Языковые файлы клиента из jar, не распаковывая их на диск:
+/// `("assets/minecraft/lang/en_us.json", байты)`. Нужны сборке, когда кэш
+/// собран раньше появления языкового файла: архив всё равно должен его нести.
+pub fn lang_entries(jar: &Path) -> Result<Vec<(String, Vec<u8>)>, CacheError> {
+    let file = std::fs::File::open(jar)
+        .map_err(|e| CacheError::Io(format!("open {}: {e}", jar.display())))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| CacheError::Format {
+        file: jar.display().to_string(),
+        msg: e.to_string(),
+    })?;
+    let mut out = Vec::new();
+    let names = lang_names(&archive);
+    if !names.is_empty() {
+        for name in names {
+            out.push((name.clone(), read_bytes(&mut archive, &name, jar)?));
+        }
+        return Ok(out);
+    }
+    let nested = nested_version_jar(&mut archive, jar)?;
+    let mut inner =
+        zip::ZipArchive::new(std::io::Cursor::new(nested)).map_err(|e| CacheError::Format {
+            file: jar.display().to_string(),
+            msg: e.to_string(),
+        })?;
+    for name in lang_names(&inner) {
+        out.push((name.clone(), read_bytes(&mut inner, &name, jar)?));
+    }
+    Ok(out)
+}
+
+fn lang_names<R: Read + Seek>(archive: &zip::ZipArchive<R>) -> Vec<String> {
+    archive
+        .file_names()
+        .filter(|name| {
+            let name = name.trim_start_matches('/');
+            name.starts_with("assets/minecraft/lang/") && name.ends_with(".json")
+        })
+        .map(|name| name.trim_start_matches('/').to_owned())
+        .collect()
+}
+
+fn read_bytes<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
+    name: &str,
+    jar: &Path,
+) -> Result<Vec<u8>, CacheError> {
+    let mut file = archive.by_name(name).map_err(|e| CacheError::Format {
+        file: jar.display().to_string(),
+        msg: format!("{name}: {e}"),
+    })?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|e| CacheError::Format {
+            file: jar.display().to_string(),
+            msg: format!("{name}: {e}"),
+        })?;
+    Ok(bytes)
+}
+/// сохраняя путь после префикса. Возвращает число файлов.
+fn write_prefix<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    prefix: &str,
+    suffix: &str,
     dest: &Path,
     jar: &Path,
-) -> Result<usize, DataError> {
+) -> Result<usize, CacheError> {
     let names: Vec<String> = archive
         .file_names()
-        .filter(|name| is_structure_entry(name))
+        .filter(|name| {
+            let name = name.trim_start_matches('/');
+            name.starts_with(prefix) && name.ends_with(suffix)
+        })
         .map(|name| name.trim_start_matches('/').to_owned())
         .collect();
     let io = |what: &str, p: &Path, e: std::io::Error| {
-        DataError::Io(format!("{what} {}: {e}", p.display()))
+        CacheError::Io(format!("{what} {}: {e}", p.display()))
     };
     for name in &names {
-        let mut file = archive.by_name(name).map_err(|e| DataError::Format {
+        let mut file = archive.by_name(name).map_err(|e| CacheError::Format {
             file: jar.display().to_string(),
             msg: format!("{name}: {e}"),
         })?;
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(|e| DataError::Format {
-            file: jar.display().to_string(),
-            msg: format!("{name}: {e}"),
-        })?;
-        let rel = name.trim_start_matches("data/minecraft/structure/");
+        file.read_to_end(&mut bytes)
+            .map_err(|e| CacheError::Format {
+                file: jar.display().to_string(),
+                msg: format!("{name}: {e}"),
+            })?;
+        let rel = name.trim_start_matches(prefix);
         let path = dest.join(rel);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| io("create", parent, e))?;
@@ -370,14 +494,15 @@ fn write_structures<R: Read + Seek>(
     Ok(names.len())
 }
 
-fn nested_version_jar<R: Read + Seek>(
+/// Вложенный jar версии из бандлера (`META-INF/versions/<версия>/*.jar`).
+pub fn nested_version_jar<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     jar: &Path,
-) -> Result<Vec<u8>, DataError> {
+) -> Result<Vec<u8>, CacheError> {
     let name = {
         let mut found = None;
         for entry in archive.file_names() {
-            if entry.starts_with("META-INF/versions/") && entry.ends_with(".jar") {
+            if entry.starts_with(VERSION_JAR_PREFIX) && entry.ends_with(".jar") {
                 found = Some(entry.to_owned());
                 break;
             }
@@ -385,22 +510,61 @@ fn nested_version_jar<R: Read + Seek>(
         found
     };
     let Some(name) = name else {
-        return Err(DataError::Format {
+        return Err(CacheError::Format {
             file: jar.display().to_string(),
             msg: "no version jar and no structure templates".into(),
         });
     };
-    let mut file = archive.by_name(&name).map_err(|e| DataError::Format {
+    let mut file = archive.by_name(&name).map_err(|e| CacheError::Format {
         file: jar.display().to_string(),
         msg: format!("{name}: {e}"),
     })?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
-        .map_err(|e| DataError::Format {
+        .map_err(|e| CacheError::Format {
             file: jar.display().to_string(),
             msg: format!("{name}: {e}"),
         })?;
     Ok(bytes)
+}
+
+/// `version.json` из jar: имя версии и номер протокола. Читается и из внешнего
+/// jar, и из вложенного jar версии.
+pub fn version_json(jar: &Path) -> Result<String, CacheError> {
+    let io = |e: std::io::Error| CacheError::Io(format!("open {}: {e}", jar.display()));
+    let file = std::fs::File::open(jar).map_err(io)?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| CacheError::Format {
+        file: jar.display().to_string(),
+        msg: e.to_string(),
+    })?;
+    if let Ok(text) = read_entry(&mut archive, "version.json", jar) {
+        return Ok(text);
+    }
+    let nested = nested_version_jar(&mut archive, jar)?;
+    let mut inner =
+        zip::ZipArchive::new(std::io::Cursor::new(nested)).map_err(|e| CacheError::Format {
+            file: jar.display().to_string(),
+            msg: e.to_string(),
+        })?;
+    read_entry(&mut inner, "version.json", jar)
+}
+
+fn read_entry<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    name: &str,
+    jar: &Path,
+) -> Result<String, CacheError> {
+    let mut file = archive.by_name(name).map_err(|e| CacheError::Format {
+        file: jar.display().to_string(),
+        msg: format!("{name}: {e}"),
+    })?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(|e| CacheError::Format {
+            file: jar.display().to_string(),
+            msg: format!("{name}: {e}"),
+        })?;
+    Ok(text)
 }
 
 /// Все `.jar` в каталоге, рекурсивно.
@@ -459,7 +623,10 @@ mod tests {
         let n = copy_structures(&jar, &data).unwrap();
         assert!(n > 0);
         assert!(structures_present(&data));
-        assert!(data.join("data/minecraft/structure/desert_well/well.nbt").is_file());
+        assert!(
+            data.join("data/minecraft/structure/desert_well/well.nbt")
+                .is_file()
+        );
         assert_eq!(reports.metadata().unwrap().modified().unwrap(), before);
     }
 }

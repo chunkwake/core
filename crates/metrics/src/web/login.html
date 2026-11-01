@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="noindex">
+<title>Chunkwake · Вход</title>
+<style>
+  :root{--bg:#080d14;--surface:#131c27;--stroke:#26374a;--text:#eaf2fb;
+        --muted:#93a6bb;--cyan:#65cce9;--red:#f18b96}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;
+    background:radial-gradient(ellipse 80% 40% at 50% -8%,#16304a 0,transparent 70%),var(--bg);
+    color:var(--text);font:13px/1.5 "Inter","Segoe UI",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .card{width:min(380px,100%);border:1px solid var(--stroke);border-radius:12px;
+    background:var(--surface);padding:22px;box-shadow:0 24px 70px #0007}
+  h1{margin:0 0 4px;font-size:16px;font-weight:750;letter-spacing:-.01em}
+  p{margin:0 0 18px;color:var(--muted);font-size:12px}
+  label{display:block;font-size:10px;font-weight:700;letter-spacing:.13em;
+    text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+  input{width:100%;padding:9px 11px;border-radius:7px;border:1px solid var(--stroke);
+    background:#0d1720;color:var(--text);font:inherit;font-family:ui-monospace,Consolas,monospace;
+    transition:border-color .2s ease, box-shadow .2s ease}
+  input:focus{outline:none;border-color:#3f6f8c;box-shadow:0 0 0 3px #65cce91f}
+  button{width:100%;margin-top:14px;padding:10px 12px;border-radius:7px;border:0;
+    background:linear-gradient(140deg,#2f7f9c,#2a6191);color:#fff;font:inherit;font-weight:650;
+    cursor:pointer;transition:filter .2s ease, transform .12s ease}
+  button:hover{filter:brightness(1.1)}
+  button:active{transform:translateY(1px)}
+  .hint{margin-top:14px;padding-top:12px;border-top:1px solid #1e2b39;
+    color:var(--muted);font-size:11px;line-height:1.6}
+  code{font-family:ui-monospace,Consolas,monospace;color:var(--cyan);
+    background:#0d1720;padding:1px 5px;border-radius:4px}
+  .error{padding:8px 10px;border-radius:6px;border:1px solid #6d3742;background:#2b171c80;
+    color:var(--red);font-size:11px;margin-bottom:14px}
+</style>
+</head>
+<body>
+<main class="card">
+  <h1>Chunkwake · метрики</h1>
+  <p>Этот дашборд открыт из сети, поэтому нужен токен из настроек сервера.</p>
+  <div id="err" class="error" hidden>Токен не подошёл. Проверьте <code>metrics-token</code> в <code>server.properties</code>.</div>
+  <form method="get" action="/" id="form">
+    <label for="token">Токен</label>
+    <input id="token" name="token" type="password" autocomplete="current-password"
+           spellcheck="false" autocapitalize="off" autofocus>
+    <button type="submit">Войти</button>
+  </form>
+  <div class="hint">
+    Токен задаётся на сервере: <code>chunkwake config set metrics-token &lt;значение&gt;</code>.
+    Чтобы открывать дашборд только с этой машины, привяжите его к loopback:
+    <code>metrics-bind=127.0.0.1</code>.
+  </div>
+</main>
+<script>
+(function(){
+  // Сервер отвечает 401, когда токен не подошёл: показываем подсказку, а не
+  // пустую страницу. Форма уходит обычным GET, куку ставит сервер.
+  if (location.search.indexOf("token=") >= 0) {
+    document.getElementById("err").hidden = false;
+  }
+})();
+</script>
+</body>
+</html>

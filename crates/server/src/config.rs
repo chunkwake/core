@@ -2,7 +2,6 @@
 
 use chunkwake_net::{GameVersion, NetConfig};
 use std::collections::HashMap;
-use std::io::Read;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
@@ -15,7 +14,7 @@ motd=A Chunkwake Server
 max-players=20
 online-mode=false
 network-compression-threshold=256
-vanilla-jar=server.jar
+vanilla-jar=
 java-path=java
 generated-dir=generated
 log-level=info
@@ -36,6 +35,10 @@ spawn-protection=16
 metrics-enabled=true
 metrics-bind=127.0.0.1
 metrics-port=25585
+# Пусто — дашборд доступен только с этой машины (metrics-bind на loopback).
+# Задайте пароль, чтобы открыть его из сети:
+# chunkwake config set metrics-token <длинная случайная строка>
+metrics-token=
 ";
 
 pub const KEYS: &[&str] = &[
@@ -66,6 +69,7 @@ pub const KEYS: &[&str] = &[
     "metrics-enabled",
     "metrics-bind",
     "metrics-port",
+    "metrics-token",
 ];
 
 #[derive(Debug)]
@@ -77,7 +81,7 @@ pub struct Properties {
     pub max_players: usize,
     pub online_mode: bool,
     pub compression_threshold: i32,
-    pub vanilla_jar: String,
+    pub vanilla_jar: Option<String>,
     pub java_path: String,
     pub generated_dir: String,
     /// Каталог мира (`level-name`), относительно каталога сервера.
@@ -107,6 +111,11 @@ pub struct Properties {
     pub metrics_enabled: bool,
     pub metrics_ip: String,
     pub metrics_port: u16,
+    /// Токен доступа к дашборду. Пустой — доступ только с текущей машины.
+    ///
+    /// Нужен, когда `metrics-bind` смотрит не только на loopback: иначе
+    /// дашборд со всей нагрузкой открыт любому в сети.
+    pub metrics_token: String,
     pub log_level: tracing_subscriber::filter::LevelFilter,
 }
 
@@ -151,9 +160,13 @@ impl Properties {
             return Err("network-compression-threshold: enter -1 or a non-negative integer".into());
         }
         let vanilla_jar = value("vanilla-jar");
-        if vanilla_jar.is_empty() {
-            return Err("vanilla-jar: enter a path to the Minecraft server.jar".into());
-        }
+        let vanilla_jar = if vanilla_jar.is_empty() {
+            // Данные обычно встроены в бинарь; jar нужен только чтобы их
+            // пересобрать, поэтому пустое значение — допустимый выбор.
+            None
+        } else {
+            Some(vanilla_jar.to_owned())
+        };
         let java_path = value("java-path");
         if java_path.is_empty() {
             return Err("java-path: enter a Java executable or path".into());
@@ -216,6 +229,15 @@ impl Properties {
         if metrics_port == 0 {
             return Err("metrics-port: enter a number from 1 to 65535".into());
         }
+        // Токен — одна строка без пробелов по краям: его передают в ссылке
+        // и заголовке, поэтому пробел в середине сделал бы вход неочевидным.
+        let metrics_token = value("metrics-token").trim().to_owned();
+        if metrics_token.contains(char::is_whitespace) {
+            return Err("metrics-token: no spaces; use a long random string".into());
+        }
+        if !metrics_token.is_empty() && metrics_token.len() < 16 {
+            return Err("metrics-token: at least 16 characters, otherwise it is guessable".into());
+        }
         Ok(Self {
             server_ip: server_ip.into(),
             server_port: port,
@@ -224,7 +246,7 @@ impl Properties {
             max_players,
             online_mode,
             compression_threshold,
-            vanilla_jar: vanilla_jar.into(),
+            vanilla_jar,
             java_path: java_path.into(),
             generated_dir: generated_dir.into(),
             level_name: value("level-name").into(),
@@ -255,6 +277,7 @@ impl Properties {
             metrics_enabled,
             metrics_ip,
             metrics_port,
+            metrics_token,
         })
     }
 
@@ -264,13 +287,16 @@ impl Properties {
         Ok(())
     }
 
-    pub fn jar_path(&self, dir: &Path) -> PathBuf {
-        let path = Path::new(&self.vanilla_jar);
-        if path.is_absolute() {
+    /// Путь к `server.jar`, если он задан. Данные обычно встроены в бинарь,
+    /// поэтому jar не обязателен: он нужен только чтобы собрать кэш заново.
+    pub fn jar_path(&self, dir: &Path) -> Option<PathBuf> {
+        let text = self.vanilla_jar.as_deref()?;
+        let path = Path::new(text);
+        Some(if path.is_absolute() {
             path.to_owned()
         } else {
             dir.join(path)
-        }
+        })
     }
 
     pub fn java_command(&self, dir: &Path) -> PathBuf {
@@ -385,28 +411,31 @@ pub fn read_cached_version(data_dir: &Path) -> Option<GameVersion> {
 
 /// Копирует `version.json` из jar в кэш.
 pub fn cache_version(jar: &Path, data_dir: &Path) -> Result<(), String> {
-    let file = std::fs::File::open(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("{}: {e}", jar.display()))?;
-    let mut text = String::new();
-    zip.by_name("version.json")
-        .map_err(|e| e.to_string())?
-        .read_to_string(&mut text)
-        .map_err(|e| e.to_string())?;
-    std::fs::write(data_dir.join(CACHED_VERSION), text).map_err(|e| e.to_string())
+    let text =
+        chunkwake_data::cache::version_json(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
+    std::fs::write(data_dir.join(CACHED_VERSION), text)
+        .map_err(|e| format!("write {}: {e}", data_dir.display()))
 }
 
+/// Читает `version.json` из ванильного jar (в том числе из вложенного jar
+/// версии внутри бандлера): так `doctor` и `check` сверяют версию файла.
 pub fn read_vanilla_version(jar: &Path) -> Result<GameVersion, String> {
-    let file = std::fs::File::open(jar).map_err(|e| {
-        format!("vanilla-jar={}: {e}; place the Minecraft 26.3 server.jar there or run `chunkwake config set vanilla-jar PATH`", jar.display())
-    })?;
-    let mut zip = zip::ZipArchive::new(file)
-        .map_err(|e| format!("vanilla-jar={}: invalid jar: {e}", jar.display()))?;
-    let mut text = String::new();
-    zip.by_name("version.json")
-        .map_err(|e| format!("vanilla-jar={}: missing version.json: {e}", jar.display()))?
-        .read_to_string(&mut text)
-        .map_err(|e| format!("vanilla-jar={}: read version.json: {e}", jar.display()))?;
+    if !jar.is_file() {
+        return Err(format!(
+            "vanilla-jar={}: not found; the embedded data does not need it, \
+             the jar is only needed to rebuild the data cache",
+            jar.display()
+        ));
+    }
+    let text = chunkwake_data::cache::version_json(jar)
+        .map_err(|e| format!("vanilla-jar={}: {e}", jar.display()))?;
     parse_version_json(&text).map_err(|e| format!("vanilla-jar={}: {e}", jar.display()))
+}
+
+/// `version.json` → версия игры. Тем же разбором пользуются кэш, jar и
+/// встроенный архив.
+pub fn version_from_json(text: &str) -> Result<GameVersion, String> {
+    parse_version_json(text)
 }
 
 fn parse_version_json(text: &str) -> Result<GameVersion, String> {

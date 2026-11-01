@@ -4,8 +4,8 @@
 //! в задаче сессии игрока: иначе тик делит с ним ядра и мир замирает. Потоки
 //! работают с приоритетом ниже обычного, поэтому тик их вытесняет, а не наоборот.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Одна задача пула: готовая работа без параметров.
 pub type Job = Box<dyn FnOnce() + Send + 'static>;

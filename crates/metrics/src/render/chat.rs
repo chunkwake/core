@@ -188,7 +188,7 @@ pub fn render(snapshot: &Snapshot, section: Section) -> Value {
         push(
             &mut extra,
             json!({
-                "text": format!("{ping}"),
+                "text": ping,
                 "color": "white",
                 "hover_event": hover(&format!(
                     "in {:.1} MiB / {} packets\nout {:.1} MiB / {} packets\nmax ping {:.0} ms",
@@ -215,10 +215,12 @@ mod tests {
     use super::*;
 
     fn sample() -> Snapshot {
-        let mut s = Snapshot::default();
-        s.motd = "Test".into();
-        s.version = "26.3".into();
-        s.uptime = 90;
+        let mut s = Snapshot {
+            motd: "Test".into(),
+            version: "26.3".into(),
+            uptime: 90,
+            ..Snapshot::default()
+        };
         s.tick.tps_1m = 19.9;
         s.tick.mspt_1m = 2.4;
         s.limits.target_mspt = 50.0;
@@ -269,7 +271,7 @@ mod tests {
                 v["color"] == "gray"
                     && v["text"]
                         .as_str()
-                        .is_some_and(|t| t.trim_end().split_whitespace().count() == 8)
+                        .is_some_and(|t| t.split_whitespace().count() == 8)
             })
             .collect();
         assert_eq!(cores.len(), 1);

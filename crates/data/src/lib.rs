@@ -1,16 +1,20 @@
-//! chunkwake-data — данные ванилы: запуск генератора и таблица пакетов.
+//! chunkwake-data — данные ванилы: образ запуска и загрузчики по дереву данных.
 //!
-//! Данные Mojang не хранятся в репозитории: сервер генерирует их из
-//! `server.jar` пользователя и кэширует по имени версии.
+//! Данные Mojang не хранятся в репозитории: `build.rs` упаковывает кэш
+//! `generated/<версия>` (или собирает его из `server.jar`) в архив и встраивает
+//! его в бинарь. При первом запуске архив распаковывается, дальше читаются
+//! обычные файлы.
 
 pub mod boot;
+pub mod bundle;
 pub mod enchanting;
-pub mod generator;
 pub mod packets;
 pub mod recipes;
 pub mod registries;
 pub mod tools;
 pub mod world;
+
+pub use chunkwake_datacache as cache;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DataError {

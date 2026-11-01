@@ -405,21 +405,21 @@ impl Grow {
             return;
         }
         let depth = parent_depth + 1;
-        if let Some(piece) = self.from_door(foot, facing, depth) {
+        if let Some(piece) = self.build_door(foot, facing, depth) {
             let index = self.pieces.len();
             self.pieces.push(piece);
             self.pending.push(index);
         }
     }
 
-    fn from_door(&mut self, foot: [i32; 3], facing: u8, depth: i32) -> Option<Raw> {
+    fn build_door(&mut self, foot: [i32; 3], facing: u8, depth: i32) -> Option<Raw> {
         if !self.refresh() {
             return None;
         }
-        if let Some(kind) = self.imposed.take() {
-            if let Some(piece) = self.make(kind, foot, facing, depth) {
-                return Some(piece);
-            }
+        if let Some(kind) = self.imposed.take()
+            && let Some(piece) = self.make(kind, foot, facing, depth)
+        {
+            return Some(piece);
         }
         let mut attempt = 0;
         while attempt < 5 {
@@ -883,6 +883,7 @@ impl<'a> Draw<'a> {
         self.level.set(p[0], p[1], p[2], state);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn stone(&mut self, x0: i32, y0: i32, z0: i32, x1: i32, y1: i32, z1: i32, skip_air: bool) {
         for y in y0..=y1 {
             for x in x0..=x1 {
@@ -913,6 +914,7 @@ impl<'a> Draw<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn blocks(
         &mut self,
         x0: i32,
@@ -932,11 +934,13 @@ impl<'a> Draw<'a> {
                         continue;
                     }
                     let shell = y == y0 || y == y1 || x == x0 || x == x1 || z == z0 || z == z1;
-                    self.put(if shell { edge } else { fill }, x, y, z);                }
+                    self.put(if shell { edge } else { fill }, x, y, z);
+                }
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn maybe(
         &mut self,
         prob: f32,
@@ -1100,7 +1104,7 @@ impl<'a> Draw<'a> {
         }
     }
 
-    fn chest_at(&mut self, x: i32, y: i32, z: i32) {
+    fn chest_at(&mut self, x: i32, y: i32, z: i32, table: &str) {
         let p = self.world(x, y, z);
         if !self.window.contains(p) {
             return;
@@ -1111,7 +1115,9 @@ impl<'a> Draw<'a> {
         }
         let state = self.reorient_chest(p);
         self.level.set(p[0], p[1], p[2], state);
-        let _loot = self.rng.next_long();
+        // `createChest`: `setLootTable(table, random.nextLong())`.
+        let seed = self.rng.next_long();
+        super::template::set_loot(self.level, p, table, seed);
     }
 
     /// `StructurePiece.reorient`: сторона сундука в мировых координатах.
@@ -1317,7 +1323,7 @@ impl<'a> Draw<'a> {
                 self.put(ladder, 9, 1, 3);
                 self.put(ladder, 9, 2, 3);
                 self.put(ladder, 9, 3, 3);
-                self.chest_at(3, 4, 8);
+                self.chest_at(3, 4, 8, "minecraft:chests/stronghold_crossing");
             }
             _ => {}
         }
@@ -1329,7 +1335,6 @@ impl<'a> Draw<'a> {
         self.small_door(OPENING, 1, 1, 7);
         let stairs = self.stair("minecraft:cobblestone_stairs", "south");
         for i in 0..6 {
-            let i = i;
             self.put(stairs, 1, 6 - i, 1 + i);
             self.put(stairs, 2, 6 - i, 1 + i);
             self.put(stairs, 3, 6 - i, 1 + i);
@@ -1422,7 +1427,7 @@ impl<'a> Draw<'a> {
         for z in 2..=4 {
             self.put(self.slab_brick, 2, 1, z);
         }
-        self.chest_at(3, 2, 3);
+        self.chest_at(3, 2, 3, "minecraft:chests/stronghold_corridor");
     }
 
     fn library(&mut self, door: u8, tall: bool) {
@@ -1499,10 +1504,10 @@ impl<'a> Draw<'a> {
                 self.put(self.torch, x, 8, z);
             }
         }
-        self.chest_at(3, 3, 5);
+        self.chest_at(3, 3, 5, "minecraft:chests/stronghold_library");
         if tall {
             self.put(self.cave, 12, 9, 1);
-            self.chest_at(12, 8, 1);
+            self.chest_at(12, 8, 1, "minecraft:chests/stronghold_library");
         }
     }
 
@@ -1603,47 +1608,21 @@ mod tests {
     #[test]
     fn stronghold_seed_12345_span() {
         let pieces = build(12345, -35, -103, 63, -64);
-        let mut min = [i32::MAX, i32::MAX, i32::MAX];
-        let mut max = [i32::MIN, i32::MIN, i32::MIN];
-        for p in &pieces {
-            for i in 0..3 {
-                min[i] = min[i].min(p.min[i]);
-                max[i] = max[i].max(p.max[i]);
-            }
-        }
-        eprintln!(
-            "span {} pieces x {}..{} y {}..{} z {}..{}",
-            pieces.len(),
-            min[0],
-            max[0],
-            min[1],
-            max[1],
-            min[2],
-            max[2]
-        );
-        for (i, p) in pieces.iter().enumerate() {
-            if matches!(p.body, Body::Portal | Body::Stairs { .. }) {
-                eprintln!(
-                    "  {i} {:?} face {} {}..{} {}..{} {}..{}",
-                    std::mem::discriminant(&p.body),
-                    p.facing,
-                    p.min[0],
-                    p.max[0],
-                    p.min[1],
-                    p.max[1],
-                    p.min[2],
-                    p.max[2]
-                );
-            }
-        }
+        // 225 кусков — столько же, сколько в NBT `server.jar`; каждая коробка
+        // сверяется в `stronghold_seed_12345_against_saved_pieces`.
+        assert_eq!(pieces.len(), 225);
         assert!(pieces.iter().any(|p| matches!(p.body, Body::Portal)));
     }
 
     #[test]
     fn stronghold_seed_12345_against_saved_pieces() {
-        let path = std::path::Path::new(
-            r"E:\paper_rust\target\stronghold-12345\world\dimensions\minecraft\overworld\region",
-        );
+        // Путь от корня рабочего пространства, а не от чьей-то папки: тест
+        // не должен зависеть от того, куда склонирован Chunkwake. Без
+        // выгруженного региона он пропускается — это проверка на реальных
+        // данных, а не обязательный шаг сборки.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/stronghold-12345/world/dimensions/minecraft/overworld/region");
+        let path = root.as_path();
         if !path.is_dir() {
             return;
         }
@@ -1696,15 +1675,29 @@ mod tests {
                 && bb[5] == p.max[2];
             if !kind_ok || !box_ok {
                 bad = Some(i);
-                eprintln!("mismatch {i} van {id} {bb:?} ours {}", body_kind(&p.body));
                 break;
             }
         }
-        if bad.is_none() && children.len() != ours.len() {
-            eprintln!("length {} vs {}", children.len(), ours.len());
-        }
         assert!(bad.is_none(), "first mismatch {}", bad.unwrap());
         assert_eq!(children.len(), ours.len());
+        // Заодно общая коробка: она складывается из этих же кусков.
+        let mut vmin = [i32::MAX; 3];
+        let mut vmax = [i32::MIN; 3];
+        let mut omin = [i32::MAX; 3];
+        let mut omax = [i32::MIN; 3];
+        for (i, c) in children.iter().enumerate() {
+            let c = c.as_compound().unwrap();
+            let bb = c.get("BB").and_then(|t| t.as_int_array()).unwrap_or(&[]);
+            let p = &ours[i];
+            for k in 0..3 {
+                vmin[k] = vmin[k].min(bb[k]);
+                vmax[k] = vmax[k].max(bb[k + 3]);
+                omin[k] = omin[k].min(p.min[k]);
+                omax[k] = omax[k].max(p.max[k]);
+            }
+        }
+        assert_eq!(omin, vmin, "низ общей коробки");
+        assert_eq!(omax, vmax, "верх общей коробки");
     }
 
     fn body_kind(body: &Body) -> &'static str {
@@ -1765,13 +1758,91 @@ mod tests {
         let pos = world
             .locate_structure("minecraft:stronghold", [0, 64, 0])
             .expect("крепость");
+        // `/locate` у `server.jar` на сиде 12345: `[-560, ~, -1648]` — угол того
+        // же чанка (−35, −103); у нас ответ — центр чанка, высота — поверхность.
+        assert_eq!((pos[0].div_euclid(16), pos[2].div_euclid(16)), (-35, -103));
+        assert_eq!(pos[0], -552);
+        assert_eq!(pos[2], -1640);
+    }
+
+    #[test]
+    fn mansion_seed_12345_locate() {
+        let Some(data) = std::env::var_os("CHUNKWAKE_DATA").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let registries = chunkwake_data::registries::RegistryData::load(&data).unwrap();
+        let biome_ids: std::collections::HashMap<String, u32> = registries
+            .synchronized
+            .iter()
+            .find(|r| r.name == "worldgen/biome")
+            .map(|r| {
+                r.entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.clone(), i as u32))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let blocks = chunkwake_data::world::Blocks::load(&data).unwrap();
+        let states = blocks.states();
+        let mut noise = crate::Generator::load_with_version(&data, 12345, None).unwrap();
+        noise.bind_biomes(biome_ids.clone());
+        let state = |n: &str| blocks.default_state(n).ok().map(|s| s as u32);
+        let world = crate::pipeline::Overworld::new(std::sync::Arc::new(noise), &state, &biome_ids)
+            .unwrap()
+            .with_features(&data, &states, &state, &biome_ids)
+            .unwrap();
+        let pos = world
+            .locate_structure("minecraft:mansion", [0, 64, 0])
+            .expect("особняк");
         eprintln!(
-            "stronghold {pos:?} chunk {}, {}",
+            "mansion {pos:?} chunk {}, {}",
             pos[0].div_euclid(16),
             pos[2].div_euclid(16)
         );
-        assert_eq!(pos[0].rem_euclid(16), 8);
-        assert_eq!(pos[2].rem_euclid(16), 8);
+        assert_eq!((pos[0].div_euclid(16), pos[2].div_euclid(16)), (291, 441));
+    }
+
+    #[test]
+    fn stronghold_chests_have_loot_tables() {
+        let path = std::path::Path::new(
+            r"E:\paper_rust\target\stronghold-12345\world\dimensions\minecraft\overworld\region",
+        );
+        if !path.is_dir() {
+            return;
+        }
+        let store = chunkwake_world::anvil::RegionStore::new(path);
+        let chunks = store.load_region(-2, -4).expect("region");
+        let mut chests = 0;
+        let mut with_table = 0;
+        let mut tables = std::collections::BTreeSet::new();
+        for (pos, root) in &chunks {
+            if !root.contains_key("block_entities") {
+                continue;
+            }
+            let list = root
+                .get("block_entities")
+                .and_then(|t| t.as_list())
+                .unwrap_or(&[]);
+            for be in list {
+                let Some(c) = be.as_compound() else { continue };
+                let id = c.get("id").and_then(|t| t.as_str()).unwrap_or("");
+                if !id.contains("chest") {
+                    continue;
+                }
+                chests += 1;
+                if let Some(t) = c.get("LootTable").and_then(|t| t.as_str()) {
+                    with_table += 1;
+                    tables.insert(t.to_owned());
+                    if !c.contains_key("LootTableSeed") {
+                        println!("{pos:?} chest without seed");
+                    }
+                }
+            }
+        }
+        println!("chests {chests} with table {with_table} tables {tables:?}");
+        assert!(chests > 0, "сундуков нет в мире");
+        assert_eq!(chests, with_table, "у сундука нет LootTable");
     }
 
     #[test]

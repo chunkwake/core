@@ -400,8 +400,10 @@ mod tests {
 
     #[test]
     fn uptime_formats() {
-        let mut s = Snapshot::default();
-        s.uptime = 3_723;
+        let mut s = Snapshot {
+            uptime: 3_723,
+            ..Snapshot::default()
+        };
         assert_eq!(s.uptime_text(), "01:02:03");
         s.uptime = 90_061;
         assert_eq!(s.uptime_text(), "1d 01:01:01");

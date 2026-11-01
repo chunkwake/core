@@ -183,6 +183,40 @@ fn fitness(p: &Point, point: &[i64; 6]) -> i64 {
 }
 
 impl BiomeSource {
+    /// `Preset.NETHER` из `MultiNoiseBiomeSourceParameterList`: пять точек,
+    /// остальные оси закреплены нулём. Порядок — как в `List.of`.
+    pub fn nether() -> Self {
+        // `Climate.parameters(temperature, humidity, continentalness, erosion,
+        // depth, weirdness, offset)`; `Climate.quantizeCoord` — `float * 10000`.
+        const fn q(v: f32) -> i64 {
+            (v as f64 * 10000.0) as i64
+        }
+        let point = |name: &str, temperature: f32, vegetation: f32, ridges: f32| Point {
+            name: name.to_owned(),
+            ranges: [
+                [q(temperature), q(temperature)],
+                [q(vegetation), q(vegetation)],
+                [0, 0],
+                [0, 0],
+                [0, 0],
+                [q(ridges), q(ridges)],
+            ],
+        };
+        let points = vec![
+            point("minecraft:nether_wastes", 0.0, 0.0, 0.0),
+            point("minecraft:soul_sand_valley", 0.0, -0.5, 0.0),
+            point("minecraft:crimson_forest", 0.4, 0.0, 0.0),
+            point("minecraft:warped_forest", 0.0, 0.5, 0.375),
+            point("minecraft:basalt_deltas", -0.5, 0.0, 0.175),
+        ];
+        let index = Index::build(&points);
+        Self {
+            points,
+            ids: HashMap::new(),
+            index,
+        }
+    }
+
     /// `reports/biomes.csv`: `имя` и по паре `мин,макс` на каждую ось.
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut points = Vec::new();

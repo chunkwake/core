@@ -61,28 +61,6 @@ pub(crate) fn emit_packed(
     }
 }
 
-/// Состояния в порядке первого появления, не во внутреннем порядке слотов.
-/// `limit` — порог сети: как только записей стало больше, хвост секции не смотрится
-/// (прямая палитра). `None` — обойти все 4096, как Anvil.
-pub(crate) fn first_seen_palette(section: &Section, limit: Option<usize>) -> Vec<u32> {
-    let mut palette = Vec::new();
-    for i in 0..4096 {
-        let v = section.get(i);
-        if palette.contains(&v) {
-            continue;
-        }
-        palette.push(v);
-        if limit.is_some_and(|n| palette.len() > n) {
-            break;
-        }
-    }
-    palette
-}
-
-pub(crate) fn palette_index(palette: &[u32], state: u32) -> u32 {
-    palette.iter().position(|&p| p == state).unwrap() as u32
-}
-
 /// Одно значение: бит на запись = 0, палитра из одной записи, без long-массива.
 fn write_single(w: &mut Writer, state: u32) {
     w.u8(0).var_int(state as i32);
@@ -96,15 +74,20 @@ fn write_biome_container(w: &mut Writer, biomes: &Biomes, global_bits: u32) {
         return;
     }
     let cells = biomes.cells();
-    let palette: Vec<u32> = {
-        let mut p = Vec::new();
-        for &c in &cells {
-            if !p.contains(&c) {
-                p.push(c);
+    // 64 клетки: палитра в порядке первого появления и индексы сразу,
+    // без линейного поиска по палитре на каждую клетку.
+    let mut palette: Vec<u32> = Vec::new();
+    let mut data = [0u32; 64];
+    for (i, &c) in cells.iter().enumerate() {
+        let slot = match palette.iter().position(|&p| p == c) {
+            Some(slot) => slot,
+            None => {
+                palette.push(c);
+                palette.len() - 1
             }
-        }
-        p
-    };
+        };
+        data[i] = slot as u32;
+    }
     if palette.len() == 1 {
         write_single(w, palette[0]);
         return;
@@ -118,7 +101,7 @@ fn write_biome_container(w: &mut Writer, biomes: &Biomes, global_bits: u32) {
         emit_packed(
             64,
             bits,
-            |i| palette_index(&palette, cells[i]),
+            |i| data[i],
             |long| w.buf.extend_from_slice(&long.to_be_bytes()),
         );
     } else {
@@ -139,33 +122,36 @@ fn write_block_container(w: &mut Writer, section: &Section, min_bits: u32, globa
         write_single(w, section.get(0));
         return;
     }
-    let palette = first_seen_palette(section, Some(256));
-    if palette.len() == 1 {
-        write_single(w, palette[0]);
-        return;
-    }
-    let indirect_bits = bits_for(palette.len()).max(min_bits);
-    if palette.len() <= 256 && indirect_bits <= 8 {
-        w.u8(indirect_bits as u8).var_int(palette.len() as i32);
-        for &state in &palette {
-            w.var_int(state as i32);
+    // Палитра и индексы считаются одним разбором секции: раньше палитра
+    // строилась линейным поиском, а индексы затем искались в ней заново
+    // на каждую из 4096 клеток.
+    if let Some((palette, data)) = section.net_palette(256) {
+        if palette.len() == 1 {
+            write_single(w, palette[0]);
+            return;
         }
-        let bits = indirect_bits;
-        emit_packed(
-            4096,
-            bits,
-            |i| palette_index(&palette, section.get(i)),
-            |long| w.buf.extend_from_slice(&long.to_be_bytes()),
-        );
-    } else {
-        w.u8(global_bits as u8);
-        emit_packed(
-            4096,
-            global_bits,
-            |i| section.get(i),
-            |long| w.buf.extend_from_slice(&long.to_be_bytes()),
-        );
+        let bits = bits_for(palette.len()).max(min_bits);
+        if bits <= 8 {
+            w.u8(bits as u8).var_int(palette.len() as i32);
+            for &state in &palette {
+                w.var_int(state as i32);
+            }
+            emit_packed(
+                4096,
+                bits,
+                |i| data[i],
+                |long| w.buf.extend_from_slice(&long.to_be_bytes()),
+            );
+            return;
+        }
     }
+    w.u8(global_bits as u8);
+    emit_packed(
+        4096,
+        global_bits,
+        |i| section.get(i),
+        |long| w.buf.extend_from_slice(&long.to_be_bytes()),
+    );
 }
 
 /// Индексы палитры: байт, пока палитра ≤ 256 записей, иначе u16.
@@ -193,6 +179,62 @@ struct Paletted {
 }
 
 impl Paletted {
+    /// Индексы палитры по клеткам в порядке первого появления состояний.
+    ///
+    /// Это ровно то, что ждёт сеть: палитра — состояния в порядке первого
+    /// появления, данные — индексы в неё. Считается двумя проходами по
+    /// индексам секции (4096 байт), без поиска по состояниям на каждую клетку.
+    fn first_seen_pack(&self) -> (Vec<u32>, Vec<u32>) {
+        let mut first = vec![u16::MAX; self.palette.len()];
+        let mut seen = self.palette.len();
+        match &self.idx {
+            Indices::Narrow(a) => {
+                for (i, &s) in a.iter().enumerate() {
+                    if first[s as usize] == u16::MAX {
+                        first[s as usize] = i as u16;
+                        seen -= 1;
+                        if seen == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+            Indices::Wide(a) => {
+                for (i, &s) in a.iter().enumerate() {
+                    if first[s as usize] == u16::MAX {
+                        first[s as usize] = i as u16;
+                        seen -= 1;
+                        if seen == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let mut rank = vec![0u16; self.palette.len()];
+        let mut slots: Vec<u32> = (0..self.palette.len() as u32).collect();
+        slots.sort_unstable_by_key(|&s| first[s as usize]);
+        let mut ordered = Vec::with_capacity(self.palette.len());
+        for (new, &old) in slots.iter().enumerate() {
+            rank[old as usize] = new as u16;
+            ordered.push(self.palette[old as usize]);
+        }
+        let mut data = vec![0u32; 4096];
+        match &self.idx {
+            Indices::Narrow(a) => {
+                for (i, &s) in a.iter().enumerate() {
+                    data[i] = u32::from(rank[s as usize]);
+                }
+            }
+            Indices::Wide(a) => {
+                for (i, &s) in a.iter().enumerate() {
+                    data[i] = u32::from(rank[s as usize]);
+                }
+            }
+        }
+        (ordered, data)
+    }
+
     fn entry(&mut self, state: u32) -> usize {
         if let Some(i) = self.palette.iter().position(|&p| p == state) {
             return i;
@@ -391,6 +433,25 @@ impl Section {
         }
     }
 
+    /// Палитра в порядке первого появления и индексы в неё — для сети и Anvil.
+    ///
+    /// Это ровно то, что ждёт сеть: палитра — состояния в порядке первого
+    /// появления, данные — индексы в неё. Индексы берутся из самой секции,
+    /// поэтому линейного поиска по состояниям на клетку здесь нет.
+    pub(crate) fn first_seen_pack(&self) -> (Vec<u32>, Vec<u32>) {
+        match &self.storage {
+            Storage::Single(state) => (vec![*state], Vec::new()),
+            Storage::Paletted(p) => p.first_seen_pack(),
+        }
+    }
+
+    /// Палитра и индексы, если записей не больше `limit`; иначе `None` —
+    /// нужна прямая палитра.
+    pub(crate) fn net_palette(&self, limit: usize) -> Option<(Vec<u32>, Vec<u32>)> {
+        let (palette, data) = self.first_seen_pack();
+        (palette.len() <= limit).then_some((palette, data))
+    }
+
     pub fn is_uniform(&self) -> bool {
         matches!(self.storage, Storage::Single(_))
     }
@@ -433,6 +494,34 @@ impl Section {
         match &self.storage {
             Storage::Single(b) => vec![*b; 4096],
             Storage::Paletted(p) => (0..4096).map(|i| p.palette[p.idx.get(i)]).collect(),
+        }
+    }
+
+    /// Перебирает состояния секции подряд, без копии в `Vec`.
+    ///
+    /// Обход `for i in 0..4096 { s.get(i) }` на каждую клетку проверяет
+    /// `Single`/`Paletted` и границы среза; здесь вид хранения выбирается
+    /// один раз, а палитра и индексы берутся напрямую. На скан столбца
+    /// (98 тыс. блоков) и на кодирование чанка это основной цикл.
+    pub fn for_each(&self, mut f: impl FnMut(u32)) {
+        match &self.storage {
+            Storage::Single(state) => {
+                for _ in 0..4096 {
+                    f(*state);
+                }
+            }
+            Storage::Paletted(p) => match &p.idx {
+                Indices::Narrow(a) => {
+                    for &i in a.iter() {
+                        f(p.palette[i as usize]);
+                    }
+                }
+                Indices::Wide(a) => {
+                    for &i in a.iter() {
+                        f(p.palette[i as usize]);
+                    }
+                }
+            },
         }
     }
 
@@ -505,6 +594,129 @@ pub fn is_fluid_state(state: u32) -> bool {
         .get()
         .and_then(|table| table.get(state as usize).copied())
         .unwrap_or(false)
+}
+
+/// Биты класса состояния: то, что тик спрашивает у блоков миллионы раз.
+///
+/// Имя состояния — это `String`, и каждое `state_name(s) == "minecraft:torch"`
+/// в редстоуне, свете и коллизиях моба тянет срез строки из таблицы и
+/// сравнение. Таблица флагов считается один раз при старте (по именам),
+/// после чего проверка — один `&` по индексу состояния.
+pub mod flags {
+    /// `minecraft:air` / `cave_air` / `void_air`.
+    pub const AIR: u8 = 1 << 0;
+    /// Непустой и не заменяемый: моб на нём стоит, предмет о него бьётся.
+    pub const SOLID: u8 = 1 << 1;
+    /// `minecraft:observer` — реагирует на изменение соседа.
+    pub const OBSERVER: u8 = 1 << 2;
+    /// `minecraft:grass_block` — овца съедает в землю.
+    pub const GRASS: u8 = 1 << 3;
+    /// Смывается жидкостью (трава, факелы, снег, культуры).
+    pub const REPLACEABLE: u8 = 1 << 4;
+    /// `minecraft:redstone_wire`.
+    pub const WIRE: u8 = 1 << 5;
+    /// Красный факел во всех вариантах.
+    pub const TORCH: u8 = 1 << 6;
+    /// Дверь, люк или калитка — открывается сигналом.
+    pub const OPENABLE: u8 = 1 << 7;
+}
+
+/// Второй байт флагов: редкие проверки, которым не хватило первого.
+///
+/// Отдельная таблица, а не расширение `u8`: первый байт читается в самых
+/// горячих циклах, и раздувать его ради нажимных плит не стоит.
+pub mod extra {
+    /// Нажимная плита (`*_pressure_plate`).
+    pub const PLATE: u8 = 1 << 0;
+    /// Утяжелённая плита — пересчитывает силу каждый тик.
+    pub const WEIGHTED_PLATE: u8 = 1 << 1;
+    /// Каменная плита: жмётся только живыми, не предметами.
+    pub const LIVING_PLATE: u8 = 1 << 2;
+    /// Воронка.
+    pub const HOPPER: u8 = 1 << 3;
+}
+
+static EXTRA_FLAGS: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
+/// Заполняет второй байт флагов (плиты, воронка).
+pub fn set_extra_flags(table: Vec<u8>) {
+    let _ = EXTRA_FLAGS.set(table);
+}
+
+/// Второй байт флагов состояния. Нет таблицы — ноль.
+pub fn extra_flags(state: u32) -> u8 {
+    EXTRA_FLAGS
+        .get()
+        .and_then(|table| table.get(state as usize).copied())
+        .unwrap_or(0)
+}
+
+/// Есть ли у состояния флаг из [`extra`].
+pub fn has_extra(state: u32, flag: u8) -> bool {
+    extra_flags(state) & flag != 0
+}
+
+/// Биты «состояние — точка интереса» (`PoiTypes` 26.3).
+///
+/// Тип точки нужен редко (скан нового чанка, `/setblock`), но этот скан
+/// обходит весь столбец — 384 × 256 блоков. Имя блока и `String` на каждом
+/// блоке там стоили дороже самого поиска, поэтому тип кодируется битом:
+/// проверка — один `&`, а строка берётся только у найденной точки.
+pub mod poi_bits {
+    /// Арморщик, мясник, картограф, священник, фермер, рыбак, лучник,
+    /// кожевник, библиотекарь, камнерез, пастух, кузнец инструментов,
+    /// оружейник.
+    pub const JOB: u16 = 1 << 0;
+    /// Колокол (`meeting`).
+    pub const MEETING: u16 = 1 << 1;
+    /// Улей (`beehive`), включая `bee_nest`.
+    pub const BEEHIVE: u16 = 1 << 2;
+    /// Обе половины кровати (`home`).
+    pub const HOME: u16 = 1 << 3;
+    /// Остальные: незер-портал, лодстоун, громоотвод.
+    pub const OTHER: u16 = 1 << 4;
+}
+
+static POI_BITS: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+
+/// Заполняет таблицу видов точек интереса по ID состояния.
+///
+/// Считается один раз при сборке мира, рядом с [`set_state_flags`]: те же
+/// имена, что и в `poi::of_block`, только один раз за старт, а не за блок.
+pub fn set_poi_bits(table: Vec<u16>) {
+    let _ = POI_BITS.set(table);
+}
+
+/// Виды точек интереса у состояния: биты из [`poi_bits`]. Нет таблицы — ноль.
+pub fn poi_kind_bits(state: u32) -> u16 {
+    POI_BITS
+        .get()
+        .and_then(|table| table.get(state as usize).copied())
+        .unwrap_or(0)
+}
+
+static STATE_FLAGS: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
+/// Заполняет таблицу флагов по именам состояний (индекс — ID состояния).
+///
+/// Зовётся один раз при сборке мира; без таблицы флаги считаются нулевыми,
+/// то есть «ничего особенного», и все прежние проверки по именам остаются
+/// верными — просто медленнее.
+pub fn set_state_flags(table: Vec<u8>) {
+    let _ = STATE_FLAGS.set(table);
+}
+
+/// Флаги состояния. Нет таблицы — ноль.
+pub fn state_flags(state: u32) -> u8 {
+    STATE_FLAGS
+        .get()
+        .and_then(|table| table.get(state as usize).copied())
+        .unwrap_or(0)
+}
+
+/// Есть ли у состояния флаг из [`flags`].
+pub fn has_flag(state: u32, flag: u8) -> bool {
+    state_flags(state) & flag != 0
 }
 
 /// Столбец чанка. Считается, что воздух — состояние 0 (`minecraft:air`).
@@ -674,9 +886,8 @@ impl ChunkColumn {
     /// Без таблицы классов лист считается землёй, и миникарта рисует пещеру.
     fn client_heightmaps(&self) -> [Vec<u32>; 3] {
         if let Some(class) = HEIGHT_CLASS.get() {
-            return self.classified_heightmaps(|state| {
-                class.get(state as usize).copied().unwrap_or(0)
-            });
+            return self
+                .classified_heightmaps(|state| class.get(state as usize).copied().unwrap_or(0));
         }
         let hm = self.heightmap();
         [hm.clone(), hm.clone(), hm]
@@ -719,6 +930,9 @@ impl ChunkColumn {
                 }
                 let base = local_y * 256;
                 let h = (si * 16 + local_y + 1) as u32;
+                // Индекс `xz` нужен и столбцу секции (`base + xz`), и всем трём
+                // картам: `iter_mut` читался бы хуже, чем есть.
+                #[allow(clippy::needless_range_loop)]
                 for xz in 0..256 {
                     let bits = bits_of(section.get(base + xz));
                     if bits == 0 {

@@ -51,7 +51,8 @@ public final class Bridge {
     static final int ARG_ITEMS_LEN = 20;
     static final int DOWN_WORLD = 21;
     static final int UP_DISABLE = 22;
-    static final int SLOTS = 23;
+    static final int DOWN_PLAYER_VERSION = 23;
+    static final int SLOTS = 24;
 
     /** События с ответом ({@code chunkwake_net::live::Event}). */
     static final int EVENT_DAMAGE = 1, EVENT_DEATH = 2, EVENT_DROP = 3, EVENT_PICKUP = 4, EVENT_GAME_MODE = 5,
@@ -73,7 +74,7 @@ public final class Bridge {
     }
 
     static MemorySegment table;
-    static MethodHandle sendMessage, broadcast, log, setCommands, opLevel, setOp, playerState, playerControl, world;
+    static MethodHandle sendMessage, broadcast, log, setCommands, opLevel, setOp, playerState, playerVersion, playerControl, world;
     static ChunkwakeServer server;
 
     private Bridge() {}
@@ -91,6 +92,8 @@ public final class Bridge {
         setOp = down(linker, DOWN_SET_OP, FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG, JAVA_INT));
         playerState = down(linker, DOWN_PLAYER_STATE,
                 FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_INT));
+        playerVersion = down(linker, DOWN_PLAYER_VERSION,
+                FunctionDescriptor.of(JAVA_LONG, JAVA_LONG, JAVA_LONG));
         playerControl = down(linker, DOWN_PLAYER_CONTROL,
                 FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_INT));
         world = down(linker, DOWN_WORLD, FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT));
@@ -211,7 +214,9 @@ public final class Bridge {
 
     /** Снимок игрока (формат {@code Live::render}); {@code null} — не онлайн. */
     static String playerState(UUID id) {
-        int cap = 4096;
+        // Обычный снимок заметно меньше: пересборка буфера нужна только когда
+        // Rust вернул длину больше ёмкости.
+        int cap = 8192;
         try (Arena a = Arena.ofConfined()) {
             while (true) {
                 MemorySegment buf = a.allocate(cap);
@@ -225,6 +230,21 @@ public final class Bridge {
                 }
                 cap = n;
             }
+        } catch (Throwable t) {
+            throw new IllegalStateException(t);
+        }
+    }
+
+    /**
+     * Отпечаток состояния игрока; {@code -1} — не онлайн.
+     *
+     * Дешёвый вызов: {@code PlayerImpl} сверяет его и переразбирает снимок
+     * только при изменении, а не на каждый {@code getHealth()}.
+     */
+    static long playerVersion(UUID id) {
+        try {
+            return (long) playerVersion.invokeExact(id.getMostSignificantBits(),
+                    id.getLeastSignificantBits());
         } catch (Throwable t) {
             throw new IllegalStateException(t);
         }

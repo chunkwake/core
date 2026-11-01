@@ -484,8 +484,10 @@ fn monster_room(
                 let placed = !Palette::flag(blocked, get(level, p));
                 safe(level, p, s);
                 if placed {
-                    // `setLootTable(SIMPLE_DUNGEON, random.nextLong())`.
-                    r.next_long();
+                    // `RandomizableContainer.setBlockEntityLootTable(level,
+                    // random, chestPos, SIMPLE_DUNGEON)`: `nextLong` в семя.
+                    let seed = r.next_long();
+                    super::template::set_loot(level, p, "minecraft:chests/simple_dungeon", seed);
                 }
                 break;
             }
@@ -503,8 +505,8 @@ fn monster_room(
 fn reorient(pal: &Palette, leaves: &[bool], level: &dyn Level, p: Pos, chest: u32) -> u32 {
     let render = |d: usize| solid_render(pal, leaves, get(level, add(p, HORIZONTAL[d])));
     let mut solid = None;
-    for d in 0..4 {
-        if pal.same_block(get(level, add(p, HORIZONTAL[d])), chest) {
+    for (d, off) in HORIZONTAL.iter().enumerate() {
+        if pal.same_block(get(level, add(p, *off)), chest) {
             return chest;
         }
         if render(d) {
@@ -823,7 +825,7 @@ impl RootSystem {
     fn space_for_tree(&self, pal: &Palette, level: &dyn Level, p: Pos) -> bool {
         for i in 1..=self.space {
             let s = get(level, add(p, [0, i, 0]));
-            let ok = pal.is_air(s) || (i + 1 <= self.water && pal.fluid(s).is_water());
+            let ok = pal.is_air(s) || (i < self.water && pal.fluid(s).is_water());
             if !ok {
                 return false;
             }
@@ -1984,48 +1986,478 @@ impl IceSpike {
     }
 }
 
-/// `IcebergFeature`: конус льда со снежной шапкой.
+/// `IcebergFeature`: конус или эллипс из пакованного льда, снега и голубого
+/// льда, с вырезами и обрывом под водой.
+///
+/// Порядок бросков и все формулы взяты из `IcebergFeature.place` 26.3: сначала
+/// `nextDouble` на снег, угол, две полуоси, выбор формы, высоту над водой и
+/// подводную глубину, потом по клеткам — радиусы по слоям.
 #[derive(Debug, Clone)]
 pub(super) struct Iceberg {
     state: u32,
+    /// `true` — фича `iceberg_blue` (`state` = `blue_ice`).
+    blue: bool,
 }
 
 impl Iceberg {
+    /// Имя состояния айсберга: `minecraft:packed_ice` или `minecraft:blue_ice`.
+    pub(super) fn state_name(&self) -> &'static str {
+        if self.blue {
+            "minecraft:blue_ice"
+        } else {
+            "minecraft:packed_ice"
+        }
+    }
+
     pub(super) fn parse(v: &Value, pal: &mut Palette) -> Result<Self, String> {
-        Ok(Self {
-            state: pal.state(&v["state"])?,
-        })
+        let state = pal.state(&v["state"])?;
+        let blue = pal
+            .blocks
+            .get("minecraft:blue_ice")
+            .is_some_and(|b| b.0 == pal.block_of[state as usize]);
+        Ok(Self { state, blue })
     }
 
     pub(super) fn place(&self, f: &Features, level: &mut dyn Level, r: &mut Worldgen, o: Pos) {
         let pal = &f.palette;
-        let (Some(snow), Some(water)) = (
+        let (Some(snow), Some(water), Some(ice), Some(blue_ice), Some(packed)) = (
             pal.defaults.get("minecraft:snow_block").copied(),
             pal.defaults.get("minecraft:water").copied(),
+            pal.defaults.get("minecraft:ice").copied(),
+            pal.defaults.get("minecraft:blue_ice").copied(),
+            pal.defaults.get("minecraft:packed_ice").copied(),
         ) else {
             return;
         };
-        // Айсберг сидит на уровне моря и растёт вверх.
-        let height = r.between_inclusive(4, 9);
-        let radius: i32 = r.between_inclusive(3, 7);
-        let base = o[1];
-        for dy in 0..height {
-            let rad = radius - dy * radius / height.max(1);
-            for dx in -rad..=rad {
-                for dz in -rad..=rad {
-                    if dx * dx + dz * dz > rad * rad {
+        let air = pal.defaults["minecraft:air"];
+        // `origin = new BlockPos(x, chunkGenerator.getSeaLevel(), z)`.
+        let origin = [o[0], level.sea_level(), o[2]];
+        let ice_ber = Ice {
+            pal,
+            snow,
+            water,
+            ice,
+            blue_ice,
+            packed,
+            air,
+        };
+
+        let snow_on_top = r.next_double() > 0.7;
+        let main_state = self.state;
+        let shape_angle = r.next_double() * 2.0 * std::f64::consts::PI;
+        let ellipse_a = 11 - r.next_int_bound(5);
+        let ellipse_c = 3 + r.next_int_bound(3);
+        let is_ellipse = r.next_double() > 0.7;
+        let mut over_water_height = if is_ellipse {
+            r.next_int_bound(6) + 6
+        } else {
+            r.next_int_bound(15) + 3
+        };
+        if !is_ellipse && r.next_double() > 0.9 {
+            over_water_height += r.next_int_bound(19) + 7;
+        }
+        let under_water_height = (over_water_height + r.next_int_bound(11)).min(18);
+        let width = (over_water_height + r.next_int_bound(7) - r.next_int_bound(5)).min(11);
+        let a = if is_ellipse { ellipse_a } else { 11 };
+
+        // Над водой: `heightDependentRadiusEllipse` или `Round`.
+        for xo in -a..a {
+            for zo in -a..a {
+                for y_off in 0..over_water_height {
+                    let radius = if is_ellipse {
+                        height_dependent_radius_ellipse(y_off, over_water_height, width)
+                    } else {
+                        height_dependent_radius_round(r, y_off, over_water_height, width)
+                    };
+                    if !is_ellipse && xo >= radius {
                         continue;
                     }
-                    let p = [o[0] + dx, base + dy, o[2] + dz];
-                    let s = get(level, p);
-                    if s == water || pal.is_air(s) {
-                        let cap = dy >= height - 1;
-                        put(level, p, if cap { snow } else { self.state });
+                    ice_ber.generate_block(
+                        level,
+                        r,
+                        origin,
+                        over_water_height,
+                        xo,
+                        y_off,
+                        zo,
+                        radius,
+                        a,
+                        is_ellipse,
+                        ellipse_c,
+                        shape_angle,
+                        snow_on_top,
+                        main_state,
+                    );
+                }
+            }
+        }
+        ice_ber.smooth(
+            level,
+            origin,
+            width,
+            over_water_height,
+            is_ellipse,
+            ellipse_a,
+        );
+
+        // Под водой: `heightDependentRadiusSteep`.
+        for xo in -a..a {
+            for zo in -a..a {
+                let mut y_off = -1;
+                while y_off > -under_water_height {
+                    let new_a = if is_ellipse {
+                        (a as f32
+                            * (1.0 - (y_off as f32).powi(2) / (under_water_height as f32 * 8.0)))
+                            .ceil() as i32
+                    } else {
+                        a
+                    };
+                    let radius =
+                        height_dependent_radius_steep(r, -y_off, under_water_height, width);
+                    if xo >= radius {
+                        y_off -= 1;
+                        continue;
                     }
+                    ice_ber.generate_block(
+                        level,
+                        r,
+                        origin,
+                        under_water_height,
+                        xo,
+                        y_off,
+                        zo,
+                        radius,
+                        new_a,
+                        is_ellipse,
+                        ellipse_c,
+                        shape_angle,
+                        snow_on_top,
+                        main_state,
+                    );
+                    y_off -= 1;
+                }
+            }
+        }
+
+        // Щербина: у эллипса с шансом 0.1, у круга с 0.3.
+        let do_cut_out = if is_ellipse {
+            r.next_double() > 0.1
+        } else {
+            r.next_double() > 0.3
+        };
+        if do_cut_out {
+            ice_ber.cut_out(
+                level,
+                r,
+                width,
+                over_water_height,
+                origin,
+                is_ellipse,
+                ellipse_a,
+                shape_angle,
+                ellipse_c,
+            );
+        }
+    }
+}
+
+/// Вспомогательное состояние одного айсберга: блоки и палитра.
+struct Ice<'a> {
+    pal: &'a Palette,
+    snow: u32,
+    water: u32,
+    ice: u32,
+    blue_ice: u32,
+    packed: u32,
+    air: u32,
+}
+
+impl Ice<'_> {
+    fn set(&self, level: &mut dyn Level, p: Pos, s: u32) {
+        if level.can_write(p[0], p[2]) {
+            level.set(p[0], p[1], p[2], s);
+        }
+    }
+
+    fn is_iceberg(&self, s: u32) -> bool {
+        s == self.packed || s == self.snow || s == self.blue_ice
+    }
+
+    fn remove_floating_snow(&self, level: &mut dyn Level, p: Pos) {
+        if level.get(p[0], p[1] + 1, p[2]) == self.snow {
+            self.set(level, [p[0], p[1] + 1, p[2]], self.air);
+        }
+    }
+
+    /// `generateCutOut`: две выемки — над водой воздухом, под водой водой.
+    #[allow(clippy::too_many_arguments)]
+    fn cut_out(
+        &self,
+        level: &mut dyn Level,
+        r: &mut Worldgen,
+        width: i32,
+        height: i32,
+        origin: Pos,
+        is_ellipse: bool,
+        ellipse_a: i32,
+        shape_angle: f64,
+        ellipse_c: i32,
+    ) {
+        let sign_x = if r.next_bool() { -1 } else { 1 };
+        let sign_z = if r.next_bool() { -1 } else { 1 };
+        let mut x_off = r.next_int_bound((width / 2 - 2).max(1));
+        if r.next_bool() {
+            x_off = width / 2 + 1 - r.next_int_bound((width - width / 2 - 1).max(1));
+        }
+        let mut z_off = r.next_int_bound((width / 2 - 2).max(1));
+        if r.next_bool() {
+            z_off = width / 2 + 1 - r.next_int_bound((width - width / 2 - 1).max(1));
+        }
+        if is_ellipse {
+            x_off = r.next_int_bound((ellipse_a - 5).max(1));
+            z_off = x_off;
+        }
+        let local = [sign_x * x_off, 0, sign_z * z_off];
+        let angle = if is_ellipse {
+            shape_angle + std::f64::consts::FRAC_PI_2
+        } else {
+            r.next_double() * 2.0 * std::f64::consts::PI
+        };
+        let mut y_off = 0;
+        while y_off < height - 3 {
+            let radius = height_dependent_radius_round(r, y_off, height, width);
+            self.carve(
+                radius, y_off, origin, level, false, angle, local, ellipse_a, ellipse_c,
+            );
+            y_off += 1;
+        }
+        let bottom = -height + r.next_int_bound(5);
+        let mut y_off = -1;
+        while y_off > bottom {
+            let radius = height_dependent_radius_steep(r, -y_off, height, width);
+            self.carve(
+                radius, y_off, origin, level, true, angle, local, ellipse_a, ellipse_c,
+            );
+            y_off -= 1;
+        }
+    }
+
+    /// `carve`: эллипс вокруг `local`, над водой — воздух, под водой — вода.
+    #[allow(clippy::too_many_arguments)]
+    fn carve(
+        &self,
+        radius: i32,
+        y_off: i32,
+        origin: Pos,
+        level: &mut dyn Level,
+        under_water: bool,
+        angle: f64,
+        local: Pos,
+        ellipse_a: i32,
+        ellipse_c: i32,
+    ) {
+        let a = radius + 1 + ellipse_a / 3;
+        let c = (radius - 3).min(3) + ellipse_c / 2 - 1;
+        for xo in -a..a {
+            for zo in -a..a {
+                let signed = signed_distance_ellipse(xo, zo, local, a, c, angle);
+                if signed >= 0.0 {
+                    continue;
+                }
+                let p = [origin[0] + xo, origin[1] + y_off, origin[2] + zo];
+                let state = level.get(p[0], p[1], p[2]);
+                if !self.is_iceberg(state) && state != self.snow {
+                    continue;
+                }
+                if under_water {
+                    self.set(level, p, self.water);
+                } else {
+                    self.set(level, p, self.air);
+                    self.remove_floating_snow(level, p);
                 }
             }
         }
     }
+
+    /// `generateIcebergBlock`: один блок конуса по знаковой дистанции.
+    #[allow(clippy::too_many_arguments)]
+    fn generate_block(
+        &self,
+        level: &mut dyn Level,
+        r: &mut Worldgen,
+        origin: Pos,
+        height: i32,
+        xo: i32,
+        y_off: i32,
+        zo: i32,
+        radius: i32,
+        a: i32,
+        is_ellipse: bool,
+        ellipse_c: i32,
+        shape_angle: f64,
+        snow_on_top: bool,
+        main_state: u32,
+    ) {
+        let signed = if is_ellipse {
+            let c = get_ellipse_c(y_off, height, ellipse_c);
+            signed_distance_ellipse(xo, zo, [0, 0, 0], a, c, shape_angle)
+        } else {
+            signed_distance_circle(xo, zo, [0, 0, 0], radius, r)
+        };
+        if signed >= 0.0 {
+            return;
+        }
+        let compare = if is_ellipse {
+            -0.5
+        } else {
+            -6.0 - r.next_int_bound(3) as f64
+        };
+        if signed > compare && r.next_double() > 0.9 {
+            return;
+        }
+        let p = [origin[0] + xo, origin[1] + y_off, origin[2] + zo];
+        self.set_iceberg_block(
+            level,
+            r,
+            p,
+            height - y_off,
+            height,
+            is_ellipse,
+            snow_on_top,
+            main_state,
+        );
+    }
+
+    /// `setIcebergBlock`: снег сверху, иначе лёд; только в воздух, снег, лёд и воду.
+    #[allow(clippy::too_many_arguments)]
+    fn set_iceberg_block(
+        &self,
+        level: &mut dyn Level,
+        r: &mut Worldgen,
+        p: Pos,
+        h_diff: i32,
+        height: i32,
+        is_ellipse: bool,
+        snow_on_top: bool,
+        main_state: u32,
+    ) {
+        let state = level.get(p[0], p[1], p[2]);
+        if !(self.pal.is_air(state)
+            || state == self.snow
+            || state == self.ice
+            || state == self.water)
+        {
+            return;
+        }
+        let randomness = !is_ellipse || r.next_double() > 0.05;
+        let divisor = if is_ellipse { 3 } else { 2 };
+        let snow = snow_on_top
+            && state != self.water
+            && h_diff as f64
+                <= r.next_int_bound((height / divisor).max(1)) as f64 + height as f64 * 0.6
+            && randomness;
+        self.set(level, p, if snow { self.snow } else { main_state });
+    }
+
+    /// `smooth`: убирает лёд над воздухом и блоки с тремя открытыми боками.
+    fn smooth(
+        &self,
+        level: &mut dyn Level,
+        origin: Pos,
+        width: i32,
+        height: i32,
+        is_ellipse: bool,
+        shape_ellipse_a: i32,
+    ) {
+        let a = if is_ellipse {
+            shape_ellipse_a
+        } else {
+            width / 2
+        };
+        for x in -a..=a {
+            for z in -a..=a {
+                for y_off in 0..=height {
+                    let p = [origin[0] + x, origin[1] + y_off, origin[2] + z];
+                    let state = level.get(p[0], p[1], p[2]);
+                    if !self.is_iceberg(state) && state != self.snow {
+                        continue;
+                    }
+                    let below = level.get(p[0], p[1] - 1, p[2]);
+                    if self.pal.is_air(below) {
+                        self.set(level, p, self.air);
+                        self.set(level, [p[0], p[1] + 1, p[2]], self.air);
+                        continue;
+                    }
+                    if !self.is_iceberg(state) {
+                        continue;
+                    }
+                    let sides = [
+                        level.get(p[0] - 1, p[1], p[2]),
+                        level.get(p[0] + 1, p[1], p[2]),
+                        level.get(p[0], p[1], p[2] - 1),
+                        level.get(p[0], p[1], p[2] + 1),
+                    ];
+                    let counter = sides.iter().filter(|s| !self.is_iceberg(**s)).count();
+                    if counter < 3 {
+                        continue;
+                    }
+                    self.set(level, p, self.air);
+                }
+            }
+        }
+    }
+}
+
+/// `getEllipseC`: верхние три слоя сужают малую полуось.
+fn get_ellipse_c(y_off: i32, height: i32, shape_ellipse_c: i32) -> i32 {
+    let mut c = shape_ellipse_c;
+    if y_off > 0 && height - y_off <= 3 {
+        c -= 4 - (height - y_off);
+    }
+    c
+}
+
+/// `signedDistanceCircle`: шум дробит круг на краю.
+fn signed_distance_circle(xo: i32, zo: i32, origin: Pos, radius: i32, r: &mut Worldgen) -> f64 {
+    let off = 10.0f32 * r.next_float().clamp(0.2, 0.8) / radius as f32;
+    off as f64 + (xo - origin[0]).pow(2) as f64 + (zo - origin[2]).pow(2) as f64
+        - (radius as f64).powi(2)
+}
+
+/// `signedDistanceEllipse`: повёрнутый эллипс.
+fn signed_distance_ellipse(xo: i32, zo: i32, origin: Pos, a: i32, c: i32, angle: f64) -> f64 {
+    let dx = (xo - origin[0]) as f64;
+    let dz = (zo - origin[2]) as f64;
+    let (cos, sin) = (angle.cos(), angle.sin());
+    ((dx * cos - dz * sin) / a as f64).powi(2) + ((dx * sin + dz * cos) / c as f64).powi(2) - 1.0
+}
+
+/// `heightDependentRadiusRound`.
+fn height_dependent_radius_round(r: &mut Worldgen, y_off: i32, height: i32, width: i32) -> i32 {
+    let k = 3.5f32 - r.next_float();
+    let mut scale = (1.0 - (y_off as f32).powi(2) / (height as f32 * k)) * width as f32;
+    if height > 15 + r.next_int_bound(5) {
+        let temp = if y_off < 3 + r.next_int_bound(6) {
+            y_off / 2
+        } else {
+            y_off
+        };
+        scale = (1.0 - temp as f32 / (height as f32 * k * 0.4)) * width as f32;
+    }
+    (scale / 2.0).ceil() as i32
+}
+
+/// `heightDependentRadiusEllipse`: без шума.
+fn height_dependent_radius_ellipse(y_off: i32, height: i32, width: i32) -> i32 {
+    let scale = (1.0 - (y_off as f32).powi(2) / height as f32) * width as f32;
+    (scale / 2.0).ceil() as i32
+}
+
+/// `heightDependentRadiusSteep`: подводная часть обрывается круче.
+fn height_dependent_radius_steep(r: &mut Worldgen, y_off: i32, height: i32, width: i32) -> i32 {
+    let k = 1.0f32 + r.next_float() / 2.0;
+    let scale = (1.0 - y_off as f32 / (height as f32 * k)) * width as f32;
+    (scale / 2.0).ceil() as i32
 }
 
 /// `CoralTreeFeature`, `CoralClawFeature`, `CoralMushroomFeature`: пятно

@@ -47,6 +47,8 @@ impl FrameCodec {
         let frame = buf.split_to(len as usize);
 
         let Some(threshold) = self.threshold else {
+            // Пакет без сжатия забираем прямо из буфера: `split_to` уже
+            // отдал владение, копия не нужна.
             return Ok(Some(frame.to_vec()));
         };
         let mut r = Reader::new(&frame);
@@ -58,6 +60,8 @@ impl FrameCodec {
         if (data_len as usize) < threshold || data_len as usize > MAX_UNCOMPRESSED_LEN {
             return Err(ProtocolError::BadLength(data_len));
         }
+        // Распаковка сразу в буфер нужной длины: `read_to_end` растил `Vec`
+        // реаллокациями на каждом чанке, а размер известен из заголовка.
         let mut out = Vec::with_capacity(data_len as usize);
         ZlibDecoder::new(body).read_to_end(&mut out)?;
         if out.len() != data_len as usize {

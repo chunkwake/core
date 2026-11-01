@@ -437,10 +437,7 @@ impl Tree {
         // Аргументы целиком: обработчику проще разобрать всю строку.
         let args = rest.to_owned();
         let mut rest = rest;
-        loop {
-            let Some((word, tail)) = rest.split_once(char::is_whitespace) else {
-                break;
-            };
+        while let Some((word, tail)) = rest.split_once(char::is_whitespace) {
             let tail = tail.trim_start();
             // Продолжаем путь только по литералам: аргумент забирает обработчик.
             let Some(child) = spec
@@ -588,10 +585,8 @@ impl Tree {
         level: i32,
     ) -> Option<(&'static str, &'a str)> {
         let trimmed = line.trim_start();
-        let (body, prefix) = match trimmed.rfind(char::is_whitespace) {
-            Some(i) => (&trimmed[..i], &trimmed[i + 1..]),
-            None => return None,
-        };
+        let i = trimmed.rfind(char::is_whitespace)?;
+        let (body, prefix) = (&trimmed[..i], &trimmed[i + 1..]);
         let words: Vec<&str> = body.split_whitespace().collect();
         let (first, rest) = words.split_first()?;
         let root = self.spec(first)?;
