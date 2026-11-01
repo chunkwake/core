@@ -7,3 +7,26 @@
 build/
 .idea/
 .env
+
+# Рантайм-каталоги сервера: появляются при запуске, в репозиторий не идут.
+# `/bluemap` содержит скачанный клиент Mojang (41 МБ) — его перераспространение
+# запрещено EULA; `/libraries` — кэш резолвера библиотек из plugin.yml.
+/bluemap
+/libraries
+
+logs/
+*.log
+*.class
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.def
+*.manifest
+*.rc
+*.res
+*.obj
+*.exp
+*.lib
