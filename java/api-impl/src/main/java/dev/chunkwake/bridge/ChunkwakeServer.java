@@ -45,6 +45,8 @@ final class ChunkwakeServer {
     final Server api = Stub.of(Server.class, this);
     final Logger logger = Logger.getLogger("Chunkwake");
     private final Scheduler scheduler = new Scheduler();
+    private final io.papermc.paper.threadedregions.scheduler.EntityScheduler entityScheduler =
+            EntitySchedulers.of(scheduler);
     private final PluginManagerImpl plugins = new PluginManagerImpl(this);
     private final SimpleCommandMap commands = new SimpleCommandMap(api, new LinkedHashMap<>());
     private final Map<UUID, PlayerImpl> online = new LinkedHashMap<>();
@@ -62,6 +64,11 @@ final class ChunkwakeServer {
         return scheduler;
     }
 
+    /** Планировщик задач сущностей: один на сервер, как поток Folia. */
+    io.papermc.paper.threadedregions.scheduler.EntityScheduler entityScheduler() {
+        return entityScheduler;
+    }
+
     void disablePlugins() {
         plugins.disablePlugins();
     }
@@ -76,27 +83,46 @@ final class ChunkwakeServer {
             return 0;
         }
         java.util.Arrays.sort(jars);
+        // Загрузка плагинов останавливает сервер на всё время `onEnable`: тик
+        // ещё не пошёл, игроки ждут. Без сообщений это выглядело как зависание,
+        // поэтому каждая фаза объявляется заранее — видно, на чём именно стоит.
+        logger.info("plugins: " + jars.length + " jar(s) in " + dir + ", loading...");
+        long started = System.nanoTime();
         List<JavaPlugin> loaded = new ArrayList<>();
-        for (File jar : jars) {
+        for (int i = 0; i < jars.length; i++) {
+            File jar = jars[i];
+            String label = jar.getName();
+            logger.info("plugins: [" + (i + 1) + "/" + jars.length + "] " + label);
             try {
+                long one = System.nanoTime();
                 PluginDescriptionFile desc = PluginLoader.describe(jar);
                 if (plugins.plugins.containsKey(desc.getName())) {
                     logger.warning("Duplicate plugin " + desc.getName() + " in " + jar.getName());
                     continue;
                 }
                 PluginLoader loader = new PluginLoader(this, jar, desc, getClass().getClassLoader());
+                // Библиотеки из `plugin.yml` качаются из сети: на первом запуске
+                // это десятки секунд, и без строки в журнале это не отличить от
+                // зависания.
+                int before = loader.declaredLibraryCount();
+                if (before > 0) {
+                    logger.info("plugins: " + desc.getName() + " declares " + before
+                            + " library(ies), resolving...");
+                }
                 loader.addDeclaredLibraries(logger);
                 JavaPlugin plugin = loader.create();
                 plugins.plugins.put(desc.getName(), plugin);
-                logger.info("Loading " + desc.getFullName());
                 plugin.onLoad();
                 loaded.add(plugin);
+                logger.info("plugins: " + desc.getName() + " loaded in " + ms(one) + " ms");
             } catch (Throwable t) {
                 logger.log(Level.SEVERE, "Could not load " + jar.getName(), t);
             }
         }
         int enabled = 0;
         for (JavaPlugin plugin : loaded) {
+            long one = System.nanoTime();
+            logger.info("plugins: enabling " + plugin.getName() + "...");
             commands.registerAll(plugin.getName().toLowerCase(java.util.Locale.ROOT),
                     PluginCommandYamlParser.parse(plugin));
             // Права из plugin.yml — до onEnable (`CraftServer.enablePlugin`).
@@ -112,9 +138,19 @@ final class ChunkwakeServer {
             if (plugin.isEnabled()) {
                 enabled++;
             }
+            // `onEnable` бывает долгим (BlueMap грузит ресурсы): время видно,
+            // и по нему понятно, кого ждать при следующем запуске.
+            logger.info("plugins: " + plugin.getName()
+                    + (plugin.isEnabled() ? " enabled" : " failed") + " in " + ms(one) + " ms");
         }
         publishCommands();
+        logger.info("plugins: " + enabled + " of " + loaded.size() + " enabled in "
+                + ms(started) + " ms");
         return enabled;
+    }
+
+    private static long ms(long from) {
+        return (System.nanoTime() - from) / 1_000_000;
     }
 
     /** paper-api при первом вызове команды шлёт предупреждение «timings в no-op режиме». */
@@ -370,7 +406,12 @@ final class ChunkwakeServer {
      * Каталог мира (в 26.3 `Server.getWorldContainer()` устарел в пользу этого):
      * BlueMap читает отсюда `level.dat` и `region/`.
      */
-    public java.nio.file.Path getLevelDirectory() { return levelDirectory; }
+    public java.nio.file.Path getLevelDirectory() {
+        // BlueMap берёт этот путь как КАТАЛОГ МИРА и прибавляет к нему
+        // `region/` или `dimensions/minecraft/<измерение>`. Поэтому здесь
+        // каталог мира, а не родительский каталог сервера.
+        return levelDirectory;
+    }
 
     public File getWorldContainer() { return levelDirectory.getParent().toFile(); }
 

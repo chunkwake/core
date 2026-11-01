@@ -152,6 +152,10 @@ pub fn chunk_to_nbt(
     root.insert("LastUpdate".into(), Tag::Long(0));
     root.insert("InhabitedTime".into(), Tag::Long(0));
     root.insert("isLightOn".into(), Tag::Byte(1));
+    // `Heightmaps` обязателен для тех, кто читает мир не через наш сервер:
+    // без него BlueMap не рисует чанк вообще (проверено на 1303 чанках —
+    // раздела не было ни у одного, и карта оставалась пустой).
+    root.insert("Heightmaps".into(), heightmaps_for_nbt(c));
     root.insert("sections".into(), Tag::List(sections));
     let block_entities = c
         .block_entities
@@ -168,6 +172,38 @@ pub fn chunk_to_nbt(
         .collect();
     root.insert("block_entities".into(), Tag::List(block_entities));
     Ok(root)
+}
+
+/// `Heightmaps` для NBT: четыре карты, которые ждёт ваниль и её потребители.
+///
+/// Формат: `map<string, long[]>` — ключ это тип карты, значение это 256 высот
+/// по `bits_for(height + 1)` бит, упакованных без пересечения границ long.
+/// Позиция в массиве — `z * 16 + x`.
+///
+/// `WORLD_SURFACE` включает листву (и всё непустое), `OCEAN_FLOOR` пропускает
+/// воду и листву, `MOTION_BLOCKING` останавливается на жидкостях,
+/// `MOTION_BLOCKING_NO_LEAVES` — то же, но без листвы.
+///
+/// Нужен снаружи: старые миры писались без раздела, и `WorldStorage`
+/// дописывает его, не пересчитывая блоки.
+pub fn heightmaps_for_nbt(c: &ChunkColumn) -> Tag {
+    let bits = bits_for((c.height() + 1).max(1));
+    let maps = c.heightmaps_for_save();
+    const NAMES: [&str; 4] = [
+        "WORLD_SURFACE",
+        "OCEAN_FLOOR",
+        "MOTION_BLOCKING",
+        "MOTION_BLOCKING_NO_LEAVES",
+    ];
+    let mut out = Compound::new();
+    for (i, name) in NAMES.into_iter().enumerate() {
+        let packed = pack(&maps[i], bits);
+        out.insert(
+            name.into(),
+            Tag::LongArray(packed.into_iter().map(|v| v as i64).collect()),
+        );
+    }
+    Tag::Compound(out)
 }
 
 /// Биомы секции из `biomes`: палитра с `data` или один биом без данных.
@@ -859,6 +895,48 @@ mod tests {
         assert_eq!(back.sections[0].biome, c.sections[0].biome);
         assert_eq!(back.sections[0].biome_at(3, 0, 0), 2);
         assert_eq!(back.sections[0].biome_at(0, 0, 0), 1);
+    }
+
+    /// Чанк в NBT обязан нести `Heightmaps`: без раздела BlueMap не рисует
+    /// чанк вообще. Проверяем и сам раздел, и что высоты настоящие.
+    #[test]
+    fn saved_chunk_has_heightmaps() {
+        let mut c = ChunkColumn::flat(&[(1, 3)], 2, 0, 2, 0, true);
+        // Трава на y=3 в колонке (5,7) — она и должна стать высотой 4.
+        c.set_block(5, 3, 7, 2);
+        let nbt = chunk_to_nbt(&c, (0, 0), F, &Test).unwrap();
+        let maps = nbt["Heightmaps"].as_compound().expect("Heightmaps");
+        let bits = bits_for(c.height() + 1);
+        let per_long = 64 / bits as usize;
+        let expected = 256usize.div_ceil(per_long);
+        for kind in [
+            "WORLD_SURFACE",
+            "OCEAN_FLOOR",
+            "MOTION_BLOCKING",
+            "MOTION_BLOCKING_NO_LEAVES",
+        ] {
+            let array = maps[kind]
+                .as_long_array()
+                .unwrap_or_else(|| panic!("{kind} отсутствует или не long[]"));
+            assert_eq!(
+                array.len(),
+                expected,
+                "{kind}: 256 высот по {bits} бит — {expected} long"
+            );
+        }
+        let surface = maps["WORLD_SURFACE"].as_long_array().unwrap();
+        assert_eq!(
+            unpack_at(surface, bits, 7 * 16 + 5),
+            4,
+            "трава на y=3 — высота 4"
+        );
+        // `flat` заливает камень по всему чанку, поэтому у соседа высота 3 —
+        // на единицу ниже травы, и карта это различие сохраняет.
+        assert_eq!(
+            unpack_at(surface, bits, 0),
+            3,
+            "камень без травы — высота 3"
+        );
     }
 
     #[test]

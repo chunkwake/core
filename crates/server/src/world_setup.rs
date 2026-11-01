@@ -576,6 +576,7 @@ fn survival_data(
         menu_crafting: menu("minecraft:crafting")?,
         menu_enchantment: menu("minecraft:enchantment")?,
         menu_grindstone: menu("minecraft:grindstone")?,
+        menu_stonecutter: menu("minecraft:stonecutter")?,
         enchanting: loaded.enchanting,
         menu_furnace: [
             menu("minecraft:furnace")?,
@@ -803,7 +804,8 @@ fn block_name_for_item(item: &str) -> &str {
     }
 }
 
-/// Биты карт высот: 1 поверхность, 2 движение, 4 движение без листвы.
+/// Биты карт высот: 1 поверхность, 2 движение, 4 движение без листвы,
+/// 8 океанское дно (без воды и листвы — нужно только в файле, не клиенту).
 /// Листва не поднимает карты движения — иначе миникарта считает игрока в пещере.
 fn height_classes(
     data_dir: &Path,
@@ -811,6 +813,7 @@ fn height_classes(
 ) -> Result<Vec<u8>, String> {
     let motion = block_tag(data_dir, "#minecraft:blocks_motion_in_heightmap")?;
     let bare = block_tag(data_dir, "#minecraft:blocks_motion_in_heightmap_no_leaves")?;
+    let leaves = block_tag(data_dir, "#minecraft:leaves")?;
     const ALWAYS: &[&str] = &[
         "minecraft:water",
         "minecraft:lava",
@@ -829,10 +832,11 @@ fn height_classes(
             let fluid = ALWAYS.contains(&name.as_str())
                 || props.iter().any(|(k, v)| k == "waterlogged" && v == "true");
             let mut bits = 0u8;
-            if !matches!(
+            let air = matches!(
                 name.as_str(),
                 "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
-            ) {
+            );
+            if !air {
                 bits |= 1;
             }
             if motion.contains(name) || fluid {
@@ -840,6 +844,12 @@ fn height_classes(
             }
             if bare.contains(name) || fluid {
                 bits |= 4;
+            }
+            // `OCEAN_FLOOR`: всё, что не вода и не листва. Листва берётся из
+            // тега `#minecraft:leaves`, потому что таблицу классов собирают
+            // здесь же, а `props` про листву ничего не знает.
+            if !air && !fluid && !leaves.contains(name) {
+                bits |= chunkwake_world::OCEAN_FLOOR;
             }
             bits
         })

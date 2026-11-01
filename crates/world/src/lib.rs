@@ -564,8 +564,14 @@ impl Section {
 
 static FLUID_STATES: std::sync::OnceLock<Vec<bool>> = std::sync::OnceLock::new();
 
+/// Бит класса `OCEAN_FLOOR` в таблице [`HEIGHT_CLASS`]: «дно» без воды и листвы.
+///
+/// Три младших бита (1, 2, 4) — это `WORLD_SURFACE`, `MOTION_BLOCKING` и
+/// `MOTION_BLOCKING_NO_LEAVES`, которые уходят клиенту. `OCEAN_FLOOR` клиенту
+/// не нужен, но обязателен в файле: без него BlueMap не находит поверхность.
+pub const OCEAN_FLOOR: u8 = 1 << 3;
+
 /// Биты класса карты высот по ID состояния.
-/// 1 — `WORLD_SURFACE` (не воздух), 2 — `MOTION_BLOCKING`, 4 — без листвы.
 static HEIGHT_CLASS: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
 
 /// Таблица для трёх клиентских карт высот. Без неё все три совпадают с
@@ -925,6 +931,34 @@ impl ChunkColumn {
         [hm.clone(), hm.clone(), hm]
     }
 
+    /// Четыре карты высот для NBT при сохранении: `WORLD_SURFACE`,
+    /// `OCEAN_FLOOR`, `MOTION_BLOCKING`, `MOTION_BLOCKING_NO_LEAVES`.
+    ///
+    /// Клиенту уходят только три (без `OCEAN_FLOOR`), но в файле нужны все
+    /// четыре: их читают BlueMap, редакторы карт и ванильные инструменты.
+    /// Без этого раздела BlueMap не рисует чанк вообще — проверено на мире,
+    /// где его не было ни у одного из 1303 чанков, и карта оставалась пустой.
+    ///
+    /// `OCEAN_FLOOR` — отдельный класс: в нём нет ни воды, ни листвы, поэтому
+    /// бит 8 таблицы (`set_height_classes`) отвечает именно за него.
+    pub fn heightmaps_for_save(&self) -> [Vec<u32>; 4] {
+        let [surface, blocking, no_leaves] = self.client_heightmaps();
+        let ocean = match HEIGHT_CLASS.get() {
+            Some(class) => self.classified_heightmaps(|state| {
+                if class.get(state as usize).copied().unwrap_or(0) & OCEAN_FLOOR != 0 {
+                    1
+                } else {
+                    0
+                }
+            })[0]
+                .clone(),
+            // Без таблицы океанское дно совпадает с поверхностью — лучше, чем
+            // карта из нулей, на которой BlueMap вообще не рисует рельеф.
+            None => surface.clone(),
+        };
+        [surface, ocean, blocking, no_leaves]
+    }
+
     fn classified_heightmaps(&self, class_of: impl Fn(u32) -> u8) -> [Vec<u32>; 3] {
         let mut out = [vec![0u32; 256], vec![0u32; 256], vec![0u32; 256]];
         let mut pending = [256usize; 3];
@@ -986,7 +1020,6 @@ impl ChunkColumn {
     /// Тело `level_chunk_with_light` после координат: ChunkData + LightData.
     pub fn encode_body(&self) -> Vec<u8> {
         let mut w = Writer::new();
-
         // Heightmaps: map<VarInt тип, long[]>; клиенту нужны типы с Usage.CLIENT.
         // Листва входит только в WORLD_SURFACE. Иначе миникарта считает игрока
         // под землёй и рисует пещеру по нулевому блочному свету.

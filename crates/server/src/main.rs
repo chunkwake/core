@@ -234,6 +234,17 @@ async fn serve(dir: &Path) -> Result<(), String> {
     let tick_task = play.spawn_tick();
     // Метрики: сэмплер процесса раз в секунду, снимок — для `/top` и HTTP.
     let _metrics = start_metrics(&props, &play);
+    // Старые миры писались без `Heightmaps`, и BlueMap не рисовал их чанки.
+    // Дописываем раздел до включения плагинов, иначе карта снова пустая.
+    // Ошибку не считаем смертельной: мир без heightmaps хуже, чем не
+    // запустившийся сервер, но и падать из-за чтения регионов незачем.
+    match storage.backfill_heightmaps() {
+        Ok(0) => {}
+        Ok(n) => {
+            tracing::info!("heightmaps: добавлены в {n} чанков (для BlueMap и редакторов карт)")
+        }
+        Err(error) => tracing::warn!("heightmaps: {error}; внешние карты могут не видеть рельеф"),
+    }
     let autosave_task = storage.spawn_autosave(play.clone());
     let bridge = start_plugins(dir, &props, &play).await;
 
@@ -571,6 +582,14 @@ async fn start_plugins(
     let plan = play.clone();
     let world_dir = std::path::absolute(dir.join(&props.level_name))
         .unwrap_or_else(|_| dir.join(&props.level_name));
+    // JVM поднимается и плагины включаются синхронно, до первого тика: всё это
+    // время сервер не отвечает. Без сообщения это неотличимо от зависания,
+    // поэтому пишем и «начали», и «заняло столько».
+    tracing::info!(
+        "plugins: starting the JVM ({}) and enabling plugins...",
+        java.display()
+    );
+    let waiting = std::time::Instant::now();
     let started = tokio::task::spawn_blocking(move || {
         chunkwake_bridge::Bridge::start(&java, &api, &plugins, &world_dir, &plan)
     })
@@ -578,7 +597,10 @@ async fn start_plugins(
     match started {
         Ok(Ok((bridge, n))) => {
             play.set_hooks(bridge.clone());
-            tracing::info!("enabled {n} plugin(s)");
+            tracing::info!(
+                "plugins: enabled {n} plugin(s) in {} ms",
+                waiting.elapsed().as_millis()
+            );
             Some(bridge)
         }
         Ok(Err(e)) => {

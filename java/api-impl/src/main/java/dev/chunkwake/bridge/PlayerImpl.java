@@ -375,6 +375,11 @@ final class PlayerImpl {
     /** Присед из `player_input`: меняется сразу, без ожидания тика. */
     public boolean isSneaking() { return state().sneaking(); }
 
+    /** Планировщик задач этого игрока: на Folia — поток региона, у нас общий. */
+    public io.papermc.paper.threadedregions.scheduler.EntityScheduler getScheduler() {
+        return server.entityScheduler();
+    }
+
     public org.bukkit.Location getLocation() {
         State s = state();
         return new org.bukkit.Location(server.world, s.x(), s.y(), s.z(), s.yaw(), s.pitch());

@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.util.List;
 import java.util.jar.JarFile;
 import java.util.logging.Logger;
 import org.bukkit.plugin.InvalidDescriptionException;
@@ -45,6 +46,12 @@ final class PluginLoader extends URLClassLoader implements ConfiguredPluginClass
         for (URL url : Libraries.resolve(file, description.getLibraries(), log)) {
             addURL(url);
         }
+    }
+
+    /** Сколько библиотек плагин объявил в `libraries:` — для журнала до загрузки. */
+    int declaredLibraryCount() {
+        List<String> declared = description.getLibraries();
+        return declared == null ? 0 : declared.size();
     }
 
     /** `plugin.yml` (или `paper-plugin.yml`) из jar. */

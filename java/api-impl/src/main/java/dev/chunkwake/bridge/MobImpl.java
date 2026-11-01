@@ -127,6 +127,11 @@ final class MobImpl {
     }
     public Component name() { return Component.text(getName()); }
 
+    /** Планировщик задач этого моба: на Folia — поток региона, у нас общий. */
+    public io.papermc.paper.threadedregions.scheduler.EntityScheduler getScheduler() {
+        return Bridge.server.entityScheduler();
+    }
+
     public Location getLocation() {
         String[] s = state();
         if (s == null) {

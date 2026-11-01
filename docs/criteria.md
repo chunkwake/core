@@ -599,3 +599,42 @@ Java ищется и сверяется мажор. Проверено на жи
 CI теперь проверяет запуском: статическую линковку (Linux), что `doctor`
 ругается на Java 21 при наличии плагинов, что API развернулся и что
 `logs/latest.log` появился.
+
+## Плагины: прозрачность загрузки, netty и EntityScheduler
+
+**«Сервер замирает при запуске».** Загрузка плагинов идёт синхронно до
+первого тика: JVM поднимается, `onLoad` и `onEnable` выполняются, игроки
+ждут. Раньше об этом была одна строка в конце, и пауза в 5 секунд выглядела
+как зависание. Теперь каждая фаза объявляется заранее, с временем:
+
+```
+plugins: starting the JVM (...java.exe) and enabling plugins...
+plugins: 2 jar(s) in .\plugins, loading...
+plugins: [1/2] bluemap-5.29-paper.jar
+plugins: BlueMap declares 1 library(ies), resolving...
+plugins: BlueMap loaded in 4814 ms
+plugins: enabling BlueMap...
+plugins: BlueMap enabled in 87 ms
+plugins: 2 of 2 enabled in 4925 ms
+```
+
+Отдельная строка про `libraries:` — на первом запуске резолвер качает
+зависимости из сети, и это самая долгая часть (4.8 из 5 секунд здесь).
+
+**netty.** JourneyMap падал с `NoClassDefFoundError: io/netty/buffer/ByteBuf`:
+на Paper netty есть в classpath сервера, плагины на неё рассчитывают, а у
+нас не было. Добавлены `netty-buffer/common/transport/resolver/handler/
+codec-base/codec-compression` версии 4.2.16.Final — ровно той, что в
+`META-INF/libraries.list` ванильного 26.3, чтобы не разойтись с нативным
+транспортом. Это +8 jar'ов и +2.7 МБ в API (всего 58 jar'ов, 37 МБ сжатого).
+
+**EntityScheduler.** `Player.getScheduler()` и `MobImpl.getScheduler()` не
+были реализованы — Folia-совместимые плагины получали заглушку.
+`EntitySchedulers` отдаёт задачи в общий планировщик (поток у нас один, как
+регион на Folia). Аргумент «сущность исчезла» игнорируется: сущности не
+удаляются вне тика.
+
+Найдено по дороге: у `EntityScheduler` сигнатуры `Consumer<ScheduledTask>`
+без `? super`, а у `ExecutionState` нет `SCHEDULED` — есть `IDLE`/`RUNNING`/
+`FINISHED`/`CANCELLED`/`CANCELLED_RUNNING`. Компилировать по памяти здесь
+нельзя, только по `javap`.

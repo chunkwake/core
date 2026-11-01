@@ -7,6 +7,18 @@ dependencies {
     // плагины объявляют в `libraries:`) логируют через SLF4J, а реализации
     // в classpath не было. Бэкенд — log4j-api, он уже едет с paper-api.
     "runtimeOnly"("org.apache.logging.log4j:log4j-slf4j2-impl:2.26.0")
+    // Netty: на Paper он есть в classpath сервера, и плагины рассчитывают на
+    // него (JourneyMap падает с NoClassDefFoundError io/netty/buffer/ByteBuf).
+    // Версия та же, что у ванильного 26.3 (`META-INF/libraries.list`), чтобы
+    // не ловить несовместимость с нативными транспорт-библиотеками.
+    val netty = "4.2.16.Final"
+    "runtimeOnly"("io.netty:netty-buffer:$netty")
+    "runtimeOnly"("io.netty:netty-common:$netty")
+    "runtimeOnly"("io.netty:netty-transport:$netty")
+    "runtimeOnly"("io.netty:netty-resolver:$netty")
+    "runtimeOnly"("io.netty:netty-handler:$netty")
+    "runtimeOnly"("io.netty:netty-codec-base:$netty")
+    "runtimeOnly"("io.netty:netty-codec-compression:$netty")
 }
 
 tasks.named<Jar>("jar") {

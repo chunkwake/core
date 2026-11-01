@@ -109,6 +109,44 @@ impl WorldStorage {
         }
     }
 
+    /// Дописывает `Heightmaps` в чанки мира, где раздела нет. Возвращает число
+    /// обновлённых чанков.
+    ///
+    /// Зачем: раньше сервер не писал `Heightmaps` вообще, и внешние читатели
+    /// мира (BlueMap, редакторы карт, ванильные инструменты) не находили
+    /// поверхность — BlueMap из-за этого не рисовал чанк. Блоки не трогаем:
+    /// чанк читается, heightmaps считаются по его секциям и пишутся рядом.
+    ///
+    /// Работает один раз: чанки, у которых раздел уже есть, пропускаются.
+    pub fn backfill_heightmaps(&self) -> Result<usize, String> {
+        let _guard = self.save_lock.lock().unwrap();
+        let stored = self.store.load_all()?;
+        let mut updated = Vec::new();
+        for (pos, root) in stored {
+            // `Compound` — псевдоним `BTreeMap`, поэтому `contains_key` есть,
+            // но clippy-совет про него здесь верен: раздел маленький.
+            if root.contains_key("Heightmaps") {
+                continue;
+            }
+            // Считаем по самому чанку: `chunk_from_nbt` даёт секции, а
+            // `heightmaps_nbt` — готовый раздел из них.
+            let Ok((column, _)) =
+                anvil::chunk_from_nbt(&root, &self.template, self.format, &self.names)
+            else {
+                continue;
+            };
+            let mut fixed = root;
+            fixed.insert("Heightmaps".into(), anvil::heightmaps_for_nbt(&column));
+            updated.push((pos, fixed));
+        }
+        if updated.is_empty() {
+            return Ok(0);
+        }
+        let n = updated.len();
+        self.store.save(&updated)?;
+        Ok(n)
+    }
+
     /// Записывает изменённые чанки; возвращает их число.
     pub fn save(&self, plan: &PlayPlan) -> Result<usize, String> {
         let _guard = self.save_lock.lock().unwrap();
