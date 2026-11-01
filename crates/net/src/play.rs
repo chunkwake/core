@@ -228,6 +228,8 @@ pub struct PlayPlan {
     plugin_commands: Mutex<Vec<String>>,
     /// Предметы на земле по ID сущности.
     dropped: Mutex<FastMap<i32, Dropped>>,
+    /// Частота последней вибрации скалк-сенсора: для компаратора.
+    sculk_frequency: Mutex<FastMap<[i32; 3], i32>>,
     /// Индекс предметов по чанкам: `(cx, cz)` → ID предметов в нём.
     ///
     /// Подбор игроком и всасывание воронкой раньше сканировали **все**
@@ -1377,6 +1379,33 @@ fn container_entity(block: &str) -> Option<&'static str> {
     }
 }
 
+fn update_container_viewers(
+    map: &mut FastMap<[i32; 3], Vec<Uuid>>,
+    uuid: Uuid,
+    positions: &[[i32; 3]],
+    add: bool,
+) -> Vec<([i32; 3], usize)> {
+    let mut out = Vec::with_capacity(positions.len());
+    for &pos in positions {
+        let n = {
+            let viewers = map.entry(pos).or_default();
+            if add {
+                if !viewers.contains(&uuid) {
+                    viewers.push(uuid);
+                }
+            } else {
+                viewers.retain(|id| *id != uuid);
+            }
+            viewers.len()
+        };
+        if n == 0 {
+            map.remove(&pos);
+        }
+        out.push((pos, n));
+    }
+    out
+}
+
 /// Слотов в контейнере: воронка 5, раздатчик и выбрасыватель 9, сундук и бочка 27.
 fn container_size(block: &str) -> usize {
     match block {
@@ -1870,6 +1899,7 @@ impl PlayPlan {
             campfires: Mutex::new(FastMap::default()),
             pending_campfires: Mutex::new(Vec::new()),
             dropped: Mutex::new(FastMap::default()),
+            sculk_frequency: Mutex::new(FastMap::default()),
             dropped_by_chunk: Mutex::new(FastMap::default()),
             orbs: Mutex::new(FastMap::default()),
             players_source: std::sync::OnceLock::new(),
@@ -2235,10 +2265,41 @@ impl PlayPlan {
         v
     }
 
+    /// Динамический выход редстоуна: у ловушки это число открывших её игроков.
+    fn redstone_output(&self, p: [i32; 3]) -> i32 {
+        if self
+            .block(p)
+            .is_some_and(|s| self.state_name(s) == "minecraft:trapped_chest")
+        {
+            let viewers = self.open_blocks.lock().unwrap().get(&p).map_or(0, Vec::len);
+            return crate::redstone::trapped_chest_power(viewers);
+        }
+        self.comparator_output(p)
+    }
+
     /// Заполненность контейнера в `p` для компаратора.
     fn analog_at(&self, p: [i32; 3]) -> Option<i32> {
         let s = self.block(p)?;
         let name = self.state_name(s);
+        if let Some(power) = crate::redstone::block_analog(&self.survival.placement, s) {
+            return Some(power);
+        }
+        // `SculkSensorBlock.getAnalogOutputSignal`: активный сенсор отдаёт
+        // частоту последней вибрации, неактивный — ноль.
+        if crate::redstone::is_sculk_sensor(name) {
+            let active = self.survival.placement.prop(s, "sculk_sensor_phase") == Some("active");
+            if !active {
+                return Some(0);
+            }
+            return Some(
+                self.sculk_frequency
+                    .lock()
+                    .unwrap()
+                    .get(&p)
+                    .copied()
+                    .unwrap_or(0),
+            );
+        }
         let full = |slots: &[Slot]| {
             slots
                 .iter()
@@ -6716,6 +6777,16 @@ impl PlayPlan {
                                 if crate::redstone::is_tripwire_hook(&name) {
                                     self.tripwire_hook_state(target, false, false, -1, None);
                                 }
+                                // `GameEvent.BLOCK_PLACE` (частота 13) — скалк
+                                // слышит установку в радиусе 8.
+                                self.emit_vibration(
+                                    [
+                                        target[0] as f64 + 0.5,
+                                        target[1] as f64 + 0.5,
+                                        target[2] as f64 + 0.5,
+                                    ],
+                                    "minecraft:block_place",
+                                );
                                 drop(edit);
                                 if survival && let Some(i) = hand_slot && state.inv.consume_at(i) {
                                     self.send_slots(conn, &mut state.inv, &[i]).await?;
@@ -7185,6 +7256,15 @@ impl PlayPlan {
         if chunkwake_world::has_rare(old, chunkwake_world::rare::TRIPWIRE_HOOK) {
             self.tripwire_hook_removed(old, pos);
         }
+        // `GameEvent.BLOCK_DESTROY` (частота 12).
+        self.emit_vibration(
+            [
+                pos[0] as f64 + 0.5,
+                pos[1] as f64 + 0.5,
+                pos[2] as f64 + 0.5,
+            ],
+            "minecraft:block_destroy",
+        );
         // Частицы и звук ломки — остальным (ломающий проиграл их сам).
         self.hub.send(
             Some(uuid),
@@ -7667,25 +7747,7 @@ impl PlayPlan {
         add: bool,
     ) -> Vec<([i32; 3], usize)> {
         let mut map = self.open_blocks.lock().unwrap();
-        let mut out = Vec::new();
-        for &pos in positions {
-            let n = {
-                let viewers = map.entry(pos).or_default();
-                if add {
-                    if !viewers.contains(&uuid) {
-                        viewers.push(uuid);
-                    }
-                } else {
-                    viewers.retain(|id| *id != uuid);
-                }
-                viewers.len()
-            };
-            if n == 0 {
-                map.remove(&pos);
-            }
-            out.push((pos, n));
-        }
-        out
+        update_container_viewers(&mut map, uuid, positions, add)
     }
 
     /// Крышка сундука — `block_event`, бочка — свойство `open`.
@@ -7725,6 +7787,10 @@ impl PlayPlan {
                 None,
                 play::block_event(self.ids.block_event, pos, 1, viewers.min(255) as u8, block),
             );
+        }
+        if name == "minecraft:trapped_chest" {
+            self.redstone_update(&crate::redstone::around(pos));
+            self.redstone_update(&crate::redstone::around(crate::redstone::step(pos, 0)));
         }
     }
 
@@ -8104,6 +8170,14 @@ impl PlayPlan {
                     self.tripwire_check(p);
                 }
             }
+            // `SculkSensorBlock.stepOn`: наступили на сенсор — вибрация шага,
+            // частота 1, источник — позиция шагнувшего.
+            if let Some(state) = self.block(p)
+                && crate::redstone::is_sculk_sensor(self.state_name(state))
+            {
+                let at = [p[0] as f64 + 0.5, p[1] as f64, p[2] as f64 + 0.5];
+                self.sculk_step_on(p, at);
+            }
         }
     }
 
@@ -8357,7 +8431,7 @@ impl PlayPlan {
         let w = rs::World {
             pl,
             at: &at,
-            output: &|p| self.comparator_output(p),
+            output: &|p| self.redstone_output(p),
             analog: &|p| self.analog_at(p),
         };
         if rs::is_button(&name) {
@@ -8373,6 +8447,30 @@ impl PlayPlan {
             // `TripWireBlock.tick`: перепроверить, стоит ли кто-то на нити.
             if pl.prop(state, "powered") == Some("true") {
                 self.tripwire_check(pos);
+            }
+        } else if rs::is_sculk_sensor(&name) {
+            // `SculkSensorBlock.tick`: активный гаснет, отдохнувший — в покой.
+            let phase =
+                rs::SculkPhase::parse(pl.prop(state, "sculk_sensor_phase").unwrap_or("inactive"));
+            match rs::sculk_tick(phase) {
+                rs::SculkTick::Deactivate => self.deactivate_sculk(pos, state),
+                rs::SculkTick::Reset => {
+                    if let Some(next) = pl.with_prop(state, "sculk_sensor_phase", "inactive") {
+                        self.set_block(pos, next);
+                        // `sculk_clicking_stop` только не в воде.
+                        if pl.prop(state, "waterlogged") != Some("true") {
+                            let pitch = rand::random::<f32>() * 0.2 + 0.8;
+                            self.block_sound(
+                                None,
+                                "minecraft:block.sculk_sensor.clicking_stop",
+                                pos,
+                                1.0,
+                                pitch,
+                            );
+                        }
+                    }
+                }
+                rs::SculkTick::Nothing => {}
             }
         } else if rs::is_tripwire_hook(&name) {
             // `TripWireHookBlock.tick`: полный пересчёт цепи.
@@ -8512,7 +8610,7 @@ impl PlayPlan {
             let w = rs::World {
                 pl,
                 at: &at,
-                output: &|p| self.comparator_output(p),
+                output: &|p| self.redstone_output(p),
                 analog: &|p| self.analog_at(p),
             };
             let mut next: Vec<[i32; 3]> = Vec::new();
@@ -8699,7 +8797,7 @@ impl PlayPlan {
         let w = crate::redstone::World {
             pl,
             at: &at,
-            output: &|q| self.comparator_output(q),
+            output: &|q| self.redstone_output(q),
             analog: &|q| self.analog_at(q),
         };
         let hardness = |st: u32| {
@@ -8946,7 +9044,7 @@ impl PlayPlan {
                     let w = crate::redstone::World {
                         pl,
                         at: &at,
-                        output: &|q| self.comparator_output(q),
+                        output: &|q| self.redstone_output(q),
                         analog: &|q| self.analog_at(q),
                     };
                     touched.extend_from_slice(&crate::redstone::around(w.observer_back(p)));
@@ -10102,7 +10200,7 @@ impl PlayPlan {
         crate::redstone::World {
             pl: &self.survival.placement,
             at: &at,
-            output: &|p| self.comparator_output(p),
+            output: &|p| self.redstone_output(p),
             analog: &|p| self.analog_at(p),
         }
         .powered(pos)
@@ -10759,6 +10857,178 @@ impl PlayPlan {
         changed
     }
 
+    /// `SculkSensorBlock.activate`: сенсор включается, держит сигнал
+    /// `ACTIVE_TICKS`, затем уходит в `cooldown` на `COOLDOWN_TICKS`.
+    ///
+    /// `power` считается по расстоянию от источника вибрации:
+    /// `getRedstoneStrengthForDistance`. Звук `sculk_clicking` (кроме
+    /// затопленного), событие `sculk_sensor_tendrils_clicking` и резонанс
+    /// аметиста вокруг — всё как в ванили.
+    fn activate_sculk(&self, pos: [i32; 3], state: u32, distance: f32, frequency: i32) {
+        let pl = &self.survival.placement;
+        let power =
+            crate::redstone::vibration_power(distance, crate::redstone::SCULK_LISTENER_RANGE);
+        let Some(next) = pl
+            .with_prop(state, "sculk_sensor_phase", "active")
+            .and_then(|s| pl.with_prop(s, "power", &power.to_string()))
+        else {
+            return;
+        };
+        self.set_block(pos, next);
+        // Частота последней вибрации — для компаратора (`getAnalogOutputSignal`).
+        self.sculk_frequency.lock().unwrap().insert(pos, frequency);
+        self.schedule(pos, crate::redstone::SCULK_ACTIVE_TICKS);
+        let waterlogged = pl.prop(next, "waterlogged") == Some("true");
+        // `updateNeighbours`: сам сенсор и блок под ним.
+        self.redstone_update(&crate::redstone::around(pos));
+        self.redstone_update(&crate::redstone::around(crate::redstone::place(pos, 0, 1)));
+        self.resonate(pos, frequency);
+        // `sculk_clicking` с дрожащей высотой `random * 0.2 + 0.8`; в воде
+        // звука нет.
+        if !waterlogged {
+            let pitch = rand::random::<f32>() * 0.2 + 0.8;
+            self.block_sound(
+                None,
+                "minecraft:block.sculk_sensor.clicking",
+                pos,
+                1.0,
+                pitch,
+            );
+        }
+    }
+
+    /// `SculkSensorBlock.deactivate`: снять сигнал и уйти в `cooldown`.
+    fn deactivate_sculk(&self, pos: [i32; 3], state: u32) {
+        let pl = &self.survival.placement;
+        let Some(next) = pl
+            .with_prop(state, "sculk_sensor_phase", "cooldown")
+            .and_then(|s| pl.with_prop(s, "power", "0"))
+        else {
+            return;
+        };
+        self.set_block(pos, next);
+        self.schedule(pos, crate::redstone::SCULK_COOLDOWN_TICKS);
+        self.redstone_update(&crate::redstone::around(pos));
+        self.redstone_update(&crate::redstone::around(crate::redstone::place(pos, 0, 1)));
+    }
+
+    /// `tryResonateVibration`: аметист вокруг сенсора откликается на частоту.
+    fn resonate(&self, pos: [i32; 3], frequency: i32) {
+        if frequency <= 0 {
+            return;
+        }
+        let pitch = crate::redstone::resonance_pitch(frequency);
+        for dir in 0..6 {
+            let at = crate::redstone::place(pos, dir, 1);
+            let Some(state) = self.block(at) else {
+                continue;
+            };
+            if !crate::redstone::is_resonator(self.state_name(state)) {
+                continue;
+            }
+            let _ = crate::redstone::resonance_event(frequency);
+            self.block_sound(
+                None,
+                "minecraft:block.amethyst_block.resonate",
+                at,
+                1.0,
+                pitch,
+            );
+        }
+    }
+
+    /// Приём вибрации скалк-сенсором (`onReceiveVibration`).
+    ///
+    /// Слышно только из фазы `inactive`; калиброванный дополнительно требует,
+    /// чтобы частота совпала с сигналом сзади, если он ненулевой.
+    fn sculk_hears(&self, pos: [i32; 3], origin: [f64; 3], frequency: i32) -> bool {
+        let pl = &self.survival.placement;
+        let Some(state) = self.block(pos) else {
+            return false;
+        };
+        let name = self.state_name(state);
+        if !crate::redstone::is_sculk_sensor(name) {
+            return false;
+        }
+        let phase = crate::redstone::SculkPhase::parse(
+            pl.prop(state, "sculk_sensor_phase").unwrap_or("inactive"),
+        );
+        if !phase.can_activate() {
+            return false;
+        }
+        if name == "minecraft:calibrated_sculk_sensor" {
+            let facing = pl
+                .prop(state, "facing")
+                .and_then(|f| crate::redstone::DIRS.iter().position(|d| *d == f))
+                .unwrap_or(2);
+            // `getBackSignal`: сигнал от блока позади, в сторону `facing`.
+            let back = crate::redstone::place(pos, crate::redstone::opposite(facing), 1);
+            let at = |p: [i32; 3]| self.block(p).unwrap_or(AIR);
+            let w = crate::redstone::World {
+                pl,
+                at: &at,
+                output: &|p| self.redstone_output(p),
+                analog: &|p| self.analog_at(p),
+            };
+            let signal = w.signal(back, crate::redstone::opposite(facing), true);
+            if !crate::redstone::calibrated_accepts(signal, frequency) {
+                return false;
+            }
+        }
+        // Расстояние до источника вибрации (`receivingDistance`).
+        let center = [
+            pos[0] as f64 + 0.5,
+            pos[1] as f64 + 0.5,
+            pos[2] as f64 + 0.5,
+        ];
+        let dist = ((center[0] - origin[0]).powi(2)
+            + (center[1] - origin[1]).powi(2)
+            + (center[2] - origin[2]).powi(2))
+        .sqrt() as f32;
+        if dist > crate::redstone::SCULK_LISTENER_RANGE as f32 {
+            return false;
+        }
+        self.activate_sculk(pos, state, dist, frequency);
+        true
+    }
+
+    /// Рассылает вибрацию всем сенсорам в радиусе: `gameEvent`.
+    ///
+    /// Ванила держит у каждого сенсора слушателя с радиусом 8 и на каждое
+    /// событие проверяет попадание. Здесь сенсоры ищутся в кубе радиуса
+    /// вокруг источника — их в мире единицы, а обхода всех чанков нет.
+    fn emit_vibration(&self, origin: [f64; 3], event: &str) {
+        let frequency = crate::redstone::vibration_frequency(event);
+        if frequency == 0 {
+            return;
+        }
+        let range = crate::redstone::SCULK_LISTENER_RANGE;
+        let (cx, cy, cz) = (
+            origin[0].floor() as i32,
+            origin[1].floor() as i32,
+            origin[2].floor() as i32,
+        );
+        for dx in -range..=range {
+            for dy in -range..=range {
+                for dz in -range..=range {
+                    let p = [cx + dx, cy + dy, cz + dz];
+                    self.sculk_hears(p, origin, frequency);
+                }
+            }
+        }
+    }
+
+    /// Наступили на скалк-сенсор (`SculkSensorBlock.stepOn`): вибрация шага.
+    fn sculk_step_on(&self, pos: [i32; 3], entity: [f64; 3]) {
+        let Some(state) = self.block(pos) else { return };
+        if !crate::redstone::is_sculk_sensor(self.state_name(state)) {
+            return;
+        }
+        let origin = [entity[0], entity[1], entity[2]];
+        let frequency = crate::redstone::vibration_frequency("minecraft:step");
+        self.sculk_hears(pos, origin, frequency);
+    }
+
     /// `TripWireBlock.updateShape`: пересобрать `north/south/west/east` по
     /// соседям. Сторона без соседа получает `false`, а не исчезает.
     fn refresh_tripwire_shape(&self, pos: [i32; 3]) {
@@ -10988,7 +11258,7 @@ impl PlayPlan {
         let w = crate::redstone::World {
             pl,
             at: &at,
-            output: &|p| self.comparator_output(p),
+            output: &|p| self.redstone_output(p),
             analog: &|p| self.analog_at(p),
         };
         let signal = w.powered(pos);
@@ -12834,9 +13104,38 @@ fn chunks_around(c: (i32, i32), r: i32, skip: Option<((i32, i32), i32)>) -> Vec<
 
 #[cfg(test)]
 mod tests {
-    use super::{acknowledge_player_save, chunks_around, dominant_axis, near};
+    use super::{
+        FastMap, acknowledge_player_save, chunks_around, dominant_axis, near,
+        update_container_viewers,
+    };
     use crate::survival::PlayerState;
     use uuid::Uuid;
+
+    #[test]
+    fn chest_viewers_close_both_halves_and_disconnect() {
+        let mut map = FastMap::default();
+        let halves = [[2, 64, 3], [3, 64, 3]];
+        let alice = Uuid::from_u128(1);
+        let bob = Uuid::from_u128(2);
+        assert_eq!(
+            update_container_viewers(&mut map, alice, &halves, true),
+            vec![(halves[0], 1), (halves[1], 1)]
+        );
+        assert_eq!(
+            update_container_viewers(&mut map, bob, &halves, true),
+            vec![(halves[0], 2), (halves[1], 2)]
+        );
+        assert_eq!(
+            update_container_viewers(&mut map, alice, &halves, false),
+            vec![(halves[0], 1), (halves[1], 1)]
+        );
+        // `release_viewer` удаляет игрока тем же путём при разрыве соединения.
+        assert_eq!(
+            update_container_viewers(&mut map, bob, &halves, false),
+            vec![(halves[0], 0), (halves[1], 0)]
+        );
+        assert!(map.is_empty());
+    }
 
     /// `DaylightDetectorBlock.updateSignalStrength`: сигнал — небесный свет,
     /// после полудня угол тянется к `2π` и `power` множится на косинус.

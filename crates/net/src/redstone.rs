@@ -224,7 +224,7 @@ fn connected(face: &str, facing: &str) -> usize {
 pub struct World<'a> {
     pub pl: &'a crate::placement::Placement,
     pub at: &'a dyn Fn([i32; 3]) -> u32,
-    /// Сохранённый выход компаратора (`OutputSignal`).
+    /// Сохранённый выход компаратора или число зрителей сундука-ловушки.
     pub output: &'a dyn Fn([i32; 3]) -> i32,
     /// Сигнал содержимого для компаратора (`getAnalogOutputSignal`): сундуки, печи.
     pub analog: &'a dyn Fn([i32; 3]) -> Option<i32>,
@@ -274,6 +274,7 @@ impl World<'_> {
                 i32::from(self.on(s, "powered") && self.facing(s) == dir) * 15
             }
             "minecraft:daylight_detector" | "minecraft:target" => self.int(s, "power"),
+            "minecraft:trapped_chest" => (self.output)(n),
             "minecraft:comparator" => {
                 if self.facing(s) == dir {
                     (self.output)(n)
@@ -308,6 +309,15 @@ impl World<'_> {
             // Крюк растяжки — источник (`isSignalSource`), слабый выход 15 во
             // все стороны: `ownSignal` не смотрит на направление.
             _ if is_tripwire_hook(name) => i32::from(self.on(s, "powered")) * 15,
+            // Скалк-сенсор: слабый выход — свой `power`, у калиброванного в
+            // сторону `facing` его нет (`CalibratedSculkSensorBlock.getSignal`).
+            _ if is_sculk_sensor(name) => {
+                if name == "minecraft:calibrated_sculk_sensor" && self.facing(s) == dir {
+                    0
+                } else {
+                    self.int(s, "power")
+                }
+            }
             _ => 0,
         }
     }
@@ -335,10 +345,26 @@ impl World<'_> {
                 0
             };
         }
+        // Сундук-ловушка сильно питает только блок под собой.
+        if name == "minecraft:trapped_chest" {
+            return if dir == UP {
+                self.weak(n, dir, wires)
+            } else {
+                0
+            };
+        }
         // `getDirectSignal` крюка: 15 только в сторону `facing`, то есть в
         // блок, на котором он висит, — и оттуда питает проводник насквозь.
         if is_tripwire_hook(name) {
             return i32::from(self.on(s, "powered") && self.facing(s) == dir) * 15;
+        }
+        // `SculkSensorBlock.getDirectSignal`: сильно питает только верх.
+        if is_sculk_sensor(name) {
+            return if sculk_direct(dir) {
+                self.weak(n, dir, wires)
+            } else {
+                0
+            };
         }
         match name {
             "minecraft:repeater"
@@ -663,6 +689,27 @@ pub fn fullness(items: impl IntoIterator<Item = (i32, i32)>, size: usize) -> i32
     (p * 14.0).floor() as i32 + i32::from(p > 0.0)
 }
 
+/// Аналоговый выход блоков без инвентаря (`getAnalogOutputSignal`).
+pub(crate) fn block_analog(pl: &crate::placement::Placement, state: u32) -> Option<i32> {
+    let name = pl.name(state)?;
+    match name {
+        "minecraft:cake" => {
+            let bites = pl.prop(state, "bites")?.parse::<i32>().ok()?;
+            Some(14 - 2 * bites)
+        }
+        "minecraft:cauldron" => Some(0),
+        "minecraft:water_cauldron" | "minecraft:powder_snow_cauldron" => {
+            pl.prop(state, "level")?.parse().ok()
+        }
+        "minecraft:lava_cauldron" => Some(3),
+        _ => None,
+    }
+}
+
+pub(crate) fn trapped_chest_power(viewers: usize) -> i32 {
+    viewers.min(15) as i32
+}
+
 pub fn is_comparator(name: &str) -> bool {
     name == "minecraft:comparator"
 }
@@ -803,6 +850,173 @@ pub fn tripwire_connects(neighbor: &str, neighbor_facing: Option<&str>, dir: usi
         return neighbor_facing.is_some_and(|f| DIRS[opposite(dir)] == f);
     }
     is_tripwire(neighbor)
+}
+
+// ---------------------------------------------------------------------------
+// Скалк: частоты вибраций (`VibrationSystem.VIBRATION_FREQUENCY_FOR_EVENT`).
+// ---------------------------------------------------------------------------
+
+/// Частота события по его имени (`minecraft:block_place` → 13).
+///
+/// Таблица — из `VibrationSystem.VIBRATION_FREQUENCY_FOR_EVENT`; ноль значит
+/// «событие скалк не слышит». События резонанса (`minecraft:resonate_1`…`_15`)
+/// дают ту же частоту, что и в имени.
+pub fn vibration_frequency(event: &str) -> i32 {
+    let path = event.strip_prefix("minecraft:").unwrap_or(event);
+    if let Some(n) = path.strip_prefix("resonate_").and_then(|n| n.parse().ok())
+        && (1..=15).contains(&n)
+    {
+        return n;
+    }
+    match path {
+        // 1 — шаг и плавание.
+        "step" | "swim" | "flap" => 1,
+        // 2 — падение и удар о землю.
+        "projectile_land" | "hit_ground" | "splash" | "bounce" => 2,
+        // 3 — выстрел, взаимодействие с предметом, инструмент.
+        "item_interact_finish" | "projectile_shoot" | "instrument_play" => 3,
+        // 4 — действие сущности, элитры.
+        "entity_action" | "elytra_glide" | "unequip" => 4,
+        // 5 — посадка и снятие снаряжения.
+        "entity_dismount" | "equip" => 5,
+        // 6 — взаимодействие, стрижка, верховая езда.
+        "entity_interact" | "shear" | "entity_mount" => 6,
+        // 7 — урон.
+        "entity_damage" => 7,
+        // 8 — еда и питьё.
+        "drink" | "eat" => 8,
+        // 9 — закрытие.
+        "container_close" | "block_close" | "block_deactivate" | "block_detach" => 9,
+        // 10 — открытие и активация.
+        "container_open" | "block_open" | "block_activate" | "block_attach" | "prime_fuse"
+        | "note_block_play" => 10,
+        // 11 — смена блока.
+        "block_change" => 11,
+        // 12 — разрушение.
+        "block_destroy" | "fluid_pickup" => 12,
+        // 13 — установка.
+        "block_place" | "fluid_place" => 13,
+        // 14 — появление сущности и молния.
+        "entity_place" | "lightning_strike" | "teleport" => 14,
+        // 15 — смерть и взрыв.
+        "entity_die" | "explode" => 15,
+        _ => 0,
+    }
+}
+
+/// `VibrationSystem.getRedstoneStrengthForDistance`.
+///
+/// `max(1, 15 - floor(15 / радиус * расстояние))`: вплотную 15, на границе 1.
+pub fn vibration_power(distance: f32, radius: i32) -> i32 {
+    let scale = 15.0 / radius as f64;
+    (15 - (scale * distance as f64).floor() as i32).max(1)
+}
+
+/// Радиус слуха скалк-сенсора и крикуна (`VibrationUser.LISTENER_RANGE`).
+pub const SCULK_LISTENER_RANGE: i32 = 8;
+/// `SculkSensorBlock.ACTIVE_TICKS`: сколько сенсор держит сигнал.
+pub const SCULK_ACTIVE_TICKS: u64 = 30;
+/// `SculkSensorBlock.COOLDOWN_TICKS`: пауза перед новым срабатыванием.
+pub const SCULK_COOLDOWN_TICKS: u64 = 10;
+
+/// Фаза сенсора (`SculkSensorPhase`) по строке свойства.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SculkPhase {
+    Inactive,
+    Active,
+    Cooldown,
+}
+
+impl SculkPhase {
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "active" => Self::Active,
+            "cooldown" => Self::Cooldown,
+            _ => Self::Inactive,
+        }
+    }
+
+    /// `canActivate`: сработать можно только из `inactive`.
+    pub fn can_activate(self) -> bool {
+        self == Self::Inactive
+    }
+}
+
+/// Что делает сенсор, когда истёк его тик.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SculkTick {
+    /// Ничего: сенсор уже неактивен.
+    Nothing,
+    /// Был активен — снять сигнал, перейти в `cooldown`.
+    Deactivate,
+    /// Был в `cooldown` — вернуться в `inactive`, звук `sculk_clicking_stop`.
+    Reset,
+}
+
+/// `SculkSensorBlock.tick`: активный гаснет, отдохнувший становится неактивным.
+pub fn sculk_tick(phase: SculkPhase) -> SculkTick {
+    match phase {
+        SculkPhase::Active => SculkTick::Deactivate,
+        SculkPhase::Cooldown => SculkTick::Reset,
+        SculkPhase::Inactive => SculkTick::Nothing,
+    }
+}
+
+/// `getDirectSignal` сенсора: сильно питает только верх.
+pub fn sculk_direct(dir: usize) -> bool {
+    dir == 1
+}
+
+/// `CalibratedSculkSensorBlock.getSignal`: сенсор молчит в сторону `facing`.
+pub fn calibrated_signal_blocked(facing: usize, dir: usize) -> bool {
+    facing == dir
+}
+
+/// Фильтр калиброванного сенсора (`canReceiveVibration`): сигнал сзади задаёт
+/// частоту, и слышны только вибрации этой частоты. Ноль — фильтра нет.
+pub fn calibrated_accepts(back_signal: i32, frequency: i32) -> bool {
+    back_signal == 0 || frequency == back_signal
+}
+
+/// `tryResonateVibration`: высота звука резонанса по частоте.
+///
+/// Тона `[0, 0, 2, 4, 6, 7, 9, 10, 12, 14, 15, 18, 19, 21, 22, 24]` — это
+/// `NoteBlock.getPitchFromNote`, индекс — частота.
+pub fn resonance_pitch(frequency: i32) -> f32 {
+    const TONES: [i32; 16] = [0, 0, 2, 4, 6, 7, 9, 10, 12, 14, 15, 18, 19, 21, 22, 24];
+    let note = TONES[frequency.clamp(0, 15) as usize];
+    note_pitch(note)
+}
+
+/// Событие резонанса по частоте: `minecraft:resonate_<N>`.
+pub fn resonance_event(frequency: i32) -> String {
+    format!("minecraft:resonate_{}", frequency.clamp(1, 15))
+}
+
+/// Блоки, которые откликаются на резонанс (`VIBRATION_RESONATORS`).
+pub fn is_resonator(name: &str) -> bool {
+    matches!(
+        name,
+        "minecraft:amethyst_block"
+            | "minecraft:budding_amethyst"
+            | "minecraft:amethyst_cluster"
+            | "minecraft:large_amethyst_bud"
+            | "minecraft:medium_amethyst_bud"
+            | "minecraft:small_amethyst_bud"
+    )
+}
+
+/// Скалк-сенсор или его калиброванный вариант.
+pub fn is_sculk_sensor(name: &str) -> bool {
+    name == "minecraft:sculk_sensor" || name == "minecraft:calibrated_sculk_sensor"
+}
+
+pub fn is_sculk_shrieker(name: &str) -> bool {
+    name == "minecraft:sculk_shrieker"
+}
+
+pub fn is_sculk_catalyst(name: &str) -> bool {
+    name == "minecraft:sculk_catalyst"
 }
 
 /// Нотный блок — тот самый, что звучит по сигналу.
@@ -1278,6 +1492,90 @@ mod tests {
         assert_eq!(w.comparator_target([0, 0, 0]), 0);
     }
 
+    #[test]
+    fn trapped_chest_signal_tracks_viewers() {
+        let states = vec![
+            Some(("minecraft:air".into(), vec![])),
+            Some(("minecraft:trapped_chest".into(), vec![])),
+            Some(("minecraft:stone".into(), vec![])),
+        ];
+        let pl = Placement::new(states, vec![0, 0, 63], Default::default());
+        // Обе половины открытого двойного сундука получают одинаковый счётчик.
+        let blocks = HashMap::from([([0, 0, 0], 1u32), ([1, 0, 0], 1), ([0, -1, 0], 2)]);
+        let at = |p: [i32; 3]| blocks.get(&p).copied().unwrap_or(0);
+        for viewers in [0, 1, 2, 15, 16] {
+            let power = trapped_chest_power(viewers);
+            let w = World {
+                pl: &pl,
+                at: &at,
+                output: &|_| power,
+                analog: &|_| None,
+            };
+            for pos in [[0, 0, 0], [1, 0, 0]] {
+                for dir in 0..6 {
+                    assert_eq!(w.weak(pos, dir, true), power);
+                    assert_eq!(w.strong(pos, dir, true), if dir == UP { power } else { 0 });
+                }
+            }
+            assert_eq!(w.signal([0, -1, 0], DOWN, true), power);
+        }
+    }
+
+    #[test]
+    fn cake_and_cauldrons_feed_comparator_through_block() {
+        let mut states = vec![
+            Some(("minecraft:air".into(), vec![])),
+            Some(("minecraft:stone".into(), vec![])),
+            Some((
+                "minecraft:comparator".into(),
+                vec![
+                    ("facing".into(), "north".into()),
+                    ("mode".into(), "compare".into()),
+                ],
+            )),
+        ];
+        let mut cases = Vec::new();
+        for bites in 0..=6 {
+            let id = states.len() as u32;
+            states.push(Some((
+                "minecraft:cake".into(),
+                vec![("bites".into(), bites.to_string())],
+            )));
+            cases.push((id, 14 - 2 * bites));
+        }
+        let empty = states.len() as u32;
+        states.push(Some(("minecraft:cauldron".into(), vec![])));
+        cases.push((empty, 0));
+        for name in ["minecraft:water_cauldron", "minecraft:powder_snow_cauldron"] {
+            for level in 1..=3 {
+                let id = states.len() as u32;
+                states.push(Some((
+                    name.into(),
+                    vec![("level".into(), level.to_string())],
+                )));
+                cases.push((id, level));
+            }
+        }
+        let lava = states.len() as u32;
+        states.push(Some(("minecraft:lava_cauldron".into(), vec![])));
+        cases.push((lava, 3));
+        let mut sturdy = vec![0; states.len()];
+        sturdy[1] = 63;
+        let pl = Placement::new(states, sturdy, Default::default());
+        for (id, expected) in cases {
+            assert_eq!(block_analog(&pl, id), Some(expected));
+            let blocks = HashMap::from([([0, 0, 0], 2u32), ([0, 0, -1], 1), ([0, 0, -2], id)]);
+            let at = |p: [i32; 3]| blocks.get(&p).copied().unwrap_or(0);
+            let w = World {
+                pl: &pl,
+                at: &at,
+                output: &|_| 0,
+                analog: &|p| block_analog(&pl, at(p)),
+            };
+            assert_eq!(w.comparator_target([0, 0, 0]), expected);
+        }
+    }
+
     /// Крюк растяжки — источник: сигнал 15 слабым выходом и сильным только в
     /// сторону `facing` (`ownSignal` и `getDirectSignal`).
     #[test]
@@ -1631,5 +1929,135 @@ mod tests {
             N::Dragon.sound(),
             "minecraft:block.note_block.imitate.ender_dragon"
         );
+    }
+
+    /// Частоты вибраций (`VibrationSystem.VIBRATION_FREQUENCY_FOR_EVENT`).
+    #[test]
+    fn vibration_frequencies_match_vanilla() {
+        // Значения сняты с таблицы ванили: 1 — шаги, 15 — смерть и взрыв.
+        for (event, want) in [
+            ("minecraft:step", 1),
+            ("minecraft:swim", 1),
+            ("minecraft:flap", 1),
+            ("minecraft:projectile_land", 2),
+            ("minecraft:hit_ground", 2),
+            ("minecraft:splash", 2),
+            ("minecraft:bounce", 2),
+            ("minecraft:projectile_shoot", 3),
+            ("minecraft:item_interact_finish", 3),
+            ("minecraft:instrument_play", 3),
+            ("minecraft:entity_action", 4),
+            ("minecraft:elytra_glide", 4),
+            ("minecraft:unequip", 4),
+            ("minecraft:entity_dismount", 5),
+            ("minecraft:equip", 5),
+            ("minecraft:entity_interact", 6),
+            ("minecraft:shear", 6),
+            ("minecraft:entity_mount", 6),
+            ("minecraft:entity_damage", 7),
+            ("minecraft:drink", 8),
+            ("minecraft:eat", 8),
+            ("minecraft:container_close", 9),
+            ("minecraft:block_deactivate", 9),
+            ("minecraft:container_open", 10),
+            ("minecraft:block_activate", 10),
+            ("minecraft:note_block_play", 10),
+            ("minecraft:block_change", 11),
+            ("minecraft:block_destroy", 12),
+            ("minecraft:fluid_pickup", 12),
+            ("minecraft:block_place", 13),
+            ("minecraft:fluid_place", 13),
+            ("minecraft:entity_place", 14),
+            ("minecraft:lightning_strike", 14),
+            ("minecraft:teleport", 14),
+            ("minecraft:entity_die", 15),
+            ("minecraft:explode", 15),
+        ] {
+            assert_eq!(vibration_frequency(event), want, "{event}");
+        }
+        // Резонанс: частота из имени события.
+        assert_eq!(vibration_frequency("minecraft:resonate_1"), 1);
+        assert_eq!(vibration_frequency("minecraft:resonate_15"), 15);
+        // Неизвестное событие и резонанс вне диапазона скалк не слышит.
+        assert_eq!(vibration_frequency("minecraft:unknown"), 0);
+        assert_eq!(vibration_frequency("minecraft:resonate_16"), 0);
+        assert_eq!(vibration_frequency("minecraft:resonate_0"), 0);
+    }
+
+    /// `getRedstoneStrengthForDistance`: вплотную 15, на границе радиуса 1.
+    #[test]
+    fn sculk_sensor_power_matches_vanilla() {
+        // Радиус 8: 15/8 = 1.875 на блок расстояния.
+        assert_eq!(vibration_power(0.0, 8), 15);
+        // 1.875 * 1 = 1.875 → floor 1 → 14.
+        assert_eq!(vibration_power(1.0, 8), 14);
+        assert_eq!(vibration_power(2.0, 8), 12);
+        assert_eq!(vibration_power(4.0, 8), 8);
+        assert_eq!(vibration_power(7.0, 8), 2);
+        // На границе радиуса `15 - 15 = 0`, но `max(1, …)` даёт единицу.
+        assert_eq!(vibration_power(8.0, 8), 1);
+        // «Максимум с единицей» уже внутри формулы — зажим не нужен.
+        assert_eq!(vibration_power(8.0, 8).max(1), 1);
+        // И на большом расстоянии формула не уходит в минус.
+        assert_eq!(vibration_power(100.0, 8), 1);
+    }
+
+    /// Фазы сенсора: активный гаснет, отдохнувший возвращается в покой.
+    #[test]
+    fn sculk_phase_transitions_match_vanilla() {
+        assert_eq!(SculkPhase::parse("active"), SculkPhase::Active);
+        assert_eq!(SculkPhase::parse("cooldown"), SculkPhase::Cooldown);
+        assert_eq!(SculkPhase::parse("inactive"), SculkPhase::Inactive);
+        assert_eq!(SculkPhase::parse("что-то"), SculkPhase::Inactive);
+        // Сработать можно только из покоя.
+        assert!(SculkPhase::Inactive.can_activate());
+        assert!(!SculkPhase::Active.can_activate());
+        assert!(!SculkPhase::Cooldown.can_activate());
+        // Тик: активный → погасить, отдохнувший → покой, покой → ничего.
+        assert_eq!(sculk_tick(SculkPhase::Active), SculkTick::Deactivate);
+        assert_eq!(sculk_tick(SculkPhase::Cooldown), SculkTick::Reset);
+        assert_eq!(sculk_tick(SculkPhase::Inactive), SculkTick::Nothing);
+        assert_eq!(SCULK_ACTIVE_TICKS, 30);
+        assert_eq!(SCULK_COOLDOWN_TICKS, 10);
+    }
+
+    /// Калиброванный сенсор: молчит в сторону `facing` и фильтрует частоты.
+    #[test]
+    fn calibrated_sculk_sensor_rules() {
+        // FACING = north (2): в эту сторону сигнала нет, в остальные — есть.
+        assert!(calibrated_signal_blocked(2, 2));
+        for dir in [0, 1, 3, 4, 5] {
+            assert!(!calibrated_signal_blocked(2, dir), "{dir}");
+        }
+        // Обычный сенсор сильно питает только верх.
+        assert!(sculk_direct(1));
+        for dir in [0, 2, 3, 4, 5] {
+            assert!(!sculk_direct(dir), "{dir}");
+        }
+        // Фильтр: без сигнала сзади слышно всё, с сигналом — только его частоту.
+        assert!(calibrated_accepts(0, 1));
+        assert!(calibrated_accepts(0, 15));
+        assert!(calibrated_accepts(7, 7));
+        assert!(!calibrated_accepts(7, 8));
+    }
+
+    /// Резонанс: высота и событие по частоте, отклик аметиста.
+    #[test]
+    fn resonance_matches_vanilla() {
+        // Индекс 0 — тон 0, индекс 1 — тоже 0, дальше по таблице.
+        assert!((resonance_pitch(0) - note_pitch(0)).abs() < 1e-6);
+        assert!((resonance_pitch(1) - note_pitch(0)).abs() < 1e-6);
+        assert!((resonance_pitch(2) - note_pitch(2)).abs() < 1e-6);
+        assert!((resonance_pitch(15) - note_pitch(24)).abs() < 1e-6);
+        // За пределами диапазона — зажим.
+        assert!((resonance_pitch(99) - note_pitch(24)).abs() < 1e-6);
+        assert_eq!(resonance_event(1), "minecraft:resonate_1");
+        assert_eq!(resonance_event(15), "minecraft:resonate_15");
+        assert_eq!(resonance_event(99), "minecraft:resonate_15");
+        // Резонируют блоки и ростки аметиста.
+        assert!(is_resonator("minecraft:amethyst_block"));
+        assert!(is_resonator("minecraft:budding_amethyst"));
+        assert!(is_resonator("minecraft:amethyst_cluster"));
+        assert!(!is_resonator("minecraft:stone"));
     }
 }
