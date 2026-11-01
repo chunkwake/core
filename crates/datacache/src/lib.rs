@@ -187,6 +187,13 @@ pub fn ensure_generated_with(
     copy_structures(&jar, &tmp_out)?;
     // Язык клиента нужен консоли команд: он тоже живёт только в jar.
     let _ = copy_lang(&jar, &tmp_out);
+    // Версия игры — часть кэша, а не что-то, что дописывается потом: по ней
+    // `cache::cached`, `doctor` и `build.rs` узнают готовое дерево, и она же
+    // нужна встроенному архиву. Сервер раньше писал её сам после генерации,
+    // а сборка (`build.rs`) шла этим же путём и упаковывала кэш без версии —
+    // бинарь получался со встроенными данными, но без `version.json`.
+    std::fs::write(tmp_out.join("version.json"), version_json(&jar)?)
+        .map_err(|e| io("write", &tmp_out.join("version.json"), e))?;
     std::fs::write(tmp_out.join(CACHE_MARKER), "").map_err(|e| io("write", &tmp_out, e))?;
     std::fs::rename(&tmp_out, &target).map_err(|e| io("rename", &tmp_out, e))?;
     Ok(target)

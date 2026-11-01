@@ -70,9 +70,11 @@ fn main() {
     };
     // Правка любого файла кэша должна пересобрать архив.
     println!("cargo:rerun-if-changed={}", root.display());
-    // Язык консоли лежит только в jar, а кэш мог быть собран до того, как его
-    // начали копировать. В архив он попадает в любом случае.
-    let extra = lang_from_jar(workspace, &root);
+    // Язык консоли и `version.json` лежат только в jar, а кэш мог быть собран
+    // до того, как их начали туда класть. В архив они попадают в любом случае:
+    // без `version.json` бинарь соберётся, но не узнает версию своих данных.
+    let mut extra = lang_from_jar(workspace, &root);
+    extra.extend(version_from_jar(workspace, &root));
     if let Some(size) = up_to_date(&root, &target, &extra) {
         println!(
             "cargo:warning=vanilla data: {} записей из {} (архив не менялся, {size} КиБ)",
@@ -92,6 +94,30 @@ fn main() {
             &target,
             &format!("упаковка {} сорвалась: {error}", root.display()),
         ),
+    }
+}
+
+/// `version.json` из jar, если в дереве его нет.
+///
+/// Кэш, собранный генератором раньше, версии не содержал: её дописывал сервер
+/// уже после. Без неё `doctor` и запуск не узнают, что за данные внутри, —
+/// поэтому сборка достаёт файл из jar сама.
+fn version_from_jar(workspace: &Path, root: &Path) -> Vec<(String, Vec<u8>)> {
+    if root.join("version.json").is_file() {
+        return Vec::new();
+    }
+    let Some(jar) = jar_path(workspace) else {
+        return Vec::new();
+    };
+    match chunkwake_datacache::version_json(&jar) {
+        Ok(text) => vec![("version.json".to_owned(), text.into_bytes())],
+        Err(error) => {
+            println!(
+                "cargo:warning=version.json из {}: {error}; бинарь не узнает версию данных",
+                jar.display()
+            );
+            Vec::new()
+        }
     }
 }
 

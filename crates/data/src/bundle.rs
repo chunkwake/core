@@ -151,15 +151,27 @@ fn is_complete_cache(dir: &Path) -> bool {
         && dir.join("data/minecraft/worldgen/noise_settings").is_dir()
 }
 
-/// Дописывает `assets/` из архива, если языковых файлов в дереве нет.
+/// Дописывает в готовый кэш то, чего в нём нет: `assets/` и `version.json`.
 /// Возвращает число добавленных файлов.
+///
+/// Кэш прежних сборок намеренно не перезаписывается, но версия игры — часть
+/// данных, а не правка датапака: без неё сервер и `doctor` не узнают версию
+/// дерева, поэтому файл достаётся из встроенного архива.
 pub fn ensure_assets(dir: &Path) -> Result<usize, DataError> {
+    let mut count = 0;
+    if !dir.join("version.json").is_file()
+        && let Some(text) = version_json()
+    {
+        std::fs::write(dir.join("version.json"), text).map_err(|e| {
+            DataError::Io(format!("write {}: {e}", dir.join("version.json").display()))
+        })?;
+        count += 1;
+    }
     if dir.join("assets/minecraft/lang/en_us.json").is_file() || !present() {
-        return Ok(0);
+        return Ok(count);
     }
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(ARCHIVE))
         .map_err(|e| DataError::Io(format!("read embedded data: {e}")))?;
-    let mut count = 0;
     let mut buffer = Vec::new();
     for index in 0..archive.len() {
         let mut entry = archive
@@ -207,6 +219,33 @@ mod tests {
         }
         assert!(version_json().is_none());
         assert!(!extracted(Path::new(".")));
+    }
+
+    /// В архиве есть всё, без чего распакованное дерево негодно.
+    ///
+    /// Проверка отдельная от распаковки: `ensure` умеет дописывать недостающее
+    /// в чужой кэш, и без этого списка он мог бы скрыть дыру в самом архиве —
+    /// так и вышло с `version.json`, который генератор не писал.
+    #[test]
+    fn bundle_has_entry_points() {
+        if !present() {
+            return;
+        }
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(ARCHIVE)).expect("zip");
+        for name in [
+            "version.json",
+            "reports/blocks.json",
+            "reports/packets.json",
+        ] {
+            assert!(
+                archive.by_name(name).is_ok(),
+                "в архиве нет {name} — распакованное дерево не поднимется"
+            );
+        }
+        let has_noise = archive
+            .file_names()
+            .any(|n| n.starts_with("data/minecraft/worldgen/noise_settings/"));
+        assert!(has_noise, "в архиве нет настроек шума");
     }
 
     /// Встроенный архив распаковывается и второй раз не трогается.
