@@ -506,6 +506,25 @@ pub fn set_entity_flags(id: i32, entity_id: i32, flags: u8) -> Vec<u8> {
     w.buf
 }
 
+/// Поза игрока и позиция кровати в `set_entity_data` (Entity.DATA_POSE и
+/// LivingEntity.SLEEPING_POS_ID). Пустая позиция возвращает позу стоя.
+pub fn set_entity_sleeping(id: i32, entity_id: i32, bed: Option<[i32; 3]>) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .var_int(entity_id)
+        .u8(6)
+        .var_int(20)
+        .var_int(if bed.is_some() { 2 } else { 0 })
+        .u8(14)
+        .var_int(11)
+        .bool(bed.is_some());
+    if let Some(pos) = bed {
+        w.i64(crate::play::pack_block_pos(pos));
+    }
+    w.u8(0xff);
+    w.buf
+}
+
 /// `set_entity_data` предмета-сущности: `ItemEntity.DATA_ITEM` (индекс 8,
 /// сериализатор `ITEM_STACK` = 7).
 pub fn set_entity_item(id: i32, entity_id: i32, stack: Slot) -> Vec<u8> {
@@ -551,6 +570,37 @@ pub const ENTITY_EVENT_USE_ITEM_COMPLETE: u8 = 9;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sleeping_metadata_has_pose_and_optional_bed_position() {
+        let bed = [12, 64, -3];
+        let packet = set_entity_sleeping(42, 7, Some(bed));
+        let mut r = Reader::new(&packet);
+        assert_eq!(r.var_int().unwrap(), 42);
+        assert_eq!(r.var_int().unwrap(), 7);
+        assert_eq!(r.u8().unwrap(), 6);
+        assert_eq!(r.var_int().unwrap(), 20);
+        assert_eq!(r.var_int().unwrap(), 2);
+        assert_eq!(r.u8().unwrap(), 14);
+        assert_eq!(r.var_int().unwrap(), 11);
+        assert!(r.bool().unwrap());
+        assert_eq!(r.i64().unwrap(), crate::play::pack_block_pos(bed));
+        assert_eq!(r.u8().unwrap(), 0xff);
+        assert!(r.remaining().is_empty());
+
+        let packet = set_entity_sleeping(42, 7, None);
+        let mut r = Reader::new(&packet);
+        assert_eq!(r.var_int().unwrap(), 42);
+        assert_eq!(r.var_int().unwrap(), 7);
+        assert_eq!(r.u8().unwrap(), 6);
+        assert_eq!(r.var_int().unwrap(), 20);
+        assert_eq!(r.var_int().unwrap(), 0);
+        assert_eq!(r.u8().unwrap(), 14);
+        assert_eq!(r.var_int().unwrap(), 11);
+        assert!(!r.bool().unwrap());
+        assert_eq!(r.u8().unwrap(), 0xff);
+        assert!(r.remaining().is_empty());
+    }
 
     #[test]
     fn stack_roundtrip() {

@@ -357,7 +357,8 @@ pub struct PlayPlan {
     /// Порог сжатия: попадает в снимок и `/perf`.
     pub(crate) compression_threshold: i32,
     /// Точки возрождения игроков (`/spawnpoint`); `None` — спавн мира.
-    pub(crate) spawn_points: Mutex<HashMap<Uuid, Option<[i32; 3]>>>,
+    pub(crate) spawn_points: Mutex<HashMap<Uuid, Option<SpawnPoint>>>,
+    sleepers: Mutex<HashMap<Uuid, [i32; 3]>>,
     /// Режим игры по умолчанию (`/defaultgamemode`).
     pub(crate) default_game_mode: std::sync::atomic::AtomicU8,
     /// Просьба сохранить мир (`/save-all`).
@@ -413,7 +414,81 @@ pub type TerrainFn = Arc<dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync>;
 /// `/locate`: ближайшая точка от блока.
 pub type LocateFn = Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync>;
 /// Кадр появления по квантованной позиции: id, позиция, поворот, элитра.
-type SpawnFrameCache = FastMap<(i32, [i64; 3], u32, u32, bool), Frame>;
+type SpawnFrameCache = FastMap<(i32, [i64; 3], u32, u32, bool, Option<[i32; 3]>), Frame>;
+
+fn sleep_required(players: usize, percentage: i64) -> usize {
+    players
+        .saturating_mul(percentage.clamp(0, 100) as usize)
+        .div_ceil(100)
+        .max(1)
+}
+
+fn sleep_voters(game_modes: impl IntoIterator<Item = i32>) -> usize {
+    game_modes.into_iter().filter(|&mode| mode != 3).count()
+}
+
+fn bed_pair_at(
+    pos: [i32; 3],
+    block: impl Fn([i32; 3]) -> Option<u32>,
+    placement: &crate::placement::Placement,
+) -> Option<([i32; 3], [i32; 3])> {
+    let state = block(pos)?;
+    let name = placement.name(state)?;
+    if !name.ends_with("_bed") {
+        return None;
+    }
+    let offset = placement.partner(state)?;
+    let other = [pos[0] + offset[0], pos[1] + offset[1], pos[2] + offset[2]];
+    let other_state = block(other)?;
+    if placement.name(other_state) != Some(name)
+        || placement.prop(state, "facing") != placement.prop(other_state, "facing")
+        || placement.partner(other_state) != Some([-offset[0], -offset[1], -offset[2]])
+    {
+        return None;
+    }
+    match placement.prop(state, "part")? {
+        "head" => Some((pos, other)),
+        "foot" => Some((other, pos)),
+        _ => None,
+    }
+}
+
+fn find_bed_spawn(
+    head: [i32; 3],
+    passable: impl Fn([i32; 3]) -> bool,
+    support: impl Fn([i32; 3]) -> bool,
+    occupied: impl Fn([f64; 3]) -> bool,
+) -> Option<[f64; 3]> {
+    for distance in 1i32..=2 {
+        for dz in -distance..=distance {
+            for dx in -distance..=distance {
+                if dx.abs().max(dz.abs()) != distance {
+                    continue;
+                }
+                for dy in [0, 1, -1] {
+                    let pos = [head[0] + dx, head[1] + dy, head[2] + dz];
+                    if !passable(pos)
+                        || !passable([pos[0], pos[1] + 1, pos[2]])
+                        || !support([pos[0], pos[1] - 1, pos[2]])
+                    {
+                        continue;
+                    }
+                    let point = [pos[0] as f64 + 0.5, pos[1] as f64, pos[2] as f64 + 0.5];
+                    if !occupied(point) {
+                        return Some(point);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SpawnPoint {
+    pub(crate) pos: [i32; 3],
+    pub(crate) forced: bool,
+}
 /// Состав, по которому посчитан набор симуляции: радиус, чанки игроков, форс.
 type SimulatedKey = (i32, Vec<(i32, i32)>, Vec<(i32, i32)>);
 /// Сжатый кадр, общий для многих соединений.
@@ -818,6 +893,7 @@ struct EntityRef {
     yaw: f32,
     pitch: f32,
     gliding: bool,
+    sleeping: Option<[i32; 3]>,
 }
 
 /// Игрок онлайн: запись таб-листа и его сущность в мире.
@@ -838,6 +914,7 @@ struct Online {
     on_ground: bool,
     /// Полёт на элитрах: другим игрокам уходит в метаданных при спавне.
     gliding: bool,
+    sleeping: Option<[i32; 3]>,
     /// Живой и не наблюдатель: к нему тянутся сферы опыта.
     collects: bool,
 }
@@ -851,6 +928,7 @@ impl Online {
             yaw: self.yaw,
             pitch: self.pitch,
             gliding: self.gliding,
+            sleeping: self.sleeping,
         }
     }
 }
@@ -1937,6 +2015,7 @@ impl PlayPlan {
             started: Instant::now(),
             compression_threshold,
             spawn_points: Mutex::new(HashMap::new()),
+            sleepers: Mutex::new(HashMap::new()),
             default_game_mode: std::sync::atomic::AtomicU8::new(login_game_mode),
             save_requested: AtomicBool::new(false),
             whitelist_enabled: AtomicBool::new(false),
@@ -2232,6 +2311,13 @@ impl PlayPlan {
             .push((local, state));
         self.observe([x, y, z]);
         self.wake_fluids([x, y, z]);
+        if self.state_name(old).ends_with("_bed")
+            && (self.state_name(old) != self.state_name(state)
+                || self.survival.placement.prop(old, "part")
+                    != self.survival.placement.prop(state, "part"))
+        {
+            self.wake_bed_state([x, y, z], old);
+        }
         Some(old)
     }
 
@@ -2500,6 +2586,7 @@ impl PlayPlan {
             rotated: false,
             on_ground: true,
             gliding: false,
+            sleeping: None,
             collects: true,
         };
         self.hub.players.lock().unwrap().insert(uuid, me);
@@ -3255,10 +3342,14 @@ impl PlayPlan {
         let mut save = st.save(pos, yaw, pitch);
         // `/spawnpoint` живёт отдельно от инвентаря: снимок не должен его стирать.
         match self.spawn_points.lock().unwrap().get(&uuid).copied() {
-            Some(spawn) => save.spawn = spawn,
+            Some(spawn) => {
+                save.spawn = spawn.map(|s| s.pos);
+                save.spawn_forced = spawn.is_none_or(|s| s.forced);
+            }
             None => {
                 if let Some(prev) = self.player_saves.lock().unwrap().get(&uuid) {
                     save.spawn = prev.spawn;
+                    save.spawn_forced = prev.spawn_forced;
                 }
             }
         }
@@ -3307,6 +3398,197 @@ impl PlayPlan {
             ry as usize,
             lz,
         ))
+    }
+
+    /// Нормализует любую половину целой кровати к изголовью и изножью.
+    fn bed_pair(&self, pos: [i32; 3]) -> Option<([i32; 3], [i32; 3])> {
+        bed_pair_at(pos, |p| self.block(p), &self.survival.placement)
+    }
+
+    fn set_bed_occupied(&self, head: [i32; 3], occupied: bool) {
+        let candidates = if let Some((head, foot)) = self.bed_pair(head) {
+            vec![head, foot]
+        } else if occupied {
+            return;
+        } else {
+            // При разрушении первой половины оставшаяся ещё должна стать свободной.
+            let mut positions = vec![head];
+            for offset in [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]] {
+                let foot = [head[0] + offset[0], head[1], head[2] + offset[2]];
+                if let Some(state) = self.block(foot)
+                    && self.state_name(state).ends_with("_bed")
+                    && self.survival.placement.prop(state, "part") == Some("foot")
+                    && self.survival.placement.partner(state) == Some([-offset[0], 0, -offset[2]])
+                {
+                    positions.push(foot);
+                }
+            }
+            positions
+        };
+        for pos in candidates {
+            if let Some(state) = self.block(pos)
+                && self.state_name(state).ends_with("_bed")
+                && let Some(next) = self.survival.placement.with_prop(
+                    state,
+                    "occupied",
+                    if occupied { "true" } else { "false" },
+                )
+            {
+                self.set_block(pos, next);
+            }
+        }
+    }
+
+    fn sleep_player(&self, uuid: Uuid, head: [i32; 3]) -> bool {
+        self.wake_player(uuid);
+        if self.bed_pair(head).is_none() {
+            return false;
+        }
+        let mut sleepers = self.sleepers.lock().unwrap();
+        if sleepers.values().any(|&p| p == head) {
+            return false;
+        }
+        sleepers.insert(uuid, head);
+        drop(sleepers);
+        self.set_bed_occupied(head, true);
+        if let Some(player) = self.hub.players.lock().unwrap().get_mut(&uuid) {
+            player.sleeping = Some(head);
+            self.hub.send(
+                None,
+                inv::set_entity_sleeping(self.ids.set_entity_data, player.entity_id, Some(head)),
+            );
+        }
+        true
+    }
+
+    fn wake_player(&self, uuid: Uuid) {
+        let head = self.sleepers.lock().unwrap().remove(&uuid);
+        let Some(head) = head else { return };
+        if !self.sleepers.lock().unwrap().values().any(|&p| p == head) {
+            self.set_bed_occupied(head, false);
+        }
+        if let Some(player) = self.hub.players.lock().unwrap().get_mut(&uuid) {
+            player.sleeping = None;
+            self.hub.send(
+                None,
+                inv::set_entity_sleeping(self.ids.set_entity_data, player.entity_id, None),
+            );
+        }
+    }
+
+    fn wake_bed(&self, pos: [i32; 3]) {
+        let Some(state) = self.block(pos) else { return };
+        self.wake_bed_state(pos, state);
+    }
+
+    fn wake_bed_state(&self, pos: [i32; 3], state: u32) {
+        if !self.state_name(state).ends_with("_bed") {
+            return;
+        }
+        let Some(offset) = self.survival.placement.partner(state) else {
+            return;
+        };
+        let head = if self.survival.placement.prop(state, "part") == Some("head") {
+            pos
+        } else {
+            [pos[0] + offset[0], pos[1] + offset[1], pos[2] + offset[2]]
+        };
+        let uuids: Vec<_> = self
+            .sleepers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(&uuid, &bed)| (bed == head).then_some(uuid))
+            .collect();
+        for uuid in uuids {
+            self.wake_player(uuid);
+        }
+    }
+
+    fn tick_sleep(&self) {
+        let sleepers: Vec<_> = self.sleepers.lock().unwrap().keys().copied().collect();
+        if sleepers.is_empty() {
+            return;
+        }
+        let day = self.day_time.load(Ordering::Relaxed);
+        if !(12_541..23_458).contains(&day) {
+            for uuid in sleepers {
+                self.wake_player(uuid);
+            }
+            return;
+        }
+        let total = sleep_voters(
+            self.hub
+                .players
+                .lock()
+                .unwrap()
+                .values()
+                .map(|p| p.entry.game_mode),
+        );
+        let required = sleep_required(total, self.vars.number("players_sleeping_percentage"));
+        if sleepers.len() < required {
+            return;
+        }
+        self.day_time.store(0, Ordering::Relaxed);
+        self.broadcast_time();
+        let clear = commands::state::Weather {
+            rain: false,
+            thunder: false,
+            ticks: 6000,
+        };
+        self.vars.set_weather(clear);
+        self.broadcast_weather(clear);
+        for uuid in sleepers {
+            self.wake_player(uuid);
+        }
+    }
+
+    fn bed_spawn(&self, head: [i32; 3], uuid: Uuid) -> Option<[f64; 3]> {
+        let (head, foot) = self.bed_pair(head)?;
+        for bed in [head, foot] {
+            let support = self.block([bed[0], bed[1] - 1, bed[2]])?;
+            if !chunkwake_world::has_flag(support, chunkwake_world::flags::SOLID) {
+                return None;
+            }
+        }
+        let players = self.hub.players.lock().unwrap();
+        find_bed_spawn(
+            head,
+            |pos| {
+                self.block(pos)
+                    .is_some_and(|s| chunkwake_world::has_flag(s, chunkwake_world::flags::AIR))
+            },
+            |pos| {
+                self.block(pos)
+                    .is_some_and(|s| chunkwake_world::has_flag(s, chunkwake_world::flags::SOLID))
+            },
+            |point| {
+                players.values().any(|p| {
+                    p.entry.uuid != uuid
+                        && (p.pos[0] - point[0]).abs() < 0.6
+                        && (p.pos[1] - point[1]).abs() < 1.8
+                        && (p.pos[2] - point[2]).abs() < 0.6
+                })
+            },
+        )
+    }
+
+    fn respawn_position(&self, uuid: Uuid) -> [f64; 3] {
+        self.spawn_points
+            .lock()
+            .unwrap()
+            .get(&uuid)
+            .copied()
+            .flatten()
+            .and_then(|point| {
+                if point.forced {
+                    let [x, y, z] = point.pos;
+                    Some([x as f64 + 0.5, y as f64, z as f64 + 0.5])
+                } else {
+                    self.bed_spawn(point.pos, uuid)
+                }
+            })
+            .unwrap_or_else(|| self.vars.world_spawn().unwrap_or(self.spawn))
     }
 
     /// Мир только для чтения на время фазы: один `RwLock::read` вместо замка
@@ -3544,22 +3826,34 @@ impl PlayPlan {
         // Сохранённый игрок: позиция, инвентарь, здоровье. Погибший — заново на спавне.
         // Свежий снимок в памяти (вышел и зашёл до автосохранения) важнее файла.
         let pending = self.player_saves.lock().unwrap().get(&player.uuid).cloned();
-        let save = pending
-            .or_else(|| {
-                self.players_source
-                    .get()
-                    .and_then(|s| s.load_player(player.uuid))
-            })
-            .filter(|s| s.health > 0.0 && s.pos.iter().all(|c| c.is_finite()));
-        if let Some(spawn) = save.as_ref().and_then(|s| s.spawn) {
-            self.spawn_points
-                .lock()
-                .unwrap()
-                .insert(player.uuid, Some(spawn));
+        let loaded = pending.or_else(|| {
+            self.players_source
+                .get()
+                .and_then(|s| s.load_player(player.uuid))
+        });
+        if let Some(spawn) = loaded.as_ref().and_then(|s| s.spawn) {
+            self.spawn_points.lock().unwrap().insert(
+                player.uuid,
+                Some(SpawnPoint {
+                    pos: spawn,
+                    forced: loaded.as_ref().is_none_or(|s| s.spawn_forced),
+                }),
+            );
         }
-        let (pos, yaw, pitch) = save
-            .as_ref()
-            .map_or((self.spawn, 0.0, 0.0), |s| (s.pos, s.yaw, s.pitch));
+        let dead_save = loaded.as_ref().is_some_and(|s| s.health <= 0.0);
+        let save = loaded.filter(|s| s.health > 0.0 && s.pos.iter().all(|c| c.is_finite()));
+        let (pos, yaw, pitch) = save.as_ref().map_or(
+            (
+                if dead_save {
+                    self.respawn_position(player.uuid)
+                } else {
+                    self.spawn
+                },
+                0.0,
+                0.0,
+            ),
+            |s| (s.pos, s.yaw, s.pitch),
+        );
         let mut state = save.as_ref().map(PlayerState::restore).unwrap_or_default();
         let game_mode = *state.game_mode.get_or_insert(self.login.spawn.game_mode);
         let me = Online {
@@ -3580,6 +3874,7 @@ impl PlayPlan {
             rotated: false,
             on_ground: true,
             gliding: false,
+            sleeping: None,
             collects: true,
         };
         let uuid = me.entry.uuid;
@@ -3628,6 +3923,7 @@ impl PlayPlan {
         // Хвост буфера (например, причина кика) — до закрытия.
         let _ = conn.flush().await;
         self.release_viewer(uuid);
+        self.wake_player(uuid);
         self.controls.lock().unwrap().remove(&uuid);
         self.live.lock().unwrap().remove(&uuid);
         // Немедленно запрашиваем автосохранение, оставляя снимок до подтверждения записи.
@@ -3671,6 +3967,7 @@ impl PlayPlan {
             e.yaw.to_bits(),
             e.pitch.to_bits(),
             e.gliding,
+            e.sleeping,
         );
         if let Some(hit) = self.spawn_frames.lock().unwrap().get(&key) {
             return hit.as_ref().clone();
@@ -3690,6 +3987,13 @@ impl PlayPlan {
                 self.ids.set_entity_data,
                 e.entity_id,
                 player_flags(false, false, true),
+            )));
+        }
+        if let Some(head) = e.sleeping {
+            out.extend(self.hub.frame(&inv::set_entity_sleeping(
+                self.ids.set_entity_data,
+                e.entity_id,
+                Some(head),
             )));
         }
         let mut cache = self.spawn_frames.lock().unwrap();
@@ -5242,6 +5546,7 @@ impl PlayPlan {
         }
         lap(PH_PLUGINS, &mut watch);
         self.advance_time();
+        self.tick_sleep();
     }
 
     /// Замер тика: MSPT, интервал, профиль `/debug` и профиль по фазам.
@@ -5770,6 +6075,7 @@ impl PlayPlan {
                         }
                         Control::Exhaustion(e) => state.vitals.exhaustion = e,
                         Control::GameMode(mode) => {
+                            if mode == 3 { self.wake_player(uuid); }
                             login.spawn.game_mode = mode;
                             state.game_mode = Some(mode);
                             survival = matches!(mode, 0 | 2);
@@ -5878,6 +6184,7 @@ impl PlayPlan {
                             }
                         }
                         Control::Teleport(pos, yaw, pitch) => {
+                            self.wake_player(uuid);
                             teleport_id += 1;
                             center = self.teleport(conn, uuid, pos, yaw, pitch, teleport_id, &mut stream).await?;
                             state.vitals.reset_fall(pos);
@@ -6060,6 +6367,14 @@ impl PlayPlan {
                     self.count_bytes_in(packet.len() as u64);
                     let mut r = Reader::new(&packet);
                     let id = r.var_int()?;
+                    if matches!(id, x if x == ids.sb_player_action
+                        || x == ids.sb_use_item_on || x == ids.sb_use_item
+                        || x == ids.sb_attack || x == ids.sb_interact
+                        || x == ids.sb_set_carried_item || x == ids.sb_player_input
+                        || x == ids.sb_chat_command || x == ids.sb_chat_command_signed
+                        || x == ids.sb_container_click) {
+                        self.wake_player(uuid);
+                    }
                     if id != ids.sb_keep_alive {
                         last_action = Instant::now();
                     }
@@ -6376,7 +6691,10 @@ impl PlayPlan {
                     }
                     if id == ids.sb_player_command {
                         let _entity = r.var_int()?;
-                        match r.var_int()? {
+                        let action = r.var_int()?;
+                        self.wake_player(uuid);
+                        match action {
+                            play::STOP_SLEEPING => {}
                             play::START_SPRINTING => state.vitals.sprinting = true,
                             play::STOP_SPRINTING => state.vitals.sprinting = false,
                             play::START_FALL_FLYING => {
@@ -6556,6 +6874,31 @@ impl PlayPlan {
                             continue;
                         }
                         // Еда на костёр — до обхода окна: присед с едой тоже кладёт её.
+                        if !state.vitals.dead && login.spawn.game_mode != 3
+                            && self.player_at(uuid).is_some_and(|(p, _, _)| {
+                                block_reach(eye_of(p), u.pos, if login.spawn.game_mode == 1 { 5.0 } else { 4.5 })
+                            })
+                            && let Some((head, _)) = self.bed_pair(u.pos)
+                        {
+                            self.spawn_points.lock().unwrap().insert(uuid, Some(SpawnPoint { pos: head, forced: false }));
+                            let occupied = self.sleepers.lock().unwrap().values().any(|&bed| bed == head);
+                            if !occupied {
+                                self.set_bed_occupied(head, false);
+                            }
+                            let day = self.day_time.load(Ordering::Relaxed);
+                            if (12_541..23_458).contains(&day)
+                                && !occupied
+                                && self.sleep_player(uuid, head)
+                            {
+                                let (_, yaw, pitch) = self.player_at(uuid).unwrap_or((me.pos, me.yaw, me.pitch));
+                                let bed_pos = [head[0] as f64 + 0.5, head[1] as f64 + 0.5625, head[2] as f64 + 0.5];
+                                teleport_id += 1;
+                                center = self.teleport(conn, uuid, bed_pos, yaw, pitch, teleport_id, &mut stream).await?;
+                                state.vitals.reset_fall(bed_pos);
+                            }
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                            continue;
+                        }
                         if !state.vitals.dead && login.spawn.game_mode != 3 {
                             let slot = if u.hand == 0 {
                                 state.inv.held_slot()
@@ -7215,6 +7558,7 @@ impl PlayPlan {
             return Ok(false);
         }
         // Одна правка: тик не разошлёт промежуточные состояния соседей.
+        self.wake_bed(pos);
         let edit = self.world_edit.lock().unwrap();
         let Some(old) = self.set_block(pos, AIR) else {
             return Ok(false);
@@ -12700,6 +13044,7 @@ impl PlayPlan {
         amount: f32,
         cause: Cause,
     ) -> Result<(), NetError> {
+        self.wake_player(me.entry.uuid);
         let mut amount = survival::resisted(
             amount,
             self.effect_amp(v, "minecraft:resistance"),
@@ -12791,6 +13136,7 @@ impl PlayPlan {
         xp: &mut crate::xp::Experience,
         cause: Cause,
     ) -> Result<(), NetError> {
+        self.wake_player(me.entry.uuid);
         {
             self.hub.send(
                 Some(me.entry.uuid),
@@ -12933,15 +13279,7 @@ impl PlayPlan {
             motion |= self.motion_mask(id);
         }
         v.respawn();
-        let spawn = self
-            .spawn_points
-            .lock()
-            .unwrap()
-            .get(&me.entry.uuid)
-            .copied()
-            .flatten()
-            .map(|[x, y, z]| [x as f64 + 0.5, y as f64, z as f64 + 0.5])
-            .unwrap_or_else(|| self.vars.world_spawn().unwrap_or(self.spawn));
+        let spawn = self.respawn_position(me.entry.uuid);
         v.reset_fall(spawn);
         conn.send(&inv::respawn(self.ids.respawn, &login.spawn, 0))
             .await?;
@@ -13110,6 +13448,79 @@ mod tests {
     };
     use crate::survival::PlayerState;
     use uuid::Uuid;
+
+    #[test]
+    fn sleep_percentage_counts_non_spectators_and_rounds_up() {
+        assert_eq!(super::sleep_required(1, 100), 1);
+        assert_eq!(super::sleep_required(2, 100), 2);
+        assert_eq!(super::sleep_required(3, 50), 2);
+        assert_eq!(super::sleep_required(4, 25), 1);
+        assert_eq!(super::sleep_required(4, 0), 1);
+        assert_eq!(super::sleep_voters([0, 1, 2, 3, 3]), 3);
+    }
+
+    #[test]
+    fn either_bed_half_resolves_to_head_only_when_pair_matches() {
+        use std::collections::{HashMap, HashSet};
+        let mut states = Vec::new();
+        for facing in ["north", "south", "west", "east"] {
+            for part in ["foot", "head"] {
+                states.push(Some((
+                    "minecraft:red_bed".to_owned(),
+                    vec![
+                        ("facing".to_owned(), facing.to_owned()),
+                        ("part".to_owned(), part.to_owned()),
+                        ("occupied".to_owned(), "false".to_owned()),
+                    ],
+                )));
+            }
+        }
+        let placement = crate::placement::Placement::new(states, vec![0; 8], HashSet::new());
+        for (i, offset) in [[0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]]
+            .into_iter()
+            .enumerate()
+        {
+            let foot = [10, 64, 10];
+            let head = [foot[0] + offset[0], foot[1], foot[2] + offset[2]];
+            let mut blocks = HashMap::from([(foot, (i * 2) as u32), (head, (i * 2 + 1) as u32)]);
+            let at = |p| blocks.get(&p).copied();
+            assert_eq!(super::bed_pair_at(foot, at, &placement), Some((head, foot)));
+            assert_eq!(super::bed_pair_at(head, at, &placement), Some((head, foot)));
+            blocks.remove(&head);
+            assert_eq!(
+                super::bed_pair_at(foot, |p| blocks.get(&p).copied(), &placement),
+                None
+            );
+            blocks.insert(head, ((i + 1) % 4 * 2 + 1) as u32);
+            assert_eq!(
+                super::bed_pair_at(foot, |p| blocks.get(&p).copied(), &placement),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn bed_spawn_requires_floor_headroom_and_unoccupied_space() {
+        let head = [0, 64, 0];
+        let floor = [-1, 63, -1];
+        let point = [-0.5, 64.0, -0.5];
+        assert_eq!(
+            super::find_bed_spawn(head, |_| true, |_| false, |_| false),
+            None
+        );
+        assert_eq!(
+            super::find_bed_spawn(head, |_| true, |p| p == floor, |_| false),
+            Some(point)
+        );
+        assert_eq!(
+            super::find_bed_spawn(head, |p| p != [-1, 65, -1], |p| p == floor, |_| false),
+            None
+        );
+        assert_eq!(
+            super::find_bed_spawn(head, |_| true, |p| p == floor, |p| p == point),
+            None
+        );
+    }
 
     #[test]
     fn chest_viewers_close_both_halves_and_disconnect() {

@@ -1315,6 +1315,7 @@ pub const SWAP_ITEM_WITH_OFFHAND: i32 = 7;
 /// `ServerboundPlayerCommandPacket.Action` (26.3, после ID сущности).
 /// 0 — встать с кровати, 3/4 — прыжок на скакуне, 5 — инвентарь скакуна.
 /// Присед приходит в `player_input`, не здесь.
+pub const STOP_SLEEPING: i32 = 0;
 pub const START_SPRINTING: i32 = 1;
 pub const STOP_SPRINTING: i32 = 2;
 /// Клиент уже включил бит «полёт на элитрах» локально и ждёт, что сервер его погасит.

@@ -702,6 +702,8 @@ pub(crate) fn block_analog(pl: &crate::placement::Placement, state: u32) -> Opti
             pl.prop(state, "level")?.parse().ok()
         }
         "minecraft:lava_cauldron" => Some(3),
+        "minecraft:composter" => pl.prop(state, "level")?.parse().ok(),
+        "minecraft:beehive" | "minecraft:bee_nest" => pl.prop(state, "honey_level")?.parse().ok(),
         _ => None,
     }
 }
@@ -1573,6 +1575,59 @@ mod tests {
                 analog: &|p| block_analog(&pl, at(p)),
             };
             assert_eq!(w.comparator_target([0, 0, 0]), expected);
+        }
+    }
+
+    #[test]
+    fn composter_and_hives_feed_comparator_directly_and_through_block() {
+        let mut states = vec![
+            Some(("minecraft:air".into(), vec![])),
+            Some(("minecraft:stone".into(), vec![])),
+            Some((
+                "minecraft:comparator".into(),
+                vec![
+                    ("facing".into(), "north".into()),
+                    ("mode".into(), "compare".into()),
+                ],
+            )),
+        ];
+        let mut cases = Vec::new();
+        for (name, property, max_level) in [
+            ("minecraft:composter", "level", 8),
+            ("minecraft:beehive", "honey_level", 5),
+            ("minecraft:bee_nest", "honey_level", 5),
+        ] {
+            for level in 0..=max_level {
+                let id = states.len() as u32;
+                states.push(Some((
+                    name.into(),
+                    vec![(property.into(), level.to_string())],
+                )));
+                cases.push((id, level));
+            }
+        }
+        let mut sturdy = vec![0; states.len()];
+        sturdy[1] = 63;
+        let pl = Placement::new(states, sturdy, Default::default());
+        for (id, expected) in cases {
+            assert_eq!(block_analog(&pl, id), Some(expected));
+            for through_block in [false, true] {
+                let mut blocks = HashMap::from([([0, 0, 0], 2u32)]);
+                if through_block {
+                    blocks.insert([0, 0, -1], 1);
+                    blocks.insert([0, 0, -2], id);
+                } else {
+                    blocks.insert([0, 0, -1], id);
+                }
+                let at = |p: [i32; 3]| blocks.get(&p).copied().unwrap_or(0);
+                let w = World {
+                    pl: &pl,
+                    at: &at,
+                    output: &|_| 0,
+                    analog: &|p| block_analog(&pl, at(p)),
+                };
+                assert_eq!(w.comparator_target([0, 0, 0]), expected);
+            }
         }
     }
 

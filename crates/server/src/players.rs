@@ -176,7 +176,10 @@ pub fn to_nbt(s: &PlayerSave, data_version: i32, names: &[String]) -> Compound {
         root.insert("SpawnX".into(), Tag::Int(x));
         root.insert("SpawnY".into(), Tag::Int(y));
         root.insert("SpawnZ".into(), Tag::Int(z));
-        root.insert("SpawnForced".into(), Tag::Byte(1));
+        root.insert(
+            "SpawnForced".into(),
+            Tag::Byte(u8::from(s.spawn_forced) as i8),
+        );
     }
     root
 }
@@ -247,6 +250,10 @@ pub fn from_nbt(root: &Compound, ids: &HashMap<String, i32>) -> Option<PlayerSav
             .map(|m| m as u8),
         effects: Vec::new(),
         spawn: spawn_from(root),
+        spawn_forced: root
+            .get("SpawnForced")
+            .and_then(Tag::as_i64)
+            .is_none_or(|v| v != 0),
         xp: chunkwake_net::xp::Experience {
             level: root
                 .get("XpLevel")
@@ -297,6 +304,7 @@ mod tests {
                 seed: -9,
             },
             spawn: Some([8, 64, -2]),
+            spawn_forced: false,
             slots: vec![
                 (
                     5,
@@ -350,5 +358,14 @@ mod tests {
         let bytes = nbt::write_root(&root);
         let back = from_nbt(&nbt::read_root(&bytes).unwrap(), &ids).unwrap();
         assert_eq!(back, s);
+        assert_eq!(root["SpawnForced"].as_i64(), Some(0));
+        let mut forced = s.clone();
+        forced.spawn_forced = true;
+        let forced_root = to_nbt(&forced, 4000, &names);
+        assert_eq!(forced_root["SpawnForced"].as_i64(), Some(1));
+        assert_eq!(from_nbt(&forced_root, &ids), Some(forced));
+        let mut legacy = root.clone();
+        legacy.remove("SpawnForced");
+        assert!(from_nbt(&legacy, &ids).unwrap().spawn_forced);
     }
 }

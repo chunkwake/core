@@ -415,9 +415,13 @@ impl PlayPlan {
     ///
     /// Пишется и в память сессии, и в сохранение, если игрок уже есть на диске.
     pub(crate) fn set_player_spawn(&self, uuid: Uuid, pos: Option<[i32; 3]>) {
-        self.spawn_points.lock().unwrap().insert(uuid, pos);
+        self.spawn_points.lock().unwrap().insert(
+            uuid,
+            pos.map(|pos| super::super::SpawnPoint { pos, forced: true }),
+        );
         if let Some(save) = self.player_saves.lock().unwrap().get_mut(&uuid) {
             save.spawn = pos;
+            save.spawn_forced = true;
         }
     }
 
@@ -1742,17 +1746,19 @@ impl PlayPlan {
         self.drop_item(from, [0.0, 0.2, 0.0], stack, std::time::Duration::ZERO);
     }
 
-    /// Погода: клиенту уходит `game_event` (1 — дождь, 2 — гроза, 7/8 — конец).
+    /// Погода: начало/конец дождя и уровни дождя/грозы для клиента.
     pub(crate) fn broadcast_weather(&self, weather: super::state::Weather) {
-        let event = match (weather.rain, weather.thunder) {
-            (false, _) => 7,
-            (true, false) => 1,
-            (true, true) => 2,
-        };
-        self.hub.send(
-            None,
-            chunkwake_protocol::play::game_event(self.ids.game_event, event, 0.0),
-        );
+        let event = if weather.rain { 1 } else { 2 };
+        for (kind, value) in [
+            (event, 0.0),
+            (7, if weather.rain { 1.0 } else { 0.0 }),
+            (8, if weather.thunder { 1.0 } else { 0.0 }),
+        ] {
+            self.hub.send(
+                None,
+                chunkwake_protocol::play::game_event(self.ids.game_event, kind, value),
+            );
+        }
     }
 
     /// Названный звук одному игроку (`/playsound`); `false` — звука нет в реестре.

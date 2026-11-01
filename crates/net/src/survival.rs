@@ -1082,6 +1082,8 @@ pub struct PlayerSave {
     pub xp: crate::xp::Experience,
     /// Точка возрождения (`SpawnX`/`SpawnY`/`SpawnZ`); `None` — спавн мира.
     pub spawn: Option<[i32; 3]>,
+    /// `SpawnForced`: команда назначает принудительную точку, кровать — нет.
+    pub spawn_forced: bool,
 }
 
 /// Живое состояние игрока в сессии: инвентарь и здоровье.
@@ -1127,6 +1129,7 @@ impl PlayerState {
             effects: v.effects.clone(),
             xp: self.xp,
             spawn: None,
+            spawn_forced: true,
             slots: (0..SLOTS)
                 .filter_map(|i| self.inv.slots[i].map(|s| (i, s)))
                 .collect(),
