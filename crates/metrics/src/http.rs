@@ -913,6 +913,9 @@ mod tests {
                 Some((busy, base))
             })
             .expect("свободная пара портов");
+        // `from_std` требует неблокирующий сокет, иначе tokio паникует при
+        // регистрации. Порт от этого не освобождается — он всё равно занят.
+        busy.set_nonblocking(true).unwrap();
         let busy = TcpListener::from_std(busy).unwrap();
 
         let snapshot = shared();
