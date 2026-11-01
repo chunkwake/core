@@ -176,9 +176,19 @@ impl WorldStorage {
                     _ = tick.tick() => {},
                     _ = notify.notified() => {},
                 }
+                // `World.save()` и `/save-all` просят запись через флаг:
+                // без этого они ставили флаг, а читать его было некому.
+                let requested = plan.take_save_request();
                 let (storage, plan) = (storage.clone(), plan.clone());
+                let started = std::time::Instant::now();
                 match tokio::task::spawn_blocking(move || storage.save(&plan)).await {
                     Ok(Ok(0)) => {}
+                    Ok(Ok(n)) if requested => {
+                        tracing::info!(
+                            "saved {n} chunks on request ({} ms)",
+                            started.elapsed().as_millis()
+                        )
+                    }
                     Ok(Ok(n)) => tracing::info!("autosaved {n} chunks"),
                     Ok(Err(e)) => tracing::error!("autosave failed: {e}"),
                     Err(e) => tracing::error!("autosave task: {e}"),

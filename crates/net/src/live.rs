@@ -36,6 +36,8 @@ pub struct Live {
     pub pitch: f32,
     pub effects: Vec<crate::survival::Effect>,
     pub xp: crate::xp::Experience,
+    /// Приседает (`Player.isSneaking`): меняется от `player_input`, без тика.
+    pub sneaking: bool,
 }
 
 impl Live {
@@ -62,6 +64,7 @@ impl Live {
         self.xp.level.hash(&mut h);
         self.xp.progress.to_bits().hash(&mut h);
         self.xp.total.hash(&mut h);
+        self.sneaking.hash(&mut h);
         // Слоты: `Option<Stack>` — сравнивается всё, что печатается в строку.
         for s in &self.slots {
             match s {
@@ -86,7 +89,7 @@ impl Live {
     }
 
     /// Первая строка — `health food saturation exhaustion mode selected x y z yaw pitch
-    /// уровень полоска всего_опыта`, затем
+    /// уровень полоска всего_опыта приседает(0/1)`, затем
     /// [`BUKKIT_SLOTS`] строк `item count` (или `-`) в порядке Bukkit, затем эффекты
     /// строками `e имя усиление тики частицы фон значок` (0/1).
     pub fn render<'a>(
@@ -96,7 +99,7 @@ impl Live {
     ) -> String {
         let [x, y, z] = self.pos;
         let mut out = format!(
-            "{} {} {} {} {} {} {x} {y} {z} {} {} {} {} {}",
+            "{} {} {} {} {} {} {x} {y} {z} {} {} {} {} {} {}",
             self.health,
             self.food,
             self.saturation,
@@ -107,7 +110,8 @@ impl Live {
             self.pitch,
             self.xp.level,
             self.xp.progress,
-            self.xp.total
+            self.xp.total,
+            u8::from(self.sneaking)
         );
         for i in 0..BUKKIT_SLOTS {
             out.push('\n');
@@ -520,6 +524,7 @@ mod tests {
             pitch: 0.0,
             effects: Vec::new(),
             xp: Default::default(),
+            sneaking: false,
         };
         let c = Control::parse_t("slot 0 minecraft:bread 3", ids).unwrap();
         assert_eq!(
@@ -580,7 +585,11 @@ e minecraft:haste 1 200 0 0 1"
         assert!(live.effects.is_empty());
         assert_eq!(Control::parse_t("effect minecraft:nope 0 20", ids), None);
         let mut lines = text.lines();
-        assert_eq!(lines.next(), Some("7.5 20 5 0 0 0 1 64 -2.5 90 0 0 0 0"));
+        assert_eq!(
+            lines.next(),
+            Some("7.5 20 5 0 0 0 1 64 -2.5 90 0 0 0 0 0"),
+            "первая строка: последнее поле — присед (0/1)"
+        );
         assert_eq!(lines.next(), Some("minecraft:bread 3"));
         assert_eq!(text.lines().count(), 1 + BUKKIT_SLOTS);
         assert_eq!(

@@ -449,8 +449,10 @@ async fn start_plugins(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| props.java_command(dir));
     let plan = play.clone();
+    let world_dir = std::path::absolute(dir.join(&props.level_name))
+        .unwrap_or_else(|_| dir.join(&props.level_name));
     let started = tokio::task::spawn_blocking(move || {
-        chunkwake_bridge::Bridge::start(&java, &api, &plugins, &plan)
+        chunkwake_bridge::Bridge::start(&java, &api, &plugins, &world_dir, &plan)
     })
     .await;
     match started {

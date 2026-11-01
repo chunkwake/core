@@ -47,8 +47,10 @@ enum Slot {
     DownWorld = 21,
     UpDisable = 22,
     DownPlayerVersion = 23,
+    ArgWorldDir = 24,
+    ArgWorldDirLen = 25,
 }
-const SLOTS: usize = 24;
+const SLOTS: usize = 26;
 
 /// Буфер ответа на событие (смерть с полным инвентарём укладывается с запасом).
 const EVENT_REPLY_CAP: usize = 64 << 10;
@@ -104,6 +106,7 @@ impl Bridge {
         java: &Path,
         api_dir: &Path,
         plugins_dir: &Path,
+        world_dir: &Path,
         plan: &Arc<PlayPlan>,
     ) -> Result<(Arc<Self>, i32), String> {
         let _ = HOST.set(Arc::downgrade(plan));
@@ -144,6 +147,12 @@ impl Bridge {
             Box::leak(plugins_dir.to_string_lossy().into_owned().into_boxed_str());
         set(table, Slot::ArgPluginsDir, dir.as_ptr() as u64);
         set(table, Slot::ArgPluginsDirLen, dir.len() as u64);
+        // Каталог мира нужен плагинам (BlueMap читает `region/` и `level.dat`
+        // прямо с диска), путь — абсолютный: JVM не меняет рабочий каталог.
+        let world: &'static str =
+            Box::leak(world_dir.to_string_lossy().into_owned().into_boxed_str());
+        set(table, Slot::ArgWorldDir, world.as_ptr() as u64);
+        set(table, Slot::ArgWorldDirLen, world.len() as u64);
         let items: &'static str = Box::leak(plan.item_list().into_boxed_str());
         set(table, Slot::ArgItems, items.as_ptr() as u64);
         set(table, Slot::ArgItemsLen, items.len() as u64);

@@ -508,9 +508,41 @@ struct Cell {
 #[derive(Default)]
 pub struct Ctx {
     cells: Vec<Cell>,
+    /// Буферы для промежуточных объёмов `volume`, по глубине вложенности.
+    ///
+    /// Раньше на каждый узел дерева брался свежий `vec![0f32; n]`. Свежий
+    /// `Vec` приходит нулём от `calloc`, а следующий узел пишет в него
+    /// целиком — занулять его не нужно, нужен только буфер. Пул на глубину
+    /// вложенности переиспользует их между вызовами, не зануляя: каждый
+    /// `volume` перезаписывает весь срез.
+    scratch: Vec<Vec<f32>>,
 }
 
 impl Ctx {
+    /// Берёт буфер `depth`-го уровня вложенности на `n` значений.
+    ///
+    /// Вызывающий заполняет его целиком (обычно `fill` или результат
+    /// вложенного `volume`) и возвращает обратно через [`Self::give_back`],
+    /// поэтому зануление здесь не делается: переиспользуется содержимое.
+    fn take_scratch(&mut self, depth: usize, n: usize) -> Vec<f32> {
+        while self.scratch.len() <= depth {
+            self.scratch.push(Vec::new());
+        }
+        let mut buf = std::mem::take(&mut self.scratch[depth]);
+        if buf.len() != n {
+            buf.clear();
+            buf.resize(n, 0.0);
+        }
+        buf
+    }
+
+    /// Возвращает буфер, взятый [`Self::take_scratch`].
+    fn give_back(&mut self, depth: usize, buf: Vec<f32>) {
+        if self.scratch[depth].len() < buf.len() {
+            self.scratch[depth] = buf;
+        }
+    }
+
     fn cell(&mut self, id: usize) -> &mut Cell {
         while self.cells.len() <= id {
             self.cells.push(Cell {
@@ -1247,7 +1279,9 @@ impl S {
             }
             S::ShiftedXz(sh, noise, xz, ys) => {
                 sh[0].volume(ctx, out, v);
-                let mut bz = vec![0f32; n];
+                // Буферы промежуточных объёмов — из пула `Ctx` по глубине
+                // вложенности: `volume` заполняет их целиком, занулять нечего.
+                let mut bz = ctx.take_scratch(0, n);
                 sh[1].volume(ctx, &mut bz, v);
                 let mut i = 0;
                 for z in 0..v.size[2] {
@@ -1263,12 +1297,13 @@ impl S {
                         }
                     }
                 }
+                ctx.give_back(0, bz);
             }
             S::ShiftedXyz(sh, noise, xz, ys) => {
                 sh[0].volume(ctx, out, v);
-                let mut by = vec![0f32; n];
+                let mut by = ctx.take_scratch(0, n);
                 sh[1].volume(ctx, &mut by, v);
-                let mut bz = vec![0f32; n];
+                let mut bz = ctx.take_scratch(1, n);
                 sh[2].volume(ctx, &mut bz, v);
                 let mut i = 0;
                 for z in 0..v.size[2] {
@@ -1284,6 +1319,8 @@ impl S {
                         }
                     }
                 }
+                ctx.give_back(0, by);
+                ctx.give_back(1, bz);
             }
             S::ShiftB(noise) => {
                 let t = Volume::new(

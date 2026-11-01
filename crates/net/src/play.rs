@@ -603,6 +603,20 @@ impl WorldView<'_> {
         Some(layer.get(i))
     }
 
+    /// Блочный свет в клетке (`getLightFromBlocks`).
+    pub fn block_light_at(&self, [x, y, z]: [i32; 3]) -> Option<u8> {
+        let ry = y - self.min_y;
+        if ry < 0 || ry as usize >= self.template.height() {
+            return None;
+        }
+        let Some((column, _)) = self.columns.get(&(x >> 4, z >> 4)) else {
+            return Some(0);
+        };
+        let layer = column.block_light.get(ry as usize / 16)?;
+        let i = (ry as usize % 16) * 256 + (z & 15) as usize * 16 + (x & 15) as usize;
+        Some(layer.get(i))
+    }
+
     /// Состояние блока; `y` — мировая координата. `None` — вне мира по
     /// высоте или чанк ещё не загружен (у шума).
     pub fn block(&self, [x, y, z]: [i32; 3]) -> Option<u32> {
@@ -2444,6 +2458,7 @@ impl PlayPlan {
                 pitch: 0.0,
                 effects: Vec::new(),
                 xp: Default::default(),
+                sneaking: false,
             },
         );
     }
@@ -2639,6 +2654,17 @@ impl PlayPlan {
             Some("get") => self
                 .block([x, y, z])
                 .map_or(String::new(), |s| self.state_name(s).to_owned()),
+            Some("light") => {
+                // `skylight blocklight`: плагинам нужны оба уровня (BlueMap
+                // рисует освещение по ним). Нет чанка — как у ванили: 15 неба, 0 блока.
+                let (sky, block) = self.with_world(|w| {
+                    (
+                        w.sky_light_at([x, y, z]).unwrap_or(15),
+                        w.block_light_at([x, y, z]).unwrap_or(0),
+                    )
+                });
+                format!("{sky} {block}")
+            }
             Some("data") => self
                 .block([x, y, z])
                 .map_or(String::new(), |s| self.state_string(s)),
@@ -2661,10 +2687,21 @@ impl PlayPlan {
         }
     }
 
+    /// Присед меняется от пакета ввода, вне тика: снимок правится точечно.
+    fn set_sneaking(&self, uuid: Uuid, sneaking: bool) {
+        if let Some(live) = self.live.lock().unwrap().get_mut(&uuid)
+            && live.sneaking != sneaking
+        {
+            live.sneaking = sneaking;
+            self.state_cache.lock().unwrap().remove(&uuid);
+            self.mark_work();
+        }
+    }
+
     fn publish_live(&self, uuid: Uuid, st: &PlayerState, game_mode: u8) {
         let (pos, yaw, pitch) = self.player_at(uuid).unwrap_or(([0.0; 3], 0.0, 0.0));
         let v = &st.vitals;
-        let live = Live {
+        let mut live = Live {
             health: v.health,
             food: v.food,
             saturation: v.saturation,
@@ -2677,8 +2714,17 @@ impl PlayPlan {
             pitch,
             effects: v.effects.clone(),
             xp: st.xp,
+            sneaking: false,
         };
-        self.live.lock().unwrap().insert(uuid, live);
+        {
+            // Присед ставит `player_input`, а не этот снимок: переносим текущее
+            // значение, иначе каждое обновление инвентаря его сбрасывало бы.
+            let mut live_map = self.live.lock().unwrap();
+            if let Some(old) = live_map.get(&uuid) {
+                live.sneaking = old.sneaking;
+            }
+            live_map.insert(uuid, live);
+        }
     }
 
     /// Событие плагинам с ожиданием ответа; `None` — слушателей нет или таймаут.
@@ -6157,6 +6203,8 @@ impl PlayPlan {
                     }
                     if id == ids.sb_player_input {
                         sneaking = r.u8()? & INPUT_SHIFT != 0;
+                        // Плагины видят присед сразу, без ожидания тика.
+                        self.set_sneaking(uuid, sneaking);
                         continue;
                     }
                     if id == ids.sb_container_button_click {
@@ -12885,6 +12933,7 @@ mod tests {
             pitch: 0.0,
             effects: Vec::new(),
             xp: Default::default(),
+            sneaking: false,
         };
         // Отпечаток меняется ровно тогда, когда меняется вывод.
         let text = |l: &Live| {

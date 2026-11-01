@@ -55,6 +55,12 @@ fn tick(c: &mut Criterion) {
     ));
 
     let mut group = c.benchmark_group("tick");
+    // Машина разработчика шумит: рядом с открытой IDE (msedgewebview2, Cursor,
+    // javaw держат ядра) один и тот же код давал разброс в 2–4 раза. Поэтому
+    // минимум — «сколько коду нужно, когда ему дали ядро», — и есть главная
+    // цифра; её же печатает `min_time_ns` ниже.
+    group.warm_up_time(std::time::Duration::from_millis(500));
+    group.measurement_time(std::time::Duration::from_secs(2));
     // Пустой мир: спавн загружен, игроков нет. Это и есть цель «idle».
     group.bench_function("idle", |b| b.iter(|| plan.tick_once()));
     let r = 6;
