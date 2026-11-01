@@ -526,3 +526,22 @@ plugin(s)`, `doctor` — `Ready to start`, `Vanilla data embedded`. Второй
 `java/gradlew -p java dist` и добавляет шаг «Assert embedded plugin API»:
 запускает бинарь в каталоге без `api/` и падает, если тот не развернулся
 или библиотек меньше десяти.
+
+### «No SLF4J providers were found»
+
+Предупреждение приходило от `MavenLibraryResolver` (paper-api), который
+логирует через SLF4J: `slf4j-api` в classpath был, а реализации не было,
+поэтому SLF4J писал три строки в stderr и дальше молчал.
+
+Опасность не в самих строках, а в том, что **все** сообщения SLF4J
+терялись: и резолвера, и любые от плагинов. В частности,
+`MavenLibraryResolver` пишет `warn` о попытке взять Maven Central как CDN —
+ровно то, что стоит увидеть.
+
+Добавлен `log4j-slf4j2-impl` (провайдер SLF4J 2.x) в `api-impl`: он тянет
+`log4j-core` 2.26.0 как бэкенд, `log4j-api` уже ехал с paper-api. API
+плагинов выросло на два jar'а (~2 МБ), сборка — 50 jar'ов, архив 34.7 МБ.
+
+Проверено: строк SLF4J в stderr больше нет, BlueMap по-прежнему
+включается (`enabled 2 plugin(s)`), резолв библиотек из `plugin.yml`
+не сломался.

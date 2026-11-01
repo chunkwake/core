@@ -2,6 +2,11 @@ val paperApi: String by rootProject.extra
 
 dependencies {
     "implementation"(paperApi)
+    // Провайдер SLF4J 2.x. Без него SLF4J пишет в stderr три строки
+    // «No SLF4J providers were found»: API плагинов (и библиотеки, которые
+    // плагины объявляют в `libraries:`) логируют через SLF4J, а реализации
+    // в classpath не было. Бэкенд — log4j-api, он уже едет с paper-api.
+    "runtimeOnly"("org.apache.logging.log4j:log4j-slf4j2-impl:2.26.0")
 }
 
 tasks.named<Jar>("jar") {
