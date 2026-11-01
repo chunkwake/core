@@ -8,7 +8,10 @@
 //!
 //! Все вызовы в Java идут из одного потока плагинов — это «main thread» Paper.
 
+mod api_bundle;
 mod jvm;
+
+pub use api_bundle::present as api_embedded;
 
 use chunkwake_net::live::Event;
 use chunkwake_net::play::{PlayPlan, PluginHooks};
@@ -80,11 +83,22 @@ pub struct Bridge {
     tick_queued: Arc<AtomicBool>,
 }
 
-/// Где искать API: `CHUNKWAKE_PLUGIN_API`, `<server>/api`, `java/dist` (dev).
+/// Где искать API: встроенный архив (распаковывается в `<server>/api`),
+/// `CHUNKWAKE_PLUGIN_API`, `<server>/api`, `java/dist` (dev).
 pub fn find_api_dir(server_dir: &Path) -> Option<PathBuf> {
+    let embedded = server_dir.join("api");
+    if api_bundle::present() {
+        match api_bundle::ensure(&embedded) {
+            Ok(Some(dir)) => return Some(dir),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!("embedded plugin api: {error}; looking for api next to the server");
+            }
+        }
+    }
     let candidates = [
         std::env::var_os("CHUNKWAKE_PLUGIN_API").map(PathBuf::from),
-        Some(server_dir.join("api")),
+        Some(embedded),
         Some(PathBuf::from("java/dist")),
     ];
     candidates

@@ -14,6 +14,10 @@ build/
 /bluemap
 /libraries
 
+# Собранный API плагинов: его делает `java/gradlew -p java dist`, он встраивается
+# в бинарь при сборке. В репозитории только исходники.
+/java/dist
+
 logs/
 *.log
 *.class

@@ -473,6 +473,27 @@ pub fn diagnose(props: &Properties, dir: &Path) -> Vec<Diagnostic> {
             ),
         });
     }
+    // API плагинов: встроенный архив распаковывается сам, иначе каталог `api/`
+    // должен лежать рядом с сервером. Плагины без него не включатся молча,
+    // поэтому говорим об этом в `doctor`, а не только в журнале запуска.
+    let plugins = dir.join("plugins");
+    let wants_plugins = std::fs::read_dir(&plugins).is_ok_and(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .any(|e| e.path().extension().is_some_and(|x| x == "jar"))
+    });
+    if wants_plugins
+        && !chunkwake_bridge::api_embedded()
+        && chunkwake_bridge::find_api_dir(dir).is_none()
+    {
+        issues.push(Diagnostic {
+            key: "plugin-api",
+            message:
+                "plugins are present but this build has no embedded plugin API and there is no \
+                      api/chunkwake-api.jar next to the server; plugins will be disabled"
+                    .into(),
+        });
+    }
     issues
 }
 

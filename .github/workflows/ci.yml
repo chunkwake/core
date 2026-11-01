@@ -54,21 +54,26 @@ jobs:
 
       # Первый проход собирает кэш данных из jar (`build.rs`), второй — уже с
       # `CHUNKWAKE_DATA`, поэтому сверки с ванилью видят настоящее дерево.
+      # API плагинов сюда не встраивается: `cargo test` и clippy не должны
+      # тащить 33 МБ jar'ов и требовать Gradle. Встраивает только job `release`.
       - name: Build test binaries
         run: cargo test --workspace --no-run
         env:
           CHUNKWAKE_JAR: ${{ github.workspace }}/server.jar
+          CHUNKWAKE_API_BUNDLE: none
 
       - run: cargo fmt --all --check
 
       - run: cargo clippy --workspace --all-targets -- -D warnings
         env:
           CHUNKWAKE_JAR: ${{ github.workspace }}/server.jar
+          CHUNKWAKE_API_BUNDLE: none
 
       - name: Test with vanilla data
         shell: bash
         env:
           CHUNKWAKE_JAR: ${{ github.workspace }}/server.jar
+          CHUNKWAKE_API_BUNDLE: none
         run: |
           set -euo pipefail
           # `build.rs` ищет кэш в `generated/<версия>`, затем в `target/vanilla-cache`.
@@ -141,6 +146,25 @@ jobs:
             fi
           done
 
+      # API плагинов собирается здесь же и встраивается в бинарь: релиз должен
+      # быть одним файлом, а не «exe плюс каталог api рядом». Gradle тянет
+      # paper-api из сети, поэтому кэш Gradle переиспользуется между запусками.
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('java/**/*.gradle.kts', 'java/gradle/wrapper/gradle-wrapper.properties') }}
+
+      - name: Build plugin API
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Бит исполнения в git может не доехать до раннера — зовём bash явно.
+          bash java/gradlew -p java dist
+          test -f java/dist/chunkwake-api.jar
+
       - name: Build release
         run: cargo build --release -p chunkwake-server
 
@@ -162,6 +186,40 @@ jobs:
             exit 1
           fi
 
+      # Встроенный API проверяется запуском: рядом с бинарником нет `api/`,
+      # и если он не развернулся из архива, плагин не включится. Проверять
+      # наличие строки в бинаре бессмысленно — jar сжат.
+      - name: Assert embedded plugin API
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe=target/release/chunkwake
+          if [ "$RUNNER_OS" = "Windows" ]; then exe="$exe.exe"; fi
+          mkdir -p apiprobe/plugins
+          printf 'server-ip=127.0.0.1\nserver-port=25598\n' > apiprobe/server.properties
+          # Плагин-пустышка: важно, что JVM поднялась и включила его из `api/`,
+          # который развернулся из бинаря, а не лежал рядом.
+          cp java/test-plugin/build/libs/*.jar apiprobe/plugins/ 2>/dev/null || true
+          if [ ! -d java/test-plugin/build/libs ]; then
+            echo "нет собранного тестового плагина; проверяю только распаковку API"
+          fi
+          "$exe" doctor --dir apiprobe | tee api-doctor.txt
+          # `doctor` не стартует JVM, поэтому смотрим сам каталог после старта.
+          timeout 90 "$exe" run --dir apiprobe > api-run.txt 2>&1 || true
+          if [ ! -f apiprobe/api/chunkwake-api.jar ]; then
+            echo "API не развернулся из бинаря — релиз не самодостаточен" >&2
+            cat api-run.txt
+            exit 1
+          fi
+          n=$(ls apiprobe/api/libs/*.jar 2>/dev/null | wc -l)
+          echo "развёрнуто библиотек: $n"
+          if [ "$n" -lt 10 ]; then
+            echo "в архиве API подозрительно мало библиотек" >&2
+            exit 1
+          fi
+
+      # Бинарь плюс README: всё остальное (данные игры, API плагинов) встроено.
+      # Плагины и мир создаются при первом запуске рядом с бинарником.
       - name: Package
         shell: bash
         run: |
@@ -172,7 +230,10 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then exe="$exe.exe"; fi
           cp "$exe" "dist/$name/"
           cp README.md "dist/$name/"
+          # Размер виден в журнале: встроенный API добавляет ~34 МБ, и если
+          # однажды он молча пропадёт, это заметят по цифре.
           ls -l "dist/$name"
+          du -h "$exe"
 
       - uses: actions/upload-artifact@v4
         with:

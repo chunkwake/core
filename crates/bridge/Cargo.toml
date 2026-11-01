@@ -11,3 +11,7 @@ libloading = "0.8"
 tokio = { version = "1", features = ["sync"] }
 tracing = "0.1"
 uuid = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[build-dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
