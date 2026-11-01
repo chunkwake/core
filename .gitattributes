@@ -1,0 +1,12 @@
+# Скрипты CI исполняются на Linux, где перевод строки CRLF ломает запуск:
+# `#!/usr/bin/env bash` с CRLF даёт «bad interpreter: /usr/bin/env: not found».
+# Windows-раннер читает те же файлы через PowerShell, которому LF безразличен.
+*.sh   text eol=lf
+*.ps1  text eol=crlf
+
+# Бинарные данные и артефакты не трогаем.
+*.jar      binary
+*.class    binary
+*.bin      binary
+*.zip      binary
+*.png      binary

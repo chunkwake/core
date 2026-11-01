@@ -40,43 +40,17 @@ jobs:
             target/vanilla-cache
           key: vanilla-${{ env.MC_VERSION }}-${{ runner.os }}-${{ hashFiles('crates/datacache/**', 'crates/data/build.rs') }}
 
+      # Публикуемая сборка должна быть полной, поэтому скачивание повторяемое:
+      # скрипты ниже повторяют и запрос манифеста, и саму загрузку.
+      # `bash` вызывается явно: бит исполнения в git может не доехать до раннера.
       - name: Download server.jar
         if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f server.jar ]; then
-            echo "server.jar уже в кэше"
-            exit 0
-          fi
-          manifest=https://piston-meta.mojang.com/mc/game/version_manifest_v2.json
-          meta=$(curl -fsSL "$manifest" \
-            | jq -r --arg v "$MC_VERSION" '.versions[] | select(.id == $v) | .url')
-          if [ -z "$meta" ]; then
-            echo "версии $MC_VERSION нет в манифесте Mojang" >&2
-            exit 1
-          fi
-          read -r url sha1 < <(curl -fsSL "$meta" \
-            | jq -r '.downloads.server | "\(.url) \(.sha1)"')
-          curl -fsSL -o server.jar "$url"
-          echo "$sha1  server.jar" | sha1sum -c -
+        run: bash ./.github/scripts/fetch-vanilla-jar.sh "$MC_VERSION"
 
       - name: Download server.jar
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if (Test-Path server.jar) { Write-Host 'server.jar уже в кэше'; exit 0 }
-          $manifest = Invoke-RestMethod 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json'
-          $entry = $manifest.versions | Where-Object { $_.id -eq $env:MC_VERSION }
-          if (-not $entry) { throw "версии $($env:MC_VERSION) нет в манифесте Mojang" }
-          $meta = Invoke-RestMethod $entry.url
-          $server = $meta.downloads.server
-          Invoke-WebRequest $server.url -OutFile server.jar
-          $actual = (Get-FileHash server.jar -Algorithm SHA1).Hash.ToLower()
-          if ($actual -ne $server.sha1) {
-            throw "SHA-1 не совпал: ждали $($server.sha1), получили $actual"
-          }
+        run: ./.github/scripts/fetch-vanilla-jar.ps1 -Version $env:MC_VERSION
 
       # Первый проход собирает кэш данных из jar (`build.rs`), второй — уже с
       # `CHUNKWAKE_DATA`, поэтому сверки с ванилью видят настоящее дерево.
@@ -139,43 +113,17 @@ jobs:
             target/vanilla-cache
           key: vanilla-${{ env.MC_VERSION }}-${{ runner.os }}-${{ hashFiles('crates/datacache/**', 'crates/data/build.rs') }}
 
+      # Публикуемая сборка должна быть полной, поэтому скачивание повторяемое:
+      # скрипты ниже повторяют и запрос манифеста, и саму загрузку.
+      # `bash` вызывается явно: бит исполнения в git может не доехать до раннера.
       - name: Download server.jar
         if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f server.jar ]; then
-            echo "server.jar уже в кэше"
-            exit 0
-          fi
-          manifest=https://piston-meta.mojang.com/mc/game/version_manifest_v2.json
-          meta=$(curl -fsSL "$manifest" \
-            | jq -r --arg v "$MC_VERSION" '.versions[] | select(.id == $v) | .url')
-          if [ -z "$meta" ]; then
-            echo "версии $MC_VERSION нет в манифесте Mojang" >&2
-            exit 1
-          fi
-          read -r url sha1 < <(curl -fsSL "$meta" \
-            | jq -r '.downloads.server | "\(.url) \(.sha1)"')
-          curl -fsSL -o server.jar "$url"
-          echo "$sha1  server.jar" | sha1sum -c -
+        run: bash ./.github/scripts/fetch-vanilla-jar.sh "$MC_VERSION"
 
       - name: Download server.jar
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if (Test-Path server.jar) { Write-Host 'server.jar уже в кэше'; exit 0 }
-          $manifest = Invoke-RestMethod 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json'
-          $entry = $manifest.versions | Where-Object { $_.id -eq $env:MC_VERSION }
-          if (-not $entry) { throw "версии $($env:MC_VERSION) нет в манифесте Mojang" }
-          $meta = Invoke-RestMethod $entry.url
-          $server = $meta.downloads.server
-          Invoke-WebRequest $server.url -OutFile server.jar
-          $actual = (Get-FileHash server.jar -Algorithm SHA1).Hash.ToLower()
-          if ($actual -ne $server.sha1) {
-            throw "SHA-1 не совпал: ждали $($server.sha1), получили $actual"
-          }
+        run: ./.github/scripts/fetch-vanilla-jar.ps1 -Version $env:MC_VERSION
 
       # `CHUNKWAKE_BUNDLE` не задан, поэтому `build.rs` упаковывает дерево
       # данных в бинарь. Проверка ниже падает, если архив всё-таки пустой:
