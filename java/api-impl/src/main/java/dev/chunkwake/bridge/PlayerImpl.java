@@ -110,7 +110,7 @@ final class PlayerImpl {
     /** Снимок игрока: здоровье, голод, режим, инвентарь в индексах Bukkit. */
     record State(double health, int food, float saturation, float exhaustion, int gameMode,
             int selected, double x, double y, double z, float yaw, float pitch, ItemStack[] items,
-            List<org.bukkit.potion.PotionEffect> effects, int level, float exp, int totalExp) {
+            List<org.bukkit.potion.PotionEffect> effects, int level, float exp, int totalExp, boolean sneaking) {
         static State parse(String text) {
             String[] lines = text.split("\n", -1);
             List<org.bukkit.potion.PotionEffect> effects = new ArrayList<>();
@@ -137,7 +137,8 @@ final class PlayerImpl {
                     Double.parseDouble(h[6]), Double.parseDouble(h[7]), Double.parseDouble(h[8]),
                     Float.parseFloat(h[9]), Float.parseFloat(h[10]), items, effects,
                     h.length > 13 ? Integer.parseInt(h[11]) : 0, h.length > 13 ? Float.parseFloat(h[12]) : 0,
-                    h.length > 13 ? Integer.parseInt(h[13]) : 0);
+                    h.length > 13 ? Integer.parseInt(h[13]) : 0,
+                    h.length > 14 && h[14].equals("1"));
         }
     }
 
@@ -370,6 +371,9 @@ final class PlayerImpl {
     public float getExhaustion() { return state().exhaustion(); }
     public void setExhaustion(float e) { control("exhaustion " + e); }
     public boolean isDead() { return getHealth() <= 0; }
+
+    /** Присед из `player_input`: меняется сразу, без ожидания тика. */
+    public boolean isSneaking() { return state().sneaking(); }
 
     public org.bukkit.Location getLocation() {
         State s = state();

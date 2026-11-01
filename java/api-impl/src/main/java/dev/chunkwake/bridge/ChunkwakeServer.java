@@ -1,5 +1,10 @@
 package dev.chunkwake.bridge;
 
+import io.papermc.paper.plugin.configuration.PluginMeta;
+import io.papermc.paper.plugin.lifecycle.event.LifecycleEvent;
+import io.papermc.paper.plugin.lifecycle.event.handler.LifecycleEventHandler;
+import io.papermc.paper.plugin.lifecycle.event.registrar.ReloadableRegistrarEvent;
+import io.papermc.paper.command.brigadier.Commands;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -46,6 +51,12 @@ final class ChunkwakeServer {
     final ConsoleCommandSender console = Stub.of(ConsoleCommandSender.class, new Console(this));
     final World world = Stub.of(World.class, new WorldImpl());
     private final Thread mainThread = Thread.currentThread();
+    /** Каталог мира: его читают плагины (BlueMap разбирает регионы сам). */
+    private final java.nio.file.Path levelDirectory;
+
+    ChunkwakeServer(java.nio.file.Path levelDirectory) {
+        this.levelDirectory = levelDirectory;
+    }
 
     Scheduler scheduler() {
         return scheduler;
@@ -74,6 +85,7 @@ final class ChunkwakeServer {
                     continue;
                 }
                 PluginLoader loader = new PluginLoader(this, jar, desc, getClass().getClassLoader());
+                loader.addDeclaredLibraries(logger);
                 JavaPlugin plugin = loader.create();
                 plugins.plugins.put(desc.getName(), plugin);
                 logger.info("Loading " + desc.getFullName());
@@ -354,6 +366,14 @@ final class ChunkwakeServer {
     public int getMaxPlayers() { return 20; }
     public List<World> getWorlds() { return List.of(world); }
 
+    /**
+     * Каталог мира (в 26.3 `Server.getWorldContainer()` устарел в пользу этого):
+     * BlueMap читает отсюда `level.dat` и `region/`.
+     */
+    public java.nio.file.Path getLevelDirectory() { return levelDirectory; }
+
+    public File getWorldContainer() { return levelDirectory.getParent().toFile(); }
+
     public World getWorld(String name) {
         return world.getName().equals(name) ? world : null;
     }
@@ -386,6 +406,69 @@ final class ChunkwakeServer {
 
     public PluginCommand getPluginCommand(String name) {
         return commands.getCommand(name) instanceof PluginCommand pc ? pc : null;
+    }
+
+    /**
+     * Событие {@code LifecycleEvents.COMMANDS}: плагин получает регистратор и
+     * складывает туда свои команды.
+     *
+     * <p>Paper зовёт обработчик в фазе загрузки плагинов; у нас этой фазы нет,
+     * поэтому событие наступает в момент подписки — плагин получает регистратор
+     * сразу, а команды попадают в игру тем же порядком, что и из {@code plugin.yml}.
+     */
+    void runLifecycleCommands(String owner, Object configuration, LifecycleEventHandler<?> handler) {
+        LifecycleCommands registrar = new LifecycleCommands(this);
+        PluginMeta meta = plugins.plugins.get(owner) != null
+                ? plugins.plugins.get(owner).getPluginMeta()
+                : null;
+        registrar.ownedBy(meta);
+        var event = new CommandsEvent(registrar);
+        try {
+            callHandler(handler, event);
+            Bridge.log(3, "lifecycle[" + owner + "]: " + registrar.registered()
+                    + " command(s) registered");
+        } catch (Throwable t) {
+            logger.log(Level.SEVERE, "lifecycle[" + owner + "]: command registration failed", t);
+        }
+    }
+
+    /** Обработчик типизирован по событию, поэтому зовём через приведение. */
+    @SuppressWarnings("unchecked")
+    private static void callHandler(LifecycleEventHandler<?> handler, LifecycleEvent event) {
+        ((LifecycleEventHandler<LifecycleEvent>) handler).run(event);
+    }
+
+    /** Событие с регистратором команд: единственное, что мы диспетчеризуем. */
+    private static final class CommandsEvent implements ReloadableRegistrarEvent<Commands> {
+        private final LifecycleCommands registrar;
+
+        CommandsEvent(LifecycleCommands registrar) {
+            this.registrar = registrar;
+        }
+
+        @Override
+        public Commands registrar() {
+            return registrar;
+        }
+
+        @Override
+        public Cause cause() {
+            return Cause.INITIAL;
+        }
+    }
+
+    /**
+     * Команда из lifecycle-регистратора: {@link LifecycleCommands} уже создал
+     * brigadier-узел, здесь он становится командой нашего {@code CommandMap}.
+     */
+    void registerLifecycleCommand(String fallbackPrefix, String name,
+            com.mojang.brigadier.tree.LiteralCommandNode<io.papermc.paper.command.brigadier.CommandSourceStack> node,
+            PluginMeta owner) {
+        String usage = node.getUsageText().isEmpty() ? "/" + name : node.getUsageText();
+        var command = new LifecycleCommands.BrigadierCommand(name, "Registered by " + fallbackPrefix, usage, node);
+        if (commands.register(fallbackPrefix, command)) {
+            Bridge.log(3, "lifecycle: /" + name + " from " + fallbackPrefix);
+        }
     }
 
     public boolean dispatchCommand(CommandSender sender, String line) {
@@ -434,7 +517,30 @@ final class ChunkwakeServer {
 
     /** Единственный мир (MVP). */
     static final class WorldImpl {
-        public String getName() { return "world"; }
+        public String getName() { return Bridge.server.levelDirectory.getFileName().toString(); }
+
+        /** `minecraft:overworld`: по ключу BlueMap выбирает измерение. */
+        public org.bukkit.NamespacedKey getKey() {
+            return new org.bukkit.NamespacedKey("minecraft", "overworld");
+        }
+
+        public org.bukkit.World.Environment getEnvironment() {
+            return org.bukkit.World.Environment.NORMAL;
+        }
+
+        public long getSeed() {
+            String seed = Bridge.world("seed").trim();
+            return seed.isEmpty() ? 0L : Long.parseLong(seed);
+        }
+
+        /** Каталог мира: плагины читают из него регионы и `level.dat`. */
+        public java.nio.file.Path getWorldPath() { return Bridge.server.levelDirectory; }
+
+        public int getSeaLevel() { return 63; }
+
+        public org.bukkit.Location getSpawnLocation() {
+            return new org.bukkit.Location(Bridge.server.world, 0, 64, 0);
+        }
         public org.bukkit.block.Block getBlockAt(int x, int y, int z) {
             return new BlockImpl(Bridge.server.world, x, y, z, null).api;
         }
@@ -446,6 +552,29 @@ final class ChunkwakeServer {
         public UUID getUID() { return new UUID(0, 1); }
         public int getMinHeight() { return -64; }
         public int getMaxHeight() { return 320; }
+
+        /**
+         * `World.save()`: просит сервер записать мир на диск.
+         *
+         * BlueMap зовёт его при включении, чтобы свойства мира точно были в
+         * файле. Запись идёт в блокирующем пуле сервера (как автосейв), здесь
+         * только просьба: иначе плагин ждал бы диск на своём потоке.
+         */
+        public void save() {
+            Bridge.world("save");
+        }
+
+        public void save(boolean force) {
+            save();
+        }
+
+        /** Автосохранение у нас всегда включено: раз в 30 с и по просьбе. */
+        public boolean isAutoSave() { return true; }
+
+        public void setAutoSave(boolean value) {
+            // Выключить автосейв плагину нельзя: мир потерял бы данные при
+            // аварии. Значение принимается молча, как в ваниле без правок.
+        }
 
         public org.bukkit.entity.Entity spawnEntity(org.bukkit.Location l, org.bukkit.entity.EntityType type) {
             String s = MobImpl.species(type);

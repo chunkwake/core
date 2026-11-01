@@ -55,6 +55,25 @@ final class BlockImpl {
         return BlockDataImpl.parse(Bridge.world("data " + x + " " + y + " " + z));
     }
 
+    /** Свет неба и блоков одной строкой `sky block`: BlueMap рисует по нему освещение. */
+    private String light() {
+        return Bridge.world("light " + x + " " + y + " " + z);
+    }
+
+    public byte getLightFromSky() {
+        String line = light();
+        return line.isEmpty() ? 15 : Byte.parseByte(line.substring(0, line.indexOf(' ')));
+    }
+
+    public byte getLightFromBlocks() {
+        String line = light();
+        return line.isEmpty() ? 0 : Byte.parseByte(line.substring(line.indexOf(' ') + 1).trim());
+    }
+
+    public byte getLightLevel() {
+        return (byte) Math.max(getLightFromSky(), getLightFromBlocks());
+    }
+
     public void setBlockData(org.bukkit.block.data.BlockData data) { setBlockData(data, true); }
 
     public void setBlockData(org.bukkit.block.data.BlockData data, boolean physics) {

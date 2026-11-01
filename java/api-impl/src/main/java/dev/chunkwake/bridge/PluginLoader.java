@@ -35,6 +35,18 @@ final class PluginLoader extends URLClassLoader implements ConfiguredPluginClass
         this.dataFolder = new File(file.getParentFile(), description.getName());
     }
 
+    /**
+     * Добавляет в classpath плагина библиотеки из `libraries:` его `plugin.yml`.
+     *
+     * Paper делает это до создания класса плагина; у нас тоже до {@link #create()},
+     * иначе main-класс, который их использует, не загрузится.
+     */
+    void addDeclaredLibraries(Logger log) {
+        for (URL url : Libraries.resolve(file, description.getLibraries(), log)) {
+            addURL(url);
+        }
+    }
+
     /** `plugin.yml` (или `paper-plugin.yml`) из jar. */
     static PluginDescriptionFile describe(File jar) throws IOException, InvalidDescriptionException {
         try (JarFile jf = new JarFile(jar)) {

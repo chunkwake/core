@@ -52,7 +52,9 @@ public final class Bridge {
     static final int DOWN_WORLD = 21;
     static final int UP_DISABLE = 22;
     static final int DOWN_PLAYER_VERSION = 23;
-    static final int SLOTS = 24;
+    static final int ARG_WORLD_DIR = 24;
+    static final int ARG_WORLD_DIR_LEN = 25;
+    static final int SLOTS = 26;
 
     /** События с ответом ({@code chunkwake_net::live::Event}). */
     static final int EVENT_DAMAGE = 1, EVENT_DEATH = 2, EVENT_DROP = 3, EVENT_PICKUP = 4, EVENT_GAME_MODE = 5,
@@ -134,7 +136,9 @@ public final class Bridge {
                     (int) table.getAtIndex(JAVA_LONG, ARG_PLUGINS_DIR_LEN));
             Registries.loadItems(string(MemorySegment.ofAddress(table.getAtIndex(JAVA_LONG, ARG_ITEMS)),
                     (int) table.getAtIndex(JAVA_LONG, ARG_ITEMS_LEN)));
-            server = new ChunkwakeServer();
+            String world = string(MemorySegment.ofAddress(table.getAtIndex(JAVA_LONG, ARG_WORLD_DIR)),
+                    (int) table.getAtIndex(JAVA_LONG, ARG_WORLD_DIR_LEN));
+            server = new ChunkwakeServer(java.nio.file.Path.of(world));
             return server.loadAndEnable(new File(dir));
         } catch (Throwable t) {
             Logger.getLogger("Chunkwake").log(Level.SEVERE, "plugin startup failed", t);

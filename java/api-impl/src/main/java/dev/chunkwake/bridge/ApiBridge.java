@@ -46,13 +46,12 @@ public final class ApiBridge implements InternalAPIBridge {
     }
 
     @Override
-    @SuppressWarnings("unchecked")
     public LifecycleEventManager<Plugin> createPluginLifecycleEventManager(JavaPlugin plugin, BooleanSupplier allowed) {
-        return Stub.of(LifecycleEventManager.class, new Object() {
-            @Override
-            public String toString() {
-                return "LifecycleEventManager[" + plugin.getName() + "]";
-            }
+        // Метаданные плагина появляются только после init(), то есть позже этого
+        // вызова, — поэтому имя берём лениво.
+        return Lifecycle.manager(() -> {
+            var meta = plugin.getPluginMeta();
+            return meta == null ? plugin.toString() : meta.getName();
         });
     }
 
