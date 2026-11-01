@@ -10,11 +10,11 @@ use crate::survival::{self, Cause, Difficulty, Inventory, PlayerSave, PlayerStat
 use crate::{Connection, LoggedIn, NetError};
 use chunkwake_data::DataError;
 use chunkwake_data::packets::{Direction, PacketTable, State};
-use chunkwake_protocol::Reader;
 use chunkwake_protocol::frame::FrameCodec;
 use chunkwake_protocol::inventory::{self as inv, Slot, Stack};
 use chunkwake_protocol::play::{self, Login, Move, PlayerEntry, game_event};
 use chunkwake_protocol::text;
+use chunkwake_protocol::{Reader, Writer};
 use chunkwake_world::light::{Engine, LightAccess, LightTable};
 use chunkwake_world::nbt::{Compound, Tag};
 use chunkwake_world::{BlockEntity, ChunkColumn};
@@ -112,6 +112,7 @@ struct Ids {
     container_set_content: i32,
     container_set_slot: i32,
     container_set_data: i32,
+    update_recipes: i32,
     set_experience: i32,
     sb_container_button_click: i32,
     set_health: i32,
@@ -1332,12 +1333,49 @@ struct Window {
     enchant: [i32; 10],
     /// Варианты стола (после `PrepareItemEnchantEvent`) и для чего они: предмет, полки, зерно.
     offer: Option<((Slot, i32, i32), crate::enchanting::Offer)>,
+    /// Индекс рецепта среди подходящих текущему входу камнереза.
+    stone_selection: Option<usize>,
 }
 
 impl Window {
     fn positions(&self) -> Vec<[i32; 3]> {
         std::iter::once(self.pos).chain(self.second).collect()
     }
+}
+
+fn stone_result_for(
+    recipes: &chunkwake_data::recipes::Recipes,
+    input: Slot,
+    selected: Option<usize>,
+) -> Slot {
+    let item = input?.item;
+    let index = *recipes.stonecutting_for(item).get(selected?)?;
+    let recipe = &recipes.stonecutting()[index];
+    Some(Stack::new(recipe.result.0, recipe.result.1))
+}
+
+/// `ClientboundUpdateRecipesPacket`: пустые наборы свойств, затем рецепты камнереза.
+fn encode_stonecutter_recipes(
+    id: i32,
+    recipes: &[chunkwake_data::recipes::Stonecutting],
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(0).var_int(recipes.len() as i32);
+    for recipe in recipes {
+        let mut items: Vec<_> = recipe.ingredient.iter().copied().collect();
+        items.sort_unstable();
+        // Ingredient.CONTENTS_STREAM_CODEC: прямой HolderSet, размер + 1.
+        w.var_int(items.len() as i32 + 1);
+        for item in &items {
+            w.var_int(*item);
+        }
+        // SelectableRecipe.optionDisplay = ItemStackSlotDisplay (тип 5).
+        w.var_int(5)
+            .var_int(recipe.result.0)
+            .var_int(recipe.result.1);
+        w.var_int(0).var_int(0); // пустой DataComponentPatch
+    }
+    w.buf
 }
 
 /// Свойства сундука: ловушка, `facing` (N0 E1 S2 W3), `type`, `waterlogged`.
@@ -1646,6 +1684,7 @@ pub struct SurvivalData {
     pub enchanting: chunkwake_data::enchanting::Enchanting,
     pub menu_enchantment: i32,
     pub menu_grindstone: i32,
+    pub menu_stonecutter: i32,
     /// Чары для плагинов по порядку сетевых ID (строки запроса `enchantments`).
     pub enchantments: Vec<String>,
     /// Твёрдость по состоянию блока (-1 — неразрушимый, 0 — ломается сразу).
@@ -1745,6 +1784,30 @@ pub struct CreatureSpawns {
     pub chance: f32,
     /// Вид, вес, размер группы от и до.
     pub entries: Vec<(String, u32, u32, u32)>,
+}
+
+struct ToggleAction {
+    next: u32,
+    sound: String,
+    opening: bool,
+    vibration: &'static str,
+}
+
+fn toggle_action(pl: &crate::placement::Placement, state: u32) -> Option<ToggleAction> {
+    let name = pl.name(state)?;
+    let opening = pl.prop(state, "open") != Some("true");
+    let sound = crate::sounds::toggle_sound(name, opening)?;
+    let next = pl.with_prop(state, "open", if opening { "true" } else { "false" })?;
+    Some(ToggleAction {
+        next,
+        sound,
+        opening,
+        vibration: if opening {
+            "minecraft:block_open"
+        } else {
+            "minecraft:block_close"
+        },
+    })
 }
 
 /// Красный ответ и ключи провала: их пишем в консоль отдельно от успеха.
@@ -1881,6 +1944,7 @@ impl PlayPlan {
                 container_set_data: cb("container_set_data")?,
                 set_experience: cb("set_experience")?,
                 sb_container_button_click: sb("container_button_click")?,
+                update_recipes: cb("update_recipes")?,
                 set_health: cb("set_health")?,
                 respawn: cb("respawn")?,
                 damage_event: cb("damage_event")?,
@@ -5420,6 +5484,7 @@ impl PlayPlan {
                 Kind::Furnace => "FURNACE",
                 Kind::Enchanting => "ENCHANTING",
                 Kind::Grindstone => "GRINDSTONE",
+                Kind::Stonecutter => "STONECUTTER",
                 Kind::Player => "CRAFTING",
             };
             (ty, plugin_of(w.pos).unwrap_or(-1), n, cur)
@@ -5856,6 +5921,7 @@ impl PlayPlan {
         login.entity_id = me.entity_id;
         login.spawn.game_mode = state.game_mode.unwrap_or(login.spawn.game_mode);
         conn.send(&play::login(ids.login, &login)).await?;
+        conn.send(&self.stonecutter_recipes_packet()).await?;
         // Спавн и граница — до чанков: Xaero по ним выбирает мир и включает
         // локальную карту. Без спавна тайлы так и не пишутся.
         self.send_map_markers(conn).await?;
@@ -6102,7 +6168,7 @@ impl PlayPlan {
                                 self.close_with_event(&mut state.inv, &mut window, uuid).await;
                                 next_window = next_window % 100 + 1;
                                 let pos = plugin_pos(pid);
-                                let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None };
+                                let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None };
                                 w.slots = self.window_slots(&w);
                                 let title = serde_json::from_str(&title).unwrap_or_else(|_| serde_json::json!({"translate": "container.chest"}));
                                 conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &title)).await?;
@@ -6524,8 +6590,11 @@ impl PlayPlan {
                         {
                             let creative = login.spawn.game_mode == 1;
                             let (thrown, resync) = self.click(&mut state.inv, &mut window, &c, creative, uuid);
-                            if resync {
+                            if resync || window.as_ref().is_some_and(|w| w.id == c.window && w.kind == Kind::Stonecutter) {
                                 self.send_window(conn, &mut state.inv, window.as_ref(), c.window).await?;
+                            }
+                            if let Some(w) = window.as_ref().filter(|w| w.id == c.window && w.kind == Kind::Stonecutter) {
+                                conn.send(&inv::container_set_data(ids.container_set_data, w.id, 0, w.stone_selection.map_or(-1, |n| n as i16))).await?;
                             }
                             if let Some(w) = window.as_mut().filter(|w| w.kind == Kind::Enchanting) {
                                 self.refresh_enchant(conn, w, state.xp.seed, uuid).await?;
@@ -6586,6 +6655,16 @@ impl PlayPlan {
                     if id == ids.sb_container_button_click {
                         let wid = r.var_int()?;
                         let button = r.var_int()?;
+                        if let Some(w) = window.as_mut().filter(|w| w.id == wid && w.kind == Kind::Stonecutter && self.window_valid(w)) {
+                            let choices = w.slots[0].map(|s| self.survival.recipes.stonecutting_for(s.item)).unwrap_or(&[]);
+                            if button >= 0 && (button as usize) < choices.len() {
+                                w.stone_selection = Some(button as usize);
+                                w.slots[1] = self.stone_result(w.slots[0], w.stone_selection);
+                                conn.send(&inv::container_set_data(ids.container_set_data, wid, 0, button as i16)).await?;
+                                self.send_window(conn, &mut state.inv, Some(w), wid).await?;
+                            }
+                            continue;
+                        }
                         let creative = login.spawn.game_mode == 1;
                         let done = match window.as_mut().filter(|w| w.id == wid && w.kind == Kind::Enchanting) {
                             Some(w) => self.enchant(w, button, &mut state.xp, creative, uuid).await,
@@ -6927,6 +7006,7 @@ impl PlayPlan {
                             "minecraft:crafting_table" => Some(Kind::Crafting),
                             "minecraft:enchanting_table" => Some(Kind::Enchanting),
                             "minecraft:grindstone" => Some(Kind::Grindstone),
+                            "minecraft:stonecutter" => Some(Kind::Stonecutter),
                             "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" => Some(Kind::Chest(27)),
                             "minecraft:hopper" => Some(Kind::Chest(5)),
                             "minecraft:dispenser" | "minecraft:dropper" => Some(Kind::Chest(9)),
@@ -6957,6 +7037,7 @@ impl PlayPlan {
                                 Kind::Crafting => (self.survival.menu_crafting, "container.crafting"),
                                 Kind::Enchanting => (self.survival.menu_enchantment, "container.enchant"),
                                 Kind::Grindstone => (self.survival.menu_grindstone, "container.grindstone"),
+                                Kind::Stonecutter => (self.survival.menu_stonecutter, "container.stonecutter"),
                                 Kind::Furnace => {
                                     let k = furnace_kind(&clicked).unwrap_or(0) as usize;
                                     (self.survival.menu_furnace[k], ["container.furnace", "container.blast_furnace", "container.smoker"][k])
@@ -6967,7 +7048,7 @@ impl PlayPlan {
                                 _ if clicked == "minecraft:barrel" => (self.survival.menu_chest, "container.barrel"),
                                 _ => (self.survival.menu_chest, "container.chest"),
                             };
-                            let mut w = Window { id: next_window, kind, pos, second, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None };
+                            let mut w = Window { id: next_window, kind, pos, second, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None };
                             w.slots = self.window_slots(&w);
                             conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &serde_json::json!({"translate": title}))).await?;
                             self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
@@ -7775,6 +7856,19 @@ impl PlayPlan {
         })
     }
 
+    fn stone_result(&self, input: Slot, selected: Option<usize>) -> Slot {
+        stone_result_for(&self.survival.recipes, input, selected)
+    }
+
+    /// `ClientboundUpdateRecipesPacket`: пустые наборы свойств, затем рецепты камнереза.
+    /// `Ingredient` и `TagSlotDisplay` передают развернутый набор item ID.
+    fn stonecutter_recipes_packet(&self) -> Vec<u8> {
+        encode_stonecutter_recipes(
+            self.ids.update_recipes,
+            self.survival.recipes.stonecutting(),
+        )
+    }
+
     /// Клик в окне: итог считает сервер (`AbstractContainerMenu.doClick`).
     /// Возвращает выброшенное и нужна ли клиенту полная пересылка окна.
     fn click(
@@ -7808,11 +7902,21 @@ impl PlayPlan {
         let size = match kind {
             Kind::Player => 2,
             Kind::Crafting => 3,
-            Kind::Chest(_) | Kind::Furnace | Kind::Enchanting | Kind::Grindstone => 0,
+            Kind::Chest(_)
+            | Kind::Furnace
+            | Kind::Enchanting
+            | Kind::Grindstone
+            | Kind::Stonecutter => 0,
         };
+        let stone_selection = window.as_ref().and_then(|w| w.stone_selection);
+        let stone_input = (kind == Kind::Stonecutter)
+            .then(|| view[0].map(|s| s.item))
+            .flatten();
         let fill = |slots: &mut [Slot]| {
             if kind == Kind::Grindstone {
                 slots[2] = self.grind_result(slots[0], slots[1]);
+            } else if kind == Kind::Stonecutter {
+                slots[1] = self.stone_result(slots[0], stone_selection);
             } else if size > 0 {
                 slots[0] = self.craft_result(&slots[1..=size * size], size);
             }
@@ -7827,6 +7931,16 @@ impl PlayPlan {
                 grind_took = true;
                 slots[0] = None;
                 slots[1] = None;
+                return;
+            }
+            if kind == Kind::Stonecutter {
+                if let Some(input) = slots[0].as_mut() {
+                    input.count -= 1;
+                    if input.count <= 0 {
+                        slots[0] = None;
+                    }
+                }
+                fill(slots);
                 return;
             }
             for s in &mut slots[1..=size * size] {
@@ -7850,7 +7964,13 @@ impl PlayPlan {
             .filter(|w| w.kind == Kind::Furnace)
             .and_then(|w| furnace_kind(self.state_name(self.block(w.pos).unwrap_or(AIR))))
             .unwrap_or(0);
-        let smeltable = |item: i32| self.survival.recipes.cooking(fk, item).is_some();
+        let smeltable = |item: i32| {
+            if kind == Kind::Stonecutter {
+                !self.survival.recipes.stonecutting_for(item).is_empty()
+            } else {
+                self.survival.recipes.cooking(fk, item).is_some()
+            }
+        };
         let fuel = |item: i32| {
             self.survival
                 .items
@@ -7878,6 +7998,10 @@ impl PlayPlan {
         }
         .click(c.slot, c.button, c.mode);
         fill(&mut view);
+        let stone_changed = kind == Kind::Stonecutter && view[0].map(|s| s.item) != stone_input;
+        if stone_changed {
+            view[1] = None;
+        }
         let same =
             |a: &Slot, b: &Slot| a.map(|s| (s.item, s.count)) == b.map(|s| (s.item, s.count));
         // Точило меняет чары и износ: сравнение смотрит только предмет и число.
@@ -7889,6 +8013,9 @@ impl PlayPlan {
         match window.as_mut().filter(|_| kind != Kind::Player) {
             Some(w) => {
                 let n = w.slots.len();
+                if stone_changed {
+                    w.stone_selection = None;
+                }
                 if matches!(kind, Kind::Chest(_)) && w.slots[..] != view[..n] {
                     w.slots.copy_from_slice(&view[..n]);
                     self.save_window(w, me);
@@ -8023,6 +8150,9 @@ impl PlayPlan {
             Kind::Grindstone => self
                 .block(w.pos)
                 .is_some_and(|s| self.state_name(s) == "minecraft:grindstone"),
+            Kind::Stonecutter => self
+                .block(w.pos)
+                .is_some_and(|s| self.state_name(s) == "minecraft:stonecutter"),
             _ => self
                 .block(w.pos)
                 .is_some_and(|s| self.state_name(s) == "minecraft:crafting_table"),
@@ -8171,6 +8301,7 @@ impl PlayPlan {
                         back.extend(slot.take());
                     }
                 }
+                Kind::Stonecutter => back.extend(w.slots[0].take()),
                 Kind::Furnace => {
                     if let Some(e) = self.furnaces.lock().unwrap().get_mut(&w.pos) {
                         e.viewers.retain(|v| *v != uuid);
@@ -8233,6 +8364,7 @@ impl PlayPlan {
             Kind::Crafting if w.slots.is_empty() => vec![None; 10],
             Kind::Enchanting if w.slots.is_empty() => vec![None; 2],
             Kind::Grindstone if w.slots.is_empty() => vec![None; 3],
+            Kind::Stonecutter if w.slots.is_empty() => vec![None; 2],
             _ => w.slots.clone(),
         }
     }
@@ -12166,15 +12298,13 @@ impl PlayPlan {
             return Ok(false);
         };
         let pl = &self.survival.placement;
+        let Some(action) = toggle_action(pl, state) else {
+            return Ok(false);
+        };
         let name = self.state_name(state).to_owned();
-        let open = pl.prop(state, "open") != Some("true");
-        let Some(sound) = crate::sounds::toggle_sound(&name, open) else {
-            return Ok(false);
-        };
+        let open = action.opening;
         let value = if open { "true" } else { "false" };
-        let Some(mut next) = pl.with_prop(state, "open", value) else {
-            return Ok(false);
-        };
+        let mut next = action.next;
         if open && name.ends_with("_fence_gate") {
             // Как в ваниле: открывается от игрока — если смотрит на него, разворот.
             let dir = ["south", "west", "north", "east"]
@@ -12203,7 +12333,21 @@ impl PlayPlan {
             conn.send(&play::block_update(self.ids.block_update, p, s as i32))
                 .await?;
         }
-        self.block_sound(Some(uuid), &sound, pos, 1.0, crate::sounds::pitch_09());
+        self.block_sound(
+            Some(uuid),
+            &action.sound,
+            pos,
+            1.0,
+            crate::sounds::pitch_09(),
+        );
+        self.emit_vibration(
+            [
+                pos[0] as f64 + 0.5,
+                pos[1] as f64 + 0.5,
+                pos[2] as f64 + 0.5,
+            ],
+            action.vibration,
+        );
         Ok(true)
     }
 
@@ -13448,6 +13592,134 @@ mod tests {
     };
     use crate::survival::PlayerState;
     use uuid::Uuid;
+
+    #[test]
+    fn hand_toggled_blocks_select_open_and_close_vibrations() {
+        use crate::placement::Placement;
+        let mut states = vec![Some(("minecraft:stone".to_owned(), vec![]))];
+        let mut pairs = Vec::new();
+        for name in ["oak_door", "oak_trapdoor", "oak_fence_gate"] {
+            let closed = states.len() as u32;
+            for open in [false, true] {
+                states.push(Some((
+                    format!("minecraft:{name}"),
+                    vec![("open".to_owned(), open.to_string())],
+                )));
+            }
+            pairs.push((closed, closed + 1));
+        }
+        let iron = states.len() as u32;
+        states.push(Some((
+            "minecraft:iron_door".to_owned(),
+            vec![("open".to_owned(), "false".to_owned())],
+        )));
+        let pl = Placement::new(states.clone(), vec![0; states.len()], Default::default());
+        for (closed, opened) in pairs {
+            let action = super::toggle_action(&pl, closed).unwrap();
+            assert_eq!(action.next, opened);
+            assert!(action.opening);
+            assert_eq!(action.vibration, "minecraft:block_open");
+            assert_eq!(crate::redstone::vibration_frequency(action.vibration), 10);
+
+            let action = super::toggle_action(&pl, opened).unwrap();
+            assert_eq!(action.next, closed);
+            assert!(!action.opening);
+            assert_eq!(action.vibration, "minecraft:block_close");
+            assert_eq!(crate::redstone::vibration_frequency(action.vibration), 9);
+        }
+        assert!(super::toggle_action(&pl, 0).is_none());
+        assert!(super::toggle_action(&pl, iron).is_none());
+    }
+
+    #[test]
+    fn stonecutter_recipe_selection_and_packet_order() {
+        use chunkwake_data::recipes::{Recipes, Stonecutting};
+        use chunkwake_protocol::Reader;
+        use chunkwake_protocol::inventory::Stack;
+        use std::collections::HashSet;
+        use std::sync::Arc;
+
+        let recipes = Recipes::from_parts(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                Stonecutting {
+                    ingredient: Arc::new(HashSet::from([1, 2])),
+                    result: (7, 2),
+                },
+                Stonecutting {
+                    ingredient: Arc::new(HashSet::from([1])),
+                    result: (8, 1),
+                },
+            ],
+        );
+        assert_eq!(
+            super::stone_result_for(&recipes, Some(Stack::new(1, 3)), Some(0)),
+            Some(Stack::new(7, 2))
+        );
+        assert_eq!(
+            super::stone_result_for(&recipes, Some(Stack::new(1, 3)), Some(1)),
+            Some(Stack::new(8, 1))
+        );
+        assert_eq!(
+            super::stone_result_for(&recipes, Some(Stack::new(2, 3)), Some(1)),
+            None
+        );
+        assert_eq!(super::stone_result_for(&recipes, None, Some(0)), None);
+        assert_eq!(
+            super::stone_result_for(&recipes, Some(Stack::new(1, 3)), Some(99)),
+            None
+        );
+
+        let packet = super::encode_stonecutter_recipes(123, recipes.stonecutting());
+        let mut reader = Reader::new(&packet);
+        assert_eq!(
+            (
+                reader.var_int().unwrap(),
+                reader.var_int().unwrap(),
+                reader.var_int().unwrap()
+            ),
+            (123, 0, 2)
+        );
+        assert_eq!(
+            (
+                reader.var_int().unwrap(),
+                reader.var_int().unwrap(),
+                reader.var_int().unwrap()
+            ),
+            (3, 1, 2)
+        );
+        assert_eq!(
+            (
+                reader.var_int().unwrap(),
+                reader.var_int().unwrap(),
+                reader.var_int().unwrap()
+            ),
+            (5, 7, 2)
+        );
+        assert_eq!(
+            (reader.var_int().unwrap(), reader.var_int().unwrap()),
+            (0, 0)
+        );
+        assert_eq!(
+            (reader.var_int().unwrap(), reader.var_int().unwrap()),
+            (2, 1)
+        );
+        assert_eq!(
+            (
+                reader.var_int().unwrap(),
+                reader.var_int().unwrap(),
+                reader.var_int().unwrap()
+            ),
+            (5, 8, 1)
+        );
+        assert_eq!(
+            (reader.var_int().unwrap(), reader.var_int().unwrap()),
+            (0, 0)
+        );
+        assert!(reader.remaining().is_empty());
+    }
 
     #[test]
     fn sleep_percentage_counts_non_spectators_and_rounds_up() {

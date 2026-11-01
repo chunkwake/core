@@ -44,6 +44,13 @@ pub struct CampfireCook {
     pub experience: f32,
 }
 
+/// Рецепт камнереза в порядке передачи клиенту.
+#[derive(Clone, Debug)]
+pub struct Stonecutting {
+    pub ingredient: Ingredient,
+    pub result: (i32, i32),
+}
+
 #[derive(Clone, Debug)]
 pub struct Recipes {
     list: Vec<Recipe>,
@@ -53,6 +60,18 @@ pub struct Recipes {
     campfire: Vec<CampfireCook>,
     /// Первый рецепт костра для предмета.
     campfire_at: HashMap<i32, usize>,
+    stonecutting: Vec<Stonecutting>,
+    stonecutting_at: HashMap<i32, Vec<usize>>,
+}
+
+fn stonecutting_at(list: &[Stonecutting]) -> HashMap<i32, Vec<usize>> {
+    let mut at: HashMap<i32, Vec<usize>> = HashMap::new();
+    for (i, recipe) in list.iter().enumerate() {
+        for &item in recipe.ingredient.iter() {
+            at.entry(item).or_default().push(i);
+        }
+    }
+    at
 }
 
 fn cooking_at(cooking: &[Cooking]) -> HashMap<(u8, i32), usize> {
@@ -81,19 +100,35 @@ impl Recipes {
         list: Vec<Recipe>,
         cooking: Vec<Cooking>,
         campfire: Vec<CampfireCook>,
+        stonecutting: Vec<Stonecutting>,
     ) -> Self {
         Self {
             cooking_at: cooking_at(&cooking),
             campfire_at: campfire_at(&campfire),
+            stonecutting_at: stonecutting_at(&stonecutting),
             list,
             cooking,
             campfire,
+            stonecutting,
         }
     }
 
     /// Части для образа запуска.
-    pub fn parts(&self) -> (&[Recipe], &[Cooking], &[CampfireCook]) {
-        (&self.list, &self.cooking, &self.campfire)
+    pub fn parts(&self) -> (&[Recipe], &[Cooking], &[CampfireCook], &[Stonecutting]) {
+        (
+            &self.list,
+            &self.cooking,
+            &self.campfire,
+            &self.stonecutting,
+        )
+    }
+
+    pub fn stonecutting(&self) -> &[Stonecutting] {
+        &self.stonecutting
+    }
+
+    pub fn stonecutting_for(&self, item: i32) -> &[usize] {
+        self.stonecutting_at.get(&item).map_or(&[], Vec::as_slice)
     }
 
     pub fn len(&self) -> usize {
@@ -304,6 +339,7 @@ pub fn load_recipes(root: &Path, items: &HashMap<String, i32>) -> Result<Recipes
     let mut list = Vec::new();
     let mut cooking_list = Vec::new();
     let mut campfire_list = Vec::new();
+    let mut stonecutting_list = Vec::new();
     for path in paths {
         let text = std::fs::read_to_string(&path)
             .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
@@ -312,7 +348,8 @@ pub fn load_recipes(root: &Path, items: &HashMap<String, i32>) -> Result<Recipes
             .iter()
             .position(|t| text.contains(&format!("\"minecraft:{t}\"")));
         let campfire = text.contains("\"minecraft:campfire_cooking\"");
-        if !crafting && cooking.is_none() && !campfire {
+        let stonecutting = text.contains("\"minecraft:stonecutting\"");
+        if !crafting && cooking.is_none() && !campfire && !stonecutting {
             continue;
         }
         let json: serde_json::Value =
@@ -354,20 +391,57 @@ pub fn load_recipes(root: &Path, items: &HashMap<String, i32>) -> Result<Recipes
                 time: json["cookingtime"].as_i64().unwrap_or(600) as i32,
                 experience: json["experience"].as_f64().unwrap_or(0.0) as f32,
             });
+        } else if stonecutting
+            && json["type"] == "minecraft:stonecutting"
+            && let (Some(ingredient), Some(result)) =
+                (tags.ingredient(&json["ingredient"]), result(&json, items))
+        {
+            stonecutting_list.push(Stonecutting { ingredient, result });
         }
     }
     Ok(Recipes {
         cooking_at: cooking_at(&cooking_list),
         campfire_at: campfire_at(&campfire_list),
+        stonecutting_at: stonecutting_at(&stonecutting_list),
         list,
         cooking: cooking_list,
         campfire: campfire_list,
+        stonecutting: stonecutting_list,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stonecutting_loads_tag_ingredients_and_counts() {
+        let root =
+            std::env::temp_dir().join(format!("chunkwake-stonecutting-{}", std::process::id()));
+        let recipes = root.join("data/minecraft/recipe");
+        let tags = root.join("data/minecraft/tags/item");
+        std::fs::create_dir_all(&recipes).unwrap();
+        std::fs::create_dir_all(&tags).unwrap();
+        std::fs::write(
+            tags.join("stones.json"),
+            r#"{"values":["minecraft:stone","minecraft:granite"]}"#,
+        )
+        .unwrap();
+        std::fs::write(recipes.join("a.json"), r##"{"type":"minecraft:stonecutting","ingredient":"#minecraft:stones","result":{"id":"minecraft:slab","count":2}}"##).unwrap();
+        std::fs::write(recipes.join("b.json"), r#"{"type":"minecraft:stonecutting","ingredient":"minecraft:stone","result":{"id":"minecraft:stairs","count":1}}"#).unwrap();
+        let items = HashMap::from([
+            ("minecraft:stone".to_owned(), 1),
+            ("minecraft:granite".to_owned(), 2),
+            ("minecraft:slab".to_owned(), 3),
+            ("minecraft:stairs".to_owned(), 4),
+        ]);
+        let loaded = load_recipes(&root, &items).unwrap();
+        assert_eq!(loaded.stonecutting().len(), 2);
+        assert_eq!(loaded.stonecutting_for(1), &[0, 1]);
+        assert_eq!(loaded.stonecutting_for(2), &[0]);
+        assert_eq!(loaded.stonecutting()[0].result, (3, 2));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn shaped_shapeless_and_mirror() {
@@ -398,13 +472,7 @@ mod tests {
             .collect();
         let cooking = Vec::new();
         let campfire = Vec::new();
-        let r = Recipes {
-            cooking_at: cooking_at(&cooking),
-            campfire_at: campfire_at(&campfire),
-            list,
-            cooking,
-            campfire,
-        };
+        let r = Recipes::from_parts(list, cooking, campfire, Vec::new());
         assert_eq!(r.len(), 3);
         // Палки в любом месте сетки 2×2.
         assert_eq!(r.find(&[None, Some(1), None, Some(1)], 2), Some((2, 4)));
@@ -453,13 +521,7 @@ mod tests {
                 experience: 0.0,
             },
         ];
-        let r = Recipes {
-            cooking_at: cooking_at(&cooking),
-            campfire_at: campfire_at(&campfire),
-            list: Vec::new(),
-            cooking,
-            campfire,
-        };
+        let r = Recipes::from_parts(Vec::new(), cooking, campfire, Vec::new());
         assert_eq!(r.cooking(0, 5).unwrap().result.0, 10);
         assert_eq!(r.cooking(1, 5).unwrap().result.0, 12);
         assert!(r.cooking(0, 6).is_none());

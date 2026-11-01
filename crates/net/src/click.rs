@@ -29,6 +29,8 @@ pub enum Kind {
     Enchanting,
     /// `GrindstoneMenu`: 0 и 1 входы, 2 результат, 3–29, 30–38.
     Grindstone,
+    /// `StonecutterMenu`: 0 вход, 1 результат, 2–28, 29–37.
+    Stonecutter,
 }
 
 impl Kind {
@@ -38,7 +40,7 @@ impl Kind {
             Kind::Chest(n) => n + 36,
             Kind::Crafting => 46,
             Kind::Furnace | Kind::Grindstone => 39,
-            Kind::Enchanting => 38,
+            Kind::Enchanting | Kind::Stonecutter => 38,
         }
     }
 
@@ -49,7 +51,7 @@ impl Kind {
             Kind::Chest(n) => n,
             Kind::Crafting => 10,
             Kind::Furnace | Kind::Grindstone => 3,
-            Kind::Enchanting => 2,
+            Kind::Enchanting | Kind::Stonecutter => 2,
         }
     }
 
@@ -58,6 +60,7 @@ impl Kind {
         match self {
             Kind::Player | Kind::Crafting => Some(0),
             Kind::Furnace | Kind::Grindstone => Some(2),
+            Kind::Stonecutter => Some(1),
             Kind::Chest(_) | Kind::Enchanting => None,
         }
     }
@@ -67,6 +70,7 @@ impl Kind {
         match self {
             Kind::Player | Kind::Crafting => Some(0),
             Kind::Grindstone => Some(2),
+            Kind::Stonecutter => Some(1),
             _ => None,
         }
     }
@@ -157,6 +161,9 @@ impl Menu<'_> {
     fn may_place(&self, slot: usize, s: &Stack) -> bool {
         if self.kind.output() == Some(slot) {
             return false;
+        }
+        if self.kind == Kind::Stonecutter && slot == 0 {
+            return (self.rules.smeltable)(s.item);
         }
         if self.kind == Kind::Enchanting && slot == 1 {
             return Some(s.item) == self.rules.lapis;
@@ -338,6 +345,20 @@ impl Menu<'_> {
             for _ in 0..64 {
                 match self.slots[i] {
                     Some(r) if same(&r, &first) => {
+                        if self.kind == Kind::Stonecutter {
+                            let capacity: i32 = (inv..end)
+                                .map(|j| match self.slots[j] {
+                                    Some(dst) if same(&dst, &r) => {
+                                        (self.slot_max(j, r.item) - dst.count).max(0)
+                                    }
+                                    None => self.slot_max(j, r.item),
+                                    _ => 0,
+                                })
+                                .sum();
+                            if capacity < r.count {
+                                break;
+                            }
+                        }
                         let mut s = r;
                         let before = s.count;
                         self.move_to(&mut s, inv..end, true);
@@ -413,6 +434,17 @@ impl Menu<'_> {
                 } else if self.slots[0].is_none() {
                     self.slots[0] = Some(Stack { count: 1, ..s });
                     s.count -= 1;
+                }
+            }
+            Kind::Stonecutter => {
+                if i == 0 {
+                    self.move_to(&mut s, inv..end, true);
+                } else if !self.move_to(&mut s, 0..1, false) {
+                    if i < hotbar {
+                        self.move_to(&mut s, hotbar..end, false);
+                    } else {
+                        self.move_to(&mut s, inv..hotbar, false);
+                    }
                 }
             }
             Kind::Grindstone => {
@@ -630,6 +662,103 @@ mod tests {
             .iter()
             .flat_map(|&(s, b, mode)| m.click(s, b, mode))
             .collect()
+    }
+
+    #[test]
+    fn stonecutter_takes_one_input_per_result_and_shift_moves_all() {
+        let mut slots = vec![None; Kind::Stonecutter.size()];
+        slots[0] = st(1, 3);
+        slots[1] = st(2, 2);
+        let mut carried = None;
+        let rules = Rules {
+            max_stack: &|_| 64,
+            equip: &|_| None,
+            smeltable: &|item| item == 1,
+            fuel: &|_| false,
+            bucket: None,
+            lapis: None,
+            grindable: &|_| false,
+            creative: false,
+        };
+        let mut drag = Drag::default();
+        let mut craft = |slots: &mut [Slot]| {
+            if let Some(input) = slots[0].as_mut() {
+                input.count -= 1;
+                if input.count == 0 {
+                    slots[0] = None;
+                }
+            }
+            slots[1] = slots[0].map(|_| Stack::new(2, 2));
+        };
+        let mut menu = Menu {
+            kind: Kind::Stonecutter,
+            slots: &mut slots,
+            carried: &mut carried,
+            drag: &mut drag,
+            rules: &rules,
+            craft: &mut craft,
+        };
+        menu.click(1, 0, PICKUP);
+        assert_eq!(
+            (menu.slots[0], menu.slots[1], *menu.carried),
+            (st(1, 2), st(2, 2), st(2, 2))
+        );
+        *menu.carried = None;
+        menu.click(1, 0, QUICK_MOVE);
+        assert_eq!(
+            (menu.slots[0], menu.slots[1], menu.slots[37]),
+            (None, None, st(2, 4))
+        );
+        assert_eq!(*menu.carried, None);
+    }
+
+    #[test]
+    fn stonecutter_shift_requires_room_for_whole_result() {
+        let mut slots = vec![st(9, 64); Kind::Stonecutter.size()];
+        slots[0] = st(1, 1);
+        slots[1] = st(2, 2);
+        let mut carried = None;
+        run(
+            Kind::Stonecutter,
+            &mut slots,
+            &mut carried,
+            &[(1, 0, QUICK_MOVE)],
+        );
+        assert_eq!((slots[0], slots[1]), (st(1, 1), st(2, 2)));
+        slots[2] = st(2, 63);
+        run(
+            Kind::Stonecutter,
+            &mut slots,
+            &mut carried,
+            &[(1, 0, QUICK_MOVE)],
+        );
+        assert_eq!(
+            (slots[0], slots[1], slots[2]),
+            (st(1, 1), st(2, 2), st(2, 63))
+        );
+    }
+
+    #[test]
+    fn stonecutter_shift_merges_only_the_input_that_fits() {
+        let mut slots = vec![None; Kind::Stonecutter.size()];
+        slots[0] = st(1, 63);
+        slots[2] = st(1, 5);
+        let mut carried = None;
+        run(
+            Kind::Stonecutter,
+            &mut slots,
+            &mut carried,
+            &[(2, 0, QUICK_MOVE)],
+        );
+        assert_eq!((slots[0], slots[2]), (st(1, 64), st(1, 4)));
+        slots[3] = st(3, 5);
+        run(
+            Kind::Stonecutter,
+            &mut slots,
+            &mut carried,
+            &[(3, 0, QUICK_MOVE)],
+        );
+        assert_eq!((slots[0], slots[3], slots[29]), (st(1, 64), None, st(3, 5)));
     }
 
     #[test]

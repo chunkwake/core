@@ -1,5 +1,5 @@
 //! Образ данных запуска: всё, что сервер собирает из дерева ванильных JSON,
-//! упаковывается в `chunkwake-derived-v1/boot.v1.bin` и дальше читается одним
+//! упаковывается в `chunkwake-derived-v1/boot.v2.bin` и дальше читается одним
 //! последовательным файлом вместо тысяч открытий и разборов.
 //!
 //! Сборка образа вызывает обычные загрузчики; повторный старт их не трогает.
@@ -9,7 +9,7 @@
 use crate::DataError;
 use crate::enchanting::{AttrEffect, EnchantDef, Enchanting, LevelValue};
 use crate::packets::{Direction, PacketTable, State};
-use crate::recipes::{CampfireCook, Cooking, Ingredient, Recipe, Recipes};
+use crate::recipes::{CampfireCook, Cooking, Ingredient, Recipe, Recipes, Stonecutting};
 use crate::registries::{Builtin, Registry, RegistryData, RegistryTags};
 use crate::tools::{Tool, ToolRule};
 use crate::world::{Blocks, Drink, Food, Fuel, ItemInfo, Properties};
@@ -18,9 +18,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Версия формата. Меняется вместе с любым полем образа.
-const SCHEMA: u32 = 1;
+const SCHEMA: u32 = 2;
 const MAGIC: u32 = 0x434B_424F; // "CKBO"
-const FILE: &str = "boot.v1.bin";
+const FILE: &str = "boot.v2.bin";
 
 /// Слоты экипировки в порядке кодов образа (`ItemInfo::equip`).
 const EQUIP: [&str; 8] = [
@@ -460,7 +460,7 @@ fn w_ingredient(w: &mut W, ing: &Ingredient) {
 }
 
 fn w_recipes(w: &mut W, r: &Recipes) {
-    let (list, cooking, campfire) = r.parts();
+    let (list, cooking, campfire, stonecutting) = r.parts();
     w.u32(list.len() as u32);
     for recipe in list {
         match recipe {
@@ -511,6 +511,12 @@ fn w_recipes(w: &mut W, r: &Recipes) {
         w.i32(c.result.1);
         w.i32(c.time);
         w.f32(c.experience);
+    }
+    w.u32(stonecutting.len() as u32);
+    for recipe in stonecutting {
+        w_ingredient(w, &recipe.ingredient);
+        w.i32(recipe.result.0);
+        w.i32(recipe.result.1);
     }
 }
 
@@ -1026,7 +1032,15 @@ fn r_recipes(r: &mut R<'_>) -> Result<Recipes, DataError> {
             experience: r.f32()?,
         });
     }
-    Ok(Recipes::from_parts(list, cooking, campfire))
+    let n = r.count()?;
+    let mut stonecutting = Vec::with_capacity(n);
+    for _ in 0..n {
+        stonecutting.push(Stonecutting {
+            ingredient: r_ingredient(r)?,
+            result: (r.i32()?, r.i32()?),
+        });
+    }
+    Ok(Recipes::from_parts(list, cooking, campfire, stonecutting))
 }
 
 fn r_level_value(r: &mut R<'_>) -> Result<LevelValue, DataError> {
@@ -1255,6 +1269,10 @@ mod tests {
                 time: 600,
                 experience: 0.35,
             }],
+            vec![Stonecutting {
+                ingredient: Arc::new(HashSet::from([1])),
+                result: (2, 2),
+            }],
         );
         let mut enchanting = Enchanting::default();
         enchanting.defs.push(EnchantDef {
@@ -1353,6 +1371,8 @@ mod tests {
         );
         assert_eq!(back.recipes.len(), boot.recipes.len());
         assert_eq!(back.recipes.find(&[Some(1)], 1), Some((2, 4)));
+        assert_eq!(back.recipes.stonecutting_for(1), &[0]);
+        assert_eq!(back.recipes.stonecutting()[0].result, (2, 2));
         assert_eq!(back.enchanting.defs.len(), 1);
         assert_eq!(back.enchanting.defs[0].max_level, 5);
         assert_eq!(back.enchanting.table, vec![0]);

@@ -704,6 +704,10 @@ pub(crate) fn block_analog(pl: &crate::placement::Placement, state: u32) -> Opti
         "minecraft:lava_cauldron" => Some(3),
         "minecraft:composter" => pl.prop(state, "level")?.parse().ok(),
         "minecraft:beehive" | "minecraft:bee_nest" => pl.prop(state, "honey_level")?.parse().ok(),
+        "minecraft:respawn_anchor" => {
+            let charges = pl.prop(state, "charges")?.parse::<i32>().ok()?;
+            Some(charges * 15 / 4)
+        }
         _ => None,
     }
 }
@@ -1631,6 +1635,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn respawn_anchor_charge_feeds_comparator_directly_and_through_block() {
+        let mut states = vec![
+            Some(("minecraft:air".into(), vec![])),
+            Some(("minecraft:stone".into(), vec![])),
+            Some((
+                "minecraft:comparator".into(),
+                vec![
+                    ("facing".into(), "north".into()),
+                    ("mode".into(), "compare".into()),
+                ],
+            )),
+        ];
+        let mut cases = Vec::new();
+        for (charges, expected) in [(0, 0), (1, 3), (2, 7), (3, 11), (4, 15)] {
+            let id = states.len() as u32;
+            states.push(Some((
+                "minecraft:respawn_anchor".into(),
+                vec![("charges".into(), charges.to_string())],
+            )));
+            cases.push((id, expected));
+        }
+        let mut sturdy = vec![0; states.len()];
+        sturdy[1] = 63;
+        let pl = Placement::new(states, sturdy, Default::default());
+        for (id, expected) in cases {
+            assert_eq!(block_analog(&pl, id), Some(expected));
+            for through_block in [false, true] {
+                let mut blocks = HashMap::from([([0, 0, 0], 2u32)]);
+                if through_block {
+                    blocks.insert([0, 0, -1], 1);
+                    blocks.insert([0, 0, -2], id);
+                } else {
+                    blocks.insert([0, 0, -1], id);
+                }
+                let at = |p: [i32; 3]| blocks.get(&p).copied().unwrap_or(0);
+                let w = World {
+                    pl: &pl,
+                    at: &at,
+                    output: &|_| 0,
+                    analog: &|p| block_analog(&pl, at(p)),
+                };
+                assert_eq!(w.comparator_target([0, 0, 0]), expected);
+            }
+        }
+    }
+
     /// Крюк растяжки — источник: сигнал 15 слабым выходом и сильным только в
     /// сторону `facing` (`ownSignal` и `getDirectSignal`).
     #[test]
@@ -2013,8 +2064,10 @@ mod tests {
             ("minecraft:drink", 8),
             ("minecraft:eat", 8),
             ("minecraft:container_close", 9),
+            ("minecraft:block_close", 9),
             ("minecraft:block_deactivate", 9),
             ("minecraft:container_open", 10),
+            ("minecraft:block_open", 10),
             ("minecraft:block_activate", 10),
             ("minecraft:note_block_play", 10),
             ("minecraft:block_change", 11),
