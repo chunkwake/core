@@ -1196,3 +1196,208 @@ pub fn load_physics(root: &Path) -> Result<BlockPhysics, DataError> {
     }
     Ok(out)
 }
+
+/// Инструмент нотного блока по имени блока (`reports/instruments.csv`).
+///
+/// Инструмент задаётся свойством блока (`instrument(...)` в
+/// `BlockBehaviour.Properties`), поэтому одно значение на блок, а не на
+/// состояние. Строки есть только для нестандартных: остальные — `harp`.
+#[derive(Debug, Clone, Default)]
+pub struct Instruments {
+    kinds: HashMap<String, NoteInstrument>,
+}
+
+/// Инструменты `NoteBlockInstrument` в порядке, в котором их знает ванила.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteInstrument {
+    Harp,
+    BaseDrum,
+    Snare,
+    Hat,
+    Bass,
+    Flute,
+    Bell,
+    Guitar,
+    Chime,
+    Xylophone,
+    IronXylophone,
+    CowBell,
+    Didgeridoo,
+    Bit,
+    Banjo,
+    Pling,
+    Trumpet,
+    TrumpetExposed,
+    TrumpetOxidized,
+    TrumpetWeathered,
+    Zombie,
+    Skeleton,
+    Creeper,
+    Dragon,
+    WitherSkeleton,
+    Piglin,
+    CustomHead,
+}
+
+impl NoteInstrument {
+    /// `getSerializedName()` — то, что лежит в отчёте и в свойстве блока.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Harp => "harp",
+            Self::BaseDrum => "basedrum",
+            Self::Snare => "snare",
+            Self::Hat => "hat",
+            Self::Bass => "bass",
+            Self::Flute => "flute",
+            Self::Bell => "bell",
+            Self::Guitar => "guitar",
+            Self::Chime => "chime",
+            Self::Xylophone => "xylophone",
+            Self::IronXylophone => "iron_xylophone",
+            Self::CowBell => "cow_bell",
+            Self::Didgeridoo => "didgeridoo",
+            Self::Bit => "bit",
+            Self::Banjo => "banjo",
+            Self::Pling => "pling",
+            Self::Trumpet => "trumpet",
+            Self::TrumpetExposed => "trumpet_exposed",
+            Self::TrumpetOxidized => "trumpet_oxidized",
+            Self::TrumpetWeathered => "trumpet_weathered",
+            Self::Zombie => "zombie",
+            Self::Skeleton => "skeleton",
+            Self::Creeper => "creeper",
+            Self::Dragon => "dragon",
+            Self::WitherSkeleton => "wither_skeleton",
+            Self::Piglin => "piglin",
+            Self::CustomHead => "custom_head",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name.trim() {
+            "harp" => Self::Harp,
+            "basedrum" => Self::BaseDrum,
+            "snare" => Self::Snare,
+            "hat" => Self::Hat,
+            "bass" => Self::Bass,
+            "flute" => Self::Flute,
+            "bell" => Self::Bell,
+            "guitar" => Self::Guitar,
+            "chime" => Self::Chime,
+            "xylophone" => Self::Xylophone,
+            "iron_xylophone" => Self::IronXylophone,
+            "cow_bell" => Self::CowBell,
+            "didgeridoo" => Self::Didgeridoo,
+            "bit" => Self::Bit,
+            "banjo" => Self::Banjo,
+            "pling" => Self::Pling,
+            "trumpet" => Self::Trumpet,
+            "trumpet_exposed" => Self::TrumpetExposed,
+            "trumpet_oxidized" => Self::TrumpetOxidized,
+            "trumpet_weathered" => Self::TrumpetWeathered,
+            "zombie" => Self::Zombie,
+            "skeleton" => Self::Skeleton,
+            "creeper" => Self::Creeper,
+            "dragon" => Self::Dragon,
+            "wither_skeleton" => Self::WitherSkeleton,
+            "piglin" => Self::Piglin,
+            "custom_head" => Self::CustomHead,
+            _ => return None,
+        })
+    }
+
+    /// `isTunable()`: `BASE_BLOCK` — звук зависит от `note`.
+    pub fn tunable(self) -> bool {
+        !matches!(
+            self,
+            Self::Zombie
+                | Self::Skeleton
+                | Self::Creeper
+                | Self::Dragon
+                | Self::WitherSkeleton
+                | Self::Piglin
+                | Self::CustomHead
+        )
+    }
+
+    /// `worksAboveNoteBlock()`: блок над нотным блоком задаёт инструмент.
+    pub fn works_above(self) -> bool {
+        !self.tunable()
+    }
+
+    /// `hasCustomSound()`: у головы игрока звук берётся из её блок-сущности.
+    pub fn custom_sound(self) -> bool {
+        self == Self::CustomHead
+    }
+
+    /// `instrument.getSoundEvent()` — идентификатор звука.
+    pub fn sound(self) -> &'static str {
+        match self {
+            Self::Harp => "minecraft:block.note_block.harp",
+            Self::BaseDrum => "minecraft:block.note_block.basedrum",
+            Self::Snare => "minecraft:block.note_block.snare",
+            Self::Hat => "minecraft:block.note_block.hat",
+            Self::Bass => "minecraft:block.note_block.bass",
+            Self::Flute => "minecraft:block.note_block.flute",
+            Self::Bell => "minecraft:block.note_block.bell",
+            Self::Guitar => "minecraft:block.note_block.guitar",
+            Self::Chime => "minecraft:block.note_block.chime",
+            Self::Xylophone => "minecraft:block.note_block.xylophone",
+            Self::IronXylophone => "minecraft:block.note_block.iron_xylophone",
+            Self::CowBell => "minecraft:block.note_block.cow_bell",
+            Self::Didgeridoo => "minecraft:block.note_block.didgeridoo",
+            Self::Bit => "minecraft:block.note_block.bit",
+            Self::Banjo => "minecraft:block.note_block.banjo",
+            Self::Pling => "minecraft:block.note_block.pling",
+            Self::Trumpet => "minecraft:block.note_block.trumpet",
+            Self::TrumpetExposed => "minecraft:block.note_block.trumpet_exposed",
+            Self::TrumpetOxidized => "minecraft:block.note_block.trumpet_oxidized",
+            Self::TrumpetWeathered => "minecraft:block.note_block.trumpet_weathered",
+            Self::Zombie => "minecraft:block.note_block.imitate.zombie",
+            Self::Skeleton => "minecraft:block.note_block.imitate.skeleton",
+            Self::Creeper => "minecraft:block.note_block.imitate.creeper",
+            Self::Dragon => "minecraft:block.note_block.imitate.ender_dragon",
+            Self::WitherSkeleton => "minecraft:block.note_block.imitate.wither_skeleton",
+            Self::Piglin => "minecraft:block.note_block.imitate.piglin",
+            Self::CustomHead => "minecraft:ui.button.click",
+        }
+    }
+}
+
+impl Instruments {
+    /// Инструмент блока по имени; неизвестное — `harp`.
+    pub fn of(&self, block: &str) -> NoteInstrument {
+        self.kinds
+            .get(block)
+            .copied()
+            .unwrap_or(NoteInstrument::Harp)
+    }
+}
+
+/// Строки `reports/instruments.csv`: `имя блока,инструмент`.
+///
+/// Файла может не быть: кэш, собранный до появления выгрузки, остаётся
+/// годным — тогда все блоки звучат как `harp`.
+pub fn load_instruments(root: &Path) -> Result<Instruments, DataError> {
+    let path = root.join("reports/instruments.csv");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Instruments::default()),
+        Err(e) => return Err(DataError::Io(format!("read {}: {e}", path.display()))),
+    };
+    let mut out = Instruments::default();
+    for (i, line) in text.lines().enumerate() {
+        let Some((name, kind)) = line.split_once(',') else {
+            return Err(DataError::Format {
+                file: path.display().to_string(),
+                msg: format!("line {}: {line:?}", i + 1),
+            });
+        };
+        let kind = NoteInstrument::parse(kind).ok_or_else(|| DataError::Format {
+            file: path.display().to_string(),
+            msg: format!("line {}: неизвестный инструмент {kind:?}", i + 1),
+        })?;
+        out.kinds.insert(name.trim().to_owned(), kind);
+    }
+    Ok(out)
+}

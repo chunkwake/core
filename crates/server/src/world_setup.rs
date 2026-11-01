@@ -623,6 +623,7 @@ fn survival_data(
         hardness: loaded.hardness,
         requires_tool: loaded.requires_tool,
         tools: loaded.tools,
+        instruments: chunkwake_data::world::load_instruments(data_dir).map_err(s)?,
         block_names: block_names.clone(),
         block_types: chunkwake_data::registries::builtin_ids_of(builtin, "block").map_err(s)?,
         block_defaults: blocks.defaults(),

@@ -132,6 +132,11 @@ pub fn ensure_generated_with(
     .map_err(|e| io("write", &class_dir.join("ChunkwakeWorldgen.class"), e))?;
     std::fs::write(class_dir.join("ChunkwakeShapes.class"), SHAPES_EXTRACTOR)
         .map_err(|e| io("write", &class_dir.join("ChunkwakeShapes.class"), e))?;
+    std::fs::write(
+        class_dir.join("ChunkwakeInstruments.class"),
+        INSTRUMENTS_EXTRACTOR,
+    )
+    .map_err(|e| io("write", &class_dir.join("ChunkwakeInstruments.class"), e))?;
 
     let mut classpath =
         vec![std::path::absolute(&class_dir).map_err(|e| io("resolve", &class_dir, e))?];
@@ -181,6 +186,16 @@ pub fn ensure_generated_with(
         "[3/3] shapes extractor",
         progress,
     )?;
+    progress("[3/3] extracting note block instruments");
+    run_extractor(
+        java,
+        &work,
+        &classpath,
+        "ChunkwakeInstruments",
+        &tmp_abs.join("reports/instruments.csv"),
+        "[3/3] instruments extractor",
+        progress,
+    )?;
     // Шаблоны структур не входят в вывод генератора данных: они лежат
     // в jar версии. Пишем их в тот же временный каталог до маркера.
     progress("copying structure templates");
@@ -207,6 +222,9 @@ const BIOME_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeBiomes.clas
 
 /// Выгрузка коллизии и трения блоков (`extractor/ChunkwakeShapes.java`).
 const SHAPES_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeShapes.class");
+
+/// Выгрузка инструмента нотного блока (`extractor/ChunkwakeInstruments.java`).
+const INSTRUMENTS_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeInstruments.class");
 
 /// Выгрузка жидкостей и классов блоков для фич (`extractor/ChunkwakeWorldgen.java`).
 const WORLDGEN_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeWorldgen.class");

@@ -5,6 +5,8 @@
 pub const BLOCKS: i32 = 4;
 pub const NEUTRAL: i32 = 6;
 pub const PLAYERS: i32 = 7;
+/// `SoundSource.RECORDS`: ноты и пластинки.
+pub const RECORDS: i32 = 10;
 
 /// `LevelEvent.PARTICLES_DESTROY_BLOCK`: частицы и звук ломки (клиент берёт звук блока сам).
 pub const DESTROY_BLOCK: i32 = 2001;

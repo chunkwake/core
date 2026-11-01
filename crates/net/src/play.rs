@@ -1560,6 +1560,8 @@ pub struct SurvivalData {
     pub attribute_gravity: i32,
     /// Ориентация ставимых блоков.
     pub placement: crate::placement::Placement,
+    /// Инструмент нотного блока по состоянию (`reports/instruments.csv`).
+    pub instruments: chunkwake_data::world::Instruments,
     /// Нужен ли правильный инструмент для дропа, по состоянию блока.
     pub requires_tool: Vec<bool>,
     /// Компонент `minecraft:tool` по ID предмета.
@@ -2526,6 +2528,9 @@ impl PlayPlan {
         }
         if line == "tps" {
             return self.tick_meter_line();
+        }
+        if line == "seed" {
+            return self.seed.to_string();
         }
         // `dropitem x y z разброс предмет`: `World.dropItem(Naturally)`.
         if let Some(rest) = line.strip_prefix("dropitem ") {
@@ -6312,6 +6317,12 @@ impl PlayPlan {
                                 let held = state.inv.held();
                                 if a.action == play::START_DESTROY_BLOCK {
                                     let face = FACES.get(a.face as usize).copied().unwrap_or("UP");
+                                    // `NoteBlock.attack`: удар играет ноту, не меняя её.
+                                    // Ванила делает это до ломки, поэтому и здесь — до
+                                    // прогресса: по блоку в приключении он не ломается.
+                                    if crate::redstone::is_note_block(self.state_name(block)) {
+                                        self.play_note(a.pos);
+                                    }
                                     if self.cancelled(Event::Interact, uuid, || {
                                         format!("LEFT_CLICK_BLOCK {} {} {} {face} HAND", a.pos[0], a.pos[1], a.pos[2])
                                     }).await {
@@ -6624,6 +6635,11 @@ impl PlayPlan {
                                 // (`TripWireBlock.getStateForPlacement`).
                                 if crate::redstone::is_tripwire(&name) {
                                     place = pl.tripwire_placement(place, &ctx);
+                                }
+                                // Нотный блок берёт инструмент у соседей
+                                // (`NoteBlock.getStateForPlacement`).
+                                if crate::redstone::is_note_block(&name) {
+                                    place = self.note_instrument_at(target, place);
                                 }
                                 // Одна правка: тик не разошлёт промежуточные состояния.
                                 let edit = self.world_edit.lock().unwrap();
@@ -8525,6 +8541,18 @@ impl PlayPlan {
                     self.refresh_tripwire_shape(p);
                     continue;
                 }
+                // Нотный блок: `updateShape` по вертикальному соседу заново
+                // выбирает инструмент (поставили камень под — звук сменился),
+                // а `neighborChanged` играет ноту на фронте сигнала.
+                if rs::is_note_block(self.state_name(s)) {
+                    let tuned = self.note_instrument_at(p, s);
+                    if tuned != s {
+                        put(p, tuned);
+                        next.extend_from_slice(&rs::around(p));
+                    }
+                    self.note_signal_update(p);
+                    continue;
+                }
                 // У крюка в ванили нет `neighborChanged`: цепь считается
                 // только по своему тику, который планирует нить. Немедленный
                 // пересчёт здесь дал бы рекурсию через `notifyNeighbors`.
@@ -9920,6 +9948,17 @@ impl PlayPlan {
         };
         let name = self.state_name(state).to_owned();
         let pl = &self.survival.placement;
+        // Нотный блок: клик меняет ноту по кругу и играет её
+        // (`NoteBlock.useWithoutItem`: `cycle(NOTE)`).
+        if crate::redstone::is_note_block(&name) {
+            if let Some(next) = self.note_next(pos) {
+                self.set_block(pos, next);
+                conn.send(&play::block_update(self.ids.block_update, pos, next as i32))
+                    .await?;
+            }
+            self.play_note(pos);
+            return Ok(true);
+        }
         // Повторитель: задержка 1→4 по кругу (`RepeaterBlock.useWithoutItem`).
         if crate::redstone::is_repeater(&name) {
             let d = pl
@@ -10780,6 +10819,158 @@ impl PlayPlan {
             };
             self.tripwire_hook_state(hook, false, false, -1, None);
         }
+    }
+
+    /// `NoteBlock.setInstrument`: инструмент от блока над, иначе от блока под.
+    ///
+    /// Инструмент считается по `BlockBehaviour.instrument()` соседа, поэтому
+    /// нужен именно **состояние** соседа, а не его имя: у камня и дерева
+    /// разные инструменты при одинаковом поведении.
+    fn note_instrument_state(&self, state: u32) -> chunkwake_data::world::NoteInstrument {
+        self.survival.instruments.of(self.state_name(state))
+    }
+
+    /// Состояние нотного блока с инструментом по соседям (`setInstrument`).
+    fn note_instrument_at(&self, pos: [i32; 3], state: u32) -> u32 {
+        let above = self.block([pos[0], pos[1] + 1, pos[2]]);
+        let below = self.block([pos[0], pos[1] - 1, pos[2]]);
+        let kind = crate::redstone::instrument_for(
+            above.map(|s| self.note_instrument_state(s)),
+            below.map(|s| self.note_instrument_state(s)),
+        );
+        self.survival
+            .placement
+            .with_prop(state, "instrument", kind.name())
+            .unwrap_or(state)
+    }
+
+    /// `NoteBlock.playNote`: сыграть ноту, если инструмент «над блоком» или
+    /// сверху воздух. Возвращает `true`, если звук отправлен.
+    ///
+    /// Звук — `playSeededSound(…, SoundSource.RECORDS, NOTE_VOLUME, pitch, seed)`,
+    /// где pitch для настраиваемых инструментов считается из `note`, а у
+    /// голов всегда 1. Сверху летит частица ноты (`ParticleTypes.NOTE`).
+    fn play_note(&self, pos: [i32; 3]) -> bool {
+        let pl = &self.survival.placement;
+        let Some(state) = self.block(pos) else {
+            return false;
+        };
+        if !crate::redstone::is_note_block(self.state_name(state)) {
+            return false;
+        }
+        // Инструмент берётся из свойства **состояния** (`instrument=…`):
+        // это и есть звук. Свойство блока (`instrument()` у камня) лишь
+        // выбирает его при установке и на смене соседа.
+        let kind = pl
+            .prop(state, "instrument")
+            .and_then(chunkwake_data::world::NoteInstrument::parse)
+            .unwrap_or(chunkwake_data::world::NoteInstrument::Harp);
+        let above = self.block([pos[0], pos[1] + 1, pos[2]]).unwrap_or(AIR);
+        let above_air = chunkwake_world::has_flag(above, chunkwake_world::flags::AIR);
+        if !crate::redstone::note_sounds(kind.works_above(), above_air) {
+            return false;
+        }
+        let note: i32 = pl
+            .prop(state, "note")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let pitch = if kind.tunable() {
+            crate::redstone::note_pitch(note)
+        } else {
+            1.0
+        };
+        // Голова игрока: звук берётся из блок-сущности над нотным блоком.
+        // Из голов в сервере есть только скелет и прочие мобы-черепа из
+        // шаблонов; их `note_block_sound` не пишется, поэтому `custom_head`
+        // молчит, как у ванили без звука в блок-сущности.
+        let custom = self.note_custom_sound(pos);
+        if kind.custom_sound() && custom.is_none() {
+            return false;
+        }
+        let sound = custom.unwrap_or_else(|| kind.sound().to_owned());
+        let center = crate::redstone::note_sound_pos(pos);
+        self.play_sound(
+            None,
+            &sound,
+            crate::sounds::RECORDS,
+            center,
+            crate::redstone::NOTE_VOLUME,
+            pitch,
+        );
+        // Частица ноты — только у настраиваемых инструментов.
+        if kind.tunable() {
+            let (at, delta) = crate::redstone::note_particle(note, pos);
+            if let Some(id) = self.particle_id("minecraft:note") {
+                self.hub.send(
+                    None,
+                    chunkwake_protocol::play::level_particles_with(
+                        self.ids.level_particles,
+                        id,
+                        None,
+                        true,
+                        at,
+                        delta,
+                        0.0,
+                        1,
+                    ),
+                );
+            }
+        }
+        true
+    }
+
+    /// `SkullBlockEntity.getNoteBlockSound()` у блока над нотным блоком.
+    fn note_custom_sound(&self, pos: [i32; 3]) -> Option<String> {
+        let above = [pos[0], pos[1] + 1, pos[2]];
+        let be = self.block_entity(above)?;
+        if be.id != "minecraft:skull" {
+            return None;
+        }
+        let chunkwake_world::nbt::Tag::String(sound) = be.nbt.get("note_block_sound")? else {
+            return None;
+        };
+        Some(sound.clone())
+    }
+
+    /// `NoteBlock.neighborChanged`: звук на фронте сигнала.
+    fn note_signal_update(&self, pos: [i32; 3]) {
+        let pl = &self.survival.placement;
+        let Some(state) = self.block(pos) else { return };
+        let at = |p: [i32; 3]| self.block(p).unwrap_or(AIR);
+        let w = crate::redstone::World {
+            pl,
+            at: &at,
+            output: &|p| self.comparator_output(p),
+            analog: &|p| self.analog_at(p),
+        };
+        let signal = w.powered(pos);
+        let powered = pl.prop(state, "powered") == Some("true");
+        match crate::redstone::note_signal(signal, powered) {
+            crate::redstone::NoteAction::Nothing => {}
+            crate::redstone::NoteAction::Play => {
+                self.play_note(pos);
+                if let Some(next) = pl.with_prop(state, "powered", "true") {
+                    self.set_block(pos, next);
+                }
+            }
+            crate::redstone::NoteAction::UpdateOnly => {
+                if let Some(next) = pl.with_prop(state, "powered", "false") {
+                    self.set_block(pos, next);
+                }
+            }
+        }
+    }
+
+    /// `NoteBlock.tick`: смена ноты по сигналу кликом — `cycle(NOTE)`.
+    fn note_next(&self, pos: [i32; 3]) -> Option<u32> {
+        let pl = &self.survival.placement;
+        let state = self.block(pos)?;
+        let note: i32 = pl
+            .prop(state, "note")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let next = (note + 1) % 25;
+        pl.with_prop(state, "note", &next.to_string())
     }
 
     /// Крюк в стороне `dir` от нити: ванильный `updateSource` ищет его в

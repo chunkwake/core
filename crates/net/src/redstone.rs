@@ -805,6 +805,90 @@ pub fn tripwire_connects(neighbor: &str, neighbor_facing: Option<&str>, dir: usi
     is_tripwire(neighbor)
 }
 
+/// Нотный блок — тот самый, что звучит по сигналу.
+pub fn is_note_block(name: &str) -> bool {
+    name == "minecraft:note_block"
+}
+
+/// `NoteBlock.NOTE_VOLUME`: громкость звука ноты.
+pub const NOTE_VOLUME: f32 = 3.0;
+
+/// `NoteBlock.getPitchFromNote`: `2^((note - 12) / 12)`.
+pub fn note_pitch(note: i32) -> f32 {
+    2f32.powf((note - 12) as f32 / 12.0)
+}
+
+/// Смещение частицы ноты над блоком (`triggerEvent`): `(0.5, 1.2, 0.5)`,
+/// скорость `(note / 24, 0, 0)`.
+pub fn note_particle(note: i32, pos: [i32; 3]) -> ([f64; 3], [f32; 3]) {
+    (
+        [
+            pos[0] as f64 + 0.5,
+            pos[1] as f64 + 1.2,
+            pos[2] as f64 + 0.5,
+        ],
+        [note as f32 / 24.0, 0.0, 0.0],
+    )
+}
+
+/// Позиция звука ноты (`triggerEvent`): центр блока, а не верх — `(0.5, 0.5, 0.5)`.
+pub fn note_sound_pos(pos: [i32; 3]) -> [f64; 3] {
+    [
+        pos[0] as f64 + 0.5,
+        pos[1] as f64 + 0.5,
+        pos[2] as f64 + 0.5,
+    ]
+}
+
+/// `NoteBlock.setInstrument`: инструмент от блока над, иначе от блока под.
+///
+/// Инструмент сверху берётся, только если он «работает над нотным блоком»
+/// (`worksAboveNoteBlock`, то есть голова моба или игрока). Инструмент снизу,
+/// который сам работает над блоком, тоже не считается — вместо него `harp`.
+/// Именно это делает голову под нотным блоком обычным звуком.
+pub fn instrument_for(
+    above: Option<chunkwake_data::world::NoteInstrument>,
+    below: Option<chunkwake_data::world::NoteInstrument>,
+) -> chunkwake_data::world::NoteInstrument {
+    use chunkwake_data::world::NoteInstrument;
+    if let Some(kind) = above
+        && kind.works_above()
+    {
+        return kind;
+    }
+    match below {
+        Some(kind) if !kind.works_above() => kind,
+        _ => NoteInstrument::Harp,
+    }
+}
+
+/// `neighborChanged` нотного блока: звук только на фронте сигнала.
+pub fn note_signal(signal: bool, powered: bool) -> NoteAction {
+    if signal == powered {
+        NoteAction::Nothing
+    } else if signal {
+        NoteAction::Play
+    } else {
+        NoteAction::UpdateOnly
+    }
+}
+
+/// Что делать нотному блоку при смене сигнала.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteAction {
+    /// Сигнал не изменился.
+    Nothing,
+    /// Включился: сыграть ноту и записать `powered = true`.
+    Play,
+    /// Выключился: только записать `powered = false`.
+    UpdateOnly,
+}
+
+/// `playNote`: звук идёт, если инструмент выше нотного блока или над ним воздух.
+pub fn note_sounds(works_above: bool, above_is_air: bool) -> bool {
+    works_above || above_is_air
+}
+
 /// Итог прохода по цепи от крюка (`TripWireHookBlock.calculateState`).
 pub struct Chain {
     pub attached: bool,
@@ -1385,5 +1469,167 @@ mod tests {
         assert!((pitch - 1.2 / (0.5 * 0.2 + 0.9)).abs() < 1e-6);
         // Ничего не изменилось — молчание.
         assert_eq!(hook_sound(true, true, true, true, 0.5), None);
+    }
+
+    /// `NoteBlock.getPitchFromNote`: `2^((note - 12) / 12)`, 25 значений 0…24.
+    #[test]
+    fn note_pitch_matches_vanilla() {
+        // Ноты сняты с самой формулы: 12 — «нет транспозиции», выше — октава.
+        assert!((note_pitch(12) - 1.0).abs() < 1e-6, "нота 12 — 1.0");
+        assert!((note_pitch(0) - 0.5).abs() < 1e-6, "нота 0 — октавой ниже");
+        assert!(
+            (note_pitch(24) - 2.0).abs() < 1e-6,
+            "нота 24 — октавой выше"
+        );
+        assert!((note_pitch(6) - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+        // Все 25 нот растут монотонно.
+        for note in 1..25 {
+            assert!(note_pitch(note) > note_pitch(note - 1), "нота {note}");
+        }
+    }
+
+    /// `NoteBlock.setInstrument`: инструмент от блока над, иначе от блока под.
+    ///
+    /// Голова над нотным блоком важнее любого блока под, а голова под —
+    /// обычный `harp` (у неё `worksAboveNoteBlock`, поэтому снизу не считается).
+    #[test]
+    fn note_instrument_matches_vanilla() {
+        use chunkwake_data::world::NoteInstrument as N;
+
+        // Ничего необычного вокруг — арфа.
+        assert_eq!(instrument_for(Some(N::Harp), Some(N::Harp)), N::Harp);
+        assert_eq!(instrument_for(Some(N::Harp), None), N::Harp);
+        // Камень под — барабан.
+        assert_eq!(
+            instrument_for(Some(N::Harp), Some(N::BaseDrum)),
+            N::BaseDrum
+        );
+        // Дерево под — бас.
+        assert_eq!(instrument_for(Some(N::Harp), Some(N::Bass)), N::Bass);
+        // Стекло под — арфа, хотя у стекла нет своего инструмента.
+        assert_eq!(instrument_for(None, Some(N::Harp)), N::Harp);
+        // Голова над блоком важнее камня под.
+        assert_eq!(
+            instrument_for(Some(N::Dragon), Some(N::BaseDrum)),
+            N::Dragon
+        );
+        // Голова под — не считается: инструмент снизу работает «над блоком».
+        assert_eq!(instrument_for(Some(N::Harp), Some(N::Zombie)), N::Harp);
+        // Пустоты нет ни сверху, ни снизу.
+        assert_eq!(instrument_for(None, None), N::Harp);
+    }
+
+    /// `NeighborChanged`: звук только на фронте сигнала.
+    #[test]
+    fn note_signal_only_on_rising_edge() {
+        assert_eq!(note_signal(true, false), NoteAction::Play);
+        assert_eq!(note_signal(false, true), NoteAction::UpdateOnly);
+        assert_eq!(note_signal(true, true), NoteAction::Nothing);
+        assert_eq!(note_signal(false, false), NoteAction::Nothing);
+    }
+
+    /// `playNote`: инструмент «над блоком» звучит всегда, настраиваемый —
+    /// только под открытым небом (над ним воздух).
+    #[test]
+    fn note_plays_in_vanilla_conditions() {
+        // Арфа под блоком не звучит.
+        assert!(!note_sounds(false, false));
+        // Арфа под открытым небом звучит.
+        assert!(note_sounds(false, true));
+        // Голова звучит и под блоком: у неё `worksAboveNoteBlock`.
+        assert!(note_sounds(true, false));
+        assert!(note_sounds(true, true));
+    }
+
+    /// Частица и звук ноты: позиция, дельта и громкость из `triggerEvent`.
+    #[test]
+    fn note_visuals_match_vanilla() {
+        let (at, delta) = note_particle(7, [10, 64, -3]);
+        assert_eq!(at, [10.5, 65.2, -2.5]);
+        assert!((delta[0] - 7.0 / 24.0).abs() < 1e-6);
+        assert_eq!(delta[1], 0.0);
+        assert_eq!(delta[2], 0.0);
+        // Звук — из центра блока, не сверху.
+        assert_eq!(note_sound_pos([10, 64, -3]), [10.5, 64.5, -2.5]);
+        assert_eq!(NOTE_VOLUME, 3.0);
+    }
+
+    /// Отчёт `instruments.csv` читается и даёт инструменты по ванили.
+    ///
+    /// Значения сверены с `Blocks.java`: `STONE` — барабан, `OAK_PLANKS` —
+    /// бас, `GLASS` — хэт, `SAND` — снейр, `NOTE_BLOCK` — бас (у самого
+    /// нотного блока `instrument(BASS)`), `SKELETON_SKULL` — скелет.
+    /// Без кэша тест пропускается: файла нет.
+    #[test]
+    fn instruments_report_matches_vanilla() {
+        use chunkwake_data::world::{NoteInstrument as N, load_instruments};
+        let Some(root) = std::env::var_os("CHUNKWAKE_DATA") else {
+            return;
+        };
+        let ok = load_instruments(std::path::Path::new(&root)).expect("instruments.csv");
+        for (block, want) in [
+            ("minecraft:stone", N::BaseDrum),
+            ("minecraft:oak_planks", N::Bass),
+            ("minecraft:glass", N::Hat),
+            ("minecraft:sand", N::Snare),
+            ("minecraft:note_block", N::Bass),
+            ("minecraft:skeleton_skull", N::Skeleton),
+            ("minecraft:dragon_head", N::Dragon),
+        ] {
+            assert_eq!(ok.of(block), want, "{block}");
+        }
+        // У воздуха инструмента нет — арфа по умолчанию.
+        assert_eq!(ok.of("minecraft:air"), N::Harp);
+    }
+
+    /// Имена инструментов: те же строки, что в свойстве блока и в отчёте.
+    #[test]
+    fn note_instrument_names_round_trip() {
+        use chunkwake_data::world::NoteInstrument as N;
+        let all = [
+            N::Harp,
+            N::BaseDrum,
+            N::Snare,
+            N::Hat,
+            N::Bass,
+            N::Flute,
+            N::Bell,
+            N::Guitar,
+            N::Chime,
+            N::Xylophone,
+            N::IronXylophone,
+            N::CowBell,
+            N::Didgeridoo,
+            N::Bit,
+            N::Banjo,
+            N::Pling,
+            N::Trumpet,
+            N::TrumpetExposed,
+            N::TrumpetOxidized,
+            N::TrumpetWeathered,
+            N::Zombie,
+            N::Skeleton,
+            N::Creeper,
+            N::Dragon,
+            N::WitherSkeleton,
+            N::Piglin,
+            N::CustomHead,
+        ];
+        for kind in all {
+            assert_eq!(N::parse(kind.name()), Some(kind), "{}", kind.name());
+        }
+        // У настраиваемых звук зависит от `note`, у голов — нет.
+        assert!(N::Harp.tunable());
+        assert!(!N::Zombie.tunable());
+        assert!(N::Zombie.works_above());
+        assert!(!N::Harp.works_above());
+        // Голова игрока берёт звук из блок-сущности.
+        assert!(N::CustomHead.custom_sound());
+        assert!(!N::Harp.custom_sound());
+        // Имя звука головы дракона — с `ender_`.
+        assert_eq!(
+            N::Dragon.sound(),
+            "minecraft:block.note_block.imitate.ender_dragon"
+        );
     }
 }
