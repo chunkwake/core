@@ -309,6 +309,11 @@ impl World<'_> {
             // Крюк растяжки — источник (`isSignalSource`), слабый выход 15 во
             // все стороны: `ownSignal` не смотрит на направление.
             _ if is_tripwire_hook(name) => i32::from(self.on(s, "powered")) * 15,
+            // Лектор, детекторные рельсы и молниеотвод: `ownSignal` — 15 от
+            // `powered` во все стороны, направление учитывает только `strong`.
+            _ if is_lectern(name) || is_detector_rail(name) || is_lightning_rod(name) => {
+                i32::from(self.on(s, "powered")) * 15
+            }
             // Скалк-сенсор: слабый выход — свой `power`, у калиброванного в
             // сторону `facing` его нет (`CalibratedSculkSensorBlock.getSignal`).
             _ if is_sculk_sensor(name) => {
@@ -365,6 +370,20 @@ impl World<'_> {
             } else {
                 0
             };
+        }
+        // `LecternBlock.getDirectSignal` и `DetectorRailBlock.getDirectSignal`:
+        // сильный сигнал только вверх.
+        if is_lectern(name) || is_detector_rail(name) {
+            return if dir == UP {
+                self.weak(n, dir, wires)
+            } else {
+                0
+            };
+        }
+        // `LightningRodBlock.getDirectSignal`: сильный сигнал только в сторону
+        // `facing`, то есть в блок, на котором стержень закреплён.
+        if is_lightning_rod(name) {
+            return i32::from(self.on(s, "powered") && self.facing(s) == dir) * 15;
         }
         match name {
             "minecraft:repeater"
@@ -1025,6 +1044,126 @@ pub fn is_sculk_catalyst(name: &str) -> bool {
     name == "minecraft:sculk_catalyst"
 }
 
+// ---------------------------------------------------------------------------
+// Лектор, детекторные рельсы, молниеотвод.
+// ---------------------------------------------------------------------------
+
+/// `LecternBlock.PAGE_CHANGE_IMPULSE_TICKS`: сколько тиков держится сигнал
+/// после перелистывания.
+pub const LECTERN_PAGE_IMPULSE_TICKS: u64 = 2;
+
+/// `LightningRodBlock.ACTIVATION_TICKS`: сколько тиков держится сигнал после
+/// удара молнии.
+pub const LIGHTNING_ROD_TICKS: u64 = 8;
+/// `LightningRodBlock.RANGE`: в каком радиусе молния ищет молниеотвод.
+pub const LIGHTNING_ROD_RANGE: i32 = 128;
+
+/// `DetectorRailBlock.PRESSED_CHECK_PERIOD`: перепроверка нажатия.
+pub const DETECTOR_RAIL_CHECK_PERIOD: u64 = 20;
+
+pub fn is_lectern(name: &str) -> bool {
+    name == "minecraft:lectern"
+}
+
+pub fn is_detector_rail(name: &str) -> bool {
+    name == "minecraft:detector_rail" || name == "minecraft:detector_rail_waterlogged"
+}
+
+pub fn is_lightning_rod(name: &str) -> bool {
+    name == "minecraft:lightning_rod"
+}
+
+/// `LecternBlockEntity.getRedstoneSignal`: `floor(прогресс * 14) + (есть книга)`.
+///
+/// Прогресс — `page / (pages - 1)`, у книги в одну страницу он равен 1. Без
+/// книги сигнала нет вообще (`getAnalogOutputSignal` выходит раньше).
+pub fn lectern_analog(has_book: bool, page: i32, pages: i32) -> i32 {
+    if !has_book {
+        return 0;
+    }
+    let progress = if pages > 1 {
+        page as f32 / (pages as f32 - 1.0)
+    } else {
+        1.0
+    };
+    (progress * 14.0).floor() as i32 + 1
+}
+
+/// Из кандидатов-молниеотводов выбирает ближайший к точке удара.
+///
+/// `LightningBolt` берёт ближайший стержень в радиусе `RANGE`; при равном
+/// расстоянии остаётся первый найденный. Возвращает индекс в `rods`.
+pub fn nearest_rod(pos: [i32; 3], rods: &[[i32; 3]]) -> Option<usize> {
+    let range = LIGHTNING_ROD_RANGE;
+    let mut best: Option<(usize, i32)> = None;
+    for (i, rod) in rods.iter().enumerate() {
+        let d = [rod[0] - pos[0], rod[1] - pos[1], rod[2] - pos[2]];
+        // Молния бьёт сверху: стержень ниже точки удара не принимает разряд.
+        if d[1] < 0 || d[0].abs() > range || d[2].abs() > range {
+            continue;
+        }
+        let dist = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        if best.is_none_or(|(_, b)| dist < b) {
+            best = Some((i, dist));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Книги, которые лектор принимает (`ItemTags.LECTERN_BOOKS`).
+pub fn is_lectern_book(name: &str) -> bool {
+    matches!(
+        name,
+        "minecraft:written_book" | "minecraft:writable_book" | "minecraft:knowledge_book"
+    )
+}
+
+/// `LecternBlockEntity.getPageCount`: страниц у книги.
+///
+/// У записанной и черновой — по списку `pages`; у книги знаний страниц нет
+/// (она и не открывается), поэтому 0. Без NBT — 100: столько даёт клиент
+/// обычной книге, и это же значение ванила берёт по умолчанию.
+pub fn lectern_pages(name: &str, nbt: Option<&chunkwake_world::nbt::Compound>) -> i32 {
+    if name == "minecraft:knowledge_book" {
+        return 0;
+    }
+    nbt.map_or(100, book_pages)
+}
+
+/// Число страниц по NBT книги: `pages` внутри `components`.
+pub fn book_pages(nbt: &chunkwake_world::nbt::Compound) -> i32 {
+    use chunkwake_world::nbt::Tag;
+    let Some(Tag::Compound(components)) = nbt.get("components") else {
+        return 1;
+    };
+    for key in [
+        "minecraft:written_book_content",
+        "minecraft:writable_book_content",
+    ] {
+        if let Some(Tag::Compound(content)) = components.get(key)
+            && let Some(Tag::List(pages)) = content.get("pages")
+        {
+            return pages.len().max(1) as i32;
+        }
+    }
+    // `pages` может лежать прямо в компоненте старого формата.
+    if let Some(Tag::List(pages)) = components.get("pages") {
+        return pages.len().max(1) as i32;
+    }
+    1
+}
+
+/// `DetectorRailBlock.getSearchBB`: вагонетка ищется в рамке `0.2…0.8`.
+/// Границы — в мировых координатах: по горизонтали отступ 0.2, сверху до
+/// `pos.y + 0.8` (в ванили `(pos.y + 1) - 0.2`).
+pub fn detector_search_box(pos: [i32; 3]) -> ([f64; 3], [f64; 3]) {
+    let (x, y, z) = (pos[0] as f64, pos[1] as f64, pos[2] as f64);
+    (
+        [x + 0.2, y, z + 0.2],
+        [x + 1.0 - 0.2, y + 1.0 - 0.2, z + 1.0 - 0.2],
+    )
+}
+
 /// Нотный блок — тот самый, что звучит по сигналу.
 pub fn is_note_block(name: &str) -> bool {
     name == "minecraft:note_block"
@@ -1331,6 +1470,36 @@ mod tests {
                     ],
                 );
             }
+        }
+        // Хвост редстоуна: лектор, детекторные рельсы и молниеотвод.
+        for powered in ["true", "false"] {
+            add(
+                format!("lectern_{powered}"),
+                "minecraft:lectern",
+                vec![
+                    ("facing".into(), "north".into()),
+                    ("powered".into(), powered.into()),
+                    ("has_book".into(), "true".into()),
+                ],
+            );
+            add(
+                format!("rail_{powered}"),
+                "minecraft:detector_rail",
+                vec![
+                    ("shape".into(), "north_south".into()),
+                    ("powered".into(), powered.into()),
+                    ("waterlogged".into(), "false".into()),
+                ],
+            );
+            add(
+                format!("rod_{powered}"),
+                "minecraft:lightning_rod",
+                vec![
+                    ("facing".into(), "north".into()),
+                    ("powered".into(), powered.into()),
+                    ("waterlogged".into(), "false".into()),
+                ],
+            );
         }
         let mut sturdy = vec![0u8; states.len()];
         sturdy[ids["stone"] as usize] = 63;
@@ -2167,5 +2336,140 @@ mod tests {
         assert!(is_resonator("minecraft:budding_amethyst"));
         assert!(is_resonator("minecraft:amethyst_cluster"));
         assert!(!is_resonator("minecraft:stone"));
+    }
+
+    /// `LightningBolt` берёт ближайший стержень в радиусе, и только сверху.
+    #[test]
+    fn nearest_lightning_rod_rules() {
+        // Ближайший из двух.
+        let rods = [[10, 70, 0], [2, 70, 0]];
+        assert_eq!(nearest_rod([0, 70, 0], &rods), Some(1));
+        // Стержень ниже точки удара разряд не принимает.
+        assert_eq!(nearest_rod([0, 80, 0], &[[0, 70, 0]]), None);
+        // На одном уровне — принимает.
+        assert_eq!(nearest_rod([0, 70, 0], &[[0, 70, 0]]), Some(0));
+        // За пределами радиуса 128 — нет.
+        assert_eq!(nearest_rod([0, 70, 0], &[[129, 70, 0]]), None);
+        assert_eq!(nearest_rod([0, 70, 0], &[[128, 70, 0]]), Some(0));
+        // Пустой список и полное отсутствие стержней.
+        let none: [[i32; 3]; 0] = [];
+        assert_eq!(nearest_rod([0, 70, 0], &none), None);
+        // Из трёх — самый близкий, а не первый.
+        let rods = [[5, 70, 5], [1, 70, 1], [9, 70, 9]];
+        assert_eq!(nearest_rod([0, 70, 0], &rods), Some(1));
+    }
+
+    /// Лектор, детекторные рельсы и молниеотвод как источники сигнала.
+    ///
+    /// Все три: слабый сигнал 15 во все стороны при `powered`, сильный —
+    /// только в свою сторону (`getDirectSignal`).
+    #[test]
+    fn tail_blocks_signal_directions() {
+        let (pl, id) = table();
+        let signal_of = |key: &str, dir: usize, strong: bool| {
+            let blocks = HashMap::from([([0, 0, 0], id[key])]);
+            let at = |p: [i32; 3]| blocks.get(&p).copied().unwrap_or(0);
+            let w = World {
+                pl: &pl,
+                at: &at,
+                output: &|_| 0,
+                analog: &|_| None,
+            };
+            if strong {
+                w.strong([0, 0, 0], dir, true)
+            } else {
+                w.weak([0, 0, 0], dir, true)
+            }
+        };
+
+        // Лектор: слабый во все стороны, сильный только вверх.
+        for dir in 0..6 {
+            assert_eq!(
+                signal_of("lectern_true", dir, false),
+                15,
+                "лектор, dir {dir}"
+            );
+        }
+        assert_eq!(signal_of("lectern_true", 1, true), 15);
+        for dir in [0, 2, 3, 4, 5] {
+            assert_eq!(signal_of("lectern_true", dir, true), 0, "лектор, dir {dir}");
+        }
+        // Погашенный лектор молчит.
+        for dir in 0..6 {
+            assert_eq!(signal_of("lectern_false", dir, false), 0);
+            assert_eq!(signal_of("lectern_false", dir, true), 0);
+        }
+
+        // Детекторные рельсы: то же самое.
+        for dir in 0..6 {
+            assert_eq!(signal_of("rail_true", dir, false), 15, "рельсы, dir {dir}");
+        }
+        assert_eq!(signal_of("rail_true", 1, true), 15);
+        for dir in [0, 2, 3, 4, 5] {
+            assert_eq!(signal_of("rail_true", dir, true), 0, "рельсы, dir {dir}");
+        }
+        for dir in 0..6 {
+            assert_eq!(signal_of("rail_false", dir, false), 0);
+        }
+
+        // Молниеотвод: сильный только в сторону `facing` (север = 2).
+        for dir in 0..6 {
+            assert_eq!(signal_of("rod_true", dir, false), 15, "стержень, dir {dir}");
+        }
+        assert_eq!(signal_of("rod_true", 2, true), 15);
+        for dir in [0, 1, 3, 4, 5] {
+            assert_eq!(signal_of("rod_true", dir, true), 0, "стержень, dir {dir}");
+        }
+        for dir in 0..6 {
+            assert_eq!(signal_of("rod_false", dir, false), 0);
+        }
+    }
+
+    /// `LecternBlockEntity.getRedstoneSignal`: `floor(прогресс * 14) + 1`.
+    #[test]
+    fn lectern_comparator_by_page() {
+        // Без книги — ноль, даже если страница ненулевая.
+        assert_eq!(lectern_analog(false, 0, 10), 0);
+        assert_eq!(lectern_analog(false, 5, 10), 0);
+        // Первая страница даёт 1, последняя — 15.
+        assert_eq!(lectern_analog(true, 0, 10), 1);
+        assert_eq!(lectern_analog(true, 9, 10), 15);
+        // Книга в одну страницу: прогресс 1, сигнал 15.
+        assert_eq!(lectern_analog(true, 0, 1), 15);
+        // Середина: floor(0.5 * 14) + 1 = 8.
+        assert_eq!(lectern_analog(true, 5, 11), 8);
+        // Значения по всей книге из 10 страниц не выходят из 1..15.
+        for page in 0..10 {
+            let v = lectern_analog(true, page, 10);
+            assert!((1..=15).contains(&v), "страница {page} дала {v}");
+        }
+    }
+
+    /// Рамка поиска вагонетки (`DetectorRailBlock.getSearchBB`).
+    #[test]
+    fn detector_rail_search_box() {
+        let (min, max) = detector_search_box([0, 0, 0]);
+        assert_eq!(min, [0.2, 0.0, 0.2]);
+        assert_eq!(max, [0.8, 0.8, 0.8]);
+        // Смещённая клетка сдвигает рамку целиком.
+        let (min, max) = detector_search_box([5, -60, -3]);
+        assert_eq!(min, [5.2, -60.0, -2.8]);
+        assert_eq!(max, [5.8, -59.2, -2.2]);
+        assert_eq!(DETECTOR_RAIL_CHECK_PERIOD, 20);
+    }
+
+    /// Длительности импульсов и радиус молнии — из ванильных констант.
+    #[test]
+    fn tail_block_constants() {
+        assert_eq!(LECTERN_PAGE_IMPULSE_TICKS, 2);
+        assert_eq!(LIGHTNING_ROD_TICKS, 8);
+        assert_eq!(LIGHTNING_ROD_RANGE, 128);
+        // Предикаты узнают только свои блоки.
+        assert!(is_lectern("minecraft:lectern"));
+        assert!(!is_lectern("minecraft:bookshelf"));
+        assert!(is_detector_rail("minecraft:detector_rail"));
+        assert!(!is_detector_rail("minecraft:rail"));
+        assert!(is_lightning_rod("minecraft:lightning_rod"));
+        assert!(!is_lightning_rod("minecraft:chain"));
     }
 }

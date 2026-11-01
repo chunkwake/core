@@ -369,12 +369,6 @@ pub(super) fn summon(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         return usage("/summon <entity> [pos]");
     };
     let name = args::resource_name(name);
-    let Some(species) = crate::mobs::Species::from_name(&name) else {
-        return Outcome::Feedback(translate(
-            "argument.entity.id.invalid",
-            vec![Value::String(name)],
-        ));
-    };
     let coords = match (input.word(), input.word(), input.word()) {
         (Some(x), Some(y), Some(z)) => {
             let Some(c) = args::coords3(x, y, z) else {
@@ -384,6 +378,38 @@ pub(super) fn summon(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         }
         (Some(_), _, _) => return usage("/summon <entity> [x] [y] [z]"),
         _ => call.position(ctx),
+    };
+    // `minecraft:lightning_bolt` — не моб: она бьёт в точку и отдаёт разряд
+    // молниеотводу, если он рядом (`LightningBolt`).
+    if name == "minecraft:lightning_bolt" {
+        let at = [
+            coords[0].floor() as i32,
+            coords[1].floor() as i32,
+            coords[2].floor() as i32,
+        ];
+        let struck = ctx.plan.lightning_strike(at);
+        return match struck {
+            Some(rod) => Outcome::Feedback(translate(
+                "commands.summon.success",
+                vec![
+                    json!({"translate": "entity.minecraft.lightning_bolt"}),
+                    Value::from(format!("{} {} {}", rod[0], rod[1], rod[2])),
+                ],
+            )),
+            None => Outcome::Feedback(translate(
+                "commands.summon.success",
+                vec![
+                    json!({"translate": "entity.minecraft.lightning_bolt"}),
+                    Value::from(format!("{} {} {}", at[0], at[1], at[2])),
+                ],
+            )),
+        };
+    }
+    let Some(species) = crate::mobs::Species::from_name(&name) else {
+        return Outcome::Feedback(translate(
+            "argument.entity.id.invalid",
+            vec![Value::String(name)],
+        ));
     };
     match ctx.plan.summon_mob(species, coords) {
         Some(id) => Outcome::Feedback(translate(

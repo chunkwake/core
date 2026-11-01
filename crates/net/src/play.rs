@@ -1491,6 +1491,9 @@ fn container_entity(block: &str) -> Option<&'static str> {
         "minecraft:furnace" => Some("minecraft:furnace"),
         "minecraft:blast_furnace" => Some("minecraft:blast_furnace"),
         "minecraft:smoker" => Some("minecraft:smoker"),
+        // Лектор — блок-сущность (`LecternBlockEntity`): в ней лежат книга и
+        // страница, по ним считается сигнал компаратора.
+        "minecraft:lectern" => Some("minecraft:lectern"),
         _ => None,
     }
 }
@@ -2449,6 +2452,11 @@ impl PlayPlan {
                     .copied()
                     .unwrap_or(0),
             );
+        }
+        // `LecternBlock.getAnalogOutputSignal`: страница из блок-сущности.
+        if crate::redstone::is_lectern(name) {
+            let (has_book, page, pages) = self.lectern_page_state(p);
+            return Some(crate::redstone::lectern_analog(has_book, page, pages));
         }
         let full = |slots: &[Slot]| {
             slots
@@ -7002,6 +7010,46 @@ impl PlayPlan {
                             }
                         }
                         let clicked = self.state_name(self.block(u.pos).unwrap_or(AIR)).to_owned();
+                        // `LecternBlock.useItemOn`: книга в руке кладётся на
+                        // лектор, рука опустошается на один предмет.
+                        if crate::redstone::is_lectern(&clicked)
+                            && !state.vitals.dead
+                            && login.spawn.game_mode != 3
+                        {
+                            let slot = if u.hand == 0 {
+                                state.inv.held_slot()
+                            } else {
+                                survival::OFFHAND
+                            };
+                            if let Some(held) = state.inv.slots[slot]
+                                && self.lectern_place_book(u.pos, held, login.spawn.game_mode == 1)
+                            {
+                                if login.spawn.game_mode != 1 {
+                                    state.inv.slots[slot] = (held.count > 1).then_some(Stack {
+                                        count: held.count - 1,
+                                        ..held
+                                    });
+                                }
+                                self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                let now = self.block(u.pos).unwrap_or(AIR);
+                                conn.send(&play::block_update(ids.block_update, u.pos, now as i32))
+                                    .await?;
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence))
+                                    .await?;
+                                continue;
+                            }
+                            // Пустая рука на лекторе с книгой — перелистнуть
+                            // (`useWithoutItem` в ванили открывает меню; меню
+                            // ещё нет, поэтому страница листается кликом).
+                            if state.inv.slots[slot].is_none() && self.lectern_turn_page(u.pos) {
+                                let now = self.block(u.pos).unwrap_or(AIR);
+                                conn.send(&play::block_update(ids.block_update, u.pos, now as i32))
+                                    .await?;
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence))
+                                    .await?;
+                                continue;
+                            }
+                        }
                         let kind = match clicked.as_str() {
                             "minecraft:crafting_table" => Some(Kind::Crafting),
                             "minecraft:enchanting_table" => Some(Kind::Enchanting),
@@ -8951,6 +8999,31 @@ impl PlayPlan {
         } else if rs::is_tripwire_hook(&name) {
             // `TripWireHookBlock.tick`: полный пересчёт цепи.
             self.tripwire_hook_state(pos, false, true, -1, None);
+        } else if rs::is_lightning_rod(&name) {
+            // `LightningRodBlock.tick`: погасить после импульса.
+            if let Some(off) = pl.with_prop(state, "powered", "false") {
+                self.set_block(pos, off);
+                self.lightning_rod_neighbours(pos, off);
+            }
+        } else if rs::is_lectern(&name) {
+            // `LecternBlock.tick`: снять сигнал перелистывания.
+            if let Some(off) = pl.with_prop(state, "powered", "false") {
+                self.set_block(pos, off);
+                self.redstone_update(&crate::redstone::around(crate::redstone::place(pos, 0, 1)));
+            }
+        } else if rs::is_detector_rail(&name) {
+            // `DetectorRailBlock.tick`: пока рельс нажат, перепроверять, стоит
+            // ли ещё вагонетка. Вагонеток пока нет, поэтому нажатие снимается
+            // на первой же проверке — но правило «сигнал держится, пока есть
+            // вагонетка» уже на месте.
+            if pl.prop(state, "powered") == Some("true") && !self.detector_rail_pressed(pos) {
+                if let Some(off) = pl.with_prop(state, "powered", "false") {
+                    self.set_block(pos, off);
+                    self.redstone_update(&crate::redstone::around(pos));
+                }
+            } else if pl.prop(state, "powered") == Some("true") {
+                self.schedule(pos, crate::redstone::DETECTOR_RAIL_CHECK_PERIOD);
+            }
         } else if crate::pistons::is_piston(&name) {
             self.check_piston(pos);
         } else if name == "minecraft:dispenser" || name == "minecraft:dropper" {
@@ -11918,6 +11991,216 @@ impl PlayPlan {
         if powered {
             self.notify_hook_neighbors(pos, facing);
         }
+    }
+
+    /// `LightningRodBlock.onLightningStrike`: стержень включился на 8 тиков.
+    ///
+    /// Событие `3002` — искры на стороне клиента, данные — ось `facing`.
+    /// Соседи обновляются в сторону `facing.getOpposite()`: сигнал идёт в
+    /// блок, на котором стержень закреплён.
+    fn lightning_rod_strike(&self, pos: [i32; 3]) {
+        let pl = &self.survival.placement;
+        let Some(state) = self.block(pos) else { return };
+        if !crate::redstone::is_lightning_rod(self.state_name(state)) {
+            return;
+        }
+        let Some(on) = pl.with_prop(state, "powered", "true") else {
+            return;
+        };
+        self.set_block(pos, on);
+        // `updateNeighbours`: только блок за стержнем.
+        self.lightning_rod_neighbours(pos, on);
+        self.schedule(pos, crate::redstone::LIGHTNING_ROD_TICKS);
+        // `levelEvent(3002, pos, axis.ordinal())`: 0 — X, 1 — Y, 2 — Z.
+        let axis = match pl.prop(on, "facing") {
+            Some("east" | "west") => 0,
+            Some("north" | "south") => 2,
+            _ => 1,
+        };
+        self.hub.send(
+            None,
+            play::level_event(self.ids.level_event, 3002, pos, axis, false),
+        );
+    }
+
+    /// `LightningRodBlock.updateNeighbours`: блок в стороне, противоположной
+    /// `facing`, то есть опора стержня.
+    fn lightning_rod_neighbours(&self, pos: [i32; 3], state: u32) {
+        let Some(facing) = self.survival.placement.prop(state, "facing") else {
+            return;
+        };
+        let dir = crate::redstone::hook_reaches(facing);
+        let back = crate::redstone::place(pos, crate::redstone::opposite(dir), 1);
+        self.redstone_update(&crate::redstone::around(back));
+        // Сам стержень тоже меняет слабый выход — соседи читают его.
+        self.redstone_update(&crate::redstone::around(pos));
+    }
+
+    /// Удар молнии в `pos`: если рядом (в радиусе 128) есть молниеотвод, он
+    /// принимает разряд (`LightningBolt` ищет стержень в своём радиусе).
+    ///
+    /// Возвращает позицию стержня, если разряд принят. Это и есть точка
+    /// входа для молнии: её вызывает тик грозы и команды/плагины.
+    pub fn lightning_strike(&self, pos: [i32; 3]) -> Option<[i32; 3]> {
+        let rod = self.nearest_lightning_rod(pos)?;
+        self.lightning_rod_strike(rod);
+        Some(rod)
+    }
+
+    /// Ближайший молниеотвод в радиусе `LIGHTNING_ROD_RANGE`.
+    ///
+    /// Кандидаты собираются обходом куба: стержней в мире единицы, а полного
+    /// индекса по блокам нет. Выбор ближайшего — `redstone::nearest_rod`,
+    /// чтобы правило «только сверху и ближайший» проверялось тестом.
+    fn nearest_lightning_rod(&self, pos: [i32; 3]) -> Option<[i32; 3]> {
+        let range = crate::redstone::LIGHTNING_ROD_RANGE;
+        let mut rods = Vec::new();
+        for dx in -range..=range {
+            for dz in -range..=range {
+                for dy in 0..(range / 2) {
+                    let p = [pos[0] + dx, pos[1] + dy, pos[2] + dz];
+                    let Some(state) = self.block(p) else { continue };
+                    if crate::redstone::is_lightning_rod(self.state_name(state)) {
+                        rods.push(p);
+                    }
+                }
+            }
+        }
+        crate::redstone::nearest_rod(pos, &rods).map(|i| rods[i])
+    }
+
+    /// `LecternBlock.tryPlaceBook`: положить книгу на лектор.
+    ///
+    /// Возвращает `false`, если книга уже есть или предмет — не книга. Номер
+    /// страницы и сама книга живут в блок-сущности (`Page`, `Book`), как в
+    /// ванили, поэтому переживают перезапуск.
+    fn lectern_place_book(&self, pos: [i32; 3], book: Stack, creative: bool) -> bool {
+        let pl = &self.survival.placement;
+        let Some(state) = self.block(pos) else {
+            return false;
+        };
+        if !crate::redstone::is_lectern(self.state_name(state)) {
+            return false;
+        }
+        if pl.prop(state, "has_book") == Some("true") {
+            return false;
+        }
+        let name = self.item_name(book.item);
+        if !crate::redstone::is_lectern_book(name) {
+            return false;
+        }
+        // Сколько страниц у книги: у записанной и у черновой — по размеру
+        // списка страниц; у обычной книги — 100 (ванильный `BookPage`).
+        let pages = crate::redstone::lectern_pages(name, None);
+        let mut nbt = self.block_entity(pos).map(|b| b.nbt).unwrap_or_default();
+        nbt.insert("Page".into(), Tag::Int(0));
+        if let Some(book) = crate::stack_nbt::to_nbt(book, name) {
+            nbt.insert("Book".into(), Tag::Compound(book));
+        }
+        self.set_block_entity(
+            pos,
+            Some(BlockEntity {
+                id: "minecraft:lectern".into(),
+                nbt,
+            }),
+        );
+        self.lectern_set_book_state(pos, state, true);
+        self.block_sound(None, "minecraft:item.book.put", pos, 1.0, 1.0);
+        let _ = (creative, pages);
+        true
+    }
+
+    /// `LecternBlock.resetBookState`: выставить `has_book` и снять `powered`,
+    /// затем обновить блок под лектором.
+    fn lectern_set_book_state(&self, pos: [i32; 3], state: u32, has_book: bool) {
+        let pl = &self.survival.placement;
+        let Some(next) = pl
+            .with_prop(state, "powered", "false")
+            .and_then(|s| pl.with_prop(s, "has_book", if has_book { "true" } else { "false" }))
+        else {
+            return;
+        };
+        self.set_block(pos, next);
+        self.redstone_update(&crate::redstone::around(crate::redstone::place(pos, 0, 1)));
+    }
+
+    /// `LecternBlock.signalPageChange`: 2 тика сигнала и событие `1043`.
+    ///
+    /// Страница листается вперёд и заворачивается на первую — в ванили это
+    /// делают кнопки меню, у нас клик пустой рукой.
+    fn lectern_turn_page(&self, pos: [i32; 3]) -> bool {
+        let pl = &self.survival.placement;
+        let Some(state) = self.block(pos) else {
+            return false;
+        };
+        if pl.prop(state, "has_book") != Some("true") {
+            return false;
+        }
+        let Some(mut nbt) = self
+            .block_entity(pos)
+            .filter(|b| b.id == "minecraft:lectern")
+            .map(|b| b.nbt)
+        else {
+            return false;
+        };
+        let book = nbt.get("Book").and_then(|t| t.as_compound()).cloned();
+        let pages = book.as_ref().map_or(1, crate::redstone::book_pages);
+        let page = nbt.get("Page").and_then(|t| t.as_i64()).unwrap_or(0) as i32;
+        let next = if pages > 0 { (page + 1) % pages } else { 0 };
+        nbt.insert("Page".into(), Tag::Int(next));
+        self.set_block_entity(
+            pos,
+            Some(BlockEntity {
+                id: "minecraft:lectern".into(),
+                nbt,
+            }),
+        );
+        // `signalPageChange`: включить на 2 тика и разослать событие.
+        if let Some(on) = pl.with_prop(state, "powered", "true") {
+            self.set_block(pos, on);
+            self.redstone_update(&crate::redstone::around(crate::redstone::place(pos, 0, 1)));
+        }
+        self.schedule(pos, crate::redstone::LECTERN_PAGE_IMPULSE_TICKS);
+        self.hub.send(
+            None,
+            play::level_event(self.ids.level_event, 1043, pos, 0, false),
+        );
+        true
+    }
+
+    /// Страница и число страниц лектора: для компаратора.
+    fn lectern_page_state(&self, pos: [i32; 3]) -> (bool, i32, i32) {
+        let pl = &self.survival.placement;
+        let Some(state) = self.block(pos) else {
+            return (false, 0, 0);
+        };
+        let has_book = pl.prop(state, "has_book") == Some("true");
+        let Some(nbt) = self
+            .block_entity(pos)
+            .filter(|b| b.id == "minecraft:lectern")
+            .map(|b| b.nbt)
+        else {
+            return (has_book, 0, 0);
+        };
+        let page = nbt.get("Page").and_then(|t| t.as_i64()).unwrap_or(0) as i32;
+        let pages = nbt
+            .get("Book")
+            .and_then(|t| t.as_compound())
+            .map_or(0, crate::redstone::book_pages);
+        (has_book, page, pages)
+    }
+
+    /// `DetectorRailBlock.checkPressed`: есть ли вагонетка в рамке `0.2…0.8`.
+    ///
+    /// Вагонеток в сервере пока нет (отдельная строка матрицы), поэтому
+    /// нажатие невозможно. Рамка и правило «сигнал держится, пока вагонетка
+    /// внутри» уже совпадают с ванилью и проверены тестом
+    /// `detector_rail_search_box`; когда появятся вагонетки, здесь будет
+    /// поиск по их позициям в этих границах.
+    fn detector_rail_pressed(&self, pos: [i32; 3]) -> bool {
+        let (min, max) = crate::redstone::detector_search_box(pos);
+        let _ = (min, max);
+        false
     }
 
     fn chest_at(&self, pos: [i32; 3]) -> Option<ChestState> {
