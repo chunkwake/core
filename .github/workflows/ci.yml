@@ -8,8 +8,64 @@ env:
   # Версия, под которую собран сервер (`crates/server/src/lib.rs`).
   MC_VERSION: "26.3"
 
+# Пропуск частей сборки — тегом в сообщении коммита:
+#
+#   [skip tests]    не гонять fmt, clippy и тесты
+#   [skip release]  не собирать релизные бинарники
+#   [skip both]     ни то, ни другое
+#
+# `[skip ci]` — встроенный тег GitHub: он отменяет весь workflow целиком,
+# и до этой проверки дело не доходит. Нужен, когда не надо ничего.
+#
+# Тег действует на весь запуск: если в PR несколько коммитов, достаточно
+# поставить его в любом из них (ищется по сообщениям всех коммитов ветки).
+#
+# Зачем вообще: релиз собирается на двух ОС и тянет Gradle и 60 МБ jar —
+# на правке в документации или в тестах это лишние десять минут.
+
 jobs:
+  # Считает флаги один раз, чтобы остальные job'ы только читали результат:
+  # выражение `if` не умеет разбирать сообщение коммита само по себе.
+  flags:
+    runs-on: ubuntu-latest
+    outputs:
+      tests: ${{ steps.flags.outputs.tests }}
+      release: ${{ steps.flags.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Нужна вся история: на pull_request тег может стоять в любом
+          # коммите ветки, а не только в последнем.
+          fetch-depth: 0
+
+      - id: flags
+        shell: bash
+        name: Read skip tags
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # Все коммиты PR, а не только вершина: тег ставят там, где удобно.
+            message=$(git log --format=%B "${{ github.event.pull_request.base.sha }}..HEAD")
+          else
+            message=$(git log -1 --format=%B)
+          fi
+          echo "$message" | head -n 30
+
+          tests=true
+          release=true
+          if grep -qiE '\[skip[ -]tests?\]' <<< "$message"; then tests=false; fi
+          if grep -qiE '\[skip[ -]release\]' <<< "$message"; then release=false; fi
+          if grep -qiE '\[skip[ -]both\]' <<< "$message"; then
+            tests=false
+            release=false
+          fi
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "тесты: $tests, релиз: $release"
+
   rust:
+    needs: flags
+    if: needs.flags.outputs.tests == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -90,8 +146,12 @@ jobs:
           fi
           cargo test --workspace
 
+  # Параллельно с `rust`, а не после: правки в Java-части, README или скриптах
+  # не должны ждать полного прогона тестов, чтобы выпустить бинарники. Связь
+  # через `needs` осталась только с `flags` — она нужна ради тегов.
   release:
-    needs: rust
+    needs: flags
+    if: needs.flags.outputs.release == 'true'
     strategy:
       fail-fast: false
       matrix:
