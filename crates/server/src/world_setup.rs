@@ -148,6 +148,7 @@ pub fn build_play_plan(
     chunkwake_world::set_fluid_states(fluid_states(&blocks.states()));
     chunkwake_world::set_state_flags(state_flags(&blocks.states()));
     chunkwake_world::set_extra_flags(extra_flags(&blocks.states()));
+    chunkwake_world::set_rare_flags(rare_flags(&blocks.states()));
     chunkwake_world::set_poi_bits(poi_bits(&blocks.states()));
     chunkwake_world::set_height_classes(height_classes(data_dir, &blocks.states())?);
     let (terrain, locate_biome, locate_structure, spawn_noise, sea_level, is_flat) = match &level
@@ -942,6 +943,26 @@ fn extra_flags(states: &[Option<(String, chunkwake_data::world::Properties)>]) -
             }
             if path == "hopper" {
                 bits |= xf::HOPPER;
+            }
+            bits
+        })
+        .collect()
+}
+
+/// Третий байт флагов: то, чего не влезло во второй.
+fn rare_flags(states: &[Option<(String, chunkwake_data::world::Properties)>]) -> Vec<u8> {
+    use chunkwake_world::rare as rf;
+    states
+        .iter()
+        .map(|s| {
+            let Some((name, _)) = s else { return 0 };
+            let path = name.strip_prefix("minecraft:").unwrap_or(name);
+            let mut bits = 0u8;
+            if path == "tripwire" {
+                bits |= rf::TRIPWIRE;
+            }
+            if path == "tripwire_hook" {
+                bits |= rf::TRIPWIRE_HOOK;
             }
             bits
         })

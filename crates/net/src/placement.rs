@@ -475,6 +475,28 @@ impl Placement {
         vec![([0; 3], s)]
     }
 
+    /// `TripWireBlock.getStateForPlacement`: нить тянется к соседней нити и к
+    /// крюку, который смотрит в её сторону.
+    ///
+    /// Направления здесь — север, юг, запад, восток из [`Ctx::near`], а
+    /// `DIRS` нумерует их как 2, 3, 4, 5, поэтому индекс сдвинут на два.
+    pub fn tripwire_placement(&self, default: u32, c: &Ctx) -> u32 {
+        let mut s = default;
+        for i in 0..4 {
+            let near = c.near[i][0];
+            let some = self.name(near);
+            let connected = some.is_some_and(|n| {
+                crate::redstone::tripwire_connects(n, self.prop(near, "facing"), i + 2)
+            });
+            self.set(
+                &mut s,
+                DIRS[i + 2],
+                if connected { "true" } else { "false" },
+            );
+        }
+        s
+    }
+
     /// `DoorBlock.getHinge`: петли к полным блокам и от соседней двери, иначе по точке клика.
     fn hinge(&self, name: &str, facing: usize, c: &Ctx) -> &'static str {
         let near = |d: usize| c.near[d - 2];

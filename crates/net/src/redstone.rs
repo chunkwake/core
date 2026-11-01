@@ -77,7 +77,7 @@ pub const DIRS: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
 const DOWN: usize = 0;
 const UP: usize = 1;
 
-fn opposite(d: usize) -> usize {
+pub fn opposite(d: usize) -> usize {
     d ^ 1
 }
 
@@ -305,6 +305,9 @@ impl World<'_> {
                     0
                 }
             }
+            // Крюк растяжки — источник (`isSignalSource`), слабый выход 15 во
+            // все стороны: `ownSignal` не смотрит на направление.
+            _ if is_tripwire_hook(name) => i32::from(self.on(s, "powered")) * 15,
             _ => 0,
         }
     }
@@ -331,6 +334,11 @@ impl World<'_> {
             } else {
                 0
             };
+        }
+        // `getDirectSignal` крюка: 15 только в сторону `facing`, то есть в
+        // блок, на котором он висит, — и оттуда питает проводник насквозь.
+        if is_tripwire_hook(name) {
+            return i32::from(self.on(s, "powered") && self.facing(s) == dir) * 15;
         }
         match name {
             "minecraft:repeater"
@@ -709,6 +717,212 @@ pub fn repeater_delay(pl: &crate::placement::Placement, state: u32) -> u64 {
         * 2
 }
 
+/// Позиция на `n` шагов в сторону `dir`.
+pub fn place(p: [i32; 3], dir: usize, n: usize) -> [i32; 3] {
+    let d = crate::placement::step(dir);
+    [
+        p[0] + d[0] * n as i32,
+        p[1] + d[1] * n as i32,
+        p[2] + d[2] * n as i32,
+    ]
+}
+
+/// Название противоположного направления (`Direction.getOpposite`).
+pub fn opposite_name(dir: usize) -> &'static str {
+    DIRS[opposite(dir)]
+}
+
+/// Растяжка — та самая нить между двумя крюками.
+pub fn is_tripwire(name: &str) -> bool {
+    name == "minecraft:tripwire"
+}
+
+pub fn is_tripwire_hook(name: &str) -> bool {
+    name == "minecraft:tripwire_hook"
+}
+
+/// `TripWireHookBlock.WIRE_DIST_MAX`: дальше 42 блоков крюк второй не ищет.
+pub const WIRE_DIST_MAX: i32 = 42;
+/// `RECHECK_PERIOD`: пока по нити кто-то идёт, проверка раз в 10 тиков.
+pub const RECHECK_PERIOD: u64 = 10;
+
+/// Габариты нити (`TripWireBlock.getShape`): натянутая тоньше и выше,
+/// провисшая — от пола до половины блока. Границы — в блоках от угла клетки.
+///
+/// `Block.column(16.0, 1.0, 2.5)` — это `box(0, 1, 0, 16, 2.5, 16)`, то есть
+/// в блоках `y` от `1/16` до `2.5/16`; провисшая — `0…8/16`.
+pub fn tripwire_shape(attached: bool) -> ([f64; 2], [f64; 2]) {
+    if attached {
+        ([0.0, 1.0 / 16.0], [1.0, 2.5 / 16.0])
+    } else {
+        ([0.0, 0.0], [1.0, 0.5])
+    }
+}
+
+/// Задевает ли сущность нить в клетке `wire` (`level.getEntities(null, shape.bounds().move(pos))`).
+///
+/// Сущность задаётся рамкой: `min` и `max` в мировых координатах. Рамка нити
+/// берётся по её состоянию, поэтому натянутая ловится только в тонкой полосе
+/// у пола — как в ванили.
+pub fn touches_wire(attached: bool, wire: [i32; 3], min: [f64; 3], max: [f64; 3]) -> bool {
+    let (lo, hi) = tripwire_shape(attached);
+    for axis in 0..3 {
+        let (from, to) = if axis == 1 {
+            (lo[1], hi[1])
+        } else {
+            (lo[0], hi[0])
+        };
+        let a = wire[axis] as f64 + from;
+        let b = wire[axis] as f64 + to;
+        // `AABB.intersects`: касание границей не считается.
+        if max[axis] <= a || min[axis] >= b {
+            return false;
+        }
+    }
+    true
+}
+
+/// `TripWireBlock.updateSource`: в какую сторону искать второй крюк.
+///
+/// Ванила перебирает только `SOUTH` и `WEST`, поэтому цепь ищется в одну
+/// сторону от каждой нити — второй крюк найдётся сам, когда дойдёт очередь.
+pub const WIRE_SCAN: [usize; 2] = [3, 4];
+
+/// Какой стороной крюк смотрит в нить (`TripWireHookBlock.FACING`): крюк
+/// соединяется с нитью позади себя, то есть `facing` указывает на опору.
+pub fn hook_reaches(facing: &str) -> usize {
+    // `pos.relative(direction, i)` в `calculateState`: `direction` — это
+    // `facing`, и нить лежит именно в ту сторону.
+    DIRS.iter().position(|d| *d == facing).unwrap_or(2)
+}
+
+/// `shouldConnectTo`: нить соединяется с соседней нитью и с крюком, который
+/// смотрит в её сторону (`facing == direction.getOpposite()`).
+pub fn tripwire_connects(neighbor: &str, neighbor_facing: Option<&str>, dir: usize) -> bool {
+    if is_tripwire_hook(neighbor) {
+        return neighbor_facing.is_some_and(|f| DIRS[opposite(dir)] == f);
+    }
+    is_tripwire(neighbor)
+}
+
+/// Итог прохода по цепи от крюка (`TripWireHookBlock.calculateState`).
+pub struct Chain {
+    pub attached: bool,
+    pub powered: bool,
+    /// Номер клетки второго крюка; 0 — не найден.
+    pub receiver: i32,
+    /// Встретилась клетка `wire_source`: крюку нужен повторный тик.
+    pub reschedule: bool,
+    /// Состояния нитей по номеру клетки: нужны, чтобы проставить `attached`.
+    wires: Vec<Option<u32>>,
+}
+
+impl Chain {
+    pub fn wire(&self, i: i32) -> Option<u32> {
+        usize::try_from(i)
+            .ok()
+            .and_then(|i| self.wires.get(i).copied().flatten())
+    }
+}
+
+/// Проход от крюка в сторону `direction` (это его `facing`).
+///
+/// `at` отдаёт состояние блока через `i` шагов; `None` — чанк не загружен,
+/// что в ванили тоже обрывает цепь.
+///
+/// Формулы — из `TripWireHookBlock.calculateState`:
+/// `attached` падает на постороннем блоке и на разоружённой нити,
+/// `powered` — «есть включённая и неразоружённая нить», а оба требуют,
+/// чтобы второй крюк стоял дальше первого блока (`receiverPos > 1`).
+pub fn scan_chain(
+    pl: &crate::placement::Placement,
+    direction: usize,
+    being_destroyed: bool,
+    wire_source: i32,
+    wire_state: Option<u32>,
+    at: impl Fn(usize) -> Option<u32>,
+) -> Chain {
+    let mut attached = !being_destroyed;
+    let mut powered = false;
+    let mut receiver = 0;
+    let mut reschedule = false;
+    let mut wires = vec![None; WIRE_DIST_MAX as usize];
+    let opposite = opposite_name(direction);
+    for (i, slot) in wires.iter_mut().enumerate().skip(1) {
+        let Some(mut wire) = at(i) else {
+            attached = false;
+            break;
+        };
+        let name = pl.name(wire).unwrap_or("");
+        if is_tripwire_hook(name) {
+            // Второй крюк считается, только если смотрит навстречу.
+            if pl.prop(wire, "facing") != Some(opposite) {
+                break;
+            }
+            receiver = i;
+            break;
+        }
+        if is_tripwire(name) || i == wire_source as usize {
+            if i == wire_source as usize
+                && let Some(given) = wire_state
+            {
+                wire = given;
+            }
+            let armed = pl.prop(wire, "disarmed") != Some("true");
+            let on = pl.prop(wire, "powered") == Some("true");
+            powered |= armed && on;
+            *slot = Some(wire);
+            if i == wire_source as usize {
+                reschedule = true;
+                attached &= armed;
+            }
+            continue;
+        }
+        // Посторонний блок снимает натяжение, но поиск крюка продолжается.
+        attached = false;
+    }
+    attached &= receiver > 1;
+    powered &= attached;
+    Chain {
+        attached,
+        powered,
+        receiver: receiver as i32,
+        reschedule,
+        wires,
+    }
+}
+
+/// Звук крюка (`TripWireHookBlock.emitState`): (звук, громкость, высота).
+pub fn hook_sound(
+    powered: bool,
+    was_powered: bool,
+    attached: bool,
+    was_attached: bool,
+    random: f32,
+) -> Option<(&'static str, f32, f32)> {
+    if powered && !was_powered {
+        Some(("minecraft:block.tripwire.click_on", 0.4, 0.6))
+    } else if !powered && was_powered {
+        Some(("minecraft:block.tripwire.click_off", 0.4, 0.5))
+    } else if attached && !was_attached {
+        Some(("minecraft:block.tripwire.attach", 0.4, 0.7))
+    } else if !attached && was_attached {
+        // Высота дрожит: `1.2 / (random * 0.2 + 0.9)`.
+        Some((
+            "minecraft:block.tripwire.detach",
+            0.4,
+            1.2 / (random * 0.2 + 0.9),
+        ))
+    } else {
+        None
+    }
+}
+
+/// Разоружённая ножницами нить (`TripWireBlock.playerWillDestroy`).
+pub fn tripwire_disarm_flag(pl: &crate::placement::Placement, state: u32) -> Option<u32> {
+    pl.with_prop(state, "disarmed", "true")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,6 +981,52 @@ mod tests {
                 "minecraft:redstone_torch",
                 vec![("lit".into(), on.into())],
             );
+        }
+        // Растяжка: крюк (снятый и включённый) и нить с `disarmed`.
+        add(
+            "hook".into(),
+            "minecraft:tripwire_hook",
+            vec![
+                ("facing".into(), "north".into()),
+                ("powered".into(), "false".into()),
+                ("attached".into(), "false".into()),
+            ],
+        );
+        for powered in ["true", "false"] {
+            add(
+                format!("hook_on_{powered}"),
+                "minecraft:tripwire_hook",
+                vec![
+                    ("facing".into(), "north".into()),
+                    ("powered".into(), powered.into()),
+                    ("attached".into(), "true".into()),
+                ],
+            );
+            // Крюк на дальнем конце цепи по оси X смотрит навстречу (запад).
+            add(
+                format!("hook_west_{powered}"),
+                "minecraft:tripwire_hook",
+                vec![
+                    ("facing".into(), "west".into()),
+                    ("powered".into(), powered.into()),
+                    ("attached".into(), "true".into()),
+                ],
+            );
+            for disarmed in ["true", "false"] {
+                add(
+                    format!("wire_{powered}_{disarmed}"),
+                    "minecraft:tripwire",
+                    vec![
+                        ("powered".into(), powered.into()),
+                        ("disarmed".into(), disarmed.into()),
+                        ("attached".into(), "true".into()),
+                        ("north".into(), "true".into()),
+                        ("south".into(), "true".into()),
+                        ("west".into(), "false".into()),
+                        ("east".into(), "false".into()),
+                    ],
+                );
+            }
         }
         let mut sturdy = vec![0u8; states.len()];
         sturdy[ids["stone"] as usize] = 63;
@@ -932,5 +1192,198 @@ mod tests {
             analog: &|_| None,
         };
         assert_eq!(w.comparator_target([0, 0, 0]), 0);
+    }
+
+    /// Крюк растяжки — источник: сигнал 15 слабым выходом и сильным только в
+    /// сторону `facing` (`ownSignal` и `getDirectSignal`).
+    #[test]
+    fn tripwire_hook_signal_is_directional() {
+        let (pl, id) = table();
+        let blocks = HashMap::from([([0, 0, 0], id["hook_on_true"]), ([1, 0, 0], id["hook"])]);
+        let at = |p: [i32; 3]| blocks.get(&p).copied().unwrap_or(0);
+        let w = World {
+            pl: &pl,
+            at: &at,
+            output: &|_| 0,
+            analog: &|_| None,
+        };
+        // Слабый сигнал — во все шесть сторон, пока крюк включён.
+        for dir in 0..6 {
+            assert_eq!(
+                w.weak([0, 0, 0], dir, true),
+                15,
+                "слабый, направление {dir}"
+            );
+        }
+        // Сильный — только в `facing` (север = 2), то есть в опору.
+        assert_eq!(w.strong([0, 0, 0], 2, true), 15);
+        for dir in [0, 1, 3, 4, 5] {
+            assert_eq!(
+                w.strong([0, 0, 0], dir, true),
+                0,
+                "сильный, направление {dir}"
+            );
+        }
+        // Выключенный крюк молчит.
+        for dir in 0..6 {
+            assert_eq!(w.weak([1, 0, 0], dir, true), 0);
+            assert_eq!(w.strong([1, 0, 0], dir, true), 0);
+        }
+    }
+
+    /// Габариты нити и попадание в них: натянутая ловится узкой полосой у
+    /// пола, провисшая — до половины блока.
+    #[test]
+    fn tripwire_shape_matches_vanilla() {
+        let (attached_lo, attached_hi) = tripwire_shape(true);
+        assert_eq!(attached_lo[1], 1.0 / 16.0);
+        assert_eq!(attached_hi[1], 2.5 / 16.0);
+        let (loose_lo, loose_hi) = tripwire_shape(false);
+        assert_eq!(loose_lo[1], 0.0);
+        assert_eq!(loose_hi[1], 0.5);
+        // По горизонтали нить занимает всю клетку.
+        for (lo, hi) in [(attached_lo, attached_hi), (loose_lo, loose_hi)] {
+            assert_eq!(lo[0], 0.0);
+            assert_eq!(hi[0], 1.0);
+        }
+
+        let wire = [0, 0, 0];
+        // Стоящий на полу игрок (ноги на y=0) задевает обе формы.
+        let feet = ([0.2, 0.0, 0.2], [0.8, 1.8, 0.8]);
+        assert!(touches_wire(false, wire, feet.0, feet.1));
+        assert!(touches_wire(true, wire, feet.0, feet.1));
+        // Висящий над нитью в метре — нет.
+        let above = ([0.2, 1.0, 0.2], [0.8, 2.8, 0.8]);
+        assert!(!touches_wire(false, wire, above.0, above.1));
+        // Сущность, стоящая внутри пологой нити (`0…8/16`), но выше полосы
+        // натянутой (`1/16…2.5/16`): провисшая ловит, натянутая — нет.
+        let gap = ([0.2, 0.4, 0.2], [0.8, 0.9, 0.8]);
+        assert!(touches_wire(false, wire, gap.0, gap.1), "провисшая ловит");
+        assert!(
+            !touches_wire(true, wire, gap.0, gap.1),
+            "натянутая не ловит"
+        );
+        // А сущность в полосе натянутой — ловится обеими.
+        let band = ([0.2, 0.07, 0.2], [0.8, 1.87, 0.8]);
+        assert!(touches_wire(true, wire, band.0, band.1));
+        // Соседняя клетка не ловится.
+        assert!(!touches_wire(false, [1, 0, 0], feet.0, feet.1));
+    }
+
+    /// Нить соединяется с соседней нитью и с крюком, смотрящим навстречу.
+    #[test]
+    fn tripwire_connects_like_vanilla() {
+        // Нить к северу от нас: dir = 2 (север), крюк должен смотреть на юг.
+        assert!(tripwire_connects("minecraft:tripwire", None, 2));
+        assert!(tripwire_connects(
+            "minecraft:tripwire_hook",
+            Some("south"),
+            2
+        ));
+        // Крюк, смотрящий в ту же сторону, не соединяется.
+        assert!(!tripwire_connects(
+            "minecraft:tripwire_hook",
+            Some("north"),
+            2
+        ));
+        // Посторонний блок — нет.
+        assert!(!tripwire_connects("minecraft:stone", None, 2));
+    }
+
+    /// Цепь крюк–нить–нить–крюк: `attached` и `powered` как в ванили.
+    #[test]
+    fn tripwire_chain_matches_vanilla() {
+        let (pl, id) = table();
+        // Цепь по оси X: 0 — крюк, 1 и 2 — нить, 3 — второй крюк.
+        let chain = |wire_powered: &'static str, disarmed: &'static str| {
+            let key = format!("wire_{wire_powered}_{disarmed}");
+            let blocks = [
+                id["hook"],
+                id[key.as_str()],
+                id[key.as_str()],
+                id["hook_west_false"],
+            ];
+            scan_chain(&pl, 5, false, -1, None, |i| blocks.get(i).copied())
+        };
+        // Нить включена — крюк натянут и под сигналом.
+        let on = chain("true", "false");
+        assert!(on.attached, "цепь из двух нитей натянута");
+        assert!(on.powered, "включённая нить питает крюк");
+        assert_eq!(on.receiver, 3, "второй крюк через две клетки");
+        // Нить выключена — натянута, но сигнала нет.
+        let off = chain("false", "false");
+        assert!(off.attached);
+        assert!(!off.powered);
+        // Разоружённая нить: сигнал не поднимается (`powered |= armed && on`),
+        // но `attached` снимается только при вызове из этой нити
+        // (`if (i != wireSource) continue; attached &= wireArmed`).
+        let disarmed = chain("true", "true");
+        assert!(!disarmed.powered, "разоружённая нить сигнала не даёт");
+        // Обход от крюка (wire_source = −1) `attached` не трогает.
+        assert!(disarmed.attached);
+        // А вызов из разоружённой нити — снимает.
+        let blocks = [
+            id["hook"],
+            id["wire_true_true"],
+            id["wire_true_false"],
+            id["hook_west_false"],
+        ];
+        let from_wire = scan_chain(&pl, 5, false, 1, None, |i| blocks.get(i).copied());
+        assert!(
+            !from_wire.attached,
+            "нить, из которой пришёл вызов, разоружена — натяжение снимается"
+        );
+        assert!(from_wire.reschedule, "крюку нужен повторный тик");
+
+        // Крюк вплотную (`receiverPos == 1`) цепью не считается:
+        // `attached &= receiverPos > 1`.
+        let blocks = [id["hook"], id["hook_west_false"]];
+        let short = scan_chain(&pl, 5, false, -1, None, |i| blocks.get(i).copied());
+        assert_eq!(short.receiver, 1);
+        assert!(!short.attached, "крюк без нити не натягивает");
+        assert!(!short.powered);
+        // А через одну нить (receiver == 2) — уже считается.
+        let blocks = [id["hook"], id["wire_true_false"], id["hook_west_false"]];
+        let one_wire = scan_chain(&pl, 5, false, -1, None, |i| blocks.get(i).copied());
+        assert_eq!(one_wire.receiver, 2);
+        assert!(one_wire.attached);
+
+        // Посторонний блок снимает натяжение, но поиск второго крюка ванила
+        // не прекращает: `receiverPos` всё равно находится, а `attached`
+        // остаётся ложным.
+        let blocks = [
+            id["hook"],
+            id["wire_true_false"],
+            id["stone"],
+            id["hook_west_false"],
+        ];
+        let broken = scan_chain(&pl, 5, false, -1, None, |i| blocks.get(i).copied());
+        assert!(!broken.attached, "посторонний блок снимает натяжение");
+        assert!(!broken.powered);
+        assert_eq!(broken.receiver, 3, "второй крюк всё равно найден");
+    }
+
+    /// Звуки крюка: включение, выключение, натяжение и обрыв.
+    #[test]
+    fn tripwire_hook_sounds() {
+        assert_eq!(
+            hook_sound(true, false, true, true, 0.5),
+            Some(("minecraft:block.tripwire.click_on", 0.4, 0.6))
+        );
+        assert_eq!(
+            hook_sound(false, true, true, true, 0.5),
+            Some(("minecraft:block.tripwire.click_off", 0.4, 0.5))
+        );
+        assert_eq!(
+            hook_sound(false, false, true, false, 0.5),
+            Some(("minecraft:block.tripwire.attach", 0.4, 0.7))
+        );
+        let (sound, volume, pitch) = hook_sound(false, false, false, true, 0.5).expect("обрыв");
+        assert_eq!(sound, "minecraft:block.tripwire.detach");
+        assert_eq!(volume, 0.4);
+        // Высота дрожит: `1.2 / (random * 0.2 + 0.9)`.
+        assert!((pitch - 1.2 / (0.5 * 0.2 + 0.9)).abs() < 1e-6);
+        // Ничего не изменилось — молчание.
+        assert_eq!(hook_sound(true, true, true, true, 0.5), None);
     }
 }

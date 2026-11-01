@@ -6620,6 +6620,11 @@ impl PlayPlan {
                                         }
                                     }
                                 }
+                                // Нить тянется к соседним нитям и крюкам
+                                // (`TripWireBlock.getStateForPlacement`).
+                                if crate::redstone::is_tripwire(&name) {
+                                    place = pl.tripwire_placement(place, &ctx);
+                                }
                                 // Одна правка: тик не разошлёт промежуточные состояния.
                                 let edit = self.world_edit.lock().unwrap();
                                 self.set_block(target, place);
@@ -6641,6 +6646,11 @@ impl PlayPlan {
                                 self.link_chest(target, place);
                                 if let Some(id) = container_entity(&name) {
                                     self.set_block_entity(target, Some(BlockEntity { id: id.into(), nbt: Default::default() }));
+                                }
+                                // Крюк сразу считает свою цепь
+                                // (`TripWireHookBlock.setPlacedBy`).
+                                if crate::redstone::is_tripwire_hook(&name) {
+                                    self.tripwire_hook_state(target, false, false, -1, None);
                                 }
                                 drop(edit);
                                 if survival && let Some(i) = hand_slot && state.inv.consume_at(i) {
@@ -7074,14 +7084,42 @@ impl PlayPlan {
         let Some(old) = self.set_block(pos, AIR) else {
             return Ok(false);
         };
+        // Ножницы разоружают нить перед снятием (`TripWireBlock.playerWillDestroy`):
+        // в мир пишется `disarmed = true`, и последующий пересчёт крюков
+        // видит разоружённую нить — сигнал не поднимается. У нас блок уже
+        // снят, поэтому крюкам передаётся именно такое состояние.
+        let disarmed_by_shears = chunkwake_world::has_rare(old, chunkwake_world::rare::TRIPWIRE)
+            && self.live.lock().unwrap().get(&uuid).is_some_and(|l| {
+                self.item_name(l.slots[36 + l.selected].map_or(0, |s| s.item)) == "minecraft:shears"
+            });
         // Сломан включённый рычаг или кнопка — сигнал пропадает.
         if self.survival.placement.prop(old, "powered") == Some("true") && {
             let n = self.state_name(old);
-            crate::redstone::is_lever(n) || crate::redstone::is_button(n)
+            crate::redstone::is_lever(n)
+                || crate::redstone::is_button(n)
+                || crate::redstone::is_tripwire(n)
         } {
-            self.update_power(old, pos);
+            if disarmed_by_shears {
+                // Разоружённая нить молчит: крюки считаются по `disarmed`.
+                if let Some(gone) = self.survival.placement.with_prop(old, "disarmed", "true") {
+                    self.update_tripwire_source(pos, gone);
+                }
+            } else {
+                self.update_power(old, pos);
+            }
         } else {
             self.redstone_update(&crate::redstone::around(pos));
+        }
+        // Нить снята без ножниц: крюки теряют `attached` и сигнал.
+        if chunkwake_world::has_rare(old, chunkwake_world::rare::TRIPWIRE)
+            && !disarmed_by_shears
+            && let Some(on) = self.survival.placement.with_prop(old, "powered", "true")
+        {
+            self.update_tripwire_source(pos, on);
+        }
+        // Крюк: цепь рушится, а включённый ещё и гасит соседей (`onRemoved`).
+        if chunkwake_world::has_rare(old, chunkwake_world::rare::TRIPWIRE_HOOK) {
+            self.tripwire_hook_removed(old, pos);
         }
         // Частицы и звук ломки — остальным (ломающий проиграл их сам).
         self.hub.send(
@@ -7886,6 +7924,8 @@ impl PlayPlan {
             self.redstone_update(&crate::redstone::around(p));
         }
         lap!(PH_DEFERRED);
+        self.scan_tripwires();
+        lap!(PH_PLATES);
         self.scan_plates();
         lap!(PH_PLATES);
         self.tick_fluids(now);
@@ -7928,6 +7968,79 @@ impl PlayPlan {
             .unwrap()
             .schedule(pos, at, replace);
         self.mark_work();
+    }
+
+    /// `TripWireBlock.entityInside`: нить под сущностью включается.
+    ///
+    /// Ванила зовёт `entityInside` при каждом движении сущности, то есть на
+    /// каждом тике, и проверяет только ту клетку, где сущность оказалась.
+    /// Здесь так же: клетки берутся из позиций игроков, мобов и предметов,
+    /// и только те, где действительно лежит нить.
+    fn scan_tripwires(&self) {
+        // Быстрый выход: никто не двигается — нечего обходить.
+        let players = self.hub.players.lock().unwrap();
+        if players.values().all(|p| !p.collects)
+            && self.mobs.lock().unwrap().values().all(|e| !e.mob.alive())
+            && self.dropped.lock().unwrap().is_empty()
+        {
+            return;
+        }
+        let mut spots: Vec<[i32; 3]> = {
+            let live = self.live.lock().unwrap();
+            players
+                .values()
+                .filter(|p| p.collects)
+                .filter(|p| live.get(&p.entry.uuid).is_some_and(|l| l.health > 0.0))
+                .map(|p| {
+                    [
+                        p.pos[0].floor() as i32,
+                        p.pos[1].floor() as i32,
+                        p.pos[2].floor() as i32,
+                    ]
+                })
+                .collect()
+        };
+        drop(players);
+        spots.extend(
+            self.mobs
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|e| e.mob.alive())
+                .map(|e| {
+                    [
+                        e.mob.pos[0].floor() as i32,
+                        e.mob.pos[1].floor() as i32,
+                        e.mob.pos[2].floor() as i32,
+                    ]
+                }),
+        );
+        spots.extend(self.dropped.lock().unwrap().values().map(|d| {
+            [
+                d.pos[0].floor() as i32,
+                d.pos[1].floor() as i32,
+                d.pos[2].floor() as i32,
+            ]
+        }));
+        spots.sort();
+        spots.dedup();
+        for p in spots {
+            // Нить занимает ту же клетку, что и ноги сущности.
+            if self
+                .block(p)
+                .is_some_and(|s| chunkwake_world::has_rare(s, chunkwake_world::rare::TRIPWIRE))
+            {
+                let pl = &self.survival.placement;
+                let state = self.block(p).unwrap_or(AIR);
+                let attached = pl.prop(state, "attached") == Some("true");
+                let powered = pl.prop(state, "powered") == Some("true");
+                // Уже включённая нить ждёт своего тика: `entityInside` в
+                // ванили выходит, если `powered` или тик уже запланирован.
+                if !powered && self.tripwire_pressed(p, attached) {
+                    self.tripwire_check(p);
+                }
+            }
+        }
     }
 
     /// Игроки на плитах: нажать свободную (`checkPressed`), счёт для утяжелённых.
@@ -8192,6 +8305,14 @@ impl PlayPlan {
             }
         } else if rs::is_plate(&name) {
             self.update_plate(pos);
+        } else if rs::is_tripwire(&name) {
+            // `TripWireBlock.tick`: перепроверить, стоит ли кто-то на нити.
+            if pl.prop(state, "powered") == Some("true") {
+                self.tripwire_check(pos);
+            }
+        } else if rs::is_tripwire_hook(&name) {
+            // `TripWireHookBlock.tick`: полный пересчёт цепи.
+            self.tripwire_hook_state(pos, false, true, -1, None);
         } else if crate::pistons::is_piston(&name) {
             self.check_piston(pos);
         } else if name == "minecraft:dispenser" || name == "minecraft:dropper" {
@@ -8392,11 +8513,32 @@ impl PlayPlan {
             }
             for &p in &pending {
                 let s = at(p);
-                let name = self.state_name(s);
-                if rs::openable(name) {
+                // Две самые частые проверки — по флагам состояния: имя
+                // (срез строки из таблицы) нужно только остальным веткам.
+                if rs::openable(self.state_name(s)) {
                     self.refresh_openable(p, true);
                     cache.borrow_mut().clear();
-                } else if rs::is_lamp(name) {
+                    continue;
+                }
+                // Нить и крюк пересчитывают соединения и цепь по соседу.
+                if chunkwake_world::has_rare(s, chunkwake_world::rare::TRIPWIRE) {
+                    self.refresh_tripwire_shape(p);
+                    continue;
+                }
+                // У крюка в ванили нет `neighborChanged`: цепь считается
+                // только по своему тику, который планирует нить. Немедленный
+                // пересчёт здесь дал бы рекурсию через `notifyNeighbors`.
+                if chunkwake_world::has_rare(s, chunkwake_world::rare::TRIPWIRE_HOOK) {
+                    continue;
+                }
+                if rs::is_torch(self.state_name(s)) {
+                    if (pl.prop(s, "lit") == Some("true")) == w.torch_off(p) {
+                        self.schedule(p, 2);
+                    }
+                    continue;
+                }
+                let name = self.state_name(s);
+                if rs::is_lamp(name) {
                     let lit = pl.prop(s, "lit") == Some("true");
                     let powered = w.powered(p);
                     if powered && !lit {
@@ -10528,6 +10670,269 @@ impl PlayPlan {
             }
         }
         changed
+    }
+
+    /// `TripWireBlock.updateShape`: пересобрать `north/south/west/east` по
+    /// соседям. Сторона без соседа получает `false`, а не исчезает.
+    fn refresh_tripwire_shape(&self, pos: [i32; 3]) {
+        let pl = &self.survival.placement;
+        let Some(state) = self.block(pos) else { return };
+        let mut next = state;
+        for dir in 2..6 {
+            let side = crate::redstone::place(pos, dir, 1);
+            let Some(neighbor) = self.block(side) else {
+                continue;
+            };
+            let name = self.state_name(neighbor);
+            let connects =
+                crate::redstone::tripwire_connects(name, pl.prop(neighbor, "facing"), dir);
+            let value = if connects { "true" } else { "false" };
+            if let Some(n) = pl.with_prop(next, crate::redstone::DIRS[dir], value) {
+                next = n;
+            }
+        }
+        if next != state {
+            self.set_block(pos, next);
+        }
+    }
+
+    /// `TripWireBlock.checkPressed` для одной клетки нити.
+    ///
+    /// В ванили это `getEntities(null, shape.bounds().move(pos))`: нить
+    /// задевают игроки, мобы и предметы. Сущности, игнорирующие триггеры
+    /// (`isIgnoringBlockTriggers`), не считаются; в сервере так себя ведут
+    /// только несуществующие здесь виды, поэтому фильтр — «живая».
+    fn tripwire_pressed(&self, pos: [i32; 3], attached: bool) -> bool {
+        let hits =
+            |min: [f64; 3], max: [f64; 3]| crate::redstone::touches_wire(attached, pos, min, max);
+        // Игрок: рамка 0.6×1.8. Живость берётся из `live`, а не из таб-листа.
+        let player = {
+            let live = self.live.lock().unwrap();
+            self.hub.players.lock().unwrap().values().any(|p| {
+                let at = p.pos;
+                let alive = live.get(&p.entry.uuid).is_some_and(|l| l.health > 0.0);
+                alive
+                    && hits(
+                        [at[0] - 0.3, at[1], at[2] - 0.3],
+                        [at[0] + 0.3, at[1] + 1.8, at[2] + 0.3],
+                    )
+            })
+        };
+        if player {
+            return true;
+        }
+        let mob = self.mobs.lock().unwrap().values().any(|e| {
+            if !e.mob.alive() {
+                return false;
+            }
+            let (w, h) = e.mob.size();
+            let at = e.mob.pos;
+            hits(
+                [at[0] - w / 2.0, at[1], at[2] - w / 2.0],
+                [at[0] + w / 2.0, at[1] + h, at[2] + w / 2.0],
+            )
+        });
+        if mob {
+            return true;
+        }
+        // Предмет: куб 0.25 вокруг центра.
+        self.dropped.lock().unwrap().values().any(|d| {
+            let at = d.pos;
+            hits(
+                [at[0] - 0.125, at[1], at[2] - 0.125],
+                [at[0] + 0.125, at[1] + 0.25, at[2] + 0.125],
+            )
+        })
+    }
+
+    /// `TripWireBlock.checkPressed`: сменить `powered`, обновить крюки,
+    /// запланировать перепроверку.
+    fn tripwire_check(&self, pos: [i32; 3]) {
+        let pl = &self.survival.placement;
+        let Some(state) = self.block(pos) else { return };
+        let attached = pl.prop(state, "attached") == Some("true");
+        let was = pl.prop(state, "powered") == Some("true");
+        let pressed = self.tripwire_pressed(pos, attached);
+        if pressed != was
+            && let Some(next) =
+                pl.with_prop(state, "powered", if pressed { "true" } else { "false" })
+        {
+            self.set_block(pos, next);
+            self.update_tripwire_source(pos, next);
+        }
+        // Пока по нити идут — проверка раз в `RECHECK_PERIOD`; отпустило —
+        // через тик, чтобы сигнал снимался сразу.
+        if pressed {
+            self.schedule(pos, crate::redstone::RECHECK_PERIOD);
+        } else if was {
+            self.schedule(pos, 1);
+        }
+    }
+
+    /// `TripWireBlock.updateSource`: пересчитать крюки в обе стороны от нити.
+    ///
+    /// Ванила смотрит только `SOUTH` и `WEST`: второй крюк найдётся, когда
+    /// очередь дойдёт до него от своей позиции.
+    fn update_tripwire_source(&self, pos: [i32; 3], _state: u32) {
+        for dir in crate::redstone::WIRE_SCAN {
+            let Some(hook) = self.tripwire_hook_toward(pos, dir) else {
+                continue;
+            };
+            self.tripwire_hook_state(hook, false, false, -1, None);
+        }
+    }
+
+    /// Крюк в стороне `dir` от нити: ванильный `updateSource` ищет его в
+    /// пределах 42 блоков и требует, чтобы он смотрел навстречу.
+    fn tripwire_hook_toward(&self, pos: [i32; 3], dir: usize) -> Option<[i32; 3]> {
+        let pl = &self.survival.placement;
+        for i in 1..crate::redstone::WIRE_DIST_MAX {
+            let p = crate::redstone::place(pos, dir, i as usize);
+            let s = self.block(p)?;
+            if chunkwake_world::has_rare(s, chunkwake_world::rare::TRIPWIRE_HOOK) {
+                return (pl.prop(s, "facing") == Some(crate::redstone::opposite_name(dir)))
+                    .then_some(p);
+            }
+            if !chunkwake_world::has_rare(s, chunkwake_world::rare::TRIPWIRE) {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// `TripWireHookBlock.calculateState`: от крюка в сторону `facing` найти
+    /// второй крюк, посчитать `attached` и `powered` обоих, выставить их,
+    /// проиграть звук и обновить соседей.
+    ///
+    /// `wire_source` — номер клетки, чьё состояние только что изменилось
+    /// (`-1`, если смена пришла не от нити), `wire_state` — само состояние.
+    fn tripwire_hook_state(
+        &self,
+        pos: [i32; 3],
+        being_destroyed: bool,
+        can_update: bool,
+        wire_source: i32,
+        wire_state: Option<u32>,
+    ) {
+        let pl = &self.survival.placement;
+        let Some(state) = self.block(pos) else { return };
+        let Some(facing) = pl.prop(state, "facing") else {
+            return;
+        };
+        let direction = crate::redstone::hook_reaches(facing);
+        let was_attached = pl.prop(state, "attached") == Some("true");
+        let was_powered = pl.prop(state, "powered") == Some("true");
+        // Расчёт цепи — чистой функцией: её проверяет тест
+        // `tripwire_chain_matches_vanilla`, и она же не зависит от мира.
+        let scan = crate::redstone::scan_chain(
+            pl,
+            direction,
+            being_destroyed,
+            wire_source,
+            wire_state,
+            |i| {
+                let at = crate::redstone::place(pos, direction, i);
+                self.block(at)
+            },
+        );
+        let attached = scan.attached;
+        let powered = scan.powered;
+        let receiver = scan.receiver;
+        let Some(base) = pl
+            .with_prop(state, "attached", if attached { "true" } else { "false" })
+            .and_then(|s| pl.with_prop(s, "powered", if powered { "true" } else { "false" }))
+        else {
+            return;
+        };
+        // Вход из нити — перепроверка крюка через период (`scheduleTick`).
+        if scan.reschedule {
+            self.schedule(pos, crate::redstone::RECHECK_PERIOD);
+        }
+        if receiver > 0 {
+            let other = crate::redstone::place(pos, direction, receiver as usize);
+            if let Some(o) = pl.with_prop(base, "facing", crate::redstone::opposite_name(direction))
+            {
+                self.set_block(other, o);
+            }
+            self.notify_hook_neighbors(other, crate::redstone::opposite(direction));
+            // Второй крюк могли снести посреди расчёта.
+            if !self
+                .block(pos)
+                .is_some_and(|s| chunkwake_world::has_rare(s, chunkwake_world::rare::TRIPWIRE_HOOK))
+            {
+                self.tripwire_hook_removed(base, pos);
+                return;
+            }
+            self.tripwire_hook_sound(other, attached, powered, was_attached, was_powered);
+        }
+        self.tripwire_hook_sound(pos, attached, powered, was_attached, was_powered);
+        if !being_destroyed {
+            self.set_block(pos, base);
+            if can_update {
+                self.notify_hook_neighbors(pos, direction);
+            }
+        }
+        // Нить получает `attached` от крюка.
+        if was_attached != attached {
+            for i in 1..receiver {
+                let Some(wire) = scan.wire(i) else {
+                    continue;
+                };
+                let at = crate::redstone::place(pos, direction, i as usize);
+                let Some(n) =
+                    pl.with_prop(wire, "attached", if attached { "true" } else { "false" })
+                else {
+                    continue;
+                };
+                if self
+                    .block(at)
+                    .is_some_and(|s| chunkwake_world::has_rare(s, chunkwake_world::rare::TRIPWIRE))
+                {
+                    self.set_block(at, n);
+                }
+            }
+        }
+    }
+
+    /// `TripWireHookBlock.notifyNeighbors`: сам крюк и блок за ним.
+    fn notify_hook_neighbors(&self, pos: [i32; 3], facing: usize) {
+        self.redstone_update(&crate::redstone::around(pos));
+        self.redstone_update(&crate::redstone::around(crate::redstone::place(
+            pos, facing, 1,
+        )));
+    }
+
+    fn tripwire_hook_sound(
+        &self,
+        pos: [i32; 3],
+        attached: bool,
+        powered: bool,
+        was_attached: bool,
+        was_powered: bool,
+    ) {
+        let random = rand::random::<f32>();
+        if let Some((sound, volume, pitch)) =
+            crate::redstone::hook_sound(powered, was_powered, attached, was_attached, random)
+        {
+            self.block_sound(None, sound, pos, volume, pitch);
+        }
+    }
+
+    /// `onRemoved`: снятый крюк гасит сигнал, если был включён.
+    fn tripwire_hook_removed(&self, state: u32, pos: [i32; 3]) {
+        let pl = &self.survival.placement;
+        let attached = pl.prop(state, "attached") == Some("true");
+        let powered = pl.prop(state, "powered") == Some("true");
+        let facing = pl
+            .prop(state, "facing")
+            .map(crate::redstone::hook_reaches)
+            .unwrap_or(2);
+        if attached || powered {
+            self.tripwire_hook_state(pos, true, false, -1, None);
+        }
+        if powered {
+            self.notify_hook_neighbors(pos, facing);
+        }
     }
 
     fn chest_at(&self, pos: [i32; 3]) -> Option<ChestState> {

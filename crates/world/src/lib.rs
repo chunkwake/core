@@ -636,6 +636,38 @@ pub mod extra {
     pub const HOPPER: u8 = 1 << 3;
 }
 
+/// Третий байт флагов: совсем редкие проверки.
+///
+/// Второй байт кончился (`DAYLIGHT` занял последний бит), а растяжке нужна
+/// проверка в цикле тика, где имя блока — это срез строки из таблицы на
+/// каждом блоке. Отдельный байт дешевле, чем расширение двух первых.
+pub mod rare {
+    /// Нить растяжки (`minecraft:tripwire`).
+    pub const TRIPWIRE: u8 = 1 << 0;
+    /// Крюк растяжки (`minecraft:tripwire_hook`).
+    pub const TRIPWIRE_HOOK: u8 = 1 << 1;
+}
+
+static RARE_FLAGS: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
+/// Заполняет третий байт флагов.
+pub fn set_rare_flags(table: Vec<u8>) {
+    let _ = RARE_FLAGS.set(table);
+}
+
+/// Третий байт флагов состояния. Нет таблицы — ноль.
+pub fn rare_flags(state: u32) -> u8 {
+    RARE_FLAGS
+        .get()
+        .and_then(|table| table.get(state as usize).copied())
+        .unwrap_or(0)
+}
+
+/// Есть ли у состояния флаг из [`rare`].
+pub fn has_rare(state: u32, flag: u8) -> bool {
+    rare_flags(state) & flag != 0
+}
+
 static EXTRA_FLAGS: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
 
 /// Заполняет второй байт флагов (плиты, воронка).
