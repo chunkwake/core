@@ -70,9 +70,31 @@ fn strip_verbatim(p: PathBuf) -> PathBuf {
     }
 }
 
-/// `chunkwake-api.jar` и все jar из `libs/`.
-pub fn class_path(api_dir: &Path) -> Result<String, String> {
+/// `chunkwake-api.jar`, все jar из `libs/` и, если передан, jar игры.
+///
+/// Jar игры нужен ради `net.minecraft.*`: плагины под Paper зовут NMS напрямую
+/// (JourneyMap падает на `net/minecraft/network/RegistryFriendlyByteBuf`), а
+/// эти классы лежат только во внутреннем jar ванилы. Кладём его в конец
+/// classpath: наши реализации Bukkit должны побеждать, если имя совпадёт.
+pub fn class_path(api_dir: &Path, game_jar: Option<&Path>) -> Result<String, String> {
     let mut jars = vec![api_dir.join("chunkwake-api.jar")];
+    // Классы `net.minecraft.*`, распакованные из вложенного jar игры. Стоят
+    // раньше самого jar: внешний их не отдаёт (они внутри `META-INF/versions`).
+    let game_classes = api_dir.join("game-classes.jar");
+    if game_classes.is_file() {
+        jars.push(game_classes);
+    }
+    // Библиотеки самого jar игры (datafixerupper, brigadier, authlib): без них
+    // классы `net.minecraft.*` не грузятся.
+    let game_libs = api_dir.join("game-libs");
+    if let Ok(entries) = std::fs::read_dir(&game_libs) {
+        let mut extra: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "jar"))
+            .collect();
+        extra.sort();
+        jars.extend(extra);
+    }
     let libs = api_dir.join("libs");
     let entries = std::fs::read_dir(&libs).map_err(|e| format!("{}: {e}", libs.display()))?;
     let mut lib_jars: Vec<PathBuf> = entries
@@ -81,6 +103,9 @@ pub fn class_path(api_dir: &Path) -> Result<String, String> {
         .collect();
     lib_jars.sort();
     jars.extend(lib_jars);
+    if let Some(jar) = game_jar.filter(|p| p.is_file()) {
+        jars.push(jar.to_path_buf());
+    }
     let joined = std::env::join_paths(jars).map_err(|e| e.to_string())?;
     Ok(joined.to_string_lossy().into_owned())
 }

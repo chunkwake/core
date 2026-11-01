@@ -638,3 +638,35 @@ codec-base/codec-compression` версии 4.2.16.Final — ровно той, �
 без `? super`, а у `ExecutionState` нет `SCHEDULED` — есть `IDLE`/`RUNNING`/
 `FINISHED`/`CANCELLED`/`CANCELLED_RUNNING`. Компилировать по памяти здесь
 нельзя, только по `javap`.
+
+## NMS-классы для плагинов: `net.minecraft.*` из jar игры
+
+JourneyMap падал с `NoClassDefFoundError: net/minecraft/network/
+RegistryFriendlyByteBuf`. Это не баг плагина: под Paper такие классы лежат
+в classpath сервера, и обращение к NMS — обычная практика.
+
+В ванильном `server.jar` их нет на верхнем уровне: там 165 записей, а сами
+классы — во вложенном `META-INF/versions/26.3/server-26.3.jar` (25.4 МБ,
+7762 класса). Поэтому jar игры в classpath бесполезен — внутренний надо
+распаковать.
+
+`api_bundle::game_classes` достаёт вложенный jar в `api/game-classes.jar`
+(отпечаток по размеру и пути исходника), и рядом `api/game-libs/` —
+39 библиотек из `META-INF/libraries/`. Второе обязательно: NMS компилировался
+против них, и без `datafixerupper` (`com.mojang.serialization`),
+`brigadier` и `authlib` он не грузится даже при наличии самих классов.
+
+Проверено напрямую: `Class.forName` на оба буфера проходит с этими путями
+в classpath и падает без `game-libs`. Ошибка, которую я допустил по дороге:
+фильтр `!rest.contains('/')` отсекал настоящий путь вида
+`26.3/server-26.3.jar` — искал файл в корне `versions/`, а он в подкаталоге.
+
+Цена: +25.4 МБ на диске рядом с API (не в бинаре — распаковка при первом
+запуске, если рядом лежит `server.jar`).
+
+**Про BlueMap отдельно.** Он грузится (`Loaded!`, веб-сервер поднят), но
+`Server.getLevelDirectory()` и `World.getWorldPath()` **не вызываются ни
+разу** — трассировка через `CHUNKWAKE_API_TRACE` это показала. Значит до
+чтения регионов он не доходит, и причина не в мире (heightmaps теперь есть,
+чанки целы, свет на месте), а в чём-то, что он проверяет раньше. Рендер не
+запускается ни после `/bluemap reload`, ни со стёртым `bluemap/web/maps`.

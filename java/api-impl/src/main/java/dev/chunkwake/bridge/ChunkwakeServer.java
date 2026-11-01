@@ -410,6 +410,7 @@ final class ChunkwakeServer {
         // BlueMap берёт этот путь как КАТАЛОГ МИРА и прибавляет к нему
         // `region/` или `dimensions/minecraft/<измерение>`. Поэтому здесь
         // каталог мира, а не родительский каталог сервера.
+        Bridge.log(3, "api: getLevelDirectory -> " + levelDirectory);
         return levelDirectory;
     }
 
@@ -575,7 +576,10 @@ final class ChunkwakeServer {
         }
 
         /** Каталог мира: плагины читают из него регионы и `level.dat`. */
-        public java.nio.file.Path getWorldPath() { return Bridge.server.levelDirectory; }
+        public java.nio.file.Path getWorldPath() {
+            Bridge.log(3, "api: World.getWorldPath -> " + Bridge.server.levelDirectory);
+            return Bridge.server.levelDirectory;
+        }
 
         public int getSeaLevel() { return 63; }
 

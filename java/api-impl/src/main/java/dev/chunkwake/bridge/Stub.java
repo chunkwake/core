@@ -42,6 +42,14 @@ final class Stub {
     /** Строгий режим: нереализованный метод — исключение, а не дефолт. */
     static final boolean STRICT = strict();
 
+    /** Трассировка вызовов API: `CHUNKWAKE_API_TRACE=1`, только для отладки. */
+    static final boolean TRACE = trace();
+
+    private static boolean trace() {
+        String env = System.getenv("CHUNKWAKE_API_TRACE");
+        return env != null && !env.isEmpty() && !env.equals("0") || Boolean.getBoolean("chunkwake.api.trace");
+    }
+
     private static boolean strict() {
         String env = System.getenv("CHUNKWAKE_API_STRICT");
         if (env != null) {
@@ -75,6 +83,9 @@ final class Stub {
         InvocationHandler h = (proxy, m, args) -> {
             Optional<Method> target = CACHE.get(impl.getClass()).computeIfAbsent(m, k -> find(impl.getClass(), k));
             if (target.isPresent()) {
+            if (TRACE && (m.getName().contains("Level") || m.getName().contains("WorldPath"))) {
+                Bridge.log(3, "api-trace: " + iface.getSimpleName() + "." + m.getName());
+            }
                 try {
                     return target.get().invoke(impl, args);
                 } catch (InvocationTargetException e) {
@@ -102,6 +113,9 @@ final class Stub {
             }
             if (m.isDefault()) {
                 return InvocationHandler.invokeDefault(proxy, m, args);
+            }
+            if (TRACE) {
+                Bridge.log(3, "api-trace: " + iface.getSimpleName() + "." + m.getName() + " -> soft");
             }
             if (STRICT) {
                 throw new UnsupportedOperationException("chunkwake: " + iface.getSimpleName() + "."

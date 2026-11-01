@@ -117,6 +117,103 @@ fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
     Err(last.unwrap_or_else(|| std::io::Error::other("rename failed")))
 }
 
+/// Путь к jar с `net.minecraft.*` для classpath JVM.
+///
+/// Плагины под Paper зовут NMS напрямую (JourneyMap — `RegistryFriendlyByteBuf`),
+/// а эти классы лежат во вложенном jar внутри `server.jar`:
+/// `META-INF/versions/<версия>/server-<версия>.jar`. Внешний jar отдаёт только
+/// 6 своих `net/minecraft` записей, поэтому внутренний надо распаковать рядом
+/// с API — один раз, с тем же отпечатком, что у остальных распакованных данных.
+///
+/// `Ok(None)` — jar игры не найден или в нём нет вложенного: плагины, которым
+/// NMS не нужен, работают и так.
+pub fn game_classes(api_dir: &Path, game_jar: &Path) -> Result<Option<PathBuf>, String> {
+    const NAME: &str = "game-classes.jar";
+    let io = |what: &str, p: &Path, e: std::io::Error| format!("{what} {}: {e}", p.display());
+    std::fs::create_dir_all(api_dir).map_err(|e| io("create", api_dir, e))?;
+    let target = api_dir.join(NAME);
+    // Отпечаток исходного jar: пересборка сервера обновит и классы.
+    let stamp = target.with_extension("stamp");
+    let meta = std::fs::metadata(game_jar).map_err(|e| io("stat", game_jar, e))?;
+    let fingerprint = format!("{}\t{}\n", meta.len(), game_jar.display());
+    let fresh = target.is_file() && std::fs::read_to_string(&stamp).is_ok_and(|s| s == fingerprint);
+    let Ok(file) = std::fs::File::open(game_jar) else {
+        return Ok(None);
+    };
+    let Ok(mut outer) = zip::ZipArchive::new(file) else {
+        return Ok(None);
+    };
+    // Библиотеки jar нужны и когда классы уже распакованы: прошлые сборки
+    // (и прошлый запуск) могли оставить `game-classes.jar` без `game-libs`.
+    extract_game_libs(&mut outer, api_dir)?;
+    if fresh {
+        return Ok(Some(target));
+    }
+    // Вложенный jar версии: `META-INF/versions/<v>/server-<v>.jar`. Каталог
+    // версии в пути есть всегда, поэтому проверяем именно `.jar` и один слэш.
+    let nested = outer
+        .file_names()
+        .find(|n| {
+            n.strip_prefix("META-INF/versions/")
+                .is_some_and(|rest| rest.ends_with(".jar"))
+        })
+        .map(str::to_owned);
+    let Some(nested) = nested else {
+        return Ok(None);
+    };
+    let mut entry = outer
+        .by_name(&nested)
+        .map_err(|e| format!("{nested} in {}: {e}", game_jar.display()))?;
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    std::io::copy(&mut entry, &mut bytes).map_err(|e| format!("read {nested}: {e}"))?;
+    drop(entry);
+    std::fs::write(&target, &bytes).map_err(|e| io("write", &target, e))?;
+    let _ = std::fs::write(&stamp, fingerprint);
+    Ok(Some(target))
+}
+
+/// Распаковывает `META-INF/libraries/**/*.jar` из jar игры в `api/game-libs`.
+///
+/// Vanilla-бандлер держит зависимости внутри: без них классы `net.minecraft.*`
+/// находят свои типы только наполовину — NMS компилировался против них.
+fn extract_game_libs(
+    outer: &mut zip::ZipArchive<std::fs::File>,
+    api_dir: &Path,
+) -> Result<(), String> {
+    let dir = api_dir.join("game-libs");
+    let names: Vec<String> = outer
+        .file_names()
+        .filter(|n| n.starts_with("META-INF/libraries/") && n.ends_with(".jar"))
+        .map(str::to_owned)
+        .collect();
+    if names.is_empty() {
+        return Ok(());
+    }
+    // Проверяем по файлам, а не по маркеру: недописанный каталог от прошлой
+    // попытки не должен считаться готовым.
+    let done = names.iter().all(|n| {
+        let base = n.rsplit('/').next().unwrap_or(n);
+        dir.join(base).is_file()
+    });
+    if done {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    for name in &names {
+        let base = name.rsplit('/').next().unwrap_or(name);
+        let target = dir.join(base);
+        if target.is_file() {
+            continue;
+        }
+        let mut entry = outer.by_name(name).map_err(|e| format!("{name}: {e}"))?;
+        let mut file = std::fs::File::create(&target)
+            .map_err(|e| format!("create {}: {e}", target.display()))?;
+        std::io::copy(&mut entry, &mut file)
+            .map_err(|e| format!("write {}: {e}", target.display()))?;
+    }
+    Ok(())
+}
+
 fn unpack(archive: &[u8], dir: &Path) -> Result<(), String> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;

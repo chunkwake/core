@@ -123,11 +123,25 @@ impl Bridge {
         api_dir: &Path,
         plugins_dir: &Path,
         world_dir: &Path,
+        game_jar: Option<&Path>,
         plan: &Arc<PlayPlan>,
     ) -> Result<(Arc<Self>, i32), String> {
         let _ = HOST.set(Arc::downgrade(plan));
         let jvm_lib = jvm::find_library(java)?;
-        let class_path = jvm::class_path(api_dir)?;
+        // `net.minecraft.*` из вложенного jar игры: без них падают плагины,
+        // которые зовут NMS напрямую (JourneyMap).
+        if let Some(jar) = game_jar {
+            match api_bundle::game_classes(api_dir, jar) {
+                Ok(Some(path)) => tracing::debug!(
+                    "plugins: game classes from {} -> {}",
+                    jar.display(),
+                    path.display()
+                ),
+                Ok(None) => {}
+                Err(error) => tracing::warn!("plugins: game classes: {error}"),
+            }
+        }
+        let class_path = jvm::class_path(api_dir, game_jar)?;
         let table: &'static Table = Box::leak(Box::new(std::array::from_fn(|_| AtomicU64::new(0))));
         set(
             table,

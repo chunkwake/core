@@ -582,6 +582,17 @@ async fn start_plugins(
     let plan = play.clone();
     let world_dir = std::path::absolute(dir.join(&props.level_name))
         .unwrap_or_else(|_| dir.join(&props.level_name));
+    // Jar игры для classpath JVM: плагины под Paper зовут `net.minecraft.*`,
+    // а эти классы есть только внутри ванильного jar. Берём `vanilla-jar`,
+    // если задан, иначе стандартный `server.jar` рядом с `server.properties`.
+    let game_jar = props
+        .jar_path(dir)
+        .filter(|p| p.is_file())
+        .or_else(|| Some(dir.join("server.jar")).filter(|p| p.is_file()))
+        // Абсолютный путь: `Bridge` работает в потоке JVM, где рабочий каталог
+        // может отличаться, а относительный `.\server.jar` оттуда не откроется.
+        .and_then(|p| std::path::absolute(&p).ok().or(Some(p)));
+    tracing::debug!("plugins: game jar = {game_jar:?}");
     // JVM поднимается и плагины включаются синхронно, до первого тика: всё это
     // время сервер не отвечает. Без сообщения это неотличимо от зависания,
     // поэтому пишем и «начали», и «заняло столько».
@@ -591,7 +602,14 @@ async fn start_plugins(
     );
     let waiting = std::time::Instant::now();
     let started = tokio::task::spawn_blocking(move || {
-        chunkwake_bridge::Bridge::start(&java, &api, &plugins, &world_dir, &plan)
+        chunkwake_bridge::Bridge::start(
+            &java,
+            &api,
+            &plugins,
+            &world_dir,
+            game_jar.as_deref(),
+            &plan,
+        )
     })
     .await;
     match started {
