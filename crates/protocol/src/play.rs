@@ -75,6 +75,8 @@ pub fn write_spawn_info(w: &mut Writer, s: &SpawnInfo) {
 /// Коды `ClientboundGameEventPacket.Type`.
 pub mod game_event {
     pub const CHANGE_GAME_MODE: u8 = 3;
+    /// `WIN_GAME`: 0 — сразу респаун, 1 — титры.
+    pub const WIN_GAME: u8 = 4;
     pub const LEVEL_CHUNKS_LOAD_START: u8 = 13;
 }
 

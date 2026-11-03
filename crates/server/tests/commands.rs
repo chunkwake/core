@@ -595,7 +595,8 @@ fn locate_poi_finds_a_composter_and_mansion_is_missing() {
     let found = run(&plan, "locate poi minecraft:farmer");
     assert!(found.contains("commands.locate.poi.success"), "{found}");
     assert!(found.contains("chat.coordinates"), "{found}");
-    assert!(found.contains(&format!("4 {y} 4")), "{found}");
+    // Ванила печатает Y точки интереса как «~» (`showLocateResult(.., false)`).
+    assert!(found.contains("4 ~ 4"), "{found}");
     let missing = run(&plan, "locate structure minecraft:woodland_mansion");
     assert!(missing.contains("commands.locate.failed"), "{missing}");
     let villages = commands::suggestions(&plan, "locate structure village", 4);

@@ -18,21 +18,28 @@ use std::time::Duration;
 
 const AUTOSAVE: Duration = Duration::from_secs(30);
 
-/// Каталог регионов оверворлда. Мир 26.3 держит чанки в
-/// `dimensions/minecraft/overworld/region`; если такого каталога ещё нет,
-/// а старый `region/` есть — читаем старый, чтобы не потерять мир.
-fn region_dir(world_dir: &Path) -> std::path::PathBuf {
-    let dimension = world_dir.join("dimensions/minecraft/overworld/region");
-    if dimension.is_dir() || !world_dir.join("region").is_dir() {
-        dimension
-    } else {
+/// Каталог регионов измерения. Мир 26.3 держит чанки в
+/// `dimensions/minecraft/<измерение>/region`; для оверворлда, если такого
+/// каталога ещё нет, а старый `region/` есть — читаем старый, чтобы не
+/// потерять мир.
+fn region_dir(world_dir: &Path, dimension: &str) -> std::path::PathBuf {
+    // В ванили `dimensions/minecraft/overworld/region`: двоеточие в ключе
+    // становится разделителем каталогов.
+    let path = dimension.replace(':', "/");
+    let dimension_dir = world_dir.join(format!("dimensions/{path}/region"));
+    if dimension_dir.is_dir() || dimension != "minecraft:overworld" {
+        dimension_dir
+    } else if world_dir.join("region").is_dir() {
         world_dir.join("region")
+    } else {
+        dimension_dir
     }
 }
 
 pub struct WorldStorage {
-    store: RegionStore,
-    entities: RegionStore,
+    /// Хранилище на измерение: в ванили у каждого `ServerLevel` своё.
+    dimensions: std::sync::RwLock<std::collections::BTreeMap<String, DimStore>>,
+    /// Шаблон и минимум по Y активного измерения (оверворлда при открытии).
     template: ChunkColumn,
     light: Arc<LightTable>,
     format: Format,
@@ -40,6 +47,16 @@ pub struct WorldStorage {
     players: PlayerFiles,
     save_lock: Mutex<()>,
     save_notify: Arc<tokio::sync::Notify>,
+    world_dir: std::path::PathBuf,
+}
+
+/// Хранилище одного измерения: чанки и сущности.
+pub struct DimStore {
+    store: RegionStore,
+    entities: RegionStore,
+    /// Шаблон столбца и формат измерения: у Ада 8 секций от Y 0, у Края 16.
+    /// `None` — как у оверворлда.
+    layout: Option<(ChunkColumn, Format)>,
 }
 
 struct StateNames {
@@ -87,16 +104,25 @@ impl WorldStorage {
             .collect();
         // С 26.3 чанки лежат в `dimensions/minecraft/<измерение>/region`.
         // Старый `region/` читаем как запасной путь: миры до переезда живы.
-        let region = region_dir(world_dir);
+        let region = region_dir(world_dir, "minecraft:overworld");
         let entities = region.with_file_name("entities");
+        let mut dimensions = std::collections::BTreeMap::new();
+        dimensions.insert(
+            "minecraft:overworld".to_owned(),
+            DimStore {
+                store: RegionStore::new(region),
+                entities: RegionStore::new(entities),
+                layout: None,
+            },
+        );
         Self {
-            store: RegionStore::new(region),
-            entities: RegionStore::new(entities),
+            dimensions: std::sync::RwLock::new(dimensions),
             players: PlayerFiles::new(world_dir, data_version, items, effects),
             save_lock: Mutex::new(()),
             save_notify: Arc::new(tokio::sync::Notify::new()),
             template,
             light,
+            world_dir: world_dir.to_path_buf(),
             format: Format {
                 data_version,
                 min_section: min_y.div_euclid(16),
@@ -107,6 +133,54 @@ impl WorldStorage {
                 biome_ids,
             },
         }
+    }
+
+    /// Включает измерение: создаёт каталоги регионов по требованию.
+    ///
+    /// В ванили `ServerLevel` создаётся сразу; здесь хранилище появляется при
+    /// первом обращении — так мир без Ада не обрастает пустыми каталогами.
+    pub fn enable_dimension(&self, dimension: &str) {
+        let mut dims = self.dimensions.write().unwrap();
+        dims.entry(dimension.to_owned()).or_insert_with(|| {
+            let region = region_dir(&self.world_dir, dimension);
+            DimStore {
+                store: RegionStore::new(region.clone()),
+                entities: RegionStore::new(region.with_file_name("entities")),
+                layout: None,
+            }
+        });
+    }
+
+    /// Включает измерение со своим шаблоном столбца и нижней границей.
+    pub fn enable_dimension_with(&self, dimension: &str, template: ChunkColumn, min_y: i32) {
+        self.enable_dimension(dimension);
+        let mut dims = self.dimensions.write().unwrap();
+        if dimension != "minecraft:overworld"
+            && let Some(dim) = dims.get_mut(dimension)
+        {
+            let format = Format {
+                data_version: self.format.data_version,
+                min_section: min_y.div_euclid(16),
+            };
+            dim.layout = Some((template, format));
+        }
+    }
+
+    /// Шаблон и формат измерения.
+    fn layout<'a>(&'a self, dim: &'a DimStore) -> (&'a ChunkColumn, Format) {
+        match &dim.layout {
+            Some((template, format)) => (template, *format),
+            None => (&self.template, self.format),
+        }
+    }
+
+    /// Хранилище измерения с загрузкой при необходимости.
+    fn dim(
+        &self,
+        dimension: &str,
+    ) -> std::sync::RwLockReadGuard<'_, std::collections::BTreeMap<String, DimStore>> {
+        self.enable_dimension(dimension);
+        self.dimensions.read().unwrap()
     }
 
     /// Дописывает `Heightmaps` в чанки мира, где раздела нет. Возвращает число
@@ -120,7 +194,12 @@ impl WorldStorage {
     /// Работает один раз: чанки, у которых раздел уже есть, пропускаются.
     pub fn backfill_heightmaps(&self) -> Result<usize, String> {
         let _guard = self.save_lock.lock().unwrap();
-        let stored = self.store.load_all()?;
+        let stored = self
+            .dim("minecraft:overworld")
+            .get("minecraft:overworld")
+            .unwrap()
+            .store
+            .load_all()?;
         let mut updated = Vec::new();
         for (pos, root) in stored {
             // `Compound` — псевдоним `BTreeMap`, поэтому `contains_key` есть,
@@ -143,7 +222,11 @@ impl WorldStorage {
             return Ok(0);
         }
         let n = updated.len();
-        self.store.save(&updated)?;
+        self.dim("minecraft:overworld")
+            .get("minecraft:overworld")
+            .unwrap()
+            .store
+            .save(&updated)?;
         Ok(n)
     }
 
@@ -155,24 +238,27 @@ impl WorldStorage {
             |uuid, s| self.players.save(uuid, s),
             |uuid, s| plan.mark_player_saved(uuid, s),
         );
-        let unsaved = plan.unsaved();
         let mut saved = 0;
-        if !unsaved.is_empty() {
+        for (dim, _, _) in plan.dimension_layouts() {
+            let unsaved = plan.unsaved_in(dim);
+            if unsaved.is_empty() {
+                continue;
+            }
+            let dims = self.dim(dim.key());
+            let Some(store) = dims.get(dim.key()) else {
+                continue;
+            };
+            let (_, format) = self.layout(store);
             let nbt = unsaved
                 .iter()
-                .map(|(pos, c, _)| {
-                    Ok((
-                        *pos,
-                        anvil::chunk_to_nbt(c, *pos, self.format, &self.names)?,
-                    ))
-                })
+                .map(|(pos, c, _)| Ok((*pos, anvil::chunk_to_nbt(c, *pos, format, &self.names)?)))
                 .collect::<Result<Vec<_>, String>>();
-            match nbt.and_then(|nbt| self.store.save(&nbt).map(|()| nbt.len())) {
+            match nbt.and_then(|nbt| store.store.save(&nbt).map(|()| nbt.len())) {
                 Ok(n) => {
-                    plan.mark_saved(unsaved.iter().map(|(pos, _, rev)| (*pos, *rev)));
-                    saved = n;
+                    plan.mark_saved_in(dim, unsaved.iter().map(|(pos, _, rev)| (*pos, *rev)));
+                    saved += n;
                 }
-                Err(e) => errors.push(format!("save chunks: {e}")),
+                Err(e) => errors.push(format!("save chunks {}: {e}", dim.key())),
             }
         }
         let mobs = plan.unsaved_entities();
@@ -190,7 +276,13 @@ impl WorldStorage {
                     (*pos, root)
                 })
                 .collect();
-            match self.entities.save(&nbt) {
+            match self
+                .dim("minecraft:overworld")
+                .get("minecraft:overworld")
+                .unwrap()
+                .entities
+                .save(&nbt)
+            {
                 Ok(()) => plan.mark_entities_saved(&mobs),
                 Err(e) => errors.push(format!("save entities: {e}")),
             }
@@ -267,12 +359,26 @@ impl PlayerSource for WorldStorage {
 
 impl ChunkSource for WorldStorage {
     fn load_region(&self, rx: i32, rz: i32) -> Result<Vec<LoadedChunk>, String> {
-        let mut out: Vec<((i32, i32), ChunkColumn, bool)> = self
+        self.load_region_in("minecraft:overworld", rx, rz)
+    }
+
+    fn load_region_in(
+        &self,
+        dimension: &str,
+        rx: i32,
+        rz: i32,
+    ) -> Result<Vec<LoadedChunk>, String> {
+        let dims = self.dim(dimension);
+        let store = dims
+            .get(dimension)
+            .ok_or_else(|| format!("no dimension {dimension}"))?;
+        let (template, format) = self.layout(store);
+        let mut out: Vec<((i32, i32), ChunkColumn, bool)> = store
             .store
             .load_region(rx, rz)?
             .iter()
             .map(|(pos, nbt)| {
-                anvil::chunk_from_nbt(nbt, &self.template, self.format, &self.names)
+                anvil::chunk_from_nbt(nbt, template, format, &self.names)
                     .map(|(c, lit)| (*pos, c, lit))
                     .map_err(|e| format!("chunk {pos:?}: {e}"))
             })
@@ -303,7 +409,20 @@ impl ChunkSource for WorldStorage {
         rx: i32,
         rz: i32,
     ) -> Result<Vec<chunkwake_net::play::StoredEntities>, String> {
-        self.entities.load_region(rx, rz)
+        self.load_entities_in("minecraft:overworld", rx, rz)
+    }
+
+    fn load_entities_in(
+        &self,
+        dimension: &str,
+        rx: i32,
+        rz: i32,
+    ) -> Result<Vec<chunkwake_net::play::StoredEntities>, String> {
+        self.dim(dimension)
+            .get(dimension)
+            .ok_or_else(|| format!("no dimension {dimension}"))?
+            .entities
+            .load_region(rx, rz)
     }
 }
 
@@ -321,7 +440,7 @@ mod tests {
         let base = std::env::temp_dir().join(format!("chunkwake-region-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("dimensions/minecraft/overworld/region")).unwrap();
-        let fresh = region_dir(&base);
+        let fresh = region_dir(&base, "minecraft:overworld");
         assert!(
             fresh.ends_with("dimensions/minecraft/overworld/region"),
             "{fresh:?}"
@@ -330,13 +449,13 @@ mod tests {
         // Мир до переезда: только `region/`, его и берём.
         let legacy = base.join("legacy");
         std::fs::create_dir_all(legacy.join("region")).unwrap();
-        let old = region_dir(&legacy);
+        let old = region_dir(&legacy, "minecraft:overworld");
         assert!(old.ends_with("region") && !old.to_string_lossy().contains("dimensions"));
 
         // Пустой мир: пишем сразу в ванильный путь.
         let empty = base.join("empty");
         std::fs::create_dir_all(&empty).unwrap();
-        let next = region_dir(&empty);
+        let next = region_dir(&empty, "minecraft:overworld");
         assert!(
             next.ends_with("dimensions/minecraft/overworld/region"),
             "{next:?}"

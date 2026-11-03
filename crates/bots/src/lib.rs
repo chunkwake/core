@@ -442,6 +442,13 @@ impl Client {
         }
     }
 
+    /// Отправить готовый пакет (ID и тело) как есть.
+    pub async fn send_raw(&mut self, packet: &[u8]) -> Result<(), String> {
+        self.bytes_out += packet.len() as u64;
+        self.conn.send(packet).await.map_err(err)?;
+        self.conn.flush().await.map_err(err)
+    }
+
     pub async fn move_to(&mut self, pos: [f64; 3]) -> Result<(), String> {
         let mut w = Writer::new();
         w.var_int(self.ids.sb_move_pos);

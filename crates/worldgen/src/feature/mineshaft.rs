@@ -817,7 +817,12 @@ impl Piece {
                 let ay = world_y + distance;
                 let state = level.get(pos[0], ay, pos[2]);
                 let empty = replaceable(pal, mats, state);
-                if !empty && pal.sturdy(state, 0) && !mats.falling.contains(&block_id(pal, state)) {
+                // `canHangChainBelow`: центр низа, а не целая грань — столб
+                // забора опоры над доской тоже держит.
+                if !empty
+                    && pal.supports_center_below(state)
+                    && !mats.falling.contains(&block_id(pal, state))
+                {
                     let hook = [pos[0], world_y + 1, pos[2]];
                     self.put(level, hook[0], hook[1], hook[2], mats.fence);
                     self.column(level, pos[0], pos[2], world_y + 2, ay, mats.chain);

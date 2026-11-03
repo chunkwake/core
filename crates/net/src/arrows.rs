@@ -24,6 +24,9 @@ pub const FIREWORK_FUSE: u16 = 20;
 /// Тройной выстрел: центр и ±10°.
 pub const MULTISHOT_YAW: [f64; 3] = [-10.0, 0.0, 10.0];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThrownKind { Snowball, Egg, Pearl, Potion }
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Arrow {
     pub pos: [f64; 3],
@@ -33,6 +36,8 @@ pub struct Arrow {
     pub age: u32,
     /// Снежок или яйцо (`ThrowableProjectile`): гравитация 0.03, без урона, бьётся о блок.
     pub thrown: bool,
+    pub thrown_kind: Option<ThrownKind>,
+    pub potion_extra: u32,
     /// Ракета с арбалета: без гравитации и урона, гаснет по таймеру.
     pub firework: bool,
     pub life: u16,
@@ -60,6 +65,8 @@ impl Arrow {
             stuck: false,
             age: 0,
             thrown,
+            thrown_kind: None,
+            potion_extra: 0,
             firework: false,
             life: 0,
             owner: None,
@@ -93,6 +100,8 @@ pub enum Hit {
     Pop,
     /// Попала в игрока `i`. Скорость — на момент удара, для отдачи.
     Player(usize, f32, [f64; 3]),
+    /// Попала в моба `i`.
+    Mob(usize, f32, [f64; 3]),
 }
 
 /// `BowItem.getPowerForTime`: ниже 0.1 выстрела нет.
@@ -172,6 +181,7 @@ fn remember(a: &mut Arrow, id: uuid::Uuid) {
 pub fn step(
     a: &mut Arrow,
     players: &[(uuid::Uuid, [f64; 3])],
+    mobs: &[(u128, [f64; 3], (f64, f64))],
     solid: impl Fn([i32; 3]) -> bool,
     water: impl Fn([i32; 3]) -> bool,
 ) -> Vec<Hit> {
@@ -209,6 +219,29 @@ pub fn step(
             hits.push(Hit::Player(k, dmg, a.vel));
             if a.pierce > 0 && (a.pierced_n as usize) < a.pierced.len() {
                 remember(a, id);
+                a.pierce -= 1;
+                prev = p;
+                continue;
+            }
+            a.stopped = true;
+            return hits;
+        }
+        if !a.firework
+            && let Some(k) = mobs.iter().position(|(id, feet, (width, height))| {
+                (p[0] - feet[0]).abs() <= width / 2.0 + 0.3
+                    && (p[2] - feet[2]).abs() <= width / 2.0 + 0.3
+                    && p[1] >= feet[1] - 0.3
+                    && p[1] <= feet[1] + height + 0.3
+                    && !remembers(a, uuid::Uuid::from_u128(*id))
+                    && (a.left_owner || a.owner.map(|owner| owner.as_u128()) != Some(*id))
+            })
+        {
+            let roll = a.crit.then(rand::random::<u32>);
+            let dmg = if a.thrown { 0.0 } else { arrow_damage(speed, a.base_damage, roll) };
+            a.pos = p;
+            hits.push(Hit::Mob(k, dmg, a.vel));
+            if a.pierce > 0 && (a.pierced_n as usize) < a.pierced.len() {
+                remember(a, uuid::Uuid::from_u128(mobs[k].0));
                 a.pierce -= 1;
                 prev = p;
                 continue;
@@ -305,7 +338,7 @@ mod tests {
         // Стена на x = 5.
         let mut hit = Vec::new();
         for _ in 0..20 {
-            hit = step(&mut a, &[], |p| p[0] >= 5, |_| false);
+            hit = step(&mut a, &[], &[], |p| p[0] >= 5, |_| false);
             if !hit.is_empty() {
                 break;
             }
@@ -317,6 +350,7 @@ mod tests {
             step(
                 &mut b,
                 &[(uuid::Uuid::nil(), [1.2, 1.0, 0.5])],
+                &[],
                 |_| false,
                 |_| false
             ),
@@ -355,6 +389,7 @@ mod tests {
         let inside = step(
             &mut own,
             &[(shooter, [0.5, 64.0, 0.5])],
+            &[],
             |_| false,
             |_| false,
         );
@@ -365,10 +400,16 @@ mod tests {
         let hits = step(
             &mut pierce,
             &[(uuid::Uuid::from_u128(1), [1.2, 1.0, 0.5])],
+            &[],
             |_| false,
             |_| false,
         );
         assert_eq!(hits.len(), 1);
         assert!(!pierce.stopped && !pierce.stuck && pierce.pierce == 0);
+
+        let mut snowball = Arrow::flight([0.5, 1.5, 0.5], [1.1, 0.0, 0.0], true);
+        let chicken = (9, [1.2, 1.0, 0.5], (0.4, 0.7));
+        assert_eq!(step(&mut snowball, &[], &[chicken], |_| false, |_| false),
+            vec![Hit::Mob(0, 0.0, [1.1, 0.0, 0.0])]);
     }
 }

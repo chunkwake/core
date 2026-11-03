@@ -299,6 +299,7 @@ mod tests {
             name: name.into(),
             max_level: max,
             weight: 10,
+            anvil_cost: 1,
             min_base,
             min_step,
             max_base: min_base + 50,

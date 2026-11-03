@@ -61,7 +61,17 @@ async fn main() {
                     tokio::select! {
                         _ = tick.tick() => {
                             angle += 0.05;
-                            if let Err(e) = client.move_to([ox + 8.0 * angle.cos(), -60.0, oz + 8.0 * angle.sin()]).await { break Err(e); }
+                            // `CHUNKWAKE_BOT_AT="x,y,z"` — стоять в точке (проверка порталов:
+                            // бот встаёт в клетку портала и не ходит по кругу).
+                            let target = match std::env::var("CHUNKWAKE_BOT_AT") {
+                                Ok(at) => {
+                                    let v: Vec<f64> =
+                                        at.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+                                    if v.len() == 3 { [v[0], v[1], v[2]] } else { [ox, -60.0, oz] }
+                                }
+                                Err(_) => [ox + 8.0 * angle.cos(), -60.0, oz + 8.0 * angle.sin()],
+                            };
+                            if let Err(e) = client.move_to(target).await { break Err(e); }
                             stats.moves_out.fetch_add(1, Ordering::Relaxed);
                         }
                         event = client.next_event() => {

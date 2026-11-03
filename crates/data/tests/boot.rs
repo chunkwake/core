@@ -59,3 +59,18 @@ fn cached_image_is_stable_if_available() {
     assert_eq!(first.recipes.len(), second.recipes.len());
     assert_eq!(first.enchanting.table, second.enchanting.table);
 }
+
+#[test]
+fn brewing_recipes_cover_26_3_if_available() {
+    let Some(root) = generated() else { return };
+    let builtin = chunkwake_data::registries::load_builtin(&root).unwrap();
+    let items = chunkwake_data::registries::builtin_entries_of(&builtin, "item").unwrap();
+    let potions = chunkwake_data::registries::builtin_entries_of(&builtin, "potion").unwrap();
+    let data = chunkwake_data::recipes::load_brewing(&root, &items, &potions).unwrap();
+    assert_eq!(data.recipes.len(), 279);
+    let id = |map: &std::collections::HashMap<String, i32>, name: &str| map[name];
+    assert_eq!(
+        data.recipes.get(&(id(&items, "minecraft:potion"), id(&potions, "minecraft:water"), id(&items, "minecraft:nether_wart"))),
+        Some(&(id(&items, "minecraft:potion"), id(&potions, "minecraft:awkward"))),
+    );
+}

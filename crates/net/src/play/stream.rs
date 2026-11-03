@@ -58,6 +58,12 @@ impl ChunkStream {
         }
     }
 
+    /// Новый мир после `respawn`: прежние задания и кадры уходят в старые
+    /// каналы и пропадают.
+    pub(super) fn restart(&mut self, center: (i32, i32)) {
+        *self = Self::new(center, self.radius);
+    }
+
     pub(super) fn center(&self) -> (i32, i32) {
         self.center
     }
@@ -131,8 +137,8 @@ impl PlayPlan {
         let mut cached = Vec::new();
         {
             // Порядок замков как в `commit_light`: мир, затем кадры.
-            let world = self.edited.read().unwrap();
-            let cache = self.chunk_frames.lock().unwrap();
+            let world = self.dim_state().edited.read().unwrap();
+            let cache = self.dim_state().chunk_frames.lock().unwrap();
             for c in fresh {
                 if let Some(f) = cache.get(&c) {
                     cached.push(f.clone());
@@ -176,11 +182,12 @@ impl PlayPlan {
             return;
         };
         let limit = crate::chunkgen::workers() * IN_FLIGHT_PER_WORKER;
+        let dim = self.active_dim();
         while s.in_flight < limit {
             let Some((x, z)) = s.queue.pop() else { break };
             let (plan, task_pool, tx) = (plan.clone(), pool.clone(), s.tx.clone());
             pool.submit(Box::new(move || {
-                plan.generate_chunk(x, z);
+                super::with_dim(dim, || plan.generate_chunk(x, z));
                 task_pool.done();
                 let _ = tx.send((x, z));
             }));
@@ -244,9 +251,12 @@ impl PlayPlan {
         let batch = s.to_light.split_off(s.to_light.len() - take);
         let tx = s.lit_tx.clone();
         s.lighting = true;
+        let dim = self.active_dim();
         tokio::task::spawn_blocking(move || {
-            plan.light_ring(&batch);
-            let frames: Vec<Frame> = batch.iter().map(|&(x, z)| plan.chunk_frame(x, z)).collect();
+            let frames: Vec<Frame> = super::with_dim(dim, || {
+                plan.light_ring(&batch);
+                batch.iter().map(|&(x, z)| plan.chunk_frame(x, z)).collect()
+            });
             let _ = tx.send(frames);
         });
     }

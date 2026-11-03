@@ -83,6 +83,8 @@ pub struct Generator {
     /// Имя плотности климата (`minecraft:overworld/continents`) → номер оси.
     climate_names: HashMap<String, usize>,
     biomes: biome::BiomeSource,
+    /// `TheEndBiomeSource` вместо климата.
+    end: bool,
     /// Предварительная поверхность (`chunk_surface_level`) для правил.
     preliminary: Arc<S>,
     /// Файлы правил и условий поверхности.
@@ -487,7 +489,15 @@ impl Generator {
         let climate: [Arc<S>; 6] = climate.try_into().expect("six climate axes");
         // `read_biomes`: у Ада свой пресет (`Preset.NETHER`), в `biomes.csv`
         // лежит только оверворлд.
-        let biomes = if settings["legacy_random_source"].as_bool().unwrap_or(false)
+        // Край узнаём по `default_block`: у Ада те же высоты и тот же
+        // `legacy_random_source`, но незеррак.
+        let end = settings["default_block"]
+            .as_str()
+            .or_else(|| settings["default_block"]["Name"].as_str())
+            == Some("minecraft:end_stone");
+        let biomes = if end {
+            biome::BiomeSource::end()
+        } else if settings["legacy_random_source"].as_bool().unwrap_or(false)
             && settings["noise"]["min_y"].as_i64() == Some(0)
             && settings["noise"]["height"].as_i64() == Some(128)
         {
@@ -553,6 +563,7 @@ impl Generator {
             surface_noise_params.insert(name.clone(), params.clone());
         }
         Ok(Self {
+            end,
             min_y,
             height,
             spawn_target,
@@ -617,6 +628,7 @@ impl Generator {
         cz: i32,
         beard: &feature::structure::Beard,
     ) -> Terrain<'_> {
+        let t0 = std::time::Instant::now();
         let v = Volume::blocks([16, self.height, 16], [cx * 16, self.min_y, cz * 16]);
         let mut ctx = Ctx::default();
         let mut aquifer = Aquifer::new(
@@ -629,6 +641,7 @@ impl Generator {
         );
         let mut density = vec![0f32; v.len()];
         self.final_density.volume(&mut ctx, &mut density, &v);
+        let t_density = t0.elapsed().as_secs_f64() * 1000.0;
         let mut out = vec![Fill::Air; v.len()];
         for z in 0..16 {
             for x in 0..16 {
@@ -650,6 +663,11 @@ impl Generator {
                 }
             }
         }
+        if std::env::var_os("CHUNKWAKE_PROF").is_some() {
+            let total = t0.elapsed().as_secs_f64() * 1000.0;
+            let corners = density::CORNERS.with(|c| c.replace(0.0));
+            eprintln!("  рельеф: плотность {t_density:.2} (углы {corners:.2}) | акифер {:.2} мс", total - t_density);
+        }
         Terrain {
             fills: out,
             ctx,
@@ -657,6 +675,37 @@ impl Generator {
             cx,
             cz,
         }
+    }
+
+    /// Один столбец шума с акифером (`iterateNoiseColumn`): объём 1×высота×1,
+    /// как у ванильных `getBaseHeight` и `getBaseColumn`. Акифер строится по
+    /// этому же объёму, поэтому его `skipSamplingAboveY` — столбца, а не чанка.
+    /// Индекс — `y - min_y`.
+    pub(crate) fn column_fills(&self, x: i32, z: i32) -> Vec<Fill> {
+        let v = Volume::blocks([1, self.height, 1], [x, self.min_y, z]);
+        let mut ctx = Ctx::default();
+        let mut aquifer = Aquifer::new(
+            self.aquifer.as_ref(),
+            self.aquifer_random,
+            self.sea_level,
+            self.default_fluid,
+            &mut ctx,
+            &v,
+        );
+        let mut density = vec![0f32; v.len()];
+        self.final_density.volume(&mut ctx, &mut density, &v);
+        let mut out = vec![Fill::Air; self.height as usize];
+        for y in (0..self.height).rev() {
+            let by = v.block_y(y);
+            let d = density[v.index(0, y, 0)];
+            out[y as usize] = match aquifer.substance(&mut ctx, x, by, z, d as f64) {
+                None => Fill::Solid,
+                Some(Fluid::Water) => Fill::Liquid,
+                Some(Fluid::Lava) => Fill::Lava,
+                Some(Fluid::Air) => Fill::Air,
+            };
+        }
+        out
     }
 
     /// Карверы чанка-источника по биому в квартовой клетке его угла на y=0
@@ -1055,25 +1104,41 @@ impl Generator {
             let cells = (self.height / 4) as usize * 16;
             return Some(vec![id; cells]);
         }
+        if self.end {
+            // Все клетки чанка смотрят в одну точку и одинаковы по высоте:
+            // `end/islands` от `y` не зависит.
+            let id = self.biomes.id_of(self.end_biome(cx * 4, 0, cz * 4))?;
+            let cells = (self.height / 4) as usize * 16;
+            return Some(vec![id; cells]);
+        }
         let points = self.climate(cx, cz)?;
-        let mut ids = Vec::with_capacity(points.len());
+        let mut ids = vec![u32::MAX; points.len()];
         let mut hint = None;
         let mut names: Vec<(usize, u32)> = Vec::new();
-        for p in &points {
-            let mut q = [0i64; 6];
-            for (q, v) in q.iter_mut().zip(p) {
-                *q = biome::quantize(*v);
-            }
-            hint = self.biomes.find_from(&q, hint);
-            let id = hint.map_or(u32::MAX, |h| {
-                if let Some(&(_, id)) = names.iter().find(|(p, _)| *p == h) {
-                    return id;
+        // `LevelChunkSection.fillBiomesFromNoise`: секции снизу вверх, внутри
+        // x, y, z. Порядок важен: ничью `Climate.RTree` решает `lastResult` —
+        // ответ предыдущего запроса.
+        for sy in 0..points.len() / 64 {
+            for qx in 0..4 {
+                for qy in 0..4 {
+                    for qz in 0..4 {
+                        let at = sy * 64 + qy * 16 + qz * 4 + qx;
+                        let mut q = [0i64; 6];
+                        for (q, v) in q.iter_mut().zip(&points[at]) {
+                            *q = biome::quantize(*v);
+                        }
+                        hint = self.biomes.find_from(&q, hint);
+                        ids[at] = hint.map_or(u32::MAX, |h| {
+                            if let Some(&(_, id)) = names.iter().find(|(p, _)| *p == h) {
+                                return id;
+                            }
+                            let id = self.biomes.id_of(h).unwrap_or(u32::MAX);
+                            names.push((h, id));
+                            id
+                        });
+                    }
                 }
-                let id = self.biomes.id_of(h).unwrap_or(u32::MAX);
-                names.push((h, id));
-                id
-            });
-            ids.push(id);
+            }
         }
         Some(ids)
     }
@@ -1194,6 +1259,9 @@ impl Generator {
         if self.biomes.is_empty() {
             return None;
         }
+        if self.end {
+            return self.biomes.id_of(self.end_biome(qx, qy, qz));
+        }
         let p = self.climate_at(qx, qy, qz);
         let mut q = [0i64; 6];
         for (q, v) in q.iter_mut().zip(&p) {
@@ -1210,6 +1278,10 @@ impl Generator {
         }
         if self.biomes.is_empty() {
             return None;
+        }
+        if self.end {
+            let i = self.end_biome(x >> 2, y >> 2, z >> 2);
+            return self.biomes.name_of(i).map(str::to_owned);
         }
         let p = self.climate_at(x >> 2, y >> 2, z >> 2);
         let mut q = [0i64; 6];
@@ -1272,6 +1344,27 @@ impl Generator {
             *q = biome::quantize(*v);
         }
         self.biomes.name(&q)
+    }
+
+    /// `TheEndBiomeSource.getNoiseBiome`: номер в [`biome::END_BIOMES`].
+    fn end_biome(&self, qx: i32, qy: i32, qz: i32) -> usize {
+        let (bx, by, bz) = (qx << 2, qy << 2, qz << 2);
+        let (cx, cz) = (bx >> 4, bz >> 4);
+        if (cx as i64) * (cx as i64) + (cz as i64) * (cz as i64) <= 4096 {
+            return 0;
+        }
+        let mut ctx = Ctx::default();
+        // `erosion` роутера Края — `end/islands`.
+        let h = self.climate[3].value(&mut ctx, (cx * 2 + 1) * 8, by, (cz * 2 + 1) * 8) as f64;
+        if h > 0.25 {
+            1
+        } else if h >= -0.0625 {
+            2
+        } else if h < -0.21875 {
+            3
+        } else {
+            4
+        }
     }
 
     /// Одна ось климата чанка — для замера, какая из шести дороже.

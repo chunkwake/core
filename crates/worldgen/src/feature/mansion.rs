@@ -535,6 +535,7 @@ impl Piece {
             self.rot,
             window,
             r,
+            false,
         );
         for (pos, meta) in markers {
             let Some(meta) = meta else { continue };

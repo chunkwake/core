@@ -130,6 +130,8 @@ enum Survive {
     MossyCarpet,
     Mushroom,
     Snow,
+    /// Корни, грибы и ростки Ада: снизу свой тег `supports_<блок>`.
+    OwnTag,
 }
 
 impl Survive {
@@ -155,6 +157,7 @@ impl Survive {
             "MossyCarpetBlock" => Self::MossyCarpet,
             "MushroomBlock" => Self::Mushroom,
             "SnowLayerBlock" => Self::Snow,
+            "NetherRootsBlock" | "NetherFungusBlock" | "NetherSproutsBlock" => Self::OwnTag,
             _ => Self::Always,
         }
     }
@@ -173,6 +176,11 @@ pub struct Palette {
     block_names: Vec<String>,
     /// Номер блока → его состояния.
     by_block: Vec<Vec<u32>>,
+    /// Номер блока → смешанное основание его состояний, если они идут
+    /// подряд произведением значений: `with_prop` сдвигом номера вместо
+    /// перебора всех состояний блока со сравнением строк (у `sculk_vein` их
+    /// 128, и на этом стояло распространение скалка).
+    layouts: Vec<Option<StateLayout>>,
     defaults: HashMap<String, u32>,
     air: Vec<bool>,
     fluid: Vec<Fluid>,
@@ -185,6 +193,9 @@ pub struct Palette {
     full_cube: Vec<bool>,
     /// Биты `isFaceSturdy` по `Direction`: низ, верх, север, юг, запад, восток.
     sturdy: Vec<u8>,
+    /// `Block.canSupportCenter(..., DOWN)`: низ формы опоры закрывает
+    /// квадрат 7..9 в центре (столб забора, цепь, стена).
+    center_down: Vec<bool>,
     survive: Vec<Survive>,
     /// Теги карт высот: `blocks_motion_in_heightmap` и без листвы.
     motion: Arc<Vec<bool>>,
@@ -195,9 +206,122 @@ pub struct Palette {
     support: Support,
     /// Сид мира: шумы фич вроде жеод строятся от него.
     world_seed: i64,
-    /// Биом замораживает воду (`Biome.shouldFreeze`: базовая температура < 0.15).
-    /// Индекс — сетевой ID биома; до заполнения в `Features::load` — пусто.
-    freeze: Vec<bool>,
+    /// Климат биомов для `Biome.getTemperature`. Индекс — сетевой ID биома;
+    /// до заполнения в `Features::load` — пусто.
+    climate: Arc<Vec<Climate>>,
+}
+
+/// Свойства блока со всеми значениями и шагом номера состояния на каждое.
+type StateLayout = Vec<(String, Vec<String>, u32)>;
+
+/// Раскладка состояний блока, если номер состояния — `первый + Σ индекс
+/// значения × шаг`; проверяется на всех состояниях, иначе `None`.
+fn state_layout(list: &[u32], props: &[Vec<(String, String)>]) -> Option<StateLayout> {
+    let &first = list.first()?;
+    if list.iter().enumerate().any(|(i, &s)| s != first + i as u32) {
+        return None;
+    }
+    let base = props.get(first as usize)?;
+    let mut layout: StateLayout = Vec::with_capacity(base.len());
+    for (k, (key, value)) in base.iter().enumerate() {
+        let mut values: Vec<String> = Vec::new();
+        let mut stride = 0;
+        for (i, &s) in list.iter().enumerate() {
+            let (k2, v) = props[s as usize].get(k)?;
+            if k2 != key {
+                return None;
+            }
+            if !values.contains(v) {
+                values.push(v.clone());
+            }
+            if stride == 0 && v != value {
+                stride = i as u32;
+            }
+        }
+        layout.push((key.clone(), values, stride));
+    }
+    for (i, &s) in list.iter().enumerate() {
+        let mut at = 0;
+        for (k, (_, values, stride)) in layout.iter().enumerate() {
+            let v = &props[s as usize][k].1;
+            at += values.iter().position(|x| x == v)? as u32 * stride;
+        }
+        if at != i as u32 {
+            return None;
+        }
+    }
+    Some(layout)
+}
+
+/// `Biome.ClimateSettings`: то, от чего зависят снег, лёд и холодные руины.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Climate {
+    temperature: f32,
+    /// `temperature_modifier: frozen`.
+    frozen: bool,
+    /// `has_precipitation`.
+    precipitation: bool,
+}
+
+/// `Biome.TEMPERATURE_NOISE`.
+fn temperature_noise() -> &'static Simplex {
+    static NOISE: std::sync::OnceLock<Simplex> = std::sync::OnceLock::new();
+    NOISE.get_or_init(|| Simplex::new(&mut Legacy::new(1234), true))
+}
+
+/// `Biome.FROZEN_TEMPERATURE_NOISE`: три слоя (частота, амплитуда).
+fn frozen_noise(x: f64, z: f64) -> f32 {
+    static NOISE: std::sync::OnceLock<[Simplex; 3]> = std::sync::OnceLock::new();
+    let layers = NOISE.get_or_init(|| {
+        let mut r = Legacy::new(3456);
+        [
+            Simplex::new(&mut r, true),
+            Simplex::new(&mut r, true),
+            Simplex::new(&mut r, true),
+        ]
+    });
+    let mut value = 0.0f32;
+    for (noise, (freq, amp)) in layers
+        .iter()
+        .zip([(1.0, 0.14285715f32), (0.5, 0.2857143), (0.25, 0.5714286)])
+    {
+        value += amp * noise.get(x * freq, z * freq);
+    }
+    value
+}
+
+/// `Biome.getHeightAdjustedTemperature`. Неизвестный биом тёплый — лучше
+/// без льда, чем лёд в пустыне.
+pub(crate) fn temperature(climate: &[Climate], biome: u32, pos: [i32; 3], sea_level: i32) -> f32 {
+    let Some(c) = climate.get(biome as usize) else {
+        return 2.0;
+    };
+    let mut t = c.temperature;
+    if c.frozen {
+        // `TemperatureModifier.FROZEN`.
+        let large = (frozen_noise(pos[0] as f64 * 0.05, pos[2] as f64 * 0.05) * 7.0) as f64;
+        let edge = biome_info_noise().get(pos[0] as f64 * 0.2, pos[2] as f64 * 0.2) as f64;
+        if large + edge < 0.3
+            && (biome_info_noise().get(pos[0] as f64 * 0.09, pos[2] as f64 * 0.09) as f64) < 0.8
+        {
+            t = 0.2;
+        }
+    }
+    let snow_level = sea_level + 17;
+    if pos[1] > snow_level {
+        let v = temperature_noise().get(
+            (pos[0] as f32 / 8.0) as f64,
+            (pos[2] as f32 / 8.0) as f64,
+        ) * 8.0;
+        t - (v + pos[1] as f32 - snow_level as f32) * 0.05 / 40.0
+    } else {
+        t
+    }
+}
+
+/// `Biome.coldEnoughToSnow`.
+pub(crate) fn cold_enough_to_snow(climate: &[Climate], biome: u32, pos: [i32; 3], sea_level: i32) -> bool {
+    !(temperature(climate, biome, pos, sea_level) >= 0.15)
 }
 
 #[derive(Default)]
@@ -211,6 +335,8 @@ struct Support {
     mushroom: Arc<Vec<bool>>,
     no_snow: Arc<Vec<bool>>,
     snow: Arc<Vec<bool>>,
+    /// Номер блока → его тег опоры (`Survive::OwnTag`).
+    own: HashMap<u32, Arc<Vec<bool>>>,
 }
 
 impl Palette {
@@ -248,6 +374,7 @@ impl Palette {
             liquid: vec![false; n],
             full_cube: vec![false; n],
             sturdy: vec![0; n],
+            center_down: vec![false; n],
             survive: vec![Survive::Always; n],
             motion: Arc::new(Vec::new()),
             motion_no_leaves: Arc::new(Vec::new()),
@@ -258,6 +385,7 @@ impl Palette {
                 }
                 v
             },
+            layouts: Vec::new(),
             block_of,
             props,
             block_names: {
@@ -273,8 +401,9 @@ impl Palette {
             tag_dir: data_dir.join("data/minecraft/tags/block"),
             support: Support::default(),
             world_seed: 0,
-            freeze: Vec::new(),
+            climate: Arc::new(Vec::new()),
         };
+        p.layouts = p.by_block.iter().map(|list| state_layout(list, &p.props)).collect();
         for name in ["minecraft:air", "minecraft:cave_air", "minecraft:void_air"] {
             for s in p.states_of(name) {
                 p.air[s as usize] = true;
@@ -318,6 +447,25 @@ impl Palette {
                 .and_then(|m| m.trim().parse().ok())
                 .unwrap_or(0);
         }
+        // `reports/shapes.csv`: коробки коллизии через `|` после трёх чисел.
+        // `getBlockSupportShape` совпадает с коллизией, кроме листвы (пусто).
+        let shapes = std::fs::read_to_string(data_dir.join("reports/shapes.csv")).unwrap_or_default();
+        let leaves = p.tag("minecraft:leaves").unwrap_or_default();
+        for (id, line) in shapes.lines().enumerate().take(n) {
+            if leaves.get(id).copied().unwrap_or(false) {
+                continue;
+            }
+            let boxes = line.splitn(4, ',').nth(3).unwrap_or("");
+            p.center_down[id] = boxes.split('|').any(|b| {
+                let v: Vec<f64> = b.split(' ').filter_map(|x| x.parse().ok()).collect();
+                v.len() == 6
+                    && v[1] <= 0.0
+                    && v[0] <= 7.0 / 16.0
+                    && v[2] <= 7.0 / 16.0
+                    && v[3] >= 9.0 / 16.0
+                    && v[5] >= 9.0 / 16.0
+            });
+        }
         p.motion = p
             .tag("minecraft:blocks_motion_in_heightmap")
             .unwrap_or_default();
@@ -335,7 +483,21 @@ impl Palette {
             mushroom: tag("minecraft:overrides_mushroom_light_requirement"),
             no_snow: tag("minecraft:cannot_support_snow_layer"),
             snow: tag("minecraft:support_override_snow_layer"),
+            own: HashMap::new(),
         };
+        let own: Vec<(u32, String)> = p
+            .block_names
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| {
+                p.by_block[*i].first().is_some_and(|&s| p.survive[s as usize] == Survive::OwnTag)
+            })
+            .map(|(i, name)| (i as u32, name.replacen("minecraft:", "minecraft:supports_", 1)))
+            .collect();
+        for (block, tag_name) in own {
+            let t = p.tag(&tag_name).unwrap_or_default();
+            p.support.own.insert(block, t);
+        }
         let shapes =
             std::fs::read_to_string(data_dir.join("reports/shapes.csv")).unwrap_or_default();
         for (id, line) in shapes.lines().enumerate().take(n) {
@@ -380,6 +542,20 @@ impl Palette {
     /// такого свойства — `None`.
     pub fn with_prop(&self, state: u32, key: &str, value: &str) -> Option<u32> {
         let props = self.props.get(state as usize)?;
+        let k = props.iter().position(|(k, _)| k == key)?;
+        let block = *self.block_of.get(state as usize)?;
+        if let Some(Some(layout)) = self.layouts.get(block as usize) {
+            let (_, values, stride) = &layout[k];
+            let new = values.iter().position(|v| v == value)? as u32;
+            let old = values.iter().position(|v| *v == props[k].1)? as u32;
+            return Some(state - old * stride + new * stride);
+        }
+        self.with_prop_scan(state, key, value)
+    }
+
+    /// `with_prop` перебором состояний блока: для раскладок не подряд.
+    fn with_prop_scan(&self, state: u32, key: &str, value: &str) -> Option<u32> {
+        let props = self.props.get(state as usize)?;
         props.iter().find(|(k, _)| k == key)?;
         let list = self
             .by_block
@@ -401,6 +577,11 @@ impl Palette {
     }
 
     /// `isFaceSturdy(dir)`, `dir` в порядке `Direction`.
+    /// `Block.canSupportCenter(level, pos, DOWN)`.
+    pub fn supports_center_below(&self, state: u32) -> bool {
+        self.center_down.get(state as usize).copied().unwrap_or(false)
+    }
+
     pub fn sturdy(&self, state: u32, dir: usize) -> bool {
         self.sturdy
             .get(state as usize)
@@ -424,10 +605,21 @@ impl Palette {
         self.air.get(state as usize).copied().unwrap_or(false)
     }
 
-    /// `Biome.shouldFreeze`: базовая температура ниже 0.15. Неизвестный
-    /// биом не замораживает — лучше без льда, чем лёд в пустыне.
-    pub fn biome_freezes(&self, biome: u32) -> bool {
-        self.freeze.get(biome as usize).copied().unwrap_or(false)
+    /// `Biome.coldEnoughToSnow` (он же `!warmEnoughToRain`).
+    pub fn cold_enough_to_snow(&self, biome: u32, pos: [i32; 3], sea_level: i32) -> bool {
+        cold_enough_to_snow(&self.climate, biome, pos, sea_level)
+    }
+
+    /// `Biome.getPrecipitationAt(...) == SNOW`.
+    pub fn snows(&self, biome: u32, pos: [i32; 3], sea_level: i32) -> bool {
+        self.climate
+            .get(biome as usize)
+            .is_some_and(|c| c.precipitation)
+            && self.cold_enough_to_snow(biome, pos, sea_level)
+    }
+
+    pub(crate) fn climate(&self) -> Arc<Vec<Climate>> {
+        Arc::clone(&self.climate)
     }
 
     /// Учитывает ли карта высот `kind` это состояние.
@@ -675,10 +867,37 @@ enum Feature {
     Template(Arc<template::TemplateFeature>),
     /// `fossil`: пара шаблонов, пустые углы и два списка процессоров.
     Fossil(Arc<template::Fossil>),
+    /// `single_block_pillar`: базальтовый столб с шапкой.
+    Pillar(Arc<nether::Pillar>),
+    /// `delta_feature`: лужи базальтовых дельт.
+    Delta(Arc<nether::Delta>),
+    /// `stepped_column_cluster`: гроздь столбов базальта.
+    ColumnCluster(Arc<nether::ColumnCluster>),
+    /// `netherrack_replace_blobs`: пятна в незераке.
+    ReplaceBlobs(Arc<nether::ReplaceBlobs>),
+    /// `random_neighbor_spread`: светокамень, плакучие лианы.
+    NeighborSpread(Arc<nether::NeighborSpread>),
+    /// `huge_fungus`: огромные грибы Ада.
+    HugeFungus(Arc<nether::HugeFungus>),
+    /// `projected_random_patchy_square`: шапка базальтового столба.
+    PatchySquare(Arc<nether::PatchySquare>),
+    /// `end_island`: перевёрнутый конус камня Края.
+    EndIsland(Arc<end::Blocks>),
+    /// `end_platform`: обсидиановая площадка точки входа.
+    EndPlatform(Arc<end::Blocks>),
+    /// `end_gateway`: шлюз в бедроковой оправе.
+    EndGateway(Arc<end::Blocks>, end::Gateway),
+    /// `end_spike`: обсидиановые шипы вокруг главного острова.
+    EndSpike(Arc<end::Blocks>, end::Spikes),
+    /// `chorus_plant`: хорус на камне Края.
+    Chorus(Arc<end::Blocks>),
 }
 
 pub(crate) mod mansion;
 pub(crate) mod mineshaft;
+pub(crate) mod end;
+mod fortress;
+mod nether;
 pub(crate) mod monument;
 pub(crate) mod ocean_ruin;
 pub(crate) mod portal;
@@ -687,6 +906,8 @@ mod shore;
 pub(crate) mod stronghold;
 pub(crate) mod structure;
 mod template;
+mod treasure;
+pub(crate) mod end_city;
 pub(crate) use template::{load_public, place_public, size_public};
 
 fn full_cube_shape(shape: &str) -> bool {
@@ -760,9 +981,9 @@ enum Modifier {
     WaterDepth(i32),
     /// `surface_relative_threshold_filter`.
     Relative(Heightmap, i32, i32),
-    /// `count_on_every_layer`: стопка копий в каждой точке столбца — как
-    /// `noise_based_count`, но смещение по y считается на каждую копию.
-    OnEveryLayer(i32, f64, f64),
+    /// `count_on_every_layer`: по `count` точек на каждый слой пола, пока
+    /// хоть одна точка нашла свой слой.
+    OnEveryLayer(IntP),
     /// `cuboid`: случайная точка в полом коробе (`CuboidPlacement`).
     Cuboid {
         /// `include_edges`, `include_interior` — какие клетки участвуют.
@@ -850,13 +1071,7 @@ impl Modifier {
                     })
                     .collect(),
             )),
-            // `CountOnEveryLayerPlacement`: число копий от того же шума, что у
-            // `noise_based_count`; каждая копия ищет свой слой в столбце.
-            "minecraft:count_on_every_layer" => Ok(Self::OnEveryLayer(
-                int("noise_to_count_ratio", 0),
-                v["noise_factor"].as_f64().unwrap_or(1.0),
-                v["noise_offset"].as_f64().unwrap_or(0.0),
-            )),
+            "minecraft:count_on_every_layer" => Ok(Self::OnEveryLayer(IntP::parse(&v["count"])?)),
             "minecraft:cuboid" => Ok(Self::Cuboid {
                 edges: v["include_edges"].as_bool().unwrap_or(true),
                 interior: v["include_interior"].as_bool().unwrap_or(true),
@@ -898,11 +1113,66 @@ pub struct Features {
     has: HashMap<u32, HashSet<(u32, u32)>>,
     /// Фичи, которые не разобрались: имя и причина. Пустой список у полного
     /// набора; нужен, чтобы отчёт при старте называл дыры, а не только счёт.
+    /// Имена фич по `steps[step][index]` — для профиля.
+    names: Vec<Vec<String>>,
     failures: Vec<(String, String)>,
     pub palette: Palette,
     seed: i64,
     min_y: i32,
     pub(crate) structures: Option<Arc<structure::Structures>>,
+}
+
+/// Configured tree features reused by sapling growth in an already loaded world.
+/// World decoration and live growth must place the same trunk, foliage and roots.
+pub struct RuntimeTrees {
+    features: Features,
+    trees: HashMap<String, Feature>,
+}
+
+impl RuntimeTrees {
+    pub fn load(
+        data_dir: &Path,
+        states: &States,
+        default: &dyn Fn(&str) -> Option<u32>,
+        min_y: i32,
+        height: i32,
+    ) -> Result<Self, String> {
+        let mut palette = Palette::new(data_dir, states, default);
+        let wg = data_dir.join("data/minecraft/worldgen");
+        let read = |dir: &str, name: &str| -> Result<Value, String> {
+            let path = name.strip_prefix("minecraft:").unwrap_or(name);
+            let bytes = std::fs::read(wg.join(dir).join(format!("{path}.json")))
+                .map_err(|e| format!("{dir} {name}: {e}"))?;
+            serde_json::from_slice(&bytes).map_err(|e| format!("{dir} {name}: {e}"))
+        };
+        const NAMES: &[&str] = &[
+            "oak", "fancy_oak", "spruce", "pine", "mega_spruce", "mega_pine",
+            "birch", "jungle_tree", "mega_jungle_tree", "acacia", "dark_oak",
+            "cherry", "pale_oak_bonemeal", "mangrove", "tall_mangrove",
+            "red_poplar", "orange_poplar", "yellow_poplar",
+        ];
+        let mut trees = HashMap::new();
+        for &name in NAMES {
+            let value = read("feature", name)?;
+            let feature = parse_feature(&value, &read, &mut palette, min_y, height, data_dir)?;
+            if !matches!(feature, Feature::Tree(_)) {
+                return Err(format!("feature {name} is not a tree"));
+            }
+            trees.insert(name.to_owned(), feature);
+        }
+        Ok(Self {
+            features: Features {
+                steps: Vec::new(), by_biome: HashMap::new(), has: HashMap::new(),
+                failures: Vec::new(), names: Vec::new(), palette, seed: 0, min_y, structures: None,
+            },
+            trees,
+        })
+    }
+
+    pub fn place(&self, name: &str, level: &mut dyn Level, origin: [i32; 3], seed: i64) -> bool {
+        let Some(Feature::Tree(tree)) = self.trees.get(name) else { return false };
+        tree.place(&self.features, level, &mut Worldgen::new(seed), origin)
+    }
 }
 
 /// Число шагов `GenerationStep.Decoration`.
@@ -935,13 +1205,23 @@ impl Features {
                 continue;
             };
             let biome = read("biome", name)?;
-            // `Biome.shouldFreeze`: базовая температура ниже 0.15 (`getBaseTemperature`).
-            let temps = biome["temperature"].as_f64().unwrap_or(0.5);
             let i = id as usize;
-            if palette.freeze.len() <= i {
-                palette.freeze.resize(i + 1, false);
+            let climate = Arc::make_mut(&mut palette.climate);
+            if climate.len() <= i {
+                climate.resize(
+                    i + 1,
+                    Climate {
+                        temperature: 2.0,
+                        frozen: false,
+                        precipitation: false,
+                    },
+                );
             }
-            palette.freeze[i] = temps < 0.15;
+            climate[i] = Climate {
+                temperature: biome["temperature"].as_f64().unwrap_or(0.5) as f32,
+                frozen: biome["temperature_modifier"].as_str() == Some("frozen"),
+                precipitation: biome["has_precipitation"].as_bool().unwrap_or(false),
+            };
             let steps = biome["features"]
                 .as_array()
                 .into_iter()
@@ -1001,12 +1281,16 @@ impl Features {
             by_biome.insert(*id, per);
         }
         let structures =
-            structure::Structures::load(data_dir, &mut palette, biome_ids, &read, min_y, height)?;
+            structure::Structures::load(
+                data_dir, &mut palette, biome_order, biome_ids, &read, min_y, height,
+            )?;
+        failures.extend(structures.failures().iter().cloned());
         Ok(Self {
             steps,
             by_biome,
             has,
             failures,
+            names: order.clone(),
             palette,
             seed,
             min_y,
@@ -1041,11 +1325,12 @@ impl Features {
         let seed = r.set_decoration_seed(self.seed, ox, oz);
         // `CHUNKWAKE_PROF=1` — время по шагам декорации в stderr.
         let prof = std::env::var_os("CHUNKWAKE_PROF").is_some();
+        // `CHUNKWAKE_FEATURE_TRACE=1` — какой индекс и сид у фичи.
+        let trace = std::env::var_os("CHUNKWAKE_FEATURE_TRACE").is_some();
         for step in 0..self.steps.len().min(DECORATION_STEPS) {
-            // Шаг 3 — `underground_structures`, шаг 4 — `surface_structures`.
-            // Куски пишутся до фич шага. У каждой структуры свой `setFeatureSeed`.
-            if (step == 3 || step == 4)
-                && let (Some(structures), Some(columns)) = (&self.structures, columns)
+            // Куски структур шага пишутся до его фич (крепость Ада — шаг 7,
+            // `underground_decoration`). У каждой структуры свой `setFeatureSeed`.
+            if let (Some(structures), Some(columns)) = (&self.structures, columns)
             {
                 structures.place(self, level, cx, cz, columns, &mut r, seed, step as i32);
             }
@@ -1062,13 +1347,19 @@ impl Features {
                 let Some(placed) = &self.steps[step][index as usize] else {
                     continue;
                 };
-                // `CHUNKWAKE_FEATURE_TRACE=1` — какой индекс и сид у фичи.
-                if std::env::var_os("CHUNKWAKE_FEATURE_TRACE").is_some() {
+                if trace {
                     eprintln!("step {step} index {index}");
                 }
                 r.set_feature_seed(seed, index as i32, step as i32);
                 let key = Some((step as u32, index));
+                let t_feature = prof.then(Instant::now);
                 self.place(level, placed, key, &mut r, [ox, self.min_y, oz]);
+                if let Some(t) = t_feature {
+                    let us = t.elapsed().as_micros();
+                    if us > 300 {
+                        eprintln!("    feature {}: {us} мкс", self.names[step][index as usize]);
+                    }
+                }
             }
             if let Some(t) = t_step {
                 let us = t.elapsed().as_micros();
@@ -1079,8 +1370,9 @@ impl Features {
         }
     }
 
-    /// `PlacedFeature.place` с ответом «поставлено ли». Честный ответ пока
-    /// даёт только дерево без модификаторов; остальное считается успехом.
+    /// `PlacedFeature.place` с ответом «поставлено ли»: успех хоть одной
+    /// точки. Честный ответ дают дерево, `sculk_patch`, `simple_block`,
+    /// `sequence`, `overlay` и выборщики; остальные фичи считаются успехом.
     fn place_ok(
         &self,
         level: &mut dyn Level,
@@ -1088,13 +1380,7 @@ impl Features {
         r: &mut Worldgen,
         origin: [i32; 3],
     ) -> bool {
-        match &placed.feature {
-            Feature::Tree(t) if placed.placement.is_empty() => t.place(self, level, r, origin),
-            _ => {
-                self.place(level, placed, None, r, origin);
-                true
-            }
-        }
+        self.place(level, placed, None, r, origin)
     }
 
     /// Уже размещённая фича в готовой точке — без повторных модификаторов.
@@ -1117,8 +1403,28 @@ impl Features {
         key: Option<(u32, u32)>,
         r: &mut Worldgen,
         origin: [i32; 3],
-    ) {
-        self.modify(level, placed, key, r, origin, 0);
+    ) -> bool {
+        self.modify(level, placed, key, r, origin, 0)
+    }
+
+    /// `CountOnEveryLayerPlacement.findOnGroundYPosition`: `layer`-й сверху
+    /// пол (непустой блок под пустым, не бедрок); пустые — воздух, вода, лава.
+    fn layer_floor(&self, level: &dyn Level, x: i32, top: i32, z: i32, layer: i32) -> Option<i32> {
+        let pal = &self.palette;
+        let empty = |s: u32| pal.is_air(s) || pal.is_liquid(s);
+        let mut current = level.get(x, top, z);
+        let mut seen = 0;
+        for y in (level.min_y() + 1..=top).rev() {
+            let below = level.get(x, y - 1, z);
+            if !empty(below) && empty(current) && pal.block_name(below) != Some("minecraft:bedrock") {
+                if seen == layer {
+                    return Some(y);
+                }
+                seen += 1;
+            }
+            current = below;
+        }
+        None
     }
 
     fn modify(
@@ -1129,74 +1435,74 @@ impl Features {
         r: &mut Worldgen,
         pos: [i32; 3],
         at: usize,
-    ) {
+    ) -> bool {
         let Some(m) = placed.placement.get(at) else {
-            self.feature(level, &placed.feature, r, pos);
-            return;
+            return self.feature(level, &placed.feature, r, pos);
         };
         let next = at + 1;
         let [x, y, z] = pos;
+        let mut ok = false;
         match m {
             Modifier::Count(n) => {
                 let n = n.sample(r);
                 // Все копии в стеке до развёртывания: счёт бросается один раз.
                 for _ in 0..n {
-                    self.modify(level, placed, key, r, pos, next);
+                    ok |= self.modify(level, placed, key, r, pos, next);
                 }
             }
             Modifier::InSquare => {
                 let nx = r.next_int_bound(16) + x;
                 let nz = r.next_int_bound(16) + z;
-                self.modify(level, placed, key, r, [nx, y, nz], next);
+                ok |= self.modify(level, placed, key, r, [nx, y, nz], next);
             }
             Modifier::Height(h) => {
                 let ny = h.sample(r);
-                self.modify(level, placed, key, r, [x, ny, z], next);
+                ok |= self.modify(level, placed, key, r, [x, ny, z], next);
             }
             Modifier::Biome => {
                 let b = level.biome(x, y, z);
                 if key.is_some_and(|key| self.has.get(&b).is_some_and(|s| s.contains(&key))) {
-                    self.modify(level, placed, key, r, pos, next);
+                    ok |= self.modify(level, placed, key, r, pos, next);
                 }
             }
             Modifier::Rarity(chance) => {
                 if r.next_float() < 1.0 / *chance as f32 {
-                    self.modify(level, placed, key, r, pos, next);
+                    ok |= self.modify(level, placed, key, r, pos, next);
                 }
             }
             Modifier::Heightmap(kind) => {
                 let ny = level.surface(*kind, x, z);
                 if ny > level.min_y() {
-                    self.modify(level, placed, key, r, [x, ny, z], next);
+                    ok |= self.modify(level, placed, key, r, [x, ny, z], next);
                 }
             }
             Modifier::Scan(dir, target, allowed, steps) => {
                 let pal = &self.palette;
                 if !allowed.test(&*level, pal, pos) {
-                    return;
+                    return ok;
                 }
                 let (lo, hi) = (level.min_y(), level.min_y() + level.height());
                 let mut at = pos;
                 for _ in 0..*steps {
                     if target.test(&*level, pal, at) {
-                        self.modify(level, placed, key, r, at, next);
-                        return;
+                        ok |= self.modify(level, placed, key, r, at, next);
+                        return ok;
                     }
                     at = add(at, *dir);
                     if at[1] < lo || at[1] >= hi {
-                        return;
+                        return ok;
                     }
                     if !allowed.test(&*level, pal, at) {
                         break;
                     }
                 }
                 if target.test(&*level, pal, at) {
-                    self.modify(level, placed, key, r, at, next);
+                    ok |= self.modify(level, placed, key, r, at, next);
                 }
             }
             Modifier::Chance(chance) => {
                 if r.next_float() < *chance {
-                    self.modify(level, placed, key, r, pos, next);
+                    ok |= self.modify(level, placed, key, r, pos, next);
                 }
             }
             Modifier::NoiseThreshold(level_at, below, above) => {
@@ -1207,31 +1513,42 @@ impl Features {
                     *above
                 };
                 for _ in 0..n {
-                    self.modify(level, placed, key, r, pos, next);
+                    ok |= self.modify(level, placed, key, r, pos, next);
                 }
             }
             Modifier::NoiseBased(ratio, factor, offset) => {
                 let noise = biome_info_noise().get(x as f64 / factor, z as f64 / factor);
                 let n = ((noise as f64 + offset) * *ratio as f64).ceil() as i32;
                 for _ in 0..n {
-                    self.modify(level, placed, key, r, pos, next);
+                    ok |= self.modify(level, placed, key, r, pos, next);
                 }
             }
-            Modifier::OnEveryLayer(ratio, factor, offset) => {
-                // `CountOnEveryLayerPlacement`: сначала число слоёв по шуму,
-                // затем для каждой копии — свой y в столбце от `MOTION_BLOCKING`.
-                let noise = biome_info_noise().get(x as f64 / factor, z as f64 / factor);
-                let layers = ((noise as f64 + offset) * *ratio as f64).ceil() as i32;
-                if layers <= 0 {
-                    return;
-                }
-                let top = level.surface(Heightmap::MotionBlocking, x, z);
-                for i in 0..layers {
-                    let ny = top - i;
-                    if ny <= level.min_y() {
-                        return;
+            Modifier::OnEveryLayer(count) => {
+                // `CountOnEveryLayerPlacement`: счёт бросается заново на каждой
+                // итерации (`i < count.sample(random)`). `FeaturePlacer` сначала
+                // собирает все точки модификатора, потом обходит их по порядку.
+                let mut out = Vec::new();
+                let mut layer = 0;
+                loop {
+                    let mut found = false;
+                    let mut i = 0;
+                    while i < count.sample(r) {
+                        let nx = r.next_int_bound(16) + x;
+                        let nz = r.next_int_bound(16) + z;
+                        let top = level.surface(Heightmap::MotionBlocking, nx, nz);
+                        if let Some(ny) = self.layer_floor(&*level, nx, top, nz, layer) {
+                            out.push([nx, ny, nz]);
+                            found = true;
+                        }
+                        i += 1;
                     }
-                    self.modify(level, placed, key, r, [x, ny, z], next);
+                    if !found {
+                        break;
+                    }
+                    layer += 1;
+                }
+                for p in out {
+                    ok |= self.modify(level, placed, key, r, p, next);
                 }
             }
             Modifier::Cuboid {
@@ -1256,36 +1573,36 @@ impl Features {
                         break;
                     }
                 }
-                self.modify(level, placed, key, r, chosen, next);
+                ok |= self.modify(level, placed, key, r, chosen, next);
             }
             Modifier::Offset(dx, dy, dz) => {
                 let (a, b) = (dx.sample(r), dy.sample(r));
                 let c = dz.sample(r);
-                self.modify(level, placed, key, r, [x + a, y + b, z + c], next);
+                ok |= self.modify(level, placed, key, r, [x + a, y + b, z + c], next);
             }
             Modifier::Filter(p) => {
                 if p.test(&*level, &self.palette, pos) {
-                    self.modify(level, placed, key, r, pos, next);
+                    ok |= self.modify(level, placed, key, r, pos, next);
                 }
             }
             Modifier::WaterDepth(max) => {
                 let floor = level.surface(Heightmap::OceanFloor, x, z);
                 let top = level.surface(Heightmap::WorldSurface, x, z);
                 if top - floor <= *max {
-                    self.modify(level, placed, key, r, pos, next);
+                    ok |= self.modify(level, placed, key, r, pos, next);
                 }
             }
             Modifier::Relative(kind, min, max) => {
                 let h = level.surface(*kind, x, z) as i64;
                 if h + *min as i64 <= y as i64 && y as i64 <= h + *max as i64 {
-                    self.modify(level, placed, key, r, pos, next);
+                    ok |= self.modify(level, placed, key, r, pos, next);
                 }
             }
             Modifier::Fixed(list) => {
                 for p in list {
                     // Только точки внутри этого чанка (`FixedPlacement`).
                     if p[0] >> 4 == x >> 4 && p[2] >> 4 == z >> 4 {
-                        self.modify(level, placed, key, r, *p, next);
+                        ok |= self.modify(level, placed, key, r, *p, next);
                     }
                 }
             }
@@ -1298,47 +1615,74 @@ impl Features {
                     feature: placed.feature.clone(),
                     placement,
                 };
-                self.modify(level, &tmp, key, r, pos, 0);
+                ok |= self.modify(level, &tmp, key, r, pos, 0);
             }
         }
+        ok
     }
 
-    fn feature(&self, level: &mut dyn Level, f: &Feature, r: &mut Worldgen, pos: [i32; 3]) {
+    /// `ConfiguredFeature.place`: ответ фичи там, где он влияет на ход
+    /// генерации (`SequenceFeature` останавливается на первом отказе).
+    fn feature(&self, level: &mut dyn Level, f: &Feature, r: &mut Worldgen, pos: [i32; 3]) -> bool {
         match f {
-            Feature::Ore(ore) => self.ore(level, ore, r, pos),
-            Feature::ScatteredOre(ore) => self.scattered_ore(level, ore, r, pos),
+            Feature::Tree(t) => t.place(self, level, r, pos),
+            Feature::SculkPatch(s) => s.place(self, level, r, pos),
             Feature::SimpleBlock(p) => self.simple_block(level, p, r, pos),
-            Feature::BlockPile(p) => self.block_pile(level, p, r, pos),
+            Feature::Sequence(list) => list.iter().all(|p| self.place(level, p, None, r, pos)),
+            Feature::Overlay(list) => {
+                let mut any = false;
+                for p in list {
+                    any |= self.place(level, p, None, r, pos);
+                }
+                any
+            }
             Feature::RandomSelector(list, default) => {
                 for (chance, placed) in list {
                     if r.next_float() < *chance {
-                        self.place(level, placed, None, r, pos);
-                        return;
+                        return self.place(level, placed, None, r, pos);
                     }
                 }
-                self.place(level, default, None, r, pos);
+                self.place(level, default, None, r, pos)
             }
             Feature::WeightedSelector(total, list) => {
                 if *total <= 0 {
-                    return;
+                    return false;
                 }
                 let mut i = r.next_int_bound(*total);
                 for (w, placed) in list {
                     if i < *w {
-                        self.place(level, placed, None, r, pos);
-                        return;
+                        return self.place(level, placed, None, r, pos);
                     }
                     i -= w;
                 }
+                false
             }
             Feature::BooleanSelector(yes, no) => {
                 let f = if r.next_bool() { yes } else { no };
-                self.place(level, f, None, r, pos);
+                self.place(level, f, None, r, pos)
             }
+            _ => {
+                self.feature_rest(level, f, r, pos);
+                true
+            }
+        }
+    }
+
+    fn feature_rest(&self, level: &mut dyn Level, f: &Feature, r: &mut Worldgen, pos: [i32; 3]) {
+        match f {
+            Feature::Ore(ore) => self.ore(level, ore, r, pos),
+            Feature::ScatteredOre(ore) => self.scattered_ore(level, ore, r, pos),
+            // Ответ этих фич нужен ходу генерации — их ставит `feature`.
+            Feature::SimpleBlock(_)
+            | Feature::RandomSelector(..)
+            | Feature::WeightedSelector(..)
+            | Feature::BooleanSelector(..)
+            | Feature::Tree(_)
+            | Feature::Sequence(_)
+            | Feature::Overlay(_)
+            | Feature::SculkPatch(_) => unreachable!("фича с ответом в feature_rest"),
+            Feature::BlockPile(p) => self.block_pile(level, p, r, pos),
             Feature::VegetationPatch(patch) => self.vegetation_patch(level, patch, r, pos),
-            Feature::Tree(t) => {
-                t.place(self, level, r, pos);
-            }
             Feature::FallenTree(t) => t.place(self, level, r, pos),
             Feature::HugeMushroom(m) => self.huge_mushroom(level, m, r, pos),
             Feature::Disk(d) => d.place(self, level, r, pos),
@@ -1350,11 +1694,6 @@ impl Features {
             Feature::MonsterRoom(m) => m.place(self, level, r, pos),
             Feature::Geode(g) => g.place(self, level, r, pos),
             Feature::RootSystem(s) => s.place(self, level, r, pos),
-            Feature::Sequence(list) => {
-                for p in list {
-                    self.place(level, p, None, r, pos);
-                }
-            }
             Feature::FreezeTopLayer => misc::freeze_top_layer(self, level, pos),
             Feature::UnderwaterMagma(m) => m.place(self, level, r, pos),
             Feature::Bamboo(chance) => misc::bamboo(self, level, r, pos, *chance),
@@ -1368,12 +1707,6 @@ impl Features {
                 i.place(self, level, r, pos)
             }
             Feature::CoralTree(kind, inner) => misc::coral(self, level, r, pos, kind, inner),
-            Feature::Overlay(list) => {
-                for p in list {
-                    self.place(level, p, None, r, pos);
-                }
-            }
-            Feature::SculkPatch(s) => s.place(self, level, r, pos),
             Feature::NoOp => {}
             Feature::VoidPlatform(stone, cobble) => {
                 place_void_platform(level, pos, *stone, *cobble);
@@ -1391,6 +1724,18 @@ impl Features {
             }
             Feature::Template(t) => t.place(&self.palette, level, r, pos),
             Feature::Fossil(f) => f.place(&self.palette, level, r, pos),
+            Feature::Pillar(p) => p.place(self, level, r, pos),
+            Feature::Delta(d) => d.place(self, level, r, pos),
+            Feature::ColumnCluster(c) => c.place(self, level, r, pos),
+            Feature::ReplaceBlobs(b) => b.place(self, level, r, pos),
+            Feature::NeighborSpread(n) => n.place(self, level, r, pos),
+            Feature::HugeFungus(g) => g.place(self, level, r, pos),
+            Feature::PatchySquare(p) => p.place(self, level, r, pos),
+            Feature::EndIsland(b) => end::island(b, level, r, pos),
+            Feature::EndPlatform(b) => end::platform(b, &self.palette, level, pos),
+            Feature::EndGateway(b, g) => g.place(b, level, pos),
+            Feature::EndSpike(b, s) => s.place(self, b, level, r, pos),
+            Feature::Chorus(b) => end::chorus(&self.palette, b, level, r, pos),
         }
     }
 
@@ -1725,17 +2070,17 @@ impl Features {
     }
 
     /// `SimpleBlockFeature.place`.
-    fn simple_block(&self, level: &mut dyn Level, p: &Provider, r: &mut Worldgen, pos: [i32; 3]) {
+    fn simple_block(&self, level: &mut dyn Level, p: &Provider, r: &mut Worldgen, pos: [i32; 3]) -> bool {
         let pal = &self.palette;
         let Some(state) = p.get(&*level, pal, r, pos) else {
-            return;
+            return false;
         };
         if !can_survive(&*level, pal, state, pos) {
-            return;
+            return false;
         }
         let [x, y, z] = pos;
         if !level.can_write(x, z) {
-            return;
+            return false;
         }
         if matches!(
             pal.survive.get(state as usize),
@@ -1745,7 +2090,7 @@ impl Features {
             if !pal.is_air(above)
                 && (pal.fluid(state) != pal.fluid(above) || !Palette::flag(&pal.replaceable, above))
             {
-                return;
+                return false;
             }
             // `DoublePlantBlock.placeAt`: обе половины, вода из мира.
             let half = |half: &str, at: [i32; 3]| {
@@ -1760,6 +2105,7 @@ impl Features {
         } else {
             level.set(x, y, z, state);
         }
+        true
     }
 
     /// `AbstractOreFeature.canPlaceOre`.
@@ -1947,6 +2293,47 @@ impl Features {
     }
 }
 
+/// `LevelChunk.postProcessGeneration` для пузырьков: `magma_block` и
+/// `soul_sand` (`postProcessAbove`) помечают клетку над собой, и вода-источник
+/// там по `LiquidBlock.tick` становится `bubble_column`
+/// (`BubbleColumnBlock.updateColumn`) до первого не-источника вверх.
+/// Состояния чанка — `(y * 16 + z) * 16 + x`.
+pub(crate) fn bubble_columns(pal: &Palette, states: &mut [u32]) {
+    let get = |n: &str| pal.defaults.get(n).copied();
+    let (Some(water), Some(column), Some(magma), Some(soul)) = (
+        get("minecraft:water"),
+        get("minecraft:bubble_column"),
+        get("minecraft:magma_block"),
+        get("minecraft:soul_sand"),
+    ) else {
+        return;
+    };
+    let (Some(down), Some(up)) = (
+        pal.with_prop(column, "drag", "true"),
+        pal.with_prop(column, "drag", "false"),
+    ) else {
+        return;
+    };
+    let height = states.len() / 256;
+    for i in 0..256 {
+        for y in 0..height.saturating_sub(1) {
+            let below = states[y * 256 + i];
+            let fill = if below == magma {
+                down
+            } else if below == soul {
+                up
+            } else {
+                continue;
+            };
+            let mut at = y + 1;
+            while at < height && (states[at * 256 + i] == water || pal.block_name(states[at * 256 + i]) == Some("minecraft:bubble_column")) {
+                states[at * 256 + i] = fill;
+                at += 1;
+            }
+        }
+    }
+}
+
 type Read<'a> = dyn Fn(&str, &str) -> Result<Value, String> + 'a;
 
 /// Порядок обхода `HashSet<BlockPos>` Java после вставки точек по порядку:
@@ -2049,6 +2436,43 @@ enum Predicate {
     Not(Box<Predicate>),
     /// `volume_match`: каждая клетка `min`…`max` проходит вложенный предикат.
     Volume([i32; 3], [i32; 3], Box<Predicate>),
+    /// `height_range`: y между якорями включительно.
+    HeightRange(Anchor, Anchor),
+}
+
+/// `VerticalAnchor`, который разрешается по уровню (`WorldGenerationContext`).
+#[derive(Clone, Copy, Debug)]
+enum Anchor {
+    Absolute(i32),
+    AboveBottom(i32),
+    BelowTop(i32),
+    RelativeToSea(i32),
+}
+
+impl Anchor {
+    fn parse(v: &Value) -> Result<Self, String> {
+        let i = |k: &str| v[k].as_i64().map(|n| n as i32);
+        if let Some(y) = i("absolute") {
+            Ok(Self::Absolute(y))
+        } else if let Some(o) = i("above_bottom") {
+            Ok(Self::AboveBottom(o))
+        } else if let Some(o) = i("below_top") {
+            Ok(Self::BelowTop(o))
+        } else if let Some(o) = i("relative_to_sea_level") {
+            Ok(Self::RelativeToSea(o))
+        } else {
+            Err(format!("vertical anchor {v} is not supported"))
+        }
+    }
+
+    fn resolve(self, level: &dyn Level) -> i32 {
+        match self {
+            Self::Absolute(y) => y,
+            Self::AboveBottom(o) => level.min_y() + o,
+            Self::BelowTop(o) => level.min_y() + level.height() - 1 - o,
+            Self::RelativeToSea(o) => level.sea_level() + o,
+        }
+    }
 }
 
 impl Predicate {
@@ -2117,6 +2541,10 @@ impl Predicate {
                 Ok(Self::Sturdy(o, d))
             }
             "minecraft:inside_world_bounds" => Ok(Self::InsideWorld(o)),
+            "minecraft:height_range" => Ok(Self::HeightRange(
+                Anchor::parse(&v["min_inclusive"])?,
+                Anchor::parse(&v["max_inclusive"])?,
+            )),
             "minecraft:all_of" => Ok(Self::AllOf(list(palette)?)),
             "minecraft:any_of" => Ok(Self::AnyOf(list(palette)?)),
             "minecraft:not" => Ok(Self::Not(Box::new(Self::parse(&v["predicate"], palette)?))),
@@ -2144,6 +2572,9 @@ impl Predicate {
             Self::AllOf(list) => list.iter().all(|p| p.test(level, pal, pos)),
             Self::AnyOf(list) => list.iter().any(|p| p.test(level, pal, pos)),
             Self::Not(p) => !p.test(level, pal, pos),
+            Self::HeightRange(min, max) => {
+                min.resolve(level) <= pos[1] && pos[1] <= max.resolve(level)
+            }
             Self::Volume(min, max, inner) => {
                 if (0..3).any(|i| min[i] > max[i]) {
                     return true;
@@ -2535,6 +2966,10 @@ fn can_survive(level: &dyn Level, pal: &Palette, state: u32, [x, y, z]: [i32; 3]
         Survive::Mushroom => {
             flag(&sup.mushroom, below) || (flag(&pal.solid, below) && pal.sturdy(below, 1))
         }
+        Survive::OwnTag => pal
+            .block_index(state)
+            .and_then(|b| sup.own.get(&b))
+            .is_some_and(|t| flag(t, below)),
         Survive::Snow => {
             if flag(&sup.no_snow, below) {
                 return false;
@@ -2851,6 +3286,54 @@ fn parse_feature(
                 .map(|e| placed(e, palette))
                 .collect::<Result<_, _>>()?,
         )),
+        "minecraft:single_block_pillar" => {
+            let block = Provider::parse(&v["block"], read, palette)?;
+            let cap = match v.get("cap_feature") {
+                Some(c) if !c.is_null() => Some(placed(c, palette)?),
+                _ => None,
+            };
+            Ok(Feature::Pillar(Arc::new(nether::Pillar::parse(
+                v, palette, block, cap,
+            )?)))
+        }
+        "minecraft:delta_feature" => Ok(Feature::Delta(Arc::new(nether::Delta::parse(
+            v, palette,
+        )?))),
+        "minecraft:stepped_column_cluster" => {
+            let block = Provider::parse(&v["block"], read, palette)?;
+            Ok(Feature::ColumnCluster(Arc::new(
+                nether::ColumnCluster::parse(v, palette, block)?,
+            )))
+        }
+        "minecraft:netherrack_replace_blobs" => Ok(Feature::ReplaceBlobs(Arc::new(
+            nether::ReplaceBlobs::parse(v, palette)?,
+        ))),
+        "minecraft:random_neighbor_spread" => {
+            let block = Provider::parse(&v["block"], read, palette)?;
+            Ok(Feature::NeighborSpread(Arc::new(
+                nether::NeighborSpread::parse(v, palette, block)?,
+            )))
+        }
+        "minecraft:projected_random_patchy_square" => {
+            let block = Provider::parse(&v["block"], read, palette)?;
+            Ok(Feature::PatchySquare(Arc::new(
+                nether::PatchySquare::parse(v, palette, block)?,
+            )))
+        }
+        "minecraft:huge_fungus" => Ok(Feature::HugeFungus(Arc::new(
+            nether::HugeFungus::parse(v, palette)?,
+        ))),
+        "minecraft:end_island" => Ok(Feature::EndIsland(end::Blocks::load(palette)?)),
+        "minecraft:end_platform" => Ok(Feature::EndPlatform(end::Blocks::load(palette)?)),
+        "minecraft:end_gateway" => Ok(Feature::EndGateway(
+            end::Blocks::load(palette)?,
+            end::Gateway::parse(v)?,
+        )),
+        "minecraft:end_spike" => Ok(Feature::EndSpike(
+            end::Blocks::load(palette)?,
+            end::Spikes::parse(v)?,
+        )),
+        "minecraft:chorus_plant" => Ok(Feature::Chorus(end::Blocks::load(palette)?)),
         other => Err(format!("feature {other} is not supported")),
     }
 }
@@ -2946,6 +3429,76 @@ mod tests {
     /// Декорация не должна молча откатываться: каждая фича биомов
     /// оверворлда разбирается. `CHUNKWAKE_DATA` — каталог `generated/26.3`;
     /// без него тест пропускается.
+    /// Фичи и структуры Ада и Края разбираются без отказов.
+    #[test]
+    fn other_dimension_features_parse() {
+        let Some(data) = std::env::var_os("CHUNKWAKE_DATA").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let registries = chunkwake_data::registries::RegistryData::load(&data).unwrap();
+        let biome_ids: HashMap<String, u32> = registries
+            .synchronized
+            .iter()
+            .find(|r| r.name == "worldgen/biome")
+            .map(|r| {
+                r.entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.clone(), i as u32))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let blocks = chunkwake_data::world::Blocks::load(&data).unwrap();
+        let state = |n: &str| blocks.default_state(n).ok().map(|s| s as u32);
+        for settings in ["minecraft:nether", "minecraft:end"] {
+            let mut noise = crate::Generator::load_settings(&data, 1, None, settings).unwrap();
+            noise.bind_biomes(biome_ids.clone());
+            let features = Features::load(
+                &data,
+                Palette::new(&data, &blocks.states(), &state),
+                &noise.feature_biomes(),
+                &biome_ids,
+                1,
+                noise.min_y,
+                noise.height,
+            )
+            .unwrap();
+            assert!(
+                features.failures().is_empty(),
+                "{settings}: отказы {:?}",
+                features.failures()
+            );
+            let (done, all) = features.coverage();
+            assert_eq!(done, all, "{settings}: {done} из {all}");
+        }
+    }
+
+    /// Сдвиг по раскладке даёт то же состояние, что и перебор, на всех
+    /// состояниях, свойствах и значениях.
+    #[test]
+    fn with_prop_layout_matches_scan() {
+        let Some(data) = std::env::var_os("CHUNKWAKE_DATA").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let blocks = chunkwake_data::world::Blocks::load(&data).unwrap();
+        let state = |n: &str| blocks.default_state(n).ok().map(|s| s as u32);
+        let pal = Palette::new(&data, &blocks.states(), &state);
+        let laid = pal.layouts.iter().filter(|l| l.is_some()).count();
+        assert!(laid * 10 > pal.layouts.len() * 9, "раскладок {laid} из {}", pal.layouts.len());
+        for (b, list) in pal.by_block.iter().enumerate() {
+            let Some(layout) = &pal.layouts[b] else {
+                continue;
+            };
+            for &s in list {
+                for (key, values, _) in layout {
+                    for v in values.iter().map(String::as_str).chain(["nope"]) {
+                        assert_eq!(pal.with_prop(s, key, v), pal.with_prop_scan(s, key, v), "{s} {key}={v}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn overworld_features_parse() {
         let Some(data) = std::env::var_os("CHUNKWAKE_DATA").map(std::path::PathBuf::from) else {
@@ -2987,7 +3540,7 @@ mod tests {
         assert_eq!(done, all, "{done} из {all}");
         assert_eq!(all, 171);
         let structures = features.structures.as_ref().expect("structures");
-        assert_eq!(structures.structure_count(), 45);
+        assert_eq!(structures.structure_count(), 48);
         assert_eq!(
             structures.feature_seed("minecraft:village_plains"),
             Some((4, 40))
@@ -3051,5 +3604,44 @@ mod tests {
             structures.feature_seed("minecraft:ruined_portal_swamp"),
             Some((4, 34))
         );
+    }
+
+    #[test]
+    fn runtime_trees_parse_26_3() {
+        let Some(data) = std::env::var_os("CHUNKWAKE_DATA").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let blocks = chunkwake_data::world::Blocks::load(&data).unwrap();
+        let state = |n: &str| blocks.default_state(n).ok().map(|s| s as u32);
+        let trees = RuntimeTrees::load(&data, &blocks.states(), &state, -64, 384).unwrap();
+        assert_eq!(trees.trees.len(), 18);
+        struct Flat {
+            air: u32,
+            dirt: u32,
+            placed: HashMap<[i32; 3], u32>,
+        }
+        impl Level for Flat {
+            fn min_y(&self) -> i32 { -64 }
+            fn height(&self) -> i32 { 384 }
+            fn get(&self, x: i32, y: i32, z: i32) -> u32 {
+                self.placed.get(&[x, y, z]).copied()
+                    .unwrap_or(if y == 63 { self.dirt } else { self.air })
+            }
+            fn set(&mut self, x: i32, y: i32, z: i32, value: u32) {
+                self.placed.insert([x, y, z], value);
+            }
+            fn can_write(&self, _x: i32, _z: i32) -> bool { true }
+            fn surface(&self, _kind: Heightmap, _x: i32, _z: i32) -> i32 { 64 }
+            fn sea_level(&self) -> i32 { 63 }
+            fn biome(&self, _x: i32, _y: i32, _z: i32) -> u32 { 0 }
+        }
+        let mut level = Flat {
+            air: state("minecraft:air").unwrap(),
+            dirt: state("minecraft:dirt").unwrap(),
+            placed: HashMap::new(),
+        };
+        assert!(trees.place("oak", &mut level, [0, 64, 0], 12345));
+        assert!(level.placed.values().any(|&s| trees.features.palette.block_name(s) == Some("minecraft:oak_log")));
+        assert!(level.placed.values().any(|&s| trees.features.palette.block_name(s) == Some("minecraft:oak_leaves")));
     }
 }

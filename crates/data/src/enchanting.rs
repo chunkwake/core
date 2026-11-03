@@ -13,6 +13,8 @@ pub struct EnchantDef {
     pub name: String,
     pub max_level: i32,
     pub weight: i32,
+    /// Стоимость одного уровня чар на наковальне.
+    pub anvil_cost: i32,
     pub min_base: i32,
     pub min_step: i32,
     pub max_base: i32,
@@ -185,6 +187,7 @@ pub fn load(root: &Path, names: &[String]) -> Result<Enchanting, DataError> {
             name: name.clone(),
             max_level: n("max_level"),
             weight: n("weight"),
+            anvil_cost: n("anvil_cost"),
             min_base: cost("min_cost", "base"),
             min_step: cost("min_cost", "per_level_above_first"),
             max_base: cost("max_cost", "base"),
@@ -339,6 +342,43 @@ pub fn plugin_lines(root: &Path, names: &[String]) -> Vec<String> {
 struct Tags<'a> {
     root: &'a Path,
     memo: HashMap<(String, String), HashSet<String>>,
+}
+
+/// Допустимые материалы починки из компонента `minecraft:repairable` каждого предмета.
+pub fn repair_materials(root: &Path, items: &HashMap<String, i32>) -> HashMap<i32, HashSet<i32>> {
+    let mut tags = Tags {
+        root,
+        memo: HashMap::new(),
+    };
+    let mut out = HashMap::new();
+    for (name, &id) in items {
+        let path = name.trim_start_matches("minecraft:");
+        let file = root.join(format!("reports/minecraft/components/item/{path}.json"));
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        if !text.contains("minecraft:repairable") {
+            continue;
+        }
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(value) = json.pointer("/components/minecraft:repairable/items") else {
+            continue;
+        };
+        let entries: Vec<&str> = match value {
+            serde_json::Value::String(s) => vec![s],
+            serde_json::Value::Array(a) => a.iter().filter_map(|v| v.as_str()).collect(),
+            _ => Vec::new(),
+        };
+        let repair = entries
+            .into_iter()
+            .flat_map(|entry| tags.values("item", entry))
+            .filter_map(|name| items.get(&name).copied())
+            .collect();
+        out.insert(id, repair);
+    }
+    out
 }
 
 impl Tags<'_> {

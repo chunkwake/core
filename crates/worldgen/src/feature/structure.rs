@@ -1,6 +1,7 @@
 //! Деревни и пиллагерские аванпосты: `random_spread`, пулы и `JigsawPlacement`.
 //! Сундуки остаются состояниями блоков, лут и мобы не пишутся.
 
+use super::end_city;
 use super::mansion;
 use super::mineshaft::{self, Cfg as ShaftCfg};
 use super::monument;
@@ -8,18 +9,22 @@ use super::ocean_ruin;
 use super::portal;
 use super::pyramid::{self, Which};
 use super::shore::{self, Body};
+use super::fortress;
+use super::treasure;
 use super::stronghold;
 use super::template::{self, JigInfo, Processor, ROTS, Rot, Template};
 use super::{Bits, Features, Legacy, Level, Palette, Worldgen};
+use crate::random::pos_seed;
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
-/// Кэш раскладки структуры по (набор, x, z).
-type LayoutCache = Mutex<HashMap<(usize, i32, i32), Option<Arc<Layout>>>>;
+/// Кэш раскладки структуры по (набор, x, z). Ячейка заводится до сборки:
+/// старт, нужный сразу многим потокам, собирает один, остальные ждут его.
+type LayoutCache = Mutex<HashMap<(usize, i32, i32), Arc<OnceLock<Option<Arc<Layout>>>>>>;
 
 /// Столбцы мира для высоты старта и проверки биома. Высота — без бороды
 /// и без карверов (`getBaseHeight`).
@@ -30,11 +35,21 @@ pub(crate) trait Columns {
     fn ocean_floor(&self, x: i32, z: i32) -> i32;
     fn biome_at(&self, x: i32, y: i32, z: i32) -> Option<u32>;
     fn column_has(&self, x: i32, z: i32, biomes: &HashSet<u32>) -> bool;
+    /// `getBaseColumn`: блок шума без поверхности и карверов.
+    fn base_block(&self, x: i32, y: i32, z: i32) -> Option<Base>;
     fn min_y(&self) -> i32;
     /// `getMaxY()`: верх невключительно.
     fn max_y(&self) -> i32;
     /// `getSeaLevel`.
     fn sea_level(&self) -> i32;
+}
+
+/// Блок столбца `getBaseColumn`: воздух, блок по умолчанию или жидкость.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Base {
+    Air,
+    Solid,
+    Fluid,
 }
 
 /// Жёсткая коробка куска и её линия земли.
@@ -43,10 +58,17 @@ struct BeardBox {
     min: [i32; 3],
     max: [i32; 3],
     ground: i32,
-    /// `TerrainAdjustment.BURY`. Иначе коробка считается как `beard_thin`.
-    bury: bool,
-    /// `TerrainAdjustment.ENCAPSULATE`: свой `dy` и половинный масштаб по XZ.
-    encapsulate: bool,
+    adapt: Adapt,
+}
+
+/// `TerrainAdjustment` структуры, кроме `NONE`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Adapt {
+    Thin,
+    Bury,
+    Boxed,
+    /// Свой `dy` от границ коробки и половинный масштаб по всем осям.
+    Encapsulate,
 }
 
 /// Добавка `beard_thin` к финальной плотности. Пустая ничего не меняет.
@@ -70,17 +92,19 @@ impl Beard {
         for b in &self.boxes {
             let dx = 0.max((b.min[0] - x).max(x - b.max[0]));
             let dz = 0.max((b.min[2] - z).max(z - b.max[2]));
-            if b.encapsulate {
-                // `ENCAPSULATE`: `dy` от границ коробки, все轴 вполовину.
-                let dy = 0.max((b.min[1] - y).max(y - b.max[1]));
-                sum += bury_contrib(dx as f32 / 2.0, dy as f32 / 2.0, dz as f32 / 2.0) * 0.8;
-            } else if b.bury {
-                let dy = (y - b.ground) as f32 / 2.0;
-                sum += bury_contrib(dx as f32, dy, dz as f32);
-            } else {
-                let dy = y - b.ground;
-                sum += beard_contrib(dx, dy, dz, dy) * 0.8;
-            }
+            let to_ground = y - b.ground;
+            sum += match b.adapt {
+                Adapt::Encapsulate => {
+                    let dy = 0.max((b.min[1] - y).max(y - b.max[1]));
+                    bury_contrib(dx as f32 / 2.0, dy as f32 / 2.0, dz as f32 / 2.0) * 0.8
+                }
+                Adapt::Bury => bury_contrib(dx as f32, to_ground as f32 / 2.0, dz as f32),
+                Adapt::Thin => beard_contrib(dx, to_ground, dz, to_ground) * 0.8,
+                Adapt::Boxed => {
+                    let dy = 0.max((b.ground - y).max(y - b.max[1]));
+                    beard_contrib(dx, dy, dz, to_ground) * 0.8
+                }
+            };
         }
         for j in &self.junctions {
             let dx = x - j[0];
@@ -169,8 +193,16 @@ enum Elem {
     Monument(Arc<monument::Piece>),
     /// Кусок крепости.
     Stronghold(Arc<stronghold::Piece>),
+    /// Кусок крепости Незера.
+    Fortress(Arc<fortress::Piece>),
+    /// Окаменелость Незера.
+    Fossil(Arc<FossilPiece>),
+    /// Зарытый клад.
+    Treasure(Arc<treasure::Piece>),
     /// Кусок лесного особняка.
     Mansion(Arc<mansion::Piece>),
+    /// Кусок города Края.
+    EndCity(Arc<end_city::Piece>),
     /// Руины портала.
     Portal(Arc<portal::Piece>),
     /// Куски океанской руины.
@@ -189,7 +221,11 @@ impl Elem {
             | Self::Shaft(_)
             | Self::Monument(_)
             | Self::Stronghold(_)
+            | Self::Fortress(_)
+            | Self::Fossil(_)
+            | Self::Treasure(_)
             | Self::Mansion(_)
+            | Self::EndCity(_)
             | Self::Portal(_)
             | Self::Ruin(_) => true,
         }
@@ -206,6 +242,7 @@ impl Elem {
         piece: &Piece,
         r: &mut Worldgen,
         window: template::Bounds,
+        reference: [i32; 3],
     ) -> bool {
         match self {
             Self::Empty => true,
@@ -225,10 +262,12 @@ impl Elem {
                 !rigid,
                 r,
                 window,
+                features.seed,
+                reference,
             ),
             Self::List { parts, .. } => {
                 for part in parts {
-                    if !part.place(features, level, piece, r, window) {
+                    if !part.place(features, level, piece, r, window, reference) {
                         return false;
                     }
                 }
@@ -260,7 +299,23 @@ impl Elem {
                 piece.place(&features.palette, level, r, window);
                 true
             }
+            Self::Fortress(piece) => {
+                piece.place(&features.palette, level, r, window);
+                true
+            }
+            Self::Fossil(piece) => {
+                piece.place(&features.palette, level, r, window, features.seed);
+                true
+            }
+            Self::Treasure(piece) => {
+                piece.place(&features.palette, level, r, window);
+                true
+            }
             Self::Mansion(piece) => {
+                piece.place(&features.palette, level, r, window);
+                true
+            }
+            Self::EndCity(piece) => {
                 piece.place(&features.palette, level, r, window);
                 true
             }
@@ -307,20 +362,35 @@ struct Kind {
     monument: Option<HashSet<u32>>,
     /// Крепость: старт — членство в кольцах, куски собираются отдельно.
     stronghold: bool,
+    /// Крепость Незера: дерево `NetherFortressPieces`.
+    fortress: bool,
+    /// Окаменелость Незера: шаблоны и диапазон высоты.
+    fossil: Option<Arc<FossilCfg>>,
+    /// Зарытый клад: старт на дне в середине чанка.
+    treasure: bool,
     /// Особняк: сетка-лабиринт из шаблонов, шаблоны грузятся при загрузке.
     mansion: bool,
+    /// Город Края: дерево `EndCityPieces`, старт как у особняка.
+    end_city: bool,
     /// Руины портала: наборы размещения.
     portal: Option<Vec<portal::Setup>>,
     /// Океанская руина: тёплая или холодная.
     ruin: Option<ocean_ruin::Cfg>,
     /// `start_height` jigsaw: своя высота вместо `WORLD_SURFACE_WG`.
-    start_height: Option<(i32, i32)>,
+    start_height: Option<StartHeight>,
     /// `ENCAPSULATE` вместо `beard_thin`.
     encapsulate: bool,
+    /// `BEARD_BOX`: высота от земли до верха коробки.
+    boxed: bool,
+    /// `BURY` у jigsaw.
+    bury: bool,
     /// `pool_aliases`: связки, раскрываются один раз в точку старта.
     aliases: Vec<PoolAlias>,
     /// `dimension_padding`: отступ от низа и верха мира.
     padding: (i32, i32),
+    /// `start_jigsaw_name`: стартовый кусок встаёт так, чтобы этот
+    /// шарнир пришёлся на точку старта.
+    start_jigsaw: Option<String>,
 }
 
 struct Set {
@@ -331,6 +401,8 @@ struct Set {
     triangular: bool,
     /// Частота старта. `Always` — без ограничения.
     frequency: Freq,
+    /// `locate_offset`: точка `/locate` от угла чанка старта.
+    locate_offset: [i32; 3],
     exclusion: Option<(usize, i32)>,
     kinds: Vec<Kind>,
     weights: Vec<i32>,
@@ -367,6 +439,8 @@ pub(crate) struct Layout {
     beard: bool,
     /// `TerrainAdjustment.BURY`, отдельно от `beard_thin`.
     bury: bool,
+    /// `TerrainAdjustment.BEARD_BOX`.
+    boxed: bool,
     /// После установки кусков нужны постаменты (`WoodlandMansionStructure.afterPlace`).
     mansion: bool,
     /// Руины портала: кусок ставится своим кодом (`RuinedPortalPiece.postProcess`).
@@ -383,10 +457,12 @@ pub(crate) struct Layout {
 pub(crate) struct Structures {
     sets: Vec<Set>,
     pools: HashMap<String, Pool>,
-    /// Шаблоны `woodland_mansion/*`, по имени без префикса.
+    /// Шаблоны `woodland_mansion/*` по имени без префикса и `end_city/*`.
     templates: HashMap<String, Arc<template::Template>>,
     /// Шаблоны руин портала.
     portals: portal::Loaded,
+    /// Климат биомов для `Properties.cold` руин портала.
+    climate: Arc<Vec<super::Climate>>,
     /// Шаблоны океанских руин.
     ruins: ocean_ruin::Loaded,
     empty: Arc<Elem>,
@@ -395,12 +471,15 @@ pub(crate) struct Structures {
     ring_cache: Mutex<HashMap<i64, Vec<RingSlot>>>,
     /// Тег `minecraft:village` → id структур из `tags/worldgen/structure`.
     tags: HashMap<String, HashSet<String>>,
+    /// Наборы измерения, которые не разобрались.
+    failures: Vec<(String, String)>,
 }
 
 impl Structures {
     pub(crate) fn load(
         data_dir: &Path,
         palette: &mut Palette,
+        biome_order: &[String],
         biome_ids: &HashMap<String, u32>,
         read: &super::Read<'_>,
         min_y: i32,
@@ -419,25 +498,47 @@ impl Structures {
             seeds: feature_seeds(data_dir)?,
             alias_names: HashSet::new(),
         };
+        // Все наборы `structure_set/*`, как `ChunkGeneratorStructureState`:
+        // набор, ни одна структура которого не встаёт в биомы измерения,
+        // в этом измерении не участвует.
+        let dimension: HashSet<u32> = biome_order
+            .iter()
+            .filter_map(|b| biome_ids.get(b).copied())
+            .collect();
+        let mut names = Vec::new();
+        let dir = data_dir.join("data/minecraft/worldgen/structure_set");
+        for entry in std::fs::read_dir(&dir).map_err(|e| format!("structure sets: {e}"))? {
+            let path = entry.map_err(|e| format!("structure sets: {e}"))?.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("json")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            {
+                names.push(format!("minecraft:{stem}"));
+            }
+        }
+        names.sort();
         let mut sets = Vec::new();
-        for name in [
-            "minecraft:villages",
-            "minecraft:pillager_outposts",
-            "minecraft:abandoned_camp",
-            "minecraft:desert_pyramids",
-            "minecraft:jungle_temples",
-            "minecraft:swamp_huts",
-            "minecraft:igloos",
-            "minecraft:shipwrecks",
-            "minecraft:mineshafts",
-            "minecraft:ocean_monuments",
-            "minecraft:strongholds",
-            "minecraft:woodland_mansions",
-            "minecraft:ruined_portals",
-            "minecraft:ocean_ruins",
-            "minecraft:trial_chambers",
-        ] {
-            sets.push(loader.set(name)?);
+        let mut failures = Vec::new();
+        for name in names {
+            let v = read("structure_set", &name)?;
+            let mut fits = false;
+            for entry in v["structures"].as_array().into_iter().flatten() {
+                let id = entry["structure"].as_str().unwrap_or("");
+                let s = read("structure", id)?;
+                let biomes = loader.biomes(s["biomes"].as_str().unwrap_or(""))?;
+                fits |= biomes.iter().any(|b| dimension.contains(b));
+            }
+            if !fits {
+                continue;
+            }
+            match loader.set(&name) {
+                Ok(set) => sets.push(set),
+                Err(e) => {
+                    if std::env::var_os("CHUNKWAKE_FEATURE_ERRORS").is_some() {
+                        eprintln!("{name}: {e}");
+                    }
+                    failures.push((name, e));
+                }
+            }
         }
         loader.close_pools()?;
         let names: Vec<String> = sets.iter().map(|s| s.name.clone()).collect();
@@ -450,12 +551,19 @@ impl Structures {
             pools: loader.pools,
             templates: load_mansion_templates(data_dir, palette)?,
             portals: portal::load(data_dir, palette)?,
+            climate: palette.climate(),
             ruins: ocean_ruin::load(data_dir, palette)?,
             empty: Arc::new(Elem::Empty),
             cache: Mutex::new(HashMap::new()),
             ring_cache: Mutex::new(HashMap::new()),
             tags: load_structure_tags(data_dir)?,
+            failures,
         })
+    }
+
+    /// Наборы, которые не разобрались: имя и причина.
+    pub(crate) fn failures(&self) -> &[(String, String)] {
+        &self.failures
     }
 
     #[cfg(test)]
@@ -466,25 +574,40 @@ impl Structures {
     /// Борода чанка: жёсткие коробки и стыки в радиусе ядра.
     pub(crate) fn beard_at(&self, columns: &dyn Columns, cx: i32, cz: i32) -> Beard {
         let mut beard = Beard::default();
-        for (_, _, _, layout) in self.nearby(cx, cz, REACH, columns) {
-            if !layout.beard && !layout.bury && !layout.encapsulate {
+        // `Beardifier.forStructuresInChunk` берёт старты по ссылкам чанка.
+        for (_, sx, sz, layout) in self.nearby(cx, cz, REACH, columns) {
+            if !referenced(&layout, sx, sz, cx, cz) {
                 continue;
             }
+            let adapt = if layout.encapsulate {
+                Adapt::Encapsulate
+            } else if layout.bury {
+                Adapt::Bury
+            } else if layout.boxed {
+                Adapt::Boxed
+            } else if layout.beard {
+                Adapt::Thin
+            } else {
+                continue;
+            };
             for piece in &layout.pieces {
-                if piece.rigid && near_xz(piece.min, piece.max, cx, cz, 12) {
+                // `isCloseToChunk(chunk, 12)` и для коробки, и для стыков.
+                if !near_xz(piece.min, piece.max, cx, cz, 12) {
+                    continue;
+                }
+                if piece.rigid {
                     beard.boxes.push(BeardBox {
                         min: piece.min,
                         max: piece.max,
                         ground: piece.min[1] + piece.ground,
-                        bury: layout.bury,
-                        encapsulate: layout.encapsulate,
+                        adapt,
                     });
                 }
-                if layout.beard {
-                    for j in &piece.junctions {
-                        if near_point(j[0], j[2], cx, cz, 12) {
-                            beard.junctions.push(*j);
-                        }
+                // Стыки берутся строго внутри окна ±12, при любой адаптации.
+                for j in &piece.junctions {
+                    let (x0, z0) = (cx * 16, cz * 16);
+                    if j[0] > x0 - 12 && j[2] > z0 - 12 && j[0] < x0 + 27 && j[2] < z0 + 27 {
+                        beard.junctions.push(*j);
                     }
                 }
             }
@@ -502,54 +625,82 @@ impl Structures {
         origin: [i32; 3],
         name: &str,
     ) -> Option<[i32; 3]> {
+        // `ChunkGenerator.findNearestMapStructure`: кольца целиком, затем
+        // `random_spread` по радиусам; на первом радиусе с находкой — ближайшая
+        // из находок всех наборов по `distSqr` с высотой.
         let wanted = self.wanted(name)?;
-        let seed = columns.seed();
-        let cx = origin[0].div_euclid(16);
-        let cz = origin[2].div_euclid(16);
+        let offer = |p: [i32; 3], best: &mut Option<([i32; 3], i64)>| {
+            let d = (0..3).map(|i| (p[i] as i64 - origin[i] as i64).pow(2)).sum();
+            if best.is_none_or(|(_, b)| d < b) {
+                *best = Some((p, d));
+            }
+        };
         let mut best: Option<([i32; 3], i64)> = None;
+        let mut spread = Vec::new();
         for (si, set) in self.sets.iter().enumerate() {
             if !set.kinds.iter().any(|k| wanted.contains(&k.name)) {
                 continue;
             }
             if set.rings.is_some() {
-                self.nearest_rings(si, origin, columns, &wanted, &mut best);
-                continue;
-            }
-            for ring in 0i32..=100 {
-                let mut hit = false;
-                for dz in -ring..=ring {
-                    for dx in -ring..=ring {
-                        if ring > 0 && dx.abs() != ring && dz.abs() != ring {
-                            continue;
-                        }
-                        let probe_x = cx.wrapping_add(dx.wrapping_mul(set.spacing));
-                        let probe_z = cz.wrapping_add(dz.wrapping_mul(set.spacing));
-                        let (sx, sz) = spread_chunk(
-                            set.spacing,
-                            set.separation,
-                            set.salt,
-                            seed,
-                            probe_x,
-                            probe_z,
-                            set.triangular,
-                        );
-                        let Some(pos) = self.probe(si, sx, sz, columns, &wanted) else {
-                            continue;
-                        };
-                        let dist = (pos[0] as i64 - origin[0] as i64).pow(2)
-                            + (pos[2] as i64 - origin[2] as i64).pow(2);
-                        if best.is_none_or(|(_, d)| dist < d) {
-                            best = Some((pos, dist));
-                            hit = true;
-                        }
-                    }
+                if let Some(p) = self.nearest_rings(si, origin, columns, &wanted) {
+                    offer(p, &mut best);
                 }
-                if hit {
-                    break;
+            } else {
+                spread.push(si);
+            }
+        }
+        let cx = origin[0] >> 4;
+        let cz = origin[2] >> 4;
+        for radius in 0i32..=100 {
+            if spread.is_empty() {
+                break;
+            }
+            let mut found = false;
+            for &si in &spread {
+                if let Some(p) = self.spread_ring(si, cx, cz, radius, columns, &wanted) {
+                    found = true;
+                    offer(p, &mut best);
+                }
+            }
+            if found {
+                break;
+            }
+        }
+        best.map(|(p, _)| p)
+    }
+
+    /// Первая находка набора на кольце `radius` в порядке x, затем z.
+    fn spread_ring(
+        &self,
+        si: usize,
+        cx: i32,
+        cz: i32,
+        radius: i32,
+        columns: &dyn Columns,
+        wanted: &HashSet<String>,
+    ) -> Option<[i32; 3]> {
+        let set = &self.sets[si];
+        for x in -radius..=radius {
+            let x_edge = x == -radius || x == radius;
+            for z in -radius..=radius {
+                if !x_edge && z != -radius && z != radius {
+                    continue;
+                }
+                let (sx, sz) = spread_chunk(
+                    set.spacing,
+                    set.separation,
+                    set.salt,
+                    columns.seed(),
+                    cx.wrapping_add(set.spacing.wrapping_mul(x)),
+                    cz.wrapping_add(set.spacing.wrapping_mul(z)),
+                    set.triangular,
+                );
+                if let Some(p) = self.probe(si, sx, sz, columns, wanted) {
+                    return Some(p);
                 }
             }
         }
-        best.map(|(pos, _)| pos)
+        None
     }
 
     /// Id, которые команда просит: одно имя или развёрнутый тег. Пусто, если
@@ -591,8 +742,9 @@ impl Structures {
             if !wanted.contains(&self.sets[si].kinds[ki].name) {
                 return Some(None);
             }
-            let y = columns.base_height(sx * 16 + 8, sz * 16 + 8);
-            Some(Some([sx * 16 + 8, y, sz * 16 + 8]))
+            // `getLocatePos`: угол чанка старта плюс `locate_offset`.
+            let off = self.sets[si].locate_offset;
+            Some(Some([sx * 16 + off[0], off[1], sz * 16 + off[2]]))
         };
         if n == 1 {
             return accept(0).flatten();
@@ -648,7 +800,17 @@ impl Structures {
             let biome = columns.biome_at(sx * 16, 0, sz * 16)?;
             return kind.biomes.contains(&biome).then_some(());
         }
-        if kind.mansion {
+        if kind.fortress {
+            let biome = columns.biome_at(sx * 16, 64, sz * 16)?;
+            return kind.biomes.contains(&biome).then_some(());
+        }
+        if kind.fossil.is_some() {
+            return fossil_layout(kind, sx, sz, columns).map(|_| ());
+        }
+        if kind.treasure {
+            return shore::surface_ok(columns, sx, sz, &kind.biomes, true);
+        }
+        if kind.mansion || kind.end_city {
             return mansion_start(kind, sx, sz, columns.seed(), columns).map(|_| ());
         }
         if kind.ruin.is_some() {
@@ -669,13 +831,7 @@ impl Structures {
         }
         let mut rng = Legacy::new(0);
         rng.set_large_feature_seed(columns.seed(), sx, sz);
-        let planned_y = kind.start_height.map(|(lo, hi)| {
-            if lo > hi {
-                lo
-            } else {
-                rng.between_inclusive(lo, hi)
-            }
-        });
+        let planned_y = kind.start_height.map(|h| h.sample(&mut rng));
         let rot = ROTS[rng.next_int_bound(4) as usize];
         let alias_map = resolve_aliases(
             &kind.aliases,
@@ -756,18 +912,44 @@ impl Structures {
         decoration_seed: i64,
         step: i32,
     ) {
+        if !self.sets.iter().flat_map(|s| &s.kinds).any(|k| k.step == step) {
+            return;
+        }
         let min_y = level.min_y();
         let window = template::Bounds {
             min: [cx * 16, min_y, cz * 16],
             max: [cx * 16 + 15, min_y + level.height() - 1, cz * 16 + 15],
         };
         let mut found = self.nearby(cx, cz, REACH, columns);
+        // Только старты со ссылкой из этого чанка; вставка — x снаружи, z внутри.
+        found.retain(|(_, sx, sz, layout)| referenced(layout, *sx, *sz, cx, cz));
         found.sort_by(|a, b| {
             a.3.seed_index
                 .cmp(&b.3.seed_index)
                 .then(a.1.cmp(&b.1))
                 .then(a.2.cmp(&b.2))
         });
+        // `startsForStructure` обходит `LongOpenHashSet` ссылок, а не порядок
+        // вставки: несколько стартов одной структуры в чанке делят генератор
+        // в этом порядке.
+        let mut start = 0;
+        while start < found.len() {
+            let mut end = start + 1;
+            while end < found.len() && found[end].3.seed_index == found[start].3.seed_index {
+                end += 1;
+            }
+            if end - start > 1 {
+                let keys: Vec<i64> = found[start..end]
+                    .iter()
+                    .map(|(_, sx, sz, _)| (*sx as u32 as i64) | ((*sz as u32 as i64) << 32))
+                    .collect();
+                let group: Vec<_> = found[start..end].to_vec();
+                for (slot, i) in long_set_order(&keys).into_iter().enumerate() {
+                    found[start + slot] = group[i].clone();
+                }
+            }
+            start = end;
+        }
         let mut seeded: Option<i32> = None;
         for (_, _, _, layout) in &found {
             if layout.step != step {
@@ -777,11 +959,17 @@ impl Structures {
                 r.set_feature_seed(decoration_seed, layout.seed_index, layout.step);
                 seeded = Some(layout.seed_index);
             }
+            // `StructureStart.placeInChunk`: опорная точка — центр коробки
+            // первого куска на её нижнем уровне.
+            let reference = layout.pieces.first().map_or([0; 3], |p| {
+                let c = |i: usize| p.min[i] + (p.max[i] - p.min[i] + 1) / 2;
+                [c(0), p.min[1], c(2)]
+            });
             for piece in &layout.pieces {
                 if !overlaps(piece.min, piece.max, window.min, window.max) {
                     continue;
                 }
-                piece.element.place(features, level, piece, r, window);
+                piece.element.place(features, level, piece, r, window, reference);
             }
             // Руины портала и океанские руины ставятся своими Elem; общих
             // действий после кусков у них нет.
@@ -848,22 +1036,38 @@ impl Structures {
 
     fn layout(&self, si: usize, sx: i32, sz: i32, columns: &dyn Columns) -> Option<Arc<Layout>> {
         let key = (si, sx, sz);
-        if let Some(hit) = self.cache.lock().unwrap().get(&key) {
-            return hit.clone();
-        }
-        let built = self.build(si, sx, sz, columns);
-        let mut cache = self.cache.lock().unwrap();
-        if let Some(hit) = cache.get(&key) {
-            return hit.clone();
-        }
-        if cache.len() >= 4096 {
-            cache.clear();
-        }
-        cache.insert(key, built.clone());
-        built
+        let cell = {
+            let mut cache = self.cache.lock().unwrap();
+            if cache.len() >= 4096 && !cache.contains_key(&key) {
+                cache.clear();
+            }
+            cache.entry(key).or_default().clone()
+        };
+        // Сборка вне замка: раньше каждый поток, которому старт понадобился
+        // до конца чужой сборки, собирал его сам.
+        cell.get_or_init(|| self.build(si, sx, sz, columns)).clone()
     }
 
     fn build(&self, si: usize, sx: i32, sz: i32, columns: &dyn Columns) -> Option<Arc<Layout>> {
+        let t = std::time::Instant::now();
+        let built = self.build_layout(si, sx, sz, columns);
+        if std::env::var_os("CHUNKWAKE_PROF").is_some() {
+            let name = self.sets[si].kinds.first().map_or("?", |k| k.name.as_str());
+            let jig = template::JIG.with(|c| c.replace(0.0));
+            eprintln!("build {name} {sx} {sz}: {:.2} мс {} (разъёмы {jig:.2})", t.elapsed().as_secs_f64() * 1000.0, built.is_some());
+        }
+        // Отладка: `CHUNKWAKE_PIECES=sx,sz` печатает коробки кусков старта.
+        if let (Some(layout), Ok(want)) = (&built, std::env::var("CHUNKWAKE_PIECES"))
+            && want == format!("{sx},{sz}")
+        {
+            for (i, p) in layout.pieces.iter().enumerate() {
+                eprintln!("наш кусок {i}: {:?} {:?} {:?}", p.min, p.max, p.rot);
+            }
+        }
+        built
+    }
+
+    fn build_layout(&self, si: usize, sx: i32, sz: i32, columns: &dyn Columns) -> Option<Arc<Layout>> {
         let seed = columns.seed();
         if !self.is_structure_chunk(si, sx, sz, seed) {
             return None;
@@ -957,8 +1161,45 @@ impl Structures {
         if kind.stronghold {
             return self.assemble_stronghold(&kind, sx, sz, seed, columns);
         }
+        if kind.fortress {
+            return self.assemble_fortress(&kind, sx, sz, seed, columns);
+        }
+        if kind.fossil.is_some() {
+            return fossil_layout(&kind, sx, sz, columns);
+        }
+        if kind.treasure {
+            shore::surface_ok(columns, sx, sz, &kind.biomes, true)?;
+            let piece = treasure::Piece {
+                pos: [sx * 16 + 9, 90, sz * 16 + 9],
+            };
+            let (min, max) = piece.bounds();
+            return Some(Layout {
+                pieces: vec![Piece {
+                    element: Arc::new(Elem::Treasure(Arc::new(piece))),
+                    pos: min,
+                    rot: Rot::None,
+                    ground: 0,
+                    min,
+                    max,
+                    rigid: true,
+                    junctions: Vec::new(),
+                }],
+                beard: false,
+                bury: false,
+                boxed: false,
+                mansion: false,
+                portal: false,
+                ruin: false,
+                encapsulate: false,
+                step: kind.step,
+                seed_index: kind.seed_index,
+            });
+        }
         if kind.mansion {
             return self.assemble_mansion(&kind, sx, sz, seed, columns);
+        }
+        if kind.end_city {
+            return self.assemble_end_city(&kind, sx, sz, seed, columns);
         }
         if kind.portal.is_some() {
             return self.assemble_portal(&kind, sx, sz, seed, columns);
@@ -970,13 +1211,7 @@ impl Structures {
         rng.set_large_feature_seed(seed, sx, sz);
         // `JigsawStructure.findGenerationPoint`: `start_height.sample` идёт
         // ПЕРВЫМ броском, а `Rotation.getRandom` — уже внутри `addPieces`.
-        let planned_y = kind.start_height.map(|(lo, hi)| {
-            if lo > hi {
-                lo
-            } else {
-                rng.between_inclusive(lo, hi)
-            }
-        });
+        let planned_y = kind.start_height.map(|h| h.sample(&mut rng));
         let rot = ROTS[rng.next_int_bound(4) as usize];
         let origin = [sx * 16, 0, sz * 16];
         // `PoolAliasLookup.create(poolAliases, startPos, seed)`: `startPos` — угол
@@ -992,10 +1227,31 @@ impl Structures {
         if element.is_empty() {
             return None;
         }
-        let (mut min, mut max) = bounds(&element, origin, rot)?;
+        // `getRandomNamedJigsaw`: шарниры старта перемешиваются от точки
+        // старта, и кусок сдвигается так, чтобы названный встал на неё.
+        let position = [origin[0], planned_y.unwrap_or(0), origin[2]];
+        let local = match &kind.start_jigsaw {
+            Some(name) => {
+                let found = jigsaws(&element, position, rot, &mut rng)
+                    .into_iter()
+                    .find(|j| j.name.as_deref().map(mc).as_deref() == Some(name.as_str()))?;
+                [
+                    found.pos[0] - position[0],
+                    found.pos[1] - position[1],
+                    found.pos[2] - position[2],
+                ]
+            }
+            None => [0; 3],
+        };
+        let adjusted = [
+            position[0] - local[0],
+            position[1] - local[1],
+            position[2] - local[2],
+        ];
+        let (mut min, mut max) = bounds(&element, adjusted, rot)?;
         let center_x = (max[0] + min[0]) / 2;
         let center_z = (max[2] + min[2]) / 2;
-        let mut pos = origin;
+        let mut pos = adjusted;
         let stub_y = {
             // `JigsawPlacement.addPieces`: `bottomY` — либо `start_height`,
             // либо `startPos.y + firstFreeHeight` по проекции. Проекция
@@ -1007,13 +1263,21 @@ impl Structures {
                 }
                 planned_y.unwrap_or(0) + columns.base_height(center_x, center_z)
             } else {
-                planned_y?
+                planned_y?;
+                adjusted[1]
             };
             let dy = bottom_y - ground_y;
             min[1] += dy;
             max[1] += dy;
             pos[1] += dy;
-            bottom_y
+            // `isStartTooCloseToWorldHeightLimits`.
+            if kind.padding != (0, 0)
+                && (min[1] < columns.min_y() + kind.padding.0
+                    || max[1] > columns.max_y() - 1 - kind.padding.1)
+            {
+                return None;
+            }
+            bottom_y + local[1]
         };
         let biome = columns.biome_at(center_x, stub_y, center_z)?;
         if !kind.biomes.contains(&biome) {
@@ -1075,7 +1339,8 @@ impl Structures {
         Some(Layout {
             pieces,
             beard: kind.beard,
-            bury: false,
+            bury: kind.bury,
+            boxed: kind.boxed,
             mansion: false,
             portal: false,
             ruin: false,
@@ -1118,10 +1383,54 @@ impl Structures {
             pieces,
             beard: false,
             bury: false,
+            boxed: false,
             mansion: false,
             portal: false,
             ruin: false,
             encapsulate: kind.encapsulate,
+            step: kind.step,
+            seed_index: kind.seed_index,
+        })
+    }
+
+    /// Крепость Незера: биом в `(minX, 64, minZ)`, дерево без адаптации рельефа.
+    fn assemble_fortress(
+        &self,
+        kind: &Kind,
+        sx: i32,
+        sz: i32,
+        seed: i64,
+        columns: &dyn Columns,
+    ) -> Option<Layout> {
+        let biome = columns.biome_at(sx * 16, 64, sz * 16)?;
+        if !kind.biomes.contains(&biome) {
+            return None;
+        }
+        let pieces = fortress::build(seed, sx, sz)
+            .into_iter()
+            .map(|piece| {
+                let (min, max) = piece.bounds();
+                Piece {
+                    element: Arc::new(Elem::Fortress(Arc::new(piece))),
+                    pos: [sx * 16, 64, sz * 16],
+                    rot: Rot::None,
+                    ground: 0,
+                    min,
+                    max,
+                    rigid: true,
+                    junctions: Vec::new(),
+                }
+            })
+            .collect();
+        Some(Layout {
+            pieces,
+            beard: false,
+            bury: false,
+            boxed: false,
+            mansion: false,
+            portal: false,
+            ruin: false,
+            encapsulate: false,
             step: kind.step,
             seed_index: kind.seed_index,
         })
@@ -1164,10 +1473,59 @@ impl Structures {
             pieces,
             beard: false,
             bury: true,
+            boxed: false,
             mansion: false,
             portal: false,
             ruin: false,
             encapsulate: kind.encapsulate,
+            step: kind.step,
+            seed_index: kind.seed_index,
+        })
+    }
+
+    /// Город Края: старт как у особняка, затем `startHouseTower` тем же
+    /// генератором.
+    fn assemble_end_city(
+        &self,
+        kind: &Kind,
+        sx: i32,
+        sz: i32,
+        seed: i64,
+        columns: &dyn Columns,
+    ) -> Option<Layout> {
+        let (start, rot) = mansion_start(kind, sx, sz, seed, columns)?;
+        let mut rng = Legacy::new(0);
+        rng.set_large_feature_seed(seed, sx, sz);
+        let _ = rng.next_int_bound(4);
+        let built = end_city::build(&self.templates, start, rot, &mut rng);
+        if built.is_empty() {
+            return None;
+        }
+        let pieces = built
+            .into_iter()
+            .map(|piece| {
+                let (min, max) = piece.bounds();
+                Piece {
+                    element: Arc::new(Elem::EndCity(Arc::new(piece))),
+                    pos: [sx * 16, 0, sz * 16],
+                    rot: Rot::None,
+                    ground: 0,
+                    min,
+                    max,
+                    rigid: true,
+                    junctions: Vec::new(),
+                }
+            })
+            .collect();
+        Some(Layout {
+            pieces,
+            beard: false,
+            bury: false,
+            boxed: false,
+            mansion: false,
+            portal: false,
+            ruin: false,
+            encapsulate: false,
             step: kind.step,
             seed_index: kind.seed_index,
         })
@@ -1213,6 +1571,7 @@ impl Structures {
             pieces,
             beard: false,
             bury: false,
+            boxed: false,
             mansion: true,
             portal: false,
             ruin: false,
@@ -1257,6 +1616,7 @@ impl Structures {
             pieces,
             beard: false,
             bury: false,
+            boxed: false,
             mansion: false,
             portal: false,
             ruin: true,
@@ -1276,7 +1636,15 @@ impl Structures {
         columns: &dyn Columns,
     ) -> Option<Layout> {
         let setups = kind.portal.as_ref()?;
-        let piece = portal::build(&self.portals, setups, sx, sz, seed, columns)?;
+        let mut piece = portal::build(&self.portals, setups, sx, sz, seed, columns)?;
+        // `isValidBiome`: биом в точке старта.
+        let biome = columns.biome_at(piece.origin[0], piece.origin[1], piece.origin[2])?;
+        if !kind.biomes.contains(&biome) {
+            return None;
+        }
+        // `Properties.cold`: `coldEnoughToSnow` шумового биома в `origin`.
+        piece.setup.cold = piece.setup.can_be_cold
+            && super::cold_enough_to_snow(&self.climate, biome, piece.origin, columns.sea_level());
         Some(Layout {
             pieces: vec![Piece {
                 element: Arc::new(Elem::Portal(Arc::new(piece))),
@@ -1301,6 +1669,7 @@ impl Structures {
             .collect(),
             beard: false,
             bury: false,
+            boxed: false,
             mansion: false,
             portal: true,
             ruin: false,
@@ -1408,8 +1777,10 @@ impl Structures {
         origin: [i32; 3],
         columns: &dyn Columns,
         wanted: &HashSet<String>,
-        best: &mut Option<([i32; 3], i64)>,
-    ) {
+    ) -> Option<[i32; 3]> {
+        // Ваниль перебирает готовые точки колец, меряет середину чанка на
+        // высоте 32 и проверяет только точки ближе текущей. Здесь порядок —
+        // по начальным точкам: сдвиг к биому короче запаса `reach`.
         let seed = columns.seed();
         self.ensure_rings(seed);
         let initials: Vec<(i32, i32)> = self.ring_cache.lock().unwrap()[&seed]
@@ -1418,24 +1789,25 @@ impl Structures {
             .collect();
         let mut order: Vec<usize> = (0..initials.len()).collect();
         order.sort_by_key(|&index| ring_dist(initials[index], origin));
+        let mut best: Option<([i32; 3], i64, usize)> = None;
         for index in order {
-            let initial_d = ring_dist(initials[index], origin);
-            if let Some((_, best_d)) = *best {
+            if let Some((_, best_d, _)) = best {
                 let reach = (best_d as f64).sqrt() + 200.0;
-                if (initial_d as f64).sqrt() > reach {
+                if (ring_dist(initials[index], origin) as f64).sqrt() > reach {
                     break;
                 }
             }
             let (sx, sz) = self.resolve_ring(seed, index, columns);
-            let Some(pos) = self.probe(si, sx, sz, columns, wanted) else {
+            let d = ring_dist((sx, sz), origin);
+            let closer = best.is_none_or(|(_, b, bi)| d < b || (d == b && index < bi));
+            if !closer {
                 continue;
-            };
-            let dist = (pos[0] as i64 - origin[0] as i64).pow(2)
-                + (pos[2] as i64 - origin[2] as i64).pow(2);
-            if best.is_none_or(|(_, d)| dist < d) {
-                *best = Some((pos, dist));
+            }
+            if let Some(pos) = self.probe(si, sx, sz, columns, wanted) {
+                best = Some((pos, d, index));
             }
         }
+        best.map(|(p, _, _)| p)
     }
 
     /// Монумент. Куб биомов вокруг моря и дно океана в середине чанка.
@@ -1471,6 +1843,7 @@ impl Structures {
             pieces,
             beard: false,
             bury: false,
+            boxed: false,
             mansion: false,
             portal: false,
             ruin: false,
@@ -1510,6 +1883,7 @@ impl Structures {
             }],
             beard: false,
             bury: false,
+            boxed: false,
             mansion: false,
             portal: false,
             ruin: false,
@@ -1554,6 +1928,7 @@ impl Structures {
             pieces,
             beard: false,
             bury: false,
+            boxed: false,
             mansion: false,
             portal: false,
             ruin: false,
@@ -1857,8 +2232,21 @@ fn load_mansion_templates(
     data_dir: &Path,
     palette: &Palette,
 ) -> Result<HashMap<String, Arc<template::Template>>, String> {
-    let dir = data_dir.join("data/minecraft/structure/woodland_mansion");
     let mut out = HashMap::new();
+    load_template_dir(data_dir, palette, "woodland_mansion", "", &mut out)?;
+    // Город Края — с префиксом, чтобы имена не смешались с особняком.
+    load_template_dir(data_dir, palette, "end_city", "end_city/", &mut out)?;
+    Ok(out)
+}
+
+fn load_template_dir(
+    data_dir: &Path,
+    palette: &Palette,
+    folder: &str,
+    prefix: &str,
+    out: &mut HashMap<String, Arc<template::Template>>,
+) -> Result<(), String> {
+    let dir = data_dir.join("data/minecraft/structure").join(folder);
     for entry in std::fs::read_dir(&dir).map_err(|e| format!("mansion templates: {e}"))? {
         let entry = entry.map_err(|e| format!("mansion templates: {e}"))?;
         let path = entry.path();
@@ -1868,11 +2256,11 @@ fn load_mansion_templates(
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        let id = format!("minecraft:woodland_mansion/{stem}");
+        let id = format!("minecraft:{folder}/{stem}");
         let loaded = template::load_template(data_dir, palette, &id)?;
-        out.insert(stem.to_owned(), Arc::new(loaded));
+        out.insert(format!("{prefix}{stem}"), Arc::new(loaded));
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Старт особняка: `findGenerationPoint` без проверки биома.
@@ -1913,6 +2301,25 @@ fn mansion_start(
         return None;
     }
     Some(([x, y, z], rot))
+}
+
+/// `HeightProvider` высоты старта jigsaw.
+#[derive(Clone, Copy, Debug)]
+enum StartHeight {
+    /// `ConstantHeight`: бросков не тратит.
+    Constant(i32),
+    /// `UniformHeight`: `randomBetweenInclusive`, даже при равных краях.
+    Uniform(i32, i32),
+}
+
+impl StartHeight {
+    fn sample(self, rng: &mut Legacy) -> i32 {
+        match self {
+            Self::Constant(y) => y,
+            Self::Uniform(lo, hi) if lo > hi => lo,
+            Self::Uniform(lo, hi) => rng.between_inclusive(lo, hi),
+        }
+    }
 }
 
 /// `VerticalAnchor`: `absolute`, `above_bottom`, `below_top`.
@@ -2134,6 +2541,128 @@ fn feature_seeds(data_dir: &Path) -> Result<HashMap<String, (i32, i32)>, String>
     Ok(out)
 }
 
+pub(crate) struct FossilCfg {
+    templates: Vec<Arc<Template>>,
+    low: i32,
+    high: i32,
+}
+
+/// `NetherFossilPiece`: шаблон с `STRUCTURE_AND_AIR`, окно чанка
+/// расширено на всю окаменелость.
+pub(crate) struct FossilPiece {
+    template: Arc<Template>,
+    rot: Rot,
+    pos: [i32; 3],
+    bounds: template::Bounds,
+}
+
+impl FossilPiece {
+    fn place(
+        &self,
+        pal: &Palette,
+        level: &mut dyn Level,
+        r: &mut Worldgen,
+        window: template::Bounds,
+        seed: i64,
+    ) {
+        let b = self.bounds;
+        let wide = template::Bounds {
+            min: [0, 1, 2].map(|i| window.min[i].min(b.min[i])),
+            max: [0, 1, 2].map(|i| window.max[i].max(b.max[i])),
+        };
+        template::place_pool(
+            pal,
+            level,
+            &self.template,
+            self.rot,
+            self.pos,
+            &[],
+            true,
+            false,
+            r,
+            wide,
+            seed,
+            self.pos,
+        );
+        // `placeDriedGhast`: `forkPositional().at(center)` от сида мира.
+        let factory = Legacy::new(seed).next_long();
+        let center = [0, 1, 2].map(|i| b.min[i] + (b.max[i] - b.min[i] + 1) / 2);
+        let mut pr = Legacy::new(pos_seed(center[0], center[1], center[2]) ^ factory);
+        if pr.next_float() < 0.5 {
+            let x = b.min[0] + pr.next_int_bound(b.max[0] - b.min[0] + 1);
+            let y = b.min[1];
+            let z = b.min[2] + pr.next_int_bound(b.max[2] - b.min[2] + 1);
+            if pal.is_air(level.get(x, y, z)) && wide.contains([x, y, z]) {
+                let rot = ROTS[pr.next_int_bound(4) as usize];
+                let ghast = pal.defaults["minecraft:dried_ghast"];
+                if level.can_write(x, z) {
+                    level.set(x, y, z, template::rotate_state(pal, ghast, rot));
+                }
+            }
+        }
+    }
+}
+
+/// `NetherFossilStructure.findGenerationPoint` и `isValidBiome` по точке старта.
+fn fossil_layout(kind: &Kind, sx: i32, sz: i32, columns: &dyn Columns) -> Option<Layout> {
+    let cfg = kind.fossil.as_ref()?;
+    let mut rng = Legacy::new(0);
+    rng.set_large_feature_seed(columns.seed(), sx, sz);
+    let x = sx * 16 + rng.next_int_bound(16);
+    let z = sz * 16 + rng.next_int_bound(16);
+    let sea = columns.sea_level();
+    let mut y = if cfg.low > cfg.high {
+        cfg.low
+    } else {
+        cfg.low + rng.next_int_bound(cfg.high - cfg.low + 1)
+    };
+    let block = |y: i32| columns.base_block(x, y, z).unwrap_or(Base::Air);
+    while y > sea {
+        let current = block(y);
+        y -= 1;
+        if current == Base::Air && block(y) == Base::Solid {
+            break;
+        }
+    }
+    if y <= sea {
+        return None;
+    }
+    let biome = columns.biome_at(x, y, z)?;
+    if !kind.biomes.contains(&biome) {
+        return None;
+    }
+    let rot = ROTS[rng.next_int_bound(4) as usize];
+    let template = Arc::clone(&cfg.templates[rng.next_int_bound(14) as usize]);
+    let pos = [x, y, z];
+    let bounds = template::template_bounds(pos, rot, template.size);
+    Some(Layout {
+        pieces: vec![Piece {
+            element: Arc::new(Elem::Fossil(Arc::new(FossilPiece {
+                template,
+                rot,
+                pos,
+                bounds,
+            }))),
+            pos,
+            rot,
+            ground: 0,
+            min: bounds.min,
+            max: bounds.max,
+            rigid: true,
+            junctions: Vec::new(),
+        }],
+        beard: true,
+        bury: false,
+        boxed: false,
+        mansion: false,
+        portal: false,
+        ruin: false,
+        encapsulate: false,
+        step: kind.step,
+        seed_index: kind.seed_index,
+    })
+}
+
 struct Loader<'a> {
     data_dir: &'a Path,
     palette: &'a mut Palette,
@@ -2157,6 +2686,7 @@ struct RawSet {
     salt: i32,
     triangular: bool,
     frequency: Freq,
+    locate_offset: [i32; 3],
     exclusion: Option<(String, i32)>,
     kinds: Vec<Kind>,
     weights: Vec<i32>,
@@ -2181,6 +2711,7 @@ impl RawSet {
             salt: self.salt,
             triangular: self.triangular,
             frequency: self.frequency,
+            locate_offset: self.locate_offset,
             exclusion,
             kinds: self.kinds,
             weights: self.weights,
@@ -2208,14 +2739,23 @@ impl Loader<'_> {
             Some(f) if !f.is_null() => {
                 let method = place["frequency_reduction_method"].as_str().unwrap_or("");
                 let value = f.as_f64().unwrap_or(1.0) as f32;
+                let salt = place["salt"].as_i64().unwrap_or(0) as i32;
                 match method {
+                    _ if value >= 1.0 => Freq::Always,
+                    "" | "default" => Freq::Default(value, salt),
                     "legacy_type_1" => Freq::Legacy1(value),
+                    "legacy_type_2" => Freq::Legacy2(value),
                     "legacy_type_3" => Freq::Legacy3(value),
                     _ => return Err(format!("{name}: frequency {method}")),
                 }
             }
             _ => Freq::Always,
         };
+        let mut locate_offset = [0; 3];
+        let offsets = place["locate_offset"].as_array().into_iter().flatten();
+        for (i, v) in offsets.enumerate().take(3) {
+            locate_offset[i] = v.as_i64().unwrap_or(0) as i32;
+        }
         let exclusion = place.get("exclusion_zone").and_then(|z| {
             if z.is_null() {
                 return None;
@@ -2240,6 +2780,7 @@ impl Loader<'_> {
             salt: place["salt"].as_i64().unwrap_or(0) as i32,
             triangular,
             frequency,
+            locate_offset,
             exclusion,
             kinds,
             weights,
@@ -2264,6 +2805,7 @@ impl Loader<'_> {
             salt: 0,
             triangular: false,
             frequency: Freq::Always,
+            locate_offset: [0; 3],
             exclusion: None,
             kinds,
             weights,
@@ -2290,14 +2832,28 @@ impl Loader<'_> {
             Some("minecraft:mineshaft") => return self.shaft_kind(name, &v),
             Some("minecraft:ocean_monument") => return self.monument_kind(name, &v),
             Some("minecraft:stronghold") => return self.stronghold_kind(name, &v),
+            Some("minecraft:fortress") => return self.fortress_kind(name, &v),
+            Some("minecraft:buried_treasure") => {
+                let mut kind = self.stronghold_kind_with(name, &v, "none")?;
+                kind.stronghold = false;
+                kind.treasure = true;
+                return Ok(kind);
+            }
+            Some("minecraft:nether_fossil") => return self.fossil_kind(name, &v),
             Some("minecraft:woodland_mansion") => return self.mansion_kind(name, &v),
+            Some("minecraft:end_city") => {
+                let mut kind = self.mansion_kind(name, &v)?;
+                kind.mansion = false;
+                kind.end_city = true;
+                return Ok(kind);
+            }
             Some("minecraft:ruined_portal") => return self.portal_kind(name, &v),
             Some("minecraft:ocean_ruin") => return self.ruin_kind(name, &v),
             Some("minecraft:jigsaw") => {}
             _ => return Err(format!("{name}: not jigsaw")),
         }
         let adapt = v["terrain_adaptation"].as_str().unwrap_or("none");
-        if adapt != "beard_thin" && adapt != "none" && adapt != "encapsulate" {
+        if !matches!(adapt, "beard_thin" | "beard_box" | "bury" | "none" | "encapsulate") {
             return Err(format!("{name}: terrain {adapt}"));
         }
         let project = match v.get("project_start_to_heightmap").and_then(|s| s.as_str()) {
@@ -2308,10 +2864,18 @@ impl Loader<'_> {
         let (horizontal, vertical) = distance(&v["max_distance_from_center"]);
         let start = mc(v["start_pool"].as_str().unwrap_or(""));
         self.ensure_pool(&start)?;
+        // `HeightProvider`: `uniform` с границами, `constant` с `value` или
+        // краткая форма — сам `VerticalAnchor` (`{"absolute": 33}` у бастиона,
+        // древнего города, троп).
         let start_height = match v.get("start_height") {
-            Some(h) if !h.is_null() => {
-                Some((anchor(&h["min_inclusive"]), anchor(&h["max_inclusive"])))
-            }
+            Some(h) if !h.is_null() => Some(match h["type"].as_str() {
+                Some("minecraft:uniform") => {
+                    StartHeight::Uniform(anchor(&h["min_inclusive"]), anchor(&h["max_inclusive"]))
+                }
+                Some("minecraft:constant") => StartHeight::Constant(anchor(&h["value"])),
+                Some(other) => return Err(format!("{name}: start_height {other}")),
+                None => StartHeight::Constant(anchor(h)),
+            }),
             _ => None,
         };
         let aliases = load_pool_aliases(&v["pool_aliases"])?;
@@ -2334,6 +2898,8 @@ impl Loader<'_> {
         Ok(Kind {
             name: id,
             start_pool: start,
+            boxed: adapt == "beard_box",
+            bury: adapt == "bury",
             size: v["size"].as_i64().unwrap_or(0) as i32,
             horizontal,
             vertical,
@@ -2345,6 +2911,7 @@ impl Loader<'_> {
             encapsulate: adapt == "encapsulate",
             aliases,
             // `DimensionPadding.CODEC` принимает и число, и `{bottom, top}`.
+            start_jigsaw: v["start_jigsaw_name"].as_str().map(mc),
             padding: match v.get("dimension_padding") {
                 Some(p) if !p.is_null() => match p.as_i64() {
                     Some(n) => (n as i32, n as i32),
@@ -2362,7 +2929,11 @@ impl Loader<'_> {
             shaft: None,
             monument: None,
             stronghold: false,
+            fortress: false,
+            fossil: None,
+            treasure: false,
             mansion: false,
+            end_city: false,
             portal: None,
             ruin: None,
         })
@@ -2383,6 +2954,8 @@ impl Loader<'_> {
         Ok(Kind {
             name: id,
             start_pool: String::new(),
+            boxed: false,
+            bury: false,
             size: 0,
             horizontal: 0,
             vertical: 0,
@@ -2397,13 +2970,18 @@ impl Loader<'_> {
             shaft: None,
             monument: None,
             stronghold: false,
+            fortress: false,
+            fossil: None,
+            treasure: false,
             mansion: false,
+            end_city: false,
             portal: None,
             ruin: None,
             start_height: None,
             encapsulate: false,
             aliases: Vec::new(),
             padding: (0, 0),
+            start_jigsaw: None,
         })
     }
 
@@ -2433,6 +3011,8 @@ impl Loader<'_> {
         Ok(Kind {
             name: id,
             start_pool: String::new(),
+            boxed: false,
+            bury: false,
             size: 0,
             horizontal: 0,
             vertical: 0,
@@ -2447,13 +3027,18 @@ impl Loader<'_> {
             shaft: None,
             monument: None,
             stronghold: false,
+            fortress: false,
+            fossil: None,
+            treasure: false,
             mansion: false,
+            end_city: false,
             portal: None,
             ruin: None,
             start_height: None,
             encapsulate: false,
             aliases: Vec::new(),
             padding: (0, 0),
+            start_jigsaw: None,
         })
     }
 
@@ -2474,6 +3059,8 @@ impl Loader<'_> {
         Ok(Kind {
             name: id,
             start_pool: String::new(),
+            boxed: false,
+            bury: false,
             size: 0,
             horizontal: 0,
             vertical: 0,
@@ -2488,13 +3075,18 @@ impl Loader<'_> {
             shaft: Some(ShaftCfg { mesa, blocking }),
             monument: None,
             stronghold: false,
+            fortress: false,
+            fossil: None,
+            treasure: false,
             mansion: false,
+            end_city: false,
             portal: None,
             ruin: None,
             start_height: None,
             encapsulate: false,
             aliases: Vec::new(),
             padding: (0, 0),
+            start_jigsaw: None,
         })
     }
 
@@ -2514,6 +3106,8 @@ impl Loader<'_> {
         Ok(Kind {
             name: id,
             start_pool: String::new(),
+            boxed: false,
+            bury: false,
             size: 0,
             horizontal: 0,
             vertical: 0,
@@ -2528,19 +3122,28 @@ impl Loader<'_> {
             shaft: None,
             monument: Some(around),
             stronghold: false,
+            fortress: false,
+            fossil: None,
+            treasure: false,
             mansion: false,
+            end_city: false,
             portal: None,
             ruin: None,
             start_height: None,
             encapsulate: false,
             aliases: Vec::new(),
             padding: (0, 0),
+            start_jigsaw: None,
         })
     }
 
     fn stronghold_kind(&mut self, name: &str, v: &Value) -> Result<Kind, String> {
+        self.stronghold_kind_with(name, v, "bury")
+    }
+
+    fn stronghold_kind_with(&mut self, name: &str, v: &Value, terrain: &str) -> Result<Kind, String> {
         let adapt = v["terrain_adaptation"].as_str().unwrap_or("none");
-        if adapt != "bury" {
+        if adapt != terrain {
             return Err(format!("{name}: terrain {adapt}"));
         }
         let biomes = self.biomes(v["biomes"].as_str().unwrap_or(""))?;
@@ -2553,6 +3156,8 @@ impl Loader<'_> {
         Ok(Kind {
             name: id,
             start_pool: String::new(),
+            boxed: false,
+            bury: false,
             size: 0,
             horizontal: 0,
             vertical: 0,
@@ -2567,14 +3172,67 @@ impl Loader<'_> {
             shaft: None,
             monument: None,
             stronghold: true,
+            fortress: false,
+            fossil: None,
+            treasure: false,
             mansion: false,
+            end_city: false,
             portal: None,
             ruin: None,
             start_height: None,
             encapsulate: false,
             aliases: Vec::new(),
             padding: (0, 0),
+            start_jigsaw: None,
         })
+    }
+
+    /// `NetherFossilStructure`: 14 шаблонов, `height` — uniform между якорями.
+    fn fossil_kind(&mut self, name: &str, v: &Value) -> Result<Kind, String> {
+        let mut kind = self.stronghold_kind_with(name, v, "beard_thin")?;
+        kind.stronghold = false;
+        let height = &v["height"];
+        if height["type"].as_str() != Some("minecraft:uniform") {
+            return Err(format!("{name}: height {}", height["type"]));
+        }
+        let low = self.anchor(&height["min_inclusive"])?;
+        let high = self.anchor(&height["max_inclusive"])?;
+        let mut templates = Vec::new();
+        for i in 1..=14 {
+            let id = format!("minecraft:nether_fossils/fossil_{i}");
+            templates.push(Arc::new(template::load_template(
+                self.data_dir,
+                self.palette,
+                &id,
+            )?));
+        }
+        kind.fossil = Some(Arc::new(FossilCfg {
+            templates,
+            low,
+            high,
+        }));
+        Ok(kind)
+    }
+
+    /// `VerticalAnchor.resolveY` в `WorldGenerationContext` генератора.
+    fn anchor(&self, v: &Value) -> Result<i32, String> {
+        if let Some(y) = v["absolute"].as_i64() {
+            return Ok(y as i32);
+        }
+        if let Some(d) = v["above_bottom"].as_i64() {
+            return Ok(self.min_y + d as i32);
+        }
+        if let Some(d) = v["below_top"].as_i64() {
+            return Ok(self.min_y + self.height - 1 - d as i32);
+        }
+        Err(format!("anchor {v}"))
+    }
+
+    fn fortress_kind(&mut self, name: &str, v: &Value) -> Result<Kind, String> {
+        let mut kind = self.stronghold_kind_with(name, v, "none")?;
+        kind.stronghold = false;
+        kind.fortress = true;
+        Ok(kind)
     }
 
     /// Особняк: сетка-лабиринт из шаблонов `woodland_mansion/*`.
@@ -2593,6 +3251,8 @@ impl Loader<'_> {
         Ok(Kind {
             name: id,
             start_pool: String::new(),
+            boxed: false,
+            bury: false,
             size: 0,
             horizontal: 0,
             vertical: 0,
@@ -2607,13 +3267,18 @@ impl Loader<'_> {
             shaft: None,
             monument: None,
             stronghold: false,
+            fortress: false,
+            fossil: None,
+            treasure: false,
             mansion: true,
+            end_city: false,
             portal: None,
             ruin: None,
             start_height: None,
             encapsulate: false,
             aliases: Vec::new(),
             padding: (0, 0),
+            start_jigsaw: None,
         })
     }
 
@@ -2635,6 +3300,7 @@ impl Loader<'_> {
                 overgrown: entry["overgrown"].as_bool().unwrap_or(false),
                 vines: entry["vines"].as_bool().unwrap_or(false),
                 can_be_cold: entry["can_be_cold"].as_bool().unwrap_or(false),
+                cold: false,
                 blackstone: entry["replace_with_blackstone"].as_bool().unwrap_or(false),
                 weight: entry["weight"].as_f64().unwrap_or(1.0) as f32,
             });
@@ -2648,6 +3314,8 @@ impl Loader<'_> {
         Ok(Kind {
             name: id,
             start_pool: String::new(),
+            boxed: false,
+            bury: false,
             size: 0,
             horizontal: 0,
             vertical: 0,
@@ -2662,13 +3330,18 @@ impl Loader<'_> {
             shaft: None,
             monument: None,
             stronghold: false,
+            fortress: false,
+            fossil: None,
+            treasure: false,
             mansion: false,
+            end_city: false,
             portal: Some(setups),
             ruin: None,
             start_height: None,
             encapsulate: false,
             aliases: Vec::new(),
             padding: (0, 0),
+            start_jigsaw: None,
         })
     }
 
@@ -2693,6 +3366,8 @@ impl Loader<'_> {
         Ok(Kind {
             name: id,
             start_pool: String::new(),
+            boxed: false,
+            bury: false,
             size: 0,
             horizontal: 0,
             vertical: 0,
@@ -2707,7 +3382,11 @@ impl Loader<'_> {
             shaft: None,
             monument: None,
             stronghold: false,
+            fortress: false,
+            fossil: None,
+            treasure: false,
             mansion: false,
+            end_city: false,
             portal: None,
             ruin: Some(ocean_ruin::Cfg {
                 warm,
@@ -2718,6 +3397,7 @@ impl Loader<'_> {
             encapsulate: false,
             aliases: Vec::new(),
             padding: (0, 0),
+            start_jigsaw: None,
         })
     }
 
@@ -2909,7 +3589,11 @@ fn collect_pools(el: &Elem, out: &mut HashSet<String>) {
         | Elem::Shaft(_)
         | Elem::Monument(_)
         | Elem::Stronghold(_)
+        | Elem::Fortress(_)
+        | Elem::Fossil(_)
+        | Elem::Treasure(_)
         | Elem::Mansion(_)
+        | Elem::EndCity(_)
         | Elem::Portal(_)
         | Elem::Ruin(_) => {}
         Elem::List { parts, .. } => {
@@ -2920,7 +3604,7 @@ fn collect_pools(el: &Elem, out: &mut HashSet<String>) {
         Elem::Single { template, .. } => {
             for pal in &template.jigsaws {
                 for jig in pal {
-                    out.insert(jig.pool.clone());
+                    out.insert(jig.pool.to_string());
                 }
             }
         }
@@ -2947,7 +3631,11 @@ fn jigsaws(el: &Elem, pos: [i32; 3], rot: Rot, rng: &mut impl Bits) -> Vec<JigIn
         | Elem::Shaft(_)
         | Elem::Monument(_)
         | Elem::Stronghold(_)
+        | Elem::Fortress(_)
+        | Elem::Fossil(_)
+        | Elem::Treasure(_)
         | Elem::Mansion(_)
+        | Elem::EndCity(_)
         | Elem::Portal(_)
         | Elem::Ruin(_) => Vec::new(),
         Elem::Feature { .. } => vec![JigInfo {
@@ -2972,7 +3660,11 @@ fn bounds(el: &Elem, pos: [i32; 3], rot: Rot) -> Option<([i32; 3], [i32; 3])> {
         | Elem::Shaft(_)
         | Elem::Monument(_)
         | Elem::Stronghold(_)
+        | Elem::Fortress(_)
+        | Elem::Fossil(_)
+        | Elem::Treasure(_)
         | Elem::Mansion(_)
+        | Elem::EndCity(_)
         | Elem::Portal(_)
         | Elem::Ruin(_) => None,
         Elem::Feature { .. } => Some((pos, pos)),
@@ -3047,6 +3739,64 @@ fn inside_box(min: [i32; 3], max: [i32; 3], p: [i32; 3]) -> bool {
     (0..3).all(|i| min[i] <= p[i] && p[i] <= max[i])
 }
 
+/// `ChunkGenerator.createReferences`: старт в чанках ±8 от цели, и его
+/// `getBoundingBox()` (у адаптации рельефа раздута на 12) задевает чанк по x/z.
+fn referenced(layout: &Layout, sx: i32, sz: i32, cx: i32, cz: i32) -> bool {
+    if (sx - cx).abs() > 8 || (sz - cz).abs() > 8 {
+        return false;
+    }
+    let mut pieces = layout.pieces.iter();
+    let Some(first) = pieces.next() else {
+        return false;
+    };
+    let (mut lo, mut hi) = (first.min, first.max);
+    for p in pieces {
+        lo = [0, 1, 2].map(|i| lo[i].min(p.min[i]));
+        hi = [0, 1, 2].map(|i| hi[i].max(p.max[i]));
+    }
+    let pad = if layout.beard || layout.bury || layout.boxed || layout.encapsulate {
+        12
+    } else {
+        0
+    };
+    let (x0, z0) = (cx * 16, cz * 16);
+    lo[0] - pad <= x0 + 15 && x0 <= hi[0] + pad && lo[2] - pad <= z0 + 15 && z0 <= hi[2] + pad
+}
+
+/// Порядок обхода fastutil `LongOpenHashSet` (ёмкость по умолчанию 16,
+/// таблица 32) для ключей в порядке вставки: ноль первым, затем ячейки
+/// таблицы от конца к началу. Перестройка таблицы при 24 ключах не нужна —
+/// столько стартов одной структуры на чанк не бывает.
+fn long_set_order(keys: &[i64]) -> Vec<usize> {
+    fn mix(x: i64) -> i64 {
+        let h = x.wrapping_mul(0x9E37_79B9_7F4A_7C15_u64 as i64);
+        let h = h ^ ((h as u64) >> 32) as i64;
+        h ^ ((h as u64) >> 16) as i64
+    }
+    let mut n = 32usize;
+    while keys.len() >= n * 3 / 4 {
+        n *= 2;
+    }
+    let mask = n - 1;
+    let mut table: Vec<Option<usize>> = vec![None; n];
+    let mut zero = None;
+    for (i, &k) in keys.iter().enumerate() {
+        if k == 0 {
+            zero.get_or_insert(i);
+            continue;
+        }
+        let mut pos = (mix(k) as i32 as usize) & mask;
+        while let Some(j) = table[pos] {
+            if keys[j] == k {
+                break;
+            }
+            pos = (pos + 1) & mask;
+        }
+        table[pos].get_or_insert(i);
+    }
+    zero.into_iter().chain(table.into_iter().rev().flatten()).collect()
+}
+
 fn overlaps(a0: [i32; 3], a1: [i32; 3], b0: [i32; 3], b1: [i32; 3]) -> bool {
     (0..3).all(|i| a0[i] <= b1[i] && b0[i] <= a1[i])
 }
@@ -3062,11 +3812,6 @@ fn near_xz(min: [i32; 3], max: [i32; 3], cx: i32, cz: i32, pad: i32) -> bool {
         && max[0] >= cx * 16 - pad
         && min[2] <= cz * 16 + 15 + pad
         && max[2] >= cz * 16 - pad
-}
-
-fn near_point(x: i32, z: i32, cx: i32, cz: i32, pad: i32) -> bool {
-    (cx * 16 - pad..=cx * 16 + 15 + pad).contains(&x)
-        && (cz * 16 - pad..=cz * 16 + 15 + pad).contains(&z)
 }
 
 fn distance(v: &Value) -> (i32, i32) {
@@ -3188,7 +3933,10 @@ pub(crate) fn spread_chunk(
 #[derive(Clone, Copy)]
 enum Freq {
     Always,
+    /// `default`: соль набора на месте координаты x, как в `probabilityReducer`.
+    Default(f32, i32),
     Legacy1(f32),
+    Legacy2(f32),
     Legacy3(f32),
 }
 
@@ -3196,7 +3944,18 @@ enum Freq {
 fn frequency_pass(frequency: Freq, seed: i64, cx: i32, cz: i32) -> bool {
     match frequency {
         Freq::Always => true,
+        Freq::Default(value, salt) => {
+            let mut rng = Legacy::new(0);
+            rng.set_large_feature_with_salt(seed, salt, cx, cz);
+            rng.next_float() < value
+        }
         Freq::Legacy1(value) => frequency_ok(Some(value), seed, cx, cz),
+        // `legacyArbitrarySaltProbabilityReducer`: соль 10387320 вместо набора.
+        Freq::Legacy2(value) => {
+            let mut rng = Legacy::new(0);
+            rng.set_large_feature_with_salt(seed, cx, cz, 10387320);
+            rng.next_float() < value
+        }
         Freq::Legacy3(value) => {
             let mut rng = Legacy::new(0);
             rng.set_large_feature_seed(seed, cx, cz);
@@ -3264,13 +4023,15 @@ mod tests {
             .map_err(|e| format!("{dir} {name}: {e}"))?;
             serde_json::from_str(&text).map_err(|e| format!("{dir} {name}: {e}"))
         };
+        let order = crate::Generator::load_with_version(&data, 12345, None)
+            .unwrap()
+            .feature_biomes();
         let structures =
-            Structures::load(&data, &mut palette, &biome_ids, &read, -64, 384).unwrap();
+            Structures::load(&data, &mut palette, &order, &biome_ids, &read, -64, 384).unwrap();
         let mut noise = crate::Generator::load_with_version(&data, 12345, None).unwrap();
         noise.bind_biomes(biome_ids.clone());
         let cols = crate::pipeline::Cols {
             noise: &noise,
-            surface: None,
             carve: crate::CarveBlocks {
                 air: 0,
                 water: 0,
@@ -3284,6 +4045,7 @@ mod tests {
             stone: 0,
             palette: &palette,
             heights: &std::sync::Mutex::new(std::collections::HashMap::new()),
+            bases: &std::sync::Mutex::new(std::collections::HashMap::new()),
         };
         let (si, ki) = structures
             .sets
@@ -3365,13 +4127,15 @@ mod tests {
             .map_err(|e| format!("{dir} {name}: {e}"))?;
             serde_json::from_str(&text).map_err(|e| format!("{dir} {name}: {e}"))
         };
+        let order = crate::Generator::load_with_version(&data, 12345, None)
+            .unwrap()
+            .feature_biomes();
         let structures =
-            Structures::load(&data, &mut palette, &biome_ids, &read, -64, 384).unwrap();
+            Structures::load(&data, &mut palette, &order, &biome_ids, &read, -64, 384).unwrap();
         let mut noise = crate::Generator::load_with_version(&data, 12345, None).unwrap();
         noise.bind_biomes(biome_ids.clone());
         let cols = crate::pipeline::Cols {
             noise: &noise,
-            surface: None,
             carve: crate::CarveBlocks {
                 air: 0,
                 water: 0,
@@ -3385,6 +4149,7 @@ mod tests {
             stone: 0,
             palette: &palette,
             heights: &std::sync::Mutex::new(std::collections::HashMap::new()),
+            bases: &std::sync::Mutex::new(std::collections::HashMap::new()),
         };
         let (si, ki) = structures
             .sets
@@ -3504,8 +4269,11 @@ mod tests {
                 .map_err(|e| format!("{dir} {name}: {e}"))?;
             serde_json::from_str(&text).map_err(|e| format!("{dir} {name}: {e}"))
         };
+        let order = crate::Generator::load_with_version(&data, 12345, None)
+            .unwrap()
+            .feature_biomes();
         let structures =
-            Structures::load(&data, &mut palette, &biome_ids, &read, -64, 384).unwrap();
+            Structures::load(&data, &mut palette, &order, &biome_ids, &read, -64, 384).unwrap();
         let biome = structures
             .one_biome("minecraft:village_plains")
             .expect("у деревни есть биом");
@@ -3514,16 +4282,16 @@ mod tests {
         let keep = structures
             .nearest(&cols, [0, 64, 0], "minecraft:stronghold")
             .expect("крепость");
-        assert_eq!(keep[0].rem_euclid(16), 8);
-        assert_eq!(keep[2].rem_euclid(16), 8);
+        assert_eq!(keep[0].rem_euclid(16), 0);
+        assert_eq!(keep[2].rem_euclid(16), 0);
         let pos = structures
             .nearest(&cols, [0, 64, 0], "#minecraft:village")
             .expect("деревня");
         let (sx, sz) = (pos[0].div_euclid(16), pos[2].div_euclid(16));
         assert!(structures.is_structure_start(sx, sz, 7), "{pos:?}");
-        assert_eq!(pos[0].rem_euclid(16), 8);
-        assert_eq!(pos[2].rem_euclid(16), 8);
-        assert_eq!(pos[1], 64);
+        assert_eq!(pos[0].rem_euclid(16), 0);
+        assert_eq!(pos[2].rem_euclid(16), 0);
+        assert_eq!(pos[1], 0);
         assert_eq!(
             structures.layout_count(),
             0,
@@ -3560,6 +4328,9 @@ mod tests {
         }
         fn column_has(&self, _: i32, _: i32, biomes: &HashSet<u32>) -> bool {
             biomes.contains(&self.biome)
+        }
+        fn base_block(&self, _: i32, _: i32, _: i32) -> Option<Base> {
+            None
         }
         fn min_y(&self) -> i32 {
             -64
@@ -3637,8 +4408,7 @@ mod tests {
                 min: [0, 64, 0],
                 max: [0, 70, 0],
                 ground: 64,
-                bury: false,
-                encapsulate: false,
+                adapt: Adapt::Thin,
             }],
             junctions: Vec::new(),
         };

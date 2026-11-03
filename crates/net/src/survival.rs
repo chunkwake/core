@@ -287,6 +287,14 @@ pub enum Cause {
     Magic,
     /// Стрела (`minecraft:arrow`).
     Arrow,
+    Explosion,
+    Fire,
+    Lava,
+    Drown,
+    Cactus,
+    Berry,
+    Freeze,
+    Magma,
     /// За границей мира (`minecraft:outside_border`).
     OutsideBorder,
 }
@@ -301,6 +309,14 @@ impl Cause {
             "magic" | "indirect_magic" | "thorns" | "sonic_boom" => Cause::Magic,
             "wither" => Cause::Wither,
             "arrow" | "trident" | "mob_projectile" => Cause::Arrow,
+            "explosion" | "player_explosion" => Cause::Explosion,
+            "in_fire" | "on_fire" => Cause::Fire,
+            "lava" => Cause::Lava,
+            "drown" => Cause::Drown,
+            "cactus" => Cause::Cactus,
+            "sweet_berry_bush" => Cause::Berry,
+            "freeze" => Cause::Freeze,
+            "hot_floor" => Cause::Magma,
             "outside_border" => Cause::OutsideBorder,
             _ => Cause::Generic,
         }
@@ -316,6 +332,14 @@ impl Cause {
             Cause::Poison | Cause::Magic => "death.attack.magic",
             Cause::Wither => "death.attack.wither",
             Cause::Arrow => "death.attack.arrow",
+            Cause::Explosion => "death.attack.explosion",
+            Cause::Fire => "death.attack.onFire",
+            Cause::Lava => "death.attack.lava",
+            Cause::Drown => "death.attack.drown",
+            Cause::Cactus => "death.attack.cactus",
+            Cause::Berry => "death.attack.sweetBerryBush",
+            Cause::Freeze => "death.attack.freeze",
+            Cause::Magma => "death.attack.hotFloor",
             Cause::OutsideBorder => "death.attack.outsideBorder",
         }
     }
@@ -331,6 +355,14 @@ impl Cause {
             Cause::Wither => "WITHER",
             Cause::Magic => "MAGIC",
             Cause::Arrow => "PROJECTILE",
+            Cause::Explosion => "BLOCK_EXPLOSION",
+            Cause::Fire => "FIRE_TICK",
+            Cause::Lava => "LAVA",
+            Cause::Drown => "DROWNING",
+            Cause::Cactus => "CONTACT",
+            Cause::Berry => "CONTACT",
+            Cause::Freeze => "FREEZE",
+            Cause::Magma => "HOT_FLOOR",
             Cause::OutsideBorder => "WORLD_BORDER",
         }
     }
@@ -345,6 +377,14 @@ impl Cause {
             Cause::Poison | Cause::Magic => "minecraft:magic",
             Cause::Wither => "minecraft:wither",
             Cause::Arrow => "minecraft:arrow",
+            Cause::Explosion => "minecraft:explosion",
+            Cause::Fire => "minecraft:on_fire",
+            Cause::Lava => "minecraft:lava",
+            Cause::Drown => "minecraft:drown",
+            Cause::Cactus => "minecraft:cactus",
+            Cause::Berry => "minecraft:sweet_berry_bush",
+            Cause::Freeze => "minecraft:freeze",
+            Cause::Magma => "minecraft:hot_floor",
             Cause::OutsideBorder => "minecraft:outside_border",
         }
     }
@@ -358,7 +398,8 @@ impl Cause {
     pub fn bypasses_armor(self) -> bool {
         matches!(
             self,
-            Cause::Void | Cause::Starve | Cause::Magic | Cause::Poison
+            Cause::Void | Cause::Starve | Cause::Magic | Cause::Poison | Cause::Fire
+                | Cause::Drown | Cause::Freeze
         )
     }
 }
@@ -736,6 +777,16 @@ impl Default for Vitals {
 }
 
 impl Vitals {
+    /// Distance accumulated at the next landing, before `on_move` clears it.
+    pub(crate) fn landing_fall(&self, pos: Option<[f64; 3]>, on_ground: bool) -> Option<f64> {
+        if self.on_ground || !on_ground { return None; }
+        let extra = match (self.last_pos, pos) {
+            (Some(last), Some(next)) => (last[1] - next[1]).max(0.0),
+            _ => 0.0,
+        };
+        Some(self.fall + extra)
+    }
+
     /// Движение игрока: падение и истощение от спринта и прыжков. Возвращает
     /// урон от падения при приземлении: `ceil(высота − 3)`, как в ванилле.
     /// Плавное падение урон обнуляет.
@@ -1084,6 +1135,10 @@ pub struct PlayerSave {
     pub spawn: Option<[i32; 3]>,
     /// `SpawnForced`: команда назначает принудительную точку, кровать — нет.
     pub spawn_forced: bool,
+    /// `seenCredits`: титры Края уже показаны.
+    pub seen_credits: bool,
+    /// `Dimension`: ключ измерения игрока; `None` — оверворлд.
+    pub dimension: Option<String>,
 }
 
 /// Живое состояние игрока в сессии: инвентарь и здоровье.
@@ -1130,6 +1185,8 @@ impl PlayerState {
             xp: self.xp,
             spawn: None,
             spawn_forced: true,
+            seen_credits: false,
+            dimension: None,
             slots: (0..SLOTS)
                 .filter_map(|i| self.inv.slots[i].map(|s| (i, s)))
                 .collect(),
@@ -1290,6 +1347,16 @@ mod tests {
         v.on_move(at(80.0), true, true, false);
         v.on_move(at(70.0), false, true, true);
         assert_eq!(v.on_move(at(70.0), true, true, true), None);
+    }
+
+    #[test]
+    fn landing_reports_distance_before_fall_resets() {
+        let mut v = Vitals::default();
+        v.reset_fall([0.0, 80.0, 0.0]);
+        v.on_move(Some([0.0, 79.0, 0.0]), false, true, false);
+        assert_eq!(v.landing_fall(Some([0.0, 78.5, 0.0]), true), Some(1.5));
+        v.on_move(Some([0.0, 78.5, 0.0]), true, true, false);
+        assert_eq!(v.landing_fall(Some([0.0, 78.5, 0.0]), true), None);
     }
 
     #[test]

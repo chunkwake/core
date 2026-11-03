@@ -1910,7 +1910,7 @@ mod tests {
             .locate_structure("minecraft:monument", [0, 64, 0])
             .expect("монумент");
         eprintln!("monument {pos:?}");
-        assert_eq!(pos[0].rem_euclid(16), 8);
-        assert_eq!(pos[2].rem_euclid(16), 8);
+        assert_eq!(pos[0].rem_euclid(16), 0);
+        assert_eq!(pos[2].rem_euclid(16), 0);
     }
 }

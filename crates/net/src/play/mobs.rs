@@ -18,6 +18,8 @@ pub(super) struct MobEntry {
     ambient: i32,
     /// Убит игроком: лут с `killed_by_player` и опыт.
     killer: Option<(Uuid, i32)>,
+    environment: crate::environment::State,
+    fall: f64,
 }
 
 impl MobEntry {
@@ -29,6 +31,8 @@ impl MobEntry {
             moves: 0,
             ambient: 80 + rand::random::<i32>().rem_euclid(120),
             killer: None,
+            environment: Default::default(),
+            fall: 0.0,
         }
     }
 }
@@ -87,7 +91,7 @@ impl PlayPlan {
             m.color = sheep_color(rand::random());
         }
         let packets = self.mob_packets(id, &m);
-        self.mobs.lock().unwrap().insert(id, MobEntry::new(m));
+        self.sim().mobs.lock().unwrap().insert(id, MobEntry::new(m));
         self.mark_work();
         // Моб уже в мире (плагин может спросить о нём), но клиентам — только после события.
         if let Some(reason) = reason
@@ -103,10 +107,10 @@ impl PlayPlan {
                 })
                 .is_some_and(|r| r.trim() == "c")
         {
-            self.mobs.lock().unwrap().remove(&id);
+            self.sim().mobs.lock().unwrap().remove(&id);
             return None;
         }
-        if !self.mobs.lock().unwrap().contains_key(&id) {
+        if !self.sim().mobs.lock().unwrap().contains_key(&id) {
             return None;
         }
         // Три пакета спавна — одной рассылкой: одно сжатие и одно
@@ -118,7 +122,7 @@ impl PlayPlan {
     /// Все мобы для зашедшего игрока.
     pub(super) fn mob_frames(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        for (&id, e) in self.mobs.lock().unwrap().iter() {
+        for (&id, e) in self.sim().mobs.lock().unwrap().iter() {
             for p in self.mob_packets(id, &e.mob) {
                 out.extend(self.hub.frame(&p));
             }
@@ -128,19 +132,19 @@ impl PlayPlan {
 
     /// Тик мобов: ИИ, физика, рассылка движений, звуки, исчезновение мёртвых.
     pub(super) fn tick_mobs(&self) {
-        let loaded = std::mem::take(&mut *self.mobs_loaded.lock().unwrap());
+        let loaded = std::mem::take(&mut *self.sim().mobs_loaded.lock().unwrap());
         if !loaded.is_empty() {
             // Все пакеты появления с диска — одной рассылкой.
             let mut frames = Vec::new();
             for e in loaded {
                 let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
                 frames.extend(self.mob_packets(id, &e.mob));
-                self.mobs.lock().unwrap().insert(id, e);
+                self.sim().mobs.lock().unwrap().insert(id, e);
             }
             self.hub.send_many(frames);
             self.mark_work();
         }
-        if self.mobs.lock().unwrap().is_empty() {
+        if self.sim().mobs.lock().unwrap().is_empty() {
             return;
         }
         // Мобы вне радиуса симуляции спят: как в ванили, где тик идёт только
@@ -191,8 +195,9 @@ impl PlayPlan {
         let mut packets = Vec::new();
         let mut gone = Vec::new();
         let mut sounds = Vec::new();
+        let mut trampling = Vec::new();
         {
-            let mut mobs = self.mobs.lock().unwrap();
+            let mut mobs = self.sim().mobs.lock().unwrap();
             // Один замок мира на всю фазу: коробки коллизий читаются тысячами раз.
             self.with_world(|w| {
                 for (&id, e) in mobs.iter_mut() {
@@ -216,9 +221,70 @@ impl PlayPlan {
                         players: &food_by_species[species as usize],
                         rand: &mut rand,
                     };
+                    let was_grounded = e.mob.on_ground;
+                    let old_y = e.mob.pos[1];
                     if mb::tick(&mut e.mob, &world, &mut senses) {
                         gone.push(id);
                         continue;
+                    }
+                    let descent = (old_y - e.mob.pos[1]).max(0.0);
+                    if !was_grounded && e.mob.on_ground {
+                        let fall = e.fall + descent;
+                        if rand() < crate::soil::trample_chance(fall) {
+                            trampling.push(e.mob.pos);
+                        }
+                        e.fall = 0.0;
+                    } else if !e.mob.on_ground {
+                        e.fall += descent;
+                    } else {
+                        e.fall = 0.0;
+                    }
+                    let (width, height) = e.mob.species.size();
+                    let view =
+                        crate::environment::probe(e.mob.pos, width, height, height * 0.85, |p| {
+                            self.environment_kind(w.block(p))
+                        });
+                    let old = e.environment;
+                    let pulse =
+                        e.environment
+                            .step(view, self.server_ticks.load(Ordering::Relaxed), false);
+                    if old.burning == 0 && e.environment.burning > 0
+                        || old.burning > 0 && e.environment.burning == 0
+                    {
+                        packets.push(inv::set_entity_flags(
+                            self.ids.set_entity_data,
+                            id,
+                            u8::from(e.environment.burning > 0),
+                        ));
+                    }
+                    if old.air != e.environment.air {
+                        packets.push(inv::set_entity_air(
+                            self.ids.set_entity_data,
+                            id,
+                            e.environment.air,
+                        ));
+                    }
+                    if old.frozen != e.environment.frozen {
+                        packets.push(inv::set_entity_frozen(
+                            self.ids.set_entity_data,
+                            id,
+                            e.environment.frozen as i32,
+                        ));
+                    }
+                    let moving = e.mob.vel.iter().any(|v| v.abs() > 0.003);
+                    let fire_damage = self.vars.flag("fire_damage");
+                    for (hit, amount) in [
+                        (pulse.drown && self.vars.flag("drowning_damage"), 2.0),
+                        (pulse.freeze && self.vars.flag("freeze_damage"), 1.0),
+                        (pulse.lava && fire_damage, 4.0),
+                        (pulse.burn && fire_damage && !pulse.lava, 1.0),
+                        (pulse.cactus, 1.0),
+                        (pulse.berries && moving, 1.0),
+                        (pulse.magma && fire_damage, 1.0),
+                    ] {
+                        if hit && mb::hurt(&mut e.mob, amount, None, 0.0).is_some() {
+                            packets.push(play::hurt_animation(self.ids.hurt_animation, id, 0.0));
+                        }
                     }
                     let m = &e.mob;
                     if m.alive() {
@@ -272,6 +338,9 @@ impl PlayPlan {
         // Движения и повороты всех мобов тика — одной рассылкой: при стаде,
         // где сдвинулись все, это одна запись в канал вместо сотни.
         self.hub.send_many(packets);
+        for feet in trampling {
+            self.trample_farmland(feet);
+        }
         for (name, pos, vol, baby) in sounds {
             self.play_sound(
                 None,
@@ -284,7 +353,7 @@ impl PlayPlan {
         }
         if !gone.is_empty() {
             let dead: Vec<(i32, MobEntry)> = {
-                let mut mobs = self.mobs.lock().unwrap();
+                let mut mobs = self.sim().mobs.lock().unwrap();
                 gone.iter()
                     .filter_map(|id| Some((*id, mobs.remove(id)?)))
                     .collect()
@@ -304,7 +373,7 @@ impl PlayPlan {
     /// заменяемое — ничего.
     fn shape_at(&self, s: Option<u32>, c: [i32; 3]) -> &[[f64; 6]] {
         let Some(s) = s else {
-            return if c[1] < self.min_y { mb::FULL } else { &[] };
+            return if c[1] < self.min_y() { mb::FULL } else { &[] };
         };
         if let Some(p) = self.survival.physics.as_deref() {
             return p.boxes_of(s);
@@ -442,7 +511,7 @@ impl PlayPlan {
         if crit {
             damage *= 1.5;
         }
-        let species = self.mobs.lock().unwrap().get(&target)?.mob.species;
+        let species = self.sim().mobs.lock().unwrap().get(&target)?.mob.species;
         match self
             .plugin_event(Event::MobDamage, uuid, || {
                 format!("{target} {} {damage} {}", species.short(), u8::from(crit))
@@ -458,7 +527,7 @@ impl PlayPlan {
         let knock = mb::KNOCKBACK
             * (1.0 + level("minecraft:knockback") as f64 + f64::from(u8::from(sprinting)));
         let (result, mpos, species, baby) = {
-            let mut mobs = self.mobs.lock().unwrap();
+            let mut mobs = self.sim().mobs.lock().unwrap();
             let e = mobs.get_mut(&target)?;
             // Дальше 3 блоков (+ запас на задержку) не бьём.
             let d = [
@@ -481,7 +550,7 @@ impl PlayPlan {
             play::hurt_animation(self.ids.hurt_animation, target, yaw),
         );
         let packets = {
-            let mobs = self.mobs.lock().unwrap();
+            let mobs = self.sim().mobs.lock().unwrap();
             mobs.get(&target).map(|e| self.mob_packets(target, &e.mob))
         };
         if let Some([_, _, data]) = packets {
@@ -606,7 +675,7 @@ impl PlayPlan {
         creative: bool,
     ) -> Option<Vec<usize>> {
         let slot = Self::hand_index(inv, hand)?;
-        let species = self.mobs.lock().unwrap().get(&target)?.mob.species;
+        let species = self.sim().mobs.lock().unwrap().get(&target)?.mob.species;
         let hand_name = if hand == 1 { "OFF_HAND" } else { "HAND" };
         if self
             .cancelled(Event::InteractEntity, uuid, || {
@@ -633,7 +702,7 @@ impl PlayPlan {
             Milk([f64; 3]),
         }
         let act = {
-            let mut mobs = self.mobs.lock().unwrap();
+            let mut mobs = self.sim().mobs.lock().unwrap();
             let m = &mut mobs.get_mut(&target)?.mob;
             if !m.alive() {
                 return None;
@@ -732,7 +801,7 @@ impl PlayPlan {
     pub(super) fn dispense_shear(&self, front: [i32; 3]) -> bool {
         let lo = front.map(f64::from);
         let hit = {
-            let mut mobs = self.mobs.lock().unwrap();
+            let mut mobs = self.sim().mobs.lock().unwrap();
             mobs.iter_mut().find_map(|(&id, e)| {
                 let m = &mut e.mob;
                 let (w, h) = m.size();
@@ -777,7 +846,7 @@ impl PlayPlan {
     /// Разослать метаданные моба заново (стрижка, рост).
     fn refresh_mob(&self, id: i32) {
         let data = {
-            let mobs = self.mobs.lock().unwrap();
+            let mobs = self.sim().mobs.lock().unwrap();
             mobs.get(&id).map(|e| self.mob_packets(id, &e.mob))
         };
         if let Some([_, _, d]) = data {
@@ -794,7 +863,7 @@ impl PlayPlan {
         let mut births = Vec::new();
         let simulated = self.simulated_set();
         {
-            let mut mobs = self.mobs.lock().unwrap();
+            let mut mobs = self.sim().mobs.lock().unwrap();
             if mobs.is_empty() {
                 return;
             }
@@ -919,7 +988,7 @@ impl PlayPlan {
             }
             self.hub
                 .send(None, inv::entity_event(self.ids.entity_event, id, 10));
-            if let Some(e) = self.mobs.lock().unwrap().get_mut(&id) {
+            if let Some(e) = self.sim().mobs.lock().unwrap().get_mut(&id) {
                 // `Sheep.ate`: шерсть отрастает, детёныш растёт на минуту.
                 e.mob.sheared = false;
                 if e.mob.is_baby() {
@@ -940,7 +1009,7 @@ impl PlayPlan {
             let reply = self.sync_event(Event::Breed, || format!("{child} {mother} {father} {xp}"));
             match reply.as_deref().map(str::trim) {
                 Some("c") => {
-                    self.mobs.lock().unwrap().remove(&child);
+                    self.sim().mobs.lock().unwrap().remove(&child);
                     self.hub.send(
                         None,
                         play::remove_entities(self.ids.remove_entities, &[child]),
@@ -1076,8 +1145,8 @@ pub(super) fn mob_from_nbt(c: &Compound) -> Option<Mob> {
 impl PlayPlan {
     /// Мобы региона из `entities/*.mca`: чанки с записью уже заселены.
     pub(super) fn load_mobs(&self, chunks: Vec<((i32, i32), Compound)>) {
-        let mut populated = self.populated.lock().unwrap();
-        let mut written = self.entity_written.lock().unwrap();
+        let mut populated = self.sim().populated.lock().unwrap();
+        let mut written = self.sim().entity_written.lock().unwrap();
         for (pos, root) in chunks {
             populated.insert(pos);
             let Some(Tag::List(list)) = root.get("Entities") else {
@@ -1087,27 +1156,34 @@ impl PlayPlan {
                 let Tag::Compound(c) = e else { continue };
                 let Some(m) = mob_from_nbt(c) else { continue };
                 written.insert(pos);
-                self.mobs_loaded.lock().unwrap().push(MobEntry::new(m));
+                self.sim().mobs_loaded.lock().unwrap().push(MobEntry::new(m));
             }
         }
     }
 
     /// Заселяет новый чанк (`NaturalSpawner.spawnMobsForChunkGeneration`), один раз.
     pub(super) fn populate_chunk(&self, cx: i32, cz: i32) {
-        if self.populated.lock().unwrap().contains(&(cx, cz)) {
+        if self.sim().populated.lock().unwrap().contains(&(cx, cz)) {
             return;
         }
         // Регион с диска помечает свои чанки заселёнными.
         self.ensure_region(cx, cz);
         // Рельефа ещё нет: не сажать мобов на плоский шаблон (они оказывались
         // в океане, когда настоящий чанк приходил позже).
-        if self.terrain.is_some() && !self.edited.read().unwrap().contains_key(&(cx, cz)) {
+        if self.terrain().is_some()
+            && !self
+                .dim_state()
+                .edited
+                .read()
+                .unwrap()
+                .contains_key(&(cx, cz))
+        {
             return;
         }
-        if !self.populated.lock().unwrap().insert((cx, cz)) {
+        if !self.sim().populated.lock().unwrap().insert((cx, cz)) {
             return;
         }
-        self.entity_new.lock().unwrap().insert((cx, cz));
+        self.sim().entity_new.lock().unwrap().insert((cx, cz));
         // Список `creature` биома в центре чанка; океан и реки — пустые.
         // Неизвестные виды остаются в весах, их группа просто пропускается.
         let (chance, list): (f32, Vec<SpawnEntry>) = match self
@@ -1182,9 +1258,9 @@ impl PlayPlan {
     /// Биом (сетевой ID) в центре чанка на высоте поверхности.
     fn chunk_biome(&self, cx: i32, cz: i32) -> Option<u32> {
         let y = self.top_solid(cx * 16 + 8, cz * 16 + 8)?;
-        let world = self.edited.read().unwrap();
-        let column = world.get(&(cx, cz)).map_or(&self.template, |e| &e.0);
-        let ry = ((y - self.min_y).max(0) as usize).min(column.sections.len() * 16 - 1);
+        let world = self.dim_state().edited.read().unwrap();
+        let column = world.get(&(cx, cz)).map_or(self.template(), |e| &e.0);
+        let ry = ((y - self.min_y()).max(0) as usize).min(column.sections.len() * 16 - 1);
         Some(column.sections[ry / 16].biome_at(2, (ry % 16) / 4, 2))
     }
 
@@ -1198,9 +1274,9 @@ impl PlayPlan {
     /// под одним замком: `block()` на каждый из 384 блоков брал мьютекс и
     /// пересчитывал ключ, а при заселении чанка это делается на каждую попытку.
     fn top_solid(&self, x: i32, z: i32) -> Option<i32> {
-        let world = self.edited.read().unwrap();
+        let world = self.dim_state().edited.read().unwrap();
         let key = (x >> 4, z >> 4);
-        let template = &self.template;
+        let template = self.template();
         let column = world.get(&key).map_or(template, |e| &e.0);
         let sky = |s: u32| {
             !matches!(
@@ -1213,23 +1289,23 @@ impl PlayPlan {
         (0..height)
             .rev()
             .find(|&ry| sky(column.block(lx, ry, lz)))
-            .map(|ry| ry as i32 + self.min_y)
+            .map(|ry| ry as i32 + self.min_y())
     }
 
     /// Чанки `entities/*.mca` к записи: где есть мобы, где они были и новые заселённые.
     pub fn unsaved_entities(&self) -> Vec<((i32, i32), Vec<Compound>)> {
         let mut by_chunk: HashMap<(i32, i32), Vec<Compound>> = HashMap::new();
-        for e in self.mobs.lock().unwrap().values().filter(|e| e.mob.alive()) {
+        for e in self.sim().mobs.lock().unwrap().values().filter(|e| e.mob.alive()) {
             let pos = (
                 (e.mob.pos[0].floor() as i32) >> 4,
                 (e.mob.pos[2].floor() as i32) >> 4,
             );
             by_chunk.entry(pos).or_default().push(mob_to_nbt(&e.mob));
         }
-        for &pos in self.entity_written.lock().unwrap().iter() {
+        for &pos in self.sim().entity_written.lock().unwrap().iter() {
             by_chunk.entry(pos).or_default();
         }
-        for &pos in self.entity_new.lock().unwrap().iter() {
+        for &pos in self.sim().entity_new.lock().unwrap().iter() {
             by_chunk.entry(pos).or_default();
         }
         by_chunk.into_iter().collect()
@@ -1237,10 +1313,10 @@ impl PlayPlan {
 
     /// После записи: запомнить, где теперь лежат мобы.
     pub fn mark_entities_saved(&self, saved: &[((i32, i32), Vec<Compound>)]) {
-        let mut written = self.entity_written.lock().unwrap();
+        let mut written = self.sim().entity_written.lock().unwrap();
         written.clear();
         written.extend(saved.iter().filter(|(_, l)| !l.is_empty()).map(|(p, _)| *p));
-        let mut new = self.entity_new.lock().unwrap();
+        let mut new = self.sim().entity_new.lock().unwrap();
         for (p, _) in saved {
             new.remove(p);
         }
@@ -1274,7 +1350,7 @@ impl PlayPlan {
                     .get(1)
                     .and_then(|v| v.parse::<i32>().ok())
                     .unwrap_or(i32::MIN);
-                let mobs = self.mobs.lock().unwrap();
+                let mobs = self.sim().mobs.lock().unwrap();
                 let mut ids: Vec<i32> = mobs
                     .iter()
                     .filter(|(id, e)| **id > after && e.mob.alive())
@@ -1297,7 +1373,7 @@ impl PlayPlan {
                 let Some(id) = f.get(1).and_then(|v| v.parse::<i32>().ok()) else {
                     return String::new();
                 };
-                let mobs = self.mobs.lock().unwrap();
+                let mobs = self.sim().mobs.lock().unwrap();
                 let Some(e) = mobs.get(&id) else {
                     return String::new();
                 };
@@ -1325,7 +1401,7 @@ impl PlayPlan {
                     return "0".into();
                 };
                 if f.get(2) == Some(&"remove") {
-                    let gone = self.mobs.lock().unwrap().remove(&id).is_some();
+                    let gone = self.sim().mobs.lock().unwrap().remove(&id).is_some();
                     if gone {
                         self.hub
                             .send(None, play::remove_entities(self.ids.remove_entities, &[id]));
@@ -1335,7 +1411,7 @@ impl PlayPlan {
                 let mut moved = None;
                 let mut died = false;
                 {
-                    let mut mobs = self.mobs.lock().unwrap();
+                    let mut mobs = self.sim().mobs.lock().unwrap();
                     let Some(e) = mobs.get_mut(&id) else {
                         return "0".into();
                     };

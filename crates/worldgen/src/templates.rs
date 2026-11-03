@@ -128,3 +128,33 @@ impl feature::Level for Air {
         0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `/place template minecraft:desert_well/well` даёт блоки, а
+    /// несуществующий шаблон — пустой (`getOrCreate`).
+    #[test]
+    fn desert_well_has_blocks() {
+        let Some(data) = std::env::var_os("CHUNKWAKE_DATA").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let blocks = chunkwake_data::world::Blocks::load(&data).unwrap();
+        let states = blocks.states();
+        let state = |n: &str| blocks.default_state(n).ok().map(|s| s as u32);
+        let palette = feature::Palette::new(&data, &states, &state);
+        let placed = template_blocks(
+            &data,
+            &palette,
+            "minecraft:desert_well/well",
+            [0, 64, 0],
+            Rotation::None,
+            Mirror::None,
+            false,
+        )
+        .ok()
+        .unwrap_or_default();
+        assert!(!placed.is_empty());
+    }
+}

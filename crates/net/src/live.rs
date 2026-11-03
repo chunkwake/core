@@ -153,6 +153,10 @@ pub enum Control {
     Selected(usize),
     /// Телепорт: позиция, поворот.
     Teleport([f64; 3], f32, f32),
+    /// Переход в другое измерение: `respawn` клиенту и новый поток чанков.
+    DimensionChange(crate::play::Dimension, [f64; 3], (f32, f32)),
+    /// `ServerPlayer.showEndCredits`: титры при первом выходе из Края.
+    Credits,
     /// Очистить инвентарь игрока (`/clear`).
     Clear,
     /// Снять до `max` штук предметов из списка (`/clear`).
@@ -172,10 +176,13 @@ pub enum Control {
     },
     /// Внутреннее: урон извне сессии (стрела из раздатчика).
     Hurt(f32, crate::survival::Cause),
+    /// Мгновенное лечение от взрывного зелья с силой по расстоянию.
+    Heal(f32),
     /// Внутреннее (не от плагинов): содержимое сундука изменил другой игрок.
     ContainerChanged([i32; 3]),
     /// Внутреннее: тик печи — свойства окна и сменились ли предметы.
     Furnace([i32; 3], [i32; 4], bool),
+    Brewing([i32; 3], [i32; 2], bool),
     /// Наложить эффект. `command` — сессия вызовет событие с причиной COMMAND.
     Effect {
         effect: crate::survival::Effect,
@@ -314,6 +321,9 @@ impl Control {
     pub fn apply(&self, live: &mut Live) {
         match *self {
             Control::Health(h) => live.health = h,
+            Control::Heal(amount) => {
+                live.health = (live.health + amount).min(crate::survival::MAX_HEALTH)
+            }
             Control::Food(f) => live.food = f,
             Control::Saturation(s) => live.saturation = s,
             Control::Exhaustion(e) => live.exhaustion = e,
@@ -325,6 +335,10 @@ impl Control {
                 live.yaw = yaw;
                 live.pitch = pitch;
             }
+            // Переход измерения: зеркало получает новую точку; измерение
+            // плагинам пока не отдаётся, поэтому больше менять нечего.
+            Control::DimensionChange(_, p, _) => live.pos = p,
+            Control::Credits => {}
             Control::Effect { effect, force, .. } => {
                 crate::survival::add_effect(&mut live.effects, effect, force);
             }
@@ -372,6 +386,7 @@ impl Control {
             | Control::Kick(_)
             | Control::Transfer(..)
             | Control::Furnace(..)
+            | Control::Brewing(..)
             | Control::Shutdown
             | Control::Hurt(..) => {}
         }

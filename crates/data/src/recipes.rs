@@ -51,6 +51,152 @@ pub struct Stonecutting {
     pub result: (i32, i32),
 }
 
+/// Рецепт кузнечного стола 26.3.
+#[derive(Clone, Debug)]
+pub struct Smithing {
+    pub template: Option<Ingredient>,
+    pub base: Ingredient,
+    pub addition: Option<Ingredient>,
+    pub kind: SmithingKind,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SmithingKind {
+    Transform(i32),
+    Trim(i32),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SmithingData {
+    pub recipes: Vec<Smithing>,
+    /// Item ID → network ID `trim_material` from `provides_trim_material`.
+    pub materials: HashMap<i32, i32>,
+}
+
+/// Рецепты варочной стойки 26.3: (предмет, зелье, реагент) → (предмет, зелье).
+#[derive(Clone, Debug, Default)]
+pub struct BrewingData {
+    pub recipes: HashMap<(i32, i32, i32), (i32, i32)>,
+}
+
+pub fn load_brewing(
+    root: &Path,
+    items: &HashMap<String, i32>,
+    potions: &HashMap<String, i32>,
+) -> Result<BrewingData, DataError> {
+    let dir = root.join("data/minecraft/recipe/brewing");
+    let mut paths: Vec<_> = std::fs::read_dir(&dir)
+        .map_err(|e| DataError::Io(format!("read {}: {e}", dir.display())))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .collect();
+    paths.sort();
+    let mut out = BrewingData::default();
+    for path in paths {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
+        let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| DataError::Format {
+            file: path.display().to_string(), msg: e.to_string(),
+        })?;
+        let name = |path: &str| json.pointer(path).and_then(|v| v.as_str());
+        let parsed = (|| Some((
+            (*items.get(name("/input/item")?)?, *potions.get(name("/input/potion_contents/potions")?)?, *items.get(name("/reagent/item")?)?),
+            (*items.get(name("/output/id")?)?, *potions.get(name("/output/components/minecraft:potion_contents/potion")?)?),
+        )))();
+        let Some((key, result)) = parsed else {
+            return Err(DataError::Format { file: path.display().to_string(), msg: "unknown item or potion in brewing recipe".into() });
+        };
+        out.recipes.insert(key, result);
+    }
+    Ok(out)
+}
+
+impl SmithingData {
+    pub fn find(&self, template: i32, base: i32, addition: i32) -> Option<&Smithing> {
+        self.recipes.iter().find(|r| {
+            r.template.as_ref().is_none_or(|i| i.contains(&template))
+                && r.base.contains(&base)
+                && r.addition.as_ref().is_none_or(|i| i.contains(&addition))
+        })
+    }
+}
+
+/// Все smithing-рецепты и материалы отделки из данных версии.
+pub fn load_smithing(
+    root: &Path,
+    items: &HashMap<String, i32>,
+    registries: &crate::registries::RegistryData,
+) -> Result<SmithingData, DataError> {
+    let mut tags = ItemTags {
+        root,
+        items,
+        memo: HashMap::new(),
+    };
+    let dir = root.join("data/minecraft/recipe");
+    let mut paths: Vec<_> = std::fs::read_dir(&dir)
+        .map_err(|e| DataError::Io(format!("read {}: {e}", dir.display())))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    paths.sort();
+    let mut out = SmithingData::default();
+    for path in paths {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
+        if !text.contains("minecraft:smithing_") {
+            continue;
+        }
+        let json: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| DataError::Format {
+                file: path.display().to_string(),
+                msg: e.to_string(),
+            })?;
+        let kind = match json["type"].as_str() {
+            Some("minecraft:smithing_transform") => {
+                result(&json, items).map(|r| SmithingKind::Transform(r.0))
+            }
+            Some("minecraft:smithing_trim") => json["pattern"]
+                .as_str()
+                .and_then(|n| registries.network_id("trim_pattern", n).ok())
+                .map(SmithingKind::Trim),
+            _ => None,
+        };
+        let Some(kind) = kind else { continue };
+        let Some(base) = tags.ingredient(&json["base"]) else {
+            continue;
+        };
+        let template = json.get("template").and_then(|v| tags.ingredient(v));
+        let addition = json.get("addition").and_then(|v| tags.ingredient(v));
+        out.recipes.push(Smithing {
+            template,
+            base,
+            addition,
+            kind,
+        });
+    }
+    let dir = root.join("reports/minecraft/components/item");
+    for (name, &id) in items {
+        let file = dir.join(format!("{}.json", name.trim_start_matches("minecraft:")));
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        if !text.contains("minecraft:provides_trim_material") {
+            continue;
+        }
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if let Some(material) = json
+            .pointer("/components/minecraft:provides_trim_material")
+            .and_then(|v| v.as_str())
+            && let Ok(network_id) = registries.network_id("trim_material", material)
+        {
+            out.materials.insert(id, network_id);
+        }
+    }
+    Ok(out)
+}
+
 #[derive(Clone, Debug)]
 pub struct Recipes {
     list: Vec<Recipe>,
@@ -413,6 +559,54 @@ pub fn load_recipes(root: &Path, items: &HashMap<String, i32>) -> Result<Recipes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smithing_loads_transform_trim_and_material_component() {
+        let root = std::env::temp_dir().join(format!("chunkwake-smithing-{}", std::process::id()));
+        let recipes = root.join("data/minecraft/recipe");
+        let reports = root.join("reports/minecraft/components/item");
+        std::fs::create_dir_all(&recipes).unwrap();
+        std::fs::create_dir_all(&reports).unwrap();
+        std::fs::write(recipes.join("upgrade.json"), r##"{"type":"minecraft:smithing_transform","template":"minecraft:template","base":"minecraft:base","addition":"minecraft:gold","result":{"id":"minecraft:upgraded"}}"##).unwrap();
+        std::fs::write(recipes.join("trim.json"), r##"{"type":"minecraft:smithing_trim","template":"minecraft:trim_template","base":"minecraft:upgraded","addition":"minecraft:gold","pattern":"minecraft:coast"}"##).unwrap();
+        std::fs::write(
+            reports.join("gold.json"),
+            r#"{"components":{"minecraft:provides_trim_material":"minecraft:gold"}}"#,
+        )
+        .unwrap();
+        let items = HashMap::from([
+            ("minecraft:template".into(), 1),
+            ("minecraft:base".into(), 2),
+            ("minecraft:gold".into(), 3),
+            ("minecraft:upgraded".into(), 4),
+            ("minecraft:trim_template".into(), 5),
+        ]);
+        let registries = crate::registries::RegistryData {
+            synchronized: vec![
+                crate::registries::Registry {
+                    name: "trim_pattern".into(),
+                    entries: vec!["minecraft:coast".into()],
+                },
+                crate::registries::Registry {
+                    name: "trim_material".into(),
+                    entries: vec!["minecraft:gold".into()],
+                },
+            ],
+            tags: Vec::new(),
+        };
+        let data = load_smithing(&root, &items, &registries).unwrap();
+        assert_eq!(data.recipes.len(), 2);
+        assert_eq!(data.materials.get(&3), Some(&0));
+        assert!(matches!(
+            data.find(1, 2, 3).unwrap().kind,
+            SmithingKind::Transform(4)
+        ));
+        assert!(matches!(
+            data.find(5, 4, 3).unwrap().kind,
+            SmithingKind::Trim(0)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn stonecutting_loads_tag_ingredients_and_counts() {

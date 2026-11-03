@@ -54,7 +54,11 @@ fn main() {
     let done = Arc::new(AtomicUsize::new(0));
     let started = Instant::now();
     let deadline = started + Duration::from_secs(seconds);
-    let threads: usize = std::thread::available_parallelism().map_or(4, |p| p.get()) - 1;
+    // `CHUNKWAKE_THREADS=n` — сколько потоков; по умолчанию все ядра без одного.
+    let threads: usize = std::env::var("CHUNKWAKE_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |p| p.get()) - 1);
     // Очередь чанков: один общий список, потоки берут следующий индекс сами.
     let queue: Arc<Vec<(i32, i32)>> = Arc::new(rings.into_iter().flatten().collect());
     let next = Arc::new(AtomicUsize::new(0));

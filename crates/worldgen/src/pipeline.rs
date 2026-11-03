@@ -7,7 +7,7 @@
 //! держится область прото-чанков (после карверов): декорация чанка берёт
 //! его 3×3, готовый чанк требует 5×5.
 
-use crate::feature::structure::{Beard, Columns};
+use crate::feature::structure::{Base, Beard, Columns};
 use crate::feature::{self, Features, Heightmap};
 use crate::surface::{self, Chunk as _, Kind, Rule};
 use crate::{BiomeMemo, CarveBlocks, Fill, Generator};
@@ -26,6 +26,10 @@ pub struct Blocks {
     /// Карты `WORLD_SURFACE_WG` и `OCEAN_FLOOR_WG` после рельефа: считаются
     /// при первой декорации, до записей фич.
     pub worldgen_heights: Option<Arc<[[i32; 256]; 2]>>,
+    /// Живые карты высот прото-чанка (`Heightmap.update`): строятся при
+    /// первом запросе декорации и дальше идут за её записями. Раньше их
+    /// заново сканировал каждый регион 3×3 — до девяти чанков на декорацию.
+    live_heights: Option<Box<Heights>>,
     /// Заборы шахты: форма сторон считается заново, когда чанк отдают и
     /// соседи в радиусе 1 уже декорированы (`postProcessGeneration`).
     shape_posts: Vec<[i32; 3]>,
@@ -47,8 +51,10 @@ pub struct Overworld {
     carve: CarveBlocks,
     stone: u32,
     features: Option<Features>,
-    /// Небородая `WORLD_SURFACE_WG`: высота постановки структур.
-    base_heights: Mutex<HashMap<(i32, i32), Arc<NoiseMaps>>>,
+    /// `getBaseHeight` по столбцам: `WORLD_SURFACE_WG` и `OCEAN_FLOOR_WG`.
+    base_heights: Mutex<HashMap<(i32, i32), (i32, i32)>>,
+    /// `getBaseColumn`: шум с акифером, по столбцам.
+    base_columns: Mutex<HashMap<(i32, i32), Arc<Vec<Fill>>>>,
     area: Mutex<Area>,
     /// Будит ждущих, когда прото-чанк построен или декорация вернула область.
     wake: Condvar,
@@ -174,6 +180,7 @@ impl Overworld {
             stone,
             features: None,
             base_heights: Mutex::new(HashMap::new()),
+            base_columns: Mutex::new(HashMap::new()),
             area: Mutex::new(Area::default()),
             wake: Condvar::new(),
         })
@@ -201,11 +208,11 @@ impl Overworld {
         let features = self.features.as_ref()?;
         Some(Cols {
             noise: &self.noise,
-            surface: self.surface.as_ref(),
             carve: self.carve,
             stone: self.stone,
             palette: &features.palette,
             heights: &self.base_heights,
+            bases: &self.base_columns,
         })
     }
 
@@ -377,42 +384,11 @@ impl Overworld {
             break;
         }
         if !area.done.contains(&(cx, cz)) {
-            for n in around(1) {
-                // Своя область 3×3 должна быть на месте: её может держать
-                // чужая декорация.
-                loop {
-                    if area.decorated.contains(&n) {
-                        break;
-                    }
-                    let region =
-                        (-1..=1).flat_map(|dz| (-1..=1).map(move |dx| (n.0 + dx, n.1 + dz)));
-                    if region.clone().any(|p| area.busy.contains(&p)) {
-                        area = self.wake.wait(area).unwrap();
-                        continue;
-                    }
-                    area.decorated.insert(n);
-                    area.decorating.insert(n);
-                    let at = |i: usize| (n.0 + i as i32 % 3 - 1, n.1 + i as i32 / 3 - 1);
-                    let mut chunks: [Option<Blocks>; 9] = Default::default();
-                    for (i, slot) in chunks.iter_mut().enumerate() {
-                        *slot = area.protos.remove(&at(i));
-                        if slot.is_some() {
-                            area.busy.insert(at(i));
-                        }
-                    }
-                    drop(area);
-                    let chunks = self.decorate(features, chunks, n);
-                    area = self.area.lock().unwrap();
-                    for (i, slot) in chunks.into_iter().enumerate() {
-                        if let Some(c) = slot {
-                            area.busy.remove(&at(i));
-                            area.protos.insert(at(i), c);
-                        }
-                    }
-                    area.decorating.remove(&n);
-                    self.wake.notify_all();
-                    break;
-                }
+            // `ChunkGenerationTask.scheduleLayer`: соседи по x снаружи, по z
+            // внутри. Пятна соседних чанков перекрываются, и кто первый
+            // занял незерак — решает этот порядок.
+            for n in (-1..=1).flat_map(|dx| (-1..=1).map(move |dz| (cx + dx, cz + dz))) {
+                area = self.decorate_one(features, area, n);
             }
             // Декорации соседей, начатые другими потоками, должны закончиться.
             while around(1).any(|p| area.decorating.contains(&p)) {
@@ -421,16 +397,86 @@ impl Overworld {
             // Тот же чанк мог отдать параллельный запрос, пока этот ждал.
             if area.done.insert((cx, cz)) {
                 self.refresh_shapes(features, &mut area, cx, cz);
-                return Some(
-                    area.protos
-                        .remove(&(cx, cz))
-                        .expect("own proto chunk stays in the area"),
-                );
+                let mut chunk = area
+                    .protos
+                    .remove(&(cx, cz))
+                    .expect("own proto chunk stays in the area");
+                feature::bubble_columns(&features.palette, &mut chunk.states);
+                return Some(chunk);
             }
         }
         // Повторный запрос отданного чанка: декорация уже ушла с ним, вызов
         // вернёт только основу (вызывающий держит готовый столбец и её отбросит).
         None
+    }
+
+    /// Декорация чанка `n` над его областью 3×3, если её ещё не было.
+    /// Прото-чанки области уже построены.
+    fn decorate_one<'a>(
+        &'a self,
+        features: &Features,
+        mut area: std::sync::MutexGuard<'a, Area>,
+        n: (i32, i32),
+    ) -> std::sync::MutexGuard<'a, Area> {
+        // Своя область 3×3 должна быть на месте: её может держать
+        // чужая декорация.
+        loop {
+            if area.decorated.contains(&n) {
+                return area;
+            }
+            let region = (-1..=1).flat_map(|dz| (-1..=1).map(move |dx| (n.0 + dx, n.1 + dz)));
+            if region.clone().any(|p| area.busy.contains(&p)) {
+                area = self.wake.wait(area).unwrap();
+                continue;
+            }
+            area.decorated.insert(n);
+            area.decorating.insert(n);
+            let at = |i: usize| (n.0 + i as i32 % 3 - 1, n.1 + i as i32 / 3 - 1);
+            let mut chunks: [Option<Blocks>; 9] = Default::default();
+            for (i, slot) in chunks.iter_mut().enumerate() {
+                *slot = area.protos.remove(&at(i));
+                if slot.is_some() {
+                    area.busy.insert(at(i));
+                }
+            }
+            drop(area);
+            let chunks = self.decorate(features, chunks, n);
+            area = self.area.lock().unwrap();
+            for (i, slot) in chunks.into_iter().enumerate() {
+                if let Some(c) = slot {
+                    area.busy.remove(&at(i));
+                    area.protos.insert(at(i), c);
+                }
+            }
+            area.decorating.remove(&n);
+            self.wake.notify_all();
+            return area;
+        }
+    }
+
+    /// Декорировать чанк заранее, не отдавая его. Стенды так повторяют
+    /// приоритет ванили: чанки с тикетом декорируются раньше кольца вокруг.
+    /// Однопоточно: только для сверки.
+    pub fn predecorate(&self, cx: i32, cz: i32) {
+        let Some(features) = &self.features else {
+            return;
+        };
+        let mut area = self.area.lock().unwrap();
+        if area.decorated.contains(&(cx, cz)) {
+            return;
+        }
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let p = (cx + dx, cz + dz);
+                if !area.protos.contains_key(&p) && !area.done.contains(&p) {
+                    drop(area);
+                    let b = self.proto_at(p.0, p.1, Some(features));
+                    area = self.area.lock().unwrap();
+                    area.protos.entry(p).or_insert(b);
+                }
+            }
+        }
+        drop(self.decorate_one(features, area, (cx, cz)));
     }
 
     /// Стороны заборов шахты и решёток крепости по уже декорированным соседям.
@@ -490,6 +536,7 @@ impl Overworld {
             let i = (ry as usize * 16 + (z & 15) as usize) * 16 + (x & 15) as usize;
             if let Some(slot) = chunk.states.get_mut(i) {
                 *slot = state;
+                chunk.live_heights = None;
             }
         }
         if own && let Some(chunk) = area.protos.get_mut(&(cx, cz)) {
@@ -532,6 +579,7 @@ impl Overworld {
             .flatten()
             .copied()
             .collect();
+        let heights = std::array::from_fn(|i| chunks[i].as_mut().and_then(|c| c.live_heights.take()));
         let mut region = Region {
             chunks,
             cx,
@@ -540,18 +588,24 @@ impl Overworld {
             palette: &features.palette,
             air: self.carve.air,
             memo: RefCell::new(Default::default()),
-            heights: RefCell::new(Default::default()),
+            heights: RefCell::new(heights),
         };
         let cols = Cols {
             noise: &self.noise,
-            surface: self.surface.as_ref(),
             carve: self.carve,
             stone: self.stone,
             palette: &features.palette,
             heights: &self.base_heights,
+            bases: &self.base_columns,
         };
         features.decorate(&mut region, cx, cz, &biomes, Some(&cols));
-        region.chunks
+        let mut chunks = region.chunks;
+        for (c, h) in chunks.iter_mut().zip(region.heights.into_inner()) {
+            if let Some(c) = c {
+                c.live_heights = h;
+            }
+        }
+        chunks
     }
 
     /// Прото-чанк: шум, поверхность, карверы.
@@ -570,16 +624,17 @@ impl Overworld {
             let features = features.expect("features");
             let cols = Cols {
                 noise: &self.noise,
-                surface: self.surface.as_ref(),
                 carve: self.carve,
                 stone: self.stone,
                 palette: &features.palette,
                 heights: &self.base_heights,
+                bases: &self.base_columns,
             };
             structures.beard_at(&cols, cx, cz)
         } else {
             Beard::default()
         };
+        let t_beard = t0.elapsed().as_secs_f64() * 1000.0;
         let noise = &*self.noise;
         let mut terrain = if beard.is_empty() {
             noise.terrain(cx, cz)
@@ -649,7 +704,7 @@ impl Overworld {
         let t_carve = t.elapsed().as_secs_f64() * 1000.0;
         if prof {
             eprintln!(
-                "proto {cx} {cz}: шум {t_noise:.2} | биомы {t_biomes:.2} | \
+                "proto {cx} {cz}: борода {t_beard:.2} | шум {t_noise:.2} | биомы {t_biomes:.2} | \
                  предв. поверхность {t_prelim:.2} | поверхность {t_surface:.2} | \
                  карверы {t_carve:.2}{} = {:.2} мс",
                 if carved { "" } else { " (нет)" },
@@ -660,6 +715,7 @@ impl Overworld {
             states,
             biomes,
             worldgen_heights: None,
+            live_heights: None,
             shape_posts: Vec::new(),
             block_entities: Vec::new(),
         }
@@ -902,19 +958,18 @@ impl feature::Level for Region<'_> {
             // четыре раза больше работы на чанк.
             for column in 0..256usize {
                 let mut found = [0i32; 4];
-                let mut left: Vec<Heightmap> = Heightmap::ALL.to_vec();
+                // Биты ещё не найденных карт по `Heightmap::index`.
+                let mut left = (1u8 << Heightmap::ALL.len()) - 1;
                 for ry in (0..self.noise.height).rev() {
                     let state = c.states[ry as usize * 256 + column];
-                    let mut i = 0;
-                    while i < left.len() {
-                        if self.palette.hits(left[i], state) {
-                            found[left[i].index()] = ry + 1;
-                            left.swap_remove(i);
-                        } else {
-                            i += 1;
+                    for kind in Heightmap::ALL {
+                        let bit = 1 << kind.index();
+                        if left & bit != 0 && self.palette.hits(kind, state) {
+                            found[kind.index()] = ry + 1;
+                            left &= !bit;
                         }
                     }
-                    if left.is_empty() {
+                    if left == 0 {
                         break;
                     }
                 }
@@ -982,17 +1037,11 @@ fn column_height(
 /// Столбцы для постановки структур: небородая высота и биомы чанка.
 pub(crate) struct Cols<'a> {
     pub(crate) noise: &'a Generator,
-    pub(crate) surface: Option<&'a Surface>,
     pub(crate) carve: CarveBlocks,
     pub(crate) stone: u32,
     pub(crate) palette: &'a feature::Palette,
-    pub(crate) heights: &'a Mutex<HashMap<(i32, i32), Arc<NoiseMaps>>>,
-}
-
-/// Небородая высота шума: поверхность мира и дно океана.
-pub(crate) struct NoiseMaps {
-    surface: [i32; 256],
-    floor: [i32; 256],
+    pub(crate) heights: &'a Mutex<HashMap<(i32, i32), (i32, i32)>>,
+    pub(crate) bases: &'a Mutex<HashMap<(i32, i32), Arc<Vec<Fill>>>>,
 }
 
 impl Columns for Cols<'_> {
@@ -1009,16 +1058,10 @@ impl Columns for Cols<'_> {
         self.noise.sea_level
     }
     fn base_height(&self, x: i32, z: i32) -> i32 {
-        let cx = x.div_euclid(16);
-        let cz = z.div_euclid(16);
-        let column = (z.rem_euclid(16) * 16 + x.rem_euclid(16)) as usize;
-        self.chunk_heights(cx, cz).surface[column]
+        self.column_heights(x, z).0
     }
     fn ocean_floor(&self, x: i32, z: i32) -> i32 {
-        let cx = x.div_euclid(16);
-        let cz = z.div_euclid(16);
-        let column = (z.rem_euclid(16) * 16 + x.rem_euclid(16)) as usize;
-        self.chunk_heights(cx, cz).floor[column]
+        self.column_heights(x, z).1
     }
     fn biome_at(&self, x: i32, y: i32, z: i32) -> Option<u32> {
         let biomes = self.noise.biomes(x.div_euclid(16), z.div_euclid(16))?;
@@ -1029,6 +1072,17 @@ impl Columns for Cols<'_> {
         let qx = x.rem_euclid(16) >> 2;
         let qz = z.rem_euclid(16) >> 2;
         biomes.get((qy * 16 + qz * 4 + qx) as usize).copied()
+    }
+    fn base_block(&self, x: i32, y: i32, z: i32) -> Option<Base> {
+        let ry = y - self.noise.min_y;
+        if ry < 0 || ry >= self.noise.height {
+            return None;
+        }
+        Some(match self.base_fills(x, z).get(ry as usize)? {
+            Fill::Air => Base::Air,
+            Fill::Solid => Base::Solid,
+            _ => Base::Fluid,
+        })
     }
     fn column_has(&self, x: i32, z: i32, biomes: &HashSet<u32>) -> bool {
         let Some(cells) = self.noise.biomes(x.div_euclid(16), z.div_euclid(16)) else {
@@ -1046,78 +1100,51 @@ impl Columns for Cols<'_> {
 }
 
 impl Cols<'_> {
-    fn chunk_heights(&self, cx: i32, cz: i32) -> Arc<NoiseMaps> {
-        if let Some(hit) = self.heights.lock().unwrap().get(&(cx, cz)) {
+    /// Столбец `iterateNoiseColumn`: шум и акифер без поверхности, карверов и
+    /// бороды. Раньше считался весь чанк вместе со стадией поверхности
+    /// (~16 мс на одну точку старта); ваниль считает один столбец, и её
+    /// поверхность в высоту не входит.
+    fn base_fills(&self, x: i32, z: i32) -> Arc<Vec<Fill>> {
+        if let Some(hit) = self.bases.lock().unwrap().get(&(x, z)) {
             return Arc::clone(hit);
         }
-        let built = self.compute_heights(cx, cz);
-        let mut cache = self.heights.lock().unwrap();
-        if let Some(hit) = cache.get(&(cx, cz)) {
-            return Arc::clone(hit);
-        }
-        if cache.len() >= 8192 {
+        let built = Arc::new(self.noise.column_fills(x, z));
+        let mut cache = self.bases.lock().unwrap();
+        if cache.len() >= 1 << 14 {
             cache.clear();
         }
-        cache.insert((cx, cz), Arc::clone(&built));
+        cache.insert((x, z), Arc::clone(&built));
         built
     }
 
-    /// `getBaseHeight`: шум и поверхность, без карверов и без своей бороды.
-    /// Рядом — первый свободный `OCEAN_FLOOR_WG` того же столбца.
-    fn compute_heights(&self, cx: i32, cz: i32) -> Arc<NoiseMaps> {
-        let terrain = self.noise.terrain(cx, cz);
+    /// `getBaseHeight` для `WORLD_SURFACE_WG` и `OCEAN_FLOOR_WG`.
+    fn column_heights(&self, x: i32, z: i32) -> (i32, i32) {
+        if let Some(&hit) = self.heights.lock().unwrap().get(&(x, z)) {
+            return hit;
+        }
+        let fills = self.base_fills(x, z);
         let c = self.carve;
-        let mut states: Vec<u32> = terrain
-            .fills
-            .iter()
-            .map(|f| match f {
-                Fill::Air => c.air,
-                Fill::Solid => self.stone,
-                // `default_fluid` настроек: в оверворлде вода, в Аду лава.
-                Fill::Liquid => c.liquid,
-                Fill::Water => c.water,
-                Fill::Lava => c.lava,
-            })
-            .collect();
-        let biomes = self.noise.biomes(cx, cz);
-        let own = biomes.as_deref().unwrap_or(&[]);
-        let memo = RefCell::new(BiomeMemo::default());
-        let preliminary = self.noise.preliminary(cx, cz);
-        let random = self.noise.surface_random();
-        if let Some(s) = self.surface {
-            let mut chunk = View {
-                states: &mut states,
-                biomes: own,
-                air: c.air,
-                water: c.water,
-                lava: c.lava,
-                height: self.noise.height as usize,
-                noise: self.noise,
-                cx,
-                cz,
-                memo: &memo,
-            };
-            s.stage(self.noise, &preliminary, &random)
-                .build(&mut chunk, cx, cz);
+        let state = |f: &Fill| match f {
+            Fill::Air => c.air,
+            Fill::Solid => self.stone,
+            // `default_fluid` настроек: в оверворлде вода, в Аду лава.
+            Fill::Liquid => c.liquid,
+            Fill::Water => c.water,
+            Fill::Lava => c.lava,
+        };
+        let top = |kind: Heightmap| {
+            fills
+                .iter()
+                .rposition(|f| self.palette.hits(kind, state(f)))
+                .map_or(0, |y| y as i32 + 1)
+                + self.noise.min_y
+        };
+        let hit = (top(Heightmap::WorldSurfaceWg), top(Heightmap::OceanFloorWg));
+        let mut cache = self.heights.lock().unwrap();
+        if cache.len() >= 1 << 16 {
+            cache.clear();
         }
-        let mut surface = [0i32; 256];
-        let mut floor = [0i32; 256];
-        for column in 0..256 {
-            surface[column] = column_height(
-                &states,
-                column,
-                self.noise.height,
-                Heightmap::WorldSurfaceWg,
-                self.palette,
-            ) + self.noise.min_y;
-            floor[column] = column_height(
-                &states,
-                column,
-                self.noise.height,
-                Heightmap::OceanFloorWg,
-                self.palette,
-            ) + self.noise.min_y;
-        }
-        Arc::new(NoiseMaps { surface, floor })
+        cache.insert((x, z), hit);
+        hit
     }
 }

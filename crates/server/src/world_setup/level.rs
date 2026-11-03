@@ -343,30 +343,10 @@ fn level_nbt(level: &Level, data_version: i32, name: &str) -> Compound {
         ("type".into(), s("minecraft:overworld")),
         ("generator".into(), Tag::Compound(generator)),
     ]);
-    // Нижний мир: свой генератор, `noise_settings/nether` и биомы `Preset.NETHER`.
-    // Плоский мир его не создаёт, как и ванила, если пресет мира его не задаёт.
+    // Ад и Край: в каждом `world_preset` ванили, плоский мир тоже.
     let mut dimensions = Compound::from([("minecraft:overworld".into(), Tag::Compound(overworld))]);
-    let flat = matches!(level.kind, Kind::Flat(_));
-    if !flat {
-        let nether = Compound::from([
-            ("type".into(), s("minecraft:the_nether")),
-            (
-                "generator".into(),
-                Tag::Compound(Compound::from([
-                    ("type".into(), s("minecraft:noise")),
-                    ("settings".into(), s("minecraft:nether")),
-                    (
-                        "biome_source".into(),
-                        Tag::Compound(Compound::from([
-                            ("type".into(), s("minecraft:multi_noise")),
-                            ("preset".into(), s("minecraft:nether")),
-                        ])),
-                    ),
-                ])),
-            ),
-        ]);
-        dimensions.insert("minecraft:the_nether".into(), Tag::Compound(nether));
-    }
+    dimensions.insert("minecraft:the_nether".into(), Tag::Compound(nether_dimension()));
+    dimensions.insert("minecraft:the_end".into(), Tag::Compound(end_dimension()));
     let gen_settings = Compound::from([
         ("seed".into(), Tag::Long(level.seed)),
         ("generate_features".into(), Tag::Byte(1)),
@@ -382,20 +362,17 @@ fn level_nbt(level: &Level, data_version: i32, name: &str) -> Compound {
     Compound::from([("Data".into(), Tag::Compound(data))])
 }
 
-/// Дописывает в `level.dat` измерения, которых там ещё нет. Плоский мир
-/// второго измерения не получает — так же, как при создании.
+/// Дописывает в `level.dat` измерения, которых там ещё нет: Ад и Край есть
+/// в каждом пресете ванили, плоский мир не исключение.
 ///
 /// Остальные поля файла не меняются: мир мог быть создан другой сборкой,
 /// и перезапись `WorldGenSettings` затёрла бы его настройки.
 fn add_missing_dimensions(
     path: &Path,
     root: &Compound,
-    kind: &Kind,
+    _kind: &Kind,
     data_version: i32,
 ) -> Result<(), String> {
-    if matches!(kind, Kind::Flat(_)) {
-        return Ok(());
-    }
     let Some(Tag::Compound(data)) = root.get("Data").cloned() else {
         return Ok(());
     };
@@ -405,13 +382,19 @@ fn add_missing_dimensions(
     let Some(Tag::Compound(mut dimensions)) = world_gen.get("dimensions").cloned() else {
         return Ok(());
     };
-    if dimensions.contains_key("minecraft:the_nether") {
+    let mut added = Vec::new();
+    for (key, dim) in [
+        ("minecraft:the_nether", nether_dimension as fn() -> Compound),
+        ("minecraft:the_end", end_dimension),
+    ] {
+        if !dimensions.contains_key(key) {
+            dimensions.insert(key.into(), Tag::Compound(dim()));
+            added.push(key);
+        }
+    }
+    if added.is_empty() {
         return Ok(());
     }
-    dimensions.insert(
-        "minecraft:the_nether".into(),
-        Tag::Compound(nether_dimension()),
-    );
     world_gen.insert("dimensions".into(), Tag::Compound(dimensions));
     let mut data = data;
     data.insert("WorldGenSettings".into(), Tag::Compound(world_gen));
@@ -420,8 +403,27 @@ fn add_missing_dimensions(
     // `DataVersion` оставляем как есть: файл принадлежит другой версии.
     let _ = data_version;
     nbt::write_gzip_file(path, &root)?;
-    tracing::info!("level.dat: дописано измерение minecraft:the_nether");
+    tracing::info!("level.dat: дописаны измерения {}", added.join(", "));
     Ok(())
+}
+
+/// Генератор Края для `level.dat`: `biome_source` `minecraft:the_end`.
+fn end_dimension() -> Compound {
+    let s = |v: &str| Tag::String(v.to_owned());
+    Compound::from([
+        ("type".into(), s("minecraft:the_end")),
+        (
+            "generator".into(),
+            Tag::Compound(Compound::from([
+                ("type".into(), s("minecraft:noise")),
+                ("settings".into(), s("minecraft:end")),
+                (
+                    "biome_source".into(),
+                    Tag::Compound(Compound::from([("type".into(), s("minecraft:the_end"))])),
+                ),
+            ])),
+        ),
+    ])
 }
 
 /// Генератор Нижнего мира для `level.dat`.

@@ -609,7 +609,7 @@ impl Grow {
     }
 }
 
-fn forward(facing: u8, min: [i32; 3], max: [i32; 3], x_off: i32, y_off: i32) -> ([i32; 3], u8) {
+pub(super) fn forward(facing: u8, min: [i32; 3], max: [i32; 3], x_off: i32, y_off: i32) -> ([i32; 3], u8) {
     let y = min[1] + y_off;
     match facing {
         0 => ([min[0] + x_off, y, min[2] - 1], 0),
@@ -619,7 +619,7 @@ fn forward(facing: u8, min: [i32; 3], max: [i32; 3], x_off: i32, y_off: i32) -> 
     }
 }
 
-fn left_of(facing: u8, min: [i32; 3], _max: [i32; 3], y_off: i32, z_off: i32) -> ([i32; 3], u8) {
+pub(super) fn left_of(facing: u8, min: [i32; 3], _max: [i32; 3], y_off: i32, z_off: i32) -> ([i32; 3], u8) {
     let y = min[1] + y_off;
     match facing {
         0 | 2 => ([min[0] - 1, y, min[2] + z_off], 3),
@@ -627,7 +627,7 @@ fn left_of(facing: u8, min: [i32; 3], _max: [i32; 3], y_off: i32, z_off: i32) ->
     }
 }
 
-fn right_of(facing: u8, min: [i32; 3], max: [i32; 3], y_off: i32, z_off: i32) -> ([i32; 3], u8) {
+pub(super) fn right_of(facing: u8, min: [i32; 3], max: [i32; 3], y_off: i32, z_off: i32) -> ([i32; 3], u8) {
     let y = min[1] + y_off;
     match facing {
         0 | 2 => ([max[0] + 1, y, min[2] + z_off], 1),
@@ -641,7 +641,7 @@ impl Grow {
     }
 }
 
-fn make_box(x: i32, y: i32, z: i32, facing: u8, w: i32, h: i32, d: i32) -> ([i32; 3], [i32; 3]) {
+pub(super) fn make_box(x: i32, y: i32, z: i32, facing: u8, w: i32, h: i32, d: i32) -> ([i32; 3], [i32; 3]) {
     if facing == 0 || facing == 2 {
         ([x, y, z], [x + w - 1, y + h - 1, z + d - 1])
     } else {
@@ -650,7 +650,7 @@ fn make_box(x: i32, y: i32, z: i32, facing: u8, w: i32, h: i32, d: i32) -> ([i32
 }
 
 /// `BoundingBox.orientBox`. Юг — ветка `default`.
-fn orient_box(
+pub(super) fn orient_box(
     foot: [i32; 3],
     off: [i32; 3],
     w: i32,
@@ -704,7 +704,7 @@ fn shape_check_ids(pal: &Palette) -> HashSet<u32> {
         .collect()
 }
 
-fn overlaps(a0: [i32; 3], a1: [i32; 3], b0: [i32; 3], b1: [i32; 3]) -> bool {
+pub(super) fn overlaps(a0: [i32; 3], a1: [i32; 3], b0: [i32; 3], b1: [i32; 3]) -> bool {
     a1[0] >= b0[0]
         && a0[0] <= b1[0]
         && a1[1] >= b0[1]
@@ -775,11 +775,11 @@ fn orient(pal: &Palette, state: u32, facing: u8) -> u32 {
     state
 }
 
-fn with_prop(pal: &Palette, state: u32, key: &str, value: &str) -> u32 {
+pub(super) fn with_prop(pal: &Palette, state: u32, key: &str, value: &str) -> u32 {
     pal.with_prop(state, key, value).unwrap_or(state)
 }
 
-struct Draw<'a> {
+pub(super) struct Draw<'a> {
     pal: &'a Palette,
     level: &'a mut dyn Level,
     rng: &'a mut Worldgen,
@@ -810,7 +810,7 @@ struct Draw<'a> {
 }
 
 impl<'a> Draw<'a> {
-    fn new(
+    pub(super) fn new(
         pal: &'a Palette,
         level: &'a mut dyn Level,
         rng: &'a mut Worldgen,
@@ -850,7 +850,7 @@ impl<'a> Draw<'a> {
         }
     }
 
-    fn world(&self, x: i32, y: i32, z: i32) -> [i32; 3] {
+    pub(super) fn world(&self, x: i32, y: i32, z: i32) -> [i32; 3] {
         let (wx, wz) = match self.facing {
             0 => (self.min[0] + x, self.max[2] - z),
             2 => (self.min[0] + x, self.min[2] + z),
@@ -868,7 +868,7 @@ impl<'a> Draw<'a> {
         self.pal.is_air(self.level.get(p[0], p[1], p[2]))
     }
 
-    fn put(&mut self, state: u32, x: i32, y: i32, z: i32) {
+    pub(super) fn put(&mut self, state: u32, x: i32, y: i32, z: i32) {
         let p = self.world(x, y, z);
         if !self.window.contains(p) {
             return;
@@ -915,7 +915,7 @@ impl<'a> Draw<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn blocks(
+    pub(super) fn blocks(
         &mut self,
         x0: i32,
         y0: i32,
@@ -1104,7 +1104,7 @@ impl<'a> Draw<'a> {
         }
     }
 
-    fn chest_at(&mut self, x: i32, y: i32, z: i32, table: &str) {
+    pub(super) fn chest_at(&mut self, x: i32, y: i32, z: i32, table: &str) {
         let p = self.world(x, y, z);
         if !self.window.contains(p) {
             return;
@@ -1172,13 +1172,45 @@ impl<'a> Draw<'a> {
         with_prop(self.pal, self.chest, "facing", lock)
     }
 
-    fn spawner_at(&mut self, x: i32, y: i32, z: i32) {
+    pub(super) fn spawner_at(&mut self, x: i32, y: i32, z: i32) {
         let p = self.world(x, y, z);
         if !self.window.contains(p) {
             return;
         }
         self.level.set(p[0], p[1], p[2], self.spawner);
         let _roll = self.rng.next_int_bound(1);
+    }
+
+    /// `StructurePiece.fillColumnDown`: воздух, жидкость, лишайник и
+    /// водоросли до `minY + 1`.
+    pub(super) fn column_down(&mut self, state: u32, x: i32, y: i32, z: i32) {
+        let mut p = self.world(x, y, z);
+        if !self.window.contains(p) {
+            return;
+        }
+        let floor = self.level.min_y() + 1;
+        while p[1] > floor && self.structure_replaceable(self.level.get(p[0], p[1], p[2])) {
+            self.level.set(p[0], p[1], p[2], state);
+            p[1] -= 1;
+        }
+    }
+
+    fn structure_replaceable(&self, state: u32) -> bool {
+        let same = |name: &str| {
+            self.pal
+                .defaults
+                .get(name)
+                .is_some_and(|block| self.pal.same_block(state, *block))
+        };
+        self.pal.is_air(state)
+            || self.pal.fluid(state) != super::Fluid::None
+            || same("minecraft:glow_lichen")
+            || same("minecraft:seagrass")
+            || same("minecraft:tall_seagrass")
+    }
+
+    pub(super) fn palette(&self) -> &'a Palette {
+        self.pal
     }
 
     fn straight(&mut self, door: u8, left: bool, right: bool) {
@@ -1758,11 +1790,9 @@ mod tests {
         let pos = world
             .locate_structure("minecraft:stronghold", [0, 64, 0])
             .expect("крепость");
-        // `/locate` у `server.jar` на сиде 12345: `[-560, ~, -1648]` — угол того
-        // же чанка (−35, −103); у нас ответ — центр чанка, высота — поверхность.
-        assert_eq!((pos[0].div_euclid(16), pos[2].div_euclid(16)), (-35, -103));
-        assert_eq!(pos[0], -552);
-        assert_eq!(pos[2], -1640);
+        // `/locate` у `server.jar` на сиде 12345: `[-560, ~, -1648]` — угол
+        // чанка (−35, −103), `getLocatePos`.
+        assert_eq!((pos[0], pos[2]), (-560, -1648));
     }
 
     #[test]

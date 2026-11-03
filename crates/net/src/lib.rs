@@ -1,5 +1,6 @@
 //! chunkwake-net — приём соединений и состояния handshake/status/login.
 
+pub mod anvil;
 pub mod arrows;
 pub mod auth;
 pub mod campfire;
@@ -19,15 +20,19 @@ pub mod mobs;
 pub mod ops;
 pub mod orbs;
 pub mod pistons;
+mod plants;
 pub mod placement;
 pub mod play;
 pub mod potions;
 pub mod redstone;
+pub mod smithing;
+mod soil;
 pub mod sounds;
 pub mod stack_nbt;
 pub mod survival;
 pub mod ticks;
 pub mod xp;
+pub mod weather;
 
 use bytes::BytesMut;
 use chunkwake_protocol::ProtocolError;
@@ -544,3 +549,7 @@ impl Connection {
         Ok(())
     }
 }
+pub mod brewing;
+pub mod tnt;
+pub mod fire;
+pub mod environment;

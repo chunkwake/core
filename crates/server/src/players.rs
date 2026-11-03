@@ -146,7 +146,11 @@ pub fn to_nbt(s: &PlayerSave, data_version: i32, names: &[String]) -> Compound {
         ("DataVersion".into(), Tag::Int(data_version)),
         (
             "Dimension".into(),
-            Tag::String("minecraft:overworld".into()),
+            Tag::String(
+                s.dimension
+                    .clone()
+                    .unwrap_or_else(|| "minecraft:overworld".into()),
+            ),
         ),
         (
             "Pos".into(),
@@ -181,6 +185,7 @@ pub fn to_nbt(s: &PlayerSave, data_version: i32, names: &[String]) -> Compound {
             Tag::Byte(u8::from(s.spawn_forced) as i8),
         );
     }
+    root.insert("seenCredits".into(), Tag::Byte(u8::from(s.seen_credits) as i8));
     root
 }
 
@@ -254,6 +259,15 @@ pub fn from_nbt(root: &Compound, ids: &HashMap<String, i32>) -> Option<PlayerSav
             .get("SpawnForced")
             .and_then(Tag::as_i64)
             .is_none_or(|v| v != 0),
+        seen_credits: root
+            .get("seenCredits")
+            .and_then(Tag::as_i64)
+            .is_some_and(|v| v != 0),
+        dimension: root
+            .get("Dimension")
+            .and_then(Tag::as_str)
+            .filter(|d| *d != "minecraft:overworld")
+            .map(str::to_owned),
         xp: chunkwake_net::xp::Experience {
             level: root
                 .get("XpLevel")
@@ -305,6 +319,8 @@ mod tests {
             },
             spawn: Some([8, 64, -2]),
             spawn_forced: false,
+            seen_credits: true,
+            dimension: Some("minecraft:the_nether".into()),
             slots: vec![
                 (
                     5,

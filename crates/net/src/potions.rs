@@ -50,6 +50,16 @@ pub fn effects(name: &str) -> &'static [Brew] {
         .map_or(&[], |(_, e)| *e)
 }
 
+/// InstantaneousMobEffect.applyInstantenousEffect rounds the scaled amount.
+pub fn splash_instant_amount(amount: f32, strength: f64) -> f32 {
+    (amount * strength.clamp(0.0, 1.0) as f32 + 0.5).floor()
+}
+
+/// A directly hit entity receives full strength regardless of its center offset.
+pub fn splash_strength(distance: f64, direct_hit: bool) -> f64 {
+    if direct_hit { 1.0 } else { (1.0 - distance / 4.0).clamp(0.0, 1.0) }
+}
+
 /// Ищет `potion_contents` в сыром патче компонентов и читает его.
 /// `None` — компонента нет или перед ним стоит компонент, который нельзя пропустить.
 pub fn read_contents(raw: &[u8], component: i32) -> Option<Contents> {
@@ -532,6 +542,21 @@ const TABLE: &[(&str, &[Brew])] = &[
 mod tests {
     use super::*;
     use chunkwake_protocol::Writer;
+
+    #[test]
+    fn instant_splash_scales_with_distance() {
+        assert_eq!(splash_instant_amount(6.0, 1.0), 6.0);
+        assert_eq!(splash_instant_amount(6.0, 0.5), 3.0);
+        assert_eq!(splash_instant_amount(6.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn direct_splash_hit_has_full_strength() {
+        assert_eq!(splash_strength(2.0, false), 0.5);
+        assert_eq!(splash_strength(2.0, true), 1.0);
+        assert_eq!(splash_instant_amount(6.0, splash_strength(2.0, true)), 6.0);
+        assert_eq!(splash_instant_amount(6.0, splash_strength(2.0, false)), 3.0);
+    }
 
     #[test]
     fn potion_patch_reads_holder_and_custom_effect() {

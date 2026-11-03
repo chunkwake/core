@@ -30,6 +30,40 @@ pub fn named_nbt(
         comps.insert("minecraft:damage".into(), Tag::Int(s.damage));
     }
     let e = components::get(s.extra);
+    if let Some(pages) = e.book_pages {
+        c.insert("chunkwake:book_pages".into(), Tag::Int(pages));
+    }
+    if e.repair_cost > 0 {
+        comps.insert("minecraft:repair_cost".into(), Tag::Int(e.repair_cost));
+    }
+    if let Some((material, pattern)) = e.trim.and_then(|(m, p)| components::trim_names(m, p)) {
+        comps.insert(
+            "minecraft:trim".into(),
+            Tag::Compound(Compound::from([
+                ("material".into(), Tag::String(material.to_owned())),
+                ("pattern".into(), Tag::String(pattern.to_owned())),
+            ])),
+        );
+    }
+    if !e.banner_patterns.is_empty() {
+        let layers = e
+            .banner_patterns
+            .iter()
+            .filter_map(|&(pattern, color)| {
+                Some(Tag::Compound(Compound::from([
+                    (
+                        "pattern".into(),
+                        Tag::String(components::banner_pattern_name(pattern)?.to_owned()),
+                    ),
+                    (
+                        "color".into(),
+                        Tag::String(components::DYE_COLORS.get(color as usize)?.to_string()),
+                    ),
+                ])))
+            })
+            .collect();
+        comps.insert("minecraft:banner_patterns".into(), Tag::List(layers));
+    }
     if !e.enchantments.is_empty() {
         let levels: Compound = e
             .enchantments
@@ -96,7 +130,53 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>) -> Option<S
     }
     let mut s = Stack::new(item, count);
     let mut e = Extra::default();
+    e.book_pages = c
+        .get("chunkwake:book_pages")
+        .and_then(Tag::as_i64)
+        .map(|n| n.clamp(0, 100) as i32);
     if let Some(Tag::Compound(m)) = c.get("components") {
+        if e.book_pages.is_none() {
+            e.book_pages = [
+                "minecraft:written_book_content",
+                "minecraft:writable_book_content",
+            ]
+            .iter()
+            .find_map(|name| {
+                m.get(*name)
+                    .and_then(Tag::as_compound)
+                    .and_then(|book| book.get("pages"))
+                    .and_then(Tag::as_list)
+                    .map(|pages| pages.len().clamp(1, 100) as i32)
+            });
+        }
+        e.repair_cost = m
+            .get("minecraft:repair_cost")
+            .and_then(Tag::as_i64)
+            .unwrap_or(0)
+            .clamp(0, i32::MAX as i64) as i32;
+        e.trim = m
+            .get("minecraft:trim")
+            .and_then(Tag::as_compound)
+            .and_then(|trim| {
+                components::trim_ids(
+                    trim.get("material")?.as_str()?,
+                    trim.get("pattern")?.as_str()?,
+                )
+            });
+        if let Some(layers) = m.get("minecraft:banner_patterns").and_then(Tag::as_list) {
+            e.banner_patterns = layers
+                .iter()
+                .filter_map(|layer| {
+                    let layer = layer.as_compound()?;
+                    let pattern = components::banner_pattern_id(layer.get("pattern")?.as_str()?)?;
+                    let color_name = layer.get("color")?.as_str()?;
+                    let color = components::DYE_COLORS
+                        .iter()
+                        .position(|&n| n == color_name)? as i32;
+                    Some((pattern, color))
+                })
+                .collect();
+        }
         s.damage = m
             .get("minecraft:damage")
             .and_then(Tag::as_i64)
@@ -157,6 +237,28 @@ pub fn to_line(s: Stack, name: &str) -> String {
     let mut j = serde_json::Map::new();
     if s.damage > 0 {
         j.insert("damage".into(), s.damage.into());
+    }
+    if e.repair_cost > 0 {
+        j.insert("repair_cost".into(), e.repair_cost.into());
+    }
+    if let Some((material, pattern)) = e.trim.and_then(|(m, p)| components::trim_names(m, p)) {
+        j.insert(
+            "trim".into(),
+            serde_json::json!({"material": material, "pattern": pattern}),
+        );
+    }
+    if !e.banner_patterns.is_empty() {
+        let layers: Vec<_> = e
+            .banner_patterns
+            .iter()
+            .filter_map(|&(pattern, color)| {
+                Some(serde_json::json!({
+                    "pattern": components::banner_pattern_name(pattern)?,
+                    "color": components::DYE_COLORS.get(color as usize)?,
+                }))
+            })
+            .collect();
+        j.insert("banner_patterns".into(), Value::Array(layers));
     }
     if !e.enchantments.is_empty() {
         let levels = e
@@ -230,6 +332,30 @@ pub fn from_line(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<St
     if let Some(Value::Object(j)) = it.next().and_then(|t| serde_json::from_str(t).ok()) {
         s.damage = j.get("damage").and_then(Value::as_i64).unwrap_or(0).max(0) as i32;
         let mut e = Extra::default();
+        e.repair_cost = j
+            .get("repair_cost")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .clamp(0, i32::MAX as i64) as i32;
+        e.trim = j.get("trim").and_then(|trim| {
+            components::trim_ids(
+                trim.get("material")?.as_str()?,
+                trim.get("pattern")?.as_str()?,
+            )
+        });
+        if let Some(layers) = j.get("banner_patterns").and_then(Value::as_array) {
+            e.banner_patterns = layers
+                .iter()
+                .filter_map(|layer| {
+                    let pattern = components::banner_pattern_id(layer.get("pattern")?.as_str()?)?;
+                    let color_name = layer.get("color")?.as_str()?;
+                    let color = components::DYE_COLORS
+                        .iter()
+                        .position(|&n| n == color_name)? as i32;
+                    Some((pattern, color))
+                })
+                .collect();
+        }
         if let Some(Value::Object(levels)) = j.get("enchantments") {
             for (name, lvl) in levels {
                 if let (Some(id), Some(lvl)) = (components::enchantment_id(name), lvl.as_i64()) {
@@ -424,6 +550,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn banner_patterns_round_trip_through_playerdata() {
+        components::set_banner_pattern_names(vec!["minecraft:stripe_bottom".into()]);
+        let stack = Stack {
+            extra: components::intern(Extra {
+                banner_patterns: vec![(0, 14)],
+                ..Default::default()
+            }),
+            ..Stack::new(7, 1)
+        };
+        let nbt = to_nbt(stack, "minecraft:white_banner").unwrap();
+        let back = from_nbt(&nbt, |n| (n == "minecraft:white_banner").then_some(7)).unwrap();
+        assert_eq!(back, stack);
+    }
+
+    #[test]
+    fn book_page_count_survives_playerdata_and_lectern_nbt() {
+        let stack = Stack {
+            extra: components::intern(Extra {
+                book_pages: Some(5),
+                ..Default::default()
+            }),
+            ..Stack::new(7, 1)
+        };
+        let nbt = to_nbt(stack, "minecraft:written_book").unwrap();
+        assert_eq!(crate::redstone::book_pages(&nbt), 5);
+        let restored = from_nbt(&nbt, |n| (n == "minecraft:written_book").then_some(7)).unwrap();
+        assert_eq!(components::get(restored.extra).book_pages, Some(5));
+    }
+
+    #[test]
+    fn trim_round_trips_through_playerdata() {
+        components::set_trim_names(
+            vec!["minecraft:gold".into()],
+            vec!["minecraft:coast".into()],
+        );
+        let stack = Stack {
+            extra: components::intern(Extra {
+                trim: Some((0, 0)),
+                ..Default::default()
+            }),
+            ..Stack::new(7, 1)
+        };
+        let nbt = to_nbt(stack, "minecraft:diamond_chestplate").unwrap();
+        let trim = nbt["components"].as_compound().unwrap()["minecraft:trim"]
+            .as_compound()
+            .unwrap();
+        assert_eq!(trim["material"].as_str(), Some("minecraft:gold"));
+        assert_eq!(
+            from_nbt(&nbt, |name| (name == "minecraft:diamond_chestplate")
+                .then_some(7)),
+            Some(stack)
+        );
+    }
+
+    #[test]
     fn round_trip_with_components() {
         components::set_enchantments(vec![
             "minecraft:efficiency".into(),
@@ -433,6 +614,10 @@ mod tests {
             enchantments: vec![(0, 5), (1, 3)],
             stored: vec![(1, 2)],
             custom_name: Some(r#"{"text":"Кирка","italic":false}"#.into()),
+            repair_cost: 5,
+            trim: None,
+            banner_patterns: Vec::new(),
+            book_pages: None,
             lore: vec![r#""строка""#.into()],
             raw: None,
             rest: None,

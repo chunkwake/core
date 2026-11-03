@@ -209,6 +209,10 @@ async fn serve(dir: &Path) -> Result<(), String> {
     let (play, storage) =
         world_setup::build_play_plan(&data_dir, boot, &props, &dir.join(&props.level_name))?;
     let (play, storage) = (std::sync::Arc::new(play), std::sync::Arc::new(storage));
+    // Измерения, объявленные клиенту, сразу получают свои каталоги регионов.
+    for (dimension, template, min_y) in play.dimension_layouts() {
+        storage.enable_dimension_with(dimension.key(), template, min_y);
+    }
     // Регионы читаются с диска при первом обращении к их чанкам.
     play.set_source(storage.clone());
     play.set_player_source(storage.clone());

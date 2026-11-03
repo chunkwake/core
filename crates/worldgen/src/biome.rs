@@ -8,14 +8,23 @@
 
 use std::collections::HashMap;
 
-/// Точек в файле ванили около 7600; при равенстве штрафа побеждает первая,
-/// как в `findValueBruteForce` (строгое `<`).
+/// Точек в файле ванили около 7600; при равенстве штрафа выбор задаёт
+/// обход `Climate.RTree` (см. [`Index`]).
 #[derive(Debug, Clone)]
 pub struct Point {
     pub name: String,
     /// `[min, max]` по осям в порядке [`AXES`], уже квантованные.
     pub ranges: [[i64; 2]; 6],
 }
+
+/// Биомы Края: центр, высокогорья, средние земли, малые острова, пустоши.
+pub const END_BIOMES: [&str; 5] = [
+    "minecraft:the_end",
+    "minecraft:end_highlands",
+    "minecraft:end_midlands",
+    "minecraft:small_end_islands",
+    "minecraft:end_barrens",
+];
 
 /// Порядок осей в `Climate.TargetPoint`.
 pub const AXES: [&str; 6] = [
@@ -41,142 +50,196 @@ pub struct BiomeSource {
     index: Index,
 }
 
-/// Узел k-d дерева по шести осям климата: лист хранит индексы точек,
-/// внутренний узел — разделение по самой широкой оси.
-///
-/// Поиск ближайшей точки идёт с отсечением: для узла считается нижняя оценка
-/// штрафа (сумма квадратов расстояний до его рамки), и узел пропускается, если
-/// оценка уже не меньше найденной. Это то, что делает RTree у ванили; результат
-/// тот же — минимальный штраф, при равенстве первая точка файла.
+/// `Climate.RTree`: дерево ванили по семи осям (седьмая — `offset`, у всех
+/// точек 0). Строится тем же разбиением и обходится в том же порядке, поэтому
+/// при равных штрафах выбирается та же точка, что у ванили: побеждает
+/// найденная раньше, а прошлый ответ (`lastResult`) — раньше всех.
 #[derive(Debug, Clone, Default)]
 struct Index {
-    /// Рамки узлов: по 6 пар `[min, max]`.
-    boxes: Vec<[[i64; 2]; 6]>,
-    /// Дети внутреннего узла; у листа пусто.
-    children: Vec<[usize; 2]>,
-    /// Точки листа (индексы в `BiomeSource::points`); у внутреннего пусто.
-    leaves: Vec<Vec<usize>>,
+    nodes: Vec<Node>,
+    /// Лист каждой точки (номер узла).
+    leaf_of: Vec<usize>,
     root: usize,
 }
 
-/// Лист до 16 точек: глубже дерево не нужно, перебор дешевле спуска.
-const LEAF: usize = 16;
+#[derive(Debug, Clone)]
+struct Node {
+    space: [[i64; 2]; DIMS],
+    /// Номер точки у листа.
+    point: Option<usize>,
+    children: Vec<usize>,
+}
+
+/// Шесть осей климата и `offset`.
+const DIMS: usize = 7;
+/// `RTree.CHILDREN_PER_NODE`.
+const CHILDREN: usize = 19;
+
+fn center(r: [i64; 2]) -> i64 {
+    (r[0] + r[1]) / 2
+}
 
 impl Index {
     fn build(points: &[Point]) -> Self {
         let mut index = Self::default();
-        let all: Vec<usize> = (0..points.len()).collect();
-        index.root = index.node(points, &all);
+        let leaves: Vec<usize> = points
+            .iter()
+            .enumerate()
+            .map(|(id, p)| {
+                let mut space = [[0i64; 2]; DIMS];
+                space[..6].copy_from_slice(&p.ranges);
+                index.nodes.push(Node {
+                    space,
+                    point: Some(id),
+                    children: Vec::new(),
+                });
+                index.nodes.len() - 1
+            })
+            .collect();
+        index.leaf_of = leaves.clone();
+        if !leaves.is_empty() {
+            index.root = index.node(leaves);
+        }
         index
     }
 
-    fn bounds(points: &[Point], ids: &[usize]) -> [[i64; 2]; 6] {
-        let mut b = [[i64::MAX, i64::MIN]; 6];
-        for &id in ids {
-            for (axis, range) in points[id].ranges.iter().enumerate() {
-                b[axis][0] = b[axis][0].min(range[0]);
-                b[axis][1] = b[axis][1].max(range[1]);
+    fn subtree(&mut self, children: Vec<usize>) -> usize {
+        let mut space = self.nodes[children[0]].space;
+        for &c in &children[1..] {
+            for (s, r) in space.iter_mut().zip(self.nodes[c].space) {
+                s[0] = s[0].min(r[0]);
+                s[1] = s[1].max(r[1]);
             }
         }
-        b
+        self.nodes.push(Node {
+            space,
+            point: None,
+            children,
+        });
+        self.nodes.len() - 1
     }
 
-    fn node(&mut self, points: &[Point], ids: &[usize]) -> usize {
-        let at = self.boxes.len();
-        self.boxes.push(Self::bounds(points, ids));
-        self.children.push([0, 0]);
-        if ids.len() <= LEAF {
-            self.leaves.push(ids.to_vec());
-            return at;
+    /// `RTree.build`.
+    fn node(&mut self, mut children: Vec<usize>) -> usize {
+        if children.len() == 1 {
+            return children[0];
         }
-        self.leaves.push(Vec::new());
-        // Самая широкая ось рамки — по ней и делим.
-        let b = self.boxes[at];
-        let axis = (0..6).max_by_key(|&a| b[a][1] - b[a][0]).unwrap_or(0);
-        let mut sorted = ids.to_vec();
-        // Центр диапазона точки — устойчивый порядок при равных рамках.
-        sorted.sort_by_key(|&id| (points[id].ranges[axis][0] + points[id].ranges[axis][1]) / 2);
-        let mid = sorted.len() / 2;
-        let left = self.node(points, &sorted[..mid]);
-        let right = self.node(points, &sorted[mid..]);
-        self.children[at] = [left, right];
-        at
-    }
-
-    /// Нижняя оценка штрафа: расстояние от точки до рамки узла.
-    fn lower_bound(b: &[[i64; 2]; 6], point: &[i64; 6]) -> i64 {
-        let mut sum = 0i64;
-        for (axis, [min, max]) in b.iter().enumerate() {
-            let d = if point[axis] > *max {
-                point[axis] - max
-            } else {
-                (min - point[axis]).max(0)
-            };
-            sum += d * d;
+        if children.len() <= CHILDREN {
+            children.sort_by_key(|&c| {
+                self.nodes[c]
+                    .space
+                    .iter()
+                    .map(|&r| center(r).abs())
+                    .sum::<i64>()
+            });
+            return self.subtree(children);
         }
-        sum
-    }
-
-    /// Минимум штрафа и лучшая точка. Обход в глубину с отсечением по оценке:
-    /// узлы с оценкой не меньше текущего минимума не смотрятся.
-    ///
-    /// `hint` — прошлый ответ (`lastResult` у ванили): соседние клетки почти
-    /// всегда того же биома, и его штраф сразу отсекает почти всё дерево.
-    fn find(
-        &self,
-        points: &[Point],
-        point: &[i64; 6],
-        hint: Option<usize>,
-    ) -> Option<(usize, i64)> {
-        // Порог на единицу выше штрафа подсказки: точки с тем же штрафом и
-        // меньшим номером по-прежнему находятся, ответ не зависит от подсказки.
-        let mut best: Option<(usize, i64)> =
-            hint.map(|id| (usize::MAX, fitness(&points[id], point) + 1));
-        let mut stack = vec![self.root];
-        while let Some(node) = stack.pop() {
-            let bound = Self::lower_bound(&self.boxes[node], point);
-            if best.is_some_and(|(_, b)| bound >= b) {
-                continue;
+        let mut best: Option<(i64, usize, Vec<Vec<usize>>)> = None;
+        for d in 0..DIMS {
+            self.sort(&mut children, d, false);
+            let buckets = bucketize(&children);
+            let cost: i64 = buckets
+                .iter()
+                .map(|b| {
+                    (0..DIMS)
+                        .map(|k| {
+                            let lo = b.iter().map(|&c| self.nodes[c].space[k][0]).min().unwrap_or(0);
+                            let hi = b.iter().map(|&c| self.nodes[c].space[k][1]).max().unwrap_or(0);
+                            (hi - lo).abs()
+                        })
+                        .sum::<i64>()
+                })
+                .sum();
+            if best.as_ref().is_none_or(|(min, _, _)| *min > cost) {
+                best = Some((cost, d, buckets));
             }
-            let leaf = &self.leaves[node];
-            if !leaf.is_empty() {
-                for &id in leaf {
-                    let fitness = fitness(&points[id], point);
-                    if best.is_none_or(|(best_id, b)| fitness < b || (fitness == b && id < best_id))
-                    {
-                        best = Some((id, fitness));
-                    }
+        }
+        let (_, dim, buckets) = best.expect("at least one dimension");
+        let mut subs: Vec<usize> = buckets.into_iter().map(|b| self.subtree(b)).collect();
+        self.sort(&mut subs, dim, true);
+        let built: Vec<usize> = subs
+            .into_iter()
+            .map(|s| {
+                let kids = self.nodes[s].children.clone();
+                self.node(kids)
+            })
+            .collect();
+        self.subtree(built)
+    }
+
+    /// `RTree.sort`: ось `dim`, потом остальные по кругу; стабильно.
+    fn sort(&self, list: &mut [usize], dim: usize, absolute: bool) {
+        list.sort_by(|&a, &b| {
+            for k in 0..DIMS {
+                let axis = (dim + k) % DIMS;
+                let key = |n: usize| {
+                    let c = center(self.nodes[n].space[axis]);
+                    if absolute { c.abs() } else { c }
+                };
+                let o = key(a).cmp(&key(b));
+                if o.is_ne() {
+                    return o;
                 }
-                continue;
             }
-            let [left, right] = self.children[node];
-            // Ближний узел обрабатываем первым: он даёт лучший минимум для отсечения.
-            let (a, b) = (
-                Self::lower_bound(&self.boxes[left], point),
-                Self::lower_bound(&self.boxes[right], point),
-            );
-            if a <= b {
-                stack.push(right);
-                stack.push(left);
-            } else {
-                stack.push(left);
-                stack.push(right);
+            std::cmp::Ordering::Equal
+        });
+    }
+
+    fn distance(&self, node: usize, target: &[i64; DIMS]) -> i64 {
+        distance(&self.nodes[node].space, target)
+    }
+
+    /// `SubTree.search`: строгое `>` — при равенстве остаётся прежний кандидат.
+    fn search(&self, node: usize, target: &[i64; DIMS], candidate: Option<usize>) -> Option<usize> {
+        let n = &self.nodes[node];
+        if n.point.is_some() {
+            return Some(node);
+        }
+        let mut min = candidate.map_or(i64::MAX, |c| self.distance(c, target));
+        let mut closest = candidate;
+        for &child in &n.children {
+            let d = self.distance(child, target);
+            if min > d {
+                let Some(leaf) = self.search(child, target, closest) else {
+                    continue;
+                };
+                let ld = if leaf == child { d } else { self.distance(leaf, target) };
+                if min > ld {
+                    min = ld;
+                    closest = Some(leaf);
+                }
             }
         }
-        best
+        closest
+    }
+
+    /// Точка и штраф для `point`; `hint` — прошлый ответ (`lastResult`).
+    fn find(&self, points: &[Point], point: &[i64; 6], hint: Option<usize>) -> Option<(usize, i64)> {
+        if points.is_empty() {
+            return None;
+        }
+        let mut target = [0i64; DIMS];
+        target[..6].copy_from_slice(point);
+        let candidate = hint.and_then(|h| self.leaf_of.get(h).copied());
+        let leaf = self.search(self.root, &target, candidate)?;
+        let id = self.nodes[leaf].point?;
+        Some((id, self.distance(leaf, &target)))
     }
 }
 
-/// `ParameterPoint.fitness`: сумма квадратов расстояний до диапазонов.
-fn fitness(p: &Point, point: &[i64; 6]) -> i64 {
+/// `RTree.bucketize`: куски по `19^floor(log19(n - 0.01))`.
+fn bucketize(nodes: &[usize]) -> Vec<Vec<usize>> {
+    let n = nodes.len() as f64;
+    let expected = (CHILDREN as f64)
+        .powf(((n - 0.01).ln() / (CHILDREN as f64).ln()).floor()) as usize;
+    nodes.chunks(expected.max(1)).map(<[usize]>::to_vec).collect()
+}
+
+/// `Node.distance`: сумма квадратов выхода за диапазоны.
+fn distance(space: &[[i64; 2]; DIMS], target: &[i64; DIMS]) -> i64 {
     let mut sum = 0i64;
-    for (i, [min, max]) in p.ranges.iter().enumerate() {
-        // `Parameter.distance`: только выход за диапазон, внутрь — ноль.
-        let d = if point[i] > *max {
-            point[i] - max
-        } else {
-            (min - point[i]).max(0)
-        };
+    for (&[min, max], &t) in space.iter().zip(target) {
+        let d = if t > max { t - max } else { (min - t).max(0) };
         sum += d * d;
     }
     sum
@@ -215,6 +278,29 @@ impl BiomeSource {
             ids: HashMap::new(),
             index,
         }
+    }
+
+    /// `TheEndBiomeSource`: пять биомов в порядке `collectPossibleBiomes`.
+    /// Климат их не выбирает — точки нужны только для имён и ID.
+    pub fn end() -> Self {
+        let points: Vec<Point> = END_BIOMES
+            .iter()
+            .map(|name| Point {
+                name: (*name).to_owned(),
+                ranges: [[0, 0]; 6],
+            })
+            .collect();
+        let index = Index::build(&points);
+        Self {
+            points,
+            ids: HashMap::new(),
+            index,
+        }
+    }
+
+    /// Имя точки номер `id`.
+    pub fn name_of(&self, id: usize) -> Option<&str> {
+        self.points.get(id).map(|p| p.name.as_str())
     }
 
     /// `reports/biomes.csv`: `имя` и по паре `мин,макс` на каждую ось.
@@ -360,8 +446,8 @@ minecraft:desert,5500,10000,-10000,-6000,-10000,10000,-10000,10000,0,0,-10000,10
 
     #[test]
     fn index_matches_linear_scan_on_real_table() {
-        // Настоящая таблица ванили: 7594 точки. Индекс обязан давать ту же
-        // точку, что и полный перебор, иначе биомы разойдутся с ванилью.
+        // Настоящая таблица ванили: 7594 точки. Дерево обязано находить точку
+        // с тем же штрафом, что и полный перебор; ничьи решает порядок дерева.
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/release/generated/26.3/reports/biomes.csv");
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -369,16 +455,14 @@ minecraft:desert,5500,10000,-10000,-6000,-10000,10000,-10000,10000,0,0,-10000,10
         };
         let src = BiomeSource::parse(&text).unwrap();
         assert_eq!(src.len(), 7594);
-        let linear = |point: &[i64; 6]| -> usize {
-            let mut best = (usize::MAX, i64::MAX);
-            for (i, p) in src.points.iter().enumerate() {
-                let f = fitness(p, point);
-                if f < best.1 {
-                    best = (i, f);
-                }
-            }
-            best.0
+        let fitness = |p: &Point, point: &[i64; 6]| -> i64 {
+            let mut space = [[0i64; 2]; DIMS];
+            space[..6].copy_from_slice(&p.ranges);
+            let mut target = [0i64; DIMS];
+            target[..6].copy_from_slice(point);
+            distance(&space, &target)
         };
+        let linear = |point: &[i64; 6]| src.points.iter().map(|p| fitness(p, point)).min();
         // Точки, взятые из самой таблицы, плюс их середины и края диапазонов.
         let mut checked = 0;
         for (i, p) in src.points.iter().enumerate().step_by(37) {
@@ -386,16 +470,16 @@ minecraft:desert,5500,10000,-10000,-6000,-10000,10000,-10000,10000,0,0,-10000,10
             for (axis, range) in p.ranges.iter().enumerate() {
                 inside[axis] = (range[0] + range[1]) / 2;
             }
-            let got = src.find(&inside).map(|p| p as *const Point);
-            let want = src.points.get(linear(&inside)).map(|p| p as *const Point);
+            let got = src.find(&inside).map(|p| fitness(p, &inside));
+            let want = linear(&inside);
             assert_eq!(got, want, "точка {i} внутри своего диапазона");
             checked += 1;
             // За границей всех диапазонов: штраф ненулевой у всех.
             let mut outside = inside;
             outside[0] = outside[0].saturating_add(4000);
             outside[3] = outside[3].saturating_sub(3000);
-            let got = src.find(&outside).map(|p| p as *const Point);
-            let want = src.points.get(linear(&outside)).map(|p| p as *const Point);
+            let got = src.find(&outside).map(|p| fitness(p, &outside));
+            let want = linear(&outside);
             assert_eq!(got, want, "точка {i} вне диапазонов");
             checked += 1;
         }

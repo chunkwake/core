@@ -84,7 +84,7 @@ impl PlayPlan {
             return self.live.lock().unwrap().contains_key(&target.uuid);
         }
         let found = {
-            let mut mobs = self.mobs.lock().unwrap();
+            let mut mobs = self.sim().mobs.lock().unwrap();
             let Some(entry) = mobs.get_mut(&target.entity_id) else {
                 return false;
             };
@@ -942,7 +942,7 @@ pub(super) fn spreadplayers(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         None
     };
     if let Some(height) = under
-        && height < ctx.plan.min_y
+        && height < ctx.plan.min_y()
     {
         return fail("commands.spreadplayers.failed.invalid.height", Vec::new());
     }
@@ -1011,6 +1011,7 @@ fn can_place(ctx: &Context<'_>, target: &Target) -> bool {
     target.game_mode.is_some()
         || ctx
             .plan
+            .sim()
             .mobs
             .lock()
             .unwrap()

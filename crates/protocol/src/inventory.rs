@@ -35,6 +35,27 @@ pub static DAMAGE_COMPONENT: std::sync::atomic::AtomicI32 = std::sync::atomic::A
 /// Слот: `None` — пусто.
 pub type Slot = Option<Stack>;
 
+fn book_page_count(kind: i32, payload: &[u8]) -> Option<i32> {
+    use crate::components::{
+        WRITABLE_BOOK_CONTENT_COMPONENT, WRITTEN_BOOK_CONTENT_COMPONENT, id_of,
+    };
+    let mut r = Reader::new(payload);
+    let count = if kind == id_of(&WRITABLE_BOOK_CONTENT_COMPONENT) {
+        r.var_int().ok()?
+    } else if kind == id_of(&WRITTEN_BOOK_CONTENT_COMPONENT) {
+        r.string(32).ok()?;
+        if r.bool().ok()? {
+            r.string(32).ok()?;
+        }
+        r.string(32767).ok()?;
+        r.var_int().ok()?;
+        r.var_int().ok()?
+    } else {
+        return None;
+    };
+    (0..=100).contains(&count).then_some(count.max(1))
+}
+
 /// `ItemStack.OPTIONAL_STREAM_CODEC`: количество, затем ID и пустой патч компонентов.
 pub fn write_stack(w: &mut Writer, s: Slot) {
     match s {
@@ -57,6 +78,67 @@ fn write_patch(w: &mut Writer, s: &Stack) {
     };
     let e = get(s.extra);
     if let Some(raw) = &e.raw {
+        let trim_id = id_of(&crate::components::TRIM_COMPONENT);
+        let banner_id = id_of(&crate::components::BANNER_PATTERNS_COMPONENT);
+        let trim = e.trim.filter(|_| trim_id >= 0);
+        let banner =
+            (!e.banner_patterns.is_empty() && banner_id >= 0).then_some(&e.banner_patterns);
+        if trim.is_some() || banner.is_some() {
+            let mut r = Reader::new(raw);
+            if let (Ok(added), Ok(removed)) = (r.var_int(), r.var_int())
+                && added >= 0
+                && removed >= 0
+            {
+                let mut tail = raw.len() - r.remaining().len();
+                let mut skipped = 0;
+                // Серверные компоненты в сыром патче всегда впереди неизвестного хвоста.
+                while skipped < added {
+                    let mut probe = Reader::new(&raw[tail..]);
+                    let Ok(kind) = probe.var_int() else { break };
+                    if kind == trim_id && trim.is_some() {
+                        if probe.var_int().is_err() || probe.var_int().is_err() {
+                            break;
+                        }
+                    } else if kind == banner_id && banner.is_some() {
+                        let Ok(n) = probe.var_int() else { break };
+                        if !(0..=256).contains(&n) {
+                            break;
+                        }
+                        let mut ok = true;
+                        for _ in 0..n {
+                            if probe.var_int().is_err() || probe.var_int().is_err() {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if !ok {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                    tail = raw.len() - probe.remaining().len();
+                    skipped += 1;
+                }
+                w.var_int(
+                    added - skipped + i32::from(trim.is_some()) + i32::from(banner.is_some()),
+                )
+                .var_int(removed);
+                if let Some((material, pattern)) = trim {
+                    w.var_int(trim_id)
+                        .var_int(material.saturating_add(1))
+                        .var_int(pattern.saturating_add(1));
+                }
+                if let Some(layers) = banner {
+                    w.var_int(banner_id).var_int(layers.len() as i32);
+                    for &(pattern, color) in layers {
+                        w.var_int(pattern.saturating_add(1)).var_int(color);
+                    }
+                }
+                w.buf.extend_from_slice(&raw[tail..]);
+                return;
+            }
+        }
         w.buf.extend_from_slice(raw);
         return;
     }
@@ -74,6 +156,9 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         !e.stored.is_empty() && id_of(&STORED_ENCHANTMENTS_COMPONENT) >= 0,
         e.custom_data.is_some() && id_of(&crate::components::CUSTOM_DATA_COMPONENT) >= 0,
         !e.charged.is_empty() && id_of(&CHARGED_PROJECTILES_COMPONENT) >= 0,
+        e.repair_cost > 0 && id_of(&crate::components::REPAIR_COST_COMPONENT) >= 0,
+        e.trim.is_some() && id_of(&crate::components::TRIM_COMPONENT) >= 0,
+        !e.banner_patterns.is_empty() && id_of(&crate::components::BANNER_PATTERNS_COMPONENT) >= 0,
     ];
     w.var_int(parts.iter().filter(|&&p| p).count() as i32)
         .var_int(0);
@@ -117,6 +202,22 @@ fn write_patch(w: &mut Writer, s: &Stack) {
             write_stack(w, Some(*st));
         }
     }
+    if parts[7] {
+        w.var_int(id_of(&crate::components::REPAIR_COST_COMPONENT))
+            .var_int(e.repair_cost);
+    }
+    if let (true, Some((material, pattern))) = (parts[8], e.trim) {
+        w.var_int(id_of(&crate::components::TRIM_COMPONENT))
+            .var_int(material.saturating_add(1))
+            .var_int(pattern.saturating_add(1));
+    }
+    if parts[9] {
+        w.var_int(id_of(&crate::components::BANNER_PATTERNS_COMPONENT))
+            .var_int(e.banner_patterns.len() as i32);
+        for &(pattern, color) in &e.banner_patterns {
+            w.var_int(pattern.saturating_add(1)).var_int(color);
+        }
+    }
 }
 
 /// Читает `ItemStack` с компонентами: износ, чары, имя и описание.
@@ -148,6 +249,28 @@ pub fn read_stack(r: &mut Reader) -> Result<Slot> {
             }
         } else if t == id_of(&CUSTOM_NAME_COMPONENT) {
             e.custom_name = Some(crate::text::read_component(r)?.to_string());
+        } else if t == id_of(&crate::components::REPAIR_COST_COMPONENT) {
+            e.repair_cost = r.var_int()?.max(0);
+        } else if t == id_of(&crate::components::TRIM_COMPONENT) {
+            let material = r.var_int()?;
+            let pattern = r.var_int()?;
+            if material > 0 && pattern > 0 {
+                e.trim = Some((material - 1, pattern - 1));
+            }
+        } else if t == id_of(&crate::components::BANNER_PATTERNS_COMPONENT) {
+            for _ in 0..r.var_int()?.clamp(0, 256) {
+                let pattern = r.var_int()?;
+                let color = r.var_int()?;
+                if pattern > 0 && (0..16).contains(&color) {
+                    e.banner_patterns.push((pattern - 1, color));
+                }
+            }
+        } else if t == id_of(&crate::components::WRITTEN_BOOK_CONTENT_COMPONENT)
+            || t == id_of(&crate::components::WRITABLE_BOOK_CONTENT_COMPONENT)
+        {
+            e.book_pages = book_page_count(t, r.remaining());
+            known = false;
+            break;
         } else if t == id_of(&STORED_ENCHANTMENTS_COMPONENT) {
             for _ in 0..r.var_int()?.clamp(0, 256) {
                 e.stored.push((r.var_int()?, r.var_int()?));
@@ -376,7 +499,8 @@ fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
         return Err(crate::ProtocolError::BadLength(added));
     }
     let mut patch = Writer::new();
-    patch.var_int(added).var_int(removed);
+    let mut known = true;
+    let mut raw_added = 0;
     for _ in 0..added {
         let kind = r.var_int()?;
         let len = r.var_int()?;
@@ -384,8 +508,13 @@ fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
             return Err(crate::ProtocolError::BadLength(len));
         }
         let payload = r.bytes(len as usize)?;
-        patch.var_int(kind);
-        patch.buf.extend_from_slice(payload);
+        if kind != id_of(&crate::components::TRIM_COMPONENT)
+            && kind != id_of(&crate::components::BANNER_PATTERNS_COMPONENT)
+        {
+            raw_added += 1;
+            patch.var_int(kind);
+            patch.buf.extend_from_slice(payload);
+        }
         let mut body = Reader::new(payload);
         if kind == id_of(&DAMAGE_COMPONENT)
             && let Ok(d) = body.var_int()
@@ -411,6 +540,32 @@ fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
             && let Ok(text) = crate::text::read_component(&mut body)
         {
             e.custom_name = Some(text.to_string());
+        } else if kind == id_of(&crate::components::REPAIR_COST_COMPONENT)
+            && let Ok(cost) = body.var_int()
+        {
+            e.repair_cost = cost.max(0);
+        } else if kind == id_of(&crate::components::TRIM_COMPONENT)
+            && let (Ok(material), Ok(pattern)) = (body.var_int(), body.var_int())
+        {
+            if material > 0 && pattern > 0 {
+                e.trim = Some((material - 1, pattern - 1));
+            }
+        } else if kind == id_of(&crate::components::BANNER_PATTERNS_COMPONENT)
+            && let Ok(n) = body.var_int()
+        {
+            for _ in 0..n.clamp(0, 256) {
+                let (Ok(pattern), Ok(color)) = (body.var_int(), body.var_int()) else {
+                    break;
+                };
+                if pattern > 0 && (0..16).contains(&color) {
+                    e.banner_patterns.push((pattern - 1, color));
+                }
+            }
+        } else if kind == id_of(&crate::components::WRITTEN_BOOK_CONTENT_COMPONENT)
+            || kind == id_of(&crate::components::WRITABLE_BOOK_CONTENT_COMPONENT)
+        {
+            e.book_pages = book_page_count(kind, payload);
+            known = false;
         } else if kind == id_of(&LORE_COMPONENT)
             && let Ok(n) = body.var_int()
         {
@@ -429,13 +584,18 @@ fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
                     e.charged.push(st);
                 }
             }
+        } else {
+            known = false;
         }
     }
     for _ in 0..removed {
         patch.var_int(r.var_int()?);
     }
-    if added != 0 || removed != 0 {
-        e.raw = Some(patch.buf);
+    if !known || removed != 0 {
+        let mut raw = Writer::new();
+        raw.var_int(raw_added).var_int(removed);
+        raw.buf.extend_from_slice(&patch.buf);
+        e.raw = Some(raw.buf);
     }
     s.extra = intern(e);
     Ok(Some(s))
@@ -506,6 +666,21 @@ pub fn set_entity_flags(id: i32, entity_id: i32, flags: u8) -> Vec<u8> {
     w.buf
 }
 
+/// Общие метаданные сущности: запас воздуха (1) и тики замерзания (7).
+pub fn set_entity_air(id: i32, entity_id: i32, air: i32) -> Vec<u8> {
+    set_entity_int(id, entity_id, 1, air)
+}
+
+pub fn set_entity_frozen(id: i32, entity_id: i32, ticks: i32) -> Vec<u8> {
+    set_entity_int(id, entity_id, 7, ticks)
+}
+
+fn set_entity_int(id: i32, entity_id: i32, index: u8, value: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_id).u8(index).var_int(1).var_int(value).u8(0xff);
+    w.buf
+}
+
 /// Поза игрока и позиция кровати в `set_entity_data` (Entity.DATA_POSE и
 /// LivingEntity.SLEEPING_POS_ID). Пустая позиция возвращает позу стоя.
 pub fn set_entity_sleeping(id: i32, entity_id: i32, bed: Option<[i32; 3]>) -> Vec<u8> {
@@ -544,6 +719,13 @@ pub fn set_orb_value(id: i32, entity_id: i32, value: i32) -> Vec<u8> {
         .var_int(1)
         .var_int(value)
         .u8(0xff);
+    w.buf
+}
+
+/// `PrimedTnt.DATA_FUSE_ID`: оставшиеся тики фитиля (индекс 8, int).
+pub fn set_tnt_fuse(id: i32, entity_id: i32, fuse: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_id).u8(8).var_int(1).var_int(fuse).u8(0xff);
     w.buf
 }
 
@@ -635,6 +817,125 @@ mod tests {
         let mut out = Writer::new();
         write_stack(&mut out, stack);
         assert_eq!(out.buf, original);
+    }
+
+    #[test]
+    fn repair_cost_component_roundtrips() {
+        use std::sync::atomic::Ordering;
+        crate::components::REPAIR_COST_COMPONENT.store(123, Ordering::Relaxed);
+        let stack = Stack {
+            extra: crate::components::intern(crate::components::Extra {
+                repair_cost: 7,
+                ..Default::default()
+            }),
+            ..Stack::new(10, 1)
+        };
+        let mut w = Writer::new();
+        write_stack(&mut w, Some(stack));
+        assert_eq!(read_stack(&mut Reader::new(&w.buf)).unwrap(), Some(stack));
+    }
+
+    #[test]
+    fn trim_component_roundtrips() {
+        use std::sync::atomic::Ordering;
+        crate::components::TRIM_COMPONENT.store(124, Ordering::Relaxed);
+        let stack = Stack {
+            extra: crate::components::intern(crate::components::Extra {
+                trim: Some((2, 5)),
+                ..Default::default()
+            }),
+            ..Stack::new(10, 1)
+        };
+        let mut w = Writer::new();
+        write_stack(&mut w, Some(stack));
+        assert_eq!(read_stack(&mut Reader::new(&w.buf)).unwrap(), Some(stack));
+    }
+
+    #[test]
+    fn banner_patterns_component_roundtrips() {
+        use std::sync::atomic::Ordering;
+        crate::components::BANNER_PATTERNS_COMPONENT.store(125, Ordering::Relaxed);
+        let stack = Stack {
+            extra: crate::components::intern(crate::components::Extra {
+                banner_patterns: vec![(2, 14), (5, 0)],
+                ..Default::default()
+            }),
+            ..Stack::new(10, 1)
+        };
+        let mut w = Writer::new();
+        write_stack(&mut w, Some(stack));
+        assert_eq!(read_stack(&mut Reader::new(&w.buf)).unwrap(), Some(stack));
+    }
+
+    #[test]
+    fn book_page_counts_decode_from_component_payloads() {
+        use std::sync::atomic::Ordering;
+        crate::components::WRITABLE_BOOK_CONTENT_COMPONENT.store(126, Ordering::Relaxed);
+        crate::components::WRITTEN_BOOK_CONTENT_COMPONENT.store(127, Ordering::Relaxed);
+        let mut writable = Writer::new();
+        writable.var_int(3);
+        assert_eq!(super::book_page_count(126, &writable.buf), Some(3));
+        let mut written = Writer::new();
+        written
+            .string("Title")
+            .bool(false)
+            .string("Author")
+            .var_int(0)
+            .var_int(5);
+        assert_eq!(super::book_page_count(127, &written.buf), Some(5));
+    }
+
+    #[test]
+    fn trim_overlays_unknown_component_without_losing_it() {
+        use std::sync::atomic::Ordering;
+        crate::components::TRIM_COMPONENT.store(124, Ordering::Relaxed);
+        let original = vec![1, 0, 42, 7];
+        let stack = Stack {
+            extra: crate::components::intern(crate::components::Extra {
+                trim: Some((2, 5)),
+                raw: Some(original),
+                ..Default::default()
+            }),
+            ..Stack::new(10, 1)
+        };
+        let mut w = Writer::new();
+        write_stack(&mut w, Some(stack));
+        let mut r = Reader::new(&w.buf);
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.var_int().unwrap(), 10);
+        assert_eq!(r.var_int().unwrap(), 2);
+        assert_eq!(r.var_int().unwrap(), 0);
+        assert_eq!(r.var_int().unwrap(), 124);
+        assert_eq!((r.var_int().unwrap(), r.var_int().unwrap()), (3, 6));
+        assert_eq!(r.remaining(), &[42, 7]);
+    }
+
+    #[test]
+    fn creative_trim_keeps_unknown_patch_once() {
+        use std::sync::atomic::Ordering;
+        crate::components::TRIM_COMPONENT.store(124, Ordering::Relaxed);
+        let mut packet = Writer::new();
+        packet
+            .u16(36)
+            .var_int(1)
+            .var_int(10)
+            .var_int(2)
+            .var_int(0)
+            .var_int(42)
+            .var_int(1)
+            .u8(7)
+            .var_int(124)
+            .var_int(2)
+            .var_int(3)
+            .var_int(6);
+        let (_, stack) = read_creative_slot(&mut Reader::new(&packet.buf)).unwrap();
+        assert_eq!(
+            crate::components::get(stack.unwrap().extra).trim,
+            Some((2, 5))
+        );
+        let mut out = Writer::new();
+        write_stack(&mut out, stack);
+        assert_eq!(out.buf, vec![1, 10, 2, 0, 124, 3, 6, 42, 7]);
     }
 
     #[test]

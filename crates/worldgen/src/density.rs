@@ -41,6 +41,27 @@ pub enum Bin {
     Max,
 }
 
+/// `DistanceMetric`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Metric {
+    Euclidean,
+    EuclideanSquared,
+    Manhattan,
+    Chebyshev,
+}
+
+impl Metric {
+    /// `DistanceMetric.compute(float, float, float)`.
+    fn compute(self, dx: f32, dy: f32, dz: f32) -> f32 {
+        match self {
+            Metric::Euclidean => ((dx * dx + dy * dy + dz * dz) as f64).sqrt() as f32,
+            Metric::EuclideanSquared => dx * dx + dy * dy + dz * dz,
+            Metric::Manhattan => dx.abs() + dy.abs() + dz.abs(),
+            Metric::Chebyshev => dx.abs().max(dy.abs()).max(dz.abs()),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Tiling {
     Clamp,
@@ -92,6 +113,10 @@ pub enum Df {
     BlendOffset,
     Beardifier,
     BlendDensity(Box<Df>),
+    /// `distance_to_point`: расстояние от точки по метрике.
+    DistanceToPoint([i32; 3], Metric),
+    /// `end_outer_islands`: острова Края от симплекс-шума по секциям 8×8.
+    EndIslands,
     /// Кэш после дедупликации (`PreparedCache`): номер ячейки и оси входа.
     Prepared(usize, u8),
 }
@@ -241,6 +266,21 @@ impl Df {
                     "blend_offset" => Df::BlendOffset,
                     "beardifier" => Df::Beardifier,
                     "blend_density" => Df::BlendDensity(p("input")?),
+                    "distance_to_point" => {
+                        let point = v["point"].as_array().ok_or("distance_to_point: no point")?;
+                        let c = |i: usize| point.get(i).and_then(Value::as_i64).unwrap_or(0) as i32;
+                        Df::DistanceToPoint(
+                            [c(0), c(1), c(2)],
+                            match v["metric"].as_str() {
+                                Some("euclidean") => Metric::Euclidean,
+                                Some("euclidean_squared") => Metric::EuclideanSquared,
+                                Some("manhattan") => Metric::Manhattan,
+                                Some("chebyshev") => Metric::Chebyshev,
+                                m => return Err(format!("distance_to_point: metric {m:?}")),
+                            },
+                        )
+                    }
+                    "end_outer_islands" => Df::EndIslands,
                     t => return Err(format!("density function type {t} is not supported")),
                 }
             }
@@ -395,7 +435,8 @@ fn domain_axes(d: &Df) -> u8 {
             }
             a | domain_axes(&shift[0]) | domain_axes(&shift[1]) | domain_axes(&shift[2])
         }
-        Df::Shift(_) | Df::Blended { .. } | Df::Beardifier => ALL_AXES,
+        Df::Shift(_) | Df::Blended { .. } | Df::Beardifier | Df::DistanceToPoint(..) => ALL_AXES,
+        Df::EndIslands => AXIS_X | AXIS_Z,
         Df::ShiftA(_) | Df::ShiftB(_) | Df::BlendAlpha | Df::BlendOffset => AXIS_X | AXIS_Z,
         Df::Gradient { axis, .. } => 1 << axis,
         Df::Unary(_, x) | Df::Clamp(x, ..) | Df::Interpolated(x, ..) | Df::BlendDensity(x) => {
@@ -494,6 +535,8 @@ pub enum S {
     FindTop(Box<[S; 2]>, i32, i32),
     Spline(Spl, Vec<S>),
     Cached(usize, Arc<S>),
+    Distance([i32; 3], Metric),
+    EndIslands(Arc<noise::Simplex>),
 }
 
 /// Ячейка кэша (`SamplerContext.CacheCell`).
@@ -746,6 +789,16 @@ impl Compiler {
                     S::Noise(Arc::new(min), xz_m, y_m),
                     S::Noise(Arc::new(max), xz_m, y_m),
                 ]))
+            }
+            Df::DistanceToPoint(point, metric) => S::Distance(*point, *metric),
+            Df::EndIslands => {
+                // `createEndIslandRandom`: `new LegacyRandomSource(seed)`, затем
+                // `consumeCount(17292)` и `new SimplexNoise(random, true)`.
+                let mut r = crate::random::Legacy::new(self.seed);
+                for _ in 0..17292 {
+                    crate::random::Bits::next_int(&mut r);
+                }
+                S::EndIslands(Arc::new(noise::Simplex::new(&mut r, true)))
             }
             Df::Gradient {
                 axis,
@@ -1075,7 +1128,9 @@ impl S {
     /// интерполяции, кэшей, срезов и `shift_b`, которые считают объём иначе.
     pub fn pointwise(&self) -> bool {
         match self {
-            S::Const(_) | S::Noise(..) | S::Gradient(..) => true,
+            S::Const(_) | S::Noise(..) | S::Gradient(..) | S::Distance(..) | S::EndIslands(_) => {
+                true
+            }
             S::ConstAdd(s, _)
             | S::ConstSub(_, s)
             | S::ConstMul(s, _)
@@ -1207,6 +1262,8 @@ impl S {
                 }
             }
             S::Gradient(axis, g, from, factor) => g.compute([x, y, z][*axis], *from, *factor),
+            S::Distance(p, m) => m.compute((p[0] - x) as f32, (p[1] - y) as f32, (p[2] - z) as f32),
+            S::EndIslands(n) => (end_height(n, x / 8, z / 8) - 8.0) / 128.0,
             S::Interpolated(input, cxz, cy) => {
                 let xi = x.rem_euclid(*cxz);
                 let yi = y.rem_euclid(*cy);
@@ -1433,6 +1490,17 @@ impl S {
                     };
                 }
             }
+            S::Distance(..) | S::EndIslands(_) => {
+                let mut i = 0;
+                for z in 0..v.size[2] {
+                    for x in 0..v.size[0] {
+                        for y in 0..v.size[1] {
+                            out[i] = self.value(ctx, v.block_x(x), v.block_y(y), v.block_z(z));
+                            i += 1;
+                        }
+                    }
+                }
+            }
             S::Gradient(axis, g, from, factor) => {
                 let mut i = 0;
                 for z in 0..v.size[2] {
@@ -1638,7 +1706,9 @@ fn interpolate_blocks(input: &S, cxz: i32, cy: i32, ctx: &mut Ctx, out: &mut [f3
         cs,
     );
     let mut cb = vec![0f32; cv.len()];
+    let t = std::time::Instant::now();
     input.volume(ctx, &mut cb, &cv);
+    CORNERS.with(|c| c.set(c.get() + t.elapsed().as_secs_f64() * 1000.0));
     let inv_xz = 1.0 / cxz as f32;
     let inv_y = 1.0 / cy as f32;
     for cz in 0..count[2] {
@@ -1694,4 +1764,36 @@ fn interpolate_blocks(input: &S, cxz: i32, cy: i32, ctx: &mut Ctx, out: &mut [f3
             }
         }
     }
+}
+
+/// `EndIslandFunction.getHeightValue`: деление и остаток — как в Java, к нулю.
+fn end_height(noise: &noise::Simplex, section_x: i32, section_z: i32) -> f32 {
+    let chunk_x = section_x / 2;
+    let chunk_z = section_z / 2;
+    let sub_x = section_x % 2;
+    let sub_z = section_z % 2;
+    let mut doffs = -100.0f32;
+    for xo in -12..=12i64 {
+        for zo in -12..=12i64 {
+            let total_x = chunk_x as i64 + xo;
+            let total_z = chunk_z as i64 + zo;
+            if total_x * total_x + total_z * total_z > 4096
+                && noise.get(total_x as f64, total_z as f64) < -0.9
+            {
+                let size = ((total_x as f32).abs() * 3439.0 + (total_z as f32).abs() * 147.0)
+                    % 13.0
+                    + 9.0;
+                let xd = sub_x as f32 - (xo * 2) as f32;
+                let zd = sub_z as f32 - (zo * 2) as f32;
+                let d = 100.0 - (((xd * xd + zd * zd) as f64).sqrt() as f32) * size;
+                doffs = doffs.max(d.clamp(-100.0, 80.0));
+            }
+        }
+    }
+    doffs
+}
+
+thread_local! {
+    /// PROF: время вычисления углов клеток в `interpolated`, мс.
+    pub static CORNERS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
 }

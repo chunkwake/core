@@ -107,25 +107,25 @@ use uuid::Uuid;
 impl PlayPlan {
     /// Координаты для телепорта командой (/tp).
     pub(crate) fn teleport_to(&self, uuid: Uuid, pos: [f64; 3], yaw: f32, pitch: f32) -> bool {
-        self.teleport_player(uuid, pos, yaw, pitch)
+        self.command_teleport(uuid, pos, yaw, pitch)
     }
 
     /// `/locate biome`: ближайшая точка или `None` (плоский мир, нет такого биома).
     pub(crate) fn locate_biome(&self, name: &str, origin: [i32; 3]) -> Option<[i32; 3]> {
-        self.locate_biome.as_ref().and_then(|f| f(name, origin))
+        self.locate_biome_fn().and_then(|f| f(name, origin))
     }
 
     /// `/locate structure`: ближайший старт или `None` (плоский мир, такой структуры нет).
     pub(crate) fn locate_structure(&self, name: &str, origin: [i32; 3]) -> Option<[i32; 3]> {
-        self.locate_structure.as_ref().and_then(|f| f(name, origin))
+        self.locate_structure_fn().and_then(|f| f(name, origin))
     }
 
     /// Все цели мира для селекторов: игроки, мобы, выпавшие предметы, стрелы.
     pub(crate) fn command_targets(&self) -> Vec<Target> {
         // Точная ёмкость: иначе вектор растёт и копирует цели два-три раза.
         let players = self.hub.players.lock().unwrap().len();
-        let mobs = self.mobs.lock().unwrap().len();
-        let dropped = self.dropped.lock().unwrap().len();
+        let mobs = self.sim().mobs.lock().unwrap().len();
+        let dropped = self.sim().dropped.lock().unwrap().len();
         let mut out: Vec<Target> = Vec::with_capacity(players + mobs + dropped);
         out.extend(self.hub.players.lock().unwrap().values().map(|p| Target {
             uuid: p.entry.uuid,
@@ -148,7 +148,7 @@ impl PlayPlan {
         }
         // Мобы и предметы: только позиция и вид — для `@e`, `kill`, `tp`.
         {
-            let mobs = self.mobs.lock().unwrap();
+            let mobs = self.sim().mobs.lock().unwrap();
             for (entity_id, entry) in mobs.iter() {
                 out.push(entity_ref(
                     *entity_id,
@@ -158,7 +158,7 @@ impl PlayPlan {
             }
         }
         {
-            let dropped = self.dropped.lock().unwrap();
+            let dropped = self.sim().dropped.lock().unwrap();
             for (entity_id, item) in dropped.iter() {
                 out.push(entity_ref(*entity_id, item.pos, "item"));
             }
@@ -203,7 +203,7 @@ impl PlayPlan {
             });
         }
         let mob = {
-            let mobs = self.mobs.lock().unwrap();
+            let mobs = self.sim().mobs.lock().unwrap();
             mobs.iter()
                 .find(|(entity_id, _)| entity_uuid(**entity_id) == uuid)
                 .map(|(entity_id, entry)| (*entity_id, entry.mob.pos, entry.mob.species.name()))
@@ -440,7 +440,12 @@ impl PlayPlan {
 
     /// Сколько столбцов знает мир: изменённые и прочитанные с диска.
     pub(crate) fn loaded_columns(&self) -> usize {
-        self.edited.read().unwrap().len().max(self.regions_loaded())
+        self.dim_state()
+            .edited
+            .read()
+            .unwrap()
+            .len()
+            .max(self.regions_loaded())
     }
 
     /// Просьба остановить сервер (`/stop`).
@@ -575,15 +580,31 @@ impl PlayPlan {
 
     /// Внутри ли мира позиция (по высоте и границам).
     pub(crate) fn in_world(&self, [x, y, z]: [i32; 3]) -> bool {
-        let height = self.template.height() as i32;
-        y >= self.min_y && y < self.min_y + height && x.abs() < 30_000_000 && z.abs() < 30_000_000
+        let height = self.template().height() as i32;
+        y >= self.min_y()
+            && y < self.min_y() + height
+            && x.abs() < 30_000_000
+            && z.abs() < 30_000_000
     }
 
     /// Ставит блок и будит редстоун; `None` — вне мира, `Some(false)` — не изменился.
     pub(crate) fn place_block(&self, pos: [i32; 3], state: u32) -> Option<bool> {
         let old = self.set_block(pos, state)?;
+        // `BaseFireBlock.onPlace`: огонь в пустой рамке портала зажигает его.
+        // Через это проходит и `/setblock ... fire`, и обычная установка.
+        if self.place_lights_portal(pos, state) {
+            self.try_light_portal(pos, 0);
+        }
         self.redstone_update(&crate::redstone::around(pos));
         Some(old != state)
+    }
+
+    /// Огонь ли это состояние (обычный или душ).
+    pub(crate) fn place_lights_portal(&self, _pos: [i32; 3], state: u32) -> bool {
+        matches!(
+            self.state_name(state),
+            "minecraft:fire" | "minecraft:soul_fire"
+        )
     }
 
     /// Имя блока в позиции (`/execute if block`).
@@ -599,7 +620,7 @@ impl PlayPlan {
 
     /// Имя биома клетки 4×4×4. Плоский мир читает шаблон. Чанка шума нет — `None`.
     pub(crate) fn biome_name_at(&self, pos: [i32; 3]) -> Option<String> {
-        let ry = pos[1] - self.min_y;
+        let ry = pos[1] - self.min_y();
         if ry < 0 || ry as usize >= self.template().height() {
             return None;
         }
@@ -618,8 +639,8 @@ impl PlayPlan {
     /// Чанк уже материализован, симулируется или стоит в `/forceload`.
     pub(crate) fn chunk_resident(&self, x: i32, z: i32) -> bool {
         let key = (x >> 4, z >> 4);
-        self.edited.read().unwrap().contains_key(&key)
-            || self.forced.lock().unwrap().contains(&key)
+        self.dim_state().edited.read().unwrap().contains_key(&key)
+            || self.sim().forced.lock().unwrap().contains(&key)
             || self.simulated.lock().unwrap().contains(&key)
     }
 
@@ -643,7 +664,7 @@ impl PlayPlan {
         }) else {
             return ColumnHeight::Missing;
         };
-        ColumnHeight::Y(f64::from(self.min_y) + f64::from(relative))
+        ColumnHeight::Y(f64::from(self.min_y()) + f64::from(relative))
     }
 
     /// Стопки окна игрока. Нет игрока — пусто.
@@ -671,7 +692,7 @@ impl PlayPlan {
 
     /// Сколько живых мобов в мире (`/top` и тесты).
     pub fn mob_count(&self) -> usize {
-        self.mobs.lock().unwrap().len()
+        self.sim().mobs.lock().unwrap().len()
     }
 
     /// Точка появления мира для тестов и команд.
@@ -701,9 +722,9 @@ impl PlayPlan {
 
     /// Убирает сущность из мира (`/kill` для моба или предмета).
     pub(crate) fn remove_entity(&self, entity_id: i32) -> bool {
-        let removed = self.mobs.lock().unwrap().remove(&entity_id).is_some()
-            | self.dropped.lock().unwrap().remove(&entity_id).is_some()
-            | self.arrows.lock().unwrap().remove(&entity_id).is_some();
+        let removed = self.sim().mobs.lock().unwrap().remove(&entity_id).is_some()
+            | self.sim().dropped.lock().unwrap().remove(&entity_id).is_some()
+            | self.sim().arrows.lock().unwrap().remove(&entity_id).is_some();
         if removed {
             let packet =
                 chunkwake_protocol::play::remove_entities(self.ids.remove_entities, &[entity_id]);
@@ -729,13 +750,13 @@ impl PlayPlan {
 
     /// Сколько чанков держит `/forceload`.
     pub(crate) fn forced_chunks(&self) -> usize {
-        self.forced.lock().unwrap().len()
+        self.sim().forced.lock().unwrap().len()
     }
 
     /// Ставит или снимает `forceload` на чанк под точкой; возвращает число чанков.
     pub(crate) fn force_load_here(&self, pos: [f64; 3], add: bool) -> usize {
         let chunk = (pos[0].floor() as i32 >> 4, pos[2].floor() as i32 >> 4);
-        let mut forced = self.forced.lock().unwrap();
+        let mut forced = self.sim().forced.lock().unwrap();
         if add {
             forced.insert(chunk);
         } else {
@@ -984,7 +1005,7 @@ impl PlayPlan {
 
     /// Игрок или моб. Предмет, снаряд и опыт — нет.
     pub(crate) fn is_living(&self, target: &Target) -> bool {
-        target.game_mode.is_some() || self.mobs.lock().unwrap().contains_key(&target.entity_id)
+        target.game_mode.is_some() || self.sim().mobs.lock().unwrap().contains_key(&target.entity_id)
     }
 
     /// Взмах руки (`/swing`).
@@ -1120,7 +1141,7 @@ impl PlayPlan {
             }
             return root;
         }
-        let mobs = self.mobs.lock().unwrap();
+        let mobs = self.sim().mobs.lock().unwrap();
         if let Some(entry) = mobs.get(&target.entity_id) {
             root.insert("id".into(), Tag::String(target.name.clone()));
             insert_pose(
@@ -1179,7 +1200,7 @@ impl PlayPlan {
             }
             return;
         }
-        let mut mobs = self.mobs.lock().unwrap();
+        let mut mobs = self.sim().mobs.lock().unwrap();
         let Some(entry) = mobs.get_mut(&target.entity_id) else {
             return;
         };
@@ -1530,7 +1551,7 @@ impl PlayPlan {
         for x in min[0]..=max[0] {
             for y in min[1]..=max[1] {
                 for z in min[2]..=max[2] {
-                    let ry = y - self.min_y;
+                    let ry = y - self.min_y();
                     if ry < 0 {
                         continue;
                     }
@@ -1546,7 +1567,7 @@ impl PlayPlan {
         let mut changed = std::collections::HashSet::new();
         let mut count = 0i32;
         {
-            let mut world = self.edited.write().unwrap();
+            let mut world = self.dim_state().edited.write().unwrap();
             for (chunk, lx, y, lz) in cells {
                 let Some((column, rev)) = world.get_mut(&chunk) else {
                     return Err("argument.pos.unloaded");
@@ -1574,9 +1595,9 @@ impl PlayPlan {
             return Ok(0);
         }
         let packets = {
-            let world = self.edited.read().unwrap();
-            let mut dirty = self.dirty.lock().unwrap();
-            let mut frames = self.chunk_frames.lock().unwrap();
+            let world = self.dim_state().edited.read().unwrap();
+            let mut dirty = self.dim_state().dirty.lock().unwrap();
+            let mut frames = self.dim_state().chunk_frames.lock().unwrap();
             let mut parts = Vec::new();
             for chunk in changed {
                 dirty.insert(chunk);
@@ -1749,16 +1770,10 @@ impl PlayPlan {
     /// Погода: начало/конец дождя и уровни дождя/грозы для клиента.
     pub(crate) fn broadcast_weather(&self, weather: super::state::Weather) {
         let event = if weather.rain { 1 } else { 2 };
-        for (kind, value) in [
-            (event, 0.0),
-            (7, if weather.rain { 1.0 } else { 0.0 }),
-            (8, if weather.thunder { 1.0 } else { 0.0 }),
-        ] {
-            self.hub.send(
-                None,
-                chunkwake_protocol::play::game_event(self.ids.game_event, kind, value),
-            );
-        }
+        self.hub.send(
+            None,
+            chunkwake_protocol::play::game_event(self.ids.game_event, event, 0.0),
+        );
     }
 
     /// Названный звук одному игроку (`/playsound`); `false` — звука нет в реестре.
@@ -2084,12 +2099,12 @@ fn with_column<T>(
     f: impl FnOnce(&chunkwake_world::ChunkColumn) -> T,
 ) -> Option<T> {
     let key = (x >> 4, z >> 4);
-    let world = plan.edited.read().unwrap();
+    let world = plan.dim_state().edited.read().unwrap();
     if let Some(entry) = world.get(&key) {
         return Some(f(&entry.0));
     }
     drop(world);
-    if plan.terrain.is_none() {
+    if plan.terrain().is_none() {
         return Some(f(plan.template()));
     }
     None

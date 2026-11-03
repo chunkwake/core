@@ -444,7 +444,12 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
 pub(super) fn execute(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     let exec = Exec::of(call, ctx);
     let mut budget = MAX_FORKS;
-    run_chain(ctx, &exec, call.rest.trim(), &mut budget)
+    // `execute in <измерение>` переключает активное измерение; после цепочки
+    // его надо вернуть, иначе следующие команды уйдут не туда.
+    let before = ctx.plan.dimension_override();
+    let outcome = run_chain(ctx, &exec, call.rest.trim(), &mut budget);
+    ctx.plan.restore_dimension_override(before);
+    outcome
 }
 
 /// Выполняет цепочку подкоманд до `run`.
@@ -648,8 +653,12 @@ fn run_chain(ctx: &Context<'_>, exec: &Exec, rest: &str, budget: &mut usize) -> 
                 continue;
             }
             "in" => {
-                // Мир один: `in minecraft:overworld` принимаем и продолжаем.
-                let (_, next) = split(tail);
+                // `execute in <измерение>`: дальше всё считается в нём. У нас
+                // измерений несколько, поэтому переключаем активное.
+                let (dim, next) = split(tail);
+                if let Some(dimension) = crate::play::Dimension::from_key(dim) {
+                    ctx.plan.set_active_dimension(dimension);
+                }
                 rest = next.to_owned();
                 continue;
             }

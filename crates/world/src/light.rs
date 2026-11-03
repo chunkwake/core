@@ -220,23 +220,31 @@ impl<'a, A: LightAccess> Engine<'a, A> {
             return Some(0);
         }
         let c = self.access.column(p[0] >> 4, p[2] >> 4)?;
-        Some(c.light(kind)[(p[1] >> 4) as usize].get(index(p)))
+        // Секций у столбца может быть меньше, чем высота движка: у измерения
+        // своя высота (Ад — 128, оверворлд — 384), а столбец приходит из того
+        // измерения, где он лежит. Без этой проверки был бы выход за границу.
+        let section = c.light(kind).get((p[1] >> 4) as usize)?;
+        Some(section.get(index(p)))
     }
 
     fn set(&mut self, kind: Kind, p: [i32; 3], v: u8) {
         if p[1] < 0 || p[1] >= self.height || self.get(kind, p) == Some(v) {
             return;
         }
-        if let Some(c) = self.access.column_mut(p[0] >> 4, p[2] >> 4) {
-            c.light_mut(kind)[(p[1] >> 4) as usize].set(index(p), v);
+        if let Some(c) = self.access.column_mut(p[0] >> 4, p[2] >> 4)
+            && let Some(section) = c.light_mut(kind).get_mut((p[1] >> 4) as usize)
+        {
+            section.set(index(p), v);
         }
     }
 
     /// Запись, когда текущее значение уже известно вызывающему: `relight`
     /// только что прочитал его тем же `cell`, и второй поиск столбца лишний.
     fn put_known(&mut self, kind: Kind, p: [i32; 3], v: u8) {
-        if let Some(c) = self.access.column_mut(p[0] >> 4, p[2] >> 4) {
-            c.light_mut(kind)[(p[1] >> 4) as usize].set(index(p), v);
+        if let Some(c) = self.access.column_mut(p[0] >> 4, p[2] >> 4)
+            && let Some(section) = c.light_mut(kind).get_mut((p[1] >> 4) as usize)
+        {
+            section.set(index(p), v);
         }
     }
 
@@ -248,7 +256,11 @@ impl<'a, A: LightAccess> Engine<'a, A> {
         let c = self.access.column(p[0] >> 4, p[2] >> 4)?;
         let si = (p[1] >> 4) as usize;
         let i = index(p);
-        Some((c.sections[si].get(i), c.light(kind)[si].get(i)))
+        // Высота движка и число секций столбца могут разойтись: у измерения
+        // своя высота. Тогда клетки просто нет, а не паника.
+        let section = c.sections.get(si)?;
+        let light = c.light(kind).get(si)?;
+        Some((section.get(i), light.get(i)))
     }
 
     /// Запись ниббла, который уже отличается от текущего. Столбец создаётся только здесь.
@@ -257,8 +269,10 @@ impl<'a, A: LightAccess> Engine<'a, A> {
     /// [`Self::put_known`], потому что уровень только что прочитан `cell`.
     #[allow(dead_code)]
     fn write_changed(&mut self, kind: Kind, p: [i32; 3], v: u8) {
-        if let Some(c) = self.access.column_mut(p[0] >> 4, p[2] >> 4) {
-            c.light_mut(kind)[(p[1] >> 4) as usize].set(index(p), v);
+        if let Some(c) = self.access.column_mut(p[0] >> 4, p[2] >> 4)
+            && let Some(section) = c.light_mut(kind).get_mut((p[1] >> 4) as usize)
+        {
+            section.set(index(p), v);
         }
     }
 
@@ -268,7 +282,10 @@ impl<'a, A: LightAccess> Engine<'a, A> {
             return None;
         }
         let c = self.access.column(p[0] >> 4, p[2] >> 4)?;
-        Some(c.sections[(p[1] >> 4) as usize].get(index(p)))
+        // Секций может быть меньше высоты движка: у измерения своя высота.
+        c.sections
+            .get((p[1] >> 4) as usize)
+            .map(|s| s.get(index(p)))
     }
 
     fn has_sky(&mut self, p: [i32; 3]) -> bool {
@@ -944,7 +961,37 @@ mod tests {
         );
     }
     fn light(w: &mut World, kind: Kind, p: [i32; 3]) -> u8 {
-        w.0[&(p[0] >> 4, p[2] >> 4)].light(kind)[(p[1] >> 4) as usize].get(index(p))
+        // Клетки выше столбца нет — как и в движке, отвечаем нулём.
+        w.0[&(p[0] >> 4, p[2] >> 4)]
+            .light(kind)
+            .get((p[1] >> 4) as usize)
+            .map_or(0, |section| section.get(index(p)))
+    }
+
+    /// Движок выше столбца: у измерения своя высота (Ад — 128, оверворлд —
+    /// 384), и столбец может прийти из измерения поменьше. Именно так падало
+    /// в BlueMap: `state` читал секцию 8 при длине 8.
+    #[test]
+    fn engine_taller_than_column_does_not_panic() {
+        let t = table();
+        // Столбец Ада: 8 секций, 128 блоков.
+        let mut short = ChunkColumn::flat(&[(1, 128)], 8, 0, 4, 4, false);
+        relight_column(&mut short, &t);
+        assert_eq!(short.sections.len(), 8);
+        let mut w = World(
+            [(0, 0)]
+                .into_iter()
+                .map(|_| ((0, 0), short.clone()))
+                .collect(),
+        );
+        // Движок знает высоту оверворлда (384) — вдвое больше секций столбца.
+        let mut e = Engine::new(&mut w, &t, 384);
+        // Клетка выше столбца: секции 8 нет, должен быть `None`, а не паника.
+        assert!(e.state([8, 130, 8]).is_none());
+        assert_eq!(e.get(Kind::Block, [8, 130, 8]), None);
+        assert!(e.cell(Kind::Block, [8, 130, 8]).is_none());
+        // А внутри столбца всё работает как обычно.
+        assert!(e.state([8, 40, 8]).is_some());
     }
 
     #[test]

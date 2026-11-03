@@ -142,6 +142,7 @@ fn shuffle(r: &mut impl NoiseRandom) -> [u8; 256] {
 
 /// `SimplexNoise` (двумерный срез): `Biome.BIOME_INFO_NOISE` для числа
 /// цветов и травы.
+#[derive(Debug)]
 pub struct Simplex {
     perms: [u8; 256],
     off: [f64; 2],
@@ -399,6 +400,11 @@ pub struct NormalNoise {
     /// (номер октавы, частота, амплитуда).
     octaves: Vec<(i32, f64, f64)>,
     norm: f64,
+    /// `baseOctave`, `baseAmplitude` и множители амплитуд как в JSON
+    /// (пустой список — `octaveCount` единиц): их берёт шум климата Ада.
+    base_octave: i32,
+    base_amplitude: f64,
+    modifiers: Vec<f64>,
 }
 
 const PERLIN_DEVIATION: f64 = 0.2702247831245211;
@@ -409,26 +415,13 @@ impl NormalNoise {
     /// `LegacyRandomSource`, каждая — `LegacyFbmInitializer`. Октавы с нулевой
     /// амплитудой не создаются, но `skipOctave` им всё равно тратит 262 броска.
     pub fn create_legacy_nether(&self, r: &mut Legacy) -> Stack {
-        let amplitudes: Vec<f64> = if self.octaves.is_empty() {
-            Vec::new()
-        } else {
-            self.octaves.iter().map(|o| o.2).collect()
-        };
-        let first = legacy_fbm_nether(r, self.base_octave(), &amplitudes);
-        let second = legacy_fbm_nether(r, self.base_octave(), &amplitudes);
-        let value_factor = (self.norm * self.base_amplitude()) as f32;
+        let first = legacy_fbm_nether(r, self.base_octave, &self.modifiers);
+        let second = legacy_fbm_nether(r, self.base_octave, &self.modifiers);
+        let value_factor = (self.norm * self.base_amplitude) as f32;
         let mut stack = Stack::default();
         stack.add_stack(&first, 1.0, value_factor);
         stack.add_stack(&second, INPUT_FACTOR, value_factor);
         stack
-    }
-
-    fn base_octave(&self) -> i32 {
-        self.octaves.first().map_or(-7, |o| o.0)
-    }
-
-    fn base_amplitude(&self) -> f64 {
-        self.octaves.first().map_or(1.0, |o| o.2.abs())
     }
 
     pub fn from_json(v: &Value) -> Result<Self, String> {
@@ -480,7 +473,18 @@ impl NormalNoise {
         } else {
             target * 0.3333333333333333 / (dev * 2f64.sqrt())
         };
-        Ok(Self { octaves, norm })
+        let modifiers = if mods.is_empty() {
+            vec![1.0; count.max(0) as usize]
+        } else {
+            mods
+        };
+        Ok(Self {
+            octaves,
+            norm,
+            base_octave: base,
+            base_amplitude: base_amp,
+            modifiers,
+        })
     }
 
     /// `NormalNoise.createParity`: базовая амплитуда подобрана так, чтобы

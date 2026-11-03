@@ -362,7 +362,7 @@ impl Lake {
                     if p[1] < level.min_y() || p[1] >= top {
                         continue;
                     }
-                    if !pal.biome_freezes(level.biome(p[0], p[1], p[2])) {
+                    if !pal.cold_enough_to_snow(level.biome(p[0], p[1], p[2]), p, level.sea_level()) {
                         continue;
                     }
                     if !pal.same_block(get(level, p), water) {
@@ -1064,6 +1064,22 @@ impl Multiface {
         from: usize,
         to: usize,
     ) -> bool {
+        self.spread_toward_types(pal, level, state, p, from, to, 3)
+    }
+
+    /// То же с первыми `types` видами `SpreadType`: 3 — `DEFAULT_SPREAD_ORDER`,
+    /// 1 — только `SAME_POSITION` (`sameSpaceSpreader` жилы).
+    #[allow(clippy::too_many_arguments)]
+    fn spread_toward_types(
+        &self,
+        pal: &Palette,
+        level: &mut dyn Level,
+        state: u32,
+        p: Pos,
+        from: usize,
+        to: usize,
+        types: usize,
+    ) -> bool {
         if to / 2 == from / 2 {
             return false;
         }
@@ -1078,7 +1094,7 @@ impl Multiface {
             (add(p, DIRS[to]), from),
             (add(add(p, DIRS[to]), DIRS[from]), to ^ 1),
         ];
-        for (at, face) in spots {
+        for &(at, face) in &spots[..types] {
             let existing = get(level, at);
             if self.replaceable(pal, &*level, p, at, face, existing)
                 && self.valid(pal, &*level, existing, at, face)
@@ -1795,7 +1811,8 @@ impl LargeDripstone {
 
 // --- Фичи, которых не было: снег и лёд, магма, бамбук, шипы, айсберги, кораллы.
 
-/// `FreezeTopLayerFeature`: лёд на воде и снег над ним в холодных биомах.
+/// `SnowAndFreezeFeature`: лёд на воде под верхом `MOTION_BLOCKING` и снег
+/// на верхе, биом — в точке верха. Свет блоков на генерации ещё ноль.
 pub(super) fn freeze_top_layer(f: &Features, level: &mut dyn Level, o: Pos) {
     let pal = &f.palette;
     let (Some(ice), Some(snow)) = (
@@ -1807,28 +1824,35 @@ pub(super) fn freeze_top_layer(f: &Features, level: &mut dyn Level, o: Pos) {
     let Some(water) = pal.defaults.get("minecraft:water").copied() else {
         return;
     };
-    // Ванила обходит чанк, в котором лежит точка фичи; берём ту же область.
-    let (ox, oz) = (o[0] & !15, o[2] & !15);
-    for x in ox..ox + 16 {
-        for z in oz..oz + 16 {
-            let h = level.surface(super::Heightmap::MotionBlocking, x, z);
-            let top = level.min_y() + level.height();
-            if h <= level.min_y() || h >= top {
-                continue;
+    let sea = level.sea_level();
+    let (min, top) = (level.min_y(), level.min_y() + level.height());
+    let inside = |y: i32| y >= min && y < top;
+    for dx in 0..16 {
+        for dz in 0..16 {
+            let (x, z) = (o[0] + dx, o[2] + dz);
+            let y = level.surface(super::Heightmap::MotionBlocking, x, z);
+            let at = [x, y, z];
+            let below = [x, y - 1, z];
+            let biome = level.biome(x, y, z);
+            // `shouldFreeze(level, below, false)`: источник воды `LiquidBlock`.
+            if pal.cold_enough_to_snow(biome, below, sea)
+                && inside(below[1])
+                && get(level, below) == water
+            {
+                put(level, below, ice);
             }
-            if !pal.biome_freezes(level.biome(x, h, z)) {
-                continue;
-            }
-            let at = [x, h, z];
-            let s = get(level, at);
-            let below = add(at, [0, -1, 0]);
-            if s == water {
-                // Вода у поверхности: лёд, если под ним не вода.
-                if get(level, below) != water {
-                    put(level, at, ice);
+            // `shouldSnow(level, top)`.
+            if pal.snows(biome, at, sea) && inside(y) {
+                let s = get(level, at);
+                if (pal.is_air(s) || pal.same_block(s, snow))
+                    && super::can_survive(&*level, pal, snow, at)
+                {
+                    put(level, at, snow);
+                    let under = get(level, below);
+                    if let Some(snowy) = pal.with_prop(under, "snowy", "true") {
+                        put(level, below, snowy);
+                    }
                 }
-            } else if pal.is_air(s) && get(level, below) != water {
-                put(level, at, snow);
             }
         }
     }
@@ -2517,7 +2541,10 @@ pub(super) fn coral(
     }
 }
 
-/// `SculkPatchFeature`: скалк по твёрдой поверхности пещеры.
+/// `SculkPatchFeature` с `SculkSpreader.createWorldGenSpreader()`: курсоры
+/// заряда ползут по скалку и жилам (`SculkBlock`, `SculkVeinBlock`,
+/// `SculkBehaviour.DEFAULT`). Катализатор и крикуны ставит обёртка
+/// `sequence` из данных, не эта фича.
 #[derive(Debug)]
 pub(super) struct SculkPatch {
     charge_count: i32,
@@ -2525,110 +2552,510 @@ pub(super) struct SculkPatch {
     spread_attempts: i32,
     spread_rounds: i32,
     growth_rounds: i32,
+    /// `sculk_replaceable_world_gen`: что жила обращает в скалк.
+    replaceable_wg: Arc<Vec<bool>>,
+    /// `sculk_replaceable`: доступ жилы к основе (`hasSubstrateAccess`).
     replaceable: Arc<Vec<bool>>,
+    inhibitors: Arc<Vec<bool>>,
     sculk: u32,
-    vein: u32,
-    catalyst: u32,
+    vein: Multiface,
     shrieker: u32,
     sensor: u32,
 }
 
+/// `SculkSpreader.createWorldGenSpreader`: цена роста 50, без роста в
+/// радиусе 1, распад 5 и 10.
+const GROWTH_COST: i32 = 50;
+const NO_GROWTH_RADIUS: i32 = 1;
+const DECAY_RATE: i32 = 5;
+const EXTRA_DECAY_RATE: i32 = 10;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Behaviour {
+    Sculk,
+    Vein,
+    Default,
+}
+
+struct Cursor {
+    pos: Pos,
+    charge: i32,
+    update_delay: i32,
+    decay_delay: i32,
+    /// `facings`: `None` — ещё не стоял на скалке.
+    facings: Option<Vec<usize>>,
+}
+
+/// `ChargeCursor.NON_CORNER_NEIGHBOURS`: куб 3×3×3 без углов и центра,
+/// обход `betweenClosed` (x быстрее всех, потом y, потом z).
+fn non_corner() -> Vec<Pos> {
+    let mut out = Vec::with_capacity(18);
+    for z in -1..=1 {
+        for y in -1..=1 {
+            for x in -1..=1 {
+                if (x == 0 || y == 0 || z == 0) && (x, y, z) != (0, 0, 0) {
+                    out.push([x, y, z]);
+                }
+            }
+        }
+    }
+    out
+}
+
 impl SculkPatch {
     pub(super) fn parse(v: &Value, pal: &mut Palette) -> Result<Self, String> {
-        let replaceable = pal.tag("minecraft:sculk_replaceable")?;
+        let vein = block(pal, "minecraft:sculk_vein")?;
+        let shrieker = block(pal, "minecraft:sculk_shrieker")?;
         Ok(Self {
             charge_count: v["charge_count"].as_i64().unwrap_or(10) as i32,
             amount_per_charge: v["amount_per_charge"].as_i64().unwrap_or(32) as i32,
             spread_attempts: v["spread_attempts"].as_i64().unwrap_or(64) as i32,
             spread_rounds: v["spread_rounds"].as_i64().unwrap_or(1) as i32,
             growth_rounds: v["growth_rounds"].as_i64().unwrap_or(0) as i32,
-            replaceable,
+            replaceable_wg: pal.tag("minecraft:sculk_replaceable_world_gen")?,
+            replaceable: pal.tag("minecraft:sculk_replaceable")?,
+            inhibitors: pal.tag("minecraft:sculk_growth_inhibitors")?,
             sculk: block(pal, "minecraft:sculk")?,
-            vein: block(pal, "minecraft:sculk_vein")?,
-            catalyst: block(pal, "minecraft:sculk_catalyst")?,
-            shrieker: block(pal, "minecraft:sculk_shrieker")?,
+            vein: Multiface {
+                block: vein,
+                sculk: true,
+                range: 0,
+                floor: true,
+                ceiling: true,
+                wall: true,
+                spread: 0.0,
+                on: Arc::new(Vec::new()),
+                sculk_blocks: [
+                    block(pal, "minecraft:sculk")?,
+                    block(pal, "minecraft:sculk_catalyst")?,
+                    block(pal, "minecraft:moving_piston")?,
+                ],
+                fire: pal.tag("minecraft:fire")?,
+            },
+            // `setValue(CAN_SUMMON, isWorldGen)`.
+            shrieker: pal.with_prop(shrieker, "can_summon", "true").unwrap_or(shrieker),
             sensor: block(pal, "minecraft:sculk_sensor")?,
         })
     }
 
-    pub(super) fn place(&self, f: &Features, level: &mut dyn Level, r: &mut Worldgen, o: Pos) {
+    pub(super) fn place(&self, f: &Features, level: &mut dyn Level, r: &mut Worldgen, o: Pos) -> bool {
         let pal = &f.palette;
-        if !pal.is_air(get(level, o)) {
-            return;
+        if !self.can_spread_from(pal, &*level, o) {
+            return false;
         }
-        // Скалк ложится на твёрдую опору снизу; иначе пятна нет.
-        if !Palette::flag(&pal.solid, get(level, add(o, [0, -1, 0]))) {
-            return;
-        }
-        let mut charges = 0;
-        for _ in 0..self.spread_rounds {
-            if charges >= self.charge_count {
-                break;
+        let neighbours = non_corner();
+        for round in 0..self.spread_rounds + self.growth_rounds {
+            // `addCursors`: не больше 32 курсоров, заряд кусками по 1000.
+            let mut cursors: Vec<Cursor> = Vec::new();
+            for _ in 0..self.charge_count {
+                let mut charge = self.amount_per_charge;
+                while charge > 0 {
+                    let part = charge.min(1000);
+                    if cursors.len() < 32 {
+                        cursors.push(Cursor {
+                            pos: o,
+                            charge: part,
+                            update_delay: 0,
+                            decay_delay: 1,
+                            facings: None,
+                        });
+                    }
+                    charge -= part;
+                }
             }
-            let mut p = o;
-            let mut placed = 0;
+            let veins = round < self.spread_rounds;
             for _ in 0..self.spread_attempts {
-                let d = [
-                    r.next_int_bound(3) - 1,
-                    r.next_int_bound(3) - 1,
-                    r.next_int_bound(3) - 1,
-                ];
-                p = add(p, d);
-                if !pal.is_air(get(level, p)) {
-                    // В воздух не растёт — ищем опору рядом.
-                    if !Palette::flag(&pal.solid, get(level, add(p, [0, -1, 0]))) {
-                        continue;
+                // `updateCursors` мира генерации: курсоры не сливаются, живые
+                // остаются в прежнем порядке.
+                for c in &mut cursors {
+                    let far = (0..3).map(|i| (c.pos[i] - o[i]).abs()).max().unwrap_or(0) > 1024;
+                    if far {
+                        c.charge = 0;
+                    } else {
+                        self.update(pal, level, r, o, c, veins, &neighbours);
                     }
                 }
-                let s = get(level, p);
-                if !Palette::flag(&self.replaceable, s) && !pal.is_air(s) {
-                    continue;
-                }
-                put(level, p, self.sculk);
-                placed += 1;
-                if placed >= self.amount_per_charge {
-                    break;
-                }
+                cursors.retain(|c| c.charge > 0);
             }
-            if placed > 0 {
-                charges += 1;
-                // Редкие украшения пятна, как `SculkPatchFeature`.
-                if r.next_int_bound(10) == 0 {
-                    put(level, o, self.catalyst);
-                } else if r.next_int_bound(4) == 0 {
-                    let p = add(o, [r.next_int_bound(3) - 1, 0, r.next_int_bound(3) - 1]);
-                    if pal.is_air(get(level, p)) {
-                        put(
-                            level,
-                            p,
-                            if r.next_int_bound(2) == 0 {
-                                self.shrieker
-                            } else {
-                                self.sensor
-                            },
-                        );
+        }
+        true
+    }
+
+    fn can_spread_from(&self, pal: &Palette, level: &dyn Level, o: Pos) -> bool {
+        let s = get(level, o);
+        if self.behaviour(pal, s) != Behaviour::Default {
+            return true;
+        }
+        // Воздух или стоячая вода; текущая вода не годится.
+        let still = pal.block_name(s) == Some("minecraft:water") && pal.prop(s, "level") == Some("0");
+        if !pal.is_air(s) && !still {
+            return false;
+        }
+        DIRS.iter()
+            .any(|&d| Palette::flag(&pal.full_cube, get(level, add(o, d))))
+    }
+
+    fn behaviour(&self, pal: &Palette, s: u32) -> Behaviour {
+        if pal.same_block(s, self.sculk) {
+            Behaviour::Sculk
+        } else if pal.same_block(s, self.vein.block) {
+            Behaviour::Vein
+        } else {
+            Behaviour::Default
+        }
+    }
+
+    /// `ChargeCursor.update`.
+    #[allow(clippy::too_many_arguments)]
+    fn update(
+        &self,
+        pal: &Palette,
+        level: &mut dyn Level,
+        r: &mut Worldgen,
+        o: Pos,
+        c: &mut Cursor,
+        veins: bool,
+        neighbours: &[Pos],
+    ) {
+        if c.update_delay > 0 {
+            c.update_delay -= 1;
+            return;
+        }
+        let mut state = get(level, c.pos);
+        let mut b = self.behaviour(pal, state);
+        // `canChangeBlockStateOnSpread`: у скалка — нет.
+        if veins
+            && self.spread_vein(pal, level, b, c.pos, state, c.facings.as_deref())
+            && b != Behaviour::Sculk
+        {
+            state = get(level, c.pos);
+            b = self.behaviour(pal, state);
+        }
+        c.charge = self.use_charge(pal, level, r, o, b, c, veins);
+        if c.charge <= 0 {
+            self.discharged(pal, level, b, state, c.pos);
+            return;
+        }
+        let Some(to) = self.movement(pal, &*level, r, o, c.pos, neighbours) else {
+            self.discharged(pal, level, b, state, c.pos);
+            c.charge = 0;
+            return;
+        };
+        self.discharged(pal, level, b, state, c.pos);
+        c.pos = to;
+        state = get(level, to);
+        match self.behaviour(pal, state) {
+            Behaviour::Vein => {
+                c.facings = Some((0..6).filter(|&d| Multiface::has_face(pal, state, d)).collect());
+            }
+            Behaviour::Sculk => c.facings = Some(Vec::new()),
+            Behaviour::Default => {}
+        }
+        // `updateDecayDelay` — у прежнего поведения, как в ванили.
+        c.decay_delay = if b == Behaviour::Default {
+            (c.decay_delay - 1).max(0)
+        } else {
+            1
+        };
+        c.update_delay = 1;
+    }
+
+    /// `attemptSpreadVein`.
+    fn spread_vein(
+        &self,
+        pal: &Palette,
+        level: &mut dyn Level,
+        b: Behaviour,
+        p: Pos,
+        state: u32,
+        facings: Option<&[usize]>,
+    ) -> bool {
+        if b == Behaviour::Default {
+            match facings {
+                None => {
+                    let now = get(level, p);
+                    return self.spread_all(pal, level, now, p, 1) > 0;
+                }
+                Some(faces) if !faces.is_empty() => {
+                    if !pal.is_air(state) && !pal.fluid(state).is_water() {
+                        return false;
                     }
+                    return self.regrow(pal, level, p, state, faces);
+                }
+                Some(_) => {}
+            }
+        }
+        self.spread_all(pal, level, state, p, 3) > 0
+    }
+
+    /// `MultifaceSpreader.spreadAll` жилы; `state` — исходное состояние.
+    fn spread_all(
+        &self,
+        pal: &Palette,
+        level: &mut dyn Level,
+        state: u32,
+        p: Pos,
+        types: usize,
+    ) -> usize {
+        let other = !pal.same_block(state, self.vein.block);
+        let mut n = 0;
+        for from in 0..6 {
+            if !(other || Multiface::has_face(pal, state, from)) {
+                continue;
+            }
+            for to in 0..6 {
+                if self.vein.spread_toward_types(pal, level, state, p, from, to, types) {
+                    n += 1;
                 }
             }
         }
-        // Вены по граням скалка — только если пятно легло.
-        for _ in 0..self.growth_rounds {
-            for _ in 0..self.spread_attempts {
-                let p = add(
-                    o,
-                    [
-                        r.next_int_bound(16) - r.next_int_bound(16),
-                        r.next_int_bound(16) - r.next_int_bound(16),
-                        r.next_int_bound(16) - r.next_int_bound(16),
-                    ],
-                );
-                if !pal.is_air(get(level, p)) {
-                    continue;
+        n
+    }
+
+    /// `SculkVeinBlock.regrow`.
+    fn regrow(
+        &self,
+        pal: &Palette,
+        level: &mut dyn Level,
+        p: Pos,
+        existing: u32,
+        faces: &[usize],
+    ) -> bool {
+        let mut s = self.vein.block;
+        let mut any = false;
+        for &d in faces {
+            if pal.sturdy(get(level, add(p, DIRS[d])), d ^ 1) {
+                s = pal.with_prop(s, FACES[d], "true").unwrap_or(s);
+                any = true;
+            }
+        }
+        if !any {
+            return false;
+        }
+        if pal.fluid(existing) != Fluid::None {
+            s = pal.with_prop(s, "waterlogged", "true").unwrap_or(s);
+        }
+        put(level, p, s);
+        true
+    }
+
+    /// `attemptUseCharge` по поведению блока.
+    #[allow(clippy::too_many_arguments)]
+    fn use_charge(
+        &self,
+        pal: &Palette,
+        level: &mut dyn Level,
+        r: &mut Worldgen,
+        o: Pos,
+        b: Behaviour,
+        c: &Cursor,
+        veins: bool,
+    ) -> i32 {
+        let charge = c.charge;
+        match b {
+            Behaviour::Default => {
+                if c.decay_delay > 0 {
+                    charge
+                } else {
+                    0
                 }
-                if DIRS.iter().any(|&d| get(level, add(p, d)) == self.sculk) {
-                    put(level, p, self.vein);
+            }
+            Behaviour::Vein => {
+                if veins && self.place_sculk(pal, level, r, c.pos) {
+                    charge - 1
+                } else if r.next_int_bound(DECAY_RATE) == 0 {
+                    (charge as f32 * 0.5).floor() as i32
+                } else {
+                    charge
                 }
+            }
+            Behaviour::Sculk => {
+                if charge == 0 || r.next_int_bound(DECAY_RATE) != 0 {
+                    return charge;
+                }
+                let p = c.pos;
+                let dist_sq: i64 = (0..3).map(|i| ((p[i] - o[i]) as i64).pow(2)).sum();
+                let close = dist_sq < (NO_GROWTH_RADIUS * NO_GROWTH_RADIUS) as i64;
+                if !close && self.can_place_growth(pal, &*level, p) {
+                    if r.next_int_bound(GROWTH_COST) < charge {
+                        let at = add(p, [0, 1, 0]);
+                        let wet = pal.fluid(get(level, at)) != Fluid::None;
+                        let mut s = if r.next_int_bound(11) == 0 {
+                            self.shrieker
+                        } else {
+                            self.sensor
+                        };
+                        if wet {
+                            s = pal.with_prop(s, "waterlogged", "true").unwrap_or(s);
+                        }
+                        put(level, at, s);
+                    }
+                    return (charge - GROWTH_COST).max(0);
+                }
+                if r.next_int_bound(EXTRA_DECAY_RATE) != 0 {
+                    return charge;
+                }
+                charge - if close { 1 } else { decay_penalty(p, o, charge) }
             }
         }
     }
+
+    /// `SculkBlock.canPlaceGrowth`.
+    fn can_place_growth(&self, pal: &Palette, level: &dyn Level, p: Pos) -> bool {
+        let above = get(level, add(p, [0, 1, 0]));
+        if !pal.is_air(above) && pal.fluid(above) != Fluid::Water {
+            return false;
+        }
+        let mut found = 0;
+        for dy in 0..=2 {
+            for dz in -4..=4 {
+                for dx in -4..=4 {
+                    if Palette::flag(&self.inhibitors, get(level, add(p, [dx, dy, dz]))) {
+                        found += 1;
+                        if found > 2 {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// `SculkVeinBlock.attemptPlaceSculk`.
+    fn place_sculk(&self, pal: &Palette, level: &mut dyn Level, r: &mut Worldgen, p: Pos) -> bool {
+        let state = get(level, p);
+        for support in shuffled(r, (0..6).collect()) {
+            if !Multiface::has_face(pal, state, support) {
+                continue;
+            }
+            let at = add(p, DIRS[support]);
+            if !Palette::flag(&self.replaceable_wg, get(level, at)) {
+                continue;
+            }
+            put(level, at, self.sculk);
+            self.spread_all(pal, level, self.sculk, at, 3);
+            let skip = support ^ 1;
+            for d in 0..6 {
+                if d == skip {
+                    continue;
+                }
+                let vp = add(at, DIRS[d]);
+                let vs = get(level, vp);
+                if pal.same_block(vs, self.vein.block) {
+                    self.discharged(pal, level, Behaviour::Vein, vs, vp);
+                }
+            }
+            return true;
+        }
+        false
+    }
+
+    /// `onDischarged`: у жилы снимаются грани, прижатые к скалку.
+    fn discharged(&self, pal: &Palette, level: &mut dyn Level, b: Behaviour, state: u32, p: Pos) {
+        if b != Behaviour::Vein || !pal.same_block(state, self.vein.block) {
+            return;
+        }
+        let mut s = state;
+        for d in 0..6 {
+            if Multiface::has_face(pal, s, d)
+                && pal.same_block(get(level, add(p, DIRS[d])), self.sculk)
+            {
+                s = pal.with_prop(s, FACES[d], "false").unwrap_or(s);
+            }
+        }
+        if !(0..6).any(|d| Multiface::has_face(pal, s, d)) {
+            s = if pal.fluid(get(level, p)) == Fluid::None {
+                pal.defaults["minecraft:air"]
+            } else {
+                pal.defaults["minecraft:water"]
+            };
+        }
+        put(level, p, s);
+    }
+
+    /// `ChargeCursor.getValidMovementPos`.
+    fn movement(
+        &self,
+        pal: &Palette,
+        level: &dyn Level,
+        r: &mut Worldgen,
+        o: Pos,
+        p: Pos,
+        neighbours: &[Pos],
+    ) -> Option<Pos> {
+        let mut best = p;
+        for off in shuffled_pos(r, neighbours.to_vec()) {
+            let n = add(p, off);
+            // `canMoveToPos` генерации: не дальше 12 по горизонтали.
+            if (o[0] - n[0]).pow(2) + (o[2] - n[2]).pow(2) > 144 {
+                continue;
+            }
+            let s = get(level, n);
+            if self.behaviour(pal, s) == Behaviour::Default || !unobstructed(pal, level, p, n) {
+                continue;
+            }
+            best = n;
+            if self.substrate(pal, level, s, n) {
+                break;
+            }
+        }
+        (best != p).then_some(best)
+    }
+
+    /// `SculkVeinBlock.hasSubstrateAccess`.
+    fn substrate(&self, pal: &Palette, level: &dyn Level, s: u32, p: Pos) -> bool {
+        pal.same_block(s, self.vein.block)
+            && (0..6).any(|d| {
+                Multiface::has_face(pal, s, d)
+                    && Palette::flag(&self.replaceable, get(level, add(p, DIRS[d])))
+            })
+    }
+}
+
+/// `Util.shuffledCopy` для смещений.
+fn shuffled_pos(r: &mut Worldgen, mut list: Vec<Pos>) -> Vec<Pos> {
+    for i in (2..=list.len()).rev() {
+        let j = r.next_int_bound(i as i32) as usize;
+        list.swap(i - 1, j);
+    }
+    list
+}
+
+/// `ChargeCursor.isMovementUnobstructed`.
+fn unobstructed(pal: &Palette, level: &dyn Level, from: Pos, to: Pos) -> bool {
+    let delta = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    if delta.iter().map(|v| v.abs()).sum::<i32>() == 1 {
+        return true;
+    }
+    // `Direction`: x — запад 4 / восток 5, y — низ 0 / верх 1, z — север 2 /
+    // юг 3; ноль считается положительным.
+    let dir = |axis: usize| -> usize {
+        let neg = delta[axis] < 0;
+        match (axis, neg) {
+            (0, true) => 4,
+            (0, false) => 5,
+            (1, true) => 0,
+            (1, false) => 1,
+            (_, true) => 2,
+            (_, false) => 3,
+        }
+    };
+    let open = |d: usize| !pal.sturdy(get(level, add(from, DIRS[d])), d ^ 1);
+    if delta[0] == 0 {
+        open(dir(1)) || open(dir(2))
+    } else if delta[1] == 0 {
+        open(dir(0)) || open(dir(2))
+    } else {
+        open(dir(0)) || open(dir(1))
+    }
+}
+
+/// `SculkBlock.getDecayPenalty` во float, как в ванили.
+fn decay_penalty(p: Pos, o: Pos, charge: i32) -> i32 {
+    let dist_sq: i64 = (0..3).map(|i| ((p[i] - o[i]) as i64).pow(2)).sum();
+    let outer = ((dist_sq as f64).sqrt() as f32 - NO_GROWTH_RADIUS as f32).powi(2);
+    let reach = ((24 - NO_GROWTH_RADIUS) * (24 - NO_GROWTH_RADIUS)) as f32;
+    let factor = (outer / reach).min(1.0);
+    ((charge as f32 * factor * 0.5) as i32).max(1)
 }

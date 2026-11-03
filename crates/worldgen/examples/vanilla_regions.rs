@@ -712,6 +712,21 @@ fn compare_blocks(
             }
         }
     }
+    // `CHUNKWAKE_AGAINST=<каталог region>` — второй ванильный мир вместо
+    // нашего: шумовой порог самой ванили (порядок декорации не детерминирован).
+    let mut against: HashMap<(i32, i32), Compound> = HashMap::new();
+    if let Some(dir) = std::env::var_os("CHUNKWAKE_AGAINST") {
+        let other = RegionStore::new(Path::new(&dir));
+        let mut seen = HashSet::new();
+        for (cx, cz) in chunk_square(radius) {
+            let key = (cx >> 5, cz >> 5);
+            if seen.insert(key) {
+                for (pos, root) in other.load_region(key.0, key.1)? {
+                    against.insert(pos, root);
+                }
+            }
+        }
+    }
     let format = Format {
         data_version: version(data)?,
         min_section: min_y / 16,
@@ -743,6 +758,13 @@ fn compare_blocks(
     if std::env::var_os("CHUNKWAKE_REVERSE").is_some() {
         order.reverse();
     }
+    // `CHUNKWAKE_EAGER=1` — сначала декорировать все чанки окна, потом
+    // кольцо (проба приоритета тикетов; на сиде 12345 хуже, чем по запросам).
+    if std::env::var_os("CHUNKWAKE_EAGER").is_some() {
+        for &(cx, cz) in &order {
+            overworld.predecorate(cx, cz);
+        }
+    }
     for (cx, cz) in order {
         {
             let Some(nbt) = chunks.get(&(cx, cz)) else {
@@ -750,10 +772,67 @@ fn compare_blocks(
             };
             let (want, _) = anvil::chunk_from_nbt(nbt, &template, format, &names)?;
             // `None` — чанк уже отдан раньше в этом проходе; сверять нечего.
-            let Some(ours) = overworld.chunk(cx, cz) else {
+            let Some(mut ours) = overworld.chunk(cx, cz) else {
                 continue;
             };
+            if let Some(nbt) = against.get(&(cx, cz)) {
+                let (other, _) = anvil::chunk_from_nbt(nbt, &template, format, &names)?;
+                for y in 0..height as usize {
+                    for z in 0..16 {
+                        for x in 0..16 {
+                            ours.states[(y * 16 + z) * 16 + x] = other.block(x, y, z);
+                        }
+                    }
+                }
+                // Биомы тоже второго мира: ничьи `Climate.RTree` ваниль решает
+                // по `lastResult` потока, то есть по истории запросов.
+                if let Some(b) = &mut ours.biomes {
+                    for (i, b) in b.iter_mut().enumerate() {
+                        let (sy, rest) = (i / 64, i % 64);
+                        let (qy, qz, qx) = (rest / 16, rest / 4 % 4, rest % 4);
+                        *b = other.sections[sy].biome_at(qx, qy, qz);
+                    }
+                }
+            }
             checked += 1;
+            // `CHUNKWAKE_COLUMN=x,z` — столбец целиком: наше и ваниль по y.
+            if let Some((qx, qz)) = std::env::var("CHUNKWAKE_COLUMN").ok().and_then(|v| {
+                let (a, b) = v.split_once(',')?;
+                Some((a.parse::<i32>().ok()?, b.parse::<i32>().ok()?))
+            }) && (qx.div_euclid(16), qz.div_euclid(16)) == (cx, cz)
+            {
+                let (x, z) = (qx.rem_euclid(16) as usize, qz.rem_euclid(16) as usize);
+                // Тикался ли чанк ванили: тогда жидкости уже текли.
+                println!(
+                    "  InhabitedTime {:?}, fluid_ticks {:?}, Status {:?}",
+                    nbt.get("InhabitedTime").and_then(|t| t.as_i64()),
+                    nbt.get("fluid_ticks").and_then(|t| t.as_list()).map(<[_]>::len),
+                    nbt.get("Status"),
+                );
+                if let Some(b) = &ours.biomes {
+                    let top = (height as usize / 4).saturating_sub(1);
+                    let mut seen = Vec::new();
+                    for qy in 0..=top {
+                        let id = b[qy * 16 + (z / 4) * 4 + x / 4];
+                        if !seen.contains(&id) {
+                            seen.push(id);
+                        }
+                    }
+                    let names: Vec<_> = seen
+                        .iter()
+                        .filter_map(|id| biomes.iter().find(|(_, v)| *v == id).map(|(n, _)| n.as_str()))
+                        .collect();
+                    println!("  биомы столбца: {names:?}");
+                }
+                for y in (0..height as usize).rev() {
+                    let a = short(ours.states[(y * 16 + z) * 16 + x]);
+                    let b = short(want.block(x, y, z));
+                    if a != "air" || b != "air" {
+                        let mark = if a == b { " " } else { "*" };
+                        println!("  {mark} y {:>4}  {a:<24} {b}", y as i32 + min_y);
+                    }
+                }
+            }
             for y in 0..height as usize {
                 for z in 0..16 {
                     for x in 0..16 {
@@ -779,6 +858,14 @@ fn compare_blocks(
                     let (qy, qz, qx) = (rest / 16, rest / 4 % 4, rest % 4);
                     if want.sections[sy].biome_at(qx, qy, qz) != b {
                         biome_bad += 1;
+                        // `CHUNKWAKE_BIOME_WHERE=1` — клетка, наш и ванильный ID.
+                        if std::env::var_os("CHUNKWAKE_BIOME_WHERE").is_some() {
+                            println!(
+                                "    биом {cx},{cz} y{} q{qx},{qz}: {b} | {}",
+                                min_y + (sy * 16 + qy * 4) as i32,
+                                want.sections[sy].biome_at(qx, qy, qz)
+                            );
+                        }
                     }
                 }
             }

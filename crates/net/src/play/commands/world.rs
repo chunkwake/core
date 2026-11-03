@@ -3,7 +3,7 @@
 
 use super::Context;
 use super::args;
-use super::dispatch::{Call, Outcome, coordinates, translate};
+use super::dispatch::{Call, Outcome, coordinates_with, translate};
 use super::entity::usage;
 use serde_json::{Value, json};
 
@@ -448,16 +448,19 @@ pub(super) fn weather(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
             rain: false,
             thunder: false,
             ticks,
+            ..Default::default()
         },
         "rain" => super::state::Weather {
             rain: true,
             thunder: false,
             ticks,
+            ..Default::default()
         },
         "thunder" => super::state::Weather {
             rain: true,
             thunder: true,
             ticks,
+            ..Default::default()
         },
         _ => return usage("/weather <clear|rain|thunder> [duration]"),
     };
@@ -1331,13 +1334,22 @@ fn locate(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
             vec![json!({"text": name})],
         ));
     };
-    let distance = (((found[0] - origin[0]) as f64).hypot((found[2] - origin[2]) as f64)).round();
+    // `showLocateResult`: высота только у биома; расстояние — `Mth.floor` от
+    // `float`-корня, по горизонтали без высоты.
+    let include_y = kind == "biome";
+    let d = |i: usize| (found[i] - origin[i]) as i64;
+    let square = if include_y {
+        d(0) * d(0) + d(1) * d(1) + d(2) * d(2)
+    } else {
+        d(0) * d(0) + d(2) * d(2)
+    };
+    let distance = ((square as f32).sqrt()).floor() as i32;
     Outcome::Feedback(translate(
         key,
         vec![
             json!({"text": name}),
-            coordinates(found),
-            Value::from(distance as i32),
+            coordinates_with(found, include_y),
+            Value::from(distance),
         ],
     ))
 }

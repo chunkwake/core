@@ -63,7 +63,7 @@ pub enum Cond {
     Biome(Vec<u32>),
     /// `hole`: глубина поверхности не выше нуля.
     Hole,
-    /// `steep`: уклон столбца (`gradientX > -4 || gradientZ >= 4`).
+    /// `steep`: уклон столбца (`gradientX <= -4 || gradientZ >= 4`).
     Steep,
     NoiseThreshold {
         noise: usize,
@@ -258,8 +258,11 @@ impl Rules {
     }
 
     fn condition(&mut self, id: &str) -> Result<Cond, String> {
-        // Встроенные условия реестра `material_condition`: файлов у них нет,
-        // ванила регистрирует их кодом (`VanillaMaterialConditions`).
+        // Файл условия главнее: в 26.3 реестр `material_condition` выгружен.
+        if let Some(value) = self.conditions.get(id).cloned() {
+            return self.cond(&value);
+        }
+        // Без файлов — как `VanillaMaterialConditions` регистрирует их кодом.
         // `stoneDepthCheck(offset, add_surface_depth, secondary_range, surface)`.
         let builtin = |offset: i32, add: bool, secondary: i32, ceiling: bool| Cond::StoneDepth {
             offset,
@@ -284,8 +287,8 @@ impl Rules {
             "minecraft:not_under_deep_water" => {
                 return Ok(Cond::Water {
                     offset: -6,
-                    surface_depth_multiplier: 0,
-                    add_stone_depth: false,
+                    surface_depth_multiplier: -1,
+                    add_stone_depth: true,
                 });
             }
             _ => {}
@@ -659,6 +662,8 @@ impl<'a> Stage<'a> {
             })
             .collect::<Vec<_>>();
         if prof {
+            let (a, b, n) = SURF.with(|s| s.replace((0.0, 0.0, 0.0)));
+            eprintln!("  столбцы: подготовка {a:.2} | правила {b:.2} мс, {n} клеток");
             eprintln!("  жилы: {:.2} мс", t.elapsed().as_secs_f64() * 1000.0);
         }
         out
@@ -724,6 +729,7 @@ impl<'a> Stage<'a> {
         heights: &[usize],
         noise_cache: &mut NoiseCache,
     ) {
+        let t_col = std::time::Instant::now();
         noise_cache.clear();
         let mut c = Context::default();
         c.surface_depth = self.surface_depth(bx, bz);
@@ -734,6 +740,9 @@ impl<'a> Stage<'a> {
         c.water_height = i32::MIN;
 
         let mut y = heights[z * 16 + x] as i32;
+        let t_rules = std::time::Instant::now();
+        let setup = t_col.elapsed().as_secs_f64() * 1000.0;
+        let mut evals = 0u32;
         let mut stone_above = 0;
         // `nextCeilingStoneY`: `stoneDepthBelow` пересчитывается на каждом
         // новом слое камня, когда прежний потолок оказался не выше текущего.
@@ -743,12 +752,14 @@ impl<'a> Stage<'a> {
             match chunk.kind(state) {
                 Kind::Air => {
                     stone_above = 0;
+                    c.water_height = i32::MIN;
                     y -= 1;
                     continue;
                 }
                 Kind::Fluid => {
+                    // Условие `water` сравнивает с абсолютным `blockY`.
                     if c.water_height == i32::MIN {
-                        c.water_height = y + 1;
+                        c.water_height = self.min_y + y + 1;
                     }
                     y -= 1;
                     continue;
@@ -767,6 +778,7 @@ impl<'a> Stage<'a> {
             c.stone_above = stone_above;
             c.stone_below = y - ceiling + 1;
             let by = self.min_y + y;
+            evals += 1;
             let at = y as usize * 256 + z * 16 + x;
             if let Some(state) = self.eval(
                 chunk,
@@ -786,6 +798,13 @@ impl<'a> Stage<'a> {
             }
             y -= 1;
         }
+        SURF.with(|s| {
+            let mut v = s.get();
+            v.0 += setup;
+            v.1 += t_rules.elapsed().as_secs_f64() * 1000.0;
+            v.2 += evals as f64;
+            s.set(v);
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -970,7 +989,7 @@ impl<'a> Stage<'a> {
                 ids.contains(&b)
             }
             Cond::Hole => c.surface_depth <= 0,
-            Cond::Steep => c.gradient_x > -4 || c.gradient_z >= 4,
+            Cond::Steep => c.gradient_x <= -4 || c.gradient_z >= 4,
             Cond::NoiseThreshold { noise, min, max } => {
                 let v = self.column_noise(*noise, bx, bz, noise_cache) as f64;
                 *min <= v && v < *max
@@ -1279,4 +1298,9 @@ mod tests {
         assert_eq!(densities[0].value(&mut ctx, 0, 20, 0), -1.0, "выше полосы");
         assert_eq!(densities[0].value(&mut ctx, 0, 3, 0), 3.0, "внутри полосы");
     }
+}
+
+thread_local! {
+    /// PROF: подготовка столбцов, правила, число вычислений правила.
+    pub static SURF: std::cell::Cell<(f64, f64, f64)> = const { std::cell::Cell::new((0.0, 0.0, 0.0)) };
 }

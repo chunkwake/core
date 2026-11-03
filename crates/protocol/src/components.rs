@@ -16,6 +16,14 @@ pub struct Extra {
     /// Чары, хранимые зачарованной книгой (`stored_enchantments`).
     pub stored: Vec<(i32, i32)>,
     pub custom_name: Option<String>,
+    /// `minecraft:repair_cost`: штраф за предыдущие работы на наковальне.
+    pub repair_cost: i32,
+    /// `minecraft:trim`: сетевые ID материала и узора.
+    pub trim: Option<(i32, i32)>,
+    /// Слои знамени: сетевой ID узора и ID цвета.
+    pub banner_patterns: Vec<(i32, i32)>,
+    /// Число страниц книги, если её содержимое хранится сырым компонентом.
+    pub book_pages: Option<i32>,
     pub lore: Vec<String>,
     /// Сырой патч компонентов с провода, если в нём было что-то кроме известных
     /// (зелья и прочее). Пишется как есть, чтобы клиент не терял состав.
@@ -36,6 +44,10 @@ impl Extra {
         self.enchantments.is_empty()
             && self.stored.is_empty()
             && self.custom_name.is_none()
+            && self.repair_cost == 0
+            && self.trim.is_none()
+            && self.banner_patterns.is_empty()
+            && self.book_pages.is_none()
             && self.lore.is_empty()
             && self.raw.is_none()
             && self.custom_data.is_none()
@@ -112,6 +124,74 @@ pub static LORE_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static STORED_ENCHANTMENTS_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static CUSTOM_DATA_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static CHARGED_PROJECTILES_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+pub static REPAIR_COST_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+pub static TRIM_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+pub static BANNER_PATTERNS_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+pub static WRITTEN_BOOK_CONTENT_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+pub static WRITABLE_BOOK_CONTENT_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+
+static TRIM_MATERIAL_NAMES: OnceLock<Vec<String>> = OnceLock::new();
+static TRIM_PATTERN_NAMES: OnceLock<Vec<String>> = OnceLock::new();
+static BANNER_PATTERN_NAMES: OnceLock<Vec<String>> = OnceLock::new();
+
+pub fn set_banner_pattern_names(patterns: Vec<String>) {
+    let _ = BANNER_PATTERN_NAMES.set(patterns);
+}
+
+pub fn banner_pattern_name(id: i32) -> Option<&'static str> {
+    BANNER_PATTERN_NAMES
+        .get()?
+        .get(id as usize)
+        .map(String::as_str)
+}
+
+pub fn banner_pattern_id(name: &str) -> Option<i32> {
+    Some(BANNER_PATTERN_NAMES.get()?.iter().position(|n| n == name)? as i32)
+}
+
+pub const DYE_COLORS: [&str; 16] = [
+    "white",
+    "orange",
+    "magenta",
+    "light_blue",
+    "yellow",
+    "lime",
+    "pink",
+    "gray",
+    "light_gray",
+    "cyan",
+    "purple",
+    "blue",
+    "brown",
+    "green",
+    "red",
+    "black",
+];
+
+pub fn set_trim_names(materials: Vec<String>, patterns: Vec<String>) {
+    let _ = TRIM_MATERIAL_NAMES.set(materials);
+    let _ = TRIM_PATTERN_NAMES.set(patterns);
+}
+
+pub fn trim_names(material: i32, pattern: i32) -> Option<(&'static str, &'static str)> {
+    Some((
+        TRIM_MATERIAL_NAMES.get()?.get(material as usize)?.as_str(),
+        TRIM_PATTERN_NAMES.get()?.get(pattern as usize)?.as_str(),
+    ))
+}
+
+pub fn trim_ids(material: &str, pattern: &str) -> Option<(i32, i32)> {
+    Some((
+        TRIM_MATERIAL_NAMES
+            .get()?
+            .iter()
+            .position(|n| n == material)? as i32,
+        TRIM_PATTERN_NAMES
+            .get()?
+            .iter()
+            .position(|n| n == pattern)? as i32,
+    ))
+}
 
 pub(crate) fn id_of(c: &AtomicI32) -> i32 {
     c.load(Ordering::Relaxed)

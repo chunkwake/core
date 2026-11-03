@@ -1133,6 +1133,9 @@ pub fn lectern_pages(name: &str, nbt: Option<&chunkwake_world::nbt::Compound>) -
 /// Число страниц по NBT книги: `pages` внутри `components`.
 pub fn book_pages(nbt: &chunkwake_world::nbt::Compound) -> i32 {
     use chunkwake_world::nbt::Tag;
+    if let Some(pages) = nbt.get("chunkwake:book_pages").and_then(Tag::as_i64) {
+        return pages.clamp(1, 100) as i32;
+    }
     let Some(Tag::Compound(components)) = nbt.get("components") else {
         return 1;
     };
@@ -1153,6 +1156,32 @@ pub fn book_pages(nbt: &chunkwake_world::nbt::Compound) -> i32 {
     1
 }
 
+/// Пересчёт точки при переходе между измерениями (`Entity.changeDimension`).
+///
+/// Координаты X и Z умножаются на масштаб измерения, Y не меняется.
+/// Округление — вниз, как `Mth.floor`: точка `0.5` у края портала переходит
+/// в целую клетку.
+pub fn scale_position(
+    from: crate::play::Dimension,
+    to: crate::play::Dimension,
+    pos: [f64; 3],
+) -> [i32; 3] {
+    let scale = from.coordinate_scale(to);
+    [
+        (pos[0] * scale).floor() as i32,
+        pos[1].floor() as i32,
+        (pos[2] * scale).floor() as i32,
+    ]
+}
+
+/// Радиус поиска портала при прибытии (`PortalForcer`).
+pub fn portal_search_radius(to: crate::play::Dimension) -> i32 {
+    match to {
+        crate::play::Dimension::Nether => 16,
+        _ => 128,
+    }
+}
+
 /// `DetectorRailBlock.getSearchBB`: вагонетка ищется в рамке `0.2…0.8`.
 /// Границы — в мировых координатах: по горизонтали отступ 0.2, сверху до
 /// `pos.y + 0.8` (в ванили `(pos.y + 1) - 0.2`).
@@ -1162,6 +1191,174 @@ pub fn detector_search_box(pos: [i32; 3]) -> ([f64; 3], [f64; 3]) {
         [x + 0.2, y, z + 0.2],
         [x + 1.0 - 0.2, y + 1.0 - 0.2, z + 1.0 - 0.2],
     )
+}
+
+/// Прямоугольник портала: где стоит и как повёрнут (`PortalShape`).
+///
+/// Ширина — внутреннее пространство между рамками, высота — тоже. Ванильные
+/// пределы: от 2×3 до 21×21.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortalRect {
+    /// Нижний левый блок внутреннего пространства.
+    pub bottom_left: [i32; 3],
+    /// Ширина вдоль `axis` (`x` считается по X, иначе по Z).
+    pub width: i32,
+    pub height: i32,
+    /// `true` — рамка в плоскости XZ идёт вдоль X (портал смотрит по Z).
+    pub along_x: bool,
+}
+
+/// Пределы внутреннего пространства (`PortalShape`).
+pub const PORTAL_MIN_WIDTH: i32 = 2;
+pub const PORTAL_MAX_WIDTH: i32 = 21;
+pub const PORTAL_MIN_HEIGHT: i32 = 3;
+pub const PORTAL_MAX_HEIGHT: i32 = 21;
+
+impl PortalRect {
+    pub fn is_valid(&self) -> bool {
+        (PORTAL_MIN_WIDTH..=PORTAL_MAX_WIDTH).contains(&self.width)
+            && (PORTAL_MIN_HEIGHT..=PORTAL_MAX_HEIGHT).contains(&self.height)
+    }
+
+    /// Все блоки внутреннего пространства — их заполняет портал.
+    pub fn blocks(&self) -> Vec<[i32; 3]> {
+        let mut out = Vec::with_capacity((self.width * self.height) as usize);
+        for dy in 0..self.height {
+            for dw in 0..self.width {
+                let [x, y, z] = self.bottom_left;
+                out.push(if self.along_x {
+                    [x + dw, y + dy, z]
+                } else {
+                    [x, y + dy, z + dw]
+                });
+            }
+        }
+        out
+    }
+
+    /// Блок рамки: сосед внутренней клетки снаружи.
+    pub fn frame_blocks(&self) -> Vec<[i32; 3]> {
+        let [x, y, z] = self.bottom_left;
+        let step = |w: i32, d: i32| {
+            if self.along_x {
+                [x + w, y + d, z]
+            } else {
+                [x, y + d, z + w]
+            }
+        };
+        let mut out = Vec::new();
+        for w in -1..=self.width {
+            out.push(step(w, -1));
+            out.push(step(w, self.height));
+        }
+        for d in 0..self.height {
+            out.push(step(-1, d));
+            out.push(step(self.width, d));
+        }
+        out
+    }
+
+    /// Ось блока портала: `x`, если портал вытянут по X, иначе `z`.
+    pub fn axis(&self) -> &'static str {
+        if self.along_x { "x" } else { "z" }
+    }
+}
+
+/// Находит рамку портала, в которую попала клетка `hit` (обычно огонь).
+///
+/// Повторяет `PortalShape.findPortalShape`: опускаемся до уровня пола рамки,
+/// идём влево до обсидиана, считаем ширину и высоту и проверяем верхнюю
+/// рамку. Проверяются обе оси: сначала предпочтительная, потом другая.
+///
+/// `frame` отвечает, обсидиан ли блок, `empty` — пусто ли (воздух, огонь или
+/// уже портал).
+pub fn find_portal(
+    hit: [i32; 3],
+    min_y: i32,
+    prefer_x: bool,
+    frame: impl Fn([i32; 3]) -> bool,
+    empty: impl Fn([i32; 3]) -> bool,
+) -> Option<PortalRect> {
+    for along_x in [prefer_x, !prefer_x] {
+        // `calculateBottomLeft`: вниз, пока пусто.
+        let mut bottom = hit;
+        let lowest = min_y.max(hit[1] - PORTAL_MAX_HEIGHT);
+        while bottom[1] > lowest && empty([bottom[0], bottom[1] - 1, bottom[2]]) {
+            bottom[1] -= 1;
+        }
+        let step = |w: i32, d: i32, from: [i32; 3]| {
+            if along_x {
+                [from[0] + w, from[1] + d, from[2]]
+            } else {
+                [from[0], from[1] + d, from[2] + w]
+            }
+        };
+        // `getDistanceUntilEdgeAboveFrame`: влево до рамки.
+        let mut left = None;
+        for w in 0..=PORTAL_MAX_WIDTH {
+            let at = step(-w, 0, bottom);
+            if !empty(at) {
+                if frame(at) {
+                    left = Some(w);
+                }
+                break;
+            }
+            // Под пустой клеткой должна быть рамка.
+            if !frame(step(-w, -1, bottom)) {
+                break;
+            }
+        }
+        let Some(left) = left else { continue };
+        let bottom = step(-(left - 1), 0, bottom);
+        // `calculateWidth`: вправо до рамки.
+        let mut width = 0;
+        for w in 0..=PORTAL_MAX_WIDTH {
+            let at = step(w, 0, bottom);
+            if !empty(at) {
+                if frame(at) {
+                    width = w;
+                }
+                break;
+            }
+            if !frame(step(w, -1, bottom)) {
+                width = 0;
+                break;
+            }
+        }
+        if !(PORTAL_MIN_WIDTH..=PORTAL_MAX_WIDTH).contains(&width) {
+            continue;
+        }
+        // `getDistanceUntilTop`: пока по бокам рамка и внутри пусто.
+        let mut height = 0;
+        'outer: for d in 0..PORTAL_MAX_HEIGHT {
+            if !frame(step(-1, d, bottom)) || !frame(step(width, d, bottom)) {
+                break;
+            }
+            for w in 0..width {
+                if !empty(step(w, d, bottom)) {
+                    break 'outer;
+                }
+            }
+            height = d + 1;
+        }
+        if !(PORTAL_MIN_HEIGHT..=PORTAL_MAX_HEIGHT).contains(&height) {
+            continue;
+        }
+        // `hasTopFrame`: верхняя рамка целиком.
+        if !(0..width).all(|w| frame(step(w, height, bottom))) {
+            continue;
+        }
+        let rect = PortalRect {
+            bottom_left: bottom,
+            width,
+            height,
+            along_x,
+        };
+        if rect.is_valid() {
+            return Some(rect);
+        }
+    }
+    None
 }
 
 /// Нотный блок — тот самый, что звучит по сигналу.
@@ -2357,6 +2554,80 @@ mod tests {
         // Из трёх — самый близкий, а не первый.
         let rods = [[5, 70, 5], [1, 70, 1], [9, 70, 9]];
         assert_eq!(nearest_rod([0, 70, 0], &rods), Some(1));
+    }
+
+    /// Рамка портала: поиск формы в обсидиановом прямоугольнике.
+    #[test]
+    fn portal_frame_shape_is_found() {
+        use std::collections::HashSet;
+        // Рамка 4×5 снаружи: внутри 2×3, вдоль X.
+        let mut frame: HashSet<[i32; 3]> = HashSet::new();
+        for w in -1..=2 {
+            frame.insert([w, 0, 0]);
+            frame.insert([w, 4, 0]);
+        }
+        for d in 0..4 {
+            frame.insert([-1, d, 0]);
+            frame.insert([2, d, 0]);
+        }
+        let is_frame = |p: [i32; 3]| frame.contains(&p);
+        let is_empty = |p: [i32; 3]| !is_frame(p);
+
+        let rect = find_portal([0, 1, 0], -64, true, is_frame, is_empty).expect("рамка найдена");
+        assert_eq!(rect.width, 2);
+        assert_eq!(rect.height, 3);
+        assert_eq!(rect.along_x, true);
+        assert_eq!(rect.bottom_left, [0, 1, 0]);
+        assert_eq!(rect.axis(), "x");
+        // Внутри 2×3 = 6 блоков, рамка по периметру.
+        assert_eq!(rect.blocks().len(), 6);
+        assert!(rect.is_valid());
+
+        // Слишком маленькая рамка (1 ширина) не портал.
+        let mut tiny: HashSet<[i32; 3]> = HashSet::new();
+        for d in 0..3 {
+            tiny.insert([-1, d, 0]);
+            tiny.insert([1, d, 0]);
+        }
+        tiny.insert([0, 0, 0]);
+        tiny.insert([0, 3, 0]);
+        let is_frame = |p: [i32; 3]| tiny.contains(&p);
+        let is_empty = |p: [i32; 3]| !is_frame(p);
+        assert!(find_portal([0, 1, 0], -64, true, is_frame, is_empty).is_none());
+    }
+
+    /// Пересчёт координат при переходе: /8 в Ад, *8 обратно, Y не меняется.
+    #[test]
+    fn portal_scales_coordinates() {
+        use crate::play::Dimension;
+
+        // Оверворлд → Ад делит X и Z на 8.
+        assert_eq!(
+            scale_position(
+                Dimension::Overworld,
+                Dimension::Nether,
+                [80.0, 64.0, -160.0]
+            ),
+            [10, 64, -20]
+        );
+        // Ад → оверворлд умножает.
+        assert_eq!(
+            scale_position(Dimension::Nether, Dimension::Overworld, [10.0, 64.0, -20.0]),
+            [80, 64, -160]
+        );
+        // Округление вниз: `0.9` даёт 0, `-0.1` даёт -1 (как `Mth.floor`).
+        assert_eq!(
+            scale_position(Dimension::Overworld, Dimension::Nether, [7.9, 64.0, -0.1]),
+            [0, 64, -1]
+        );
+        // Край не масштабирует.
+        assert_eq!(
+            scale_position(Dimension::Overworld, Dimension::End, [100.0, 50.0, 100.0]),
+            [100, 50, 100]
+        );
+        // Радиус поиска: 128 в Аду, 16 в оверворлде.
+        assert_eq!(portal_search_radius(Dimension::Nether), 16);
+        assert_eq!(portal_search_radius(Dimension::Overworld), 128);
     }
 
     /// Лектор, детекторные рельсы и молниеотвод как источники сигнала.

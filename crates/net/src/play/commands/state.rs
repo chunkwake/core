@@ -167,8 +167,14 @@ pub struct ServerVars {
 pub struct Weather {
     pub rain: bool,
     pub thunder: bool,
-    /// Тики до смены; 0 — бесконечно, пока не сменят командой.
+    /// Длительность, переданная командой; нормализуется в `set_weather`.
     pub ticks: i64,
+    #[serde(default)]
+    pub clear_ticks: i64,
+    #[serde(default)]
+    pub rain_ticks: i64,
+    #[serde(default)]
+    pub thunder_ticks: i64,
 }
 
 /// Белый список и баны.
@@ -490,22 +496,63 @@ impl ServerVars {
     }
 
     pub fn set_weather(&self, weather: Weather) {
+        let mut weather = weather;
+        if weather.clear_ticks == 0 && weather.rain_ticks == 0 && weather.thunder_ticks == 0 {
+            if weather.rain {
+                weather.rain_ticks = weather.ticks;
+                weather.thunder_ticks = weather.ticks;
+            } else {
+                weather.clear_ticks = weather.ticks;
+            }
+        }
         *self.weather.lock().unwrap() = weather;
     }
 
-    /// Тик погоды: `advance_weather` гасит дождь, когда вышло время.
-    pub fn tick_weather(&self) {
+    /// Advance the weather cycle; return a new state only when clients must be updated.
+    pub fn tick_weather(&self) -> Option<Weather> {
         if !self.flag("advance_weather") {
-            return;
+            return None;
         }
         let mut weather = self.weather.lock().unwrap();
-        if weather.ticks > 0 {
-            weather.ticks -= 1;
-            if weather.ticks == 0 {
-                weather.rain = false;
-                weather.thunder = false;
+        let before = (weather.rain, weather.thunder);
+        if weather.clear_ticks > 0 {
+            weather.clear_ticks -= 1;
+            weather.rain = false;
+            weather.thunder = false;
+            if weather.clear_ticks == 0 {
+                weather.rain_ticks = 0;
+                weather.thunder_ticks = 0;
+            }
+        } else if weather.rain_ticks == 0 && weather.thunder_ticks == 0 {
+            // New world, or the first tick after forced clear weather.
+            weather.rain_ticks = 12_000 + rand::random::<i64>().rem_euclid(168_001);
+            weather.thunder_ticks = 12_000 + rand::random::<i64>().rem_euclid(168_001);
+        } else {
+            if weather.rain_ticks > 0 {
+                weather.rain_ticks -= 1;
+            }
+            if weather.rain_ticks == 0 {
+                weather.rain_ticks = if weather.rain {
+                    12_000 + rand::random::<i64>().rem_euclid(168_001)
+                } else {
+                    12_000 + rand::random::<i64>().rem_euclid(12_001)
+                };
+                weather.rain = !weather.rain;
+            }
+            if weather.thunder_ticks > 0 {
+                weather.thunder_ticks -= 1;
+            }
+            if weather.thunder_ticks == 0 {
+                weather.thunder_ticks = if weather.thunder {
+                    12_000 + rand::random::<i64>().rem_euclid(168_001)
+                } else {
+                    3_600 + rand::random::<i64>().rem_euclid(12_001)
+                };
+                weather.thunder = !weather.thunder;
             }
         }
+        weather.ticks = weather.clear_ticks.max(weather.rain_ticks);
+        (before != (weather.rain, weather.thunder)).then_some(*weather)
     }
 
     pub fn world_spawn(&self) -> Option<[f64; 3]> {
@@ -867,11 +914,38 @@ mod tests {
             rain: true,
             thunder: false,
             ticks: 2,
+            ..Default::default()
         });
         vars.tick_weather();
         assert!(vars.weather().rain);
         vars.tick_weather();
         assert!(!vars.weather().rain);
+        assert!(vars.weather().ticks > 0);
+        vars.set_weather(Weather {
+            rain: false,
+            thunder: false,
+            ticks: 1,
+            ..Default::default()
+        });
+        vars.tick_weather();
+        assert!(!vars.weather().rain);
+        assert!(vars.weather().rain_ticks == 0);
+    }
+
+    #[test]
+    fn rain_and_thunder_have_independent_timers() {
+        let vars = ServerVars::ephemeral();
+        vars.set_weather(Weather {
+            rain_ticks: 1,
+            thunder_ticks: 2,
+            ..Default::default()
+        });
+        let first = vars.tick_weather().unwrap();
+        assert!(first.rain);
+        assert!(!first.thunder);
+        let second = vars.tick_weather().unwrap();
+        assert!(second.rain);
+        assert!(second.thunder);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //!
 //! Сундуки в шаблонах нет, поэтому лут не съедается. Мобы не пишутся.
 
-use super::structure::Columns;
+use super::structure::{Base, Columns};
 use super::template::{self, Bounds, Rot, Template};
 use super::{Bits, Heightmap, Legacy, Level, Palette, Worldgen};
 use crate::templates::Mirror;
@@ -18,6 +18,8 @@ pub(crate) struct Setup {
     pub overgrown: bool,
     pub vines: bool,
     pub can_be_cold: bool,
+    /// `Properties.cold`: `can_be_cold` и холодный биом в `origin`.
+    pub cold: bool,
     pub blackstone: bool,
     pub weight: f32,
 }
@@ -128,6 +130,12 @@ impl Piece {
             return;
         }
         let processors = portal_processors(pal, self.setup, self.placement);
+        // `chunkBB.encapsulate(boundingBox)`: шаблон ставится целиком, броски
+        // процессоров идут по всем его блокам.
+        let window = Bounds {
+            min: [0, 1, 2].map(|i| window.min[i].min(self.min[i])),
+            max: [0, 1, 2].map(|i| window.max[i].max(self.max[i])),
+        };
         template::place_with(
             pal,
             level,
@@ -178,6 +186,8 @@ fn portal_processors(
     let mut rules = Vec::new();
     // `gold_block` с шансом 0.3 → воздух.
     rules.push(template::ProcRule {
+            pos: template::PosTest::Always,
+            loot: None,
         input: template::RuleInput::Random {
             block: pal.blocks["minecraft:gold_block"].0,
             chance: 0.3,
@@ -189,21 +199,40 @@ fn portal_processors(
     let lava = pal.blocks["minecraft:lava"].0;
     if placement == Placement::OnOceanFloor {
         rules.push(template::ProcRule {
+            pos: template::PosTest::Always,
+            loot: None,
             input: template::RuleInput::Block(lava),
             at: template::RuleAt::Always,
             output: magma,
         });
     } else if setup_cold(setup) {
         rules.push(template::ProcRule {
+            pos: template::PosTest::Always,
+            loot: None,
             input: template::RuleInput::Block(lava),
             at: template::RuleAt::Always,
             output: netherrack,
         });
     } else {
         rules.push(template::ProcRule {
+            pos: template::PosTest::Always,
+            loot: None,
             input: template::RuleInput::Random {
                 block: lava,
                 chance: 0.2,
+            },
+            at: template::RuleAt::Always,
+            output: magma,
+        });
+    }
+    // Незеррак шаблона в тепле → магма с шансом 0.07.
+    if !setup_cold(setup) {
+        rules.push(template::ProcRule {
+            pos: template::PosTest::Always,
+            loot: None,
+            input: template::RuleInput::Random {
+                block: pal.blocks["minecraft:netherrack"].0,
+                chance: 0.07,
             },
             at: template::RuleAt::Always,
             output: magma,
@@ -232,9 +261,9 @@ fn sample(rng: &mut impl Bits, limit: f32) -> bool {
     rng.next_float() < limit
 }
 
-/// Холод считается по биому в точке `origin`.
+/// `Properties.cold`, посчитанный при сборке старта.
 fn setup_cold(setup: Setup) -> bool {
-    setup.can_be_cold
+    setup.cold
 }
 
 /// `findGenerationPoint`: выбор набора, шаблон, высота и начало.
@@ -287,7 +316,7 @@ pub(crate) fn build(
         (min, max),
         columns,
         setup,
-    )?;
+    );
     let dy = y - min[1];
     min[1] += dy;
     max[1] += dy;
@@ -332,7 +361,7 @@ fn suitable_y(
     bbox: ([i32; 3], [i32; 3]),
     columns: &dyn Columns,
     setup: Setup,
-) -> Option<i32> {
+) -> i32 {
     let min_y = columns.min_y() + 15;
     let mut y = match placement {
         Placement::InNether => {
@@ -355,35 +384,36 @@ fn suitable_y(
         Placement::PartlyBuried => surface - span + rng.between_inclusive(2, 8),
         _ => surface,
     };
-    let map = placement.heightmap();
-    // `getBaseColumn` по четырём нижним углам; у нас высота столбца.
+    let floor = placement.heightmap() == Heightmap::OceanFloorWg;
+    // `getBaseColumn` по четырём нижним углам: `WORLD_SURFACE_WG` — не воздух,
+    // `OCEAN_FLOOR_WG` — блок по умолчанию (жидкость не держит).
     let corners = [
         [bbox.0[0], bbox.0[2]],
         [bbox.1[0], bbox.0[2]],
         [bbox.0[0], bbox.1[2]],
         [bbox.1[0], bbox.1[2]],
     ];
-    let solid = |x: i32, z: i32, yy: i32| -> bool {
-        let top = match map {
-            Heightmap::OceanFloorWg => columns.ocean_floor(x, z),
-            _ => columns.base_height(x, z),
-        } - 1;
-        yy <= top
+    let opaque = |x: i32, z: i32, yy: i32| -> bool {
+        match columns.base_block(x, yy, z) {
+            None | Some(Base::Air) => false,
+            Some(Base::Fluid) => !floor,
+            Some(Base::Solid) => true,
+        }
     };
     let _ = setup;
     while y > min_y {
         let mut count = 0;
         for [x, z] in corners {
-            if solid(x, z, y) {
+            if opaque(x, z, y) {
                 count += 1;
                 if count == 3 {
-                    return Some(y);
+                    return y;
                 }
             }
         }
         y -= 1;
     }
-    None
+    y
 }
 
 /// `getRandomWithinInterval`: бросок только при `min < max`.
@@ -466,11 +496,9 @@ fn replaceable_as_netherrack(
     placement: Placement,
 ) -> bool {
     let state = level.get(pos[0], pos[1], pos[2]);
-    if pal.is_air(state) {
-        return false;
-    }
     let is = |name: &str| pal.blocks.get(name).map(|b| b.0) == pal.block_index(state);
-    if is("minecraft:obsidian") {
+    // `!state.is(Blocks.AIR)`: пещерный воздух карвера заменяется.
+    if is("minecraft:air") || is("minecraft:obsidian") {
         return false;
     }
     if placement != Placement::InNether && is("minecraft:lava") {

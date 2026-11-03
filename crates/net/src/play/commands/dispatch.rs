@@ -100,12 +100,27 @@ pub fn translate(key: &str, with: Vec<Value>) -> Value {
 /// `chat.square_brackets` → `[…]`, внутри `chat.coordinates` (`x, y, z`).
 /// Клик подставляет `/tp`.
 pub fn coordinates(pos: [i32; 3]) -> Value {
-    let command = format!("/tp @s {} {} {}", pos[0], pos[1], pos[2]);
+    coordinates_with(pos, true)
+}
+
+/// То же, но без высоты: `~` вместо `y`, как у `/locate structure` и `poi`.
+pub fn coordinates_with(pos: [i32; 3], include_y: bool) -> Value {
+    let y = if include_y {
+        Value::from(pos[1])
+    } else {
+        Value::from("~")
+    };
+    let shown = if include_y {
+        pos[1].to_string()
+    } else {
+        "~".to_owned()
+    };
+    let command = format!("/tp @s {} {shown} {}", pos[0], pos[2]);
     serde_json::json!({
         "translate": "chat.square_brackets",
         "with": [{
             "translate": "chat.coordinates",
-            "with": [pos[0], pos[1], pos[2]]
+            "with": [pos[0], y, pos[2]]
         }],
         "color": "green",
         "click_event": {"action": "suggest_command", "command": command},

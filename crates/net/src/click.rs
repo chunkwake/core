@@ -29,17 +29,30 @@ pub enum Kind {
     Enchanting,
     /// `GrindstoneMenu`: 0 и 1 входы, 2 результат, 3–29, 30–38.
     Grindstone,
+    /// `AnvilMenu`: два входа, результат и инвентарь.
+    Anvil,
+    /// `SmithingMenu`: шаблон, основа, добавка, результат, инвентарь.
+    Smithing,
+    /// `LoomMenu`: знамя, краситель, шаблон, результат, инвентарь.
+    Loom,
+    /// `LecternMenu`: одна книга, без инвентаря игрока.
+    Lectern,
     /// `StonecutterMenu`: 0 вход, 1 результат, 2–28, 29–37.
     Stonecutter,
+    /// `BrewingStandMenu`: 0–2 бутылки, 3 реагент, 4 топливо.
+    Brewing,
 }
 
 impl Kind {
     pub fn size(self) -> usize {
         match self {
             Kind::Player => 46,
+            Kind::Lectern => 1,
             Kind::Chest(n) => n + 36,
             Kind::Crafting => 46,
-            Kind::Furnace | Kind::Grindstone => 39,
+            Kind::Furnace | Kind::Grindstone | Kind::Anvil => 39,
+            Kind::Brewing => 41,
+            Kind::Smithing | Kind::Loom => 40,
             Kind::Enchanting | Kind::Stonecutter => 38,
         }
     }
@@ -48,9 +61,12 @@ impl Kind {
     pub fn inventory_start(self) -> usize {
         match self {
             Kind::Player => 9,
+            Kind::Lectern => 1,
             Kind::Chest(n) => n,
             Kind::Crafting => 10,
-            Kind::Furnace | Kind::Grindstone => 3,
+            Kind::Furnace | Kind::Grindstone | Kind::Anvil => 3,
+            Kind::Brewing => 5,
+            Kind::Smithing | Kind::Loom => 4,
             Kind::Enchanting | Kind::Stonecutter => 2,
         }
     }
@@ -59,9 +75,10 @@ impl Kind {
     fn output(self) -> Option<usize> {
         match self {
             Kind::Player | Kind::Crafting => Some(0),
-            Kind::Furnace | Kind::Grindstone => Some(2),
+            Kind::Furnace | Kind::Grindstone | Kind::Anvil => Some(2),
+            Kind::Smithing | Kind::Loom => Some(3),
             Kind::Stonecutter => Some(1),
-            Kind::Chest(_) | Kind::Enchanting => None,
+            Kind::Chest(_) | Kind::Enchanting | Kind::Lectern | Kind::Brewing => None,
         }
     }
 
@@ -69,7 +86,8 @@ impl Kind {
     fn craft_output(self) -> Option<usize> {
         match self {
             Kind::Player | Kind::Crafting => Some(0),
-            Kind::Grindstone => Some(2),
+            Kind::Grindstone | Kind::Anvil => Some(2),
+            Kind::Smithing | Kind::Loom => Some(3),
             Kind::Stonecutter => Some(1),
             _ => None,
         }
@@ -105,6 +123,10 @@ pub struct Rules<'a> {
     /// Точило: изнашиваемый предмет или стопка с чарами, без сырого патча.
     pub grindable: &'a dyn Fn(&Stack) -> bool,
     pub creative: bool,
+    pub can_take_output: bool,
+    pub smithing_accept: &'a dyn Fn(usize, i32) -> bool,
+    pub loom_accept: &'a dyn Fn(usize, i32) -> bool,
+    pub brewing_accept: &'a dyn Fn(usize, i32) -> bool,
 }
 
 /// Перетаскивание (`QUICK_CRAFT`) между пакетами.
@@ -151,7 +173,8 @@ impl Menu<'_> {
             self.kind == Kind::Furnace && slot == 1 && Some(item) == self.rules.bucket;
         let enchant_item = self.kind == Kind::Enchanting && slot == 0;
         let grind_input = self.kind == Kind::Grindstone && slot < 2;
-        if self.kind.armor(slot).is_some() || bucket_fuel || enchant_item || grind_input {
+        if self.kind.armor(slot).is_some() || bucket_fuel || enchant_item || grind_input
+            || self.kind == Kind::Brewing && slot < 3 {
             1
         } else {
             self.max(item)
@@ -164,6 +187,15 @@ impl Menu<'_> {
         }
         if self.kind == Kind::Stonecutter && slot == 0 {
             return (self.rules.smeltable)(s.item);
+        }
+        if self.kind == Kind::Smithing && slot < 3 {
+            return (self.rules.smithing_accept)(slot, s.item);
+        }
+        if self.kind == Kind::Loom && slot < 3 {
+            return (self.rules.loom_accept)(slot, s.item);
+        }
+        if self.kind == Kind::Brewing && slot < 5 {
+            return (self.rules.brewing_accept)(slot, s.item);
         }
         if self.kind == Kind::Enchanting && slot == 1 {
             return Some(s.item) == self.rules.lapis;
@@ -184,6 +216,9 @@ impl Menu<'_> {
     /// Выполняет клик; возвращает выброшенное (Q, клик за окном).
     pub fn click(&mut self, slot: i16, button: i8, mode: i32) -> Vec<Stack> {
         let mut thrown = Vec::new();
+        if self.kind == Kind::Lectern {
+            return thrown;
+        }
         let size = self.slots.len();
         let index = (slot >= 0 && (slot as usize) < size).then_some(slot as usize);
         if mode == QUICK_CRAFT {
@@ -242,6 +277,9 @@ impl Menu<'_> {
 
     /// Забирает результат крафта или точила целиком и пересчитывает его.
     fn take_output(&mut self) -> Slot {
+        if !self.rules.can_take_output {
+            return None;
+        }
         let i = self.kind.craft_output()?;
         let out = self.slots.get_mut(i)?.take()?;
         (self.craft)(self.slots);
@@ -250,6 +288,9 @@ impl Menu<'_> {
 
     fn pickup(&mut self, i: usize, left: bool) {
         if self.kind.craft_output() == Some(i) {
+            if !self.rules.can_take_output {
+                return;
+            }
             let Some(result) = self.slots[i] else { return };
             match *self.carried {
                 None => *self.carried = self.take_output(),
@@ -340,12 +381,18 @@ impl Menu<'_> {
         let hotbar = inv + 27;
         let end = hotbar + 9;
         if self.kind.craft_output() == Some(i) {
+            if !self.rules.can_take_output {
+                return;
+            }
             // Результат: крафтим, пока влезает и рецепт тот же.
             let Some(first) = self.slots[i] else { return };
             for _ in 0..64 {
                 match self.slots[i] {
                     Some(r) if same(&r, &first) => {
-                        if self.kind == Kind::Stonecutter {
+                        if matches!(
+                            self.kind,
+                            Kind::Stonecutter | Kind::Anvil | Kind::Smithing | Kind::Loom
+                        ) {
                             let capacity: i32 = (inv..end)
                                 .map(|j| match self.slots[j] {
                                     Some(dst) if same(&dst, &r) => {
@@ -379,6 +426,7 @@ impl Menu<'_> {
         let Some(mut s) = self.slots[i] else { return };
         let original = s.count;
         match self.kind {
+            Kind::Lectern => return,
             Kind::Player => {
                 let armor = match (self.rules.equip)(s.item) {
                     Some("head") => Some(5),
@@ -425,6 +473,29 @@ impl Menu<'_> {
                     self.move_to(&mut s, inv..hotbar, false);
                 }
             }
+            Kind::Brewing => {
+                if i < inv {
+                    self.move_to(&mut s, inv..end, true);
+                } else if (self.rules.brewing_accept)(4, s.item) && self.slots[4].is_none() {
+                    self.move_to(&mut s, 4..5, false);
+                } else if (self.rules.brewing_accept)(3, s.item) {
+                    self.move_to(&mut s, 3..4, false);
+                } else if (self.rules.brewing_accept)(4, s.item) {
+                    self.move_to(&mut s, 4..5, false);
+                } else if (self.rules.brewing_accept)(0, s.item) {
+                    for slot in 0..3 {
+                        if s.count == 0 { break; }
+                        if self.slots[slot].is_none() {
+                            self.slots[slot] = Some(Stack { count: 1, ..s });
+                            s.count -= 1;
+                        }
+                    }
+                } else if i < hotbar {
+                    self.move_to(&mut s, hotbar..end, false);
+                } else {
+                    self.move_to(&mut s, inv..hotbar, false);
+                }
+            }
             Kind::Enchanting => {
                 // `EnchantmentMenu.quickMoveStack`: лазурит — во второй слот, иначе один предмет — в первый.
                 if i < inv {
@@ -447,7 +518,7 @@ impl Menu<'_> {
                     }
                 }
             }
-            Kind::Grindstone => {
+            Kind::Grindstone | Kind::Anvil => {
                 // Входы — в инвентарь. Из инвентаря по штуке в каждый свободный вход
                 // (`move_to` останавливается на первой пустой ячейке).
                 if i < inv {
@@ -465,6 +536,28 @@ impl Menu<'_> {
                         } else {
                             self.move_to(&mut s, inv..hotbar, false);
                         }
+                    }
+                }
+            }
+            Kind::Smithing => {
+                if i < inv {
+                    self.move_to(&mut s, inv..end, true);
+                } else if !self.move_to(&mut s, 0..3, false) {
+                    if i < hotbar {
+                        self.move_to(&mut s, hotbar..end, false);
+                    } else {
+                        self.move_to(&mut s, inv..hotbar, false);
+                    }
+                }
+            }
+            Kind::Loom => {
+                if i < inv {
+                    self.move_to(&mut s, inv..end, true);
+                } else if !self.move_to(&mut s, 0..3, false) {
+                    if i < hotbar {
+                        self.move_to(&mut s, hotbar..end, false);
+                    } else {
+                        self.move_to(&mut s, inv..hotbar, false);
                     }
                 }
             }
@@ -495,6 +588,9 @@ impl Menu<'_> {
             return;
         }
         if self.kind.craft_output() == Some(i) {
+            if !self.rules.can_take_output {
+                return;
+            }
             if self.slots[target].is_none() {
                 self.slots[target] = self.take_output();
             }
@@ -620,6 +716,220 @@ impl Menu<'_> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn lectern_book_cannot_be_taken_by_slot_click() {
+        let mut slots = vec![Some(Stack::new(7, 1))];
+        let mut carried = None;
+        let mut drag = Drag::default();
+        let rules = Rules {
+            max_stack: &|_| 64,
+            equip: &|_| None,
+            smeltable: &|_| false,
+            fuel: &|_| false,
+            bucket: None,
+            lapis: None,
+            grindable: &|_| false,
+            creative: false,
+            can_take_output: true,
+            smithing_accept: &|_, _| false,
+            loom_accept: &|_, _| false,
+            brewing_accept: &|_, _| false,
+        };
+        let mut craft = |_: &mut [Slot]| panic!("lectern must not craft");
+        let mut menu = Menu {
+            kind: Kind::Lectern,
+            slots: &mut slots,
+            carried: &mut carried,
+            drag: &mut drag,
+            rules: &rules,
+            craft: &mut craft,
+        };
+        assert!(menu.click(0, 0, PICKUP).is_empty());
+        assert_eq!(menu.slots[0], Some(Stack::new(7, 1)));
+        assert_eq!(*menu.carried, None);
+    }
+
+    #[test]
+    fn loom_shift_consumes_banner_and_dye_but_keeps_pattern() {
+        let mut slots = vec![None; Kind::Loom.size()];
+        slots[0] = Some(Stack::new(1, 2));
+        slots[1] = Some(Stack::new(2, 3));
+        slots[2] = Some(Stack::new(3, 1));
+        slots[3] = Some(Stack::new(4, 1));
+        let mut carried = None;
+        let mut drag = Drag::default();
+        let rules = Rules {
+            max_stack: &|_| 64,
+            equip: &|_| None,
+            smeltable: &|_| false,
+            fuel: &|_| false,
+            bucket: None,
+            lapis: None,
+            grindable: &|_| false,
+            creative: false,
+            can_take_output: true,
+            smithing_accept: &|_, _| false,
+            loom_accept: &|slot, item| item == slot as i32 + 1,
+            brewing_accept: &|_, _| false,
+        };
+        let mut craft = |slots: &mut [Slot]| {
+            for slot in &mut slots[..2] {
+                let s = slot.as_mut().unwrap();
+                s.count -= 1;
+                if s.count == 0 {
+                    *slot = None;
+                }
+            }
+            slots[3] = (slots[0].is_some() && slots[1].is_some()).then_some(Stack::new(4, 1));
+        };
+        let mut menu = Menu {
+            kind: Kind::Loom,
+            slots: &mut slots,
+            carried: &mut carried,
+            drag: &mut drag,
+            rules: &rules,
+            craft: &mut craft,
+        };
+        menu.click(3, 0, QUICK_MOVE);
+        assert_eq!(menu.slots[0], None);
+        assert_eq!(menu.slots[1], Some(Stack::new(2, 1)));
+        assert_eq!(menu.slots[2], Some(Stack::new(3, 1)));
+        assert_eq!(menu.slots[39], Some(Stack::new(4, 2)));
+    }
+
+    #[test]
+    fn smithing_shift_consumes_one_of_each_input_per_result() {
+        let mut slots = vec![None; Kind::Smithing.size()];
+        for i in 0..3 {
+            slots[i] = Some(Stack::new(i as i32 + 1, 2));
+        }
+        slots[3] = Some(Stack::new(4, 1));
+        let mut carried = None;
+        let mut drag = Drag::default();
+        let rules = Rules {
+            max_stack: &|_| 64,
+            equip: &|_| None,
+            smeltable: &|_| false,
+            fuel: &|_| false,
+            bucket: None,
+            lapis: None,
+            grindable: &|_| false,
+            creative: false,
+            can_take_output: true,
+            loom_accept: &|_, _| false,
+            brewing_accept: &|_, _| false,
+            smithing_accept: &|slot, item| item == slot as i32 + 1,
+        };
+        let mut craft = |slots: &mut [Slot]| {
+            for slot in &mut slots[..3] {
+                let s = slot.as_mut().unwrap();
+                s.count -= 1;
+                if s.count == 0 {
+                    *slot = None;
+                }
+            }
+            slots[3] = slots[..3]
+                .iter()
+                .all(Option::is_some)
+                .then_some(Stack::new(4, 1));
+        };
+        let mut menu = Menu {
+            kind: Kind::Smithing,
+            slots: &mut slots,
+            carried: &mut carried,
+            drag: &mut drag,
+            rules: &rules,
+            craft: &mut craft,
+        };
+        menu.click(3, 0, QUICK_MOVE);
+        assert!(menu.slots[..4].iter().all(Option::is_none));
+        assert_eq!(menu.slots[39], Some(Stack::new(4, 2)));
+    }
+
+    #[test]
+    fn anvil_result_cannot_be_taken_without_levels() {
+        let mut slots = vec![None; Kind::Anvil.size()];
+        slots[0] = Some(Stack::new(1, 1));
+        slots[2] = Some(Stack::new(2, 1));
+        let mut carried = None;
+        let mut drag = Drag::default();
+        let mut taken = false;
+        let mut craft = |_: &mut [Slot]| taken = true;
+        let rules = Rules {
+            max_stack: &|_| 64,
+            equip: &|_| None,
+            smeltable: &|_| false,
+            fuel: &|_| false,
+            bucket: None,
+            lapis: None,
+            grindable: &|_| false,
+            creative: false,
+            can_take_output: false,
+            loom_accept: &|_, _| false,
+            brewing_accept: &|_, _| false,
+            smithing_accept: &|_, _| false,
+        };
+        let mut menu = Menu {
+            kind: Kind::Anvil,
+            slots: &mut slots,
+            carried: &mut carried,
+            drag: &mut drag,
+            rules: &rules,
+            craft: &mut craft,
+        };
+        menu.click(2, 0, PICKUP);
+        menu.click(2, 0, QUICK_MOVE);
+        menu.click(2, 0, THROW);
+        menu.click(2, 0, SWAP);
+        assert_eq!(menu.slots[2], Some(Stack::new(2, 1)));
+        assert_eq!(*menu.carried, None);
+        drop(menu);
+        assert!(!taken);
+    }
+
+    #[test]
+    fn anvil_shift_requires_room_for_entire_named_stack() {
+        let mut slots = vec![Some(Stack::new(9, 64)); Kind::Anvil.size()];
+        slots[0] = Some(Stack::new(1, 64));
+        slots[1] = None;
+        slots[2] = Some(Stack::new(2, 64));
+        slots[3] = Some(Stack::new(2, 32));
+        let mut carried = None;
+        let mut drag = Drag::default();
+        let rules = Rules {
+            max_stack: &|_| 64,
+            equip: &|_| None,
+            smeltable: &|_| false,
+            fuel: &|_| false,
+            bucket: None,
+            lapis: None,
+            grindable: &|_| false,
+            creative: false,
+            can_take_output: true,
+            loom_accept: &|_, _| false,
+            brewing_accept: &|_, _| false,
+            smithing_accept: &|_, _| false,
+        };
+        let mut craft = |slots: &mut [Slot]| slots[0] = None;
+        let mut menu = Menu {
+            kind: Kind::Anvil,
+            slots: &mut slots,
+            carried: &mut carried,
+            drag: &mut drag,
+            rules: &rules,
+            craft: &mut craft,
+        };
+        menu.click(2, 0, QUICK_MOVE);
+        assert_eq!(menu.slots[0], Some(Stack::new(1, 64)));
+        assert_eq!(menu.slots[2], Some(Stack::new(2, 64)));
+        menu.slots[4] = None;
+        menu.click(2, 0, QUICK_MOVE);
+        assert_eq!(menu.slots[0], None);
+        assert_eq!(menu.slots[2], None);
+        assert_eq!(menu.slots[3], Some(Stack::new(2, 64)));
+        assert_eq!(menu.slots[4], Some(Stack::new(2, 32)));
+    }
+
     fn st(item: i32, count: i32) -> Slot {
         Some(Stack {
             item,
@@ -647,6 +957,10 @@ mod tests {
             lapis: Some(10),
             grindable: &|_| false,
             creative: false,
+            can_take_output: true,
+            loom_accept: &|_, _| false,
+            brewing_accept: &|_, _| false,
+            smithing_accept: &|_, _| false,
         };
         let mut drag = Drag::default();
         let mut craft = |_: &mut [Slot]| {};
@@ -679,6 +993,10 @@ mod tests {
             lapis: None,
             grindable: &|_| false,
             creative: false,
+            can_take_output: true,
+            loom_accept: &|_, _| false,
+            brewing_accept: &|_, _| false,
+            smithing_accept: &|_, _| false,
         };
         let mut drag = Drag::default();
         let mut craft = |slots: &mut [Slot]| {
@@ -847,6 +1165,30 @@ mod tests {
         slots[2] = st(3, 4);
         run(Kind::Furnace, &mut slots, &mut carried, &[(2, 1, PICKUP)]);
         assert_eq!((slots[2], carried), (st(3, 2), st(3, 2)));
+    }
+
+    #[test]
+    fn brewing_shift_routes_bottles_reagent_and_fuel() {
+        let mut slots = vec![None; Kind::Brewing.size()];
+        slots[5] = Some(Stack::new(1, 3)); // бутылки
+        slots[6] = Some(Stack::new(2, 2)); // реагент
+        slots[7] = Some(Stack::new(3, 2)); // огненный порошок
+        let mut carried = None;
+        let mut drag = Drag::default();
+        let rules = Rules {
+            max_stack: &|_| 64, equip: &|_| None, smeltable: &|_| false,
+            fuel: &|_| false, bucket: None, lapis: None, grindable: &|_| false,
+            creative: false, can_take_output: true, smithing_accept: &|_, _| false,
+            loom_accept: &|_, _| false,
+            brewing_accept: &|slot, item| match slot { 0..=2 => item == 1, 3 => item == 2, 4 => item == 3, _ => false },
+        };
+        let mut craft = |_: &mut [Slot]| {};
+        let mut menu = Menu { kind: Kind::Brewing, slots: &mut slots, carried: &mut carried,
+            drag: &mut drag, rules: &rules, craft: &mut craft };
+        for slot in 5..=7 { menu.click(slot, 0, QUICK_MOVE); }
+        assert_eq!(menu.slots[..3], [Some(Stack::new(1, 1)); 3]);
+        assert_eq!(menu.slots[3], Some(Stack::new(2, 2)));
+        assert_eq!(menu.slots[4], Some(Stack::new(3, 2)));
     }
 
     #[test]

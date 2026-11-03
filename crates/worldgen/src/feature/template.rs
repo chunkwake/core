@@ -53,11 +53,14 @@ struct Piece {
 #[derive(Clone, Debug)]
 pub(crate) struct StoredJig {
     pub pos: [i32; 3],
-    pub orientation: String,
+    /// Фронт и верх после каждого поворота в порядке [`ROTS`]: сборка jigsaw
+    /// перебирает кандидатов по всем поворотам, и строки на каждый перебор
+    /// съедали ~80% времени камер испытаний.
+    pub turned: [(&'static str, &'static str); 4],
     pub rollable: bool,
-    pub name: String,
-    pub target: String,
-    pub pool: String,
+    pub name: Arc<str>,
+    pub target: Arc<str>,
+    pub pool: Arc<str>,
     pub placement_priority: i32,
     pub selection_priority: i32,
     pub final_state: u32,
@@ -67,12 +70,12 @@ pub(crate) struct StoredJig {
 #[derive(Clone, Debug)]
 pub(crate) struct JigInfo {
     pub pos: [i32; 3],
-    pub front: String,
-    pub top: String,
+    pub front: &'static str,
+    pub top: &'static str,
     pub rollable: bool,
-    pub name: Option<String>,
-    pub target: String,
-    pub pool: String,
+    pub name: Option<Arc<str>>,
+    pub target: Arc<str>,
+    pub pool: Arc<str>,
     pub placement_priority: i32,
     pub selection_priority: i32,
 }
@@ -83,6 +86,17 @@ pub(crate) struct Template {
     pub(crate) size: [i32; 3],
     palettes: Vec<Vec<Piece>>,
     pub(crate) jigsaws: Vec<Vec<StoredJig>>,
+}
+
+impl Template {
+    /// Пустой шаблон `StructureTemplateManager.getOrCreate`.
+    pub(crate) fn empty() -> Self {
+        Self {
+            size: [0; 3],
+            palettes: vec![vec![]],
+            jigsaws: vec![vec![]],
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -129,10 +143,18 @@ pub(crate) enum Processor {
     Blackstone,
     /// `block_ignore`: структурные блоки (и воздух, если пещеры нет) не ставятся.
     IgnoreStructureBlock { air_pocket: f32 },
+    /// `capped`: на блок ничего не делает; в `finalizeProcessing` делегат
+    /// пробует случайные блоки всего куска, пока не изменит `limit` штук.
+    Capped {
+        delegate: Box<Processor>,
+        limit: crate::carver::IntP,
+    },
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum RuleInput {
+    /// `always_true`.
+    Always,
     Block(u32),
     State(u32),
     Tag(Arc<Vec<bool>>),
@@ -151,11 +173,84 @@ pub(crate) enum RuleAt {
     Always,
 }
 
+/// `PosRuleTest`: от расстояния между блоком и опорной точкой старта.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PosTest {
+    /// `always_true`.
+    Always,
+    /// `linear_pos`: манхэттен; `axis_aligned_linear_pos`: по одной оси.
+    Linear {
+        axis: Option<usize>,
+        min_chance: f32,
+        max_chance: f32,
+        min_dist: i32,
+        max_dist: i32,
+    },
+}
+
+impl PosTest {
+    fn parse(v: &Value) -> Result<Self, String> {
+        let kind = v["predicate_type"].as_str();
+        let f = |k: &str| v[k].as_f64().unwrap_or(0.0) as f32;
+        let i = |k: &str| v[k].as_i64().unwrap_or(0) as i32;
+        let axis = match kind {
+            None | Some("minecraft:always_true") => return Ok(Self::Always),
+            Some("minecraft:linear_pos") => None,
+            Some("minecraft:axis_aligned_linear_pos") => Some(match v["axis"].as_str().unwrap_or("y") {
+                "x" => 0,
+                "z" => 2,
+                _ => 1,
+            }),
+            Some(other) => return Err(format!("position predicate {other} is not supported")),
+        };
+        Ok(Self::Linear {
+            axis,
+            min_chance: f("min_chance"),
+            max_chance: f("max_chance"),
+            min_dist: i("min_dist"),
+            max_dist: i("max_dist"),
+        })
+    }
+
+    /// `LinearPosTest` / `AxisAlignedLinearPosTest.test`: бросок `nextFloat`
+    /// против `clampedLerp(inverseLerp(dist))` во float.
+    fn holds(self, world: [i32; 3], reference: [i32; 3], rng: &mut Legacy) -> bool {
+        let Self::Linear {
+            axis,
+            min_chance,
+            max_chance,
+            min_dist,
+            max_dist,
+        } = self
+        else {
+            return true;
+        };
+        let d = |i: usize| (world[i] - reference[i]).abs();
+        let dist = match axis {
+            Some(a) => d(a),
+            None => d(0) + d(1) + d(2),
+        };
+        let rnd = rng.next_float();
+        let t = (dist as f32 - min_dist as f32) / (max_dist as f32 - min_dist as f32);
+        let chance = if t < 0.0 {
+            min_chance
+        } else if t > 1.0 {
+            max_chance
+        } else {
+            min_chance + t * (max_chance - min_chance)
+        };
+        rnd <= chance
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct ProcRule {
     pub(crate) input: RuleInput,
     pub(crate) at: RuleAt,
+    pub(crate) pos: PosTest,
     pub(crate) output: u32,
+    /// `block_entity_modifier` `append_loot`: таблица лута блок-сущности.
+    pub(crate) loot: Option<String>,
 }
 
 /// Включающие границы, как `BoundingBox.isInside`.
@@ -362,6 +457,7 @@ pub(crate) fn parse_processors(
                     let input = &rule["input_predicate"];
                     let kind = predicate_kind(input);
                     let input = match kind {
+                        "minecraft:always_true" => RuleInput::Always,
                         "minecraft:block_match" => {
                             RuleInput::Block(palette.block(input["block"].as_str().unwrap_or(""))?)
                         }
@@ -382,16 +478,40 @@ pub(crate) fn parse_processors(
                     let loc = &rule["location_predicate"];
                     let at = if predicate_kind(loc) == "minecraft:block_match" {
                         RuleAt::Block(palette.block(loc["block"].as_str().unwrap_or(""))?)
+                    } else if predicate_kind(loc) == "minecraft:always_true" {
+                        RuleAt::Always
                     } else {
                         RuleAt::Pred(Predicate::parse(loc, palette)?)
+                    };
+                    let modifier = &rule["block_entity_modifier"];
+                    let loot = match modifier["type"].as_str() {
+                        None | Some("minecraft:passthrough") => None,
+                        Some("minecraft:append_loot") => {
+                            Some(modifier["loot_table"].as_str().unwrap_or("").to_owned())
+                        }
+                        Some(other) => {
+                            return Err(format!("block entity modifier {other} is not supported"));
+                        }
                     };
                     rules.push(ProcRule {
                         input,
                         at,
+                        pos: PosTest::parse(&rule["position_predicate"])?,
                         output: palette.state(&rule["output_state"])?,
+                        loot,
                     });
                 }
                 out.push(Processor::Rule(rules));
+            }
+            "minecraft:capped" => {
+                let one = serde_json::json!({ "processors": [p["delegate"].clone()] });
+                let delegate = parse_processors(&one, read, palette)?
+                    .pop()
+                    .ok_or("capped: no delegate")?;
+                out.push(Processor::Capped {
+                    delegate: Box::new(delegate),
+                    limit: crate::carver::IntP::parse(&p["limit"])?,
+                });
             }
             other => return Err(format!("processor {other} is not supported")),
         }
@@ -409,7 +529,15 @@ pub(crate) fn load_template(
         .join("data/minecraft/structure")
         .join(path)
         .with_extension("nbt");
-    let root = nbt::read_gzip_file(&file)?.ok_or_else(|| format!("no template {id}"))?;
+    // `getOrCreate`: шаблона нет — пустой, без блоков и стыков. Так в 26.3
+    // пул `ancient_city/walls/no_corners` ссылается на несуществующий файл.
+    let Some(root) = nbt::read_gzip_file(&file)? else {
+        return Ok(Template {
+            size: [0; 3],
+            palettes: vec![Vec::new()],
+            jigsaws: vec![Vec::new()],
+        });
+    };
     let size = int3(root.get("size").ok_or_else(|| format!("{id}: no size"))?)
         .ok_or_else(|| format!("{id}: size"))?;
     let blocks = root
@@ -470,6 +598,16 @@ pub(crate) fn load_public(
     palette: &Palette,
     id: &str,
 ) -> Result<Template, String> {
+    // `/place template` берёт `StructureTemplateManager.get`: нет файла — ошибка,
+    // а не пустой шаблон `getOrCreate`, как у пулов генерации.
+    let path = id.strip_prefix("minecraft:").unwrap_or(id);
+    let file = data_dir
+        .join("data/minecraft/structure")
+        .join(path)
+        .with_extension("nbt");
+    if !file.is_file() {
+        return Err(format!("{id}: no such template"));
+    }
     load_template(data_dir, palette, id)
 }
 
@@ -479,7 +617,7 @@ pub(crate) fn size_public(
     palette: &Palette,
     id: &str,
 ) -> Result<[i32; 3], String> {
-    Ok(load_template(data_dir, palette, id)?.size)
+    Ok(load_public(data_dir, palette, id)?.size)
 }
 
 /// Блоки шаблона в мировых координатах: без процессоров, маркеров и воды.
@@ -616,13 +754,18 @@ fn stored_jig(
         Some(tag) => final_state(palette, tag)?,
         None => air,
     };
+    let turned = ROTS.map(|rot| {
+        let o = rotate_orientation(&orientation, rot).unwrap_or_else(|| orientation.clone());
+        let (front, top) = o.split_once('_').unwrap_or(("north", "up"));
+        (direction(front), direction(top))
+    });
     Ok(StoredJig {
         pos,
-        orientation,
+        turned,
         rollable,
-        name: ident("name"),
-        target: ident("target"),
-        pool: ident("pool"),
+        name: ident("name").into(),
+        target: ident("target").into(),
+        pool: ident("pool").into(),
         placement_priority: nbt
             .and_then(|n| n.get("placement_priority"))
             .and_then(Tag::as_i64)
@@ -1200,8 +1343,9 @@ pub(crate) fn place_with(
         let mut state = Some(piece.state);
         for processor in processors {
             let Some(current) = state else { break };
-            // Процессоры видят состояние до зеркала и поворота.
-            state = processor.apply(pal, level, current, world, r, true);
+            // Процессоры видят состояние до зеркала и поворота. Проверок по
+            // опорной точке у этих списков нет.
+            state = processor.apply(pal, level, current, world, world, r, true);
         }
         let Some(state) = state else { continue };
         let state = mirror_state(pal, state, mirror, rot);
@@ -1269,6 +1413,7 @@ pub(crate) fn place_mirrored(
     rot: Rot,
     window: Bounds,
     r: &mut Worldgen,
+    ignore_air: bool,
 ) -> Vec<([i32; 3], Option<String>)> {
     let mut out = Vec::new();
     if template.palettes.is_empty() {
@@ -1279,6 +1424,7 @@ pub(crate) fn place_mirrored(
         return out;
     };
     let structure_block = pal.blocks.get("minecraft:structure_block").map(|b| b.0);
+    let air = pal.blocks.get("minecraft:air").map(|b| b.0);
     let mut placed = Vec::new();
     for piece in blocks {
         let shifted = transform_mirror(
@@ -1299,6 +1445,10 @@ pub(crate) fn place_mirrored(
             if let Some(meta) = &piece.marker {
                 out.push((world, Some(meta.clone())));
             }
+            continue;
+        }
+        // `BlockIgnoreProcessor.STRUCTURE_AND_AIR`.
+        if ignore_air && air.is_some_and(|id| block == Some(id)) {
             continue;
         }
         if !window.contains(world) || !level.can_write(world[0], world[2]) {
@@ -1836,7 +1986,7 @@ fn place_in_world(
         let mut state = Some(piece.state);
         for processor in processors {
             let Some(current) = state else { break };
-            state = processor.apply(pal, level, current, world, r, false);
+            state = processor.apply(pal, level, current, world, world, r, false);
         }
         let Some(state) = state else { continue };
         let state = rotate_state(pal, state, rot);
@@ -1864,6 +2014,7 @@ impl Processor {
         level: &dyn Level,
         state: u32,
         world: [i32; 3],
+        reference: [i32; 3],
         r: &mut Worldgen,
         positional_rot: bool,
     ) -> Option<u32> {
@@ -1900,7 +2051,10 @@ impl Processor {
                 // позиции, заново на каждый блок. Генератор декорации не двигается.
                 let mut rng = Legacy::new(palette_seed(world[0], world[1], world[2]));
                 for rule in rules {
-                    if rule.input.holds(pal, state, &mut rng) && rule.at.holds(pal, level, world) {
+                    if rule.input.holds(pal, state, &mut rng)
+                        && rule.at.holds(pal, level, world)
+                        && rule.pos.holds(world, reference, &mut rng)
+                    {
                         return Some(rule.output);
                     }
                 }
@@ -1923,6 +2077,7 @@ impl Processor {
                 Some(state)
             }
             Self::Blackstone => Some(blackstone(pal, state)),
+            Self::Capped { .. } => Some(state),
             Self::IgnoreStructureBlock { air_pocket } => {
                 // `BlockIgnoreProcessor`: структурный блок всегда, воздух — если
                 // пещеры нет (иначе шаблон вырезает её сам).
@@ -2108,6 +2263,7 @@ impl RuleInput {
     fn holds(&self, pal: &Palette, state: u32, r: &mut impl Bits) -> bool {
         let block = pal.block_index(state);
         match self {
+            Self::Always => true,
             Self::Block(id) => block == Some(*id),
             Self::State(want) => state == *want,
             Self::Tag(mask) => mask.get(state as usize).copied().unwrap_or(false),
@@ -2166,6 +2322,8 @@ pub(crate) fn place_pool(
     gravity: bool,
     r: &mut Worldgen,
     window: Bounds,
+    world_seed: i64,
+    reference: [i32; 3],
 ) -> bool {
     if template.palettes.is_empty()
         || template.size[0] < 1
@@ -2188,6 +2346,18 @@ pub(crate) fn place_pool(
         .flatten()
         .map(|j| (j.pos, j.final_state))
         .collect();
+    // `processBlockInfos`: при `evaluatesEntirePieceState` обрабатывается
+    // весь кусок, иначе только блоки окна чанка.
+    let whole = processors
+        .iter()
+        .any(|p| matches!(p, Processor::Capped { .. }));
+    struct Info<'t> {
+        world: [i32; 3],
+        state: u32,
+        piece: &'t Piece,
+        loot: Option<(String, i64)>,
+    }
+    let mut infos: Vec<Info<'_>> = Vec::new();
     for piece in blocks {
         let shifted = transform(rot, piece.pos[0], piece.pos[1], piece.pos[2]);
         let mut world = [
@@ -2195,7 +2365,7 @@ pub(crate) fn place_pool(
             place[1] + shifted[1],
             place[2] + shifted[2],
         ];
-        if !window.contains(world) {
+        if !whole && !window.contains(world) {
             continue;
         }
         let block = pal.block_index(piece.state);
@@ -2208,7 +2378,7 @@ pub(crate) fn place_pool(
         let mut state = finals.get(&piece.pos).copied().unwrap_or(piece.state);
         let mut keep = true;
         for processor in processors {
-            match processor.apply(pal, level, state, world, r, true) {
+            match processor.apply(pal, level, state, world, reference, r, true) {
                 Some(next) => state = next,
                 None => {
                     keep = false;
@@ -2223,10 +2393,59 @@ pub(crate) fn place_pool(
             let surface = level.surface(Heightmap::WorldSurfaceWg, world[0], world[2]);
             world[1] = surface - 1 + piece.pos[1];
         }
+        infos.push(Info {
+            world,
+            state,
+            piece,
+            loot: None,
+        });
+    }
+    for processor in processors {
+        let Processor::Capped { delegate, limit } = processor else {
+            continue;
+        };
+        if infos.is_empty() {
+            continue;
+        }
+        // `RandomSource.createThreadLocalInstance(seed).forkPositional().at(position)`.
+        let mut rng = {
+            let factory = Legacy::new(world_seed).next_long();
+            Legacy::new(palette_seed(place[0], place[1], place[2]) ^ factory)
+        };
+        let most = limit.sample(&mut rng).min(infos.len() as i32);
+        if most < 1 {
+            continue;
+        }
+        let mut order: Vec<usize> = (0..infos.len()).collect();
+        shuffle(&mut order, &mut rng);
+        let mut replaced = 0;
+        for i in order {
+            if replaced >= most {
+                break;
+            }
+            let info = &mut infos[i];
+            if let Processor::Rule(rules) = delegate.as_ref() {
+                if let Some((state, loot)) = rule_hit(pal, &*level, rules, info.state, info.world, reference) {
+                    info.state = state;
+                    if loot.is_some() {
+                        info.loot = loot;
+                    }
+                    replaced += 1;
+                }
+            } else if let Some(next) = delegate.apply(pal, &*level, info.state, info.world, reference, r, true) {
+                if next != info.state {
+                    info.state = next;
+                    replaced += 1;
+                }
+            }
+        }
+    }
+    for info in infos {
+        let world = info.world;
         if !window.contains(world) {
             continue;
         }
-        let state = rotate_state(pal, state, rot);
+        let state = rotate_state(pal, info.state, rot);
         if skipped(pal, state) || !level.can_write(world[0], world[2]) {
             continue;
         }
@@ -2236,12 +2455,42 @@ pub(crate) fn place_pool(
             world[2],
             waterlog(pal, level, world, state),
         );
+        if let Some((table, seed)) = info.loot {
+            let mut nbt = chunkwake_world::nbt::Compound::new();
+            nbt.insert("LootTable".into(), chunkwake_world::nbt::Tag::String(table));
+            nbt.insert("LootTableSeed".into(), chunkwake_world::nbt::Tag::Long(seed));
+            level.set_block_entity(world[0], world[1], world[2], "minecraft:brushable_block", nbt);
+            continue;
+        }
         // `placeInWorld`: свой NBT шаблона плюс `LootTableSeed`.
-        if let Some(nbt) = &piece.nbt {
+        if let Some(nbt) = &info.piece.nbt {
             place_template_nbt(pal, level, world, state, nbt, r);
         }
     }
     true
+}
+
+/// `RuleProcessor.processBlock`: первое совпавшее правило и его
+/// `append_loot` (`nextLong` того же генератора после проверок).
+fn rule_hit(
+    pal: &Palette,
+    level: &dyn Level,
+    rules: &[ProcRule],
+    state: u32,
+    world: [i32; 3],
+    reference: [i32; 3],
+) -> Option<(u32, Option<(String, i64)>)> {
+    let mut rng = Legacy::new(palette_seed(world[0], world[1], world[2]));
+    for rule in rules {
+        if rule.input.holds(pal, state, &mut rng)
+            && rule.at.holds(pal, level, world)
+            && rule.pos.holds(world, reference, &mut rng)
+        {
+            let loot = rule.loot.as_ref().map(|t| (t.clone(), rng.next_long()));
+            return Some((rule.output, loot));
+        }
+    }
+    None
 }
 
 /// `getShuffledJigsawBlocks`: палитра от позиции, затем `Util.shuffle` и
@@ -2252,6 +2501,7 @@ pub(crate) fn shuffled_jigsaws(
     place: [i32; 3],
     r: &mut impl Bits,
 ) -> Vec<JigInfo> {
+    let t_jig = std::time::Instant::now();
     if template.jigsaws.is_empty() {
         return Vec::new();
     }
@@ -2260,17 +2510,15 @@ pub(crate) fn shuffled_jigsaws(
         .iter()
         .map(|jig| {
             let shifted = transform(rot, jig.pos[0], jig.pos[1], jig.pos[2]);
-            let orient = rotate_orientation(&jig.orientation, rot)
-                .unwrap_or_else(|| jig.orientation.clone());
-            let (front, top) = orient.split_once('_').unwrap_or(("north", "up"));
+            let (front, top) = jig.turned[rot_index(rot)];
             JigInfo {
                 pos: [
                     place[0] + shifted[0],
                     place[1] + shifted[1],
                     place[2] + shifted[2],
                 ],
-                front: front.to_owned(),
-                top: top.to_owned(),
+                front,
+                top,
                 rollable: jig.rollable,
                 name: Some(jig.name.clone()),
                 target: jig.target.clone(),
@@ -2282,6 +2530,7 @@ pub(crate) fn shuffled_jigsaws(
         .collect();
     shuffle(&mut list, r);
     list.sort_by_key(|b| std::cmp::Reverse(b.selection_priority));
+    JIG.with(|c| c.set(c.get() + t_jig.elapsed().as_secs_f64() * 1000.0));
     list
 }
 
@@ -2312,7 +2561,7 @@ fn waterlog(pal: &Palette, level: &dyn Level, world: [i32; 3], state: u32) -> u3
     pal.with_prop(state, "waterlogged", "true").unwrap_or(state)
 }
 
-pub(super) fn rotate_state(pal: &Palette, state: u32, rot: Rot) -> u32 {
+pub(crate) fn rotate_state(pal: &Palette, state: u32, rot: Rot) -> u32 {
     if rot == Rot::None {
         return state;
     }
@@ -2382,6 +2631,28 @@ fn rotate_cross(pal: &Palette, state: u32, rot: Rot) -> u32 {
         }
     }
     state
+}
+
+/// Номер поворота в [`ROTS`].
+fn rot_index(rot: Rot) -> usize {
+    match rot {
+        Rot::None => 0,
+        Rot::Cw90 => 1,
+        Rot::Cw180 => 2,
+        Rot::Ccw90 => 3,
+    }
+}
+
+/// Направление `FrontAndTop` как статическая строка.
+fn direction(dir: &str) -> &'static str {
+    match dir {
+        "down" => "down",
+        "up" => "up",
+        "south" => "south",
+        "west" => "west",
+        "east" => "east",
+        _ => "north",
+    }
 }
 
 fn rotate_horizontal(dir: &str, rot: Rot) -> Option<&'static str> {
@@ -2737,10 +3008,15 @@ mod tests {
             "minecraft:village/plains/town_centers/plains_meeting_point_1",
         )
         .unwrap();
-        let pools: Vec<&str> = hall.jigsaws[0].iter().map(|j| j.pool.as_str()).collect();
+        let pools: Vec<&str> = hall.jigsaws[0].iter().map(|j| &*j.pool).collect();
         assert!(
             pools.iter().any(|p| p.contains("village/plains")),
             "{pools:?}"
         );
     }
+}
+
+thread_local! {
+    /// PROF: время `shuffled_jigsaws`, мс.
+    pub(crate) static JIG: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
 }

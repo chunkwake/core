@@ -1,5 +1,5 @@
 //! Образ данных запуска: всё, что сервер собирает из дерева ванильных JSON,
-//! упаковывается в `chunkwake-derived-v1/boot.v2.bin` и дальше читается одним
+//! упаковывается в `chunkwake-derived-v1/boot.v3.bin` и дальше читается одним
 //! последовательным файлом вместо тысяч открытий и разборов.
 //!
 //! Сборка образа вызывает обычные загрузчики; повторный старт их не трогает.
@@ -18,9 +18,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Версия формата. Меняется вместе с любым полем образа.
-const SCHEMA: u32 = 2;
+const SCHEMA: u32 = 3;
 const MAGIC: u32 = 0x434B_424F; // "CKBO"
-const FILE: &str = "boot.v2.bin";
+const FILE: &str = "boot.v3.bin";
 
 /// Слоты экипировки в порядке кодов образа (`ItemInfo::equip`).
 const EQUIP: [&str; 8] = [
@@ -558,6 +558,7 @@ fn w_enchanting(w: &mut W, e: &Enchanting) {
         for v in [
             d.max_level,
             d.weight,
+            d.anvil_cost,
             d.min_base,
             d.min_step,
             d.max_base,
@@ -1068,8 +1069,15 @@ fn r_enchanting(r: &mut R<'_>) -> Result<Enchanting, DataError> {
     for _ in 0..n {
         let id = r.i32()?;
         let name = r.str()?;
-        let (max_level, weight, min_base, min_step, max_base, max_step) =
-            (r.i32()?, r.i32()?, r.i32()?, r.i32()?, r.i32()?, r.i32()?);
+        let (max_level, weight, anvil_cost, min_base, min_step, max_base, max_step) = (
+            r.i32()?,
+            r.i32()?,
+            r.i32()?,
+            r.i32()?,
+            r.i32()?,
+            r.i32()?,
+            r.i32()?,
+        );
         let supported = r.set()?;
         let primary = r.set()?;
         let exclusive = r.set()?;
@@ -1105,6 +1113,7 @@ fn r_enchanting(r: &mut R<'_>) -> Result<Enchanting, DataError> {
             name,
             max_level,
             weight,
+            anvil_cost,
             min_base,
             min_step,
             max_base,
@@ -1280,6 +1289,7 @@ mod tests {
             name: "minecraft:sharpness".into(),
             max_level: 5,
             weight: 10,
+            anvil_cost: 1,
             min_base: 1,
             min_step: 11,
             max_base: 21,
