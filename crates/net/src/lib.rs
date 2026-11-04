@@ -16,6 +16,7 @@ pub mod hoppers;
 pub mod items;
 pub mod live;
 pub mod loot;
+pub mod minecart;
 pub mod mobs;
 pub mod ops;
 pub mod orbs;

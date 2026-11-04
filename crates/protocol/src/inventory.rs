@@ -764,6 +764,17 @@ pub fn boat_data(
     w.buf
 }
 
+/// Удар по транспорту (`VehicleEntity`): время удара (8), сторона (9), урон (10).
+pub fn boat_data_hurt(id: i32, entity_id: i32, hurt: i32, hurt_dir: i32, damage: f32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_id);
+    w.u8(8).var_int(1).var_int(hurt);
+    w.u8(9).var_int(1).var_int(hurt_dir);
+    w.u8(10).var_int(3).f32(damage);
+    w.u8(0xff);
+    w.buf
+}
+
 /// `take_item_entity`: анимация подбора (предмет летит к игроку).
 pub fn take_item_entity(id: i32, item_entity: i32, collector: i32, amount: i32) -> Vec<u8> {
     let mut w = Writer::new();

@@ -185,7 +185,7 @@ impl PlayPlan {
     }
 
     /// Твёрдый блок для коробки лодки: не воздух, не жидкость, не трава и не цветы.
-    fn blocks_boat(&self, state: u32) -> bool {
+    pub(super) fn blocks_boat(&self, state: u32) -> bool {
         let name = self.state_name(state);
         if name.ends_with(":air") || crate::fluids::state_fluid(&self.survival.placement, state).is_some() {
             return false;

@@ -1471,6 +1471,8 @@ pub(crate) struct DimSim {
     mobs: Mutex<FastMap<i32, mobs::MobEntry>>,
     /// Лодки и плоты по ID сущности.
     boats: Mutex<FastMap<i32, boats::Boat>>,
+    /// Вагонетки по ID сущности.
+    minecarts: Mutex<FastMap<i32, minecarts::MinecartEntry>>,
     /// Чанки, уже заселённые мобами при генерации (или прочитанные из `entities/`).
     populated: Mutex<FastSet<(i32, i32)>>,
     /// Прочитанные с диска мобы: тик заберёт их в `mobs` (регион может читаться из самого тика).
@@ -1896,6 +1898,7 @@ use chunkwake_data::world::FURNACES;
 /// Ванильные команды: дерево, права, селекторы и обработчики.
 pub mod commands;
 mod boats;
+mod minecarts;
 mod mobs;
 mod poi;
 mod stream;
@@ -4734,7 +4737,10 @@ impl PlayPlan {
         // Вышел из лодки: она остаётся на месте пустой.
         let left_in = self.hub.players.lock().unwrap().get(&uuid).map(|p| p.dimension);
         if let Some(dim) = left_in {
-            with_dim(dim, || self.leave_boat(uuid, 0.0));
+            with_dim(dim, || {
+                self.leave_boat(uuid, 0.0);
+                self.leave_minecart(uuid);
+            });
         }
         self.hub.players.lock().unwrap().remove(&uuid);
         self.forget_ping(uuid);
@@ -8900,6 +8906,7 @@ impl PlayPlan {
         self.tick_tnt();
         self.tick_lightning();
         self.tick_mobs();
+        self.tick_minecarts();
         lap(PH_MOBS, &mut watch);
         self.tick_animals();
         lap(PH_ANIMALS, &mut watch);
@@ -8978,6 +8985,7 @@ impl DimSim {
     fn busy(&self) -> bool {
         !self.forced.lock().unwrap().is_empty()
             || !self.mobs.lock().unwrap().is_empty()
+            || !self.minecarts.lock().unwrap().is_empty()
             || !self.mobs_loaded.lock().unwrap().is_empty()
             || !self.dropped.lock().unwrap().is_empty()
             || !self.arrows.lock().unwrap().is_empty()
@@ -9333,6 +9341,7 @@ impl PlayPlan {
         out.extend(self.orb_frames());
         out.extend(self.mob_frames());
         out.extend(self.boat_frames());
+        out.extend(self.minecart_frames());
         if !out.is_empty() {
             conn.send_frames(&out).await?;
         }
@@ -9371,6 +9380,8 @@ impl PlayPlan {
         let mut gliding = false;
         // Сидит в лодке: клиент шлёт `move_vehicle` вместо своей позиции.
         let mut in_boat = false;
+        // Сидит в вагонетке: её везёт сервер, клиент шлёт только поворот и клавиши.
+        let mut in_cart = false;
         // `fallFlyTicks`: тики текущего полёта на элитрах.
         let mut fall_fly_ticks: u32 = 0;
         // Креатив/наблюдатель: клиент шлёт `player_abilities`, пока бит включён элитры нельзя.
@@ -9992,6 +10003,24 @@ impl PlayPlan {
                             in_boat = false;
                             self.leave_boat(uuid, 0.0);
                         }
+                        if in_cart && m.pos.is_some() {
+                            in_cart = false;
+                            self.leave_minecart(uuid);
+                        }
+                        // В вагонетке позицию ведёт тик: чанки догоняют её здесь.
+                        if in_cart && let Some((at, _, _)) = self.player_at(uuid) {
+                            let now = ((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4);
+                            if now != center {
+                                self.stream_move(conn, &mut stream, now).await?;
+                                center = now;
+                                out.clear();
+                                self.refresh_visible(uuid, center, r_view, &mut visible, &mut out);
+                                if !out.is_empty() {
+                                    conn.send_frames(&out).await?;
+                                }
+                            }
+                            state.vitals.reset_fall(at);
+                        }
                         // `PlayerMoveEvent` (как Paper: сдвиг > 1/16 блока или поворот > 10°).
                         if let Some((from, fyaw, fpitch)) = self.player_at(uuid)
                             && self.hooks().is_some_and(|h| h.listens(Event::Move))
@@ -10182,7 +10211,9 @@ impl PlayPlan {
                             let crit = !state.vitals.sprinting
                                 && self.hub.players.lock().unwrap().get(&uuid).is_some_and(|p| !p.on_ground);
                             let held = state.inv.slots[state.inv.held_slot()];
-                            if self.attack_boat(uuid, target, held, creative, crit).is_some() {
+                            if self.attack_boat(uuid, target, held, creative, crit).is_some()
+                                || self.attack_minecart(uuid, target, held, creative, crit).is_some()
+                            {
                                 continue;
                             }
                             if let Some(slot) = self.attack_mob(uuid, target, &mut state.inv, creative, state.vitals.sprinting).await {
@@ -10196,6 +10227,16 @@ impl PlayPlan {
                     }
                     if id == ids.sb_interact {
                         let it = play::read_interact(&mut r)?;
+                        // `Minecart.interact`: без шифта и в пустую — сесть.
+                        if self.is_minecart(it.entity) {
+                            if !state.vitals.dead && !it.sneaking && !in_boat && !in_cart && it.hand == 0
+                                && self.mount_minecart(uuid, me.entity_id, it.entity)
+                            {
+                                in_cart = true;
+                                state.vitals.clear_fall();
+                            }
+                            continue;
+                        }
                         // `AbstractBoat.interact`: без шифта — сесть.
                         if self.is_boat(it.entity) {
                             if !state.vitals.dead && !it.sneaking && !in_boat && it.hand == 0
@@ -10215,7 +10256,20 @@ impl PlayPlan {
                         continue;
                     }
                     if id == ids.sb_player_input {
-                        sneaking = r.u8()? & INPUT_SHIFT != 0;
+                        let input = r.u8()?;
+                        sneaking = input & INPUT_SHIFT != 0;
+                        if in_cart {
+                            self.minecart_input(uuid, input);
+                        }
+                        if sneaking && in_cart {
+                            in_cart = false;
+                            let (yaw, pitch) = self.player_at(uuid).map_or((0.0, 0.0), |p| (p.1, p.2));
+                            if let Some(spot) = self.leave_minecart(uuid) {
+                                teleport_id += 1;
+                                center = self.teleport(conn, uuid, spot, yaw, pitch, teleport_id, &mut stream).await?;
+                                state.vitals.reset_fall(spot);
+                            }
+                        }
                         // Плагины видят присед сразу, без ожидания тика.
                         self.set_sneaking(uuid, sneaking);
                         // `Player.rideTick`: шифт снимает с транспорта (`wantsToStopRiding`).
@@ -10727,6 +10781,20 @@ impl PlayPlan {
                             && let Some(held) = state.inv.slots[slot]
                             && self.item_name(held.item) == "minecraft:ender_eye"
                             && self.insert_ender_eye(u.pos)
+                        {
+                            if login.spawn.game_mode != 1 {
+                                state.inv.consume_at(slot);
+                                self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                            }
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                            continue;
+                        }
+                        // `MinecartItem.useOn`: вагонетка на рельс.
+                        if clicked.ends_with("rail") && !state.vitals.dead && login.spawn.game_mode != 3
+                            && self.player_at(uuid).is_some_and(|(p, _, _)| block_reach(eye_of(p), u.pos, if login.spawn.game_mode == 1 { 5.0 } else { 4.5 }))
+                            && let Some(slot) = Self::hand_index(&state.inv, u.hand)
+                            && let Some(held) = state.inv.slots[slot]
+                            && self.place_minecart(self.item_name(held.item), u.pos)
                         {
                             if login.spawn.game_mode != 1 {
                                 state.inv.consume_at(slot);
@@ -13873,7 +13941,34 @@ impl PlayPlan {
                     continue;
                 }
                 let name = self.state_name(s);
-                if rs::is_lamp(name) {
+                // `PoweredRailBlock.updateState`: свой сигнал или сигнал по
+                // цепочке того же рельса до 8 звеньев.
+                if (name == "minecraft:powered_rail" || name == "minecraft:activator_rail")
+                    && let Some(shape) = pl.prop(s, "shape").and_then(crate::minecart::Shape::parse)
+                {
+                    let rail_at = |q: [i32; 3]| {
+                        let t = at(q);
+                        if self.state_name(t) != name {
+                            return None;
+                        }
+                        let sh = crate::minecart::Shape::parse(pl.prop(t, "shape")?)?;
+                        Some((sh, pl.prop(t, "powered") == Some("true")))
+                    };
+                    let signal = |q: [i32; 3]| w.powered(q);
+                    let on = w.powered(p)
+                        || crate::minecart::rail_signal(p, shape, true, 0, &rail_at, &signal)
+                        || crate::minecart::rail_signal(p, shape, false, 0, &rail_at, &signal);
+                    if on != (pl.prop(s, "powered") == Some("true"))
+                        && let Some(n) = pl.with_prop(s, "powered", if on { "true" } else { "false" })
+                    {
+                        put(p, n);
+                        next.extend_from_slice(&rs::around(p));
+                        next.extend_from_slice(&rs::around([p[0], p[1] - 1, p[2]]));
+                        if shape.is_slope() {
+                            next.extend_from_slice(&rs::around([p[0], p[1] + 1, p[2]]));
+                        }
+                    }
+                } else if rs::is_lamp(name) {
                     let lit = pl.prop(s, "lit") == Some("true");
                     let powered = w.powered(p);
                     if powered && !lit {
@@ -16947,15 +17042,10 @@ impl PlayPlan {
 
     /// `DetectorRailBlock.checkPressed`: есть ли вагонетка в рамке `0.2…0.8`.
     ///
-    /// Вагонеток в сервере пока нет (отдельная строка матрицы), поэтому
-    /// нажатие невозможно. Рамка и правило «сигнал держится, пока вагонетка
-    /// внутри» уже совпадают с ванилью и проверены тестом
-    /// `detector_rail_search_box`; когда появятся вагонетки, здесь будет
-    /// поиск по их позициям в этих границах.
+    /// Рамка проверена тестом `detector_rail_search_box`, вагонетки — по их коробкам.
     fn detector_rail_pressed(&self, pos: [i32; 3]) -> bool {
         let (min, max) = crate::redstone::detector_search_box(pos);
-        let _ = (min, max);
-        false
+        self.minecart_in_box(min, max)
     }
 
     fn chest_at(&self, pos: [i32; 3]) -> Option<ChestState> {
@@ -18467,6 +18557,7 @@ impl PlayPlan {
     ) -> Result<(), NetError> {
         self.wake_player(me.entry.uuid);
         self.leave_boat(me.entry.uuid, 0.0);
+        self.leave_minecart(me.entry.uuid);
         {
             self.hub.send(
                 Some(me.entry.uuid),

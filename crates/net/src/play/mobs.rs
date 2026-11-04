@@ -1154,7 +1154,7 @@ impl PlayPlan {
             };
             for e in list {
                 let Tag::Compound(c) = e else { continue };
-                if self.load_boat(c) {
+                if self.load_boat(c) || self.load_minecart(c) {
                     written.insert(pos);
                     continue;
                 }
@@ -1306,7 +1306,7 @@ impl PlayPlan {
             );
             by_chunk.entry(pos).or_default().push(mob_to_nbt(&e.mob));
         }
-        for (pos, c) in self.boats_nbt() {
+        for (pos, c) in self.boats_nbt().into_iter().chain(self.minecarts_nbt()) {
             by_chunk.entry(pos).or_default().push(c);
         }
         for &pos in self.sim().entity_written.lock().unwrap().iter() {

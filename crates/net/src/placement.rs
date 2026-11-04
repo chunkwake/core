@@ -152,6 +152,18 @@ impl Placement {
         self.by_name.get(name).copied()
     }
 
+    /// Настоящие состояния по умолчанию из реестра (`"default": true`). Без
+    /// них берётся первое состояние блока, а оно у многих другое: у
+    /// детекторного рельса — включённый и залитый водой.
+    pub fn with_defaults(mut self, defaults: HashMap<String, u32>) -> Self {
+        for (name, id) in defaults {
+            if let Some(v) = self.by_name.get_mut(&name) {
+                *v = id;
+            }
+        }
+        self
+    }
+
     pub fn new(
         states: Vec<Option<(String, Props)>>,
         sturdy: Vec<u8>,
@@ -852,6 +864,18 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn default_state_from_registry() {
+        let states = vec![
+            Some(("minecraft:detector_rail".to_owned(), props(&[("powered", "true")]))),
+            Some(("minecraft:detector_rail".to_owned(), props(&[("powered", "false")]))),
+        ];
+        let p = Placement::new(states, vec![0; 2], HashSet::new());
+        assert_eq!(p.default_state("minecraft:detector_rail"), Some(0));
+        let p = p.with_defaults(HashMap::from([("minecraft:detector_rail".to_owned(), 1)]));
+        assert_eq!(p.default_state("minecraft:detector_rail"), Some(1));
     }
 
     #[test]

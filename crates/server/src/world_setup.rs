@@ -783,7 +783,8 @@ fn survival_data(
             .iter()
             .filter_map(|v| v.as_str().map(str::to_owned))
             .collect(),
-        ),
+        )
+        .with_defaults(blocks.defaults()),
         hardness: loaded.hardness,
         requires_tool: loaded.requires_tool,
         tools: loaded.tools,
