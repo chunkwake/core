@@ -34,6 +34,9 @@ pub trait Level {
     /// Клетка, чью форму надо пересчитать после декорации соседей
     /// (`markPosForPostProcessing`). По умолчанию некуда записать.
     fn mark_shape(&mut self, _x: i32, _y: i32, _z: i32) {}
+    /// `scheduleTick(pos, fluid, 0)`: жидкость потечёт, когда чанк станет
+    /// полным. По умолчанию некуда записать.
+    fn schedule_fluid(&mut self, _x: i32, _y: i32, _z: i32) {}
     /// `Level.setBlockEntity` для сундуков структур: ванила пишет в них
     /// `LootTable` и `LootTableSeed`, а не готовые предметы.
     fn set_block_entity(

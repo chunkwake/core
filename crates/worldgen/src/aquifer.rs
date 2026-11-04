@@ -63,6 +63,9 @@ fn similarity(d1: i32, d2: i32) -> f64 {
     1.0 - (d2 - d1) as f64 / 25.0
 }
 
+/// `FLOWING_UPDATE_SIMULARITY = similarity(10², 12²)`.
+const FLOWING_UPDATE_SIMILARITY: f64 = 1.0 - (144 - 100) as f64 / 25.0;
+
 const SURFACE_OFFSETS: [[i32; 2]; 13] = [
     [0, 0],
     [-2, -1],
@@ -132,6 +135,11 @@ pub struct Aquifer<'a> {
     locations: Vec<Option<(i32, i32, i32)>>,
     skip_above_y: i32,
     surface_cache: HashMap<(i32, i32), i32>,
+    /// `shouldScheduleFluidUpdate` последнего `substance`: жидкость на стыке
+    /// разных уровней акифера потечёт после генерации. Ванила не сбрасывает
+    /// его там, где `computeSubstance` не зовётся (лава карвера ниже
+    /// `lava_level`), — поле переживает вызовы так же.
+    pub should_schedule: bool,
 }
 
 impl<'a> Aquifer<'a> {
@@ -154,6 +162,7 @@ impl<'a> Aquifer<'a> {
             locations: Vec::new(),
             skip_above_y: v.max_block(1),
             surface_cache: HashMap::new(),
+            should_schedule: false,
         }
     }
 
@@ -190,6 +199,7 @@ impl<'a> Aquifer<'a> {
             locations: vec![None; total],
             skip_above_y: 0,
             surface_cache: HashMap::new(),
+            should_schedule: false,
         };
         let max_surface = a.max_surface_level(
             ctx,
@@ -264,6 +274,7 @@ impl<'a> Aquifer<'a> {
         density: f64,
     ) -> Option<Fluid> {
         if density > 0.0 {
+            self.should_schedule = false;
             return None;
         }
         let Some(_) = self.s else {
@@ -272,9 +283,11 @@ impl<'a> Aquifer<'a> {
         };
         let g = global(self.sea, y, self.default_fluid);
         if y > self.skip_above_y {
+            self.should_schedule = false;
             return Some(g.at(y));
         }
         if g.at(y) == Fluid::Lava {
+            self.should_schedule = false;
             return Some(Fluid::Lava);
         }
         let (ax, ay, az) = (grid_xz(x - 5), grid_y(y + 1), grid_xz(z - 5));
@@ -320,17 +333,21 @@ impl<'a> Aquifer<'a> {
         let sim12 = similarity(dist[0], dist[1]);
         let fluid = s1.at(y);
         if sim12 <= 0.0 {
+            self.should_schedule = sim12 >= FLOWING_UPDATE_SIMILARITY
+                && self.status(ctx, closest[1]) != s1;
             return Some(fluid);
         }
         if fluid == Fluid::Water
             && global(self.sea, y - 1, self.default_fluid).at(y - 1) == Fluid::Lava
         {
+            self.should_schedule = true;
             return Some(fluid);
         }
         let mut barrier = f64::NAN;
         let s2 = self.status(ctx, closest[1]);
         let b12 = sim12 * self.pressure(ctx, x, y, z, &mut barrier, s1, s2);
         if density + b12 > 0.0 {
+            self.should_schedule = false;
             return None;
         }
         let s3 = self.status(ctx, closest[2]);
@@ -338,6 +355,7 @@ impl<'a> Aquifer<'a> {
         if sim13 > 0.0 {
             let b13 = sim12 * sim13 * self.pressure(ctx, x, y, z, &mut barrier, s1, s3);
             if density + b13 > 0.0 {
+                self.should_schedule = false;
                 return None;
             }
         }
@@ -345,9 +363,20 @@ impl<'a> Aquifer<'a> {
         if sim23 > 0.0 {
             let b23 = sim12 * sim23 * self.pressure(ctx, x, y, z, &mut barrier, s2, s3);
             if density + b23 > 0.0 {
+                self.should_schedule = false;
                 return None;
             }
         }
+        let differ12 = s1 != s2;
+        let differ23 = sim23 >= FLOWING_UPDATE_SIMILARITY && s2 != s3;
+        let differ13 = sim13 >= FLOWING_UPDATE_SIMILARITY && s1 != s3;
+        self.should_schedule = if differ12 || differ23 || differ13 {
+            true
+        } else {
+            sim13 >= FLOWING_UPDATE_SIMILARITY
+                && similarity(dist[0], dist[3]) >= FLOWING_UPDATE_SIMILARITY
+                && self.status(ctx, closest[3]) != s1
+        };
         Some(fluid)
     }
 

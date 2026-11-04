@@ -137,6 +137,9 @@ type ChunkPos = (i32, i32);
 /// карверам (`noiseChunk.aquifer()` той же стадии).
 pub struct Terrain<'a> {
     pub fills: Vec<Fill>,
+    /// Жидкость, которой акифер велел течь (`shouldScheduleFluidUpdate`):
+    /// `markPosForPostprocessing` заполнения и карверов. Мировые координаты.
+    pub fluid_posts: Vec<[i32; 3]>,
     ctx: Ctx,
     aquifer: Aquifer<'a>,
     cx: i32,
@@ -643,6 +646,7 @@ impl Generator {
         self.final_density.volume(&mut ctx, &mut density, &v);
         let t_density = t0.elapsed().as_secs_f64() * 1000.0;
         let mut out = vec![Fill::Air; v.len()];
+        let mut fluid_posts = Vec::new();
         for z in 0..16 {
             for x in 0..16 {
                 for y in (0..self.height).rev() {
@@ -651,7 +655,11 @@ impl Generator {
                     if !beard.is_empty() {
                         d += beard.delta(bx, by, bz);
                     }
-                    let fill = match aquifer.substance(&mut ctx, bx, by, bz, d as f64) {
+                    let found = aquifer.substance(&mut ctx, bx, by, bz, d as f64);
+                    if aquifer.should_schedule && matches!(found, Some(Fluid::Water | Fluid::Lava)) {
+                        fluid_posts.push([bx, by, bz]);
+                    }
+                    let fill = match found {
                         None => Fill::Solid,
                         // `globalFluidPicker`: `default_fluid` настроек, а не
                         // всегда вода — в Аду это лава.
@@ -670,6 +678,7 @@ impl Generator {
         }
         Terrain {
             fills: out,
+            fluid_posts,
             ctx,
             aquifer,
             cx,
@@ -809,6 +818,9 @@ impl Generator {
                     Fluid::Lava => b.lava,
                 };
                 states[i] = state;
+                if terrain.aquifer.should_schedule && fluid != Fluid::Air {
+                    terrain.fluid_posts.push([bx0 + x as i32, wy, bz0 + z as i32]);
+                }
                 if has_grass {
                     let below = at(x, wy - 1, z);
                     if states[below] == b.dirt

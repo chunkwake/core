@@ -770,6 +770,9 @@ pub struct ChunkColumn {
     pub block_light: Vec<LightLayer>,
     /// Блок-сущности по мировым координатам.
     pub block_entities: BTreeMap<[i32; 3], BlockEntity>,
+    /// Жидкость, которую надо тикнуть, когда столбец войдёт в мир
+    /// (`postProcessGeneration` и `fluid_ticks` прото-чанка генератора).
+    pub fluid_posts: Vec<[i32; 3]>,
 }
 
 const AIR: u32 = 0;
@@ -810,6 +813,7 @@ impl ChunkColumn {
             sky_light: vec![LightLayer::Uniform(if has_skylight { 15 } else { 0 }); n],
             block_light: vec![LightLayer::Uniform(0); n],
             block_entities: BTreeMap::new(),
+            fluid_posts: Vec::new(),
         }
     }
 
@@ -872,6 +876,7 @@ impl ChunkColumn {
             sky_light: vec![LightLayer::Uniform(if has_skylight { 15 } else { 0 }); n],
             block_light: vec![LightLayer::Uniform(0); n],
             block_entities: BTreeMap::new(),
+            fluid_posts: Vec::new(),
         }
     }
 

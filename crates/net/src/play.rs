@@ -3807,6 +3807,9 @@ impl PlayPlan {
         // Скан точек интереса — до замка: он только читает наш столбец.
         let list = self.collect_pois(x, z, &column);
         let fires = self.collect_fires((x, z), &column);
+        // `LevelChunk.postProcessGeneration`: жидкость на стыках акифера и
+        // родники текут, как только чанк стал полным.
+        let fluids = std::mem::take(&mut column.fluid_posts);
         let mut world = self.dim_state().edited.write().unwrap();
         if let std::collections::hash_map::Entry::Vacant(e) = world.entry((x, z)) {
             e.insert((column, 0));
@@ -3819,6 +3822,15 @@ impl PlayPlan {
             self.store_pois(x, z, list);
             for pos in fires {
                 self.schedule(pos, crate::fire::TICK_DELAY);
+            }
+            if !fluids.is_empty() {
+                let now = self.server_ticks.load(std::sync::atomic::Ordering::Relaxed);
+                let mut queue = self.sim().fluid_ticks.lock().unwrap();
+                for pos in fluids {
+                    queue.schedule(pos, now, false);
+                }
+                drop(queue);
+                self.mark_work();
             }
             true
         } else {

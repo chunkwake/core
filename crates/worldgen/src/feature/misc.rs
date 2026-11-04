@@ -120,6 +120,7 @@ impl Spring {
             .count() as i32;
         if rocks == self.rocks && holes == self.holes {
             put(level, o, self.state);
+            level.schedule_fluid(o[0], o[1], o[2]);
         }
     }
 }
@@ -724,6 +725,13 @@ impl Geode {
                     }
                     if crack && crack_sum >= crack_size {
                         safe(level, p, pal.defaults["minecraft:air"]);
+                        // Жидкость у трещины потечёт в неё.
+                        for d in DIRS {
+                            let n = add(p, d);
+                            if pal.fluid(get(level, n)) != Fluid::None {
+                                level.schedule_fluid(n[0], n[1], n[2]);
+                            }
+                        }
                     } else if shell >= innermost {
                         let alt = (r.next_float() as f64) < self.alternate_chance;
                         with(level, r, if alt { &self.alternate } else { &self.inner }, p);

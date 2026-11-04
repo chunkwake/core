@@ -974,14 +974,15 @@ impl<'a> Stage<'a> {
                         + c.surface_depth * surface_depth_multiplier
             }
             Cond::Biome(ids) => {
-                // Биом постоянен внутри клетки 4×4×4, поэтому ответ кэшируется
-                // по `y / 4`, а не по каждому блоку: иначе `zoomed_biome`
-                // («дрожание» границ) считался на каждый из 384 блоков столбца.
-                let cell_y = y / 4;
+                // `Context.updateY`: биом по самому блоку (`BiomeManager`
+                // с «дрожанием» внутри клетки 4×4×4), один раз на y — правило
+                // может спросить его несколько раз. Однородные клетки
+                // `zoomed_biome` отвечает из кэша родителя.
+                let cell_y = y;
                 let b = match c.biome {
                     Some((at, b)) if at == cell_y => b,
                     _ => {
-                        let b = chunk.biome(x, cell_y * 4, z);
+                        let b = chunk.biome(x, y, z);
                         c.biome = Some((cell_y, b));
                         b
                     }

@@ -35,6 +35,10 @@ pub struct Blocks {
     shape_posts: Vec<[i32; 3]>,
     /// Блок-сущности структур (LootTable + LootTableSeed у сундуков).
     pub block_entities: Vec<([i32; 3], String, chunkwake_world::nbt::Compound)>,
+    /// Жидкость, которую сервер тикнет, когда чанк станет полным
+    /// (`postProcessGeneration` и `fluid_ticks` прото-чанка): стыки уровней
+    /// акифера и родники. Мировые координаты.
+    pub fluid_posts: Vec<[i32; 3]>,
 }
 
 /// Скомпилированная стадия поверхности.
@@ -706,9 +710,10 @@ impl Overworld {
             eprintln!(
                 "proto {cx} {cz}: борода {t_beard:.2} | шум {t_noise:.2} | биомы {t_biomes:.2} | \
                  предв. поверхность {t_prelim:.2} | поверхность {t_surface:.2} | \
-                 карверы {t_carve:.2}{} = {:.2} мс",
+                 карверы {t_carve:.2}{} = {:.2} мс, жидкость {}",
                 if carved { "" } else { " (нет)" },
-                t0.elapsed().as_secs_f64() * 1000.0
+                t0.elapsed().as_secs_f64() * 1000.0,
+                terrain.fluid_posts.len()
             );
         }
         Blocks {
@@ -718,6 +723,7 @@ impl Overworld {
             live_heights: None,
             shape_posts: Vec::new(),
             block_entities: Vec::new(),
+            fluid_posts: std::mem::take(&mut terrain.fluid_posts),
         }
     }
 
@@ -727,6 +733,12 @@ impl Overworld {
     /// поэтому эталон ловит именно их.
     pub fn proto_for_test(&self, cx: i32, cz: i32) -> Blocks {
         self.proto(cx, cz)
+    }
+
+    /// Чанк статуса `terrain` (шум с бородой структур, поверхность,
+    /// карверы) без декорации: сверка с прото-чанками ванили.
+    pub fn terrain_for_test(&self, cx: i32, cz: i32) -> Blocks {
+        self.proto_at(cx, cz, self.features.as_ref())
     }
 
     fn view<'a>(
@@ -990,6 +1002,14 @@ impl feature::Level for Region<'_> {
         };
         if let Some(c) = self.chunks[s].as_mut() {
             c.shape_posts.push([x, y, z]);
+        }
+    }
+    fn schedule_fluid(&mut self, x: i32, y: i32, z: i32) {
+        let Some(s) = self.slot(x, z) else {
+            return;
+        };
+        if let Some(c) = self.chunks[s].as_mut() {
+            c.fluid_posts.push([x, y, z]);
         }
     }
     fn set_block_entity(
