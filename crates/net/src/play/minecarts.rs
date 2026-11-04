@@ -172,6 +172,36 @@ impl PlayPlan {
         true
     }
 
+    /// `MinecartDispenseItemBehavior.execute`: вагонетка на 1.125 перед
+    /// центром раздатчика, по высоте `floor(центр) + шагY`; рельс спереди —
+    /// +0.1 (на подъёме +0.6), воздух с рельсом под ним — −0.9 (−0.4, если
+    /// нижний — подъём и раздатчик смотрит не вниз), иначе обычный выброс.
+    pub(super) fn dispense_minecart(&self, item: &str, dispenser: [i32; 3], facing: usize) -> Option<bool> {
+        if item != ITEM {
+            return None;
+        }
+        self.minecart_type()?;
+        let d = crate::placement::step(facing);
+        let front = [dispenser[0] + d[0], dispenser[1] + d[1], dispenser[2] + d[2]];
+        let track = PlanTrack(self);
+        let lift = if let Some(r) = track.rail(front) {
+            if r.shape.is_slope() { 0.6 } else { 0.1 }
+        } else if self.block(front).is_some_and(|s| self.state_name(s).ends_with(":air"))
+            && let Some(r) = track.rail([front[0], front[1] - 1, front[2]])
+        {
+            if facing == 0 || !r.shape.is_slope() { -0.9 } else { -0.4 }
+        } else {
+            return None;
+        };
+        let pos = [
+            dispenser[0] as f64 + 0.5 + d[0] as f64 * 1.125,
+            dispenser[1] as f64 + d[1] as f64 + lift,
+            dispenser[2] as f64 + 0.5 + d[2] as f64 * 1.125,
+        ];
+        self.add_minecart(MinecartEntry::new(Cart::new(pos, 0.0)));
+        Some(true)
+    }
+
     /// `Minecart.interact`: без шифта и в пустую — сесть.
     pub(super) fn mount_minecart(&self, uuid: Uuid, entity_id: i32, cart: i32) -> bool {
         let cart_uuid = {
@@ -380,8 +410,11 @@ impl PlayPlan {
                     ejected.push((id, Uuid::nil()));
                     continue;
                 }
-                let moved = (0..3).any(|i| (e.cart.pos[i] - e.sent.0[i]).abs() > 1e-4)
-                    || (e.cart.yaw - e.sent.1).abs() > 0.5;
+                // `ServerEntity.sendChanges`: сдвиг шлётся от квадрата длины
+                // 7.6293945e-6, иначе затухающая на 0.96 вагонетка слала бы
+                // крошечные шаги бесконечно.
+                let d: f64 = (0..3).map(|i| (e.cart.pos[i] - e.sent.0[i]).powi(2)).sum();
+                let moved = d >= 7.629_394_5e-6 || (e.cart.yaw - e.sent.1).abs() > 0.5;
                 if moved {
                     e.sent = (e.cart.pos, e.cart.yaw);
                     packets.push(play::teleport_entity(

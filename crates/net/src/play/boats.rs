@@ -184,6 +184,59 @@ impl PlayPlan {
         true
     }
 
+    /// `BoatDispenseItemBehavior.execute`: лодка на `0.5625 + ширина/2` перед
+    /// раздатчиком, по высоте `центр + шагY·1.125`; вода спереди — ещё +1,
+    /// воздух с водой под ним — +0, иначе обычный выброс (`None`). Поворот —
+    /// сторона раздатчика (`Direction.toYRot`).
+    ///
+    /// Лодку без седока у нас не ведёт физика, поэтому она сразу ложится на
+    /// поверхность воды, куда ванильная доплывает за пару тиков.
+    pub(super) fn dispense_boat(&self, item: &str, dispenser: [i32; 3], facing: usize) -> Option<bool> {
+        self.boat_type(item)?;
+        let d = crate::placement::step(facing);
+        let front = [dispenser[0] + d[0], dispenser[1] + d[1], dispenser[2] + d[2]];
+        let water = |p: [i32; 3]| {
+            self.block(p)
+                .and_then(|s| crate::fluids::state_fluid(&self.survival.placement, s))
+                .filter(|f| f.kind == crate::fluids::Kind::Water)
+        };
+        let below = [front[0], front[1] - 1, front[2]];
+        let lift = if water(front).is_some() {
+            1.0
+        } else if self.block(front).is_some_and(|s| self.state_name(s).ends_with(":air")) && water(below).is_some() {
+            0.0
+        } else {
+            return None;
+        };
+        // Ширина `EntityType` лодок и плотов — 1.375.
+        let reach = 0.5625 + 1.375 / 2.0;
+        let mut at = [
+            dispenser[0] as f64 + 0.5 + reach * d[0] as f64,
+            dispenser[1] as f64 + 0.5 + (d[1] as f32 * 1.125) as f64 + lift,
+            dispenser[2] as f64 + 0.5 + reach * d[2] as f64,
+        ];
+        // Поверхность столба воды под точкой (`FluidState.getHeight`).
+        let mut top = if lift > 0.0 { front } else { below };
+        top[0] = at[0].floor() as i32;
+        top[2] = at[2].floor() as i32;
+        if water(top).is_some() {
+            while water([top[0], top[1] + 1, top[2]]).is_some() {
+                top[1] += 1;
+            }
+            if let Some(f) = water(top) {
+                at[1] = top[1] as f64 + if f.source { 8.0 / 9.0 } else { f.amount as f64 / 9.0 };
+            }
+        }
+        let yaw = match facing {
+            2 => 180.0,
+            4 => 90.0,
+            5 => -90.0,
+            _ => 0.0,
+        };
+        self.add_boat(Boat::new(item.to_owned(), at, yaw));
+        Some(true)
+    }
+
     /// Твёрдый блок для коробки лодки: не воздух, не жидкость, не трава и не цветы.
     pub(super) fn blocks_boat(&self, state: u32) -> bool {
         let name = self.state_name(state);

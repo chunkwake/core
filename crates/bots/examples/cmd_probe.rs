@@ -29,13 +29,20 @@ async fn main() {
         let mut w = Writer::new();
         w.var_int(sb).string(&s);
         c.send_raw(&w.buf).await.unwrap();
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(400);
+        let gap = std::env::var("GAP_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(400);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(gap);
         while let Ok(Ok(ev)) = tokio::time::timeout_at(deadline, c.next_event()).await {
             match ev {
                 Event::BlockUpdate(p, st) if p == at => println!("  {st}"),
                 Event::BlockUpdates(v) => v.iter().filter(|(p, _)| *p == at).for_each(|(_, st)| println!("  * {st}")),
                 _ => {}
             }
+        }
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while let Ok(Ok(ev)) = tokio::time::timeout_at(deadline, c.next_event()).await {
+        if let Event::BlockUpdate(p, st) = ev && p == at {
+            println!("  late {st}");
         }
     }
 }

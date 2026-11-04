@@ -104,7 +104,10 @@ async fn main() {
     let mut detector = false;
     let det = [x, y, z + 5];
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_secs(8) {
+    // До остановки: после старта сервер тикает медленнее, за фиксированное
+    // время вагонетка могла ещё катиться.
+    let mut still = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(30) && still.elapsed() < Duration::from_secs(3) {
         match wait(&mut c, 0.5, |e| match e {
             Event::EntitySpawned { entity_id, pos, .. } if *entity_id == cart => Some((Some(*pos), false)),
             Event::BlockUpdate(p, s) if *p == det && detector_on.contains(s) => Some((None, true)),
@@ -113,12 +116,17 @@ async fn main() {
         })
         .await
         {
-            Some((Some(p), _)) => last = p,
+            Some((Some(p), _)) => {
+                if p != last {
+                    still = tokio::time::Instant::now();
+                }
+                last = p;
+            }
             Some((None, true)) => detector = true,
             _ => {}
         }
     }
-    println!("cart rolled to {last:?} (from z {}), detector powered: {detector}", cpos[2]);
+    println!("cart rolled to {last:?} (from z {}) in {:.1}s, detector powered: {detector}", cpos[2], start.elapsed().as_secs_f64());
 
     // Сесть, сойти шифтом.
     let mut w = Writer::new();

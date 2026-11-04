@@ -1519,6 +1519,13 @@ pub(crate) struct DimState {
     regions: Mutex<FastSet<(i32, i32)>>,
     /// Кадры `level_chunk_with_light`, уже сжатые.
     chunk_frames: Mutex<FastMap<(i32, i32), Frame>>,
+    /// Столбцы, снятые из `edited` на время пролива света (`light_ring`).
+    /// Чтение или правка такого чанка ждёт `light_lock`, а не считает его
+    /// пустым: иначе `/setblock` у игрока молча не вставал, а физика видела
+    /// под вагонеткой воздух.
+    lent: Mutex<FastSet<(i32, i32)>>,
+    /// Есть ли сейчас снятые столбцы — быстрый отказ без замка.
+    lending: std::sync::atomic::AtomicBool,
     /// Чанки, которые тикают (симуляция рядом с игроками этого измерения).
     simulated: Mutex<Arc<FastSet<(i32, i32)>>>,
     /// Сущности и тики этого измерения.
@@ -1540,6 +1547,8 @@ impl DimState {
             pois: Mutex::new(FastMap::default()),
             regions: Mutex::new(FastSet::default()),
             chunk_frames: Mutex::new(FastMap::default()),
+            lent: Mutex::new(FastSet::default()),
+            lending: std::sync::atomic::AtomicBool::new(false),
             simulated: Mutex::new(Arc::new(FastSet::default())),
             sim: DimSim::default(),
         }
@@ -2716,6 +2725,7 @@ impl PlayPlan {
         }
         let key = (x >> 4, z >> 4);
         let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
+        self.wait_lent(self.dim_state(), key);
         // Чанк шума появится при отправке игроку, а не из тика.
         // В шумовом мире чанк появляется при первом обращении: `/setblock` и
         // портал должны работать до того, как чанк дойдёт до игрока.
@@ -4046,6 +4056,21 @@ impl PlayPlan {
         self.block_in(self.active_dim(), p)
     }
 
+    /// Чанк снят из `edited` на время пролива света: дождаться, пока
+    /// `light_ring` его вернёт. `true` — ждали, стоит перечитать.
+    ///
+    /// Замок не реентерабельный, но тот, кто держит `light_lock`, сюда за
+    /// снятым чанком не придёт: снимает и возвращает их только сам пролив.
+    fn wait_lent(&self, state: &DimState, key: (i32, i32)) -> bool {
+        if !state.lending.load(std::sync::atomic::Ordering::Acquire)
+            || !state.lent.lock().unwrap().contains(&key)
+        {
+            return false;
+        }
+        drop(self.light_lock.lock().unwrap());
+        true
+    }
+
     /// Чтение блока в конкретном измерении (`Level.getBlockState`).
     #[inline]
     fn block_in(&self, dim: Dimension, p: [i32; 3]) -> Option<u32> {
@@ -4063,6 +4088,10 @@ impl PlayPlan {
             }
         }
         if state.terrain.is_some() {
+            if self.wait_lent(state, (x >> 4, z >> 4)) {
+                let columns = state.edited.read().unwrap();
+                return columns.get(&(x >> 4, z >> 4)).map(|(c, _)| c.block(lx, ry as usize, lz));
+            }
             return None;
         }
         Some(Self::flat_in(
@@ -4528,10 +4557,20 @@ impl PlayPlan {
                         }
                     }
                 }
+                // Отметка под тем же замком записи: читатель не застанет
+                // столбец ни в `edited`, ни вне `lent`.
+                let state = self.dim_state();
+                state.lent.lock().unwrap().extend(columns.keys().copied());
+                state.lending.store(true, std::sync::atomic::Ordering::Release);
             }
             let origins: HashSet<(i32, i32)> = ring.iter().copied().collect();
             let touched = chunkwake_world::light::spread_wave(&mut columns, &origins, &self.light);
-            self.commit_light(&mut columns, &touched)
+            let resent = self.commit_light(&mut columns, &touched);
+            // Все столбцы вернулись (`commit_light`): ждущие проснутся на `light_lock`.
+            let state = self.dim_state();
+            state.lent.lock().unwrap().clear();
+            state.lending.store(false, std::sync::atomic::Ordering::Release);
+            resent
         };
         for (nx, nz) in resent {
             self.hub.send_ready(self.chunk_frame(nx, nz));
@@ -9436,6 +9475,11 @@ impl PlayPlan {
             if written > 0 {
                 self.count_bytes_out(written, 1);
             }
+            // Поручение от команды (`/give`, телепорт) уже в очереди — сначала
+            // оно, потом следующий пакет клиента: у ванили команда меняет мир
+            // сразу, и клик после `/give` видит выданный предмет. `select!`
+            // выбирает ветки случайно, поэтому пакет здесь ждёт явно.
+            let control_first = !controls.is_empty();
             tokio::select! {
                 Some(pos) = stream.ready.recv() => {
                     self.stream_ready(&mut stream, pos);
@@ -9962,7 +10006,7 @@ impl PlayPlan {
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => return Ok(()),
                 },
-                packet = conn.read_packet() => {
+                packet = conn.read_packet(), if !control_first => {
                     let packet = packet?;
                     self.count_bytes_in(packet.len() as u64);
                     let mut r = Reader::new(&packet);
@@ -12409,7 +12453,12 @@ impl PlayPlan {
         match w.kind {
             Kind::Chest(_) => w.positions().iter().all(|&p| match plugin_of(p) {
                 Some(id) => self.plugin_invs.lock().unwrap().contains_key(&id),
-                None => self.block_entity(p).is_some(),
+                // Пустой контейнер из `/setblock` ещё без записи блок-сущности:
+                // у ванили она создаётся вместе с блоком, окно живо, пока блок на месте.
+                None => {
+                    self.block_entity(p).is_some()
+                        || self.block(p).is_some_and(|s| container_entity(self.state_name(s)).is_some())
+                }
             }),
             Kind::Furnace => self
                 .block(w.pos)
@@ -14793,12 +14842,21 @@ impl PlayPlan {
                             ),
                         );
                     }
+                    // `DefaultDispenseItemBehavior.dispense`: дым после любого `execute`.
+                    self.hub.send(
+                        None,
+                        play::level_event(self.ids.level_event, hp::EVENT_SMOKE, pos, f as i32, false),
+                    );
                     return;
                 }
                 Some(false) => {
                     self.hub.send(
                         None,
                         play::level_event(self.ids.level_event, hp::EVENT_FAIL, pos, 0, false),
+                    );
+                    self.hub.send(
+                        None,
+                        play::level_event(self.ids.level_event, hp::EVENT_SMOKE, pos, f as i32, false),
                     );
                     return;
                 }
@@ -14850,6 +14908,20 @@ impl PlayPlan {
             "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
         );
         let open = empty || self.fluid_replaceable(front);
+        let dispenser = crate::redstone::step(front, facing ^ 1);
+        let vehicle = if boats::is_boat_item(&name) {
+            Some(self.dispense_boat(&name, dispenser, facing))
+        } else if name == "minecraft:minecart" {
+            Some(self.dispense_minecart(&name, dispenser, facing))
+        } else {
+            None
+        };
+        if let Some(done) = vehicle {
+            if done == Some(true) {
+                crate::hoppers::take_one(&mut me.slots, i);
+            }
+            return done;
+        }
         match name.as_str() {
             "minecraft:bone_meal" => {
                 if !self.bonemeal_at(front) {
@@ -17305,6 +17377,7 @@ impl PlayPlan {
 
     fn block_entity(&self, pos: [i32; 3]) -> Option<BlockEntity> {
         let key = (pos[0] >> 4, pos[2] >> 4);
+        self.wait_lent(self.dim_state(), key);
         let world = self.dim_state().edited.read().unwrap();
         // Диск не читается: это вызывается и из тика.
         match world.get(&key) {
@@ -17317,6 +17390,7 @@ impl PlayPlan {
     /// Ставит или убирает блок-сущность; чанк сохранится и перекодируется.
     fn set_block_entity(&self, pos: [i32; 3], be: Option<BlockEntity>) {
         let key = (pos[0] >> 4, pos[2] >> 4);
+        self.wait_lent(self.dim_state(), key);
         if self.terrain().is_some() && !self.dim_state().edited.read().unwrap().contains_key(&key) {
             return;
         }
