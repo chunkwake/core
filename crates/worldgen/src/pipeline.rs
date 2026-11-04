@@ -39,6 +39,9 @@ pub struct Blocks {
     /// (`postProcessGeneration` и `fluid_ticks` прото-чанка): стыки уровней
     /// акифера и родники. Мировые координаты.
     pub fluid_posts: Vec<[i32; 3]>,
+    /// Блоки, которым фича поставила тик (`simple_block` с
+    /// `schedule_tick`). Мировые координаты.
+    pub block_ticks: Vec<[i32; 3]>,
 }
 
 /// Скомпилированная стадия поверхности.
@@ -724,6 +727,7 @@ impl Overworld {
             shape_posts: Vec::new(),
             block_entities: Vec::new(),
             fluid_posts: std::mem::take(&mut terrain.fluid_posts),
+            block_ticks: Vec::new(),
         }
     }
 
@@ -1010,6 +1014,14 @@ impl feature::Level for Region<'_> {
         };
         if let Some(c) = self.chunks[s].as_mut() {
             c.fluid_posts.push([x, y, z]);
+        }
+    }
+    fn schedule_block(&mut self, x: i32, y: i32, z: i32) {
+        let Some(s) = self.slot(x, z) else {
+            return;
+        };
+        if let Some(c) = self.chunks[s].as_mut() {
+            c.block_ticks.push([x, y, z]);
         }
     }
     fn set_block_entity(

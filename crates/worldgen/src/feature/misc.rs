@@ -325,7 +325,19 @@ impl Lake {
                 for yy in 0..8 {
                     let p = add(o, [xx, yy, zz]);
                     if grid[at(xx, zz, yy)] && self.to_air.test(&*level, pal, p) {
-                        put(level, p, if yy >= 4 { air } else { fluid });
+                        let above = yy >= 4;
+                        put(level, p, if above { air } else { fluid });
+                        if above {
+                            // `markAboveForPostProcessing`: до двух блоков над
+                            // воздухом, пока не встретится воздух.
+                            for d in 1..=2 {
+                                let q = add(p, [0, d, 0]);
+                                if pal.is_air(get(level, q)) {
+                                    break;
+                                }
+                                level.mark_shape(q[0], q[1], q[2]);
+                            }
+                        }
                     }
                 }
             }

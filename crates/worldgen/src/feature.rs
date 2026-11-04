@@ -37,6 +37,8 @@ pub trait Level {
     /// `scheduleTick(pos, fluid, 0)`: жидкость потечёт, когда чанк станет
     /// полным. По умолчанию некуда записать.
     fn schedule_fluid(&mut self, _x: i32, _y: i32, _z: i32) {}
+    /// `scheduleTick(pos, block, 1)` блока, поставленного фичей.
+    fn schedule_block(&mut self, _x: i32, _y: i32, _z: i32) {}
     /// `Level.setBlockEntity` для сундуков структур: ванила пишет в них
     /// `LootTable` и `LootTableSeed`, а не готовые предметы.
     fn set_block_entity(
@@ -813,7 +815,7 @@ enum Feature {
     Ore(Ore),
     ScatteredOre(Ore),
     /// `simple_block`: провайдер и `schedule_tick`.
-    SimpleBlock(Provider),
+    SimpleBlock(Provider, bool),
     /// `random_selector`: по очереди `nextFloat() < chance`, иначе по умолчанию.
     RandomSelector(Vec<(f32, Arc<Placed>)>, Arc<Placed>),
     /// `simple_random_selector`: одна из списка равновероятно.
@@ -1630,7 +1632,7 @@ impl Features {
         match f {
             Feature::Tree(t) => t.place(self, level, r, pos),
             Feature::SculkPatch(s) => s.place(self, level, r, pos),
-            Feature::SimpleBlock(p) => self.simple_block(level, p, r, pos),
+            Feature::SimpleBlock(p, tick) => self.simple_block(level, p, *tick, r, pos),
             Feature::Sequence(list) => list.iter().all(|p| self.place(level, p, None, r, pos)),
             Feature::Overlay(list) => {
                 let mut any = false;
@@ -1676,7 +1678,7 @@ impl Features {
             Feature::Ore(ore) => self.ore(level, ore, r, pos),
             Feature::ScatteredOre(ore) => self.scattered_ore(level, ore, r, pos),
             // Ответ этих фич нужен ходу генерации — их ставит `feature`.
-            Feature::SimpleBlock(_)
+            Feature::SimpleBlock(..)
             | Feature::RandomSelector(..)
             | Feature::WeightedSelector(..)
             | Feature::BooleanSelector(..)
@@ -2073,7 +2075,14 @@ impl Features {
     }
 
     /// `SimpleBlockFeature.place`.
-    fn simple_block(&self, level: &mut dyn Level, p: &Provider, r: &mut Worldgen, pos: [i32; 3]) -> bool {
+    fn simple_block(
+        &self,
+        level: &mut dyn Level,
+        p: &Provider,
+        schedule_tick: bool,
+        r: &mut Worldgen,
+        pos: [i32; 3],
+    ) -> bool {
         let pal = &self.palette;
         let Some(state) = p.get(&*level, pal, r, pos) else {
             return false;
@@ -2107,6 +2116,9 @@ impl Features {
             level.set(x, y + 1, z, upper);
         } else {
             level.set(x, y, z, state);
+            if schedule_tick {
+                level.schedule_block(x, y, z);
+            }
         }
         true
     }
@@ -3075,11 +3087,10 @@ fn parse_feature(
             read,
             palette,
         )?)),
-        "minecraft:simple_block" => Ok(Feature::SimpleBlock(Provider::parse(
-            &v["to_place"],
-            read,
-            palette,
-        )?)),
+        "minecraft:simple_block" => Ok(Feature::SimpleBlock(
+            Provider::parse(&v["to_place"], read, palette)?,
+            v["schedule_tick"].as_bool().unwrap_or(false),
+        )),
         "minecraft:random_selector" => {
             let mut list = Vec::new();
             for e in v["features"]

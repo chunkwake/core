@@ -272,6 +272,7 @@ pub fn chunk_from_nbt(
         block_light: vec![LightLayer::Uniform(0); n],
         block_entities: std::collections::BTreeMap::new(),
         fluid_posts: Vec::new(),
+        block_ticks: Vec::new(),
     };
     // Свет из файла только у чанков, сохранённых со светом (`isLightOn`).
     let mut lit = root.get("isLightOn").and_then(Tag::as_i64) == Some(1);

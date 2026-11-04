@@ -3810,6 +3810,7 @@ impl PlayPlan {
         // `LevelChunk.postProcessGeneration`: жидкость на стыках акифера и
         // родники текут, как только чанк стал полным.
         let fluids = std::mem::take(&mut column.fluid_posts);
+        let block_ticks = std::mem::take(&mut column.block_ticks);
         let mut world = self.dim_state().edited.write().unwrap();
         if let std::collections::hash_map::Entry::Vacant(e) = world.entry((x, z)) {
             e.insert((column, 0));
@@ -3822,6 +3823,11 @@ impl PlayPlan {
             self.store_pois(x, z, list);
             for pos in fires {
                 self.schedule(pos, crate::fire::TICK_DELAY);
+            }
+            // Тики блоков от генерации (`simple_block` с `schedule_tick`):
+            // прото-чанк хранит задержку 1, полный чанк ставит её от «сейчас».
+            for pos in block_ticks {
+                self.schedule(pos, 1);
             }
             if !fluids.is_empty() {
                 let now = self.server_ticks.load(std::sync::atomic::Ordering::Relaxed);
@@ -7132,6 +7138,10 @@ impl PlayPlan {
     fn tick_plant(&self, pos: [i32; 3], state: u32) {
         let name = self.state_name(state);
         let pl = &self.survival.placement;
+        if matches!(name, "minecraft:open_eyeblossom" | "minecraft:closed_eyeblossom") {
+            self.eyeblossom_tick(pos, state, true);
+            return;
+        }
         if matches!(name, "minecraft:snow" | "minecraft:ice") {
             let block_light = self.with_world(|w| w.block_light_at(pos).unwrap_or(0));
             if block_light > 11 {
@@ -13105,6 +13115,94 @@ impl PlayPlan {
         }
     }
 
+    /// `EyeblossomBlock.tryChangingState` из случайного (`long`) или
+    /// назначенного тика.
+    ///
+    /// Атрибут `gameplay/eyeblossom_open` идёт из таймлайна `day` (только у
+    /// оверворлда): `true` с 12600 до 23401, иначе `false`. В Аду и Краю
+    /// таймлайна нет — `TriState.DEFAULT`, цветок остаётся как есть. Сменив
+    /// вид, цветок назначает тики таким же цветкам в ±3/±2/±3 с задержкой
+    /// `nextIntBetweenInclusive(⌊5d⌋, ⌊10d⌋)` — волна расходится по поляне.
+    fn eyeblossom_tick(&self, pos: [i32; 3], state: u32, long: bool) {
+        let open = self.state_name(state) == "minecraft:open_eyeblossom";
+        if self.active_dim() != Dimension::Overworld {
+            return;
+        }
+        let should_open =
+            crate::plants::eyeblossom_open_at(self.day_time.load(Ordering::Relaxed));
+        if should_open == open {
+            return;
+        }
+        let (target, long_sound, short_sound, color) = if open {
+            (
+                "minecraft:closed_eyeblossom",
+                "minecraft:block.eyeblossom.close_long",
+                "minecraft:block.eyeblossom.close",
+                6250335,
+            )
+        } else {
+            (
+                "minecraft:open_eyeblossom",
+                "minecraft:block.eyeblossom.open_long",
+                "minecraft:block.eyeblossom.open",
+                16545810,
+            )
+        };
+        let Some(&next) = self.survival.block_defaults.get(target) else {
+            return;
+        };
+        self.set_block(pos, next);
+        let center = [
+            pos[0] as f64 + 0.5,
+            pos[1] as f64 + 0.5,
+            pos[2] as f64 + 0.5,
+        ];
+        self.emit_vibration(center, "minecraft:block_change");
+        // `Type.spawnTransformParticle`: след к случайной точке над цветком.
+        let scale = 0.5 + rand::random::<f64>();
+        let dir = [
+            rand::random::<f64>() - 0.5,
+            rand::random::<f64>() + 1.0,
+            rand::random::<f64>() - 0.5,
+        ];
+        let to = [
+            center[0] + dir[0] * scale,
+            center[1] + dir[1] * scale,
+            center[2] + dir[2] * scale,
+        ];
+        if let Some(&particle) = self.particle_types.lock().unwrap().get("minecraft:trail") {
+            let body = play::trail_body(to, color, (20.0 * scale) as i32);
+            self.hub.send(
+                None,
+                play::level_particles_with(
+                    self.ids.level_particles,
+                    particle,
+                    Some(&body),
+                    false,
+                    center,
+                    [0.0; 3],
+                    0.0,
+                    1,
+                ),
+            );
+        }
+        for dx in -3..=3 {
+            for dy in -2..=2 {
+                for dz in -3..=3 {
+                    let p = [pos[0] + dx, pos[1] + dy, pos[2] + dz];
+                    if self.block(p) != Some(state) {
+                        continue;
+                    }
+                    let d = ((dx * dx + dy * dy + dz * dz) as f64).sqrt();
+                    let (lo, hi) = ((d * 5.0) as u64, (d * 10.0) as u64);
+                    self.schedule(p, lo + rand::random::<u64>() % (hi - lo + 1));
+                }
+            }
+        }
+        let sound = if long { long_sound } else { short_sound };
+        self.block_sound(None, sound, pos, 1.0, 1.0);
+    }
+
     fn scheduled_tick(&self, pos: [i32; 3], now: u64) {
         use crate::redstone as rs;
         let Some(state) = self.block(pos) else { return };
@@ -13117,7 +13215,9 @@ impl PlayPlan {
             output: &|p| self.redstone_output(p),
             analog: &|p| self.analog_at(p),
         };
-        if rs::is_button(&name) {
+        if matches!(name.as_str(), "minecraft:open_eyeblossom" | "minecraft:closed_eyeblossom") {
+            self.eyeblossom_tick(pos, state, false);
+        } else if rs::is_button(&name) {
             if let Some(off) = pl.with_prop(state, "powered", "false") {
                 self.set_block(pos, off);
                 let (sound, v, p) = rs::click_sound(&name, false);

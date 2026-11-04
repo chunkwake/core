@@ -240,6 +240,7 @@ pub fn build_play_plan(
                     // Лут структур: ванила кладёт в сундук `LootTable` и
                     // `LootTableSeed`, содержимое считается при открытии.
                     column.fluid_posts = chunk.fluid_posts.clone();
+                    column.block_ticks = chunk.block_ticks.clone();
                     for ([x, y, z], id, nbt) in &chunk.block_entities {
                         column.block_entities.insert(
                             [*x, *y, *z],
@@ -1431,6 +1432,7 @@ fn build_dimension(
             None => ChunkColumn::from_blocks(&chunk.states, fallback, block_bits, biome_bits, false),
         };
         column.fluid_posts = chunk.fluid_posts.clone();
+        column.block_ticks = chunk.block_ticks.clone();
         for ([x, y, z], id, nbt) in &chunk.block_entities {
             column.block_entities.insert(
                 [*x, *y, *z],

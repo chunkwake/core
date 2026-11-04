@@ -35,7 +35,15 @@ pub fn random_tick_candidate(name: &str) -> bool {
                 | "minecraft:mycelium"
                 | "minecraft:snow"
                 | "minecraft:ice"
+                | "minecraft:open_eyeblossom"
+                | "minecraft:closed_eyeblossom"
         )
+}
+
+/// `gameplay/eyeblossom_open` таймлайна `day`: ключевые кадры `12600 → true`
+/// и `23401 → false`, булево значение держится до следующего кадра.
+pub fn eyeblossom_open_at(day_time: i64) -> bool {
+    (12600..23401).contains(&day_time.rem_euclid(24000))
 }
 
 pub fn tree_wood(name: &str) -> Option<&str> {
@@ -136,6 +144,13 @@ mod tests {
         assert!(random_tick_candidate("minecraft:cave_vines_plant"));
         assert!(random_tick_candidate("minecraft:bamboo_sapling"));
         assert!(random_tick_candidate("minecraft:brown_mushroom"));
+        assert!(random_tick_candidate("minecraft:closed_eyeblossom"));
+        assert!(!eyeblossom_open_at(12599));
+        assert!(eyeblossom_open_at(12600));
+        assert!(eyeblossom_open_at(23400));
+        assert!(!eyeblossom_open_at(23401));
+        assert!(eyeblossom_open_at(24000 * 3 + 18000));
+        assert!(eyeblossom_open_at(-1000)); // 23000
     }
 
     #[test]

@@ -718,6 +718,18 @@ pub fn level_particles_with(
     w.buf
 }
 
+/// Тело `TrailParticleOption`: точка, к которой летит след, цвет RGB и
+/// длительность в тиках.
+pub fn trail_body(target: [f64; 3], color: i32, duration: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.f64(target[0])
+        .f64(target[1])
+        .f64(target[2])
+        .i32(color)
+        .var_int(duration);
+    w.buf
+}
+
 /// Тело `DustParticleOptions`: цвет ARGB и масштаб.
 pub fn dust_body(argb: i32, scale: f32) -> Vec<u8> {
     let mut w = Writer::new();

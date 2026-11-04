@@ -773,6 +773,9 @@ pub struct ChunkColumn {
     /// Жидкость, которую надо тикнуть, когда столбец войдёт в мир
     /// (`postProcessGeneration` и `fluid_ticks` прото-чанка генератора).
     pub fluid_posts: Vec<[i32; 3]>,
+    /// Блоки, которым генерация поставила тик (`scheduleTick` фичи
+    /// `simple_block` с `schedule_tick`): сервер тикнет их через 1 тик.
+    pub block_ticks: Vec<[i32; 3]>,
 }
 
 const AIR: u32 = 0;
@@ -814,6 +817,7 @@ impl ChunkColumn {
             block_light: vec![LightLayer::Uniform(0); n],
             block_entities: BTreeMap::new(),
             fluid_posts: Vec::new(),
+            block_ticks: Vec::new(),
         }
     }
 
@@ -877,6 +881,7 @@ impl ChunkColumn {
             block_light: vec![LightLayer::Uniform(0); n],
             block_entities: BTreeMap::new(),
             fluid_posts: Vec::new(),
+            block_ticks: Vec::new(),
         }
     }
 
