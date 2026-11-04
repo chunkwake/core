@@ -102,12 +102,32 @@ pub struct Cart {
     pub on_ground: bool,
     /// `isVehicle`: с пассажиром трение меньше и скорость по рельсам ×0.75.
     pub ridden: bool,
+    /// Чем тормозит вид вагонетки (`applyNaturalSlowdown`).
+    pub drag: Drag,
+    /// Тяга печной вагонетки (`MinecartFurnace.push`), по горизонтали.
+    pub push: [f64; 2],
+    /// За этот тик упёрлась в стену.
+    collided: bool,
+}
+
+/// Своё трение вида вагонетки.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Drag {
+    /// `AbstractMinecart`: 0.997 с пассажиром, 0.96 пустая.
+    Plain,
+    /// `AbstractMinecartContainer`: `0.98 + (15 − сигнал)·0.001`, без
+    /// общего трения; сигнал — заполненность для компаратора.
+    Container(u8),
+    /// `MinecartFurnace`: тяга `push`, скорость ×0.5 (в воде ×0.75).
+    Furnace,
 }
 
 /// Что случилось за тик: рельс под вагонеткой (для детектора и активатора).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Step {
     pub rail: Option<([i32; 3], Rail)>,
+    /// Упёрлась в стену (`horizontalCollision`).
+    pub collided: bool,
 }
 
 fn floor(v: f64) -> i32 {
@@ -123,6 +143,9 @@ impl Cart {
             flipped: false,
             on_ground: false,
             ridden: false,
+            drag: Drag::Plain,
+            push: [0.0; 2],
+            collided: false,
         }
     }
 
@@ -132,7 +155,66 @@ impl Cart {
 
     /// `OldMinecartBehavior.getMaxSpeed`: 8 блоков/с, в воде 4.
     fn max_speed(&self, t: &impl Track) -> f64 {
-        (if self.in_water(t) { 4.0 } else { 8.0 }) / 20.0
+        let water = self.in_water(t);
+        let base = (if water { 4.0 } else { 8.0 }) / 20.0;
+        match self.drag {
+            // `MinecartFurnace.getMaxSpeed`.
+            Drag::Furnace => base * if water { 0.75 } else { 0.5 },
+            _ => base,
+        }
+    }
+
+    /// `applyNaturalSlowdown` вида вагонетки; `vel[1]` обнуляется.
+    fn natural_slowdown(&mut self, water: bool) {
+        let [vx, _, vz] = self.vel;
+        let (mut vx, mut vz) = match self.drag {
+            Drag::Container(signal) => {
+                let mut f = 0.98f32 + (15 - signal.min(15) as i32) as f32 * 0.001;
+                if water {
+                    f *= 0.95;
+                }
+                self.vel = [vx * f as f64, 0.0, vz * f as f64];
+                return;
+            }
+            Drag::Furnace if self.push[0] * self.push[0] + self.push[1] * self.push[1] > 1.0e-7 => {
+                self.push = self.push_along([vx, vz]);
+                let (mut x, mut z) = (vx * 0.8 + self.push[0], vz * 0.8 + self.push[1]);
+                if water {
+                    x *= 0.1;
+                    z *= 0.1;
+                }
+                (x, z)
+            }
+            Drag::Furnace => (vx * 0.98, vz * 0.98),
+            Drag::Plain => (vx, vz),
+        };
+        let f = if self.ridden { 0.997 } else { 0.96 };
+        vx *= f;
+        vz *= f;
+        if water {
+            vx *= 0.95;
+            vz *= 0.95;
+        }
+        self.vel = [vx, 0.0, vz];
+    }
+
+    /// `MinecartFurnace.calculateNewPushAlong`: тяга поворачивает вслед за
+    /// скоростью, сохраняя длину.
+    fn push_along(&self, v: [f64; 2]) -> [f64; 2] {
+        let p = self.push;
+        let (p2, v2) = (p[0] * p[0] + p[1] * p[1], v[0] * v[0] + v[1] * v[1]);
+        if p2 <= 1.0e-4 || v2 <= 0.001 {
+            return p;
+        }
+        // `push.projectedOn(v).normalize().scale(push.length())`
+        let k = (p[0] * v[0] + p[1] * v[1]) / v2;
+        let q = [v[0] * k, v[1] * k];
+        let ql = (q[0] * q[0] + q[1] * q[1]).sqrt();
+        if ql < 1.0e-5 {
+            return [0.0; 2];
+        }
+        let l = p2.sqrt();
+        [q[0] / ql * l, q[1] / ql * l]
     }
 
     /// `AbstractMinecart.getCurrentBlockPosOrRailBelow`.
@@ -146,6 +228,7 @@ impl Cart {
     /// `ServerPlayer.getLastClientMoveIntent` водителя (вектор в мире).
     pub fn tick(&mut self, t: &impl Track, intent: [f64; 2]) -> Step {
         let old = self.pos;
+        self.collided = false;
         self.vel[1] -= GRAVITY;
         let pos = self.rail_pos(t);
         let mut step = Step::default();
@@ -173,6 +256,7 @@ impl Cart {
             self.flipped = !self.flipped;
         }
         self.yaw = yaw.rem_euclid(360.0);
+        step.collided = self.collided;
         step
     }
 
@@ -205,6 +289,7 @@ impl Cart {
             next[axis] += v[axis];
             if blocked(next) {
                 self.vel[axis] = 0.0;
+                self.collided = true;
             } else {
                 self.pos = next;
             }
@@ -339,11 +424,8 @@ impl Cart {
             self.pos[1] += b[1] as f64;
         }
         // `applyNaturalSlowdown`: с пассажиром 0.997, пустая 0.96; в воде ещё ×0.95.
-        let f = if self.ridden { 0.997 } else { 0.96 };
-        self.vel = [self.vel[0] * f, 0.0, self.vel[2] * f];
-        if self.in_water(t) {
-            self.vel = self.vel.map(|v| v * 0.95);
-        }
+        let water = self.in_water(t);
+        self.natural_slowdown(water);
         // Сохранение энергии на склоне: скорость от перепада высоты.
         if let (Some(after), Some(before)) = (Self::track_point(t, self.pos), before) {
             let dy = (before[1] - after[1]) * 0.05;
@@ -548,6 +630,35 @@ mod tests {
         }
         // Пустая теряет 4 % за тик.
         assert!((last - 0.3 * 0.96f64.powi(20)).abs() < 0.01, "{last}");
+    }
+
+    #[test]
+    fn container_drag_depends_on_fill() {
+        // Пустой сундук: 0.98 + 15·0.001 = 0.995 за тик; полный — 0.98.
+        for (signal, f) in [(0u8, 0.995f32), (15, 0.98)] {
+            let mut c = Cart::new([0.5, 0.0, 0.5], 0.0);
+            c.drag = Drag::Container(signal);
+            c.vel = [0.1, 0.0, 0.0];
+            c.natural_slowdown(false);
+            assert!((c.vel[0] - 0.1 * f as f64).abs() < 1e-9, "{signal}: {c:?}");
+        }
+    }
+
+    #[test]
+    fn furnace_push_drives_cart_at_half_speed() {
+        let w = line(60, Kind::Plain);
+        let mut c = Cart::new([2.5, 0.0625, 0.5], 0.0);
+        c.drag = Drag::Furnace;
+        c.push = [2.0, 0.0];
+        let x0 = c.pos[0];
+        for _ in 0..40 {
+            c.tick(&w, [0.0; 2]);
+        }
+        // Предел печной — половина обычного: 0.2 блока за тик.
+        let moved = c.pos[0] - x0;
+        assert!(moved > 7.0 && moved <= 8.0 + 1e-9, "{moved}");
+        // Тяга повёрнута вдоль скорости и сохранила длину.
+        assert!((c.push[0] - 2.0).abs() < 1e-9 && c.push[1].abs() < 1e-9, "{c:?}");
     }
 
     #[test]

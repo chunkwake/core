@@ -1621,6 +1621,16 @@ fn plugin_of(pos: [i32; 3]) -> Option<i32> {
     (pos[0] == i32::MIN && pos[1] == i32::MIN).then_some(pos[2])
 }
 
+/// Инвентарь вагонетки (сундук, воронка) — тоже условная позиция вне мира:
+/// окна, воронки и `ContainerChanged` работают с ней как с блоком.
+fn cart_pos(id: i32) -> [i32; 3] {
+    [i32::MIN, i32::MIN + 1, id]
+}
+
+fn cart_of(pos: [i32; 3]) -> Option<i32> {
+    (pos[0] == i32::MIN && pos[1] == i32::MIN + 1).then_some(pos[2])
+}
+
 struct Window {
     id: i32,
     kind: Kind,
@@ -2884,6 +2894,15 @@ impl PlayPlan {
     fn analog_at(&self, p: [i32; 3]) -> Option<i32> {
         let s = self.block(p)?;
         let name = self.state_name(s);
+        // `DetectorRailBlock.getAnalogOutputSignal`: нажатый рельс отдаёт
+        // заполненность вагонетки с инвентарём на нём.
+        if crate::redstone::is_detector_rail(name) {
+            if self.survival.placement.prop(s, "powered") != Some("true") {
+                return Some(0);
+            }
+            let (min, max) = crate::redstone::detector_search_box(p);
+            return Some(self.minecart_signal_in_box(min, max));
+        }
         if let Some(power) = crate::redstone::block_analog(&self.survival.placement, s) {
             return Some(power);
         }
@@ -8117,10 +8136,18 @@ impl PlayPlan {
     }
 
     fn explode_tnt(&self, pos: [f64; 3]) {
-        let center = [pos[0], pos[1] + 0.0625, pos[2]];
+        self.explode([pos[0], pos[1] + 0.0625, pos[2]], crate::tnt::POWER, false);
+    }
+
+    /// `ServerLevel.explode` с взаимодействием TNT. `rails_safe` —
+    /// `MinecartTNT` с фитилём: рельсы и блок под рельсом не рушатся
+    /// (`shouldBlockExplode`) и лучи сквозь них не слабеют.
+    pub(super) fn explode(&self, center: [f64; 3], power: f32, rails_safe: bool) {
         let cache = std::cell::RefCell::new(HashMap::<[i32; 3], Option<f32>>::new());
+        let is_rail = |p: [i32; 3]| self.block(p).is_some_and(|s| self.state_name(s).ends_with("rail"));
         let affected = crate::tnt::affected(
             center,
+            power,
             |p| {
                 *cache.borrow_mut().entry(p).or_insert_with(|| {
                     let Some(state) = self.block(p) else {
@@ -8128,6 +8155,10 @@ impl PlayPlan {
                     };
                     if state == AIR {
                         return None;
+                    }
+                    if rails_safe && (is_rail(p) || is_rail([p[0], p[1] + 1, p[2]])) {
+                        // Сопротивление 0, но блок остаётся (отсев ниже).
+                        return Some(0.0);
                     }
                     let name = self.state_name(state);
                     if name == "minecraft:water"
@@ -8166,9 +8197,12 @@ impl PlayPlan {
         );
         let mut touched = Vec::new();
         let mut chain = Vec::new();
-        let mut blocks: Vec<_> = affected.into_iter().collect();
+        let mut blocks: Vec<_> = affected
+            .into_iter()
+            .filter(|&p| !(rails_safe && (is_rail(p) || is_rail([p[0], p[1] + 1, p[2]]))))
+            .collect();
         blocks.sort_unstable();
-        self.damage_tnt_targets(center);
+        self.damage_tnt_targets(center, power);
         for block in blocks {
             let Some(state) = self.block(block) else {
                 continue;
@@ -8256,7 +8290,8 @@ impl PlayPlan {
         }
     }
 
-    fn damage_tnt_targets(&self, center: [f64; 3]) {
+    fn damage_tnt_targets(&self, center: [f64; 3], power: f32) {
+        let reach = power as f64 * 2.0;
         let players: Vec<_> = self
             .hub
             .players
@@ -8276,10 +8311,10 @@ impl PlayPlan {
                 .map(|(a, b)| (a - b).powi(2))
                 .sum::<f64>()
                 .sqrt();
-            if dist >= 8.0 {
+            if dist >= reach {
                 continue;
             }
-            let damage = crate::tnt::damage(dist, self.explosion_exposure(center, eye));
+            let damage = crate::tnt::damage(dist, self.explosion_exposure(center, eye), power);
             if damage > 0.0 {
                 self.push_control(uuid, Control::Hurt(damage, Cause::Explosion));
             }
@@ -8293,10 +8328,10 @@ impl PlayPlan {
                 .map(|(a, b)| (a - b).powi(2))
                 .sum::<f64>()
                 .sqrt();
-            if dist >= 8.0 {
+            if dist >= reach {
                 continue;
             }
-            let damage = crate::tnt::damage(dist, self.explosion_exposure(center, mpos));
+            let damage = crate::tnt::damage(dist, self.explosion_exposure(center, mpos), power);
             if damage > 0.0
                 && crate::mobs::hurt(&mut entry.mob, damage, Some(center), 0.4).is_some()
             {
@@ -8304,6 +8339,8 @@ impl PlayPlan {
                     .send(None, play::hurt_animation(self.ids.hurt_animation, id, 0.0));
             }
         }
+        drop(mobs);
+        self.explode_minecarts(center, power);
     }
 
     fn explosion_exposure(&self, from: [f64; 3], to: [f64; 3]) -> f64 {
@@ -10271,13 +10308,49 @@ impl PlayPlan {
                     }
                     if id == ids.sb_interact {
                         let it = play::read_interact(&mut r)?;
-                        // `Minecart.interact`: без шифта и в пустую — сесть.
                         if self.is_minecart(it.entity) {
-                            if !state.vitals.dead && !it.sneaking && !in_boat && !in_cart && it.hand == 0
-                                && self.mount_minecart(uuid, me.entity_id, it.entity)
-                            {
-                                in_cart = true;
-                                state.vitals.clear_fall();
+                            if state.vitals.dead || it.hand != 0 || login.spawn.game_mode == 3 {
+                                continue;
+                            }
+                            match self.minecart_use(it.entity) {
+                                // `Minecart.interact`: без шифта и в пустую — сесть.
+                                minecarts::CartUse::Ride => {
+                                    if !it.sneaking && !in_boat && !in_cart
+                                        && self.mount_minecart(uuid, me.entity_id, it.entity)
+                                    {
+                                        in_cart = true;
+                                        state.vitals.clear_fall();
+                                    }
+                                }
+                                // `ContainerEntity.interactWithContainerVehicle`: окно инвентаря.
+                                minecarts::CartUse::Open(size, title) => {
+                                    if let Some(w) = window.as_ref() {
+                                        conn.send(&inv::container_close(ids.container_close, w.id)).await?;
+                                    }
+                                    self.close_with_event(&mut state.inv, &mut window, uuid).await;
+                                    next_window = next_window % 100 + 1;
+                                    let menu = if size == 5 { self.survival.menu_hopper } else { self.survival.menu_chest };
+                                    let pos = cart_pos(it.entity);
+                                    let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false };
+                                    w.slots = self.window_slots(&w);
+                                    conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &title)).await?;
+                                    self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
+                                    window = Some(w);
+                                    self.container_viewers(uuid, &[pos], true);
+                                }
+                                // `MinecartFurnace.interact`: уголь — в топку (творческий не тратит).
+                                minecarts::CartUse::Fuel => {
+                                    let slot = state.inv.held_slot();
+                                    if let Some(held) = state.inv.slots[slot]
+                                        && let Some(p) = self.player_at(uuid).map(|p| p.0)
+                                        && self.fuel_minecart(it.entity, p, self.item_name(held.item))
+                                        && login.spawn.game_mode != 1
+                                    {
+                                        state.inv.consume_at(slot);
+                                        self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                    }
+                                }
+                                minecarts::CartUse::Pass => {}
                             }
                             continue;
                         }
@@ -12453,6 +12526,7 @@ impl PlayPlan {
         match w.kind {
             Kind::Chest(_) => w.positions().iter().all(|&p| match plugin_of(p) {
                 Some(id) => self.plugin_invs.lock().unwrap().contains_key(&id),
+                None if cart_of(p).is_some() => cart_of(p).and_then(|id| self.minecart_slots(id)).is_some(),
                 // Пустой контейнер из `/setblock` ещё без записи блок-сущности:
                 // у ванили она создаётся вместе с блоком, окно живо, пока блок на месте.
                 None => {
@@ -14419,6 +14493,15 @@ impl PlayPlan {
 
     /// Содержимое контейнера в `p` для воронок и выбрасывателей.
     fn cont_get(&self, p: [i32; 3]) -> Option<Cont> {
+        // `HopperBlockEntity.getContainerAt`: блок-контейнер, иначе
+        // вагонетка с инвентарём в этой клетке.
+        self.block_cont(p).or_else(|| self.minecart_cont_at(p))
+    }
+
+    fn block_cont(&self, p: [i32; 3]) -> Option<Cont> {
+        if cart_of(p).is_some() {
+            return None;
+        }
         let name = self.state_name(self.block(p)?).to_owned();
         if furnace_kind(&name).is_some() {
             let slots = self.with_furnace(p, |e| e.f.slots)?;
@@ -14651,44 +14734,12 @@ impl PlayPlan {
         let above = crate::redstone::step(p, 1);
         if !full {
             if let Some(mut a) = self.cont_get(above) {
-                let all: Vec<usize> = (0..me.slots.len()).collect();
-                let source_slots = if a.name == "minecraft:brewing_stand" {
-                    vec![0, 1, 2, 3]
-                } else {
-                    hp::extract_slots(a.furnace, a.slots.len())
-                };
-                for i in source_slots {
-                    let Some(st) = a.slots[i] else { continue };
-                    if a.name == "minecraft:brewing_stand"
-                        && i == 3
-                        && self.item_name(st.item) != "minecraft:glass_bottle"
-                    {
-                        continue;
-                    }
-                    if a.furnace && i == 1 && self.item_name(st.item) != "minecraft:bucket" {
-                        continue;
-                    }
-                    let mut trial = me.slots.clone();
-                    if !hp::insert_one(&mut trial, &all, st, max) {
-                        continue;
-                    }
-                    if self
-                        .move_event(&a, &me, false, Stack { count: 1, ..st })
-                        .is_none()
-                    {
-                        break;
-                    }
-                    me.slots = trial;
-                    hp::take_one(&mut a.slots, i);
-                    self.cont_put(&a);
-                    moved = true;
-                    break;
-                }
+                moved |= self.hopper_pull(&mut a, &mut me);
             } else if !self
                 .block(above)
                 .is_some_and(|b| (0..6).all(|d| pl.sturdy(b, d)))
             {
-                moved |= self.hopper_suck(p, &mut me);
+                moved |= self.hopper_suck(p, &mut me, |d| crate::hoppers::in_suck_area(p, d));
             }
         }
         if moved {
@@ -14697,14 +14748,55 @@ impl PlayPlan {
         Some(moved)
     }
 
-    /// Воронка втягивает предметы с земли над собой (`addItem(container, ItemEntity)`).
-    fn hopper_suck(&self, p: [i32; 3], me: &mut Cont) -> bool {
+    /// Взять один предмет из контейнера `a` в воронку `me`
+    /// (`HopperBlockEntity.suckInItems`, ветка с контейнером сверху).
+    fn hopper_pull(&self, a: &mut Cont, me: &mut Cont) -> bool {
+        use crate::hoppers as hp;
+        let max = |item: i32| self.max_stack(item);
+        let all: Vec<usize> = (0..me.slots.len()).collect();
+        let source_slots = if a.name == "minecraft:brewing_stand" {
+            vec![0, 1, 2, 3]
+        } else {
+            hp::extract_slots(a.furnace, a.slots.len())
+        };
+        for i in source_slots {
+            let Some(st) = a.slots[i] else { continue };
+            if a.name == "minecraft:brewing_stand"
+                && i == 3
+                && self.item_name(st.item) != "minecraft:glass_bottle"
+            {
+                continue;
+            }
+            if a.furnace && i == 1 && self.item_name(st.item) != "minecraft:bucket" {
+                continue;
+            }
+            let mut trial = me.slots.clone();
+            if !hp::insert_one(&mut trial, &all, st, max) {
+                continue;
+            }
+            if self
+                .move_event(a, me, false, Stack { count: 1, ..st })
+                .is_none()
+            {
+                break;
+            }
+            me.slots = trial;
+            hp::take_one(&mut a.slots, i);
+            self.cont_put(a);
+            return true;
+        }
+        false
+    }
+
+    /// Воронка втягивает предметы с земли над собой (`addItem(container, ItemEntity)`);
+    /// `p` — клетка для событий плагинов, `inside` — попадает ли предмет в зону.
+    fn hopper_suck(&self, p: [i32; 3], me: &mut Cont, inside: impl Fn([f64; 3]) -> bool) -> bool {
         // Область всасывания — чуть больше блока, то есть 1–2 чанка.
         let center = [p[0] as f64 + 0.5, p[1] as f64, p[2] as f64 + 0.5];
         let found: Vec<(i32, Stack)> = self
             .drops_near(center, 1)
             .into_iter()
-            .filter(|(_, d)| crate::hoppers::in_suck_area(p, d.pos))
+            .filter(|(_, d)| inside(d.pos))
             .map(|(id, d)| (id, d.stack))
             .collect();
         let mut any = false;
@@ -14911,7 +15003,7 @@ impl PlayPlan {
         let dispenser = crate::redstone::step(front, facing ^ 1);
         let vehicle = if boats::is_boat_item(&name) {
             Some(self.dispense_boat(&name, dispenser, facing))
-        } else if name == "minecraft:minecart" {
+        } else if name.ends_with("minecart") {
             Some(self.dispense_minecart(&name, dispenser, facing))
         } else {
             None
@@ -17415,6 +17507,9 @@ impl PlayPlan {
 
     /// 27 слотов сундука из `Items` его блок-сущности.
     fn container_items(&self, pos: [i32; 3]) -> Vec<Slot> {
+        if let Some(id) = cart_of(pos) {
+            return self.minecart_slots(id).unwrap_or_default();
+        }
         if let Some(id) = plugin_of(pos) {
             return self
                 .plugin_invs
@@ -17442,6 +17537,10 @@ impl PlayPlan {
 
     /// Сохраняет слоты сундука в его блок-сущность (`Items` как в ванилле).
     fn save_container(&self, pos: [i32; 3], slots: &[Slot]) {
+        if let Some(id) = cart_of(pos) {
+            self.set_minecart_slots(id, slots);
+            return;
+        }
         if let Some(id) = plugin_of(pos) {
             if let Some(p) = self.plugin_invs.lock().unwrap().get_mut(&id) {
                 p.slots = slots.to_vec();

@@ -42,6 +42,7 @@ impl Primed {
 /// `resistance` возвращает `None` для воздуха и `Some(INFINITY)` для щита.
 pub fn affected(
     center: [f64; 3],
+    power: f32,
     mut resistance: impl FnMut([i32; 3]) -> Option<f32>,
     mut random: impl FnMut() -> f32,
 ) -> HashSet<[i32; 3]> {
@@ -54,7 +55,7 @@ pub fn affected(
                 let len = dir.iter().map(|v| v * v).sum::<f64>().sqrt();
                 for d in &mut dir { *d = *d / len * 0.3; }
                 let mut pos = center;
-                let mut strength = POWER * (0.7 + random() * 0.6);
+                let mut strength = power * (0.7 + random() * 0.6);
                 while strength > 0.0 {
                     let block = pos.map(|v| v.floor() as i32);
                     if let Some(r) = resistance(block) {
@@ -70,10 +71,12 @@ pub fn affected(
     out
 }
 
-pub fn damage(distance: f64, exposure: f64) -> f32 {
-    let impact = (1.0 - distance / 8.0).max(0.0) * exposure.clamp(0.0, 1.0);
+/// `ServerExplosion.hurtEntities`: радиус и множитель — удвоенная сила.
+pub fn damage(distance: f64, exposure: f64, power: f32) -> f32 {
+    let r = power as f64 * 2.0;
+    let impact = (1.0 - distance / r).max(0.0) * exposure.clamp(0.0, 1.0);
     if impact == 0.0 { return 0.0; }
-    ((impact * impact + impact) / 2.0 * 7.0 * 8.0 + 1.0).floor() as f32
+    ((impact * impact + impact) / 2.0 * 7.0 * r + 1.0).floor() as f32
 }
 
 #[cfg(test)]
@@ -91,15 +94,15 @@ mod tests {
 
     #[test]
     fn rays_stop_at_resistant_blocks() {
-        let open = affected([0.5; 3], |_| Some(0.0), || 0.5);
+        let open = affected([0.5; 3], POWER, |_| Some(0.0), || 0.5);
         assert!(open.contains(&[2, 0, 0]));
-        let protected = affected([0.5; 3], |p| Some(if p[0] == 1 { f32::INFINITY } else { 0.0 }), || 0.5);
+        let protected = affected([0.5; 3], POWER, |p| Some(if p[0] == 1 { f32::INFINITY } else { 0.0 }), || 0.5);
         assert!(!protected.iter().any(|p| p[0] >= 2));
     }
 
     #[test]
     fn blast_damage_falls_with_distance() {
-        assert!(damage(0.0, 1.0) > damage(4.0, 1.0));
-        assert_eq!(damage(0.0, 0.0), 0.0);
+        assert!(damage(0.0, 1.0, POWER) > damage(4.0, 1.0, POWER));
+        assert_eq!(damage(0.0, 0.0, POWER), 0.0);
     }
 }

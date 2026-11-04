@@ -775,6 +775,13 @@ pub fn boat_data_hurt(id: i32, entity_id: i32, hurt: i32, hurt_dir: i32, damage:
     w.buf
 }
 
+/// `MinecartFurnace.DATA_ID_FUEL` (индекс 13, boolean): печь горит.
+pub fn furnace_cart_fuel(id: i32, entity_id: i32, lit: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_id).u8(13).var_int(8).bool(lit).u8(0xff);
+    w.buf
+}
+
 /// `take_item_entity`: анимация подбора (предмет летит к игроку).
 pub fn take_item_entity(id: i32, item_entity: i32, collector: i32, amount: i32) -> Vec<u8> {
     let mut w = Writer::new();
