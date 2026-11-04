@@ -456,6 +456,20 @@ impl Section {
         matches!(self.storage, Storage::Single(_))
     }
 
+    /// Есть ли в секции хоть одно состояние, прошедшее `f`: по палитре, а не
+    /// по 4096 клеткам (`LevelChunkSection.isRandomlyTicking` у ванили — тот
+    /// же вопрос, только со счётчиком).
+    pub fn any_state(&self, mut f: impl FnMut(u32) -> bool) -> bool {
+        match &self.storage {
+            Storage::Single(b) => f(*b),
+            Storage::Paletted(p) => p
+                .palette
+                .iter()
+                .zip(&p.counts)
+                .any(|(&s, &c)| c > 0 && f(s)),
+        }
+    }
+
     /// Ставит состояние, возвращает прежнее. O(1), кроме роста палитры.
     pub fn set(&mut self, i: usize, state: u32) -> u32 {
         let old = self.get(i);

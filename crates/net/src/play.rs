@@ -126,6 +126,8 @@ struct Ids {
     hurt_animation: i32,
     sb_container_close: i32,
     sb_player_input: i32,
+    sb_move_vehicle: i32,
+    sb_paddle_boat: i32,
     sb_player_abilities: i32,
     sb_accept_teleportation: i32,
     open_screen: i32,
@@ -215,6 +217,8 @@ pub struct PlayPlan {
     spawn_frames: Mutex<SpawnFrameCache>,
     /// Кадры удаления сущности: тоже один пакет на всех, кто её видел.
     remove_frames: Mutex<FastMap<i32, Frame>>,
+    /// `BlockState.isRandomlyTicking` по номеру состояния: строится один раз.
+    random_ticking: std::sync::OnceLock<Vec<bool>>,
     /// Состояние блока → имя (`minecraft:stone`), для событий плагинов.
     block_names: Arc<Vec<String>>,
     /// ID `brigadier:string` в `command_argument_type`.
@@ -1465,6 +1469,8 @@ pub(crate) struct DimSim {
     pending_campfires: Mutex<Vec<[i32; 3]>>,
     /// Живые мобы по ID сущности.
     mobs: Mutex<FastMap<i32, mobs::MobEntry>>,
+    /// Лодки и плоты по ID сущности.
+    boats: Mutex<FastMap<i32, boats::Boat>>,
     /// Чанки, уже заселённые мобами при генерации (или прочитанные из `entities/`).
     populated: Mutex<FastSet<(i32, i32)>>,
     /// Прочитанные с диска мобы: тик заберёт их в `mobs` (регион может читаться из самого тика).
@@ -1843,27 +1849,6 @@ fn is_copper_chest(name: &str) -> bool {
     )
 }
 
-/// Возраст блоков `WeatheringCopper`, участвующих в локальном шансе окисления.
-fn copper_weather_age(name: &str) -> Option<u8> {
-    let name = name.strip_prefix("minecraft:")?;
-    if name.starts_with("waxed_") {
-        return None;
-    }
-    let (age, root) = if let Some(root) = name.strip_prefix("exposed_") {
-        (2, root)
-    } else if let Some(root) = name.strip_prefix("weathered_") {
-        (3, root)
-    } else if let Some(root) = name.strip_prefix("oxidized_") {
-        (4, root)
-    } else {
-        (1, name)
-    };
-    (root.starts_with("copper_") && root != "copper_ore"
-        || root.starts_with("cut_copper")
-        || root.starts_with("chiseled_copper"))
-    .then_some(age)
-}
-
 fn update_container_viewers(
     map: &mut FastMap<[i32; 3], Vec<Uuid>>,
     uuid: Uuid,
@@ -1910,6 +1895,7 @@ use chunkwake_data::world::FURNACES;
 
 /// Ванильные команды: дерево, права, селекторы и обработчики.
 pub mod commands;
+mod boats;
 mod mobs;
 mod poi;
 mod stream;
@@ -2153,6 +2139,8 @@ pub struct SurvivalData {
     pub orb_entity_type: i32,
     /// ID корова, свинья, овца, курица (`mobs::Species`) в реестре `entity_type`.
     pub mob_entity_types: [i32; 4],
+    /// Весь реестр `entity_type` по имени: лодки и плоты (`minecraft:oak_boat`).
+    pub entity_types: HashMap<String, i32>,
     /// Категория `creature` биомов по сетевому ID биома.
     pub creature_spawns: Vec<CreatureSpawns>,
     /// Коллизия и трение блоков; `None` — старый кэш без `shapes.csv`.
@@ -2171,6 +2159,8 @@ pub struct SurvivalData {
     pub data_dir: std::path::PathBuf,
     /// Состояния блоков (`reports/blocks.json`): палитра шаблонов.
     pub block_states: Arc<Vec<Option<(String, chunkwake_data::world::Properties)>>>,
+    /// Превращения блоков предметами, воск и окисление меди.
+    pub transforms: crate::transform::Transforms,
 }
 
 /// `natural_mob_spawns.creature` и `creature_world_gen_spawn_probability` биома.
@@ -2348,6 +2338,8 @@ impl PlayPlan {
                 hurt_animation: cb("hurt_animation")?,
                 sb_container_close: sb("container_close")?,
                 sb_player_input: sb("player_input")?,
+                sb_move_vehicle: sb("move_vehicle")?,
+                sb_paddle_boat: sb("paddle_boat")?,
                 sb_player_abilities: sb("player_abilities")?,
                 sb_accept_teleportation: sb("accept_teleportation")?,
                 open_screen: cb("open_screen")?,
@@ -2426,6 +2418,7 @@ impl PlayPlan {
             next_entity_id: AtomicI32::new(1),
             spawn_frames: Mutex::new(FastMap::default()),
             remove_frames: Mutex::new(FastMap::default()),
+            random_ticking: std::sync::OnceLock::new(),
             block_names,
             parsers,
             survival,
@@ -4391,6 +4384,45 @@ impl PlayPlan {
         *self.dim_state().simulated.lock().unwrap() = Arc::new(set);
     }
 
+    /// `ChunkMap.isPositionTicking` для отложенных тиков: чанк тикает, если
+    /// он в симуляции, а он сам и восемь соседей загружены (у ванили тикает
+    /// только чанк со статусом FULL у всего кольца соседей). Иначе тик
+    /// жидкости на краю писал бы в несгенерированного соседа — и тик сам
+    /// генерировал бы его, замирая на десятки миллисекунд на каждый.
+    ///
+    /// Держит `edited` на чтение, пока живёт: брать раньше замка очереди и
+    /// отпускать до самих тиков (они пишут в мир).
+    fn ticking_check(&self) -> impl FnMut((i32, i32)) -> bool + '_ {
+        let simulated = self.simulated_set();
+        // Плоский и пустой мир: чанка может не быть в `edited`, но он есть.
+        let flat = self.terrain().is_none();
+        let world = self.dim_state().edited.read().unwrap();
+        let mut memo: FastMap<(i32, i32), bool> = FastMap::default();
+        move |c: (i32, i32)| {
+            if !simulated.is_empty() && !simulated.contains(&c) {
+                return false;
+            }
+            if flat {
+                return true;
+            }
+            *memo.entry(c).or_insert_with(|| {
+                (-1..=1).all(|dx| (-1..=1).all(|dz| world.contains_key(&(c.0 + dx, c.1 + dz))))
+            })
+        }
+    }
+
+    /// Наступившие тики очереди `queue` в тикающих чанках; отложенные чанки,
+    /// которые снова тикают, возвращаются в очередь.
+    fn take_ticking(&self, queue: &Mutex<crate::ticks::TickQueue>, now: u64) -> Vec<[i32; 3]> {
+        let mut ticking = self.ticking_check();
+        let mut list = queue.lock().unwrap();
+        if list.is_empty() {
+            return Vec::new();
+        }
+        list.unpark(&mut ticking);
+        list.take_due_in(now, |p| ticking((p[0] >> 4, p[2] >> 4)))
+    }
+
     /// Набор симулируемых чанков для чтения: атомарная прибавка вместо клона.
     fn simulated_set(&self) -> Arc<FastSet<(i32, i32)>> {
         self.dim_state().simulated.lock().unwrap().clone()
@@ -4699,6 +4731,11 @@ impl PlayPlan {
             source.schedule_save();
         }
 
+        // Вышел из лодки: она остаётся на месте пустой.
+        let left_in = self.hub.players.lock().unwrap().get(&uuid).map(|p| p.dimension);
+        if let Some(dim) = left_in {
+            with_dim(dim, || self.leave_boat(uuid, 0.0));
+        }
         self.hub.players.lock().unwrap().remove(&uuid);
         self.forget_ping(uuid);
         self.hub.send_entity(
@@ -5554,6 +5591,10 @@ impl PlayPlan {
         let mut gone = Vec::new();
         let mut stuck = Vec::new();
         let mut broken = Vec::new();
+        // Ракеты без взрывов: событие есть, звука хлопка нет.
+        let mut quiet = Vec::new();
+        // `dealExplosionDamage` ракеты на элитрах: игрок, к которому она прицеплена.
+        let mut blasted = Vec::new();
         let mut impacts = Vec::new();
         let mut hurt = Vec::new();
         let mut hurt_mobs = Vec::new();
@@ -5571,6 +5612,14 @@ impl PlayPlan {
                         match hit {
                             ar::Hit::Pop => {
                                 broken.push((id, true, a.pos));
+                                if a.attached.is_some() && a.explosions == 0 {
+                                    quiet.push(id);
+                                }
+                                if let Some(owner) = a.attached
+                                    && a.explosions > 0
+                                {
+                                    blasted.push((owner, 5.0 + 2.0 * a.explosions as f32));
+                                }
                                 gone.push(id);
                             }
                             ar::Hit::Block if a.thrown => {
@@ -5635,8 +5684,11 @@ impl PlayPlan {
                 }
             });
         }
+        for (owner, damage) in blasted {
+            self.push_control(owner, Control::Hurt(damage, Cause::Explosion));
+        }
         for (id, rocket, pos) in broken {
-            if rocket {
+            if rocket && !quiet.contains(&id) {
                 self.play_sound(
                     None,
                     "minecraft:entity.firework_rocket.blast",
@@ -5646,10 +5698,13 @@ impl PlayPlan {
                     1.0,
                 );
             }
-            self.hub.send(
-                None,
-                inv::entity_event(self.ids.entity_event, id, crate::arrows::EVENT_BREAK),
-            );
+            // `FireworkRocketEntity.explode` шлёт 17 (частицы взрыва), снаряды — 3.
+            let event = if rocket {
+                crate::arrows::EVENT_FIREWORK_EXPLODE
+            } else {
+                crate::arrows::EVENT_BREAK
+            };
+            self.hub.send(None, inv::entity_event(self.ids.entity_event, id, event));
         }
         for (kind, owner, pos, extra, direct_hit) in impacts {
             match kind {
@@ -5998,6 +6053,53 @@ impl PlayPlan {
             t += 0.05;
         }
         None
+    }
+
+    /// `FireworkRocketItem.use` в полёте на элитрах: ракета цепляется к
+    /// игроку (`DATA_ATTACHED_TO_TARGET`), и разгон считает его клиент.
+    /// Звук запуска — первый тик ракеты (`life == 0`), всем вокруг.
+    fn boost_rocket(&self, uuid: Uuid, entity_id: i32, stack: Stack) {
+        let Some((feet, _, _)) = self.player_at(uuid) else {
+            return;
+        };
+        let (flight, explosions) =
+            chunkwake_protocol::components::fireworks(stack.extra).unwrap_or((1, 0));
+        let mut rocket = crate::arrows::Arrow::flight(feet, [0.0; 3], false);
+        rocket.firework = true;
+        rocket.owner = Some(uuid);
+        rocket.attached = Some(uuid);
+        rocket.explosions = explosions.min(u8::MAX as usize) as u8;
+        rocket.lifetime =
+            crate::arrows::rocket_lifetime(flight, rand::random(), rand::random());
+        let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
+        self.sim().arrows.lock().unwrap().insert(id, rocket);
+        self.mark_work();
+        self.hub.send(
+            None,
+            play::add_entity_moving(
+                self.ids.add_entity,
+                id,
+                Uuid::from_u128(rand::random()),
+                self.survival.firework_entity_type,
+                feet,
+                [0.0; 3],
+                0.0,
+                0.0,
+                0,
+            ),
+        );
+        self.hub.send(
+            None,
+            inv::set_firework_attached(self.ids.set_entity_data, id, entity_id),
+        );
+        self.play_sound(
+            None,
+            "minecraft:entity.firework_rocket.launch",
+            crate::sounds::AMBIENT,
+            feet,
+            3.0,
+            1.0,
+        );
     }
 
     fn launch(&self, entity_type: i32, arrow: crate::arrows::Arrow) {
@@ -6882,19 +6984,39 @@ impl PlayPlan {
         if simulated.is_empty() {
             return;
         }
+        let ticking = self.random_ticking.get_or_init(|| {
+            (0..self.survival.block_names.len() as u32)
+                .map(|state| {
+                    let name = self.state_name(state);
+                    let copper = !is_copper_chest(name)
+                        && self
+                            .survival
+                            .transforms
+                            .weathering
+                            .get(name)
+                            .is_some_and(|w| w.1.is_some());
+                    name == "minecraft:lava" || copper || crate::plants::random_tick_candidate(name)
+                })
+                .collect()
+        });
+        let ticks = |state: u32| ticking.get(state as usize).copied().unwrap_or(false);
         let mut sampled = Vec::new();
         {
             let world = self.dim_state().edited.read().unwrap();
+            let mut rng = rand::thread_rng();
             for &(cx, cz) in simulated.iter() {
                 let Some((column, _)) = world.get(&(cx, cz)) else {
                     continue;
                 };
                 for (sy, section) in column.sections.iter().enumerate() {
+                    // Секция без тикающих блоков: выборка ничего бы не дала.
+                    if !section.any_state(ticks) {
+                        continue;
+                    }
                     for _ in 0..speed {
-                        let i = rand::random::<usize>() % 4096;
+                        let i = rand::Rng::gen_range(&mut rng, 0..4096usize);
                         let state = section.get(i);
-                        let name = self.state_name(state);
-                        if name != "minecraft:lava" && !crate::plants::random_tick_candidate(name) {
+                        if !ticks(state) {
                             continue;
                         }
                         sampled.push((
@@ -6911,6 +7033,10 @@ impl PlayPlan {
         }
         for (p, sampled_state) in sampled {
             if self.block(p) != Some(sampled_state) {
+                continue;
+            }
+            if self.survival.transforms.weathering.contains_key(self.state_name(sampled_state)) {
+                self.tick_weathering(p, sampled_state);
                 continue;
             }
             if self.state_name(sampled_state) != "minecraft:lava" {
@@ -8905,7 +9031,12 @@ impl PlayPlan {
                 if frozen && !step {
                     continue;
                 }
+                let t = Instant::now();
                 plan.tick_once();
+                // Тик дольше пяти обычных: мир замирает, и игроку это видно.
+                if t.elapsed() > TICK * 5 {
+                    tracing::debug!("slow tick: {:?}", t.elapsed());
+                }
             }
         })
     }
@@ -9201,6 +9332,7 @@ impl PlayPlan {
         out.extend(self.dropped_frames());
         out.extend(self.orb_frames());
         out.extend(self.mob_frames());
+        out.extend(self.boat_frames());
         if !out.is_empty() {
             conn.send_frames(&out).await?;
         }
@@ -9237,6 +9369,10 @@ impl PlayPlan {
         let mut sneaking = false;
         // Полёт на элитрах. Клиент включает его сам и гасит только по метаданным.
         let mut gliding = false;
+        // Сидит в лодке: клиент шлёт `move_vehicle` вместо своей позиции.
+        let mut in_boat = false;
+        // `fallFlyTicks`: тики текущего полёта на элитрах.
+        let mut fall_fly_ticks: u32 = 0;
         // Креатив/наблюдатель: клиент шлёт `player_abilities`, пока бит включён элитры нельзя.
         let mut flying = login.spawn.game_mode == 3;
         let mut food_ticker = tokio::time::interval(TICK);
@@ -9763,6 +9899,24 @@ impl PlayPlan {
                         }
                     }
                     self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
+                    // `updateFallFlying`: раз в 20 тиков полёта элитры теряют
+                    // единицу прочности (`hurtAndBreak`, с Прочностью — по шансу).
+                    if gliding {
+                        fall_fly_ticks += 1;
+                        if survival
+                            && fall_fly_ticks % 20 == 0
+                            && let Some(mut chest) = state.inv.slots[survival::CHEST]
+                        {
+                            let before = chest.damage;
+                            self.wear_one(&mut chest);
+                            if chest.damage != before {
+                                state.inv.slots[survival::CHEST] = Some(chest);
+                                self.send_slots(conn, &mut state.inv, &[survival::CHEST]).await?;
+                            }
+                        }
+                    } else {
+                        fall_fly_ticks = 0;
+                    }
                     if !survival {
                         continue;
                     }
@@ -9832,6 +9986,11 @@ impl PlayPlan {
                         let m = play::read_move(&mut r, has_pos, has_rot)?;
                         if state.vitals.dead {
                             continue;
+                        }
+                        // Свою позицию клиент шлёт только пешком: лодки под игроком уже нет.
+                        if in_boat && m.pos.is_some() {
+                            in_boat = false;
+                            self.leave_boat(uuid, 0.0);
                         }
                         // `PlayerMoveEvent` (как Paper: сдвиг > 1/16 блока или поворот > 10°).
                         if let Some((from, fyaw, fpitch)) = self.player_at(uuid)
@@ -10020,6 +10179,12 @@ impl PlayPlan {
                         let target = r.var_int()?;
                         if !state.vitals.dead {
                             let creative = login.spawn.game_mode == 1;
+                            let crit = !state.vitals.sprinting
+                                && self.hub.players.lock().unwrap().get(&uuid).is_some_and(|p| !p.on_ground);
+                            let held = state.inv.slots[state.inv.held_slot()];
+                            if self.attack_boat(uuid, target, held, creative, crit).is_some() {
+                                continue;
+                            }
                             if let Some(slot) = self.attack_mob(uuid, target, &mut state.inv, creative, state.vitals.sprinting).await {
                                 if state.inv.slots[slot].is_none() {
                                     self.break_in_hand(me.entity_id, false);
@@ -10031,6 +10196,16 @@ impl PlayPlan {
                     }
                     if id == ids.sb_interact {
                         let it = play::read_interact(&mut r)?;
+                        // `AbstractBoat.interact`: без шифта — сесть.
+                        if self.is_boat(it.entity) {
+                            if !state.vitals.dead && !it.sneaking && !in_boat && it.hand == 0
+                                && self.mount_boat(uuid, me.entity_id, it.entity)
+                            {
+                                in_boat = true;
+                                state.vitals.clear_fall();
+                            }
+                            continue;
+                        }
                         if !state.vitals.dead {
                             let creative = login.spawn.game_mode == 1;
                             if let Some(slots) = self.interact_mob(uuid, it.entity, it.hand, &mut state.inv, creative).await {
@@ -10043,6 +10218,42 @@ impl PlayPlan {
                         sneaking = r.u8()? & INPUT_SHIFT != 0;
                         // Плагины видят присед сразу, без ожидания тика.
                         self.set_sneaking(uuid, sneaking);
+                        // `Player.rideTick`: шифт снимает с транспорта (`wantsToStopRiding`).
+                        if sneaking && in_boat {
+                            in_boat = false;
+                            let (yaw, pitch) = self.player_at(uuid).map_or((0.0, 0.0), |p| (p.1, p.2));
+                            if let Some(spot) = self.leave_boat(uuid, yaw) {
+                                teleport_id += 1;
+                                center = self.teleport(conn, uuid, spot, yaw, pitch, teleport_id, &mut stream).await?;
+                                state.vitals.reset_fall(spot);
+                            }
+                        }
+                        continue;
+                    }
+                    if id == ids.sb_move_vehicle {
+                        let (pos, yaw, _pitch, _on_ground) = play::read_move_vehicle(&mut r)?;
+                        if in_boat && let Some(at) = self.drive_boat(uuid, pos, yaw) {
+                            // Игрок едет с лодкой: за ним идут чанки и трекинг.
+                            let now = ((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4);
+                            if now != center {
+                                self.stream_move(conn, &mut stream, now).await?;
+                                center = now;
+                                out.clear();
+                                self.refresh_visible(uuid, center, r_view, &mut visible, &mut out);
+                                if !out.is_empty() {
+                                    conn.send_frames(&out).await?;
+                                }
+                            }
+                            self.moved(uuid, Move { pos: Some(at), rot: None, on_ground: true });
+                            state.vitals.reset_fall(at);
+                        }
+                        continue;
+                    }
+                    if id == ids.sb_paddle_boat {
+                        let (left, right) = (r.bool()?, r.bool()?);
+                        if in_boat {
+                            self.paddle_boat(uuid, left, right);
+                        }
                         continue;
                     }
                     if id == ids.sb_rename_item {
@@ -10154,6 +10365,24 @@ impl PlayPlan {
                                 let at_frame = self.looked_block(uuid, 4.5).and_then(|p| self.block(p))
                                     .is_some_and(|s| self.state_name(s) == "minecraft:end_portal_frame");
                                 if !at_frame && self.throw_ender_eye(uuid, stack) && login.spawn.game_mode != 1 {
+                                    state.inv.consume_at(slot);
+                                    self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                }
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
+                                continue;
+                            }
+                            if boats::is_boat_item(item) {
+                                if self.place_boat(uuid, item) && login.spawn.game_mode != 1 {
+                                    state.inv.consume_at(slot);
+                                    self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                }
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
+                                continue;
+                            }
+                            // `FireworkRocketItem.use`: только в полёте на элитрах.
+                            if item == "minecraft:firework_rocket" && gliding {
+                                self.boost_rocket(uuid, me.entity_id, stack);
+                                if login.spawn.game_mode != 1 {
                                     state.inv.consume_at(slot);
                                     self.send_slots(conn, &mut state.inv, &[slot]).await?;
                                 }
@@ -10553,48 +10782,6 @@ impl PlayPlan {
                                 continue;
                             }
                         }
-                        if !state.vitals.dead && login.spawn.game_mode != 3
-                            && is_copper_chest(&clicked)
-                            && self.player_at(uuid).is_some_and(|(p, _, _)| {
-                                block_reach(eye_of(p), u.pos, if login.spawn.game_mode == 1 { 5.0 } else { 4.5 })
-                            })
-                        {
-                            let slot = Self::hand_index(&state.inv, u.hand);
-                            if let Some(slot) = slot
-                                && let Some(mut held) = state.inv.slots[slot]
-                                && let Some(c) = self.chest_at(u.pos)
-                            {
-                                let item = self.item_name(held.item);
-                                let axe = item.starts_with("minecraft:") && item.ends_with("_axe")
-                                    && !item.ends_with("_pickaxe");
-                                let next = if item == "minecraft:honeycomb" && c.copper <= 4 {
-                                    Some((c.copper + 4, "minecraft:item.honeycomb.wax_on"))
-                                } else if axe && c.copper > 4 {
-                                    Some((c.copper - 4, "minecraft:item.axe.wax_off"))
-                                } else if axe && (2..=4).contains(&c.copper) {
-                                    Some((c.copper - 1, "minecraft:item.axe.scrape"))
-                                } else {
-                                    None
-                                };
-                                if let Some((variant, sound)) = next {
-                                    self.set_copper_chest(u.pos, variant);
-                                    self.block_sound(None, sound, u.pos, 1.0, 1.0);
-                                    if login.spawn.game_mode != 1 {
-                                        if item == "minecraft:honeycomb" {
-                                            state.inv.consume_at(slot);
-                                        } else if self.wear_one(&mut held) {
-                                            state.inv.slots[slot] = None;
-                                            self.break_in_hand(me.entity_id, u.hand != 0);
-                                        } else {
-                                            state.inv.slots[slot] = Some(held);
-                                        }
-                                        self.send_slots(conn, &mut state.inv, &[slot]).await?;
-                                    }
-                                    conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
-                                    continue;
-                                }
-                            }
-                        }
                         // `LecternBlock.useItemOn`: книга в руке кладётся на
                         // лектор, рука опустошается на один предмет.
                         if crate::redstone::is_lectern(&clicked)
@@ -10736,6 +10923,46 @@ impl PlayPlan {
                                 self.send_slots(conn, &mut state.inv, &[i]).await?;
                             }
                             self.hub.send(None, play::level_event(ids.level_event, 1505, u.pos, 0, false));
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                            continue;
+                        }
+                        // `BlockTransformer.transformBlock` (топор, мотыга, лопата) и
+                        // `HoneycombItem.useOn`: стадия предмета — после действий
+                        // самого блока (дверь, сундук открываются раньше), только
+                        // там, где можно строить (не приключение и не наблюдатель).
+                        if let Some(i) = hand_slot.filter(|_| !state.vitals.dead && matches!(login.spawn.game_mode, 0 | 1))
+                            && let Some(mut held) = state.inv.slots[i]
+                            && !self.spawn_blocked(uuid, u.pos)
+                            && self.player_at(uuid).is_some_and(|(feet, _, _)| block_reach(eye_of(feet), u.pos, if login.spawn.game_mode == 1 { 5.0 } else { 4.5 }))
+                            && let Some((consume, damage)) = {
+                                let blocking = u.hand == 0
+                                    && !sneaking
+                                    && state.inv.slots[survival::OFFHAND].is_some_and(|o| self.item_name(o.item) == "minecraft:shield");
+                                self.item_transform(uuid, held, blocking, u.pos, u.face as u8)
+                            }
+                        {
+                            if login.spawn.game_mode != 1 {
+                                if self.max_stack(held.item) > 1 {
+                                    if consume {
+                                        state.inv.consume_at(i);
+                                    }
+                                } else {
+                                    let mut broke = false;
+                                    for _ in 0..damage {
+                                        if self.wear_one(&mut held) {
+                                            broke = true;
+                                            break;
+                                        }
+                                    }
+                                    if broke {
+                                        state.inv.slots[i] = None;
+                                        self.break_in_hand(me.entity_id, u.hand != 0);
+                                    } else {
+                                        state.inv.slots[i] = Some(held);
+                                    }
+                                }
+                                self.send_slots(conn, &mut state.inv, &[i]).await?;
+                            }
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                             continue;
                         }
@@ -12152,8 +12379,14 @@ impl PlayPlan {
         }
     }
 
+    /// `LivingEntity.canGlideUsing`: элитры в нагруднике и следующий износ
+    /// их не сломает (`nextDamageWillBreak`) — на последней единице прочности
+    /// полёт гаснет, а сами элитры остаются целыми.
     fn wearing_elytra(&self, inv: &Inventory) -> bool {
-        inv.slots[survival::CHEST].is_some_and(|s| self.item_name(s.item) == "minecraft:elytra")
+        inv.slots[survival::CHEST].is_some_and(|s| {
+            let max = self.survival.items.get(s.item as usize).map_or(0, |i| i.max_damage);
+            self.item_name(s.item) == "minecraft:elytra" && (max <= 0 || s.damage < max - 1)
+        })
     }
 
     fn mark_gliding(&self, uuid: Uuid, gliding: bool) {
@@ -12757,17 +12990,12 @@ impl PlayPlan {
         lap!(PH_PISTONS);
         self.tick_hoppers();
         lap!(PH_HOPPERS);
-        let due: Vec<[i32; 3]> = {
-            let mut list = self.sim().redstone_ticks.lock().unwrap();
-            if list.is_empty() {
-                lap!(PH_SCHEDULED);
-                return;
-            }
-            // Расписание вдалеке не теряется: тик подождёт, пока чанк в симуляции.
-            list.take_due_in(now, |p| {
-                simulated.is_empty() || simulated.contains(&(p[0] >> 4, p[2] >> 4))
-            })
-        };
+        if self.sim().redstone_ticks.lock().unwrap().is_empty() {
+            lap!(PH_SCHEDULED);
+            return;
+        }
+        // Расписание вдалеке не теряется: тик подождёт, пока чанк тикает.
+        let due = self.take_ticking(&self.sim().redstone_ticks, now);
         for pos in due {
             self.scheduled_tick(pos, now);
         }
@@ -13201,6 +13429,129 @@ impl PlayPlan {
         }
         let sound = if long { long_sound } else { short_sound };
         self.block_sound(None, sound, pos, 1.0, 1.0);
+    }
+
+    /// Превращение блока предметом в руке: воск соты или первое подходящее
+    /// превращение компонента `block_transformer`. Возвращает, тратится ли
+    /// предмет из стопки и сколько износа у инструмента.
+    ///
+    /// `blocking` — `playerHasBlockingItemUseIntent`: основная рука, во
+    /// второй щит и игрок не приседает — инструмент не действует.
+    fn item_transform(
+        &self,
+        uuid: Uuid,
+        held: Stack,
+        blocking: bool,
+        pos: [i32; 3],
+        face: u8,
+    ) -> Option<(bool, i32)> {
+        let here = self.block(pos)?;
+        let pl = &self.survival.placement;
+        let t = &self.survival.transforms;
+        let item = self.item_name(held.item).to_owned();
+        let name = self.state_name(here).to_owned();
+        let center = [pos[0] as f64 + 0.5, pos[1] as f64 + 0.5, pos[2] as f64 + 0.5];
+        let partner = if is_copper_chest(&name) { self.chest_partner(pos) } else { None };
+        let at_partner = |event: i32, sound: Option<&str>| {
+            if let Some((other, _)) = partner {
+                let c = [other[0] as f64 + 0.5, other[1] as f64 + 0.5, other[2] as f64 + 0.5];
+                self.emit_vibration(c, "minecraft:block_change");
+                if event != 0 {
+                    self.hub.send(Some(uuid), play::level_event(self.ids.level_event, event, other, 0, false));
+                }
+                if let Some(sound) = sound {
+                    self.block_sound(Some(uuid), sound, other, 1.0, 1.0);
+                }
+            }
+        };
+        if item == "minecraft:honeycomb" {
+            let waxed = t.waxed.get(&name)?;
+            let mut next = *self.survival.block_defaults.get(waxed)?;
+            for (k, v) in pl.props(here) {
+                next = pl.with_prop(next, k, v).unwrap_or(next);
+            }
+            self.put_transformed(pos, &name, next);
+            self.emit_vibration(center, "minecraft:block_change");
+            self.hub.send(
+                Some(uuid),
+                play::level_event(self.ids.level_event, crate::transform::EVENT_WAX_ON, pos, 0, false),
+            );
+            self.block_sound(Some(uuid), "minecraft:item.honeycomb.wax_on", pos, 1.0, 1.0);
+            at_partner(crate::transform::EVENT_WAX_ON, Some("minecraft:item.honeycomb.wax_on"));
+            return Some((true, 0));
+        }
+        if blocking {
+            return None;
+        }
+        let list = t.for_item(&item)?;
+        let name_at = |p: [i32; 3]| {
+            self.block(p)
+                .map_or_else(|| "minecraft:air".to_owned(), |s| self.state_name(s).to_owned())
+        };
+        for tr in list {
+            if tr.disallowed_faces.contains(&face) {
+                continue;
+            }
+            let Some(next) = tr.result(pos, here, &name_at, pl, &self.survival.block_defaults) else {
+                continue;
+            };
+            // `dropFromBlockInteractLootTable` до смены блока.
+            if let Some(table) = &tr.loot {
+                let none = |_: &str| None;
+                let level = |_: &str| 0;
+                let ctx = crate::loot::Ctx {
+                    prop: &none,
+                    block: table,
+                    tool: Some(&item),
+                    level: &level,
+                    entity: None,
+                    killed_by_player: true,
+                    smelt: &|_| None,
+                };
+                for (drop, count) in crate::loot::roll(&self.survival.loot, &ctx, &mut rand::thread_rng()) {
+                    let Some(id) = self.item_id(&drop) else { continue };
+                    let stack = Stack::new(id, count.min(self.max_stack(id).max(1)));
+                    let (from, vel) = if tr.drop_from_face {
+                        crate::transform::pop_from_face(pos, face, rand::random())
+                    } else {
+                        (
+                            [center[0], pos[1] as f64 + 0.25, center[2]],
+                            items::pop_velocity(rand::random(), rand::random()),
+                        )
+                    };
+                    self.drop_item(from, vel, stack, items::BLOCK_DELAY);
+                }
+            }
+            self.put_transformed(pos, &name, next);
+            if tr.update_from_neighbors {
+                self.update_connections(pos);
+            }
+            if let Some(sound) = &tr.sound {
+                self.block_sound(Some(uuid), sound, pos, 1.0, 1.0);
+            }
+            if tr.event != 0 {
+                self.hub.send(Some(uuid), play::level_event(self.ids.level_event, tr.event, pos, 0, false));
+            }
+            self.emit_vibration(center, "minecraft:block_change");
+            if tr.copper_chest {
+                at_partner(tr.event, None);
+            }
+            return Some((tr.consume_on_use, tr.item_damage));
+        }
+        None
+    }
+
+    /// `setBlock(pos, state, 11)` превращённого блока. Медный сундук меняет
+    /// обе половины разом, сохраняя связь и инвентари.
+    fn put_transformed(&self, pos: [i32; 3], old_name: &str, next: u32) {
+        if is_copper_chest(old_name)
+            && let Some(c) = self.survival.chests.get(&next).copied()
+        {
+            self.set_copper_chest(pos, c.copper);
+            return;
+        }
+        self.set_block(pos, next);
+        self.redstone_update(&crate::redstone::around(pos));
     }
 
     fn scheduled_tick(&self, pos: [i32; 3], now: u64) {
@@ -14020,17 +14371,11 @@ impl PlayPlan {
     /// вместе с исследованным миром.
     fn tick_hoppers(&self) {
         let now = self.server_ticks.load(std::sync::atomic::Ordering::Relaxed);
-        let ready: Vec<[i32; 3]> = {
-            let mut queue = self.sim().hopper_ticks.lock().unwrap();
-            if queue.is_empty() {
-                return;
-            }
-            let simulated = self.simulated_set();
-            // Воронка вне симуляции не переносит: срок остаётся на месте.
-            queue.take_due_in(now, |p| {
-                simulated.is_empty() || simulated.contains(&(p[0] >> 4, p[2] >> 4))
-            })
-        };
+        if self.sim().hopper_ticks.lock().unwrap().is_empty() {
+            return;
+        }
+        // Воронка вне симуляции не переносит: срок остаётся на месте.
+        let ready = self.take_ticking(&self.sim().hopper_ticks, now);
         for p in ready {
             match self.hopper_step(p) {
                 Some(moved) => {
@@ -14970,17 +15315,11 @@ impl PlayPlan {
     /// Наступившие тики жидкостей: растекание, высыхание, смыв, застывание.
     fn tick_fluids(&self, now: u64) {
         use crate::fluids as fl;
-        let due: Vec<[i32; 3]> = {
-            let mut list = self.sim().fluid_ticks.lock().unwrap();
-            if list.is_empty() {
-                return;
-            }
-            // Вне симуляции тик откладывается, а не теряется.
-            let simulated = self.simulated_set();
-            list.take_due_in(now, |p| {
-                simulated.is_empty() || simulated.contains(&(p[0] >> 4, p[2] >> 4))
-            })
-        };
+        if self.sim().fluid_ticks.lock().unwrap().is_empty() {
+            return;
+        }
+        // Вне тикающих чанков тик откладывается, а не теряется.
+        let due = self.take_ticking(&self.sim().fluid_ticks, now);
         for p in due {
             let changes = {
                 let at = |q: [i32; 3]| self.block(q).unwrap_or(AIR);
@@ -16680,48 +17019,74 @@ impl PlayPlan {
             let Some(chest) = self.chest_at(pos).filter(|c| (1..=3).contains(&c.copper)) else {
                 continue;
             };
-            let age = chest.copper;
-            let mut same = 0f32;
-            let mut later = 0f32;
-            let mut blocked = false;
-            for dx in -4i32..=4 {
-                for dy in -4i32..=4 {
-                    for dz in -4i32..=4 {
-                        if dx == 0 && dy == 0 && dz == 0 || dx.abs() + dy.abs() + dz.abs() > 4 {
-                            continue;
-                        }
-                        let p = [pos[0] + dx, pos[1] + dy, pos[2] + dz];
-                        let Some(state) = self.block(p) else { continue };
-                        let Some(other_age) = copper_weather_age(self.state_name(state)) else {
-                            continue;
-                        };
-                        if other_age < age {
-                            blocked = true;
-                            break;
-                        }
-                        if other_age == age {
-                            same += 1.0;
-                        } else {
-                            later += 1.0;
-                        }
-                    }
-                    if blocked {
-                        break;
-                    }
-                }
-                if blocked {
-                    break;
-                }
-            }
-            if blocked {
-                continue;
-            }
-            let factor = (same + 1.0) / (same + later + 1.0);
-            let modifier = if age == 1 { 0.75 } else { 1.0 };
-            if rand::random::<f32>() < factor * factor * modifier {
-                self.set_copper_chest(pos, age + 1);
+            if self.weathering_advances(pos, chest.copper) {
+                self.set_copper_chest(pos, chest.copper + 1);
             }
         }
+    }
+
+    /// `ChangeOverTimeBlock.getNextState`: медь в манхэттенском радиусе 4.
+    /// Любой сосед моложе — стоп; иначе шанс `((same+1)/(same+later+1))²`,
+    /// у неокисленной стадии ещё ×0.75 (`getChanceModifier`).
+    fn weathering_advances(&self, pos: [i32; 3], age: u8) -> bool {
+        let t = &self.survival.transforms;
+        let mut same = 0f32;
+        let mut later = 0f32;
+        for dx in -4i32..=4 {
+            for dy in -4i32..=4 {
+                for dz in -4i32..=4 {
+                    if dx == 0 && dy == 0 && dz == 0 || dx.abs() + dy.abs() + dz.abs() > 4 {
+                        continue;
+                    }
+                    let p = [pos[0] + dx, pos[1] + dy, pos[2] + dz];
+                    let Some(state) = self.block(p) else { continue };
+                    let Some(other_age) = t.copper_age(self.state_name(state)) else {
+                        continue;
+                    };
+                    if other_age < age {
+                        return false;
+                    }
+                    if other_age == age {
+                        same += 1.0;
+                    } else {
+                        later += 1.0;
+                    }
+                }
+            }
+        }
+        let factor = (same + 1.0) / (same + later + 1.0);
+        let modifier = if age == 1 { 0.75 } else { 1.0 };
+        rand::random::<f32>() < factor * factor * modifier
+    }
+
+    /// `WeatheringCopper.changeOverTime` из случайного тика: шанс 0.05688889,
+    /// затем `getNextState`; следующая стадия берёт свойства блока.
+    fn tick_weathering(&self, pos: [i32; 3], state: u32) {
+        if rand::random::<f32>() >= 0.05688889 {
+            return;
+        }
+        let Some((age, Some(next))) = self
+            .survival
+            .transforms
+            .weathering
+            .get(self.state_name(state))
+            .cloned()
+        else {
+            return;
+        };
+        if !self.weathering_advances(pos, age) {
+            return;
+        }
+        let pl = &self.survival.placement;
+        let Some(&default) = self.survival.block_defaults.get(&next) else {
+            return;
+        };
+        let mut s = default;
+        for (k, v) in pl.props(state) {
+            s = pl.with_prop(s, k, v).unwrap_or(s);
+        }
+        self.set_block(pos, s);
+        self.redstone_update(&crate::redstone::around(pos));
     }
 
     /// Вторая половина двойного сундука и `true`, если `pos` — правая (первая) половина.
@@ -18101,6 +18466,7 @@ impl PlayPlan {
         cause: Cause,
     ) -> Result<(), NetError> {
         self.wake_player(me.entry.uuid);
+        self.leave_boat(me.entry.uuid, 0.0);
         {
             self.hub.send(
                 Some(me.entry.uuid),
@@ -18434,7 +18800,7 @@ fn chunks_around(c: (i32, i32), r: i32, skip: Option<((i32, i32), i32)>) -> Vec<
 mod tests {
     use super::{
         CHEST_SINGLE, ChestState, FastMap, acknowledge_player_save, add_banner_pattern,
-        chunks_around, container_entity, copper_weather_age, dominant_axis, lectern_page_request,
+        chunks_around, container_entity, dominant_axis, lectern_page_request,
         near, update_container_viewers,
     };
     use crate::survival::PlayerState;
@@ -18727,16 +19093,6 @@ mod tests {
             assert_eq!(container_entity(name), Some("minecraft:chest"));
         }
         assert!(!base.same_family(ChestState { copper: 0, ..base }));
-        assert_eq!(copper_weather_age("minecraft:copper_chest"), Some(1));
-        assert_eq!(
-            copper_weather_age("minecraft:weathered_cut_copper"),
-            Some(3)
-        );
-        assert_eq!(
-            copper_weather_age("minecraft:waxed_oxidized_copper_chest"),
-            None
-        );
-        assert_eq!(copper_weather_age("minecraft:copper_ore"), None);
     }
 
     /// `DaylightDetectorBlock.updateSignalStrength`: сигнал — небесный свет,

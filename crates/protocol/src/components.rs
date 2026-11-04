@@ -129,6 +129,25 @@ pub static TRIM_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static BANNER_PATTERNS_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static WRITTEN_BOOK_CONTENT_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static WRITABLE_BOOK_CONTENT_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+pub static FIREWORKS_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+
+/// `minecraft:fireworks` ракеты из сырого патча: `(flight_duration, число
+/// взрывов)`. Скрафченная ракета несёт в патче только этот компонент, и он
+/// первый; за неизвестным компонентом длина тела неизвестна — тогда `None`,
+/// и действует прототип предмета (полёт 1, без взрывов).
+pub fn fireworks(extra: u32) -> Option<(i32, usize)> {
+    let e = get(extra);
+    let raw = e.raw.as_deref()?;
+    let mut r = crate::Reader::new(raw);
+    let added = r.var_int().ok()?;
+    let _removed = r.var_int().ok()?;
+    if added < 1 || r.var_int().ok()? != id_of(&FIREWORKS_COMPONENT) {
+        return None;
+    }
+    let flight = r.var_int().ok()?;
+    let explosions = r.var_int().ok()?.max(0) as usize;
+    Some((flight, explosions))
+}
 
 static TRIM_MATERIAL_NAMES: OnceLock<Vec<String>> = OnceLock::new();
 static TRIM_PATTERN_NAMES: OnceLock<Vec<String>> = OnceLock::new();

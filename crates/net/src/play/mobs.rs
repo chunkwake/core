@@ -1154,6 +1154,10 @@ impl PlayPlan {
             };
             for e in list {
                 let Tag::Compound(c) = e else { continue };
+                if self.load_boat(c) {
+                    written.insert(pos);
+                    continue;
+                }
                 let Some(m) = mob_from_nbt(c) else { continue };
                 written.insert(pos);
                 self.sim().mobs_loaded.lock().unwrap().push(MobEntry::new(m));
@@ -1301,6 +1305,9 @@ impl PlayPlan {
                 (e.mob.pos[2].floor() as i32) >> 4,
             );
             by_chunk.entry(pos).or_default().push(mob_to_nbt(&e.mob));
+        }
+        for (pos, c) in self.boats_nbt() {
+            by_chunk.entry(pos).or_default().push(c);
         }
         for &pos in self.sim().entity_written.lock().unwrap().iter() {
             by_chunk.entry(pos).or_default();

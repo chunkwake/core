@@ -33,6 +33,7 @@ pub struct Ids {
     remove_entities: i32,
     set_time: i32,
     level_chunk: i32,
+    forget_level_chunk: i32,
 }
 
 impl Ids {
@@ -64,6 +65,7 @@ impl Ids {
             remove_entities: id(Play, C, "remove_entities")?,
             set_time: id(Play, C, "set_time")?,
             level_chunk: id(Play, C, "level_chunk_with_light")?,
+            forget_level_chunk: id(Play, C, "forget_level_chunk")?,
         })
     }
 }
@@ -79,6 +81,9 @@ pub struct Client {
     /// Пакеты с этим ID сохраняются целиком в `captured` (без ID): отладка
     /// кодирования против декодера клиента.
     pub capture: Option<i32>,
+    /// Чанки, которые сейчас есть у клиента (`level_chunk_with_light` минус
+    /// `forget_level_chunk`).
+    pub loaded: std::collections::HashSet<(i32, i32)>,
     pub captured: Vec<Vec<u8>>,
     pub bytes_out: u64,
     pub keep_alives: u64,
@@ -292,6 +297,7 @@ impl Client {
             packets_in: 0,
             chunks_in: 0,
             capture: None,
+            loaded: std::collections::HashSet::new(),
             captured: Vec::new(),
             bytes_in: 0,
             bytes_out: 0,
@@ -308,6 +314,18 @@ impl Client {
         let id = r.var_int().map_err(err)?;
         if id == self.ids.level_chunk {
             self.chunks_in += 1;
+            let b = r.remaining();
+            if b.len() >= 8 {
+                let x = i32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+                let z = i32::from_be_bytes([b[4], b[5], b[6], b[7]]);
+                self.loaded.insert((x, z));
+            }
+        } else if id == self.ids.forget_level_chunk {
+            // `ChunkPos.toLong`: x в младших 32 битах, z в старших.
+            let mut c = Reader::new(r.remaining());
+            if let Ok(v) = c.i64() {
+                self.loaded.remove(&(v as i32, (v >> 32) as i32));
+            }
         }
         if self.capture == Some(id) {
             self.captured.push(r.remaining().to_vec());

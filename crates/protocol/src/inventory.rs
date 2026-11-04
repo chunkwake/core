@@ -722,10 +722,45 @@ pub fn set_orb_value(id: i32, entity_id: i32, value: i32) -> Vec<u8> {
     w.buf
 }
 
+/// `FireworkRocketEntity.DATA_ATTACHED_TO_TARGET` (индекс 9, сериализатор
+/// `OPTIONAL_UNSIGNED_INT` = 19: `id + 1`, 0 — пусто). Клиент сам ведёт
+/// ракету за сущностью и сам разгоняет своего игрока на элитрах.
+pub fn set_firework_attached(id: i32, entity_id: i32, attached: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .var_int(entity_id)
+        .u8(9)
+        .var_int(19)
+        .var_int(attached + 1)
+        .u8(0xff);
+    w.buf
+}
+
 /// `PrimedTnt.DATA_FUSE_ID`: оставшиеся тики фитиля (индекс 8, int).
 pub fn set_tnt_fuse(id: i32, entity_id: i32, fuse: i32) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id).var_int(entity_id).u8(8).var_int(1).var_int(fuse).u8(0xff);
+    w.buf
+}
+
+/// Данные лодки (`VehicleEntity`/`AbstractBoat`): время удара (8, int),
+/// его сторона (9, int), накопленный урон (10, float) и вёсла (11, 12, boolean).
+pub fn boat_data(
+    id: i32,
+    entity_id: i32,
+    hurt: i32,
+    hurt_dir: i32,
+    damage: f32,
+    paddles: (bool, bool),
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_id);
+    w.u8(8).var_int(1).var_int(hurt);
+    w.u8(9).var_int(1).var_int(hurt_dir);
+    w.u8(10).var_int(3).f32(damage);
+    w.u8(11).var_int(8).bool(paddles.0);
+    w.u8(12).var_int(8).bool(paddles.1);
+    w.u8(0xff);
     w.buf
 }
 

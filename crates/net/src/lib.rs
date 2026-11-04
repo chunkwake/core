@@ -551,5 +551,6 @@ impl Connection {
 }
 pub mod brewing;
 pub mod tnt;
+pub mod transform;
 pub mod fire;
 pub mod environment;

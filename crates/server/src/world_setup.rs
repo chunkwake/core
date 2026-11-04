@@ -627,6 +627,7 @@ fn survival_data(
             .store(component("minecraft:written_book_content")?, order);
         c::WRITABLE_BOOK_CONTENT_COMPONENT
             .store(component("minecraft:writable_book_content")?, order);
+        c::FIREWORKS_COMPONENT.store(component("minecraft:fireworks")?, order);
         c::set_banner_pattern_names(
             registries
                 .synchronized
@@ -926,6 +927,8 @@ fn survival_data(
             "minecraft:experience_orb",
         )
         .map_err(s)?,
+        entity_types: chunkwake_data::registries::builtin_ids_of(builtin, "entity_type")
+            .map_err(s)?,
         mob_entity_types: {
             let id =
                 |n| chunkwake_data::registries::builtin_id_of(builtin, "entity_type", n).map_err(s);
@@ -960,6 +963,12 @@ fn survival_data(
         biome_tags: chunkwake_net::play::load_registry_tags(data_dir, "worldgen/biome"),
         data_dir: data_dir.to_owned(),
         block_states: blocks.states(),
+        transforms: chunkwake_net::transform::load(
+            data_dir,
+            &chunkwake_net::play::load_registry_tags(data_dir, "block"),
+            &blocks.defaults(),
+        )
+        ?,
     };
     Ok(survival)
 }

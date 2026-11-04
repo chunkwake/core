@@ -5,8 +5,10 @@
 pub const BLOCKS: i32 = 4;
 pub const NEUTRAL: i32 = 6;
 pub const PLAYERS: i32 = 7;
-/// `SoundSource.RECORDS`: ноты и пластинки.
-pub const RECORDS: i32 = 10;
+/// `SoundSource.AMBIENT`: запуск ракеты, окружение.
+pub const AMBIENT: i32 = 8;
+/// `SoundSource.RECORDS`: ноты и пластинки (порядковый номер 2; 10 — это `UI`).
+pub const RECORDS: i32 = 2;
 
 /// `LevelEvent.PARTICLES_DESTROY_BLOCK`: частицы и звук ломки (клиент берёт звук блока сам).
 pub const DESTROY_BLOCK: i32 = 2001;

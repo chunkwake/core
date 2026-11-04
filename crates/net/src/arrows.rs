@@ -22,6 +22,13 @@ pub const CROSSBOW_ROCKET: f64 = 1.6;
 /// Ракета без взрыва живёт секунду.
 pub const FIREWORK_FUSE: u16 = 20;
 /// Тройной выстрел: центр и ±10°.
+/// `FireworkRocketEntity(Level, x, y, z, ItemStack)`: `10 × (1 + полёт) +
+/// nextInt(6) + nextInt(7)` тиков.
+pub fn rocket_lifetime(flight: i32, r6: u32, r7: u32) -> u16 {
+    (10 * (1 + flight.max(0)) + (r6 % 6) as i32 + (r7 % 7) as i32).clamp(0, u16::MAX as i32) as u16
+}
+/// Событие сущности `explode`: клиент показывает взрыв ракеты.
+pub const EVENT_FIREWORK_EXPLODE: u8 = 17;
 pub const MULTISHOT_YAW: [f64; 3] = [-10.0, 0.0, 10.0];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +48,14 @@ pub struct Arrow {
     /// Ракета с арбалета: без гравитации и урона, гаснет по таймеру.
     pub firework: bool,
     pub life: u16,
+    /// Ракета на элитрах (`DATA_ATTACHED_TO_TARGET`): держится у игрока, а
+    /// разгон считает клиент этого игрока.
+    pub attached: Option<uuid::Uuid>,
+    /// Срок ракеты в тиках (`FireworkRocketEntity.lifetime`); 0 — запал
+    /// [`FIREWORK_FUSE`] прежних ракет арбалета и раздатчика.
+    pub lifetime: u16,
+    /// Взрывов в компоненте `fireworks`: без них ракета гаснет молча и не ранит.
+    pub explosions: u8,
     pub owner: Option<uuid::Uuid>,
     /// Стрелок уже снаружи хитбокса — дальше по нему можно попасть.
     pub left_owner: bool,
@@ -69,6 +84,9 @@ impl Arrow {
             potion_extra: 0,
             firework: false,
             life: 0,
+            attached: None,
+            lifetime: 0,
+            explosions: 0,
             owner: None,
             left_owner: true,
             base_damage: if thrown { 0.0 } else { BASE_DAMAGE },
@@ -189,8 +207,17 @@ pub fn step(
         a.age += 1;
         return Vec::new();
     }
-    if a.firework && a.life >= FIREWORK_FUSE {
+    if a.firework && a.life >= FIREWORK_FUSE && a.lifetime == 0 {
         return vec![Hit::Pop];
+    }
+    // `FireworkRocketEntity.tick` с `attachedToEntity`: ракета стоит на месте
+    // игрока, столкновений своих не ищет, а `life > lifetime` — взрыв.
+    if let Some(owner) = a.attached {
+        if let Some((_, feet)) = players.iter().find(|(id, _)| *id == owner) {
+            a.pos = *feet;
+        }
+        a.life = a.life.saturating_add(1);
+        return if a.life > a.lifetime { vec![Hit::Pop] } else { Vec::new() };
     }
     let speed = len(a.vel);
     let n = (speed / 0.1).ceil().max(1.0) as usize;
@@ -411,5 +438,28 @@ mod tests {
         let chicken = (9, [1.2, 1.0, 0.5], (0.4, 0.7));
         assert_eq!(step(&mut snowball, &[], &[chicken], |_| false, |_| false),
             vec![Hit::Mob(0, 0.0, [1.1, 0.0, 0.0])]);
+    }
+
+    #[test]
+    fn rocket_lifetime_matches_vanilla_range() {
+        // Полёт 1: 20..=31 тик, полёт 3: 40..=51.
+        assert_eq!(rocket_lifetime(1, 0, 0), 20);
+        assert_eq!(rocket_lifetime(1, 5, 6), 31);
+        assert_eq!(rocket_lifetime(3, 11, 13), 40 + 5 + 6);
+    }
+
+    #[test]
+    fn attached_rocket_follows_its_player_and_pops_after_lifetime() {
+        let owner = uuid::Uuid::from_u128(7);
+        let mut r = Arrow::flight([0.0, 64.0, 0.0], [0.0; 3], false);
+        r.firework = true;
+        r.attached = Some(owner);
+        r.lifetime = 2;
+        // Твёрдый блок вокруг не мешает: прицепленная ракета столкновений не ищет.
+        for x in [5.0, 6.0] {
+            assert!(step(&mut r, &[(owner, [x, 80.0, 1.0])], &[], |_| true, |_| false).is_empty());
+            assert_eq!(r.pos, [x, 80.0, 1.0]);
+        }
+        assert_eq!(step(&mut r, &[(owner, [7.0, 80.0, 1.0])], &[], |_| true, |_| false), vec![Hit::Pop]);
     }
 }

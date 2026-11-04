@@ -921,6 +921,11 @@ pub fn teleport_entity(
     w.buf
 }
 
+/// `ServerboundMoveVehiclePacket`: позиция, поворот и «на земле».
+pub fn read_move_vehicle(r: &mut Reader) -> Result<([f64; 3], f32, f32, bool)> {
+    Ok(([r.f64()?, r.f64()?, r.f64()?], r.f32()?, r.f32()?, r.bool()?))
+}
+
 pub fn rotate_head(id: i32, entity_id: i32, yaw: f32) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id).var_int(entity_id).u8(angle(yaw));
