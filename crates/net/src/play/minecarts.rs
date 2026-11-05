@@ -640,7 +640,9 @@ impl PlayPlan {
         let mut blasts = Vec::new();
         {
             let mut carts = self.sim().minecarts.lock().unwrap();
-            for (&id, e) in carts.iter_mut() {
+            let ids: Vec<i32> = carts.keys().copied().collect();
+            for id in ids {
+                let Some(e) = carts.get_mut(&id) else { continue };
                 if !awake(e.cart.pos) {
                     continue;
                 }
@@ -700,6 +702,25 @@ impl PlayPlan {
                     },
                     _ => {}
                 }
+                // `OldMinecartBehavior.pushAndPickupEntities`: в конце своего
+                // тика вагонетка толкает другие, задевающие её коробку с
+                // запасом 0.2 по горизонтали.
+                let (lo, hi) = e.bounds();
+                let (lo, hi) = ([lo[0] - 0.2, lo[1], lo[2] - 0.2], [hi[0] + 0.2, hi[1], hi[2] + 0.2]);
+                let near: Vec<i32> = carts
+                    .iter()
+                    .filter(|(o, b)| {
+                        let (a, z) = b.bounds();
+                        **o != id && (0..3).all(|i| a[i] < hi[i] && z[i] > lo[i])
+                    })
+                    .map(|(o, _)| *o)
+                    .collect();
+                for o in near {
+                    if let [Some(a), Some(b)] = carts.get_disjoint_mut([&id, &o]) {
+                        crate::minecart::push_pair(&mut a.cart, &mut b.cart);
+                    }
+                }
+                let Some(e) = carts.get_mut(&id) else { continue };
                 // Падение: на рельсе сбрасывается, о землю — `causeFallDamage`.
                 let mut landed = 0.0;
                 if step.rail.is_some() {

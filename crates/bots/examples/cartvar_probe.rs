@@ -2,7 +2,7 @@
 //!
 //! `place`: воронка-вагонетка под сундуком с алмазами, вагонетка с сундуком
 //! (бот кладёт землю и ломает её — выпадает вагонетка и земля), печная
-//! (уголь — едет от игрока), ТНТ на включённом активаторе (взрывается через
+//! (уголь — едет от игрока и толкает обычную вагонетку впереди), ТНТ на включённом активаторе (взрывается через
 //! 4 с, рельс цел). `check` (после перезапуска): воронку-вагонетку ломают —
 //! выпадают вагонетка и алмазы, то есть инвентарь записан.
 //!
@@ -201,6 +201,7 @@ async fn main() {
         "give carter minecraft:diamond 5".into(),
         "give carter minecraft:coal".into(),
         "give carter minecraft:dirt 3".into(),
+        "give carter minecraft:minecart".into(),
         format!("tp carter {}.5 {y} {}.5", x + 2, z + 2),
     ] {
         p.cmd(s).await;
@@ -216,7 +217,13 @@ async fn main() {
     p.use_on([cx, y, z + 4]).await;
     p.hold(2).await;
     p.use_on([fx, y, z + 4]).await;
+    // Обычная вагонетка на пути печной: печная её толкнёт.
+    p.cmd(format!("tp carter {}.5 {y} {}.5", fx + 1, z + 7)).await;
+    p.hold(7).await;
+    p.use_on([fx, y, z + 7]).await;
+    p.cmd(format!("tp carter {}.5 {y} {}.5", x + 2, z + 2)).await;
     p.pump(1500).await;
+    let plain = p.find("minecraft:minecart");
     let hopper = p.find("minecraft:hopper_minecart");
     let chest = p.find("minecraft:chest_minecart");
     let furnace = p.find("minecraft:furnace_minecart");
@@ -246,6 +253,10 @@ async fn main() {
         p.ticks(60).await;
         let now = p.seen.get(&id).map_or(at, |s| s.1);
         println!("furnace cart moved {:.2} blocks along z in ~60 ticks", now[2] - at[2]);
+        if let Some((pid, pat)) = plain {
+            let pn = p.seen.get(&pid).map_or(pat, |s| s.1);
+            println!("plain cart ahead pushed {:.2} blocks along z", pn[2] - pat[2]);
+        }
     }
     // 6. ТНТ: на активатор, через 4 с — взрыв, рельс под ней цел.
     p.cmd(format!("tp carter {}.5 {y} {}.5", tx + 2, z + 2)).await;

@@ -134,6 +134,53 @@ fn floor(v: f64) -> i32 {
     v.floor() as i32
 }
 
+/// `AbstractMinecart.push` вагонетки `a` по вагонетке `b`
+/// (`OldMinecartBehavior`): толчок 0.05 от `a` к `b` (слабее, если дальше
+/// блока), только если `b` впереди или позади `a` по её повороту (|cos| ≥ 0.8).
+/// Печная тянет другую: та теряет 80 % скорости и получает скорость печной;
+/// обычные делят среднюю скорость.
+pub fn push_pair(a: &mut Cart, b: &mut Cart) {
+    let (mut dx, mut dz) = (b.pos[0] - a.pos[0], b.pos[2] - a.pos[2]);
+    let d2 = dx * dx + dz * dz;
+    if d2 < 1.0e-4 {
+        return;
+    }
+    let d = d2.sqrt();
+    dx /= d;
+    dz /= d;
+    let k = (1.0 / d).min(1.0);
+    dx *= k * 0.1 * 0.5;
+    dz *= k * 0.1 * 0.5;
+    // Направление на `b` против поворота `a`.
+    let (vx, vz) = (b.pos[0] - a.pos[0], b.pos[2] - a.pos[2]);
+    let vl = (vx * vx + vz * vz).sqrt();
+    let yaw = (a.yaw as f64).to_radians();
+    if vl < 1.0e-5 || ((vx * yaw.cos() + vz * yaw.sin()) / vl).abs() < 0.8 {
+        return;
+    }
+    let (va, vb) = (a.vel, b.vel);
+    let furnace = |c: &Cart| c.drag == Drag::Furnace;
+    match (furnace(a), furnace(b)) {
+        (false, true) => {
+            a.vel = [va[0] * 0.2, va[1], va[2] * 0.2];
+            a.vel[0] += vb[0] - dx;
+            a.vel[2] += vb[2] - dz;
+            b.vel = [vb[0] * 0.95, vb[1], vb[2] * 0.95];
+        }
+        (true, false) => {
+            b.vel = [vb[0] * 0.2, vb[1], vb[2] * 0.2];
+            b.vel[0] += va[0] + dx;
+            b.vel[2] += va[2] + dz;
+            a.vel = [va[0] * 0.95, va[1], va[2] * 0.95];
+        }
+        _ => {
+            let (mx, mz) = ((vb[0] + va[0]) / 2.0, (vb[2] + va[2]) / 2.0);
+            a.vel = [va[0] * 0.2 + mx - dx, va[1], va[2] * 0.2 + mz - dz];
+            b.vel = [vb[0] * 0.2 + mx + dx, vb[1], vb[2] * 0.2 + mz + dz];
+        }
+    }
+}
+
 impl Cart {
     pub fn new(pos: [f64; 3], yaw: f32) -> Self {
         Self {
@@ -630,6 +677,37 @@ mod tests {
         }
         // Пустая теряет 4 % за тик.
         assert!((last - 0.3 * 0.96f64.powi(20)).abs() < 0.01, "{last}");
+    }
+
+    #[test]
+    fn moving_cart_shares_speed_with_the_one_ahead() {
+        let w = line(40, Kind::Plain);
+        let mut a = Cart::new([2.5, 0.0625, 0.5], 0.0);
+        let mut b = Cart::new([5.5, 0.0625, 0.5], 0.0);
+        a.vel = [0.3, 0.0, 0.0];
+        let mut hit = false;
+        for _ in 0..40 {
+            a.tick(&w, [0.0; 2]);
+            b.tick(&w, [0.0; 2]);
+            let gap = b.pos[0] - a.pos[0];
+            if gap < WIDTH + 0.4 {
+                push_pair(&mut a, &mut b);
+                hit = true;
+            }
+        }
+        assert!(hit);
+        // Удар передал скорость: вторая уехала вперёд, первая почти встала.
+        assert!(b.pos[0] > 6.5, "{b:?}");
+        assert!(b.vel[0] > a.vel[0], "{a:?} {b:?}");
+    }
+
+    #[test]
+    fn side_by_side_carts_do_not_push() {
+        let mut a = Cart::new([0.5, 0.0625, 0.5], 0.0);
+        let mut b = Cart::new([0.5, 0.0625, 1.3], 0.0);
+        a.vel = [0.2, 0.0, 0.0];
+        push_pair(&mut a, &mut b);
+        assert_eq!(b.vel, [0.0; 3]);
     }
 
     #[test]
