@@ -41,6 +41,8 @@ pub enum Kind {
     Stonecutter,
     /// `BrewingStandMenu`: 0–2 бутылки, 3 реагент, 4 топливо.
     Brewing,
+    /// `CartographyTableMenu`: 0 карта, 1 бумага/карта/стекло, 2 результат, 3–29, 30–38.
+    Cartography,
 }
 
 impl Kind {
@@ -50,7 +52,7 @@ impl Kind {
             Kind::Lectern => 1,
             Kind::Chest(n) => n + 36,
             Kind::Crafting => 46,
-            Kind::Furnace | Kind::Grindstone | Kind::Anvil => 39,
+            Kind::Furnace | Kind::Grindstone | Kind::Anvil | Kind::Cartography => 39,
             Kind::Brewing => 41,
             Kind::Smithing | Kind::Loom => 40,
             Kind::Enchanting | Kind::Stonecutter => 38,
@@ -64,7 +66,7 @@ impl Kind {
             Kind::Lectern => 1,
             Kind::Chest(n) => n,
             Kind::Crafting => 10,
-            Kind::Furnace | Kind::Grindstone | Kind::Anvil => 3,
+            Kind::Furnace | Kind::Grindstone | Kind::Anvil | Kind::Cartography => 3,
             Kind::Brewing => 5,
             Kind::Smithing | Kind::Loom => 4,
             Kind::Enchanting | Kind::Stonecutter => 2,
@@ -75,7 +77,7 @@ impl Kind {
     fn output(self) -> Option<usize> {
         match self {
             Kind::Player | Kind::Crafting => Some(0),
-            Kind::Furnace | Kind::Grindstone | Kind::Anvil => Some(2),
+            Kind::Furnace | Kind::Grindstone | Kind::Anvil | Kind::Cartography => Some(2),
             Kind::Smithing | Kind::Loom => Some(3),
             Kind::Stonecutter => Some(1),
             Kind::Chest(_) | Kind::Enchanting | Kind::Lectern | Kind::Brewing => None,
@@ -86,7 +88,7 @@ impl Kind {
     fn craft_output(self) -> Option<usize> {
         match self {
             Kind::Player | Kind::Crafting => Some(0),
-            Kind::Grindstone | Kind::Anvil => Some(2),
+            Kind::Grindstone | Kind::Anvil | Kind::Cartography => Some(2),
             Kind::Smithing | Kind::Loom => Some(3),
             Kind::Stonecutter => Some(1),
             _ => None,
@@ -127,6 +129,8 @@ pub struct Rules<'a> {
     pub smithing_accept: &'a dyn Fn(usize, i32) -> bool,
     pub loom_accept: &'a dyn Fn(usize, i32) -> bool,
     pub brewing_accept: &'a dyn Fn(usize, i32) -> bool,
+    /// Стол картографа: 0 — заполненная карта, 1 — бумага, пустая карта, стекло.
+    pub cartography_accept: &'a dyn Fn(usize, &Stack) -> bool,
 }
 
 /// Перетаскивание (`QUICK_CRAFT`) между пакетами.
@@ -193,6 +197,9 @@ impl Menu<'_> {
         }
         if self.kind == Kind::Loom && slot < 3 {
             return (self.rules.loom_accept)(slot, s.item);
+        }
+        if self.kind == Kind::Cartography && slot < 2 {
+            return (self.rules.cartography_accept)(slot, s);
         }
         if self.kind == Kind::Brewing && slot < 5 {
             return (self.rules.brewing_accept)(slot, s.item);
@@ -550,6 +557,20 @@ impl Menu<'_> {
                     }
                 }
             }
+            Kind::Cartography => {
+                // `CartographyTableMenu.quickMoveStack`: без запасного хода в хотбар.
+                if i < inv {
+                    self.move_to(&mut s, inv..end, false);
+                } else if (self.rules.cartography_accept)(0, &s) {
+                    self.move_to(&mut s, 0..1, false);
+                } else if (self.rules.cartography_accept)(1, &s) {
+                    self.move_to(&mut s, 1..2, false);
+                } else if i < hotbar {
+                    self.move_to(&mut s, hotbar..end, false);
+                } else {
+                    self.move_to(&mut s, inv..hotbar, false);
+                }
+            }
             Kind::Loom => {
                 if i < inv {
                     self.move_to(&mut s, inv..end, true);
@@ -734,6 +755,7 @@ mod tests {
             smithing_accept: &|_, _| false,
             loom_accept: &|_, _| false,
             brewing_accept: &|_, _| false,
+            cartography_accept: &|_, _| false,
         };
         let mut craft = |_: &mut [Slot]| panic!("lectern must not craft");
         let mut menu = Menu {
@@ -771,6 +793,7 @@ mod tests {
             smithing_accept: &|_, _| false,
             loom_accept: &|slot, item| item == slot as i32 + 1,
             brewing_accept: &|_, _| false,
+            cartography_accept: &|_, _| false,
         };
         let mut craft = |slots: &mut [Slot]| {
             for slot in &mut slots[..2] {
@@ -818,6 +841,7 @@ mod tests {
             can_take_output: true,
             loom_accept: &|_, _| false,
             brewing_accept: &|_, _| false,
+            cartography_accept: &|_, _| false,
             smithing_accept: &|slot, item| item == slot as i32 + 1,
         };
         let mut craft = |slots: &mut [Slot]| {
@@ -867,6 +891,7 @@ mod tests {
             can_take_output: false,
             loom_accept: &|_, _| false,
             brewing_accept: &|_, _| false,
+            cartography_accept: &|_, _| false,
             smithing_accept: &|_, _| false,
         };
         let mut menu = Menu {
@@ -908,6 +933,7 @@ mod tests {
             can_take_output: true,
             loom_accept: &|_, _| false,
             brewing_accept: &|_, _| false,
+            cartography_accept: &|_, _| false,
             smithing_accept: &|_, _| false,
         };
         let mut craft = |slots: &mut [Slot]| slots[0] = None;
@@ -960,6 +986,7 @@ mod tests {
             can_take_output: true,
             loom_accept: &|_, _| false,
             brewing_accept: &|_, _| false,
+            cartography_accept: &|_, _| false,
             smithing_accept: &|_, _| false,
         };
         let mut drag = Drag::default();
@@ -996,6 +1023,7 @@ mod tests {
             can_take_output: true,
             loom_accept: &|_, _| false,
             brewing_accept: &|_, _| false,
+            cartography_accept: &|_, _| false,
             smithing_accept: &|_, _| false,
         };
         let mut drag = Drag::default();
@@ -1181,6 +1209,7 @@ mod tests {
             creative: false, can_take_output: true, smithing_accept: &|_, _| false,
             loom_accept: &|_, _| false,
             brewing_accept: &|slot, item| match slot { 0..=2 => item == 1, 3 => item == 2, 4 => item == 3, _ => false },
+            cartography_accept: &|_, _| false,
         };
         let mut craft = |_: &mut [Slot]| {};
         let mut menu = Menu { kind: Kind::Brewing, slots: &mut slots, carried: &mut carried,
@@ -1189,6 +1218,56 @@ mod tests {
         assert_eq!(menu.slots[..3], [Some(Stack::new(1, 1)); 3]);
         assert_eq!(menu.slots[3], Some(Stack::new(2, 2)));
         assert_eq!(menu.slots[4], Some(Stack::new(3, 2)));
+    }
+
+    #[test]
+    fn cartography_shift_routes_map_and_paper_and_takes_one_of_each() {
+        // 1 — заполненная карта, 2 — бумага, 9 — прочее.
+        let mut slots = vec![None; Kind::Cartography.size()];
+        slots[3] = Some(Stack::new(1, 3));
+        slots[4] = Some(Stack::new(2, 5));
+        slots[5] = Some(Stack::new(9, 1));
+        let mut carried = None;
+        let mut drag = Drag::default();
+        let rules = Rules {
+            max_stack: &|_| 64, equip: &|_| None, smeltable: &|_| false,
+            fuel: &|_| false, bucket: None, lapis: None, grindable: &|_| false,
+            creative: false, can_take_output: true, smithing_accept: &|_, _| false,
+            loom_accept: &|_, _| false, brewing_accept: &|_, _| false,
+            cartography_accept: &|slot, s| s.item == slot as i32 + 1,
+        };
+        let mut craft = |slots: &mut [Slot]| {
+            for slot in &mut slots[..2] {
+                let s = slot.as_mut().unwrap();
+                s.count -= 1;
+                if s.count == 0 {
+                    *slot = None;
+                }
+            }
+            slots[2] = (slots[0].is_some() && slots[1].is_some()).then_some(Stack::new(7, 1));
+        };
+        let mut menu = Menu {
+            kind: Kind::Cartography,
+            slots: &mut slots,
+            carried: &mut carried,
+            drag: &mut drag,
+            rules: &rules,
+            craft: &mut craft,
+        };
+        menu.click(3, 0, QUICK_MOVE);
+        menu.click(4, 0, QUICK_MOVE);
+        assert_eq!(menu.slots[0], Some(Stack::new(1, 3)));
+        assert_eq!(menu.slots[1], Some(Stack::new(2, 5)));
+        // Прочее во входы не идёт: уходит в хотбар.
+        menu.click(5, 0, QUICK_MOVE);
+        assert_eq!(menu.slots[5], None);
+        assert_eq!(menu.slots[30], Some(Stack::new(9, 1)));
+        menu.slots[2] = Some(Stack::new(7, 1));
+        menu.click(2, 0, PICKUP);
+        assert_eq!(*menu.carried, Some(Stack::new(7, 1)));
+        assert_eq!(menu.slots[0], Some(Stack::new(1, 2)));
+        assert_eq!(menu.slots[1], Some(Stack::new(2, 4)));
+        assert_eq!(menu.slots[2], Some(Stack::new(7, 1)));
     }
 
     #[test]

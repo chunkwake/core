@@ -238,6 +238,9 @@ impl WorldStorage {
             |uuid, s| self.players.save(uuid, s),
             |uuid, s| plan.mark_player_saved(uuid, s),
         );
+        if let Err(e) = plan.save_maps(self.format.data_version) {
+            errors.push(format!("save maps: {e}"));
+        }
         let mut saved = 0;
         for (dim, _, _) in plan.dimension_layouts() {
             let unsaved = plan.unsaved_in(dim);

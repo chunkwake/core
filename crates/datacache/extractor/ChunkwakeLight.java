@@ -1,7 +1,8 @@
 // Выгрузка свойств состояний блоков: `reports/light.csv`, строка на id
-// состояния: `излучение,затухание,небо_вниз(0/1),твёрдость,нужен_инструмент(0/1),прочные_грани`
+// состояния: `излучение,затухание,небо_вниз(0/1),твёрдость,нужен_инструмент(0/1),прочные_грани,твёрдый(0/1)`
 // (прочные грани — биты `isFaceSturdy` по `Direction`: низ, верх, север, юг, запад, восток)
-// (твёрдость -1 — неразрушимый; инструмент — `requiresCorrectToolForDrops`).
+// (твёрдость -1 — неразрушимый; инструмент — `requiresCorrectToolForDrops`;
+// твёрдый — `BlockState.isSolid`, опора рамок и картин).
 //
 // Только рефлексия и java.base: классы сервера новее компилятора, поэтому
 // компилируется без них и запускается на Java сервера:
@@ -26,6 +27,7 @@ public final class ChunkwakeLight {
         Method dampening = base.getMethod("getLightDampening");
         Method skyDown = base.getMethod("propagatesSkylightDown");
         Method requiresTool = base.getMethod("requiresCorrectToolForDrops");
+        Method solid = base.getMethod("isSolid");
         java.lang.reflect.Field hardness = base.getDeclaredField("destroySpeed");
         hardness.setAccessible(true);
         Class<?> getter = Class.forName("net.minecraft.world.level.BlockGetter");
@@ -51,7 +53,7 @@ public final class ChunkwakeLight {
                     mask |= 1 << d;
                 }
             }
-            out.append(mask).append('\n');
+            out.append(mask).append(',').append((Boolean) solid.invoke(state) ? 1 : 0).append('\n');
         }
         Files.writeString(Path.of(args[0]), out);
         System.exit(0);

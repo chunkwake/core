@@ -37,6 +37,11 @@ pub struct Extra {
     /// (`minecraft:potion_contents` и прочее). В патч клиента не пишется:
     /// сырой `raw` заменил бы уже разобранные чары и имя.
     pub rest: Option<String>,
+    /// `minecraft:map_id`: номер карты (`data/minecraft/maps/<id>.dat`).
+    pub map_id: Option<i32>,
+    /// `minecraft:map_post_processing` у результата стола картографа:
+    /// 0 — `LOCK`, 1 — `SCALE`. Снимается, как только стопку забрали.
+    pub map_post_processing: Option<u8>,
 }
 
 impl Extra {
@@ -53,6 +58,8 @@ impl Extra {
             && self.custom_data.is_none()
             && self.charged.is_empty()
             && self.rest.is_none()
+            && self.map_id.is_none()
+            && self.map_post_processing.is_none()
     }
 
     pub fn level(&self, enchantment: i32) -> i32 {
@@ -130,6 +137,8 @@ pub static BANNER_PATTERNS_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static WRITTEN_BOOK_CONTENT_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static WRITABLE_BOOK_CONTENT_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static FIREWORKS_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+pub static MAP_ID_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+pub static MAP_POST_PROCESSING_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 
 /// `minecraft:fireworks` ракеты из сырого патча: `(flight_duration, число
 /// взрывов)`. Скрафченная ракета несёт в патче только этот компонент, и он

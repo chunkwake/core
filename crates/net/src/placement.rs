@@ -99,7 +99,7 @@ pub struct Placement {
     tables: Vec<Table>,
     /// Минимальный id состояния с этим именем (настенные варианты).
     by_name: HashMap<String, u32>,
-    /// Прочные грани по состоянию (биты по `DIRS`).
+    /// Прочные грани по состоянию (биты по `DIRS`), бит 6 — `isSolid`.
     sturdy: Vec<u8>,
     /// Тег `minecraft:walls`.
     walls: HashSet<String>,
@@ -270,6 +270,11 @@ impl Placement {
         self.sturdy
             .get(state as usize)
             .is_some_and(|m| m >> face & 1 == 1)
+    }
+
+    /// `BlockState.isSolid` (устаревший «твёрдый» флаг: опора рамок и картин).
+    pub fn solid(&self, state: u32) -> bool {
+        self.sturdy.get(state as usize).is_some_and(|m| m >> 6 & 1 == 1)
     }
 
     /// Калитка поперёк направления `dir` (`FenceGateBlock.connectsToDirection`).
@@ -512,7 +517,7 @@ impl Placement {
     /// `DoorBlock.getHinge`: петли к полным блокам и от соседней двери, иначе по точке клика.
     fn hinge(&self, name: &str, facing: usize, c: &Ctx) -> &'static str {
         let near = |d: usize| c.near[d - 2];
-        let full = |st: u32| self.sturdy.get(st as usize) == Some(&63);
+        let full = |st: u32| self.sturdy.get(st as usize).is_some_and(|m| m & 63 == 63);
         let door = |st: u32| self.name(st) == Some(name) && self.prop(st, "half") == Some("lower");
         let (l, r) = (near(counter_clockwise(facing)), near(clockwise(facing)));
         let i = -(full(l[0]) as i32) - full(l[1]) as i32 + full(r[0]) as i32 + full(r[1]) as i32;

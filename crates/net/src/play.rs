@@ -158,6 +158,7 @@ struct Ids {
     reset_score: i32,
     set_display_objective: i32,
     transfer: i32,
+    map_item_data: i32,
 }
 
 pub struct PlayPlan {
@@ -242,6 +243,12 @@ pub struct PlayPlan {
     /// Тики сервера (для редстоуна).
     server_ticks: std::sync::atomic::AtomicU64,
     players_source: std::sync::OnceLock<Arc<dyn PlayerSource>>,
+    /// Карты (`data/minecraft/maps`), загруженные и созданные.
+    maps: Mutex<maps::MapStore>,
+    /// Каталог `data/minecraft/maps` мира; без него карты живут только в памяти.
+    maps_dir: std::sync::OnceLock<std::path::PathBuf>,
+    /// Жидкость состояния для карт: 0 — нет, 1 — вода, 2 — лава.
+    map_fluids: std::sync::OnceLock<Vec<u8>>,
     /// Несохранённые снимки игроков.
     player_saves: Mutex<FastMap<Uuid, PlayerSave>>,
     ops: std::sync::OnceLock<OpList>,
@@ -1473,6 +1480,8 @@ pub(crate) struct DimSim {
     boats: Mutex<FastMap<i32, boats::Boat>>,
     /// Вагонетки по ID сущности.
     minecarts: Mutex<FastMap<i32, minecarts::MinecartEntry>>,
+    /// Рамки для предметов по ID сущности.
+    item_frames: Mutex<FastMap<i32, item_frames::ItemFrame>>,
     /// Чанки, уже заселённые мобами при генерации (или прочитанные из `entities/`).
     populated: Mutex<FastSet<(i32, i32)>>,
     /// Прочитанные с диска мобы: тик заберёт их в `mobs` (регион может читаться из самого тика).
@@ -1917,6 +1926,8 @@ use chunkwake_data::world::FURNACES;
 /// Ванильные команды: дерево, права, селекторы и обработчики.
 pub mod commands;
 mod boats;
+mod maps;
+mod item_frames;
 mod minecarts;
 mod mobs;
 mod poi;
@@ -2066,6 +2077,7 @@ pub struct SurvivalData {
     pub menu_smithing: i32,
     pub menu_stonecutter: i32,
     pub menu_loom: i32,
+    pub menu_cartography: i32,
     pub menu_lectern: i32,
     pub menu_brewing: i32,
     pub brewing: chunkwake_data::recipes::BrewingData,
@@ -2110,6 +2122,8 @@ pub struct SurvivalData {
     pub placement: crate::placement::Placement,
     /// Инструмент нотного блока по состоянию (`reports/instruments.csv`).
     pub instruments: chunkwake_data::world::Instruments,
+    /// Цвет на карте по состоянию (`reports/map_colors.csv`), 0 — `NONE`.
+    pub map_colors: Arc<Vec<u8>>,
     /// Нужен ли правильный инструмент для дропа, по состоянию блока.
     pub requires_tool: Vec<bool>,
     /// Компонент `minecraft:tool` по ID предмета.
@@ -2391,6 +2405,7 @@ impl PlayPlan {
                 reset_score: cb("reset_score")?,
                 set_display_objective: cb("set_display_objective")?,
                 transfer: cb("transfer")?,
+                map_item_data: cb("map_item_data")?,
             },
             login,
             chunk_body: template.encode_body(),
@@ -2454,6 +2469,9 @@ impl PlayPlan {
             seen_credits: Mutex::new(HashSet::new()),
             won_game: Mutex::new(HashSet::new()),
             players_source: std::sync::OnceLock::new(),
+            maps: Mutex::new(maps::MapStore::default()),
+            maps_dir: std::sync::OnceLock::new(),
+            map_fluids: std::sync::OnceLock::new(),
             player_saves: Mutex::new(FastMap::default()),
             ops: std::sync::OnceLock::new(),
             item_names,
@@ -8341,6 +8359,7 @@ impl PlayPlan {
         }
         drop(mobs);
         self.explode_minecarts(center, power);
+        self.explode_item_frames(center, power);
     }
 
     fn explosion_exposure(&self, from: [f64; 3], to: [f64; 3]) -> f64 {
@@ -8828,6 +8847,7 @@ impl PlayPlan {
                 Kind::Smithing => "SMITHING",
                 Kind::Stonecutter => "STONECUTTER",
                 Kind::Loom => "LOOM",
+                Kind::Cartography => "CARTOGRAPHY",
                 Kind::Lectern => "LECTERN",
                 Kind::Player => "CRAFTING",
             };
@@ -8983,6 +9003,7 @@ impl PlayPlan {
         self.tick_lightning();
         self.tick_mobs();
         self.tick_minecarts();
+        self.tick_item_frames();
         lap(PH_MOBS, &mut watch);
         self.tick_animals();
         lap(PH_ANIMALS, &mut watch);
@@ -9418,6 +9439,7 @@ impl PlayPlan {
         out.extend(self.mob_frames());
         out.extend(self.boat_frames());
         out.extend(self.minecart_frames());
+        out.extend(self.item_frame_frames());
         if !out.is_empty() {
             conn.send_frames(&out).await?;
         }
@@ -9806,6 +9828,7 @@ impl PlayPlan {
                 }
                 _ = food_ticker.tick() => {
                     game_ticks += 1;
+                    self.tick_maps(conn, uuid, &state.inv).await?;
                     let feet = self.player_at(uuid).map(|p| p.0).unwrap_or(me.pos);
                     let mut view = crate::environment::probe(feet, 0.6, 1.8, EYE_HEIGHT,
                         |p| self.environment_kind(self.block(p)));
@@ -10294,6 +10317,7 @@ impl PlayPlan {
                             let held = state.inv.slots[state.inv.held_slot()];
                             if self.attack_boat(uuid, target, held, creative, crit).is_some()
                                 || self.attack_minecart(uuid, target, held, creative, crit).is_some()
+                                || (login.spawn.game_mode != 3 && self.attack_item_frame(uuid, target, creative).is_some())
                             {
                                 continue;
                             }
@@ -10351,6 +10375,18 @@ impl PlayPlan {
                                     }
                                 }
                                 minecarts::CartUse::Pass => {}
+                            }
+                            continue;
+                        }
+                        // `ItemFrame.interact`: предмет в рамку или поворот.
+                        if self.is_item_frame(it.entity) {
+                            if !state.vitals.dead && login.spawn.game_mode != 3
+                                && let Some(slot) = Self::hand_index(&state.inv, it.hand)
+                                && self.use_item_frame(it.entity, state.inv.slots[slot]) == Some(true)
+                                && login.spawn.game_mode != 1
+                            {
+                                state.inv.consume_at(slot);
+                                self.send_slots(conn, &mut state.inv, &[slot]).await?;
                             }
                             continue;
                         }
@@ -10547,6 +10583,11 @@ impl PlayPlan {
                                     state.inv.consume_at(slot);
                                     self.send_slots(conn, &mut state.inv, &[slot]).await?;
                                 }
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
+                                continue;
+                            }
+                            if item == "minecraft:map" {
+                                self.use_empty_map(conn, uuid, &mut state.inv, slot, login.spawn.game_mode == 1).await?;
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                                 continue;
                             }
@@ -11001,6 +11042,7 @@ impl PlayPlan {
                             "minecraft:stonecutter" => Some(Kind::Stonecutter),
                             "minecraft:smithing_table" => Some(Kind::Smithing),
                             "minecraft:loom" => Some(Kind::Loom),
+                            "minecraft:cartography_table" => Some(Kind::Cartography),
                             "minecraft:lectern" if self.block(u.pos).is_some_and(|s| self.survival.placement.prop(s, "has_book") == Some("true")) => Some(Kind::Lectern),
                             "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" => Some(Kind::Chest(27)),
                             "minecraft:brewing_stand" => Some(Kind::Brewing),
@@ -11038,6 +11080,7 @@ impl PlayPlan {
                                 Kind::Stonecutter => (self.survival.menu_stonecutter, "container.stonecutter"),
                                 Kind::Smithing => (self.survival.menu_smithing, "container.upgrade"),
                                 Kind::Loom => (self.survival.menu_loom, "container.loom"),
+                                Kind::Cartography => (self.survival.menu_cartography, "container.cartography_table"),
                                 Kind::Lectern => (self.survival.menu_lectern, "container.lectern"),
                                 Kind::Brewing => (self.survival.menu_brewing, "container.brewing"),
                                 Kind::Furnace => {
@@ -11146,6 +11189,19 @@ impl PlayPlan {
                                         state.inv.slots[i] = Some(held);
                                     }
                                 }
+                                self.send_slots(conn, &mut state.inv, &[i]).await?;
+                            }
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                            continue;
+                        }
+                        // `ItemFrameItem.useOn`: рамка на грань блока.
+                        if let Some(i) = hand_slot.filter(|_| !state.vitals.dead && login.spawn.game_mode != 3)
+                            && let Some(s) = state.inv.slots[i]
+                            && self.player_at(uuid).is_some_and(|(p, _, _)| block_reach(eye_of(p), u.pos, if login.spawn.game_mode == 1 { 5.0 } else { 4.5 }))
+                            && self.place_item_frame(uuid, self.item_name(s.item), u.pos, u.face, login.spawn.game_mode == 2)
+                        {
+                            if login.spawn.game_mode != 1 {
+                                state.inv.consume_at(i);
                                 self.send_slots(conn, &mut state.inv, &[i]).await?;
                             }
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
@@ -12050,6 +12106,7 @@ impl PlayPlan {
             | Kind::Anvil
             | Kind::Smithing
             | Kind::Loom
+            | Kind::Cartography
             | Kind::Lectern
             | Kind::Stonecutter => 0,
         };
@@ -12092,6 +12149,8 @@ impl PlayPlan {
                 slots[3] = crate::smithing::result(slots, &self.survival.smithing);
             } else if kind == Kind::Loom {
                 slots[3] = self.loom_result(slots, loom_selection.get());
+            } else if kind == Kind::Cartography {
+                slots[2] = self.cartography_result(slots[0], slots[1]);
             } else if kind == Kind::Stonecutter {
                 slots[1] = self.stone_result(slots[0], stone_selection);
             } else if size > 0 {
@@ -12105,7 +12164,22 @@ impl PlayPlan {
         let mut anvil_took = false;
         let mut smithing_took = false;
         let mut loom_took = false;
+        let mut carto_took = false;
         let mut craft = |slots: &mut [Slot]| {
+            if kind == Kind::Cartography {
+                // `CartographyTableMenu$5.onTake`: по одной из обоих входов.
+                carto_took = true;
+                for slot in &mut slots[..2] {
+                    if let Some(s) = slot {
+                        s.count -= 1;
+                        if s.count <= 0 {
+                            *slot = None;
+                        }
+                    }
+                }
+                fill(slots);
+                return;
+            }
             if kind == Kind::Smithing {
                 smithing_took = true;
                 for slot in &mut slots[..3] {
@@ -12228,6 +12302,14 @@ impl PlayPlan {
             4 => self.item_name(item) == "minecraft:blaze_powder",
             _ => false,
         };
+        let cartography_accept = |slot: usize, s: &Stack| match slot {
+            0 => self.map_id_of(*s).is_some(),
+            1 => matches!(
+                self.item_name(s.item),
+                "minecraft:paper" | "minecraft:map" | "minecraft:glass_pane"
+            ),
+            _ => false,
+        };
         let rules = click::Rules {
             max_stack: &max,
             equip: &equip,
@@ -12244,6 +12326,7 @@ impl PlayPlan {
             smithing_accept: &smithing_accept,
             loom_accept: &loom_accept,
             brewing_accept: &brewing_accept,
+            cartography_accept: &cartography_accept,
         };
         let thrown = click::Menu {
             kind,
@@ -12254,6 +12337,17 @@ impl PlayPlan {
             craft: &mut craft,
         }
         .click(c.slot, c.button, c.mode);
+        if carto_took {
+            // `MapItem.onCraftedBy`: увеличенная или запертая копия — новая карта.
+            for slot in view.iter_mut().skip(3).chain(std::iter::once(&mut inv.carried)) {
+                if let Some(s) = slot {
+                    self.finish_map_processing(s);
+                }
+            }
+            if let Some(w) = window.as_ref() {
+                self.cartography_sound(w.pos);
+            }
+        }
         if kind == Kind::Loom {
             let after = (
                 view[0].map(|s| (s.item, s.extra)),
@@ -12293,7 +12387,7 @@ impl PlayPlan {
         // Точило меняет чары и износ: сравнение смотрит только предмет и число.
         let resync = matches!(
             kind,
-            Kind::Grindstone | Kind::Anvil | Kind::Smithing | Kind::Loom
+            Kind::Grindstone | Kind::Anvil | Kind::Smithing | Kind::Loom | Kind::Cartography
         ) || c.state != inv.state
             || view.iter().zip(&expected).any(|(a, b)| !same(a, b))
             || !same(&inv.carried, &c.carried);
@@ -12555,6 +12649,9 @@ impl PlayPlan {
             Kind::Smithing => self
                 .block(w.pos)
                 .is_some_and(|s| self.state_name(s) == "minecraft:smithing_table"),
+            Kind::Cartography => self
+                .block(w.pos)
+                .is_some_and(|s| self.state_name(s) == "minecraft:cartography_table"),
             Kind::Loom => self
                 .block(w.pos)
                 .is_some_and(|s| self.state_name(s) == "minecraft:loom"),
@@ -12729,7 +12826,7 @@ impl PlayPlan {
             match w.kind {
                 Kind::Crafting => back.extend(w.slots[1..10].iter_mut().filter_map(Option::take)),
                 Kind::Enchanting => back.extend(w.slots.iter_mut().filter_map(Option::take)),
-                Kind::Grindstone | Kind::Anvil | Kind::Smithing | Kind::Loom => {
+                Kind::Grindstone | Kind::Anvil | Kind::Smithing | Kind::Loom | Kind::Cartography => {
                     for slot in
                         w.slots
                             .iter_mut()
@@ -12815,6 +12912,7 @@ impl PlayPlan {
             Kind::Anvil if w.slots.is_empty() => vec![None; 3],
             Kind::Smithing if w.slots.is_empty() => vec![None; 4],
             Kind::Loom if w.slots.is_empty() => vec![None; 4],
+            Kind::Cartography if w.slots.is_empty() => vec![None; 3],
             Kind::Lectern => vec![self.lectern_book(w.pos)],
             Kind::Stonecutter if w.slots.is_empty() => vec![None; 2],
             _ => w.slots.clone(),
@@ -13756,6 +13854,7 @@ impl PlayPlan {
             at: &at,
             output: &|p| self.redstone_output(p),
             analog: &|p| self.analog_at(p),
+            frame: &|q, d| self.item_frame_signal(q, d),
         };
         if matches!(name.as_str(), "minecraft:open_eyeblossom" | "minecraft:closed_eyeblossom") {
             self.eyeblossom_tick(pos, state, false);
@@ -13964,6 +14063,7 @@ impl PlayPlan {
                 at: &at,
                 output: &|p| self.redstone_output(p),
                 analog: &|p| self.analog_at(p),
+                frame: &|q, d| self.item_frame_signal(q, d),
             };
             let mut next: Vec<[i32; 3]> = Vec::new();
             let mut wires = Vec::new();
@@ -14183,6 +14283,7 @@ impl PlayPlan {
             at: &at,
             output: &|q| self.redstone_output(q),
             analog: &|q| self.analog_at(q),
+            frame: &|q, d| self.item_frame_signal(q, d),
         };
         let hardness = |st: u32| {
             self.survival
@@ -14432,6 +14533,7 @@ impl PlayPlan {
                         at: &at,
                         output: &|q| self.redstone_output(q),
                         analog: &|q| self.analog_at(q),
+                        frame: &|q, d| self.item_frame_signal(q, d),
                     };
                     touched.extend_from_slice(&crate::redstone::around(w.observer_back(p)));
                 }
@@ -15752,6 +15854,7 @@ impl PlayPlan {
             at: &at,
             output: &|p| self.redstone_output(p),
             analog: &|p| self.analog_at(p),
+            frame: &|q, d| self.item_frame_signal(q, d),
         }
         .powered(pos)
     }
@@ -16520,6 +16623,7 @@ impl PlayPlan {
                 at: &at,
                 output: &|p| self.redstone_output(p),
                 analog: &|p| self.analog_at(p),
+                frame: &|q, d| self.item_frame_signal(q, d),
             };
             let signal = w.signal(back, crate::redstone::opposite(facing), true);
             if !crate::redstone::calibrated_accepts(signal, frequency) {
@@ -16811,6 +16915,7 @@ impl PlayPlan {
             at: &at,
             output: &|p| self.redstone_output(p),
             analog: &|p| self.analog_at(p),
+            frame: &|q, d| self.item_frame_signal(q, d),
         };
         let signal = w.powered(pos);
         let powered = pl.prop(state, "powered") == Some("true");

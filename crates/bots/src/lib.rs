@@ -34,6 +34,8 @@ pub struct Ids {
     set_time: i32,
     level_chunk: i32,
     forget_level_chunk: i32,
+    chunk_batch_finished: i32,
+    sb_chunk_batch_received: i32,
 }
 
 impl Ids {
@@ -66,6 +68,8 @@ impl Ids {
             set_time: id(Play, C, "set_time")?,
             level_chunk: id(Play, C, "level_chunk_with_light")?,
             forget_level_chunk: id(Play, C, "forget_level_chunk")?,
+            chunk_batch_finished: id(Play, C, "chunk_batch_finished")?,
+            sb_chunk_batch_received: id(Play, S, "chunk_batch_received")?,
         })
     }
 }
@@ -85,6 +89,9 @@ pub struct Client {
     /// `forget_level_chunk`).
     pub loaded: std::collections::HashSet<(i32, i32)>,
     pub captured: Vec<Vec<u8>>,
+    /// Ещё ID для записи: пакеты попадают в `captured_by` вместе с ID.
+    pub capture_also: Vec<i32>,
+    pub captured_by: Vec<(i32, Vec<u8>)>,
     pub bytes_out: u64,
     pub keep_alives: u64,
     sent_player_loaded: bool,
@@ -299,6 +306,8 @@ impl Client {
             capture: None,
             loaded: std::collections::HashSet::new(),
             captured: Vec::new(),
+            capture_also: Vec::new(),
+            captured_by: Vec::new(),
             bytes_in: 0,
             bytes_out: 0,
             keep_alives: 0,
@@ -329,6 +338,17 @@ impl Client {
         }
         if self.capture == Some(id) {
             self.captured.push(r.remaining().to_vec());
+        }
+        if self.capture_also.contains(&id) {
+            self.captured_by.push((id, r.remaining().to_vec()));
+        }
+        if id == self.ids.chunk_batch_finished {
+            // Как клиент: подтвердить пачку, иначе ваниль держит чанки «в
+            // отправке» и не показывает в них сущности (`ChunkMap.isChunkTracked`).
+            let mut w = Writer::new();
+            w.var_int(self.ids.sb_chunk_batch_received).f32(64.0);
+            self.bytes_out += w.buf.len() as u64;
+            self.conn.send(&w.buf).await.map_err(err)?;
         }
         if id == self.ids.keep_alive {
             let mut w = Writer::new();

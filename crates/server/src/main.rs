@@ -216,6 +216,7 @@ async fn serve(dir: &Path) -> Result<(), String> {
     // Регионы читаются с диска при первом обращении к их чанкам.
     play.set_source(storage.clone());
     play.set_player_source(storage.clone());
+    play.set_maps_dir(dir.join(&props.level_name).join("data/minecraft/maps"));
     // Генерация чанков — на своих потоках, чтобы тик не ждал счёта.
     play.set_self_weak();
     play.set_gen_pool(chunkwake_net::chunkgen::GenPool::new(

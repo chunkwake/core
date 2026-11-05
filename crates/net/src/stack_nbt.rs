@@ -36,6 +36,9 @@ pub fn named_nbt(
     if e.repair_cost > 0 {
         comps.insert("minecraft:repair_cost".into(), Tag::Int(e.repair_cost));
     }
+    if let Some(id) = e.map_id {
+        comps.insert("minecraft:map_id".into(), Tag::Int(id));
+    }
     if let Some((material, pattern)) = e.trim.and_then(|(m, p)| components::trim_names(m, p)) {
         comps.insert(
             "minecraft:trim".into(),
@@ -154,6 +157,7 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>) -> Option<S
             .and_then(Tag::as_i64)
             .unwrap_or(0)
             .clamp(0, i32::MAX as i64) as i32;
+        e.map_id = m.get("minecraft:map_id").and_then(Tag::as_i64).map(|v| v as i32);
         e.trim = m
             .get("minecraft:trim")
             .and_then(Tag::as_compound)
@@ -240,6 +244,9 @@ pub fn to_line(s: Stack, name: &str) -> String {
     }
     if e.repair_cost > 0 {
         j.insert("repair_cost".into(), e.repair_cost.into());
+    }
+    if let Some(id) = e.map_id {
+        j.insert("map_id".into(), id.into());
     }
     if let Some((material, pattern)) = e.trim.and_then(|(m, p)| components::trim_names(m, p)) {
         j.insert(
@@ -337,6 +344,7 @@ pub fn from_line(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<St
             .and_then(Value::as_i64)
             .unwrap_or(0)
             .clamp(0, i32::MAX as i64) as i32;
+        e.map_id = j.get("map_id").and_then(Value::as_i64).map(|v| v as i32);
         e.trim = j.get("trim").and_then(|trim| {
             components::trim_ids(
                 trim.get("material")?.as_str()?,
@@ -621,6 +629,8 @@ mod tests {
             lore: vec![r#""строка""#.into()],
             raw: None,
             rest: None,
+            map_id: Some(12),
+            map_post_processing: None,
             charged: Vec::new(),
             custom_data: Some(compound_to_net(&Compound::from([(
                 "PublicBukkitValues".into(),

@@ -228,6 +228,9 @@ pub struct World<'a> {
     pub output: &'a dyn Fn([i32; 3]) -> i32,
     /// Сигнал содержимого для компаратора (`getAnalogOutputSignal`): сундуки, печи.
     pub analog: &'a dyn Fn([i32; 3]) -> Option<i32>,
+    /// Рамка в блоке, повёрнутая в сторону `d` (`ComparatorBlock.getItemFrame`):
+    /// её `getAnalogOutput`; `None` — рамки нет или их там несколько.
+    pub frame: &'a dyn Fn([i32; 3], usize) -> Option<i32>,
 }
 
 impl World<'_> {
@@ -472,11 +475,12 @@ impl World<'_> {
         }
         if let Some(a) = (self.analog)(back) {
             input = a;
-        } else if input < 15
-            && self.conductor(bs)
-            && let Some(a) = (self.analog)(step(back, f))
-        {
-            input = a;
+        } else if input < 15 && self.conductor(bs) {
+            // За проводником — больший из сигналов рамки и блока.
+            let far = step(back, f);
+            if let Some(a) = (self.frame)(far, f).max((self.analog)(far)) {
+                input = a;
+            }
         }
         if input == 0 {
             return 0;
@@ -1721,6 +1725,7 @@ mod tests {
             at: &at,
             output: &|_| 0,
             analog: &|_| None,
+            frame: &|_, _| None,
         };
         assert_eq!(w.wire_shape([5, 1, 0]), ["none", "none", "side", "side"]);
         let mut got: Vec<_> = w.solve(&[[5, 1, 0]]);
@@ -1743,6 +1748,7 @@ mod tests {
             at: &at2,
             output: &|_| 0,
             analog: &|_| None,
+            frame: &|_, _| None,
         };
         assert_eq!(
             w2.wire_shape([0, 1, 0]),
@@ -1768,6 +1774,7 @@ mod tests {
             at: &at,
             output: &|_| 0,
             analog: &|_| None,
+            frame: &|_, _| None,
         };
         assert!(!w.torch_off([0, 1, 0]));
         // Факел сильно питает блок над собой.
@@ -1781,6 +1788,7 @@ mod tests {
             at: &at2,
             output: &|_| 0,
             analog: &|_| None,
+            frame: &|_, _| None,
         };
         // Рычаг на полу рядом с камнем питает его слабо: факел горит.
         assert!(!w2.torch_off([0, 1, 0]));
@@ -1827,6 +1835,7 @@ mod tests {
             at: &at,
             output: &|_| 0,
             analog: &|_| None,
+            frame: &|_, _| None,
         };
         let got = w.solve(&[[1, 1, 0], [2, 1, 0]]);
         let power = |p| got.iter().find(|g| g.0 == p).map(|g| g.1).unwrap_or(-1);
@@ -1860,6 +1869,7 @@ mod tests {
             at: &at,
             output: &|_| 0,
             analog: &|_| None,
+            frame: &|_, _| None,
         };
         assert_eq!(w.comparator_target([0, 0, 0]), 0);
     }
@@ -1882,6 +1892,7 @@ mod tests {
                 at: &at,
                 output: &|_| power,
                 analog: &|_| None,
+                frame: &|_, _| None,
             };
             for pos in [[0, 0, 0], [1, 0, 0]] {
                 for dir in 0..6 {
@@ -1943,6 +1954,7 @@ mod tests {
                 at: &at,
                 output: &|_| 0,
                 analog: &|p| block_analog(&pl, at(p)),
+                frame: &|_, _| None,
             };
             assert_eq!(w.comparator_target([0, 0, 0]), expected);
         }
@@ -1995,6 +2007,7 @@ mod tests {
                     at: &at,
                     output: &|_| 0,
                     analog: &|p| block_analog(&pl, at(p)),
+                    frame: &|_, _| None,
                 };
                 assert_eq!(w.comparator_target([0, 0, 0]), expected);
             }
@@ -2042,6 +2055,7 @@ mod tests {
                     at: &at,
                     output: &|_| 0,
                     analog: &|p| block_analog(&pl, at(p)),
+                    frame: &|_, _| None,
                 };
                 assert_eq!(w.comparator_target([0, 0, 0]), expected);
             }
@@ -2060,6 +2074,7 @@ mod tests {
             at: &at,
             output: &|_| 0,
             analog: &|_| None,
+            frame: &|_, _| None,
         };
         // Слабый сигнал — во все шесть сторон, пока крюк включён.
         for dir in 0..6 {
@@ -2645,6 +2660,7 @@ mod tests {
                 at: &at,
                 output: &|_| 0,
                 analog: &|_| None,
+                frame: &|_, _| None,
             };
             if strong {
                 w.strong([0, 0, 0], dir, true)

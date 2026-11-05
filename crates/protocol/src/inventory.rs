@@ -159,6 +159,9 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         e.repair_cost > 0 && id_of(&crate::components::REPAIR_COST_COMPONENT) >= 0,
         e.trim.is_some() && id_of(&crate::components::TRIM_COMPONENT) >= 0,
         !e.banner_patterns.is_empty() && id_of(&crate::components::BANNER_PATTERNS_COMPONENT) >= 0,
+        e.map_id.is_some() && id_of(&crate::components::MAP_ID_COMPONENT) >= 0,
+        e.map_post_processing.is_some()
+            && id_of(&crate::components::MAP_POST_PROCESSING_COMPONENT) >= 0,
     ];
     w.var_int(parts.iter().filter(|&&p| p).count() as i32)
         .var_int(0);
@@ -218,6 +221,13 @@ fn write_patch(w: &mut Writer, s: &Stack) {
             w.var_int(pattern.saturating_add(1)).var_int(color);
         }
     }
+    if let (true, Some(id)) = (parts[10], e.map_id) {
+        w.var_int(id_of(&crate::components::MAP_ID_COMPONENT)).var_int(id);
+    }
+    if let (true, Some(p)) = (parts[11], e.map_post_processing) {
+        w.var_int(id_of(&crate::components::MAP_POST_PROCESSING_COMPONENT))
+            .var_int(i32::from(p));
+    }
 }
 
 /// Читает `ItemStack` с компонентами: износ, чары, имя и описание.
@@ -251,6 +261,10 @@ pub fn read_stack(r: &mut Reader) -> Result<Slot> {
             e.custom_name = Some(crate::text::read_component(r)?.to_string());
         } else if t == id_of(&crate::components::REPAIR_COST_COMPONENT) {
             e.repair_cost = r.var_int()?.max(0);
+        } else if t == id_of(&crate::components::MAP_ID_COMPONENT) {
+            e.map_id = Some(r.var_int()?);
+        } else if t == id_of(&crate::components::MAP_POST_PROCESSING_COMPONENT) {
+            e.map_post_processing = Some(r.var_int()?.clamp(0, 1) as u8);
         } else if t == id_of(&crate::components::TRIM_COMPONENT) {
             let material = r.var_int()?;
             let pattern = r.var_int()?;
@@ -544,6 +558,14 @@ fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
             && let Ok(cost) = body.var_int()
         {
             e.repair_cost = cost.max(0);
+        } else if kind == id_of(&crate::components::MAP_ID_COMPONENT)
+            && let Ok(id) = body.var_int()
+        {
+            e.map_id = Some(id);
+        } else if kind == id_of(&crate::components::MAP_POST_PROCESSING_COMPONENT)
+            && let Ok(p) = body.var_int()
+        {
+            e.map_post_processing = Some(p.clamp(0, 1) as u8);
         } else if kind == id_of(&crate::components::TRIM_COMPONENT)
             && let (Ok(material), Ok(pattern)) = (body.var_int(), body.var_int())
         {
@@ -771,6 +793,37 @@ pub fn boat_data_hurt(id: i32, entity_id: i32, hurt: i32, hurt_dir: i32, damage:
     w.u8(8).var_int(1).var_int(hurt);
     w.u8(9).var_int(1).var_int(hurt_dir);
     w.u8(10).var_int(3).f32(damage);
+    w.u8(0xff);
+    w.buf
+}
+
+/// Данные рамки (`HangingEntity`/`ItemFrame`): невидимость (флаги 0, бит 0x20),
+/// сторона (8, `DIRECTION` = 12, 3D-номер), предмет (9, `ITEM_STACK`) и
+/// поворот предмета (10, int). Пишутся только переданные поля — как
+/// `packDirty`/`getNonDefaultValues` у ванили.
+pub fn item_frame_data(
+    id: i32,
+    entity_id: i32,
+    facing: Option<i32>,
+    item: Option<Slot>,
+    rotation: Option<i32>,
+    invisible: Option<bool>,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_id);
+    if let Some(v) = invisible {
+        w.u8(0).var_int(0).u8(if v { 0x20 } else { 0 });
+    }
+    if let Some(v) = facing {
+        w.u8(8).var_int(12).var_int(v);
+    }
+    if let Some(v) = item {
+        w.u8(9).var_int(7);
+        write_stack(&mut w, v);
+    }
+    if let Some(v) = rotation {
+        w.u8(10).var_int(1).var_int(v);
+    }
     w.u8(0xff);
     w.buf
 }

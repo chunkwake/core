@@ -184,6 +184,7 @@ impl Track for PlanTrack<'_> {
             at: &at,
             output: &|_| 0,
             analog: &|_| None,
+            frame: &|_, _| None,
         };
         w.conductor(at(p))
     }

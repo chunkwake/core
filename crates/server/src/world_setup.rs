@@ -628,6 +628,9 @@ fn survival_data(
         c::WRITABLE_BOOK_CONTENT_COMPONENT
             .store(component("minecraft:writable_book_content")?, order);
         c::FIREWORKS_COMPONENT.store(component("minecraft:fireworks")?, order);
+        c::MAP_ID_COMPONENT.store(component("minecraft:map_id")?, order);
+        c::MAP_POST_PROCESSING_COMPONENT
+            .store(component("minecraft:map_post_processing")?, order);
         c::set_banner_pattern_names(
             registries
                 .synchronized
@@ -728,6 +731,7 @@ fn survival_data(
         menu_smithing: menu("minecraft:smithing")?,
         menu_stonecutter: menu("minecraft:stonecutter")?,
         menu_loom: menu("minecraft:loom")?,
+        menu_cartography: menu("minecraft:cartography_table")?,
         menu_lectern: menu("minecraft:lectern")?,
         menu_brewing: menu("minecraft:brewing_stand")?,
         loom_basic,
@@ -789,6 +793,9 @@ fn survival_data(
         requires_tool: loaded.requires_tool,
         tools: loaded.tools,
         instruments: chunkwake_data::world::load_instruments(data_dir).map_err(s)?,
+        map_colors: std::sync::Arc::new(
+            chunkwake_data::world::load_map_colors(data_dir, &blocks).map_err(s)?,
+        ),
         block_names: block_names.clone(),
         block_types: chunkwake_data::registries::builtin_ids_of(builtin, "block").map_err(s)?,
         block_defaults: blocks.defaults(),

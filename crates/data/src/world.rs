@@ -33,7 +33,8 @@ pub struct LightRows {
     pub light: Vec<(u8, u8, bool)>,
     /// Твёрдость; -1 — неразрушимый.
     pub hardness: Vec<f32>,
-    /// Прочные грани по битам низ, верх, север, юг, запад, восток.
+    /// Прочные грани по битам низ, верх, север, юг, запад, восток; бит 6 —
+    /// `BlockState.isSolid` (7-я колонка).
     pub sturdy: Vec<u8>,
     /// `requiresCorrectToolForDrops`.
     pub requires_tool: Vec<bool>,
@@ -78,7 +79,9 @@ pub fn load_light_rows(root: &Path) -> Result<LightRows, DataError> {
             Some("1") => true,
             _ => return Err(bad(i, line, "no requires-tool flag")),
         };
-        let sturdy = f.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let sturdy = f.next().and_then(|v| v.parse::<u8>().ok()).unwrap_or(0) & 63;
+        let solid = if f.next() == Some("1") { SOLID_BIT } else { 0 };
+        let sturdy = sturdy | solid;
         rows.light.push((emission, dampening, down != 0));
         rows.hardness.push(hardness);
         rows.sturdy.push(sturdy);
@@ -87,13 +90,16 @@ pub fn load_light_rows(root: &Path) -> Result<LightRows, DataError> {
     Ok(rows)
 }
 
+/// Бит `BlockState.isSolid` в байте прочных граней [`LightRows::sturdy`].
+pub const SOLID_BIT: u8 = 1 << 6;
+
 /// Твёрдость состояний блоков (4-я колонка `reports/light.csv`); -1 — неразрушимый.
 pub fn load_hardness(root: &Path) -> Result<Vec<f32>, DataError> {
     Ok(load_light_rows(root)?.hardness)
 }
 
 /// Прочные грани состояний (6-я колонка `light.csv`): биты по граням низ, верх,
-/// север, юг, запад, восток (`isFaceSturdy`).
+/// север, юг, запад, восток (`isFaceSturdy`), бит 6 — `isSolid` (7-я колонка).
 pub fn load_sturdy(root: &Path) -> Result<Vec<u8>, DataError> {
     Ok(load_light_rows(root)?.sturdy)
 }
@@ -1129,6 +1135,45 @@ mod loot_tests {
             assert_eq!(parse_item_line(&line, &items), Some((3, info)));
         }
     }
+}
+
+/// Цвет на карте (`MapColor.id`) по id состояния из `reports/map_colors.csv`
+/// (выгрузка `ChunkwakeMapColors`): строки `имя;цвет` или `имя[k=v,...];цвет`.
+///
+/// Файла может не быть (кэш до выгрузки): тогда список пуст и карты не рисуют.
+pub fn load_map_colors(root: &Path, blocks: &Blocks) -> Result<Vec<u8>, DataError> {
+    let path = root.join("reports/map_colors.csv");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(DataError::Io(format!("read {}: {e}", path.display()))),
+    };
+    let mut by_key: HashMap<&str, u8> = HashMap::new();
+    for (i, line) in text.lines().enumerate() {
+        let parsed = line
+            .rsplit_once(';')
+            .and_then(|(k, c)| Some((k, c.trim().parse::<u8>().ok()?)));
+        let Some((key, color)) = parsed else {
+            return Err(DataError::Format {
+                file: path.display().to_string(),
+                msg: format!("line {}: {line:?}", i + 1),
+            });
+        };
+        by_key.insert(key, color);
+    }
+    let states = blocks.states();
+    Ok(states
+        .iter()
+        .map(|s| {
+            s.as_ref().map_or(0, |(name, props)| {
+                by_key
+                    .get(state_key(name, props).as_str())
+                    .or_else(|| by_key.get(name.as_str()))
+                    .copied()
+                    .unwrap_or(0)
+            })
+        })
+        .collect())
 }
 
 /// Физика состояний блоков из `reports/shapes.csv` (выгрузка `ChunkwakeShapes`).

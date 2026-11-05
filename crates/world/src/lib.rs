@@ -544,7 +544,7 @@ impl Section {
     }
 
     /// Секция из одного состояния, включая воздух.
-    fn uniform_state(&self) -> Option<u32> {
+    pub fn uniform_state(&self) -> Option<u32> {
         match &self.storage {
             Storage::Single(state) => Some(*state),
             Storage::Paletted(_) => None,
