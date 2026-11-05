@@ -793,6 +793,7 @@ fn survival_data(
         requires_tool: loaded.requires_tool,
         tools: loaded.tools,
         instruments: chunkwake_data::world::load_instruments(data_dir).map_err(s)?,
+        jukebox_songs: chunkwake_data::world::load_jukebox_songs(data_dir, items, registries).map_err(s)?,
         map_colors: std::sync::Arc::new(
             chunkwake_data::world::load_map_colors(data_dir, &blocks).map_err(s)?,
         ),

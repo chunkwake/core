@@ -1482,6 +1482,10 @@ pub(crate) struct DimSim {
     minecarts: Mutex<FastMap<i32, minecarts::MinecartEntry>>,
     /// Рамки для предметов по ID сущности.
     item_frames: Mutex<FastMap<i32, item_frames::ItemFrame>>,
+    /// Играющие проигрыватели (`JukeboxSongPlayer`).
+    jukeboxes: Mutex<FastMap<[i32; 3], jukebox::Playing>>,
+    /// Проигрыватели с диска, ещё не разобранные тиком.
+    pending_jukeboxes: Mutex<Vec<[i32; 3]>>,
     /// Чанки, уже заселённые мобами при генерации (или прочитанные из `entities/`).
     populated: Mutex<FastSet<(i32, i32)>>,
     /// Прочитанные с диска мобы: тик заберёт их в `mobs` (регион может читаться из самого тика).
@@ -1928,6 +1932,7 @@ pub mod commands;
 mod boats;
 mod maps;
 mod item_frames;
+mod jukebox;
 mod minecarts;
 mod mobs;
 mod poi;
@@ -2124,6 +2129,8 @@ pub struct SurvivalData {
     pub instruments: chunkwake_data::world::Instruments,
     /// Цвет на карте по состоянию (`reports/map_colors.csv`), 0 — `NONE`.
     pub map_colors: Arc<Vec<u8>>,
+    /// Пластинки: ID предмета → песня (`jukebox_playable`).
+    pub jukebox_songs: HashMap<i32, chunkwake_data::world::JukeboxSong>,
     /// Нужен ли правильный инструмент для дропа, по состоянию блока.
     pub requires_tool: Vec<bool>,
     /// Компонент `minecraft:tool` по ID предмета.
@@ -2905,6 +2912,10 @@ impl PlayPlan {
             let viewers = self.sim().open_blocks.lock().unwrap().get(&p).map_or(0, Vec::len);
             return crate::redstone::trapped_chest_power(viewers);
         }
+        // `JukeboxBlock.ownSignal`: 15, пока играет песня.
+        if self.block(p).is_some_and(|s| self.state_name(s) == jukebox::JUKEBOX) {
+            return i32::from(self.jukebox_playing(p)) * 15;
+        }
         self.comparator_output(p)
     }
 
@@ -2939,6 +2950,9 @@ impl PlayPlan {
                     .copied()
                     .unwrap_or(0),
             );
+        }
+        if name == jukebox::JUKEBOX {
+            return Some(self.jukebox_analog(p));
         }
         // `LecternBlock.getAnalogOutputSignal`: страница из блок-сущности.
         if crate::redstone::is_lectern(name) {
@@ -3775,6 +3789,12 @@ impl PlayPlan {
                     .filter(|(_, be)| FURNACES.contains(&be.id.as_str()))
                     .map(|(p, _)| *p),
             );
+            self.sim().pending_jukeboxes.lock().unwrap().extend(
+                c.block_entities
+                    .iter()
+                    .filter(|(_, be)| be.id == jukebox::JUKEBOX)
+                    .map(|(p, _)| *p),
+            );
             self.sim().pending_campfires.lock().unwrap().extend(
                 c.block_entities
                     .iter()
@@ -3995,12 +4015,17 @@ impl PlayPlan {
         let world = state.edited.read().unwrap();
         let saved = state.saved.lock().unwrap();
         let dirty = state.dirty.lock().unwrap();
+        let playing = state.sim.jukeboxes.lock().unwrap();
         // Только правленые после записи, а не все загруженные с диска.
         dirty
             .iter()
             .filter_map(|pos| Some((pos, world.get(pos)?)))
             .filter(|(pos, (_, rev))| saved.get(*pos) != Some(rev) && *rev != 0)
-            .map(|(pos, (c, rev))| (*pos, c.clone(), *rev))
+            .map(|(pos, (c, rev))| {
+                let mut c = c.clone();
+                jukebox::stamp_ticks(&mut c, &playing);
+                (*pos, c, *rev)
+            })
             .collect()
     }
 
@@ -8234,6 +8259,7 @@ impl PlayPlan {
             }
             if let Some(be) = self.block_entity(block) {
                 let _ = be;
+                self.jukebox_removed(block, state);
                 let from = [
                     block[0] as f64 + 0.5,
                     block[1] as f64 + 0.5,
@@ -9013,6 +9039,7 @@ impl PlayPlan {
         lap(PH_FURNACES, &mut watch);
         self.tick_brewing();
         self.tick_campfires();
+        self.tick_jukeboxes();
         lap(PH_CAMPFIRES, &mut watch);
         self.tick_copper_chests();
         self.tick_random_blocks();
@@ -9094,6 +9121,8 @@ impl DimSim {
             || !self.pending_furnaces.lock().unwrap().is_empty()
             || !self.campfires.lock().unwrap().is_empty()
             || !self.pending_campfires.lock().unwrap().is_empty()
+            || !self.jukeboxes.lock().unwrap().is_empty()
+            || !self.pending_jukeboxes.lock().unwrap().is_empty()
             || !self.hopper_ticks.lock().unwrap().is_empty()
             || !self.redstone_ticks.lock().unwrap().is_empty()
             || !self.fluid_ticks.lock().unwrap().is_empty()
@@ -11008,6 +11037,26 @@ impl PlayPlan {
                                 continue;
                             }
                         }
+                        // `JukeboxBlock.useItemOn`/`useWithoutItem`: пластинка
+                        // в пустой, из занятого — наружу. Шифт с предметом в
+                        // руке блок не трогает.
+                        if clicked == "minecraft:jukebox"
+                            && !state.vitals.dead
+                            && login.spawn.game_mode != 3
+                            && !(sneaking && (state.inv.held().is_some() || state.inv.slots[survival::OFFHAND].is_some()))
+                        {
+                            let slot = if u.hand == 0 { state.inv.held_slot() } else { survival::OFFHAND };
+                            if let Some(spent) = self.use_jukebox(u.pos, u.hand, state.inv.slots[slot]) {
+                                if spent && login.spawn.game_mode != 1 {
+                                    state.inv.consume_at(slot);
+                                    self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                }
+                                let now = self.block(u.pos).unwrap_or(AIR);
+                                conn.send(&play::block_update(ids.block_update, u.pos, now as i32)).await?;
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                                continue;
+                            }
+                        }
                         // `LecternBlock.useItemOn`: книга в руке кладётся на
                         // лектор, рука опустошается на один предмет.
                         if crate::redstone::is_lectern(&clicked)
@@ -11906,6 +11955,7 @@ impl PlayPlan {
                 pos[1] as f64 + 0.5,
                 pos[2] as f64 + 0.5,
             ];
+            self.jukebox_removed(pos, old);
             if crate::redstone::is_lectern(self.state_name(old))
                 && let Some(book) = self.lectern_book(pos)
             {
@@ -14605,6 +14655,15 @@ impl PlayPlan {
             return None;
         }
         let name = self.state_name(self.block(p)?).to_owned();
+        // Проигрыватель — контейнер на один слот (`JukeboxBlockEntity`).
+        if name == jukebox::JUKEBOX {
+            return Some(Cont {
+                parts: vec![p],
+                slots: vec![self.jukebox_record(p)],
+                furnace: false,
+                name,
+            });
+        }
         if furnace_kind(&name).is_some() {
             let slots = self.with_furnace(p, |e| e.f.slots)?;
             return Some(Cont {
@@ -14638,6 +14697,13 @@ impl PlayPlan {
 
     /// Записать контейнер и показать изменения тем, у кого он открыт.
     fn cont_put(&self, c: &Cont) {
+        if c.name == jukebox::JUKEBOX {
+            let item = c.slots[0];
+            if item != self.jukebox_record(c.parts[0]) {
+                self.jukebox_set_item(c.parts[0], item);
+            }
+            return;
+        }
         if c.furnace {
             if let [a, b, r] = c.slots[..] {
                 self.set_furnace_slots(c.parts[0], [a, b, r], Uuid::nil());
@@ -14753,7 +14819,10 @@ impl PlayPlan {
         {
             for i in 0..me.slots.len() {
                 let Some(st) = me.slots[i] else { continue };
-                let allowed = if t.name == "minecraft:brewing_stand" {
+                let allowed = if t.name == jukebox::JUKEBOX {
+                    // `canPlaceItem`: пластинка и только в пустой.
+                    if t.slots[0].is_none() && self.is_jukebox_disc(Some(st)) { vec![0] } else { Vec::new() }
+                } else if t.name == "minecraft:brewing_stand" {
                     let item = self.item_name(st.item);
                     if f ^ 1 == 1 {
                         if self
@@ -14786,7 +14855,9 @@ impl PlayPlan {
                     hp::insert_slots(t.furnace, t.slots.len(), f ^ 1, self.is_fuel(st.item))
                 };
                 let slot_max = |item| {
-                    if t.name == "minecraft:brewing_stand"
+                    if t.name == jukebox::JUKEBOX {
+                        1
+                    } else if t.name == "minecraft:brewing_stand"
                         && matches!(
                             self.item_name(item),
                             "minecraft:glass_bottle"
@@ -14856,6 +14927,10 @@ impl PlayPlan {
         use crate::hoppers as hp;
         let max = |item: i32| self.max_stack(item);
         let all: Vec<usize> = (0..me.slots.len()).collect();
+        // `JukeboxBlockEntity.canTakeItem`: только если у воронки есть пустой слот.
+        if a.name == jukebox::JUKEBOX && me.slots.iter().all(Option::is_some) {
+            return false;
+        }
         let source_slots = if a.name == "minecraft:brewing_stand" {
             vec![0, 1, 2, 3]
         } else {
@@ -14972,7 +15047,11 @@ impl PlayPlan {
         if me.name == "minecraft:dropper"
             && let Some(mut t) = self.cont_get(front)
         {
-            let allowed = hp::insert_slots(t.furnace, t.slots.len(), f ^ 1, self.is_fuel(st.item));
+            let allowed = if t.name == jukebox::JUKEBOX {
+                if t.slots[0].is_none() && self.is_jukebox_disc(Some(st)) { vec![0] } else { Vec::new() }
+            } else {
+                hp::insert_slots(t.furnace, t.slots.len(), f ^ 1, self.is_fuel(st.item))
+            };
             let mut trial = t.slots.clone();
             if hp::insert_one(&mut trial, &allowed, one, |it| self.max_stack(it)) {
                 if self.move_event(&me, &t, true, one).is_some() {

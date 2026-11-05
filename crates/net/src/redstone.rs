@@ -186,6 +186,7 @@ fn is_source(name: &str) -> bool {
                 | "minecraft:target"
                 | "minecraft:trapped_chest"
                 | "minecraft:lectern"
+                | "minecraft:jukebox"
                 | "minecraft:tripwire_hook"
                 | "minecraft:detector_rail"
                 | "minecraft:lightning_rod"
@@ -277,7 +278,8 @@ impl World<'_> {
                 i32::from(self.on(s, "powered") && self.facing(s) == dir) * 15
             }
             "minecraft:daylight_detector" | "minecraft:target" => self.int(s, "power"),
-            "minecraft:trapped_chest" => (self.output)(n),
+            // Сундук-ловушка — по зрителям, проигрыватель — 15, пока играет.
+            "minecraft:trapped_chest" | "minecraft:jukebox" => (self.output)(n),
             "minecraft:comparator" => {
                 if self.facing(s) == dir {
                     (self.output)(n)

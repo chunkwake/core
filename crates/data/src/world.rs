@@ -1446,3 +1446,64 @@ pub fn load_instruments(root: &Path) -> Result<Instruments, DataError> {
     }
     Ok(out)
 }
+
+/// Песня проигрывателя (`JukeboxSong`) из `data/minecraft/jukebox_song`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JukeboxSong {
+    /// Сетевой ID в реестре `jukebox_song`: данные события 1010.
+    pub id: i32,
+    /// `comparator_output`.
+    pub comparator: i32,
+    /// `lengthInTicks`: `ceil(length_in_seconds · 20)`.
+    pub ticks: i64,
+}
+
+/// Пластинки: ID предмета → песня (`minecraft:jukebox_playable`).
+///
+/// Для песни `<имя>` смотрим компоненты предмета `music_disc_<имя>` и берём
+/// его, только если `jukebox_playable` действительно указывает на эту песню:
+/// так не нужно читать отчёты всех предметов на старте.
+pub fn load_jukebox_songs(
+    root: &Path,
+    items: &HashMap<String, i32>,
+    registries: &crate::registries::RegistryData,
+) -> Result<HashMap<i32, JukeboxSong>, DataError> {
+    let dir = root.join("data/minecraft/jukebox_song");
+    let mut out = HashMap::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(out);
+    };
+    for e in entries.flatten() {
+        let path = e.path();
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned) else {
+            continue;
+        };
+        let key = format!("minecraft:{name}");
+        let Ok(id) = registries.network_id("jukebox_song", &key) else {
+            continue;
+        };
+        let song = read_json(&path)?;
+        let item = format!("minecraft:music_disc_{name}");
+        let Some(&item_id) = items.get(&item) else {
+            continue;
+        };
+        let report = root.join(format!("reports/minecraft/components/item/music_disc_{name}.json"));
+        let playable = std::fs::read_to_string(&report)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|j| j["components"]["minecraft:jukebox_playable"].as_str().map(str::to_owned));
+        if playable.as_deref() != Some(key.as_str()) {
+            continue;
+        }
+        let seconds = song["length_in_seconds"].as_f64().unwrap_or(0.0) as f32;
+        out.insert(
+            item_id,
+            JukeboxSong {
+                id,
+                comparator: song["comparator_output"].as_i64().unwrap_or(0) as i32,
+                ticks: (seconds * 20.0).ceil() as i64,
+            },
+        );
+    }
+    Ok(out)
+}
