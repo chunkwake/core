@@ -1932,6 +1932,7 @@ pub mod commands;
 mod boats;
 mod maps;
 mod item_frames;
+mod banners;
 mod jukebox;
 mod minecarts;
 mod mobs;
@@ -5460,7 +5461,9 @@ impl PlayPlan {
                 .items
                 .get(d.stack.item as usize)
                 .map_or(64, |i| i.max_stack);
-            let (slots, left) = inv.add(d.stack.item, d.stack.count, max as i32);
+            // С износом и компонентами: зачарованное, именованное, знамя с узором.
+            let (slots, left) =
+                inv.add_components(d.stack.item, d.stack.count, max as i32, d.stack.extra, d.stack.damage);
             let got = d.stack.count - left;
             if got == 0 {
                 continue;
@@ -8257,8 +8260,8 @@ impl PlayPlan {
                 chain.push(block);
                 continue;
             }
-            if let Some(be) = self.block_entity(block) {
-                let _ = be;
+            let be = self.block_entity(block);
+            if be.is_some() {
                 self.jukebox_removed(block, state);
                 let from = [
                     block[0] as f64 + 0.5,
@@ -8286,7 +8289,7 @@ impl PlayPlan {
                     block[1] as f64 + 0.5,
                     block[2] as f64 + 0.5,
                 ];
-                for stack in self.block_loot(state, None) {
+                for stack in self.dress_banner_loot(be.as_ref(), self.block_loot(state, None)) {
                     self.drop_item(
                         from,
                         items::pop_velocity(rand::random(), rand::random()),
@@ -11057,6 +11060,22 @@ impl PlayPlan {
                                 continue;
                             }
                         }
+                        // `MapItem.useOn` по знамени: метка на карте (у знамени
+                        // своего действия нет, шифт не мешает).
+                        if banners::banner_color(&clicked).is_some()
+                            && !state.vitals.dead
+                            && login.spawn.game_mode != 3
+                        {
+                            let slot = if u.hand == 0 { state.inv.held_slot() } else { survival::OFFHAND };
+                            if let Some(map) = state.inv.slots[slot]
+                                && self.item_name(map.item) == "minecraft:filled_map"
+                            {
+                                // Отказ (`FAIL`) клиенту не отличим: только подтверждение.
+                                self.use_map_on_banner(map, u.pos);
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                                continue;
+                            }
+                        }
                         // `LecternBlock.useItemOn`: книга в руке кладётся на
                         // лектор, рука опустошается на один предмет.
                         if crate::redstone::is_lectern(&clicked)
@@ -11375,6 +11394,9 @@ impl PlayPlan {
                                 self.link_chest(target, place);
                                 if let Some(id) = container_entity(&name) {
                                     self.set_block_entity(target, Some(BlockEntity { id: id.into(), nbt: Default::default() }));
+                                }
+                                if banners::banner_color(self.state_name(place)).is_some() {
+                                    self.place_banner(target, hand_slot.and_then(|i| state.inv.slots[i]));
                                 }
                                 // Крюк сразу считает свою цепь
                                 // (`TripWireHookBlock.setPlacedBy`).
@@ -11949,7 +11971,8 @@ impl PlayPlan {
             self.save_furnace(pos, &e.f);
         }
         // Содержимое сундука — на землю.
-        if self.block_entity(pos).is_some() {
+        let be = self.block_entity(pos);
+        if be.is_some() {
             let center = [
                 pos[0] as f64 + 0.5,
                 pos[1] as f64 + 0.5,
@@ -11977,7 +12000,7 @@ impl PlayPlan {
                 pos[1] as f64 + 0.25,
                 pos[2] as f64 + 0.5,
             ];
-            for s in self.block_loot(old, held) {
+            for s in self.dress_banner_loot(be.as_ref(), self.block_loot(old, held)) {
                 let vel = items::pop_velocity(rand::random(), rand::random());
                 self.drop_item(center, vel, s, items::BLOCK_DELAY);
             }
@@ -12006,7 +12029,9 @@ impl PlayPlan {
             pos[1] as f64 + 0.5,
             pos[2] as f64 + 0.5,
         ];
-        if self.block_entity(pos).is_some() {
+        let be = self.block_entity(pos);
+        if be.is_some() {
+            self.jukebox_removed(pos, old);
             for stack in self.container_items(pos).into_iter().flatten() {
                 let vel = items::pop_velocity(rand::random(), rand::random());
                 self.drop_item(center, vel, stack, items::BLOCK_DELAY);
@@ -12014,7 +12039,7 @@ impl PlayPlan {
             self.set_block_entity(pos, None);
         }
         let drop_at = [center[0], pos[1] as f64 + 0.25, center[2]];
-        for stack in self.block_loot(old, None) {
+        for stack in self.dress_banner_loot(be.as_ref(), self.block_loot(old, None)) {
             let vel = items::pop_velocity(rand::random(), rand::random());
             self.drop_item(drop_at, vel, stack, items::BLOCK_DELAY);
         }

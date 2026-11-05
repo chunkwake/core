@@ -49,23 +49,7 @@ pub fn named_nbt(
         );
     }
     if !e.banner_patterns.is_empty() {
-        let layers = e
-            .banner_patterns
-            .iter()
-            .filter_map(|&(pattern, color)| {
-                Some(Tag::Compound(Compound::from([
-                    (
-                        "pattern".into(),
-                        Tag::String(components::banner_pattern_name(pattern)?.to_owned()),
-                    ),
-                    (
-                        "color".into(),
-                        Tag::String(components::DYE_COLORS.get(color as usize)?.to_string()),
-                    ),
-                ])))
-            })
-            .collect();
-        comps.insert("minecraft:banner_patterns".into(), Tag::List(layers));
+        comps.insert("minecraft:banner_patterns".into(), banner_layers_to_tag(&e.banner_patterns));
     }
     if !e.enchantments.is_empty() {
         let levels: Compound = e
@@ -167,19 +151,8 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>) -> Option<S
                     trim.get("pattern")?.as_str()?,
                 )
             });
-        if let Some(layers) = m.get("minecraft:banner_patterns").and_then(Tag::as_list) {
-            e.banner_patterns = layers
-                .iter()
-                .filter_map(|layer| {
-                    let layer = layer.as_compound()?;
-                    let pattern = components::banner_pattern_id(layer.get("pattern")?.as_str()?)?;
-                    let color_name = layer.get("color")?.as_str()?;
-                    let color = components::DYE_COLORS
-                        .iter()
-                        .position(|&n| n == color_name)? as i32;
-                    Some((pattern, color))
-                })
-                .collect();
+        if let Some(layers) = m.get("minecraft:banner_patterns") {
+            e.banner_patterns = banner_layers_from_tag(layers);
         }
         s.damage = m
             .get("minecraft:damage")
@@ -507,6 +480,42 @@ fn levels_nbt(list: &[(i32, i32)]) -> Compound {
             Some((components::enchantment_name(id)?.to_owned(), Tag::Int(lvl)))
         })
         .collect()
+}
+
+/// Текстовый компонент из сохранённой JSON-строки (как `custom_name`).
+pub fn text_json(text: &str) -> Value {
+    parse(text)
+}
+
+/// Слои `banner_patterns` → список NBT `{pattern, color}`.
+pub fn banner_layers_to_tag(layers: &[(i32, i32)]) -> Tag {
+    Tag::List(
+        layers
+            .iter()
+            .filter_map(|&(pattern, color)| {
+                Some(Tag::Compound(Compound::from([
+                    ("pattern".into(), Tag::String(components::banner_pattern_name(pattern)?.to_owned())),
+                    ("color".into(), Tag::String(components::DYE_COLORS.get(color as usize)?.to_string())),
+                ])))
+            })
+            .collect(),
+    )
+}
+
+/// Список NBT `{pattern, color}` → слои `banner_patterns`.
+pub fn banner_layers_from_tag(t: &Tag) -> Vec<(i32, i32)> {
+    t.as_list()
+        .map(|l| {
+            l.iter()
+                .filter_map(|layer| {
+                    let layer = layer.as_compound()?;
+                    let pattern = components::banner_pattern_id(layer.get("pattern")?.as_str()?)?;
+                    let name = layer.get("color")?.as_str()?;
+                    Some((pattern, components::DYE_COLORS.iter().position(|&n| n == name)? as i32))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn parse(text: &str) -> Value {

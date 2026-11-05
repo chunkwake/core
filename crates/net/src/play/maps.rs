@@ -3,8 +3,8 @@
 //! (`MapItemSavedData.tickCarriedBy`), пакеты и запись в
 //! `data/minecraft/maps/<id>.dat` с `last_id.dat` (`MapIndex`).
 //!
-//! Отрисовка и данные — [`crate::maps`]. Чего нет: значки баннеров
-//! (`banners` пишутся пустыми), невидимость в тыкве.
+//! Отрисовка и данные — [`crate::maps`], знамёна — [`super::banners`].
+//! Чего нет: невидимость в тыкве.
 
 use super::*;
 use crate::maps::{MapData, MapFrame, Sample, mode_color};
@@ -324,6 +324,8 @@ impl PlayPlan {
                 let world = self.dim_state().edited.read().unwrap();
                 let flat = self.terrain().is_none();
                 let ceiling = me_dim == Dimension::Nether;
+                // Углы перерисованных квадратов: в них `checkBanners`.
+                let mut corners = Vec::new();
                 map.update(uuid, [my_pos[0], my_pos[2]], ceiling, |x, z| {
                     let col = match world.get(&(x >> 4, z >> 4)) {
                         Some(e) => &e.0,
@@ -333,8 +335,13 @@ impl PlayPlan {
                     if ceiling {
                         return Some(Sample { color: 0, height: 0.0, depth: 0 });
                     }
+                    corners.push((x, z));
                     Some(self.map_sample(col, x, z, scale))
                 });
+                drop(world);
+                if !map.banners.is_empty() {
+                    self.check_map_banners(map, &corners);
+                }
             }
             if let Some(u) = map.next_update(uuid) {
                 packets.push(crate::maps::encode(self.ids.map_item_data, id, &u));
@@ -390,6 +397,16 @@ impl PlayPlan {
         }
         for (to, p) in packets {
             self.send_to(to, p);
+        }
+    }
+
+    /// `toggleBanner` у карты `id`: карты нет — успех без дела, знамени
+    /// (`banner` = `None`) нет — отказ.
+    pub(super) fn toggle_map_banner(&self, id: i32, banner: Option<crate::maps::MapBanner>) -> bool {
+        let mut store = self.maps.lock().unwrap();
+        match self.with_map(&mut store, id, |m| banner.map(|b| m.toggle_banner(b))) {
+            None => true,
+            Some(r) => r.unwrap_or(false),
         }
     }
 

@@ -17,23 +17,59 @@ const DIRT: u8 = 10;
 const STONE: u8 = 11;
 pub const WATER: u8 = 12;
 
-/// Номера `MapDecorationType` в реестре.
+/// Типы `MapDecorationType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecoKind {
-    Player = 0,
-    Frame = 1,
-    PlayerOffMap = 6,
-    PlayerOffLimits = 7,
+    Player,
+    Frame,
+    PlayerOffMap,
+    PlayerOffLimits,
+    /// Знамя цвета `DyeColor` с этим номером (`banner_white` … `banner_black`).
+    Banner(u8),
 }
 
-/// Значок на карте: `x`, `z` — от −128 до 127, `rot` — шестнадцатые доли оборота.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+impl DecoKind {
+    /// Номер в реестре `map_decoration_type`.
+    pub fn id(self) -> i32 {
+        match self {
+            DecoKind::Player => 0,
+            DecoKind::Frame => 1,
+            DecoKind::PlayerOffMap => 6,
+            DecoKind::PlayerOffLimits => 7,
+            DecoKind::Banner(c) => 10 + c as i32,
+        }
+    }
+}
+
+/// Значок на карте: `x`, `z` — от −128 до 127, `rot` — шестнадцатые доли
+/// оборота, `name` — JSON-текст подписи (имя знамени).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Decoration {
     pub kind: DecoKind,
     pub x: i8,
     pub z: i8,
     pub rot: i8,
+    pub name: Option<String>,
 }
+
+/// Знамя на карте (`MapBanner`): место, цвет (`DyeColor`) и имя (JSON-текст).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MapBanner {
+    pub pos: [i32; 3],
+    pub color: u8,
+    pub name: Option<String>,
+}
+
+impl MapBanner {
+    /// `MapBanner.getId`.
+    pub fn id(&self) -> String {
+        format!("banner-{},{},{}", self.pos[0], self.pos[1], self.pos[2])
+    }
+}
+
+/// `isTrackedCountOverLimit(256)`: все наши типы значков считаются
+/// (`trackCount` у игрока, рамки и знамён).
+const TRACKED_LIMIT: usize = 256;
 
 /// Столбец (или квадрат `scale×scale` столбцов) под пикселем.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -137,6 +173,8 @@ pub struct MapData {
     pub decorations: Vec<(String, Decoration)>,
     /// Рамки с этой картой (`frameMarkers`), по порядку добавления.
     pub frames: Vec<MapFrame>,
+    /// Отмеченные знамёна (`bannerMarkers`), по порядку добавления.
+    pub banners: Vec<MapBanner>,
     /// Изменилась с последнего сохранения.
     pub dirty: bool,
 }
@@ -162,6 +200,7 @@ impl MapData {
             holders: Vec::new(),
             decorations: Vec::new(),
             frames: Vec::new(),
+            banners: Vec::new(),
             dirty: true,
         }
     }
@@ -237,6 +276,21 @@ impl MapData {
     /// стрелка у края или точка за пределами; прочий значок вне карты остаётся
     /// у края только на карте без границ.
     pub fn put_decoration(&mut self, kind: DecoKind, key: &str, x: f64, z: f64, yaw: f64, nether_time: Option<i64>) {
+        self.put_named(kind, key, x, z, yaw, nether_time, None);
+    }
+
+    /// `addDecoration` с подписью.
+    #[allow(clippy::too_many_arguments)]
+    fn put_named(
+        &mut self,
+        kind: DecoKind,
+        key: &str,
+        x: f64,
+        z: f64,
+        yaw: f64,
+        nether_time: Option<i64>,
+        name: Option<String>,
+    ) {
         let s = (1i32 << self.scale) as f32;
         let fx = (x - self.center[0] as f64) as f32 / s;
         let fz = (z - self.center[1] as f64) as f32 / s;
@@ -259,6 +313,7 @@ impl MapData {
             x: clamp_coord(fx),
             z: clamp_coord(fz),
             rot,
+            name,
         };
         match self.decorations.iter_mut().find(|(k, _)| k == key) {
             Some((_, old)) if *old == deco => {}
@@ -307,6 +362,68 @@ impl MapData {
         }
     }
 
+    /// Метка знамени и её значок без проверок: чтение с диска и последняя
+    /// ветка `toggleBanner`.
+    fn add_banner(&mut self, b: MapBanner) {
+        let id = b.id();
+        self.put_named(
+            DecoKind::Banner(b.color),
+            &id,
+            b.pos[0] as f64 + 0.5,
+            b.pos[2] as f64 + 0.5,
+            180.0,
+            None,
+            b.name.clone(),
+        );
+        match self.banners.iter_mut().find(|o| o.id() == id) {
+            Some(old) => *old = b,
+            None => self.banners.push(b),
+        }
+    }
+
+    /// `toggleBanner`: то же знамя снимается, новое (или изменившееся)
+    /// отмечается. `false` — знамя вне карты или значков слишком много.
+    pub fn toggle_banner(&mut self, b: MapBanner) -> bool {
+        let s = (1i32 << self.scale) as f64;
+        let dx = (b.pos[0] as f64 + 0.5 - self.center[0] as f64) / s;
+        let dz = (b.pos[2] as f64 + 0.5 - self.center[1] as f64) / s;
+        if !(-63.0..=63.0).contains(&dx) || !(-63.0..=63.0).contains(&dz) {
+            return false;
+        }
+        let id = b.id();
+        if let Some(i) = self.banners.iter().position(|o| *o == b) {
+            self.banners.remove(i);
+            self.remove_decoration(&id);
+            self.dirty = true;
+            return true;
+        }
+        if self.decorations.len() >= TRACKED_LIMIT {
+            return false;
+        }
+        self.add_banner(b);
+        self.dirty = true;
+        true
+    }
+
+    /// Метки знамён в квадратах `scale×scale` с этими углами — их сверяет
+    /// `checkBanners` по каждому столбцу перерисованного квадрата.
+    pub fn banners_in(&self, corners: &[(i32, i32)]) -> Vec<MapBanner> {
+        let s = 1i32 << self.scale;
+        self.banners
+            .iter()
+            .filter(|b| corners.contains(&(b.pos[0].div_euclid(s) * s, b.pos[2].div_euclid(s) * s)))
+            .cloned()
+            .collect()
+    }
+
+    /// `checkBanners`: знамени на месте нет или оно другое — метка снимается.
+    pub fn remove_banner(&mut self, b: &MapBanner) {
+        let id = b.id();
+        self.banners.retain(|o| o.id() != id);
+        self.remove_decoration(&id);
+        self.dirty = true;
+    }
+
     /// `removedFromFrame`: рамка лишилась карты или сломана.
     pub fn removed_from_frame(&mut self, pos: [i32; 3], entity_id: i32) {
         self.remove_decoration(&frame_key(entity_id));
@@ -318,7 +435,7 @@ impl MapData {
     /// `HoldingPlayer.nextUpdatePacket`: заплатка и (раз в 5 вызовов) значки.
     pub fn next_update(&mut self, player: Uuid) -> Option<Update> {
         let (scale, locked) = (self.scale, self.locked);
-        let decorations: Vec<Decoration> = self.decorations.iter().map(|(_, d)| *d).collect();
+        let decorations: Vec<Decoration> = self.decorations.iter().map(|(_, d)| d.clone()).collect();
         let colors = &self.colors;
         let h = self.holders.iter_mut().find(|h| h.player == player)?;
         let patch = if h.dirty_data {
@@ -450,7 +567,28 @@ impl MapData {
         c.insert("trackingPosition".into(), Tag::Byte(self.tracking as i8));
         c.insert("unlimitedTracking".into(), Tag::Byte(self.unlimited as i8));
         c.insert("locked".into(), Tag::Byte(self.locked as i8));
-        c.insert("banners".into(), Tag::List(Vec::new()));
+        c.insert(
+            "banners".into(),
+            Tag::List(
+                self.banners
+                    .iter()
+                    .map(|b| {
+                        let mut m = Compound::new();
+                        m.insert("pos".into(), Tag::IntArray(b.pos.to_vec()));
+                        // `lenientOptionalFieldOf("color", WHITE)`: белый не пишется.
+                        if b.color != 0
+                            && let Some(c) = chunkwake_protocol::components::DYE_COLORS.get(b.color as usize)
+                        {
+                            m.insert("color".into(), Tag::String((*c).to_owned()));
+                        }
+                        if let Some(n) = &b.name {
+                            m.insert("name".into(), crate::stack_nbt::json_to_tag(&crate::stack_nbt::text_json(n)));
+                        }
+                        Tag::Compound(m)
+                    })
+                    .collect(),
+            ),
+        );
         c.insert(
             "frames".into(),
             Tag::List(
@@ -495,6 +633,27 @@ impl MapData {
                 .collect(),
             _ => Vec::new(),
         };
+        let banners: Vec<MapBanner> = match c.get("banners") {
+            Some(Tag::List(l)) => l
+                .iter()
+                .filter_map(|t| {
+                    let m = t.as_compound()?;
+                    let pos = match m.get("pos") {
+                        Some(Tag::IntArray(p)) if p.len() == 3 => [p[0], p[1], p[2]],
+                        _ => return None,
+                    };
+                    let color = match m.get("color") {
+                        Some(Tag::String(s)) => {
+                            chunkwake_protocol::components::DYE_COLORS.iter().position(|c| c == s)? as u8
+                        }
+                        _ => 0,
+                    };
+                    let name = m.get("name").map(|t| crate::stack_nbt::tag_to_json(t).to_string());
+                    Some(MapBanner { pos, color, name })
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         let mut map = Self {
             scale: (int("scale").unwrap_or(0).clamp(0, MAX_SCALE as i64)) as u8,
             center: [int("xCenter")? as i32, int("zCenter")? as i32],
@@ -509,8 +668,13 @@ impl MapData {
             holders: Vec::new(),
             decorations: Vec::new(),
             frames: Vec::new(),
+            banners: Vec::new(),
             dirty: false,
         };
+        // `banners` читаются раньше рамок.
+        for b in banners {
+            map.add_banner(b);
+        }
         // Как при чтении у ванили: метки рамок и их значки (без вращения в Аду).
         for f in frames {
             map.put_decoration(
@@ -597,11 +761,16 @@ pub fn encode(packet_id: i32, map_id: i32, u: &Update) -> Vec<u8> {
         Some(list) => {
             w.bool(true).var_int(list.len() as i32);
             for d in list {
-                w.var_int(d.kind as i32)
-                    .u8(d.x as u8)
-                    .u8(d.z as u8)
-                    .u8((d.rot & 15) as u8)
-                    .bool(false);
+                w.var_int(d.kind.id()).u8(d.x as u8).u8(d.z as u8).u8((d.rot & 15) as u8);
+                match &d.name {
+                    Some(n) => {
+                        w.bool(true);
+                        chunkwake_protocol::text::write_component(&mut w, &crate::stack_nbt::text_json(n));
+                    }
+                    None => {
+                        w.bool(false);
+                    }
+                }
             }
         }
         None => {
@@ -702,7 +871,7 @@ mod tests {
     fn player_marker_inside_and_off_map() {
         let mut m = MapData::fresh(0.0, 0.0, 0, true, false, "minecraft:overworld");
         m.put_player("a", 0.0, 0.0, 0.0, None);
-        assert_eq!(m.decorations[0].1, Decoration { kind: DecoKind::Player, x: 0, z: 0, rot: 0 });
+        assert_eq!(m.decorations[0].1, Decoration { kind: DecoKind::Player, x: 0, z: 0, rot: 0, name: None });
         m.put_player("a", 200.0, 0.0, 90.0, None);
         assert_eq!(m.decorations[0].1.kind, DecoKind::PlayerOffMap);
         assert_eq!(m.decorations[0].1.x, 127);
@@ -728,7 +897,7 @@ mod tests {
         let mut m = MapData::fresh(0.0, 0.0, 0, true, false, "minecraft:overworld");
         let f = MapFrame { pos: [10, 70, -6], rotation: 90, entity_id: 5 };
         m.tick_frame(f, None);
-        let deco = |m: &MapData, k: &str| m.decorations.iter().find(|(key, _)| key == k).map(|(_, d)| *d);
+        let deco = |m: &MapData, k: &str| m.decorations.iter().find(|(key, _)| key == k).map(|(_, d)| d.clone());
         let d = deco(&m, "frame-5").expect("значок рамки");
         assert_eq!((d.kind, d.x, d.z, d.rot), (DecoKind::Frame, 20, -11, 4));
         // После перезапуска у рамки другой номер: старый значок уходит.
@@ -753,12 +922,40 @@ mod tests {
         assert_eq!(mode_color([3, 4, 4]), 4);
     }
 
+    /// `toggleBanner`: второй клик снимает метку; метки переживают
+    /// сохранение, белый цвет не пишется; имя уходит в пакет.
+    #[test]
+    fn banner_toggle_and_save() {
+        let mut m = MapData::fresh(0.0, 0.0, 0, true, false, "minecraft:overworld");
+        let red = MapBanner { pos: [10, 70, -6], color: 14, name: Some(r#"{"text":"База"}"#.into()) };
+        assert!(m.toggle_banner(red.clone()));
+        let d = m.decorations[0].1.clone();
+        assert_eq!((d.kind.id(), d.x, d.z, d.rot), (24, 21, -10, 8));
+        assert_eq!(d.name.as_deref(), red.name.as_deref());
+        let white = MapBanner { pos: [1, 64, 1], color: 0, name: None };
+        assert!(m.toggle_banner(white.clone()));
+        let nbt = m.to_nbt();
+        let back = MapData::from_nbt(&nbt).unwrap();
+        assert_eq!(back.banners, vec![red.clone(), white.clone()]);
+        assert_eq!(back.decorations.len(), 2);
+        let Some(Tag::List(l)) = nbt.get("banners") else { panic!() };
+        assert!(l[1].as_compound().unwrap().get("color").is_none());
+        let u = Update { scale: 0, locked: false, decorations: Some(vec![d]), patch: None };
+        assert!(encode(1, 0, &u).len() > 10);
+        // Повторный клик по тому же знамени снимает метку.
+        assert!(m.toggle_banner(red.clone()));
+        assert_eq!(m.banners, vec![white.clone()]);
+        assert_eq!(m.banners_in(&[(1, 1)]), vec![white]);
+        // Дальше 63 пикселей от центра — отказ.
+        assert!(!m.toggle_banner(MapBanner { pos: [200, 64, 0], color: 0, name: None }));
+    }
+
     #[test]
     fn packet_layout() {
         let u = Update {
             scale: 1,
             locked: false,
-            decorations: Some(vec![Decoration { kind: DecoKind::Player, x: 1, z: -1, rot: 3 }]),
+            decorations: Some(vec![Decoration { kind: DecoKind::Player, x: 1, z: -1, rot: 3, name: None }]),
             patch: Some(Patch { x: 2, z: 3, width: 1, height: 1, colors: vec![9] }),
         };
         let b = encode(52, 7, &u);

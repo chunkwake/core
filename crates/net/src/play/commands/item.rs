@@ -121,6 +121,27 @@ fn apply_one(extra: &mut Extra, damage: &mut Option<i32>, key: &str, value: Tag)
             extra.stored = levels_of(&value);
             true
         }
+        "banner_patterns" => {
+            // Узор без пространства имён — `minecraft:`.
+            let Some(layers) = value.as_list() else {
+                return false;
+            };
+            let full: Vec<Tag> = layers
+                .iter()
+                .map(|l| {
+                    let mut l = l.as_compound().cloned().unwrap_or_default();
+                    if let Some(Tag::String(p)) = l.get("pattern")
+                        && !p.contains(':')
+                    {
+                        let p = format!("minecraft:{p}");
+                        l.insert("pattern".into(), Tag::String(p));
+                    }
+                    Tag::Compound(l)
+                })
+                .collect();
+            extra.banner_patterns = crate::stack_nbt::banner_layers_from_tag(&Tag::List(full));
+            extra.banner_patterns.len() == layers.len()
+        }
         "custom_data" => {
             let Some(map) = value.as_compound() else {
                 return false;
