@@ -17,6 +17,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 const AUTOSAVE: Duration = Duration::from_secs(30);
+/// Чанков в одной записи: NBT пачки живёт в памяти целиком.
+const SAVE_BATCH: usize = 128;
+/// Как часто выгружать столбцы вдали от игроков.
+const UNLOAD_EVERY: Duration = Duration::from_secs(5);
 
 /// Каталог регионов измерения. Мир 26.3 держит чанки в
 /// `dimensions/minecraft/<измерение>/region`; для оверворлда, если такого
@@ -252,16 +256,23 @@ impl WorldStorage {
                 continue;
             };
             let (_, format) = self.layout(store);
-            let nbt = unsaved
-                .iter()
-                .map(|(pos, c, _)| Ok((*pos, anvil::chunk_to_nbt(c, *pos, format, &self.names)?)))
-                .collect::<Result<Vec<_>, String>>();
-            match nbt.and_then(|nbt| store.store.save(&nbt).map(|()| nbt.len())) {
-                Ok(n) => {
-                    plan.mark_saved_in(dim, unsaved.iter().map(|(pos, _, rev)| (*pos, *rev)));
-                    saved += n;
+            // Пачками: NBT-деревья всех несохранённых чанков разом — сотни
+            // мегабайт пика после полёта, когда правлены тысячи столбцов.
+            for batch in unsaved.chunks(SAVE_BATCH) {
+                let nbt = batch
+                    .iter()
+                    .map(|(pos, c, _)| Ok((*pos, anvil::chunk_to_nbt(c, *pos, format, &self.names)?)))
+                    .collect::<Result<Vec<_>, String>>();
+                match nbt.and_then(|nbt| store.store.save(&nbt).map(|()| nbt.len())) {
+                    Ok(n) => {
+                        plan.mark_saved_in(dim, batch.iter().map(|(pos, _, rev)| (*pos, *rev)));
+                        saved += n;
+                    }
+                    Err(e) => {
+                        errors.push(format!("save chunks {}: {e}", dim.key()));
+                        break;
+                    }
                 }
-                Err(e) => errors.push(format!("save chunks {}: {e}", dim.key())),
             }
         }
         let mobs = plan.unsaved_entities();
@@ -295,6 +306,51 @@ impl WorldStorage {
         } else {
             Err(errors.join("\n"))
         }
+    }
+
+    /// Выгружает столбцы вдали от игроков, дописывая на диск те, которых
+    /// там ещё нет. Под замком сейва: запись не перемешается с автосейвом.
+    pub fn unload(&self, plan: &PlayPlan) -> usize {
+        let _guard = self.save_lock.lock().unwrap();
+        let mut total = 0;
+        for (dim, _, _) in plan.dimension_layouts() {
+            let dims = self.dim(dim.key());
+            let Some(store) = dims.get(dim.key()) else {
+                continue;
+            };
+            let (_, format) = self.layout(store);
+            let write = |cols: &[chunkwake_net::play::UnloadWrite]| {
+                for batch in cols.chunks(SAVE_BATCH) {
+                    let nbt = batch
+                        .iter()
+                        .map(|(pos, c)| Ok((*pos, anvil::chunk_to_nbt(c, *pos, format, &self.names)?)))
+                        .collect::<Result<Vec<_>, String>>()?;
+                    store.store.save(&nbt)?;
+                }
+                Ok(())
+            };
+            total += plan.unload_far(dim, &write);
+        }
+        total
+    }
+
+    /// Выгрузка раз в несколько секунд, в блокирующем пуле.
+    pub fn spawn_unloader(self: &Arc<Self>, plan: Arc<PlayPlan>) -> tokio::task::JoinHandle<()> {
+        let storage = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(UNLOAD_EVERY);
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let (storage, plan) = (storage.clone(), plan.clone());
+                let started = std::time::Instant::now();
+                match tokio::task::spawn_blocking(move || storage.unload(&plan)).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::debug!("unloaded {n} chunks ({} ms)", started.elapsed().as_millis()),
+                    Err(e) => tracing::error!("unload task: {e}"),
+                }
+            }
+        })
     }
 
     /// Автосохранение каждые 30 с в блокирующем пуле (сжатие и диск не держат сеть).

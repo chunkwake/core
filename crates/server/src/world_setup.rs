@@ -209,6 +209,13 @@ pub fn build_play_plan(
             // Свет считает пролив при отправке: здесь только блоки.
             // Тот же генератор отвечает `/locate biome`, не строя чанк.
             let overworld = std::sync::Arc::new(overworld);
+            if std::env::var_os("CHUNKWAKE_MEMSTATS").is_some() {
+                let wg = overworld.clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                    tracing::info!("memstats gen: {}", wg.mem_stats());
+                });
+            }
             let locate_world = overworld.clone();
             let locate: Locate =
                 std::sync::Arc::new(move |name, origin| locate_world.locate_biome(name, origin));

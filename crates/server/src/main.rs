@@ -251,6 +251,21 @@ async fn serve(dir: &Path) -> Result<(), String> {
         Err(error) => tracing::warn!("heightmaps: {error}; внешние карты могут не видеть рельеф"),
     }
     let autosave_task = storage.spawn_autosave(play.clone());
+    let unload_task = storage.spawn_unloader(play.clone());
+    if std::env::var_os("CHUNKWAKE_MEMSTATS").is_some() {
+        let plan = play.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            tracing::info!("memstats world: {}", plan.mem_stats());
+            if std::env::var_os("CHUNKWAKE_MEMSTATS_MI").is_some() {
+                // SAFETY: функции mimalloc без аргументов-указателей кроме null.
+                unsafe {
+                    libmimalloc_sys::mi_collect(true);
+                    libmimalloc_sys::mi_stats_print_out(None, std::ptr::null_mut());
+                }
+            }
+        });
+    }
     let bridge = start_plugins(dir, &props, &play).await;
 
     let mut net = props.net_config(version);
@@ -346,8 +361,10 @@ async fn serve(dir: &Path) -> Result<(), String> {
     }
     tick_task.abort();
     autosave_task.abort();
+    unload_task.abort();
     let _ = tick_task.await;
     let _ = autosave_task.await;
+    let _ = unload_task.await;
     let mut errors = Vec::new();
     if let Some(error) = serve_error {
         errors.push(format!("network: {error}"));

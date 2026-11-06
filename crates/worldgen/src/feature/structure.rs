@@ -871,7 +871,6 @@ impl Structures {
             .find_map(|kind| (kind.name == name).then_some((kind.step, kind.seed_index)))
     }
 
-    #[cfg(test)]
     pub(crate) fn layout_count(&self) -> usize {
         self.cache.lock().unwrap().len()
     }

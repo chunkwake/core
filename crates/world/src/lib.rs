@@ -334,8 +334,6 @@ pub struct Section {
     storage: Storage,
     non_air: u16,
     pub biome: Biomes,
-    /// Закодированный для сети контейнер блоков: клоны делят его, `set` сбрасывает.
-    net: Arc<std::sync::OnceLock<Vec<u8>>>,
 }
 
 impl PartialEq for Section {
@@ -350,7 +348,6 @@ impl Section {
             storage: Storage::Single(state),
             non_air: if state == AIR { 0 } else { 4096 },
             biome: Biomes::Single(biome),
-            net: Default::default(),
         }
     }
 
@@ -422,7 +419,6 @@ impl Section {
             })),
             non_air,
             biome: Biomes::Single(biome),
-            net: Default::default(),
         }
     }
 
@@ -477,7 +473,6 @@ impl Section {
             return old;
         }
         self.non_air = (self.non_air as i32 + (state != AIR) as i32 - (old != AIR) as i32) as u16;
-        self.net = Default::default();
         if let Storage::Single(b) = self.storage {
             self.storage = Storage::Paletted(Arc::new(Paletted {
                 palette: vec![b],
@@ -794,7 +789,41 @@ pub struct ChunkColumn {
 
 const AIR: u32 = 0;
 
+impl Section {
+    /// Куча секции (индексы, палитры, кэш сети) для замера памяти.
+    pub fn heap_bytes(&self) -> usize {
+        let blocks = match &self.storage {
+            Storage::Single(_) => 0,
+            Storage::Paletted(p) => {
+                let idx = match &p.idx {
+                    Indices::Narrow(_) => 4096,
+                    Indices::Wide(_) => 8192,
+                };
+                idx + p.palette.capacity() * 4 + p.counts.capacity() * 2
+            }
+        };
+        let biomes = match &self.biome {
+            Biomes::Single(_) => 0,
+            Biomes::Paletted(p) => 64 + p.palette.capacity() * 4,
+        };
+        blocks + biomes
+    }
+}
+
 impl ChunkColumn {
+    /// Куча столбца для замера памяти: секции, свет, блок-сущности (грубо).
+    pub fn heap_bytes(&self) -> (usize, usize, usize) {
+        let sections: usize = self.sections.iter().map(Section::heap_bytes).sum();
+        let light = self
+            .sky_light
+            .iter()
+            .chain(&self.block_light)
+            .filter(|l| matches!(l, light::LightLayer::Full(_)))
+            .count()
+            * 2048;
+        (sections, light, self.block_entities.len())
+    }
+
     /// Плоский мир: слои снизу вверх `(состояние, толщина)`, начиная с `min_y`.
     pub fn flat(
         layers: &[(u32, usize)],
@@ -1064,15 +1093,10 @@ impl ChunkColumn {
             .reserve(self.sections.len().saturating_mul(2048 + 64));
         for s in &self.sections {
             data.u16(s.non_air() as u16).u16(s.fluids());
-            // Неизменённая секция кодируется один раз: после правки блока
-            // пересобирается только её секция, а не все 24.
-            let bits = self.global_block_bits;
-            let bytes = s.net.get_or_init(|| {
-                let mut w = Writer::new();
-                write_block_container(&mut w, s, 4, bits);
-                w.buf
-            });
-            data.buf.extend_from_slice(bytes);
+            // Кодируется каждый раз, без кэша в секции: кэш держал копию
+            // 2–4 КиБ на секцию у каждого столбца в памяти (треть столбца),
+            // а при подгрузке кадр собирается один раз и сам кэшируется.
+            write_block_container(&mut data, s, 4, self.global_block_bits);
             write_biome_container(&mut data, &s.biome, self.global_biome_bits);
         }
         w.byte_array(&data.buf);

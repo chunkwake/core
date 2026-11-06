@@ -364,6 +364,8 @@ pub struct PlayPlan {
     effect_kinds: survival::EffectKinds,
     /// `wet_sponge`, `bucket`, `water_bucket` для тика печи.
     sponge: Option<(i32, i32, i32)>,
+    /// Наибольший обзор вошедших игроков: радиус, который выгрузка не трогает.
+    view_radius: std::sync::atomic::AtomicI32,
 }
 
 /// Генератор столбца по координатам чанка: `None` — чанк уже отдан.
@@ -563,7 +565,7 @@ pub type LoadedChunk = ((i32, i32), ChunkColumn);
 pub type StoredEntities = ((i32, i32), Compound);
 thread_local! {
     /// Последний загруженный регион, к которому обращался поток: (мир, регион).
-    static LAST_REGION: std::cell::Cell<Option<(usize, (i32, i32))>> =
+    static LAST_REGION: std::cell::Cell<Option<(usize, (i32, i32), u64)>> =
         const { std::cell::Cell::new(None) };
 }
 
@@ -1533,6 +1535,11 @@ pub(crate) struct DimState {
     pois: Mutex<FastMap<(i32, i32), Vec<Poi>>>,
     /// Уже прочитанные с диска регионы.
     regions: Mutex<FastSet<(i32, i32)>>,
+    /// Регионы, из которых выгружали столбцы: блоки читаются заново при
+    /// следующем обращении (сущности — нет, они живут в памяти).
+    evicted: Mutex<FastSet<(i32, i32)>>,
+    /// Растёт при каждой выгрузке: сбрасывает кэш региона в потоках.
+    region_epoch: std::sync::atomic::AtomicU64,
     /// Кадры `level_chunk_with_light`, уже сжатые.
     chunk_frames: Mutex<FastMap<(i32, i32), Frame>>,
     /// Столбцы, снятые из `edited` на время пролива света (`light_ring`).
@@ -1562,6 +1569,8 @@ impl DimState {
             dirty: Mutex::new(FastSet::default()),
             pois: Mutex::new(FastMap::default()),
             regions: Mutex::new(FastSet::default()),
+            evicted: Mutex::new(FastSet::default()),
+            region_epoch: std::sync::atomic::AtomicU64::new(0),
             chunk_frames: Mutex::new(FastMap::default()),
             lent: Mutex::new(FastSet::default()),
             lending: std::sync::atomic::AtomicBool::new(false),
@@ -1945,8 +1954,10 @@ mod minecarts;
 mod mobs;
 mod poi;
 mod stream;
+mod unload;
 
 pub use poi::group_of as poi_group;
+pub use unload::UnloadWrite;
 
 /// Заселение мира для бенчмарков и тестов: мобы и предметы без сокетов.
 #[cfg(feature = "bench")]
@@ -2542,6 +2553,7 @@ impl PlayPlan {
             version_protocol: 0,
             effect_kinds,
             sponge,
+            view_radius: std::sync::atomic::AtomicI32::new(2),
             hub: Hub {
                 codec: FrameCodec {
                     threshold: (compression_threshold >= 0)
@@ -2565,13 +2577,14 @@ impl PlayPlan {
         self.materialize_void(x, z);
         // Под блокировкой — только дешёвый клон (секции за Arc);
         // кодирование и сжатие — вне её.
-        let snapshot = self
-            .dim_state()
-            .edited
-            .read()
-            .unwrap()
-            .get(&(x, z))
-            .cloned();
+        let read = || self.dim_state().edited.read().unwrap().get(&(x, z)).cloned();
+        let mut snapshot = read();
+        // Выгрузка могла снять столбец после проверки региона: регион
+        // помечен, повторный запрос прочтёт его с диска.
+        if snapshot.is_none() && self.terrain().is_some() {
+            self.generate_chunk(x, z);
+            snapshot = read();
+        }
         let edited = snapshot.map(|(c, rev)| (c.encode_body(), rev));
         let (body, rev) = match &edited {
             Some((body, rev)) => (body.as_slice(), *rev),
@@ -3750,11 +3763,16 @@ impl PlayPlan {
         let dim = self.active_dim();
         // Регионы только добавляются: последний известный в потоке — без замка.
         // Измерение входит в ключ: тот же регион Ада — другой файл.
-        let me = (self as *const Self as usize + dim as usize, key);
+        let state = self.dim_state();
+        let epoch = state.region_epoch.load(Ordering::Acquire);
+        let me = (self as *const Self as usize + dim as usize, key, epoch);
         if LAST_REGION.with(|c| c.get() == Some(me)) {
             return;
         }
-        if self.dim_state().regions.lock().unwrap().contains(&key) {
+        let loaded = |s: &DimState| {
+            s.regions.lock().unwrap().contains(&key) && !s.evicted.lock().unwrap().contains(&key)
+        };
+        if loaded(state) {
             LAST_REGION.with(|c| c.set(Some(me)));
             return;
         }
@@ -3762,7 +3780,7 @@ impl PlayPlan {
         // тот же — один раз. Второй проверки под замком достаточно: пока
         // первый загрузчик держал шард, второй ждал и увидит готовый регион.
         let _guard = self.region_load[region_shard(key)].lock().unwrap();
-        if self.dim_state().regions.lock().unwrap().contains(&key) {
+        if loaded(state) {
             LAST_REGION.with(|c| c.set(Some(me)));
             return;
         }
@@ -3770,11 +3788,15 @@ impl PlayPlan {
             Ok(columns) => self.install_region(columns),
             Err(e) => tracing::error!("region {key:?}: {e}"),
         }
-        match source.load_entities_in(dim.key(), key.0, key.1) {
-            Ok(chunks) => self.load_mobs(chunks),
-            Err(e) => tracing::error!("entities {key:?}: {e}"),
+        // Сущности — один раз: после выгрузки столбцов мобы остались в памяти.
+        if !state.regions.lock().unwrap().contains(&key) {
+            match source.load_entities_in(dim.key(), key.0, key.1) {
+                Ok(chunks) => self.load_mobs(chunks),
+                Err(e) => tracing::error!("entities {key:?}: {e}"),
+            }
         }
-        self.dim_state().regions.lock().unwrap().insert(key);
+        state.evicted.lock().unwrap().remove(&key);
+        state.regions.lock().unwrap().insert(key);
     }
 
     /// Вставляет прочитанный регион: только те столбцы, которых ещё нет,
@@ -3790,7 +3812,15 @@ impl PlayPlan {
             .lock()
             .unwrap()
             .extend(columns.iter().map(|(pos, _)| *pos));
+        let mut saved = self.dim_state().saved.lock().unwrap();
         for (pos, c) in columns {
+            // Столбец уже в памяти (правка до загрузки или не выгружен):
+            // диск его не затирает, и живые печи, проигрыватели не регистрируются заново.
+            if world.contains_key(&pos) {
+                continue;
+            }
+            // На диске ровно эта версия: выгрузке писать её незачем.
+            saved.insert(pos, 0);
             hoppers.extend(
                 c.block_entities
                     .iter()
@@ -3818,12 +3848,11 @@ impl PlayPlan {
                     .filter(|(_, be)| be.id == "minecraft:campfire")
                     .map(|(p, _)| *p),
             );
-            if let std::collections::hash_map::Entry::Vacant(e) = world.entry(pos) {
-                fresh.push(pos);
-                e.insert((c, 0));
-                cache.remove(&pos);
-            }
+            fresh.push(pos);
+            world.insert(pos, (c, 0));
+            cache.remove(&pos);
         }
+        drop(saved);
         drop(world);
         drop(cache);
         // Скан точек интереса — уже под замком на запись это значило бы
@@ -4016,6 +4045,36 @@ impl PlayPlan {
     /// Минимум по Y конкретного измерения.
     fn min_y_of(&self, dim: Dimension) -> i32 {
         self.dims.get(&dim).map_or(0, |d| d.min_y)
+    }
+
+    /// Размеры мира в памяти по измерениям (`CHUNKWAKE_MEMSTATS`).
+    pub fn mem_stats(&self) -> String {
+        let mut out = String::new();
+        for (dim, st) in &self.dims {
+            let (n, sec, light, be) = {
+                let w = st.edited.read().unwrap();
+                w.values().fold((0, 0, 0, 0), |(n, s, l, b), (c, _)| {
+                    let (cs, cl, cb) = c.heap_bytes();
+                    (n + 1, s + cs, l + cl, b + cb)
+                })
+            };
+            let (frames, fbytes) = {
+                let f = st.chunk_frames.lock().unwrap();
+                (f.len(), f.values().map(|v| v.len()).sum::<usize>())
+            };
+            let pois = st.pois.lock().unwrap().len();
+            let mobs = st.sim.mobs.lock().unwrap().len();
+            let dropped = st.sim.dropped.lock().unwrap().len();
+            let populated = st.sim.populated.lock().unwrap().len();
+            out += &format!(
+                "{}: columns {n} (sections {} MB, light {} MB, block entities {be}), frames {frames} ({} MB), pois {pois}, mobs {mobs}, items {dropped}, populated {populated}; ",
+                dim.key(),
+                sec >> 20,
+                light >> 20,
+                fbytes >> 20
+            );
+        }
+        out
     }
 
     /// Изменённые с последнего сохранения столбцы: копии и номера правок.
@@ -9456,6 +9515,7 @@ impl PlayPlan {
             (me.pos[2].floor() as i32) >> 4,
         );
         let r_view = login.view_distance;
+        self.view_radius.fetch_max(r_view, Ordering::Relaxed);
         let mut center = (cx, cz);
         let mut stream = stream::ChunkStream::new(center, r_view);
         self.stream_start(conn, &mut stream).await?;

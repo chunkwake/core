@@ -28,6 +28,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 mimalloc = { version = "0.1", default-features = false }
+libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"] }
 tracing-appender = "0.2"
 
 [dev-dependencies]

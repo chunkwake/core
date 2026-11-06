@@ -19,9 +19,13 @@ use std::sync::{Arc, Condvar, Mutex};
 
 /// Блоки чанка по индексу `((y - min_y) * 16 + z) * 16 + x` и его биомы
 /// по клеткам 4×4×4 (`None` — климата нет, мир из одного биома).
+///
+/// Наружу состояния идут `u32`; прото-чанки внутри генератора хранятся
+/// `u16` ([`Proto`]): состояний меньше 65536, а прото-чанков у края мира
+/// тысячи, и `u32` удваивал их память (~393 КБ против ~197 КБ на чанк).
 #[derive(Clone, Default)]
-pub struct Blocks {
-    pub states: Vec<u32>,
+pub struct Blocks<S = u32> {
+    pub states: Vec<S>,
     pub biomes: Option<Vec<u32>>,
     /// Карты `WORLD_SURFACE_WG` и `OCEAN_FLOOR_WG` после рельефа: считаются
     /// при первой декорации, до записей фич.
@@ -42,6 +46,64 @@ pub struct Blocks {
     /// Блоки, которым фича поставила тик (`simple_block` с
     /// `schedule_tick`). Мировые координаты.
     pub block_ticks: Vec<[i32; 3]>,
+}
+
+/// Прото-чанк в области генератора.
+type Proto = Blocks<u16>;
+
+impl Blocks<u32> {
+    /// В хранение области: состояния в `u16`.
+    fn pack(self) -> Proto {
+        let Self {
+            states,
+            biomes,
+            worldgen_heights,
+            live_heights,
+            shape_posts,
+            block_entities,
+            fluid_posts,
+            block_ticks,
+        } = self;
+        Blocks {
+            states: states
+                .into_iter()
+                .map(|s| u16::try_from(s).expect("block state id fits u16"))
+                .collect(),
+            biomes,
+            worldgen_heights,
+            live_heights,
+            shape_posts,
+            block_entities,
+            fluid_posts,
+            block_ticks,
+        }
+    }
+}
+
+impl Proto {
+    /// Отдаваемый чанк: состояния обратно в `u32`.
+    fn unpack(self) -> Blocks {
+        let Self {
+            states,
+            biomes,
+            worldgen_heights,
+            live_heights,
+            shape_posts,
+            block_entities,
+            fluid_posts,
+            block_ticks,
+        } = self;
+        Blocks {
+            states: states.into_iter().map(u32::from).collect(),
+            biomes,
+            worldgen_heights,
+            live_heights,
+            shape_posts,
+            block_entities,
+            fluid_posts,
+            block_ticks,
+        }
+    }
 }
 
 /// Скомпилированная стадия поверхности.
@@ -76,7 +138,7 @@ pub struct Overworld {
 #[derive(Default)]
 struct Area {
     /// Прото-чанки ещё не отданных чанков и их соседей.
-    protos: HashMap<(i32, i32), Blocks>,
+    protos: Protos,
     /// Чанки, чья декорация уже прошла: повторно фичи не ставятся.
     decorated: HashSet<(i32, i32)>,
     /// Отданные чанки. Их прото-чанк больше никому не нужен: область 3×3,
@@ -99,7 +161,165 @@ struct Area {
     active: HashMap<(i32, i32), u32>,
 }
 
+/// Прото-чанки области: нужные сейчас — как есть, давно не нужные — со
+/// сжатыми состояниями.
+///
+/// Тронутый декорацией прото-чанк выбросить нельзя (запись соседа в него
+/// пропала бы), а за полётом их остаётся полоса по обе стороны пути: три
+/// минуты на обзоре 32 — 2300 штук и 430 МБ. Состояния прото-чанка — слои
+/// воздуха, камня и воды, RLE сжимает их в десятки раз.
+#[derive(Default)]
+struct Protos {
+    hot: HashMap<(i32, i32), Proto>,
+    /// `states` пуст, состояния в RLE: пары (состояние, длина − 1).
+    cold: HashMap<(i32, i32), ColdProto>,
+    /// Часы последнего обращения к горячему.
+    used: HashMap<(i32, i32), u64>,
+    /// Растёт на каждый запрос чанка.
+    clock: u64,
+}
+
+impl Protos {
+    fn len(&self) -> usize {
+        self.hot.len() + self.cold.len()
+    }
+
+    fn contains_key(&self, p: &(i32, i32)) -> bool {
+        self.hot.contains_key(p) || self.cold.contains_key(p)
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &(i32, i32)> {
+        self.hot.keys().chain(self.cold.keys())
+    }
+
+    fn insert(&mut self, p: (i32, i32), b: Proto) {
+        self.cold.remove(&p);
+        self.used.insert(p, self.clock);
+        self.hot.insert(p, b);
+    }
+
+    fn insert_if_absent(&mut self, p: (i32, i32), b: Proto) {
+        if !self.contains_key(&p) {
+            self.insert(p, b);
+        }
+    }
+
+    /// Сжатый — обратно в горячие; отметка обращения.
+    fn thaw(&mut self, p: (i32, i32)) {
+        if let Some((mut b, rle)) = self.cold.remove(&p) {
+            b.states = rle_decode(&rle);
+            self.hot.insert(p, b);
+        }
+        if self.hot.contains_key(&p) {
+            self.used.insert(p, self.clock);
+        }
+    }
+
+    fn remove(&mut self, p: &(i32, i32)) -> Option<Proto> {
+        self.thaw(*p);
+        self.used.remove(p);
+        self.hot.remove(p)
+    }
+
+    /// Выбросить, не распаковывая.
+    fn discard(&mut self, p: &(i32, i32)) {
+        self.hot.remove(p);
+        self.cold.remove(p);
+        self.used.remove(p);
+    }
+
+    /// Только горячий: сжатые сначала [`Self::thaw`].
+    fn get(&self, p: &(i32, i32)) -> Option<&Proto> {
+        self.hot.get(p)
+    }
+
+    fn get_mut(&mut self, p: &(i32, i32)) -> Option<&mut Proto> {
+        self.thaw(*p);
+        self.hot.get_mut(p)
+    }
+
+    /// Сжимает горячие, к которым давно не обращались, кроме `pinned`.
+    fn freeze_idle(&mut self, pinned: impl Fn(&(i32, i32)) -> bool) {
+        let clock = self.clock;
+        let idle: Vec<(i32, i32)> = self
+            .used
+            .iter()
+            .filter(|(p, at)| clock - **at > PROTO_FREEZE_AFTER && !pinned(p))
+            .map(|(p, _)| *p)
+            .collect();
+        for p in idle {
+            self.used.remove(&p);
+            if let Some(mut b) = self.hot.remove(&p) {
+                let rle = rle_encode(&b.states);
+                b.states = Vec::new();
+                // Карты высот строятся заново при следующей декорации.
+                b.live_heights = None;
+                self.cold.insert(p, (b, rle));
+            }
+        }
+    }
+
+    /// Куча состояний: горячие и сжатые, байты.
+    fn bytes(&self) -> (usize, usize) {
+        (
+            self.hot.values().map(|b| b.states.capacity() * 2).sum(),
+            self.cold.values().map(|(_, r)| r.capacity() * 2).sum(),
+        )
+    }
+}
+
+/// Прото-чанк без состояний и его состояния в RLE.
+type ColdProto = (Proto, Vec<u16>);
+
+/// Запросов чанка без обращения, после которых прото-чанк сжимается
+/// (на полёте ~160 запросов в секунду — около 13 с).
+const PROTO_FREEZE_AFTER: u64 = 2048;
+
+fn rle_encode(states: &[u16]) -> Vec<u16> {
+    let mut out = Vec::new();
+    let mut it = states.iter().copied();
+    let Some(mut cur) = it.next() else {
+        return out;
+    };
+    let mut run: u16 = 0;
+    for s in it {
+        if s == cur && run < u16::MAX {
+            run += 1;
+        } else {
+            out.extend([cur, run]);
+            cur = s;
+            run = 0;
+        }
+    }
+    out.extend([cur, run]);
+    out.shrink_to_fit();
+    out
+}
+
+fn rle_decode(rle: &[u16]) -> Vec<u16> {
+    let (pairs, _) = rle.as_chunks::<2>();
+    let total: usize = pairs.iter().map(|&[_, n]| n as usize + 1).sum();
+    let mut out = Vec::with_capacity(total);
+    for &[s, n] in pairs {
+        out.extend(std::iter::repeat_n(s, n as usize + 1));
+    }
+    out
+}
+
 impl Area {
+    /// Сжимает давно не нужные прото-чанки (раз в 64 запроса: обход словаря).
+    fn freeze(&mut self) {
+        self.protos.clock += 1;
+        if !self.protos.clock.is_multiple_of(64) {
+            return;
+        }
+        let active = &self.active;
+        let pinned = |p: &(i32, i32)| {
+            active.keys().any(|c| (c.0 - p.0).abs() <= 2 && (c.1 - p.1).abs() <= 2)
+        };
+        self.protos.freeze_idle(pinned);
+    }
+
     /// Выбрасывает прото-чанки сверх предела, но только чистые: ни одна
     /// декорация в них ещё не писала, и построенный заново будет тем же.
     /// Такие копятся за краем прорисовки (область 5×5 запроса шире радиуса)
@@ -129,7 +349,7 @@ impl Area {
             .collect();
         let excess = self.protos.len() - AREA_SOFT_LIMIT / 2;
         for p in clean.into_iter().take(excess) {
-            self.protos.remove(&p);
+            self.protos.discard(&p);
         }
     }
 }
@@ -252,6 +472,32 @@ impl Overworld {
     }
 
     /// Перенесённые и все фичи оверворлда.
+    /// Размеры кэшей генератора для замера памяти (`CHUNKWAKE_MEMSTATS`).
+    pub fn mem_stats(&self) -> String {
+        let (protos, proto_bytes, decorated, done) = {
+            let a = self.area.lock().unwrap();
+            let (hot, cold) = a.protos.bytes();
+            (a.protos.len(), (hot, cold, a.protos.cold.len()), a.decorated.len(), a.done.len())
+        };
+        let heights = self.base_heights.lock().unwrap().len();
+        let (bases, base_bytes) = {
+            let b = self.base_columns.lock().unwrap();
+            (b.len(), b.values().map(|v| v.capacity()).sum::<usize>())
+        };
+        let layouts = self
+            .features
+            .as_ref()
+            .and_then(|f| f.structures.as_ref())
+            .map_or(0, |s| s.layout_count());
+        format!(
+            "protos {protos} (hot {} MB, cold {} of them {} MB), decorated {decorated}, done {done}, base_heights {heights}, base_columns {bases} ({} MB), layouts {layouts}",
+            proto_bytes.0 >> 20,
+            proto_bytes.2,
+            proto_bytes.1 >> 20,
+            base_bytes >> 20
+        )
+    }
+
     pub fn feature_coverage(&self) -> Option<(usize, usize)> {
         self.features.as_ref().map(Features::coverage)
     }
@@ -344,6 +590,7 @@ impl Overworld {
             }
         }
         area.evict();
+        area.freeze();
         drop(area);
         // Раньше здесь на `None` строился полный прото-чанк впустую (16 мс),
         // чтобы вызывающий его выбросил.
@@ -377,10 +624,10 @@ impl Overworld {
             if let Some(p) = mine {
                 area.building.insert(p);
                 drop(area);
-                let b = self.proto_at(p.0, p.1, Some(features));
+                let b = self.proto_at(p.0, p.1, Some(features)).pack();
                 area = self.area.lock().unwrap();
                 area.building.remove(&p);
-                area.protos.entry(p).or_insert(b);
+                area.protos.insert_if_absent(p, b);
                 self.wake.notify_all();
                 continue;
             }
@@ -407,7 +654,8 @@ impl Overworld {
                 let mut chunk = area
                     .protos
                     .remove(&(cx, cz))
-                    .expect("own proto chunk stays in the area");
+                    .expect("own proto chunk stays in the area")
+                    .unpack();
                 feature::bubble_columns(&features.palette, &mut chunk.states);
                 return Some(chunk);
             }
@@ -439,7 +687,7 @@ impl Overworld {
             area.decorated.insert(n);
             area.decorating.insert(n);
             let at = |i: usize| (n.0 + i as i32 % 3 - 1, n.1 + i as i32 / 3 - 1);
-            let mut chunks: [Option<Blocks>; 9] = Default::default();
+            let mut chunks: [Option<Proto>; 9] = Default::default();
             for (i, slot) in chunks.iter_mut().enumerate() {
                 *slot = area.protos.remove(&at(i));
                 if slot.is_some() {
@@ -477,9 +725,9 @@ impl Overworld {
                 let p = (cx + dx, cz + dz);
                 if !area.protos.contains_key(&p) && !area.done.contains(&p) {
                     drop(area);
-                    let b = self.proto_at(p.0, p.1, Some(features));
+                    let b = self.proto_at(p.0, p.1, Some(features)).pack();
                     area = self.area.lock().unwrap();
-                    area.protos.entry(p).or_insert(b);
+                    area.protos.insert_if_absent(p, b);
                 }
             }
         }
@@ -507,6 +755,15 @@ impl Overworld {
         cz: i32,
         own: bool,
     ) {
+        // Сжатые соседи читаются ниже без распаковки — распаковать заранее.
+        area.protos.thaw((cx, cz));
+        if area.protos.get(&(cx, cz)).is_some_and(|c| !c.shape_posts.is_empty()) {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    area.protos.thaw((cx + dx, cz + dz));
+                }
+            }
+        }
         let Some(chunk) = area.protos.get(&(cx, cz)) else {
             return;
         };
@@ -523,7 +780,7 @@ impl Overworld {
             }
             let chunk = area.protos.get(&(x >> 4, z >> 4))?;
             let i = (ry as usize * 16 + (z & 15) as usize) * 16 + (x & 15) as usize;
-            chunk.states.get(i).copied()
+            chunk.states.get(i).copied().map(u32::from)
         };
         let mut updates = crate::feature::mineshaft::fence_updates(&features.palette, &posts, get);
         // Стены `cobblestone_wall` пересобираются тем же проходом.
@@ -542,7 +799,7 @@ impl Overworld {
             }
             let i = (ry as usize * 16 + (z & 15) as usize) * 16 + (x & 15) as usize;
             if let Some(slot) = chunk.states.get_mut(i) {
-                *slot = state;
+                *slot = state as u16;
                 chunk.live_heights = None;
             }
         }
@@ -556,9 +813,9 @@ impl Overworld {
     fn decorate(
         &self,
         features: &Features,
-        mut chunks: [Option<Blocks>; 9],
+        mut chunks: [Option<Proto>; 9],
         (cx, cz): (i32, i32),
-    ) -> [Option<Blocks>; 9] {
+    ) -> [Option<Proto>; 9] {
         for c in chunks.iter_mut().flatten() {
             if c.worldgen_heights.is_none() {
                 let mut maps = [[0; 256]; 2];
@@ -876,7 +1133,7 @@ type Heights = [[i32; 256]; 4];
 /// Регион 3×3 прото-чанков вокруг декорируемого (`WorldGenRegion`).
 struct Region<'a> {
     /// По индексу `(dz + 1) * 3 + dx + 1`.
-    chunks: [Option<Blocks>; 9],
+    chunks: [Option<Proto>; 9],
     cx: i32,
     cz: i32,
     noise: &'a Generator,
@@ -919,7 +1176,7 @@ impl feature::Level for Region<'_> {
     }
     fn get(&self, x: i32, y: i32, z: i32) -> u32 {
         self.index(x, y, z)
-            .and_then(|(s, i)| self.chunks[s].as_ref()?.states.get(i).copied())
+            .and_then(|(s, i)| self.chunks[s].as_ref()?.states.get(i).copied().map(u32::from))
             .unwrap_or(self.air)
     }
     fn set(&mut self, x: i32, y: i32, z: i32, state: u32) {
@@ -929,7 +1186,8 @@ impl feature::Level for Region<'_> {
         let Some(c) = self.chunks[s].as_mut() else {
             return;
         };
-        c.states[i] = state;
+        debug_assert!(state <= u32::from(u16::MAX), "block state id fits u16");
+        c.states[i] = state as u16;
         let column = ((z & 15) * 16 + (x & 15)) as usize;
         let mut heights = self.heights.borrow_mut();
         let Some(maps) = heights[s].as_mut() else {
@@ -977,7 +1235,7 @@ impl feature::Level for Region<'_> {
                 // Биты ещё не найденных карт по `Heightmap::index`.
                 let mut left = (1u8 << Heightmap::ALL.len()) - 1;
                 for ry in (0..self.noise.height).rev() {
-                    let state = c.states[ry as usize * 256 + column];
+                    let state = u32::from(c.states[ry as usize * 256 + column]);
                     for kind in Heightmap::ALL {
                         let bit = 1 << kind.index();
                         if left & bit != 0 && self.palette.hits(kind, state) {
@@ -1053,8 +1311,8 @@ impl feature::Level for Region<'_> {
 }
 
 /// Первый свободный y (от низа мира) над столбцом, ниже `below`.
-fn column_height(
-    states: &[u32],
+fn column_height<S: Copy + Into<u32>>(
+    states: &[S],
     column: usize,
     below: i32,
     kind: Heightmap,
@@ -1062,7 +1320,7 @@ fn column_height(
 ) -> i32 {
     (0..below.max(0) as usize)
         .rev()
-        .find(|&ry| palette.hits(kind, states[ry * 256 + column]))
+        .find(|&ry| palette.hits(kind, states[ry * 256 + column].into()))
         .map_or(0, |ry| ry as i32 + 1)
 }
 
@@ -1178,5 +1436,19 @@ impl Cols<'_> {
         }
         cache.insert((x, z), hit);
         hit
+    }
+}
+
+#[cfg(test)]
+mod rle_tests {
+    #[test]
+    fn rle_roundtrip() {
+        let mut v = vec![0u16; 70_000];
+        v.extend([5, 5, 7, 7, 7, 1]);
+        v.extend(vec![9u16; 30_000]);
+        let rle = super::rle_encode(&v);
+        assert!(rle.len() < 20);
+        assert_eq!(super::rle_decode(&rle), v);
+        assert!(super::rle_decode(&super::rle_encode(&[])).is_empty());
     }
 }
