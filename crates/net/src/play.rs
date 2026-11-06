@@ -563,9 +563,11 @@ fn region_shard((rx, rz): (i32, i32)) -> usize {
 pub type LoadedChunk = ((i32, i32), ChunkColumn);
 /// Чанк `entities/*.mca`: координаты и NBT-корень.
 pub type StoredEntities = ((i32, i32), Compound);
+/// Мир, регион и эпоха выгрузки ([`DimState::region_epoch`]).
+type RegionKey = (usize, (i32, i32), u64);
 thread_local! {
     /// Последний загруженный регион, к которому обращался поток: (мир, регион).
-    static LAST_REGION: std::cell::Cell<Option<(usize, (i32, i32), u64)>> =
+    static LAST_REGION: std::cell::Cell<Option<RegionKey>> =
         const { std::cell::Cell::new(None) };
 }
 
@@ -1948,6 +1950,7 @@ mod boats;
 mod maps;
 mod item_frames;
 mod banners;
+mod block_items;
 mod crafter;
 mod jukebox;
 mod minecarts;
@@ -11165,6 +11168,97 @@ impl PlayPlan {
                                 continue;
                             }
                         }
+                        // `RespawnAnchorBlock.useItemOn` (светокамень) и
+                        // `BeehiveBlock.useItemOn` (ножницы, бутылка): действие
+                        // блока раньше предмета; шифт с предметом блок не трогает.
+                        if (clicked == "minecraft:respawn_anchor" || self.full_hive(u.pos).is_some())
+                            && !state.vitals.dead
+                            && login.spawn.game_mode != 3
+                            && !(sneaking && (state.inv.held().is_some() || state.inv.slots[survival::OFFHAND].is_some()))
+                            && self.player_at(uuid).is_some_and(|(p, _, _)| block_reach(eye_of(p), u.pos, if login.spawn.game_mode == 1 { 5.0 } else { 4.5 }))
+                            && let Some(slot) = Self::hand_index(&state.inv, u.hand)
+                            && let Some(mut held) = state.inv.slots[slot]
+                        {
+                            let creative = login.spawn.game_mode == 1;
+                            let feet = self.player_at(uuid).map_or(me.pos, |p| p.0);
+                            let done = match self.item_name(held.item) {
+                                // `ItemStack.consume`: в творческом светокамень цел.
+                                "minecraft:glowstone" if self.charge_anchor(u.pos) => {
+                                    if !creative {
+                                        state.inv.consume_at(slot);
+                                    }
+                                    true
+                                }
+                                "minecraft:shears" if self.shear_hive(u.pos, feet) => {
+                                    if !creative {
+                                        if self.wear_one(&mut held) {
+                                            state.inv.slots[slot] = None;
+                                            self.break_in_hand(me.entity_id, u.hand != 0);
+                                        } else {
+                                            state.inv.slots[slot] = Some(held);
+                                        }
+                                    }
+                                    true
+                                }
+                                // `shrink(1)` без оглядки на творческий режим.
+                                "minecraft:glass_bottle" if self.bottle_hive(u.pos, Some((uuid, feet))) => {
+                                    if let Some(honey) = self.item_id("minecraft:honey_bottle") {
+                                        if held.count == 1 {
+                                            state.inv.slots[slot] = Some(Stack::new(honey, 1));
+                                        } else {
+                                            state.inv.slots[slot] = Some(Stack { count: held.count - 1, ..held });
+                                            let (changed, left) = state.inv.add(honey, 1, self.max_stack(honey));
+                                            self.send_slots(conn, &mut state.inv, &changed).await?;
+                                            if left > 0 {
+                                                let (_, yaw, pitch) = self.player_at(uuid).unwrap_or((feet, 0.0, 0.0));
+                                                let vel = items::throw_velocity(yaw, pitch, rand::random());
+                                                self.drop_item(items::throw_origin(feet), vel, Stack::new(honey, 1), items::THROW_DELAY);
+                                            }
+                                        }
+                                    }
+                                    self.emit_vibration(feet, "minecraft:fluid_pickup");
+                                    true
+                                }
+                                _ => false,
+                            };
+                            if done {
+                                self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                                continue;
+                            }
+                        }
+                        // `PotionItem.useOn`: бутылка воды по земле сверху или
+                        // сбоку — грязь, в руке остаётся пустая бутылка.
+                        if !state.vitals.dead
+                            && matches!(login.spawn.game_mode, 0 | 1)
+                            && u.face != 0
+                            && !self.spawn_blocked(uuid, u.pos)
+                            && self.player_at(uuid).is_some_and(|(p, _, _)| block_reach(eye_of(p), u.pos, if login.spawn.game_mode == 1 { 5.0 } else { 4.5 }))
+                            && let Some(slot) = Self::hand_index(&state.inv, u.hand)
+                            && let Some(held) = state.inv.slots[slot]
+                            && self.is_water_bottle(held)
+                            && self.soak_to_mud(u.pos, u.pos, true)
+                        {
+                            // `ItemUtils.createFilledResult`: в творческом бутылка
+                            // воды остаётся, пустая добавляется, если её нет.
+                            if let Some(bottle) = self.item_id("minecraft:glass_bottle") {
+                                if login.spawn.game_mode != 1 {
+                                    if held.count == 1 {
+                                        state.inv.slots[slot] = Some(Stack::new(bottle, 1));
+                                    } else {
+                                        state.inv.slots[slot] = Some(Stack { count: held.count - 1, ..held });
+                                        let (changed, _) = state.inv.add(bottle, 1, self.max_stack(bottle));
+                                        self.send_slots(conn, &mut state.inv, &changed).await?;
+                                    }
+                                } else if !state.inv.slots.iter().any(|s| s.is_some_and(|s| s.item == bottle)) {
+                                    let (changed, _) = state.inv.add(bottle, 1, self.max_stack(bottle));
+                                    self.send_slots(conn, &mut state.inv, &changed).await?;
+                                }
+                            }
+                            self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                            continue;
+                        }
                         // `MapItem.useOn` по знамени: метка на карте (у знамени
                         // своего действия нет, шифт не мешает).
                         if banners::banner_color(&clicked).is_some()
@@ -13350,6 +13444,13 @@ impl PlayPlan {
             .map(|i| i as i32)
     }
 
+    /// Компоненты `extra` с зельем `potion` (`minecraft:water`) для `/give`;
+    /// `None` — такого зелья нет.
+    fn with_potion(&self, item: i32, extra: u32, potion: &str) -> Option<u32> {
+        let id = self.survival.potions.iter().position(|n| n == potion)?;
+        Some(self.brewed_stack(Stack { item, count: 1, damage: 0, extra }, item, id as i32).extra)
+    }
+
     fn brewed_stack(&self, mut input: Stack, item: i32, potion: i32) -> Stack {
         let mut patch = Writer::new();
         patch
@@ -15248,7 +15349,38 @@ impl PlayPlan {
             return;
         }
         // Особые действия раздатчика (`DispenseItemBehavior`): вёдра, огниво.
-        if me.name == "minecraft:dispenser" {
+        let mut click = hp::EVENT_DISPENSE;
+        let mut twice = false;
+        let extra = if me.name == "minecraft:dispenser" {
+            self.dispense_extra(&mut me, i, st, front, f)
+        } else {
+            None
+        };
+        if let Some(out) = extra {
+            use block_items::Dispensed;
+            let event = match out {
+                Dispensed::Done => Some(hp::EVENT_DISPENSE),
+                Dispensed::Fail => Some(hp::EVENT_FAIL),
+                Dispensed::Drop => None,
+                Dispensed::DropFail => {
+                    click = hp::EVENT_FAIL;
+                    None
+                }
+                Dispensed::DropTwice => {
+                    twice = true;
+                    None
+                }
+            };
+            if let Some(event) = event {
+                self.cont_put(&me);
+                self.hub.send(None, play::level_event(self.ids.level_event, event, pos, 0, false));
+                self.hub.send(
+                    None,
+                    play::level_event(self.ids.level_event, hp::EVENT_SMOKE, pos, f as i32, false),
+                );
+                return;
+            }
+        } else if me.name == "minecraft:dispenser" {
             match self.dispense_special(&mut me, i, st, front, f) {
                 Some(true) => {
                     self.cont_put(&me);
@@ -15298,14 +15430,14 @@ impl PlayPlan {
         hp::take_one(&mut me.slots, i);
         self.cont_put(&me);
         self.drop_item(at, vel, one, std::time::Duration::ZERO);
-        self.hub.send(
-            None,
-            play::level_event(self.ids.level_event, hp::EVENT_DISPENSE, pos, 0, false),
-        );
-        self.hub.send(
-            None,
-            play::level_event(self.ids.level_event, hp::EVENT_SMOKE, pos, f as i32, false),
-        );
+        let events = [click, hp::EVENT_DISPENSE];
+        for event in &events[..if twice { 2 } else { 1 }] {
+            self.hub.send(None, play::level_event(self.ids.level_event, *event, pos, 0, false));
+            self.hub.send(
+                None,
+                play::level_event(self.ids.level_event, hp::EVENT_SMOKE, pos, f as i32, false),
+            );
+        }
     }
 
     /// Действие раздатчика для предмета в слоте `i`: `Some(true)` — сделано,
@@ -15433,37 +15565,7 @@ impl PlayPlan {
                 });
                 Some(true)
             }
-            // Пустое ведро: зачерпнуть источник перед собой.
-            "minecraft:bucket" => {
-                let f =
-                    fl::state_fluid(&self.survival.placement, front_state).filter(|f| f.source)?;
-                let (filled, sound) = match f.kind {
-                    fl::Kind::Water => ("minecraft:water_bucket", "minecraft:item.bucket.fill"),
-                    fl::Kind::Lava => ("minecraft:lava_bucket", "minecraft:item.bucket.fill_lava"),
-                };
-                let item = self.item_id(filled)?;
-                let full = Stack {
-                    item,
-                    count: 1,
-                    damage: 0,
-                    extra: 0,
-                };
-                if st.count == 1 {
-                    me.slots[i] = Some(full);
-                } else {
-                    me.slots[i] = Some(Stack {
-                        count: st.count - 1,
-                        ..st
-                    });
-                    if crate::hoppers::insert_all(&mut me.slots, full, |_| 1) > 0 {
-                        let c = front.map(|v| v as f64 + 0.5);
-                        self.drop_item(c, [0.0, 0.1, 0.0], full, std::time::Duration::ZERO);
-                    }
-                }
-                self.drain(front);
-                self.block_sound(None, sound, front, 1.0, 1.0);
-                Some(true)
-            }
+            // Пустое ведро и ведро снега — в `dispense_extra`.
             // Стрела (`ProjectileDispenseBehavior`): из центра грани, сила 1.1, разброс 6.
             "minecraft:arrow"
             | "minecraft:snowball"

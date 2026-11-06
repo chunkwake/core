@@ -11,6 +11,9 @@ pub struct ParsedItem {
     pub extra: u32,
     /// `Some` — в аргументе был `minecraft:damage`. `None` — износ не фильтруем.
     pub damage: Option<i32>,
+    /// Зелье из `potion_contents` (`"minecraft:water"` или `{potion:…}`):
+    /// реестра зелий здесь нет, сырой компонент собирает вызывающий.
+    pub potion: Option<String>,
 }
 
 /// `minecraft:stone[minecraft:custom_name="Hi"]` → id и интернированные компоненты.
@@ -18,15 +21,16 @@ pub fn parse_item(token: &str, ids: &HashMap<String, i32>) -> Option<ParsedItem>
     let (name, body) = split_item(token)?;
     let name = super::args::resource_name(name);
     let id = *ids.get(&name)?;
-    let (extra, damage) = if let Some(body) = body {
+    let (extra, damage, potion) = if let Some(body) = body {
         components_of(body)?
     } else {
-        (Extra::default(), None)
+        (Extra::default(), None, None)
     };
     Some(ParsedItem {
         id,
         extra: components::intern(extra),
         damage,
+        potion,
     })
 }
 
@@ -43,10 +47,12 @@ fn split_item(token: &str) -> Option<(&str, Option<&str>)> {
     (!token.is_empty()).then_some((token, None))
 }
 
-fn components_of(body: &str) -> Option<(Extra, Option<i32>)> {
+type Parsed = (Extra, Option<i32>, Option<String>);
+
+fn components_of(body: &str) -> Option<Parsed> {
     let body = body.trim();
     if body.is_empty() {
-        return Some((Extra::default(), None));
+        return Some((Extra::default(), None, None));
     }
     // Старый `{nbt}` целиком — compound компонентов, не список пар `key=value`.
     if body.starts_with('{') {
@@ -69,7 +75,7 @@ fn components_of(body: &str) -> Option<(Extra, Option<i32>)> {
     Some(apply_pairs(pairs))
 }
 
-fn apply_map(pairs: Vec<(String, Tag)>) -> (Extra, Option<i32>) {
+fn apply_map(pairs: Vec<(String, Tag)>) -> Parsed {
     apply_pairs(
         pairs
             .into_iter()
@@ -81,11 +87,23 @@ fn apply_map(pairs: Vec<(String, Tag)>) -> (Extra, Option<i32>) {
     )
 }
 
-fn apply_pairs(pairs: Vec<(String, Tag, String)>) -> (Extra, Option<i32>) {
+fn apply_pairs(pairs: Vec<(String, Tag, String)>) -> Parsed {
     let mut extra = Extra::default();
     let mut damage = None;
+    let mut potion = None;
     let mut rest = Vec::new();
     for (key, value, shown) in pairs {
+        if bare(&key) == "potion_contents" {
+            let name = match &value {
+                Tag::String(n) => Some(n.clone()),
+                Tag::Compound(c) => c.get("potion").and_then(|p| match p {
+                    Tag::String(n) => Some(n.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            };
+            potion = name.map(|n| super::args::resource_name(&n));
+        }
         if !apply_one(&mut extra, &mut damage, &key, value) {
             rest.push(shown);
         }
@@ -93,7 +111,7 @@ fn apply_pairs(pairs: Vec<(String, Tag, String)>) -> (Extra, Option<i32>) {
     if !rest.is_empty() {
         extra.rest = Some(rest.join(","));
     }
-    (extra, damage)
+    (extra, damage, potion)
 }
 
 fn apply_one(extra: &mut Extra, damage: &mut Option<i32>, key: &str, value: Tag) -> bool {
@@ -253,5 +271,18 @@ mod tests {
         let extra = components::get(parsed.extra);
         assert!(extra.custom_name.as_deref().unwrap().contains("Ada"));
         assert!(extra.rest.as_deref().unwrap().contains("potion_contents"));
+        assert_eq!(parsed.potion, None);
+    }
+
+    #[test]
+    fn reads_potion_in_both_forms() {
+        let ids = HashMap::from([("minecraft:potion".into(), 7)]);
+        for token in [
+            r#"minecraft:potion[potion_contents={potion:"minecraft:water"}]"#,
+            r#"potion[minecraft:potion_contents="water"]"#,
+        ] {
+            let parsed = parse_item(token, &ids).unwrap();
+            assert_eq!(parsed.potion.as_deref(), Some("minecraft:water"), "{token}");
+        }
     }
 }

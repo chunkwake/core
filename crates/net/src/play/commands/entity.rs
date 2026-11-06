@@ -348,13 +348,18 @@ pub(super) fn give(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     };
     let name = item.split(['[', '{']).next().unwrap_or(item);
     let name = args::resource_name(name);
+    let extra = parsed
+        .potion
+        .as_deref()
+        .and_then(|p| ctx.plan.with_potion(parsed.id, parsed.extra, p))
+        .unwrap_or(parsed.extra);
     let mut given = 0;
     for target in &targets {
         if ctx.plan.give_item(
             target.uuid,
             parsed.id,
             count,
-            parsed.extra,
+            extra,
             parsed.damage.unwrap_or(0),
         ) {
             given += 1;

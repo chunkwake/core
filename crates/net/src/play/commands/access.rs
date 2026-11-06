@@ -590,6 +590,11 @@ impl PlayPlan {
     /// Ставит блок и будит редстоун; `None` — вне мира, `Some(false)` — не изменился.
     pub(crate) fn place_block(&self, pos: [i32; 3], state: u32) -> Option<bool> {
         let old = self.set_block(pos, state)?;
+        // `LevelChunk.setBlockState`: другой блок уносит блок-сущность
+        // старого (содержимое раздатчика не переходит к новому на том же месте).
+        if self.state_name(old) != self.state_name(state) && self.block_entity(pos).is_some() {
+            self.set_block_entity(pos, None);
+        }
         // `BaseFireBlock.onPlace`: огонь в пустой рамке портала зажигает его.
         // Через это проходит и `/setblock ... fire`, и обычная установка.
         if self.place_lights_portal(pos, state) {
