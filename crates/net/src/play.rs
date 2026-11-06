@@ -121,6 +121,7 @@ struct Ids {
     entity_event: i32,
     sb_container_click: i32,
     sb_rename_item: i32,
+    sb_container_slot_state_changed: i32,
     sb_attack: i32,
     sb_interact: i32,
     hurt_animation: i32,
@@ -1486,6 +1487,8 @@ pub(crate) struct DimSim {
     jukeboxes: Mutex<FastMap<[i32; 3], jukebox::Playing>>,
     /// Проигрыватели с диска, ещё не разобранные тиком.
     pending_jukeboxes: Mutex<Vec<[i32; 3]>>,
+    /// Крафтеры в `crafting=true`: сколько тиков осталось.
+    crafters: Mutex<FastMap<[i32; 3], i32>>,
     /// Чанки, уже заселённые мобами при генерации (или прочитанные из `entities/`).
     populated: Mutex<FastSet<(i32, i32)>>,
     /// Прочитанные с диска мобы: тик заберёт их в `mobs` (регион может читаться из самого тика).
@@ -1664,6 +1667,8 @@ struct Window {
     anvil_cost: i32,
     anvil_materials: i32,
     anvil_only_renaming: bool,
+    /// Последние отправленные данные крафтера (`CrafterMenu`: слоты 0–8, `triggered`).
+    crafter: [i32; 10],
 }
 
 impl Window {
@@ -1865,6 +1870,7 @@ fn container_entity(block: &str) -> Option<&'static str> {
         // Лектор — блок-сущность (`LecternBlockEntity`): в ней лежат книга и
         // страница, по ним считается сигнал компаратора.
         "minecraft:lectern" => Some("minecraft:lectern"),
+        "minecraft:crafter" => Some("minecraft:crafter"),
         _ => None,
     }
 }
@@ -1915,7 +1921,7 @@ fn container_size(block: &str) -> usize {
     match block {
         "minecraft:hopper" => 5,
         "minecraft:brewing_stand" => 5,
-        "minecraft:dispenser" | "minecraft:dropper" => 9,
+        "minecraft:dispenser" | "minecraft:dropper" | "minecraft:crafter" => 9,
         _ => 27,
     }
 }
@@ -1933,6 +1939,7 @@ mod boats;
 mod maps;
 mod item_frames;
 mod banners;
+mod crafter;
 mod jukebox;
 mod minecarts;
 mod mobs;
@@ -2103,6 +2110,8 @@ pub struct SurvivalData {
     /// Меню воронки и раздатчика/выбрасывателя (`generic_3x3`).
     pub menu_hopper: i32,
     pub menu_3x3: i32,
+    /// `crafter_3x3`.
+    pub menu_crafter: i32,
     /// `generic_9x1` … `generic_9x6` для окон плагинов.
     pub menu_rows: [i32; 6],
     /// Состояния сундуков (`ChestBlock`): свойства по состоянию и обратно.
@@ -2377,6 +2386,7 @@ impl PlayPlan {
                 entity_event: cb("entity_event")?,
                 sb_container_click: sb("container_click")?,
                 sb_rename_item: sb("rename_item")?,
+                sb_container_slot_state_changed: sb("container_slot_state_changed")?,
                 sb_attack: sb("attack")?,
                 sb_interact: sb("interact")?,
                 hurt_animation: cb("hurt_animation")?,
@@ -2954,6 +2964,9 @@ impl PlayPlan {
         }
         if name == jukebox::JUKEBOX {
             return Some(self.jukebox_analog(p));
+        }
+        if name == crafter::CRAFTER {
+            return Some(self.crafter_analog(p));
         }
         // `LecternBlock.getAnalogOutputSignal`: страница из блок-сущности.
         if crate::redstone::is_lectern(name) {
@@ -3796,6 +3809,9 @@ impl PlayPlan {
                     .filter(|(_, be)| be.id == jukebox::JUKEBOX)
                     .map(|(p, _)| *p),
             );
+            for (p, be) in c.block_entities.iter().filter(|(_, be)| be.id == crafter::CRAFTER) {
+                self.adopt_crafter(*p, be);
+            }
             self.sim().pending_campfires.lock().unwrap().extend(
                 c.block_entities
                     .iter()
@@ -8878,6 +8894,7 @@ impl PlayPlan {
                 Kind::Loom => "LOOM",
                 Kind::Cartography => "CARTOGRAPHY",
                 Kind::Lectern => "LECTERN",
+                Kind::Crafter(_) => "CRAFTER",
                 Kind::Player => "CRAFTING",
             };
             (ty, plugin_of(w.pos).unwrap_or(-1), n, cur)
@@ -9043,6 +9060,7 @@ impl PlayPlan {
         self.tick_brewing();
         self.tick_campfires();
         self.tick_jukeboxes();
+        self.tick_crafters();
         lap(PH_CAMPFIRES, &mut watch);
         self.tick_copper_chests();
         self.tick_random_blocks();
@@ -9126,6 +9144,7 @@ impl DimSim {
             || !self.pending_campfires.lock().unwrap().is_empty()
             || !self.jukeboxes.lock().unwrap().is_empty()
             || !self.pending_jukeboxes.lock().unwrap().is_empty()
+            || !self.crafters.lock().unwrap().is_empty()
             || !self.hopper_ticks.lock().unwrap().is_empty()
             || !self.redstone_ticks.lock().unwrap().is_empty()
             || !self.fluid_ticks.lock().unwrap().is_empty()
@@ -9673,7 +9692,7 @@ impl PlayPlan {
                                 self.close_with_event(&mut state.inv, &mut window, uuid).await;
                                 next_window = next_window % 100 + 1;
                                 let pos = plugin_pos(pid);
-                                let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false };
+                                let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10] };
                                 w.slots = self.window_slots(&w);
                                 let title = serde_json::from_str(&title).unwrap_or_else(|_| serde_json::json!({"translate": "container.chest"}));
                                 conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &title)).await?;
@@ -9748,8 +9767,24 @@ impl PlayPlan {
                         }
                         Control::ContainerChanged(pos) => {
                             if let Some(w) = window.as_mut().filter(|w| w.positions().contains(&pos)) {
-                                w.slots = self.window_slots(w);
-                                self.send_window(conn, &mut state.inv, Some(w), w.id).await?;
+                                if matches!(w.kind, Kind::Crafter(_)) {
+                                    w.kind = Kind::Crafter(self.crafter_disabled(pos));
+                                    let data = self.crafter_data(pos);
+                                    for (i, (&v, old)) in data.iter().zip(w.crafter.iter_mut()).enumerate() {
+                                        if v != *old {
+                                            *old = v;
+                                            conn.send(&inv::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
+                                        }
+                                    }
+                                }
+                                let slots = self.window_slots(w);
+                                // Крафтер: только данные (слот вкл/выкл, `triggered`) —
+                                // у ванили `broadcastChanges` шлёт лишь изменившееся.
+                                let same = matches!(w.kind, Kind::Crafter(_)) && slots == w.slots;
+                                w.slots = slots;
+                                if !same {
+                                    self.send_window(conn, &mut state.inv, Some(w), w.id).await?;
+                                }
                                 if w.kind == Kind::Lectern {
                                     let (_, page, _) = self.lectern_page_state(pos);
                                     if page != w.data[0] {
@@ -10387,7 +10422,7 @@ impl PlayPlan {
                                     next_window = next_window % 100 + 1;
                                     let menu = if size == 5 { self.survival.menu_hopper } else { self.survival.menu_chest };
                                     let pos = cart_pos(it.entity);
-                                    let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false };
+                                    let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10] };
                                     w.slots = self.window_slots(&w);
                                     conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &title)).await?;
                                     self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
@@ -10492,6 +10527,16 @@ impl PlayPlan {
                         let (left, right) = (r.bool()?, r.bool()?);
                         if in_boat {
                             self.paddle_boat(uuid, left, right);
+                        }
+                        continue;
+                    }
+                    if id == ids.sb_container_slot_state_changed {
+                        // `handleContainerSlotStateChanged`: слот крафтера вкл/выкл.
+                        let (slot, wid, enabled) = (r.var_int()?, r.var_int()?, r.bool()?);
+                        if login.spawn.game_mode != 3
+                            && let Some(w) = window.as_ref().filter(|w| w.id == wid && matches!(w.kind, Kind::Crafter(_)) && self.window_valid(w))
+                        {
+                            self.crafter_set_slot_state(w.pos, slot, enabled);
                         }
                         continue;
                     }
@@ -11117,6 +11162,7 @@ impl PlayPlan {
                             n if is_copper_chest(n) => Some(Kind::Chest(27)),
                             "minecraft:hopper" => Some(Kind::Chest(5)),
                             "minecraft:dispenser" | "minecraft:dropper" => Some(Kind::Chest(9)),
+                            "minecraft:crafter" => Some(Kind::Crafter(self.crafter_disabled(u.pos))),
                             n if furnace_kind(n).is_some() => Some(Kind::Furnace),
                             _ => None,
                         };
@@ -11157,11 +11203,12 @@ impl PlayPlan {
                                 }
                                 Kind::Chest(54) => (self.survival.menu_double_chest, "container.chestDouble"),
                                 Kind::Chest(5) => (self.survival.menu_hopper, "container.hopper"),
+                                Kind::Crafter(_) => (self.survival.menu_crafter, "container.crafter"),
                                 Kind::Chest(9) => (self.survival.menu_3x3, if clicked == "minecraft:dropper" { "container.dropper" } else { "container.dispenser" }),
                                 _ if clicked == "minecraft:barrel" => (self.survival.menu_chest, "container.barrel"),
                                 _ => (self.survival.menu_chest, "container.chest"),
                             };
-                            let mut w = Window { id: next_window, kind, pos, second, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false };
+                            let mut w = Window { id: next_window, kind, pos, second, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10] };
                             w.slots = self.window_slots(&w);
                             conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &serde_json::json!({"translate": title}))).await?;
                             self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
@@ -11195,6 +11242,13 @@ impl PlayPlan {
                             }
                             if kind == Kind::Anvil {
                                 conn.send(&inv::container_set_data(ids.container_set_data, w.id, 0, 0)).await?;
+                            }
+                            if matches!(kind, Kind::Crafter(_)) {
+                                let data = self.crafter_data(pos);
+                                for (i, v) in data.into_iter().enumerate() {
+                                    conn.send(&inv::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
+                                }
+                                w.crafter = data;
                             }
                             window = Some(w);
                             if matches!(kind, Kind::Chest(_)) {
@@ -12156,10 +12210,15 @@ impl PlayPlan {
             if matches!(w.kind, Kind::Chest(_) | Kind::Furnace | Kind::Brewing) {
                 w.slots = self.window_slots(w);
             }
-            (
-                w.kind,
-                w.slots.iter().chain(&inv.slots[9..45]).copied().collect(),
-            )
+            if matches!(w.kind, Kind::Crafter(_)) {
+                w.kind = Kind::Crafter(self.crafter_disabled(w.pos));
+                w.slots = self.window_slots(w);
+            }
+            let mut view: Vec<Slot> = w.slots.iter().chain(&inv.slots[9..45]).copied().collect();
+            if matches!(w.kind, Kind::Crafter(_)) {
+                view.push(self.crafter_result(&w.slots));
+            }
+            (w.kind, view)
         } else {
             return (Vec::new(), false);
         };
@@ -12174,6 +12233,7 @@ impl PlayPlan {
             Kind::Player => 2,
             Kind::Crafting => 3,
             Kind::Chest(_)
+            | Kind::Crafter(_)
             | Kind::Furnace
             | Kind::Brewing
             | Kind::Enchanting
@@ -12228,6 +12288,8 @@ impl PlayPlan {
                 slots[2] = self.cartography_result(slots[0], slots[1]);
             } else if kind == Kind::Stonecutter {
                 slots[1] = self.stone_result(slots[0], stone_selection);
+            } else if matches!(kind, Kind::Crafter(_)) {
+                slots[45] = self.crafter_result(&slots[..9]);
             } else if size > 0 {
                 slots[0] = self.craft_result(&slots[1..=size * size], size);
             }
@@ -12481,7 +12543,7 @@ impl PlayPlan {
                     w.anvil_materials = anvil_after.materials;
                     w.anvil_only_renaming = anvil_after.only_renaming;
                 }
-                if matches!(kind, Kind::Chest(_)) && w.slots[..] != view[..n] {
+                if matches!(kind, Kind::Chest(_) | Kind::Crafter(_)) && w.slots[..] != view[..n] {
                     w.slots.copy_from_slice(&view[..n]);
                     self.save_window(w, me);
                 }
@@ -12496,7 +12558,7 @@ impl PlayPlan {
                     );
                 }
                 w.slots.copy_from_slice(&view[..n]);
-                inv.slots[9..45].copy_from_slice(&view[n..]);
+                inv.slots[9..45].copy_from_slice(&view[n..n + 36]);
             }
             None => inv.slots.copy_from_slice(&view),
         }
@@ -12736,6 +12798,7 @@ impl PlayPlan {
             Kind::Stonecutter => self
                 .block(w.pos)
                 .is_some_and(|s| self.state_name(s) == "minecraft:stonecutter"),
+            Kind::Crafter(_) => self.block(w.pos).is_some_and(|s| self.state_name(s) == crafter::CRAFTER),
             _ => self
                 .block(w.pos)
                 .is_some_and(|s| self.state_name(s) == "minecraft:crafting_table"),
@@ -12921,7 +12984,7 @@ impl PlayPlan {
                         e.viewers.retain(|v| *v != uuid);
                     }
                 }
-                Kind::Brewing => {}
+                Kind::Brewing | Kind::Crafter(_) => {}
                 Kind::Chest(_) => {
                     let positions = w.positions();
                     for (pos, n) in self.container_viewers(uuid, &positions, false) {
@@ -12955,6 +13018,14 @@ impl PlayPlan {
         };
         let view: Vec<Slot> = if w.kind == Kind::Lectern {
             w.slots.clone()
+        } else if matches!(w.kind, Kind::Crafter(_)) {
+            // Результат крафтера — после инвентаря (слот 45).
+            w.slots
+                .iter()
+                .chain(&inv.slots[9..45])
+                .copied()
+                .chain(std::iter::once(self.crafter_result(&w.slots)))
+                .collect()
         } else {
             w.slots.iter().chain(&inv.slots[9..45]).copied().collect()
         };
@@ -12980,7 +13051,7 @@ impl PlayPlan {
             Kind::Furnace => self
                 .with_furnace(w.pos, |e| e.f.slots.to_vec())
                 .unwrap_or_else(|| vec![None; 3]),
-            Kind::Brewing => self.container_items(w.pos),
+            Kind::Brewing | Kind::Crafter(_) => self.container_items(w.pos),
             Kind::Crafting if w.slots.is_empty() => vec![None; 10],
             Kind::Enchanting if w.slots.is_empty() => vec![None; 2],
             Kind::Grindstone if w.slots.is_empty() => vec![None; 3],
@@ -14005,6 +14076,8 @@ impl PlayPlan {
             self.check_piston(pos);
         } else if name == "minecraft:dispenser" || name == "minecraft:dropper" {
             self.dispense(pos);
+        } else if name == crafter::CRAFTER {
+            self.crafter_craft(pos);
         } else if rs::is_observer(&name) {
             // Импульс: включиться на 2 тика, затем погаснуть.
             let on = pl.prop(state, "powered") != Some("true");
@@ -14301,6 +14374,23 @@ impl PlayPlan {
                     if self.prime_tnt(p, crate::tnt::FUSE) {
                         cache.borrow_mut().clear();
                         next.extend_from_slice(&rs::around(p));
+                    }
+                } else if name == crafter::CRAFTER {
+                    // `CrafterBlock.neighborChanged`: фронт — крафт через 4
+                    // тика, спад гасит `triggered` и `crafting`.
+                    let powered = w.powered(p);
+                    let triggered = pl.prop(s, "triggered") == Some("true");
+                    if powered && !triggered {
+                        self.schedule(p, crate::hoppers::DISPENSE_DELAY);
+                        if let Some(n) = pl.with_prop(s, "triggered", "true") {
+                            put(p, n);
+                        }
+                        self.crafter_set_triggered(p, true);
+                    } else if !powered && triggered {
+                        if let Some(n) = pl.with_prop(s, "triggered", "false").and_then(|n| pl.with_prop(n, "crafting", "false")) {
+                            put(p, n);
+                        }
+                        self.crafter_set_triggered(p, false);
                     }
                 } else if name == "minecraft:dispenser" || name == "minecraft:dropper" {
                     // Фронт сигнала (и квази-связность сверху) — выдать через 4 тика.
@@ -14819,6 +14909,45 @@ impl PlayPlan {
         }
     }
 
+    /// Куда в контейнер `t` с грани `face` можно положить `st`
+    /// (`canPlaceItemThroughFace`/`canPlaceItem`) и сколько в слоте предела.
+    fn insert_target(&self, t: &Cont, st: Stack, face: usize) -> (Vec<usize>, i32) {
+        use crate::hoppers as hp;
+        let max = self.max_stack(st.item);
+        if t.name == jukebox::JUKEBOX {
+            // `canPlaceItem`: пластинка и только в пустой.
+            let ok = t.slots[0].is_none() && self.is_jukebox_disc(Some(st));
+            return (if ok { vec![0] } else { Vec::new() }, 1);
+        }
+        if t.name == crafter::CRAFTER {
+            return (self.crafter_allowed(t.parts[0], &t.slots, st), max);
+        }
+        if t.name == "minecraft:brewing_stand" {
+            let item = self.item_name(st.item);
+            let bottle = matches!(
+                item,
+                "minecraft:potion" | "minecraft:splash_potion" | "minecraft:lingering_potion" | "minecraft:glass_bottle"
+            );
+            let slots = if face == 1 {
+                if self.survival.brewing.recipes.keys().any(|key| key.2 == st.item) {
+                    vec![3]
+                } else {
+                    Vec::new()
+                }
+            } else if face == 0 {
+                Vec::new()
+            } else if item == "minecraft:blaze_powder" {
+                vec![4]
+            } else if bottle {
+                (0..3).collect()
+            } else {
+                Vec::new()
+            };
+            return (slots, if bottle { 1 } else { max });
+        }
+        (hp::insert_slots(t.furnace, t.slots.len(), face, self.is_fuel(st.item)), max)
+    }
+
     /// `HopperBlockEntity.tryMoveItems`: отдать один предмет вперёд, взять один
     /// сверху (из контейнера или с земли). `None` — воронки здесь больше нет.
     fn hopper_step(&self, p: [i32; 3]) -> Option<bool> {
@@ -14832,7 +14961,6 @@ impl PlayPlan {
             return Some(false);
         }
         let mut me = self.cont_get(p)?;
-        let max = |item: i32| self.max_stack(item);
         let mut moved = false;
         let f = pl
             .prop(s, "facing")
@@ -14844,58 +14972,8 @@ impl PlayPlan {
         {
             for i in 0..me.slots.len() {
                 let Some(st) = me.slots[i] else { continue };
-                let allowed = if t.name == jukebox::JUKEBOX {
-                    // `canPlaceItem`: пластинка и только в пустой.
-                    if t.slots[0].is_none() && self.is_jukebox_disc(Some(st)) { vec![0] } else { Vec::new() }
-                } else if t.name == "minecraft:brewing_stand" {
-                    let item = self.item_name(st.item);
-                    if f ^ 1 == 1 {
-                        if self
-                            .survival
-                            .brewing
-                            .recipes
-                            .keys()
-                            .any(|key| key.2 == st.item)
-                        {
-                            vec![3]
-                        } else {
-                            Vec::new()
-                        }
-                    } else if f ^ 1 == 0 {
-                        Vec::new()
-                    } else if item == "minecraft:blaze_powder" {
-                        vec![4]
-                    } else if matches!(
-                        item,
-                        "minecraft:potion"
-                            | "minecraft:splash_potion"
-                            | "minecraft:lingering_potion"
-                            | "minecraft:glass_bottle"
-                    ) {
-                        (0..3).collect()
-                    } else {
-                        Vec::new()
-                    }
-                } else {
-                    hp::insert_slots(t.furnace, t.slots.len(), f ^ 1, self.is_fuel(st.item))
-                };
-                let slot_max = |item| {
-                    if t.name == jukebox::JUKEBOX {
-                        1
-                    } else if t.name == "minecraft:brewing_stand"
-                        && matches!(
-                            self.item_name(item),
-                            "minecraft:glass_bottle"
-                                | "minecraft:potion"
-                                | "minecraft:splash_potion"
-                                | "minecraft:lingering_potion"
-                        )
-                    {
-                        1
-                    } else {
-                        max(item)
-                    }
-                };
+                let (allowed, cap) = self.insert_target(&t, st, f ^ 1);
+                let slot_max = |_: i32| cap;
                 let mut trial = t.slots.clone();
                 if !hp::insert_one(&mut trial, &allowed, st, slot_max) {
                     continue;
@@ -15072,13 +15150,9 @@ impl PlayPlan {
         if me.name == "minecraft:dropper"
             && let Some(mut t) = self.cont_get(front)
         {
-            let allowed = if t.name == jukebox::JUKEBOX {
-                if t.slots[0].is_none() && self.is_jukebox_disc(Some(st)) { vec![0] } else { Vec::new() }
-            } else {
-                hp::insert_slots(t.furnace, t.slots.len(), f ^ 1, self.is_fuel(st.item))
-            };
+            let (allowed, cap) = self.insert_target(&t, st, f ^ 1);
             let mut trial = t.slots.clone();
-            if hp::insert_one(&mut trial, &allowed, one, |it| self.max_stack(it)) {
+            if hp::insert_one(&mut trial, &allowed, one, |_| cap) {
                 if self.move_event(&me, &t, true, one).is_some() {
                     t.slots = trial;
                     hp::take_one(&mut me.slots, i);
@@ -16143,6 +16217,7 @@ impl PlayPlan {
             && !name.ends_with("dropper")
             && !name.ends_with("brewing_stand")
             && !name.ends_with("shulker_box")
+            && name != "minecraft:crafter"
         {
             return None;
         }

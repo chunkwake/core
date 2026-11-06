@@ -454,6 +454,17 @@ impl Placement {
             };
             self.set(&mut s, "facing", DIRS[dir]);
         }
+        // `CrafterBlock.getStateForPlacement`: лицом к игроку, верх — вверх,
+        // а лицом вверх/вниз — по горизонтали взгляда.
+        if self.prop(s, "orientation").is_some() && name == "minecraft:crafter" {
+            let front = opposite(c.looking());
+            let top = match front {
+                DOWN => opposite(player),
+                UP => player,
+                _ => UP,
+            };
+            self.set(&mut s, "orientation", &format!("{}_{}", DIRS[front], DIRS[top]));
+        }
         // Костёр ставится горящим (`CampfireBlock.getStateForPlacement`).
         if name == "minecraft:campfire" || name == "minecraft:soul_campfire" {
             self.set(&mut s, "lit", "true");

@@ -43,6 +43,9 @@ pub enum Kind {
     Brewing,
     /// `CartographyTableMenu`: 0 карта, 1 бумага/карта/стекло, 2 результат, 3–29, 30–38.
     Cartography,
+    /// `CrafterMenu`: 0–8 сетка, 9–44 инвентарь, 45 результат (только показ).
+    /// Бит `i` — слот `i` выключен (`CrafterSlot.mayPlace`).
+    Crafter(u16),
 }
 
 impl Kind {
@@ -51,7 +54,7 @@ impl Kind {
             Kind::Player => 46,
             Kind::Lectern => 1,
             Kind::Chest(n) => n + 36,
-            Kind::Crafting => 46,
+            Kind::Crafting | Kind::Crafter(_) => 46,
             Kind::Furnace | Kind::Grindstone | Kind::Anvil | Kind::Cartography => 39,
             Kind::Brewing => 41,
             Kind::Smithing | Kind::Loom => 40,
@@ -66,6 +69,7 @@ impl Kind {
             Kind::Lectern => 1,
             Kind::Chest(n) => n,
             Kind::Crafting => 10,
+            Kind::Crafter(_) => 9,
             Kind::Furnace | Kind::Grindstone | Kind::Anvil | Kind::Cartography => 3,
             Kind::Brewing => 5,
             Kind::Smithing | Kind::Loom => 4,
@@ -80,6 +84,7 @@ impl Kind {
             Kind::Furnace | Kind::Grindstone | Kind::Anvil | Kind::Cartography => Some(2),
             Kind::Smithing | Kind::Loom => Some(3),
             Kind::Stonecutter => Some(1),
+            Kind::Crafter(_) => Some(45),
             Kind::Chest(_) | Kind::Enchanting | Kind::Lectern | Kind::Brewing => None,
         }
     }
@@ -192,6 +197,11 @@ impl Menu<'_> {
         if self.kind == Kind::Stonecutter && slot == 0 {
             return (self.rules.smeltable)(s.item);
         }
+        if let Kind::Crafter(off) = self.kind
+            && slot < 9
+        {
+            return off & (1 << slot) == 0;
+        }
         if self.kind == Kind::Smithing && slot < 3 {
             return (self.rules.smithing_accept)(slot, s.item);
         }
@@ -228,6 +238,10 @@ impl Menu<'_> {
         }
         let size = self.slots.len();
         let index = (slot >= 0 && (slot as usize) < size).then_some(slot as usize);
+        // Результат крафтера (`NonInteractiveResultSlot`): ни взять, ни положить.
+        if matches!(self.kind, Kind::Crafter(_)) && index == Some(45) && mode != QUICK_CRAFT {
+            return thrown;
+        }
         if mode == QUICK_CRAFT {
             self.quick_craft(index, button);
             return thrown;
@@ -580,6 +594,14 @@ impl Menu<'_> {
                     } else {
                         self.move_to(&mut s, inv..hotbar, false);
                     }
+                }
+            }
+            Kind::Crafter(_) => {
+                // `CrafterMenu.quickMoveStack`.
+                if i < inv {
+                    self.move_to(&mut s, inv..end, true);
+                } else {
+                    self.move_to(&mut s, 0..inv, false);
                 }
             }
             Kind::Crafting => {

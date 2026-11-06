@@ -714,6 +714,7 @@ fn survival_data(
         menu_double_chest: menu("minecraft:generic_9x6")?,
         menu_hopper: menu("minecraft:hopper")?,
         menu_3x3: menu("minecraft:generic_3x3")?,
+        menu_crafter: menu("minecraft:crafter_3x3")?,
         menu_rows: [
             menu("minecraft:generic_9x1")?,
             menu("minecraft:generic_9x2")?,
