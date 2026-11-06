@@ -1135,6 +1135,10 @@ pub struct PlayerSave {
     pub spawn: Option<[i32; 3]>,
     /// `SpawnForced`: команда назначает принудительную точку, кровать — нет.
     pub spawn_forced: bool,
+    /// Измерение точки возрождения (`respawn.dimension`); `None` — оверворлд.
+    pub spawn_dimension: Option<String>,
+    /// Взгляд в точке возрождения (`respawn.yaw`/`pitch`).
+    pub spawn_angle: [f32; 2],
     /// `seenCredits`: титры Края уже показаны.
     pub seen_credits: bool,
     /// `Dimension`: ключ измерения игрока; `None` — оверворлд.
@@ -1185,6 +1189,8 @@ impl PlayerState {
             xp: self.xp,
             spawn: None,
             spawn_forced: true,
+            spawn_dimension: None,
+            spawn_angle: [0.0; 2],
             seen_credits: false,
             dimension: None,
             slots: (0..SLOTS)

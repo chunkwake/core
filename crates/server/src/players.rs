@@ -176,22 +176,66 @@ pub fn to_nbt(s: &PlayerSave, data_version: i32, names: &[String]) -> Compound {
         ("Inventory".into(), Tag::List(inventory)),
         ("equipment".into(), Tag::Compound(equipment)),
     ]);
+    // `ServerPlayer.RespawnConfig.CODEC`: `GlobalPos` + взгляд + `forced`.
     if let Some([x, y, z]) = s.spawn {
-        root.insert("SpawnX".into(), Tag::Int(x));
-        root.insert("SpawnY".into(), Tag::Int(y));
-        root.insert("SpawnZ".into(), Tag::Int(z));
-        root.insert(
-            "SpawnForced".into(),
-            Tag::Byte(u8::from(s.spawn_forced) as i8),
-        );
+        let dimension = s
+            .spawn_dimension
+            .clone()
+            .unwrap_or_else(|| "minecraft:overworld".into());
+        let respawn = Compound::from([
+            ("dimension".into(), Tag::String(dimension)),
+            ("pos".into(), Tag::IntArray(vec![x, y, z])),
+            ("yaw".into(), Tag::Float(s.spawn_angle[0])),
+            ("pitch".into(), Tag::Float(s.spawn_angle[1])),
+            ("forced".into(), Tag::Byte(u8::from(s.spawn_forced) as i8)),
+        ]);
+        root.insert("respawn".into(), Tag::Compound(respawn));
     }
     root.insert("seenCredits".into(), Tag::Byte(u8::from(s.seen_credits) as i8));
     root
 }
 
-fn spawn_from(root: &Compound) -> Option<[i32; 3]> {
+/// Точка возрождения из сохранения.
+struct SavedSpawn {
+    pos: Option<[i32; 3]>,
+    forced: bool,
+    dimension: Option<String>,
+    angle: [f32; 2],
+}
+
+/// `respawn` (26.3) или старые `SpawnX`/`SpawnY`/`SpawnZ`/`SpawnForced`.
+fn spawn_from(root: &Compound) -> SavedSpawn {
+    if let Some(r) = root.get("respawn").and_then(Tag::as_compound) {
+        let pos = match r.get("pos") {
+            Some(Tag::IntArray(v)) if v.len() == 3 => Some([v[0], v[1], v[2]]),
+            _ => None,
+        };
+        let f = |k: &str| match r.get(k) {
+            Some(Tag::Float(v)) => *v,
+            _ => 0.0,
+        };
+        let dimension = match r.get("dimension") {
+            Some(Tag::String(d)) if d != "minecraft:overworld" => Some(d.clone()),
+            _ => None,
+        };
+        return SavedSpawn {
+            pos,
+            forced: r.get("forced").and_then(Tag::as_i64).is_some_and(|v| v != 0),
+            dimension,
+            angle: [f("yaw"), f("pitch")],
+        };
+    }
     let n = |k: &str| root.get(k).and_then(Tag::as_i64).map(|v| v as i32);
-    Some([n("SpawnX")?, n("SpawnY")?, n("SpawnZ")?])
+    let pos = (|| Some([n("SpawnX")?, n("SpawnY")?, n("SpawnZ")?]))();
+    SavedSpawn {
+        pos,
+        forced: root
+            .get("SpawnForced")
+            .and_then(Tag::as_i64)
+            .is_none_or(|v| v != 0),
+        dimension: None,
+        angle: [0.0; 2],
+    }
 }
 
 pub fn from_nbt(root: &Compound, ids: &HashMap<String, i32>) -> Option<PlayerSave> {
@@ -234,6 +278,7 @@ pub fn from_nbt(root: &Compound, ids: &HashMap<String, i32>) -> Option<PlayerSav
         }
     }
     slots.sort_by_key(|&(i, _)| i);
+    let spawn = spawn_from(root);
     Some(PlayerSave {
         pos,
         yaw,
@@ -254,11 +299,10 @@ pub fn from_nbt(root: &Compound, ids: &HashMap<String, i32>) -> Option<PlayerSav
             .filter(|m| (0..4).contains(m))
             .map(|m| m as u8),
         effects: Vec::new(),
-        spawn: spawn_from(root),
-        spawn_forced: root
-            .get("SpawnForced")
-            .and_then(Tag::as_i64)
-            .is_none_or(|v| v != 0),
+        spawn: spawn.pos,
+        spawn_forced: spawn.forced,
+        spawn_dimension: spawn.dimension,
+        spawn_angle: spawn.angle,
         seen_credits: root
             .get("seenCredits")
             .and_then(Tag::as_i64)
@@ -319,6 +363,8 @@ mod tests {
             },
             spawn: Some([8, 64, -2]),
             spawn_forced: false,
+            spawn_dimension: Some("minecraft:the_nether".into()),
+            spawn_angle: [90.0, 0.0],
             seen_credits: true,
             dimension: Some("minecraft:the_nether".into()),
             slots: vec![
@@ -374,14 +420,27 @@ mod tests {
         let bytes = nbt::write_root(&root);
         let back = from_nbt(&nbt::read_root(&bytes).unwrap(), &ids).unwrap();
         assert_eq!(back, s);
-        assert_eq!(root["SpawnForced"].as_i64(), Some(0));
+        let respawn = root["respawn"].as_compound().unwrap();
+        assert_eq!(respawn["forced"].as_i64(), Some(0));
+        assert_eq!(respawn["pos"], Tag::IntArray(vec![8, 64, -2]));
+        assert_eq!(respawn["dimension"], Tag::String("minecraft:the_nether".into()));
         let mut forced = s.clone();
         forced.spawn_forced = true;
+        forced.spawn_dimension = None;
         let forced_root = to_nbt(&forced, 4000, &names);
-        assert_eq!(forced_root["SpawnForced"].as_i64(), Some(1));
+        let respawn = forced_root["respawn"].as_compound().unwrap();
+        assert_eq!(respawn["forced"].as_i64(), Some(1));
+        assert_eq!(respawn["dimension"], Tag::String("minecraft:overworld".into()));
         assert_eq!(from_nbt(&forced_root, &ids), Some(forced));
+        // Старые ключи до 1.21.5: без `SpawnForced` точка принудительная.
         let mut legacy = root.clone();
-        legacy.remove("SpawnForced");
-        assert!(from_nbt(&legacy, &ids).unwrap().spawn_forced);
+        legacy.remove("respawn");
+        legacy.insert("SpawnX".into(), Tag::Int(8));
+        legacy.insert("SpawnY".into(), Tag::Int(64));
+        legacy.insert("SpawnZ".into(), Tag::Int(-2));
+        let old = from_nbt(&legacy, &ids).unwrap();
+        assert_eq!(old.spawn, Some([8, 64, -2]));
+        assert!(old.spawn_forced);
+        assert_eq!(old.spawn_dimension, None);
     }
 }

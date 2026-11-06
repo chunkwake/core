@@ -707,7 +707,8 @@ pub(super) fn rotate(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     )
 }
 
-/// `/spawnpoint [targets] [pos] [angle]`.
+/// `/spawnpoint [targets] [pos] [rotation]` (`SetSpawnCommand`): точка
+/// принудительная, в измерении источника; без позиции — блок цели.
 pub(super) fn spawnpoint(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     let mut input = call.t();
     let token = input.word().unwrap_or("@s");
@@ -718,36 +719,58 @@ pub(super) fn spawnpoint(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     let Some(first) = targets.first().cloned() else {
         return no_targets();
     };
+    let base = (first.yaw, first.pitch);
     let pos = match (input.word(), input.word(), input.word()) {
         (Some(x), Some(y), Some(z)) => {
             let Some(c) = args::coords3(x, y, z) else {
-                return usage("/spawnpoint [targets] [pos] [angle]");
+                return usage("/spawnpoint [targets] [pos] [rotation]");
             };
-            Some(args::block_pos(
-                c,
-                first.pos,
-                args::Basis::from_rotation(first.yaw, first.pitch),
-            ))
+            args::block_pos(c, first.pos, args::Basis::from_rotation(base.0, base.1))
         }
-        _ => None,
+        (None, _, _) => first.pos.map(|v| v.floor() as i32),
+        _ => return usage("/spawnpoint [targets] [pos] [rotation]"),
     };
+    // `Mth.wrapDegrees(yaw)`, `clamp(pitch, -90, 90)`; без угла — ноль.
+    let angle = match (input.word(), input.word()) {
+        (Some(y), Some(p)) => match args::rotation(y, p, base) {
+            Some((y, p)) => [wrap_degrees(y), p.clamp(-90.0, 90.0)],
+            None => return usage("/spawnpoint [targets] [pos] [rotation]"),
+        },
+        (None, _) => [0.0; 2],
+        _ => return usage("/spawnpoint [targets] [pos] [rotation]"),
+    };
+    let dim = ctx.plan.active_dimension();
     for target in &targets {
-        ctx.plan.set_player_spawn(target.uuid, pos);
+        ctx.plan.set_player_spawn(target.uuid, Some(pos), angle, dim);
     }
-    match pos {
-        Some([x, y, z]) => Outcome::Feedback(translate(
-            "commands.spawnpoint.success.single",
-            vec![
-                name_of(&targets),
-                Value::from(x),
-                Value::from(y),
-                Value::from(z),
-            ],
-        )),
-        None => Outcome::Feedback(translate(
-            "commands.spawnpoint.success.single",
-            vec![name_of(&targets)],
-        )),
+    let [x, y, z] = pos;
+    let mut args = vec![
+        Value::from(x),
+        Value::from(y),
+        Value::from(z),
+        Value::from(angle[0]),
+        Value::from(angle[1]),
+        Value::from(dim.key()),
+    ];
+    let key = if let [one] = targets.as_slice() {
+        args.push(json!({"text": one.name}));
+        "commands.spawnpoint.success.single"
+    } else {
+        args.push(Value::from(targets.len()));
+        "commands.spawnpoint.success.multiple"
+    };
+    Outcome::Feedback(translate(key, args))
+}
+
+/// `Mth.wrapDegrees`: угол в `[-180, 180)`.
+fn wrap_degrees(a: f32) -> f32 {
+    let w = a % 360.0;
+    if w >= 180.0 {
+        w - 360.0
+    } else if w < -180.0 {
+        w + 360.0
+    } else {
+        w
     }
 }
 

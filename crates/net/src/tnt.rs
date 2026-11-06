@@ -58,10 +58,12 @@ pub fn affected(
                 let mut strength = power * (0.7 + random() * 0.6);
                 while strength > 0.0 {
                     let block = pos.map(|v| v.floor() as i32);
+                    // Воздух без сопротивления тоже попадает в список: по нему
+                    // `ServerExplosion.createFire` ставит огонь.
                     if let Some(r) = resistance(block) {
                         strength -= (r + 0.3) * 0.3;
-                        if strength > 0.0 { out.insert(block); }
                     }
+                    if strength > 0.0 { out.insert(block); }
                     strength -= 0.225;
                     for i in 0..3 { pos[i] += dir[i]; }
                 }

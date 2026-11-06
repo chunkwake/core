@@ -470,9 +470,13 @@ fn find_bed_spawn(
     None
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `ServerPlayer.RespawnConfig`: блок (кровать, якорь) или точка `/spawnpoint`.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SpawnPoint {
+    pub(crate) dim: Dimension,
     pub(crate) pos: [i32; 3],
+    /// `yaw`, `pitch` из `RespawnData`.
+    pub(crate) angle: [f32; 2],
     pub(crate) forced: bool,
 }
 /// Состав, по которому посчитан набор симуляции: радиус, чанки игроков, форс.
@@ -1956,6 +1960,7 @@ mod jukebox;
 mod minecarts;
 mod mobs;
 mod poi;
+mod respawn;
 mod stream;
 mod unload;
 
@@ -4154,11 +4159,17 @@ impl PlayPlan {
             Some(spawn) => {
                 save.spawn = spawn.map(|s| s.pos);
                 save.spawn_forced = spawn.is_none_or(|s| s.forced);
+                save.spawn_dimension = spawn
+                    .filter(|s| s.dim != Dimension::Overworld)
+                    .map(|s| s.dim.key().to_owned());
+                save.spawn_angle = spawn.map_or([0.0; 2], |s| s.angle);
             }
             None => {
                 if let Some(prev) = self.player_saves.lock().unwrap().get(&uuid) {
                     save.spawn = prev.spawn;
                     save.spawn_forced = prev.spawn_forced;
+                    save.spawn_dimension = prev.spawn_dimension.clone();
+                    save.spawn_angle = prev.spawn_angle;
                 }
             }
         }
@@ -4478,22 +4489,14 @@ impl PlayPlan {
         )
     }
 
+    /// Точка возрождения в оверворлде без траты заряда; иначе спавн мира.
     fn respawn_position(&self, uuid: Uuid) -> [f64; 3] {
-        self.spawn_points
-            .lock()
-            .unwrap()
-            .get(&uuid)
-            .copied()
-            .flatten()
-            .and_then(|point| {
-                if point.forced {
-                    let [x, y, z] = point.pos;
-                    Some([x as f64 + 0.5, y as f64, z as f64 + 0.5])
-                } else {
-                    self.bed_spawn(point.pos, uuid)
-                }
-            })
-            .unwrap_or_else(|| self.vars.world_spawn().unwrap_or(self.spawn))
+        let at = self.respawn_target(uuid, false);
+        if at.dim == Dimension::Overworld {
+            at.pos
+        } else {
+            self.vars.world_spawn().unwrap_or(self.spawn)
+        }
     }
 
     /// Мир только для чтения на время фазы: один `RwLock::read` вместо замка
@@ -4793,14 +4796,26 @@ impl PlayPlan {
         if loaded.as_ref().is_some_and(|s| s.seen_credits) {
             self.seen_credits.lock().unwrap().insert(player.uuid);
         }
-        if let Some(spawn) = loaded.as_ref().and_then(|s| s.spawn) {
-            self.spawn_points.lock().unwrap().insert(
-                player.uuid,
-                Some(SpawnPoint {
-                    pos: spawn,
-                    forced: loaded.as_ref().is_none_or(|s| s.spawn_forced),
-                }),
-            );
+        if let Some(save) = loaded.as_ref()
+            && let Some(pos) = save.spawn
+        {
+            // Измерение, которого на сервере нет, — как у ванили
+            // `getDimensionOrDefault`: точка остаётся, но ведёт на спавн мира.
+            let dim = save
+                .spawn_dimension
+                .as_deref()
+                .map_or(Some(Dimension::Overworld), Dimension::from_key);
+            if let Some(dim) = dim {
+                self.spawn_points.lock().unwrap().insert(
+                    player.uuid,
+                    Some(SpawnPoint {
+                        dim,
+                        pos,
+                        angle: save.spawn_angle,
+                        forced: save.spawn_forced,
+                    }),
+                );
+            }
         }
         let dead_save = loaded.as_ref().is_some_and(|s| s.health <= 0.0);
         // Измерение сохранения, если оно есть на сервере; погибший — на спавне.
@@ -6538,7 +6553,11 @@ impl PlayPlan {
             self.push_control(uuid, Control::Credits);
             return None;
         }
-        Some((self.respawn_position(uuid), Dimension::Overworld))
+        let at = self.respawn_target(uuid, false);
+        if at.missing {
+            self.spawn_points.lock().unwrap().insert(uuid, None);
+        }
+        Some((at.pos, at.dim))
     }
 
     /// `TheEndGatewayBlockEntity.getPortalPosition`: точный выход — середина
@@ -8267,6 +8286,19 @@ impl PlayPlan {
     /// `MinecartTNT` с фитилём: рельсы и блок под рельсом не рушатся
     /// (`shouldBlockExplode`) и лучи сквозь них не слабеют.
     pub(super) fn explode(&self, center: [f64; 3], power: f32, rails_safe: bool) {
+        self.explode_with(center, power, rails_safe, false, None);
+    }
+
+    /// Взрыв с огнём (`createFire`: треть пустых клеток над твёрдым) и
+    /// клеткой, где сопротивление — как у воды (`RespawnAnchorBlock` у воды).
+    pub(super) fn explode_with(
+        &self,
+        center: [f64; 3],
+        power: f32,
+        rails_safe: bool,
+        fire: bool,
+        water_shield: Option<[i32; 3]>,
+    ) {
         let cache = std::cell::RefCell::new(HashMap::<[i32; 3], Option<f32>>::new());
         let is_rail = |p: [i32; 3]| self.block(p).is_some_and(|s| self.state_name(s).ends_with("rail"));
         let affected = crate::tnt::affected(
@@ -8277,6 +8309,9 @@ impl PlayPlan {
                     let Some(state) = self.block(p) else {
                         return Some(f32::INFINITY);
                     };
+                    if water_shield == Some(p) {
+                        return Some(100.0);
+                    }
                     if state == AIR {
                         return None;
                     }
@@ -8327,6 +8362,7 @@ impl PlayPlan {
             .collect();
         blocks.sort_unstable();
         self.damage_tnt_targets(center, power);
+        let fire_at: Vec<[i32; 3]> = if fire { blocks.clone() } else { Vec::new() };
         for block in blocks {
             let Some(state) = self.block(block) else {
                 continue;
@@ -8382,6 +8418,22 @@ impl PlayPlan {
                 touched.extend_from_slice(&crate::redstone::around(block));
             }
         }
+        // `ServerExplosion.createFire`: `nextInt(3) == 0`, пусто и под ним
+        // твёрдый блок.
+        for p in fire_at {
+            if rand::random::<u32>() % 3 != 0 || self.block(p) != Some(AIR) {
+                continue;
+            }
+            let below = [p[0], p[1] - 1, p[2]];
+            if !self
+                .block(below)
+                .is_some_and(|s| chunkwake_world::has_flag(s, chunkwake_world::flags::SOLID))
+            {
+                continue;
+            }
+            // `BaseFireBlock.onPlace` в рамке портала зажигает портал.
+            self.ignite_at(p, 0);
+        }
         touched.sort_unstable();
         touched.dedup();
         self.redstone_update(&touched);
@@ -8417,12 +8469,15 @@ impl PlayPlan {
 
     fn damage_tnt_targets(&self, center: [f64; 3], power: f32) {
         let reach = power as f64 * 2.0;
+        // Взрыв задевает только игроков своего измерения.
+        let dim = self.active_dim();
         let players: Vec<_> = self
             .hub
             .players
             .lock()
             .unwrap()
             .values()
+            .filter(|p| p.dimension == dim)
             .map(|p| (p.entry.uuid, p.pos, p.collects))
             .collect();
         for (uuid, player, alive) in players {
@@ -10866,8 +10921,11 @@ impl PlayPlan {
                         if command == inv::PERFORM_RESPAWN && !state.vitals.dead
                             && self.won_game.lock().unwrap().remove(&uuid)
                         {
-                            let spawn = self.respawn_position(uuid);
-                            self.switch_player_dimension(uuid, Dimension::Overworld, spawn);
+                            let at = self.respawn_target(uuid, false);
+                            if at.missing {
+                                self.spawn_points.lock().unwrap().insert(uuid, None);
+                            }
+                            self.switch_player_dimension_look(uuid, at.dim, at.pos, at.look);
                             continue;
                         }
                         if command == inv::PERFORM_RESPAWN && state.vitals.dead {
@@ -11028,9 +11086,24 @@ impl PlayPlan {
                             && self.player_at(uuid).is_some_and(|(p, _, _)| {
                                 block_reach(eye_of(p), u.pos, if login.spawn.game_mode == 1 { 5.0 } else { 4.5 })
                             })
-                            && let Some((head, _)) = self.bed_pair(u.pos)
+                            && let Some((head, foot)) = self.bed_pair(u.pos)
                         {
-                            self.spawn_points.lock().unwrap().insert(uuid, Some(SpawnPoint { pos: head, forced: false }));
+                            // `bed_rule` Ада и Края: `destroy_on_use` — взрыв.
+                            if self.active_dim() != Dimension::Overworld {
+                                self.explode_bed(head, foot);
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                                continue;
+                            }
+                            let (_, look_yaw, look_pitch) = self.player_at(uuid).unwrap_or((me.pos, me.yaw, me.pitch));
+                            self.spawn_points.lock().unwrap().insert(
+                                uuid,
+                                Some(SpawnPoint {
+                                    dim: Dimension::Overworld,
+                                    pos: head,
+                                    angle: [look_yaw, look_pitch],
+                                    forced: false,
+                                }),
+                            );
                             let occupied = self.sleepers.lock().unwrap().values().any(|&bed| bed == head);
                             if !occupied {
                                 self.set_bed_occupied(head, false);
@@ -11223,6 +11296,32 @@ impl PlayPlan {
                             };
                             if done {
                                 self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                                continue;
+                            }
+                        }
+                        // `RespawnAnchorBlock.useWithoutItem`: только основная
+                        // рука и не когда светокамень во второй зарядит якорь.
+                        if clicked == "minecraft:respawn_anchor"
+                            && u.hand == 0
+                            && !state.vitals.dead
+                            && login.spawn.game_mode != 3
+                            && !(sneaking && (state.inv.held().is_some() || state.inv.slots[survival::OFFHAND].is_some()))
+                            && !(state.inv.slots[survival::OFFHAND].is_some_and(|s| self.item_name(s.item) == "minecraft:glowstone")
+                                && self.anchor_charge(u.pos).is_some_and(|(_, c)| c < 4))
+                            && self.player_at(uuid).is_some_and(|(p, _, _)| block_reach(eye_of(p), u.pos, if login.spawn.game_mode == 1 { 5.0 } else { 4.5 }))
+                        {
+                            let used = self.use_anchor(uuid, u.pos);
+                            if !matches!(used, respawn::AnchorUse::Pass) {
+                                if matches!(used, respawn::AnchorUse::Set) {
+                                    let msg = serde_json::json!({"translate": "block.minecraft.set_spawn"});
+                                    conn.send(&text::system_chat_json(ids.system_chat, &msg.to_string(), false)).await?;
+                                }
+                                // `handleUseItemOn`: блок клика заново клиенту.
+                                if !matches!(used, respawn::AnchorUse::Exploded) {
+                                    let now = self.block(u.pos).unwrap_or(AIR);
+                                    conn.send(&play::block_update(ids.block_update, u.pos, now as i32)).await?;
+                                }
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                                 continue;
                             }
@@ -19320,21 +19419,33 @@ impl PlayPlan {
             motion |= self.motion_mask(id);
         }
         v.respawn();
-        let spawn = self.respawn_position(me.entry.uuid);
-        v.reset_fall(spawn);
-        // Точка возрождения — в оверворлде: смерть в Аду или Краю переносит
-        // игрока туда, и чанки идут уже оттуда.
         let uuid = me.entry.uuid;
-        let mut info = self.dimension_spawn(Dimension::Overworld, login);
+        // `PlayerList.respawn`: точка игрока (кровать, якорь в Аду, команда)
+        // в своём измерении; пропавший блок — спавн мира, точка стирается.
+        let at = self.respawn_target(uuid, true);
+        let spawn = at.pos;
+        let (yaw, pitch) = at.look;
+        v.reset_fall(spawn);
+        if at.missing {
+            self.spawn_points.lock().unwrap().insert(uuid, None);
+            conn.send(&play::game_event(
+                self.ids.game_event,
+                game_event::NO_RESPAWN_BLOCK_AVAILABLE,
+                0.0,
+            ))
+            .await?;
+        }
+        let dim = at.dim;
+        let mut info = self.dimension_spawn(dim, login);
         if let Some(p) = self.hub.players.lock().unwrap().get_mut(&uuid) {
             info.game_mode = p.entry.game_mode as u8;
-            p.dimension = Dimension::Overworld;
+            p.dimension = dim;
         }
-        let changed = *client_dim != Dimension::Overworld;
+        let changed = *client_dim != dim;
         if changed {
-            *client_dim = Dimension::Overworld;
-            let _ = SESSION_DIM.try_with(|c| c.set(Dimension::Overworld));
-            *self.active.lock().unwrap() = Dimension::Overworld;
+            *client_dim = dim;
+            let _ = SESSION_DIM.try_with(|c| c.set(dim));
+            *self.active.lock().unwrap() = dim;
         }
         conn.send(&inv::respawn(self.ids.respawn, &info, 0))
             .await?;
@@ -19368,8 +19479,8 @@ impl PlayPlan {
             self.ids.player_position,
             teleport_id,
             spawn,
-            0.0,
-            0.0,
+            yaw,
+            pitch,
         ))
         .await?;
         self.send_health(conn, v).await?;
@@ -19387,10 +19498,25 @@ impl PlayPlan {
             me.entry.uuid,
             Move {
                 pos: Some(spawn),
-                rot: Some((0.0, 0.0)),
+                rot: Some((yaw, pitch)),
                 on_ground: true,
             },
         );
+        // Звук разрядки якоря слышит только сам игрок, в углу блока.
+        if let Some(anchor) = self.anchor_at_spawn(uuid)
+            && let Some(&id) = self.survival.sounds.get("minecraft:block.respawn_anchor.deplete")
+        {
+            conn.send(&play::sound(
+                self.ids.sound,
+                id,
+                crate::sounds::BLOCKS,
+                anchor.map(f64::from),
+                1.0,
+                1.0,
+                rand::random(),
+            ))
+            .await?;
+        }
         tracing::info!("{} respawned", me.entry.name);
         Ok(spawn_chunk)
     }

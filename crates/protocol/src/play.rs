@@ -74,6 +74,8 @@ pub fn write_spawn_info(w: &mut Writer, s: &SpawnInfo) {
 
 /// Коды `ClientboundGameEventPacket.Type`.
 pub mod game_event {
+    /// `NO_RESPAWN_BLOCK_AVAILABLE`: «кровать или якорь недоступны».
+    pub const NO_RESPAWN_BLOCK_AVAILABLE: u8 = 0;
     pub const CHANGE_GAME_MODE: u8 = 3;
     /// `WIN_GAME`: 0 — сразу респаун, 1 — титры.
     pub const WIN_GAME: u8 = 4;

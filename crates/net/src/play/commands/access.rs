@@ -414,14 +414,28 @@ impl PlayPlan {
     /// Точка возрождения игрока (`/spawnpoint`); `None` — сброс на спавн мира.
     ///
     /// Пишется и в память сессии, и в сохранение, если игрок уже есть на диске.
-    pub(crate) fn set_player_spawn(&self, uuid: Uuid, pos: Option<[i32; 3]>) {
+    pub(crate) fn set_player_spawn(
+        &self,
+        uuid: Uuid,
+        pos: Option<[i32; 3]>,
+        angle: [f32; 2],
+        dim: super::super::Dimension,
+    ) {
         self.spawn_points.lock().unwrap().insert(
             uuid,
-            pos.map(|pos| super::super::SpawnPoint { pos, forced: true }),
+            pos.map(|pos| super::super::SpawnPoint {
+                dim,
+                pos,
+                angle,
+                forced: true,
+            }),
         );
         if let Some(save) = self.player_saves.lock().unwrap().get_mut(&uuid) {
             save.spawn = pos;
             save.spawn_forced = true;
+            save.spawn_dimension =
+                (dim != super::super::Dimension::Overworld).then(|| dim.key().to_owned());
+            save.spawn_angle = angle;
         }
     }
 

@@ -113,7 +113,7 @@ impl PlayPlan {
     }
 
     /// Якорь возрождения в `pos` и его заряд.
-    fn anchor_charge(&self, pos: [i32; 3]) -> Option<(u32, u8)> {
+    pub(super) fn anchor_charge(&self, pos: [i32; 3]) -> Option<(u32, u8)> {
         let s = self.block(pos)?;
         if self.state_name(s) != ANCHOR {
             return None;
