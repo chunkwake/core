@@ -164,6 +164,9 @@ impl Probe {
                     let _state = r.var_int().unwrap();
                     // Только девять слотов раздатчика; хвост — инвентарь игрока.
                     self.log.push(format!("content {}", hex(r.remaining())));
+                } else if w == 0 {
+                    let _state = r.var_int().unwrap();
+                    self.log.push(format!("inv content {}", hex(r.remaining())));
                 }
             }
             "container_set_slot" => {
@@ -203,6 +206,27 @@ impl Probe {
         w.var_int(self.sb("use_item_on")).var_int(0).i64(pack(p)).var_int(face).f32(0.5).f32(1.0).f32(0.5).u8(0).u8(0).var_int(self.seq);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(600).await;
+    }
+
+    /// `use_item` основной рукой со взглядом.
+    async fn use_item(&mut self, yaw: f32, pitch: f32) {
+        self.seq += 1;
+        let mut w = Writer::new();
+        w.var_int(self.sb("use_item")).var_int(0).var_int(self.seq).f32(yaw).f32(pitch);
+        self.c.send_raw(&w.buf).await.unwrap();
+        self.pump(600).await;
+    }
+
+    /// Бутылка в руке, перед игроком `block` в (8, 200, 8), взгляд вниз-вперёд.
+    async fn bottle_at(&mut self, title: &str, block: &str, give: &str) {
+        self.cmd(&format!("setblock 8 200 8 {block}")).await;
+        self.cmd("clear framer").await;
+        self.cmd(&format!("give framer {give}")).await;
+        self.pump(400).await;
+        self.log.push(format!("== player: {title}"));
+        self.use_item(-90.0, 60.0).await;
+        self.ticks(4).await;
+        self.cmd("setblock 8 200 8 minecraft:air").await;
     }
 
     async fn close(&mut self) {
@@ -365,6 +389,9 @@ async fn main() {
     p.player("shears at a full hive", "minecraft:beehive[facing=north,honey_level=5]", "minecraft:shears").await;
     p.player("bottle at a full hive", "minecraft:beehive[facing=north,honey_level=5]", "minecraft:glass_bottle 3").await;
     p.player("water bottle on dirt", "minecraft:dirt", water).await;
+    p.bottle_at("bottle from water", "minecraft:water", "minecraft:glass_bottle 2").await;
+    p.bottle_at("last bottle from a waterlogged slab", "minecraft:oak_slab[waterlogged=true]", "minecraft:glass_bottle 1").await;
+    p.bottle_at("bottle at stone: nothing", "minecraft:stone", "minecraft:glass_bottle 1").await;
     for l in &p.log {
         println!("{l}");
     }

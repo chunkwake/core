@@ -98,6 +98,35 @@ impl PlayPlan {
         true
     }
 
+    /// `BottleItem.use` по воде: луч `SOURCE_ONLY` на дальность взаимодействия
+    /// упирается в блок или источник; если в клетке вода — звук `bottle.fill`
+    /// всем, кроме игрока, и вибрация `fluid_pickup`. `true` — наполнено.
+    pub(super) fn bottle_from_water(&self, uuid: Uuid, reach: f64) -> bool {
+        use crate::fluids as fl;
+        let Some((feet, yaw, pitch)) = self.player_at(uuid) else {
+            return false;
+        };
+        let (y, p) = (yaw.to_radians() as f64, pitch.to_radians() as f64);
+        let dir = [-y.sin() * p.cos(), -p.sin(), y.cos() * p.cos()];
+        let eye = [feet[0], feet[1] + super::EYE_HEIGHT, feet[2]];
+        let pl = &self.survival.placement;
+        let fluid = |q: [i32; 3]| fl::state_fluid(pl, self.block(q).unwrap_or(super::AIR));
+        let solid = |q: [i32; 3]| {
+            let n = self.state_name(self.block(q).unwrap_or(super::AIR));
+            !matches!(n, "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | "")
+                && fl::fluid_of(n, None).is_none()
+        };
+        let Some((at, _)) = fl::trace(eye, dir, reach, |q| solid(q) || fluid(q).is_some_and(|f| f.source)) else {
+            return false;
+        };
+        if self.spawn_blocked(uuid, at) || !fluid(at).is_some_and(|f| f.kind == fl::Kind::Water) {
+            return false;
+        }
+        self.play_sound(Some(uuid), "minecraft:item.bottle.fill", crate::sounds::NEUTRAL, feet, 1.0, 1.0);
+        self.emit_vibration(at.map(|v| v as f64 + 0.5), "minecraft:fluid_pickup");
+        true
+    }
+
     /// Бутылка по полному улью: мёд сброшен. Звук наполнения — только от
     /// игрока (`playSound(player, …)`: ему самому не шлётся), раздатчик
     /// набирает молча.
@@ -153,7 +182,7 @@ impl PlayPlan {
         water.is_some_and(|w| potion == Some(w as i32))
     }
 
-    fn water_bottle(&self) -> Option<Stack> {
+    pub(super) fn water_bottle(&self) -> Option<Stack> {
         let item = self.item_id("minecraft:potion")?;
         let water = self.survival.potions.iter().position(|n| n == "minecraft:water")?;
         Some(self.brewed_stack(Stack::new(item, 1), item, water as i32))

@@ -10742,6 +10742,16 @@ impl PlayPlan {
                     if id == ids.sb_use_item {
                         let hand = r.var_int()?;
                         let sequence = r.var_int()?;
+                        // `handleUseItem`: взгляд из пакета (`absSnapRotationTo`),
+                        // луч бутылки и ведра идёт уже по нему.
+                        if let (Ok(yaw), Ok(pitch)) = (r.f32(), r.f32())
+                            && yaw.is_finite()
+                            && pitch.is_finite()
+                            && let Some(p) = self.hub.players.lock().unwrap().get_mut(&uuid)
+                        {
+                            p.yaw = yaw;
+                            p.pitch = pitch.clamp(-90.0, 90.0);
+                        }
                         let hand_name = if hand == 0 { "HAND" } else { "OFF_HAND" };
                         if !state.vitals.dead
                             && self.cancelled(Event::Interact, uuid, || format!("RIGHT_CLICK_AIR ~ ~ ~ SELF {hand_name}")).await
@@ -10754,6 +10764,41 @@ impl PlayPlan {
                         if !state.vitals.dead && login.spawn.game_mode != 3
                             && self.use_bucket(conn, uuid, &mut state.inv, hand, survival).await?
                         {
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
+                            continue;
+                        }
+                        // `BottleItem.use`: пустая бутылка из воды — бутылка воды
+                        // (`ItemUtils.createFilledResult`).
+                        if !state.vitals.dead && login.spawn.game_mode != 3
+                            && let Some(slot) = Self::hand_index(&state.inv, hand)
+                            && let Some(held) = state.inv.slots[slot]
+                            && self.item_name(held.item) == "minecraft:glass_bottle"
+                            && self.bottle_from_water(uuid, if login.spawn.game_mode == 1 { 5.0 } else { 4.5 })
+                            && let Some(water) = self.water_bottle()
+                        {
+                            // Бутылка воды не складывается: в свободный слот, иначе наземь.
+                            let free = survival::Inventory::storage_order().find(|&i| state.inv.slots[i].is_none());
+                            if login.spawn.game_mode == 1 {
+                                if !state.inv.slots.contains(&Some(water))
+                                    && let Some(i) = free
+                                {
+                                    state.inv.slots[i] = Some(water);
+                                }
+                            } else if held.count == 1 {
+                                state.inv.slots[slot] = Some(water);
+                            } else {
+                                state.inv.slots[slot] = Some(Stack { count: held.count - 1, ..held });
+                                if let Some(i) = free {
+                                    state.inv.slots[i] = Some(water);
+                                } else {
+                                    let (feet, yaw, pitch) = self.player_at(uuid).unwrap_or((me.pos, 0.0, 0.0));
+                                    let vel = items::throw_velocity(yaw, pitch, rand::random());
+                                    self.drop_item(items::throw_origin(feet), vel, water, items::THROW_DELAY);
+                                }
+                            }
+                            // `ServerPlayerGameMode.useItem`: предмет в руке сменился —
+                            // `inventoryMenu.sendAllDataToRemote`.
+                            self.send_inventory(conn, &mut state.inv).await?;
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                             continue;
                         }

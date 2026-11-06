@@ -82,7 +82,7 @@ impl Inventory {
     }
 
     /// Порядок заполнения как в ванилле: хотбар, затем основной инвентарь.
-    fn storage_order() -> impl Iterator<Item = usize> {
+    pub(crate) fn storage_order() -> impl Iterator<Item = usize> {
         (HOTBAR..HOTBAR + 9).chain(MAIN..HOTBAR)
     }
 
