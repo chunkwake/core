@@ -637,6 +637,8 @@ impl PlayPlan {
         let mut ejected = Vec::new();
         let mut hoppers = Vec::new();
         let mut primed = Vec::new();
+        let now = self.game_time.load(Ordering::Relaxed);
+        let border = self.border_at(now);
         // Взорвавшиеся ТНТ: позиция, квадрат скорости, был ли фитиль.
         let mut blasts = Vec::new();
         {
@@ -680,8 +682,17 @@ impl PlayPlan {
                         p.2,
                     )
                 });
-                let y0 = e.cart.pos[1];
+                let old_pos = e.cart.pos;
+                let y0 = old_pos[1];
                 let step = e.cart.tick(&track, intent);
+                let clipped =
+                    border.clip_movement(now, old_pos, e.cart.pos, crate::minecart::WIDTH);
+                for axis in [0, 2] {
+                    if clipped[axis] != e.cart.pos[axis] {
+                        e.cart.pos[axis] = clipped[axis];
+                        e.cart.vel[axis] = 0.0;
+                    }
+                }
                 match step.rail {
                     Some((pos, Rail { kind: Kind::Detector, .. })) => pressed.push(pos),
                     // `activateMinecart` каждый тик на активаторе.

@@ -52,6 +52,8 @@ pub struct WorldStorage {
     save_lock: Mutex<()>,
     save_notify: Arc<tokio::sync::Notify>,
     world_dir: std::path::PathBuf,
+    /// `region-file-compression` для регионов всех измерений.
+    codec: chunkwake_world::anvil::Codec,
 }
 
 /// Хранилище одного измерения: чанки и сущности.
@@ -100,6 +102,7 @@ impl WorldStorage {
         light: Arc<LightTable>,
         items: HashMap<String, i32>,
         effects: HashMap<String, i32>,
+        codec: chunkwake_world::anvil::Codec,
     ) -> Self {
         let biome_ids = biomes
             .iter()
@@ -114,8 +117,8 @@ impl WorldStorage {
         dimensions.insert(
             "minecraft:overworld".to_owned(),
             DimStore {
-                store: RegionStore::new(region),
-                entities: RegionStore::new(entities),
+                store: RegionStore::new(region).with_codec(codec),
+                entities: RegionStore::new(entities).with_codec(codec),
                 layout: None,
             },
         );
@@ -127,6 +130,7 @@ impl WorldStorage {
             template,
             light,
             world_dir: world_dir.to_path_buf(),
+            codec,
             format: Format {
                 data_version,
                 min_section: min_y.div_euclid(16),
@@ -148,8 +152,8 @@ impl WorldStorage {
         dims.entry(dimension.to_owned()).or_insert_with(|| {
             let region = region_dir(&self.world_dir, dimension);
             DimStore {
-                store: RegionStore::new(region.clone()),
-                entities: RegionStore::new(region.with_file_name("entities")),
+                store: RegionStore::new(region.clone()).with_codec(self.codec),
+                entities: RegionStore::new(region.with_file_name("entities")).with_codec(self.codec),
                 layout: None,
             }
         });
@@ -330,6 +334,11 @@ impl WorldStorage {
                 Ok(())
             };
             total += plan.unload_far(dim, &write);
+        }
+        plan.trim_idle_generators();
+        if total != 0 {
+            // Сборка идёт в блокирующем выгрузчике, вне потока тика.
+            unsafe { libmimalloc_sys::mi_collect(true) };
         }
         total
     }

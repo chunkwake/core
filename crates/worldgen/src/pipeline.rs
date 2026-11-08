@@ -124,6 +124,9 @@ pub struct Overworld {
     base_heights: Mutex<HashMap<(i32, i32), (i32, i32)>>,
     /// `getBaseColumn`: шум с акифером, по столбцам.
     base_columns: Mutex<HashMap<(i32, i32), Arc<Vec<Fill>>>>,
+    area_soft_limit: usize,
+    area_evict_slack: usize,
+    base_column_limit: usize,
     area: Mutex<Area>,
     /// Будит ждущих, когда прото-чанк построен или декорация вернула область.
     wake: Condvar,
@@ -307,6 +310,22 @@ fn rle_decode(rle: &[u16]) -> Vec<u16> {
 }
 
 impl Area {
+    /// В простое оставляем затронутые декорацией прото, чтобы не потерять
+    /// запись на границе; чистые можно построить повторно без отличий.
+    fn trim_idle(&mut self) {
+        if !self.active.is_empty() || !self.building.is_empty() || !self.busy.is_empty() || !self.decorating.is_empty() {
+            return;
+        }
+        let clean: Vec<_> = self.protos.keys().filter(|p| {
+            !(-1..=1).any(|dz| (-1..=1).any(|dx| self.decorated.contains(&(p.0 + dx, p.1 + dz))))
+        }).copied().collect();
+        for pos in clean {
+            self.protos.discard(&pos);
+        }
+        self.protos.clock += PROTO_FREEZE_AFTER + 1;
+        self.protos.freeze_idle(|_| false);
+    }
+
     /// Сжимает давно не нужные прото-чанки (раз в 64 запроса: обход словаря).
     fn freeze(&mut self) {
         self.protos.clock += 1;
@@ -329,8 +348,8 @@ impl Area {
     /// двух тысяч столбцов, и вызов на каждый чанк превращался в проход по
     /// всему словарю под общим замком. Поэтому чистим, только когда запас
     /// вырос заметно, и сразу до половины предела.
-    fn evict(&mut self) {
-        if self.protos.len() <= AREA_SOFT_LIMIT + AREA_EVICT_SLACK {
+    fn evict(&mut self, soft_limit: usize, slack: usize) {
+        if self.protos.len() <= soft_limit + slack {
             return;
         }
         let touched = |p: &(i32, i32)| {
@@ -347,7 +366,7 @@ impl Area {
             .filter(|p| !touched(p) && !pinned(p))
             .copied()
             .collect();
-        let excess = self.protos.len() - AREA_SOFT_LIMIT / 2;
+        let excess = self.protos.len() - soft_limit / 2;
         for p in clean.into_iter().take(excess) {
             self.protos.discard(&p);
         }
@@ -361,6 +380,14 @@ const AREA_SOFT_LIMIT: usize = 2048;
 const AREA_EVICT_SLACK: usize = 1024;
 
 impl Overworld {
+    /// Сбрасывает только воспроизводимые кэши и холодит нужные для границ прото.
+    pub fn trim_idle(&self) {
+        self.area.lock().unwrap().trim_idle();
+        self.base_columns.lock().unwrap().clear();
+        self.base_heights.lock().unwrap().clear();
+        self.noise.trim_idle();
+    }
+
     /// `state` — состояние блока по имени (`minecraft:stone`); `biome_ids` —
     /// сетевые ID биомов для условий `minecraft:biome`.
     pub fn new(
@@ -408,9 +435,20 @@ impl Overworld {
             features: None,
             base_heights: Mutex::new(HashMap::new()),
             base_columns: Mutex::new(HashMap::new()),
+            area_soft_limit: AREA_SOFT_LIMIT,
+            area_evict_slack: AREA_EVICT_SLACK,
+            base_column_limit: 16_384,
             area: Mutex::new(Area::default()),
             wake: Condvar::new(),
         })
+    }
+
+    /// Лимиты горячих данных, выбранные серверным профилем памяти.
+    pub fn with_memory_limits(mut self, proto_limit: usize, base_column_limit: usize) -> Self {
+        self.area_soft_limit = proto_limit.max(64);
+        self.area_evict_slack = (self.area_soft_limit / 2).max(64);
+        self.base_column_limit = base_column_limit.max(128);
+        self
     }
 
     /// Ближайший биом для `/locate biome`. Имя — `plains` или `minecraft:plains`.
@@ -440,6 +478,7 @@ impl Overworld {
             palette: &features.palette,
             heights: &self.base_heights,
             bases: &self.base_columns,
+            base_limit: self.base_column_limit,
         })
     }
 
@@ -447,10 +486,19 @@ impl Overworld {
     /// свойства; `default` — состояние блока по умолчанию; `biome_ids` —
     /// сетевые ID биомов.
     pub fn with_features(
-        mut self,
+        self,
         data_dir: &Path,
         states: &feature::States,
         default: &dyn Fn(&str) -> Option<u32>,
+        biome_ids: &HashMap<String, u32>,
+    ) -> Result<Self, String> {
+        self.with_features_palette(data_dir, feature::Palette::new(data_dir, states, default), biome_ids)
+    }
+
+    pub fn with_features_palette(
+        mut self,
+        data_dir: &Path,
+        palette: feature::Palette,
         biome_ids: &HashMap<String, u32>,
     ) -> Result<Self, String> {
         let n = &self.noise;
@@ -458,7 +506,6 @@ impl Overworld {
         if order.is_empty() {
             return Ok(self);
         }
-        let palette = feature::Palette::new(data_dir, states, default);
         self.features = Some(Features::load(
             data_dir,
             palette,
@@ -489,12 +536,16 @@ impl Overworld {
             .as_ref()
             .and_then(|f| f.structures.as_ref())
             .map_or(0, |s| s.layout_count());
+        let rings = self.features.as_ref().and_then(|f| f.structures.as_ref())
+            .map_or(0, |s| s.ring_count());
+        let palette_bytes = self.features.as_ref().map_or(0, |f| f.palette.heap_bytes());
         format!(
-            "protos {protos} (hot {} MB, cold {} of them {} MB), decorated {decorated}, done {done}, base_heights {heights}, base_columns {bases} ({} MB), layouts {layouts}",
+            "protos {protos} (hot {} MB, cold {} of them {} MB), decorated {decorated}, done {done}, base_heights {heights}, base_columns {bases} ({} MB), layouts {layouts}, rings {rings}, palette {} MB",
             proto_bytes.0 >> 20,
             proto_bytes.2,
             proto_bytes.1 >> 20,
-            base_bytes >> 20
+            base_bytes >> 20,
+            palette_bytes >> 20
         )
     }
 
@@ -589,7 +640,7 @@ impl Overworld {
                 e.remove();
             }
         }
-        area.evict();
+        area.evict(self.area_soft_limit, self.area_evict_slack);
         area.freeze();
         drop(area);
         // Раньше здесь на `None` строился полный прото-чанк впустую (16 мс),
@@ -861,6 +912,7 @@ impl Overworld {
             palette: &features.palette,
             heights: &self.base_heights,
             bases: &self.base_columns,
+            base_limit: self.base_column_limit,
         };
         features.decorate(&mut region, cx, cz, &biomes, Some(&cols));
         let mut chunks = region.chunks;
@@ -893,6 +945,7 @@ impl Overworld {
                 palette: &features.palette,
                 heights: &self.base_heights,
                 bases: &self.base_columns,
+                base_limit: self.base_column_limit,
             };
             structures.beard_at(&cols, cx, cz)
         } else {
@@ -1332,6 +1385,7 @@ pub(crate) struct Cols<'a> {
     pub(crate) palette: &'a feature::Palette,
     pub(crate) heights: &'a Mutex<HashMap<(i32, i32), (i32, i32)>>,
     pub(crate) bases: &'a Mutex<HashMap<(i32, i32), Arc<Vec<Fill>>>>,
+    pub(crate) base_limit: usize,
 }
 
 impl Columns for Cols<'_> {
@@ -1400,7 +1454,7 @@ impl Cols<'_> {
         }
         let built = Arc::new(self.noise.column_fills(x, z));
         let mut cache = self.bases.lock().unwrap();
-        if cache.len() >= 1 << 14 {
+        if cache.len() >= self.base_limit {
             cache.clear();
         }
         cache.insert((x, z), Arc::clone(&built));

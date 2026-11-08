@@ -8,6 +8,8 @@ use chunkwake_protocol::inventory::{Slot, Stack};
 /// 9–35 — основной, 36–44 — хотбар, 45 — вторая рука.
 pub const SLOTS: usize = 46;
 const HOTBAR: usize = 36;
+/// Слот шлема в окне инвентаря игрока.
+pub const HEAD: usize = 5;
 /// Нагрудник: элитры носят здесь.
 pub const CHEST: usize = 6;
 pub const OFFHAND: usize = 45;

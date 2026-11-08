@@ -23,8 +23,16 @@ pub use world_setup::build_play_plan;
 ///
 /// Объявлен в библиотеке, а не в `main.rs`, чтобы бенчмарки мерили тот же
 /// аллокатор, что и сервер.
+#[cfg(not(feature = "alloc-count"))]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// С признаком `alloc-count` — mimalloc со счётом живой кучи.
+#[cfg(feature = "alloc-count")]
+pub mod alloc_count;
+#[cfg(feature = "alloc-count")]
+#[global_allocator]
+static ALLOC: alloc_count::Counting = alloc_count::Counting;
 
 /// Версия Minecraft, под которую собран сервер (`version.json` ванильного jar).
 pub const MC_VERSION: &str = "26.3";

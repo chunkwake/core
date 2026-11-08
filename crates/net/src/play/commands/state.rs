@@ -5,6 +5,7 @@
 //! сохраняется в `world/gamerules.json` рядом с миром, чтобы правило не
 //! терялось между запусками (как `level.dat` ванилы).
 
+use crate::play::Dimension;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -157,8 +158,8 @@ pub struct ServerVars {
     saving: Mutex<bool>,
     /// Открыт ли сервер в LAN (`/publish`).
     published: Mutex<Option<u16>>,
-    /// Граница мира (`/worldborder`).
-    border: Mutex<WorldBorder>,
+    /// Граница каждого измерения (`/worldborder`).
+    borders: Mutex<BTreeMap<Dimension, WorldBorder>>,
     path: Option<std::path::PathBuf>,
 }
 
@@ -259,6 +260,87 @@ impl WorldBorder {
             && x < self.center_x + half + margin
             && z >= self.center_z - half - margin
             && z < self.center_z + half + margin
+    }
+
+    /// `WorldBorder.clampToBounds`: блок для поиска портала после
+    /// масштабирования координат между измерениями.
+    pub fn clamp_to_bounds(&self, now: i64, pos: [f64; 3]) -> [i32; 3] {
+        let half = self.size_at(now) / 2.0;
+        let clamp = |value: f64, center: f64| {
+            let min = (center - half).max(-BORDER_MAX_CENTER).floor() as i32;
+            let max = (center + half).min(BORDER_MAX_CENTER).ceil() as i32 - 1;
+            (value.floor() as i32).clamp(min, max.max(min))
+        };
+        [clamp(pos[0], self.center_x), pos[1].floor() as i32, clamp(pos[2], self.center_z)]
+    }
+
+    /// `WorldBorder.isWithinBounds(BlockPos)`: блок может пересекать
+    /// границу даже тогда, когда его центр уже снаружи.
+    pub fn contains_block(&self, now: i64, pos: [i32; 3]) -> bool {
+        let half = self.size_at(now) / 2.0;
+        let min_x = (self.center_x - half).max(-BORDER_MAX_CENTER);
+        let max_x = (self.center_x + half).min(BORDER_MAX_CENTER);
+        let min_z = (self.center_z - half).max(-BORDER_MAX_CENTER);
+        let max_z = (self.center_z + half).min(BORDER_MAX_CENTER);
+        pos[0] as f64 + 1.0 > min_x
+            && (pos[0] as f64) < max_x
+            && pos[2] as f64 + 1.0 > min_z
+            && (pos[2] as f64) < max_z
+    }
+
+    /// Прямоугольник целых блоков целиком внутри границы. `max` включён.
+    pub fn contains_box(&self, now: i64, min: [i32; 2], max: [i32; 2]) -> bool {
+        let half = self.size_at(now) / 2.0;
+        (min[0] as f64) >= (self.center_x - half).max(-BORDER_MAX_CENTER)
+            && (max[0] as f64 + 1.0) <= (self.center_x + half).min(BORDER_MAX_CENTER)
+            && (min[1] as f64) >= (self.center_z - half).max(-BORDER_MAX_CENTER)
+            && (max[1] as f64 + 1.0) <= (self.center_z + half).min(BORDER_MAX_CENTER)
+    }
+
+    /// Останавливает горизонтальное движение коробки у кромки. Если коробка
+    /// уже оказалась снаружи (например, граница сжалась), путь обратно открыт.
+    pub fn clip_movement(
+        &self,
+        now: i64,
+        from: [f64; 3],
+        mut to: [f64; 3],
+        width: f64,
+    ) -> [f64; 3] {
+        let half = self.size_at(now) / 2.0;
+        let radius = width / 2.0;
+        let min_x = (self.center_x - half).max(-BORDER_MAX_CENTER) + radius;
+        let max_x = (self.center_x + half).min(BORDER_MAX_CENTER) - radius;
+        let min_z = (self.center_z - half).max(-BORDER_MAX_CENTER) + radius;
+        let max_z = (self.center_z + half).min(BORDER_MAX_CENTER) - radius;
+        if min_x <= max_x && min_z <= max_z
+            && (min_x..=max_x).contains(&from[0])
+            && (min_z..=max_z).contains(&from[2])
+        {
+            to[0] = to[0].clamp(min_x, max_x);
+            to[2] = to[2].clamp(min_z, max_z);
+        }
+        to
+    }
+
+    /// `CollisionGetter.clipIncludingBorder`: для луча снаряда учитывается
+    /// точка, а не ширина сущности. Верхнюю кромку `clampVec3ToBound` сдвигает
+    /// внутрь на float `1e-5`.
+    pub fn clip_projectile(&self, now: i64, from: [f64; 3], mut to: [f64; 3]) -> [f64; 3] {
+        if self.is_within(now, from[0], from[2], 0.0)
+            && !self.is_within(now, to[0], to[2], 0.0)
+        {
+            let half = self.size_at(now) / 2.0;
+            let epsilon = 1e-5_f32 as f64;
+            to[0] = to[0].clamp(
+                (self.center_x - half).max(-BORDER_MAX_CENTER),
+                (self.center_x + half).min(BORDER_MAX_CENTER) - epsilon,
+            );
+            to[2] = to[2].clamp(
+                (self.center_z - half).max(-BORDER_MAX_CENTER),
+                (self.center_z + half).min(BORDER_MAX_CENTER) - epsilon,
+            );
+        }
+        to
     }
 
     /// Снимок для `initialize_border`: старый и новый диаметр и остаток анимации.
@@ -375,8 +457,18 @@ struct Saved {
     world_spawn: Option<[f64; 3]>,
     #[serde(default)]
     access: AccessLists,
+    /// Старые миры хранили только границу обычного мира.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    border: Option<SavedBorder>,
     #[serde(default)]
-    border: SavedBorder,
+    borders: BTreeMap<String, SavedBorder>,
+}
+
+fn default_borders() -> BTreeMap<Dimension, WorldBorder> {
+    [Dimension::Overworld, Dimension::Nether, Dimension::End]
+        .into_iter()
+        .map(|dim| (dim, WorldBorder::default()))
+        .collect()
 }
 
 impl ServerVars {
@@ -390,7 +482,7 @@ impl ServerVars {
             whitelist: Mutex::new(AccessLists::default()),
             saving: Mutex::new(true),
             published: Mutex::new(None),
-            border: Mutex::new(WorldBorder::default()),
+            borders: Mutex::new(default_borders()),
             path: None,
         }
     }
@@ -432,14 +524,23 @@ impl ServerVars {
             .ok()
             .and_then(|text| serde_json::from_str::<Saved>(&text).ok());
         let mut rules = defaults();
-        let (spawn, access, border) = match saved {
+        let mut borders = default_borders();
+        let (spawn, access) = match saved {
             Some(saved) => {
                 // Незнакомые правила из файла сохраняем: их могла записать
                 // другая версия сервера, и терять их при сохранении нельзя.
                 rules.extend(saved.rules);
-                (saved.world_spawn, saved.access, saved.border.into())
+                if let Some(border) = saved.border {
+                    borders.insert(Dimension::Overworld, border.into());
+                }
+                for (key, border) in saved.borders {
+                    if let Some(dim) = Dimension::from_key(&key) {
+                        borders.insert(dim, border.into());
+                    }
+                }
+                (saved.world_spawn, saved.access)
             }
-            None => (None, AccessLists::default(), WorldBorder::default()),
+            None => (None, AccessLists::default()),
         };
         Self {
             rules: Mutex::new(rules),
@@ -449,7 +550,7 @@ impl ServerVars {
             whitelist: Mutex::new(access),
             saving: Mutex::new(true),
             published: Mutex::new(None),
-            border: Mutex::new(border),
+            borders: Mutex::new(borders),
             path: Some(path),
         }
     }
@@ -630,12 +731,12 @@ impl ServerVars {
         *self.published.lock().unwrap() = port;
     }
 
-    pub fn border(&self) -> WorldBorder {
-        self.border.lock().unwrap().clone()
+    pub fn border(&self, dim: Dimension) -> WorldBorder {
+        self.borders.lock().unwrap()[&dim].clone()
     }
 
-    pub fn border_at(&self, now: i64) -> WorldBorder {
-        let mut border = self.border.lock().unwrap().clone();
+    pub fn border_at(&self, dim: Dimension, now: i64) -> WorldBorder {
+        let mut border = self.border(dim);
         if border.lerp_ticks > 0 && now - border.lerp_start >= border.lerp_ticks {
             border.from = border.to;
             border.lerp_ticks = 0;
@@ -644,8 +745,16 @@ impl ServerVars {
     }
 
     /// `/worldborder set|add`. `adding` прибавляет расстояние к текущему диаметру.
-    pub fn resize_border(&self, distance: f64, ticks: i64, now: i64, adding: bool) -> BorderResize {
-        let mut border = self.border.lock().unwrap();
+    pub fn resize_border(
+        &self,
+        dim: Dimension,
+        distance: f64,
+        ticks: i64,
+        now: i64,
+        adding: bool,
+    ) -> BorderResize {
+        let mut borders = self.borders.lock().unwrap();
+        let border = borders.get_mut(&dim).unwrap();
         let current = border.size_at(now);
         let next = if adding { current + distance } else { distance };
         if next < 1.0 {
@@ -664,7 +773,7 @@ impl ServerVars {
             border.from = next;
             border.to = next;
             border.lerp_ticks = 0;
-            drop(border);
+            drop(borders);
             self.save();
             return BorderResize::Immediate(next);
         }
@@ -672,7 +781,7 @@ impl ServerVars {
         border.to = next;
         border.lerp_start = now;
         border.lerp_ticks = ticks;
-        drop(border);
+        drop(borders);
         self.save();
         if next > current {
             BorderResize::Grow { size: next, ticks }
@@ -682,11 +791,12 @@ impl ServerVars {
     }
 
     /// `/worldborder center`. `None` — центр или кромка выходят за мир.
-    pub fn set_border_center(&self, x: f64, z: f64, now: i64) -> bool {
+    pub fn set_border_center(&self, dim: Dimension, x: f64, z: f64, now: i64) -> bool {
         if x.abs() > BORDER_MAX_CENTER || z.abs() > BORDER_MAX_CENTER {
             return false;
         }
-        let mut border = self.border.lock().unwrap();
+        let mut borders = self.borders.lock().unwrap();
+        let border = borders.get_mut(&dim).unwrap();
         let size = border.size_at(now).max(border.to);
         if !border_fits(x, z, size) {
             return false;
@@ -696,14 +806,20 @@ impl ServerVars {
         }
         border.center_x = x;
         border.center_z = z;
-        drop(border);
+        drop(borders);
         self.save();
         true
     }
 
     /// Урон и буфер границы. `false` — значение уже такое.
-    pub fn set_border_damage(&self, per_block: Option<f32>, buffer: Option<f32>) -> bool {
-        let mut border = self.border.lock().unwrap();
+    pub fn set_border_damage(
+        &self,
+        dim: Dimension,
+        per_block: Option<f32>,
+        buffer: Option<f32>,
+    ) -> bool {
+        let mut borders = self.borders.lock().unwrap();
+        let border = borders.get_mut(&dim).unwrap();
         let mut changed = false;
         if let Some(value) = per_block
             && (border.damage - value).abs() > 1e-6
@@ -717,7 +833,7 @@ impl ServerVars {
             border.buffer = value;
             changed = true;
         }
-        drop(border);
+        drop(borders);
         if changed {
             self.save();
         }
@@ -725,8 +841,9 @@ impl ServerVars {
     }
 
     /// Предупреждение границы. `false` — значение уже такое.
-    pub fn set_border_warning(&self, blocks: Option<i32>, time: Option<i32>) -> bool {
-        let mut border = self.border.lock().unwrap();
+    pub fn set_border_warning(&self, dim: Dimension, blocks: Option<i32>, time: Option<i32>) -> bool {
+        let mut borders = self.borders.lock().unwrap();
+        let border = borders.get_mut(&dim).unwrap();
         let mut changed = false;
         if let Some(value) = blocks
             && border.warning_blocks != value
@@ -740,7 +857,7 @@ impl ServerVars {
             border.warning_time = value;
             changed = true;
         }
-        drop(border);
+        drop(borders);
         if changed {
             self.save();
         }
@@ -749,22 +866,32 @@ impl ServerVars {
 
     fn save(&self) {
         let Some(path) = &self.path else { return };
-        let border = self.border.lock().unwrap();
-        let saved_border = SavedBorder {
-            center_x: border.center_x,
-            center_z: border.center_z,
-            size: border.to,
-            damage: border.damage,
-            buffer: border.buffer,
-            warning_blocks: border.warning_blocks,
-            warning_time: border.warning_time,
-        };
-        drop(border);
+        let borders = self
+            .borders
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(dim, border)| {
+                (
+                    dim.key().to_owned(),
+                    SavedBorder {
+                        center_x: border.center_x,
+                        center_z: border.center_z,
+                        size: border.to,
+                        damage: border.damage,
+                        buffer: border.buffer,
+                        warning_blocks: border.warning_blocks,
+                        warning_time: border.warning_time,
+                    },
+                )
+            })
+            .collect();
         let saved = Saved {
             rules: self.rules.lock().unwrap().clone(),
             world_spawn: *self.world_spawn.lock().unwrap(),
             access: self.whitelist.lock().unwrap().clone(),
-            border: saved_border,
+            border: None,
+            borders,
         };
         match serde_json::to_string_pretty(&saved) {
             Ok(text) => {
@@ -845,6 +972,81 @@ mod tests {
         let far = b.distance_to(0, 80.0, 0.0) + b.buffer as f64;
         assert_eq!(far, -25.0);
         assert_eq!(((-far) * b.damage as f64).floor().max(1.0), 5.0);
+    }
+
+    #[test]
+    fn border_clamps_portal_search_position() {
+        let b = WorldBorder {
+            center_x: 20.0,
+            center_z: -20.0,
+            from: 10.0,
+            to: 10.0,
+            ..WorldBorder::default()
+        };
+        assert_eq!(b.clamp_to_bounds(0, [100.0, 64.8, -100.0]), [24, 64, -25]);
+        assert_eq!(b.clamp_to_bounds(0, [17.8, 70.1, -17.2]), [17, 70, -18]);
+        assert!(b.contains_block(0, [15, 70, -25]));
+        assert!(b.contains_block(0, [24, 70, -16]));
+        assert!(!b.contains_block(0, [25, 70, -20]));
+        assert!(!b.contains_block(0, [20, 70, -26]));
+        assert!(b.contains_box(0, [15, -25], [24, -16]));
+        assert!(!b.contains_box(0, [14, -25], [24, -16]));
+        assert!(!b.contains_box(0, [15, -25], [25, -16]));
+    }
+
+    #[test]
+    fn border_clips_entity_movement_but_allows_return_from_outside() {
+        let b = WorldBorder {
+            center_x: 10.0,
+            center_z: -10.0,
+            from: 10.0,
+            to: 10.0,
+            ..WorldBorder::default()
+        };
+        let inside = [10.0, 64.0, -10.0];
+        assert_eq!(
+            b.clip_movement(0, inside, [20.0, 65.0, -20.0], 0.6),
+            [14.7, 65.0, -14.7]
+        );
+        assert_eq!(b.clip_movement(0, [17.0, 64.0, -10.0], inside, 0.6), inside);
+        assert_eq!(
+            b.clip_movement(0, [17.0, 64.0, -10.0], [18.0, 64.0, -10.0], 0.6),
+            [18.0, 64.0, -10.0]
+        );
+        assert_eq!(
+            b.clip_movement(0, inside, [11.0, 64.0, -11.0], 0.6),
+            [11.0, 64.0, -11.0]
+        );
+        assert_eq!(
+            b.clip_movement(0, inside, [20.0, 64.0, -10.0], 0.25),
+            [14.875, 64.0, -10.0]
+        );
+    }
+
+    #[test]
+    fn shrinking_border_releases_entities_left_outside() {
+        let b = WorldBorder {
+            from: 10.0,
+            to: 4.0,
+            lerp_start: 0,
+            lerp_ticks: 10,
+            ..WorldBorder::default()
+        };
+        let edge = b.clip_movement(5, [0.0, 64.0, 0.0], [9.0, 64.0, 0.0], 0.98);
+        assert_eq!(edge, [3.01, 64.0, 0.0]);
+        assert_eq!(b.clip_movement(10, edge, [0.0, 64.0, 0.0], 0.98), [0.0, 64.0, 0.0]);
+    }
+
+    #[test]
+    fn projectile_ray_hits_border_and_can_return_from_outside() {
+        let b = WorldBorder {
+            from: 4.0,
+            to: 4.0,
+            ..WorldBorder::default()
+        };
+        let clipped = b.clip_projectile(0, [0.0, 64.0, 0.0], [3.0, 65.0, 0.0]);
+        assert_eq!(clipped, [2.0 - 1e-5_f32 as f64, 65.0, 0.0]);
+        assert_eq!(b.clip_projectile(0, [3.0, 64.0, 0.0], [0.0, 64.0, 0.0]), [0.0, 64.0, 0.0]);
     }
 
     #[test]
@@ -962,6 +1164,42 @@ mod tests {
         assert!(vars.flag("keep_inventory"));
         assert_eq!(vars.world_spawn(), Some([1.0, 2.0, 3.0]));
         assert!(vars.is_allowed(AccessList::BannedPlayers, "Griefer"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn borders_are_independent_and_legacy_border_loads_into_overworld() {
+        let dir = std::env::temp_dir().join(format!(
+            "chunkwake-borders-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("gamerules.json"), r#"{"border":{"size":100}}"#).unwrap();
+
+        let vars = ServerVars::load(&dir);
+        assert_eq!(vars.border(Dimension::Overworld).to, 100.0);
+        assert_eq!(vars.border(Dimension::Nether).to, BORDER_MAX_SIZE);
+        assert_eq!(vars.border(Dimension::End).to, BORDER_MAX_SIZE);
+        assert_eq!(
+            vars.resize_border(Dimension::Nether, 80.0, 0, 0, false),
+            BorderResize::Immediate(80.0)
+        );
+        assert_eq!(
+            vars.resize_border(Dimension::End, 60.0, 0, 0, false),
+            BorderResize::Immediate(60.0)
+        );
+        assert!(vars.set_border_center(Dimension::End, 12.0, -8.0, 0));
+        assert!(vars.set_border_warning(Dimension::End, Some(9), None));
+
+        let reloaded = ServerVars::load(&dir);
+        assert_eq!(reloaded.border(Dimension::Overworld).to, 100.0);
+        assert_eq!(reloaded.border(Dimension::Nether).to, 80.0);
+        assert_eq!(reloaded.border(Dimension::End).center_x, 12.0);
+        assert_eq!(reloaded.border(Dimension::End).warning_blocks, 9);
         let _ = std::fs::remove_dir_all(dir);
     }
 

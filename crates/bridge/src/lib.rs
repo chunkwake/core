@@ -11,6 +11,11 @@
 mod api_bundle;
 mod jvm;
 
+/// Ограничение кучи встроенной JVM для профиля памяти сервера.
+pub fn set_jvm_max_heap(option: Option<&'static str>) {
+    jvm::set_max_heap(option);
+}
+
 pub use api_bundle::present as api_embedded;
 
 use chunkwake_net::live::Event;

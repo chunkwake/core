@@ -4,7 +4,6 @@
 //! `data/minecraft/maps/<id>.dat` с `last_id.dat` (`MapIndex`).
 //!
 //! Отрисовка и данные — [`crate::maps`], знамёна — [`super::banners`].
-//! Чего нет: невидимость в тыкве.
 
 use super::*;
 use crate::maps::{MapData, MapFrame, Sample, mode_color};
@@ -33,6 +32,25 @@ impl MapStore {
 }
 
 impl PlayPlan {
+    /// `hasMapInvisibilityItemEquipped`: предмет на голове из тега данных.
+    fn map_icon_hidden(&self, head: Slot) -> bool {
+        head.is_some_and(|s| {
+            self.survival
+                .item_tags
+                .get("minecraft:map_invisibility_equipment")
+                .is_some_and(|tag| tag.contains(self.item_name(s.item)))
+        })
+    }
+
+    fn map_hidden_players(&self) -> FastSet<Uuid> {
+        self.live
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(&uuid, live)| self.map_icon_hidden(live.slots[survival::HEAD]).then_some(uuid))
+            .collect()
+    }
+
     /// Каталог `data/minecraft/maps` мира (зовёт сервер при запуске).
     pub fn set_maps_dir(&self, dir: std::path::PathBuf) {
         let _ = self.maps_dir.set(dir);
@@ -287,6 +305,12 @@ impl PlayPlan {
         let Some(&(_, _, my_pos, _, _)) = online.iter().find(|p| p.0 == uuid) else {
             return Ok(());
         };
+        let mut hidden = self.map_hidden_players();
+        if self.map_icon_hidden(inv.slots[survival::HEAD]) {
+            hidden.insert(uuid);
+        } else {
+            hidden.remove(&uuid);
+        }
         let now = self.game_time.load(Ordering::Relaxed);
         let mut packets = Vec::new();
         for id in ids {
@@ -306,7 +330,9 @@ impl PlayPlan {
                 let still = carried.iter().any(|&(p, c)| p == h && c);
                 match info {
                     Some((_, name, pos, yaw, dim)) if still => {
-                        if map.tracking && Some(*dim) == map_dim {
+                        if hidden.contains(&h) {
+                            map.remove_decoration(name);
+                        } else if map.tracking && Some(*dim) == map_dim {
                             map.put_player(name, pos[0], pos[2], *yaw, nether.then_some(now));
                         }
                     }
@@ -357,6 +383,7 @@ impl PlayPlan {
     /// игроку измерения — `tickCarriedBy` с рамкой и его пакет.
     pub(super) fn tick_framed_map(&self, id: i32, frame: MapFrame) {
         let me_dim = self.active_dim();
+        let hidden = self.map_hidden_players();
         let online: Vec<(Uuid, String, Dimension)> = {
             let players = self.hub.players.lock().unwrap();
             players
@@ -375,7 +402,7 @@ impl PlayPlan {
             let map = store.maps.get_mut(&id).expect("загружена выше");
             for (uuid, name, dim) in online.iter().filter(|p| p.2 == me_dim) {
                 map.holder(*uuid);
-                if !carried.iter().any(|&(p, c)| p == *uuid && c) {
+                if hidden.contains(uuid) || !carried.iter().any(|&(p, c)| p == *uuid && c) {
                     map.remove_decoration(name);
                 }
                 // С рамкой держатели не проверяются на карту в инвентаре:
@@ -414,6 +441,13 @@ impl PlayPlan {
     pub(super) fn map_removed_from_frame(&self, id: i32, pos: [i32; 3], entity_id: i32) {
         let mut store = self.maps.lock().unwrap();
         self.with_map(&mut store, id, |m| m.removed_from_frame(pos, entity_id));
+    }
+
+    /// `ItemFrame.interact`: проверка лимита значков до вставки карты.
+    pub(super) fn map_has_too_many_decorations(&self, id: i32) -> bool {
+        let mut store = self.maps.lock().unwrap();
+        self.with_map(&mut store, id, |m| m.tracked_count_over_limit())
+            .unwrap_or(false)
     }
 
     /// Запись изменённых карт и `last_id.dat` (из автосохранения).

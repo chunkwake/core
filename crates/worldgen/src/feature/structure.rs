@@ -875,6 +875,10 @@ impl Structures {
         self.cache.lock().unwrap().len()
     }
 
+    pub(crate) fn ring_count(&self) -> usize {
+        self.ring_cache.lock().unwrap().len()
+    }
+
     /// Один биом вида: тест поиска подставляет его во все столбцы.
     #[cfg(test)]
     pub(crate) fn one_biome(&self, structure: &str) -> Option<u32> {
@@ -1694,6 +1698,10 @@ impl Structures {
             })
             .collect();
         let mut cache = self.ring_cache.lock().unwrap();
+        if cache.len() >= 64 && !cache.contains_key(&seed) {
+            let old: Vec<_> = cache.keys().take(32).copied().collect();
+            for key in old { cache.remove(&key); }
+        }
         cache.entry(seed).or_insert(slots);
     }
 
@@ -4045,6 +4053,7 @@ mod tests {
             palette: &palette,
             heights: &std::sync::Mutex::new(std::collections::HashMap::new()),
             bases: &std::sync::Mutex::new(std::collections::HashMap::new()),
+            base_limit: 16_384,
         };
         let (si, ki) = structures
             .sets
@@ -4149,6 +4158,7 @@ mod tests {
             palette: &palette,
             heights: &std::sync::Mutex::new(std::collections::HashMap::new()),
             bases: &std::sync::Mutex::new(std::collections::HashMap::new()),
+            base_limit: 16_384,
         };
         let (si, ki) = structures
             .sets

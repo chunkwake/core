@@ -221,6 +221,8 @@ pub struct PlayPlan {
     remove_frames: Mutex<FastMap<i32, Frame>>,
     /// `BlockState.isRandomlyTicking` по номеру состояния: строится один раз.
     random_ticking: std::sync::OnceLock<Vec<bool>>,
+    /// Виды состояний (`kinds`): огонь, кровать, листва, медь — по номеру.
+    state_kinds: std::sync::OnceLock<Vec<u16>>,
     /// Состояние блока → имя (`minecraft:stone`), для событий плагинов.
     block_names: Arc<Vec<String>>,
     /// ID `brigadier:string` в `command_argument_type`.
@@ -370,6 +372,7 @@ pub struct PlayPlan {
 
 /// Генератор столбца по координатам чанка: `None` — чанк уже отдан.
 pub type TerrainFn = Arc<dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync>;
+pub type TerrainTrimFn = Arc<dyn Fn() + Send + Sync>;
 /// `/locate`: ближайшая точка от блока.
 pub type LocateFn = Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync>;
 /// Летящий глаз Края.
@@ -540,13 +543,6 @@ pub(crate) fn background_priority() {
 
 #[cfg(not(windows))]
 pub(crate) fn background_priority() {}
-
-/// Предел кэша кадров чанков. Кадр — уже сжатый чанк, около 4.7 КиБ, так что
-/// видимая область одного игрока при радиусе 32 — это 4 225 чанков, и кэш
-/// нужен, чтобы при повторном заходе не кодировать и не сжимать заново, а не
-/// чтобы держать весь пройденный мир. 16 384 кадра — это ~75 МБ и запас на
-/// нескольких игроков.
-const CHUNK_CACHE_LIMIT: usize = 16_384;
 
 /// Предел кэша кадров появления. Один кадр — сотня байт; ключ меняется с
 /// каждой сменой позиции, поэтому кэш короткоживущий: важен только всплеск,
@@ -1063,6 +1059,18 @@ impl Hub {
         self.send_entity(skip, packet, None);
     }
 
+    fn send_in(&self, dim: Dimension, packet: Vec<u8>) {
+        let _ = self.tx.send(Broadcast {
+            skip: None,
+            dim: Some(dim),
+            only: None,
+            packet: Arc::new(self.frame(&packet)),
+            entity: None,
+            moves: None,
+            blocks: None,
+        });
+    }
+
     /// Всем во всех мирах: чат и прочее, что не привязано к месту.
     fn send_global(&self, packet: Vec<u8>) {
         let _ = self.tx.send(Broadcast {
@@ -1407,6 +1415,39 @@ fn spiral_around(center: [i32; 2], radius: i32) -> Vec<[i32; 2]> {
     }
 }
 
+/// Горизонтальный след рамки 4×5 и, для запасного варианта, очищаемой
+/// площадки 2×3. Проверяются все блоки, которые `create_portal` меняет.
+fn portal_footprint_in_border(
+    border: &commands::state::WorldBorder,
+    now: i64,
+    at: [i32; 3],
+    axis_x: bool,
+    fallback: bool,
+) -> bool {
+    let [x, _, z] = at;
+    let (min, max) = match (axis_x, fallback) {
+        (true, false) => ([x - 1, z], [x + 2, z]),
+        (false, false) => ([x, z - 1], [x, z + 2]),
+        (true, true) => ([x - 1, z - 1], [x + 2, z + 1]),
+        (false, true) => ([x - 1, z - 1], [x + 1, z + 2]),
+    };
+    border.contains_box(now, min, max)
+}
+
+fn fallback_portal_origin(
+    border: &commands::state::WorldBorder,
+    now: i64,
+    origin: [i32; 3],
+    axis_x: bool,
+    y: i32,
+) -> Option<[i32; 3]> {
+    let dir = if axis_x { [1, 0] } else { [0, 1] };
+    spiral_around([origin[0], origin[2]], 16)
+        .into_iter()
+        .map(|[x, z]| [x - dir[0], y, z - dir[1]])
+        .find(|&at| portal_footprint_in_border(border, now, at, axis_x, true))
+}
+
 /// `PortalShape.getRelativePosition` для игрока: доля по ширине и высоте
 /// портала и смещение поперёк от середины блока.
 fn portal_relative(area: &crate::redstone::PortalRect, pos: [f64; 3]) -> (f64, f64, f64) {
@@ -1524,6 +1565,7 @@ pub(crate) struct DimState {
     template: ChunkColumn,
     /// Нормальный мир: сгенерировать недостающий чанк. Плоский — `None`.
     terrain: Option<TerrainFn>,
+    trim_idle: Option<TerrainTrimFn>,
     /// `/locate biome` в этом измерении.
     locate_biome: Option<LocateFn>,
     /// `/locate structure` в этом измерении.
@@ -1566,6 +1608,7 @@ impl DimState {
         Self {
             template: spec.template,
             terrain: spec.terrain,
+            trim_idle: spec.trim_idle,
             locate_biome: spec.locate_biome,
             locate_structure: spec.locate_structure,
             void_platform: spec.void_platform,
@@ -1592,6 +1635,7 @@ pub struct DimSpec {
     pub dimension_type: i32,
     pub template: ChunkColumn,
     pub terrain: Option<TerrainFn>,
+    pub trim_idle: Option<TerrainTrimFn>,
     pub locate_biome: Option<LocateFn>,
     pub locate_structure: Option<LocateFn>,
     pub void_platform: Option<(u32, u32)>,
@@ -1960,6 +2004,9 @@ mod jukebox;
 mod minecarts;
 mod mobs;
 mod poi;
+mod kinds;
+mod minerals;
+mod section_order;
 mod respawn;
 mod stream;
 mod unload;
@@ -2023,6 +2070,11 @@ pub mod bench {
     /// Состояние блока по умолчанию (`minecraft:stone` → ID состояния).
     pub fn state(plan: &PlayPlan, block: &str) -> Option<u32> {
         plan.survival.block_defaults.get(block).copied()
+    }
+
+    /// `/fill from to state replace`: путь команды целиком. Число сменённых блоков.
+    pub fn fill(plan: &PlayPlan, from: [i32; 3], to: [i32; 3], state: u32) -> i64 {
+        plan.fill_region(from, to, state, commands::world::FillMode::Replace, None)
     }
 
     /// Записывает один блок: полный путь `set_block` (свет, индексы, рассылка).
@@ -2457,6 +2509,7 @@ impl PlayPlan {
                             dimension_type: spec.dimension_type,
                             template: spec.template.clone(),
                             terrain: spec.terrain.clone(),
+                            trim_idle: spec.trim_idle.clone(),
                             locate_biome: spec.locate_biome.clone(),
                             locate_structure: spec.locate_structure.clone(),
                             void_platform: spec.void_platform,
@@ -2493,6 +2546,7 @@ impl PlayPlan {
             spawn_frames: Mutex::new(FastMap::default()),
             remove_frames: Mutex::new(FastMap::default()),
             random_ticking: std::sync::OnceLock::new(),
+            state_kinds: std::sync::OnceLock::new(),
             block_names,
             parsers,
             survival,
@@ -2601,13 +2655,14 @@ impl PlayPlan {
         let packet = play::level_chunk_with_light(self.ids.level_chunk_with_light, x, z, body);
         let frame = Arc::new(self.hub.frame(&packet));
         // В кэш — только если чанк не изменили, пока мы его сжимали.
+        let limit = self.chunk_frame_limit(self.active_dim());
         let world = self.dim_state().edited.read().unwrap();
         if world.get(&(x, z)).map_or(0, |e| e.1) == rev {
             let mut cache = self.dim_state().chunk_frames.lock().unwrap();
-            if cache.len() >= CHUNK_CACHE_LIMIT {
+            if cache.len() >= limit {
                 // Восьмая часть в порядке хеша (по сути случайная): без обрыва,
                 // когда весь кэш разом пересжимается для всех игроков.
-                let old: Vec<_> = cache.keys().take(CHUNK_CACHE_LIMIT / 8).copied().collect();
+                let old: Vec<_> = cache.keys().take((limit / 8).max(1)).copied().collect();
                 for k in old {
                     cache.remove(&k);
                 }
@@ -2872,44 +2927,185 @@ impl PlayPlan {
             .entry((self.active_dim(), [x >> 4, y >> 4, z >> 4]))
             .or_default()
             .push((local, state));
-        self.observe([x, y, z]);
+        self.after_block_change([x, y, z], old, state);
+        Some(old)
+    }
+
+    /// Последствия смены блока `old` → `state` в `p`: наблюдатели, жидкости,
+    /// огонь, листва соседей, кровать. Общая часть [`Self::set_block`] и
+    /// [`Self::set_blocks`].
+    fn after_block_change(&self, [x, y, z]: [i32; 3], old: u32, state: u32) {
+        let (fire_new, fire_old) = (self.is_kind(state, kinds::FIRE), self.is_kind(old, kinds::FIRE));
+        // Соседи читаются один раз на наблюдателей, огонь и листву.
+        let neighbours: [Option<u32>; 6] =
+            std::array::from_fn(|d| self.block(crate::redstone::step([x, y, z], d)));
+        self.observe_with([x, y, z], &neighbours);
         self.wake_fluids([x, y, z]);
-        if crate::fire::is_fire(self.state_name(state)) {
+        if fire_new {
             self.schedule(
                 [x, y, z],
                 crate::fire::TICK_DELAY + rand::random::<u64>() % 10,
             );
-        } else if crate::fire::is_fire(self.state_name(old)) {
+        } else if fire_old {
             self.sim().redstone_ticks.lock().unwrap().remove([x, y, z]);
         }
-        if !crate::fire::is_fire(self.state_name(old))
-            || !crate::fire::is_fire(self.state_name(state))
-        {
-            for d in 0..6 {
-                let next = crate::redstone::step([x, y, z], d);
-                if self
-                    .block(next)
-                    .is_some_and(|s| crate::fire::is_fire(self.state_name(s)))
-                {
-                    self.reschedule(next, 1);
-                }
+        for (d, n) in neighbours.iter().enumerate() {
+            let Some(n) = *n else { continue };
+            let next = crate::redstone::step([x, y, z], d);
+            if (!fire_old || !fire_new) && self.is_kind(n, kinds::FIRE) {
+                self.reschedule(next, 1);
+            }
+            if self.is_kind(n, kinds::LEAVES) {
+                self.leaves_shape(next, n, state);
             }
         }
-        if self.state_name(old).ends_with("_bed")
+        if self.is_kind(old, kinds::BED)
             && (self.state_name(old) != self.state_name(state)
                 || self.survival.placement.prop(old, "part")
                     != self.survival.placement.prop(state, "part"))
         {
             self.wake_bed_state([x, y, z], old);
         }
-        Some(old)
     }
 
-    /// Наблюдатели, смотрящие на изменённый `changed`, дают импульс через 2 тика.
-    fn observe(&self, changed: [i32; 3]) {
-        for d in 0..6 {
+    /// Пачка правок блоков (`/fill`, `/clone`): тот же итог, что
+    /// [`Self::set_block`] по очереди, но один замок мира на всю пачку и
+    /// один проход света. Последствия (наблюдатели, жидкости, огонь,
+    /// листва) — после записи всей пачки, как у ванильного `/fill`, который
+    /// ставит блоки флагом 2 и обновляет соседей в конце.
+    ///
+    /// Возвращает прежнее состояние каждой позиции (`None` — вне мира или
+    /// чанка нет).
+    pub(crate) fn set_blocks(&self, list: &[([i32; 3], u32)]) -> Vec<Option<u32>> {
+        let min_y = self.min_y();
+        let height = self.template().height();
+        let inside = |y: i32| y - min_y >= 0 && ((y - min_y) as usize) < height;
+        let mut keys: Vec<(i32, i32)> = list
+            .iter()
+            .filter(|(p, _)| inside(p[1]))
+            .map(|(p, _)| (p[0] >> 4, p[2] >> 4))
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let mut ready: FastSet<(i32, i32)> = FastSet::default();
+        for key in keys {
+            self.wait_lent(self.dim_state(), key);
+            if self.terrain().is_some() && !self.dim_state().edited.read().unwrap().contains_key(&key) {
+                self.generate_chunk(key.0, key.1);
+                if !self.dim_state().edited.read().unwrap().contains_key(&key) {
+                    continue;
+                }
+            }
+            self.materialize_void(key.0, key.1);
+            ready.insert(key);
+        }
+        let template = self.template();
+        let mut olds = vec![None; list.len()];
+        let mut changed = Vec::new();
+        let mut lit = Vec::new();
+        let mut inserted: FastSet<(i32, i32)> = FastSet::default();
+        let mut stale: FastSet<(i32, i32)> = FastSet::default();
+        {
+            let mut world = self.dim_state().edited.write().unwrap();
+            let mut dirty = self.dim_state().dirty.lock().unwrap();
+            for (i, &([x, y, z], state)) in list.iter().enumerate() {
+                let key = (x >> 4, z >> 4);
+                if !inside(y) || !ready.contains(&key) {
+                    continue;
+                }
+                let ry = (y - min_y) as usize;
+                let fresh = !world.contains_key(&key);
+                let (column, rev) = world.entry(key).or_insert_with(|| (template.clone(), 0));
+                let old = column.set_block((x & 15) as usize, ry, (z & 15) as usize, state);
+                olds[i] = Some(old);
+                if old == state {
+                    continue;
+                }
+                if fresh {
+                    inserted.insert(key);
+                }
+                *rev += 1;
+                dirty.insert(key);
+                stale.insert(key);
+                changed.push(i);
+                if !self.light.same_light(old, state) {
+                    lit.push([x, ry as i32, z]);
+                }
+            }
+        }
+        if changed.is_empty() {
+            return olds;
+        }
+        for &key in &inserted {
+            if let Some((column, _)) = self.dim_state().edited.read().unwrap().get(&key) {
+                let list = self.collect_pois(key.0, key.1, column);
+                self.store_pois(key.0, key.1, list);
+            }
+        }
+        for &i in &changed {
+            let (p, state) = list[i];
+            if !inserted.contains(&(p[0] >> 4, p[2] >> 4)) {
+                self.note_poi(p, state);
+            }
+        }
+        {
+            let platform = self.void_platform();
+            let light = &self.light;
+            let make = |cx: i32, cz: i32| {
+                let (stone, cobble) = platform?;
+                stamp_void(template, cx, cz, min_y, stone, cobble, light)
+            };
+            let mut world = self.dim_state().edited.write().unwrap();
+            // Под той же блокировкой: chunk_frame не вставит устаревший кадр.
+            let mut frames = self.dim_state().chunk_frames.lock().unwrap();
+            for key in &stale {
+                frames.remove(key);
+            }
+            if !lit.is_empty() {
+                let mut access = WorldLight {
+                    world: &mut world,
+                    fallback: self.terrain().is_none().then_some(template),
+                    touched: FastSet::default(),
+                    last: None,
+                    special: platform.is_some().then_some(&make as _),
+                };
+                Engine::new(&mut access, &self.light, height).blocks_changed(&lit);
+                let touched = std::mem::take(&mut access.touched);
+                drop(access);
+                self.dim_state()
+                    .dirty
+                    .lock()
+                    .unwrap()
+                    .extend(touched.iter().copied());
+                let first = (lit[0][0] >> 4, lit[0][2] >> 4);
+                write_light(&mut world, &mut frames, first, None, touched);
+            }
+        }
+        {
+            let dim = self.active_dim();
+            let mut pending = self.pending_blocks.lock().unwrap();
+            for &i in &changed {
+                let ([x, y, z], state) = list[i];
+                let local = ((x & 15) << 8 | (z & 15) << 4 | (y & 15)) as u16;
+                pending
+                    .entry((dim, [x >> 4, y >> 4, z >> 4]))
+                    .or_default()
+                    .push((local, state));
+            }
+        }
+        for &i in &changed {
+            let (p, state) = list[i];
+            self.after_block_change(p, olds[i].unwrap_or(AIR), state);
+        }
+        olds
+    }
+
+    /// Наблюдатели, смотрящие на изменённый блок, дают импульс через 2 тика.
+    /// Соседи уже прочитаны (порядок `redstone::step`).
+    fn observe_with(&self, changed: [i32; 3], neighbours: &[Option<u32>; 6]) {
+        for (d, s) in neighbours.iter().enumerate() {
             let n = crate::redstone::step(changed, d);
-            let Some(s) = self.block(n) else { continue };
+            let Some(s) = *s else { continue };
             if !chunkwake_world::has_flag(s, chunkwake_world::flags::OBSERVER) {
                 continue;
             }
@@ -4056,6 +4252,19 @@ impl PlayPlan {
     }
 
     /// Размеры мира в памяти по измерениям (`CHUNKWAKE_MEMSTATS`).
+    pub fn trim_idle_generators(&self) {
+        if self.gen_pool.get().is_some_and(|pool| pool.pending() != 0) {
+            return;
+        }
+        let occupied: FastSet<Dimension> = self.hub.players.lock().unwrap().values()
+            .map(|p| p.dimension).collect();
+        for (dim, state) in &self.dims {
+            if !occupied.contains(dim) && let Some(trim) = &state.trim_idle {
+                trim();
+            }
+        }
+    }
+
     pub fn mem_stats(&self) -> String {
         let mut out = String::new();
         for (dim, st) in &self.dims {
@@ -4074,14 +4283,18 @@ impl PlayPlan {
             let mobs = st.sim.mobs.lock().unwrap().len();
             let dropped = st.sim.dropped.lock().unwrap().len();
             let populated = st.sim.populated.lock().unwrap().len();
+            let saved = st.saved.lock().unwrap().len();
+            let entity_written = st.sim.entity_written.lock().unwrap().len();
+            let entity_new = st.sim.entity_new.lock().unwrap().len();
             out += &format!(
-                "{}: columns {n} (sections {} MB, light {} MB, block entities {be}), frames {frames} ({} MB), pois {pois}, mobs {mobs}, items {dropped}, populated {populated}; ",
+                "{}: columns {n} (sections {} MB, light {} MB, block entities {be}), frames {frames} ({} MB), pois {pois}, saved {saved}, mobs {mobs}, items {dropped}, populated {populated}, entity_written {entity_written}, entity_new {entity_new}; ",
                 dim.key(),
                 sec >> 20,
                 light >> 20,
                 fbytes >> 20
             );
         }
+        out += &format!("paletted sections alive {}", chunkwake_world::paletted_live());
         out
     }
 
@@ -4269,6 +4482,10 @@ impl PlayPlan {
             return dim;
         }
         *self.active.lock().unwrap()
+    }
+
+    fn border_at(&self, now: i64) -> commands::state::WorldBorder {
+        self.vars.border_at(self.active_dim(), now)
     }
 
     /// Текущее активное измерение (для `execute in` и плагинов).
@@ -5130,6 +5347,8 @@ impl PlayPlan {
         if orbs.is_empty() {
             return;
         }
+        let now = self.game_time.load(Ordering::Relaxed);
+        let border = self.border_at(now);
         // Наблюдатели и мёртвые сферы не притягивают (`EntitySelector.NO_SPECTATORS`).
         let players: Vec<[f64; 3]> = self
             .hub
@@ -5163,7 +5382,17 @@ impl PlayPlan {
                 .filter(|(_, d)| *d < crate::orbs::FOLLOW_RANGE.powi(2))
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(p, _)| *p);
-            if crate::orbs::step(o, near, solid) {
+            let old_pos = o.pos;
+            let mut sync = crate::orbs::step(o, near, solid);
+            let clipped = border.clip_movement(now, old_pos, o.pos, 0.5);
+            for axis in [0, 2] {
+                if clipped[axis] != o.pos[axis] {
+                    o.pos[axis] = clipped[axis];
+                    o.vel[axis] = 0.0;
+                    sync = true;
+                }
+            }
+            if sync {
                 syncs.push((id, o.pos, o.vel, o.on_ground));
             }
             if o.age >= crate::orbs::LIFETIME_TICKS || o.pos[1] < min_y as f64 - items::VOID_DEPTH {
@@ -5596,6 +5825,8 @@ impl PlayPlan {
             return;
         }
         let now = Instant::now();
+        let game_time = self.game_time.load(Ordering::Relaxed);
+        let border = self.border_at(game_time);
         let min_y = self.min_y();
         // Предметы вне радиуса симуляции стоят: как чанки, которые не тикают.
         let simulated = self.simulated_set();
@@ -5634,7 +5865,16 @@ impl PlayPlan {
                     }
                     d.on_ground = false;
                 }
-                let hit = items::step(d, |p| solid(w, p));
+                let old_pos = d.pos;
+                let mut hit = items::step(d, |p| solid(w, p));
+                let clipped = border.clip_movement(game_time, old_pos, d.pos, 0.25);
+                for axis in [0, 2] {
+                    if clipped[axis] != d.pos[axis] {
+                        d.pos[axis] = clipped[axis];
+                        d.vel[axis] = 0.0;
+                        hit = true;
+                    }
+                }
                 if hit || d.age.is_multiple_of(items::SYNC_TICKS) {
                     syncs.push((id, d.pos, d.vel, d.on_ground));
                 }
@@ -5793,6 +6033,7 @@ impl PlayPlan {
         };
         let mut gone = Vec::new();
         let mut stuck = Vec::new();
+        let mut bounced = Vec::new();
         let mut broken = Vec::new();
         // Ракеты без взрывов: событие есть, звука хлопка нет.
         let mut quiet = Vec::new();
@@ -5802,6 +6043,8 @@ impl PlayPlan {
         let mut hurt = Vec::new();
         let mut hurt_mobs = Vec::new();
         let simulated = self.simulated_set();
+        let now = self.game_time.load(Ordering::Relaxed);
+        let border = self.border_at(now);
         {
             let mut arrows = self.sim().arrows.lock().unwrap();
             self.with_world(|w| {
@@ -5811,7 +6054,14 @@ impl PlayPlan {
                         continue;
                     }
                     let punch = a.punch;
-                    for hit in ar::step(a, &alive, &mob_boxes, |c| solid(w, c), |c| water(w, c)) {
+                    for hit in ar::step(
+                        a,
+                        &alive,
+                        &mob_boxes,
+                        |c| solid(w, c),
+                        |c| water(w, c),
+                        |from, to| border.clip_projectile(now, from, to),
+                    ) {
                         match hit {
                             ar::Hit::Pop => {
                                 broken.push((id, true, a.pos));
@@ -5835,6 +6085,9 @@ impl PlayPlan {
                             ar::Hit::Block => {
                                 self.target_hit(a.pos, [a.vel[0], a.vel[1], a.vel[2]]);
                                 stuck.push((id, a.pos));
+                            }
+                            ar::Hit::Border => {
+                                bounced.push((id, a.pos, a.vel));
                             }
                             ar::Hit::Player(k, d, vel) => {
                                 if a.thrown {
@@ -5954,6 +6207,16 @@ impl PlayPlan {
                 1.0,
             );
         }
+        for (id, pos, vel) in bounced {
+            self.hub.send(
+                None,
+                play::teleport_entity(self.ids.teleport_entity, id, pos, 0.0, 0.0, false),
+            );
+            self.hub.send(
+                None,
+                play::set_entity_motion(self.ids.set_entity_motion, id, vel),
+            );
+        }
         for ((uuid, entity), d, punch, vel) in hurt {
             self.push_control(uuid, Control::Hurt(d, Cause::Arrow));
             if punch > 0 {
@@ -5973,13 +6236,20 @@ impl PlayPlan {
         }
         if !hurt_mobs.is_empty() {
             let mut mobs = self.sim().mobs.lock().unwrap();
+            let mut damaged = Vec::new();
             for (id, damage, at) in hurt_mobs {
-                if let Some(entry) = mobs.get_mut(&id)
+                if damage > 0.0
+                    && let Some(entry) = mobs.get_mut(&id)
                     && crate::mobs::hurt(&mut entry.mob, damage, Some(at), 0.4).is_some()
                 {
+                    damaged.push(entry.mob.pos);
                     self.hub
                         .send(None, play::hurt_animation(self.ids.hurt_animation, id, 0.0));
                 }
+            }
+            drop(mobs);
+            for pos in damaged {
+                self.emit_vibration(pos, "minecraft:entity_damage");
             }
         }
         if !gone.is_empty() {
@@ -6708,11 +6978,11 @@ impl PlayPlan {
         let entry_state = self.block_in(from, entry)?;
         let entry_axis_x = pl.prop(entry_state, "axis") != Some("z");
         let scale = from.coordinate_scale(to);
-        let approx = [
-            (feet[0] * scale).floor() as i32,
-            feet[1].floor() as i32,
-            (feet[2] * scale).floor() as i32,
-        ];
+        let now = self.game_time.load(Ordering::Relaxed);
+        let approx = self.vars.border_at(to, now).clamp_to_bounds(
+            now,
+            [feet[0] * scale, feet[1], feet[2] * scale],
+        );
         let exit = match self.closest_portal(to, approx, to == Dimension::Nether) {
             Some(pos) => self.portal_rect_around(to, pos)?,
             None => self.create_portal(to, approx, entry_axis_x)?,
@@ -6741,6 +7011,8 @@ impl PlayPlan {
     /// высоте; ближайший, при равенстве — ниже.
     fn closest_portal(&self, dim: Dimension, around: [i32; 3], to_nether: bool) -> Option<[i32; 3]> {
         let radius = if to_nether { 16 } else { 128 };
+        let now = self.game_time.load(Ordering::Relaxed);
+        let border = self.vars.border_at(dim, now);
         // `ensureLoadedAndValid`: регионы квадрата читаются с диска.
         with_dim(dim, || {
             for rx in (around[0] - radius) >> 9..=(around[0] + radius) >> 9 {
@@ -6774,7 +7046,8 @@ impl PlayPlan {
         candidates
             .into_iter()
             .filter(|p| {
-                self.block_in(dim, *p)
+                border.contains_block(now, *p)
+                    && self.block_in(dim, *p)
                     .is_some_and(|s| self.state_name(s) == "minecraft:nether_portal")
             })
             .min_by(|a, b| dist(a).cmp(&dist(b)).then(a[1].cmp(&b[1])))
@@ -6809,11 +7082,12 @@ impl PlayPlan {
         Some(crate::redstone::PortalRect { bottom_left: low, width, height, along_x })
     }
 
-    /// `PortalForcer.createPortal` 1:1: по спирали радиуса 16 вокруг точки
+    /// `PortalForcer.createPortal`: по спирали радиуса 16 вокруг точки
     /// ищется столбец, где рамка 4×5 встаёт на твёрдое в пустоте («полное»
     /// место — с запасом по обе стороны, иначе «частичное»); выше логической
     /// высоты мира портал не ставится. Не нашлось — площадка из обсидиана
-    /// 3×2 на высоте `clamp(y, 70, верх − 9)`.
+    /// 3×2 на высоте `clamp(y, 70, верх − 9)`. След всех новых блоков
+    /// должен полностью попадать внутрь границы мира.
     fn create_portal(
         &self,
         dim: Dimension,
@@ -6828,6 +7102,8 @@ impl PlayPlan {
         let max_y = min_y + height - 1;
         let logical = if dim == Dimension::Nether { 128 } else { height };
         let max_placeable = max_y.min(min_y + logical - 1);
+        let now = self.game_time.load(Ordering::Relaxed);
+        let border = self.vars.border_at(dim, now);
         // Направление вдоль оси (+x или +z) и по часовой от него.
         let dir = if axis_x { [1, 0] } else { [0, 1] };
         let cw = if axis_x { [0, 1] } else { [-1, 0] };
@@ -6870,6 +7146,9 @@ impl PlayPlan {
         let mut full: Option<([i32; 3], f64)> = None;
         let mut partial: Option<([i32; 3], f64)> = None;
         for [cx, cz] in spiral_around([origin[0], origin[2]], 16) {
+            if !portal_footprint_in_border(&border, now, [cx, 0, cz], axis_x, false) {
+                continue;
+            }
             // `getHeight(MOTION_BLOCKING)`: над верхним блоком, что мешает
             // движению или держит жидкость.
             let mut top = min_y;
@@ -6914,7 +7193,7 @@ impl PlayPlan {
                 if high < low {
                     return None;
                 }
-                let at = [origin[0] - dir[0], origin[1].clamp(low, high), origin[2] - dir[1]];
+                let at = fallback_portal_origin(&border, now, origin, axis_x, origin[1].clamp(low, high))?;
                 for b in -1..2 {
                     for w in 0..2 {
                         for h in -1..3 {
@@ -7202,7 +7481,17 @@ impl PlayPlan {
                             .weathering
                             .get(name)
                             .is_some_and(|w| w.1.is_some());
-                    name == "minecraft:lava" || copper || crate::plants::random_tick_candidate(name)
+                    // `LeavesBlock.isRandomlyTicking`: только распадающаяся.
+                    if name.ends_with("_leaves") && self.survival.placement.prop(state, "distance").is_some() {
+                        return self.is_kind(state, kinds::DECAYING);
+                    }
+                    name == "minecraft:lava"
+                        || copper
+                        || crate::plants::random_tick_candidate(name)
+                        || name == "minecraft:budding_amethyst"
+                        // `RedStoneOreBlock.isRandomlyTicking`: только горящая.
+                        || (minerals::is_redstone_ore(name)
+                            && self.survival.placement.prop(state, "lit") == Some("true"))
                 })
                 .collect()
         });
@@ -7242,11 +7531,18 @@ impl PlayPlan {
             if self.block(p) != Some(sampled_state) {
                 continue;
             }
-            if self.survival.transforms.weathering.contains_key(self.state_name(sampled_state)) {
+            if self.is_kind(sampled_state, kinds::DECAYING) {
+                self.leaves_decay(p, sampled_state);
+                continue;
+            }
+            if self.tick_mineral(p, sampled_state) {
+                continue;
+            }
+            if self.is_kind(sampled_state, kinds::WEATHERING) {
                 self.tick_weathering(p, sampled_state);
                 continue;
             }
-            if self.state_name(sampled_state) != "minecraft:lava" {
+            if !self.is_kind(sampled_state, kinds::LAVA) {
                 self.tick_plant(p, sampled_state);
                 continue;
             }
@@ -7496,25 +7792,6 @@ impl PlayPlan {
         if let Some(wood) = crate::plants::tree_wood(name) {
             if rand::random::<u8>() % 7 == 0 {
                 self.tick_sapling(pos, state, wood);
-            }
-            return;
-        }
-        if name.ends_with("_leaves") {
-            let logs = self.survival.block_tags.get("minecraft:logs");
-            let distance = crate::plants::leaf_distance(pos, |at| {
-                let block = self.block(at)?;
-                let block_name = self.state_name(block);
-                Some((
-                    block_name.ends_with("_leaves"),
-                    logs.is_some_and(|set| set.contains(block_name)),
-                ))
-            });
-            if pl.prop(state, "persistent") == Some("false") && distance == 7 {
-                self.pop_block(pos, state);
-            } else if let Some(next) = pl.with_prop(state, "distance", &distance.to_string()) {
-                if next != state {
-                    self.set_block(pos, next);
-                }
             }
             return;
         }
@@ -8231,6 +8508,8 @@ impl PlayPlan {
         if self.sim().tnt.lock().unwrap().is_empty() {
             return;
         }
+        let now = self.game_time.load(Ordering::Relaxed);
+        let border = self.border_at(now);
         let simulated = self.simulated_set();
         let mut moved = Vec::new();
         let mut due = Vec::new();
@@ -8244,11 +8523,19 @@ impl PlayPlan {
                 if !simulated.is_empty() && !simulated.contains(&chunk) {
                     continue;
                 }
+                let old_pos = entity.pos;
                 let expired = entity.step(|p| {
                     self.block(p).is_some_and(|s| {
                         chunkwake_world::has_flag(s, chunkwake_world::flags::SOLID)
                     })
                 });
+                let clipped = border.clip_movement(now, old_pos, entity.pos, crate::tnt::WIDTH);
+                for axis in [0, 2] {
+                    if clipped[axis] != entity.pos[axis] {
+                        entity.pos[axis] = clipped[axis];
+                        entity.vel[axis] = 0.0;
+                    }
+                }
                 moved.push((id, entity.pos, entity.vel));
                 if expired {
                     due.push((id, entity.pos));
@@ -8500,6 +8787,7 @@ impl PlayPlan {
             }
         }
         let mut mobs = self.sim().mobs.lock().unwrap();
+        let mut damaged = Vec::new();
         for (&id, entry) in mobs.iter_mut() {
             let mpos = entry.mob.pos;
             let dist = center
@@ -8515,11 +8803,15 @@ impl PlayPlan {
             if damage > 0.0
                 && crate::mobs::hurt(&mut entry.mob, damage, Some(center), 0.4).is_some()
             {
+                damaged.push(mpos);
                 self.hub
                     .send(None, play::hurt_animation(self.ids.hurt_animation, id, 0.0));
             }
         }
         drop(mobs);
+        for pos in damaged {
+            self.emit_vibration(pos, "minecraft:entity_damage");
+        }
         self.explode_minecarts(center, power);
         self.explode_item_frames(center, power);
     }
@@ -9325,20 +9617,10 @@ impl PlayPlan {
         let batch: Vec<BlockItem> = pending
             .into_iter()
             .map(|((dim, [sx, sy, sz]), mut blocks)| {
-                // Последняя запись позиции побеждает: промежуточные не рассылаются.
-                // Битсет вместо `HashSet`: локальный индекс секции — 0..4096,
-                // и хэшировать его на каждый блок дороже самой проверки.
+                // Позиция — один раз, с последним состоянием, в порядке
+                // набора позиций ванили.
                 if blocks.len() > 1 {
-                    let mut seen = [0u64; 64];
-                    blocks.reverse();
-                    blocks.retain(|(local, _)| {
-                        let bit = &mut seen[*local as usize >> 6];
-                        let mask = 1u64 << (*local as usize & 63);
-                        let fresh = *bit & mask == 0;
-                        *bit |= mask;
-                        fresh
-                    });
-                    blocks.reverse();
+                    blocks = section_order::vanilla_order(&blocks);
                 }
                 let packet = match blocks.as_slice() {
                     [(local, state)] => {
@@ -9496,7 +9778,7 @@ impl PlayPlan {
         ))
         .await?;
         let now = self.game_time.load(Ordering::Relaxed);
-        let border = self.vars.border_at(now).login(now);
+        let border = self.border_at(now).login(now);
         conn.send(&play::initialize_border_state(
             self.ids.initialize_border,
             border,
@@ -10015,6 +10297,14 @@ impl PlayPlan {
                     game_ticks += 1;
                     self.tick_maps(conn, uuid, &state.inv).await?;
                     let feet = self.player_at(uuid).map(|p| p.0).unwrap_or(me.pos);
+                    // `Block.stepOn` (`applyEffectsFromBlocks`, блок `getOnPosLegacy`):
+                    // на земле и не крадучись — редстоун-руда загорается.
+                    if !state.vitals.dead && login.spawn.game_mode != 3 && !sneaking
+                        && self.hub.players.lock().unwrap().get(&uuid).is_some_and(|p| p.on_ground)
+                    {
+                        let on = [feet[0].floor() as i32, (feet[1] - 0.2).floor() as i32, feet[2].floor() as i32];
+                        self.touch_redstone_ore(on);
+                    }
                     let mut view = crate::environment::probe(feet, 0.6, 1.8, EYE_HEIGHT,
                         |p| self.environment_kind(self.block(p)));
                     if self.effect_amp(&state.vitals, "minecraft:water_breathing").is_some()
@@ -10338,19 +10628,40 @@ impl PlayPlan {
                                 }
                             }
                         }
+                        if let Some(to) = m.pos
+                            && let Some((from, fyaw, fpitch)) = self.player_at(uuid)
+                        {
+                            let now = self.game_time.load(Ordering::Relaxed);
+                            let clipped = self
+                                .border_at(now)
+                                .clip_movement(now, from, to, PLAYER_WIDTH);
+                            if clipped != to {
+                                let (yaw, pitch) = m.rot.unwrap_or((fyaw, fpitch));
+                                teleport_id += 1;
+                                center = self.teleport(conn, uuid, clipped, yaw, pitch, teleport_id, &mut stream).await?;
+                                state.vitals.reset_fall(clipped);
+                                continue;
+                            }
+                        }
                         let y = m.pos.map(|p| p[1]);
                         let slow = self.effect_amp(&state.vitals, "minecraft:slow_falling").is_some();
-                        let in_water = m.pos.is_some_and(|p| self.standing_in_water(p));
+                        let feet = m.pos.or_else(|| self.player_at(uuid).map(|(pos, _, _)| pos));
+                        let in_water = feet.is_some_and(|p| self.standing_in_water(p));
                         let landing = state.vitals.landing_fall(m.pos, m.on_ground);
                         if let Some(d) = state.vitals.on_move(m.pos, m.on_ground, survival, slow) {
                             let scale = if in_water {
                                 0.0
                             } else {
-                                m.pos.map_or(1.0, |p| self.fall_scale(p))
+                                feet.map_or(1.0, |p| self.fall_scale(p))
                             };
                             if scale > 0.0 {
-                                self.hurt(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, d * scale, Cause::Fall).await?;
+                                self.hurt_at(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, d * scale, Cause::Fall, feet).await?;
                             }
+                        }
+                        if !in_water && landing.is_some_and(|fall| fall > 0.0)
+                            && let Some(feet) = feet
+                        {
+                            self.emit_vibration(feet, "minecraft:hit_ground");
                         }
                         if in_water {
                             state.vitals.clear_fall();
@@ -10365,19 +10676,19 @@ impl PlayPlan {
                             && last_void.is_none_or(|t| t.elapsed() >= TICK * survival::VOID_INTERVAL_TICKS as u32)
                         {
                             last_void = Some(Instant::now());
-                            self.hurt(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, survival::VOID_DAMAGE, Cause::Void).await?;
+                            self.hurt_at(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, survival::VOID_DAMAGE, Cause::Void, m.pos).await?;
                         }
                         // `LivingEntity.baseTick`: за границей мира бьёт
                         // `max(1, floor(-dist * damage))`, где `dist` — расстояние
                         // до кромки плюс `safeZone`.
                         if survival && let Some([x, _, z]) = m.pos {
                             let now = self.game_time.load(Ordering::Relaxed);
-                            let border = self.vars.border_at(now);
+                            let border = self.border_at(now);
                             let dist = border.distance_to(now, x, z) + border.buffer as f64;
                             let per_block = border.damage as f64;
                             if dist < 0.0 && per_block > 0.0 {
                                 let amount = ((-dist) * per_block).floor().max(1.0) as f32;
-                                self.hurt(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, amount, Cause::OutsideBorder).await?;
+                                self.hurt_at(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, amount, Cause::OutsideBorder, m.pos).await?;
                             }
                         }
                         if let Some([x, _, z]) = m.pos {
@@ -11028,6 +11339,9 @@ impl PlayPlan {
                                     }
                                     _ if mode >= 2 => resync = a.action != play::ABORT_DESTROY_BLOCK,
                                     play::START_DESTROY_BLOCK => {
+                                        // `RedStoneOreBlock.attack`: удар зажигает руду.
+                                        self.touch_redstone_ore(a.pos);
+                                        let block = self.block(a.pos).unwrap_or(AIR);
                                         let p = self.destroy_progress(uuid, block, held, state.inv.slots[5], &state.vitals);
                                         if block != AIR && p >= 1.0 {
                                             self.mine(conn, uuid, a.pos, block, state).await?;
@@ -11261,6 +11575,31 @@ impl PlayPlan {
                                         self.break_in_hand(me.entity_id, u.hand != 0);
                                     } else { state.inv.slots[slot] = Some(held); }
                                     self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                }
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                                continue;
+                            }
+                        }
+                        // `RedStoneOreBlock.useItemOn`: клик зажигает руду; с блоком
+                        // в руке дальше ставится блок, иначе на этом всё (`SUCCESS`).
+                        if minerals::is_redstone_ore(&clicked)
+                            && !state.vitals.dead
+                            && login.spawn.game_mode != 3
+                            && !(sneaking && (state.inv.held().is_some() || state.inv.slots[survival::OFFHAND].is_some()))
+                            && self.player_at(uuid).is_some_and(|(p, _, _)| block_reach(eye_of(p), u.pos, if login.spawn.game_mode == 1 { 5.0 } else { 4.5 }))
+                        {
+                            self.touch_redstone_ore(u.pos);
+                            let slot = if u.hand == 0 { state.inv.held_slot() } else { survival::OFFHAND };
+                            let places = state.inv.slots[slot]
+                                .is_some_and(|s| self.item_blocks.get(s.item as usize).copied().flatten().is_some());
+                            if !places {
+                                // Эхо кликнутой клетки и соседней по грани, как `handleUseItemOn`.
+                                let now = self.block(u.pos).unwrap_or(AIR);
+                                conn.send(&play::block_update(ids.block_update, u.pos, now as i32)).await?;
+                                if let Some(d) = play::direction_offset(u.face) {
+                                    let side = [u.pos[0] + d[0], u.pos[1] + d[1], u.pos[2] + d[2]];
+                                    let there = self.block(side).unwrap_or(AIR);
+                                    conn.send(&play::block_update(ids.block_update, side, there as i32)).await?;
                                 }
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                                 continue;
@@ -11771,10 +12110,15 @@ impl PlayPlan {
                                 }
                                 // Новое состояние — до подтверждения: иначе клиент откатит
                                 // свой предсказанный блок к воздуху до рассылки тика (мигание).
+                                // `handleUseItemOn` шлёт кликнутую клетку и соседнюю по
+                                // грани — первыми и в этом порядке; прочие наши — следом.
+                                let side = play::direction_offset(u.face)
+                                    .map(|d| [u.pos[0] + d[0], u.pos[1] + d[1], u.pos[2] + d[2]]);
                                 touched.extend(std::iter::once(target).chain(extra.iter().map(|e| e.0)));
                                 touched.sort();
                                 touched.dedup();
-                                for p in touched {
+                                touched.retain(|p| *p != u.pos && Some(*p) != side);
+                                for p in std::iter::once(u.pos).chain(side).chain(touched) {
                                     let s = self.block(p).unwrap_or(AIR);
                                     conn.send(&play::block_update(ids.block_update, p, s as i32)).await?;
                                 }
@@ -12214,38 +12558,45 @@ impl PlayPlan {
         let unstable_tnt = self.state_name(old) == "minecraft:tnt"
             && self.survival.placement.prop(old, "unstable") == Some("true")
             && drops.is_some();
-        // Ножницы разоружают нить перед снятием (`TripWireBlock.playerWillDestroy`):
-        // в мир пишется `disarmed = true`, и последующий пересчёт крюков
-        // видит разоружённую нить — сигнал не поднимается. У нас блок уже
-        // снят, поэтому крюкам передаётся именно такое состояние.
-        let disarmed_by_shears = chunkwake_world::has_rare(old, chunkwake_world::rare::TRIPWIRE)
+        // `playerWillDestroy` помечает нить разоружённой до снятия блока.
+        // При пересчёте крюкам передаётся это состояние, хотя блок уже убран.
+        let is_tripwire = chunkwake_world::has_rare(old, chunkwake_world::rare::TRIPWIRE);
+        let disarmed_by_shears = is_tripwire
             && self.live.lock().unwrap().get(&uuid).is_some_and(|l| {
                 self.item_name(l.slots[36 + l.selected].map_or(0, |s| s.item)) == "minecraft:shears"
             });
+        if disarmed_by_shears {
+            self.emit_vibration(
+                [
+                    pos[0] as f64 + 0.5,
+                    pos[1] as f64 + 0.5,
+                    pos[2] as f64 + 0.5,
+                ],
+                "minecraft:shear",
+            );
+        }
         // Сломан включённый рычаг или кнопка — сигнал пропадает.
         if self.survival.placement.prop(old, "powered") == Some("true") && {
             let n = self.state_name(old);
-            crate::redstone::is_lever(n)
-                || crate::redstone::is_button(n)
-                || crate::redstone::is_tripwire(n)
+            crate::redstone::is_lever(n) || crate::redstone::is_button(n)
         } {
-            if disarmed_by_shears {
-                // Разоружённая нить молчит: крюки считаются по `disarmed`.
-                if let Some(gone) = self.survival.placement.with_prop(old, "disarmed", "true") {
-                    self.update_tripwire_source(pos, gone);
-                }
-            } else {
-                self.update_power(old, pos);
-            }
+            self.update_power(old, pos);
         } else {
             self.redstone_update(&crate::redstone::around(pos));
         }
-        // Нить снята без ножниц: крюки теряют `attached` и сигнал.
-        if chunkwake_world::has_rare(old, chunkwake_world::rare::TRIPWIRE)
-            && !disarmed_by_shears
-            && let Some(on) = self.survival.placement.with_prop(old, "powered", "true")
-        {
-            self.update_tripwire_source(pos, on);
+        // `affectNeighborsAfterRemoval` передаёт крюкам снятую нить с
+        // `powered=true`: обычный разрыв даёт импульс, ножницы — нет.
+        if is_tripwire {
+            let removed = if disarmed_by_shears {
+                self.survival.placement.with_prop(old, "disarmed", "true")
+            } else {
+                Some(old)
+            };
+            if let Some(on) =
+                removed.and_then(|s| self.survival.placement.with_prop(s, "powered", "true"))
+            {
+                self.update_tripwire_source(pos, on);
+            }
         }
         // Крюк: цепь рушится, а включённый ещё и гасит соседей (`onRemoved`).
         if chunkwake_world::has_rare(old, chunkwake_world::rare::TRIPWIRE_HOOK) {
@@ -14297,6 +14648,10 @@ impl PlayPlan {
     fn scheduled_tick(&self, pos: [i32; 3], now: u64) {
         use crate::redstone as rs;
         let Some(state) = self.block(pos) else { return };
+        if self.is_kind(state, kinds::LEAVES) {
+            self.leaves_tick(pos, state);
+            return;
+        }
         let name = self.state_name(state).to_owned();
         let pl = &self.survival.placement;
         let at = |p: [i32; 3]| self.block(p).unwrap_or(AIR);
@@ -17270,12 +17625,12 @@ impl PlayPlan {
     ///
     /// Ванила смотрит только `SOUTH` и `WEST`: второй крюк найдётся, когда
     /// очередь дойдёт до него от своей позиции.
-    fn update_tripwire_source(&self, pos: [i32; 3], _state: u32) {
+    fn update_tripwire_source(&self, pos: [i32; 3], state: u32) {
         for dir in crate::redstone::WIRE_SCAN {
-            let Some(hook) = self.tripwire_hook_toward(pos, dir) else {
+            let Some((hook, distance)) = self.tripwire_hook_toward(pos, dir) else {
                 continue;
             };
-            self.tripwire_hook_state(hook, false, false, -1, None);
+            self.tripwire_hook_state(hook, false, true, distance, Some(state));
         }
     }
 
@@ -17434,14 +17789,14 @@ impl PlayPlan {
 
     /// Крюк в стороне `dir` от нити: ванильный `updateSource` ищет его в
     /// пределах 42 блоков и требует, чтобы он смотрел навстречу.
-    fn tripwire_hook_toward(&self, pos: [i32; 3], dir: usize) -> Option<[i32; 3]> {
+    fn tripwire_hook_toward(&self, pos: [i32; 3], dir: usize) -> Option<([i32; 3], i32)> {
         let pl = &self.survival.placement;
         for i in 1..crate::redstone::WIRE_DIST_MAX {
             let p = crate::redstone::place(pos, dir, i as usize);
             let s = self.block(p)?;
             if chunkwake_world::has_rare(s, chunkwake_world::rare::TRIPWIRE_HOOK) {
                 return (pl.prop(s, "facing") == Some(crate::redstone::opposite_name(dir)))
-                    .then_some(p);
+                    .then_some((p, i));
             }
             if !chunkwake_world::has_rare(s, chunkwake_world::rare::TRIPWIRE) {
                 return None;
@@ -19218,6 +19573,21 @@ impl PlayPlan {
         amount: f32,
         cause: Cause,
     ) -> Result<(), NetError> {
+        self.hurt_at(conn, me, v, inv, xp, amount, cause, None).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn hurt_at(
+        &self,
+        conn: &mut Connection,
+        me: &Online,
+        v: &mut Vitals,
+        inv: &mut Inventory,
+        xp: &mut crate::xp::Experience,
+        amount: f32,
+        cause: Cause,
+        origin: Option<[f64; 3]>,
+    ) -> Result<(), NetError> {
         self.wake_player(me.entry.uuid);
         let mut amount = survival::resisted(
             amount,
@@ -19276,7 +19646,13 @@ impl PlayPlan {
         if amount <= 0.0 {
             return Ok(());
         }
+        let was_dead = v.dead;
         let died = v.damage(amount);
+        if !was_dead
+            && let Some(at) = origin.or_else(|| self.player_at(me.entry.uuid).map(|(pos, _, _)| pos))
+        {
+            self.emit_vibration(at, "minecraft:entity_damage");
+        }
         self.send_health(conn, v).await?;
         let damage_type = match cause {
             Cause::Fall => Some(self.survival.damage_fall),
@@ -19686,6 +20062,29 @@ mod tests {
     };
     use crate::survival::PlayerState;
     use uuid::Uuid;
+
+    #[test]
+    fn new_portal_frame_and_fallback_stay_inside_border() {
+        let border = super::commands::state::WorldBorder {
+            from: 10.0,
+            to: 10.0,
+            ..Default::default()
+        };
+        assert!(super::portal_footprint_in_border(&border, 0, [0, 70, 0], true, false));
+        assert!(!super::portal_footprint_in_border(&border, 0, [3, 70, 0], true, false));
+        assert!(!super::portal_footprint_in_border(&border, 0, [0, 70, 3], false, false));
+
+        let fallback = super::fallback_portal_origin(&border, 0, [4, 70, 0], true, 70).unwrap();
+        assert!(super::portal_footprint_in_border(&border, 0, fallback, true, true));
+        assert!(fallback[0] < 3);
+
+        let narrow = super::commands::state::WorldBorder {
+            from: 3.0,
+            to: 3.0,
+            ..Default::default()
+        };
+        assert!(super::fallback_portal_origin(&narrow, 0, [0, 70, 0], true, 70).is_none());
+    }
 
     #[test]
     fn lectern_buttons_select_previous_next_and_absolute_page() {

@@ -4,6 +4,8 @@ use std::collections::HashSet;
 
 pub const FUSE: i32 = 80;
 pub const POWER: f32 = 4.0;
+/// `EntityType.TNT`: ширина коробки столкновения.
+pub const WIDTH: f64 = 0.98;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Primed {

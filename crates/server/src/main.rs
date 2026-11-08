@@ -14,8 +14,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use tokio::net::TcpListener;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     // Локальные переменные окружения (например, CHUNKWAKE_JAVA) из .env в текущем
     // каталоге или выше. Переменные, уже заданные в окружении, не перезаписываются.
     //
@@ -27,7 +26,19 @@ async fn main() {
     if let Err(error) = dotenv_in_server_dir() {
         eprintln!("warning: .env: {error}");
     }
-    if let Err(error) = cli::execute().await {
+    let dir = std::env::args().collect::<Vec<_>>().windows(2)
+        .find(|pair| pair[0] == "--dir")
+        .map_or_else(|| std::path::PathBuf::from("."), |pair| std::path::PathBuf::from(&pair[1]));
+    let (requested, view_distance) = config::Properties::load(&dir.join("server.properties"))
+        .map_or((config::MemoryProfile::Auto, 8), |p| (p.memory_profile, p.view_distance));
+    let budget = config::MemoryBudget::resolve(requested, view_distance);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(budget.tokio_workers)
+        .max_blocking_threads(budget.blocking_threads)
+        .enable_all()
+        .build()
+        .expect("build Tokio runtime");
+    if let Err(error) = runtime.block_on(cli::execute()) {
         eprintln!("error: {error}");
         std::process::exit(1);
     }
@@ -165,7 +176,12 @@ impl tracing_subscriber::fmt::time::FormatTime for LogTime {
 async fn serve(dir: &Path) -> Result<(), String> {
     let _server_lock = backup::lock(dir)?;
     let (props, version) = cli::check(dir)?;
+    let budget = config::MemoryBudget::resolve(props.memory_profile, props.view_distance);
+    chunkwake_bridge::set_jvm_max_heap(budget.jvm_xmx);
     init_logging(dir, props.log_level)?;
+    tracing::info!("memory profile: {:?}, gen workers {}, Tokio workers {}, blocking {}, proto limit {}, base columns {}",
+        budget.profile, budget.gen_workers, budget.tokio_workers, budget.blocking_threads,
+        budget.proto_limit, budget.base_column_limit);
     tracing::info!("Minecraft {} (protocol {})", version.name, version.protocol);
     let boot_started = std::time::Instant::now();
 
@@ -219,9 +235,7 @@ async fn serve(dir: &Path) -> Result<(), String> {
     play.set_maps_dir(dir.join(&props.level_name).join("data/minecraft/maps"));
     // Генерация чанков — на своих потоках, чтобы тик не ждал счёта.
     play.set_self_weak();
-    play.set_gen_pool(chunkwake_net::chunkgen::GenPool::new(
-        chunkwake_net::chunkgen::workers(),
-    ));
+    play.set_gen_pool(chunkwake_net::chunkgen::GenPool::new(budget.gen_workers));
     play.set_ops(chunkwake_net::ops::OpList::load(dir.join("ops.json"))?);
     play.set_spawn_protection(props.spawn_protection as i32);
     tracing::info!(
@@ -253,10 +267,18 @@ async fn serve(dir: &Path) -> Result<(), String> {
     let autosave_task = storage.spawn_autosave(play.clone());
     let unload_task = storage.spawn_unloader(play.clone());
     if std::env::var_os("CHUNKWAKE_MEMSTATS").is_some() {
+        #[cfg(feature = "alloc-count")]
+        chunkwake_server::alloc_count::init_trace();
         let plan = play.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(10));
             tracing::info!("memstats world: {}", plan.mem_stats());
+            #[cfg(feature = "alloc-count")]
+            tracing::info!(
+                "memstats heap: {}{}",
+                chunkwake_server::alloc_count::report(),
+                chunkwake_server::alloc_count::trace_report()
+            );
             if std::env::var_os("CHUNKWAKE_MEMSTATS_MI").is_some() {
                 // SAFETY: функции mimalloc без аргументов-указателей кроме null.
                 unsafe {

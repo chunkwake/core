@@ -312,15 +312,20 @@ impl PlayPlan {
         if !pos.iter().all(|v| v.is_finite()) {
             return None;
         }
-        let id = {
+        let now = self.game_time.load(Ordering::Relaxed);
+        let border = self.border_at(now);
+        let (id, pos, corrected) = {
             let mut boats = self.sim().boats.lock().unwrap();
             let (&id, b) = boats.iter_mut().find(|(_, b)| b.riders.first().is_some_and(|r| r.0 == uuid))?;
+            let clipped = border.clip_movement(now, b.pos, pos, WIDTH);
+            let corrected = clipped != pos;
+            let pos = clipped;
             b.pos = pos;
             b.yaw = yaw;
-            id
+            (id, pos, corrected)
         };
         self.hub.send(
-            Some(uuid),
+            if corrected { None } else { Some(uuid) },
             play::teleport_entity(self.ids.teleport_entity, id, pos, yaw, 0.0, false),
         );
         Some(pos)

@@ -2206,6 +2206,19 @@ mod tests {
         );
         assert!(from_wire.reschedule, "крюку нужен повторный тик");
 
+        // При снятии нить уже заменена воздухом, но `calculateState` получает
+        // её последнее состояние отдельно: обычный разрыв даёт импульс,
+        // разоружение ножницами не подаёт сигнал.
+        let removed = [id["hook"], id["air"], id["wire_false_false"], id["hook_west_false"]];
+        let plain = scan_chain(&pl, 5, false, 1, Some(id["wire_true_false"]), |i| {
+            removed.get(i).copied()
+        });
+        assert!(plain.attached && plain.powered);
+        let sheared = scan_chain(&pl, 5, false, 1, Some(id["wire_true_true"]), |i| {
+            removed.get(i).copied()
+        });
+        assert!(!sheared.attached && !sheared.powered);
+
         // Крюк вплотную (`receiverPos == 1`) цепью не считается:
         // `attached &= receiverPos > 1`.
         let blocks = [id["hook"], id["hook_west_false"]];

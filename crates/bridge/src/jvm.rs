@@ -111,6 +111,12 @@ pub fn class_path(api_dir: &Path, game_jar: Option<&Path>) -> Result<String, Str
 }
 
 /// Создаёт JVM в текущем потоке и вызывает `Bridge.boot(table)`.
+static MAX_HEAP: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+
+pub(super) fn set_max_heap(option: Option<&'static str>) {
+    let _ = MAX_HEAP.set(option);
+}
+
 pub fn boot(lib: &Path, class_path: &str, table: i64) -> Result<(), String> {
     let library = load(lib)?;
     let create: libloading::Symbol<CreateJavaVm> =
@@ -124,6 +130,8 @@ pub fn boot(lib: &Path, class_path: &str, table: i64) -> Result<(), String> {
     ];
     if let Ok(extra) = std::env::var("CHUNKWAKE_JVM_ARGS") {
         opts.extend(extra.split_whitespace().map(str::to_owned));
+    } else if let Some(option) = MAX_HEAP.get().copied().flatten() {
+        opts.push(option.to_owned());
     }
     let strings: Vec<CString> = opts
         .into_iter()

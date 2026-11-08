@@ -440,7 +440,7 @@ const OUT_KEEP: usize = 256 * 1024;
 /// Раньше ужимали всё, что больше `OUT_KEEP`, то есть на каждой пачке
 /// 257 КиБ — а это переезд буфера и `memcpy`. Обычная пачка чанков при
 /// входе (96 × ~4.7 КиБ) в новый порог влезает и остаётся на месте.
-const OUT_MAX_KEEP: usize = 2 * 1024 * 1024;
+const OUT_MAX_KEEP: usize = 256 * 1024;
 
 impl Connection {
     pub fn new(stream: TcpStream) -> Self {

@@ -17,6 +17,8 @@ fn main() {
     let seed: i64 = a[2].parse().unwrap();
     let len: i32 = a.get(3).map_or(120, |v| v.parse().unwrap());
     let width: i32 = a.get(4).map_or(20, |v| v.parse().unwrap());
+    let proto_limit: usize = a.get(5).map_or(2048, |v| v.parse().unwrap());
+    let trim_midway = a.get(6).is_some_and(|v| v == "trim");
 
     let registries = chunkwake_data::registries::RegistryData::load(data).unwrap();
     let biome_ids: HashMap<String, u32> = registries
@@ -31,6 +33,7 @@ fn main() {
     let state = |n: &str| blocks.default_state(n).ok().map(|s| s as u32);
     let world = chunkwake_worldgen::pipeline::Overworld::new(Arc::new(noise), &state, &biome_ids)
         .unwrap()
+        .with_memory_limits(proto_limit, 16_384)
         .with_features(data, &blocks.states(), &state, &biome_ids)
         .unwrap();
 
@@ -72,6 +75,7 @@ fn main() {
         }
         if i as i32 == len * width {
             eprintln!("first strip done: {}", world.mem_stats());
+            if trim_midway { world.trim_idle(); }
         }
         if i % 500 == 0 {
             eprintln!("{i}/{} {:.0} s", order.len(), started.elapsed().as_secs_f64());

@@ -302,6 +302,50 @@ impl<'a, A: LightAccess> Engine<'a, A> {
         self.relight(Kind::Block, p);
     }
 
+    /// Блоки в `ps` уже заменены: пересчёт одним проходом на все сразу.
+    ///
+    /// Гашение от всех изменённых клеток идёт одной волной, рост — тоже:
+    /// для `/fill` это один BFS вместо BFS на каждый блок. Итог тот же, что
+    /// у [`Self::block_changed`] по очереди (тест `batch_matches_sequential`).
+    pub fn blocks_changed(&mut self, ps: &[[i32; 3]]) {
+        let Some(&first) = ps.first() else { return };
+        if self.has_sky(first) {
+            self.relight_many(Kind::Sky, ps);
+        }
+        self.relight_many(Kind::Block, ps);
+    }
+
+    fn relight_many(&mut self, kind: Kind, ps: &[[i32; 3]]) {
+        for &p in ps {
+            if self.state(p).is_none() {
+                continue;
+            }
+            let cur = self.get(kind, p).unwrap_or(0);
+            if cur > 0 {
+                self.set(kind, p, 0);
+                self.dec.push_back((p, cur));
+            }
+        }
+        self.decrease(kind);
+        for &p in ps {
+            let Some(state) = self.state(p) else { continue };
+            if kind == Kind::Block {
+                let e = self.table.emission(state);
+                if e > 0 {
+                    self.set(kind, p, e);
+                    self.inc.push_back(p);
+                }
+            }
+            for d in DIRS {
+                let n = [p[0] + d[0], p[1] + d[1], p[2] + d[2]];
+                if self.get(kind, n).unwrap_or(0) > 0 {
+                    self.inc.push_back(n);
+                }
+            }
+        }
+        self.increase(kind);
+    }
+
     fn relight(&mut self, kind: Kind, p: [i32; 3]) {
         let Some(state) = self.state(p) else { return };
         let cur = self.get(kind, p).unwrap_or(0);
@@ -1104,6 +1148,64 @@ mod tests {
                             full.light(kind)[(y >> 4) as usize].get(index(q)),
                         );
                         assert_eq!(a, b, "step {step} {kind:?} at {q:?} after {state} at {p:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Пачка правок (как `/fill` и взрыв) пересчитанная одним проходом даёт
+    /// тот же свет, что полный пересчёт столбца.
+    #[test]
+    fn batch_matches_full_relight() {
+        let t = table();
+        let mut c = ChunkColumn::flat(&[(1, 24)], 4, 0, 2, 0, true);
+        relight_column(&mut c, &t);
+        let mut seed = 777u64;
+        let mut rnd = |n: u64| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        for step in 0..300 {
+            // Пачка: прямоугольник одним состоянием или россыпь разных.
+            let mut batch = Vec::new();
+            if rnd(2) == 0 {
+                let state = [0, 1, 2, 3][rnd(4) as usize];
+                let (x0, y0, z0) = (rnd(12) as i32, rnd(28) as i32, rnd(12) as i32);
+                let (w, h, d) = (1 + rnd(5) as i32, 1 + rnd(5) as i32, 1 + rnd(5) as i32);
+                for x in x0..x0 + w {
+                    for y in y0..y0 + h {
+                        for z in z0..z0 + d {
+                            batch.push(([x, y, z], state));
+                        }
+                    }
+                }
+            } else {
+                for _ in 0..20 {
+                    let p = [rnd(16) as i32, rnd(32) as i32, rnd(16) as i32];
+                    batch.push((p, [0, 0, 1, 1, 2, 3][rnd(6) as usize]));
+                }
+            }
+            let mut changed = Vec::new();
+            for &(p, state) in &batch {
+                if c.set_block(p[0] as usize, p[1] as usize, p[2] as usize, state) != state {
+                    changed.push(p);
+                }
+            }
+            Engine::new(&mut Single(&mut c), &t, 64).blocks_changed(&changed);
+            let mut full = c.clone();
+            relight_column(&mut full, &t);
+            for kind in [Kind::Sky, Kind::Block] {
+                for y in 0..64 {
+                    for i in 0..256 {
+                        let q = [i & 15, y, i >> 4];
+                        let (a, b) = (
+                            c.light(kind)[(y >> 4) as usize].get(index(q)),
+                            full.light(kind)[(y >> 4) as usize].get(index(q)),
+                        );
+                        assert_eq!(a, b, "step {step} {kind:?} at {q:?}");
                     }
                 }
             }

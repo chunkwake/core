@@ -283,6 +283,9 @@ impl PlayPlan {
         }
         let (sound, spend, packet) = if f.item.is_none() {
             let held = held?;
+            if self.map_id_of(held).is_some_and(|id| self.map_has_too_many_decorations(id)) {
+                return None;
+            }
             f.item = Some(Stack { count: 1, ..held });
             ("add_item", true, self.frame_item_data(target, f))
         } else {

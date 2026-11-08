@@ -2,6 +2,7 @@
 
 use crate::config::Properties;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -166,6 +167,57 @@ fn copy_file(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Каталог и файлы последнего бэкапа: путь → (sha256, размер). Нет
+/// бэкапа или манифест не читается — пусто, тогда всё копируется.
+fn previous_files(dir: &Path) -> (PathBuf, HashMap<String, (String, u64)>) {
+    let Some(id) = list(dir).ok().and_then(|ids| ids.into_iter().next()) else {
+        return (PathBuf::new(), HashMap::new());
+    };
+    let Ok(value) = manifest(dir, &id) else {
+        return (PathBuf::new(), HashMap::new());
+    };
+    let files = value["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| {
+            let path = e["path"].as_str()?.to_owned();
+            Some((path, (e["sha256"].as_str()?.to_owned(), e["size"].as_u64()?)))
+        })
+        .collect();
+    (backup_dir(dir).join(id), files)
+}
+
+/// Файл не изменился с прошлого бэкапа — жёсткая ссылка на его копию
+/// вместо новой. Бэкапы никто не правит на месте (восстановление копирует
+/// из них), поэтому общий файл безопасен, а удаление одного бэкапа
+/// снимает лишь его ссылку. `None` — копировать: файл другой, ссылки не
+/// поддерживаются или прошлая копия не сходится с манифестом.
+fn link_unchanged(
+    src: &Path,
+    old: &Path,
+    dst: &Path,
+    sha: &str,
+    size: u64,
+) -> Option<(String, u64)> {
+    if fs::metadata(src).ok()?.len() != size || hash(src).ok()?.0 != sha {
+        return None;
+    }
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    fs::hard_link(old, dst).ok()?;
+    // Прошлая копия могла испортиться: ссылка годится, только если её
+    // байты — те, что в манифесте.
+    match hash(dst) {
+        Ok(known) if known.0 == sha && known.1 == size => Some(known),
+        _ => {
+            let _ = fs::remove_file(dst);
+            None
+        }
+    }
+}
+
 pub fn create(dir: &Path) -> Result<String, String> {
     if let Some(error) = incomplete(dir) {
         return Err(error);
@@ -215,12 +267,22 @@ fn create_from_roots(
     let staging = base.join(format!(".{id}.tmp"));
     let final_dir = base.join(&id);
     fs::create_dir(&staging).map_err(|e| e.to_string())?;
+    let (previous_dir, previous) = previous_files(dir);
     let result = (|| {
         let mut entries = Vec::new();
         for relative in files {
             let path = relative.to_string_lossy().replace('\\', "/");
-            copy_file(&dir.join(&relative), &staging.join(&relative))?;
-            let (sha256, size) = hash(&staging.join(&relative))?;
+            let (src, dst) = (dir.join(&relative), staging.join(&relative));
+            let linked = previous.get(&path).and_then(|(sha, size)| {
+                link_unchanged(&src, &previous_dir.join(&relative), &dst, sha, *size)
+            });
+            let (sha256, size) = match linked {
+                Some(known) => known,
+                None => {
+                    copy_file(&src, &dst)?;
+                    hash(&dst)?
+                }
+            };
             entries.push(serde_json::json!({"path": path, "sha256": sha256, "size": size}));
         }
         let manifest = serde_json::json!({"format": 1, "game_version": crate::MC_VERSION, "roots": roots, "files": entries});
@@ -564,6 +626,32 @@ mod tests {
         fs::create_dir_all(dir.join("generated")).unwrap();
         fs::write(dir.join("generated/data"), b"excluded").unwrap();
         dir
+    }
+
+    #[test]
+    fn unchanged_files_are_shared_with_the_previous_backup() {
+        let dir = fixture();
+        let first = create(&dir).unwrap();
+        fs::write(dir.join("plugins/TestPlugin/config.yml"), b"changed").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let second = create(&dir).unwrap();
+        assert_eq!(verify(&dir, &second).unwrap(), 4);
+        let file = |id: &str, p: &str| dir.join("backups").join(id).join(p);
+        let player = "world/playerdata/test.dat";
+        // Общий файл: правка копии первого бэкапа видна и во втором.
+        let before = fs::read(file(&second, player)).unwrap();
+        fs::write(file(&first, player), b"damaged").unwrap();
+        assert_eq!(fs::read(file(&second, player)).unwrap(), b"damaged");
+        // Изменённый файл — своя копия.
+        fs::write(file(&first, "plugins/TestPlugin/config.yml"), b"x").unwrap();
+        assert_eq!(fs::read(file(&second, "plugins/TestPlugin/config.yml")).unwrap(), b"changed");
+        // Испорченная прошлая копия не наследуется: третий бэкап копирует.
+        fs::write(file(&second, player), &before).unwrap();
+        fs::write(file(&first, player), b"damaged again").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let third = create(&dir).unwrap();
+        assert_eq!(verify(&dir, &third).unwrap(), 4);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

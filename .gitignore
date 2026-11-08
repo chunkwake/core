@@ -1,5 +1,6 @@
 /target
 /run
+/memory-measure
 /generated
 *.jar
 !java/**/gradle-wrapper.jar

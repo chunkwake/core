@@ -170,38 +170,39 @@ impl Survive {
 
 /// Состояния блоков сервера: имя блока по состоянию, состояния по свойствам
 /// и теги блоков из `data/minecraft/tags/block`.
+#[derive(Clone)]
 pub struct Palette {
     /// Состояние → номер блока.
-    block_of: Vec<u32>,
+    block_of: Arc<Vec<u32>>,
     /// Состояние → свойства.
-    props: Vec<Vec<(String, String)>>,
+    props: Arc<Vec<Vec<(String, String)>>>,
     /// Имя блока → номер и его состояния по порядку.
-    blocks: HashMap<String, (u32, Vec<u32>)>,
+    blocks: Arc<HashMap<String, (u32, Vec<u32>)>>,
     /// Номер блока → его имя.
-    block_names: Vec<String>,
+    block_names: Arc<Vec<String>>,
     /// Номер блока → его состояния.
-    by_block: Vec<Vec<u32>>,
+    by_block: Arc<Vec<Vec<u32>>>,
     /// Номер блока → смешанное основание его состояний, если они идут
     /// подряд произведением значений: `with_prop` сдвигом номера вместо
     /// перебора всех состояний блока со сравнением строк (у `sculk_vein` их
     /// 128, и на этом стояло распространение скалка).
-    layouts: Vec<Option<StateLayout>>,
-    defaults: HashMap<String, u32>,
-    air: Vec<bool>,
-    fluid: Vec<Fluid>,
+    layouts: Arc<Vec<Option<StateLayout>>>,
+    defaults: Arc<HashMap<String, u32>>,
+    air: Arc<Vec<bool>>,
+    fluid: Arc<Vec<Fluid>>,
     /// `isSolid`, `canBeReplaced`, `LiquidBlock` по состоянию.
-    solid: Vec<bool>,
-    replaceable: Vec<bool>,
-    liquid: Vec<bool>,
+    solid: Arc<Vec<bool>>,
+    replaceable: Arc<Vec<bool>>,
+    liquid: Arc<Vec<bool>>,
     /// Коллизия — один полный куб. Для блоков этих шаблонов это совпадает
     /// с `isCollisionShapeFullBlock && !hasDynamicShape`.
-    full_cube: Vec<bool>,
+    full_cube: Arc<Vec<bool>>,
     /// Биты `isFaceSturdy` по `Direction`: низ, верх, север, юг, запад, восток.
-    sturdy: Vec<u8>,
+    sturdy: Arc<Vec<u8>>,
     /// `Block.canSupportCenter(..., DOWN)`: низ формы опоры закрывает
     /// квадрат 7..9 в центре (столб забора, цепь, стена).
-    center_down: Vec<bool>,
-    survive: Vec<Survive>,
+    center_down: Arc<Vec<bool>>,
+    survive: Arc<Vec<Survive>>,
     /// Теги карт высот: `blocks_motion_in_heightmap` и без листвы.
     motion: Arc<Vec<bool>>,
     motion_no_leaves: Arc<Vec<bool>>,
@@ -329,7 +330,7 @@ pub(crate) fn cold_enough_to_snow(climate: &[Climate], biome: u32, pos: [i32; 3]
     !(temperature(climate, biome, pos, sea_level) >= 0.15)
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Support {
     vegetation: Arc<Vec<bool>>,
     dry: Arc<Vec<bool>>,
@@ -345,6 +346,25 @@ struct Support {
 }
 
 impl Palette {
+    /// Приблизительный размер таблиц; общий Arc учитывается в каждом измерении.
+    pub fn heap_bytes(&self) -> usize {
+        let props = self.props.iter().map(|row| {
+            row.capacity() * std::mem::size_of::<(String, String)>()
+                + row.iter().map(|(k, v)| k.capacity() + v.capacity()).sum::<usize>()
+        }).sum::<usize>();
+        let blocks = self.blocks.iter().map(|(name, (_, states))| {
+            name.capacity() + states.capacity() * 4
+        }).sum::<usize>();
+        props + blocks + self.block_of.capacity() * 4
+            + self.block_names.iter().map(String::capacity).sum::<usize>()
+            + self.by_block.iter().map(|v| v.capacity() * 4).sum::<usize>()
+            + self.defaults.keys().map(String::capacity).sum::<usize>()
+            + self.tags.values().map(|v| v.capacity()).sum::<usize>()
+            + self.air.capacity() + self.solid.capacity() + self.replaceable.capacity()
+            + self.liquid.capacity() + self.full_cube.capacity() + self.center_down.capacity()
+            + self.sturdy.capacity() + self.survive.capacity() * std::mem::size_of::<Survive>()
+    }
+
     /// `states` — по ID состояния имя блока и свойства (как в реестре сервера);
     /// `default` — состояние блока по умолчанию.
     pub fn new(data_dir: &Path, states: &States, default: &dyn Fn(&str) -> Option<u32>) -> Self {
@@ -372,46 +392,46 @@ impl Palette {
             .collect();
         let n = states.len();
         let mut p = Self {
-            air: vec![false; n],
-            fluid: vec![Fluid::None; n],
-            solid: vec![false; n],
-            replaceable: vec![false; n],
-            liquid: vec![false; n],
-            full_cube: vec![false; n],
-            sturdy: vec![0; n],
-            center_down: vec![false; n],
-            survive: vec![Survive::Always; n],
+            air: Arc::new(vec![false; n]),
+            fluid: Arc::new(vec![Fluid::None; n]),
+            solid: Arc::new(vec![false; n]),
+            replaceable: Arc::new(vec![false; n]),
+            liquid: Arc::new(vec![false; n]),
+            full_cube: Arc::new(vec![false; n]),
+            sturdy: Arc::new(vec![0; n]),
+            center_down: Arc::new(vec![false; n]),
+            survive: Arc::new(vec![Survive::Always; n]),
             motion: Arc::new(Vec::new()),
             motion_no_leaves: Arc::new(Vec::new()),
-            by_block: {
+            by_block: Arc::new({
                 let mut v = vec![Vec::new(); blocks.len()];
                 for (id, list) in blocks.values() {
                     v[*id as usize] = list.clone();
                 }
                 v
-            },
-            layouts: Vec::new(),
-            block_of,
-            props,
-            block_names: {
+            }),
+            layouts: Arc::new(Vec::new()),
+            block_of: Arc::new(block_of),
+            props: Arc::new(props),
+            block_names: Arc::new({
                 let mut v = vec![String::new(); blocks.len()];
                 for (name, (id, _)) in &blocks {
                     v[*id as usize] = name.clone();
                 }
                 v
-            },
-            blocks,
-            defaults,
+            }),
+            blocks: Arc::new(blocks),
+            defaults: Arc::new(defaults),
             tags: HashMap::new(),
             tag_dir: data_dir.join("data/minecraft/tags/block"),
             support: Support::default(),
             world_seed: 0,
             climate: Arc::new(Vec::new()),
         };
-        p.layouts = p.by_block.iter().map(|list| state_layout(list, &p.props)).collect();
+        p.layouts = Arc::new(p.by_block.iter().map(|list| state_layout(list, &p.props)).collect());
         for name in ["minecraft:air", "minecraft:cave_air", "minecraft:void_air"] {
             for s in p.states_of(name) {
-                p.air[s as usize] = true;
+                Arc::make_mut(&mut p.air)[s as usize] = true;
             }
         }
         // `reports/worldgen_blocks.csv`: жидкость, isSolid, canBeReplaced, класс.
@@ -420,12 +440,12 @@ impl Palette {
         for (id, line) in rows.lines().enumerate().take(n) {
             let mut f = line.split(',');
             let fluid = f.next().unwrap_or("0");
-            p.solid[id] = f.next() == Some("1");
-            p.replaceable[id] = f.next() == Some("1");
+            Arc::make_mut(&mut p.solid)[id] = f.next() == Some("1");
+            Arc::make_mut(&mut p.replaceable)[id] = f.next() == Some("1");
             let class = f.next().unwrap_or("");
-            p.liquid[id] = class == "LiquidBlock";
-            p.survive[id] = Survive::of_class(class);
-            p.fluid[id] = match fluid {
+            Arc::make_mut(&mut p.liquid)[id] = class == "LiquidBlock";
+            Arc::make_mut(&mut p.survive)[id] = Survive::of_class(class);
+            Arc::make_mut(&mut p.fluid)[id] = match fluid {
                 "1" => Fluid::Water,
                 "2" => Fluid::Lava,
                 _ => Fluid::None,
@@ -439,14 +459,14 @@ impl Palette {
         ] {
             for s in p.states_of(name) {
                 let level = p.prop(s, "level").unwrap_or("0");
-                p.fluid[s as usize] = if level == "0" { src } else { flow };
-                p.liquid[s as usize] = true;
+                Arc::make_mut(&mut p.fluid)[s as usize] = if level == "0" { src } else { flow };
+                Arc::make_mut(&mut p.liquid)[s as usize] = true;
             }
         }
         // `reports/light.csv`: шестой столбец — маска прочных граней.
         let light = std::fs::read_to_string(data_dir.join("reports/light.csv")).unwrap_or_default();
         for (id, line) in light.lines().enumerate().take(n) {
-            p.sturdy[id] = line
+            Arc::make_mut(&mut p.sturdy)[id] = line
                 .rsplit(',')
                 .next()
                 .and_then(|m| m.trim().parse().ok())
@@ -461,7 +481,7 @@ impl Palette {
                 continue;
             }
             let boxes = line.splitn(4, ',').nth(3).unwrap_or("");
-            p.center_down[id] = boxes.split('|').any(|b| {
+            Arc::make_mut(&mut p.center_down)[id] = boxes.split('|').any(|b| {
                 let v: Vec<f64> = b.split(' ').filter_map(|x| x.parse().ok()).collect();
                 v.len() == 6
                     && v[1] <= 0.0
@@ -507,7 +527,7 @@ impl Palette {
             std::fs::read_to_string(data_dir.join("reports/shapes.csv")).unwrap_or_default();
         for (id, line) in shapes.lines().enumerate().take(n) {
             let shape = line.splitn(4, ',').nth(3).unwrap_or("").trim();
-            p.full_cube[id] = full_cube_shape(shape);
+            Arc::make_mut(&mut p.full_cube)[id] = full_cube_shape(shape);
         }
         p
     }
@@ -1142,7 +1162,15 @@ impl RuntimeTrees {
         min_y: i32,
         height: i32,
     ) -> Result<Self, String> {
-        let mut palette = Palette::new(data_dir, states, default);
+        Self::load_with_palette(data_dir, Palette::new(data_dir, states, default), min_y, height)
+    }
+
+    pub fn load_with_palette(
+        data_dir: &Path,
+        mut palette: Palette,
+        min_y: i32,
+        height: i32,
+    ) -> Result<Self, String> {
         let wg = data_dir.join("data/minecraft/worldgen");
         let read = |dir: &str, name: &str| -> Result<Value, String> {
             let path = name.strip_prefix("minecraft:").unwrap_or(name);

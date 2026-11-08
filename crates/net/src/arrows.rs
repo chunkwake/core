@@ -114,6 +114,8 @@ pub const EVENT_LAUNCH: i32 = 1002;
 pub enum Hit {
     /// Воткнулась в блок.
     Block,
+    /// Отскочила от границы мира.
+    Border,
     /// Ракета кончилась или брошенный снаряд разбился.
     Pop,
     /// Попала в игрока `i`. Скорость — на момент удара, для отдачи.
@@ -195,13 +197,15 @@ fn remember(a: &mut Arrow, id: uuid::Uuid) {
 
 /// Тик летящей стрелы: путь пробегается мелкими шагами — первый твёрдый блок
 /// или игрок останавливают её. `solid` — есть ли коллизия у клетки, `water` — в воде ли.
-/// Стрелок пропускается, пока снаряд внутри его хитбокса.
+/// `border` ограничивает подшаг лучом границы мира. Стрелок пропускается,
+/// пока снаряд внутри его хитбокса.
 pub fn step(
     a: &mut Arrow,
     players: &[(uuid::Uuid, [f64; 3])],
     mobs: &[(u128, [f64; 3], (f64, f64))],
     solid: impl Fn([i32; 3]) -> bool,
     water: impl Fn([i32; 3]) -> bool,
+    border: impl Fn([f64; 3], [f64; 3]) -> [f64; 3],
 ) -> Vec<Hit> {
     if a.stuck {
         a.age += 1;
@@ -230,6 +234,20 @@ pub fn step(
             a.pos[1] + a.vel[1] * t,
             a.pos[2] + a.vel[2] * t,
         ];
+        let clipped = border(prev, p);
+        if clipped != p {
+            a.pos = clipped;
+            if a.firework {
+                hits.push(Hit::Pop);
+            } else if a.thrown {
+                hits.push(Hit::Block);
+            } else {
+                // `ProjectileDeflection.REVERSE`: -0.5 × border power 0.2.
+                a.vel = a.vel.map(|v| v * -0.1);
+                hits.push(Hit::Border);
+            }
+            return hits;
+        }
         if !a.firework
             && let Some(k) = players.iter().position(|(id, f)| {
                 touches(*f, p) && !remembers(a, *id) && (a.left_owner || a.owner != Some(*id))
@@ -358,6 +376,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn projectiles_hit_world_border_before_targets_beyond_it() {
+        let border = crate::play::commands::state::WorldBorder {
+            from: 4.0,
+            to: 4.0,
+            ..Default::default()
+        };
+        let clip = |from, to| border.clip_projectile(0, from, to);
+        let target = [(uuid::Uuid::nil(), [3.0, 64.0, 0.0])];
+        let mut arrow = Arrow::flight([0.0, 64.0, 0.0], [3.0, 0.3, 0.6], false);
+        assert_eq!(
+            step(&mut arrow, &target, &[], |_| false, |_| false, clip),
+            vec![Hit::Border]
+        );
+        let edge = 2.0 - 1e-5_f32 as f64;
+        assert_eq!(arrow.pos[0], edge);
+        assert!(arrow.pos[1] > 64.0 && arrow.pos[2] > 0.0);
+        assert!((arrow.vel[0] + 0.3).abs() < 1e-12);
+        assert!((arrow.vel[1] + 0.03).abs() < 1e-12);
+        assert!((arrow.vel[2] + 0.06).abs() < 1e-12);
+        assert!(!arrow.stuck);
+        assert!(step(&mut arrow, &[], &[], |_| false, |_| false, clip).is_empty());
+        assert!(arrow.pos[0] < edge);
+
+        let mut snowball = Arrow::flight([0.0, 64.0, 0.0], [3.0, 0.0, 0.0], true);
+        assert_eq!(
+            step(&mut snowball, &target, &[], |_| false, |_| false, clip),
+            vec![Hit::Block]
+        );
+        assert_eq!(snowball.pos, [edge, 64.0, 0.0]);
+    }
+
+    #[test]
     fn flies_sticks_and_hits() {
         let v = shoot([1.0, 0.1, 0.0], DISPENSE_POWER, DISPENSE_SPREAD, [0.5; 3]);
         assert!((len(v) - 1.1).abs() < 1e-9);
@@ -365,7 +415,7 @@ mod tests {
         // Стена на x = 5.
         let mut hit = Vec::new();
         for _ in 0..20 {
-            hit = step(&mut a, &[], &[], |p| p[0] >= 5, |_| false);
+            hit = step(&mut a, &[], &[], |p| p[0] >= 5, |_| false, |_, to| to);
             if !hit.is_empty() {
                 break;
             }
@@ -379,7 +429,8 @@ mod tests {
                 &[(uuid::Uuid::nil(), [1.2, 1.0, 0.5])],
                 &[],
                 |_| false,
-                |_| false
+                |_| false,
+                |_, to| to,
             ),
             vec![Hit::Player(0, 3.0, [1.1, 0.0, 0.0])]
         );
@@ -419,6 +470,7 @@ mod tests {
             &[],
             |_| false,
             |_| false,
+            |_, to| to,
         );
         assert!(inside.is_empty(), "{inside:?}");
 
@@ -430,13 +482,14 @@ mod tests {
             &[],
             |_| false,
             |_| false,
+            |_, to| to,
         );
         assert_eq!(hits.len(), 1);
         assert!(!pierce.stopped && !pierce.stuck && pierce.pierce == 0);
 
         let mut snowball = Arrow::flight([0.5, 1.5, 0.5], [1.1, 0.0, 0.0], true);
         let chicken = (9, [1.2, 1.0, 0.5], (0.4, 0.7));
-        assert_eq!(step(&mut snowball, &[], &[chicken], |_| false, |_| false),
+        assert_eq!(step(&mut snowball, &[], &[chicken], |_| false, |_| false, |_, to| to),
             vec![Hit::Mob(0, 0.0, [1.1, 0.0, 0.0])]);
     }
 
@@ -457,9 +510,9 @@ mod tests {
         r.lifetime = 2;
         // Твёрдый блок вокруг не мешает: прицепленная ракета столкновений не ищет.
         for x in [5.0, 6.0] {
-            assert!(step(&mut r, &[(owner, [x, 80.0, 1.0])], &[], |_| true, |_| false).is_empty());
+            assert!(step(&mut r, &[(owner, [x, 80.0, 1.0])], &[], |_| true, |_| false, |_, to| to).is_empty());
             assert_eq!(r.pos, [x, 80.0, 1.0]);
         }
-        assert_eq!(step(&mut r, &[(owner, [7.0, 80.0, 1.0])], &[], |_| true, |_| false), vec![Hit::Pop]);
+        assert_eq!(step(&mut r, &[(owner, [7.0, 80.0, 1.0])], &[], |_| true, |_| false, |_, to| to), vec![Hit::Pop]);
     }
 }

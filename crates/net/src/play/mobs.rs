@@ -196,6 +196,9 @@ impl PlayPlan {
         let mut gone = Vec::new();
         let mut sounds = Vec::new();
         let mut trampling = Vec::new();
+        let mut vibrations = Vec::new();
+        let now = self.game_time.load(Ordering::Relaxed);
+        let border = self.border_at(now);
         {
             let mut mobs = self.sim().mobs.lock().unwrap();
             // Один замок мира на всю фазу: коробки коллизий читаются тысячами раз.
@@ -222,28 +225,42 @@ impl PlayPlan {
                         rand: &mut rand,
                     };
                     let was_grounded = e.mob.on_ground;
+                    let old_pos = e.mob.pos;
                     let old_y = e.mob.pos[1];
                     if mb::tick(&mut e.mob, &world, &mut senses) {
                         gone.push(id);
                         continue;
                     }
+                    let clipped = border.clip_movement(now, old_pos, e.mob.pos, e.mob.size().0);
+                    for axis in [0, 2] {
+                        if clipped[axis] != e.mob.pos[axis] {
+                            e.mob.pos[axis] = clipped[axis];
+                            e.mob.vel[axis] = 0.0;
+                        }
+                    }
                     let descent = (old_y - e.mob.pos[1]).max(0.0);
-                    if !was_grounded && e.mob.on_ground {
+                    let landed_fall = if !was_grounded && e.mob.on_ground {
                         let fall = e.fall + descent;
                         if rand() < crate::soil::trample_chance(fall) {
                             trampling.push(e.mob.pos);
                         }
                         e.fall = 0.0;
+                        Some(fall)
                     } else if !e.mob.on_ground {
                         e.fall += descent;
+                        None
                     } else {
                         e.fall = 0.0;
-                    }
+                        None
+                    };
                     let (width, height) = e.mob.species.size();
                     let view =
                         crate::environment::probe(e.mob.pos, width, height, height * 0.85, |p| {
                             self.environment_kind(w.block(p))
                         });
+                    if !view.water && landed_fall.is_some_and(|fall| fall > 0.0) {
+                        vibrations.push((e.mob.pos, "minecraft:hit_ground"));
+                    }
                     let old = e.environment;
                     let pulse =
                         e.environment
@@ -284,6 +301,7 @@ impl PlayPlan {
                     ] {
                         if hit && mb::hurt(&mut e.mob, amount, None, 0.0).is_some() {
                             packets.push(play::hurt_animation(self.ids.hurt_animation, id, 0.0));
+                            vibrations.push((e.mob.pos, "minecraft:entity_damage"));
                         }
                     }
                     let m = &e.mob;
@@ -334,6 +352,9 @@ impl PlayPlan {
                     }
                 }
             });
+        }
+        for (pos, event) in vibrations {
+            self.emit_vibration(pos, event);
         }
         // Движения и повороты всех мобов тика — одной рассылкой: при стаде,
         // где сдвинулись все, это одна запись в канал вместо сотни.
@@ -524,6 +545,9 @@ impl PlayPlan {
             Some(r) if r.starts_with("d ") => damage = r[2..].parse().unwrap_or(damage),
             _ => {}
         }
+        if damage <= 0.0 {
+            return None;
+        }
         let knock = mb::KNOCKBACK
             * (1.0 + level("minecraft:knockback") as f64 + f64::from(u8::from(sprinting)));
         let (result, mpos, species, baby) = {
@@ -545,6 +569,7 @@ impl PlayPlan {
             (r, e.mob.pos, e.mob.species, e.mob.is_baby())
         };
         let died = result?;
+        self.emit_vibration(mpos, "minecraft:entity_damage");
         self.hub.send(
             None,
             play::hurt_animation(self.ids.hurt_animation, target, yaw),

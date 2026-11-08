@@ -85,6 +85,20 @@ fn tick(c: &mut Criterion) {
         });
     }
 
+    // `/fill` 32×16×32 (16 384 блока) камнем и обратно воздухом.
+    if let Some(stone) = chunkwake_net::play::bench::state(&plan, "minecraft:stone") {
+        let mut up = false;
+        group.sample_size(10);
+        group.bench_function("fill_16k", |b| {
+            b.iter(|| {
+                up = !up;
+                let state = if up { stone } else { 0 };
+                black_box(chunkwake_net::play::bench::fill(&plan, [-16, 100, -16], [15, 115, 15], state));
+            });
+        });
+        group.sample_size(100);
+    }
+
     // Мир с мобами и предметами: тик проходит AI, физику и подбор целиком.
     // Это тот случай, где видна цена `block()` и пространственных запросов.
     let center = [8.0, 70.0, 8.0];

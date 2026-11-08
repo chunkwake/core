@@ -12,7 +12,8 @@
 //! неё самой есть пустой слот.
 //!
 //! Нет: `setPlacedBy` с `block_entity_data` (проигрыватель с пластинкой из
-//! предмета), статистики `play_record`, игровых событий для скалка.
+//! предмета), статистики `play_record`; при смене пластинки сенсор слышит
+//! `block_change`. События `jukebox_play` и `jukebox_stop_play` не передаются.
 
 use super::*;
 use chunkwake_data::world::JukeboxSong;
@@ -97,6 +98,12 @@ impl PlayPlan {
         {
             self.set_block(pos, next);
         }
+        // `JukeboxBlockEntity.notifyItemChangedInJukebox`: и при ручном
+        // действии, и при переносе пластинки воронкой.
+        self.emit_vibration(
+            [pos[0] as f64 + 0.5, pos[1] as f64 + 0.5, pos[2] as f64 + 0.5],
+            "minecraft:block_change",
+        );
         match (item.is_some(), self.song_of(item)) {
             (true, Some(song)) => self.jukebox_play(pos, song),
             _ => self.jukebox_stop(pos),

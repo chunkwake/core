@@ -1663,41 +1663,49 @@ impl PlayPlan {
     }
 
     pub(crate) fn broadcast_border_size(&self, size: f64) {
-        self.broadcast_packet(chunkwake_protocol::play::set_border_size(
-            self.ids.set_border_size,
-            size,
-        ));
+        self.hub.send_in(
+            self.active_dimension(),
+            chunkwake_protocol::play::set_border_size(self.ids.set_border_size, size),
+        );
     }
 
     pub(crate) fn broadcast_border_lerp(&self, from: f64, to: f64, ticks: i64) {
-        self.broadcast_packet(chunkwake_protocol::play::set_border_lerp_size(
-            self.ids.set_border_lerp_size,
-            from,
-            to,
-            ticks.saturating_mul(50),
-        ));
+        self.hub.send_in(
+            self.active_dimension(),
+            chunkwake_protocol::play::set_border_lerp_size(
+                self.ids.set_border_lerp_size,
+                from,
+                to,
+                ticks.saturating_mul(50),
+            ),
+        );
     }
 
     pub(crate) fn broadcast_border_center(&self, x: f64, z: f64) {
-        self.broadcast_packet(chunkwake_protocol::play::set_border_center(
-            self.ids.set_border_center,
-            x,
-            z,
-        ));
+        self.hub.send_in(
+            self.active_dimension(),
+            chunkwake_protocol::play::set_border_center(self.ids.set_border_center, x, z),
+        );
     }
 
     pub(crate) fn broadcast_border_warning(&self, blocks: Option<i32>, time: Option<i32>) {
         if let Some(blocks) = blocks {
-            self.broadcast_packet(chunkwake_protocol::play::set_border_warning_distance(
-                self.ids.set_border_warning_distance,
-                blocks,
-            ));
+            self.hub.send_in(
+                self.active_dimension(),
+                chunkwake_protocol::play::set_border_warning_distance(
+                    self.ids.set_border_warning_distance,
+                    blocks,
+                ),
+            );
         }
         if let Some(time) = time {
-            self.broadcast_packet(chunkwake_protocol::play::set_border_warning_delay(
-                self.ids.set_border_warning_delay,
-                time,
-            ));
+            self.hub.send_in(
+                self.active_dimension(),
+                chunkwake_protocol::play::set_border_warning_delay(
+                    self.ids.set_border_warning_delay,
+                    time,
+                ),
+            );
         }
     }
 

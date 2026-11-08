@@ -16,6 +16,14 @@ const KEEP_MARGIN: i32 = 3;
 pub type UnloadWrite = ((i32, i32), ChunkColumn);
 
 impl PlayPlan {
+    /// Столько кадров может понадобиться игрокам измерения с запасом для края обзора.
+    pub(super) fn chunk_frame_limit(&self, dim: Dimension) -> usize {
+        let r = self.view_radius.load(Ordering::Relaxed).max(2) + KEEP_MARGIN;
+        let side = (2 * r + 1) as usize;
+        let players = self.hub.players.lock().unwrap().values().filter(|p| p.dimension == dim).count();
+        (players * side * side).max(64)
+    }
+
     /// Чанки, которые выгрузка не трогает: квадрат обзора с запасом вокруг
     /// каждого игрока измерения и симулируемые чанки.
     fn keep_test(&self, dim: Dimension) -> impl Fn((i32, i32)) -> bool + use<> {
@@ -47,6 +55,10 @@ impl PlayPlan {
         dim: Dimension,
         write: &dyn Fn(&[UnloadWrite]) -> Result<(), String>,
     ) -> usize {
+        let keep = self.keep_test(dim);
+        if let Some(state) = self.dims.get(&dim) {
+            state.chunk_frames.lock().unwrap().retain(|pos, _| keep(*pos));
+        }
         // Без диска выгруженное не вернуть.
         if self.source.get().is_none() {
             return 0;
@@ -111,6 +123,7 @@ impl PlayPlan {
         let mut frames = state.chunk_frames.lock().unwrap();
         let mut saved = state.saved.lock().unwrap();
         let mut dirty = state.dirty.lock().unwrap();
+        let mut pois = state.pois.lock().unwrap();
         let mut n = 0;
         for &(pos, rev) in revs {
             if world.get(&pos).is_none_or(|e| e.1 != rev) {
@@ -120,6 +133,7 @@ impl PlayPlan {
             frames.remove(&pos);
             saved.remove(&pos);
             dirty.remove(&pos);
+            pois.remove(&pos);
             n += 1;
         }
         n

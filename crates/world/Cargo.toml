@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 chunkwake-protocol = { path = "../protocol" }
 flate2 = "1"
+lz4_flex = { version = "0.14.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }

@@ -111,7 +111,7 @@ pub struct Generator {
     zoom_seed: i64,
     /// Биомы уже посчитанных чанков: «дрожание» границы заглядывает к соседу,
     /// а соседа всё равно генерировать — как биомы в чанках региона ванили.
-    biome_cache: Vec<std::sync::Mutex<HashMap<ChunkPos, Arc<[u32]>>>>,
+    biome_cache: Vec<std::sync::Mutex<HashMap<ChunkPos, Arc<PackedBiomes>>>>,
     /// `single_biome_surface`: имя биома и его сетевой ID. Климат для выбора
     /// биома не считается, рельеф — как у выбранных `noise_settings`.
     fixed_biome: Option<String>,
@@ -120,6 +120,18 @@ pub struct Generator {
     vein_names: Vec<String>,
     /// Правило поверхности выбранных настроек: файл `overworld` или своё.
     surface_choice: SurfaceChoice,
+}
+
+impl Generator {
+    /// Освобождает вычисляемые заново биомы и выбор карверов после ухода игроков.
+    pub fn trim_idle(&self) {
+        for shard in &self.source_biomes {
+            shard.lock().unwrap().clear();
+        }
+        for shard in &self.biome_cache {
+            shard.lock().unwrap().clear();
+        }
+    }
 }
 
 /// Откуда брать правило поверхности.
@@ -307,14 +319,50 @@ fn write_cache(path: &Path, rows: &[(String, String)], world_version: i32) {
     }
 }
 
-/// Ограничение кэша биомов на шард. Один чанк — 1536 u32 (24 секции × 64
-/// клетки), то есть ~6 КиБ; 512 чанков на шард — ~3 МБ, 32 шарда — ~96 МБ.
+/// Ограничение кэша биомов на шард. Один чанк — 1536 клеток (24 секции ×
+/// 64) байтом в палитру, то есть ~1.5 КиБ; 512 чанков на шард, 32 шарда —
+/// ~25 МБ.
 const BIOME_CACHE_SHARD: usize = 512;
 
 /// Шардов кэша биомов. Промах стоит ~4 мс климата, поэтому замок должен
 /// быть мелким: с одним общим мьютексом все потоки генерации выстраивались
 /// в очередь на каждом промахе.
 const BIOME_SHARDS: usize = 32;
+
+/// Биомы чанка в кэше: палитра и индекс байтом на клетку. В чанке редко
+/// больше десятка биомов, а `u32` на клетку держал бы вчетверо больше.
+struct PackedBiomes {
+    palette: Vec<u32>,
+    cells: Box<[u8]>,
+}
+
+impl PackedBiomes {
+    /// `None`, если биомов в чанке больше 256 (не бывает, но тогда не кэшируем).
+    fn pack(ids: &[u32]) -> Option<Self> {
+        let mut palette: Vec<u32> = Vec::new();
+        let mut cells = Vec::with_capacity(ids.len());
+        let mut last = (u32::MAX, 0u8);
+        for &id in ids {
+            if id != last.0 {
+                let i = match palette.iter().position(|&p| p == id) {
+                    Some(i) => i,
+                    None if palette.len() < 256 => {
+                        palette.push(id);
+                        palette.len() - 1
+                    }
+                    None => return None,
+                };
+                last = (id, i as u8);
+            }
+            cells.push(last.1);
+        }
+        Some(Self { palette, cells: cells.into() })
+    }
+
+    fn unpack(&self) -> Arc<[u32]> {
+        self.cells.iter().map(|&i| self.palette[i as usize]).collect()
+    }
+}
 
 fn biome_shard(cx: i32, cz: i32) -> usize {
     ((cx.wrapping_mul(73_856_093) ^ cz.wrapping_mul(19_349_663)) as u32 as usize) % BIOME_SHARDS
@@ -1094,8 +1142,9 @@ impl Generator {
 
     fn cached_biomes(&self, cx: i32, cz: i32) -> Option<Arc<[u32]>> {
         let shard = &self.biome_cache[biome_shard(cx, cz)];
-        if let Some(hit) = shard.lock().unwrap().get(&(cx, cz)) {
-            return Some(hit.clone());
+        let hit = shard.lock().unwrap().get(&(cx, cz)).cloned();
+        if let Some(hit) = hit {
+            return Some(hit.unpack());
         }
         // Считаем без замка: климат дорогой, держать его под общим мьютексом
         // значит сериализовать все потоки генерации.
@@ -1107,7 +1156,9 @@ impl Generator {
                 cache.remove(&k);
             }
         }
-        cache.insert((cx, cz), ids.clone());
+        if let Some(packed) = PackedBiomes::pack(&ids) {
+            cache.insert((cx, cz), Arc::new(packed));
+        }
         Some(ids)
     }
 

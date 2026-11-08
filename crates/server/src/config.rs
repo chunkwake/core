@@ -25,6 +25,10 @@ level-type=minecraft:flat
 generator-settings=
 view-distance=8
 simulation-distance=6
+# Сжатие чанков в регионах: deflate (как у ванили), lz4 или none.
+region-file-compression=deflate
+# auto chooses low below 2 GiB available RAM or on at most two cores.
+memory-profile=auto
 gamemode=survival
 difficulty=easy
 hardcore=false
@@ -59,6 +63,8 @@ pub const KEYS: &[&str] = &[
     "generator-settings",
     "view-distance",
     "simulation-distance",
+    "region-file-compression",
+    "memory-profile",
     "gamemode",
     "difficulty",
     "hardcore",
@@ -71,6 +77,83 @@ pub const KEYS: &[&str] = &[
     "metrics-port",
     "metrics-token",
 ];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryProfile {
+    Auto,
+    Low,
+    Normal,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MemoryBudget {
+    pub profile: MemoryProfile,
+    pub gen_workers: usize,
+    pub tokio_workers: usize,
+    pub blocking_threads: usize,
+    pub proto_limit: usize,
+    pub base_column_limit: usize,
+    pub jvm_xmx: Option<&'static str>,
+}
+
+impl MemoryBudget {
+    pub fn resolve(requested: MemoryProfile, view_distance: u8) -> Self {
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let profile = match requested {
+            MemoryProfile::Auto if cores <= 2 || available_memory().is_some_and(|n| n < 2 << 30) => MemoryProfile::Low,
+            MemoryProfile::Auto => MemoryProfile::Normal,
+            other => other,
+        };
+        let low = profile == MemoryProfile::Low;
+        let gen_workers = if low { cores.saturating_sub(1).clamp(1, 2) } else { cores.saturating_sub(1).max(1) };
+        let view = usize::from(view_distance);
+        Self {
+            profile,
+            gen_workers,
+            tokio_workers: if low { 2 } else { cores },
+            blocking_threads: if low { 16 } else { 512 },
+            proto_limit: (gen_workers * 192 + view * 32).clamp(256, if low { 1024 } else { 2048 }),
+            base_column_limit: (gen_workers * 1024 + view * 256).clamp(1024, if low { 4096 } else { 16_384 }),
+            jvm_xmx: low.then_some("-Xmx256m"),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn available_memory() -> Option<u64> {
+    #[repr(C)]
+    struct Status {
+        length: u32,
+        load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page: u64,
+        avail_page: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
+        avail_extended: u64,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalMemoryStatusEx(status: *mut Status) -> i32;
+    }
+    let mut status = Status {
+        length: std::mem::size_of::<Status>() as u32,
+        load: 0, total_phys: 0, avail_phys: 0, total_page: 0,
+        avail_page: 0, total_virtual: 0, avail_virtual: 0, avail_extended: 0,
+    };
+    (unsafe { GlobalMemoryStatusEx(&mut status) } != 0).then_some(status.avail_phys)
+}
+
+#[cfg(target_os = "linux")]
+fn available_memory() -> Option<u64> {
+    std::fs::read_to_string("/proc/meminfo").ok()?.lines()
+        .find_map(|line| line.strip_prefix("MemAvailable:")?.split_whitespace().next()?.parse::<u64>().ok())
+        .map(|kb| kb * 1024)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn available_memory() -> Option<u64> { None }
 
 #[derive(Debug)]
 pub struct Properties {
@@ -94,6 +177,9 @@ pub struct Properties {
     pub view_distance: u8,
     /// Радиус симуляции: где тикают блоки и сущности. Не больше прорисовки.
     pub simulation_distance: u8,
+    /// `region-file-compression`: чем сжимать новые записи регионов.
+    pub region_compression: chunkwake_world::anvil::Codec,
+    pub memory_profile: MemoryProfile,
     /// 0 survival, 1 creative, 2 adventure, 3 spectator.
     pub game_mode: u8,
     pub difficulty: chunkwake_net::survival::Difficulty,
@@ -198,6 +284,14 @@ impl Properties {
         };
         let view_distance = distance("view-distance")?;
         let simulation_distance = distance("simulation-distance")?;
+        let region_compression = chunkwake_world::anvil::Codec::parse(value("region-file-compression"))
+            .ok_or("region-file-compression: choose deflate, lz4, or none")?;
+        let memory_profile = match value("memory-profile") {
+            "auto" => MemoryProfile::Auto,
+            "low" => MemoryProfile::Low,
+            "normal" => MemoryProfile::Normal,
+            _ => return Err("memory-profile: choose auto, low, or normal".into()),
+        };
         if !["survival", "creative", "adventure", "spectator"].contains(&value("gamemode")) {
             return Err("gamemode: choose survival, creative, adventure, or spectator".into());
         }
@@ -255,6 +349,8 @@ impl Properties {
             generator_settings: value("generator-settings").into(),
             view_distance,
             simulation_distance,
+            region_compression,
+            memory_profile,
             game_mode: ["survival", "creative", "adventure", "spectator"]
                 .iter()
                 .position(|m| *m == value("gamemode"))
@@ -492,6 +588,7 @@ mod tests {
         assert!(!p.allow_flight);
         assert_eq!(effective_value("", "view-distance"), "8");
         assert_eq!(effective_value("", "simulation-distance"), "6");
+        assert_eq!(p.memory_profile, MemoryProfile::Auto);
     }
 
     #[test]
@@ -533,9 +630,23 @@ mod tests {
             "hardcore=yes",
             "spawn-protection=-1",
             "log-level=verbose",
+            "memory-profile=tiny",
         ] {
             assert!(Properties::parse(text).is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn low_profile_limits_threads_and_caches() {
+        let p = Properties::parse("memory-profile=low\nview-distance=32").unwrap();
+        let low = MemoryBudget::resolve(p.memory_profile, p.view_distance);
+        let normal = MemoryBudget::resolve(MemoryProfile::Normal, p.view_distance);
+        assert_eq!(low.profile, MemoryProfile::Low);
+        assert!(low.gen_workers <= 2);
+        assert_eq!((low.tokio_workers, low.blocking_threads), (2, 16));
+        assert!(low.proto_limit <= normal.proto_limit);
+        assert!(low.base_column_limit <= normal.base_column_limit);
+        assert_eq!(low.jvm_xmx, Some("-Xmx256m"));
     }
 
     #[test]

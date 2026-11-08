@@ -267,6 +267,12 @@ impl MapData {
         }
     }
 
+    /// `isTrackedCountOverLimit`: рамка не принимает новую карту, когда
+    /// все 256 отслеживаемых значков уже заняты.
+    pub fn tracked_count_over_limit(&self) -> bool {
+        self.decorations.len() >= TRACKED_LIMIT
+    }
+
     /// `addDecoration` для игрока: `game_time` — только в Аду (вертящаяся стрелка).
     pub fn put_player(&mut self, key: &str, x: f64, z: f64, yaw: f32, nether_time: Option<i64>) {
         self.put_decoration(DecoKind::Player, key, x, z, yaw as f64, nether_time);
@@ -397,7 +403,7 @@ impl MapData {
             self.dirty = true;
             return true;
         }
-        if self.decorations.len() >= TRACKED_LIMIT {
+        if self.tracked_count_over_limit() {
             return false;
         }
         self.add_banner(b);
@@ -914,6 +920,17 @@ mod tests {
         m.unlimited = true;
         m.put_decoration(DecoKind::Frame, "far", 500.0, 0.0, 0.0, None);
         assert_eq!(deco(&m, "far").map(|d| d.x), Some(127));
+    }
+
+    #[test]
+    fn frame_limit_counts_existing_map_decorations() {
+        let mut map = MapData::fresh(0.0, 0.0, 0, true, false, "minecraft:overworld");
+        for id in 0..TRACKED_LIMIT {
+            map.put_decoration(DecoKind::Frame, &format!("frame-{id}"), 0.0, 0.0, 0.0, None);
+        }
+        assert!(map.tracked_count_over_limit());
+        map.remove_decoration("frame-0");
+        assert!(!map.tracked_count_over_limit());
     }
 
     #[test]

@@ -664,7 +664,10 @@ pub(super) fn worldborder(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     let route: Vec<&str> = call.path.iter().map(String::as_str).collect();
     match route.as_slice() {
         ["get"] => {
-            let size = ctx.vars().border_at(now).size_at(now);
+            let size = ctx
+                .vars()
+                .border_at(ctx.plan.active_dimension(), now)
+                .size_at(now);
             Outcome::Feedback(translate(
                 "commands.worldborder.get",
                 vec![size_value(size)],
@@ -679,7 +682,10 @@ pub(super) fn worldborder(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
             let Some((x, z)) = column_xz(x, z, call, ctx) else {
                 return Outcome::Feedback(translate("argument.pos2d.incomplete", Vec::new()));
             };
-            if !ctx.vars().set_border_center(x, z, now) {
+            if !ctx
+                .vars()
+                .set_border_center(ctx.plan.active_dimension(), x, z, now)
+            {
                 return Outcome::Feedback(translate(
                     "commands.worldborder.center.failed",
                     Vec::new(),
@@ -715,8 +721,9 @@ fn resize_border(
             None => return usage("/worldborder <set|add> <distance> [<time>]"),
         },
     };
-    let before = ctx.vars().border_at(now).size_at(now);
-    match ctx.vars().resize_border(distance, ticks, now, adding) {
+    let dim = ctx.plan.active_dimension();
+    let before = ctx.vars().border_at(dim, now).size_at(now);
+    match ctx.vars().resize_border(dim, distance, ticks, now, adding) {
         super::state::BorderResize::Immediate(size) => {
             ctx.plan.broadcast_border_size(size);
             Outcome::Feedback(translate(
@@ -764,9 +771,11 @@ fn border_damage(ctx: &Context<'_>, input: &mut args::Input<'_>, amount: bool) -
         return usage("/worldborder damage <amount|buffer> <value>");
     };
     let changed = if amount {
-        ctx.vars().set_border_damage(Some(value), None)
+        ctx.vars()
+            .set_border_damage(ctx.plan.active_dimension(), Some(value), None)
     } else {
-        ctx.vars().set_border_damage(None, Some(value))
+        ctx.vars()
+            .set_border_damage(ctx.plan.active_dimension(), None, Some(value))
     };
     if !changed {
         let key = if amount {
@@ -801,9 +810,11 @@ fn border_warning(ctx: &Context<'_>, input: &mut args::Input<'_>, distance: bool
         return usage("/worldborder warning <distance|time> <value>");
     };
     let changed = if distance {
-        ctx.vars().set_border_warning(Some(value), None)
+        ctx.vars()
+            .set_border_warning(ctx.plan.active_dimension(), Some(value), None)
     } else {
-        ctx.vars().set_border_warning(None, Some(value))
+        ctx.vars()
+            .set_border_warning(ctx.plan.active_dimension(), None, Some(value))
     };
     if !changed {
         let key = if distance {

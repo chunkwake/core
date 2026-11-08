@@ -31,6 +31,10 @@ mimalloc = { version = "0.1", default-features = false }
 libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"] }
 tracing-appender = "0.2"
 
+[features]
+# Счёт живой кучи по классам размера в `memstats` (поиск памяти).
+alloc-count = []
+
 [dev-dependencies]
 chunkwake-net = { path = "../net", features = ["bench"] }
 criterion = { version = "0.5", default-features = false, features = ["html_reports"] }

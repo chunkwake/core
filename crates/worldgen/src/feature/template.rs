@@ -1597,7 +1597,7 @@ fn refresh_neighbors(
 /// `true` — деревянный забор: он связывается с любым деревянным, не с адским.
 fn fence_kinds(pal: &Palette) -> HashMap<u32, bool> {
     let mut kinds = HashMap::new();
-    for (name, (id, _)) in &pal.blocks {
+    for (name, (id, _)) in pal.blocks.iter() {
         if name.ends_with("_fence") {
             kinds.insert(*id, !name.contains("nether_brick"));
         }

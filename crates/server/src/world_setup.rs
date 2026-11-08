@@ -40,6 +40,7 @@ pub fn build_play_plan(
     props: &Properties,
     world_dir: &Path,
 ) -> Result<(PlayPlan, WorldStorage), String> {
+    let memory = crate::config::MemoryBudget::resolve(props.memory_profile, props.view_distance);
     let s = |e: chunkwake_data::DataError| e.to_string();
     let t = std::time::Instant::now();
     let Boot {
@@ -151,10 +152,13 @@ pub fn build_play_plan(
     chunkwake_world::set_rare_flags(rare_flags(&blocks.states()));
     chunkwake_world::set_poi_bits(poi_bits(&blocks.states()));
     chunkwake_world::set_height_classes(height_classes(data_dir, &blocks.states())?);
-    let (terrain, locate_biome, locate_structure, spawn_noise, sea_level, is_flat) = match &level
+    let palette = chunkwake_worldgen::feature::Palette::new(
+        data_dir, &blocks.states(), &|name| blocks.default_state(name).ok().map(|s| s as u32),
+    );
+    let (terrain, trim_idle, locate_biome, locate_structure, spawn_noise, sea_level, is_flat) = match &level
         .kind
     {
-        level::Kind::Flat(_) => (None, None, None, None, 63, true),
+        level::Kind::Flat(_) => (None, None, None, None, None, 63, true),
         level::Kind::Noise(noise) => {
             let mut loaded = chunkwake_worldgen::Generator::load_settings(
                 data_dir,
@@ -196,7 +200,8 @@ pub fn build_play_plan(
             let state = |name: &str| blocks.default_state(name).ok().map(|s| s as u32);
             let overworld =
                 chunkwake_worldgen::pipeline::Overworld::new(noise, &state, &biome_ids)?
-                    .with_features(data_dir, &blocks.states(), &state, &biome_ids)?;
+                    .with_memory_limits(memory.proto_limit, memory.base_column_limit)
+                    .with_features_palette(data_dir, palette.clone(), &biome_ids)?;
             if let Some((done, all)) = overworld.feature_coverage() {
                 tracing::info!("worldgen features: {done} of {all} ported");
                 for (name, why) in overworld.feature_failures().iter().take(5) {
@@ -223,6 +228,8 @@ pub fn build_play_plan(
             let locate_structure: Locate = std::sync::Arc::new(move |name, origin| {
                 locate_struct_world.locate_structure(name, origin)
             });
+            let trim_world = overworld.clone();
+            let trim_idle: chunkwake_net::play::TerrainTrimFn = std::sync::Arc::new(move || trim_world.trim_idle());
             let built: std::sync::Arc<dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync> =
                 std::sync::Arc::new(move |cx, cz| {
                     // `None` — чанк уже отдан: генератор его не повторяет, и
@@ -267,6 +274,7 @@ pub fn build_play_plan(
             }
             (
                 Some(built),
+                Some(trim_idle),
                 Some(locate),
                 Some(locate_structure),
                 Some(stand),
@@ -294,6 +302,8 @@ pub fn build_play_plan(
         "minecraft:netherrack",
         "minecraft:lava",
         "minecraft:nether_wastes",
+        memory,
+        palette.clone(),
     )?;
     let end_dim = build_dimension(
         data_dir,
@@ -309,6 +319,8 @@ pub fn build_play_plan(
         "minecraft:end_stone",
         "minecraft:air",
         "minecraft:the_end",
+        memory,
+        palette.clone(),
     )?;
 
     let login = Login {
@@ -407,6 +419,7 @@ pub fn build_play_plan(
                         .map_err(s)?,
                     template: chunk.clone(),
                     terrain,
+                    trim_idle,
                     locate_biome,
                     locate_structure,
                     void_platform: void_blocks,
@@ -421,10 +434,9 @@ pub fn build_play_plan(
             }
             list
         },
-        trees: std::sync::Arc::new(chunkwake_worldgen::feature::RuntimeTrees::load(
+        trees: std::sync::Arc::new(chunkwake_worldgen::feature::RuntimeTrees::load_with_palette(
             data_dir,
-            &blocks.states(),
-            &|name| blocks.default_state(name).ok().map(|s| s as u32),
+            palette,
             dim.min_y,
             dim.height,
         )?),
@@ -485,6 +497,7 @@ pub fn build_play_plan(
         light,
         items,
         chunkwake_data::registries::builtin_entries_of(&builtin, "mob_effect").map_err(s)?,
+        props.region_compression,
     );
     Ok((plan, storage))
 }
@@ -1365,6 +1378,7 @@ fn dimension_height(data_dir: &Path, key: &str) -> Option<i32> {
     json["height"].as_i64().map(|h| h as i32)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_dimension(
     data_dir: &Path,
     seed: i64,
@@ -1377,6 +1391,8 @@ fn build_dimension(
     default_block: &str,
     default_fluid: &str,
     fallback_biome: &str,
+    memory: crate::config::MemoryBudget,
+    palette: chunkwake_worldgen::feature::Palette,
 ) -> Result<Option<chunkwake_net::play::DimSpec>, String> {
     let mut noise = match chunkwake_worldgen::Generator::load_settings(
         data_dir,
@@ -1406,7 +1422,8 @@ fn build_dimension(
         default_block,
         default_fluid,
     )
-    .and_then(|w| w.with_features(data_dir, &blocks.states(), &state, biome_ids))
+    .and_then(|w| w.with_memory_limits(memory.proto_limit, memory.base_column_limit)
+        .with_features_palette(data_dir, palette, biome_ids))
     .map_err(|e| format!("{settings} generator: {e}"))?;
     if let Some((done, all)) = built.feature_coverage() {
         tracing::info!("{settings}: фичи {done} из {all}");
@@ -1428,6 +1445,8 @@ fn build_dimension(
         false,
     );
     let world = built.clone();
+    let trim_world = built.clone();
+    let trim_idle: chunkwake_net::play::TerrainTrimFn = std::sync::Arc::new(move || trim_world.trim_idle());
     let terrain: chunkwake_net::play::TerrainFn = std::sync::Arc::new(move |cx, cz| {
         let mut chunk = world.chunk(cx, cz)?;
         if dim_height > height {
@@ -1482,6 +1501,7 @@ fn build_dimension(
         dimension_type,
         template,
         terrain: Some(terrain),
+        trim_idle: Some(trim_idle),
         locate_biome: Some(locate_biome),
         locate_structure: Some(locate_structure),
         void_platform: None,
