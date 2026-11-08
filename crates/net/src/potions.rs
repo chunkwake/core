@@ -57,7 +57,11 @@ pub fn splash_instant_amount(amount: f32, strength: f64) -> f32 {
 
 /// A directly hit entity receives full strength regardless of its center offset.
 pub fn splash_strength(distance: f64, direct_hit: bool) -> f64 {
-    if direct_hit { 1.0 } else { (1.0 - distance / 4.0).clamp(0.0, 1.0) }
+    if direct_hit {
+        1.0
+    } else {
+        (1.0 - distance / 4.0).clamp(0.0, 1.0)
+    }
 }
 
 /// Ищет `potion_contents` в сыром патче компонентов и читает его.

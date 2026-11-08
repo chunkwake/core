@@ -741,7 +741,8 @@ pub(super) fn spawnpoint(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     };
     let dim = ctx.plan.active_dimension();
     for target in &targets {
-        ctx.plan.set_player_spawn(target.uuid, Some(pos), angle, dim);
+        ctx.plan
+            .set_player_spawn(target.uuid, Some(pos), angle, dim);
     }
     let [x, y, z] = pos;
     let mut args = vec![

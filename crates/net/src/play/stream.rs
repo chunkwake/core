@@ -17,6 +17,71 @@ const IN_FLIGHT_PER_WORKER: usize = 2;
 /// ждать её клиенту недолго.
 const LIGHT_BATCH: usize = 96;
 
+/// `PlayerChunkSender`: освещённые чанки ждут здесь и уходят пачками раз в
+/// тик, сколько разрешает клиент ответами `chunk_batch_received`.
+pub(super) struct ChunkSender {
+    /// Готовы и ждут отправки (`pendingChunks`): уход из обзора снимает их
+    /// без `forget_level_chunk`.
+    pending: HashSet<(i32, i32)>,
+    /// `desiredChunksPerTick`: с 9, дальше — из ответа клиента в `0.01..=64`.
+    desired: f32,
+    batch_quota: f32,
+    unacknowledged: i32,
+    /// 1 до первого ответа клиента, потом 10.
+    max_unacknowledged: i32,
+}
+
+impl Default for ChunkSender {
+    fn default() -> Self {
+        Self {
+            pending: HashSet::new(),
+            desired: 9.0,
+            batch_quota: 0.0,
+            unacknowledged: 0,
+            max_unacknowledged: 1,
+        }
+    }
+}
+
+impl ChunkSender {
+    /// `sendNextChunks` без самой отправки: чанки пачки этого тика, ближние
+    /// к `center` первыми (`ChunkPos.distanceSquared`).
+    pub(super) fn next_batch(&mut self, center: (i32, i32)) -> Vec<(i32, i32)> {
+        if self.unacknowledged >= self.max_unacknowledged {
+            return Vec::new();
+        }
+        let cap = self.desired.max(1.0);
+        self.batch_quota = (self.batch_quota + self.desired).min(cap);
+        if self.batch_quota < 1.0 || self.pending.is_empty() {
+            return Vec::new();
+        }
+        let max = self.batch_quota.floor() as usize;
+        let mut batch: Vec<(i32, i32)> = self.pending.iter().copied().collect();
+        batch.sort_by_key(|&(x, z)| (x - center.0).pow(2) + (z - center.1).pow(2));
+        batch.truncate(max);
+        for p in &batch {
+            self.pending.remove(p);
+        }
+        self.unacknowledged += 1;
+        self.batch_quota -= batch.len() as f32;
+        batch
+    }
+
+    /// `onChunkBatchReceivedByClient`.
+    pub(super) fn received(&mut self, desired: f32) {
+        self.unacknowledged = (self.unacknowledged - 1).max(0);
+        self.desired = if desired.is_nan() {
+            0.01
+        } else {
+            desired.clamp(0.01, 64.0)
+        };
+        if self.unacknowledged == 0 {
+            self.batch_quota = 1.0;
+        }
+        self.max_unacknowledged = 10;
+    }
+}
+
 pub(super) struct ChunkStream {
     tx: tokio::sync::mpsc::UnboundedSender<(i32, i32)>,
     pub(super) ready: tokio::sync::mpsc::UnboundedReceiver<(i32, i32)>,
@@ -34,8 +99,15 @@ pub(super) struct ChunkStream {
     to_light: Vec<(i32, i32)>,
     /// Пачка сейчас светится в отдельном потоке.
     lighting: bool,
-    lit_tx: tokio::sync::mpsc::UnboundedSender<Vec<Frame>>,
-    pub(super) lit: tokio::sync::mpsc::UnboundedReceiver<Vec<Frame>>,
+    /// Освещённые пачки: кадры уже в `chunk_frames`, сюда — их позиции.
+    lit_tx: tokio::sync::mpsc::UnboundedSender<Vec<(i32, i32)>>,
+    pub(super) lit: tokio::sync::mpsc::UnboundedReceiver<Vec<(i32, i32)>>,
+    /// Темп отправки (`PlayerChunkSender`): переживает `restart`, как в ваниле.
+    pub(super) sender: ChunkSender,
+    /// Уже у клиента: в них видны сущности и приходят блоки (`isChunkTracked`).
+    sent: HashSet<(i32, i32)>,
+    /// Позиция игрока для дальности слежения: обновляет сессия.
+    pub(super) pos: [f64; 3],
 }
 
 impl ChunkStream {
@@ -55,17 +127,47 @@ impl ChunkStream {
             queue: Vec::new(),
             in_flight: 0,
             built: HashSet::new(),
+            sender: ChunkSender::default(),
+            sent: HashSet::new(),
+            pos: [0.0; 3],
         }
     }
 
     /// Новый мир после `respawn`: прежние задания и кадры уходят в старые
     /// каналы и пропадают.
     pub(super) fn restart(&mut self, center: (i32, i32)) {
+        let mut sender = std::mem::take(&mut self.sender);
+        let pos = self.pos;
+        sender.pending.clear();
         *self = Self::new(center, self.radius);
+        self.sender = sender;
+        self.pos = pos;
     }
 
     pub(super) fn center(&self) -> (i32, i32) {
         self.center
+    }
+
+    /// `ChunkMap.isChunkTracked`: в обзоре и уже отправлен клиенту.
+    pub(super) fn tracks(&self, chunk: (i32, i32)) -> bool {
+        self.sent.contains(&chunk) && in_view(self.center, self.radius, chunk)
+    }
+
+    /// `TrackedEntity.updatePlayer`: по горизонтали не дальше
+    /// `min(обзор × 16, дальность сущности)` и чанк сущности у клиента.
+    pub(super) fn sees(&self, pos: [f64; 3], range: i32) -> bool {
+        let (dx, dz) = (self.pos[0] - pos[0], self.pos[2] - pos[2]);
+        let r = f64::from((self.radius * 16).min(range));
+        dx * dx + dz * dz <= r * r
+            && self.tracks(((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4))
+    }
+
+    pub(super) fn radius(&self) -> i32 {
+        self.radius
+    }
+
+    pub(super) fn set_radius(&mut self, radius: i32) {
+        self.radius = radius;
     }
 
     fn sort_queue(&mut self) {
@@ -101,7 +203,7 @@ impl PlayPlan {
         self.stream_enter(conn, s, s.center, &[], all).await
     }
 
-    async fn stream_enter(
+    pub(super) async fn stream_enter(
         &self,
         conn: &mut Connection,
         s: &mut ChunkStream,
@@ -114,6 +216,11 @@ impl PlayPlan {
         let ids = self.ids;
         let mut prefix = Vec::new();
         for &(x, z) in forget {
+            s.sent.remove(&(x, z));
+            // `dropChunk`: ещё не отправленный просто снимается с очереди.
+            if s.sender.pending.remove(&(x, z)) {
+                continue;
+            }
             prefix.extend(
                 self.hub
                     .frame(&play::forget_level_chunk(ids.forget_level_chunk, x, z)),
@@ -126,13 +233,12 @@ impl PlayPlan {
         )));
         conn.send_frames(&prefix).await?;
         // Ушедшие из радиуса больше не нужны: ни отправлять, ни считать.
-        s.waiting
-            .retain(|&p| (p.0 - new.0).abs() <= r && (p.1 - new.1).abs() <= r);
+        s.waiting.retain(|&p| in_view(new, r, p));
         let center = new;
-        s.queue
-            .retain(|&p| (p.0 - center.0).abs() <= r && (p.1 - center.1).abs() <= r);
+        s.queue.retain(|&p| in_view(center, r, p));
+        // Построенные — с каймой в чанк вокруг описанного квадрата `r + 1`: соседи для света.
         s.built
-            .retain(|&p| (p.0 - center.0).abs() <= r + 1 && (p.1 - center.1).abs() <= r + 1);
+            .retain(|&p| (p.0 - center.0).abs() <= r + 2 && (p.1 - center.1).abs() <= r + 2);
 
         let mut cached = Vec::new();
         {
@@ -140,8 +246,8 @@ impl PlayPlan {
             let world = self.dim_state().edited.read().unwrap();
             let cache = self.dim_state().chunk_frames.lock().unwrap();
             for c in fresh {
-                if let Some(f) = cache.get(&c) {
-                    cached.push(f.clone());
+                if cache.contains_key(&c) {
+                    cached.push(c);
                     continue;
                 }
                 s.waiting.insert(c);
@@ -152,9 +258,8 @@ impl PlayPlan {
                 }
             }
         }
-        if !cached.is_empty() {
-            self.send_batch(conn, &cached).await?;
-        }
+        // Готовые — в очередь отправки (`markChunkPendingToSend`), уйдут по тикам.
+        s.sender.pending.extend(cached);
         s.sort_queue();
         self.stream_pump(s);
         // Уже построенные (с диска или от другого игрока) могут уйти сразу.
@@ -253,23 +358,119 @@ impl PlayPlan {
         s.lighting = true;
         let dim = self.active_dim();
         tokio::task::spawn_blocking(move || {
-            let frames: Vec<Frame> = super::with_dim(dim, || {
+            super::with_dim(dim, || {
                 plan.light_ring(&batch);
-                batch.iter().map(|&(x, z)| plan.chunk_frame(x, z)).collect()
+                // Кадры — в кэш `chunk_frames`: отправка возьмёт их оттуда.
+                for &(x, z) in &batch {
+                    plan.chunk_frame(x, z);
+                }
             });
-            let _ = tx.send(frames);
+            let _ = tx.send(batch);
         });
     }
 
-    /// Пачка освещена: отправить и начать следующую.
-    pub(super) async fn stream_lit(
+    /// Пачка освещена: в очередь отправки, и начать следующую.
+    pub(super) fn stream_lit(&self, s: &mut ChunkStream, lit: Vec<(i32, i32)>) {
+        s.lighting = false;
+        self.stream_light(s);
+        // Пока пачка светилась, игрок мог уйти: вне обзора не отправляются.
+        let (c, r) = (s.center, s.radius);
+        s.sender
+            .pending
+            .extend(lit.into_iter().filter(|&p| in_view(c, r, p)));
+    }
+
+    /// Тик отправки (`PlayerChunkSender.sendNextChunks`). Кадр берётся в
+    /// момент отправки: правка после света сбросила кэш, и клиент получит
+    /// чанк уже с ней.
+    pub(super) async fn stream_tick(
         &self,
         conn: &mut Connection,
         s: &mut ChunkStream,
-        frames: Vec<Frame>,
-    ) -> Result<(), NetError> {
-        s.lighting = false;
-        self.stream_light(s);
-        self.send_batch(conn, &frames).await
+    ) -> Result<bool, NetError> {
+        let batch = s.sender.next_batch(s.center);
+        if batch.is_empty() {
+            return Ok(false);
+        }
+        let frames: Vec<Frame> = batch.iter().map(|&(x, z)| self.chunk_frame(x, z)).collect();
+        s.sent.extend(batch);
+        self.send_batch(conn, &frames).await?;
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChunkSender;
+
+    fn sender(pending: impl IntoIterator<Item = (i32, i32)>) -> ChunkSender {
+        let mut s = ChunkSender::default();
+        s.pending.extend(pending);
+        s
+    }
+
+    fn square(r: i32) -> Vec<(i32, i32)> {
+        (-r..=r)
+            .flat_map(|x| (-r..=r).map(move |z| (x, z)))
+            .collect()
+    }
+
+    #[test]
+    fn first_batch_is_nine_then_waits_for_ack() {
+        let mut s = sender(square(5));
+        let first = s.next_batch((0, 0));
+        assert_eq!(first.len(), 9);
+        // Ближние первыми: центр и кольцо вокруг.
+        assert!(first.iter().all(|&(x, z)| x * x + z * z <= 2));
+        // `maxUnacknowledgedBatches` = 1 до первого ответа.
+        assert!(s.next_batch((0, 0)).is_empty());
+        s.received(64.0);
+        // Квота после ответа — 1, плюс 64 за тик, не больше 64.
+        assert_eq!(s.next_batch((0, 0)).len(), 64);
+        // Ответа нет, но в полёте уже до 10 пачек.
+        assert_eq!(s.next_batch((0, 0)).len(), 121 - 9 - 64);
+    }
+
+    #[test]
+    fn slow_client_gets_fractional_rate() {
+        let mut s = sender(square(3));
+        s.next_batch((0, 0));
+        s.received(0.25);
+        // Квота 1 после ответа: первый тик — один чанк.
+        assert_eq!(s.next_batch((0, 0)).len(), 1);
+        s.received(0.25);
+        // Потолок квоты `max(1, desired)` = 1, прибавка 0.25: квота
+        // 1 → отправка, затем три тика копится, на четвёртый — снова чанк.
+        let sent: Vec<usize> = (0..5).map(|_| s.next_batch((0, 0)).len()).collect();
+        assert_eq!(sent, [1, 0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn nan_and_out_of_range_rates_clamp() {
+        let mut s = ChunkSender::default();
+        s.received(f32::NAN);
+        assert_eq!(s.desired, 0.01);
+        s.received(1000.0);
+        assert_eq!(s.desired, 64.0);
+        assert_eq!(s.unacknowledged, 0);
+    }
+
+    /// `TrackedEntity.updatePlayer`: дальность — меньшая из обзора и типа,
+    /// и чанк сущности уже отправлен.
+    #[test]
+    fn sees_within_min_range_and_sent_chunk() {
+        let mut v = super::ChunkStream::new((0, 0), 10);
+        v.pos = [8.0, 64.0, 8.0];
+        v.sent.extend(square(10));
+        // Зомби (8 чанков = 128 блоков): 120 — видно, 130 — нет.
+        assert!(v.sees([128.0, 64.0, 8.0], 128));
+        assert!(!v.sees([138.0, 64.0, 8.0], 128));
+        // Корова (160) при обзоре 4: потолок 64 блока.
+        v.set_radius(4);
+        assert!(v.sees([72.0, 64.0, 8.0], 160));
+        assert!(!v.sees([73.0, 64.0, 8.0], 160));
+        // В дальности, но чанк ещё не у клиента.
+        v.sent.remove(&(2, 0));
+        assert!(!v.sees([40.0, 64.0, 8.0], 160));
     }
 }

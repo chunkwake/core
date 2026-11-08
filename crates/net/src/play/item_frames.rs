@@ -88,11 +88,19 @@ impl ItemFrame {
     }
 
     fn kind(&self) -> &'static str {
-        if self.glow { "minecraft:glow_item_frame" } else { "minecraft:item_frame" }
+        if self.glow {
+            "minecraft:glow_item_frame"
+        } else {
+            "minecraft:item_frame"
+        }
     }
 
     fn sound(&self, what: &str) -> String {
-        let base = if self.glow { "glow_item_frame" } else { "item_frame" };
+        let base = if self.glow {
+            "glow_item_frame"
+        } else {
+            "item_frame"
+        };
         format!("minecraft:entity.{base}.{what}")
     }
 
@@ -112,7 +120,11 @@ impl ItemFrame {
 
     /// `getAnalogOutput`: пустая — 0, иначе поворот + 1.
     pub fn analog(&self) -> i32 {
-        if self.item.is_none() { 0 } else { self.rotation % ROTATIONS + 1 }
+        if self.item.is_none() {
+            0
+        } else {
+            self.rotation % ROTATIONS + 1
+        }
     }
 }
 
@@ -165,12 +177,33 @@ impl PlayPlan {
         let (yaw, pitch) = f.angles();
         // `getAddEntityPacket`: позиция — блок рамки, данные — 3D-номер стороны.
         let at = f.pos.map(|v| v as f64);
-        let mut out = vec![play::add_entity_moving(self.ids.add_entity, id, f.uuid, ty, at, [0.0; 3], yaw, pitch, f.facing as i32)];
+        let mut out = vec![play::add_entity_moving(
+            self.ids.add_entity,
+            id,
+            f.uuid,
+            ty,
+            at,
+            [0.0; 3],
+            yaw,
+            pitch,
+            f.facing as i32,
+        )];
         // `getNonDefaultValues`: по умолчанию юг, пусто, поворот 0, видима.
-        let (facing, item, rotation, invisible) =
-            ((f.facing != 3).then_some(f.facing as i32), f.item.is_some().then_some(f.item), (f.rotation != 0).then_some(f.rotation), f.invisible.then_some(true));
+        let (facing, item, rotation, invisible) = (
+            (f.facing != 3).then_some(f.facing as i32),
+            f.item.is_some().then_some(f.item),
+            (f.rotation != 0).then_some(f.rotation),
+            f.invisible.then_some(true),
+        );
         if facing.is_some() || item.is_some() || rotation.is_some() || invisible.is_some() {
-            out.push(inv::item_frame_data(self.ids.set_entity_data, id, facing, item, rotation, invisible));
+            out.push(inv::item_frame_data(
+                self.ids.set_entity_data,
+                id,
+                facing,
+                item,
+                rotation,
+                invisible,
+            ));
         }
         out
     }
@@ -180,15 +213,31 @@ impl PlayPlan {
         inv::item_frame_data(self.ids.set_entity_data, id, None, Some(f.item), None, None)
     }
 
-    /// Все рамки для зашедшего игрока.
-    pub(super) fn item_frame_frames(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        for (&id, f) in self.sim().item_frames.lock().unwrap().iter() {
-            for p in self.frame_packets(id, f) {
-                out.extend(self.hub.frame(&p));
-            }
+    fn frame_tracked(&self, id: i32, f: &ItemFrame) -> Tracked {
+        let ty = self
+            .survival
+            .entity_types
+            .get(f.kind())
+            .copied()
+            .unwrap_or_default();
+        Tracked {
+            id,
+            // Позиция сущности — центр её коробки (`recalculateBoundingBox`).
+            pos: center(f.pos, f.facing as usize),
+            range: self.tracking_range(ty),
         }
-        out
+    }
+
+    pub(super) fn track_item_frames(&self, out: &mut Vec<Tracked>) {
+        for (&id, f) in self.sim().item_frames.lock().unwrap().iter() {
+            out.push(self.frame_tracked(id, f));
+        }
+    }
+
+    /// Пакеты спавна рамки для нового зрителя.
+    pub(super) fn item_frame_spawn(&self, id: i32) -> Option<Vec<Vec<u8>>> {
+        let frames = self.sim().item_frames.lock().unwrap();
+        Some(self.frame_packets(id, frames.get(&id)?))
     }
 
     pub(super) fn is_item_frame(&self, id: i32) -> bool {
@@ -198,8 +247,9 @@ impl PlayPlan {
     fn add_item_frame(&self, f: ItemFrame) -> i32 {
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
         let packets = self.frame_packets(id, &f);
+        let tracked = self.frame_tracked(id, &f);
         self.sim().item_frames.lock().unwrap().insert(id, f);
-        self.hub.send_many(packets);
+        self.hub.spawn_tracked(tracked, packets);
         id
     }
 
@@ -230,7 +280,10 @@ impl PlayPlan {
         let d = crate::placement::step(facing);
         let support = [pos[0] - d[0], pos[1] - d[1], pos[2] - d[2]];
         let s = self.block(support).unwrap_or(0);
-        let diode = matches!(self.state_name(s), "minecraft:repeater" | "minecraft:comparator");
+        let diode = matches!(
+            self.state_name(s),
+            "minecraft:repeater" | "minecraft:comparator"
+        );
         if !self.survival.placement.solid(s) && !(facing >= 2 && diode) {
             return false;
         }
@@ -239,7 +292,10 @@ impl PlayPlan {
         !frames.iter().any(|(&other, o)| {
             Some(other) != id
                 && o.facing == facing
-                && intersects(pop, frame_box(o.pos, o.facing, self.map_id_of_slot(o.item).is_some()))
+                && intersects(
+                    pop,
+                    frame_box(o.pos, o.facing, self.map_id_of_slot(o.item).is_some()),
+                )
         })
     }
 
@@ -249,7 +305,14 @@ impl PlayPlan {
 
     /// `ItemFrameItem.useOn`: рамка в блок перед кликнутой гранью.
     /// `true` — поставлена (предмет тратится вне творческого).
-    pub(super) fn place_item_frame(&self, uuid: Uuid, item: &str, clicked: [i32; 3], face: i32, adventure: bool) -> bool {
+    pub(super) fn place_item_frame(
+        &self,
+        uuid: Uuid,
+        item: &str,
+        clicked: [i32; 3],
+        face: i32,
+        adventure: bool,
+    ) -> bool {
         let glow = match item {
             "minecraft:item_frame" => false,
             "minecraft:glow_item_frame" => true,
@@ -268,7 +331,14 @@ impl PlayPlan {
             return false;
         }
         let f = ItemFrame::new(glow, pos, facing);
-        self.play_sound(None, &f.sound("place"), crate::sounds::NEUTRAL, f.center(), 1.0, 1.0);
+        self.play_sound(
+            None,
+            &f.sound("place"),
+            crate::sounds::NEUTRAL,
+            f.center(),
+            1.0,
+            1.0,
+        );
         self.add_item_frame(f);
         true
     }
@@ -283,18 +353,32 @@ impl PlayPlan {
         }
         let (sound, spend, packet) = if f.item.is_none() {
             let held = held?;
-            if self.map_id_of(held).is_some_and(|id| self.map_has_too_many_decorations(id)) {
+            if self
+                .map_id_of(held)
+                .is_some_and(|id| self.map_has_too_many_decorations(id))
+            {
                 return None;
             }
             f.item = Some(Stack { count: 1, ..held });
             ("add_item", true, self.frame_item_data(target, f))
         } else {
             f.rotation = (f.rotation + 1) % ROTATIONS;
-            ("rotate_item", false, inv::item_frame_data(self.ids.set_entity_data, target, None, None, Some(f.rotation), None))
+            (
+                "rotate_item",
+                false,
+                inv::item_frame_data(
+                    self.ids.set_entity_data,
+                    target,
+                    None,
+                    None,
+                    Some(f.rotation),
+                    None,
+                ),
+            )
         };
         let (center, name, pos) = (f.center(), f.sound(sound), f.pos);
         drop(frames);
-        self.hub.send(None, packet);
+        self.hub.send_about(target, packet);
         self.play_sound(None, &name, crate::sounds::NEUTRAL, center, 1.0, 1.0);
         self.redstone_update(&crate::redstone::around(pos));
         Some(spend)
@@ -324,12 +408,17 @@ impl PlayPlan {
                 let mut frames = self.sim().item_frames.lock().unwrap();
                 let f = frames.get_mut(&target)?;
                 let loot = f.take_loot()?;
-                (loot, self.frame_item_data(target, f), f.center(), f.sound("remove_item"))
+                (
+                    loot,
+                    self.frame_item_data(target, f),
+                    f.center(),
+                    f.sound("remove_item"),
+                )
             };
             let pos = loot.pos;
             self.frame_drop(target, loot, false, creative);
             self.play_sound(None, &sound, crate::sounds::NEUTRAL, center, 1.0, 1.0);
-            self.hub.send(None, packet);
+            self.hub.send_about(target, packet);
             self.redstone_update(&crate::redstone::around(pos));
             return Some(());
         }
@@ -343,8 +432,15 @@ impl PlayPlan {
         let Some(mut f) = self.sim().item_frames.lock().unwrap().remove(&id) else {
             return;
         };
-        self.hub.send(None, play::remove_entities(self.ids.remove_entities, &[id]));
-        self.play_sound(None, &f.sound("break"), crate::sounds::NEUTRAL, f.center(), 1.0, 1.0);
+        self.hub.remove_tracked(&[id]);
+        self.play_sound(
+            None,
+            &f.sound("break"),
+            crate::sounds::NEUTRAL,
+            f.center(),
+            1.0,
+            1.0,
+        );
         if let Some(loot) = f.take_loot() {
             self.frame_drop(id, loot, true, creative);
         }
@@ -367,7 +463,11 @@ impl PlayPlan {
             self.drop_item(loot.at, vel, s, items::BLOCK_DELAY);
         };
         if with_frame
-            && let Some(frame) = self.item_id(if loot.glow { "minecraft:glow_item_frame" } else { "minecraft:item_frame" })
+            && let Some(frame) = self.item_id(if loot.glow {
+                "minecraft:glow_item_frame"
+            } else {
+                "minecraft:item_frame"
+            })
         {
             pop(Stack::new(frame, 1));
         }
@@ -404,7 +504,11 @@ impl PlayPlan {
         let frames = self.sim().item_frames.lock().unwrap();
         let block = [p.map(|v| v as f64), p.map(|v| v as f64 + 1.0)];
         let mut found = frames.values().filter(|f| {
-            f.facing == facing && intersects(block, frame_box(f.pos, f.facing, self.map_id_of_slot(f.item).is_some()))
+            f.facing == facing
+                && intersects(
+                    block,
+                    frame_box(f.pos, f.facing, self.map_id_of_slot(f.item).is_some()),
+                )
         });
         let one = found.next()?;
         found.next().is_none().then(|| one.analog())
@@ -428,7 +532,11 @@ impl PlayPlan {
                 if f.ticks % MAP_INTERVAL == 0
                     && let Some(map) = f.item.and_then(|s| self.map_id_of(s))
                 {
-                    let frame = MapFrame { pos: f.pos, rotation: two_d(f.facing) * 90, entity_id: id };
+                    let frame = MapFrame {
+                        pos: f.pos,
+                        rotation: two_d(f.facing) * 90,
+                        entity_id: id,
+                    };
                     maps.push((map, frame));
                 }
                 f.ticks += 1;
@@ -468,7 +576,11 @@ impl PlayPlan {
                             _ => 0.0,
                         })
                         .collect();
-                    [v[0].floor() as i32, v[1].floor() as i32, v[2].floor() as i32]
+                    [
+                        v[0].floor() as i32,
+                        v[1].floor() as i32,
+                        v[2].floor() as i32,
+                    ]
                 }
                 _ => return false,
             },
@@ -485,7 +597,9 @@ impl PlayPlan {
             .get("Item")
             .and_then(Tag::as_compound)
             .and_then(|i| crate::stack_nbt::from_nbt(i, |n| self.item_id(n)));
-        f.rotation = byte("ItemRotation").unwrap_or(0).rem_euclid(ROTATIONS as i64) as i32;
+        f.rotation = byte("ItemRotation")
+            .unwrap_or(0)
+            .rem_euclid(ROTATIONS as i64) as i32;
         f.drop_chance = match c.get("ItemDropChance") {
             Some(Tag::Float(v)) => *v,
             Some(Tag::Double(v)) => *v as f32,
@@ -510,13 +624,24 @@ impl PlayPlan {
                 let center = f.center();
                 let (yaw, pitch) = f.angles();
                 c.insert("id".into(), Tag::String(f.kind().into()));
-                c.insert("Pos".into(), Tag::List(center.iter().map(|v| Tag::Double(*v)).collect()));
+                c.insert(
+                    "Pos".into(),
+                    Tag::List(center.iter().map(|v| Tag::Double(*v)).collect()),
+                );
                 c.insert("Motion".into(), Tag::List(vec![Tag::Double(0.0); 3]));
-                c.insert("Rotation".into(), Tag::List(vec![Tag::Float(yaw), Tag::Float(pitch)]));
+                c.insert(
+                    "Rotation".into(),
+                    Tag::List(vec![Tag::Float(yaw), Tag::Float(pitch)]),
+                );
                 let u = f.uuid.as_u128();
                 c.insert(
                     "UUID".into(),
-                    Tag::IntArray((0..4).rev().map(|i| (u >> (32 * i)) as u32 as i32).collect()),
+                    Tag::IntArray(
+                        (0..4)
+                            .rev()
+                            .map(|i| (u >> (32 * i)) as u32 as i32)
+                            .collect(),
+                    ),
                 );
                 c.insert("block_pos".into(), Tag::IntArray(f.pos.to_vec()));
                 c.insert("Facing".into(), Tag::Byte(f.facing as i8));
@@ -532,7 +657,10 @@ impl PlayPlan {
                 if let Some(n) = &f.custom_name {
                     c.insert("CustomName".into(), n.clone());
                 }
-                let chunk = ((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
+                let chunk = (
+                    (center[0].floor() as i32) >> 4,
+                    (center[2].floor() as i32) >> 4,
+                );
                 (chunk, c)
             })
             .collect()
@@ -562,7 +690,10 @@ mod tests {
         let a = frame_box([0, 64, 0], 3, true);
         let b = frame_box([1, 64, 0], 3, false);
         assert!(!intersects(a, b));
-        assert!(intersects(frame_box([0, 64, 0], 3, false), frame_box([0, 64, 0], 3, true)));
+        assert!(intersects(
+            frame_box([0, 64, 0], 3, false),
+            frame_box([0, 64, 0], 3, true)
+        ));
     }
 
     #[test]

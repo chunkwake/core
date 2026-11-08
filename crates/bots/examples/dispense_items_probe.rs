@@ -24,7 +24,11 @@ fn pack(p: [i32; 3]) -> i64 {
 }
 
 fn unpack(v: i64) -> [i32; 3] {
-    [(v >> 38) as i32, (v << 52 >> 52) as i32, (v << 26 >> 38) as i32]
+    [
+        (v >> 38) as i32,
+        (v << 52 >> 52) as i32,
+        (v << 26 >> 38) as i32,
+    ]
 }
 
 fn hex(b: &[u8]) -> String {
@@ -56,7 +60,9 @@ struct Probe {
 
 impl Probe {
     fn sb(&self, n: &str) -> i32 {
-        self.table.id(State::Play, Direction::Serverbound, n).unwrap()
+        self.table
+            .id(State::Play, Direction::Serverbound, n)
+            .unwrap()
     }
 
     async fn pump(&mut self, ms: u64) {
@@ -75,7 +81,11 @@ impl Probe {
 
     fn block(&mut self, p: [i32; 3], state: i32) {
         let Some(what) = label(p) else { return };
-        let name = self.states.get(&state).cloned().unwrap_or_else(|| state.to_string());
+        let name = self
+            .states
+            .get(&state)
+            .cloned()
+            .unwrap_or_else(|| state.to_string());
         let line = format!("{what} {name}");
         if self.log.last() != Some(&line) {
             self.log.push(line);
@@ -92,7 +102,10 @@ impl Probe {
                     return;
                 }
                 let pos = [r.f64().unwrap(), r.f64().unwrap(), r.f64().unwrap()];
-                if (pos[0] - 10.0).abs() > 3.0 || (pos[2] - 9.0).abs() > 3.0 || (pos[1] - 200.5).abs() > 2.0 {
+                if (pos[0] - 10.0).abs() > 3.0
+                    || (pos[2] - 9.0).abs() > 3.0
+                    || (pos[1] - 200.5).abs() > 2.0
+                {
                     return;
                 }
                 let n = self.items.len();
@@ -102,7 +115,8 @@ impl Probe {
             "set_entity_data" => {
                 let id = r.var_int().unwrap();
                 if let Some(n) = self.items.get(&id) {
-                    self.log.push(format!("item#{n} data {}", hex(r.remaining())));
+                    self.log
+                        .push(format!("item#{n} data {}", hex(r.remaining())));
                 }
             }
             "level_event" => {
@@ -122,7 +136,10 @@ impl Probe {
                     }
                     n
                 } else {
-                    self.sounds.get(&(id - 1)).cloned().unwrap_or_else(|| (id - 1).to_string())
+                    self.sounds
+                        .get(&(id - 1))
+                        .cloned()
+                        .unwrap_or_else(|| (id - 1).to_string())
                 };
                 let source = r.var_int().unwrap();
                 let mut int = || i32::from_be_bytes(r.bytes(4).unwrap().try_into().unwrap());
@@ -147,11 +164,20 @@ impl Probe {
             }
             "section_blocks_update" => {
                 let sec = r.i64().unwrap();
-                let (sx, sy, sz) = ((sec >> 42) as i32, (sec << 44 >> 44) as i32, (sec << 22 >> 42) as i32);
+                let (sx, sy, sz) = (
+                    (sec >> 42) as i32,
+                    (sec << 44 >> 44) as i32,
+                    (sec << 22 >> 42) as i32,
+                );
                 let n = r.var_int().unwrap();
                 for _ in 0..n {
                     let v = r.var_long().unwrap();
-                    let (state, x, z, y) = ((v >> 12) as i32, (v >> 8 & 15) as i32, (v >> 4 & 15) as i32, (v & 15) as i32);
+                    let (state, x, z, y) = (
+                        (v >> 12) as i32,
+                        (v >> 8 & 15) as i32,
+                        (v >> 4 & 15) as i32,
+                        (v & 15) as i32,
+                    );
                     self.block([sx * 16 + x, sy * 16 + y, sz * 16 + z], state);
                 }
             }
@@ -174,7 +200,8 @@ impl Probe {
                 let _state = r.var_int().unwrap();
                 let slot = r.u16().unwrap();
                 if w == 0 {
-                    self.log.push(format!("inv slot {slot} {}", hex(r.remaining())));
+                    self.log
+                        .push(format!("inv slot {slot} {}", hex(r.remaining())));
                 }
             }
             _ => {}
@@ -203,7 +230,16 @@ impl Probe {
     async fn use_on(&mut self, p: [i32; 3], face: i32) {
         self.seq += 1;
         let mut w = Writer::new();
-        w.var_int(self.sb("use_item_on")).var_int(0).i64(pack(p)).var_int(face).f32(0.5).f32(1.0).f32(0.5).u8(0).u8(0).var_int(self.seq);
+        w.var_int(self.sb("use_item_on"))
+            .var_int(0)
+            .i64(pack(p))
+            .var_int(face)
+            .f32(0.5)
+            .f32(1.0)
+            .f32(0.5)
+            .u8(0)
+            .u8(0)
+            .var_int(self.seq);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(600).await;
     }
@@ -212,7 +248,11 @@ impl Probe {
     async fn use_item(&mut self, yaw: f32, pitch: f32) {
         self.seq += 1;
         let mut w = Writer::new();
-        w.var_int(self.sb("use_item")).var_int(0).var_int(self.seq).f32(yaw).f32(pitch);
+        w.var_int(self.sb("use_item"))
+            .var_int(0)
+            .var_int(self.seq)
+            .f32(yaw)
+            .f32(pitch);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(600).await;
     }
@@ -241,7 +281,8 @@ impl Probe {
     async fn setup(&mut self, front: &str, give: &str) {
         self.cmd("kill @e[type=minecraft:item]").await;
         self.cmd("setblock 10 200 8 minecraft:air").await;
-        self.cmd("setblock 10 200 8 minecraft:dispenser[facing=east]").await;
+        self.cmd("setblock 10 200 8 minecraft:dispenser[facing=east]")
+            .await;
         self.cmd(&format!("setblock 11 200 8 {front}")).await;
         self.cmd("clear framer").await;
         self.cmd(&format!("give framer {give}")).await;
@@ -250,7 +291,14 @@ impl Probe {
         let quiet = self.log.len();
         self.use_on(DISP, 1).await;
         let mut w = Writer::new();
-        w.var_int(self.sb("container_click")).var_int(self.window).var_int(0).u16(36).u8(0).var_int(1).var_int(0).bool(false);
+        w.var_int(self.sb("container_click"))
+            .var_int(self.window)
+            .var_int(0)
+            .u16(36)
+            .u8(0)
+            .var_int(1)
+            .var_int(0)
+            .bool(false);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(300).await;
         self.close().await;
@@ -290,7 +338,8 @@ impl Probe {
 async fn main() {
     let a: Vec<String> = std::env::args().collect();
     let table = PacketTable::load(a[2].as_ref()).unwrap();
-    let reg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&a[3]).unwrap()).unwrap();
+    let reg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&a[3]).unwrap()).unwrap();
     let id_of = |r: &str, k: &str| reg[r]["entries"][k]["protocol_id"].as_i64().unwrap() as i32;
     let item_type = id_of("minecraft:entity_type", "minecraft:item");
     let sounds = reg["minecraft:sound_event"]["entries"]
@@ -300,7 +349,8 @@ async fn main() {
         .map(|(k, v)| (v["protocol_id"].as_i64().unwrap() as i32, k.clone()))
         .collect();
     let blocks: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(std::path::Path::new(&a[3]).with_file_name("blocks.json")).unwrap(),
+        &std::fs::read_to_string(std::path::Path::new(&a[3]).with_file_name("blocks.json"))
+            .unwrap(),
     )
     .unwrap();
     let mut states = HashMap::new();
@@ -308,14 +358,23 @@ async fn main() {
         for s in b["states"].as_array().unwrap() {
             let mut props: Vec<String> = s["properties"]
                 .as_object()
-                .map(|o| o.iter().map(|(k, v)| format!("{k}={}", v.as_str().unwrap())).collect())
+                .map(|o| {
+                    o.iter()
+                        .map(|(k, v)| format!("{k}={}", v.as_str().unwrap()))
+                        .collect()
+                })
                 .unwrap_or_default();
             props.sort();
-            states.insert(s["id"].as_i64().unwrap() as i32, format!("{name}[{}]", props.join(",")));
+            states.insert(
+                s["id"].as_i64().unwrap() as i32,
+                format!("{name}[{}]", props.join(",")),
+            );
         }
     }
     let ids = Ids::load(&table).unwrap();
-    let mut c = Client::connect(&a[1], "framer", ids, 777, "26.3").await.unwrap();
+    let mut c = Client::connect(&a[1], "framer", ids, 777, "26.3")
+        .await
+        .unwrap();
     let mut cb = HashMap::new();
     for n in [
         "add_entity",
@@ -366,32 +425,145 @@ async fn main() {
     let water = "minecraft:potion[potion_contents={potion:\"minecraft:water\"}]";
     let awkward = "minecraft:potion[potion_contents={potion:\"minecraft:awkward\"}]";
     let hive = "minecraft:beehive[facing=west,honey_level=5]";
-    p.step("bottle at air: dropped with a fail click", "minecraft:air", "minecraft:glass_bottle 2").await;
-    p.step("bottle at water: water bottle into the dispenser", "minecraft:water", "minecraft:glass_bottle 2").await;
-    p.step("last bottle at a full hive: honey bottle", hive, "minecraft:glass_bottle 1").await;
-    p.step("bottle at an empty hive: dropped", "minecraft:beehive[facing=west]", "minecraft:glass_bottle 1").await;
-    p.step("glowstone charges the anchor", "minecraft:respawn_anchor", "minecraft:glowstone 2").await;
-    p.step("glowstone at a full anchor: fail", "minecraft:respawn_anchor[charges=4]", "minecraft:glowstone 1").await;
-    p.step("glowstone at air: dropped", "minecraft:air", "minecraft:glowstone 1").await;
-    p.step("honeycomb waxes copper", "minecraft:copper_block", "minecraft:honeycomb 1").await;
-    p.step("honeycomb at stone: dropped", "minecraft:stone", "minecraft:honeycomb 1").await;
-    p.step("water bottle turns dirt to mud", "minecraft:dirt", water).await;
-    p.step("awkward potion at dirt: dropped twice-clicked", "minecraft:dirt", awkward).await;
-    p.step("shears at a full hive: honeycomb", hive, "minecraft:shears").await;
-    p.step("powder snow bucket into air", "minecraft:air", "minecraft:powder_snow_bucket").await;
-    p.step("powder snow bucket at stone: dropped", "minecraft:stone", "minecraft:powder_snow_bucket").await;
-    p.step("bucket picks powder snow", "minecraft:powder_snow", "minecraft:bucket").await;
-    p.step("bucket drains a waterlogged slab", "minecraft:oak_slab[waterlogged=true]", "minecraft:bucket").await;
-    p.step("bucket of two at water: one filled into a free slot", "minecraft:water", "minecraft:bucket 2").await;
-    p.step("bucket at stone: dropped", "minecraft:stone", "minecraft:bucket").await;
+    p.step(
+        "bottle at air: dropped with a fail click",
+        "minecraft:air",
+        "minecraft:glass_bottle 2",
+    )
+    .await;
+    p.step(
+        "bottle at water: water bottle into the dispenser",
+        "minecraft:water",
+        "minecraft:glass_bottle 2",
+    )
+    .await;
+    p.step(
+        "last bottle at a full hive: honey bottle",
+        hive,
+        "minecraft:glass_bottle 1",
+    )
+    .await;
+    p.step(
+        "bottle at an empty hive: dropped",
+        "minecraft:beehive[facing=west]",
+        "minecraft:glass_bottle 1",
+    )
+    .await;
+    p.step(
+        "glowstone charges the anchor",
+        "minecraft:respawn_anchor",
+        "minecraft:glowstone 2",
+    )
+    .await;
+    p.step(
+        "glowstone at a full anchor: fail",
+        "minecraft:respawn_anchor[charges=4]",
+        "minecraft:glowstone 1",
+    )
+    .await;
+    p.step(
+        "glowstone at air: dropped",
+        "minecraft:air",
+        "minecraft:glowstone 1",
+    )
+    .await;
+    p.step(
+        "honeycomb waxes copper",
+        "minecraft:copper_block",
+        "minecraft:honeycomb 1",
+    )
+    .await;
+    p.step(
+        "honeycomb at stone: dropped",
+        "minecraft:stone",
+        "minecraft:honeycomb 1",
+    )
+    .await;
+    p.step("water bottle turns dirt to mud", "minecraft:dirt", water)
+        .await;
+    p.step(
+        "awkward potion at dirt: dropped twice-clicked",
+        "minecraft:dirt",
+        awkward,
+    )
+    .await;
+    p.step("shears at a full hive: honeycomb", hive, "minecraft:shears")
+        .await;
+    p.step(
+        "powder snow bucket into air",
+        "minecraft:air",
+        "minecraft:powder_snow_bucket",
+    )
+    .await;
+    p.step(
+        "powder snow bucket at stone: dropped",
+        "minecraft:stone",
+        "minecraft:powder_snow_bucket",
+    )
+    .await;
+    p.step(
+        "bucket picks powder snow",
+        "minecraft:powder_snow",
+        "minecraft:bucket",
+    )
+    .await;
+    p.step(
+        "bucket drains a waterlogged slab",
+        "minecraft:oak_slab[waterlogged=true]",
+        "minecraft:bucket",
+    )
+    .await;
+    p.step(
+        "bucket of two at water: one filled into a free slot",
+        "minecraft:water",
+        "minecraft:bucket 2",
+    )
+    .await;
+    p.step(
+        "bucket at stone: dropped",
+        "minecraft:stone",
+        "minecraft:bucket",
+    )
+    .await;
 
-    p.player("glowstone charges the anchor", "minecraft:respawn_anchor", "minecraft:glowstone 2").await;
-    p.player("shears at a full hive", "minecraft:beehive[facing=north,honey_level=5]", "minecraft:shears").await;
-    p.player("bottle at a full hive", "minecraft:beehive[facing=north,honey_level=5]", "minecraft:glass_bottle 3").await;
-    p.player("water bottle on dirt", "minecraft:dirt", water).await;
-    p.bottle_at("bottle from water", "minecraft:water", "minecraft:glass_bottle 2").await;
-    p.bottle_at("last bottle from a waterlogged slab", "minecraft:oak_slab[waterlogged=true]", "minecraft:glass_bottle 1").await;
-    p.bottle_at("bottle at stone: nothing", "minecraft:stone", "minecraft:glass_bottle 1").await;
+    p.player(
+        "glowstone charges the anchor",
+        "minecraft:respawn_anchor",
+        "minecraft:glowstone 2",
+    )
+    .await;
+    p.player(
+        "shears at a full hive",
+        "minecraft:beehive[facing=north,honey_level=5]",
+        "minecraft:shears",
+    )
+    .await;
+    p.player(
+        "bottle at a full hive",
+        "minecraft:beehive[facing=north,honey_level=5]",
+        "minecraft:glass_bottle 3",
+    )
+    .await;
+    p.player("water bottle on dirt", "minecraft:dirt", water)
+        .await;
+    p.bottle_at(
+        "bottle from water",
+        "minecraft:water",
+        "minecraft:glass_bottle 2",
+    )
+    .await;
+    p.bottle_at(
+        "last bottle from a waterlogged slab",
+        "minecraft:oak_slab[waterlogged=true]",
+        "minecraft:glass_bottle 1",
+    )
+    .await;
+    p.bottle_at(
+        "bottle at stone: nothing",
+        "minecraft:stone",
+        "minecraft:glass_bottle 1",
+    )
+    .await;
     for l in &p.log {
         println!("{l}");
     }

@@ -12,11 +12,19 @@ async fn main() {
     let a: Vec<String> = std::env::args().collect();
     let table = PacketTable::load(a[2].as_ref()).unwrap();
     let ids = Ids::load(&table).unwrap();
-    let cmd_id = table.id(State::Play, Direction::Serverbound, "chat_command").unwrap();
-    let loaded_id = table.id(State::Play, Direction::Serverbound, "player_loaded").unwrap();
-    let content_id = table.id(State::Play, Direction::Clientbound, "container_set_content").unwrap();
+    let cmd_id = table
+        .id(State::Play, Direction::Serverbound, "chat_command")
+        .unwrap();
+    let loaded_id = table
+        .id(State::Play, Direction::Serverbound, "player_loaded")
+        .unwrap();
+    let content_id = table
+        .id(State::Play, Direction::Clientbound, "container_set_content")
+        .unwrap();
     let secs: u64 = a.get(7).and_then(|s| s.parse().ok()).unwrap_or(30);
-    let mut c = Client::connect(&a[1], &a[3], ids, 777, "26.3").await.unwrap();
+    let mut c = Client::connect(&a[1], &a[3], ids, 777, "26.3")
+        .await
+        .unwrap();
     loop {
         if let Ok(Event::Position(_)) = c.next_event().await {
             break;
@@ -30,7 +38,10 @@ async fn main() {
     for line in [
         "gamemode creative".to_string(),
         "give @s minecraft:diamond 5".to_string(),
-        format!("execute in minecraft:the_nether run tp @s {} {} {}", a[4], a[5], a[6]),
+        format!(
+            "execute in minecraft:the_nether run tp @s {} {} {}",
+            a[4], a[5], a[6]
+        ),
     ] {
         c.send_raw(&send(line)).await.unwrap();
     }
@@ -57,7 +68,11 @@ async fn main() {
             _ => {}
         }
     }
-    println!("chunks {}, inventory windows {}", c.chunks_in, c.captured.len());
+    println!(
+        "chunks {}, inventory windows {}",
+        c.chunks_in,
+        c.captured.len()
+    );
     c.send_raw(&send("save-all".to_string())).await.unwrap();
     tokio::time::sleep(Duration::from_secs(5)).await;
 }

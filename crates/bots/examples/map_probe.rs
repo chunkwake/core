@@ -38,7 +38,9 @@ struct Probe {
 
 impl Probe {
     fn sb(&self, n: &str) -> i32 {
-        self.table.id(State::Play, Direction::Serverbound, n).unwrap()
+        self.table
+            .id(State::Play, Direction::Serverbound, n)
+            .unwrap()
     }
 
     async fn pump(&mut self, ms: u64) {
@@ -82,7 +84,10 @@ impl Probe {
             let data = r.bytes(len).unwrap();
             for dz in 0..h {
                 for dx in 0..w {
-                    e.colors.insert((x + dx, z + dz), data[dx as usize + dz as usize * w as usize]);
+                    e.colors.insert(
+                        (x + dx, z + dz),
+                        data[dx as usize + dz as usize * w as usize],
+                    );
                 }
             }
         }
@@ -116,7 +121,11 @@ impl Probe {
     async fn use_item(&mut self) {
         self.seq += 1;
         let mut w = Writer::new();
-        w.var_int(self.sb("use_item")).var_int(0).var_int(self.seq).f32(0.0).f32(0.0);
+        w.var_int(self.sb("use_item"))
+            .var_int(0)
+            .var_int(self.seq)
+            .f32(0.0)
+            .f32(0.0);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(400).await;
     }
@@ -124,14 +133,30 @@ impl Probe {
     async fn use_on(&mut self, p: [i32; 3]) {
         self.seq += 1;
         let mut w = Writer::new();
-        w.var_int(self.sb("use_item_on")).var_int(0).i64(pack(p)).var_int(1).f32(0.5).f32(1.0).f32(0.5).u8(0).u8(0).var_int(self.seq);
+        w.var_int(self.sb("use_item_on"))
+            .var_int(0)
+            .i64(pack(p))
+            .var_int(1)
+            .f32(0.5)
+            .f32(1.0)
+            .f32(0.5)
+            .u8(0)
+            .u8(0)
+            .var_int(self.seq);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(400).await;
     }
 
     async fn shift(&mut self, window: i32, slot: i16) {
         let mut w = Writer::new();
-        w.var_int(self.sb("container_click")).var_int(window).var_int(0).u16(slot as u16).u8(0).var_int(1).var_int(0).bool(false);
+        w.var_int(self.sb("container_click"))
+            .var_int(window)
+            .var_int(0)
+            .u16(slot as u16)
+            .u8(0)
+            .var_int(1)
+            .var_int(0)
+            .bool(false);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(300).await;
     }
@@ -153,8 +178,12 @@ async fn main() {
     let a: Vec<String> = std::env::args().collect();
     let table = PacketTable::load(a[2].as_ref()).unwrap();
     let ids = Ids::load(&table).unwrap();
-    let mut c = Client::connect(&a[1], "mapper", ids, 777, "26.3").await.unwrap();
-    let map_packet = table.id(State::Play, Direction::Clientbound, "map_item_data").unwrap();
+    let mut c = Client::connect(&a[1], "mapper", ids, 777, "26.3")
+        .await
+        .unwrap();
+    let map_packet = table
+        .id(State::Play, Direction::Clientbound, "map_item_data")
+        .unwrap();
     c.capture_also = vec![map_packet];
     let spawn = loop {
         if let Event::Position(p) = c.next_event().await.unwrap() {
@@ -162,7 +191,14 @@ async fn main() {
         }
     };
     println!("spawn {spawn:?}");
-    let mut p = Probe { c, table, seq: 0, time: 0, map_packet, maps: BTreeMap::new() };
+    let mut p = Probe {
+        c,
+        table,
+        seq: 0,
+        time: 0,
+        map_packet,
+        maps: BTreeMap::new(),
+    };
     p.pump(2000).await;
 
     if a[3] == "check" {
@@ -190,7 +226,10 @@ async fn main() {
     p.use_item().await;
     // Заполненная карта — в слоте 3 хотбара; держим её, сервер рисует.
     p.hold(3).await;
-    let hold = std::env::var("MAP_HOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(80);
+    let hold = std::env::var("MAP_HOLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(80);
     p.ticks(hold).await;
     p.report("after holding the new map 80 ticks");
     // Стол: окно 1. Хотбар — слоты 30..38.

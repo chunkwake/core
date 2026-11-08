@@ -4,7 +4,9 @@ use chunkwake_data::packets::PacketTable;
 use chunkwake_data::registries::{Registry, RegistryData, RegistryTags};
 use chunkwake_net::configuration::ConfigurationPlan;
 use chunkwake_net::{Connection, GameVersion, LoggedIn, NetConfig, Server};
-use chunkwake_protocol::configuration::{KnownPack, read_known_packs, select_known_packs};
+use chunkwake_protocol::configuration::{
+    ClientInfo, KnownPack, client_information, read_known_packs, select_known_packs,
+};
 use chunkwake_protocol::packets::{Handshake, NextState};
 use chunkwake_protocol::{Reader, Writer};
 use std::sync::Arc;
@@ -39,6 +41,13 @@ fn plan() -> ConfigurationPlan {
     };
     ConfigurationPlan::build(&packets, &registries, "26.3").unwrap()
 }
+
+const INFO: ClientInfo = ClientInfo {
+    view_distance: 12,
+    skin_parts: 0x7f,
+    main_hand: 0,
+    allows_listing: true,
+};
 
 async fn start() -> (std::net::SocketAddr, mpsc::UnboundedReceiver<LoggedIn>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -105,8 +114,8 @@ async fn full_configuration() {
     let mut c = login(addr).await;
     expect_greeting(&mut c).await;
 
-    // Клиент шлёт client_information (игнорируется) и свои known packs.
-    c.send(&[SB_CLIENT_INFORMATION as u8, 1, 2, 3])
+    // Клиент шлёт client_information (уйдёт в `LoggedIn.client`) и свои known packs.
+    c.send(&client_information(SB_CLIENT_INFORMATION, &INFO))
         .await
         .unwrap();
     c.send(&select_known_packs(
@@ -141,7 +150,9 @@ async fn full_configuration() {
     assert!(players.try_recv().is_err());
     c.send(&[SB_FINISH as u8]).await.unwrap();
     c.flush().await.unwrap();
-    assert_eq!(players.recv().await.unwrap().name, "Steve");
+    let player = players.recv().await.unwrap();
+    assert_eq!(player.name, "Steve");
+    assert_eq!(player.client, INFO);
 }
 
 #[tokio::test]

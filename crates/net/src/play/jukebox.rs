@@ -68,7 +68,8 @@ impl PlayPlan {
 
     /// `JukeboxBlock.getAnalogOutputSignal`: `comparator_output` пластинки.
     pub(super) fn jukebox_analog(&self, pos: [i32; 3]) -> i32 {
-        self.song_of(self.jukebox_record(pos)).map_or(0, |s| s.comparator)
+        self.song_of(self.jukebox_record(pos))
+            .map_or(0, |s| s.comparator)
     }
 
     /// `JukeboxBlockEntity.setTheItem`: пластинка в блок-сущность, `has_record`
@@ -80,7 +81,10 @@ impl PlayPlan {
         let mut be = self
             .block_entity(pos)
             .filter(|b| b.id == JUKEBOX)
-            .unwrap_or_else(|| BlockEntity { id: JUKEBOX.into(), nbt: Default::default() });
+            .unwrap_or_else(|| BlockEntity {
+                id: JUKEBOX.into(),
+                nbt: Default::default(),
+            });
         be.nbt.remove("ticks_since_song_started");
         match item.and_then(|s| crate::stack_nbt::to_nbt(s, self.item_name(s.item))) {
             Some(c) => {
@@ -101,7 +105,11 @@ impl PlayPlan {
         // `JukeboxBlockEntity.notifyItemChangedInJukebox`: и при ручном
         // действии, и при переносе пластинки воронкой.
         self.emit_vibration(
-            [pos[0] as f64 + 0.5, pos[1] as f64 + 0.5, pos[2] as f64 + 0.5],
+            [
+                pos[0] as f64 + 0.5,
+                pos[1] as f64 + 0.5,
+                pos[2] as f64 + 0.5,
+            ],
             "minecraft:block_change",
         );
         match (item.is_some(), self.song_of(item)) {
@@ -112,8 +120,15 @@ impl PlayPlan {
 
     /// `JukeboxSongPlayer.play`: событие 1010 с номером песни.
     fn jukebox_play(&self, pos: [i32; 3], song: JukeboxSong) {
-        self.sim().jukeboxes.lock().unwrap().insert(pos, Playing { song, ticks: 0 });
-        self.hub.send(None, play::level_event(self.ids.level_event, EVENT_PLAY, pos, song.id, false));
+        self.sim()
+            .jukeboxes
+            .lock()
+            .unwrap()
+            .insert(pos, Playing { song, ticks: 0 });
+        self.hub.send(
+            None,
+            play::level_event(self.ids.level_event, EVENT_PLAY, pos, song.id, false),
+        );
         self.redstone_update(&crate::redstone::around(pos));
         self.mark_work();
     }
@@ -128,7 +143,10 @@ impl PlayPlan {
         {
             self.set_block_entity(pos, Some(be));
         }
-        self.hub.send(None, play::level_event(self.ids.level_event, EVENT_STOP, pos, 0, false));
+        self.hub.send(
+            None,
+            play::level_event(self.ids.level_event, EVENT_STOP, pos, 0, false),
+        );
         self.redstone_update(&crate::redstone::around(pos));
     }
 
@@ -184,7 +202,10 @@ impl PlayPlan {
         if let Some(record) = self.jukebox_record(pos) {
             self.drop_record(pos, record);
         }
-        self.hub.send(None, play::level_event(self.ids.level_event, EVENT_STOP, pos, 0, false));
+        self.hub.send(
+            None,
+            play::level_event(self.ids.level_event, EVENT_STOP, pos, 0, false),
+        );
     }
 
     /// Проигрыватель с диска: песня продолжается с сохранённого места
@@ -259,7 +280,11 @@ impl PlayPlan {
                         self.ids.level_particles,
                         id,
                         false,
-                        [pos[0] as f64 + 0.5, pos[1] as f64 + 1.2, pos[2] as f64 + 0.5],
+                        [
+                            pos[0] as f64 + 0.5,
+                            pos[1] as f64 + 1.2,
+                            pos[2] as f64 + 0.5,
+                        ],
                         [color, 0.0, 0.0],
                         1.0,
                         0,
@@ -278,7 +303,8 @@ pub(super) fn stamp_ticks(column: &mut ChunkColumn, playing: &FastMap<[i32; 3], 
             continue;
         }
         if let Some(p) = playing.get(pos) {
-            be.nbt.insert("ticks_since_song_started".into(), Tag::Long(p.ticks));
+            be.nbt
+                .insert("ticks_since_song_started".into(), Tag::Long(p.ticks));
         }
     }
 }
@@ -288,13 +314,20 @@ mod tests {
     use super::*;
 
     fn song(ticks: i64) -> JukeboxSong {
-        JukeboxSong { id: 5, comparator: 2, ticks }
+        JukeboxSong {
+            id: 5,
+            comparator: 2,
+            ticks,
+        }
     }
 
     /// `hasFinished`: песня держится ещё 20 тиков после `lengthInTicks`.
     #[test]
     fn song_finishes_twenty_ticks_after_its_length() {
-        let p = Playing { song: song(3700), ticks: 3719 };
+        let p = Playing {
+            song: song(3700),
+            ticks: 3719,
+        };
         assert!(!p.finished());
         assert!(Playing { ticks: 3720, ..p }.finished());
     }
@@ -304,12 +337,29 @@ mod tests {
     fn save_stamps_ticks_of_playing_jukeboxes_only() {
         let mut column = ChunkColumn::flat(&[], 1, 0, 15, 6, false);
         for pos in [[1, 64, 1], [2, 64, 2]] {
-            column.block_entities.insert(pos, BlockEntity { id: JUKEBOX.into(), nbt: Default::default() });
+            column.block_entities.insert(
+                pos,
+                BlockEntity {
+                    id: JUKEBOX.into(),
+                    nbt: Default::default(),
+                },
+            );
         }
         let mut playing = FastMap::default();
-        playing.insert([1, 64, 1], Playing { song: song(100), ticks: 42 });
+        playing.insert(
+            [1, 64, 1],
+            Playing {
+                song: song(100),
+                ticks: 42,
+            },
+        );
         stamp_ticks(&mut column, &playing);
-        let ticks = |p: [i32; 3]| column.block_entities[&p].nbt.get("ticks_since_song_started").and_then(Tag::as_i64);
+        let ticks = |p: [i32; 3]| {
+            column.block_entities[&p]
+                .nbt
+                .get("ticks_since_song_started")
+                .and_then(Tag::as_i64)
+        };
         assert_eq!(ticks([1, 64, 1]), Some(42));
         assert_eq!(ticks([2, 64, 2]), None);
     }

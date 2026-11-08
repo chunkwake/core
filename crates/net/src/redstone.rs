@@ -2209,7 +2209,12 @@ mod tests {
         // При снятии нить уже заменена воздухом, но `calculateState` получает
         // её последнее состояние отдельно: обычный разрыв даёт импульс,
         // разоружение ножницами не подаёт сигнал.
-        let removed = [id["hook"], id["air"], id["wire_false_false"], id["hook_west_false"]];
+        let removed = [
+            id["hook"],
+            id["air"],
+            id["wire_false_false"],
+            id["hook_west_false"],
+        ];
         let plain = scan_chain(&pl, 5, false, 1, Some(id["wire_true_false"]), |i| {
             removed.get(i).copied()
         });

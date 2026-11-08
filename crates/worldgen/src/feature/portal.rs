@@ -186,8 +186,8 @@ fn portal_processors(
     let mut rules = Vec::new();
     // `gold_block` с шансом 0.3 → воздух.
     rules.push(template::ProcRule {
-            pos: template::PosTest::Always,
-            loot: None,
+        pos: template::PosTest::Always,
+        loot: None,
         input: template::RuleInput::Random {
             block: pal.blocks["minecraft:gold_block"].0,
             chance: 0.3,

@@ -31,7 +31,10 @@ fn main() {
         for (rx, rz) in store.regions().unwrap() {
             let _ = std::fs::remove_file(dir.join(format!("r.{rx}.{rz}.mca")));
         }
-        RegionStore::new(&dir).with_codec(codec).save(&chunks).unwrap();
+        RegionStore::new(&dir)
+            .with_codec(codec)
+            .save(&chunks)
+            .unwrap();
         let again = RegionStore::new(&dir).load_all().unwrap();
         assert_eq!(again.len(), chunks.len());
         println!("rewrote {} chunks as {codec:?}", again.len());

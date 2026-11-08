@@ -25,7 +25,13 @@ fn main() {
         .synchronized
         .iter()
         .find(|r| r.name == "worldgen/biome")
-        .map(|r| r.entries.iter().enumerate().map(|(i, n)| (n.clone(), i as u32)).collect())
+        .map(|r| {
+            r.entries
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.clone(), i as u32))
+                .collect()
+        })
         .unwrap_or_default();
     let blocks = chunkwake_data::world::Blocks::load(data).unwrap();
     let mut noise = chunkwake_worldgen::Generator::load_with_version(data, seed, None).unwrap();
@@ -75,10 +81,16 @@ fn main() {
         }
         if i as i32 == len * width {
             eprintln!("first strip done: {}", world.mem_stats());
-            if trim_midway { world.trim_idle(); }
+            if trim_midway {
+                world.trim_idle();
+            }
         }
         if i % 500 == 0 {
-            eprintln!("{i}/{} {:.0} s", order.len(), started.elapsed().as_secs_f64());
+            eprintln!(
+                "{i}/{} {:.0} s",
+                order.len(),
+                started.elapsed().as_secs_f64()
+            );
         }
     }
     println!("chunks {} hash {h:016x}", order.len());

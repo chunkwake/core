@@ -345,7 +345,10 @@ fn level_nbt(level: &Level, data_version: i32, name: &str) -> Compound {
     ]);
     // Ад и Край: в каждом `world_preset` ванили, плоский мир тоже.
     let mut dimensions = Compound::from([("minecraft:overworld".into(), Tag::Compound(overworld))]);
-    dimensions.insert("minecraft:the_nether".into(), Tag::Compound(nether_dimension()));
+    dimensions.insert(
+        "minecraft:the_nether".into(),
+        Tag::Compound(nether_dimension()),
+    );
     dimensions.insert("minecraft:the_end".into(), Tag::Compound(end_dimension()));
     let gen_settings = Compound::from([
         ("seed".into(), Tag::Long(level.seed)),

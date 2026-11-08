@@ -806,7 +806,9 @@ fn compare_blocks(
                 println!(
                     "  InhabitedTime {:?}, fluid_ticks {:?}, Status {:?}",
                     nbt.get("InhabitedTime").and_then(|t| t.as_i64()),
-                    nbt.get("fluid_ticks").and_then(|t| t.as_list()).map(<[_]>::len),
+                    nbt.get("fluid_ticks")
+                        .and_then(|t| t.as_list())
+                        .map(<[_]>::len),
                     nbt.get("Status"),
                 );
                 if let Some(b) = &ours.biomes {
@@ -820,7 +822,12 @@ fn compare_blocks(
                     }
                     let names: Vec<_> = seen
                         .iter()
-                        .filter_map(|id| biomes.iter().find(|(_, v)| *v == id).map(|(n, _)| n.as_str()))
+                        .filter_map(|id| {
+                            biomes
+                                .iter()
+                                .find(|(_, v)| *v == id)
+                                .map(|(n, _)| n.as_str())
+                        })
                         .collect();
                     println!("  биомы столбца: {names:?}");
                 }

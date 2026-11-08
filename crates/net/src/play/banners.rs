@@ -11,8 +11,13 @@ const BANNER: &str = "minecraft:banner";
 /// Цвет знамени (номер `DyeColor`) по имени блока: `*_banner`, `*_wall_banner`.
 pub(super) fn banner_color(block: &str) -> Option<u8> {
     let base = block.strip_prefix("minecraft:")?;
-    let color = base.strip_suffix("_wall_banner").or_else(|| base.strip_suffix("_banner"))?;
-    chunkwake_protocol::components::DYE_COLORS.iter().position(|&c| c == color).map(|i| i as u8)
+    let color = base
+        .strip_suffix("_wall_banner")
+        .or_else(|| base.strip_suffix("_banner"))?;
+    chunkwake_protocol::components::DYE_COLORS
+        .iter()
+        .position(|&c| c == color)
+        .map(|i| i as u8)
 }
 
 impl PlayPlan {
@@ -25,27 +30,56 @@ impl PlayPlan {
         if let Some(s) = item {
             let e = chunkwake_protocol::components::get(s.extra);
             if !e.banner_patterns.is_empty() {
-                nbt.insert("patterns".into(), crate::stack_nbt::banner_layers_to_tag(&e.banner_patterns));
+                nbt.insert(
+                    "patterns".into(),
+                    crate::stack_nbt::banner_layers_to_tag(&e.banner_patterns),
+                );
             }
             if let Some(n) = &e.custom_name {
-                nbt.insert("CustomName".into(), crate::stack_nbt::json_to_tag(&crate::stack_nbt::text_json(n)));
+                nbt.insert(
+                    "CustomName".into(),
+                    crate::stack_nbt::json_to_tag(&crate::stack_nbt::text_json(n)),
+                );
             }
         }
-        self.set_block_entity(pos, Some(BlockEntity { id: BANNER.into(), nbt: nbt.clone() }));
-        if let Some(&kind) = chunkwake_world::BLOCK_ENTITY_TYPES.get().and_then(|t| t.get(BANNER)) {
+        self.set_block_entity(
+            pos,
+            Some(BlockEntity {
+                id: BANNER.into(),
+                nbt: nbt.clone(),
+            }),
+        );
+        if let Some(&kind) = chunkwake_world::BLOCK_ENTITY_TYPES
+            .get()
+            .and_then(|t| t.get(BANNER))
+        {
             let bytes = chunkwake_world::nbt::write_network(&nbt);
-            self.hub.send(None, play::block_entity_data(self.ids.block_entity_data, pos, kind, &bytes));
+            self.hub.send(
+                None,
+                play::block_entity_data(self.ids.block_entity_data, pos, kind, &bytes),
+            );
         }
     }
 
     /// `copy_components` из таблицы лута знамени: узоры и имя блок-сущности
     /// ложатся на выпавшее знамя.
-    pub(super) fn dress_banner_loot(&self, be: Option<&BlockEntity>, loot: Vec<Stack>) -> Vec<Stack> {
+    pub(super) fn dress_banner_loot(
+        &self,
+        be: Option<&BlockEntity>,
+        loot: Vec<Stack>,
+    ) -> Vec<Stack> {
         let Some(be) = be.filter(|b| b.id == BANNER) else {
             return loot;
         };
-        let patterns = be.nbt.get("patterns").map(crate::stack_nbt::banner_layers_from_tag).unwrap_or_default();
-        let name = be.nbt.get("CustomName").map(|t| crate::stack_nbt::tag_to_json(t).to_string());
+        let patterns = be
+            .nbt
+            .get("patterns")
+            .map(crate::stack_nbt::banner_layers_from_tag)
+            .unwrap_or_default();
+        let name = be
+            .nbt
+            .get("CustomName")
+            .map(|t| crate::stack_nbt::tag_to_json(t).to_string());
         if patterns.is_empty() && name.is_none() {
             return loot;
         }
@@ -68,7 +102,10 @@ impl PlayPlan {
     pub(super) fn map_banner_at(&self, pos: [i32; 3]) -> Option<MapBanner> {
         let color = banner_color(self.state_name(self.block(pos)?))?;
         let be = self.block_entity(pos).filter(|b| b.id == BANNER)?;
-        let name = be.nbt.get("CustomName").map(|t| crate::stack_nbt::tag_to_json(t).to_string());
+        let name = be
+            .nbt
+            .get("CustomName")
+            .map(|t| crate::stack_nbt::tag_to_json(t).to_string());
         Some(MapBanner { pos, color, name })
     }
 

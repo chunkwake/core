@@ -8,9 +8,12 @@ use chunkwake_protocol::{Reader, Writer};
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
-
 fn unpack(v: i64) -> [i32; 3] {
-    [(v >> 38) as i32, (v << 52 >> 52) as i32, (v << 26 >> 38) as i32]
+    [
+        (v >> 38) as i32,
+        (v << 52 >> 52) as i32,
+        (v << 26 >> 38) as i32,
+    ]
 }
 
 struct Probe {
@@ -25,11 +28,16 @@ struct Probe {
 
 impl Probe {
     fn sb(&self, n: &str) -> i32 {
-        self.table.id(State::Play, Direction::Serverbound, n).unwrap()
+        self.table
+            .id(State::Play, Direction::Serverbound, n)
+            .unwrap()
     }
 
     fn name(&self, s: i32) -> String {
-        self.states.get(&s).cloned().unwrap_or_else(|| s.to_string())
+        self.states
+            .get(&s)
+            .cloned()
+            .unwrap_or_else(|| s.to_string())
     }
 
     async fn pump(&mut self, ms: u64) {
@@ -60,11 +68,20 @@ impl Probe {
             }
             "section_blocks_update" => {
                 let sec = r.i64().unwrap();
-                let (sx, sy, sz) = ((sec >> 42) as i32, (sec << 44 >> 44) as i32, (sec << 22 >> 42) as i32);
+                let (sx, sy, sz) = (
+                    (sec >> 42) as i32,
+                    (sec << 44 >> 44) as i32,
+                    (sec << 22 >> 42) as i32,
+                );
                 let n = r.var_int().unwrap();
                 for _ in 0..n {
                     let v = r.var_long().unwrap();
-                    let (state, x, z, y) = ((v >> 12) as i32, (v >> 8 & 15) as i32, (v >> 4 & 15) as i32, (v & 15) as i32);
+                    let (state, x, z, y) = (
+                        (v >> 12) as i32,
+                        (v >> 8 & 15) as i32,
+                        (v >> 4 & 15) as i32,
+                        (v & 15) as i32,
+                    );
                     self.block([sx * 16 + x, sy * 16 + y, sz * 16 + z], state);
                 }
             }
@@ -115,7 +132,8 @@ async fn main() {
     let a: Vec<String> = std::env::args().collect();
     let table = PacketTable::load(a[2].as_ref()).unwrap();
     let blocks: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(std::path::Path::new(&a[3]).with_file_name("blocks.json")).unwrap(),
+        &std::fs::read_to_string(std::path::Path::new(&a[3]).with_file_name("blocks.json"))
+            .unwrap(),
     )
     .unwrap();
     let mut states = HashMap::new();
@@ -123,14 +141,23 @@ async fn main() {
         for s in b["states"].as_array().unwrap() {
             let mut props: Vec<String> = s["properties"]
                 .as_object()
-                .map(|o| o.iter().map(|(k, v)| format!("{k}={}", v.as_str().unwrap())).collect())
+                .map(|o| {
+                    o.iter()
+                        .map(|(k, v)| format!("{k}={}", v.as_str().unwrap()))
+                        .collect()
+                })
                 .unwrap_or_default();
             props.sort();
-            states.insert(s["id"].as_i64().unwrap() as i32, format!("{name}[{}]", props.join(",")));
+            states.insert(
+                s["id"].as_i64().unwrap() as i32,
+                format!("{name}[{}]", props.join(",")),
+            );
         }
     }
     let ids = Ids::load(&table).unwrap();
-    let mut c = Client::connect(&a[1], "framer", ids, 777, "26.3").await.unwrap();
+    let mut c = Client::connect(&a[1], "framer", ids, 777, "26.3")
+        .await
+        .unwrap();
     let mut cb = HashMap::new();
     for n in ["block_update", "section_blocks_update"] {
         let id = table.id(State::Play, Direction::Clientbound, n).unwrap();
@@ -163,7 +190,8 @@ async fn main() {
     p.pump(1500).await;
     // Бревно и ряд листвы с `distance` 7: расстояния должны разойтись 1..7.
     p.cmd("setblock 5 201 5 minecraft:oak_log").await;
-    p.cmd("fill 6 201 5 12 201 5 minecraft:oak_leaves[distance=7,persistent=false]").await;
+    p.cmd("fill 6 201 5 12 201 5 minecraft:oak_leaves[distance=7,persistent=false]")
+        .await;
     p.ticks(20).await;
     p.row("after fill");
     p.cmd("setblock 5 201 5 minecraft:air").await;

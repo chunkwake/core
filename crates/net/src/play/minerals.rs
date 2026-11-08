@@ -17,7 +17,10 @@ fn next_bud(name: &str) -> Option<&'static str> {
 }
 
 pub(super) fn is_redstone_ore(name: &str) -> bool {
-    matches!(name, "minecraft:redstone_ore" | "minecraft:deepslate_redstone_ore")
+    matches!(
+        name,
+        "minecraft:redstone_ore" | "minecraft:deepslate_redstone_ore"
+    )
 }
 
 impl PlayPlan {
@@ -84,7 +87,9 @@ impl PlayPlan {
     /// `RedStoneOreBlock.interact`: удар, шаг или клик зажигают руду.
     /// `true` — в клетке редстоун-руда.
     pub(super) fn touch_redstone_ore(&self, pos: [i32; 3]) -> bool {
-        let Some(state) = self.block(pos) else { return false };
+        let Some(state) = self.block(pos) else {
+            return false;
+        };
         if !is_redstone_ore(self.state_name(state)) {
             return false;
         }
@@ -104,8 +109,14 @@ mod tests {
 
     #[test]
     fn buds_grow_in_vanilla_order() {
-        assert_eq!(next_bud("minecraft:small_amethyst_bud"), Some("minecraft:medium_amethyst_bud"));
-        assert_eq!(next_bud("minecraft:large_amethyst_bud"), Some("minecraft:amethyst_cluster"));
+        assert_eq!(
+            next_bud("minecraft:small_amethyst_bud"),
+            Some("minecraft:medium_amethyst_bud")
+        );
+        assert_eq!(
+            next_bud("minecraft:large_amethyst_bud"),
+            Some("minecraft:amethyst_cluster")
+        );
         assert_eq!(next_bud("minecraft:amethyst_cluster"), None);
         assert!(is_redstone_ore("minecraft:deepslate_redstone_ore"));
     }

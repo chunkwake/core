@@ -22,8 +22,8 @@ pub mod mobs;
 pub mod ops;
 pub mod orbs;
 pub mod pistons;
-mod plants;
 pub mod placement;
+mod plants;
 pub mod play;
 pub mod potions;
 pub mod redstone;
@@ -32,9 +32,10 @@ mod soil;
 pub mod sounds;
 pub mod stack_nbt;
 pub mod survival;
+pub mod swing;
 pub mod ticks;
-pub mod xp;
 pub mod weather;
+pub mod xp;
 
 use bytes::BytesMut;
 use chunkwake_protocol::ProtocolError;
@@ -96,6 +97,8 @@ pub struct LoggedIn {
     pub uuid: Uuid,
     pub addr: SocketAddr,
     pub properties: Vec<ProfileProperty>,
+    /// Настройки клиента из configuration (обзор, рука, части скина).
+    pub client: chunkwake_protocol::configuration::ClientInfo,
 }
 
 #[derive(Debug)]
@@ -317,10 +320,12 @@ impl Server {
             }
         }
         tracing::info!(%name, %uuid, %addr, "player logged in");
+        let mut client = chunkwake_protocol::configuration::ClientInfo::DEFAULT;
         if let Some(plan) = &self.config.configuration {
             match plan.run(&mut conn).await? {
-                configuration::Outcome::Finished => {
+                configuration::Outcome::Finished(info) => {
                     tracing::info!(%name, "configuration finished");
+                    client = info;
                 }
                 configuration::Outcome::Rejected => return Ok(None),
             }
@@ -331,6 +336,7 @@ impl Server {
                 uuid,
                 addr,
                 properties,
+                client,
             },
             conn,
         )))
@@ -552,7 +558,7 @@ impl Connection {
     }
 }
 pub mod brewing;
+pub mod environment;
+pub mod fire;
 pub mod tnt;
 pub mod transform;
-pub mod fire;
-pub mod environment;

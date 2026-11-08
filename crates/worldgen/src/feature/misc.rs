@@ -375,7 +375,8 @@ impl Lake {
                     if p[1] < level.min_y() || p[1] >= top {
                         continue;
                     }
-                    if !pal.cold_enough_to_snow(level.biome(p[0], p[1], p[2]), p, level.sea_level()) {
+                    if !pal.cold_enough_to_snow(level.biome(p[0], p[1], p[2]), p, level.sea_level())
+                    {
                         continue;
                     }
                     if !pal.same_block(get(level, p), water) {
@@ -2653,12 +2654,20 @@ impl SculkPatch {
                 fire: pal.tag("minecraft:fire")?,
             },
             // `setValue(CAN_SUMMON, isWorldGen)`.
-            shrieker: pal.with_prop(shrieker, "can_summon", "true").unwrap_or(shrieker),
+            shrieker: pal
+                .with_prop(shrieker, "can_summon", "true")
+                .unwrap_or(shrieker),
             sensor: block(pal, "minecraft:sculk_sensor")?,
         })
     }
 
-    pub(super) fn place(&self, f: &Features, level: &mut dyn Level, r: &mut Worldgen, o: Pos) -> bool {
+    pub(super) fn place(
+        &self,
+        f: &Features,
+        level: &mut dyn Level,
+        r: &mut Worldgen,
+        o: Pos,
+    ) -> bool {
         let pal = &f.palette;
         if !self.can_spread_from(pal, &*level, o) {
             return false;
@@ -2707,7 +2716,8 @@ impl SculkPatch {
             return true;
         }
         // Воздух или стоячая вода; текущая вода не годится.
-        let still = pal.block_name(s) == Some("minecraft:water") && pal.prop(s, "level") == Some("0");
+        let still =
+            pal.block_name(s) == Some("minecraft:water") && pal.prop(s, "level") == Some("0");
         if !pal.is_air(s) && !still {
             return false;
         }
@@ -2766,7 +2776,11 @@ impl SculkPatch {
         state = get(level, to);
         match self.behaviour(pal, state) {
             Behaviour::Vein => {
-                c.facings = Some((0..6).filter(|&d| Multiface::has_face(pal, state, d)).collect());
+                c.facings = Some(
+                    (0..6)
+                        .filter(|&d| Multiface::has_face(pal, state, d))
+                        .collect(),
+                );
             }
             Behaviour::Sculk => c.facings = Some(Vec::new()),
             Behaviour::Default => {}
@@ -2824,7 +2838,10 @@ impl SculkPatch {
                 continue;
             }
             for to in 0..6 {
-                if self.vein.spread_toward_types(pal, level, state, p, from, to, types) {
+                if self
+                    .vein
+                    .spread_toward_types(pal, level, state, p, from, to, types)
+                {
                     n += 1;
                 }
             }
@@ -2915,7 +2932,12 @@ impl SculkPatch {
                 if r.next_int_bound(EXTRA_DECAY_RATE) != 0 {
                     return charge;
                 }
-                charge - if close { 1 } else { decay_penalty(p, o, charge) }
+                charge
+                    - if close {
+                        1
+                    } else {
+                        decay_penalty(p, o, charge)
+                    }
             }
         }
     }

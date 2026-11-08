@@ -76,7 +76,14 @@ impl PlayPlan {
         let Some(s) = self.full_hive(pos) else {
             return false;
         };
-        self.play_sound(None, "minecraft:block.beehive.shear", crate::sounds::BLOCKS, sound_at, 1.0, 1.0);
+        self.play_sound(
+            None,
+            "minecraft:block.beehive.shear",
+            crate::sounds::BLOCKS,
+            sound_at,
+            1.0,
+            1.0,
+        );
         let none = |_: &str| None;
         let level = |_: &str| 0;
         let ctx = crate::loot::Ctx {
@@ -113,16 +120,27 @@ impl PlayPlan {
         let fluid = |q: [i32; 3]| fl::state_fluid(pl, self.block(q).unwrap_or(super::AIR));
         let solid = |q: [i32; 3]| {
             let n = self.state_name(self.block(q).unwrap_or(super::AIR));
-            !matches!(n, "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | "")
-                && fl::fluid_of(n, None).is_none()
+            !matches!(
+                n,
+                "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | ""
+            ) && fl::fluid_of(n, None).is_none()
         };
-        let Some((at, _)) = fl::trace(eye, dir, reach, |q| solid(q) || fluid(q).is_some_and(|f| f.source)) else {
+        let Some((at, _)) = fl::trace(eye, dir, reach, |q| {
+            solid(q) || fluid(q).is_some_and(|f| f.source)
+        }) else {
             return false;
         };
         if self.spawn_blocked(uuid, at) || !fluid(at).is_some_and(|f| f.kind == fl::Kind::Water) {
             return false;
         }
-        self.play_sound(Some(uuid), "minecraft:item.bottle.fill", crate::sounds::NEUTRAL, feet, 1.0, 1.0);
+        self.play_sound(
+            Some(uuid),
+            "minecraft:item.bottle.fill",
+            crate::sounds::NEUTRAL,
+            feet,
+            1.0,
+            1.0,
+        );
         self.emit_vibration(at.map(|v| v as f64 + 0.5), "minecraft:fluid_pickup");
         true
     }
@@ -135,7 +153,14 @@ impl PlayPlan {
             return false;
         };
         if let Some((uuid, at)) = by {
-            self.play_sound(Some(uuid), "minecraft:item.bottle.fill", crate::sounds::BLOCKS, at, 1.0, 1.0);
+            self.play_sound(
+                Some(uuid),
+                "minecraft:item.bottle.fill",
+                crate::sounds::BLOCKS,
+                at,
+                1.0,
+                1.0,
+            );
         }
         self.reset_honey(pos, s);
         true
@@ -156,14 +181,25 @@ impl PlayPlan {
         let Some((s, c)) = self.anchor_charge(pos).filter(|(_, c)| *c < ANCHOR_MAX) else {
             return false;
         };
-        let Some(next) = self.survival.placement.with_prop(s, "charges", &(c + 1).to_string()) else {
+        let Some(next) = self
+            .survival
+            .placement
+            .with_prop(s, "charges", &(c + 1).to_string())
+        else {
             return false;
         };
         self.set_block(pos, next);
         self.redstone_update(&crate::redstone::around(pos));
         let center = pos.map(|v| v as f64 + 0.5);
         self.emit_vibration(center, "minecraft:block_change");
-        self.play_sound(None, "minecraft:block.respawn_anchor.charge", crate::sounds::BLOCKS, center, 1.0, 1.0);
+        self.play_sound(
+            None,
+            "minecraft:block.respawn_anchor.charge",
+            crate::sounds::BLOCKS,
+            center,
+            1.0,
+            1.0,
+        );
         true
     }
 
@@ -172,7 +208,11 @@ impl PlayPlan {
         if self.item_name(st.item) != "minecraft:potion" {
             return false;
         }
-        let water = self.survival.potions.iter().position(|n| n == "minecraft:water");
+        let water = self
+            .survival
+            .potions
+            .iter()
+            .position(|n| n == "minecraft:water");
         let extra = chunkwake_protocol::components::get(st.extra);
         let potion = extra
             .raw
@@ -184,7 +224,11 @@ impl PlayPlan {
 
     pub(super) fn water_bottle(&self) -> Option<Stack> {
         let item = self.item_id("minecraft:potion")?;
-        let water = self.survival.potions.iter().position(|n| n == "minecraft:water")?;
+        let water = self
+            .survival
+            .potions
+            .iter()
+            .position(|n| n == "minecraft:water")?;
         Some(self.brewed_stack(Stack::new(item, 1), item, water as i32))
     }
 
@@ -193,7 +237,9 @@ impl PlayPlan {
     /// звучит у себя, `BlockSource.pos`). У игрока ещё и всплеск — его
     /// слышат все, и он сам (`playSound(null, …)`).
     pub(super) fn soak_to_mud(&self, pos: [i32; 3], sound_at: [i32; 3], player: bool) -> bool {
-        let Some(s) = self.block(pos) else { return false };
+        let Some(s) = self.block(pos) else {
+            return false;
+        };
         let convertible = self
             .survival
             .block_tags
@@ -211,10 +257,22 @@ impl PlayPlan {
         if let Some(splash) = self.particle_id("minecraft:splash") {
             for _ in 0..5 {
                 let r: [f64; 2] = rand::random();
-                let at = [pos[0] as f64 + r[0], (pos[1] + 1) as f64, pos[2] as f64 + r[1]];
+                let at = [
+                    pos[0] as f64 + r[0],
+                    (pos[1] + 1) as f64,
+                    pos[2] as f64 + r[1],
+                ];
                 self.hub.send(
                     None,
-                    play::level_particles(self.ids.level_particles, splash, false, at, [0.0; 3], 1.0, 1),
+                    play::level_particles(
+                        self.ids.level_particles,
+                        splash,
+                        false,
+                        at,
+                        [0.0; 3],
+                        1.0,
+                        1,
+                    ),
                 );
             }
         }
@@ -228,18 +286,42 @@ impl PlayPlan {
     /// `DefaultDispenseItemBehavior.consumeWithRemainder`: последний предмет
     /// стопки сменяется остатком, иначе остаток кладётся в раздатчик
     /// (`DispenserBlockEntity.insertItem`), а не влезший вылетает с щелчком и дымом.
-    fn dispense_remainder(&self, me: &mut Cont, i: usize, st: Stack, rest: Stack, disp: [i32; 3], facing: usize) {
+    fn dispense_remainder(
+        &self,
+        me: &mut Cont,
+        i: usize,
+        st: Stack,
+        rest: Stack,
+        disp: [i32; 3],
+        facing: usize,
+    ) {
         if st.count <= 1 {
             me.slots[i] = Some(rest);
             return;
         }
-        me.slots[i] = Some(Stack { count: st.count - 1, ..st });
+        me.slots[i] = Some(Stack {
+            count: st.count - 1,
+            ..st
+        });
         let max = self.max_stack(rest.item);
         if hp::insert_all(&mut me.slots, rest, |_| max) > 0 {
-            let (at, vel) = hp::dispense_motion(disp, crate::placement::step(facing), rand::random());
+            let (at, vel) =
+                hp::dispense_motion(disp, crate::placement::step(facing), rand::random());
             self.drop_item(at, vel, rest, std::time::Duration::ZERO);
-            self.hub.send(None, play::level_event(self.ids.level_event, hp::EVENT_DISPENSE, disp, 0, false));
-            self.hub.send(None, play::level_event(self.ids.level_event, hp::EVENT_SMOKE, disp, facing as i32, false));
+            self.hub.send(
+                None,
+                play::level_event(self.ids.level_event, hp::EVENT_DISPENSE, disp, 0, false),
+            );
+            self.hub.send(
+                None,
+                play::level_event(
+                    self.ids.level_event,
+                    hp::EVENT_SMOKE,
+                    disp,
+                    facing as i32,
+                    false,
+                ),
+            );
         }
     }
 
@@ -257,7 +339,10 @@ impl PlayPlan {
         let plain = |name: &str| self.item_id(name).map(|id| Stack::new(id, 1));
         let front_state = self.block(front);
         let empty = front_state.is_some_and(|s| {
-            matches!(self.state_name(s), "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
+            matches!(
+                self.state_name(s),
+                "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
+            )
         });
         Some(match self.item_name(st.item) {
             // `$9`: мёд из полного улья, иначе вода из любой воды перед собой.
@@ -303,7 +388,13 @@ impl PlayPlan {
                 self.put_transformed(front, &name, next);
                 self.hub.send(
                     None,
-                    play::level_event(self.ids.level_event, crate::transform::EVENT_WAX_ON, front, 0, false),
+                    play::level_event(
+                        self.ids.level_event,
+                        crate::transform::EVENT_WAX_ON,
+                        front,
+                        0,
+                        false,
+                    ),
                 );
                 self.block_sound(None, "minecraft:item.honeycomb.wax_on", front, 1.0, 1.0);
                 hp::take_one(&mut me.slots, i);
@@ -338,7 +429,13 @@ impl PlayPlan {
                 }
                 self.set_block(front, snow);
                 self.emit_vibration(front.map(|v| v as f64 + 0.5), "minecraft:fluid_place");
-                self.block_sound(None, "minecraft:item.bucket.empty_powder_snow", front, 1.0, 1.0);
+                self.block_sound(
+                    None,
+                    "minecraft:item.bucket.empty_powder_snow",
+                    front,
+                    1.0,
+                    1.0,
+                );
                 if let Some(rest) = plain("minecraft:bucket") {
                     self.dispense_remainder(me, i, st, rest, disp, facing);
                 }
@@ -371,11 +468,18 @@ impl PlayPlan {
                     self.set_block(front, AIR);
                     self.hub.send(
                         None,
-                        play::level_event(self.ids.level_event, EVENT_DESTROY, front, s as i32, false),
+                        play::level_event(
+                            self.ids.level_event,
+                            EVENT_DESTROY,
+                            front,
+                            s as i32,
+                            false,
+                        ),
                     );
                     "minecraft:powder_snow_bucket"
                 } else {
-                    let Some(f) = fl::state_fluid(&self.survival.placement, s).filter(|f| f.source) else {
+                    let Some(f) = fl::state_fluid(&self.survival.placement, s).filter(|f| f.source)
+                    else {
                         return Some(Dispensed::Drop);
                     };
                     self.drain(front);

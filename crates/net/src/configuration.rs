@@ -15,6 +15,7 @@ struct Ids {
     disconnect: i32,
     sb_select_known_packs: i32,
     sb_finish: i32,
+    sb_client_information: i32,
 }
 
 #[derive(Debug)]
@@ -28,8 +29,9 @@ pub struct ConfigurationPlan {
 }
 
 pub enum Outcome {
-    /// Клиент подтвердил finish_configuration и перешёл в play.
-    Finished,
+    /// Клиент подтвердил finish_configuration и перешёл в play; настройки —
+    /// последний `client_information` (без него — `ClientInformation.createDefault`).
+    Finished(cfg::ClientInfo),
     /// Клиент отключён с сообщением.
     Rejected,
 }
@@ -74,6 +76,7 @@ impl ConfigurationPlan {
                 disconnect: cb("disconnect")?,
                 sb_select_known_packs: sb("select_known_packs")?,
                 sb_finish: sb("finish_configuration")?,
+                sb_client_information: sb("client_information")?,
             },
             pack,
             greeting,
@@ -91,6 +94,7 @@ impl ConfigurationPlan {
             conn.send(p).await?;
         }
         let mut synced = false;
+        let mut client = cfg::ClientInfo::DEFAULT;
         loop {
             let packet = conn.read_packet().await?;
             let mut r = Reader::new(&packet);
@@ -112,9 +116,11 @@ impl ConfigurationPlan {
                 }
                 synced = true;
             } else if id == self.ids.sb_finish && synced {
-                return Ok(Outcome::Finished);
+                return Ok(Outcome::Finished(client));
+            } else if id == self.ids.sb_client_information {
+                client = cfg::read_client_information(&mut r)?;
             }
-            // client_information, custom_payload (brand), keep_alive и т.п. пока игнорируются.
+            // custom_payload (brand), keep_alive и т.п. пока игнорируются.
         }
     }
 }

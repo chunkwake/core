@@ -313,12 +313,22 @@ impl Area {
     /// В простое оставляем затронутые декорацией прото, чтобы не потерять
     /// запись на границе; чистые можно построить повторно без отличий.
     fn trim_idle(&mut self) {
-        if !self.active.is_empty() || !self.building.is_empty() || !self.busy.is_empty() || !self.decorating.is_empty() {
+        if !self.active.is_empty()
+            || !self.building.is_empty()
+            || !self.busy.is_empty()
+            || !self.decorating.is_empty()
+        {
             return;
         }
-        let clean: Vec<_> = self.protos.keys().filter(|p| {
-            !(-1..=1).any(|dz| (-1..=1).any(|dx| self.decorated.contains(&(p.0 + dx, p.1 + dz))))
-        }).copied().collect();
+        let clean: Vec<_> = self
+            .protos
+            .keys()
+            .filter(|p| {
+                !(-1..=1)
+                    .any(|dz| (-1..=1).any(|dx| self.decorated.contains(&(p.0 + dx, p.1 + dz))))
+            })
+            .copied()
+            .collect();
         for pos in clean {
             self.protos.discard(&pos);
         }
@@ -334,7 +344,9 @@ impl Area {
         }
         let active = &self.active;
         let pinned = |p: &(i32, i32)| {
-            active.keys().any(|c| (c.0 - p.0).abs() <= 2 && (c.1 - p.1).abs() <= 2)
+            active
+                .keys()
+                .any(|c| (c.0 - p.0).abs() <= 2 && (c.1 - p.1).abs() <= 2)
         };
         self.protos.freeze_idle(pinned);
     }
@@ -492,7 +504,11 @@ impl Overworld {
         default: &dyn Fn(&str) -> Option<u32>,
         biome_ids: &HashMap<String, u32>,
     ) -> Result<Self, String> {
-        self.with_features_palette(data_dir, feature::Palette::new(data_dir, states, default), biome_ids)
+        self.with_features_palette(
+            data_dir,
+            feature::Palette::new(data_dir, states, default),
+            biome_ids,
+        )
     }
 
     pub fn with_features_palette(
@@ -524,7 +540,12 @@ impl Overworld {
         let (protos, proto_bytes, decorated, done) = {
             let a = self.area.lock().unwrap();
             let (hot, cold) = a.protos.bytes();
-            (a.protos.len(), (hot, cold, a.protos.cold.len()), a.decorated.len(), a.done.len())
+            (
+                a.protos.len(),
+                (hot, cold, a.protos.cold.len()),
+                a.decorated.len(),
+                a.done.len(),
+            )
         };
         let heights = self.base_heights.lock().unwrap().len();
         let (bases, base_bytes) = {
@@ -536,7 +557,10 @@ impl Overworld {
             .as_ref()
             .and_then(|f| f.structures.as_ref())
             .map_or(0, |s| s.layout_count());
-        let rings = self.features.as_ref().and_then(|f| f.structures.as_ref())
+        let rings = self
+            .features
+            .as_ref()
+            .and_then(|f| f.structures.as_ref())
             .map_or(0, |s| s.ring_count());
         let palette_bytes = self.features.as_ref().map_or(0, |f| f.palette.heap_bytes());
         format!(
@@ -808,7 +832,11 @@ impl Overworld {
     ) {
         // Сжатые соседи читаются ниже без распаковки — распаковать заранее.
         area.protos.thaw((cx, cz));
-        if area.protos.get(&(cx, cz)).is_some_and(|c| !c.shape_posts.is_empty()) {
+        if area
+            .protos
+            .get(&(cx, cz))
+            .is_some_and(|c| !c.shape_posts.is_empty())
+        {
             for dz in -1..=1 {
                 for dx in -1..=1 {
                     area.protos.thaw((cx + dx, cz + dz));
@@ -894,7 +922,8 @@ impl Overworld {
             .flatten()
             .copied()
             .collect();
-        let heights = std::array::from_fn(|i| chunks[i].as_mut().and_then(|c| c.live_heights.take()));
+        let heights =
+            std::array::from_fn(|i| chunks[i].as_mut().and_then(|c| c.live_heights.take()));
         let mut region = Region {
             chunks,
             cx,
@@ -1229,7 +1258,14 @@ impl feature::Level for Region<'_> {
     }
     fn get(&self, x: i32, y: i32, z: i32) -> u32 {
         self.index(x, y, z)
-            .and_then(|(s, i)| self.chunks[s].as_ref()?.states.get(i).copied().map(u32::from))
+            .and_then(|(s, i)| {
+                self.chunks[s]
+                    .as_ref()?
+                    .states
+                    .get(i)
+                    .copied()
+                    .map(u32::from)
+            })
             .unwrap_or(self.air)
     }
     fn set(&mut self, x: i32, y: i32, z: i32, state: u32) {

@@ -81,7 +81,10 @@ mod tests {
 
     #[test]
     fn zero_first_and_every_position_once_after_growth() {
-        let keys: Vec<(u16, u32)> = (0..300u16).rev().map(|k| (k * 13 % 4096, k as u32)).collect();
+        let keys: Vec<(u16, u32)> = (0..300u16)
+            .rev()
+            .map(|k| (k * 13 % 4096, k as u32))
+            .collect();
         let got = vanilla_order(&keys);
         assert_eq!(got.len(), 300);
         assert_eq!(got[0].0, 0);

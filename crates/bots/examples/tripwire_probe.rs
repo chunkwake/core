@@ -1,4 +1,4 @@
-//! Живой прогон разрыва растяжки рукой и ножницами.
+//! Живой прогон разрыва растяжки рукой и ножницами, включая вибрации крюков.
 //! `tripwire_probe <addr> <packets.json> <blocks.json>`
 use chunkwake_bots::{Client, Event, Ids};
 use chunkwake_data::packets::{Direction, PacketTable, State};
@@ -8,6 +8,8 @@ use std::time::Duration;
 
 const HOOKS: [[i32; 3]; 2] = [[8, 200, 8], [11, 200, 8]];
 const WIRE: [i32; 3] = [9, 200, 8];
+const SENSOR: [i32; 3] = [8, 200, 10];
+const FILTER: [i32; 3] = [7, 200, 10];
 
 fn pack(p: [i32; 3]) -> i64 {
     ((p[0] as i64 & 0x3ff_ffff) << 38) | ((p[2] as i64 & 0x3ff_ffff) << 12) | (p[1] as i64 & 0xfff)
@@ -20,6 +22,8 @@ struct Probe {
     hooks: HashMap<[i32; 3], i32>,
     seq: i32,
     changes: Vec<String>,
+    sensor_changes: Vec<String>,
+    filter_changes: Vec<String>,
 }
 
 impl Probe {
@@ -48,6 +52,10 @@ impl Probe {
                 if HOOKS.contains(&pos) {
                     self.hooks.insert(pos, state);
                     self.changes.push(format!("{pos:?} {}", self.name(state)));
+                } else if pos == SENSOR {
+                    self.sensor_changes.push(self.name(state).to_owned());
+                } else if pos == FILTER {
+                    self.filter_changes.push(self.name(state).to_owned());
                 }
             }
         }
@@ -91,6 +99,33 @@ impl Probe {
         self.pump(500).await;
         self.changes.clear();
     }
+
+    async fn sensor(&mut self, frequency: i32) {
+        self.cmd("fill 0 199 10 8 199 10 minecraft:stone").await;
+        self.cmd("fill 0 200 10 8 200 10 minecraft:air").await;
+        let source = if frequency == 9 { 0 } else { 1 };
+        self.cmd(&format!(
+            "setblock {source} 200 10 minecraft:redstone_block"
+        ))
+        .await;
+        self.filter_changes.clear();
+        self.cmd(&format!(
+            "fill {} 200 10 7 200 10 minecraft:redstone_wire",
+            source + 1
+        ))
+        .await;
+        self.cmd("setblock 8 200 10 minecraft:calibrated_sculk_sensor[facing=east]")
+            .await;
+        self.pump(400).await;
+        assert!(
+            self.filter_changes
+                .last()
+                .is_some_and(|s| s.contains(&format!("power={frequency}"))),
+            "фильтр сенсора: ожидалась частота {frequency}, обновления {:?}",
+            self.filter_changes
+        );
+        self.sensor_changes.clear();
+    }
 }
 
 #[tokio::main]
@@ -130,6 +165,8 @@ async fn main() {
         hooks: HashMap::new(),
         seq: 0,
         changes: Vec::new(),
+        sensor_changes: Vec::new(),
+        filter_changes: Vec::new(),
     };
     probe.pump(500).await;
     probe.cmd("gamemode survival").await;
@@ -142,12 +179,22 @@ async fn main() {
         if shears {
             probe.cmd("give framer minecraft:shears").await;
         }
+        probe.sensor(if shears { 9 } else { 10 }).await;
         probe.changes.clear();
         probe.dig().await;
         println!("== {label}");
         for change in &probe.changes {
             println!("{change}");
         }
+        assert!(
+            probe
+                .sensor_changes
+                .iter()
+                .any(|state| state.contains("sculk_sensor_phase=active")),
+            "{label}: крюк не включил сенсор; обновления {:?}",
+            probe.sensor_changes
+        );
+        println!("{label}: калиброванный сенсор включился");
         for hook in HOOKS {
             let pulse = probe.changes.iter().any(|line| {
                 line.starts_with(&format!("{hook:?}")) && line.contains("powered=true")

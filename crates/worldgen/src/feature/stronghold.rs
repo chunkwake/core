@@ -609,7 +609,13 @@ impl Grow {
     }
 }
 
-pub(super) fn forward(facing: u8, min: [i32; 3], max: [i32; 3], x_off: i32, y_off: i32) -> ([i32; 3], u8) {
+pub(super) fn forward(
+    facing: u8,
+    min: [i32; 3],
+    max: [i32; 3],
+    x_off: i32,
+    y_off: i32,
+) -> ([i32; 3], u8) {
     let y = min[1] + y_off;
     match facing {
         0 => ([min[0] + x_off, y, min[2] - 1], 0),
@@ -619,7 +625,13 @@ pub(super) fn forward(facing: u8, min: [i32; 3], max: [i32; 3], x_off: i32, y_of
     }
 }
 
-pub(super) fn left_of(facing: u8, min: [i32; 3], _max: [i32; 3], y_off: i32, z_off: i32) -> ([i32; 3], u8) {
+pub(super) fn left_of(
+    facing: u8,
+    min: [i32; 3],
+    _max: [i32; 3],
+    y_off: i32,
+    z_off: i32,
+) -> ([i32; 3], u8) {
     let y = min[1] + y_off;
     match facing {
         0 | 2 => ([min[0] - 1, y, min[2] + z_off], 3),
@@ -627,7 +639,13 @@ pub(super) fn left_of(facing: u8, min: [i32; 3], _max: [i32; 3], y_off: i32, z_o
     }
 }
 
-pub(super) fn right_of(facing: u8, min: [i32; 3], max: [i32; 3], y_off: i32, z_off: i32) -> ([i32; 3], u8) {
+pub(super) fn right_of(
+    facing: u8,
+    min: [i32; 3],
+    max: [i32; 3],
+    y_off: i32,
+    z_off: i32,
+) -> ([i32; 3], u8) {
     let y = min[1] + y_off;
     match facing {
         0 | 2 => ([max[0] + 1, y, min[2] + z_off], 1),
@@ -641,7 +659,15 @@ impl Grow {
     }
 }
 
-pub(super) fn make_box(x: i32, y: i32, z: i32, facing: u8, w: i32, h: i32, d: i32) -> ([i32; 3], [i32; 3]) {
+pub(super) fn make_box(
+    x: i32,
+    y: i32,
+    z: i32,
+    facing: u8,
+    w: i32,
+    h: i32,
+    d: i32,
+) -> ([i32; 3], [i32; 3]) {
     if facing == 0 || facing == 2 {
         ([x, y, z], [x + w - 1, y + h - 1, z + d - 1])
     } else {

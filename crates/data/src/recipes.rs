@@ -95,16 +95,30 @@ pub fn load_brewing(
     for path in paths {
         let text = std::fs::read_to_string(&path)
             .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
-        let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| DataError::Format {
-            file: path.display().to_string(), msg: e.to_string(),
-        })?;
+        let json: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| DataError::Format {
+                file: path.display().to_string(),
+                msg: e.to_string(),
+            })?;
         let name = |path: &str| json.pointer(path).and_then(|v| v.as_str());
-        let parsed = (|| Some((
-            (*items.get(name("/input/item")?)?, *potions.get(name("/input/potion_contents/potions")?)?, *items.get(name("/reagent/item")?)?),
-            (*items.get(name("/output/id")?)?, *potions.get(name("/output/components/minecraft:potion_contents/potion")?)?),
-        )))();
+        let parsed = (|| {
+            Some((
+                (
+                    *items.get(name("/input/item")?)?,
+                    *potions.get(name("/input/potion_contents/potions")?)?,
+                    *items.get(name("/reagent/item")?)?,
+                ),
+                (
+                    *items.get(name("/output/id")?)?,
+                    *potions.get(name("/output/components/minecraft:potion_contents/potion")?)?,
+                ),
+            ))
+        })();
         let Some((key, result)) = parsed else {
-            return Err(DataError::Format { file: path.display().to_string(), msg: "unknown item or potion in brewing recipe".into() });
+            return Err(DataError::Format {
+                file: path.display().to_string(),
+                msg: "unknown item or potion in brewing recipe".into(),
+            });
         };
         out.recipes.insert(key, result);
     }

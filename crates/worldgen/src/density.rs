@@ -1780,9 +1780,8 @@ fn end_height(noise: &noise::Simplex, section_x: i32, section_z: i32) -> f32 {
             if total_x * total_x + total_z * total_z > 4096
                 && noise.get(total_x as f64, total_z as f64) < -0.9
             {
-                let size = ((total_x as f32).abs() * 3439.0 + (total_z as f32).abs() * 147.0)
-                    % 13.0
-                    + 9.0;
+                let size =
+                    ((total_x as f32).abs() * 3439.0 + (total_z as f32).abs() * 147.0) % 13.0 + 9.0;
                 let xd = sub_x as f32 - (xo * 2) as f32;
                 let zd = sub_z as f32 - (zo * 2) as f32;
                 let d = 100.0 - (((xd * xd + zd * zd) as f64).sqrt() as f32) * size;

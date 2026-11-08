@@ -2,6 +2,7 @@
 //! Сундуки остаются состояниями блоков, лут и мобы не пишутся.
 
 use super::end_city;
+use super::fortress;
 use super::mansion;
 use super::mineshaft::{self, Cfg as ShaftCfg};
 use super::monument;
@@ -9,10 +10,9 @@ use super::ocean_ruin;
 use super::portal;
 use super::pyramid::{self, Which};
 use super::shore::{self, Body};
-use super::fortress;
-use super::treasure;
 use super::stronghold;
 use super::template::{self, JigInfo, Processor, ROTS, Rot, Template};
+use super::treasure;
 use super::{Bits, Features, Legacy, Level, Palette, Worldgen};
 use crate::random::pos_seed;
 use serde_json::Value;
@@ -630,7 +630,9 @@ impl Structures {
         // из находок всех наборов по `distSqr` с высотой.
         let wanted = self.wanted(name)?;
         let offer = |p: [i32; 3], best: &mut Option<([i32; 3], i64)>| {
-            let d = (0..3).map(|i| (p[i] as i64 - origin[i] as i64).pow(2)).sum();
+            let d = (0..3)
+                .map(|i| (p[i] as i64 - origin[i] as i64).pow(2))
+                .sum();
             if best.is_none_or(|(_, b)| d < b) {
                 *best = Some((p, d));
             }
@@ -915,7 +917,12 @@ impl Structures {
         decoration_seed: i64,
         step: i32,
     ) {
-        if !self.sets.iter().flat_map(|s| &s.kinds).any(|k| k.step == step) {
+        if !self
+            .sets
+            .iter()
+            .flat_map(|s| &s.kinds)
+            .any(|k| k.step == step)
+        {
             return;
         }
         let min_y = level.min_y();
@@ -972,7 +979,9 @@ impl Structures {
                 if !overlaps(piece.min, piece.max, window.min, window.max) {
                     continue;
                 }
-                piece.element.place(features, level, piece, r, window, reference);
+                piece
+                    .element
+                    .place(features, level, piece, r, window, reference);
             }
             // Руины портала и океанские руины ставятся своими Elem; общих
             // действий после кусков у них нет.
@@ -1057,7 +1066,11 @@ impl Structures {
         if std::env::var_os("CHUNKWAKE_PROF").is_some() {
             let name = self.sets[si].kinds.first().map_or("?", |k| k.name.as_str());
             let jig = template::JIG.with(|c| c.replace(0.0));
-            eprintln!("build {name} {sx} {sz}: {:.2} мс {} (разъёмы {jig:.2})", t.elapsed().as_secs_f64() * 1000.0, built.is_some());
+            eprintln!(
+                "build {name} {sx} {sz}: {:.2} мс {} (разъёмы {jig:.2})",
+                t.elapsed().as_secs_f64() * 1000.0,
+                built.is_some()
+            );
         }
         // Отладка: `CHUNKWAKE_PIECES=sx,sz` печатает коробки кусков старта.
         if let (Some(layout), Ok(want)) = (&built, std::env::var("CHUNKWAKE_PIECES"))
@@ -1070,7 +1083,13 @@ impl Structures {
         built
     }
 
-    fn build_layout(&self, si: usize, sx: i32, sz: i32, columns: &dyn Columns) -> Option<Arc<Layout>> {
+    fn build_layout(
+        &self,
+        si: usize,
+        sx: i32,
+        sz: i32,
+        columns: &dyn Columns,
+    ) -> Option<Arc<Layout>> {
         let seed = columns.seed();
         if !self.is_structure_chunk(si, sx, sz, seed) {
             return None;
@@ -1700,7 +1719,9 @@ impl Structures {
         let mut cache = self.ring_cache.lock().unwrap();
         if cache.len() >= 64 && !cache.contains_key(&seed) {
             let old: Vec<_> = cache.keys().take(32).copied().collect();
-            for key in old { cache.remove(&key); }
+            for key in old {
+                cache.remove(&key);
+            }
         }
         cache.entry(seed).or_insert(slots);
     }
@@ -2860,7 +2881,10 @@ impl Loader<'_> {
             _ => return Err(format!("{name}: not jigsaw")),
         }
         let adapt = v["terrain_adaptation"].as_str().unwrap_or("none");
-        if !matches!(adapt, "beard_thin" | "beard_box" | "bury" | "none" | "encapsulate") {
+        if !matches!(
+            adapt,
+            "beard_thin" | "beard_box" | "bury" | "none" | "encapsulate"
+        ) {
             return Err(format!("{name}: terrain {adapt}"));
         }
         let project = match v.get("project_start_to_heightmap").and_then(|s| s.as_str()) {
@@ -3148,7 +3172,12 @@ impl Loader<'_> {
         self.stronghold_kind_with(name, v, "bury")
     }
 
-    fn stronghold_kind_with(&mut self, name: &str, v: &Value, terrain: &str) -> Result<Kind, String> {
+    fn stronghold_kind_with(
+        &mut self,
+        name: &str,
+        v: &Value,
+        terrain: &str,
+    ) -> Result<Kind, String> {
         let adapt = v["terrain_adaptation"].as_str().unwrap_or("none");
         if adapt != terrain {
             return Err(format!("{name}: terrain {adapt}"));
@@ -3801,7 +3830,9 @@ fn long_set_order(keys: &[i64]) -> Vec<usize> {
         }
         table[pos].get_or_insert(i);
     }
-    zero.into_iter().chain(table.into_iter().rev().flatten()).collect()
+    zero.into_iter()
+        .chain(table.into_iter().rev().flatten())
+        .collect()
 }
 
 fn overlaps(a0: [i32; 3], a1: [i32; 3], b0: [i32; 3], b1: [i32; 3]) -> bool {

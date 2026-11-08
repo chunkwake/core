@@ -11,7 +11,10 @@ use std::time::Duration;
 async fn wait<T>(c: &mut Client, secs: f64, mut f: impl FnMut(&Event) -> Option<T>) -> Option<T> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs_f64(secs);
     loop {
-        let ev = tokio::time::timeout_at(deadline, c.next_event()).await.ok()?.ok()?;
+        let ev = tokio::time::timeout_at(deadline, c.next_event())
+            .await
+            .ok()?
+            .ok()?;
         if let Some(v) = f(&ev) {
             return Some(v);
         }
@@ -29,12 +32,19 @@ async fn main() {
     let ids = Ids::load(&table).unwrap();
     let sb = |n: &str| table.id(State::Play, Direction::Serverbound, n).unwrap();
     let dir = std::path::Path::new(&a[2]);
-    let reg: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.with_file_name("registries.json")).unwrap()).unwrap();
-    let ty = |n: &str| reg["minecraft:entity_type"]["entries"][n]["protocol_id"].as_i64().unwrap() as i32;
+    let reg: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.with_file_name("registries.json")).unwrap(),
+    )
+    .unwrap();
+    let ty = |n: &str| {
+        reg["minecraft:entity_type"]["entries"][n]["protocol_id"]
+            .as_i64()
+            .unwrap() as i32
+    };
     let (cart_ty, item_ty) = (ty("minecraft:minecart"), ty("minecraft:item"));
     let blocks: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.with_file_name("blocks.json")).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(dir.with_file_name("blocks.json")).unwrap())
+            .unwrap();
     let detector_on: Vec<i32> = blocks["minecraft:detector_rail"]["states"]
         .as_array()
         .unwrap()
@@ -42,7 +52,9 @@ async fn main() {
         .filter(|s| s["properties"]["powered"] == "true")
         .map(|s| s["id"].as_i64().unwrap() as i32)
         .collect();
-    let mut c = Client::connect(&a[1], "carter", ids, 777, "26.3").await.unwrap();
+    let mut c = Client::connect(&a[1], "carter", ids, 777, "26.3")
+        .await
+        .unwrap();
     let spawn = wait(&mut c, 30.0, |e| match e {
         Event::Position(p) => Some(*p),
         _ => None,
@@ -52,7 +64,11 @@ async fn main() {
     println!("spawn {spawn:?}");
     if a[3] == "check" {
         let found = wait(&mut c, 10.0, |e| match e {
-            Event::EntitySpawned { entity_id, kind, pos } if *kind == cart_ty => Some((*entity_id, *pos)),
+            Event::EntitySpawned {
+                entity_id,
+                kind,
+                pos,
+            } if *kind == cart_ty => Some((*entity_id, *pos)),
             _ => None,
         })
         .await;
@@ -66,8 +82,21 @@ async fn main() {
     };
     let [x, y, z] = spawn.map(|v| v.floor() as i32);
     for s in [
-        format!("fill {} {y} {} {} {} {} minecraft:air", x - 1, z + 1, x + 1, y + 3, z + 30),
-        format!("fill {x} {} {} {x} {} {} minecraft:stone", y - 1, z + 1, y - 1, z + 30),
+        format!(
+            "fill {} {y} {} {} {} {} minecraft:air",
+            x - 1,
+            z + 1,
+            x + 1,
+            y + 3,
+            z + 30
+        ),
+        format!(
+            "fill {x} {} {} {x} {} {} minecraft:stone",
+            y - 1,
+            z + 1,
+            y - 1,
+            z + 30
+        ),
         format!("setblock {x} {y} {} minecraft:stone", z + 2),
         format!("fill {x} {y} {} {x} {y} {} minecraft:rail", z + 3, z + 30),
         format!("setblock {x} {y} {} minecraft:powered_rail", z + 3),
@@ -83,17 +112,34 @@ async fn main() {
     let _ = wait(&mut c, 0.8, |e| -> Option<()> {
         match e {
             Event::BlockUpdate(p, s) if *p == det0 => println!("setup det {s}"),
-            Event::BlockUpdates(v) => v.iter().filter(|(p, _)| *p == det0).for_each(|(_, s)| println!("setup det* {s}")),
+            Event::BlockUpdates(v) => v
+                .iter()
+                .filter(|(p, _)| *p == det0)
+                .for_each(|(_, s)| println!("setup det* {s}")),
             _ => {}
         }
         None
-    }).await;
+    })
+    .await;
     let rail = [x, y, z + 3];
     let mut w = Writer::new();
-    w.var_int(sb("use_item_on")).var_int(0).i64(pack(rail)).var_int(1).f32(0.5).f32(1.0).f32(0.5).u8(0).u8(0).var_int(5);
+    w.var_int(sb("use_item_on"))
+        .var_int(0)
+        .i64(pack(rail))
+        .var_int(1)
+        .f32(0.5)
+        .f32(1.0)
+        .f32(0.5)
+        .u8(0)
+        .u8(0)
+        .var_int(5);
     c.send_raw(&w.buf).await.unwrap();
     let (cart, cpos) = wait(&mut c, 5.0, |e| match e {
-        Event::EntitySpawned { entity_id, kind, pos } if *kind == cart_ty => Some((*entity_id, *pos)),
+        Event::EntitySpawned {
+            entity_id,
+            kind,
+            pos,
+        } if *kind == cart_ty => Some((*entity_id, *pos)),
         _ => None,
     })
     .await
@@ -109,9 +155,15 @@ async fn main() {
     let mut still = tokio::time::Instant::now();
     while start.elapsed() < Duration::from_secs(30) && still.elapsed() < Duration::from_secs(3) {
         match wait(&mut c, 0.5, |e| match e {
-            Event::EntitySpawned { entity_id, pos, .. } if *entity_id == cart => Some((Some(*pos), false)),
+            Event::EntitySpawned { entity_id, pos, .. } if *entity_id == cart => {
+                Some((Some(*pos), false))
+            }
             Event::BlockUpdate(p, s) if *p == det && detector_on.contains(s) => Some((None, true)),
-            Event::BlockUpdates(v) if v.iter().any(|(p, s)| *p == det && detector_on.contains(s)) => Some((None, true)),
+            Event::BlockUpdates(v)
+                if v.iter().any(|(p, s)| *p == det && detector_on.contains(s)) =>
+            {
+                Some((None, true))
+            }
             _ => None,
         })
         .await
@@ -126,11 +178,19 @@ async fn main() {
             _ => {}
         }
     }
-    println!("cart rolled to {last:?} (from z {}) in {:.1}s, detector powered: {detector}", cpos[2], start.elapsed().as_secs_f64());
+    println!(
+        "cart rolled to {last:?} (from z {}) in {:.1}s, detector powered: {detector}",
+        cpos[2],
+        start.elapsed().as_secs_f64()
+    );
 
     // Сесть, сойти шифтом.
     let mut w = Writer::new();
-    w.var_int(sb("interact")).var_int(cart).var_int(0).u8(0).bool(false);
+    w.var_int(sb("interact"))
+        .var_int(cart)
+        .var_int(0)
+        .u8(0)
+        .bool(false);
     c.send_raw(&w.buf).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     let mut w = Writer::new();
@@ -169,15 +229,30 @@ async fn main() {
     }
     println!("broken: removed={removed} drop={dropped}");
     // Вторая — на плоский рельс у детектора, остаётся до перезапуска.
-    c.send_raw(&cmd("give carter minecraft:minecart".into())).await.unwrap();
+    c.send_raw(&cmd("give carter minecraft:minecart".into()))
+        .await
+        .unwrap();
     let mut w = Writer::new();
     w.var_int(sb("set_carried_item")).u16(1);
     c.send_raw(&w.buf).await.unwrap();
     let mut w = Writer::new();
-    w.var_int(sb("use_item_on")).var_int(0).i64(pack([x, y, z + 10])).var_int(1).f32(0.5).f32(1.0).f32(0.5).u8(0).u8(0).var_int(6);
+    w.var_int(sb("use_item_on"))
+        .var_int(0)
+        .i64(pack([x, y, z + 10]))
+        .var_int(1)
+        .f32(0.5)
+        .f32(1.0)
+        .f32(0.5)
+        .u8(0)
+        .u8(0)
+        .var_int(6);
     c.send_raw(&w.buf).await.unwrap();
     let second = wait(&mut c, 5.0, |e| match e {
-        Event::EntitySpawned { entity_id, kind, pos } if *kind == cart_ty => Some((*entity_id, *pos)),
+        Event::EntitySpawned {
+            entity_id,
+            kind,
+            pos,
+        } if *kind == cart_ty => Some((*entity_id, *pos)),
         _ => None,
     })
     .await;

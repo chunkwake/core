@@ -143,8 +143,16 @@ impl Index {
                 .map(|b| {
                     (0..DIMS)
                         .map(|k| {
-                            let lo = b.iter().map(|&c| self.nodes[c].space[k][0]).min().unwrap_or(0);
-                            let hi = b.iter().map(|&c| self.nodes[c].space[k][1]).max().unwrap_or(0);
+                            let lo = b
+                                .iter()
+                                .map(|&c| self.nodes[c].space[k][0])
+                                .min()
+                                .unwrap_or(0);
+                            let hi = b
+                                .iter()
+                                .map(|&c| self.nodes[c].space[k][1])
+                                .max()
+                                .unwrap_or(0);
                             (hi - lo).abs()
                         })
                         .sum::<i64>()
@@ -203,7 +211,11 @@ impl Index {
                 let Some(leaf) = self.search(child, target, closest) else {
                     continue;
                 };
-                let ld = if leaf == child { d } else { self.distance(leaf, target) };
+                let ld = if leaf == child {
+                    d
+                } else {
+                    self.distance(leaf, target)
+                };
                 if min > ld {
                     min = ld;
                     closest = Some(leaf);
@@ -214,7 +226,12 @@ impl Index {
     }
 
     /// Точка и штраф для `point`; `hint` — прошлый ответ (`lastResult`).
-    fn find(&self, points: &[Point], point: &[i64; 6], hint: Option<usize>) -> Option<(usize, i64)> {
+    fn find(
+        &self,
+        points: &[Point],
+        point: &[i64; 6],
+        hint: Option<usize>,
+    ) -> Option<(usize, i64)> {
         if points.is_empty() {
             return None;
         }
@@ -230,9 +247,12 @@ impl Index {
 /// `RTree.bucketize`: куски по `19^floor(log19(n - 0.01))`.
 fn bucketize(nodes: &[usize]) -> Vec<Vec<usize>> {
     let n = nodes.len() as f64;
-    let expected = (CHILDREN as f64)
-        .powf(((n - 0.01).ln() / (CHILDREN as f64).ln()).floor()) as usize;
-    nodes.chunks(expected.max(1)).map(<[usize]>::to_vec).collect()
+    let expected =
+        (CHILDREN as f64).powf(((n - 0.01).ln() / (CHILDREN as f64).ln()).floor()) as usize;
+    nodes
+        .chunks(expected.max(1))
+        .map(<[usize]>::to_vec)
+        .collect()
 }
 
 /// `Node.distance`: сумма квадратов выхода за диапазоны.

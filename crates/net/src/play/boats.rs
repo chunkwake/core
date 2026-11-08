@@ -67,7 +67,13 @@ pub(super) fn is_boat_item(name: &str) -> bool {
 /// Точка, куда смотрит луч `ClipContext.Fluid.ANY`: грань блока; сверху —
 /// высота `top` внутри клетки (верх формы или `FluidState.getHeight`:
 /// источник 8/9, течение (8−уровень)/9).
-fn hit_point(eye: [f64; 3], dir: [f64; 3], block: [i32; 3], face: usize, top: Option<f64>) -> [f64; 3] {
+fn hit_point(
+    eye: [f64; 3],
+    dir: [f64; 3],
+    block: [i32; 3],
+    face: usize,
+    top: Option<f64>,
+) -> [f64; 3] {
     let axis = match face {
         0 | 1 => 1,
         2 | 3 => 2,
@@ -83,7 +89,11 @@ fn hit_point(eye: [f64; 3], dir: [f64; 3], block: [i32; 3], face: usize, top: Op
     } else {
         ((plane - eye[axis]) / dir[axis]).max(0.0)
     };
-    let mut p = [eye[0] + dir[0] * t, eye[1] + dir[1] * t, eye[2] + dir[2] * t];
+    let mut p = [
+        eye[0] + dir[0] * t,
+        eye[1] + dir[1] * t,
+        eye[2] + dir[2] * t,
+    ];
     p[axis] = plane;
     p
 }
@@ -108,8 +118,25 @@ impl PlayPlan {
             return Vec::new();
         };
         let mut out = vec![
-            play::add_entity_moving(self.ids.add_entity, id, b.uuid, ty, b.pos, [0.0; 3], b.yaw, 0.0, 0),
-            inv::boat_data(self.ids.set_entity_data, id, 0, b.hurt_dir, b.damage_at(now), b.paddles),
+            play::add_entity_moving(
+                self.ids.add_entity,
+                id,
+                b.uuid,
+                ty,
+                b.pos,
+                [0.0; 3],
+                b.yaw,
+                0.0,
+                0,
+            ),
+            inv::boat_data(
+                self.ids.set_entity_data,
+                id,
+                0,
+                b.hurt_dir,
+                b.damage_at(now),
+                b.paddles,
+            ),
         ];
         if !b.riders.is_empty() {
             let ids: Vec<i32> = b.riders.iter().map(|r| r.1).collect();
@@ -118,16 +145,32 @@ impl PlayPlan {
         out
     }
 
-    /// Все лодки для зашедшего игрока (после игроков: пассажиры уже известны).
-    pub(super) fn boat_frames(&self) -> Vec<u8> {
-        let now = self.game_time.load(Ordering::Relaxed);
-        let mut out = Vec::new();
-        for (&id, b) in self.sim().boats.lock().unwrap().iter() {
-            for p in self.boat_packets(id, b, now) {
-                out.extend(self.hub.frame(&p));
-            }
+    fn boat_tracked(&self, id: i32, b: &Boat) -> Tracked {
+        let ty = self.boat_type(&b.kind).unwrap_or_default();
+        // `getEffectiveRange`: не меньше дальности пассажиров — игрок 32 чанка.
+        let range = if b.riders.is_empty() {
+            self.tracking_range(ty)
+        } else {
+            self.tracking_range(ty).max(PLAYER_TRACKING_RANGE)
+        };
+        Tracked {
+            id,
+            pos: b.pos,
+            range,
         }
-        out
+    }
+
+    pub(super) fn track_boats(&self, out: &mut Vec<Tracked>) {
+        for (&id, b) in self.sim().boats.lock().unwrap().iter() {
+            out.push(self.boat_tracked(id, b));
+        }
+    }
+
+    /// Пакеты спавна лодки для нового зрителя (пассажиры — `set_passengers`).
+    pub(super) fn boat_spawn(&self, id: i32) -> Option<Vec<Vec<u8>>> {
+        let now = self.game_time.load(Ordering::Relaxed);
+        let boats = self.sim().boats.lock().unwrap();
+        Some(self.boat_packets(id, boats.get(&id)?, now))
     }
 
     pub(super) fn is_boat(&self, id: i32) -> bool {
@@ -138,8 +181,9 @@ impl PlayPlan {
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
         let now = self.game_time.load(Ordering::Relaxed);
         let packets = self.boat_packets(id, &b, now);
+        let tracked = self.boat_tracked(id, &b);
         self.sim().boats.lock().unwrap().insert(id, b);
-        self.hub.send_many(packets);
+        self.hub.spawn_tracked(tracked, packets);
         id
     }
 
@@ -158,13 +202,19 @@ impl PlayPlan {
         // поэтому трава и цветы пропускаются, а лодка ложится на землю под ними.
         let fluid = |s: u32| crate::fluids::state_fluid(&self.survival.placement, s).is_some();
         let Some((block, face)) = crate::fluids::trace(eye, dir, 5.0, |p| {
-            self.block(p).is_some_and(|s| fluid(s) || self.blocks_boat(s))
+            self.block(p)
+                .is_some_and(|s| fluid(s) || self.blocks_boat(s))
         }) else {
             return false;
         };
         let state = self.block(block).unwrap_or(0);
         let top = if fluid(state) {
-            match self.survival.placement.prop(state, "level").and_then(|l| l.parse::<u8>().ok()) {
+            match self
+                .survival
+                .placement
+                .prop(state, "level")
+                .and_then(|l| l.parse::<u8>().ok())
+            {
                 Some(l) if l >= 8 => 1.0,
                 Some(l) if l > 0 => (8 - l) as f64 / 9.0,
                 _ => 8.0 / 9.0,
@@ -176,7 +226,11 @@ impl PlayPlan {
         };
         let at = hit_point(eye, dir, block, face, Some(top));
         // `level.noCollision(boat, box.deflate(0.1))`: над точкой не должно быть твёрдого.
-        let above = [at[0].floor() as i32, (at[1] + 0.1).floor() as i32, at[2].floor() as i32];
+        let above = [
+            at[0].floor() as i32,
+            (at[1] + 0.1).floor() as i32,
+            at[2].floor() as i32,
+        ];
         if self.block(above).is_some_and(|s| self.blocks_boat(s)) {
             return false;
         }
@@ -191,10 +245,19 @@ impl PlayPlan {
     ///
     /// Лодку без седока у нас не ведёт физика, поэтому она сразу ложится на
     /// поверхность воды, куда ванильная доплывает за пару тиков.
-    pub(super) fn dispense_boat(&self, item: &str, dispenser: [i32; 3], facing: usize) -> Option<bool> {
+    pub(super) fn dispense_boat(
+        &self,
+        item: &str,
+        dispenser: [i32; 3],
+        facing: usize,
+    ) -> Option<bool> {
         self.boat_type(item)?;
         let d = crate::placement::step(facing);
-        let front = [dispenser[0] + d[0], dispenser[1] + d[1], dispenser[2] + d[2]];
+        let front = [
+            dispenser[0] + d[0],
+            dispenser[1] + d[1],
+            dispenser[2] + d[2],
+        ];
         let water = |p: [i32; 3]| {
             self.block(p)
                 .and_then(|s| crate::fluids::state_fluid(&self.survival.placement, s))
@@ -203,7 +266,11 @@ impl PlayPlan {
         let below = [front[0], front[1] - 1, front[2]];
         let lift = if water(front).is_some() {
             1.0
-        } else if self.block(front).is_some_and(|s| self.state_name(s).ends_with(":air")) && water(below).is_some() {
+        } else if self
+            .block(front)
+            .is_some_and(|s| self.state_name(s).ends_with(":air"))
+            && water(below).is_some()
+        {
             0.0
         } else {
             return None;
@@ -224,7 +291,12 @@ impl PlayPlan {
                 top[1] += 1;
             }
             if let Some(f) = water(top) {
-                at[1] = top[1] as f64 + if f.source { 8.0 / 9.0 } else { f.amount as f64 / 9.0 };
+                at[1] = top[1] as f64
+                    + if f.source {
+                        8.0 / 9.0
+                    } else {
+                        f.amount as f64 / 9.0
+                    };
             }
         }
         let yaw = match facing {
@@ -240,7 +312,9 @@ impl PlayPlan {
     /// Твёрдый блок для коробки лодки: не воздух, не жидкость, не трава и не цветы.
     pub(super) fn blocks_boat(&self, state: u32) -> bool {
         let name = self.state_name(state);
-        if name.ends_with(":air") || crate::fluids::state_fluid(&self.survival.placement, state).is_some() {
+        if name.ends_with(":air")
+            || crate::fluids::state_fluid(&self.survival.placement, state).is_some()
+        {
             return false;
         }
         match self.survival.physics.as_deref() {
@@ -272,7 +346,9 @@ impl PlayPlan {
     pub(super) fn leave_boat(&self, uuid: Uuid, yaw: f32) -> Option<[f64; 3]> {
         let (boat, pos, riders) = {
             let mut boats = self.sim().boats.lock().unwrap();
-            let (&id, b) = boats.iter_mut().find(|(_, b)| b.riders.iter().any(|r| r.0 == uuid))?;
+            let (&id, b) = boats
+                .iter_mut()
+                .find(|(_, b)| b.riders.iter().any(|r| r.0 == uuid))?;
             b.riders.retain(|r| r.0 != uuid);
             if b.riders.is_empty() {
                 b.paddles = (false, false);
@@ -290,13 +366,21 @@ impl PlayPlan {
         let fallback = [boat[0], boat[1] + HEIGHT, boat[2]];
         let v = escape_vector(WIDTH * std::f64::consts::SQRT_2, 0.6, yaw);
         let (x, z) = (boat[0] + v[0], boat[2] + v[1]);
-        let below = [x.floor() as i32, (boat[1] + HEIGHT).floor() as i32 - 1, z.floor() as i32];
+        let below = [
+            x.floor() as i32,
+            (boat[1] + HEIGHT).floor() as i32 - 1,
+            z.floor() as i32,
+        ];
         let state = |p: [i32; 3]| self.block(p).unwrap_or(0);
         if crate::fluids::state_fluid(&self.survival.placement, state(below)).is_some() {
             return fallback;
         }
         let free = |p: [i32; 3]| !self.blocks_boat(state(p));
-        for floor in [below, [below[0], below[1] - 1, below[2]], [below[0], below[1] + 1, below[2]]] {
+        for floor in [
+            below,
+            [below[0], below[1] - 1, below[2]],
+            [below[0], below[1] + 1, below[2]],
+        ] {
             let up = [floor[0], floor[1] + 1, floor[2]];
             let head = [floor[0], floor[1] + 2, floor[2]];
             if self.blocks_boat(state(floor)) && free(up) && free(head) {
@@ -316,7 +400,9 @@ impl PlayPlan {
         let border = self.border_at(now);
         let (id, pos, corrected) = {
             let mut boats = self.sim().boats.lock().unwrap();
-            let (&id, b) = boats.iter_mut().find(|(_, b)| b.riders.first().is_some_and(|r| r.0 == uuid))?;
+            let (&id, b) = boats
+                .iter_mut()
+                .find(|(_, b)| b.riders.first().is_some_and(|r| r.0 == uuid))?;
             let clipped = border.clip_movement(now, b.pos, pos, WIDTH);
             let corrected = clipped != pos;
             let pos = clipped;
@@ -324,8 +410,9 @@ impl PlayPlan {
             b.yaw = yaw;
             (id, pos, corrected)
         };
-        self.hub.send(
+        self.hub.send_about_except(
             if corrected { None } else { Some(uuid) },
+            id,
             play::teleport_entity(self.ids.teleport_entity, id, pos, yaw, 0.0, false),
         );
         Some(pos)
@@ -334,29 +421,51 @@ impl PlayPlan {
     /// `handlePaddleBoat`: вёсла водителя видят остальные.
     pub(super) fn paddle_boat(&self, uuid: Uuid, left: bool, right: bool) {
         let now = self.game_time.load(Ordering::Relaxed);
-        let packet = {
+        let (id, packet) = {
             let mut boats = self.sim().boats.lock().unwrap();
-            let Some((&id, b)) = boats.iter_mut().find(|(_, b)| b.riders.first().is_some_and(|r| r.0 == uuid)) else {
+            let Some((&id, b)) = boats
+                .iter_mut()
+                .find(|(_, b)| b.riders.first().is_some_and(|r| r.0 == uuid))
+            else {
                 return;
             };
             if b.paddles == (left, right) {
                 return;
             }
             b.paddles = (left, right);
-            inv::boat_data(self.ids.set_entity_data, id, 0, b.hurt_dir, b.damage_at(now), b.paddles)
+            (
+                id,
+                inv::boat_data(
+                    self.ids.set_entity_data,
+                    id,
+                    0,
+                    b.hurt_dir,
+                    b.damage_at(now),
+                    b.paddles,
+                ),
+            )
         };
-        self.hub.send(Some(uuid), packet);
+        self.hub.send_about_except(Some(uuid), id, packet);
     }
 
     /// Удар по лодке (`VehicleEntity.hurtServer`). `None` — это не лодка.
     /// В творческом лодка исчезает с первого удара без дропа, иначе ломается
     /// при уроне больше 40 и падает предметом (`entity_drops`).
-    pub(super) fn attack_boat(&self, uuid: Uuid, target: i32, held: Slot, creative: bool, crit: bool) -> Option<()> {
+    pub(super) fn attack_boat(
+        &self,
+        uuid: Uuid,
+        target: i32,
+        held: Slot,
+        creative: bool,
+        crit: bool,
+    ) -> Option<()> {
         let pos = self.player_at(uuid)?.0;
         let now = self.game_time.load(Ordering::Relaxed);
         let item = held.and_then(|s| self.survival.items.get(s.item as usize));
         let mut amount = 1.0 + item.map_or(0.0, |i| i.attack);
-        let sharp = held.map_or(0, |s| chunkwake_protocol::components::stack_level(s.extra, "minecraft:sharpness"));
+        let sharp = held.map_or(0, |s| {
+            chunkwake_protocol::components::stack_level(s.extra, "minecraft:sharpness")
+        });
         if sharp > 0 {
             amount += 0.5 * sharp as f32 + 0.5;
         }
@@ -374,15 +483,23 @@ impl PlayPlan {
         b.hit_at = now;
         let broken = !creative && b.damage > BREAK_AT;
         if !broken && !creative {
-            let packet = inv::boat_data(self.ids.set_entity_data, target, HURT_TIME, b.hurt_dir, b.damage, b.paddles);
+            let packet = inv::boat_data(
+                self.ids.set_entity_data,
+                target,
+                HURT_TIME,
+                b.hurt_dir,
+                b.damage,
+                b.paddles,
+            );
             drop(boats);
-            self.hub.send(None, packet);
+            self.hub.send_about(target, packet);
             return Some(());
         }
         let b = boats.remove(&target)?;
         drop(boats);
         self.remove_boat(target, &b);
-        if broken && self.vars.flag("entity_drops")
+        if broken
+            && self.vars.flag("entity_drops")
             && let Some(item) = self.item_id(&b.kind)
         {
             let vel = items::pop_velocity(rand::random(), rand::random());
@@ -396,7 +513,7 @@ impl PlayPlan {
         for r in &b.riders {
             self.unlink_rider(r.0);
         }
-        self.hub.send(None, play::remove_entities(self.ids.remove_entities, &[id]));
+        self.hub.remove_tracked(&[id]);
     }
 
     /// Лодки чанка `entities/*.mca` (`id` — тип лодки), остальное — мобам.
@@ -446,18 +563,32 @@ impl PlayPlan {
             .map(|b| {
                 let mut c = Compound::new();
                 c.insert("id".into(), Tag::String(b.kind.clone()));
-                c.insert("Pos".into(), Tag::List(b.pos.iter().map(|v| Tag::Double(*v)).collect()));
+                c.insert(
+                    "Pos".into(),
+                    Tag::List(b.pos.iter().map(|v| Tag::Double(*v)).collect()),
+                );
                 c.insert("Motion".into(), Tag::List(vec![Tag::Double(0.0); 3]));
-                c.insert("Rotation".into(), Tag::List(vec![Tag::Float(b.yaw), Tag::Float(0.0)]));
+                c.insert(
+                    "Rotation".into(),
+                    Tag::List(vec![Tag::Float(b.yaw), Tag::Float(0.0)]),
+                );
                 let u = b.uuid.as_u128();
                 c.insert(
                     "UUID".into(),
-                    Tag::IntArray((0..4).rev().map(|i| (u >> (32 * i)) as u32 as i32).collect()),
+                    Tag::IntArray(
+                        (0..4)
+                            .rev()
+                            .map(|i| (u >> (32 * i)) as u32 as i32)
+                            .collect(),
+                    ),
                 );
                 if let Some(n) = &b.custom_name {
                     c.insert("CustomName".into(), Tag::String(n.clone()));
                 }
-                let chunk = ((b.pos[0].floor() as i32) >> 4, (b.pos[2].floor() as i32) >> 4);
+                let chunk = (
+                    (b.pos[0].floor() as i32) >> 4,
+                    (b.pos[2].floor() as i32) >> 4,
+                );
                 (chunk, c)
             })
             .collect()
@@ -476,7 +607,10 @@ mod tests {
         assert!((v[1] - 1.2722).abs() < 1e-3, "{v:?}");
         // По диагонали шаг растягивается до угла квадрата.
         let d = escape_vector(1.0, 0.0, 45.0);
-        assert!((d[0] + 0.5).abs() < 1e-4 && (d[1] - 0.5).abs() < 1e-4, "{d:?}");
+        assert!(
+            (d[0] + 0.5).abs() < 1e-4 && (d[1] - 0.5).abs() < 1e-4,
+            "{d:?}"
+        );
     }
 
     #[test]

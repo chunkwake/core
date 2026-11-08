@@ -3,6 +3,8 @@
 
 /// `SoundSource`: категория громкости у клиента.
 pub const BLOCKS: i32 = 4;
+/// `SoundSource.HOSTILE`: звуки монстров.
+pub const HOSTILE: i32 = 5;
 pub const NEUTRAL: i32 = 6;
 pub const PLAYERS: i32 = 7;
 /// `SoundSource.AMBIENT`: запуск ракеты, окружение.

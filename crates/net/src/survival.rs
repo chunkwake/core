@@ -299,6 +299,8 @@ pub enum Cause {
     Magma,
     /// За границей мира (`minecraft:outside_border`).
     OutsideBorder,
+    /// Удар моба (`minecraft:mob_attack`); внутри — ключ вида (`minecraft:zombie`).
+    Mob(&'static str),
 }
 
 impl Cause {
@@ -343,6 +345,7 @@ impl Cause {
             Cause::Freeze => "death.attack.freeze",
             Cause::Magma => "death.attack.hotFloor",
             Cause::OutsideBorder => "death.attack.outsideBorder",
+            Cause::Mob(_) => "death.attack.mob",
         }
     }
 
@@ -366,6 +369,7 @@ impl Cause {
             Cause::Freeze => "FREEZE",
             Cause::Magma => "HOT_FLOOR",
             Cause::OutsideBorder => "WORLD_BORDER",
+            Cause::Mob(_) => "ENTITY_ATTACK",
         }
     }
 
@@ -388,6 +392,7 @@ impl Cause {
             Cause::Freeze => "minecraft:freeze",
             Cause::Magma => "minecraft:hot_floor",
             Cause::OutsideBorder => "minecraft:outside_border",
+            Cause::Mob(_) => "minecraft:mob_attack",
         }
     }
 
@@ -400,8 +405,13 @@ impl Cause {
     pub fn bypasses_armor(self) -> bool {
         matches!(
             self,
-            Cause::Void | Cause::Starve | Cause::Magic | Cause::Poison | Cause::Fire
-                | Cause::Drown | Cause::Freeze
+            Cause::Void
+                | Cause::Starve
+                | Cause::Magic
+                | Cause::Poison
+                | Cause::Fire
+                | Cause::Drown
+                | Cause::Freeze
         )
     }
 }
@@ -683,6 +693,17 @@ pub fn after_armor(amount: f32, armor: f32, toughness: f32) -> f32 {
     amount * (1.0 - g / 25.0)
 }
 
+/// Урон моба по игроку со сложностью (`Player.hurtServer`, `scalesWithDifficulty`):
+/// мирная — 0, лёгкая — `min(урон / 2 + 1, урон)`, сложная — ×1.5.
+pub fn mob_damage_for(difficulty: Difficulty, amount: f32) -> f32 {
+    match difficulty {
+        Difficulty::Peaceful => 0.0,
+        Difficulty::Easy => (amount / 2.0 + 1.0).min(amount),
+        Difficulty::Normal => amount,
+        Difficulty::Hard => amount * 3.0 / 2.0,
+    }
+}
+
 /// Сопротивление: `урон * max(0, 1 − 0.2 * (уровень))`. `bypass` — пустота и голод.
 pub fn resisted(amount: f32, amplifier: Option<u8>, bypass: bool) -> f32 {
     if bypass {
@@ -781,7 +802,9 @@ impl Default for Vitals {
 impl Vitals {
     /// Distance accumulated at the next landing, before `on_move` clears it.
     pub(crate) fn landing_fall(&self, pos: Option<[f64; 3]>, on_ground: bool) -> Option<f64> {
-        if self.on_ground || !on_ground { return None; }
+        if self.on_ground || !on_ground {
+            return None;
+        }
         let extra = match (self.last_pos, pos) {
             (Some(last), Some(next)) => (last[1] - next[1]).max(0.0),
             _ => 0.0,

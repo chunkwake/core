@@ -31,15 +31,25 @@ struct Probe {
 
 impl Probe {
     fn sb(&self, n: &str) -> i32 {
-        self.table.id(State::Play, Direction::Serverbound, n).unwrap()
+        self.table
+            .id(State::Play, Direction::Serverbound, n)
+            .unwrap()
     }
 
     async fn pump(&mut self, ms: u64) {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(ms);
         while let Ok(Ok(ev)) = tokio::time::timeout_at(deadline, self.c.next_event()).await {
             match ev {
-                Event::EntitySpawned { entity_id, kind, pos } => {
-                    let k = if kind >= 0 { kind } else { self.seen.get(&entity_id).map_or(kind, |s| s.0) };
+                Event::EntitySpawned {
+                    entity_id,
+                    kind,
+                    pos,
+                } => {
+                    let k = if kind >= 0 {
+                        kind
+                    } else {
+                        self.seen.get(&entity_id).map_or(kind, |s| s.0)
+                    };
                     self.seen.insert(entity_id, (k, pos));
                 }
                 Event::EntityMoved { entity_id, delta } => {
@@ -87,21 +97,41 @@ impl Probe {
     async fn use_on(&mut self, p: [i32; 3]) {
         self.seq += 1;
         let mut w = Writer::new();
-        w.var_int(self.sb("use_item_on")).var_int(0).i64(pack(p)).var_int(1).f32(0.5).f32(1.0).f32(0.5).u8(0).u8(0).var_int(self.seq);
+        w.var_int(self.sb("use_item_on"))
+            .var_int(0)
+            .i64(pack(p))
+            .var_int(1)
+            .f32(0.5)
+            .f32(1.0)
+            .f32(0.5)
+            .u8(0)
+            .u8(0)
+            .var_int(self.seq);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(400).await;
     }
 
     async fn interact(&mut self, e: i32) {
         let mut w = Writer::new();
-        w.var_int(self.sb("interact")).var_int(e).var_int(0).u8(0).bool(false);
+        w.var_int(self.sb("interact"))
+            .var_int(e)
+            .var_int(0)
+            .u8(0)
+            .bool(false);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(400).await;
     }
 
     async fn shift_click(&mut self, window: i32, slot: i16) {
         let mut w = Writer::new();
-        w.var_int(self.sb("container_click")).var_int(window).var_int(0).u16(slot as u16).u8(0).var_int(1).var_int(0).bool(false);
+        w.var_int(self.sb("container_click"))
+            .var_int(window)
+            .var_int(0)
+            .u16(slot as u16)
+            .u8(0)
+            .var_int(1)
+            .var_int(0)
+            .bool(false);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(300).await;
         let mut w = Writer::new();
@@ -124,15 +154,21 @@ impl Probe {
         let item = self.kind("minecraft:item");
         self.seen
             .iter()
-            .filter(|(id, s)| !before.contains(id) && s.0 == item && (0..3).all(|i| (s.1[i] - at[i]).abs() < 2.0))
+            .filter(|(id, s)| {
+                !before.contains(id) && s.0 == item && (0..3).all(|i| (s.1[i] - at[i]).abs() < 2.0)
+            })
             .count()
     }
 
     fn kind(&self, n: &str) -> i32 {
         let dir = std::path::Path::new(self.table_path());
-        let reg: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.with_file_name("registries.json")).unwrap()).unwrap();
-        reg["minecraft:entity_type"]["entries"][n]["protocol_id"].as_i64().unwrap() as i32
+        let reg: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.with_file_name("registries.json")).unwrap(),
+        )
+        .unwrap();
+        reg["minecraft:entity_type"]["entries"][n]["protocol_id"]
+            .as_i64()
+            .unwrap() as i32
     }
 
     fn table_path(&self) -> &str {
@@ -141,7 +177,11 @@ impl Probe {
 
     fn find(&self, n: &str) -> Option<(i32, [f64; 3])> {
         let k = self.kind(n);
-        self.seen.iter().filter(|(id, s)| s.0 == k && !self.removed.contains(id)).map(|(id, s)| (*id, s.1)).max_by_key(|(id, _)| *id)
+        self.seen
+            .iter()
+            .filter(|(id, s)| s.0 == k && !self.removed.contains(id))
+            .map(|(id, s)| (*id, s.1))
+            .max_by_key(|(id, _)| *id)
     }
 }
 
@@ -150,15 +190,27 @@ async fn main() {
     let a: Vec<String> = std::env::args().collect();
     let table = PacketTable::load(a[2].as_ref()).unwrap();
     let ids = Ids::load(&table).unwrap();
-    let mut c = Client::connect(&a[1], "carter", ids, 777, "26.3").await.unwrap();
-    c.capture = table.id(State::Play, Direction::Clientbound, "open_screen").ok();
+    let mut c = Client::connect(&a[1], "carter", ids, 777, "26.3")
+        .await
+        .unwrap();
+    c.capture = table
+        .id(State::Play, Direction::Clientbound, "open_screen")
+        .ok();
     let spawn = loop {
         if let Event::Position(p) = c.next_event().await.unwrap() {
             break p;
         }
     };
     println!("spawn {spawn:?}");
-    let mut p = Probe { c, table, seq: 0, seen: HashMap::new(), removed: Vec::new(), updates: Vec::new(), time: 0 };
+    let mut p = Probe {
+        c,
+        table,
+        seq: 0,
+        seen: HashMap::new(),
+        removed: Vec::new(),
+        updates: Vec::new(),
+        time: 0,
+    };
     p.pump(2000).await;
     let [x, y, z] = spawn.map(|v| v.floor() as i32);
     if a[3] == "check" {
@@ -167,19 +219,38 @@ async fn main() {
             println!("hopper cart after restart: none");
             return;
         };
-        println!("hopper cart after restart rel {:?}", [at[0] - x as f64, at[1] - y as f64, at[2] - z as f64]);
+        println!(
+            "hopper cart after restart rel {:?}",
+            [at[0] - x as f64, at[1] - y as f64, at[2] - z as f64]
+        );
         if let Some((_, f)) = p.find("minecraft:furnace_minecart") {
             println!("furnace cart after restart rel z {:.2}", f[2] - z as f64);
         }
-        p.cmd(format!("tp carter {}.5 {y} {}.5", x + 2, z + 2)).await;
+        p.cmd(format!("tp carter {}.5 {y} {}.5", x + 2, z + 2))
+            .await;
         let drops = p.smash(h).await;
         println!("hopper cart broken: {drops} drops (2 = cart + diamonds)");
         return;
     }
     let (hx, fx, cx, tx) = (x, x + 2, x + 4, x - 10);
     for s in [
-        format!("fill {} {y} {} {} {} {} minecraft:air", x - 12, z + 1, x + 6, y + 3, z + 32),
-        format!("fill {} {} {} {} {} {} minecraft:stone", x - 12, y - 1, z + 1, x + 6, y - 1, z + 32),
+        format!(
+            "fill {} {y} {} {} {} {} minecraft:air",
+            x - 12,
+            z + 1,
+            x + 6,
+            y + 3,
+            z + 32
+        ),
+        format!(
+            "fill {} {} {} {} {} {} minecraft:stone",
+            x - 12,
+            y - 1,
+            z + 1,
+            x + 6,
+            y - 1,
+            z + 32
+        ),
         // Воронка: короткий рельс, сундук над серединой.
         format!("fill {hx} {y} {} {hx} {y} {} minecraft:rail", z + 3, z + 5),
         format!("setblock {hx} {} {} minecraft:chest", y + 1, z + 4),
@@ -218,10 +289,12 @@ async fn main() {
     p.hold(2).await;
     p.use_on([fx, y, z + 4]).await;
     // Обычная вагонетка на пути печной: печная её толкнёт.
-    p.cmd(format!("tp carter {}.5 {y} {}.5", fx + 1, z + 7)).await;
+    p.cmd(format!("tp carter {}.5 {y} {}.5", fx + 1, z + 7))
+        .await;
     p.hold(7).await;
     p.use_on([fx, y, z + 7]).await;
-    p.cmd(format!("tp carter {}.5 {y} {}.5", x + 2, z + 2)).await;
+    p.cmd(format!("tp carter {}.5 {y} {}.5", x + 2, z + 2))
+        .await;
     p.pump(1500).await;
     let plain = p.find("minecraft:minecart");
     let hopper = p.find("minecraft:hopper_minecart");
@@ -252,18 +325,31 @@ async fn main() {
         p.interact(id).await;
         p.ticks(60).await;
         let now = p.seen.get(&id).map_or(at, |s| s.1);
-        println!("furnace cart moved {:.2} blocks along z in ~60 ticks", now[2] - at[2]);
+        println!(
+            "furnace cart moved {:.2} blocks along z in ~60 ticks",
+            now[2] - at[2]
+        );
         if let Some((pid, pat)) = plain {
             let pn = p.seen.get(&pid).map_or(pat, |s| s.1);
-            println!("plain cart ahead pushed {:.2} blocks along z", pn[2] - pat[2]);
+            println!(
+                "plain cart ahead pushed {:.2} blocks along z",
+                pn[2] - pat[2]
+            );
         }
     }
     // 6. ТНТ: на активатор, через 4 с — взрыв, рельс под ней цел.
-    p.cmd(format!("tp carter {}.5 {y} {}.5", tx + 2, z + 2)).await;
-    p.cmd(format!("setblock {} {y} {} minecraft:redstone_block", tx - 1, z + 4)).await;
+    p.cmd(format!("tp carter {}.5 {y} {}.5", tx + 2, z + 2))
+        .await;
+    p.cmd(format!(
+        "setblock {} {y} {} minecraft:redstone_block",
+        tx - 1,
+        z + 4
+    ))
+    .await;
     p.hold(3).await;
     p.use_on([tx, y, z + 4]).await;
-    p.cmd(format!("tp carter {}.5 {y} {}.5", x + 2, z + 2)).await;
+    p.cmd(format!("tp carter {}.5 {y} {}.5", x + 2, z + 2))
+        .await;
     let tnt = p.find("minecraft:tnt_minecart");
     println!("tnt cart {tnt:?}");
     p.updates.clear();
@@ -271,8 +357,16 @@ async fn main() {
     if let Some((id, _)) = tnt {
         println!("tnt cart exploded: {}", p.removed.contains(&id));
     }
-    let air_near = p.updates.iter().filter(|(q, s)| *s == 0 && (q[0] - tx).abs() <= 6 && (q[2] - z - 4).abs() <= 6).count();
-    let rails_lost = p.updates.iter().filter(|(q, s)| *s == 0 && q[0] == tx && q[1] == y && (z + 3..=z + 5).contains(&q[2])).count();
+    let air_near = p
+        .updates
+        .iter()
+        .filter(|(q, s)| *s == 0 && (q[0] - tx).abs() <= 6 && (q[2] - z - 4).abs() <= 6)
+        .count();
+    let rails_lost = p
+        .updates
+        .iter()
+        .filter(|(q, s)| *s == 0 && q[0] == tx && q[1] == y && (z + 3..=z + 5).contains(&q[2]))
+        .count();
     println!("blocks blown near tnt lane: {air_near}, rails lost: {rails_lost}");
     if let Some((_, at)) = p.find("minecraft:hopper_minecart") {
         println!("hopper cart rel z {:.2}", at[2] - z as f64);

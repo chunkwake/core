@@ -32,7 +32,12 @@ pub const EVENT_FIREWORK_EXPLODE: u8 = 17;
 pub const MULTISHOT_YAW: [f64; 3] = [-10.0, 0.0, 10.0];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ThrownKind { Snowball, Egg, Pearl, Potion }
+pub enum ThrownKind {
+    Snowball,
+    Egg,
+    Pearl,
+    Potion,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Arrow {
@@ -221,7 +226,11 @@ pub fn step(
             a.pos = *feet;
         }
         a.life = a.life.saturating_add(1);
-        return if a.life > a.lifetime { vec![Hit::Pop] } else { Vec::new() };
+        return if a.life > a.lifetime {
+            vec![Hit::Pop]
+        } else {
+            Vec::new()
+        };
     }
     let speed = len(a.vel);
     let n = (speed / 0.1).ceil().max(1.0) as usize;
@@ -282,7 +291,11 @@ pub fn step(
             })
         {
             let roll = a.crit.then(rand::random::<u32>);
-            let dmg = if a.thrown { 0.0 } else { arrow_damage(speed, a.base_damage, roll) };
+            let dmg = if a.thrown {
+                0.0
+            } else {
+                arrow_damage(speed, a.base_damage, roll)
+            };
             a.pos = p;
             hits.push(Hit::Mob(k, dmg, a.vel));
             if a.pierce > 0 && (a.pierced_n as usize) < a.pierced.len() {
@@ -489,8 +502,17 @@ mod tests {
 
         let mut snowball = Arrow::flight([0.5, 1.5, 0.5], [1.1, 0.0, 0.0], true);
         let chicken = (9, [1.2, 1.0, 0.5], (0.4, 0.7));
-        assert_eq!(step(&mut snowball, &[], &[chicken], |_| false, |_| false, |_, to| to),
-            vec![Hit::Mob(0, 0.0, [1.1, 0.0, 0.0])]);
+        assert_eq!(
+            step(
+                &mut snowball,
+                &[],
+                &[chicken],
+                |_| false,
+                |_| false,
+                |_, to| to
+            ),
+            vec![Hit::Mob(0, 0.0, [1.1, 0.0, 0.0])]
+        );
     }
 
     #[test]
@@ -510,9 +532,29 @@ mod tests {
         r.lifetime = 2;
         // Твёрдый блок вокруг не мешает: прицепленная ракета столкновений не ищет.
         for x in [5.0, 6.0] {
-            assert!(step(&mut r, &[(owner, [x, 80.0, 1.0])], &[], |_| true, |_| false, |_, to| to).is_empty());
+            assert!(
+                step(
+                    &mut r,
+                    &[(owner, [x, 80.0, 1.0])],
+                    &[],
+                    |_| true,
+                    |_| false,
+                    |_, to| to
+                )
+                .is_empty()
+            );
             assert_eq!(r.pos, [x, 80.0, 1.0]);
         }
-        assert_eq!(step(&mut r, &[(owner, [7.0, 80.0, 1.0])], &[], |_| true, |_| false, |_, to| to), vec![Hit::Pop]);
+        assert_eq!(
+            step(
+                &mut r,
+                &[(owner, [7.0, 80.0, 1.0])],
+                &[],
+                |_| true,
+                |_| false,
+                |_, to| to
+            ),
+            vec![Hit::Pop]
+        );
     }
 }

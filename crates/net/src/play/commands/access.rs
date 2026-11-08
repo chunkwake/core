@@ -337,10 +337,30 @@ impl PlayPlan {
         removed
     }
 
-    /// `/kill`: игрока убивает сессия, сущность убираем из мира.
+    /// `/kill`: живую сущность убиваем через урон, остальные удаляем из мира.
     pub(crate) fn kill_target(&self, target: &Target) -> bool {
         if target.game_mode.is_some() {
             return self.push_control(target.uuid, Control::Health(0.0));
+        }
+        let killed = {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            mobs.get_mut(&target.entity_id).and_then(|entry| {
+                crate::mobs::hurt(&mut entry.mob, f32::MAX, None, 0.0)
+                    .and_then(|died| died.then_some(entry.mob.pos))
+            })
+        };
+        if let Some(pos) = killed {
+            self.emit_vibration(pos, "minecraft:entity_damage");
+            self.emit_vibration(pos, "minecraft:entity_die");
+            self.hub.send_about(
+                target.entity_id,
+                chunkwake_protocol::inventory::entity_event(
+                    self.ids.entity_event,
+                    target.entity_id,
+                    3,
+                ),
+            );
+            return true;
         }
         self.remove_entity(target.entity_id)
     }
@@ -739,11 +759,23 @@ impl PlayPlan {
         self.spawn_mob(species, pos, 0.0, false, Some("COMMAND"))
     }
 
-    /// Убирает сущность из мира (`/kill` для моба или предмета).
+    /// Убирает сущность из мира (`/kill` для предмета, снаряда или уже мёртвого моба).
     pub(crate) fn remove_entity(&self, entity_id: i32) -> bool {
         let removed = self.sim().mobs.lock().unwrap().remove(&entity_id).is_some()
-            | self.sim().dropped.lock().unwrap().remove(&entity_id).is_some()
-            | self.sim().arrows.lock().unwrap().remove(&entity_id).is_some();
+            | self
+                .sim()
+                .dropped
+                .lock()
+                .unwrap()
+                .remove(&entity_id)
+                .is_some()
+            | self
+                .sim()
+                .arrows
+                .lock()
+                .unwrap()
+                .remove(&entity_id)
+                .is_some();
         if removed {
             let packet =
                 chunkwake_protocol::play::remove_entities(self.ids.remove_entities, &[entity_id]);
@@ -1024,7 +1056,13 @@ impl PlayPlan {
 
     /// Игрок или моб. Предмет, снаряд и опыт — нет.
     pub(crate) fn is_living(&self, target: &Target) -> bool {
-        target.game_mode.is_some() || self.sim().mobs.lock().unwrap().contains_key(&target.entity_id)
+        target.game_mode.is_some()
+            || self
+                .sim()
+                .mobs
+                .lock()
+                .unwrap()
+                .contains_key(&target.entity_id)
     }
 
     /// Взмах руки (`/swing`).

@@ -16,8 +16,12 @@ async fn main() {
     let speed: f64 = a[3].parse().unwrap();
     let secs: u64 = a[4].parse().unwrap();
     let view: i32 = a.get(5).and_then(|s| s.parse().ok()).unwrap_or(12);
-    let cmd = table.id(State::Play, Direction::Serverbound, "chat_command").unwrap();
-    let mut c = Client::connect(&a[1], "flyer", ids, 777, "26.3").await.unwrap();
+    let cmd = table
+        .id(State::Play, Direction::Serverbound, "chat_command")
+        .unwrap();
+    let mut c = Client::connect(&a[1], "flyer", ids, 777, "26.3")
+        .await
+        .unwrap();
     let mut pos = loop {
         if let Ok(Event::Position(p)) = c.next_event().await {
             break p;

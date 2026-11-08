@@ -1,6 +1,11 @@
-//! Мирные мобы 26.3 (`Cow`, `Pig`, `Sheep`, `Chicken`): физика `LivingEntity.travel`,
-//! коллизия с полными блоками, цели ИИ (`PanicGoal`, `TemptGoal`, `RandomStrollGoal`,
-//! `LookAtPlayerGoal`), урон с отбрасыванием и смерть.
+//! Мобы 26.3: мирные (`Cow`, `Pig`, `Sheep`, `Chicken`) и враждебные (`Zombie`).
+//! Физика `LivingEntity.travel`, коллизия с блоками, цели ИИ (`PanicGoal`,
+//! `TemptGoal`, `RandomStrollGoal`, `LookAtPlayerGoal`, у монстров —
+//! `NearestAttackableTargetGoal` и `MeleeAttackGoal`), урон с отбрасыванием и смерть.
+//!
+//! Здесь же правила естественного спавна (`NaturalSpawner`), света для
+//! монстров, горения на солнце и исчезновения (`Mob.checkDespawn`): они не
+//! трогают мир напрямую, а получают его через замыкания и проверяются тестами.
 
 /// Гравитация и сопротивление по вертикали (`LivingEntity.travel`).
 pub const GRAVITY: f64 = 0.08;
@@ -22,6 +27,65 @@ pub const PANIC_TICKS: u32 = 100;
 pub const KNOCKBACK: f64 = 0.4;
 /// Детёныш растёт 20 минут (`AgeableMob.BABY_START_AGE`).
 pub const BABY_AGE: i32 = -24000;
+/// Цель забывается, если её не видно столько тиков (`TargetGoal.unseenMemoryTicks`).
+pub const UNSEEN_MEMORY: u32 = 60;
+/// Пауза между ударами (`MeleeAttackGoal.resetAttackCooldown`: 20 тиков).
+pub const ATTACK_INTERVAL: u32 = 20;
+/// Досягаемость удара (`Mob.DEFAULT_ATTACK_REACH = sqrt(2.04) - 0.6`): на
+/// столько раздувается рамка моба по горизонтали.
+pub const ATTACK_REACH: f64 = 0.828_285_686_438_656_6;
+/// Рост и ширина игрока и высота его глаз (`EntityType.PLAYER`).
+pub const PLAYER_SIZE: (f64, f64) = (0.6, 1.8);
+pub const PLAYER_EYE: f64 = 1.62;
+/// `MobCategory.despawnDistance` и `noDespawnDistance`.
+pub const DESPAWN_DISTANCE: f64 = 128.0;
+pub const NO_DESPAWN_DISTANCE: f64 = 32.0;
+/// Ближе 24 блоков к игроку спавна нет (`NaturalSpawner.isRightDistanceToPlayerAndSpawnPoint`).
+pub const MIN_SPAWN_DISTANCE: f64 = 24.0;
+/// Делитель лимита (`NaturalSpawner.MAGIC_NUMBER` = 17²).
+pub const MOB_CAP_CHUNKS: u32 = 289;
+/// Существа (`creature`) спавнятся раз в 400 тиков (`spawnFriendlies`).
+pub const CREATURE_SPAWN_PERIOD: u64 = 400;
+/// Без дела монстр исчезает не раньше (`Mob.checkDespawn`: `noActionTime > 600`).
+pub const IDLE_DESPAWN_TICKS: u32 = 600;
+
+/// `MobCategory`: лимит на 289 чанков и исчезает ли моб вдали от игроков.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Category {
+    Creature,
+    Monster,
+}
+
+impl Category {
+    pub const ALL: [Category; 2] = [Category::Monster, Category::Creature];
+
+    /// `MobCategory.getMaxInstancesPerChunk`.
+    pub fn max(self) -> u32 {
+        match self {
+            Category::Monster => 70,
+            Category::Creature => 10,
+        }
+    }
+
+    /// `MobCategory.isPersistent` наоборот: существа не исчезают.
+    pub fn despawns(self) -> bool {
+        self == Category::Monster
+    }
+
+    /// Ключ в `spawns_by_category` биома.
+    pub fn key(self) -> &'static str {
+        match self {
+            Category::Monster => "monster",
+            Category::Creature => "creature",
+        }
+    }
+}
+
+/// Лимит категории (`NaturalSpawner.SpawnState.canSpawnForCategoryGlobal`):
+/// `max × чанки / 289`.
+pub fn mob_cap(category: Category, spawnable_chunks: usize) -> usize {
+    category.max() as usize * spawnable_chunks / MOB_CAP_CHUNKS as usize
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Species {
@@ -29,10 +93,17 @@ pub enum Species {
     Pig,
     Sheep,
     Chicken,
+    Zombie,
 }
 
 impl Species {
-    pub const ALL: [Species; 4] = [Species::Cow, Species::Pig, Species::Sheep, Species::Chicken];
+    pub const ALL: [Species; 5] = [
+        Species::Cow,
+        Species::Pig,
+        Species::Sheep,
+        Species::Chicken,
+        Species::Zombie,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -40,6 +111,63 @@ impl Species {
             Species::Pig => "minecraft:pig",
             Species::Sheep => "minecraft:sheep",
             Species::Chicken => "minecraft:chicken",
+            Species::Zombie => "minecraft:zombie",
+        }
+    }
+
+    /// Категория спавна (`EntityType.getCategory`).
+    pub fn category(self) -> Category {
+        match self {
+            Species::Zombie => Category::Monster,
+            _ => Category::Creature,
+        }
+    }
+
+    pub fn is_monster(self) -> bool {
+        self.category() == Category::Monster
+    }
+
+    /// Животное: растёт, любит, плодится (`Animal`). Детёныш зомби не растёт.
+    pub fn is_animal(self) -> bool {
+        !self.is_monster()
+    }
+
+    /// Атрибут `attack_damage` (`Zombie.createAttributes`: 3).
+    pub fn attack_damage(self) -> f32 {
+        match self {
+            Species::Zombie => 3.0,
+            _ => 0.0,
+        }
+    }
+
+    /// Атрибут `follow_range`: дальность поиска цели (зомби — 35, по умолчанию 16).
+    pub fn follow_range(self) -> f64 {
+        match self {
+            Species::Zombie => 35.0,
+            _ => 16.0,
+        }
+    }
+
+    /// Горит на солнце (`Zombie.isSunSensitive`).
+    pub fn burns_in_sun(self) -> bool {
+        self == Species::Zombie
+    }
+
+    /// Высота глаз взрослого (`EntityType.eyeHeight`; по умолчанию 0.85 роста).
+    pub fn eye_height(self) -> f64 {
+        match self {
+            Species::Zombie => 1.74,
+            s => s.size().1 * 0.85,
+        }
+    }
+
+    /// Опыт за убийство игроком: у животных 1–3 (`Animal.getBaseExperienceReward`),
+    /// у зомби 5, у детёныша ×2.5 (`Zombie.getBaseExperienceReward`).
+    pub fn xp(self, baby: bool, r: f64) -> i32 {
+        match self {
+            Species::Zombie if baby => 12,
+            Species::Zombie => 5,
+            _ => 1 + (r * 3.0).floor().min(2.0) as i32,
         }
     }
 
@@ -60,6 +188,7 @@ impl Species {
             Species::Pig => (0.9, 0.9),
             Species::Sheep => (0.9, 1.3),
             Species::Chicken => (0.4, 0.7),
+            Species::Zombie => (0.6, 1.95),
         }
     }
 
@@ -68,6 +197,7 @@ impl Species {
             Species::Cow | Species::Pig => 10.0,
             Species::Sheep => 8.0,
             Species::Chicken => 4.0,
+            Species::Zombie => 20.0,
         }
     }
 
@@ -76,7 +206,7 @@ impl Species {
         match self {
             Species::Cow => 0.2,
             Species::Pig | Species::Chicken => 0.25,
-            Species::Sheep => 0.23,
+            Species::Sheep | Species::Zombie => 0.23,
         }
     }
 
@@ -86,6 +216,7 @@ impl Species {
             Species::Cow => 2.0,
             Species::Pig | Species::Sheep => 1.25,
             Species::Chicken => 1.4,
+            Species::Zombie => 1.0,
         }
     }
 
@@ -94,7 +225,7 @@ impl Species {
         match self {
             Species::Cow => 1.25,
             Species::Pig => 1.2,
-            Species::Sheep | Species::Chicken => 1.0,
+            Species::Sheep | Species::Chicken | Species::Zombie => 1.0,
         }
     }
 
@@ -113,6 +244,7 @@ impl Species {
                     | "torchflower_seeds"
                     | "pitcher_pod"
             ),
+            Species::Zombie => false,
         }
     }
 
@@ -123,6 +255,7 @@ impl Species {
             Species::Pig => "minecraft:entity.pig",
             Species::Sheep => "minecraft:entity.sheep",
             Species::Chicken => "minecraft:entity.chicken",
+            Species::Zombie => "minecraft:entity.zombie",
         }
     }
 
@@ -138,6 +271,7 @@ impl Species {
             Species::Pig => "minecraft:entities/pig",
             Species::Sheep => "minecraft:entities/sheep",
             Species::Chicken => "minecraft:entities/chicken",
+            Species::Zombie => "minecraft:entities/zombie",
         }
     }
 }
@@ -189,6 +323,18 @@ pub struct Mob {
     pub eating: u8,
     /// Пользовательское имя (JSON) от плагинов.
     pub custom_name: Option<String>,
+    /// Цель монстра — UUID игрока (`Mob.getTarget`).
+    pub target: Option<u128>,
+    /// Сколько тиков цели не видно подряд.
+    pub unseen: u32,
+    /// Тиков до следующего удара (`MeleeAttackGoal.ticksUntilNextAttack`).
+    pub attack_cooldown: u32,
+    /// Удар этого тика: кого бить. Забирает и сбрасывает сервер.
+    pub strike: Option<u128>,
+    /// Тики без дела (`noActionTime`) — для исчезновения.
+    pub no_action: u32,
+    /// Не исчезает (`persistenceRequired`): с яйца, из команды, от плагина.
+    pub persistent: bool,
 }
 
 impl Mob {
@@ -217,7 +363,33 @@ impl Mob {
             egg_time: 6000,
             eating: 0,
             custom_name: None,
+            target: None,
+            unseen: 0,
+            attack_cooldown: 0,
+            strike: None,
+            no_action: 0,
+            persistent: false,
         }
+    }
+
+    /// Скорость с поправкой детёныша зомби (`Zombie.SPEED_MODIFIER_BABY`: +50 % базы).
+    pub fn speed(&self) -> f64 {
+        let base = self.species.speed();
+        if self.species == Species::Zombie && self.is_baby() {
+            base * 1.5
+        } else {
+            base
+        }
+    }
+
+    /// Высота глаз над ногами с учётом детёныша.
+    pub fn eye_height(&self) -> f64 {
+        let eye = self.species.eye_height();
+        if self.is_baby() { eye * 0.5 } else { eye }
+    }
+
+    pub fn eye(&self) -> [f64; 3] {
+        [self.pos[0], self.pos[1] + self.eye_height(), self.pos[2]]
     }
 
     pub fn is_baby(&self) -> bool {
@@ -272,9 +444,46 @@ const STEP: f64 = 0.6;
 /// Игроки уже отфильтрованы по виду моба: сюда попадают только те, кто держит
 /// его еду. Раньше на каждого моба строился `Vec` с проверкой имён предметов,
 /// и это была основная аллокация тика мобов.
+///
+/// Монстрам `players` — все игроки рядом (на них смотрят), `prey` — те, кого
+/// можно атаковать (не в творческом и не наблюдатели), `sight` — прямая
+/// видимость между двумя точками (`Sensing.hasLineOfSight`, луч `COLLIDER`).
 pub struct Senses<'a> {
     pub players: &'a [[f64; 3]],
     pub rand: &'a mut dyn FnMut() -> f64,
+    pub prey: &'a [Prey],
+    pub sight: &'a dyn Fn([f64; 3], [f64; 3]) -> bool,
+}
+
+/// Игрок, которого монстр может выбрать целью.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Prey {
+    pub uuid: u128,
+    /// Ноги.
+    pub pos: [f64; 3],
+}
+
+impl Prey {
+    pub fn eye(&self) -> [f64; 3] {
+        [self.pos[0], self.pos[1] + PLAYER_EYE, self.pos[2]]
+    }
+}
+
+/// Видно всё: мирным мобам луч не нужен.
+pub fn always_visible(_: [f64; 3], _: [f64; 3]) -> bool {
+    true
+}
+
+/// Рамка моба, раздутая на досягаемость, задевает рамку игрока
+/// (`Mob.isWithinMeleeAttackRange`: `getAttackBoundingBox().intersects(getHitbox())`).
+pub fn in_reach(m: &Mob, p: &Prey) -> bool {
+    let (w, h) = m.size();
+    let half = w / 2.0 + ATTACK_REACH;
+    let ph = PLAYER_SIZE.0 / 2.0;
+    (m.pos[0] - p.pos[0]).abs() < half + ph
+        && (m.pos[2] - p.pos[2]).abs() < half + ph
+        && m.pos[1] < p.pos[1] + PLAYER_SIZE.1
+        && p.pos[1] < m.pos[1] + h
 }
 
 const EPS: f64 = 1e-7;
@@ -441,7 +650,7 @@ pub fn travel(m: &mut Mob, forward: f64, w: &World) -> bool {
         // где `input.zza` уже равен скорости моба (`Mob.setSpeed` вызывает `setZza(f)`).
         // Поэтому на земле ускорение — скорость в квадрате: корова с `movement_speed`
         // 0.2 разгоняется на 0.04 за тик, а не на 0.2.
-        let friction = friction_speed(m.species.speed(), GROUND_FRICTION);
+        let friction = friction_speed(m.speed(), GROUND_FRICTION);
         friction * forward
     } else {
         // В воздухе `getFrictionInfluencedSpeed` — это `getFlyingSpeed()` (0.02),
@@ -525,7 +734,11 @@ pub fn think(m: &mut Mob, s: &mut Senses) {
     if !m.alive() {
         return;
     }
-    let speed = m.species.speed();
+    if m.species.is_monster() {
+        think_monster(m, s);
+        return;
+    }
+    let speed = m.speed();
     if m.panic > 0 {
         m.panic -= 1;
         let fleeing =
@@ -590,6 +803,109 @@ pub fn think(m: &mut Mob, s: &mut Senses) {
     }
 }
 
+/// ИИ монстра ближнего боя (зомби, `Zombie.addBehaviourGoals`):
+/// `NearestAttackableTargetGoal<Player>` (раз в ~10 тиков, рамка
+/// `follow_range × 4 × follow_range`, нужна видимость) и `MeleeAttackGoal`
+/// (идти к цели, бить раз в 20 тиков, когда рамка с досягаемостью задевает
+/// игрока и он виден). Без цели — прогулка и взгляд на игроков в 8 блоках.
+///
+/// Путь к цели — по прямой с прыжком через ступень: настоящего поиска пути
+/// (`PathNavigation`) пока нет.
+fn think_monster(m: &mut Mob, s: &mut Senses) {
+    let speed = m.speed();
+    let range = m.species.follow_range();
+    m.attack_cooldown = m.attack_cooldown.saturating_sub(1);
+    // `TargetGoal.canContinueToUse`: цель есть, в дальности и видна хоть раз за 60 тиков.
+    if let Some(uuid) = m.target {
+        let eye = m.eye();
+        let keep = s
+            .prey
+            .iter()
+            .find(|p| p.uuid == uuid)
+            .filter(|p| dist2(p.pos, m.pos) <= range * range)
+            .is_some_and(|p| {
+                if (s.sight)(eye, p.eye()) {
+                    m.unseen = 0;
+                } else {
+                    m.unseen += 1;
+                }
+                m.unseen <= UNSEEN_MEMORY
+            });
+        if !keep {
+            m.target = None;
+            m.unseen = 0;
+            m.goal = Goal::Idle;
+        }
+    }
+    // `NearestAttackableTargetGoal`: `randomInterval` 10 — проверка с шансом 1/10.
+    if m.target.is_none() && (s.rand)() < 0.1 {
+        let eye = m.eye();
+        let (_, h) = m.size();
+        m.target = s
+            .prey
+            .iter()
+            .filter(|p| {
+                // Рамка поиска: ±4 по вертикали поверх рамки моба.
+                p.pos[1] + PLAYER_SIZE.1 > m.pos[1] - 4.0
+                    && p.pos[1] < m.pos[1] + h + 4.0
+                    && dist2(p.pos, m.pos) <= range * range
+                    && (s.sight)(eye, p.eye())
+            })
+            .min_by(|a, b| dist2(a.pos, eye).total_cmp(&dist2(b.pos, eye)))
+            .map(|p| p.uuid);
+        if m.target.is_some() {
+            // `MeleeAttackGoal.start`: первый удар без ожидания.
+            m.attack_cooldown = 0;
+            m.unseen = 0;
+        }
+    }
+    if let Some(uuid) = m.target
+        && let Some(p) = s.prey.iter().find(|p| p.uuid == uuid).copied()
+    {
+        m.no_action = 0;
+        m.look = Some((p.eye(), 2));
+        if in_reach(m, &p) {
+            // Вплотную стоим и бьём, а не толкаемся в игрока.
+            m.goal = Goal::Idle;
+            m.yaw = turn(m.yaw, yaw_to(m.pos, p.pos), 30.0);
+            if m.attack_cooldown == 0 && (s.sight)(m.eye(), p.eye()) {
+                m.attack_cooldown = ATTACK_INTERVAL;
+                m.strike = Some(uuid);
+            }
+        } else {
+            m.goal = Goal::Walk {
+                to: p.pos,
+                speed,
+                ticks: 20,
+            };
+        }
+        return;
+    }
+    // `WaterAvoidingRandomStrollGoal`: раз в ~120 тиков точка до 10 блоков.
+    if m.goal == Goal::Idle && (s.rand)() < 1.0 / 120.0 {
+        let to = [
+            m.pos[0] + ((s.rand)() * 2.0 - 1.0) * 10.0,
+            m.pos[1],
+            m.pos[2] + ((s.rand)() * 2.0 - 1.0) * 10.0,
+        ];
+        m.goal = Goal::Walk {
+            to,
+            speed,
+            ticks: 120,
+        };
+    }
+    // `LookAtPlayerGoal(Player, 8)`.
+    if m.look.is_none()
+        && (s.rand)() < 0.02
+        && let Some(p) = s.players.iter().find(|p| dist2(**p, m.pos) < 64.0).copied()
+    {
+        m.look = Some((
+            [p[0], p[1] + PLAYER_EYE, p[2]],
+            40 + ((s.rand)() * 40.0) as u32,
+        ));
+    }
+}
+
 /// Тик моба: ИИ, движение, повороты, таймеры. Возвращает `true`, когда моб исчез.
 pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
     if m.death_time > 0 {
@@ -598,12 +914,17 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
         return m.death_time > DEATH_TICKS;
     }
     m.invulnerable = m.invulnerable.saturating_sub(1);
-    if m.age < 0 {
-        m.age += 1;
-    } else if m.age > 0 {
-        m.age -= 1;
+    m.strike = None;
+    // `Mob.serverAiStep`: `++noActionTime`; сбрасывают удар, цель и игрок рядом.
+    m.no_action = m.no_action.saturating_add(1);
+    if m.species.is_animal() {
+        if m.age < 0 {
+            m.age += 1;
+        } else if m.age > 0 {
+            m.age -= 1;
+        }
+        m.love = (m.love - 1).max(0);
     }
-    m.love = (m.love - 1).max(0);
     think(m, s);
     let mut forward = 0.0;
     if let Goal::Walk { to, speed, ticks } = m.goal {
@@ -630,7 +951,7 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
     let target_head = match m.look {
         Some((p, t)) => {
             m.look = (t > 1).then_some((p, t - 1));
-            let eye = [m.pos[0], m.pos[1] + m.size().1 * 0.85, m.pos[2]];
+            let eye = m.eye();
             let horiz = ((p[0] - eye[0]).powi(2) + (p[2] - eye[2]).powi(2)).sqrt();
             m.pitch = (-(p[1] - eye[1]).atan2(horiz).to_degrees() as f32).clamp(-40.0, 40.0);
             yaw_to(m.pos, p)
@@ -663,6 +984,7 @@ pub fn hurt(m: &mut Mob, amount: f32, from: Option<[f64; 3]>, knockback: f64) ->
     };
     m.last_damage = amount;
     m.health = (m.health - dealt).max(0.0);
+    m.no_action = 0;
     if let Some(src) = from {
         let d = [src[0] - m.pos[0], src[2] - m.pos[2]];
         let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
@@ -673,15 +995,311 @@ pub fn hurt(m: &mut Mob, amount: f32, from: Option<[f64; 3]>, knockback: f64) ->
                 m.vel[1] = (m.vel[1] / 2.0 + knockback).min(0.4);
             }
         }
-        m.panic = PANIC_TICKS;
-        m.panic_from = src;
-        m.goal = Goal::Idle;
+        // Монстр не паникует: обидчика он берёт целью (`HurtByTargetGoal`) —
+        // это делает сервер, который знает, кто ударил.
+        if m.species.is_animal() {
+            m.panic = PANIC_TICKS;
+            m.panic_from = src;
+            m.goal = Goal::Idle;
+        }
     }
     if m.health <= 0.0 {
         m.death_time = 1;
         return Some(true);
     }
     Some(false)
+}
+
+// --- Свет, солнце и исчезновение -------------------------------------------
+
+/// Затемнение неба (`Level.updateSkyBrightness`): 0 днём, 11 ночью.
+/// `sun_angle` — угол солнца в градусах (0° — полдень), дождь и гроза — 0..1.
+pub fn sky_darken(sun_angle: f32, rain: f32, thunder: f32) -> i32 {
+    let d = 1.0 - f64::from(rain) * 5.0 / 16.0;
+    let e = 1.0 - f64::from(thunder) * 5.0 / 16.0;
+    let c = f64::from(sun_angle.to_radians().cos());
+    let f = 0.5 + 2.0 * c.clamp(-0.25, 0.25);
+    ((1.0 - f * d * e) * 11.0) as i32
+}
+
+/// `getMaxLocalRawBrightness`: блочный свет или небесный минус затемнение.
+pub fn raw_brightness(sky: u8, block: u8, darken: i32) -> u8 {
+    block.max((i32::from(sky) - darken).clamp(0, 15) as u8)
+}
+
+/// `LightTexture.getBrightness` при `ambient_light` 0: `f / (4 − 3f)`, `f = уровень / 15`.
+pub fn brightness(level: u8) -> f32 {
+    let f = f32::from(level.min(15)) / 15.0;
+    f / (4.0 - 3.0 * f)
+}
+
+/// `Mob.isSunBurnTick`: светло снаружи (`skyDarken < 4`), яркость у глаз
+/// больше 0.5, бросок `nextFloat × 30 < (яркость − 0.4) × 2`, не мокрый и
+/// видит небо. `raw` — сырая яркость у глаз, `r` — `nextFloat`.
+pub fn sun_burn_tick(raw: u8, darken: i32, sees_sky: bool, wet: bool, r: f64) -> bool {
+    if darken >= 4 || wet || !sees_sky {
+        return false;
+    }
+    let br = brightness(raw);
+    br > 0.5 && (r as f32) * 30.0 < (br - 0.4) * 2.0
+}
+
+/// Световые правила спавна монстров измерения (`DimensionType`):
+/// предел блочного света и диапазон `monster_spawn_light_level`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MonsterLight {
+    pub block_limit: u8,
+    pub level: (u8, u8),
+}
+
+impl MonsterLight {
+    /// Оверворлд и Край: блочный свет 0, уровень `uniform(0, 7)`.
+    pub const OVERWORLD: Self = Self {
+        block_limit: 0,
+        level: (0, 7),
+    };
+    /// Ад: блочный свет до 15 не мешает, уровень 7.
+    pub const NETHER: Self = Self {
+        block_limit: 15,
+        level: (7, 7),
+    };
+}
+
+/// `Monster.isDarkEnoughToSpawn`: небесный свет больше `nextInt(32)` — нет;
+/// блочный выше предела — нет; иначе сырая яркость (в грозу затемнение 10)
+/// не выше случайного уровня из диапазона.
+pub fn dark_enough(
+    sky: u8,
+    block: u8,
+    darken: i32,
+    thundering: bool,
+    rules: MonsterLight,
+    rand: &mut dyn FnMut() -> f64,
+) -> bool {
+    let roll = (rand() * 32.0).floor() as i32;
+    if i32::from(sky) > roll {
+        return false;
+    }
+    if rules.block_limit < 15 && block > rules.block_limit {
+        return false;
+    }
+    let raw = raw_brightness(sky, block, if thundering { 10 } else { darken });
+    let (lo, hi) = rules.level;
+    let sample = lo + ((rand() * f64::from(hi - lo + 1)).floor() as u8).min(hi - lo);
+    raw <= sample
+}
+
+/// `Animal.isBrightEnoughToSpawn`: `getRawBrightness(pos, 0) > 8`.
+pub fn bright_enough(sky: u8, block: u8) -> bool {
+    raw_brightness(sky, block, 0) > 8
+}
+
+/// `Mob.checkDespawn`. `nearest` — квадрат расстояния до ближайшего игрока
+/// (`None` — игроков нет, тогда ничего не делаем). `true` — убрать моба.
+pub fn check_despawn(m: &mut Mob, nearest: Option<f64>, peaceful: bool, r: f64) -> bool {
+    if peaceful && m.species.is_monster() {
+        return true;
+    }
+    if m.persistent || m.custom_name.is_some() || !m.species.category().despawns() {
+        m.no_action = 0;
+        return false;
+    }
+    let Some(d2) = nearest else {
+        return false;
+    };
+    if d2 > DESPAWN_DISTANCE * DESPAWN_DISTANCE {
+        return true;
+    }
+    let far = d2 > NO_DESPAWN_DISTANCE * NO_DESPAWN_DISTANCE;
+    if m.no_action > IDLE_DESPAWN_TICKS && far && r < 1.0 / 800.0 {
+        return true;
+    }
+    if !far {
+        m.no_action = 0;
+    }
+    false
+}
+
+// --- Естественный спавн ----------------------------------------------------
+
+/// Строка `spawns_by_category` биома: вид (`None` — его пока нет в сервере),
+/// вес и размер группы.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpawnEntry {
+    pub species: Option<Species>,
+    pub weight: u32,
+    pub min: u32,
+    pub max: u32,
+}
+
+/// Взвешенный выбор (`WeightedList.getRandom`). Неизвестный вид остаётся в
+/// весах: его доля просто не спавнится, а доля зомби остаётся ванильной.
+pub fn pick_entry(entries: &[SpawnEntry], r: f64) -> Option<SpawnEntry> {
+    let total: u32 = entries.iter().map(|e| e.weight).sum();
+    if total == 0 {
+        return None;
+    }
+    let mut pick = ((r * f64::from(total)).floor() as u32).min(total - 1);
+    for e in entries {
+        if pick < e.weight {
+            return Some(*e);
+        }
+        pick -= e.weight;
+    }
+    None
+}
+
+/// Максимум мобов за один заход в чанк (`Mob.getMaxSpawnClusterSize`).
+pub const MAX_CLUSTER: u32 = 4;
+
+/// `NaturalSpawner.spawnCategoryForPosition`: три группы от точки `start`,
+/// в каждой до `ceil(4·r)` шагов со сдвигом `nextInt(6) − nextInt(6)` по X и Z;
+/// вид выбирается на первом подходящем шаге, и тогда число шагов становится
+/// размером группы. Всего не больше [`MAX_CLUSTER`].
+///
+/// `nearest(pos)` — квадрат расстояния до ближайшего игрока от центра клетки
+/// (`None` — игроков нет), `fits(вид, pos, d2)` — все проверки места: дальность
+/// от игроков и точки спавна, опора, свободное место, свет. Возвращает, кого
+/// и где поставить.
+pub fn spawn_packs(
+    start: [i32; 3],
+    entries: &[SpawnEntry],
+    nearest: &mut dyn FnMut([i32; 3]) -> Option<f64>,
+    fits: &mut dyn FnMut(Species, [i32; 3], f64) -> bool,
+    rand: &mut dyn FnMut() -> f64,
+) -> Vec<(Species, [i32; 3])> {
+    let mut out = Vec::new();
+    let next_int = |rand: &mut dyn FnMut() -> f64, n: u32| {
+        ((rand() * f64::from(n)).floor() as i32).min(n as i32 - 1)
+    };
+    for _ in 0..3 {
+        let (mut x, mut z) = (start[0], start[2]);
+        let mut chosen: Option<SpawnEntry> = None;
+        let mut steps = (rand() * 4.0).ceil() as u32;
+        let mut q = 0;
+        while q < steps {
+            q += 1;
+            x += next_int(rand, 6) - next_int(rand, 6);
+            z += next_int(rand, 6) - next_int(rand, 6);
+            let pos = [x, start[1], z];
+            let Some(d2) = nearest(pos) else {
+                continue;
+            };
+            // `isRightDistanceToPlayerAndSpawnPoint`.
+            if d2 <= MIN_SPAWN_DISTANCE * MIN_SPAWN_DISTANCE {
+                continue;
+            }
+            let entry = match chosen {
+                Some(e) => e,
+                None => {
+                    let Some(e) = pick_entry(entries, rand()) else {
+                        break;
+                    };
+                    chosen = Some(e);
+                    steps = e.min + next_int(rand, 1 + e.max.saturating_sub(e.min)).max(0) as u32;
+                    e
+                }
+            };
+            // Вид, которого в сервере нет: группа пропадает целиком.
+            let Some(species) = entry.species else {
+                break;
+            };
+            // `isValidSpawnPostitionForType`: исчезающие не дальше 128 блоков.
+            if species.category().despawns() && d2 > DESPAWN_DISTANCE * DESPAWN_DISTANCE {
+                continue;
+            }
+            if !fits(species, pos, d2) {
+                continue;
+            }
+            out.push((species, pos));
+            if out.len() as u32 >= MAX_CLUSTER {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+/// Пусто ли место под рамку моба `w × h` с ногами в `feet` (`Level.noCollision`
+/// для `EntityType.getSpawnAABB`). `shape` — коробки блока в долях клетки.
+pub fn box_free<'r>(
+    feet: [f64; 3],
+    w: f64,
+    h: f64,
+    shape: &dyn Fn([i32; 3]) -> &'r [[f64; 6]],
+) -> bool {
+    let half = w / 2.0;
+    let lo = [feet[0] - half, feet[1], feet[2] - half];
+    let hi = [feet[0] + half, feet[1] + h, feet[2] + half];
+    let cell = |v: f64| v.floor() as i32;
+    for x in cell(lo[0])..=cell(hi[0] - EPS) {
+        for y in cell(lo[1]) - 1..=cell(hi[1] - EPS) {
+            for z in cell(lo[2])..=cell(hi[2] - EPS) {
+                for b in shape([x, y, z]) {
+                    if b[3] + f64::from(x) > lo[0] + EPS
+                        && b[0] + f64::from(x) < hi[0] - EPS
+                        && b[4] + f64::from(y) > lo[1] + EPS
+                        && b[1] + f64::from(y) < hi[1] - EPS
+                        && b[5] + f64::from(z) > lo[2] + EPS
+                        && b[2] + f64::from(z) < hi[2] - EPS
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Верхняя грань блока прочна целиком (`isFaceSturdy(UP)`): есть коробка,
+/// закрывающая всю клетку по X и Z и доходящая до верха.
+pub fn sturdy_top(boxes: &[[f64; 6]]) -> bool {
+    boxes.iter().any(|b| {
+        b[0] <= EPS && b[2] <= EPS && b[3] >= 1.0 - EPS && b[5] >= 1.0 - EPS && b[4] >= 1.0 - EPS
+    })
+}
+
+/// Полный куб коллизии (`isCollisionShapeFullBlock`).
+pub fn full_block(boxes: &[[f64; 6]]) -> bool {
+    boxes.iter().any(|b| {
+        b[0] <= EPS
+            && b[1] <= EPS
+            && b[2] <= EPS
+            && b[3] >= 1.0 - EPS
+            && b[4] >= 1.0 - EPS
+            && b[5] >= 1.0 - EPS
+    })
+}
+
+/// Блоки, на которых не спавнится никто из наших мобов (`isValidSpawn` =
+/// `never` или только для особых видов: лёд — белые медведи, листва —
+/// оцелоты и попугаи, магма — огнестойкие).
+pub fn spawn_floor_forbidden(name: &str) -> bool {
+    let n = name.strip_prefix("minecraft:").unwrap_or(name);
+    matches!(
+        n,
+        "bedrock" | "barrier" | "magma_block" | "ice" | "packed_ice" | "blue_ice" | "frosted_ice"
+    ) || n.ends_with("glass")
+        || n.ends_with("leaves")
+}
+
+/// Опасные для обычного моба блоки в месте спавна (`EntityType.isBlockDangerous`)
+/// и запрещающие спавн внутри (`#prevents_mob_spawning_inside` — рельсы).
+pub fn spawn_cell_forbidden(name: &str) -> bool {
+    let n = name.strip_prefix("minecraft:").unwrap_or(name);
+    matches!(
+        n,
+        "fire"
+            | "soul_fire"
+            | "lava"
+            | "magma_block"
+            | "sweet_berry_bush"
+            | "wither_rose"
+            | "powder_snow"
+            | "cactus"
+    ) || n.ends_with("campfire")
+        || n.ends_with("rail")
 }
 
 #[cfg(test)]
@@ -736,6 +1354,8 @@ mod tests {
         let mut s = Senses {
             players: &[],
             rand: &mut rnd,
+            prey: &[],
+            sight: &always_visible,
         };
         // Первые тики — разгон от нуля; установившаяся скорость дальше.
         for _ in 0..150 {
@@ -871,6 +1491,8 @@ mod tests {
         let mut s = Senses {
             players: &[],
             rand: &mut rnd,
+            prey: &[],
+            sight: &always_visible,
         };
         let mut max_x: f64 = 0.0;
         for _ in 0..200 {
@@ -905,6 +1527,8 @@ mod tests {
         let mut s = Senses {
             players: &[],
             rand: &mut rnd,
+            prey: &[],
+            sight: &always_visible,
         };
         for _ in 0..40 {
             tick(&mut m, &w, &mut s);
@@ -926,6 +1550,8 @@ mod tests {
         let mut s = Senses {
             players: &[],
             rand: &mut rnd,
+            prey: &[],
+            sight: &always_visible,
         };
         let gone = (0..30).position(|_| tick(&mut m, &w, &mut s));
         assert_eq!(gone, Some(19));
@@ -945,6 +1571,8 @@ mod tests {
         let mut s = Senses {
             players: &players,
             rand: &mut rnd,
+            prey: &[],
+            sight: &always_visible,
         };
         for _ in 0..100 {
             tick(&mut m, &w, &mut s);
@@ -957,5 +1585,319 @@ mod tests {
         assert_eq!(Species::from_name("minecraft:cow"), Some(Species::Cow));
         assert_eq!(Species::from_name("sheep"), Some(Species::Sheep));
         assert!(Species::Pig.is_food("minecraft:carrot"));
+    }
+
+    /// Зомби на полу y = 64 и игрок в `at`; `sight` — видимость.
+    fn zombie_run(
+        at: [f64; 3],
+        sight: &dyn Fn([f64; 3], [f64; 3]) -> bool,
+        ticks: usize,
+    ) -> (Mob, Vec<usize>) {
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+        };
+        let mut m = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 1);
+        m.on_ground = true;
+        let prey = [Prey { uuid: 7, pos: at }];
+        let players = [at];
+        // 0.05: выбор цели (< 0.1) проходит, прогулка (< 1/120) — нет.
+        let mut rnd = || 0.05;
+        let mut s = Senses {
+            players: &players,
+            rand: &mut rnd,
+            prey: &prey,
+            sight,
+        };
+        let mut strikes = Vec::new();
+        for t in 0..ticks {
+            tick(&mut m, &w, &mut s);
+            if m.strike == Some(7) {
+                strikes.push(t);
+            }
+        }
+        (m, strikes)
+    }
+
+    #[test]
+    fn zombie_chases_and_strikes_every_second() {
+        let (m, strikes) = zombie_run([8.5, 64.0, 0.5], &always_visible, 200);
+        assert_eq!(m.target, Some(7));
+        assert!(m.pos[0] > 6.0 && m.pos[0] < 8.5, "{:?}", m.pos);
+        assert!(strikes.len() >= 3, "{strikes:?}");
+        for pair in strikes.windows(2) {
+            assert_eq!(pair[1] - pair[0], ATTACK_INTERVAL as usize, "{strikes:?}");
+        }
+    }
+
+    #[test]
+    fn zombie_needs_sight_and_range() {
+        let (m, strikes) = zombie_run([8.5, 64.0, 0.5], &|_, _| false, 100);
+        assert_eq!(m.target, None);
+        assert!(strikes.is_empty());
+        // Дальше 35 блоков не замечает.
+        let (m, _) = zombie_run([40.5, 64.0, 0.5], &always_visible, 100);
+        assert_eq!(m.target, None);
+        // Выше рамки поиска (±4) тоже.
+        let (m, _) = zombie_run([3.5, 72.0, 0.5], &always_visible, 100);
+        assert_eq!(m.target, None);
+    }
+
+    #[test]
+    fn zombie_forgets_unseen_target() {
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+        };
+        let mut m = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 1);
+        m.target = Some(7);
+        let prey = [Prey {
+            uuid: 7,
+            pos: [20.5, 64.0, 0.5],
+        }];
+        let mut rnd = || 0.9;
+        let mut s = Senses {
+            players: &[],
+            rand: &mut rnd,
+            prey: &prey,
+            sight: &|_, _| false,
+        };
+        for _ in 0..UNSEEN_MEMORY {
+            tick(&mut m, &w, &mut s);
+        }
+        assert_eq!(m.target, Some(7));
+        tick(&mut m, &w, &mut s);
+        assert_eq!(m.target, None);
+    }
+
+    #[test]
+    fn monsters_do_not_panic_and_babies_stay_babies() {
+        let mut z = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 1);
+        z.age = -1;
+        hurt(&mut z, 1.0, Some([2.0, 64.0, 0.5]), KNOCKBACK);
+        assert_eq!(z.panic, 0);
+        assert!(z.vel[0] < 0.0, "knockback {:?}", z.vel);
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+        };
+        let mut rnd = || 0.9;
+        let mut s = Senses {
+            players: &[],
+            rand: &mut rnd,
+            prey: &[],
+            sight: &always_visible,
+        };
+        for _ in 0..10 {
+            tick(&mut z, &w, &mut s);
+        }
+        assert!(z.is_baby());
+        assert!((z.speed() - 0.345).abs() < 1e-9);
+        assert_eq!(Species::Zombie.xp(true, 0.0), 12);
+        assert_eq!(Species::Zombie.xp(false, 0.0), 5);
+        assert_eq!(Species::Cow.xp(false, 0.999), 3);
+    }
+
+    #[test]
+    fn sky_darkens_at_night_and_in_rain() {
+        assert_eq!(sky_darken(0.0, 0.0, 0.0), 0);
+        assert_eq!(sky_darken(180.0, 0.0, 0.0), 11);
+        assert_eq!(sky_darken(0.0, 1.0, 0.0), 3);
+        assert_eq!(sky_darken(0.0, 1.0, 1.0), 5);
+    }
+
+    #[test]
+    fn zombies_burn_only_in_bright_sun() {
+        assert!(sun_burn_tick(15, 0, true, false, 0.0));
+        // Бросок: (1.0 − 0.4) × 2 / 30 = 4 % на тик.
+        assert!(!sun_burn_tick(15, 0, true, false, 0.05));
+        assert!(!sun_burn_tick(15, 4, true, false, 0.0));
+        assert!(!sun_burn_tick(15, 0, false, false, 0.0));
+        assert!(!sun_burn_tick(15, 0, true, true, 0.0));
+        // Яркость выше 0.5 — с уровня 12: во `float` 12/15 даёт 0.50000001,
+        // как и в ванили (`LightTexture.getBrightness`).
+        assert!(!sun_burn_tick(11, 0, true, false, 0.0));
+        assert!(sun_burn_tick(12, 0, true, false, 0.0));
+    }
+
+    #[test]
+    fn monster_light_rules() {
+        let mut high = || 0.999;
+        let mut low = || 0.0;
+        // Днём под небом — нет: сырая яркость 15.
+        assert!(!dark_enough(
+            15,
+            0,
+            0,
+            false,
+            MonsterLight::OVERWORLD,
+            &mut high
+        ));
+        // Ночью под небом: 15 − 11 = 4 ≤ 7 при высоком броске.
+        assert!(dark_enough(
+            15,
+            0,
+            11,
+            false,
+            MonsterLight::OVERWORLD,
+            &mut high
+        ));
+        // Небесный свет 15 больше `nextInt(32)` = 0.
+        assert!(!dark_enough(
+            15,
+            0,
+            11,
+            false,
+            MonsterLight::OVERWORLD,
+            &mut low
+        ));
+        // В пещере темно; факел (блочный свет 1+) запрещает.
+        assert!(dark_enough(
+            0,
+            0,
+            0,
+            false,
+            MonsterLight::OVERWORLD,
+            &mut low
+        ));
+        assert!(!dark_enough(
+            0,
+            1,
+            0,
+            false,
+            MonsterLight::OVERWORLD,
+            &mut high
+        ));
+        // В Аду блочный свет до 7 не мешает.
+        assert!(dark_enough(0, 7, 0, false, MonsterLight::NETHER, &mut low));
+        assert!(!dark_enough(0, 8, 0, false, MonsterLight::NETHER, &mut low));
+        assert!(bright_enough(15, 0));
+        assert!(!bright_enough(0, 8));
+    }
+
+    #[test]
+    fn despawn_rules() {
+        let mut z = Mob::new(Species::Zombie, [0.0; 3], 1);
+        assert!(check_despawn(&mut z, Some(129.0 * 129.0), false, 0.5));
+        assert!(!check_despawn(&mut z, None, false, 0.0));
+        z.no_action = 700;
+        assert!(check_despawn(&mut z, Some(40.0 * 40.0), false, 0.0));
+        assert!(!check_despawn(&mut z, Some(40.0 * 40.0), false, 0.5));
+        assert!(!check_despawn(&mut z, Some(10.0 * 10.0), false, 0.0));
+        assert_eq!(z.no_action, 0);
+        assert!(check_despawn(&mut z, Some(1.0), true, 0.5));
+        let mut named = Mob::new(Species::Zombie, [0.0; 3], 1);
+        named.custom_name = Some("Боб".into());
+        assert!(!check_despawn(&mut named, Some(1e9), false, 0.0));
+        let mut cow = Mob::new(Species::Cow, [0.0; 3], 1);
+        assert!(!check_despawn(&mut cow, Some(1e9), true, 0.0));
+    }
+
+    #[test]
+    fn spawn_packs_cap_and_unknown_species() {
+        let zombie = [SpawnEntry {
+            species: Some(Species::Zombie),
+            weight: 95,
+            min: 4,
+            max: 4,
+        }];
+        let mut rnd = || 0.99;
+        let got = spawn_packs(
+            [8, 64, 8],
+            &zombie,
+            &mut |_| Some(1000.0),
+            &mut |_, _, _| true,
+            &mut rnd,
+        );
+        assert_eq!(got.len(), MAX_CLUSTER as usize);
+        assert!(got.iter().all(|(s, p)| *s == Species::Zombie && p[1] == 64));
+        // Рядом с игроком (ближе 24) — никого.
+        let got = spawn_packs(
+            [8, 64, 8],
+            &zombie,
+            &mut |_| Some(100.0),
+            &mut |_, _, _| true,
+            &mut rnd,
+        );
+        assert!(got.is_empty());
+        // Только неизвестный вид — никого, и место даже не проверяется.
+        let other = [SpawnEntry {
+            species: None,
+            weight: 100,
+            min: 4,
+            max: 4,
+        }];
+        let got = spawn_packs(
+            [8, 64, 8],
+            &other,
+            &mut |_| Some(1000.0),
+            &mut |_, _, _| panic!("unknown species checked"),
+            &mut rnd,
+        );
+        assert!(got.is_empty());
+        assert_eq!(mob_cap(Category::Monster, 289), 70);
+        assert_eq!(mob_cap(Category::Creature, 578), 20);
+    }
+
+    #[test]
+    fn pick_entry_keeps_weights() {
+        let e = [
+            SpawnEntry {
+                species: Some(Species::Zombie),
+                weight: 95,
+                min: 4,
+                max: 4,
+            },
+            SpawnEntry {
+                species: None,
+                weight: 100,
+                min: 4,
+                max: 4,
+            },
+        ];
+        assert_eq!(pick_entry(&e, 0.0).unwrap().species, Some(Species::Zombie));
+        assert_eq!(
+            pick_entry(&e, 94.0 / 195.0).unwrap().species,
+            Some(Species::Zombie)
+        );
+        assert_eq!(pick_entry(&e, 96.0 / 195.0).unwrap().species, None);
+        assert_eq!(pick_entry(&e, 0.99999).unwrap().species, None);
+    }
+
+    #[test]
+    fn spawn_space_checks() {
+        let ground = |p: [i32; 3]| if p[1] < 64 { FULL } else { &[] as &[[f64; 6]] };
+        assert!(box_free([0.5, 64.0, 0.5], 0.6, 1.95, &ground));
+        assert!(!box_free([0.5, 63.5, 0.5], 0.6, 1.95, &ground));
+        let low_ceiling = |p: [i32; 3]| {
+            if p[1] < 64 || p[1] == 65 {
+                FULL
+            } else {
+                &[] as &[[f64; 6]]
+            }
+        };
+        assert!(!box_free([0.5, 64.0, 0.5], 0.6, 1.95, &low_ceiling));
+        assert!(sturdy_top(FULL));
+        assert!(!sturdy_top(&[[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]));
+        assert!(full_block(FULL));
+        assert!(!full_block(&[[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]));
+        assert!(spawn_floor_forbidden("minecraft:oak_leaves"));
+        assert!(spawn_floor_forbidden("minecraft:white_stained_glass"));
+        assert!(!spawn_floor_forbidden("minecraft:stone"));
+        assert!(spawn_cell_forbidden("minecraft:powered_rail"));
+        assert!(!spawn_cell_forbidden("minecraft:short_grass"));
+    }
+
+    #[test]
+    fn zombie_name_round_trip() {
+        assert_eq!(
+            Species::from_name("minecraft:zombie"),
+            Some(Species::Zombie)
+        );
+        assert_eq!(Species::Zombie.short(), "zombie");
+        assert!(Species::Zombie.is_monster());
     }
 }

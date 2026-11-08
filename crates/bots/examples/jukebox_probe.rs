@@ -23,7 +23,11 @@ fn pack(p: [i32; 3]) -> i64 {
 }
 
 fn unpack(v: i64) -> [i32; 3] {
-    [(v >> 38) as i32, (v << 52 >> 52) as i32, (v << 26 >> 38) as i32]
+    [
+        (v >> 38) as i32,
+        (v << 52 >> 52) as i32,
+        (v << 26 >> 38) as i32,
+    ]
 }
 
 struct Probe {
@@ -41,7 +45,9 @@ struct Probe {
 
 impl Probe {
     fn sb(&self, n: &str) -> i32 {
-        self.table.id(State::Play, Direction::Serverbound, n).unwrap()
+        self.table
+            .id(State::Play, Direction::Serverbound, n)
+            .unwrap()
     }
 
     async fn pump(&mut self, ms: u64) {
@@ -66,7 +72,11 @@ impl Probe {
             OUT => "comparator out wire",
             _ => return,
         };
-        let name = self.states.get(&state).cloned().unwrap_or_else(|| state.to_string());
+        let name = self
+            .states
+            .get(&state)
+            .cloned()
+            .unwrap_or_else(|| state.to_string());
         self.log.push(format!("{what} {name}"));
     }
 
@@ -80,7 +90,10 @@ impl Probe {
                     return;
                 }
                 let pos = [r.f64().unwrap(), r.f64().unwrap(), r.f64().unwrap()];
-                if (pos[0] - 10.5).abs() > 0.5 || (pos[2] - 8.5).abs() > 0.5 || (pos[1] - 201.0).abs() > 2.0 {
+                if (pos[0] - 10.5).abs() > 0.5
+                    || (pos[2] - 8.5).abs() > 0.5
+                    || (pos[1] - 201.0).abs() > 2.0
+                {
                     return;
                 }
                 let n = self.items.len();
@@ -117,7 +130,9 @@ impl Probe {
                 r.f32().unwrap();
                 let count = r.var_int().unwrap();
                 // Цвет ноты случаен: только что он из четырёх.
-                let color_ok = [0.0, 1.0, 2.0, 3.0].iter().any(|c| (d[0] * 24.0 - c).abs() < 1e-4);
+                let color_ok = [0.0, 1.0, 2.0, 3.0]
+                    .iter()
+                    .any(|c| (d[0] * 24.0 - c).abs() < 1e-4);
                 self.log.push(format!(
                     "note {:.2} {:.2} {:.2} force {force} color {color_ok} {} {} speed {speed} count {count}",
                     pos[0], pos[1], pos[2], d[1], d[2]
@@ -130,11 +145,20 @@ impl Probe {
             }
             "section_blocks_update" => {
                 let sec = r.i64().unwrap();
-                let (sx, sy, sz) = ((sec >> 42) as i32, (sec << 44 >> 44) as i32, (sec << 22 >> 42) as i32);
+                let (sx, sy, sz) = (
+                    (sec >> 42) as i32,
+                    (sec << 44 >> 44) as i32,
+                    (sec << 22 >> 42) as i32,
+                );
                 let n = r.var_int().unwrap();
                 for _ in 0..n {
                     let v = r.var_long().unwrap();
-                    let (state, x, z, y) = ((v >> 12) as i32, (v >> 8 & 15) as i32, (v >> 4 & 15) as i32, (v & 15) as i32);
+                    let (state, x, z, y) = (
+                        (v >> 12) as i32,
+                        (v >> 8 & 15) as i32,
+                        (v >> 4 & 15) as i32,
+                        (v & 15) as i32,
+                    );
                     self.block([sx * 16 + x, sy * 16 + y, sz * 16 + z], state);
                 }
             }
@@ -172,7 +196,16 @@ impl Probe {
     async fn use_on(&mut self, p: [i32; 3], face: i32) {
         self.seq += 1;
         let mut w = Writer::new();
-        w.var_int(self.sb("use_item_on")).var_int(0).i64(pack(p)).var_int(face).f32(0.5).f32(0.5).f32(0.5).u8(0).u8(0).var_int(self.seq);
+        w.var_int(self.sb("use_item_on"))
+            .var_int(0)
+            .i64(pack(p))
+            .var_int(face)
+            .f32(0.5)
+            .f32(0.5)
+            .f32(0.5)
+            .u8(0)
+            .u8(0)
+            .var_int(self.seq);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(400).await;
     }
@@ -181,7 +214,11 @@ impl Probe {
     async fn drop_one(&mut self) {
         self.seq += 1;
         let mut w = Writer::new();
-        w.var_int(self.sb("player_action")).var_int(4).i64(0).u8(0).var_int(self.seq);
+        w.var_int(self.sb("player_action"))
+            .var_int(4)
+            .i64(0)
+            .u8(0)
+            .var_int(self.seq);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(200).await;
     }
@@ -195,22 +232,30 @@ impl Probe {
 async fn main() {
     let a: Vec<String> = std::env::args().collect();
     let table = PacketTable::load(a[2].as_ref()).unwrap();
-    let reg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&a[3]).unwrap()).unwrap();
+    let reg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&a[3]).unwrap()).unwrap();
     let id_of = |r: &str, k: &str| reg[r]["entries"][k]["protocol_id"].as_i64().unwrap() as i32;
     let item_type = id_of("minecraft:entity_type", "minecraft:item");
     let note = id_of("minecraft:particle_type", "minecraft:note");
     // Имена состояний проигрывателя, компаратора и провода по blocks.json.
     let blocks: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(std::path::Path::new(&a[3]).with_file_name("blocks.json")).unwrap(),
+        &std::fs::read_to_string(std::path::Path::new(&a[3]).with_file_name("blocks.json"))
+            .unwrap(),
     )
     .unwrap();
     let mut states = HashMap::new();
-    for b in ["minecraft:jukebox", "minecraft:comparator", "minecraft:redstone_wire"] {
+    for b in [
+        "minecraft:jukebox",
+        "minecraft:comparator",
+        "minecraft:redstone_wire",
+    ] {
         for s in blocks[b]["states"].as_array().unwrap() {
             let props = s["properties"].as_object().map(|o| {
                 let mut v: Vec<String> = o
                     .iter()
-                    .filter(|(k, _)| matches!(k.as_str(), "has_record" | "powered" | "power" | "mode"))
+                    .filter(|(k, _)| {
+                        matches!(k.as_str(), "has_record" | "powered" | "power" | "mode")
+                    })
                     .map(|(k, v)| format!("{k}={}", v.as_str().unwrap()))
                     .collect();
                 v.sort();
@@ -220,9 +265,18 @@ async fn main() {
         }
     }
     let ids = Ids::load(&table).unwrap();
-    let mut c = Client::connect(&a[1], "framer", ids, 777, "26.3").await.unwrap();
+    let mut c = Client::connect(&a[1], "framer", ids, 777, "26.3")
+        .await
+        .unwrap();
     let mut cb = HashMap::new();
-    for n in ["add_entity", "remove_entities", "level_event", "level_particles", "block_update", "section_blocks_update"] {
+    for n in [
+        "add_entity",
+        "remove_entities",
+        "level_event",
+        "level_particles",
+        "block_update",
+        "section_blocks_update",
+    ] {
         let id = table.id(State::Play, Direction::Clientbound, n).unwrap();
         cb.insert(id, n);
         c.capture_also.push(id);
@@ -232,7 +286,18 @@ async fn main() {
             break;
         }
     }
-    let mut p = Probe { c, table, seq: 0, time: 0, cb, item_type, note, states, items: HashMap::new(), log: Vec::new() };
+    let mut p = Probe {
+        c,
+        table,
+        seq: 0,
+        time: 0,
+        cb,
+        item_type,
+        note,
+        states,
+        items: HashMap::new(),
+        log: Vec::new(),
+    };
     p.pump(2000).await;
     for s in [
         "gamemode survival",
@@ -264,8 +329,10 @@ async fn main() {
 
     p.step("hopper above feeds 13, hopper below takes it");
     p.cmd("kill @e[type=minecraft:item]").await;
-    p.cmd("setblock 10 199 8 minecraft:hopper[facing=east]").await;
-    p.cmd("setblock 10 201 8 minecraft:hopper[facing=down]").await;
+    p.cmd("setblock 10 199 8 minecraft:hopper[facing=east]")
+        .await;
+    p.cmd("setblock 10 201 8 minecraft:hopper[facing=down]")
+        .await;
     p.cmd("tp framer 10.5 202 8.5 0 90").await;
     p.pump(500).await;
     p.hold(1).await;

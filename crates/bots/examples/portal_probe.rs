@@ -11,11 +11,19 @@ async fn main() {
     let a: Vec<String> = std::env::args().collect();
     let table = PacketTable::load(a[2].as_ref()).unwrap();
     let ids = Ids::load(&table).unwrap();
-    let cmd_id = table.id(State::Play, Direction::Serverbound, "chat_command").unwrap();
-    let loaded_id = table.id(State::Play, Direction::Serverbound, "player_loaded").unwrap();
-    let respawn_id = table.id(State::Play, Direction::Clientbound, "respawn").unwrap();
+    let cmd_id = table
+        .id(State::Play, Direction::Serverbound, "chat_command")
+        .unwrap();
+    let loaded_id = table
+        .id(State::Play, Direction::Serverbound, "player_loaded")
+        .unwrap();
+    let respawn_id = table
+        .id(State::Play, Direction::Clientbound, "respawn")
+        .unwrap();
     let secs: u64 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(60);
-    let mut c = Client::connect(&a[1], &a[3], ids, 777, "26.3").await.unwrap();
+    let mut c = Client::connect(&a[1], &a[3], ids, 777, "26.3")
+        .await
+        .unwrap();
     let t0 = Instant::now();
     let p = loop {
         if let Ok(Event::Position(p)) = c.next_event().await {
@@ -23,12 +31,40 @@ async fn main() {
         }
     };
     println!("start {p:?}");
-    let (x, y, z) = (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32);
+    let (x, y, z) = (
+        p[0].floor() as i32,
+        p[1].floor() as i32,
+        p[2].floor() as i32,
+    );
     for line in [
         format!("gamemode {}", a.get(5).map_or("survival", |s| s)),
-        format!("fill {} {} {} {} {} {} air", x - 3, y, z - 2, x + 4, y + 4, z + 2),
-        format!("fill {} {} {} {} {} {} obsidian", x - 1, y - 1, z, x + 2, y + 3, z),
-        format!("fill {} {} {} {} {} {} nether_portal[axis=x]", x, y, z, x + 1, y + 2, z),
+        format!(
+            "fill {} {} {} {} {} {} air",
+            x - 3,
+            y,
+            z - 2,
+            x + 4,
+            y + 4,
+            z + 2
+        ),
+        format!(
+            "fill {} {} {} {} {} {} obsidian",
+            x - 1,
+            y - 1,
+            z,
+            x + 2,
+            y + 3,
+            z
+        ),
+        format!(
+            "fill {} {} {} {} {} {} nether_portal[axis=x]",
+            x,
+            y,
+            z,
+            x + 1,
+            y + 2,
+            z
+        ),
     ] {
         let mut w = Writer::new();
         w.var_int(cmd_id).string(&line);
@@ -60,7 +96,11 @@ async fn main() {
         }
         if !c.captured.is_empty() {
             c.captured.clear();
-            println!("{:5.1}s RESPAWN (chunks before {})", t0.elapsed().as_secs_f32(), c.chunks_in - since);
+            println!(
+                "{:5.1}s RESPAWN (chunks before {})",
+                t0.elapsed().as_secs_f32(),
+                c.chunks_in - since
+            );
             since = c.chunks_in;
             respawned_at = Some(Instant::now());
             arrival = None;
@@ -80,7 +120,11 @@ async fn main() {
         }
         if last_report.elapsed() > Duration::from_secs(3) {
             last_report = Instant::now();
-            println!("{:5.1}s chunks since respawn {}", t0.elapsed().as_secs_f32(), c.chunks_in - since);
+            println!(
+                "{:5.1}s chunks since respawn {}",
+                t0.elapsed().as_secs_f32(),
+                c.chunks_in - since
+            );
         }
     }
 }

@@ -70,7 +70,14 @@ fn brewing_recipes_cover_26_3_if_available() {
     assert_eq!(data.recipes.len(), 279);
     let id = |map: &std::collections::HashMap<String, i32>, name: &str| map[name];
     assert_eq!(
-        data.recipes.get(&(id(&items, "minecraft:potion"), id(&potions, "minecraft:water"), id(&items, "minecraft:nether_wart"))),
-        Some(&(id(&items, "minecraft:potion"), id(&potions, "minecraft:awkward"))),
+        data.recipes.get(&(
+            id(&items, "minecraft:potion"),
+            id(&potions, "minecraft:water"),
+            id(&items, "minecraft:nether_wart")
+        )),
+        Some(&(
+            id(&items, "minecraft:potion"),
+            id(&potions, "minecraft:awkward")
+        )),
     );
 }

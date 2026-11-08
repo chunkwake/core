@@ -182,8 +182,12 @@ impl Menu<'_> {
             self.kind == Kind::Furnace && slot == 1 && Some(item) == self.rules.bucket;
         let enchant_item = self.kind == Kind::Enchanting && slot == 0;
         let grind_input = self.kind == Kind::Grindstone && slot < 2;
-        if self.kind.armor(slot).is_some() || bucket_fuel || enchant_item || grind_input
-            || self.kind == Kind::Brewing && slot < 3 {
+        if self.kind.armor(slot).is_some()
+            || bucket_fuel
+            || enchant_item
+            || grind_input
+            || self.kind == Kind::Brewing && slot < 3
+        {
             1
         } else {
             self.max(item)
@@ -505,7 +509,9 @@ impl Menu<'_> {
                     self.move_to(&mut s, 4..5, false);
                 } else if (self.rules.brewing_accept)(0, s.item) {
                     for slot in 0..3 {
-                        if s.count == 0 { break; }
+                        if s.count == 0 {
+                            break;
+                        }
                         if self.slots[slot].is_none() {
                             self.slots[slot] = Some(Stack { count: 1, ..s });
                             s.count -= 1;
@@ -1226,17 +1232,37 @@ mod tests {
         let mut carried = None;
         let mut drag = Drag::default();
         let rules = Rules {
-            max_stack: &|_| 64, equip: &|_| None, smeltable: &|_| false,
-            fuel: &|_| false, bucket: None, lapis: None, grindable: &|_| false,
-            creative: false, can_take_output: true, smithing_accept: &|_, _| false,
+            max_stack: &|_| 64,
+            equip: &|_| None,
+            smeltable: &|_| false,
+            fuel: &|_| false,
+            bucket: None,
+            lapis: None,
+            grindable: &|_| false,
+            creative: false,
+            can_take_output: true,
+            smithing_accept: &|_, _| false,
             loom_accept: &|_, _| false,
-            brewing_accept: &|slot, item| match slot { 0..=2 => item == 1, 3 => item == 2, 4 => item == 3, _ => false },
+            brewing_accept: &|slot, item| match slot {
+                0..=2 => item == 1,
+                3 => item == 2,
+                4 => item == 3,
+                _ => false,
+            },
             cartography_accept: &|_, _| false,
         };
         let mut craft = |_: &mut [Slot]| {};
-        let mut menu = Menu { kind: Kind::Brewing, slots: &mut slots, carried: &mut carried,
-            drag: &mut drag, rules: &rules, craft: &mut craft };
-        for slot in 5..=7 { menu.click(slot, 0, QUICK_MOVE); }
+        let mut menu = Menu {
+            kind: Kind::Brewing,
+            slots: &mut slots,
+            carried: &mut carried,
+            drag: &mut drag,
+            rules: &rules,
+            craft: &mut craft,
+        };
+        for slot in 5..=7 {
+            menu.click(slot, 0, QUICK_MOVE);
+        }
         assert_eq!(menu.slots[..3], [Some(Stack::new(1, 1)); 3]);
         assert_eq!(menu.slots[3], Some(Stack::new(2, 2)));
         assert_eq!(menu.slots[4], Some(Stack::new(3, 2)));
@@ -1252,10 +1278,18 @@ mod tests {
         let mut carried = None;
         let mut drag = Drag::default();
         let rules = Rules {
-            max_stack: &|_| 64, equip: &|_| None, smeltable: &|_| false,
-            fuel: &|_| false, bucket: None, lapis: None, grindable: &|_| false,
-            creative: false, can_take_output: true, smithing_accept: &|_, _| false,
-            loom_accept: &|_, _| false, brewing_accept: &|_, _| false,
+            max_stack: &|_| 64,
+            equip: &|_| None,
+            smeltable: &|_| false,
+            fuel: &|_| false,
+            bucket: None,
+            lapis: None,
+            grindable: &|_| false,
+            creative: false,
+            can_take_output: true,
+            smithing_accept: &|_, _| false,
+            loom_accept: &|_, _| false,
+            brewing_accept: &|_, _| false,
             cartography_accept: &|slot, s| s.item == slot as i32 + 1,
         };
         let mut craft = |slots: &mut [Slot]| {

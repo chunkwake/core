@@ -27,7 +27,10 @@ impl PlayPlan {
             return 0;
         };
         match be.nbt.get("disabled_slots") {
-            Some(Tag::IntArray(a)) => a.iter().filter(|&&i| (0..9).contains(&i)).fold(0, |m, &i| m | 1 << i),
+            Some(Tag::IntArray(a)) => a
+                .iter()
+                .filter(|&&i| (0..9).contains(&i))
+                .fold(0, |m, &i| m | 1 << i),
             _ => 0,
         }
     }
@@ -49,9 +52,19 @@ impl PlayPlan {
 
     /// Правка блок-сущности крафтера с сохранением остального (`Items`).
     fn crafter_edit(&self, pos: [i32; 3], f: impl FnOnce(&mut Compound)) {
-        let mut nbt = self.block_entity(pos).filter(|b| b.id == CRAFTER).map(|b| b.nbt).unwrap_or_default();
+        let mut nbt = self
+            .block_entity(pos)
+            .filter(|b| b.id == CRAFTER)
+            .map(|b| b.nbt)
+            .unwrap_or_default();
         f(&mut nbt);
-        self.set_block_entity(pos, Some(BlockEntity { id: CRAFTER.into(), nbt }));
+        self.set_block_entity(
+            pos,
+            Some(BlockEntity {
+                id: CRAFTER.into(),
+                nbt,
+            }),
+        );
     }
 
     /// Тем, у кого крафтер открыт: слоты, результат и данные меню.
@@ -131,23 +144,40 @@ impl PlayPlan {
         let Some(s) = self.block(pos).filter(|&s| self.state_name(s) == CRAFTER) else {
             return;
         };
-        let Some(mut me) = self.cont_get(pos) else { return };
+        let Some(mut me) = self.cont_get(pos) else {
+            return;
+        };
         let Some(result) = self.crafter_result(&me.slots) else {
-            self.hub.send(None, play::level_event(self.ids.level_event, EVENT_FAIL, pos, 0, false));
+            self.hub.send(
+                None,
+                play::level_event(self.ids.level_event, EVENT_FAIL, pos, 0, false),
+            );
             return;
         };
         let pl = &self.survival.placement;
         if let Some(n) = pl.with_prop(s, "crafting", "true") {
             self.set_block(pos, n);
         }
-        self.sim().crafters.lock().unwrap().insert(pos, CRAFTING_TICKS);
+        self.sim()
+            .crafters
+            .lock()
+            .unwrap()
+            .insert(pos, CRAFTING_TICKS);
         self.crafter_edit(pos, |n| {
             n.insert("crafting_ticks_remaining".into(), Tag::Int(CRAFTING_TICKS));
         });
         self.mark_work();
-        let f = pl.prop(s, "orientation").and_then(crafter_front).unwrap_or(2);
+        let f = pl
+            .prop(s, "orientation")
+            .and_then(crafter_front)
+            .unwrap_or(2);
         self.crafter_dispense(pos, f, result);
-        let rests: Vec<Stack> = me.slots.iter().flatten().filter_map(|x| self.craft_remainder(x.item)).collect();
+        let rests: Vec<Stack> = me
+            .slots
+            .iter()
+            .flatten()
+            .filter_map(|x| self.craft_remainder(x.item))
+            .collect();
         for r in rests {
             self.crafter_dispense(pos, f, r);
         }
@@ -187,8 +217,14 @@ impl PlayPlan {
         let d = crate::placement::step(f);
         let (at, vel) = hp::dispense_motion(pos, d, rand::random());
         self.drop_item(at, vel, left, std::time::Duration::ZERO);
-        self.hub.send(None, play::level_event(self.ids.level_event, EVENT_CRAFT, pos, 0, false));
-        self.hub.send(None, play::level_event(self.ids.level_event, EVENT_SMOKE, pos, f as i32, false));
+        self.hub.send(
+            None,
+            play::level_event(self.ids.level_event, EVENT_CRAFT, pos, 0, false),
+        );
+        self.hub.send(
+            None,
+            play::level_event(self.ids.level_event, EVENT_SMOKE, pos, f as i32, false),
+        );
     }
 
     /// `CrafterBlockEntity.serverTick`: по истечении `crafting` гаснет.
@@ -201,7 +237,11 @@ impl PlayPlan {
             for t in map.values_mut() {
                 *t -= 1;
             }
-            let done: Vec<_> = map.iter().filter(|(_, t)| **t <= 0).map(|(p, _)| *p).collect();
+            let done: Vec<_> = map
+                .iter()
+                .filter(|(_, t)| **t <= 0)
+                .map(|(p, _)| *p)
+                .collect();
             for p in &done {
                 map.remove(p);
             }
@@ -225,7 +265,11 @@ impl PlayPlan {
 
     /// Крафтер с диска посреди `crafting`: досчитать его тики.
     pub(super) fn adopt_crafter(&self, pos: [i32; 3], be: &BlockEntity) {
-        let left = be.nbt.get("crafting_ticks_remaining").and_then(Tag::as_i64).unwrap_or(0);
+        let left = be
+            .nbt
+            .get("crafting_ticks_remaining")
+            .and_then(Tag::as_i64)
+            .unwrap_or(0);
         if left > 0 {
             self.sim().crafters.lock().unwrap().insert(pos, left as i32);
         }

@@ -333,8 +333,8 @@ impl<'a> Aquifer<'a> {
         let sim12 = similarity(dist[0], dist[1]);
         let fluid = s1.at(y);
         if sim12 <= 0.0 {
-            self.should_schedule = sim12 >= FLOWING_UPDATE_SIMILARITY
-                && self.status(ctx, closest[1]) != s1;
+            self.should_schedule =
+                sim12 >= FLOWING_UPDATE_SIMILARITY && self.status(ctx, closest[1]) != s1;
             return Some(fluid);
         }
         if fluid == Fluid::Water

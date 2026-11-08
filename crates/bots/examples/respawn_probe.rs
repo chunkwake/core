@@ -20,7 +20,11 @@ fn pack(p: [i32; 3]) -> i64 {
 }
 
 fn unpack(v: i64) -> [i32; 3] {
-    [(v >> 38) as i32, (v << 52 >> 52) as i32, (v << 26 >> 38) as i32]
+    [
+        (v >> 38) as i32,
+        (v << 52 >> 52) as i32,
+        (v << 26 >> 38) as i32,
+    ]
 }
 
 /// Читаемые куски NBT-текста: ключи перевода и строки.
@@ -56,7 +60,9 @@ struct Probe {
 
 impl Probe {
     fn sb(&self, n: &str) -> i32 {
-        self.table.id(State::Play, Direction::Serverbound, n).unwrap()
+        self.table
+            .id(State::Play, Direction::Serverbound, n)
+            .unwrap()
     }
 
     async fn pump(&mut self, ms: u64) {
@@ -79,7 +85,11 @@ impl Probe {
             HEAD => "head",
             _ => return,
         };
-        let name = self.states.get(&state).cloned().unwrap_or_else(|| state.to_string());
+        let name = self
+            .states
+            .get(&state)
+            .cloned()
+            .unwrap_or_else(|| state.to_string());
         let line = format!("{what} {name}");
         if self.log.last() != Some(&line) {
             self.log.push(line);
@@ -91,7 +101,11 @@ impl Probe {
         match kind {
             "sound" => {
                 let id = r.var_int().unwrap();
-                let name = self.sounds.get(&(id - 1)).cloned().unwrap_or_else(|| (id - 1).to_string());
+                let name = self
+                    .sounds
+                    .get(&(id - 1))
+                    .cloned()
+                    .unwrap_or_else(|| (id - 1).to_string());
                 if !(name.contains("anchor") || name.contains("explode") || name.contains("bed")) {
                     return;
                 }
@@ -99,7 +113,11 @@ impl Probe {
                 let mut int = || i32::from_be_bytes(r.bytes(4).unwrap().try_into().unwrap());
                 let at = [int(), int(), int()].map(|v| v as f64 / 8.0);
                 let (vol, pitch) = (r.f32().unwrap(), r.f32().unwrap());
-                let pitch = if name.contains("explode") { "*".to_owned() } else { format!("{pitch:.3}") };
+                let pitch = if name.contains("explode") {
+                    "*".to_owned()
+                } else {
+                    format!("{pitch:.3}")
+                };
                 self.log.push(format!(
                     "sound {name} src {source} at {:.2} {:.2} {:.2} vol {vol} pitch {pitch}",
                     at[0], at[1], at[2]
@@ -141,11 +159,20 @@ impl Probe {
             }
             "section_blocks_update" => {
                 let sec = r.i64().unwrap();
-                let (sx, sy, sz) = ((sec >> 42) as i32, (sec << 44 >> 44) as i32, (sec << 22 >> 42) as i32);
+                let (sx, sy, sz) = (
+                    (sec >> 42) as i32,
+                    (sec << 44 >> 44) as i32,
+                    (sec << 22 >> 42) as i32,
+                );
                 let n = r.var_int().unwrap();
                 for _ in 0..n {
                     let v = r.var_long().unwrap();
-                    let (state, x, z, y) = ((v >> 12) as i32, (v >> 8 & 15) as i32, (v >> 4 & 15) as i32, (v & 15) as i32);
+                    let (state, x, z, y) = (
+                        (v >> 12) as i32,
+                        (v >> 8 & 15) as i32,
+                        (v >> 4 & 15) as i32,
+                        (v & 15) as i32,
+                    );
                     self.block([sx * 16 + x, sy * 16 + y, sz * 16 + z], state);
                 }
             }
@@ -183,7 +210,16 @@ impl Probe {
     async fn use_on(&mut self, p: [i32; 3]) {
         self.seq += 1;
         let mut w = Writer::new();
-        w.var_int(self.sb("use_item_on")).var_int(0).i64(pack(p)).var_int(1).f32(0.5).f32(1.0).f32(0.5).u8(0).u8(0).var_int(self.seq);
+        w.var_int(self.sb("use_item_on"))
+            .var_int(0)
+            .i64(pack(p))
+            .var_int(1)
+            .f32(0.5)
+            .f32(1.0)
+            .f32(0.5)
+            .u8(0)
+            .u8(0)
+            .var_int(self.seq);
         self.c.send_raw(&w.buf).await.unwrap();
         self.ticks(4).await;
     }
@@ -205,11 +241,19 @@ impl Probe {
     /// Площадка и бот в измерении `dim`.
     async fn go(&mut self, dim: &str) {
         let n = self.log.len();
-        self.cmd(&format!("execute in {dim} run tp framer 7.5 200 8.5 -90 0")).await;
+        self.cmd(&format!("execute in {dim} run tp framer 7.5 200 8.5 -90 0"))
+            .await;
         self.pump(2500).await;
-        self.cmd(&format!("execute in {dim} run fill 4 199 4 14 199 14 minecraft:stone")).await;
-        self.cmd(&format!("execute in {dim} run fill 4 200 4 14 203 14 minecraft:air")).await;
-        self.cmd(&format!("execute in {dim} run tp framer 7.5 200 8.5 -90 0")).await;
+        self.cmd(&format!(
+            "execute in {dim} run fill 4 199 4 14 199 14 minecraft:stone"
+        ))
+        .await;
+        self.cmd(&format!(
+            "execute in {dim} run fill 4 200 4 14 203 14 minecraft:air"
+        ))
+        .await;
+        self.cmd(&format!("execute in {dim} run tp framer 7.5 200 8.5 -90 0"))
+            .await;
         self.pump(1500).await;
         self.log.truncate(n);
     }
@@ -219,7 +263,8 @@ impl Probe {
 async fn main() {
     let a: Vec<String> = std::env::args().collect();
     let table = PacketTable::load(a[2].as_ref()).unwrap();
-    let reg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&a[3]).unwrap()).unwrap();
+    let reg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&a[3]).unwrap()).unwrap();
     let sounds = reg["minecraft:sound_event"]["entries"]
         .as_object()
         .unwrap()
@@ -227,7 +272,8 @@ async fn main() {
         .map(|(k, v)| (v["protocol_id"].as_i64().unwrap() as i32, k.clone()))
         .collect();
     let blocks: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(std::path::Path::new(&a[3]).with_file_name("blocks.json")).unwrap(),
+        &std::fs::read_to_string(std::path::Path::new(&a[3]).with_file_name("blocks.json"))
+            .unwrap(),
     )
     .unwrap();
     let mut states = HashMap::new();
@@ -235,14 +281,23 @@ async fn main() {
         for s in b["states"].as_array().unwrap() {
             let mut props: Vec<String> = s["properties"]
                 .as_object()
-                .map(|o| o.iter().map(|(k, v)| format!("{k}={}", v.as_str().unwrap())).collect())
+                .map(|o| {
+                    o.iter()
+                        .map(|(k, v)| format!("{k}={}", v.as_str().unwrap()))
+                        .collect()
+                })
                 .unwrap_or_default();
             props.sort();
-            states.insert(s["id"].as_i64().unwrap() as i32, format!("{name}[{}]", props.join(",")));
+            states.insert(
+                s["id"].as_i64().unwrap() as i32,
+                format!("{name}[{}]", props.join(",")),
+            );
         }
     }
     let ids = Ids::load(&table).unwrap();
-    let mut c = Client::connect(&a[1], "framer", ids, 777, "26.3").await.unwrap();
+    let mut c = Client::connect(&a[1], "framer", ids, 777, "26.3")
+        .await
+        .unwrap();
     let mut cb = HashMap::new();
     for n in [
         "sound",
@@ -280,7 +335,8 @@ async fn main() {
     p.quiet("clear framer").await;
 
     p.log.push("== overworld: charged anchor explodes".into());
-    p.quiet("setblock 9 200 10 minecraft:respawn_anchor[charges=1]").await;
+    p.quiet("setblock 9 200 10 minecraft:respawn_anchor[charges=1]")
+        .await;
     p.use_on(TARGET).await;
 
     p.log.push("== overworld: empty anchor does nothing".into());
@@ -293,14 +349,17 @@ async fn main() {
 
     p.log.push("== nether: bed explodes".into());
     p.go("minecraft:the_nether").await;
-    p.quiet("setblock 9 200 10 minecraft:red_bed[part=foot,facing=south]").await;
-    p.quiet("setblock 9 200 11 minecraft:red_bed[part=head,facing=south]").await;
+    p.quiet("setblock 9 200 10 minecraft:red_bed[part=foot,facing=south]")
+        .await;
+    p.quiet("setblock 9 200 11 minecraft:red_bed[part=head,facing=south]")
+        .await;
     p.use_on(TARGET).await;
 
     p.log.push("== nether: anchor sets spawn".into());
     p.quiet("fill 4 200 4 14 203 14 minecraft:air").await;
     p.quiet("setblock 9 199 11 minecraft:stone").await;
-    p.quiet("setblock 9 200 10 minecraft:respawn_anchor[charges=2]").await;
+    p.quiet("setblock 9 200 10 minecraft:respawn_anchor[charges=2]")
+        .await;
     p.use_on(TARGET).await;
     p.log.push("== nether: same anchor again".into());
     p.use_on(TARGET).await;
@@ -308,8 +367,10 @@ async fn main() {
     p.log.push("== nether: death respawns at the anchor".into());
     p.die_and_respawn().await;
 
-    p.log.push("== nether: empty anchor, respawn falls back".into());
-    p.quiet("execute in minecraft:the_nether run setblock 9 200 10 minecraft:respawn_anchor").await;
+    p.log
+        .push("== nether: empty anchor, respawn falls back".into());
+    p.quiet("execute in minecraft:the_nether run setblock 9 200 10 minecraft:respawn_anchor")
+        .await;
     p.die_and_respawn().await;
 
     p.log.push("== again: point is gone".into());

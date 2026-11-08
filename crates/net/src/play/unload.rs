@@ -20,7 +20,14 @@ impl PlayPlan {
     pub(super) fn chunk_frame_limit(&self, dim: Dimension) -> usize {
         let r = self.view_radius.load(Ordering::Relaxed).max(2) + KEEP_MARGIN;
         let side = (2 * r + 1) as usize;
-        let players = self.hub.players.lock().unwrap().values().filter(|p| p.dimension == dim).count();
+        let players = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|p| p.dimension == dim)
+            .count();
         (players * side * side).max(64)
     }
 
@@ -35,11 +42,21 @@ impl PlayPlan {
             .unwrap()
             .values()
             .filter(|p| p.dimension == dim)
-            .map(|p| ((p.pos[0].floor() as i32) >> 4, (p.pos[2].floor() as i32) >> 4))
+            .map(|p| {
+                (
+                    (p.pos[0].floor() as i32) >> 4,
+                    (p.pos[2].floor() as i32) >> 4,
+                )
+            })
             .collect();
-        let simulated = self.dims.get(&dim).map(|s| s.simulated.lock().unwrap().clone());
+        let simulated = self
+            .dims
+            .get(&dim)
+            .map(|s| s.simulated.lock().unwrap().clone());
         move |c: (i32, i32)| {
-            centers.iter().any(|o| (c.0 - o.0).abs() <= r && (c.1 - o.1).abs() <= r)
+            centers
+                .iter()
+                .any(|o| (c.0 - o.0).abs() <= r && (c.1 - o.1).abs() <= r)
                 || simulated.as_ref().is_some_and(|s| s.contains(&c))
         }
     }
@@ -57,7 +74,11 @@ impl PlayPlan {
     ) -> usize {
         let keep = self.keep_test(dim);
         if let Some(state) = self.dims.get(&dim) {
-            state.chunk_frames.lock().unwrap().retain(|pos, _| keep(*pos));
+            state
+                .chunk_frames
+                .lock()
+                .unwrap()
+                .retain(|pos, _| keep(*pos));
         }
         // Без диска выгруженное не вернуть.
         if self.source.get().is_none() {
@@ -70,7 +91,10 @@ impl PlayPlan {
         let mut regions: FastMap<(i32, i32), Vec<(i32, i32)>> = FastMap::default();
         for pos in state.edited.read().unwrap().keys() {
             if !keep(*pos) {
-                regions.entry((pos.0 >> 5, pos.1 >> 5)).or_default().push(*pos);
+                regions
+                    .entry((pos.0 >> 5, pos.1 >> 5))
+                    .or_default()
+                    .push(*pos);
             }
         }
         let mut total = 0;
@@ -85,7 +109,9 @@ impl PlayPlan {
                 let mut writes = Vec::new();
                 let mut revs = Vec::new();
                 for pos in list {
-                    let Some((column, rev)) = world.get(&pos) else { continue };
+                    let Some((column, rev)) = world.get(&pos) else {
+                        continue;
+                    };
                     if keep(pos) {
                         continue;
                     }
@@ -114,7 +140,12 @@ impl PlayPlan {
     }
 
     /// Снимает записанные столбцы, если их не правили за время записи.
-    fn unload_commit(&self, state: &DimState, region: (i32, i32), revs: &[((i32, i32), u64)]) -> usize {
+    fn unload_commit(
+        &self,
+        state: &DimState,
+        region: (i32, i32),
+        revs: &[((i32, i32), u64)],
+    ) -> usize {
         let mut world = state.edited.write().unwrap();
         // Отметка до снятия и под тем же замком: читатель, не нашедший
         // столбца, уже увидит регион невычитанным.

@@ -15,7 +15,7 @@
 
 Ванильные данные игры (протокол, реестры, блоки, шаблоны структур) встраиваются в бинарник при сборке: `server.jar` и Java для запуска не нужны. Если данных на машине сборки нет, `build.rs` возьмёт готовый кэш `generated/26.3` или соберёт его из `server.jar` — об этом он напишет предупреждением. При первом запуске архив распаковывается в `generated/26.3` (около 27 МБ, один раз), дальше старт мгновенный. Сейчас сервер запускает базовый плоский мир; игровые механики ещё в разработке. При `online-mode=true` вход проверяется через Minecraft session server; при `false` имена игроков не проверяются.
 
-Соберите бинарник командой `cargo build --release -p chunkwake-server`. Он появится как `target/release/chunkwake` (Windows: `target\release\chunkwake.exe`). Создайте каталог сервера и выполните команды ниже, заменив `chunkwake` на путь к бинарнику, если он не добавлен в `PATH`:
+Для сборки из исходников нужен JDK 21 или новее: `crates/datacache/build.rs` компилирует Java-экстракторы в `OUT_DIR`. При необходимости задайте `CHUNKWAKE_JAVAC` с путём к `javac`. Соберите бинарник командой `cargo build --release -p chunkwake-server`. Он появится как `target/release/chunkwake` (Windows: `target\release\chunkwake.exe`). Создайте каталог сервера и выполните команды ниже, заменив `chunkwake` на путь к бинарнику, если он не добавлен в `PATH`:
 
 ```text
 chunkwake setup --dir /path/to/server

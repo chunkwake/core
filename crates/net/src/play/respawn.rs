@@ -134,7 +134,11 @@ impl PlayPlan {
         {
             return None;
         }
-        let at = [pos[0] as f64 + 0.5, pos[1] as f64 + floor, pos[2] as f64 + 0.5];
+        let at = [
+            pos[0] as f64 + 0.5,
+            pos[1] as f64 + floor,
+            pos[2] as f64 + 0.5,
+        ];
         let lo = [at[0] - 0.3, at[1], at[2] - 0.3];
         let hi = [at[0] + 0.3, at[1] + 1.8, at[2] + 0.3];
         const EPS: f64 = 1.0e-7;
@@ -160,7 +164,10 @@ impl PlayPlan {
         // `BlockTags.INVALID_SPAWN_INSIDE`.
         let inside = |p: [i32; 3]| {
             self.block(p).is_some_and(|s| {
-                matches!(self.state_name(s), "minecraft:end_portal" | "minecraft:end_gateway")
+                matches!(
+                    self.state_name(s),
+                    "minecraft:end_portal" | "minecraft:end_gateway"
+                )
             })
         };
         if inside(pos) || inside([pos[0], pos[1] + 1, pos[2]]) {
@@ -205,10 +212,10 @@ impl PlayPlan {
             if !point.forced
                 && use_charge
                 && at.is_some()
-                && let Some(next) = self
-                    .survival
-                    .placement
-                    .with_prop(s, "charges", &(charge - 1).to_string())
+                && let Some(next) =
+                    self.survival
+                        .placement
+                        .with_prop(s, "charges", &(charge - 1).to_string())
             {
                 self.set_block(pos, next);
                 self.redstone_update(&crate::redstone::around(pos));
@@ -225,7 +232,11 @@ impl PlayPlan {
         }
         (self.can_respawn_in(pos) && self.can_respawn_in([pos[0], pos[1] + 1, pos[2]])).then(|| {
             (
-                [pos[0] as f64 + 0.5, pos[1] as f64 + 0.1, pos[2] as f64 + 0.5],
+                [
+                    pos[0] as f64 + 0.5,
+                    pos[1] as f64 + 0.1,
+                    pos[2] as f64 + 0.5,
+                ],
                 (point.angle[0], point.angle[1]),
             )
         })
@@ -240,7 +251,13 @@ impl PlayPlan {
             look: (0.0, 0.0),
             missing: false,
         };
-        let point = self.spawn_points.lock().unwrap().get(&uuid).copied().flatten();
+        let point = self
+            .spawn_points
+            .lock()
+            .unwrap()
+            .get(&uuid)
+            .copied()
+            .flatten();
         let Some(point) = point.filter(|p| self.dims.contains_key(&p.dim)) else {
             return world;
         };
@@ -260,7 +277,13 @@ impl PlayPlan {
 
     /// Якорь в точке игрока: после возрождения у него звук разрядки.
     pub(super) fn anchor_at_spawn(&self, uuid: Uuid) -> Option<[i32; 3]> {
-        let point = self.spawn_points.lock().unwrap().get(&uuid).copied().flatten()?;
+        let point = self
+            .spawn_points
+            .lock()
+            .unwrap()
+            .get(&uuid)
+            .copied()
+            .flatten()?;
         with_dim(point.dim, || {
             self.block(point.pos)
                 .is_some_and(|s| self.state_name(s) == ANCHOR)
@@ -300,7 +323,13 @@ impl PlayPlan {
             }),
         );
         drop(points);
-        self.block_sound(None, "minecraft:block.respawn_anchor.set_spawn", pos, 1.0, 1.0);
+        self.block_sound(
+            None,
+            "minecraft:block.respawn_anchor.set_spawn",
+            pos,
+            1.0,
+            1.0,
+        );
         AnchorUse::Set
     }
 

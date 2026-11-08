@@ -16,6 +16,7 @@ pub struct Ids {
     sb_cfg_known_packs: i32,
     sb_cfg_finish: i32,
     sb_cfg_keep_alive: i32,
+    sb_cfg_client_information: i32,
     keep_alive: i32,
     sb_keep_alive: i32,
     sb_move_pos: i32,
@@ -50,6 +51,7 @@ impl Ids {
             sb_cfg_known_packs: id(Cfg, S, "select_known_packs")?,
             sb_cfg_finish: id(Cfg, S, "finish_configuration")?,
             sb_cfg_keep_alive: id(Cfg, S, "keep_alive")?,
+            sb_cfg_client_information: id(Cfg, S, "client_information")?,
             keep_alive: id(Play, C, "keep_alive")?,
             sb_keep_alive: id(Play, S, "keep_alive")?,
             sb_move_pos: id(Play, S, "move_player_pos")?,
@@ -275,6 +277,23 @@ impl Client {
             }
         }
         conn.send(&[3]).await.map_err(err)?;
+        // Настоящий клиент шлёт настройки сразу: без них сервер (как ваниль)
+        // считает обзор равным 2. `CHUNKWAKE_BOT_VIEW` меняет запрошенный обзор.
+        let view = std::env::var("CHUNKWAKE_BOT_VIEW")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(32);
+        conn.send(&chunkwake_protocol::configuration::client_information(
+            ids.sb_cfg_client_information,
+            &chunkwake_protocol::configuration::ClientInfo {
+                view_distance: view,
+                skin_parts: 0x7f,
+                main_hand: 1,
+                allows_listing: true,
+            },
+        ))
+        .await
+        .map_err(err)?;
         loop {
             let p = conn.read_packet().await.map_err(err)?;
             let mut r = Reader::new(&p);

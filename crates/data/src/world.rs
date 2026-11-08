@@ -245,6 +245,9 @@ pub struct ItemInfo {
     pub attack: f32,
     /// Добавка к `minecraft:attack_speed` (к базовым 4 игрока).
     pub attack_speed: f32,
+    /// `minecraft:attack_animation`: вид (`none` 0, `whack` 1, `stab` 2) и
+    /// длительность в тиках; без компонента — `SwingAnimation.DEFAULT`.
+    pub swing: (u8, u8),
 }
 
 impl Default for ItemInfo {
@@ -260,8 +263,39 @@ impl Default for ItemInfo {
             toughness: 0.0,
             attack: 0.0,
             attack_speed: 0.0,
+            swing: DEFAULT_SWING,
         }
     }
+}
+
+/// `SwingAnimation.DEFAULT`: `whack` на 6 тиков.
+pub const DEFAULT_SWING: (u8, u8) = (1, 6);
+
+/// `minecraft:attack_animation` из текста отчёта предмета. Компонент есть у
+/// каждого предмета, но непустой только у копий (`stab`), поэтому JSON
+/// целиком не разбирается: берётся объект сразу за ключом.
+fn parse_swing(text: &str) -> (u8, u8) {
+    let Some((_, rest)) = text.split_once("\"minecraft:attack_animation\":") else {
+        return DEFAULT_SWING;
+    };
+    let body = rest.split_once('}').map_or("", |(b, _)| b);
+    let field = |key: &str| {
+        body.split_once(key).map(|(_, v)| {
+            v.trim_start_matches([':', ' ', '"'])
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect::<String>()
+        })
+    };
+    let kind = match field("\"type\"").as_deref() {
+        Some("none") => 0,
+        Some("stab") => 2,
+        _ => DEFAULT_SWING.0,
+    };
+    let duration = field("\"duration\"")
+        .and_then(|d| d.parse().ok())
+        .unwrap_or(DEFAULT_SWING.1);
+    (kind, duration)
 }
 
 /// Время поедания по умолчанию (`Consumable.DEFAULT_CONSUME_SECONDS`).
@@ -306,6 +340,7 @@ pub fn load_items(root: &Path, items: &HashMap<String, i32>) -> Result<Vec<ItemI
         {
             out[id as usize].max_damage = n;
         }
+        out[id as usize].swing = parse_swing(&text);
         // Еды и зелий немного: такие файлы разбираем целиком.
         if text.contains("\"minecraft:food\"")
             || text.contains("\"minecraft:potion_contents\"")
@@ -834,12 +869,12 @@ impl Drop for MarkReady {
     }
 }
 
-/// `load_items` через сводку `items.v3.tsv`: имя, стопка, питьё, броня, урон и для еды — сытость.
+/// `load_items` через сводку `items.v4.tsv`: имя, стопка, питьё, броня, урон и для еды — сытость.
 pub fn load_items_cached(
     root: &Path,
     items: &HashMap<String, i32>,
 ) -> Result<Vec<ItemInfo>, DataError> {
-    let path = derived(root, "items.v3.tsv");
+    let path = derived(root, "items.v4.tsv");
     let len = items.values().max().map_or(0, |&m| m as usize + 1);
     if let Ok(text) = std::fs::read_to_string(&path) {
         let mut out = vec![ItemInfo::default(); len];
@@ -870,7 +905,7 @@ fn equip_slot(name: &str) -> Option<&'static str> {
 }
 
 /// `name, max_stack, equip (-), max_damage, fuel, секунды питья (-), остаток (-),
-/// броня, прочность брони, урон, скорость атаки`
+/// броня, прочность брони, урон, скорость атаки, взмах (вид,тики)`
 /// и для еды — сытость, насыщение, можно ли всегда, секунды. Поля через табуляцию.
 fn item_line(name: &str, i: &ItemInfo) -> String {
     let fuel = i.fuel.map_or("-".to_owned(), |f| {
@@ -892,14 +927,16 @@ fn item_line(name: &str, i: &ItemInfo) -> String {
         None => "-\t-".to_owned(),
     };
     let head = format!(
-        "{name}\t{}\t{}\t{}\t{fuel}\t{drink}\t{}\t{}\t{}\t{}",
+        "{name}\t{}\t{}\t{}\t{fuel}\t{drink}\t{}\t{}\t{}\t{}\t{},{}",
         i.max_stack,
         i.equip.unwrap_or("-"),
         i.max_damage,
         i.armor,
         i.toughness,
         i.attack,
-        i.attack_speed
+        i.attack_speed,
+        i.swing.0,
+        i.swing.1
     );
     match i.food {
         Some(f) => format!(
@@ -952,6 +989,8 @@ fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, I
     let toughness = f.next()?.parse().ok()?;
     let attack = f.next()?.parse().ok()?;
     let attack_speed = f.next()?.parse().ok()?;
+    let (kind, duration) = f.next()?.split_once(',')?;
+    let swing = (kind.parse().ok()?, duration.parse().ok()?);
     let food = match (f.next(), f.next(), f.next(), f.next()) {
         (Some(n), Some(s), Some(a), Some(sec)) => Some(Food {
             nutrition: n.parse().ok()?,
@@ -974,6 +1013,7 @@ fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, I
             toughness,
             attack,
             attack_speed,
+            swing,
         },
     ))
 }
@@ -1124,6 +1164,7 @@ mod loot_tests {
                 toughness: 2.0,
                 attack: 5.0,
                 attack_speed: -2.4,
+                swing: (2, 13),
             },
             ItemInfo {
                 max_stack: 16,
@@ -1134,6 +1175,21 @@ mod loot_tests {
             let line = item_line("minecraft:bread", &info);
             assert_eq!(parse_item_line(&line, &items), Some((3, info)));
         }
+    }
+
+    /// Взмах копья из отчёта 26.3 и умолчание у пустого компонента.
+    #[test]
+    fn swing_from_report() {
+        let spear = r#"{"components":{"minecraft:attack_animation":{"type":"stab","duration":13},"minecraft:attack_range":{}}}"#;
+        assert_eq!(parse_swing(spear), (2, 13));
+        let pretty =
+            "\"minecraft:attack_animation\": {\n  \"type\": \"stab\",\n  \"duration\": 21\n},";
+        assert_eq!(parse_swing(pretty), (2, 21));
+        assert_eq!(
+            parse_swing(r#"{"minecraft:attack_animation":{},"x":{"duration":9}}"#),
+            DEFAULT_SWING
+        );
+        assert_eq!(parse_swing("{}"), DEFAULT_SWING);
     }
 }
 
@@ -1487,11 +1543,17 @@ pub fn load_jukebox_songs(
         let Some(&item_id) = items.get(&item) else {
             continue;
         };
-        let report = root.join(format!("reports/minecraft/components/item/music_disc_{name}.json"));
+        let report = root.join(format!(
+            "reports/minecraft/components/item/music_disc_{name}.json"
+        ));
         let playable = std::fs::read_to_string(&report)
             .ok()
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-            .and_then(|j| j["components"]["minecraft:jukebox_playable"].as_str().map(str::to_owned));
+            .and_then(|j| {
+                j["components"]["minecraft:jukebox_playable"]
+                    .as_str()
+                    .map(str::to_owned)
+            });
         if playable.as_deref() != Some(key.as_str()) {
             continue;
         }
@@ -1506,4 +1568,71 @@ pub fn load_jukebox_songs(
         );
     }
     Ok(out)
+}
+
+/// Тип сущности из `reports/entities.csv` (выгрузка `ChunkwakeEntities`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EntityTypeInfo {
+    pub name: String,
+    /// `EntityType.clientTrackingRange`, в чанках: слежение — ×16 блоков.
+    pub tracking_range: i32,
+    /// `EntityType.updateInterval`: тики между рассылками `ServerEntity`.
+    pub update_interval: i32,
+    pub width: f32,
+    pub height: f32,
+    /// `MobCategory.getName()`: `monster`, `creature`, `misc`…
+    pub category: String,
+    pub fire_immune: bool,
+}
+
+/// Строки `имя;дальность;интервал;ширина;высота;категория;fireImmune`.
+fn parse_entity_line(line: &str) -> Option<EntityTypeInfo> {
+    let mut f = line.split(';');
+    let info = EntityTypeInfo {
+        name: f.next()?.to_owned(),
+        tracking_range: f.next()?.parse().ok()?,
+        update_interval: f.next()?.parse().ok()?,
+        width: f.next()?.parse().ok()?,
+        height: f.next()?.parse().ok()?,
+        category: f.next()?.to_owned(),
+        fire_immune: f.next()?.parse().ok()?,
+    };
+    f.next().is_none().then_some(info)
+}
+
+/// Типы сущностей в порядке реестра. Файла может не быть (кэш до выгрузки):
+/// тогда список пуст и дальности берутся по умолчанию.
+pub fn load_entity_types(root: &Path) -> Result<Vec<EntityTypeInfo>, DataError> {
+    let path = root.join("reports/entities.csv");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(DataError::Io(format!("read {}: {e}", path.display()))),
+    };
+    text.lines()
+        .enumerate()
+        .map(|(i, line)| {
+            parse_entity_line(line).ok_or_else(|| DataError::Format {
+                file: path.display().to_string(),
+                msg: format!("line {}: {line:?}", i + 1),
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod entity_tests {
+    use super::*;
+
+    #[test]
+    fn entity_line() {
+        let z = parse_entity_line("minecraft:zombie;8;3;0.6;1.95;monster;false").unwrap();
+        assert_eq!(z.name, "minecraft:zombie");
+        assert_eq!((z.tracking_range, z.update_interval), (8, 3));
+        assert_eq!((z.width, z.height), (0.6, 1.95));
+        assert_eq!(z.category, "monster");
+        assert!(!z.fire_immune);
+        assert!(parse_entity_line("minecraft:zombie;8;3").is_none());
+        assert!(parse_entity_line("minecraft:zombie;8;3;0.6;1.95;monster;false;x").is_none());
+    }
 }

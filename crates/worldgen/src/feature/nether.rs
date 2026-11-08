@@ -1,7 +1,9 @@
 //! Фичи Нижнего мира: столбы базальта, дельты, пятна, светокамень и лианы,
 //! огромные грибы.
 
-use super::{DIRECTION_NAMES, DIRS, Features, Level, Palette, Placed, Predicate, Provider, block_set};
+use super::{
+    DIRECTION_NAMES, DIRS, Features, Level, Palette, Placed, Predicate, Provider, block_set,
+};
 use crate::carver::IntP;
 use crate::random::{Bits, Worldgen};
 use serde_json::Value;
@@ -163,8 +165,16 @@ impl Delta {
 
     pub(crate) fn place(&self, f: &Features, level: &mut dyn Level, r: &mut Worldgen, origin: Pos) {
         let spawn_rim = r.next_double() < 0.9;
-        let rim_x = if spawn_rim { self.rim_size.sample(r) } else { 0 };
-        let rim_z = if spawn_rim { self.rim_size.sample(r) } else { 0 };
+        let rim_x = if spawn_rim {
+            self.rim_size.sample(r)
+        } else {
+            0
+        };
+        let rim_z = if spawn_rim {
+            self.rim_size.sample(r)
+        } else {
+            0
+        };
         let has_rim = spawn_rim && rim_x != 0 && rim_z != 0;
         let radius_x = self.size.sample(r);
         let radius_z = self.size.sample(r);
@@ -299,7 +309,13 @@ impl ColumnCluster {
         }
     }
 
-    fn find_surface(&self, f: &Features, level: &dyn Level, mut cursor: Pos, mut limit: i32) -> Option<Pos> {
+    fn find_surface(
+        &self,
+        f: &Features,
+        level: &dyn Level,
+        mut cursor: Pos,
+        mut limit: i32,
+    ) -> Option<Pos> {
         while cursor[1] > level.min_y() + 1 && limit > 0 {
             limit -= 1;
             if self.can_place_at(f, level, cursor) {
@@ -319,7 +335,13 @@ impl ColumnCluster {
         !pal.is_air(below) && !Palette::flag(&self.cannot_place_on, below)
     }
 
-    fn find_air(&self, f: &Features, level: &dyn Level, mut cursor: Pos, mut limit: i32) -> Option<Pos> {
+    fn find_air(
+        &self,
+        f: &Features,
+        level: &dyn Level,
+        mut cursor: Pos,
+        mut limit: i32,
+    ) -> Option<Pos> {
         let max_y = level.min_y() + level.height() - 1;
         while cursor[1] <= max_y && limit > 0 {
             limit -= 1;
@@ -356,7 +378,11 @@ impl ReplaceBlobs {
     pub(crate) fn place(&self, f: &Features, level: &mut dyn Level, r: &mut Worldgen, origin: Pos) {
         let pal = &f.palette;
         let max_y = level.min_y() + level.height() - 1;
-        let mut cursor = [origin[0], origin[1].clamp(level.min_y() + 1, max_y), origin[2]];
+        let mut cursor = [
+            origin[0],
+            origin[1].clamp(level.min_y() + 1, max_y),
+            origin[2],
+        ];
         // `findTarget`.
         let center = loop {
             if cursor[1] <= level.min_y() + 1 {
@@ -498,7 +524,15 @@ impl HugeFungus {
         plants && self.replaceable.test(level, &f.palette, pos)
     }
 
-    fn stem(&self, f: &Features, level: &mut dyn Level, r: &mut Worldgen, o: Pos, total: i32, huge: bool) {
+    fn stem(
+        &self,
+        f: &Features,
+        level: &mut dyn Level,
+        r: &mut Worldgen,
+        o: Pos,
+        total: i32,
+        huge: bool,
+    ) {
         let radius = i32::from(huge);
         for dx in -radius..=radius {
             for dz in -radius..=radius {
@@ -520,11 +554,23 @@ impl HugeFungus {
         }
     }
 
-    fn hat(&self, f: &Features, level: &mut dyn Level, r: &mut Worldgen, o: Pos, total: i32, huge: bool) {
+    fn hat(
+        &self,
+        f: &Features,
+        level: &mut dyn Level,
+        r: &mut Worldgen,
+        o: Pos,
+        total: i32,
+        huge: bool,
+    ) {
         let hat_height = (r.next_int_bound(1 + total / 3) + 5).min(total);
         let start = total - hat_height;
         for dy in start..=total {
-            let mut radius = if dy < total - r.next_int_bound(3) { 2 } else { 1 };
+            let mut radius = if dy < total - r.next_int_bound(3) {
+                2
+            } else {
+                1
+            };
             if hat_height > 8 && dy < start + 4 {
                 radius = 3;
             }
@@ -550,9 +596,25 @@ impl HugeFungus {
                     } else if inside {
                         self.hat_block(f, level, r, pos, 0.1, 0.2, if vines { 0.1 } else { 0.0 });
                     } else if corner {
-                        self.hat_block(f, level, r, pos, 0.01, 0.7, if vines { 0.083 } else { 0.0 });
+                        self.hat_block(
+                            f,
+                            level,
+                            r,
+                            pos,
+                            0.01,
+                            0.7,
+                            if vines { 0.083 } else { 0.0 },
+                        );
                     } else {
-                        self.hat_block(f, level, r, pos, 5.0e-4, 0.98, if vines { 0.07 } else { 0.0 });
+                        self.hat_block(
+                            f,
+                            level,
+                            r,
+                            pos,
+                            5.0e-4,
+                            0.98,
+                            if vines { 0.07 } else { 0.0 },
+                        );
                     }
                 }
             }
@@ -608,7 +670,9 @@ impl HugeFungus {
                 let below = [at[0], at[1] - 1, at[2]];
                 if height == goal || !pal.is_air(get(&*level, below)) {
                     let age = next_int(r, 23, 25).to_string();
-                    let s = pal.with_prop(self.weeping_vines, "age", &age).unwrap_or(self.weeping_vines);
+                    let s = pal
+                        .with_prop(self.weeping_vines, "age", &age)
+                        .unwrap_or(self.weeping_vines);
                     put(level, at, s);
                     break;
                 }
@@ -651,7 +715,10 @@ impl PatchySquare {
                 }
                 let mut base = add(pos, [dx, 0, dz]);
                 let mut drop = self.max_drop;
-                while self.through.test(&*level, pal, [base[0], base[1] - 1, base[2]]) {
+                while self
+                    .through
+                    .test(&*level, pal, [base[0], base[1] - 1, base[2]])
+                {
                     base[1] -= 1;
                     drop -= 1;
                     if drop <= 0 {

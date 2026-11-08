@@ -222,7 +222,8 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         }
     }
     if let (true, Some(id)) = (parts[10], e.map_id) {
-        w.var_int(id_of(&crate::components::MAP_ID_COMPONENT)).var_int(id);
+        w.var_int(id_of(&crate::components::MAP_ID_COMPONENT))
+            .var_int(id);
     }
     if let (true, Some(p)) = (parts[11], e.map_post_processing) {
         w.var_int(id_of(&crate::components::MAP_POST_PROCESSING_COMPONENT))
@@ -688,6 +689,27 @@ pub fn set_entity_flags(id: i32, entity_id: i32, flags: u8) -> Vec<u8> {
     w.buf
 }
 
+/// Модель игрока (`Avatar`): основная рука (15, `HUMANOID_ARM` = 42) и
+/// видимые части скина (16, `BYTE` = 0).
+/// Пишутся только поля `Some`: как грязные значения `SynchedEntityData`.
+pub fn set_player_model(
+    id: i32,
+    entity_id: i32,
+    main_hand: Option<u8>,
+    skin_parts: Option<u8>,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_id);
+    if let Some(hand) = main_hand {
+        w.u8(15).var_int(42).var_int(i32::from(hand));
+    }
+    if let Some(skin) = skin_parts {
+        w.u8(16).var_int(0).u8(skin);
+    }
+    w.u8(0xff);
+    w.buf
+}
+
 /// Общие метаданные сущности: запас воздуха (1) и тики замерзания (7).
 pub fn set_entity_air(id: i32, entity_id: i32, air: i32) -> Vec<u8> {
     set_entity_int(id, entity_id, 1, air)
@@ -699,7 +721,12 @@ pub fn set_entity_frozen(id: i32, entity_id: i32, ticks: i32) -> Vec<u8> {
 
 fn set_entity_int(id: i32, entity_id: i32, index: u8, value: i32) -> Vec<u8> {
     let mut w = Writer::new();
-    w.var_int(id).var_int(entity_id).u8(index).var_int(1).var_int(value).u8(0xff);
+    w.var_int(id)
+        .var_int(entity_id)
+        .u8(index)
+        .var_int(1)
+        .var_int(value)
+        .u8(0xff);
     w.buf
 }
 
@@ -761,7 +788,12 @@ pub fn set_firework_attached(id: i32, entity_id: i32, attached: i32) -> Vec<u8> 
 /// `PrimedTnt.DATA_FUSE_ID`: оставшиеся тики фитиля (индекс 8, int).
 pub fn set_tnt_fuse(id: i32, entity_id: i32, fuse: i32) -> Vec<u8> {
     let mut w = Writer::new();
-    w.var_int(id).var_int(entity_id).u8(8).var_int(1).var_int(fuse).u8(0xff);
+    w.var_int(id)
+        .var_int(entity_id)
+        .u8(8)
+        .var_int(1)
+        .var_int(fuse)
+        .u8(0xff);
     w.buf
 }
 
@@ -831,7 +863,12 @@ pub fn item_frame_data(
 /// `MinecartFurnace.DATA_ID_FUEL` (индекс 13, boolean): печь горит.
 pub fn furnace_cart_fuel(id: i32, entity_id: i32, lit: bool) -> Vec<u8> {
     let mut w = Writer::new();
-    w.var_int(id).var_int(entity_id).u8(13).var_int(8).bool(lit).u8(0xff);
+    w.var_int(id)
+        .var_int(entity_id)
+        .u8(13)
+        .var_int(8)
+        .bool(lit)
+        .u8(0xff);
     w.buf
 }
 

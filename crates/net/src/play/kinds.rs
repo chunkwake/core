@@ -113,7 +113,10 @@ impl PlayPlan {
                 break;
             }
         }
-        if let Some(next) = self.survival.placement.with_prop(state, "distance", &d.to_string())
+        if let Some(next) = self
+            .survival
+            .placement
+            .with_prop(state, "distance", &d.to_string())
             && next != state
         {
             self.set_block(pos, next);
@@ -123,7 +126,11 @@ impl PlayPlan {
     /// `LeavesBlock.randomTick`: распадающаяся листва роняет добычу и
     /// исчезает (`removeBlock` — без частиц разрушения).
     pub(super) fn leaves_decay(&self, pos: [i32; 3], state: u32) {
-        let at = [pos[0] as f64 + 0.5, pos[1] as f64 + 0.25, pos[2] as f64 + 0.5];
+        let at = [
+            pos[0] as f64 + 0.5,
+            pos[1] as f64 + 0.25,
+            pos[2] as f64 + 0.5,
+        ];
         self.set_block(pos, 0);
         for st in self.block_loot(state, None) {
             let vel = crate::items::pop_velocity(rand::random(), rand::random());

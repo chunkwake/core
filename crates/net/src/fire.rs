@@ -27,10 +27,24 @@ pub fn flammability(name: &str) -> Option<(u32, u32)> {
     if n == "bookshelf" || n == "chiseled_bookshelf" || n == "lectern" {
         return Some((30, 20));
     }
-    if matches!(n, "chest" | "trapped_chest" | "barrel" | "crafting_table"
-        | "cartography_table" | "fletching_table" | "smithing_table"
-        | "loom" | "composter" | "ladder" | "scaffolding"
-        | "beehive" | "bee_nest" | "note_block" | "jukebox") {
+    if matches!(
+        n,
+        "chest"
+            | "trapped_chest"
+            | "barrel"
+            | "crafting_table"
+            | "cartography_table"
+            | "fletching_table"
+            | "smithing_table"
+            | "loom"
+            | "composter"
+            | "ladder"
+            | "scaffolding"
+            | "beehive"
+            | "bee_nest"
+            | "note_block"
+            | "jukebox"
+    ) {
         return Some((5, 20));
     }
     let wood_name = n.strip_prefix("stripped_").unwrap_or(n);

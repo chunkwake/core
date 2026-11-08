@@ -3,9 +3,9 @@
 
 use crate::light::LightLayer;
 use crate::nbt::{self, Compound, Tag};
-use crate::{Biomes, ChunkColumn, Section, bits_for, emit_packed, pack};
 pub use crate::region_codec::Codec;
 use crate::region_codec::{self, EXTERNAL};
+use crate::{Biomes, ChunkColumn, Section, bits_for, emit_packed, pack};
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -480,7 +480,10 @@ where
 /// Сжатие пачки чанков без записи в файл — для бенчмарка и профиля.
 pub fn compress_for_bench(chunks: &[Compound]) -> usize {
     let list: Vec<(usize, &Compound)> = chunks.iter().enumerate().collect();
-    compress_chunks(&list, Codec::Deflate).iter().map(|(_, v)| v.len()).sum()
+    compress_chunks(&list, Codec::Deflate)
+        .iter()
+        .map(|(_, v)| v.len())
+        .sum()
 }
 
 /// То же в одном потоке: с ним сравнивается параллельный вариант.
@@ -543,7 +546,9 @@ impl SectorMap {
 
     /// Свободных секторов подряд с `from` (за концом файла не считаются).
     fn free_run(&self, from: usize) -> usize {
-        self.0.get(from..).map_or(0, |rest| rest.iter().take_while(|u| !**u).count())
+        self.0
+            .get(from..)
+            .map_or(0, |rest| rest.iter().take_while(|u| !**u).count())
     }
 
     /// Место для `need` секторов чанка, который сейчас лежит в
@@ -581,7 +586,10 @@ type RegionPayloads = (Vec<u8>, Vec<(usize, std::ops::Range<usize>)>);
 
 impl RegionStore {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into(), codec: Codec::default() }
+        Self {
+            dir: dir.into(),
+            codec: Codec::default(),
+        }
     }
 
     /// Сжатие новых записей (`region-file-compression`). Читаются все виды.
@@ -1122,15 +1130,20 @@ mod tests {
     fn freed_sectors_are_reused() {
         // Чанк попеременно растёт и сжимается: без переиспользования каждый
         // рост дописывал бы его в конец файла.
-        let dir = std::env::temp_dir().join(format!("chunkwake-anvil-reuse-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("chunkwake-anvil-reuse-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = RegionStore::new(&dir);
         let base = chunk_to_nbt(&sample(), (0, 0), F, &Test).unwrap();
         let other = chunk_to_nbt(&sample(), (1, 0), F, &Test).unwrap();
-        store.save(&[((0, 0), noisy(&base, 1000, 1)), ((1, 0), other.clone())]).unwrap();
+        store
+            .save(&[((0, 0), noisy(&base, 1000, 1)), ((1, 0), other.clone())])
+            .unwrap();
         for round in 0..20u32 {
             let size = if round % 2 == 0 { 40_000 } else { 1000 };
-            store.save(&[((0, 0), noisy(&base, size, round + 2))]).unwrap();
+            store
+                .save(&[((0, 0), noisy(&base, size, round + 2))])
+                .unwrap();
         }
         let len = std::fs::metadata(dir.join("r.0.0.mca")).unwrap().len();
         assert!(len <= 16 * SECTOR as u64, "файл вырос до {len}");
@@ -1160,16 +1173,24 @@ mod tests {
 
     #[test]
     fn every_codec_reads_back_and_mixes_in_one_region() {
-        let dir = std::env::temp_dir().join(format!("chunkwake-anvil-codec-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("chunkwake-anvil-codec-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut want = BTreeMap::new();
-        for (x, codec) in [Codec::Deflate, Codec::Lz4, Codec::None].into_iter().enumerate() {
+        for (x, codec) in [Codec::Deflate, Codec::Lz4, Codec::None]
+            .into_iter()
+            .enumerate()
+        {
             let store = RegionStore::new(&dir).with_codec(codec);
             let nbt = chunk_to_nbt(&sample(), (x as i32, 0), F, &Test).unwrap();
             store.save(&[((x as i32, 0), nbt.clone())]).unwrap();
             want.insert((x as i32, 0), nbt);
         }
-        let got: BTreeMap<_, _> = RegionStore::new(&dir).load_region(0, 0).unwrap().into_iter().collect();
+        let got: BTreeMap<_, _> = RegionStore::new(&dir)
+            .load_region(0, 0)
+            .unwrap()
+            .into_iter()
+            .collect();
         assert_eq!(got, want);
         std::fs::remove_dir_all(&dir).unwrap();
     }

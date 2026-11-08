@@ -49,7 +49,10 @@ pub fn named_nbt(
         );
     }
     if !e.banner_patterns.is_empty() {
-        comps.insert("minecraft:banner_patterns".into(), banner_layers_to_tag(&e.banner_patterns));
+        comps.insert(
+            "minecraft:banner_patterns".into(),
+            banner_layers_to_tag(&e.banner_patterns),
+        );
     }
     if !e.enchantments.is_empty() {
         let levels: Compound = e
@@ -141,7 +144,10 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>) -> Option<S
             .and_then(Tag::as_i64)
             .unwrap_or(0)
             .clamp(0, i32::MAX as i64) as i32;
-        e.map_id = m.get("minecraft:map_id").and_then(Tag::as_i64).map(|v| v as i32);
+        e.map_id = m
+            .get("minecraft:map_id")
+            .and_then(Tag::as_i64)
+            .map(|v| v as i32);
         e.trim = m
             .get("minecraft:trim")
             .and_then(Tag::as_compound)
@@ -494,8 +500,14 @@ pub fn banner_layers_to_tag(layers: &[(i32, i32)]) -> Tag {
             .iter()
             .filter_map(|&(pattern, color)| {
                 Some(Tag::Compound(Compound::from([
-                    ("pattern".into(), Tag::String(components::banner_pattern_name(pattern)?.to_owned())),
-                    ("color".into(), Tag::String(components::DYE_COLORS.get(color as usize)?.to_string())),
+                    (
+                        "pattern".into(),
+                        Tag::String(components::banner_pattern_name(pattern)?.to_owned()),
+                    ),
+                    (
+                        "color".into(),
+                        Tag::String(components::DYE_COLORS.get(color as usize)?.to_string()),
+                    ),
                 ])))
             })
             .collect(),
@@ -511,7 +523,10 @@ pub fn banner_layers_from_tag(t: &Tag) -> Vec<(i32, i32)> {
                     let layer = layer.as_compound()?;
                     let pattern = components::banner_pattern_id(layer.get("pattern")?.as_str()?)?;
                     let name = layer.get("color")?.as_str()?;
-                    Some((pattern, components::DYE_COLORS.iter().position(|&n| n == name)? as i32))
+                    Some((
+                        pattern,
+                        components::DYE_COLORS.iter().position(|&n| n == name)? as i32,
+                    ))
                 })
                 .collect()
         })

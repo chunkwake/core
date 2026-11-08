@@ -47,7 +47,10 @@ impl PlayPlan {
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|(&uuid, live)| self.map_icon_hidden(live.slots[survival::HEAD]).then_some(uuid))
+            .filter_map(|(&uuid, live)| {
+                self.map_icon_hidden(live.slots[survival::HEAD])
+                    .then_some(uuid)
+            })
             .collect()
     }
 
@@ -57,7 +60,12 @@ impl PlayPlan {
     }
 
     /// Карта в памяти; при первом обращении читается с диска.
-    fn with_map<R>(&self, store: &mut MapStore, id: i32, f: impl FnOnce(&mut MapData) -> R) -> Option<R> {
+    fn with_map<R>(
+        &self,
+        store: &mut MapStore,
+        id: i32,
+        f: impl FnOnce(&mut MapData) -> R,
+    ) -> Option<R> {
         if !store.maps.contains_key(&id) {
             if store.missing.contains(&id) {
                 return None;
@@ -66,7 +74,9 @@ impl PlayPlan {
                 let root = chunkwake_world::nbt::read_gzip_file(&dir.join(format!("{id}.dat")))
                     .map_err(|e| tracing::warn!("map {id}: {e}"))
                     .ok()??;
-                root.get("data").and_then(Tag::as_compound).and_then(MapData::from_nbt)
+                root.get("data")
+                    .and_then(Tag::as_compound)
+                    .and_then(MapData::from_nbt)
             });
             match loaded {
                 Some(m) => {
@@ -86,13 +96,10 @@ impl PlayPlan {
         let last = *store.last_id.get_or_insert_with(|| {
             self.maps_dir
                 .get()
-                .and_then(|dir| chunkwake_world::nbt::read_gzip_file(&dir.join("last_id.dat")).ok()?)
-                .and_then(|root| {
-                    root.get("data")?
-                        .as_compound()?
-                        .get("map")?
-                        .as_i64()
+                .and_then(|dir| {
+                    chunkwake_world::nbt::read_gzip_file(&dir.join("last_id.dat")).ok()?
                 })
+                .and_then(|root| root.get("data")?.as_compound()?.get("map")?.as_i64())
                 .map_or(-1, |v| v as i32)
         });
         let id = last + 1;
@@ -102,14 +109,22 @@ impl PlayPlan {
     }
 
     /// `MapItem.create`: новая карта с центром около `(x, z)`, её номер.
-    pub(crate) fn create_map(&self, x: i32, z: i32, scale: u8, tracking: bool, unlimited: bool) -> i32 {
+    pub(crate) fn create_map(
+        &self,
+        x: i32,
+        z: i32,
+        scale: u8,
+        tracking: bool,
+        unlimited: bool,
+    ) -> i32 {
         let dim = self.active_dim().key();
         let mut store = self.maps.lock().unwrap();
         let id = self.free_map_id(&mut store);
         store.missing.remove(&id);
-        store
-            .maps
-            .insert(id, MapData::fresh(x as f64, z as f64, scale, tracking, unlimited, dim));
+        store.maps.insert(
+            id,
+            MapData::fresh(x as f64, z as f64, scale, tracking, unlimited, dim),
+        );
         id
     }
 
@@ -164,7 +179,13 @@ impl PlayPlan {
             inv.consume_at(slot);
         }
         self.player_sound(uuid, "minecraft:ui.cartography_table.take_result", 1.0, 1.0);
-        let id = self.create_map(feet[0].floor() as i32, feet[2].floor() as i32, 0, true, false);
+        let id = self.create_map(
+            feet[0].floor() as i32,
+            feet[2].floor() as i32,
+            0,
+            true,
+            false,
+        );
         let Some(map) = self.filled_map(id) else {
             return Ok(());
         };
@@ -190,8 +211,12 @@ impl PlayPlan {
             (0..self.survival.map_colors.len() as u32)
                 .map(|s| match pl.name(s).unwrap_or("") {
                     "minecraft:lava" => 2,
-                    "minecraft:water" | "minecraft:bubble_column" | "minecraft:kelp"
-                    | "minecraft:kelp_plant" | "minecraft:seagrass" | "minecraft:tall_seagrass" => 1,
+                    "minecraft:water"
+                    | "minecraft:bubble_column"
+                    | "minecraft:kelp"
+                    | "minecraft:kelp_plant"
+                    | "minecraft:seagrass"
+                    | "minecraft:tall_seagrass" => 1,
                     _ if pl.prop(s, "waterlogged") == Some("true") => 1,
                     _ => 0,
                 })
@@ -249,7 +274,11 @@ impl PlayPlan {
                     }
                     // `getCorrectStateForFluidBlock`: верх не держит — видна жидкость.
                     if !self.survival.placement.sturdy(s, 1) {
-                        color = if fluid_of(s) == 2 { LAVA_COLOR } else { crate::maps::WATER };
+                        color = if fluid_of(s) == 2 {
+                            LAVA_COLOR
+                        } else {
+                            crate::maps::WATER
+                        };
                     }
                 }
                 height += (min_y + y as i32) as f64 / (scale * scale) as f64;
@@ -299,7 +328,15 @@ impl PlayPlan {
             let players = self.hub.players.lock().unwrap();
             players
                 .values()
-                .map(|p| (p.entry.uuid, p.entry.name.clone(), p.pos, p.yaw, p.dimension))
+                .map(|p| {
+                    (
+                        p.entry.uuid,
+                        p.entry.name.clone(),
+                        p.pos,
+                        p.yaw,
+                        p.dimension,
+                    )
+                })
                 .collect()
         };
         let Some(&(_, _, my_pos, _, _)) = online.iter().find(|p| p.0 == uuid) else {
@@ -315,7 +352,10 @@ impl PlayPlan {
         let mut packets = Vec::new();
         for id in ids {
             let mut store = self.maps.lock().unwrap();
-            let carried: Vec<(Uuid, bool)> = online.iter().map(|p| (p.0, store.carries(p.0, id))).collect();
+            let carried: Vec<(Uuid, bool)> = online
+                .iter()
+                .map(|p| (p.0, store.carries(p.0, id)))
+                .collect();
             let Some(dim_key) = self.with_map(&mut store, id, |m| m.dimension.clone()) else {
                 continue;
             };
@@ -359,7 +399,11 @@ impl PlayPlan {
                         None => return None,
                     };
                     if ceiling {
-                        return Some(Sample { color: 0, height: 0.0, depth: 0 });
+                        return Some(Sample {
+                            color: 0,
+                            height: 0.0,
+                            depth: 0,
+                        });
                     }
                     corners.push((x, z));
                     Some(self.map_sample(col, x, z, scale))
@@ -395,7 +439,10 @@ impl PlayPlan {
         let mut packets = Vec::new();
         {
             let mut store = self.maps.lock().unwrap();
-            let carried: Vec<(Uuid, bool)> = online.iter().map(|p| (p.0, store.carries(p.0, id))).collect();
+            let carried: Vec<(Uuid, bool)> = online
+                .iter()
+                .map(|p| (p.0, store.carries(p.0, id)))
+                .collect();
             if self.with_map(&mut store, id, |_| ()).is_none() {
                 return;
             }
@@ -429,7 +476,11 @@ impl PlayPlan {
 
     /// `toggleBanner` у карты `id`: карты нет — успех без дела, знамени
     /// (`banner` = `None`) нет — отказ.
-    pub(super) fn toggle_map_banner(&self, id: i32, banner: Option<crate::maps::MapBanner>) -> bool {
+    pub(super) fn toggle_map_banner(
+        &self,
+        id: i32,
+        banner: Option<crate::maps::MapBanner>,
+    ) -> bool {
         let mut store = self.maps.lock().unwrap();
         match self.with_map(&mut store, id, |m| banner.map(|b| m.toggle_banner(b))) {
             None => true,
@@ -482,14 +533,19 @@ impl PlayPlan {
         };
         let mut failed = Vec::new();
         for (id, data) in &dirty {
-            if let Err(e) = chunkwake_world::nbt::write_gzip_file(&dir.join(format!("{id}.dat")), &wrap(data.clone())) {
+            if let Err(e) = chunkwake_world::nbt::write_gzip_file(
+                &dir.join(format!("{id}.dat")),
+                &wrap(data.clone()),
+            ) {
                 failed.push(*id);
                 tracing::warn!("map {id}: {e}");
             }
         }
         if let Some(last) = last {
             let data = Compound::from([("map".into(), Tag::Int(last))]);
-            if let Err(e) = chunkwake_world::nbt::write_gzip_file(&dir.join("last_id.dat"), &wrap(data)) {
+            if let Err(e) =
+                chunkwake_world::nbt::write_gzip_file(&dir.join("last_id.dat"), &wrap(data))
+            {
                 self.maps.lock().unwrap().last_id_dirty = true;
                 return Err(e);
             }
@@ -560,6 +616,12 @@ impl PlayPlan {
             }
             store.last_sound = now;
         }
-        self.block_sound(None, "minecraft:ui.cartography_table.take_result", pos, 1.0, 1.0);
+        self.block_sound(
+            None,
+            "minecraft:ui.cartography_table.take_result",
+            pos,
+            1.0,
+            1.0,
+        );
     }
 }

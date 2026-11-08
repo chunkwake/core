@@ -3,7 +3,7 @@
 //! Шалкеры и рамка с элитрами — сущности генерации, их не пишем; сундуки
 //! получают таблицу `end_city_treasure`.
 
-use super::template::{self, Bounds, Rot, Template, ROTS};
+use super::template::{self, Bounds, ROTS, Rot, Template};
 use super::{Bits, Legacy, Level, Palette};
 use crate::templates::Mirror;
 use std::collections::HashMap;
@@ -150,7 +150,7 @@ impl Builder<'_> {
             Some(t) => Arc::clone(t),
             None => {
                 self.missing = true;
-Arc::new(Template::empty())
+                Arc::new(Template::empty())
             }
         };
         let (min, max) = template::mirrored_bounds(origin, Mirror::None, rot, template.size);
@@ -275,7 +275,14 @@ Arc::new(Template::empty())
                 if let Some(bridge) = bridge {
                     for (brot, boff) in TOWER_BRIDGES {
                         if rng.next_bool() {
-                            let start = self.add(pieces, bridge, boff, "bridge_end", rotated(rot, brot), true);
+                            let start = self.add(
+                                pieces,
+                                bridge,
+                                boff,
+                                "bridge_end",
+                                rotated(rot, brot),
+                                true,
+                            );
                             self.recursive(Gen::TowerBridge, depth + 1, start, None, pieces, rng);
                         }
                     }
@@ -296,9 +303,23 @@ Arc::new(Template::empty())
                         next_y = 0;
                     } else {
                         if rng.next_bool() {
-                            last = self.add(pieces, last, [0, next_y, -4], "bridge_steep_stairs", rot, true);
+                            last = self.add(
+                                pieces,
+                                last,
+                                [0, next_y, -4],
+                                "bridge_steep_stairs",
+                                rot,
+                                true,
+                            );
                         } else {
-                            last = self.add(pieces, last, [0, next_y, -8], "bridge_gentle_stairs", rot, true);
+                            last = self.add(
+                                pieces,
+                                last,
+                                [0, next_y, -8],
+                                "bridge_gentle_stairs",
+                                rot,
+                                true,
+                            );
                         }
                         next_y = 4;
                     }
@@ -318,7 +339,14 @@ Arc::new(Template::empty())
                 ) {
                     return false;
                 }
-                let end = self.add(pieces, last, [4, next_y, 0], "bridge_end", rotated(rot, Rot::Cw180), true);
+                let end = self.add(
+                    pieces,
+                    last,
+                    [4, next_y, 0],
+                    "bridge_end",
+                    rotated(rot, Rot::Cw180),
+                    true,
+                );
                 self.arena[end].gen_depth = -1;
                 true
             }
@@ -330,7 +358,14 @@ Arc::new(Template::empty())
                     last = self.add(pieces, last, [0, 8, 0], "fat_tower_middle", rot, true);
                     for (brot, boff) in FAT_TOWER_BRIDGES {
                         if rng.next_bool() {
-                            let start = self.add(pieces, last, boff, "bridge_end", rotated(rot, brot), true);
+                            let start = self.add(
+                                pieces,
+                                last,
+                                boff,
+                                "bridge_end",
+                                rotated(rot, brot),
+                                true,
+                            );
                             self.recursive(Gen::TowerBridge, depth + 1, start, None, pieces, rng);
                         }
                     }

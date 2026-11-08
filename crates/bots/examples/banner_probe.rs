@@ -21,7 +21,11 @@ fn pack(p: [i32; 3]) -> i64 {
 }
 
 fn unpack(v: i64) -> [i32; 3] {
-    [(v >> 38) as i32, (v << 52 >> 52) as i32, (v << 26 >> 38) as i32]
+    [
+        (v >> 38) as i32,
+        (v << 52 >> 52) as i32,
+        (v << 26 >> 38) as i32,
+    ]
 }
 
 fn hex(b: &[u8]) -> String {
@@ -40,7 +44,9 @@ struct Probe {
 
 impl Probe {
     fn sb(&self, n: &str) -> i32 {
-        self.table.id(State::Play, Direction::Serverbound, n).unwrap()
+        self.table
+            .id(State::Play, Direction::Serverbound, n)
+            .unwrap()
     }
 
     async fn pump(&mut self, ms: u64) {
@@ -60,7 +66,8 @@ impl Probe {
                 let p = unpack(r.i64().unwrap());
                 if p == RED || p == WHITE {
                     let t = r.var_int().unwrap();
-                    self.log.push(format!("be {p:?} type {t} {}", hex(r.remaining())));
+                    self.log
+                        .push(format!("be {p:?} type {t} {}", hex(r.remaining())));
                 }
             }
             "map_item_data" => {
@@ -73,7 +80,11 @@ impl Probe {
                 let mut out = Vec::new();
                 for _ in 0..n {
                     let t = r.var_int().unwrap();
-                    let (x, z, rot) = (r.u8().unwrap() as i8, r.u8().unwrap() as i8, r.u8().unwrap());
+                    let (x, z, rot) = (
+                        r.u8().unwrap() as i8,
+                        r.u8().unwrap() as i8,
+                        r.u8().unwrap(),
+                    );
                     // Игрок (0) и его стрелка за краем (6) — не про знамёна.
                     let name = if r.bool().unwrap() {
                         // Имя — корневой NBT-текст: строка (`8`, длина, байты).
@@ -124,7 +135,11 @@ impl Probe {
     async fn use_item(&mut self) {
         self.seq += 1;
         let mut w = Writer::new();
-        w.var_int(self.sb("use_item")).var_int(0).var_int(self.seq).f32(0.0).f32(0.0);
+        w.var_int(self.sb("use_item"))
+            .var_int(0)
+            .var_int(self.seq)
+            .f32(0.0)
+            .f32(0.0);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(400).await;
     }
@@ -132,7 +147,16 @@ impl Probe {
     async fn use_on(&mut self, p: [i32; 3], face: i32) {
         self.seq += 1;
         let mut w = Writer::new();
-        w.var_int(self.sb("use_item_on")).var_int(0).i64(pack(p)).var_int(face).f32(0.5).f32(0.5).f32(0.5).u8(0).u8(0).var_int(self.seq);
+        w.var_int(self.sb("use_item_on"))
+            .var_int(0)
+            .i64(pack(p))
+            .var_int(face)
+            .f32(0.5)
+            .f32(0.5)
+            .f32(0.5)
+            .u8(0)
+            .u8(0)
+            .var_int(self.seq);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(400).await;
     }
@@ -147,7 +171,9 @@ async fn main() {
     let a: Vec<String> = std::env::args().collect();
     let table = PacketTable::load(a[2].as_ref()).unwrap();
     let ids = Ids::load(&table).unwrap();
-    let mut c = Client::connect(&a[1], "framer", ids, 777, "26.3").await.unwrap();
+    let mut c = Client::connect(&a[1], "framer", ids, 777, "26.3")
+        .await
+        .unwrap();
     let mut cb = HashMap::new();
     for n in ["block_entity_data", "map_item_data", "container_set_slot"] {
         let id = table.id(State::Play, Direction::Clientbound, n).unwrap();
@@ -159,7 +185,14 @@ async fn main() {
             break;
         }
     }
-    let mut p = Probe { c, table, seq: 0, cb, log: Vec::new(), last_deco: String::new() };
+    let mut p = Probe {
+        c,
+        table,
+        seq: 0,
+        cb,
+        log: Vec::new(),
+        last_deco: String::new(),
+    };
     p.pump(2000).await;
     for s in [
         "gamemode survival",

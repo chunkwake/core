@@ -182,7 +182,10 @@ fn previous_files(dir: &Path) -> (PathBuf, HashMap<String, (String, u64)>) {
         .flatten()
         .filter_map(|e| {
             let path = e["path"].as_str()?.to_owned();
-            Some((path, (e["sha256"].as_str()?.to_owned(), e["size"].as_u64()?)))
+            Some((
+                path,
+                (e["sha256"].as_str()?.to_owned(), e["size"].as_u64()?),
+            ))
         })
         .collect();
     (backup_dir(dir).join(id), files)
@@ -644,7 +647,10 @@ mod tests {
         assert_eq!(fs::read(file(&second, player)).unwrap(), b"damaged");
         // Изменённый файл — своя копия.
         fs::write(file(&first, "plugins/TestPlugin/config.yml"), b"x").unwrap();
-        assert_eq!(fs::read(file(&second, "plugins/TestPlugin/config.yml")).unwrap(), b"changed");
+        assert_eq!(
+            fs::read(file(&second, "plugins/TestPlugin/config.yml")).unwrap(),
+            b"changed"
+        );
         // Испорченная прошлая копия не наследуется: третий бэкап копирует.
         fs::write(file(&second, player), &before).unwrap();
         fs::write(file(&first, player), b"damaged again").unwrap();

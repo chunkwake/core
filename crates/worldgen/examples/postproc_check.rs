@@ -28,7 +28,13 @@ fn main() -> Result<(), String> {
         .synchronized
         .iter()
         .find(|r| r.name == "worldgen/biome")
-        .map(|r| r.entries.iter().enumerate().map(|(i, n)| (n.clone(), i as u32)).collect())
+        .map(|r| {
+            r.entries
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.clone(), i as u32))
+                .collect()
+        })
         .unwrap_or_default();
     let mut noise = Generator::load_with_version(data, seed, None)?;
     noise.bind_biomes(biomes.clone());
@@ -64,7 +70,11 @@ fn main() -> Result<(), String> {
                     let Tag::Short(p) = t else { continue };
                     let p = *p as i32;
                     let sy = min_y / 16 + i as i32;
-                    want.insert([cx * 16 + (p & 15), sy * 16 + (p >> 4 & 15), cz * 16 + (p >> 8 & 15)]);
+                    want.insert([
+                        cx * 16 + (p & 15),
+                        sy * 16 + (p >> 4 & 15),
+                        cz * 16 + (p >> 8 & 15),
+                    ]);
                 }
             }
             let ours = overworld.terrain_for_test(cx, cz);

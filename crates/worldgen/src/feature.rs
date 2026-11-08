@@ -287,9 +287,10 @@ fn frozen_noise(x: f64, z: f64) -> f32 {
         ]
     });
     let mut value = 0.0f32;
-    for (noise, (freq, amp)) in layers
-        .iter()
-        .zip([(1.0, 0.14285715f32), (0.5, 0.2857143), (0.25, 0.5714286)])
+    for (noise, (freq, amp)) in
+        layers
+            .iter()
+            .zip([(1.0, 0.14285715f32), (0.5, 0.2857143), (0.25, 0.5714286)])
     {
         value += amp * noise.get(x * freq, z * freq);
     }
@@ -315,10 +316,8 @@ pub(crate) fn temperature(climate: &[Climate], biome: u32, pos: [i32; 3], sea_le
     }
     let snow_level = sea_level + 17;
     if pos[1] > snow_level {
-        let v = temperature_noise().get(
-            (pos[0] as f32 / 8.0) as f64,
-            (pos[2] as f32 / 8.0) as f64,
-        ) * 8.0;
+        let v = temperature_noise().get((pos[0] as f32 / 8.0) as f64, (pos[2] as f32 / 8.0) as f64)
+            * 8.0;
         t - (v + pos[1] as f32 - snow_level as f32) * 0.05 / 40.0
     } else {
         t
@@ -326,7 +325,12 @@ pub(crate) fn temperature(climate: &[Climate], biome: u32, pos: [i32; 3], sea_le
 }
 
 /// `Biome.coldEnoughToSnow`.
-pub(crate) fn cold_enough_to_snow(climate: &[Climate], biome: u32, pos: [i32; 3], sea_level: i32) -> bool {
+pub(crate) fn cold_enough_to_snow(
+    climate: &[Climate],
+    biome: u32,
+    pos: [i32; 3],
+    sea_level: i32,
+) -> bool {
     !(temperature(climate, biome, pos, sea_level) >= 0.15)
 }
 
@@ -348,21 +352,41 @@ struct Support {
 impl Palette {
     /// Приблизительный размер таблиц; общий Arc учитывается в каждом измерении.
     pub fn heap_bytes(&self) -> usize {
-        let props = self.props.iter().map(|row| {
-            row.capacity() * std::mem::size_of::<(String, String)>()
-                + row.iter().map(|(k, v)| k.capacity() + v.capacity()).sum::<usize>()
-        }).sum::<usize>();
-        let blocks = self.blocks.iter().map(|(name, (_, states))| {
-            name.capacity() + states.capacity() * 4
-        }).sum::<usize>();
-        props + blocks + self.block_of.capacity() * 4
+        let props = self
+            .props
+            .iter()
+            .map(|row| {
+                row.capacity() * std::mem::size_of::<(String, String)>()
+                    + row
+                        .iter()
+                        .map(|(k, v)| k.capacity() + v.capacity())
+                        .sum::<usize>()
+            })
+            .sum::<usize>();
+        let blocks = self
+            .blocks
+            .iter()
+            .map(|(name, (_, states))| name.capacity() + states.capacity() * 4)
+            .sum::<usize>();
+        props
+            + blocks
+            + self.block_of.capacity() * 4
             + self.block_names.iter().map(String::capacity).sum::<usize>()
-            + self.by_block.iter().map(|v| v.capacity() * 4).sum::<usize>()
+            + self
+                .by_block
+                .iter()
+                .map(|v| v.capacity() * 4)
+                .sum::<usize>()
             + self.defaults.keys().map(String::capacity).sum::<usize>()
             + self.tags.values().map(|v| v.capacity()).sum::<usize>()
-            + self.air.capacity() + self.solid.capacity() + self.replaceable.capacity()
-            + self.liquid.capacity() + self.full_cube.capacity() + self.center_down.capacity()
-            + self.sturdy.capacity() + self.survive.capacity() * std::mem::size_of::<Survive>()
+            + self.air.capacity()
+            + self.solid.capacity()
+            + self.replaceable.capacity()
+            + self.liquid.capacity()
+            + self.full_cube.capacity()
+            + self.center_down.capacity()
+            + self.sturdy.capacity()
+            + self.survive.capacity() * std::mem::size_of::<Survive>()
     }
 
     /// `states` — по ID состояния имя блока и свойства (как в реестре сервера);
@@ -428,7 +452,12 @@ impl Palette {
             world_seed: 0,
             climate: Arc::new(Vec::new()),
         };
-        p.layouts = Arc::new(p.by_block.iter().map(|list| state_layout(list, &p.props)).collect());
+        p.layouts = Arc::new(
+            p.by_block
+                .iter()
+                .map(|list| state_layout(list, &p.props))
+                .collect(),
+        );
         for name in ["minecraft:air", "minecraft:cave_air", "minecraft:void_air"] {
             for s in p.states_of(name) {
                 Arc::make_mut(&mut p.air)[s as usize] = true;
@@ -474,7 +503,8 @@ impl Palette {
         }
         // `reports/shapes.csv`: коробки коллизии через `|` после трёх чисел.
         // `getBlockSupportShape` совпадает с коллизией, кроме листвы (пусто).
-        let shapes = std::fs::read_to_string(data_dir.join("reports/shapes.csv")).unwrap_or_default();
+        let shapes =
+            std::fs::read_to_string(data_dir.join("reports/shapes.csv")).unwrap_or_default();
         let leaves = p.tag("minecraft:leaves").unwrap_or_default();
         for (id, line) in shapes.lines().enumerate().take(n) {
             if leaves.get(id).copied().unwrap_or(false) {
@@ -515,9 +545,16 @@ impl Palette {
             .iter()
             .enumerate()
             .filter(|(i, _)| {
-                p.by_block[*i].first().is_some_and(|&s| p.survive[s as usize] == Survive::OwnTag)
+                p.by_block[*i]
+                    .first()
+                    .is_some_and(|&s| p.survive[s as usize] == Survive::OwnTag)
             })
-            .map(|(i, name)| (i as u32, name.replacen("minecraft:", "minecraft:supports_", 1)))
+            .map(|(i, name)| {
+                (
+                    i as u32,
+                    name.replacen("minecraft:", "minecraft:supports_", 1),
+                )
+            })
             .collect();
         for (block, tag_name) in own {
             let t = p.tag(&tag_name).unwrap_or_default();
@@ -604,7 +641,10 @@ impl Palette {
     /// `isFaceSturdy(dir)`, `dir` в порядке `Direction`.
     /// `Block.canSupportCenter(level, pos, DOWN)`.
     pub fn supports_center_below(&self, state: u32) -> bool {
-        self.center_down.get(state as usize).copied().unwrap_or(false)
+        self.center_down
+            .get(state as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     pub fn sturdy(&self, state: u32, dir: usize) -> bool {
@@ -918,12 +958,13 @@ enum Feature {
     Chorus(Arc<end::Blocks>),
 }
 
+pub(crate) mod end;
+pub(crate) mod end_city;
+mod fortress;
 pub(crate) mod mansion;
 pub(crate) mod mineshaft;
-pub(crate) mod end;
-mod fortress;
-mod nether;
 pub(crate) mod monument;
+mod nether;
 pub(crate) mod ocean_ruin;
 pub(crate) mod portal;
 mod pyramid;
@@ -932,7 +973,6 @@ pub(crate) mod stronghold;
 pub(crate) mod structure;
 mod template;
 mod treasure;
-pub(crate) mod end_city;
 pub(crate) use template::{load_public, place_public, size_public};
 
 fn full_cube_shape(shape: &str) -> bool {
@@ -1162,7 +1202,12 @@ impl RuntimeTrees {
         min_y: i32,
         height: i32,
     ) -> Result<Self, String> {
-        Self::load_with_palette(data_dir, Palette::new(data_dir, states, default), min_y, height)
+        Self::load_with_palette(
+            data_dir,
+            Palette::new(data_dir, states, default),
+            min_y,
+            height,
+        )
     }
 
     pub fn load_with_palette(
@@ -1179,10 +1224,24 @@ impl RuntimeTrees {
             serde_json::from_slice(&bytes).map_err(|e| format!("{dir} {name}: {e}"))
         };
         const NAMES: &[&str] = &[
-            "oak", "fancy_oak", "spruce", "pine", "mega_spruce", "mega_pine",
-            "birch", "jungle_tree", "mega_jungle_tree", "acacia", "dark_oak",
-            "cherry", "pale_oak_bonemeal", "mangrove", "tall_mangrove",
-            "red_poplar", "orange_poplar", "yellow_poplar",
+            "oak",
+            "fancy_oak",
+            "spruce",
+            "pine",
+            "mega_spruce",
+            "mega_pine",
+            "birch",
+            "jungle_tree",
+            "mega_jungle_tree",
+            "acacia",
+            "dark_oak",
+            "cherry",
+            "pale_oak_bonemeal",
+            "mangrove",
+            "tall_mangrove",
+            "red_poplar",
+            "orange_poplar",
+            "yellow_poplar",
         ];
         let mut trees = HashMap::new();
         for &name in NAMES {
@@ -1195,15 +1254,24 @@ impl RuntimeTrees {
         }
         Ok(Self {
             features: Features {
-                steps: Vec::new(), by_biome: HashMap::new(), has: HashMap::new(),
-                failures: Vec::new(), names: Vec::new(), palette, seed: 0, min_y, structures: None,
+                steps: Vec::new(),
+                by_biome: HashMap::new(),
+                has: HashMap::new(),
+                failures: Vec::new(),
+                names: Vec::new(),
+                palette,
+                seed: 0,
+                min_y,
+                structures: None,
             },
             trees,
         })
     }
 
     pub fn place(&self, name: &str, level: &mut dyn Level, origin: [i32; 3], seed: i64) -> bool {
-        let Some(Feature::Tree(tree)) = self.trees.get(name) else { return false };
+        let Some(Feature::Tree(tree)) = self.trees.get(name) else {
+            return false;
+        };
         tree.place(&self.features, level, &mut Worldgen::new(seed), origin)
     }
 }
@@ -1313,10 +1381,15 @@ impl Features {
             }
             by_biome.insert(*id, per);
         }
-        let structures =
-            structure::Structures::load(
-                data_dir, &mut palette, biome_order, biome_ids, &read, min_y, height,
-            )?;
+        let structures = structure::Structures::load(
+            data_dir,
+            &mut palette,
+            biome_order,
+            biome_ids,
+            &read,
+            min_y,
+            height,
+        )?;
         failures.extend(structures.failures().iter().cloned());
         Ok(Self {
             steps,
@@ -1363,8 +1436,7 @@ impl Features {
         for step in 0..self.steps.len().min(DECORATION_STEPS) {
             // Куски структур шага пишутся до его фич (крепость Ада — шаг 7,
             // `underground_decoration`). У каждой структуры свой `setFeatureSeed`.
-            if let (Some(structures), Some(columns)) = (&self.structures, columns)
-            {
+            if let (Some(structures), Some(columns)) = (&self.structures, columns) {
                 structures.place(self, level, cx, cz, columns, &mut r, seed, step as i32);
             }
             let t_step = prof.then(Instant::now);
@@ -1449,7 +1521,8 @@ impl Features {
         let mut seen = 0;
         for y in (level.min_y() + 1..=top).rev() {
             let below = level.get(x, y - 1, z);
-            if !empty(below) && empty(current) && pal.block_name(below) != Some("minecraft:bedrock") {
+            if !empty(below) && empty(current) && pal.block_name(below) != Some("minecraft:bedrock")
+            {
                 if seen == layer {
                     return Some(y);
                 }
@@ -2369,7 +2442,10 @@ pub(crate) fn bubble_columns(pal: &Palette, states: &mut [u32]) {
                 continue;
             };
             let mut at = y + 1;
-            while at < height && (states[at * 256 + i] == water || pal.block_name(states[at * 256 + i]) == Some("minecraft:bubble_column")) {
+            while at < height
+                && (states[at * 256 + i] == water
+                    || pal.block_name(states[at * 256 + i]) == Some("minecraft:bubble_column"))
+            {
                 states[at * 256 + i] = fill;
                 at += 1;
             }
@@ -3338,9 +3414,9 @@ fn parse_feature(
                 v, palette, block, cap,
             )?)))
         }
-        "minecraft:delta_feature" => Ok(Feature::Delta(Arc::new(nether::Delta::parse(
-            v, palette,
-        )?))),
+        "minecraft:delta_feature" => {
+            Ok(Feature::Delta(Arc::new(nether::Delta::parse(v, palette)?)))
+        }
         "minecraft:stepped_column_cluster" => {
             let block = Provider::parse(&v["block"], read, palette)?;
             Ok(Feature::ColumnCluster(Arc::new(
@@ -3362,9 +3438,9 @@ fn parse_feature(
                 nether::PatchySquare::parse(v, palette, block)?,
             )))
         }
-        "minecraft:huge_fungus" => Ok(Feature::HugeFungus(Arc::new(
-            nether::HugeFungus::parse(v, palette)?,
-        ))),
+        "minecraft:huge_fungus" => Ok(Feature::HugeFungus(Arc::new(nether::HugeFungus::parse(
+            v, palette,
+        )?))),
         "minecraft:end_island" => Ok(Feature::EndIsland(end::Blocks::load(palette)?)),
         "minecraft:end_platform" => Ok(Feature::EndPlatform(end::Blocks::load(palette)?)),
         "minecraft:end_gateway" => Ok(Feature::EndGateway(
@@ -3526,7 +3602,11 @@ mod tests {
         let state = |n: &str| blocks.default_state(n).ok().map(|s| s as u32);
         let pal = Palette::new(&data, &blocks.states(), &state);
         let laid = pal.layouts.iter().filter(|l| l.is_some()).count();
-        assert!(laid * 10 > pal.layouts.len() * 9, "раскладок {laid} из {}", pal.layouts.len());
+        assert!(
+            laid * 10 > pal.layouts.len() * 9,
+            "раскладок {laid} из {}",
+            pal.layouts.len()
+        );
         for (b, list) in pal.by_block.iter().enumerate() {
             let Some(layout) = &pal.layouts[b] else {
                 continue;
@@ -3534,7 +3614,11 @@ mod tests {
             for &s in list {
                 for (key, values, _) in layout {
                     for v in values.iter().map(String::as_str).chain(["nope"]) {
-                        assert_eq!(pal.with_prop(s, key, v), pal.with_prop_scan(s, key, v), "{s} {key}={v}");
+                        assert_eq!(
+                            pal.with_prop(s, key, v),
+                            pal.with_prop_scan(s, key, v),
+                            "{s} {key}={v}"
+                        );
                     }
                 }
             }
@@ -3663,19 +3747,34 @@ mod tests {
             placed: HashMap<[i32; 3], u32>,
         }
         impl Level for Flat {
-            fn min_y(&self) -> i32 { -64 }
-            fn height(&self) -> i32 { 384 }
+            fn min_y(&self) -> i32 {
+                -64
+            }
+            fn height(&self) -> i32 {
+                384
+            }
             fn get(&self, x: i32, y: i32, z: i32) -> u32 {
-                self.placed.get(&[x, y, z]).copied()
-                    .unwrap_or(if y == 63 { self.dirt } else { self.air })
+                self.placed.get(&[x, y, z]).copied().unwrap_or(if y == 63 {
+                    self.dirt
+                } else {
+                    self.air
+                })
             }
             fn set(&mut self, x: i32, y: i32, z: i32, value: u32) {
                 self.placed.insert([x, y, z], value);
             }
-            fn can_write(&self, _x: i32, _z: i32) -> bool { true }
-            fn surface(&self, _kind: Heightmap, _x: i32, _z: i32) -> i32 { 64 }
-            fn sea_level(&self) -> i32 { 63 }
-            fn biome(&self, _x: i32, _y: i32, _z: i32) -> u32 { 0 }
+            fn can_write(&self, _x: i32, _z: i32) -> bool {
+                true
+            }
+            fn surface(&self, _kind: Heightmap, _x: i32, _z: i32) -> i32 {
+                64
+            }
+            fn sea_level(&self) -> i32 {
+                63
+            }
+            fn biome(&self, _x: i32, _y: i32, _z: i32) -> u32 {
+                0
+            }
         }
         let mut level = Flat {
             air: state("minecraft:air").unwrap(),
@@ -3683,7 +3782,17 @@ mod tests {
             placed: HashMap::new(),
         };
         assert!(trees.place("oak", &mut level, [0, 64, 0], 12345));
-        assert!(level.placed.values().any(|&s| trees.features.palette.block_name(s) == Some("minecraft:oak_log")));
-        assert!(level.placed.values().any(|&s| trees.features.palette.block_name(s) == Some("minecraft:oak_leaves")));
+        assert!(
+            level
+                .placed
+                .values()
+                .any(|&s| trees.features.palette.block_name(s) == Some("minecraft:oak_log"))
+        );
+        assert!(
+            level
+                .placed
+                .values()
+                .any(|&s| trees.features.palette.block_name(s) == Some("minecraft:oak_leaves"))
+        );
     }
 }

@@ -41,9 +41,19 @@ fn main() {
 /// Каталог измерения, настройки шума, блок и жидкость по умолчанию.
 fn dim() -> (&'static str, &'static str, &'static str, &'static str) {
     if std::env::var("CHUNKWAKE_DIM").as_deref() == Ok("end") {
-        ("the_end", "minecraft:end", "minecraft:end_stone", "minecraft:air")
+        (
+            "the_end",
+            "minecraft:end",
+            "minecraft:end_stone",
+            "minecraft:air",
+        )
     } else {
-        ("the_nether", "minecraft:nether", "minecraft:netherrack", "minecraft:lava")
+        (
+            "the_nether",
+            "minecraft:nether",
+            "minecraft:netherrack",
+            "minecraft:lava",
+        )
     }
 }
 
@@ -134,7 +144,10 @@ fn compare(regions: &Path, data: &Path, seed: i64, radius: i32) -> Result<(), St
             let (name, at) = item.split_once('@').unwrap_or((item, "0:0"));
             let (x, z) = at.split_once(':').unwrap_or(("0", "0"));
             let origin = [x.parse().unwrap_or(0), 64, z.parse().unwrap_or(0)];
-            println!("{name} от {origin:?}: {:?}", world.locate_structure(name, origin));
+            println!(
+                "{name} от {origin:?}: {:?}",
+                world.locate_structure(name, origin)
+            );
         }
     }
     let names = FileNames {
@@ -191,7 +204,12 @@ fn compare(regions: &Path, data: &Path, seed: i64, radius: i32) -> Result<(), St
                     .and_then(|c| c.get("Children"))
                     .and_then(|t| t.as_list())
                     .unwrap_or(&[]);
-                if start.as_compound().and_then(|c| c.get("id")).and_then(|t| t.as_str()) == Some("INVALID") {
+                if start
+                    .as_compound()
+                    .and_then(|c| c.get("id"))
+                    .and_then(|t| t.as_str())
+                    == Some("INVALID")
+                {
                     continue;
                 }
                 let first = pieces
@@ -200,14 +218,28 @@ fn compare(regions: &Path, data: &Path, seed: i64, radius: i32) -> Result<(), St
                     .and_then(|p| p.get("BB"))
                     .and_then(|t| t.as_int_array())
                     .map(|b| b.to_vec());
-                println!("старт {name} в ({cx},{cz}): кусков {}, первый {:?}", pieces.len(), first);
+                println!(
+                    "старт {name} в ({cx},{cz}): кусков {}, первый {:?}",
+                    pieces.len(),
+                    first
+                );
                 if std::env::var("CHUNKWAKE_PIECES").ok() == Some(format!("{cx},{cz}")) {
                     for (i, p) in pieces.iter().enumerate() {
                         let p = p.as_compound();
-                        let bb = p.and_then(|p| p.get("BB")).and_then(|t| t.as_int_array()).map(|b| b.to_vec());
-                        let rot = p.and_then(|p| p.get("rotation")).and_then(|t| t.as_str()).unwrap_or("");
-                        let el = p.and_then(|p| p.get("pool_element")).and_then(|t| t.as_compound())
-                            .and_then(|e| e.get("location")).and_then(|t| t.as_str()).unwrap_or("");
+                        let bb = p
+                            .and_then(|p| p.get("BB"))
+                            .and_then(|t| t.as_int_array())
+                            .map(|b| b.to_vec());
+                        let rot = p
+                            .and_then(|p| p.get("rotation"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
+                        let el = p
+                            .and_then(|p| p.get("pool_element"))
+                            .and_then(|t| t.as_compound())
+                            .and_then(|e| e.get("location"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
                         println!("ванильный кусок {i}: {bb:?} {rot} {el}");
                     }
                 }
@@ -244,7 +276,12 @@ fn compare(regions: &Path, data: &Path, seed: i64, radius: i32) -> Result<(), St
             continue;
         };
         if let Some(other) = &other {
-            let Some(nbt) = other.load_region(cx >> 5, cz >> 5)?.into_iter().find(|(p, _)| *p == (cx, cz)).map(|(_, r)| r) else {
+            let Some(nbt) = other
+                .load_region(cx >> 5, cz >> 5)?
+                .into_iter()
+                .find(|(p, _)| *p == (cx, cz))
+                .map(|(_, r)| r)
+            else {
                 continue;
             };
             let (col, _) = anvil::chunk_from_nbt(&nbt, &template, format, &names)?;
@@ -262,7 +299,9 @@ fn compare(regions: &Path, data: &Path, seed: i64, radius: i32) -> Result<(), St
         if let Some(cells) = &ours.biomes {
             for (i, &b) in cells.iter().enumerate() {
                 let (qy, qz, qx) = (i / 16, (i / 4) % 4, i % 4);
-                let Some(sec) = want.sections.get(qy / 4) else { continue };
+                let Some(sec) = want.sections.get(qy / 4) else {
+                    continue;
+                };
                 let v = sec.biome_at(qx, qy % 4, qz);
                 if v != b {
                     let n = |id| BiomeNames(&biomes).name(id);
@@ -279,11 +318,12 @@ fn compare(regions: &Path, data: &Path, seed: i64, radius: i32) -> Result<(), St
                     let a = short(ours.states[(y * 16 + z) * 16 + x]);
                     let b = short(want.block(x, y, z));
                     // Текущая жидкость — тики живого сервера, не генерация.
-                    let flowing = names
-                        .block_name(want.block(x, y, z))
-                        .is_some_and(|(_, props)| {
-                            props.iter().any(|(k, v)| k == "level" && v != "0")
-                        });
+                    let flowing =
+                        names
+                            .block_name(want.block(x, y, z))
+                            .is_some_and(|(_, props)| {
+                                props.iter().any(|(k, v)| k == "level" && v != "0")
+                            });
                     if a != b && flowing && a == "air" {
                         flows += 1;
                         continue;
@@ -354,23 +394,23 @@ fn compare(regions: &Path, data: &Path, seed: i64, radius: i32) -> Result<(), St
             }
         };
         for x in x0..=x1 {
-        println!("x={x}");
-        for y in (y0..=y1).rev() {
-            let mut a = String::new();
-            let mut b = String::new();
-            for z in z0..=z1 {
-                let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
-                let (lx, lz) = (x.rem_euclid(16) as usize, z.rem_euclid(16) as usize);
-                let ry = (y - min_y) as usize;
-                let ours = got.get(&(cx, cz));
-                a.push(ours.map_or(' ', |c| glyph(short(c[(ry * 16 + lz) * 16 + lx]))));
-                let theirs = chunks
-                    .get(&(cx, cz))
-                    .and_then(|nbt| anvil::chunk_from_nbt(nbt, &template, format, &names).ok());
-                b.push(theirs.map_or(' ', |(c, _)| glyph(short(c.block(lx, ry, lz)))));
+            println!("x={x}");
+            for y in (y0..=y1).rev() {
+                let mut a = String::new();
+                let mut b = String::new();
+                for z in z0..=z1 {
+                    let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+                    let (lx, lz) = (x.rem_euclid(16) as usize, z.rem_euclid(16) as usize);
+                    let ry = (y - min_y) as usize;
+                    let ours = got.get(&(cx, cz));
+                    a.push(ours.map_or(' ', |c| glyph(short(c[(ry * 16 + lz) * 16 + lx]))));
+                    let theirs = chunks
+                        .get(&(cx, cz))
+                        .and_then(|nbt| anvil::chunk_from_nbt(nbt, &template, format, &names).ok());
+                    b.push(theirs.map_or(' ', |(c, _)| glyph(short(c.block(lx, ry, lz)))));
+                }
+                println!("{y:>4} {a} | {b}");
             }
-            println!("{y:>4} {a} | {b}");
-        }
         }
     }
     let mut top: Vec<_> = pairs.into_iter().collect();
@@ -390,7 +430,10 @@ fn compare(regions: &Path, data: &Path, seed: i64, radius: i32) -> Result<(), St
     for ((a, b), n) in bp.iter().take(10) {
         println!("    {n:6}  биом наш {a:22} ваниль {b}");
     }
-    println!("клеток биомов расходится {}", bp.iter().map(|p| p.1).sum::<usize>());
+    println!(
+        "клеток биомов расходится {}",
+        bp.iter().map(|p| p.1).sum::<usize>()
+    );
     Ok(())
 }
 
@@ -424,6 +467,11 @@ struct BiomeNames<'a>(&'a HashMap<String, u32>);
 
 impl BiomeNames<'_> {
     fn name(&self, id: u32) -> String {
-        self.0.iter().find(|(_, v)| **v == id).map_or("?".into(), |(k, _)| k.trim_start_matches("minecraft:").to_owned())
+        self.0
+            .iter()
+            .find(|(_, v)| **v == id)
+            .map_or("?".into(), |(k, _)| {
+                k.trim_start_matches("minecraft:").to_owned()
+            })
     }
 }

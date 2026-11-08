@@ -191,7 +191,10 @@ pub fn to_nbt(s: &PlayerSave, data_version: i32, names: &[String]) -> Compound {
         ]);
         root.insert("respawn".into(), Tag::Compound(respawn));
     }
-    root.insert("seenCredits".into(), Tag::Byte(u8::from(s.seen_credits) as i8));
+    root.insert(
+        "seenCredits".into(),
+        Tag::Byte(u8::from(s.seen_credits) as i8),
+    );
     root
 }
 
@@ -220,7 +223,10 @@ fn spawn_from(root: &Compound) -> SavedSpawn {
         };
         return SavedSpawn {
             pos,
-            forced: r.get("forced").and_then(Tag::as_i64).is_some_and(|v| v != 0),
+            forced: r
+                .get("forced")
+                .and_then(Tag::as_i64)
+                .is_some_and(|v| v != 0),
             dimension,
             angle: [f("yaw"), f("pitch")],
         };
@@ -423,14 +429,20 @@ mod tests {
         let respawn = root["respawn"].as_compound().unwrap();
         assert_eq!(respawn["forced"].as_i64(), Some(0));
         assert_eq!(respawn["pos"], Tag::IntArray(vec![8, 64, -2]));
-        assert_eq!(respawn["dimension"], Tag::String("minecraft:the_nether".into()));
+        assert_eq!(
+            respawn["dimension"],
+            Tag::String("minecraft:the_nether".into())
+        );
         let mut forced = s.clone();
         forced.spawn_forced = true;
         forced.spawn_dimension = None;
         let forced_root = to_nbt(&forced, 4000, &names);
         let respawn = forced_root["respawn"].as_compound().unwrap();
         assert_eq!(respawn["forced"].as_i64(), Some(1));
-        assert_eq!(respawn["dimension"], Tag::String("minecraft:overworld".into()));
+        assert_eq!(
+            respawn["dimension"],
+            Tag::String("minecraft:overworld".into())
+        );
         assert_eq!(from_nbt(&forced_root, &ids), Some(forced));
         // Старые ключи до 1.21.5: без `SpawnForced` точка принудительная.
         let mut legacy = root.clone();

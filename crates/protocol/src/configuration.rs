@@ -95,6 +95,73 @@ pub fn finish_configuration(id: i32) -> Vec<u8> {
     w.buf
 }
 
+/// Настройки клиента (`ClientInformation`): приходят в configuration и в play.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientInfo {
+    /// Запрошенная дальность обзора в чанках (`requestedViewDistance`).
+    pub view_distance: u8,
+    /// Видимые части скина (`modelCustomisation`): бит 0 — плащ, 6 — шляпа.
+    pub skin_parts: u8,
+    /// Основная рука: `HumanoidArm` 0 — левая, 1 — правая.
+    pub main_hand: u8,
+    pub allows_listing: bool,
+}
+
+impl ClientInfo {
+    /// `PlayerModelPart.HAT`: бит 6.
+    pub const HAT: u8 = 1 << 6;
+
+    /// `ClientInformation.createDefault`: обзор 2, скин скрыт, правая рука.
+    pub const DEFAULT: Self = Self {
+        view_distance: 2,
+        skin_parts: 0,
+        main_hand: 1,
+        allows_listing: false,
+    };
+
+    pub fn shows_hat(&self) -> bool {
+        self.skin_parts & Self::HAT != 0
+    }
+}
+
+/// Тело `client_information` после ID (`ClientInformation(FriendlyByteBuf)`):
+/// язык (до 16 символов), обзор, видимость чата, цвета чата, части скина,
+/// рука, фильтр текста, показ в списке, частицы.
+pub fn read_client_information(r: &mut Reader) -> Result<ClientInfo> {
+    let _language = r.string(16)?;
+    let view_distance = r.u8()?;
+    let _chat_visibility = r.var_int()?;
+    let _chat_colors = r.bool()?;
+    let skin_parts = r.u8()?;
+    let main_hand = r.var_int()?.clamp(0, 1) as u8;
+    let _text_filtering = r.bool()?;
+    let allows_listing = r.bool()?;
+    let _particles = r.var_int()?;
+    Ok(ClientInfo {
+        view_distance,
+        skin_parts,
+        main_hand,
+        allows_listing,
+    })
+}
+
+/// `client_information` клиента (для ботов): язык `en_us`, чат виден и цветной,
+/// фильтра текста нет, частицы все.
+pub fn client_information(id: i32, info: &ClientInfo) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .string("en_us")
+        .u8(info.view_distance)
+        .var_int(0)
+        .bool(true)
+        .u8(info.skin_parts)
+        .var_int(i32::from(info.main_hand))
+        .bool(false)
+        .bool(info.allows_listing)
+        .var_int(0);
+    w.buf
+}
+
 /// Disconnect в configuration/play: причина — текстовый компонент в сетевом NBT.
 /// Простой текст кодируется как корневой TAG_String.
 pub fn disconnect(id: i32, text: &str) -> Vec<u8> {
@@ -166,5 +233,22 @@ mod tests {
         let buf = disconnect(2, "hi\0");
         assert_eq!(buf, [2, 8, 0, 4, b'h', b'i', 0xc0, 0x80]);
         assert_eq!(modified_utf8("😀").len(), 6);
+    }
+
+    #[test]
+    fn client_information_round_trip() {
+        let info = ClientInfo {
+            view_distance: 12,
+            skin_parts: 0x7f,
+            main_hand: 0,
+            allows_listing: true,
+        };
+        let buf = client_information(3, &info);
+        let mut r = Reader::new(&buf);
+        assert_eq!(r.var_int().unwrap(), 3);
+        assert_eq!(read_client_information(&mut r).unwrap(), info);
+        assert!(r.remaining().is_empty());
+        assert!(info.shows_hat());
+        assert!(!ClientInfo::DEFAULT.shows_hat());
     }
 }

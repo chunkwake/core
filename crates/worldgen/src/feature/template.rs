@@ -196,11 +196,13 @@ impl PosTest {
         let axis = match kind {
             None | Some("minecraft:always_true") => return Ok(Self::Always),
             Some("minecraft:linear_pos") => None,
-            Some("minecraft:axis_aligned_linear_pos") => Some(match v["axis"].as_str().unwrap_or("y") {
-                "x" => 0,
-                "z" => 2,
-                _ => 1,
-            }),
+            Some("minecraft:axis_aligned_linear_pos") => {
+                Some(match v["axis"].as_str().unwrap_or("y") {
+                    "x" => 0,
+                    "z" => 2,
+                    _ => 1,
+                })
+            }
             Some(other) => return Err(format!("position predicate {other} is not supported")),
         };
         Ok(Self::Linear {
@@ -2425,14 +2427,18 @@ pub(crate) fn place_pool(
             }
             let info = &mut infos[i];
             if let Processor::Rule(rules) = delegate.as_ref() {
-                if let Some((state, loot)) = rule_hit(pal, &*level, rules, info.state, info.world, reference) {
+                if let Some((state, loot)) =
+                    rule_hit(pal, &*level, rules, info.state, info.world, reference)
+                {
                     info.state = state;
                     if loot.is_some() {
                         info.loot = loot;
                     }
                     replaced += 1;
                 }
-            } else if let Some(next) = delegate.apply(pal, &*level, info.state, info.world, reference, r, true) {
+            } else if let Some(next) =
+                delegate.apply(pal, &*level, info.state, info.world, reference, r, true)
+            {
                 if next != info.state {
                     info.state = next;
                     replaced += 1;
@@ -2458,8 +2464,17 @@ pub(crate) fn place_pool(
         if let Some((table, seed)) = info.loot {
             let mut nbt = chunkwake_world::nbt::Compound::new();
             nbt.insert("LootTable".into(), chunkwake_world::nbt::Tag::String(table));
-            nbt.insert("LootTableSeed".into(), chunkwake_world::nbt::Tag::Long(seed));
-            level.set_block_entity(world[0], world[1], world[2], "minecraft:brushable_block", nbt);
+            nbt.insert(
+                "LootTableSeed".into(),
+                chunkwake_world::nbt::Tag::Long(seed),
+            );
+            level.set_block_entity(
+                world[0],
+                world[1],
+                world[2],
+                "minecraft:brushable_block",
+                nbt,
+            );
             continue;
         }
         // `placeInWorld`: свой NBT шаблона плюс `LootTableSeed`.

@@ -41,7 +41,13 @@ pub(crate) enum Variant {
 }
 
 impl Variant {
-    const ALL: [Variant; 5] = [Variant::Plain, Variant::Chest, Variant::Hopper, Variant::Furnace, Variant::Tnt];
+    const ALL: [Variant; 5] = [
+        Variant::Plain,
+        Variant::Chest,
+        Variant::Hopper,
+        Variant::Furnace,
+        Variant::Tnt,
+    ];
 
     /// Тип сущности; предмет называется так же.
     fn name(self) -> &'static str {
@@ -140,7 +146,10 @@ impl MinecartEntry {
     fn bounds(&self) -> ([f64; 3], [f64; 3]) {
         let h = crate::minecart::WIDTH / 2.0;
         let p = self.cart.pos;
-        ([p[0] - h, p[1], p[2] - h], [p[0] + h, p[1] + crate::minecart::HEIGHT, p[2] + h])
+        (
+            [p[0] - h, p[1], p[2] - h],
+            [p[0] + h, p[1] + crate::minecart::HEIGHT, p[2] + h],
+        )
     }
 
     fn speed_sq(&self) -> f64 {
@@ -150,9 +159,12 @@ impl MinecartEntry {
 
 /// Пересекает ли предмет на земле (коробка 0.25×0.25) коробку `[lo, hi]`.
 fn item_in(lo: [f64; 3], hi: [f64; 3], p: [f64; 3]) -> bool {
-    p[0] + 0.125 > lo[0] && p[0] - 0.125 < hi[0]
-        && p[2] + 0.125 > lo[2] && p[2] - 0.125 < hi[2]
-        && p[1] + 0.25 > lo[1] && p[1] < hi[1]
+    p[0] + 0.125 > lo[0]
+        && p[0] - 0.125 < hi[0]
+        && p[2] + 0.125 > lo[2]
+        && p[2] - 0.125 < hi[2]
+        && p[1] + 0.25 > lo[1]
+        && p[1] < hi[1]
 }
 
 /// Мир для физики вагонетки.
@@ -190,7 +202,9 @@ impl Track for PlanTrack<'_> {
     }
 
     fn solid(&self, p: [i32; 3]) -> bool {
-        self.0.block(p).is_some_and(|s| !self.0.state_name(s).ends_with("rail") && self.0.blocks_boat(s))
+        self.0
+            .block(p)
+            .is_some_and(|s| !self.0.state_name(s).ends_with("rail") && self.0.blocks_boat(s))
     }
 
     fn water(&self, p: [i32; 3]) -> bool {
@@ -208,8 +222,24 @@ impl PlayPlan {
         };
         let c = &e.cart;
         let mut out = vec![
-            play::add_entity_moving(self.ids.add_entity, id, e.uuid, ty, c.pos, c.vel, c.yaw, 0.0, 0),
-            inv::boat_data_hurt(self.ids.set_entity_data, id, 0, e.hurt_dir, e.damage_at(now)),
+            play::add_entity_moving(
+                self.ids.add_entity,
+                id,
+                e.uuid,
+                ty,
+                c.pos,
+                c.vel,
+                c.yaw,
+                0.0,
+                0,
+            ),
+            inv::boat_data_hurt(
+                self.ids.set_entity_data,
+                id,
+                0,
+                e.hurt_dir,
+                e.damage_at(now),
+            ),
         ];
         if e.lit {
             out.push(inv::furnace_cart_fuel(self.ids.set_entity_data, id, true));
@@ -223,16 +253,37 @@ impl PlayPlan {
         out
     }
 
-    /// Все вагонетки для зашедшего игрока.
-    pub(super) fn minecart_frames(&self) -> Vec<u8> {
-        let now = self.game_time.load(Ordering::Relaxed);
-        let mut out = Vec::new();
-        for (&id, e) in self.sim().minecarts.lock().unwrap().iter() {
-            for p in self.minecart_packets(id, e, now) {
-                out.extend(self.hub.frame(&p));
-            }
+    fn minecart_tracked(&self, id: i32, e: &MinecartEntry) -> Tracked {
+        let ty = self
+            .survival
+            .entity_types
+            .get(e.variant.name())
+            .copied()
+            .unwrap_or_default();
+        // `getEffectiveRange`: с игроком внутри — его 32 чанка.
+        let range = if e.rider.is_some() {
+            self.tracking_range(ty).max(PLAYER_TRACKING_RANGE)
+        } else {
+            self.tracking_range(ty)
+        };
+        Tracked {
+            id,
+            pos: e.cart.pos,
+            range,
         }
-        out
+    }
+
+    pub(super) fn track_minecarts(&self, out: &mut Vec<Tracked>) {
+        for (&id, e) in self.sim().minecarts.lock().unwrap().iter() {
+            out.push(self.minecart_tracked(id, e));
+        }
+    }
+
+    /// Пакеты спавна вагонетки для нового зрителя.
+    pub(super) fn minecart_spawn(&self, id: i32) -> Option<Vec<Vec<u8>>> {
+        let now = self.game_time.load(Ordering::Relaxed);
+        let carts = self.sim().minecarts.lock().unwrap();
+        Some(self.minecart_packets(id, carts.get(&id)?, now))
     }
 
     pub(super) fn is_minecart(&self, id: i32) -> bool {
@@ -242,9 +293,10 @@ impl PlayPlan {
     fn add_minecart(&self, e: MinecartEntry) -> i32 {
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
         let packets = self.minecart_packets(id, &e, self.game_time.load(Ordering::Relaxed));
+        let tracked = self.minecart_tracked(id, &e);
         self.sim().minecarts.lock().unwrap().insert(id, e);
         self.mark_work();
-        self.hub.send_many(packets);
+        self.hub.spawn_tracked(tracked, packets);
         id
     }
 
@@ -263,7 +315,11 @@ impl PlayPlan {
             return false;
         };
         let lift = if r.shape.is_slope() { 0.5 } else { 0.0 };
-        let pos = [rail[0] as f64 + 0.5, rail[1] as f64 + 0.0625 + lift, rail[2] as f64 + 0.5];
+        let pos = [
+            rail[0] as f64 + 0.5,
+            rail[1] as f64 + 0.0625 + lift,
+            rail[2] as f64 + 0.5,
+        ];
         // `getEntities(minecart.getBoundingBox())`: на месте уже есть вагонетка — нельзя.
         let busy = self.sim().minecarts.lock().unwrap().values().any(|e| {
             let (lo, hi) = e.bounds();
@@ -280,17 +336,32 @@ impl PlayPlan {
     /// центром раздатчика, по высоте `floor(центр) + шагY`; рельс спереди —
     /// +0.1 (на подъёме +0.6), воздух с рельсом под ним — −0.9 (−0.4, если
     /// нижний — подъём и раздатчик смотрит не вниз), иначе обычный выброс.
-    pub(super) fn dispense_minecart(&self, item: &str, dispenser: [i32; 3], facing: usize) -> Option<bool> {
+    pub(super) fn dispense_minecart(
+        &self,
+        item: &str,
+        dispenser: [i32; 3],
+        facing: usize,
+    ) -> Option<bool> {
         let variant = self.cart_variant(item)?;
         let d = crate::placement::step(facing);
-        let front = [dispenser[0] + d[0], dispenser[1] + d[1], dispenser[2] + d[2]];
+        let front = [
+            dispenser[0] + d[0],
+            dispenser[1] + d[1],
+            dispenser[2] + d[2],
+        ];
         let track = PlanTrack(self);
         let lift = if let Some(r) = track.rail(front) {
             if r.shape.is_slope() { 0.6 } else { 0.1 }
-        } else if self.block(front).is_some_and(|s| self.state_name(s).ends_with(":air"))
+        } else if self
+            .block(front)
+            .is_some_and(|s| self.state_name(s).ends_with(":air"))
             && let Some(r) = track.rail([front[0], front[1] - 1, front[2]])
         {
-            if facing == 0 || !r.shape.is_slope() { -0.9 } else { -0.4 }
+            if facing == 0 || !r.shape.is_slope() {
+                -0.9
+            } else {
+                -0.4
+            }
         } else {
             return None;
         };
@@ -353,13 +424,19 @@ impl PlayPlan {
     /// Инвентарь вагонетки с сундуком или воронкой.
     pub(super) fn minecart_slots(&self, cart: i32) -> Option<Vec<Slot>> {
         let carts = self.sim().minecarts.lock().unwrap();
-        carts.get(&cart).filter(|e| e.variant.size() > 0).map(|e| e.slots.clone())
+        carts
+            .get(&cart)
+            .filter(|e| e.variant.size() > 0)
+            .map(|e| e.slots.clone())
     }
 
     /// Записать инвентарь; заполненность меняет трение (`applyNaturalSlowdown`).
     pub(super) fn set_minecart_slots(&self, cart: i32, slots: &[Slot]) {
         let signal = crate::redstone::fullness(
-            slots.iter().flatten().map(|s| (s.count, self.max_stack(s.item))),
+            slots
+                .iter()
+                .flatten()
+                .map(|s| (s.count, self.max_stack(s.item))),
             slots.len(),
         );
         if let Some(e) = self.sim().minecarts.lock().unwrap().get_mut(&cart)
@@ -402,7 +479,10 @@ impl PlayPlan {
             e.slots.clone()
         };
         crate::redstone::fullness(
-            slots.iter().flatten().map(|s| (s.count, self.max_stack(s.item))),
+            slots
+                .iter()
+                .flatten()
+                .map(|s| (s.count, self.max_stack(s.item))),
             slots.len(),
         )
     }
@@ -428,7 +508,14 @@ impl PlayPlan {
 
     /// Клавиши водителя из `player_input`.
     pub(super) fn minecart_input(&self, uuid: Uuid, input: u8) {
-        if let Some(e) = self.sim().minecarts.lock().unwrap().values_mut().find(|e| e.rider.is_some_and(|r| r.0 == uuid)) {
+        if let Some(e) = self
+            .sim()
+            .minecarts
+            .lock()
+            .unwrap()
+            .values_mut()
+            .find(|e| e.rider.is_some_and(|r| r.0 == uuid))
+        {
             e.input = input;
         }
     }
@@ -437,7 +524,9 @@ impl PlayPlan {
     pub(super) fn leave_minecart(&self, uuid: Uuid) -> Option<[f64; 3]> {
         let (id, cart) = {
             let mut carts = self.sim().minecarts.lock().unwrap();
-            let (&id, e) = carts.iter_mut().find(|(_, e)| e.rider.is_some_and(|r| r.0 == uuid))?;
+            let (&id, e) = carts
+                .iter_mut()
+                .find(|(_, e)| e.rider.is_some_and(|r| r.0 == uuid))?;
             e.rider = None;
             e.input = 0;
             (id, e.cart.clone())
@@ -451,7 +540,11 @@ impl PlayPlan {
     /// по бокам, затем наискосок, назад и вперёд; высоты 0, +1, −1. Нет места —
     /// на вагонетку сверху.
     fn minecart_dismount(&self, c: &Cart) -> [f64; 3] {
-        let base = [c.pos[0].floor() as i32, c.pos[1].floor() as i32, c.pos[2].floor() as i32];
+        let base = [
+            c.pos[0].floor() as i32,
+            c.pos[1].floor() as i32,
+            c.pos[2].floor() as i32,
+        ];
         // Направление: по скорости, а у стоящей — по рельсу.
         let dir: [i32; 2] = if c.vel[0].abs() > 1e-4 || c.vel[2].abs() > 1e-4 {
             if c.vel[0].abs() > c.vel[2].abs() {
@@ -460,7 +553,10 @@ impl PlayPlan {
                 [0, c.vel[2].signum() as i32]
             }
         } else {
-            match PlanTrack(self).rail(c.rail_pos(&PlanTrack(self))).map(|r| r.shape) {
+            match PlanTrack(self)
+                .rail(c.rail_pos(&PlanTrack(self)))
+                .map(|r| r.shape)
+            {
                 Some(Shape::EastWest | Shape::AscendingEast | Shape::AscendingWest) => [1, 0],
                 _ => [0, 1],
             }
@@ -493,11 +589,20 @@ impl PlayPlan {
     }
 
     /// Удар (`VehicleEntity.hurtServer`); `None` — не вагонетка.
-    pub(super) fn attack_minecart(&self, uuid: Uuid, target: i32, held: Slot, creative: bool, crit: bool) -> Option<()> {
+    pub(super) fn attack_minecart(
+        &self,
+        uuid: Uuid,
+        target: i32,
+        held: Slot,
+        creative: bool,
+        crit: bool,
+    ) -> Option<()> {
         let pos = self.player_at(uuid)?.0;
         let item = held.and_then(|s| self.survival.items.get(s.item as usize));
         let mut amount = 1.0 + item.map_or(0.0, |i| i.attack);
-        let sharp = held.map_or(0, |s| chunkwake_protocol::components::stack_level(s.extra, "minecraft:sharpness"));
+        let sharp = held.map_or(0, |s| {
+            chunkwake_protocol::components::stack_level(s.extra, "minecraft:sharpness")
+        });
         if sharp > 0 {
             amount += 0.5 * sharp as f32 + 0.5;
         }
@@ -521,15 +626,23 @@ impl PlayPlan {
     fn hurt_minecart(&self, target: i32, amount: f32, creative: bool, explosion: bool) {
         let now = self.game_time.load(Ordering::Relaxed);
         let mut carts = self.sim().minecarts.lock().unwrap();
-        let Some(e) = carts.get_mut(&target) else { return };
+        let Some(e) = carts.get_mut(&target) else {
+            return;
+        };
         e.hurt_dir = -e.hurt_dir;
         e.damage = e.damage_at(now) + amount * DAMAGE_SCALE;
         e.hit_at = now;
         let broken = !creative && e.damage > BREAK_AT;
         if !broken && !creative {
-            let packet = inv::boat_data_hurt(self.ids.set_entity_data, target, HURT_TIME, e.hurt_dir, e.damage);
+            let packet = inv::boat_data_hurt(
+                self.ids.set_entity_data,
+                target,
+                HURT_TIME,
+                e.hurt_dir,
+                e.damage,
+            );
             drop(carts);
-            self.hub.send(None, packet);
+            self.hub.send_about(target, packet);
             return;
         }
         // `MinecartTNT.destroy`: огонь, взрыв или скорость — поджечь
@@ -543,7 +656,9 @@ impl PlayPlan {
             }
             return;
         }
-        let Some(e) = carts.remove(&target) else { return };
+        let Some(e) = carts.remove(&target) else {
+            return;
+        };
         drop(carts);
         self.remove_minecart(target, e, broken);
     }
@@ -554,7 +669,7 @@ impl PlayPlan {
         if let Some((rider, _)) = e.rider {
             self.unlink_rider(rider);
         }
-        self.hub.send(None, play::remove_entities(self.ids.remove_entities, &[id]));
+        self.hub.remove_tracked(&[id]);
         if !drops {
             return;
         }
@@ -574,8 +689,18 @@ impl PlayPlan {
 
     /// `MinecartTNT.primeFuse`: событие клиенту и звук (фитиль ставит вызывающий).
     fn announce_prime(&self, id: i32, pos: [f64; 3]) {
-        self.hub.send(None, inv::entity_event(self.ids.entity_event, id, EVENT_PRIME));
-        self.play_sound(None, "minecraft:entity.tnt.primed", crate::sounds::BLOCKS, pos, 1.0, 1.0);
+        self.hub.send_about(
+            id,
+            inv::entity_event(self.ids.entity_event, id, EVENT_PRIME),
+        );
+        self.play_sound(
+            None,
+            "minecraft:entity.tnt.primed",
+            crate::sounds::BLOCKS,
+            pos,
+            1.0,
+            1.0,
+        );
     }
 
     /// Взрыв задел вагонетки (`ServerExplosion.hurtEntities`): урон и отброс.
@@ -588,10 +713,15 @@ impl PlayPlan {
             .unwrap()
             .iter()
             .map(|(&id, e)| (id, e.cart.pos))
-            .filter(|(_, p)| (0..3).map(|i| (p[i] - center[i]).powi(2)).sum::<f64>() < reach * reach)
+            .filter(|(_, p)| {
+                (0..3).map(|i| (p[i] - center[i]).powi(2)).sum::<f64>() < reach * reach
+            })
             .collect();
         for (id, pos) in near {
-            let dist = (0..3).map(|i| (pos[i] - center[i]).powi(2)).sum::<f64>().sqrt();
+            let dist = (0..3)
+                .map(|i| (pos[i] - center[i]).powi(2))
+                .sum::<f64>()
+                .sqrt();
             let exposure = self.explosion_exposure(center, pos);
             let damage = crate::tnt::damage(dist, exposure, power);
             if damage <= 0.0 {
@@ -619,7 +749,8 @@ impl PlayPlan {
         }
         let simulated = self.simulated_set();
         let awake = |p: [f64; 3]| {
-            simulated.is_empty() || simulated.contains(&((p[0].floor() as i32) >> 4, (p[2].floor() as i32) >> 4))
+            simulated.is_empty()
+                || simulated.contains(&((p[0].floor() as i32) >> 4, (p[2].floor() as i32) >> 4))
         };
         // Игроки пешком: позиция, поворот (для водителя) и uuid.
         let players: Vec<(Uuid, [f64; 3], f32)> = self
@@ -645,7 +776,9 @@ impl PlayPlan {
             let mut carts = self.sim().minecarts.lock().unwrap();
             let ids: Vec<i32> = carts.keys().copied().collect();
             for id in ids {
-                let Some(e) = carts.get_mut(&id) else { continue };
+                let Some(e) = carts.get_mut(&id) else {
+                    continue;
+                };
                 if !awake(e.cart.pos) {
                     continue;
                 }
@@ -655,9 +788,12 @@ impl PlayPlan {
                         continue;
                     }
                     let (lo, hi) = e.bounds();
-                    let overlap = p[0] + 0.3 > lo[0] && p[0] - 0.3 < hi[0]
-                        && p[2] + 0.3 > lo[2] && p[2] - 0.3 < hi[2]
-                        && p[1] + 1.8 > lo[1] && p[1] < hi[1];
+                    let overlap = p[0] + 0.3 > lo[0]
+                        && p[0] - 0.3 < hi[0]
+                        && p[2] + 0.3 > lo[2]
+                        && p[2] - 0.3 < hi[2]
+                        && p[1] + 1.8 > lo[1]
+                        && p[1] < hi[1];
                     if !overlap {
                         continue;
                     }
@@ -673,15 +809,18 @@ impl PlayPlan {
                     }
                 }
                 e.cart.ridden = e.rider.is_some();
-                let intent = e.rider.and_then(|(r, _)| players.iter().find(|p| p.0 == r)).map_or([0.0; 2], |p| {
-                    crate::minecart::move_intent(
-                        e.input & IN_FORWARD != 0,
-                        e.input & IN_BACK != 0,
-                        e.input & IN_LEFT != 0,
-                        e.input & IN_RIGHT != 0,
-                        p.2,
-                    )
-                });
+                let intent = e
+                    .rider
+                    .and_then(|(r, _)| players.iter().find(|p| p.0 == r))
+                    .map_or([0.0; 2], |p| {
+                        crate::minecart::move_intent(
+                            e.input & IN_FORWARD != 0,
+                            e.input & IN_BACK != 0,
+                            e.input & IN_LEFT != 0,
+                            e.input & IN_RIGHT != 0,
+                            p.2,
+                        )
+                    });
                 let old_pos = e.cart.pos;
                 let y0 = old_pos[1];
                 let step = e.cart.tick(&track, intent);
@@ -694,9 +833,21 @@ impl PlayPlan {
                     }
                 }
                 match step.rail {
-                    Some((pos, Rail { kind: Kind::Detector, .. })) => pressed.push(pos),
+                    Some((
+                        pos,
+                        Rail {
+                            kind: Kind::Detector,
+                            ..
+                        },
+                    )) => pressed.push(pos),
                     // `activateMinecart` каждый тик на активаторе.
-                    Some((_, Rail { kind: Kind::Activator(on), .. })) => match e.variant {
+                    Some((
+                        _,
+                        Rail {
+                            kind: Kind::Activator(on),
+                            ..
+                        },
+                    )) => match e.variant {
                         // `Minecart`: включённый высаживает.
                         Variant::Plain if on => {
                             if let Some((rider, _)) = e.rider.take() {
@@ -718,7 +869,10 @@ impl PlayPlan {
                 // тика вагонетка толкает другие, задевающие её коробку с
                 // запасом 0.2 по горизонтали.
                 let (lo, hi) = e.bounds();
-                let (lo, hi) = ([lo[0] - 0.2, lo[1], lo[2] - 0.2], [hi[0] + 0.2, hi[1], hi[2] + 0.2]);
+                let (lo, hi) = (
+                    [lo[0] - 0.2, lo[1], lo[2] - 0.2],
+                    [hi[0] + 0.2, hi[1], hi[2] + 0.2],
+                );
                 let near: Vec<i32> = carts
                     .iter()
                     .filter(|(o, b)| {
@@ -732,7 +886,9 @@ impl PlayPlan {
                         crate::minecart::push_pair(&mut a.cart, &mut b.cart);
                     }
                 }
-                let Some(e) = carts.get_mut(&id) else { continue };
+                let Some(e) = carts.get_mut(&id) else {
+                    continue;
+                };
                 // Падение: на рельсе сбрасывается, о землю — `causeFallDamage`.
                 let mut landed = 0.0;
                 if step.rail.is_some() {
@@ -753,7 +909,10 @@ impl PlayPlan {
                         }
                         if e.lit != (e.fuel > 0) {
                             e.lit = e.fuel > 0;
-                            packets.push(inv::furnace_cart_fuel(self.ids.set_entity_data, id, e.lit));
+                            packets.push((
+                                id,
+                                inv::furnace_cart_fuel(self.ids.set_entity_data, id, e.lit),
+                            ));
                         }
                     }
                     // `MinecartTNT.tick`: фитиль, удар о стену на скорости,
@@ -791,13 +950,16 @@ impl PlayPlan {
                 let moved = d >= 7.629_394_5e-6 || (e.cart.yaw - e.sent.1).abs() > 0.5;
                 if moved {
                     e.sent = (e.cart.pos, e.cart.yaw);
-                    packets.push(play::teleport_entity(
-                        self.ids.teleport_entity,
+                    packets.push((
                         id,
-                        e.cart.pos,
-                        e.cart.yaw,
-                        0.0,
-                        e.cart.on_ground,
+                        play::teleport_entity(
+                            self.ids.teleport_entity,
+                            id,
+                            e.cart.pos,
+                            e.cart.yaw,
+                            0.0,
+                            e.cart.on_ground,
+                        ),
                     ));
                     if let Some((rider, _)) = e.rider {
                         riders.push((rider, e.cart.pos));
@@ -813,20 +975,29 @@ impl PlayPlan {
         for (id, pos) in primed {
             self.announce_prime(id, pos);
         }
+        let mut gone = Vec::new();
         for (id, rider) in ejected {
             if rider.is_nil() {
-                packets.push(play::remove_entities(self.ids.remove_entities, &[id]));
+                gone.push(id);
             } else {
                 self.unlink_rider(rider);
-                packets.push(play::set_passengers(self.ids.set_passengers, id, &[]));
+                packets.push((id, play::set_passengers(self.ids.set_passengers, id, &[])));
             }
         }
         if !packets.is_empty() {
-            self.hub.send_many(packets);
+            self.hub.send_many_about(packets);
         }
+        self.hub.remove_tracked(&gone);
         // Водитель едет с вагонеткой: сессия по этой позиции грузит чанки.
         for (uuid, pos) in riders {
-            self.moved(uuid, Move { pos: Some(pos), rot: None, on_ground: true });
+            self.moved(
+                uuid,
+                Move {
+                    pos: Some(pos),
+                    rot: None,
+                    on_ground: true,
+                },
+            );
         }
         for pos in pressed {
             self.press_detector_rail(pos);
@@ -843,13 +1014,27 @@ impl PlayPlan {
     /// 1.5 выше её низа), без него — предметы в зоне над ней; затем
     /// предметы, задевающие саму вагонетку.
     fn minecart_hopper(&self, id: i32, pos: [f64; 3]) {
-        let Some(slots) = self.minecart_slots(id) else { return };
-        let mut me = Cont { parts: vec![cart_pos(id)], slots, furnace: false, name: Variant::Hopper.name().into() };
-        let full = me.slots.iter().all(|s| s.is_some_and(|s| s.count >= self.max_stack(s.item)));
+        let Some(slots) = self.minecart_slots(id) else {
+            return;
+        };
+        let mut me = Cont {
+            parts: vec![cart_pos(id)],
+            slots,
+            furnace: false,
+            name: Variant::Hopper.name().into(),
+        };
+        let full = me
+            .slots
+            .iter()
+            .all(|s| s.is_some_and(|s| s.count >= self.max_stack(s.item)));
         if full {
             return;
         }
-        let cell = [pos[0].floor() as i32, (pos[1] + 1.5).floor() as i32, pos[2].floor() as i32];
+        let cell = [
+            pos[0].floor() as i32,
+            (pos[1] + 1.5).floor() as i32,
+            pos[2].floor() as i32,
+        ];
         let mut moved = match self.cont_get(cell) {
             Some(mut a) => self.hopper_pull(&mut a, &mut me),
             None => {
@@ -863,7 +1048,11 @@ impl PlayPlan {
             let h = crate::minecart::WIDTH / 2.0 + 0.25;
             let lo = [pos[0] - h, pos[1], pos[2] - h];
             let hi = [pos[0] + h, pos[1] + crate::minecart::HEIGHT, pos[2] + h];
-            let own = [pos[0].floor() as i32, pos[1].floor() as i32, pos[2].floor() as i32];
+            let own = [
+                pos[0].floor() as i32,
+                pos[1].floor() as i32,
+                pos[2].floor() as i32,
+            ];
             moved = self.hopper_suck(own, &mut me, |d| item_in(lo, hi, d));
         }
         if moved {
@@ -878,7 +1067,9 @@ impl PlayPlan {
         if !explodes && !lit {
             return;
         }
-        let Some(e) = self.sim().minecarts.lock().unwrap().remove(&id) else { return };
+        let Some(e) = self.sim().minecarts.lock().unwrap().remove(&id) else {
+            return;
+        };
         self.remove_minecart(id, e, false);
         if explodes {
             let k = speed_sq.sqrt().min(5.0);
@@ -892,7 +1083,9 @@ impl PlayPlan {
     fn press_detector_rail(&self, pos: [i32; 3]) {
         let pl = &self.survival.placement;
         let Some(s) = self.block(pos) else { return };
-        if !crate::redstone::is_detector_rail(self.state_name(s)) || pl.prop(s, "powered") == Some("true") {
+        if !crate::redstone::is_detector_rail(self.state_name(s))
+            || pl.prop(s, "powered") == Some("true")
+        {
             return;
         }
         if !self.detector_rail_pressed(pos) {
@@ -956,7 +1149,9 @@ impl PlayPlan {
         }
         // `ContainerHelper.loadAllItems`.
         for t in c.get("Items").and_then(Tag::as_list).unwrap_or(&[]) {
-            let Some(item) = t.as_compound() else { continue };
+            let Some(item) = t.as_compound() else {
+                continue;
+            };
             let slot = item.get("Slot").and_then(Tag::as_i64).unwrap_or(-1);
             if let Some(dst) = usize::try_from(slot).ok().and_then(|i| e.slots.get_mut(i)) {
                 *dst = crate::stack_nbt::from_nbt(item, |n| self.item_id(n));
@@ -964,7 +1159,10 @@ impl PlayPlan {
         }
         if variant.size() > 0 {
             let signal = crate::redstone::fullness(
-                e.slots.iter().flatten().map(|s| (s.count, self.max_stack(s.item))),
+                e.slots
+                    .iter()
+                    .flatten()
+                    .map(|s| (s.count, self.max_stack(s.item))),
                 e.slots.len(),
             );
             e.cart.drag = Drag::Container(signal as u8);
@@ -1001,13 +1199,27 @@ impl PlayPlan {
                 let c0 = &e.cart;
                 let mut c = Compound::new();
                 c.insert("id".into(), Tag::String(e.variant.name().into()));
-                c.insert("Pos".into(), Tag::List(c0.pos.iter().map(|v| Tag::Double(*v)).collect()));
-                c.insert("Motion".into(), Tag::List(c0.vel.iter().map(|v| Tag::Double(*v)).collect()));
-                c.insert("Rotation".into(), Tag::List(vec![Tag::Float(c0.yaw), Tag::Float(0.0)]));
+                c.insert(
+                    "Pos".into(),
+                    Tag::List(c0.pos.iter().map(|v| Tag::Double(*v)).collect()),
+                );
+                c.insert(
+                    "Motion".into(),
+                    Tag::List(c0.vel.iter().map(|v| Tag::Double(*v)).collect()),
+                );
+                c.insert(
+                    "Rotation".into(),
+                    Tag::List(vec![Tag::Float(c0.yaw), Tag::Float(0.0)]),
+                );
                 let u = e.uuid.as_u128();
                 c.insert(
                     "UUID".into(),
-                    Tag::IntArray((0..4).rev().map(|i| (u >> (32 * i)) as u32 as i32).collect()),
+                    Tag::IntArray(
+                        (0..4)
+                            .rev()
+                            .map(|i| (u >> (32 * i)) as u32 as i32)
+                            .collect(),
+                    ),
                 );
                 if let Some(n) = &e.custom_name {
                     c.insert("CustomName".into(), Tag::String(n.clone()));
@@ -1026,7 +1238,11 @@ impl PlayPlan {
                     }
                     _ => {}
                 }
-                ((c0.pos[0].floor() as i32 >> 4, c0.pos[2].floor() as i32 >> 4), c, e.slots.clone())
+                (
+                    (c0.pos[0].floor() as i32 >> 4, c0.pos[2].floor() as i32 >> 4),
+                    c,
+                    e.slots.clone(),
+                )
             })
             .collect();
         // `Items` — после замка: имена предметов берутся из реестра.

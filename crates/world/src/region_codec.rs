@@ -76,8 +76,12 @@ pub(crate) fn decode(kind: u8, data: &[u8]) -> Result<Vec<u8>, String> {
     // без него буфер растёт реаллокациями.
     let mut raw = Vec::with_capacity(data.len().saturating_mul(4).max(4096));
     match kind {
-        ZLIB => ZlibDecoder::new(data).read_to_end(&mut raw).map_err(|e| e.to_string())?,
-        GZIP => GzDecoder::new(data).read_to_end(&mut raw).map_err(|e| e.to_string())?,
+        ZLIB => ZlibDecoder::new(data)
+            .read_to_end(&mut raw)
+            .map_err(|e| e.to_string())?,
+        GZIP => GzDecoder::new(data)
+            .read_to_end(&mut raw)
+            .map_err(|e| e.to_string())?,
         RAW => return Ok(data.to_vec()),
         LZ4 => {
             lz4_read(data, &mut raw)?;
@@ -132,7 +136,11 @@ fn lz4_read(mut data: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
             return Err("lz4: bad block header".into());
         }
         let method = data[8] & 0xF0;
-        let (packed, orig, sum) = (le(&data[9..13]), le(&data[13..17]), le(&data[17..21]) as u32);
+        let (packed, orig, sum) = (
+            le(&data[9..13]),
+            le(&data[13..17]),
+            le(&data[17..21]) as u32,
+        );
         data = &data[21..];
         if orig == 0 && packed == 0 {
             return Ok(());
@@ -167,7 +175,11 @@ fn xxh32(data: &[u8], seed: u32) -> u32 {
     const P4: u32 = 668_265_263;
     const P5: u32 = 374_761_393;
     let word = |i: usize| u32::from_le_bytes(data[i..i + 4].try_into().unwrap());
-    let round = |acc: u32, w: u32| acc.wrapping_add(w.wrapping_mul(P2)).rotate_left(13).wrapping_mul(P1);
+    let round = |acc: u32, w: u32| {
+        acc.wrapping_add(w.wrapping_mul(P2))
+            .rotate_left(13)
+            .wrapping_mul(P1)
+    };
     let mut i = 0;
     let mut h = if data.len() >= 16 {
         let mut v = [
@@ -191,11 +203,17 @@ fn xxh32(data: &[u8], seed: u32) -> u32 {
     };
     h = h.wrapping_add(data.len() as u32);
     while i + 4 <= data.len() {
-        h = h.wrapping_add(word(i).wrapping_mul(P3)).rotate_left(17).wrapping_mul(P4);
+        h = h
+            .wrapping_add(word(i).wrapping_mul(P3))
+            .rotate_left(17)
+            .wrapping_mul(P4);
         i += 4;
     }
     for &b in &data[i..] {
-        h = h.wrapping_add((b as u32).wrapping_mul(P5)).rotate_left(11).wrapping_mul(P1);
+        h = h
+            .wrapping_add((b as u32).wrapping_mul(P5))
+            .rotate_left(11)
+            .wrapping_mul(P1);
     }
     h ^= h >> 15;
     h = h.wrapping_mul(P2);
@@ -212,7 +230,10 @@ mod tests {
     fn xxh32_reference_vectors() {
         assert_eq!(xxh32(b"", 0), 0x02CC_5D05);
         assert_eq!(xxh32(b"abc", 0), 0x32D1_53FF);
-        assert_eq!(xxh32(b"Nobody inspects the spammish repetition", 0), 0xE229_3B2F);
+        assert_eq!(
+            xxh32(b"Nobody inspects the spammish repetition", 0),
+            0xE229_3B2F
+        );
     }
 
     #[test]

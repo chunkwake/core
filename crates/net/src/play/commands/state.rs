@@ -271,7 +271,11 @@ impl WorldBorder {
             let max = (center + half).min(BORDER_MAX_CENTER).ceil() as i32 - 1;
             (value.floor() as i32).clamp(min, max.max(min))
         };
-        [clamp(pos[0], self.center_x), pos[1].floor() as i32, clamp(pos[2], self.center_z)]
+        [
+            clamp(pos[0], self.center_x),
+            pos[1].floor() as i32,
+            clamp(pos[2], self.center_z),
+        ]
     }
 
     /// `WorldBorder.isWithinBounds(BlockPos)`: блок может пересекать
@@ -312,7 +316,8 @@ impl WorldBorder {
         let max_x = (self.center_x + half).min(BORDER_MAX_CENTER) - radius;
         let min_z = (self.center_z - half).max(-BORDER_MAX_CENTER) + radius;
         let max_z = (self.center_z + half).min(BORDER_MAX_CENTER) - radius;
-        if min_x <= max_x && min_z <= max_z
+        if min_x <= max_x
+            && min_z <= max_z
             && (min_x..=max_x).contains(&from[0])
             && (min_z..=max_z).contains(&from[2])
         {
@@ -326,9 +331,7 @@ impl WorldBorder {
     /// точка, а не ширина сущности. Верхнюю кромку `clampVec3ToBound` сдвигает
     /// внутрь на float `1e-5`.
     pub fn clip_projectile(&self, now: i64, from: [f64; 3], mut to: [f64; 3]) -> [f64; 3] {
-        if self.is_within(now, from[0], from[2], 0.0)
-            && !self.is_within(now, to[0], to[2], 0.0)
-        {
+        if self.is_within(now, from[0], from[2], 0.0) && !self.is_within(now, to[0], to[2], 0.0) {
             let half = self.size_at(now) / 2.0;
             let epsilon = 1e-5_f32 as f64;
             to[0] = to[0].clamp(
@@ -841,7 +844,12 @@ impl ServerVars {
     }
 
     /// Предупреждение границы. `false` — значение уже такое.
-    pub fn set_border_warning(&self, dim: Dimension, blocks: Option<i32>, time: Option<i32>) -> bool {
+    pub fn set_border_warning(
+        &self,
+        dim: Dimension,
+        blocks: Option<i32>,
+        time: Option<i32>,
+    ) -> bool {
         let mut borders = self.borders.lock().unwrap();
         let border = borders.get_mut(&dim).unwrap();
         let mut changed = false;
@@ -1034,7 +1042,10 @@ mod tests {
         };
         let edge = b.clip_movement(5, [0.0, 64.0, 0.0], [9.0, 64.0, 0.0], 0.98);
         assert_eq!(edge, [3.01, 64.0, 0.0]);
-        assert_eq!(b.clip_movement(10, edge, [0.0, 64.0, 0.0], 0.98), [0.0, 64.0, 0.0]);
+        assert_eq!(
+            b.clip_movement(10, edge, [0.0, 64.0, 0.0], 0.98),
+            [0.0, 64.0, 0.0]
+        );
     }
 
     #[test]
@@ -1046,7 +1057,10 @@ mod tests {
         };
         let clipped = b.clip_projectile(0, [0.0, 64.0, 0.0], [3.0, 65.0, 0.0]);
         assert_eq!(clipped, [2.0 - 1e-5_f32 as f64, 65.0, 0.0]);
-        assert_eq!(b.clip_projectile(0, [3.0, 64.0, 0.0], [0.0, 64.0, 0.0]), [0.0, 64.0, 0.0]);
+        assert_eq!(
+            b.clip_projectile(0, [3.0, 64.0, 0.0], [0.0, 64.0, 0.0]),
+            [0.0, 64.0, 0.0]
+        );
     }
 
     #[test]

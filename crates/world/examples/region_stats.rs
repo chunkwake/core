@@ -2,10 +2,10 @@
 //! deflate и сколько стоит сжатие и распаковка.
 //!
 //! `region_stats <каталог region>`
+use chunkwake_world::nbt::{self, Compound, Tag};
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
-use chunkwake_world::nbt::{self, Compound, Tag};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::time::Instant;
@@ -33,7 +33,9 @@ fn main() {
             assert_eq!(kind, 2, "только zlib");
             stored += len - 1;
             let mut out = Vec::new();
-            ZlibDecoder::new(&bytes[off + 5..off + 4 + len]).read_to_end(&mut out).unwrap();
+            ZlibDecoder::new(&bytes[off + 5..off + 4 + len])
+                .read_to_end(&mut out)
+                .unwrap();
             raw.push(out);
         }
     }
@@ -88,7 +90,11 @@ fn breakdown(raw: &[Vec<u8>]) {
     let mut full = 0usize;
     for bytes in raw {
         let root = nbt::read_root(bytes).unwrap();
-        let status = root.get("Status").and_then(Tag::as_str).unwrap_or("?").to_owned();
+        let status = root
+            .get("Status")
+            .and_then(Tag::as_str)
+            .unwrap_or("?")
+            .to_owned();
         *statuses.entry(status.clone()).or_default() += 1;
         if status != "minecraft:full" {
             continue;
@@ -103,7 +109,8 @@ fn breakdown(raw: &[Vec<u8>]) {
                         *by.entry(format!("sections/{sk}")).or_default() += size(sk, sv);
                         if let Some(inner) = sv.as_compound() {
                             for (ik, iv) in inner {
-                                *by.entry(format!("sections/{sk}/{ik}")).or_default() += size(ik, iv);
+                                *by.entry(format!("sections/{sk}/{ik}")).or_default() +=
+                                    size(ik, iv);
                             }
                         }
                     }
@@ -134,7 +141,9 @@ fn breakdown(raw: &[Vec<u8>]) {
         without += deflate(&nbt::write_root(&root), 6);
     }
     if let (Some(with), Some(without)) = (with.checked_div(n), without.checked_div(n)) {
-        println!("уровень 6, полные чанки: со светом неба {with} Б, без однородного {without} Б на чанк");
+        println!(
+            "уровень 6, полные чанки: со светом неба {with} Б, без однородного {without} Б на чанк"
+        );
     }
     if full == 0 {
         return;

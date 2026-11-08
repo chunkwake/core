@@ -92,14 +92,17 @@ impl PlayPlan {
             true
         };
         if found {
-            self.broadcast_packet(chunkwake_protocol::play::teleport_entity(
-                self.ids.teleport_entity,
+            self.hub.send_about(
                 target.entity_id,
-                pos,
-                target.yaw,
-                target.pitch,
-                true,
-            ));
+                chunkwake_protocol::play::teleport_entity(
+                    self.ids.teleport_entity,
+                    target.entity_id,
+                    pos,
+                    target.yaw,
+                    target.pitch,
+                    true,
+                ),
+            );
         }
         found
     }

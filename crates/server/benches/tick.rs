@@ -93,7 +93,12 @@ fn tick(c: &mut Criterion) {
             b.iter(|| {
                 up = !up;
                 let state = if up { stone } else { 0 };
-                black_box(chunkwake_net::play::bench::fill(&plan, [-16, 100, -16], [15, 115, 15], state));
+                black_box(chunkwake_net::play::bench::fill(
+                    &plan,
+                    [-16, 100, -16],
+                    [15, 115, 15],
+                    state,
+                ));
             });
         });
         group.sample_size(100);

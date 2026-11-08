@@ -62,7 +62,11 @@ pub(crate) fn island(b: &Blocks, level: &mut dyn Level, r: &mut Worldgen, origin
         for x in lo..=hi {
             for z in lo..=hi {
                 if ((x * x + z * z) as f32) <= (size + 1.0) * (size + 1.0) {
-                    put(level, [origin[0] + x, origin[1] + y, origin[2] + z], b.end_stone);
+                    put(
+                        level,
+                        [origin[0] + x, origin[1] + y, origin[2] + z],
+                        b.end_stone,
+                    );
                 }
             }
         }
@@ -209,7 +213,14 @@ impl Spikes {
         Ok(Self { spikes })
     }
 
-    pub(crate) fn place(&self, f: &Features, b: &Blocks, level: &mut dyn Level, r: &mut Worldgen, origin: Pos) {
+    pub(crate) fn place(
+        &self,
+        f: &Features,
+        b: &Blocks,
+        level: &mut dyn Level,
+        r: &mut Worldgen,
+        origin: Pos,
+    ) {
         let own;
         let spikes = if self.spikes.is_empty() {
             own = spikes_for_seed(f.seed);
@@ -275,9 +286,17 @@ fn spike(pal: &Palette, b: &Blocks, level: &mut dyn Level, r: &mut Worldgen, s: 
 }
 
 /// `ChorusPlantFeature`: растение на камне Края.
-pub(crate) fn chorus(pal: &Palette, b: &Blocks, level: &mut dyn Level, r: &mut Worldgen, origin: Pos) {
+pub(crate) fn chorus(
+    pal: &Palette,
+    b: &Blocks,
+    level: &mut dyn Level,
+    r: &mut Worldgen,
+    origin: Pos,
+) {
     let below = level.get(origin[0], origin[1] - 1, origin[2]);
-    if !pal.is_air(level.get(origin[0], origin[1], origin[2])) || !Palette::flag(&b.supports_chorus, below) {
+    if !pal.is_air(level.get(origin[0], origin[1], origin[2]))
+        || !Palette::flag(&b.supports_chorus, below)
+    {
         return;
     }
     let c = Chorus { pal, b };
@@ -307,7 +326,8 @@ impl Chorus<'_> {
     fn set_plant(&self, level: &mut dyn Level, p: Pos) {
         let at = |d: Pos| [p[0] + d[0], p[1] + d[1], p[2] + d[2]];
         let below = level.get(p[0], p[1] - 1, p[2]);
-        let down = self.plant_or_flower(&*level, at([0, -1, 0])) || Palette::flag(&self.b.supports_chorus, below);
+        let down = self.plant_or_flower(&*level, at([0, -1, 0]))
+            || Palette::flag(&self.b.supports_chorus, below);
         let mut st = self.b.plant;
         let flag = |v: bool| if v { "true" } else { "false" };
         for (k, v) in [
@@ -324,13 +344,22 @@ impl Chorus<'_> {
     }
 
     fn all_neighbors_empty(&self, level: &dyn Level, p: Pos, ignore: Option<usize>) -> bool {
-        HORIZONTAL.iter().enumerate().all(|(i, d)| {
-            Some(i) == ignore || self.empty(level, [p[0] + d[0], p[1], p[2] + d[2]])
-        })
+        HORIZONTAL
+            .iter()
+            .enumerate()
+            .all(|(i, d)| Some(i) == ignore || self.empty(level, [p[0] + d[0], p[1], p[2] + d[2]]))
     }
 
     /// `ChorusFlowerBlock.growTreeRecursive`.
-    fn grow(&self, level: &mut dyn Level, r: &mut Worldgen, current: Pos, start: Pos, spread: i32, depth: i32) {
+    fn grow(
+        &self,
+        level: &mut dyn Level,
+        r: &mut Worldgen,
+        current: Pos,
+        start: Pos,
+        spread: i32,
+        depth: i32,
+    ) {
         let mut height = r.next_int_bound(4) + 1;
         if depth == 0 {
             height += 1;
@@ -352,7 +381,11 @@ impl Chorus<'_> {
             for _ in 0..stems {
                 let d = r.next_int_bound(4) as usize;
                 let dir = HORIZONTAL[d];
-                let target = [current[0] + dir[0], current[1] + height, current[2] + dir[2]];
+                let target = [
+                    current[0] + dir[0],
+                    current[1] + height,
+                    current[2] + dir[2],
+                ];
                 if (target[0] - start[0]).abs() < spread
                     && (target[2] - start[2]).abs() < spread
                     && self.empty(&*level, target)
@@ -367,7 +400,10 @@ impl Chorus<'_> {
             }
         }
         if !placed {
-            let flower = self.pal.with_prop(self.b.flower, "age", "5").unwrap_or(self.b.flower);
+            let flower = self
+                .pal
+                .with_prop(self.b.flower, "age", "5")
+                .unwrap_or(self.b.flower);
             put(level, [current[0], current[1] + height, current[2]], flower);
         }
     }
@@ -379,7 +415,10 @@ mod tests {
 
     #[test]
     fn spike_ring_matches_vanilla() {
-        let xz: Vec<(i32, i32)> = spikes_for_seed(0).iter().map(|s| (s.center_x, s.center_z)).collect();
+        let xz: Vec<(i32, i32)> = spikes_for_seed(0)
+            .iter()
+            .map(|s| (s.center_x, s.center_z))
+            .collect();
         assert_eq!(
             xz,
             vec![

@@ -100,12 +100,20 @@ impl MemoryBudget {
     pub fn resolve(requested: MemoryProfile, view_distance: u8) -> Self {
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
         let profile = match requested {
-            MemoryProfile::Auto if cores <= 2 || available_memory().is_some_and(|n| n < 2 << 30) => MemoryProfile::Low,
+            MemoryProfile::Auto
+                if cores <= 2 || available_memory().is_some_and(|n| n < 2 << 30) =>
+            {
+                MemoryProfile::Low
+            }
             MemoryProfile::Auto => MemoryProfile::Normal,
             other => other,
         };
         let low = profile == MemoryProfile::Low;
-        let gen_workers = if low { cores.saturating_sub(1).clamp(1, 2) } else { cores.saturating_sub(1).max(1) };
+        let gen_workers = if low {
+            cores.saturating_sub(1).clamp(1, 2)
+        } else {
+            cores.saturating_sub(1).max(1)
+        };
         let view = usize::from(view_distance);
         Self {
             profile,
@@ -113,7 +121,8 @@ impl MemoryBudget {
             tokio_workers: if low { 2 } else { cores },
             blocking_threads: if low { 16 } else { 512 },
             proto_limit: (gen_workers * 192 + view * 32).clamp(256, if low { 1024 } else { 2048 }),
-            base_column_limit: (gen_workers * 1024 + view * 256).clamp(1024, if low { 4096 } else { 16_384 }),
+            base_column_limit: (gen_workers * 1024 + view * 256)
+                .clamp(1024, if low { 4096 } else { 16_384 }),
             jvm_xmx: low.then_some("-Xmx256m"),
         }
     }
@@ -139,21 +148,37 @@ fn available_memory() -> Option<u64> {
     }
     let mut status = Status {
         length: std::mem::size_of::<Status>() as u32,
-        load: 0, total_phys: 0, avail_phys: 0, total_page: 0,
-        avail_page: 0, total_virtual: 0, avail_virtual: 0, avail_extended: 0,
+        load: 0,
+        total_phys: 0,
+        avail_phys: 0,
+        total_page: 0,
+        avail_page: 0,
+        total_virtual: 0,
+        avail_virtual: 0,
+        avail_extended: 0,
     };
     (unsafe { GlobalMemoryStatusEx(&mut status) } != 0).then_some(status.avail_phys)
 }
 
 #[cfg(target_os = "linux")]
 fn available_memory() -> Option<u64> {
-    std::fs::read_to_string("/proc/meminfo").ok()?.lines()
-        .find_map(|line| line.strip_prefix("MemAvailable:")?.split_whitespace().next()?.parse::<u64>().ok())
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("MemAvailable:")?
+                .split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()
+        })
         .map(|kb| kb * 1024)
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-fn available_memory() -> Option<u64> { None }
+fn available_memory() -> Option<u64> {
+    None
+}
 
 #[derive(Debug)]
 pub struct Properties {
@@ -284,8 +309,9 @@ impl Properties {
         };
         let view_distance = distance("view-distance")?;
         let simulation_distance = distance("simulation-distance")?;
-        let region_compression = chunkwake_world::anvil::Codec::parse(value("region-file-compression"))
-            .ok_or("region-file-compression: choose deflate, lz4, or none")?;
+        let region_compression =
+            chunkwake_world::anvil::Codec::parse(value("region-file-compression"))
+                .ok_or("region-file-compression: choose deflate, lz4, or none")?;
         let memory_profile = match value("memory-profile") {
             "auto" => MemoryProfile::Auto,
             "low" => MemoryProfile::Low,

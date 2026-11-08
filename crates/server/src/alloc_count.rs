@@ -21,7 +21,8 @@ fn class(size: usize) -> usize {
 
 /// Выборка мест выделения: класс размера из `CHUNKWAKE_ALLOC_TRACE`
 /// (например `13` — блоки 4–8 КиБ), каждый 64-й объект со стеком, пока жив.
-static TRACE_CLASS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+static TRACE_CLASS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(usize::MAX);
 static SEEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 type Traces = std::collections::HashMap<usize, String>;
 static LIVE: std::sync::Mutex<Option<Traces>> = std::sync::Mutex::new(None);
@@ -32,7 +33,10 @@ thread_local! {
 
 /// Включить выборку по классу размера из окружения.
 pub fn init_trace() {
-    if let Some(c) = std::env::var("CHUNKWAKE_ALLOC_TRACE").ok().and_then(|v| v.parse().ok()) {
+    if let Some(c) = std::env::var("CHUNKWAKE_ALLOC_TRACE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
         *LIVE.lock().unwrap() = Some(Traces::new());
         TRACE_CLASS.store(c, Ordering::Relaxed);
     }
@@ -71,8 +75,12 @@ fn traced(ptr: *mut u8, size: usize, alloc: bool) {
 
 /// Самые частые живые места выделения из выборки.
 pub fn trace_report() -> String {
-    let Ok(live) = LIVE.lock() else { return String::new() };
-    let Some(map) = live.as_ref() else { return String::new() };
+    let Ok(live) = LIVE.lock() else {
+        return String::new();
+    };
+    let Some(map) = live.as_ref() else {
+        return String::new();
+    };
     let mut by: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for site in map.values() {
         *by.entry(site.as_str()).or_default() += 1;
@@ -134,7 +142,10 @@ pub fn report() -> String {
     let mut total = 0i64;
     let mut parts = Vec::new();
     for c in 0..CLASSES {
-        let (b, n) = (BYTES[c].load(Ordering::Relaxed), COUNT[c].load(Ordering::Relaxed));
+        let (b, n) = (
+            BYTES[c].load(Ordering::Relaxed),
+            COUNT[c].load(Ordering::Relaxed),
+        );
         total += b;
         if b >= 4 << 20 {
             parts.push(format!("<{}: {} MB/{}", 1u64 << c, b >> 20, n));

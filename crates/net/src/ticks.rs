@@ -67,7 +67,11 @@ impl TickQueue {
     /// откладываются по своему чанку и ждут [`Self::unpark`]. Нужно, когда
     /// часть мира не тикает: отложенная работа за пределами симуляции не
     /// должна ни пропадать, ни перебираться заново на каждом тике.
-    pub fn take_due_in(&mut self, now: u64, mut include: impl FnMut([i32; 3]) -> bool) -> Vec<[i32; 3]> {
+    pub fn take_due_in(
+        &mut self,
+        now: u64,
+        mut include: impl FnMut([i32; 3]) -> bool,
+    ) -> Vec<[i32; 3]> {
         let mut due = Vec::new();
         while let Some(entry) = self.by_time.first_entry() {
             if *entry.key() > now {
@@ -82,7 +86,10 @@ impl TickQueue {
                     self.at.remove(&p);
                     due.push(p);
                 } else {
-                    self.parked.entry((p[0] >> 4, p[2] >> 4)).or_default().push((p, t));
+                    self.parked
+                        .entry((p[0] >> 4, p[2] >> 4))
+                        .or_default()
+                        .push((p, t));
                 }
             }
         }
@@ -95,7 +102,12 @@ impl TickQueue {
         if self.parked.is_empty() {
             return;
         }
-        let ready: Vec<(i32, i32)> = self.parked.keys().copied().filter(|&c| ticking(c)).collect();
+        let ready: Vec<(i32, i32)> = self
+            .parked
+            .keys()
+            .copied()
+            .filter(|&c| ticking(c))
+            .collect();
         for c in ready {
             for (p, t) in self.parked.remove(&c).unwrap_or_default() {
                 // Снятый или перенесённый тик здесь уже устарел.

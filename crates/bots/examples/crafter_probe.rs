@@ -24,7 +24,11 @@ fn pack(p: [i32; 3]) -> i64 {
 }
 
 fn unpack(v: i64) -> [i32; 3] {
-    [(v >> 38) as i32, (v << 52 >> 52) as i32, (v << 26 >> 38) as i32]
+    [
+        (v >> 38) as i32,
+        (v << 52 >> 52) as i32,
+        (v << 26 >> 38) as i32,
+    ]
 }
 
 fn hex(b: &[u8]) -> String {
@@ -46,7 +50,9 @@ struct Probe {
 
 impl Probe {
     fn sb(&self, n: &str) -> i32 {
-        self.table.id(State::Play, Direction::Serverbound, n).unwrap()
+        self.table
+            .id(State::Play, Direction::Serverbound, n)
+            .unwrap()
     }
 
     async fn pump(&mut self, ms: u64) {
@@ -70,7 +76,11 @@ impl Probe {
             [11, 200, 6] => "chest out wire",
             _ => return,
         };
-        let name = self.states.get(&state).cloned().unwrap_or_else(|| state.to_string());
+        let name = self
+            .states
+            .get(&state)
+            .cloned()
+            .unwrap_or_else(|| state.to_string());
         let line = format!("{what} {name}");
         // Повтор того же состояния (пакет чанка и правка) не пишется.
         if self.log.last() != Some(&line) {
@@ -88,18 +98,25 @@ impl Probe {
                     return;
                 }
                 let pos = [r.f64().unwrap(), r.f64().unwrap(), r.f64().unwrap()];
-                if (pos[0] - 11.2).abs() > 1.0 || (pos[2] - 8.5).abs() > 1.0 || (pos[1] - 200.3).abs() > 1.5 {
+                if (pos[0] - 11.2).abs() > 1.0
+                    || (pos[2] - 8.5).abs() > 1.0
+                    || (pos[1] - 200.3).abs() > 1.5
+                {
                     return;
                 }
                 let n = self.items.len();
                 self.items.insert(id, n);
-                self.log.push(format!("add item#{n} at {:.3} {:.3} {:.3}", pos[0], pos[1], pos[2]));
+                self.log.push(format!(
+                    "add item#{n} at {:.3} {:.3} {:.3}",
+                    pos[0], pos[1], pos[2]
+                ));
             }
             "set_entity_data" => {
                 let id = r.var_int().unwrap();
                 if let Some(n) = self.items.get(&id) {
                     // Предмет — слот в данных сущности: хвост как есть.
-                    self.log.push(format!("item#{n} data {}", hex(r.remaining())));
+                    self.log
+                        .push(format!("item#{n} data {}", hex(r.remaining())));
                 }
             }
             "level_event" => {
@@ -117,18 +134,28 @@ impl Probe {
             }
             "section_blocks_update" => {
                 let sec = r.i64().unwrap();
-                let (sx, sy, sz) = ((sec >> 42) as i32, (sec << 44 >> 44) as i32, (sec << 22 >> 42) as i32);
+                let (sx, sy, sz) = (
+                    (sec >> 42) as i32,
+                    (sec << 44 >> 44) as i32,
+                    (sec << 22 >> 42) as i32,
+                );
                 let n = r.var_int().unwrap();
                 for _ in 0..n {
                     let v = r.var_long().unwrap();
-                    let (state, x, z, y) = ((v >> 12) as i32, (v >> 8 & 15) as i32, (v >> 4 & 15) as i32, (v & 15) as i32);
+                    let (state, x, z, y) = (
+                        (v >> 12) as i32,
+                        (v >> 8 & 15) as i32,
+                        (v >> 4 & 15) as i32,
+                        (v & 15) as i32,
+                    );
                     self.block([sx * 16 + x, sy * 16 + y, sz * 16 + z], state);
                 }
             }
             "open_screen" => {
                 self.window = r.var_int().unwrap();
                 let menu = r.var_int().unwrap();
-                self.log.push(format!("open menu {menu} title {}", hex(r.remaining())));
+                self.log
+                    .push(format!("open menu {menu} title {}", hex(r.remaining())));
             }
             "container_set_content" => {
                 let w = r.var_int().unwrap();
@@ -178,14 +205,26 @@ impl Probe {
     async fn use_on(&mut self, p: [i32; 3], face: i32) {
         self.seq += 1;
         let mut w = Writer::new();
-        w.var_int(self.sb("use_item_on")).var_int(0).i64(pack(p)).var_int(face).f32(0.5).f32(0.5).f32(0.5).u8(0).u8(0).var_int(self.seq);
+        w.var_int(self.sb("use_item_on"))
+            .var_int(0)
+            .i64(pack(p))
+            .var_int(face)
+            .f32(0.5)
+            .f32(0.5)
+            .f32(0.5)
+            .u8(0)
+            .u8(0)
+            .var_int(self.seq);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(600).await;
     }
 
     async fn slot_state(&mut self, slot: i32, enabled: bool) {
         let mut w = Writer::new();
-        w.var_int(self.sb("container_slot_state_changed")).var_int(slot).var_int(self.window).bool(enabled);
+        w.var_int(self.sb("container_slot_state_changed"))
+            .var_int(slot)
+            .var_int(self.window)
+            .bool(enabled);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(600).await;
     }
@@ -208,12 +247,17 @@ impl Probe {
     /// Бросить `n` брёвен в воронку сверху и подождать, пока она отдаст.
     async fn feed(&mut self, n: i32) {
         self.cmd("clear framer").await;
-        self.cmd(&format!("give framer minecraft:oak_log {n}")).await;
+        self.cmd(&format!("give framer minecraft:oak_log {n}"))
+            .await;
         self.cmd("tp framer 9.5 201.2 8.5 0 90").await;
         // `DROP_ALL_ITEMS` (4): вся стопка из руки.
         self.seq += 1;
         let mut w = Writer::new();
-        w.var_int(self.sb("player_action")).var_int(4).i64(0).u8(0).var_int(self.seq);
+        w.var_int(self.sb("player_action"))
+            .var_int(4)
+            .i64(0)
+            .u8(0)
+            .var_int(self.seq);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(150).await;
         self.cmd("tp framer 7.5 200 8.5 -90 0").await;
@@ -229,11 +273,13 @@ impl Probe {
 async fn main() {
     let a: Vec<String> = std::env::args().collect();
     let table = PacketTable::load(a[2].as_ref()).unwrap();
-    let reg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&a[3]).unwrap()).unwrap();
+    let reg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&a[3]).unwrap()).unwrap();
     let id_of = |r: &str, k: &str| reg[r]["entries"][k]["protocol_id"].as_i64().unwrap() as i32;
     let item_type = id_of("minecraft:entity_type", "minecraft:item");
     let blocks: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(std::path::Path::new(&a[3]).with_file_name("blocks.json")).unwrap(),
+        &std::fs::read_to_string(std::path::Path::new(&a[3]).with_file_name("blocks.json"))
+            .unwrap(),
     )
     .unwrap();
     let mut states = HashMap::new();
@@ -242,7 +288,12 @@ async fn main() {
             let props = s["properties"].as_object().map(|o| {
                 let mut v: Vec<String> = o
                     .iter()
-                    .filter(|(k, _)| matches!(k.as_str(), "orientation" | "triggered" | "crafting" | "power"))
+                    .filter(|(k, _)| {
+                        matches!(
+                            k.as_str(),
+                            "orientation" | "triggered" | "crafting" | "power"
+                        )
+                    })
                     .map(|(k, v)| format!("{k}={}", v.as_str().unwrap()))
                     .collect();
                 v.sort();
@@ -252,7 +303,9 @@ async fn main() {
         }
     }
     let ids = Ids::load(&table).unwrap();
-    let mut c = Client::connect(&a[1], "framer", ids, 777, "26.3").await.unwrap();
+    let mut c = Client::connect(&a[1], "framer", ids, 777, "26.3")
+        .await
+        .unwrap();
     let mut cb = HashMap::new();
     for n in [
         "add_entity",
@@ -314,7 +367,8 @@ async fn main() {
     p.step("chest in front takes the planks");
     p.feed(1).await;
     p.cmd("setblock 11 200 8 minecraft:chest").await;
-    p.cmd("setblock 11 200 7 minecraft:comparator[facing=south]").await;
+    p.cmd("setblock 11 200 7 minecraft:comparator[facing=south]")
+        .await;
     p.cmd("setblock 11 200 6 minecraft:redstone_wire").await;
     p.pulse().await;
     p.step("two logs spread over slots 0 and 1, no recipe");

@@ -184,6 +184,26 @@ impl Eval<'_> {
                 let p = c.get("chance").map_or(0.0, |v| self.number(v, rng));
                 rng.r#gen::<f64>() < p
             }
+            // Редкий дроп мобов: без чар — `unenchanted_chance`, с чарами —
+            // `enchanted_chance` от уровня (`LevelBasedValue`: число или `linear`).
+            "minecraft:random_chance_with_enchanted_bonus" => {
+                let lvl = self.enchant(c.get("enchantment"));
+                let p = if lvl > 0 {
+                    match c.get("enchanted_chance") {
+                        Some(Value::Object(o)) => {
+                            let at = |k: &str| o.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+                            at("base") + at("per_level_above_first") * f64::from(lvl - 1)
+                        }
+                        Some(v) => v.as_f64().unwrap_or(0.0),
+                        None => 0.0,
+                    }
+                } else {
+                    c.get("unenchanted_chance")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.0)
+                };
+                rng.r#gen::<f64>() < p
+            }
             "minecraft:table_bonus" => {
                 let chances: Vec<f64> = list(c.get("chances")).filter_map(Value::as_f64).collect();
                 let lvl = self.enchant(c.get("enchantment")) as usize;

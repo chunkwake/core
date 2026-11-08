@@ -587,6 +587,8 @@ pub struct PlayerEntry {
     pub properties: Vec<ProfileProperty>,
     pub game_mode: i32,
     pub latency_ms: i32,
+    /// `isModelPartShown(HAT)`: второй слой головы в таб-листе.
+    pub show_hat: bool,
 }
 
 /// Действия `ClientboundPlayerInfoUpdatePacket$Action` (порядковые номера в EnumSet).
@@ -596,11 +598,14 @@ const UPDATE_LISTED: u8 = 1 << 3;
 const UPDATE_LATENCY: u8 = 1 << 4;
 
 /// `player_info_update` с добавлением игроков в таб-лист.
+///
+/// Как `createPlayerInitializing`, кроме чата, имени в списке и порядка:
+/// они у сервера пока не меняются и совпадают с умолчаниями клиента.
 pub fn player_info_add(id: i32, players: &[PlayerEntry]) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id);
     // EnumSet из 8 действий — фиксированный битсет в 1 байт.
-    w.u8(ADD_PLAYER | UPDATE_GAME_MODE | UPDATE_LISTED | UPDATE_LATENCY);
+    w.u8(ADD_PLAYER | UPDATE_GAME_MODE | UPDATE_LISTED | UPDATE_LATENCY | UPDATE_HAT);
     w.var_int(players.len() as i32);
     for p in players {
         w.uuid(p.uuid).string(&p.name);
@@ -613,8 +618,26 @@ pub fn player_info_add(id: i32, players: &[PlayerEntry]) -> Vec<u8> {
                 w.string(sig);
             }
         }
-        w.var_int(p.game_mode).bool(true).var_int(p.latency_ms);
+        w.var_int(p.game_mode)
+            .bool(true)
+            .var_int(p.latency_ms)
+            .bool(p.show_hat);
     }
+    w.buf
+}
+
+/// `UPDATE_HAT` — последнее из восьми действий.
+const UPDATE_HAT: u8 = 1 << 7;
+
+/// `player_info_update` с флагом шляпы (`ServerboundClientInformation` сменил
+/// `PlayerModelPart.HAT`): таб-лист рисует голову со вторым слоем или без.
+pub fn player_info_hat(id: i32, uuid: Uuid, shown: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .u8(UPDATE_HAT)
+        .var_int(1)
+        .uuid(uuid)
+        .bool(shown);
     w.buf
 }
 
@@ -786,11 +809,12 @@ mod chat_tests {
                 properties: vec![],
                 game_mode: 1,
                 latency_ms: 5,
+                show_hat: true,
             }],
         );
         let mut r = Reader::new(&p);
         assert_eq!(r.var_int().unwrap(), 0x40);
-        assert_eq!(r.u8().unwrap(), 0b1_1101);
+        assert_eq!(r.u8().unwrap(), 0b1001_1101);
         assert_eq!(r.var_int().unwrap(), 1);
         assert_eq!(r.uuid().unwrap(), u);
         assert_eq!(r.string(16).unwrap(), "Steve");
@@ -803,6 +827,7 @@ mod chat_tests {
             ),
             (1, true, 5)
         );
+        assert!(r.bool().unwrap());
         assert!(r.remaining().is_empty());
     }
 }
@@ -925,7 +950,12 @@ pub fn teleport_entity(
 
 /// `ServerboundMoveVehiclePacket`: позиция, поворот и «на земле».
 pub fn read_move_vehicle(r: &mut Reader) -> Result<([f64; 3], f32, f32, bool)> {
-    Ok(([r.f64()?, r.f64()?, r.f64()?], r.f32()?, r.f32()?, r.bool()?))
+    Ok((
+        [r.f64()?, r.f64()?, r.f64()?],
+        r.f32()?,
+        r.f32()?,
+        r.bool()?,
+    ))
 }
 
 pub fn rotate_head(id: i32, entity_id: i32, yaw: f32) -> Vec<u8> {
@@ -1491,6 +1521,16 @@ pub fn mob_data(
         crate::text::write_component(&mut w, name);
         w.u8(3).var_int(8).bool(true);
     }
+    w.u8(0xff);
+    w.buf
+}
+
+/// Флаги моба (`Mob.DATA_MOB_FLAGS_ID`, индекс 15): 1 — без ИИ, 2 — левша,
+/// 4 — агрессивен (зомби поднимает руки).
+pub fn mob_flags(id: i32, entity_id: i32, flags: u8) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_id);
+    w.u8(15).var_int(0).u8(flags);
     w.u8(0xff);
     w.buf
 }

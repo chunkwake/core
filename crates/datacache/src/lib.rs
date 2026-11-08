@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Пишется последним; меняется при изменении состава кэша.
-pub const CACHE_MARKER: &str = ".chunkwake-cache-v12";
+pub const CACHE_MARKER: &str = ".chunkwake-cache-v13";
 
 /// Вложенные `.jar` версии лежат здесь (бандлер распаковывает сервер сюда).
 const VERSION_JAR_PREFIX: &str = "META-INF/versions/";
@@ -137,8 +137,16 @@ pub fn ensure_generated_with(
         INSTRUMENTS_EXTRACTOR,
     )
     .map_err(|e| io("write", &class_dir.join("ChunkwakeInstruments.class"), e))?;
-    std::fs::write(class_dir.join("ChunkwakeMapColors.class"), MAP_COLORS_EXTRACTOR)
-        .map_err(|e| io("write", &class_dir.join("ChunkwakeMapColors.class"), e))?;
+    std::fs::write(
+        class_dir.join("ChunkwakeMapColors.class"),
+        MAP_COLORS_EXTRACTOR,
+    )
+    .map_err(|e| io("write", &class_dir.join("ChunkwakeMapColors.class"), e))?;
+    std::fs::write(
+        class_dir.join("ChunkwakeEntities.class"),
+        ENTITIES_EXTRACTOR,
+    )
+    .map_err(|e| io("write", &class_dir.join("ChunkwakeEntities.class"), e))?;
 
     let mut classpath =
         vec![std::path::absolute(&class_dir).map_err(|e| io("resolve", &class_dir, e))?];
@@ -208,6 +216,16 @@ pub fn ensure_generated_with(
         "[3/3] map colors extractor",
         progress,
     )?;
+    progress("[3/3] extracting entity types");
+    run_extractor(
+        java,
+        &work,
+        &classpath,
+        "ChunkwakeEntities",
+        &tmp_abs.join("reports/entities.csv"),
+        "[3/3] entities extractor",
+        progress,
+    )?;
     // Шаблоны структур не входят в вывод генератора данных: они лежат
     // в jar версии. Пишем их в тот же временный каталог до маркера.
     progress("copying structure templates");
@@ -227,22 +245,40 @@ pub fn ensure_generated_with(
 }
 
 /// Выгрузка свойств света (исходник рядом: `extractor/ChunkwakeLight.java`).
-const LIGHT_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeLight.class");
+const LIGHT_EXTRACTOR: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/extractor/ChunkwakeLight.class"));
 
 /// Выгрузка климатических параметров биомов (`extractor/ChunkwakeBiomes.java`).
-const BIOME_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeBiomes.class");
+const BIOME_EXTRACTOR: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/extractor/ChunkwakeBiomes.class"));
 
 /// Выгрузка коллизии и трения блоков (`extractor/ChunkwakeShapes.java`).
-const SHAPES_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeShapes.class");
+const SHAPES_EXTRACTOR: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/extractor/ChunkwakeShapes.class"));
 
 /// Выгрузка инструмента нотного блока (`extractor/ChunkwakeInstruments.java`).
-const INSTRUMENTS_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeInstruments.class");
+const INSTRUMENTS_EXTRACTOR: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/extractor/ChunkwakeInstruments.class"
+));
 
 /// Выгрузка цвета блоков на карте (`extractor/ChunkwakeMapColors.java`).
-const MAP_COLORS_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeMapColors.class");
+const MAP_COLORS_EXTRACTOR: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/extractor/ChunkwakeMapColors.class"
+));
+
+/// Выгрузка свойств типов сущностей (`extractor/ChunkwakeEntities.java`).
+const ENTITIES_EXTRACTOR: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/extractor/ChunkwakeEntities.class"
+));
 
 /// Выгрузка жидкостей и классов блоков для фич (`extractor/ChunkwakeWorldgen.java`).
-const WORLDGEN_EXTRACTOR: &[u8] = include_bytes!("../extractor/ChunkwakeWorldgen.class");
+const WORLDGEN_EXTRACTOR: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/extractor/ChunkwakeWorldgen.class"
+));
 
 /// Один выгрузчик: класс на общем classpath, результат — файл `out`.
 fn run_extractor(

@@ -222,7 +222,11 @@ impl Paletted {
     /// Новая секция в счёте [`paletted_live`].
     fn counted(palette: Vec<u32>, counts: Vec<u16>, idx: Indices) -> Self {
         PALETTED_LIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Self { palette, counts, idx }
+        Self {
+            palette,
+            counts,
+            idx,
+        }
     }
 
     /// Индексы палитры по клеткам в порядке первого появления состояний.
@@ -240,13 +244,17 @@ impl Paletted {
                     if first[lo] == u16::MAX {
                         first[lo] = (pair_index * 2) as u16;
                         seen -= 1;
-                        if seen == 0 { break; }
+                        if seen == 0 {
+                            break;
+                        }
                     }
                     let hi = (pair >> 4) as usize;
                     if first[hi] == u16::MAX {
                         first[hi] = (pair_index * 2 + 1) as u16;
                         seen -= 1;
-                        if seen == 0 { break; }
+                        if seen == 0 {
+                            break;
+                        }
                     }
                 }
             }
@@ -314,7 +322,9 @@ impl Paletted {
         }
         self.palette.push(state);
         self.counts.push(0);
-        if self.palette.len() > 16 && let Indices::Nibble(_) = &self.idx {
+        if self.palette.len() > 16
+            && let Indices::Nibble(_) = &self.idx
+        {
             let mut narrow = Box::new([0u8; 4096]);
             for (i, slot) in narrow.iter_mut().enumerate() {
                 *slot = self.idx.get(i) as u8;
@@ -1105,16 +1115,22 @@ impl ChunkColumn {
             bits_at: impl Fn(usize) -> u8,
         ) {
             for local_y in (0..16).rev() {
-                if pending.iter().all(|&n| n == 0) { break; }
+                if pending.iter().all(|&n| n == 0) {
+                    break;
+                }
                 let base = local_y * 256;
                 let h = (si * 16 + local_y + 1) as u32;
                 // Индекс xz адресует сразу все три карты и секцию.
                 #[allow(clippy::needless_range_loop)]
                 for xz in 0..256 {
                     let bits = bits_at(base + xz);
-                    if bits == 0 { continue; }
+                    if bits == 0 {
+                        continue;
+                    }
                     for kind in 0..3 {
-                        if bits & (1 << kind) == 0 || out[kind][xz] != 0 { continue; }
+                        if bits & (1 << kind) == 0 || out[kind][xz] != 0 {
+                            continue;
+                        }
                         out[kind][xz] = h;
                         pending[kind] -= 1;
                     }
@@ -1151,14 +1167,20 @@ impl ChunkColumn {
             if section.non_air() == 0 {
                 continue;
             }
-            let Storage::Paletted(p) = &section.storage else { unreachable!() };
+            let Storage::Paletted(p) = &section.storage else {
+                unreachable!()
+            };
             let classes: Vec<u8> = p.palette.iter().map(|&state| bits_of(state)).collect();
             match &p.idx {
                 Indices::Nibble(a) => scan_section(si, &mut out, &mut pending, |i| {
                     classes[((a[i >> 1] >> ((i & 1) << 2)) & 0xf) as usize]
                 }),
-                Indices::Narrow(a) => scan_section(si, &mut out, &mut pending, |i| classes[a[i] as usize]),
-                Indices::Wide(a) => scan_section(si, &mut out, &mut pending, |i| classes[a[i] as usize]),
+                Indices::Narrow(a) => {
+                    scan_section(si, &mut out, &mut pending, |i| classes[a[i] as usize])
+                }
+                Indices::Wide(a) => {
+                    scan_section(si, &mut out, &mut pending, |i| classes[a[i] as usize])
+                }
             }
         }
         out
@@ -1629,20 +1651,31 @@ mod tests {
     fn nibble_grows_without_changing_states_or_palette_order() {
         let blocks: Vec<u32> = (0..4096).map(|i| (i % 16) as u32).collect();
         let mut section = Section::from_blocks(blocks.clone(), 0);
-        assert!(matches!(&section.storage, Storage::Paletted(p) if matches!(&p.idx, Indices::Nibble(_))));
+        assert!(
+            matches!(&section.storage, Storage::Paletted(p) if matches!(&p.idx, Indices::Nibble(_)))
+        );
         assert_eq!(section.blocks(), blocks);
         assert!(section.heap_bytes() >= 2048);
         section.set(1, 16);
-        assert!(matches!(&section.storage, Storage::Paletted(p) if matches!(&p.idx, Indices::Narrow(_))));
+        assert!(
+            matches!(&section.storage, Storage::Paletted(p) if matches!(&p.idx, Indices::Narrow(_)))
+        );
         for state in 17..257 {
             section.set(state as usize, state);
         }
-        assert!(matches!(&section.storage, Storage::Paletted(p) if matches!(&p.idx, Indices::Wide(_))));
+        assert!(
+            matches!(&section.storage, Storage::Paletted(p) if matches!(&p.idx, Indices::Wide(_)))
+        );
         let mut scanned = Vec::new();
         section.for_each(|state| scanned.push(state));
         assert_eq!(scanned, section.blocks());
         let (palette, indices) = section.first_seen_pack();
-        assert!(indices.iter().enumerate().all(|(i, &entry)| palette[entry as usize] == scanned[i]));
+        assert!(
+            indices
+                .iter()
+                .enumerate()
+                .all(|(i, &entry)| palette[entry as usize] == scanned[i])
+        );
     }
 }
 

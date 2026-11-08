@@ -1,4 +1,4 @@
-//! Живой прогон вибраций от урона, приземления и смены пластинки.
+//! Живой прогон вибраций от урона, приземления, пластинки, контейнеров и редстоуна.
 //! `sculk_events_probe <addr> <packets.json> <blocks.json>`
 use chunkwake_bots::{Client, Event, Ids};
 use chunkwake_data::packets::{Direction, PacketTable, State};
@@ -79,18 +79,49 @@ impl Probe {
         self.pump(100).await;
     }
 
-    async fn use_jukebox(&mut self) {
+    async fn use_on(&mut self, pos: [i32; 3]) {
         self.seq += 1;
         let mut w = Writer::new();
         w.var_int(self.sb("use_item_on"))
             .var_int(0)
-            .i64(pack(JUKEBOX))
+            .i64(pack(pos))
             .var_int(1)
             .f32(0.5)
             .f32(0.5)
             .f32(0.5)
             .u8(0)
             .u8(0)
+            .var_int(self.seq);
+        self.client.send_raw(&w.buf).await.unwrap();
+        self.pump(400).await;
+    }
+
+    async fn use_item(&mut self) {
+        self.seq += 1;
+        let mut w = Writer::new();
+        w.var_int(self.sb("use_item"))
+            .var_int(0)
+            .var_int(self.seq)
+            .f32(0.0)
+            .f32(0.0);
+        self.client.send_raw(&w.buf).await.unwrap();
+        self.pump(400).await;
+    }
+
+    async fn close_window(&mut self) {
+        let mut w = Writer::new();
+        w.var_int(self.sb("container_close")).var_int(1);
+        self.client.send_raw(&w.buf).await.unwrap();
+        self.pump(400).await;
+    }
+
+    async fn hit_block(&mut self, pos: [i32; 3]) {
+        self.seq += 1;
+        let mut w = Writer::new();
+        w.var_int(self.sb("player_action"))
+            .var_int(0)
+            .i64(pack(pos))
+            .u8(1)
             .var_int(self.seq);
         self.client.send_raw(&w.buf).await.unwrap();
         self.pump(400).await;
@@ -199,7 +230,7 @@ async fn main() {
     probe.pump(2600).await;
     probe.reset_sensor().await;
     probe.hold(0).await;
-    probe.use_jukebox().await;
+    probe.use_on(JUKEBOX).await;
     probe.assert_active("пластинка в проигрыватель рукой");
     assert!(
         probe
@@ -211,7 +242,7 @@ async fn main() {
     probe.pump(2600).await;
     probe.reset_sensor().await;
     probe.hold(5).await;
-    probe.use_jukebox().await;
+    probe.use_on(JUKEBOX).await;
     probe.assert_active("пластинка из проигрывателя рукой");
     assert!(
         probe
@@ -240,4 +271,356 @@ async fn main() {
             .iter()
             .any(|state| state.contains("has_record=true"))
     );
+
+    probe.cmd("setblock 10 201 8 minecraft:air").await;
+    probe.cmd("setblock 10 200 8 minecraft:chest").await;
+    probe.cmd("tp framer 10.5 200 10.5 -90 0").await;
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe.use_on(JUKEBOX).await;
+    probe.assert_active("открытие сундука");
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe.close_window().await;
+    probe.assert_active("закрытие сундука");
+
+    probe.cmd("setblock 10 200 8 minecraft:barrel").await;
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe.use_on(JUKEBOX).await;
+    probe.assert_active("открытие бочки");
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe.close_window().await;
+    probe.assert_active("закрытие бочки");
+
+    probe.cmd("setblock 10 200 8 minecraft:hopper").await;
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe.use_on(JUKEBOX).await;
+    assert!(
+        !probe
+            .changes
+            .iter()
+            .any(|state| state.contains("sculk_sensor_phase=active")),
+        "открытие воронки ошибочно включило сенсор: {:?}",
+        probe.changes
+    );
+    println!("открытие воронки: сенсор молчит");
+    probe.close_window().await;
+
+    probe.cmd("setblock 10 200 8 minecraft:note_block").await;
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe.use_on(JUKEBOX).await;
+    probe.assert_active("нотный блок: клик");
+
+    probe.cmd("setblock 10 201 8 minecraft:stone").await;
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe.use_on(JUKEBOX).await;
+    assert!(
+        !probe
+            .changes
+            .iter()
+            .any(|state| state.contains("sculk_sensor_phase=active")),
+        "заглушенный нотный блок включил сенсор: {:?}",
+        probe.changes
+    );
+    println!("нотный блок под камнем: сенсор молчит");
+
+    probe.cmd("setblock 10 201 8 minecraft:air").await;
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe.hit_block(JUKEBOX).await;
+    probe.assert_active("нотный блок: удар");
+
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe
+        .cmd("setblock 11 200 8 minecraft:redstone_block")
+        .await;
+    probe.pump(500).await;
+    probe.assert_active("нотный блок: фронт сигнала");
+
+    probe.cmd("setblock 11 200 8 minecraft:air").await;
+    probe
+        .cmd("setblock 10 200 8 minecraft:lever[face=floor,facing=north,powered=false]")
+        .await;
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe.use_on(JUKEBOX).await;
+    probe.assert_active("рычаг: включение");
+    assert!(
+        probe
+            .jukebox_changes
+            .iter()
+            .any(|state| state.contains("powered=true"))
+    );
+
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe.jukebox_changes.clear();
+    probe.use_on(JUKEBOX).await;
+    probe.assert_active("рычаг: выключение");
+    assert!(
+        probe
+            .jukebox_changes
+            .iter()
+            .any(|state| state.contains("powered=false"))
+    );
+
+    probe
+        .cmd("setblock 10 200 8 minecraft:oak_button[face=floor,facing=north,powered=false]")
+        .await;
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe.jukebox_changes.clear();
+    probe.use_on(JUKEBOX).await;
+    probe.assert_active("кнопка: нажатие");
+    assert!(
+        probe
+            .jukebox_changes
+            .iter()
+            .any(|state| state.contains("powered=true"))
+    );
+    // Старый сенсор должен закончить цикл: его отложенный тик переживает `/setblock`.
+    probe.pump(2600).await;
+    probe.cmd("setblock 8 200 8 minecraft:air").await;
+    probe.cmd("tick rate 5").await;
+    probe.jukebox_changes.clear();
+    probe.use_on(JUKEBOX).await;
+    assert!(
+        probe
+            .jukebox_changes
+            .iter()
+            .any(|state| state.contains("powered=true"))
+    );
+    probe.reset_sensor().await;
+    probe.pump(7000).await;
+    probe.assert_active("кнопка: отпускание");
+    assert!(
+        probe
+            .jukebox_changes
+            .iter()
+            .any(|state| state.contains("powered=false"))
+    );
+    probe.cmd("tick rate 20").await;
+
+    probe
+        .cmd("setblock 10 200 8 minecraft:stone_pressure_plate[powered=false]")
+        .await;
+    probe.cmd("tp framer 10.5 200 8.5").await;
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe.jukebox_changes.clear();
+    // `/setblock` сам не вибрирует; стоящий на плите игрок нажмёт её на тике.
+    probe
+        .cmd("setblock 10 200 8 minecraft:stone_pressure_plate[powered=false]")
+        .await;
+    probe.assert_active("плита: нажатие");
+    assert!(
+        probe
+            .jukebox_changes
+            .iter()
+            .any(|state| state.contains("powered=true"))
+    );
+
+    // Остановить тики, чтобы успеть сбросить сенсор до проверки отпущенной плиты.
+    probe.cmd("tick freeze").await;
+    probe.cmd("tp framer 10.5 200 10.5").await;
+    probe.reset_sensor().await;
+    probe.jukebox_changes.clear();
+    probe.cmd("tick unfreeze").await;
+    probe.pump(1400).await;
+    probe.assert_active("плита: отпускание");
+    assert!(
+        probe
+            .jukebox_changes
+            .iter()
+            .any(|state| state.contains("powered=false"))
+    );
+
+    probe
+        .cmd("setblock 10 200 8 minecraft:light_weighted_pressure_plate[power=0]")
+        .await;
+    probe.cmd("tp framer 10.5 200 8.5").await;
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe.jukebox_changes.clear();
+    probe
+        .cmd("setblock 10 200 8 minecraft:light_weighted_pressure_plate[power=2]")
+        .await;
+    probe.pump(500).await;
+    assert!(
+        probe
+            .jukebox_changes
+            .iter()
+            .any(|state| state.contains("power=1")),
+        "утяжелённая плита не пересчитала силу: {:?}",
+        probe.jukebox_changes
+    );
+    assert!(
+        !probe
+            .changes
+            .iter()
+            .any(|state| state.contains("sculk_sensor_phase=active")),
+        "изменение ненулевой силы плиты включило сенсор: {:?}",
+        probe.changes
+    );
+    println!("утяжелённая плита: сила 2 → 1 без вибрации");
+
+    probe.cmd("tp framer 10.5 200 10.5").await;
+    probe
+        .cmd("setblock 10 200 8 minecraft:oak_fence_gate[facing=north,open=false,powered=false]")
+        .await;
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe.jukebox_changes.clear();
+    probe
+        .cmd("setblock 11 200 8 minecraft:redstone_block")
+        .await;
+    probe.assert_active("калитка: открытие редстоуном");
+    assert!(
+        probe
+            .jukebox_changes
+            .iter()
+            .any(|state| state.contains("open=true"))
+    );
+
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe.jukebox_changes.clear();
+    probe.cmd("setblock 11 200 8 minecraft:air").await;
+    probe.assert_active("калитка: закрытие редстоуном");
+    assert!(
+        probe
+            .jukebox_changes
+            .iter()
+            .any(|state| state.contains("open=false"))
+    );
+
+    probe.cmd("setblock 10 200 8 minecraft:oak_door[half=lower,facing=north,hinge=left,open=false,powered=false]").await;
+    probe.cmd("setblock 10 201 8 minecraft:oak_door[half=upper,facing=north,hinge=left,open=false,powered=false]").await;
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe.jukebox_changes.clear();
+    probe
+        .cmd("setblock 11 200 8 minecraft:redstone_block")
+        .await;
+    probe.assert_active("дверь: открытие редстоуном");
+    assert!(
+        probe
+            .jukebox_changes
+            .iter()
+            .any(|state| state.contains("open=true"))
+    );
+
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe.jukebox_changes.clear();
+    probe.cmd("setblock 11 200 8 minecraft:air").await;
+    probe.assert_active("дверь: закрытие редстоуном");
+    assert!(
+        probe
+            .jukebox_changes
+            .iter()
+            .any(|state| state.contains("open=false"))
+    );
+
+    probe.cmd("setblock 10 201 8 minecraft:air").await;
+    probe.cmd("setblock 10 200 8 minecraft:oak_trapdoor[facing=north,half=bottom,open=false,powered=false,waterlogged=false]").await;
+    probe.pump(2600).await;
+    probe.reset_sensor().await;
+    probe.jukebox_changes.clear();
+    probe
+        .cmd("setblock 11 200 8 minecraft:redstone_block")
+        .await;
+    assert!(
+        probe
+            .jukebox_changes
+            .iter()
+            .any(|state| state.contains("open=true"))
+    );
+    assert!(
+        !probe
+            .changes
+            .iter()
+            .any(|state| state.contains("sculk_sensor_phase=active")),
+        "люк от редстоуна включил сенсор: {:?}",
+        probe.changes
+    );
+    println!("люк: открытие редстоуном без вибрации");
+
+    // Сигнал 3 сзади калиброванного сенсора: снаряд при запуске даёт
+    // `projectile_shoot`, а его приземление имеет другую частоту (2).
+    probe.cmd("tp framer 10.5 200 10.5").await;
+    probe.cmd("fill -6 199 8 8 199 8 minecraft:stone").await;
+    probe.cmd("fill -6 200 8 8 200 8 minecraft:air").await;
+    probe
+        .cmd("setblock -6 200 8 minecraft:redstone_block")
+        .await;
+    probe
+        .cmd("fill -5 200 8 7 200 8 minecraft:redstone_wire")
+        .await;
+    probe
+        .cmd("setblock 8 200 8 minecraft:calibrated_sculk_sensor[facing=east]")
+        .await;
+    probe.cmd("clear framer").await;
+    probe.cmd("give framer minecraft:snowball").await;
+    probe.hold(0).await;
+    probe.pump(2600).await;
+    probe.changes.clear();
+    probe.use_item().await;
+    probe.assert_active("снежок: запуск снаряда (частота 3)");
+
+    // Следующий снежок ударится в стену; фильтр 2 отсечёт событие запуска.
+    probe.pump(2600).await;
+    probe.cmd("fill -7 199 8 8 199 8 minecraft:stone").await;
+    probe.cmd("fill -7 200 8 8 200 8 minecraft:air").await;
+    probe
+        .cmd("setblock -7 200 8 minecraft:redstone_block")
+        .await;
+    probe
+        .cmd("fill -6 200 8 7 200 8 minecraft:redstone_wire")
+        .await;
+    probe
+        .cmd("setblock 8 200 8 minecraft:calibrated_sculk_sensor[facing=east]")
+        .await;
+    probe.cmd("fill 10 200 12 10 204 12 minecraft:stone").await;
+    probe.cmd("give framer minecraft:snowball").await;
+    probe.hold(0).await;
+    probe.pump(2600).await;
+    probe.changes.clear();
+    probe.use_item().await;
+    probe.pump(900).await;
+    probe.assert_active("снежок: попадание в блок (частота 2)");
+
+    // Калиброванный сенсор с сигналом 15 слышит смерть, но отсекает урон (7).
+    probe.pump(2600).await;
+    probe.cmd("fill -7 200 8 8 200 8 minecraft:air").await;
+    probe.cmd("setblock 7 200 8 minecraft:redstone_block").await;
+    probe
+        .cmd("setblock 8 200 8 minecraft:calibrated_sculk_sensor[facing=east]")
+        .await;
+    probe.cmd("tp framer 12.5 200 10.5").await;
+    probe.cmd("fill 9 200 9 11 203 11 minecraft:glass").await;
+    probe.cmd("fill 10 200 10 10 202 10 minecraft:air").await;
+    probe.cmd("summon minecraft:cow 10.5 200 10.5").await;
+    probe.pump(2600).await;
+    probe.changes.clear();
+    probe.cmd("setblock 10 200 10 minecraft:lava").await;
+    probe.pump(6000).await;
+    probe.assert_active("смерть коровы (частота 15)");
+
+    probe.cmd("fill 9 200 9 11 203 11 minecraft:air").await;
+    probe.cmd("tp framer 10.5 200 10.5").await;
+    probe.pump(2600).await;
+    probe.cmd("setblock 8 200 8 minecraft:air").await;
+    probe
+        .cmd("setblock 8 200 8 minecraft:calibrated_sculk_sensor[facing=east]")
+        .await;
+    probe.changes.clear();
+    probe.cmd("damage framer 100 minecraft:generic").await;
+    probe.assert_active("смерть игрока (частота 15)");
 }

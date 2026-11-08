@@ -610,9 +610,17 @@ pub fn rail_signal(
         _ => {}
     }
     let same = |p: [i32; 3]| -> bool {
-        let Some((s, powered)) = at(p) else { return false };
-        let ns = matches!(s, Shape::NorthSouth | Shape::AscendingNorth | Shape::AscendingSouth);
-        let ew = matches!(s, Shape::EastWest | Shape::AscendingEast | Shape::AscendingWest);
+        let Some((s, powered)) = at(p) else {
+            return false;
+        };
+        let ns = matches!(
+            s,
+            Shape::NorthSouth | Shape::AscendingNorth | Shape::AscendingSouth
+        );
+        let ew = matches!(
+            s,
+            Shape::EastWest | Shape::AscendingEast | Shape::AscendingWest
+        );
         if (line == Shape::EastWest && ns) || (line == Shape::NorthSouth && ew) || !powered {
             return false;
         }
@@ -650,7 +658,13 @@ mod tests {
     fn line(n: i32, kind: Kind) -> World {
         let mut w = World::default();
         for x in 0..n {
-            w.rails.insert([x, 0, 0], Rail { shape: Shape::EastWest, kind });
+            w.rails.insert(
+                [x, 0, 0],
+                Rail {
+                    shape: Shape::EastWest,
+                    kind,
+                },
+            );
         }
         w
     }
@@ -736,18 +750,33 @@ mod tests {
         let moved = c.pos[0] - x0;
         assert!(moved > 7.0 && moved <= 8.0 + 1e-9, "{moved}");
         // Тяга повёрнута вдоль скорости и сохранила длину.
-        assert!((c.push[0] - 2.0).abs() < 1e-9 && c.push[1].abs() < 1e-9, "{c:?}");
+        assert!(
+            (c.push[0] - 2.0).abs() < 1e-9 && c.push[1].abs() < 1e-9,
+            "{c:?}"
+        );
     }
 
     #[test]
     fn unpowered_rail_brakes_and_powered_rail_boosts() {
         let mut w = line(10, Kind::Plain);
-        w.rails.insert([5, 0, 0], Rail { shape: Shape::EastWest, kind: Kind::Powered(false) });
+        w.rails.insert(
+            [5, 0, 0],
+            Rail {
+                shape: Shape::EastWest,
+                kind: Kind::Powered(false),
+            },
+        );
         let mut c = Cart::new([5.5, 0.0625, 0.5], 0.0);
         c.vel = [0.2, 0.0, 0.0];
         c.tick(&w, [0.0; 2]);
         assert!(c.vel[0] < 0.1, "тормозит: {c:?}");
-        w.rails.insert([5, 0, 0], Rail { shape: Shape::EastWest, kind: Kind::Powered(true) });
+        w.rails.insert(
+            [5, 0, 0],
+            Rail {
+                shape: Shape::EastWest,
+                kind: Kind::Powered(true),
+            },
+        );
         let mut c = Cart::new([5.5, 0.0625, 0.5], 0.0);
         c.vel = [0.2, 0.0, 0.0];
         c.tick(&w, [0.0; 2]);
@@ -757,7 +786,13 @@ mod tests {
     #[test]
     fn powered_rail_starts_cart_away_from_a_block() {
         let mut w = line(10, Kind::Plain);
-        w.rails.insert([0, 0, 0], Rail { shape: Shape::EastWest, kind: Kind::Powered(true) });
+        w.rails.insert(
+            [0, 0, 0],
+            Rail {
+                shape: Shape::EastWest,
+                kind: Kind::Powered(true),
+            },
+        );
         w.solid.push([-1, 0, 0]);
         let mut c = Cart::new([0.5, 0.0625, 0.5], 0.0);
         c.tick(&w, [0.0; 2]);
@@ -771,9 +806,21 @@ mod tests {
     #[test]
     fn cart_climbs_a_slope_with_its_speed() {
         let mut w = line(3, Kind::Plain);
-        w.rails.insert([3, 0, 0], Rail { shape: Shape::AscendingEast, kind: Kind::Plain });
+        w.rails.insert(
+            [3, 0, 0],
+            Rail {
+                shape: Shape::AscendingEast,
+                kind: Kind::Plain,
+            },
+        );
         for x in 4..8 {
-            w.rails.insert([x, 1, 0], Rail { shape: Shape::EastWest, kind: Kind::Plain });
+            w.rails.insert(
+                [x, 1, 0],
+                Rail {
+                    shape: Shape::EastWest,
+                    kind: Kind::Plain,
+                },
+            );
         }
         let mut c = Cart::new([1.5, 0.0625, 0.5], 0.0);
         c.vel = [0.4, 0.0, 0.0];
@@ -786,9 +833,21 @@ mod tests {
     #[test]
     fn cart_turns_on_a_curve() {
         let mut w = line(3, Kind::Plain);
-        w.rails.insert([3, 0, 0], Rail { shape: Shape::SouthWest, kind: Kind::Plain });
+        w.rails.insert(
+            [3, 0, 0],
+            Rail {
+                shape: Shape::SouthWest,
+                kind: Kind::Plain,
+            },
+        );
         for z in 1..6 {
-            w.rails.insert([3, 0, z], Rail { shape: Shape::NorthSouth, kind: Kind::Plain });
+            w.rails.insert(
+                [3, 0, z],
+                Rail {
+                    shape: Shape::NorthSouth,
+                    kind: Kind::Plain,
+                },
+            );
         }
         let mut c = Cart::new([1.5, 0.0625, 0.5], 0.0);
         c.vel = [0.3, 0.0, 0.0];
@@ -823,7 +882,9 @@ mod tests {
     #[test]
     fn powered_rail_signal_runs_eight_rails() {
         // Источник у x=0; рельсы 0..12 на восток.
-        let at = |p: [i32; 3]| (p[1] == 0 && p[2] == 0 && (0..12).contains(&p[0])).then_some((Shape::EastWest, true));
+        let at = |p: [i32; 3]| {
+            (p[1] == 0 && p[2] == 0 && (0..12).contains(&p[0])).then_some((Shape::EastWest, true))
+        };
         let signal = |p: [i32; 3]| p == [0, 0, 0];
         let lit = |x: i32| {
             signal([x, 0, 0])

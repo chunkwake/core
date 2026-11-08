@@ -356,11 +356,17 @@ impl PackedBiomes {
             }
             cells.push(last.1);
         }
-        Some(Self { palette, cells: cells.into() })
+        Some(Self {
+            palette,
+            cells: cells.into(),
+        })
     }
 
     fn unpack(&self) -> Arc<[u32]> {
-        self.cells.iter().map(|&i| self.palette[i as usize]).collect()
+        self.cells
+            .iter()
+            .map(|&i| self.palette[i as usize])
+            .collect()
     }
 }
 
@@ -704,7 +710,8 @@ impl Generator {
                         d += beard.delta(bx, by, bz);
                     }
                     let found = aquifer.substance(&mut ctx, bx, by, bz, d as f64);
-                    if aquifer.should_schedule && matches!(found, Some(Fluid::Water | Fluid::Lava)) {
+                    if aquifer.should_schedule && matches!(found, Some(Fluid::Water | Fluid::Lava))
+                    {
                         fluid_posts.push([bx, by, bz]);
                     }
                     let fill = match found {
@@ -722,7 +729,10 @@ impl Generator {
         if std::env::var_os("CHUNKWAKE_PROF").is_some() {
             let total = t0.elapsed().as_secs_f64() * 1000.0;
             let corners = density::CORNERS.with(|c| c.replace(0.0));
-            eprintln!("  рельеф: плотность {t_density:.2} (углы {corners:.2}) | акифер {:.2} мс", total - t_density);
+            eprintln!(
+                "  рельеф: плотность {t_density:.2} (углы {corners:.2}) | акифер {:.2} мс",
+                total - t_density
+            );
         }
         Terrain {
             fills: out,
@@ -867,7 +877,9 @@ impl Generator {
                 };
                 states[i] = state;
                 if terrain.aquifer.should_schedule && fluid != Fluid::Air {
-                    terrain.fluid_posts.push([bx0 + x as i32, wy, bz0 + z as i32]);
+                    terrain
+                        .fluid_posts
+                        .push([bx0 + x as i32, wy, bz0 + z as i32]);
                 }
                 if has_grass {
                     let below = at(x, wy - 1, z);

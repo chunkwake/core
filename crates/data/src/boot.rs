@@ -1,5 +1,5 @@
 //! Образ данных запуска: всё, что сервер собирает из дерева ванильных JSON,
-//! упаковывается в `chunkwake-derived-v1/boot.v4.bin` и дальше читается одним
+//! упаковывается в `chunkwake-derived-v1/boot.v5.bin` и дальше читается одним
 //! последовательным файлом вместо тысяч открытий и разборов.
 //!
 //! Сборка образа вызывает обычные загрузчики; повторный старт их не трогает.
@@ -18,9 +18,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Версия формата. Меняется вместе с любым полем образа.
-const SCHEMA: u32 = 4;
+const SCHEMA: u32 = 5;
 const MAGIC: u32 = 0x434B_424F; // "CKBO"
-const FILE: &str = "boot.v4.bin";
+const FILE: &str = "boot.v5.bin";
 
 /// Слоты экипировки в порядке кодов образа (`ItemInfo::equip`).
 const EQUIP: [&str; 8] = [
@@ -427,6 +427,8 @@ fn w_items(w: &mut W, items: &[ItemInfo]) {
         w.f32(i.toughness);
         w.f32(i.attack);
         w.f32(i.attack_speed);
+        w.u8(i.swing.0);
+        w.u8(i.swing.1);
     }
 }
 
@@ -930,6 +932,7 @@ fn r_items(r: &mut R<'_>) -> Result<Vec<ItemInfo>, DataError> {
             toughness: r.f32()?,
             attack: r.f32()?,
             attack_speed: r.f32()?,
+            swing: (r.u8()?, r.u8()?),
         });
     }
     Ok(out)
@@ -1243,6 +1246,7 @@ mod tests {
                 toughness: 2.0,
                 attack: 5.0,
                 attack_speed: -2.4,
+                swing: (2, 13),
             },
         ];
         let tools = vec![

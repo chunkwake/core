@@ -13,12 +13,19 @@ pub struct Stand {
 
 impl Default for Stand {
     fn default() -> Self {
-        Self { slots: [None; 5], time: 0, fuel: 0, ingredient: None }
+        Self {
+            slots: [None; 5],
+            time: 0,
+            fuel: 0,
+            ingredient: None,
+        }
     }
 }
 
 impl Stand {
-    pub fn data(&self) -> [i32; 2] { [self.time, self.fuel] }
+    pub fn data(&self) -> [i32; 2] {
+        [self.time, self.fuel]
+    }
 
     /// Тик по рецептам 26.3; возвращает, изменилось ли состояние, и остаток
     /// реагента (например, бутылку после драконьего дыхания).
@@ -40,7 +47,10 @@ impl Stand {
         let results: [Option<(i32, i32)>; 3] = std::array::from_fn(|i| {
             let bottle = self.slots[i]?;
             let potion = potion_of(bottle)?;
-            recipes.recipes.get(&(bottle.item, potion, reagent?)).copied()
+            recipes
+                .recipes
+                .get(&(bottle.item, potion, reagent?))
+                .copied()
         });
         let can_brew = results.iter().any(Option::is_some);
         if self.time > 0 {
@@ -54,8 +64,11 @@ impl Stand {
                 if let Some(item) = reagent {
                     let rest = remainder(item);
                     consume(&mut self.slots[3]);
-                    if self.slots[3].is_none() { self.slots[3] = rest; }
-                    else { leftover = rest; }
+                    if self.slots[3].is_none() {
+                        self.slots[3] = rest;
+                    } else {
+                        leftover = rest;
+                    }
                 }
                 self.ingredient = None;
             } else if !can_brew || self.ingredient != reagent {
@@ -73,7 +86,9 @@ impl Stand {
 fn consume(slot: &mut Slot) {
     if let Some(s) = slot.as_mut() {
         s.count -= 1;
-        if s.count <= 0 { *slot = None; }
+        if s.count <= 0 {
+            *slot = None;
+        }
     }
 }
 
@@ -89,12 +104,29 @@ mod tests {
         stand.slots[..3].fill(Some(Stack::new(1, 1)));
         stand.slots[3] = Some(Stack::new(3, 2));
         stand.slots[4] = Some(Stack::new(4, 1));
-        let step = |stand: &mut Stand| stand.tick(&recipes, 4, |_| Some(10), |mut s, _, potion| { s.damage = potion; s }, |_| None);
+        let step = |stand: &mut Stand| {
+            stand.tick(
+                &recipes,
+                4,
+                |_| Some(10),
+                |mut s, _, potion| {
+                    s.damage = potion;
+                    s
+                },
+                |_| None,
+            )
+        };
         step(&mut stand);
         assert_eq!(stand.data(), [400, 19]);
-        for _ in 0..400 { step(&mut stand); }
+        for _ in 0..400 {
+            step(&mut stand);
+        }
         assert_eq!(stand.slots[3], Some(Stack::new(3, 1)));
-        assert!(stand.slots[..3].iter().all(|s| s.is_some_and(|s| s.damage == 11)));
+        assert!(
+            stand.slots[..3]
+                .iter()
+                .all(|s| s.is_some_and(|s| s.damage == 11))
+        );
         assert_eq!(stand.fuel, 19);
     }
 
@@ -124,9 +156,16 @@ mod tests {
         stand.time = 1;
         stand.fuel = 19;
         stand.ingredient = Some(3);
-        let (_, rest) = stand.tick(&recipes, 4, |_| Some(10),
-            |mut stack, item, _| { stack.item = item; stack },
-            |_| Some(Stack::new(5, 1)));
+        let (_, rest) = stand.tick(
+            &recipes,
+            4,
+            |_| Some(10),
+            |mut stack, item, _| {
+                stack.item = item;
+                stack
+            },
+            |_| Some(Stack::new(5, 1)),
+        );
         assert_eq!(stand.slots[0], Some(Stack::new(2, 1)));
         assert_eq!(stand.slots[3], Some(Stack::new(3, 1)));
         assert_eq!(rest, Some(Stack::new(5, 1)));

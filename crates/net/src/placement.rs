@@ -274,7 +274,9 @@ impl Placement {
 
     /// `BlockState.isSolid` (устаревший «твёрдый» флаг: опора рамок и картин).
     pub fn solid(&self, state: u32) -> bool {
-        self.sturdy.get(state as usize).is_some_and(|m| m >> 6 & 1 == 1)
+        self.sturdy
+            .get(state as usize)
+            .is_some_and(|m| m >> 6 & 1 == 1)
     }
 
     /// Калитка поперёк направления `dir` (`FenceGateBlock.connectsToDirection`).
@@ -463,7 +465,11 @@ impl Placement {
                 UP => player,
                 _ => UP,
             };
-            self.set(&mut s, "orientation", &format!("{}_{}", DIRS[front], DIRS[top]));
+            self.set(
+                &mut s,
+                "orientation",
+                &format!("{}_{}", DIRS[front], DIRS[top]),
+            );
         }
         // Костёр ставится горящим (`CampfireBlock.getStateForPlacement`).
         if name == "minecraft:campfire" || name == "minecraft:soul_campfire" {
@@ -885,8 +891,14 @@ mod tests {
     #[test]
     fn default_state_from_registry() {
         let states = vec![
-            Some(("minecraft:detector_rail".to_owned(), props(&[("powered", "true")]))),
-            Some(("minecraft:detector_rail".to_owned(), props(&[("powered", "false")]))),
+            Some((
+                "minecraft:detector_rail".to_owned(),
+                props(&[("powered", "true")]),
+            )),
+            Some((
+                "minecraft:detector_rail".to_owned(),
+                props(&[("powered", "false")]),
+            )),
         ];
         let p = Placement::new(states, vec![0; 2], HashSet::new());
         assert_eq!(p.default_state("minecraft:detector_rail"), Some(0));

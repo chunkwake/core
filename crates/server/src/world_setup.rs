@@ -152,137 +152,147 @@ pub fn build_play_plan(
     chunkwake_world::set_rare_flags(rare_flags(&blocks.states()));
     chunkwake_world::set_poi_bits(poi_bits(&blocks.states()));
     chunkwake_world::set_height_classes(height_classes(data_dir, &blocks.states())?);
-    let palette = chunkwake_worldgen::feature::Palette::new(
-        data_dir, &blocks.states(), &|name| blocks.default_state(name).ok().map(|s| s as u32),
-    );
-    let (terrain, trim_idle, locate_biome, locate_structure, spawn_noise, sea_level, is_flat) = match &level
-        .kind
-    {
-        level::Kind::Flat(_) => (None, None, None, None, None, 63, true),
-        level::Kind::Noise(noise) => {
-            let mut loaded = chunkwake_worldgen::Generator::load_settings(
-                data_dir,
-                level.seed,
-                Some(data_version),
-                &noise.settings,
-            )?;
-            if loaded.min_y != dim.min_y || loaded.height != dim.height {
-                return Err(format!(
-                    "noise settings y {} height {} do not match the overworld y {} height {}",
-                    loaded.min_y, loaded.height, dim.min_y, dim.height
-                ));
-            }
-            // Биомы выбирает климат (`MultiNoiseBiomeSource`), а не один plains.
-            // `single_biome_surface` подменяет климат одним биомом.
-            loaded.bind_biomes(biome_ids.clone());
-            let fixed = noise.biome.is_some();
-            if let Some(name) = &noise.biome {
-                loaded.set_fixed_biome(name, &biome_ids)?;
-            }
-            let climate = loaded.has_biomes();
-            let noise = std::sync::Arc::new(loaded);
-            let sea = noise.sea_level;
-            // `NoiseSpawnFinder.findSpawnPosition` даёт точку `(x, 0, z)`;
-            // высоту берём по столбцу этой точки, как `ServerLevel`.
-            let stand = noise
-                .spawn_position()
-                .map(|p| {
-                    let cx = p[0].div_euclid(16);
-                    let cz = p[2].div_euclid(16);
-                    let y =
-                        stand_on_solid(&noise.fill(cx, cz), noise.height, dim.min_y, p[0], p[2]);
-                    [p[0] as f64 + 0.5, y, p[2] as f64 + 0.5]
-                })
-                .unwrap_or([8.5, 64.0, 8.5]);
-            let biome_id = biome as u32;
-            let sky = dim.has_skylight;
-            // Шум, поверхность и карверы — один конвейер генератора.
-            let state = |name: &str| blocks.default_state(name).ok().map(|s| s as u32);
-            let overworld =
-                chunkwake_worldgen::pipeline::Overworld::new(noise, &state, &biome_ids)?
-                    .with_memory_limits(memory.proto_limit, memory.base_column_limit)
-                    .with_features_palette(data_dir, palette.clone(), &biome_ids)?;
-            if let Some((done, all)) = overworld.feature_coverage() {
-                tracing::info!("worldgen features: {done} of {all} ported");
-                for (name, why) in overworld.feature_failures().iter().take(5) {
-                    tracing::warn!("worldgen feature {name}: {why}");
+    let palette = chunkwake_worldgen::feature::Palette::new(data_dir, &blocks.states(), &|name| {
+        blocks.default_state(name).ok().map(|s| s as u32)
+    });
+    let (terrain, trim_idle, locate_biome, locate_structure, spawn_noise, sea_level, is_flat) =
+        match &level.kind {
+            level::Kind::Flat(_) => (None, None, None, None, None, 63, true),
+            level::Kind::Noise(noise) => {
+                let mut loaded = chunkwake_worldgen::Generator::load_settings(
+                    data_dir,
+                    level.seed,
+                    Some(data_version),
+                    &noise.settings,
+                )?;
+                if loaded.min_y != dim.min_y || loaded.height != dim.height {
+                    return Err(format!(
+                        "noise settings y {} height {} do not match the overworld y {} height {}",
+                        loaded.min_y, loaded.height, dim.min_y, dim.height
+                    ));
                 }
-            }
-            if !overworld.has_surface() {
-                tracing::warn!("no material_rule in the data cache: the world keeps bare stone");
-            }
-            // Свет считает пролив при отправке: здесь только блоки.
-            // Тот же генератор отвечает `/locate biome`, не строя чанк.
-            let overworld = std::sync::Arc::new(overworld);
-            if std::env::var_os("CHUNKWAKE_MEMSTATS").is_some() {
-                let wg = overworld.clone();
-                std::thread::spawn(move || loop {
-                    std::thread::sleep(std::time::Duration::from_secs(10));
-                    tracing::info!("memstats gen: {}", wg.mem_stats());
-                });
-            }
-            let locate_world = overworld.clone();
-            let locate: Locate =
-                std::sync::Arc::new(move |name, origin| locate_world.locate_biome(name, origin));
-            let locate_struct_world = overworld.clone();
-            let locate_structure: Locate = std::sync::Arc::new(move |name, origin| {
-                locate_struct_world.locate_structure(name, origin)
-            });
-            let trim_world = overworld.clone();
-            let trim_idle: chunkwake_net::play::TerrainTrimFn = std::sync::Arc::new(move || trim_world.trim_idle());
-            let built: std::sync::Arc<dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync> =
-                std::sync::Arc::new(move |cx, cz| {
-                    // `None` — чанк уже отдан: генератор его не повторяет, и
-                    // вызывающему нужен готовый столбец из мира, а не копия.
-                    let chunk = overworld.chunk(cx, cz)?;
-                    let mut column = match chunk.biomes {
-                        Some(biomes) => ChunkColumn::from_blocks_with_biomes(
-                            &chunk.states,
-                            &biomes,
-                            block_bits,
-                            biome_bits,
-                            sky,
-                        ),
-                        None => ChunkColumn::from_blocks(
-                            &chunk.states,
-                            biome_id,
-                            block_bits,
-                            biome_bits,
-                            sky,
-                        ),
-                    };
-                    // Лут структур: ванила кладёт в сундук `LootTable` и
-                    // `LootTableSeed`, содержимое считается при открытии.
-                    column.fluid_posts = chunk.fluid_posts.clone();
-                    column.block_ticks = chunk.block_ticks.clone();
-                    for ([x, y, z], id, nbt) in &chunk.block_entities {
-                        column.block_entities.insert(
-                            [*x, *y, *z],
-                            chunkwake_world::BlockEntity {
-                                id: id.clone(),
-                                nbt: nbt.clone(),
-                            },
+                // Биомы выбирает климат (`MultiNoiseBiomeSource`), а не один plains.
+                // `single_biome_surface` подменяет климат одним биомом.
+                loaded.bind_biomes(biome_ids.clone());
+                let fixed = noise.biome.is_some();
+                if let Some(name) = &noise.biome {
+                    loaded.set_fixed_biome(name, &biome_ids)?;
+                }
+                let climate = loaded.has_biomes();
+                let noise = std::sync::Arc::new(loaded);
+                let sea = noise.sea_level;
+                // `NoiseSpawnFinder.findSpawnPosition` даёт точку `(x, 0, z)`;
+                // высоту берём по столбцу этой точки, как `ServerLevel`.
+                let stand = noise
+                    .spawn_position()
+                    .map(|p| {
+                        let cx = p[0].div_euclid(16);
+                        let cz = p[2].div_euclid(16);
+                        let y = stand_on_solid(
+                            &noise.fill(cx, cz),
+                            noise.height,
+                            dim.min_y,
+                            p[0],
+                            p[2],
                         );
+                        [p[0] as f64 + 0.5, y, p[2] as f64 + 0.5]
+                    })
+                    .unwrap_or([8.5, 64.0, 8.5]);
+                let biome_id = biome as u32;
+                let sky = dim.has_skylight;
+                // Шум, поверхность и карверы — один конвейер генератора.
+                let state = |name: &str| blocks.default_state(name).ok().map(|s| s as u32);
+                let overworld =
+                    chunkwake_worldgen::pipeline::Overworld::new(noise, &state, &biome_ids)?
+                        .with_memory_limits(memory.proto_limit, memory.base_column_limit)
+                        .with_features_palette(data_dir, palette.clone(), &biome_ids)?;
+                if let Some((done, all)) = overworld.feature_coverage() {
+                    tracing::info!("worldgen features: {done} of {all} ported");
+                    for (name, why) in overworld.feature_failures().iter().take(5) {
+                        tracing::warn!("worldgen feature {name}: {why}");
                     }
-                    Some(column)
+                }
+                if !overworld.has_surface() {
+                    tracing::warn!(
+                        "no material_rule in the data cache: the world keeps bare stone"
+                    );
+                }
+                // Свет считает пролив при отправке: здесь только блоки.
+                // Тот же генератор отвечает `/locate biome`, не строя чанк.
+                let overworld = std::sync::Arc::new(overworld);
+                if std::env::var_os("CHUNKWAKE_MEMSTATS").is_some() {
+                    let wg = overworld.clone();
+                    std::thread::spawn(move || {
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_secs(10));
+                            tracing::info!("memstats gen: {}", wg.mem_stats());
+                        }
+                    });
+                }
+                let locate_world = overworld.clone();
+                let locate: Locate = std::sync::Arc::new(move |name, origin| {
+                    locate_world.locate_biome(name, origin)
                 });
-            if !fixed && !climate {
-                tracing::warn!(
-                    "reports/biomes.csv is missing: the noise world keeps a single biome. \
+                let locate_struct_world = overworld.clone();
+                let locate_structure: Locate = std::sync::Arc::new(move |name, origin| {
+                    locate_struct_world.locate_structure(name, origin)
+                });
+                let trim_world = overworld.clone();
+                let trim_idle: chunkwake_net::play::TerrainTrimFn =
+                    std::sync::Arc::new(move || trim_world.trim_idle());
+                let built: std::sync::Arc<dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync> =
+                    std::sync::Arc::new(move |cx, cz| {
+                        // `None` — чанк уже отдан: генератор его не повторяет, и
+                        // вызывающему нужен готовый столбец из мира, а не копия.
+                        let chunk = overworld.chunk(cx, cz)?;
+                        let mut column = match chunk.biomes {
+                            Some(biomes) => ChunkColumn::from_blocks_with_biomes(
+                                &chunk.states,
+                                &biomes,
+                                block_bits,
+                                biome_bits,
+                                sky,
+                            ),
+                            None => ChunkColumn::from_blocks(
+                                &chunk.states,
+                                biome_id,
+                                block_bits,
+                                biome_bits,
+                                sky,
+                            ),
+                        };
+                        // Лут структур: ванила кладёт в сундук `LootTable` и
+                        // `LootTableSeed`, содержимое считается при открытии.
+                        column.fluid_posts = chunk.fluid_posts.clone();
+                        column.block_ticks = chunk.block_ticks.clone();
+                        for ([x, y, z], id, nbt) in &chunk.block_entities {
+                            column.block_entities.insert(
+                                [*x, *y, *z],
+                                chunkwake_world::BlockEntity {
+                                    id: id.clone(),
+                                    nbt: nbt.clone(),
+                                },
+                            );
+                        }
+                        Some(column)
+                    });
+                if !fixed && !climate {
+                    tracing::warn!(
+                        "reports/biomes.csv is missing: the noise world keeps a single biome. \
                      Delete the data cache or rebuild it to get real biomes"
-                );
+                    );
+                }
+                (
+                    Some(built),
+                    Some(trim_idle),
+                    Some(locate),
+                    Some(locate_structure),
+                    Some(stand),
+                    sea,
+                    false,
+                )
             }
-            (
-                Some(built),
-                Some(trim_idle),
-                Some(locate),
-                Some(locate_structure),
-                Some(stand),
-                sea,
-                false,
-            )
-        }
-    };
+        };
 
     let dimension = format!("minecraft:{DIMENSION}");
 
@@ -434,12 +444,11 @@ pub fn build_play_plan(
             }
             list
         },
-        trees: std::sync::Arc::new(chunkwake_worldgen::feature::RuntimeTrees::load_with_palette(
-            data_dir,
-            palette,
-            dim.min_y,
-            dim.height,
-        )?),
+        trees: std::sync::Arc::new(
+            chunkwake_worldgen::feature::RuntimeTrees::load_with_palette(
+                data_dir, palette, dim.min_y, dim.height,
+            )?,
+        ),
         poi_tags,
         structure_names,
         light: light.clone(),
@@ -649,8 +658,7 @@ fn survival_data(
             .store(component("minecraft:writable_book_content")?, order);
         c::FIREWORKS_COMPONENT.store(component("minecraft:fireworks")?, order);
         c::MAP_ID_COMPONENT.store(component("minecraft:map_id")?, order);
-        c::MAP_POST_PROCESSING_COMPONENT
-            .store(component("minecraft:map_post_processing")?, order);
+        c::MAP_POST_PROCESSING_COMPONENT.store(component("minecraft:map_post_processing")?, order);
         c::set_banner_pattern_names(
             registries
                 .synchronized
@@ -814,7 +822,8 @@ fn survival_data(
         requires_tool: loaded.requires_tool,
         tools: loaded.tools,
         instruments: chunkwake_data::world::load_instruments(data_dir).map_err(s)?,
-        jukebox_songs: chunkwake_data::world::load_jukebox_songs(data_dir, items, registries).map_err(s)?,
+        jukebox_songs: chunkwake_data::world::load_jukebox_songs(data_dir, items, registries)
+            .map_err(s)?,
         map_colors: std::sync::Arc::new(
             chunkwake_data::world::load_map_colors(data_dir, &blocks).map_err(s)?,
         ),
@@ -861,6 +870,9 @@ fn survival_data(
             .map_err(s)?,
         damage_magma: registries
             .network_id("damage_type", "minecraft:hot_floor")
+            .map_err(s)?,
+        damage_mob: registries
+            .network_id("damage_type", "minecraft:mob_attack")
             .map_err(s)?,
         snowball_entity_type: chunkwake_data::registries::builtin_id_of(
             builtin,
@@ -959,6 +971,15 @@ fn survival_data(
         .map_err(s)?,
         entity_types: chunkwake_data::registries::builtin_ids_of(builtin, "entity_type")
             .map_err(s)?,
+        tracking_ranges: {
+            let ids =
+                chunkwake_data::registries::builtin_ids_of(builtin, "entity_type").map_err(s)?;
+            chunkwake_data::world::load_entity_types(data_dir)
+                .map_err(s)?
+                .into_iter()
+                .filter_map(|t| Some((*ids.get(&t.name)?, t.tracking_range * 16)))
+                .collect()
+        },
         mob_entity_types: {
             let id =
                 |n| chunkwake_data::registries::builtin_id_of(builtin, "entity_type", n).map_err(s);
@@ -969,7 +990,8 @@ fn survival_data(
                 id("minecraft:chicken")?,
             ]
         },
-        creature_spawns: creature_spawns(data_dir, registries),
+        creature_spawns: biome_spawns(data_dir, registries, "creature"),
+        monster_spawns: biome_spawns(data_dir, registries, "monster"),
         physics: chunkwake_data::world::load_physics(data_dir)
             .ok()
             .map(std::sync::Arc::new),
@@ -997,16 +1019,17 @@ fn survival_data(
             data_dir,
             &chunkwake_net::play::load_registry_tags(data_dir, "block"),
             &blocks.defaults(),
-        )
-        ?,
+        )?,
     };
     Ok(survival)
 }
 
-/// Мирные мобы биомов для заселения новых чанков.
-fn creature_spawns(
+/// Мобы биомов категории `category` (`creature`, `monster`): заселение новых
+/// чанков и естественный спавн по тику.
+fn biome_spawns(
     data_dir: &Path,
     registries: &RegistryData,
+    category: &str,
 ) -> Vec<chunkwake_net::play::CreatureSpawns> {
     let names = registries
         .synchronized
@@ -1029,7 +1052,7 @@ fn creature_spawns(
             let chance = attrs["minecraft:gameplay/creature_world_gen_spawn_probability"]
                 .as_f64()
                 .unwrap_or(0.1) as f32;
-            let list = &attrs["minecraft:gameplay/natural_mob_spawns"]["argument"]["spawns_by_category"]["creature"];
+            let list = &attrs["minecraft:gameplay/natural_mob_spawns"]["argument"]["spawns_by_category"][category];
             let entries = list
                 .as_array()
                 .into_iter()
@@ -1374,7 +1397,8 @@ fn command_language(data_dir: &Path) -> HashMap<String, String> {
 fn dimension_height(data_dir: &Path, key: &str) -> Option<i32> {
     let name = key.strip_prefix("minecraft:").unwrap_or(key);
     let path = data_dir.join(format!("data/minecraft/dimension_type/{name}.json"));
-    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
     json["height"].as_i64().map(|h| h as i32)
 }
 
@@ -1412,7 +1436,9 @@ fn build_dimension(
     let height = noise.height;
     // Клиент ждёт секции на всю высоту `dimension_type` (у Ада и Края 256),
     // а шум заполняет только свои 128: выше — воздух, как у `ProtoChunk`.
-    let dim_height = dimension_height(data_dir, dimension_key).unwrap_or(height).max(height);
+    let dim_height = dimension_height(data_dir, dimension_key)
+        .unwrap_or(height)
+        .max(height);
     let state = |name: &str| blocks.default_state(name).ok().map(|s| s as u32);
     let air = state("minecraft:air").unwrap_or(0);
     let built = chunkwake_worldgen::pipeline::Overworld::new_for(
@@ -1422,8 +1448,10 @@ fn build_dimension(
         default_block,
         default_fluid,
     )
-    .and_then(|w| w.with_memory_limits(memory.proto_limit, memory.base_column_limit)
-        .with_features_palette(data_dir, palette, biome_ids))
+    .and_then(|w| {
+        w.with_memory_limits(memory.proto_limit, memory.base_column_limit)
+            .with_features_palette(data_dir, palette, biome_ids)
+    })
     .map_err(|e| format!("{settings} generator: {e}"))?;
     if let Some((done, all)) = built.feature_coverage() {
         tracing::info!("{settings}: фичи {done} из {all}");
@@ -1446,7 +1474,8 @@ fn build_dimension(
     );
     let world = built.clone();
     let trim_world = built.clone();
-    let trim_idle: chunkwake_net::play::TerrainTrimFn = std::sync::Arc::new(move || trim_world.trim_idle());
+    let trim_idle: chunkwake_net::play::TerrainTrimFn =
+        std::sync::Arc::new(move || trim_world.trim_idle());
     let terrain: chunkwake_net::play::TerrainFn = std::sync::Arc::new(move |cx, cz| {
         let mut chunk = world.chunk(cx, cz)?;
         if dim_height > height {
@@ -1474,7 +1503,9 @@ fn build_dimension(
                 biome_bits,
                 false,
             ),
-            None => ChunkColumn::from_blocks(&chunk.states, fallback, block_bits, biome_bits, false),
+            None => {
+                ChunkColumn::from_blocks(&chunk.states, fallback, block_bits, biome_bits, false)
+            }
         };
         column.fluid_posts = chunk.fluid_posts.clone();
         column.block_ticks = chunk.block_ticks.clone();
@@ -1493,10 +1524,11 @@ fn build_dimension(
     let locate_biome: Locate =
         std::sync::Arc::new(move |name, origin| locate_world.locate_biome(name, origin));
     let locate_struct_world = built;
-    let locate_structure: Locate = std::sync::Arc::new(move |name, origin| {
-        locate_struct_world.locate_structure(name, origin)
-    });
-    tracing::info!("{settings}: генератор готов (min_y {min_y}, высота {height}, море {sea_level})");
+    let locate_structure: Locate =
+        std::sync::Arc::new(move |name, origin| locate_struct_world.locate_structure(name, origin));
+    tracing::info!(
+        "{settings}: генератор готов (min_y {min_y}, высота {height}, море {sea_level})"
+    );
     Ok(Some(chunkwake_net::play::DimSpec {
         dimension_type,
         template,

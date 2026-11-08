@@ -187,7 +187,14 @@ pub fn center_for(x: f64, z: f64, scale: u8) -> [i32; 2] {
 }
 
 impl MapData {
-    pub fn fresh(x: f64, z: f64, scale: u8, tracking: bool, unlimited: bool, dimension: &str) -> Self {
+    pub fn fresh(
+        x: f64,
+        z: f64,
+        scale: u8,
+        tracking: bool,
+        unlimited: bool,
+        dimension: &str,
+    ) -> Self {
         let scale = scale.min(MAX_SCALE);
         Self {
             scale,
@@ -281,7 +288,15 @@ impl MapData {
     /// `addDecoration` (`calculateDecorationLocationAndType`): игрок вне карты —
     /// стрелка у края или точка за пределами; прочий значок вне карты остаётся
     /// у края только на карте без границ.
-    pub fn put_decoration(&mut self, kind: DecoKind, key: &str, x: f64, z: f64, yaw: f64, nether_time: Option<i64>) {
+    pub fn put_decoration(
+        &mut self,
+        kind: DecoKind,
+        key: &str,
+        x: f64,
+        z: f64,
+        yaw: f64,
+        nether_time: Option<i64>,
+    ) {
         self.put_named(kind, key, x, z, yaw, nether_time, None);
     }
 
@@ -441,7 +456,8 @@ impl MapData {
     /// `HoldingPlayer.nextUpdatePacket`: заплатка и (раз в 5 вызовов) значки.
     pub fn next_update(&mut self, player: Uuid) -> Option<Update> {
         let (scale, locked) = (self.scale, self.locked);
-        let decorations: Vec<Decoration> = self.decorations.iter().map(|(_, d)| d.clone()).collect();
+        let decorations: Vec<Decoration> =
+            self.decorations.iter().map(|(_, d)| d.clone()).collect();
         let colors = &self.colors;
         let h = self.holders.iter_mut().find(|h| h.player == player)?;
         let patch = if h.dirty_data {
@@ -583,12 +599,16 @@ impl MapData {
                         m.insert("pos".into(), Tag::IntArray(b.pos.to_vec()));
                         // `lenientOptionalFieldOf("color", WHITE)`: белый не пишется.
                         if b.color != 0
-                            && let Some(c) = chunkwake_protocol::components::DYE_COLORS.get(b.color as usize)
+                            && let Some(c) =
+                                chunkwake_protocol::components::DYE_COLORS.get(b.color as usize)
                         {
                             m.insert("color".into(), Tag::String((*c).to_owned()));
                         }
                         if let Some(n) = &b.name {
-                            m.insert("name".into(), crate::stack_nbt::json_to_tag(&crate::stack_nbt::text_json(n)));
+                            m.insert(
+                                "name".into(),
+                                crate::stack_nbt::json_to_tag(&crate::stack_nbt::text_json(n)),
+                            );
                         }
                         Tag::Compound(m)
                     })
@@ -649,12 +669,15 @@ impl MapData {
                         _ => return None,
                     };
                     let color = match m.get("color") {
-                        Some(Tag::String(s)) => {
-                            chunkwake_protocol::components::DYE_COLORS.iter().position(|c| c == s)? as u8
-                        }
+                        Some(Tag::String(s)) => chunkwake_protocol::components::DYE_COLORS
+                            .iter()
+                            .position(|c| c == s)?
+                            as u8,
                         _ => 0,
                     };
-                    let name = m.get("name").map(|t| crate::stack_nbt::tag_to_json(t).to_string());
+                    let name = m
+                        .get("name")
+                        .map(|t| crate::stack_nbt::tag_to_json(t).to_string());
                     Some(MapBanner { pos, color, name })
                 })
                 .collect(),
@@ -707,7 +730,10 @@ pub fn packed(color: u8, brightness: u8) -> u8 {
 /// Потолочное измерение: земля или камень по хэшу координат.
 fn ceiling_sample(x: i32, z: i32) -> Sample {
     let mut h = x.wrapping_add(z.wrapping_mul(231871));
-    h = h.wrapping_mul(h).wrapping_mul(31287121).wrapping_add(h.wrapping_mul(11));
+    h = h
+        .wrapping_mul(h)
+        .wrapping_mul(31287121)
+        .wrapping_add(h.wrapping_mul(11));
     Sample {
         color: if (h >> 20) & 1 == 0 { DIRT } else { STONE },
         height: 100.0,
@@ -752,7 +778,11 @@ fn clamp_coord(v: f32) -> i8 {
 fn rotation(yaw: f64, nether_time: Option<i64>) -> i8 {
     if let Some(t) = nether_time {
         let i = (t / 10) as i32;
-        return ((i.wrapping_mul(i).wrapping_mul(34187121).wrapping_add(i.wrapping_mul(121)) >> 15)
+        return ((i
+            .wrapping_mul(i)
+            .wrapping_mul(34187121)
+            .wrapping_add(i.wrapping_mul(121))
+            >> 15)
             & 15) as i8;
     }
     let d = if yaw < 0.0 { yaw - 8.0 } else { yaw + 8.0 };
@@ -762,16 +792,25 @@ fn rotation(yaw: f64, nether_time: Option<i64>) -> i8 {
 /// `ClientboundMapItemDataPacket`.
 pub fn encode(packet_id: i32, map_id: i32, u: &Update) -> Vec<u8> {
     let mut w = chunkwake_protocol::Writer::new();
-    w.var_int(packet_id).var_int(map_id).u8(u.scale).bool(u.locked);
+    w.var_int(packet_id)
+        .var_int(map_id)
+        .u8(u.scale)
+        .bool(u.locked);
     match &u.decorations {
         Some(list) => {
             w.bool(true).var_int(list.len() as i32);
             for d in list {
-                w.var_int(d.kind.id()).u8(d.x as u8).u8(d.z as u8).u8((d.rot & 15) as u8);
+                w.var_int(d.kind.id())
+                    .u8(d.x as u8)
+                    .u8(d.z as u8)
+                    .u8((d.rot & 15) as u8);
                 match &d.name {
                     Some(n) => {
                         w.bool(true);
-                        chunkwake_protocol::text::write_component(&mut w, &crate::stack_nbt::text_json(n));
+                        chunkwake_protocol::text::write_component(
+                            &mut w,
+                            &crate::stack_nbt::text_json(n),
+                        );
                     }
                     None => {
                         w.bool(false);
@@ -785,7 +824,11 @@ pub fn encode(packet_id: i32, map_id: i32, u: &Update) -> Vec<u8> {
     }
     match &u.patch {
         Some(p) => {
-            w.u8(p.width).u8(p.height).u8(p.x).u8(p.z).byte_array(&p.colors);
+            w.u8(p.width)
+                .u8(p.height)
+                .u8(p.x)
+                .u8(p.z)
+                .byte_array(&p.colors);
         }
         None => {
             w.u8(0);
@@ -825,18 +868,28 @@ mod tests {
         // Ровная трава на высоте 64.
         m.update(me, [0.5, 0.5], false, |_, _| {
             calls += 1;
-            Some(Sample { color: 1, height: 64.0, depth: 0 })
+            Some(Sample {
+                color: 1,
+                height: 64.0,
+                depth: 0,
+            })
         });
         // step = 1: первый столбец x ≡ 1 (mod 16), дальше подряд, пока
         // предыдущий менялся, — на чистой карте до конца.
         assert!(calls > 0);
-        let drawn: Vec<usize> = (0..SIZE).filter(|&x| m.colors[x + 64 * SIZE] != 0).collect();
+        let drawn: Vec<usize> = (0..SIZE)
+            .filter(|&x| m.colors[x + 64 * SIZE] != 0)
+            .collect();
         assert_eq!(drawn, (1..SIZE).collect::<Vec<_>>());
         // Второй проход: всё уже нарисовано — только столбцы x ≡ 2.
         calls = 0;
         m.update(me, [0.5, 0.5], false, |_, _| {
             calls += 1;
-            Some(Sample { color: 1, height: 64.0, depth: 0 })
+            Some(Sample {
+                color: 1,
+                height: 64.0,
+                depth: 0,
+            })
         });
         assert_eq!(calls, 8 * 129);
         // Ровно: яркость NORMAL или по шахматке.
@@ -855,13 +908,31 @@ mod tests {
         let me = Uuid::from_u128(2);
         let mut m = MapData::fresh(0.0, 0.0, 0, true, false, "minecraft:overworld");
         // Подъём на блок за пиксель к югу — светлее (HIGH).
-        m.update(me, [0.5, 0.5], false, |_, z| Some(Sample { color: 1, height: z as f64, depth: 0 }));
+        m.update(me, [0.5, 0.5], false, |_, z| {
+            Some(Sample {
+                color: 1,
+                height: z as f64,
+                depth: 0,
+            })
+        });
         assert_eq!(m.colors[1 + 64 * SIZE], packed(1, 2));
         let mut w = MapData::fresh(0.0, 0.0, 0, true, false, "minecraft:overworld");
-        w.update(me, [0.5, 0.5], false, |_, _| Some(Sample { color: WATER, height: 60.0, depth: 10 }));
+        w.update(me, [0.5, 0.5], false, |_, _| {
+            Some(Sample {
+                color: WATER,
+                height: 60.0,
+                depth: 10,
+            })
+        });
         assert_eq!(w.colors[1 + 64 * SIZE], packed(WATER, 0));
         let mut s = MapData::fresh(0.0, 0.0, 0, true, false, "minecraft:overworld");
-        s.update(me, [0.5, 0.5], false, |_, _| Some(Sample { color: WATER, height: 60.0, depth: 1 }));
+        s.update(me, [0.5, 0.5], false, |_, _| {
+            Some(Sample {
+                color: WATER,
+                height: 60.0,
+                depth: 1,
+            })
+        });
         assert_eq!(s.colors[1 + 64 * SIZE], packed(WATER, 2));
     }
 
@@ -877,7 +948,16 @@ mod tests {
     fn player_marker_inside_and_off_map() {
         let mut m = MapData::fresh(0.0, 0.0, 0, true, false, "minecraft:overworld");
         m.put_player("a", 0.0, 0.0, 0.0, None);
-        assert_eq!(m.decorations[0].1, Decoration { kind: DecoKind::Player, x: 0, z: 0, rot: 0, name: None });
+        assert_eq!(
+            m.decorations[0].1,
+            Decoration {
+                kind: DecoKind::Player,
+                x: 0,
+                z: 0,
+                rot: 0,
+                name: None
+            }
+        );
         m.put_player("a", 200.0, 0.0, 90.0, None);
         assert_eq!(m.decorations[0].1.kind, DecoKind::PlayerOffMap);
         assert_eq!(m.decorations[0].1.x, 127);
@@ -901,9 +981,18 @@ mod tests {
     #[test]
     fn frame_marker_survives_save_and_moves_with_new_entity_id() {
         let mut m = MapData::fresh(0.0, 0.0, 0, true, false, "minecraft:overworld");
-        let f = MapFrame { pos: [10, 70, -6], rotation: 90, entity_id: 5 };
+        let f = MapFrame {
+            pos: [10, 70, -6],
+            rotation: 90,
+            entity_id: 5,
+        };
         m.tick_frame(f, None);
-        let deco = |m: &MapData, k: &str| m.decorations.iter().find(|(key, _)| key == k).map(|(_, d)| d.clone());
+        let deco = |m: &MapData, k: &str| {
+            m.decorations
+                .iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, d)| d.clone())
+        };
         let d = deco(&m, "frame-5").expect("значок рамки");
         assert_eq!((d.kind, d.x, d.z, d.rot), (DecoKind::Frame, 20, -11, 4));
         // После перезапуска у рамки другой номер: старый значок уходит.
@@ -944,27 +1033,46 @@ mod tests {
     #[test]
     fn banner_toggle_and_save() {
         let mut m = MapData::fresh(0.0, 0.0, 0, true, false, "minecraft:overworld");
-        let red = MapBanner { pos: [10, 70, -6], color: 14, name: Some(r#"{"text":"База"}"#.into()) };
+        let red = MapBanner {
+            pos: [10, 70, -6],
+            color: 14,
+            name: Some(r#"{"text":"База"}"#.into()),
+        };
         assert!(m.toggle_banner(red.clone()));
         let d = m.decorations[0].1.clone();
         assert_eq!((d.kind.id(), d.x, d.z, d.rot), (24, 21, -10, 8));
         assert_eq!(d.name.as_deref(), red.name.as_deref());
-        let white = MapBanner { pos: [1, 64, 1], color: 0, name: None };
+        let white = MapBanner {
+            pos: [1, 64, 1],
+            color: 0,
+            name: None,
+        };
         assert!(m.toggle_banner(white.clone()));
         let nbt = m.to_nbt();
         let back = MapData::from_nbt(&nbt).unwrap();
         assert_eq!(back.banners, vec![red.clone(), white.clone()]);
         assert_eq!(back.decorations.len(), 2);
-        let Some(Tag::List(l)) = nbt.get("banners") else { panic!() };
+        let Some(Tag::List(l)) = nbt.get("banners") else {
+            panic!()
+        };
         assert!(l[1].as_compound().unwrap().get("color").is_none());
-        let u = Update { scale: 0, locked: false, decorations: Some(vec![d]), patch: None };
+        let u = Update {
+            scale: 0,
+            locked: false,
+            decorations: Some(vec![d]),
+            patch: None,
+        };
         assert!(encode(1, 0, &u).len() > 10);
         // Повторный клик по тому же знамени снимает метку.
         assert!(m.toggle_banner(red.clone()));
         assert_eq!(m.banners, vec![white.clone()]);
         assert_eq!(m.banners_in(&[(1, 1)]), vec![white]);
         // Дальше 63 пикселей от центра — отказ.
-        assert!(!m.toggle_banner(MapBanner { pos: [200, 64, 0], color: 0, name: None }));
+        assert!(!m.toggle_banner(MapBanner {
+            pos: [200, 64, 0],
+            color: 0,
+            name: None
+        }));
     }
 
     #[test]
@@ -972,10 +1080,25 @@ mod tests {
         let u = Update {
             scale: 1,
             locked: false,
-            decorations: Some(vec![Decoration { kind: DecoKind::Player, x: 1, z: -1, rot: 3, name: None }]),
-            patch: Some(Patch { x: 2, z: 3, width: 1, height: 1, colors: vec![9] }),
+            decorations: Some(vec![Decoration {
+                kind: DecoKind::Player,
+                x: 1,
+                z: -1,
+                rot: 3,
+                name: None,
+            }]),
+            patch: Some(Patch {
+                x: 2,
+                z: 3,
+                width: 1,
+                height: 1,
+                colors: vec![9],
+            }),
         };
         let b = encode(52, 7, &u);
-        assert_eq!(b, vec![52, 7, 1, 0, 1, 1, 0, 1, 255, 3, 0, 1, 1, 2, 3, 1, 9]);
+        assert_eq!(
+            b,
+            vec![52, 7, 1, 0, 1, 1, 0, 1, 255, 3, 0, 1, 1, 2, 3, 1, 9]
+        );
     }
 }

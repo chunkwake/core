@@ -17,7 +17,11 @@ fn pack(p: [i32; 3]) -> i64 {
 }
 
 fn unpack(v: i64) -> [i32; 3] {
-    [(v >> 38) as i32, (v << 52 >> 52) as i32, (v << 26 >> 38) as i32]
+    [
+        (v >> 38) as i32,
+        (v << 52 >> 52) as i32,
+        (v << 26 >> 38) as i32,
+    ]
 }
 
 fn hex(b: &[u8]) -> String {
@@ -42,7 +46,9 @@ struct Probe {
 
 impl Probe {
     fn sb(&self, n: &str) -> i32 {
-        self.table.id(State::Play, Direction::Serverbound, n).unwrap()
+        self.table
+            .id(State::Play, Direction::Serverbound, n)
+            .unwrap()
     }
 
     fn name(&self, id: i32) -> String {
@@ -64,7 +70,18 @@ impl Probe {
                 Some(kind) => self.read(kind, &body),
                 None => {
                     let n = self.all.get(&id).cloned().unwrap_or_default();
-                    if !matches!(n.as_str(), "minecraft:keep_alive" | "minecraft:set_time" | "minecraft:level_chunk_with_light" | "minecraft:move_entity_pos" | "minecraft:set_entity_motion" | "minecraft:rotate_head" | "minecraft:move_entity_pos_rot" | "minecraft:entity_position_sync" | "minecraft:move_entity_rot") {
+                    if !matches!(
+                        n.as_str(),
+                        "minecraft:keep_alive"
+                            | "minecraft:set_time"
+                            | "minecraft:level_chunk_with_light"
+                            | "minecraft:move_entity_pos"
+                            | "minecraft:set_entity_motion"
+                            | "minecraft:rotate_head"
+                            | "minecraft:move_entity_pos_rot"
+                            | "minecraft:entity_position_sync"
+                            | "minecraft:move_entity_rot"
+                    ) {
                         self.log.push(format!("pkt {n} {}", body.len()));
                     }
                 }
@@ -90,7 +107,10 @@ impl Probe {
                 let (pitch, yaw, _head) = (r.u8().unwrap(), r.u8().unwrap(), r.u8().unwrap());
                 let data = r.var_int().unwrap();
                 // Чужие предметы мира (далеко от стенда) — мимо.
-                if (pos[0] - 9.0).abs() > 16.0 || (pos[2] - 8.0).abs() > 16.0 || (pos[1] - 200.0).abs() > 16.0 {
+                if (pos[0] - 9.0).abs() > 16.0
+                    || (pos[2] - 8.0).abs() > 16.0
+                    || (pos[1] - 200.0).abs() > 16.0
+                {
                     return;
                 }
                 let n = self.seen.len();
@@ -127,13 +147,15 @@ impl Probe {
                 if let Some(s) = self.sounds.get(&(holder - 1)) {
                     let rest = r.remaining();
                     // Без сида (последние 8 байт).
-                    self.log.push(format!("sound {s} {}", hex(&rest[..rest.len() - 8])));
+                    self.log
+                        .push(format!("sound {s} {}", hex(&rest[..rest.len() - 8])));
                 }
             }
             "block_update" => {
                 let p = unpack(r.i64().unwrap());
                 if p == [11, 200, 8] {
-                    self.log.push(format!("comparator state {}", r.var_int().unwrap()));
+                    self.log
+                        .push(format!("comparator state {}", r.var_int().unwrap()));
                 }
             }
             "teleport_entity" | "entity_position_sync" => {
@@ -141,7 +163,8 @@ impl Probe {
                 if self.seen.contains_key(&id) && std::env::var("FP_DEBUG").is_ok() {
                     let name = self.name(id);
                     let p = [r.f64().unwrap(), r.f64().unwrap(), r.f64().unwrap()];
-                    self.log.push(format!("moved {name} {:.3} {:.3} {:.3}", p[0], p[1], p[2]));
+                    self.log
+                        .push(format!("moved {name} {:.3} {:.3} {:.3}", p[0], p[1], p[2]));
                 }
             }
             "map_item_data" => {
@@ -179,7 +202,11 @@ impl Probe {
     async fn use_item(&mut self) {
         self.seq += 1;
         let mut w = Writer::new();
-        w.var_int(self.sb("use_item")).var_int(0).var_int(self.seq).f32(0.0).f32(0.0);
+        w.var_int(self.sb("use_item"))
+            .var_int(0)
+            .var_int(self.seq)
+            .f32(0.0)
+            .f32(0.0);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(400).await;
     }
@@ -187,7 +214,16 @@ impl Probe {
     async fn use_on(&mut self, p: [i32; 3], face: i32) {
         self.seq += 1;
         let mut w = Writer::new();
-        w.var_int(self.sb("use_item_on")).var_int(0).i64(pack(p)).var_int(face).f32(0.5).f32(0.5).f32(0.5).u8(0).u8(0).var_int(self.seq);
+        w.var_int(self.sb("use_item_on"))
+            .var_int(0)
+            .i64(pack(p))
+            .var_int(face)
+            .f32(0.5)
+            .f32(0.5)
+            .f32(0.5)
+            .u8(0)
+            .u8(0)
+            .var_int(self.seq);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(400).await;
     }
@@ -217,7 +253,8 @@ impl Probe {
 async fn main() {
     let a: Vec<String> = std::env::args().collect();
     let table = PacketTable::load(a[2].as_ref()).unwrap();
-    let reg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&a[3]).unwrap()).unwrap();
+    let reg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&a[3]).unwrap()).unwrap();
     let id_of = |r: &str, k: &str| reg[r]["entries"][k]["protocol_id"].as_i64().unwrap() as i32;
     let types: HashMap<i32, &'static str> = [
         ("minecraft:item_frame", "frame"),
@@ -232,17 +269,34 @@ async fn main() {
         .unwrap()
         .iter()
         .filter(|(k, _)| k.contains("item_frame"))
-        .map(|(k, v)| (v["protocol_id"].as_i64().unwrap() as i32, k.replace("minecraft:entity.", "")))
+        .map(|(k, v)| {
+            (
+                v["protocol_id"].as_i64().unwrap() as i32,
+                k.replace("minecraft:entity.", ""),
+            )
+        })
         .collect();
     let ids = Ids::load(&table).unwrap();
-    let mut c = Client::connect(&a[1], "framer", ids, 777, "26.3").await.unwrap();
+    let mut c = Client::connect(&a[1], "framer", ids, 777, "26.3")
+        .await
+        .unwrap();
     let mut cb = HashMap::new();
-    for n in ["add_entity", "set_entity_data", "remove_entities", "sound", "block_update", "map_item_data", "teleport_entity", "entity_position_sync"] {
+    for n in [
+        "add_entity",
+        "set_entity_data",
+        "remove_entities",
+        "sound",
+        "block_update",
+        "map_item_data",
+        "teleport_entity",
+        "entity_position_sync",
+    ] {
         let id = table.id(State::Play, Direction::Clientbound, n).unwrap();
         cb.insert(id, n);
         c.capture_also.push(id);
     }
-    let pj: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&a[2]).unwrap()).unwrap();
+    let pj: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&a[2]).unwrap()).unwrap();
     let all: HashMap<i32, String> = pj["play"]["clientbound"]
         .as_object()
         .unwrap()
@@ -250,7 +304,8 @@ async fn main() {
         .map(|(k, v)| (v["protocol_id"].as_i64().unwrap() as i32, k.clone()))
         .collect();
     if std::env::var("FP_DEBUG").is_ok() {
-        c.capture_also.extend(all.keys().copied().filter(|k| !cb.contains_key(k)));
+        c.capture_also
+            .extend(all.keys().copied().filter(|k| !cb.contains_key(k)));
     }
     loop {
         if let Event::Position(_) = c.next_event().await.unwrap() {

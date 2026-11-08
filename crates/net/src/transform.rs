@@ -39,7 +39,11 @@ const COPPER_FAMILIES: [&str; 15] = [
 /// Четыре стадии семейства: `copper_block` → `exposed_copper`, остальные —
 /// с приставкой стадии.
 fn stages(base: &str) -> [String; 4] {
-    let root = if base == "copper_block" { "copper" } else { base };
+    let root = if base == "copper_block" {
+        "copper"
+    } else {
+        base
+    };
     [
         format!("minecraft:{base}"),
         format!("minecraft:exposed_{root}"),
@@ -61,7 +65,9 @@ enum Pred {
 impl Pred {
     fn test(&self, pos: [i32; 3], name_at: &dyn Fn([i32; 3]) -> String) -> bool {
         match self {
-            Pred::Blocks(set, o) => set.contains(&name_at([pos[0] + o[0], pos[1] + o[1], pos[2] + o[2]])),
+            Pred::Blocks(set, o) => {
+                set.contains(&name_at([pos[0] + o[0], pos[1] + o[1], pos[2] + o[2]]))
+            }
             Pred::All(list) => list.iter().all(|p| p.test(pos, name_at)),
             Pred::Any(list) => list.iter().any(|p| p.test(pos, name_at)),
             Pred::Not(p) => !p.test(pos, name_at),
@@ -248,7 +254,10 @@ fn parse_prov(v: &Value) -> Result<Prov, String> {
     }
 }
 
-fn parse_transform(v: &Value, tags: &HashMap<String, HashSet<String>>) -> Result<Transform, String> {
+fn parse_transform(
+    v: &Value,
+    tags: &HashMap<String, HashSet<String>>,
+) -> Result<Transform, String> {
     let p = &v["block_state_provider"];
     let rules = match p["type"].as_str() {
         Some("minecraft:rule_based") => p["rules"]
@@ -363,7 +372,8 @@ pub fn pop_from_face(pos: [i32; 3], face: u8, r: [f64; 6]) -> ([f64; 3], [f64; 3
     let half = 0.125;
     let lerp = |t: f64, a: f64, b: f64| a + t * (b - a);
     let coord = |i: usize, sx: i32, t: f64| {
-        pos[i] as f64 + 0.5
+        pos[i] as f64
+            + 0.5
             + if sx == 0 {
                 lerp(t, -0.25, 0.25)
             } else {
@@ -376,9 +386,21 @@ pub fn pop_from_face(pos: [i32; 3], face: u8, r: [f64; 6]) -> ([f64; 3], [f64; 3
         coord(2, step[2], r[2]),
     ];
     let vel = [
-        if step[0] == 0 { lerp(r[3], -0.1, 0.1) } else { step[0] as f64 * 0.1 },
-        if step[1] == 0 { lerp(r[4], 0.0, 0.1) } else { step[1] as f64 * 0.1 + 0.1 },
-        if step[2] == 0 { lerp(r[5], -0.1, 0.1) } else { step[2] as f64 * 0.1 },
+        if step[0] == 0 {
+            lerp(r[3], -0.1, 0.1)
+        } else {
+            step[0] as f64 * 0.1
+        },
+        if step[1] == 0 {
+            lerp(r[4], 0.0, 0.1)
+        } else {
+            step[1] as f64 * 0.1 + 0.1
+        },
+        if step[2] == 0 {
+            lerp(r[5], -0.1, 0.1)
+        } else {
+            step[2] as f64 * 0.1
+        },
     ];
     (at, vel)
 }
@@ -390,8 +412,14 @@ mod tests {
     #[test]
     fn copper_stage_names() {
         assert_eq!(stages("copper_block")[1], "minecraft:exposed_copper");
-        assert_eq!(stages("lightning_rod")[3], "minecraft:oxidized_lightning_rod");
-        assert_eq!(stages("cut_copper_slab")[2], "minecraft:weathered_cut_copper_slab");
+        assert_eq!(
+            stages("lightning_rod")[3],
+            "minecraft:oxidized_lightning_rod"
+        );
+        assert_eq!(
+            stages("cut_copper_slab")[2],
+            "minecraft:weathered_cut_copper_slab"
+        );
     }
 
     #[test]
@@ -412,7 +440,9 @@ mod tests {
         };
         let data = Path::new(&data);
         let tags = crate::play::load_registry_tags(data, "block");
-        let blocks = chunkwake_data::world::Blocks::load(data).unwrap().defaults();
+        let blocks = chunkwake_data::world::Blocks::load(data)
+            .unwrap()
+            .defaults();
         let t = load(data, &tags, &blocks).unwrap();
         // Все 15 семейств по 4 стадии, у каждой вощёная пара.
         assert_eq!(t.weathering.len(), 60);
@@ -434,9 +464,16 @@ mod tests {
         assert!(hoe[1].drop_from_face);
         assert!(t.for_item("minecraft:golden_shovel").is_some());
         assert_eq!(t.copper_age("minecraft:weathered_copper"), Some(3));
-        assert_eq!(t.waxed["minecraft:exposed_copper"], "minecraft:waxed_exposed_copper");
+        assert_eq!(
+            t.waxed["minecraft:exposed_copper"],
+            "minecraft:waxed_exposed_copper"
+        );
         let name = |p: [i32; 3]| {
-            if p[1] == 0 { "minecraft:oak_log".to_owned() } else { "minecraft:air".to_owned() }
+            if p[1] == 0 {
+                "minecraft:oak_log".to_owned()
+            } else {
+                "minecraft:air".to_owned()
+            }
         };
         assert!(axe[0].rules.iter().any(|(p, _)| p.test([0, 0, 0], &name)));
     }

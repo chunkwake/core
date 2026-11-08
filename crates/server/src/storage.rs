@@ -153,7 +153,8 @@ impl WorldStorage {
             let region = region_dir(&self.world_dir, dimension);
             DimStore {
                 store: RegionStore::new(region.clone()).with_codec(self.codec),
-                entities: RegionStore::new(region.with_file_name("entities")).with_codec(self.codec),
+                entities: RegionStore::new(region.with_file_name("entities"))
+                    .with_codec(self.codec),
                 layout: None,
             }
         });
@@ -265,7 +266,9 @@ impl WorldStorage {
             for batch in unsaved.chunks(SAVE_BATCH) {
                 let nbt = batch
                     .iter()
-                    .map(|(pos, c, _)| Ok((*pos, anvil::chunk_to_nbt(c, *pos, format, &self.names)?)))
+                    .map(|(pos, c, _)| {
+                        Ok((*pos, anvil::chunk_to_nbt(c, *pos, format, &self.names)?))
+                    })
                     .collect::<Result<Vec<_>, String>>();
                 match nbt.and_then(|nbt| store.store.save(&nbt).map(|()| nbt.len())) {
                     Ok(n) => {
@@ -327,7 +330,9 @@ impl WorldStorage {
                 for batch in cols.chunks(SAVE_BATCH) {
                     let nbt = batch
                         .iter()
-                        .map(|(pos, c)| Ok((*pos, anvil::chunk_to_nbt(c, *pos, format, &self.names)?)))
+                        .map(|(pos, c)| {
+                            Ok((*pos, anvil::chunk_to_nbt(c, *pos, format, &self.names)?))
+                        })
                         .collect::<Result<Vec<_>, String>>()?;
                     store.store.save(&nbt)?;
                 }
@@ -355,7 +360,10 @@ impl WorldStorage {
                 let started = std::time::Instant::now();
                 match tokio::task::spawn_blocking(move || storage.unload(&plan)).await {
                     Ok(0) => {}
-                    Ok(n) => tracing::debug!("unloaded {n} chunks ({} ms)", started.elapsed().as_millis()),
+                    Ok(n) => tracing::debug!(
+                        "unloaded {n} chunks ({} ms)",
+                        started.elapsed().as_millis()
+                    ),
                     Err(e) => tracing::error!("unload task: {e}"),
                 }
             }

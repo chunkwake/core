@@ -11,7 +11,10 @@ use std::time::Duration;
 async fn wait<T>(c: &mut Client, secs: u64, mut f: impl FnMut(&Event) -> Option<T>) -> Option<T> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
     loop {
-        let ev = tokio::time::timeout_at(deadline, c.next_event()).await.ok()?.ok()?;
+        let ev = tokio::time::timeout_at(deadline, c.next_event())
+            .await
+            .ok()?
+            .ok()?;
         if let Some(v) = f(&ev) {
             return Some(v);
         }
@@ -26,13 +29,20 @@ async fn main() {
     let sb = |n: &str| table.id(State::Play, Direction::Serverbound, n).unwrap();
     // Типы сущностей из отчёта реестров: ловим именно лодку и предмет.
     let reg: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(std::path::Path::new(&a[2]).with_file_name("registries.json")).unwrap(),
+        &std::fs::read_to_string(std::path::Path::new(&a[2]).with_file_name("registries.json"))
+            .unwrap(),
     )
     .unwrap();
-    let ty = |n: &str| reg["minecraft:entity_type"]["entries"][n]["protocol_id"].as_i64().unwrap() as i32;
+    let ty = |n: &str| {
+        reg["minecraft:entity_type"]["entries"][n]["protocol_id"]
+            .as_i64()
+            .unwrap() as i32
+    };
     let (boat_ty, item_ty) = (ty("minecraft:oak_boat"), ty("minecraft:item"));
     println!("oak_boat type {boat_ty}, item type {item_ty}");
-    let mut c = Client::connect(&a[1], "boater", ids, 777, "26.3").await.unwrap();
+    let mut c = Client::connect(&a[1], "boater", ids, 777, "26.3")
+        .await
+        .unwrap();
     let pos = wait(&mut c, 30, |e| match e {
         Event::Position(p) => Some(*p),
         _ => None,
@@ -43,7 +53,11 @@ async fn main() {
     if a[3] == "check" {
         // Лодки с диска приходят с остальными сущностями при входе.
         let found = wait(&mut c, 10, |e| match e {
-            Event::EntitySpawned { entity_id, kind, pos } if *kind == boat_ty => Some((*entity_id, *pos)),
+            Event::EntitySpawned {
+                entity_id,
+                kind,
+                pos,
+            } if *kind == boat_ty => Some((*entity_id, *pos)),
             _ => None,
         })
         .await;
@@ -56,7 +70,9 @@ async fn main() {
         w.buf
     };
     c.send_raw(&cmd("gamemode survival")).await.unwrap();
-    c.send_raw(&cmd("give boater minecraft:oak_boat 2")).await.unwrap();
+    c.send_raw(&cmd("give boater minecraft:oak_boat 2"))
+        .await
+        .unwrap();
     // Взгляд вниз и вперёд (на юг): лодка встаёт на землю перед игроком.
     let mut w = Writer::new();
     w.var_int(sb("move_player_rot")).f32(0.0).f32(60.0).u8(1);
@@ -64,12 +80,20 @@ async fn main() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let use_item = |seq: i32| {
         let mut w = Writer::new();
-        w.var_int(sb("use_item")).var_int(0).var_int(seq).f32(0.0).f32(60.0);
+        w.var_int(sb("use_item"))
+            .var_int(0)
+            .var_int(seq)
+            .f32(0.0)
+            .f32(60.0);
         w.buf
     };
     c.send_raw(&use_item(1)).await.unwrap();
     let (boat, kind, bpos) = wait(&mut c, 5, |e| match e {
-        Event::EntitySpawned { entity_id, kind, pos } if *kind == boat_ty => Some((*entity_id, *kind, *pos)),
+        Event::EntitySpawned {
+            entity_id,
+            kind,
+            pos,
+        } if *kind == boat_ty => Some((*entity_id, *kind, *pos)),
         _ => None,
     })
     .await
@@ -78,7 +102,11 @@ async fn main() {
 
     // Сесть: `interact` без шифта.
     let mut w = Writer::new();
-    w.var_int(sb("interact")).var_int(boat).var_int(0).u8(0).bool(false);
+    w.var_int(sb("interact"))
+        .var_int(boat)
+        .var_int(0)
+        .u8(0)
+        .bool(false);
     c.send_raw(&w.buf).await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     // Проехать 6 блоков на юг.
@@ -86,7 +114,13 @@ async fn main() {
     for _ in 0..30 {
         p[2] += 0.2;
         let mut w = Writer::new();
-        w.var_int(sb("move_vehicle")).f64(p[0]).f64(p[1]).f64(p[2]).f32(0.0).f32(0.0).bool(true);
+        w.var_int(sb("move_vehicle"))
+            .f64(p[0])
+            .f64(p[1])
+            .f64(p[2])
+            .f32(0.0)
+            .f32(0.0)
+            .bool(true);
         c.send_raw(&w.buf).await.unwrap();
         let mut w = Writer::new();
         w.var_int(sb("paddle_boat")).bool(true).bool(true);
@@ -119,7 +153,9 @@ async fn main() {
     let mut dropped = None;
     while let Some(ev) = wait(&mut c, 3, |e| match e {
         Event::EntityRemoved(ids) => Some((ids.contains(&boat), None)),
-        Event::EntitySpawned { entity_id, kind, .. } if *kind == item_ty => Some((false, Some((*entity_id, *kind)))),
+        Event::EntitySpawned {
+            entity_id, kind, ..
+        } if *kind == item_ty => Some((false, Some((*entity_id, *kind)))),
         _ => None,
     })
     .await
@@ -144,7 +180,11 @@ async fn main() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     c.send_raw(&use_item(2)).await.unwrap();
     let second = wait(&mut c, 5, |e| match e {
-        Event::EntitySpawned { entity_id, kind, pos } if *kind == boat_ty => Some((*entity_id, *kind, *pos)),
+        Event::EntitySpawned {
+            entity_id,
+            kind,
+            pos,
+        } if *kind == boat_ty => Some((*entity_id, *kind, *pos)),
         _ => None,
     })
     .await;

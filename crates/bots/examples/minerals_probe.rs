@@ -20,7 +20,11 @@ fn pack(p: [i32; 3]) -> i64 {
 }
 
 fn unpack(v: i64) -> [i32; 3] {
-    [(v >> 38) as i32, (v << 52 >> 52) as i32, (v << 26 >> 38) as i32]
+    [
+        (v >> 38) as i32,
+        (v << 52 >> 52) as i32,
+        (v << 26 >> 38) as i32,
+    ]
 }
 
 struct Probe {
@@ -36,11 +40,16 @@ struct Probe {
 
 impl Probe {
     fn sb(&self, n: &str) -> i32 {
-        self.table.id(State::Play, Direction::Serverbound, n).unwrap()
+        self.table
+            .id(State::Play, Direction::Serverbound, n)
+            .unwrap()
     }
 
     fn name(&self, s: i32) -> String {
-        self.states.get(&s).cloned().unwrap_or_else(|| s.to_string())
+        self.states
+            .get(&s)
+            .cloned()
+            .unwrap_or_else(|| s.to_string())
     }
 
     async fn pump(&mut self, ms: u64) {
@@ -82,11 +91,20 @@ impl Probe {
             }
             "section_blocks_update" => {
                 let sec = r.i64().unwrap();
-                let (sx, sy, sz) = ((sec >> 42) as i32, (sec << 44 >> 44) as i32, (sec << 22 >> 42) as i32);
+                let (sx, sy, sz) = (
+                    (sec >> 42) as i32,
+                    (sec << 44 >> 44) as i32,
+                    (sec << 22 >> 42) as i32,
+                );
                 let n = r.var_int().unwrap();
                 for _ in 0..n {
                     let v = r.var_long().unwrap();
-                    let (state, x, z, y) = ((v >> 12) as i32, (v >> 8 & 15) as i32, (v >> 4 & 15) as i32, (v & 15) as i32);
+                    let (state, x, z, y) = (
+                        (v >> 12) as i32,
+                        (v >> 8 & 15) as i32,
+                        (v >> 4 & 15) as i32,
+                        (v & 15) as i32,
+                    );
                     self.block([sx * 16 + x, sy * 16 + y, sz * 16 + z], state);
                 }
             }
@@ -116,7 +134,16 @@ impl Probe {
     async fn use_on(&mut self, p: [i32; 3]) {
         self.seq += 1;
         let mut w = Writer::new();
-        w.var_int(self.sb("use_item_on")).var_int(0).i64(pack(p)).var_int(1).f32(0.5).f32(1.0).f32(0.5).u8(0).u8(0).var_int(self.seq);
+        w.var_int(self.sb("use_item_on"))
+            .var_int(0)
+            .i64(pack(p))
+            .var_int(1)
+            .f32(0.5)
+            .f32(1.0)
+            .f32(0.5)
+            .u8(0)
+            .u8(0)
+            .var_int(self.seq);
         self.c.send_raw(&w.buf).await.unwrap();
         self.ticks(4).await;
     }
@@ -124,7 +151,11 @@ impl Probe {
     async fn dig(&mut self, status: i32, p: [i32; 3]) {
         self.seq += 1;
         let mut w = Writer::new();
-        w.var_int(self.sb("player_action")).var_int(status).i64(pack(p)).u8(1).var_int(self.seq);
+        w.var_int(self.sb("player_action"))
+            .var_int(status)
+            .i64(pack(p))
+            .u8(1)
+            .var_int(self.seq);
         self.c.send_raw(&w.buf).await.unwrap();
         self.ticks(2).await;
     }
@@ -152,7 +183,8 @@ async fn main() {
     let a: Vec<String> = std::env::args().collect();
     let table = PacketTable::load(a[2].as_ref()).unwrap();
     let blocks: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(std::path::Path::new(&a[3]).with_file_name("blocks.json")).unwrap(),
+        &std::fs::read_to_string(std::path::Path::new(&a[3]).with_file_name("blocks.json"))
+            .unwrap(),
     )
     .unwrap();
     let mut states = HashMap::new();
@@ -160,14 +192,23 @@ async fn main() {
         for s in b["states"].as_array().unwrap() {
             let mut props: Vec<String> = s["properties"]
                 .as_object()
-                .map(|o| o.iter().map(|(k, v)| format!("{k}={}", v.as_str().unwrap())).collect())
+                .map(|o| {
+                    o.iter()
+                        .map(|(k, v)| format!("{k}={}", v.as_str().unwrap()))
+                        .collect()
+                })
                 .unwrap_or_default();
             props.sort();
-            states.insert(s["id"].as_i64().unwrap() as i32, format!("{name}[{}]", props.join(",")));
+            states.insert(
+                s["id"].as_i64().unwrap() as i32,
+                format!("{name}[{}]", props.join(",")),
+            );
         }
     }
     let ids = Ids::load(&table).unwrap();
-    let mut c = Client::connect(&a[1], "framer", ids, 777, "26.3").await.unwrap();
+    let mut c = Client::connect(&a[1], "framer", ids, 777, "26.3")
+        .await
+        .unwrap();
     let mut cb = HashMap::new();
     for n in ["block_update", "section_blocks_update"] {
         let id = table.id(State::Play, Direction::Clientbound, n).unwrap();
@@ -232,13 +273,27 @@ async fn main() {
     // Время в stderr: замер скорости случайных тиков, в сравнение не идёт.
     let started = std::time::Instant::now();
     p.ticks(400).await;
-    eprintln!("400 ticks at speed 4096: {:.1} s", started.elapsed().as_secs_f64());
+    eprintln!(
+        "400 ticks at speed 4096: {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
     p.cmd("gamerule random_tick_speed 0").await;
     p.pump(500).await;
     p.log.push("== budding amethyst after 400 ticks".into());
-    for d in [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]] {
+    for d in [
+        [0, -1, 0],
+        [0, 1, 0],
+        [0, 0, -1],
+        [0, 0, 1],
+        [-1, 0, 0],
+        [1, 0, 0],
+    ] {
         let at = [BUD[0] + d[0], BUD[1] + d[1], BUD[2] + d[2]];
-        let s = p.seen.get(&at).copied().map_or("(no update)".to_owned(), |s| p.name(s));
+        let s = p
+            .seen
+            .get(&at)
+            .copied()
+            .map_or("(no update)".to_owned(), |s| p.name(s));
         p.log.push(format!("{d:?} {s}"));
     }
     for l in &p.log {
