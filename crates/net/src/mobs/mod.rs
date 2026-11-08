@@ -1,14 +1,16 @@
 //! Мобы 26.3: мирные (`Cow`, `Pig`, `Sheep`, `Chicken`) и враждебные (`Zombie`).
-//! Физика `LivingEntity.travel`, коллизия с блоками, цели ИИ (`PanicGoal`,
-//! `TemptGoal`, `RandomStrollGoal`, `LookAtPlayerGoal`, у монстров —
-//! `NearestAttackableTargetGoal` и `MeleeAttackGoal`), урон с отбрасыванием и смерть.
+//! Физика `LivingEntity.travel`, коллизия с блоками, `Mob.serverAiStep` с
+//! селекторами целей ([`goals`]) и поиском пути ([`path`]), урон с
+//! отбрасыванием и смерть.
 //!
 //! Здесь же правила естественного спавна (`NaturalSpawner`), света для
 //! монстров, горения на солнце и исчезновения (`Mob.checkDespawn`): они не
 //! трогают мир напрямую, а получают его через замыкания и проверяются тестами.
 
+pub mod goals;
 pub mod path;
 
+use goals::{CellInfo, Kin, LookControl, Out, Selector};
 use path::{MoveControl, Navigation};
 
 /// Гравитация и сопротивление по вертикали (`LivingEntity.travel`).
@@ -25,8 +27,6 @@ pub const JUMP: f64 = 0.42;
 pub const INVULNERABLE: u8 = 20;
 /// Анимация смерти до исчезновения (`tickDeath`).
 pub const DEATH_TICKS: u16 = 20;
-/// Паника после удара (`lastHurtByMob` живёт 100 тиков).
-pub const PANIC_TICKS: u32 = 100;
 /// Отбрасывание от удара игрока (`knockback`).
 pub const KNOCKBACK: f64 = 0.4;
 /// Детёныш растёт 20 минут (`AgeableMob.BABY_START_AGE`).
@@ -127,6 +127,8 @@ pub struct SpeciesInfo {
     pub panic_speed: f64,
     /// Множитель скорости `TemptGoal`.
     pub tempt_speed: f64,
+    /// Множитель скорости `FollowParentGoal`.
+    pub follow_parent_speed: f64,
     /// Горит на солнце (`isSunSensitive`).
     pub burns_in_sun: bool,
     /// Громкость звуков (`getSoundVolume`).
@@ -152,6 +154,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
         fire_immune: false,
         panic_speed: 1.0,
         tempt_speed: 1.0,
+        follow_parent_speed: 1.1,
         burns_in_sun: false,
         volume: 1.0,
         sound,
@@ -169,6 +172,7 @@ const BUILTIN: [SpeciesInfo; 5] = [
         speed: 0.2,
         panic_speed: 2.0,
         tempt_speed: 1.25,
+        follow_parent_speed: 1.25,
         volume: 0.4,
         ..base(
             "minecraft:cow",
@@ -194,6 +198,7 @@ const BUILTIN: [SpeciesInfo; 5] = [
         max_health: 8.0,
         speed: 0.23,
         panic_speed: 1.25,
+        tempt_speed: 1.1,
         ..base(
             "minecraft:sheep",
             "minecraft:entity.sheep",
@@ -384,18 +389,6 @@ impl Species {
     }
 }
 
-/// Что сейчас делает моб (одна активная цель движения).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Goal {
-    Idle,
-    /// Идти к точке со множителем скорости, не дольше `ticks`.
-    Walk {
-        to: [f64; 3],
-        speed: f64,
-        ticks: u32,
-    },
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mob {
     pub species: Species,
@@ -419,24 +412,27 @@ pub struct Mob {
     pub sheared: bool,
     /// Цвет шерсти (`DyeColor` id).
     pub color: u8,
-    pub goal: Goal,
-    /// Паника: тики и от кого бежать.
-    pub panic: u32,
-    pub panic_from: [f64; 3],
-    /// Смотрит на точку ещё столько тиков.
-    pub look: Option<([f64; 3], u32)>,
+    /// `goalSelector` и `targetSelector`.
+    pub goals: Selector,
+    pub targets: Selector,
+    /// `tickCount`.
+    pub tick_count: u32,
+    /// `LookControl`.
+    pub look_ctl: LookControl,
+    /// `Mob.isAggressive` (зомби поднимает руки).
+    pub aggressive: bool,
+    /// `lastHurtByMob` и его `tickCount` (держится 100 тиков).
+    pub last_hurt_by: Option<(u128, u32)>,
+    /// `lastDamageSource`: `tickCount` удара и входит ли он в `panic_causes`.
+    pub last_damage_source: Option<(u32, bool)>,
+    /// События тика для сервера ([`Out`]). Сбрасываются в начале тика.
+    pub out: Vec<Out>,
     /// Курица: тиков до яйца.
     pub egg_time: i32,
-    /// Овца ест траву: тики анимации.
-    pub eating: u8,
     /// Пользовательское имя (JSON) от плагинов.
     pub custom_name: Option<String>,
     /// Цель монстра — UUID игрока (`Mob.getTarget`).
     pub target: Option<u128>,
-    /// Сколько тиков цели не видно подряд.
-    pub unseen: u32,
-    /// Тиков до следующего удара (`MeleeAttackGoal.ticksUntilNextAttack`).
-    pub attack_cooldown: u32,
     /// Удар этого тика: кого бить. Забирает и сбрасывает сервер.
     pub strike: Option<u128>,
     /// Тики без дела (`noActionTime`) — для исчезновения.
@@ -457,6 +453,7 @@ pub struct Mob {
 
 impl Mob {
     pub fn new(species: Species, pos: [f64; 3], uuid: u128) -> Self {
+        let (goals, targets) = goals::for_species(species);
         Self {
             species,
             uuid,
@@ -474,16 +471,17 @@ impl Mob {
             love: 0,
             sheared: false,
             color: 0,
-            goal: Goal::Idle,
-            panic: 0,
-            panic_from: pos,
-            look: None,
+            goals,
+            targets,
+            tick_count: 0,
+            look_ctl: LookControl::default(),
+            aggressive: false,
+            last_hurt_by: None,
+            last_damage_source: None,
+            out: Vec::new(),
             egg_time: 6000,
-            eating: 0,
             custom_name: None,
             target: None,
-            unseen: 0,
-            attack_cooldown: 0,
             strike: None,
             no_action: 0,
             persistent: false,
@@ -526,6 +524,24 @@ impl Mob {
         self.zza = f64::from(s);
     }
 
+    /// Бежит ли в панике (`PanicGoal.isRunning`, `Mob.isPanicking`).
+    pub fn panicking(&self) -> bool {
+        self.goals
+            .running(|g| matches!(g, goals::Goal::Panic { .. }))
+    }
+
+    /// Сородич для соседей по тику ([`goals::Kin`]).
+    pub fn kin(&self, id: i32) -> Kin {
+        Kin {
+            id,
+            species: self.species,
+            pos: self.pos,
+            age: self.age,
+            in_love: self.love > 0,
+            panicking: self.panicking(),
+        }
+    }
+
     pub fn alive(&self) -> bool {
         self.death_time == 0 && self.health > 0.0
     }
@@ -563,6 +579,9 @@ pub struct World<'a, 's, 'r> {
     pub water: &'a dyn Fn([i32; 3]) -> bool,
     /// Клетки для поиска пути; `None` — по форме и воде ([`path::cell`]).
     pub cell: Option<&'a dyn Fn([i32; 3]) -> path::Cell>,
+    /// Трава и яркость клетки для прогулок и еды овцы; `None` — яркость 0.5
+    /// и травы нет.
+    pub info: Option<&'a dyn Fn([i32; 3]) -> CellInfo>,
     /// Нижняя граница мира.
     pub min_y: i32,
 }
@@ -573,22 +592,24 @@ pub const FULL: &[[f64; 6]] = &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
 /// `maxUpStep` сухопутных мобов.
 const STEP: f64 = 0.6;
 
-/// Окружение для ИИ: игроки рядом (`ноги`) и случайные числа.
+/// Окружение для ИИ.
 ///
-/// Игроки уже отфильтрованы по виду моба: сюда попадают только те, кто держит
-/// его еду. Раньше на каждого моба строился `Vec` с проверкой имён предметов,
-/// и это была основная аллокация тика мобов.
-///
-/// Монстрам `players` — все игроки рядом (на них смотрят), `prey` — те, кого
-/// можно атаковать (не в творческом и не наблюдатели), `sight` — прямая
+/// `players` — все игроки мира (на них смотрят), `prey` — те, кого можно
+/// атаковать (не в творческом и не наблюдатели), `tempters` — ноги игроков с
+/// едой этого вида в руке (отфильтрованы сервером раз на вид за тик, а не на
+/// моба), `kin` — животные рядом для пар и детёнышей, `sight` — прямая
 /// видимость между двумя точками (`Sensing.hasLineOfSight`, луч `COLLIDER`).
 pub struct Senses<'a> {
-    pub players: &'a [[f64; 3]],
+    pub players: &'a [Prey],
     pub rand: &'a mut dyn FnMut() -> f64,
     pub prey: &'a [Prey],
+    pub tempters: &'a [[f64; 3]],
+    pub kin: &'a [Kin],
     pub sight: &'a dyn Fn([f64; 3], [f64; 3]) -> bool,
     /// Сложность (`Difficulty.getId`): глубина падения с целью.
     pub difficulty: u8,
+    /// Id сущности: чётность полного прохода селекторов.
+    pub entity_id: i32,
 }
 
 /// Игрок, которого монстр может выбрать целью.
@@ -820,15 +841,8 @@ pub fn travel(m: &mut Mob, forward: f64, w: &World) -> bool {
         m.vel[2] = 0.0;
     }
     if water {
+        // Всплывают сами только с `FloatGoal` (прыжок в жидкости, `tick`).
         m.vel = [m.vel[0] * 0.8, m.vel[1] * 0.8 - 0.02, m.vel[2] * 0.8];
-        // `FloatGoal`: всплывать.
-        if (w.water)([
-            m.pos[0].floor() as i32,
-            (m.pos[1] + h * 0.6).floor() as i32,
-            m.pos[2].floor() as i32,
-        ]) {
-            m.vel[1] += 0.04;
-        }
     } else {
         let f = if m.on_ground {
             GROUND_FRICTION
@@ -857,194 +871,8 @@ fn wrap(a: f32) -> f32 {
     a
 }
 
-/// Поворот к цели не больше `max` градусов (`MoveControl.rotlerp`).
-fn turn(from: f32, to: f32, max: f32) -> f32 {
-    from + wrap(to - from).clamp(-max, max)
-}
-
-fn yaw_to(from: [f64; 3], to: [f64; 3]) -> f32 {
-    (path::atan2(to[2] - from[2], to[0] - from[0]) * 57.2957763671875) as f32 - 90.0
-}
-
 pub fn dist2(a: [f64; 3], b: [f64; 3]) -> f64 {
     (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)
-}
-
-/// Выбор цели (`GoalSelector`): паника > еда в руке > прогулка; взгляд на игрока.
-pub fn think(m: &mut Mob, s: &mut Senses) {
-    if !m.alive() {
-        return;
-    }
-    if m.species.is_monster() {
-        think_monster(m, s);
-        return;
-    }
-    let speed = m.speed();
-    if m.panic > 0 {
-        m.panic -= 1;
-        let fleeing =
-            matches!(m.goal, Goal::Walk { speed: v, ticks, .. } if v > speed * 1.01 && ticks > 0);
-        if !fleeing {
-            // `DefaultRandomPos.getPosAway`: точка до 5 блоков прочь от обидчика.
-            let away = [m.pos[0] - m.panic_from[0], m.pos[2] - m.panic_from[2]];
-            let len = (away[0] * away[0] + away[1] * away[1]).sqrt().max(1e-3);
-            let spread = ((s.rand)() - 0.5) * 3.0;
-            let to = [
-                m.pos[0] + away[0] / len * 5.0 + spread,
-                m.pos[1],
-                m.pos[2] + away[1] / len * 5.0 - spread,
-            ];
-            m.goal = Goal::Walk {
-                to,
-                speed: speed * m.species.panic_speed(),
-                ticks: 60,
-            };
-        }
-        return;
-    }
-    // `TemptGoal`: ближайший игрок с едой в 10 блоках.
-    let tempt = s
-        .players
-        .iter()
-        .filter(|p| dist2(**p, m.pos) < 100.0)
-        .min_by(|a, b| dist2(**a, m.pos).total_cmp(&dist2(**b, m.pos)))
-        .copied();
-    if let Some(p) = tempt {
-        m.look = Some(([p[0], p[1] + 1.62, p[2]], 2));
-        m.goal = if dist2(p, m.pos) < 6.25 {
-            Goal::Idle
-        } else {
-            Goal::Walk {
-                to: p,
-                speed: speed * m.species.tempt_speed(),
-                ticks: 20,
-            }
-        };
-        return;
-    }
-    if m.goal == Goal::Idle && (s.rand)() < 1.0 / 120.0 {
-        // `RandomStrollGoal`: случайная точка до 10 блоков.
-        let to = [
-            m.pos[0] + ((s.rand)() * 2.0 - 1.0) * 10.0,
-            m.pos[1],
-            m.pos[2] + ((s.rand)() * 2.0 - 1.0) * 10.0,
-        ];
-        m.goal = Goal::Walk {
-            to,
-            speed,
-            ticks: 120,
-        };
-    }
-    // `LookAtPlayerGoal`: 2% за тик, в 6 блоках, на 40 тиков.
-    if m.look.is_none()
-        && (s.rand)() < 0.02
-        && let Some(p) = s.players.iter().find(|p| dist2(**p, m.pos) < 36.0).copied()
-    {
-        m.look = Some(([p[0], p[1] + 1.62, p[2]], 40 + ((s.rand)() * 40.0) as u32));
-    }
-}
-
-/// ИИ монстра ближнего боя (зомби, `Zombie.addBehaviourGoals`):
-/// `NearestAttackableTargetGoal<Player>` (раз в ~10 тиков, рамка
-/// `follow_range × 4 × follow_range`, нужна видимость) и `MeleeAttackGoal`
-/// (идти к цели, бить раз в 20 тиков, когда рамка с досягаемостью задевает
-/// игрока и он виден). Без цели — прогулка и взгляд на игроков в 8 блоках.
-///
-/// Путь к цели — по прямой с прыжком через ступень: настоящего поиска пути
-/// (`PathNavigation`) пока нет.
-fn think_monster(m: &mut Mob, s: &mut Senses) {
-    let speed = m.speed();
-    let range = m.species.follow_range();
-    m.attack_cooldown = m.attack_cooldown.saturating_sub(1);
-    // `TargetGoal.canContinueToUse`: цель есть, в дальности и видна хоть раз за 60 тиков.
-    if let Some(uuid) = m.target {
-        let eye = m.eye();
-        let keep = s
-            .prey
-            .iter()
-            .find(|p| p.uuid == uuid)
-            .filter(|p| dist2(p.pos, m.pos) <= range * range)
-            .is_some_and(|p| {
-                if (s.sight)(eye, p.eye()) {
-                    m.unseen = 0;
-                } else {
-                    m.unseen += 1;
-                }
-                m.unseen <= UNSEEN_MEMORY
-            });
-        if !keep {
-            m.target = None;
-            m.unseen = 0;
-            m.goal = Goal::Idle;
-        }
-    }
-    // `NearestAttackableTargetGoal`: `randomInterval` 10 — проверка с шансом 1/10.
-    if m.target.is_none() && (s.rand)() < 0.1 {
-        let eye = m.eye();
-        let (_, h) = m.size();
-        m.target = s
-            .prey
-            .iter()
-            .filter(|p| {
-                // Рамка поиска: ±4 по вертикали поверх рамки моба.
-                p.pos[1] + PLAYER_SIZE.1 > m.pos[1] - 4.0
-                    && p.pos[1] < m.pos[1] + h + 4.0
-                    && dist2(p.pos, m.pos) <= range * range
-                    && (s.sight)(eye, p.eye())
-            })
-            .min_by(|a, b| dist2(a.pos, eye).total_cmp(&dist2(b.pos, eye)))
-            .map(|p| p.uuid);
-        if m.target.is_some() {
-            // `MeleeAttackGoal.start`: первый удар без ожидания.
-            m.attack_cooldown = 0;
-            m.unseen = 0;
-        }
-    }
-    if let Some(uuid) = m.target
-        && let Some(p) = s.prey.iter().find(|p| p.uuid == uuid).copied()
-    {
-        m.no_action = 0;
-        m.look = Some((p.eye(), 2));
-        if in_reach(m, &p) {
-            // Вплотную стоим и бьём, а не толкаемся в игрока.
-            m.goal = Goal::Idle;
-            m.yaw = turn(m.yaw, yaw_to(m.pos, p.pos), 30.0);
-            if m.attack_cooldown == 0 && (s.sight)(m.eye(), p.eye()) {
-                m.attack_cooldown = ATTACK_INTERVAL;
-                m.strike = Some(uuid);
-            }
-        } else {
-            m.goal = Goal::Walk {
-                to: p.pos,
-                speed,
-                ticks: 20,
-            };
-        }
-        return;
-    }
-    // `WaterAvoidingRandomStrollGoal`: раз в ~120 тиков точка до 10 блоков.
-    if m.goal == Goal::Idle && (s.rand)() < 1.0 / 120.0 {
-        let to = [
-            m.pos[0] + ((s.rand)() * 2.0 - 1.0) * 10.0,
-            m.pos[1],
-            m.pos[2] + ((s.rand)() * 2.0 - 1.0) * 10.0,
-        ];
-        m.goal = Goal::Walk {
-            to,
-            speed,
-            ticks: 120,
-        };
-    }
-    // `LookAtPlayerGoal(Player, 8)`.
-    if m.look.is_none()
-        && (s.rand)() < 0.02
-        && let Some(p) = s.players.iter().find(|p| dist2(**p, m.pos) < 64.0).copied()
-    {
-        m.look = Some((
-            [p[0], p[1] + PLAYER_EYE, p[2]],
-            40 + ((s.rand)() * 40.0) as u32,
-        ));
-    }
 }
 
 /// Моб для поиска пути.
@@ -1075,62 +903,52 @@ pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walke
     }
 }
 
-/// Цель движения → путь (`navigation.moveTo`), затем `PathNavigation.tick`.
-///
-/// Путь строится, когда цель сменила блок; дошёл — цель снята, как
-/// `RandomStrollGoal.canContinueToUse` (`!navigation.isDone()`). К цели атаки
-/// путь ведёт в саму клетку (`createPath(target, 0)`), к точке — в соседнюю.
-fn drive(m: &mut Mob, w: &World, difficulty: u8, water: bool) {
-    let walk = walker(m, w, difficulty, water);
-    let range = m.species.follow_range();
-    match m.goal {
-        Goal::Idle => {
-            m.nav.stop();
-            m.nav.requested = None;
-        }
-        Goal::Walk { to, speed, ticks } => {
-            if ticks == 0 {
-                m.goal = Goal::Idle;
-                m.nav.stop();
-                m.nav.requested = None;
-            } else {
-                m.goal = Goal::Walk {
-                    to,
-                    speed,
-                    ticks: ticks - 1,
-                };
-                let block = to.map(|v| v.floor() as i32);
-                if m.nav.requested != Some(block) {
-                    m.nav.requested = Some(block);
-                    let reach = if m.target.is_some() { 0 } else { 1 };
-                    let found = m.nav.path_to(w, &walk, to, reach, range);
-                    let modifier = speed / m.speed().max(1e-9);
-                    if !m.nav.move_to(w, &walk, found, modifier) {
-                        m.goal = Goal::Idle;
-                        m.nav.requested = None;
-                    }
-                } else if m.nav.is_done() {
-                    m.goal = Goal::Idle;
-                    m.nav.requested = None;
-                }
-            }
+/// `Mob.serverAiStep`: селекторы → навигация → `MoveControl` → `LookControl`.
+fn server_ai_step(m: &mut Mob, w: &World, s: &mut Senses) {
+    let mut goals = std::mem::take(&mut m.goals);
+    let mut targets = std::mem::take(&mut m.targets);
+    {
+        // Полный проход — на первом тике и через тик (со сдвигом на id), иначе
+        // только цели с `requiresUpdateEveryTick`.
+        let full = m.tick_count <= 1 || (i64::from(m.tick_count) + i64::from(s.entity_id)) % 2 == 0;
+        let mut c = goals::Ctx { w, s };
+        if full {
+            targets.tick(m, &mut c);
+            goals.tick(m, &mut c);
+        } else {
+            targets.tick_running(false, m, &mut c);
+            goals.tick_running(false, m, &mut c);
         }
     }
-    if let Some((to, speed)) = m.nav.tick(w, &walk, range) {
+    m.goals = goals;
+    m.targets = targets;
+    let water = in_water(m, w);
+    let walk = walker(m, w, s.difficulty, water);
+    if let Some((to, speed)) = m.nav.tick(w, &walk, m.species.follow_range()) {
         m.move_ctl.set_wanted(to, speed);
     }
+    path::move_control(m, w, water);
+    goals::look_tick(m);
 }
 
-/// Тик моба: ИИ, движение, повороты, таймеры. Возвращает `true`, когда моб исчез.
+/// Тик моба (`LivingEntity.tick` → `aiStep`). Возвращает `true`, когда моб исчез.
 pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
     if m.death_time > 0 {
         m.death_time += 1;
         let _ = travel(m, 0.0, w);
         return m.death_time > DEATH_TICKS;
     }
+    m.out.clear();
+    m.tick_count = m.tick_count.wrapping_add(1);
     m.invulnerable = m.invulnerable.saturating_sub(1);
     m.strike = None;
-    // `Mob.serverAiStep`: `++noActionTime`; сбрасывают удар, цель и игрок рядом.
+    // `LivingEntity.baseTick`: обидчик забывается через 100 тиков.
+    if m.last_hurt_by
+        .is_some_and(|(_, t)| m.tick_count.wrapping_sub(t) > 100)
+    {
+        m.last_hurt_by = None;
+    }
+    // `Mob.serverAiStep`: `++noActionTime`; сбрасывают удар и игрок рядом.
     m.no_action = m.no_action.saturating_add(1);
     if m.species.is_animal() {
         if m.age < 0 {
@@ -1142,15 +960,14 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
     }
     // `LivingEntity.aiStep`: задержка прыжка тает до ИИ.
     m.no_jump_delay = m.no_jump_delay.saturating_sub(1);
-    think(m, s);
-    // `Mob.serverAiStep`: навигация → `MoveControl` → `JumpControl`.
+    server_ai_step(m, w, s);
+    // Прыжок: в воде — всплытие (`jumpInLiquid`, +0.04), с земли — не чаще
+    // раза в 10 тиков подряд.
     let water = in_water(m, w);
-    drive(m, w, s.difficulty, water);
-    path::move_control(m, w, water);
-    // `LivingEntity.aiStep`: прыжок с земли не чаще раза в 10 тиков подряд;
-    // в воде всплывают сами (`travel`).
     if std::mem::take(&mut m.jump) {
-        if !water && m.on_ground && m.no_jump_delay == 0 {
+        if water && (!m.on_ground || goals::deep_water(m, w)) {
+            m.vel[1] += 0.04;
+        } else if m.on_ground && m.no_jump_delay == 0 {
             m.vel[1] = m.vel[1].max(JUMP);
             m.no_jump_delay = 10;
         }
@@ -1158,30 +975,32 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
         m.no_jump_delay = 0;
     }
     let _ = travel(m, m.zza, w);
-    // Голова: на цель взгляда, иначе по телу.
-    let target_head = match m.look {
-        Some((p, t)) => {
-            m.look = (t > 1).then_some((p, t - 1));
-            let eye = m.eye();
-            let horiz = ((p[0] - eye[0]).powi(2) + (p[2] - eye[2]).powi(2)).sqrt();
-            m.pitch =
-                (-(path::atan2(p[1] - eye[1], horiz) * 57.2957763671875) as f32).clamp(-40.0, 40.0);
-            yaw_to(m.pos, p)
-        }
-        None => {
-            m.pitch = 0.0;
-            m.yaw
-        }
-    };
-    m.head_yaw = turn(m.head_yaw, target_head, 10.0);
-    // Голова не уходит от тела дальше 75° (`BodyRotationControl`).
-    m.head_yaw = m.yaw + wrap(m.head_yaw - m.yaw).clamp(-75.0, 75.0);
     false
 }
 
-/// Удар по мобу (`LivingEntity.hurt`): неуязвимость, отбрасывание от `from`, паника.
+/// Источник урона (`DamageSource`): откуда и кто.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Source {
+    /// Точка источника: отбрасывание от неё. Урон с точкой (удар, стрела,
+    /// взрыв) пугает животных (`#panic_causes`), урон среды без точки — нет.
+    pub from: Option<[f64; 3]>,
+    /// Обидчик (`lastHurtByMob`) — UUID игрока: его берёт целью `HurtByTargetGoal`.
+    pub attacker: Option<u128>,
+}
+
+impl Source {
+    pub fn at(from: [f64; 3], attacker: Option<u128>) -> Self {
+        Self {
+            from: Some(from),
+            attacker,
+        }
+    }
+}
+
+/// Удар по мобу (`LivingEntity.hurt`): неуязвимость, отбрасывание, память об
+/// обидчике и источнике (для `HurtByTargetGoal` и `PanicGoal`).
 /// `None` — урон не прошёл; `Some(true)` — моб умер.
-pub fn hurt(m: &mut Mob, amount: f32, from: Option<[f64; 3]>, knockback: f64) -> Option<bool> {
+pub fn hurt(m: &mut Mob, amount: f32, src: Source, knockback: f64) -> Option<bool> {
     if !m.alive() {
         return None;
     }
@@ -1197,8 +1016,12 @@ pub fn hurt(m: &mut Mob, amount: f32, from: Option<[f64; 3]>, knockback: f64) ->
     m.last_damage = amount;
     m.health = (m.health - dealt).max(0.0);
     m.no_action = 0;
-    if let Some(src) = from {
-        let d = [src[0] - m.pos[0], src[2] - m.pos[2]];
+    m.last_damage_source = Some((m.tick_count, src.from.is_some()));
+    if let Some(a) = src.attacker {
+        m.last_hurt_by = Some((a, m.tick_count));
+    }
+    if let Some(from) = src.from {
+        let d = [from[0] - m.pos[0], from[2] - m.pos[2]];
         let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
         if len > 1e-4 && knockback > 0.0 {
             m.vel[0] = m.vel[0] / 2.0 - d[0] / len * knockback;
@@ -1206,13 +1029,6 @@ pub fn hurt(m: &mut Mob, amount: f32, from: Option<[f64; 3]>, knockback: f64) ->
             if m.on_ground {
                 m.vel[1] = (m.vel[1] / 2.0 + knockback).min(0.4);
             }
-        }
-        // Монстр не паникует: обидчика он берёт целью (`HurtByTargetGoal`) —
-        // это делает сервер, который знает, кто ударил.
-        if m.species.is_animal() {
-            m.panic = PANIC_TICKS;
-            m.panic_from = src;
-            m.goal = Goal::Idle;
         }
     }
     if m.health <= 0.0 {
@@ -1539,6 +1355,26 @@ mod tests {
         }
     }
 
+    /// Без целей, путь к `to` (`navigation.moveTo`): проверка ходьбы отдельно от ИИ.
+    fn walk_to(m: &mut Mob, w: &World, to: [f64; 3], speed: f64) {
+        m.goals = Selector::default();
+        m.targets = Selector::default();
+        let walk = walker(m, w, 2, false);
+        let found = m.nav.path_to(w, &walk, to, 1, m.species.follow_range());
+        assert!(m.nav.move_to(w, &walk, found, speed), "нет пути к {to:?}");
+    }
+
+    /// Детерминированный ГСЧ (LCG) для целей со случайными точками.
+    fn lcg(seed: u64) -> impl FnMut() -> f64 {
+        let mut s = seed;
+        move || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
     /// Скорость ходьбы закреплена на ванильном значении.
     ///
     /// Сверено с байткодом 26.3. `travelInAir` передаёт в `moveRelative`
@@ -1555,23 +1391,23 @@ mod tests {
             shape: &*shape,
             water: &*water,
             cell: None,
+            info: None,
             min_y: -64,
         };
         let mut m = Mob::new(Species::Cow, [0.5, 64.0, 0.5], 1);
         m.on_ground = true;
-        m.goal = Goal::Walk {
-            // Путь не длиннее `follow_range` (16): цель в его пределах.
-            to: [15.5, 64.0, 0.5],
-            speed: Species::Cow.speed(),
-            ticks: 10_000,
-        };
+        // Путь не длиннее `follow_range` (16): цель в его пределах.
+        walk_to(&mut m, &w, [15.5, 64.0, 0.5], 1.0);
         let mut rnd = || 0.5;
         let mut s = Senses {
             players: &[],
             rand: &mut rnd,
             prey: &[],
+            tempters: &[],
+            kin: &[],
             sight: &always_visible,
             difficulty: 2,
+            entity_id: 1,
         };
         // Первые тики — разгон от нуля (за 30 тиков скорость сходится до 1e-8).
         for _ in 0..30 {
@@ -1600,6 +1436,7 @@ mod tests {
             shape: &*shape,
             water: &*water,
             cell: None,
+            info: None,
             min_y: -64,
         };
         let mut m = Mob::new(Species::Cow, [0.5, 70.0, 0.5], 1);
@@ -1615,6 +1452,7 @@ mod tests {
             shape: &*shape,
             water: &*water,
             cell: None,
+            info: None,
             min_y: -64,
         };
         let mut c = Mob::new(Species::Chicken, [0.5, 80.0, 0.5], 1);
@@ -1649,6 +1487,7 @@ mod tests {
                 shape: &ledge(top),
                 water: &|_| false,
                 cell: None,
+                info: None,
                 min_y: -64,
             };
             let mut m = Mob::new(Species::Cow, [3.5, 70.0, 0.5], 1);
@@ -1664,6 +1503,7 @@ mod tests {
             shape: &ledge(SLAB),
             water: &|_| false,
             cell: None,
+            info: None,
             min_y: -64,
         };
         let mut m = Mob::new(Species::Pig, [0.5, 64.0, 0.5], 1);
@@ -1691,6 +1531,7 @@ mod tests {
             shape: &ledge(&[]),
             water: &|_| false,
             cell: None,
+            info: None,
             min_y: -64,
         };
         let mut m = Mob::new(Species::Cow, [3.5, 70.0, 0.5], 1);
@@ -1707,22 +1548,22 @@ mod tests {
             shape: &*shape,
             water: &*water,
             cell: None,
+            info: None,
             min_y: -64,
         };
         let mut m = Mob::new(Species::Pig, [0.5, 64.0, 0.5], 1);
         m.on_ground = true;
-        m.goal = Goal::Walk {
-            to: [10.5, 64.0, 0.5],
-            speed: 0.25,
-            ticks: 400,
-        };
+        walk_to(&mut m, &w, [10.5, 64.0, 0.5], 1.0);
         let mut rnd = || 0.9;
         let mut s = Senses {
             players: &[],
             rand: &mut rnd,
             prey: &[],
+            tempters: &[],
+            kin: &[],
             sight: &always_visible,
             difficulty: 2,
+            entity_id: 1,
         };
         let mut max_x: f64 = 0.0;
         for _ in 0..200 {
@@ -1745,28 +1586,36 @@ mod tests {
             shape: &*shape,
             water: &*water,
             cell: None,
+            info: None,
             min_y: -64,
         };
         let mut m = Mob::new(Species::Cow, [0.5, 64.0, 0.5], 1);
         m.on_ground = true;
-        assert_eq!(
-            hurt(&mut m, 1.0, Some([-2.0, 64.0, 0.5]), KNOCKBACK),
-            Some(false)
-        );
+        let hit = Source::at([-2.0, 64.0, 0.5], None);
+        assert_eq!(hurt(&mut m, 1.0, hit, KNOCKBACK), Some(false));
         // Повторный такой же удар в неуязвимости не проходит.
-        assert_eq!(hurt(&mut m, 1.0, Some([-2.0, 64.0, 0.5]), KNOCKBACK), None);
-        let mut rnd = || 0.5;
+        assert_eq!(hurt(&mut m, 1.0, hit, KNOCKBACK), None);
+        // `PanicGoal` бежит в случайную точку `DefaultRandomPos.getPos(5, 4)`, не
+        // обязательно прочь от обидчика: важно, что бежит и с `panic_speed`.
+        let mut rnd = lcg(7);
         let mut s = Senses {
             players: &[],
             rand: &mut rnd,
             prey: &[],
+            tempters: &[],
+            kin: &[],
             sight: &always_visible,
             difficulty: 2,
+            entity_id: 1,
         };
+        let start = m.pos;
+        let mut ran = false;
         for _ in 0..40 {
             tick(&mut m, &w, &mut s);
+            ran |= m.panicking() && m.nav.speed == Species::Cow.panic_speed();
         }
-        assert!(m.pos[0] > 3.0, "{:?}", m.pos);
+        assert!(ran, "не запаниковала");
+        assert!(dist2(m.pos, start) > 4.0, "{:?}", m.pos);
         assert_eq!(m.health, 9.0);
     }
 
@@ -1777,17 +1626,21 @@ mod tests {
             shape: &*shape,
             water: &*water,
             cell: None,
+            info: None,
             min_y: -64,
         };
         let mut m = Mob::new(Species::Chicken, [0.5, 64.0, 0.5], 1);
-        assert_eq!(hurt(&mut m, 10.0, None, 0.0), Some(true));
+        assert_eq!(hurt(&mut m, 10.0, Source::default(), 0.0), Some(true));
         let mut rnd = || 0.5;
         let mut s = Senses {
             players: &[],
             rand: &mut rnd,
             prey: &[],
+            tempters: &[],
+            kin: &[],
             sight: &always_visible,
             difficulty: 2,
+            entity_id: 1,
         };
         let gone = (0..30).position(|_| tick(&mut m, &w, &mut s));
         assert_eq!(gone, Some(19));
@@ -1800,18 +1653,22 @@ mod tests {
             shape: &*shape,
             water: &*water,
             cell: None,
+            info: None,
             min_y: -64,
         };
         let mut m = Mob::new(Species::Sheep, [0.5, 64.0, 0.5], 1);
         m.on_ground = true;
-        let players = [[0.5, 64.0, 8.5]];
+        let food = [[0.5, 64.0, 8.5]];
         let mut rnd = || 0.99;
         let mut s = Senses {
-            players: &players,
+            players: &[],
             rand: &mut rnd,
             prey: &[],
+            tempters: &food,
+            kin: &[],
             sight: &always_visible,
             difficulty: 2,
+            entity_id: 1,
         };
         for _ in 0..100 {
             tick(&mut m, &w, &mut s);
@@ -1880,20 +1737,24 @@ mod tests {
             shape: &*shape,
             water: &*water,
             cell: None,
+            info: None,
             min_y: -64,
         };
         let mut m = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 1);
         m.on_ground = true;
         let prey = [Prey { uuid: 7, pos: at }];
-        let players = [at];
+        let players = prey;
         // 0.05: выбор цели (< 0.1) проходит, прогулка (< 1/120) — нет.
         let mut rnd = || 0.05;
         let mut s = Senses {
             players: &players,
             rand: &mut rnd,
             prey: &prey,
+            tempters: &[],
+            kin: &[],
             sight,
             difficulty: 2,
+            entity_id: 1,
         };
         let mut strikes = Vec::new();
         for t in 0..ticks {
@@ -1910,8 +1771,16 @@ mod tests {
         let (m, strikes) = zombie_run([8.5, 64.0, 0.5], &always_visible, 200);
         assert_eq!(m.target, Some(7));
         assert!(m.pos[0] > 6.0 && m.pos[0] < 8.5, "{:?}", m.pos);
-        assert!(strikes.len() >= 3, "{strikes:?}");
-        for pair in strikes.windows(2) {
+        assert!(strikes.len() >= 4, "{strikes:?}");
+        // Дойдя до игрока, зомби завершает путь: `MeleeAttackGoal` встаёт
+        // (`canContinueToUse` — `!navigation.isDone()`) и через 20 тиков проверки
+        // `canUse` запускается снова, а `start` обнуляет `ticksUntilNextAttack`.
+        // Поэтому второй удар раньше (как в байткоде), дальше — ровно раз в 20.
+        assert!(
+            strikes[1] - strikes[0] <= ATTACK_INTERVAL as usize,
+            "{strikes:?}"
+        );
+        for pair in strikes[1..].windows(2) {
             assert_eq!(pair[1] - pair[0], ATTACK_INTERVAL as usize, "{strikes:?}");
         }
     }
@@ -1926,20 +1795,24 @@ mod tests {
             shape: &*shape,
             water: &*water,
             cell: None,
+            info: None,
             min_y: -64,
         };
         let mut m = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 1);
         m.on_ground = true;
         let at = [6.5, 64.0, 0.5];
         let prey = [Prey { uuid: 7, pos: at }];
-        let players = [at];
+        let players = prey;
         let mut rnd = || 0.05;
         let mut s = Senses {
             players: &players,
             rand: &mut rnd,
             prey: &prey,
+            tempters: &[],
+            kin: &[],
             sight: &always_visible,
             difficulty: 2,
+            entity_id: 1,
         };
         let mut hit = None;
         for t in 0..400 {
@@ -2013,6 +1886,7 @@ mod tests {
             shape: &shape,
             water: &|_| false,
             cell: Some(&cell),
+            info: None,
             min_y: -64,
         };
         let mut m = Mob::new(Species::Zombie, [0.5, 64.0, -5.5], 1);
@@ -2022,14 +1896,17 @@ mod tests {
         settle(&mut m, &w);
         let at = [0.5, 64.0, 0.5];
         let prey = [Prey { uuid: 7, pos: at }];
-        let players = [at];
+        let players = prey;
         let mut rnd = || 0.05;
         let mut s = Senses {
             players: &players,
             rand: &mut rnd,
             prey: &prey,
+            tempters: &[],
+            kin: &[],
             sight: &always_visible,
             difficulty: 2,
+            entity_id: 1,
         };
         // `mob_path_probe` на `server.jar`: (тик движения, x, z) относительно
         // игрока по шаговым дельтам `move_entity` (трекер шлёт раз в 3 тика).
@@ -2122,9 +1999,10 @@ mod tests {
         // Дальше 35 блоков не замечает.
         let (m, _) = zombie_run([40.5, 64.0, 0.5], &always_visible, 100);
         assert_eq!(m.target, None);
-        // Выше рамки поиска (±4) тоже.
-        let (m, _) = zombie_run([3.5, 72.0, 0.5], &always_visible, 100);
-        assert_eq!(m.target, None);
+        // Игрока ищут `getNearestPlayer` без рамки по высоте: на 8 блоков выше
+        // в дальности и на виду — цель (прежняя рамка ±4 была не из ванили).
+        let (m, _) = zombie_run([3.5, 72.0, 0.5], &always_visible, 20);
+        assert_eq!(m.target, Some(7));
     }
 
     #[test]
@@ -2134,42 +2012,97 @@ mod tests {
             shape: &*shape,
             water: &*water,
             cell: None,
+            info: None,
             min_y: -64,
         };
         let mut m = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 1);
-        m.target = Some(7);
+        m.on_ground = true;
         let prey = [Prey {
             uuid: 7,
             pos: [20.5, 64.0, 0.5],
         }];
-        let mut rnd = || 0.9;
+        let visible = std::cell::Cell::new(true);
+        let sight = |_: [f64; 3], _: [f64; 3]| visible.get();
+        let mut rnd = || 0.05;
         let mut s = Senses {
-            players: &[],
+            players: &prey,
             rand: &mut rnd,
             prey: &prey,
-            sight: &|_, _| false,
+            tempters: &[],
+            kin: &[],
+            sight: &sight,
             difficulty: 2,
+            entity_id: 1,
         };
+        tick(&mut m, &w, &mut s);
+        assert_eq!(m.target, Some(7));
+        // `TargetGoal.canContinueToUse` считает невидимые полные проходы
+        // селектора (раз в 2 тика) до `reducedTickDelay(60)` = 30.
+        visible.set(false);
         for _ in 0..UNSEEN_MEMORY {
             tick(&mut m, &w, &mut s);
         }
         assert_eq!(m.target, Some(7));
-        tick(&mut m, &w, &mut s);
+        for _ in 0..3 {
+            tick(&mut m, &w, &mut s);
+        }
         assert_eq!(m.target, None);
+    }
+
+    /// `HurtByTargetGoal`: обидчика берёт целью без взгляда и дальности поиска,
+    /// зовёт своих (`alertOthers`); творческого (нет в `prey`) — нет.
+    #[test]
+    fn zombie_targets_attacker_and_alerts() {
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let player = Prey {
+            uuid: 7,
+            pos: [10.5, 64.0, 0.5],
+        };
+        for (prey, want) in [(vec![player], Some(7)), (vec![], None)] {
+            let mut m = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 1);
+            m.on_ground = true;
+            let mut rnd = || 0.9;
+            let mut s = Senses {
+                players: &[player],
+                rand: &mut rnd,
+                prey: &prey,
+                tempters: &[],
+                kin: &[],
+                sight: &|_, _| false,
+                difficulty: 2,
+                entity_id: 1,
+            };
+            tick(&mut m, &w, &mut s);
+            assert_eq!(m.target, None);
+            hurt(&mut m, 1.0, Source::at(player.pos, Some(7)), KNOCKBACK);
+            tick(&mut m, &w, &mut s);
+            let mut alerted = m.out.contains(&Out::Alert(7));
+            tick(&mut m, &w, &mut s);
+            alerted |= m.out.contains(&Out::Alert(7));
+            assert_eq!(m.target, want);
+            assert_eq!(alerted, want.is_some());
+        }
     }
 
     #[test]
     fn monsters_do_not_panic_and_babies_stay_babies() {
         let mut z = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 1);
         z.age = -1;
-        hurt(&mut z, 1.0, Some([2.0, 64.0, 0.5]), KNOCKBACK);
-        assert_eq!(z.panic, 0);
+        hurt(&mut z, 1.0, Source::at([2.0, 64.0, 0.5], None), KNOCKBACK);
         assert!(z.vel[0] < 0.0, "knockback {:?}", z.vel);
         let (shape, water) = flat_world(&floor);
         let w = World {
             shape: &*shape,
             water: &*water,
             cell: None,
+            info: None,
             min_y: -64,
         };
         let mut rnd = || 0.9;
@@ -2177,12 +2110,16 @@ mod tests {
             players: &[],
             rand: &mut rnd,
             prey: &[],
+            tempters: &[],
+            kin: &[],
             sight: &always_visible,
             difficulty: 2,
+            entity_id: 1,
         };
         for _ in 0..10 {
             tick(&mut z, &w, &mut s);
         }
+        assert!(!z.panicking());
         assert!(z.is_baby());
         assert!((z.speed() - 0.345).abs() < 1e-9);
         assert_eq!(Species::Zombie.xp(true, 0.0), 12);

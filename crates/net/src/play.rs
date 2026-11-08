@@ -6331,7 +6331,12 @@ impl PlayPlan {
                                     }
                                     gone.push(id);
                                 } else {
-                                    hurt_mobs.push((mob_targets[k].3, d, a.pos));
+                                    hurt_mobs.push((
+                                        mob_targets[k].3,
+                                        d,
+                                        a.pos,
+                                        a.owner.map(|u| u.as_u128()),
+                                    ));
                                     if a.stopped {
                                         gone.push(id);
                                     }
@@ -6456,10 +6461,15 @@ impl PlayPlan {
             let mut mobs = self.sim().mobs.lock().unwrap();
             let mut damaged = Vec::new();
             let mut died = Vec::new();
-            for (id, damage, at) in hurt_mobs {
+            for (id, damage, at, owner) in hurt_mobs {
                 if damage > 0.0
                     && let Some(entry) = mobs.get_mut(&id)
-                    && let Some(dead) = crate::mobs::hurt(&mut entry.mob, damage, Some(at), 0.4)
+                    && let Some(dead) = crate::mobs::hurt(
+                        &mut entry.mob,
+                        damage,
+                        crate::mobs::Source::at(at, owner),
+                        0.4,
+                    )
                 {
                     damaged.push(entry.mob.pos);
                     if dead {
@@ -9194,7 +9204,13 @@ impl PlayPlan {
             }
             let damage = crate::tnt::damage(dist, self.explosion_exposure(center, mpos), power);
             if damage > 0.0
-                && crate::mobs::hurt(&mut entry.mob, damage, Some(center), 0.4).is_some()
+                && crate::mobs::hurt(
+                    &mut entry.mob,
+                    damage,
+                    crate::mobs::Source::at(center, None),
+                    0.4,
+                )
+                .is_some()
             {
                 damaged.push(mpos);
                 self.hub

@@ -345,8 +345,13 @@ impl PlayPlan {
         let killed = {
             let mut mobs = self.sim().mobs.lock().unwrap();
             mobs.get_mut(&target.entity_id).and_then(|entry| {
-                crate::mobs::hurt(&mut entry.mob, f32::MAX, None, 0.0)
-                    .and_then(|died| died.then_some(entry.mob.pos))
+                crate::mobs::hurt(
+                    &mut entry.mob,
+                    f32::MAX,
+                    crate::mobs::Source::default(),
+                    0.0,
+                )
+                .and_then(|died| died.then_some(entry.mob.pos))
             })
         };
         if let Some(pos) = killed {

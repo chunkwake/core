@@ -6,6 +6,8 @@ use crate::mobs::{self as mb, Mob, Species};
 
 /// Группа спавна: вид, вес, минимум и максимум.
 type SpawnEntry = (Option<Species>, u32, u32, u32);
+/// Игрок для тика мобов: ноги, имена предметов в руках (основная и вторая), UUID.
+type Hands<'a> = ([f64; 3], [Option<&'a str>; 2], u128);
 
 /// Моб и то, что о нём уже знают клиенты.
 pub(super) struct MobEntry {
@@ -192,7 +194,7 @@ impl PlayPlan {
         let dim = self.active_dim();
         // Кого монстры могут атаковать: игроки этого мира не в творческом.
         let mut prey: Vec<mb::Prey> = Vec::new();
-        let hands: Vec<([f64; 3], [Option<&str>; 2])> = {
+        let hands: Vec<Hands> = {
             let live = self.live.lock().unwrap();
             let players = self.hub.players.lock().unwrap();
             players
@@ -212,7 +214,7 @@ impl PlayPlan {
                             l.slots[survival::OFFHAND].map(|s| self.item_name(s.item)),
                         ]
                     });
-                    (p.pos, held)
+                    (p.pos, held, p.entry.uuid.as_u128())
                 })
                 .collect()
         };
@@ -220,7 +222,7 @@ impl PlayPlan {
         let mut food_by_species: Vec<Vec<[f64; 3]>> = vec![Vec::new(); mb::Species::ALL.len()];
         {
             let mut seen = [false; mb::Species::ALL.len()];
-            for (pos, held) in &hands {
+            for (pos, held, _) in &hands {
                 for species in mb::Species::ALL {
                     let slot = species as usize;
                     if !seen[slot] && held.iter().flatten().any(|n| species.is_food(n)) {
@@ -230,14 +232,21 @@ impl PlayPlan {
                 }
             }
         }
-        // Все игроки мира: на них смотрят монстры, от них считается исчезновение.
-        let watchers: Vec<[f64; 3]> = hands.iter().map(|h| h.0).collect();
+        // Все игроки мира: на них смотрят мобы, от них считается исчезновение.
+        let watchers: Vec<mb::Prey> = hands
+            .iter()
+            .map(|h| mb::Prey {
+                uuid: h.2,
+                pos: h.0,
+            })
+            .collect();
         let peaceful = self.difficulty() == Difficulty::Peaceful;
         let difficulty = self.difficulty().id();
         let min_y = self.min_y();
         let weather = self.vars.weather();
         let darken = self.sky_darken_now(dim, weather.rain, weather.thunder);
         let mut strikes = Vec::new();
+        let mut outs = Vec::new();
         let mut despawned = Vec::new();
         let mut rng = rand::thread_rng();
         let mut rand = || rand::Rng::r#gen::<f64>(&mut rng);
@@ -250,6 +259,14 @@ impl PlayPlan {
         let border = self.border_at(now);
         {
             let mut mobs = self.sim().mobs.lock().unwrap();
+            // Животные до тика: пары (`BreedGoal`) и родители (`FollowParentGoal`).
+            let kin: Vec<mb::goals::Kin> = mobs
+                .iter()
+                .filter(|(_, e)| e.mob.species.is_animal() && e.mob.alive())
+                .map(|(&id, e)| e.mob.kin(id))
+                .collect();
+            // `EatBlockGoal.IS_EDIBLE`: `#edible_for_sheep`.
+            let edible = self.survival.block_tags.get("minecraft:edible_for_sheep");
             // Один замок мира на всю фазу: коробки коллизий читаются тысячами раз.
             self.with_world(|w| {
                 for (&id, e) in mobs.iter_mut() {
@@ -265,25 +282,39 @@ impl PlayPlan {
                     let shape = |c: [i32; 3]| self.shape_at(w.block(c), c);
                     let water = |c: [i32; 3]| self.water_at(w.block(c));
                     let cell = |c: [i32; 3]| self.cell_at(w.block(c), c);
+                    // `getWalkTargetValue` и `EatBlockGoal`: дёрн, трава и яркость.
+                    let info = |c: [i32; 3]| {
+                        let state = w.block(c);
+                        let sky = w.sky_light_at(c).unwrap_or(0);
+                        let raw = mb::raw_brightness(sky, w.block_light_at(c).unwrap_or(0), darken);
+                        mb::goals::CellInfo {
+                            grass_block: state.is_some_and(|s| {
+                                chunkwake_world::has_flag(s, chunkwake_world::flags::GRASS)
+                            }),
+                            short_grass: state.is_some_and(|s| {
+                                edible.is_some_and(|t| t.contains(self.state_name(s)))
+                            }),
+                            brightness: mb::brightness(raw),
+                        }
+                    };
                     let world = mb::World {
                         shape: &shape,
                         water: &water,
                         cell: Some(&cell),
+                        info: Some(&info),
                         min_y,
                     };
                     let sight = |a: [f64; 3], b: [f64; 3]| self.clear_line(w, a, b);
                     let mut senses = mb::Senses {
-                        // Животным — уже отфильтрованные по виду: моб видит только
-                        // тех, кто держит его еду, и строки предметов не сравниваются.
-                        players: if monster {
-                            &watchers[..]
-                        } else {
-                            &food_by_species[species as usize][..]
-                        },
+                        players: &watchers,
                         rand: &mut rand,
                         prey: if monster { &prey[..] } else { &[] },
+                        // Уже отфильтрованные по виду: строки предметов не сравниваются.
+                        tempters: &food_by_species[species as usize][..],
+                        kin: if monster { &[] } else { &kin[..] },
                         sight: &sight,
                         difficulty,
+                        entity_id: id,
                     };
                     let was_grounded = e.mob.on_ground;
                     let old_pos = e.mob.pos;
@@ -384,7 +415,10 @@ impl PlayPlan {
                         (pulse.berries && moving, 1.0),
                         (pulse.magma && fire_damage, 1.0),
                     ] {
-                        if hit && let Some(died) = mb::hurt(&mut e.mob, amount, None, 0.0) {
+                        if hit
+                            && let Some(died) =
+                                mb::hurt(&mut e.mob, amount, mb::Source::default(), 0.0)
+                        {
                             packets
                                 .push((id, play::hurt_animation(self.ids.hurt_animation, id, 0.0)));
                             vibrations.push((e.mob.pos, "minecraft:entity_damage"));
@@ -396,7 +430,10 @@ impl PlayPlan {
                     if let Some(target) = e.mob.strike.take() {
                         strikes.push((species, Uuid::from_u128(target), e.mob.pos));
                     }
-                    let aggressive = e.mob.target.is_some();
+                    if !e.mob.out.is_empty() {
+                        outs.extend(e.mob.out.drain(..).map(|o| (id, o)));
+                    }
+                    let aggressive = e.mob.aggressive;
                     if aggressive != e.aggressive {
                         e.aggressive = aggressive;
                         packets.push((
@@ -411,7 +448,7 @@ impl PlayPlan {
                     // `Mob.checkDespawn`: монстры вдали от игроков и в мирной сложности.
                     let nearest = watchers
                         .iter()
-                        .map(|p| mb::dist2(*p, e.mob.pos))
+                        .map(|p| mb::dist2(p.pos, e.mob.pos))
                         .min_by(f64::total_cmp);
                     if e.mob.alive() && mb::check_despawn(&mut e.mob, nearest, peaceful, rand()) {
                         despawned.push(id);
@@ -491,6 +528,7 @@ impl PlayPlan {
         for (species, target, from) in strikes {
             self.mob_strike(species, target, from);
         }
+        self.apply_mob_outs(outs);
         if !gone.is_empty() {
             let dead: Vec<(i32, MobEntry)> = {
                 let mut mobs = self.sim().mobs.lock().unwrap();
@@ -715,14 +753,15 @@ impl PlayPlan {
             if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 36.0 {
                 return None;
             }
-            let r = mb::hurt(&mut e.mob, damage, Some(pos), knock);
+            // Обидчика монстр берёт целью сам (`HurtByTargetGoal`), творческого — нет.
+            let r = mb::hurt(
+                &mut e.mob,
+                damage,
+                mb::Source::at(pos, Some(uuid.as_u128())),
+                knock,
+            );
             if r == Some(true) {
                 e.killer = Some((uuid, slot as i32));
-            }
-            // `HurtByTargetGoal`: монстр отвечает обидчику, если тот не в творческом.
-            if r.is_some() && e.mob.species.is_monster() && !creative {
-                e.mob.target = Some(uuid.as_u128());
-                e.mob.unseen = 0;
             }
             (r, e.mob.pos, e.mob.species, e.mob.is_baby())
         };
@@ -1049,73 +1088,19 @@ impl PlayPlan {
         }
     }
 
-    /// Поведение животных поверх ИИ: пары, яйца куриц, овцы щиплют траву,
-    /// детёныши взрослеют.
+    /// Поведение животных поверх ИИ: яйца куриц и взросление детёнышей.
     pub(super) fn tick_animals(&self) {
         let mut eggs = Vec::new();
-        let mut grazed = Vec::new();
         let mut grown = Vec::new();
-        let mut births = Vec::new();
         let simulated = self.simulated_set();
         {
             let mut mobs = self.sim().mobs.lock().unwrap();
-            if mobs.is_empty() {
-                return;
-            }
-            let lovers: Vec<(i32, Species, [f64; 3])> = mobs
-                .iter()
-                .filter(|(_, e)| e.mob.alive() && e.mob.love > 0 && e.mob.age == 0)
-                .map(|(&id, e)| (id, e.mob.species, e.mob.pos))
-                .collect();
-            let mut paired = HashSet::new();
-            for &(a, sa, pa) in &lovers {
-                if paired.contains(&a) {
-                    continue;
-                }
-                // `BreedGoal`: ближайший влюблённый того же вида в 8 блоках.
-                let Some(&(b, _, pb)) = lovers
-                    .iter()
-                    .filter(|(b, sb, pb)| {
-                        *b != a && *sb == sa && !paired.contains(b) && mb::dist2(pa, *pb) < 64.0
-                    })
-                    .min_by(|x, y| mb::dist2(pa, x.2).total_cmp(&mb::dist2(pa, y.2)))
-                else {
-                    continue;
-                };
-                paired.insert(a);
-                paired.insert(b);
-                if mb::dist2(pa, pb) < 9.0 {
-                    for id in [a, b] {
-                        if let Some(e) = mobs.get_mut(&id) {
-                            e.mob.love = 0;
-                            e.mob.age = 6000;
-                        }
-                    }
-                    let at = [
-                        (pa[0] + pb[0]) / 2.0,
-                        pa[1].min(pb[1]),
-                        (pa[2] + pb[2]) / 2.0,
-                    ];
-                    births.push((sa, at, a, b));
-                } else {
-                    for (id, to) in [(a, pb), (b, pa)] {
-                        if let Some(e) = mobs.get_mut(&id) {
-                            e.mob.goal = mb::Goal::Walk {
-                                to,
-                                speed: sa.speed(),
-                                ticks: 20,
-                            };
-                            e.mob.look = Some(([to[0], to[1] + 0.5, to[2]], 2));
-                        }
-                    }
-                }
-            }
             for (&id, e) in mobs.iter_mut() {
                 let m = &mut e.mob;
                 if !m.alive() {
                     continue;
                 }
-                // Вне симуляции животное не стареет, не несётся и не ест.
+                // Вне симуляции животное не стареет и не несётся.
                 if !simulated.is_empty()
                     && !simulated.contains(&(
                         (m.pos[0].floor() as i32) >> 4,
@@ -1135,25 +1120,6 @@ impl PlayPlan {
                         eggs.push(m.pos);
                     }
                 }
-                // `EatBlockGoal`: взрослая 1/1000, детёныш 1/50; жуёт 40 тиков.
-                if m.species == Species::Sheep {
-                    if m.eating > 0 {
-                        m.eating -= 1;
-                        if m.eating == 4 {
-                            let below = [
-                                m.pos[0].floor() as i32,
-                                (m.pos[1] - 0.5).floor() as i32,
-                                m.pos[2].floor() as i32,
-                            ];
-                            grazed.push((id, below));
-                        }
-                    } else if m.on_ground && m.goal == mb::Goal::Idle && m.panic == 0 {
-                        let chance = if m.is_baby() { 50 } else { 1000 };
-                        if rand::random::<u32>().is_multiple_of(chance) {
-                            m.eating = 40;
-                        }
-                    }
-                }
             }
         }
         for pos in eggs {
@@ -1169,35 +1135,92 @@ impl PlayPlan {
                 self.drop_item(pos, [0.0; 3], Stack::new(egg, 1), items::BLOCK_DELAY);
             }
         }
-        let dirt = self.survival.block_defaults.get("minecraft:dirt").copied();
-        for (id, below) in grazed {
-            let Some(d) = dirt else {
-                break;
-            };
-            if !self.is_grass(below) {
-                continue;
-            }
-            {
-                let _edit = self.world_edit.lock().unwrap();
-                self.set_block(below, d);
-            }
-            self.hub
-                .send_about(id, inv::entity_event(self.ids.entity_event, id, 10));
-            if let Some(e) = self.sim().mobs.lock().unwrap().get_mut(&id) {
-                // `Sheep.ate`: шерсть отрастает, детёныш растёт на минуту.
-                e.mob.sheared = false;
-                if e.mob.is_baby() {
-                    e.mob.age = (e.mob.age + 1200).min(0);
-                }
-            }
-            self.refresh_mob(id);
-        }
         for id in grown {
             self.refresh_mob(id);
         }
+    }
+
+    /// События целей за тик ([`mb::goals::Out`]): пары, еда овцы, зов на обидчика.
+    fn apply_mob_outs(&self, outs: Vec<(i32, mb::goals::Out)>) {
+        use mb::goals::Out;
+        let mut births = Vec::new();
+        for (id, out) in outs {
+            match out {
+                // `Animal.spawnChildFromBreeding`: оба на 5 минут без любви,
+                // детёныш на месте того, у кого сработала цель.
+                Out::Breed(partner) => {
+                    let mut mobs = self.sim().mobs.lock().unwrap();
+                    let ready =
+                        |e: Option<&MobEntry>| e.is_some_and(|e| e.mob.alive() && e.mob.love > 0);
+                    if !ready(mobs.get(&id)) || !ready(mobs.get(&partner)) {
+                        continue;
+                    }
+                    let mut at = None;
+                    for k in [id, partner] {
+                        if let Some(e) = mobs.get_mut(&k) {
+                            e.mob.love = 0;
+                            e.mob.age = 6000;
+                            at.get_or_insert((e.mob.species, e.mob.pos));
+                        }
+                    }
+                    if let Some((species, pos)) = at {
+                        births.push((species, pos, id, partner));
+                    }
+                }
+                // `EatBlockGoal.start`: анимация опущенной головы.
+                Out::EatStart => self
+                    .hub
+                    .send_about(id, inv::entity_event(self.ids.entity_event, id, 10)),
+                // `EatBlockGoal.tick`: трава ломается, дёрн становится землёй
+                // (если `mob_griefing`); овца ест в любом случае (`Sheep.ate`).
+                Out::Eat(pos, plant) => {
+                    if self.vars.flag("mob_griefing") {
+                        let to = if plant {
+                            self.survival.block_defaults.get("minecraft:air").copied()
+                        } else if self.is_grass(pos) {
+                            self.survival.block_defaults.get("minecraft:dirt").copied()
+                        } else {
+                            None
+                        };
+                        if let Some(state) = to {
+                            let _edit = self.world_edit.lock().unwrap();
+                            self.set_block(pos, state);
+                        }
+                    }
+                    if let Some(e) = self.sim().mobs.lock().unwrap().get_mut(&id) {
+                        e.mob.sheared = false;
+                        if e.mob.is_baby() {
+                            e.mob.age = (e.mob.age + 1200).min(0);
+                        }
+                    }
+                    self.refresh_mob(id);
+                }
+                // `HurtByTargetGoal.alertOthers`: свои того же вида рядом без цели.
+                Out::Alert(attacker) => {
+                    let mut mobs = self.sim().mobs.lock().unwrap();
+                    let Some((species, pos)) = mobs.get(&id).map(|e| (e.mob.species, e.mob.pos))
+                    else {
+                        continue;
+                    };
+                    let r = species.follow_range();
+                    for (&other, e) in mobs.iter_mut() {
+                        let m = &mut e.mob;
+                        if other != id
+                            && m.species == species
+                            && m.alive()
+                            && m.target.is_none()
+                            && (m.pos[0] - pos[0]).abs() < r + 1.0
+                            && (m.pos[1] - pos[1]).abs() < 11.0
+                            && (m.pos[2] - pos[2]).abs() < r + 1.0
+                        {
+                            m.target = Some(attacker);
+                        }
+                    }
+                }
+            }
+        }
         for (species, pos, mother, father) in births {
-            let yaw = rand::random::<f32>() * 360.0;
-            let Some(child) = self.spawn_mob(species, pos, yaw, true, Some("BREEDING")) else {
+            let Some(child) = self.spawn_mob(species, pos, 0.0, true, Some("BREEDING")) else {
                 continue;
             };
             let mut xp = 1 + (rand::random::<u32>() % 7) as i32;
@@ -1657,8 +1680,12 @@ impl PlayPlan {
                             }
                         }
                         Some("damage") => {
-                            died =
-                                mb::hurt(m, num(3).unwrap_or(0.0) as f32, None, 0.0) == Some(true);
+                            died = mb::hurt(
+                                m,
+                                num(3).unwrap_or(0.0) as f32,
+                                mb::Source::default(),
+                                0.0,
+                            ) == Some(true);
                         }
                         Some("pos") => {
                             if let (Some(x), Some(y), Some(z)) = (num(3), num(4), num(5)) {
@@ -1667,7 +1694,7 @@ impl PlayPlan {
                                 m.yaw = num(6).unwrap_or(m.yaw as f64) as f32;
                                 m.pitch = num(7).unwrap_or(m.pitch as f64) as f32;
                                 m.head_yaw = m.yaw;
-                                m.goal = mb::Goal::Idle;
+                                m.nav.stop();
                                 e.sent = play::quantize(m.pos);
                                 moved = Some((m.pos, m.yaw, m.pitch, m.on_ground));
                             }

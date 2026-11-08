@@ -1134,6 +1134,11 @@ pub fn find_path(
 }
 
 /// Найденный путь (`Path`): узлы, следующий узел и цель.
+/// `WalkNodeEvaluator.getPathTypeStatic` для моба (`GoalUtils.hasMalus`).
+pub fn type_static(w: &World, m: &Walker, p: [i32; 3]) -> PathType {
+    Search::new(w, m).type_static(p)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Path {
     pub nodes: Vec<([i32; 3], PathType)>,
@@ -1744,6 +1749,7 @@ mod tests {
             shape,
             water: &|_| false,
             cell,
+            info: None,
             min_y: -64,
         };
         find_path(&w, &walker(from), &[to], 35.0, 0, visited, 1.0)
