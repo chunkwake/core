@@ -7,6 +7,10 @@
 //! монстров, горения на солнце и исчезновения (`Mob.checkDespawn`): они не
 //! трогают мир напрямую, а получают его через замыкания и проверяются тестами.
 
+pub mod path;
+
+use path::{MoveControl, Navigation};
+
 /// Гравитация и сопротивление по вертикали (`LivingEntity.travel`).
 pub const GRAVITY: f64 = 0.08;
 pub const AIR_DRAG: f64 = 0.98;
@@ -439,6 +443,16 @@ pub struct Mob {
     pub no_action: u32,
     /// Не исчезает (`persistenceRequired`): с яйца, из команды, от плагина.
     pub persistent: bool,
+    /// Навигация по пути (`GroundPathNavigation`).
+    pub nav: Navigation,
+    /// `MoveControl`.
+    pub move_ctl: MoveControl,
+    /// `LivingEntity.speed` (ставит `MoveControl`) и ход вперёд `zza`.
+    pub move_speed: f64,
+    pub zza: f64,
+    /// `JumpControl.jump` этого тика и `noJumpDelay`.
+    pub jump: bool,
+    pub no_jump_delay: u8,
 }
 
 impl Mob {
@@ -473,6 +487,12 @@ impl Mob {
             strike: None,
             no_action: 0,
             persistent: false,
+            nav: Navigation::default(),
+            move_ctl: MoveControl::default(),
+            move_speed: 0.0,
+            zza: 0.0,
+            jump: false,
+            no_jump_delay: 0,
         }
     }
 
@@ -498,6 +518,12 @@ impl Mob {
 
     pub fn is_baby(&self) -> bool {
         self.age < 0
+    }
+
+    /// `Mob.setSpeed`: скорость и ход вперёд.
+    pub fn set_speed(&mut self, s: f32) {
+        self.move_speed = f64::from(s);
+        self.zza = f64::from(s);
     }
 
     pub fn alive(&self) -> bool {
@@ -535,6 +561,10 @@ impl Mob {
 pub struct World<'a, 's, 'r> {
     pub shape: &'s dyn Fn([i32; 3]) -> &'r [[f64; 6]],
     pub water: &'a dyn Fn([i32; 3]) -> bool,
+    /// Клетки для поиска пути; `None` — по форме и воде ([`path::cell`]).
+    pub cell: Option<&'a dyn Fn([i32; 3]) -> path::Cell>,
+    /// Нижняя граница мира.
+    pub min_y: i32,
 }
 
 /// Полный куб.
@@ -557,6 +587,8 @@ pub struct Senses<'a> {
     pub rand: &'a mut dyn FnMut() -> f64,
     pub prey: &'a [Prey],
     pub sight: &'a dyn Fn([f64; 3], [f64; 3]) -> bool,
+    /// Сложность (`Difficulty.getId`): глубина падения с целью.
+    pub difficulty: u8,
 }
 
 /// Игрок, которого монстр может выбрать целью.
@@ -754,7 +786,7 @@ pub fn travel(m: &mut Mob, forward: f64, w: &World) -> bool {
         // где `input.zza` уже равен скорости моба (`Mob.setSpeed` вызывает `setZza(f)`).
         // Поэтому на земле ускорение — скорость в квадрате: корова с `movement_speed`
         // 0.2 разгоняется на 0.04 за тик, а не на 0.2.
-        let friction = friction_speed(m.speed(), GROUND_FRICTION);
+        let friction = friction_speed(m.move_speed, GROUND_FRICTION);
         friction * forward
     } else {
         // В воздухе `getFrictionInfluencedSpeed` — это `getFlyingSpeed()` (0.02),
@@ -762,9 +794,14 @@ pub fn travel(m: &mut Mob, forward: f64, w: &World) -> bool {
         AIR_ACCEL * forward
     };
     if forward != 0.0 {
-        let yaw = (m.yaw as f64).to_radians();
-        m.vel[0] += -yaw.sin() * accel;
-        m.vel[2] += yaw.cos() * accel;
+        // `Entity.getInputVector`: угол во float и табличные `Mth.sin`/`Mth.cos`.
+        let yaw = f64::from(m.yaw * 0.017453292f32);
+        let (sin, cos) = (
+            f64::from(chunkwake_worldgen::carver::sin(yaw)),
+            f64::from(chunkwake_worldgen::carver::cos(yaw)),
+        );
+        m.vel[0] += -sin * accel;
+        m.vel[2] += cos * accel;
     }
     let (wd, h) = m.size();
     let half = wd / 2.0;
@@ -826,7 +863,7 @@ fn turn(from: f32, to: f32, max: f32) -> f32 {
 }
 
 fn yaw_to(from: [f64; 3], to: [f64; 3]) -> f32 {
-    ((to[2] - from[2]).atan2(to[0] - from[0]).to_degrees() as f32) - 90.0
+    (path::atan2(to[2] - from[2], to[0] - from[0]) * 57.2957763671875) as f32 - 90.0
 }
 
 pub fn dist2(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -1010,6 +1047,80 @@ fn think_monster(m: &mut Mob, s: &mut Senses) {
     }
 }
 
+/// Моб для поиска пути.
+pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walker {
+    let (width, height) = m.size();
+    let animal = m.species.is_animal();
+    path::Walker {
+        pos: m.pos,
+        width,
+        height,
+        on_ground: m.on_ground,
+        in_water,
+        step: m.species.info().step_height as f32,
+        max_fall: path::max_fall_distance(
+            m.target.is_some(),
+            m.health,
+            m.species.max_health(),
+            difficulty,
+        ),
+        speed: m.move_speed as f32,
+        // `FloatGoal` ставит `setCanFloat(true)`: он есть у животных.
+        can_float: animal,
+        can_open_doors: false,
+        can_pass_doors: true,
+        can_walk_over_fences: false,
+        malus: if animal { path::ANIMAL_MALUS } else { &[] },
+        min_y: w.min_y,
+    }
+}
+
+/// Цель движения → путь (`navigation.moveTo`), затем `PathNavigation.tick`.
+///
+/// Путь строится, когда цель сменила блок; дошёл — цель снята, как
+/// `RandomStrollGoal.canContinueToUse` (`!navigation.isDone()`). К цели атаки
+/// путь ведёт в саму клетку (`createPath(target, 0)`), к точке — в соседнюю.
+fn drive(m: &mut Mob, w: &World, difficulty: u8, water: bool) {
+    let walk = walker(m, w, difficulty, water);
+    let range = m.species.follow_range();
+    match m.goal {
+        Goal::Idle => {
+            m.nav.stop();
+            m.nav.requested = None;
+        }
+        Goal::Walk { to, speed, ticks } => {
+            if ticks == 0 {
+                m.goal = Goal::Idle;
+                m.nav.stop();
+                m.nav.requested = None;
+            } else {
+                m.goal = Goal::Walk {
+                    to,
+                    speed,
+                    ticks: ticks - 1,
+                };
+                let block = to.map(|v| v.floor() as i32);
+                if m.nav.requested != Some(block) {
+                    m.nav.requested = Some(block);
+                    let reach = if m.target.is_some() { 0 } else { 1 };
+                    let found = m.nav.path_to(w, &walk, to, reach, range);
+                    let modifier = speed / m.speed().max(1e-9);
+                    if !m.nav.move_to(w, &walk, found, modifier) {
+                        m.goal = Goal::Idle;
+                        m.nav.requested = None;
+                    }
+                } else if m.nav.is_done() {
+                    m.goal = Goal::Idle;
+                    m.nav.requested = None;
+                }
+            }
+        }
+    }
+    if let Some((to, speed)) = m.nav.tick(w, &walk, range) {
+        m.move_ctl.set_wanted(to, speed);
+    }
+}
+
 /// Тик моба: ИИ, движение, повороты, таймеры. Возвращает `true`, когда моб исчез.
 pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
     if m.death_time > 0 {
@@ -1029,35 +1140,32 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
         }
         m.love = (m.love - 1).max(0);
     }
+    // `LivingEntity.aiStep`: задержка прыжка тает до ИИ.
+    m.no_jump_delay = m.no_jump_delay.saturating_sub(1);
     think(m, s);
-    let mut forward = 0.0;
-    if let Goal::Walk { to, speed, ticks } = m.goal {
-        let dx = to[0] - m.pos[0];
-        let dz = to[2] - m.pos[2];
-        if ticks == 0 || dx * dx + dz * dz < 0.25 {
-            m.goal = Goal::Idle;
-        } else {
-            m.goal = Goal::Walk {
-                to,
-                speed,
-                ticks: ticks - 1,
-            };
-            m.yaw = turn(m.yaw, yaw_to(m.pos, to), 90.0);
-            forward = speed;
+    // `Mob.serverAiStep`: навигация → `MoveControl` → `JumpControl`.
+    let water = in_water(m, w);
+    drive(m, w, s.difficulty, water);
+    path::move_control(m, w, water);
+    // `LivingEntity.aiStep`: прыжок с земли не чаще раза в 10 тиков подряд;
+    // в воде всплывают сами (`travel`).
+    if std::mem::take(&mut m.jump) {
+        if !water && m.on_ground && m.no_jump_delay == 0 {
+            m.vel[1] = m.vel[1].max(JUMP);
+            m.no_jump_delay = 10;
         }
+    } else {
+        m.no_jump_delay = 0;
     }
-    let blocked = travel(m, forward, w);
-    // `JumpControl`: упёрся на земле — прыжок; в воде всплываем сами.
-    if blocked && forward > 0.0 && m.on_ground {
-        m.vel[1] = JUMP;
-    }
+    let _ = travel(m, m.zza, w);
     // Голова: на цель взгляда, иначе по телу.
     let target_head = match m.look {
         Some((p, t)) => {
             m.look = (t > 1).then_some((p, t - 1));
             let eye = m.eye();
             let horiz = ((p[0] - eye[0]).powi(2) + (p[2] - eye[2]).powi(2)).sqrt();
-            m.pitch = (-(p[1] - eye[1]).atan2(horiz).to_degrees() as f32).clamp(-40.0, 40.0);
+            m.pitch =
+                (-(path::atan2(p[1] - eye[1], horiz) * 57.2957763671875) as f32).clamp(-40.0, 40.0);
             yaw_to(m.pos, p)
         }
         None => {
@@ -1446,11 +1554,14 @@ mod tests {
         let w = World {
             shape: &*shape,
             water: &*water,
+            cell: None,
+            min_y: -64,
         };
         let mut m = Mob::new(Species::Cow, [0.5, 64.0, 0.5], 1);
         m.on_ground = true;
         m.goal = Goal::Walk {
-            to: [1000.0, 64.0, 0.5],
+            // Путь не длиннее `follow_range` (16): цель в его пределах.
+            to: [15.5, 64.0, 0.5],
             speed: Species::Cow.speed(),
             ticks: 10_000,
         };
@@ -1460,9 +1571,10 @@ mod tests {
             rand: &mut rnd,
             prey: &[],
             sight: &always_visible,
+            difficulty: 2,
         };
-        // Первые тики — разгон от нуля; установившаяся скорость дальше.
-        for _ in 0..150 {
+        // Первые тики — разгон от нуля (за 30 тиков скорость сходится до 1e-8).
+        for _ in 0..30 {
             tick(&mut m, &w, &mut s);
         }
         let start = m.pos;
@@ -1487,6 +1599,8 @@ mod tests {
         let w = World {
             shape: &*shape,
             water: &*water,
+            cell: None,
+            min_y: -64,
         };
         let mut m = Mob::new(Species::Cow, [0.5, 70.0, 0.5], 1);
         settle(&mut m, &w);
@@ -1500,6 +1614,8 @@ mod tests {
         let w = World {
             shape: &*shape,
             water: &*water,
+            cell: None,
+            min_y: -64,
         };
         let mut c = Mob::new(Species::Chicken, [0.5, 80.0, 0.5], 1);
         let mut p = Mob::new(Species::Pig, [0.5, 80.0, 0.5], 2);
@@ -1532,6 +1648,8 @@ mod tests {
             let w = World {
                 shape: &ledge(top),
                 water: &|_| false,
+                cell: None,
+                min_y: -64,
             };
             let mut m = Mob::new(Species::Cow, [3.5, 70.0, 0.5], 1);
             settle(&mut m, &w);
@@ -1545,9 +1663,12 @@ mod tests {
         let w = World {
             shape: &ledge(SLAB),
             water: &|_| false,
+            cell: None,
+            min_y: -64,
         };
         let mut m = Mob::new(Species::Pig, [0.5, 64.0, 0.5], 1);
         m.on_ground = true;
+        m.set_speed(0.25);
         let mut highest: f64 = 64.0;
         for _ in 0..60 {
             m.yaw = -90.0;
@@ -1569,6 +1690,8 @@ mod tests {
         let w = World {
             shape: &ledge(&[]),
             water: &|_| false,
+            cell: None,
+            min_y: -64,
         };
         let mut m = Mob::new(Species::Cow, [3.5, 70.0, 0.5], 1);
         settle(&mut m, &w);
@@ -1583,6 +1706,8 @@ mod tests {
         let w = World {
             shape: &*shape,
             water: &*water,
+            cell: None,
+            min_y: -64,
         };
         let mut m = Mob::new(Species::Pig, [0.5, 64.0, 0.5], 1);
         m.on_ground = true;
@@ -1597,6 +1722,7 @@ mod tests {
             rand: &mut rnd,
             prey: &[],
             sight: &always_visible,
+            difficulty: 2,
         };
         let mut max_x: f64 = 0.0;
         for _ in 0..200 {
@@ -1618,6 +1744,8 @@ mod tests {
         let w = World {
             shape: &*shape,
             water: &*water,
+            cell: None,
+            min_y: -64,
         };
         let mut m = Mob::new(Species::Cow, [0.5, 64.0, 0.5], 1);
         m.on_ground = true;
@@ -1633,6 +1761,7 @@ mod tests {
             rand: &mut rnd,
             prey: &[],
             sight: &always_visible,
+            difficulty: 2,
         };
         for _ in 0..40 {
             tick(&mut m, &w, &mut s);
@@ -1647,6 +1776,8 @@ mod tests {
         let w = World {
             shape: &*shape,
             water: &*water,
+            cell: None,
+            min_y: -64,
         };
         let mut m = Mob::new(Species::Chicken, [0.5, 64.0, 0.5], 1);
         assert_eq!(hurt(&mut m, 10.0, None, 0.0), Some(true));
@@ -1656,6 +1787,7 @@ mod tests {
             rand: &mut rnd,
             prey: &[],
             sight: &always_visible,
+            difficulty: 2,
         };
         let gone = (0..30).position(|_| tick(&mut m, &w, &mut s));
         assert_eq!(gone, Some(19));
@@ -1667,6 +1799,8 @@ mod tests {
         let w = World {
             shape: &*shape,
             water: &*water,
+            cell: None,
+            min_y: -64,
         };
         let mut m = Mob::new(Species::Sheep, [0.5, 64.0, 0.5], 1);
         m.on_ground = true;
@@ -1677,6 +1811,7 @@ mod tests {
             rand: &mut rnd,
             prey: &[],
             sight: &always_visible,
+            difficulty: 2,
         };
         for _ in 0..100 {
             tick(&mut m, &w, &mut s);
@@ -1744,6 +1879,8 @@ mod tests {
         let w = World {
             shape: &*shape,
             water: &*water,
+            cell: None,
+            min_y: -64,
         };
         let mut m = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 1);
         m.on_ground = true;
@@ -1756,6 +1893,7 @@ mod tests {
             rand: &mut rnd,
             prey: &prey,
             sight,
+            difficulty: 2,
         };
         let mut strikes = Vec::new();
         for t in 0..ticks {
@@ -1778,6 +1916,204 @@ mod tests {
         }
     }
 
+    /// Стена в два блока между зомби и игроком: раньше зомби упирался в неё,
+    /// теперь обходит по пути и бьёт.
+    #[test]
+    fn zombie_walks_around_wall() {
+        let wall = |p: [i32; 3]| p[1] < 64 || (p[0] == 3 && (-3..=3).contains(&p[2]) && p[1] < 66);
+        let (shape, water) = flat_world(&wall);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+            cell: None,
+            min_y: -64,
+        };
+        let mut m = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 1);
+        m.on_ground = true;
+        let at = [6.5, 64.0, 0.5];
+        let prey = [Prey { uuid: 7, pos: at }];
+        let players = [at];
+        let mut rnd = || 0.05;
+        let mut s = Senses {
+            players: &players,
+            rand: &mut rnd,
+            prey: &prey,
+            sight: &always_visible,
+            difficulty: 2,
+        };
+        let mut hit = None;
+        for t in 0..400 {
+            tick(&mut m, &w, &mut s);
+            assert!(
+                !(m.pos[0] + 0.3 > 3.0 && m.pos[0] - 0.3 < 4.0 && m.pos[2].abs() < 3.6),
+                "inside the wall at {:?}",
+                m.pos
+            );
+            if m.strike == Some(7) {
+                hit = Some(t);
+                break;
+            }
+        }
+        assert!(hit.is_some(), "never reached the player: {:?}", m.pos);
+    }
+
+    /// Загон из `mob_path_probe`: забор-«П» (передняя стенка z−4, боковые x±3
+    /// до z−8), зомби в нём, игрок снаружи. Ваниль 26.3 проходит клетки
+    /// (0,−6) (1,−7) (2,−8) (2,−9) (3,−9) (4,−9) (4,−8)…(4,−3) (3,−2) (2,−1)
+    /// (1,0) и подходит на 1.5 блока за 131 тик движения.
+    #[test]
+    fn zombie_leaves_fence_pen_like_vanilla() {
+        let pen =
+            |x: i32, z: i32| (z == -4 && x.abs() <= 3) || (x.abs() == 3 && (-8..=-5).contains(&z));
+        const POST: [f64; 6] = [0.375, 0.0, 0.375, 0.625, 1.5, 0.625];
+        let shapes: std::collections::HashMap<[i32; 3], Vec<[f64; 6]>> = (-3..=3)
+            .flat_map(|x| (-8..=-4).map(move |z| [x, 64, z]))
+            .filter(|p| pen(p[0], p[2]))
+            .map(|p| {
+                let mut v = vec![POST];
+                let arm = |dx: i32, dz: i32| pen(p[0] + dx, p[2] + dz);
+                if arm(1, 0) {
+                    v.push([0.625, 0.0, 0.375, 1.0, 1.5, 0.625]);
+                }
+                if arm(-1, 0) {
+                    v.push([0.0, 0.0, 0.375, 0.375, 1.5, 0.625]);
+                }
+                if arm(0, 1) {
+                    v.push([0.375, 0.0, 0.625, 0.625, 1.5, 1.0]);
+                }
+                if arm(0, -1) {
+                    v.push([0.375, 0.0, 0.0, 0.625, 1.5, 0.375]);
+                }
+                (p, v)
+            })
+            .collect();
+        let shape = |p: [i32; 3]| -> &[[f64; 6]] {
+            if p[1] < 64 {
+                FULL
+            } else {
+                shapes.get(&p).map_or(&[], |v| v.as_slice())
+            }
+        };
+        let cell = |p: [i32; 3]| {
+            if p[1] < 64 {
+                path::Cell {
+                    kind: path::PathType::Blocked,
+                    flags: path::Cell::SOLID,
+                }
+            } else if shapes.contains_key(&p) {
+                path::Cell {
+                    kind: path::PathType::Fence,
+                    flags: path::Cell::SOLID | path::Cell::FENCE,
+                }
+            } else {
+                path::Cell::AIR_CELL
+            }
+        };
+        let w = World {
+            shape: &shape,
+            water: &|_| false,
+            cell: Some(&cell),
+            min_y: -64,
+        };
+        let mut m = Mob::new(Species::Zombie, [0.5, 64.0, -5.5], 1);
+        m.on_ground = true;
+        // После `/summon` зомби несколько тиков стоит: гравитация успевает
+        // прижать его к полу, и первый шаг идёт уже с земли.
+        settle(&mut m, &w);
+        let at = [0.5, 64.0, 0.5];
+        let prey = [Prey { uuid: 7, pos: at }];
+        let players = [at];
+        let mut rnd = || 0.05;
+        let mut s = Senses {
+            players: &players,
+            rand: &mut rnd,
+            prey: &prey,
+            sight: &always_visible,
+            difficulty: 2,
+        };
+        // `mob_path_probe` на `server.jar`: (тик движения, x, z) относительно
+        // игрока по шаговым дельтам `move_entity` (трекер шлёт раз в 3 тика).
+        const VANILLA: &[(i32, f64, f64)] = &[
+            (1, 0.0530, -6.0000),
+            (3, 0.1895, -6.0984),
+            (5, 0.3396, -6.2493),
+            (6, 0.4158, -6.3323),
+            (9, 0.6453, -6.5906),
+            (12, 0.8833, -6.8455),
+            (15, 1.1255, -7.0974),
+            (18, 1.3687, -7.3486),
+            (21, 1.6118, -7.5996),
+            (24, 1.7520, -7.9087),
+            (27, 1.8391, -8.2444),
+            (30, 1.9143, -8.5854),
+            (33, 2.1584, -8.7749),
+            (36, 2.4810, -8.8806),
+            (39, 2.8218, -8.9421),
+            (42, 3.1697, -8.9663),
+            (45, 3.5186, -8.9792),
+            (48, 3.7771, -8.8542),
+            (51, 3.8918, -8.5503),
+            (54, 3.9492, -8.2114),
+            (57, 3.9707, -7.8640),
+            (60, 3.9792, -7.5149),
+            (63, 3.9829, -7.1655),
+            (66, 3.9854, -6.8159),
+            (69, 3.9885, -6.4666),
+            (72, 3.9905, -6.1169),
+            (75, 3.9919, -5.7676),
+            (78, 3.9939, -5.4180),
+            (81, 3.9946, -5.0684),
+            (84, 3.9954, -4.7188),
+            (87, 3.9966, -4.3694),
+            (90, 3.9971, -4.0198),
+            (93, 3.9976, -3.6702),
+            (96, 3.9678, -3.3301),
+            (99, 3.7988, -3.0359),
+            (102, 3.5925, -2.7563),
+            (105, 3.3784, -2.4805),
+            (108, 3.1536, -2.2134),
+            (111, 2.9153, -1.9578),
+            (114, 2.6743, -1.7046),
+            (117, 2.4326, -1.4519),
+            (120, 2.1895, -1.2009),
+            (123, 1.9438, -0.9521),
+            (126, 1.6980, -0.7039),
+            (129, 1.4519, -0.4556),
+        ];
+        let start = m.pos;
+        let mut moving = 0;
+        let mut arrived = None;
+        let mut worst = (0.0f64, 0);
+        for _ in 0..400 {
+            tick(&mut m, &w, &mut s);
+            if m.pos == start && moving == 0 {
+                continue;
+            }
+            moving += 1;
+            assert_eq!(m.pos[1], 64.0, "сошёл с пола на тике {moving}");
+            if let Some(&(_, x, z)) = VANILLA.iter().find(|v| v.0 == moving) {
+                let d = (m.pos[0] - 0.5 - x).hypot(m.pos[2] - 0.5 - z);
+                if d > worst.0 {
+                    worst = (d, moving);
+                }
+            }
+            if (m.pos[0] - at[0]).hypot(m.pos[2] - at[2]) < 1.5 {
+                arrived = Some(moving);
+                break;
+            }
+        }
+        // Остаток в сотые доли блока набегает на повороте у узла (4,−9);
+        // его не видно по 3-тиковым пакетам ванили, а клетки и время те же.
+        assert!(
+            worst.0 < 0.02,
+            "отклонение {:.4} на тике {}",
+            worst.0,
+            worst.1
+        );
+        let t = arrived.expect("не дошёл");
+        assert!((t - 131).abs() <= 2, "{t} тиков против 131 в ванили");
+    }
+
     #[test]
     fn zombie_needs_sight_and_range() {
         let (m, strikes) = zombie_run([8.5, 64.0, 0.5], &|_, _| false, 100);
@@ -1797,6 +2133,8 @@ mod tests {
         let w = World {
             shape: &*shape,
             water: &*water,
+            cell: None,
+            min_y: -64,
         };
         let mut m = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 1);
         m.target = Some(7);
@@ -1810,6 +2148,7 @@ mod tests {
             rand: &mut rnd,
             prey: &prey,
             sight: &|_, _| false,
+            difficulty: 2,
         };
         for _ in 0..UNSEEN_MEMORY {
             tick(&mut m, &w, &mut s);
@@ -1830,6 +2169,8 @@ mod tests {
         let w = World {
             shape: &*shape,
             water: &*water,
+            cell: None,
+            min_y: -64,
         };
         let mut rnd = || 0.9;
         let mut s = Senses {
@@ -1837,6 +2178,7 @@ mod tests {
             rand: &mut rnd,
             prey: &[],
             sight: &always_visible,
+            difficulty: 2,
         };
         for _ in 0..10 {
             tick(&mut z, &w, &mut s);

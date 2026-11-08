@@ -31,6 +31,7 @@ pub struct Ids {
     move_entity_pos: i32,
     move_entity_rot: i32,
     teleport_entity: i32,
+    entity_position_sync: i32,
     remove_entities: i32,
     set_time: i32,
     level_chunk: i32,
@@ -66,6 +67,7 @@ impl Ids {
             move_entity_pos: id(Play, C, "move_entity_pos")?,
             move_entity_rot: id(Play, C, "move_entity_rot")?,
             teleport_entity: id(Play, C, "teleport_entity")?,
+            entity_position_sync: id(Play, C, "entity_position_sync")?,
             remove_entities: id(Play, C, "remove_entities")?,
             set_time: id(Play, C, "set_time")?,
             level_chunk: id(Play, C, "level_chunk_with_light")?,
@@ -115,6 +117,9 @@ pub enum Event {
     EntityMoved {
         entity_id: i32,
         delta: [f64; 3],
+        /// Шаговая дельта (`VecDelta.Stepped`): тики шага и смещение от прежней
+        /// позиции к концу шага. Для линейной пусто.
+        steps: Vec<(i32, [f64; 3])>,
     },
     EntityRemoved(Vec<i32>),
     /// Игровое время из `set_time`: сервер шлёт раз в 20 тиков.
@@ -169,7 +174,9 @@ impl Entities {
                 );
                 true
             }
-            Event::EntityMoved { entity_id, delta } => {
+            Event::EntityMoved {
+                entity_id, delta, ..
+            } => {
                 if let Some(e) = self.by_id.get_mut(entity_id) {
                     e.pos = [
                         e.pos[0] + delta[0],
@@ -452,6 +459,29 @@ impl Client {
                 kind,
                 pos,
             })
+        } else if id == self.ids.entity_position_sync {
+            // `PositionPath`: 0 — одна точка, 1 — список шагов (точка, тики); берём конец.
+            let entity_id = r.var_int().map_err(err)?;
+            let mut pos = [0.0; 3];
+            let stepped = r.var_int().map_err(err)? == 1;
+            let steps = if stepped {
+                r.var_int().map_err(err)?
+            } else {
+                1
+            };
+            for _ in 0..steps {
+                for v in &mut pos {
+                    *v = r.f64().map_err(err)?;
+                }
+                if stepped {
+                    r.var_int().map_err(err)?;
+                }
+            }
+            Ok(Event::EntitySpawned {
+                entity_id,
+                kind: -1,
+                pos,
+            })
         } else if id == self.ids.teleport_entity {
             let entity_id = r.var_int().map_err(err)?;
             let pos = [
@@ -471,18 +501,27 @@ impl Client {
             let props = r.var_int().map_err(err)?;
             // Младший бит — onGround, остальные — число шагов (0 — линейная дельта).
             let steps = props >> 1;
+            // `VecDelta`: линейная — три short; шаговая — на каждый шаг varint тиков
+            // и три short от предыдущего шага. В 1/4096 блока.
             let mut raw = [0i64; 3];
-            for v in &mut raw {
-                *v = if steps == 0 {
-                    r.u16().map_err(err)? as i16 as i64
+            let mut path = Vec::new();
+            for _ in 0..steps.max(1) {
+                let ticks = if steps > 0 {
+                    r.var_int().map_err(err)?
                 } else {
-                    r.var_int().map_err(err)? as i64
+                    1
                 };
+                for v in &mut raw {
+                    *v += r.u16().map_err(err)? as i16 as i64;
+                }
+                if steps > 0 {
+                    path.push((ticks, raw.map(|v| v as f64 / 4096.0)));
+                }
             }
-            let scale = 4096.0 / (1i64 << steps.min(30)) as f64;
             Ok(Event::EntityMoved {
                 entity_id,
-                delta: raw.map(|v| v as f64 / scale),
+                delta: raw.map(|v| v as f64 / 4096.0),
+                steps: path,
             })
         } else if id == self.ids.remove_entities {
             let count = r.var_int().map_err(err)?;

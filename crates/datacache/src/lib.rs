@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Пишется последним; меняется при изменении состава кэша.
-pub const CACHE_MARKER: &str = ".chunkwake-cache-v14";
+pub const CACHE_MARKER: &str = ".chunkwake-cache-v15";
 
 /// Вложенные `.jar` версии лежат здесь (бандлер распаковывает сервер сюда).
 const VERSION_JAR_PREFIX: &str = "META-INF/versions/";
@@ -147,6 +147,11 @@ pub fn ensure_generated_with(
         ENTITIES_EXTRACTOR,
     )
     .map_err(|e| io("write", &class_dir.join("ChunkwakeEntities.class"), e))?;
+    std::fs::write(
+        class_dir.join("ChunkwakePathTypes.class"),
+        PATH_TYPES_EXTRACTOR,
+    )
+    .map_err(|e| io("write", &class_dir.join("ChunkwakePathTypes.class"), e))?;
 
     let mut classpath =
         vec![std::path::absolute(&class_dir).map_err(|e| io("resolve", &class_dir, e))?];
@@ -226,6 +231,16 @@ pub fn ensure_generated_with(
         "[3/3] entities extractor",
         progress,
     )?;
+    progress("[3/3] extracting pathfinding cell types");
+    run_extractor(
+        java,
+        &work,
+        &classpath,
+        "ChunkwakePathTypes",
+        &tmp_abs.join("reports/path_types.csv"),
+        "[3/3] path types extractor",
+        progress,
+    )?;
     // Шаблоны структур не входят в вывод генератора данных: они лежат
     // в jar версии. Пишем их в тот же временный каталог до маркера.
     progress("copying structure templates");
@@ -272,6 +287,12 @@ const MAP_COLORS_EXTRACTOR: &[u8] = include_bytes!(concat!(
 const ENTITIES_EXTRACTOR: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
     "/extractor/ChunkwakeEntities.class"
+));
+
+/// Выгрузка типов клеток поиска пути (`extractor/ChunkwakePathTypes.java`).
+const PATH_TYPES_EXTRACTOR: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/extractor/ChunkwakePathTypes.class"
 ));
 
 /// Выгрузка жидкостей и классов блоков для фич (`extractor/ChunkwakeWorldgen.java`).

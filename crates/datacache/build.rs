@@ -9,6 +9,7 @@ const EXTRACTORS: &[&str] = &[
     "ChunkwakeInstruments",
     "ChunkwakeMapColors",
     "ChunkwakeEntities",
+    "ChunkwakePathTypes",
 ];
 
 fn main() {

@@ -1624,13 +1624,15 @@ fn parse_entity_line(line: &str) -> Option<EntityTypeInfo> {
         None => None,
         Some(max_health) => Some(DefaultAttributes {
             max_health,
-            movement_speed: a[1]?,
-            follow_range: a[2]?,
+            // Нет атрибута у типа (стойка для брони без `follow_range`) —
+            // значение по умолчанию `Attributes`.
+            movement_speed: a[1].unwrap_or(0.7),
+            follow_range: a[2].unwrap_or(32.0),
             attack_damage: a[3],
-            armor: a[4]?,
-            knockback_resistance: a[5]?,
-            step_height: a[6]?,
-            safe_fall_distance: a[7]?,
+            armor: a[4].unwrap_or(0.0),
+            knockback_resistance: a[5].unwrap_or(0.0),
+            step_height: a[6].unwrap_or(0.6),
+            safe_fall_distance: a[7].unwrap_or(3.0),
         }),
     };
     Some(EntityTypeInfo {
@@ -1684,6 +1686,12 @@ mod entity_tests {
         assert_eq!(z.eye_height, 1.74);
         let a = z.attributes.unwrap();
         assert_eq!((a.max_health, a.follow_range, a.armor), (20.0, 35.0, 2.0));
+        // Живой тип без части атрибутов: значения `Attributes` по умолчанию.
+        let stand = parse_entity_line(
+            "minecraft:armor_stand;10;3;0.5;1.975;misc;false;1.7775;20.0;0.7;;;0.0;0.0;0.0;3.0",
+        )
+        .unwrap();
+        assert_eq!(stand.attributes.unwrap().follow_range, 32.0);
         assert_eq!(a.attack_damage, Some(3.0));
         assert_eq!(a.movement_speed as f32, 0.23);
         // Корова: без `attack_damage`; предмет: не живой.

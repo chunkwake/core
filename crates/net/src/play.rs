@@ -2380,6 +2380,8 @@ pub struct SurvivalData {
     pub monster_spawns: Vec<CreatureSpawns>,
     /// Коллизия и трение блоков; `None` — старый кэш без `shapes.csv`.
     pub physics: Option<Arc<chunkwake_data::world::BlockPhysics>>,
+    /// Клетки поиска пути по id состояния (`path_types.csv`); `None` — по форме.
+    pub path_cells: Option<Arc<Vec<crate::mobs::path::Cell>>>,
     /// Тег предмета (`minecraft:dirt`) → id предметов.
     pub item_tags: HashMap<String, HashSet<String>>,
     /// Тег блока → id блоков. `/fill … replace #тег`.

@@ -52,7 +52,9 @@ impl Probe {
                     };
                     self.seen.insert(entity_id, (k, pos));
                 }
-                Event::EntityMoved { entity_id, delta } => {
+                Event::EntityMoved {
+                    entity_id, delta, ..
+                } => {
                     if let Some(s) = self.seen.get_mut(&entity_id) {
                         for i in 0..3 {
                             s.1[i] += delta[i];

@@ -233,6 +233,8 @@ impl PlayPlan {
         // Все игроки мира: на них смотрят монстры, от них считается исчезновение.
         let watchers: Vec<[f64; 3]> = hands.iter().map(|h| h.0).collect();
         let peaceful = self.difficulty() == Difficulty::Peaceful;
+        let difficulty = self.difficulty().id();
+        let min_y = self.min_y();
         let weather = self.vars.weather();
         let darken = self.sky_darken_now(dim, weather.rain, weather.thunder);
         let mut strikes = Vec::new();
@@ -262,9 +264,12 @@ impl PlayPlan {
                     // держат ссылку на `WorldView` этой фазы.
                     let shape = |c: [i32; 3]| self.shape_at(w.block(c), c);
                     let water = |c: [i32; 3]| self.water_at(w.block(c));
+                    let cell = |c: [i32; 3]| self.cell_at(w.block(c), c);
                     let world = mb::World {
                         shape: &shape,
                         water: &water,
+                        cell: Some(&cell),
+                        min_y,
                     };
                     let sight = |a: [f64; 3], b: [f64; 3]| self.clear_line(w, a, b);
                     let mut senses = mb::Senses {
@@ -278,6 +283,7 @@ impl PlayPlan {
                         rand: &mut rand,
                         prey: if monster { &prey[..] } else { &[] },
                         sight: &sight,
+                        difficulty,
                     };
                     let was_grounded = e.mob.on_ground;
                     let old_pos = e.mob.pos;
@@ -517,6 +523,39 @@ impl PlayPlan {
             mb::FULL
         } else {
             &[]
+        }
+    }
+
+    /// Клетка поиска пути: из таблицы состояний, без неё — по форме и воде.
+    fn cell_at(&self, s: Option<u32>, c: [i32; 3]) -> mb::path::Cell {
+        use mb::path::{Cell, PathType};
+        let Some(s) = s else {
+            return if c[1] < self.min_y() {
+                Cell {
+                    kind: PathType::Blocked,
+                    flags: Cell::SOLID,
+                }
+            } else {
+                Cell::AIR_CELL
+            };
+        };
+        if let Some(t) = self.survival.path_cells.as_deref()
+            && let Some(&cell) = t.get(s as usize)
+        {
+            return cell;
+        }
+        if self.water_at(Some(s)) {
+            Cell {
+                kind: PathType::Water,
+                flags: Cell::LAND,
+            }
+        } else if self.shape_at(Some(s), c).is_empty() {
+            Cell::AIR_CELL
+        } else {
+            Cell {
+                kind: PathType::Blocked,
+                flags: Cell::SOLID,
+            }
         }
     }
 

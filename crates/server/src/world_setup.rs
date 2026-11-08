@@ -738,7 +738,7 @@ fn survival_data(
     // Типы сущностей из `server.jar`: дальность слежения и данные видов мобов.
     let entity_types_info = chunkwake_data::world::load_entity_types(data_dir).map_err(s)?;
     chunkwake_net::mobs::install_species_data(&entity_types_info);
-    let survival = SurvivalData {
+    let mut survival = SurvivalData {
         enchantments: loaded.enchantment_lines,
         recipes,
         menu_chest: menu("minecraft:generic_9x3")?,
@@ -994,6 +994,7 @@ fn survival_data(
         physics: chunkwake_data::world::load_physics(data_dir)
             .ok()
             .map(std::sync::Arc::new),
+        path_cells: None,
         item_tags: chunkwake_net::play::load_registry_tags(data_dir, "item"),
         block_tags: chunkwake_net::play::load_registry_tags(data_dir, "block"),
         biome_names: registries
@@ -1020,6 +1021,10 @@ fn survival_data(
             &blocks.defaults(),
         )?,
     };
+    // Клетки поиска пути: теги, которых нет в выгрузке, — по состояниям мира.
+    survival.path_cells =
+        chunkwake_net::mobs::path::load_cells(data_dir, &survival.placement, &survival.block_tags)
+            .map(std::sync::Arc::new);
     Ok(survival)
 }
 
