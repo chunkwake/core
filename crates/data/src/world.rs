@@ -1583,21 +1583,67 @@ pub struct EntityTypeInfo {
     /// `MobCategory.getName()`: `monster`, `creature`, `misc`…
     pub category: String,
     pub fire_immune: bool,
+    /// `EntityDimensions.eyeHeight`.
+    pub eye_height: f32,
+    /// Базовые атрибуты (`DefaultAttributes`); `None` — тип не живой.
+    pub attributes: Option<DefaultAttributes>,
 }
 
-/// Строки `имя;дальность;интервал;ширина;высота;категория;fireImmune`.
+/// Базовые значения атрибутов живого типа.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DefaultAttributes {
+    pub max_health: f64,
+    pub movement_speed: f64,
+    pub follow_range: f64,
+    /// Есть не у всех: у животных атрибута `attack_damage` нет.
+    pub attack_damage: Option<f64>,
+    pub armor: f64,
+    pub knockback_resistance: f64,
+    pub step_height: f64,
+    pub safe_fall_distance: f64,
+}
+
+/// Строки `имя;дальность;интервал;ширина;высота;категория;fireImmune;глаза;`
+/// и восемь атрибутов (пустые у неживых): `max_health;movement_speed;`
+/// `follow_range;attack_damage;armor;knockback_resistance;step_height;`
+/// `safe_fall_distance`.
 fn parse_entity_line(line: &str) -> Option<EntityTypeInfo> {
-    let mut f = line.split(';');
-    let info = EntityTypeInfo {
-        name: f.next()?.to_owned(),
-        tracking_range: f.next()?.parse().ok()?,
-        update_interval: f.next()?.parse().ok()?,
-        width: f.next()?.parse().ok()?,
-        height: f.next()?.parse().ok()?,
-        category: f.next()?.to_owned(),
-        fire_immune: f.next()?.parse().ok()?,
+    let f: Vec<&str> = line.split(';').collect();
+    if f.len() != 16 {
+        return None;
+    }
+    let opt = |s: &str| -> Option<Option<f64>> {
+        if s.is_empty() {
+            Some(None)
+        } else {
+            s.parse().ok().map(Some)
+        }
     };
-    f.next().is_none().then_some(info)
+    let a: Vec<Option<f64>> = f[8..].iter().map(|s| opt(s)).collect::<Option<_>>()?;
+    let attributes = match a[0] {
+        None => None,
+        Some(max_health) => Some(DefaultAttributes {
+            max_health,
+            movement_speed: a[1]?,
+            follow_range: a[2]?,
+            attack_damage: a[3],
+            armor: a[4]?,
+            knockback_resistance: a[5]?,
+            step_height: a[6]?,
+            safe_fall_distance: a[7]?,
+        }),
+    };
+    Some(EntityTypeInfo {
+        name: f[0].to_owned(),
+        tracking_range: f[1].parse().ok()?,
+        update_interval: f[2].parse().ok()?,
+        width: f[3].parse().ok()?,
+        height: f[4].parse().ok()?,
+        category: f[5].to_owned(),
+        fire_immune: f[6].parse().ok()?,
+        eye_height: f[7].parse().ok()?,
+        attributes,
+    })
 }
 
 /// Типы сущностей в порядке реестра. Файла может не быть (кэш до выгрузки):
@@ -1626,13 +1672,32 @@ mod entity_tests {
 
     #[test]
     fn entity_line() {
-        let z = parse_entity_line("minecraft:zombie;8;3;0.6;1.95;monster;false").unwrap();
+        let z = parse_entity_line(
+            "minecraft:zombie;8;3;0.6;1.95;monster;false;1.74;20.0;0.23000000417232513;35.0;3.0;2.0;0.0;0.6;3.0",
+        )
+        .unwrap();
         assert_eq!(z.name, "minecraft:zombie");
         assert_eq!((z.tracking_range, z.update_interval), (8, 3));
         assert_eq!((z.width, z.height), (0.6, 1.95));
         assert_eq!(z.category, "monster");
         assert!(!z.fire_immune);
+        assert_eq!(z.eye_height, 1.74);
+        let a = z.attributes.unwrap();
+        assert_eq!((a.max_health, a.follow_range, a.armor), (20.0, 35.0, 2.0));
+        assert_eq!(a.attack_damage, Some(3.0));
+        assert_eq!(a.movement_speed as f32, 0.23);
+        // Корова: без `attack_damage`; предмет: не живой.
+        let cow = parse_entity_line(
+            "minecraft:cow;10;3;0.9;1.4;creature;false;1.3;10.0;0.2;16.0;;0.0;0.0;0.6;3.0",
+        )
+        .unwrap();
+        assert_eq!(cow.attributes.unwrap().attack_damage, None);
+        let item =
+            parse_entity_line("minecraft:item;6;20;0.25;0.25;misc;false;0.2125;;;;;;;;").unwrap();
+        assert!(item.attributes.is_none());
         assert!(parse_entity_line("minecraft:zombie;8;3").is_none());
-        assert!(parse_entity_line("minecraft:zombie;8;3;0.6;1.95;monster;false;x").is_none());
+        assert!(
+            parse_entity_line("minecraft:zombie;8;3;0.6;1.95;monster;false;x;;;;;;;;").is_none()
+        );
     }
 }

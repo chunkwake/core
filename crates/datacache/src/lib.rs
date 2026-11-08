@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Пишется последним; меняется при изменении состава кэша.
-pub const CACHE_MARKER: &str = ".chunkwake-cache-v13";
+pub const CACHE_MARKER: &str = ".chunkwake-cache-v14";
 
 /// Вложенные `.jar` версии лежат здесь (бандлер распаковывает сервер сюда).
 const VERSION_JAR_PREFIX: &str = "META-INF/versions/";

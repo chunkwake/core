@@ -573,7 +573,12 @@ fn bounds_of(target: &Target, name: &str) -> Option<Bounds> {
         (Profile::Player, "minecraft:attack_damage") => 1.0,
         (Profile::Mob(species), "minecraft:movement_speed") => species.speed(),
         (Profile::Mob(species), "minecraft:max_health") => f64::from(species.max_health()),
-        (Profile::Mob(_), "minecraft:follow_range") => 16.0,
+        (Profile::Mob(species), "minecraft:follow_range") => species.follow_range(),
+        (Profile::Mob(species), "minecraft:armor") => species.info().armor,
+        (Profile::Mob(species), "minecraft:step_height") => species.info().step_height,
+        (Profile::Mob(species), "minecraft:attack_damage") if species.is_monster() => {
+            f64::from(species.attack_damage())
+        }
         _ => bounds.base,
     };
     Some(bounds)
@@ -585,7 +590,10 @@ fn entity_has(profile: &Profile, name: &str) -> bool {
     }
     match profile {
         Profile::Player => player_only(name),
-        Profile::Mob(_) => name == "minecraft:follow_range",
+        Profile::Mob(species) => {
+            name == "minecraft:follow_range"
+                || (name == "minecraft:attack_damage" && species.is_monster())
+        }
     }
 }
 

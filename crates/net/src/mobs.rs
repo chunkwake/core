@@ -96,6 +96,166 @@ pub enum Species {
     Zombie,
 }
 
+/// Всё о виде в одном месте. Встроенные значения — запасные: при старте
+/// сервер накрывает измеримые (размер, глаза, атрибуты, категорию) выгрузкой
+/// `reports/entities.csv` ([`install_species_data`]). Поведенческие
+/// константы целей (паника, приманка) в выгрузку не попадают и живут здесь.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpeciesInfo {
+    pub name: &'static str,
+    pub category: Category,
+    /// Ширина и высота взрослого (`EntityType.sized`).
+    pub size: (f64, f64),
+    /// `EntityDimensions.eyeHeight` взрослого.
+    pub eye_height: f64,
+    pub max_health: f32,
+    /// Атрибут `movement_speed`.
+    pub speed: f64,
+    /// Атрибут `follow_range`: дальность поиска цели и узлов пути.
+    pub follow_range: f64,
+    /// Атрибут `attack_damage` (у животных его нет — 0).
+    pub attack_damage: f32,
+    pub armor: f64,
+    /// Атрибут `step_height`.
+    pub step_height: f64,
+    pub fire_immune: bool,
+    /// Множитель скорости `PanicGoal`.
+    pub panic_speed: f64,
+    /// Множитель скорости `TemptGoal`.
+    pub tempt_speed: f64,
+    /// Горит на солнце (`isSunSensitive`).
+    pub burns_in_sun: bool,
+    /// Громкость звуков (`getSoundVolume`).
+    pub volume: f32,
+    /// Префикс звуков: `.ambient`, `.hurt`, `.death`, `.step`.
+    pub sound: &'static str,
+    /// Таблица лута (`entities/<вид>`).
+    pub loot: &'static str,
+}
+
+const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> SpeciesInfo {
+    SpeciesInfo {
+        name,
+        category: Category::Creature,
+        size: (0.6, 1.8),
+        eye_height: 1.8 * 0.85,
+        max_health: 20.0,
+        speed: 0.25,
+        follow_range: 16.0,
+        attack_damage: 0.0,
+        armor: 0.0,
+        step_height: 0.6,
+        fire_immune: false,
+        panic_speed: 1.0,
+        tempt_speed: 1.0,
+        burns_in_sun: false,
+        volume: 1.0,
+        sound,
+        loot,
+    }
+}
+
+/// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
+/// и `EntityType` 26.3.
+const BUILTIN: [SpeciesInfo; 5] = [
+    SpeciesInfo {
+        size: (0.9, 1.4),
+        eye_height: 1.3,
+        max_health: 10.0,
+        speed: 0.2,
+        panic_speed: 2.0,
+        tempt_speed: 1.25,
+        volume: 0.4,
+        ..base(
+            "minecraft:cow",
+            "minecraft:entity.cow",
+            "minecraft:entities/cow",
+        )
+    },
+    SpeciesInfo {
+        size: (0.9, 0.9),
+        eye_height: 0.765,
+        max_health: 10.0,
+        panic_speed: 1.25,
+        tempt_speed: 1.2,
+        ..base(
+            "minecraft:pig",
+            "minecraft:entity.pig",
+            "minecraft:entities/pig",
+        )
+    },
+    SpeciesInfo {
+        size: (0.9, 1.3),
+        eye_height: 1.235,
+        max_health: 8.0,
+        speed: 0.23,
+        panic_speed: 1.25,
+        ..base(
+            "minecraft:sheep",
+            "minecraft:entity.sheep",
+            "minecraft:entities/sheep",
+        )
+    },
+    SpeciesInfo {
+        size: (0.4, 0.7),
+        eye_height: 0.644,
+        max_health: 4.0,
+        panic_speed: 1.4,
+        ..base(
+            "minecraft:chicken",
+            "minecraft:entity.chicken",
+            "minecraft:entities/chicken",
+        )
+    },
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (0.6, 1.95),
+        eye_height: 1.74,
+        speed: 0.23,
+        follow_range: 35.0,
+        attack_damage: 3.0,
+        armor: 2.0,
+        burns_in_sun: true,
+        ..base(
+            "minecraft:zombie",
+            "minecraft:entity.zombie",
+            "minecraft:entities/zombie",
+        )
+    },
+];
+
+static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
+
+/// Накрыть встроенную таблицу выгрузкой `server.jar`. Вызывается один раз
+/// при старте; без выгрузки (тесты) действуют встроенные значения.
+pub fn install_species_data(types: &[chunkwake_data::world::EntityTypeInfo]) {
+    let _ = INSTALLED.set(BUILTIN.iter().map(|b| merge(b, types)).collect());
+}
+
+/// Встроенные данные вида, накрытые строкой выгрузки с тем же именем.
+fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> SpeciesInfo {
+    let Some(t) = types.iter().find(|t| t.name == b.name) else {
+        return *b;
+    };
+    let mut s = *b;
+    s.size = (f64::from(t.width), f64::from(t.height));
+    s.eye_height = f64::from(t.eye_height);
+    s.fire_immune = t.fire_immune;
+    s.category = match t.category.as_str() {
+        "monster" => Category::Monster,
+        _ => Category::Creature,
+    };
+    if let Some(a) = t.attributes {
+        s.max_health = a.max_health as f32;
+        s.speed = a.movement_speed;
+        s.follow_range = a.follow_range;
+        s.attack_damage = a.attack_damage.unwrap_or(0.0) as f32;
+        s.armor = a.armor;
+        s.step_height = a.step_height;
+    }
+    s
+}
+
 impl Species {
     pub const ALL: [Species; 5] = [
         Species::Cow,
@@ -105,22 +265,19 @@ impl Species {
         Species::Zombie,
     ];
 
+    /// Данные вида: выгрузка, если она установлена, иначе встроенные.
+    pub fn info(self) -> &'static SpeciesInfo {
+        let i = self as usize;
+        INSTALLED.get().map_or(&BUILTIN[i], |t| &t[i])
+    }
+
     pub fn name(self) -> &'static str {
-        match self {
-            Species::Cow => "minecraft:cow",
-            Species::Pig => "minecraft:pig",
-            Species::Sheep => "minecraft:sheep",
-            Species::Chicken => "minecraft:chicken",
-            Species::Zombie => "minecraft:zombie",
-        }
+        BUILTIN[self as usize].name
     }
 
     /// Категория спавна (`EntityType.getCategory`).
     pub fn category(self) -> Category {
-        match self {
-            Species::Zombie => Category::Monster,
-            _ => Category::Creature,
-        }
+        self.info().category
     }
 
     pub fn is_monster(self) -> bool {
@@ -132,42 +289,32 @@ impl Species {
         !self.is_monster()
     }
 
-    /// Атрибут `attack_damage` (`Zombie.createAttributes`: 3).
     pub fn attack_damage(self) -> f32 {
-        match self {
-            Species::Zombie => 3.0,
-            _ => 0.0,
-        }
+        self.info().attack_damage
     }
 
-    /// Атрибут `follow_range`: дальность поиска цели (зомби — 35, по умолчанию 16).
     pub fn follow_range(self) -> f64 {
-        match self {
-            Species::Zombie => 35.0,
-            _ => 16.0,
-        }
+        self.info().follow_range
     }
 
-    /// Горит на солнце (`Zombie.isSunSensitive`).
     pub fn burns_in_sun(self) -> bool {
-        self == Species::Zombie
+        self.info().burns_in_sun
     }
 
-    /// Высота глаз взрослого (`EntityType.eyeHeight`; по умолчанию 0.85 роста).
     pub fn eye_height(self) -> f64 {
-        match self {
-            Species::Zombie => 1.74,
-            s => s.size().1 * 0.85,
-        }
+        self.info().eye_height
     }
 
     /// Опыт за убийство игроком: у животных 1–3 (`Animal.getBaseExperienceReward`),
-    /// у зомби 5, у детёныша ×2.5 (`Zombie.getBaseExperienceReward`).
+    /// у монстров 5 (`Monster.xpReward`), у детёныша зомби ×2.5
+    /// (`Zombie.getBaseExperienceReward`).
     pub fn xp(self, baby: bool, r: f64) -> i32 {
-        match self {
-            Species::Zombie if baby => 12,
-            Species::Zombie => 5,
-            _ => 1 + (r * 3.0).floor().min(2.0) as i32,
+        if !self.is_monster() {
+            1 + (r * 3.0).floor().min(2.0) as i32
+        } else if baby {
+            (5.0 * 2.5) as i32
+        } else {
+            5
         }
     }
 
@@ -178,55 +325,27 @@ impl Species {
 
     pub fn from_name(name: &str) -> Option<Self> {
         let name = name.strip_prefix("minecraft:").unwrap_or(name);
-        Self::ALL.into_iter().find(|s| &s.name()[10..] == name)
+        Self::ALL.into_iter().find(|s| s.short() == name)
     }
 
-    /// Ширина и высота взрослого (`EntityType.sized`).
     pub fn size(self) -> (f64, f64) {
-        match self {
-            Species::Cow => (0.9, 1.4),
-            Species::Pig => (0.9, 0.9),
-            Species::Sheep => (0.9, 1.3),
-            Species::Chicken => (0.4, 0.7),
-            Species::Zombie => (0.6, 1.95),
-        }
+        self.info().size
     }
 
     pub fn max_health(self) -> f32 {
-        match self {
-            Species::Cow | Species::Pig => 10.0,
-            Species::Sheep => 8.0,
-            Species::Chicken => 4.0,
-            Species::Zombie => 20.0,
-        }
+        self.info().max_health
     }
 
-    /// Атрибут `movement_speed` (`createAttributes`).
     pub fn speed(self) -> f64 {
-        match self {
-            Species::Cow => 0.2,
-            Species::Pig | Species::Chicken => 0.25,
-            Species::Sheep | Species::Zombie => 0.23,
-        }
+        self.info().speed
     }
 
-    /// Множитель скорости паники (`PanicGoal`).
     pub fn panic_speed(self) -> f64 {
-        match self {
-            Species::Cow => 2.0,
-            Species::Pig | Species::Sheep => 1.25,
-            Species::Chicken => 1.4,
-            Species::Zombie => 1.0,
-        }
+        self.info().panic_speed
     }
 
-    /// Множитель скорости, когда манят едой (`TemptGoal`).
     pub fn tempt_speed(self) -> f64 {
-        match self {
-            Species::Cow => 1.25,
-            Species::Pig => 1.2,
-            Species::Sheep | Species::Chicken | Species::Zombie => 1.0,
-        }
+        self.info().tempt_speed
     }
 
     /// Еда (`isFood`: теги `cow_food`, `pig_food`, `sheep_food`, `chicken_food`).
@@ -244,35 +363,20 @@ impl Species {
                     | "torchflower_seeds"
                     | "pitcher_pod"
             ),
-            Species::Zombie => false,
+            _ => false,
         }
     }
 
-    /// Префикс звуков: `minecraft:entity.cow` → `.ambient`, `.hurt`, `.death`, `.step`.
     pub fn sound(self) -> &'static str {
-        match self {
-            Species::Cow => "minecraft:entity.cow",
-            Species::Pig => "minecraft:entity.pig",
-            Species::Sheep => "minecraft:entity.sheep",
-            Species::Chicken => "minecraft:entity.chicken",
-            Species::Zombie => "minecraft:entity.zombie",
-        }
+        self.info().sound
     }
 
-    /// Громкость звуков (`Cow.getSoundVolume` — 0.4).
     pub fn volume(self) -> f32 {
-        if self == Species::Cow { 0.4 } else { 1.0 }
+        self.info().volume
     }
 
-    /// Таблица лута (`entities/<вид>`; у овцы шерсть — подтаблица по цвету).
     pub fn loot(self) -> &'static str {
-        match self {
-            Species::Cow => "minecraft:entities/cow",
-            Species::Pig => "minecraft:entities/pig",
-            Species::Sheep => "minecraft:entities/sheep",
-            Species::Chicken => "minecraft:entities/chicken",
-            Species::Zombie => "minecraft:entities/zombie",
-        }
+        self.info().loot
     }
 }
 
@@ -1578,6 +1682,49 @@ mod tests {
             tick(&mut m, &w, &mut s);
         }
         assert!(m.pos[2] > 5.0 && m.pos[2] < 7.0, "{:?}", m.pos);
+    }
+
+    /// Строка выгрузки накрывает измеримое, поведение остаётся встроенным.
+    #[test]
+    fn vanilla_data_overrides_builtin() {
+        let row = |line: &str| {
+            let f: Vec<&str> = line.split(';').collect();
+            let num = |i: usize| f[i].parse::<f64>().ok();
+            chunkwake_data::world::EntityTypeInfo {
+                name: f[0].into(),
+                tracking_range: 8,
+                update_interval: 3,
+                width: f[3].parse().unwrap(),
+                height: f[4].parse().unwrap(),
+                category: f[5].into(),
+                fire_immune: false,
+                eye_height: f[7].parse().unwrap(),
+                attributes: Some(chunkwake_data::world::DefaultAttributes {
+                    max_health: num(8).unwrap(),
+                    movement_speed: num(9).unwrap(),
+                    follow_range: num(10).unwrap(),
+                    attack_damage: num(11),
+                    armor: num(12).unwrap(),
+                    knockback_resistance: num(13).unwrap(),
+                    step_height: num(14).unwrap(),
+                    safe_fall_distance: num(15).unwrap(),
+                }),
+            }
+        };
+        let types = [row(
+            "minecraft:zombie;8;3;0.6;1.95;monster;false;1.74;20.0;0.23000000417232513;35.0;3.0;2.0;0.0;0.6;3.0",
+        )];
+        let z = merge(&BUILTIN[Species::Zombie as usize], &types);
+        assert_eq!(z.speed, 0.23000000417232513);
+        assert_eq!((z.follow_range, z.attack_damage, z.armor), (35.0, 3.0, 2.0));
+        assert!(z.burns_in_sun && z.category == Category::Monster);
+        // Нет строки — встроенные значения как есть.
+        assert_eq!(merge(&BUILTIN[0], &types), BUILTIN[0]);
+        // Встроенные совпадают с ванилью до f32.
+        assert_eq!(
+            BUILTIN[Species::Zombie as usize].speed as f32,
+            z.speed as f32
+        );
     }
 
     #[test]

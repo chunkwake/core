@@ -735,6 +735,9 @@ fn survival_data(
             }
         }
     }
+    // Типы сущностей из `server.jar`: дальность слежения и данные видов мобов.
+    let entity_types_info = chunkwake_data::world::load_entity_types(data_dir).map_err(s)?;
+    chunkwake_net::mobs::install_species_data(&entity_types_info);
     let survival = SurvivalData {
         enchantments: loaded.enchantment_lines,
         recipes,
@@ -974,22 +977,18 @@ fn survival_data(
         tracking_ranges: {
             let ids =
                 chunkwake_data::registries::builtin_ids_of(builtin, "entity_type").map_err(s)?;
-            chunkwake_data::world::load_entity_types(data_dir)
-                .map_err(s)?
-                .into_iter()
+            entity_types_info
+                .iter()
                 .filter_map(|t| Some((*ids.get(&t.name)?, t.tracking_range * 16)))
                 .collect()
         },
-        mob_entity_types: {
-            let id =
-                |n| chunkwake_data::registries::builtin_id_of(builtin, "entity_type", n).map_err(s);
-            [
-                id("minecraft:cow")?,
-                id("minecraft:pig")?,
-                id("minecraft:sheep")?,
-                id("minecraft:chicken")?,
-            ]
-        },
+        mob_entity_types: chunkwake_net::mobs::Species::ALL
+            .iter()
+            .map(|sp| {
+                chunkwake_data::registries::builtin_id_of(builtin, "entity_type", sp.name())
+                    .map_err(s)
+            })
+            .collect::<Result<_, _>>()?,
         creature_spawns: biome_spawns(data_dir, registries, "creature"),
         monster_spawns: biome_spawns(data_dir, registries, "monster"),
         physics: chunkwake_data::world::load_physics(data_dir)

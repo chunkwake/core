@@ -2367,7 +2367,8 @@ pub struct SurvivalData {
     pub item_entity_type: i32,
     pub orb_entity_type: i32,
     /// ID корова, свинья, овца, курица (`mobs::Species`) в реестре `entity_type`.
-    pub mob_entity_types: [i32; 4],
+    /// ID типа сущности по виду, в порядке `Species::ALL`.
+    pub mob_entity_types: Vec<i32>,
     /// Весь реестр `entity_type` по имени: лодки и плоты (`minecraft:oak_boat`).
     pub entity_types: HashMap<String, i32>,
     /// Дальность слежения в блоках (`clientTrackingRange` × 16) по ID типа

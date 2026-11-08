@@ -42,8 +42,7 @@ impl MobEntry {
 
 impl PlayPlan {
     fn mob_type(&self, s: Species) -> i32 {
-        // Первые четыре вида — заранее собранный массив, остальные — по имени
-        // из реестра `entity_type`.
+        // Собран при старте по `Species::ALL`; без него (тесты) — по имени.
         self.survival
             .mob_entity_types
             .get(s as usize)
