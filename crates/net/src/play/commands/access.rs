@@ -1431,8 +1431,10 @@ impl PlayPlan {
             .get("minecraft:air")
             .copied()
             .unwrap_or(state);
-        let mut origins = HashSet::new();
-        let mut changed = 0;
+        // Пачка целиком, как `FillCommand`: блоки ставятся без обновлений,
+        // свет и последствия — после записи всей области. По одному блоку
+        // жидкость или огонь успевали среагировать посреди заливки.
+        let mut list = Vec::new();
         for y in y1..=y2 {
             for z in z1..=z2 {
                 for x in x1..=x2 {
@@ -1447,13 +1449,13 @@ impl PlayPlan {
                     let edge = x == x1 || x == x2 || y == y1 || y == y2 || z == z1 || z == z2;
                     let place = match mode {
                         FillMode::Replace | FillMode::Destroy | FillMode::Strict => true,
-                        // `keep` не трогает непустые блоки, `hollow` — только рамку,
-                        // `outline` — рамку и внутренний воздух.
+                        // `keep` не трогает непустые блоки, `outline` — только рамку,
+                        // `hollow` — рамку и воздух внутри (`FillCommand.Mode`, `HOLLOW_CORE`).
                         FillMode::Keep => {
                             current.is_none_or(|s| self.state_name(s).ends_with(":air"))
                         }
-                        FillMode::Hollow => edge,
-                        FillMode::Outline => true,
+                        FillMode::Outline => edge,
+                        FillMode::Hollow => true,
                     };
                     if !place {
                         continue;
@@ -1464,17 +1466,19 @@ impl PlayPlan {
                         self.break_drops(position);
                     }
                     let target = match mode {
-                        FillMode::Outline if !edge => air,
+                        FillMode::Hollow if !edge => air,
                         _ => state,
                     };
-                    if self
-                        .set_block(position, target)
-                        .is_some_and(|old| old != target)
-                    {
-                        changed += 1;
-                        origins.extend(crate::redstone::around(position));
-                    }
+                    list.push((position, target));
                 }
+            }
+        }
+        let mut origins = HashSet::new();
+        let mut changed = 0;
+        for (&(position, target), old) in list.iter().zip(self.set_blocks(&list)) {
+            if old.is_some_and(|old| old != target) {
+                changed += 1;
+                origins.extend(crate::redstone::around(position));
             }
         }
         if !origins.is_empty() {

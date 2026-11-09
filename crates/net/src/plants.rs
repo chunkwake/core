@@ -1,7 +1,5 @@
 //! Random-tick rules for plants and leaves.
 
-use std::collections::{HashSet, VecDeque};
-
 pub fn age_limit(name: &str) -> Option<u8> {
     match name {
         "minecraft:wheat"
@@ -73,39 +71,6 @@ pub fn climbing_tip(name: &str) -> Option<(&'static str, i32)> {
     }
 }
 
-/// The shortest path through leaves to any log, capped at the seven-state limit.
-pub fn leaf_distance(
-    origin: [i32; 3],
-    mut block: impl FnMut([i32; 3]) -> Option<(bool, bool)>,
-) -> u8 {
-    let mut seen = HashSet::from([origin]);
-    let mut queue = VecDeque::from([(origin, 0u8)]);
-    while let Some((p, depth)) = queue.pop_front() {
-        if depth == 6 {
-            continue;
-        }
-        for d in [
-            [1, 0, 0],
-            [-1, 0, 0],
-            [0, 1, 0],
-            [0, -1, 0],
-            [0, 0, 1],
-            [0, 0, -1],
-        ] {
-            let next = [p[0] + d[0], p[1] + d[1], p[2] + d[2]];
-            if !seen.insert(next) {
-                continue;
-            }
-            match block(next) {
-                Some((_, true)) => return depth + 1,
-                Some((true, _)) => queue.push_back((next, depth + 1)),
-                _ => {}
-            }
-        }
-    }
-    7
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,25 +127,5 @@ mod tests {
             assert_eq!(tree_wood(&format!("minecraft:{wood}_sapling")), Some(wood));
         }
         assert_eq!(tree_wood("minecraft:mangrove_propagule"), Some("mangrove"));
-    }
-
-    #[test]
-    fn leaves_find_logs_only_through_leaves() {
-        assert_eq!(
-            leaf_distance([0, 0, 0], |p| match p {
-                [3, 0, 0] => Some((false, true)),
-                [1 | 2, 0, 0] => Some((true, false)),
-                _ => None,
-            }),
-            3
-        );
-        assert_eq!(
-            leaf_distance([0, 0, 0], |p| match p {
-                [7, 0, 0] => Some((false, true)),
-                [1..=6, 0, 0] => Some((true, false)),
-                _ => None,
-            }),
-            7
-        );
     }
 }
