@@ -1699,6 +1699,10 @@ pub(crate) struct DimState {
     lent: Mutex<FastSet<(i32, i32)>>,
     /// Есть ли сейчас снятые столбцы — быстрый отказ без замка.
     lending: std::sync::atomic::AtomicBool,
+    /// Чанки, которые сейчас генерирует какой-то поток (`generate_chunk`),
+    /// и сигнал об их вставке в мир.
+    generating: Mutex<FastSet<(i32, i32)>>,
+    generated: std::sync::Condvar,
     /// Чанки, которые тикают (симуляция рядом с игроками этого измерения).
     simulated: Mutex<Arc<FastSet<(i32, i32)>>>,
     /// Сущности и тики этого измерения.
@@ -1726,6 +1730,8 @@ impl DimState {
             tracked: Mutex::new(Arc::new(Vec::new())),
             lent: Mutex::new(FastSet::default()),
             lending: std::sync::atomic::AtomicBool::new(false),
+            generating: Mutex::new(FastSet::default()),
+            generated: std::sync::Condvar::new(),
             simulated: Mutex::new(Arc::new(FastSet::default())),
             sim: DimSim::default(),
         }
@@ -2771,6 +2777,12 @@ impl PlayPlan {
                 .cloned()
         };
         let mut snapshot = read();
+        // Столбец снят на время пролива света (`light_ring` берёт и соседей
+        // пачки): он не пропал, а вернётся с `light_lock`. Без этого ожидания
+        // клиент получал пустой чанк — дыры до дна в океане после портала.
+        if snapshot.is_none() && self.wait_lent(self.dim_state(), (x, z)) {
+            snapshot = read();
+        }
         // Выгрузка могла снять столбец после проверки региона: регион
         // помечен, повторный запрос прочтёт его с диска.
         if snapshot.is_none() && self.terrain().is_some() {
@@ -2780,14 +2792,29 @@ impl PlayPlan {
         let edited = snapshot.map(|(c, rev)| (c.encode_body(), rev));
         let (body, rev) = match &edited {
             Some((body, rev)) => (body.as_slice(), *rev),
-            None => (self.chunk_body.as_slice(), 0),
+            None => {
+                if self.terrain().is_some() {
+                    // Шаблон в шумовом мире — пустой столбец: клиент увидит
+                    // дыру. Кэшировать такой кадр нельзя (ниже), а в журнал —
+                    // чтобы гонку было видно.
+                    tracing::warn!("chunk ({x}, {z}) is missing from the world, sending an empty one");
+                }
+                (self.chunk_body.as_slice(), 0)
+            }
         };
         let packet = play::level_chunk_with_light(self.ids.level_chunk_with_light, x, z, body);
         let frame = Arc::new(self.hub.frame(&packet));
         // В кэш — только если чанк не изменили, пока мы его сжимали.
         let limit = self.chunk_frame_limit(self.active_dim());
         let world = self.dim_state().edited.read().unwrap();
-        if world.get(&(x, z)).map_or(0, |e| e.1) == rev {
+        // Шаблон — только в плоском мире: в шумовом это пустой столбец из
+        // гонки, и из кэша он уходил бы снова и снова.
+        let cacheable = match (&edited, world.get(&(x, z))) {
+            (Some(_), Some(e)) => e.1 == rev,
+            (None, None) => self.terrain().is_none(),
+            _ => false,
+        };
+        if cacheable {
             let mut cache = self.dim_state().chunk_frames.lock().unwrap();
             if cache.len() >= limit {
                 // Восьмая часть в порядке хеша (по сути случайная): без обрыва,
@@ -4285,15 +4312,38 @@ impl PlayPlan {
         let Some(generate) = &self.terrain() else {
             return false;
         };
-        if self
-            .dim_state()
-            .edited
-            .read()
-            .unwrap()
-            .contains_key(&(x, z))
-        {
+        let state = self.dim_state();
+        if state.edited.read().unwrap().contains_key(&(x, z)) {
             return false;
         }
+        // На пролив света столбец снят из мира, но он есть.
+        if self.wait_lent(state, (x, z)) {
+            return false;
+        }
+        // Генератор отдаёт чанк один раз. Пока первый поток считает для него
+        // точки интереса и ещё не вставил в мир, второй получил бы `None` и
+        // отправил игроку пустой шаблон: ждём первого.
+        {
+            let mut busy = state.generating.lock().unwrap();
+            if busy.contains(&(x, z)) {
+                while busy.contains(&(x, z)) {
+                    busy = state.generated.wait(busy).unwrap();
+                }
+                return false;
+            }
+            if state.edited.read().unwrap().contains_key(&(x, z)) {
+                return false;
+            }
+            busy.insert((x, z));
+        }
+        struct Done<'a>(&'a DimState, (i32, i32));
+        impl Drop for Done<'_> {
+            fn drop(&mut self) {
+                self.0.generating.lock().unwrap().remove(&self.1);
+                self.0.generated.notify_all();
+            }
+        }
+        let _done = Done(state, (x, z));
         let Some(mut column) = generate(x, z) else {
             // Чанк уже отдан: вызывающий возьмёт готовый столбец из мира.
             return false;
