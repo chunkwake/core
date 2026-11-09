@@ -91,6 +91,23 @@ pub fn mob_cap(category: Category, spawnable_chunks: usize) -> usize {
     category.max() as usize * spawnable_chunks / MOB_CAP_CHUNKS as usize
 }
 
+/// Чанков для лимита (`DistanceManager.getNaturalSpawnChunkCount`): счётчик
+/// `naturalSpawnChunkCounter` — `FixedPlayerDistanceChunkTracker` радиуса 8,
+/// то есть квадрат 17×17 вокруг чанка каждого игрока, без повторов. От
+/// дальности симуляции не зависит: один игрок всегда даёт 289 чанков и полный
+/// лимит, хотя спавн идёт только в чанках симуляции.
+pub fn spawn_cap_chunks(players: &[(i32, i32)]) -> usize {
+    let mut chunks = std::collections::HashSet::new();
+    for &(cx, cz) in players {
+        for dx in -8..=8 {
+            for dz in -8..=8 {
+                chunks.insert((cx + dx, cz + dz));
+            }
+        }
+    }
+    chunks.len()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Species {
     Cow,
@@ -2401,6 +2418,11 @@ mod tests {
         assert!(got.is_empty());
         assert_eq!(mob_cap(Category::Monster, 289), 70);
         assert_eq!(mob_cap(Category::Creature, 578), 20);
+        assert_eq!(spawn_cap_chunks(&[(3, -2)]), 289);
+        assert_eq!(mob_cap(Category::Monster, spawn_cap_chunks(&[(3, -2)])), 70);
+        // Соседние игроки делят квадраты: 17 × 18, а не 2 × 289.
+        assert_eq!(spawn_cap_chunks(&[(0, 0), (1, 0)]), 306);
+        assert_eq!(spawn_cap_chunks(&[]), 0);
     }
 
     #[test]

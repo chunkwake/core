@@ -2135,6 +2135,11 @@ impl PlayPlan {
                 None
             },
         };
+        let player_chunks: Vec<(i32, i32)> = players
+            .iter()
+            .map(|p| ((p[0].floor() as i32) >> 4, (p[2].floor() as i32) >> 4))
+            .collect();
+        let cap_chunks = mb::spawn_cap_chunks(&player_chunks);
         let mut rng = rand::thread_rng();
         chunks.shuffle(&mut rng);
         let mut plan: Vec<(Species, [i32; 3])> = Vec::new();
@@ -2147,7 +2152,7 @@ impl PlayPlan {
                 if !on {
                     continue;
                 }
-                let cap = mb::mob_cap(cat, chunks.len());
+                let cap = mb::mob_cap(cat, cap_chunks);
                 for &chunk in &chunks {
                     if counts[slot(cat)] >= cap {
                         break;

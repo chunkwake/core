@@ -42,6 +42,9 @@ final class MobImpl {
             case "sheep" -> org.bukkit.entity.Sheep.class;
             case "chicken" -> org.bukkit.entity.Chicken.class;
             case "zombie" -> org.bukkit.entity.Zombie.class;
+            case "creeper" -> org.bukkit.entity.Creeper.class;
+            case "skeleton" -> org.bukkit.entity.Skeleton.class;
+            case "spider" -> org.bukkit.entity.Spider.class;
             default -> throw new IllegalArgumentException("chunkwake: no mob " + species);
         };
     }
@@ -49,13 +52,13 @@ final class MobImpl {
     /** Вид для {@link EntityType}; {@code null} — такого моба сервер не умеет. */
     static String species(EntityType type) {
         return switch (type) {
-            case COW, PIG, SHEEP, CHICKEN, ZOMBIE -> type.name().toLowerCase(Locale.ROOT);
+            case COW, PIG, SHEEP, CHICKEN, ZOMBIE, CREEPER, SKELETON, SPIDER -> type.name().toLowerCase(Locale.ROOT);
             default -> null;
         };
     }
 
     static String species(Class<?> type) {
-        for (String s : new String[] {"cow", "pig", "sheep", "chicken", "zombie"}) {
+        for (String s : new String[] {"cow", "pig", "sheep", "chicken", "zombie", "creeper", "skeleton", "spider"}) {
             if (type.isAssignableFrom(iface(s)) && iface(s).isAssignableFrom(type)) {
                 return s;
             }
@@ -158,7 +161,9 @@ final class MobImpl {
             case "chicken" -> 0.644;
             case "pig" -> 0.765;
             case "sheep" -> 1.235;
-            case "zombie" -> 1.74;
+            case "zombie", "skeleton" -> 1.74;
+            case "creeper" -> 1.445;
+            case "spider" -> 0.65;
             default -> 1.3;
         } * (isAdult() ? 1 : 0.5);
     }
