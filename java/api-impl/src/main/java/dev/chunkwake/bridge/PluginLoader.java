@@ -24,7 +24,14 @@ import org.bukkit.plugin.java.JavaPlugin;
  * {@link #init(JavaPlugin)}, где мы передаём плагину сервер и описание.
  */
 final class PluginLoader extends URLClassLoader implements ConfiguredPluginClassLoader {
+    static {
+        // Загрузчики ищут классы друг у друга: с замком на весь загрузчик два
+        // плагина, ссылающиеся друг на друга из разных потоков, встали бы.
+        ClassLoader.registerAsParallelCapable();
+    }
+
     private final ChunkwakeServer server;
+    private final PluginClassGroup group;
     final PluginDescriptionFile description;
     private final File file;
     private final File dataFolder;
@@ -34,10 +41,11 @@ final class PluginLoader extends URLClassLoader implements ConfiguredPluginClass
     private final String bootstrapper;
     private io.papermc.paper.plugin.bootstrap.PluginBootstrap bootstrap;
 
-    PluginLoader(ChunkwakeServer server, File file, PluginDescriptionFile description, ClassLoader parent)
-            throws IOException {
+    PluginLoader(ChunkwakeServer server, File file, PluginDescriptionFile description, ClassLoader parent,
+            PluginClassGroup group) throws IOException {
         super(file.getName(), new URL[] {file.toURI().toURL()}, parent);
         this.server = server;
+        this.group = group;
         this.file = file;
         this.description = description;
         this.dataFolder = new File(file.getParentFile(), description.getName());
@@ -216,13 +224,58 @@ final class PluginLoader extends URLClassLoader implements ConfiguredPluginClass
     }
 
     @Override
+    protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+        return loadClass(name, resolve, true, true);
+    }
+
+    /**
+     * Родитель (API, Via), затем свой jar и библиотеки, затем — при
+     * {@code checkGlobal} — jar других плагинов ({@link PluginClassGroup}).
+     * Библиотеки лежат в том же classpath, что и jar, поэтому
+     * {@code checkLibraries} их не отделяет.
+     */
+    @Override
     public Class<?> loadClass(String name, boolean resolve, boolean checkGlobal, boolean checkLibraries)
             throws ClassNotFoundException {
-        return loadClass(name, resolve);
+        synchronized (getClassLoadingLock(name)) {
+            Class<?> c = findLoadedClass(name);
+            if (c == null) {
+                try {
+                    c = getParent().loadClass(name);
+                } catch (ClassNotFoundException ignored) {
+                    // Нет у родителя — ищем у себя.
+                }
+            }
+            if (c == null) {
+                try {
+                    c = findClass(name);
+                } catch (ClassNotFoundException ignored) {
+                    // Нет в своём jar — ищем у других плагинов.
+                }
+            }
+            if (c == null && checkGlobal && group != null) {
+                c = group.getClassByName(name, resolve, this);
+            }
+            if (c == null) {
+                throw new ClassNotFoundException(name);
+            }
+            if (resolve) {
+                resolveClass(c);
+            }
+            return c;
+        }
     }
 
     @Override
     public PluginClassLoaderGroup getGroup() {
-        return null;
+        return group;
+    }
+
+    @Override
+    public void close() throws IOException {
+        if (group != null) {
+            group.remove(this);
+        }
+        super.close();
     }
 }

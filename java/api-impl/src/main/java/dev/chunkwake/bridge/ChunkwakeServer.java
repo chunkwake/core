@@ -51,6 +51,8 @@ final class ChunkwakeServer {
     private final SimpleCommandMap commands = new SimpleCommandMap(api, new LinkedHashMap<>());
     /** ViaVersion из `plugins/` как библиотека (см. {@link ViaLoader}). */
     private final ViaLoader via = new ViaLoader();
+    /** Загрузчики плагинов, которые видят классы друг друга. */
+    private final PluginClassGroup classGroup = new PluginClassGroup(logger);
     private final Map<UUID, PlayerImpl> online = new LinkedHashMap<>();
     final ConsoleCommandSender console = Stub.of(ConsoleCommandSender.class, new Console(this));
     final World world = Stub.of(World.class, new WorldImpl());
@@ -141,19 +143,41 @@ final class ChunkwakeServer {
         // поэтому каждая фаза объявляется заранее — видно, на чём именно стоит.
         logger.info("plugins: " + jars.length + " jar(s) in " + dir + ", loading...");
         long started = System.nanoTime();
+        List<PluginOrder.Candidate> candidates = new ArrayList<>();
+        for (File jar : jars) {
+            try {
+                candidates.add(new PluginOrder.Candidate(jar, PluginLoader.describe(jar)));
+            } catch (Throwable t) {
+                logger.log(Level.SEVERE, "Could not load " + jar.getName() + ": " + t.getMessage());
+            }
+        }
+        // Как Paper: зависимости — раньше зависящих, `loadbefore` — наоборот.
+        List<PluginOrder.Candidate> order = PluginOrder.sort(candidates, plugins.plugins.keySet(), logger);
         List<JavaPlugin> loaded = new ArrayList<>();
-        for (int i = 0; i < jars.length; i++) {
-            File jar = jars[i];
+        // Имена и `provides` загруженных: по ним проверяются `depend`.
+        java.util.Set<String> loadedNames = new java.util.HashSet<>(plugins.plugins.keySet());
+        for (int i = 0; i < order.size(); i++) {
+            File jar = order.get(i).jar();
+            PluginDescriptionFile desc = order.get(i).description();
             String label = jar.getName();
-            logger.info("plugins: [" + (i + 1) + "/" + jars.length + "] " + label);
+            logger.info("plugins: [" + (i + 1) + "/" + order.size() + "] " + label);
             try {
                 long one = System.nanoTime();
-                PluginDescriptionFile desc = PluginLoader.describe(jar);
                 if (plugins.plugins.containsKey(desc.getName())) {
                     logger.warning("Duplicate plugin " + desc.getName() + " in " + jar.getName());
                     continue;
                 }
-                PluginLoader loader = new PluginLoader(this, jar, desc, via.parent(getClass().getClassLoader()));
+                List<String> missing = PluginOrder.missing(desc, loadedNames);
+                if (!missing.isEmpty()) {
+                    // Зависимость была, но не загрузилась: без неё плагин упадёт
+                    // на первом же её классе.
+                    logger.severe("Could not load '" + jar.getName() + "': dependencies failed to load: "
+                            + missing);
+                    continue;
+                }
+                PluginLoader loader = new PluginLoader(this, jar, desc, via.parent(getClass().getClassLoader()),
+                        classGroup);
+                classGroup.add(loader);
                 // Библиотеки из `plugin.yml` качаются из сети: на первом запуске
                 // это десятки секунд, и без строки в журнале это не отличить от
                 // зависания.
@@ -167,8 +191,16 @@ final class ChunkwakeServer {
                 // регистрирует команды до создания плагина и создаёт его сам.
                 loader.runPaperLoader(logger);
                 loader.runBootstrapper();
-                JavaPlugin plugin = loader.create();
+                JavaPlugin plugin;
+                try {
+                    plugin = loader.create();
+                } catch (Throwable t) {
+                    classGroup.remove(loader);
+                    throw t;
+                }
                 plugins.plugins.put(desc.getName(), plugin);
+                loadedNames.add(desc.getName());
+                loadedNames.addAll(desc.getProvides());
                 plugin.onLoad();
                 loaded.add(plugin);
                 logger.info("plugins: " + desc.getName() + " loaded in " + ms(one) + " ms");
