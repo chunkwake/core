@@ -24,7 +24,6 @@ const UNHANDLED: &[&str] = &[
     "configuration_acknowledged",
     "cookie_response",
     "custom_click_action",
-    "custom_payload",
     "debug_subscription_request",
     "edit_book",
     "entity_tag_query",

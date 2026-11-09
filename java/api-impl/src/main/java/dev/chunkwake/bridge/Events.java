@@ -110,6 +110,11 @@ final class Events {
             case Bridge.EVENT_POTION -> potion(plugins, p, arg);
             case Bridge.EVENT_PREPARE_ENCHANT -> prepareEnchant(plugins, p, arg);
             case Bridge.EVENT_PREPARE_GRINDSTONE -> prepareGrindstone(plugins, p, arg);
+            case Bridge.EVENT_PLUGIN_MESSAGE -> {
+                int space = arg.indexOf(' ');
+                p.pluginMessage(arg.substring(0, space), java.util.HexFormat.of().parseHex(arg.substring(space + 1)));
+                yield "";
+            }
             case Bridge.EVENT_ENCHANT -> enchant(plugins, p, arg);
             case Bridge.EVENT_PICKUP_XP -> {
                 String[] f = arg.split(" ");

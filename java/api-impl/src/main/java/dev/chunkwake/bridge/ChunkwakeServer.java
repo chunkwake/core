@@ -69,8 +69,51 @@ final class ChunkwakeServer {
         return entityScheduler;
     }
 
+    /** Каналы плагинов: регистрация как в Bukkit, доставка — через Rust. */
+    private final org.bukkit.plugin.messaging.StandardMessenger messenger =
+            new org.bukkit.plugin.messaging.StandardMessenger();
+    private final org.bukkit.plugin.SimpleServicesManager services = new org.bukkit.plugin.SimpleServicesManager();
+    private final org.bukkit.UnsafeValues unsafe = Stub.of(org.bukkit.UnsafeValues.class, new Unsafe());
+    /** {@code Server.isStopping}: с начала выключения плагинов. */
+    private volatile boolean stopping;
+
     void disablePlugins() {
+        stopping = true;
         plugins.disablePlugins();
+    }
+
+    public org.bukkit.plugin.messaging.Messenger getMessenger() { return messenger; }
+    public org.bukkit.plugin.ServicesManager getServicesManager() { return services; }
+    public boolean isStopping() { return stopping; }
+    public org.bukkit.UnsafeValues getUnsafe() { return unsafe; }
+
+    /** {@code Server.sendPluginMessage}: всем игрокам, кто слушает канал. */
+    public void sendPluginMessage(org.bukkit.plugin.Plugin source, String channel, byte[] message) {
+        org.bukkit.plugin.messaging.StandardMessenger.validatePluginMessage(messenger, source, channel, message);
+        for (PlayerImpl p : List.copyOf(online.values())) {
+            p.sendPluginMessage(source, channel, message);
+        }
+    }
+
+    public java.util.Set<String> getListeningPluginChannels() {
+        java.util.Set<String> out = new java.util.HashSet<>();
+        for (PlayerImpl p : List.copyOf(online.values())) {
+            out.addAll(p.getListeningPluginChannels());
+        }
+        return out;
+    }
+
+    /** Плагин выключен: снять его каналы и сервисы, как {@code SimplePluginManager}. */
+    void pluginDisabled(org.bukkit.plugin.Plugin plugin) {
+        messenger.unregisterIncomingPluginChannel(plugin);
+        messenger.unregisterOutgoingPluginChannel(plugin);
+        services.unregisterAll(plugin);
+    }
+
+    /** {@code UnsafeValues}: только версии, их спрашивают ViaVersion и ProtocolLib. */
+    public static final class Unsafe {
+        public int getProtocolVersion() { return 777; }
+        public int getDataVersion() { return 5023; }
     }
 
     /** Загружает jar из каталога и включает плагины. Возвращает число включённых. */
@@ -199,6 +242,8 @@ final class ChunkwakeServer {
         if (e.joinMessage() != null) {
             announce(e.joinMessage());
         }
+        // `CraftPlayer.sendSupportedChannels`: клиент узнаёт входящие каналы плагинов.
+        p.sendSupportedChannels(messenger.getIncomingChannels());
     }
 
     void quit(UUID id) {

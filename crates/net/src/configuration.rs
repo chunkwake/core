@@ -16,6 +16,7 @@ struct Ids {
     sb_select_known_packs: i32,
     sb_finish: i32,
     sb_client_information: i32,
+    sb_custom_payload: i32,
 }
 
 #[derive(Debug)]
@@ -31,7 +32,8 @@ pub struct ConfigurationPlan {
 pub enum Outcome {
     /// Клиент подтвердил finish_configuration и перешёл в play; настройки —
     /// последний `client_information` (без него — `ClientInformation.createDefault`).
-    Finished(cfg::ClientInfo),
+    /// Настройки клиента и каналы плагинов из `minecraft:register`.
+    Finished(cfg::ClientInfo, Vec<String>),
     /// Клиент отключён с сообщением.
     Rejected,
 }
@@ -77,6 +79,8 @@ impl ConfigurationPlan {
                 sb_select_known_packs: sb("select_known_packs")?,
                 sb_finish: sb("finish_configuration")?,
                 sb_client_information: sb("client_information")?,
+                // Нет в урезанных таблицах тестов: -1 не совпадёт ни с одним ID.
+                sb_custom_payload: sb("custom_payload").unwrap_or(-1),
             },
             pack,
             greeting,
@@ -95,6 +99,7 @@ impl ConfigurationPlan {
         }
         let mut synced = false;
         let mut client = cfg::ClientInfo::DEFAULT;
+        let mut channels = Vec::new();
         loop {
             let packet = conn.read_packet().await?;
             let mut r = Reader::new(&packet);
@@ -116,11 +121,17 @@ impl ConfigurationPlan {
                 }
                 synced = true;
             } else if id == self.ids.sb_finish && synced {
-                return Ok(Outcome::Finished(client));
+                return Ok(Outcome::Finished(client, channels));
             } else if id == self.ids.sb_client_information {
                 client = cfg::read_client_information(&mut r)?;
+            } else if id == self.ids.sb_custom_payload {
+                // Моды объявляют каналы ещё до входа в мир; плагины узнают о них
+                // после `PlayerJoinEvent`, как в Paper.
+                if r.string(32767)? == "minecraft:register" {
+                    channels.extend(crate::payload::register_names(r.remaining()));
+                }
             }
-            // custom_payload (brand), keep_alive и т.п. пока игнорируются.
+            // keep_alive, brand и т.п. пока игнорируются.
         }
     }
 }

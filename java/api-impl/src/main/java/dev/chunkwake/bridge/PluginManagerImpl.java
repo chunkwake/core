@@ -72,6 +72,7 @@ final class PluginManagerImpl {
         setEnabledQuietly(p, false);
         server.scheduler().cancelTasks(p);
         HandlerList.unregisterAll(p);
+        server.pluginDisabled(p);
         updateListenerMask();
     }
 
@@ -179,6 +180,9 @@ final class PluginManagerImpl {
         }
         // Таб-комплит команд плагинов нужен всегда (TabCompleter, а не слушатель).
         mask |= Bridge.listenBit(Bridge.EVENT_TAB_COMPLETE);
+        // Каналы плагинов: `minecraft:register` нужен всегда, иначе игрок
+        // не «слушает» ни один канал и `sendPluginMessage` молчит.
+        mask |= Bridge.listenBit(Bridge.EVENT_PLUGIN_MESSAGE);
         if (has(org.bukkit.event.block.BlockPlaceEvent.getHandlerList())) mask |= Bridge.listenBit(Bridge.EVENT_PLACE);
         if (has(org.bukkit.event.player.PlayerMoveEvent.getHandlerList())) mask |= Bridge.listenBit(Bridge.EVENT_MOVE);
         if (has(org.bukkit.event.player.PlayerInteractEvent.getHandlerList())) {

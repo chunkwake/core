@@ -21,6 +21,7 @@ pub mod minecart;
 pub mod mobs;
 pub mod ops;
 pub mod orbs;
+pub mod payload;
 pub mod pistons;
 pub mod placement;
 mod plants;
@@ -99,6 +100,8 @@ pub struct LoggedIn {
     pub properties: Vec<ProfileProperty>,
     /// Настройки клиента из configuration (обзор, рука, части скина).
     pub client: chunkwake_protocol::configuration::ClientInfo,
+    /// Каналы плагинов, объявленные клиентом в configuration.
+    pub channels: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -321,11 +324,13 @@ impl Server {
         }
         tracing::info!(%name, %uuid, %addr, "player logged in");
         let mut client = chunkwake_protocol::configuration::ClientInfo::DEFAULT;
+        let mut channels = Vec::new();
         if let Some(plan) = &self.config.configuration {
             match plan.run(&mut conn).await? {
-                configuration::Outcome::Finished(info) => {
+                configuration::Outcome::Finished(info, registered) => {
                     tracing::info!(%name, "configuration finished");
                     client = info;
+                    channels = registered;
                 }
                 configuration::Outcome::Rejected => return Ok(None),
             }
@@ -337,6 +342,7 @@ impl Server {
                 addr,
                 properties,
                 client,
+                channels,
             },
             conn,
         )))

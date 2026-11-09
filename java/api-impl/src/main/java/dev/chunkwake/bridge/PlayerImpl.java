@@ -169,6 +169,52 @@ final class PlayerImpl {
         return last;
     }
 
+    /** Каналы, которые клиент объявил через `minecraft:register`. */
+    private final Set<String> channels = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    public void sendPluginMessage(Plugin source, String channel, byte[] message) {
+        org.bukkit.plugin.messaging.StandardMessenger.validatePluginMessage(server.getMessenger(), source, channel,
+                message);
+        // Как `CraftPlayer`: клиенту, не объявившему канал, не шлём.
+        if (channels.contains(channel)) {
+            sendPayload(channel, message);
+        }
+    }
+
+    public Set<String> getListeningPluginChannels() {
+        return Set.copyOf(channels);
+    }
+
+    private void sendPayload(String channel, byte[] message) {
+        control("payload " + channel + " " + java.util.HexFormat.of().formatHex(message));
+    }
+
+    void sendSupportedChannels(Set<String> incoming) {
+        if (!incoming.isEmpty()) {
+            sendPayload("minecraft:register",
+                    String.join(" ", incoming).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+
+    /** Сообщение канала от клиента: регистрация каналов или данные плагину. */
+    void pluginMessage(String channel, byte[] data) {
+        boolean register = channel.equals("minecraft:register");
+        if (register || channel.equals("minecraft:unregister")) {
+            for (String name : new String(data, java.nio.charset.StandardCharsets.UTF_8).split(" ")) {
+                if (name.isEmpty()) {
+                    continue;
+                }
+                if (register ? channels.add(name) : channels.remove(name)) {
+                    server.api.getPluginManager().callEvent(register
+                            ? new org.bukkit.event.player.PlayerRegisterChannelEvent(api, name)
+                            : new org.bukkit.event.player.PlayerUnregisterChannelEvent(api, name));
+                }
+            }
+            return;
+        }
+        server.getMessenger().dispatchIncomingMessage(api, channel, data);
+    }
+
     void control(String line) {
         if (online) {
             Bridge.playerControl(id, line);

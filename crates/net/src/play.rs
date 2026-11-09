@@ -128,6 +128,8 @@ struct Ids {
     sb_attack: i32,
     sb_punch: i32,
     sb_client_information: i32,
+    sb_custom_payload: i32,
+    custom_payload: i32,
     sb_chunk_batch_received: i32,
     sb_interact: i32,
     hurt_animation: i32,
@@ -2577,6 +2579,8 @@ impl PlayPlan {
                 sb_attack: sb("attack")?,
                 sb_punch: sb("punch")?,
                 sb_client_information: sb("client_information")?,
+                sb_custom_payload: sb("custom_payload")?,
+                custom_payload: cb("custom_payload")?,
                 sb_chunk_batch_received: sb("chunk_batch_received")?,
                 sb_interact: sb("interact")?,
                 hurt_animation: cb("hurt_animation")?,
@@ -3856,6 +3860,17 @@ impl PlayPlan {
         let h = self.hooks().filter(|h| h.listens(kind))?;
         let rx = h.event(kind, uuid, arg())?;
         tokio::time::timeout(PLUGIN_TIMEOUT, rx).await.ok()?.ok()
+    }
+
+    /// Сообщение канала плагинам без ожидания ответа.
+    fn plugin_message(&self, uuid: Uuid, channel: &str, data: &[u8]) {
+        if let Some(h) = self.hooks().filter(|h| h.listens(Event::PluginMessage)) {
+            let _ = h.event(
+                Event::PluginMessage,
+                uuid,
+                format!("{channel} {}", crate::payload::to_hex(data)),
+            );
+        }
     }
 
     /// Событие без игрока из синхронного кода (тик): поток ждёт ответа
@@ -5296,6 +5311,10 @@ impl PlayPlan {
         self.hub
             .send_entity(Some(uuid), Vec::new(), Some(EntityEvent::At(me.at())));
         self.publish_live(uuid, &state, game_mode);
+        // Канал команд — до `PlayerJoinEvent`: плагин может сразу слать
+        // игроку сообщения канала (`minecraft:register`), они ждут в очереди.
+        let (control_tx, controls) = tokio::sync::mpsc::unbounded_channel();
+        self.controls.lock().unwrap().insert(uuid, control_tx);
         match self.hooks() {
             Some(h) => h.join(uuid, &me.entry.name),
             None => self.hub.send(
@@ -5307,9 +5326,11 @@ impl PlayPlan {
                 ),
             ),
         }
+        if !player.channels.is_empty() {
+            let names = player.channels.join(" ");
+            self.plugin_message(uuid, "minecraft:register", names.as_bytes());
+        }
 
-        let (control_tx, controls) = tokio::sync::mpsc::unbounded_channel();
-        self.controls.lock().unwrap().insert(uuid, control_tx);
         if self.shutting_down.load(Ordering::Acquire) {
             let _ = self
                 .controls
@@ -10583,6 +10604,10 @@ impl PlayPlan {
                                 self.container_viewers(uuid, &[pos], true);
                             }
                         }
+                        Control::Payload(channel, data) => {
+                            conn.send(&crate::payload::custom_payload(ids.custom_payload, &channel, &data))
+                                .await?;
+                        }
                         Control::CloseWindow => {
                             if let Some(w) = window.as_ref() {
                                 conn.send(&inv::container_close(ids.container_close, w.id)).await?;
@@ -11298,6 +11323,14 @@ impl PlayPlan {
                             }
                         }
                         self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
+                        continue;
+                    }
+                    if id == ids.sb_custom_payload {
+                        let channel = r.string(32767)?.to_owned();
+                        let data = r.remaining();
+                        if data.len() <= crate::payload::MAX_SERVERBOUND {
+                            self.plugin_message(uuid, &channel, data);
+                        }
                         continue;
                     }
                     if id == ids.sb_chunk_batch_received {

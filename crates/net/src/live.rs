@@ -198,6 +198,8 @@ pub enum Control {
     Xp(crate::xp::XpChange),
     /// Открыть окно плагина: `open <id> <заголовок JSON>`.
     OpenPlugin(i32, String),
+    /// Сообщение канала плагина клиенту: `payload <канал> <hex>`.
+    Payload(String, Vec<u8>),
     /// Закрыть открытое окно (`closewin`).
     CloseWindow,
     /// Отключить игрока с причиной (`/kick`).
@@ -298,6 +300,14 @@ impl Control {
                 Control::OpenPlugin(id, title.to_owned())
             }
             "closewin" => Control::CloseWindow,
+            "payload" => {
+                let channel = it.next()?.to_owned();
+                let data = crate::payload::from_hex(it.next().unwrap_or(""))?;
+                if data.len() > crate::payload::MAX_CLIENTBOUND {
+                    return None;
+                }
+                Control::Payload(channel, data)
+            }
             "held" => Control::Selected(it.next()?.parse::<usize>().ok().filter(|&s| s <= 8)?),
             "slot" => {
                 let window = bukkit_to_window(it.next()?.parse().ok()?)?;
@@ -382,6 +392,7 @@ impl Control {
             }
             Control::ContainerChanged(_)
             | Control::OpenPlugin(..)
+            | Control::Payload(..)
             | Control::CloseWindow
             | Control::Kick(_)
             | Control::Transfer(..)
@@ -480,6 +491,9 @@ pub enum Event {
     Cook = 35,
     /// `PrepareGrindstoneEvent`: `x y z\nвход\nвход\nрезультат` → пусто, `e` или `i стопка`.
     PrepareGrindstone = 36,
+    /// Сообщение канала плагина от клиента: `<канал> <hex>`, ответ не нужен.
+    /// `minecraft:register` из configuration приходит этим же событием после входа.
+    PluginMessage = 37,
 }
 
 impl Event {
