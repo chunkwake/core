@@ -78,17 +78,6 @@ pub fn ensure(cache_root: &Path, version: &str) -> Result<PathBuf, DataError> {
             target.display()
         )));
     }
-    // Кэш от прежней сборки (`generated/<версия>` без маркера) не сносим:
-    // в нём могут быть правки датапака. Дописываем только то, чего в нём
-    // нет, — язык консоли, — и оставляем остальное как есть.
-    if is_complete_cache(&target) {
-        let added = ensure_assets(&target)?;
-        if added > 0 {
-            tracing::debug!("vanilla data: added {added} file(s) to the existing cache");
-        }
-        let _ = std::fs::write(target.join(chunkwake_datacache::CACHE_MARKER), b"");
-        return Ok(target);
-    }
     let io = |what: &str, p: &Path, e: std::io::Error| {
         DataError::Io(format!("{what} {}: {e}", p.display()))
     };
@@ -99,9 +88,26 @@ pub fn ensure(cache_root: &Path, version: &str) -> Result<PathBuf, DataError> {
     }
     chunkwake_datacache::unpack_parallel(ARCHIVE, &tmp, unpack_threads())
         .map_err(|e| DataError::Io(format!("unpack embedded data: {e}")))?;
-    // Старое дерево могло остаться от другой сборки: маркера в нём нет.
+    // Дерево не из этого архива — от прежней сборки или выгрузки другой
+    // версией экстрактора. Раньше полный кэш оставался как есть, и новые
+    // поля (атрибуты в `entities.csv`) не доходили до сервера никогда.
+    // Целое дерево уходит в `.<версия>.old` — правки в нём не пропадут;
+    // недописанное просто удаляется.
     if target.exists() {
-        std::fs::remove_dir_all(&target).map_err(|e| io("remove", &target, e))?;
+        if is_complete_cache(&target) {
+            let old = cache_root.join(format!(".{version}.old"));
+            if old.exists() {
+                std::fs::remove_dir_all(&old).map_err(|e| io("remove", &old, e))?;
+            }
+            rename_with_retry(&target, &old).map_err(|e| io("move aside", &target, e))?;
+            tracing::info!(
+                "vanilla data: {} was not unpacked from this build; kept as {}",
+                target.display(),
+                old.display()
+            );
+        } else {
+            std::fs::remove_dir_all(&target).map_err(|e| io("remove", &target, e))?;
+        }
     }
     // Антивирус на Windows держит свежезаписанные файлы ещё мгновение:
     // переименование каталога с ними падает с «отказано в доступе».
@@ -149,53 +155,6 @@ fn is_complete_cache(dir: &Path) -> bool {
         && dir.join("reports/blocks.json").is_file()
         && dir.join("reports/packets.json").is_file()
         && dir.join("data/minecraft/worldgen/noise_settings").is_dir()
-}
-
-/// Дописывает в готовый кэш то, чего в нём нет: `assets/` и `version.json`.
-/// Возвращает число добавленных файлов.
-///
-/// Кэш прежних сборок намеренно не перезаписывается, но версия игры — часть
-/// данных, а не правка датапака: без неё сервер и `doctor` не узнают версию
-/// дерева, поэтому файл достаётся из встроенного архива.
-pub fn ensure_assets(dir: &Path) -> Result<usize, DataError> {
-    let mut count = 0;
-    if !dir.join("version.json").is_file()
-        && let Some(text) = version_json()
-    {
-        std::fs::write(dir.join("version.json"), text).map_err(|e| {
-            DataError::Io(format!("write {}: {e}", dir.join("version.json").display()))
-        })?;
-        count += 1;
-    }
-    if dir.join("assets/minecraft/lang/en_us.json").is_file() || !present() {
-        return Ok(count);
-    }
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(ARCHIVE))
-        .map_err(|e| DataError::Io(format!("read embedded data: {e}")))?;
-    let mut buffer = Vec::new();
-    for index in 0..archive.len() {
-        let mut entry = archive
-            .by_index(index)
-            .map_err(|e| DataError::Io(format!("read embedded data: {e}")))?;
-        let Some(relative) = entry.enclosed_name() else {
-            continue;
-        };
-        if !relative.starts_with("assets") || entry.is_dir() {
-            continue;
-        }
-        let path = dir.join(&relative);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| DataError::Io(format!("create {}: {e}", parent.display())))?;
-        }
-        buffer.clear();
-        std::io::Read::read_to_end(&mut entry, &mut buffer)
-            .map_err(|e| DataError::Io(format!("read embedded data: {e}")))?;
-        std::fs::write(&path, &buffer)
-            .map_err(|e| DataError::Io(format!("write {}: {e}", path.display())))?;
-        count += 1;
-    }
-    Ok(count)
 }
 
 /// Сколько потоков отдать распаковке: по числу ядер, но не больше шестнадцати.
@@ -285,34 +244,44 @@ mod tests {
     /// Готовый кэш от прежней сборки не перезаписывается: в него только
     /// дописывается язык консоли, а свои файлы он сохраняет.
     #[test]
-    fn existing_cache_is_kept_and_gets_assets() {
+    fn stale_cache_is_replaced_and_kept_aside() {
         if !present() {
             return;
         }
         let cache =
-            std::env::temp_dir().join(format!("chunkwake-bundle-existing-{:016x}", fingerprint()));
+            std::env::temp_dir().join(format!("chunkwake-bundle-stale-{:016x}", fingerprint()));
+        let _ = std::fs::remove_dir_all(&cache);
         let dir = cache.join("test");
-        if !dir.join("reports/blocks.json").is_file() {
-            // Раскладываем дерево из архива, затем изображаем кэш прежней сборки.
-            std::fs::create_dir_all(&cache).unwrap();
-            chunkwake_datacache::unpack_parallel(ARCHIVE, &dir, 4).unwrap();
-            let _ = std::fs::remove_dir_all(dir.join("assets"));
-            let _ = std::fs::remove_file(dir.join(MARKER));
-            std::fs::write(dir.join("reports/local-edit.txt"), b"keep me").unwrap();
-        }
-        let ready = ensure(&cache, "test").expect("cache reuse");
+        // Кэш прежней сборки: полное дерево без маркера, `entities.csv`
+        // старого формата и ручная правка.
+        chunkwake_datacache::unpack_parallel(ARCHIVE, &dir, 4).unwrap();
+        let _ = std::fs::remove_file(dir.join(MARKER));
+        std::fs::write(
+            dir.join("reports/entities.csv"),
+            b"minecraft:pig;1;2;0.9;0.9;creature;false\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("reports/local-edit.txt"), b"keep me").unwrap();
+
+        let ready = ensure(&cache, "test").expect("replace stale cache");
         assert_eq!(ready, dir);
-        // Правка на месте.
+        assert!(extracted(&dir));
+        // Данные — из бинаря, а не старые.
+        assert!(!dir.join("reports/local-edit.txt").exists());
+        assert_ne!(
+            std::fs::read(dir.join("reports/entities.csv")).unwrap(),
+            b"minecraft:pig;1;2;0.9;0.9;creature;false\n"
+        );
+        // Старое дерево с правкой отложено.
         assert_eq!(
-            std::fs::read(dir.join("reports/local-edit.txt")).unwrap(),
+            std::fs::read(cache.join(".test.old/reports/local-edit.txt")).unwrap(),
             b"keep me"
         );
-        // Язык консоли дописан из архива.
-        assert!(dir.join("assets/minecraft/lang/en_us.json").is_file());
         // Второй вызов ничего не пишет.
-        let marker = dir.join("assets/minecraft/lang/en_us.json");
-        let before = marker.metadata().unwrap().modified().unwrap();
+        let csv = dir.join("reports/entities.csv");
+        let before = csv.metadata().unwrap().modified().unwrap();
         ensure(&cache, "test").expect("cached");
-        assert_eq!(marker.metadata().unwrap().modified().unwrap(), before);
+        assert_eq!(csv.metadata().unwrap().modified().unwrap(), before);
+        let _ = std::fs::remove_dir_all(&cache);
     }
 }
