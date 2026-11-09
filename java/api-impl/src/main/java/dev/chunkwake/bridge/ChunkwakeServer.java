@@ -110,6 +110,10 @@ final class ChunkwakeServer {
                             + " library(ies), resolving...");
                 }
                 loader.addDeclaredLibraries(logger);
+                // `paper-plugin.yml`: `loader:` добавляет свои библиотеки, `bootstrapper:`
+                // регистрирует команды до создания плагина и создаёт его сам.
+                loader.runPaperLoader(logger);
+                loader.runBootstrapper();
                 JavaPlugin plugin = loader.create();
                 plugins.plugins.put(desc.getName(), plugin);
                 plugin.onLoad();
@@ -472,6 +476,21 @@ final class ChunkwakeServer {
         } catch (Throwable t) {
             logger.log(Level.SEVERE, "lifecycle[" + owner + "]: command registration failed", t);
         }
+    }
+
+    /** {@code DATAPACK_DISCOVERY}: теги паков плагина становятся видны {@code getTag}. */
+    void runLifecycleDatapacks(String owner, LifecycleEventHandler<?> handler) {
+        try {
+            callHandler(handler, new Tags.DiscoveryEvent(new Tags.Registrar(owner)));
+        } catch (Throwable t) {
+            logger.log(Level.SEVERE, "lifecycle[" + owner + "]: datapack discovery failed", t);
+        }
+    }
+
+    /** Теги блоков и предметов: ванильные из Rust плюс теги датапаков плагинов. */
+    public <T extends org.bukkit.Keyed> org.bukkit.Tag<T> getTag(String registry, org.bukkit.NamespacedKey tag,
+            Class<T> clazz) {
+        return Tags.get(registry, tag, clazz);
     }
 
     /** Обработчик типизирован по событию, поэтому зовём через приведение. */

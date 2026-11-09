@@ -214,6 +214,18 @@ public final class Lifecycle {
         if (handler == null) {
             return;
         }
+        // Команды и поиск датапаков (из паков берутся только теги); прочие
+        // события у нас не наступают. Каждому обработчику — своё событие:
+        // раньше все получали регистратор команд и падали на приведении.
+        String name = configuration instanceof Named n ? n.name() : "";
+        if (name.equals("datapack_discovery")) {
+            server.runLifecycleDatapacks(manager.ownerName(), handler);
+            return;
+        }
+        if (!name.equals("commands")) {
+            Bridge.log(3, "lifecycle[" + manager.ownerName() + "]: " + name + " is not dispatched");
+            return;
+        }
         server.runLifecycleCommands(manager.ownerName(), configuration, handler);
     }
 

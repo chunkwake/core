@@ -3645,6 +3645,23 @@ impl PlayPlan {
         if line == "tps" {
             return self.tick_meter_line();
         }
+        // `tag block|item имя`: состав ванильного тега через пробел (вложенные
+        // уже раскрыты), `!` — такого тега нет. `Server.getTag` плагинов.
+        if let Some(rest) = line.strip_prefix("tag ") {
+            let tags = match rest.split_once(' ') {
+                Some(("block", name)) => self.survival.block_tags.get(name),
+                Some(("item", name)) => self.survival.item_tags.get(name),
+                _ => None,
+            };
+            return tags.map_or_else(
+                || "!".into(),
+                |set| {
+                    let mut ids: Vec<&str> = set.iter().map(String::as_str).collect();
+                    ids.sort_unstable();
+                    ids.join(" ")
+                },
+            );
+        }
         if line == "seed" {
             return self.seed.to_string();
         }

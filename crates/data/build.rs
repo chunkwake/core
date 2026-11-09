@@ -141,9 +141,26 @@ fn lang_from_jar(workspace: &Path, root: &Path) -> Vec<(String, Vec<u8>)> {
     }
 }
 
+/// Переменная сборки: из окружения, иначе из `.env` в корне репозитория.
+///
+/// Сервер читает `.env` сам (`dotenvy` в `main`), а Cargo — нет: без этого
+/// `CHUNKWAKE_JAVA` из `.env` работал при запуске и терялся при сборке.
+fn local_var(workspace: &Path, key: &str) -> Option<std::ffi::OsString> {
+    if let Some(v) = std::env::var_os(key) {
+        return Some(v);
+    }
+    let env = workspace.join(".env");
+    println!("cargo:rerun-if-changed={}", env.display());
+    dotenvy::from_path_iter(&env)
+        .ok()?
+        .filter_map(Result::ok)
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.into())
+}
+
 /// `server.jar` для сборки: `CHUNKWAKE_JAR` или обычные места рядом с корнем.
 fn jar_path(workspace: &Path) -> Option<PathBuf> {
-    std::env::var_os("CHUNKWAKE_JAR")
+    local_var(workspace, "CHUNKWAKE_JAR")
         .map(PathBuf::from)
         .filter(|p| p.is_file())
         .or_else(|| {
@@ -175,7 +192,7 @@ fn announce(target: &Path, what: &str) {
 
 /// Дерево данных для упаковки: сначала готовый кэш, потом jar и Java.
 fn locate(workspace: &Path) -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("CHUNKWAKE_DATA") {
+    if let Some(dir) = local_var(workspace, "CHUNKWAKE_DATA") {
         let dir = PathBuf::from(dir);
         if dir.join("reports/packets.json").is_file() {
             return Some(dir);
@@ -196,11 +213,11 @@ fn locate(workspace: &Path) -> Option<PathBuf> {
         }
     }
     let jar = jar_path(workspace)?;
-    let java = std::env::var_os("CHUNKWAKE_JAVA")
+    let java = local_var(workspace, "CHUNKWAKE_JAVA")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             println!(
-                "cargo:warning=CHUNKWAKE_JAVA не задан, беру `java` из PATH; для 26.3 нужна Java 25"
+                "cargo:warning=CHUNKWAKE_JAVA не задан ни в окружении, ни в .env, беру `java` из PATH; для 26.3 нужна Java 25"
             );
             PathBuf::from("java")
         });

@@ -14,4 +14,5 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [build-dependencies]
 chunkwake-datacache = { path = "../datacache" }
+dotenvy = "0.15"
 serde_json = "1"
