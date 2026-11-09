@@ -47,8 +47,10 @@ final class ChunkwakeServer {
     private final Scheduler scheduler = new Scheduler();
     private final io.papermc.paper.threadedregions.scheduler.EntityScheduler entityScheduler =
             EntitySchedulers.of(scheduler);
-    private final PluginManagerImpl plugins = new PluginManagerImpl(this);
+    final PluginManagerImpl plugins = new PluginManagerImpl(this);
     private final SimpleCommandMap commands = new SimpleCommandMap(api, new LinkedHashMap<>());
+    /** ViaVersion из `plugins/` как библиотека (см. {@link ViaLoader}). */
+    private final ViaLoader via = new ViaLoader();
     private final Map<UUID, PlayerImpl> online = new LinkedHashMap<>();
     final ConsoleCommandSender console = Stub.of(ConsoleCommandSender.class, new Console(this));
     final World world = Stub.of(World.class, new WorldImpl());
@@ -80,6 +82,7 @@ final class ChunkwakeServer {
     void disablePlugins() {
         stopping = true;
         plugins.disablePlugins();
+        via.stop(logger);
     }
 
     public org.bukkit.plugin.messaging.Messenger getMessenger() { return messenger; }
@@ -112,7 +115,8 @@ final class ChunkwakeServer {
 
     /** {@code UnsafeValues}: только версии, их спрашивают ViaVersion и ProtocolLib. */
     public static final class Unsafe {
-        public int getProtocolVersion() { return 777; }
+        static final int PROTOCOL = 777;
+        public int getProtocolVersion() { return PROTOCOL; }
         public int getDataVersion() { return 5023; }
     }
 
@@ -126,6 +130,12 @@ final class ChunkwakeServer {
             return 0;
         }
         java.util.Arrays.sort(jars);
+        // Via — библиотекой, до остальных: её загрузчик станет им родителем.
+        jars = via.claim(jars, logger).toArray(File[]::new);
+        via.start(dir, this, logger);
+        if (via.host != null) {
+            commands.register("viaversion", via.command());
+        }
         // Загрузка плагинов останавливает сервер на всё время `onEnable`: тик
         // ещё не пошёл, игроки ждут. Без сообщений это выглядело как зависание,
         // поэтому каждая фаза объявляется заранее — видно, на чём именно стоит.
@@ -143,7 +153,7 @@ final class ChunkwakeServer {
                     logger.warning("Duplicate plugin " + desc.getName() + " in " + jar.getName());
                     continue;
                 }
-                PluginLoader loader = new PluginLoader(this, jar, desc, getClass().getClassLoader());
+                PluginLoader loader = new PluginLoader(this, jar, desc, via.parent(getClass().getClassLoader()));
                 // Библиотеки из `plugin.yml` качаются из сети: на первом запуске
                 // это десятки секунд, и без строки в журнале это не отличить от
                 // зависания.
@@ -450,7 +460,40 @@ final class ChunkwakeServer {
     public CommandMap getCommandMap() { return commands; }
     public ConsoleCommandSender getConsoleSender() { return console; }
     public boolean isPrimaryThread() { return Thread.currentThread() == mainThread; }
-    public int getMaxPlayers() { return 20; }
+    public int getMaxPlayers() { return intProperty("max-players", 20); }
+    public boolean getOnlineMode() { return property("online-mode", "true").equals("true"); }
+    public int getPort() { return intProperty("server-port", 25565); }
+    public String getIp() { return property("server-ip", ""); }
+    public String getMotd() { return property("motd", "A Minecraft Server"); }
+    public int getViewDistance() { return intProperty("view-distance", 10); }
+    public int getSimulationDistance() { return intProperty("simulation-distance", 10); }
+    public boolean getAllowNether() { return property("allow-nether", "true").equals("true"); }
+    public boolean getAllowFlight() { return property("allow-flight", "false").equals("true"); }
+    public boolean isHardcore() { return property("hardcore", "false").equals("true"); }
+    public boolean hasWhitelist() { return property("white-list", "false").equals("true"); }
+
+    /** `server.properties` рабочего каталога (JVM живёт в процессе сервера). */
+    private java.util.Properties properties;
+
+    private synchronized String property(String key, String fallback) {
+        if (properties == null) {
+            properties = new java.util.Properties();
+            try (var in = java.nio.file.Files.newBufferedReader(java.nio.file.Path.of("server.properties"))) {
+                properties.load(in);
+            } catch (java.io.IOException | RuntimeException e) {
+                logger.fine("server.properties: " + e);
+            }
+        }
+        return properties.getProperty(key, fallback).trim();
+    }
+
+    private int intProperty(String key, int fallback) {
+        try {
+            return Integer.parseInt(property(key, String.valueOf(fallback)));
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
     public List<World> getWorlds() { return List.of(world); }
 
     /**

@@ -87,4 +87,8 @@ tasks.register<Sync>("dist") {
         into("libs")
     }
     into(rootProject.layout.projectDirectory.dir("dist"))
+    // Соседние подпроекты кладут сюда своё: `plugins/` и `via/`.
+    preserve {
+        include("plugins/**", "via/**")
+    }
 }

@@ -54,7 +54,12 @@ public final class Bridge {
     static final int DOWN_PLAYER_VERSION = 23;
     static final int ARG_WORLD_DIR = 24;
     static final int ARG_WORLD_DIR_LEN = 25;
-    static final int SLOTS = 26;
+    static final int UP_VIA_OPEN = 26;
+    static final int UP_VIA = 27;
+    static final int UP_VIA_POLL = 28;
+    static final int UP_VIA_CLOSE = 29;
+    static final int DOWN_VIA_EMIT = 30;
+    static final int SLOTS = 31;
 
     /** События с ответом ({@code chunkwake_net::live::Event}). */
     static final int EVENT_DAMAGE = 1, EVENT_DEATH = 2, EVENT_DROP = 3, EVENT_PICKUP = 4, EVENT_GAME_MODE = 5,
@@ -77,6 +82,9 @@ public final class Bridge {
 
     static MemorySegment table;
     static MethodHandle sendMessage, broadcast, log, setCommands, opLevel, setOp, playerState, playerVersion, playerControl, world;
+    static MethodHandle viaEmit;
+    /** ViaVersion как библиотека; {@code null} — Via в `plugins/` нет. */
+    static ViaHost via;
     static ChunkwakeServer server;
 
     private Bridge() {}
@@ -99,6 +107,10 @@ public final class Bridge {
         playerControl = down(linker, DOWN_PLAYER_CONTROL,
                 FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_INT));
         world = down(linker, DOWN_WORLD, FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT));
+        // Результат перевода: Java отдаёт буфер Netty как есть (бывает и в куче),
+        // Rust копирует его в свой коллектор и в JVM не возвращается.
+        viaEmit = linker.downcallHandle(MemorySegment.ofAddress(table.getAtIndex(JAVA_LONG, DOWN_VIA_EMIT)),
+                FunctionDescriptor.ofVoid(JAVA_INT, ADDRESS, JAVA_INT), Linker.Option.critical(true));
         NativeLog.install();
 
         up(linker, UP_ENABLE, "enable", FunctionDescriptor.of(JAVA_INT));
@@ -125,6 +137,68 @@ public final class Bridge {
             table.setAtIndex(JAVA_LONG, slot, stub.address());
         } catch (ReflectiveOperationException e) {
             throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * Ставит слоты перевода протокола: с этого момента Rust шлёт пакеты
+     * клиентов других версий в {@code host}. Зовётся из {@code enable()},
+     * до возврата в Rust — тот читает слоты после старта плагинов.
+     */
+    static void installVia(ViaHost host) {
+        via = host;
+        Linker linker = Linker.nativeLinker();
+        up(linker, UP_VIA_OPEN, "viaOpen", FunctionDescriptor.of(JAVA_LONG, JAVA_INT, ADDRESS, JAVA_INT));
+        up(linker, UP_VIA, "viaTranslate", FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, ADDRESS, JAVA_INT));
+        up(linker, UP_VIA_POLL, "viaPoll", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+        up(linker, UP_VIA_CLOSE, "viaClose", FunctionDescriptor.ofVoid(JAVA_LONG));
+    }
+
+    // Перевод зовётся из потоков соединений Rust (не из потока плагинов).
+
+    static long viaOpen(int protocol, MemorySegment address, int len) {
+        try {
+            return via.open(protocol, string(address, len));
+        } catch (Throwable t) {
+            Logger.getLogger("ViaVersion").log(Level.SEVERE, "opening a translated connection failed", t);
+            return -1;
+        }
+    }
+
+    static int viaTranslate(long id, int direction, MemorySegment packet, int len) {
+        try {
+            byte[] bytes = packet.reinterpret(len).toArray(java.lang.foreign.ValueLayout.JAVA_BYTE);
+            return via.translate(id, direction, bytes) ? 0 : 1;
+        } catch (Throwable t) {
+            Logger.getLogger("ViaVersion").log(Level.SEVERE, "translation failed", t);
+            return 1;
+        }
+    }
+
+    static int viaPoll(long id) {
+        try {
+            return via.poll(id) ? 0 : 1;
+        } catch (Throwable t) {
+            Logger.getLogger("ViaVersion").log(Level.SEVERE, "translation failed", t);
+            return 1;
+        }
+    }
+
+    static void viaClose(long id) {
+        try {
+            via.close(id);
+        } catch (Throwable t) {
+            Logger.getLogger("ViaVersion").log(Level.WARNING, "closing a translated connection failed", t);
+        }
+    }
+
+    /** Пакет-результат в коллектор Rust (только внутри вызова перевода). */
+    static void viaEmit(int direction, java.nio.ByteBuffer data) {
+        MemorySegment segment = MemorySegment.ofBuffer(data);
+        try {
+            viaEmit.invokeExact(direction, segment, (int) segment.byteSize());
+        } catch (Throwable t) {
+            throw new IllegalStateException(t);
         }
     }
 

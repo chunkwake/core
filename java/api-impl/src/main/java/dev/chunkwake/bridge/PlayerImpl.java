@@ -40,6 +40,11 @@ final class PlayerImpl {
 
     public String getName() { return name; }
     public UUID getUniqueId() { return id; }
+    /** Версия протокола клиента: через ViaVersion — его собственная, иначе наша. */
+    public int getProtocolVersion() {
+        int via = Bridge.via != null ? Bridge.via.protocol(id) : -1;
+        return via >= 0 ? via : ChunkwakeServer.Unsafe.PROTOCOL;
+    }
     public Server getServer() { return server.api; }
     public World getWorld() { return server.world; }
     public boolean isOnline() { return online; }

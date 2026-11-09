@@ -4,4 +4,4 @@ plugins {
 }
 
 rootProject.name = "chunkwake-java"
-include("api-impl", "test-plugin")
+include("api-impl", "test-plugin", "via")
