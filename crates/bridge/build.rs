@@ -131,6 +131,11 @@ fn pack(dist: &Path, target: &Path) -> Result<(usize, u64), String> {
             .unwrap_or_default();
         add(&mut zip, &format!("libs/{name}"), &path)?;
     }
+    // Платформа ViaVersion: вне classpath, мост грузит её вместе с jar-ами Via.
+    let via = dist.join("via/chunkwake-via.jar");
+    if via.is_file() {
+        add(&mut zip, "via/chunkwake-via.jar", &via)?;
+    }
     zip.finish().map_err(|e| e.to_string())?;
     let size = std::fs::metadata(target).map(|m| m.len()).unwrap_or(0);
     Ok((jars, size))

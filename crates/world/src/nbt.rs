@@ -21,7 +21,7 @@ pub enum Tag {
 pub type Compound = BTreeMap<String, Tag>;
 
 impl Tag {
-    fn id(&self) -> u8 {
+    pub fn id(&self) -> u8 {
         match self {
             Tag::Byte(_) => 1,
             Tag::Short(_) => 2,
@@ -96,6 +96,13 @@ impl Tag {
 pub fn write_network(c: &Compound) -> Vec<u8> {
     let mut out = vec![10];
     write_compound(&mut out, c);
+    out
+}
+
+/// Любой тег в сетевом NBT: байт типа и тело без имени.
+pub fn write_network_tag(t: &Tag) -> Vec<u8> {
+    let mut out = vec![t.id()];
+    write_payload(&mut out, t);
     out
 }
 

@@ -45,6 +45,7 @@ use chunkwake_protocol::packets::{
     self, Handshake, LoginC2S, NextState, ProfileProperty, StatusC2S,
 };
 use crypto::{ServerKey, StreamCipher};
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -130,9 +131,13 @@ pub struct Server {
     http: reqwest::Client,
     /// Случайный UUID сессии сервера; клиент получает его в login_finished.
     session_id: Uuid,
+    /// Перевод протокола для клиентов других версий (ставит мост с ViaVersion).
+    translator: std::sync::OnceLock<Arc<dyn translate::Translator>>,
 }
 
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// Первая версия протокола со сжатием (1.8).
+const COMPRESSION_SINCE: i32 = 47;
 
 impl Server {
     pub fn new(config: NetConfig) -> Arc<Self> {
@@ -145,7 +150,14 @@ impl Server {
             config,
             online: AtomicUsize::new(0),
             session_id: uuid::Builder::from_random_bytes(rand::random()).into_uuid(),
+            translator: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Ставит переводчик протокола: клиенты других версий пойдут через него.
+    /// Ставится один раз (мост поднимает ViaVersion после старта сети).
+    pub fn set_translator(&self, translator: Arc<dyn translate::Translator>) -> bool {
+        self.translator.set(translator).is_ok()
     }
 
     /// Принимает соединения бесконечно; каждый вошедший игрок передаётся в `on_login`.
@@ -204,8 +216,21 @@ impl Server {
         addr: SocketAddr,
     ) -> Result<Option<(LoggedIn, Connection)>, NetError> {
         let mut conn = Connection::new(stream);
-        let packet = conn.read_packet().await?;
-        let hs = Handshake::decode(&packet)?;
+        let mut packet = conn.read_packet().await?;
+        let mut hs = Handshake::decode(&packet)?;
+        // Клиент другой версии: если переводчик её знает, всё дальнейшее
+        // (и сам handshake — его версию переводчик переписывает на нашу)
+        // идёт через сессию перевода.
+        if hs.protocol_version != self.config.version.protocol
+            && let Some(translator) = self.translator.get()
+            && let Some(id) = translator.open(hs.protocol_version, addr)
+        {
+            tracing::debug!(%addr, protocol = hs.protocol_version, "translated connection");
+            conn.translate_with(translator.clone(), id, hs.protocol_version);
+            conn.receive_translated(&packet)?;
+            packet = conn.read_packet().await?;
+            hs = Handshake::decode(&packet)?;
+        }
         match hs.next_state {
             NextState::Status => {
                 if self.config.enable_status {
@@ -301,7 +326,11 @@ impl Server {
             return Ok(None);
         }
 
-        if self.config.compression_threshold >= 0 {
+        // Клиенты до 1.8 (протокол 47) сжатия не знают: ViaRewind гасит пакет
+        // set_compression, и кадры должны остаться несжатыми.
+        if self.config.compression_threshold >= 0
+            && conn.client_protocol().is_none_or(|p| p >= COMPRESSION_SINCE)
+        {
             conn.send(&packets::set_compression(self.config.compression_threshold))
                 .await?;
             conn.codec.threshold = Some(self.config.compression_threshold as usize);
@@ -420,12 +449,19 @@ pub struct Connection {
     plain: usize,
     /// Сколько байт уже ушло в сокет: по разнице видно объём записи.
     written_bytes: u64,
+    /// Перевод протокола для клиента другой версии.
+    via: Option<translate::Session>,
+    /// Переведённые пакеты от клиента, которые сервер ещё не прочитал.
+    inbox: VecDeque<Vec<u8>>,
 }
 
 /// Неотправленный хвост (причина отключения после `send` и `return`) —
 /// без ожидания, сколько примет сокет.
 impl Drop for Connection {
     fn drop(&mut self) {
+        if let Some(s) = &self.via {
+            s.translator.close(s.id);
+        }
         if self.out.is_empty() {
             return;
         }
@@ -464,7 +500,77 @@ impl Connection {
             out: Vec::new(),
             plain: 0,
             written_bytes: 0,
+            via: None,
+            inbox: VecDeque::new(),
         }
+    }
+
+    /// Дальше пакеты соединения идут через переводчик (сессия `id`).
+    pub fn translate_with(
+        &mut self,
+        translator: Arc<dyn translate::Translator>,
+        id: u64,
+        protocol: i32,
+    ) {
+        self.via = Some(translate::Session {
+            id,
+            translator,
+            protocol,
+        });
+    }
+
+    /// Версия протокола клиента, если соединение переводится.
+    pub fn client_protocol(&self) -> Option<i32> {
+        self.via.as_ref().map(|s| s.protocol)
+    }
+
+    /// Пакет от клиента — через переводчик; результат ждёт в `inbox`
+    /// (серверу) и в буфере записи (ответы переводчика клиенту).
+    pub fn receive_translated(&mut self, packet: &[u8]) -> Result<(), NetError> {
+        self.translate(translate::Dir::Serverbound, Some(packet))
+    }
+
+    /// Один вызов переводчика: `packet` — перевести, `None` — забрать то,
+    /// что переводчик отправил сам.
+    fn translate(&mut self, dir: translate::Dir, packet: Option<&[u8]>) -> Result<(), NetError> {
+        let Some(s) = &self.via else {
+            if let Some(p) = packet {
+                match dir {
+                    translate::Dir::Serverbound => self.inbox.push_back(p.to_vec()),
+                    translate::Dir::Clientbound => self.codec.encode(p, &mut self.out),
+                }
+            }
+            return Ok(());
+        };
+        let (translator, id) = (s.translator.clone(), s.id);
+        let mut out = Vec::new();
+        let result = match packet {
+            Some(p) => translator.translate(id, dir, p, &mut out),
+            None => translator.poll(id, &mut out),
+        };
+        for (dir, p) in out {
+            match dir {
+                translate::Dir::Serverbound => self.inbox.push_back(p),
+                translate::Dir::Clientbound => self.codec.encode(&p, &mut self.out),
+            }
+        }
+        // Причину отключения переводчик положил в буфер: её допишет `Drop`.
+        result.map_err(|reason| {
+            NetError::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                reason,
+            ))
+        })
+    }
+
+    /// Кадры, закодированные для всех (сжатые общим порогом), — по одному
+    /// пакету через переводчик.
+    fn send_frames_translated(&mut self, frames: &[u8]) -> Result<(), NetError> {
+        let mut buf = BytesMut::from(frames);
+        while let Some(packet) = self.codec.decode(&mut buf)? {
+            self.translate(translate::Dir::Clientbound, Some(&packet))?;
+        }
+        Ok(())
     }
 
     /// Включает AES/CFB8 для обоих направлений.
@@ -479,11 +585,20 @@ impl Connection {
     }
 
     pub async fn read_packet(&mut self) -> Result<Vec<u8>, NetError> {
-        // Ответ ждут на отправленное: сначала оно должно уйти.
-        self.flush().await?;
         loop {
-            if let Some(packet) = self.codec.decode(&mut self.buf)? {
+            if let Some(packet) = self.inbox.pop_front() {
                 return Ok(packet);
+            }
+            // Ответ ждут на отправленное: сначала оно должно уйти.
+            self.flush().await?;
+            if let Some(packet) = self.codec.decode(&mut self.buf)? {
+                if self.via.is_none() {
+                    return Ok(packet);
+                }
+                // Переводчик мог съесть пакет (0 на выходе) или ответить
+                // клиенту сам — тогда снова на круг.
+                self.receive_translated(&packet)?;
+                continue;
             }
             let start = self.buf.len();
             let n = tokio::time::timeout(READ_TIMEOUT, self.stream.read_buf(&mut self.buf))
@@ -509,6 +624,10 @@ impl Connection {
         if frames.is_empty() {
             return Ok(());
         }
+        if self.via.is_some() {
+            self.send_frames_translated(frames)?;
+            return self.flush().await;
+        }
         if self.out.is_empty() && self.cipher.is_none() {
             self.stream.write_all(frames).await?;
             self.written_bytes += frames.len() as u64;
@@ -524,6 +643,10 @@ impl Connection {
     /// Пишет кадр, который уже лежит готовым у отправителя: буфер соединения
     /// освобождается до копирования, чтобы не держать две копии пачки.
     pub async fn send_owned_frames(&mut self, mut frame: Vec<u8>) -> Result<(), NetError> {
+        if self.via.is_some() {
+            self.send_frames_translated(&frame)?;
+            return self.flush().await;
+        }
         if self.out.is_empty() && self.cipher.is_none() {
             self.written_bytes += frame.len() as u64;
             return self.stream.write_all(&frame).await.map_err(Into::into);
@@ -536,7 +659,11 @@ impl Connection {
     /// Кадр в буфер; уходит при `flush` (конец итерации сессии, чтение ответа)
     /// или при переполнении — один syscall на пачку, а не на пакет.
     pub async fn send(&mut self, packet: &[u8]) -> Result<(), NetError> {
-        self.codec.encode(packet, &mut self.out);
+        if self.via.is_some() {
+            self.translate(translate::Dir::Clientbound, Some(packet))?;
+        } else {
+            self.codec.encode(packet, &mut self.out);
+        }
         if self.out.len() >= OUT_LIMIT {
             self.flush().await?;
         }
@@ -545,6 +672,10 @@ impl Connection {
 
     /// Шифрует буфер на месте и пишет его целиком.
     pub async fn flush(&mut self) -> Result<(), NetError> {
+        if self.via.is_some() {
+            // Что переводчик отправил сам (по таймеру) — с этой же записью.
+            self.translate(translate::Dir::Clientbound, None)?;
+        }
         if self.out.is_empty() {
             return Ok(());
         }
@@ -568,3 +699,4 @@ pub mod environment;
 pub mod fire;
 pub mod tnt;
 pub mod transform;
+pub mod translate;

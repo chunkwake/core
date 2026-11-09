@@ -70,6 +70,18 @@ pub fn registry_data(id: i32, registry: &str, entries: &[String]) -> Vec<u8> {
     w.buf
 }
 
+/// `registry_data` с данными записей (сетевой NBT): для клиента без общего
+/// с сервером пака, как ванила шлёт клиентам других версий и модам.
+pub fn registry_data_full(id: i32, registry: &str, entries: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).string(registry).var_int(entries.len() as i32);
+    for (e, nbt) in entries {
+        w.string(e).bool(true);
+        w.buf.extend_from_slice(nbt);
+    }
+    w.buf
+}
+
 /// `update_tags`: реестр → (тег → сетевые ID записей).
 pub fn update_tags<'a>(
     id: i32,

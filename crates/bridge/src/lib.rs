@@ -10,6 +10,7 @@
 
 mod api_bundle;
 mod jvm;
+mod via;
 
 /// Ограничение кучи встроенной JVM для профиля памяти сервера.
 pub fn set_jvm_max_heap(option: Option<&'static str>) {
@@ -57,8 +58,13 @@ enum Slot {
     DownPlayerVersion = 23,
     ArgWorldDir = 24,
     ArgWorldDirLen = 25,
+    UpViaOpen = 26,
+    UpVia = 27,
+    UpViaPoll = 28,
+    UpViaClose = 29,
+    DownViaEmit = 30,
 }
-const SLOTS: usize = 26;
+const SLOTS: usize = 31;
 
 /// Буфер ответа на событие (смерть с полным инвентарём укладывается с запасом).
 const EVENT_REPLY_CAP: usize = 64 << 10;
@@ -115,6 +121,11 @@ pub fn find_api_dir(api_dir: &Path) -> Option<PathBuf> {
 }
 
 impl Bridge {
+    /// ViaVersion из `plugins/` как переводчик протокола; `None` — Via нет.
+    pub fn translator(&self) -> Option<Arc<dyn chunkwake_net::translate::Translator>> {
+        via::ViaTranslator::new(self.table).map(|t| Arc::new(t) as Arc<dyn chunkwake_net::translate::Translator>)
+    }
+
     /// Завершает плагины на их JVM-потоке и дожидается `onDisable`.
     pub fn shutdown(&self) -> Result<std::sync::mpsc::Receiver<bool>, String> {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -178,6 +189,7 @@ impl Bridge {
             player_version as *const () as u64,
         );
         set(table, Slot::DownWorld, world as *const () as u64);
+        set(table, Slot::DownViaEmit, via::emit as *const () as u64);
         let dir: &'static str =
             Box::leak(plugins_dir.to_string_lossy().into_owned().into_boxed_str());
         set(table, Slot::ArgPluginsDir, dir.as_ptr() as u64);

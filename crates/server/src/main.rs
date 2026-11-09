@@ -219,7 +219,8 @@ async fn serve(dir: &Path) -> Result<(), String> {
     let registries = &boot.registries;
     let plan =
         chunkwake_net::configuration::ConfigurationPlan::build(packets, registries, &version.name)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .with_data_dir(&data_dir);
     tracing::info!(
         "prepared {} synchronized registries and tags for {} registries ({} KiB)",
         registries.synchronized.len(),
@@ -312,6 +313,10 @@ async fn serve(dir: &Path) -> Result<(), String> {
         move |name, uuid, addr| gate.admission_denied(name, uuid, addr),
     )));
     let server = Server::new(net);
+    if let Some(translator) = bridge.as_ref().and_then(|b| b.translator()) {
+        server.set_translator(translator);
+        tracing::info!("ViaVersion: clients of other versions are translated");
+    }
     let world = play.clone();
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let (session_tx, mut session_rx) = tokio::sync::mpsc::unbounded_channel();

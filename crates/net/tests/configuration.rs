@@ -50,6 +50,12 @@ const INFO: ClientInfo = ClientInfo {
 };
 
 async fn start() -> (std::net::SocketAddr, mpsc::UnboundedReceiver<LoggedIn>) {
+    start_with(plan()).await
+}
+
+async fn start_with(
+    plan: ConfigurationPlan,
+) -> (std::net::SocketAddr, mpsc::UnboundedReceiver<LoggedIn>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = Server::new(NetConfig {
@@ -63,7 +69,7 @@ async fn start() -> (std::net::SocketAddr, mpsc::UnboundedReceiver<LoggedIn>) {
         online_mode: false,
         enable_status: true,
         session_server: String::new(),
-        configuration: Some(Arc::new(plan())),
+        configuration: Some(Arc::new(plan)),
         admit: None,
     });
     let (tx, rx) = mpsc::unbounded_channel();
@@ -174,4 +180,69 @@ async fn client_without_vanilla_pack_is_disconnected() {
     drop(c);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(players.try_recv().is_err());
+}
+
+/// Клиент без пака нашей версии (другая версия через ViaVersion): реестры
+/// с данными записей из JSON датапака, как у ванилы.
+#[tokio::test]
+async fn client_without_vanilla_pack_gets_full_registry_data() {
+    let dir = std::env::temp_dir().join(format!("chunkwake-cfg-{}", std::process::id()));
+    let types = dir.join("data/minecraft/dimension_type");
+    std::fs::create_dir_all(&types).unwrap();
+    std::fs::write(
+        types.join("overworld.json"),
+        r##"{"height": 384, "coordinate_scale": 1.0, "has_skylight": true, "infiniburn": "#minecraft:infiniburn_overworld", "mixed": [1, 0.5]}"##,
+    )
+    .unwrap();
+    std::fs::write(types.join("the_end.json"), r#"{"height": 256}"#).unwrap();
+    let (addr, mut players) = start_with(plan().with_data_dir(&dir)).await;
+    let mut c = login(addr).await;
+    expect_greeting(&mut c).await;
+    c.send(&select_known_packs(SB_SELECT_KNOWN_PACKS, &[KnownPack::vanilla("1.21.1")]))
+        .await
+        .unwrap();
+
+    let p = c.read_packet().await.unwrap();
+    let mut r = Reader::new(&p);
+    assert_eq!(r.var_int().unwrap(), CB_REGISTRY_DATA);
+    assert_eq!(r.string(256).unwrap(), "minecraft:dimension_type");
+    assert_eq!(r.var_int().unwrap(), 2);
+    assert_eq!(r.string(256).unwrap(), "minecraft:overworld");
+    assert!(r.bool().unwrap(), "entry carries its data");
+    // Сетевой NBT: compound без имени, ключи по алфавиту.
+    let mut nbt = Vec::new();
+    nbt.extend_from_slice(r.remaining());
+    let mut expected = vec![10u8];
+    let push_key = |e: &mut Vec<u8>, tag: u8, name: &str| {
+        e.push(tag);
+        e.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        e.extend_from_slice(name.as_bytes());
+    };
+    push_key(&mut expected, 6, "coordinate_scale");
+    expected.extend_from_slice(&1.0f64.to_be_bytes());
+    push_key(&mut expected, 1, "has_skylight");
+    expected.push(1);
+    push_key(&mut expected, 3, "height");
+    expected.extend_from_slice(&384i32.to_be_bytes());
+    push_key(&mut expected, 8, "infiniburn");
+    let tag = "#minecraft:infiniburn_overworld";
+    expected.extend_from_slice(&(tag.len() as u16).to_be_bytes());
+    expected.extend_from_slice(tag.as_bytes());
+    // Числа вперемешку — список Double.
+    push_key(&mut expected, 9, "mixed");
+    expected.push(6);
+    expected.extend_from_slice(&2i32.to_be_bytes());
+    expected.extend_from_slice(&1.0f64.to_be_bytes());
+    expected.extend_from_slice(&0.5f64.to_be_bytes());
+    expected.push(0);
+    assert!(nbt.starts_with(&expected), "{nbt:?}");
+
+    let p = c.read_packet().await.unwrap();
+    assert_eq!(Reader::new(&p).var_int().unwrap(), CB_UPDATE_TAGS);
+    let p = c.read_packet().await.unwrap();
+    assert_eq!(Reader::new(&p).var_int().unwrap(), CB_FINISH);
+    c.send(&[SB_FINISH as u8]).await.unwrap();
+    c.flush().await.unwrap();
+    assert_eq!(players.recv().await.unwrap().name, "Steve");
+    let _ = std::fs::remove_dir_all(&dir);
 }
