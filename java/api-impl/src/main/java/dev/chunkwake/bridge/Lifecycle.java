@@ -31,6 +31,12 @@ import java.util.function.Supplier;
  * {@code plugin.yml}.
  */
 public final class Lifecycle {
+    /**
+     * Плагин зарегистрировал обработчик жизненного цикла: как в Paper, после
+     * этого `/reload` плагинов невозможен.
+     */
+    static volatile boolean registered;
+
 
     private Lifecycle() {}
 
@@ -257,6 +263,7 @@ public final class Lifecycle {
     @Override
     public void registerEventHandler(LifecycleEventHandlerConfiguration<? super O> configuration) {
         Bridge.log(3, "lifecycle[" + owner.get() + "]: registered " + configuration);
+        Lifecycle.registered = true;
         Lifecycle.dispatch(this, configuration);
     }
 

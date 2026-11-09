@@ -1,0 +1,72 @@
+//! Команды оператора (`/plugins`, `/version`, `/mspt`, `/help`): шлёт команды
+//! и печатает текст ответов из `system_chat` (строки NBT подряд), а также
+//! какие из имён `CHECK` есть в дереве `commands` у этого игрока.
+//!
+//! `opcmd_probe <addr> <packets.json> <name> <cmd>...`; `CHECK=mspt,plugins`.
+use chunkwake_bots::{Client, Event, Ids};
+use chunkwake_data::packets::{Direction, PacketTable, State};
+use chunkwake_protocol::Writer;
+use std::time::Duration;
+
+/// Печатаемые UTF-8 строки пакета: грубо, но для глаз хватает.
+fn strings(body: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(body);
+    text.split(|c: char| c.is_control() || c == '\u{FFFD}')
+        .filter(|s| s.chars().count() >= 2)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Читает события `ms` миллисекунд: захваченные пакеты копятся в клиенте.
+async fn wait(c: &mut Client, ms: u64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(ms);
+    while let Ok(Ok(_)) = tokio::time::timeout_at(deadline, c.next_event()).await {}
+}
+
+#[tokio::main]
+async fn main() {
+    let a: Vec<String> = std::env::args().collect();
+    let table = PacketTable::load(a[2].as_ref()).unwrap();
+    let ids = Ids::load(&table).unwrap();
+    let id = |d, n| table.id(State::Play, d, n).unwrap();
+    let cmd = id(Direction::Serverbound, "chat_command");
+    let chat = id(Direction::Clientbound, "system_chat");
+    let tree = id(Direction::Clientbound, "commands");
+    let mut c = Client::connect(&a[1], &a[3], ids, 777, "26.3").await.unwrap();
+    c.capture_also.push(chat);
+    c.capture_also.push(tree);
+    loop {
+        if let Event::Position(_) = c.next_event().await.unwrap() {
+            break;
+        }
+    }
+    let check: Vec<String> = std::env::var("CHECK")
+        .unwrap_or_default()
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let drain = |c: &mut Client| {
+        for (pid, body) in std::mem::take(&mut c.captured_by) {
+            if pid == tree {
+                let names = strings(&body);
+                for n in &check {
+                    println!("  tree has {n}: {}", names.iter().any(|s| s.ends_with(n.as_str())));
+                }
+            } else {
+                println!("  | {}", strings(&body).join(""));
+            }
+        }
+    };
+    wait(&mut c, 1500).await;
+    drain(&mut c);
+    for s in &a[4..] {
+        println!("> /{s}");
+        let mut w = Writer::new();
+        w.var_int(cmd).string(s);
+        c.send_raw(&w.buf).await.unwrap();
+        let gap = std::env::var("GAP_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500);
+        wait(&mut c, gap).await;
+        drain(&mut c);
+    }
+}

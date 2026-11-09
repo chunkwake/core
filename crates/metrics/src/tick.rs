@@ -227,6 +227,20 @@ impl TickStats {
         }
     }
 
+    /// Работа тика за последние `ticks`: (среднее, минимум, максимум) в мс,
+    /// `None` — замеров нет. Числа Paper `/mspt` (avg/min/max).
+    pub fn mspt_over(&self, ticks: usize) -> Option<(f64, f64, f64)> {
+        let skip = self.samples.len().saturating_sub(ticks);
+        let (mut sum, mut min, mut max, mut n) = (0.0, f64::INFINITY, 0.0f64, 0usize);
+        for s in self.samples.iter().skip(skip) {
+            sum += s.work;
+            min = min.min(s.work);
+            max = max.max(s.work);
+            n += 1;
+        }
+        (n > 0).then(|| (sum / n as f64, min, max))
+    }
+
     /// Снимок окна `ticks` назад; `None` — замеров нет.
     pub fn window(&self, ticks: usize) -> Option<WindowStats> {
         let skip = self.samples.len().saturating_sub(ticks);
@@ -336,6 +350,19 @@ mod tests {
         assert!((window.tps - 20.0).abs() < 1e-9);
         assert!((window.mspt_avg - 5.0).abs() < 1e-9);
         assert_eq!(stats.line(), "TPS: 20.0 MSPT: 5.0 interval: 50.0 ms");
+    }
+
+    /// `/mspt`: окно берёт только последние тики.
+    #[test]
+    fn mspt_window_avg_min_max() {
+        let mut stats = TickStats::new();
+        assert!(stats.mspt_over(100).is_none());
+        stats.record(30.0, 50.0);
+        for work in [2.0, 4.0, 6.0] {
+            stats.record(work, 50.0);
+        }
+        assert_eq!(stats.mspt_over(3), Some((4.0, 2.0, 6.0)));
+        assert_eq!(stats.mspt_over(100), Some((10.5, 2.0, 30.0)));
     }
 
     /// Дрожание таймера ОС не считается опозданием: интервалы чередуются

@@ -49,6 +49,12 @@ final class ChunkwakeServer {
             EntitySchedulers.of(scheduler);
     final PluginManagerImpl plugins = new PluginManagerImpl(this);
     private final SimpleCommandMap commands = new SimpleCommandMap(api, new LinkedHashMap<>());
+    /** `/help`: темы по командам, пересобираются после загрузки плагинов. */
+    private final HelpMapImpl help = new HelpMapImpl();
+    /** Каталог плагинов: его заново читает `/reload`. */
+    private File pluginsDir;
+    /** Права `bukkit.*` зарегистрированы. */
+    private boolean corePermissions;
     /** ViaVersion из `plugins/` как библиотека (см. {@link ViaLoader}). */
     private final ViaLoader via = new ViaLoader();
     /** Загрузчики плагинов, которые видят классы друг друга. */
@@ -124,7 +130,10 @@ final class ChunkwakeServer {
 
     /** Загружает jar из каталога и включает плагины. Возвращает число включённых. */
     int loadAndEnable(File dir) {
-        Bukkit.setServer(api);
+        pluginsDir = dir;
+        if (Bukkit.getServer() == null) {
+            Bukkit.setServer(api);
+        }
         silenceTimings();
         dir.mkdirs();
         File[] jars = dir.listFiles((d, n) -> n.endsWith(".jar"));
@@ -138,6 +147,7 @@ final class ChunkwakeServer {
         if (via.host != null) {
             commands.register("viaversion", via.command());
         }
+        registerBuiltins();
         // Загрузка плагинов останавливает сервер на всё время `onEnable`: тик
         // ещё не пошёл, игроки ждут. Без сообщений это выглядело как зависание,
         // поэтому каждая фаза объявляется заранее — видно, на чём именно стоит.
@@ -234,10 +244,87 @@ final class ChunkwakeServer {
             logger.info("plugins: " + plugin.getName()
                     + (plugin.isEnabled() ? " enabled" : " failed") + " in " + ms(one) + " ms");
         }
+        // `CraftServer.enablePlugins(POSTWORLD)`: `/help` — запасной, после плагинов.
+        commands.setFallbackCommands();
+        help.rebuild(commands.getCommands());
         publishCommands();
         logger.info("plugins: " + enabled + " of " + loaded.size() + " enabled in "
                 + ms(started) + " ms");
+        plugins.callEvent(new org.bukkit.event.server.ServerLoadEvent(loadType));
         return enabled;
+    }
+
+    /** Тип для {@code ServerLoadEvent}: запуск или `/reload`. */
+    private org.bukkit.event.server.ServerLoadEvent.LoadType loadType =
+            org.bukkit.event.server.ServerLoadEvent.LoadType.STARTUP;
+
+    /**
+     * Права {@code bukkit.command.*} и команды, которые Paper регистрирует сам
+     * ({@code PaperCommands}): {@code /plugins}, {@code /version}, {@code /mspt}.
+     * {@code /reload} и {@code /timings} добавляет конструктор {@code SimpleCommandMap}.
+     */
+    private void registerBuiltins() {
+        if (!corePermissions) {
+            corePermissions = true;
+            org.bukkit.util.permissions.DefaultPermissions.registerCorePermissions();
+            // Paper: `/mspt` только для операторов.
+            if (plugins.getPermission("bukkit.command.mspt") == null) {
+                plugins.addPermission(new org.bukkit.permissions.Permission("bukkit.command.mspt",
+                        "Allows the user to view server tick times", org.bukkit.permissions.PermissionDefault.OP));
+            }
+        }
+        for (Command c : PaperCommands.all(() -> Bridge.world("mspt"))) {
+            commands.register("bukkit", c);
+        }
+    }
+
+    /**
+     * {@code Bukkit.reload}: выключить плагины, закрыть их загрузчики и загрузить
+     * каталог заново. Via остаётся: она поднята библиотекой, а не плагином.
+     */
+    public void reload() {
+        if (Lifecycle.registered) {
+            throw new IllegalStateException(
+                    "A lifecycle event handler has been registered which makes reloading plugins not possible");
+        }
+        List<org.bukkit.plugin.Plugin> own = new ArrayList<>();
+        for (org.bukkit.plugin.Plugin p : plugins.plugins.values()) {
+            if (p instanceof JavaPlugin) {
+                own.add(p);
+            }
+        }
+        java.util.Collections.reverse(own);
+        for (org.bukkit.plugin.Plugin p : own) {
+            plugins.disablePlugin(p);
+        }
+        for (org.bukkit.plugin.Plugin p : own) {
+            plugins.plugins.remove(p.getName());
+            if (p.getClass().getClassLoader() instanceof PluginLoader loader) {
+                classGroup.remove(loader);
+                try {
+                    loader.close();
+                } catch (java.io.IOException e) {
+                    logger.log(Level.WARNING, "Could not close the class loader of " + p.getName(), e);
+                }
+            }
+        }
+        plugins.clearPermissions();
+        corePermissions = false;
+        commands.clearCommands();
+        help.clear();
+        loadType = org.bukkit.event.server.ServerLoadEvent.LoadType.RELOAD;
+        loadAndEnable(pluginsDir);
+    }
+
+    /** `/reload permissions`: файла `permissions.yml` у нас нет — перечитывать нечего. */
+    public void reloadPermissions() {}
+
+    /** `/reload commands`: алиасов из `commands.yml` у нас нет. */
+    public boolean reloadCommandAliases() { return true; }
+
+    /** Датапаки при `/reload` не перезагружаются. */
+    public void reloadData() {
+        logger.info("Data packs are not reloaded by Chunkwake; restart the server to apply changes");
     }
 
     private static long ms(long from) {
@@ -255,23 +342,45 @@ final class ChunkwakeServer {
         }
     }
 
-    /** Имена команд для дерева `commands` у клиента (через '\n'). */
+    /**
+     * Метки команд для дерева `commands` у клиента: строки `метка\tdefault`
+     * через '\n'. Метки — все ключи {@code CommandMap}, с `bukkit:pl` и т. п., как
+     * у Paper; `default` — кому команда видна (см. {@link #access}).
+     */
     private void publishCommands() {
         StringBuilder sb = new StringBuilder();
-        for (Command c : commands.getCommands()) {
-            for (String n : names(c)) {
-                if (!sb.isEmpty()) sb.append('\n');
-                sb.append(n);
-            }
+        for (var e : commands.getKnownCommands().entrySet()) {
+            if (!sb.isEmpty()) sb.append('\n');
+            sb.append(e.getKey()).append('\t').append(access(e.getValue()));
         }
         Bridge.setCommands(sb.toString());
     }
 
-    private static List<String> names(Command c) {
-        List<String> out = new ArrayList<>();
-        out.add(c.getName());
-        out.addAll(c.getAliases());
-        return out;
+    /**
+     * Кому видна команда без выдачи прав плагином: по default её прав, как
+     * {@code testPermissionSilent} у {@code PermissibleBase}. Незарегистрированное
+     * право — {@code Permission.DEFAULT_PERMISSION} (операторы). Права через `;` —
+     * хватает любого.
+     */
+    String access(Command c) {
+        String perm = c.getPermission();
+        if (perm == null || perm.isEmpty()) {
+            return "true";
+        }
+        boolean ops = false;
+        boolean notOps = false;
+        for (String name : perm.split(";")) {
+            org.bukkit.permissions.Permission p = plugins.getPermission(name);
+            switch (p == null ? org.bukkit.permissions.Permission.DEFAULT_PERMISSION : p.getDefault()) {
+                case TRUE -> {
+                    return "true";
+                }
+                case OP -> ops = true;
+                case NOT_OP -> notOps = true;
+                case FALSE -> {}
+            }
+        }
+        return ops && notOps ? "true" : ops ? "op" : notOps ? "notop" : "false";
     }
 
     // --- вызовы из Rust ---
@@ -486,6 +595,28 @@ final class ChunkwakeServer {
     public String getVersion() { return VERSION + "-chunkwake (MC: " + VERSION + ")"; }
     public String getBukkitVersion() { return VERSION + "-R0.1-SNAPSHOT"; }
     public String getMinecraftVersion() { return VERSION; }
+    /** TPS за 1, 5 и 15 минут: у Rust одно окно, оно и отдаётся трижды. */
+    public double[] getTPS() {
+        double tps = tickNumber("TPS:", 20.0);
+        return new double[] {tps, tps, tps};
+    }
+    public double getAverageTickTime() { return tickNumber("MSPT:", 0.0); }
+    public org.bukkit.help.HelpMap getHelpMap() { return help; }
+
+    /** Число после метки в строке Rust `TPS: … MSPT: … interval: …`. */
+    private static double tickNumber(String label, double fallback) {
+        String[] f = Bridge.world("tps").trim().split(" ");
+        for (int i = 0; i + 1 < f.length; i++) {
+            if (f[i].equals(label)) {
+                try {
+                    return Double.parseDouble(f[i + 1]);
+                } catch (NumberFormatException e) {
+                    return fallback;
+                }
+            }
+        }
+        return fallback;
+    }
     public Logger getLogger() { return logger; }
     public PluginManager getPluginManager() { return plugins.api; }
     public BukkitScheduler getScheduler() { return scheduler.api; }
@@ -650,7 +781,8 @@ final class ChunkwakeServer {
             com.mojang.brigadier.tree.LiteralCommandNode<io.papermc.paper.command.brigadier.CommandSourceStack> node,
             PluginMeta owner) {
         String usage = node.getUsageText().isEmpty() ? "/" + name : node.getUsageText();
-        var command = new LifecycleCommands.BrigadierCommand(name, "Registered by " + fallbackPrefix, usage, node);
+        var command = new LifecycleCommands.BrigadierCommand(name, "Registered by " + fallbackPrefix, usage, node,
+                owner != null ? owner.getName() : fallbackPrefix);
         if (commands.register(fallbackPrefix, command)) {
             Bridge.log(3, "lifecycle: /" + name + " from " + fallbackPrefix);
         }

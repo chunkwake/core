@@ -51,8 +51,11 @@ final class ViaLoader {
                 if (NAMES.contains(desc.getName())) {
                     name = desc.getName();
                     if (jars.containsKey(name)) {
-                        logger.warning("Duplicate plugin " + name + " in " + jar.getName() + ", keeping "
-                                + jars.get(name).getName());
+                        // Тот же jar при `/reload` — Via уже поднята библиотекой.
+                        if (!jars.get(name).equals(jar)) {
+                            logger.warning("Duplicate plugin " + name + " in " + jar.getName() + ", keeping "
+                                    + jars.get(name).getName());
+                        }
                         continue;
                     }
                     jars.put(name, jar);
@@ -78,7 +81,7 @@ final class ViaLoader {
      * они без неё не работают, как и на Paper.
      */
     void start(File pluginsDir, ChunkwakeServer server, Logger logger) {
-        if (jars.isEmpty()) {
+        if (jars.isEmpty() || loader != null) {
             return;
         }
         if (!jars.containsKey("ViaVersion")) {

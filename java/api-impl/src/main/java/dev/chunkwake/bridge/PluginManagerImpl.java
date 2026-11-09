@@ -302,6 +302,11 @@ final class PluginManagerImpl {
         permissions.remove(name.toLowerCase(java.util.Locale.ROOT));
     }
 
+    /** `/reload`: права плагинов регистрируются заново. */
+    void clearPermissions() {
+        permissions.clear();
+    }
+
     public Set<Permission> getPermissions() {
         return Set.copyOf(permissions.values());
     }

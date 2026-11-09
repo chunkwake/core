@@ -843,7 +843,7 @@ impl PlayPlan {
     }
 
     /// Команды плагинов для дерева и подсказок.
-    pub(crate) fn plugin_commands(&self) -> Vec<String> {
+    pub(crate) fn plugin_commands(&self) -> Vec<crate::play::commands::PluginCommand> {
         self.plugin_commands.lock().unwrap().clone()
     }
 

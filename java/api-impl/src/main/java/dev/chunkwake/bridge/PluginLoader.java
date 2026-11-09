@@ -52,7 +52,11 @@ final class PluginLoader extends URLClassLoader implements ConfiguredPluginClass
         Map<String, Object> paper = paperYaml(file);
         this.paperLoader = paper.get("loader") instanceof String s ? s : null;
         this.bootstrapper = paper.get("bootstrapper") instanceof String s ? s : null;
+        this.paperPlugin = !paper.isEmpty();
     }
+
+    /** Есть `paper-plugin.yml`: в `/plugins` такой плагин — в «Paper Plugins». */
+    final boolean paperPlugin;
 
     /**
      * Добавляет в classpath плагина библиотеки из `libraries:` его `plugin.yml`.

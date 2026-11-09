@@ -212,7 +212,87 @@ impl<'a> Context<'a> {
 /// `None` — команда не наша: сессия отвечает «Unknown command» и отдаёт
 /// строку плагинам.
 pub fn execute(plan: &PlayPlan, source: &Source, line: &str) -> Option<Outcome> {
+    let line = vanilla_line(line, &plan.plugin_commands())?;
     execute_with(plan, source, line, None)
+}
+
+/// Строка для ванильного диспетчера или `None` — она для плагинов.
+///
+/// Как в Paper: команда плагина с тем же именем заменяет ванильную, а
+/// ванильная остаётся доступной как `minecraft:<имя>`.
+pub fn vanilla_line<'a>(line: &'a str, plugins: &[PluginCommand]) -> Option<&'a str> {
+    if let Some(rest) = line.strip_prefix("minecraft:") {
+        return Some(rest);
+    }
+    let label = line.split(' ').next().unwrap_or_default();
+    if plugins.iter().any(|c| c.name.eq_ignore_ascii_case(label)) {
+        return None;
+    }
+    Some(line)
+}
+
+/// Команда плагина в дереве клиента: имя и кому она видна.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginCommand {
+    pub name: String,
+    pub access: PluginAccess,
+}
+
+/// Кому видна команда плагина: default её права в Bukkit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PluginAccess {
+    Everyone,
+    Ops,
+    NotOps,
+    Nobody,
+}
+
+impl PluginCommand {
+    /// Строка моста: `имя` или `имя\tdefault` (`true`, `op`, `notop`, `false`).
+    pub fn parse(line: &str) -> Option<Self> {
+        let (name, access) = line.split_once('\t').unwrap_or((line, "true"));
+        if name.is_empty() {
+            return None;
+        }
+        let access = match access {
+            "op" => PluginAccess::Ops,
+            "notop" => PluginAccess::NotOps,
+            "false" => PluginAccess::Nobody,
+            _ => PluginAccess::Everyone,
+        };
+        Some(Self {
+            name: name.to_owned(),
+            access,
+        })
+    }
+
+    /// Видна ли игроку с этим уровнем прав: оператор — уровень выше 0, как
+    /// `Player.isOp` моста.
+    pub fn visible(&self, level: i32) -> bool {
+        match self.access {
+            PluginAccess::Everyone => true,
+            PluginAccess::Ops => level > 0,
+            PluginAccess::NotOps => level <= 0,
+            PluginAccess::Nobody => false,
+        }
+    }
+}
+
+/// Корни ванильного дерева без перекрытых плагинами, и без алиасов, которые
+/// ведут в перекрытые: иначе у клиента `redirect` в никуда.
+fn vanilla_roots(level: i32, plugins: &[PluginCommand]) -> Vec<chunkwake_protocol::text::Node> {
+    use chunkwake_protocol::text::Node;
+    let shadowed = |name: &str| plugins.iter().any(|c| c.name.eq_ignore_ascii_case(name));
+    registry::tree()
+        .nodes_for(level)
+        .into_iter()
+        .filter(|node| match node {
+            Node::Literal { name, redirect, .. } => {
+                !shadowed(name) && !redirect.as_deref().is_some_and(shadowed)
+            }
+            _ => true,
+        })
+        .collect()
 }
 
 /// То же, но с точкой выполнения цепочки `/execute`.
@@ -247,10 +327,11 @@ pub fn execute_with(
 
 /// Пакет `commands` для уровня прав: встроенные и команды плагинов.
 pub fn commands_packet(plan: &PlayPlan, level: i32) -> Vec<u8> {
-    let mut roots = registry::tree().nodes_for(level);
-    roots.extend(plan.plugin_commands().iter().map(|n| {
+    let plugins = plan.plugin_commands();
+    let mut roots = vanilla_roots(level, &plugins);
+    roots.extend(plugins.iter().filter(|c| c.visible(level)).map(|c| {
         chunkwake_protocol::text::Node::literal(
-            n,
+            &c.name,
             true,
             vec![chunkwake_protocol::text::Node::argument(
                 "args",
@@ -285,9 +366,9 @@ pub fn suggestions(plan: &PlayPlan, line: &str, level: i32) -> Vec<String> {
     if !line.contains(char::is_whitespace) {
         out.extend(
             plan.plugin_commands()
-                .iter()
-                .filter(|n| n.starts_with(line))
-                .cloned(),
+                .into_iter()
+                .filter(|c| c.visible(level) && c.name.starts_with(line))
+                .map(|c| c.name),
         );
         out.sort();
         out.dedup();
@@ -317,4 +398,58 @@ fn structure_match(name: &str, prefix: &str) -> bool {
         return tag;
     }
     path.starts_with(typed)
+}
+
+#[cfg(test)]
+mod plugin_tests {
+    use super::*;
+
+    fn cmds(lines: &[&str]) -> Vec<PluginCommand> {
+        lines.iter().filter_map(|l| PluginCommand::parse(l)).collect()
+    }
+
+    /// Как в Paper: `/version` плагина заменяет ванильную, `minecraft:` её возвращает.
+    #[test]
+    fn plugin_commands_shadow_vanilla() {
+        let plugins = cmds(&["version\ttrue", "pl"]);
+        assert_eq!(vanilla_line("version", &plugins), None);
+        assert_eq!(vanilla_line("VERSION x", &plugins), None);
+        assert_eq!(vanilla_line("minecraft:version", &plugins), Some("version"));
+        assert_eq!(vanilla_line("tp @s 0 0 0", &plugins), Some("tp @s 0 0 0"));
+        assert_eq!(vanilla_line("version", &[]), Some("version"));
+    }
+
+    #[test]
+    fn access_by_level() {
+        let [all, op, notop, none, bare] = [
+            "a\ttrue", "b\top", "c\tnotop", "d\tfalse", "e",
+        ]
+        .map(|l| PluginCommand::parse(l).unwrap());
+        assert!(all.visible(0) && all.visible(4));
+        assert!(!op.visible(0) && op.visible(1) && op.visible(4));
+        assert!(notop.visible(0) && !notop.visible(2));
+        assert!(!none.visible(0) && !none.visible(4));
+        assert_eq!(bare.access, PluginAccess::Everyone);
+        assert!(PluginCommand::parse("").is_none());
+    }
+
+    /// Перекрытая команда и её алиасы уходят из ванильного дерева.
+    #[test]
+    fn shadowed_roots_and_aliases_dropped() {
+        use chunkwake_protocol::text::Node;
+        let names = |roots: Vec<Node>| -> Vec<String> {
+            roots
+                .into_iter()
+                .filter_map(|n| match n {
+                    Node::Literal { name, .. } => Some(name),
+                    _ => None,
+                })
+                .collect()
+        };
+        let all = names(vanilla_roots(4, &[]));
+        assert!(all.iter().any(|n| n == "teleport") && all.iter().any(|n| n == "tp"));
+        let left = names(vanilla_roots(4, &cmds(&["teleport"])));
+        assert!(!left.iter().any(|n| n == "teleport" || n == "tp"), "{left:?}");
+        assert!(left.iter().any(|n| n == "give"));
+    }
 }

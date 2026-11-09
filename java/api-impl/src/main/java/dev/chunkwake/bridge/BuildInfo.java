@@ -25,6 +25,6 @@ public final class BuildInfo implements ServerBuildInfo {
     @Override
     public String asString(StringRepresentation r) {
         return r == StringRepresentation.VERSION_SIMPLE ? ChunkwakeServer.VERSION
-                : "Chunkwake " + ChunkwakeServer.VERSION + " (MC: " + ChunkwakeServer.VERSION + ")";
+                : ChunkwakeServer.VERSION + " (MC: " + ChunkwakeServer.VERSION + ")";
     }
 }

@@ -238,7 +238,7 @@ pub struct PlayPlan {
     survival: SurvivalData,
     hooks: std::sync::OnceLock<Arc<dyn PluginHooks>>,
     /// Команды плагинов для дерева `commands` у клиента.
-    plugin_commands: Mutex<Vec<String>>,
+    plugin_commands: Mutex<Vec<crate::play::commands::PluginCommand>>,
     /// До какого тика игроку нельзя входить в портал снова
     /// (`Entity.PortalCooldown`, 300 тиков).
     portal_cooldown: Mutex<FastMap<Uuid, u64>>,
@@ -3413,9 +3413,14 @@ impl PlayPlan {
             .send_global(text::system_chat_json(self.ids.system_chat, json, false));
     }
 
-    /// Команды плагинов: запоминаем и обновляем дерево у всех онлайн.
+    /// Команды плагинов (строки `имя\tdefault`, см.
+    /// [`crate::play::commands::PluginCommand::parse`]): запоминаем и
+    /// обновляем дерево у всех онлайн.
     pub fn set_commands(&self, names: Vec<String>) {
-        *self.plugin_commands.lock().unwrap() = names;
+        *self.plugin_commands.lock().unwrap() = names
+            .iter()
+            .filter_map(|l| crate::play::commands::PluginCommand::parse(l))
+            .collect();
         let online: Vec<Uuid> = self.hub.players.lock().unwrap().keys().copied().collect();
         for uuid in online {
             self.send_to(uuid, self.commands_packet(self.op_level(uuid)));
@@ -3675,6 +3680,17 @@ impl PlayPlan {
         }
         if line == "tps" {
             return self.tick_meter_line();
+        }
+        // `mspt`: работа тика за 5 с, 10 с и 1 мин — по тройке avg min max
+        // через пробел (Paper `/mspt`), `?` — замеров ещё нет.
+        if line == "mspt" {
+            let ticks = self.ticks.lock().unwrap();
+            return [100, 200, 1200]
+                .map(|n| match ticks.mspt_over(n) {
+                    Some((avg, min, max)) => format!("{avg} {min} {max}"),
+                    None => "? ? ?".into(),
+                })
+                .join(" ");
         }
         // `tag block|item имя`: состав ванильного тега через пробел (вложенные
         // уже раскрыты), `!` — такого тега нет. `Server.getTag` плагинов.

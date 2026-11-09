@@ -167,11 +167,14 @@ final class LifecycleCommands implements Commands {
     /** Команда бумажного регистратора как обычная команда сервера. */
     static final class BrigadierCommand extends BukkitCommand {
         private final LiteralCommandNode<CommandSourceStack> node;
+        /** Плагин-владелец: по нему `/help <плагин>` собирает его команды. */
+        final String owner;
 
         BrigadierCommand(String name, String description, String usage,
-                LiteralCommandNode<CommandSourceStack> node) {
+                LiteralCommandNode<CommandSourceStack> node, String owner) {
             super(name, description, usage, java.util.List.of());
             this.node = node;
+            this.owner = owner;
         }
 
         @Override
