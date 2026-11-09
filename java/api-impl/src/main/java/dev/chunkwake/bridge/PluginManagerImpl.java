@@ -58,7 +58,9 @@ final class PluginManagerImpl {
         try {
             setEnabled(p, true);
         } catch (Throwable t) {
-            server.logger.log(Level.SEVERE, "Error occurred while enabling " + p.getName(), t);
+            if (!Internals.report(server.logger, p.getName(), "enabling", t)) {
+                server.logger.log(Level.SEVERE, "Error occurred while enabling " + p.getName(), t);
+            }
             setEnabledQuietly(p, false);
         }
         updateListenerMask();
@@ -110,8 +112,10 @@ final class PluginManagerImpl {
             try {
                 rl.callEvent(event);
             } catch (Throwable t) {
-                server.logger.log(Level.SEVERE, "Could not pass event " + event.getEventName()
-                        + " to " + rl.getPlugin().getName(), t);
+                if (!Internals.report(server.logger, rl.getPlugin().getName(), event.getEventName(), t)) {
+                    server.logger.log(Level.SEVERE, "Could not pass event " + event.getEventName()
+                            + " to " + rl.getPlugin().getName(), t);
+                }
             }
         }
     }

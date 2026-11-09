@@ -163,7 +163,9 @@ final class ChunkwakeServer {
                 loaded.add(plugin);
                 logger.info("plugins: " + desc.getName() + " loaded in " + ms(one) + " ms");
             } catch (Throwable t) {
-                logger.log(Level.SEVERE, "Could not load " + jar.getName(), t);
+                if (!Internals.report(logger, jar.getName(), "loading", t)) {
+                    logger.log(Level.SEVERE, "Could not load " + jar.getName(), t);
+                }
             }
         }
         int enabled = 0;
@@ -519,7 +521,9 @@ final class ChunkwakeServer {
             Bridge.log(3, "lifecycle[" + owner + "]: " + registrar.registered()
                     + " command(s) registered");
         } catch (Throwable t) {
-            logger.log(Level.SEVERE, "lifecycle[" + owner + "]: command registration failed", t);
+            if (!Internals.report(logger, owner, "command registration", t)) {
+                logger.log(Level.SEVERE, "lifecycle[" + owner + "]: command registration failed", t);
+            }
         }
     }
 
