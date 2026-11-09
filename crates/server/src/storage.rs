@@ -22,6 +22,25 @@ const SAVE_BATCH: usize = 128;
 /// Как часто выгружать столбцы вдали от игроков.
 const UNLOAD_EVERY: Duration = Duration::from_secs(5);
 
+/// Добавляет `key`, если его нет. Замок записи — только для нового ключа:
+/// каждая загрузка региона приходит в `WorldStorage::dim`, держа замок шарда
+/// `region_load`, а выгрузчик держит замок чтения карты и ждёт тот же шард.
+/// Запись на каждой загрузке замыкала круг, и пул генерации вставал до
+/// перезапуска.
+fn ensure_key<V>(
+    map: &std::sync::RwLock<std::collections::BTreeMap<String, V>>,
+    key: &str,
+    make: impl FnOnce() -> V,
+) {
+    if map.read().unwrap().contains_key(key) {
+        return;
+    }
+    map.write()
+        .unwrap()
+        .entry(key.to_owned())
+        .or_insert_with(make);
+}
+
 /// Каталог регионов измерения. Мир 26.3 держит чанки в
 /// `dimensions/minecraft/<измерение>/region`; для оверворлда, если такого
 /// каталога ещё нет, а старый `region/` есть — читаем старый, чтобы не
@@ -148,8 +167,7 @@ impl WorldStorage {
     /// В ванили `ServerLevel` создаётся сразу; здесь хранилище появляется при
     /// первом обращении — так мир без Ада не обрастает пустыми каталогами.
     pub fn enable_dimension(&self, dimension: &str) {
-        let mut dims = self.dimensions.write().unwrap();
-        dims.entry(dimension.to_owned()).or_insert_with(|| {
+        ensure_key(&self.dimensions, dimension, || {
             let region = region_dir(&self.world_dir, dimension);
             DimStore {
                 store: RegionStore::new(region.clone()).with_codec(self.codec),
@@ -504,7 +522,7 @@ impl ChunkSource for WorldStorage {
 
 #[cfg(test)]
 mod tests {
-    use super::{region_dir, save_player_batch};
+    use super::{ensure_key, region_dir, save_player_batch};
     use chunkwake_net::Uuid;
     use chunkwake_net::survival::PlayerState;
     use std::collections::HashMap;
@@ -538,6 +556,24 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Известное измерение не берёт замок записи: выгрузчик держит замок
+    /// чтения, пока загрузчик региона сюда заходит.
+    #[test]
+    fn known_dimension_does_not_wait_for_readers() {
+        let map = std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new()));
+        ensure_key(&map, "minecraft:overworld", || 1);
+        let held = map.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _reader = held.read().unwrap();
+            ensure_key(&held, "minecraft:overworld", || 2);
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("ensure_key ждёт замок записи при известном ключе");
+        assert_eq!(map.read().unwrap()["minecraft:overworld"], 1);
     }
 
     #[test]
