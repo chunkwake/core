@@ -1217,12 +1217,25 @@ pub struct Navigation {
     delayed_recompute: bool,
     /// Куда просили идти (для целей, пока их нет).
     pub requested: Option<[i32; 3]>,
+    /// `GroundPathNavigation.avoidSun` (`RestrictSunGoal`).
+    pub avoid_sun: bool,
+    /// `WallClimberNavigation` паука и `pathToPosition`.
+    pub climber: bool,
+    pub to_position: Option<[i32; 3]>,
 }
 
 /// Множитель узлов поиска (`maxVisitedNodesMultiplier`).
 const NODES_MULTIPLIER: f32 = 1.0;
 
 impl Navigation {
+    /// Наземная навигация; `climber` — `WallClimberNavigation` паука.
+    pub fn new(climber: bool) -> Self {
+        Self {
+            climber,
+            ..Self::default()
+        }
+    }
+
     pub fn is_done(&self) -> bool {
         self.path.as_ref().is_none_or(Path::is_done)
     }
@@ -1334,6 +1347,9 @@ impl Navigation {
             to[1].floor() as i32,
             to[2].floor() as i32,
         ];
+        if self.climber {
+            self.to_position = Some(p);
+        }
         let p = Self::surface(w, m, p);
         self.create_path(w, m, p, reach, follow_range)
     }
@@ -1350,7 +1366,7 @@ impl Navigation {
         if self.is_done() {
             return false;
         }
-        self.trim_path(w);
+        self.trim_path(w, m);
         if self.path.as_ref().is_none_or(|p| p.nodes.is_empty()) {
             return false;
         }
@@ -1361,7 +1377,7 @@ impl Navigation {
     }
 
     /// `trimPath`: котлы — узел на блок выше.
-    fn trim_path(&mut self, w: &World) {
+    fn trim_path(&mut self, w: &World, m: &Walker) {
         let Some(path) = &mut self.path else {
             return;
         };
@@ -1374,6 +1390,21 @@ impl Navigation {
                 {
                     path.nodes[i + 1] = ([n[0], p[1] + 1, n[2]], nk);
                 }
+            }
+        }
+        // `GroundPathNavigation.trimPath`: с солнцем — обрезать у первого узла под небом.
+        if self.avoid_sun {
+            let sky = |p: [i32; 3]| w.info.is_some_and(|f| f(p).sky);
+            let at = [
+                m.pos[0].floor() as i32,
+                (m.pos[1] + 0.5).floor() as i32,
+                m.pos[2].floor() as i32,
+            ];
+            if sky(at) {
+                return;
+            }
+            if let Some(i) = path.nodes.iter().position(|(p, _)| sky(*p)) {
+                path.nodes.truncate(i);
             }
         }
     }
@@ -1416,6 +1447,19 @@ impl Navigation {
 
     /// `PathNavigation.tick`: куда идти (`MoveControl.setWantedPosition`).
     pub fn tick(&mut self, w: &World, m: &Walker, follow_range: f64) -> Option<([f64; 3], f64)> {
+        // `WallClimberNavigation.tick`: путь кончился — прямо к блоку цели.
+        if self.climber && self.is_done() {
+            let p = self.to_position?;
+            let w2 = m.width * m.width;
+            let near = |q: [i32; 3]| d2(q.map(|v| f64::from(v) + 0.5), m.pos) < w2;
+            if near(p)
+                || (m.pos[1] > f64::from(p[1]) && near([p[0], m.pos[1].floor() as i32, p[2]]))
+            {
+                self.to_position = None;
+                return None;
+            }
+            return Some((p.map(f64::from), self.speed));
+        }
         self.tick += 1;
         if self.delayed_recompute {
             self.recompute(w, m, follow_range);
@@ -1630,6 +1674,7 @@ pub enum MoveOp {
     Wait,
     MoveTo,
     Jumping,
+    Strafe,
 }
 
 /// `MoveControl`: куда хочет моб и с каким множителем скорости.
@@ -1638,6 +1683,9 @@ pub struct MoveControl {
     pub wanted: [f64; 3],
     pub speed: f64,
     pub op: MoveOp,
+    /// `strafeForwards`, `strafeRight`.
+    pub strafe_fwd: f32,
+    pub strafe_right: f32,
 }
 
 impl MoveControl {
@@ -1648,6 +1696,14 @@ impl MoveControl {
         if self.op != MoveOp::Jumping {
             self.op = MoveOp::MoveTo;
         }
+    }
+
+    /// `strafe(forward, right)`: множитель скорости 0.25.
+    pub fn strafe(&mut self, forward: f32, right: f32) {
+        self.op = MoveOp::Strafe;
+        self.strafe_fwd = forward;
+        self.strafe_right = right;
+        self.speed = 0.25;
     }
 }
 
@@ -1704,6 +1760,39 @@ pub fn move_control(m: &mut Mob, w: &World, in_water: bool) {
             if m.on_ground || in_water {
                 m.move_ctl.op = MoveOp::Wait;
             }
+        }
+        MoveOp::Strafe => {
+            let f = m.move_ctl.speed as f32 * base as f32;
+            let (mut f1, mut f2) = (m.move_ctl.strafe_fwd, m.move_ctl.strafe_right);
+            let mut f3 = (f1 * f1 + f2 * f2).sqrt();
+            if f3 < 1.0 {
+                f3 = 1.0;
+            }
+            f3 = f / f3;
+            f1 *= f3;
+            f2 *= f3;
+            let r = f64::from(m.yaw * 0.017453292f32);
+            let (f4, f5) = (
+                chunkwake_worldgen::carver::sin(r),
+                chunkwake_worldgen::carver::cos(r),
+            );
+            let dx = f1 * f5 - f2 * f4;
+            let dz = f2 * f5 + f1 * f4;
+            // `isWalkable`: клетка, куда шагнём, проходима.
+            let walk = super::walker(m, w, 0, in_water);
+            let p = [
+                (m.pos[0] + f64::from(dx)).floor() as i32,
+                m.pos[1].floor() as i32,
+                (m.pos[2] + f64::from(dz)).floor() as i32,
+            ];
+            if type_static(w, &walk, p) != PathType::Walkable {
+                m.move_ctl.strafe_fwd = 1.0;
+                m.move_ctl.strafe_right = 0.0;
+            }
+            m.set_speed(f);
+            m.zza = f64::from(m.move_ctl.strafe_fwd);
+            m.xxa = f64::from(m.move_ctl.strafe_right);
+            m.move_ctl.op = MoveOp::Wait;
         }
         MoveOp::Wait => m.zza = 0.0,
     }

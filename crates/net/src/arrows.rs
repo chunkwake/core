@@ -326,6 +326,14 @@ pub fn step(
                 .iter()
                 .find(|(id, _)| *id == owner)
                 .is_none_or(|(_, f)| !touches(*f, p))
+            // Стрелок-моб (скелет): стрела рождается в его рамке.
+            && !mobs.iter().any(|(id, feet, (width, height))| {
+                *id == owner.as_u128()
+                    && (p[0] - feet[0]).abs() <= width / 2.0 + 0.3
+                    && (p[2] - feet[2]).abs() <= width / 2.0 + 0.3
+                    && p[1] >= feet[1] - 0.3
+                    && p[1] <= feet[1] + height + 0.3
+            })
         {
             a.left_owner = true;
         }

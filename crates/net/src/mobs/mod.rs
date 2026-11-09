@@ -98,6 +98,9 @@ pub enum Species {
     Sheep,
     Chicken,
     Zombie,
+    Creeper,
+    Skeleton,
+    Spider,
 }
 
 /// Всё о виде в одном месте. Встроенные значения — запасные: при старте
@@ -134,6 +137,8 @@ pub struct SpeciesInfo {
     /// Громкость звуков (`getSoundVolume`).
     pub volume: f32,
     /// Префикс звуков: `.ambient`, `.hurt`, `.death`, `.step`.
+    /// Подаёт голос (`getAmbientSound` не `null`): у крипера его нет.
+    pub ambient: bool,
     pub sound: &'static str,
     /// Таблица лута (`entities/<вид>`).
     pub loot: &'static str,
@@ -157,6 +162,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
         follow_parent_speed: 1.1,
         burns_in_sun: false,
         volume: 1.0,
+        ambient: true,
         sound,
         loot,
     }
@@ -164,7 +170,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 5] = [
+const BUILTIN: [SpeciesInfo; 8] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -231,6 +237,43 @@ const BUILTIN: [SpeciesInfo; 5] = [
             "minecraft:entities/zombie",
         )
     },
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (0.6, 1.7),
+        eye_height: 1.7 * 0.85,
+        attack_damage: 2.0,
+        ambient: false,
+        ..base(
+            "minecraft:creeper",
+            "minecraft:entity.creeper",
+            "minecraft:entities/creeper",
+        )
+    },
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (0.6, 1.99),
+        eye_height: 1.74,
+        attack_damage: 2.0,
+        burns_in_sun: true,
+        ..base(
+            "minecraft:skeleton",
+            "minecraft:entity.skeleton",
+            "minecraft:entities/skeleton",
+        )
+    },
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (1.4, 0.9),
+        eye_height: 0.65,
+        max_health: 16.0,
+        speed: 0.3,
+        attack_damage: 2.0,
+        ..base(
+            "minecraft:spider",
+            "minecraft:entity.spider",
+            "minecraft:entities/spider",
+        )
+    },
 ];
 
 static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
@@ -266,12 +309,15 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 5] = [
+    pub const ALL: [Species; 8] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
         Species::Chicken,
         Species::Zombie,
+        Species::Creeper,
+        Species::Skeleton,
+        Species::Spider,
     ];
 
     /// Данные вида: выгрузка, если она установлена, иначе встроенные.
@@ -449,6 +495,21 @@ pub struct Mob {
     /// `JumpControl.jump` этого тика и `noJumpDelay`.
     pub jump: bool,
     pub no_jump_delay: u8,
+    /// Ход вбок `xxa` (`MoveControl.strafe`).
+    pub xxa: f64,
+    /// Паук лезет по стене (`Spider.isClimbing`, бит 1 `DATA_FLAGS_ID`).
+    pub climbing: bool,
+    /// Горит (`isOnFire`): ставит сервер.
+    pub on_fire: bool,
+    /// Крипер: `swell`, `swellDir`, `maxSwell`, `explosionRadius`, заряжен, подожжён.
+    pub swell: i32,
+    pub swell_dir: i32,
+    pub max_swell: i32,
+    pub explosion_radius: i32,
+    pub powered: bool,
+    pub ignited: bool,
+    /// Скелет: тики натяжения лука (`getTicksUsingItem`); `None` — не тянет.
+    pub using_item: Option<i32>,
 }
 
 impl Mob {
@@ -485,12 +546,22 @@ impl Mob {
             strike: None,
             no_action: 0,
             persistent: false,
-            nav: Navigation::default(),
+            nav: Navigation::new(species == Species::Spider),
             move_ctl: MoveControl::default(),
             move_speed: 0.0,
             zza: 0.0,
             jump: false,
             no_jump_delay: 0,
+            xxa: 0.0,
+            climbing: false,
+            on_fire: false,
+            swell: 0,
+            swell_dir: -1,
+            max_swell: 30,
+            explosion_radius: 3,
+            powered: false,
+            ignited: false,
+            using_item: None,
         }
     }
 
@@ -610,6 +681,8 @@ pub struct Senses<'a> {
     pub difficulty: u8,
     /// Id сущности: чётность полного прохода селекторов.
     pub entity_id: i32,
+    /// `Level.isBrightOutside`: день без грозы (`skyDarken < 4`).
+    pub bright_outside: bool,
 }
 
 /// Игрок, которого монстр может выбрать целью.
@@ -799,31 +872,44 @@ fn in_water(m: &Mob, w: &World) -> bool {
 /// Возвращает, упёрся ли моб по горизонтали.
 pub fn travel(m: &mut Mob, forward: f64, w: &World) -> bool {
     let water = in_water(m, w);
-    let accel = if water {
-        // `travelInWater`: `moveRelative(0.02, input)`, `input.zza` — скорость моба.
-        0.02 * forward
+    // `moveRelative(amount, (xxa, 0, zza))`: в воде 0.02; на земле
+    // `getFrictionInfluencedSpeed` — скорость моба (`Mob.setSpeed` ставит и
+    // `zza`, поэтому на земле ускорение — скорость в квадрате: корова с
+    // `movement_speed` 0.2 разгоняется на 0.04 за тик); в воздухе 0.02.
+    let amount = if water {
+        0.02
     } else if m.on_ground {
-        // `LivingEntity.travelInAir`: `moveRelative(getFrictionInfluencedSpeed(f), input)`,
-        // где `input.zza` уже равен скорости моба (`Mob.setSpeed` вызывает `setZza(f)`).
-        // Поэтому на земле ускорение — скорость в квадрате: корова с `movement_speed`
-        // 0.2 разгоняется на 0.04 за тик, а не на 0.2.
-        let friction = friction_speed(m.move_speed, GROUND_FRICTION);
-        friction * forward
+        friction_speed(m.move_speed, GROUND_FRICTION)
     } else {
-        // В воздухе `getFrictionInfluencedSpeed` — это `getFlyingSpeed()` (0.02),
-        // и он тоже умножается на `zza`.
-        AIR_ACCEL * forward
+        AIR_ACCEL
     };
-    if forward != 0.0 {
+    let (mut ix, mut iz) = (m.xxa, forward);
+    let l2 = ix * ix + iz * iz;
+    if l2 >= 1.0e-7 {
+        if l2 > 1.0 {
+            let l = l2.sqrt();
+            ix /= l;
+            iz /= l;
+        }
+        ix *= amount;
+        iz *= amount;
         // `Entity.getInputVector`: угол во float и табличные `Mth.sin`/`Mth.cos`.
         let yaw = f64::from(m.yaw * 0.017453292f32);
         let (sin, cos) = (
             f64::from(chunkwake_worldgen::carver::sin(yaw)),
             f64::from(chunkwake_worldgen::carver::cos(yaw)),
         );
-        m.vel[0] += -sin * accel;
-        m.vel[2] += cos * accel;
+        m.vel[0] += ix * cos - iz * sin;
+        m.vel[2] += iz * cos + ix * sin;
     }
+    // `handleOnClimbable`: паук на стене не разгоняется и не падает быстро.
+    let climb = m.species == Species::Spider && m.climbing;
+    if climb && !water {
+        m.vel[0] = m.vel[0].clamp(-0.15, 0.15);
+        m.vel[2] = m.vel[2].clamp(-0.15, 0.15);
+        m.vel[1] = m.vel[1].max(-0.15);
+    }
+
     let (wd, h) = m.size();
     let half = wd / 2.0;
     let want = m.vel;
@@ -839,6 +925,10 @@ pub fn travel(m: &mut Mob, forward: f64, w: &World) -> bool {
     }
     if (dz - want[2]).abs() > EPS {
         m.vel[2] = 0.0;
+    }
+    // Лезет вверх, пока упирается (или прыгает).
+    if climb && (blocked || (m.jump && !water)) {
+        m.vel[1] = 0.2;
     }
     if water {
         // Всплывают сами только с `FloatGoal` (прыжок в жидкости, `tick`).
@@ -893,8 +983,8 @@ pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walke
             difficulty,
         ),
         speed: m.move_speed as f32,
-        // `FloatGoal` ставит `setCanFloat(true)`: он есть у животных.
-        can_float: animal,
+        // `FloatGoal` ставит `setCanFloat(true)`: его нет у зомби и скелета.
+        can_float: !matches!(m.species, Species::Zombie | Species::Skeleton),
         can_open_doors: false,
         can_pass_doors: true,
         can_walk_over_fences: false,
@@ -935,10 +1025,14 @@ fn server_ai_step(m: &mut Mob, w: &World, s: &mut Senses) {
 pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
     if m.death_time > 0 {
         m.death_time += 1;
+        m.xxa = 0.0;
         let _ = travel(m, 0.0, w);
         return m.death_time > DEATH_TICKS;
     }
     m.out.clear();
+    if m.species == Species::Creeper && creeper_tick(m) {
+        return true;
+    }
     m.tick_count = m.tick_count.wrapping_add(1);
     m.invulnerable = m.invulnerable.saturating_sub(1);
     m.strike = None;
@@ -958,13 +1052,20 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
         }
         m.love = (m.love - 1).max(0);
     }
+    // `LivingEntity.updateUsingItem`: лук натягивается.
+    if let Some(t) = &mut m.using_item {
+        *t += 1;
+    }
     // `LivingEntity.aiStep`: задержка прыжка тает до ИИ.
     m.no_jump_delay = m.no_jump_delay.saturating_sub(1);
+    // `applyInput`: ход затухает до ИИ (`WAIT` гасит только `zza`).
+    m.xxa = f64::from(m.xxa as f32 * 0.98);
+    m.zza = f64::from(m.zza as f32 * 0.98);
     server_ai_step(m, w, s);
     // Прыжок: в воде — всплытие (`jumpInLiquid`, +0.04), с земли — не чаще
     // раза в 10 тиков подряд.
     let water = in_water(m, w);
-    if std::mem::take(&mut m.jump) {
+    if m.jump {
         if water && (!m.on_ground || goals::deep_water(m, w)) {
             m.vel[1] += 0.04;
         } else if m.on_ground && m.no_jump_delay == 0 {
@@ -974,7 +1075,30 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
     } else {
         m.no_jump_delay = 0;
     }
-    let _ = travel(m, m.zza, w);
+    let blocked = travel(m, m.zza, w);
+    m.jump = false;
+    // `Spider.tick`: лезет, пока упёрся.
+    if m.species == Species::Spider {
+        m.climbing = blocked;
+    }
+    false
+}
+
+/// `Creeper.tick` до `super.tick`: набухание и взрыв. `true` — взорвался.
+fn creeper_tick(m: &mut Mob) -> bool {
+    if m.ignited {
+        m.swell_dir = 1;
+    }
+    if m.swell_dir > 0 && m.swell == 0 {
+        m.out.push(Out::Primed);
+    }
+    m.swell = (m.swell + m.swell_dir).max(0);
+    if m.swell >= m.max_swell {
+        m.swell = m.max_swell;
+        let k = if m.powered { 2.0 } else { 1.0 };
+        m.out.push(Out::Explode(m.explosion_radius as f32 * k));
+        return true;
+    }
     false
 }
 
@@ -1408,6 +1532,7 @@ mod tests {
             sight: &always_visible,
             difficulty: 2,
             entity_id: 1,
+            bright_outside: false,
         };
         // Первые тики — разгон от нуля (за 30 тиков скорость сходится до 1e-8).
         for _ in 0..30 {
@@ -1564,6 +1689,7 @@ mod tests {
             sight: &always_visible,
             difficulty: 2,
             entity_id: 1,
+            bright_outside: false,
         };
         let mut max_x: f64 = 0.0;
         for _ in 0..200 {
@@ -1607,6 +1733,7 @@ mod tests {
             sight: &always_visible,
             difficulty: 2,
             entity_id: 1,
+            bright_outside: false,
         };
         let start = m.pos;
         let mut ran = false;
@@ -1641,6 +1768,7 @@ mod tests {
             sight: &always_visible,
             difficulty: 2,
             entity_id: 1,
+            bright_outside: false,
         };
         let gone = (0..30).position(|_| tick(&mut m, &w, &mut s));
         assert_eq!(gone, Some(19));
@@ -1669,6 +1797,7 @@ mod tests {
             sight: &always_visible,
             difficulty: 2,
             entity_id: 1,
+            bright_outside: false,
         };
         for _ in 0..100 {
             tick(&mut m, &w, &mut s);
@@ -1755,6 +1884,7 @@ mod tests {
             sight,
             difficulty: 2,
             entity_id: 1,
+            bright_outside: false,
         };
         let mut strikes = Vec::new();
         for t in 0..ticks {
@@ -1813,6 +1943,7 @@ mod tests {
             sight: &always_visible,
             difficulty: 2,
             entity_id: 1,
+            bright_outside: false,
         };
         let mut hit = None;
         for t in 0..400 {
@@ -1907,6 +2038,7 @@ mod tests {
             sight: &always_visible,
             difficulty: 2,
             entity_id: 1,
+            bright_outside: false,
         };
         // `mob_path_probe` на `server.jar`: (тик движения, x, z) относительно
         // игрока по шаговым дельтам `move_entity` (трекер шлёт раз в 3 тика).
@@ -2033,6 +2165,7 @@ mod tests {
             sight: &sight,
             difficulty: 2,
             entity_id: 1,
+            bright_outside: false,
         };
         tick(&mut m, &w, &mut s);
         assert_eq!(m.target, Some(7));
@@ -2078,6 +2211,7 @@ mod tests {
                 sight: &|_, _| false,
                 difficulty: 2,
                 entity_id: 1,
+                bright_outside: false,
             };
             tick(&mut m, &w, &mut s);
             assert_eq!(m.target, None);
@@ -2115,6 +2249,7 @@ mod tests {
             sight: &always_visible,
             difficulty: 2,
             entity_id: 1,
+            bright_outside: false,
         };
         for _ in 0..10 {
             tick(&mut z, &w, &mut s);
@@ -2325,5 +2460,255 @@ mod tests {
         );
         assert_eq!(Species::Zombie.short(), "zombie");
         assert!(Species::Zombie.is_monster());
+    }
+
+    /// Прогон монстра `species` на мире `solid` против игрока в `at`.
+    /// Возвращает моба и события тиков (`Out`) с номерами тиков.
+    #[allow(clippy::too_many_arguments)]
+    fn monster_run(
+        species: Species,
+        from: [f64; 3],
+        at: [f64; 3],
+        solid: &dyn Fn([i32; 3]) -> bool,
+        brightness: f32,
+        difficulty: u8,
+        rnd: &mut dyn FnMut() -> f64,
+        ticks: usize,
+    ) -> (Mob, Vec<(usize, Out)>) {
+        let (shape, water) = flat_world(solid);
+        let info = move |_: [i32; 3]| CellInfo {
+            brightness,
+            ..CellInfo::default()
+        };
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+            cell: None,
+            info: Some(&info),
+            min_y: -64,
+        };
+        let mut m = Mob::new(species, from, 1);
+        m.on_ground = true;
+        let prey = [Prey { uuid: 7, pos: at }];
+        let mut s = Senses {
+            players: &prey,
+            rand: rnd,
+            prey: &prey,
+            tempters: &[],
+            kin: &[],
+            sight: &always_visible,
+            difficulty,
+            entity_id: 1,
+            bright_outside: false,
+        };
+        let mut outs = Vec::new();
+        for t in 0..ticks {
+            let gone = tick(&mut m, &w, &mut s);
+            outs.extend(m.out.iter().map(|o| (t, *o)));
+            if gone {
+                break;
+            }
+        }
+        (m, outs)
+    }
+
+    /// `SwellGoal`: в двух блоках крипер встаёт, шипит один раз и через
+    /// `maxSwell` = 30 тиков набухания взрывается с мощностью 3.
+    #[test]
+    fn creeper_swells_and_explodes() {
+        let mut rnd = || 0.05;
+        let (m, outs) = monster_run(
+            Species::Creeper,
+            [0.5, 64.0, 0.5],
+            [2.5, 64.0, 0.5],
+            &floor,
+            0.0,
+            2,
+            &mut rnd,
+            100,
+        );
+        let primed: Vec<usize> = outs
+            .iter()
+            .filter(|(_, o)| *o == Out::Primed)
+            .map(|(t, _)| *t)
+            .collect();
+        let boom: Vec<(usize, Out)> = outs
+            .iter()
+            .filter(|(_, o)| matches!(o, Out::Explode(_)))
+            .copied()
+            .collect();
+        assert_eq!(primed.len(), 1, "{outs:?}");
+        assert_eq!(boom.len(), 1, "{outs:?}");
+        // Набухание считается в `Creeper.tick` до ИИ: шипение на тике после
+        // `SwellGoal.tick`, взрыв ещё через 29.
+        assert_eq!(boom[0].0 - primed[0], 29, "{outs:?}");
+        assert_eq!(boom[0].1, Out::Explode(3.0));
+        assert_eq!(m.swell, 30);
+    }
+
+    /// Без цели крипер сдувается; заряженный бахает вдвое сильнее.
+    #[test]
+    fn creeper_deflates_and_powered_doubles() {
+        let mut m = Mob::new(Species::Creeper, [0.5, 64.0, 0.5], 1);
+        m.swell = 10;
+        let mut rnd = || 0.99;
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut s = Senses {
+            players: &[],
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &always_visible,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: false,
+        };
+        for _ in 0..12 {
+            assert!(!tick(&mut m, &w, &mut s));
+        }
+        assert_eq!(m.swell, 0);
+        let mut c = Mob::new(Species::Creeper, [0.5, 64.0, 0.5], 1);
+        c.powered = true;
+        c.ignited = true;
+        c.swell = 29;
+        assert!(creeper_tick(&mut c));
+        assert_eq!(c.out, vec![Out::Explode(6.0)]);
+    }
+
+    /// `RangedBowAttackGoal`: натяжение 20 тиков, затем пауза 40 (20 на сложной).
+    #[test]
+    fn skeleton_shoots_at_bow_interval() {
+        for (difficulty, period) in [(2u8, 60usize), (3, 40)] {
+            let mut rnd = lcg(5);
+            let (m, outs) = monster_run(
+                Species::Skeleton,
+                [0.5, 64.0, 0.5],
+                [8.5, 64.0, 0.5],
+                &floor,
+                0.0,
+                difficulty,
+                &mut rnd,
+                300,
+            );
+            let shots: Vec<usize> = outs
+                .iter()
+                .filter_map(|(t, o)| match o {
+                    Out::Shoot { target: 7, power } => {
+                        assert_eq!(*power, 1.0);
+                        Some(*t)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(shots.len() >= 3, "{shots:?}");
+            for pair in shots.windows(2) {
+                assert_eq!(pair[1] - pair[0], period, "{difficulty}: {shots:?}");
+            }
+            assert!(m.aggressive);
+        }
+        assert_eq!(goals::bow_power(20), 1.0);
+        assert!((goals::bow_power(10) - 0.41666666).abs() < 1e-6);
+    }
+
+    /// Видя цель 20 тиков в 15 блоках, скелет встаёт и кружит боком.
+    #[test]
+    fn skeleton_strafes_in_range() {
+        let mut rnd = lcg(9);
+        let (m, _) = monster_run(
+            Species::Skeleton,
+            [0.5, 64.0, 0.5],
+            [8.5, 64.0, 0.5],
+            &floor,
+            0.0,
+            2,
+            &mut rnd,
+            60,
+        );
+        assert!(m.nav.is_done());
+        assert!(m.xxa.abs() > 0.1, "xxa = {}", m.xxa);
+        assert_eq!(m.pos[1], 64.0);
+    }
+
+    /// Паук, упёршись в стену, лезет вверх (`onClimbable`: 0.2 вверх) и
+    /// забирается на неё.
+    #[test]
+    fn spider_climbs_wall() {
+        let wall = |p: [i32; 3]| p[1] < 64 || (p[0] >= 3 && p[1] < 68);
+        let mut rnd = lcg(3);
+        let (m, _) = monster_run(
+            Species::Spider,
+            [0.5, 64.0, 0.5],
+            [6.5, 68.0, 0.5],
+            &wall,
+            0.0,
+            2,
+            &mut rnd,
+            200,
+        );
+        assert!(m.pos[1] >= 68.0, "{:?}", m.pos);
+        assert!(m.pos[0] > 3.0, "{:?}", m.pos);
+    }
+
+    /// Днём (яркость ≥ 0.5) паук не берёт цель, ночью — берёт.
+    #[test]
+    fn spider_neutral_in_light() {
+        for (light, hunts) in [(1.0, false), (0.0, true)] {
+            let mut rnd = || 0.05;
+            let (m, _) = monster_run(
+                Species::Spider,
+                [0.5, 64.0, 0.5],
+                [6.5, 64.0, 0.5],
+                &floor,
+                light,
+                2,
+                &mut rnd,
+                20,
+            );
+            assert_eq!(m.target.is_some(), hunts, "яркость {light}");
+        }
+    }
+
+    /// `LeapAtTargetGoal`: в 2–4 блоках от цели паук прыгает на 0.4 вверх и к ней.
+    #[test]
+    fn spider_leaps_at_target() {
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut m = Mob::new(Species::Spider, [0.5, 64.0, 0.5], 1);
+        m.on_ground = true;
+        m.target = Some(7);
+        let prey = [Prey {
+            uuid: 7,
+            pos: [3.5, 64.0, 0.5],
+        }];
+        let mut rnd = || 0.0;
+        let mut s = Senses {
+            players: &prey,
+            rand: &mut rnd,
+            prey: &prey,
+            tempters: &[],
+            kin: &[],
+            sight: &always_visible,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: false,
+        };
+        let y0 = m.pos[1];
+        tick(&mut m, &w, &mut s);
+        assert!(m.pos[1] > y0 + 0.3, "{:?}", m.pos);
+        assert!(m.vel[0] > 0.2, "{:?}", m.vel);
     }
 }

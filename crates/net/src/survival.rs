@@ -301,6 +301,10 @@ pub enum Cause {
     OutsideBorder,
     /// Удар моба (`minecraft:mob_attack`); внутри — ключ вида (`minecraft:zombie`).
     Mob(&'static str),
+    /// Стрела моба (`minecraft:arrow` с владельцем): внутри — ключ вида стрелка.
+    MobArrow(&'static str),
+    /// Взрыв моба (`minecraft:player_explosion`): внутри — ключ вида (крипер).
+    MobExplosion(&'static str),
 }
 
 impl Cause {
@@ -346,6 +350,8 @@ impl Cause {
             Cause::Magma => "death.attack.hotFloor",
             Cause::OutsideBorder => "death.attack.outsideBorder",
             Cause::Mob(_) => "death.attack.mob",
+            Cause::MobArrow(_) => "death.attack.arrow",
+            Cause::MobExplosion(_) => "death.attack.explosion.player",
         }
     }
 
@@ -370,6 +376,8 @@ impl Cause {
             Cause::Magma => "HOT_FLOOR",
             Cause::OutsideBorder => "WORLD_BORDER",
             Cause::Mob(_) => "ENTITY_ATTACK",
+            Cause::MobArrow(_) => "PROJECTILE",
+            Cause::MobExplosion(_) => "ENTITY_EXPLOSION",
         }
     }
 
@@ -393,6 +401,8 @@ impl Cause {
             Cause::Magma => "minecraft:hot_floor",
             Cause::OutsideBorder => "minecraft:outside_border",
             Cause::Mob(_) => "minecraft:mob_attack",
+            Cause::MobArrow(_) => "minecraft:arrow",
+            Cause::MobExplosion(_) => "minecraft:player_explosion",
         }
     }
 

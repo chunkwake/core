@@ -24,11 +24,67 @@ pub(super) struct MobEntry {
     fall: f64,
     /// Клиентам разослан флаг «агрессивен» (зомби с поднятыми руками).
     aggressive: bool,
+    /// Разосланные поля вида: набухание крипера, лазание паука, лук скелета.
+    meta: MobMeta,
+}
+
+/// Синхронизируемые поля вида (`SynchedEntityData`), которые меняет тик.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MobMeta {
+    swell_dir: i32,
+    powered: bool,
+    ignited: bool,
+    climbing: bool,
+    using_item: bool,
+}
+
+impl MobMeta {
+    fn of(m: &Mob) -> Self {
+        Self {
+            swell_dir: m.swell_dir,
+            powered: m.powered,
+            ignited: m.ignited,
+            climbing: m.climbing,
+            using_item: m.using_item.is_some(),
+        }
+    }
+
+    /// Поля, отличные от `old` (`None` — все значимые для вида).
+    fn fields(self, species: Species, old: Option<Self>) -> Vec<(u8, play::Meta)> {
+        use play::Meta;
+        let mut out = Vec::new();
+        let changed = |f: fn(&Self) -> bool| old.is_none_or(|o| f(&o) != f(&self));
+        match species {
+            // `Creeper.DATA_SWELL_DIR`, `DATA_IS_POWERED`, `DATA_IS_IGNITED`.
+            Species::Creeper => {
+                if old.is_none_or(|o| o.swell_dir != self.swell_dir) {
+                    out.push((16, Meta::Int(self.swell_dir)));
+                }
+                if changed(|m| m.powered) {
+                    out.push((17, Meta::Bool(self.powered)));
+                }
+                if changed(|m| m.ignited) {
+                    out.push((18, Meta::Bool(self.ignited)));
+                }
+            }
+            // `Spider.DATA_FLAGS_ID`: бит 1 — лезет.
+            Species::Spider if changed(|m| m.climbing) => {
+                out.push((16, Meta::Byte(u8::from(self.climbing))));
+            }
+            // `LivingEntity.DATA_LIVING_ENTITY_FLAGS`: 1 — тянет предмет основной рукой.
+            Species::Skeleton if changed(|m| m.using_item) => {
+                out.push((8, Meta::Byte(u8::from(self.using_item))));
+            }
+            _ => {}
+        }
+        out
+    }
 }
 
 impl MobEntry {
     fn new(mob: Mob) -> Self {
         Self {
+            meta: MobMeta::of(&mob),
             sent: play::quantize(mob.pos),
             sent_rot: (mob.yaw, mob.pitch, mob.head_yaw),
             mob,
@@ -53,12 +109,15 @@ impl PlayPlan {
             .unwrap_or_default()
     }
 
-    fn mob_packets(&self, id: i32, m: &Mob) -> [Vec<u8>; 3] {
+    fn mob_packets(&self, id: i32, m: &Mob) -> Vec<Vec<u8>> {
         let name = m
             .custom_name
             .as_ref()
             .map(|n| serde_json::json!({ "text": n }));
-        [
+        // Флаг детёныша (индекс 16) — у `AgeableMob` и зомби; у крипера и
+        // паука на 16 свои поля.
+        let ageable = m.species.is_animal() || m.species == Species::Zombie;
+        let mut out = vec![
             play::add_entity_moving(
                 self.ids.add_entity,
                 id,
@@ -75,11 +134,32 @@ impl PlayPlan {
                 self.ids.set_entity_data,
                 id,
                 m.health,
-                m.is_baby(),
+                ageable.then_some(m.is_baby()),
                 (m.species == Species::Sheep).then_some(m.color | u8::from(m.sheared) << 4),
                 name.as_ref(),
             ),
-        ]
+        ];
+        let meta = MobMeta::of(m).fields(
+            m.species,
+            Some(MobMeta {
+                swell_dir: -1,
+                ..MobMeta::default()
+            }),
+        );
+        if !meta.is_empty() {
+            out.push(play::entity_meta(self.ids.set_entity_data, id, &meta));
+        }
+        // `AbstractSkeleton.populateDefaultEquipmentSlots`: лук в основной руке.
+        if m.species == Species::Skeleton
+            && let Some(bow) = self.item_id("minecraft:bow")
+        {
+            out.push(play::set_equipment(
+                self.ids.set_equipment,
+                id,
+                &[(0, Some(Stack::new(bow, 1)))],
+            ));
+        }
+        out
     }
 
     /// Новый моб в мире; возвращает ID сущности. `reason` — причина для
@@ -149,7 +229,7 @@ impl PlayPlan {
     pub(super) fn mob_spawn(&self, id: i32) -> Option<Vec<Vec<u8>>> {
         let mobs = self.sim().mobs.lock().unwrap();
         let e = mobs.get(&id)?;
-        let mut out = self.mob_packets(id, &e.mob).to_vec();
+        let mut out = self.mob_packets(id, &e.mob);
         if e.aggressive {
             out.push(play::mob_flags(self.ids.set_entity_data, id, 4));
         }
@@ -247,6 +327,7 @@ impl PlayPlan {
         let darken = self.sky_darken_now(dim, weather.rain, weather.thunder);
         let mut strikes = Vec::new();
         let mut outs = Vec::new();
+        let mut blasts = Vec::new();
         let mut despawned = Vec::new();
         let mut rng = rand::thread_rng();
         let mut rand = || rand::Rng::r#gen::<f64>(&mut rng);
@@ -295,6 +376,7 @@ impl PlayPlan {
                                 edible.is_some_and(|t| t.contains(self.state_name(s)))
                             }),
                             brightness: mb::brightness(raw),
+                            sky: sky == 15,
                         }
                     };
                     let world = mb::World {
@@ -315,11 +397,23 @@ impl PlayPlan {
                         sight: &sight,
                         difficulty,
                         entity_id: id,
+                        bright_outside: darken < 4,
                     };
                     let was_grounded = e.mob.on_ground;
                     let old_pos = e.mob.pos;
                     let old_y = e.mob.pos[1];
+                    e.mob.on_fire = e.environment.burning > 0;
                     if mb::tick(&mut e.mob, &world, &mut senses) {
+                        // Крипер взорвался (`discard`): без лута и анимации смерти.
+                        let blast = e.mob.out.iter().find_map(|o| match o {
+                            mb::goals::Out::Explode(p) => Some(*p),
+                            _ => None,
+                        });
+                        if let Some(power) = blast {
+                            blasts.push((id, e.mob.pos, power, species.name()));
+                            e.mob.out.clear();
+                            continue;
+                        }
                         gone.push(id);
                         continue;
                     }
@@ -433,6 +527,17 @@ impl PlayPlan {
                     if !e.mob.out.is_empty() {
                         outs.extend(e.mob.out.drain(..).map(|o| (id, o)));
                     }
+                    let meta = MobMeta::of(&e.mob);
+                    if meta != e.meta {
+                        let fields = meta.fields(species, Some(e.meta));
+                        e.meta = meta;
+                        if !fields.is_empty() {
+                            packets.push((
+                                id,
+                                play::entity_meta(self.ids.set_entity_data, id, &fields),
+                            ));
+                        }
+                    }
                     let aggressive = e.mob.aggressive;
                     if aggressive != e.aggressive {
                         e.aggressive = aggressive;
@@ -455,7 +560,7 @@ impl PlayPlan {
                         continue;
                     }
                     let m = &e.mob;
-                    if m.alive() {
+                    if m.alive() && species.info().ambient {
                         e.ambient -= 1;
                         if e.ambient <= 0 {
                             e.ambient = 80 + rand::random::<i32>().rem_euclid(120);
@@ -527,6 +632,19 @@ impl PlayPlan {
         }
         for (species, target, from) in strikes {
             self.mob_strike(species, target, from);
+        }
+        if !blasts.is_empty() {
+            let ids: Vec<i32> = blasts.iter().map(|b| b.0).collect();
+            {
+                let mut mobs = self.sim().mobs.lock().unwrap();
+                for id in &ids {
+                    mobs.remove(id);
+                }
+            }
+            self.hub.remove_tracked(&ids);
+            for (_, pos, power, kind) in blasts {
+                self.explode_mob(pos, power, kind);
+            }
         }
         self.apply_mob_outs(outs);
         if !gone.is_empty() {
@@ -778,7 +896,7 @@ impl PlayPlan {
             let mobs = self.sim().mobs.lock().unwrap();
             mobs.get(&target).map(|e| self.mob_packets(target, &e.mob))
         };
-        if let Some([_, _, data]) = packets {
+        if let Some(data) = packets.and_then(|p| p.into_iter().nth(2)) {
             self.hub.send_about(target, data);
         }
         let sound = format!(
@@ -934,6 +1052,7 @@ impl PlayPlan {
             Grow,
             Shear([f64; 3], u8),
             Milk([f64; 3]),
+            Ignite([f64; 3], bool),
         }
         let act = {
             let mut mobs = self.sim().mobs.lock().unwrap();
@@ -960,6 +1079,15 @@ impl PlayPlan {
                 Act::Shear(m.pos, m.color)
             } else if name == "minecraft:bucket" && m.species == Species::Cow && !m.is_baby() {
                 Act::Milk(m.pos)
+            } else if m.species == Species::Creeper
+                && matches!(
+                    name.as_str(),
+                    "minecraft:flint_and_steel" | "minecraft:fire_charge"
+                )
+            {
+                // `Creeper.mobInteract`: `#creeper_igniters` поджигают.
+                m.ignited = true;
+                Act::Ignite(m.pos, name == "minecraft:fire_charge")
             } else {
                 return None;
             }
@@ -980,6 +1108,26 @@ impl PlayPlan {
                 if !creative {
                     let mut s = stack;
                     inv.slots[slot] = (!self.wear_one(&mut s)).then_some(s);
+                }
+            }
+            Act::Ignite(pos, charge) => {
+                let sound = if charge {
+                    "minecraft:item.firecharge.use"
+                } else {
+                    "minecraft:item.flintandsteel.use"
+                };
+                let pitch = rand::random::<f32>() * 0.4 + 0.8;
+                self.play_sound(None, sound, crate::sounds::HOSTILE, pos, 1.0, pitch);
+                if !creative {
+                    let mut s = stack;
+                    inv.slots[slot] = if charge {
+                        (s.count > 1).then(|| Stack {
+                            count: s.count - 1,
+                            ..s
+                        })
+                    } else {
+                        (!self.wear_one(&mut s)).then_some(s)
+                    };
                 }
             }
             Act::Milk(pos) => {
@@ -1083,7 +1231,7 @@ impl PlayPlan {
             let mobs = self.sim().mobs.lock().unwrap();
             mobs.get(&id).map(|e| self.mob_packets(id, &e.mob))
         };
-        if let Some([_, _, d]) = data {
+        if let Some(d) = data.and_then(|p| p.into_iter().nth(2)) {
             self.hub.send_about(id, d);
         }
     }
@@ -1167,6 +1315,24 @@ impl PlayPlan {
                         births.push((species, pos, id, partner));
                     }
                 }
+                // `Creeper.tick`: шипение и игровое событие `prime_fuse`.
+                Out::Primed => {
+                    let pos = self.sim().mobs.lock().unwrap().get(&id).map(|e| e.mob.pos);
+                    if let Some(pos) = pos {
+                        self.play_sound(
+                            None,
+                            "minecraft:entity.creeper.primed",
+                            crate::sounds::HOSTILE,
+                            pos,
+                            1.0,
+                            0.5,
+                        );
+                        self.emit_vibration(pos, "minecraft:prime_fuse");
+                    }
+                }
+                // Взрыв разобран в тике: моб уже убран.
+                Out::Explode(_) => {}
+                Out::Shoot { target, power } => self.mob_shoot(id, Uuid::from_u128(target), power),
                 // `EatBlockGoal.start`: анимация опущенной головы.
                 Out::EatStart => self
                     .hub
@@ -1314,6 +1480,16 @@ pub(super) fn mob_to_nbt(m: &Mob) -> Compound {
         Species::Chicken => {
             c.insert("EggLayTime".into(), Tag::Int(m.egg_time));
         }
+        // `Creeper.addAdditionalSaveData`.
+        Species::Creeper => {
+            c.insert("powered".into(), Tag::Byte(i8::from(m.powered)));
+            c.insert("Fuse".into(), Tag::Short(m.max_swell as i16));
+            c.insert(
+                "ExplosionRadius".into(),
+                Tag::Byte(m.explosion_radius as i8),
+            );
+            c.insert("ignited".into(), Tag::Byte(i8::from(m.ignited)));
+        }
         _ => {}
     }
     c
@@ -1367,6 +1543,16 @@ pub(super) fn mob_from_nbt(c: &Compound) -> Option<Mob> {
             0
         };
         m.love = 0;
+    }
+    if species == Species::Creeper {
+        m.powered = byte("powered").is_some_and(|b| b != 0);
+        if let Some(Tag::Short(f)) = c.get("Fuse") {
+            m.max_swell = i32::from(*f);
+        }
+        if let Some(r) = byte("ExplosionRadius") {
+            m.explosion_radius = i32::from(r);
+        }
+        m.ignited = byte("ignited").is_some_and(|b| b != 0);
     }
     if let Some(Tag::String(n)) = c.get("CustomName") {
         m.custom_name = Some(n.clone());
@@ -1793,7 +1979,56 @@ impl PlayPlan {
     /// Удар моба по игроку (`Mob.doHurtTarget`): атрибут `attack_damage` со
     /// сложностью, затем отбрасывание 0.4 от моба (`LivingEntity.knockback`).
     /// Броню, сопротивление и событие урона плагинам считает сессия игрока.
+    /// `AbstractSkeleton.performRangedAttack`: стрела от глаз (−0.1) в треть
+    /// роста цели с поправкой на дальность, сила 1.6, разброс `14 − 4 × сложность`,
+    /// урон `2 × сила лука + triangle(0.11 × сложность, 0.57425)`.
+    fn mob_shoot(&self, id: i32, target: Uuid, power: f32) {
+        let Some(eye) = self
+            .sim()
+            .mobs
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|e| e.mob.eye())
+        else {
+            return;
+        };
+        let Some(feet) = self.hub.players.lock().unwrap().get(&target).map(|p| p.pos) else {
+            return;
+        };
+        let from = [eye[0], eye[1] - 0.1, eye[2]];
+        let dx = feet[0] - from[0];
+        let dy = feet[1] + mb::PLAYER_SIZE.1 / 3.0 - from[1];
+        let dz = feet[2] - from[2];
+        let d = (dx * dx + dz * dz).sqrt();
+        let difficulty = self.difficulty().id();
+        let spread = f64::from(14 - i32::from(difficulty) * 4);
+        let vel = crate::arrows::shoot([dx, dy + d * 0.2, dz], 1.6, spread, rand::random());
+        let mut arrow = crate::arrows::Arrow::flight(from, vel, false);
+        let uuid = self.sim().mobs.lock().unwrap().get(&id).map(|e| e.mob.uuid);
+        arrow.owner = uuid.map(Uuid::from_u128);
+        arrow.left_owner = false;
+        let triangle = f64::from(difficulty) * 0.11
+            + 0.57425 * (rand::random::<f64>() - rand::random::<f64>());
+        arrow.base_damage = f64::from(power) * 2.0 + triangle;
+        // `Pickup.DISALLOWED`: стрелу моба не подобрать.
+        arrow.creative_only = true;
+        self.launch(self.survival.arrow_entity_type, arrow);
+        self.play_sound(
+            None,
+            "minecraft:entity.skeleton.shoot",
+            crate::sounds::HOSTILE,
+            from,
+            1.0,
+            1.0 / (rand::random::<f32>() * 0.4 + 0.8),
+        );
+    }
+
     fn mob_strike(&self, species: Species, target: Uuid, from: [f64; 3]) {
+        // `Creeper.doHurtTarget`: удар засчитан, урона нет — он взрывается.
+        if species == Species::Creeper {
+            return;
+        }
         let damage = survival::mob_damage_for(self.difficulty(), species.attack_damage());
         if damage <= 0.0 {
             return;

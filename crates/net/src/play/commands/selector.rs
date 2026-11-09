@@ -504,6 +504,8 @@ fn squared(a: [f64; 3], b: [f64; 3]) -> f64 {
 
 /// `type=` разобранный один раз: полное имя и его короткая форма.
 struct TypeFilter {
+    /// `type=!…`: все, кроме этого типа.
+    negated: bool,
     want: String,
     /// `cow` совпадает и с целью `minecraft:cow`, и с целью `cow`.
     short: String,
@@ -511,21 +513,28 @@ struct TypeFilter {
 
 impl TypeFilter {
     fn new(raw: &str) -> Self {
-        let want = super::args::resource_name(raw);
+        let negated = raw.starts_with('!');
+        let want = super::args::resource_name(raw.trim_start_matches('!'));
         let short = want
             .strip_prefix("minecraft:")
             .map_or_else(|| want.clone(), str::to_owned);
-        Self { want, short }
+        Self {
+            negated,
+            want,
+            short,
+        }
     }
 
     /// Игрок — это `type=player`; у моба имя цели и есть его тип.
     fn matches(&self, target: &Target) -> bool {
-        if target.game_mode.is_some() {
-            return self.short == "player";
-        }
-        // Имена мобов в снимке уже с пространством: `minecraft:cow`.
-        target.name.eq_ignore_ascii_case(&self.want)
-            || target.name.eq_ignore_ascii_case(&self.short)
+        let hit = if target.game_mode.is_some() {
+            self.short == "player"
+        } else {
+            // Имена мобов в снимке уже с пространством: `minecraft:cow`.
+            target.name.eq_ignore_ascii_case(&self.want)
+                || target.name.eq_ignore_ascii_case(&self.short)
+        };
+        hit != self.negated
     }
 }
 
@@ -782,5 +791,10 @@ mod tests {
         assert_eq!(s.apply(None, &all, |_| Vec::new()).unwrap().len(), 3);
         let s = Selector::parse("@e[type=minecraft:cow]").unwrap();
         assert!(s.apply(None, &all, |_| Vec::new()).unwrap().is_empty());
+        // `type=!…` — все, кроме: игроков нет, коровы нет — все трое.
+        let s = Selector::parse("@e[type=!minecraft:player]").unwrap();
+        assert!(s.apply(None, &all, |_| Vec::new()).unwrap().is_empty());
+        let s = Selector::parse("@e[type=!cow]").unwrap();
+        assert_eq!(s.apply(None, &all, |_| Vec::new()).unwrap().len(), 3);
     }
 }

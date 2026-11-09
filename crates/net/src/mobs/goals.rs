@@ -40,6 +40,12 @@ pub enum Out {
     Eat([i32; 3], bool),
     /// `HurtByTargetGoal.alertOthers`: позвать своих на обидчика.
     Alert(u128),
+    /// `Creeper.tick`: набухание началось (звук `creeper.primed`, `prime_fuse`).
+    Primed,
+    /// `Creeper.explodeCreeper`: взрыв этой мощности, моб исчез.
+    Explode(f32),
+    /// `AbstractSkeleton.performRangedAttack`: стрела в игрока с силой лука.
+    Shoot { target: u128, power: f32 },
 }
 
 /// Сородич рядом: для `BreedGoal` и `FollowParentGoal`.
@@ -62,6 +68,8 @@ pub struct CellInfo {
     pub short_grass: bool,
     /// `getLightLevelDependentMagicValue`.
     pub brightness: f32,
+    /// `Level.canSeeSky`.
+    pub sky: bool,
 }
 
 impl Default for CellInfo {
@@ -70,6 +78,7 @@ impl Default for CellInfo {
             grass_block: false,
             short_grass: false,
             brightness: 0.5,
+            sky: false,
         }
     }
 }
@@ -192,6 +201,8 @@ pub enum Goal {
     /// `NearestAttackableTargetGoal<Player>(mustSee = true)`.
     NearestPlayer {
         interval: i32,
+        /// `SpiderTargetGoal`: при яркости ≥ 0.5 не ищет.
+        day_neutral: bool,
         found: Option<u128>,
         tg: TargetState,
     },
@@ -201,6 +212,16 @@ pub enum Goal {
         timestamp: u32,
         tg: TargetState,
     },
+    /// `SwellGoal` крипера.
+    Swell { target: Option<u128> },
+    /// `RangedBowAttackGoal`.
+    RangedBow(Box<RangedBow>),
+    /// `RestrictSunGoal`: путь обрезается у неба.
+    RestrictSun,
+    /// `FleeSunGoal`.
+    FleeSun { speed: f64, to: [f64; 3] },
+    /// `LeapAtTargetGoal`.
+    Leap { y: f64, target: Option<u128> },
 }
 
 /// Состояние `MeleeAttackGoal`.
@@ -214,6 +235,10 @@ pub struct Melee {
     pub next_attack: i32,
     pub last_can_use: i64,
     pub raise_arm: i32,
+    /// `followingTargetEvenIfNotSeen`.
+    pub follow: bool,
+    /// `SpiderAttackGoal`: на свету бросает цель.
+    pub spider: bool,
 }
 
 impl Melee {
@@ -228,8 +253,71 @@ impl Melee {
             // Первая проверка `canUse` проходит сразу.
             last_can_use: i64::MIN / 2,
             raise_arm: 0,
+            follow: false,
+            spider: false,
         }
     }
+}
+
+/// Состояние `RangedBowAttackGoal`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RangedBow {
+    pub speed: f64,
+    pub attack_time: i32,
+    pub see_time: i32,
+    pub strafing_time: i32,
+    pub clockwise: bool,
+    pub backwards: bool,
+}
+
+impl RangedBow {
+    pub fn new(speed: f64) -> Self {
+        Self {
+            speed,
+            attack_time: -1,
+            see_time: 0,
+            strafing_time: -1,
+            clockwise: false,
+            backwards: false,
+        }
+    }
+}
+
+/// `attackRadius` 15 у скелета, в квадрате.
+const BOW_RADIUS_SQR: f32 = 15.0 * 15.0;
+
+/// `BowItem.getPowerForTime`.
+pub fn bow_power(ticks: i32) -> f32 {
+    let f = ticks as f32 / 20.0;
+    ((f * f + f * 2.0) / 3.0).min(1.0)
+}
+
+/// `AbstractSkeleton.reassessWeaponGoal`: пауза между выстрелами.
+pub fn bow_interval(difficulty: u8) -> i32 {
+    if difficulty == 3 { 20 } else { 40 }
+}
+
+/// `Mob.lookAt(entity, yMax, xMax)`: поворот тела сразу, без `LookControl`.
+fn look_at(m: &mut Mob, p: &Prey, y_max: f32, x_max: f32) {
+    let dx = p.pos[0] - m.pos[0];
+    let dz = p.pos[2] - m.pos[2];
+    let dy = p.eye()[1] - m.eye()[1];
+    let d = (dx * dx + dz * dz).sqrt();
+    let yaw = (path::atan2(dz, dx) * 57.2957763671875) as f32 - 90.0;
+    let pitch = -(path::atan2(dy, d) * 57.2957763671875) as f32;
+    m.pitch += degrees_difference(m.pitch, pitch).clamp(-x_max, x_max);
+    m.yaw += degrees_difference(m.yaw, yaw).clamp(-y_max, y_max);
+}
+
+/// `getLightLevelDependentMagicValue` моба: яркость у глаз.
+fn mob_brightness(m: &Mob, c: &Ctx) -> f32 {
+    let e = m.eye();
+    c.info([
+        e[0].floor() as i32,
+        e[1].floor() as i32,
+        e[2].floor() as i32,
+    ])
+    .brightness
 }
 
 /// Общее у `TargetGoal`.
@@ -262,11 +350,22 @@ impl Goal {
             Goal::LookAround { .. } => MOVE | LOOK,
             Goal::EatBlock { .. } => MOVE | LOOK | JUMP,
             Goal::NearestPlayer { .. } | Goal::HurtBy { .. } => TARGET,
+            Goal::Swell { .. } | Goal::FleeSun { .. } => MOVE,
+            Goal::RangedBow(_) => MOVE | LOOK,
+            Goal::RestrictSun => 0,
+            Goal::Leap { .. } => JUMP | MOVE,
         }
     }
 
     pub fn every_tick(&self) -> bool {
-        matches!(self, Goal::Float | Goal::LookAround { .. } | Goal::Melee(_))
+        matches!(
+            self,
+            Goal::Float
+                | Goal::LookAround { .. }
+                | Goal::Melee(_)
+                | Goal::Swell { .. }
+                | Goal::RangedBow(_)
+        )
     }
 }
 
@@ -720,8 +819,14 @@ fn can_use(g: &mut Goal, m: &mut Mob, c: &mut Ctx) -> bool {
             g.path.is_some() || super::in_reach(m, &p)
         }
         Goal::NearestPlayer {
-            interval, found, ..
+            interval,
+            day_neutral,
+            found,
+            ..
         } => {
+            if *day_neutral && mob_brightness(m, c) >= 0.5 {
+                return false;
+            }
             if *interval > 0 && c.next_int(*interval) != 0 {
                 return false;
             }
@@ -741,6 +846,52 @@ fn can_use(g: &mut Goal, m: &mut Mob, c: &mut Ctx) -> bool {
             };
             // `HURT_BY_TARGETING` без дальности и взгляда: лишь бы можно было бить.
             stamp != *timestamp && c.prey(attacker).is_some()
+        }
+        Goal::Swell { .. } => {
+            m.swell_dir > 0
+                || m.target
+                    .and_then(|t| c.player(t))
+                    .is_some_and(|p| dist2(m.pos, p.pos) < 9.0)
+        }
+        Goal::RangedBow(_) => m.target.is_some(),
+        // Голова пуста: шлемов у мобов пока нет.
+        Goal::RestrictSun => c.s.bright_outside,
+        Goal::FleeSun { to, .. } => {
+            if m.target.is_some() || !c.s.bright_outside || !m.on_fire {
+                return false;
+            }
+            let b = m.pos.map(|v| v.floor() as i32);
+            if !c.info(b).sky {
+                return false;
+            }
+            // `getHidePos`.
+            for _ in 0..10 {
+                let p = [
+                    b[0] + c.next_int(20) - 10,
+                    b[1] + c.next_int(6) - 3,
+                    b[2] + c.next_int(20) - 10,
+                ];
+                if !c.info(p).sky && walk_value(m, c, p) < 0.0 {
+                    *to = [
+                        f64::from(p[0]) + 0.5,
+                        f64::from(p[1]),
+                        f64::from(p[2]) + 0.5,
+                    ];
+                    return true;
+                }
+            }
+            false
+        }
+        Goal::Leap { target, .. } => {
+            let Some(p) = m.target.and_then(|t| c.player(t)) else {
+                return false;
+            };
+            *target = Some(p.uuid);
+            let d = dist2(m.pos, p.pos);
+            if !(4.0..=16.0).contains(&d) || !m.on_ground {
+                return false;
+            }
+            c.next_int(reduced(5)) == 0
         }
     }
 }
@@ -765,14 +916,23 @@ fn can_continue(g: &mut Goal, m: &mut Mob, c: &mut Ctx) -> bool {
             .is_some_and(|p| dist2(m.pos, p.pos) <= *range * *range && *time > 0),
         Goal::LookAround { time, .. } => *time >= 0,
         Goal::EatBlock { tick } => *tick > 0,
-        Goal::Melee(_) => {
-            // `followingTargetEvenIfNotSeen = false`: пока не дошли.
-            m.target.and_then(|t| c.prey(t)).is_some() && !m.nav.is_done()
+        Goal::Melee(g) => {
+            if g.spider && mob_brightness(m, c) >= 0.5 && c.next_int(100) == 0 {
+                m.target = None;
+                return false;
+            }
+            // Творческий и наблюдатель — не добыча. Без `follow` — пока не дошли.
+            m.target.and_then(|t| c.prey(t)).is_some() && (g.follow || !m.nav.is_done())
         }
         Goal::NearestPlayer { tg, .. } => target_continue(tg, true, m, c),
         Goal::HurtBy { tg, .. } => target_continue(tg, true, m, c),
+        Goal::RangedBow(_) => m.target.is_some() || !m.nav.is_done(),
+        Goal::FleeSun { .. } => !m.nav.is_done(),
+        Goal::Leap { .. } => !m.on_ground,
         // `Goal.canContinueToUse` по умолчанию — снова `canUse`.
-        Goal::Float | Goal::Tempt { .. } => can_use(g, m, c),
+        Goal::Float | Goal::Tempt { .. } | Goal::Swell { .. } | Goal::RestrictSun => {
+            can_use(g, m, c)
+        }
     }
 }
 
@@ -830,6 +990,33 @@ fn start(g: &mut Goal, m: &mut Mob, c: &mut Ctx) {
             }
             tg.unseen = 0;
         }
+        Goal::Swell { target } => {
+            m.nav.stop();
+            *target = m.target;
+        }
+        Goal::RangedBow(_) => m.aggressive = true,
+        Goal::RestrictSun => m.nav.avoid_sun = true,
+        Goal::FleeSun { speed, to } => {
+            let (speed, to) = (*speed, *to);
+            move_to(m, c, to, 1, speed);
+        }
+        Goal::Leap { y, target } => {
+            let Some(p) = target.and_then(|t| c.player(t)) else {
+                return;
+            };
+            let d = [p.pos[0] - m.pos[0], 0.0, p.pos[2] - m.pos[2]];
+            let l2 = d[0] * d[0] + d[2] * d[2];
+            let mut v = d;
+            if l2 > 1.0e-7 {
+                let l = l2.sqrt();
+                v = [
+                    d[0] / l * 0.4 + m.vel[0] * 0.2,
+                    0.0,
+                    d[2] / l * 0.4 + m.vel[2] * 0.2,
+                ];
+            }
+            m.vel = [v[0], *y, v[2]];
+        }
         Goal::Float | Goal::Breed { .. } | Goal::Tempt { .. } => {}
     }
 }
@@ -865,7 +1052,19 @@ fn stop(g: &mut Goal, m: &mut Mob, c: &mut Ctx) {
             m.target = None;
             tg.target_mob = None;
         }
-        Goal::Float | Goal::Panic { .. } | Goal::LookAround { .. } => {}
+        Goal::Swell { target } => *target = None,
+        Goal::RangedBow(g) => {
+            m.aggressive = false;
+            g.see_time = 0;
+            g.attack_time = -1;
+            m.using_item = None;
+        }
+        Goal::RestrictSun => m.nav.avoid_sun = false,
+        Goal::Float
+        | Goal::Panic { .. }
+        | Goal::LookAround { .. }
+        | Goal::FleeSun { .. }
+        | Goal::Leap { .. } => {}
     }
 }
 
@@ -946,10 +1145,85 @@ fn tick(g: &mut Goal, m: &mut Mob, c: &mut Ctx) {
             }
         }
         Goal::Melee(g) => melee_tick(g, m, c),
+        Goal::Swell { target } => {
+            // `SwellGoal.tick`: цель далеко (> 7) или не видна — сдуваться.
+            m.swell_dir = match target.and_then(|t| c.player(t)) {
+                Some(p) if dist2(m.pos, p.pos) <= 49.0 && c.sees(m, &p) => 1,
+                _ => -1,
+            };
+        }
+        Goal::RangedBow(g) => bow_tick(g, m, c),
         Goal::Panic { .. }
         | Goal::Stroll { .. }
         | Goal::NearestPlayer { .. }
-        | Goal::HurtBy { .. } => {}
+        | Goal::HurtBy { .. }
+        | Goal::RestrictSun
+        | Goal::FleeSun { .. }
+        | Goal::Leap { .. } => {}
+    }
+}
+
+/// `RangedBowAttackGoal.tick`.
+fn bow_tick(g: &mut RangedBow, m: &mut Mob, c: &mut Ctx) {
+    let Some(p) = m.target.and_then(|t| c.player(t)) else {
+        return;
+    };
+    let d2 = dist2(m.pos, p.pos);
+    let see = c.sees(m, &p);
+    if see != (g.see_time > 0) {
+        g.see_time = 0;
+    }
+    if see {
+        g.see_time += 1;
+    } else {
+        g.see_time -= 1;
+    }
+    if d2 <= f64::from(BOW_RADIUS_SQR) && g.see_time >= 20 {
+        m.nav.stop();
+        g.strafing_time += 1;
+    } else {
+        move_to(m, c, p.pos, 0, g.speed);
+        g.strafing_time = -1;
+    }
+    if g.strafing_time >= 20 {
+        if c.next_float() < 0.3 {
+            g.clockwise = !g.clockwise;
+        }
+        if c.next_float() < 0.3 {
+            g.backwards = !g.backwards;
+        }
+        g.strafing_time = 0;
+    }
+    if g.strafing_time > -1 {
+        if d2 > f64::from(BOW_RADIUS_SQR * 0.75) {
+            g.backwards = false;
+        } else if d2 < f64::from(BOW_RADIUS_SQR * 0.25) {
+            g.backwards = true;
+        }
+        m.move_ctl.strafe(
+            if g.backwards { -0.5 } else { 0.5 },
+            if g.clockwise { 0.5 } else { -0.5 },
+        );
+        look_at(m, &p, 30.0, 30.0);
+    } else {
+        m.look_ctl.set(p.eye(), 30.0, 30.0);
+    }
+    if let Some(ticks) = m.using_item {
+        if !see && g.see_time < -60 {
+            m.using_item = None;
+        } else if see && ticks >= 20 {
+            m.using_item = None;
+            m.out.push(Out::Shoot {
+                target: p.uuid,
+                power: bow_power(ticks),
+            });
+            g.attack_time = bow_interval(c.s.difficulty);
+        }
+    } else {
+        g.attack_time -= 1;
+        if g.attack_time <= 0 && g.see_time >= -60 {
+            m.using_item = Some(0);
+        }
     }
 }
 
@@ -958,7 +1232,7 @@ fn melee_tick(g: &mut Melee, m: &mut Mob, c: &mut Ctx) {
     if let Some(p) = m.target.and_then(|t| c.prey(t)) {
         m.look_ctl.set(p.eye(), 30.0, 30.0);
         g.recalc = (g.recalc - 1).max(0);
-        if c.sees(m, &p)
+        if (g.follow || c.sees(m, &p))
             && g.recalc <= 0
             && (g.pathed == [0.0; 3] || dist2(p.pos, g.pathed) >= 1.0 || c.next_float() < 0.05)
         {
@@ -991,11 +1265,11 @@ fn melee_tick(g: &mut Melee, m: &mut Mob, c: &mut Ctx) {
 /// Цели вида (`registerGoals`, `addBehaviourGoals`): движение и выбор цели.
 pub fn for_species(species: Species) -> (Selector, Selector) {
     let info = species.info();
-    let stroll = |p| {
+    let stroll_at = |p, speed| {
         (
             p,
             Goal::Stroll {
-                speed: 1.0,
+                speed,
                 interval: 120,
                 avoid_water: true,
                 to: [0.0; 3],
@@ -1021,33 +1295,98 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
             },
         )
     };
-    if species == Species::Zombie {
-        return (
-            Selector::new(vec![
-                (3, Goal::Melee(Box::new(Melee::new(1.0, true)))),
-                stroll(7),
-                look(8, 8.0),
-                around(8),
-            ]),
-            Selector::new(vec![
-                (
-                    1,
-                    Goal::HurtBy {
-                        alert: true,
-                        timestamp: 0,
-                        tg: TargetState::default(),
-                    },
-                ),
-                (
-                    2,
-                    Goal::NearestPlayer {
-                        interval: reduced(10),
-                        found: None,
-                        tg: TargetState::default(),
-                    },
-                ),
-            ]),
-        );
+    let hurt_by = |p, alert| {
+        (
+            p,
+            Goal::HurtBy {
+                alert,
+                timestamp: 0,
+                tg: TargetState::default(),
+            },
+        )
+    };
+    let nearest = |p, day_neutral| {
+        (
+            p,
+            Goal::NearestPlayer {
+                interval: reduced(10),
+                day_neutral,
+                found: None,
+                tg: TargetState::default(),
+            },
+        )
+    };
+    match species {
+        Species::Zombie => {
+            return (
+                Selector::new(vec![
+                    (3, Goal::Melee(Box::new(Melee::new(1.0, true)))),
+                    stroll_at(7, 1.0),
+                    look(8, 8.0),
+                    around(8),
+                ]),
+                Selector::new(vec![hurt_by(1, true), nearest(2, false)]),
+            );
+        }
+        // `AvoidEntityGoal` от кошек (3) пропущен: кошек нет.
+        Species::Creeper => {
+            return (
+                Selector::new(vec![
+                    (1, Goal::Float),
+                    (2, Goal::Swell { target: None }),
+                    (4, Goal::Melee(Box::new(Melee::new(1.0, false)))),
+                    stroll_at(5, 0.8),
+                    look(6, 8.0),
+                    around(6),
+                ]),
+                Selector::new(vec![nearest(1, false), hurt_by(2, false)]),
+            );
+        }
+        // `AvoidEntityGoal` от волков (3) пропущен; лук в руке всегда, так что
+        // вместо ближнего боя — `RangedBowAttackGoal`.
+        Species::Skeleton => {
+            return (
+                Selector::new(vec![
+                    (2, Goal::RestrictSun),
+                    (
+                        3,
+                        Goal::FleeSun {
+                            speed: 1.0,
+                            to: [0.0; 3],
+                        },
+                    ),
+                    (4, Goal::RangedBow(Box::new(RangedBow::new(1.0)))),
+                    stroll_at(5, 1.0),
+                    look(6, 8.0),
+                    around(6),
+                ]),
+                Selector::new(vec![hurt_by(1, false), nearest(2, false)]),
+            );
+        }
+        // `AvoidEntityGoal` от броненосцев (2) пропущен.
+        Species::Spider => {
+            let mut attack = Melee::new(1.0, false);
+            attack.follow = true;
+            attack.spider = true;
+            return (
+                Selector::new(vec![
+                    (1, Goal::Float),
+                    (
+                        3,
+                        Goal::Leap {
+                            y: f64::from(0.4f32),
+                            target: None,
+                        },
+                    ),
+                    (4, Goal::Melee(Box::new(attack))),
+                    stroll_at(5, 0.8),
+                    look(6, 8.0),
+                    around(6),
+                ]),
+                Selector::new(vec![hurt_by(1, false), nearest(2, true)]),
+            );
+        }
+        _ => {}
     }
     // Животные: `Cow`, `Pig`, `Sheep`, `Chicken`. У овцы своя нумерация:
     // `EatBlockGoal` на 5, прогулка и взгляд сдвинуты на единицу.
@@ -1091,7 +1430,7 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
     if sheep {
         goals.push((5, Goal::EatBlock { tick: 0 }));
     }
-    goals.push(stroll(5 + shift));
+    goals.push(stroll_at(5 + shift, 1.0));
     goals.push(look(6 + shift, 6.0));
     goals.push(around(7 + shift));
     (Selector::new(goals), Selector::default())
@@ -1131,6 +1470,11 @@ mod tests {
                             Goal::LookAtPlayer { .. } => "look",
                             Goal::LookAround { .. } => "around",
                             Goal::Melee(_) => "melee",
+                            Goal::Swell { .. } => "swell",
+                            Goal::RangedBow(_) => "bow",
+                            Goal::RestrictSun => "restrict_sun",
+                            Goal::FleeSun { .. } => "flee_sun",
+                            Goal::Leap { .. } => "leap",
                             _ => "?",
                         },
                     )
@@ -1180,6 +1524,39 @@ mod tests {
         assert_eq!(
             pri(Species::Zombie),
             [(3, "melee"), (7, "stroll"), (8, "look"), (8, "around")]
+        );
+        assert_eq!(
+            pri(Species::Creeper),
+            [
+                (1, "float"),
+                (2, "swell"),
+                (4, "melee"),
+                (5, "stroll"),
+                (6, "look"),
+                (6, "around")
+            ]
+        );
+        assert_eq!(
+            pri(Species::Skeleton),
+            [
+                (2, "restrict_sun"),
+                (3, "flee_sun"),
+                (4, "bow"),
+                (5, "stroll"),
+                (6, "look"),
+                (6, "around")
+            ]
+        );
+        assert_eq!(
+            pri(Species::Spider),
+            [
+                (1, "float"),
+                (3, "leap"),
+                (4, "melee"),
+                (5, "stroll"),
+                (6, "look"),
+                (6, "around")
+            ]
         );
     }
 }

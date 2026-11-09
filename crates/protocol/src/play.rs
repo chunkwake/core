@@ -1505,14 +1505,16 @@ pub fn mob_data(
     id: i32,
     entity_id: i32,
     health: f32,
-    baby: bool,
+    baby: Option<bool>,
     wool: Option<u8>,
     name: Option<&serde_json::Value>,
 ) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id).var_int(entity_id);
     w.u8(9).var_int(3).f32(health);
-    w.u8(16).var_int(8).bool(baby);
+    if let Some(baby) = baby {
+        w.u8(16).var_int(8).bool(baby);
+    }
     if let Some(wool) = wool {
         w.u8(18).var_int(0).u8(wool);
     }
@@ -1532,6 +1534,41 @@ pub fn mob_flags(id: i32, entity_id: i32, flags: u8) -> Vec<u8> {
     w.var_int(id).var_int(entity_id);
     w.u8(15).var_int(0).u8(flags);
     w.u8(0xff);
+    w.buf
+}
+
+/// Значение `SynchedEntityData`: байт, целое (`VarInt`) или логическое.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Meta {
+    Byte(u8),
+    Int(i32),
+    Bool(bool),
+}
+
+/// `set_entity_data` с произвольными полями `(индекс, значение)`.
+pub fn entity_meta(id: i32, entity_id: i32, fields: &[(u8, Meta)]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_id);
+    for &(i, v) in fields {
+        match v {
+            Meta::Byte(b) => w.u8(i).var_int(0).u8(b),
+            Meta::Int(n) => w.u8(i).var_int(1).var_int(n),
+            Meta::Bool(b) => w.u8(i).var_int(8).bool(b),
+        };
+    }
+    w.u8(0xff);
+    w.buf
+}
+
+/// `set_equipment`: слоты (`EquipmentSlot` id, 0 — основная рука) и стопки.
+pub fn set_equipment(id: i32, entity_id: i32, slots: &[(u8, crate::inventory::Slot)]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_id);
+    for (n, &(slot, stack)) in slots.iter().enumerate() {
+        let more = if n + 1 < slots.len() { 0x80 } else { 0 };
+        w.u8(slot | more);
+        crate::inventory::write_stack(&mut w, stack);
+    }
     w.buf
 }
 

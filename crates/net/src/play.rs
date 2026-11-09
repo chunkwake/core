@@ -97,6 +97,7 @@ struct Ids {
     rotate_head: i32,
     remove_entities: i32,
     set_entity_data: i32,
+    set_equipment: i32,
     take_item_entity: i32,
     set_entity_motion: i32,
     set_held_slot: i32,
@@ -2545,6 +2546,7 @@ impl PlayPlan {
                 rotate_head: cb("rotate_head")?,
                 remove_entities: cb("remove_entities")?,
                 set_entity_data: cb("set_entity_data")?,
+                set_equipment: cb("set_equipment")?,
                 take_item_entity: cb("take_item_entity")?,
                 set_entity_motion: cb("set_entity_motion")?,
                 set_held_slot: cb("set_held_slot")?,
@@ -6317,7 +6319,7 @@ impl PlayPlan {
                                     }
                                     gone.push(id);
                                 } else {
-                                    hurt.push((alive_ids[k], d, punch, vel));
+                                    hurt.push((alive_ids[k], d, punch, vel, a.owner));
                                     if a.stopped {
                                         gone.push(id);
                                     }
@@ -6440,8 +6442,25 @@ impl PlayPlan {
                 play::set_entity_motion(self.ids.set_entity_motion, id, vel),
             );
         }
-        for ((uuid, entity), d, punch, vel) in hurt {
-            self.push_control(uuid, Control::Hurt(d, Cause::Arrow));
+        for ((uuid, entity), d, punch, vel, owner) in hurt {
+            // Стрела моба: урон `arrow` со стрелком-не-игроком растёт со сложностью.
+            let shooter = owner.and_then(|o| {
+                let mobs = self.sim().mobs.lock().unwrap();
+                mobs.values()
+                    .find(|e| e.mob.uuid == o.as_u128())
+                    .map(|e| e.mob.species.name())
+            });
+            let (d, cause) = match shooter {
+                Some(kind) => (
+                    survival::mob_damage_for(self.difficulty(), d),
+                    Cause::MobArrow(kind),
+                ),
+                None => (d, Cause::Arrow),
+            };
+            if d <= 0.0 {
+                continue;
+            }
+            self.push_control(uuid, Control::Hurt(d, cause));
             if punch > 0 {
                 let h = (vel[0] * vel[0] + vel[2] * vel[2]).sqrt();
                 if h > 1e-6 {
@@ -8986,6 +9005,26 @@ impl PlayPlan {
         fire: bool,
         water_shield: Option<[i32; 3]>,
     ) {
+        self.explode_full(center, power, rails_safe, fire, water_shield, None);
+    }
+
+    /// Взрыв моба (`ExplosionInteraction.MOB`): блоки рушатся только при
+    /// `mob_griefing`, а дроп — с шансом `1 / мощность` (`mob_explosion_drop_decay`).
+    pub(super) fn explode_mob(&self, center: [f64; 3], power: f32, species: &'static str) {
+        self.explode_full(center, power, false, false, None, Some(species));
+    }
+
+    fn explode_full(
+        &self,
+        center: [f64; 3],
+        power: f32,
+        rails_safe: bool,
+        fire: bool,
+        water_shield: Option<[i32; 3]>,
+        mob: Option<&'static str>,
+    ) {
+        let keep_blocks = mob.is_some() && !self.vars.flag("mob_griefing");
+        let drop_chance = if mob.is_some() { 1.0 / power } else { 0.25 };
         let cache = std::cell::RefCell::new(HashMap::<[i32; 3], Option<f32>>::new());
         let is_rail = |p: [i32; 3]| {
             self.block(p)
@@ -9049,9 +9088,10 @@ impl PlayPlan {
         let mut blocks: Vec<_> = affected
             .into_iter()
             .filter(|&p| !(rails_safe && (is_rail(p) || is_rail([p[0], p[1] + 1, p[2]]))))
+            .filter(|_| !keep_blocks)
             .collect();
         blocks.sort_unstable();
-        self.damage_tnt_targets(center, power);
+        self.damage_tnt_targets(center, power, mob);
         let fire_at: Vec<[i32; 3]> = if fire { blocks.clone() } else { Vec::new() };
         for block in blocks {
             let Some(state) = self.block(block) else {
@@ -9087,7 +9127,7 @@ impl PlayPlan {
             self.unlink_chest(block, state);
             touched.extend(self.update_connections(block));
             touched.extend_from_slice(&crate::redstone::around(block));
-            if rand::random::<f32>() < 0.25 {
+            if rand::random::<f32>() < drop_chance {
                 let from = [
                     block[0] as f64 + 0.5,
                     block[1] as f64 + 0.5,
@@ -9157,7 +9197,11 @@ impl PlayPlan {
         }
     }
 
-    fn damage_tnt_targets(&self, center: [f64; 3], power: f32) {
+    /// Урон взрыва. Тип `explosion` и `player_explosion` масштабируется
+    /// сложностью всегда (`scaling: always`); `mob` — вид-источник.
+    fn damage_tnt_targets(&self, center: [f64; 3], power: f32, mob: Option<&'static str>) {
+        let difficulty = self.difficulty();
+        let cause = mob.map_or(Cause::Explosion, Cause::MobExplosion);
         let reach = power as f64 * 2.0;
         // Взрыв задевает только игроков своего измерения.
         let dim = self.active_dim();
@@ -9184,9 +9228,12 @@ impl PlayPlan {
             if dist >= reach {
                 continue;
             }
-            let damage = crate::tnt::damage(dist, self.explosion_exposure(center, eye), power);
+            let damage = survival::mob_damage_for(
+                difficulty,
+                crate::tnt::damage(dist, self.explosion_exposure(center, eye), power),
+            );
             if damage > 0.0 {
-                self.push_control(uuid, Control::Hurt(damage, Cause::Explosion));
+                self.push_control(uuid, Control::Hurt(damage, cause));
             }
         }
         let mut mobs = self.sim().mobs.lock().unwrap();
@@ -20356,6 +20403,8 @@ impl PlayPlan {
             // `minecraft:outside_border` — сетевой ID из реестра.
             Cause::OutsideBorder => Some(self.survival.damage_void),
             Cause::Mob(_) => Some(self.survival.damage_mob),
+            Cause::MobArrow(_) => Some(self.survival.damage_arrow),
+            Cause::MobExplosion(_) => Some(self.survival.damage_explosion),
             Cause::Generic => None,
         };
         if let Some(t) = damage_type {
@@ -20402,7 +20451,7 @@ impl PlayPlan {
                     serde_json::json!({"translate": cause.death_key(), "with": [me.entry.name, {"translate": "entity.minecraft.arrow"}]})
                 }
                 // `death.attack.mob`: «%1$s убит %2$s» — имя вида из языкового ключа сущности.
-                Cause::Mob(kind) => {
+                Cause::Mob(kind) | Cause::MobArrow(kind) | Cause::MobExplosion(kind) => {
                     let key = format!(
                         "entity.minecraft.{}",
                         kind.strip_prefix("minecraft:").unwrap_or(kind)
