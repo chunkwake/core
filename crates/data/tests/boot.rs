@@ -81,3 +81,26 @@ fn brewing_recipes_cover_26_3_if_available() {
         )),
     );
 }
+
+/// Ключи реестров для `Registry` плагинов: встроенные по ID, data-driven,
+/// структуры и служебные строки свойств.
+#[test]
+fn plugin_registry_keys_if_available() {
+    let Some(root) = generated() else { return };
+    let builtin = chunkwake_data::registries::load_builtin(&root).unwrap();
+    let data = chunkwake_data::registries::RegistryData::load_with(&root, &builtin).unwrap();
+    let keys = chunkwake_data::registries::all_keys(&root, &builtin, &data).unwrap();
+    let attrs = &keys["attribute"];
+    let health = builtin["attribute"]["minecraft:max_health"] as usize;
+    assert_eq!(attrs[health], "minecraft:max_health");
+    assert!(keys["worldgen/biome"].contains(&"minecraft:plains".to_owned()));
+    assert!(keys["worldgen/structure"].contains(&"minecraft:village_plains".to_owned()));
+    assert!(
+        keys["#structure_type"].contains(&"minecraft:village_plains minecraft:jigsaw".to_owned())
+    );
+    let horn = keys["#instrument"]
+        .iter()
+        .find(|l| l.starts_with("minecraft:ponder_goat_horn "))
+        .unwrap();
+    assert_eq!(horn, "minecraft:ponder_goat_horn minecraft:item.goat_horn.sound.0 7 256");
+}

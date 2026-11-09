@@ -645,6 +645,11 @@ fn player_only(name: &str) -> bool {
     )
 }
 
+/// Умолчание атрибута (`Attribute.getDefaultValue` плагинов).
+pub fn default_value(name: &str) -> Option<f64> {
+    registry_bounds(name).map(|b| b.base)
+}
+
 fn registry_bounds(name: &str) -> Option<Bounds> {
     let (base, min, max) = match name {
         "minecraft:air_drag_modifier" => (1.0, 0.0, 2048.0),

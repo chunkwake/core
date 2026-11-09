@@ -2305,6 +2305,8 @@ pub struct SurvivalData {
     pub menu_furnace: [i32; 3],
     /// Состояние печи → то же с переключённым `lit`.
     pub furnace_lit: HashMap<u32, u32>,
+    /// Ключи всех реестров (`attribute`, `worldgen/biome` …) для `Registry` плагинов.
+    pub registry_keys: HashMap<String, Vec<String>>,
     /// Эффекты по имени (`minecraft:haste`) в реестре `mob_effect`.
     pub effects: HashMap<String, i32>,
     /// Сетевые ID атрибутов (`attribute`).
@@ -3792,6 +3794,57 @@ impl PlayPlan {
                 v.join(" ")
             };
             return format!("{}\n{}", join(&d.supported), join(&d.exclusive));
+        }
+        // `registry attribute 0`: ключи реестра по порядку ID с номера `from`,
+        // по строке, кусками до 7000 байт (ответ влезает в буфер моста);
+        // пусто — ключи кончились или реестра нет. `Registry` плагинов.
+        if let Some(rest) = line.strip_prefix("registry ") {
+            let (name, from) = rest.trim().split_once(' ').unwrap_or((rest.trim(), "0"));
+            let from: usize = from.parse().unwrap_or(0);
+            let mut out = String::new();
+            for k in self.survival.registry_keys.get(name).into_iter().flatten().skip(from) {
+                if out.len() + k.len() + 1 > 7000 {
+                    break;
+                }
+                out.push_str(k);
+                out.push('\n');
+            }
+            return out;
+        }
+        // `attrdefault minecraft:max_health`: умолчание атрибута, пусто — нет такого.
+        if let Some(name) = line.strip_prefix("attrdefault ") {
+            return crate::play::commands::attribute::default_value(name.trim())
+                .map_or(String::new(), |v| v.to_string());
+        }
+        // `gamerules`: `имя bool|int умолчание текущее` по строке (`GameRule`,
+        // `World.getGameRuleValue`).
+        if line == "gamerules" {
+            let defaults = crate::play::commands::state::defaults();
+            return defaults
+                .iter()
+                .map(|(name, default)| {
+                    let kind = match default {
+                        crate::play::commands::state::RuleValue::Bool(_) => "bool",
+                        crate::play::commands::state::RuleValue::Int(_) => "int",
+                        crate::play::commands::state::RuleValue::Text(_) => "text",
+                    };
+                    let current = self.vars.rule(name).unwrap_or_else(|| default.clone());
+                    format!("{name} {kind} {} {}", default.render(), current.render())
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        // `gamerule имя значение`: `1` — записано, пусто — нет правила или
+        // значение не того типа (`World.setGameRule`).
+        if let Some(rest) = line.strip_prefix("gamerule ") {
+            let Some((name, value)) = rest.trim().split_once(' ') else {
+                return String::new();
+            };
+            let parsed = self.vars.rule(name).and_then(|cur| cur.parse_like(value));
+            return match parsed.and_then(|v| self.vars.set_rule(name, v)) {
+                Some(_) => "1".into(),
+                None => String::new(),
+            };
         }
         if line == "enchantments" {
             return self.survival.enchantments.join(

@@ -783,6 +783,8 @@ fn survival_data(
             menu("minecraft:smoker")?,
         ],
         furnace_lit,
+        registry_keys: chunkwake_data::registries::all_keys(data_dir, builtin, registries)
+            .map_err(s)?,
         effects: chunkwake_data::registries::builtin_entries_of(builtin, "mob_effect")
             .map_err(s)?,
         attributes: chunkwake_data::registries::builtin_entries_of(builtin, "attribute")

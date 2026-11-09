@@ -2,7 +2,8 @@
 //! и печатает текст ответов из `system_chat` (строки NBT подряд), а также
 //! какие из имён `CHECK` есть в дереве `commands` у этого игрока.
 //!
-//! `opcmd_probe <addr> <packets.json> <name> <cmd>...`; `CHECK=mspt,plugins`.
+//! `opcmd_probe <addr> <packets.json> <name> <cmd>...`; `CHECK=mspt,plugins`,
+//! `DIG=x,y,z` — после команд сломать блок.
 use chunkwake_bots::{Client, Event, Ids};
 use chunkwake_data::packets::{Direction, PacketTable, State};
 use chunkwake_protocol::Writer;
@@ -67,6 +68,20 @@ async fn main() {
         c.send_raw(&w.buf).await.unwrap();
         let gap = std::env::var("GAP_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500);
         wait(&mut c, gap).await;
+        drain(&mut c);
+    }
+    // `DIG=x,y,z`: начать ломать блок (в творческом он ломается сразу) —
+    // события ломания у плагинов (`BlockBreakEvent`).
+    if let Some(p) = std::env::var("DIG").ok().map(|s| {
+        let v: Vec<i64> = s.split(',').map(|n| n.trim().parse().unwrap()).collect();
+        ((v[0] & 0x3FF_FFFF) << 38) | ((v[2] & 0x3FF_FFFF) << 12) | (v[1] & 0xFFF)
+    }) {
+        let action = id(Direction::Serverbound, "player_action");
+        println!("> dig");
+        let mut w = Writer::new();
+        w.var_int(action).var_int(0).i64(p).u8(1).var_int(1);
+        c.send_raw(&w.buf).await.unwrap();
+        wait(&mut c, 2000).await;
         drain(&mut c);
     }
 }

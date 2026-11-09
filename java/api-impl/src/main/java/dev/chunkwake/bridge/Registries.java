@@ -85,7 +85,7 @@ public final class Registries implements RegistryAccess {
     private synchronized KeyedRegistry<org.bukkit.enchantments.Enchantment> enchantments() {
         if (enchantments == null) {
             Map<NamespacedKey, String[]> all = new java.util.LinkedHashMap<>();
-            for (String line : Bridge.world("enchantments").split("\n")) {
+            for (String line : world("enchantments").split("\n")) {
                 String[] f = line.trim().split(" ");
                 NamespacedKey k = f.length == 10 ? NamespacedKey.fromString(f[0]) : null;
                 if (k != null) {
@@ -103,7 +103,7 @@ public final class Registries implements RegistryAccess {
     private synchronized KeyedRegistry<org.bukkit.potion.PotionEffectType> effects() {
         if (effects == null) {
             List<NamespacedKey> keys = new java.util.ArrayList<>();
-            for (String line : Bridge.world("effects").split("\n")) {
+            for (String line : world("effects").split("\n")) {
                 NamespacedKey k = NamespacedKey.fromString(line.trim());
                 if (k != null) {
                     keys.add(k);
@@ -119,7 +119,7 @@ public final class Registries implements RegistryAccess {
     private synchronized KeyedRegistry<ItemType> items() {
         if (items == null) {
             items = new KeyedRegistry<>(
-                    k -> ITEM_STACKS.containsKey(k) ? Stub.of(ItemType.class, new ItemTypeImpl(k)) : null,
+                    k -> ITEM_STACKS.containsKey(k) ? Stub.of(ItemType.Typed.class, new ItemTypeImpl(k)) : null,
                     () -> ITEM_STACKS.keySet().stream());
         }
         return items;
@@ -129,7 +129,7 @@ public final class Registries implements RegistryAccess {
     private synchronized KeyedRegistry<org.bukkit.block.BlockType> blocks() {
         if (blocks == null) {
             blocks = new KeyedRegistry<>(
-                    k -> isBlock(k) ? Stub.of(org.bukkit.block.BlockType.class, new BlockTypeImpl(k)) : null,
+                    k -> isBlock(k) ? Stub.of(org.bukkit.block.BlockType.Typed.class, new BlockTypeImpl(k)) : null,
                     () -> blockKeys().stream());
         }
         return blocks;
@@ -139,14 +139,14 @@ public final class Registries implements RegistryAccess {
     private static volatile List<NamespacedKey> blockKeys;
 
     static boolean isBlock(NamespacedKey k) {
-        return IS_BLOCK.computeIfAbsent(k, key -> "1".equals(Bridge.world("isblock " + key)));
+        return IS_BLOCK.computeIfAbsent(k, key -> "1".equals(world("isblock " + key)));
     }
 
     private static List<NamespacedKey> blockKeys() {
         if (blockKeys == null) {
             List<NamespacedKey> out = new java.util.ArrayList<>();
             while (true) {
-                String part = Bridge.world("blocks " + out.size());
+                String part = world("blocks " + out.size());
                 if (part.isEmpty()) {
                     break;
                 }
@@ -183,15 +183,84 @@ public final class Registries implements RegistryAccess {
         return ITEM_STACKS.getOrDefault(m.getKey(), 64);
     }
 
+    /**
+     * Источник данных сервера. В сервере — запрос к Rust через мост; тесты
+     * подменяют его чтением тех же ванильных отчётов (без нативной части).
+     */
+    static volatile Function<String, String> source = Bridge::world;
+
+    static String world(String line) {
+        return source.apply(line);
+    }
+
+    /** Строки ответа {@code registry <имя> <с какой>} целиком: ответ приходит кусками. */
+    static List<String> registryLines(String name) {
+        List<String> out = new java.util.ArrayList<>();
+        while (true) {
+            String part = world("registry " + name + " " + out.size());
+            if (part.isEmpty()) {
+                return out;
+            }
+            for (String line : part.split("\n")) {
+                if (!line.isEmpty()) {
+                    out.add(line);
+                }
+            }
+        }
+    }
+
+    /**
+     * Порядок инициализации классов, как при загрузке Paper: {@code GameRule}
+     * раньше {@code GameRules}. Иначе плагин, первым тронувший
+     * {@code GameRules.X}, ловит цикл {@code <clinit>}: {@code GameRule}
+     * читает ещё пустые поля {@code GameRules} и строит мост к {@code null}.
+     */
+    static void bootstrap() {
+        try {
+            Class.forName("org.bukkit.GameRule", true, Registries.class.getClassLoader());
+        } catch (Throwable t) {
+            Bridge.log(2, "registries: GameRule init failed: " + t);
+        }
+    }
+
+    /** Тип значений реестра — из объявления поля {@code RegistryKey<T>}. */
+    private static final Map<RegistryKey<?>, Class<?>> TYPES = registryTypes();
+
+    private static Map<RegistryKey<?>, Class<?>> registryTypes() {
+        Map<RegistryKey<?>, Class<?>> out = new java.util.LinkedHashMap<>();
+        for (java.lang.reflect.Field f : RegistryKey.class.getFields()) {
+            if (f.getType() != RegistryKey.class
+                    || !(f.getGenericType() instanceof java.lang.reflect.ParameterizedType p)) {
+                continue;
+            }
+            java.lang.reflect.Type arg = p.getActualTypeArguments()[0];
+            if (arg instanceof java.lang.reflect.ParameterizedType pa) {
+                arg = pa.getRawType();
+            }
+            try {
+                out.put((RegistryKey<?>) f.get(null), (Class<?>) arg);
+            } catch (IllegalAccessException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+        return out;
+    }
+
+    /** Все ключи реестров с типами значений (для тестов и {@code getRegistry(Class)}). */
+    static Map<RegistryKey<?>, Class<?>> registryTypesView() {
+        return java.util.Collections.unmodifiableMap(TYPES);
+    }
+
+    private final Map<RegistryKey<?>, KeyedRegistry<?>> generic = new ConcurrentHashMap<>();
+
     @Override
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings({"unchecked", "rawtypes"})
     public <T extends Keyed> Registry<T> getRegistry(Class<T> type) {
-        if (type == ItemType.class) return (Registry<T>) items();
-        if (type == org.bukkit.block.BlockType.class) return (Registry<T>) blocks();
-        if (type == org.bukkit.inventory.MenuType.class) return (Registry<T>) menus();
-        if (type == DamageType.class) return (Registry<T>) damageTypes();
-        if (type == org.bukkit.potion.PotionEffectType.class) return (Registry<T>) effects();
-        if (type == org.bukkit.enchantments.Enchantment.class) return (Registry<T>) enchantments();
+        for (var e : TYPES.entrySet()) {
+            if (e.getValue() == type) {
+                return getRegistry((RegistryKey) e.getKey());
+            }
+        }
         return new KeyedRegistry<>(k -> null, Stream::empty);
     }
 
@@ -204,7 +273,13 @@ public final class Registries implements RegistryAccess {
         if (key == RegistryKey.DAMAGE_TYPE) return (Registry<T>) damageTypes();
         if (key == RegistryKey.MOB_EFFECT) return (Registry<T>) effects();
         if (key == RegistryKey.ENCHANTMENT) return (Registry<T>) enchantments();
-        return new KeyedRegistry<>(k -> null, Stream::empty);
+        KeyedRegistry<?> r = generic.get(key);
+        if (r == null) {
+            KeyedRegistry<?> made = RegistryValues.registry(key, TYPES.get(key));
+            r = generic.putIfAbsent(key, made);
+            r = r != null ? r : made;
+        }
+        return (Registry<T>) r;
     }
 
     /** Реестр с ленивым созданием значений по ключу. */
@@ -256,7 +331,7 @@ public final class Registries implements RegistryAccess {
         public short getMaxDurability() { return 0; }
         public boolean hasBlockType() { return isBlock(key); }
         public org.bukkit.block.BlockType getBlockType() {
-            return isBlock(key) ? Stub.of(org.bukkit.block.BlockType.class, new BlockTypeImpl(key)) : null;
+            return isBlock(key) ? Stub.of(org.bukkit.block.BlockType.Typed.class, new BlockTypeImpl(key)) : null;
         }
         public boolean isEdible() { return false; }
         public String getTranslationKey() { return "item." + key.getNamespace() + "." + key.getKey(); }
@@ -283,7 +358,7 @@ public final class Registries implements RegistryAccess {
         public Material asMaterial() { return Material.matchMaterial(key.toString()); }
         public boolean hasItemType() { return ITEM_STACKS.containsKey(key); }
         public ItemType getItemType() {
-            return hasItemType() ? Stub.of(ItemType.class, new ItemTypeImpl(key)) : null;
+            return hasItemType() ? Stub.of(ItemType.Typed.class, new ItemTypeImpl(key)) : null;
         }
         public boolean isAir() {
             String k = key.getKey();
@@ -441,7 +516,7 @@ public final class Registries implements RegistryAccess {
 
         private synchronized void info() {
             if (supported == null) {
-                String[] l = Bridge.world("enchantinfo " + key).split("\n", -1);
+                String[] l = world("enchantinfo " + key).split("\n", -1);
                 supported = words(l.length > 0 ? l[0] : "");
                 exclusive = words(l.length > 1 ? l[1] : "");
             }

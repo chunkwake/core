@@ -266,6 +266,7 @@ final class ChunkwakeServer {
     private void registerBuiltins() {
         if (!corePermissions) {
             corePermissions = true;
+            Registries.bootstrap();
             org.bukkit.util.permissions.DefaultPermissions.registerCorePermissions();
             // Paper: `/mspt` только для операторов.
             if (plugins.getPermission("bukkit.command.mspt") == null) {
@@ -857,6 +858,63 @@ final class ChunkwakeServer {
         }
 
         public int getSeaLevel() { return 63; }
+
+        // --- Геймрулы: те же правила, что у `/gamerule` (общие на сервер) ---
+
+        public <T> T getGameRuleValue(org.bukkit.GameRule<T> rule) {
+            return rule instanceof RegistryValues.GameRuleImpl<?> r ? rule.getType().cast(
+                    RegistryValues.GameRules.value(r)) : null;
+        }
+
+        public <T> T getGameRuleDefault(org.bukkit.GameRule<T> rule) {
+            return rule == null ? null : rule.getDefaultValue();
+        }
+
+        public <T> boolean setGameRule(org.bukkit.GameRule<T> rule, T value) {
+            return rule instanceof RegistryValues.GameRuleImpl<?> r && value != null
+                    && RegistryValues.GameRules.set(r, value);
+        }
+
+        /** Имена как у {@code GameRule.getName()}: {@code minecraft:keep_inventory}. */
+        public String[] getGameRules() {
+            return RegistryValues.GameRules.names().stream().map(n -> "minecraft:" + n).toArray(String[]::new);
+        }
+
+        public boolean isGameRule(String name) {
+            return rule(name) != null;
+        }
+
+        public String getGameRuleValue(String name) {
+            org.bukkit.GameRule<?> r = rule(name);
+            Object v = r == null ? null : getGameRuleValue(r);
+            return v == null ? null : v.toString();
+        }
+
+        @SuppressWarnings("unchecked")
+        public boolean setGameRuleValue(String name, String value) {
+            org.bukkit.GameRule<Object> r = (org.bukkit.GameRule<Object>) rule(name);
+            if (r == null || value == null) {
+                return false;
+            }
+            Object parsed;
+            if ((Class<?>) r.getType() == Integer.class) {
+                try {
+                    parsed = Integer.parseInt(value);
+                } catch (NumberFormatException e) {
+                    return false;
+                }
+            } else if (value.equals("true") || value.equals("false")) {
+                parsed = Boolean.parseBoolean(value);
+            } else {
+                return false;
+            }
+            return setGameRule(r, parsed);
+        }
+
+        private static org.bukkit.GameRule<?> rule(String name) {
+            org.bukkit.NamespacedKey k = name == null ? null : org.bukkit.NamespacedKey.fromString(name);
+            return k == null ? null : org.bukkit.Registry.GAME_RULE.get(k);
+        }
 
         public org.bukkit.Location getSpawnLocation() {
             return new org.bukkit.Location(Bridge.server.world, 0, 64, 0);

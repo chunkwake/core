@@ -55,14 +55,25 @@ public final class ApiBridge implements InternalAPIBridge {
         });
     }
 
-    @Override public Biome constructLegacyCustomBiome() { throw todo("constructLegacyCustomBiome"); }
+    /** {@code Biome.CUSTOM}: как Paper {@code LegacyCustomBiomeImpl} — ключ {@code minecraft:custom}, имя CUSTOM. */
+    @Override public Biome constructLegacyCustomBiome() {
+        return Stub.of(Biome.class, new RegistryValues.KeyedValue(new org.bukkit.NamespacedKey("minecraft", "custom"), -1,
+                "worldgen/biome") {
+            @Override public String name() { return "CUSTOM"; }
+            @Override public String toString() { return "CUSTOM"; }
+        });
+    }
     @Override public CombatEntry createCombatEntry(LivingEntity e, DamageSource s, float d) { throw todo("createCombatEntry"); }
     @Override public CombatEntry createCombatEntry(DamageSource s, float d, FallLocationType f, float dist) { throw todo("createCombatEntry"); }
     @Override public Predicate<CommandSourceStack> restricted(Predicate<CommandSourceStack> p, boolean b) { return p; }
     @Override public ResolvableProfile defaultMannequinProfile() { throw todo("defaultMannequinProfile"); }
     @Override public SkinParts.Mutable allSkinParts() { throw todo("allSkinParts"); }
     @Override public Component defaultMannequinDescription() { throw todo("defaultMannequinDescription"); }
-    @Override public <M, L> GameRule<L> legacyGameRuleBridge(GameRule<M> r, Function<L, M> a, Function<M, L> b, Class<L> c) { throw todo("legacyGameRuleBridge"); }
+    @Override
+    @SuppressWarnings("unchecked")
+    public <M, L> GameRule<L> legacyGameRuleBridge(GameRule<M> r, Function<L, M> a, Function<M, L> b, Class<L> c) {
+        return new RegistryValues.Legacy<>((RegistryValues.GameRuleImpl<M>) r, a, b, c);
+    }
     @Override public Set<Pose> validMannequinPoses() { throw todo("validMannequinPoses"); }
     @Override public PoiType.Occupancy createOccupancy(String s) { throw todo("createOccupancy"); }
     @Override public DamageSource.Builder createDamageSourceBuilder(DamageType t) { return Events.sourceBuilder(t); }

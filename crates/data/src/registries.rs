@@ -186,6 +186,65 @@ pub fn builtin_ids_of(
     builtin_entries_of(builtin, registry)
 }
 
+/// Ключи всех реестров для плагинов (`Registry` Bukkit): встроенные — по
+/// числовому ID, синхронизируемые — по сетевому порядку, `worldgen/structure`
+/// — из файлов данных (он не синхронизируется, но плагинам нужен).
+pub fn all_keys(
+    root: &Path,
+    builtin: &Builtin,
+    data: &RegistryData,
+) -> Result<HashMap<String, Vec<String>>, DataError> {
+    let mut out = HashMap::new();
+    for (name, entries) in builtin {
+        let mut v: Vec<(&i32, &String)> = entries.iter().map(|(k, id)| (id, k)).collect();
+        v.sort();
+        out.insert(name.clone(), v.into_iter().map(|(_, k)| k.clone()).collect());
+    }
+    for r in &data.synchronized {
+        out.insert(r.name.clone(), r.entries.clone());
+    }
+    let dir = root.join("data/minecraft/worldgen/structure");
+    let structures = json_files(&dir)?;
+    // Служебные «реестры» со свойствами записей: `ключ значение…` по строке.
+    // `Structure.getStructureType` — поле `type` файла структуры.
+    out.insert(
+        "#structure_type".into(),
+        structures
+            .iter()
+            .map(|s| {
+                let json = read_json(&dir.join(format!("{s}.json")))?;
+                let kind = json["type"].as_str().unwrap_or("minecraft:jigsaw");
+                Ok(format!("minecraft:{s} {kind}"))
+            })
+            .collect::<Result<_, DataError>>()?,
+    );
+    out.insert(
+        "worldgen/structure".into(),
+        structures.into_iter().map(|s| format!("minecraft:{s}")).collect(),
+    );
+    // `MusicInstrument`: `ключ звук длительность дальность`.
+    let dir = root.join("data/minecraft/instrument");
+    out.insert(
+        "#instrument".into(),
+        json_files(&dir)?
+            .iter()
+            .map(|s| {
+                let json = read_json(&dir.join(format!("{s}.json")))?;
+                let sound = match &json["sound_event"] {
+                    serde_json::Value::String(id) => id.clone(),
+                    other => other["sound_id"].as_str().unwrap_or("").to_owned(),
+                };
+                Ok(format!(
+                    "minecraft:{s} {sound} {} {}",
+                    json["use_duration"].as_f64().unwrap_or(0.0),
+                    json["range"].as_f64().unwrap_or(0.0)
+                ))
+            })
+            .collect::<Result<_, DataError>>()?,
+    );
+    Ok(out)
+}
+
 /// `registries.json`: `{"minecraft:block": {"entries": {"minecraft:stone": {"protocol_id": 1}}}}`.
 pub fn load_builtin(root: &Path) -> Result<Builtin, DataError> {
     let path = root.join("reports/registries.json");
