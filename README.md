@@ -1,129 +1,294 @@
-# Chunkwake
+<div align="center">
 
-Многопоточное серверное ядро Minecraft Java Edition **26.3** на Rust.
-Совместимо с плагинами Bukkit/Paper/Purpur; для плагинов, заявивших
-`folia-supported`, работает параллельная модель Folia — остальные при этом
-продолжают работать в режиме совместимости, а не отключаются.
+# ⛏️ Chunkwake
 
-- Архитектура: [ARCHITECTURE.md](ARCHITECTURE.md)
-- Этапы: [docs/milestones.md](docs/milestones.md)
-- Критерии оценки: [docs/criteria.md](docs/criteria.md)
+**Серверное ядро Minecraft Java Edition 26.3, написанное с нуля на Rust.<br>
+Ванильное поведение 1 в 1 и плагины Paper и Folia без переписывания.**
 
-Основная ветка: `ver/26.3`.
+[![CI](https://github.com/chunkwake/core/actions/workflows/ci.yml/badge.svg?branch=ver/26.3)](https://github.com/chunkwake/core/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
+![Minecraft 26.3](https://img.shields.io/badge/Minecraft-26.3-62B47A)
+![Rust stable](https://img.shields.io/badge/Rust-stable-DEA584?logo=rust)
+![Paper API](https://img.shields.io/badge/Paper%20API-26.3-2F80ED)
+![Folia schedulers](https://img.shields.io/badge/Folia-schedulers-8A2BE2)
 
-## Первый запуск
+[Быстрый старт](#быстрый-старт) ·
+[Что уже работает](#что-уже-работает) ·
+[Плагины](#плагины) ·
+[Архитектура](#архитектура) ·
+[Участие](#участие) ·
+[English](#english)
 
-Ванильные данные игры (протокол, реестры, блоки, шаблоны структур) встраиваются в бинарник при сборке: `server.jar` и Java для запуска не нужны. Если данных на машине сборки нет, `build.rs` возьмёт готовый кэш `generated/26.3` или соберёт его из `server.jar` — об этом он напишет предупреждением. При первом запуске архив распаковывается в `generated/26.3` (около 27 МБ, один раз), дальше старт мгновенный. Сейчас сервер запускает базовый плоский мир; игровые механики ещё в разработке. При `online-mode=true` вход проверяется через Minecraft session server; при `false` имена игроков не проверяются.
+</div>
 
-Для сборки из исходников нужен JDK 21 или новее: `crates/datacache/build.rs` компилирует Java-экстракторы в `OUT_DIR`. При необходимости задайте `CHUNKWAKE_JAVAC` с путём к `javac`. Соберите бинарник командой `cargo build --release -p chunkwake-server`. Он появится как `target/release/chunkwake` (Windows: `target\release\chunkwake.exe`). Создайте каталог сервера и выполните команды ниже, заменив `chunkwake` на путь к бинарнику, если он не добавлен в `PATH`:
+---
 
-```text
-chunkwake setup --dir /path/to/server
-chunkwake doctor --dir /path/to/server
-chunkwake --dir /path/to/server
+> [!WARNING]
+> **Ранняя стадия.** Chunkwake уже держит выживание с генерацией мира, редстоуном,
+> мобами и плагинами, но это ещё не замена Paper на живом сервере. Что готово и
+> чего нет — в [фич-матрице](docs/feature-matrix.md), там всё честно.
+> Делайте резервные копии миров.
+
+## Зачем ещё одно ядро
+
+У владельца сервера сейчас неприятный выбор:
+
+| | Совместим с плагинами | Многопоточный |
+|---|:---:|:---:|
+| **Paper** | ✅ | ❌ один главный поток |
+| **Folia** | ⚠️ только плагины с `folia-supported` | ✅ |
+| **Chunkwake** | ✅ обычные плагины работают как в Paper | 🚧 движок на Rust, параллелизм — по этапам |
+
+Chunkwake убирает этот выбор. Движок, сеть, генерация, свет и хранилище — на
+Rust, без GC-пауз. Плагины — в настоящей JVM рядом с ним, на настоящем
+`paper-api.jar`. Плагин не знает, что сервер не на Java.
+
+Два правила, по которым принимаются решения:
+
+1. **Совместимость важнее скорости.** Если быстрее значит «плагин увидит другой
+   порядок событий», выбираем Paper-семантику.
+2. **Ваниль — эталон, а не вдохновение.** Поведение сверяется с байткодом
+   `server.jar` и Paper, а не с вики. Отличие от ванили — это баг.
+
+## Что уже работает
+
+По [фич-матрице](docs/feature-matrix.md): **66** семейств механик готово,
+**31** частично, **10** не начато. Протокол, чанки, Anvil, инвентарь, крафт,
+печи, чары и жидкости описаны отдельно в [этапах](docs/milestones.md).
+
+<table>
+<tr>
+<td valign="top" width="50%">
+
+**🌍 Мир**
+- Ванильная генерация оверворлда: рельеф, акиферы, 6 осей климата, пещеры, руды, деревья
+- Деревни, аванпосты и другие структуры (частично)
+- Нижний мир и Край со своей генерацией
+- Миры Anvil (`.mca`), читаемые ванилью в обе стороны, сжатие deflate / lz4 / без сжатия
+- Свет неба и блоков, граница мира, точка спавна по рельефу
+
+**⚡ Механики**
+- Редстоун: провода, поршни, повторители, компараторы, наблюдатели, раздатчики, лектор
+- Жидкости, огонь, листва, рост растений и случайные тики
+- Мобы, снаряды, лук, арбалет, сферы опыта
+- Наковальня, точило, крафтер, печи, станции
+- Таблички (с редактором и воском), книги (запись, подпись, чтение)
+
+</td>
+<td valign="top" width="50%">
+
+**🧩 Плагины**
+- Настоящий `paper-api.jar` в JVM внутри процесса сервера
+- События Bukkit и Paper в порядке Paper, отмена и подмена данных
+- Планировщики Folia: глобальный, региональный, асинхронный и сущности
+- `plugin.yml` и `paper-plugin.yml`, `libraries:` из Maven, `loader` и `bootstrapper`
+- Миры, PDC, Metadatable, реестры, теги, атрибуты, каналы плагинов
+- Ванильные классы `net.minecraft.*` в classpath для плагинов с NMS
+
+**🛠️ Эксплуатация**
+- Один бинарник со встроенными данными игры и API плагинов
+- Мастер настройки в терминале, `doctor`, `config set`
+- Резервные копии с проверкой контрольных сумм и откатом
+- Встроенный дашборд метрик
+- Ванильные команды с деревом, сверенным с `commands.json`
+
+</td>
+</tr>
+</table>
+
+## Цифры
+
+Ryzen 9 7945HX, release-сборка. Методика и сырые данные — в [docs/perf.md](docs/perf.md).
+
+| Замер | Chunkwake | Ваниль |
+|---|---|---|
+| Тик пустого сервера | **51 нс** | — |
+| Генерация чанков, 31 поток | **364.6 чанка/с** | — |
+| 400 тиков при `randomTickSpeed` 4096 | **32.5–33.5 с** | 43 с |
+| `/fill` 32×16×32 | **35 мс** | — |
+| Мир после полёта, 13 тыс. чанков, deflate 6 | 114 МБ | — |
+
+Скорость — вторая цель. Каждая оптимизация проверяется тем же сравнением с
+`server.jar`: например, после ускорения листвы проба совпадает с ванилью построчно,
+а хэш сгенерированного мира не меняется.
+
+## Быстрый старт
+
+### Готовый бинарник
+
+CI собирает полный релиз под **Windows x86_64** и **Linux x86_64** (musl,
+работает на любом дистрибутиве и в контейнере). Скачайте последний артефакт
+`chunkwake-26.3-<os>-<arch>` со страницы
+[Actions](https://github.com/chunkwake/core/actions/workflows/ci.yml): нужен вход в GitHub.
+Внутри один файл. `server.jar` и Java для запуска не нужны.
+
+```bash
+chunkwake setup --dir ./server    # мастер настройки в терминале
+chunkwake doctor --dir ./server   # проверка конфигурации, порта и Java
+chunkwake --dir ./server          # запуск
 ```
 
-В Windows PowerShell путь можно передать так: `chunkwake setup --dir "C:\Minecraft\Chunkwake"`. В Linux: `chunkwake setup --dir /srv/chunkwake`. `--dir` задаёт каталог для `server.properties` и относительных путей `vanilla-jar` и `generated-dir`; при запуске как службы передавайте его явно.
+Плагины кладутся в `server/plugins/`. Для них нужна **Java 25+**: сервер
+найдёт её по `java-path`, `CHUNKWAKE_JAVA` или `PATH`.
 
-`setup` открывает полноэкранную форму и требует терминал. Там, где терминала нет — по SSH без `-t`, в контейнере, в сценарии установки, — используйте `chunkwake setup --yes --dir /path/to/server`: он запишет значения по умолчанию, а менять их потом можно через `config set`. Существующий `server.properties` не перезаписывается.
+### Из исходников
 
-`server.jar` нужен только чтобы пересобрать данные игры: положите его в каталог сервера и задайте `vanilla-jar=server.jar`, если хотите другой набор данных или другую версию. Пустое значение `vanilla-jar` — обычный случай. Java (`java-path` или `CHUNKWAKE_JAVA`) требуется только для генерации данных из jar и для Java-плагинов — и для плагинов это **Java 25 или новее**: API собран под неё. `doctor` проверяет версию, если в `plugins/` есть jar'ы.
+Нужны Rust stable и JDK 21+ (Java-экстракторы данных собираются при сборке).
 
-## Платформы
-
-Готовые бинарники собираются под Windows x86_64 и Linux x86_64. Linux-сборка линкуется с musl, а не с glibc: тот же файл работает на Debian, Ubuntu, Alpine и в контейнерах без установленных библиотек. Артефакт называется `chunkwake-26.3-<os>-<arch>`, внутри `chunkwake` (`chunkwake.exe` на Windows), `README.md` и `LICENSE`.
-
-## Логи
-
-Сервер пишет лог в консоль и в файл `logs/` рядом с `server.properties`: `latest.log` — текущий запуск, `chunkwake.<дата>.log` — суточные файлы (хранятся 14 дней). Это важно для службы: без перенаправления вывода консольный лог пропадает. Не удалось создать каталог — сервер работает и пишет только в консоль, запуск не падает.
-
-## Каталог состояния
-
-Первый запуск распаковывает данные игры (≈27 МБ) и API плагинов (≈37 МБ). По умолчанию они лежат рядом с `server.properties`, но установку можно держать только для чтения — бинарник в `/usr/local/bin`, состояние в `/var/lib/chunkwake`:
-
-```text
-CHUNKWAKE_HOME=/var/lib/chunkwake chunkwake run --dir /srv/chunkwake
+```bash
+git clone https://github.com/chunkwake/core.git chunkwake
+cd chunkwake
+cargo build --release -p chunkwake-server
 ```
 
-`CHUNKWAKE_HOME` переносит `generated/` и `api/`; мир, `server.properties` и `logs/` остаются в `--dir`.
+Бинарник появится в `target/release/chunkwake`. Данные игры встраиваются в
+него при сборке. Если их нет, `build.rs` возьмёт кэш или соберёт его из `server.jar`.
 
-## Запуск как служба
+Служба systemd, Windows-служба, логи, `CHUNKWAKE_HOME`, резервные копии и все
+переменные сборки — в [docs/running.md](docs/running.md).
 
-Linux: готовый юнит — `contrib/systemd/chunkwake.service`. Скопируйте его в `/etc/systemd/system/`, поправьте пути и пользователя, затем `systemctl enable --now chunkwake`. Юнит запускает сервер отдельным пользователем, держит состояние в `/var/lib/chunkwake` и перезапускает процесс при падении.
+## Плагины
 
-Windows: зарегистрируйте службу через `sc` или NSSM с командой `/path/chunkwake.exe run --dir C:\Minecraft\Chunkwake`. Сервер обрабатывает Ctrl+C как штатную остановку (закрывает соединения, выгружает плагины и сохраняет мир), поэтому в NSSM укажите остановку сигналом, а не убийством процесса.
+```mermaid
+flowchart LR
+    C([Клиент 26.3]) <-->|протокол| N
+    subgraph S [процесс chunkwake]
+        direction LR
+        N[Сеть и игроки<br/>Rust, tokio] --- W[Мир, генерация,<br/>редстоун, мобы<br/>Rust]
+        N <-->|события, запросы| B[Мост JNI]
+        B <--> J[JVM<br/>paper-api.jar + api-impl]
+        J --- P[(plugins/*.jar)]
+    end
+```
 
-Остановить сервер можно командой `stop` в консоли; `backup restore --yes` не спрашивает подтверждение — это тот же сценарий без терминала.
+- **JVM внутри процесса.** Сервер поднимает её через JNI. Плагины получают
+  `Bukkit.getServer()`, `JavaPlugin`, события и планировщики, как в Paper.
+- **API не переписан.** В classpath лежит официальный `paper-api.jar`. Реализуется
+  только поведение, поэтому сигнатуры всегда совпадают с Paper.
+- **События дёшевы.** Если на событие нет слушателей, Rust его не отправляет в JVM.
+- **Folia.** `GlobalRegionScheduler`, `RegionScheduler`, `AsyncScheduler` и
+  `EntityScheduler` работают для всех плагинов. Обычные плагины не отключаются, как в Folia.
+- **ViaVersion.** ViaVersion, ViaBackwards и ViaRewind из `plugins/` пускают
+  клиентов других версий (частично).
 
-CI собирает готовый релиз и выкладывает его в артефакты Actions: `chunkwake-26.3-<os>-<arch>` с бинарником, README и LICENSE. Это полная сборка со встроенными данными **и встроенным API плагинов** — скачали, распаковали, запустили; ни jar, ни Java не нужны. API разворачивается в `<каталог сервера>/api` при первом старте (≈34 МБ, один раз), после чего плагины кладутся в `plugins/` и работают (для них нужна Java 25). Артефакты видны только тем, у кого есть доступ к репозиторию.
+> [!NOTE]
+> Граница совместимости — плагины, которые лезут во внутренности сервера
+> (NMS и CraftBukkit, пакеты Netty, `ServerLevel`). Ванильные классы для них
+> лежат в classpath, и часть таких плагинов работает. Полностью этого без
+> Java-сервера не сделать, и мы не обещаем обратного.
 
-Часть сборки можно пропустить тегом в сообщении коммита — тесты и релиз идут параллельно, так что для правки в документации незачем собирать бинарники на двух ОС:
+## Как проверяется «1 в 1»
 
-| Тег | Что пропускается |
+Ваниль здесь — исполняемый эталон.
+
+- **Байткод.** Перед реализацией механики читаем `server.jar` и Paper через
+  `javap`: константы, порядок проверок, ключи сообщений.
+- **Тесты паритета.** Дерево команд сверяется с `reports/commands.json`,
+  пакеты — с `reports/packets.json`. Рельеф генерации (камень, вода, лава) сверяется с ванилью, а хэш мира ловит регрессии.
+- **Боты-пробы.** [`crates/bots`](crates/bots/examples) подключаются к Chunkwake и
+  к `server.jar` и сравнивают пакеты построчно: листва, редстоун, чанки,
+  слежение за сущностями.
+- **Лаборатория.** `chunkwake-lab compare` гоняет сценарии на обоих серверах и
+  собирает HTML-отчёт с отличиями, `bench` — нагрузку с ботами.
+  Подробности — в [docs/lab.md](docs/lab.md).
+
+## Архитектура
+
+```text
+crates/
+├── protocol    пакеты 26.3, VarInt, NBT, текстовые компоненты, компоненты предметов
+├── net         соединения, игра, команды, механики, плагинные события
+├── worldgen    ванильный генератор: шум, биомы, поверхности, карверы, структуры
+├── world       чанки, палитры, Anvil, свет
+├── data        встроенные данные игры
+├── datacache   сборка кэша данных из server.jar
+├── bridge      JVM через JNI, встроенный API плагинов
+├── server      бинарник chunkwake: CLI, мастер настройки, консоль, бэкапы
+├── metrics     метрики и дашборд
+├── lab         сравнение с ванилью и нагрузочные тесты
+└── bots        боты-пробы для сверки с server.jar
+java/
+├── api-impl    реализация Bukkit / Paper / Folia API поверх Rust
+└── test-plugin плагин для живых проверок событий
+```
+
+Около 170 тыс. строк Rust и 14 тыс. строк Java.
+
+Дальше по [ARCHITECTURE.md](ARCHITECTURE.md) — то, чего нет ни в одном ядре.
+Это **планы**, а не готовые фичи:
+
+- 🧪 **STM-тик**: обычные плагины видят один главный поток, а исполняются параллельно.
+- 🏝️ **Динамические острова** вместо фиксированных регионов Folia.
+- 📜 **Мир как журнал событий**: откат и повтор изменений.
+- 🔗 **Мост на Panama FFM** с общей памятью вместо JNI.
+
+## Документация
+
+| | |
 |---|---|
-| `[skip tests]` | fmt, clippy и тесты |
-| `[skip release]` | сборка релизных бинарников |
-| `[skip both]` | и то, и другое |
-| `[skip ci]` | весь workflow (встроенный тег GitHub) |
+| [docs/feature-matrix.md](docs/feature-matrix.md) | что готово, что частично, чего нет — построчно |
+| [docs/running.md](docs/running.md) | установка, служба, логи, бэкапы, переменные сборки |
+| [docs/commands.md](docs/commands.md) | ванильные команды и их отличия |
+| [docs/lab.md](docs/lab.md) | сравнение с ванилью и бенчмарки |
+| [docs/perf.md](docs/perf.md) | замеры CPU, памяти и диска |
+| [docs/observability.md](docs/observability.md) | метрики и дашборд |
+| [docs/milestones.md](docs/milestones.md) · [docs/criteria.md](docs/criteria.md) | этапы и критерии |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | устройство и планы |
 
-Тег ищется в сообщениях всех коммитов PR и в последнем коммите ветки, регистр и `skip-tests`/`skip test` допустимы.
+## Участие
 
-Сборка без встроенных данных: `CHUNKWAKE_BUNDLE=none cargo build --release -p chunkwake-server`. Такой бинарник **не самодостаточен**: на старте ему нужен `generated/<версия>` или `server.jar` с Java, иначе `doctor` и запуск падают с ошибкой про `vanilla-jar`. Годится для разработки и для сборок, где данные кладут рядом, но не для релиза «из коробки».
+Pull request'ы и issue приветствуются. Лучшее место для начала — строки
+«частично» и «нет» в [фич-матрице](docs/feature-matrix.md).
 
-Сборка без встроенного API плагинов: `CHUNKWAKE_API_BUNDLE=none`. Бинарь тогда ищет `api/chunkwake-api.jar` рядом с собой (или `CHUNKWAKE_PLUGIN_API`), а без них работает без плагинов. Так собирает job `rust`: `cargo test` и clippy не должны тащить встраивание 48 jar'ов и требовать Gradle.
-
-Встроенный API собирается из `java/dist` при сборке бинаря. Готовый архив можно подставить и без Gradle: `CHUNKWAKE_API_BUNDLE=/path/api.zip cargo build --release -p chunkwake-server`.
-
-Мастер предлагает локальный адрес `127.0.0.1`. Для доступа из сети укажите в мастере `0.0.0.0` и подтвердите предупреждение: в текущем offline mode учётные записи игроков не проверяются.
-
-Посмотреть и изменить настройки можно без редактора:
-
-```text
-chunkwake config show --dir /path/to/server
-chunkwake config set server-port 25570 --dir /path/to/server
-chunkwake doctor --dir /path/to/server
+```bash
+cargo test -p chunkwake-world -p chunkwake-net -p chunkwake-server -p chunkwake-protocol
+cd java && ./gradlew dist :api-impl:test
 ```
 
-`setup` открывает полноэкранную форму с разделами «Сеть», «Сервер», «Запуск», «Метрики», «Мир» и «Игра». Стрелки влево и вправо или Tab переключают разделы, вверх и вниз выбирают поле и переходят с конца списка на начало. Enter редактирует текст; в числовом поле ↑/↓ меняют значение на 1, Shift+↑/↓ или PageUp/PageDown — на 10. Enter или Space переключает флаги и варианты. Изменённые поля отмечаются точкой. D проверяет текущие значения, jar, Java и доступность порта; ошибки подсвечиваются у соответствующих полей. S показывает изменения перед записью, Enter на этом экране сохраняет их. Esc при несохранённых изменениях предлагает сохранить, отбросить или вернуться. При повторном запуске мастер показывает текущие значения. Обычный запуск без `server.properties` завершится с подсказкой запустить мастер. Для справки используйте `chunkwake --help`.
+Правила:
 
-В широком терминале пояснение к выбранному полю и результат проверки показаны справа от списка. В узком терминале подсказки находятся под списком.
+- **Сначала ваниль.** Прочитайте нужный класс `server.jar` или Paper, а не
+  угадывайте поведение. В PR напишите, с чем сверялись.
+- **Тест на поведение.** Юнит-тест или проба ботом против `server.jar`.
+- **Плагинное событие вместе с механикой.** Если у механики есть событие Paper,
+  оно должно стрелять в том же месте и с той же отменой.
+- **Матрица честная.** Сделали механику — обновите строку в
+  [feature-matrix.md](docs/feature-matrix.md), включая то, чего ещё нет.
+- Комментарии, документация и сообщения коммитов — на русском.
 
-Если используете Java-плагины, API теперь встроен в бинарь и разворачивается сам. Пересобирать его вручную нужно только при работе над самой Java-частью: `java/gradlew -p java dist` (Windows: `java\gradlew.bat -p java dist`) собирает `java/dist`, и следующий `cargo build` встроит его в бинарь заново. Старый `java/dist/chunkwake-api.jar` будет отклонён при запуске, если не поддерживает корректное отключение плагинов.
+Нашли отличие от ванили или упавший плагин? Откройте
+[issue](https://github.com/chunkwake/core/issues): версия, плагин, шаги и
+что делает ваниль.
 
-Настройки мира и игры в TUI помечены `*`: они сохраняются в `server.properties` и проверяются, но текущий сервер их пока не применяет. Остальные разделы управляют адресом и портом, отображением в списке серверов, авторизацией, сжатием, путями к Java и jar, каталогом сгенерированных данных и уровнем логирования. Относительные пути `vanilla-jar` и `generated-dir` отсчитываются от `--dir`; путь к Java с каталогом тоже отсчитывается от `--dir`. `java-path=java` ищет исполняемый файл в `PATH`. Поле `vanilla-jar` необязательно: оно нужно только для пересборки данных из jar.
+## Лицензия
 
-Раздел «Метрики» настраивает встроенный дашборд: включение, адрес, порт и токен доступа. Пока адрес остаётся `127.0.0.1`, дашборд открыт только с этой машины и токен не нужен. Если выбрать внешний адрес вроде `0.0.0.0`, сервер не запустит эндпоинт без токена — панель деталей предупредит об этом до сохранения. Токен — не короче 16 символов, без пробелов; войти в браузере можно один раз по ссылке `http://адрес:25585/?token=...`, дальше вход держится на куке. Подробности — в [docs/observability.md](docs/observability.md).
+[GNU GPL v3](LICENSE).
 
-В разделе «Мир» на поле World seed нажмите R, чтобы сгенерировать случайное 64-битное число, либо Enter, чтобы ввести сид вручную.
+Chunkwake — независимый проект. Он не связан с Mojang Studios, Microsoft,
+PaperMC или Folia и не одобрен ими. Minecraft — товарный знак Mojang Synergies AB.
+Код Minecraft в репозитории не распространяется: данные игры извлекаются из
+официального `server.jar` при сборке.
 
-## Резервные копии и восстановление
+---
 
-Остановите сервер командой `stop` и дождитесь сообщения об успешном сохранении. Резервные копии создаются только при остановленном сервере: на время работы Chunkwake удерживает блокировку каталога. В копию входят `server.properties`, `ops.json`, активный мир с данными игроков и `plugins/` с настройками плагинов. `server.jar`, сгенерированные данные и `backups/` не копируются. Внешние базы данных плагинов нужно копировать отдельно.
-```text
-chunkwake backup create --dir /srv/chunkwake
-chunkwake backup list --dir /srv/chunkwake
-chunkwake backup verify ID --dir /srv/chunkwake
-chunkwake backup restore ID --dir /srv/chunkwake
-```
+## English
 
-В PowerShell используйте, например, `chunkwake backup create --dir "C:\Minecraft\Chunkwake"`. Копии лежат в `<каталог сервера>/backups/ID`. `restore` сначала проверяет контрольные суммы, показывает заменяемые каталоги и просит ввести `RESTORE ID`; перед заменой создаёт ещё одну копию текущего состояния. Если восстановление прервалось, обычный запуск остановится с подсказкой. Завершите его через `chunkwake backup resume --dir ...` или верните прежнее состояние через `chunkwake backup rollback --dir ...`. Команда `doctor` проверяет файлы мира и игроков и при повреждении подсказывает последнюю исправную копию.
+**Chunkwake** is a Minecraft Java Edition **26.3** server written from scratch in
+**Rust**. It aims for **1:1 vanilla behaviour** and runs **unmodified Paper and
+Folia plugins**: a real JVM is embedded in the server process with the official
+`paper-api.jar`, and the Rust core fires Bukkit/Paper events in Paper's order.
 
-## Сквозные тесты и сравнение с vanilla
+- **Status:** early. Survival with vanilla world generation, redstone, mobs and
+  plugins works; see the [feature matrix](docs/feature-matrix.md) (66 done,
+  31 partial, 10 not started).
+- **Verified against vanilla:** mechanics are implemented from `server.jar` and
+  Paper bytecode, then checked with parity tests and bots that compare packets
+  with a real vanilla server.
+- **Folia schedulers** work for every plugin, and regular plugins keep working.
+- **One binary:** game data and the plugin API are embedded; Java 25+ is only
+  needed for plugins.
+- **Build:** `cargo build --release -p chunkwake-server`, then
+  `chunkwake setup --dir ./server` and `chunkwake --dir ./server`.
 
-Соберите лабораторию и релизный сервер: `cargo build -p chunkwake-lab` и `cargo build --release -p chunkwake-server`. Запустите `target/debug/chunkwake-lab` (Windows: `target\debug\chunkwake-lab.exe`) **без аргументов**, чтобы открыть TUI. По умолчанию выбран `Compare` — по одному сценарию на обоих серверах, а путь к Chunkwake указывает на релизную сборку. `Smoke` запускает один сценарий только на Chunkwake, а `Bench` измеряет нагрузку с указанным числом ботов и повторов на обоих серверах. Поля нагрузки в TUI показываются только для `Bench`. ↑/↓ выбирают поле с переходом через край списка; ←/→ переключают варианты и меняют числа; Enter редактирует путь или переключает флаг. Чтобы начать, выберите «Start test» и нажмите Enter; Tab быстро переводит к этой строке.
-
-Без TUI можно вызвать те же сценарии из терминала или CI:
-
-```text
-chunkwake-lab smoke --chunkwake ./target/release/chunkwake --jar ./server.jar
-chunkwake-lab compare --chunkwake ./target/release/chunkwake --accept-vanilla-eula
-chunkwake-lab bench --chunkwake ./target/release/chunkwake --profile movement --bots 20 --duration 30 --accept-vanilla-eula
-chunkwake-lab bench --chunkwake ./target/release/chunkwake --profile redstone --bots 20 --duration 30
-chunkwake-lab bench --chunkwake ./target/release/chunkwake --profile all --bots 10 --warmup 5 --duration 10 --repetitions 1
-```
-
-В PowerShell используйте `target\debug\chunkwake-lab.exe compare --chunkwake target\release\chunkwake.exe --accept-vanilla-eula`. `--jar` необязателен: при его отсутствии лаборатория скачает нужный `server.jar` по официальному манифесту Mojang в `target/chunkwake-lab/cache/26.3/` и проверит размер и SHA-1. Если указанный файл отсутствует, он также будет скачан по этому пути. Для Minecraft 26.3 требуется Java 25 или новее; лаборатория проверяет её до запуска. Java выбирается в порядке `--java PATH` → `CHUNKWAKE_JAVA` из окружения или `.env` → `java` из `PATH`; TUI сразу показывает выбранный путь. Первый сравнительный запуск требует явного `--accept-vanilla-eula`; лаборатория запомнит выбор в своём рабочем каталоге. Перед согласием прочитайте [Minecraft EULA](https://www.minecraft.net/en-us/eula).
-
-Во время запуска CLI показывает этапы подготовки, готовность серверов, подключение ботов и ход замера. В TUI прогресс Chunkwake и vanilla отображается в двух колонках. Каждый прогон создаёт русскоязычный `target/chunkwake-lab/<id>/report.html` с графиками ECharts, проверками и поиском по журналам; в конце CLI выводит путь и ссылку `file://` на отчёт. ECharts загружается с CDN, поэтому для графиков нужен интернет; таблицы, данные и журналы встроены в HTML. Рядом остаются `report.md` с таблицами, `report.json` для CI и полные логи. `--work-dir PATH` меняет место хранения, `--keep-worlds` сохраняет тестовые миры. `--generated-cache PATH` позволяет использовать уже подготовленные данные Chunkwake и ускоряет прогоны; без него лаборатория использует общий кэш в рабочем каталоге.
-
-`Compare` показывает известные отличия из `crates/lab/expected-differences.json` вместе с причиной; новое отличие или ошибка сценария дают код выхода `1`, неверные аргументы или ошибка подготовки — `2`. `Bench` поддерживает профили `join-burst` (одновременный вход), `movement` (движение по кругу), `exploration` (переход между чанками), `redstone` (64 лампы и 64 провода на 128 переключаемых опорах) и `cows` (2500 коров в сетке 50 × 50). Профиль `all` сначала проверяет поведение и сохранение, затем последовательно запускает все пять нагрузочных профилей на обоих серверах. Каждый профиль получает отдельный мир, а `--repetitions` задаёт повторы каждого нагрузочного профиля; полная проверка поведения выполняется один раз. Выберите профиль в TUI или через `--profile`. Отчёт содержит задержки, нагрузку процесса, MSPT из `tick query` и приблизительный TPS по изменению игрового времени между замерами. В профиле `cows` подготовка и подтверждение появления всех сущностей происходят до разминки. Результаты скорости сами по себе не определяют совместимость: настройки мира, пока не применяемые Chunkwake, нельзя считать эквивалентными vanilla.
+Docs and commit messages are in Russian; issues and PRs in English are welcome.
+Licensed under GPLv3. Not affiliated with Mojang, Microsoft or PaperMC.
