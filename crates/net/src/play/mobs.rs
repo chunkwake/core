@@ -1934,19 +1934,14 @@ struct SpawnLight {
 }
 
 impl PlayPlan {
-    /// Затемнение неба сейчас (`Level.skyDarken`): из угла солнца по таймлайну
-    /// дня и погоды. В Аду и Краю времени суток нет — «светло снаружи» там не
+    /// Затемнение неба сейчас (`Level.skyDarken`): по таймлайну дня и погоде. В Аду и Краю времени суток нет — «светло снаружи» там не
     /// бывает, поэтому 11, как ночью.
     fn sky_darken_now(&self, dim: Dimension, rain: bool, thunder: bool) -> i32 {
         if dim != Dimension::Overworld {
             return 11;
         }
         let day = self.day_time.load(Ordering::Relaxed).rem_euclid(24000) as f32;
-        mb::sky_darken(
-            super::sun_angle(day),
-            f32::from(u8::from(rain)),
-            f32::from(u8::from(thunder)),
-        )
+        mb::sky_darken(day, f32::from(u8::from(rain)), f32::from(u8::from(thunder)))
     }
 
     /// Прямая видимость (`ClipContext.Block.COLLIDER`): точки отрезка через

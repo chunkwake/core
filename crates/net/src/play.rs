@@ -698,6 +698,17 @@ pub struct WorldView<'a> {
 }
 
 impl WorldView<'_> {
+    /// Столбец, из которого читается свет: загруженный, а в плоском мире
+    /// отсутствующий — это шаблон (с уже посчитанным светом), как и в [`Self::block`].
+    /// Платформа `the_void` свет шаблона почти не меняет: над ней — то же небо.
+    fn light_column(&self, x: i32, z: i32) -> Option<&ChunkColumn> {
+        match self.columns.get(&(x >> 4, z >> 4)) {
+            Some((column, _)) => Some(column),
+            None if self.flat => Some(self.template),
+            None => None,
+        }
+    }
+
     /// Небесный свет в клетке (`getBrightness(SKY)`): 0, если чанк не
     /// загружен или у мира нет неба.
     pub fn sky_light_at(&self, [x, y, z]: [i32; 3]) -> Option<u8> {
@@ -705,7 +716,7 @@ impl WorldView<'_> {
         if ry < 0 || ry as usize >= self.template.height() {
             return None;
         }
-        let Some((column, _)) = self.columns.get(&(x >> 4, z >> 4)) else {
+        let Some(column) = self.light_column(x, z) else {
             return Some(0);
         };
         if !column.has_skylight {
@@ -723,7 +734,7 @@ impl WorldView<'_> {
         if ry < 0 || ry as usize >= self.template.height() {
             return None;
         }
-        let Some((column, _)) = self.columns.get(&(x >> 4, z >> 4)) else {
+        let Some(column) = self.light_column(x, z) else {
             return Some(0);
         };
         let layer = column.block_light.get(ry as usize / 16)?;
@@ -21380,6 +21391,25 @@ mod tests {
     };
     use crate::survival::PlayerState;
     use uuid::Uuid;
+
+    /// Плоский мир: незагруженный столбец — шаблон, и свет у него тоже шаблонный.
+    /// Раньше свет здесь был 0, и монстры появлялись днём на поверхности.
+    #[test]
+    fn flat_world_light_falls_back_to_template() {
+        let template = chunkwake_world::ChunkColumn::flat(&[(1, 4)], 24, 0, 15, 6, true);
+        let columns = FastMap::default();
+        let view = |flat| super::WorldView {
+            columns: &columns,
+            template: &template,
+            min_y: -64,
+            flat,
+            void_platform: None,
+        };
+        assert_eq!(view(true).sky_light_at([5, -60, 5]), Some(15));
+        assert_eq!(view(true).block_light_at([5, -60, 5]), Some(0));
+        // У шумового мира незагруженный столбец — темнота, как раньше.
+        assert_eq!(view(false).sky_light_at([5, -60, 5]), Some(0));
+    }
 
     #[test]
     fn new_portal_frame_and_fallback_stay_inside_border() {

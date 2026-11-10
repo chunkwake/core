@@ -1181,14 +1181,45 @@ pub fn hurt(m: &mut Mob, amount: f32, src: Source, knockback: f64) -> Option<boo
 
 // --- Свет, солнце и исчезновение -------------------------------------------
 
-/// Затемнение неба (`Level.updateSkyBrightness`): 0 днём, 11 ночью.
-/// `sun_angle` — угол солнца в градусах (0° — полдень), дождь и гроза — 0..1.
-pub fn sky_darken(sun_angle: f32, rain: f32, thunder: f32) -> i32 {
-    let d = 1.0 - f64::from(rain) * 5.0 / 16.0;
-    let e = 1.0 - f64::from(thunder) * 5.0 / 16.0;
-    let c = f64::from(sun_angle.to_radians().cos());
-    let f = 0.5 + 2.0 * c.clamp(-0.25, 0.25);
-    ((1.0 - f * d * e) * 11.0) as i32
+/// Ключевые кадры `gameplay/sky_light_level` в `timeline/day.json`: множитель
+/// к 15, линейно между кадрами, по кругу с периодом 24000.
+const SKY_LIGHT_KEYFRAMES: [(f32, f32); 4] = [
+    (133.0, 1.0),
+    (11867.0, 1.0),
+    (13670.0, 0.26666668),
+    (22330.0, 0.26666668),
+];
+
+/// `KeyframeTrack` с линейным переходом: значение в тике `t` периода 24000.
+fn sky_light_factor(t: f32) -> f32 {
+    let n = SKY_LIGHT_KEYFRAMES.len();
+    // Последний кадр, не позже `t`; до первого — последний прошлого периода.
+    let i = SKY_LIGHT_KEYFRAMES
+        .iter()
+        .rposition(|k| k.0 <= t)
+        .unwrap_or(n - 1);
+    let (t0, v0) = SKY_LIGHT_KEYFRAMES[i];
+    let (t1, v1) = SKY_LIGHT_KEYFRAMES[(i + 1) % n];
+    let span = (t1 - t0).rem_euclid(24000.0);
+    let x = (t - t0).rem_euclid(24000.0) / span;
+    v0 + (v1 - v0) * x
+}
+
+/// Затемнение неба (`Level.updateSkyBrightness`): `(int)(15 − SKY_LIGHT_LEVEL)`.
+/// Уровень — 15, умноженное на таймлайн дня, затем слои погоды
+/// (`WeatherAttributes`): дождь без грозы тянет к 4 с долей 0.3125, гроза — с
+/// долей 0.52734375. `day` — время суток, дождь и гроза — 0..1.
+pub fn sky_darken(day: f32, rain: f32, thunder: f32) -> i32 {
+    let mut level = 15.0 * sky_light_factor(day.rem_euclid(24000.0));
+    let lerp = |a: f32, from: f32, to: f32| from + a * (to - from);
+    let rain_only = rain - thunder;
+    if rain_only > 0.0 {
+        level = lerp(rain_only, level, lerp(0.3125, level, 4.0));
+    }
+    if thunder > 0.0 {
+        level = lerp(thunder, level, lerp(0.52734375, level, 4.0));
+    }
+    (15.0 - level) as i32
 }
 
 /// `getMaxLocalRawBrightness`: блочный свет или небесный минус затемнение.
@@ -2281,10 +2312,17 @@ mod tests {
 
     #[test]
     fn sky_darkens_at_night_and_in_rain() {
+        // Полдень и полночь.
+        assert_eq!(sky_darken(6000.0, 0.0, 0.0), 0);
+        assert_eq!(sky_darken(18000.0, 0.0, 0.0), 11);
+        // Рассвет нового мира (тик 0): таймлайн уже почти поднялся до 1.
         assert_eq!(sky_darken(0.0, 0.0, 0.0), 0);
-        assert_eq!(sky_darken(180.0, 0.0, 0.0), 11);
-        assert_eq!(sky_darken(0.0, 1.0, 0.0), 3);
-        assert_eq!(sky_darken(0.0, 1.0, 1.0), 5);
+        assert_eq!(sky_darken(3.0, 0.0, 0.0), 0);
+        // Середина заката: 15 × (1 − 0.733 × 1133 / 1803) = 8.09.
+        assert_eq!(sky_darken(13000.0, 0.0, 0.0), 6);
+        // Дождь и гроза днём.
+        assert_eq!(sky_darken(6000.0, 1.0, 0.0), 3);
+        assert_eq!(sky_darken(6000.0, 1.0, 1.0), 5);
     }
 
     #[test]
