@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 # Полный прогон: push в ветки версий. Pull request'ы проверяет pr.yml
 # (fmt всегда, clippy и тесты на Linux — если менялся код), без релизной сборки.
 on:
@@ -90,7 +90,7 @@ jobs:
       # Кэш держит и сам jar, и собранное из него дерево данных, поэтому
       # повторный запуск не качает 60 МБ и не гоняет генератор заново.
       - name: Cache server.jar and generated data
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             server.jar
@@ -189,7 +189,7 @@ jobs:
       # Тот же ключ, что у job `rust`: кэш переиспользуется, jar не качается
       # повторно и дерево данных уже собрано.
       - name: Cache server.jar and generated data
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             server.jar
@@ -229,7 +229,7 @@ jobs:
       # быть одним файлом, а не «exe плюс каталог api рядом». Gradle тянет
       # paper-api из сети, поэтому кэш Gradle переиспользуется между запусками.
       - name: Cache Gradle
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.gradle/caches
