@@ -1178,6 +1178,8 @@ pub struct PlayerSave {
     pub seen_credits: bool,
     /// `Dimension`: ключ измерения игрока; `None` — оверворлд.
     pub dimension: Option<String>,
+    /// `BukkitValues`: PDC плагинов, как у CraftBukkit.
+    pub bukkit_values: Option<chunkwake_world::nbt::Compound>,
 }
 
 /// Живое состояние игрока в сессии: инвентарь и здоровье.
@@ -1227,6 +1229,7 @@ impl PlayerState {
             spawn_dimension: None,
             spawn_angle: [0.0; 2],
             seen_credits: false,
+            bukkit_values: None,
             dimension: None,
             slots: (0..SLOTS)
                 .filter_map(|i| self.inv.slots[i].map(|s| (i, s)))

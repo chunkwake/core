@@ -23,8 +23,22 @@ final class PdcImpl {
     final PersistentDataContainer api = Stub.of(PersistentDataContainer.class, this);
     final Map<String, Object> tags;
 
+    /** Кому сообщить о правке (PDC игрока и мира пишутся сразу); {@code null} — никому. */
+    private final java.util.function.Consumer<Map<String, Object>> onChange;
+
     PdcImpl(Map<String, Object> tags) {
+        this(tags, null);
+    }
+
+    PdcImpl(Map<String, Object> tags, java.util.function.Consumer<Map<String, Object>> onChange) {
         this.tags = tags;
+        this.onChange = onChange;
+    }
+
+    private void changed() {
+        if (onChange != null) {
+            onChange.accept(tags);
+        }
     }
 
     private static final PersistentDataAdapterContext CONTEXT =
@@ -39,6 +53,7 @@ final class PdcImpl {
     public <P, C> void set(NamespacedKey key, PersistentDataType<P, C> type, C value) {
         java.util.Objects.requireNonNull(value, "The provided value cannot be null");
         tags.put(key.toString(), toNbt(type.toPrimitive(value, CONTEXT)));
+        changed();
     }
 
     public <P, C> boolean has(NamespacedKey key, PersistentDataType<P, C> type) {
@@ -76,7 +91,9 @@ final class PdcImpl {
     }
 
     public void remove(NamespacedKey key) {
-        tags.remove(key.toString());
+        if (tags.remove(key.toString()) != null) {
+            changed();
+        }
     }
 
     public boolean isEmpty() {
@@ -92,6 +109,7 @@ final class PdcImpl {
             tags.forEach((k, v) -> {
                 if (replace || !o.tags.containsKey(k)) o.tags.put(k, copy(v));
             });
+            o.changed();
         }
     }
 
@@ -107,6 +125,7 @@ final class PdcImpl {
         if (clear) tags.clear();
         String text = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
         tags.putAll(Nbt.decode(com.google.gson.JsonParser.parseString(text).getAsJsonObject()));
+        changed();
     }
 
     public void readFromBytes(byte[] bytes) {

@@ -74,6 +74,7 @@ final class PluginManagerImpl {
         setEnabledQuietly(p, false);
         server.scheduler().cancelTasks(p);
         server.folia().cancelTasks(p);
+        server.metadata().removeAll(p);
         HandlerList.unregisterAll(p);
         server.pluginDisabled(p);
         updateListenerMask();
@@ -295,6 +296,9 @@ final class PluginManagerImpl {
         }
         if (has(org.bukkit.event.player.PlayerToggleSprintEvent.getHandlerList())) {
             mask |= Bridge.listenBit(Bridge.EVENT_TOGGLE_SPRINT);
+        }
+        if (has(org.bukkit.event.player.PlayerChangedWorldEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_CHANGED_WORLD);
         }
         Bridge.setFlag(Bridge.FLAG_LISTENERS, mask);
     }

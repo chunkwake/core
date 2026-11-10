@@ -51,7 +51,8 @@ final class PlayerImpl {
         return via >= 0 ? via : ChunkwakeServer.Unsafe.PROTOCOL;
     }
     public Server getServer() { return server.api; }
-    public World getWorld() { return server.world; }
+    /** Мир игрока — измерение из снимка Rust. */
+    public World getWorld() { return server.world(state().dim()).api; }
     public boolean isOnline() { return online; }
     public boolean isConnected() { return online; }
     public boolean isOp() { return Bridge.opLevel(id) > 0; }
@@ -120,7 +121,8 @@ final class PlayerImpl {
     /** Снимок игрока: здоровье, голод, режим, инвентарь в индексах Bukkit. */
     record State(double health, int food, float saturation, float exhaustion, int gameMode,
             int selected, double x, double y, double z, float yaw, float pitch, ItemStack[] items,
-            List<org.bukkit.potion.PotionEffect> effects, int level, float exp, int totalExp, boolean sneaking) {
+            List<org.bukkit.potion.PotionEffect> effects, int level, float exp, int totalExp, boolean sneaking,
+            String dim) {
         static State parse(String text) {
             String[] lines = text.split("\n", -1);
             List<org.bukkit.potion.PotionEffect> effects = new ArrayList<>();
@@ -148,7 +150,8 @@ final class PlayerImpl {
                     Float.parseFloat(h[9]), Float.parseFloat(h[10]), items, effects,
                     h.length > 13 ? Integer.parseInt(h[11]) : 0, h.length > 13 ? Float.parseFloat(h[12]) : 0,
                     h.length > 13 ? Integer.parseInt(h[13]) : 0,
-                    h.length > 14 && h[14].equals("1"));
+                    h.length > 14 && h[14].equals("1"),
+                    h.length > 15 ? h[15] : WorldImpl.OVERWORLD);
         }
     }
 
@@ -229,6 +232,50 @@ final class PlayerImpl {
         if (online) {
             Bridge.playerControl(id, line);
         }
+    }
+
+    // --- метаданные и PDC ---
+
+    public void setMetadata(String key, org.bukkit.metadata.MetadataValue value) {
+        server.metadata().players.setMetadata(api, key, value);
+    }
+    public List<org.bukkit.metadata.MetadataValue> getMetadata(String key) {
+        return server.metadata().players.getMetadata(api, key);
+    }
+    public boolean hasMetadata(String key) { return server.metadata().players.hasMetadata(api, key); }
+    public void removeMetadata(String key, org.bukkit.plugin.Plugin owner) {
+        server.metadata().players.removeMetadata(api, key, owner);
+    }
+
+    private volatile PdcImpl pdc;
+
+    /**
+     * PDC игрока — {@code BukkitValues} его {@code playerdata}: держит Rust,
+     * правка сразу уходит туда и сохраняется с игроком.
+     */
+    public org.bukkit.persistence.PersistentDataContainer getPersistentDataContainer() {
+        PdcImpl p = pdc;
+        if (p == null) {
+            synchronized (this) {
+                if (pdc == null) {
+                    java.util.Map<String, Object> tags = new java.util.LinkedHashMap<>();
+                    if (Bridge.table != null) {
+                        String json = Bridge.world("pdc " + id);
+                        if (!json.isEmpty()) {
+                            tags.putAll(PdcImpl.Nbt.decode(
+                                    com.google.gson.JsonParser.parseString(json).getAsJsonObject()));
+                        }
+                    }
+                    pdc = new PdcImpl(tags, t -> {
+                        if (Bridge.table != null) {
+                            Bridge.world("pdc " + id + " " + PdcImpl.Nbt.encode(t));
+                        }
+                    });
+                }
+                p = pdc;
+            }
+        }
+        return p.api;
     }
 
     // --- профиль, адрес и кик ---
@@ -513,7 +560,7 @@ final class PlayerImpl {
 
     public org.bukkit.Location getLocation() {
         State s = state();
-        return new org.bukkit.Location(server.world, s.x(), s.y(), s.z(), s.yaw(), s.pitch());
+        return new org.bukkit.Location(server.world(s.dim()).api, s.x(), s.y(), s.z(), s.yaw(), s.pitch());
     }
 
     public org.bukkit.Location getEyeLocation() { return getLocation().add(0, 1.62, 0); }
@@ -535,7 +582,10 @@ final class PlayerImpl {
             return false;
         }
         org.bukkit.Location t = e.getTo();
-        control("tp " + t.getX() + " " + t.getY() + " " + t.getZ() + " " + t.getYaw() + " " + t.getPitch());
+        // Мир цели последним словом: другой мир — переход измерения в Rust.
+        WorldImpl target = t.getWorld() != null ? WorldImpl.of(t.getWorld()) : null;
+        String dim = target != null ? target.dim : state().dim();
+        control("tp " + t.getX() + " " + t.getY() + " " + t.getZ() + " " + t.getYaw() + " " + t.getPitch() + " " + dim);
         return true;
     }
 

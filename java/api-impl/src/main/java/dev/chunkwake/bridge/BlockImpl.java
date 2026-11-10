@@ -34,7 +34,7 @@ final class BlockImpl {
     }
 
     public Material getType() {
-        String k = key != null ? key : Bridge.world("get " + x + " " + y + " " + z);
+        String k = key != null ? key : WorldImpl.request(world, "get " + x + " " + y + " " + z);
         Material m = k.isEmpty() ? null : Material.matchMaterial(k);
         return m == null ? Material.AIR : m;
     }
@@ -48,16 +48,16 @@ final class BlockImpl {
         if (!type.isBlock()) {
             throw new IllegalArgumentException("Material " + type + " is not a block");
         }
-        Bridge.world("set " + x + " " + y + " " + z + " " + type.getKey() + (physics ? " 1" : " 0"));
+        WorldImpl.request(world, "set " + x + " " + y + " " + z + " " + type.getKey() + (physics ? " 1" : " 0"));
     }
 
     public org.bukkit.block.data.BlockData getBlockData() {
-        return BlockDataImpl.parse(Bridge.world("data " + x + " " + y + " " + z));
+        return BlockDataImpl.parse(WorldImpl.request(world, "data " + x + " " + y + " " + z));
     }
 
     /** Свет неба и блоков одной строкой `sky block`: BlueMap рисует по нему освещение. */
     private String light() {
-        return Bridge.world("light " + x + " " + y + " " + z);
+        return WorldImpl.request(world, "light " + x + " " + y + " " + z);
     }
 
     public byte getLightFromSky() {
@@ -77,12 +77,23 @@ final class BlockImpl {
     public void setBlockData(org.bukkit.block.data.BlockData data) { setBlockData(data, true); }
 
     public void setBlockData(org.bukkit.block.data.BlockData data, boolean physics) {
-        Bridge.world("set " + x + " " + y + " " + z + " " + data.getAsString() + (physics ? " 1" : " 0"));
+        WorldImpl.request(world, "set " + x + " " + y + " " + z + " " + data.getAsString() + (physics ? " 1" : " 0"));
+    }
+
+    public void setMetadata(String k, org.bukkit.metadata.MetadataValue v) {
+        Bridge.server.metadata().blocks.setMetadata(api, k, v);
+    }
+    public java.util.List<org.bukkit.metadata.MetadataValue> getMetadata(String k) {
+        return Bridge.server.metadata().blocks.getMetadata(api, k);
+    }
+    public boolean hasMetadata(String k) { return Bridge.server.metadata().blocks.hasMetadata(api, k); }
+    public void removeMetadata(String k, org.bukkit.plugin.Plugin owner) {
+        Bridge.server.metadata().blocks.removeMetadata(api, k, owner);
     }
 
     @Override
     public boolean equals(Object o) {
-        return o instanceof BlockImpl b && b.x == x && b.y == y && b.z == z;
+        return o instanceof BlockImpl b && b.world == world && b.x == x && b.y == y && b.z == z;
     }
 
     @Override

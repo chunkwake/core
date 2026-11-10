@@ -15,6 +15,9 @@ commands:
   up:
     description: Teleports up onto a glass block
     usage: /up [height]
+  world:
+    description: Teleports to the spawn of another world
+    usage: /world <name>
 permissions:
   chunkwake.test.kit:
     description: Use /kit

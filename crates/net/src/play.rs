@@ -263,6 +263,8 @@ pub struct PlayPlan {
     portal_time: Mutex<FastMap<Uuid, u32>>,
     /// `ServerPlayer.seenCredits`: титры Края уже показаны.
     pub(crate) seen_credits: Mutex<HashSet<Uuid>>,
+    /// `BukkitValues` игроков: PDC плагинов (`Player.getPersistentDataContainer`).
+    bukkit_values: Mutex<FastMap<Uuid, chunkwake_world::nbt::Compound>>,
     /// Игроки на экране титров: `PERFORM_RESPAWN` вернёт их из Края.
     won_game: Mutex<HashSet<Uuid>>,
     /// Инвентари плагинов (`Bukkit.createInventory`) по номеру.
@@ -2707,6 +2709,7 @@ impl PlayPlan {
             portal_cooldown: Mutex::new(FastMap::default()),
             portal_time: Mutex::new(FastMap::default()),
             seen_credits: Mutex::new(HashSet::new()),
+            bukkit_values: Mutex::new(FastMap::default()),
             won_game: Mutex::new(HashSet::new()),
             players_source: std::sync::OnceLock::new(),
             maps: Mutex::new(maps::MapStore::default()),
@@ -3616,6 +3619,7 @@ impl PlayPlan {
                 effects: Vec::new(),
                 xp: Default::default(),
                 sneaking: false,
+                dimension: Dimension::Overworld,
             },
         );
     }
@@ -3663,6 +3667,26 @@ impl PlayPlan {
 
     /// Команда плагина сессии игрока (формат — [`Control::parse`]).
     pub fn player_control(&self, uuid: Uuid, line: &str) -> bool {
+        // `tp x y z yaw pitch <мир>`: телепорт плагина в другое измерение —
+        // переход, как у `/tp` в `execute in`.
+        if let Some(rest) = line.strip_prefix("tp ") {
+            let f: Vec<&str> = rest.split(' ').collect();
+            if let [x, y, z, yaw, pitch, key] = f[..]
+                && let Some(dim) = Dimension::from_key(key).filter(|d| self.dims.contains_key(d))
+                && dim != self.player_dim(uuid)
+            {
+                let n = |s: &str| s.parse::<f64>().ok().filter(|v| v.is_finite());
+                let (Some(x), Some(y), Some(z), Some(yaw), Some(pitch)) = (n(x), n(y), n(z), n(yaw), n(pitch))
+                else {
+                    return false;
+                };
+                if !self.controls.lock().unwrap().contains_key(&uuid) {
+                    return false;
+                }
+                self.switch_player_dimension_look(uuid, dim, [x, y, z], (yaw as f32, pitch as f32));
+                return true;
+            }
+        }
         let Some(c) = Control::parse(
             line,
             |n| self.item_id(n),
@@ -3692,6 +3716,83 @@ impl PlayPlan {
     /// `effects` → эффекты по порядку ID (строки), `isblock имя` → `1`/`0`,
     /// `blocks с` → имена блоков по порядку начиная с номера `с` (кусок до 7 КБ).
     pub fn world_request(&self, line: &str) -> String {
+        // `@<ключ измерения> <запрос>`: запрос в мире плагина (`World` Nether/End),
+        // а не в измерении текущей работы. Нет такого мира — пусто.
+        if let Some(rest) = line.strip_prefix('@') {
+            let (key, rest) = rest.split_once(' ').unwrap_or((rest, ""));
+            return match Dimension::from_key(key).filter(|d| self.dims.contains_key(d)) {
+                Some(dim) => with_dim(dim, || self.world_request(rest)),
+                None => String::new(),
+            };
+        }
+        // `worlds`: ключи загруженных измерений по строке (`Server.getWorlds`).
+        if line == "worlds" {
+            let mut dims: Vec<Dimension> = self.dims.keys().copied().collect();
+            dims.sort();
+            return dims.iter().map(|d| d.key()).collect::<Vec<_>>().join("\n");
+        }
+        // `nbtread <путь>` → корень gzip-NBT файла типизированным JSON (пусто —
+        // файла нет); `nbtwrite <путь>\n<json>` → `1`/`0`. Данные Paper о мире
+        // (`data/paper/metadata.dat`, `persistent_data_container.dat`).
+        if let Some(path) = line.strip_prefix("nbtread ") {
+            return match chunkwake_world::nbt::read_gzip_file(std::path::Path::new(path)) {
+                Ok(Some(root)) => crate::stack_nbt::typed_compound(&root).to_string(),
+                Ok(None) => String::new(),
+                Err(e) => {
+                    tracing::warn!("plugin nbtread {path}: {e}");
+                    String::new()
+                }
+            };
+        }
+        if let Some(rest) = line.strip_prefix("nbtwrite ") {
+            let Some((path, json)) = rest.split_once('\n') else {
+                return "0".into();
+            };
+            let root = serde_json::from_str(json)
+                .ok()
+                .and_then(|v| crate::stack_nbt::untyped_compound(&v));
+            let Some(root) = root else {
+                return "0".into();
+            };
+            let path = std::path::Path::new(path);
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            return match chunkwake_world::nbt::write_gzip_file(path, &root) {
+                Ok(()) => "1".into(),
+                Err(e) => {
+                    tracing::warn!("plugin nbtwrite {}: {e}", path.display());
+                    "0".into()
+                }
+            };
+        }
+        // `pdc <uuid>` → `BukkitValues` игрока типизированным JSON;
+        // `pdc <uuid> <json>` — заменить (уходит в `playerdata`).
+        if let Some(rest) = line.strip_prefix("pdc ") {
+            let (id, json) = rest.split_once(' ').unwrap_or((rest, ""));
+            let Ok(uuid) = Uuid::parse_str(id) else {
+                return String::new();
+            };
+            if json.is_empty() {
+                return self
+                    .bukkit_values
+                    .lock()
+                    .unwrap()
+                    .get(&uuid)
+                    .map_or_else(String::new, |c| crate::stack_nbt::typed_compound(c).to_string());
+            }
+            let Some(c) = serde_json::from_str(json)
+                .ok()
+                .and_then(|v| crate::stack_nbt::untyped_compound(&v))
+            else {
+                return "0".into();
+            };
+            if let Some(save) = self.player_saves.lock().unwrap().get_mut(&uuid) {
+                save.bukkit_values = (!c.is_empty()).then(|| c.clone());
+            }
+            self.bukkit_values.lock().unwrap().insert(uuid, c);
+            return "1".into();
+        }
         if let Some(rest) = line.strip_prefix("inv ") {
             return self.plugin_inv_request(rest);
         }
@@ -3954,6 +4055,7 @@ impl PlayPlan {
             effects: v.effects.clone(),
             xp: st.xp,
             sneaking: false,
+            dimension: self.player_dim(uuid),
         };
         {
             // Присед ставит `player_input`, а не этот снимок: переносим текущее
@@ -4177,29 +4279,50 @@ impl PlayPlan {
         &self,
         uuid: Uuid,
         cause: &str,
-        to: ([f64; 3], f32, f32),
-    ) -> Option<([f64; 3], f32, f32)> {
+        to: ([f64; 3], f32, f32, Dimension),
+    ) -> Option<([f64; 3], f32, f32, Dimension)> {
         let Some(from) = self.player_at(uuid) else {
             return Some(to);
         };
+        let from_dim = self.player_dim(uuid);
         let reply = self.sync_player_event(Event::Teleport, uuid, || {
             let [fx, fy, fz] = from.0;
             let [tx, ty, tz] = to.0;
             format!(
-                "{cause} {fx} {fy} {fz} {} {} {tx} {ty} {tz} {} {}",
-                from.1, from.2, to.1, to.2
+                "{cause} {fx} {fy} {fz} {} {} {tx} {ty} {tz} {} {} {} {}",
+                from.1,
+                from.2,
+                to.1,
+                to.2,
+                from_dim.key(),
+                to.3.key()
             )
         });
         match reply.as_deref().map(str::trim) {
             Some("c") => None,
             Some(r) if r.starts_with("t ") => {
-                let f: Vec<f64> = r[2..].split(' ').filter_map(|v| v.parse().ok()).collect();
+                let mut it = r[2..].split(' ');
+                let f: Vec<f64> = it.by_ref().take(5).filter_map(|v| v.parse().ok()).collect();
+                let dim = it
+                    .next()
+                    .and_then(Dimension::from_key)
+                    .filter(|d| self.dims.contains_key(d))
+                    .unwrap_or(to.3);
                 Some(match f[..] {
-                    [x, y, z, yaw, pitch] => ([x, y, z], yaw as f32, pitch as f32),
+                    [x, y, z, yaw, pitch] => ([x, y, z], yaw as f32, pitch as f32, dim),
                     _ => to,
                 })
             }
             _ => Some(to),
+        }
+    }
+
+    /// `PlayerChangedWorldEvent`, если мир сменился; ответа не ждём.
+    fn changed_world(&self, uuid: Uuid, from: Dimension, to: Dimension) {
+        if from != to
+            && let Some(h) = self.hooks().filter(|h| h.listens(Event::ChangedWorld))
+        {
+            let _ = h.event(Event::ChangedWorld, uuid, from.key().to_owned());
         }
     }
 
@@ -4740,6 +4863,13 @@ impl PlayPlan {
         };
         let mut save = st.save(pos, yaw, pitch);
         save.seen_credits = self.seen_credits.lock().unwrap().contains(&uuid);
+        save.bukkit_values = self
+            .bukkit_values
+            .lock()
+            .unwrap()
+            .get(&uuid)
+            .filter(|c| !c.is_empty())
+            .cloned();
         let dim = self
             .hub
             .players
@@ -5400,6 +5530,9 @@ impl PlayPlan {
         });
         if loaded.as_ref().is_some_and(|s| s.seen_credits) {
             self.seen_credits.lock().unwrap().insert(player.uuid);
+        }
+        if let Some(c) = loaded.as_ref().and_then(|s| s.bukkit_values.clone()) {
+            self.bukkit_values.lock().unwrap().insert(player.uuid, c);
         }
         if let Some(save) = loaded.as_ref()
             && let Some(pos) = save.spawn
@@ -6632,8 +6765,9 @@ impl PlayPlan {
                         let feet = [pos[0], pos[1].max(self.min_y() as f64), pos[2]];
                         let (yaw, pitch) = self.player_at(uuid).map_or((0.0, 0.0), |p| (p.1, p.2));
                         // Paper: отменённый `ENDER_PEARL` — ни переноса, ни урона.
-                        if let Some((feet, yaw, pitch)) =
-                            self.teleport_event(uuid, "ENDER_PEARL", (feet, yaw, pitch))
+                        let dim = self.player_dim(uuid);
+                        if let Some((feet, yaw, pitch, _)) =
+                            self.teleport_event(uuid, "ENDER_PEARL", (feet, yaw, pitch, dim))
                         {
                             self.push_control(uuid, Control::Teleport(feet, yaw, pitch));
                             self.push_control(uuid, Control::Hurt(5.0, Cause::Fall));
@@ -7891,10 +8025,10 @@ impl PlayPlan {
     pub(crate) fn command_teleport(&self, uuid: Uuid, pos: [f64; 3], yaw: f32, pitch: f32) -> bool {
         // `TeleportCommand.performTeleport` → `PlayerTeleportEvent` с `COMMAND`;
         // отмена — без переноса (команда всё равно сообщает об успехе, как Paper).
-        let Some((pos, yaw, pitch)) = self.teleport_event(uuid, "COMMAND", (pos, yaw, pitch)) else {
+        let target = (pos, yaw, pitch, self.active_dim());
+        let Some((pos, yaw, pitch, dim)) = self.teleport_event(uuid, "COMMAND", target) else {
             return true;
         };
-        let dim = self.active_dim();
         let here = self
             .hub
             .players
@@ -7937,8 +8071,10 @@ impl PlayPlan {
         pos: [f64; 3],
         look: (f32, f32),
     ) {
+        let mut from = to;
         if let Some(p) = self.hub.players.lock().unwrap().get_mut(&uuid) {
             p.pos = pos;
+            from = p.dimension;
             p.dimension = to;
         }
         // Активное измерение переключается только потому, что вся работа с
@@ -7947,6 +8083,7 @@ impl PlayPlan {
         // однопоточный — пока в Аду один игрок, этого достаточно.
         *self.active.lock().unwrap() = to;
         self.push_control(uuid, Control::DimensionChange(to, pos, look));
+        self.changed_world(uuid, from, to);
     }
 
     /// `SpawnInfo` для измерения: клиент по нему понимает, куда попал.
@@ -10019,6 +10156,16 @@ impl PlayPlan {
     }
 
     /// Позиция ног и поворот игрока.
+    /// Измерение игрока; нет в мире — оверворлд.
+    fn player_dim(&self, uuid: Uuid) -> Dimension {
+        self.hub
+            .players
+            .lock()
+            .unwrap()
+            .get(&uuid)
+            .map_or(Dimension::Overworld, |p| p.dimension)
+    }
+
     fn player_at(&self, uuid: Uuid) -> Option<([f64; 3], f32, f32)> {
         self.hub
             .players
@@ -20885,9 +21032,15 @@ impl PlayPlan {
         }
         let dim = at.dim;
         let mut info = self.dimension_spawn(dim, login);
+        let mut from = dim;
         if let Some(p) = self.hub.players.lock().unwrap().get_mut(&uuid) {
             info.game_mode = p.entry.game_mode as u8;
+            from = p.dimension;
             p.dimension = dim;
+        }
+        self.changed_world(uuid, from, dim);
+        if let Some(l) = self.live.lock().unwrap().get_mut(&uuid) {
+            l.dimension = dim;
         }
         let changed = *client_dim != dim;
         if changed {
@@ -21530,6 +21683,7 @@ mod tests {
         use crate::live::Live;
         use crate::survival::Effect;
         let mut live = Live {
+            dimension: crate::play::Dimension::Overworld,
             health: 20.0,
             food: 20,
             saturation: 5.0,

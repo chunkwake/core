@@ -431,7 +431,7 @@ fn typed(t: &Tag) -> Value {
     }
 }
 
-fn typed_compound(c: &Compound) -> Value {
+pub(crate) fn typed_compound(c: &Compound) -> Value {
     Value::Object(c.iter().map(|(k, v)| (k.clone(), typed(v))).collect())
 }
 
@@ -470,7 +470,7 @@ fn untyped(v: &Value) -> Option<Tag> {
     })
 }
 
-fn untyped_compound(v: &Value) -> Option<Compound> {
+pub(crate) fn untyped_compound(v: &Value) -> Option<Compound> {
     Some(
         v.as_object()?
             .iter()

@@ -142,6 +142,10 @@ final class Events {
             }
             case Bridge.EVENT_KICK -> p.kickEvent(arg);
             case Bridge.EVENT_RESPAWN -> respawn(plugins, p, arg);
+            case Bridge.EVENT_CHANGED_WORLD -> {
+                plugins.callEvent(new org.bukkit.event.player.PlayerChangedWorldEvent(p.api, world(arg.trim())));
+                yield "";
+            }
             case Bridge.EVENT_TELEPORT -> teleport(plugins, p, arg);
             case Bridge.EVENT_ITEM_HELD -> {
                 String[] f = arg.trim().split(" ");
@@ -174,6 +178,16 @@ final class Events {
         return l.getX() + " " + l.getY() + " " + l.getZ() + " " + l.getYaw() + " " + l.getPitch();
     }
 
+    /** Координаты и мир цели: {@code x y z yaw pitch <ключ>}. */
+    private static String target(Location l, World fallback) {
+        WorldImpl w = WorldImpl.of(l.getWorld() != null ? l.getWorld() : fallback);
+        return coords(l) + (w != null ? " " + w.dim : "");
+    }
+
+    private static World world(String key) {
+        return Bridge.server.world(key).api;
+    }
+
     /**
      * {@code PlayerRespawnEvent}: {@code x y z yaw pitch кровать якорь ПРИЧИНА} →
      * пусто или новая точка. Как у {@code PlayerList.respawn}: отменить нельзя,
@@ -181,13 +195,13 @@ final class Events {
      */
     private static String respawn(PluginManager plugins, PlayerImpl p, String arg) {
         String[] f = arg.trim().split(" ");
-        Location at = location(p.api.getWorld(), f, 0);
+        Location at = location(f.length > 8 ? world(f[8]) : p.api.getWorld(), f, 0);
         var e = new org.bukkit.event.player.PlayerRespawnEvent(p.api, at.clone(), f[5].equals("1"),
                 f[6].equals("1"), false,
                 org.bukkit.event.player.PlayerRespawnEvent.RespawnReason.valueOf(f[7]));
         plugins.callEvent(e);
         Location to = e.getRespawnLocation();
-        return to.equals(at) ? "" : coords(to);
+        return to.equals(at) ? "" : target(to, at.getWorld());
     }
 
     /**
@@ -196,16 +210,15 @@ final class Events {
      */
     private static String teleport(PluginManager plugins, PlayerImpl p, String arg) {
         String[] f = arg.trim().split(" ");
-        World w = p.api.getWorld();
-        Location from = location(w, f, 1);
-        Location to = location(w, f, 6);
+        Location from = location(f.length > 11 ? world(f[11]) : p.api.getWorld(), f, 1);
+        Location to = location(f.length > 12 ? world(f[12]) : p.api.getWorld(), f, 6);
         var e = new org.bukkit.event.player.PlayerTeleportEvent(p.api, from, to.clone(),
                 org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.valueOf(f[0]));
         plugins.callEvent(e);
         if (e.isCancelled()) {
             return "c";
         }
-        return e.getTo().equals(to) ? "" : "t " + coords(e.getTo());
+        return e.getTo().equals(to) ? "" : "t " + target(e.getTo(), to.getWorld());
     }
 
     /**

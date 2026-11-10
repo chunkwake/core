@@ -29,7 +29,11 @@ final class MobImpl {
     private String[] last;
     private String lastName = "";
 
-    private MobImpl(int id, String species) {
+    /** Мир моба: запросы `mob …` идут в его измерение. */
+    final WorldImpl world;
+
+    private MobImpl(WorldImpl world, int id, String species) {
+        this.world = world;
         this.id = id;
         this.species = species;
         this.api = (LivingEntity) Stub.of(iface(species), this);
@@ -66,32 +70,37 @@ final class MobImpl {
         return null;
     }
 
+    /** Моб из события тика: мобы событий пока только оверворлда. */
     static LivingEntity of(int id, String species) {
-        return new MobImpl(id, species).api;
+        return of(Bridge.server.overworld, id, species);
+    }
+
+    static LivingEntity of(WorldImpl world, int id, String species) {
+        return new MobImpl(world, id, species).api;
     }
 
     /** Новый моб плагина ({@code World.spawnEntity}). */
-    static LivingEntity spawn(Location l, String species) {
-        String id = Bridge.world("mob spawn " + species + " " + l.getX() + " " + l.getY() + " " + l.getZ() + " " + l.getYaw()).trim();
+    static LivingEntity spawn(WorldImpl world, Location l, String species) {
+        String id = world.request("mob spawn " + species + " " + l.getX() + " " + l.getY() + " " + l.getZ() + " " + l.getYaw()).trim();
         if (id.isEmpty()) {
             throw new IllegalStateException("chunkwake: spawn " + species + " failed");
         }
-        return of(Integer.parseInt(id), species);
+        return of(world, Integer.parseInt(id), species);
     }
 
     /** Все живые мобы мира. */
-    static List<LivingEntity> all() {
+    static List<LivingEntity> all(WorldImpl world) {
         List<LivingEntity> out = new ArrayList<>();
         String after = String.valueOf(Integer.MIN_VALUE);
         while (true) {
-            String page = Bridge.world("mob list " + after);
+            String page = world.request("mob list " + after);
             if (page.isEmpty()) {
                 return out;
             }
             for (String line : page.split("\n")) {
                 String[] f = line.split(" ");
                 if (f.length >= 2) {
-                    out.add(of(Integer.parseInt(f[0]), f[1]));
+                    out.add(of(world, Integer.parseInt(f[0]), f[1]));
                     after = f[0];
                 }
             }
@@ -99,7 +108,7 @@ final class MobImpl {
     }
 
     private String[] state() {
-        String r = Bridge.world("mob get " + id);
+        String r = world.request("mob get " + id);
         if (!r.isEmpty()) {
             int nl = r.indexOf('\n');
             last = (nl < 0 ? r : r.substring(0, nl)).split(" ");
@@ -109,7 +118,7 @@ final class MobImpl {
     }
 
     private boolean set(String what) {
-        return Bridge.world("mob set " + id + " " + what).trim().equals("1");
+        return world.request("mob set " + id + " " + what).trim().equals("1");
     }
 
     private double num(int i) {
@@ -128,7 +137,18 @@ final class MobImpl {
     }
     public void registerAttribute(org.bukkit.attribute.Attribute a) {}
     public EntityType getType() { return EntityType.valueOf(species.toUpperCase(Locale.ROOT)); }
-    public World getWorld() { return Bridge.server.world; }
+    public World getWorld() { return world.api; }
+
+    public void setMetadata(String key, org.bukkit.metadata.MetadataValue value) {
+        Bridge.server.metadata().entities.setMetadata(api, key, value);
+    }
+    public List<org.bukkit.metadata.MetadataValue> getMetadata(String key) {
+        return Bridge.server.metadata().entities.getMetadata(api, key);
+    }
+    public boolean hasMetadata(String key) { return Bridge.server.metadata().entities.hasMetadata(api, key); }
+    public void removeMetadata(String key, org.bukkit.plugin.Plugin owner) {
+        Bridge.server.metadata().entities.removeMetadata(api, key, owner);
+    }
     public org.bukkit.Server getServer() { return Bridge.server.api; }
     public String getName() {
         String n = getCustomName();
@@ -194,7 +214,7 @@ final class MobImpl {
     public void damage(double amount) { set("damage " + amount); }
     public void damage(double amount, Entity source) { damage(amount); }
     public boolean isDead() {
-        String[] s = Bridge.world("mob get " + id).split(" ");
+        String[] s = world.request("mob get " + id).split(" ");
         return s.length < 13 || s[12].equals("1");
     }
     public boolean isValid() { return !isDead(); }
@@ -289,7 +309,7 @@ final class MobImpl {
             }
             case Bridge.EVENT_BREED -> {
                 String[] f = arg.split(" ");
-                var child = Bridge.world("mob get " + f[0]).split(" ");
+                var child = Bridge.server.overworld.request("mob get " + f[0]).split(" ");
                 String kind2 = child.length > 1 ? child[0] : "cow";
                 var e = new org.bukkit.event.entity.EntityBreedEvent(of(Integer.parseInt(f[0]), kind2),
                         of(Integer.parseInt(f[1]), kind2), of(Integer.parseInt(f[2]), kind2), null, null,

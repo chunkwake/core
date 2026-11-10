@@ -38,6 +38,8 @@ pub struct Live {
     pub xp: crate::xp::Experience,
     /// Приседает (`Player.isSneaking`): меняется от `player_input`, без тика.
     pub sneaking: bool,
+    /// Измерение игрока (`Player.getWorld`): меняется переходом и респавном.
+    pub dimension: crate::play::Dimension,
 }
 
 impl Live {
@@ -65,6 +67,7 @@ impl Live {
         self.xp.progress.to_bits().hash(&mut h);
         self.xp.total.hash(&mut h);
         self.sneaking.hash(&mut h);
+        self.dimension.hash(&mut h);
         // Слоты: `Option<Stack>` — сравнивается всё, что печатается в строку.
         for s in &self.slots {
             match s {
@@ -99,7 +102,7 @@ impl Live {
     ) -> String {
         let [x, y, z] = self.pos;
         let mut out = format!(
-            "{} {} {} {} {} {} {x} {y} {z} {} {} {} {} {} {}",
+            "{} {} {} {} {} {} {x} {y} {z} {} {} {} {} {} {} {}",
             self.health,
             self.food,
             self.saturation,
@@ -111,7 +114,8 @@ impl Live {
             self.xp.level,
             self.xp.progress,
             self.xp.total,
-            u8::from(self.sneaking)
+            u8::from(self.sneaking),
+            self.dimension.key()
         );
         for i in 0..BUKKIT_SLOTS {
             out.push('\n');
@@ -352,9 +356,12 @@ impl Control {
                 live.yaw = yaw;
                 live.pitch = pitch;
             }
-            // Переход измерения: зеркало получает новую точку; измерение
-            // плагинам пока не отдаётся, поэтому больше менять нечего.
-            Control::DimensionChange(_, p, _) => live.pos = p,
+            Control::DimensionChange(dim, p, (yaw, pitch)) => {
+                live.dimension = dim;
+                live.pos = p;
+                live.yaw = yaw;
+                live.pitch = pitch;
+            }
             Control::Credits => {}
             Control::Effect { effect, force, .. } => {
                 crate::survival::add_effect(&mut live.effects, effect, force);
@@ -526,6 +533,8 @@ pub enum Event {
     ToggleSneak = 44,
     /// `PlayerToggleSprintEvent`: `1|0` → `c` или пусто.
     ToggleSprint = 45,
+    /// `PlayerChangedWorldEvent` после перехода: `<ключ прежнего мира>`, ответ не нужен.
+    ChangedWorld = 46,
 }
 
 impl Event {
@@ -586,6 +595,7 @@ mod tests {
             effects: Vec::new(),
             xp: Default::default(),
             sneaking: false,
+            dimension: crate::play::Dimension::Overworld,
         };
         let c = Control::parse_t("slot 0 minecraft:bread 3", ids).unwrap();
         assert_eq!(
@@ -648,8 +658,8 @@ e minecraft:haste 1 200 0 0 1"
         let mut lines = text.lines();
         assert_eq!(
             lines.next(),
-            Some("7.5 20 5 0 0 0 1 64 -2.5 90 0 0 0 0 0"),
-            "первая строка: последнее поле — присед (0/1)"
+            Some("7.5 20 5 0 0 0 1 64 -2.5 90 0 0 0 0 0 minecraft:overworld"),
+            "первая строка: присед (0/1), затем ключ измерения"
         );
         assert_eq!(lines.next(), Some("minecraft:bread 3"));
         assert_eq!(text.lines().count(), 1 + BUKKIT_SLOTS);

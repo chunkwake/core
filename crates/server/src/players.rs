@@ -195,6 +195,9 @@ pub fn to_nbt(s: &PlayerSave, data_version: i32, names: &[String]) -> Compound {
         "seenCredits".into(),
         Tag::Byte(u8::from(s.seen_credits) as i8),
     );
+    if let Some(values) = s.bukkit_values.as_ref().filter(|c| !c.is_empty()) {
+        root.insert("BukkitValues".into(), Tag::Compound(values.clone()));
+    }
     root
 }
 
@@ -313,6 +316,7 @@ pub fn from_nbt(root: &Compound, ids: &HashMap<String, i32>) -> Option<PlayerSav
             .get("seenCredits")
             .and_then(Tag::as_i64)
             .is_some_and(|v| v != 0),
+        bukkit_values: root.get("BukkitValues").and_then(Tag::as_compound).cloned(),
         dimension: root
             .get("Dimension")
             .and_then(Tag::as_str)
@@ -372,6 +376,10 @@ mod tests {
             spawn_dimension: Some("minecraft:the_nether".into()),
             spawn_angle: [90.0, 0.0],
             seen_credits: true,
+            bukkit_values: Some(Compound::from([(
+                "myplugin:coins".into(),
+                Tag::Int(42),
+            )])),
             dimension: Some("minecraft:the_nether".into()),
             slots: vec![
                 (

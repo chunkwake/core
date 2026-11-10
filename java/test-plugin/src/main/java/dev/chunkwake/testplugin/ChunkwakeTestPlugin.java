@@ -24,6 +24,10 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
     @Override
     public void onEnable() {
         getLogger().info("onEnable on " + getServer().getName() + " " + getServer().getVersion());
+        for (org.bukkit.World w : getServer().getWorlds()) {
+            getLogger().info("world: " + w.getName() + " " + w.getKey() + " " + w.getEnvironment() + " uid=" + w.getUID()
+                    + " path=" + w.getWorldPath());
+        }
         String bench = System.getenv("CHUNKWAKE_BENCH_MOBS");
         if (bench != null) {
             benchMobs(Integer.parseInt(bench));
@@ -200,6 +204,13 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
     }
 
     @EventHandler
+    public void onChangedWorld(org.bukkit.event.player.PlayerChangedWorldEvent e) {
+        getLogger().info("changed world: " + e.getPlayer().getName() + " " + e.getFrom().getName() + " -> "
+                + e.getPlayer().getWorld().getName() + " meta=" + (e.getPlayer().hasMetadata("cw-last")
+                ? e.getPlayer().getMetadata("cw-last").get(0).asString() : null));
+    }
+
+    @EventHandler
     public void onRespawn(org.bukkit.event.player.PlayerRespawnEvent e) {
         getLogger().info("respawn: " + e.getRespawnReason() + " bed=" + e.isBedSpawn() + " at "
                 + e.getRespawnLocation().getBlockX() + " " + e.getRespawnLocation().getBlockY());
@@ -289,6 +300,13 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (command.getName().equals("world") && sender instanceof Player p && args.length == 1) {
+            org.bukkit.World w = getServer().getWorld(args[0]);
+            if (w == null) return false;
+            p.setMetadata("cw-last", new org.bukkit.metadata.FixedMetadataValue(this, p.getWorld().getName()));
+            p.teleport(new org.bukkit.Location(w, 0.5, 100, 0.5));
+            return true;
+        }
         if (command.getName().equals("up")) {
             if (!(sender instanceof Player p)) {
                 return false;
@@ -318,6 +336,10 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
     @EventHandler
     public void onJoin(PlayerJoinEvent event) {
         Player p = event.getPlayer();
+        org.bukkit.NamespacedKey joins = new org.bukkit.NamespacedKey(this, "joins");
+        int n = p.getPersistentDataContainer().getOrDefault(joins, org.bukkit.persistence.PersistentDataType.INTEGER, 0) + 1;
+        p.getPersistentDataContainer().set(joins, org.bukkit.persistence.PersistentDataType.INTEGER, n);
+        getLogger().info("pdc: " + p.getName() + " joins=" + n + " world=" + p.getWorld().getName());
         // Планировщик сущности: задача игрока на следующем тике и в его «регионе».
         p.getScheduler().run(this, t -> getLogger().info("folia: entity task for " + p.getName()
                 + " owned=" + getServer().isOwnedByCurrentRegion(p)), () -> getLogger().info("folia: entity retired"));

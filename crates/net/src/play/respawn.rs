@@ -292,22 +292,27 @@ impl PlayPlan {
         let reply = self.sync_player_event(crate::live::Event::Respawn, uuid, || {
             let [x, y, z] = at.pos;
             format!(
-                "{x} {y} {z} {} {} {} {} {reason}",
+                "{x} {y} {z} {} {} {} {} {reason} {}",
                 at.look.0,
                 at.look.1,
                 u8::from(at.bed),
-                u8::from(at.anchor)
+                u8::from(at.anchor),
+                at.dim.key()
             )
         });
-        let f: Vec<f64> = reply
-            .as_deref()
-            .unwrap_or("")
-            .split_whitespace()
-            .filter_map(|v| v.parse().ok())
-            .collect();
+        let mut it = reply.as_deref().unwrap_or("").split_whitespace();
+        let f: Vec<f64> = it.by_ref().take(5).filter_map(|v| v.parse().ok()).collect();
         if let [x, y, z, yaw, pitch] = f[..] {
             at.pos = [x, y, z];
             at.look = (yaw as f32, pitch as f32);
+            // Точка в другом мире плагина (`setRespawnLocation`).
+            if let Some(dim) = it
+                .next()
+                .and_then(Dimension::from_key)
+                .filter(|d| self.dims.contains_key(d))
+            {
+                at.dim = dim;
+            }
         }
     }
 

@@ -60,13 +60,98 @@ final class ChunkwakeServer {
     private final PluginClassGroup classGroup = new PluginClassGroup(logger);
     private final Map<UUID, PlayerImpl> online = new LinkedHashMap<>();
     final ConsoleCommandSender console = Stub.of(ConsoleCommandSender.class, new Console(this));
-    final World world = Stub.of(World.class, new WorldImpl());
+    /** Оверворлд: события без мира (тик блоков и мобов) идут сюда. */
+    final WorldImpl overworld = new WorldImpl(this, WorldImpl.OVERWORLD);
+    final World world = overworld.api;
+    /** Миры по ключу измерения, порядок как у Paper: оверворлд, Ад, Край. */
+    private volatile Map<String, WorldImpl> worlds;
+    private final Metadata metadata = new Metadata();
     private final Thread mainThread = Thread.currentThread();
     /** Каталог мира: его читают плагины (BlueMap разбирает регионы сам). */
     private final java.nio.file.Path levelDirectory;
 
     ChunkwakeServer(java.nio.file.Path levelDirectory) {
         this.levelDirectory = levelDirectory;
+    }
+
+    java.nio.file.Path levelDirectory() {
+        return levelDirectory;
+    }
+
+    Metadata metadata() {
+        return metadata;
+    }
+
+    /** Миры сервера: оверворлд и загруженные Rust измерения (без Rust — только оверворлд). */
+    Map<String, WorldImpl> worlds() {
+        Map<String, WorldImpl> w = worlds;
+        if (w != null) {
+            return w;
+        }
+        synchronized (this) {
+            if (worlds == null) {
+                Map<String, WorldImpl> out = new LinkedHashMap<>();
+                out.put(WorldImpl.OVERWORLD, overworld);
+                if (Bridge.table != null) {
+                    for (String key : Bridge.world("worlds").split("\n")) {
+                        if (!key.isBlank() && !out.containsKey(key.trim())) {
+                            out.put(key.trim(), new WorldImpl(this, key.trim()));
+                        }
+                    }
+                }
+                worlds = java.util.Collections.unmodifiableMap(out);
+            }
+            return worlds;
+        }
+    }
+
+    /** Мир по ключу измерения; неизвестный — оверворлд. */
+    WorldImpl world(String key) {
+        WorldImpl w = key == null ? null : worlds().get(key);
+        return w != null ? w : overworld;
+    }
+
+    /**
+     * { MetadataStore} сервера, как у { CraftServer}: игроки по имени
+     * (как { PlayerMetadataStore}), сущности и миры по UUID, блоки по месту.
+     * Выключение плагина снимает его значения ({ invalidateAll}).
+     */
+    static final class Metadata {
+        final org.bukkit.metadata.MetadataStoreBase<org.bukkit.OfflinePlayer> players =
+                new org.bukkit.metadata.MetadataStoreBase<>() {
+                    @Override
+                    protected String disambiguate(org.bukkit.OfflinePlayer p, String key) {
+                        return p.getName().toLowerCase(java.util.Locale.ROOT) + ":" + key;
+                    }
+                };
+        final org.bukkit.metadata.MetadataStoreBase<org.bukkit.entity.Entity> entities =
+                new org.bukkit.metadata.MetadataStoreBase<>() {
+                    @Override
+                    protected String disambiguate(org.bukkit.entity.Entity e, String key) {
+                        return e.getUniqueId() + ":" + key;
+                    }
+                };
+        final org.bukkit.metadata.MetadataStoreBase<World> worlds =
+                new org.bukkit.metadata.MetadataStoreBase<>() {
+                    @Override
+                    protected String disambiguate(World w, String key) {
+                        return w.getUID() + ":" + key;
+                    }
+                };
+        final org.bukkit.metadata.MetadataStoreBase<org.bukkit.block.Block> blocks =
+                new org.bukkit.metadata.MetadataStoreBase<>() {
+                    @Override
+                    protected String disambiguate(org.bukkit.block.Block b, String key) {
+                        return b.getWorld().getUID() + ":" + b.getX() + ":" + b.getY() + ":" + b.getZ() + ":" + key;
+                    }
+                };
+
+        void removeAll(org.bukkit.plugin.Plugin plugin) {
+            players.removeAll(plugin);
+            entities.removeAll(plugin);
+            worlds.removeAll(plugin);
+            blocks.removeAll(plugin);
+        }
     }
 
     Scheduler scheduler() {
@@ -124,7 +209,8 @@ final class ChunkwakeServer {
     public static final class Unsafe {
         static final int PROTOCOL = 777;
         public int getProtocolVersion() { return PROTOCOL; }
-        public int getDataVersion() { return 5023; }
+        static final int DATA_VERSION = 5023;
+        public int getDataVersion() { return DATA_VERSION; }
     }
 
     /** Загружает jar из каталога и включает плагины. Возвращает число включённых. */
@@ -689,7 +775,9 @@ final class ChunkwakeServer {
             return fallback;
         }
     }
-    public List<World> getWorlds() { return List.of(world); }
+    public List<World> getWorlds() {
+        return worlds().values().stream().map(w -> w.api).toList();
+    }
 
     /**
      * Каталог мира (в 26.3 `Server.getWorldContainer()` устарел в пользу этого):
@@ -706,7 +794,31 @@ final class ChunkwakeServer {
     public File getWorldContainer() { return levelDirectory.getParent().toFile(); }
 
     public World getWorld(String name) {
-        return world.getName().equals(name) ? world : null;
+        for (WorldImpl w : worlds().values()) {
+            if (w.getName().equals(name)) {
+                return w.api;
+            }
+        }
+        return null;
+    }
+
+    public World getWorld(UUID uid) {
+        for (WorldImpl w : worlds().values()) {
+            if (w.getUID().equals(uid)) {
+                return w.api;
+            }
+        }
+        return null;
+    }
+
+    public World getWorld(org.bukkit.NamespacedKey key) {
+        WorldImpl w = key == null ? null : worlds().get(key.toString());
+        return w == null ? null : w.api;
+    }
+
+    public World getWorld(net.kyori.adventure.key.Key key) {
+        WorldImpl w = key == null ? null : worlds().get(key.asString());
+        return w == null ? null : w.api;
     }
 
     public Collection<? extends Player> getOnlinePlayers() {
@@ -888,220 +1000,4 @@ final class ChunkwakeServer {
         }
     }
 
-    /** Единственный мир (MVP). */
-    static final class WorldImpl {
-        public String getName() { return Bridge.server.levelDirectory.getFileName().toString(); }
-
-        /** `minecraft:overworld`: по ключу BlueMap выбирает измерение. */
-        public org.bukkit.NamespacedKey getKey() {
-            return new org.bukkit.NamespacedKey("minecraft", "overworld");
-        }
-
-        public org.bukkit.World.Environment getEnvironment() {
-            return org.bukkit.World.Environment.NORMAL;
-        }
-
-        public long getSeed() {
-            String seed = Bridge.world("seed").trim();
-            return seed.isEmpty() ? 0L : Long.parseLong(seed);
-        }
-
-        /** Каталог мира: плагины читают из него регионы и `level.dat`. */
-        public java.nio.file.Path getWorldPath() {
-            Bridge.log(3, "api: World.getWorldPath -> " + Bridge.server.levelDirectory);
-            return Bridge.server.levelDirectory;
-        }
-
-        public int getSeaLevel() { return 63; }
-
-        // --- Геймрулы: те же правила, что у `/gamerule` (общие на сервер) ---
-
-        public <T> T getGameRuleValue(org.bukkit.GameRule<T> rule) {
-            return rule instanceof RegistryValues.GameRuleImpl<?> r ? rule.getType().cast(
-                    RegistryValues.GameRules.value(r)) : null;
-        }
-
-        public <T> T getGameRuleDefault(org.bukkit.GameRule<T> rule) {
-            return rule == null ? null : rule.getDefaultValue();
-        }
-
-        public <T> boolean setGameRule(org.bukkit.GameRule<T> rule, T value) {
-            return rule instanceof RegistryValues.GameRuleImpl<?> r && value != null
-                    && RegistryValues.GameRules.set(r, value);
-        }
-
-        /** Имена как у {@code GameRule.getName()}: {@code minecraft:keep_inventory}. */
-        public String[] getGameRules() {
-            return RegistryValues.GameRules.names().stream().map(n -> "minecraft:" + n).toArray(String[]::new);
-        }
-
-        public boolean isGameRule(String name) {
-            return rule(name) != null;
-        }
-
-        public String getGameRuleValue(String name) {
-            org.bukkit.GameRule<?> r = rule(name);
-            Object v = r == null ? null : getGameRuleValue(r);
-            return v == null ? null : v.toString();
-        }
-
-        @SuppressWarnings("unchecked")
-        public boolean setGameRuleValue(String name, String value) {
-            org.bukkit.GameRule<Object> r = (org.bukkit.GameRule<Object>) rule(name);
-            if (r == null || value == null) {
-                return false;
-            }
-            Object parsed;
-            if ((Class<?>) r.getType() == Integer.class) {
-                try {
-                    parsed = Integer.parseInt(value);
-                } catch (NumberFormatException e) {
-                    return false;
-                }
-            } else if (value.equals("true") || value.equals("false")) {
-                parsed = Boolean.parseBoolean(value);
-            } else {
-                return false;
-            }
-            return setGameRule(r, parsed);
-        }
-
-        private static org.bukkit.GameRule<?> rule(String name) {
-            org.bukkit.NamespacedKey k = name == null ? null : org.bukkit.NamespacedKey.fromString(name);
-            return k == null ? null : org.bukkit.Registry.GAME_RULE.get(k);
-        }
-
-        public org.bukkit.Location getSpawnLocation() {
-            return new org.bukkit.Location(Bridge.server.world, 0, 64, 0);
-        }
-        public org.bukkit.block.Block getBlockAt(int x, int y, int z) {
-            return new BlockImpl(Bridge.server.world, x, y, z, null).api;
-        }
-        public org.bukkit.block.Block getBlockAt(org.bukkit.Location l) {
-            return getBlockAt(l.getBlockX(), l.getBlockY(), l.getBlockZ());
-        }
-        public org.bukkit.Material getType(int x, int y, int z) { return getBlockAt(x, y, z).getType(); }
-        public void setType(int x, int y, int z, org.bukkit.Material m) { getBlockAt(x, y, z).setType(m); }
-        public UUID getUID() { return new UUID(0, 1); }
-        public int getMinHeight() { return -64; }
-        public int getMaxHeight() { return 320; }
-
-        /**
-         * `World.save()`: просит сервер записать мир на диск.
-         *
-         * BlueMap зовёт его при включении, чтобы свойства мира точно были в
-         * файле. Запись идёт в блокирующем пуле сервера (как автосейв), здесь
-         * только просьба: иначе плагин ждал бы диск на своём потоке.
-         */
-        public void save() {
-            Bridge.world("save");
-        }
-
-        public void save(boolean force) {
-            save();
-        }
-
-        /** Автосохранение у нас всегда включено: раз в 30 с и по просьбе. */
-        public boolean isAutoSave() { return true; }
-
-        public void setAutoSave(boolean value) {
-            // Выключить автосейв плагину нельзя: мир потерял бы данные при
-            // аварии. Значение принимается молча, как в ваниле без правок.
-        }
-
-        public org.bukkit.entity.Entity spawnEntity(org.bukkit.Location l, org.bukkit.entity.EntityType type) {
-            String s = MobImpl.species(type);
-            if (s == null) {
-                throw new UnsupportedOperationException("chunkwake: spawnEntity " + type);
-            }
-            return MobImpl.spawn(l, s);
-        }
-
-        public org.bukkit.entity.Entity spawnEntity(org.bukkit.Location l, org.bukkit.entity.EntityType type,
-                boolean randomize) {
-            return spawnEntity(l, type);
-        }
-
-        public org.bukkit.entity.Entity spawnEntity(org.bukkit.Location l, org.bukkit.entity.EntityType type,
-                org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason reason) {
-            return spawnEntity(l, type);
-        }
-
-        public <T extends org.bukkit.entity.Entity> T spawn(org.bukkit.Location l, Class<T> type) {
-            return spawn(l, type, null);
-        }
-
-        public <T extends org.bukkit.entity.Entity> T spawn(org.bukkit.Location l, Class<T> type,
-                org.bukkit.util.Consumer<? super T> init) {
-            java.util.function.Consumer<? super T> c = init == null ? null : init::accept;
-            return spawn(l, type, c);
-        }
-
-        public <T extends org.bukkit.entity.Entity> T spawn(org.bukkit.Location l, Class<T> type,
-                java.util.function.Consumer<? super T> init) {
-            String s = MobImpl.species(type);
-            if (s == null) {
-                throw new UnsupportedOperationException("chunkwake: spawn " + type.getSimpleName());
-            }
-            T e = type.cast(MobImpl.spawn(l, s));
-            if (init != null) {
-                init.accept(e);
-            }
-            return e;
-        }
-
-        public java.util.List<org.bukkit.entity.Entity> getEntities() {
-            java.util.List<org.bukkit.entity.Entity> out = new java.util.ArrayList<>(Bridge.server.api.getOnlinePlayers());
-            out.addAll(MobImpl.all());
-            return out;
-        }
-
-        public java.util.List<org.bukkit.entity.LivingEntity> getLivingEntities() {
-            java.util.List<org.bukkit.entity.LivingEntity> out = new java.util.ArrayList<>(Bridge.server.api.getOnlinePlayers());
-            out.addAll(MobImpl.all());
-            return out;
-        }
-
-        public <T extends org.bukkit.entity.Entity> java.util.Collection<T> getEntitiesByClass(Class<T> type) {
-            java.util.List<T> out = new java.util.ArrayList<>();
-            for (var e : getEntities()) {
-                if (type.isInstance(e)) {
-                    out.add(type.cast(e));
-                }
-            }
-            return out;
-        }
-
-        public java.util.Collection<org.bukkit.entity.Entity> getNearbyEntities(org.bukkit.Location l, double x,
-                double y, double z) {
-            java.util.List<org.bukkit.entity.Entity> out = new java.util.ArrayList<>();
-            for (var e : getEntities()) {
-                var at = e.getLocation();
-                if (Math.abs(at.getX() - l.getX()) <= x && Math.abs(at.getY() - l.getY()) <= y
-                        && Math.abs(at.getZ() - l.getZ()) <= z) {
-                    out.add(e);
-                }
-            }
-            return out;
-        }
-
-        /** Предмет на земле без разброса. */
-        public org.bukkit.entity.Item dropItem(org.bukkit.Location l, org.bukkit.inventory.ItemStack s) {
-            return drop(l, s, false);
-        }
-
-        /** Предмет с разбросом, как из сломанного блока. */
-        public org.bukkit.entity.Item dropItemNaturally(org.bukkit.Location l, org.bukkit.inventory.ItemStack s) {
-            return drop(l, s, true);
-        }
-
-        private org.bukkit.entity.Item drop(org.bukkit.Location l, org.bukkit.inventory.ItemStack s, boolean natural) {
-            String line = StackImpl.line(s);
-            if (line == null) {
-                throw new IllegalArgumentException("Cannot drop air");
-            }
-            Bridge.world("dropitem " + l.getX() + " " + l.getY() + " " + l.getZ() + " " + (natural ? 1 : 0) + " " + line);
-            return Stub.of(org.bukkit.entity.Item.class, new BlockEvents.GroundItem(l.clone(), s.clone()));
-        }
-    }
 }
