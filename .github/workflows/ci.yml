@@ -361,7 +361,7 @@ jobs:
           # однажды он молча пропадёт, это заметят по цифре.
           ls -l "dist/$name"
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: chunkwake-${{ env.MC_VERSION }}-${{ matrix.artifact }}
           path: dist/chunkwake-*
