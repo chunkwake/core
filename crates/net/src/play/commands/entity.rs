@@ -436,43 +436,65 @@ pub(super) fn clear(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
             Some((vec![parsed.id], parsed.extra, parsed.damage))
         }
     };
+    // `maxCount` по умолчанию -1 (без предела), 0 — только посчитать.
     let max = match input.word() {
-        None => i32::MAX,
+        None => -1,
         Some(token) => match args::int(token, 0, i32::MAX) {
             Some(n) => n,
             None => return usage("/clear [targets] [item] [maxCount]"),
         },
     };
-    let mut removed = 0;
-    for target in &targets {
-        removed += match &item {
-            Some((ids, extra, damage)) => ctx.plan.clear_items(
-                target.uuid,
-                ids,
-                *extra,
-                *damage,
-                max.saturating_sub(removed),
-            ),
-            None => ctx.plan.clear_inventory(target.uuid),
+    let test = max == 0;
+    let (ids, extra, damage) = match &item {
+        Some((ids, extra, damage)) => (Some(ids.as_slice()), *extra, *damage),
+        None => (None, 0, None),
+    };
+    // Предел — на каждого игрока, как в `ClearInventoryCommands`.
+    let counts: Vec<i32> = targets
+        .iter()
+        .map(|t| ctx.plan.clear_matching(t.uuid, ids, extra, damage, max, test))
+        .collect();
+    clear_feedback(&targets, &counts, test)
+}
+
+/// Ответ `/clear` по `CommandResponseTracker`: ошибка — если ни у кого ничего
+/// не нашлось, иначе в счёт идут только игроки, у которых что-то было.
+fn clear_feedback(targets: &[Target], counts: &[i32], test: bool) -> Outcome {
+    let total: i32 = counts.iter().sum();
+    if total == 0 {
+        return match targets {
+            [one] => fail("clear.failed.single", vec![json!({"text": one.name})]),
+            many => fail("clear.failed.multiple", vec![Value::from(many.len())]),
         };
     }
-    if item.is_some() && removed == 0 {
-        return Outcome::Feedback(translate(
-            "commands.clear.failed.single",
-            vec![json!({"text": targets[0].name})],
-        ));
-    }
-    let first = &targets[0];
-    match targets.len() {
-        1 => Outcome::Feedback(translate(
-            "commands.clear.success.single",
-            vec![Value::from(removed), json!({"text": first.name})],
+    let hit: Vec<(&Target, i32)> = targets
+        .iter()
+        .zip(counts.iter().copied())
+        .filter(|&(_, n)| n > 0)
+        .collect();
+    let (single, multiple) = if test {
+        ("commands.clear.test.single", "commands.clear.test.multiple")
+    } else {
+        ("commands.clear.success.single", "commands.clear.success.multiple")
+    };
+    match hit.as_slice() {
+        [(one, n)] => Outcome::Feedback(translate(
+            single,
+            vec![Value::from(*n), json!({"text": one.name})],
         )),
-        n => Outcome::Feedback(translate(
-            "commands.clear.success.multiple",
-            vec![Value::from(removed), Value::from(n)],
+        many => Outcome::Feedback(translate(
+            multiple,
+            vec![Value::from(total), Value::from(many.len())],
         )),
     }
+}
+
+fn fail(key: &str, with: Vec<Value>) -> Outcome {
+    let mut value = translate(key, with);
+    if let Some(object) = value.as_object_mut() {
+        object.insert("color".into(), Value::String("red".into()));
+    }
+    Outcome::Feedback(value)
 }
 
 /// `/effect give|clear`.
@@ -1171,6 +1193,49 @@ fn tp_spec(name: &str) -> super::dispatch::Spec {
 #[cfg(test)]
 mod tests {
     use super::read_teleport;
+
+    fn player(name: &str) -> super::Target {
+        super::Target {
+            uuid: uuid::Uuid::nil(),
+            name: name.into(),
+            entity_id: 0,
+            pos: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            game_mode: Some(0),
+            tags: Vec::new(),
+        }
+    }
+
+    fn feedback(o: super::Outcome) -> serde_json::Value {
+        match o {
+            super::Outcome::Feedback(v) => v,
+            other => panic!("ожидался ответ: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clear_counts_only_players_with_items() {
+        let (a, b, c) = (player("A"), player("B"), player("C"));
+        let all = [a.clone(), b.clone(), c.clone()];
+        // У одного из трёх: single с его именем, а не multiple на трёх.
+        let v = feedback(super::clear_feedback(&all, &[0, 5, 0], false));
+        assert_eq!(v["translate"], "commands.clear.success.single");
+        assert_eq!(v["with"][0], 5);
+        assert_eq!(v["with"][1]["text"], "B");
+        // У двух: сумма и число игроков с находкой.
+        let v = feedback(super::clear_feedback(&all, &[2, 3, 0], true));
+        assert_eq!(v["translate"], "commands.clear.test.multiple");
+        assert_eq!(v["with"][0], 5);
+        assert_eq!(v["with"][1], 2);
+        // Ни у кого: ключи без `commands.`, красным.
+        let v = feedback(super::clear_feedback(&all, &[0, 0, 0], false));
+        assert_eq!(v["translate"], "clear.failed.multiple");
+        assert_eq!(v["with"][0], 3);
+        assert_eq!(v["color"], "red");
+        let v = feedback(super::clear_feedback(std::slice::from_ref(&a), &[0], true));
+        assert_eq!(v["translate"], "clear.failed.single");
+    }
 
     #[test]
     fn local_teleport_keeps_all_three_coordinates() {

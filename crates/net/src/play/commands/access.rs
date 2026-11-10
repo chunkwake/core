@@ -301,40 +301,39 @@ impl PlayPlan {
         true
     }
 
-    /// Очищает инвентарь; возвращает, сколько предметов было (по зеркалу).
-    pub(crate) fn clear_inventory(&self, uuid: Uuid) -> i32 {
-        let count = self.live.lock().unwrap().get(&uuid).map_or(0, |l| {
-            l.slots.iter().flatten().map(|s| s.count).sum::<i32>()
-        });
-        self.push_control(uuid, Control::Clear);
-        count
-    }
-
-    /// Снимает до `max` штук предметов из списка id.
-    ///
-    /// `extra == 0` и `damage == None` — любые компоненты. Иначе снимаются
-    /// стопки, у которых заданные компоненты совпали.
-    pub(crate) fn clear_items(
+    /// `/clear` одному игроку, как `Inventory.clearOrCountMatchingItems`:
+    /// считает по зеркалу подходящие предметы (сетка крафта 2×2 тоже, слот
+    /// результата — нет) и, если `test` ложно, снимает до `max` штук.
+    /// `items == None` — любой предмет, `max < 0` — без предела.
+    pub(crate) fn clear_matching(
         &self,
         uuid: Uuid,
-        items: &[i32],
+        items: Option<&[i32]>,
         extra: u32,
         damage: Option<i32>,
         max: i32,
+        test: bool,
     ) -> i32 {
-        let removed = self.live.lock().unwrap().get(&uuid).map_or(0, |l| {
-            crate::survival::query_count(&l.slots, Some(items), extra, damage, max)
+        // `test` (предел 0) считает всё, как `clearOrCountMatchingItems`.
+        let limit = if max < 0 || test { i32::MAX } else { max };
+        let found = self.live.lock().unwrap().get(&uuid).map_or(0, |l| {
+            crate::survival::query_count(&l.slots[1..], items, extra, damage, limit)
         });
-        self.push_control(
-            uuid,
+        if test || found == 0 {
+            return found;
+        }
+        let control = if items.is_none() && extra == 0 && damage.is_none() && max < 0 {
+            Control::Clear
+        } else {
             Control::ClearItem {
-                items: items.to_vec(),
+                items: items.map(<[i32]>::to_vec),
                 extra,
                 damage,
-                max,
-            },
-        );
-        removed
+                max: limit,
+            }
+        };
+        self.push_control(uuid, control);
+        found
     }
 
     /// `/kill`: живую сущность убиваем через урон, остальные удаляем из мира.

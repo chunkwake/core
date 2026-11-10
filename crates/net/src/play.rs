@@ -11005,7 +11005,7 @@ impl PlayPlan {
                             damage,
                             max,
                         } => {
-                            let _ = state.inv.take_selected(Some(&items), extra, damage, max);
+                            let _ = state.inv.take_selected(items.as_deref(), extra, damage, max);
                             if let Some(w) = window.as_ref() {
                                 self.send_window(conn, &mut state.inv, Some(w), w.id).await?;
                             } else {

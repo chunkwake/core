@@ -186,7 +186,8 @@ impl Inventory {
         max: i32,
     ) -> i32 {
         let mut left = max.max(0);
-        let from_slots = take_selected_slots(&mut self.slots, ids, extra, damage, left);
+        // Слот 0 — результат крафта 2×2: ваниль считает только сетку.
+        let from_slots = take_selected_slots(&mut self.slots[1..], ids, extra, damage, left);
         left -= from_slots;
         from_slots
             + take_selected_slots(

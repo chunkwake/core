@@ -163,10 +163,11 @@ pub enum Control {
     Credits,
     /// Очистить инвентарь игрока (`/clear`).
     Clear,
-    /// Снять до `max` штук предметов из списка (`/clear`).
+    /// Снять до `max` штук предметов из списка (`/clear` с пределом или фильтром).
     /// `extra == 0` и `damage == None` — любые компоненты.
     ClearItem {
-        items: Vec<i32>,
+        /// `None` — любой предмет.
+        items: Option<Vec<i32>>,
         extra: u32,
         damage: Option<i32>,
         max: i32,
@@ -377,8 +378,8 @@ impl Control {
                 max,
             } => {
                 let _ = crate::survival::take_selected_slots(
-                    &mut live.slots,
-                    Some(items),
+                    &mut live.slots[1..],
+                    items.as_deref(),
                     extra,
                     damage,
                     max,
