@@ -11,13 +11,12 @@ use std::collections::BTreeSet;
 /// Пакеты, которые клиент шлёт, а сервер пока молча пропускает.
 ///
 /// Часть из них протокольная (`pong`, `chat_ack`, `client_tick_end`), часть —
-/// дыры поведения (`change_game_mode`).
+/// дыры поведения (`entity_tag_query`).
 /// Матрица: `docs/feature-matrix.md`, строка «Пакеты клиента».
 const UNHANDLED: &[&str] = &[
     "block_entity_tag_query",
     "bundle_item_selected",
     "change_difficulty",
-    "change_game_mode",
     "chat_ack",
     "chat_session_update",
     "client_tick_end",

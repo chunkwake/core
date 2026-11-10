@@ -128,6 +128,7 @@ struct Ids {
     sb_set_creative_mode_slot: i32,
     sb_pick_item_from_block: i32,
     sb_pick_item_from_entity: i32,
+    sb_change_game_mode: i32,
     sb_set_carried_item: i32,
     container_set_content: i32,
     container_set_slot: i32,
@@ -2300,6 +2301,31 @@ fn charged_extra(extra: u32, charged: Vec<Stack>) -> u32 {
 
 /// Режимы игры по номерам (`GameType`).
 const GAME_MODES: [&str; 4] = ["survival", "creative", "adventure", "spectator"];
+
+#[derive(Debug, PartialEq, Eq)]
+enum GameModeChange {
+    Denied(u8),
+    Unchanged,
+    Change(u8),
+}
+
+/// Решение `handleChangeGameMode`: тот же уровень прав, что у `/gamemode`,
+/// а неизвестный ID `GameType.BY_ID` сводит к survival.
+fn game_mode_change(requested: i32, level: i32, current: u8) -> GameModeChange {
+    let mode = if (0..GAME_MODES.len() as i32).contains(&requested) {
+        requested as u8
+    } else {
+        0
+    };
+    if level < commands::registry::GAMEMASTERS {
+        GameModeChange::Denied(mode)
+    } else if mode == current {
+        GameModeChange::Unchanged
+    } else {
+        GameModeChange::Change(mode)
+    }
+}
+
 /// Предел `/give` за раз.
 const MAX_GIVE: i32 = 6400;
 
@@ -2610,6 +2636,7 @@ impl PlayPlan {
                 sb_set_creative_mode_slot: sb("set_creative_mode_slot")?,
                 sb_pick_item_from_block: sb("pick_item_from_block")?,
                 sb_pick_item_from_entity: sb("pick_item_from_entity")?,
+                sb_change_game_mode: sb("change_game_mode")?,
                 sb_set_carried_item: sb("set_carried_item")?,
                 container_set_content: cb("container_set_content")?,
                 container_set_slot: cb("container_set_slot")?,
@@ -11704,6 +11731,38 @@ impl PlayPlan {
                         }
                         state.inv.selected = slot;
                         eating = None;
+                        continue;
+                    }
+                    if id == ids.sb_change_game_mode {
+                        // GameType.STREAM_CODEC читает VarInt.
+                        let requested = r.var_int()?;
+                        let mode = match game_mode_change(
+                            requested,
+                            self.op_level(uuid),
+                            login.spawn.game_mode,
+                        ) {
+                            GameModeChange::Denied(mode) => {
+                                tracing::warn!(
+                                    "{} tried to change game mode to {} without required permissions",
+                                    me.entry.name,
+                                    GAME_MODES[mode as usize]
+                                );
+                                continue;
+                            }
+                            GameModeChange::Unchanged => continue,
+                            GameModeChange::Change(mode) => mode,
+                        };
+                        if mode == 3 { self.wake_player(uuid); }
+                        login.spawn.game_mode = mode;
+                        state.game_mode = Some(mode);
+                        survival = matches!(mode, 0 | 2);
+                        if let Some((feet, _, _)) = self.player_at(uuid) {
+                            state.vitals.reset_fall(feet);
+                        }
+                        self.set_game_mode(conn, uuid, mode, true).await?;
+                        flying = mode == 3;
+                        self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
+                        self.send_health(conn, &state.vitals).await?;
                         continue;
                     }
                     if id == ids.sb_pick_item_from_block {
@@ -21524,12 +21583,22 @@ fn chunks_around(c: (i32, i32), r: i32, skip: Option<((i32, i32), i32)>) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::{
-        CHEST_SINGLE, ChestState, FastMap, acknowledge_player_save, add_banner_pattern,
-        chunks_around, container_entity, dominant_axis, in_view, lectern_page_request,
-        update_container_viewers, within_pick_range,
+        CHEST_SINGLE, ChestState, FastMap, GameModeChange, acknowledge_player_save,
+        add_banner_pattern, chunks_around, container_entity, dominant_axis, game_mode_change,
+        in_view, lectern_page_request, update_container_viewers, within_pick_range,
     };
     use crate::survival::PlayerState;
     use uuid::Uuid;
+
+    #[test]
+    fn change_game_mode_requires_gamemaster_and_ignores_repeats() {
+        assert_eq!(game_mode_change(1, 1, 0), GameModeChange::Denied(1));
+        assert_eq!(game_mode_change(1, 2, 0), GameModeChange::Change(1));
+        assert_eq!(game_mode_change(1, 2, 1), GameModeChange::Unchanged);
+        // `GameType.BY_ID` использует `OutOfBoundsStrategy.ZERO`.
+        assert_eq!(game_mode_change(127, 2, 1), GameModeChange::Change(0));
+        assert_eq!(game_mode_change(-1, 2, 0), GameModeChange::Unchanged);
+    }
 
     /// Ваниль проверяет ближайшую точку коробки и строгое расстояние до неё.
     #[test]
