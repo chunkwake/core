@@ -40,7 +40,24 @@ class RegistriesTest {
     private static final Map<String, List<String>> KEYS = new HashMap<>();
 
     @BeforeAll
-    static void vanillaSource() throws IOException {
+    static void vanillaSource() {
+        vanillaSourceIfPresent();
+    }
+
+    /** Ванильные данные вместо Rust-сервера (один раз); без кэша — тест пропускается. */
+    static synchronized void vanillaSourceIfPresent() {
+        if (!KEYS.isEmpty()) {
+            Registries.source = RegistriesTest::answer;
+            return;
+        }
+        try {
+            load();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private static void load() throws IOException {
         assumeTrue(Files.isRegularFile(ROOT.resolve("reports/registries.json")), "no vanilla cache at " + ROOT);
         JsonObject all = JsonParser.parseString(Files.readString(ROOT.resolve("reports/registries.json")))
                 .getAsJsonObject();

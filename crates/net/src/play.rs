@@ -3680,6 +3680,9 @@ impl PlayPlan {
         if let Some(rest) = line.strip_prefix("mob ") {
             return self.mob_request(rest);
         }
+        if let Some(rest) = line.strip_prefix("attr ") {
+            return self.plugin_attribute(rest);
+        }
         if line == "tps" {
             return self.tick_meter_line();
         }

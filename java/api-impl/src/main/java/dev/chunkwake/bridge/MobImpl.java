@@ -122,6 +122,11 @@ final class MobImpl {
         String[] s = state();
         return s == null ? new UUID(0, id) : UUID.fromString(s[1]);
     }
+    /** Атрибут моба: набор вида, как у `/attribute` (`null` — у вида его нет). */
+    public org.bukkit.attribute.AttributeInstance getAttribute(org.bukkit.attribute.Attribute a) {
+        return AttributeInstanceImpl.of(this::getUniqueId, a);
+    }
+    public void registerAttribute(org.bukkit.attribute.Attribute a) {}
     public EntityType getType() { return EntityType.valueOf(species.toUpperCase(Locale.ROOT)); }
     public World getWorld() { return Bridge.server.world; }
     public org.bukkit.Server getServer() { return Bridge.server.api; }

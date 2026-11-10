@@ -40,6 +40,11 @@ final class PlayerImpl {
 
     public String getName() { return name; }
     public UUID getUniqueId() { return id; }
+    /** Атрибут игрока: база и модификаторы те же, что у `/attribute`. */
+    public org.bukkit.attribute.AttributeInstance getAttribute(org.bukkit.attribute.Attribute a) {
+        return AttributeInstanceImpl.of(() -> id, a);
+    }
+    public void registerAttribute(org.bukkit.attribute.Attribute a) {}
     /** Версия протокола клиента: через ViaVersion — его собственная, иначе наша. */
     public int getProtocolVersion() {
         int via = Bridge.via != null ? Bridge.via.protocol(id) : -1;

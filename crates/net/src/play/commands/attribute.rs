@@ -804,6 +804,98 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
     ]
 }
 
+impl PlayPlan {
+    /// `AttributeInstance` плагинов: `<uuid> <атрибут> <действие>…`, та же
+    /// база, модификаторы и пакет `update_attributes`, что у `/attribute`.
+    ///
+    /// - `get` → `база значение умолчание`, затем `id величина операция` по
+    ///   строке (видимые модификаторы: эффекты, чары, команды и плагины);
+    ///   пусто — у сущности нет такого атрибута;
+    /// - `base V` / `reset` / `add ID V OP` / `remove ID` → `1` или пусто.
+    pub(crate) fn plugin_attribute(&self, line: &str) -> String {
+        let mut it = line.split_whitespace();
+        let (Some(uuid), Some(name), Some(action)) = (it.next(), it.next(), it.next()) else {
+            return String::new();
+        };
+        let Ok(uuid) = uuid.parse::<Uuid>() else {
+            return String::new();
+        };
+        let Some(target) = self.command_target(uuid) else {
+            return String::new();
+        };
+        let Some(bounds) = bounds_of(&target, name) else {
+            return String::new();
+        };
+        let ok = |done: bool| if done { "1".to_owned() } else { String::new() };
+        match action {
+            "get" => {
+                let base = self.attribute_base(uuid, name, bounds.base);
+                let mods = visible_modifiers(self, &target, name);
+                let mut out = format!(
+                    "{} {} {}",
+                    base.clamp(bounds.min, bounds.max),
+                    combine(base, &mods, &bounds),
+                    bounds.base
+                );
+                for (id, amount, op) in mods {
+                    out.push_str(&format!("\n{id} {amount} {op}"));
+                }
+                out
+            }
+            "base" => {
+                let Some(v) = it.next().and_then(|v| v.parse::<f64>().ok()) else {
+                    return String::new();
+                };
+                let v = v.clamp(bounds.min, bounds.max);
+                edit(self, uuid, name, |s| s.base = Some(v));
+                publish(self, &target, name, &bounds);
+                ok(true)
+            }
+            "reset" => {
+                edit(self, uuid, name, |s| s.base = None);
+                publish(self, &target, name, &bounds);
+                ok(true)
+            }
+            "add" => {
+                let (Some(id), Some(amount), Some(op)) = (
+                    it.next().and_then(location),
+                    it.next().and_then(|v| v.parse::<f64>().ok()),
+                    it.next().and_then(|v| v.parse::<i32>().ok()).filter(|o| (0..=2).contains(o)),
+                ) else {
+                    return String::new();
+                };
+                let mut added = false;
+                edit(self, uuid, name, |s| {
+                    if !s.modifiers.iter().any(|m| m.id == id) {
+                        s.modifiers.push(AttrMod { id, amount, op });
+                        added = true;
+                    }
+                });
+                if added {
+                    publish(self, &target, name, &bounds);
+                }
+                ok(added)
+            }
+            "remove" => {
+                let Some(id) = it.next().and_then(location) else {
+                    return String::new();
+                };
+                let mut removed = false;
+                edit(self, uuid, name, |s| {
+                    let before = s.modifiers.len();
+                    s.modifiers.retain(|m| m.id != id);
+                    removed = s.modifiers.len() != before;
+                });
+                if removed {
+                    publish(self, &target, name, &bounds);
+                }
+                ok(removed)
+            }
+            _ => String::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
