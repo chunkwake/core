@@ -136,9 +136,14 @@ final class MobImpl {
     }
     public Component name() { return Component.text(getName()); }
 
+    private io.papermc.paper.threadedregions.scheduler.EntityScheduler scheduler;
+
     /** Планировщик задач этого моба: на Folia — поток региона, у нас общий. */
     public io.papermc.paper.threadedregions.scheduler.EntityScheduler getScheduler() {
-        return Bridge.server.entityScheduler();
+        if (scheduler == null) {
+            scheduler = Bridge.server.folia().entity(() -> !isValid());
+        }
+        return scheduler;
     }
 
     public Location getLocation() {

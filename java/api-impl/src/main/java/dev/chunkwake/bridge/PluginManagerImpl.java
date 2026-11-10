@@ -73,6 +73,7 @@ final class PluginManagerImpl {
         p.getLogger().info("Disabling " + p.getPluginMeta().getDisplayName());
         setEnabledQuietly(p, false);
         server.scheduler().cancelTasks(p);
+        server.folia().cancelTasks(p);
         HandlerList.unregisterAll(p);
         server.pluginDisabled(p);
         updateListenerMask();

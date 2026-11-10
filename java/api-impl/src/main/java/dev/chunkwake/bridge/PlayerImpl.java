@@ -432,8 +432,13 @@ final class PlayerImpl {
     public boolean isSneaking() { return state().sneaking(); }
 
     /** Планировщик задач этого игрока: на Folia — поток региона, у нас общий. */
+    private io.papermc.paper.threadedregions.scheduler.EntityScheduler scheduler;
+
     public io.papermc.paper.threadedregions.scheduler.EntityScheduler getScheduler() {
-        return server.entityScheduler();
+        if (scheduler == null) {
+            scheduler = server.folia().entity(() -> !online);
+        }
+        return scheduler;
     }
 
     public org.bukkit.Location getLocation() {

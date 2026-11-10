@@ -39,6 +39,8 @@ final class Scheduler {
         final long period;
         long due;
         volatile boolean cancelled;
+        /** Задача Folia-планировщика: не видна через {@code BukkitScheduler}. */
+        boolean hidden;
 
         Task(Plugin owner, Runnable body, boolean isSync, long delay, long period) {
             this.owner = owner;
@@ -74,6 +76,15 @@ final class Scheduler {
         } else {
             async.submit(() -> runAsync(t));
         }
+        return t;
+    }
+
+    /** Синхронная задача Folia-планировщика: тот же тик, но вне {@code BukkitScheduler}. */
+    Task scheduleHidden(Plugin plugin, Runnable body, long delay, long period) {
+        Task t = new Task(plugin, body, true, delay, period);
+        t.hidden = true;
+        incoming.add(t);
+        Bridge.setFlag(Bridge.FLAG_HAS_TASKS, 1);
         return t;
     }
 
@@ -172,18 +183,18 @@ final class Scheduler {
     }
 
     public void cancelTask(int id) {
-        incoming.forEach(t -> { if (t.id == id) t.cancelled = true; });
-        sync.forEach(t -> { if (t.id == id) t.cancelled = true; });
+        incoming.forEach(t -> { if (t.id == id && !t.hidden) t.cancelled = true; });
+        sync.forEach(t -> { if (t.id == id && !t.hidden) t.cancelled = true; });
     }
 
     public void cancelTasks(Plugin p) {
-        incoming.forEach(t -> { if (t.owner == p) t.cancelled = true; });
-        sync.forEach(t -> { if (t.owner == p) t.cancelled = true; });
+        incoming.forEach(t -> { if (t.owner == p && !t.hidden) t.cancelled = true; });
+        sync.forEach(t -> { if (t.owner == p && !t.hidden) t.cancelled = true; });
     }
 
     public boolean isQueued(int id) {
-        return sync.stream().anyMatch(t -> t.id == id && !t.cancelled)
-                || incoming.stream().anyMatch(t -> t.id == id && !t.cancelled);
+        return sync.stream().anyMatch(t -> t.id == id && !t.cancelled && !t.hidden)
+                || incoming.stream().anyMatch(t -> t.id == id && !t.cancelled && !t.hidden);
     }
 
     public boolean isCurrentlyRunning(int id) {
@@ -191,8 +202,9 @@ final class Scheduler {
     }
 
     public List<BukkitTask> getPendingTasks() {
-        List<BukkitTask> out = new ArrayList<>(sync);
-        out.addAll(incoming);
+        List<BukkitTask> out = new ArrayList<>();
+        sync.forEach(t -> { if (!t.hidden) out.add(t); });
+        incoming.forEach(t -> { if (!t.hidden) out.add(t); });
         return out;
     }
 

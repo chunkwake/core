@@ -406,6 +406,9 @@ public final class Bridge {
 
     /** Флаги в общей памяти (Rust читает их атомарно). */
     static void setFlag(int slot, long value) {
+        if (table == null) {
+            return; // тесты без Rust-сервера
+        }
         table.setAtIndex(JAVA_LONG, slot, value);
     }
 

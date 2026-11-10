@@ -45,8 +45,7 @@ final class ChunkwakeServer {
     final Server api = Stub.of(Server.class, this);
     final Logger logger = Logger.getLogger("Chunkwake");
     private final Scheduler scheduler = new Scheduler();
-    private final io.papermc.paper.threadedregions.scheduler.EntityScheduler entityScheduler =
-            EntitySchedulers.of(scheduler);
+    private final FoliaSchedulers folia = new FoliaSchedulers(scheduler);
     final PluginManagerImpl plugins = new PluginManagerImpl(this);
     private final SimpleCommandMap commands = new SimpleCommandMap(api, new LinkedHashMap<>());
     /** `/help`: темы по командам, пересобираются после загрузки плагинов. */
@@ -74,9 +73,9 @@ final class ChunkwakeServer {
         return scheduler;
     }
 
-    /** Планировщик задач сущностей: один на сервер, как поток Folia. */
-    io.papermc.paper.threadedregions.scheduler.EntityScheduler entityScheduler() {
-        return entityScheduler;
+    /** Планировщики Folia: регион один — главный тик плагинов. */
+    FoliaSchedulers folia() {
+        return folia;
     }
 
     /** Каналы плагинов: регистрация как в Bukkit, доставка — через Rust. */
@@ -624,6 +623,19 @@ final class ChunkwakeServer {
     public CommandMap getCommandMap() { return commands; }
     public ConsoleCommandSender getConsoleSender() { return console; }
     public boolean isPrimaryThread() { return Thread.currentThread() == mainThread; }
+    public io.papermc.paper.threadedregions.scheduler.GlobalRegionScheduler getGlobalRegionScheduler() { return folia.global; }
+    public io.papermc.paper.threadedregions.scheduler.RegionScheduler getRegionScheduler() { return folia.region; }
+    public io.papermc.paper.threadedregions.scheduler.AsyncScheduler getAsyncScheduler() { return folia.async; }
+    // Регион один: им владеет главный поток плагинов, как тиковый поток Paper.
+    public boolean isGlobalTickThread() { return isPrimaryThread(); }
+    public boolean isOwnedByCurrentRegion(World w, io.papermc.paper.math.Position p) { return isPrimaryThread(); }
+    public boolean isOwnedByCurrentRegion(World w, io.papermc.paper.math.Position p, int r) { return isPrimaryThread(); }
+    public boolean isOwnedByCurrentRegion(org.bukkit.Location l) { return isPrimaryThread(); }
+    public boolean isOwnedByCurrentRegion(org.bukkit.Location l, int r) { return isPrimaryThread(); }
+    public boolean isOwnedByCurrentRegion(World w, int cx, int cz) { return isPrimaryThread(); }
+    public boolean isOwnedByCurrentRegion(World w, int cx, int cz, int r) { return isPrimaryThread(); }
+    public boolean isOwnedByCurrentRegion(World w, int x0, int z0, int x1, int z1) { return isPrimaryThread(); }
+    public boolean isOwnedByCurrentRegion(org.bukkit.entity.Entity e) { return isPrimaryThread(); }
     public int getMaxPlayers() { return intProperty("max-players", 20); }
     public boolean getOnlineMode() { return property("online-mode", "true").equals("true"); }
     public int getPort() { return intProperty("server-port", 25565); }

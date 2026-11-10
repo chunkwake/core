@@ -30,6 +30,7 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             return;
         }
         getServer().getPluginManager().registerEvents(this, this);
+        foliaProbe();
         ItemStack bread = new ItemStack(Material.BREAD, 3);
         getLogger().info("item api: " + bread.getType() + " x" + bread.getAmount() + " max " + bread.getMaxStackSize());
         getServer().getScheduler().runTaskTimer(this, () -> {
@@ -259,6 +260,9 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
     @EventHandler
     public void onJoin(PlayerJoinEvent event) {
         Player p = event.getPlayer();
+        // Планировщик сущности: задача игрока на следующем тике и в его «регионе».
+        p.getScheduler().run(this, t -> getLogger().info("folia: entity task for " + p.getName()
+                + " owned=" + getServer().isOwnedByCurrentRegion(p)), () -> getLogger().info("folia: entity retired"));
         getLogger().info("join state: " + p.getName() + " health=" + p.getHealth() + " food=" + p.getFoodLevel()
                 + " mode=" + p.getGameMode() + " held=" + p.getInventory().getItemInMainHand()
                 + " op=" + p.isOp() + " kit=" + p.hasPermission("chunkwake.test.kit"));
@@ -387,5 +391,23 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             event.getPlayer().sendMessage(Component.text("Bedrock is protected by chunkwake-test-plugin",
                     NamedTextColor.RED));
         }
+    }
+
+    /** Планировщики Folia: каждая задача пишет в лог, что выполнилась. */
+    private void foliaProbe() {
+        getLogger().info("folia: owned on enable=" + getServer().isOwnedByCurrentRegion(getServer().getWorlds().get(0), 0, 0)
+                + " global=" + getServer().isGlobalTickThread());
+        getServer().getGlobalRegionScheduler().execute(this, () -> getLogger().info("folia: global execute"));
+        int[] runs = {0};
+        getServer().getGlobalRegionScheduler().runAtFixedRate(this, t -> {
+            if (++runs[0] == 3) {
+                getLogger().info("folia: global fixed rate x3, cancel=" + t.cancel());
+            }
+        }, 1, 5);
+        getServer().getRegionScheduler().runDelayed(this, getServer().getWorlds().get(0), 0, 0,
+                t -> getLogger().info("folia: region delayed, state=" + t.getExecutionState()), 20);
+        getServer().getAsyncScheduler().runDelayed(this, t -> getLogger().info("folia: async delayed on "
+                + Thread.currentThread().getName() + " owned=" + getServer().isGlobalTickThread()), 500,
+                java.util.concurrent.TimeUnit.MILLISECONDS);
     }
 }
