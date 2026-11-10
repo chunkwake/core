@@ -1229,7 +1229,11 @@ impl ChunkColumn {
             w.u8(((x & 15) << 4 | (z & 15)) as u8)
                 .u16(y as i16 as u16)
                 .var_int(kind);
-            if be.id == "minecraft:campfire" {
+            // `getUpdateTag`: костру — `Items`, табличкам — текст, знамени — узоры.
+            if matches!(
+                be.id.as_str(),
+                "minecraft:campfire" | "minecraft:sign" | "minecraft:hanging_sign" | "minecraft:banner"
+            ) {
                 w.buf.extend(nbt::write_network(&be.nbt));
             } else {
                 w.u8(10).u8(0);

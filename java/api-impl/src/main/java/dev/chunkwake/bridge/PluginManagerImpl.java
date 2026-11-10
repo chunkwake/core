@@ -300,6 +300,16 @@ final class PluginManagerImpl {
         if (has(org.bukkit.event.player.PlayerChangedWorldEvent.getHandlerList())) {
             mask |= Bridge.listenBit(Bridge.EVENT_CHANGED_WORLD);
         }
+        if (has(io.papermc.paper.event.packet.UncheckedSignChangeEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_SIGN_UNCHECKED);
+        }
+        if (has(org.bukkit.event.block.SignChangeEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_SIGN_CHANGE);
+        }
+        if (has(io.papermc.paper.event.player.PlayerOpenSignEvent.getHandlerList())
+                || has(org.bukkit.event.player.PlayerSignOpenEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_OPEN_SIGN);
+        }
         Bridge.setFlag(Bridge.FLAG_LISTENERS, mask);
     }
 

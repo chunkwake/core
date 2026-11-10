@@ -204,6 +204,18 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
     }
 
     @EventHandler
+    public void onSignChange(org.bukkit.event.block.SignChangeEvent e) {
+        var plain = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText();
+        getLogger().info("sign change: " + e.getSide() + " " + e.lines().stream().map(plain::serialize).toList());
+        e.line(3, Component.text("[signed]", NamedTextColor.BLUE));
+    }
+
+    @EventHandler
+    public void onOpenSign(io.papermc.paper.event.player.PlayerOpenSignEvent e) {
+        getLogger().info("open sign: " + e.getCause() + " " + e.getSide() + " sign=" + e.getSign().getLine(0));
+    }
+
+    @EventHandler
     public void onChangedWorld(org.bukkit.event.player.PlayerChangedWorldEvent e) {
         getLogger().info("changed world: " + e.getPlayer().getName() + " " + e.getFrom().getName() + " -> "
                 + e.getPlayer().getWorld().getName() + " meta=" + (e.getPlayer().hasMetadata("cw-last")

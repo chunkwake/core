@@ -162,6 +162,11 @@ fn write_str(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(s.as_bytes());
 }
 
+/// `ListTag.isWrapper`: словарь из одного ключа `""`.
+fn is_wrapper(c: &Compound) -> bool {
+    c.len() == 1 && c.contains_key("")
+}
+
 fn write_compound(out: &mut Vec<u8>, c: &Compound) {
     for (k, v) in c {
         out.push(v.id());
@@ -185,10 +190,25 @@ fn write_payload(out: &mut Vec<u8>, t: &Tag) {
         }
         Tag::String(s) => write_str(out, s),
         Tag::List(l) => {
-            out.push(l.first().map_or(0, Tag::id));
+            out.extend_from_slice(&[0]);
+            let at = out.len() - 1;
             out.extend_from_slice(&(l.len() as i32).to_be_bytes());
-            for t in l {
-                write_payload(out, t);
+            let first = l.first().map_or(0, Tag::id);
+            if l.iter().all(|t| t.id() == first) {
+                out[at] = first;
+                for t in l {
+                    write_payload(out, t);
+                }
+            } else {
+                // Разнотипный список (`ListTag.wrapIfNeeded`, 1.21.5+): список
+                // словарей, прочее — в обёртке `{"": значение}`.
+                out[at] = 10;
+                for t in l {
+                    match t {
+                        Tag::Compound(c) if !is_wrapper(c) => write_compound(out, c),
+                        t => write_compound(out, &Compound::from([(String::new(), t.clone())])),
+                    }
+                }
             }
         }
         Tag::Compound(c) => write_compound(out, c),
@@ -269,7 +289,12 @@ fn read_payload(r: &mut &[u8], id: u8, depth: usize) -> Result<Tag, String> {
             let n = read_len(r)?;
             let mut l = Vec::with_capacity(n.min(4096));
             for _ in 0..n {
-                l.push(read_payload(r, elem, depth + 1)?);
+                let t = read_payload(r, elem, depth + 1)?;
+                // `ListTag`: обёртка `{"": значение}` разнотипного списка снимается.
+                l.push(match t {
+                    Tag::Compound(mut c) if is_wrapper(&c) => c.remove("").unwrap_or(Tag::Compound(c)),
+                    t => t,
+                });
             }
             Tag::List(l)
         }
@@ -303,6 +328,19 @@ fn read_payload(r: &mut &[u8], id: u8, depth: usize) -> Result<Tag, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_list_is_wrapped_like_vanilla() {
+        let red = Tag::Compound(Compound::from([("text".into(), Tag::String("x".into()))]));
+        let mixed = Tag::List(vec![Tag::String("a".into()), red.clone(), Tag::Int(3)]);
+        let root = Compound::from([("l".into(), mixed.clone())]);
+        let mut out = Vec::new();
+        write_payload(&mut out, &Tag::Compound(root.clone()));
+        // Тип элементов — словарь (10).
+        assert_eq!(out[1 + 2 + 1], 10);
+        let back = read_payload(&mut &out[..], 10, 0).unwrap();
+        assert_eq!(back, Tag::Compound(root));
+    }
 
     #[test]
     fn roundtrip() {

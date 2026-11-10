@@ -535,6 +535,14 @@ pub enum Event {
     ToggleSprint = 45,
     /// `PlayerChangedWorldEvent` после перехода: `<ключ прежнего мира>`, ответ не нужен.
     ChangedWorld = 46,
+    /// `UncheckedSignChangeEvent` до проверок: `x y z FRONT|BACK` и четыре
+    /// строки JSON-строками по строке → `c` или пусто.
+    SignUnchecked = 47,
+    /// `SignChangeEvent`: `x y z FRONT|BACK` и четыре компонента JSON по
+    /// строке → `c`, пусто или четыре новых компонента.
+    SignChange = 48,
+    /// `PlayerOpenSignEvent` (и `PlayerSignOpenEvent`): `x y z FRONT|BACK ПРИЧИНА` → `c` или пусто.
+    OpenSign = 49,
 }
 
 impl Event {

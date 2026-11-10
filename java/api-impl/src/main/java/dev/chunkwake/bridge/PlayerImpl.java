@@ -234,6 +234,21 @@ final class PlayerImpl {
         }
     }
 
+    // --- таблички ---
+
+    /** {@code Player.openSign}: события с причиной {@code PLUGIN}, затем редактор у клиента. */
+    public void openSign(org.bukkit.block.Sign sign, org.bukkit.block.sign.Side side) {
+        if (sign == null || !sign.isPlaced() || sign.getWorld() != getWorld()) {
+            throw new IllegalArgumentException("Sign must be placed in the player's world");
+        }
+        org.bukkit.block.Block b = sign.getBlock();
+        if (Events.openSignEvents(api, b, side, io.papermc.paper.event.player.PlayerOpenSignEvent.Cause.PLUGIN)) {
+            control("opensign " + b.getX() + " " + b.getY() + " " + b.getZ() + " " + side.name());
+        }
+    }
+
+    public void openSign(org.bukkit.block.Sign sign) { openSign(sign, org.bukkit.block.sign.Side.FRONT); }
+
     // --- метаданные и PDC ---
 
     public void setMetadata(String key, org.bukkit.metadata.MetadataValue value) {

@@ -140,6 +140,7 @@ struct Ids {
     entity_event: i32,
     sb_container_click: i32,
     sb_rename_item: i32,
+    sb_sign_update: i32,
     sb_container_slot_state_changed: i32,
     sb_attack: i32,
     sb_punch: i32,
@@ -156,6 +157,7 @@ struct Ids {
     sb_player_abilities: i32,
     sb_accept_teleportation: i32,
     open_screen: i32,
+    open_sign_editor: i32,
     disconnect: i32,
     container_close: i32,
     sb_client_command: i32,
@@ -265,6 +267,8 @@ pub struct PlayPlan {
     pub(crate) seen_credits: Mutex<HashSet<Uuid>>,
     /// `BukkitValues` игроков: PDC плагинов (`Player.getPersistentDataContainer`).
     bukkit_values: Mutex<FastMap<Uuid, chunkwake_world::nbt::Compound>>,
+    /// `SignBlockEntity.playerWhoMayEdit`: кому открыт редактор таблички.
+    sign_editors: Mutex<FastMap<(Dimension, [i32; 3]), Uuid>>,
     /// Игроки на экране титров: `PERFORM_RESPAWN` вернёт их из Края.
     won_game: Mutex<HashSet<Uuid>>,
     /// Инвентари плагинов (`Bukkit.createInventory`) по номеру.
@@ -2137,6 +2141,7 @@ mod mobs;
 mod poi;
 mod respawn;
 mod section_order;
+mod signs;
 mod stream;
 mod swing;
 mod tracking;
@@ -2602,6 +2607,7 @@ impl PlayPlan {
                 entity_event: cb("entity_event")?,
                 sb_container_click: sb("container_click")?,
                 sb_rename_item: sb("rename_item")?,
+                sb_sign_update: sb("sign_update")?,
                 sb_container_slot_state_changed: sb("container_slot_state_changed")?,
                 sb_attack: sb("attack")?,
                 sb_punch: sb("punch")?,
@@ -2618,6 +2624,7 @@ impl PlayPlan {
                 sb_player_abilities: sb("player_abilities")?,
                 sb_accept_teleportation: sb("accept_teleportation")?,
                 open_screen: cb("open_screen")?,
+                open_sign_editor: cb("open_sign_editor")?,
                 disconnect: cb("disconnect")?,
                 container_close: cb("container_close")?,
                 sb_client_command: sb("client_command")?,
@@ -2710,6 +2717,7 @@ impl PlayPlan {
             portal_time: Mutex::new(FastMap::default()),
             seen_credits: Mutex::new(HashSet::new()),
             bukkit_values: Mutex::new(FastMap::default()),
+            sign_editors: Mutex::new(FastMap::default()),
             won_game: Mutex::new(HashSet::new()),
             players_source: std::sync::OnceLock::new(),
             maps: Mutex::new(maps::MapStore::default()),
@@ -3687,6 +3695,22 @@ impl PlayPlan {
                 return true;
             }
         }
+        // `opensign x y z FRONT|BACK`: `Player.openSign` (события уже вызвал плагин).
+        if let Some(rest) = line.strip_prefix("opensign ") {
+            let f: Vec<&str> = rest.split(' ').collect();
+            let n = |s: &str| s.parse::<i32>().ok();
+            if let [x, y, z, side] = f[..]
+                && let (Some(x), Some(y), Some(z)) = (n(x), n(y), n(z))
+            {
+                return with_dim(self.player_dim(uuid), || {
+                    self.sign_at([x, y, z]).is_some() && {
+                        self.open_sign_now(uuid, [x, y, z], side == "FRONT");
+                        true
+                    }
+                });
+            }
+            return false;
+        }
         let Some(c) = Control::parse(
             line,
             |n| self.item_id(n),
@@ -3792,6 +3816,9 @@ impl PlayPlan {
             }
             self.bukkit_values.lock().unwrap().insert(uuid, c);
             return "1".into();
+        }
+        if let Some(rest) = line.strip_prefix("sign ") {
+            return self.sign_request(rest);
         }
         if let Some(rest) = line.strip_prefix("inv ") {
             return self.plugin_inv_request(rest);
@@ -11890,6 +11917,13 @@ impl PlayPlan {
                         }
                         continue;
                     }
+                    if id == ids.sb_sign_update {
+                        let u = play::read_sign_update(&mut r)?;
+                        if !state.vitals.dead {
+                            self.sign_update(uuid, u).await;
+                        }
+                        continue;
+                    }
                     if id == ids.sb_rename_item {
                         let name = r.string(50)?.to_owned();
                         if let Some(w) = window.as_mut().filter(|w| w.kind == Kind::Anvil && self.window_valid(w)) {
@@ -12689,6 +12723,31 @@ impl PlayPlan {
                                 continue;
                             }
                         }
+                        // `SignBlock.useItemOn`/`useWithoutItem`: краситель, чернила,
+                        // соты, редактор. Шифт с предметом — мимо, к установке.
+                        if signs::sign_entity(&clicked).is_some()
+                            && !state.vitals.dead
+                            && login.spawn.game_mode != 3
+                            && !(sneaking && (state.inv.held().is_some() || state.inv.slots[survival::OFFHAND].is_some()))
+                        {
+                            let slot = if u.hand == 0 { state.inv.held_slot() } else { survival::OFFHAND };
+                            let held = state.inv.slots[slot];
+                            match self.use_sign(uuid, u.pos, held, u.hand == 0, login.spawn.game_mode != 2).await {
+                                signs::SignUse::Applied => {
+                                    if login.spawn.game_mode != 1 {
+                                        state.inv.consume_at(slot);
+                                    }
+                                    self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                    conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                                    continue;
+                                }
+                                signs::SignUse::Handled => {
+                                    conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                                    continue;
+                                }
+                                signs::SignUse::Pass => {}
+                            }
+                        }
                         // `LecternBlock.useItemOn`: книга в руке кладётся на
                         // лектор, рука опустошается на один предмет.
                         if crate::redstone::is_lectern(&clicked)
@@ -13020,6 +13079,9 @@ impl PlayPlan {
                                 if banners::banner_color(self.state_name(place)).is_some() {
                                     self.place_banner(target, hand_slot.and_then(|i| state.inv.slots[i]));
                                 }
+                                if let Some(id) = signs::sign_entity(self.state_name(place)) {
+                                    self.place_sign(target, id);
+                                }
                                 // Крюк сразу считает свою цепь
                                 // (`TripWireHookBlock.setPlacedBy`).
                                 if crate::redstone::is_tripwire_hook(&name) {
@@ -13052,6 +13114,10 @@ impl PlayPlan {
                                 for p in std::iter::once(u.pos).chain(side).chain(touched) {
                                     let s = self.block(p).unwrap_or(AIR);
                                     conn.send(&play::block_update(ids.block_update, p, s as i32)).await?;
+                                }
+                                // `ItemStack.useOn` (Paper): редактор новой таблички, причина `PLACE`.
+                                if signs::sign_entity(self.state_name(place)).is_some() {
+                                    self.sign_placed(uuid, target).await;
                                 }
                             } else {
                                 // Отказ: вернуть клиенту настоящие блоки, иначе предсказание

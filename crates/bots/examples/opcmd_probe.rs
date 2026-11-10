@@ -105,6 +105,44 @@ async fn main() {
         wait(&mut c, 2000).await;
         drain(&mut c);
     }
+    // `SIGN=x,y,z`: поставить табличку из слота 0 на блок под `x,y,z`, ответить
+    // на редактор строками и кликнуть по ней снова (редактор `INTERACT`).
+    if let Some(v) = std::env::var("SIGN").ok().map(|s| {
+        s.split(',').map(|n| n.trim().parse::<i64>().unwrap()).collect::<Vec<_>>()
+    }) {
+        let pack = |x: i64, y: i64, z: i64| ((x & 0x3FF_FFFF) << 38) | ((z & 0x3FF_FFFF) << 12) | (y & 0xFFF);
+        let use_on = id(Direction::Serverbound, "use_item_on");
+        let update = id(Direction::Serverbound, "sign_update");
+        let editor = id(Direction::Clientbound, "open_sign_editor");
+        c.capture_also.push(editor);
+        let click = |pos: i64, face: i32, seq: i32| {
+            let mut w = Writer::new();
+            w.var_int(use_on).var_int(0).i64(pos).var_int(face);
+            w.f32(0.5).f32(1.0).f32(0.5).bool(false).bool(false).var_int(seq);
+            w.buf
+        };
+        let opened = |c: &mut Client| {
+            let n = c.captured_by.iter().filter(|(p, _)| *p == editor).count();
+            c.captured_by.retain(|(p, _)| *p != editor);
+            n
+        };
+        println!("> place sign");
+        c.send_raw(&click(pack(v[0], v[1] - 1, v[2]), 1, 1)).await.unwrap();
+        wait(&mut c, 1500).await;
+        println!("  editor opened: {}", opened(&mut c));
+        let mut w = Writer::new();
+        w.var_int(update).i64(pack(v[0], v[1], v[2])).bool(true);
+        for l in ["Hello", "§cfrom", "bot", ""] {
+            w.string(l);
+        }
+        c.send_raw(&w.buf).await.unwrap();
+        wait(&mut c, 1500).await;
+        println!("> click sign");
+        c.send_raw(&click(pack(v[0], v[1], v[2]), 3, 2)).await.unwrap();
+        wait(&mut c, 1500).await;
+        println!("  editor opened: {}", opened(&mut c));
+        drain(&mut c);
+    }
     // `DIG=x,y,z`: начать ломать блок (в творческом он ломается сразу) —
     // события ломания у плагинов (`BlockBreakEvent`).
     if let Some(p) = std::env::var("DIG").ok().map(|s| {

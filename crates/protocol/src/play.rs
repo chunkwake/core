@@ -1078,6 +1078,13 @@ pub fn block_entity_data(id: i32, pos: [i32; 3], kind: i32, nbt: &[u8]) -> Vec<u
     w.buf
 }
 
+/// `ClientboundOpenSignEditorPacket`: редактор таблички у клиента (`is_front_text`).
+pub fn open_sign_editor(id: i32, pos: [i32; 3], front: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).i64(pack_block_pos(pos)).bool(front);
+    w.buf
+}
+
 /// `ClientboundTransferPacket`: клиент переподключается к `host:port`.
 pub fn transfer(id: i32, host: &str, port: u16) -> Vec<u8> {
     let mut w = Writer::new();
@@ -1406,6 +1413,25 @@ pub fn read_use_item_on(r: &mut Reader) -> Result<UseItemOn> {
         cursor,
         sequence: r.var_int()?,
     })
+}
+
+/// `ServerboundSignUpdatePacket` после ID: позиция, сторона и четыре строки
+/// (каждая до 384 символов).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SignUpdate {
+    pub pos: [i32; 3],
+    pub front: bool,
+    pub lines: [String; 4],
+}
+
+pub fn read_sign_update(r: &mut Reader) -> Result<SignUpdate> {
+    let pos = unpack_block_pos(r.i64()?);
+    let front = r.bool()?;
+    let mut lines: [String; 4] = Default::default();
+    for l in &mut lines {
+        *l = r.string(384)?.to_owned();
+    }
+    Ok(SignUpdate { pos, front, lines })
 }
 
 #[cfg(test)]

@@ -142,6 +142,9 @@ final class Events {
             }
             case Bridge.EVENT_KICK -> p.kickEvent(arg);
             case Bridge.EVENT_RESPAWN -> respawn(plugins, p, arg);
+            case Bridge.EVENT_SIGN_UNCHECKED -> signUnchecked(plugins, p, arg);
+            case Bridge.EVENT_SIGN_CHANGE -> signChange(plugins, p, arg);
+            case Bridge.EVENT_OPEN_SIGN -> openSign(p, arg);
             case Bridge.EVENT_CHANGED_WORLD -> {
                 plugins.callEvent(new org.bukkit.event.player.PlayerChangedWorldEvent(p.api, world(arg.trim())));
                 yield "";
@@ -411,6 +414,89 @@ final class Events {
                 p.api, true, hand);
         plugins.callEvent(e);
         return e.isCancelled() || !e.canBuild() ? "c" : "";
+    }
+
+    /** {@code x y z FRONT|BACK} и строки ниже: JSON-строки или компоненты. */
+    private static java.util.List<net.kyori.adventure.text.Component> signLines(String[] parts, boolean raw) {
+        java.util.List<net.kyori.adventure.text.Component> out = new java.util.ArrayList<>(4);
+        for (int i = 1; i < parts.length && out.size() < 4; i++) {
+            out.add(raw
+                    ? net.kyori.adventure.text.Component.text(com.google.gson.JsonParser.parseString(parts[i]).getAsString())
+                    : SignImpl.parse(parts[i]));
+        }
+        while (out.size() < 4) out.add(net.kyori.adventure.text.Component.empty());
+        return out;
+    }
+
+    /** {@code UncheckedSignChangeEvent}: до проверок права правки → {@code c} или пусто. */
+    static String signUnchecked(PluginManager plugins, PlayerImpl p, String arg) {
+        String[] parts = arg.split("\n");
+        String[] f = parts[0].split(" ");
+        var e = new io.papermc.paper.event.packet.UncheckedSignChangeEvent(p.api,
+                io.papermc.paper.math.Position.block(Integer.parseInt(f[0]), Integer.parseInt(f[1]), Integer.parseInt(f[2])),
+                org.bukkit.block.sign.Side.valueOf(f[3]), signLines(parts, true));
+        plugins.callEvent(e);
+        return e.isCancelled() ? "c" : "";
+    }
+
+    /**
+     * {@code SignChangeEvent} из {@code SignBlockEntity.updateMessages}: отмена —
+     * {@code c}; изменённые строки — все четыре компонентом JSON по строке.
+     */
+    static String signChange(PluginManager plugins, PlayerImpl p, String arg) {
+        return signChange(plugins, p.api, p.getWorld(), arg);
+    }
+
+    static String signChange(PluginManager plugins, Player player, World world, String arg) {
+        String[] parts = arg.split("\n");
+        String[] f = parts[0].split(" ");
+        Block block = new BlockImpl(world, Integer.parseInt(f[0]), Integer.parseInt(f[1]), Integer.parseInt(f[2]), null).api;
+        java.util.List<net.kyori.adventure.text.Component> lines = signLines(parts, false);
+        org.bukkit.event.block.SignChangeEvent e = new org.bukkit.event.block.SignChangeEvent(block, player,
+                new java.util.ArrayList<>(lines), org.bukkit.block.sign.Side.valueOf(f[3]));
+        plugins.callEvent(e);
+        if (e.isCancelled()) {
+            return "c";
+        }
+        if (e.lines().equals(lines)) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < 4; i++) {
+            if (i > 0) out.append('\n');
+            out.append(SignImpl.json(i < e.lines().size() ? e.lines().get(i) : null));
+        }
+        return out.toString();
+    }
+
+    /** {@code x y z FRONT|BACK ПРИЧИНА}: {@code PlayerOpenSignEvent}, затем {@code PlayerSignOpenEvent}. */
+    private static String openSign(PlayerImpl p, String arg) {
+        String[] f = arg.trim().split(" ");
+        Block block = new BlockImpl(p.getWorld(), Integer.parseInt(f[0]), Integer.parseInt(f[1]), Integer.parseInt(f[2]), null).api;
+        return openSignEvents(p.api, block, org.bukkit.block.sign.Side.valueOf(f[3]),
+                io.papermc.paper.event.player.PlayerOpenSignEvent.Cause.valueOf(f[4])) ? "" : "c";
+    }
+
+    /** {@code SignBlock.openTextEdit} (Paper): оба события; {@code false} — отменено. */
+    static boolean openSignEvents(Player player, Block block, org.bukkit.block.sign.Side side,
+            io.papermc.paper.event.player.PlayerOpenSignEvent.Cause cause) {
+        org.bukkit.block.Sign sign = SignImpl.of(block);
+        if (sign == null) {
+            return false;
+        }
+        if (!new io.papermc.paper.event.player.PlayerOpenSignEvent(player, sign, side, cause).callEvent()) {
+            return false;
+        }
+        if (org.bukkit.event.player.PlayerSignOpenEvent.getHandlerList().getRegisteredListeners().length > 0) {
+            var legacy = switch (cause) {
+                case PLACE -> org.bukkit.event.player.PlayerSignOpenEvent.Cause.PLACE;
+                case PLUGIN -> org.bukkit.event.player.PlayerSignOpenEvent.Cause.PLUGIN;
+                case INTERACT -> org.bukkit.event.player.PlayerSignOpenEvent.Cause.INTERACT;
+                default -> org.bukkit.event.player.PlayerSignOpenEvent.Cause.UNKNOWN;
+            };
+            return new org.bukkit.event.player.PlayerSignOpenEvent(player, sign, side, legacy).callEvent();
+        }
+        return true;
     }
 
     /** Заменённый блок (до установки — воздух). */
