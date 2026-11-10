@@ -1,8 +1,10 @@
 ﻿name: CI
+# Полный прогон: push в ветки версий. Pull request'ы проверяет pr.yml
+# (fmt всегда, clippy и тесты на Linux — если менялся код), без релизной сборки.
 on:
   push:
     branches: ["ver/**"]
-  pull_request:
+  workflow_dispatch:
 
 env:
   # Версия, под которую собран сервер (`crates/server/src/lib.rs`).

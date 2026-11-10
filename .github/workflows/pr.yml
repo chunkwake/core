@@ -1,0 +1,146 @@
+name: PR
+on:
+  pull_request:
+
+# Лёгкая проверка pull request'ов. Полный CI (две ОС, релизные бинарники с
+# встроенным API) идёт на push в `ver/**` — после слияния. Здесь:
+#
+#   fmt    — всегда, секунды, без ванильного jar;
+#   rust   — clippy и тесты на Linux, если менялся Rust;
+#   java   — JUnit моста, если менялась Java-часть.
+#
+# `[skip tests]` или `[skip both]` в любом коммите PR снимает rust и java;
+# fmt остаётся. Правки только в документации тесты не запускают сами.
+
+env:
+  MC_VERSION: "26.3"
+
+# Новый push в PR отменяет недоделанный прогон того же PR.
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  # Что затронуто: выражение `if` не умеет смотреть на файлы и сообщения
+  # коммитов, поэтому считаем один раз и отдаём флаги.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.c.outputs.rust }}
+      java: ${{ steps.c.outputs.java }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: c
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          files=$(git diff --name-only "$base...HEAD")
+          message=$(git log --format=%B "$base..HEAD")
+          echo "$files"
+
+          rust=false
+          java=false
+          if grep -qE '^(crates/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.github/workflows/pr\.yml$)' <<< "$files"; then rust=true; fi
+          if grep -qE '^(java/|\.github/workflows/pr\.yml$)' <<< "$files"; then java=true; fi
+          # Мост собирается из Rust тоже (`crates/bridge`): правка там трогает обе стороны.
+          if grep -qE '^crates/bridge/' <<< "$files"; then java=true; fi
+          if grep -qiE '\[skip[ -](tests?|both)\]' <<< "$message"; then
+            rust=false
+            java=false
+          fi
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "java=$java" >> "$GITHUB_OUTPUT"
+          echo "rust: $rust, java: $java"
+
+  rust:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    env:
+      CHUNKWAKE_JAR: ${{ github.workspace }}/server.jar
+      CHUNKWAKE_API_BUNDLE: none
+    steps:
+      - uses: actions/checkout@v5
+
+      # Java 25 нужна генератору данных: из jar собирается кэш `generated/26.3`.
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # Тот же ключ, что у CI: кэш с ветки виден и в PR.
+      - name: Cache server.jar and generated data
+        uses: actions/cache@v5
+        with:
+          path: |
+            server.jar
+            generated
+            target/vanilla-cache
+          key: vanilla-${{ env.MC_VERSION }}-${{ runner.os }}-${{ hashFiles('crates/datacache/**', 'crates/data/build.rs') }}
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+          key: cargo-pr-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-pr-${{ runner.os }}-
+
+      - name: Download server.jar
+        run: bash ./.github/scripts/fetch-vanilla-jar.sh "$MC_VERSION"
+
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test with vanilla data
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dir in generated/26.3 target/vanilla-cache/26.3; do
+            if [ -f "$dir/reports/packets.json" ]; then
+              export CHUNKWAKE_DATA="$(cd "$dir" && pwd)"
+              echo "сверки с ванилью включены: $CHUNKWAKE_DATA"
+              break
+            fi
+          done
+          cargo test --workspace
+
+  java:
+    needs: changes
+    if: needs.changes.outputs.java == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('java/**/*.gradle.kts', 'java/gradle/wrapper/gradle-wrapper.properties') }}
+      # Бит исполнения в git может не доехать до раннера — зовём bash явно.
+      - run: bash java/gradlew -p java :api-impl:test

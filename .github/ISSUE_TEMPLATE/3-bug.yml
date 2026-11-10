@@ -1,0 +1,45 @@
+name: Ошибка / Bug
+description: Падение, зависание, порча мира, утечка памяти, проблема запуска или настройки.
+labels: ["bug"]
+body:
+  - type: input
+    id: build
+    attributes:
+      label: Сборка Chunkwake
+      description: Коммит или имя артефакта CI.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: ОС
+      options:
+        - Windows
+        - Linux
+        - Другая
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: Что случилось
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги
+      description: Как воспроизвести. Сколько игроков, какой обзор, какие плагины.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Вывод `chunkwake doctor`
+      render: text
+  - type: textarea
+    id: log
+    attributes:
+      label: Лог
+      description: Конец `logs/latest.log` и паника, если есть. Запуск с `RUST_BACKTRACE=1` даёт полный стек.
+      render: text

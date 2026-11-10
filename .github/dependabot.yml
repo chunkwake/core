@@ -1,0 +1,10 @@
+# Только версии GitHub Actions: зависимости Cargo и Gradle обновляем руками,
+# сверяя с ванилью и Paper (версии netty, paper-api).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "CI"

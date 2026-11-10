@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Уязвимость / Security vulnerability
+    url: https://github.com/chunkwake/core/security/advisories/new
+    about: Не открывайте публичный issue — сообщите приватно. Do not open a public issue.
+  - name: Документация / Documentation
+    url: https://github.com/chunkwake/core/tree/ver/26.3/docs
+    about: Запуск, настройка, фич-матрица и стенд сравнения с ванилью.

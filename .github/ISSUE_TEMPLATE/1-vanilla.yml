@@ -1,0 +1,63 @@
+name: Отличие от ванили / Vanilla mismatch
+description: Механика, генерация, команда или пакет ведут себя не так, как в server.jar 26.3.
+labels: ["vanilla-parity"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Цель проекта — поведение 1 в 1 с ванильным `server.jar` 26.3. Самый ценный отчёт —
+        тот, где видно, что делает ваниль в той же ситуации.
+
+        The goal is 1:1 behaviour with vanilla `server.jar` 26.3. English reports are welcome too.
+  - type: input
+    id: build
+    attributes:
+      label: Сборка Chunkwake
+      description: Коммит или имя артефакта CI (например, `chunkwake-26.3-windows-x86_64` из запуска abc1234).
+      placeholder: d3b74fd
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги
+      description: Как воспроизвести. Сид, координаты, команды, `level-type` — всё, что нужно для повтора.
+      placeholder: |
+        1. Сид 12345, /tp 100 64 -200
+        2. Поставить поршень, рычаг...
+    validations:
+      required: true
+  - type: textarea
+    id: vanilla
+    attributes:
+      label: Что делает ваниль
+      description: Проверено на `server.jar` 26.3? Если знаете класс ванили или Paper, где это решается, — укажите.
+    validations:
+      required: true
+  - type: textarea
+    id: chunkwake
+    attributes:
+      label: Что делает Chunkwake
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Область
+      options:
+        - Генерация мира
+        - Редстоун и механизмы
+        - Мобы и сущности
+        - Предметы, инвентари, крафт
+        - Команды
+        - Свет, жидкости, физика
+        - Протокол и клиент
+        - Другое
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Логи, скриншоты, мир
+      description: "`logs/latest.log`, вывод `chunkwake doctor`, архив мира или региона, если он маленький."
+      render: text

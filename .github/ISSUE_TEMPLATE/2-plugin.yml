@@ -1,0 +1,63 @@
+name: Плагин не работает / Plugin incompatibility
+description: Плагин Paper или Folia падает, не грузится или ведёт себя иначе, чем на Paper 26.3.
+labels: ["plugins"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Chunkwake запускает плагины через настоящий `paper-api.jar`. Плагины, которые лезут во
+        внутренности сервера (NMS, CraftBukkit, Netty), полностью работать не могут — но об этом
+        тоже стоит сообщить: самые частые точки закрываются шимами.
+
+        Plugins run against the real `paper-api.jar`. NMS/CraftBukkit internals are out of scope,
+        but reports still help us shim the most common entry points.
+  - type: input
+    id: plugin
+    attributes:
+      label: Плагин и версия
+      description: Название, версия и ссылка (Modrinth, Hangar, SpigotMC, GitHub).
+      placeholder: LuckPerms 5.5.x — https://luckperms.net
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Сборка Chunkwake
+      description: Коммит или имя артефакта CI.
+    validations:
+      required: true
+  - type: dropdown
+    id: paper
+    attributes:
+      label: На Paper 26.3 работает?
+      options:
+        - Да, проверено
+        - Не проверял
+        - Нет, на Paper тоже не работает
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: Что происходит
+      description: Не грузится, падает при включении, не стреляет событие, команда не работает...
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги
+      description: Конфиг плагина, команды, действия игрока.
+  - type: textarea
+    id: log
+    attributes:
+      label: Лог
+      description: Стектрейс из `logs/latest.log` целиком — по нему видно, какой метод API или класс сервера нужен.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: plugins
+    attributes:
+      label: Остальные плагины
+      description: Список из `/plugins`, если их больше одного.

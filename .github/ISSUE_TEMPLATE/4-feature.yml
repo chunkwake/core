@@ -1,0 +1,27 @@
+name: Предложение / Feature request
+description: Недостающая ванильная механика, API для плагинов, инструмент администрирования.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Сначала загляните в [фич-матрицу](https://github.com/chunkwake/core/blob/ver/26.3/docs/feature-matrix.md):
+        возможно, механика уже в списке «частично» или «нет».
+  - type: textarea
+    id: what
+    attributes:
+      label: Что нужно
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Зачем
+      description: Какой плагин, сценарий или сервер без этого не работает.
+    validations:
+      required: true
+  - type: textarea
+    id: reference
+    attributes:
+      label: Как это сделано в ванили или Paper
+      description: Классы, методы, события, ссылки на документацию — если знаете.

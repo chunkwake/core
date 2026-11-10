@@ -237,8 +237,8 @@ java/
 
 ## Участие
 
-Pull request'ы и issue приветствуются. Лучшее место для начала — строки
-«частично» и «нет» в [фич-матрице](docs/feature-matrix.md).
+Pull request'ы и issue приветствуются — подробности в [CONTRIBUTING.md](CONTRIBUTING.md).
+Лучшее место для начала — строки «частично» и «нет» в [фич-матрице](docs/feature-matrix.md).
 
 ```bash
 cargo test -p chunkwake-world -p chunkwake-net -p chunkwake-server -p chunkwake-protocol
