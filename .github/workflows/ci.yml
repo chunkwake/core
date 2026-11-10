@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 # Полный прогон: push в ветки версий. Pull request'ы проверяет pr.yml
 # (fmt всегда, clippy и тесты на Linux — если менялся код), без релизной сборки.
 on:
@@ -361,7 +361,7 @@ jobs:
           # однажды он молча пропадёт, это заметят по цифре.
           ls -l "dist/$name"
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: chunkwake-${{ env.MC_VERSION }}-${{ matrix.artifact }}
           path: dist/chunkwake-*
