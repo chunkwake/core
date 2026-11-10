@@ -28,8 +28,8 @@ final class Internals {
                     && internal(message.replace('/', '.'))) {
                 return message.replace('/', '.');
             }
-            // Ванильный класс найден, но мир Minecraft в JVM не поднят
-            // (`Bootstrap.bootStrap`): статический инициализатор падает.
+            // Ванильный класс найден, но реестры не подняты: jar игры без
+            // `VanillaBootstrap` или бутстрап упал — статический инициализатор падает.
             if (t instanceof ExceptionInInitializerError || message.startsWith("Not bootstrapped")) {
                 String entry = entry(error);
                 if (entry != null) {

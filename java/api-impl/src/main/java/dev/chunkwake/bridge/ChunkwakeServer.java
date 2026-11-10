@@ -162,6 +162,8 @@ final class ChunkwakeServer {
         }
         // Как Paper: зависимости — раньше зависящих, `loadbefore` — наоборот.
         List<PluginOrder.Candidate> order = PluginOrder.sort(candidates, plugins.plugins.keySet(), logger);
+        // Как на Paper: реестры ванили подняты до первого класса плагина.
+        VanillaBootstrap.await();
         List<JavaPlugin> loaded = new ArrayList<>();
         // Имена и `provides` загруженных: по ним проверяются `depend`.
         java.util.Set<String> loadedNames = new java.util.HashSet<>(plugins.plugins.keySet());

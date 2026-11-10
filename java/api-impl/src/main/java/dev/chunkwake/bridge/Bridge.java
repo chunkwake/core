@@ -112,6 +112,7 @@ public final class Bridge {
         viaEmit = linker.downcallHandle(MemorySegment.ofAddress(table.getAtIndex(JAVA_LONG, DOWN_VIA_EMIT)),
                 FunctionDescriptor.ofVoid(JAVA_INT, ADDRESS, JAVA_INT), Linker.Option.critical(true));
         NativeLog.install();
+        VanillaBootstrap.start();
 
         up(linker, UP_ENABLE, "enable", FunctionDescriptor.of(JAVA_INT));
         up(linker, UP_DISABLE, "disable", FunctionDescriptor.of(JAVA_INT));
