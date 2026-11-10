@@ -62,8 +62,14 @@ impl FrameCodec {
         }
         // Распаковка сразу в буфер нужной длины: `read_to_end` растил `Vec`
         // реаллокациями на каждом чанке, а размер известен из заголовка.
-        let mut out = Vec::with_capacity(data_len as usize);
-        ZlibDecoder::new(body).read_to_end(&mut out)?;
+        // Ёмкость заявляет клиент, поэтому она ограничена тем, что реально
+        // может дать тело: иначе пустой кадр резервировал 8 МиБ.
+        let mut out = Vec::with_capacity((data_len as usize).min(body.len().saturating_mul(64)));
+        // Читается не больше заявленного плюс байт: zip-бомба (2 МиБ кадра,
+        // гигабайты на выходе) обрывается здесь, а не после полной распаковки.
+        ZlibDecoder::new(body)
+            .take(data_len as u64 + 1)
+            .read_to_end(&mut out)?;
         if out.len() != data_len as usize {
             return Err(ProtocolError::BadLength(data_len));
         }
@@ -143,6 +149,31 @@ mod tests {
         };
         roundtrip(codec, &[0x01, 9, 9]);
         roundtrip(codec, &vec![7u8; 10_000]);
+    }
+
+    /// Кадр заявляет 1000 байт, а распаковывается в 4 МиБ: распаковка обязана
+    /// остановиться на заявленной длине и отказать, а не выделять всё.
+    #[test]
+    fn rejects_decompression_bomb() {
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let mut z = ZlibEncoder::new(Vec::new(), Compression::best());
+        z.write_all(&vec![0u8; 4 << 20]).unwrap();
+        let packed = z.finish().unwrap();
+        let mut body = Vec::new();
+        write_var_int(&mut body, 1000);
+        body.extend_from_slice(&packed);
+        let mut frame = Vec::new();
+        write_var_int(&mut frame, body.len() as i32);
+        frame.extend_from_slice(&body);
+        let codec = FrameCodec {
+            threshold: Some(256),
+        };
+        let mut buf = BytesMut::from(&frame[..]);
+        assert!(matches!(
+            codec.decode(&mut buf),
+            Err(ProtocolError::BadLength(1000))
+        ));
     }
 
     #[test]

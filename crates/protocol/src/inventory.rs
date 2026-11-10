@@ -332,6 +332,18 @@ fn book_id(book: Option<&crate::components::Book>) -> i32 {
 /// Неизвестный компонент (состав зелья и т. п.) сохраняется сырым патчем целиком.
 /// Стопка с таким патчем должна быть последним полем пакета: хвост не разбирается.
 pub fn read_stack(r: &mut Reader) -> Result<Slot> {
+    read_stack_at(r, 0)
+}
+
+/// Предел вложенности стопок (`charged_projectiles` внутри `charged_projectiles`).
+/// У ванили арбалет в арбалете не бывает; без предела клиент цепочкой в сотню
+/// тысяч уровней переполнял стек, а `panic = "abort"` ронял сервер.
+const MAX_STACK_DEPTH: u8 = 4;
+
+fn read_stack_at(r: &mut Reader, depth: u8) -> Result<Slot> {
+    if depth > MAX_STACK_DEPTH {
+        return Err(crate::ProtocolError::BadLength(i32::from(depth)));
+    }
     use crate::components::{
         CHARGED_PROJECTILES_COMPONENT, CUSTOM_NAME_COMPONENT, ENCHANTMENTS_COMPONENT, Extra,
         LORE_COMPONENT, STORED_ENCHANTMENTS_COMPONENT, id_of, intern,
@@ -406,7 +418,7 @@ pub fn read_stack(r: &mut Reader) -> Result<Slot> {
             && t == id_of(&CHARGED_PROJECTILES_COMPONENT)
         {
             for _ in 0..r.var_int()?.clamp(0, 16) {
-                if let Some(st) = read_stack(r)? {
+                if let Some(st) = read_stack_at(r, depth + 1)? {
                     e.charged.push(st);
                 }
             }
@@ -711,7 +723,7 @@ fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
             && let Ok(n) = body.var_int()
         {
             for _ in 0..n.clamp(0, 16) {
-                if let Ok(Some(st)) = read_stack(&mut body) {
+                if let Ok(Some(st)) = read_stack_at(&mut body, 1) {
                     e.charged.push(st);
                 }
             }
@@ -1052,6 +1064,15 @@ mod tests {
         assert_eq!(read_stack(&mut r).unwrap(), Some(Stack::new(300, 64)));
         assert_eq!(read_stack(&mut r).unwrap(), None);
         assert!(r.remaining().is_empty());
+    }
+
+    /// Вложенность глубже предела — ошибка разбора, а не рекурсия до переполнения стека.
+    #[test]
+    fn nested_stack_depth_is_capped() {
+        let mut w = Writer::new();
+        write_stack(&mut w, Some(Stack::new(300, 1)));
+        assert!(read_stack_at(&mut Reader::new(&w.buf), MAX_STACK_DEPTH).is_ok());
+        assert!(read_stack_at(&mut Reader::new(&w.buf), MAX_STACK_DEPTH + 1).is_err());
     }
 
     #[test]

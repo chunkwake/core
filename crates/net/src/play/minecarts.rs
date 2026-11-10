@@ -216,6 +216,15 @@ impl Track for PlanTrack<'_> {
 }
 
 impl PlayPlan {
+    /// Предмет и коробка вагонетки для средней кнопки.
+    pub(super) fn pick_minecart(&self, id: i32) -> Option<(i32, [[f64; 3]; 2])> {
+        let carts = self.sim().minecarts.lock().unwrap();
+        let cart = carts.get(&id)?;
+        let item = self.item_id(cart.variant.name())?;
+        let (min, max) = cart.bounds();
+        Some((item, [min, max]))
+    }
+
     fn minecart_packets(&self, id: i32, e: &MinecartEntry, now: i64) -> Vec<Vec<u8>> {
         let Some(&ty) = self.survival.entity_types.get(e.variant.name()) else {
             return Vec::new();

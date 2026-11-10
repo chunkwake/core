@@ -51,13 +51,21 @@ impl Inventory {
     /// Средняя кнопка: выбрать такой предмет или, в креативе, положить один в руку.
     /// `None` — предмета нет и создавать его не нужно. Пустой список — сменилась только ячейка.
     pub fn pick(&mut self, item: i32, creative: bool) -> Option<Vec<usize>> {
-        if let Some(i) = (0..9).find(|&i| self.slots[HOTBAR + i].is_some_and(|s| s.item == item)) {
+        self.pick_stack(Stack::new(item, 1), creative)
+    }
+
+    /// `Inventory.findSlotMatchingItem`: компоненты и износ тоже должны совпасть.
+    pub fn pick_stack(&mut self, mut wanted: Stack, creative: bool) -> Option<Vec<usize>> {
+        wanted.count = 1;
+        if let Some(i) =
+            (0..9).find(|&i| self.slots[HOTBAR + i].is_some_and(|s| s.same_kind(&wanted)))
+        {
             self.selected = i;
             return Some(Vec::new());
         }
         if let Some(i) = (MAIN..HOTBAR)
             .chain(std::iter::once(OFFHAND))
-            .find(|&i| self.slots[i].is_some_and(|s| s.item == item))
+            .find(|&i| self.slots[i].is_some_and(|s| s.same_kind(&wanted)))
         {
             let held = self.held_slot();
             self.slots.swap(i, held);
@@ -68,7 +76,7 @@ impl Inventory {
         }
         if let Some(i) = (0..9).find(|&i| self.slots[HOTBAR + i].is_none()) {
             self.selected = i;
-            self.slots[HOTBAR + i] = Some(Stack::new(item, 1));
+            self.slots[HOTBAR + i] = Some(wanted);
             return Some(vec![HOTBAR + i]);
         }
         let held = self.held_slot();
@@ -79,7 +87,7 @@ impl Inventory {
             self.slots[free] = Some(old);
             changed.push(free);
         }
-        self.slots[held] = Some(Stack::new(item, 1));
+        self.slots[held] = Some(wanted);
         Some(changed)
     }
 
@@ -1328,6 +1336,27 @@ mod tests {
         assert_eq!(inv.held(), Some(Stack::new(8, 2)));
         assert!(inv.slots[MAIN].is_none());
         assert!(inv.pick(9, false).is_none());
+    }
+
+    #[test]
+    fn pick_matches_components_and_copies_them_in_creative() {
+        let mut inv = Inventory::default();
+        let wanted = Stack {
+            item: 5,
+            count: 1,
+            damage: 2,
+            extra: 17,
+        };
+        inv.slots[HOTBAR] = Some(Stack::new(5, 1));
+        inv.slots[MAIN] = Some(wanted);
+        assert_eq!(inv.pick_stack(wanted, false), Some(vec![MAIN, HOTBAR]));
+        assert_eq!(inv.held(), Some(wanted));
+
+        let mut inv = Inventory::default();
+        inv.slots[HOTBAR] = Some(Stack::new(5, 1));
+        inv.selected = 1;
+        assert_eq!(inv.pick_stack(wanted, true), Some(vec![HOTBAR + 1]));
+        assert_eq!(inv.held(), Some(wanted));
     }
 
     #[test]

@@ -8,8 +8,8 @@
 use super::*;
 
 /// `EntityType.BOAT`: ширина и высота коробки.
-const WIDTH: f64 = 1.375;
-const HEIGHT: f64 = 0.5625;
+pub(super) const WIDTH: f64 = 1.375;
+pub(super) const HEIGHT: f64 = 0.5625;
 /// `VehicleEntity.hurtServer`: урон за удар множится на 10, больше 40 — сломана.
 const DAMAGE_SCALE: f32 = 10.0;
 const BREAK_AT: f32 = 40.0;

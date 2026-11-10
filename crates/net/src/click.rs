@@ -241,6 +241,11 @@ impl Menu<'_> {
             return thrown;
         }
         let size = self.slots.len();
+        // Блок под открытым окном заменили (сундук → воронка): слотов стало
+        // меньше, чем у вида окна, и индексы хотбара вышли бы за границы.
+        if size < self.kind.size() {
+            return thrown;
+        }
         let index = (slot >= 0 && (slot as usize) < size).then_some(slot as usize);
         // Результат крафтера (`NonInteractiveResultSlot`): ни взять, ни положить.
         if matches!(self.kind, Kind::Crafter(_)) && index == Some(45) && mode != QUICK_CRAFT {
@@ -746,8 +751,21 @@ impl Menu<'_> {
                 };
                 let mut left = c.count;
                 for &i in &drag.slots {
-                    let have = self.slots[i].map_or(0, |s| s.count);
+                    // Слот мог измениться, пока кнопку держали (воронка, другой
+                    // игрок): как `canItemQuickReplace` + `mayPlace` в ванили.
+                    // Без проверки чужой предмет в слоте превращался в копию
+                    // перетаскиваемого — дюп.
+                    let Some(slot) = self.slots.get(i).copied() else {
+                        continue;
+                    };
+                    if slot.is_some_and(|s| !same(&s, &c)) || !self.may_place(i, &c) {
+                        continue;
+                    }
+                    let have = slot.map_or(0, |s| s.count);
                     let max = self.slot_max(i, c.item);
+                    if have >= max {
+                        continue;
+                    }
                     let put = (have + per).min(max);
                     if k != 2 {
                         left -= put - have;

@@ -39,6 +39,16 @@ struct Bounds {
 }
 
 impl PlayPlan {
+    /// Дальность взаимодействия с сущностью для `isWithinEntityInteractionRange`.
+    pub(crate) fn entity_interaction_range(&self, uuid: Uuid) -> f64 {
+        let name = "minecraft:entity_interaction_range";
+        let bounds = registry_bounds(name).expect("vanilla entity interaction range");
+        let base = self.attribute_base(uuid, name, bounds.base);
+        let mods = self.enchant_attribute_modifiers(uuid, name);
+        let mods = self.merge_attribute_modifiers(uuid, name, &mods);
+        combine(base, &mods, &bounds)
+    }
+
     /// База для пакета: правка команды или запасное значение сущности.
     pub(crate) fn attribute_base(&self, uuid: Uuid, name: &str, fallback: f64) -> f64 {
         self.entity_attributes

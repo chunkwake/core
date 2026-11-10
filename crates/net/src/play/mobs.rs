@@ -1718,6 +1718,19 @@ impl PlayPlan {
             .map(|ry| ry as i32 + self.min_y())
     }
 
+    /// Чанки `entities/*.mca` измерения `dim` к записи. Измерение задаётся явно:
+    /// поток сохранения не знает «текущего» мира, а общее активное измерение
+    /// меняется при каждом переходе игрока — сущности Ада уходили в файлы
+    /// оверворлда и затирали его списки.
+    pub fn unsaved_entities_in(&self, dim: Dimension) -> Vec<((i32, i32), Vec<Compound>)> {
+        with_dim(dim, || self.unsaved_entities())
+    }
+
+    /// После записи сущностей измерения `dim`.
+    pub fn mark_entities_saved_in(&self, dim: Dimension, saved: &[((i32, i32), Vec<Compound>)]) {
+        with_dim(dim, || self.mark_entities_saved(saved));
+    }
+
     /// Чанки `entities/*.mca` к записи: где есть мобы, где они были и новые заселённые.
     pub fn unsaved_entities(&self) -> Vec<((i32, i32), Vec<Compound>)> {
         let mut by_chunk: HashMap<(i32, i32), Vec<Compound>> = HashMap::new();

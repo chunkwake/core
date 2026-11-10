@@ -11,10 +11,21 @@ pub const MAX_SERVERBOUND: usize = 32767;
 /// Предел `ClientboundCustomPayloadPacket` (1 МиБ).
 pub const MAX_CLIENTBOUND: usize = 1 << 20;
 
-/// Имена каналов из тела `minecraft:register`.
+/// Сколько каналов может объявить один клиент (как в Paper: 128).
+pub const MAX_CHANNELS: usize = 128;
+/// Предел длины имени канала (`Messenger.MAX_CHANNEL_SIZE`).
+pub const MAX_CHANNEL_NAME: usize = 64;
+
+/// Имена каналов из тела `minecraft:register`. Тело сверх предела пакета,
+/// слишком длинные имена и каналы сверх `MAX_CHANNELS` отбрасываются: иначе
+/// один пакет на 8 МиБ давал миллионы строк, которые сервер хранил до выхода.
 pub fn register_names(data: &[u8]) -> Vec<String> {
+    if data.len() > MAX_SERVERBOUND {
+        return Vec::new();
+    }
     data.split(|&b| b == 0)
-        .filter(|n| !n.is_empty())
+        .filter(|n| !n.is_empty() && n.len() <= MAX_CHANNEL_NAME)
+        .take(MAX_CHANNELS)
         .filter_map(|n| std::str::from_utf8(n).ok())
         .map(str::to_owned)
         .collect()
@@ -58,6 +69,15 @@ mod tests {
             vec!["voicechat:a".to_owned(), "bluemap:b".to_owned()]
         );
         assert!(register_names(b"").is_empty());
+    }
+
+    #[test]
+    fn register_is_bounded() {
+        let many = "a:b\0".repeat(1000);
+        assert_eq!(register_names(many.as_bytes()).len(), MAX_CHANNELS);
+        let long = "x".repeat(MAX_CHANNEL_NAME + 1);
+        assert!(register_names(long.as_bytes()).is_empty());
+        assert!(register_names(&vec![b'a'; MAX_SERVERBOUND + 1]).is_empty());
     }
 
     #[test]

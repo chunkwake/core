@@ -127,6 +127,7 @@ struct Ids {
     sb_use_item_on: i32,
     sb_set_creative_mode_slot: i32,
     sb_pick_item_from_block: i32,
+    sb_pick_item_from_entity: i32,
     sb_set_carried_item: i32,
     container_set_content: i32,
     container_set_slot: i32,
@@ -2608,6 +2609,7 @@ impl PlayPlan {
                 sb_use_item_on: sb("use_item_on")?,
                 sb_set_creative_mode_slot: sb("set_creative_mode_slot")?,
                 sb_pick_item_from_block: sb("pick_item_from_block")?,
+                sb_pick_item_from_entity: sb("pick_item_from_entity")?,
                 sb_set_carried_item: sb("set_carried_item")?,
                 container_set_content: cb("container_set_content")?,
                 container_set_slot: cb("container_set_slot")?,
@@ -4909,6 +4911,29 @@ impl PlayPlan {
         acknowledge_player_save(&mut pending, uuid, written);
     }
 
+    /// Выгоняет идущую сессию игрока `uuid` и ждёт, пока она уйдёт из списков
+    /// (к этому моменту её снимок уже лежит в `player_saves`). `false` — старая
+    /// сессия не завершилась за отведённое время: новую пускать нельзя.
+    async fn evict_session(&self, uuid: Uuid, reason: &str) -> bool {
+        let online = |this: &Self| {
+            this.controls.lock().unwrap().contains_key(&uuid)
+                || this.hub.players.lock().unwrap().contains_key(&uuid)
+        };
+        if !online(self) {
+            return true;
+        }
+        if let Some(tx) = self.controls.lock().unwrap().get(&uuid) {
+            let _ = tx.send(Control::Kick(reason.to_owned()));
+        }
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if !online(self) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn disconnect_all(&self) {
         self.shutting_down.store(true, Ordering::Release);
         for tx in self.controls.lock().unwrap().values() {
@@ -5580,6 +5605,17 @@ impl PlayPlan {
     /// Сессия игрока: вход в таб-лист и мир, игра, выход с оповещением остальных.
     pub async fn run(&self, player: &LoggedIn, conn: &mut Connection) -> Result<(), NetError> {
         let ids = self.ids;
+        // Тот же профиль уже в игре — как `PlayerList.disconnectAllPlayersWithProfile`:
+        // старую сессию выгоняем и ждём, пока она сохранится. Без этого две
+        // сессии делили одно сохранение (дюп предметов), а первая вышедшая
+        // стирала из списков вторую.
+        const DUPLICATE_LOGIN: &str = r#"{"translate":"multiplayer.disconnect.duplicate_login"}"#;
+        if !self.evict_session(player.uuid, DUPLICATE_LOGIN).await {
+            conn.send(&text::disconnect_json(ids.disconnect, DUPLICATE_LOGIN))
+                .await?;
+            conn.flush().await?;
+            return Ok(());
+        }
         // Сохранённый игрок: позиция, инвентарь, здоровье. Погибший — заново на спавне.
         // Свежий снимок в памяти (вышел и зашёл до автосохранения) важнее файла.
         let pending = self.player_saves.lock().unwrap().get(&player.uuid).cloned();
@@ -11505,6 +11541,20 @@ impl PlayPlan {
                     }
                     if moved {
                         let m = play::read_move(&mut r, has_pos, has_rot)?;
+                        // `ServerGamePacketListenerImpl.containsInvalidValues`: NaN и
+                        // бесконечность в позиции или повороте — кик. Иначе NaN попадал
+                        // в позицию игрока, рассылался остальным и сохранялся на диск.
+                        let finite = m.pos.is_none_or(|p| p.iter().all(|v| v.is_finite()))
+                            && m.rot.is_none_or(|(yaw, pitch)| yaw.is_finite() && pitch.is_finite());
+                        if !finite {
+                            conn.send(&text::disconnect_json(
+                                ids.disconnect,
+                                r#"{"translate":"multiplayer.disconnect.invalid_player_movement"}"#,
+                            ))
+                            .await?;
+                            conn.flush().await?;
+                            return Ok(());
+                        }
                         if state.vitals.dead {
                             continue;
                         }
@@ -11670,9 +11720,34 @@ impl PlayPlan {
                         }
                         continue;
                     }
+                    if id == ids.sb_pick_item_from_entity {
+                        let target = r.var_int()?;
+                        let _include_data = r.bool()?;
+                        // У ванили данные профиля копируются только для Avatar
+                        // с правами администратора; таких сущностей здесь пока нет.
+                        if !state.vitals.dead
+                            && let Some(item) = self.clone_entity_item(uuid, target)
+                        {
+                            let creative = login.spawn.game_mode == 1;
+                            if let Some(changed) = state.inv.pick_stack(item, creative) {
+                                if !changed.is_empty() {
+                                    self.send_slots(conn, &mut state.inv, &changed).await?;
+                                }
+                                conn.send(&inv::set_held_slot(ids.set_held_slot, state.inv.selected as i32)).await?;
+                            }
+                        }
+                        continue;
+                    }
                     if id == ids.sb_set_creative_mode_slot {
+                        // Пакет принимается только в творческом (`handleSetCreativeModeSlot`:
+                        // `player.hasInfiniteMaterials()`), и проверка идёт до разбора:
+                        // иначе игрок в выживании и наблюдатель заставляли сервер
+                        // разбирать и запоминать произвольные компоненты предметов.
+                        if login.spawn.game_mode != 1 {
+                            continue;
+                        }
                         let (slot, stack) = inv::read_creative_slot(&mut r)?;
-                        if !survival {
+                        {
                             // Слот < 0 — выброс из креатив-меню (`handleSetCreativeModeSlot`).
                             if slot < 0 {
                                 if let (Some(s), Some((feet, yaw, pitch))) = (stack, self.player_at(uuid)) {
@@ -13429,6 +13504,53 @@ impl PlayPlan {
             name => name,
         };
         self.item_id(name)
+    }
+
+    /// `handlePickItemFromEntity`: по ID берётся `getPickResult` сущности и
+    /// проверяется расстояние от глаз до её коробки, а не до центра.
+    fn clone_entity_item(&self, uuid: Uuid, target: i32) -> Option<Stack> {
+        let (feet, _, _) = self.player_at(uuid)?;
+        let eye = [feet[0], feet[1] + EYE_HEIGHT, feet[2]];
+        let range = self.entity_interaction_range(uuid) + 3.0;
+        let mob = {
+            let mobs = self.sim().mobs.lock().unwrap();
+            mobs.get(&target).and_then(|entry| {
+                let mob = &entry.mob;
+                let (width, height) = mob.species.info().size;
+                let scale = if mob.is_baby() { 0.5 } else { 1.0 };
+                let half = width * scale / 2.0;
+                let pos = mob.pos;
+                let name = format!("{}_spawn_egg", mob.species.info().name);
+                Some((
+                    Stack::new(self.item_id(&name)?, 1),
+                    [
+                        [pos[0] - half, pos[1], pos[2] - half],
+                        [pos[0] + half, pos[1] + height * scale, pos[2] + half],
+                    ],
+                ))
+            })
+        };
+        let boat = || {
+            let boats = self.sim().boats.lock().unwrap();
+            let boat = boats.get(&target)?;
+            let half = boats::WIDTH / 2.0;
+            let pos = boat.pos;
+            Some((
+                Stack::new(self.item_id(&boat.kind)?, 1),
+                [
+                    [pos[0] - half, pos[1], pos[2] - half],
+                    [pos[0] + half, pos[1] + boats::HEIGHT, pos[2] + half],
+                ],
+            ))
+        };
+        let (item, bounds) = mob
+            .or_else(boat)
+            .or_else(|| {
+                self.pick_minecart(target)
+                    .map(|(item, bounds)| (Stack::new(item, 1), bounds))
+            })
+            .or_else(|| self.pick_item_frame(target))?;
+        within_pick_range(eye, bounds, range).then_some(item)
     }
 
     /// Прогресс ломки за тик предметом в руке: вода у глаз и опора под ногами.
@@ -21353,6 +21475,23 @@ impl PlayPlan {
     }
 }
 
+/// `AABB.distanceToSqr`: ближайшая точка коробки к глазам игрока.
+fn within_pick_range(eye: [f64; 3], bounds: [[f64; 3]; 2], range: f64) -> bool {
+    let distance_sq: f64 = (0..3)
+        .map(|i| {
+            let delta = if eye[i] < bounds[0][i] {
+                bounds[0][i] - eye[i]
+            } else if eye[i] > bounds[1][i] {
+                eye[i] - bounds[1][i]
+            } else {
+                0.0
+            };
+            delta * delta
+        })
+        .sum();
+    distance_sq < range * range
+}
+
 /// Возвращает буфер тика в запас мира: следующий тик возьмёт его пустым.
 fn return_tick_buffer<T>(slot: &Mutex<Vec<T>>, buf: &mut Vec<T>) {
     buf.clear();
@@ -21387,10 +21526,19 @@ mod tests {
     use super::{
         CHEST_SINGLE, ChestState, FastMap, acknowledge_player_save, add_banner_pattern,
         chunks_around, container_entity, dominant_axis, in_view, lectern_page_request,
-        update_container_viewers,
+        update_container_viewers, within_pick_range,
     };
     use crate::survival::PlayerState;
     use uuid::Uuid;
+
+    /// Ваниль проверяет ближайшую точку коробки и строгое расстояние до неё.
+    #[test]
+    fn entity_pick_reach_uses_box_and_strict_boundary() {
+        let bounds = [[5.0, 0.0, -0.5], [6.0, 2.0, 0.5]];
+        assert!(within_pick_range([0.0, 1.0, 0.0], bounds, 6.0));
+        assert!(!within_pick_range([-1.0, 1.0, 0.0], bounds, 6.0));
+        assert!(!within_pick_range([0.0, 1.0, 0.0], bounds, 5.0));
+    }
 
     /// Плоский мир: незагруженный столбец — шаблон, и свет у него тоже шаблонный.
     /// Раньше свет здесь был 0, и монстры появлялись днём на поверхности.

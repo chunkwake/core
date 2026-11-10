@@ -14,6 +14,10 @@ path = "src/main.rs"
 name = "chunkwake-watch"
 path = "src/bin/watch.rs"
 
+[[example]]
+name = "bot_fill_probe"
+path = "examples/fill_probe.rs"
+
 [dependencies]
 chunkwake-data = { path = "../data" }
 chunkwake-net = { path = "../net" }

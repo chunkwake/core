@@ -129,6 +129,9 @@ impl From<ProtocolError> for NetError {
 
 pub struct Server {
     config: NetConfig,
+    /// Входящие и играющие сессии занимают место до закрытия соединения.
+    admission: AtomicUsize,
+    /// Только играющие сессии показываются в статусе сервера.
     online: AtomicUsize,
     key: Option<ServerKey>,
     http: reqwest::Client,
@@ -139,6 +142,13 @@ pub struct Server {
 }
 
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// Клиент, переставший читать, держал `flush` вечно: сессия не видела ни
+/// таймаута keep-alive, ни кика, ни остановки сервера.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Срок от соединения до входа в игру (рукопожатие, вход, конфигурация).
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(120);
+/// Сколько соединений одновременно может находиться на пути к игре.
+const MAX_PENDING_LOGINS: usize = 1024;
 /// Первая версия протокола со сжатием (1.8).
 const COMPRESSION_SINCE: i32 = 47;
 
@@ -151,6 +161,7 @@ impl Server {
                 .build()
                 .expect("HTTP client"),
             config,
+            admission: AtomicUsize::new(0),
             online: AtomicUsize::new(0),
             session_id: uuid::Builder::from_random_bytes(rand::random()).into_uuid(),
             translator: std::sync::OnceLock::new(),
@@ -197,14 +208,29 @@ impl Server {
                 }
                 Some(_) = handshakes.join_next(), if !handshakes.is_empty() => continue,
             };
+            // Незавершённых входов не больше предела: иначе поток соединений,
+            // не дошедших до игры, съедал дескрипторы и память.
+            if handshakes.len() >= MAX_PENDING_LOGINS {
+                tracing::debug!(%addr, "too many pending logins, connection dropped");
+                continue;
+            }
             let _ = stream.set_nodelay(true);
             let server = self.clone();
             let on_login = on_login.clone();
             handshakes.spawn(async move {
-                match server.handle(stream, addr).await {
-                    Ok(Some((player, conn))) => on_login(player, conn),
-                    Ok(None) => {}
-                    Err(e) => tracing::debug!(%addr, ?e, "connection closed"),
+                // Срок на весь вход, а не на каждое чтение: байт раз в 29 секунд
+                // держал соединение до игры бесконечно.
+                match tokio::time::timeout(LOGIN_TIMEOUT, server.handle(stream, addr)).await {
+                    Ok(Ok(Some((player, mut conn)))) => {
+                        conn.online
+                            .as_mut()
+                            .expect("login reserved a slot")
+                            .activate();
+                        on_login(player, conn)
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(e)) => tracing::debug!(%addr, ?e, "connection closed"),
+                    Err(_) => tracing::debug!(%addr, "login timed out"),
                 }
             });
         }
@@ -214,7 +240,7 @@ impl Server {
     }
 
     async fn handle(
-        &self,
+        self: &Arc<Self>,
         stream: TcpStream,
         addr: SocketAddr,
     ) -> Result<Option<(LoggedIn, Connection)>, NetError> {
@@ -271,10 +297,16 @@ impl Server {
     }
 
     async fn status(&self, conn: &mut Connection) -> Result<(), NetError> {
+        // Ответ на статус один на соединение, как в `ServerStatusPacketListenerImpl`:
+        // второй запрос — разрыв, а не бесконечная раздача JSON.
+        let mut answered = false;
         loop {
             let packet = conn.read_packet().await?;
             match StatusC2S::decode(&packet)? {
                 StatusC2S::Request => {
+                    if std::mem::replace(&mut answered, true) {
+                        return Ok(());
+                    }
                     conn.send(&packets::status_response(&self.status_json()))
                         .await?
                 }
@@ -287,7 +319,7 @@ impl Server {
     }
 
     async fn login(
-        &self,
+        self: &Arc<Self>,
         mut conn: Connection,
         addr: SocketAddr,
     ) -> Result<Option<(LoggedIn, Connection)>, NetError> {
@@ -313,15 +345,22 @@ impl Server {
         };
         // Как `PlayerList.canPlayerLogin`: бан, белый список, места; решение
         // могут сменить плагины (`AsyncPlayerPreLoginEvent`, `PlayerLoginEvent`).
-        let full = self.online.load(Ordering::Relaxed) >= self.config.max_players;
+        // Бронируем место атомарно до асинхронной проверки плагинов: два
+        // одновременных входа больше не получают последнее место вместе.
+        let slot = OnlineGuard::reserve(self.clone());
+        let full = slot.is_none();
         let denied = match &self.config.admit {
             Some(admit) => {
                 let admit = admit.0.clone();
                 let (n, p) = (name.clone(), properties.clone());
                 // Плагины могут думать долго (база данных): поток рантайма не держим.
-                tokio::task::spawn_blocking(move || admit(&n, uuid, addr, &p, full))
-                    .await
-                    .unwrap_or(None)
+                match tokio::task::spawn_blocking(move || admit(&n, uuid, addr, &p, full)).await {
+                    Ok(decision) => decision,
+                    Err(error) => {
+                        tracing::error!(%error, "login admission failed");
+                        Some(text_json("Internal server error"))
+                    }
+                }
             }
             None => full.then(|| text_json("The server is full!")),
         };
@@ -329,6 +368,8 @@ impl Server {
             conn.send(&packets::login_disconnect(&reason)).await?;
             return Ok(None);
         }
+        // Плагин вправе снять отказ из-за полного сервера, как PlayerLoginEvent.
+        conn.online = Some(slot.unwrap_or_else(|| OnlineGuard::override_full(self.clone())));
 
         // Клиенты до 1.8 (протокол 47) сжатия не знают: ViaRewind гасит пакет
         // set_compression, и кадры должны остаться несжатыми.
@@ -459,6 +500,52 @@ pub struct Connection {
     via: Option<translate::Session>,
     /// Переведённые пакеты от клиента, которые сервер ещё не прочитал.
     inbox: VecDeque<Vec<u8>>,
+    /// Место игрока на сервере: занято, пока жива сессия (`max-players`, статус).
+    online: Option<OnlineGuard>,
+}
+
+/// Бронь места на время входа и игры; освобождается при закрытии соединения.
+struct OnlineGuard {
+    server: Arc<Server>,
+    active: bool,
+}
+
+impl OnlineGuard {
+    fn reserve(server: Arc<Server>) -> Option<Self> {
+        server
+            .admission
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < server.config.max_players).then_some(count + 1)
+            })
+            .ok()?;
+        Some(Self {
+            server,
+            active: false,
+        })
+    }
+
+    fn override_full(server: Arc<Server>) -> Self {
+        server.admission.fetch_add(1, Ordering::AcqRel);
+        Self {
+            server,
+            active: false,
+        }
+    }
+
+    fn activate(&mut self) {
+        debug_assert!(!self.active);
+        self.active = true;
+        self.server.online.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl Drop for OnlineGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.server.online.fetch_sub(1, Ordering::Relaxed);
+        }
+        self.server.admission.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Неотправленный хвост (причина отключения после `send` и `return`) —
@@ -508,6 +595,7 @@ impl Connection {
             written_bytes: 0,
             via: None,
             inbox: VecDeque::new(),
+            online: None,
         }
     }
 
@@ -635,7 +723,9 @@ impl Connection {
             return self.flush().await;
         }
         if self.out.is_empty() && self.cipher.is_none() {
-            self.stream.write_all(frames).await?;
+            tokio::time::timeout(WRITE_TIMEOUT, self.stream.write_all(frames))
+                .await
+                .map_err(|_| NetError::Timeout)??;
             self.written_bytes += frames.len() as u64;
             return Ok(());
         }
@@ -654,8 +744,11 @@ impl Connection {
             return self.flush().await;
         }
         if self.out.is_empty() && self.cipher.is_none() {
+            tokio::time::timeout(WRITE_TIMEOUT, self.stream.write_all(&frame))
+                .await
+                .map_err(|_| NetError::Timeout)??;
             self.written_bytes += frame.len() as u64;
-            return self.stream.write_all(&frame).await.map_err(Into::into);
+            return Ok(());
         }
         self.flush().await?;
         std::mem::swap(&mut self.out, &mut frame);
@@ -689,13 +782,15 @@ impl Connection {
             c.encrypt(&mut self.out[self.plain..]);
         }
         let written = self.out.len() as u64;
-        let res = self.stream.write_all(&self.out).await;
+        let res = tokio::time::timeout(WRITE_TIMEOUT, self.stream.write_all(&self.out))
+            .await
+            .map_err(|_| NetError::Timeout);
         self.out.clear();
         self.plain = 0;
         if self.out.capacity() > OUT_MAX_KEEP {
             self.out.shrink_to(OUT_KEEP);
         }
-        res?;
+        res??;
         self.written_bytes += written;
         Ok(())
     }
@@ -706,3 +801,67 @@ pub mod fire;
 pub mod tnt;
 pub mod transform;
 pub mod translate;
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    fn server(max_players: usize) -> Arc<Server> {
+        Server::new(NetConfig {
+            version: GameVersion {
+                name: "26.3".into(),
+                protocol: 777,
+            },
+            motd: String::new(),
+            max_players,
+            compression_threshold: -1,
+            online_mode: false,
+            enable_status: false,
+            session_server: String::new(),
+            configuration: None,
+            admit: None,
+        })
+    }
+
+    #[test]
+    fn concurrent_logins_share_only_one_free_slot() {
+        let server = server(1);
+        let release = Arc::new(std::sync::Barrier::new(17));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                let server = server.clone();
+                let release = release.clone();
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    let slot = OnlineGuard::reserve(server);
+                    tx.send(slot.is_some()).unwrap();
+                    release.wait();
+                })
+            })
+            .collect();
+        let accepted = (0..16).filter(|_| rx.recv().unwrap()).count();
+        assert_eq!(accepted, 1);
+        assert_eq!(server.admission.load(Ordering::Relaxed), 1);
+        release.wait();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(server.admission.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn plugin_override_and_disconnect_update_counters() {
+        let server = server(1);
+        let reserved = OnlineGuard::reserve(server.clone()).unwrap();
+        assert!(OnlineGuard::reserve(server.clone()).is_none());
+        let mut overridden = OnlineGuard::override_full(server.clone());
+        overridden.activate();
+        assert_eq!(server.online.load(Ordering::Relaxed), 1);
+        assert_eq!(server.admission.load(Ordering::Relaxed), 2);
+        drop(overridden);
+        drop(reserved);
+        assert_eq!(server.online.load(Ordering::Relaxed), 0);
+        assert_eq!(server.admission.load(Ordering::Relaxed), 0);
+    }
+}

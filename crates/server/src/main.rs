@@ -343,7 +343,9 @@ async fn serve(dir: &Path) -> Result<(), String> {
     let mut serve_error = None;
     let mut serving_done = false;
     let mut session_errors = Vec::new();
-    // Ctrl+C или `stop`: завершить соединения, плагины и сохранить мир.
+    // Ctrl+C, SIGTERM или `stop`: завершить соединения, плагины и сохранить мир.
+    let terminate = terminate_signal();
+    tokio::pin!(terminate);
     loop {
         tokio::select! {
             result = &mut serving => {
@@ -352,6 +354,7 @@ async fn serve(dir: &Path) -> Result<(), String> {
                 break;
             },
             _ = tokio::signal::ctrl_c() => break,
+            _ = &mut terminate => break,
             Some((player, mut conn)) = session_rx.recv() => {
                 let play = play.clone();
                 sessions.spawn(async move {
@@ -696,4 +699,25 @@ async fn start_plugins(
             None
         }
     }
+}
+
+/// Ждёт SIGTERM: так сервер останавливают systemd, Docker и `kill`.
+/// Без перехвата процесс умирал сразу, не сохранив мир и игроков.
+/// На Windows такого сигнала нет: там остановка идёт через Ctrl+C и `stop`.
+async fn terminate_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                term.recv().await;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "SIGTERM handler is unavailable");
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    std::future::pending::<()>().await;
 }

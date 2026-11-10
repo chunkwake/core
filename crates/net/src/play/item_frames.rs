@@ -170,6 +170,19 @@ fn intersects(a: [[f64; 3]; 2], b: [[f64; 3]; 2]) -> bool {
 }
 
 impl PlayPlan {
+    /// Предмет в рамке или сама пустая рамка, с её коробкой для проверки дальности.
+    pub(super) fn pick_item_frame(&self, id: i32) -> Option<(Stack, [[f64; 3]; 2])> {
+        let frames = self.sim().item_frames.lock().unwrap();
+        let frame = frames.get(&id)?;
+        let item = frame
+            .item
+            .or_else(|| self.item_id(frame.kind()).map(|id| Stack::new(id, 1)))?;
+        let map = frame
+            .item
+            .is_some_and(|s| self.item_name(s.item) == "minecraft:filled_map");
+        Some((item, frame_box(frame.pos, frame.facing, map)))
+    }
+
     fn frame_packets(&self, id: i32, f: &ItemFrame) -> Vec<Vec<u8>> {
         let Some(&ty) = self.survival.entity_types.get(f.kind()) else {
             return Vec::new();

@@ -543,10 +543,7 @@ impl Tree {
     /// в цель, чтобы `/tell <tab>` показывал аргументы `/msg`.
     pub fn suggest(&self, line: &str, level: i32) -> Vec<String> {
         let trimmed = line.trim_start();
-        let (body, prefix) = match trimmed.rfind(char::is_whitespace) {
-            Some(i) => (&trimmed[..i], &trimmed[i + 1..]),
-            None => ("", trimmed),
-        };
+        let (body, prefix) = split_last_word(trimmed).unwrap_or(("", trimmed));
         let words: Vec<&str> = body.split_whitespace().collect();
         let children: &[Spec] = match words.split_first() {
             None => &self.specs,
@@ -600,8 +597,7 @@ impl Tree {
         level: i32,
     ) -> Option<(&'static str, &'a str)> {
         let trimmed = line.trim_start();
-        let i = trimmed.rfind(char::is_whitespace)?;
-        let (body, prefix) = (&trimmed[..i], &trimmed[i + 1..]);
+        let (body, prefix) = split_last_word(trimmed)?;
         let words: Vec<&str> = body.split_whitespace().collect();
         let (first, rest) = words.split_first()?;
         let root = self.spec(first)?;
@@ -625,10 +621,35 @@ impl Tree {
     }
 }
 
+/// Делит строку по последнему пробельному символу: всё до него и слово после.
+/// Пробел бывает многобайтным (U+3000, U+00A0): срез по `i + 1` попадал внутрь
+/// символа и ронял сервер паникой от одного пакета подсказки.
+fn split_last_word(text: &str) -> Option<(&str, &str)> {
+    let (i, ch) = text.char_indices().rev().find(|(_, c)| c.is_whitespace())?;
+    Some((&text[..i], &text[i + ch.len_utf8()..]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::play::commands::registry;
+
+    #[test]
+    fn suggest_survives_multibyte_whitespace() {
+        let tree = registry::tree();
+        for line in [
+            "a\u{3000}b",
+            "give\u{a0}",
+            "\u{2028}",
+            "time\u{3000}set\u{3000}",
+        ] {
+            let _ = tree.suggest(line, 4);
+            let _ = tree.pending_resource(line, 4);
+        }
+        assert_eq!(split_last_word("a\u{3000}b"), Some(("a", "b")));
+        assert_eq!(split_last_word("time set"), Some(("time", "set")));
+        assert_eq!(split_last_word("time"), None);
+    }
 
     #[test]
     fn parses_known_commands() {

@@ -40,6 +40,7 @@ enum Command {
         color: bool,
     },
     Help,
+    Version,
 }
 
 #[derive(Debug)]
@@ -67,6 +68,7 @@ impl Cli {
             [s, flag] if s == "setup" && flag == "--yes" => Command::Setup { yes: true },
             [s] if s == "doctor" => Command::Doctor,
             [s] if s == "--help" || s == "-h" || s == "help" => Command::Help,
+            [s] if s == "--version" || s == "-V" || s == "version" => Command::Version,
             [a, b] if a == "config" && b == "show" => Command::Show,
             [a, b, key, value] if a == "config" && b == "set" => {
                 Command::Set(key.clone(), value.clone())
@@ -157,6 +159,7 @@ COMMANDS
 OPTIONS
   --dir PATH              Server directory (default: current directory)
   -h, --help              Show this help
+  -V, --version           Show the Chunkwake and Minecraft versions
 
 SETUP OPTIONS
   --yes                   Write the default settings without a terminal
@@ -177,6 +180,14 @@ EXAMPLES
   chunkwake config set server-port 25570 --dir ./server
   chunkwake doctor --dir ./server
   chunkwake top --dir ./server --watch 2"
+}
+
+/// Строка `chunkwake --version`: версия ядра и версия игры, под которую оно собрано.
+fn version_line() -> String {
+    format!(
+        "chunkwake {} (Minecraft {MC_VERSION})",
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 fn usage() -> &'static str {
@@ -304,6 +315,10 @@ pub async fn execute() -> Result<(), String> {
         } => top(&cli.dir, host, port, watch, json, color).await,
         Command::Help => {
             println!("{}", help());
+            Ok(())
+        }
+        Command::Version => {
+            println!("{}", version_line());
             Ok(())
         }
     }
@@ -709,6 +724,17 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn version_flag_parses() {
+        for flag in ["--version", "-V", "version"] {
+            assert_eq!(
+                Cli::parse([flag.to_owned()]).unwrap().command,
+                Command::Version
+            );
+        }
+        assert!(version_line().contains(MC_VERSION));
     }
 
     #[test]

@@ -207,7 +207,13 @@ impl ConfigurationPlan {
                 // Моды объявляют каналы ещё до входа в мир; плагины узнают о них
                 // после `PlayerJoinEvent`, как в Paper.
                 if r.string(32767)? == "minecraft:register" {
-                    channels.extend(crate::payload::register_names(r.remaining()));
+                    // Предел на клиента, а не на пакет: пакеты можно слать подряд.
+                    let room = crate::payload::MAX_CHANNELS.saturating_sub(channels.len());
+                    channels.extend(
+                        crate::payload::register_names(r.remaining())
+                            .into_iter()
+                            .take(room),
+                    );
                 }
             }
             // keep_alive, brand и т.п. пока игнорируются.
