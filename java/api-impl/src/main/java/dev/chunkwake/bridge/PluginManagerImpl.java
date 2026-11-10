@@ -310,6 +310,9 @@ final class PluginManagerImpl {
                 || has(org.bukkit.event.player.PlayerSignOpenEvent.getHandlerList())) {
             mask |= Bridge.listenBit(Bridge.EVENT_OPEN_SIGN);
         }
+        if (has(org.bukkit.event.player.PlayerEditBookEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_EDIT_BOOK);
+        }
         Bridge.setFlag(Bridge.FLAG_LISTENERS, mask);
     }
 

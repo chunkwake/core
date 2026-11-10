@@ -56,6 +56,82 @@ fn book_page_count(kind: i32, payload: &[u8]) -> Option<i32> {
     (0..=100).contains(&count).then_some(count.max(1))
 }
 
+/// `Filterable.streamCodec`: значение и необязательная отфильтрованная версия.
+fn read_filterable(
+    r: &mut Reader,
+    read: &dyn Fn(&mut Reader) -> Result<String>,
+) -> Result<crate::components::Filterable> {
+    let raw = read(r)?;
+    let filtered = if r.bool()? { Some(read(r)?) } else { None };
+    Ok((raw, filtered))
+}
+
+fn write_filterable(w: &mut Writer, v: &crate::components::Filterable, write: &dyn Fn(&mut Writer, &str)) {
+    write(w, &v.0);
+    w.bool(v.1.is_some());
+    if let Some(f) = &v.1 {
+        write(w, f);
+    }
+}
+
+/// Тело `writable_book_content` / `written_book_content` (`WritableBookContent`
+/// и `WrittenBookContent.STREAM_CODEC`).
+fn read_book(r: &mut Reader, written: bool) -> Result<crate::components::Book> {
+    use crate::components::Book;
+    let text = |r: &mut Reader| Ok(crate::text::read_component(r)?.to_string());
+    if !written {
+        let n = r.var_int()?;
+        if !(0..=100).contains(&n) {
+            return Err(crate::ProtocolError::BadLength(n));
+        }
+        let mut pages = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            pages.push(read_filterable(r, &|r| Ok(r.string(1024)?.to_owned()))?);
+        }
+        return Ok(Book::writable(pages));
+    }
+    let title = read_filterable(r, &|r| Ok(r.string(32)?.to_owned()))?;
+    let author = r.string(32767)?.to_owned();
+    let generation = r.var_int()?;
+    let n = r.var_int()?;
+    if !(0..=100).contains(&n) {
+        return Err(crate::ProtocolError::BadLength(n));
+    }
+    let mut pages = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        pages.push(read_filterable(r, &text)?);
+    }
+    Ok(Book {
+        written: true,
+        pages,
+        title,
+        author,
+        generation,
+        resolved: r.bool()?,
+    })
+}
+
+fn write_book(w: &mut Writer, b: &crate::components::Book) {
+    let text = |w: &mut Writer, t: &str| {
+        let v = serde_json::from_str(t).unwrap_or_else(|_| serde_json::Value::String(t.to_owned()));
+        crate::text::write_component(w, &v);
+    };
+    let plain = |w: &mut Writer, t: &str| {
+        w.string(t);
+    };
+    if b.written {
+        write_filterable(w, &b.title, &plain);
+        w.string(&b.author).var_int(b.generation);
+    }
+    w.var_int(b.pages.len() as i32);
+    for p in &b.pages {
+        write_filterable(w, p, if b.written { &text } else { &plain });
+    }
+    if b.written {
+        w.bool(b.resolved);
+    }
+}
+
 /// `ItemStack.OPTIONAL_STREAM_CODEC`: количество, затем ID и пустой патч компонентов.
 pub fn write_stack(w: &mut Writer, s: Slot) {
     match s {
@@ -162,6 +238,7 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         e.map_id.is_some() && id_of(&crate::components::MAP_ID_COMPONENT) >= 0,
         e.map_post_processing.is_some()
             && id_of(&crate::components::MAP_POST_PROCESSING_COMPONENT) >= 0,
+        e.book.is_some() && book_id(e.book.as_ref()) >= 0,
     ];
     w.var_int(parts.iter().filter(|&&p| p).count() as i32)
         .var_int(0);
@@ -229,6 +306,20 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         w.var_int(id_of(&crate::components::MAP_POST_PROCESSING_COMPONENT))
             .var_int(i32::from(p));
     }
+    if let (true, Some(book)) = (parts[12], &e.book) {
+        w.var_int(book_id(Some(book)));
+        write_book(w, book);
+    }
+}
+
+/// Номер компонента книги в реестре; -1 — нет книги или реестр не задан.
+fn book_id(book: Option<&crate::components::Book>) -> i32 {
+    use crate::components::{WRITABLE_BOOK_CONTENT_COMPONENT, WRITTEN_BOOK_CONTENT_COMPONENT, id_of};
+    match book {
+        Some(b) if b.written => id_of(&WRITTEN_BOOK_CONTENT_COMPONENT),
+        Some(_) => id_of(&WRITABLE_BOOK_CONTENT_COMPONENT),
+        None => -1,
+    }
 }
 
 /// Читает `ItemStack` с компонентами: износ, чары, имя и описание.
@@ -283,9 +374,20 @@ pub fn read_stack(r: &mut Reader) -> Result<Slot> {
         } else if t == id_of(&crate::components::WRITTEN_BOOK_CONTENT_COMPONENT)
             || t == id_of(&crate::components::WRITABLE_BOOK_CONTENT_COMPONENT)
         {
-            e.book_pages = book_page_count(t, r.remaining());
-            known = false;
-            break;
+            let written = t == id_of(&crate::components::WRITTEN_BOOK_CONTENT_COMPONENT);
+            let start = r.remaining().to_vec();
+            match read_book(r, written) {
+                Ok(book) => {
+                    e.book_pages = Some(book.page_count());
+                    e.book = Some(book);
+                }
+                // Не разобрали — патч целиком сырым, как раньше.
+                Err(_) => {
+                    e.book_pages = book_page_count(t, &start);
+                    known = false;
+                    break;
+                }
+            }
         } else if t == id_of(&STORED_ENCHANTMENTS_COMPONENT) {
             for _ in 0..r.var_int()?.clamp(0, 256) {
                 e.stored.push((r.var_int()?, r.var_int()?));
@@ -1026,6 +1128,35 @@ mod tests {
             .var_int(0)
             .var_int(5);
         assert_eq!(super::book_page_count(127, &written.buf), Some(5));
+    }
+
+    #[test]
+    fn written_book_component_roundtrips() {
+        use std::sync::atomic::Ordering;
+        crate::components::WRITABLE_BOOK_CONTENT_COMPONENT.store(126, Ordering::Relaxed);
+        crate::components::WRITTEN_BOOK_CONTENT_COMPONENT.store(127, Ordering::Relaxed);
+        for written in [false, true] {
+            let page = |t: &str| if written { format!("{{\"text\":\"{t}\"}}") } else { t.to_owned() };
+            let book = crate::components::Book {
+                written,
+                pages: vec![(page("one"), None), (page("two"), Some(page("t*o")))],
+                title: if written { ("T".into(), None) } else { Default::default() },
+                author: if written { "Steve".into() } else { String::new() },
+                generation: i32::from(written),
+                resolved: written,
+            };
+            let stack = Stack {
+                extra: crate::components::intern(crate::components::Extra {
+                    book_pages: Some(2),
+                    book: Some(book),
+                    ..Default::default()
+                }),
+                ..Stack::new(10, 1)
+            };
+            let mut w = Writer::new();
+            write_stack(&mut w, Some(stack));
+            assert_eq!(read_stack(&mut Reader::new(&w.buf)).unwrap(), Some(stack));
+        }
     }
 
     #[test]

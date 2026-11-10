@@ -84,7 +84,7 @@ final class StackImpl extends ItemStack {
     @Override public int getMaxStackSize() { return Registries.maxStack(type); }
     @Override public boolean isEmpty() { return type == Material.AIR || amount <= 0; }
     @Override public boolean hasItemMeta() { return !isEmpty() && !data.isEmpty(); }
-    @Override public ItemMeta getItemMeta() { return isEmpty() ? null : new MetaImpl(data.copy()).api; }
+    @Override public ItemMeta getItemMeta() { return isEmpty() ? null : new MetaImpl(data.copy(), type).api; }
     @Override public short getDurability() { return (short) data.damage; }
     @Override public void setDurability(short d) { data.damage = Math.max(0, d); }
 
@@ -170,6 +170,8 @@ final class StackImpl extends ItemStack {
         JsonObject stored;
         /** {@code custom_data}: compound NBT, в нём {@code PublicBukkitValues}. */
         Map<String, Object> custom = new LinkedHashMap<>();
+        /** {@code writable_book_content} / {@code written_book_content}; нет книги — {@code null}. */
+        BookData book;
 
         /** {@code custom_data} без пустого {@code PublicBukkitValues} (пустой PDC не сохраняется). */
         Map<String, Object> customOut() {
@@ -183,7 +185,7 @@ final class StackImpl extends ItemStack {
 
         boolean isEmpty() {
             return damage == 0 && enchants.isEmpty() && name == null && lore.isEmpty() && raw == null
-                    && stored == null && customOut().isEmpty();
+                    && stored == null && book == null && customOut().isEmpty();
         }
 
         Data copy() {
@@ -194,6 +196,7 @@ final class StackImpl extends ItemStack {
             d.lore = new ArrayList<>(lore);
             d.raw = raw;
             d.stored = stored == null ? null : stored.deepCopy();
+            d.book = book == null ? null : book.copy();
             @SuppressWarnings("unchecked")
             Map<String, Object> c = (Map<String, Object>) PdcImpl.copy(custom);
             d.custom = c;
@@ -218,6 +221,7 @@ final class StackImpl extends ItemStack {
             }
             if (j.has("raw")) d.raw = j.get("raw").getAsString();
             if (j.has("stored")) d.stored = j.getAsJsonObject("stored");
+            if (j.has("book")) d.book = BookData.parse(j.getAsJsonObject("book"));
             if (j.has("custom")) d.custom = PdcImpl.Nbt.decode(j.getAsJsonObject("custom"));
             return d;
         }
@@ -241,6 +245,7 @@ final class StackImpl extends ItemStack {
             }
             if (raw != null) j.addProperty("raw", raw);
             if (stored != null) j.add("stored", stored);
+            if (book != null) j.add("book", book.json());
             if (!customOut().isEmpty()) j.add("custom", PdcImpl.Nbt.encode(customOut()));
             return j.toString();
         }
@@ -250,12 +255,13 @@ final class StackImpl extends ItemStack {
             return o instanceof Data d && d.damage == damage && d.enchants.equals(enchants)
                     && Objects.equals(d.name, name) && d.lore.equals(lore) && Objects.equals(d.raw, raw)
                     && Objects.equals(d.stored, stored)
+                    && Objects.equals(d.book, book)
                     && PdcImpl.Nbt.encode(d.customOut()).equals(PdcImpl.Nbt.encode(customOut()));
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(damage, enchants, name, lore, raw, stored, PdcImpl.Nbt.encode(customOut()));
+            return Objects.hash(damage, enchants, name, lore, raw, stored, book, PdcImpl.Nbt.encode(customOut()));
         }
 
         @Override
@@ -273,11 +279,17 @@ final class StackImpl extends ItemStack {
     static final String PDC = "PublicBukkitValues";
 
     static final class MetaImpl {
-        final Damageable api = Stub.of(Damageable.class, this);
+        final ItemMeta api;
         final Data data;
+        /** Тип стопки: у книг мета ещё и {@link org.bukkit.inventory.meta.BookMeta}, как CraftMetaBook. */
+        final Material type;
 
-        MetaImpl(Data data) {
+        MetaImpl(Data data, Material type) {
             this.data = data;
+            this.type = type;
+            this.api = type == Material.WRITABLE_BOOK || type == Material.WRITTEN_BOOK
+                    ? Stub.of(org.bukkit.inventory.meta.BookMeta.class, this)
+                    : Stub.of(Damageable.class, this);
         }
 
         private static String legacy(Component c) {
@@ -348,7 +360,161 @@ final class StackImpl extends ItemStack {
         public java.util.Set<org.bukkit.inventory.ItemFlag> getItemFlags() { return java.util.Set.of(); }
         public boolean hasItemFlag(org.bukkit.inventory.ItemFlag flag) { return false; }
 
-        public Damageable clone() { return new MetaImpl(data.copy()).api; }
+        public ItemMeta clone() { return new MetaImpl(data.copy(), type).api; }
+
+        // BookMeta / WritableBookMeta: страницы с 1, как у CraftMetaBook(Signed).
+        private boolean written() {
+            return data.book != null ? data.book.written : type == Material.WRITTEN_BOOK;
+        }
+
+        private BookData book() {
+            if (data.book == null) {
+                data.book = new BookData(type == Material.WRITTEN_BOOK);
+            }
+            return data.book;
+        }
+
+        private List<String> rawPages() {
+            return data.book == null ? List.of() : data.book.pages;
+        }
+
+        private void checkPage(int page) {
+            if (page < 1 || page > rawPages().size()) {
+                throw new IllegalArgumentException("Invalid page number " + page + "/" + rawPages().size());
+            }
+        }
+
+        private static Component component(String json) {
+            return GsonComponentSerializer.gson().deserialize(json);
+        }
+
+        /** Страница в хранимый вид: у подписанной — JSON, у черновой — текст до 1024. */
+        private String encode(Component c) {
+            if (c == null) c = Component.empty();
+            if (written()) return GsonComponentSerializer.gson().serialize(c);
+            return truncate(legacy(c));
+        }
+
+        private String encode(String s) {
+            if (s == null) s = "";
+            return written() ? GsonComponentSerializer.gson().serialize(fromLegacy(s)) : truncate(s);
+        }
+
+        private static String truncate(String s) {
+            return s.length() > BookData.WRITABLE_PAGE_LENGTH ? s.substring(0, BookData.WRITABLE_PAGE_LENGTH) : s;
+        }
+
+        public boolean hasPages() { return !rawPages().isEmpty(); }
+        public int getPageCount() { return rawPages().size(); }
+
+        public String getPage(int page) {
+            checkPage(page);
+            String p = rawPages().get(page - 1);
+            return written() ? legacy(component(p)) : p;
+        }
+
+        public void setPage(int page, String text) {
+            checkPage(page);
+            book().pages.set(page - 1, encode(text));
+        }
+
+        public List<String> getPages() {
+            List<String> out = new ArrayList<>();
+            for (int i = 1; i <= rawPages().size(); i++) out.add(getPage(i));
+            return out;
+        }
+
+        public void setPages(List<String> pages) {
+            book().pages.clear();
+            addPage(pages.toArray(String[]::new));
+        }
+
+        public void setPages(String... pages) { setPages(java.util.Arrays.asList(pages)); }
+
+        public void addPage(String... pages) {
+            for (String p : pages) {
+                if (book().pages.size() >= BookData.MAX_PAGES) return;
+                book().pages.add(encode(p));
+            }
+        }
+
+        public Component page(int page) {
+            checkPage(page);
+            String p = rawPages().get(page - 1);
+            return written() ? component(p) : fromLegacy(p);
+        }
+
+        public void page(int page, Component c) {
+            checkPage(page);
+            book().pages.set(page - 1, encode(c));
+        }
+
+        public List<Component> pages() {
+            List<Component> out = new ArrayList<>();
+            for (int i = 1; i <= rawPages().size(); i++) out.add(page(i));
+            return out;
+        }
+
+        public void addPages(Component... pages) {
+            for (Component c : pages) {
+                if (book().pages.size() >= BookData.MAX_PAGES) return;
+                book().pages.add(encode(c));
+            }
+        }
+
+        /** {@code Book}-методы Adventure меняют копию, как CraftMetaBook. */
+        public org.bukkit.inventory.meta.BookMeta pages(List<Component> pages) {
+            MetaImpl m = new MetaImpl(data.copy(), type);
+            m.book().pages.clear();
+            m.addPages(pages.toArray(Component[]::new));
+            return (org.bukkit.inventory.meta.BookMeta) m.api;
+        }
+
+        public boolean hasTitle() { return written() && data.book != null && data.book.title != null; }
+        public String getTitle() { return hasTitle() ? data.book.title : null; }
+
+        public boolean setTitle(String title) {
+            if (!written()) return false;
+            if (title != null && title.length() > BookData.TITLE_LENGTH) return false;
+            book().title = title;
+            return true;
+        }
+
+        public Component title() { return hasTitle() ? fromLegacy(getTitle()) : null; }
+
+        public org.bukkit.inventory.meta.BookMeta title(Component title) {
+            MetaImpl m = new MetaImpl(data.copy(), type);
+            m.setTitle(title == null ? null : legacy(title));
+            return (org.bukkit.inventory.meta.BookMeta) m.api;
+        }
+
+        public boolean hasAuthor() { return written() && data.book != null && data.book.author != null; }
+        public String getAuthor() { return hasAuthor() ? data.book.author : null; }
+
+        public void setAuthor(String author) {
+            if (written()) book().author = author;
+        }
+
+        public Component author() { return hasAuthor() ? fromLegacy(getAuthor()) : null; }
+
+        public org.bukkit.inventory.meta.BookMeta author(Component author) {
+            MetaImpl m = new MetaImpl(data.copy(), type);
+            m.setAuthor(author == null ? null : legacy(author));
+            return (org.bukkit.inventory.meta.BookMeta) m.api;
+        }
+
+        public boolean hasGeneration() { return written() && data.book != null; }
+
+        public org.bukkit.inventory.meta.BookMeta.Generation getGeneration() {
+            var all = org.bukkit.inventory.meta.BookMeta.Generation.values();
+            return data.book == null ? all[0] : all[Math.max(0, Math.min(all.length - 1, data.book.generation))];
+        }
+
+        public void setGeneration(org.bukkit.inventory.meta.BookMeta.Generation g) {
+            if (written()) book().generation = g == null ? 0 : g.ordinal();
+        }
+
+        public org.bukkit.inventory.meta.BookMeta.Spigot spigot() { return new org.bukkit.inventory.meta.BookMeta.Spigot(); }
 
         @Override
         public boolean equals(Object o) {

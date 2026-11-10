@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 /// Пакеты, которые клиент шлёт, а сервер пока молча пропускает.
 ///
 /// Часть из них протокольная (`pong`, `chat_ack`, `client_tick_end`), часть —
-/// дыры поведения (`edit_book`).
+/// дыры поведения (`pick_item_from_entity`).
 /// Матрица: `docs/feature-matrix.md`, строка «Пакеты клиента».
 const UNHANDLED: &[&str] = &[
     "block_entity_tag_query",
@@ -25,7 +25,6 @@ const UNHANDLED: &[&str] = &[
     "cookie_response",
     "custom_click_action",
     "debug_subscription_request",
-    "edit_book",
     "entity_tag_query",
     "jigsaw_generate",
     "lock_difficulty",

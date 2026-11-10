@@ -141,6 +141,7 @@ struct Ids {
     sb_container_click: i32,
     sb_rename_item: i32,
     sb_sign_update: i32,
+    sb_edit_book: i32,
     sb_container_slot_state_changed: i32,
     sb_attack: i32,
     sb_punch: i32,
@@ -158,6 +159,7 @@ struct Ids {
     sb_accept_teleportation: i32,
     open_screen: i32,
     open_sign_editor: i32,
+    open_book: i32,
     disconnect: i32,
     container_close: i32,
     sb_client_command: i32,
@@ -2127,6 +2129,7 @@ use chunkwake_data::world::FURNACES;
 mod banners;
 mod block_items;
 mod boats;
+mod books;
 mod client_info;
 /// Ванильные команды: дерево, права, селекторы и обработчики.
 pub mod commands;
@@ -2608,6 +2611,7 @@ impl PlayPlan {
                 sb_container_click: sb("container_click")?,
                 sb_rename_item: sb("rename_item")?,
                 sb_sign_update: sb("sign_update")?,
+                sb_edit_book: sb("edit_book")?,
                 sb_container_slot_state_changed: sb("container_slot_state_changed")?,
                 sb_attack: sb("attack")?,
                 sb_punch: sb("punch")?,
@@ -2625,6 +2629,7 @@ impl PlayPlan {
                 sb_accept_teleportation: sb("accept_teleportation")?,
                 open_screen: cb("open_screen")?,
                 open_sign_editor: cb("open_sign_editor")?,
+                open_book: cb("open_book")?,
                 disconnect: cb("disconnect")?,
                 container_close: cb("container_close")?,
                 sb_client_command: sb("client_command")?,
@@ -10770,6 +10775,8 @@ impl PlayPlan {
         // `/setidletimeout`: минуты без игровых пакетов. Ноль — без таймаута.
         // Ответ keep-alive не считается действием.
         let mut last_action = Instant::now();
+        // Paper `lastBookTick`: с момента входа.
+        let mut last_book_tick = self.server_ticks.load(Ordering::Relaxed);
         // Выживание: инвентарь, здоровье. Креатив (1) и наблюдатель (3) урона не получают.
         let mut survival = matches!(login.spawn.game_mode, 0 | 2);
         state.vitals.reset_fall(me.pos);
@@ -11924,6 +11931,13 @@ impl PlayPlan {
                         }
                         continue;
                     }
+                    if id == ids.sb_edit_book {
+                        let e = play::read_edit_book(&mut r)?;
+                        if let Some(slot) = self.edit_book(uuid, &me.entry.name, &mut state.inv, e, &mut last_book_tick).await {
+                            self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                        }
+                        continue;
+                    }
                     if id == ids.sb_rename_item {
                         let name = r.string(50)?.to_owned();
                         if let Some(w) = window.as_mut().filter(|w| w.kind == Kind::Anvil && self.window_valid(w)) {
@@ -12030,6 +12044,24 @@ impl PlayPlan {
                         if !state.vitals.dead && login.spawn.game_mode != 3
                             && self.use_bucket(conn, uuid, &mut state.inv, hand, survival).await?
                         {
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
+                            continue;
+                        }
+                        // `WrittenBookItem.use` → `openItemGui`: разрешить страницы
+                        // (`broadcastChanges`) и `open_book` клиенту.
+                        if !state.vitals.dead && login.spawn.game_mode != 3
+                            && let Some(slot) = Self::hand_index(&state.inv, hand)
+                            && let Some(held) = state.inv.slots[slot]
+                            && self.item_name(held.item) == books::WRITTEN_BOOK
+                        {
+                            let (open, changed) = self.open_written_book(held);
+                            if let Some(s) = changed {
+                                state.inv.slots[slot] = Some(s);
+                                self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                            }
+                            if open {
+                                conn.send(&play::open_book(ids.open_book, hand)).await?;
+                            }
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                             continue;
                         }

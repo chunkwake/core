@@ -724,6 +724,7 @@ final class ChunkwakeServer {
     }
     public Logger getLogger() { return logger; }
     public PluginManager getPluginManager() { return plugins.api; }
+    public org.bukkit.inventory.ItemFactory getItemFactory() { return ItemFactoryImpl.API; }
     public BukkitScheduler getScheduler() { return scheduler.api; }
     public CommandMap getCommandMap() { return commands; }
     public ConsoleCommandSender getConsoleSender() { return console; }

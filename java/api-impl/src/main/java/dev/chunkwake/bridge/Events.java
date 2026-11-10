@@ -145,6 +145,7 @@ final class Events {
             case Bridge.EVENT_SIGN_UNCHECKED -> signUnchecked(plugins, p, arg);
             case Bridge.EVENT_SIGN_CHANGE -> signChange(plugins, p, arg);
             case Bridge.EVENT_OPEN_SIGN -> openSign(p, arg);
+            case Bridge.EVENT_EDIT_BOOK -> editBook(plugins, p.api, arg);
             case Bridge.EVENT_CHANGED_WORLD -> {
                 plugins.callEvent(new org.bukkit.event.player.PlayerChangedWorldEvent(p.api, world(arg.trim())));
                 yield "";
@@ -467,6 +468,29 @@ final class Events {
             out.append(SignImpl.json(i < e.lines().size() ? e.lines().get(i) : null));
         }
         return out.toString();
+    }
+
+    /**
+     * {@code PlayerEditBookEvent} из {@code CraftEventFactory.handleEditBookEvent}:
+     * {@code слот подпись}, затем строками прежняя и новая стопка → {@code c} (отмена) или
+     * {@code s|w <стопка>} — подписать ли и итоговая мета ({@code setItemMeta} на книге в руке).
+     */
+    static String editBook(PluginManager plugins, Player player, String arg) {
+        String[] parts = arg.split("\n", 3);
+        String[] f = parts[0].trim().split(" ");
+        org.bukkit.inventory.ItemStack old = StackImpl.parse(parts[1]);
+        org.bukkit.inventory.ItemStack next = StackImpl.parse(parts[2]);
+        var e = new org.bukkit.event.player.PlayerEditBookEvent(player, Integer.parseInt(f[0]),
+                (org.bukkit.inventory.meta.BookMeta) old.getItemMeta(),
+                (org.bukkit.inventory.meta.BookMeta) next.getItemMeta(), "1".equals(f[1]));
+        plugins.callEvent(e);
+        if (e.isCancelled()) {
+            return "c";
+        }
+        org.bukkit.inventory.ItemStack out = StackImpl.of(
+                (e.isSigning() ? org.bukkit.Material.WRITTEN_BOOK : old.getType()).getKey().toString(), old.getAmount());
+        out.setItemMeta(e.getNewBookMeta());
+        return (e.isSigning() ? "s " : "w ") + StackImpl.line(out);
     }
 
     /** {@code x y z FRONT|BACK ПРИЧИНА}: {@code PlayerOpenSignEvent}, затем {@code PlayerSignOpenEvent}. */

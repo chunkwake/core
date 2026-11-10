@@ -211,6 +211,17 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
     }
 
     @EventHandler
+    public void onEditBook(org.bukkit.event.player.PlayerEditBookEvent e) {
+        org.bukkit.inventory.meta.BookMeta m = e.getNewBookMeta();
+        getLogger().info("edit book: slot=" + e.getSlot() + " signing=" + e.isSigning() + " pages=" + m.getPages()
+                + " title=" + m.getTitle() + " author=" + m.getAuthor());
+        if (e.isSigning()) {
+            m.addPage("[plugin page]");
+            e.setNewBookMeta(m);
+        }
+    }
+
+    @EventHandler
     public void onOpenSign(io.papermc.paper.event.player.PlayerOpenSignEvent e) {
         getLogger().info("open sign: " + e.getCause() + " " + e.getSide() + " sign=" + e.getSign().getLine(0));
     }

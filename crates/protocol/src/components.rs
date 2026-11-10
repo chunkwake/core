@@ -22,8 +22,10 @@ pub struct Extra {
     pub trim: Option<(i32, i32)>,
     /// Слои знамени: сетевой ID узора и ID цвета.
     pub banner_patterns: Vec<(i32, i32)>,
-    /// Число страниц книги, если её содержимое хранится сырым компонентом.
+    /// Число страниц книги (для лектора): по [`Extra::book`] или по сырому патчу.
     pub book_pages: Option<i32>,
+    /// `writable_book_content` или `written_book_content`.
+    pub book: Option<Book>,
     pub lore: Vec<String>,
     /// Сырой патч компонентов с провода, если в нём было что-то кроме известных
     /// (зелья и прочее). Пишется как есть, чтобы клиент не терял состав.
@@ -44,6 +46,39 @@ pub struct Extra {
     pub map_post_processing: Option<u8>,
 }
 
+/// Строка с необязательной отфильтрованной версией (`Filterable<T>`).
+pub type Filterable = (String, Option<String>);
+
+/// Содержимое книги. У черновой (`writable_book_content`) страницы — простой
+/// текст до 1024 символов, у подписанной (`written_book_content`) — текстовые
+/// компоненты в JSON, плюс название, автор, поколение и флаг `resolved`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Book {
+    pub written: bool,
+    pub pages: Vec<Filterable>,
+    pub title: Filterable,
+    pub author: String,
+    /// 0 — оригинал, 1 — копия, 2 — копия копии, 3 — потрёпанная.
+    pub generation: i32,
+    /// Компоненты страниц уже разрешены (`WrittenBookContent.resolveForItem`).
+    pub resolved: bool,
+}
+
+impl Book {
+    /// Черновик с этими страницами.
+    pub fn writable(pages: Vec<Filterable>) -> Self {
+        Book {
+            pages,
+            ..Book::default()
+        }
+    }
+
+    /// Страниц для лектора: как у сырого патча, не меньше одной.
+    pub fn page_count(&self) -> i32 {
+        (self.pages.len().min(100) as i32).max(1)
+    }
+}
+
 impl Extra {
     pub fn is_empty(&self) -> bool {
         self.enchantments.is_empty()
@@ -53,6 +88,7 @@ impl Extra {
             && self.trim.is_none()
             && self.banner_patterns.is_empty()
             && self.book_pages.is_none()
+            && self.book.is_none()
             && self.lore.is_empty()
             && self.raw.is_none()
             && self.custom_data.is_none()
@@ -94,6 +130,12 @@ pub fn intern(mut e: Extra) -> u32 {
     };
     e.custom_name.iter_mut().for_each(canon);
     e.lore.iter_mut().for_each(canon);
+    if let Some(book) = e.book.as_mut().filter(|b| b.written) {
+        for (raw, filtered) in &mut book.pages {
+            canon(raw);
+            filtered.iter_mut().for_each(canon);
+        }
+    }
     e.enchantments.sort_unstable();
     e.stored.sort_unstable();
     if let Some(&id) = table().read().unwrap().index.get(&e) {

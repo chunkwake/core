@@ -143,6 +143,41 @@ async fn main() {
         println!("  editor opened: {}", opened(&mut c));
         drain(&mut c);
     }
+    // `BOOK=1`: книга с пером в слоте 0 — правка, подпись с названием, ПКМ
+    // (ждём `open_book`), затем две правки подряд (кик Paper «too quickly»).
+    if std::env::var("BOOK").is_ok() {
+        let edit = id(Direction::Serverbound, "edit_book");
+        let use_item = id(Direction::Serverbound, "use_item");
+        let open = id(Direction::Clientbound, "open_book");
+        c.capture_also.push(open);
+        let book = |pages: &[&str], title: Option<&str>| {
+            let mut w = Writer::new();
+            w.var_int(edit).var_int(0).var_int(pages.len() as i32);
+            for p in pages {
+                w.string(p);
+            }
+            w.bool(title.is_some());
+            if let Some(t) = title {
+                w.string(t);
+            }
+            w.buf
+        };
+        println!("> edit book");
+        c.send_raw(&book(&["first page", "second"], None)).await.unwrap();
+        wait(&mut c, 1500).await;
+        println!("> sign book");
+        c.send_raw(&book(&["first page", "second"], Some("Probe Book"))).await.unwrap();
+        wait(&mut c, 1500).await;
+        println!("> open book");
+        let mut w = Writer::new();
+        w.var_int(use_item).var_int(0).var_int(3).f32(0.0).f32(0.0);
+        c.send_raw(&w.buf).await.unwrap();
+        wait(&mut c, 1500).await;
+        let opened = c.captured_by.iter().filter(|(p, _)| *p == open).count();
+        c.captured_by.retain(|(p, _)| *p != open);
+        println!("  open_book: {opened}");
+        drain(&mut c);
+    }
     // `DIG=x,y,z`: начать ломать блок (в творческом он ломается сразу) —
     // события ломания у плагинов (`BlockBreakEvent`).
     if let Some(p) = std::env::var("DIG").ok().map(|s| {

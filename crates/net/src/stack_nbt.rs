@@ -30,7 +30,10 @@ pub fn named_nbt(
         comps.insert("minecraft:damage".into(), Tag::Int(s.damage));
     }
     let e = components::get(s.extra);
-    if let Some(pages) = e.book_pages {
+    if let Some(book) = &e.book {
+        let (key, tag) = book_to_tag(book);
+        comps.insert(key.into(), tag);
+    } else if let Some(pages) = e.book_pages {
         c.insert("chunkwake:book_pages".into(), Tag::Int(pages));
     }
     if e.repair_cost > 0 {
@@ -125,6 +128,10 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>) -> Option<S
         .and_then(Tag::as_i64)
         .map(|n| n.clamp(0, 100) as i32);
     if let Some(Tag::Compound(m)) = c.get("components") {
+        e.book = book_from_components(m);
+        if let Some(book) = &e.book {
+            e.book_pages = Some(book.page_count());
+        }
         if e.book_pages.is_none() {
             e.book_pages = [
                 "minecraft:written_book_content",
@@ -209,6 +216,137 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>) -> Option<S
     Some(s)
 }
 
+/// `Filterable.codec`: всегда полной записью `{raw, filtered?}`.
+fn filterable_tag(v: &components::Filterable, value: &dyn Fn(&str) -> Tag) -> Tag {
+    let mut c = Compound::from([("raw".into(), value(&v.0))]);
+    if let Some(f) = &v.1 {
+        c.insert("filtered".into(), value(f));
+    }
+    Tag::Compound(c)
+}
+
+/// Обратно; принимает и голое значение (`Filterable.passThrough`).
+fn filterable_from(t: &Tag, value: &dyn Fn(&Tag) -> Option<String>) -> Option<components::Filterable> {
+    match t {
+        Tag::Compound(c) if c.contains_key("raw") => Some((
+            value(c.get("raw")?)?,
+            c.get("filtered").and_then(value),
+        )),
+        other => Some((value(other)?, None)),
+    }
+}
+
+/// Компонент книги на диске: страницы подписанной — JSON строкой
+/// (`ComponentSerialization.flatRestrictedCodec`).
+fn book_to_tag(b: &components::Book) -> (&'static str, Tag) {
+    let string = |s: &str| Tag::String(s.to_owned());
+    let pages = Tag::List(
+        b.pages
+            .iter()
+            .map(|p| filterable_tag(p, &string))
+            .collect(),
+    );
+    let mut c = Compound::new();
+    if !b.pages.is_empty() {
+        c.insert("pages".into(), pages);
+    }
+    if !b.written {
+        return ("minecraft:writable_book_content", Tag::Compound(c));
+    }
+    c.insert("title".into(), filterable_tag(&b.title, &string));
+    c.insert("author".into(), Tag::String(b.author.clone()));
+    if b.generation != 0 {
+        c.insert("generation".into(), Tag::Int(b.generation));
+    }
+    if b.resolved {
+        c.insert("resolved".into(), Tag::Byte(1));
+    }
+    ("minecraft:written_book_content", Tag::Compound(c))
+}
+
+/// Книга из `components`: подписанная важнее черновой.
+fn book_from_components(m: &Compound) -> Option<components::Book> {
+    let string = |t: &Tag| t.as_str().map(str::to_owned);
+    // Страница подписанной: JSON строкой или текстовым компонентом NBT.
+    let text = |t: &Tag| match t {
+        Tag::String(s) => Some(
+            serde_json::from_str::<Value>(s)
+                .unwrap_or_else(|_| Value::String(s.clone()))
+                .to_string(),
+        ),
+        other => Some(tag_to_json(other).to_string()),
+    };
+    let pages = |c: &Compound, value: &dyn Fn(&Tag) -> Option<String>| {
+        c.get("pages")
+            .and_then(Tag::as_list)
+            .map(|l| l.iter().take(100).filter_map(|p| filterable_from(p, value)).collect())
+            .unwrap_or_default()
+    };
+    if let Some(c) = m.get("minecraft:written_book_content").and_then(Tag::as_compound) {
+        return Some(components::Book {
+            written: true,
+            pages: pages(c, &text),
+            title: c
+                .get("title")
+                .and_then(|t| filterable_from(t, &string))
+                .unwrap_or_default(),
+            author: c.get("author").and_then(Tag::as_str).unwrap_or_default().to_owned(),
+            generation: c.get("generation").and_then(Tag::as_i64).unwrap_or(0).clamp(0, 3) as i32,
+            resolved: c.get("resolved").and_then(Tag::as_i64).unwrap_or(0) != 0,
+        });
+    }
+    let c = m.get("minecraft:writable_book_content")?.as_compound()?;
+    Some(components::Book::writable(pages(c, &string)))
+}
+
+/// Книга для моста: страницы черновой — строки, подписанной — JSON компонентов.
+fn book_to_json(b: &components::Book) -> Value {
+    let pages: Vec<Value> = b
+        .pages
+        .iter()
+        .map(|(raw, _)| if b.written { parse(raw) } else { Value::String(raw.clone()) })
+        .collect();
+    let mut j = serde_json::json!({"written": b.written, "pages": pages});
+    if b.written {
+        j["title"] = b.title.0.clone().into();
+        j["author"] = b.author.clone().into();
+        j["generation"] = b.generation.into();
+        j["resolved"] = b.resolved.into();
+    }
+    j
+}
+
+fn book_from_json(j: &Value) -> Option<components::Book> {
+    let written = j.get("written")?.as_bool()?;
+    let pages = j
+        .get("pages")
+        .and_then(Value::as_array)
+        .map(|l| {
+            l.iter()
+                .take(100)
+                .map(|p| {
+                    let text = match p {
+                        Value::String(s) if !written => s.clone(),
+                        other => other.to_string(),
+                    };
+                    (text, None)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(components::Book {
+        written,
+        pages,
+        title: (
+            j.get("title").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            None,
+        ),
+        author: j.get("author").and_then(Value::as_str).unwrap_or_default().to_owned(),
+        generation: j.get("generation").and_then(Value::as_i64).unwrap_or(0).clamp(0, 3) as i32,
+        resolved: j.get("resolved").and_then(Value::as_bool).unwrap_or(false),
+    })
+}
+
 /// Строка для плагинов: `item count` и, если есть компоненты, JSON
 /// `{"damage", "enchantments": {имя: уровень}, "name", "lore"}` до конца строки.
 pub fn to_line(s: Stack, name: &str) -> String {
@@ -271,6 +409,9 @@ pub fn to_line(s: Stack, name: &str) -> String {
     }
     if !e.lore.is_empty() {
         j.insert("lore".into(), e.lore.iter().map(|l| parse(l)).collect());
+    }
+    if let Some(book) = &e.book {
+        j.insert("book".into(), book_to_json(book));
     }
     if let Some(custom) = e.custom_data.as_deref().and_then(net_to_compound) {
         j.insert("custom".into(), typed_compound(&custom));
@@ -383,6 +524,10 @@ pub fn from_line(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<St
                 })
                 .filter(|st| st.count > 0)
                 .collect();
+        }
+        e.book = j.get("book").and_then(book_from_json);
+        if let Some(book) = &e.book {
+            e.book_pages = Some(book.page_count());
         }
         e.raw = j.get("raw").and_then(Value::as_str).and_then(|h| {
             (0..h.len())
@@ -612,6 +757,50 @@ mod tests {
     }
 
     #[test]
+    fn books_round_trip_through_nbt_and_bridge_line() {
+        let book = components::Book {
+            written: true,
+            pages: vec![("{\"text\":\"Hi\"}".into(), None), ("\"plain\"".into(), None)],
+            title: ("Title".into(), None),
+            author: "Steve".into(),
+            generation: 2,
+            resolved: false,
+        };
+        let stack = Stack {
+            extra: components::intern(Extra {
+                book_pages: Some(2),
+                book: Some(book),
+                ..Default::default()
+            }),
+            ..Stack::new(7, 1)
+        };
+        let nbt = to_nbt(stack, "minecraft:written_book").unwrap();
+        // Ваниль: страницы подписанной книги — JSON строкой в `{raw: ...}`.
+        let comps = nbt.get("components").and_then(Tag::as_compound).unwrap();
+        let content = comps.get("minecraft:written_book_content").and_then(Tag::as_compound).unwrap();
+        assert_eq!(content.get("generation").and_then(Tag::as_i64), Some(2));
+        assert_eq!(crate::redstone::book_pages(&nbt), 2);
+        let id = |n: &str| (n == "minecraft:written_book").then_some(7);
+        assert_eq!(from_nbt(&nbt, id).unwrap(), stack);
+        let line = to_line(stack, "minecraft:written_book");
+        assert!(line.contains("\"title\":\"Title\""), "{line}");
+        assert_eq!(from_line(&line, id).unwrap(), stack);
+
+        let draft = Stack {
+            extra: components::intern(Extra {
+                book_pages: Some(1),
+                book: Some(components::Book::writable(vec![("a {b}".into(), None)])),
+                ..Default::default()
+            }),
+            ..Stack::new(8, 1)
+        };
+        let id = |n: &str| (n == "minecraft:writable_book").then_some(8);
+        let nbt = to_nbt(draft, "minecraft:writable_book").unwrap();
+        assert_eq!(from_nbt(&nbt, id).unwrap(), draft);
+        assert_eq!(from_line(&to_line(draft, "minecraft:writable_book"), id).unwrap(), draft);
+    }
+
+    #[test]
     fn trim_round_trips_through_playerdata() {
         components::set_trim_names(
             vec!["minecraft:gold".into()],
@@ -650,6 +839,7 @@ mod tests {
             trim: None,
             banner_patterns: Vec::new(),
             book_pages: None,
+            book: None,
             lore: vec![r#""строка""#.into()],
             raw: None,
             rest: None,

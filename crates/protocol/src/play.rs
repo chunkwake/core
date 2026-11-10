@@ -1434,9 +1434,49 @@ pub fn read_sign_update(r: &mut Reader) -> Result<SignUpdate> {
     Ok(SignUpdate { pos, front, lines })
 }
 
+/// `ServerboundEditBookPacket` после ID: слот инвентаря (0–8 или 40),
+/// до 100 страниц по 1024 символа и название до 32 — если книгу подписывают.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditBook {
+    pub slot: i32,
+    pub pages: Vec<String>,
+    pub title: Option<String>,
+}
+
+pub fn read_edit_book(r: &mut Reader) -> Result<EditBook> {
+    let slot = r.var_int()?;
+    let n = r.var_int()?;
+    if !(0..=100).contains(&n) {
+        return Err(crate::ProtocolError::BadLength(n));
+    }
+    let mut pages = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        pages.push(r.string(1024)?.to_owned());
+    }
+    let title = if r.bool()? { Some(r.string(32)?.to_owned()) } else { None };
+    Ok(EditBook { slot, pages, title })
+}
+
+/// `ClientboundOpenBookPacket`: открыть подписанную книгу в руке (0 — основная).
+pub fn open_book(id: i32, hand: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(hand);
+    w.buf
+}
+
 #[cfg(test)]
 mod block_tests {
     use super::*;
+
+    #[test]
+    fn edit_book_reads_pages_and_title() {
+        let mut w = Writer::new();
+        w.var_int(40).var_int(2).string("a").string("b").bool(true).string("T");
+        let b = read_edit_book(&mut crate::Reader::new(&w.buf)).unwrap();
+        assert_eq!(b.slot, 40);
+        assert_eq!(b.pages, ["a", "b"]);
+        assert_eq!(b.title.as_deref(), Some("T"));
+    }
 
     #[test]
     fn block_event_time_and_difficulty_roundtrip() {

@@ -544,6 +544,10 @@ pub enum Event {
     SignChange = 48,
     /// `PlayerOpenSignEvent` (и `PlayerSignOpenEvent`): `x y z FRONT|BACK ПРИЧИНА` → `c` или пусто.
     OpenSign = 49,
+    /// `PlayerEditBookEvent`: `слот(0–8 или -1) подпись(1|0)`, затем строками
+    /// прежняя и новая стопка
+    /// → `c` (отмена), пусто или `s|w <стопка>` (подписать ли и итоговая мета).
+    EditBook = 50,
 }
 
 impl Event {
