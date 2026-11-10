@@ -310,7 +310,9 @@ async fn serve(dir: &Path) -> Result<(), String> {
     net.configuration = Some(std::sync::Arc::new(plan));
     let gate = play.clone();
     net.admit = Some(chunkwake_net::Admit(std::sync::Arc::new(
-        move |name, uuid, addr| gate.admission_denied(name, uuid, addr),
+        move |name, uuid, addr, properties, full| {
+            gate.admission_denied(name, uuid, addr, properties, full)
+        },
     )));
     let server = Server::new(net);
     if let Some(translator) = bridge.as_ref().and_then(|b| b.translator()) {

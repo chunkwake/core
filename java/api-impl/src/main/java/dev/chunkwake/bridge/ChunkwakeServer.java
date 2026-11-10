@@ -387,8 +387,13 @@ final class ChunkwakeServer {
 
     // --- вызовы из Rust ---
 
+    /** Игроки между {@code PlayerLoginEvent} и входом: тот же объект уходит в {@code join}. */
+    final Map<UUID, PlayerImpl> logins = new java.util.concurrent.ConcurrentHashMap<>();
+
     void join(UUID id, String name) {
-        PlayerImpl p = new PlayerImpl(this, id, name);
+        PlayerImpl pending = logins.remove(id);
+        PlayerImpl p = pending != null ? pending : new PlayerImpl(this, id, name);
+        p.online = true;
         online.put(id, p);
         Component msg = Component.translatable("multiplayer.player.joined", NamedTextColor.YELLOW,
                 Component.text(name));
@@ -402,13 +407,19 @@ final class ChunkwakeServer {
     }
 
     void quit(UUID id) {
+        logins.remove(id);
         PlayerImpl p = online.get(id);
         if (p == null) {
             return;
         }
         Component msg = Component.translatable("multiplayer.player.left", NamedTextColor.YELLOW,
                 Component.text(p.name));
-        PlayerQuitEvent e = new PlayerQuitEvent(p.api, msg, PlayerQuitEvent.QuitReason.DISCONNECTED);
+        // После `PlayerKickEvent` — его сообщение о выходе и причина KICKED, как у Paper.
+        if (p.kicked) {
+            msg = p.kickLeaveMessage;
+        }
+        PlayerQuitEvent e = new PlayerQuitEvent(p.api, msg,
+                p.kicked ? PlayerQuitEvent.QuitReason.KICKED : PlayerQuitEvent.QuitReason.DISCONNECTED);
         plugins.callEvent(e);
         online.remove(id);
         p.online = false;
@@ -475,6 +486,12 @@ final class ChunkwakeServer {
                     : new org.bukkit.event.block.BlockPistonRetractEvent(piston, moved, face);
             api.getPluginManager().callEvent(e);
             return e.isCancelled() ? "c" : "";
+        }
+        if (kind == Bridge.EVENT_PRE_LOGIN) {
+            return LoginEvents.preLogin(this, id, arg);
+        }
+        if (kind == Bridge.EVENT_LOGIN) {
+            return LoginEvents.login(this, id, arg);
         }
         PlayerImpl p = online.get(id);
         if (p == null) {
@@ -694,6 +711,30 @@ final class ChunkwakeServer {
 
     public Collection<? extends Player> getOnlinePlayers() {
         return online.values().stream().map(p -> p.api).toList();
+    }
+
+    /** Как {@code CraftServer.createProfile}: профиль онлайн-игрока берёт его свойства. */
+    public com.destroystokyo.paper.profile.PlayerProfile createProfile(UUID id) {
+        return createProfile(id, null);
+    }
+
+    public com.destroystokyo.paper.profile.PlayerProfile createProfile(String name) {
+        return createProfile(null, name);
+    }
+
+    public com.destroystokyo.paper.profile.PlayerProfile createProfile(UUID id, String name) {
+        PlayerImpl p = id != null ? online.get(id) : null;
+        if (p != null && (name == null || name.equals(p.name))) {
+            return p.getPlayerProfile();
+        }
+        return createProfileExact(id, name);
+    }
+
+    public com.destroystokyo.paper.profile.PlayerProfile createProfileExact(UUID id, String name) {
+        if (id == null && name == null) {
+            throw new IllegalArgumentException("Name and ID cannot both be null");
+        }
+        return new ProfileImpl(id, name);
     }
 
     public Player getPlayer(UUID id) {

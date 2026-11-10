@@ -73,9 +73,15 @@ pub(super) fn kick(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         Ok(list) => list,
         Err(e) => return Outcome::Feedback(e.component()),
     };
-    let reason = args::message(input.rest());
+    // `KickCommand`: без причины — `multiplayer.disconnect.kicked`.
+    let text = args::message(input.rest());
+    let reason = if text.is_empty() {
+        json!({"translate": "multiplayer.disconnect.kicked"})
+    } else {
+        json!({"text": text})
+    };
     for target in &targets {
-        ctx.plan.kick(target.uuid, &reason);
+        ctx.plan.kick(target.uuid, &reason.to_string(), "KICKED");
     }
     Outcome::Feedback(translate(
         "commands.kick.success",
@@ -85,7 +91,7 @@ pub(super) fn kick(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
                 .map(|t| t.name.clone())
                 .collect::<Vec<_>>()
                 .join(", ")}),
-            json!({"text": reason}),
+            reason,
         ],
     ))
 }
@@ -167,10 +173,17 @@ fn ban_common(ctx: &Context<'_>, call: &Call<'_>, list: AccessList) -> Outcome {
         };
         return Outcome::Feedback(translate(key, Vec::new()));
     }
-    // Кикаем забаненного игрока: как ванила после `/ban`.
+    // Кикаем забаненного игрока, как ванила: `multiplayer.disconnect.banned`
+    // (`ip_banned` для `/ban-ip`), причина бана в сообщение не идёт.
+    let (key, cause) = if list == AccessList::BannedIps {
+        ("multiplayer.disconnect.ip_banned", "IP_BANNED")
+    } else {
+        ("multiplayer.disconnect.banned", "BANNED")
+    };
+    let message = json!({"translate": key}).to_string();
     let targets = ctx.plan.command_targets_named(name).unwrap_or_default();
     for target in &targets {
-        ctx.plan.kick(target.uuid, &reason);
+        ctx.plan.kick(target.uuid, &message, cause);
     }
     let key = if list == AccessList::BannedIps {
         "commands.banip.success"

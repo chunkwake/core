@@ -31,6 +31,12 @@ const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Сколько ждать ответа плагинов на отменяемое событие; дольше — не отменено.
 const PLUGIN_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Ответ плагинов в блокирующем потоке (`spawn_blocking`), не в задаче рантайма.
+pub(crate) fn block_on_reply(rx: oneshot::Receiver<String>, timeout: Duration) -> Option<String> {
+    let rt = tokio::runtime::Handle::try_current().ok()?;
+    rt.block_on(async { tokio::time::timeout(timeout, rx).await.ok()?.ok() })
+}
+
 /// Хуки плагинов (реализует JVM-мост). Вызовы не блокируют: события уходят
 /// в поток плагинов, ответы на отменяемые приходят через `oneshot`.
 pub trait PluginHooks: Send + Sync {
@@ -52,6 +58,16 @@ pub trait PluginHooks: Send + Sync {
     fn listens(&self, kind: Event) -> bool;
     /// Событие с ответом (формат — в [`Event`]); `None` — слушателей нет.
     fn event(&self, kind: Event, uuid: Uuid, arg: String) -> Option<oneshot::Receiver<String>>;
+    /// Асинхронное событие Paper (`AsyncPlayerPreLoginEvent`): вне потока
+    /// плагинов, чтобы долгий обработчик (база данных) не останавливал тик.
+    fn event_async(
+        &self,
+        kind: Event,
+        uuid: Uuid,
+        arg: String,
+    ) -> Option<oneshot::Receiver<String>> {
+        self.event(kind, uuid, arg)
+    }
 }
 #[derive(Debug, Clone, Copy)]
 struct Ids {
@@ -140,6 +156,7 @@ struct Ids {
     sb_player_abilities: i32,
     sb_accept_teleportation: i32,
     open_screen: i32,
+    disconnect: i32,
     container_close: i32,
     sb_client_command: i32,
     sb_player_command: i32,
@@ -2599,6 +2616,7 @@ impl PlayPlan {
                 sb_player_abilities: sb("player_abilities")?,
                 sb_accept_teleportation: sb("accept_teleportation")?,
                 open_screen: cb("open_screen")?,
+                disconnect: cb("disconnect")?,
                 container_close: cb("container_close")?,
                 sb_client_command: sb("client_command")?,
                 sb_player_command: sb("player_command")?,
@@ -3961,6 +3979,18 @@ impl PlayPlan {
         tokio::time::timeout(PLUGIN_TIMEOUT, rx).await.ok()?.ok()
     }
 
+    /// Событие игрока из синхронного кода (команда, тик): поток ждёт ответа
+    /// плагинов, как главный поток Paper. Без слушателей или вне рантайма
+    /// (вызов из самого потока плагинов) — сразу `None`.
+    fn sync_player_event(&self, kind: Event, uuid: Uuid, arg: impl FnOnce() -> String) -> Option<String> {
+        let h = self.hooks().filter(|h| h.listens(kind))?;
+        let rt = tokio::runtime::Handle::try_current().ok()?;
+        let rx = h.event(kind, uuid, arg())?;
+        tokio::task::block_in_place(|| {
+            rt.block_on(async { tokio::time::timeout(PLUGIN_TIMEOUT, rx).await.ok()?.ok() })
+        })
+    }
+
     /// Сообщение канала плагинам без ожидания ответа.
     fn plugin_message(&self, uuid: Uuid, channel: &str, data: &[u8]) {
         if let Some(h) = self.hooks().filter(|h| h.listens(Event::PluginMessage)) {
@@ -4138,6 +4168,39 @@ impl PlayPlan {
             .unwrap()
             .get(&uuid)
             .is_some_and(|tx| tx.send(c).is_ok())
+    }
+
+    /// `PlayerTeleportEvent` телепорта сервером (`COMMAND`, `ENDER_PEARL`):
+    /// `None` — отменено, иначе цель (плагин мог её сменить). Без слушателей —
+    /// цель как есть.
+    fn teleport_event(
+        &self,
+        uuid: Uuid,
+        cause: &str,
+        to: ([f64; 3], f32, f32),
+    ) -> Option<([f64; 3], f32, f32)> {
+        let Some(from) = self.player_at(uuid) else {
+            return Some(to);
+        };
+        let reply = self.sync_player_event(Event::Teleport, uuid, || {
+            let [fx, fy, fz] = from.0;
+            let [tx, ty, tz] = to.0;
+            format!(
+                "{cause} {fx} {fy} {fz} {} {} {tx} {ty} {tz} {} {}",
+                from.1, from.2, to.1, to.2
+            )
+        });
+        match reply.as_deref().map(str::trim) {
+            Some("c") => None,
+            Some(r) if r.starts_with("t ") => {
+                let f: Vec<f64> = r[2..].split(' ').filter_map(|v| v.parse().ok()).collect();
+                Some(match f[..] {
+                    [x, y, z, yaw, pitch] => ([x, y, z], yaw as f32, pitch as f32),
+                    _ => to,
+                })
+            }
+            _ => Some(to),
+        }
     }
 
     /// Телепорт игрока (`Player.teleport`).
@@ -6568,8 +6631,13 @@ impl PlayPlan {
                     if let Some(uuid) = owner {
                         let feet = [pos[0], pos[1].max(self.min_y() as f64), pos[2]];
                         let (yaw, pitch) = self.player_at(uuid).map_or((0.0, 0.0), |p| (p.1, p.2));
-                        self.push_control(uuid, Control::Teleport(feet, yaw, pitch));
-                        self.push_control(uuid, Control::Hurt(5.0, Cause::Fall));
+                        // Paper: отменённый `ENDER_PEARL` — ни переноса, ни урона.
+                        if let Some((feet, yaw, pitch)) =
+                            self.teleport_event(uuid, "ENDER_PEARL", (feet, yaw, pitch))
+                        {
+                            self.push_control(uuid, Control::Teleport(feet, yaw, pitch));
+                            self.push_control(uuid, Control::Hurt(5.0, Cause::Fall));
+                        }
                     }
                 }
                 ar::ThrownKind::Potion => self.splash_potion(extra, pos, direct_hit),
@@ -7821,6 +7889,11 @@ impl PlayPlan {
     /// `/tp` из команды: в `execute in <мир>` — переход в тот мир, как
     /// `Entity.teleport` в другой `ServerLevel`.
     pub(crate) fn command_teleport(&self, uuid: Uuid, pos: [f64; 3], yaw: f32, pitch: f32) -> bool {
+        // `TeleportCommand.performTeleport` → `PlayerTeleportEvent` с `COMMAND`;
+        // отмена — без переноса (команда всё равно сообщает об успехе, как Paper).
+        let Some((pos, yaw, pitch)) = self.teleport_event(uuid, "COMMAND", (pos, yaw, pitch)) else {
+            return true;
+        };
         let dim = self.active_dim();
         let here = self
             .hub
@@ -10643,7 +10716,12 @@ impl PlayPlan {
                 Some(c) = controls.recv() => {
                     match c {
                         Control::Shutdown => return Ok(()),
-                        Control::Kick(_) => return Ok(()),
+                        Control::Kick(reason) => {
+                            // `ServerCommonPacketListenerImpl.disconnect`: причина клиенту.
+                            conn.send(&text::disconnect_json(ids.disconnect, &reason)).await?;
+                            conn.flush().await?;
+                            return Ok(());
+                        }
                         Control::Transfer(host, port) => {
                             conn.send(&play::transfer(ids.transfer, &host, port)).await?;
                             conn.flush().await?;
@@ -11353,7 +11431,18 @@ impl PlayPlan {
                         continue;
                     }
                     if id == ids.sb_set_carried_item {
-                        state.inv.selected = (r.u16()? as usize).min(8);
+                        let slot = (r.u16()? as usize).min(8);
+                        // Paper: `PlayerItemHeldEvent` на каждый пакет; отмена — клиенту
+                        // старый слот.
+                        let old = state.inv.selected;
+                        if self
+                            .sync_player_event(Event::ItemHeld, uuid, || format!("{old} {slot}"))
+                            .is_some_and(|r| r.trim() == "c")
+                        {
+                            conn.send(&inv::set_held_slot(ids.set_held_slot, old as i32)).await?;
+                            continue;
+                        }
+                        state.inv.selected = slot;
                         eating = None;
                         continue;
                     }
@@ -11582,11 +11671,20 @@ impl PlayPlan {
                     }
                     if id == ids.sb_player_input {
                         let input = r.u8()?;
-                        sneaking = input & INPUT_SHIFT != 0;
+                        let shift = input & INPUT_SHIFT != 0;
+                        // Paper: `PlayerToggleSneakEvent` при смене шифта; отмена —
+                        // флаг приседа остаётся прежним, ввод транспорта идёт как есть.
+                        if shift != sneaking
+                            && !self
+                                .sync_player_event(Event::ToggleSneak, uuid, || u8::from(shift).to_string())
+                                .is_some_and(|r| r.trim() == "c")
+                        {
+                            sneaking = shift;
+                        }
                         if in_cart {
                             self.minecart_input(uuid, input);
                         }
-                        if sneaking && in_cart {
+                        if shift && in_cart {
                             in_cart = false;
                             let (yaw, pitch) = self.player_at(uuid).map_or((0.0, 0.0), |p| (p.1, p.2));
                             if let Some(spot) = self.leave_minecart(uuid) {
@@ -11598,7 +11696,7 @@ impl PlayPlan {
                         // Плагины видят присед сразу, без ожидания тика.
                         self.set_sneaking(uuid, sneaking);
                         // `Player.rideTick`: шифт снимает с транспорта (`wantsToStopRiding`).
-                        if sneaking && in_boat {
+                        if shift && in_boat {
                             in_boat = false;
                             let (yaw, pitch) = self.player_at(uuid).map_or((0.0, 0.0), |p| (p.1, p.2));
                             if let Some(spot) = self.leave_boat(uuid, yaw) {
@@ -11922,8 +12020,17 @@ impl PlayPlan {
                         self.wake_player(uuid);
                         match action {
                             play::STOP_SLEEPING => {}
-                            play::START_SPRINTING => state.vitals.sprinting = true,
-                            play::STOP_SPRINTING => state.vitals.sprinting = false,
+                            play::START_SPRINTING | play::STOP_SPRINTING => {
+                                // Paper: `PlayerToggleSprintEvent` при смене; отмена — без смены.
+                                let on = action == play::START_SPRINTING;
+                                if on != state.vitals.sprinting
+                                    && !self
+                                        .sync_player_event(Event::ToggleSprint, uuid, || u8::from(on).to_string())
+                                        .is_some_and(|r| r.trim() == "c")
+                                {
+                                    state.vitals.sprinting = on;
+                                }
+                            }
                             play::START_FALL_FLYING => {
                                 // `canGlide` ложен при креативном полёте: иначе клиент
                                 // планирует (множитель 0.99) и остановка тянется, как в воде.
@@ -11953,7 +12060,8 @@ impl PlayPlan {
                         if command == inv::PERFORM_RESPAWN && !state.vitals.dead
                             && self.won_game.lock().unwrap().remove(&uuid)
                         {
-                            let at = self.respawn_target(uuid, false);
+                            let mut at = self.respawn_target(uuid, false);
+                            self.respawn_event(uuid, &mut at, "END_PORTAL");
                             if at.missing {
                                 self.spawn_points.lock().unwrap().insert(uuid, None);
                             }
@@ -20761,7 +20869,8 @@ impl PlayPlan {
         let uuid = me.entry.uuid;
         // `PlayerList.respawn`: точка игрока (кровать, якорь в Аду, команда)
         // в своём измерении; пропавший блок — спавн мира, точка стирается.
-        let at = self.respawn_target(uuid, true);
+        let mut at = self.respawn_target(uuid, true);
+        self.respawn_event(uuid, &mut at, "DEATH");
         let spawn = at.pos;
         let (yaw, pitch) = at.look;
         v.reset_fall(spawn);

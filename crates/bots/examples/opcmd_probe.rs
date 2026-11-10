@@ -70,6 +70,41 @@ async fn main() {
         wait(&mut c, gap).await;
         drain(&mut c);
     }
+    // `INPUTS=1`: слот 3, шифт вкл/выкл, бег вкл/выкл — события
+    // `PlayerItemHeld`/`ToggleSneak`/`ToggleSprint`.
+    if std::env::var("INPUTS").is_ok() {
+        let held = id(Direction::Serverbound, "set_carried_item");
+        let input = id(Direction::Serverbound, "player_input");
+        let command = id(Direction::Serverbound, "player_command");
+        println!("> inputs");
+        let mut w = Writer::new();
+        w.var_int(held).u16(3);
+        c.send_raw(&w.buf).await.unwrap();
+        for flags in [0x20u8, 0] {
+            let mut w = Writer::new();
+            w.var_int(input).u8(flags);
+            c.send_raw(&w.buf).await.unwrap();
+            wait(&mut c, 200).await;
+        }
+        for action in [1, 2] {
+            let mut w = Writer::new();
+            w.var_int(command).var_int(0).var_int(action).var_int(0);
+            c.send_raw(&w.buf).await.unwrap();
+            wait(&mut c, 200).await;
+        }
+        wait(&mut c, 1000).await;
+        drain(&mut c);
+    }
+    // `RESPAWN=1`: «Возродиться» после смерти — `PlayerRespawnEvent`.
+    if std::env::var("RESPAWN").is_ok() {
+        let client_command = id(Direction::Serverbound, "client_command");
+        println!("> respawn");
+        let mut w = Writer::new();
+        w.var_int(client_command).var_int(0);
+        c.send_raw(&w.buf).await.unwrap();
+        wait(&mut c, 2000).await;
+        drain(&mut c);
+    }
     // `DIG=x,y,z`: начать ломать блок (в творческом он ломается сразу) —
     // события ломания у плагинов (`BlockBreakEvent`).
     if let Some(p) = std::env::var("DIG").ok().map(|s| {

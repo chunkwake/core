@@ -162,6 +162,64 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
         }
     }
 
+    // --- вход, кик, телепорт, респавн, слот, присед, бег ---
+
+    @EventHandler
+    public void onPreLogin(org.bukkit.event.player.AsyncPlayerPreLoginEvent e) {
+        getLogger().info("pre-login: " + e.getName() + " " + e.getUniqueId() + " props="
+                + e.getPlayerProfile().getProperties().size() + " thread=" + Thread.currentThread().getName());
+    }
+
+    @EventHandler
+    public void onValidateLogin(io.papermc.paper.event.connection.PlayerConnectionValidateLoginEvent e) {
+        getLogger().info("validate-login: allowed=" + e.isAllowed());
+    }
+
+    @SuppressWarnings("deprecation")
+    @EventHandler
+    public void onLogin(org.bukkit.event.player.PlayerLoginEvent e) {
+        getLogger().info("login: " + e.getPlayer().getName() + " " + e.getResult() + " " + e.getAddress());
+    }
+
+    @EventHandler
+    public void onKick(org.bukkit.event.player.PlayerKickEvent e) {
+        getLogger().info("kick: " + e.getPlayer().getName() + " " + e.getCause() + " reason="
+                + net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(e.reason()));
+        e.reason(net.kyori.adventure.text.Component.text("Kicked via test plugin"));
+    }
+
+    @EventHandler
+    public void onQuit(org.bukkit.event.player.PlayerQuitEvent e) {
+        getLogger().info("quit: " + e.getPlayer().getName() + " " + e.getReason());
+    }
+
+    @EventHandler
+    public void onTeleport(org.bukkit.event.player.PlayerTeleportEvent e) {
+        getLogger().info("teleport: " + e.getCause() + " to " + e.getTo().getBlockX() + " " + e.getTo().getBlockY()
+                + " " + e.getTo().getBlockZ());
+    }
+
+    @EventHandler
+    public void onRespawn(org.bukkit.event.player.PlayerRespawnEvent e) {
+        getLogger().info("respawn: " + e.getRespawnReason() + " bed=" + e.isBedSpawn() + " at "
+                + e.getRespawnLocation().getBlockX() + " " + e.getRespawnLocation().getBlockY());
+    }
+
+    @EventHandler
+    public void onHeld(org.bukkit.event.player.PlayerItemHeldEvent e) {
+        getLogger().info("held: " + e.getPreviousSlot() + " -> " + e.getNewSlot());
+    }
+
+    @EventHandler
+    public void onSneak(org.bukkit.event.player.PlayerToggleSneakEvent e) {
+        getLogger().info("sneak: " + e.isSneaking());
+    }
+
+    @EventHandler
+    public void onSprint(org.bukkit.event.player.PlayerToggleSprintEvent e) {
+        getLogger().info("sprint: " + e.isSprinting());
+    }
+
     @EventHandler
     public void onCreatureSpawn(org.bukkit.event.entity.CreatureSpawnEvent e) {
         creatureSpawns++;

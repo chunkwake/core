@@ -140,8 +140,72 @@ final class Events {
                 plugins.callEvent(e);
                 yield e.getAmount() == amount ? "" : Integer.toString(e.getAmount());
             }
+            case Bridge.EVENT_KICK -> p.kickEvent(arg);
+            case Bridge.EVENT_RESPAWN -> respawn(plugins, p, arg);
+            case Bridge.EVENT_TELEPORT -> teleport(plugins, p, arg);
+            case Bridge.EVENT_ITEM_HELD -> {
+                String[] f = arg.trim().split(" ");
+                var e = new org.bukkit.event.player.PlayerItemHeldEvent(p.api,
+                        Integer.parseInt(f[0]), Integer.parseInt(f[1]));
+                plugins.callEvent(e);
+                yield e.isCancelled() ? "c" : "";
+            }
+            case Bridge.EVENT_TOGGLE_SNEAK -> {
+                var e = new org.bukkit.event.player.PlayerToggleSneakEvent(p.api, arg.trim().equals("1"));
+                plugins.callEvent(e);
+                yield e.isCancelled() ? "c" : "";
+            }
+            case Bridge.EVENT_TOGGLE_SPRINT -> {
+                var e = new org.bukkit.event.player.PlayerToggleSprintEvent(p.api, arg.trim().equals("1"));
+                plugins.callEvent(e);
+                yield e.isCancelled() ? "c" : "";
+            }
             default -> "";
         };
+    }
+
+    /** {@code x y z yaw pitch} в мире сервера. */
+    private static Location location(World world, String[] f, int at) {
+        return new Location(world, Double.parseDouble(f[at]), Double.parseDouble(f[at + 1]),
+                Double.parseDouble(f[at + 2]), Float.parseFloat(f[at + 3]), Float.parseFloat(f[at + 4]));
+    }
+
+    private static String coords(Location l) {
+        return l.getX() + " " + l.getY() + " " + l.getZ() + " " + l.getYaw() + " " + l.getPitch();
+    }
+
+    /**
+     * {@code PlayerRespawnEvent}: {@code x y z yaw pitch кровать якорь ПРИЧИНА} →
+     * пусто или новая точка. Как у {@code PlayerList.respawn}: отменить нельзя,
+     * только сменить место.
+     */
+    private static String respawn(PluginManager plugins, PlayerImpl p, String arg) {
+        String[] f = arg.trim().split(" ");
+        Location at = location(p.api.getWorld(), f, 0);
+        var e = new org.bukkit.event.player.PlayerRespawnEvent(p.api, at.clone(), f[5].equals("1"),
+                f[6].equals("1"), false,
+                org.bukkit.event.player.PlayerRespawnEvent.RespawnReason.valueOf(f[7]));
+        plugins.callEvent(e);
+        Location to = e.getRespawnLocation();
+        return to.equals(at) ? "" : coords(to);
+    }
+
+    /**
+     * {@code PlayerTeleportEvent} сервера (команды, жемчуг):
+     * {@code ПРИЧИНА откуда куда} → {@code c}, пусто или {@code t куда}.
+     */
+    private static String teleport(PluginManager plugins, PlayerImpl p, String arg) {
+        String[] f = arg.trim().split(" ");
+        World w = p.api.getWorld();
+        Location from = location(w, f, 1);
+        Location to = location(w, f, 6);
+        var e = new org.bukkit.event.player.PlayerTeleportEvent(p.api, from, to.clone(),
+                org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.valueOf(f[0]));
+        plugins.callEvent(e);
+        if (e.isCancelled()) {
+            return "c";
+        }
+        return e.getTo().equals(to) ? "" : "t " + coords(e.getTo());
     }
 
     /**

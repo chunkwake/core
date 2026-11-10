@@ -158,8 +158,9 @@ async fn banned_name_is_rejected_at_login() {
         session_server: String::new(),
         configuration: None,
         admit: Some(chunkwake_net::Admit(std::sync::Arc::new(
-            |name, _uuid, _addr| {
-                (name == "Steve").then(|| "You are banned from this server.".to_owned())
+            |name, _uuid, _addr, _properties, _full| {
+                (name == "Steve")
+                    .then(|| r#"{"text":"You are banned from this server."}"#.to_owned())
             },
         ))),
     });

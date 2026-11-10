@@ -263,13 +263,34 @@ unsafe fn up<F: Copy>(table: &Table, slot: Slot) -> F {
     unsafe { std::mem::transmute_copy::<usize, F>(&addr) }
 }
 
+/// Upcall `Bridge.event`: вид, uuid, аргумент, буфер ответа → длина ответа или -1.
+type EventFn = extern "C" fn(i32, i64, i64, *const u8, i32, *mut u8, i32) -> i32;
+
+/// Вызов `Bridge.event` в текущем потоке: ответ или пусто.
+fn call_event(event: EventFn, kind: Event, u: Uuid, arg: &str, buf: &mut [u8]) -> String {
+    let (hi, lo) = u.as_u64_pair();
+    let n = event(
+        kind as i32,
+        hi as i64,
+        lo as i64,
+        arg.as_ptr(),
+        arg.len() as i32,
+        buf.as_mut_ptr(),
+        buf.len() as i32,
+    );
+    usize::try_from(n)
+        .ok()
+        .and_then(|n| buf.get(..n))
+        .map(|b| String::from_utf8_lossy(b).into_owned())
+        .unwrap_or_default()
+}
+
 /// Цикл потока плагинов: события по порядку, как в main thread Paper.
 fn run(table: &'static Table, rx: mpsc::Receiver<Call>, tick_queued: &AtomicBool) {
     type JoinFn = extern "C" fn(i64, i64, *const u8, i32);
     type QuitFn = extern "C" fn(i64, i64);
     type BreakFn = extern "C" fn(i64, i64, i32, i32, i32, *const u8, i32) -> i32;
     type CommandFn = extern "C" fn(i64, i64, *const u8, i32) -> i32;
-    type EventFn = extern "C" fn(i32, i64, i64, *const u8, i32, *mut u8, i32) -> i32;
     let (tick, join, quit, block_break, command, event) = unsafe {
         (
             up::<extern "C" fn()>(table, Slot::UpTick),
@@ -315,22 +336,7 @@ fn run(table: &'static Table, rx: mpsc::Receiver<Call>, tick_queued: &AtomicBool
                 let _ = reply.send(known != 0);
             }
             Call::Event(kind, u, arg, reply) => {
-                let (hi, lo) = id(u);
-                let n = event(
-                    kind as i32,
-                    hi,
-                    lo,
-                    arg.as_ptr(),
-                    arg.len() as i32,
-                    reply_buf.as_mut_ptr(),
-                    reply_buf.len() as i32,
-                );
-                let text = usize::try_from(n)
-                    .ok()
-                    .and_then(|n| reply_buf.get(..n))
-                    .map(|b| String::from_utf8_lossy(b).into_owned())
-                    .unwrap_or_default();
-                let _ = reply.send(text);
+                let _ = reply.send(call_event(event, kind, u, &arg, &mut reply_buf));
             }
         }
     }
@@ -377,6 +383,24 @@ impl PluginHooks for Bridge {
         }
         let (reply, rx) = oneshot::channel();
         self.tx.send(Call::Event(kind, uuid, arg, reply)).ok()?;
+        Some(rx)
+    }
+
+    /// Свой поток на событие, как пул асинхронных событий Paper: upcall FFM
+    /// сам подключает поток к JVM. Поток плагинов в это время не занят.
+    fn event_async(&self, kind: Event, uuid: Uuid, arg: String) -> Option<oneshot::Receiver<String>> {
+        if !self.listens(kind) {
+            return None;
+        }
+        let event = unsafe { up::<EventFn>(self.table, Slot::UpEvent) };
+        let (reply, rx) = oneshot::channel();
+        std::thread::Builder::new()
+            .name("Paper Async Event".into())
+            .spawn(move || {
+                let mut buf = vec![0u8; EVENT_REPLY_CAP];
+                let _ = reply.send(call_event(event, kind, uuid, &arg, &mut buf));
+            })
+            .ok()?;
         Some(rx)
     }
 

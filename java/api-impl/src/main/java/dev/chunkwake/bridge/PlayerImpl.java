@@ -231,6 +231,76 @@ final class PlayerImpl {
         }
     }
 
+    // --- профиль, адрес и кик ---
+
+    /** Профиль с входа (свойства session server); до входа — только имя и UUID. */
+    volatile ProfileImpl profile;
+    volatile java.net.InetSocketAddress address;
+    /** Сообщение о выходе из {@code PlayerKickEvent}: {@code quit} шлёт его с {@code KICKED}. */
+    volatile Component kickLeaveMessage;
+    volatile boolean kicked;
+
+    /** Как {@code CraftPlayer.getPlayerProfile}: копия, правки не меняют игрока. */
+    public com.destroystokyo.paper.profile.PlayerProfile getPlayerProfile() {
+        ProfileImpl p = profile;
+        return p != null ? p.clone() : new ProfileImpl(id, name);
+    }
+
+    public void setPlayerProfile(com.destroystokyo.paper.profile.PlayerProfile p) {
+        ProfileImpl copy = new ProfileImpl(id, name);
+        copy.setProperties(p.getProperties());
+        profile = copy;
+    }
+
+    /** Как {@code CraftPlayer.getAddress}: без соединения — loopback:0. */
+    public java.net.InetSocketAddress getAddress() {
+        java.net.InetSocketAddress a = address;
+        return a != null ? a : new java.net.InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), 0);
+    }
+
+    public void kickPlayer(String message) {
+        kick(message == null ? Component.empty() : ChunkwakeServer.legacy(message),
+                org.bukkit.event.player.PlayerKickEvent.Cause.PLUGIN);
+    }
+
+    /**
+     * {@code ServerGamePacketListenerImpl.disconnect} Paper: {@code PlayerKickEvent}
+     * с сообщением о выходе {@code multiplayer.player.left}, отмена — игрок остаётся.
+     */
+    public void kick(Component reason, org.bukkit.event.player.PlayerKickEvent.Cause cause) {
+        if (!online) {
+            return;
+        }
+        var e = fireKick(reason == null ? Component.empty() : reason, cause);
+        if (e != null) {
+            control("kick " + GsonComponentSerializer.gson().serialize(e.reason()));
+        }
+    }
+
+    /** Событие кика; {@code null} — отменено. */
+    private org.bukkit.event.player.PlayerKickEvent fireKick(Component reason,
+            org.bukkit.event.player.PlayerKickEvent.Cause cause) {
+        Component leave = Component.translatable("multiplayer.player.left",
+                net.kyori.adventure.text.format.NamedTextColor.YELLOW, Component.text(name));
+        var e = new org.bukkit.event.player.PlayerKickEvent(api, reason, leave, cause);
+        server.api.getPluginManager().callEvent(e);
+        if (e.isCancelled()) {
+            return null;
+        }
+        kickLeaveMessage = e.leaveMessage();
+        kicked = true;
+        return e;
+    }
+
+    /** Кик сервером (команды, бан): {@code ПРИЧИНА\n<json>} → {@code c} или JSON причины. */
+    String kickEvent(String arg) {
+        int nl = arg.indexOf('\n');
+        var cause = org.bukkit.event.player.PlayerKickEvent.Cause.valueOf(arg.substring(0, nl));
+        Component reason = GsonComponentSerializer.gson().deserialize(arg.substring(nl + 1));
+        var e = fireKick(reason, cause);
+        return e == null ? "c" : GsonComponentSerializer.gson().serialize(e.reason());
+    }
+
     public PlayerInventory getInventory() { return inventory.api; }
 
     /** Открытое окно плагина (null — своё окно игрока или окно блока). */

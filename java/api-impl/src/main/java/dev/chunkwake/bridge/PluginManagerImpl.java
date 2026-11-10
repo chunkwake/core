@@ -271,6 +271,31 @@ final class PluginManagerImpl {
         if (has(org.bukkit.event.inventory.PrepareGrindstoneEvent.getHandlerList())) {
             mask |= Bridge.listenBit(Bridge.EVENT_PREPARE_GRINDSTONE);
         }
+        if (has(org.bukkit.event.player.AsyncPlayerPreLoginEvent.getHandlerList())
+                || has(org.bukkit.event.player.PlayerPreLoginEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_PRE_LOGIN);
+        }
+        // Вход ждём всегда: игрок для `join` создаётся здесь, с профилем и адресом.
+        mask |= Bridge.listenBit(Bridge.EVENT_LOGIN);
+        if (has(org.bukkit.event.player.PlayerKickEvent.getHandlerList())
+                || has(org.bukkit.event.player.PlayerQuitEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_KICK);
+        }
+        if (has(org.bukkit.event.player.PlayerRespawnEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_RESPAWN);
+        }
+        if (has(org.bukkit.event.player.PlayerTeleportEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_TELEPORT);
+        }
+        if (has(org.bukkit.event.player.PlayerItemHeldEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_ITEM_HELD);
+        }
+        if (has(org.bukkit.event.player.PlayerToggleSneakEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_TOGGLE_SNEAK);
+        }
+        if (has(org.bukkit.event.player.PlayerToggleSprintEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_TOGGLE_SPRINT);
+        }
         Bridge.setFlag(Bridge.FLAG_LISTENERS, mask);
     }
 

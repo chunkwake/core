@@ -75,12 +75,15 @@ pub struct NetConfig {
     pub session_server: String,
     /// Фаза configuration; `None` — отдать соединение сразу после login.
     pub configuration: Option<Arc<configuration::ConfigurationPlan>>,
-    /// Отказ во входе: `Some(причина)` — бан или белый список. `None` — пускать всех.
+    /// Проверка входа (бан, белый список, места, плагины). `None` —
+    /// проверяется только число мест.
     pub admit: Option<Admit>,
 }
 
-/// Проверка входа: `Some(причина)` — отказать.
-pub type AdmitFn = Arc<dyn Fn(&str, Uuid, SocketAddr) -> Option<String> + Send + Sync>;
+/// Проверка входа после авторизации: имя, uuid, адрес, свойства профиля и
+/// «мест нет». `Some(json причины)` — отказать (JSON-компонент).
+pub type AdmitFn =
+    Arc<dyn Fn(&str, Uuid, SocketAddr, &[ProfileProperty], bool) -> Option<String> + Send + Sync>;
 
 /// Проверка входа. Отдельный тип, потому что замыкание не реализует `Debug`.
 #[derive(Clone)]
@@ -308,21 +311,22 @@ impl Server {
                 (name, uuid, Vec::new())
             }
         };
-        if let Some(reason) = self
-            .config
-            .admit
-            .as_ref()
-            .and_then(|admit| (admit.0)(&name, uuid, addr))
-        {
-            conn.send(&packets::login_disconnect(&text_json(&reason)))
-                .await?;
-            return Ok(None);
-        }
-        if self.online.load(Ordering::Relaxed) >= self.config.max_players {
-            conn.send(&packets::login_disconnect(&text_json(
-                "The server is full!",
-            )))
-            .await?;
+        // Как `PlayerList.canPlayerLogin`: бан, белый список, места; решение
+        // могут сменить плагины (`AsyncPlayerPreLoginEvent`, `PlayerLoginEvent`).
+        let full = self.online.load(Ordering::Relaxed) >= self.config.max_players;
+        let denied = match &self.config.admit {
+            Some(admit) => {
+                let admit = admit.0.clone();
+                let (n, p) = (name.clone(), properties.clone());
+                // Плагины могут думать долго (база данных): поток рантайма не держим.
+                tokio::task::spawn_blocking(move || admit(&n, uuid, addr, &p, full))
+                    .await
+                    .unwrap_or(None)
+            }
+            None => full.then(|| text_json("The server is full!")),
+        };
+        if let Some(reason) = denied {
+            conn.send(&packets::login_disconnect(&reason)).await?;
             return Ok(None);
         }
 

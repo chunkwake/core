@@ -459,13 +459,18 @@ fn banned_name_is_refused_at_admission() {
     assert!(run(&plan, "ban Steve").contains("success"));
     let addr = "203.0.113.5:25565".parse().unwrap();
     let reason = plan
-        .admission_denied("Steve", chunkwake_net::Uuid::nil(), addr)
+        .admission_denied("Steve", chunkwake_net::Uuid::nil(), addr, &[], false)
         .expect("бан закрывает вход");
     assert!(reason.contains("banned"), "{reason}");
     assert!(
-        plan.admission_denied("Ada", chunkwake_net::Uuid::nil(), addr)
+        plan.admission_denied("Ada", chunkwake_net::Uuid::nil(), addr, &[], false)
             .is_none()
     );
+    // Нет мест — отказ и без бана.
+    let full = plan
+        .admission_denied("Ada", chunkwake_net::Uuid::nil(), addr, &[], true)
+        .expect("полный сервер");
+    assert!(full.contains("full"), "{full}");
 }
 
 /// Компостер — точка `farmer`. Структуры, которых генератор не ставит, не выдумываются.

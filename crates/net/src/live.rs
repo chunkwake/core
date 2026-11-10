@@ -202,7 +202,7 @@ pub enum Control {
     Payload(String, Vec<u8>),
     /// Закрыть открытое окно (`closewin`).
     CloseWindow,
-    /// Отключить игрока с причиной (`/kick`).
+    /// Отключить игрока с причиной (JSON-компонент): `/kick`, бан, `Player.kick`.
     Kick(String),
     /// Переслать на другой сервер (`/transfer`).
     Transfer(String, u16),
@@ -300,6 +300,13 @@ impl Control {
                 Control::OpenPlugin(id, title.to_owned())
             }
             "closewin" => Control::CloseWindow,
+            // `Player.kick`: событие плагин уже вызвал, здесь только причина.
+            "kick" => Control::Kick(
+                line.trim_start()
+                    .split_once(char::is_whitespace)
+                    .map_or("", |(_, rest)| rest.trim())
+                    .to_owned(),
+            ),
             "payload" => {
                 let channel = it.next()?.to_owned();
                 let data = crate::payload::from_hex(it.next().unwrap_or(""))?;
@@ -494,6 +501,31 @@ pub enum Event {
     /// Сообщение канала плагина от клиента: `<канал> <hex>`, ответ не нужен.
     /// `minecraft:register` из configuration приходит этим же событием после входа.
     PluginMessage = 37,
+    /// `AsyncPlayerPreLoginEvent` (и `PlayerPreLoginEvent`) после авторизации,
+    /// вне потока плагинов: `имя uuid ip порт\nсвойство значение [подпись]…` →
+    /// `k <json причины>` (отказ) или пусто.
+    PreLogin = 38,
+    /// `PlayerConnectionValidateLoginEvent` и `PlayerLoginEvent` после проверки
+    /// бана/белого списка/мест:
+    /// `имя uuid ip порт\n[KICK_BANNED|KICK_WHITELIST|KICK_FULL <json>]\nсвойство значение [подпись]…` →
+    /// `a` (пустить), `k <json причины>` или пусто (решение ванили).
+    Login = 39,
+    /// `PlayerKickEvent`: `ПРИЧИНА\n<json причины>` → `c` (отмена), пусто или
+    /// `<json причины>` (новая). Сообщение о выходе остаётся в Java до `quit`.
+    Kick = 40,
+    /// `PlayerRespawnEvent`: `x y z yaw pitch кровать(1|0) якорь(1|0) ПРИЧИНА` →
+    /// пусто или новая точка `x y z yaw pitch`.
+    Respawn = 41,
+    /// `PlayerTeleportEvent` от сервера (команды, жемчуг):
+    /// `ПРИЧИНА fx fy fz fyaw fpitch tx ty tz tyaw tpitch` → `c`, пусто или
+    /// `t x y z yaw pitch` (новая цель).
+    Teleport = 42,
+    /// `PlayerItemHeldEvent`: `старый новый` слот хотбара → `c` или пусто.
+    ItemHeld = 43,
+    /// `PlayerToggleSneakEvent`: `1|0` → `c` или пусто.
+    ToggleSneak = 44,
+    /// `PlayerToggleSprintEvent`: `1|0` → `c` или пусто.
+    ToggleSprint = 45,
 }
 
 impl Event {

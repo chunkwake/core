@@ -411,27 +411,83 @@ impl PlayPlan {
             .map(|l| (l.xp.level, l.xp.points()))
     }
 
-    /// Причина отказа во входе: бан игрока, бан IP или белый список.
-    /// Оператор проходит белый список. `None` — пускать.
+    /// Решение о входе (JSON причины отказа или `None`), как у Paper:
+    /// `AsyncPlayerPreLoginEvent` вне потока плагинов, затем ванильная
+    /// проверка (`PlayerList.canPlayerLogin`), которую плагины могут сменить в
+    /// `PlayerConnectionValidateLoginEvent`/`PlayerLoginEvent`.
+    ///
+    /// Блокирует поток: вызывать из `spawn_blocking`.
     pub fn admission_denied(
         &self,
         name: &str,
         uuid: Uuid,
         addr: std::net::SocketAddr,
+        properties: &[chunkwake_protocol::packets::ProfileProperty],
+        full: bool,
     ) -> Option<String> {
+        let head = format!("{name} {uuid} {} {}", addr.ip(), addr.port());
+        // Свойства профиля строками `имя значение [подпись]`, каждая с `\n` впереди.
+        let props: String = properties
+            .iter()
+            .map(|p| match &p.signature {
+                Some(s) => format!("\n{} {} {s}", p.name, p.value),
+                None => format!("\n{} {}", p.name, p.value),
+            })
+            .collect();
+        if let Some(h) = self.hooks() {
+            let arg = format!("{head}{props}");
+            // Paper ждёт асинхронный обработчик без предела; клиент сам
+            // отключится через 30 с.
+            let reply = h
+                .event_async(crate::live::Event::PreLogin, uuid, arg)
+                .and_then(|rx| crate::play::block_on_reply(rx, std::time::Duration::from_secs(30)));
+            if let Some(json) = reply.as_deref().and_then(|r| r.strip_prefix("k ")) {
+                return Some(json.to_owned());
+            }
+        }
+        let vanilla = self.vanilla_denial(name, uuid, addr, full);
+        let reply = self.hooks().and_then(|h| {
+            let arg = match &vanilla {
+                Some((kind, json)) => format!("{head}\n{kind} {json}{props}"),
+                None => format!("{head}\n{props}"),
+            };
+            h.event(crate::live::Event::Login, uuid, arg)
+                .and_then(|rx| crate::play::block_on_reply(rx, super::super::PLUGIN_TIMEOUT))
+        });
+        match reply.as_deref() {
+            Some("a") => None,
+            Some(r) if r.starts_with("k ") => Some(r[2..].to_owned()),
+            _ => vanilla.map(|(_, json)| json),
+        }
+    }
+
+    /// Ванильный отказ: бан IP, бан игрока, белый список (оператор проходит), нет мест.
+    fn vanilla_denial(
+        &self,
+        name: &str,
+        uuid: Uuid,
+        addr: std::net::SocketAddr,
+        full: bool,
+    ) -> Option<(&'static str, String)> {
         use super::state::AccessList;
+        // Вид отказа — `PlayerLoginEvent.Result`, как у `PlayerList.LoginResult` Paper.
+        let text = |t: &str| serde_json::json!({ "text": t }).to_string();
         let ip = addr.ip().to_string();
         if self.vars.is_allowed(AccessList::BannedIps, &ip) {
-            return Some("Your IP address is banned from this server!".into());
+            return Some(("KICK_BANNED", text("Your IP address is banned from this server!")));
         }
         if self.vars.is_allowed(AccessList::BannedPlayers, name) {
-            return Some("You are banned from this server.".into());
+            return Some(("KICK_BANNED", text("You are banned from this server.")));
         }
         if self.whitelist_enabled()
             && self.op_level(uuid) == 0
             && !self.vars.is_allowed(AccessList::Whitelist, name)
         {
-            return Some("You are not white-listed on this server!".into());
+            return Some(("KICK_WHITELIST", text("You are not white-listed on this server!")));
+        }
+        // `bypassesPlayerLimit` у операторов не храним: в полный сервер не пускаем никого.
+        if full {
+            return Some(("KICK_FULL", text("The server is full!")));
         }
         None
     }
@@ -874,8 +930,18 @@ impl PlayPlan {
     }
 
     /// Кик игрока (`/kick`, `/ban`).
-    pub(crate) fn kick(&self, uuid: Uuid, reason: &str) {
-        self.push_control(uuid, Control::Kick(reason.to_owned()));
+    /// Отключает игрока с причиной (JSON-компонент), как
+    /// `ServerGamePacketListenerImpl.disconnect`: сначала `PlayerKickEvent`
+    /// (`cause` — `PlayerKickEvent.Cause`), плагин может отменить или сменить причину.
+    pub(crate) fn kick(&self, uuid: Uuid, reason_json: &str, cause: &str) {
+        let reason = match self.sync_player_event(crate::live::Event::Kick, uuid, || {
+            format!("{cause}\n{reason_json}")
+        }) {
+            Some(r) if r.trim() == "c" => return,
+            Some(r) if !r.trim().is_empty() => r.trim().to_owned(),
+            _ => reason_json.to_owned(),
+        };
+        self.push_control(uuid, Control::Kick(reason));
     }
 
     /// Пересылка на другой сервер (`/transfer`).

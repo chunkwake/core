@@ -26,6 +26,17 @@ pub fn system_chat_json(id: i32, json: &str, overlay: bool) -> Vec<u8> {
     w.buf
 }
 
+/// `ClientboundDisconnectPacket` в play: причина — JSON-компонент.
+pub fn disconnect_json(id: i32, json: &str) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id);
+    match serde_json::from_str::<Value>(json) {
+        Ok(v) => write_component(&mut w, &v),
+        Err(_) => write_nbt_string_root(&mut w, json),
+    }
+    w.buf
+}
+
 /// Компонент как безымянный корень сетевого NBT.
 pub fn write_component(w: &mut Writer, v: &Value) {
     match v {

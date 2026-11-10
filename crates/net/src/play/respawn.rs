@@ -54,6 +54,9 @@ pub(super) struct RespawnAt {
     pub pos: [f64; 3],
     pub look: (f32, f32),
     pub missing: bool,
+    /// Точка — кровать или якорь (`PlayerRespawnEvent.isBedSpawn`/`isAnchorSpawn`).
+    pub bed: bool,
+    pub anchor: bool,
 }
 
 /// Чем кончилось использование якоря без светокамня.
@@ -250,6 +253,8 @@ impl PlayPlan {
             pos: self.vars.world_spawn().unwrap_or(self.spawn),
             look: (0.0, 0.0),
             missing: false,
+            bed: false,
+            anchor: false,
         };
         let point = self
             .spawn_points
@@ -261,17 +266,48 @@ impl PlayPlan {
         let Some(point) = point.filter(|p| self.dims.contains_key(&p.dim)) else {
             return world;
         };
+        let block = with_dim(point.dim, || {
+            self.block(point.pos).map(|s| self.state_name(s).to_owned())
+        })
+        .unwrap_or_default();
         match with_dim(point.dim, || self.find_respawn(uuid, point, use_block)) {
             Some((pos, look)) => RespawnAt {
                 dim: point.dim,
                 pos,
                 look,
                 missing: false,
+                bed: block.ends_with("_bed"),
+                anchor: block == ANCHOR,
             },
             None => RespawnAt {
                 missing: true,
                 ..world
             },
+        }
+    }
+
+    /// `PlayerRespawnEvent` (`DEATH`, `END_PORTAL`): плагин может сменить
+    /// точку; отменить возрождение нельзя.
+    pub(super) fn respawn_event(&self, uuid: Uuid, at: &mut RespawnAt, reason: &str) {
+        let reply = self.sync_player_event(crate::live::Event::Respawn, uuid, || {
+            let [x, y, z] = at.pos;
+            format!(
+                "{x} {y} {z} {} {} {} {} {reason}",
+                at.look.0,
+                at.look.1,
+                u8::from(at.bed),
+                u8::from(at.anchor)
+            )
+        });
+        let f: Vec<f64> = reply
+            .as_deref()
+            .unwrap_or("")
+            .split_whitespace()
+            .filter_map(|v| v.parse().ok())
+            .collect();
+        if let [x, y, z, yaw, pitch] = f[..] {
+            at.pos = [x, y, z];
+            at.look = (yaw as f32, pitch as f32);
         }
     }
 
