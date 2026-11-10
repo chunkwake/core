@@ -66,7 +66,11 @@ fn read_filterable(
     Ok((raw, filtered))
 }
 
-fn write_filterable(w: &mut Writer, v: &crate::components::Filterable, write: &dyn Fn(&mut Writer, &str)) {
+fn write_filterable(
+    w: &mut Writer,
+    v: &crate::components::Filterable,
+    write: &dyn Fn(&mut Writer, &str),
+) {
     write(w, &v.0);
     w.bool(v.1.is_some());
     if let Some(f) = &v.1 {
@@ -314,7 +318,9 @@ fn write_patch(w: &mut Writer, s: &Stack) {
 
 /// Номер компонента книги в реестре; -1 — нет книги или реестр не задан.
 fn book_id(book: Option<&crate::components::Book>) -> i32 {
-    use crate::components::{WRITABLE_BOOK_CONTENT_COMPONENT, WRITTEN_BOOK_CONTENT_COMPONENT, id_of};
+    use crate::components::{
+        WRITABLE_BOOK_CONTENT_COMPONENT, WRITTEN_BOOK_CONTENT_COMPONENT, id_of,
+    };
     match book {
         Some(b) if b.written => id_of(&WRITTEN_BOOK_CONTENT_COMPONENT),
         Some(_) => id_of(&WRITABLE_BOOK_CONTENT_COMPONENT),
@@ -1136,12 +1142,26 @@ mod tests {
         crate::components::WRITABLE_BOOK_CONTENT_COMPONENT.store(126, Ordering::Relaxed);
         crate::components::WRITTEN_BOOK_CONTENT_COMPONENT.store(127, Ordering::Relaxed);
         for written in [false, true] {
-            let page = |t: &str| if written { format!("{{\"text\":\"{t}\"}}") } else { t.to_owned() };
+            let page = |t: &str| {
+                if written {
+                    format!("{{\"text\":\"{t}\"}}")
+                } else {
+                    t.to_owned()
+                }
+            };
             let book = crate::components::Book {
                 written,
                 pages: vec![(page("one"), None), (page("two"), Some(page("t*o")))],
-                title: if written { ("T".into(), None) } else { Default::default() },
-                author: if written { "Steve".into() } else { String::new() },
+                title: if written {
+                    ("T".into(), None)
+                } else {
+                    Default::default()
+                },
+                author: if written {
+                    "Steve".into()
+                } else {
+                    String::new()
+                },
                 generation: i32::from(written),
                 resolved: written,
             };

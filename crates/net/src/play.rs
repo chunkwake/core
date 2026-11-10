@@ -2833,7 +2833,9 @@ impl PlayPlan {
                     // Шаблон в шумовом мире — пустой столбец: клиент увидит
                     // дыру. Кэшировать такой кадр нельзя (ниже), а в журнал —
                     // чтобы гонку было видно.
-                    tracing::warn!("chunk ({x}, {z}) is missing from the world, sending an empty one");
+                    tracing::warn!(
+                        "chunk ({x}, {z}) is missing from the world, sending an empty one"
+                    );
                 }
                 (self.chunk_body.as_slice(), 0)
             }
@@ -3689,7 +3691,8 @@ impl PlayPlan {
                 && dim != self.player_dim(uuid)
             {
                 let n = |s: &str| s.parse::<f64>().ok().filter(|v| v.is_finite());
-                let (Some(x), Some(y), Some(z), Some(yaw), Some(pitch)) = (n(x), n(y), n(z), n(yaw), n(pitch))
+                let (Some(x), Some(y), Some(z), Some(yaw), Some(pitch)) =
+                    (n(x), n(y), n(z), n(yaw), n(pitch))
                 else {
                     return false;
                 };
@@ -3808,7 +3811,9 @@ impl PlayPlan {
                     .lock()
                     .unwrap()
                     .get(&uuid)
-                    .map_or_else(String::new, |c| crate::stack_nbt::typed_compound(c).to_string());
+                    .map_or_else(String::new, |c| {
+                        crate::stack_nbt::typed_compound(c).to_string()
+                    });
             }
             let Some(c) = serde_json::from_str(json)
                 .ok()
@@ -3956,7 +3961,14 @@ impl PlayPlan {
             let (name, from) = rest.trim().split_once(' ').unwrap_or((rest.trim(), "0"));
             let from: usize = from.parse().unwrap_or(0);
             let mut out = String::new();
-            for k in self.survival.registry_keys.get(name).into_iter().flatten().skip(from) {
+            for k in self
+                .survival
+                .registry_keys
+                .get(name)
+                .into_iter()
+                .flatten()
+                .skip(from)
+            {
                 if out.len() + k.len() + 1 > 7000 {
                     break;
                 }
@@ -4116,7 +4128,12 @@ impl PlayPlan {
     /// Событие игрока из синхронного кода (команда, тик): поток ждёт ответа
     /// плагинов, как главный поток Paper. Без слушателей или вне рантайма
     /// (вызов из самого потока плагинов) — сразу `None`.
-    fn sync_player_event(&self, kind: Event, uuid: Uuid, arg: impl FnOnce() -> String) -> Option<String> {
+    fn sync_player_event(
+        &self,
+        kind: Event,
+        uuid: Uuid,
+        arg: impl FnOnce() -> String,
+    ) -> Option<String> {
         let h = self.hooks().filter(|h| h.listens(kind))?;
         let rt = tokio::runtime::Handle::try_current().ok()?;
         let rx = h.event(kind, uuid, arg())?;
@@ -4373,10 +4390,10 @@ impl PlayPlan {
     fn advance_time(&self) {
         let now = self.game_time.fetch_add(1, Ordering::Relaxed) + 1;
         let old_weather = self.vars.weather();
-        if let Some(weather) = self.vars.tick_weather() {
-            if old_weather.rain != weather.rain {
-                self.broadcast_weather(weather);
-            }
+        if let Some(weather) = self.vars.tick_weather()
+            && old_weather.rain != weather.rain
+        {
+            self.broadcast_weather(weather);
         }
         self.tick_weather_levels();
         let _ = self
@@ -6779,8 +6796,12 @@ impl PlayPlan {
             match kind {
                 ar::ThrownKind::Snowball => {}
                 ar::ThrownKind::Egg => {
-                    if rand::random::<u8>() % 8 == 0 {
-                        let count = if rand::random::<u8>() % 32 == 0 { 4 } else { 1 };
+                    if rand::random::<u8>().is_multiple_of(8) {
+                        let count = if rand::random::<u8>().is_multiple_of(32) {
+                            4
+                        } else {
+                            1
+                        };
                         for _ in 0..count {
                             self.spawn_mob(
                                 crate::mobs::Species::Chicken,
@@ -7093,7 +7114,7 @@ impl PlayPlan {
             vel: [0.0; 3],
             target,
             life: 0,
-            survive: rand::random::<u32>() % 5 > 0,
+            survive: !rand::random::<u32>().is_multiple_of(5),
             stack: Stack { count: 1, ..stack },
         };
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
@@ -8205,7 +8226,7 @@ impl PlayPlan {
                 "minecraft:netherrack" | "minecraft:magma_block"
             )
         });
-        if age == 15 && !eternal && !has_fuel && rand::random::<u8>() % 4 == 0 {
+        if age == 15 && !eternal && !has_fuel && rand::random::<u8>().is_multiple_of(4) {
             self.set_block(pos, AIR);
             return;
         }
@@ -8242,7 +8263,7 @@ impl PlayPlan {
             self.set_block(target, AIR);
             self.unlink_chest(target, state);
             self.update_connections(target);
-            if rand::random::<u8>() % 3 != 0 && !self.fire_rained_on(target) {
+            if !rand::random::<u8>().is_multiple_of(3) && !self.fire_rained_on(target) {
                 self.ignite_at(
                     target,
                     age.saturating_add(rand::random::<u8>() % 5 / 4).min(15),
@@ -8428,7 +8449,7 @@ impl PlayPlan {
             if self.with_world(|w| w.sky_light_at(above).unwrap_or(0)) < 15 {
                 continue;
             }
-            if self.vars.weather().thunder && rand::random::<u32>() % 6_250 == 0 {
+            if self.vars.weather().thunder && rand::random::<u32>().is_multiple_of(6_250) {
                 self.thunder_strike(above);
             }
             let Some(state) = self.block(ground) else {
@@ -8471,7 +8492,7 @@ impl PlayPlan {
                     self.set_block(above, snow);
                 }
             } else if name == "minecraft:cauldron" || name == "minecraft:water_cauldron" {
-                if rand::random::<u8>() % 20 != 0 {
+                if !rand::random::<u8>().is_multiple_of(20) {
                     continue;
                 }
                 let next = if name == "minecraft:cauldron" {
@@ -8611,14 +8632,14 @@ impl PlayPlan {
             return;
         }
         if let Some(wood) = crate::plants::tree_wood(name) {
-            if rand::random::<u8>() % 7 == 0 {
+            if rand::random::<u8>().is_multiple_of(7) {
                 self.tick_sapling(pos, state, wood);
             }
             return;
         }
         if matches!(name, "minecraft:cave_vines" | "minecraft:cave_vines_plant")
             && pl.prop(state, "berries") == Some("false")
-            && rand::random::<u32>() % 11 == 0
+            && rand::random::<u32>().is_multiple_of(11)
         {
             if let Some(ripe) = pl.with_prop(state, "berries", "true") {
                 self.set_block(pos, ripe);
@@ -8664,12 +8685,11 @@ impl PlayPlan {
                 if self
                     .block(above)
                     .is_some_and(|block| self.state_name(block) == "minecraft:air")
+                    && let Some(&new) = self.survival.block_defaults.get(name)
                 {
-                    if let Some(&new) = self.survival.block_defaults.get(name) {
-                        self.set_block(above, new);
-                        if let Some(reset) = pl.with_prop(state, "age", "0") {
-                            self.set_block(pos, reset);
-                        }
+                    self.set_block(above, new);
+                    if let Some(reset) = pl.with_prop(state, "age", "0") {
+                        self.set_block(pos, reset);
                     }
                 }
             } else if let Some(next) = pl.with_prop(state, "age", &(age + 1).to_string()) {
@@ -8687,7 +8707,7 @@ impl PlayPlan {
             return;
         }
         if matches!(name, "minecraft:pumpkin_stem" | "minecraft:melon_stem") && age == max_age {
-            if rand::random::<u32>() % self.crop_growth_denominator(pos) != 0 {
+            if !rand::random::<u32>().is_multiple_of(self.crop_growth_denominator(pos)) {
                 return;
             }
             let direction = rand::random::<u8>() % 4;
@@ -8735,10 +8755,10 @@ impl PlayPlan {
             "minecraft:sweet_berry_bush" | "minecraft:cocoa" => 5,
             _ => self.crop_growth_denominator(pos),
         };
-        if rand::random::<u32>() % chance == 0 {
-            if let Some(next) = pl.with_prop(state, "age", &(age + 1).to_string()) {
-                self.set_block(pos, next);
-            }
+        if rand::random::<u32>().is_multiple_of(chance)
+            && let Some(next) = pl.with_prop(state, "age", &(age + 1).to_string())
+        {
+            self.set_block(pos, next);
         }
     }
 
@@ -8775,11 +8795,11 @@ impl PlayPlan {
             }
             return false;
         }
-        if pl.prop(state, "stage") == Some("0") {
-            if let Some(next) = pl.with_prop(state, "stage", "1") {
-                self.set_block(pos, next);
-                return true;
-            }
+        if pl.prop(state, "stage") == Some("0")
+            && let Some(next) = pl.with_prop(state, "stage", "1")
+        {
+            self.set_block(pos, next);
+            return true;
         }
         self.grow_tree(pos, state, wood)
     }
@@ -8860,7 +8880,7 @@ impl PlayPlan {
             return false;
         }
         let feature = match (wood, big) {
-            ("oak", _) if rand::random::<u8>() % 10 == 0 => "fancy_oak",
+            ("oak", _) if rand::random::<u8>().is_multiple_of(10) => "fancy_oak",
             ("oak", _) => "oak",
             ("spruce", true) if rand::random::<bool>() => "mega_spruce",
             ("spruce", true) => "mega_pine",
@@ -8989,10 +9009,9 @@ impl PlayPlan {
             } else if !self
                 .block(above)
                 .is_some_and(|s| crate::soil::crop_holds_farmland(self.state_name(s)))
+                && let Some(&dirt) = self.survival.block_defaults.get("minecraft:dirt")
             {
-                if let Some(&dirt) = self.survival.block_defaults.get("minecraft:dirt") {
-                    self.set_block(pos, dirt);
-                }
+                self.set_block(pos, dirt);
             }
             return;
         }
@@ -9036,20 +9055,19 @@ impl PlayPlan {
                 .block(target)
                 .is_some_and(|s| self.state_name(s) == "minecraft:dirt")
                 && suitable(target)
+                && let Some(&base) = self.survival.block_defaults.get(name)
             {
-                if let Some(&base) = self.survival.block_defaults.get(name) {
-                    let cover = self
-                        .block([target[0], target[1] + 1, target[2]])
-                        .unwrap_or(AIR);
-                    let snowy = matches!(
-                        self.state_name(cover),
-                        "minecraft:snow" | "minecraft:snow_block"
-                    );
-                    let next = pl
-                        .with_prop(base, "snowy", if snowy { "true" } else { "false" })
-                        .unwrap_or(base);
-                    self.set_block(target, next);
-                }
+                let cover = self
+                    .block([target[0], target[1] + 1, target[2]])
+                    .unwrap_or(AIR);
+                let snowy = matches!(
+                    self.state_name(cover),
+                    "minecraft:snow" | "minecraft:snow_block"
+                );
+                let next = pl
+                    .with_prop(base, "snowy", if snowy { "true" } else { "false" })
+                    .unwrap_or(base);
+                self.set_block(target, next);
             }
         }
     }
@@ -9090,7 +9108,8 @@ impl PlayPlan {
         }
         let name = self.state_name(state);
         let kelp = name == "minecraft:kelp";
-        if (kelp && rand::random::<u32>() % 100 >= 14) || (!kelp && rand::random::<u32>() % 10 != 0)
+        if (kelp && rand::random::<u32>() % 100 >= 14)
+            || (!kelp && !rand::random::<u32>().is_multiple_of(10))
         {
             return;
         }
@@ -9143,7 +9162,7 @@ impl PlayPlan {
                     .unwrap_or(0)
                     .max(w.block_light_at(above).unwrap_or(0))
             }) < 9
-            || rand::random::<u32>() % 3 != 0
+            || !rand::random::<u32>().is_multiple_of(3)
         {
             return;
         }
@@ -9187,7 +9206,7 @@ impl PlayPlan {
     }
 
     fn tick_mushroom(&self, pos: [i32; 3], state: u32) {
-        if rand::random::<u32>() % 25 != 0 {
+        if !rand::random::<u32>().is_multiple_of(25) {
             return;
         }
         let name = self.state_name(state);
@@ -9553,7 +9572,7 @@ impl PlayPlan {
         // `ServerExplosion.createFire`: `nextInt(3) == 0`, пусто и под ним
         // твёрдый блок.
         for p in fire_at {
-            if rand::random::<u32>() % 3 != 0 || self.block(p) != Some(AIR) {
+            if !rand::random::<u32>().is_multiple_of(3) || self.block(p) != Some(AIR) {
                 continue;
             }
             let below = [p[0], p[1] - 1, p[2]];
@@ -10320,32 +10339,31 @@ impl PlayPlan {
                 w.lap(phase);
             }
         };
-        let mut watch = watch;
         self.refresh_simulated();
-        lap(PH_REFRESH, &mut watch);
+        lap(PH_REFRESH, watch);
         self.tick_items();
-        lap(PH_ITEMS, &mut watch);
+        lap(PH_ITEMS, watch);
         self.tick_arrows();
         self.tick_eyes();
-        lap(PH_ARROWS, &mut watch);
+        lap(PH_ARROWS, watch);
         self.tick_tnt();
         self.tick_lightning();
         self.tick_mobs();
         self.tick_minecarts();
         self.tick_item_frames();
-        lap(PH_MOBS, &mut watch);
+        lap(PH_MOBS, watch);
         self.tick_animals();
         self.tick_natural_spawn();
-        lap(PH_ANIMALS, &mut watch);
+        lap(PH_ANIMALS, watch);
         self.tick_orbs();
-        lap(PH_ORBS, &mut watch);
+        lap(PH_ORBS, watch);
         self.tick_furnaces();
-        lap(PH_FURNACES, &mut watch);
+        lap(PH_FURNACES, watch);
         self.tick_brewing();
         self.tick_campfires();
         self.tick_jukeboxes();
         self.tick_crafters();
-        lap(PH_CAMPFIRES, &mut watch);
+        lap(PH_CAMPFIRES, watch);
         self.tick_copper_chests();
         self.tick_random_blocks();
         self.tick_precipitation();
@@ -11393,7 +11411,7 @@ impl PlayPlan {
                     if gliding {
                         fall_fly_ticks += 1;
                         if survival
-                            && fall_fly_ticks % 20 == 0
+                            && fall_fly_ticks.is_multiple_of(20)
                             && let Some(mut chest) = state.inv.slots[survival::CHEST]
                         {
                             let before = chest.damage;
@@ -11958,19 +11976,17 @@ impl PlayPlan {
                         if let Some(w) = window.as_mut().filter(|w| w.id == wid && w.kind == Kind::Lectern && self.window_valid(w)) {
                             if button == 3 && !matches!(login.spawn.game_mode, 2 | 3) {
                                 if let Some(book) = self.lectern_take_book(w.pos) {
-                                    if let Some(left) = state.inv.add_stack(book, self.max_stack(book.item)) {
-                                        if let Some((feet, yaw, pitch)) = self.player_at(uuid) { self.throw(feet, yaw, pitch, left); }
-                                    }
+                                    if let Some(left) = state.inv.add_stack(book, self.max_stack(book.item))
+                                        && let Some((feet, yaw, pitch)) = self.player_at(uuid) { self.throw(feet, yaw, pitch, left); }
                                     w.slots[0] = None;
                                     self.send_inventory(conn, &mut state.inv).await?;
                                     self.send_window(conn, &mut state.inv, Some(w), wid).await?;
                                 }
-                            } else if let Some(requested) = lectern_page_request(button, self.lectern_page_state(w.pos).1) {
-                                if let Some(page) = self.lectern_set_page(w.pos, requested) {
+                            } else if let Some(requested) = lectern_page_request(button, self.lectern_page_state(w.pos).1)
+                                && let Some(page) = self.lectern_set_page(w.pos, requested) {
                                     w.data[0] = page;
                                     conn.send(&inv::container_set_data(ids.container_set_data, wid, 0, page as i16)).await?;
                                 }
-                            }
                             continue;
                         }
                         if let Some(w) = window.as_mut().filter(|w| w.id == wid && w.kind == Kind::Loom && self.window_valid(w)) {
@@ -12537,8 +12553,8 @@ impl PlayPlan {
                             && let Some(mut held) = state.inv.slots[slot]
                         {
                             let item = self.item_name(held.item);
-                            if item == "minecraft:flint_and_steel" || item == "minecraft:fire_charge" {
-                                if self.prime_tnt(u.pos, crate::tnt::FUSE) {
+                            if (item == "minecraft:flint_and_steel" || item == "minecraft:fire_charge")
+                                && self.prime_tnt(u.pos, crate::tnt::FUSE) {
                                     self.redstone_update(&crate::redstone::around(u.pos));
                                     if login.spawn.game_mode != 1 {
                                         if item == "minecraft:fire_charge" { state.inv.consume_at(slot); }
@@ -12551,7 +12567,6 @@ impl PlayPlan {
                                     conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                                     continue;
                                 }
-                            }
                         }
                         if !state.vitals.dead && login.spawn.game_mode != 3
                             && self.player_at(uuid).is_some_and(|(p, _, _)| block_reach(eye_of(p), u.pos, if login.spawn.game_mode == 1 { 5.0 } else { 4.5 }))
@@ -14154,14 +14169,13 @@ impl PlayPlan {
         .click(c.slot, c.button, c.mode);
         if carto_took {
             // `MapItem.onCraftedBy`: увеличенная или запертая копия — новая карта.
-            for slot in view
+            for s in view
                 .iter_mut()
                 .skip(3)
                 .chain(std::iter::once(&mut inv.carried))
+                .flatten()
             {
-                if let Some(s) = slot {
-                    self.finish_map_processing(s);
-                }
+                self.finish_map_processing(s);
             }
             if let Some(w) = window.as_ref() {
                 self.cartography_sound(w.pos);
@@ -14319,17 +14333,17 @@ impl PlayPlan {
             };
             if broken {
                 self.set_block(pos, AIR);
-            } else if let Some(next_name) = next_name {
-                if let Some(mut next) = self.survival.placement.default_state(next_name) {
-                    if let Some(facing) = self.survival.placement.prop(state, "facing") {
-                        next = self
-                            .survival
-                            .placement
-                            .with_prop(next, "facing", facing)
-                            .unwrap_or(next);
-                    }
-                    self.set_block(pos, next);
+            } else if let Some(next_name) = next_name
+                && let Some(mut next) = self.survival.placement.default_state(next_name)
+            {
+                if let Some(facing) = self.survival.placement.prop(state, "facing") {
+                    next = self
+                        .survival
+                        .placement
+                        .with_prop(next, "facing", facing)
+                        .unwrap_or(next);
                 }
+                self.set_block(pos, next);
             }
         }
         self.hub.send(
@@ -19595,13 +19609,14 @@ impl PlayPlan {
             }
         }
         let mut want = ChestState { facing, kind, ..c };
-        if kind != CHEST_SINGLE && c.copper != 0 {
-            if let Some(o) = self.chest_at(offset(pos, want.connected())) {
-                let stage = (c.copper - 1) % 4;
-                let other_stage = (o.copper - 1) % 4;
-                let waxed = c.copper > 4 && o.copper > 4;
-                want.copper = 1 + stage.min(other_stage) + if waxed { 4 } else { 0 };
-            }
+        if kind != CHEST_SINGLE
+            && c.copper != 0
+            && let Some(o) = self.chest_at(offset(pos, want.connected()))
+        {
+            let stage = (c.copper - 1) % 4;
+            let other_stage = (o.copper - 1) % 4;
+            let waxed = c.copper > 4 && o.copper > 4;
+            want.copper = 1 + stage.min(other_stage) + if waxed { 4 } else { 0 };
         }
         self.survival
             .chest_states

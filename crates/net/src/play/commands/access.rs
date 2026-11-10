@@ -473,7 +473,10 @@ impl PlayPlan {
         let text = |t: &str| serde_json::json!({ "text": t }).to_string();
         let ip = addr.ip().to_string();
         if self.vars.is_allowed(AccessList::BannedIps, &ip) {
-            return Some(("KICK_BANNED", text("Your IP address is banned from this server!")));
+            return Some((
+                "KICK_BANNED",
+                text("Your IP address is banned from this server!"),
+            ));
         }
         if self.vars.is_allowed(AccessList::BannedPlayers, name) {
             return Some(("KICK_BANNED", text("You are banned from this server.")));
@@ -482,7 +485,10 @@ impl PlayPlan {
             && self.op_level(uuid) == 0
             && !self.vars.is_allowed(AccessList::Whitelist, name)
         {
-            return Some(("KICK_WHITELIST", text("You are not white-listed on this server!")));
+            return Some((
+                "KICK_WHITELIST",
+                text("You are not white-listed on this server!"),
+            ));
         }
         // `bypassesPlayerLimit` у операторов не храним: в полный сервер не пускаем никого.
         if full {

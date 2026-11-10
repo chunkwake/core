@@ -14,20 +14,40 @@ fn sections(root: &Compound) -> HashMap<i32, Vec<String>> {
     };
     for s in list {
         let Tag::Compound(s) = s else { continue };
-        let Some(Tag::Byte(y)) = s.get("Y") else { continue };
-        let Some(Tag::Compound(bs)) = s.get("block_states") else { continue };
-        let Some(Tag::List(palette)) = bs.get("palette") else { continue };
+        let Some(Tag::Byte(y)) = s.get("Y") else {
+            continue;
+        };
+        let Some(Tag::Compound(bs)) = s.get("block_states") else {
+            continue;
+        };
+        let Some(Tag::List(palette)) = bs.get("palette") else {
+            continue;
+        };
         let names: Vec<String> = palette
             .iter()
             .map(|p| match p {
                 Tag::String(n) => n.clone(),
                 Tag::Compound(c) => match c.get("id").or(c.get("Name")) {
-                    Some(Tag::String(n)) => match c.get("properties") { Some(Tag::Compound(p)) if n.ends_with("water") && matches!(p.get("level"), Some(Tag::String(l)) if l != "0") => format!("{n}_flowing"), _ => n.clone() },
+                    Some(Tag::String(n)) => match c.get("properties") {
+                        Some(Tag::Compound(p))
+                            if n.ends_with("water")
+                                && matches!(p.get("level"), Some(Tag::String(l)) if l != "0") =>
+                        {
+                            format!("{n}_flowing")
+                        }
+                        _ => n.clone(),
+                    },
                     _ => "?".into(),
                 },
                 _ => "?".into(),
             })
-            .map(|n: String| if n.contains(':') { n } else { format!("minecraft:{n}") })
+            .map(|n: String| {
+                if n.contains(':') {
+                    n
+                } else {
+                    format!("minecraft:{n}")
+                }
+            })
             .collect();
         let blocks = match bs.get("data") {
             Some(Tag::LongArray(data)) => {
@@ -73,62 +93,97 @@ fn main() {
     };
     println!("{} chunk(s) loaded", chunks.len());
     let mut flowing: std::collections::BTreeMap<(i32, i32), (i32, i32, usize)> = Default::default();
-    for cx in ccx - r..=ccx + r { for cz in ccz - r..=ccz + r { for x in cx * 16..cx * 16 + 16 { for z in cz * 16..cz * 16 + 16 { for y in -64..120 { if block(x, y, z).is_some_and(|b| b.ends_with("_flowing")) { let e = flowing.entry((x & !7, z & !7)).or_insert((y, y, 0)); e.0 = e.0.min(y); e.1 = e.1.max(y); e.2 += 1; } } } } } }
-    for ((x, z), (lo, hi, n)) in &flowing { println!("flowing water near {x} {z}: {n} block(s), y {lo}..{hi}"); }
-    for y in (40..=90).rev() {
-        if let Some(b) = block(bx, y, bz) { if b != "minecraft:air" { println!("player column {y}: {b}"); } }
-    }
-    let seas: Vec<i32> = std::env::var("SEA").ok().map(|s| s.split(',').map(|v| v.parse().unwrap()).collect()).unwrap_or(vec![62]);
-    for sea in seas {
-    let mut holes = 0;
     for cx in ccx - r..=ccx + r {
         for cz in ccz - r..=ccz + r {
-            if !chunks.contains_key(&(cx, cz)) {
-                continue;
-            }
             for x in cx * 16..cx * 16 + 16 {
                 for z in cz * 16..cz * 16 + 16 {
-                    if block(x, sea, z) != Some("minecraft:air") {
-                        continue;
-                    }
-                    let wet = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-                        .iter()
-                        .any(|(dx, dz)| block(x + dx, sea, z + dz) == Some("minecraft:water"));
-                    if !wet {
-                        continue;
-                    }
-                    holes += 1;
-                    if holes <= 12 {
-                        let mut col = Vec::new();
-                        let mut y = sea;
-                        while y > -64 {
-                            let b = block(x, y, z).unwrap_or("-");
-                            col.push(format!("{y}:{}", b.trim_start_matches("minecraft:")));
-                            if !matches!(b, "minecraft:air" | "minecraft:water" | "minecraft:snow") {
-                                break;
-                            }
-                            y -= 1;
+                    for y in -64..120 {
+                        if block(x, y, z).is_some_and(|b| b.ends_with("_flowing")) {
+                            let e = flowing.entry((x & !7, z & !7)).or_insert((y, y, 0));
+                            e.0 = e.0.min(y);
+                            e.1 = e.1.max(y);
+                            e.2 += 1;
                         }
-                        // Свернуть повторы.
-                        let mut short: Vec<String> = Vec::new();
-                        for c in col {
-                            let name = c.split(':').nth(1).unwrap().to_string();
-                            if short.last().is_some_and(|l| l.ends_with(&format!(":{name}"))) && !short.last().unwrap().contains("..") {
-                                let last = short.pop().unwrap();
-                                short.push(format!("{}..{c}", last.split(':').next().unwrap()));
-                            } else if short.last().is_some_and(|l| l.ends_with(&format!(":{name}"))) {
-                                let last = short.pop().unwrap();
-                                short.push(format!("{}..{c}", last.split("..").next().unwrap()));
-                            } else {
-                                short.push(c);
-                            }
-                        }
-                        println!("hole at {x} {z}: {}", short.join(" "));
                     }
                 }
             }
         }
     }
-    println!("{holes} hole column(s) at y={sea} within {r} chunk(s) of {bx} {bz}");
+    for ((x, z), (lo, hi, n)) in &flowing {
+        println!("flowing water near {x} {z}: {n} block(s), y {lo}..{hi}");
+    }
+    for y in (40..=90).rev() {
+        if let Some(b) = block(bx, y, bz)
+            && b != "minecraft:air"
+        {
+            println!("player column {y}: {b}");
+        }
+    }
+    let seas: Vec<i32> = std::env::var("SEA")
+        .ok()
+        .map(|s| s.split(',').map(|v| v.parse().unwrap()).collect())
+        .unwrap_or(vec![62]);
+    for sea in seas {
+        let mut holes = 0;
+        for cx in ccx - r..=ccx + r {
+            for cz in ccz - r..=ccz + r {
+                if !chunks.contains_key(&(cx, cz)) {
+                    continue;
+                }
+                for x in cx * 16..cx * 16 + 16 {
+                    for z in cz * 16..cz * 16 + 16 {
+                        if block(x, sea, z) != Some("minecraft:air") {
+                            continue;
+                        }
+                        let wet = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                            .iter()
+                            .any(|(dx, dz)| block(x + dx, sea, z + dz) == Some("minecraft:water"));
+                        if !wet {
+                            continue;
+                        }
+                        holes += 1;
+                        if holes <= 12 {
+                            let mut col = Vec::new();
+                            let mut y = sea;
+                            while y > -64 {
+                                let b = block(x, y, z).unwrap_or("-");
+                                col.push(format!("{y}:{}", b.trim_start_matches("minecraft:")));
+                                if !matches!(
+                                    b,
+                                    "minecraft:air" | "minecraft:water" | "minecraft:snow"
+                                ) {
+                                    break;
+                                }
+                                y -= 1;
+                            }
+                            // Свернуть повторы.
+                            let mut short: Vec<String> = Vec::new();
+                            for c in col {
+                                let name = c.split(':').nth(1).unwrap().to_string();
+                                if short
+                                    .last()
+                                    .is_some_and(|l| l.ends_with(&format!(":{name}")))
+                                    && !short.last().unwrap().contains("..")
+                                {
+                                    let last = short.pop().unwrap();
+                                    short.push(format!("{}..{c}", last.split(':').next().unwrap()));
+                                } else if short
+                                    .last()
+                                    .is_some_and(|l| l.ends_with(&format!(":{name}")))
+                                {
+                                    let last = short.pop().unwrap();
+                                    short
+                                        .push(format!("{}..{c}", last.split("..").next().unwrap()));
+                                } else {
+                                    short.push(c);
+                                }
+                            }
+                            println!("hole at {x} {z}: {}", short.join(" "));
+                        }
+                    }
+                }
+            }
+        }
+        println!("{holes} hole column(s) at y={sea} within {r} chunk(s) of {bx} {bz}");
     }
 }

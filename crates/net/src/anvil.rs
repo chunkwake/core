@@ -122,11 +122,11 @@ pub fn compute(left: Slot, right: Slot, name: Option<&str>, ctx: &Ctx<'_>) -> Re
                     || left.item == ctx.enchanted_book
                     || def.supported.contains((ctx.item_name)(left.item));
                 for &(existing, _) in dest.iter().filter(|e| e.0 != id) {
-                    if let Some(other) = ctx.enchantments.iter().find(|d| d.id == existing) {
-                        if !def.compatible(other) {
-                            allowed = false;
-                            work = work.saturating_add(1);
-                        }
+                    if let Some(other) = ctx.enchantments.iter().find(|d| d.id == existing)
+                        && !def.compatible(other)
+                    {
+                        allowed = false;
+                        work = work.saturating_add(1);
                     }
                 }
                 if !allowed {

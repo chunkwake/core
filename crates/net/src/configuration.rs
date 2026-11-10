@@ -118,13 +118,19 @@ impl ConfigurationPlan {
                     .iter()
                     .map(|e| {
                         let path = e.strip_prefix("minecraft:").unwrap_or(e);
-                        let file = dir.join("data/minecraft").join(&r.name).join(format!("{path}.json"));
+                        let file = dir
+                            .join("data/minecraft")
+                            .join(&r.name)
+                            .join(format!("{path}.json"));
                         let text = std::fs::read_to_string(&file)
                             .map_err(|err| format!("{}: {err}", file.display()))?;
                         let json: serde_json::Value = serde_json::from_str(&text)
                             .map_err(|err| format!("{}: {err}", file.display()))?;
                         // Запись — любой тег: у части реестров это строка или список.
-                        Ok((e.clone(), chunkwake_world::nbt::write_network_tag(&json_to_nbt(&json))))
+                        Ok((
+                            e.clone(),
+                            chunkwake_world::nbt::write_network_tag(&json_to_nbt(&json)),
+                        ))
                     })
                     .collect::<Result<Vec<_>, String>>()?;
                 out.push(cfg::registry_data_full(
@@ -165,7 +171,9 @@ impl ConfigurationPlan {
                     match self.full_sync() {
                         Ok(full) => Some(full),
                         Err(error) => {
-                            tracing::warn!("registry data for a client without the vanilla pack: {error}");
+                            tracing::warn!(
+                                "registry data for a client without the vanilla pack: {error}"
+                            );
                             None
                         }
                     }
@@ -226,7 +234,10 @@ fn json_to_nbt(v: &serde_json::Value) -> chunkwake_world::nbt::Tag {
         Value::Array(a) => {
             let mut items: Vec<Tag> = a.iter().map(json_to_nbt).collect();
             // Числа вперемешку (`[1, 0.5]`) — все `Double`, как один тип.
-            if items.iter().all(|t| matches!(t, Tag::Int(_) | Tag::Long(_) | Tag::Double(_))) {
+            if items
+                .iter()
+                .all(|t| matches!(t, Tag::Int(_) | Tag::Long(_) | Tag::Double(_)))
+            {
                 if items.iter().any(|t| matches!(t, Tag::Double(_))) {
                     for t in &mut items {
                         *t = match *t {

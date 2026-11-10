@@ -2010,6 +2010,7 @@ fn place_in_world(
 }
 
 impl Processor {
+    #[allow(clippy::too_many_arguments)]
     fn apply(
         &self,
         pal: &Palette,
@@ -2438,11 +2439,10 @@ pub(crate) fn place_pool(
                 }
             } else if let Some(next) =
                 delegate.apply(pal, &*level, info.state, info.world, reference, r, true)
+                && next != info.state
             {
-                if next != info.state {
-                    info.state = next;
-                    replaced += 1;
-                }
+                info.state = next;
+                replaced += 1;
             }
         }
     }

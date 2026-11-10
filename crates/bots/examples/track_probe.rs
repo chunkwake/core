@@ -27,13 +27,11 @@ async fn main() {
     let mut resident = Client::connect(&a[1], "resident", Ids::load(&table).unwrap(), 777, "26.3")
         .await
         .unwrap();
-    let mut home = [0.0; 3];
-    loop {
+    let home = loop {
         if let Event::Position(p) = resident.next_event().await.unwrap() {
-            home = p;
-            break;
+            break p;
         }
-    }
+    };
     let keep = tokio::spawn(async move { drain(&mut resident, 6000).await });
     let target = ((home[0].floor() as i32) >> 4, (home[2].floor() as i32) >> 4);
     println!("resident chunk {target:?}");

@@ -88,7 +88,8 @@ impl PlayPlan {
         if !writable {
             return None;
         }
-        let pages: Vec<components::Filterable> = e.pages.iter().map(|p| (p.clone(), None)).collect();
+        let pages: Vec<components::Filterable> =
+            e.pages.iter().map(|p| (p.clone(), None)).collect();
         let signing = e.title.is_some();
         let mut new_extra = (*extra).clone();
         // Сырой патч держал прежнюю книгу: новая пишется разобранной.
@@ -113,7 +114,11 @@ impl PlayPlan {
         }
         new.extra = components::intern(new_extra);
         // `CraftEventFactory.handleEditBookEvent`: слот — только хотбар, иначе -1.
-        let event_slot = if (0..=8).contains(&e.slot) { e.slot } else { -1 };
+        let event_slot = if (0..=8).contains(&e.slot) {
+            e.slot
+        } else {
+            -1
+        };
         let reply = self
             .plugin_event(Event::EditBook, uuid, || {
                 format!(

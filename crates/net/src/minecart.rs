@@ -532,8 +532,8 @@ pub fn move_intent(forward: bool, back: bool, left: bool, right: bool, yaw: f32)
         (false, true) => -1.0,
         _ => 0.0,
     };
-    let (mut x, mut z) = (strafe as f64, fwd as f64);
-    let len2 = x * x + z * z;
+    let (mut x, mut z) = (strafe, fwd);
+    let len2: f64 = x * x + z * z;
     if len2 < 1.0e-7 {
         return [0.0, 0.0];
     }

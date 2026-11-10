@@ -376,10 +376,7 @@ mod tests {
             spawn_dimension: Some("minecraft:the_nether".into()),
             spawn_angle: [90.0, 0.0],
             seen_credits: true,
-            bukkit_values: Some(Compound::from([(
-                "myplugin:coins".into(),
-                Tag::Int(42),
-            )])),
+            bukkit_values: Some(Compound::from([("myplugin:coins".into(), Tag::Int(42))])),
             dimension: Some("minecraft:the_nether".into()),
             slots: vec![
                 (

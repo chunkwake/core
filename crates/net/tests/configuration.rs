@@ -198,9 +198,12 @@ async fn client_without_vanilla_pack_gets_full_registry_data() {
     let (addr, mut players) = start_with(plan().with_data_dir(&dir)).await;
     let mut c = login(addr).await;
     expect_greeting(&mut c).await;
-    c.send(&select_known_packs(SB_SELECT_KNOWN_PACKS, &[KnownPack::vanilla("1.21.1")]))
-        .await
-        .unwrap();
+    c.send(&select_known_packs(
+        SB_SELECT_KNOWN_PACKS,
+        &[KnownPack::vanilla("1.21.1")],
+    ))
+    .await
+    .unwrap();
 
     let p = c.read_packet().await.unwrap();
     let mut r = Reader::new(&p);

@@ -292,7 +292,9 @@ fn read_payload(r: &mut &[u8], id: u8, depth: usize) -> Result<Tag, String> {
                 let t = read_payload(r, elem, depth + 1)?;
                 // `ListTag`: обёртка `{"": значение}` разнотипного списка снимается.
                 l.push(match t {
-                    Tag::Compound(mut c) if is_wrapper(&c) => c.remove("").unwrap_or(Tag::Compound(c)),
+                    Tag::Compound(mut c) if is_wrapper(&c) => {
+                        c.remove("").unwrap_or(Tag::Compound(c))
+                    }
                     t => t,
                 });
             }

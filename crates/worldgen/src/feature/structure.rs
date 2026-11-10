@@ -1990,7 +1990,7 @@ impl Structures {
         let jigs = jigsaws(&element, parent_pos, parent_rot, rng);
         let mut inside: Option<Rc<RefCell<Space>>> = None;
         for parent_jig in &jigs {
-            let front = step(&parent_jig.front);
+            let front = step(parent_jig.front);
             let target = [
                 parent_jig.pos[0] + front[0],
                 parent_jig.pos[1] + front[1],
@@ -2167,7 +2167,7 @@ impl Structures {
         max: [i32; 3],
         aliases: &HashMap<String, String>,
     ) -> i32 {
-        let s = step(&jig.front);
+        let s = step(jig.front);
         let front = [jig.pos[0] + s[0], jig.pos[1] + s[1], jig.pos[2] + s[2]];
         if !inside_box(min, max, front) {
             return 0;
@@ -3676,8 +3676,8 @@ fn jigsaws(el: &Elem, pos: [i32; 3], rot: Rot, rng: &mut impl Bits) -> Vec<JigIn
         | Elem::Ruin(_) => Vec::new(),
         Elem::Feature { .. } => vec![JigInfo {
             pos,
-            front: "down".into(),
-            top: "south".into(),
+            front: "down",
+            top: "south",
             rollable: true,
             name: None,
             target: "minecraft:empty".into(),
@@ -3735,7 +3735,7 @@ fn y_span(el: &Elem) -> i32 {
 }
 
 fn can_attach(parent: &JigInfo, child: &JigInfo) -> bool {
-    if opposite(&parent.front) != child.front {
+    if opposite(parent.front) != child.front {
         return false;
     }
     if !parent.rollable && parent.top != child.top {

@@ -1232,7 +1232,10 @@ impl ChunkColumn {
             // `getUpdateTag`: костру — `Items`, табличкам — текст, знамени — узоры.
             if matches!(
                 be.id.as_str(),
-                "minecraft:campfire" | "minecraft:sign" | "minecraft:hanging_sign" | "minecraft:banner"
+                "minecraft:campfire"
+                    | "minecraft:sign"
+                    | "minecraft:hanging_sign"
+                    | "minecraft:banner"
             ) {
                 w.buf.extend(nbt::write_network(&be.nbt));
             } else {

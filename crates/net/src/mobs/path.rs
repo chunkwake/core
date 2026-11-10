@@ -202,7 +202,7 @@ pub fn load_cells(
     for (id, line) in text.lines().enumerate() {
         let mut f = line.split(',');
         let mut kind = PathType::from_name(f.next()?)?;
-        let mut bit = |b: u8| (f.next() == Some("1")).then_some(b).unwrap_or(0);
+        let mut bit = |b: u8| if f.next() == Some("1") { b } else { 0 };
         let mut flags = bit(Cell::LAND) | bit(Cell::AIR) | bit(Cell::SOLID);
         let s = id as u32;
         let name = pl.name(s).unwrap_or("");
@@ -526,18 +526,18 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
 
     // --- Типы клеток ------------------------------------------------------
 
-    fn from_state(&self, p: [i32; 3]) -> PathType {
+    fn state_type(&self, p: [i32; 3]) -> PathType {
         cell(self.w, p).kind
     }
 
     /// `getPathTypeStatic`: воздух над чем-то — по блоку снизу и соседям.
     fn type_static(&self, p: [i32; 3]) -> PathType {
-        let t = self.from_state(p);
+        let t = self.state_type(p);
         if t != PathType::Open || p[1] < self.m.min_y + 1 {
             return t;
         }
         use PathType::*;
-        match self.from_state([p[0], p[1] - 1, p[2]]) {
+        match self.state_type([p[0], p[1] - 1, p[2]]) {
             Open | Water | Lava | Walkable => Open,
             Fire => Fire,
             Damaging => Damaging,
@@ -557,7 +557,7 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
                     if dx == 0 && dz == 0 {
                         continue;
                     }
-                    match self.from_state([p[0] + dx, p[1] + dy, p[2] + dz]) {
+                    match self.state_type([p[0] + dx, p[1] + dy, p[2] + dz]) {
                         PathType::Damaging => return PathType::DamagingInNeighbor,
                         PathType::Fire | PathType::Lava => return PathType::FireInNeighbor,
                         PathType::Water => return PathType::WaterBorder,

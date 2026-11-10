@@ -331,7 +331,11 @@ pub(crate) fn cold_enough_to_snow(
     pos: [i32; 3],
     sea_level: i32,
 ) -> bool {
-    !(temperature(climate, biome, pos, sea_level) >= 0.15)
+    // `< 0.15` и NaN, как `!(t >= 0.15)` у ванили.
+    !matches!(
+        temperature(climate, biome, pos, sea_level).partial_cmp(&0.15),
+        Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+    )
 }
 
 #[derive(Clone, Default)]

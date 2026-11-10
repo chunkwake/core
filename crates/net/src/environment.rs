@@ -141,12 +141,12 @@ impl State {
         } else {
             self.burning = self.burning.saturating_sub(1);
         }
-        pulse.freeze = self.frozen >= MAX_FROZEN && tick % 40 == 0;
-        pulse.burn = self.burning > 0 && tick % 20 == 0;
-        pulse.lava = view.lava && tick % 10 == 0;
-        pulse.cactus = view.cactus && tick % 10 == 0;
-        pulse.berries = view.berries && tick % 20 == 0;
-        pulse.magma = view.magma && tick % 10 == 0;
+        pulse.freeze = self.frozen >= MAX_FROZEN && tick.is_multiple_of(40);
+        pulse.burn = self.burning > 0 && tick.is_multiple_of(20);
+        pulse.lava = view.lava && tick.is_multiple_of(10);
+        pulse.cactus = view.cactus && tick.is_multiple_of(10);
+        pulse.berries = view.berries && tick.is_multiple_of(20);
+        pulse.magma = view.magma && tick.is_multiple_of(10);
         pulse
     }
 }

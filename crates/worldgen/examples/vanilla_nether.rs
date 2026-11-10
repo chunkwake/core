@@ -426,7 +426,7 @@ fn compare(regions: &Path, data: &Path, seed: i64, radius: i32) -> Result<(), St
     println!("тики сервера (жидкости, нилий) {flows}");
     println!("блоков расходится {bad} в {checked} чанках");
     let mut bp: Vec<_> = biome_pairs.into_iter().collect();
-    bp.sort_by(|a, b| b.1.cmp(&a.1));
+    bp.sort_by_key(|a| std::cmp::Reverse(a.1));
     for ((a, b), n) in bp.iter().take(10) {
         println!("    {n:6}  биом наш {a:22} ваниль {b}");
     }

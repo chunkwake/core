@@ -123,7 +123,8 @@ pub fn find_api_dir(api_dir: &Path) -> Option<PathBuf> {
 impl Bridge {
     /// ViaVersion из `plugins/` как переводчик протокола; `None` — Via нет.
     pub fn translator(&self) -> Option<Arc<dyn chunkwake_net::translate::Translator>> {
-        via::ViaTranslator::new(self.table).map(|t| Arc::new(t) as Arc<dyn chunkwake_net::translate::Translator>)
+        via::ViaTranslator::new(self.table)
+            .map(|t| Arc::new(t) as Arc<dyn chunkwake_net::translate::Translator>)
     }
 
     /// Завершает плагины на их JVM-потоке и дожидается `onDisable`.
@@ -388,7 +389,12 @@ impl PluginHooks for Bridge {
 
     /// Свой поток на событие, как пул асинхронных событий Paper: upcall FFM
     /// сам подключает поток к JVM. Поток плагинов в это время не занят.
-    fn event_async(&self, kind: Event, uuid: Uuid, arg: String) -> Option<oneshot::Receiver<String>> {
+    fn event_async(
+        &self,
+        kind: Event,
+        uuid: Uuid,
+        arg: String,
+    ) -> Option<oneshot::Receiver<String>> {
         if !self.listens(kind) {
             return None;
         }

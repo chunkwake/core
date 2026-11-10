@@ -36,10 +36,17 @@ struct Fake {
 
 impl Translator for Fake {
     fn open(&self, protocol: i32, _addr: SocketAddr) -> Option<u64> {
-        (protocol == OLD || protocol == LEGACY).then(|| self.opened.fetch_add(1, Ordering::SeqCst) as u64 + 1)
+        (protocol == OLD || protocol == LEGACY)
+            .then(|| self.opened.fetch_add(1, Ordering::SeqCst) as u64 + 1)
     }
 
-    fn translate(&self, _id: u64, dir: Dir, packet: &[u8], out: &mut Translated) -> Result<(), String> {
+    fn translate(
+        &self,
+        _id: u64,
+        dir: Dir,
+        packet: &[u8],
+        out: &mut Translated,
+    ) -> Result<(), String> {
         match dir {
             Dir::Serverbound => {
                 let first = self.serverbound.fetch_add(1, Ordering::SeqCst) == 0;
@@ -128,7 +135,10 @@ async fn old_client_status_goes_through_translator() {
 
     // Переводчик ответил клиенту сам — сервер пакета не видел.
     c.send(&[ECHO_IN]).await.unwrap();
-    let mut got = vec![c.read_packet().await.unwrap(), c.read_packet().await.unwrap()];
+    let mut got = vec![
+        c.read_packet().await.unwrap(),
+        c.read_packet().await.unwrap(),
+    ];
     got.sort();
     assert_eq!(got, vec![vec![SCHEDULED], vec![ECHO_OUT]]);
 
@@ -233,7 +243,11 @@ async fn unknown_version_is_refused() {
     let p = c.read_packet().await.unwrap();
     let mut r = Reader::new(&p);
     assert_eq!(r.var_int().unwrap(), 0x00, "login disconnect");
-    assert!(r.string(32767).unwrap().contains("Unsupported client version"));
+    assert!(
+        r.string(32767)
+            .unwrap()
+            .contains("Unsupported client version")
+    );
     assert_eq!(fake.opened.load(Ordering::SeqCst), 0);
 }
 
@@ -247,7 +261,11 @@ async fn legacy_client_logs_in_without_compression() {
     c.send(&w.buf).await.unwrap();
     assert_eq!(c.read_packet().await.unwrap(), vec![SCHEDULED]);
     let p = c.read_packet().await.unwrap();
-    assert_eq!(Reader::new(&p).var_int().unwrap(), 0x02, "login success, no set_compression");
+    assert_eq!(
+        Reader::new(&p).var_int().unwrap(),
+        0x02,
+        "login success, no set_compression"
+    );
     c.send(&[0x03]).await.unwrap();
     c.flush().await.unwrap();
     let (_, conn) = rx.recv().await.unwrap();

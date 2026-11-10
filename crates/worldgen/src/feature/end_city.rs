@@ -16,7 +16,7 @@ const MAX_GEN_DEPTH: i32 = 8;
 #[derive(Clone, Debug)]
 pub(crate) struct Piece {
     /// Имя шаблона без `end_city/`: нужно сверке в тесте.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub name: String,
     pub template: Arc<Template>,
     pub origin: [i32; 3],

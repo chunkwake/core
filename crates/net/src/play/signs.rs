@@ -77,7 +77,11 @@ fn plain(t: &Tag) -> String {
         Tag::String(s) => s.clone(),
         Tag::List(l) => l.iter().map(plain).collect(),
         Tag::Compound(c) => {
-            let mut s = c.get("text").and_then(Tag::as_str).unwrap_or_default().to_owned();
+            let mut s = c
+                .get("text")
+                .and_then(Tag::as_str)
+                .unwrap_or_default()
+                .to_owned();
             if let Some(extra) = c.get("extra") {
                 s.push_str(&plain(extra));
             }
@@ -120,9 +124,23 @@ fn styled_like(old: &Tag, text: &str) -> Tag {
                 .filter(|(k, _)| {
                     !matches!(
                         k.as_str(),
-                        "text" | "extra" | "type" | "translate" | "with" | "fallback" | "score"
-                            | "selector" | "separator" | "keybind" | "nbt" | "source" | "block"
-                            | "entity" | "storage" | "interpret" | "object"
+                        "text"
+                            | "extra"
+                            | "type"
+                            | "translate"
+                            | "with"
+                            | "fallback"
+                            | "score"
+                            | "selector"
+                            | "separator"
+                            | "keybind"
+                            | "nbt"
+                            | "source"
+                            | "block"
+                            | "entity"
+                            | "storage"
+                            | "interpret"
+                            | "object"
                     )
                 })
                 .map(|(k, v)| (k.clone(), v.clone()))
@@ -257,7 +275,12 @@ impl PlayPlan {
     fn sign_packet(&self, pos: [i32; 3], id: &str, nbt: &Compound) -> Option<Vec<u8>> {
         let kind = *chunkwake_world::BLOCK_ENTITY_TYPES.get()?.get(id)?;
         let bytes = chunkwake_world::nbt::write_network(nbt);
-        Some(play::block_entity_data(self.ids.block_entity_data, pos, kind, &bytes))
+        Some(play::block_entity_data(
+            self.ids.block_entity_data,
+            pos,
+            kind,
+            &bytes,
+        ))
     }
 
     /// Табличка в этом месте: тип блок-сущности и её NBT.
@@ -285,7 +308,12 @@ impl PlayPlan {
 
     /// `isWithinBlockInteractionRange(pos, 4.0)`: дальность руки + 4.
     fn sign_in_range(&self, uuid: Uuid, pos: [i32; 3], extra: f64) -> bool {
-        let creative = self.live.lock().unwrap().get(&uuid).is_some_and(|l| l.game_mode == 1);
+        let creative = self
+            .live
+            .lock()
+            .unwrap()
+            .get(&uuid)
+            .is_some_and(|l| l.game_mode == 1);
         let reach = if creative { 5.0 } else { 4.5 };
         self.player_at(uuid)
             .is_some_and(|(p, _, _)| block_reach(eye_of(p), pos, reach + extra))
@@ -307,7 +335,13 @@ impl PlayPlan {
 
     /// `SignBlock.openTextEdit`: `PlayerOpenSignEvent` (и `PlayerSignOpenEvent`
     /// при слушателях), затем редактор у клиента и право правки.
-    pub(super) async fn open_sign(&self, uuid: Uuid, pos: [i32; 3], front: bool, cause: &str) -> bool {
+    pub(super) async fn open_sign(
+        &self,
+        uuid: Uuid,
+        pos: [i32; 3],
+        front: bool,
+        cause: &str,
+    ) -> bool {
         let side = if front { "FRONT" } else { "BACK" };
         if self
             .cancelled(Event::OpenSign, uuid, || {
@@ -328,8 +362,14 @@ impl PlayPlan {
             .unwrap()
             .insert((self.active_dim(), pos), uuid);
         let state = self.block(pos).unwrap_or(AIR);
-        self.send_to(uuid, play::block_update(self.ids.block_update, pos, state as i32));
-        self.send_to(uuid, play::open_sign_editor(self.ids.open_sign_editor, pos, front));
+        self.send_to(
+            uuid,
+            play::block_update(self.ids.block_update, pos, state as i32),
+        );
+        self.send_to(
+            uuid,
+            play::open_sign_editor(self.ids.open_sign_editor, pos, front),
+        );
     }
 
     /// Редактор после установки (`ItemStack.useOn`, причина `PLACE`).
@@ -364,7 +404,10 @@ impl PlayPlan {
         let item = held.map(|s| self.item_name(s.item).to_owned());
         let applicator = item.as_deref().filter(|n| {
             dye_color(n).is_some()
-                || matches!(*n, "minecraft:ink_sac" | "minecraft:glow_ink_sac" | "minecraft:honeycomb")
+                || matches!(
+                    *n,
+                    "minecraft:ink_sac" | "minecraft:glow_ink_sac" | "minecraft:honeycomb"
+                )
         });
         if let Some(item) = applicator
             && may_build
@@ -378,13 +421,17 @@ impl PlayPlan {
                 && match item {
                     "minecraft:honeycomb" => {
                         nbt.insert("is_waxed".into(), Tag::Byte(1));
-                        self.hub.send(None, play::level_event(self.ids.level_event, 3003, pos, 0, false));
+                        self.hub.send(
+                            None,
+                            play::level_event(self.ids.level_event, 3003, pos, 0, false),
+                        );
                         self.block_sound(None, "minecraft:item.honeycomb.wax_on", pos, 1.0, 1.0);
                         true
                     }
                     "minecraft:glow_ink_sac" | "minecraft:ink_sac" => {
                         let glow = item == "minecraft:glow_ink_sac";
-                        let was = matches!(text.get("has_glowing_text"), Some(Tag::Byte(b)) if *b != 0);
+                        let was =
+                            matches!(text.get("has_glowing_text"), Some(Tag::Byte(b)) if *b != 0);
                         if was == glow {
                             false
                         } else {
@@ -416,7 +463,11 @@ impl PlayPlan {
                 self.put_sign(pos, id, nbt);
                 // `GameEvent.BLOCK_CHANGE` от игрока.
                 self.emit_vibration(
-                    [pos[0] as f64 + 0.5, pos[1] as f64 + 0.5, pos[2] as f64 + 0.5],
+                    [
+                        pos[0] as f64 + 0.5,
+                        pos[1] as f64 + 0.5,
+                        pos[2] as f64 + 0.5,
+                    ],
                     "minecraft:block_change",
                 );
                 return SignUse::Applied;
@@ -487,7 +538,11 @@ impl PlayPlan {
         let key = side_key(u.front);
         let mut text = side(&nbt, u.front);
         let old = messages(&text);
-        let mut lines: Vec<Tag> = old.iter().zip(&raw).map(|(o, r)| styled_like(o, r)).collect();
+        let mut lines: Vec<Tag> = old
+            .iter()
+            .zip(&raw)
+            .map(|(o, r)| styled_like(o, r))
+            .collect();
         let mut filtered: Vec<Tag> = old
             .iter()
             .zip(&raw)
@@ -525,7 +580,10 @@ impl PlayPlan {
             text.insert("messages".into(), Tag::List(lines));
             nbt.insert(key.into(), Tag::Compound(text));
         }
-        self.sign_editors.lock().unwrap().remove(&(self.active_dim(), pos));
+        self.sign_editors
+            .lock()
+            .unwrap()
+            .remove(&(self.active_dim(), pos));
         self.put_sign(pos, id, nbt);
     }
 
@@ -533,7 +591,9 @@ impl PlayPlan {
     /// `sign x y z\n<json>` — записать и разослать (`Sign.update`).
     pub(super) fn sign_request(&self, rest: &str) -> String {
         let (head, body) = rest.split_once('\n').unwrap_or((rest, ""));
-        let mut it = head.split_whitespace().filter_map(|v| v.parse::<i32>().ok());
+        let mut it = head
+            .split_whitespace()
+            .filter_map(|v| v.parse::<i32>().ok());
         let (Some(x), Some(y), Some(z)) = (it.next(), it.next(), it.next()) else {
             return String::new();
         };
@@ -587,7 +647,11 @@ impl PlayPlan {
                 s.insert("has_glowing_text".into(), Tag::Byte(g as i8));
             }
             if let Some(l) = sv.get("lines").and_then(|l| l.as_array()) {
-                let mut lines: Vec<Tag> = l.iter().take(4).map(crate::stack_nbt::json_to_tag).collect();
+                let mut lines: Vec<Tag> = l
+                    .iter()
+                    .take(4)
+                    .map(crate::stack_nbt::json_to_tag)
+                    .collect();
                 lines.resize(4, Tag::String(String::new()));
                 s.insert("messages".into(), Tag::List(lines));
                 s.remove("filtered_messages");
@@ -607,8 +671,14 @@ mod tests {
     fn entity_by_block_name() {
         assert_eq!(sign_entity("minecraft:oak_sign"), Some(SIGN));
         assert_eq!(sign_entity("minecraft:spruce_wall_sign"), Some(SIGN));
-        assert_eq!(sign_entity("minecraft:cherry_hanging_sign"), Some(HANGING_SIGN));
-        assert_eq!(sign_entity("minecraft:bamboo_wall_hanging_sign"), Some(HANGING_SIGN));
+        assert_eq!(
+            sign_entity("minecraft:cherry_hanging_sign"),
+            Some(HANGING_SIGN)
+        );
+        assert_eq!(
+            sign_entity("minecraft:bamboo_wall_hanging_sign"),
+            Some(HANGING_SIGN)
+        );
         assert_eq!(sign_entity("minecraft:oak_planks"), None);
     }
 
@@ -624,15 +694,51 @@ mod tests {
     #[test]
     fn facing_side_follows_rotation_and_wall() {
         // Стоячая табличка `rotation=0` смотрит на юг (+z): игрок южнее — лицо.
-        assert!(facing_front([0, 64, 0], Some(0), None, false, [0.5, 64.0, 3.0]));
-        assert!(!facing_front([0, 64, 0], Some(0), None, false, [0.5, 64.0, -3.0]));
+        assert!(facing_front(
+            [0, 64, 0],
+            Some(0),
+            None,
+            false,
+            [0.5, 64.0, 3.0]
+        ));
+        assert!(!facing_front(
+            [0, 64, 0],
+            Some(0),
+            None,
+            false,
+            [0.5, 64.0, -3.0]
+        ));
         // `rotation=8` (180°) — наоборот.
-        assert!(facing_front([0, 64, 0], Some(8), None, false, [0.5, 64.0, -3.0]));
+        assert!(facing_front(
+            [0, 64, 0],
+            Some(8),
+            None,
+            false,
+            [0.5, 64.0, -3.0]
+        ));
         // Настенная `facing=north` у южной стены: игрок севернее — лицо.
-        assert!(facing_front([0, 64, 0], None, Some("north"), true, [0.5, 64.0, -2.0]));
+        assert!(facing_front(
+            [0, 64, 0],
+            None,
+            Some("north"),
+            true,
+            [0.5, 64.0, -2.0]
+        ));
         // Стоя в той же клетке перед доской (z < 0,9375) — тоже лицо.
-        assert!(facing_front([0, 64, 0], None, Some("north"), true, [0.5, 64.0, 0.5]));
-        assert!(facing_front([0, 64, 0], None, Some("east"), true, [3.0, 64.0, 0.5]));
+        assert!(facing_front(
+            [0, 64, 0],
+            None,
+            Some("north"),
+            true,
+            [0.5, 64.0, 0.5]
+        ));
+        assert!(facing_front(
+            [0, 64, 0],
+            None,
+            Some("east"),
+            true,
+            [3.0, 64.0, 0.5]
+        ));
     }
 
     #[test]
@@ -646,7 +752,12 @@ mod tests {
         ]));
         text.insert(
             "messages".into(),
-            Tag::List(vec![red.clone(), Tag::String(String::new()), Tag::String(String::new()), Tag::String(String::new())]),
+            Tag::List(vec![
+                red.clone(),
+                Tag::String(String::new()),
+                Tag::String(String::new()),
+                Tag::String(String::new()),
+            ]),
         );
         assert!(has_message(&text));
         assert_eq!(
@@ -656,8 +767,14 @@ mod tests {
                 ("color".into(), Tag::String("red".into())),
             ]))
         );
-        assert_eq!(styled_like(&Tag::String("x".into()), "y"), Tag::String("y".into()));
-        let tr = Tag::Compound(Compound::from([("translate".into(), Tag::String("a.b".into()))]));
+        assert_eq!(
+            styled_like(&Tag::String("x".into()), "y"),
+            Tag::String("y".into())
+        );
+        let tr = Tag::Compound(Compound::from([(
+            "translate".into(),
+            Tag::String("a.b".into()),
+        )]));
         text.insert("messages".into(), Tag::List(vec![tr]));
         assert!(!has_editable_text(&text));
     }

@@ -50,10 +50,15 @@ pub struct ViaTranslator {
 impl ViaTranslator {
     /// `None` — Java не поставила слоты (Via не загружена).
     pub(super) fn new(table: &'static Table) -> Option<Self> {
-        [Slot::UpViaOpen, Slot::UpVia, Slot::UpViaPoll, Slot::UpViaClose]
-            .iter()
-            .all(|&s| get(table, s) != 0)
-            .then_some(Self { table })
+        [
+            Slot::UpViaOpen,
+            Slot::UpVia,
+            Slot::UpViaPoll,
+            Slot::UpViaClose,
+        ]
+        .iter()
+        .all(|&s| get(table, s) != 0)
+        .then_some(Self { table })
     }
 
     /// Вызов Java с коллектором этого потока; результат — в `out`.
@@ -87,7 +92,13 @@ impl Translator for ViaTranslator {
         u64::try_from(id).ok().filter(|&id| id > 0)
     }
 
-    fn translate(&self, id: u64, dir: Dir, packet: &[u8], out: &mut Translated) -> Result<(), String> {
+    fn translate(
+        &self,
+        id: u64,
+        dir: Dir,
+        packet: &[u8],
+        out: &mut Translated,
+    ) -> Result<(), String> {
         let translate = unsafe { up::<TranslateFn>(self.table, Slot::UpVia) };
         let dir = match dir {
             Dir::Serverbound => SERVERBOUND,

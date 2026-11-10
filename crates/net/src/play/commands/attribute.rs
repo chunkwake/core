@@ -860,7 +860,9 @@ impl PlayPlan {
                 let (Some(id), Some(amount), Some(op)) = (
                     it.next().and_then(location),
                     it.next().and_then(|v| v.parse::<f64>().ok()),
-                    it.next().and_then(|v| v.parse::<i32>().ok()).filter(|o| (0..=2).contains(o)),
+                    it.next()
+                        .and_then(|v| v.parse::<i32>().ok())
+                        .filter(|o| (0..=2).contains(o)),
                 ) else {
                     return String::new();
                 };

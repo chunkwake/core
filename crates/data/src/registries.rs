@@ -198,7 +198,10 @@ pub fn all_keys(
     for (name, entries) in builtin {
         let mut v: Vec<(&i32, &String)> = entries.iter().map(|(k, id)| (id, k)).collect();
         v.sort();
-        out.insert(name.clone(), v.into_iter().map(|(_, k)| k.clone()).collect());
+        out.insert(
+            name.clone(),
+            v.into_iter().map(|(_, k)| k.clone()).collect(),
+        );
     }
     for r in &data.synchronized {
         out.insert(r.name.clone(), r.entries.clone());
@@ -220,7 +223,10 @@ pub fn all_keys(
     );
     out.insert(
         "worldgen/structure".into(),
-        structures.into_iter().map(|s| format!("minecraft:{s}")).collect(),
+        structures
+            .into_iter()
+            .map(|s| format!("minecraft:{s}"))
+            .collect(),
     );
     // `MusicInstrument`: `ключ звук длительность дальность`.
     let dir = root.join("data/minecraft/instrument");

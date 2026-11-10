@@ -333,7 +333,9 @@ impl Server {
         // Клиенты до 1.8 (протокол 47) сжатия не знают: ViaRewind гасит пакет
         // set_compression, и кадры должны остаться несжатыми.
         if self.config.compression_threshold >= 0
-            && conn.client_protocol().is_none_or(|p| p >= COMPRESSION_SINCE)
+            && conn
+                .client_protocol()
+                .is_none_or(|p| p >= COMPRESSION_SINCE)
         {
             conn.send(&packets::set_compression(self.config.compression_threshold))
                 .await?;

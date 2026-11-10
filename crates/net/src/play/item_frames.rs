@@ -223,7 +223,7 @@ impl PlayPlan {
         Tracked {
             id,
             // Позиция сущности — центр её коробки (`recalculateBoundingBox`).
-            pos: center(f.pos, f.facing as usize),
+            pos: center(f.pos, f.facing),
             range: self.tracking_range(ty),
         }
     }

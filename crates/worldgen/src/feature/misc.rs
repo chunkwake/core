@@ -2978,11 +2978,11 @@ impl SculkPatch {
             put(level, at, self.sculk);
             self.spread_all(pal, level, self.sculk, at, 3);
             let skip = support ^ 1;
-            for d in 0..6 {
+            for (d, &dir) in DIRS.iter().enumerate().take(6) {
                 if d == skip {
                     continue;
                 }
-                let vp = add(at, DIRS[d]);
+                let vp = add(at, dir);
                 let vs = get(level, vp);
                 if pal.same_block(vs, self.vein.block) {
                     self.discharged(pal, level, Behaviour::Vein, vs, vp);

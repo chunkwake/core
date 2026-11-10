@@ -3,6 +3,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+/// Отложенные тики одного чанка: позиция и срок.
+type Parked = Vec<([i32; 3], u64)>;
+
 #[derive(Default)]
 pub struct TickQueue {
     /// Срок тика по позиции — истина; в `by_time` могут остаться устаревшие записи.
@@ -11,7 +14,7 @@ pub struct TickQueue {
     /// Наступившие тики чанков, которые сейчас не тикают (`LevelChunkTicks`
     /// выгруженного или нетикающего чанка у ванили): лежат по чанку и не
     /// перебираются каждый тик, а возвращаются целиком [`Self::unpark`].
-    parked: HashMap<(i32, i32), Vec<([i32; 3], u64)>>,
+    parked: HashMap<(i32, i32), Parked>,
 }
 
 impl TickQueue {

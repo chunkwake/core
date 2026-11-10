@@ -851,8 +851,8 @@ mod tests {
     #[test]
     fn smithing_shift_consumes_one_of_each_input_per_result() {
         let mut slots = vec![None; Kind::Smithing.size()];
-        for i in 0..3 {
-            slots[i] = Some(Stack::new(i as i32 + 1, 2));
+        for (i, slot) in slots.iter_mut().enumerate().take(3) {
+            *slot = Some(Stack::new(i as i32 + 1, 2));
         }
         slots[3] = Some(Stack::new(4, 1));
         let mut carried = None;
@@ -936,7 +936,6 @@ mod tests {
         menu.click(2, 0, SWAP);
         assert_eq!(menu.slots[2], Some(Stack::new(2, 1)));
         assert_eq!(*menu.carried, None);
-        drop(menu);
         assert!(!taken);
     }
 

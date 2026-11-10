@@ -452,7 +452,10 @@ pub(super) fn clear(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     // Предел — на каждого игрока, как в `ClearInventoryCommands`.
     let counts: Vec<i32> = targets
         .iter()
-        .map(|t| ctx.plan.clear_matching(t.uuid, ids, extra, damage, max, test))
+        .map(|t| {
+            ctx.plan
+                .clear_matching(t.uuid, ids, extra, damage, max, test)
+        })
         .collect();
     clear_feedback(&targets, &counts, test)
 }
@@ -475,7 +478,10 @@ fn clear_feedback(targets: &[Target], counts: &[i32], test: bool) -> Outcome {
     let (single, multiple) = if test {
         ("commands.clear.test.single", "commands.clear.test.multiple")
     } else {
-        ("commands.clear.success.single", "commands.clear.success.multiple")
+        (
+            "commands.clear.success.single",
+            "commands.clear.success.multiple",
+        )
     };
     match hit.as_slice() {
         [(one, n)] => Outcome::Feedback(translate(

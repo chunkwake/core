@@ -28,7 +28,13 @@ pub trait Translator: Send + Sync {
     /// Переводит пакет `packet`, идущий в направлении `dir`, дописывая
     /// результат в `out`. `Err` — переводчик закрыл соединение (причину
     /// клиенту он уже отправил в `out`).
-    fn translate(&self, id: u64, dir: Dir, packet: &[u8], out: &mut Translated) -> Result<(), String>;
+    fn translate(
+        &self,
+        id: u64,
+        dir: Dir,
+        packet: &[u8],
+        out: &mut Translated,
+    ) -> Result<(), String>;
     /// Пакеты, которые переводчик отправил сам между вызовами (по таймеру).
     fn poll(&self, id: u64, out: &mut Translated) -> Result<(), String>;
     /// Сессия больше не нужна.

@@ -405,7 +405,10 @@ mod plugin_tests {
     use super::*;
 
     fn cmds(lines: &[&str]) -> Vec<PluginCommand> {
-        lines.iter().filter_map(|l| PluginCommand::parse(l)).collect()
+        lines
+            .iter()
+            .filter_map(|l| PluginCommand::parse(l))
+            .collect()
     }
 
     /// Как в Paper: `/version` плагина заменяет ванильную, `minecraft:` её возвращает.
@@ -421,10 +424,8 @@ mod plugin_tests {
 
     #[test]
     fn access_by_level() {
-        let [all, op, notop, none, bare] = [
-            "a\ttrue", "b\top", "c\tnotop", "d\tfalse", "e",
-        ]
-        .map(|l| PluginCommand::parse(l).unwrap());
+        let [all, op, notop, none, bare] = ["a\ttrue", "b\top", "c\tnotop", "d\tfalse", "e"]
+            .map(|l| PluginCommand::parse(l).unwrap());
         assert!(all.visible(0) && all.visible(4));
         assert!(!op.visible(0) && op.visible(1) && op.visible(4));
         assert!(notop.visible(0) && !notop.visible(2));
@@ -449,7 +450,10 @@ mod plugin_tests {
         let all = names(vanilla_roots(4, &[]));
         assert!(all.iter().any(|n| n == "teleport") && all.iter().any(|n| n == "tp"));
         let left = names(vanilla_roots(4, &cmds(&["teleport"])));
-        assert!(!left.iter().any(|n| n == "teleport" || n == "tp"), "{left:?}");
+        assert!(
+            !left.iter().any(|n| n == "teleport" || n == "tp"),
+            "{left:?}"
+        );
         assert!(left.iter().any(|n| n == "give"));
     }
 }

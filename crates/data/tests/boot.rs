@@ -102,5 +102,8 @@ fn plugin_registry_keys_if_available() {
         .iter()
         .find(|l| l.starts_with("minecraft:ponder_goat_horn "))
         .unwrap();
-    assert_eq!(horn, "minecraft:ponder_goat_horn minecraft:item.goat_horn.sound.0 7 256");
+    assert_eq!(
+        horn,
+        "minecraft:ponder_goat_horn minecraft:item.goat_horn.sound.0 7 256"
+    );
 }

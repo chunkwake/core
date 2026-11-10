@@ -830,7 +830,7 @@ fn survival_data(
         jukebox_songs: chunkwake_data::world::load_jukebox_songs(data_dir, items, registries)
             .map_err(s)?,
         map_colors: std::sync::Arc::new(
-            chunkwake_data::world::load_map_colors(data_dir, &blocks).map_err(s)?,
+            chunkwake_data::world::load_map_colors(data_dir, blocks).map_err(s)?,
         ),
         block_names: block_names.clone(),
         block_types: chunkwake_data::registries::builtin_ids_of(builtin, "block").map_err(s)?,

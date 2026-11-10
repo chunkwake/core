@@ -56,8 +56,8 @@ impl Probe {
                     entity_id, delta, ..
                 } => {
                     if let Some(s) = self.seen.get_mut(&entity_id) {
-                        for i in 0..3 {
-                            s.1[i] += delta[i];
+                        for (a, d) in s.1.iter_mut().zip(delta) {
+                            *a += d;
                         }
                     }
                 }

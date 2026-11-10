@@ -17,6 +17,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 
+/// `getBaseHeight` по столбцам: `WORLD_SURFACE_WG` и `OCEAN_FLOOR_WG`.
+type BaseHeights = Mutex<HashMap<(i32, i32), (i32, i32)>>;
+/// `getBaseColumn` по столбцам.
+type BaseColumns = Mutex<HashMap<(i32, i32), Arc<Vec<Fill>>>>;
+
 /// Блоки чанка по индексу `((y - min_y) * 16 + z) * 16 + x` и его биомы
 /// по клеткам 4×4×4 (`None` — климата нет, мир из одного биома).
 ///
@@ -121,9 +126,9 @@ pub struct Overworld {
     stone: u32,
     features: Option<Features>,
     /// `getBaseHeight` по столбцам: `WORLD_SURFACE_WG` и `OCEAN_FLOOR_WG`.
-    base_heights: Mutex<HashMap<(i32, i32), (i32, i32)>>,
+    base_heights: BaseHeights,
     /// `getBaseColumn`: шум с акифером, по столбцам.
-    base_columns: Mutex<HashMap<(i32, i32), Arc<Vec<Fill>>>>,
+    base_columns: BaseColumns,
     area_soft_limit: usize,
     area_evict_slack: usize,
     base_column_limit: usize,
@@ -1419,8 +1424,8 @@ pub(crate) struct Cols<'a> {
     pub(crate) carve: CarveBlocks,
     pub(crate) stone: u32,
     pub(crate) palette: &'a feature::Palette,
-    pub(crate) heights: &'a Mutex<HashMap<(i32, i32), (i32, i32)>>,
-    pub(crate) bases: &'a Mutex<HashMap<(i32, i32), Arc<Vec<Fill>>>>,
+    pub(crate) heights: &'a BaseHeights,
+    pub(crate) bases: &'a BaseColumns,
     pub(crate) base_limit: usize,
 }
 

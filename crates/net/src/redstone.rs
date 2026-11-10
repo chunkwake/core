@@ -2611,7 +2611,7 @@ mod tests {
         let rect = find_portal([0, 1, 0], -64, true, is_frame, is_empty).expect("рамка найдена");
         assert_eq!(rect.width, 2);
         assert_eq!(rect.height, 3);
-        assert_eq!(rect.along_x, true);
+        assert!(rect.along_x);
         assert_eq!(rect.bottom_left, [0, 1, 0]);
         assert_eq!(rect.axis(), "x");
         // Внутри 2×3 = 6 блоков, рамка по периметру.

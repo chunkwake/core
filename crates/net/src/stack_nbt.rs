@@ -122,11 +122,13 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>) -> Option<S
         return None;
     }
     let mut s = Stack::new(item, count);
-    let mut e = Extra::default();
-    e.book_pages = c
-        .get("chunkwake:book_pages")
-        .and_then(Tag::as_i64)
-        .map(|n| n.clamp(0, 100) as i32);
+    let mut e = Extra {
+        book_pages: c
+            .get("chunkwake:book_pages")
+            .and_then(Tag::as_i64)
+            .map(|n| n.clamp(0, 100) as i32),
+        ..Extra::default()
+    };
     if let Some(Tag::Compound(m)) = c.get("components") {
         e.book = book_from_components(m);
         if let Some(book) = &e.book {
@@ -226,12 +228,14 @@ fn filterable_tag(v: &components::Filterable, value: &dyn Fn(&str) -> Tag) -> Ta
 }
 
 /// Обратно; принимает и голое значение (`Filterable.passThrough`).
-fn filterable_from(t: &Tag, value: &dyn Fn(&Tag) -> Option<String>) -> Option<components::Filterable> {
+fn filterable_from(
+    t: &Tag,
+    value: &dyn Fn(&Tag) -> Option<String>,
+) -> Option<components::Filterable> {
     match t {
-        Tag::Compound(c) if c.contains_key("raw") => Some((
-            value(c.get("raw")?)?,
-            c.get("filtered").and_then(value),
-        )),
+        Tag::Compound(c) if c.contains_key("raw") => {
+            Some((value(c.get("raw")?)?, c.get("filtered").and_then(value)))
+        }
         other => Some((value(other)?, None)),
     }
 }
@@ -240,12 +244,7 @@ fn filterable_from(t: &Tag, value: &dyn Fn(&Tag) -> Option<String>) -> Option<co
 /// (`ComponentSerialization.flatRestrictedCodec`).
 fn book_to_tag(b: &components::Book) -> (&'static str, Tag) {
     let string = |s: &str| Tag::String(s.to_owned());
-    let pages = Tag::List(
-        b.pages
-            .iter()
-            .map(|p| filterable_tag(p, &string))
-            .collect(),
-    );
+    let pages = Tag::List(b.pages.iter().map(|p| filterable_tag(p, &string)).collect());
     let mut c = Compound::new();
     if !b.pages.is_empty() {
         c.insert("pages".into(), pages);
@@ -279,10 +278,18 @@ fn book_from_components(m: &Compound) -> Option<components::Book> {
     let pages = |c: &Compound, value: &dyn Fn(&Tag) -> Option<String>| {
         c.get("pages")
             .and_then(Tag::as_list)
-            .map(|l| l.iter().take(100).filter_map(|p| filterable_from(p, value)).collect())
+            .map(|l| {
+                l.iter()
+                    .take(100)
+                    .filter_map(|p| filterable_from(p, value))
+                    .collect()
+            })
             .unwrap_or_default()
     };
-    if let Some(c) = m.get("minecraft:written_book_content").and_then(Tag::as_compound) {
+    if let Some(c) = m
+        .get("minecraft:written_book_content")
+        .and_then(Tag::as_compound)
+    {
         return Some(components::Book {
             written: true,
             pages: pages(c, &text),
@@ -290,8 +297,16 @@ fn book_from_components(m: &Compound) -> Option<components::Book> {
                 .get("title")
                 .and_then(|t| filterable_from(t, &string))
                 .unwrap_or_default(),
-            author: c.get("author").and_then(Tag::as_str).unwrap_or_default().to_owned(),
-            generation: c.get("generation").and_then(Tag::as_i64).unwrap_or(0).clamp(0, 3) as i32,
+            author: c
+                .get("author")
+                .and_then(Tag::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            generation: c
+                .get("generation")
+                .and_then(Tag::as_i64)
+                .unwrap_or(0)
+                .clamp(0, 3) as i32,
             resolved: c.get("resolved").and_then(Tag::as_i64).unwrap_or(0) != 0,
         });
     }
@@ -304,7 +319,13 @@ fn book_to_json(b: &components::Book) -> Value {
     let pages: Vec<Value> = b
         .pages
         .iter()
-        .map(|(raw, _)| if b.written { parse(raw) } else { Value::String(raw.clone()) })
+        .map(|(raw, _)| {
+            if b.written {
+                parse(raw)
+            } else {
+                Value::String(raw.clone())
+            }
+        })
         .collect();
     let mut j = serde_json::json!({"written": b.written, "pages": pages});
     if b.written {
@@ -338,11 +359,22 @@ fn book_from_json(j: &Value) -> Option<components::Book> {
         written,
         pages,
         title: (
-            j.get("title").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            j.get("title")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
             None,
         ),
-        author: j.get("author").and_then(Value::as_str).unwrap_or_default().to_owned(),
-        generation: j.get("generation").and_then(Value::as_i64).unwrap_or(0).clamp(0, 3) as i32,
+        author: j
+            .get("author")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        generation: j
+            .get("generation")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .clamp(0, 3) as i32,
         resolved: j.get("resolved").and_then(Value::as_bool).unwrap_or(false),
     })
 }
@@ -458,12 +490,14 @@ pub fn from_line(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<St
     let mut s = Stack::new(item, count);
     if let Some(Value::Object(j)) = it.next().and_then(|t| serde_json::from_str(t).ok()) {
         s.damage = j.get("damage").and_then(Value::as_i64).unwrap_or(0).max(0) as i32;
-        let mut e = Extra::default();
-        e.repair_cost = j
-            .get("repair_cost")
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
-            .clamp(0, i32::MAX as i64) as i32;
+        let mut e = Extra {
+            repair_cost: j
+                .get("repair_cost")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .clamp(0, i32::MAX as i64) as i32,
+            ..Extra::default()
+        };
         e.map_id = j.get("map_id").and_then(Value::as_i64).map(|v| v as i32);
         e.trim = j.get("trim").and_then(|trim| {
             components::trim_ids(
@@ -760,7 +794,10 @@ mod tests {
     fn books_round_trip_through_nbt_and_bridge_line() {
         let book = components::Book {
             written: true,
-            pages: vec![("{\"text\":\"Hi\"}".into(), None), ("\"plain\"".into(), None)],
+            pages: vec![
+                ("{\"text\":\"Hi\"}".into(), None),
+                ("\"plain\"".into(), None),
+            ],
             title: ("Title".into(), None),
             author: "Steve".into(),
             generation: 2,
@@ -777,7 +814,10 @@ mod tests {
         let nbt = to_nbt(stack, "minecraft:written_book").unwrap();
         // Ваниль: страницы подписанной книги — JSON строкой в `{raw: ...}`.
         let comps = nbt.get("components").and_then(Tag::as_compound).unwrap();
-        let content = comps.get("minecraft:written_book_content").and_then(Tag::as_compound).unwrap();
+        let content = comps
+            .get("minecraft:written_book_content")
+            .and_then(Tag::as_compound)
+            .unwrap();
         assert_eq!(content.get("generation").and_then(Tag::as_i64), Some(2));
         assert_eq!(crate::redstone::book_pages(&nbt), 2);
         let id = |n: &str| (n == "minecraft:written_book").then_some(7);
@@ -797,7 +837,10 @@ mod tests {
         let id = |n: &str| (n == "minecraft:writable_book").then_some(8);
         let nbt = to_nbt(draft, "minecraft:writable_book").unwrap();
         assert_eq!(from_nbt(&nbt, id).unwrap(), draft);
-        assert_eq!(from_line(&to_line(draft, "minecraft:writable_book"), id).unwrap(), draft);
+        assert_eq!(
+            from_line(&to_line(draft, "minecraft:writable_book"), id).unwrap(),
+            draft
+        );
     }
 
     #[test]

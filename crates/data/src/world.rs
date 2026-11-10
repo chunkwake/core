@@ -1620,21 +1620,18 @@ fn parse_entity_line(line: &str) -> Option<EntityTypeInfo> {
         }
     };
     let a: Vec<Option<f64>> = f[8..].iter().map(|s| opt(s)).collect::<Option<_>>()?;
-    let attributes = match a[0] {
-        None => None,
-        Some(max_health) => Some(DefaultAttributes {
-            max_health,
-            // Нет атрибута у типа (стойка для брони без `follow_range`) —
-            // значение по умолчанию `Attributes`.
-            movement_speed: a[1].unwrap_or(0.7),
-            follow_range: a[2].unwrap_or(32.0),
-            attack_damage: a[3],
-            armor: a[4].unwrap_or(0.0),
-            knockback_resistance: a[5].unwrap_or(0.0),
-            step_height: a[6].unwrap_or(0.6),
-            safe_fall_distance: a[7].unwrap_or(3.0),
-        }),
-    };
+    let attributes = a[0].map(|max_health| DefaultAttributes {
+        max_health,
+        // Нет атрибута у типа (стойка для брони без `follow_range`) —
+        // значение по умолчанию `Attributes`.
+        movement_speed: a[1].unwrap_or(0.7),
+        follow_range: a[2].unwrap_or(32.0),
+        attack_damage: a[3],
+        armor: a[4].unwrap_or(0.0),
+        knockback_resistance: a[5].unwrap_or(0.0),
+        step_height: a[6].unwrap_or(0.6),
+        safe_fall_distance: a[7].unwrap_or(3.0),
+    });
     Some(EntityTypeInfo {
         name: f[0].to_owned(),
         tracking_range: f[1].parse().ok()?,

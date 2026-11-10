@@ -33,7 +33,9 @@ async fn main() {
     let cmd = id(Direction::Serverbound, "chat_command");
     let chat = id(Direction::Clientbound, "system_chat");
     let tree = id(Direction::Clientbound, "commands");
-    let mut c = Client::connect(&a[1], &a[3], ids, 777, "26.3").await.unwrap();
+    let mut c = Client::connect(&a[1], &a[3], ids, 777, "26.3")
+        .await
+        .unwrap();
     c.capture_also.push(chat);
     c.capture_also.push(tree);
     loop {
@@ -52,7 +54,10 @@ async fn main() {
             if pid == tree {
                 let names = strings(&body);
                 for n in &check {
-                    println!("  tree has {n}: {}", names.iter().any(|s| s.ends_with(n.as_str())));
+                    println!(
+                        "  tree has {n}: {}",
+                        names.iter().any(|s| s.ends_with(n.as_str()))
+                    );
                 }
             } else {
                 println!("  | {}", strings(&body).join(""));
@@ -66,7 +71,10 @@ async fn main() {
         let mut w = Writer::new();
         w.var_int(cmd).string(s);
         c.send_raw(&w.buf).await.unwrap();
-        let gap = std::env::var("GAP_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500);
+        let gap = std::env::var("GAP_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1500);
         wait(&mut c, gap).await;
         drain(&mut c);
     }
@@ -108,9 +116,13 @@ async fn main() {
     // `SIGN=x,y,z`: поставить табличку из слота 0 на блок под `x,y,z`, ответить
     // на редактор строками и кликнуть по ней снова (редактор `INTERACT`).
     if let Some(v) = std::env::var("SIGN").ok().map(|s| {
-        s.split(',').map(|n| n.trim().parse::<i64>().unwrap()).collect::<Vec<_>>()
+        s.split(',')
+            .map(|n| n.trim().parse::<i64>().unwrap())
+            .collect::<Vec<_>>()
     }) {
-        let pack = |x: i64, y: i64, z: i64| ((x & 0x3FF_FFFF) << 38) | ((z & 0x3FF_FFFF) << 12) | (y & 0xFFF);
+        let pack = |x: i64, y: i64, z: i64| {
+            ((x & 0x3FF_FFFF) << 38) | ((z & 0x3FF_FFFF) << 12) | (y & 0xFFF)
+        };
         let use_on = id(Direction::Serverbound, "use_item_on");
         let update = id(Direction::Serverbound, "sign_update");
         let editor = id(Direction::Clientbound, "open_sign_editor");
@@ -118,7 +130,12 @@ async fn main() {
         let click = |pos: i64, face: i32, seq: i32| {
             let mut w = Writer::new();
             w.var_int(use_on).var_int(0).i64(pos).var_int(face);
-            w.f32(0.5).f32(1.0).f32(0.5).bool(false).bool(false).var_int(seq);
+            w.f32(0.5)
+                .f32(1.0)
+                .f32(0.5)
+                .bool(false)
+                .bool(false)
+                .var_int(seq);
             w.buf
         };
         let opened = |c: &mut Client| {
@@ -127,7 +144,9 @@ async fn main() {
             n
         };
         println!("> place sign");
-        c.send_raw(&click(pack(v[0], v[1] - 1, v[2]), 1, 1)).await.unwrap();
+        c.send_raw(&click(pack(v[0], v[1] - 1, v[2]), 1, 1))
+            .await
+            .unwrap();
         wait(&mut c, 1500).await;
         println!("  editor opened: {}", opened(&mut c));
         let mut w = Writer::new();
@@ -138,7 +157,9 @@ async fn main() {
         c.send_raw(&w.buf).await.unwrap();
         wait(&mut c, 1500).await;
         println!("> click sign");
-        c.send_raw(&click(pack(v[0], v[1], v[2]), 3, 2)).await.unwrap();
+        c.send_raw(&click(pack(v[0], v[1], v[2]), 3, 2))
+            .await
+            .unwrap();
         wait(&mut c, 1500).await;
         println!("  editor opened: {}", opened(&mut c));
         drain(&mut c);
@@ -163,10 +184,14 @@ async fn main() {
             w.buf
         };
         println!("> edit book");
-        c.send_raw(&book(&["first page", "second"], None)).await.unwrap();
+        c.send_raw(&book(&["first page", "second"], None))
+            .await
+            .unwrap();
         wait(&mut c, 1500).await;
         println!("> sign book");
-        c.send_raw(&book(&["first page", "second"], Some("Probe Book"))).await.unwrap();
+        c.send_raw(&book(&["first page", "second"], Some("Probe Book")))
+            .await
+            .unwrap();
         wait(&mut c, 1500).await;
         println!("> open book");
         let mut w = Writer::new();

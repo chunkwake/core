@@ -3,23 +3,12 @@
 use chunkwake_data::recipes::BrewingData;
 use chunkwake_protocol::inventory::{Slot, Stack};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Stand {
     pub slots: [Slot; 5],
     pub time: i32,
     pub fuel: i32,
     pub ingredient: Option<i32>,
-}
-
-impl Default for Stand {
-    fn default() -> Self {
-        Self {
-            slots: [None; 5],
-            time: 0,
-            fuel: 0,
-            ingredient: None,
-        }
-    }
 }
 
 impl Stand {

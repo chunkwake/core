@@ -139,9 +139,7 @@ impl Gateway {
                         continue;
                     } else if same_y {
                         b.air
-                    } else if end && same_x && same_z {
-                        b.bedrock
-                    } else if (same_x || same_z) && !end {
+                    } else if (end && same_x && same_z) || ((same_x || same_z) && !end) {
                         b.bedrock
                     } else {
                         b.air

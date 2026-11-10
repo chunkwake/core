@@ -1453,7 +1453,11 @@ pub fn read_edit_book(r: &mut Reader) -> Result<EditBook> {
     for _ in 0..n {
         pages.push(r.string(1024)?.to_owned());
     }
-    let title = if r.bool()? { Some(r.string(32)?.to_owned()) } else { None };
+    let title = if r.bool()? {
+        Some(r.string(32)?.to_owned())
+    } else {
+        None
+    };
     Ok(EditBook { slot, pages, title })
 }
 
@@ -1471,7 +1475,12 @@ mod block_tests {
     #[test]
     fn edit_book_reads_pages_and_title() {
         let mut w = Writer::new();
-        w.var_int(40).var_int(2).string("a").string("b").bool(true).string("T");
+        w.var_int(40)
+            .var_int(2)
+            .string("a")
+            .string("b")
+            .bool(true)
+            .string("T");
         let b = read_edit_book(&mut crate::Reader::new(&w.buf)).unwrap();
         assert_eq!(b.slot, 40);
         assert_eq!(b.pages, ["a", "b"]);

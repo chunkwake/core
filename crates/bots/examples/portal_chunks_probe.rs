@@ -71,7 +71,9 @@ async fn main() {
     let respawn_id = id(Direction::Clientbound, "respawn");
     let chunk_id = id(Direction::Clientbound, "level_chunk_with_light");
     let secs: u64 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(45);
-    let mut c = Client::connect(&a[1], &a[3], ids, 777, "26.3").await.unwrap();
+    let mut c = Client::connect(&a[1], &a[3], ids, 777, "26.3")
+        .await
+        .unwrap();
     let t0 = Instant::now();
     let mut p = loop {
         if let Ok(Event::Position(p)) = c.next_event().await {
@@ -94,13 +96,41 @@ async fn main() {
             let _ = tokio::time::timeout(Duration::from_millis(100), c.next_event()).await;
         }
     }
-    let (x, y, z) = (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32);
+    let (x, y, z) = (
+        p[0].floor() as i32,
+        p[1].floor() as i32,
+        p[2].floor() as i32,
+    );
     println!("start {p:?}");
     for line in [
         "gamemode creative".to_string(),
-        format!("fill {} {} {} {} {} {} air", x - 3, y, z - 2, x + 4, y + 4, z + 2),
-        format!("fill {} {} {} {} {} {} obsidian", x - 1, y - 1, z, x + 2, y + 3, z),
-        format!("fill {} {} {} {} {} {} nether_portal[axis=x]", x, y, z, x + 1, y + 2, z),
+        format!(
+            "fill {} {} {} {} {} {} air",
+            x - 3,
+            y,
+            z - 2,
+            x + 4,
+            y + 4,
+            z + 2
+        ),
+        format!(
+            "fill {} {} {} {} {} {} obsidian",
+            x - 1,
+            y - 1,
+            z,
+            x + 2,
+            y + 3,
+            z
+        ),
+        format!(
+            "fill {} {} {} {} {} {} nether_portal[axis=x]",
+            x,
+            y,
+            z,
+            x + 1,
+            y + 2,
+            z
+        ),
     ] {
         let mut w = Writer::new();
         w.var_int(cmd_id).string(&line);
@@ -138,7 +168,10 @@ async fn main() {
                     if total == 0 {
                         empty[phase].push((cx, cz));
                     }
-                    format!("{sections} sections{}", if total == 0 { ", EMPTY" } else { "" })
+                    format!(
+                        "{sections} sections{}",
+                        if total == 0 { ", EMPTY" } else { "" }
+                    )
                 }
                 Err(err) => format!("undecodable: {err}"),
             };
@@ -147,7 +180,10 @@ async fn main() {
         if !c.captured.is_empty() {
             c.captured.clear();
             phase = (phase + 1).min(2);
-            println!("{:5.1}s RESPAWN -> phase {phase}", t0.elapsed().as_secs_f32());
+            println!(
+                "{:5.1}s RESPAWN -> phase {phase}",
+                t0.elapsed().as_secs_f32()
+            );
             respawned_at = Some(Instant::now());
             arrival = None;
             stepped = 0;
