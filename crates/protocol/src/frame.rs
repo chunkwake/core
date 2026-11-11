@@ -38,7 +38,10 @@ impl FrameCodec {
         if len <= 0 || len as usize > MAX_PACKET_LEN {
             return Err(ProtocolError::BadLength(len));
         }
-        let header = var_int_len(len);
+        // Длину заголовка считаем по фактически прочитанным байтам: пиры
+        // (например, Velocity) могут прислать VarInt с лишними продолжениями,
+        // и `var_int_len(len)` тогда съедет на байт.
+        let header = buf.len() - r.remaining().len();
         let total = header + len as usize;
         if buf.len() < total {
             return Ok(None);
@@ -174,6 +177,16 @@ mod tests {
             codec.decode(&mut buf),
             Err(ProtocolError::BadLength(1000))
         ));
+    }
+
+    /// Пиры (например, Velocity) могут писать VarInt с лишними
+    /// продолжениями; заголовок считается по фактически прочитанным байтам.
+    #[test]
+    fn accepts_non_canonical_length_prefix() {
+        let mut buf = BytesMut::from(&[0x82, 0x80, 0x00, 0x01, 0xAA][..]);
+        let packet = FrameCodec::default().decode(&mut buf).unwrap().unwrap();
+        assert_eq!(packet, vec![0x01, 0xAA]);
+        assert!(buf.is_empty());
     }
 
     #[test]
