@@ -21,6 +21,8 @@ pub enum Kind {
     Player,
     /// Контейнер из `n` слотов и инвентарь (`ChestMenu`, `HopperMenu`, `DispenserMenu`).
     Chest(usize),
+    /// Эндер-сундук: 27 слотов, содержимое личное у игрока.
+    EnderChest,
     /// `CraftingMenu`: 0 результат, 1–9 сетка, 10–36, 37–45.
     Crafting,
     /// `AbstractFurnaceMenu`: 0 сырьё, 1 топливо, 2 результат, 3–29, 30–38.
@@ -54,6 +56,7 @@ impl Kind {
             Kind::Player => 46,
             Kind::Lectern => 1,
             Kind::Chest(n) => n + 36,
+            Kind::EnderChest => 27 + 36,
             Kind::Crafting | Kind::Crafter(_) => 46,
             Kind::Furnace | Kind::Grindstone | Kind::Anvil | Kind::Cartography => 39,
             Kind::Brewing => 41,
@@ -68,6 +71,7 @@ impl Kind {
             Kind::Player => 9,
             Kind::Lectern => 1,
             Kind::Chest(n) => n,
+            Kind::EnderChest => 27,
             Kind::Crafting => 10,
             Kind::Crafter(_) => 9,
             Kind::Furnace | Kind::Grindstone | Kind::Anvil | Kind::Cartography => 3,
@@ -85,7 +89,11 @@ impl Kind {
             Kind::Smithing | Kind::Loom => Some(3),
             Kind::Stonecutter => Some(1),
             Kind::Crafter(_) => Some(45),
-            Kind::Chest(_) | Kind::Enchanting | Kind::Lectern | Kind::Brewing => None,
+            Kind::Chest(_)
+            | Kind::EnderChest
+            | Kind::Enchanting
+            | Kind::Lectern
+            | Kind::Brewing => None,
         }
     }
 
@@ -480,7 +488,7 @@ impl Menu<'_> {
                     self.move_to(&mut s, inv..end, false);
                 }
             }
-            Kind::Chest(_) => {
+            Kind::Chest(_) | Kind::EnderChest => {
                 if i < inv {
                     self.move_to(&mut s, inv..end, true);
                 } else {

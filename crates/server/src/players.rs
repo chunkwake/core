@@ -142,6 +142,17 @@ pub fn to_nbt(s: &PlayerSave, data_version: i32, names: &[String]) -> Compound {
         c.insert("Slot".into(), Tag::Byte(slot as i8));
         inventory.push(Tag::Compound(c));
     }
+    let mut ender = Vec::new();
+    for &(i, stack) in &s.ender {
+        if i >= 27 {
+            continue;
+        }
+        let Some(mut c) = stack_nbt(stack, names) else {
+            continue;
+        };
+        c.insert("Slot".into(), Tag::Byte(i as i8));
+        ender.push(Tag::Compound(c));
+    }
     let mut root = Compound::from([
         ("DataVersion".into(), Tag::Int(data_version)),
         (
@@ -174,6 +185,7 @@ pub fn to_nbt(s: &PlayerSave, data_version: i32, names: &[String]) -> Compound {
             Tag::Int(s.game_mode.unwrap_or(0) as i32),
         ),
         ("Inventory".into(), Tag::List(inventory)),
+        ("EnderItems".into(), Tag::List(ender)),
         ("equipment".into(), Tag::Compound(equipment)),
     ]);
     // `ServerPlayer.RespawnConfig.CODEC`: `GlobalPos` + взгляд + `forced`.
@@ -287,6 +299,20 @@ pub fn from_nbt(root: &Compound, ids: &HashMap<String, i32>) -> Option<PlayerSav
         }
     }
     slots.sort_by_key(|&(i, _)| i);
+    let mut ender = Vec::new();
+    for t in root.get("EnderItems").and_then(Tag::as_list).unwrap_or(&[]) {
+        let Some(c) = t.as_compound() else { continue };
+        let Some(slot) = c.get("Slot").and_then(Tag::as_i64) else {
+            continue;
+        };
+        if !(0..27).contains(&slot) {
+            continue;
+        }
+        if let Some(s) = stack_from(c, ids) {
+            ender.push((slot as usize, s));
+        }
+    }
+    ender.sort_by_key(|&(i, _)| i);
     let spawn = spawn_from(root);
     Some(PlayerSave {
         pos,
@@ -302,6 +328,7 @@ pub fn from_nbt(root: &Compound, ids: &HashMap<String, i32>) -> Option<PlayerSav
             .unwrap_or(0)
             .clamp(0, 8) as usize,
         slots,
+        ender,
         game_mode: root
             .get("playerGameType")
             .and_then(Tag::as_i64)
@@ -378,6 +405,15 @@ mod tests {
             seen_credits: true,
             bukkit_values: Some(Compound::from([("myplugin:coins".into(), Tag::Int(42))])),
             dimension: Some("minecraft:the_nether".into()),
+            ender: vec![(
+                2,
+                Stack {
+                    item: 2,
+                    count: 1,
+                    damage: 0,
+                    extra: 0,
+                },
+            )],
             slots: vec![
                 (
                     5,
@@ -422,6 +458,8 @@ mod tests {
         let inv = root["Inventory"].as_list().unwrap();
         let slot_of = |t: &Tag| t.as_compound().unwrap()["Slot"].as_i64().unwrap();
         assert_eq!(inv.iter().map(slot_of).collect::<Vec<_>>(), vec![10, 0]);
+        let ender = root["EnderItems"].as_list().unwrap();
+        assert_eq!(ender.iter().map(slot_of).collect::<Vec<_>>(), vec![2]);
         assert!(
             root["equipment"]
                 .as_compound()

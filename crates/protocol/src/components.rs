@@ -3,7 +3,7 @@
 //! Стопка остаётся `Copy`: набор компонентов хранится один раз в общей
 //! таблице, а в [`crate::inventory::Stack::extra`] — его номер (0 — нет).
 
-use crate::inventory::Stack;
+use crate::inventory::{Slot, Stack};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -35,6 +35,9 @@ pub struct Extra {
     pub custom_data: Option<Vec<u8>>,
     /// `minecraft:charged_projectiles`: чем заряжен арбалет.
     pub charged: Vec<Stack>,
+    /// `minecraft:container`: содержимое шалкер-ящика по слотам. Шалкеры
+    /// в шалкеры не кладутся, поэтому вложенность ограничена одним уровнем.
+    pub container: Vec<Slot>,
     /// Хвост командного `item_stack`, который не лёг в известные поля
     /// (`minecraft:potion_contents` и прочее). В патч клиента не пишется:
     /// сырой `raw` заменил бы уже разобранные чары и имя.
@@ -93,6 +96,7 @@ impl Extra {
             && self.raw.is_none()
             && self.custom_data.is_none()
             && self.charged.is_empty()
+            && self.container.is_empty()
             && self.rest.is_none()
             && self.map_id.is_none()
             && self.map_post_processing.is_none()
@@ -173,6 +177,7 @@ pub static LORE_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static STORED_ENCHANTMENTS_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static CUSTOM_DATA_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static CHARGED_PROJECTILES_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+pub static CONTAINER_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static REPAIR_COST_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static TRIM_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static BANNER_PATTERNS_COMPONENT: AtomicI32 = AtomicI32::new(-1);

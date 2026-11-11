@@ -91,6 +91,23 @@ pub fn named_nbt(
             .collect();
         comps.insert("minecraft:charged_projectiles".into(), Tag::List(list));
     }
+    if !e.container.is_empty() {
+        let list = e
+            .container
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                let st = (*slot)?;
+                let name = item_name(st.item)?;
+                let item = named_nbt(st, &name, item_name)?;
+                Some(Tag::Compound(Compound::from([
+                    ("slot".into(), Tag::Int(index as i32)),
+                    ("item".into(), Tag::Compound(item)),
+                ])))
+            })
+            .collect();
+        comps.insert("minecraft:container".into(), Tag::List(list));
+    }
     if !comps.is_empty() {
         c.insert("components".into(), Tag::Compound(comps));
     }
@@ -112,10 +129,13 @@ pub fn named_nbt(
 
 /// Обратно; неизвестные компоненты пропускаются.
 pub fn from_nbt(c: &Compound, item_id: impl Fn(&str) -> Option<i32>) -> Option<Stack> {
-    from_nbt_ref(c, &item_id)
+    from_nbt_ref(c, &item_id, 0)
 }
 
-fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>) -> Option<Stack> {
+fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>, depth: u32) -> Option<Stack> {
+    if depth > 4 {
+        return None;
+    }
     let item = item_id(c.get("id")?.as_str()?)?;
     let count = c.get("count").and_then(Tag::as_i64).unwrap_or(1) as i32;
     if count <= 0 {
@@ -206,8 +226,33 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>) -> Option<S
         {
             e.charged = list
                 .iter()
-                .filter_map(|t| from_nbt_ref(t.as_compound()?, item_id))
+                .filter_map(|t| from_nbt_ref(t.as_compound()?, item_id, depth + 1))
                 .collect();
+        }
+        if let Some(list) = m.get("minecraft:container").and_then(Tag::as_list) {
+            for entry in list.iter().take(256) {
+                let Some(slot) = entry.as_compound() else {
+                    continue;
+                };
+                let Some(index) = slot.get("slot").and_then(Tag::as_i64) else {
+                    continue;
+                };
+                if !(0..=255).contains(&index) {
+                    continue;
+                }
+                let Some(stack) = slot
+                    .get("item")
+                    .and_then(Tag::as_compound)
+                    .and_then(|item| from_nbt_ref(item, item_id, depth + 1))
+                else {
+                    continue;
+                };
+                let index = index as usize;
+                if e.container.len() <= index {
+                    e.container.resize(index + 1, None);
+                }
+                e.container[index] = Some(stack);
+            }
         }
     }
     e.raw = c
@@ -869,6 +914,36 @@ mod tests {
     }
 
     #[test]
+    fn container_contents_survive_nbt() {
+        let names = |id: i32| {
+            Some(
+                match id {
+                    10 => "minecraft:dirt",
+                    11 => "minecraft:stone",
+                    20 => "minecraft:shulker_box",
+                    _ => return None,
+                }
+                .to_owned(),
+            )
+        };
+        let ids = |name: &str| match name {
+            "minecraft:dirt" => Some(10),
+            "minecraft:stone" => Some(11),
+            "minecraft:shulker_box" => Some(20),
+            _ => None,
+        };
+        let stack = Stack {
+            extra: components::intern(Extra {
+                container: vec![Some(Stack::new(10, 3)), None, Some(Stack::new(11, 1))],
+                ..Default::default()
+            }),
+            ..Stack::new(20, 1)
+        };
+        let nbt = named_nbt(stack, "minecraft:shulker_box", &names).unwrap();
+        assert_eq!(from_nbt(&nbt, ids), Some(stack));
+    }
+
+    #[test]
     fn round_trip_with_components() {
         components::set_enchantments(vec![
             "minecraft:efficiency".into(),
@@ -889,6 +964,7 @@ mod tests {
             map_id: Some(12),
             map_post_processing: None,
             charged: Vec::new(),
+            container: Vec::new(),
             custom_data: Some(compound_to_net(&Compound::from([(
                 "PublicBukkitValues".into(),
                 Tag::Compound(Compound::from([

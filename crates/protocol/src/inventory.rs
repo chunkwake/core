@@ -136,7 +136,25 @@ fn write_book(w: &mut Writer, b: &crate::components::Book) {
     }
 }
 
-/// `ItemStack.OPTIONAL_STREAM_CODEC`: количество, затем ID и пустой патч компонентов.
+/// Значение `minecraft:container`: список optional `ItemStackTemplate`
+/// (предмет, количество, компоненты); хвостовые пустые слоты не пишутся.
+pub fn write_container_value(w: &mut Writer, slots: &[Slot]) {
+    let len = slots.iter().rposition(Option::is_some).map_or(0, |i| i + 1);
+    w.var_int(len as i32);
+    for s in &slots[..len] {
+        match s {
+            Some(s) if s.count > 0 => {
+                w.bool(true).var_int(s.item).var_int(s.count);
+                write_patch(w, s);
+            }
+            _ => {
+                w.bool(false);
+            }
+        }
+    }
+}
+
+/// `ItemStack.OPTIONAL_STREAM_CODEC`: количество, затем ID и патч компонентов.
 pub fn write_stack(w: &mut Writer, s: Slot) {
     match s {
         Some(s) if s.count > 0 => {
@@ -153,8 +171,8 @@ pub fn write_stack(w: &mut Writer, s: Slot) {
 /// Если патч пришёл с неизвестным компонентом, он пишется байт в байт.
 fn write_patch(w: &mut Writer, s: &Stack) {
     use crate::components::{
-        CHARGED_PROJECTILES_COMPONENT, CUSTOM_NAME_COMPONENT, ENCHANTMENTS_COMPONENT,
-        LORE_COMPONENT, STORED_ENCHANTMENTS_COMPONENT, get, id_of,
+        CHARGED_PROJECTILES_COMPONENT, CONTAINER_COMPONENT, CUSTOM_NAME_COMPONENT,
+        ENCHANTMENTS_COMPONENT, LORE_COMPONENT, STORED_ENCHANTMENTS_COMPONENT, get, id_of,
     };
     let e = get(s.extra);
     if let Some(raw) = &e.raw {
@@ -243,6 +261,7 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         e.map_post_processing.is_some()
             && id_of(&crate::components::MAP_POST_PROCESSING_COMPONENT) >= 0,
         e.book.is_some() && book_id(e.book.as_ref()) >= 0,
+        !e.container.is_empty() && id_of(&CONTAINER_COMPONENT) >= 0,
     ];
     w.var_int(parts.iter().filter(|&&p| p).count() as i32)
         .var_int(0);
@@ -314,6 +333,10 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         w.var_int(book_id(Some(book)));
         write_book(w, book);
     }
+    if parts[13] {
+        w.var_int(id_of(&CONTAINER_COMPONENT));
+        write_container_value(w, &e.container);
+    }
 }
 
 /// Номер компонента книги в реестре; -1 — нет книги или реестр не задан.
@@ -344,15 +367,51 @@ fn read_stack_at(r: &mut Reader, depth: u8) -> Result<Slot> {
     if depth > MAX_STACK_DEPTH {
         return Err(crate::ProtocolError::BadLength(i32::from(depth)));
     }
-    use crate::components::{
-        CHARGED_PROJECTILES_COMPONENT, CUSTOM_NAME_COMPONENT, ENCHANTMENTS_COMPONENT, Extra,
-        LORE_COMPONENT, STORED_ENCHANTMENTS_COMPONENT, id_of, intern,
-    };
     let count = r.var_int()?;
     if count <= 0 {
         return Ok(None);
     }
     let item = r.var_int()?;
+    read_stack_tail(r, item, count, depth)
+}
+
+/// `ItemStackTemplate`: `item`, `count`, затем тот же patch компонентов.
+/// Используется содержимым `minecraft:container`.
+pub fn read_stack_template(r: &mut Reader, depth: u8) -> Result<Slot> {
+    if depth > MAX_STACK_DEPTH {
+        return Err(crate::ProtocolError::BadLength(i32::from(depth)));
+    }
+    let item = r.var_int()?;
+    let count = r.var_int()?;
+    if count <= 0 {
+        return Ok(None);
+    }
+    read_stack_tail(r, item, count, depth)
+}
+
+/// Значение `minecraft:container`: список optional `ItemStackTemplate`.
+pub fn read_container_value(r: &mut Reader, depth: u8) -> Result<Vec<Slot>> {
+    let n = r.var_int()?;
+    if !(0..=256).contains(&n) {
+        return Err(crate::ProtocolError::BadLength(n));
+    }
+    let mut out = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        if !r.bool()? {
+            out.push(None);
+            continue;
+        }
+        out.push(read_stack_template(r, depth + 1)?);
+    }
+    Ok(out)
+}
+
+fn read_stack_tail(r: &mut Reader, item: i32, count: i32, depth: u8) -> Result<Slot> {
+    use crate::components::{
+        CHARGED_PROJECTILES_COMPONENT, CONTAINER_COMPONENT, CUSTOM_NAME_COMPONENT,
+        ENCHANTMENTS_COMPONENT, Extra, LORE_COMPONENT, STORED_ENCHANTMENTS_COMPONENT, id_of,
+        intern,
+    };
     let mut s = Stack::new(item, count);
     let mut e = Extra::default();
     let patch = r.remaining().to_vec();
@@ -422,6 +481,8 @@ fn read_stack_at(r: &mut Reader, depth: u8) -> Result<Slot> {
                     e.charged.push(st);
                 }
             }
+        } else if id_of(&CONTAINER_COMPONENT) >= 0 && t == id_of(&CONTAINER_COMPONENT) {
+            e.container = read_container_value(r, depth)?;
         } else {
             known = false;
             break;
@@ -1089,6 +1150,22 @@ mod tests {
         let mut out = Writer::new();
         write_stack(&mut out, stack);
         assert_eq!(out.buf, original);
+    }
+
+    #[test]
+    fn container_component_roundtrips() {
+        use std::sync::atomic::Ordering;
+        crate::components::CONTAINER_COMPONENT.store(200, Ordering::Relaxed);
+        let stack = Stack {
+            extra: crate::components::intern(crate::components::Extra {
+                container: vec![Some(Stack::new(10, 3)), None, Some(Stack::new(11, 1))],
+                ..Default::default()
+            }),
+            ..Stack::new(20, 1)
+        };
+        let mut w = Writer::new();
+        write_stack(&mut w, Some(stack));
+        assert_eq!(read_stack(&mut Reader::new(&w.buf)).unwrap(), Some(stack));
     }
 
     #[test]

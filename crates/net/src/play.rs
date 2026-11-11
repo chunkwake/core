@@ -2143,6 +2143,7 @@ fn container_entity(block: &str) -> Option<&'static str> {
         "minecraft:hopper" => Some("minecraft:hopper"),
         "minecraft:dispenser" => Some("minecraft:dispenser"),
         "minecraft:dropper" => Some("minecraft:dropper"),
+        n if n.ends_with("shulker_box") => Some("minecraft:shulker_box"),
         "minecraft:furnace" => Some("minecraft:furnace"),
         "minecraft:blast_furnace" => Some("minecraft:blast_furnace"),
         "minecraft:smoker" => Some("minecraft:smoker"),
@@ -5782,6 +5783,9 @@ impl PlayPlan {
             |s| (s.pos, s.yaw, s.pitch),
         );
         let mut state = save.as_ref().map(PlayerState::restore).unwrap_or_default();
+        if state.ender.len() < survival::ENDER_SLOTS {
+            state.ender.resize(survival::ENDER_SLOTS, None);
+        }
         let game_mode = *state.game_mode.get_or_insert(self.login.spawn.game_mode);
         // Конструктор `ServerGamePacketListenerImpl` вызывает
         // `restartClientLoadTimerAfterRespawn`: на входе клиент тоже не
@@ -9697,13 +9701,15 @@ impl PlayPlan {
                     block[1] as f64 + 0.5,
                     block[2] as f64 + 0.5,
                 ];
-                for stack in self.container_items(block).into_iter().flatten() {
-                    self.drop_item(
-                        from,
-                        items::pop_velocity(rand::random(), rand::random()),
-                        stack,
-                        items::BLOCK_DELAY,
-                    );
+                if !self.state_name(state).ends_with("shulker_box") {
+                    for stack in self.container_items(block).into_iter().flatten() {
+                        self.drop_item(
+                            from,
+                            items::pop_velocity(rand::random(), rand::random()),
+                            stack,
+                            items::BLOCK_DELAY,
+                        );
+                    }
                 }
                 self.set_block_entity(block, None);
             }
@@ -9718,7 +9724,12 @@ impl PlayPlan {
                     block[1] as f64 + 0.5,
                     block[2] as f64 + 0.5,
                 ];
-                for stack in self.dress_banner_loot(be.as_ref(), self.block_loot(state, None)) {
+                let loot = self.dress_container_loot(
+                    be.as_ref(),
+                    self.state_name(state),
+                    self.block_loot(state, None),
+                );
+                for stack in self.dress_banner_loot(be.as_ref(), loot) {
                     self.drop_item(
                         from,
                         items::pop_velocity(rand::random(), rand::random()),
@@ -10333,6 +10344,7 @@ impl PlayPlan {
                 Kind::Chest(5) => "HOPPER",
                 Kind::Chest(9) if plugin_of(w.pos).is_none() => "DISPENSER",
                 Kind::Chest(_) => "CHEST",
+                Kind::EnderChest => "ENDER_CHEST",
                 Kind::Crafting => "WORKBENCH",
                 Kind::Furnace => "FURNACE",
                 Kind::Brewing => "BREWING",
@@ -11936,7 +11948,7 @@ impl PlayPlan {
                         {
                             let creative = login.spawn.game_mode == 1;
                             let old_level = state.xp.level;
-                            let (thrown, resync) = self.click(&mut state.inv, &mut window, &c, &mut state.xp, creative, uuid);
+                            let (thrown, resync) = self.click(&mut state.inv, &mut state.ender, &mut window, &c, &mut state.xp, creative, uuid);
                             if old_level != state.xp.level { self.send_xp(conn, &state.xp).await?; }
                             if resync || window.as_ref().is_some_and(|w| w.id == c.window && matches!(w.kind, Kind::Stonecutter | Kind::Anvil | Kind::Loom)) {
                                 self.send_window(conn, &mut state.inv, window.as_ref(), c.window).await?;
@@ -13082,10 +13094,12 @@ impl PlayPlan {
                             "minecraft:cartography_table" => Some(Kind::Cartography),
                             "minecraft:lectern" if self.block(u.pos).is_some_and(|s| self.survival.placement.prop(s, "has_book") == Some("true")) => Some(Kind::Lectern),
                             "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" => Some(Kind::Chest(27)),
+                            "minecraft:ender_chest" => Some(Kind::EnderChest),
                             "minecraft:brewing_stand" => Some(Kind::Brewing),
                             n if is_copper_chest(n) => Some(Kind::Chest(27)),
                             "minecraft:hopper" => Some(Kind::Chest(5)),
                             "minecraft:dispenser" | "minecraft:dropper" => Some(Kind::Chest(9)),
+                            n if n.ends_with("shulker_box") => Some(Kind::Chest(27)),
                             "minecraft:crafter" => Some(Kind::Crafter(self.crafter_disabled(u.pos))),
                             n if furnace_kind(n).is_some() => Some(Kind::Furnace),
                             _ => None,
@@ -13126,14 +13140,23 @@ impl PlayPlan {
                                     (self.survival.menu_furnace[k], ["container.furnace", "container.blast_furnace", "container.smoker"][k])
                                 }
                                 Kind::Chest(54) => (self.survival.menu_double_chest, "container.chestDouble"),
+                                Kind::EnderChest => (self.survival.menu_chest, "container.enderchest"),
                                 Kind::Chest(5) => (self.survival.menu_hopper, "container.hopper"),
                                 Kind::Crafter(_) => (self.survival.menu_crafter, "container.crafter"),
                                 Kind::Chest(9) => (self.survival.menu_3x3, if clicked == "minecraft:dropper" { "container.dropper" } else { "container.dispenser" }),
                                 _ if clicked == "minecraft:barrel" => (self.survival.menu_chest, "container.barrel"),
+                                _ if clicked.ends_with("shulker_box") => (self.survival.menu_chest, "container.shulkerBox"),
                                 _ => (self.survival.menu_chest, "container.chest"),
                             };
                             let mut w = Window { id: next_window, kind, pos, second, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10] };
-                            w.slots = self.window_slots(&w);
+                            if kind == Kind::EnderChest {
+                                if state.ender.len() < survival::ENDER_SLOTS {
+                                    state.ender.resize(survival::ENDER_SLOTS, None);
+                                }
+                                w.slots = state.ender.clone();
+                            } else {
+                                w.slots = self.window_slots(&w);
+                            }
                             conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &serde_json::json!({"translate": title}))).await?;
                             self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
                             if kind == Kind::Enchanting {
@@ -13372,6 +13395,32 @@ impl PlayPlan {
                                 self.link_chest(target, place);
                                 if let Some(id) = container_entity(&name) {
                                     self.set_block_entity(target, Some(BlockEntity { id: id.into(), nbt: Default::default() }));
+                                }
+                                // `BlockItem.updateBlockEntityComponents`: шалкер
+                                // переносит в блок содержимое `minecraft:container`.
+                                if self.state_name(place).ends_with("shulker_box")
+                                    && let Some(extra) = hand_slot.and_then(|i| state.inv.slots[i]).map(|s| s.extra)
+                                {
+                                    let e = chunkwake_protocol::components::get(extra);
+                                    if let Some(name) = &e.custom_name {
+                                        let mut nbt = Compound::new();
+                                        nbt.insert(
+                                            "CustomName".into(),
+                                            crate::stack_nbt::json_to_tag(
+                                                &crate::stack_nbt::text_json(name),
+                                            ),
+                                        );
+                                        self.set_block_entity(
+                                            target,
+                                            Some(BlockEntity {
+                                                id: "minecraft:shulker_box".into(),
+                                                nbt,
+                                            }),
+                                        );
+                                    }
+                                    if !e.container.is_empty() {
+                                        self.set_container_slots(target, &e.container);
+                                    }
                                 }
                                 if banners::banner_color(self.state_name(place)).is_some() {
                                     self.place_banner(target, hand_slot.and_then(|i| state.inv.slots[i]));
@@ -14029,9 +14078,11 @@ impl PlayPlan {
                 let vel = items::pop_velocity(rand::random(), rand::random());
                 self.drop_item(center, vel, book, items::BLOCK_DELAY);
             }
-            for s in self.container_items(pos).into_iter().flatten() {
-                let vel = items::pop_velocity(rand::random(), rand::random());
-                self.drop_item(center, vel, s, items::BLOCK_DELAY);
+            if !self.state_name(old).ends_with("shulker_box") {
+                for s in self.container_items(pos).into_iter().flatten() {
+                    let vel = items::pop_velocity(rand::random(), rand::random());
+                    self.drop_item(center, vel, s, items::BLOCK_DELAY);
+                }
             }
             self.set_block_entity(pos, None);
             if crate::redstone::is_lectern(self.state_name(old)) {
@@ -14044,7 +14095,12 @@ impl PlayPlan {
                 pos[1] as f64 + 0.25,
                 pos[2] as f64 + 0.5,
             ];
-            for s in self.dress_banner_loot(be.as_ref(), self.block_loot(old, held)) {
+            let loot = self.dress_container_loot(
+                be.as_ref(),
+                self.state_name(old),
+                self.block_loot(old, held),
+            );
+            for s in self.dress_banner_loot(be.as_ref(), loot) {
                 let vel = items::pop_velocity(rand::random(), rand::random());
                 self.drop_item(center, vel, s, items::BLOCK_DELAY);
             }
@@ -14076,17 +14132,77 @@ impl PlayPlan {
         let be = self.block_entity(pos);
         if be.is_some() {
             self.jukebox_removed(pos, old);
-            for stack in self.container_items(pos).into_iter().flatten() {
-                let vel = items::pop_velocity(rand::random(), rand::random());
-                self.drop_item(center, vel, stack, items::BLOCK_DELAY);
+            if !self.state_name(old).ends_with("shulker_box") {
+                for stack in self.container_items(pos).into_iter().flatten() {
+                    let vel = items::pop_velocity(rand::random(), rand::random());
+                    self.drop_item(center, vel, stack, items::BLOCK_DELAY);
+                }
             }
             self.set_block_entity(pos, None);
         }
         let drop_at = [center[0], pos[1] as f64 + 0.25, center[2]];
-        for stack in self.dress_banner_loot(be.as_ref(), self.block_loot(old, None)) {
+        let loot = self.dress_container_loot(
+            be.as_ref(),
+            self.state_name(old),
+            self.block_loot(old, None),
+        );
+        for stack in self.dress_banner_loot(be.as_ref(), loot) {
             let vel = items::pop_velocity(rand::random(), rand::random());
             self.drop_item(drop_at, vel, stack, items::BLOCK_DELAY);
         }
+    }
+
+    /// `Items` из NBT блок-сущности: слоты 0..`size`, только занятые.
+    fn items_from_nbt(&self, nbt: &Compound, size: usize) -> Vec<Slot> {
+        let mut slots = vec![None; size];
+        for t in nbt.get("Items").and_then(Tag::as_list).unwrap_or(&[]) {
+            let Some(c) = t.as_compound() else { continue };
+            let slot = c.get("Slot").and_then(Tag::as_i64).unwrap_or(-1);
+            if slot < 0 {
+                continue;
+            }
+            if let Some(dst) = slots.get_mut(slot as usize) {
+                *dst = crate::stack_nbt::from_nbt(c, |n| self.item_id(n));
+            }
+        }
+        slots
+    }
+
+    /// `ShulkerBoxBlock.getDrops` + `copy_components`: содержимое шалкера
+    /// возвращается в предмет, а не высыпается отдельными стопками.
+    fn dress_container_loot(
+        &self,
+        be: Option<&BlockEntity>,
+        block: &str,
+        loot: Vec<Stack>,
+    ) -> Vec<Stack> {
+        if !block.ends_with("shulker_box") {
+            return loot;
+        }
+        let Some(be) = be else {
+            return loot;
+        };
+        let slots = self.items_from_nbt(&be.nbt, 27);
+        let name = be
+            .nbt
+            .get("CustomName")
+            .map(|t| crate::stack_nbt::tag_to_json(t).to_string());
+        if slots.iter().all(Option::is_none) && name.is_none() {
+            return loot;
+        }
+        let extra = chunkwake_protocol::components::intern(chunkwake_protocol::components::Extra {
+            container: slots,
+            custom_name: name,
+            ..Default::default()
+        });
+        loot.into_iter()
+            .map(|mut s| {
+                if self.item_name(s.item).ends_with("shulker_box") {
+                    s.extra = extra;
+                }
+                s
+            })
+            .collect()
     }
 
     /// Дроп блока `state`, сломанного предметом `held`, по таблице лута.
@@ -14185,9 +14301,11 @@ impl PlayPlan {
 
     /// Клик в окне: итог считает сервер (`AbstractContainerMenu.doClick`).
     /// Возвращает выброшенное и нужна ли клиенту полная пересылка окна.
+    #[allow(clippy::too_many_arguments)]
     fn click(
         &self,
         inv: &mut Inventory,
+        ender: &mut Vec<Slot>,
         window: &mut Option<Window>,
         c: &inv::ContainerClick,
         xp: &mut crate::xp::Experience,
@@ -14223,6 +14341,7 @@ impl PlayPlan {
             Kind::Player => 2,
             Kind::Crafting => 3,
             Kind::Chest(_)
+            | Kind::EnderChest
             | Kind::Crafter(_)
             | Kind::Furnace
             | Kind::Brewing
@@ -14455,7 +14574,16 @@ impl PlayPlan {
             brewing_accept: &brewing_accept,
             cartography_accept: &cartography_accept,
         };
-        let thrown = click::Menu {
+        let shulker_container = window.as_ref().is_some_and(|w| {
+            matches!(w.kind, Kind::Chest(_))
+                && self
+                    .block(w.pos)
+                    .is_some_and(|s| self.state_name(s).ends_with("shulker_box"))
+        });
+        let inv_before = inv.slots;
+        let carried_before = inv.carried;
+        let view_before = view.clone();
+        let mut thrown = click::Menu {
             kind,
             slots: &mut view,
             carried: &mut inv.carried,
@@ -14464,6 +14592,19 @@ impl PlayPlan {
             craft: &mut craft,
         }
         .click(c.slot, c.button, c.mode);
+        // `ShulkerBoxSlot.mayPlace`: шалкер в шалкер не кладётся. Клик
+        // откатываем целиком, иначе предмет мог уехать в инвентарь.
+        let shulker_reject = shulker_container
+            && view[..kind.inventory_start()]
+                .iter()
+                .flatten()
+                .any(|s| self.item_name(s.item).ends_with("shulker_box"));
+        if shulker_reject {
+            view = view_before;
+            inv.slots = inv_before;
+            inv.carried = carried_before;
+            thrown.clear();
+        }
         if carto_took {
             // `MapItem.onCraftedBy`: увеличенная или запертая копия — новая карта.
             for s in view
@@ -14515,13 +14656,14 @@ impl PlayPlan {
         let same =
             |a: &Slot, b: &Slot| a.map(|s| (s.item, s.count)) == b.map(|s| (s.item, s.count));
         // Точило меняет чары и износ: сравнение смотрит только предмет и число.
-        let resync = matches!(
-            kind,
-            Kind::Grindstone | Kind::Anvil | Kind::Smithing | Kind::Loom | Kind::Cartography
-        ) || c.state != inv.state
+        let resync = shulker_reject
+            || matches!(
+                kind,
+                Kind::Grindstone | Kind::Anvil | Kind::Smithing | Kind::Loom | Kind::Cartography
+            )
+            || c.state != inv.state
             || view.iter().zip(&expected).any(|(a, b)| !same(a, b))
             || !same(&inv.carried, &c.carried);
-        let mut thrown = thrown;
         match window.as_mut().filter(|_| kind != Kind::Player) {
             Some(w) => {
                 let n = w.slots.len();
@@ -14539,6 +14681,12 @@ impl PlayPlan {
                 if matches!(kind, Kind::Chest(_) | Kind::Crafter(_)) && w.slots[..] != view[..n] {
                     w.slots.copy_from_slice(&view[..n]);
                     self.save_window(w, me);
+                }
+                if kind == Kind::EnderChest && w.slots[..] != view[..n] {
+                    if ender.len() < n {
+                        ender.resize(n, None);
+                    }
+                    ender[..n].copy_from_slice(&view[..n]);
                 }
                 if kind == Kind::Furnace && w.slots[..] != view[..n] {
                     self.set_furnace_slots(w.pos, [view[0], view[1], view[2]], me);
@@ -14762,6 +14910,9 @@ impl PlayPlan {
                             .is_some_and(|s| container_entity(self.state_name(s)).is_some())
                 }
             }),
+            Kind::EnderChest => self
+                .block(w.pos)
+                .is_some_and(|s| self.state_name(s) == "minecraft:ender_chest"),
             Kind::Furnace => self
                 .block(w.pos)
                 .is_some_and(|s| furnace_kind(self.state_name(s)).is_some()),
@@ -14901,6 +15052,7 @@ impl PlayPlan {
             "minecraft:barrel" => Some("barrel"),
             "minecraft:chest" | "minecraft:trapped_chest" => Some("chest"),
             n if is_copper_chest(n) => Some("copper_chest"),
+            n if n.ends_with("shulker_box") => Some("shulker_box"),
             _ => None,
         };
         let changed = kind.is_some() && ((opening && viewers == 1) || (!opening && viewers == 0));
@@ -14924,7 +15076,8 @@ impl PlayPlan {
             }
         } else {
             if (matches!(name.as_str(), "minecraft:chest" | "minecraft:trapped_chest")
-                || is_copper_chest(&name))
+                || is_copper_chest(&name)
+                || name.ends_with("shulker_box"))
                 && let Some(&block) = self.survival.block_types.get(name.as_str())
             {
                 self.hub.send(
@@ -15013,7 +15166,7 @@ impl PlayPlan {
                         self.show_container(pos, n, false);
                     }
                 }
-                Kind::Player => {}
+                Kind::EnderChest | Kind::Player => {}
             }
         }
         back.extend(inv.carried.take());
@@ -15070,6 +15223,7 @@ impl PlayPlan {
                 .iter()
                 .flat_map(|&p| self.container_items(p))
                 .collect(),
+            Kind::EnderChest => w.slots.clone(),
             Kind::Furnace => self
                 .with_furnace(w.pos, |e| e.f.slots.to_vec())
                 .unwrap_or_else(|| vec![None; 3]),
@@ -17183,6 +17337,12 @@ impl PlayPlan {
         };
         for i in source_slots {
             let Some(st) = a.slots[i] else { continue };
+            // `ShulkerBoxBlockEntity.canPlaceItemThroughFace`: шалкер
+            // нельзя положить в шалкер.
+            if me.name.ends_with("shulker_box") && self.item_name(st.item).ends_with("shulker_box")
+            {
+                continue;
+            }
             if a.name == "minecraft:brewing_stand"
                 && i == 3
                 && self.item_name(st.item) != "minecraft:glass_bottle"
@@ -18396,6 +18556,10 @@ impl PlayPlan {
     /// Слоты контейнера в позиции (`/loot insert|replace`): сундук, бочка, воронка.
     pub(crate) fn container_slots(&self, pos: [i32; 3]) -> Option<Vec<Slot>> {
         let name = self.block(pos).map(|s| self.state_name(s))?;
+        // Эндер-сундук хранит предметы в игроке, а не в блоке.
+        if name == "minecraft:ender_chest" {
+            return None;
+        }
         // Печь и костёр хранят слоты в своих структурах, а не в `Items`.
         if furnace_kind(name).is_some() || name.ends_with("campfire") {
             return None;
@@ -18454,6 +18618,13 @@ impl PlayPlan {
         let Some(mut slots) = self.container_slots(pos) else {
             return false;
         };
+        if self
+            .block(pos)
+            .is_some_and(|s| self.state_name(s).ends_with("shulker_box"))
+            && self.item_name(stack.item).ends_with("shulker_box")
+        {
+            return false;
+        }
         let limit = self.max_stack(stack.item).max(1);
         // Сначала к существующим стопкам, потом в пустые слоты: как `Container.addItem`.
         let mut left = stack.count;

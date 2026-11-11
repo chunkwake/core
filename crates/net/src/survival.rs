@@ -9,6 +9,9 @@ use chunkwake_protocol::inventory::{Slot, Stack};
 pub const SLOTS: usize = 46;
 const HOTBAR: usize = 36;
 /// Слот шлема в окне инвентаря игрока.
+/// `PlayerEnderChestContainer.SLOTS`.
+pub const ENDER_SLOTS: usize = 27;
+
 pub const HEAD: usize = 5;
 /// Нагрудник: элитры носят здесь.
 pub const CHEST: usize = 6;
@@ -1170,6 +1173,8 @@ pub struct PlayerSave {
     pub exhaustion: f32,
     pub selected: usize,
     pub slots: Vec<(usize, Stack)>,
+    /// `EnderItems`: личный эндер-сундук (27 слотов, только занятые).
+    pub ender: Vec<(usize, Stack)>,
     /// Режим игры (`GameType`); `None` — режим сервера.
     pub game_mode: Option<u8>,
     /// Активные эффекты (`active_effects`).
@@ -1195,6 +1200,8 @@ pub struct PlayerSave {
 #[derive(Default)]
 pub struct PlayerState {
     pub inv: Inventory,
+    /// `EnderItems`: личный эндер-сундук, 27 слотов.
+    pub ender: Vec<Slot>,
     pub vitals: Vitals,
     pub game_mode: Option<u8>,
     pub xp: crate::xp::Experience,
@@ -1209,6 +1216,12 @@ impl PlayerState {
             }
         }
         st.inv.selected = s.selected.min(8);
+        st.ender = vec![None; ENDER_SLOTS];
+        for &(i, stack) in &s.ender {
+            if i < ENDER_SLOTS && stack.count > 0 {
+                st.ender[i] = Some(stack);
+            }
+        }
         st.game_mode = s.game_mode.filter(|&m| m <= 3);
         st.vitals.health = s.health.clamp(0.0, MAX_HEALTH);
         st.vitals.food = s.food.clamp(0, MAX_FOOD);
@@ -1230,6 +1243,12 @@ impl PlayerState {
             saturation: v.saturation,
             exhaustion: v.exhaustion,
             selected: self.inv.selected,
+            ender: self
+                .ender
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| s.map(|stack| (i, stack)))
+                .collect(),
             game_mode: self.game_mode,
             effects: v.effects.clone(),
             xp: self.xp,
@@ -1529,9 +1548,13 @@ mod tests {
         st.vitals.health = 7.5;
         st.vitals.food = 12;
         st.game_mode = Some(1);
+        st.ender = vec![None; ENDER_SLOTS];
+        st.ender[4] = Some(Stack::new(5, 2));
         let s = st.save([1.0, 2.0, 3.0], 90.0, -10.0);
         assert_eq!(s.slots.len(), 2);
+        assert_eq!(s.ender, vec![(4, Stack::new(5, 2))]);
         let back = PlayerState::restore(&s);
+        assert_eq!(back.ender[4], Some(Stack::new(5, 2)));
         assert_eq!(back.save([1.0, 2.0, 3.0], 90.0, -10.0), s);
     }
 
