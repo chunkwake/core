@@ -139,6 +139,9 @@ pub struct Server {
     session_id: Uuid,
     /// Перевод протокола для клиентов других версий (ставит мост с ViaVersion).
     translator: std::sync::OnceLock<Arc<dyn translate::Translator>>,
+    /// Незавершённые входы по адресу: один IP не должен занимать весь
+    /// глобальный `MAX_PENDING_LOGINS`.
+    pending_by_ip: std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, usize>>,
 }
 
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -149,6 +152,9 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(120);
 /// Сколько соединений одновременно может находиться на пути к игре.
 const MAX_PENDING_LOGINS: usize = 1024;
+/// Сколько незавершённых входов допускается с одного IP. Остальные
+/// соединения с этого адреса отбрасываются до чтения рукопожатия.
+const MAX_PENDING_PER_IP: usize = 8;
 /// Первая версия протокола со сжатием (1.8).
 const COMPRESSION_SINCE: i32 = 47;
 
@@ -165,6 +171,7 @@ impl Server {
             online: AtomicUsize::new(0),
             session_id: uuid::Builder::from_random_bytes(rand::random()).into_uuid(),
             translator: std::sync::OnceLock::new(),
+            pending_by_ip: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -172,6 +179,28 @@ impl Server {
     /// Ставится один раз (мост поднимает ViaVersion после старта сети).
     pub fn set_translator(&self, translator: Arc<dyn translate::Translator>) -> bool {
         self.translator.set(translator).is_ok()
+    }
+
+    /// Берёт место незавершённого входа для `ip`; `false` — с адреса уже
+    /// висит `MAX_PENDING_PER_IP` соединений.
+    fn reserve_pending_ip(&self, ip: std::net::IpAddr) -> bool {
+        let mut pending = self.pending_by_ip.lock().unwrap();
+        let slot = pending.entry(ip).or_insert(0);
+        if *slot >= MAX_PENDING_PER_IP {
+            return false;
+        }
+        *slot += 1;
+        true
+    }
+
+    fn release_pending_ip(&self, ip: std::net::IpAddr) {
+        let mut pending = self.pending_by_ip.lock().unwrap();
+        if let Some(slot) = pending.get_mut(&ip) {
+            *slot -= 1;
+            if *slot == 0 {
+                pending.remove(&ip);
+            }
+        }
     }
 
     /// Принимает соединения бесконечно; каждый вошедший игрок передаётся в `on_login`.
@@ -214,10 +243,19 @@ impl Server {
                 tracing::debug!(%addr, "too many pending logins, connection dropped");
                 continue;
             }
+            if !self.reserve_pending_ip(addr.ip()) {
+                tracing::debug!(%addr, "too many pending logins from this IP, connection dropped");
+                continue;
+            }
+            let ip_pending = IpPending {
+                server: self.clone(),
+                ip: addr.ip(),
+            };
             let _ = stream.set_nodelay(true);
             let server = self.clone();
             let on_login = on_login.clone();
             handshakes.spawn(async move {
+                let _ip_pending = ip_pending;
                 // Срок на весь вход, а не на каждое чтение: байт раз в 29 секунд
                 // держал соединение до игры бесконечно.
                 match tokio::time::timeout(LOGIN_TIMEOUT, server.handle(stream, addr)).await {
@@ -502,6 +540,19 @@ pub struct Connection {
     inbox: VecDeque<Vec<u8>>,
     /// Место игрока на сервере: занято, пока жива сессия (`max-players`, статус).
     online: Option<OnlineGuard>,
+}
+
+/// Место незавершённого входа для одного IP; освобождается при завершении
+/// задачи рукопожатия/входа.
+struct IpPending {
+    server: Arc<Server>,
+    ip: std::net::IpAddr,
+}
+
+impl Drop for IpPending {
+    fn drop(&mut self) {
+        self.server.release_pending_ip(self.ip);
+    }
 }
 
 /// Бронь места на время входа и игры; освобождается при закрытии соединения.
@@ -863,5 +914,30 @@ mod admission_tests {
         drop(reserved);
         assert_eq!(server.online.load(Ordering::Relaxed), 0);
         assert_eq!(server.admission.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn pending_logins_are_limited_per_ip() {
+        let server = server(10);
+        let ip: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let other: std::net::IpAddr = "192.0.2.2".parse().unwrap();
+        let guards: Vec<IpPending> = (0..MAX_PENDING_PER_IP)
+            .map(|_| {
+                assert!(server.reserve_pending_ip(ip));
+                IpPending {
+                    server: server.clone(),
+                    ip,
+                }
+            })
+            .collect();
+
+        assert!(!server.reserve_pending_ip(ip));
+        assert!(server.reserve_pending_ip(other), "другой IP не затронут");
+
+        drop(guards);
+        assert!(
+            server.reserve_pending_ip(ip),
+            "после входа место снова свободно"
+        );
     }
 }
