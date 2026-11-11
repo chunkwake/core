@@ -684,9 +684,36 @@ pub(super) fn damage(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     let Some(first) = targets.first().cloned() else {
         return no_targets();
     };
+    // `[at <location> | by <entity>]`: точка источника для щита.
+    let origin = match input.word() {
+        Some("at") => {
+            let (Some(x), Some(y), Some(z)) = (input.word(), input.word(), input.word()) else {
+                return usage("/damage <target> <amount> [type] [at <pos> | by <entity>]");
+            };
+            let Some(coords) = super::args::coords3(x, y, z) else {
+                return usage("/damage <target> <amount> [type] [at <pos> | by <entity>]");
+            };
+            let (base, yaw, pitch) = call.source.uuid.and_then(|u| ctx.pose(u)).unwrap_or((
+                call.position(ctx),
+                0.0,
+                0.0,
+            ));
+            Some(super::args::Basis::from_rotation(yaw, pitch).resolve(coords, base))
+        }
+        Some("by") => {
+            let Some(token) = input.word() else {
+                return usage("/damage <target> <amount> [type] [at <pos> | by <entity>]");
+            };
+            match ctx.select(call.source, token, true) {
+                Ok(list) => list.first().map(|t| t.pos),
+                Err(e) => return Outcome::Feedback(e.component()),
+            }
+        }
+        _ => None,
+    };
     if ctx
         .plan
-        .push_control(first.uuid, Control::Hurt(amount, cause))
+        .push_control(first.uuid, Control::Hurt(amount, cause, origin))
     {
         success(
             "commands.damage.success",

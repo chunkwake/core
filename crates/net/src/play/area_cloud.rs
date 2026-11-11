@@ -230,6 +230,7 @@ impl PlayPlan {
                         Control::Hurt(
                             crate::potions::splash_instant_amount(amount, 0.5),
                             Cause::Magic,
+                            None,
                         ),
                     );
                 }

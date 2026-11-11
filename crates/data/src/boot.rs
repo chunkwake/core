@@ -1,5 +1,5 @@
 //! Образ данных запуска: всё, что сервер собирает из дерева ванильных JSON,
-//! упаковывается в `chunkwake-derived-v1/boot.v7.bin` и дальше читается одним
+//! упаковывается в `chunkwake-derived-v1/boot.v8.bin` и дальше читается одним
 //! последовательным файлом вместо тысяч открытий и разборов.
 //!
 //! Сборка образа вызывает обычные загрузчики; повторный старт их не трогает.
@@ -13,17 +13,17 @@ use crate::recipes::{CampfireCook, Cooking, Ingredient, Recipe, Recipes, Stonecu
 use crate::registries::{Builtin, Registry, RegistryData, RegistryTags};
 use crate::tools::{Tool, ToolRule};
 use crate::world::{
-    AttackRangeInfo, Blocks, Drink, Food, Fuel, ItemInfo, KineticCondition, KineticWeaponInfo,
-    PiercingWeaponInfo, Properties,
+    AttackRangeInfo, Blocks, BlocksAttacksInfo, DeathEffectInfo, DeathProtectionInfo, Drink, Food,
+    Fuel, ItemInfo, KineticCondition, KineticWeaponInfo, PiercingWeaponInfo, Properties,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Версия формата. Меняется вместе с любым полем образа.
-const SCHEMA: u32 = 7;
+const SCHEMA: u32 = 8;
 const MAGIC: u32 = 0x434B_424F; // "CKBO"
-const FILE: &str = "boot.v7.bin";
+const FILE: &str = "boot.v8.bin";
 
 /// Слоты экипировки в порядке кодов образа (`ItemInfo::equip`).
 const EQUIP: [&str; 8] = [
@@ -460,6 +460,31 @@ fn w_items(w: &mut W, items: &[ItemInfo]) {
             w.bool(p.dismounts);
             w.opt(p.sound, |w, s| w.str(s));
             w.opt(p.hit_sound, |w, s| w.str(s));
+        });
+        w.opt(i.blocks, |w, b| {
+            w.i32(b.block_delay_ticks);
+            w.f32(b.item_damage_threshold);
+            w.f32(b.item_damage_base);
+            w.f32(b.item_damage_factor);
+            w.opt(b.bypassed_by, |w, s| w.str(s));
+            w.opt(b.block_sound, |w, s| w.str(s));
+            w.opt(b.disable_sound, |w, s| w.str(s));
+            w.u32(b.reductions.len() as u32);
+            for r in b.reductions {
+                w.f32(r.angle_deg);
+                w.opt(r.kind, |w, s| w.str(s));
+                w.f32(r.base);
+                w.f32(r.factor);
+            }
+        });
+        w.opt(i.death_protection, |w, d| {
+            w.bool(d.clear_all);
+            w.u32(d.effects.len() as u32);
+            for e in d.effects {
+                w.str(e.id);
+                w.u8(e.amplifier);
+                w.i32(e.duration);
+            }
         });
     }
 }
@@ -1007,6 +1032,49 @@ fn r_items(r: &mut R<'_>) -> Result<Vec<ItemInfo>, DataError> {
                     hit_sound: r.opt(|r| Ok(crate::world::leak_str(r.str()?)))?,
                 })
             })?,
+            blocks: r.opt(|r| {
+                let block_delay_ticks = r.i32()?;
+                let item_damage_threshold = r.f32()?;
+                let item_damage_base = r.f32()?;
+                let item_damage_factor = r.f32()?;
+                let bypassed_by = r.opt(|r| Ok(crate::world::leak_str(r.str()?)))?;
+                let block_sound = r.opt(|r| Ok(crate::world::leak_str(r.str()?)))?;
+                let disable_sound = r.opt(|r| Ok(crate::world::leak_str(r.str()?)))?;
+                let mut reductions = Vec::new();
+                for _ in 0..r.count()? {
+                    reductions.push(crate::world::BlockDamageReduction {
+                        angle_deg: r.f32()?,
+                        kind: r.opt(|r| Ok(crate::world::leak_str(r.str()?)))?,
+                        base: r.f32()?,
+                        factor: r.f32()?,
+                    });
+                }
+                Ok(BlocksAttacksInfo {
+                    block_delay_ticks,
+                    reductions: Box::leak(reductions.into_boxed_slice()),
+                    item_damage_threshold,
+                    item_damage_base,
+                    item_damage_factor,
+                    bypassed_by,
+                    block_sound,
+                    disable_sound,
+                })
+            })?,
+            death_protection: r.opt(|r| {
+                let clear_all = r.bool()?;
+                let mut effects = Vec::new();
+                for _ in 0..r.count()? {
+                    effects.push(DeathEffectInfo {
+                        id: crate::world::leak_str(r.str()?),
+                        amplifier: r.u8()?,
+                        duration: r.i32()?,
+                    });
+                }
+                Ok(DeathProtectionInfo {
+                    clear_all,
+                    effects: Box::leak(effects.into_boxed_slice()),
+                })
+            })?,
         });
     }
     Ok(out)
@@ -1359,6 +1427,29 @@ mod tests {
                     dismounts: false,
                     sound: Some("minecraft:item.spear.attack"),
                     hit_sound: Some("minecraft:item.spear.hit"),
+                }),
+                blocks: Some(BlocksAttacksInfo {
+                    block_delay_ticks: 5,
+                    reductions: &[crate::world::BlockDamageReduction {
+                        angle_deg: 90.0,
+                        kind: None,
+                        base: 0.0,
+                        factor: 1.0,
+                    }],
+                    item_damage_threshold: 3.0,
+                    item_damage_base: 1.0,
+                    item_damage_factor: 1.0,
+                    bypassed_by: Some("#minecraft:bypasses_shield"),
+                    block_sound: Some("minecraft:item.shield.block"),
+                    disable_sound: Some("minecraft:item.shield.break"),
+                }),
+                death_protection: Some(DeathProtectionInfo {
+                    clear_all: true,
+                    effects: &[DeathEffectInfo {
+                        id: "minecraft:regeneration",
+                        amplifier: 1,
+                        duration: 900,
+                    }],
                 }),
             },
         ];

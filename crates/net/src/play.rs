@@ -2568,6 +2568,8 @@ pub struct SurvivalData {
     pub item_tags: HashMap<String, HashSet<String>>,
     /// Тег блока → id блоков. `/fill … replace #тег`.
     pub block_tags: HashMap<String, HashSet<String>>,
+    /// Теги типов урона (`#minecraft:bypasses_shield`).
+    pub damage_tags: HashMap<String, HashSet<String>>,
     /// Имя биома по сетевому ID (`worldgen/biome`).
     pub biome_names: Vec<String>,
     /// Осадки и базовая температура из `worldgen/biome`.
@@ -6944,7 +6946,7 @@ impl PlayPlan {
                                     }
                                     gone.push(id);
                                 } else {
-                                    hurt.push((alive_ids[k], d, punch, vel, a.owner));
+                                    hurt.push((alive_ids[k], d, punch, vel, a.owner, a.pos));
                                     if a.stopped {
                                         gone.push(id);
                                     }
@@ -6990,7 +6992,7 @@ impl PlayPlan {
             self.emit_vibration(pos, "minecraft:projectile_land");
         }
         for (owner, damage) in blasted {
-            self.push_control(owner, Control::Hurt(damage, Cause::Explosion));
+            self.push_control(owner, Control::Hurt(damage, Cause::Explosion, None));
         }
         for (id, rocket, pos) in broken {
             if rocket && !quiet.contains(&id) {
@@ -7043,7 +7045,7 @@ impl PlayPlan {
                             self.teleport_event(uuid, "ENDER_PEARL", (feet, yaw, pitch, dim))
                         {
                             self.push_control(uuid, Control::Teleport(feet, yaw, pitch));
-                            self.push_control(uuid, Control::Hurt(5.0, Cause::Fall));
+                            self.push_control(uuid, Control::Hurt(5.0, Cause::Fall, None));
                         }
                     }
                 }
@@ -7078,7 +7080,7 @@ impl PlayPlan {
                 play::set_entity_motion(self.ids.set_entity_motion, id, vel),
             );
         }
-        for ((uuid, entity), d, punch, vel, owner) in hurt {
+        for ((uuid, entity), d, punch, vel, owner, pos) in hurt {
             // Стрела моба: урон `arrow` со стрелком-не-игроком растёт со сложностью.
             let shooter = owner.and_then(|o| {
                 let mobs = self.sim().mobs.lock().unwrap();
@@ -7096,7 +7098,7 @@ impl PlayPlan {
             if d <= 0.0 {
                 continue;
             }
-            self.push_control(uuid, Control::Hurt(d, cause));
+            self.push_control(uuid, Control::Hurt(d, cause, Some(pos)));
             if punch > 0 {
                 let h = (vel[0] * vel[0] + vel[2] * vel[2]).sqrt();
                 if h > 1e-6 {
@@ -7225,6 +7227,7 @@ impl PlayPlan {
                             Control::Hurt(
                                 crate::potions::splash_instant_amount(amount, strength),
                                 Cause::Magic,
+                                Some(pos),
                             ),
                         );
                         continue;
@@ -8809,7 +8812,7 @@ impl PlayPlan {
             let dx = feet[0] - pos[0];
             let dz = feet[2] - pos[2];
             if dx * dx + dz * dz <= 9.0 && (feet[1] - pos[1]).abs() <= 6.0 {
-                self.push_control(uuid, Control::Hurt(5.0, Cause::Fire));
+                self.push_control(uuid, Control::Hurt(5.0, Cause::Fire, Some(pos)));
             }
         }
         self.lightning_mobs(pos);
@@ -9895,7 +9898,7 @@ impl PlayPlan {
                 crate::tnt::damage(dist, self.explosion_exposure(center, eye), power),
             );
             if damage > 0.0 {
-                self.push_control(uuid, Control::Hurt(damage, cause));
+                self.push_control(uuid, Control::Hurt(damage, cause, Some(center)));
             }
         }
         let mut mobs = self.sim().mobs.lock().unwrap();
@@ -11204,9 +11207,9 @@ impl PlayPlan {
                                 state.inv.add_components(item, count, max, extra, damage);
                             self.send_slots(conn, &mut state.inv, &changed).await?;
                         }
-                        Control::Hurt(d, cause) => {
+                        Control::Hurt(d, cause, origin) => {
                             if !state.vitals.dead && matches!(login.spawn.game_mode, 0 | 2) {
-                                self.hurt(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, d, cause).await?;
+                                self.hurt_at(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, d, cause, origin).await?;
                             }
                         }
                         Control::Heal(amount) => {
@@ -11682,6 +11685,23 @@ impl PlayPlan {
                                 &[(8, play::Meta::Byte(0))],
                             ),
                         );
+                    }
+                    // Предмет щита сменился или игрок умер — `stopUsingItem`.
+                    if let Some((slot, item, _)) = state.vitals.block_use
+                        && (state.vitals.dead
+                            || state.inv.slots[slot].is_none_or(|s| s.item != item))
+                    {
+                        state.vitals.stop_blocking();
+                        if spear_use.is_none() {
+                            self.hub.send(
+                                None,
+                                play::entity_meta(
+                                    ids.set_entity_data,
+                                    me.entity_id,
+                                    &[(8, play::Meta::Byte(0))],
+                                ),
+                            );
+                        }
                     }
                     let pulsed = state.vitals.tick_effects(self.effect_kinds());
                     let effects_changed = !pulsed.expired.is_empty();
@@ -12611,6 +12631,37 @@ impl PlayPlan {
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                             continue;
                         }
+                        // `Item.use` для `BLOCKS_ATTACKS`: поднять щит.
+                        if !state.vitals.dead
+                            && login.spawn.game_mode != 3
+                            && let Some(slot) = Self::hand_index(&state.inv, hand)
+                            && let Some(held) = state.inv.slots[slot]
+                            && self
+                                .survival
+                                .items
+                                .get(held.item as usize)
+                                .is_some_and(|i| i.blocks.is_some())
+                        {
+                            eating = None;
+                            drinking = None;
+                            drawing = None;
+                            if state.vitals.block_use.is_none() {
+                                state.vitals.start_blocking(slot, held.item);
+                                self.hub.send(
+                                    None,
+                                    play::entity_meta(
+                                        ids.set_entity_data,
+                                        me.entity_id,
+                                        &[(
+                                            8,
+                                            play::Meta::Byte(if hand == 0 { 1 } else { 3 }),
+                                        )],
+                                    ),
+                                );
+                            }
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
+                            continue;
+                        }
                         if !state.vitals.dead && login.spawn.game_mode != 3
                             && self.use_bucket(conn, uuid, &mut state.inv, hand, survival).await?
                         {
@@ -13026,7 +13077,7 @@ impl PlayPlan {
                                     )
                                     .await?;
                                 }
-                                if spear_use.take().is_some() {
+                                if spear_use.take().is_some() | state.vitals.stop_blocking() {
                                     self.hub.send(
                                         None,
                                         play::entity_meta(
@@ -21798,6 +21849,178 @@ impl PlayPlan {
     }
 
     /// Урон игроку: здоровье, анимация у всех, при смерти — сообщение и падение.
+    /// `LivingEntity.getItemBlockingWith`: предмет в руке всё ещё тот, щит
+    /// поднят (`blockDelayTicks`), и в нём есть `blocks_attacks`.
+    fn blocking_with(
+        &self,
+        v: &Vitals,
+        inv: &Inventory,
+    ) -> Option<(usize, Stack, chunkwake_data::world::BlocksAttacksInfo)> {
+        let (slot, item, started) = v.block_use?;
+        let stack = inv.slots[slot]?;
+        if stack.item != item {
+            return None;
+        }
+        let info = self.survival.items.get(item as usize)?.blocks?;
+        let elapsed = started.elapsed().as_millis() / 50;
+        (elapsed >= info.block_delay_ticks.max(0) as u128).then_some((slot, stack, info))
+    }
+
+    /// Угол между взглядом игрока и горизонтальным направлением на источник.
+    fn shield_angle(&self, uuid: Uuid, origin: [f64; 3]) -> f64 {
+        let Some((feet, yaw, _)) = self.player_at(uuid) else {
+            return std::f64::consts::PI;
+        };
+        let (dx, dz) = (origin[0] - feet[0], origin[2] - feet[2]);
+        let len = (dx * dx + dz * dz).sqrt();
+        if len < 1e-6 {
+            return std::f64::consts::PI;
+        }
+        let (sin, cos) = f64::from(yaw).to_radians().sin_cos();
+        // `calculateViewVector(0, yHeadRot)` = (-sin, 0, cos).
+        ((-sin * dx + cos * dz) / len).clamp(-1.0, 1.0).acos()
+    }
+
+    /// `checkTotemDeathProtection`: тотем из любой руки, здоровье 1, эффекты.
+    async fn totem_save(
+        &self,
+        conn: &mut Connection,
+        me: &Online,
+        v: &mut Vitals,
+        inv: &mut Inventory,
+    ) -> Result<bool, NetError> {
+        let main = inv.held_slot();
+        let mut found = None;
+        for slot in [main, survival::OFFHAND] {
+            let Some(stack) = inv.slots[slot] else {
+                continue;
+            };
+            let Some(info) = self
+                .survival
+                .items
+                .get(stack.item as usize)
+                .and_then(|i| i.death_protection)
+            else {
+                continue;
+            };
+            found = Some((slot, stack, info));
+            break;
+        }
+        let Some((slot, stack, info)) = found else {
+            return Ok(false);
+        };
+        if stack.count > 1 {
+            inv.slots[slot] = Some(Stack {
+                count: stack.count - 1,
+                ..stack
+            });
+        } else {
+            inv.slots[slot] = None;
+            self.break_in_hand(me.entity_id, slot == survival::OFFHAND);
+        }
+        self.send_slots(conn, inv, &[slot]).await?;
+        if info.clear_all {
+            let old: Vec<i32> = v.effects.iter().map(|e| e.id).collect();
+            v.effects.clear();
+            for id in old {
+                conn.send(&inv::remove_mob_effect(
+                    self.ids.remove_mob_effect,
+                    me.entity_id,
+                    id,
+                ))
+                .await?;
+            }
+        }
+        v.dead = false;
+        v.health = 1.0;
+        for e in info.effects {
+            let Some(&id) = self.survival.effects.get(e.id) else {
+                continue;
+            };
+            let effect = survival::Effect::plain(id, e.amplifier, e.duration);
+            if v.add_effect(effect, false) {
+                conn.send(&inv::update_mob_effect(
+                    self.ids.update_mob_effect,
+                    me.entity_id,
+                    id,
+                    effect.amplifier as i32,
+                    effect.duration,
+                    effect.flags(),
+                ))
+                .await?;
+            }
+        }
+        self.send_health(conn, v).await?;
+        self.sync_effect_particles(conn, me, v).await?;
+        // `EntityEvent.PROTECTED_FROM_DEATH`: клиент играет звук и частицы.
+        self.hub.send(
+            None,
+            inv::entity_event(self.ids.entity_event, me.entity_id, 35),
+        );
+        Ok(true)
+    }
+
+    /// `LivingEntity.applyItemBlocking`: вернуть заблокированный урон и
+    /// износить щит.
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_shield(
+        &self,
+        conn: &mut Connection,
+        me: &Online,
+        v: &Vitals,
+        inv: &mut Inventory,
+        amount: f32,
+        cause: Cause,
+        origin: Option<[f64; 3]>,
+    ) -> Result<f32, NetError> {
+        let Some((slot, _stack, info)) = self.blocking_with(v, inv) else {
+            return Ok(0.0);
+        };
+        let kind = cause.damage_type();
+        if info.bypasses(kind, &self.survival.damage_tags) {
+            return Ok(0.0);
+        }
+        let angle = origin.map_or(std::f64::consts::PI, |o| {
+            self.shield_angle(me.entry.uuid, o)
+        });
+        let blocked = info.resolve_blocked(amount, angle, kind, &self.survival.damage_tags);
+        if blocked <= 0.0 {
+            return Ok(0.0);
+        }
+        if let Some((feet, _, _)) = self.player_at(me.entry.uuid)
+            && let Some(sound) = info.block_sound
+        {
+            self.play_sound(
+                None,
+                sound,
+                crate::sounds::PLAYERS,
+                feet,
+                1.0,
+                0.8 + rand::random::<f32>() * 0.4,
+            );
+        }
+        let wear = info.item_damage(blocked);
+        if wear > 0
+            && let Some(mut held) = inv.slots[slot]
+        {
+            let mut broken = false;
+            for _ in 0..wear {
+                if self.wear_one(&mut held) {
+                    broken = true;
+                    break;
+                }
+            }
+            if broken {
+                inv.slots[slot] = None;
+                self.break_in_hand(me.entity_id, slot == survival::OFFHAND);
+            } else {
+                inv.slots[slot] = Some(held);
+            }
+            self.send_slots(conn, inv, &[slot]).await?;
+        }
+        Ok(blocked)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn hurt(
         &self,
@@ -21830,6 +22053,17 @@ impl PlayPlan {
             return Ok(());
         }
         self.wake_player(me.entry.uuid);
+        let mut amount = amount.max(0.0);
+        // `LivingEntity.hurt`: щит блокирует часть урона до брони и эффектов.
+        let blocked = self
+            .apply_shield(conn, me, v, inv, amount, cause, origin)
+            .await?;
+        if blocked > 0.0 {
+            amount -= blocked;
+            if amount <= 0.0 {
+                return Ok(());
+            }
+        }
         let mut amount = survival::resisted(
             amount,
             self.effect_amp(v, "minecraft:resistance"),
@@ -21895,6 +22129,7 @@ impl PlayPlan {
         {
             self.emit_vibration(at, "minecraft:entity_damage");
         }
+        let saved = died && self.totem_save(conn, me, v, inv).await?;
         self.send_health(conn, v).await?;
         let damage_type = match cause {
             Cause::Fall => Some(self.survival.damage_fall),
@@ -21924,7 +22159,7 @@ impl PlayPlan {
                 inv::damage_event(self.ids.damage_event, me.entity_id, t),
             );
         }
-        if died {
+        if died && !saved {
             self.die(conn, me, inv, xp, cause).await?;
         }
         Ok(())

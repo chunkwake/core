@@ -1,7 +1,7 @@
 //! Блоки (`reports/blocks.json`) и типы измерений (`data/minecraft/dimension_type`).
 
 use crate::DataError;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -254,6 +254,10 @@ pub struct ItemInfo {
     pub kinetic: Option<KineticWeaponInfo>,
     /// `minecraft:piercing_weapon`: обычный удар копьём.
     pub piercing: Option<PiercingWeaponInfo>,
+    /// `minecraft:blocks_attacks`: блокировка щитом.
+    pub blocks: Option<BlocksAttacksInfo>,
+    /// `minecraft:death_protection`: тотем бессмертия.
+    pub death_protection: Option<DeathProtectionInfo>,
 }
 
 impl Default for ItemInfo {
@@ -273,6 +277,8 @@ impl Default for ItemInfo {
             attack_range: None,
             kinetic: None,
             piercing: None,
+            blocks: None,
+            death_protection: None,
         }
     }
 }
@@ -378,6 +384,109 @@ pub struct PiercingWeaponInfo {
     pub hit_sound: Option<&'static str>,
 }
 
+/// Одно правило `BlocksAttacks.DamageReduction`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlockDamageReduction {
+    pub angle_deg: f32,
+    /// `None` — любой тип урона; иначе `#тег` или имя `damage_type`.
+    pub kind: Option<&'static str>,
+    pub base: f32,
+    pub factor: f32,
+}
+
+impl BlockDamageReduction {
+    /// `DamageReduction.resolve`: угол, тип и `base + factor × урон`.
+    pub fn resolve(
+        self,
+        damage: f32,
+        angle: f64,
+        damage_type: &str,
+        tags: &HashMap<String, HashSet<String>>,
+    ) -> f32 {
+        if angle > f64::from(self.angle_deg).to_radians() {
+            return 0.0;
+        }
+        if let Some(kind) = self.kind {
+            let ok = if let Some(tag) = kind.strip_prefix('#') {
+                tags.get(tag).is_some_and(|set| set.contains(damage_type))
+            } else {
+                kind == damage_type
+            };
+            if !ok {
+                return 0.0;
+            }
+        }
+        (self.base + self.factor * damage).clamp(0.0, damage)
+    }
+}
+
+/// `minecraft:blocks_attacks` (`BlocksAttacks`): блокировка щитом.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlocksAttacksInfo {
+    /// `blockDelayTicks`: сколько тиков щит поднимается.
+    pub block_delay_ticks: i32,
+    /// `damageReductions`; пусто — правило по умолчанию (90°, все типы).
+    pub reductions: &'static [BlockDamageReduction],
+    pub item_damage_threshold: f32,
+    pub item_damage_base: f32,
+    pub item_damage_factor: f32,
+    /// `bypassed_by`: `#тег` типов, которые щит не блокирует.
+    pub bypassed_by: Option<&'static str>,
+    pub block_sound: Option<&'static str>,
+    pub disable_sound: Option<&'static str>,
+}
+
+impl BlocksAttacksInfo {
+    /// `ItemDamageFunction.apply`: износ щита за заблокированный урон.
+    pub fn item_damage(self, blocked: f32) -> i32 {
+        if blocked < self.item_damage_threshold {
+            return 0;
+        }
+        (self.item_damage_base + self.item_damage_factor * blocked).floor() as i32
+    }
+
+    /// `resolveBlockedDamage`: сумма правил, не больше самого урона.
+    pub fn resolve_blocked(
+        self,
+        damage: f32,
+        angle: f64,
+        damage_type: &str,
+        tags: &HashMap<String, HashSet<String>>,
+    ) -> f32 {
+        self.reductions
+            .iter()
+            .map(|r| r.resolve(damage, angle, damage_type, tags))
+            .sum::<f32>()
+            .clamp(0.0, damage)
+    }
+
+    /// `bypassedBy.contains(source.typeHolder())`.
+    pub fn bypasses(self, damage_type: &str, tags: &HashMap<String, HashSet<String>>) -> bool {
+        self.bypassed_by.is_some_and(|kind| {
+            if let Some(tag) = kind.strip_prefix('#') {
+                tags.get(tag).is_some_and(|set| set.contains(damage_type))
+            } else {
+                kind == damage_type
+            }
+        })
+    }
+}
+
+/// Один эффект `death_protection`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeathEffectInfo {
+    pub id: &'static str,
+    pub amplifier: u8,
+    pub duration: i32,
+}
+
+/// `minecraft:death_protection`: тотем бессмертия.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeathProtectionInfo {
+    pub clear_all: bool,
+    pub effects: &'static [DeathEffectInfo],
+}
+
 /// `SwingAnimation.DEFAULT`: `whack` на 6 тиков.
 pub const DEFAULT_SWING: (u8, u8) = (1, 6);
 
@@ -460,6 +569,8 @@ pub fn load_items(root: &Path, items: &HashMap<String, i32>) -> Result<Vec<ItemI
             || text.contains("\"minecraft:attack_range\"")
             || text.contains("\"minecraft:kinetic_weapon\"")
             || text.contains("\"minecraft:piercing_weapon\"")
+            || text.contains("\"minecraft:blocks_attacks\"")
+            || text.contains("\"minecraft:death_protection\"")
         {
             let json: serde_json::Value =
                 serde_json::from_str(&text).map_err(|e| DataError::Format {
@@ -481,6 +592,8 @@ pub fn load_items(root: &Path, items: &HashMap<String, i32>) -> Result<Vec<ItemI
             out[id as usize].attack_range = parse_attack_range(c);
             out[id as usize].kinetic = parse_kinetic(c);
             out[id as usize].piercing = parse_piercing(c);
+            out[id as usize].blocks = parse_blocks(c);
+            out[id as usize].death_protection = parse_death_protection(c);
         }
     }
     Ok(out)
@@ -568,6 +681,111 @@ fn parse_piercing(c: &serde_json::Value) -> Option<PiercingWeaponInfo> {
             .unwrap_or(false),
         sound: v.get("sound").and_then(parse_sound),
         hit_sound: v.get("hit_sound").and_then(parse_sound),
+    })
+}
+
+/// `HolderSet<DamageType>` из отчёта: строка, `{tag: …}`, `{id: …}` или первый
+/// элемент списка.
+fn parse_damage_kind(v: &serde_json::Value) -> Option<&'static str> {
+    let name = v
+        .as_str()
+        .or_else(|| v.get("tag").and_then(|s| s.as_str()))
+        .or_else(|| v.get("id").and_then(|s| s.as_str()))
+        .or_else(|| v.as_array()?.first()?.as_str())?;
+    Some(leak_str(if name.starts_with('#') || name.contains(':') {
+        name.to_owned()
+    } else {
+        format!("#minecraft:{name}")
+    }))
+}
+
+fn parse_blocks(c: &serde_json::Value) -> Option<BlocksAttacksInfo> {
+    let v = c.get("minecraft:blocks_attacks")?;
+    let number = |obj: Option<&serde_json::Value>, key: &str, fallback: f32| {
+        obj.and_then(|o| o.get(key))
+            .and_then(|n| n.as_f64())
+            .map_or(fallback, |n| n as f32)
+    };
+    let items = v.get("item_damage");
+    let reductions = match v.get("damage_reductions") {
+        None => {
+            const DEFAULT: &[BlockDamageReduction] = &[BlockDamageReduction {
+                angle_deg: 90.0,
+                kind: None,
+                base: 0.0,
+                factor: 1.0,
+            }];
+            DEFAULT
+        }
+        Some(serde_json::Value::Array(list)) => {
+            let parsed: Vec<BlockDamageReduction> = list
+                .iter()
+                .filter_map(|r| {
+                    Some(BlockDamageReduction {
+                        angle_deg: number(Some(r), "horizontal_blocking_angle", 90.0),
+                        kind: r.get("type").and_then(parse_damage_kind),
+                        base: r.get("base").and_then(|n| n.as_f64())? as f32,
+                        factor: r.get("factor").and_then(|n| n.as_f64())? as f32,
+                    })
+                })
+                .collect();
+            Box::leak(parsed.into_boxed_slice())
+        }
+        Some(_) => &[],
+    };
+    Some(BlocksAttacksInfo {
+        block_delay_ticks: (number(Some(v), "block_delay_seconds", 0.0) * 20.0).round() as i32,
+        reductions,
+        item_damage_threshold: number(items, "threshold", 1.0),
+        item_damage_base: number(items, "base", 0.0),
+        item_damage_factor: number(items, "factor", 1.0),
+        bypassed_by: v.get("bypassed_by").and_then(parse_damage_kind),
+        block_sound: v.get("block_sound").and_then(parse_sound),
+        disable_sound: v.get("disabled_sound").and_then(parse_sound),
+    })
+}
+
+fn parse_death_protection(c: &serde_json::Value) -> Option<DeathProtectionInfo> {
+    let v = c.get("minecraft:death_protection")?;
+    let mut clear_all = false;
+    let mut effects = Vec::new();
+    for entry in v
+        .get("death_effects")
+        .and_then(|e| e.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let kind = entry.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match kind.strip_prefix("minecraft:").unwrap_or(kind) {
+            "clear_all_effects" => clear_all = true,
+            "apply_effects" => {
+                for effect in entry
+                    .get("effects")
+                    .and_then(|e| e.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some(id) = effect.get("id").and_then(|s| s.as_str()) else {
+                        continue;
+                    };
+                    effects.push(DeathEffectInfo {
+                        id: leak_str(id.to_owned()),
+                        amplifier: effect
+                            .get("amplifier")
+                            .and_then(|n| n.as_i64())
+                            .unwrap_or(0)
+                            .clamp(0, 255) as u8,
+                        duration: effect.get("duration").and_then(|n| n.as_i64()).unwrap_or(0)
+                            as i32,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(DeathProtectionInfo {
+        clear_all,
+        effects: Box::leak(effects.into_boxed_slice()),
     })
 }
 
@@ -1070,12 +1288,12 @@ impl Drop for MarkReady {
     }
 }
 
-/// `load_items` через сводку `items.v5.tsv`: имя, стопка, питьё, броня, урон, копья и для еды — сытость.
+/// `load_items` через сводку `items.v6.tsv`: имя, стопка, питьё, броня, урон, копья, щит, тотем и для еды — сытость.
 pub fn load_items_cached(
     root: &Path,
     items: &HashMap<String, i32>,
 ) -> Result<Vec<ItemInfo>, DataError> {
-    let path = derived(root, "items.v5.tsv");
+    let path = derived(root, "items.v6.tsv");
     let len = items.values().max().map_or(0, |&m| m as usize + 1);
     if let Ok(text) = std::fs::read_to_string(&path) {
         let mut out = vec![ItemInfo::default(); len];
@@ -1169,6 +1387,42 @@ fn item_line(name: &str, i: &ItemInfo) -> String {
             p.hit_sound.unwrap_or("-")
         )
     });
+    let blocks = i.blocks.map_or("-".to_owned(), |b| {
+        let reductions = b
+            .reductions
+            .iter()
+            .map(|r| {
+                format!(
+                    "{},{},{},{}",
+                    r.angle_deg,
+                    r.kind.unwrap_or("-"),
+                    r.base,
+                    r.factor
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(">");
+        format!(
+            "{};{};{};{};{};{};{};{}",
+            b.block_delay_ticks,
+            b.item_damage_threshold,
+            b.item_damage_base,
+            b.item_damage_factor,
+            b.bypassed_by.unwrap_or("-"),
+            b.block_sound.unwrap_or("-"),
+            b.disable_sound.unwrap_or("-"),
+            reductions
+        )
+    });
+    let death = i.death_protection.map_or("-".to_owned(), |d| {
+        let effects = d
+            .effects
+            .iter()
+            .map(|e| format!("{},{},{}", e.id, e.amplifier, e.duration))
+            .collect::<Vec<_>>()
+            .join(">");
+        format!("{};{}", u8::from(d.clear_all), effects)
+    });
     let head = format!(
         "{name}\t{}\t{}\t{}\t{fuel}\t{drink}\t{}\t{}\t{}\t{}\t{},{}",
         i.max_stack,
@@ -1181,7 +1435,7 @@ fn item_line(name: &str, i: &ItemInfo) -> String {
         i.swing.0,
         i.swing.1
     );
-    let head = format!("{head}\t{range}\t{kinetic}\t{piercing}");
+    let head = format!("{head}\t{range}\t{kinetic}\t{piercing}\t{blocks}\t{death}");
     match i.food {
         Some(f) => format!(
             "{head}\t{}\t{}\t{}\t{}",
@@ -1309,6 +1563,71 @@ fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, I
             })
         }
     };
+    let blocks = match f.next()? {
+        "-" => None,
+        s => {
+            let v: Vec<&str> = s.split(';').collect();
+            if v.len() != 8 {
+                return None;
+            }
+            let reduction = |s: &str| -> Option<BlockDamageReduction> {
+                let p: Vec<&str> = s.split(',').collect();
+                if p.len() != 4 {
+                    return None;
+                }
+                Some(BlockDamageReduction {
+                    angle_deg: p[0].parse().ok()?,
+                    kind: (p[1] != "-").then(|| leak_str(p[1].to_owned())),
+                    base: p[2].parse().ok()?,
+                    factor: p[3].parse().ok()?,
+                })
+            };
+            let reductions: Vec<BlockDamageReduction> = v[7]
+                .split('>')
+                .filter(|r| !r.is_empty())
+                .map(reduction)
+                .collect::<Option<_>>()?;
+            Some(BlocksAttacksInfo {
+                block_delay_ticks: v[0].parse().ok()?,
+                reductions: Box::leak(reductions.into_boxed_slice()),
+                item_damage_threshold: v[1].parse().ok()?,
+                item_damage_base: v[2].parse().ok()?,
+                item_damage_factor: v[3].parse().ok()?,
+                bypassed_by: (v[4] != "-").then(|| leak_str(v[4].to_owned())),
+                block_sound: (v[5] != "-").then(|| leak_str(v[5].to_owned())),
+                disable_sound: (v[6] != "-").then(|| leak_str(v[6].to_owned())),
+            })
+        }
+    };
+    let death_protection = match f.next()? {
+        "-" => None,
+        s => {
+            let v: Vec<&str> = s.split(';').collect();
+            if v.len() != 2 {
+                return None;
+            }
+            let effect = |s: &str| -> Option<DeathEffectInfo> {
+                let p: Vec<&str> = s.split(',').collect();
+                if p.len() != 3 {
+                    return None;
+                }
+                Some(DeathEffectInfo {
+                    id: leak_str(p[0].to_owned()),
+                    amplifier: p[1].parse().ok()?,
+                    duration: p[2].parse().ok()?,
+                })
+            };
+            let effects: Vec<DeathEffectInfo> = v[1]
+                .split('>')
+                .filter(|e| !e.is_empty())
+                .map(effect)
+                .collect::<Option<_>>()?;
+            Some(DeathProtectionInfo {
+                clear_all: v[0] != "0",
+                effects: Box::leak(effects.into_boxed_slice()),
+            })
+        }
+    };
     let food = match (f.next(), f.next(), f.next(), f.next()) {
         (Some(n), Some(s), Some(a), Some(sec)) => Some(Food {
             nutrition: n.parse().ok()?,
@@ -1335,6 +1654,8 @@ fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, I
             attack_range,
             kinetic,
             piercing,
+            blocks,
+            death_protection,
         },
     ))
 }
@@ -1489,6 +1810,8 @@ mod loot_tests {
                 attack_range: None,
                 kinetic: None,
                 piercing: None,
+                blocks: None,
+                death_protection: None,
             },
             ItemInfo {
                 max_stack: 16,
@@ -1504,7 +1827,7 @@ mod loot_tests {
     /// Взмах копья из отчёта 26.3 и умолчание у пустого компонента.
     #[test]
     fn swing_from_report() {
-        let spear = r#"{"components":{"minecraft:attack_animation":{"type":"stab","duration":13},"minecraft:attack_range":{}}}"#;
+        let spear = r##"{"components":{"minecraft:attack_animation":{"type":"stab","duration":13},"minecraft:attack_range":{}}}"##;
         assert_eq!(parse_swing(spear), (2, 13));
         let pretty =
             "\"minecraft:attack_animation\": {\n  \"type\": \"stab\",\n  \"duration\": 21\n},";
@@ -1520,11 +1843,11 @@ mod loot_tests {
     #[test]
     fn parses_spear_components() {
         let json: serde_json::Value = serde_json::from_str(
-            r#"{"components":{
+            r##"{"components":{
               "minecraft:attack_range":{"hitbox_margin":0.125,"max_creative_reach":6.5,"max_reach":4.5,"min_creative_reach":2.0,"min_reach":2.0,"mob_factor":0.5},
               "minecraft:kinetic_weapon":{"damage_conditions":{"max_duration_ticks":225,"min_relative_speed":4.6},"damage_multiplier":0.95,"delay_ticks":12,"dismount_conditions":{"max_duration_ticks":50,"min_speed":11.0},"forward_movement":0.38,"hit_sound":"minecraft:item.spear.hit","knockback_conditions":{"max_duration_ticks":135,"min_speed":5.1},"sound":"minecraft:item.spear.use"},
               "minecraft:piercing_weapon":{"hit_sound":"minecraft:item.spear.hit","sound":"minecraft:item.spear.attack"}
-            }}"#,
+            }}"##,
         )
         .unwrap();
         let c = &json["components"];
@@ -1550,7 +1873,7 @@ mod loot_tests {
         assert_eq!(piercing.sound, Some("minecraft:item.spear.attack"));
     }
 
-    /// Сводка `items.v5.tsv` сохраняет компоненты копья.
+    /// Сводка `items.v6.tsv` сохраняет компоненты копья.
     #[test]
     fn item_line_keeps_spear_components() {
         let items = HashMap::from([("minecraft:iron_spear".to_string(), 5)]);
@@ -1595,6 +1918,82 @@ mod loot_tests {
         };
         let line = item_line("minecraft:iron_spear", &info);
         assert_eq!(parse_item_line(&line, &items), Some((5, info)));
+    }
+
+    /// Щит и тотем: разбор компонентов 26.3 и сводка предметов.
+    #[test]
+    fn parses_shield_and_totem() {
+        let json: serde_json::Value = serde_json::from_str(
+            r##"{"components":{
+              "minecraft:blocks_attacks":{"block_delay_seconds":0.25,"block_sound":"minecraft:item.shield.block","bypassed_by":"#minecraft:bypasses_shield","disabled_sound":"minecraft:item.shield.break","item_damage":{"base":1.0,"factor":1.0,"threshold":3.0}},
+              "minecraft:death_protection":{"death_effects":[{"type":"minecraft:clear_all_effects"},{"type":"minecraft:apply_effects","effects":[{"amplifier":1,"duration":900,"id":"minecraft:regeneration","show_icon":true},{"duration":800,"id":"minecraft:fire_resistance","show_icon":true}]}]}
+            }}"##,
+        )
+        .unwrap();
+        let c = &json["components"];
+        let blocks = parse_blocks(c).unwrap();
+        assert_eq!(blocks.block_delay_ticks, 5);
+        assert_eq!(blocks.item_damage(2.9), 0);
+        assert_eq!(blocks.item_damage(6.0), 7);
+        assert_eq!(blocks.reductions.len(), 1);
+        let tags = HashMap::from([(
+            "minecraft:bypasses_shield".to_owned(),
+            HashSet::from(["minecraft:on_fire".to_owned()]),
+        )]);
+        assert!(blocks.bypasses("minecraft:on_fire", &tags));
+        assert!(!blocks.bypasses("minecraft:mob_attack", &tags));
+        assert_eq!(
+            blocks.resolve_blocked(10.0, 0.0, "minecraft:mob_attack", &tags),
+            10.0
+        );
+        assert_eq!(
+            blocks.resolve_blocked(10.0, std::f64::consts::PI, "minecraft:mob_attack", &tags),
+            0.0
+        );
+        let death = parse_death_protection(c).unwrap();
+        assert!(death.clear_all);
+        assert_eq!(death.effects.len(), 2);
+        assert_eq!(death.effects[0].id, "minecraft:regeneration");
+        assert_eq!(
+            (death.effects[0].amplifier, death.effects[0].duration),
+            (1, 900)
+        );
+        assert_eq!(death.effects[1].id, "minecraft:fire_resistance");
+        assert_eq!(death.effects[1].duration, 800);
+    }
+
+    #[test]
+    fn item_line_keeps_shield_and_totem() {
+        let items = HashMap::from([("minecraft:shield".to_string(), 7)]);
+        let info = ItemInfo {
+            max_damage: 336,
+            blocks: Some(BlocksAttacksInfo {
+                block_delay_ticks: 5,
+                reductions: &[BlockDamageReduction {
+                    angle_deg: 90.0,
+                    kind: None,
+                    base: 0.0,
+                    factor: 1.0,
+                }],
+                item_damage_threshold: 3.0,
+                item_damage_base: 1.0,
+                item_damage_factor: 1.0,
+                bypassed_by: Some("#minecraft:bypasses_shield"),
+                block_sound: Some("minecraft:item.shield.block"),
+                disable_sound: Some("minecraft:item.shield.break"),
+            }),
+            death_protection: Some(DeathProtectionInfo {
+                clear_all: true,
+                effects: &[DeathEffectInfo {
+                    id: "minecraft:regeneration",
+                    amplifier: 1,
+                    duration: 900,
+                }],
+            }),
+            ..Default::default()
+        };
+        let line = item_line("minecraft:shield", &info);
+        assert_eq!(parse_item_line(&line, &items), Some((7, info)));
     }
 }
 

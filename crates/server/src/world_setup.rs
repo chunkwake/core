@@ -1013,6 +1013,7 @@ fn survival_data(
         path_cells: None,
         item_tags: chunkwake_net::play::load_registry_tags(data_dir, "item"),
         block_tags: chunkwake_net::play::load_registry_tags(data_dir, "block"),
+        damage_tags: chunkwake_net::play::load_registry_tags(data_dir, "damage_type"),
         biome_names: registries
             .synchronized
             .iter()

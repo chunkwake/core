@@ -3911,7 +3911,10 @@ impl PlayPlan {
         let Some((entity, pos, on_ground)) = player else {
             return;
         };
-        if !self.push_control(target, Control::Hurt(damage, Cause::Mob(species.name()))) {
+        if !self.push_control(
+            target,
+            Control::Hurt(damage, Cause::Mob(species.name()), Some(from)),
+        ) {
             return;
         }
         // `AbstractCubeMob.dealDamage`: звук удара после прошедшего урона.

@@ -862,6 +862,8 @@ pub struct Vitals {
     attack_ticker: u32,
     /// Item ID в основной руке на прошлом тике (`lastItemInMainHand`).
     attack_item: Option<i32>,
+    /// `LivingEntity.useItem` щита: слот, предмет и начало удержания.
+    pub block_use: Option<(usize, i32, std::time::Instant)>,
 }
 
 impl Default for Vitals {
@@ -881,11 +883,22 @@ impl Default for Vitals {
             effects: Vec::new(),
             attack_ticker: 0,
             attack_item: None,
+            block_use: None,
         }
     }
 }
 
 impl Vitals {
+    /// `LivingEntity.startUsingItem` для щита.
+    pub fn start_blocking(&mut self, slot: usize, item: i32) {
+        self.block_use = Some((slot, item, std::time::Instant::now()));
+    }
+
+    /// `stopUsingItem`: `true`, если щит был поднят.
+    pub fn stop_blocking(&mut self) -> bool {
+        self.block_use.take().is_some()
+    }
+
     /// `Player.tick`: `++attackStrengthTicker`; смена предмета в руке сбрасывает
     /// заряд (`resetAttackStrengthTicker`).
     pub fn tick_attack(&mut self, held_item: Option<i32>) {
