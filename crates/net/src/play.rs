@@ -12835,6 +12835,8 @@ impl PlayPlan {
                                     if !self.cancelled(Event::Drop, uuid, || format!("{name} {n}")).await {
                                         state.inv.slots[held] = (s.count > n).then_some(Stack { count: s.count - n, ..s });
                                         self.throw(feet, yaw, pitch, Stack { count: n, ..s });
+                                        // `ServerPlayer.drop`: выброс сбрасывает заряд удара.
+                                        state.vitals.reset_attack();
                                         eating = None;
                                         drinking = None;
                                     }
@@ -13562,6 +13564,9 @@ impl PlayPlan {
                                     continue;
                                 }
                                 placed = true;
+                                // `handleUseItemOn`: успешная постановка блока
+                                // взмахивает рукой и сбрасывает заряд удара.
+                                state.vitals.reset_attack();
                                 // Провод ставится крестом (`getStateForPlacement`), дальше — форма и сила.
                                 if crate::redstone::is_wire(&name) {
                                     for k in ["north", "south", "west", "east"] {

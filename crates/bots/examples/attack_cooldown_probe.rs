@@ -10,10 +10,12 @@ struct Probe {
     c: Client,
     sb_command: i32,
     sb_attack: i32,
+    sb_use_item_on: i32,
     sb_move_pos: i32,
     sb_tick_end: i32,
     cb_chat: i32,
     chat: String,
+    seq: i32,
 }
 
 impl Probe {
@@ -126,6 +128,26 @@ impl Probe {
         self.c.send_raw(&w.buf).await.unwrap();
     }
 
+    /// Правый клик по грани блока (`use_item_on`) без ожидания: следующий
+    /// удар должен увидеть только что сброшенный заряд.
+    async fn use_on(&mut self, p: [i32; 3], face: i32, hand: i32) {
+        self.seq += 1;
+        let [x, y, z] = p;
+        let packed =
+            ((x as i64 & 0x3FF_FFFF) << 38) | ((z as i64 & 0x3FF_FFFF) << 12) | (y as i64 & 0xFFF);
+        let mut w = self.packet(self.sb_use_item_on);
+        w.var_int(hand)
+            .i64(packed)
+            .var_int(face)
+            .f32(0.5)
+            .f32(1.0)
+            .f32(0.5)
+            .u8(0)
+            .u8(0)
+            .var_int(self.seq);
+        self.c.send_raw(&w.buf).await.unwrap();
+    }
+
     /// Движение клиента без опоры: сервер копит высоту падения.
     async fn move_down(&mut self, pos: [f64; 3]) {
         let mut w = self.packet(self.sb_move_pos);
@@ -203,10 +225,12 @@ async fn main() {
         c,
         sb_command: sb("chat_command"),
         sb_attack: sb("attack"),
+        sb_use_item_on: sb("use_item_on"),
         sb_move_pos: sb("move_player_pos"),
         sb_tick_end: sb("client_tick_end"),
         cb_chat,
         chat: String::new(),
+        seq: 0,
     };
     let (x, z) = (spawn[0].floor() as i32, spawn[2].floor() as i32);
     // Пол ровного мира: bedrock, 2×dirt, трава — верх на -60.
@@ -344,9 +368,33 @@ async fn main() {
         "Sweeping Edge 3 должен снять ~5.5 HP с коровы, осталось {cow_edge}"
     );
 
+    // Постановка блока взмахивает рукой и сбрасывает заряд удара
+    // (`ServerGamePacketListenerImpl.handleUseItemOn`). Блок ставим из второй
+    // руки, чтобы меч в основной сохранял полный заряд.
+    p.clear("spider").await;
+    p.clear("cow").await;
+    p.cmd("item replace entity @s weapon.offhand with minecraft:stone 2")
+        .await;
+    p.pump(900).await;
+    let s_place = p.spawn("spider", spider, spot).await;
+    p.pump(150).await;
+    // Верхняя грань блока пола под площадкой (y = -61), рука 1 — вторая.
+    p.use_on([bx + 4, by - 1, bz], 1, 1).await;
+    p.attack(s_place).await;
+    p.pump(300).await;
+    let placed_h = p.data_health().await;
+    let after_place = 16.0 - placed_h;
+    assert!(
+        after_place < 2.5,
+        "после постановки блока удар должен быть слабым, снято {after_place}"
+    );
+
     // Крит: падение с высоты, удар в воздухе — 9 урона.
     p.clear("spider").await;
     p.clear("cow").await;
+    p.cmd("item replace entity @s hotbar.0 with minecraft:iron_sword 1")
+        .await;
+    p.pump(900).await;
     let s3 = p.spawn("spider", spider, spot).await;
     p.pump(900).await;
     p.cmd(&format!("tp @s {} {} {}", spot[0], spot[1] + 4.0, spot[2]))
