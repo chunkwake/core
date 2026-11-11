@@ -150,11 +150,10 @@ impl PlayPlan {
         {
             let mobs = self.sim().mobs.lock().unwrap();
             for (entity_id, entry) in mobs.iter() {
-                out.push(entity_ref(
-                    *entity_id,
-                    entry.mob.pos,
-                    entry.mob.species.name(),
-                ));
+                let mut target = entity_ref(*entity_id, entry.mob.pos, entry.mob.species.name());
+                target.yaw = entry.mob.yaw;
+                target.pitch = entry.mob.pitch;
+                out.push(target);
             }
         }
         {
@@ -206,10 +205,20 @@ impl PlayPlan {
             let mobs = self.sim().mobs.lock().unwrap();
             mobs.iter()
                 .find(|(entity_id, _)| entity_uuid(**entity_id) == uuid)
-                .map(|(entity_id, entry)| (*entity_id, entry.mob.pos, entry.mob.species.name()))
+                .map(|(entity_id, entry)| {
+                    (
+                        *entity_id,
+                        entry.mob.pos,
+                        entry.mob.species.name(),
+                        entry.mob.yaw,
+                        entry.mob.pitch,
+                    )
+                })
         };
-        let (entity_id, pos, name) = mob?;
+        let (entity_id, pos, name, yaw, pitch) = mob?;
         let mut target = entity_ref(entity_id, pos, name);
+        target.yaw = yaw;
+        target.pitch = pitch;
         if let Some(held) = self.entity_tags.lock().unwrap().get(&uuid) {
             target.tags.clone_from(held);
         }

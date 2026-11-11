@@ -270,10 +270,7 @@ impl Selector {
             .origin
             .or_else(|| source.map(|s| s.pos))
             .unwrap_or([0.0; 3]);
-        let player_only = matches!(
-            self.kind,
-            Kind::Self_ | Kind::Nearest | Kind::Random | Kind::AllPlayers
-        );
+        let player_only = matches!(self.kind, Kind::Nearest | Kind::Random | Kind::AllPlayers);
         // `type=` и `name=` разбираются в фильтре один раз, а не на каждую цель:
         // иначе на каждый `@e` приходилось `format!` и `to_lowercase`.
         let kind = self.kind_filter.as_deref().map(TypeFilter::new);

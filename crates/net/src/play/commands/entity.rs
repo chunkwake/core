@@ -283,13 +283,9 @@ fn move_all(
     let mut moved = Vec::new();
     let mut skipped = Vec::new();
     for target in targets {
-        if target.game_mode.is_none() {
-            skipped.push(target.uuid);
-            continue;
-        }
         // Без `facing` и углов оставляем текущий поворот, а не смотрим на юг.
         let (yaw, pitch) = turn.unwrap_or((target.yaw, target.pitch));
-        if ctx.plan.teleport_to(target.uuid, pos, yaw, pitch) {
+        if ctx.plan.teleport_entity_to(target, pos, yaw, pitch) {
             moved.push(target.clone());
         } else {
             skipped.push(target.uuid);
@@ -1264,6 +1260,19 @@ mod tests {
                 .all(|c| matches!(c, super::args::Coord::Local(_)))
         );
         assert!(matches!(coords[1], super::args::Coord::Local(v) if (v - 5.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn explicit_rotation_after_location() {
+        let plan = read_teleport(&["@e", "1", "2", "3", "90", "20"]).unwrap();
+        let super::Dest::Location {
+            rotation, facing, ..
+        } = plan.dest
+        else {
+            panic!("ожидались координаты");
+        };
+        assert!(matches!(facing, super::Facing::None));
+        assert_eq!(rotation, Some(("90".to_owned(), "20".to_owned())));
     }
 
     #[test]

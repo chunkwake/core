@@ -106,6 +106,68 @@ impl PlayPlan {
         }
         found
     }
+
+    /// `/tp` для любой цели: игроку — обычный телепорт, мобу и выпавшему
+    /// предмету — `teleport_entity` с новым поворотом (`TeleportCommand`).
+    pub(crate) fn teleport_entity_to(
+        &self,
+        target: &Target,
+        pos: [f64; 3],
+        yaw: f32,
+        pitch: f32,
+    ) -> bool {
+        if target.game_mode.is_some() {
+            if let Some(player) = self.hub.players.lock().unwrap().get_mut(&target.uuid) {
+                player.pos = pos;
+                player.yaw = yaw;
+                player.pitch = pitch;
+            }
+            return self.teleport_to(target.uuid, pos, yaw, pitch);
+        }
+        let teleported = {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            match mobs.get_mut(&target.entity_id) {
+                Some(entry) => {
+                    entry.mob.pos = pos;
+                    entry.mob.yaw = yaw;
+                    entry.mob.pitch = pitch;
+                    entry.mob.head_yaw = yaw;
+                    // `TeleportCommand.performTeleport`: гасим вертикальную
+                    // скорость, ставим на землю и останавливаем навигацию.
+                    entry.mob.vel[1] = 0.0;
+                    entry.mob.on_ground = true;
+                    entry.mob.nav.stop();
+                    true
+                }
+                None => false,
+            }
+        } || {
+            let mut dropped = self.sim().dropped.lock().unwrap();
+            match dropped.get_mut(&target.entity_id) {
+                Some(item) => {
+                    item.pos = pos;
+                    item.vel[1] = 0.0;
+                    item.on_ground = true;
+                    true
+                }
+                None => false,
+            }
+        };
+        if teleported {
+            self.hub.send_about(
+                target.entity_id,
+                chunkwake_protocol::play::teleport_entity(
+                    self.ids.teleport_entity,
+                    target.entity_id,
+                    pos,
+                    yaw,
+                    pitch,
+                    true,
+                ),
+            );
+        }
+        teleported
+    }
 }
 
 /// `/bossbar`.

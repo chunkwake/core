@@ -167,6 +167,54 @@ fn summon_creates_a_mob() {
 }
 
 #[test]
+fn tp_moves_a_mob_and_keeps_rotation() {
+    let plan = world!();
+    let y = plan.spawn_point()[1].floor() as i32;
+    assert!(
+        run(&plan, &format!("summon minecraft:cow 8 {y} 8")).contains("commands.summon.success")
+    );
+    let out = run(
+        &plan,
+        &format!("tp @e[type=minecraft:cow,limit=1] 12 {y} 12 90 20"),
+    );
+    assert!(out.contains("commands.teleport.success"), "{out}");
+    let pos = run(&plan, "data get entity @e[type=minecraft:cow,limit=1] Pos");
+    assert!(pos.contains("12.0d"), "{pos}");
+    let rot = run(
+        &plan,
+        "data get entity @e[type=minecraft:cow,limit=1] Rotation",
+    );
+    assert!(rot.contains("[90f,20f]"), "{rot}");
+    // Без углов поворот остаётся прежним.
+    let out = run(
+        &plan,
+        &format!("tp @e[type=minecraft:cow,limit=1] 14 {y} 14"),
+    );
+    assert!(out.contains("commands.teleport.success"), "{out}");
+    let rot = run(
+        &plan,
+        "data get entity @e[type=minecraft:cow,limit=1] Rotation",
+    );
+    assert!(rot.contains("[90f,20f]"), "{rot}");
+}
+
+#[test]
+fn execute_as_mob_teleports_itself() {
+    let plan = world!();
+    let y = plan.spawn_point()[1].floor() as i32;
+    assert!(
+        run(&plan, &format!("summon minecraft:cow 8 {y} 8")).contains("commands.summon.success")
+    );
+    let out = run(
+        &plan,
+        &format!("execute as @e[type=minecraft:cow,limit=1] run tp @s 10 {y} 10"),
+    );
+    assert!(out.contains("commands.teleport.success"), "{out}");
+    let pos = run(&plan, "data get entity @e[type=minecraft:cow,limit=1] Pos");
+    assert!(pos.contains("10.0"), "{pos}");
+}
+
+#[test]
 fn top_and_tick_report_load() {
     let plan = world!();
     let tps = run(&plan, "tps");
