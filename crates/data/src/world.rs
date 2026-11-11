@@ -248,6 +248,12 @@ pub struct ItemInfo {
     /// `minecraft:attack_animation`: вид (`none` 0, `whack` 1, `stab` 2) и
     /// длительность в тиках; без компонента — `SwingAnimation.DEFAULT`.
     pub swing: (u8, u8),
+    /// `minecraft:attack_range`; `None` — `AttackRange.defaultFor`.
+    pub attack_range: Option<AttackRangeInfo>,
+    /// `minecraft:kinetic_weapon`: урон копья по скорости.
+    pub kinetic: Option<KineticWeaponInfo>,
+    /// `minecraft:piercing_weapon`: обычный удар копьём.
+    pub piercing: Option<PiercingWeaponInfo>,
 }
 
 impl Default for ItemInfo {
@@ -264,8 +270,112 @@ impl Default for ItemInfo {
             attack: 0.0,
             attack_speed: 0.0,
             swing: DEFAULT_SWING,
+            attack_range: None,
+            kinetic: None,
+            piercing: None,
         }
     }
+}
+
+/// `minecraft:attack_range` (`AttackRange`): дальность удара предмета.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AttackRangeInfo {
+    pub min_reach: f32,
+    pub max_reach: f32,
+    pub min_creative_reach: f32,
+    pub max_creative_reach: f32,
+    pub hitbox_margin: f32,
+    pub mob_factor: f32,
+}
+
+impl AttackRangeInfo {
+    /// `AttackRange.defaultFor`: без компонента — дальность взаимодействия 3.0.
+    pub const ENTITY: Self = Self {
+        min_reach: 0.0,
+        max_reach: 3.0,
+        min_creative_reach: 0.0,
+        max_creative_reach: 3.0,
+        hitbox_margin: 0.0,
+        mob_factor: 1.0,
+    };
+
+    /// `effectiveMinRange`: у творческого — `min_creative_reach`, у моба — с `mob_factor`.
+    pub fn effective_min(self, creative: bool, mob: bool) -> f32 {
+        if mob {
+            self.min_reach * self.mob_factor
+        } else if creative {
+            self.min_creative_reach
+        } else {
+            self.min_reach
+        }
+    }
+
+    pub fn effective_max(self, creative: bool, mob: bool) -> f32 {
+        if mob {
+            self.max_reach * self.mob_factor
+        } else if creative {
+            self.max_creative_reach
+        } else {
+            self.max_reach
+        }
+    }
+}
+
+impl Default for AttackRangeInfo {
+    fn default() -> Self {
+        Self::ENTITY
+    }
+}
+
+/// Одно условие `KineticWeapon.Condition`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KineticCondition {
+    pub max_duration_ticks: i32,
+    pub min_speed: f32,
+    pub min_relative_speed: f32,
+}
+
+impl KineticCondition {
+    /// `Condition.test`: тики использования, скорость атакующего и относительная.
+    pub fn test(self, ticks_used: i32, speed: f64, relative: f64, factor: f64) -> bool {
+        ticks_used <= self.max_duration_ticks
+            && speed >= f64::from(self.min_speed) * factor
+            && relative >= f64::from(self.min_relative_speed) * factor
+    }
+
+    fn max_duration(self) -> i32 {
+        self.max_duration_ticks
+    }
+}
+
+/// `minecraft:kinetic_weapon` (`KineticWeapon`): урон по скорости при удержании.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KineticWeaponInfo {
+    pub contact_cooldown_ticks: i32,
+    pub delay_ticks: i32,
+    pub dismount: Option<KineticCondition>,
+    pub knockback: Option<KineticCondition>,
+    pub damage: Option<KineticCondition>,
+    pub forward_movement: f32,
+    pub damage_multiplier: f32,
+    pub sound: Option<&'static str>,
+    pub hit_sound: Option<&'static str>,
+}
+
+impl KineticWeaponInfo {
+    /// `computeDamageUseDuration`: задержка плюс окно урона.
+    pub fn use_duration(self) -> i32 {
+        self.delay_ticks + self.damage.map_or(0, KineticCondition::max_duration)
+    }
+}
+
+/// `minecraft:piercing_weapon` (`PiercingWeapon`): обычный удар копьём.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PiercingWeaponInfo {
+    pub deals_knockback: bool,
+    pub dismounts: bool,
+    pub sound: Option<&'static str>,
+    pub hit_sound: Option<&'static str>,
 }
 
 /// `SwingAnimation.DEFAULT`: `whack` на 6 тиков.
@@ -341,12 +451,15 @@ pub fn load_items(root: &Path, items: &HashMap<String, i32>) -> Result<Vec<ItemI
             out[id as usize].max_damage = n;
         }
         out[id as usize].swing = parse_swing(&text);
-        // Еды и зелий немного: такие файлы разбираем целиком.
+        // Еды, зелий и копий немного: такие файлы разбираем целиком.
         if text.contains("\"minecraft:food\"")
             || text.contains("\"minecraft:potion_contents\"")
             || text.contains("\"minecraft:equippable\"")
             || text.contains("\"minecraft:cooking_fuel\"")
             || text.contains("attack_damage")
+            || text.contains("\"minecraft:attack_range\"")
+            || text.contains("\"minecraft:kinetic_weapon\"")
+            || text.contains("\"minecraft:piercing_weapon\"")
         {
             let json: serde_json::Value =
                 serde_json::from_str(&text).map_err(|e| DataError::Format {
@@ -365,9 +478,97 @@ pub fn load_items(root: &Path, items: &HashMap<String, i32>) -> Result<Vec<ItemI
             out[id as usize].toughness = toughness;
             out[id as usize].attack = attr_add(c, "attack_damage");
             out[id as usize].attack_speed = attr_add(c, "attack_speed");
+            out[id as usize].attack_range = parse_attack_range(c);
+            out[id as usize].kinetic = parse_kinetic(c);
+            out[id as usize].piercing = parse_piercing(c);
         }
     }
     Ok(out)
+}
+
+/// Строка на всё время работы: компоненты предметов читаются один раз.
+pub(crate) fn leak_str(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+/// Имя звука из компонента (`SoundEvent` — строка или `{sound_id: …}`).
+fn parse_sound(v: &serde_json::Value) -> Option<&'static str> {
+    let name = v
+        .as_str()
+        .or_else(|| v.get("sound_id").and_then(|s| s.as_str()))
+        .or_else(|| v.get("id").and_then(|s| s.as_str()))?;
+    Some(leak_str(name.to_owned()))
+}
+
+fn parse_attack_range(c: &serde_json::Value) -> Option<AttackRangeInfo> {
+    let v = c.get("minecraft:attack_range")?;
+    let number = |key: &str, fallback: f32| {
+        v.get(key)
+            .and_then(|n| n.as_f64())
+            .map_or(fallback, |n| n as f32)
+    };
+    Some(AttackRangeInfo {
+        min_reach: number("min_reach", 0.0),
+        max_reach: number("max_reach", 3.0),
+        min_creative_reach: number("min_creative_reach", 0.0),
+        max_creative_reach: number("max_creative_reach", 5.0),
+        hitbox_margin: number("hitbox_margin", 0.3),
+        mob_factor: number("mob_factor", 1.0),
+    })
+}
+
+/// `KineticWeapon.Condition`: `max_duration_ticks` обязателен.
+fn parse_condition(v: &serde_json::Value) -> Option<KineticCondition> {
+    Some(KineticCondition {
+        max_duration_ticks: v.get("max_duration_ticks")?.as_i64()? as i32,
+        min_speed: v.get("min_speed").and_then(|n| n.as_f64()).unwrap_or(0.0) as f32,
+        min_relative_speed: v
+            .get("min_relative_speed")
+            .and_then(|n| n.as_f64())
+            .unwrap_or(0.0) as f32,
+    })
+}
+
+fn parse_kinetic(c: &serde_json::Value) -> Option<KineticWeaponInfo> {
+    let v = c.get("minecraft:kinetic_weapon")?;
+    let int = |key: &str, fallback: i32| {
+        v.get(key)
+            .and_then(|n| n.as_i64())
+            .map_or(fallback, |n| n.max(0) as i32)
+    };
+    Some(KineticWeaponInfo {
+        contact_cooldown_ticks: int("contact_cooldown_ticks", 10),
+        delay_ticks: int("delay_ticks", 0),
+        dismount: v.get("dismount_conditions").and_then(parse_condition),
+        knockback: v.get("knockback_conditions").and_then(parse_condition),
+        damage: v.get("damage_conditions").and_then(parse_condition),
+        forward_movement: v
+            .get("forward_movement")
+            .and_then(|n| n.as_f64())
+            .unwrap_or(0.0) as f32,
+        damage_multiplier: v
+            .get("damage_multiplier")
+            .and_then(|n| n.as_f64())
+            .unwrap_or(1.0) as f32,
+        sound: v.get("sound").and_then(parse_sound),
+        hit_sound: v.get("hit_sound").and_then(parse_sound),
+    })
+}
+
+fn parse_piercing(c: &serde_json::Value) -> Option<PiercingWeaponInfo> {
+    let v = c.get("minecraft:piercing_weapon")?;
+    Some(PiercingWeaponInfo {
+        deals_knockback: v
+            .get("deals_knockback")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(true),
+        dismounts: v
+            .get("dismounts")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false),
+        sound: v.get("sound").and_then(parse_sound),
+        hit_sound: v.get("hit_sound").and_then(parse_sound),
+    })
 }
 
 /// Зелье: есть `potion_contents` и `consumable`, нет `food` (еда идёт своим путём).
@@ -869,12 +1070,12 @@ impl Drop for MarkReady {
     }
 }
 
-/// `load_items` через сводку `items.v4.tsv`: имя, стопка, питьё, броня, урон и для еды — сытость.
+/// `load_items` через сводку `items.v5.tsv`: имя, стопка, питьё, броня, урон, копья и для еды — сытость.
 pub fn load_items_cached(
     root: &Path,
     items: &HashMap<String, i32>,
 ) -> Result<Vec<ItemInfo>, DataError> {
-    let path = derived(root, "items.v4.tsv");
+    let path = derived(root, "items.v5.tsv");
     let len = items.values().max().map_or(0, |&m| m as usize + 1);
     if let Ok(text) = std::fs::read_to_string(&path) {
         let mut out = vec![ItemInfo::default(); len];
@@ -926,6 +1127,48 @@ fn item_line(name: &str, i: &ItemInfo) -> String {
         ),
         None => "-\t-".to_owned(),
     };
+    let range = i.attack_range.map_or("-".to_owned(), |a| {
+        format!(
+            "{},{},{},{},{},{}",
+            a.min_reach,
+            a.max_reach,
+            a.min_creative_reach,
+            a.max_creative_reach,
+            a.hitbox_margin,
+            a.mob_factor
+        )
+    });
+    let cond = |c: Option<KineticCondition>| {
+        c.map_or("-".to_owned(), |c| {
+            format!(
+                "{},{},{}",
+                c.max_duration_ticks, c.min_speed, c.min_relative_speed
+            )
+        })
+    };
+    let kinetic = i.kinetic.map_or("-".to_owned(), |k| {
+        format!(
+            "{};{};{};{};{};{};{};{};{}",
+            k.contact_cooldown_ticks,
+            k.delay_ticks,
+            k.forward_movement,
+            k.damage_multiplier,
+            cond(k.dismount),
+            cond(k.knockback),
+            cond(k.damage),
+            k.sound.unwrap_or("-"),
+            k.hit_sound.unwrap_or("-")
+        )
+    });
+    let piercing = i.piercing.map_or("-".to_owned(), |p| {
+        format!(
+            "{};{};{};{}",
+            u8::from(p.deals_knockback),
+            u8::from(p.dismounts),
+            p.sound.unwrap_or("-"),
+            p.hit_sound.unwrap_or("-")
+        )
+    });
     let head = format!(
         "{name}\t{}\t{}\t{}\t{fuel}\t{drink}\t{}\t{}\t{}\t{}\t{},{}",
         i.max_stack,
@@ -938,6 +1181,7 @@ fn item_line(name: &str, i: &ItemInfo) -> String {
         i.swing.0,
         i.swing.1
     );
+    let head = format!("{head}\t{range}\t{kinetic}\t{piercing}");
     match i.food {
         Some(f) => format!(
             "{head}\t{}\t{}\t{}\t{}",
@@ -991,6 +1235,80 @@ fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, I
     let attack_speed = f.next()?.parse().ok()?;
     let (kind, duration) = f.next()?.split_once(',')?;
     let swing = (kind.parse().ok()?, duration.parse().ok()?);
+    let attack_range = match f.next()? {
+        "-" => None,
+        s => {
+            let values: Vec<f32> = s
+                .split(',')
+                .map(|x| x.parse().ok())
+                .collect::<Option<_>>()?;
+            let [
+                min_reach,
+                max_reach,
+                min_creative_reach,
+                max_creative_reach,
+                hitbox_margin,
+                mob_factor,
+            ] = <[f32; 6]>::try_from(values).ok()?;
+            Some(AttackRangeInfo {
+                min_reach,
+                max_reach,
+                min_creative_reach,
+                max_creative_reach,
+                hitbox_margin,
+                mob_factor,
+            })
+        }
+    };
+    let parse_cond = |s: &str| -> Option<Option<KineticCondition>> {
+        if s == "-" {
+            return Some(None);
+        }
+        let v: Vec<&str> = s.split(',').collect();
+        if v.len() != 3 {
+            return None;
+        }
+        Some(Some(KineticCondition {
+            max_duration_ticks: v[0].parse().ok()?,
+            min_speed: v[1].parse().ok()?,
+            min_relative_speed: v[2].parse().ok()?,
+        }))
+    };
+    let kinetic = match f.next()? {
+        "-" => None,
+        s => {
+            let v: Vec<&str> = s.split(';').collect();
+            if v.len() != 9 {
+                return None;
+            }
+            Some(KineticWeaponInfo {
+                contact_cooldown_ticks: v[0].parse().ok()?,
+                delay_ticks: v[1].parse().ok()?,
+                forward_movement: v[2].parse().ok()?,
+                damage_multiplier: v[3].parse().ok()?,
+                dismount: parse_cond(v[4])?,
+                knockback: parse_cond(v[5])?,
+                damage: parse_cond(v[6])?,
+                sound: (v[7] != "-").then(|| leak_str(v[7].to_owned())),
+                hit_sound: (v[8] != "-").then(|| leak_str(v[8].to_owned())),
+            })
+        }
+    };
+    let piercing = match f.next()? {
+        "-" => None,
+        s => {
+            let v: Vec<&str> = s.split(';').collect();
+            if v.len() != 4 {
+                return None;
+            }
+            Some(PiercingWeaponInfo {
+                deals_knockback: v[0] != "0",
+                dismounts: v[1] != "0",
+                sound: (v[2] != "-").then(|| leak_str(v[2].to_owned())),
+                hit_sound: (v[3] != "-").then(|| leak_str(v[3].to_owned())),
+            })
+        }
+    };
     let food = match (f.next(), f.next(), f.next(), f.next()) {
         (Some(n), Some(s), Some(a), Some(sec)) => Some(Food {
             nutrition: n.parse().ok()?,
@@ -1014,6 +1332,9 @@ fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, I
             attack,
             attack_speed,
             swing,
+            attack_range,
+            kinetic,
+            piercing,
         },
     ))
 }
@@ -1165,6 +1486,9 @@ mod loot_tests {
                 attack: 5.0,
                 attack_speed: -2.4,
                 swing: (2, 13),
+                attack_range: None,
+                kinetic: None,
+                piercing: None,
             },
             ItemInfo {
                 max_stack: 16,
@@ -1190,6 +1514,87 @@ mod loot_tests {
             DEFAULT_SWING
         );
         assert_eq!(parse_swing("{}"), DEFAULT_SWING);
+    }
+
+    /// Копьё 26.3: `attack_range`, `kinetic_weapon` и `piercing_weapon`.
+    #[test]
+    fn parses_spear_components() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"components":{
+              "minecraft:attack_range":{"hitbox_margin":0.125,"max_creative_reach":6.5,"max_reach":4.5,"min_creative_reach":2.0,"min_reach":2.0,"mob_factor":0.5},
+              "minecraft:kinetic_weapon":{"damage_conditions":{"max_duration_ticks":225,"min_relative_speed":4.6},"damage_multiplier":0.95,"delay_ticks":12,"dismount_conditions":{"max_duration_ticks":50,"min_speed":11.0},"forward_movement":0.38,"hit_sound":"minecraft:item.spear.hit","knockback_conditions":{"max_duration_ticks":135,"min_speed":5.1},"sound":"minecraft:item.spear.use"},
+              "minecraft:piercing_weapon":{"hit_sound":"minecraft:item.spear.hit","sound":"minecraft:item.spear.attack"}
+            }}"#,
+        )
+        .unwrap();
+        let c = &json["components"];
+        let range = parse_attack_range(c).unwrap();
+        assert_eq!(range.max_reach, 4.5);
+        assert_eq!(range.hitbox_margin, 0.125);
+        assert_eq!(range.effective_min(false, false), 2.0);
+        assert_eq!(range.effective_max(true, false), 6.5);
+        assert_eq!(range.effective_max(false, true), 2.25);
+        let kinetic = parse_kinetic(c).unwrap();
+        assert_eq!(kinetic.delay_ticks, 12);
+        assert_eq!(kinetic.use_duration(), 237);
+        let damage = kinetic.damage.unwrap();
+        assert_eq!(damage.min_relative_speed, 4.6);
+        assert!(damage.test(225, 0.0, 4.6, 1.0));
+        assert!(!damage.test(226, 0.0, 4.6, 1.0));
+        // У моба скорость и относительная скорость масштабируются на 0.2.
+        assert!(!damage.test(10, 0.0, 0.9, 0.2));
+        assert!(damage.test(10, 0.0, 0.92, 0.2));
+        let piercing = parse_piercing(c).unwrap();
+        assert!(piercing.deals_knockback);
+        assert!(!piercing.dismounts);
+        assert_eq!(piercing.sound, Some("minecraft:item.spear.attack"));
+    }
+
+    /// Сводка `items.v5.tsv` сохраняет компоненты копья.
+    #[test]
+    fn item_line_keeps_spear_components() {
+        let items = HashMap::from([("minecraft:iron_spear".to_string(), 5)]);
+        let info = ItemInfo {
+            attack: 2.0,
+            attack_speed: -2.947_368_4,
+            swing: (2, 19),
+            attack_range: Some(AttackRangeInfo {
+                min_reach: 2.0,
+                max_reach: 4.5,
+                min_creative_reach: 2.0,
+                max_creative_reach: 6.5,
+                hitbox_margin: 0.125,
+                mob_factor: 0.5,
+            }),
+            kinetic: Some(KineticWeaponInfo {
+                contact_cooldown_ticks: 10,
+                delay_ticks: 12,
+                dismount: Some(KineticCondition {
+                    max_duration_ticks: 50,
+                    min_speed: 11.0,
+                    min_relative_speed: 0.0,
+                }),
+                knockback: None,
+                damage: Some(KineticCondition {
+                    max_duration_ticks: 225,
+                    min_speed: 0.0,
+                    min_relative_speed: 4.6,
+                }),
+                forward_movement: 0.38,
+                damage_multiplier: 0.95,
+                sound: Some("minecraft:item.spear.use"),
+                hit_sound: Some("minecraft:item.spear.hit"),
+            }),
+            piercing: Some(PiercingWeaponInfo {
+                deals_knockback: true,
+                dismounts: false,
+                sound: Some("minecraft:item.spear.attack"),
+                hit_sound: Some("minecraft:item.spear.hit"),
+            }),
+            ..Default::default()
+        };
+        let line = item_line("minecraft:iron_spear", &info);
+        assert_eq!(parse_item_line(&line, &items), Some((5, info)));
     }
 }
 

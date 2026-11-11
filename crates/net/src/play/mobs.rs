@@ -1422,6 +1422,392 @@ impl PlayPlan {
         }
     }
 
+    /// `LivingEntity.getAttackRangeWith`: компонент предмета или
+    /// `AttackRange.defaultFor` (дальность взаимодействия).
+    fn attack_range_for(&self, held: Slot) -> chunkwake_data::world::AttackRangeInfo {
+        held.and_then(|s| self.survival.items.get(s.item as usize))
+            .and_then(|i| i.attack_range)
+            .unwrap_or(chunkwake_data::world::AttackRangeInfo::ENTITY)
+    }
+
+    /// `AttackRange.isInRange` для рамки цели: расстояние от глаз до ближайшей
+    /// точки AABB в пределах `[min − margin, max + margin]`.
+    fn in_attack_range(
+        &self,
+        eye: [f64; 3],
+        pos: [f64; 3],
+        size: (f64, f64),
+        range: chunkwake_data::world::AttackRangeInfo,
+        creative: bool,
+        mob: bool,
+    ) -> bool {
+        let min = f64::from(range.effective_min(creative, mob) - range.hitbox_margin);
+        let max = f64::from(range.effective_max(creative, mob) + range.hitbox_margin);
+        let d2: f64 = (0..3)
+            .map(|i| {
+                let lo = match i {
+                    0 | 2 => pos[i] - size.0 / 2.0,
+                    1 => pos[i],
+                    _ => unreachable!(),
+                };
+                let hi = match i {
+                    0 | 2 => pos[i] + size.0 / 2.0,
+                    1 => pos[i] + size.1,
+                    _ => unreachable!(),
+                };
+                let c = eye[i].clamp(lo, hi);
+                (eye[i] - c).powi(2)
+            })
+            .sum();
+        let d = d2.sqrt();
+        d >= min.max(0.0) && d <= max
+    }
+
+    /// Первый блок на луче (`ClipContext.Block.COLLIDER`).
+    fn ray_blocked(&self, eye: [f64; 3], dir: [f64; 3], max: f64) -> Option<f64> {
+        let mut d = 0.0;
+        while d <= max {
+            let c = [
+                (eye[0] + dir[0] * d).floor() as i32,
+                (eye[1] + dir[1] * d).floor() as i32,
+                (eye[2] + dir[2] * d).floor() as i32,
+            ];
+            if self
+                .block(c)
+                .is_some_and(|s| !self.shape_at(Some(s), c).is_empty())
+            {
+                return Some(d);
+            }
+            d += 0.1;
+        }
+        None
+    }
+
+    /// `LivingEntity.stabAttack` для набора целей: урон `deals_damage`,
+    /// отбрасывание `deals_knockback`, звук удара и анимация.
+    #[allow(clippy::too_many_arguments)]
+    fn stab_targets(
+        &self,
+        uuid: Uuid,
+        eye: [f64; 3],
+        yaw: f32,
+        slot: usize,
+        ids: &[i32],
+        damage: f32,
+        deals_knockback: bool,
+        knockback_level: i32,
+    ) -> usize {
+        let power = 0.4 + 0.5 * f64::from(knockback_level.max(0));
+        let (sin, cos) = f64::from(yaw).to_radians().sin_cos();
+        let mut hits = Vec::new();
+        {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            for &id in ids {
+                let Some(e) = mobs.get_mut(&id) else { continue };
+                if !e.mob.alive() {
+                    continue;
+                }
+                let mut died = false;
+                let mut hit = mb::hurt(
+                    &mut e.mob,
+                    damage,
+                    mb::Source::at(eye, Some(uuid.as_u128())),
+                    mb::KNOCKBACK,
+                )
+                .is_some_and(|d| {
+                    died = d;
+                    true
+                });
+                if died {
+                    e.killer = Some((uuid, slot as i32));
+                }
+                if deals_knockback {
+                    // `causeExtraKnockback(target, 0.4 + getKnockback)`.
+                    mb::knockback(&mut e.mob, power, sin, -cos);
+                    hit = true;
+                }
+                if hit {
+                    hits.push((
+                        id,
+                        died,
+                        e.mob.pos,
+                        e.mob.sound(if died { "death" } else { "hurt" }),
+                        e.mob.volume(),
+                        e.mob.is_baby(),
+                        sound_source(e.mob.species),
+                    ));
+                }
+            }
+        }
+        for (id, died, pos, sound, volume, baby, source) in &hits {
+            self.hub
+                .send_about(*id, play::hurt_animation(self.ids.hurt_animation, *id, yaw));
+            self.refresh_mob(*id);
+            self.play_sound(None, sound, *source, *pos, *volume, mob_pitch(*baby));
+            self.emit_vibration(*pos, "minecraft:entity_damage");
+            if *died {
+                self.emit_vibration(*pos, "minecraft:entity_die");
+                self.hub
+                    .send_about(*id, inv::entity_event(self.ids.entity_event, *id, 3));
+            }
+        }
+        hits.len()
+    }
+
+    /// `PiercingWeapon.attack`: удар копьём вдоль взгляда по всем целям в
+    /// `attack_range`; урон — `ATTACK_DAMAGE` без заряда атаки.
+    pub(super) fn piercing_attack(
+        &self,
+        uuid: Uuid,
+        inv: &mut Inventory,
+        vitals: &mut Vitals,
+        creative: bool,
+    ) -> bool {
+        let slot = inv.held_slot();
+        let Some(stack) = inv.slots[slot] else {
+            return false;
+        };
+        let Some(item) = self.survival.items.get(stack.item as usize) else {
+            return false;
+        };
+        let Some(piercing) = item.piercing else {
+            return false;
+        };
+        let Some((feet, yaw, pitch)) = self.player_at(uuid) else {
+            return false;
+        };
+        let eye = super::eye_of(feet);
+        let dir = crate::arrows::aim(f64::from(yaw), f64::from(pitch), 0.0);
+        let range = item.attack_range.unwrap_or_default();
+        let margin = f64::from(range.hitbox_margin);
+        let min = (f64::from(range.effective_min(creative, false)) - margin).max(0.0);
+        let max = f64::from(range.effective_max(creative, false)) + margin;
+        let blocked = self.ray_blocked(eye, dir, max);
+        let mut targets = Vec::new();
+        {
+            let mobs = self.sim().mobs.lock().unwrap();
+            for (&id, e) in mobs.iter() {
+                if !e.mob.alive() {
+                    continue;
+                }
+                let size = e.mob.size();
+                let Some(t) = ray_aabb(eye, dir, e.mob.pos, size, margin) else {
+                    continue;
+                };
+                if t < min || t > max || blocked.is_some_and(|b| b < t) {
+                    continue;
+                }
+                targets.push((t, id));
+            }
+        }
+        targets.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let level = |n: &str| chunkwake_protocol::components::stack_level(stack.extra, n);
+        let sharp = level("minecraft:sharpness");
+        let bonus = if sharp > 0 {
+            0.5 * sharp as f32 + 0.5
+        } else {
+            0.0
+        };
+        let ids: Vec<i32> = targets.into_iter().map(|(_, id)| id).collect();
+        let hit = self.stab_targets(
+            uuid,
+            eye,
+            yaw,
+            slot,
+            &ids,
+            1.0 + item.attack + bonus,
+            piercing.deals_knockback,
+            level("minecraft:knockback"),
+        );
+        if hit > 0
+            && !creative
+            && let Some(mut worn) = inv.slots[slot]
+        {
+            for _ in 0..hit {
+                if self.wear_one(&mut worn) {
+                    inv.slots[slot] = None;
+                    break;
+                }
+            }
+            if inv.slots[slot].is_some() {
+                inv.slots[slot] = Some(worn);
+            }
+        }
+        if hit > 0
+            && let Some(s) = piercing.hit_sound
+        {
+            self.play_sound(None, s, crate::sounds::PLAYERS, eye, 1.0, 1.0);
+        }
+        if let Some(s) = piercing.sound {
+            self.play_sound(None, s, crate::sounds::PLAYERS, eye, 1.0, 1.0);
+        }
+        vitals.reset_attack();
+        hit > 0
+    }
+
+    /// `KineticWeapon.damageEntities`: пока копьё удерживают, цели вдоль
+    /// взгляда получают урон `ATTACK_DAMAGE + floor(относительная скорость ×
+    /// damage_multiplier)` и отбрасывание/снятие с транспорта по условиям.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn kinetic_strike(
+        &self,
+        uuid: Uuid,
+        entity: i32,
+        inv: &mut Inventory,
+        ticks_used: i32,
+        attacker_speed: f64,
+        creative: bool,
+        recent: &mut HashMap<i32, Instant>,
+    ) -> bool {
+        let slot = inv.held_slot();
+        let Some(stack) = inv.slots[slot] else {
+            return false;
+        };
+        let Some(item) = self.survival.items.get(stack.item as usize) else {
+            return false;
+        };
+        let Some(kinetic) = item.kinetic else {
+            return false;
+        };
+        if ticks_used < kinetic.delay_ticks {
+            return false;
+        }
+        let ticks = ticks_used - kinetic.delay_ticks;
+        let factor = 1.0;
+        let Some((feet, yaw, pitch)) = self.player_at(uuid) else {
+            return false;
+        };
+        let eye = super::eye_of(feet);
+        let dir = crate::arrows::aim(f64::from(yaw), f64::from(pitch), 0.0);
+        let range = item.attack_range.unwrap_or_default();
+        let margin = f64::from(range.hitbox_margin);
+        let min = (f64::from(range.effective_min(creative, false)) - margin).max(0.0);
+        let max = f64::from(range.effective_max(creative, false)) + margin;
+        let blocked = self.ray_blocked(eye, dir, max);
+        let cooldown = Duration::from_millis((kinetic.contact_cooldown_ticks.max(0) as u64) * 50);
+        let base = 1.0 + item.attack;
+        let level = |n: &str| chunkwake_protocol::components::stack_level(stack.extra, n);
+        let sharp = level("minecraft:sharpness");
+        let bonus = if sharp > 0 {
+            0.5 * sharp as f32 + 0.5
+        } else {
+            0.0
+        };
+        let mut chosen: Vec<(i32, f32, bool, bool)> = Vec::new();
+        {
+            let mobs = self.sim().mobs.lock().unwrap();
+            for (&id, e) in mobs.iter() {
+                if !e.mob.alive() {
+                    continue;
+                }
+                let size = e.mob.size();
+                let Some(t) = ray_aabb(eye, dir, e.mob.pos, size, margin) else {
+                    continue;
+                };
+                if t < min || t > max || blocked.is_some_and(|b| b < t) {
+                    continue;
+                }
+                if recent.get(&id).is_some_and(|at| at.elapsed() < cooldown) {
+                    continue;
+                }
+                // `rememberStabbedEntity` — до проверки условий.
+                recent.insert(id, Instant::now());
+                let target_speed = (0..3).map(|i| dir[i] * e.mob.vel[i] * 20.0).sum::<f64>();
+                let relative = (attacker_speed - target_speed).max(0.0);
+                let knockback = kinetic
+                    .knockback
+                    .is_some_and(|c| c.test(ticks, attacker_speed, relative, factor));
+                let damage = kinetic
+                    .damage
+                    .is_some_and(|c| c.test(ticks, attacker_speed, relative, factor));
+                if !knockback && !damage {
+                    continue;
+                }
+                let amount =
+                    f64::from(base) + (relative * f64::from(kinetic.damage_multiplier)).floor();
+                chosen.push((id, (amount as f32) + bonus, damage, knockback));
+            }
+        }
+        if chosen.is_empty() {
+            return false;
+        }
+        let (sin, cos) = f64::from(yaw).to_radians().sin_cos();
+        let power = 0.4 + 0.5 * f64::from(level("minecraft:knockback").max(0));
+        let mut hits = Vec::new();
+        {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            for (id, damage, deals_damage, deals_knockback) in chosen {
+                let Some(e) = mobs.get_mut(&id) else { continue };
+                if !e.mob.alive() {
+                    continue;
+                }
+                let mut died = false;
+                let mut hit = false;
+                if deals_damage
+                    && let Some(d) = mb::hurt(
+                        &mut e.mob,
+                        damage,
+                        mb::Source::at(eye, Some(uuid.as_u128())),
+                        mb::KNOCKBACK,
+                    )
+                {
+                    died = d;
+                    hit = true;
+                    if died {
+                        e.killer = Some((uuid, slot as i32));
+                    }
+                }
+                if deals_knockback {
+                    mb::knockback(&mut e.mob, power, sin, -cos);
+                    hit = true;
+                }
+                if hit {
+                    hits.push((
+                        id,
+                        died,
+                        e.mob.pos,
+                        e.mob.sound(if died { "death" } else { "hurt" }),
+                        e.mob.volume(),
+                        e.mob.is_baby(),
+                        sound_source(e.mob.species),
+                    ));
+                }
+            }
+        }
+        for (id, died, pos, sound, volume, baby, source) in &hits {
+            self.hub
+                .send_about(*id, play::hurt_animation(self.ids.hurt_animation, *id, yaw));
+            self.refresh_mob(*id);
+            self.play_sound(None, sound, *source, *pos, *volume, mob_pitch(*baby));
+            self.emit_vibration(*pos, "minecraft:entity_damage");
+            if *died {
+                self.emit_vibration(*pos, "minecraft:entity_die");
+                self.hub
+                    .send_about(*id, inv::entity_event(self.ids.entity_event, *id, 3));
+            }
+        }
+        if !hits.is_empty() {
+            if !creative && let Some(mut worn) = inv.slots[slot] {
+                for _ in 0..hits.len() {
+                    if self.wear_one(&mut worn) {
+                        inv.slots[slot] = None;
+                        break;
+                    }
+                }
+                if inv.slots[slot].is_some() {
+                    inv.slots[slot] = Some(worn);
+                }
+            }
+            self.hub
+                .send_about(entity, play::animate(self.ids.animate, entity, 2));
+            if let Some(s) = kinetic.hit_sound {
+                // `makeLocalHitSound`: звук только атакующему.
+                self.player_sound(uuid, s, 1.0, 1.0);
+            }
+        }
+        !hits.is_empty()
+    }
+
     pub(super) async fn attack_mob(
         &self,
         uuid: Uuid,
@@ -1479,13 +1865,16 @@ impl PlayPlan {
         {
             let mobs = self.sim().mobs.lock().unwrap();
             let e = mobs.get(&target)?;
-            // Дальше 3 блоков (+ запас на задержку) не бьём.
-            let d = [
-                e.mob.pos[0] - pos[0],
-                e.mob.pos[1] - pos[1],
-                e.mob.pos[2] - pos[2],
-            ];
-            if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 36.0 {
+            // `AttackRange.isInRange`: дальность предмета в руке (у копья —
+            // 4.5, у обычного удара — 3.0), а не прежние 6 блоков.
+            if !self.in_attack_range(
+                super::eye_of(pos),
+                e.mob.pos,
+                e.mob.size(),
+                self.attack_range_for(held),
+                creative,
+                false,
+            ) {
                 return None;
             }
         }
@@ -1944,6 +2333,49 @@ impl PlayPlan {
         self.spawn_mob(species, pos, yaw + 180.0, false, Some("SPAWNER_EGG"));
         true
     }
+}
+
+/// Пересечение луча с AABB сущности (`ProjectileUtil.getEntityHitResult`);
+/// возвращает расстояние до входа в рамку.
+fn ray_aabb(
+    eye: [f64; 3],
+    dir: [f64; 3],
+    pos: [f64; 3],
+    size: (f64, f64),
+    margin: f64,
+) -> Option<f64> {
+    let min = [
+        pos[0] - size.0 / 2.0 - margin,
+        pos[1] - margin,
+        pos[2] - size.0 / 2.0 - margin,
+    ];
+    let max = [
+        pos[0] + size.0 / 2.0 + margin,
+        pos[1] + size.1 + margin,
+        pos[2] + size.0 / 2.0 + margin,
+    ];
+    let mut near = 0.0f64;
+    let mut far = f64::INFINITY;
+    for i in 0..3 {
+        if dir[i].abs() < 1e-9 {
+            if eye[i] < min[i] || eye[i] > max[i] {
+                return None;
+            }
+            continue;
+        }
+        let inv = 1.0 / dir[i];
+        let mut t1 = (min[i] - eye[i]) * inv;
+        let mut t2 = (max[i] - eye[i]) * inv;
+        if t1 > t2 {
+            std::mem::swap(&mut t1, &mut t2);
+        }
+        near = near.max(t1);
+        far = far.min(t2);
+        if near > far {
+            return None;
+        }
+    }
+    (far >= 0.0).then_some(near.max(0.0))
 }
 
 /// Категория звуков моба (`Mob.getSoundSource`): монстры — `HOSTILE`.
@@ -3836,6 +4268,21 @@ mod tests {
         assert_eq!(PlayPlan::mace_smash_bonus(10.0), 24.0);
         assert_eq!(PlayPlan::mace_smash_damage(5.0, 0), 16.0);
         assert_eq!(PlayPlan::mace_smash_damage(5.0, 3), 23.5);
+    }
+
+    #[test]
+    fn ray_hits_entity_box() {
+        let eye = [0.0, 64.0, 0.0];
+        let dir = crate::arrows::aim(0.0, 0.0, 0.0);
+        assert_eq!(dir, [0.0, 0.0, 1.0]);
+        // Корова шириной 0.9: луч входит в рамку на 3.0 − 0.45.
+        let t = ray_aabb(eye, dir, [0.0, 64.0, 3.0], (0.9, 1.4), 0.0).unwrap();
+        assert!((t - 2.55).abs() < 1e-9, "{t}");
+        // В стороне от луча — промах.
+        assert!(ray_aabb(eye, dir, [3.0, 64.0, 3.0], (0.9, 1.4), 0.0).is_none());
+        // Запас `hitbox_margin` расширяет рамку.
+        assert!(ray_aabb(eye, dir, [0.52, 64.0, 3.0], (0.9, 1.4), 0.0).is_none());
+        assert!(ray_aabb(eye, dir, [0.52, 64.0, 3.0], (0.9, 1.4), 0.125).is_some());
     }
 
     #[test]

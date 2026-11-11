@@ -1210,6 +1210,17 @@ fn chunk_square(center: (i32, i32), r: i32, out: &mut FastSet<(i32, i32)>) {
     }
 }
 
+/// Удержание копья (`KineticWeapon`) игроком.
+struct SpearUse {
+    slot: usize,
+    item: i32,
+    started: Instant,
+    /// Позиция на прошлом тике: `getKnownSpeed` для скорости атакующего.
+    last_pos: [f64; 3],
+    /// `recentKineticEnemies`: цель → когда её задели.
+    recent: HashMap<i32, Instant>,
+}
+
 /// Общее состояние сессий: игроки онлайн и широковещательный канал.
 struct Hub {
     /// Кодек кадров play (порог сжатия сервера): рассылка кодируется один раз.
@@ -11069,6 +11080,8 @@ impl PlayPlan {
         let mut drawing: Option<(usize, u64)> = None;
         // Питьё зелья: слот, предмет, компоненты и момент окончания.
         let mut drinking: Option<(usize, i32, u32, Instant)> = None;
+        // Копьё в режиме удержания (`KineticWeapon`).
+        let mut spear_use: Option<SpearUse> = None;
         // Открытое окно (сундук, верстак) и счётчик номеров окон.
         let mut window: Option<Window> = None;
         let mut next_window = 0;
@@ -11633,6 +11646,43 @@ impl PlayPlan {
                         }
                     }
                     // Длительность тикает и в креативе. Урон от эффектов — только там, где игрок уязвим.
+                    // `ItemStack.onUseTick` → `KineticWeapon.damageEntities`:
+                    // урон копья по скорости, пока предмет удерживают.
+                    let mut stop_spear = false;
+                    if let Some(use_state) = spear_use.as_mut() {
+                        let held_ok = state.inv.slots[use_state.slot]
+                            .is_some_and(|s| s.item == use_state.item);
+                        if state.vitals.dead || !held_ok {
+                            stop_spear = true;
+                        } else if let Some((feet, yaw, pitch)) = self.player_at(uuid) {
+                            let ticks = (use_state.started.elapsed().as_millis() / 50) as i32;
+                            let dir = crate::arrows::aim(f64::from(yaw), f64::from(pitch), 0.0);
+                            let speed = (0..3)
+                                .map(|i| dir[i] * (feet[i] - use_state.last_pos[i]) * 20.0)
+                                .sum::<f64>();
+                            use_state.last_pos = feet;
+                            self.kinetic_strike(
+                                uuid,
+                                me.entity_id,
+                                &mut state.inv,
+                                ticks,
+                                speed,
+                                login.spawn.game_mode == 1,
+                                &mut use_state.recent,
+                            );
+                        }
+                    }
+                    if stop_spear {
+                        spear_use = None;
+                        self.hub.send(
+                            None,
+                            play::entity_meta(
+                                ids.set_entity_data,
+                                me.entity_id,
+                                &[(8, play::Meta::Byte(0))],
+                            ),
+                        );
+                    }
                     let pulsed = state.vitals.tick_effects(self.effect_kinds());
                     let effects_changed = !pulsed.expired.is_empty();
                     let mut motion = 0u8;
@@ -12514,14 +12564,60 @@ impl PlayPlan {
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                             continue;
                         }
+                        // `Item.use` для `KINETIC_WEAPON`: начать удержание и
+                        // проиграть `minecraft:item.spear.use`.
+                        if !state.vitals.dead
+                            && login.spawn.game_mode != 3
+                            && let Some(slot) = Self::hand_index(&state.inv, hand)
+                            && let Some(held) = state.inv.slots[slot]
+                            && let Some(kinetic) = self
+                                .survival
+                                .items
+                                .get(held.item as usize)
+                                .and_then(|i| i.kinetic)
+                        {
+                            eating = None;
+                            drinking = None;
+                            drawing = None;
+                            if spear_use.is_none()
+                                && let Some((feet, _, _)) = self.player_at(uuid)
+                            {
+                                spear_use = Some(SpearUse {
+                                    slot,
+                                    item: held.item,
+                                    started: Instant::now(),
+                                    last_pos: feet,
+                                    recent: HashMap::new(),
+                                });
+                                self.hub.send(
+                                    None,
+                                    play::entity_meta(
+                                        ids.set_entity_data,
+                                        me.entity_id,
+                                        &[(8, play::Meta::Byte(1))],
+                                    ),
+                                );
+                                if let Some(s) = kinetic.sound {
+                                    self.play_sound(
+                                        None,
+                                        s,
+                                        crate::sounds::PLAYERS,
+                                        feet,
+                                        1.0,
+                                        1.0,
+                                    );
+                                }
+                            }
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
+                            continue;
+                        }
                         if !state.vitals.dead && login.spawn.game_mode != 3
                             && self.use_bucket(conn, uuid, &mut state.inv, hand, survival).await?
                         {
                             self.reset_after_use(me.entity_id, uuid, hand, state, &mut swing);
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                             continue;
-                        }
-                        // `WrittenBookItem.use` → `openItemGui`: разрешить страницы
+                        }                        // `WrittenBookItem.use` → `openItemGui`: разрешить страницы
                         // (`broadcastChanges`) и `open_book` клиенту.
                         if !state.vitals.dead && login.spawn.game_mode != 3
                             && let Some(slot) = Self::hand_index(&state.inv, hand)
@@ -12880,6 +12976,25 @@ impl PlayPlan {
                                 }
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, a.sequence)).await?;
                             }
+                            play::STAB if !state.vitals.dead => {
+                                // `handlePlayerAction` STAB: `PiercingWeapon.attack`.
+                                // `handlePlayerAction` STAB: `PiercingWeapon.attack`.
+                                // Сам удар не зависит от заряда атаки, но взмах
+                                // (`swingAndResetAttackStrength`) сбрасывает его.
+                                if login.spawn.game_mode != 3 {
+                                    let slot = state.inv.held_slot();
+                                    let hit = self.piercing_attack(
+                                        uuid,
+                                        &mut state.inv,
+                                        &mut state.vitals,
+                                        login.spawn.game_mode == 1,
+                                    );
+                                    if hit {
+                                        self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                    }
+                                }
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, a.sequence)).await?;
+                            }
                             play::DROP_ALL_ITEMS | play::DROP_ITEM if !state.vitals.dead => {
                                 let held = state.inv.held_slot();
                                 let all = a.action == play::DROP_ALL_ITEMS;
@@ -12910,6 +13025,16 @@ impl PlayPlan {
                                         login.spawn.game_mode,
                                     )
                                     .await?;
+                                }
+                                if spear_use.take().is_some() {
+                                    self.hub.send(
+                                        None,
+                                        play::entity_meta(
+                                            ids.set_entity_data,
+                                            me.entity_id,
+                                            &[(8, play::Meta::Byte(0))],
+                                        ),
+                                    );
                                 }
                                 eating = None;
                                 drinking = None;

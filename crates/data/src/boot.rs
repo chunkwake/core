@@ -1,5 +1,5 @@
 //! Образ данных запуска: всё, что сервер собирает из дерева ванильных JSON,
-//! упаковывается в `chunkwake-derived-v1/boot.v6.bin` и дальше читается одним
+//! упаковывается в `chunkwake-derived-v1/boot.v7.bin` и дальше читается одним
 //! последовательным файлом вместо тысяч открытий и разборов.
 //!
 //! Сборка образа вызывает обычные загрузчики; повторный старт их не трогает.
@@ -12,15 +12,18 @@ use crate::packets::{Direction, PacketTable, State};
 use crate::recipes::{CampfireCook, Cooking, Ingredient, Recipe, Recipes, Stonecutting};
 use crate::registries::{Builtin, Registry, RegistryData, RegistryTags};
 use crate::tools::{Tool, ToolRule};
-use crate::world::{Blocks, Drink, Food, Fuel, ItemInfo, Properties};
+use crate::world::{
+    AttackRangeInfo, Blocks, Drink, Food, Fuel, ItemInfo, KineticCondition, KineticWeaponInfo,
+    PiercingWeaponInfo, Properties,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Версия формата. Меняется вместе с любым полем образа.
-const SCHEMA: u32 = 6;
+const SCHEMA: u32 = 7;
 const MAGIC: u32 = 0x434B_424F; // "CKBO"
-const FILE: &str = "boot.v6.bin";
+const FILE: &str = "boot.v7.bin";
 
 /// Слоты экипировки в порядке кодов образа (`ItemInfo::equip`).
 const EQUIP: [&str; 8] = [
@@ -429,6 +432,35 @@ fn w_items(w: &mut W, items: &[ItemInfo]) {
         w.f32(i.attack_speed);
         w.u8(i.swing.0);
         w.u8(i.swing.1);
+        w.opt(i.attack_range, |w, a| {
+            w.f32(a.min_reach);
+            w.f32(a.max_reach);
+            w.f32(a.min_creative_reach);
+            w.f32(a.max_creative_reach);
+            w.f32(a.hitbox_margin);
+            w.f32(a.mob_factor);
+        });
+        w.opt(i.kinetic, |w, k| {
+            w.i32(k.contact_cooldown_ticks);
+            w.i32(k.delay_ticks);
+            for c in [k.dismount, k.knockback, k.damage] {
+                w.opt(c, |w, c| {
+                    w.i32(c.max_duration_ticks);
+                    w.f32(c.min_speed);
+                    w.f32(c.min_relative_speed);
+                });
+            }
+            w.f32(k.forward_movement);
+            w.f32(k.damage_multiplier);
+            w.opt(k.sound, |w, s| w.str(s));
+            w.opt(k.hit_sound, |w, s| w.str(s));
+        });
+        w.opt(i.piercing, |w, p| {
+            w.bool(p.deals_knockback);
+            w.bool(p.dismounts);
+            w.opt(p.sound, |w, s| w.str(s));
+            w.opt(p.hit_sound, |w, s| w.str(s));
+        });
     }
 }
 
@@ -937,6 +969,44 @@ fn r_items(r: &mut R<'_>) -> Result<Vec<ItemInfo>, DataError> {
             attack: r.f32()?,
             attack_speed: r.f32()?,
             swing: (r.u8()?, r.u8()?),
+            attack_range: r.opt(|r| {
+                Ok(AttackRangeInfo {
+                    min_reach: r.f32()?,
+                    max_reach: r.f32()?,
+                    min_creative_reach: r.f32()?,
+                    max_creative_reach: r.f32()?,
+                    hitbox_margin: r.f32()?,
+                    mob_factor: r.f32()?,
+                })
+            })?,
+            kinetic: r.opt(|r| {
+                let condition = |r: &mut R<'_>| {
+                    Ok(KineticCondition {
+                        max_duration_ticks: r.i32()?,
+                        min_speed: r.f32()?,
+                        min_relative_speed: r.f32()?,
+                    })
+                };
+                Ok(KineticWeaponInfo {
+                    contact_cooldown_ticks: r.i32()?,
+                    delay_ticks: r.i32()?,
+                    dismount: r.opt(condition)?,
+                    knockback: r.opt(condition)?,
+                    damage: r.opt(condition)?,
+                    forward_movement: r.f32()?,
+                    damage_multiplier: r.f32()?,
+                    sound: r.opt(|r| Ok(crate::world::leak_str(r.str()?)))?,
+                    hit_sound: r.opt(|r| Ok(crate::world::leak_str(r.str()?)))?,
+                })
+            })?,
+            piercing: r.opt(|r| {
+                Ok(PiercingWeaponInfo {
+                    deals_knockback: r.bool()?,
+                    dismounts: r.bool()?,
+                    sound: r.opt(|r| Ok(crate::world::leak_str(r.str()?)))?,
+                    hit_sound: r.opt(|r| Ok(crate::world::leak_str(r.str()?)))?,
+                })
+            })?,
         });
     }
     Ok(out)
@@ -1257,6 +1327,39 @@ mod tests {
                 attack: 5.0,
                 attack_speed: -2.4,
                 swing: (2, 13),
+                attack_range: Some(AttackRangeInfo {
+                    min_reach: 2.0,
+                    max_reach: 4.5,
+                    min_creative_reach: 2.0,
+                    max_creative_reach: 6.5,
+                    hitbox_margin: 0.125,
+                    mob_factor: 0.5,
+                }),
+                kinetic: Some(KineticWeaponInfo {
+                    contact_cooldown_ticks: 10,
+                    delay_ticks: 12,
+                    dismount: Some(KineticCondition {
+                        max_duration_ticks: 50,
+                        min_speed: 11.0,
+                        min_relative_speed: 0.0,
+                    }),
+                    knockback: None,
+                    damage: Some(KineticCondition {
+                        max_duration_ticks: 225,
+                        min_speed: 0.0,
+                        min_relative_speed: 4.6,
+                    }),
+                    forward_movement: 0.38,
+                    damage_multiplier: 0.95,
+                    sound: Some("minecraft:item.spear.use"),
+                    hit_sound: Some("minecraft:item.spear.hit"),
+                }),
+                piercing: Some(PiercingWeaponInfo {
+                    deals_knockback: true,
+                    dismounts: false,
+                    sound: Some("minecraft:item.spear.attack"),
+                    hit_sound: Some("minecraft:item.spear.hit"),
+                }),
             },
         ];
         let tools = vec![

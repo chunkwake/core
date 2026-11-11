@@ -1369,6 +1369,8 @@ pub const DROP_ALL_ITEMS: i32 = 4;
 pub const DROP_ITEM: i32 = 5;
 pub const RELEASE_USE_ITEM: i32 = 6;
 pub const SWAP_ITEM_WITH_OFFHAND: i32 = 7;
+/// `STAB`: удар копьём (`PiercingWeapon.attack`).
+pub const STAB: i32 = 8;
 
 /// `ServerboundPlayerCommandPacket.Action` (26.3, после ID сущности).
 /// 0 — встать с кровати, 3/4 — прыжок на скакуне, 5 — инвентарь скакуна.
