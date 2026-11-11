@@ -1513,6 +1513,10 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
         app.edit_value = "0.0.0.0".into();
         app.handle_key(key(KeyCode::Enter));
+        // Публичный адрес сам по себе безопасен: предупреждение нужно, только
+        // когда вместе с ним выключают проверку аккаунтов.
+        app.selected = 4;
+        app.handle_key(key(KeyCode::Char(' ')));
         app.handle_key(key(KeyCode::Char('s')));
         assert_eq!(app.mode, Mode::Review);
         app.handle_key(key(KeyCode::Enter));
@@ -1646,12 +1650,12 @@ mod tests {
         let mut app = app(config::DEFAULT_PROPERTIES);
         app.selected = 4;
         app.handle_key(key(KeyCode::Char(' ')));
-        assert_eq!(app.values[4], "true");
+        assert_eq!(app.values[4], "false");
         assert_eq!(app.mode, Mode::Browse);
         assert_eq!(app.handle_key(key(KeyCode::Char('s'))), Action::Continue);
         assert_eq!(app.mode, Mode::Review);
         assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::Save);
-        assert!(app.draft().unwrap().contains("online-mode=true"));
+        assert!(app.draft().unwrap().contains("online-mode=false"));
     }
 
     /// Поля дашборда есть в TUI и пишутся в черновик конфига.
