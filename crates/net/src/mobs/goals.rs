@@ -898,10 +898,10 @@ fn can_use(g: &mut Goal, m: &mut Mob, c: &mut Ctx) -> bool {
             }
             false
         }
-        Goal::CubeFloat => super::in_water(m, c.w),
+        Goal::CubeFloat => super::in_liquid(m, c.w),
         Goal::CubeAttack { .. } => m.target.and_then(|t| c.prey(t)).is_some(),
         Goal::CubeRandomDir { .. } => {
-            m.target.is_none() && (m.on_ground || super::in_water(m, c.w))
+            m.target.is_none() && (m.on_ground || super::in_liquid(m, c.w))
         }
         Goal::CubeKeepJumping => true,
         Goal::Leap { target, .. } => {

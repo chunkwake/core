@@ -975,6 +975,20 @@ fn in_water(m: &Mob, w: &World) -> bool {
     ])
 }
 
+/// `Entity.isInLiquid`: вода или лава в клетке ног. Для `CubeMobFloatGoal` и
+/// `CubeMobRandomDirectionGoal` ваниль проверяет именно жидкость, а не только воду.
+fn in_liquid(m: &Mob, w: &World) -> bool {
+    if in_water(m, w) {
+        return true;
+    }
+    let p = [
+        m.pos[0].floor() as i32,
+        (m.pos[1] + 0.1).floor() as i32,
+        m.pos[2].floor() as i32,
+    ];
+    w.cell.is_some_and(|f| f(p).kind == path::PathType::Lava)
+}
+
 /// Один тик движения (`LivingEntity.travel` + `Entity.move`): `forward` — ускорение вдоль `yaw`.
 /// Возвращает, упёрся ли моб по горизонтали.
 pub fn travel(m: &mut Mob, forward: f64, w: &World) -> bool {
@@ -1665,6 +1679,25 @@ mod tests {
     /// `getFrictionInfluencedSpeed = getSpeed() * 0.216 / f³ = getSpeed()`.
     /// Итоговое ускорение за тик — `speed²`, установившаяся скорость —
     /// `speed² / (1 - 0.6 * 0.91)`: для коровы (0.2) это 0.0881 блока за тик.
+    #[test]
+    fn lava_counts_as_liquid_for_cube_mobs() {
+        let shape = |_: [i32; 3]| FULL;
+        let water = |_: [i32; 3]| false;
+        let cell = |_: [i32; 3]| path::Cell {
+            kind: path::PathType::Lava,
+            flags: 0,
+        };
+        let w = World {
+            shape: &shape,
+            water: &water,
+            cell: Some(&cell),
+            info: None,
+            min_y: -64,
+        };
+        let m = Mob::new(Species::Slime, [0.5, 64.0, 0.5], 1);
+        assert!(in_liquid(&m, &w));
+    }
+
     #[test]
     fn walk_speed_matches_vanilla() {
         let (shape, water) = flat_world(&floor);

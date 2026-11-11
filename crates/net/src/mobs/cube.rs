@@ -60,9 +60,10 @@ pub fn move_control(m: &mut Mob, rand: &mut dyn FnMut() -> f64) {
         return;
     }
     m.set_speed(speed);
-    let delay = m.cube.jump_delay;
+    // `--jumpDelay <= 0`: уменьшение и проверка — в одном порядке, иначе
+    // первый прыжок после установки задержки опаздывает на тик.
     m.cube.jump_delay -= 1;
-    if delay <= 0 {
+    if m.cube.jump_delay <= 0 {
         // `Slime.getJumpDelay`: `random.nextInt(20) + 10`.
         let mut next = ((rand() * 20.0) as i32).min(19) + 10;
         if m.cube.aggressive {
@@ -75,6 +76,16 @@ pub fn move_control(m: &mut Mob, rand: &mut dyn FnMut() -> f64) {
         m.xxa = 0.0;
         m.zza = 0.0;
         m.set_speed(0.0);
+    }
+}
+
+/// Высота звука слизня: `AbstractCubeMob.getSoundPitch` для прыжка и
+/// `(nextFloat − nextFloat) · 0.2 + 1` для шлепка (у шлепка множителя размера нет).
+pub fn sound_pitch(jump: bool, size: i32, random: f32) -> f32 {
+    if jump {
+        random * if size <= 1 { 1.4 } else { 0.8 }
+    } else {
+        random
     }
 }
 
@@ -241,6 +252,32 @@ mod tests {
         assert!(!deals_damage(&m));
         m.set_size(500, false);
         assert_eq!(m.cube_size, 127);
+    }
+
+    #[test]
+    fn jump_delay_uses_decremented_value() {
+        let mut m = Mob::new(super::super::Species::Slime, [0.0; 3], 1);
+        m.on_ground = true;
+        m.cube.speed_mod = 1.0;
+        m.cube.jump_delay = 2;
+        let mut rnd = || 0.0;
+
+        m.cube.move_to = true;
+        move_control(&mut m, &mut rnd);
+        assert!(!m.jump, "первый тик только уменьшает задержку");
+        assert_eq!(m.cube.jump_delay, 1);
+
+        m.cube.move_to = true;
+        move_control(&mut m, &mut rnd);
+        assert!(m.jump, "на втором тике задержка дошла до нуля");
+    }
+
+    #[test]
+    fn squish_pitch_has_no_size_factor() {
+        assert_eq!(sound_pitch(false, 1, 0.91), 0.91);
+        assert_eq!(sound_pitch(false, 4, 0.91), 0.91);
+        assert!((sound_pitch(true, 1, 1.0) - 1.4).abs() < 1e-6);
+        assert!((sound_pitch(true, 4, 1.0) - 0.8).abs() < 1e-6);
     }
 
     #[test]

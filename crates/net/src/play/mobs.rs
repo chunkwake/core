@@ -9,6 +9,10 @@ type SpawnEntry = (Option<Species>, u32, u32, u32);
 /// Игрок для тика мобов: ноги, имена предметов в руках (основная и вторая), UUID.
 type Hands<'a> = ([f64; 3], [Option<&'a str>; 2], u128);
 
+/// Предел детей одного деления. Плагин через `SlimeSplitEvent` не должен
+/// заставлять сервер крутить цикл на произвольное число сущностей.
+const MAX_SLIME_SPLIT: i32 = 128;
+
 /// Моб и то, что о нём уже знают клиенты.
 pub(super) struct MobEntry {
     pub mob: Mob,
@@ -704,8 +708,11 @@ impl PlayPlan {
                         self.sync_event(Event::SlimeSplit, || format!("{id} slime {count}"));
                     match reply.as_deref().map(str::trim) {
                         Some("c") => None,
-                        Some(n) if !n.is_empty() => n.parse().ok().map(|n: i32| (id, n)),
-                        _ => Some((id, count)),
+                        Some(n) if !n.is_empty() => n
+                            .parse()
+                            .ok()
+                            .map(|n: i32| (id, n.clamp(0, MAX_SLIME_SPLIT))),
+                        _ => Some((id, count.clamp(0, MAX_SLIME_SPLIT))),
                     }
                 })
                 .collect();
@@ -1413,14 +1420,12 @@ impl PlayPlan {
                     };
                     let small = if size <= 1 { "_small" } else { "" };
                     let r = (rand::random::<f32>() - rand::random::<f32>()) * 0.2 + 1.0;
-                    let (name, pitch) = if jump {
-                        (
-                            format!("minecraft:entity.slime.jump{small}"),
-                            r * if size <= 1 { 1.4 } else { 0.8 },
-                        )
+                    let name = if jump {
+                        format!("minecraft:entity.slime.jump{small}")
                     } else {
-                        (format!("minecraft:entity.slime.squish{small}"), r / 0.8)
+                        format!("minecraft:entity.slime.squish{small}")
                     };
+                    let pitch = mb::cube::sound_pitch(jump, size, r);
                     self.play_sound(None, &name, crate::sounds::HOSTILE, pos, volume, pitch);
                 }
                 Out::Shoot { target, power } => self.mob_shoot(id, Uuid::from_u128(target), power),
@@ -1621,7 +1626,7 @@ pub(super) fn mob_from_nbt(c: &Compound) -> Option<Mob> {
     };
     if species == Species::Slime {
         // `readAdditionalSaveData`: `setSize(Size + 1, false)`.
-        m.set_size(int("Size").unwrap_or(0) + 1, true);
+        m.set_size(int("Size").unwrap_or(0) + 1, false);
         m.was_on_ground = byte("wasOnGround").is_some_and(|b| b != 0);
     }
     if let Some(Tag::Float(h)) = c.get("Health") {
@@ -2141,6 +2146,7 @@ impl PlayPlan {
     /// `Slime.remove` у умершего больше 1: 2–4 детей вдвое меньше
     /// (`convertTo SPLIT_ON_DEATH`: имя и постоянство переходят к ним).
     fn slime_split(&self, m: &Mob, count: i32) {
+        let count = count.clamp(0, MAX_SLIME_SPLIT);
         let size = m.cube_size / 2;
         let width = m.size().0 as f32;
         for [dx, dz] in mb::cube::split_offsets(count, f64::from(width)) {
@@ -2559,6 +2565,22 @@ mod tests {
         assert_eq!((back.yaw, back.health, back.age), (90.0, 5.0, -100));
         assert!(back.sheared);
         assert_eq!(back.color, 14);
+    }
+
+    #[test]
+    fn slime_nbt_roundtrip_keeps_size_and_health() {
+        let mut m = Mob::new(
+            Species::Slime,
+            [1.5, 64.0, -3.25],
+            0x0123_4567_89ab_cdef_0011_2233_4455_6677,
+        );
+        m.set_size(4, true);
+        m.was_on_ground = true;
+        let back = mob_from_nbt(&mob_to_nbt(&m)).unwrap();
+        assert_eq!(back.cube_size, 4);
+        assert_eq!(back.max_health(), 16.0);
+        assert_eq!(back.health, 16.0);
+        assert!(back.was_on_ground);
     }
 
     #[test]
