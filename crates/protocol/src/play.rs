@@ -1675,6 +1675,13 @@ pub fn hurt_animation(id: i32, entity_id: i32, yaw: f32) -> Vec<u8> {
     w.buf
 }
 
+/// `animate`: действие над сущностью (1 — крит, 2 — магический крит).
+pub fn animate(id: i32, entity_id: i32, action: u8) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entity_id).u8(action);
+    w.buf
+}
+
 #[cfg(test)]
 mod lp_tests {
     use super::*;

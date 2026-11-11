@@ -516,7 +516,7 @@ impl PlayPlan {
             let center = st.center();
             let d2: f64 = (0..3).map(|i| (center[i] - feet[i]).powi(2)).sum();
             if d2 > 36.0 || st.marker {
-                return Some(());
+                return None;
             }
             let brk = creative || now - st.last_hit <= 5;
             if !brk {

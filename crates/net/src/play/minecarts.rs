@@ -604,26 +604,30 @@ impl PlayPlan {
         target: i32,
         held: Slot,
         creative: bool,
-        crit: bool,
+        hit: super::mobs::MeleeHit,
     ) -> Option<()> {
         let pos = self.player_at(uuid)?.0;
         let item = held.and_then(|s| self.survival.items.get(s.item as usize));
-        let mut amount = 1.0 + item.map_or(0.0, |i| i.attack);
         let sharp = held.map_or(0, |s| {
             chunkwake_protocol::components::stack_level(s.extra, "minecraft:sharpness")
         });
-        if sharp > 0 {
-            amount += 0.5 * sharp as f32 + 0.5;
-        }
-        if crit {
-            amount *= 1.5;
-        }
+        let bonus = if sharp > 0 {
+            0.5 * sharp as f32 + 0.5
+        } else {
+            0.0
+        };
+        let amount = Self::melee_damage(
+            1.0 + item.map_or(0.0, |i| i.attack),
+            bonus,
+            hit.scale,
+            hit.crit,
+        );
         {
             let carts = self.sim().minecarts.lock().unwrap();
             let e = carts.get(&target)?;
             let d: f64 = (0..3).map(|i| (e.cart.pos[i] - pos[i]).powi(2)).sum();
             if d > 36.0 {
-                return Some(());
+                return None;
             }
         }
         self.hurt_minecart(target, amount, creative, false);

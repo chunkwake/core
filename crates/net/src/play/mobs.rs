@@ -108,6 +108,13 @@ impl MobEntry {
     }
 }
 
+/// `Player.attack`: сила удара по заряду и признак крита.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct MeleeHit {
+    pub scale: f32,
+    pub crit: bool,
+}
+
 impl PlayPlan {
     fn mob_type(&self, s: Species) -> i32 {
         // Собран при старте по `Species::ALL`; без него (тесты) — по имени.
@@ -940,6 +947,74 @@ impl PlayPlan {
         }
     }
 
+    /// Урон удара игрока: `base × (0.2 + scale²·0.8)`, крит ×1.5,
+    /// бонус чар (`magicBoost`) масштабируется отдельно.
+    pub(super) fn melee_damage(base: f32, bonus: f32, scale: f32, crit: bool) -> f32 {
+        let scale = scale.clamp(0.0, 1.0);
+        let mut damage = base * (0.2 + scale * scale * 0.8);
+        if crit {
+            damage *= 1.5;
+        }
+        damage + bonus * scale
+    }
+
+    /// Заряд и крит удара: `Player.attack` передаёт их в урон и эффекты.
+    pub(super) fn melee_hit(
+        &self,
+        uuid: Uuid,
+        held: Slot,
+        vitals: &Vitals,
+        passenger: bool,
+    ) -> MeleeHit {
+        let speed = 4.0
+            + held
+                .and_then(|s| self.survival.items.get(s.item as usize))
+                .map_or(0.0, |i| i.attack_speed);
+        let scale = vitals.attack_scale(speed);
+        let (pos, on_ground) = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .get(&uuid)
+            .map_or(([0.0; 3], true), |p| (p.pos, p.on_ground));
+        // `fallDistance > 0`: крит только на падении, не на подъёме прыжка.
+        let crit = scale > 0.9
+            && vitals.fall_distance() > 0.0
+            && !on_ground
+            && !self.standing_in_water(pos)
+            && !self.on_climbable(pos)
+            && self.effect_amp(vitals, "minecraft:blindness").is_none()
+            && !vitals.sprinting
+            && !passenger;
+        MeleeHit { scale, crit }
+    }
+
+    /// `Entity.onClimbable`: лестницы, лианы и подмостки.
+    fn on_climbable(&self, feet: [f64; 3]) -> bool {
+        let p = [
+            feet[0].floor() as i32,
+            feet[1].floor() as i32,
+            feet[2].floor() as i32,
+        ];
+        [p, [p[0], p[1] + 1, p[2]]].iter().any(|&q| {
+            self.block(q).is_some_and(|s| {
+                matches!(
+                    self.state_name(s),
+                    "minecraft:ladder"
+                        | "minecraft:vine"
+                        | "minecraft:scaffolding"
+                        | "minecraft:twisting_vines"
+                        | "minecraft:twisting_vines_plant"
+                        | "minecraft:weeping_vines"
+                        | "minecraft:weeping_vines_plant"
+                        | "minecraft:cave_vines"
+                        | "minecraft:cave_vines_plant"
+                )
+            })
+        })
+    }
+
     /// Удар игрока по мобу (`Player.attack`). Возвращает слот оружия, если оно износилось.
     pub(super) async fn attack_mob(
         &self,
@@ -947,12 +1022,15 @@ impl PlayPlan {
         target: i32,
         inv: &mut Inventory,
         creative: bool,
-        sprinting: bool,
+        vitals: &mut Vitals,
+        hit: MeleeHit,
     ) -> Option<usize> {
-        let (pos, yaw, airborne) = {
+        let scale = hit.scale;
+        let crit = hit.crit;
+        let (pos, yaw, on_ground) = {
             let players = self.hub.players.lock().unwrap();
             let p = players.get(&uuid)?;
-            (p.pos, p.yaw, !p.on_ground)
+            (p.pos, p.yaw, p.on_ground)
         };
         let slot = inv.held_slot();
         let held = inv.slots[slot];
@@ -962,16 +1040,40 @@ impl PlayPlan {
                 chunkwake_protocol::components::stack_level(s.extra, n)
             })
         };
-        let mut damage = 1.0 + item.map_or(0.0, |i| i.attack);
+        let base = 1.0 + item.map_or(0.0, |i| i.attack);
         let sharp = level("minecraft:sharpness");
-        if sharp > 0 {
-            damage += 0.5 * sharp as f32 + 0.5;
-        }
-        let crit = airborne && !sprinting;
-        if crit {
-            damage *= 1.5;
-        }
+        let bonus = if sharp > 0 {
+            0.5 * sharp as f32 + 0.5
+        } else {
+            0.0
+        };
+        let mut damage = Self::melee_damage(base, bonus, scale, crit);
+        let full = scale > 0.9;
+        let sprinting = vitals.sprinting;
+        let sprint_knock = sprinting && full;
+        let sword = held.is_some_and(|s| {
+            self.survival
+                .item_tags
+                .get("minecraft:swords")
+                .is_some_and(|set| set.contains(self.item_name(s.item)))
+        });
+        let sweep = full && !crit && !sprint_knock && on_ground && sword;
         let species = self.sim().mobs.lock().unwrap().get(&target)?.mob.species;
+        {
+            let mobs = self.sim().mobs.lock().unwrap();
+            let e = mobs.get(&target)?;
+            // Дальше 3 блоков (+ запас на задержку) не бьём.
+            let d = [
+                e.mob.pos[0] - pos[0],
+                e.mob.pos[1] - pos[1],
+                e.mob.pos[2] - pos[2],
+            ];
+            if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 36.0 {
+                return None;
+            }
+        }
+        // `Player.onAttack`: заряд сбрасывается до расчёта урона.
+        vitals.reset_attack();
         match self
             .plugin_event(Event::MobDamage, uuid, || {
                 format!("{target} {} {damage} {}", species.short(), u8::from(crit))
@@ -987,27 +1089,25 @@ impl PlayPlan {
         if damage <= 0.0 {
             return None;
         }
-        let knock = mb::KNOCKBACK
-            * (1.0 + level("minecraft:knockback") as f64 + f64::from(u8::from(sprinting)));
+        // `LivingEntity.getKnockback` = (атрибут + чары) / 2; база 0.4 уже
+        // применяется в `hurt`, это — добавка `causeExtraKnockback`.
+        let extra =
+            0.25 * level("minecraft:knockback") as f64 + if sprint_knock { 0.5 } else { 0.0 };
         let (result, mpos, species, baby, sound) = {
             let mut mobs = self.sim().mobs.lock().unwrap();
             let e = mobs.get_mut(&target)?;
-            // Дальше 3 блоков (+ запас на задержку) не бьём.
-            let d = [
-                e.mob.pos[0] - pos[0],
-                e.mob.pos[1] - pos[1],
-                e.mob.pos[2] - pos[2],
-            ];
-            if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 36.0 {
-                return None;
-            }
             // Обидчика монстр берёт целью сам (`HurtByTargetGoal`), творческого — нет.
             let r = mb::hurt(
                 &mut e.mob,
                 damage,
                 mb::Source::at(pos, Some(uuid.as_u128())),
-                knock,
+                mb::KNOCKBACK,
             );
+            if r.is_some() && extra > 0.0 {
+                let dx = pos[0] - e.mob.pos[0];
+                let dz = pos[2] - e.mob.pos[2];
+                mb::knockback(&mut e.mob, extra, dx, dz);
+            }
             if r == Some(true) {
                 e.killer = Some((uuid, slot as i32));
             }
@@ -1042,18 +1142,51 @@ impl PlayPlan {
             sound.1,
             mob_pitch(baby),
         );
-        self.play_sound(
-            None,
-            if crit {
-                "minecraft:entity.player.attack.crit"
-            } else {
-                "minecraft:entity.player.attack.strong"
-            },
-            crate::sounds::PLAYERS,
-            pos,
-            1.0,
-            1.0,
-        );
+        if sprint_knock {
+            self.play_sound(
+                None,
+                "minecraft:entity.player.attack.knockback",
+                crate::sounds::PLAYERS,
+                pos,
+                1.0,
+                1.0,
+            );
+        }
+        if crit {
+            self.play_sound(
+                None,
+                "minecraft:entity.player.attack.crit",
+                crate::sounds::PLAYERS,
+                pos,
+                1.0,
+                1.0,
+            );
+            self.hub
+                .send_about(target, play::animate(self.ids.animate, target, 1));
+        } else if !sweep {
+            self.play_sound(
+                None,
+                if full {
+                    "minecraft:entity.player.attack.strong"
+                } else {
+                    "minecraft:entity.player.attack.weak"
+                },
+                crate::sounds::PLAYERS,
+                pos,
+                1.0,
+                1.0,
+            );
+        } else {
+            self.play_sound(
+                None,
+                "minecraft:entity.player.attack.sweep",
+                crate::sounds::PLAYERS,
+                pos,
+                1.0,
+                1.0,
+            );
+            self.sweep_attack(uuid, target, pos, yaw, scale, slot);
+        }
         if died {
             self.hub
                 .send_about(target, inv::entity_event(self.ids.entity_event, target, 3));
@@ -1068,6 +1201,98 @@ impl PlayPlan {
             inv.slots[slot] = Some(s);
         }
         Some(slot)
+    }
+
+    /// `Player.doSweepAttack`: 1 × `scale` урона всем рядом с целью.
+    fn sweep_attack(
+        &self,
+        uuid: Uuid,
+        target: i32,
+        pos: [f64; 3],
+        yaw: f32,
+        scale: f32,
+        slot: usize,
+    ) {
+        let mut hits = Vec::new();
+        {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            let Some((tpos, tsize)) = mobs.get(&target).map(|e| (e.mob.pos, e.mob.size())) else {
+                return;
+            };
+            for (&id, e) in mobs.iter_mut() {
+                if id == target || !e.mob.alive() {
+                    continue;
+                }
+                let p = e.mob.pos;
+                let size = e.mob.size();
+                // AABB цели, расширенный на (1.0, 0.25, 1.0).
+                if (p[0] - tpos[0]).abs() > tsize.0 / 2.0 + 1.0 + size.0 / 2.0
+                    || (p[2] - tpos[2]).abs() > tsize.0 / 2.0 + 1.0 + size.0 / 2.0
+                    || p[1] > tpos[1] + tsize.1 + 0.25
+                    || p[1] + size.1 < tpos[1] - 0.25
+                {
+                    continue;
+                }
+                let d2: f64 = (0..3).map(|i| (p[i] - pos[i]).powi(2)).sum();
+                if d2 >= 9.0 {
+                    continue;
+                }
+                // `LivingEntity.hurtServer` затем `knockback(0.4)`.
+                let r = mb::hurt(
+                    &mut e.mob,
+                    scale,
+                    mb::Source::at(pos, Some(uuid.as_u128())),
+                    mb::KNOCKBACK,
+                );
+                if let Some(died) = r {
+                    if died {
+                        e.killer = Some((uuid, slot as i32));
+                    }
+                    hits.push((
+                        id,
+                        (
+                            e.mob.sound(if died { "death" } else { "hurt" }),
+                            p,
+                            e.mob.volume(),
+                            e.mob.is_baby(),
+                            sound_source(e.mob.species),
+                        ),
+                        died,
+                    ));
+                }
+            }
+        }
+        for (id, (name, p, volume, baby, source), died) in hits {
+            self.hub
+                .send_about(id, play::hurt_animation(self.ids.hurt_animation, id, yaw));
+            self.refresh_mob(id);
+            self.play_sound(None, &name, source, p, volume, mob_pitch(baby));
+            self.emit_vibration(p, "minecraft:entity_damage");
+            if died {
+                self.emit_vibration(p, "minecraft:entity_die");
+            }
+        }
+        if let Some(&particle) = self
+            .particle_types
+            .lock()
+            .unwrap()
+            .get("minecraft:sweep_attack")
+        {
+            let a = f64::from(yaw).to_radians();
+            let at = [pos[0] - a.sin(), pos[1] + 0.5, pos[2] + a.cos()];
+            self.hub.send(
+                None,
+                play::level_particles(
+                    self.ids.level_particles,
+                    particle,
+                    false,
+                    at,
+                    [-(a.sin() as f32), 0.0, a.cos() as f32],
+                    0.0,
+                    0,
+                ),
+            );
+        }
     }
 
     /// Яйцо призыва `<вид>_spawn_egg` по клику на блок: моб на грани `face`.
@@ -2770,6 +2995,22 @@ mod tests {
             Some("Бурёнка")
         );
         assert_eq!(tag_name("7"), None);
+    }
+
+    #[test]
+    fn melee_damage_scales_with_charge_and_crit() {
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        // Полный заряд: 6 урона железного меча без бонусов.
+        assert!(near(PlayPlan::melee_damage(6.0, 0.0, 1.0, false), 6.0));
+        // Пустой заряд: только 0.2 от базы.
+        assert!(near(PlayPlan::melee_damage(6.0, 0.0, 0.0, false), 1.2));
+        // Крит — до бонуса чар.
+        assert!(near(PlayPlan::melee_damage(6.0, 0.0, 1.0, true), 9.0));
+        // Острота при полном заряде прибавляется целиком.
+        assert!(near(PlayPlan::melee_damage(6.0, 1.5, 1.0, false), 7.5));
+        // При неполном — пропорционально заряду (`magicBoost`).
+        let half = PlayPlan::melee_damage(6.0, 1.5, 0.5, false);
+        assert!(near(half, 6.0 * 0.4 + 0.75));
     }
 
     #[test]

@@ -154,6 +154,7 @@ struct Ids {
     sb_chunk_batch_received: i32,
     sb_interact: i32,
     hurt_animation: i32,
+    animate: i32,
     sb_container_close: i32,
     sb_player_input: i32,
     sb_move_vehicle: i32,
@@ -2756,6 +2757,7 @@ impl PlayPlan {
                 sb_chunk_batch_received: sb("chunk_batch_received")?,
                 sb_interact: sb("interact")?,
                 hurt_animation: cb("hurt_animation")?,
+                animate: cb("animate")?,
                 sb_container_close: sb("container_close")?,
                 sb_player_input: sb("player_input")?,
                 sb_move_vehicle: sb("move_vehicle")?,
@@ -11415,6 +11417,7 @@ impl PlayPlan {
                 }
                 _ = food_ticker.tick() => {
                     game_ticks += 1;
+                    state.vitals.tick_attack(state.inv.held().map(|s| s.item));
                     // Слежение до отправки чанков, как в ванили (тик мира, затем
                     // `send chunks`): сущность в только что пришедшем чанке
                     // появится тиком позже.
@@ -12083,29 +12086,78 @@ impl PlayPlan {
                     if id == ids.sb_punch {
                         let held = state.inv.slots[state.inv.held_slot()];
                         self.punch(me.entity_id, uuid, held, &state.vitals, &mut swing);
+                        // `handlePunch`: каждый взмах сбрасывает заряд удара.
+                        state.vitals.reset_attack();
                         continue;
                     }
                     if id == ids.sb_attack {
                         let target = r.var_int()?;
                         if !state.vitals.dead {
                             let creative = login.spawn.game_mode == 1;
-                            let crit = !state.vitals.sprinting
-                                && self.hub.players.lock().unwrap().get(&uuid).is_some_and(|p| !p.on_ground);
                             let held = state.inv.slots[state.inv.held_slot()];
-                            if self.attack_boat(uuid, target, held, creative, crit).is_some()
-                                || self.attack_minecart(uuid, target, held, creative, crit).is_some()
+                            let hit = self.melee_hit(uuid, held, &state.vitals, in_boat || in_cart);
+                            // `causeExtraKnockback` гасит спринт и без полного
+                            // заряда, если у оружия есть отбрасывание.
+                            let knockback_level = held.map_or(0, |s| {
+                                chunkwake_protocol::components::stack_level(
+                                    s.extra,
+                                    "minecraft:knockback",
+                                )
+                            });
+                            let stop_sprint = state.vitals.sprinting
+                                && (hit.scale > 0.9 || knockback_level > 0);
+                            let mut handled = false;
+                            if self
+                                .attack_boat(uuid, target, held, creative, hit)
+                                .is_some()
+                                || self
+                                    .attack_minecart(uuid, target, held, creative, hit)
+                                    .is_some()
                                 || (login.spawn.game_mode != 3
                                     && (self.attack_item_frame(uuid, target, creative).is_some()
                                         || self.attack_painting(uuid, target, creative).is_some()
-                                        || self.attack_armor_stand(uuid, target, creative).is_some()))
+                                        || self
+                                            .attack_armor_stand(uuid, target, creative)
+                                            .is_some()))
                             {
-                                continue;
-                            }
-                            if let Some(slot) = self.attack_mob(uuid, target, &mut state.inv, creative, state.vitals.sprinting).await {
+                                handled = true;
+                            } else if let Some(slot) = self
+                                .attack_mob(
+                                    uuid,
+                                    target,
+                                    &mut state.inv,
+                                    creative,
+                                    &mut state.vitals,
+                                    hit,
+                                )
+                                .await
+                            {
+                                handled = true;
                                 if state.inv.slots[slot].is_none() {
                                     self.break_in_hand(me.entity_id, false);
                                 }
                                 self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                            }
+                            if handled {
+                                state.vitals.reset_attack();
+                                if !creative {
+                                    // `Player.causeFoodExhaustion(0.1)`.
+                                    state.vitals.exhaust(0.1);
+                                }
+                                if stop_sprint {
+                                    state.vitals.sprinting = false;
+                                    self.send_pose(
+                                        conn,
+                                        me,
+                                        player_flags(
+                                            sneaking,
+                                            false,
+                                            gliding,
+                                            burning_visual,
+                                        ),
+                                    )
+                                    .await?;
+                                }
                             }
                         }
                         continue;

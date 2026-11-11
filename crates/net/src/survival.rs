@@ -801,6 +801,10 @@ pub struct Vitals {
     food_timer: u32,
     pub dead: bool,
     pub effects: Vec<Effect>,
+    /// `Player.attackStrengthTicker`: тики с последнего удара или взмаха.
+    attack_ticker: u32,
+    /// Item ID в основной руке на прошлом тике (`lastItemInMainHand`).
+    attack_item: Option<i32>,
 }
 
 impl Default for Vitals {
@@ -817,11 +821,40 @@ impl Default for Vitals {
             food_timer: 0,
             dead: false,
             effects: Vec::new(),
+            attack_ticker: 0,
+            attack_item: None,
         }
     }
 }
 
 impl Vitals {
+    /// `Player.tick`: `++attackStrengthTicker`; смена предмета в руке сбрасывает
+    /// заряд (`resetAttackStrengthTicker`).
+    pub fn tick_attack(&mut self, held_item: Option<i32>) {
+        if held_item == self.attack_item {
+            self.attack_ticker = self.attack_ticker.saturating_add(1);
+        } else {
+            self.attack_item = held_item;
+            self.attack_ticker = 0;
+        }
+    }
+
+    /// `Player.resetAttackStrengthTicker`.
+    pub fn reset_attack(&mut self) {
+        self.attack_ticker = 0;
+    }
+
+    /// `Player.getAttackStrengthScale(0.5)`: `(тики + 0.5) / (20 / скорость)`.
+    pub fn attack_scale(&self, attack_speed: f32) -> f32 {
+        let delay = 20.0 / attack_speed.max(1e-4);
+        ((self.attack_ticker as f32 + 0.5) / delay).clamp(0.0, 1.0)
+    }
+
+    /// Текущая высота падения (`LivingEntity.fallDistance`).
+    pub fn fall_distance(&self) -> f64 {
+        self.fall
+    }
+
     /// Distance accumulated at the next landing, before `on_move` clears it.
     pub(crate) fn landing_fall(&self, pos: Option<[f64; 3]>, on_ground: bool) -> Option<f64> {
         if self.on_ground || !on_ground {
@@ -1450,6 +1483,31 @@ mod tests {
         assert_eq!(v.landing_fall(Some([0.0, 78.5, 0.0]), true), Some(1.5));
         v.on_move(Some([0.0, 78.5, 0.0]), true, true, false);
         assert_eq!(v.landing_fall(Some([0.0, 78.5, 0.0]), true), None);
+    }
+
+    #[test]
+    fn attack_strength_scale_matches_vanilla() {
+        let mut v = Vitals::default();
+        // Меч: скорость 1.6, задержка 12.5 тиков.
+        for _ in 0..11 {
+            v.tick_attack(Some(42));
+        }
+        assert!(v.attack_scale(1.6) < 1.0);
+        // Первый тик с предметом только запоминает руку; 12 тиков заряда
+        // (13-й вызов) дают 12.5/12.5.
+        v.tick_attack(Some(42));
+        v.tick_attack(Some(42));
+        assert_eq!(v.attack_scale(1.6), 1.0);
+        // Смена предмета в руке сбрасывает заряд.
+        v.tick_attack(Some(43));
+        assert!(v.attack_scale(1.6) < 0.1);
+        v.reset_attack();
+        assert_eq!(v.attack_scale(1.6), 0.04);
+        // Без предмета скорость 4.0: задержка 5 тиков.
+        for _ in 0..5 {
+            v.tick_attack(None);
+        }
+        assert_eq!(v.attack_scale(4.0), 0.9);
     }
 
     #[test]

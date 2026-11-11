@@ -1286,7 +1286,24 @@ pub fn fall_damage(fall: f64, safe: f32) -> f32 {
     ((fall - f64::from(safe)).ceil()).max(0.0) as f32
 }
 
-pub fn hurt(m: &mut Mob, amount: f32, src: Source, knockback: f64) -> Option<bool> {
+/// `LivingEntity.knockback(power, xd, zd)`: отбрасывание по единичному
+/// направлению `(xd, zd)`; вверх — только стоя на земле.
+pub fn knockback(m: &mut Mob, power: f64, xd: f64, zd: f64) {
+    if power <= 0.0 {
+        return;
+    }
+    let len = (xd * xd + zd * zd).sqrt();
+    if len <= 1e-4 {
+        return;
+    }
+    m.vel[0] = m.vel[0] / 2.0 - xd / len * power;
+    m.vel[2] = m.vel[2] / 2.0 - zd / len * power;
+    if m.on_ground {
+        m.vel[1] = (m.vel[1] / 2.0 + power).min(0.4);
+    }
+}
+
+pub fn hurt(m: &mut Mob, amount: f32, src: Source, knockback_power: f64) -> Option<bool> {
     if !m.alive() {
         return None;
     }
@@ -1307,15 +1324,7 @@ pub fn hurt(m: &mut Mob, amount: f32, src: Source, knockback: f64) -> Option<boo
         m.last_hurt_by = Some((a, m.tick_count));
     }
     if let Some(from) = src.from {
-        let d = [from[0] - m.pos[0], from[2] - m.pos[2]];
-        let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
-        if len > 1e-4 && knockback > 0.0 {
-            m.vel[0] = m.vel[0] / 2.0 - d[0] / len * knockback;
-            m.vel[2] = m.vel[2] / 2.0 - d[1] / len * knockback;
-            if m.on_ground {
-                m.vel[1] = (m.vel[1] / 2.0 + knockback).min(0.4);
-            }
-        }
+        knockback(m, knockback_power, from[0] - m.pos[0], from[2] - m.pos[2]);
     }
     if m.health <= 0.0 {
         m.death_time = 1;
