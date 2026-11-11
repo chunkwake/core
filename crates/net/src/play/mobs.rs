@@ -191,7 +191,8 @@ impl PlayPlan {
     }
 
     /// `Mob.populateDefaultEquipmentSlots` + `Zombie`/`AbstractSkeleton`:
-    /// броня по `special_multiplier`, оружие с шансом от сложности.
+    /// броня по `special_multiplier`, оружие с шансом от сложности. Затем
+    /// `populateDefaultEquipmentEnchantments`: чары из `mob_spawn_equipment`.
     fn populate_equipment(&self, m: &mut Mob) {
         let difficulty = self.difficulty().id();
         let special =
@@ -204,6 +205,37 @@ impl PlayPlan {
             if let Some(item) = self.item_id(name) {
                 m.set_item(slot, Some(Stack::new(item, 1)));
             }
+        }
+        // `Mob.enchantSpawnedEquipment`: оружие — `0.25 × special`, броня —
+        // `0.5 × special`; стоимость `EnchantmentsByCostWithDifficulty`
+        // (`min_cost 5`, `max_cost_span 17`) и чары тега
+        // `#minecraft:on_mob_spawn_equipment`.
+        let mut r = crate::enchanting::JavaRandom::new(rand::random::<i64>());
+        let span = (special * 17.0) as i32;
+        for (slot, chance) in [(0usize, 0.25f32), (2, 0.5), (3, 0.5), (4, 0.5), (5, 0.5)] {
+            let Some(stack) = m.item(slot) else { continue };
+            if r.next_float() >= chance * special {
+                continue;
+            }
+            let cost = 5 + r.below(span + 1);
+            let list = crate::enchanting::mob_spawn_enchantments(
+                &self.survival.enchanting,
+                self.item_name(stack.item),
+                cost,
+                &mut r,
+            );
+            if list.is_empty() {
+                continue;
+            }
+            let mut extra = (*chunkwake_protocol::components::get(stack.extra)).clone();
+            extra.enchantments = list;
+            m.set_item(
+                slot,
+                Some(Stack {
+                    extra: chunkwake_protocol::components::intern(extra),
+                    ..stack
+                }),
+            );
         }
     }
 

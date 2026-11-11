@@ -134,6 +134,19 @@ pub fn enchantments(
     enchantments_rng(e, item, slot, cost, seed).0
 }
 
+/// `EnchantmentsByCostWithDifficulty` с провайдером `minecraft:mob_spawn_equipment`
+/// (`Mob.enchantSpawnedEquipment`): чары снаряжения из тега
+/// `#minecraft:on_mob_spawn_equipment`. Книгу не превращаем: снаряжение
+/// книгой не бывает.
+pub fn mob_spawn_enchantments(
+    e: &Enchanting,
+    item: &str,
+    cost: i32,
+    r: &mut JavaRandom,
+) -> Vec<(i32, i32)> {
+    select(e, &e.mob_spawn, item, cost, r)
+}
+
 fn enchantments_rng(
     e: &Enchanting,
     item: &str,
@@ -142,7 +155,7 @@ fn enchantments_rng(
     seed: i32,
 ) -> (Vec<(i32, i32)>, JavaRandom) {
     let mut r = JavaRandom::new(seed.wrapping_add(slot) as i64);
-    let mut list = select(e, item, cost, &mut r);
+    let mut list = select(e, &e.table, item, cost, &mut r);
     if item == BOOK && list.len() > 1 {
         list.remove(r.below(list.len() as i32) as usize);
     }
@@ -150,7 +163,15 @@ fn enchantments_rng(
 }
 
 /// `selectEnchantment`: уровень с разбросом от зачаряемости, затем чары по весу.
-fn select(e: &Enchanting, item: &str, level: i32, r: &mut JavaRandom) -> Vec<(i32, i32)> {
+/// `source` — индексы `defs` в порядке тега (`in_enchanting_table` или
+/// `on_mob_spawn_equipment`): ванильный `HolderSet.stream()` тоже идёт по тегу.
+fn select(
+    e: &Enchanting,
+    source: &[usize],
+    item: &str,
+    level: i32,
+    r: &mut JavaRandom,
+) -> Vec<(i32, i32)> {
     let Some(&value) = e.enchantable.get(item) else {
         return Vec::new();
     };
@@ -158,7 +179,7 @@ fn select(e: &Enchanting, item: &str, level: i32, r: &mut JavaRandom) -> Vec<(i3
     let spread = (r.next_float() + r.next_float() - 1.0) * 0.15;
     // `Math.round(float)`: floor(x + 0.5).
     level = ((level as f32 + level as f32 * spread + 0.5).floor() as i32).max(1);
-    let mut avail = available(e, item, level);
+    let mut avail = available(e, source, item, level);
     let mut out: Vec<(&EnchantDef, i32)> = Vec::new();
     if let Some(first) = pick(&avail, r) {
         out.push(first);
@@ -179,9 +200,14 @@ fn select(e: &Enchanting, item: &str, level: i32, r: &mut JavaRandom) -> Vec<(i3
 }
 
 /// `getAvailableEnchantmentResults`: высший уровень каждой чары, чья стоимость в окне;
-/// порядок — как в теге `in_enchanting_table`.
-fn available<'a>(e: &'a Enchanting, item: &str, level: i32) -> Vec<(&'a EnchantDef, i32)> {
-    e.table
+/// порядок — как в теге.
+fn available<'a>(
+    e: &'a Enchanting,
+    source: &[usize],
+    item: &str,
+    level: i32,
+) -> Vec<(&'a EnchantDef, i32)> {
+    source
         .iter()
         .filter_map(|&i| e.defs.get(i))
         .filter(|d| item == BOOK || d.primary.contains(item))
@@ -340,6 +366,7 @@ mod tests {
         ));
         e.table = vec![0, 1, 2];
         e.enchantable.insert("minecraft:diamond_pickaxe".into(), 10);
+        e.enchantable.insert("minecraft:diamond_sword".into(), 15);
         e.enchantable.insert(BOOK.into(), 1);
         e.providers = pick("minecraft:bookshelf");
         e.transmitters = pick("minecraft:air");
@@ -416,5 +443,36 @@ mod tests {
         }
         // Незачаряемое — без вариантов.
         assert_eq!(offer(&e, "minecraft:stone", 15, 1).costs, [0; 3]);
+    }
+
+    #[test]
+    fn mob_spawn_uses_own_tag_not_table() {
+        let mut e = data();
+        // Источник спавна — только sharpness (индекс 2), стол пуст.
+        e.mob_spawn = vec![2];
+        e.table.clear();
+        for seed in 0..200 {
+            let list = mob_spawn_enchantments(
+                &e,
+                "minecraft:diamond_sword",
+                22,
+                &mut JavaRandom::new(seed),
+            );
+            assert!(!list.is_empty(), "seed {seed}");
+            for &(id, level) in &list {
+                assert_eq!(id, 2);
+                assert!((1..=5).contains(&level), "seed {seed}: {level}");
+            }
+        }
+        // Без записи в `enchantable` чар нет.
+        assert!(
+            mob_spawn_enchantments(&e, "minecraft:stone", 22, &mut JavaRandom::new(1)).is_empty()
+        );
+        // Источник не зависит от `primary_items` стола: кирка тоже не зачаруется,
+        // если её нет в теге спавна.
+        assert!(
+            mob_spawn_enchantments(&e, "minecraft:diamond_pickaxe", 22, &mut JavaRandom::new(1))
+                .is_empty()
+        );
     }
 }

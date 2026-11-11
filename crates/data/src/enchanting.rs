@@ -140,6 +140,9 @@ pub struct Enchanting {
     pub transmitters: HashSet<String>,
     /// Индексы `defs` чар стола в порядке тега `in_enchanting_table`.
     pub table: Vec<usize>,
+    /// Индексы `defs` чар снаряжения мобов в порядке тега
+    /// `on_mob_spawn_equipment` (ванильный `HolderSet` тоже идёт по тегу).
+    pub mob_spawn: Vec<usize>,
 }
 
 /// Чары в сетевом порядке `names`.
@@ -285,6 +288,20 @@ pub fn load(root: &Path, names: &[String]) -> Result<Enchanting, DataError> {
             && !out.table.contains(&i)
         {
             out.table.push(i);
+        }
+    }
+    let mut order = Vec::new();
+    tags.ordered(
+        "enchantment",
+        "#minecraft:on_mob_spawn_equipment",
+        &mut order,
+        0,
+    );
+    for name in order {
+        if let Some(i) = out.defs.iter().position(|d| d.name == name)
+            && !out.mob_spawn.contains(&i)
+        {
+            out.mob_spawn.push(i);
         }
     }
     out.providers = tags.values("block", "#minecraft:enchantment_power_provider");

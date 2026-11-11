@@ -1,5 +1,5 @@
 //! Образ данных запуска: всё, что сервер собирает из дерева ванильных JSON,
-//! упаковывается в `chunkwake-derived-v1/boot.v5.bin` и дальше читается одним
+//! упаковывается в `chunkwake-derived-v1/boot.v6.bin` и дальше читается одним
 //! последовательным файлом вместо тысяч открытий и разборов.
 //!
 //! Сборка образа вызывает обычные загрузчики; повторный старт их не трогает.
@@ -18,9 +18,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Версия формата. Меняется вместе с любым полем образа.
-const SCHEMA: u32 = 5;
+const SCHEMA: u32 = 6;
 const MAGIC: u32 = 0x434B_424F; // "CKBO"
-const FILE: &str = "boot.v5.bin";
+const FILE: &str = "boot.v6.bin";
 
 /// Слоты экипировки в порядке кодов образа (`ItemInfo::equip`).
 const EQUIP: [&str; 8] = [
@@ -607,6 +607,10 @@ fn w_enchanting(w: &mut W, e: &Enchanting) {
     for i in &e.table {
         w.u32(*i as u32);
     }
+    w.u32(e.mob_spawn.len() as u32);
+    for i in &e.mob_spawn {
+        w.u32(*i as u32);
+    }
 }
 
 // ------------------------------------------------------------------ чтение
@@ -1144,12 +1148,18 @@ fn r_enchanting(r: &mut R<'_>) -> Result<Enchanting, DataError> {
     for _ in 0..n {
         table.push(r.u32()? as usize);
     }
+    let n = r.count()?;
+    let mut mob_spawn = Vec::with_capacity(n);
+    for _ in 0..n {
+        mob_spawn.push(r.u32()? as usize);
+    }
     Ok(Enchanting {
         defs,
         enchantable,
         providers,
         transmitters,
         table,
+        mob_spawn,
     })
 }
 
@@ -1325,6 +1335,7 @@ mod tests {
         enchanting.enchantable.insert("minecraft:stone".into(), 5);
         enchanting.providers.insert("minecraft:bookshelf".into());
         enchanting.table.push(0);
+        enchanting.mob_spawn.push(0);
         Boot {
             world_version: 5023,
             packets: PacketTable::from_entries(vec![(
@@ -1390,6 +1401,7 @@ mod tests {
         assert_eq!(back.enchanting.defs.len(), 1);
         assert_eq!(back.enchanting.defs[0].max_level, 5);
         assert_eq!(back.enchanting.table, vec![0]);
+        assert_eq!(back.enchanting.mob_spawn, vec![0]);
         assert_eq!(back.dimension.height, 384);
     }
 

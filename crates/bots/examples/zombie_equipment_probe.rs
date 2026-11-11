@@ -1,5 +1,5 @@
 //! Экипировка зомби: NBT `equipment`/`drop_chances`, `set_equipment`,
-//! выпадение при смерти и лук скелета.
+//! выпадение при смерти, лук скелета и чары снаряжения при спавне.
 //!
 //! `zombie_equipment_probe <addr> <packets.json> <registries.json>`
 use chunkwake_bots::{Client, Event, Ids};
@@ -243,6 +243,38 @@ async fn main() {
         sk_gear.contains("minecraft:bow"),
         "скелет без лука: {sk_gear}"
     );
+
+    // `Mob.populateDefaultEquipmentEnchantments`: у скелета всегда лук, шанс
+    // чар `0.25 × special` (на сложной с поздним временем — 12.5 %). Перебираем
+    // спавны, пока не попадётся зачарованный лук; проверяем, что чары именно
+    // из тега `on_mob_spawn_equipment` (у лука это power/punch).
+    p.clear("skeleton").await;
+    let mut enchanted = None;
+    for _ in 0..60 {
+        p.send_cmd(&format!(
+            "summon minecraft:skeleton {} {} {}",
+            sk[0], sk[1], sk[2]
+        ))
+        .await;
+        p.pump(120).await;
+        let gear = p
+            .data("@e[type=minecraft:skeleton,limit=1,sort=nearest] equipment")
+            .await;
+        if gear.contains("minecraft:enchantments") {
+            enchanted = Some(gear);
+            break;
+        }
+        // `/tp` не берёт не-игрока, поэтому убираем проверенного смертью.
+        p.cmd("kill @e[type=minecraft:skeleton,limit=1,sort=nearest]")
+            .await;
+        p.pump(1100).await;
+    }
+    let gear = enchanted.expect("60 спавнов скелета без зачарованного лука");
+    assert!(
+        gear.contains("minecraft:power") || gear.contains("minecraft:punch"),
+        "чары не из тега спавна снаряжения: {gear}"
+    );
+    p.clear("skeleton").await;
 
     // `/summon <entity> <pos> <nbt>`: NBT применяется, `finalizeSpawn`
     // не вызывается — случайной брони нет, всё из NBT.
