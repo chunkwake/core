@@ -1746,6 +1746,8 @@ pub(crate) struct DimSim {
     item_frames: Mutex<FastMap<i32, item_frames::ItemFrame>>,
     /// Картины (`Painting`).
     paintings: Mutex<FastMap<i32, paintings::Painting>>,
+    /// Стойки для брони (`ArmorStand`).
+    armor_stands: Mutex<FastMap<i32, armor_stands::ArmorStand>>,
     /// Играющие проигрыватели (`JukeboxSongPlayer`).
     jukeboxes: Mutex<FastMap<[i32; 3], jukebox::Playing>>,
     /// Проигрыватели с диска, ещё не разобранные тиком.
@@ -2217,6 +2219,7 @@ fn furnace_kind(block: &str) -> Option<u8> {
 
 use chunkwake_data::world::FURNACES;
 
+mod armor_stands;
 mod banners;
 mod block_items;
 mod boats;
@@ -9874,6 +9877,7 @@ impl PlayPlan {
         self.explode_minecarts(center, power);
         self.explode_item_frames(center, power);
         self.explode_paintings(center, power);
+        self.explode_armor_stands(center, power);
     }
 
     fn explosion_exposure(&self, from: [f64; 3], to: [f64; 3]) -> f64 {
@@ -12042,7 +12046,8 @@ impl PlayPlan {
                                 || self.attack_minecart(uuid, target, held, creative, crit).is_some()
                                 || (login.spawn.game_mode != 3
                                     && (self.attack_item_frame(uuid, target, creative).is_some()
-                                        || self.attack_painting(uuid, target, creative).is_some()))
+                                        || self.attack_painting(uuid, target, creative).is_some()
+                                        || self.attack_armor_stand(uuid, target, creative).is_some()))
                             {
                                 continue;
                             }
@@ -12105,6 +12110,24 @@ impl PlayPlan {
                         }
                         // `Painting.interact`: у картины нет действия.
                         if self.is_painting(it.entity) {
+                            continue;
+                        }
+                        // `ArmorStand.interactAt`: надеть, снять или обменять.
+                        if self.is_armor_stand(it.entity) {
+                            if !state.vitals.dead && login.spawn.game_mode != 3 {
+                                let creative = login.spawn.game_mode == 1;
+                                if let Some(slots) = self.use_armor_stand(
+                                    uuid,
+                                    it.entity,
+                                    it.hand,
+                                    it.at,
+                                    &mut state.inv,
+                                    creative,
+                                ) && !slots.is_empty()
+                                {
+                                    self.send_slots(conn, &mut state.inv, &slots).await?;
+                                }
+                            }
                             continue;
                         }
                         // `ItemFrame.interact`: предмет в рамку или поворот.
@@ -13278,6 +13301,20 @@ impl PlayPlan {
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                             continue;
                         }
+                        // `ArmorStandItem.useOn`: стойка на блок.
+                        if let Some(i) = hand_slot.filter(|_| !state.vitals.dead && login.spawn.game_mode != 3)
+                            && let Some(s) = state.inv.slots[i]
+                            && self.item_name(s.item) == "minecraft:armor_stand"
+                            && self.player_at(uuid).is_some_and(|(p, _, _)| block_reach(eye_of(p), u.pos, if login.spawn.game_mode == 1 { 5.0 } else { 4.5 }))
+                            && self.place_armor_stand(uuid, u.pos, u.face, login.spawn.game_mode == 2)
+                        {
+                            if login.spawn.game_mode != 1 {
+                                state.inv.consume_at(i);
+                                self.send_slots(conn, &mut state.inv, &[i]).await?;
+                            }
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                            continue;
+                        }
                         // `PaintingItem.useOn`: картина на стену.
                         if let Some(i) = hand_slot.filter(|_| !state.vitals.dead && login.spawn.game_mode != 3)
                             && let Some(s) = state.inv.slots[i]
@@ -13792,7 +13829,8 @@ impl PlayPlan {
                     .map(|(item, bounds)| (Stack::new(item, 1), bounds))
             })
             .or_else(|| self.pick_item_frame(target))
-            .or_else(|| self.pick_painting(target))?;
+            .or_else(|| self.pick_painting(target))
+            .or_else(|| self.pick_armor_stand(target))?;
         within_pick_range(eye, bounds, range).then_some(item)
     }
 

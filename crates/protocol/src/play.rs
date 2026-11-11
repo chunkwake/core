@@ -1613,11 +1613,13 @@ pub fn mob_flags(id: i32, entity_id: i32, flags: u8) -> Vec<u8> {
 }
 
 /// Значение `SynchedEntityData`: байт, целое (`VarInt`) или логическое.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Meta {
     Byte(u8),
     Int(i32),
     Bool(bool),
+    /// `EntityDataSerializers.ROTATIONS` (id 9): три угла `FLOAT`.
+    Rotations([f32; 3]),
 }
 
 /// `set_entity_data` с произвольными полями `(индекс, значение)`.
@@ -1626,9 +1628,21 @@ pub fn entity_meta(id: i32, entity_id: i32, fields: &[(u8, Meta)]) -> Vec<u8> {
     w.var_int(id).var_int(entity_id);
     for &(i, v) in fields {
         match v {
-            Meta::Byte(b) => w.u8(i).var_int(0).u8(b),
-            Meta::Int(n) => w.u8(i).var_int(1).var_int(n),
-            Meta::Bool(b) => w.u8(i).var_int(8).bool(b),
+            Meta::Byte(b) => {
+                w.u8(i).var_int(0).u8(b);
+            }
+            Meta::Int(n) => {
+                w.u8(i).var_int(1).var_int(n);
+            }
+            Meta::Bool(b) => {
+                w.u8(i).var_int(8).bool(b);
+            }
+            Meta::Rotations(r) => {
+                w.u8(i).var_int(9);
+                for v in r {
+                    w.f32(v);
+                }
+            }
         };
     }
     w.u8(0xff);
@@ -1671,5 +1685,19 @@ mod lp_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn rotations_meta_uses_serializer_9() {
+        let p = entity_meta(1, 2, &[(16, Meta::Rotations([1.5, -2.0, 3.0]))]);
+        let mut r = Reader::new(&p);
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.var_int().unwrap(), 2);
+        assert_eq!(r.u8().unwrap(), 16);
+        assert_eq!(r.var_int().unwrap(), 9);
+        assert_eq!(r.f32().unwrap(), 1.5);
+        assert_eq!(r.f32().unwrap(), -2.0);
+        assert_eq!(r.f32().unwrap(), 3.0);
+        assert_eq!(r.u8().unwrap(), 0xff);
     }
 }

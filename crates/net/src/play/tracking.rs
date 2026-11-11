@@ -34,6 +34,7 @@ impl PlayPlan {
         self.track_minecarts(&mut out);
         self.track_item_frames(&mut out);
         self.track_paintings(&mut out);
+        self.track_armor_stands(&mut out);
         *self.dim_state().tracked.lock().unwrap() = Arc::new(out);
     }
 
@@ -46,6 +47,7 @@ impl PlayPlan {
             .or_else(|| self.minecart_spawn(id))
             .or_else(|| self.item_frame_spawn(id))
             .or_else(|| self.painting_spawn(id))
+            .or_else(|| self.armor_stand_spawn(id))
     }
 
     /// Тик слежения одного игрока (`TrackedEntity.updatePlayer` по всем

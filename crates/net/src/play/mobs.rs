@@ -1692,6 +1692,7 @@ impl PlayPlan {
                     || self.load_minecart(c)
                     || self.load_item_frame(c)
                     || self.load_painting(c)
+                    || self.load_armor_stand(c)
                 {
                     written.insert(pos);
                     continue;
@@ -1874,6 +1875,7 @@ impl PlayPlan {
             .chain(self.minecarts_nbt())
             .chain(self.item_frames_nbt())
             .chain(self.paintings_nbt())
+            .chain(self.armor_stands_nbt())
         {
             by_chunk.entry(pos).or_default().push(c);
         }
