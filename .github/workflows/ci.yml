@@ -77,7 +77,7 @@ jobs:
       - uses: actions/checkout@v5
 
       # Java 25 нужна генератору данных: из jar собирается кэш `generated/26.3`.
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "25"
@@ -171,7 +171,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "25"
