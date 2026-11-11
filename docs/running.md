@@ -10,15 +10,17 @@
 
 Поддерживается только modern forwarding; legacy/BungeeCord-режим не реализован.
 
-На прокси в `velocity.toml` включите `player-info-forwarding-mode = "modern"` и задайте `forwarding-secret`. На backend в `server.properties`:
+На прокси в `velocity.toml` включите `player-info-forwarding-mode = "modern"`. Секрет лежит в файле `forwarding.secret` рядом с `velocity.toml` (или в файле из `forwarding-secret-file`). На backend в `server.properties`:
 
 ```text
 online-mode=false
 velocity-enabled=true
-velocity-secret=<тот же секрет, что в velocity.toml>
+velocity-secret=<тот же секрет, что в forwarding.secret>
 ```
 
 Секрет можно записать и командой `chunkwake config set velocity-secret <секрет>`. Сервер откажется стартовать, если `velocity-enabled=true`, а секрет пуст или `online-mode=true`.
+
+Проверено с Velocity 4.3.1 в режиме `modern`: бот входит через прокси, backend получает UUID, имя и свойства из подписанного профиля (проба [`velocity_probe`](../crates/bots/examples/velocity_probe.rs)).
 
 Backend-порт должен быть доступен **только прокси** (loopback или firewall): с секретом сервер доверяет подписанному профилю от Velocity, но напрямую клиенту этот профиль передать не должен.
 
