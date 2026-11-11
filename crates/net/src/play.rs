@@ -12145,7 +12145,7 @@ impl PlayPlan {
                         if !state.vitals.dead {
                             let creative = login.spawn.game_mode == 1;
                             let held = state.inv.slots[state.inv.held_slot()];
-                            let hit = self.melee_hit(uuid, held, &state.vitals, in_boat || in_cart);
+                            let hit = self.melee_hit(uuid, held, &state.vitals, in_boat || in_cart, gliding);
                             // `causeExtraKnockback` гасит спринт и без полного
                             // заряда, если у оружия есть отбрасывание.
                             let knockback_level = held.map_or(0, |s| {

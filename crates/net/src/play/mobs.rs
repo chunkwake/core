@@ -116,6 +116,8 @@ impl MobEntry {
 pub(super) struct MeleeHit {
     pub scale: f32,
     pub crit: bool,
+    /// `LivingEntity.isFallFlying`: ломает smash-атаку булавы.
+    pub gliding: bool,
 }
 
 /// `Player.doSweepAttack`: база урона, заряд и Sweeping Edge.
@@ -1276,6 +1278,24 @@ impl PlayPlan {
     /// `Player.doSweepAttack`: `1 + sweeping_damage_ratio × item_damage`
     /// плюс бонус чар, затем всё умножается на заряд. Sweeping Edge даёт
     /// `level / (level + 1)` (`minecraft:sweeping_edge` в данных 26.3).
+    /// `MaceItem.getAttackDamageBonus` без чар: 4×падение до 3 блоков,
+    /// 12 + 2×(h−3) до 8, дальше 22 + (h−8).
+    pub(super) fn mace_smash_bonus(fall: f32) -> f32 {
+        if fall <= 3.0 {
+            4.0 * fall
+        } else if fall <= 8.0 {
+            12.0 + 2.0 * (fall - 3.0)
+        } else {
+            22.0 + fall - 8.0
+        }
+    }
+
+    /// Бонус булавы с Density: `getAttackDamageBonus` плюс
+    /// `smash_damage_per_fallen_block × fall` (`0.5 × уровень`).
+    pub(super) fn mace_smash_damage(fall: f32, density: i32) -> f32 {
+        Self::mace_smash_bonus(fall) + 0.5 * density.max(0) as f32 * fall
+    }
+
     pub(super) fn sweep_damage(item_damage: f32, sharpness: f32, sweeping: i32, scale: f32) -> f32 {
         let ratio = if sweeping > 0 {
             f64::from(sweeping) / f64::from(sweeping + 1)
@@ -1293,6 +1313,7 @@ impl PlayPlan {
         held: Slot,
         vitals: &Vitals,
         passenger: bool,
+        gliding: bool,
     ) -> MeleeHit {
         let speed = 4.0
             + held
@@ -1315,7 +1336,11 @@ impl PlayPlan {
             && self.effect_amp(vitals, "minecraft:blindness").is_none()
             && !vitals.sprinting
             && !passenger;
-        MeleeHit { scale, crit }
+        MeleeHit {
+            scale,
+            crit,
+            gliding,
+        }
     }
 
     /// `Entity.onClimbable`: лестницы, лианы и подмостки.
@@ -1344,6 +1369,59 @@ impl PlayPlan {
     }
 
     /// Удар игрока по мобу (`Player.attack`). Возвращает слот оружия, если оно износилось.
+    /// `MaceItem.smashAttack`: звук, частицы и отбрасывание живых в радиусе
+    /// 3.5 блока; сила `(3.5 − d) × 0.7`, на падении > 5 — вдвое.
+    fn mace_smash(&self, target: i32, user: [f64; 3], fall: f32, on_ground: bool) {
+        let heavy = fall > 5.0;
+        let sound = if on_ground {
+            if heavy {
+                "minecraft:item.mace.smash_ground_heavy"
+            } else {
+                "minecraft:item.mace.smash_ground"
+            }
+        } else {
+            "minecraft:item.mace.smash_air"
+        };
+        self.play_sound(None, sound, crate::sounds::PLAYERS, user, 1.0, 1.0);
+        let mut mobs = self.sim().mobs.lock().unwrap();
+        let Some(at) = mobs.get(&target).map(|e| e.mob.pos) else {
+            return;
+        };
+        self.hub.send(
+            None,
+            play::level_event(
+                self.ids.level_event,
+                2013,
+                [
+                    at[0].floor() as i32,
+                    at[1].floor() as i32,
+                    at[2].floor() as i32,
+                ],
+                750,
+                false,
+            ),
+        );
+        let multiplier = if heavy { 2.0 } else { 1.0 };
+        for (&id, e) in mobs.iter_mut() {
+            if id == target || !e.mob.alive() {
+                continue;
+            }
+            let d = [
+                e.mob.pos[0] - at[0],
+                e.mob.pos[1] - at[1],
+                e.mob.pos[2] - at[2],
+            ];
+            let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            if dist > 3.5 || dist < 1e-4 {
+                continue;
+            }
+            let power = (3.5 - dist) * 0.7 * multiplier;
+            e.mob.vel[0] += d[0] / dist * power;
+            e.mob.vel[1] += 0.7;
+            e.mob.vel[2] += d[2] / dist * power;
+        }
+    }
+
     pub(super) async fn attack_mob(
         &self,
         uuid: Uuid,
@@ -1376,6 +1454,16 @@ impl PlayPlan {
             0.0
         };
         let mut damage = Self::melee_damage(base, bonus, scale, crit);
+        // `MaceItem`: бонус за падение не масштабируется зарядом, но крит
+        // умножает его вместе с базовым уроном.
+        let mace = held.is_some_and(|s| self.item_name(s.item) == "minecraft:mace");
+        let fall = vitals.fall_distance() as f32;
+        let smash = mace && fall > 1.5 && !hit.gliding;
+        if smash {
+            let density = level("minecraft:density");
+            let bonus = Self::mace_smash_damage(fall, density);
+            damage += bonus * if crit { 1.5 } else { 1.0 };
+        }
         let full = scale > 0.9;
         let sprinting = vitals.sprinting;
         let sprint_knock = sprinting && full;
@@ -1422,7 +1510,7 @@ impl PlayPlan {
         // применяется в `hurt`, это — добавка `causeExtraKnockback`.
         let extra =
             0.25 * level("minecraft:knockback") as f64 + if sprint_knock { 0.5 } else { 0.0 };
-        let (result, mpos, species, baby, sound) = {
+        let (result, mpos, species, baby, sound, target_ground) = {
             let mut mobs = self.sim().mobs.lock().unwrap();
             let e = mobs.get_mut(&target)?;
             // Обидчика монстр берёт целью сам (`HurtByTargetGoal`), творческого — нет.
@@ -1445,9 +1533,20 @@ impl PlayPlan {
                 e.mob.sound(if died { "death" } else { "hurt" }),
                 e.mob.volume(),
             );
-            (r, e.mob.pos, e.mob.species, e.mob.is_baby(), sound)
+            (
+                r,
+                e.mob.pos,
+                e.mob.species,
+                e.mob.is_baby(),
+                sound,
+                e.mob.on_ground,
+            )
         };
         let died = result?;
+        if smash {
+            self.mace_smash(target, pos, fall, target_ground);
+            vitals.reset_fall(pos);
+        }
         self.emit_vibration(mpos, "minecraft:entity_damage");
         if died {
             self.emit_vibration(mpos, "minecraft:entity_die");
@@ -3726,6 +3825,18 @@ impl PlayPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mace_smash_bonus_matches_vanilla() {
+        assert_eq!(PlayPlan::mace_smash_bonus(0.0), 0.0);
+        assert_eq!(PlayPlan::mace_smash_bonus(2.0), 8.0);
+        assert_eq!(PlayPlan::mace_smash_bonus(3.0), 12.0);
+        assert_eq!(PlayPlan::mace_smash_bonus(5.0), 16.0);
+        assert_eq!(PlayPlan::mace_smash_bonus(8.0), 22.0);
+        assert_eq!(PlayPlan::mace_smash_bonus(10.0), 24.0);
+        assert_eq!(PlayPlan::mace_smash_damage(5.0, 0), 16.0);
+        assert_eq!(PlayPlan::mace_smash_damage(5.0, 3), 23.5);
+    }
 
     #[test]
     fn mob_nbt_roundtrip() {

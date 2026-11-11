@@ -72,6 +72,13 @@ impl Probe {
         last_number(&self.chat).expect("нет Health в ответе")
     }
 
+    async fn self_health(&mut self) -> f64 {
+        self.pump(150).await;
+        self.chat.clear();
+        self.cmd("data get entity @s Health").await;
+        last_number(&self.chat).expect("нет Health игрока")
+    }
+
     async fn spawn(&mut self, name: &str, kind: i32, at: [f64; 3]) -> i32 {
         self.send_cmd(&format!(
             "summon minecraft:{name} {} {} {}",
@@ -512,6 +519,51 @@ async fn main() {
     assert!(
         (crit - 9.0).abs() < 1.0,
         "крит в падении должен снять ~9 HP, снято {crit}"
+    );
+
+    // Булава: удар в падении (smash) добавляет урон за высоту, сбрасывает
+    // падение и бьёт по площади. Проверяем урон и отсутствие урона от падения.
+    p.clear("spider").await;
+    p.clear("cow").await;
+    p.cmd("effect clear @s").await;
+    p.cmd("data merge entity @s {Health:20.0f}").await;
+    p.cmd("item replace entity @s hotbar.0 with minecraft:mace 1")
+        .await;
+    let mut slot = Writer::new();
+    slot.var_int(sb("set_carried_item")).u16(0);
+    p.c.send_raw(&slot.buf).await.unwrap();
+    p.pump(900).await;
+    let cow_mace = p
+        .spawn("cow", ty("minecraft:cow"), [spot[0], by as f64, spot[2]])
+        .await;
+    p.pump(100).await;
+    p.cmd(&format!(
+        "tp @s {} {} {}",
+        spot[0],
+        by as f64 + 6.0,
+        spot[2]
+    ))
+    .await;
+    p.pump(200).await;
+    for dy in [5.0, 4.0, 3.0, 2.0, 1.0] {
+        p.move_down([spot[0], by as f64 + dy, spot[2]]).await;
+        p.pump(60).await;
+    }
+    let before = p.self_health().await;
+    p.attack(cow_mace).await;
+    p.pump(300).await;
+    let cow_damage = 10.0 - p.data_health_of("cow").await;
+    assert!(
+        cow_damage > 9.0,
+        "smash булавы должен убить корову, снято {cow_damage}"
+    );
+    // Приземляемся: smash сбросил высоту падения, урона быть не должно.
+    p.move_ground([spot[0], by as f64, spot[2]]).await;
+    p.pump(600).await;
+    let after = p.self_health().await;
+    assert!(
+        (after - before).abs() < 0.1,
+        "после smash остался урон от падения: {before} -> {after}"
     );
 
     println!("attack_cooldown: ok");
