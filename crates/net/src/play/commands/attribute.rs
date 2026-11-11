@@ -484,7 +484,10 @@ fn effect_modifiers(plan: &PlayPlan, uuid: Uuid, name: &str) -> Vec<(String, f64
         "minecraft:movement_speed" => {
             survival::speed_modifiers(false, amp("minecraft:speed"), amp("minecraft:slowness"))
         }
-        "minecraft:jump_strength" => survival::jump_modifiers(amp("minecraft:jump_boost")),
+        "minecraft:jump_strength" => Vec::new(),
+        "minecraft:safe_fall_distance" => {
+            survival::safe_fall_modifiers(amp("minecraft:jump_boost"))
+        }
         "minecraft:gravity" => survival::gravity_modifiers(amp("minecraft:slow_falling").is_some()),
         _ => Vec::new(),
     }

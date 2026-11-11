@@ -1837,6 +1837,7 @@ mod tests {
             entity_id: 1,
             bright_outside: false,
             mob_griefing: true,
+            jump_boost: None,
         };
         let mut c = Ctx { w: &w, s: &mut s };
         let mut last = -1;

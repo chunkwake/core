@@ -122,6 +122,18 @@ pub const AIR_FRICTION: f64 = 0.91;
 pub const AIR_ACCEL: f64 = 0.02;
 /// Прыжок (`getJumpPower`).
 pub const JUMP: f64 = 0.42;
+
+/// `LivingEntity.getJumpPower` без `blockJumpFactor`: `0.42` плюс
+/// `getJumpBoostPower` = `0.1 × (уровень + 1)`.
+pub fn jump_power(jump_boost: Option<u8>) -> f64 {
+    JUMP + jump_boost.map_or(0.0, |a| 0.1 * (f64::from(a) + 1.0))
+}
+
+/// `SAFE_FALL_DISTANCE`: база плюс `+1` за уровень Прыгучести
+/// (`MobEffects.JUMP_BOOST`).
+pub fn safe_fall_distance(base: f32, jump_boost: Option<u8>) -> f32 {
+    base + jump_boost.map_or(0.0, |a| f32::from(a) + 1.0)
+}
 /// Неуязвимость после удара (`invulnerableTime`); урон проходит при > 10, только больший.
 pub const INVULNERABLE: u8 = 20;
 /// Анимация смерти до исчезновения (`tickDeath`).
@@ -1015,6 +1027,8 @@ pub struct Senses<'a> {
     pub bright_outside: bool,
     /// `GameRules.MOB_GRIEFING`: ломание дверей.
     pub mob_griefing: bool,
+    /// Уровень `minecraft:jump_boost` из `LivingEntity.getJumpBoostPower`.
+    pub jump_boost: Option<u8>,
 }
 
 /// Игрок, которого монстр может выбрать целью.
@@ -1416,7 +1430,7 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
         if water && (!m.on_ground || goals::deep_water(m, w)) {
             m.vel[1] += 0.04;
         } else if m.on_ground && m.no_jump_delay == 0 {
-            m.vel[1] = m.vel[1].max(JUMP);
+            m.vel[1] = m.vel[1].max(jump_power(s.jump_boost));
             m.no_jump_delay = 10;
         }
     } else {
@@ -1994,6 +2008,7 @@ mod tests {
             entity_id: 1,
             bright_outside: false,
             mob_griefing: false,
+            jump_boost: None,
         };
         tick(&mut m, &w, &mut s);
         assert_eq!(m.touch_strikes, vec![7, 8]);
@@ -2044,6 +2059,7 @@ mod tests {
             entity_id: 1,
             bright_outside: false,
             mob_griefing: false,
+            jump_boost: None,
         };
         // Первые тики — разгон от нуля (за 30 тиков скорость сходится до 1e-8).
         for _ in 0..30 {
@@ -2202,6 +2218,7 @@ mod tests {
             entity_id: 1,
             bright_outside: false,
             mob_griefing: false,
+            jump_boost: None,
         };
         let mut max_x: f64 = 0.0;
         for _ in 0..200 {
@@ -2247,6 +2264,7 @@ mod tests {
             entity_id: 1,
             bright_outside: false,
             mob_griefing: false,
+            jump_boost: None,
         };
         let start = m.pos;
         let mut ran = false;
@@ -2283,6 +2301,7 @@ mod tests {
             entity_id: 1,
             bright_outside: false,
             mob_griefing: false,
+            jump_boost: None,
         };
         let gone = (0..30).position(|_| tick(&mut m, &w, &mut s));
         assert_eq!(gone, Some(19));
@@ -2313,6 +2332,7 @@ mod tests {
             entity_id: 1,
             bright_outside: false,
             mob_griefing: false,
+            jump_boost: None,
         };
         for _ in 0..100 {
             tick(&mut m, &w, &mut s);
@@ -2418,6 +2438,17 @@ mod tests {
     }
 
     #[test]
+    fn jump_boost_raises_jump_and_safe_fall() {
+        assert!((jump_power(None) - 0.42).abs() < 1e-9);
+        assert!((jump_power(Some(0)) - 0.52).abs() < 1e-9);
+        assert!((jump_power(Some(2)) - 0.72).abs() < 1e-9);
+        assert_eq!(safe_fall_distance(3.0, None), 3.0);
+        assert_eq!(safe_fall_distance(3.0, Some(0)), 4.0);
+        assert_eq!(safe_fall_distance(3.0, Some(4)), 8.0);
+        assert_eq!(fall_damage(10.0, safe_fall_distance(3.0, Some(3))), 3.0);
+    }
+
+    #[test]
     fn fall_damage_starts_above_safe_distance() {
         assert_eq!(fall_damage(3.0, 3.0), 0.0);
         assert_eq!(fall_damage(3.1, 3.0), 1.0);
@@ -2465,6 +2496,7 @@ mod tests {
             entity_id: 1,
             bright_outside: false,
             mob_griefing: false,
+            jump_boost: None,
         };
         let mut strikes = Vec::new();
         for t in 0..ticks {
@@ -2525,6 +2557,7 @@ mod tests {
             entity_id: 1,
             bright_outside: false,
             mob_griefing: false,
+            jump_boost: None,
         };
         let mut hit = None;
         for t in 0..400 {
@@ -2621,6 +2654,7 @@ mod tests {
             entity_id: 1,
             bright_outside: false,
             mob_griefing: false,
+            jump_boost: None,
         };
         // `mob_path_probe` на `server.jar`: (тик движения, x, z) относительно
         // игрока по шаговым дельтам `move_entity` (трекер шлёт раз в 3 тика).
@@ -2749,6 +2783,7 @@ mod tests {
             entity_id: 1,
             bright_outside: false,
             mob_griefing: false,
+            jump_boost: None,
         };
         tick(&mut m, &w, &mut s);
         assert_eq!(m.target, Some(7));
@@ -2796,6 +2831,7 @@ mod tests {
                 entity_id: 1,
                 bright_outside: false,
                 mob_griefing: false,
+                jump_boost: None,
             };
             tick(&mut m, &w, &mut s);
             assert_eq!(m.target, None);
@@ -2835,6 +2871,7 @@ mod tests {
             entity_id: 1,
             bright_outside: false,
             mob_griefing: false,
+            jump_boost: None,
         };
         for _ in 0..10 {
             tick(&mut z, &w, &mut s);
@@ -3098,6 +3135,7 @@ mod tests {
             entity_id: 1,
             bright_outside: false,
             mob_griefing: false,
+            jump_boost: None,
         };
         let mut outs = Vec::new();
         for t in 0..ticks {
@@ -3169,6 +3207,7 @@ mod tests {
             entity_id: 1,
             bright_outside: false,
             mob_griefing: false,
+            jump_boost: None,
         };
         for _ in 0..12 {
             assert!(!tick(&mut m, &w, &mut s));
@@ -3305,6 +3344,7 @@ mod tests {
             entity_id: 1,
             bright_outside: false,
             mob_griefing: false,
+            jump_boost: None,
         };
         let y0 = m.pos[1];
         tick(&mut m, &w, &mut s);

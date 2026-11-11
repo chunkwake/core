@@ -534,6 +534,17 @@ impl PlayPlan {
                         min_y,
                     };
                     let sight = |a: [f64; 3], b: [f64; 3]| self.clear_line(w, a, b);
+                    let jump_boost =
+                        self.survival
+                            .effects
+                            .get("minecraft:jump_boost")
+                            .and_then(|&id| {
+                                e.mob
+                                    .effects
+                                    .iter()
+                                    .find(|effect| effect.id == id)
+                                    .map(|effect| effect.amplifier)
+                            });
                     let mut senses = mb::Senses {
                         players: &watchers,
                         rand: &mut rand,
@@ -546,6 +557,7 @@ impl PlayPlan {
                         entity_id: id,
                         bright_outside: darken < 4,
                         mob_griefing,
+                        jump_boost,
                     };
                     let was_grounded = e.mob.on_ground;
                     let old_pos = e.mob.pos;
@@ -600,7 +612,10 @@ impl PlayPlan {
                     if view.water || view.lava {
                         e.fall = 0.0;
                     } else if let Some(fall) = landed_fall {
-                        let damage = mb::fall_damage(fall, species.safe_fall());
+                        let damage = mb::fall_damage(
+                            fall,
+                            mb::safe_fall_distance(species.safe_fall(), jump_boost),
+                        );
                         if damage > 0.0
                             && let Some(died) =
                                 mb::hurt(&mut e.mob, damage, mb::Source::default(), 0.0)

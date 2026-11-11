@@ -640,19 +640,16 @@ pub fn dig_multiplier(haste: Option<u8>, fatigue: Option<u8>) -> f32 {
 
 /// Стартовая скорость прыжка (`Attributes.JUMP_STRENGTH` игрока).
 pub const BASE_JUMP_STRENGTH: f64 = 0.42;
+/// База `safe_fall_distance`.
+pub const BASE_SAFE_FALL: f64 = 3.0;
 /// Гравитация игрока без эффектов.
 pub const BASE_GRAVITY: f64 = 0.08;
 
-/// Прыжок: `jump_strength` +0.1 за уровень, операция add.
-pub fn jump_modifiers(jump: Option<u8>) -> Vec<(String, f64, i32)> {
-    jump.map(|a| {
-        vec![(
-            "minecraft:effect.jump_boost".to_owned(),
-            0.1 * (a as f64 + 1.0),
-            0,
-        )]
-    })
-    .unwrap_or_default()
+/// `MobEffects.JUMP_BOOST`: `safe_fall_distance` +1 за уровень, add.
+/// Сам прыжок в 26.3 даёт `LivingEntity.getJumpBoostPower` на клиенте.
+pub fn safe_fall_modifiers(jump: Option<u8>) -> Vec<(String, f64, i32)> {
+    jump.map(|a| vec![("minecraft:effect.jump_boost".to_owned(), a as f64 + 1.0, 0)])
+        .unwrap_or_default()
 }
 
 /// Плавное падение: `gravity` −0.07, от уровня не зависит (в 1.20.5+ клиент
@@ -797,6 +794,8 @@ pub struct Vitals {
     pub saturation: f32,
     /// Пройденное вниз расстояние в текущем падении.
     fall: f64,
+    /// `Attributes.SAFE_FALL_DISTANCE` с модификатором Прыгучести.
+    pub safe_fall: f64,
     last_pos: Option<[f64; 3]>,
     on_ground: bool,
     pub sprinting: bool,
@@ -818,6 +817,7 @@ impl Default for Vitals {
             food: MAX_FOOD,
             saturation: START_SATURATION,
             fall: 0.0,
+            safe_fall: BASE_SAFE_FALL,
             last_pos: None,
             on_ground: true,
             sprinting: false,
@@ -906,7 +906,7 @@ impl Vitals {
             return None;
         }
         let fall = std::mem::take(&mut self.fall);
-        let damage = (fall - 3.0).ceil() as f32;
+        let damage = (fall - self.safe_fall).ceil() as f32;
         (takes_damage && !slow_falling && damage > 0.0).then_some(damage)
     }
 
@@ -1480,6 +1480,17 @@ mod tests {
     }
 
     #[test]
+    fn jump_boost_extends_safe_fall() {
+        let mut v = Vitals::default();
+        let at = |y| Some([0.0, y, 0.0]);
+        v.reset_fall([0.0, 100.0, 0.0]);
+        // Прыгучесть III: `3 + 4` безопасных блока.
+        v.safe_fall = 7.0;
+        v.on_move(at(95.0), false, true, false);
+        assert_eq!(v.on_move(at(90.0), true, true, false), Some(3.0));
+    }
+
+    #[test]
     fn landing_reports_distance_before_fall_resets() {
         let mut v = Vitals::default();
         v.reset_fall([0.0, 80.0, 0.0]);
@@ -1715,8 +1726,8 @@ mod tests {
             Instant::Eat(1, 2.0)
         );
         assert_eq!(
-            jump_modifiers(Some(1)),
-            vec![("minecraft:effect.jump_boost".to_owned(), 0.2, 0)]
+            safe_fall_modifiers(Some(1)),
+            vec![("minecraft:effect.jump_boost".to_owned(), 2.0, 0)]
         );
         assert_eq!(
             gravity_modifiers(true),

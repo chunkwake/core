@@ -11825,6 +11825,14 @@ impl PlayPlan {
                         }
                         let y = m.pos.map(|p| p[1]);
                         let slow = self.effect_amp(&state.vitals, "minecraft:slow_falling").is_some();
+                        let jump_safe = self
+                            .effect_amp(&state.vitals, "minecraft:jump_boost")
+                            .map_or(0.0, |a| f64::from(a) + 1.0);
+                        state.vitals.safe_fall = self.attribute_base(
+                            uuid,
+                            "minecraft:safe_fall_distance",
+                            survival::BASE_SAFE_FALL,
+                        ) + jump_safe;
                         let feet = m.pos.or_else(|| self.player_at(uuid).map(|(pos, _, _)| pos));
                         let in_water = feet.is_some_and(|p| self.standing_in_water(p));
                         let landing = state.vitals.landing_fall(m.pos, m.on_ground);
@@ -20887,10 +20895,9 @@ impl PlayPlan {
         conn: &mut Connection,
         uuid: Uuid,
         entity: i32,
-        v: &Vitals,
+        _v: &Vitals,
     ) -> Result<(), NetError> {
-        let mods = survival::jump_modifiers(self.effect_amp(v, "minecraft:jump_boost"));
-        let mods = self.merge_attribute_modifiers(uuid, "minecraft:jump_strength", &mods);
+        let mods = self.merge_attribute_modifiers(uuid, "minecraft:jump_strength", &[]);
         let base = self.attribute_base(
             uuid,
             "minecraft:jump_strength",
@@ -20944,7 +20951,10 @@ impl PlayPlan {
             "minecraft:movement_speed" => {
                 survival::speed_modifiers(false, amp("minecraft:speed"), amp("minecraft:slowness"))
             }
-            "minecraft:jump_strength" => survival::jump_modifiers(amp("minecraft:jump_boost")),
+            "minecraft:jump_strength" => Vec::new(),
+            "minecraft:safe_fall_distance" => {
+                survival::safe_fall_modifiers(amp("minecraft:jump_boost"))
+            }
             "minecraft:gravity" => {
                 survival::gravity_modifiers(amp("minecraft:slow_falling").is_some())
             }
