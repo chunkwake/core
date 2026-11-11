@@ -67,14 +67,31 @@ impl Probe {
             at[0], at[1], at[2]
         ))
         .await;
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(2000);
         while tokio::time::Instant::now() < deadline {
             match tokio::time::timeout_at(deadline, self.c.next_event()).await {
-                Ok(Ok(Event::EntitySpawned { kind: 30, .. })) => break,
+                // Старые коровы приходят отдельными событиями при загрузке
+                // чанков — ждём именно призванную рядом с точкой.
+                Ok(Ok(Event::EntitySpawned { kind: 30, pos, .. })) => {
+                    let d = (0..3).map(|i| (pos[i] - at[i]).powi(2)).sum::<f64>();
+                    if d <= 2.25 {
+                        break;
+                    }
+                }
                 Ok(Ok(_)) => {}
                 _ => break,
             }
         }
+        self.drain();
+    }
+
+    /// Корова уходит с места призыва: ставим её под облако перед срабатыванием.
+    async fn tp_cow(&mut self, at: [f64; 3]) {
+        self.cmd(&format!(
+            "tp @e[type=minecraft:cow,limit=1,sort=nearest] {} {} {}",
+            at[0], at[1], at[2]
+        ))
+        .await;
     }
 
     async fn clear_cows(&mut self) {
@@ -227,6 +244,7 @@ async fn main() {
     p.hold_first().await;
     p.throw(-90.0, 75.0).await;
     let cloud = p.wait_cloud(cloud_type).await;
+    p.tp_cow(cow).await;
 
     // 10 тиков ожидания, затем яд обязан появиться на корове.
     p.pump(900).await;

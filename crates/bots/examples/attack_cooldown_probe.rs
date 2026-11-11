@@ -74,8 +74,7 @@ impl Probe {
             at[0], at[1], at[2]
         ))
         .await;
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
-        let mut best: Option<(i32, f64)> = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(2000);
         while tokio::time::Instant::now() < deadline {
             match tokio::time::timeout_at(deadline, self.c.next_event()).await {
                 Ok(Ok(Event::EntitySpawned {
@@ -83,9 +82,12 @@ impl Probe {
                     kind: k,
                     pos,
                 })) if k == kind => {
+                    // Только что призванный моб — рядом с точкой: старые
+                    // сущности в мире приходят отдельными событиями.
                     let d = (0..3).map(|i| (pos[i] - at[i]).powi(2)).sum::<f64>();
-                    if best.is_none_or(|(_, b)| d < b) {
-                        best = Some((entity_id, d));
+                    if d <= 2.25 {
+                        self.drain();
+                        return entity_id;
                     }
                 }
                 Ok(Ok(_)) => {}
@@ -93,7 +95,7 @@ impl Probe {
             }
         }
         self.drain();
-        best.expect("моб не появился").0
+        panic!("моб {name} не появился у {at:?}");
     }
 
     /// `/kill` оставляет тушу на 20 тиков — ждём, чтобы `@e` её не увидел.
@@ -310,6 +312,36 @@ async fn main() {
     assert!(
         (9.3..=10.7).contains(&spider_h),
         "цель должна получить ~6 HP, осталось {spider_h}"
+    );
+
+    // Sweeping Edge 3: ratio 3/4, железный меч — 1 + 0.75 × 6 = 5.5 по корове.
+    p.clear("spider").await;
+    p.clear("cow").await;
+    p.cmd(
+        "item replace entity @s hotbar.0 with minecraft:iron_sword[minecraft:enchantments={\"minecraft:sweeping_edge\":3}] 1",
+    )
+    .await;
+    p.pump(900).await;
+    let s_edge = p
+        .spawn(
+            "spider",
+            spider,
+            [bx as f64 + 3.5, by as f64, bz as f64 + 0.5],
+        )
+        .await;
+    p.spawn(
+        "cow",
+        ty("minecraft:cow"),
+        [bx as f64 + 2.5, by as f64, bz as f64 + 0.5],
+    )
+    .await;
+    p.pump(100).await;
+    p.attack(s_edge).await;
+    p.pump(300).await;
+    let cow_edge = p.data_health_of("cow").await;
+    assert!(
+        (3.5..=6.5).contains(&cow_edge),
+        "Sweeping Edge 3 должен снять ~5.5 HP с коровы, осталось {cow_edge}"
     );
 
     // Крит: падение с высоты, удар в воздухе — 9 урона.

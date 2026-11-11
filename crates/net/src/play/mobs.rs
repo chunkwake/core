@@ -115,6 +115,18 @@ pub(super) struct MeleeHit {
     pub crit: bool,
 }
 
+/// `Player.doSweepAttack`: база урона, заряд и Sweeping Edge.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct SweepHit {
+    pub scale: f32,
+    pub slot: usize,
+    /// Урон предмета без чар (`1 + attack_damage`).
+    pub item_damage: f32,
+    /// Бонус Остроты (`getEnchantedDamage`).
+    pub sharpness: f32,
+    pub sweeping: i32,
+}
+
 impl PlayPlan {
     fn mob_type(&self, s: Species) -> i32 {
         // Собран при старте по `Species::ALL`; без него (тесты) — по имени.
@@ -981,6 +993,19 @@ impl PlayPlan {
         damage + bonus * scale
     }
 
+    /// `Player.doSweepAttack`: `1 + sweeping_damage_ratio × item_damage`
+    /// плюс бонус чар, затем всё умножается на заряд. Sweeping Edge даёт
+    /// `level / (level + 1)` (`minecraft:sweeping_edge` в данных 26.3).
+    pub(super) fn sweep_damage(item_damage: f32, sharpness: f32, sweeping: i32, scale: f32) -> f32 {
+        let ratio = if sweeping > 0 {
+            f64::from(sweeping) / f64::from(sweeping + 1)
+        } else {
+            0.0
+        };
+        let base = 1.0 + ratio as f32 * item_damage + sharpness;
+        base * scale.clamp(0.0, 1.0)
+    }
+
     /// Заряд и крит удара: `Player.attack` передаёт их в урон и эффекты.
     pub(super) fn melee_hit(
         &self,
@@ -1081,6 +1106,7 @@ impl PlayPlan {
                 .is_some_and(|set| set.contains(self.item_name(s.item)))
         });
         let sweep = full && !crit && !sprint_knock && on_ground && sword;
+        let sweeping = level("minecraft:sweeping_edge");
         let species = self.sim().mobs.lock().unwrap().get(&target)?.mob.species;
         {
             let mobs = self.sim().mobs.lock().unwrap();
@@ -1208,7 +1234,24 @@ impl PlayPlan {
                 1.0,
                 1.0,
             );
-            self.sweep_attack(uuid, target, pos, yaw, scale, slot);
+            self.sweep_attack(
+                uuid,
+                target,
+                pos,
+                yaw,
+                SweepHit {
+                    scale,
+                    slot,
+                    item_damage: base,
+                    sharpness: bonus,
+                    sweeping,
+                },
+            );
+        }
+        // `EnchantmentHelper` бонус (Острота и т.п.) — «магический крит».
+        if bonus > 0.0 {
+            self.hub
+                .send_about(target, play::animate(self.ids.animate, target, 2));
         }
         if died {
             self.hub
@@ -1415,16 +1458,16 @@ impl PlayPlan {
         }
     }
 
-    /// `Player.doSweepAttack`: 1 × `scale` урона всем рядом с целью.
-    fn sweep_attack(
-        &self,
-        uuid: Uuid,
-        target: i32,
-        pos: [f64; 3],
-        yaw: f32,
-        scale: f32,
-        slot: usize,
-    ) {
+    /// `Player.doSweepAttack`: `1 + sweeping_damage_ratio × база` урона всем
+    /// рядом с целью, всё умножается на заряд.
+    fn sweep_attack(&self, uuid: Uuid, target: i32, pos: [f64; 3], yaw: f32, sweep: SweepHit) {
+        let amount = Self::sweep_damage(
+            sweep.item_damage,
+            sweep.sharpness,
+            sweep.sweeping,
+            sweep.scale,
+        );
+        let slot = sweep.slot;
         let mut hits = Vec::new();
         {
             let mut mobs = self.sim().mobs.lock().unwrap();
@@ -1452,7 +1495,7 @@ impl PlayPlan {
                 // `LivingEntity.hurtServer` затем `knockback(0.4)`.
                 let r = mb::hurt(
                     &mut e.mob,
-                    scale,
+                    amount,
                     mb::Source::at(pos, Some(uuid.as_u128())),
                     mb::KNOCKBACK,
                 );
@@ -3312,6 +3355,19 @@ mod tests {
         // При неполном — пропорционально заряду (`magicBoost`).
         let half = PlayPlan::melee_damage(6.0, 1.5, 0.5, false);
         assert!(near(half, 6.0 * 0.4 + 0.75));
+    }
+
+    #[test]
+    fn sweep_damage_uses_ratio_and_charge() {
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        // Без Sweeping Edge: 1 × заряд, как раньше.
+        assert!(near(PlayPlan::sweep_damage(6.0, 0.0, 0, 1.0), 1.0));
+        assert!(near(PlayPlan::sweep_damage(6.0, 0.0, 0, 0.5), 0.5));
+        // Уровень 3: ratio 3/4, железный меч — 1 + 4.5 = 5.5.
+        assert!(near(PlayPlan::sweep_damage(6.0, 0.0, 3, 1.0), 5.5));
+        // Острота прибавляется до умножения на заряд.
+        assert!(near(PlayPlan::sweep_damage(6.0, 1.5, 3, 1.0), 7.0));
+        assert!(near(PlayPlan::sweep_damage(6.0, 1.5, 3, 0.5), 3.5));
     }
 
     #[test]
