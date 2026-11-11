@@ -774,6 +774,10 @@ pub struct EffectKinds {
     pub poison: Option<i32>,
     pub wither: Option<i32>,
     pub hunger: Option<i32>,
+    /// `Speed`, `Slowness`, `Weakness` для мобов.
+    pub speed: Option<i32>,
+    pub slowness: Option<i32>,
+    pub weakness: Option<i32>,
 }
 
 /// Итог тика эффектов: лечение, флаги урона, истощение и истёкшие.

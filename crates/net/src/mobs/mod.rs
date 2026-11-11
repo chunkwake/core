@@ -554,6 +554,10 @@ pub struct Mob {
     pub on_fire: bool,
     /// `active_effects`: зелья и эффекты на мобе.
     pub effects: Vec<crate::survival::Effect>,
+    /// Множитель скорости от `Speed`/`Slowness` (пересчитывается в тике).
+    pub effect_speed: f64,
+    /// Штраф урона от `Weakness`.
+    pub effect_weakness: f32,
     /// Крипер: `swell`, `swellDir`, `maxSwell`, `explosionRadius`, заряжен, подожжён.
     pub swell: i32,
     pub swell_dir: i32,
@@ -615,6 +619,8 @@ impl Mob {
             climbing: false,
             on_fire: false,
             effects: Vec::new(),
+            effect_speed: 1.0,
+            effect_weakness: 0.0,
             swell: 0,
             swell_dir: -1,
             max_swell: 30,
@@ -630,15 +636,14 @@ impl Mob {
 
     /// Скорость с поправкой детёныша зомби (`Zombie.SPEED_MODIFIER_BABY`: +50 % базы).
     pub fn speed(&self) -> f64 {
-        if self.species == Species::Slime {
-            return cube::speed(self.cube_size);
-        }
-        let base = self.species.speed();
-        if self.species == Species::Zombie && self.is_baby() {
-            base * 1.5
+        let base = if self.species == Species::Slime {
+            cube::speed(self.cube_size)
+        } else if self.species == Species::Zombie && self.is_baby() {
+            self.species.speed() * 1.5
         } else {
-            base
-        }
+            self.species.speed()
+        };
+        base * self.effect_speed
     }
 
     /// Высота глаз над ногами с учётом детёныша.
@@ -711,11 +716,12 @@ impl Mob {
 
     /// Атрибут `attack_damage`: у слизня - размер.
     pub fn attack_damage(&self) -> f32 {
-        if self.species == Species::Slime {
+        let base = if self.species == Species::Slime {
             self.cube_size as f32
         } else {
             self.species.attack_damage()
-        }
+        };
+        (base - self.effect_weakness).max(0.0)
     }
 
     /// `LivingEntity.addEffect`: сильнее — заменяет, равный — продлевает.
@@ -765,6 +771,24 @@ impl Mob {
         if !gone.is_empty() {
             self.effects.retain(|e| e.duration != 0);
         }
+        // Атрибуты движения и урона: `add_multiplied_total` +20%/−15%,
+        // `Weakness` — `add_value` −4 за уровень.
+        let mut factor = 1.0;
+        let mut weak = 0.0f32;
+        for e in &self.effects {
+            let level = f64::from(e.amplifier) + 1.0;
+            if kinds.speed == Some(e.id) {
+                factor += 0.2 * level;
+            }
+            if kinds.slowness == Some(e.id) {
+                factor -= 0.15 * level;
+            }
+            if kinds.weakness == Some(e.id) {
+                weak = weak.max(4.0 * level as f32);
+            }
+        }
+        self.effect_speed = factor.max(0.0);
+        self.effect_weakness = weak;
         out.expired = gone;
         out
     }
@@ -2191,6 +2215,35 @@ mod tests {
             m.tick_effects(kinds);
         }
         assert!(!m.has_effect(2), "яд должен истечь: {:?}", m.effects);
+    }
+
+    #[test]
+    fn effects_change_speed_and_damage() {
+        use crate::survival::{Effect, EffectKinds};
+        let mut m = Mob::new(Species::Zombie, [0.0; 3], 1);
+        let base = m.speed();
+        let damage = m.attack_damage();
+        assert_eq!(damage, 3.0);
+        m.add_effect(Effect::plain(10, 0, 100));
+        m.add_effect(Effect::plain(12, 0, 100));
+        let kinds = EffectKinds {
+            speed: Some(10),
+            weakness: Some(12),
+            ..EffectKinds::default()
+        };
+        m.tick_effects(kinds);
+        assert!((m.speed() - base * 1.2).abs() < 1e-9);
+        assert_eq!(m.attack_damage(), 0.0);
+        // Замедление складывается с ускорением: 1 + 0.2 − 0.15.
+        m.add_effect(Effect::plain(11, 0, 100));
+        let kinds = EffectKinds {
+            speed: Some(10),
+            slowness: Some(11),
+            weakness: Some(12),
+            ..EffectKinds::default()
+        };
+        m.tick_effects(kinds);
+        assert!((m.speed() - base * 1.05).abs() < 1e-9);
     }
 
     #[test]

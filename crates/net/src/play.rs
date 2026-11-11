@@ -2657,6 +2657,9 @@ impl PlayPlan {
             poison: survival.effects.get("minecraft:poison").copied(),
             wither: survival.effects.get("minecraft:wither").copied(),
             hunger: survival.effects.get("minecraft:hunger").copied(),
+            speed: survival.effects.get("minecraft:speed").copied(),
+            slowness: survival.effects.get("minecraft:slowness").copied(),
+            weakness: survival.effects.get("minecraft:weakness").copied(),
         };
         let sponge = survival
             .item_ids
