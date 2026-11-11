@@ -1,4 +1,4 @@
-﻿//! Живые мобы в `PlayPlan`: появление у клиентов, тик, удар игрока, смерть с лутом.
+//! Живые мобы в `PlayPlan`: появление у клиентов, тик, удар игрока, смерть с лутом.
 //! Логика самих мобов — в [`crate::mobs`].
 
 use super::*;
@@ -221,7 +221,7 @@ impl PlayPlan {
     }
 
     /// [`Self::spawn_mob`] с правкой моба до рассылки (`setup`: размер детей
-    /// слизня, имя и постоянство от родителя).
+    /// слизня, имя и постоянство от родителя) и `finalizeSpawn`.
     pub(crate) fn spawn_mob_with(
         &self,
         species: Species,
@@ -229,6 +229,36 @@ impl PlayPlan {
         yaw: f32,
         baby: bool,
         reason: Option<&str>,
+        setup: impl FnOnce(&mut Mob),
+    ) -> Option<i32> {
+        self.spawn_mob_final(species, pos, yaw, baby, reason, true, setup)
+    }
+
+    /// `/summon <entity> <pos> <nbt>`: в ванили с NBT `finalize = false`,
+    /// поэтому случайного снаряжения нет — только то, что в NBT.
+    pub(crate) fn spawn_mob_nbt(
+        &self,
+        species: Species,
+        pos: [f64; 3],
+        yaw: f32,
+        nbt: &Compound,
+    ) -> Option<i32> {
+        self.spawn_mob_final(species, pos, yaw, false, Some("COMMAND"), false, |m| {
+            self.apply_mob_nbt(m, nbt);
+        })
+    }
+
+    /// Общий путь спавна: `finalize` включает `finalizeSpawn` (случайное
+    /// снаряжение и размер слизня), `setup` правит моба из NBT.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_mob_final(
+        &self,
+        species: Species,
+        pos: [f64; 3],
+        yaw: f32,
+        baby: bool,
+        reason: Option<&str>,
+        finalize: bool,
         setup: impl FnOnce(&mut Mob),
     ) -> Option<i32> {
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
@@ -241,7 +271,7 @@ impl PlayPlan {
             m.color = sheep_color(rand::random());
         }
         // `Slime.finalizeSpawn`: случайный размер 1, 2 или 4.
-        if species == Species::Slime {
+        if finalize && species == Species::Slime {
             let special = mb::cube::special_multiplier(
                 self.difficulty().id(),
                 self.day_time.load(Ordering::Relaxed),
@@ -253,7 +283,7 @@ impl PlayPlan {
         }
         // Внеочередная экипировка мобов (`finalizeSpawn`): броня по сложности,
         // у зомби — случайное оружие, у скелета — лук.
-        if reason != Some("CONVERSION") {
+        if finalize && reason != Some("CONVERSION") {
             self.populate_equipment(&mut m);
         }
         // Исчезать вдали от игроков могут только природные: с яйца, из команды
@@ -1035,6 +1065,88 @@ impl PlayPlan {
         if xp > 0 {
             self.spawn_orbs(m.pos, xp);
         }
+    }
+
+    /// Поля мобов из NBT: `/summon <entity> <pos> <nbt>` и
+    /// `/data merge entity`. Повторяет `LivingEntity.readAdditionalSaveData`
+    /// и `Mob.readAdditionalSaveData`: `Pos`/`Rotation` применяет вызывающий.
+    /// Возвращает изменённые слоты снаряжения для `set_equipment`.
+    pub(super) fn apply_mob_nbt(&self, m: &mut Mob, nbt: &Compound) -> Vec<(u8, Option<Stack>)> {
+        if let Some(health) = nbt
+            .get("Health")
+            .and_then(crate::play::commands::snbt::number)
+        {
+            m.health = (health as f32).clamp(0.0, m.max_health());
+        }
+        if let Some(name) = nbt.get("CustomName") {
+            m.custom_name = Some(custom_name_text(name));
+        }
+        if let Some(Tag::Byte(baby)) = nbt.get("IsBaby") {
+            m.age = if *baby != 0 { mb::BABY_AGE } else { 0 };
+        }
+        if let Some(age) = nbt.get("Age").and_then(Tag::as_i64) {
+            m.age = age as i32;
+        }
+        if let Some(Tag::Byte(persistent)) = nbt.get("PersistenceRequired") {
+            m.persistent = *persistent != 0;
+        }
+        // `active_effects` заменяет список целиком (`readAdditionalSaveData`).
+        if let Some(Tag::List(list)) = nbt.get("active_effects") {
+            m.effects.clear();
+            for tag in list {
+                let Tag::Compound(e) = tag else { continue };
+                let Some(Tag::String(name)) = e.get("id") else {
+                    continue;
+                };
+                let Some(&id) = self.survival.effects.get(name) else {
+                    continue;
+                };
+                let amplifier = match e.get("amplifier") {
+                    Some(Tag::Byte(v)) => *v as u8,
+                    _ => 0,
+                };
+                let duration = match e.get("duration") {
+                    Some(Tag::Int(v)) => *v,
+                    _ => 0,
+                };
+                if duration == 0 {
+                    continue;
+                }
+                m.add_effect(crate::survival::Effect {
+                    id,
+                    amplifier,
+                    duration,
+                    ambient: matches!(e.get("ambient"), Some(Tag::Byte(v)) if *v != 0),
+                    particles: !matches!(e.get("show_particles"), Some(Tag::Byte(v)) if *v == 0),
+                    show_icon: !matches!(e.get("show_icon"), Some(Tag::Byte(v)) if *v == 0),
+                    age: 0,
+                });
+            }
+        }
+        let mut changed = Vec::new();
+        if let Some(Tag::Compound(eq)) = nbt.get("equipment") {
+            for (i, (slot, id)) in mb::EQUIPMENT_SLOTS.iter().enumerate() {
+                let Some(tag) = eq.get(*slot) else { continue };
+                let stack = match tag {
+                    Tag::Compound(c) if c.contains_key("id") => {
+                        crate::stack_nbt::from_nbt(c, |n| self.item_id(n))
+                    }
+                    _ => None,
+                };
+                m.set_item(i, stack);
+                changed.push((*id, m.item(i)));
+            }
+        }
+        if let Some(Tag::Compound(chances)) = nbt.get("drop_chances") {
+            for (i, (slot, _)) in mb::EQUIPMENT_SLOTS.iter().enumerate() {
+                match chances.get(*slot) {
+                    Some(Tag::Float(v)) => m.drop_chances[i] = (*v).max(0.0),
+                    Some(Tag::Double(v)) => m.drop_chances[i] = (*v as f32).max(0.0),
+                    _ => {}
+                }
+            }
+        }
+        changed
     }
 
     /// Урон удара игрока: `base × (0.2 + scale²·0.8)`, крит ×1.5,
@@ -2269,6 +2381,18 @@ pub(super) fn equipment_from_nbt(
         legacy("HandDropChances", &[0, 1]);
         legacy("ArmorDropChances", &[2, 3, 4, 5]);
         legacy("DropChances", &[0, 1, 2, 3, 4, 5]);
+    }
+}
+
+/// `CustomName` из NBT: строка — литерал, у компонента берём `text`.
+fn custom_name_text(tag: &Tag) -> String {
+    match tag {
+        Tag::String(s) => s.clone(),
+        Tag::Compound(c) => match c.get("text") {
+            Some(Tag::String(s)) => s.clone(),
+            _ => crate::stack_nbt::tag_to_json(tag).to_string(),
+        },
+        _ => crate::stack_nbt::tag_to_json(tag).to_string(),
     }
 }
 

@@ -825,6 +825,17 @@ impl PlayPlan {
         self.spawn_mob(species, pos, 0.0, false, Some("COMMAND"))
     }
 
+    /// `/summon <entity> <pos> <nbt>`: NBT применяется до рассылки спавна,
+    /// случайной экипировки нет (`finalizeSpawn` в ванили не вызывается).
+    pub(crate) fn summon_mob_nbt(
+        &self,
+        species: crate::mobs::Species,
+        pos: [f64; 3],
+        nbt: &Compound,
+    ) -> Option<i32> {
+        self.spawn_mob_nbt(species, pos, 0.0, nbt)
+    }
+
     /// Убирает сущность из мира (`/kill` для предмета, снаряда или уже мёртвого моба).
     pub(crate) fn remove_entity(&self, entity_id: i32) -> bool {
         let removed = self.sim().mobs.lock().unwrap().remove(&entity_id).is_some()
@@ -1377,15 +1388,11 @@ impl PlayPlan {
             }
             return;
         }
-        let mut changed: Vec<(u8, chunkwake_protocol::inventory::Slot)> = Vec::new();
-        {
+        let changed: Vec<(u8, chunkwake_protocol::inventory::Slot)> = {
             let mut mobs = self.sim().mobs.lock().unwrap();
             let Some(entry) = mobs.get_mut(&target.entity_id) else {
                 return;
             };
-            if let Some(health) = nbt.get("Health").and_then(super::snbt::number) {
-                entry.mob.health = health as f32;
-            }
             if let Some(pos) = list3(nbt.get("Pos")) {
                 entry.mob.pos = pos;
                 if let Some((yaw, pitch)) = list2(nbt.get("Rotation")) {
@@ -1393,36 +1400,10 @@ impl PlayPlan {
                     entry.mob.pitch = pitch;
                 }
             }
-            if let Some(name) = nbt.get("CustomName") {
-                entry.mob.custom_name = Some(crate::stack_nbt::tag_to_json(name).to_string());
-            }
-            // `EntityEquipment`/`DropChances`: `/data merge entity` меняет
-            // снаряжение, клиентам уходит `set_equipment`.
-            if let Some(Tag::Compound(eq)) = nbt.get("equipment") {
-                for (i, (slot, id)) in crate::mobs::EQUIPMENT_SLOTS.iter().enumerate() {
-                    let Some(tag) = eq.get(*slot) else { continue };
-                    let stack = match tag {
-                        Tag::Compound(c) if c.contains_key("id") => {
-                            crate::stack_nbt::from_nbt(c, |n| self.item_id(n))
-                        }
-                        _ => None,
-                    };
-                    entry.mob.set_item(i, stack);
-                    changed.push((*id, entry.mob.item(i)));
-                }
-            }
-            if let Some(Tag::Compound(chances)) = nbt.get("drop_chances") {
-                for (i, (slot, _)) in crate::mobs::EQUIPMENT_SLOTS.iter().enumerate() {
-                    match chances.get(*slot) {
-                        Some(Tag::Float(v)) => entry.mob.drop_chances[i] = (*v).max(0.0),
-                        Some(Tag::Double(v)) => {
-                            entry.mob.drop_chances[i] = (*v as f32).max(0.0);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
+            // `EntityEquipment`/`DropChances` и прочие поля — как при загрузке
+            // сущности; клиентам уходит `set_equipment`.
+            self.apply_mob_nbt(&mut entry.mob, nbt)
+        };
         if !changed.is_empty() {
             self.hub.send_about(
                 target.entity_id,

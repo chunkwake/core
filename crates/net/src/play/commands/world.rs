@@ -5,6 +5,7 @@ use super::Context;
 use super::args;
 use super::dispatch::{Call, Outcome, coordinates_with, translate};
 use super::entity::usage;
+use chunkwake_world::nbt::Tag;
 use serde_json::{Value, json};
 
 /// Предел `/fill` за раз (ванильный `MAX_BLOCK_MODIFICATIONS`, уменьшенный:
@@ -402,7 +403,21 @@ pub(super) fn summon(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
             vec![Value::String(name)],
         ));
     };
-    match ctx.plan.summon_mob(species, coords) {
+    // `/summon <entity> <pos> <nbt>`: NBT применяется после создания моба,
+    // `finalizeSpawn` при этом не вызывается (как `SummonCommand.createEntity`).
+    let nbt = if input.rest().is_empty() {
+        None
+    } else {
+        match super::snbt::parse_value(input.rest()) {
+            Some(Tag::Compound(c)) => Some(c),
+            _ => return Outcome::Feedback(translate("argument.nbt.malformed", Vec::new())),
+        }
+    };
+    let spawned = match &nbt {
+        Some(nbt) => ctx.plan.summon_mob_nbt(species, coords, nbt),
+        None => ctx.plan.summon_mob(species, coords),
+    };
+    match spawned {
         Some(id) => Outcome::Feedback(translate(
             "commands.summon.success",
             vec![

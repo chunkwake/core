@@ -244,6 +244,62 @@ async fn main() {
         "скелет без лука: {sk_gear}"
     );
 
+    // `/summon <entity> <pos> <nbt>`: NBT применяется, `finalizeSpawn`
+    // не вызывается — случайной брони нет, всё из NBT.
+    let nb = [bx as f64 + 5.5, by as f64, bz as f64 + 0.5];
+    // Крыша: на солнце зомби горит и теряет здоровье до проверки.
+    p.cmd(&format!(
+        "setblock {} {} {} minecraft:stone",
+        bx + 5,
+        by + 2,
+        bz
+    ))
+    .await;
+    p.send_cmd(&format!(
+        "summon minecraft:zombie {} {} {} {}",
+        nb[0],
+        nb[1],
+        nb[2],
+        r#"{equipment:{mainhand:{id:"minecraft:netherite_sword",count:1},head:{id:"minecraft:golden_helmet",count:1}},drop_chances:{head:2.0f},Health:7.0f,CustomName:"Summoned"}"#
+    ))
+    .await;
+    p.pump(500).await;
+    let gear = p
+        .data("@e[type=minecraft:zombie,limit=1,sort=nearest] equipment")
+        .await;
+    assert!(
+        gear.contains("minecraft:netherite_sword") && gear.contains("minecraft:golden_helmet"),
+        "NBT summon не применил equipment: {gear}"
+    );
+    assert!(
+        !gear.contains("chestplate") && !gear.contains("leggings") && !gear.contains("boots"),
+        "NBT summon получил случайную броню: {gear}"
+    );
+    let hp = p
+        .data("@e[type=minecraft:zombie,limit=1,sort=nearest] Health")
+        .await;
+    assert!(hp.contains("7.0"), "NBT summon не применил Health: {hp}");
+    let name = p
+        .data("@e[type=minecraft:zombie,limit=1,sort=nearest] CustomName")
+        .await;
+    assert!(
+        name.to_lowercase().contains("summoned"),
+        "NBT summon не применил CustomName: {name}"
+    );
+    let chances = p
+        .data("@e[type=minecraft:zombie,limit=1,sort=nearest] drop_chances")
+        .await;
+    assert!(
+        chances.contains("head:2f"),
+        "NBT summon не применил drop_chances: {chances}"
+    );
+    p.cmd(&format!(
+        "kill @e[type=minecraft:zombie,x={},y={},z={},distance=..2]",
+        nb[0], nb[1], nb[2]
+    ))
+    .await;
+    p.pump(1400).await;
+
     // Зомби в клетке: NBT-экипировка и шансы выпадения через `/data merge`.
     p.cage([bx + 2, by, bz]).await;
     let zid = p.spawn("zombie", zombie, spot).await;
