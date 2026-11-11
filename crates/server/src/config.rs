@@ -618,6 +618,15 @@ mod tests {
     }
 
     #[test]
+    fn new_server_checks_accounts_by_default() {
+        let p = Properties::parse("").unwrap();
+        assert!(
+            p.online_mode,
+            "новый server.properties должен требовать вход"
+        );
+    }
+
+    #[test]
     fn distances_come_from_the_file() {
         let p = Properties::parse("view-distance=12\nsimulation-distance=4").unwrap();
         assert_eq!(p.view_distance, 12);
