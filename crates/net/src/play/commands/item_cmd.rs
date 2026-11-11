@@ -128,11 +128,16 @@ fn replace(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         },
         None => 1,
     };
+    let extra = parsed
+        .potion
+        .as_deref()
+        .and_then(|p| ctx.plan.with_potion(parsed.id, parsed.extra, p))
+        .unwrap_or(parsed.extra);
     let stack = Stack {
         item: parsed.id,
         count,
         damage: parsed.damage.unwrap_or(0),
-        extra: parsed.extra,
+        extra,
     };
     let shown = item_name(ctx, parsed.id);
     let mut changed_targets = 0i32;

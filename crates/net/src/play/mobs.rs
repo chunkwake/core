@@ -579,6 +579,23 @@ impl PlayPlan {
                     }
                     let moving = e.mob.vel.iter().any(|v| v.abs() > 0.003);
                     let fire_damage = self.vars.flag("fire_damage");
+                    // Зелья: регенерация лечит, яд и иссушение бьют раз в
+                    // `25 >> amp` / `40 >> amp` тиков (`LivingEntity.tickEffects`).
+                    let fx = e.mob.tick_effects(self.effect_kinds());
+                    if fx.heal > 0.0 && e.mob.alive() {
+                        e.mob.health = (e.mob.health + fx.heal).min(e.mob.max_health());
+                        packets.push((
+                            id,
+                            play::mob_data(
+                                self.ids.set_entity_data,
+                                id,
+                                e.mob.health,
+                                None,
+                                None,
+                                None,
+                            ),
+                        ));
+                    }
                     for (hit, amount) in [
                         (pulse.drown && self.vars.flag("drowning_damage"), 2.0),
                         (pulse.freeze && self.vars.flag("freeze_damage"), 1.0),
@@ -587,7 +604,10 @@ impl PlayPlan {
                         (pulse.cactus, 1.0),
                         (pulse.berries && moving, 1.0),
                         (pulse.magma && fire_damage, 1.0),
-                    ] {
+                    ]
+                    .into_iter()
+                    .chain([(fx.poison, 1.0), (fx.wither, 1.0)])
+                    {
                         if hit
                             && let Some(died) =
                                 mb::hurt(&mut e.mob, amount, mb::Source::default(), 0.0)
@@ -1201,6 +1221,114 @@ impl PlayPlan {
             inv.slots[slot] = Some(s);
         }
         Some(slot)
+    }
+
+    /// `ThrownSplashPotion.onHitAsPotion` для мобов: те же эффекты и
+    /// масштаб по расстоянию, но в `Mob.effects`.
+    pub(super) fn splash_mobs(&self, effects: &[survival::Effect], pos: [f64; 3]) {
+        let instant: Vec<(survival::Effect, survival::Instant)> = effects
+            .iter()
+            .map(|e| {
+                (
+                    *e,
+                    survival::instant_effect(
+                        self.effect_name(e.id).unwrap_or_default(),
+                        e.amplifier,
+                    ),
+                )
+            })
+            .collect();
+        let mut hits = Vec::new();
+        {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            for (&id, entry) in mobs.iter_mut() {
+                if !entry.mob.alive() {
+                    continue;
+                }
+                let p = entry.mob.pos;
+                let (_, height) = entry.mob.size();
+                let distance = ((p[0] - pos[0]).powi(2)
+                    + (p[1] + height * 0.5 - pos[1]).powi(2)
+                    + (p[2] - pos[2]).powi(2))
+                .sqrt();
+                if distance > 4.0 {
+                    continue;
+                }
+                let strength = crate::potions::splash_strength(distance, false);
+                let undead = entry.mob.species.is_undead();
+                for (effect, instant) in &instant {
+                    let hurt = |entry: &mut MobEntry, amount: f32| {
+                        mb::hurt(&mut entry.mob, amount, mb::Source::default(), 0.0)
+                    };
+                    match *instant {
+                        survival::Instant::Heal(amount) => {
+                            let amount = crate::potions::splash_instant_amount(amount, strength);
+                            if undead {
+                                if let Some(died) = hurt(entry, amount) {
+                                    hits.push((
+                                        id,
+                                        (
+                                            entry.mob.sound(if died { "death" } else { "hurt" }),
+                                            entry.mob.pos,
+                                            entry.mob.volume(),
+                                            entry.mob.is_baby(),
+                                            sound_source(entry.mob.species),
+                                        ),
+                                        died,
+                                    ));
+                                }
+                            } else {
+                                entry.mob.health =
+                                    (entry.mob.health + amount).min(entry.mob.max_health());
+                            }
+                            continue;
+                        }
+                        survival::Instant::Harm(amount) => {
+                            let amount = crate::potions::splash_instant_amount(amount, strength);
+                            if undead {
+                                entry.mob.health =
+                                    (entry.mob.health + amount).min(entry.mob.max_health());
+                            } else if let Some(died) = hurt(entry, amount) {
+                                hits.push((
+                                    id,
+                                    (
+                                        entry.mob.sound(if died { "death" } else { "hurt" }),
+                                        entry.mob.pos,
+                                        entry.mob.volume(),
+                                        entry.mob.is_baby(),
+                                        sound_source(entry.mob.species),
+                                    ),
+                                    died,
+                                ));
+                            }
+                            continue;
+                        }
+                        survival::Instant::None => {}
+                        survival::Instant::Eat(..) => continue,
+                    }
+                    let mut effect = *effect;
+                    if effect.duration > 1 {
+                        effect.duration = (effect.duration as f64 * strength).round() as i32;
+                    }
+                    if effect.duration < 20 {
+                        continue;
+                    }
+                    entry.mob.add_effect(effect);
+                }
+            }
+        }
+        for (id, (name, p, volume, baby, source), died) in hits {
+            self.hub
+                .send_about(id, play::hurt_animation(self.ids.hurt_animation, id, 0.0));
+            self.refresh_mob(id);
+            self.play_sound(None, &name, source, p, volume, mob_pitch(baby));
+            self.emit_vibration(p, "minecraft:entity_damage");
+            if died {
+                self.emit_vibration(p, "minecraft:entity_die");
+                self.hub
+                    .send_about(id, inv::entity_event(self.ids.entity_event, id, 3));
+            }
+        }
     }
 
     /// `Player.doSweepAttack`: 1 × `scale` урона всем рядом с целью.
@@ -1873,7 +2001,7 @@ fn list_f64(t: Option<&Tag>) -> Vec<f64> {
 }
 
 /// Моб в NBT сущности (`Entity.saveWithoutId` + `Animal`/`Sheep`/`Chicken`).
-pub(super) fn mob_to_nbt(m: &Mob) -> Compound {
+pub(super) fn mob_to_nbt(m: &Mob, effects: &std::collections::HashMap<String, i32>) -> Compound {
     let mut c = Compound::new();
     let u = m.uuid;
     c.insert("id".into(), Tag::String(m.species.name().to_owned()));
@@ -1937,11 +2065,32 @@ pub(super) fn mob_to_nbt(m: &Mob) -> Compound {
         }
         _ => {}
     }
+    if !m.effects.is_empty() {
+        let list = m
+            .effects
+            .iter()
+            .filter_map(|e| {
+                let name = effects.iter().find(|(_, id)| **id == e.id)?.0.clone();
+                let mut c = Compound::new();
+                c.insert("id".into(), Tag::String(name));
+                c.insert("amplifier".into(), Tag::Byte(e.amplifier as i8));
+                c.insert("duration".into(), Tag::Int(e.duration));
+                c.insert("ambient".into(), Tag::Byte(i8::from(e.ambient)));
+                c.insert("show_particles".into(), Tag::Byte(i8::from(e.particles)));
+                c.insert("show_icon".into(), Tag::Byte(i8::from(e.show_icon)));
+                Some(Tag::Compound(c))
+            })
+            .collect();
+        c.insert("active_effects".into(), Tag::List(list));
+    }
     c
 }
 
 /// Обратно из NBT; чужие виды — `None`.
-pub(super) fn mob_from_nbt(c: &Compound) -> Option<Mob> {
+pub(super) fn mob_from_nbt(
+    c: &Compound,
+    effects: &std::collections::HashMap<String, i32>,
+) -> Option<Mob> {
     let Some(Tag::String(id)) = c.get("id") else {
         return None;
     };
@@ -2007,6 +2156,37 @@ pub(super) fn mob_from_nbt(c: &Compound) -> Option<Mob> {
     if let Some(Tag::String(n)) = c.get("CustomName") {
         m.custom_name = Some(n.clone());
     }
+    if let Some(Tag::List(list)) = c.get("active_effects") {
+        for tag in list {
+            let Tag::Compound(e) = tag else { continue };
+            let Some(Tag::String(name)) = e.get("id") else {
+                continue;
+            };
+            let Some(&id) = effects.get(name) else {
+                continue;
+            };
+            let amp = match e.get("amplifier") {
+                Some(Tag::Byte(v)) => *v as u8,
+                _ => 0,
+            };
+            let duration = match e.get("duration") {
+                Some(Tag::Int(v)) => *v,
+                _ => 0,
+            };
+            if duration == 0 {
+                continue;
+            }
+            m.add_effect(crate::survival::Effect {
+                id,
+                amplifier: amp,
+                duration,
+                ambient: matches!(e.get("ambient"), Some(Tag::Byte(v)) if *v != 0),
+                particles: !matches!(e.get("show_particles"), Some(Tag::Byte(v)) if *v == 0),
+                show_icon: !matches!(e.get("show_icon"), Some(Tag::Byte(v)) if *v == 0),
+                age: 0,
+            });
+        }
+    }
     (m.health > 0.0).then_some(m)
 }
 
@@ -2031,7 +2211,9 @@ impl PlayPlan {
                     written.insert(pos);
                     continue;
                 }
-                let Some(m) = mob_from_nbt(c) else { continue };
+                let Some(m) = mob_from_nbt(c, &self.survival.effects) else {
+                    continue;
+                };
                 written.insert(pos);
                 self.sim()
                     .mobs_loaded
@@ -2201,7 +2383,10 @@ impl PlayPlan {
                 (e.mob.pos[0].floor() as i32) >> 4,
                 (e.mob.pos[2].floor() as i32) >> 4,
             );
-            by_chunk.entry(pos).or_default().push(mob_to_nbt(&e.mob));
+            by_chunk
+                .entry(pos)
+                .or_default()
+                .push(mob_to_nbt(&e.mob, &self.survival.effects));
         }
         for (pos, c) in self
             .boats_nbt()
@@ -2956,13 +3141,41 @@ mod tests {
             0x0123_4567_89ab_cdef_0011_2233_4455_6677,
         );
         (m.yaw, m.pitch, m.health, m.age, m.sheared, m.color) = (90.0, 10.0, 5.0, -100, true, 14);
-        let back = mob_from_nbt(&mob_to_nbt(&m)).unwrap();
+        let back = mob_from_nbt(
+            &mob_to_nbt(&m, &std::collections::HashMap::new()),
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
         assert_eq!(back.species, Species::Sheep);
         assert_eq!(back.uuid, m.uuid);
         assert_eq!(back.pos, m.pos);
         assert_eq!((back.yaw, back.health, back.age), (90.0, 5.0, -100));
         assert!(back.sheared);
         assert_eq!(back.color, 14);
+    }
+
+    #[test]
+    fn mob_nbt_keeps_active_effects() {
+        let mut m = Mob::new(Species::Cow, [0.5, 64.0, 0.5], 7);
+        m.add_effect(crate::survival::Effect::plain(2, 1, 120));
+        let names = std::collections::HashMap::from([("minecraft:poison".to_owned(), 2)]);
+        let nbt = mob_to_nbt(&m, &names);
+        let list = match nbt.get("active_effects") {
+            Some(Tag::List(list)) => list,
+            _ => panic!("нет active_effects"),
+        };
+        let Tag::Compound(e) = &list[0] else {
+            panic!("элемент не compound")
+        };
+        assert_eq!(
+            e.get("id"),
+            Some(&Tag::String("minecraft:poison".to_owned()))
+        );
+        assert_eq!(e.get("duration"), Some(&Tag::Int(120)));
+        let back = mob_from_nbt(&nbt, &names).unwrap();
+        assert_eq!(back.effects.len(), 1);
+        assert_eq!((back.effects[0].id, back.effects[0].amplifier), (2, 1));
+        assert_eq!(back.effects[0].duration, 120);
     }
 
     #[test]
@@ -2974,7 +3187,11 @@ mod tests {
         );
         m.set_size(4, true);
         m.was_on_ground = true;
-        let back = mob_from_nbt(&mob_to_nbt(&m)).unwrap();
+        let back = mob_from_nbt(
+            &mob_to_nbt(&m, &std::collections::HashMap::new()),
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
         assert_eq!(back.cube_size, 4);
         assert_eq!(back.max_health(), 16.0);
         assert_eq!(back.health, 16.0);

@@ -384,6 +384,11 @@ impl Species {
         !self.is_monster()
     }
 
+    /// `EntityTypeTags.UNDEAD`: лечение вредит, урон лечит.
+    pub fn is_undead(self) -> bool {
+        matches!(self, Species::Zombie | Species::Skeleton)
+    }
+
     pub fn attack_damage(self) -> f32 {
         self.info().attack_damage
     }
@@ -547,6 +552,8 @@ pub struct Mob {
     pub climbing: bool,
     /// Горит (`isOnFire`): ставит сервер.
     pub on_fire: bool,
+    /// `active_effects`: зелья и эффекты на мобе.
+    pub effects: Vec<crate::survival::Effect>,
     /// Крипер: `swell`, `swellDir`, `maxSwell`, `explosionRadius`, заряжен, подожжён.
     pub swell: i32,
     pub swell_dir: i32,
@@ -607,6 +614,7 @@ impl Mob {
             xxa: 0.0,
             climbing: false,
             on_fire: false,
+            effects: Vec::new(),
             swell: 0,
             swell_dir: -1,
             max_swell: 30,
@@ -701,13 +709,64 @@ impl Mob {
         }
     }
 
-    /// Атрибут `attack_damage`: у слизня — размер.
+    /// Атрибут `attack_damage`: у слизня - размер.
     pub fn attack_damage(&self) -> f32 {
         if self.species == Species::Slime {
             self.cube_size as f32
         } else {
             self.species.attack_damage()
         }
+    }
+
+    /// `LivingEntity.addEffect`: сильнее — заменяет, равный — продлевает.
+    pub fn add_effect(&mut self, effect: crate::survival::Effect) {
+        if let Some(old) = self.effects.iter_mut().find(|e| e.id == effect.id) {
+            if effect.amplifier > old.amplifier
+                || (effect.amplifier == old.amplifier && effect.duration > old.duration)
+            {
+                *old = effect;
+            }
+        } else {
+            self.effects.push(effect);
+        }
+    }
+
+    pub fn has_effect(&self, id: i32) -> bool {
+        self.effects.iter().any(|e| e.id == id)
+    }
+
+    /// `LivingEntity.tickEffects`: лечение, яд, иссушение и истечение срока.
+    pub fn tick_effects(
+        &mut self,
+        kinds: crate::survival::EffectKinds,
+    ) -> crate::survival::EffectTick {
+        use crate::survival::effect_due;
+        let mut out = crate::survival::EffectTick::default();
+        let mut gone = Vec::new();
+        for e in &mut self.effects {
+            if kinds.regeneration == Some(e.id) && effect_due(e.duration, e.age, 50, e.amplifier) {
+                out.heal += 1.0;
+            }
+            if kinds.poison == Some(e.id) && effect_due(e.duration, e.age, 25, e.amplifier) {
+                out.poison = true;
+            }
+            if kinds.wither == Some(e.id) && effect_due(e.duration, e.age, 40, e.amplifier) {
+                out.wither = true;
+            }
+            if e.duration < 0 {
+                e.age = e.age.wrapping_add(1);
+            } else if e.duration > 0 {
+                if e.duration == 1 {
+                    gone.push(*e);
+                }
+                e.duration -= 1;
+            }
+        }
+        if !gone.is_empty() {
+            self.effects.retain(|e| e.duration != 0);
+        }
+        out.expired = gone;
+        out
     }
 
     /// Опыт за убийство игроком: у слизня `xpReward` = размер.
@@ -2107,6 +2166,31 @@ mod tests {
             BUILTIN[Species::Zombie as usize].speed as f32,
             z.speed as f32
         );
+    }
+
+    #[test]
+    fn effects_merge_tick_and_expire() {
+        use crate::survival::{Effect, EffectKinds};
+        let mut m = Mob::new(Species::Cow, [0.0; 3], 1);
+        m.add_effect(Effect::plain(1, 0, 100));
+        // Слабже и короче — не заменяет.
+        m.add_effect(Effect::plain(1, 0, 50));
+        assert_eq!(m.effects[0].duration, 100);
+        // Сильнее — заменяет целиком.
+        m.add_effect(Effect::plain(1, 1, 40));
+        assert_eq!((m.effects[0].amplifier, m.effects[0].duration), (1, 40));
+
+        let kinds = EffectKinds {
+            poison: Some(2),
+            ..EffectKinds::default()
+        };
+        m.add_effect(Effect::plain(2, 0, 25));
+        assert!(m.tick_effects(kinds).poison);
+        assert_eq!(m.effects[1].duration, 24);
+        for _ in 0..24 {
+            m.tick_effects(kinds);
+        }
+        assert!(!m.has_effect(2), "яд должен истечь: {:?}", m.effects);
     }
 
     #[test]

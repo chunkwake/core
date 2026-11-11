@@ -7223,6 +7223,8 @@ impl PlayPlan {
                 );
             }
         }
+        // Мобы в радиусе 4: те же эффекты, но `active_effects` вместо Vitals.
+        self.splash_mobs(&effects, pos);
     }
 
     fn hand_index(inv: &survival::Inventory, hand: i32) -> Option<usize> {

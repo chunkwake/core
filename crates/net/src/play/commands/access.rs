@@ -1297,6 +1297,26 @@ impl PlayPlan {
                 }
                 _ => {}
             }
+            if !entry.mob.effects.is_empty() {
+                let list = entry
+                    .mob
+                    .effects
+                    .iter()
+                    .map(|e| {
+                        let mut c = Compound::new();
+                        if let Some(name) = self.effect_name(e.id) {
+                            c.insert("id".into(), Tag::String(name.to_owned()));
+                        }
+                        c.insert("amplifier".into(), Tag::Byte(e.amplifier as i8));
+                        c.insert("duration".into(), Tag::Int(e.duration));
+                        c.insert("ambient".into(), Tag::Byte(i8::from(e.ambient)));
+                        c.insert("show_particles".into(), Tag::Byte(i8::from(e.particles)));
+                        c.insert("show_icon".into(), Tag::Byte(i8::from(e.show_icon)));
+                        Tag::Compound(c)
+                    })
+                    .collect();
+                root.insert("active_effects".into(), Tag::List(list));
+            }
         } else {
             root.insert("id".into(), Tag::String(target.name.clone()));
             insert_pose(&mut root, target.pos, target.yaw, target.pitch, 0.0);
