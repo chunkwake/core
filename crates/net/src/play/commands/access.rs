@@ -1287,6 +1287,16 @@ impl PlayPlan {
             if let Some(name) = &entry.mob.custom_name {
                 root.insert("CustomName".into(), Tag::String(name.clone()));
             }
+            match entry.mob.species {
+                crate::mobs::Species::Creeper => {
+                    root.insert("powered".into(), Tag::Byte(i8::from(entry.mob.powered)));
+                }
+                crate::mobs::Species::Sheep => {
+                    root.insert("Color".into(), Tag::Byte(entry.mob.color as i8));
+                    root.insert("Sheared".into(), Tag::Byte(i8::from(entry.mob.sheared)));
+                }
+                _ => {}
+            }
         } else {
             root.insert("id".into(), Tag::String(target.name.clone()));
             insert_pose(&mut root, target.pos, target.yaw, target.pitch, 0.0);

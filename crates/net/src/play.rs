@@ -8719,7 +8719,7 @@ impl PlayPlan {
         }
     }
 
-    fn thunder_strike(&self, at: [i32; 3]) {
+    pub(crate) fn thunder_strike(&self, at: [i32; 3]) -> [i32; 3] {
         let target = self.lightning_strike(at).unwrap_or(at);
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
         let pos = [
@@ -8779,9 +8779,11 @@ impl PlayPlan {
                 self.push_control(uuid, Control::Hurt(5.0, Cause::Fire));
             }
         }
+        self.lightning_mobs(pos);
         if target == at {
             self.ignite_at(at, 0);
         }
+        target
     }
 
     fn tick_lightning(&self) {

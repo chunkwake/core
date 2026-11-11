@@ -144,6 +144,8 @@ pub struct SpeciesInfo {
     pub armor: f64,
     /// Атрибут `step_height`.
     pub step_height: f64,
+    /// `safe_fall_distance`: с какой высоты урон ещё не начисляется.
+    pub safe_fall: f32,
     pub fire_immune: bool,
     /// Множитель скорости `PanicGoal`.
     pub panic_speed: f64,
@@ -175,6 +177,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
         attack_damage: 0.0,
         armor: 0.0,
         step_height: 0.6,
+        safe_fall: 3.0,
         fire_immune: false,
         panic_speed: 1.0,
         tempt_speed: 1.0,
@@ -339,6 +342,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
         s.attack_damage = a.attack_damage.unwrap_or(0.0) as f32;
         s.armor = a.armor;
         s.step_height = a.step_height;
+        s.safe_fall = a.safe_fall_distance as f32;
     }
     s
 }
@@ -429,6 +433,10 @@ impl Species {
 
     pub fn speed(self) -> f64 {
         self.info().speed
+    }
+
+    pub fn safe_fall(self) -> f32 {
+        self.info().safe_fall
     }
 
     pub fn panic_speed(self) -> f64 {
@@ -1273,6 +1281,11 @@ impl Source {
 /// Удар по мобу (`LivingEntity.hurt`): неуязвимость, отбрасывание, память об
 /// обидчике и источнике (для `HurtByTargetGoal` и `PanicGoal`).
 /// `None` — урон не прошёл; `Some(true)` — моб умер.
+/// `LivingEntity.causeFallDamage`: урон только за высоту сверх безопасной.
+pub fn fall_damage(fall: f64, safe: f32) -> f32 {
+    ((fall - f64::from(safe)).ceil()).max(0.0) as f32
+}
+
 pub fn hurt(m: &mut Mob, amount: f32, src: Source, knockback: f64) -> Option<bool> {
     if !m.alive() {
         return None;
@@ -2085,6 +2098,16 @@ mod tests {
             BUILTIN[Species::Zombie as usize].speed as f32,
             z.speed as f32
         );
+    }
+
+    #[test]
+    fn fall_damage_starts_above_safe_distance() {
+        assert_eq!(fall_damage(3.0, 3.0), 0.0);
+        assert_eq!(fall_damage(3.1, 3.0), 1.0);
+        assert_eq!(fall_damage(10.0, 3.0), 7.0);
+        assert_eq!(fall_damage(0.0, 3.0), 0.0);
+        // Данные `DefaultAttributes` доходят до вида.
+        assert_eq!(Species::Cow.safe_fall(), 3.0);
     }
 
     #[test]

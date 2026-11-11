@@ -480,8 +480,44 @@ impl PlayPlan {
                         crate::environment::probe(e.mob.pos, width, height, height * 0.85, |p| {
                             self.environment_kind(w.block(p))
                         });
-                    if !view.water && landed_fall.is_some_and(|fall| fall > 0.0) {
+                    if !view.water && !view.lava && landed_fall.is_some_and(|fall| fall > 0.0) {
                         vibrations.push((e.mob.pos, "minecraft:hit_ground"));
+                    }
+                    // `LivingEntity.causeFallDamage`: в воде и лаве падение
+                    // сбрасывается без урона.
+                    if view.water || view.lava {
+                        e.fall = 0.0;
+                    } else if let Some(fall) = landed_fall {
+                        let damage = mb::fall_damage(fall, species.safe_fall());
+                        if damage > 0.0
+                            && let Some(died) =
+                                mb::hurt(&mut e.mob, damage, mb::Source::default(), 0.0)
+                        {
+                            packets
+                                .push((id, play::hurt_animation(self.ids.hurt_animation, id, 0.0)));
+                            packets.push((
+                                id,
+                                play::mob_data(
+                                    self.ids.set_entity_data,
+                                    id,
+                                    e.mob.health,
+                                    None,
+                                    None,
+                                    None,
+                                ),
+                            ));
+                            sounds.push((
+                                e.mob.sound(if died { "death" } else { "hurt" }),
+                                e.mob.pos,
+                                e.mob.volume(),
+                                e.mob.is_baby(),
+                                sound_source(species),
+                            ));
+                            vibrations.push((e.mob.pos, "minecraft:entity_damage"));
+                            if died {
+                                vibrations.push((e.mob.pos, "minecraft:entity_die"));
+                            }
+                        }
                     }
                     let old = e.environment;
                     if monster && e.mob.alive() {
@@ -551,6 +587,17 @@ impl PlayPlan {
                         {
                             packets
                                 .push((id, play::hurt_animation(self.ids.hurt_animation, id, 0.0)));
+                            packets.push((
+                                id,
+                                play::mob_data(
+                                    self.ids.set_entity_data,
+                                    id,
+                                    e.mob.health,
+                                    None,
+                                    None,
+                                    None,
+                                ),
+                            ));
                             vibrations.push((e.mob.pos, "minecraft:entity_damage"));
                             if died {
                                 vibrations.push((e.mob.pos, "minecraft:entity_die"));
@@ -1075,6 +1122,18 @@ pub(super) const SHEEP_COLORS: [&str; 16] = [
 ];
 
 /// `Sheep.getRandomSheepColor`: белая 81.836%, серые/чёрная по 5%, коричневая 3%, розовая 0.164%.
+/// Текст из компонента `minecraft:custom_name` (строка или `{"text": …}`).
+fn tag_name(json: &str) -> Option<String> {
+    match serde_json::from_str::<serde_json::Value>(json).ok()? {
+        serde_json::Value::String(s) => Some(s),
+        serde_json::Value::Object(o) => o
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        _ => None,
+    }
+}
+
 fn sheep_color(r: f64) -> u8 {
     let r = r * 100.0;
     if r < 5.0 {
@@ -1135,6 +1194,8 @@ impl PlayPlan {
             Grow,
             Shear([f64; 3], u8),
             Milk([f64; 3]),
+            Dye([f64; 3]),
+            Name([f64; 3]),
             Ignite([f64; 3], bool),
         }
         let act = {
@@ -1162,6 +1223,30 @@ impl PlayPlan {
                 Act::Shear(m.pos, m.color)
             } else if name == "minecraft:bucket" && m.species == Species::Cow && !m.is_baby() {
                 Act::Milk(m.pos)
+            } else if m.species == Species::Sheep
+                && !m.sheared
+                && let Some(color) = name
+                    .strip_prefix("minecraft:")
+                    .and_then(|n| n.strip_suffix("_dye"))
+                    .and_then(|c| {
+                        chunkwake_protocol::components::DYE_COLORS
+                            .iter()
+                            .position(|d| *d == c)
+                    })
+            {
+                let color = color as u8;
+                if color == m.color {
+                    return None;
+                }
+                m.color = color;
+                Act::Dye(m.pos)
+            } else if name == "minecraft:name_tag" {
+                let extra = chunkwake_protocol::components::get(stack.extra);
+                let json = extra.custom_name.as_deref()?;
+                let text = tag_name(json)?;
+                m.custom_name = Some(text);
+                m.persistent = true;
+                Act::Name(m.pos)
             } else if m.species == Species::Creeper
                 && matches!(
                     name.as_str(),
@@ -1238,6 +1323,30 @@ impl PlayPlan {
                 } else {
                     inv.slots[slot] = Some(milk);
                 }
+            }
+            Act::Dye(pos) => {
+                self.refresh_mob(target);
+                self.play_sound(
+                    Some(uuid),
+                    "minecraft:item.dye.use",
+                    crate::sounds::PLAYERS,
+                    pos,
+                    1.0,
+                    1.0,
+                );
+                inv.consume_at(slot);
+            }
+            Act::Name(pos) => {
+                self.refresh_mob(target);
+                self.play_sound(
+                    Some(uuid),
+                    "minecraft:item.name_tag.use",
+                    crate::sounds::PLAYERS,
+                    pos,
+                    1.0,
+                    1.0,
+                );
+                inv.consume_at(slot);
             }
         }
         Some(slots)
@@ -2112,6 +2221,53 @@ impl PlayPlan {
         true
     }
 
+    /// `Entity.thunderHit` для мобов: 5 урона, огонь на 8 секунд,
+    /// крипер заряжается. Область — `AABB(pos).inflate(3)` вверх до `y + 9`.
+    pub(super) fn lightning_mobs(&self, at: [f64; 3]) {
+        let mut hits = Vec::new();
+        {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            for (&id, e) in mobs.iter_mut() {
+                if !e.mob.alive() {
+                    continue;
+                }
+                let mpos = e.mob.pos;
+                if (mpos[0] - at[0]).powi(2) + (mpos[2] - at[2]).powi(2) > 9.0 {
+                    continue;
+                }
+                if mpos[1] < at[1] - 3.0 || mpos[1] > at[1] + 9.0 {
+                    continue;
+                }
+                let died = mb::hurt(&mut e.mob, 5.0, mb::Source::default(), 0.0) == Some(true);
+                e.environment.burning = e.environment.burning.max(160);
+                if e.mob.species == Species::Creeper {
+                    e.mob.powered = true;
+                }
+                hits.push((
+                    id,
+                    (
+                        e.mob.sound(if died { "death" } else { "hurt" }),
+                        mpos,
+                        e.mob.volume(),
+                        e.mob.is_baby(),
+                        sound_source(e.mob.species),
+                    ),
+                    died,
+                ));
+            }
+        }
+        for (id, (name, pos, volume, baby, source), died) in hits {
+            self.hub
+                .send_about(id, play::hurt_animation(self.ids.hurt_animation, id, 0.0));
+            self.refresh_mob(id);
+            self.play_sound(None, &name, source, pos, volume, mob_pitch(baby));
+            self.emit_vibration(pos, "minecraft:entity_damage");
+            if died {
+                self.emit_vibration(pos, "minecraft:entity_die");
+            }
+        }
+    }
+
     /// Удар моба по игроку (`Mob.doHurtTarget`): атрибут `attack_damage` со
     /// сложностью, затем отбрасывание 0.4 от моба (`LivingEntity.knockback`).
     /// Броню, сопротивление и событие урона плагинам считает сессия игрока.
@@ -2604,6 +2760,16 @@ mod tests {
     fn feeding_speeds_up_baby() {
         assert_eq!(feed_baby(mb::BABY_AGE), mb::BABY_AGE + 2400);
         assert_eq!(feed_baby(-10), -10);
+    }
+
+    #[test]
+    fn name_tag_text_is_extracted() {
+        assert_eq!(tag_name("\"Бурёнка\"").as_deref(), Some("Бурёнка"));
+        assert_eq!(
+            tag_name(r#"{"text":"Бурёнка","color":"gold"}"#).as_deref(),
+            Some("Бурёнка")
+        );
+        assert_eq!(tag_name("7"), None);
     }
 
     #[test]

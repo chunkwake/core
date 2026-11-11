@@ -387,23 +387,14 @@ pub(super) fn summon(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
             coords[1].floor() as i32,
             coords[2].floor() as i32,
         ];
-        let struck = ctx.plan.lightning_strike(at);
-        return match struck {
-            Some(rod) => Outcome::Feedback(translate(
-                "commands.summon.success",
-                vec![
-                    json!({"translate": "entity.minecraft.lightning_bolt"}),
-                    Value::from(format!("{} {} {}", rod[0], rod[1], rod[2])),
-                ],
-            )),
-            None => Outcome::Feedback(translate(
-                "commands.summon.success",
-                vec![
-                    json!({"translate": "entity.minecraft.lightning_bolt"}),
-                    Value::from(format!("{} {} {}", at[0], at[1], at[2])),
-                ],
-            )),
-        };
+        let struck = ctx.plan.thunder_strike(at);
+        return Outcome::Feedback(translate(
+            "commands.summon.success",
+            vec![
+                json!({"translate": "entity.minecraft.lightning_bolt"}),
+                Value::from(format!("{} {} {}", struck[0], struck[1], struck[2])),
+            ],
+        ));
     }
     let Some(species) = crate::mobs::Species::from_name(&name) else {
         return Outcome::Feedback(translate(
