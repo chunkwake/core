@@ -14,9 +14,9 @@
 ![Paper API](https://img.shields.io/badge/Paper%20API-26.3-8FA3B8?style=flat-square&labelColor=202020)
 ![Folia schedulers](https://img.shields.io/badge/Folia-schedulers-A6A092?style=flat-square&labelColor=202020)
 
-![готово](https://img.shields.io/badge/%D0%BC%D0%B5%D1%85%D0%B0%D0%BD%D0%B8%D0%BA%D0%B8-66%20%D0%B3%D0%BE%D1%82%D0%BE%D0%B2%D0%BE-9DB283?style=flat-square&labelColor=202020)
-![частично](https://img.shields.io/badge/%D0%BC%D0%B5%D1%85%D0%B0%D0%BD%D0%B8%D0%BA%D0%B8-31%20%D1%87%D0%B0%D1%81%D1%82%D0%B8%D1%87%D0%BD%D0%BE-C7A96B?style=flat-square&labelColor=202020)
-![не начато](https://img.shields.io/badge/%D0%BC%D0%B5%D1%85%D0%B0%D0%BD%D0%B8%D0%BA%D0%B8-10%20%D0%BD%D0%B5%20%D0%BD%D0%B0%D1%87%D0%B0%D1%82%D0%BE-7A7A75?style=flat-square&labelColor=202020)
+![готово](https://img.shields.io/badge/%D0%BC%D0%B5%D1%85%D0%B0%D0%BD%D0%B8%D0%BA%D0%B8-70%20%D0%B3%D0%BE%D1%82%D0%BE%D0%B2%D0%BE-9DB283?style=flat-square&labelColor=202020)
+![частично](https://img.shields.io/badge/%D0%BC%D0%B5%D1%85%D0%B0%D0%BD%D0%B8%D0%BA%D0%B8-35%20%D1%87%D0%B0%D1%81%D1%82%D0%B8%D1%87%D0%BD%D0%BE-C7A96B?style=flat-square&labelColor=202020)
+![не начато](https://img.shields.io/badge/%D0%BC%D0%B5%D1%85%D0%B0%D0%BD%D0%B8%D0%BA%D0%B8-7%20%D0%BD%D0%B5%20%D0%BD%D0%B0%D1%87%D0%B0%D1%82%D0%BE-7A7A75?style=flat-square&labelColor=202020)
 
 [Быстрый старт](#быстрый-старт) ·
 [Что уже работает](#что-уже-работает) ·
@@ -27,7 +27,7 @@
 [English](#english)
 
 <a href="https://chunkwake.github.io/ru/">
-  <img src="docs/assets/og-ru.png" width="760" alt="Chunkwake — сервер Minecraft на Rust">
+  <img src="docs/assets/preview-ru.png" width="900" alt="Chunkwake — сервер Minecraft на Rust">
 </a>
 
 <sub><a href="https://chunkwake.github.io/ru/">chunkwake.github.io</a></sub>
@@ -65,8 +65,8 @@ Rust, без GC-пауз. Плагины — в настоящей JVM рядо�
 
 ## Что уже работает
 
-По [фич-матрице](docs/feature-matrix.md): **66** семейств механик готово,
-**31** частично, **10** не начато. Протокол, чанки, Anvil, инвентарь, крафт,
+По [фич-матрице](docs/feature-matrix.md): **70** семейств механик готово,
+**35** частично, **7** не начато. Протокол, чанки, Anvil, инвентарь, крафт,
 печи, чары и жидкости описаны отдельно в [этапах](docs/milestones.md).
 
 <table>
@@ -321,8 +321,8 @@ Folia plugins**: a real JVM is embedded in the server process with the official
 `paper-api.jar`, and the Rust core fires Bukkit/Paper events in Paper's order.
 
 - **Status:** early. Survival with vanilla world generation, redstone, mobs and
-  plugins works; see the [feature matrix](docs/feature-matrix.md) (66 done,
-  31 partial, 10 not started).
+  plugins works; see the [feature matrix](docs/feature-matrix.md) (70 done,
+  35 partial, 7 not started).
 - **Verified against vanilla:** mechanics are implemented from `server.jar` and
   Paper bytecode, then checked with parity tests and bots that compare packets
   with a real vanilla server.
