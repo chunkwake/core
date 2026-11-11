@@ -13744,6 +13744,10 @@ impl PlayPlan {
                             me.entry.name.as_str(),
                             self.op_level(uuid),
                         );
+                        // `data get entity @s` читает `live`: публикуем
+                        // актуальные слоты и здоровье перед командой, иначе
+                        // подобранный предмет виден только со следующего тика.
+                        self.publish_live(uuid, state, login.spawn.game_mode);
                         if let Some(outcome) = self.run_command(&source, &line) {
                             match outcome {
                                 crate::play::commands::dispatch::Outcome::Feedback(msg) => {

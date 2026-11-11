@@ -1317,9 +1317,23 @@ impl PlayPlan {
                     .collect();
                 root.insert("active_effects".into(), Tag::List(list));
             }
+            if let Some(tag) = super::super::mobs::equipment_to_nbt(&entry.mob, &self.item_names) {
+                root.insert("equipment".into(), tag);
+            }
+            if let Some(tag) = super::super::mobs::drop_chances_to_nbt(&entry.mob) {
+                root.insert("drop_chances".into(), tag);
+            }
         } else {
             root.insert("id".into(), Tag::String(target.name.clone()));
             insert_pose(&mut root, target.pos, target.yaw, target.pitch, 0.0);
+            // Предмет на земле: `Item` (`ItemEntity.ITEM`), чтобы `data get`
+            // показывал стек.
+            let dropped = self.sim().dropped.lock().unwrap();
+            if let Some(d) = dropped.get(&target.entity_id)
+                && let Some(c) = crate::stack_nbt::to_nbt(d.stack, self.item_name(d.stack.item))
+            {
+                root.insert("Item".into(), Tag::Compound(c));
+            }
         }
         root
     }
@@ -1363,22 +1377,61 @@ impl PlayPlan {
             }
             return;
         }
-        let mut mobs = self.sim().mobs.lock().unwrap();
-        let Some(entry) = mobs.get_mut(&target.entity_id) else {
-            return;
-        };
-        if let Some(health) = nbt.get("Health").and_then(super::snbt::number) {
-            entry.mob.health = health as f32;
-        }
-        if let Some(pos) = list3(nbt.get("Pos")) {
-            entry.mob.pos = pos;
-            if let Some((yaw, pitch)) = list2(nbt.get("Rotation")) {
-                entry.mob.yaw = yaw;
-                entry.mob.pitch = pitch;
+        let mut changed: Vec<(u8, chunkwake_protocol::inventory::Slot)> = Vec::new();
+        {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            let Some(entry) = mobs.get_mut(&target.entity_id) else {
+                return;
+            };
+            if let Some(health) = nbt.get("Health").and_then(super::snbt::number) {
+                entry.mob.health = health as f32;
+            }
+            if let Some(pos) = list3(nbt.get("Pos")) {
+                entry.mob.pos = pos;
+                if let Some((yaw, pitch)) = list2(nbt.get("Rotation")) {
+                    entry.mob.yaw = yaw;
+                    entry.mob.pitch = pitch;
+                }
+            }
+            if let Some(name) = nbt.get("CustomName") {
+                entry.mob.custom_name = Some(crate::stack_nbt::tag_to_json(name).to_string());
+            }
+            // `EntityEquipment`/`DropChances`: `/data merge entity` меняет
+            // снаряжение, клиентам уходит `set_equipment`.
+            if let Some(Tag::Compound(eq)) = nbt.get("equipment") {
+                for (i, (slot, id)) in crate::mobs::EQUIPMENT_SLOTS.iter().enumerate() {
+                    let Some(tag) = eq.get(*slot) else { continue };
+                    let stack = match tag {
+                        Tag::Compound(c) if c.contains_key("id") => {
+                            crate::stack_nbt::from_nbt(c, |n| self.item_id(n))
+                        }
+                        _ => None,
+                    };
+                    entry.mob.set_item(i, stack);
+                    changed.push((*id, entry.mob.item(i)));
+                }
+            }
+            if let Some(Tag::Compound(chances)) = nbt.get("drop_chances") {
+                for (i, (slot, _)) in crate::mobs::EQUIPMENT_SLOTS.iter().enumerate() {
+                    match chances.get(*slot) {
+                        Some(Tag::Float(v)) => entry.mob.drop_chances[i] = (*v).max(0.0),
+                        Some(Tag::Double(v)) => {
+                            entry.mob.drop_chances[i] = (*v as f32).max(0.0);
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
-        if let Some(name) = nbt.get("CustomName") {
-            entry.mob.custom_name = Some(crate::stack_nbt::tag_to_json(name).to_string());
+        if !changed.is_empty() {
+            self.hub.send_about(
+                target.entity_id,
+                chunkwake_protocol::play::set_equipment(
+                    self.ids.set_equipment,
+                    target.entity_id,
+                    &changed,
+                ),
+            );
         }
     }
 

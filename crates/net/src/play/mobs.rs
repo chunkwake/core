@@ -1,4 +1,4 @@
-//! Живые мобы в `PlayPlan`: появление у клиентов, тик, удар игрока, смерть с лутом.
+﻿//! Живые мобы в `PlayPlan`: появление у клиентов, тик, удар игрока, смерть с лутом.
 //! Логика самих мобов — в [`crate::mobs`].
 
 use super::*;
@@ -178,17 +178,33 @@ impl PlayPlan {
         if !meta.is_empty() {
             out.push(play::entity_meta(self.ids.set_entity_data, id, &meta));
         }
-        // `AbstractSkeleton.populateDefaultEquipmentSlots`: лук в основной руке.
-        if m.species == Species::Skeleton
-            && let Some(bow) = self.item_id("minecraft:bow")
-        {
-            out.push(play::set_equipment(
-                self.ids.set_equipment,
-                id,
-                &[(0, Some(Stack::new(bow, 1)))],
-            ));
+        // `EntityEquipment`: все надетые предметы (`set_equipment`).
+        let worn: Vec<(u8, Slot)> = mb::EQUIPMENT_SLOTS
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (_, id))| m.item(i).map(|s| (*id, Some(s))))
+            .collect();
+        if !worn.is_empty() {
+            out.push(play::set_equipment(self.ids.set_equipment, id, &worn));
         }
         out
+    }
+
+    /// `Mob.populateDefaultEquipmentSlots` + `Zombie`/`AbstractSkeleton`:
+    /// броня по `special_multiplier`, оружие с шансом от сложности.
+    fn populate_equipment(&self, m: &mut Mob) {
+        let difficulty = self.difficulty().id();
+        let special =
+            mb::cube::special_multiplier(difficulty, self.day_time.load(Ordering::Relaxed));
+        let mut rng = || rand::random::<f32>();
+        for (slot, name) in mb::random_equipment(m.species, difficulty, special, &mut rng) {
+            if slot >= 2 && m.item(slot).is_some() {
+                continue;
+            }
+            if let Some(item) = self.item_id(name) {
+                m.set_item(slot, Some(Stack::new(item, 1)));
+            }
+        }
     }
 
     /// Новый моб в мире; возвращает ID сущности. `reason` — причина для
@@ -234,6 +250,11 @@ impl PlayPlan {
                 mb::cube::spawn_size(rand::random(), rand::random(), special),
                 true,
             );
+        }
+        // Внеочередная экипировка мобов (`finalizeSpawn`): броня по сложности,
+        // у зомби — случайное оружие, у скелета — лук.
+        if reason != Some("CONVERSION") {
+            self.populate_equipment(&mut m);
         }
         // Исчезать вдали от игроков могут только природные: с яйца, из команды
         // и от плагина моб остаётся (`setPersistenceRequired`).
@@ -950,6 +971,40 @@ impl PlayPlan {
         } else {
             0
         };
+        // `Mob.dropCustomDeathLoot`: экипировка по `drop_chances` (с бонусом
+        // Добычи 0.01 за уровень); без убийцы — только «сохраняемые» (> 1).
+        let killed_by_player = e.killer.is_some();
+        let looting = level("minecraft:looting");
+        for (slot, _) in mb::EQUIPMENT_SLOTS.iter().enumerate() {
+            let Some(stack) = m.item(slot) else { continue };
+            let mut chance = m.drop_chance(slot);
+            if chance == 0.0 {
+                continue;
+            }
+            let preserve = chance > 1.0;
+            if !killed_by_player && !preserve {
+                continue;
+            }
+            chance += 0.01 * looting as f32;
+            if rand::random::<f32>() >= chance {
+                continue;
+            }
+            let mut stack = stack;
+            if !preserve {
+                let max_damage = self
+                    .survival
+                    .items
+                    .get(stack.item as usize)
+                    .map_or(0, |i| i.max_damage);
+                if max_damage > 0 {
+                    let span = (max_damage - 3).max(1) as u32;
+                    let inner = rand::random::<u32>() % span;
+                    let back = rand::random::<u32>() % (1 + inner);
+                    stack.damage = max_damage - back as i32;
+                }
+            }
+            drops.push(stack);
+        }
         // `EntityDeathEvent`: плагин меняет дроп и опыт.
         if let Some(reply) = self.sync_event(Event::MobDeath, || {
             let mut arg = format!(
@@ -2128,7 +2183,100 @@ fn list_f64(t: Option<&Tag>) -> Vec<f64> {
 }
 
 /// Моб в NBT сущности (`Entity.saveWithoutId` + `Animal`/`Sheep`/`Chicken`).
-pub(super) fn mob_to_nbt(m: &Mob, effects: &std::collections::HashMap<String, i32>) -> Compound {
+/// `equipment` (26.3): слот -> `ItemStack` только для непустых.
+pub(super) fn equipment_to_nbt(m: &Mob, item_names: &[String]) -> Option<Tag> {
+    let mut map = Compound::new();
+    for (i, (slot, _)) in mb::EQUIPMENT_SLOTS.iter().enumerate() {
+        let Some(s) = m.item(i) else { continue };
+        let name = item_names
+            .get(s.item as usize)
+            .filter(|n| !n.is_empty())
+            .map_or("minecraft:air", String::as_str);
+        if let Some(c) = crate::stack_nbt::to_nbt(s, name) {
+            map.insert((*slot).to_owned(), Tag::Compound(c));
+        }
+    }
+    (!map.is_empty()).then_some(Tag::Compound(map))
+}
+
+/// `drop_chances`: только отличия от 0.085 (`DropChances.filterDefaultValues`).
+pub(super) fn drop_chances_to_nbt(m: &Mob) -> Option<Tag> {
+    let mut map = Compound::new();
+    for (i, (slot, _)) in mb::EQUIPMENT_SLOTS.iter().enumerate() {
+        let chance = m.drop_chance(i);
+        if chance != mb::DEFAULT_DROP_CHANCE {
+            map.insert((*slot).to_owned(), Tag::Float(chance));
+        }
+    }
+    (!map.is_empty()).then_some(Tag::Compound(map))
+}
+
+/// Чтение `equipment`/`drop_chances` (26.3) с запасным старым
+/// `HandItems`/`ArmorItems`/`DropChances`/`*DropChances`.
+pub(super) fn equipment_from_nbt(
+    m: &mut Mob,
+    c: &Compound,
+    items: &std::collections::HashMap<String, i32>,
+) {
+    let resolve = |n: &str| -> Option<i32> { items.get(n).copied() };
+    let read_stack = |tag: Option<&Tag>| -> Option<Stack> {
+        match tag {
+            Some(Tag::Compound(item)) if item.contains_key("id") => {
+                crate::stack_nbt::from_nbt(item, resolve)
+            }
+            _ => None,
+        }
+    };
+    if let Some(Tag::Compound(eq)) = c.get("equipment") {
+        for (i, (slot, _)) in mb::EQUIPMENT_SLOTS.iter().enumerate() {
+            if let Some(tag) = eq.get(*slot) {
+                m.set_item(i, read_stack(Some(tag)));
+            }
+        }
+    } else {
+        let mut legacy = |key: &str, order: &[usize]| {
+            let Some(Tag::List(list)) = c.get(key) else {
+                return;
+            };
+            for (n, &i) in order.iter().enumerate() {
+                m.set_item(i, read_stack(list.get(n)));
+            }
+        };
+        legacy("HandItems", &[0, 1]);
+        legacy("ArmorItems", &[2, 3, 4, 5]);
+    }
+    if let Some(Tag::Compound(chances)) = c.get("drop_chances") {
+        for (i, (slot, _)) in mb::EQUIPMENT_SLOTS.iter().enumerate() {
+            match chances.get(*slot) {
+                Some(Tag::Float(v)) => m.drop_chances[i] = (*v).max(0.0),
+                Some(Tag::Double(v)) => m.drop_chances[i] = (*v as f32).max(0.0),
+                _ => {}
+            }
+        }
+    } else {
+        let mut legacy = |key: &str, order: &[usize]| {
+            let Some(Tag::List(list)) = c.get(key) else {
+                return;
+            };
+            for (n, &i) in order.iter().enumerate() {
+                match list.get(n) {
+                    Some(Tag::Float(v)) => m.drop_chances[i] = (*v).max(0.0),
+                    Some(Tag::Double(v)) => m.drop_chances[i] = (*v as f32).max(0.0),
+                    _ => {}
+                }
+            }
+        };
+        legacy("HandDropChances", &[0, 1]);
+        legacy("ArmorDropChances", &[2, 3, 4, 5]);
+        legacy("DropChances", &[0, 1, 2, 3, 4, 5]);
+    }
+}
+
+pub(super) fn mob_to_nbt(
+    m: &Mob,
+    effects: &std::collections::HashMap<String, i32>,
+    item_names: &[String],
+) -> Compound {
     let mut c = Compound::new();
     let u = m.uuid;
     c.insert("id".into(), Tag::String(m.species.name().to_owned()));
@@ -2210,6 +2358,12 @@ pub(super) fn mob_to_nbt(m: &Mob, effects: &std::collections::HashMap<String, i3
             .collect();
         c.insert("active_effects".into(), Tag::List(list));
     }
+    if let Some(tag) = equipment_to_nbt(m, item_names) {
+        c.insert("equipment".into(), tag);
+    }
+    if let Some(tag) = drop_chances_to_nbt(m) {
+        c.insert("drop_chances".into(), tag);
+    }
     c
 }
 
@@ -2217,6 +2371,7 @@ pub(super) fn mob_to_nbt(m: &Mob, effects: &std::collections::HashMap<String, i3
 pub(super) fn mob_from_nbt(
     c: &Compound,
     effects: &std::collections::HashMap<String, i32>,
+    items: &std::collections::HashMap<String, i32>,
 ) -> Option<Mob> {
     let Some(Tag::String(id)) = c.get("id") else {
         return None;
@@ -2314,6 +2469,7 @@ pub(super) fn mob_from_nbt(
             });
         }
     }
+    equipment_from_nbt(&mut m, c, items);
     (m.health > 0.0).then_some(m)
 }
 
@@ -2338,7 +2494,8 @@ impl PlayPlan {
                     written.insert(pos);
                     continue;
                 }
-                let Some(m) = mob_from_nbt(c, &self.survival.effects) else {
+                let Some(m) = mob_from_nbt(c, &self.survival.effects, &self.survival.item_ids)
+                else {
                     continue;
                 };
                 written.insert(pos);
@@ -2510,10 +2667,11 @@ impl PlayPlan {
                 (e.mob.pos[0].floor() as i32) >> 4,
                 (e.mob.pos[2].floor() as i32) >> 4,
             );
-            by_chunk
-                .entry(pos)
-                .or_default()
-                .push(mob_to_nbt(&e.mob, &self.survival.effects));
+            by_chunk.entry(pos).or_default().push(mob_to_nbt(
+                &e.mob,
+                &self.survival.effects,
+                &self.item_names,
+            ));
         }
         for (pos, c) in self
             .boats_nbt()
@@ -3269,7 +3427,8 @@ mod tests {
         );
         (m.yaw, m.pitch, m.health, m.age, m.sheared, m.color) = (90.0, 10.0, 5.0, -100, true, 14);
         let back = mob_from_nbt(
-            &mob_to_nbt(&m, &std::collections::HashMap::new()),
+            &mob_to_nbt(&m, &std::collections::HashMap::new(), &[]),
+            &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
         )
         .unwrap();
@@ -3286,7 +3445,7 @@ mod tests {
         let mut m = Mob::new(Species::Cow, [0.5, 64.0, 0.5], 7);
         m.add_effect(crate::survival::Effect::plain(2, 1, 120));
         let names = std::collections::HashMap::from([("minecraft:poison".to_owned(), 2)]);
-        let nbt = mob_to_nbt(&m, &names);
+        let nbt = mob_to_nbt(&m, &names, &[]);
         let list = match nbt.get("active_effects") {
             Some(Tag::List(list)) => list,
             _ => panic!("нет active_effects"),
@@ -3299,10 +3458,98 @@ mod tests {
             Some(&Tag::String("minecraft:poison".to_owned()))
         );
         assert_eq!(e.get("duration"), Some(&Tag::Int(120)));
-        let back = mob_from_nbt(&nbt, &names).unwrap();
+        let back = mob_from_nbt(&nbt, &names, &std::collections::HashMap::new()).unwrap();
         assert_eq!(back.effects.len(), 1);
         assert_eq!((back.effects[0].id, back.effects[0].amplifier), (2, 1));
         assert_eq!(back.effects[0].duration, 120);
+    }
+
+    #[test]
+    fn mob_nbt_keeps_equipment_and_drop_chances() {
+        let mut m = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 9);
+        m.set_item(0, Some(Stack::new(2, 1)));
+        m.set_item(5, Some(Stack::new(1, 1)));
+        m.drop_chances[5] = 2.0;
+        m.drop_chances[0] = 0.0;
+        let names = [
+            "minecraft:air".to_owned(),
+            "minecraft:iron_helmet".to_owned(),
+            "minecraft:iron_sword".to_owned(),
+        ];
+        let items = std::collections::HashMap::from([
+            ("minecraft:iron_helmet".to_owned(), 1),
+            ("minecraft:iron_sword".to_owned(), 2),
+        ]);
+        let nbt = mob_to_nbt(&m, &std::collections::HashMap::new(), &names);
+        let Some(Tag::Compound(eq)) = nbt.get("equipment") else {
+            panic!("нет equipment")
+        };
+        assert!(eq.contains_key("mainhand"));
+        assert!(eq.contains_key("head"));
+        let Some(Tag::Compound(chances)) = nbt.get("drop_chances") else {
+            panic!("нет drop_chances")
+        };
+        assert_eq!(chances.get("head"), Some(&Tag::Float(2.0)));
+        assert_eq!(chances.get("mainhand"), Some(&Tag::Float(0.0)));
+
+        let back = mob_from_nbt(&nbt, &std::collections::HashMap::new(), &items).unwrap();
+        assert_eq!(back.item(0).map(|s| s.item), Some(2));
+        assert_eq!(back.item(5).map(|s| s.item), Some(1));
+        assert_eq!(back.drop_chance(5), 2.0);
+        assert_eq!(back.drop_chance(0), 0.0);
+        // Незаданные слоты остаются пустыми, шанс — по умолчанию.
+        assert_eq!(back.item(4), None);
+        assert_eq!(back.drop_chance(4), crate::mobs::DEFAULT_DROP_CHANCE);
+    }
+
+    #[test]
+    fn mob_nbt_reads_legacy_hand_and_armor_items() {
+        let mut root = Compound::new();
+        root.insert("id".into(), Tag::String("minecraft:zombie".into()));
+        root.insert(
+            "Pos".into(),
+            Tag::List(vec![Tag::Double(0.0), Tag::Double(64.0), Tag::Double(0.0)]),
+        );
+        let sword = Tag::Compound(Compound::from([
+            ("id".into(), Tag::String("minecraft:iron_sword".into())),
+            ("count".into(), Tag::Int(1)),
+        ]));
+        let helmet = Tag::Compound(Compound::from([
+            ("id".into(), Tag::String("minecraft:iron_helmet".into())),
+            ("count".into(), Tag::Int(1)),
+        ]));
+        root.insert(
+            "HandItems".into(),
+            Tag::List(vec![sword, Tag::Compound(Compound::new())]),
+        );
+        root.insert(
+            "ArmorItems".into(),
+            Tag::List(vec![
+                Tag::Compound(Compound::new()),
+                Tag::Compound(Compound::new()),
+                Tag::Compound(Compound::new()),
+                helmet,
+            ]),
+        );
+        root.insert(
+            "DropChances".into(),
+            Tag::List(vec![
+                Tag::Float(0.0),
+                Tag::Float(0.0),
+                Tag::Float(0.0),
+                Tag::Float(0.0),
+                Tag::Float(0.0),
+                Tag::Float(2.0),
+            ]),
+        );
+        let items = std::collections::HashMap::from([
+            ("minecraft:iron_helmet".to_owned(), 1),
+            ("minecraft:iron_sword".to_owned(), 2),
+        ]);
+        let back = mob_from_nbt(&root, &std::collections::HashMap::new(), &items).unwrap();
+        assert_eq!(back.item(0).map(|s| s.item), Some(2));
+        assert_eq!(back.item(5).map(|s| s.item), Some(1));
+        assert_eq!(back.drop_chance(5), 2.0);
     }
 
     #[test]
@@ -3315,7 +3562,8 @@ mod tests {
         m.set_size(4, true);
         m.was_on_ground = true;
         let back = mob_from_nbt(
-            &mob_to_nbt(&m, &std::collections::HashMap::new()),
+            &mob_to_nbt(&m, &std::collections::HashMap::new(), &[]),
+            &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
         )
         .unwrap();

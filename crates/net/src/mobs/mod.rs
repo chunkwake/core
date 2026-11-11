@@ -14,6 +14,104 @@ pub mod path;
 use goals::{CellInfo, Kin, LookControl, Out, Selector};
 use path::{MoveControl, Navigation};
 
+use chunkwake_protocol::inventory::Stack;
+
+/// `EquipmentSlot` 26.3: имя в NBT и id в `set_equipment`.
+/// Порядок — как `EntityEquipment`/`DropChances` в сохранении.
+pub const EQUIPMENT_SLOTS: [(&str, u8); 6] = [
+    ("mainhand", 0),
+    ("offhand", 5),
+    ("feet", 1),
+    ("legs", 2),
+    ("chest", 3),
+    ("head", 4),
+];
+/// `DropChances.DEFAULT_EQUIPMENT_DROP_CHANCE`.
+pub const DEFAULT_DROP_CHANCE: f32 = 0.085;
+/// `Mob.getEquipmentForSlot`: материал брони 0..=5 по частям
+/// (шлем, нагрудник, штаны, ботинки).
+pub const ARMOR_NAMES: [[&str; 6]; 4] = [
+    [
+        "minecraft:leather_helmet",
+        "minecraft:copper_helmet",
+        "minecraft:golden_helmet",
+        "minecraft:chainmail_helmet",
+        "minecraft:iron_helmet",
+        "minecraft:diamond_helmet",
+    ],
+    [
+        "minecraft:leather_chestplate",
+        "minecraft:copper_chestplate",
+        "minecraft:golden_chestplate",
+        "minecraft:chainmail_chestplate",
+        "minecraft:iron_chestplate",
+        "minecraft:diamond_chestplate",
+    ],
+    [
+        "minecraft:leather_leggings",
+        "minecraft:copper_leggings",
+        "minecraft:golden_leggings",
+        "minecraft:chainmail_leggings",
+        "minecraft:iron_leggings",
+        "minecraft:diamond_leggings",
+    ],
+    [
+        "minecraft:leather_boots",
+        "minecraft:copper_boots",
+        "minecraft:golden_boots",
+        "minecraft:chainmail_boots",
+        "minecraft:iron_boots",
+        "minecraft:diamond_boots",
+    ],
+];
+
+/// `Mob.populateDefaultEquipmentSlots` + `Zombie`/`AbstractSkeleton`:
+/// слот [`EQUIPMENT_SLOTS`] и имя предмета. `rng` — `nextFloat()`.
+pub fn random_equipment(
+    species: Species,
+    difficulty: u8,
+    special: f32,
+    rng: &mut dyn FnMut() -> f32,
+) -> Vec<(usize, &'static str)> {
+    let mut out = Vec::new();
+    if rng() < 0.15 * special {
+        let mut armor_type = (rng() * 3.0) as usize % 3;
+        for _ in 0..3 {
+            if rng() < 0.1087 {
+                armor_type += 1;
+            }
+        }
+        let partial = if difficulty == 3 { 0.1 } else { 0.25 };
+        let mut first = true;
+        // `EQUIPMENT_POPULATION_ORDER`: HEAD, CHEST, LEGS, FEET.
+        for (n, slot) in [5usize, 4, 3, 2].into_iter().enumerate() {
+            if !first && rng() < partial {
+                break;
+            }
+            first = false;
+            if let Some(name) = ARMOR_NAMES[n].get(armor_type) {
+                out.push((slot, *name));
+            }
+        }
+    }
+    match species {
+        Species::Zombie => {
+            let chance = if difficulty == 3 { 0.05 } else { 0.01 };
+            if rng() < chance {
+                let name = match (rng() * 6.0) as u32 % 6 {
+                    0 => "minecraft:iron_sword",
+                    1 => "minecraft:iron_spear",
+                    _ => "minecraft:iron_shovel",
+                };
+                out.push((0, name));
+            }
+        }
+        Species::Skeleton => out.push((0, "minecraft:bow")),
+        _ => {}
+    }
+    out
+}
+
 /// Гравитация и сопротивление по вертикали (`LivingEntity.travel`).
 pub const GRAVITY: f64 = 0.08;
 pub const AIR_DRAG: f64 = 0.98;
@@ -554,6 +652,10 @@ pub struct Mob {
     pub on_fire: bool,
     /// `active_effects`: зелья и эффекты на мобе.
     pub effects: Vec<crate::survival::Effect>,
+    /// `EntityEquipment`: mainhand, offhand, feet, legs, chest, head.
+    pub equipment: [Option<Stack>; 6],
+    /// `DropChances` по тем же слотам; > 1 — предмет сохраняется всегда.
+    pub drop_chances: [f32; 6],
     /// Множитель скорости от `Speed`/`Slowness` (пересчитывается в тике).
     pub effect_speed: f64,
     /// Штраф урона от `Weakness`.
@@ -619,6 +721,8 @@ impl Mob {
             climbing: false,
             on_fire: false,
             effects: Vec::new(),
+            equipment: [None; 6],
+            drop_chances: [DEFAULT_DROP_CHANCE; 6],
             effect_speed: 1.0,
             effect_weakness: 0.0,
             swell: 0,
@@ -722,6 +826,25 @@ impl Mob {
             self.species.attack_damage()
         };
         (base - self.effect_weakness).max(0.0)
+    }
+
+    /// `LivingEntity.setItemSlot` по индексу [`EQUIPMENT_SLOTS`].
+    pub fn set_item(&mut self, slot: usize, item: Option<Stack>) {
+        if let Some(s) = self.equipment.get_mut(slot) {
+            *s = item.filter(|s| s.count > 0);
+        }
+    }
+
+    pub fn item(&self, slot: usize) -> Option<Stack> {
+        self.equipment.get(slot).copied().flatten()
+    }
+
+    /// `DropChances.byEquipment`.
+    pub fn drop_chance(&self, slot: usize) -> f32 {
+        self.drop_chances
+            .get(slot)
+            .copied()
+            .unwrap_or(DEFAULT_DROP_CHANCE)
     }
 
     /// `LivingEntity.addEffect`: сильнее — заменяет, равный — продлевает.
@@ -1742,6 +1865,39 @@ pub fn spawn_cell_forbidden(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn equipment_population_matches_vanilla() {
+        // rng = 0: броня есть (0 < 0.15), все три апгрейда типа дают 3
+        // (кольчуга), после шлема `partial` стоп; оружие зомби — меч.
+        let mut zero = || 0.0f32;
+        let gear = random_equipment(Species::Zombie, 2, 1.0, &mut zero);
+        assert!(gear.contains(&(5, "minecraft:chainmail_helmet")));
+        assert!(!gear.iter().any(|(slot, _)| *slot == 4));
+        assert!(gear.contains(&(0, "minecraft:iron_sword")));
+
+        // rng = 0.99: ни брони, ни оружия; скелет всё равно с луком.
+        let mut high = || 0.99f32;
+        assert!(random_equipment(Species::Zombie, 2, 1.0, &mut high).is_empty());
+        assert_eq!(
+            random_equipment(Species::Skeleton, 0, 0.0, &mut high),
+            vec![(0, "minecraft:bow")]
+        );
+
+        // Тип 1 (медь) и полный комплект: броня не прерывается.
+        let seq = [0.1f32, 0.5, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9];
+        let mut i = 0;
+        let mut rng = || {
+            let v = seq[i % seq.len()];
+            i += 1;
+            v
+        };
+        let gear = random_equipment(Species::Zombie, 2, 1.0, &mut rng);
+        for (slot, piece) in [(5usize, 0usize), (4, 1), (3, 2), (2, 3)] {
+            assert!(gear.contains(&(slot, ARMOR_NAMES[piece][1])));
+        }
+        assert!(!gear.iter().any(|(slot, _)| *slot == 0));
+    }
 
     /// Форма блока для тестового мира.
     type ShapeFn<'a> = Box<dyn Fn([i32; 3]) -> &'static [[f64; 6]] + 'a>;
