@@ -12226,6 +12226,7 @@ impl PlayPlan {
                                     {
                                         in_cart = true;
                                         state.vitals.clear_fall();
+                                        self.reset_after_use(me.entity_id, uuid, it.hand, state, &mut swing);
                                     }
                                 }
                                 // `ContainerEntity.interactWithContainerVehicle`: окно инвентаря.
@@ -12243,17 +12244,24 @@ impl PlayPlan {
                                     self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
                                     window = Some(w);
                                     self.container_viewers(uuid, &[pos], true);
+                                    self.reset_after_use(me.entity_id, uuid, it.hand, state, &mut swing);
                                 }
                                 // `MinecartFurnace.interact`: уголь — в топку (творческий не тратит).
                                 minecarts::CartUse::Fuel => {
                                     let slot = state.inv.held_slot();
-                                    if let Some(held) = state.inv.slots[slot]
-                                        && let Some(p) = self.player_at(uuid).map(|p| p.0)
-                                        && self.fuel_minecart(it.entity, p, self.item_name(held.item))
-                                        && login.spawn.game_mode != 1
-                                    {
+                                    let fueled = state.inv.slots[slot]
+                                        .and_then(|held| {
+                                            self.player_at(uuid).map(|p| (held, p.0))
+                                        })
+                                        .is_some_and(|(held, p)| {
+                                            self.fuel_minecart(it.entity, p, self.item_name(held.item))
+                                        });
+                                    if fueled && login.spawn.game_mode != 1 {
                                         state.inv.consume_at(slot);
                                         self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                    }
+                                    if fueled {
+                                        self.reset_after_use(me.entity_id, uuid, it.hand, state, &mut swing);
                                     }
                                 }
                                 minecarts::CartUse::Pass => {}
@@ -12278,6 +12286,7 @@ impl PlayPlan {
                                 ) && !slots.is_empty()
                                 {
                                     self.send_slots(conn, &mut state.inv, &slots).await?;
+                                    self.reset_after_use(me.entity_id, uuid, it.hand, state, &mut swing);
                                 }
                             }
                             continue;
@@ -12287,10 +12296,12 @@ impl PlayPlan {
                             if !state.vitals.dead && login.spawn.game_mode != 3
                                 && let Some(slot) = Self::hand_index(&state.inv, it.hand)
                                 && self.use_item_frame(it.entity, state.inv.slots[slot]) == Some(true)
-                                && login.spawn.game_mode != 1
                             {
-                                state.inv.consume_at(slot);
-                                self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                if login.spawn.game_mode != 1 {
+                                    state.inv.consume_at(slot);
+                                    self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                }
+                                self.reset_after_use(me.entity_id, uuid, it.hand, state, &mut swing);
                             }
                             continue;
                         }
@@ -12301,6 +12312,7 @@ impl PlayPlan {
                             {
                                 in_boat = true;
                                 state.vitals.clear_fall();
+                                self.reset_after_use(me.entity_id, uuid, it.hand, state, &mut swing);
                             }
                             continue;
                         }
@@ -12308,6 +12320,7 @@ impl PlayPlan {
                             let creative = login.spawn.game_mode == 1;
                             if let Some(slots) = self.interact_mob(uuid, it.entity, it.hand, &mut state.inv, creative).await {
                                 self.send_slots(conn, &mut state.inv, &slots).await?;
+                                self.reset_after_use(me.entity_id, uuid, it.hand, state, &mut swing);
                             }
                         }
                         continue;
@@ -12966,6 +12979,7 @@ impl PlayPlan {
                                 state.vitals.reset_fall(bed_pos);
                             }
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                            self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                             continue;
                         }
                         if !state.vitals.dead && login.spawn.game_mode != 3 {
@@ -12988,6 +13002,7 @@ impl PlayPlan {
                                 self.send_slots(conn, &mut state.inv, &[slot]).await?;
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence))
                                     .await?;
+                                self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                                 continue;
                             }
                         }
@@ -13003,6 +13018,7 @@ impl PlayPlan {
                                 state.inv.consume_at(slot);
                                 self.send_slots(conn, &mut state.inv, &[slot]).await?;
                             }
+                            self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                             continue;
                         }
@@ -13017,6 +13033,7 @@ impl PlayPlan {
                                 state.inv.consume_at(slot);
                                 self.send_slots(conn, &mut state.inv, &[slot]).await?;
                             }
+                            self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                             continue;
                         }
@@ -13038,6 +13055,7 @@ impl PlayPlan {
                                         } else { state.inv.slots[slot] = Some(held); }
                                         self.send_slots(conn, &mut state.inv, &[slot]).await?;
                                     }
+                                    self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                                     conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                                     continue;
                                 }
@@ -13062,6 +13080,7 @@ impl PlayPlan {
                                     } else { state.inv.slots[slot] = Some(held); }
                                     self.send_slots(conn, &mut state.inv, &[slot]).await?;
                                 }
+                                self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                                 continue;
                             }
@@ -13088,6 +13107,7 @@ impl PlayPlan {
                                     conn.send(&play::block_update(ids.block_update, side, there as i32)).await?;
                                 }
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                                self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                                 continue;
                             }
                         }
@@ -13107,6 +13127,7 @@ impl PlayPlan {
                                 }
                                 let now = self.block(u.pos).unwrap_or(AIR);
                                 conn.send(&play::block_update(ids.block_update, u.pos, now as i32)).await?;
+                                self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                                 continue;
                             }
@@ -13166,6 +13187,7 @@ impl PlayPlan {
                             };
                             if done {
                                 self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                                 continue;
                             }
@@ -13192,6 +13214,7 @@ impl PlayPlan {
                                     let now = self.block(u.pos).unwrap_or(AIR);
                                     conn.send(&play::block_update(ids.block_update, u.pos, now as i32)).await?;
                                 }
+                                self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                                 continue;
                             }
@@ -13259,10 +13282,12 @@ impl PlayPlan {
                                         state.inv.consume_at(slot);
                                     }
                                     self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                    self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                                     conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                                     continue;
                                 }
                                 signs::SignUse::Handled => {
+                                    self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                                     conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                                     continue;
                                 }
@@ -13322,6 +13347,7 @@ impl PlayPlan {
                         if !state.vitals.dead && login.spawn.game_mode != 3 && !bypass && u.hand == 0 {
                             let yaw = self.player_at(uuid).map_or(0.0, |p| p.1);
                             if self.use_switch(conn, uuid, u.pos).await? || self.toggle_block(conn, uuid, u.pos, yaw).await? {
+                                self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                                 continue;
                             }
@@ -13426,6 +13452,7 @@ impl PlayPlan {
                                 }
                             }
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                            self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                             continue;
                         }
                         let hand_slot = Self::hand_index(&state.inv, u.hand);
@@ -13441,6 +13468,7 @@ impl PlayPlan {
                                 self.send_slots(conn, &mut state.inv, &[i]).await?;
                             }
                             self.hub.send(None, play::level_event(ids.level_event, 1505, u.pos, 0, false));
+                            self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                             continue;
                         }
@@ -13481,6 +13509,7 @@ impl PlayPlan {
                                 }
                                 self.send_slots(conn, &mut state.inv, &[i]).await?;
                             }
+                            self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                             continue;
                         }
@@ -13495,6 +13524,7 @@ impl PlayPlan {
                                 state.inv.consume_at(i);
                                 self.send_slots(conn, &mut state.inv, &[i]).await?;
                             }
+                            self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                             continue;
                         }
@@ -13509,6 +13539,7 @@ impl PlayPlan {
                                 state.inv.consume_at(i);
                                 self.send_slots(conn, &mut state.inv, &[i]).await?;
                             }
+                            self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                             continue;
                         }
@@ -13522,6 +13553,7 @@ impl PlayPlan {
                                 state.inv.consume_at(i);
                                 self.send_slots(conn, &mut state.inv, &[i]).await?;
                             }
+                            self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                             continue;
                         }
@@ -13533,6 +13565,7 @@ impl PlayPlan {
                                 state.inv.consume_at(i);
                                 self.send_slots(conn, &mut state.inv, &[i]).await?;
                             }
+                            self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                             continue;
                         }
@@ -13605,9 +13638,9 @@ impl PlayPlan {
                                     continue;
                                 }
                                 placed = true;
+                                self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                                 // `handleUseItemOn`: успешная постановка блока
                                 // взмахивает рукой и сбрасывает заряд удара.
-                                state.vitals.reset_attack();
                                 // Провод ставится крестом (`getStateForPlacement`), дальше — форма и сила.
                                 if crate::redstone::is_wire(&name) {
                                     for k in ["north", "south", "west", "east"] {

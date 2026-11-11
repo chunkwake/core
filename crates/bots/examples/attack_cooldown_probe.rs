@@ -12,6 +12,7 @@ struct Probe {
     sb_attack: i32,
     sb_use_item_on: i32,
     sb_use_item: i32,
+    sb_interact: i32,
     sb_move_pos: i32,
     sb_tick_end: i32,
     cb_chat: i32,
@@ -158,6 +159,14 @@ impl Probe {
         self.c.send_raw(&w.buf).await.unwrap();
     }
 
+    /// Правый клик по сущности (`interact`): успешное взаимодействие тоже
+    /// взмахивает рукой и сбрасывает заряд.
+    async fn interact(&mut self, entity: i32, hand: i32) {
+        let mut w = self.packet(self.sb_interact);
+        w.var_int(entity).var_int(hand).u8(0).bool(false);
+        self.c.send_raw(&w.buf).await.unwrap();
+    }
+
     /// Движение клиента без опоры: сервер копит высоту падения.
     async fn move_down(&mut self, pos: [f64; 3]) {
         let mut w = self.packet(self.sb_move_pos);
@@ -237,6 +246,7 @@ async fn main() {
         sb_attack: sb("attack"),
         sb_use_item_on: sb("use_item_on"),
         sb_use_item: sb("use_item"),
+        sb_interact: sb("interact"),
         sb_move_pos: sb("move_player_pos"),
         sb_tick_end: sb("client_tick_end"),
         cb_chat,
@@ -421,6 +431,63 @@ async fn main() {
     assert!(
         after_use < 2.5,
         "после use_item удар должен быть слабым, снято {after_use}"
+    );
+
+    // Успешный `use_item_on` по двери (открыть/закрыть) тоже сбрасывает заряд.
+    p.clear("spider").await;
+    p.clear("cow").await;
+    p.cmd("item replace entity @s hotbar.0 with minecraft:iron_sword 1")
+        .await;
+    let mut slot = Writer::new();
+    slot.var_int(sb("set_carried_item")).u16(0);
+    p.c.send_raw(&slot.buf).await.unwrap();
+    let dx = bx + 5;
+    for (dy, half) in [(0, "lower"), (1, "upper")] {
+        p.cmd(&format!(
+            "setblock {} {} {} minecraft:oak_door[half={half},facing=north,hinge=left,open=false,powered=false]",
+            dx,
+            by + dy,
+            bz
+        ))
+        .await;
+    }
+    p.pump(900).await;
+    let s_door = p.spawn("spider", spider, spot).await;
+    p.pump(150).await;
+    p.use_on([dx, by, bz], 1, 0).await;
+    p.attack(s_door).await;
+    p.pump(300).await;
+    let after_door = 16.0 - p.data_health().await;
+    assert!(
+        after_door < 2.5,
+        "после клика по двери удар должен быть слабым, снято {after_door}"
+    );
+
+    // Успешное взаимодействие с сущностью (доение коровы ведром во второй
+    // руке) тоже взмахивает и сбрасывает заряд.
+    p.clear("spider").await;
+    p.clear("cow").await;
+    p.cmd("item replace entity @s hotbar.0 with minecraft:iron_sword 1")
+        .await;
+    p.cmd("item replace entity @s weapon.offhand with minecraft:bucket 1")
+        .await;
+    p.pump(900).await;
+    let cow_id = p
+        .spawn(
+            "cow",
+            ty("minecraft:cow"),
+            [bx as f64 + 2.5, by as f64, bz as f64 + 0.5],
+        )
+        .await;
+    let s_mob = p.spawn("spider", spider, spot).await;
+    p.pump(150).await;
+    p.interact(cow_id, 1).await;
+    p.attack(s_mob).await;
+    p.pump(300).await;
+    let after_mob = 16.0 - p.data_health().await;
+    assert!(
+        after_mob < 2.5,
+        "после interact с сущностью удар должен быть слабым, снято {after_mob}"
     );
 
     // Крит: падение с высоты, удар в воздухе — 9 урона.
