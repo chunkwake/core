@@ -168,6 +168,8 @@ struct Ids {
     sb_player_loaded: i32,
     sb_player_command: i32,
     sb_use_item: i32,
+    /// `LOAD_GATED_PACKETS`, разрешённые в id текущей таблицы пакетов.
+    load_gated: [i32; LOAD_GATED_PACKETS.len()],
     commands: i32,
     block_event: i32,
     sound: i32,
@@ -305,7 +307,7 @@ pub struct PlayPlan {
     /// Клиент ещё не загрузился (`!hasClientLoaded`): игровой тик, до
     /// которого игрок неуязвим, `i64::MAX` — экран смерти до респауна.
     /// Общая на все измерения: `clientLoadedTimeoutTimer` живёт в соединении.
-    client_loading: Mutex<FastMap<Uuid, i64>>,
+    client_loading: Mutex<ClientLoading>,
     shutting_down: AtomicBool,
     /// Чанки в радиусе симуляции вокруг игроков: только они тикают.
     ///
@@ -1066,6 +1068,64 @@ impl Online {
 /// `CLIENT_LOADED_TIMEOUT_TIME`: столько тиков после входа или респауна
 /// игрок неуязвим, если клиент не прислал `player_loaded`.
 const CLIENT_LOADED_TIMEOUT: i64 = 60;
+
+/// Пакеты, которые ваниль игнорирует, пока клиент не загрузил мир
+/// (`ServerGamePacketListenerImpl.hasClientLoaded`): движение, атака и взмах,
+/// использование предметов, взаимодействие и команды игрока.
+/// `player_loaded`, `accept_teleportation` и `keep_alive` сюда не входят.
+const LOAD_GATED_PACKETS: [&str; 12] = [
+    "player_action",
+    "use_item_on",
+    "use_item",
+    "attack",
+    "interact",
+    "punch",
+    "player_command",
+    "move_vehicle",
+    "move_player_pos",
+    "move_player_pos_rot",
+    "move_player_rot",
+    "move_player_status_only",
+];
+
+/// `hasClientLoaded` одного соединения: `waitingForRespawn` (`i64::MAX`)
+/// или таймер `clientLoadedTimeoutTimer` до тика `until`.
+/// Нет записи — клиент загружен.
+#[derive(Default)]
+struct ClientLoading {
+    players: FastMap<Uuid, i64>,
+}
+
+impl ClientLoading {
+    fn set(&mut self, uuid: Uuid, now: i64, ticks: Option<i64>) {
+        match ticks {
+            None => {
+                self.players.remove(&uuid);
+            }
+            Some(ticks) => {
+                self.players.insert(uuid, now.saturating_add(ticks));
+                if self.players.len() > 256 {
+                    self.players.retain(|_, until| *until > now);
+                }
+            }
+        }
+    }
+
+    fn loaded(&mut self, uuid: Uuid, now: i64) -> bool {
+        let Some(&until) = self.players.get(&uuid) else {
+            return true;
+        };
+        if now >= until {
+            self.players.remove(&uuid);
+            return true;
+        }
+        false
+    }
+
+    fn remove(&mut self, uuid: Uuid) {
+        self.players.remove(&uuid);
+    }
+}
 
 /// Снимок игрока для сохранения — раз в 5 с.
 const SNAPSHOT_TICKS: u32 = 100;
@@ -2590,6 +2650,10 @@ impl PlayPlan {
             .map(|((s, b), w)| (s, b, w));
         // Режим игры по умолчанию до `/defaultgamemode`.
         let login_game_mode = login.spawn.game_mode;
+        let mut load_gated = [0; LOAD_GATED_PACKETS.len()];
+        for (slot, name) in load_gated.iter_mut().zip(LOAD_GATED_PACKETS) {
+            *slot = sb(name)?;
+        }
         Ok(Self {
             ids: Ids {
                 login: cb("login")?,
@@ -2689,6 +2753,7 @@ impl PlayPlan {
                 sb_player_loaded: sb("player_loaded")?,
                 sb_player_command: sb("player_command")?,
                 sb_use_item: sb("use_item")?,
+                load_gated,
                 commands: cb("commands")?,
                 block_event: cb("block_event")?,
                 sound: cb("sound")?,
@@ -2789,7 +2854,7 @@ impl PlayPlan {
             state_cache: Mutex::new(FastMap::default()),
             controls: Mutex::new(FastMap::default()),
             mob_hits: Mutex::new(FastMap::default()),
-            client_loading: Mutex::new(FastMap::default()),
+            client_loading: Mutex::new(ClientLoading::default()),
             shutting_down: AtomicBool::new(false),
             simulated: Mutex::new(Arc::new(FastSet::default())),
             day_time: AtomicI64::new(0),
@@ -5718,8 +5783,10 @@ impl PlayPlan {
         );
         let mut state = save.as_ref().map(PlayerState::restore).unwrap_or_default();
         let game_mode = *state.game_mode.get_or_insert(self.login.spawn.game_mode);
-        // `clientLoadedTimeoutTimer` на входе равен 0: 60 ставит только
-        // `restartClientLoadTimerAfterRespawn`, а не первый вход.
+        // Конструктор `ServerGamePacketListenerImpl` вызывает
+        // `restartClientLoadTimerAfterRespawn`: на входе клиент тоже не
+        // загружен, пока не придёт `player_loaded` или не истекут 60 тиков.
+        self.set_client_loading(player.uuid, Some(CLIENT_LOADED_TIMEOUT));
         let me = Online {
             entry: PlayerEntry {
                 uuid: player.uuid,
@@ -5814,7 +5881,7 @@ impl PlayPlan {
         // Соединение закрыто: таймеры и `lastHurt` больше не нужны. Без этого
         // умерший и вышедший игрок навсегда оставался в `client_loading`
         // (`i64::MAX` никогда не истекает).
-        self.client_loading.lock().unwrap().remove(&uuid);
+        self.client_loading.lock().unwrap().remove(uuid);
         self.mob_hits.lock().unwrap().remove(&uuid);
         // Немедленно запрашиваем автосохранение, оставляя снимок до подтверждения записи.
         self.snapshot(uuid, &state);
@@ -11560,6 +11627,13 @@ impl PlayPlan {
                     self.count_bytes_in(packet.len() as u64);
                     let mut r = Reader::new(&packet);
                     let id = r.var_int()?;
+                    // `ServerGamePacketListenerImpl.hasClientLoaded`: пока клиент
+                    // не загрузил мир (вход, респаун, экран смерти), движение,
+                    // атака, предметы, взаимодействие и команды игрока
+                    // игнорируются.
+                    if ids.load_gated.contains(&id) && !self.client_loaded(uuid) {
+                        continue;
+                    }
                     if matches!(id, x if x == ids.sb_player_action
                         || x == ids.sb_use_item_on || x == ids.sb_use_item
                         || x == ids.sb_attack || x == ids.sb_interact
@@ -21057,32 +21131,14 @@ impl PlayPlan {
     /// от текущего игрового тика (или `i64::MAX` — до респауна), `None` —
     /// загрузился.
     fn set_client_loading(&self, uuid: Uuid, ticks: Option<i64>) {
-        let mut map = self.client_loading.lock().unwrap();
-        match ticks {
-            None => {
-                map.remove(&uuid);
-            }
-            Some(t) => {
-                let now = self.game_time.load(Ordering::Relaxed);
-                map.insert(uuid, now.saturating_add(t));
-                if map.len() > 256 {
-                    map.retain(|_, until| *until > now);
-                }
-            }
-        }
+        let now = self.game_time.load(Ordering::Relaxed);
+        self.client_loading.lock().unwrap().set(uuid, now, ticks);
     }
 
     /// `hasClientLoaded`: нет ожидания респауна и таймер истёк.
     pub(crate) fn client_loaded(&self, uuid: Uuid) -> bool {
-        let mut map = self.client_loading.lock().unwrap();
-        let Some(&until) = map.get(&uuid) else {
-            return true;
-        };
-        if self.game_time.load(Ordering::Relaxed) >= until {
-            map.remove(&uuid);
-            return true;
-        }
-        false
+        let now = self.game_time.load(Ordering::Relaxed);
+        self.client_loading.lock().unwrap().loaded(uuid, now)
     }
 
     /// Урон игроку: здоровье, анимация у всех, при смерти — сообщение и падение.
@@ -21654,12 +21710,71 @@ fn chunks_around(c: (i32, i32), r: i32, skip: Option<((i32, i32), i32)>) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::{
-        CHEST_SINGLE, ChestState, FastMap, GameModeChange, acknowledge_player_save,
-        add_banner_pattern, chunks_around, container_entity, dominant_axis, game_mode_change,
-        in_view, lectern_page_request, update_container_viewers, within_pick_range,
+        CHEST_SINGLE, ChestState, ClientLoading, FastMap, GameModeChange, LOAD_GATED_PACKETS,
+        acknowledge_player_save, add_banner_pattern, chunks_around, container_entity,
+        dominant_axis, game_mode_change, in_view, lectern_page_request, update_container_viewers,
+        within_pick_range,
     };
     use crate::survival::PlayerState;
     use uuid::Uuid;
+
+    /// `hasClientLoaded`: таймер после входа/респауна, экран смерти и
+    /// снятие ожидания по `player_loaded`.
+    #[test]
+    fn client_loading_expires_and_waits_for_respawn() {
+        let mut loading = ClientLoading::default();
+        let uuid = Uuid::from_u128(1);
+        assert!(loading.loaded(uuid, 0), "нет записи — клиент загружен");
+
+        loading.set(uuid, 100, Some(60));
+        assert!(!loading.loaded(uuid, 159));
+        assert!(loading.loaded(uuid, 160));
+        assert!(loading.loaded(uuid, 161), "истёкшая запись удалена");
+
+        // Экран смерти: ждём респаун, таймер не истекает.
+        loading.set(uuid, 200, Some(i64::MAX));
+        assert!(!loading.loaded(uuid, i64::MAX - 1));
+
+        // `player_loaded` снимает ожидание.
+        loading.set(uuid, 200, None);
+        assert!(loading.loaded(uuid, 200));
+
+        // Выход игрока очищает состояние.
+        loading.set(uuid, 300, Some(60));
+        loading.remove(uuid);
+        assert!(loading.loaded(uuid, 300));
+    }
+
+    /// Список пакетов из `ServerGamePacketListenerImpl`: изменение должно
+    /// быть осознанным, а не случайной правкой.
+    #[test]
+    fn load_gate_matches_vanilla_handlers() {
+        assert_eq!(
+            LOAD_GATED_PACKETS,
+            [
+                "player_action",
+                "use_item_on",
+                "use_item",
+                "attack",
+                "interact",
+                "punch",
+                "player_command",
+                "move_vehicle",
+                "move_player_pos",
+                "move_player_pos_rot",
+                "move_player_rot",
+                "move_player_status_only",
+            ]
+        );
+        for allowed in [
+            "player_loaded",
+            "accept_teleportation",
+            "keep_alive",
+            "client_command",
+        ] {
+            assert!(!LOAD_GATED_PACKETS.contains(&allowed));
+        }
+    }
 
     #[test]
     fn change_game_mode_requires_gamemaster_and_ignores_repeats() {

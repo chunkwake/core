@@ -98,6 +98,9 @@ pub struct Client {
     pub captured_by: Vec<(i32, Vec<u8>)>,
     pub bytes_out: u64,
     pub keep_alives: u64,
+    /// Отправлять `player_loaded` сразу после первого `player_position`.
+    /// Проверки загрузки клиента выключают это, чтобы самим выбрать момент.
+    pub auto_player_loaded: bool,
     sent_player_loaded: bool,
 }
 
@@ -337,6 +340,7 @@ impl Client {
             bytes_in: 0,
             bytes_out: 0,
             keep_alives: 0,
+            auto_player_loaded: true,
             sent_player_loaded: false,
         })
     }
@@ -404,7 +408,7 @@ impl Client {
             w.f32(yaw).f32(pitch);
             self.bytes_out += w.buf.len() as u64;
             self.conn.send(&w.buf).await.map_err(err)?;
-            if !self.sent_player_loaded {
+            if self.auto_player_loaded && !self.sent_player_loaded {
                 let mut loaded = Writer::new();
                 loaded.var_int(self.ids.sb_player_loaded);
                 self.bytes_out += loaded.buf.len() as u64;
