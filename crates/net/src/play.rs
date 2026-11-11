@@ -308,6 +308,8 @@ pub struct PlayPlan {
     /// которого игрок неуязвим, `i64::MAX` — экран смерти до респауна.
     /// Общая на все измерения: `clientLoadedTimeoutTimer` живёт в соединении.
     client_loading: Mutex<ClientLoading>,
+    /// Варианты картин из `painting_variant`.
+    painting_variants: Vec<paintings::PaintingVariant>,
     shutting_down: AtomicBool,
     /// Чанки в радиусе симуляции вокруг игроков: только они тикают.
     ///
@@ -1742,6 +1744,8 @@ pub(crate) struct DimSim {
     minecarts: Mutex<FastMap<i32, minecarts::MinecartEntry>>,
     /// Рамки для предметов по ID сущности.
     item_frames: Mutex<FastMap<i32, item_frames::ItemFrame>>,
+    /// Картины (`Painting`).
+    paintings: Mutex<FastMap<i32, paintings::Painting>>,
     /// Играющие проигрыватели (`JukeboxSongPlayer`).
     jukeboxes: Mutex<FastMap<[i32; 3], jukebox::Playing>>,
     /// Проигрыватели с диска, ещё не разобранные тиком.
@@ -2228,6 +2232,7 @@ mod maps;
 mod minecarts;
 mod minerals;
 mod mobs;
+mod paintings;
 mod poi;
 mod respawn;
 mod section_order;
@@ -2655,6 +2660,7 @@ impl PlayPlan {
         for (slot, name) in load_gated.iter_mut().zip(LOAD_GATED_PACKETS) {
             *slot = sb(name)?;
         }
+        let painting_variants = paintings::load_variants(&survival.data_dir);
         Ok(Self {
             ids: Ids {
                 login: cb("login")?,
@@ -2856,6 +2862,7 @@ impl PlayPlan {
             controls: Mutex::new(FastMap::default()),
             mob_hits: Mutex::new(FastMap::default()),
             client_loading: Mutex::new(ClientLoading::default()),
+            painting_variants,
             shutting_down: AtomicBool::new(false),
             simulated: Mutex::new(Arc::new(FastSet::default())),
             day_time: AtomicI64::new(0),
@@ -9866,6 +9873,7 @@ impl PlayPlan {
         }
         self.explode_minecarts(center, power);
         self.explode_item_frames(center, power);
+        self.explode_paintings(center, power);
     }
 
     fn explosion_exposure(&self, from: [f64; 3], to: [f64; 3]) -> f64 {
@@ -10527,6 +10535,7 @@ impl PlayPlan {
         self.tick_mobs();
         self.tick_minecarts();
         self.tick_item_frames();
+        self.tick_paintings();
         lap(PH_MOBS, watch);
         self.tick_animals();
         self.tick_natural_spawn();
@@ -12031,7 +12040,9 @@ impl PlayPlan {
                             let held = state.inv.slots[state.inv.held_slot()];
                             if self.attack_boat(uuid, target, held, creative, crit).is_some()
                                 || self.attack_minecart(uuid, target, held, creative, crit).is_some()
-                                || (login.spawn.game_mode != 3 && self.attack_item_frame(uuid, target, creative).is_some())
+                                || (login.spawn.game_mode != 3
+                                    && (self.attack_item_frame(uuid, target, creative).is_some()
+                                        || self.attack_painting(uuid, target, creative).is_some()))
                             {
                                 continue;
                             }
@@ -12090,6 +12101,10 @@ impl PlayPlan {
                                 }
                                 minecarts::CartUse::Pass => {}
                             }
+                            continue;
+                        }
+                        // `Painting.interact`: у картины нет действия.
+                        if self.is_painting(it.entity) {
                             continue;
                         }
                         // `ItemFrame.interact`: предмет в рамку или поворот.
@@ -13263,6 +13278,20 @@ impl PlayPlan {
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                             continue;
                         }
+                        // `PaintingItem.useOn`: картина на стену.
+                        if let Some(i) = hand_slot.filter(|_| !state.vitals.dead && login.spawn.game_mode != 3)
+                            && let Some(s) = state.inv.slots[i]
+                            && self.item_name(s.item) == "minecraft:painting"
+                            && self.player_at(uuid).is_some_and(|(p, _, _)| block_reach(eye_of(p), u.pos, if login.spawn.game_mode == 1 { 5.0 } else { 4.5 }))
+                            && self.place_painting(uuid, u.pos, u.face, login.spawn.game_mode == 2)
+                        {
+                            if login.spawn.game_mode != 1 {
+                                state.inv.consume_at(i);
+                                self.send_slots(conn, &mut state.inv, &[i]).await?;
+                            }
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                            continue;
+                        }
                         // `ItemFrameItem.useOn`: рамка на грань блока.
                         if let Some(i) = hand_slot.filter(|_| !state.vitals.dead && login.spawn.game_mode != 3)
                             && let Some(s) = state.inv.slots[i]
@@ -13762,7 +13791,8 @@ impl PlayPlan {
                 self.pick_minecart(target)
                     .map(|(item, bounds)| (Stack::new(item, 1), bounds))
             })
-            .or_else(|| self.pick_item_frame(target))?;
+            .or_else(|| self.pick_item_frame(target))
+            .or_else(|| self.pick_painting(target))?;
         within_pick_range(eye, bounds, range).then_some(item)
     }
 

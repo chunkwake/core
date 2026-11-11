@@ -1688,7 +1688,11 @@ impl PlayPlan {
             };
             for e in list {
                 let Tag::Compound(c) = e else { continue };
-                if self.load_boat(c) || self.load_minecart(c) || self.load_item_frame(c) {
+                if self.load_boat(c)
+                    || self.load_minecart(c)
+                    || self.load_item_frame(c)
+                    || self.load_painting(c)
+                {
                     written.insert(pos);
                     continue;
                 }
@@ -1869,6 +1873,7 @@ impl PlayPlan {
             .into_iter()
             .chain(self.minecarts_nbt())
             .chain(self.item_frames_nbt())
+            .chain(self.paintings_nbt())
         {
             by_chunk.entry(pos).or_default().push(c);
         }
