@@ -13249,6 +13249,7 @@ impl PlayPlan {
                             }
                             self.send_slots(conn, &mut state.inv, &[slot]).await?;
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                            self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                             continue;
                         }
                         // `MapItem.useOn` по знамени: метка на карте (у знамени
@@ -13264,6 +13265,7 @@ impl PlayPlan {
                                 // Отказ (`FAIL`) клиенту не отличим: только подтверждение.
                                 self.use_map_on_banner(map, u.pos);
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                                self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
                                 continue;
                             }
                         }
