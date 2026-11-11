@@ -27,7 +27,7 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -41,7 +41,7 @@ jobs:
       rust: ${{ steps.c.outputs.rust }}
       java: ${{ steps.c.outputs.java }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: c
@@ -75,7 +75,7 @@ jobs:
       CHUNKWAKE_JAR: ${{ github.workspace }}/server.jar
       CHUNKWAKE_API_BUNDLE: none
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Java 25 нужна генератору данных: из jar собирается кэш `generated/26.3`.
       - uses: actions/setup-java@v5
@@ -130,7 +130,7 @@ jobs:
     if: needs.changes.outputs.java == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
