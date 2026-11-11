@@ -565,6 +565,16 @@ impl PlayPlan {
                             e.mob.attack_damage(),
                         ));
                     }
+                    // `Slime.playerTouch` вызывается для каждого игрока,
+                    // чья раздутая рамка пересекла слизня.
+                    for target in std::mem::take(&mut e.mob.touch_strikes) {
+                        strikes.push((
+                            species,
+                            Uuid::from_u128(target),
+                            e.mob.pos,
+                            e.mob.attack_damage(),
+                        ));
+                    }
                     if !e.mob.out.is_empty() {
                         outs.extend(e.mob.out.drain(..).map(|o| (id, o)));
                     }

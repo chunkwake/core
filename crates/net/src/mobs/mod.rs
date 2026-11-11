@@ -517,6 +517,8 @@ pub struct Mob {
     pub target: Option<u128>,
     /// Удар этого тика: кого бить. Забирает и сбрасывает сервер.
     pub strike: Option<u128>,
+    /// Слизень: все игроки, которых он коснулся за тик (`playerTouch`).
+    pub touch_strikes: Vec<u128>,
     /// Тики без дела (`noActionTime`) — для исчезновения.
     pub no_action: u32,
     /// Не исчезает (`persistenceRequired`): с яйца, из команды, от плагина.
@@ -585,6 +587,7 @@ impl Mob {
             custom_name: None,
             target: None,
             strike: None,
+            touch_strikes: Vec::new(),
             no_action: 0,
             persistent: false,
             nav: Navigation::new(species == Species::Spider),
@@ -1157,6 +1160,7 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
     m.tick_count = m.tick_count.wrapping_add(1);
     m.invulnerable = m.invulnerable.saturating_sub(1);
     m.strike = None;
+    m.touch_strikes.clear();
     // `LivingEntity.baseTick`: обидчик забывается через 100 тиков.
     if m.last_hurt_by
         .is_some_and(|(_, t)| m.tick_count.wrapping_sub(t) > 100)
@@ -1209,16 +1213,21 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
         // и на виду (`dealDamage`).
         if cube::deals_damage(m) {
             let (wd, h) = m.size();
-            let touched = s.prey.iter().find(|p| {
-                let pw = PLAYER_SIZE.0 / 2.0 + 1.0;
-                (p.pos[0] - m.pos[0]).abs() < pw + wd / 2.0
-                    && (p.pos[2] - m.pos[2]).abs() < pw + wd / 2.0
-                    && p.pos[1] - 0.5 < m.pos[1] + h
-                    && p.pos[1] + PLAYER_SIZE.1 + 0.5 > m.pos[1]
-                    && in_reach(m, p)
-                    && (s.sight)(m.eye(), p.eye())
-            });
-            m.strike = touched.map(|p| p.uuid);
+            let touched: Vec<u128> = s
+                .prey
+                .iter()
+                .filter(|p| {
+                    let pw = PLAYER_SIZE.0 / 2.0 + 1.0;
+                    (p.pos[0] - m.pos[0]).abs() < pw + wd / 2.0
+                        && (p.pos[2] - m.pos[2]).abs() < pw + wd / 2.0
+                        && p.pos[1] - 0.5 < m.pos[1] + h
+                        && p.pos[1] + PLAYER_SIZE.1 + 0.5 > m.pos[1]
+                        && in_reach(m, p)
+                        && (s.sight)(m.eye(), p.eye())
+                })
+                .map(|p| p.uuid)
+                .collect();
+            m.touch_strikes.extend(touched);
         }
     }
     false
@@ -1679,6 +1688,46 @@ mod tests {
     /// `getFrictionInfluencedSpeed = getSpeed() * 0.216 / f³ = getSpeed()`.
     /// Итоговое ускорение за тик — `speed²`, установившаяся скорость —
     /// `speed² / (1 - 0.6 * 0.91)`: для коровы (0.2) это 0.0881 блока за тик.
+    #[test]
+    fn slime_player_touch_hits_every_overlapping_player() {
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut m = Mob::new(Species::Slime, [8.5, 64.0, 8.5], 1);
+        m.set_size(4, true);
+        m.on_ground = true;
+        let prey = [
+            Prey {
+                uuid: 7,
+                pos: [8.5, 64.0, 8.5],
+            },
+            Prey {
+                uuid: 8,
+                pos: [9.5, 64.0, 8.5],
+            },
+        ];
+        let sight = |_: [f64; 3], _: [f64; 3]| true;
+        let mut rnd = || 0.5;
+        let mut s = Senses {
+            players: &prey,
+            rand: &mut rnd,
+            prey: &prey,
+            tempters: &[],
+            kin: &[],
+            sight: &sight,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: false,
+        };
+        tick(&mut m, &w, &mut s);
+        assert_eq!(m.touch_strikes, vec![7, 8]);
+    }
+
     #[test]
     fn lava_counts_as_liquid_for_cube_mobs() {
         let shape = |_: [i32; 3]| FULL;
