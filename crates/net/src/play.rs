@@ -10918,6 +10918,22 @@ impl PlayPlan {
         Ok(())
     }
 
+    /// `handleUseItem`: успешный `Item.use` взмахивает рукой и сбрасывает
+    /// заряд удара (`swingAndResetAttackStrength`).
+    fn reset_after_use(
+        &self,
+        entity_id: i32,
+        uuid: Uuid,
+        hand: i32,
+        state: &mut PlayerState,
+        swing: &mut (crate::swing::SwingState, Instant),
+    ) {
+        let held = Self::hand_index(&state.inv, hand).and_then(|i| state.inv.slots[i]);
+        if self.swing_use(entity_id, uuid, held, &state.vitals, swing) {
+            state.vitals.reset_attack();
+        }
+    }
+
     async fn session(
         &self,
         conn: &mut Connection,
@@ -12488,6 +12504,7 @@ impl PlayPlan {
                         if !state.vitals.dead && login.spawn.game_mode != 3
                             && self.use_bucket(conn, uuid, &mut state.inv, hand, survival).await?
                         {
+                            self.reset_after_use(me.entity_id, uuid, hand, state, &mut swing);
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                             continue;
                         }
@@ -12506,6 +12523,7 @@ impl PlayPlan {
                             if open {
                                 conn.send(&play::open_book(ids.open_book, hand)).await?;
                             }
+                            self.reset_after_use(me.entity_id, uuid, hand, state, &mut swing);
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                             continue;
                         }
@@ -12538,9 +12556,10 @@ impl PlayPlan {
                                     self.drop_item(items::throw_origin(feet), vel, water, items::THROW_DELAY);
                                 }
                             }
-                            // `ServerPlayerGameMode.useItem`: предмет в руке сменился —
+                            // `ServerPlayerGameMode.useItem`: предмет в руке сменился -
                             // `inventoryMenu.sendAllDataToRemote`.
                             self.send_inventory(conn, &mut state.inv).await?;
+                            self.reset_after_use(me.entity_id, uuid, hand, state, &mut swing);
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                             continue;
                         }
@@ -12557,19 +12576,27 @@ impl PlayPlan {
                                     state.inv.consume_at(slot);
                                     self.send_slots(conn, &mut state.inv, &[slot]).await?;
                                 }
+                                if !at_frame {
+                                    self.reset_after_use(me.entity_id, uuid, hand, state, &mut swing);
+                                }
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                                 continue;
                             }
                             if boats::is_boat_item(item) {
-                                if self.place_boat(uuid, item) && login.spawn.game_mode != 1 {
+                                let placed = self.place_boat(uuid, item);
+                                if placed && login.spawn.game_mode != 1 {
                                     state.inv.consume_at(slot);
                                     self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                }
+                                if placed {
+                                    self.reset_after_use(me.entity_id, uuid, hand, state, &mut swing);
                                 }
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                                 continue;
                             }
                             if item == "minecraft:map" {
                                 self.use_empty_map(conn, uuid, &mut state.inv, slot, login.spawn.game_mode == 1).await?;
+                                self.reset_after_use(me.entity_id, uuid, hand, state, &mut swing);
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                                 continue;
                             }
@@ -12580,6 +12607,7 @@ impl PlayPlan {
                                     state.inv.consume_at(slot);
                                     self.send_slots(conn, &mut state.inv, &[slot]).await?;
                                 }
+                                self.reset_after_use(me.entity_id, uuid, hand, state, &mut swing);
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                                 continue;
                             }
@@ -12614,6 +12642,7 @@ impl PlayPlan {
                                     state.inv.consume_at(slot);
                                     self.send_slots(conn, &mut state.inv, &[slot]).await?;
                                 }
+                                self.reset_after_use(me.entity_id, uuid, hand, state, &mut swing);
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                                 continue;
                             }

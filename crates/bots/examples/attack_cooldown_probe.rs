@@ -11,6 +11,7 @@ struct Probe {
     sb_command: i32,
     sb_attack: i32,
     sb_use_item_on: i32,
+    sb_use_item: i32,
     sb_move_pos: i32,
     sb_tick_end: i32,
     cb_chat: i32,
@@ -148,6 +149,15 @@ impl Probe {
         self.c.send_raw(&w.buf).await.unwrap();
     }
 
+    /// `use_item` по воздуху (снежок, ведро, жемчуг): успешный `Item.use`
+    /// взмахивает рукой и сбрасывает заряд удара.
+    async fn use_air(&mut self, hand: i32) {
+        self.seq += 1;
+        let mut w = self.packet(self.sb_use_item);
+        w.var_int(hand).var_int(self.seq).f32(0.0).f32(0.0);
+        self.c.send_raw(&w.buf).await.unwrap();
+    }
+
     /// Движение клиента без опоры: сервер копит высоту падения.
     async fn move_down(&mut self, pos: [f64; 3]) {
         let mut w = self.packet(self.sb_move_pos);
@@ -226,6 +236,7 @@ async fn main() {
         sb_command: sb("chat_command"),
         sb_attack: sb("attack"),
         sb_use_item_on: sb("use_item_on"),
+        sb_use_item: sb("use_item"),
         sb_move_pos: sb("move_player_pos"),
         sb_tick_end: sb("client_tick_end"),
         cb_chat,
@@ -387,6 +398,29 @@ async fn main() {
     assert!(
         after_place < 2.5,
         "после постановки блока удар должен быть слабым, снято {after_place}"
+    );
+
+    // Успешный `use_item` (снежок из второй руки) тоже взмахивает и
+    // сбрасывает заряд: меч в основной руке бьёт слабо.
+    p.clear("spider").await;
+    p.clear("cow").await;
+    p.cmd("item replace entity @s hotbar.0 with minecraft:iron_sword 1")
+        .await;
+    p.cmd("item replace entity @s weapon.offhand with minecraft:snowball 16")
+        .await;
+    let mut slot = Writer::new();
+    slot.var_int(sb("set_carried_item")).u16(0);
+    p.c.send_raw(&slot.buf).await.unwrap();
+    p.pump(900).await;
+    let s_use = p.spawn("spider", spider, spot).await;
+    p.pump(150).await;
+    p.use_air(1).await;
+    p.attack(s_use).await;
+    p.pump(300).await;
+    let after_use = 16.0 - p.data_health().await;
+    assert!(
+        after_use < 2.5,
+        "после use_item удар должен быть слабым, снято {after_use}"
     );
 
     // Крит: падение с высоты, удар в воздухе — 9 урона.
