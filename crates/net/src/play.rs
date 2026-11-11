@@ -1712,6 +1712,8 @@ pub(crate) struct DimSim {
     redstone_ticks: Mutex<crate::ticks::TickQueue>,
     /// Летящие и воткнутые стрелы по id сущности.
     arrows: Mutex<FastMap<i32, crate::arrows::Arrow>>,
+    /// Облака оседающих зелий (`AreaEffectCloud`).
+    clouds: Mutex<FastMap<i32, area_cloud::Cloud>>,
     /// Летящие глаза Края (`EyeOfEnder`) по ID сущности.
     eyes: Mutex<FastMap<i32, EnderEye>>,
     tnt: Mutex<FastMap<i32, crate::tnt::Primed>>,
@@ -2225,6 +2227,7 @@ fn furnace_kind(block: &str) -> Option<u8> {
 
 use chunkwake_data::world::FURNACES;
 
+mod area_cloud;
 mod armor_stands;
 mod banners;
 mod beacons;
@@ -2520,6 +2523,8 @@ pub struct SurvivalData {
     pub pearl_entity_type: i32,
     pub eye_entity_type: i32,
     pub potion_entity_type: i32,
+    pub lingering_entity_type: i32,
+    pub area_cloud_entity_type: i32,
     pub lightning_entity_type: i32,
     /// Текущая сложность: `/difficulty` меняет её, пока сервер запущен.
     pub difficulty: AtomicU8,
@@ -7032,6 +7037,7 @@ impl PlayPlan {
                     }
                 }
                 ar::ThrownKind::Potion => self.splash_potion(extra, pos, direct_hit),
+                ar::ThrownKind::Lingering => self.spawn_lingering(extra, pos),
             }
         }
         for (id, pos) in stuck {
@@ -7131,14 +7137,15 @@ impl PlayPlan {
         }
     }
 
-    fn splash_potion(&self, extra: u32, pos: [f64; 3], direct_hit: Option<Uuid>) {
+    /// Эффекты из `potion_contents` предмета-зелья (базовый зелья + свои).
+    fn potion_effects(&self, extra: u32) -> Vec<survival::Effect> {
         let patch = chunkwake_protocol::components::get(extra);
         let Some(contents) = patch
             .raw
             .as_deref()
             .and_then(|raw| crate::potions::read_contents(raw, self.survival.potion_component))
         else {
-            return;
+            return Vec::new();
         };
         let mut effects = Vec::new();
         if let Some(id) = contents.potion
@@ -7163,6 +7170,14 @@ impl PlayPlan {
             show_icon: e.show_icon,
             age: 0,
         }));
+        effects
+    }
+
+    fn splash_potion(&self, extra: u32, pos: [f64; 3], direct_hit: Option<Uuid>) {
+        let effects = self.potion_effects(extra);
+        if effects.is_empty() {
+            return;
+        }
         let players: Vec<_> = self
             .hub
             .players
@@ -10565,6 +10580,7 @@ impl PlayPlan {
         self.tick_arrows();
         self.tick_eyes();
         lap(PH_ARROWS, watch);
+        self.tick_area_clouds();
         self.tick_tnt();
         self.tick_lightning();
         self.tick_mobs();
@@ -10658,6 +10674,7 @@ impl DimSim {
             || !self.mobs_loaded.lock().unwrap().is_empty()
             || !self.dropped.lock().unwrap().is_empty()
             || !self.arrows.lock().unwrap().is_empty()
+            || !self.clouds.lock().unwrap().is_empty()
             || !self.eyes.lock().unwrap().is_empty()
             || !self.tnt.lock().unwrap().is_empty()
             || !self.lightning.lock().unwrap().is_empty()
@@ -12558,7 +12575,8 @@ impl PlayPlan {
                                 "minecraft:snowball" => Some((self.survival.snowball_entity_type, crate::arrows::ThrownKind::Snowball, "minecraft:entity.snowball.throw")),
                                 "minecraft:egg" => Some((self.survival.egg_entity_type, crate::arrows::ThrownKind::Egg, "minecraft:entity.egg.throw")),
                                 "minecraft:ender_pearl" => Some((self.survival.pearl_entity_type, crate::arrows::ThrownKind::Pearl, "minecraft:entity.ender_pearl.throw")),
-                                "minecraft:splash_potion" | "minecraft:lingering_potion" => Some((self.survival.potion_entity_type, crate::arrows::ThrownKind::Potion, "minecraft:entity.splash_potion.throw")),
+                                "minecraft:splash_potion" => Some((self.survival.potion_entity_type, crate::arrows::ThrownKind::Potion, "minecraft:entity.splash_potion.throw")),
+                                "minecraft:lingering_potion" => Some((self.survival.lingering_entity_type, crate::arrows::ThrownKind::Lingering, "minecraft:entity.lingering_potion.throw")),
                                 _ => None,
                             };
                             if let Some((ty, kind, sound)) = thrown
@@ -12569,7 +12587,13 @@ impl PlayPlan {
                                 let vel = crate::arrows::shoot(crate::arrows::aim(yaw as f64, pitch as f64, 0.0), 1.5, 1.0, rand::random());
                                 let mut shot = crate::arrows::Arrow::flight(origin, vel, true);
                                 shot.thrown_kind = Some(kind);
-                                if kind == crate::arrows::ThrownKind::Potion { shot.potion_extra = stack.extra; }
+                                if matches!(
+                                    kind,
+                                    crate::arrows::ThrownKind::Potion
+                                        | crate::arrows::ThrownKind::Lingering
+                                ) {
+                                    shot.potion_extra = stack.extra;
+                                }
                                 shot.owner = Some(uuid);
                                 shot.left_owner = false;
                                 self.launch(ty, shot);
@@ -17944,15 +17968,22 @@ impl PlayPlan {
                         self.survival.egg_entity_type,
                         Some(crate::arrows::ThrownKind::Egg),
                     ),
-                    "minecraft:splash_potion" | "minecraft:lingering_potion" => (
+                    "minecraft:splash_potion" => (
                         self.survival.potion_entity_type,
                         Some(crate::arrows::ThrownKind::Potion),
+                    ),
+                    "minecraft:lingering_potion" => (
+                        self.survival.lingering_entity_type,
+                        Some(crate::arrows::ThrownKind::Lingering),
                     ),
                     _ => (self.survival.arrow_entity_type, None),
                 };
                 let mut shot = crate::arrows::Arrow::flight(at, vel, kind.is_some());
                 shot.thrown_kind = kind;
-                if kind == Some(crate::arrows::ThrownKind::Potion) {
+                if matches!(
+                    kind,
+                    Some(crate::arrows::ThrownKind::Potion | crate::arrows::ThrownKind::Lingering)
+                ) {
                     shot.potion_extra = st.extra;
                 }
                 self.launch(ty, shot);

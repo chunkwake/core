@@ -37,6 +37,7 @@ pub enum ThrownKind {
     Egg,
     Pearl,
     Potion,
+    Lingering,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

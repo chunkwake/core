@@ -913,6 +913,18 @@ fn survival_data(
             "minecraft:splash_potion",
         )
         .map_err(s)?,
+        lingering_entity_type: chunkwake_data::registries::builtin_id_of(
+            builtin,
+            "entity_type",
+            "minecraft:lingering_potion",
+        )
+        .map_err(s)?,
+        area_cloud_entity_type: chunkwake_data::registries::builtin_id_of(
+            builtin,
+            "entity_type",
+            "minecraft:area_effect_cloud",
+        )
+        .map_err(s)?,
         lightning_entity_type: chunkwake_data::registries::builtin_id_of(
             builtin,
             "entity_type",

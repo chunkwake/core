@@ -1624,6 +1624,7 @@ pub fn mob_flags(id: i32, entity_id: i32, flags: u8) -> Vec<u8> {
 pub enum Meta {
     Byte(u8),
     Int(i32),
+    Float(f32),
     Bool(bool),
     /// `EntityDataSerializers.ROTATIONS` (id 9): три угла `FLOAT`.
     Rotations([f32; 3]),
@@ -1640,6 +1641,9 @@ pub fn entity_meta(id: i32, entity_id: i32, fields: &[(u8, Meta)]) -> Vec<u8> {
             }
             Meta::Int(n) => {
                 w.u8(i).var_int(1).var_int(n);
+            }
+            Meta::Float(v) => {
+                w.u8(i).var_int(3).f32(v);
             }
             Meta::Bool(b) => {
                 w.u8(i).var_int(8).bool(b);
@@ -1712,6 +1716,18 @@ mod lp_tests {
         assert_eq!(r.f32().unwrap(), 1.5);
         assert_eq!(r.f32().unwrap(), -2.0);
         assert_eq!(r.f32().unwrap(), 3.0);
+        assert_eq!(r.u8().unwrap(), 0xff);
+    }
+
+    #[test]
+    fn float_meta_uses_serializer_3() {
+        let p = entity_meta(1, 2, &[(8, Meta::Float(2.5))]);
+        let mut r = Reader::new(&p);
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.var_int().unwrap(), 2);
+        assert_eq!(r.u8().unwrap(), 8);
+        assert_eq!(r.var_int().unwrap(), 3);
+        assert_eq!(r.f32().unwrap(), 2.5);
         assert_eq!(r.u8().unwrap(), 0xff);
     }
 }

@@ -606,8 +606,11 @@ impl PlayPlan {
                         (pulse.magma && fire_damage, 1.0),
                     ]
                     .into_iter()
-                    .chain([(fx.poison, 1.0), (fx.wither, 1.0)])
-                    {
+                    .chain([
+                        // `PoisonMobEffect`: не добивает, пока здоровье > 1.
+                        (fx.poison && e.mob.health > 1.0, 1.0),
+                        (fx.wither, 1.0),
+                    ]) {
                         if hit
                             && let Some(died) =
                                 mb::hurt(&mut e.mob, amount, mb::Source::default(), 0.0)
@@ -1221,6 +1224,87 @@ impl PlayPlan {
             inv.slots[slot] = Some(s);
         }
         Some(slot)
+    }
+
+    /// Применить один эффект зелья к мобу (`AreaEffectCloud`): `None` —
+    /// не instant, добавляет `active_effects`; иначе лечит/ранит.
+    pub(super) fn mob_potion_effect(
+        &self,
+        id: i32,
+        effect: survival::Effect,
+        instant: survival::Instant,
+        strength: f64,
+    ) -> bool {
+        let mut hit = None;
+        {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            let Some(entry) = mobs.get_mut(&id) else {
+                return false;
+            };
+            if !entry.mob.alive() {
+                return false;
+            }
+            let undead = entry.mob.species.is_undead();
+            let amount = |base: f32| crate::potions::splash_instant_amount(base, strength);
+            let hurt = |entry: &mut MobEntry, amount: f32| {
+                mb::hurt(&mut entry.mob, amount, mb::Source::default(), 0.0)
+            };
+            let mut died_now = None;
+            match instant {
+                survival::Instant::Heal(base) => {
+                    if undead {
+                        died_now = hurt(entry, amount(base));
+                    } else {
+                        entry.mob.health =
+                            (entry.mob.health + amount(base)).min(entry.mob.max_health());
+                    }
+                }
+                survival::Instant::Harm(base) => {
+                    if undead {
+                        entry.mob.health =
+                            (entry.mob.health + amount(base)).min(entry.mob.max_health());
+                    } else {
+                        died_now = hurt(entry, amount(base));
+                    }
+                }
+                survival::Instant::Eat(..) => return false,
+                survival::Instant::None => {
+                    entry.mob.add_effect(effect);
+                    return true;
+                }
+            }
+            if let Some(died) = died_now {
+                hit = Some((died, entry.mob.sound(if died { "death" } else { "hurt" })));
+            }
+        }
+        if let Some((died, sound)) = hit {
+            let mobs = self.sim().mobs.lock().unwrap();
+            if let Some(entry) = mobs.get(&id) {
+                let pos = entry.mob.pos;
+                let volume = entry.mob.volume();
+                let baby = entry.mob.is_baby();
+                let species = entry.mob.species;
+                drop(mobs);
+                self.play_sound(
+                    None,
+                    &sound,
+                    sound_source(species),
+                    pos,
+                    volume,
+                    mob_pitch(baby),
+                );
+                self.hub
+                    .send_about(id, play::hurt_animation(self.ids.hurt_animation, id, 0.0));
+                self.refresh_mob(id);
+                self.emit_vibration(pos, "minecraft:entity_damage");
+                if died {
+                    self.emit_vibration(pos, "minecraft:entity_die");
+                    self.hub
+                        .send_about(id, inv::entity_event(self.ids.entity_event, id, 3));
+                }
+            }
+        }
+        true
     }
 
     /// `ThrownSplashPotion.onHitAsPotion` для мобов: те же эффекты и
