@@ -313,6 +313,14 @@ impl PlayPlan {
                 true,
             );
         }
+        // `Zombie.finalizeSpawn`: шанс ломать двери `specialMultiplier × 0.1`.
+        if finalize && m.species == Species::Zombie {
+            let special = mb::cube::special_multiplier(
+                self.difficulty().id(),
+                self.day_time.load(Ordering::Relaxed),
+            );
+            m.can_break_doors = rand::random::<f32>() < special * 0.1;
+        }
         // Внеочередная экипировка мобов (`finalizeSpawn`): броня по сложности,
         // у зомби — случайное оружие, у скелета — лук.
         if finalize && reason != Some("CONVERSION") {
@@ -460,6 +468,7 @@ impl PlayPlan {
             .collect();
         let peaceful = self.difficulty() == Difficulty::Peaceful;
         let difficulty = self.difficulty().id();
+        let mob_griefing = self.vars.flag("mob_griefing");
         let min_y = self.min_y();
         let weather = self.vars.weather();
         let darken = self.sky_darken_now(dim, weather.rain, weather.thunder);
@@ -536,6 +545,7 @@ impl PlayPlan {
                         difficulty,
                         entity_id: id,
                         bright_outside: darken < 4,
+                        mob_griefing,
                     };
                     let was_grounded = e.mob.on_ground;
                     let old_pos = e.mob.pos;
@@ -1121,6 +1131,11 @@ impl PlayPlan {
         }
         if let Some(Tag::Byte(persistent)) = nbt.get("PersistenceRequired") {
             m.persistent = *persistent != 0;
+        }
+        if m.species == Species::Zombie
+            && let Some(Tag::Byte(breaks)) = nbt.get("CanBreakDoors")
+        {
+            m.can_break_doors = *breaks != 0;
         }
         // `active_effects` заменяет список целиком (`readAdditionalSaveData`).
         if let Some(Tag::List(list)) = nbt.get("active_effects") {
@@ -2159,6 +2174,49 @@ impl PlayPlan {
         }
     }
 
+    /// `BreakDoorGoal`: дверь сломана — обе половины, `block_update` зрителям,
+    /// звук удара (`levelEvent 1021`) и частицы разрушения (`2001`).
+    fn break_mob_door(&self, pos: [i32; 3]) {
+        let Some(state) = self.block(pos) else {
+            return;
+        };
+        let name = self.state_name(state).to_owned();
+        if !name.ends_with("_door") {
+            return;
+        }
+        let Some(offset) = self.survival.placement.partner(state) else {
+            return;
+        };
+        let other = [pos[0] + offset[0], pos[1] + offset[1], pos[2] + offset[2]];
+        let Some(air) = self.survival.block_defaults.get("minecraft:air").copied() else {
+            return;
+        };
+        let mut changed = vec![(pos, state)];
+        if let Some(s) = self.block(other)
+            && self.survival.placement.name(s) == Some(name.as_str())
+        {
+            changed.push((other, s));
+        }
+        let _edit = self.world_edit.lock().unwrap();
+        for (p, _) in changed {
+            self.set_block(p, air);
+            self.hub.send(
+                None,
+                play::block_update(self.ids.block_update, p, air as i32),
+            );
+        }
+        // Ваниль: `levelEvent 2001` только в точке `removeBlock` (верхняя
+        // половина), вторая убирается `updateShape`.
+        self.hub.send(
+            None,
+            play::level_event(self.ids.level_event, 2001, pos, state as i32, false),
+        );
+        self.hub.send(
+            None,
+            play::level_event(self.ids.level_event, 1021, pos, 0, false),
+        );
+    }
+
     /// События целей за тик ([`mb::goals::Out`]): пары, еда овцы, зов на обидчика.
     fn apply_mob_outs(&self, outs: Vec<(i32, mb::goals::Out)>) {
         use mb::goals::Out;
@@ -2255,6 +2313,30 @@ impl PlayPlan {
                     }
                     self.refresh_mob(id);
                 }
+                // `BreakDoorGoal.tick`: звук удара по деревянной двери и взмах.
+                Out::DoorHit(pos) => {
+                    self.hub.send(
+                        None,
+                        play::level_event(self.ids.level_event, 1019, pos, 0, false),
+                    );
+                    self.hub.send_about(
+                        id,
+                        play::swing_animation(self.ids.swing_animation, id, 0, 1, 6),
+                    );
+                }
+                // `Level.destroyBlockProgress`: сетка ломания у зрителей.
+                Out::DoorBreakProgress { pos, progress } => {
+                    self.hub.send(
+                        None,
+                        play::block_destruction(
+                            self.ids.block_destruction,
+                            id,
+                            pos,
+                            progress as i8,
+                        ),
+                    );
+                }
+                Out::DoorBroken(pos) => self.break_mob_door(pos),
                 // `HurtByTargetGoal.alertOthers`: свои того же вида рядом без цели.
                 Out::Alert(attacker) => {
                     let mut mobs = self.sim().mobs.lock().unwrap();
@@ -2471,6 +2553,10 @@ pub(super) fn mob_to_nbt(
     match m.species {
         Species::Zombie => {
             c.insert("IsBaby".into(), Tag::Byte(i8::from(m.is_baby())));
+            c.insert(
+                "CanBreakDoors".into(),
+                Tag::Byte(i8::from(m.can_break_doors)),
+            );
         }
         Species::Sheep => {
             c.insert("Sheared".into(), Tag::Byte(i8::from(m.sheared)));
@@ -2580,6 +2666,7 @@ pub(super) fn mob_from_nbt(
             0
         };
         m.love = 0;
+        m.can_break_doors = byte("CanBreakDoors").is_some_and(|b| b != 0);
     }
     if species == Species::Creeper {
         m.powered = byte("powered").is_some_and(|b| b != 0);
@@ -3618,6 +3705,20 @@ mod tests {
         assert_eq!(back.effects.len(), 1);
         assert_eq!((back.effects[0].id, back.effects[0].amplifier), (2, 1));
         assert_eq!(back.effects[0].duration, 120);
+    }
+
+    #[test]
+    fn mob_nbt_keeps_can_break_doors() {
+        let mut m = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 9);
+        m.can_break_doors = true;
+        let nbt = mob_to_nbt(&m, &std::collections::HashMap::new(), &[]);
+        let back = mob_from_nbt(
+            &nbt,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+        assert!(back.can_break_doors);
     }
 
     #[test]

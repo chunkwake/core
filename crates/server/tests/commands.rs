@@ -167,6 +167,29 @@ fn summon_creates_a_mob() {
 }
 
 #[test]
+fn summon_applies_can_break_doors() {
+    let plan = world!();
+    let y = plan.spawn_point()[1].floor() as i32;
+    assert!(
+        run(
+            &plan,
+            &format!("summon minecraft:zombie 8 {y} 8 {{CanBreakDoors:1b}}")
+        )
+        .contains("commands.summon.success")
+    );
+    let flag = run(
+        &plan,
+        "data get entity @e[type=minecraft:zombie,limit=1] CanBreakDoors",
+    );
+    assert!(flag.contains("1.0"), "{flag}");
+    let has = run(
+        &plan,
+        "execute if entity @e[type=minecraft:zombie] run say zombie",
+    );
+    assert!(has.contains("zombie"), "{has}");
+}
+
+#[test]
 fn tp_moves_a_mob_and_keeps_rotation() {
     let plan = world!();
     let y = plan.spawn_point()[1].floor() as i32;

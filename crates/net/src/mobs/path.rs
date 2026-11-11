@@ -1861,6 +1861,43 @@ mod tests {
     }
 
     #[test]
+    fn closed_wooden_door_needs_can_open_doors() {
+        let shape = solid(|p| p[1] < 64);
+        let kind = |p: [i32; 3]| {
+            if p[2] != 0 {
+                PathType::Blocked
+            } else if p == [2, 64, 0] || p == [2, 65, 0] {
+                PathType::DoorWoodClosed
+            } else if p[1] < 64 {
+                PathType::Blocked
+            } else {
+                PathType::Open
+            }
+        };
+        let cell = move |p: [i32; 3]| Cell {
+            kind: kind(p),
+            flags: 0,
+        };
+        let w = World {
+            shape: &shape,
+            water: &|_| false,
+            cell: Some(&cell),
+            info: None,
+            min_y: -64,
+        };
+        let mut walk = walker([0.5, 64.0, 0.5]);
+        walk.can_open_doors = true;
+        let open = find_path(&w, &walk, &[[4, 64, 0]], 35.0, 0, 560, 1.0).unwrap();
+        assert!(
+            open.reached && cells(&open).contains(&[2, 64, 0]),
+            "{open:?}"
+        );
+        walk.can_open_doors = false;
+        let closed = find_path(&w, &walk, &[[4, 64, 0]], 35.0, 0, 560, 1.0);
+        assert!(closed.as_ref().is_none_or(|p| !p.reached), "{closed:?}");
+    }
+
+    #[test]
     fn goes_around_a_wall() {
         // Стена в два блока x = 3, z от −3 до 3: обход по краю.
         let shape = solid(|p| p[1] < 64 || (p[0] == 3 && (-3..=3).contains(&p[2]) && p[1] < 66));

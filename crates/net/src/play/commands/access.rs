@@ -1315,6 +1315,13 @@ impl PlayPlan {
                     root.insert("Color".into(), Tag::Byte(entry.mob.color as i8));
                     root.insert("Sheared".into(), Tag::Byte(i8::from(entry.mob.sheared)));
                 }
+                crate::mobs::Species::Zombie => {
+                    root.insert("IsBaby".into(), Tag::Byte(i8::from(entry.mob.is_baby())));
+                    root.insert(
+                        "CanBreakDoors".into(),
+                        Tag::Byte(i8::from(entry.mob.can_break_doors)),
+                    );
+                }
                 _ => {}
             }
             if !entry.mob.effects.is_empty() {

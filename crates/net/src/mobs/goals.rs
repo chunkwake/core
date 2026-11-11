@@ -38,6 +38,12 @@ pub enum Out {
     EatStart,
     /// `EatBlockGoal.tick`: съесть траву в клетке (`true`) или дёрн под ногами.
     Eat([i32; 3], bool),
+    /// `BreakDoorGoal.tick`: удар по двери (`levelEvent 1019`) и взмах.
+    DoorHit([i32; 3]),
+    /// `BreakDoorGoal.tick`: прогресс ломания (`destroyBlockProgress`), -1 — сброс.
+    DoorBreakProgress { pos: [i32; 3], progress: i32 },
+    /// `BreakDoorGoal.tick`: дверь сломана (`removeBlock` и события).
+    DoorBroken([i32; 3]),
     /// `HurtByTargetGoal.alertOthers`: позвать своих на обидчика.
     Alert(u128),
     /// `Creeper.tick`: набухание началось (звук `creeper.primed`, `prime_fuse`).
@@ -198,6 +204,8 @@ pub enum Goal {
     LookAround { rel: [f64; 2], time: i32 },
     /// `EatBlockGoal`.
     EatBlock { tick: i32 },
+    /// `BreakDoorGoal`: закрытая деревянная дверь в узлах пути.
+    BreakDoor(BreakDoor),
     /// `MeleeAttackGoal`; `zombie` — `ZombieAttackGoal` (поднятые руки).
     Melee(Box<Melee>),
     /// `NearestAttackableTargetGoal<Player>(mustSee = true)`.
@@ -232,6 +240,31 @@ pub enum Goal {
     CubeRandomDir { chosen: f32, next: i32 },
     /// `CubeMobKeepOnJumpingGoal`: прыгать дальше.
     CubeKeepJumping,
+}
+
+/// Состояние `BreakDoorGoal`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BreakDoor {
+    /// Верхняя половина двери (ванильный `DoorInteractGoal.doorPos`).
+    pub door: Option<[i32; 3]>,
+    pub break_time: i32,
+    pub last_progress: i32,
+}
+
+impl BreakDoor {
+    pub fn new() -> Self {
+        Self {
+            door: None,
+            break_time: 0,
+            last_progress: -1,
+        }
+    }
+}
+
+impl Default for BreakDoor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Состояние `MeleeAttackGoal`.
@@ -359,6 +392,7 @@ impl Goal {
             Goal::LookAtPlayer { .. } => LOOK,
             Goal::LookAround { .. } => MOVE | LOOK,
             Goal::EatBlock { .. } => MOVE | LOOK | JUMP,
+            Goal::BreakDoor(_) => 0,
             Goal::NearestPlayer { .. } | Goal::HurtBy { .. } => TARGET,
             Goal::Swell { .. } | Goal::FleeSun { .. } => MOVE,
             Goal::RangedBow(_) => MOVE | LOOK,
@@ -379,6 +413,7 @@ impl Goal {
                 | Goal::RangedBow(_)
                 | Goal::CubeFloat
                 | Goal::CubeAttack { .. }
+                | Goal::BreakDoor(_)
         )
     }
 }
@@ -526,6 +561,59 @@ pub fn move_to(m: &mut Mob, c: &mut Ctx, to: [f64; 3], reach: i32, speed: f64) -
         .nav
         .path_to(c.w, &walk, to, reach, m.species.follow_range());
     m.nav.move_to(c.w, &walk, found, speed)
+}
+
+/// `DoorInteractGoal`: расстояние по горизонтали до центра двери.
+fn door_flat_dist2(pos: [f64; 3], door: [i32; 3]) -> f64 {
+    let dx = pos[0] - (f64::from(door[0]) + 0.5);
+    let dz = pos[2] - (f64::from(door[2]) + 0.5);
+    dx * dx + dz * dz
+}
+
+/// `doorPos.closerToCenterThan(mob.position(), 2.0)`.
+fn door_close(pos: [f64; 3], door: [i32; 3]) -> bool {
+    let dx = pos[0] - (f64::from(door[0]) + 0.5);
+    let dy = pos[1] - (f64::from(door[1]) + 0.5);
+    let dz = pos[2] - (f64::from(door[2]) + 0.5);
+    dx * dx + dy * dy + dz * dz < 4.0
+}
+
+/// `DoorBlock.isWoodenDoor` для закрытой двери: тип клетки пути.
+fn wooden_door_closed(w: &World, p: [i32; 3]) -> bool {
+    path::cell(w, p).kind == path::PathType::DoorWoodClosed
+}
+
+fn door_open(w: &World, p: [i32; 3]) -> bool {
+    path::cell(w, p).kind == path::PathType::DoorOpen
+}
+
+/// `BreakDoorGoal.canUse`/`DoorInteractGoal.canUse`.
+fn break_door_can_use(g: &mut BreakDoor, m: &Mob, c: &Ctx) -> bool {
+    if !m.can_break_doors || c.s.difficulty != 3 || !c.s.mob_griefing || !m.horizontal_collision {
+        return false;
+    }
+    let Some(path) = m.nav.path.as_ref().filter(|p| !p.is_done()) else {
+        return false;
+    };
+    g.door = None;
+    for i in 0..path.nodes.len().min(path.next + 2) {
+        let n = path.nodes[i].0;
+        // Ванильный `DoorInteractGoal` берёт блок над узлом пути.
+        let door = [n[0], n[1] + 1, n[2]];
+        if door_flat_dist2(m.pos, door) > 2.25 || !wooden_door_closed(c.w, door) {
+            continue;
+        }
+        g.door = Some(door);
+        return true;
+    }
+    // `blockPosition().above()`.
+    let b = m.pos.map(|v| v.floor() as i32);
+    let door = [b[0], b[1] + 1, b[2]];
+    if wooden_door_closed(c.w, door) {
+        g.door = Some(door);
+        return true;
+    }
+    false
 }
 
 // --- Случайные точки (`RandomPos`, `DefaultRandomPos`, `LandRandomPos`) ----
@@ -904,6 +992,7 @@ fn can_use(g: &mut Goal, m: &mut Mob, c: &mut Ctx) -> bool {
             m.target.is_none() && (m.on_ground || super::in_liquid(m, c.w))
         }
         Goal::CubeKeepJumping => true,
+        Goal::BreakDoor(g) => break_door_can_use(g, m, c),
         Goal::Leap { target, .. } => {
             let Some(p) = m.target.and_then(|t| c.player(t)) else {
                 return false;
@@ -958,6 +1047,17 @@ fn can_continue(g: &mut Goal, m: &mut Mob, c: &mut Ctx) -> bool {
             }
         }
         Goal::CubeFloat | Goal::CubeRandomDir { .. } | Goal::CubeKeepJumping => can_use(g, m, c),
+        Goal::BreakDoor(g) => {
+            let Some(door) = g.door else {
+                return false;
+            };
+            // `BreakDoorGoal.canContinueToUse`: 240 тиков, дверь ещё закрыта,
+            // моб рядом, сложность всё ещё сложная.
+            g.break_time <= 240
+                && !door_open(c.w, door)
+                && door_close(m.pos, door)
+                && c.s.difficulty == 3
+        }
         // `Goal.canContinueToUse` по умолчанию — снова `canUse`.
         Goal::Float | Goal::Tempt { .. } | Goal::Swell { .. } | Goal::RestrictSun => {
             can_use(g, m, c)
@@ -1047,6 +1147,10 @@ fn start(g: &mut Goal, m: &mut Mob, c: &mut Ctx) {
             m.vel = [v[0], *y, v[2]];
         }
         Goal::CubeAttack { tired } => *tired = reduced(300),
+        Goal::BreakDoor(g) => {
+            g.break_time = 0;
+            g.last_progress = -1;
+        }
         Goal::Float
         | Goal::Breed { .. }
         | Goal::Tempt { .. }
@@ -1095,6 +1199,16 @@ fn stop(g: &mut Goal, m: &mut Mob, c: &mut Ctx) {
             m.using_item = None;
         }
         Goal::RestrictSun => m.nav.avoid_sun = false,
+        Goal::BreakDoor(g) => {
+            // `BreakDoorGoal.stop`: убрать сетку ломания.
+            if let Some(door) = g.door {
+                m.out.push(Out::DoorBreakProgress {
+                    pos: door,
+                    progress: -1,
+                });
+            }
+            g.door = None;
+        }
         Goal::Float
         | Goal::Panic { .. }
         | Goal::LookAround { .. }
@@ -1181,6 +1295,25 @@ fn tick(g: &mut Goal, m: &mut Mob, c: &mut Ctx) {
                 } else if c.info(below).grass_block {
                     m.out.push(Out::Eat(below, false));
                 }
+            }
+        }
+        Goal::BreakDoor(g) => {
+            let Some(door) = g.door else { return };
+            // `BreakDoorGoal.tick`: раз в 20 тиков звук удара и взмах.
+            if c.next_int(20) == 0 {
+                m.out.push(Out::DoorHit(door));
+            }
+            g.break_time += 1;
+            let progress = (g.break_time * 10 / 240).min(10);
+            if progress != g.last_progress {
+                g.last_progress = progress;
+                m.out.push(Out::DoorBreakProgress {
+                    pos: door,
+                    progress,
+                });
+            }
+            if g.break_time == 240 {
+                m.out.push(Out::DoorBroken(door));
             }
         }
         Goal::Melee(g) => melee_tick(g, m, c),
@@ -1381,6 +1514,7 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
         Species::Zombie => {
             return (
                 Selector::new(vec![
+                    (1, Goal::BreakDoor(BreakDoor::new())),
                     (3, Goal::Melee(Box::new(Melee::new(1.0, true)))),
                     stroll_at(7, 1.0),
                     look(8, 8.0),
@@ -1559,6 +1693,7 @@ mod tests {
                             Goal::CubeAttack { .. } => "cube_attack",
                             Goal::CubeRandomDir { .. } => "cube_direction",
                             Goal::CubeKeepJumping => "cube_jump",
+                            Goal::BreakDoor(_) => "break_door",
                             _ => "?",
                         },
                     )
@@ -1607,7 +1742,13 @@ mod tests {
         );
         assert_eq!(
             pri(Species::Zombie),
-            [(3, "melee"), (7, "stroll"), (8, "look"), (8, "around")]
+            [
+                (1, "break_door"),
+                (3, "melee"),
+                (7, "stroll"),
+                (8, "look"),
+                (8, "around")
+            ]
         );
         assert_eq!(
             pri(Species::Creeper),
@@ -1651,5 +1792,71 @@ mod tests {
                 (2, "cube_attack")
             ]
         );
+    }
+
+    #[test]
+    fn break_door_goal_breaks_wooden_door_on_hard() {
+        let shape = |_: [i32; 3]| crate::mobs::FULL;
+        let water = |_: [i32; 3]| false;
+        let cell = |p: [i32; 3]| path::Cell {
+            kind: if p == [0, 65, 0] {
+                path::PathType::DoorWoodClosed
+            } else {
+                path::PathType::Open
+            },
+            flags: 0,
+        };
+        let w = World {
+            shape: &shape,
+            water: &water,
+            cell: Some(&cell),
+            info: None,
+            min_y: -64,
+        };
+        let mut m = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 1);
+        m.can_break_doors = true;
+        m.horizontal_collision = true;
+        m.nav.path = Some(path::Path {
+            nodes: vec![([0, 64, 0], path::PathType::WalkableDoor)],
+            next: 0,
+            target: [0, 64, 0],
+            reached: false,
+            dist_to_target: 0.0,
+        });
+        let mut goals = Selector::new(vec![(1, Goal::BreakDoor(BreakDoor::new()))]);
+        let sight = |_: [f64; 3], _: [f64; 3]| true;
+        let mut rnd = || 0.5;
+        let mut s = Senses {
+            players: &[],
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &sight,
+            difficulty: 3,
+            entity_id: 1,
+            bright_outside: false,
+            mob_griefing: true,
+        };
+        let mut c = Ctx { w: &w, s: &mut s };
+        let mut last = -1;
+        let mut broken = false;
+        for _ in 0..240 {
+            m.out.clear();
+            goals.tick(&mut m, &mut c);
+            for out in &m.out {
+                match out {
+                    Out::DoorBreakProgress { progress, .. } => last = *progress,
+                    Out::DoorBroken(pos) => broken = *pos == [0, 65, 0],
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(last, 10);
+        assert!(broken);
+        let Goal::BreakDoor(g) = &goals.goals[0].goal else {
+            panic!("цель сменилась");
+        };
+        assert_eq!(g.break_time, 240);
     }
 }

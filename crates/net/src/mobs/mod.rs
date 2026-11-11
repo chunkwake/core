@@ -634,6 +634,10 @@ pub struct Mob {
     pub no_action: u32,
     /// Не исчезает (`persistenceRequired`): с яйца, из команды, от плагина.
     pub persistent: bool,
+    /// `Zombie.canBreakDoors`: ломает деревянные двери (`BreakDoorGoal`).
+    pub can_break_doors: bool,
+    /// `Entity.horizontalCollision` прошлого хода: условие `DoorInteractGoal`.
+    pub horizontal_collision: bool,
     /// Навигация по пути (`GroundPathNavigation`).
     pub nav: Navigation,
     /// `MoveControl`.
@@ -711,6 +715,8 @@ impl Mob {
             touch_strikes: Vec::new(),
             no_action: 0,
             persistent: false,
+            can_break_doors: false,
+            horizontal_collision: false,
             nav: Navigation::new(species == Species::Spider),
             move_ctl: MoveControl::default(),
             move_speed: 0.0,
@@ -1007,6 +1013,8 @@ pub struct Senses<'a> {
     pub entity_id: i32,
     /// `Level.isBrightOutside`: день без грозы (`skyDarken < 4`).
     pub bright_outside: bool,
+    /// `GameRules.MOB_GRIEFING`: ломание дверей.
+    pub mob_griefing: bool,
 }
 
 /// Игрок, которого монстр может выбрать целью.
@@ -1318,7 +1326,7 @@ pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walke
         speed: m.move_speed as f32,
         // `FloatGoal` ставит `setCanFloat(true)`: его нет у зомби и скелета.
         can_float: !matches!(m.species, Species::Zombie | Species::Skeleton),
-        can_open_doors: false,
+        can_open_doors: m.can_break_doors,
         can_pass_doors: true,
         can_walk_over_fences: false,
         malus: if animal { path::ANIMAL_MALUS } else { &[] },
@@ -1415,6 +1423,7 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
         m.no_jump_delay = 0;
     }
     let blocked = travel(m, m.zza, w);
+    m.horizontal_collision = blocked;
     m.jump = false;
     // `Spider.tick`: лезет, пока упёрся.
     if m.species == Species::Spider {
@@ -1984,6 +1993,7 @@ mod tests {
             difficulty: 2,
             entity_id: 1,
             bright_outside: false,
+            mob_griefing: false,
         };
         tick(&mut m, &w, &mut s);
         assert_eq!(m.touch_strikes, vec![7, 8]);
@@ -2033,6 +2043,7 @@ mod tests {
             difficulty: 2,
             entity_id: 1,
             bright_outside: false,
+            mob_griefing: false,
         };
         // Первые тики — разгон от нуля (за 30 тиков скорость сходится до 1e-8).
         for _ in 0..30 {
@@ -2190,6 +2201,7 @@ mod tests {
             difficulty: 2,
             entity_id: 1,
             bright_outside: false,
+            mob_griefing: false,
         };
         let mut max_x: f64 = 0.0;
         for _ in 0..200 {
@@ -2234,6 +2246,7 @@ mod tests {
             difficulty: 2,
             entity_id: 1,
             bright_outside: false,
+            mob_griefing: false,
         };
         let start = m.pos;
         let mut ran = false;
@@ -2269,6 +2282,7 @@ mod tests {
             difficulty: 2,
             entity_id: 1,
             bright_outside: false,
+            mob_griefing: false,
         };
         let gone = (0..30).position(|_| tick(&mut m, &w, &mut s));
         assert_eq!(gone, Some(19));
@@ -2298,6 +2312,7 @@ mod tests {
             difficulty: 2,
             entity_id: 1,
             bright_outside: false,
+            mob_griefing: false,
         };
         for _ in 0..100 {
             tick(&mut m, &w, &mut s);
@@ -2449,6 +2464,7 @@ mod tests {
             difficulty: 2,
             entity_id: 1,
             bright_outside: false,
+            mob_griefing: false,
         };
         let mut strikes = Vec::new();
         for t in 0..ticks {
@@ -2508,6 +2524,7 @@ mod tests {
             difficulty: 2,
             entity_id: 1,
             bright_outside: false,
+            mob_griefing: false,
         };
         let mut hit = None;
         for t in 0..400 {
@@ -2603,6 +2620,7 @@ mod tests {
             difficulty: 2,
             entity_id: 1,
             bright_outside: false,
+            mob_griefing: false,
         };
         // `mob_path_probe` на `server.jar`: (тик движения, x, z) относительно
         // игрока по шаговым дельтам `move_entity` (трекер шлёт раз в 3 тика).
@@ -2730,6 +2748,7 @@ mod tests {
             difficulty: 2,
             entity_id: 1,
             bright_outside: false,
+            mob_griefing: false,
         };
         tick(&mut m, &w, &mut s);
         assert_eq!(m.target, Some(7));
@@ -2776,6 +2795,7 @@ mod tests {
                 difficulty: 2,
                 entity_id: 1,
                 bright_outside: false,
+                mob_griefing: false,
             };
             tick(&mut m, &w, &mut s);
             assert_eq!(m.target, None);
@@ -2814,6 +2834,7 @@ mod tests {
             difficulty: 2,
             entity_id: 1,
             bright_outside: false,
+            mob_griefing: false,
         };
         for _ in 0..10 {
             tick(&mut z, &w, &mut s);
@@ -3076,6 +3097,7 @@ mod tests {
             difficulty,
             entity_id: 1,
             bright_outside: false,
+            mob_griefing: false,
         };
         let mut outs = Vec::new();
         for t in 0..ticks {
@@ -3146,6 +3168,7 @@ mod tests {
             difficulty: 2,
             entity_id: 1,
             bright_outside: false,
+            mob_griefing: false,
         };
         for _ in 0..12 {
             assert!(!tick(&mut m, &w, &mut s));
@@ -3281,6 +3304,7 @@ mod tests {
             difficulty: 2,
             entity_id: 1,
             bright_outside: false,
+            mob_griefing: false,
         };
         let y0 = m.pos[1];
         tick(&mut m, &w, &mut s);
