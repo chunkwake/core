@@ -1,23 +1,36 @@
 <div align="center">
 
-# ⛏️ Chunkwake
+<a href="https://chunkwake.github.io/ru/"><img src="docs/assets/icon.svg" width="76" height="76" alt="Chunkwake"></a>
+
+# Chunkwake
 
 **Серверное ядро Minecraft Java Edition 26.3, написанное с нуля на Rust.<br>
 Ванильное поведение 1 в 1 и плагины Paper и Folia без переписывания.**
 
-[![CI](https://github.com/chunkwake/core/actions/workflows/ci.yml/badge.svg?branch=ver/26.3)](https://github.com/chunkwake/core/actions/workflows/ci.yml)
-[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
-![Minecraft 26.3](https://img.shields.io/badge/Minecraft-26.3-62B47A)
-![Rust stable](https://img.shields.io/badge/Rust-stable-DEA584?logo=rust)
-![Paper API](https://img.shields.io/badge/Paper%20API-26.3-2F80ED)
-![Folia schedulers](https://img.shields.io/badge/Folia-schedulers-8A2BE2)
+[![CI](https://img.shields.io/github/actions/workflow/status/chunkwake/core/ci.yml?branch=ver/26.3&label=CI&style=flat-square&labelColor=202020&color=9DB283)](https://github.com/chunkwake/core/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-A6A092?style=flat-square&labelColor=202020)](LICENSE)
+![Minecraft 26.3](https://img.shields.io/badge/Minecraft-26.3-9DB283?style=flat-square&labelColor=202020)
+![Rust stable](https://img.shields.io/badge/Rust-stable-C2A98A?style=flat-square&labelColor=202020&logo=rust&logoColor=181818)
+![Paper API](https://img.shields.io/badge/Paper%20API-26.3-8FA3B8?style=flat-square&labelColor=202020)
+![Folia schedulers](https://img.shields.io/badge/Folia-schedulers-A6A092?style=flat-square&labelColor=202020)
+
+![готово](https://img.shields.io/badge/%D0%BC%D0%B5%D1%85%D0%B0%D0%BD%D0%B8%D0%BA%D0%B8-66%20%D0%B3%D0%BE%D1%82%D0%BE%D0%B2%D0%BE-9DB283?style=flat-square&labelColor=202020)
+![частично](https://img.shields.io/badge/%D0%BC%D0%B5%D1%85%D0%B0%D0%BD%D0%B8%D0%BA%D0%B8-31%20%D1%87%D0%B0%D1%81%D1%82%D0%B8%D1%87%D0%BD%D0%BE-C7A96B?style=flat-square&labelColor=202020)
+![не начато](https://img.shields.io/badge/%D0%BC%D0%B5%D1%85%D0%B0%D0%BD%D0%B8%D0%BA%D0%B8-10%20%D0%BD%D0%B5%20%D0%BD%D0%B0%D1%87%D0%B0%D1%82%D0%BE-7A7A75?style=flat-square&labelColor=202020)
 
 [Быстрый старт](#быстрый-старт) ·
 [Что уже работает](#что-уже-работает) ·
 [Плагины](#плагины) ·
 [Архитектура](#архитектура) ·
 [Участие](#участие) ·
+[Сайт](https://chunkwake.github.io/ru/) ·
 [English](#english)
+
+<a href="https://chunkwake.github.io/ru/">
+  <img src="docs/assets/og-ru.png" width="760" alt="Chunkwake — сервер Minecraft на Rust">
+</a>
+
+<sub><a href="https://chunkwake.github.io/ru/">chunkwake.github.io</a></sub>
 
 </div>
 
@@ -174,6 +187,20 @@ flowchart LR
         B <--> J[JVM<br/>paper-api.jar + api-impl]
         J --- P[(plugins/*.jar)]
     end
+
+    classDef client fill:#202020,stroke:#303030,color:#E7E7E7
+    classDef rust fill:#202020,stroke:#9DB283,color:#E7E7E7
+    classDef bridge fill:#202020,stroke:#C7A96B,color:#E7E7E7
+    classDef jvm fill:#202020,stroke:#8FA3B8,color:#E7E7E7
+    classDef plugins fill:#141414,stroke:#A6A092,color:#E7E7E7
+
+    style S fill:#181818,stroke:#303030,color:#9A9A96
+
+    class C client
+    class N,W rust
+    class B bridge
+    class J jvm
+    class P plugins
 ```
 
 - **JVM внутри процесса.** Сервер поднимает её через JNI. Плагины получают
