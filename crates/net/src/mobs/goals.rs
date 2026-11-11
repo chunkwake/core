@@ -46,6 +46,8 @@ pub enum Out {
     Explode(f32),
     /// `AbstractSkeleton.performRangedAttack`: стрела в игрока с силой лука.
     Shoot { target: u128, power: f32 },
+    /// Слизень прыгнул (`jump`) или шлёпнулся на землю: звук `jump`/`squish`.
+    CubeSound { jump: bool },
 }
 
 /// Сородич рядом: для `BreedGoal` и `FollowParentGoal`.
@@ -222,6 +224,14 @@ pub enum Goal {
     FleeSun { speed: f64, to: [f64; 3] },
     /// `LeapAtTargetGoal`.
     Leap { y: f64, target: Option<u128> },
+    /// `CubeMobFloatGoal`: всплывать прыжками.
+    CubeFloat,
+    /// `CubeMobAttackGoal`: смотреть на цель и прыгать к ней, пока не устал.
+    CubeAttack { tired: i32 },
+    /// `CubeMobRandomDirectionGoal`: новое направление раз в 40–100 тиков.
+    CubeRandomDir { chosen: f32, next: i32 },
+    /// `CubeMobKeepOnJumpingGoal`: прыгать дальше.
+    CubeKeepJumping,
 }
 
 /// Состояние `MeleeAttackGoal`.
@@ -354,6 +364,8 @@ impl Goal {
             Goal::RangedBow(_) => MOVE | LOOK,
             Goal::RestrictSun => 0,
             Goal::Leap { .. } => JUMP | MOVE,
+            Goal::CubeFloat | Goal::CubeKeepJumping => JUMP | MOVE,
+            Goal::CubeAttack { .. } | Goal::CubeRandomDir { .. } => LOOK,
         }
     }
 
@@ -365,6 +377,8 @@ impl Goal {
                 | Goal::Melee(_)
                 | Goal::Swell { .. }
                 | Goal::RangedBow(_)
+                | Goal::CubeFloat
+                | Goal::CubeAttack { .. }
         )
     }
 }
@@ -835,6 +849,8 @@ fn can_use(g: &mut Goal, m: &mut Mob, c: &mut Ctx) -> bool {
             *found =
                 c.s.prey
                     .iter()
+                    // `Slime`: цель не дальше 4 блоков по высоте.
+                    .filter(|p| m.species != Species::Slime || (p.pos[1] - m.pos[1]).abs() <= 4.0)
                     .filter(|p| combat_ok(m, c, p, range, true))
                     .min_by(|a, b| dist2(a.pos, eye).total_cmp(&dist2(b.pos, eye)))
                     .map(|p| p.uuid);
@@ -882,6 +898,12 @@ fn can_use(g: &mut Goal, m: &mut Mob, c: &mut Ctx) -> bool {
             }
             false
         }
+        Goal::CubeFloat => super::in_water(m, c.w),
+        Goal::CubeAttack { .. } => m.target.and_then(|t| c.prey(t)).is_some(),
+        Goal::CubeRandomDir { .. } => {
+            m.target.is_none() && (m.on_ground || super::in_water(m, c.w))
+        }
+        Goal::CubeKeepJumping => true,
         Goal::Leap { target, .. } => {
             let Some(p) = m.target.and_then(|t| c.player(t)) else {
                 return false;
@@ -929,6 +951,13 @@ fn can_continue(g: &mut Goal, m: &mut Mob, c: &mut Ctx) -> bool {
         Goal::RangedBow(_) => m.target.is_some() || !m.nav.is_done(),
         Goal::FleeSun { .. } => !m.nav.is_done(),
         Goal::Leap { .. } => !m.on_ground,
+        Goal::CubeAttack { tired } => {
+            m.target.and_then(|t| c.prey(t)).is_some() && {
+                *tired -= 1;
+                *tired > 0
+            }
+        }
+        Goal::CubeFloat | Goal::CubeRandomDir { .. } | Goal::CubeKeepJumping => can_use(g, m, c),
         // `Goal.canContinueToUse` по умолчанию — снова `canUse`.
         Goal::Float | Goal::Tempt { .. } | Goal::Swell { .. } | Goal::RestrictSun => {
             can_use(g, m, c)
@@ -1017,7 +1046,13 @@ fn start(g: &mut Goal, m: &mut Mob, c: &mut Ctx) {
             }
             m.vel = [v[0], *y, v[2]];
         }
-        Goal::Float | Goal::Breed { .. } | Goal::Tempt { .. } => {}
+        Goal::CubeAttack { tired } => *tired = reduced(300),
+        Goal::Float
+        | Goal::Breed { .. }
+        | Goal::Tempt { .. }
+        | Goal::CubeFloat
+        | Goal::CubeRandomDir { .. }
+        | Goal::CubeKeepJumping => {}
     }
 }
 
@@ -1064,7 +1099,11 @@ fn stop(g: &mut Goal, m: &mut Mob, c: &mut Ctx) {
         | Goal::Panic { .. }
         | Goal::LookAround { .. }
         | Goal::FleeSun { .. }
-        | Goal::Leap { .. } => {}
+        | Goal::Leap { .. }
+        | Goal::CubeFloat
+        | Goal::CubeAttack { .. }
+        | Goal::CubeRandomDir { .. }
+        | Goal::CubeKeepJumping => {}
     }
 }
 
@@ -1153,6 +1192,28 @@ fn tick(g: &mut Goal, m: &mut Mob, c: &mut Ctx) {
             };
         }
         Goal::RangedBow(g) => bow_tick(g, m, c),
+        Goal::CubeFloat => {
+            if c.next_float() < 0.8 {
+                m.jump = true;
+            }
+            m.cube.set_wanted_movement(1.2);
+        }
+        Goal::CubeAttack { .. } => {
+            if let Some(p) = m.target.and_then(|t| c.prey(t)) {
+                look_at(m, &p, 10.0, 10.0);
+            }
+            let deals = super::cube::deals_damage(m);
+            m.cube.set_direction(m.yaw, deals);
+        }
+        Goal::CubeRandomDir { chosen, next } => {
+            *next -= 1;
+            if *next <= 0 {
+                *next = reduced(40 + c.next_int(60));
+                *chosen = c.next_int(360) as f32;
+            }
+            m.cube.set_direction(*chosen, false);
+        }
+        Goal::CubeKeepJumping => m.cube.set_wanted_movement(1.0),
         Goal::Panic { .. }
         | Goal::Stroll { .. }
         | Goal::NearestPlayer { .. }
@@ -1386,6 +1447,25 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
                 Selector::new(vec![hurt_by(1, false), nearest(2, true)]),
             );
         }
+        // `AbstractCubeMob.registerGoals` + `Slime`: атака (2) после
+        // направления и прыжков; цель — игрок, железный голем (3) пропущен.
+        Species::Slime => {
+            return (
+                Selector::new(vec![
+                    (1, Goal::CubeFloat),
+                    (
+                        4,
+                        Goal::CubeRandomDir {
+                            chosen: 0.0,
+                            next: 0,
+                        },
+                    ),
+                    (5, Goal::CubeKeepJumping),
+                    (2, Goal::CubeAttack { tired: 0 }),
+                ]),
+                Selector::new(vec![nearest(1, false)]),
+            );
+        }
         _ => {}
     }
     // Животные: `Cow`, `Pig`, `Sheep`, `Chicken`. У овцы своя нумерация:
@@ -1475,6 +1555,10 @@ mod tests {
                             Goal::RestrictSun => "restrict_sun",
                             Goal::FleeSun { .. } => "flee_sun",
                             Goal::Leap { .. } => "leap",
+                            Goal::CubeFloat => "cube_float",
+                            Goal::CubeAttack { .. } => "cube_attack",
+                            Goal::CubeRandomDir { .. } => "cube_direction",
+                            Goal::CubeKeepJumping => "cube_jump",
                             _ => "?",
                         },
                     )
@@ -1556,6 +1640,15 @@ mod tests {
                 (5, "stroll"),
                 (6, "look"),
                 (6, "around")
+            ]
+        );
+        assert_eq!(
+            pri(Species::Slime),
+            [
+                (1, "cube_float"),
+                (4, "cube_direction"),
+                (5, "cube_jump"),
+                (2, "cube_attack")
             ]
         );
     }

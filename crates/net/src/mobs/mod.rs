@@ -7,6 +7,7 @@
 //! монстров, горения на солнце и исчезновения (`Mob.checkDespawn`): они не
 //! трогают мир напрямую, а получают его через замыкания и проверяются тестами.
 
+pub mod cube;
 pub mod goals;
 pub mod path;
 
@@ -118,6 +119,7 @@ pub enum Species {
     Creeper,
     Skeleton,
     Spider,
+    Slime,
 }
 
 /// Всё о виде в одном месте. Встроенные значения — запасные: при старте
@@ -187,7 +189,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 8] = [
+const BUILTIN: [SpeciesInfo; 9] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -291,6 +293,22 @@ const BUILTIN: [SpeciesInfo; 8] = [
             "minecraft:entities/spider",
         )
     },
+    // `AbstractCubeMob`: числа размера 1; дальше всё множит `Mob::cube_size`.
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (0.52, 0.52),
+        eye_height: 0.325,
+        max_health: 1.0,
+        speed: 0.3,
+        attack_damage: 1.0,
+        volume: 0.4,
+        ambient: false,
+        ..base(
+            "minecraft:slime",
+            "minecraft:entity.slime",
+            "minecraft:entities/slime",
+        )
+    },
 ];
 
 static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
@@ -326,7 +344,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 8] = [
+    pub const ALL: [Species; 9] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -335,6 +353,7 @@ impl Species {
         Species::Creeper,
         Species::Skeleton,
         Species::Spider,
+        Species::Slime,
     ];
 
     /// Данные вида: выгрузка, если она установлена, иначе встроенные.
@@ -527,6 +546,11 @@ pub struct Mob {
     pub ignited: bool,
     /// Скелет: тики натяжения лука (`getTicksUsingItem`); `None` — не тянет.
     pub using_item: Option<i32>,
+    /// Слизень: размер (`AbstractCubeMob.ID_SIZE`, 1..127), прошлое
+    /// касание земли (`wasOnGround`) и `CubeMobMoveControl`.
+    pub cube_size: i32,
+    pub was_on_ground: bool,
+    pub cube: cube::CubeMove,
 }
 
 impl Mob {
@@ -579,11 +603,17 @@ impl Mob {
             powered: false,
             ignited: false,
             using_item: None,
+            cube_size: 1,
+            was_on_ground: false,
+            cube: cube::CubeMove::default(),
         }
     }
 
     /// Скорость с поправкой детёныша зомби (`Zombie.SPEED_MODIFIER_BABY`: +50 % базы).
     pub fn speed(&self) -> f64 {
+        if self.species == Species::Slime {
+            return cube::speed(self.cube_size);
+        }
         let base = self.species.speed();
         if self.species == Species::Zombie && self.is_baby() {
             base * 1.5
@@ -595,6 +625,9 @@ impl Mob {
     /// Высота глаз над ногами с учётом детёныша.
     pub fn eye_height(&self) -> f64 {
         let eye = self.species.eye_height();
+        if self.species == Species::Slime {
+            return eye * f64::from(self.cube_size);
+        }
         if self.is_baby() { eye * 0.5 } else { eye }
     }
 
@@ -637,11 +670,68 @@ impl Mob {
     /// Ширина и высота с учётом детёныша (`getScale` 0.5).
     pub fn size(&self) -> (f64, f64) {
         let (w, h) = self.species.size();
+        if self.species == Species::Slime {
+            let k = f64::from(self.cube_size);
+            return (w * k, h * k);
+        }
         if self.is_baby() {
             (w * 0.5, h * 0.5)
         } else {
             (w, h)
         }
+    }
+
+    /// Атрибут `max_health`: у слизня — квадрат размера (`setSize`).
+    pub fn max_health(&self) -> f32 {
+        if self.species == Species::Slime {
+            (self.cube_size * self.cube_size) as f32
+        } else {
+            self.species.max_health()
+        }
+    }
+
+    /// Атрибут `attack_damage`: у слизня — размер.
+    pub fn attack_damage(&self) -> f32 {
+        if self.species == Species::Slime {
+            self.cube_size as f32
+        } else {
+            self.species.attack_damage()
+        }
+    }
+
+    /// Опыт за убийство игроком: у слизня `xpReward` = размер.
+    pub fn xp(&self, r: f64) -> i32 {
+        if self.species == Species::Slime {
+            self.cube_size
+        } else {
+            self.species.xp(self.is_baby(), r)
+        }
+    }
+
+    /// `getSoundVolume`: у слизня 0.4 × размер.
+    pub fn volume(&self) -> f32 {
+        if self.species == Species::Slime {
+            0.4 * self.cube_size as f32
+        } else {
+            self.species.volume()
+        }
+    }
+
+    /// Звук `kind` (`hurt`, `death`): у маленького слизня — `<kind>_small`.
+    pub fn sound(&self, kind: &str) -> String {
+        if self.species == Species::Slime && self.cube_size <= 1 {
+            format!("{}.{kind}_small", self.species.sound())
+        } else {
+            format!("{}.{kind}", self.species.sound())
+        }
+    }
+
+    /// `AbstractCubeMob.setSize`: размер 1..127, здоровье не выше нового
+    /// максимума, `heal` — полное.
+    pub fn set_size(&mut self, size: i32, heal: bool) {
+        self.cube_size = size.clamp(1, 127);
+        let max = self.max_health();
+        self.health = if heal { max } else { self.health.min(max) };
     }
 
     /// Попадает ли луч в рамку моба (для подбора цели по ближайшему).
@@ -993,12 +1083,7 @@ pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walke
         on_ground: m.on_ground,
         in_water,
         step: m.species.info().step_height as f32,
-        max_fall: path::max_fall_distance(
-            m.target.is_some(),
-            m.health,
-            m.species.max_health(),
-            difficulty,
-        ),
+        max_fall: path::max_fall_distance(m.target.is_some(), m.health, m.max_health(), difficulty),
         speed: m.move_speed as f32,
         // `FloatGoal` ставит `setCanFloat(true)`: его нет у зомби и скелета.
         can_float: !matches!(m.species, Species::Zombie | Species::Skeleton),
@@ -1034,8 +1119,13 @@ fn server_ai_step(m: &mut Mob, w: &World, s: &mut Senses) {
     if let Some((to, speed)) = m.nav.tick(w, &walk, m.species.follow_range()) {
         m.move_ctl.set_wanted(to, speed);
     }
-    path::move_control(m, w, water);
-    goals::look_tick(m);
+    if m.species == Species::Slime {
+        // `CubeMobMoveControl` сам ставит голову и тело; `LookControl` не трогает.
+        cube::move_control(m, s.rand);
+    } else {
+        path::move_control(m, w, water);
+        goals::look_tick(m);
+    }
 }
 
 /// Тик моба (`LivingEntity.tick` → `aiStep`). Возвращает `true`, когда моб исчез.
@@ -1097,6 +1187,25 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
     // `Spider.tick`: лезет, пока упёрся.
     if m.species == Species::Spider {
         m.climbing = blocked;
+    }
+    if m.species == Species::Slime {
+        cube::after_tick(m);
+        // `Player.aiStep` → `Slime.playerTouch`: игрок, чья рамка (раздутая
+        // на 1, 0.5, 1) задевает слизня, получает удар, если тот в досягаемости
+        // и на виду (`dealDamage`).
+        if cube::deals_damage(m) {
+            let (wd, h) = m.size();
+            let touched = s.prey.iter().find(|p| {
+                let pw = PLAYER_SIZE.0 / 2.0 + 1.0;
+                (p.pos[0] - m.pos[0]).abs() < pw + wd / 2.0
+                    && (p.pos[2] - m.pos[2]).abs() < pw + wd / 2.0
+                    && p.pos[1] - 0.5 < m.pos[1] + h
+                    && p.pos[1] + PLAYER_SIZE.1 + 0.5 > m.pos[1]
+                    && in_reach(m, p)
+                    && (s.sight)(m.eye(), p.eye())
+            });
+            m.strike = touched.map(|p| p.uuid);
+        }
     }
     false
 }

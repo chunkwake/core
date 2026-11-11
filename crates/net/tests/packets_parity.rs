@@ -29,7 +29,6 @@ const UNHANDLED: &[&str] = &[
     "lock_difficulty",
     "ping_request",
     "place_recipe",
-    "player_loaded",
     "pong",
     "recipe_book_change_settings",
     "recipe_book_seen_recipe",

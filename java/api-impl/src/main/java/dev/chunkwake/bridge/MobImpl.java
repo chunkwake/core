@@ -49,6 +49,7 @@ final class MobImpl {
             case "creeper" -> org.bukkit.entity.Creeper.class;
             case "skeleton" -> org.bukkit.entity.Skeleton.class;
             case "spider" -> org.bukkit.entity.Spider.class;
+            case "slime" -> org.bukkit.entity.Slime.class;
             default -> throw new IllegalArgumentException("chunkwake: no mob " + species);
         };
     }
@@ -56,13 +57,13 @@ final class MobImpl {
     /** Вид для {@link EntityType}; {@code null} — такого моба сервер не умеет. */
     static String species(EntityType type) {
         return switch (type) {
-            case COW, PIG, SHEEP, CHICKEN, ZOMBIE, CREEPER, SKELETON, SPIDER -> type.name().toLowerCase(Locale.ROOT);
+            case COW, PIG, SHEEP, CHICKEN, ZOMBIE, CREEPER, SKELETON, SPIDER, SLIME -> type.name().toLowerCase(Locale.ROOT);
             default -> null;
         };
     }
 
     static String species(Class<?> type) {
-        for (String s : new String[] {"cow", "pig", "sheep", "chicken", "zombie", "creeper", "skeleton", "spider"}) {
+        for (String s : new String[] {"cow", "pig", "sheep", "chicken", "zombie", "creeper", "skeleton", "spider", "slime"}) {
             if (type.isAssignableFrom(iface(s)) && iface(s).isAssignableFrom(type)) {
                 return s;
             }
@@ -194,6 +195,7 @@ final class MobImpl {
             case "zombie", "skeleton" -> 1.74;
             case "creeper" -> 1.445;
             case "spider" -> 0.65;
+            case "slime" -> 0.325 * getSize();
             default -> 1.3;
         } * (isAdult() ? 1 : 0.5);
     }
@@ -237,6 +239,10 @@ final class MobImpl {
     public int getLoveModeTicks() { return (int) num(13); }
     public void setLoveModeTicks(int ticks) { set("love " + ticks); }
     public boolean isLoveMode() { return getLoveModeTicks() > 0; }
+
+    /** `Slime.getSize`: размер 1..127. */
+    public int getSize() { return (int) num(14); }
+    public void setSize(int size) { set("size " + size); }
 
     public boolean isSheared() { return num(10) != 0; }
     public void setSheared(boolean v) { set("sheared " + (v ? 1 : 0)); }
@@ -306,6 +312,14 @@ final class MobImpl {
                 var e = new CreatureSpawnEvent(mob(f), CreatureSpawnEvent.SpawnReason.valueOf(f[5]));
                 plugins.callEvent(e);
                 yield e.isCancelled() ? "c" : "";
+            }
+            // Paper: отмена или число детей не больше 0 — без деления.
+            case Bridge.EVENT_SLIME_SPLIT -> {
+                String[] f = arg.split(" ");
+                var e = new org.bukkit.event.entity.SlimeSplitEvent(
+                        (org.bukkit.entity.AbstractCubeMob) mob(f), Integer.parseInt(f[2]));
+                plugins.callEvent(e);
+                yield e.isCancelled() ? "c" : String.valueOf(e.getCount());
             }
             case Bridge.EVENT_BREED -> {
                 String[] f = arg.split(" ");

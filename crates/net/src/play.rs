@@ -165,6 +165,7 @@ struct Ids {
     disconnect: i32,
     container_close: i32,
     sb_client_command: i32,
+    sb_player_loaded: i32,
     sb_player_command: i32,
     sb_use_item: i32,
     commands: i32,
@@ -1054,6 +1055,10 @@ impl Online {
     }
 }
 
+/// `CLIENT_LOADED_TIMEOUT_TIME`: столько тиков после входа или респауна
+/// игрок неуязвим, если клиент не прислал `player_loaded`.
+const CLIENT_LOADED_TIMEOUT: i64 = 60;
+
 /// Снимок игрока для сохранения — раз в 5 с.
 const SNAPSHOT_TICKS: u32 = 100;
 
@@ -1679,6 +1684,12 @@ pub(crate) struct DimSim {
     populated: Mutex<FastSet<(i32, i32)>>,
     /// Прочитанные с диска мобы: тик заберёт их в `mobs` (регион может читаться из самого тика).
     mobs_loaded: Mutex<Vec<mobs::MobEntry>>,
+    /// Неуязвимость игрока к ударам мобов (`invulnerableTime`, `lastHurt`):
+    /// тик последнего удара и его сила.
+    mob_hits: Mutex<FastMap<Uuid, (i64, f32)>>,
+    /// Клиент ещё не загрузился (`!hasClientLoaded`): игровой тик, до
+    /// которого игрок неуязвим, `i64::MAX` — экран смерти до респауна.
+    client_loading: Mutex<FastMap<Uuid, i64>>,
     /// Чанки `entities/`, где по последней записи были мобы.
     entity_written: Mutex<FastSet<(i32, i32)>>,
     /// Новые заселённые чанки, ещё не записанные.
@@ -2673,6 +2684,7 @@ impl PlayPlan {
                 disconnect: cb("disconnect")?,
                 container_close: cb("container_close")?,
                 sb_client_command: sb("client_command")?,
+                sb_player_loaded: sb("player_loaded")?,
                 sb_player_command: sb("player_command")?,
                 sb_use_item: sb("use_item")?,
                 commands: cb("commands")?,
@@ -5702,6 +5714,8 @@ impl PlayPlan {
         );
         let mut state = save.as_ref().map(PlayerState::restore).unwrap_or_default();
         let game_mode = *state.game_mode.get_or_insert(self.login.spawn.game_mode);
+        // Новое соединение: `clientLoadedTimeoutTimer` = 60.
+        self.set_client_loading(player.uuid, Some(CLIENT_LOADED_TIMEOUT));
         let me = Online {
             entry: PlayerEntry {
                 uuid: player.uuid,
@@ -12427,6 +12441,13 @@ impl PlayPlan {
                         }
                         continue;
                     }
+                    if id == ids.sb_player_loaded {
+                        // `handleAcceptPlayerLoad` → `markClientLoaded`.
+                        if !state.vitals.dead {
+                            self.set_client_loading(uuid, None);
+                        }
+                        continue;
+                    }
                     if id == ids.sb_client_command {
                         let command = r.var_int()?;
                         // После титров Края клиент просит респаун живым:
@@ -12440,6 +12461,7 @@ impl PlayPlan {
                                 self.spawn_points.lock().unwrap().insert(uuid, None);
                             }
                             self.switch_player_dimension_look(uuid, at.dim, at.pos, at.look);
+                            self.set_client_loading(uuid, Some(CLIENT_LOADED_TIMEOUT));
                             continue;
                         }
                         if command == inv::PERFORM_RESPAWN && state.vitals.dead {
@@ -21022,6 +21044,38 @@ impl PlayPlan {
         .await
     }
 
+    /// `ServerGamePacketListenerImpl.clientLoadedTimeoutTimer`: `Some(тиков)`
+    /// от текущего игрового тика (или `i64::MAX` — до респауна), `None` —
+    /// загрузился.
+    fn set_client_loading(&self, uuid: Uuid, ticks: Option<i64>) {
+        let mut map = self.sim().client_loading.lock().unwrap();
+        match ticks {
+            None => {
+                map.remove(&uuid);
+            }
+            Some(t) => {
+                let now = self.game_time.load(Ordering::Relaxed);
+                map.insert(uuid, now.saturating_add(t));
+                if map.len() > 256 {
+                    map.retain(|_, until| *until > now);
+                }
+            }
+        }
+    }
+
+    /// `hasClientLoaded`: нет ожидания респауна и таймер истёк.
+    pub(crate) fn client_loaded(&self, uuid: Uuid) -> bool {
+        let mut map = self.sim().client_loading.lock().unwrap();
+        let Some(&until) = map.get(&uuid) else {
+            return true;
+        };
+        if self.game_time.load(Ordering::Relaxed) >= until {
+            map.remove(&uuid);
+            return true;
+        }
+        false
+    }
+
     /// Урон игроку: здоровье, анимация у всех, при смерти — сообщение и падение.
     #[allow(clippy::too_many_arguments)]
     async fn hurt(
@@ -21050,6 +21104,10 @@ impl PlayPlan {
         cause: Cause,
         origin: Option<[f64; 3]>,
     ) -> Result<(), NetError> {
+        // `ServerPlayer.isInvulnerableTo`: пока клиент не загрузился, урона нет.
+        if !self.client_loaded(me.entry.uuid) {
+            return Ok(());
+        }
         self.wake_player(me.entry.uuid);
         let mut amount = survival::resisted(
             amount,
@@ -21161,6 +21219,8 @@ impl PlayPlan {
         cause: Cause,
     ) -> Result<(), NetError> {
         self.wake_player(me.entry.uuid);
+        // `markClientUnloadedAfterDeath`: неуязвим до респауна.
+        self.set_client_loading(me.entry.uuid, Some(i64::MAX));
         self.leave_boat(me.entry.uuid, 0.0);
         self.leave_minecart(me.entry.uuid);
         if let Some((pos, _, _)) = self.player_at(me.entry.uuid) {
@@ -21319,6 +21379,8 @@ impl PlayPlan {
         }
         v.respawn();
         let uuid = me.entry.uuid;
+        // `restartClientLoadTimerAfterRespawn`.
+        self.set_client_loading(uuid, Some(CLIENT_LOADED_TIMEOUT));
         // `PlayerList.respawn`: точка игрока (кровать, якорь в Аду, команда)
         // в своём измерении; пропавший блок — спавн мира, точка стирается.
         let mut at = self.respawn_target(uuid, true);

@@ -553,7 +553,8 @@ final class ChunkwakeServer {
                 || kind == Bridge.EVENT_CAMPFIRE_START || kind == Bridge.EVENT_COOK) {
             return BlockEvents.fire(api.getPluginManager(), world, kind, arg);
         }
-        if (kind == Bridge.EVENT_MOB_DEATH || kind == Bridge.EVENT_CREATURE_SPAWN || kind == Bridge.EVENT_BREED) {
+        if (kind == Bridge.EVENT_MOB_DEATH || kind == Bridge.EVENT_CREATURE_SPAWN || kind == Bridge.EVENT_BREED
+                || kind == Bridge.EVENT_SLIME_SPLIT) {
             return MobImpl.fire(api.getPluginManager(), kind, arg);
         }
         if (kind == Bridge.EVENT_PISTON) {

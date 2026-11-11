@@ -270,6 +270,18 @@ impl Eval<'_> {
                             this("sheared").as_deref() == Some(if w { "true" } else { "false" })
                         })
                     }
+                    // Слизень: размер (`size` — число или `{min, max}`).
+                    ("this", "minecraft:type_specific/cube_mob") => {
+                        let have: Option<i64> = this("size").and_then(|s| s.parse().ok());
+                        match v.get("size") {
+                            None => true,
+                            Some(Value::Object(r)) => have.is_some_and(|n| {
+                                r.get("min").and_then(Value::as_i64).is_none_or(|b| n >= b)
+                                    && r.get("max").and_then(Value::as_i64).is_none_or(|b| n <= b)
+                            }),
+                            Some(w) => w.as_i64().is_some_and(|w| have == Some(w)),
+                        }
+                    }
                     (_, "minecraft:equipment") => v
                         .get("mainhand")
                         .is_some_and(|h| self.tool_matches(Some(h))),
@@ -535,6 +547,47 @@ mod tests {
             ]
         );
         assert_eq!(run("true", 1, 2), [("minecraft:cooked_mutton".into(), 3)]);
+    }
+
+    #[test]
+    fn slime_balls_only_from_smallest() {
+        let mut l = BlockLoot::default();
+        // `entities/slime` 26.3 без ветки лягушки (её урона нет — условие ложно).
+        l.tables.insert(
+            "minecraft:entities/slime".into(),
+            json!({"pools": [{"rolls": 1,
+                "condition": {"type": "minecraft:entity_properties", "entity": "this",
+                    "predicate": {"minecraft:type_specific/cube_mob": {"size": 1}}},
+                "entries": [{"type": "minecraft:item", "name": "minecraft:slime_ball",
+                    "condition": {"type": "minecraft:inverted", "term": {
+                        "type": "minecraft:damage_source_properties",
+                        "predicate": {"source_entity": {"minecraft:entity_type": "minecraft:frog"}}}},
+                    "modifier": [{"type": "minecraft:set_count",
+                        "count": {"type": "minecraft:uniform", "min": 0, "max": 2}}]}]}]}),
+        );
+        let run = |size: &str, rng: &mut rand::rngs::StdRng| {
+            let props = |k: &str| (k == "size").then(|| size.to_owned());
+            roll(
+                &l,
+                &Ctx {
+                    prop: &|_| None,
+                    block: "minecraft:entities/slime",
+                    tool: None,
+                    level: &|_| 0,
+                    entity: Some(&props),
+                    killed_by_player: true,
+                    smelt: &|_| None,
+                },
+                rng,
+            )
+        };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(5);
+        let small: i32 = (0..300)
+            .flat_map(|_| run("1", &mut rng))
+            .map(|(_, n)| n)
+            .sum();
+        assert!((200..400).contains(&small), "{small}");
+        assert!((0..50).all(|_| run("2", &mut rng).is_empty()));
     }
 
     #[test]

@@ -260,6 +260,9 @@ final class PluginManagerImpl {
         if (has(org.bukkit.event.entity.EntityBreedEvent.getHandlerList())) {
             mask |= Bridge.listenBit(Bridge.EVENT_BREED);
         }
+        if (has(org.bukkit.event.entity.SlimeSplitEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_SLIME_SPLIT);
+        }
         if (has(org.bukkit.event.player.PlayerShearEntityEvent.getHandlerList())) {
             mask |= Bridge.listenBit(Bridge.EVENT_SHEAR);
         }

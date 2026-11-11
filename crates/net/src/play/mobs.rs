@@ -36,6 +36,7 @@ struct MobMeta {
     ignited: bool,
     climbing: bool,
     using_item: bool,
+    cube_size: i32,
 }
 
 impl MobMeta {
@@ -46,6 +47,7 @@ impl MobMeta {
             ignited: m.ignited,
             climbing: m.climbing,
             using_item: m.using_item.is_some(),
+            cube_size: m.cube_size,
         }
     }
 
@@ -70,6 +72,10 @@ impl MobMeta {
             // `Spider.DATA_FLAGS_ID`: бит 1 — лезет.
             Species::Spider if changed(|m| m.climbing) => {
                 out.push((16, Meta::Byte(u8::from(self.climbing))));
+            }
+            // `AbstractCubeMob.ID_SIZE` (после полей `AgeableMob` на 16 и 17).
+            Species::Slime if old.is_none_or(|o| o.cube_size != self.cube_size) => {
+                out.push((18, Meta::Int(self.cube_size)));
             }
             // `LivingEntity.DATA_LIVING_ENTITY_FLAGS`: 1 — тянет предмет основной рукой.
             Species::Skeleton if changed(|m| m.using_item) => {
@@ -172,6 +178,20 @@ impl PlayPlan {
         baby: bool,
         reason: Option<&str>,
     ) -> Option<i32> {
+        self.spawn_mob_with(species, pos, yaw, baby, reason, |_| {})
+    }
+
+    /// [`Self::spawn_mob`] с правкой моба до рассылки (`setup`: размер детей
+    /// слизня, имя и постоянство от родителя).
+    pub(crate) fn spawn_mob_with(
+        &self,
+        species: Species,
+        pos: [f64; 3],
+        yaw: f32,
+        baby: bool,
+        reason: Option<&str>,
+        setup: impl FnOnce(&mut Mob),
+    ) -> Option<i32> {
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
         let mut m = Mob::new(species, pos, rand::random());
         (m.yaw, m.head_yaw) = (yaw, yaw);
@@ -181,9 +201,21 @@ impl PlayPlan {
         if species == Species::Sheep {
             m.color = sheep_color(rand::random());
         }
+        // `Slime.finalizeSpawn`: случайный размер 1, 2 или 4.
+        if species == Species::Slime {
+            let special = mb::cube::special_multiplier(
+                self.difficulty().id(),
+                self.day_time.load(Ordering::Relaxed),
+            );
+            m.set_size(
+                mb::cube::spawn_size(rand::random(), rand::random(), special),
+                true,
+            );
+        }
         // Исчезать вдали от игроков могут только природные: с яйца, из команды
         // и от плагина моб остаётся (`setPersistenceRequired`).
         m.persistent = !matches!(reason, Some("NATURAL" | "CHUNK_GEN"));
+        setup(&mut m);
         let packets = self.mob_packets(id, &m);
         let tracked = self.mob_tracked(id, &m);
         self.sim().mobs.lock().unwrap().insert(id, MobEntry::new(m));
@@ -439,7 +471,7 @@ impl PlayPlan {
                         e.fall = 0.0;
                         None
                     };
-                    let (width, height) = e.mob.species.size();
+                    let (width, height) = e.mob.size();
                     let view =
                         crate::environment::probe(e.mob.pos, width, height, height * 0.85, |p| {
                             self.environment_kind(w.block(p))
@@ -522,7 +554,12 @@ impl PlayPlan {
                         }
                     }
                     if let Some(target) = e.mob.strike.take() {
-                        strikes.push((species, Uuid::from_u128(target), e.mob.pos));
+                        strikes.push((
+                            species,
+                            Uuid::from_u128(target),
+                            e.mob.pos,
+                            e.mob.attack_damage(),
+                        ));
                     }
                     if !e.mob.out.is_empty() {
                         outs.extend(e.mob.out.drain(..).map(|o| (id, o)));
@@ -630,8 +667,8 @@ impl PlayPlan {
             }
             self.hub.remove_tracked(&despawned);
         }
-        for (species, target, from) in strikes {
-            self.mob_strike(species, target, from);
+        for (species, target, from, damage) in strikes {
+            self.mob_strike(species, target, from, damage);
         }
         if !blasts.is_empty() {
             let ids: Vec<i32> = blasts.iter().map(|b| b.0).collect();
@@ -648,6 +685,30 @@ impl PlayPlan {
         }
         self.apply_mob_outs(outs);
         if !gone.is_empty() {
+            // `Slime.remove`: число детей решается (и `SlimeSplitEvent` идёт),
+            // пока умерший ещё в мире.
+            let splits: Vec<(i32, i32)> = {
+                let mobs = self.sim().mobs.lock().unwrap();
+                gone.iter()
+                    .filter(|id| {
+                        mobs.get(id)
+                            .is_some_and(|e| e.mob.species == Species::Slime && e.mob.cube_size > 1)
+                    })
+                    .map(|&id| (id, 2 + rand::random::<u32>().rem_euclid(3) as i32))
+                    .collect()
+            };
+            let splits: Vec<(i32, i32)> = splits
+                .into_iter()
+                .filter_map(|(id, count)| {
+                    let reply =
+                        self.sync_event(Event::SlimeSplit, || format!("{id} slime {count}"));
+                    match reply.as_deref().map(str::trim) {
+                        Some("c") => None,
+                        Some(n) if !n.is_empty() => n.parse().ok().map(|n: i32| (id, n)),
+                        _ => Some((id, count)),
+                    }
+                })
+                .collect();
             let dead: Vec<(i32, MobEntry)> = {
                 let mut mobs = self.sim().mobs.lock().unwrap();
                 gone.iter()
@@ -657,6 +718,9 @@ impl PlayPlan {
             self.hub.remove_tracked(&gone);
             for (id, e) in dead {
                 self.mob_loot(id, &e);
+                if let Some(&(_, count)) = splits.iter().find(|s| s.0 == id) {
+                    self.slime_split(&e.mob, count);
+                }
             }
         }
     }
@@ -743,10 +807,12 @@ impl PlayPlan {
         let color = SHEEP_COLORS[m.color as usize % 16];
         let sheared = m.sheared;
         let on_fire = e.environment.burning > 0;
+        let size = m.cube_size;
         let props = move |k: &str| match k {
             "color" => Some(color.to_owned()),
             "sheared" => Some(sheared.to_string()),
             "on_fire" => Some(on_fire.to_string()),
+            "size" => Some(size.to_string()),
             _ => None,
         };
         let smelt = |name: &str| {
@@ -774,7 +840,7 @@ impl PlayPlan {
                 })
                 .collect();
         let mut xp = if e.killer.is_some() {
-            m.species.xp(m.is_baby(), rand::random())
+            m.xp(rand::random())
         } else {
             0
         };
@@ -859,7 +925,7 @@ impl PlayPlan {
         }
         let knock = mb::KNOCKBACK
             * (1.0 + level("minecraft:knockback") as f64 + f64::from(u8::from(sprinting)));
-        let (result, mpos, species, baby) = {
+        let (result, mpos, species, baby, sound) = {
             let mut mobs = self.sim().mobs.lock().unwrap();
             let e = mobs.get_mut(&target)?;
             // Дальше 3 блоков (+ запас на задержку) не бьём.
@@ -881,7 +947,12 @@ impl PlayPlan {
             if r == Some(true) {
                 e.killer = Some((uuid, slot as i32));
             }
-            (r, e.mob.pos, e.mob.species, e.mob.is_baby())
+            let died = r == Some(true);
+            let sound = (
+                e.mob.sound(if died { "death" } else { "hurt" }),
+                e.mob.volume(),
+            );
+            (r, e.mob.pos, e.mob.species, e.mob.is_baby(), sound)
         };
         let died = result?;
         self.emit_vibration(mpos, "minecraft:entity_damage");
@@ -899,17 +970,12 @@ impl PlayPlan {
         if let Some(data) = packets.and_then(|p| p.into_iter().nth(2)) {
             self.hub.send_about(target, data);
         }
-        let sound = format!(
-            "{}.{}",
-            species.sound(),
-            if died { "death" } else { "hurt" }
-        );
         self.play_sound(
             None,
-            &sound,
+            &sound.0,
             sound_source(species),
             mpos,
-            species.volume(),
+            sound.1,
             mob_pitch(baby),
         );
         self.play_sound(
@@ -1332,6 +1398,31 @@ impl PlayPlan {
                 }
                 // Взрыв разобран в тике: моб уже убран.
                 Out::Explode(_) => {}
+                // `CubeMobMoveControl.tick` и `Slime.tick`: прыжок (`getSoundPitch`:
+                // ×1.4 у маленького, ×0.8 у большого) и шлепок при приземлении.
+                Out::CubeSound { jump } => {
+                    let mob = self
+                        .sim()
+                        .mobs
+                        .lock()
+                        .unwrap()
+                        .get(&id)
+                        .map(|e| (e.mob.pos, e.mob.cube_size, e.mob.volume()));
+                    let Some((pos, size, volume)) = mob else {
+                        continue;
+                    };
+                    let small = if size <= 1 { "_small" } else { "" };
+                    let r = (rand::random::<f32>() - rand::random::<f32>()) * 0.2 + 1.0;
+                    let (name, pitch) = if jump {
+                        (
+                            format!("minecraft:entity.slime.jump{small}"),
+                            r * if size <= 1 { 1.4 } else { 0.8 },
+                        )
+                    } else {
+                        (format!("minecraft:entity.slime.squish{small}"), r / 0.8)
+                    };
+                    self.play_sound(None, &name, crate::sounds::HOSTILE, pos, volume, pitch);
+                }
                 Out::Shoot { target, power } => self.mob_shoot(id, Uuid::from_u128(target), power),
                 // `EatBlockGoal.start`: анимация опущенной головы.
                 Out::EatStart => self
@@ -1480,6 +1571,11 @@ pub(super) fn mob_to_nbt(m: &Mob) -> Compound {
         Species::Chicken => {
             c.insert("EggLayTime".into(), Tag::Int(m.egg_time));
         }
+        // `AbstractCubeMob.addAdditionalSaveData`.
+        Species::Slime => {
+            c.insert("Size".into(), Tag::Int(m.cube_size - 1));
+            c.insert("wasOnGround".into(), Tag::Byte(i8::from(m.was_on_ground)));
+        }
         // `Creeper.addAdditionalSaveData`.
         Species::Creeper => {
             c.insert("powered".into(), Tag::Byte(i8::from(m.powered)));
@@ -1523,8 +1619,13 @@ pub(super) fn mob_from_nbt(c: &Compound) -> Option<Mob> {
         Some(Tag::Byte(v)) => Some(*v),
         _ => None,
     };
+    if species == Species::Slime {
+        // `readAdditionalSaveData`: `setSize(Size + 1, false)`.
+        m.set_size(int("Size").unwrap_or(0) + 1, true);
+        m.was_on_ground = byte("wasOnGround").is_some_and(|b| b != 0);
+    }
     if let Some(Tag::Float(h)) = c.get("Health") {
-        m.health = h.clamp(0.0, species.max_health());
+        m.health = h.clamp(0.0, m.max_health());
     }
     m.on_ground = byte("OnGround").is_some_and(|b| b != 0);
     m.age = int("Age").unwrap_or(0);
@@ -1833,20 +1934,21 @@ impl PlayPlan {
                 };
                 let m = &e.mob;
                 let [x, y, z] = m.pos;
-                // вид uuid x y z yaw pitch здоровье макс возраст стрижена цвет мёртв любовь\nимя
+                // вид uuid x y z yaw pitch здоровье макс возраст стрижена цвет мёртв любовь размер\nимя
                 format!(
-                    "{} {} {x} {y} {z} {} {} {} {} {} {} {} {} {}\n{}",
+                    "{} {} {x} {y} {z} {} {} {} {} {} {} {} {} {} {}\n{}",
                     m.species.short(),
                     Uuid::from_u128(m.uuid),
                     m.yaw,
                     m.pitch,
                     m.health,
-                    m.species.max_health(),
+                    m.max_health(),
                     m.age,
                     u8::from(m.sheared),
                     m.color,
                     u8::from(!m.alive()),
                     m.love,
+                    m.cube_size,
                     m.custom_name.as_deref().unwrap_or("")
                 )
             }
@@ -1872,7 +1974,7 @@ impl PlayPlan {
                     match f.get(2).copied() {
                         Some("health") => {
                             let h = num(3).unwrap_or(0.0) as f32;
-                            m.health = h.clamp(0.0, m.species.max_health());
+                            m.health = h.clamp(0.0, m.max_health());
                             if m.health <= 0.0 && m.alive() {
                                 m.death_time = 1;
                                 died = true;
@@ -1902,6 +2004,10 @@ impl PlayPlan {
                         Some("love") => m.love = num(3).unwrap_or(0.0) as i32,
                         Some("sheared") => m.sheared = f.get(3) == Some(&"1"),
                         Some("color") => m.color = num(3).unwrap_or(0.0) as u8 & 15,
+                        // `CraftSlime.setSize`: `setSize(size, true)`.
+                        Some("size") if m.species == Species::Slime => {
+                            m.set_size(num(3).unwrap_or(1.0) as i32, true);
+                        }
                         Some("name") => {
                             let name = f[3..].join(" ");
                             m.custom_name = (!name.is_empty()).then_some(name);
@@ -2032,14 +2138,55 @@ impl PlayPlan {
         );
     }
 
-    fn mob_strike(&self, species: Species, target: Uuid, from: [f64; 3]) {
+    /// `Slime.remove` у умершего больше 1: 2–4 детей вдвое меньше
+    /// (`convertTo SPLIT_ON_DEATH`: имя и постоянство переходят к ним).
+    fn slime_split(&self, m: &Mob, count: i32) {
+        let size = m.cube_size / 2;
+        let width = m.size().0 as f32;
+        for [dx, dz] in mb::cube::split_offsets(count, f64::from(width)) {
+            let pos = [m.pos[0] + dx, m.pos[1] + 0.5, m.pos[2] + dz];
+            let yaw = rand::random::<f32>() * 360.0;
+            let (name, persistent) = (m.custom_name.clone(), m.persistent);
+            self.spawn_mob_with(Species::Slime, pos, yaw, false, Some("SLIME_SPLIT"), |c| {
+                c.set_size(size, true);
+                c.custom_name = name;
+                c.persistent = persistent;
+            });
+        }
+    }
+
+    fn mob_strike(&self, species: Species, target: Uuid, from: [f64; 3], attack: f32) {
         // `Creeper.doHurtTarget`: удар засчитан, урона нет — он взрывается.
         if species == Species::Creeper {
             return;
         }
-        let damage = survival::mob_damage_for(self.difficulty(), species.attack_damage());
-        if damage <= 0.0 {
+        let mut damage = survival::mob_damage_for(self.difficulty(), attack);
+        // `isInvulnerableTo` раньше счёта неуязвимости: незагрузившегося
+        // клиента удар не задевает и `lastHurt` не меняет.
+        if damage <= 0.0 || !self.client_loaded(target) {
             return;
+        }
+        // `LivingEntity.hurtServer`: 10 тиков после удара (`invulnerableTime`
+        // > 10) проходит только превышение над прошлым ударом. Слизень бьёт
+        // касанием каждый тик — без этого он наносил бы 20 ударов в секунду.
+        {
+            let now = self.game_time.load(Ordering::Relaxed);
+            let mut hits = self.sim().mob_hits.lock().unwrap();
+            match hits.get(&target).copied() {
+                Some((at, last)) if now.wrapping_sub(at) < 10 => {
+                    if damage <= last {
+                        return;
+                    }
+                    hits.insert(target, (at, damage));
+                    damage -= last;
+                }
+                _ => {
+                    hits.insert(target, (now, damage));
+                }
+            }
+            if hits.len() > 256 {
+                hits.retain(|_, (at, _)| now.wrapping_sub(*at) < 10);
+            }
         }
         let player = {
             let players = self.hub.players.lock().unwrap();
@@ -2052,6 +2199,18 @@ impl PlayPlan {
         };
         if !self.push_control(target, Control::Hurt(damage, Cause::Mob(species.name()))) {
             return;
+        }
+        // `AbstractCubeMob.dealDamage`: звук удара после прошедшего урона.
+        if species == Species::Slime {
+            let pitch = (rand::random::<f32>() - rand::random::<f32>()) * 0.2 + 1.0;
+            self.play_sound(
+                None,
+                "minecraft:entity.slime.attack",
+                crate::sounds::HOSTILE,
+                from,
+                1.0,
+                pitch,
+            );
         }
         let d = [from[0] - pos[0], from[2] - pos[2]];
         let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
@@ -2305,6 +2464,33 @@ impl PlayPlan {
         }
         let sky = w.sky_light_at(pos).unwrap_or(0);
         let block = w.block_light_at(pos).unwrap_or(0);
+        // `Slime.checkSlimeSpawnRules`: темнота не нужна. Болото на высоте
+        // 51–69 — по шансу луны и свету; иначе слизневый чанк ниже y 40.
+        if species == Species::Slime {
+            let swamp = self.biome_in(w, pos).is_some_and(|b| {
+                let names = &self.survival.biome_names;
+                let tags = self
+                    .survival
+                    .biome_tags
+                    .get("minecraft:allows_surface_slime_spawns");
+                names
+                    .get(b as usize)
+                    .is_some_and(|n| tags.is_some_and(|t| t.contains(n)))
+            });
+            if swamp && pos[1] > 50 && pos[1] < 70 {
+                let chance = mb::cube::surface_spawn_chance(self.day_time.load(Ordering::Relaxed));
+                if rng.r#gen::<f32>() < chance
+                    && i32::from(mb::raw_brightness(sky, block, light.darken))
+                        <= rng.gen_range(0..8)
+                {
+                    return true;
+                }
+            }
+            let roll = rng.gen_range(0..10) == 0;
+            return roll
+                && mb::cube::slime_chunk(pos[0] >> 4, pos[2] >> 4, self.seed)
+                && pos[1] < 40;
+        }
         match species.category() {
             mb::Category::Monster => {
                 let mut roll = || rng.r#gen::<f64>();
