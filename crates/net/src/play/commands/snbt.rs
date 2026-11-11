@@ -280,10 +280,49 @@ fn split_suffix(token: &str) -> (&str, u8) {
 
 /// SNBT целиком. Хвост после значения — ошибка.
 pub fn parse_value(text: &str) -> Option<Tag> {
+    // Стек не бесконечен: цепочка `{a:{a:{…}}}` из командной строки иначе
+    // переполняет его раньше, чем закончится разбор.
+    if nesting_depth(text) > MAX_SNBT_DEPTH {
+        return None;
+    }
     let mut p = P::new(text);
     let tag = p.value()?;
     p.skip();
     p.eof().then_some(tag)
+}
+
+/// Предел вложенности compound/list в SNBT.
+const MAX_SNBT_DEPTH: usize = 64;
+
+/// Максимальная вложенность `{`/`[` вне кавычек. Кавычки и `\` учитываются,
+/// чтобы `"{a"` в строке не считался открывающей скобкой.
+fn nesting_depth(text: &str) -> usize {
+    let mut depth = 0usize;
+    let mut max = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for c in text.chars() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '{' | '[' => {
+                depth += 1;
+                max = max.max(depth);
+            }
+            '}' | ']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    max
 }
 
 /// Путь `Foo.Bar[0]."baz"[]`. Пустая строка — корень.
@@ -650,6 +689,23 @@ mod tests {
         let y = get_path(&tag, &parse_path("Pos[1]").unwrap()).unwrap();
         assert_eq!(number(&y), Some(2.0));
         assert!(format_tag(&y).contains("2.0"));
+    }
+
+    #[test]
+    fn nested_snbt_is_capped() {
+        let shallow = format!("{}1{}", "{a:".repeat(8), "}".repeat(8));
+        assert!(parse_value(&shallow).is_some());
+        let deep = format!(
+            "{}1{}",
+            "{a:".repeat(MAX_SNBT_DEPTH + 1),
+            "}".repeat(MAX_SNBT_DEPTH + 1)
+        );
+        assert!(parse_value(&deep).is_none());
+    }
+
+    #[test]
+    fn brackets_inside_strings_do_not_count() {
+        assert_eq!(nesting_depth(r#"{a:"[[[{{{",b:[1]}"#), 2);
     }
 
     #[test]

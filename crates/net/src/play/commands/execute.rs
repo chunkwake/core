@@ -72,6 +72,35 @@ impl Exec {
 /// которая иначе размножает работу экспоненциально.
 const MAX_FORKS: usize = 256;
 
+/// Предел вложенности `/execute run execute run …`. Без него цепочка
+/// в 32 КБ команды рекурсивно вызывает диспетчер тысячи раз и переполняет
+/// стек процесса (`panic = "abort"`).
+const MAX_EXECUTE_DEPTH: usize = 32;
+
+thread_local! {
+    static EXECUTE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+struct ExecuteDepth;
+
+impl ExecuteDepth {
+    fn enter() -> Option<Self> {
+        EXECUTE_DEPTH.with(|depth| {
+            let current = depth.get();
+            (current < MAX_EXECUTE_DEPTH).then(|| {
+                depth.set(current + 1);
+                Self
+            })
+        })
+    }
+}
+
+impl Drop for ExecuteDepth {
+    fn drop(&mut self) {
+        EXECUTE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
 /// Узлы дерева `/execute`.
 ///
 /// Ванильное дерево разбирает `execute` по подкомандам, и каждая ветка
@@ -442,6 +471,9 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
 /// `rest`), поэтому цепочка берётся только из `rest` — иначе `positioned`
 /// попал бы в строку дважды.
 pub(super) fn execute(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
+    let Some(_depth) = ExecuteDepth::enter() else {
+        return Outcome::Feedback(error_component("/execute: maximum nesting depth exceeded"));
+    };
     let exec = Exec::of(call, ctx);
     let mut budget = MAX_FORKS;
     // `execute in <измерение>` переключает активное измерение; после цепочки
@@ -1567,6 +1599,20 @@ mod tests {
         assert!(pitch.abs() < 1e-3, "на одном уровне — pitch 0: {pitch}");
         let (yaw, _) = look_at([0.0, 0.0, 0.0], [-10.0, 0.0, 0.0]);
         assert!((yaw - 90.0).abs() < 1e-3, "на запад — yaw 90: {yaw}");
+    }
+
+    #[test]
+    fn execute_depth_is_capped() {
+        let mut guards = Vec::new();
+        for _ in 0..MAX_EXECUTE_DEPTH {
+            guards.push(ExecuteDepth::enter().expect("depth below limit"));
+        }
+        assert!(ExecuteDepth::enter().is_none());
+        drop(guards);
+        assert!(
+            ExecuteDepth::enter().is_some(),
+            "после выхода место снова есть"
+        );
     }
 
     #[test]
