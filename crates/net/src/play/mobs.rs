@@ -2177,7 +2177,7 @@ impl PlayPlan {
         // касанием каждый тик — без этого он наносил бы 20 ударов в секунду.
         {
             let now = self.game_time.load(Ordering::Relaxed);
-            let mut hits = self.sim().mob_hits.lock().unwrap();
+            let mut hits = self.mob_hits.lock().unwrap();
             match hits.get(&target).copied() {
                 Some((at, last)) if now.wrapping_sub(at) < 10 => {
                     if damage <= last {

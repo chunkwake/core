@@ -298,6 +298,14 @@ pub struct PlayPlan {
     /// Старый снимок игрока: ревизии больше нет — отпечаток считается по полям.
     state_cache: Mutex<FastMap<Uuid, (u64, Arc<str>)>>,
     controls: Mutex<FastMap<Uuid, tokio::sync::mpsc::UnboundedSender<Control>>>,
+    /// Неуязвимость игрока к ударам мобов (`invulnerableTime`, `lastHurt`):
+    /// тик последнего удара и его сила. Общая на все измерения: в ванили
+    /// это поле `ServerPlayer`, а не мира.
+    mob_hits: Mutex<FastMap<Uuid, (i64, f32)>>,
+    /// Клиент ещё не загрузился (`!hasClientLoaded`): игровой тик, до
+    /// которого игрок неуязвим, `i64::MAX` — экран смерти до респауна.
+    /// Общая на все измерения: `clientLoadedTimeoutTimer` живёт в соединении.
+    client_loading: Mutex<FastMap<Uuid, i64>>,
     shutting_down: AtomicBool,
     /// Чанки в радиусе симуляции вокруг игроков: только они тикают.
     ///
@@ -1684,12 +1692,6 @@ pub(crate) struct DimSim {
     populated: Mutex<FastSet<(i32, i32)>>,
     /// Прочитанные с диска мобы: тик заберёт их в `mobs` (регион может читаться из самого тика).
     mobs_loaded: Mutex<Vec<mobs::MobEntry>>,
-    /// Неуязвимость игрока к ударам мобов (`invulnerableTime`, `lastHurt`):
-    /// тик последнего удара и его сила.
-    mob_hits: Mutex<FastMap<Uuid, (i64, f32)>>,
-    /// Клиент ещё не загрузился (`!hasClientLoaded`): игровой тик, до
-    /// которого игрок неуязвим, `i64::MAX` — экран смерти до респауна.
-    client_loading: Mutex<FastMap<Uuid, i64>>,
     /// Чанки `entities/`, где по последней записи были мобы.
     entity_written: Mutex<FastSet<(i32, i32)>>,
     /// Новые заселённые чанки, ещё не записанные.
@@ -2786,6 +2788,8 @@ impl PlayPlan {
             live: Mutex::new(FastMap::default()),
             state_cache: Mutex::new(FastMap::default()),
             controls: Mutex::new(FastMap::default()),
+            mob_hits: Mutex::new(FastMap::default()),
+            client_loading: Mutex::new(FastMap::default()),
             shutting_down: AtomicBool::new(false),
             simulated: Mutex::new(Arc::new(FastSet::default())),
             day_time: AtomicI64::new(0),
@@ -5714,8 +5718,8 @@ impl PlayPlan {
         );
         let mut state = save.as_ref().map(PlayerState::restore).unwrap_or_default();
         let game_mode = *state.game_mode.get_or_insert(self.login.spawn.game_mode);
-        // Новое соединение: `clientLoadedTimeoutTimer` = 60.
-        self.set_client_loading(player.uuid, Some(CLIENT_LOADED_TIMEOUT));
+        // `clientLoadedTimeoutTimer` на входе равен 0: 60 ставит только
+        // `restartClientLoadTimerAfterRespawn`, а не первый вход.
         let me = Online {
             entry: PlayerEntry {
                 uuid: player.uuid,
@@ -5807,6 +5811,11 @@ impl PlayPlan {
         self.wake_player(uuid);
         self.controls.lock().unwrap().remove(&uuid);
         self.live.lock().unwrap().remove(&uuid);
+        // Соединение закрыто: таймеры и `lastHurt` больше не нужны. Без этого
+        // умерший и вышедший игрок навсегда оставался в `client_loading`
+        // (`i64::MAX` никогда не истекает).
+        self.client_loading.lock().unwrap().remove(&uuid);
+        self.mob_hits.lock().unwrap().remove(&uuid);
         // Немедленно запрашиваем автосохранение, оставляя снимок до подтверждения записи.
         self.snapshot(uuid, &state);
         if let Some(source) = self.players_source.get() {
@@ -21048,7 +21057,7 @@ impl PlayPlan {
     /// от текущего игрового тика (или `i64::MAX` — до респауна), `None` —
     /// загрузился.
     fn set_client_loading(&self, uuid: Uuid, ticks: Option<i64>) {
-        let mut map = self.sim().client_loading.lock().unwrap();
+        let mut map = self.client_loading.lock().unwrap();
         match ticks {
             None => {
                 map.remove(&uuid);
@@ -21065,7 +21074,7 @@ impl PlayPlan {
 
     /// `hasClientLoaded`: нет ожидания респауна и таймер истёк.
     pub(crate) fn client_loaded(&self, uuid: Uuid) -> bool {
-        let mut map = self.sim().client_loading.lock().unwrap();
+        let mut map = self.client_loading.lock().unwrap();
         let Some(&until) = map.get(&uuid) else {
             return true;
         };
