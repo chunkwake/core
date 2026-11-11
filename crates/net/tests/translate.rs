@@ -102,6 +102,7 @@ async fn start(
         max_players: 20,
         compression_threshold: compression,
         online_mode: false,
+        velocity_secret: None,
         enable_status: true,
         session_server: String::new(),
         configuration: None,

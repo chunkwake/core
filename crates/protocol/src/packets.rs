@@ -147,6 +147,15 @@ impl<'a> LoginC2S<'a> {
     }
 }
 
+/// `LoginPluginRequest`: сервер просит клиента ответить на канале.
+/// Velocity использует его для `velocity:player_info`.
+pub fn login_plugin_request(message_id: i32, channel: &str, data: &[u8]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(0x04).var_int(message_id).string(channel);
+    w.buf.extend_from_slice(data);
+    w.buf
+}
+
 /// Disconnect в состоянии login: причина — JSON текстового компонента.
 pub fn login_disconnect(reason_json: &str) -> Vec<u8> {
     let mut w = Writer::new();

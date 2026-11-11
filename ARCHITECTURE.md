@@ -82,7 +82,7 @@ Cargo workspace:
 - `crates/protocol` — пакеты 26.3 (codegen из данных ванилы: `java -DbundlerMainClass=net.minecraft.data.Main -jar server.jar --all`), VarInt, NBT, текстовые компоненты, сжатие, шифрование.
 - `crates/datacache` — сборка кэша ванильных данных из `server.jar` и упаковка готового дерева в архив; им пользуются `build.rs` крейта `chunkwake-data` и сервер в сборке без встроенных данных.
 - `crates/data` — загрузчики данных версии и образ запуска. `build.rs` упаковывает `generated/<версия>` в zip и встраивает его в бинарник: при первом старте архив распаковывается в `generated/<версия>`, и `server.jar` на машине сервера больше не нужен.
-- `crates/net` — tokio, состояния handshake/status/login/configuration/play, лимиты. Прокси-forwarding (Velocity/BungeeCord) пока не реализован: сервер рассчитан на прямой вход клиентов.
+- `crates/net` — tokio, состояния handshake/status/login/configuration/play, лимиты, modern Velocity forwarding (HMAC-SHA256 по `velocity:player_info`). Legacy/BungeeCord forwarding не поддерживается.
 - `crates/registry` — блоки, предметы, биомы, data-driven реестры, теги, датапаки.
 - `crates/world` — чанки/секции/палитры, Anvil (.mca) чтение/запись, light engine, генерация (сначала flat/void, затем ванильный генератор).
 - `crates/region` — регионы-планировщик: мир делится на независимые регионы, каждый тикается в своём потоке (rayon/свой пул), слияние/разделение регионов, передача сущностей между ними. Глобальный тик для общих вещей (время, погода, команды консоли).
@@ -100,7 +100,7 @@ Cargo workspace:
 | Крейт | Роль |
 |---|---|
 | `chunkwake-protocol` | пакеты 26.3 (codegen), VarInt, NBT, компоненты |
-| `chunkwake-net` | соединения, состояния протокола (прокси-forwarding не поддерживается) |
+| `chunkwake-net` | соединения, состояния протокола, modern Velocity forwarding |
 | `chunkwake-registry` | реестры, теги, датапаки |
 | `chunkwake-world` | чанки, палитры, Anvil, свет, генерация |
 | `chunkwake-journal` | event-sourced лог изменений, WAL, rollback/replay |

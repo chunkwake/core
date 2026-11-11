@@ -13,6 +13,9 @@ enable-status=true
 motd=A Chunkwake Server
 max-players=20
 online-mode=true
+# Modern Velocity forwarding: общий секрет с velocity.toml. Только вместе с online-mode=false.
+velocity-enabled=false
+velocity-secret=
 network-compression-threshold=256
 vanilla-jar=
 java-path=java
@@ -52,6 +55,8 @@ pub const KEYS: &[&str] = &[
     "motd",
     "max-players",
     "online-mode",
+    "velocity-enabled",
+    "velocity-secret",
     "network-compression-threshold",
     "vanilla-jar",
     "java-path",
@@ -188,6 +193,9 @@ pub struct Properties {
     pub motd: String,
     pub max_players: usize,
     pub online_mode: bool,
+    /// Вход только от Velocity с modern forwarding.
+    pub velocity_enabled: bool,
+    pub velocity_secret: String,
     pub compression_threshold: i32,
     pub vanilla_jar: Option<String>,
     pub java_path: String,
@@ -259,6 +267,21 @@ impl Properties {
         let online_mode = value("online-mode")
             .parse::<bool>()
             .map_err(|_| "online-mode: use true or false".to_owned())?;
+        let velocity_enabled = value("velocity-enabled")
+            .parse::<bool>()
+            .map_err(|_| "velocity-enabled: use true or false".to_owned())?;
+        let velocity_secret = value("velocity-secret").trim().to_owned();
+        if velocity_enabled {
+            if velocity_secret.is_empty() {
+                return Err("velocity-enabled=true requires a non-empty velocity-secret".to_owned());
+            }
+            if online_mode {
+                return Err(
+                    "velocity-enabled=true requires online-mode=false; Velocity checks accounts"
+                        .to_owned(),
+                );
+            }
+        }
         let enable_status = value("enable-status")
             .parse::<bool>()
             .map_err(|_| "enable-status: use true or false".to_owned())?;
@@ -365,6 +388,8 @@ impl Properties {
             motd: value("motd").into(),
             max_players,
             online_mode,
+            velocity_enabled,
+            velocity_secret,
             compression_threshold,
             vanilla_jar,
             java_path: java_path.into(),
@@ -463,6 +488,11 @@ impl Properties {
             max_players: self.max_players,
             compression_threshold: self.compression_threshold,
             online_mode: self.online_mode,
+            velocity_secret: if self.velocity_enabled {
+                Some(self.velocity_secret.as_bytes().to_vec())
+            } else {
+                None
+            },
             enable_status: self.enable_status,
             session_server: chunkwake_net::auth::MOJANG_SESSION_SERVER.into(),
             configuration: None,
@@ -624,6 +654,22 @@ mod tests {
             p.online_mode,
             "новый server.properties должен требовать вход"
         );
+    }
+
+    #[test]
+    fn velocity_forwarding_requires_secret_and_offline_mode() {
+        assert!(Properties::parse("velocity-enabled=true\nonline-mode=false").is_err());
+        assert!(
+            Properties::parse("velocity-enabled=true\nvelocity-secret=s\nonline-mode=true")
+                .is_err()
+        );
+        let p = Properties::parse(
+            "velocity-enabled=true\nvelocity-secret=s\nonline-mode=false\nserver-ip=127.0.0.1",
+        )
+        .unwrap();
+        assert!(p.velocity_enabled);
+        assert_eq!(p.velocity_secret, "s");
+        assert!(!p.online_mode);
     }
 
     #[test]

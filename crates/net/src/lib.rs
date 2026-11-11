@@ -69,6 +69,10 @@ pub struct NetConfig {
     /// Порог сжатия; отрицательное значение выключает сжатие.
     pub compression_threshold: i32,
     pub online_mode: bool,
+    /// Секрет modern Velocity forwarding. `Some` — вход принимается только
+    /// от Velocity с подписанным `velocity:player_info`; Mojang session server
+    /// при этом не вызывается.
+    pub velocity_secret: Option<Vec<u8>>,
     /// Разрешает status ping в списке серверов.
     pub enable_status: bool,
     /// Базовый URL session server (по умолчанию Mojang).
@@ -161,7 +165,7 @@ const COMPRESSION_SINCE: i32 = 47;
 impl Server {
     pub fn new(config: NetConfig) -> Arc<Self> {
         Arc::new(Self {
-            key: config.online_mode.then(ServerKey::generate),
+            key: (config.online_mode && config.velocity_secret.is_none()).then(ServerKey::generate),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
@@ -371,14 +375,21 @@ impl Server {
                 .await?;
             return Ok(None);
         }
-        let (name, uuid, properties) = match &self.key {
-            Some(key) => match self.authenticate(&mut conn, key, &name).await? {
+        let (name, uuid, properties) = if let Some(secret) = &self.config.velocity_secret {
+            match self.forward_velocity(&mut conn, secret).await? {
                 Some(profile) => (profile.name, profile.uuid, profile.properties),
                 None => return Ok(None),
-            },
-            None => {
-                let uuid = packets::offline_uuid(&name);
-                (name, uuid, Vec::new())
+            }
+        } else {
+            match &self.key {
+                Some(key) => match self.authenticate(&mut conn, key, &name).await? {
+                    Some(profile) => (profile.name, profile.uuid, profile.properties),
+                    None => return Ok(None),
+                },
+                None => {
+                    let uuid = packets::offline_uuid(&name);
+                    (name, uuid, Vec::new())
+                }
             }
         };
         // Как `PlayerList.canPlayerLogin`: бан, белый список, места; решение
@@ -460,6 +471,59 @@ impl Server {
             },
             conn,
         )))
+    }
+
+    /// Modern Velocity forwarding: запрос `velocity:player_info` и проверка
+    /// HMAC-SHA256 от общего секрета. `Ok(None)` — прокси/клиент отключён.
+    async fn forward_velocity(
+        &self,
+        conn: &mut Connection,
+        secret: &[u8],
+    ) -> Result<Option<auth::GameProfile>, NetError> {
+        const MESSAGE_ID: i32 = 0;
+        conn.send(&packets::login_plugin_request(
+            MESSAGE_ID,
+            velocity::CHANNEL,
+            &[],
+        ))
+        .await?;
+        loop {
+            let packet = conn.read_packet().await?;
+            match LoginC2S::decode(&packet)? {
+                LoginC2S::PluginResponse { message_id, data } if message_id == MESSAGE_ID => {
+                    let Some(data) = data else {
+                        tracing::info!("velocity forwarding: proxy declined the request");
+                        conn.send(&packets::login_disconnect(&text_json(
+                            "Invalid proxy forwarding data",
+                        )))
+                        .await?;
+                        return Ok(None);
+                    };
+                    return match velocity::parse(secret, data) {
+                        Ok(profile) => Ok(Some(profile)),
+                        Err(error) => {
+                            tracing::info!(%error, "velocity forwarding rejected");
+                            conn.send(&packets::login_disconnect(&text_json(
+                                "Invalid proxy forwarding data",
+                            )))
+                            .await?;
+                            Ok(None)
+                        }
+                    };
+                }
+                // Cookie-ответы не относятся к профилю; остальные пакеты в
+                // этом состоянии означают, что вход идёт не через Velocity.
+                LoginC2S::CookieResponse => continue,
+                _ => {
+                    tracing::info!("velocity forwarding: unexpected login packet");
+                    conn.send(&packets::login_disconnect(&text_json(
+                        "This server requires Velocity player info forwarding",
+                    )))
+                    .await?;
+                    return Ok(None);
+                }
+            }
+        }
     }
 
     /// Обмен ключами, включение шифрования и проверка через session server.
@@ -852,6 +916,7 @@ pub mod fire;
 pub mod tnt;
 pub mod transform;
 pub mod translate;
+pub mod velocity;
 
 #[cfg(test)]
 mod admission_tests {
@@ -867,6 +932,7 @@ mod admission_tests {
             max_players,
             compression_threshold: -1,
             online_mode: false,
+            velocity_secret: None,
             enable_status: false,
             session_server: String::new(),
             configuration: None,
