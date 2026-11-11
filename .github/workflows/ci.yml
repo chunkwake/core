@@ -181,10 +181,15 @@ jobs:
           targets: ${{ matrix.target }}
 
       # musl-линкер и заголовки для статической сборки; `cc` соберёт под них
-      # и C-часть mimalloc.
-      - name: Install musl tools
+      # и C-часть mimalloc. Готовый кросс-тулчейн берём из GitHub Releases
+      # (`rust-cross-toolchain`), а не через `apt-get`: зеркала Ubuntu
+      # (archive/azure/security) периодически не резолвятся на раннере, и
+      # релиз Linux падал ещё до сборки.
+      - name: Install musl toolchain
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
 
       # Тот же ключ, что у job `rust`: кэш переиспользуется, jar не качается
       # повторно и дерево данных уже собрано.
