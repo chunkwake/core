@@ -670,6 +670,7 @@ impl App {
     fn needs_exposure_confirmation(&self, props: &Properties) -> bool {
         is_public(&props.server_ip)
             && !props.online_mode
+            && !props.velocity_enabled
             && (self.initial[0] != self.values[0] || self.initial[4] != self.values[4])
     }
 

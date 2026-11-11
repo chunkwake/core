@@ -251,7 +251,7 @@ pub async fn execute() -> Result<(), String> {
                 "✓  Ready to start · Minecraft {} (protocol {})\n   Listen address  {}:{}\n   Vanilla data    {}",
                 version.name, version.protocol, props.server_ip, props.server_port, data
             );
-            if !is_loopback(&props.server_ip) && !props.online_mode {
+            if !is_loopback(&props.server_ip) && !props.online_mode && !props.velocity_enabled {
                 println!(
                     "Warning: offline-mode does not verify player accounts; limit access to trusted users."
                 );
