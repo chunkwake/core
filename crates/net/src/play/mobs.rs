@@ -16,6 +16,8 @@ const MAX_SLIME_SPLIT: i32 = 128;
 /// Моб и то, что о нём уже знают клиенты.
 pub(super) struct MobEntry {
     pub mob: Mob,
+    /// Последние `DATA_EFFECT_PARTICLES`/`DATA_EFFECT_AMBIENCE_ID`.
+    effect_meta: (Vec<i32>, bool),
     /// Последняя разосланная позиция (квантованная) и повороты.
     sent: [i64; 3],
     sent_rot: (f32, f32, f32),
@@ -104,6 +106,7 @@ impl MobEntry {
             environment: Default::default(),
             fall: 0.0,
             aggressive: false,
+            effect_meta: (Vec::new(), false),
         }
     }
 }
@@ -177,6 +180,25 @@ impl PlayPlan {
         );
         if !meta.is_empty() {
             out.push(play::entity_meta(self.ids.set_entity_data, id, &meta));
+        }
+        // `DATA_EFFECT_PARTICLES`/`DATA_EFFECT_AMBIENCE_ID`: клиент рисует
+        // частицы эффектов сам по метаданным.
+        let (colors, ambient) = self.effect_particles(&m.effects);
+        if !colors.is_empty()
+            && let Some(&particle) = self
+                .particle_types
+                .lock()
+                .unwrap()
+                .get("minecraft:entity_effect")
+        {
+            out.push(play::entity_meta(
+                self.ids.set_entity_data,
+                id,
+                &[
+                    (10, play::Meta::Particles { particle, colors }),
+                    (11, play::Meta::Bool(ambient)),
+                ],
+            ));
         }
         // `EntityEquipment`: все надетые предметы (`set_equipment`).
         let worn: Vec<(u8, Slot)> = mb::EQUIPMENT_SLOTS
@@ -702,6 +724,35 @@ impl PlayPlan {
                     // Зелья: регенерация лечит, яд и иссушение бьют раз в
                     // `25 >> amp` / `40 >> amp` тиков (`LivingEntity.tickEffects`).
                     let fx = e.mob.tick_effects(self.effect_kinds());
+                    let effect_meta = self.effect_particles(&e.mob.effects);
+                    if effect_meta != e.effect_meta {
+                        e.effect_meta = effect_meta;
+                        let (colors, ambient) = &e.effect_meta;
+                        if let Some(&particle) = self
+                            .particle_types
+                            .lock()
+                            .unwrap()
+                            .get("minecraft:entity_effect")
+                        {
+                            packets.push((
+                                id,
+                                play::entity_meta(
+                                    self.ids.set_entity_data,
+                                    id,
+                                    &[
+                                        (
+                                            10,
+                                            play::Meta::Particles {
+                                                particle,
+                                                colors: colors.clone(),
+                                            },
+                                        ),
+                                        (11, play::Meta::Bool(*ambient)),
+                                    ],
+                                ),
+                            ));
+                        }
+                    }
                     if fx.heal > 0.0 && e.mob.alive() {
                         e.mob.health = (e.mob.health + fx.heal).min(e.mob.max_health());
                         packets.push((

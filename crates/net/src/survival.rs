@@ -662,6 +662,60 @@ pub fn gravity_modifiers(slow_falling: bool) -> Vec<(String, f64, i32)> {
     }
 }
 
+/// `MobEffect.getColor` для `minecraft:entity_effect`.
+pub fn effect_color(name: &str) -> Option<i32> {
+    let name = name.strip_prefix("minecraft:").unwrap_or(name);
+    Some(match name {
+        "speed" => 0x33EBFF,
+        "slowness" => 0x8BAFE0,
+        "haste" => 0xD9C043,
+        "mining_fatigue" => 0x4A4217,
+        "strength" => 0xFFC700,
+        "instant_health" => 0xF82423,
+        "instant_damage" => 0xA9656A,
+        "jump_boost" => 0xFDFF84,
+        "nausea" => 0x551D4A,
+        "regeneration" => 0xCD5CAB,
+        "resistance" => 0x9146F0,
+        "fire_resistance" => 0xFF9900,
+        "water_breathing" => 0x98DAC0,
+        "invisibility" => 0xF6F6F6,
+        "blindness" => 0x1F1F23,
+        "night_vision" => 0xC2FF66,
+        "hunger" => 0x587653,
+        "weakness" => 0x484D48,
+        "poison" => 0x87A363,
+        "wither" => 0x736156,
+        "health_boost" => 0xF87D23,
+        "absorption" => 0x2552A5,
+        "saturation" => 0xF82423,
+        "glowing" => 0x94A061,
+        "levitation" => 0xCEFFFF,
+        "luck" => 0x59C106,
+        "unluck" => 0xC0A44D,
+        "slow_falling" => 0xF3CFB9,
+        "conduit_power" => 0x1DC2D1,
+        "dolphins_grace" => 0x88A3BE,
+        "bad_omen" => 0x0B6138,
+        "hero_of_the_village" => 0x44FF44,
+        "darkness" => 0x292721,
+        "trial_omen" => 0x16A6A6,
+        "raid_omen" => 0xDE4058,
+        "wind_charged" => 0xBDC9FF,
+        "weaving" => 0x78695A,
+        "oozing" => 0x99FFA3,
+        "infested" => 0x8C9B8C,
+        "breath_of_the_nautilus" => 0x00FFEE,
+        _ => return None,
+    })
+}
+
+/// `ARGB.color(alpha, color)`: у скрытых (ambient) эффектов альфа 38.
+pub fn effect_particle_argb(color: i32, ambient: bool) -> i32 {
+    let alpha = if ambient { 38 } else { 255 };
+    (alpha << 24) | (color & 0x00FF_FFFF)
+}
+
 /// Интервал тика (`shouldApplyEffectTickThisTick`): `base >> amplifier`,
 /// а если сдвиг обнулил число — каждый тик.
 pub fn effect_interval(base: i32, amplifier: u8) -> i32 {
@@ -1477,6 +1531,15 @@ mod tests {
         v.on_move(at(80.0), true, true, false);
         v.on_move(at(70.0), false, true, true);
         assert_eq!(v.on_move(at(70.0), true, true, true), None);
+    }
+
+    #[test]
+    fn effect_particles_use_vanilla_colors() {
+        assert_eq!(effect_color("minecraft:speed"), Some(0x33EBFF));
+        assert_eq!(effect_color("minecraft:jump_boost"), Some(0xFDFF84));
+        assert_eq!(effect_color("minecraft:unknown"), None);
+        assert_eq!(effect_particle_argb(0x33EBFF, false), 0xFF33EBFFu32 as i32);
+        assert_eq!(effect_particle_argb(0x33EBFF, true), 0x2633EBFF);
     }
 
     #[test]

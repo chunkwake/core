@@ -1620,7 +1620,7 @@ pub fn mob_flags(id: i32, entity_id: i32, flags: u8) -> Vec<u8> {
 }
 
 /// Значение `SynchedEntityData`: байт, целое (`VarInt`) или логическое.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Meta {
     Byte(u8),
     Int(i32),
@@ -1628,30 +1628,41 @@ pub enum Meta {
     Bool(bool),
     /// `EntityDataSerializers.ROTATIONS` (id 9): три угла `FLOAT`.
     Rotations([f32; 3]),
+    /// `EntityDataSerializers.PARTICLES` (id 17): список частиц одного типа.
+    Particles {
+        particle: i32,
+        colors: Vec<i32>,
+    },
 }
 
 /// `set_entity_data` с произвольными полями `(индекс, значение)`.
 pub fn entity_meta(id: i32, entity_id: i32, fields: &[(u8, Meta)]) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id).var_int(entity_id);
-    for &(i, v) in fields {
+    for (i, v) in fields {
         match v {
             Meta::Byte(b) => {
-                w.u8(i).var_int(0).u8(b);
+                w.u8(*i).var_int(0).u8(*b);
             }
             Meta::Int(n) => {
-                w.u8(i).var_int(1).var_int(n);
+                w.u8(*i).var_int(1).var_int(*n);
             }
             Meta::Float(v) => {
-                w.u8(i).var_int(3).f32(v);
+                w.u8(*i).var_int(3).f32(*v);
             }
             Meta::Bool(b) => {
-                w.u8(i).var_int(8).bool(b);
+                w.u8(*i).var_int(8).bool(*b);
             }
             Meta::Rotations(r) => {
-                w.u8(i).var_int(9);
+                w.u8(*i).var_int(9);
                 for v in r {
-                    w.f32(v);
+                    w.f32(*v);
+                }
+            }
+            Meta::Particles { particle, colors } => {
+                w.u8(*i).var_int(17).var_int(colors.len() as i32);
+                for color in colors {
+                    w.var_int(*particle).i32(*color);
                 }
             }
         };
@@ -1703,6 +1714,33 @@ mod lp_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn particles_meta_uses_serializer_17() {
+        let p = entity_meta(
+            1,
+            2,
+            &[(
+                10,
+                Meta::Particles {
+                    particle: 33,
+                    colors: vec![0x26FF_0000u32 as i32],
+                },
+            )],
+        );
+        let mut r = Reader::new(&p);
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.var_int().unwrap(), 2);
+        assert_eq!(r.u8().unwrap(), 10);
+        assert_eq!(r.var_int().unwrap(), 17);
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.var_int().unwrap(), 33);
+        assert_eq!(
+            i32::from_be_bytes(r.bytes(4).unwrap().try_into().unwrap()),
+            0x26FF_0000u32 as i32
+        );
+        assert_eq!(r.u8().unwrap(), 0xff);
     }
 
     #[test]

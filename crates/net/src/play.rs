@@ -11618,6 +11618,7 @@ impl PlayPlan {
                     }
                     // Длительность тикает и в креативе. Урон от эффектов — только там, где игрок уязвим.
                     let pulsed = state.vitals.tick_effects(self.effect_kinds());
+                    let effects_changed = !pulsed.expired.is_empty();
                     let mut motion = 0u8;
                     for e in pulsed.expired {
                         let name = self.effect_name(e.id).unwrap_or_default();
@@ -11629,6 +11630,9 @@ impl PlayPlan {
                         }
                     }
                     self.sync_motion(conn, uuid, me.entity_id, &state.vitals, motion).await?;
+                    if effects_changed {
+                        self.sync_effect_particles(conn, me, &state.vitals).await?;
+                    }
                     if !state.vitals.dead {
                         if pulsed.heal > 0.0 {
                             state.vitals.heal(pulsed.heal);
@@ -20855,6 +20859,54 @@ impl PlayPlan {
         self.effect_kinds
     }
 
+    /// `LivingEntity.updateSynchronizedMobEffectParticles`: цвета видимых
+    /// эффектов и флаг «все скрытые» (`ambient`).
+    fn effect_particles(&self, effects: &[survival::Effect]) -> (Vec<i32>, bool) {
+        let mut colors = Vec::new();
+        let mut all_ambient = true;
+        for effect in effects.iter().filter(|effect| effect.particles) {
+            let Some(name) = self.effect_name(effect.id) else {
+                continue;
+            };
+            let Some(color) = survival::effect_color(name) else {
+                continue;
+            };
+            colors.push(survival::effect_particle_argb(color, effect.ambient));
+            all_ambient &= effect.ambient;
+        }
+        let ambient = !colors.is_empty() && all_ambient;
+        (colors, ambient)
+    }
+
+    /// `DATA_EFFECT_PARTICLES` (10) и `DATA_EFFECT_AMBIENCE_ID` (11) игрока.
+    async fn sync_effect_particles(
+        &self,
+        conn: &mut Connection,
+        me: &Online,
+        v: &Vitals,
+    ) -> Result<(), NetError> {
+        let (colors, ambient) = self.effect_particles(&v.effects);
+        let Some(&particle) = self
+            .particle_types
+            .lock()
+            .unwrap()
+            .get("minecraft:entity_effect")
+        else {
+            return Ok(());
+        };
+        let packet = play::entity_meta(
+            self.ids.set_entity_data,
+            me.entity_id,
+            &[
+                (10, play::Meta::Particles { particle, colors }),
+                (11, play::Meta::Bool(ambient)),
+            ],
+        );
+        conn.send(&packet).await?;
+        self.hub.send(Some(me.entry.uuid), packet);
+        Ok(())
+    }
+
     /// Биты атрибутов, которые надо переслать: 1 скорость, 2 прыжок, 4 гравитация.
     fn motion_mask(&self, id: i32) -> u8 {
         let mut m = 0;
@@ -21184,6 +21236,7 @@ impl PlayPlan {
         .await?;
         self.sync_motion(conn, me.entry.uuid, me.entity_id, v, self.motion_mask(e.id))
             .await?;
+        self.sync_effect_particles(conn, me, v).await?;
         let name = self.effect_name(e.id).unwrap_or_default();
         match survival::instant_effect(name, e.amplifier) {
             survival::Instant::Heal(n) if !v.dead => {
@@ -21246,7 +21299,8 @@ impl PlayPlan {
         }
         v.effects.retain(|e| id.is_some_and(|w| w != e.id));
         self.sync_motion(conn, me.entry.uuid, me.entity_id, v, motion)
-            .await
+            .await?;
+        self.sync_effect_particles(conn, me, v).await
     }
 
     async fn send_xp(
