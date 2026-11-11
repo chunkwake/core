@@ -767,6 +767,7 @@ fn survival_data(
         menu_cartography: menu("minecraft:cartography_table")?,
         menu_lectern: menu("minecraft:lectern")?,
         menu_brewing: menu("minecraft:brewing_stand")?,
+        menu_beacon: menu("minecraft:beacon")?,
         loom_basic,
         loom_special,
         anvil_repair: chunkwake_data::enchanting::repair_materials(data_dir, items),

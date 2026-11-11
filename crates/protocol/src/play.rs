@@ -1573,6 +1573,13 @@ pub fn read_interact(r: &mut Reader) -> Result<Interact> {
     })
 }
 
+/// `set_beacon`: два необязательных эффекта (`Optional<Holder<MobEffect>>`).
+pub fn read_set_beacon(r: &mut Reader) -> Result<(Option<i32>, Option<i32>)> {
+    let primary = if r.bool()? { Some(r.var_int()?) } else { None };
+    let secondary = if r.bool()? { Some(r.var_int()?) } else { None };
+    Ok((primary, secondary))
+}
+
 /// Метаданные живого моба (`set_entity_data`): здоровье (9, `FLOAT`), детёныш
 /// (`AgeableMob.DATA_BABY_ID` 16, `BOOLEAN`), шерсть овцы (`Sheep.DATA_WOOL_ID` 18, `BYTE`),
 /// имя (2, `OPTIONAL_COMPONENT`) и его видимость (3, `BOOLEAN`).

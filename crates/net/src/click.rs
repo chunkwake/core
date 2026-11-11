@@ -45,6 +45,8 @@ pub enum Kind {
     Brewing,
     /// `CartographyTableMenu`: 0 карта, 1 бумага/карта/стекло, 2 результат, 3–29, 30–38.
     Cartography,
+    /// `BeaconMenu`: 0 оплата, 1–36 инвентарь, 37–45 хотбар.
+    Beacon,
     /// `CrafterMenu`: 0–8 сетка, 9–44 инвентарь, 45 результат (только показ).
     /// Бит `i` — слот `i` выключен (`CrafterSlot.mayPlace`).
     Crafter(u16),
@@ -62,6 +64,7 @@ impl Kind {
             Kind::Brewing => 41,
             Kind::Smithing | Kind::Loom => 40,
             Kind::Enchanting | Kind::Stonecutter => 38,
+            Kind::Beacon => 37,
         }
     }
 
@@ -78,6 +81,7 @@ impl Kind {
             Kind::Brewing => 5,
             Kind::Smithing | Kind::Loom => 4,
             Kind::Enchanting | Kind::Stonecutter => 2,
+            Kind::Beacon => 1,
         }
     }
 
@@ -93,7 +97,8 @@ impl Kind {
             | Kind::EnderChest
             | Kind::Enchanting
             | Kind::Lectern
-            | Kind::Brewing => None,
+            | Kind::Brewing
+            | Kind::Beacon => None,
         }
     }
 
@@ -144,6 +149,8 @@ pub struct Rules<'a> {
     pub brewing_accept: &'a dyn Fn(usize, i32) -> bool,
     /// Стол картографа: 0 — заполненная карта, 1 — бумага, пустая карта, стекло.
     pub cartography_accept: &'a dyn Fn(usize, &Stack) -> bool,
+    /// `#minecraft:beacon_payment_items` для слота оплаты маяка.
+    pub beacon_payment: &'a dyn Fn(i32) -> bool,
 }
 
 /// Перетаскивание (`QUICK_CRAFT`) между пакетами.
@@ -195,6 +202,7 @@ impl Menu<'_> {
             || enchant_item
             || grind_input
             || self.kind == Kind::Brewing && slot < 3
+            || self.kind == Kind::Beacon && slot == 0
         {
             1
         } else {
@@ -228,6 +236,9 @@ impl Menu<'_> {
         }
         if self.kind == Kind::Enchanting && slot == 1 {
             return Some(s.item) == self.rules.lapis;
+        }
+        if self.kind == Kind::Beacon && slot == 0 {
+            return (self.rules.beacon_payment)(s.item);
         }
         if self.kind == Kind::Grindstone && slot < 2 {
             return (self.rules.grindable)(s);
@@ -418,6 +429,23 @@ impl Menu<'_> {
         let inv = self.kind.inventory_start();
         let hotbar = inv + 27;
         let end = hotbar + 9;
+        // `BeaconMenu.quickMoveStack`: в оплату идёт только одиночный предмет.
+        if self.kind == Kind::Beacon {
+            if i == 0 {
+                let Some(mut s) = self.slots[0].take() else {
+                    return;
+                };
+                self.move_to(&mut s, inv..end, false);
+                self.slots[0] = (s.count > 0).then_some(s);
+            } else if self.slots[0].is_none()
+                && let Some(s) = self.slots[i]
+                && s.count == 1
+                && (self.rules.beacon_payment)(s.item)
+            {
+                self.slots[0] = self.slots[i].take();
+            }
+            return;
+        }
         if self.kind.craft_output() == Some(i) {
             if !self.rules.can_take_output {
                 return;
@@ -464,7 +492,7 @@ impl Menu<'_> {
         let Some(mut s) = self.slots[i] else { return };
         let original = s.count;
         match self.kind {
-            Kind::Lectern => return,
+            Kind::Lectern | Kind::Beacon => return,
             Kind::Player => {
                 let armor = match (self.rules.equip)(s.item) {
                     Some("head") => Some(5),
@@ -810,6 +838,7 @@ mod tests {
             loom_accept: &|_, _| false,
             brewing_accept: &|_, _| false,
             cartography_accept: &|_, _| false,
+            beacon_payment: &|_| false,
         };
         let mut craft = |_: &mut [Slot]| panic!("lectern must not craft");
         let mut menu = Menu {
@@ -848,6 +877,7 @@ mod tests {
             loom_accept: &|slot, item| item == slot as i32 + 1,
             brewing_accept: &|_, _| false,
             cartography_accept: &|_, _| false,
+            beacon_payment: &|_| false,
         };
         let mut craft = |slots: &mut [Slot]| {
             for slot in &mut slots[..2] {
@@ -896,6 +926,7 @@ mod tests {
             loom_accept: &|_, _| false,
             brewing_accept: &|_, _| false,
             cartography_accept: &|_, _| false,
+            beacon_payment: &|_| false,
             smithing_accept: &|slot, item| item == slot as i32 + 1,
         };
         let mut craft = |slots: &mut [Slot]| {
@@ -946,6 +977,7 @@ mod tests {
             loom_accept: &|_, _| false,
             brewing_accept: &|_, _| false,
             cartography_accept: &|_, _| false,
+            beacon_payment: &|_| false,
             smithing_accept: &|_, _| false,
         };
         let mut menu = Menu {
@@ -987,6 +1019,7 @@ mod tests {
             loom_accept: &|_, _| false,
             brewing_accept: &|_, _| false,
             cartography_accept: &|_, _| false,
+            beacon_payment: &|_| false,
             smithing_accept: &|_, _| false,
         };
         let mut craft = |slots: &mut [Slot]| slots[0] = None;
@@ -1040,6 +1073,7 @@ mod tests {
             loom_accept: &|_, _| false,
             brewing_accept: &|_, _| false,
             cartography_accept: &|_, _| false,
+            beacon_payment: &|_| false,
             smithing_accept: &|_, _| false,
         };
         let mut drag = Drag::default();
@@ -1077,6 +1111,7 @@ mod tests {
             loom_accept: &|_, _| false,
             brewing_accept: &|_, _| false,
             cartography_accept: &|_, _| false,
+            beacon_payment: &|_| false,
             smithing_accept: &|_, _| false,
         };
         let mut drag = Drag::default();
@@ -1275,6 +1310,7 @@ mod tests {
                 _ => false,
             },
             cartography_accept: &|_, _| false,
+            beacon_payment: &|_| false,
         };
         let mut craft = |_: &mut [Slot]| {};
         let mut menu = Menu {
@@ -1316,6 +1352,7 @@ mod tests {
             loom_accept: &|_, _| false,
             brewing_accept: &|_, _| false,
             cartography_accept: &|slot, s| s.item == slot as i32 + 1,
+            beacon_payment: &|_| false,
         };
         let mut craft = |slots: &mut [Slot]| {
             for slot in &mut slots[..2] {

@@ -130,6 +130,7 @@ struct Ids {
     sb_pick_item_from_entity: i32,
     sb_change_game_mode: i32,
     sb_set_carried_item: i32,
+    sb_set_beacon: i32,
     container_set_content: i32,
     container_set_slot: i32,
     container_set_data: i32,
@@ -1748,6 +1749,10 @@ pub(crate) struct DimSim {
     paintings: Mutex<FastMap<i32, paintings::Painting>>,
     /// Стойки для брони (`ArmorStand`).
     armor_stands: Mutex<FastMap<i32, armor_stands::ArmorStand>>,
+    /// Маяки (`BeaconBlockEntity`).
+    beacons: Mutex<FastMap<[i32; 3], beacons::Beacon>>,
+    /// Маяки в загруженных чанках, ещё не разобранные тиком.
+    pending_beacons: Mutex<Vec<[i32; 3]>>,
     /// Играющие проигрыватели (`JukeboxSongPlayer`).
     jukeboxes: Mutex<FastMap<[i32; 3], jukebox::Playing>>,
     /// Проигрыватели с диска, ещё не разобранные тиком.
@@ -2221,6 +2226,7 @@ use chunkwake_data::world::FURNACES;
 
 mod armor_stands;
 mod banners;
+mod beacons;
 mod block_items;
 mod boats;
 mod books;
@@ -2423,6 +2429,7 @@ pub struct SurvivalData {
     pub menu_cartography: i32,
     pub menu_lectern: i32,
     pub menu_brewing: i32,
+    pub menu_beacon: i32,
     pub brewing: chunkwake_data::recipes::BrewingData,
     pub loom_basic: Vec<i32>,
     pub loom_special: HashMap<i32, Vec<i32>>,
@@ -2725,6 +2732,7 @@ impl PlayPlan {
                 sb_pick_item_from_entity: sb("pick_item_from_entity")?,
                 sb_change_game_mode: sb("change_game_mode")?,
                 sb_set_carried_item: sb("set_carried_item")?,
+                sb_set_beacon: sb("set_beacon")?,
                 container_set_content: cb("container_set_content")?,
                 container_set_slot: cb("container_set_slot")?,
                 container_set_data: cb("container_set_data")?,
@@ -3198,6 +3206,13 @@ impl PlayPlan {
             self.dim_state().dirty.lock().unwrap().insert(key);
             (old, inserted)
         };
+        // `LevelChunk.setBlockState`: старый маяк больше не актуален, даже
+        // если блок-сущность ещё не успели удалить.
+        let beacon = self.state_name(state) == "minecraft:beacon";
+        self.sim().beacons.lock().unwrap().remove(&[x, y, z]);
+        if beacon {
+            self.sim().pending_beacons.lock().unwrap().push([x, y, z]);
+        }
         if inserted {
             if let Some((column, _)) = self.dim_state().edited.read().unwrap().get(&key) {
                 let list = self.collect_pois(key.0, key.1, column);
@@ -4701,6 +4716,12 @@ impl PlayPlan {
                 c.block_entities
                     .iter()
                     .filter(|(_, be)| be.id == "minecraft:campfire")
+                    .map(|(p, _)| *p),
+            );
+            self.sim().pending_beacons.lock().unwrap().extend(
+                c.block_entities
+                    .iter()
+                    .filter(|(_, be)| be.id == "minecraft:beacon")
                     .map(|(p, _)| *p),
             );
             fresh.push(pos);
@@ -10368,6 +10389,7 @@ impl PlayPlan {
                 Kind::Loom => "LOOM",
                 Kind::Cartography => "CARTOGRAPHY",
                 Kind::Lectern => "LECTERN",
+                Kind::Beacon => "BEACON",
                 Kind::Crafter(_) => "CRAFTER",
                 Kind::Player => "CRAFTING",
             };
@@ -10540,6 +10562,7 @@ impl PlayPlan {
         self.tick_minecarts();
         self.tick_item_frames();
         self.tick_paintings();
+        self.tick_beacons();
         lap(PH_MOBS, watch);
         self.tick_animals();
         self.tick_natural_spawn();
@@ -11855,6 +11878,31 @@ impl PlayPlan {
                         eating = None;
                         continue;
                     }
+                    if id == ids.sb_set_beacon {
+                        let (primary, secondary) = play::read_set_beacon(&mut r)?;
+                        if let Some(w) = window
+                            .as_mut()
+                            .filter(|w| w.kind == Kind::Beacon && self.window_valid(w))
+                        {
+                            let paid = w.slots[0].is_some_and(|s| self.beacon_payment(s.item));
+                            if paid && self.set_beacon_effects(w.pos, primary, secondary) {
+                                w.slots[0] = None;
+                                let data = self.beacon_data(w.pos);
+                                for (i, &v) in data.iter().take(3).enumerate() {
+                                    conn.send(&inv::container_set_data(
+                                        ids.container_set_data,
+                                        w.id,
+                                        i as i16,
+                                        v as i16,
+                                    ))
+                                    .await?;
+                                }
+                                w.data[..3].copy_from_slice(&data[..3]);
+                                self.send_window(conn, &mut state.inv, Some(w), w.id).await?;
+                            }
+                        }
+                        continue;
+                    }
                     if id == ids.sb_change_game_mode {
                         // GameType.STREAM_CODEC читает VarInt.
                         let requested = r.var_int()?;
@@ -13134,6 +13182,7 @@ impl PlayPlan {
                             "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" => Some(Kind::Chest(27)),
                             "minecraft:ender_chest" => Some(Kind::EnderChest),
                             "minecraft:brewing_stand" => Some(Kind::Brewing),
+                            "minecraft:beacon" => Some(Kind::Beacon),
                             n if is_copper_chest(n) => Some(Kind::Chest(27)),
                             "minecraft:hopper" => Some(Kind::Chest(5)),
                             "minecraft:dispenser" | "minecraft:dropper" => Some(Kind::Chest(9)),
@@ -13173,6 +13222,7 @@ impl PlayPlan {
                                 Kind::Cartography => (self.survival.menu_cartography, "container.cartography_table"),
                                 Kind::Lectern => (self.survival.menu_lectern, "container.lectern"),
                                 Kind::Brewing => (self.survival.menu_brewing, "container.brewing"),
+                                Kind::Beacon => (self.survival.menu_beacon, "container.beacon"),
                                 Kind::Furnace => {
                                     let k = furnace_kind(&clicked).unwrap_or(0) as usize;
                                     (self.survival.menu_furnace[k], ["container.furnace", "container.blast_furnace", "container.smoker"][k])
@@ -13224,6 +13274,13 @@ impl PlayPlan {
                                     conn.send(&inv::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
                                 }
                                 w.data[..2].copy_from_slice(&data);
+                            }
+                            if kind == Kind::Beacon {
+                                let data = self.beacon_data(pos);
+                                for (i, &v) in data.iter().take(3).enumerate() {
+                                    conn.send(&inv::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
+                                }
+                                w.data[..3].copy_from_slice(&data[..3]);
                             }
                             if kind == Kind::Anvil {
                                 conn.send(&inv::container_set_data(ids.container_set_data, w.id, 0, 0)).await?;
@@ -14420,7 +14477,8 @@ impl PlayPlan {
             | Kind::Loom
             | Kind::Cartography
             | Kind::Lectern
-            | Kind::Stonecutter => 0,
+            | Kind::Stonecutter
+            | Kind::Beacon => 0,
         };
         let anvil_name = window.as_ref().and_then(|w| w.anvil_name.clone());
         let anvil_before = if kind == Kind::Anvil {
@@ -14567,6 +14625,7 @@ impl PlayPlan {
         };
         let max = |item: i32| self.max_stack(item);
         let equip = |item: i32| self.survival.items.get(item as usize).and_then(|i| i.equip);
+        let beacon_payment = |item: i32| self.beacon_payment(item);
         // Печь окна: рецепты её вида.
         let fk = window
             .as_ref()
@@ -14641,6 +14700,7 @@ impl PlayPlan {
             loom_accept: &loom_accept,
             brewing_accept: &brewing_accept,
             cartography_accept: &cartography_accept,
+            beacon_payment: &beacon_payment,
         };
         let shulker_container = window.as_ref().is_some_and(|w| {
             matches!(w.kind, Kind::Chest(_))
@@ -15014,6 +15074,9 @@ impl PlayPlan {
             Kind::Stonecutter => self
                 .block(w.pos)
                 .is_some_and(|s| self.state_name(s) == "minecraft:stonecutter"),
+            Kind::Beacon => self
+                .block(w.pos)
+                .is_some_and(|s| self.state_name(s) == "minecraft:beacon"),
             Kind::Crafter(_) => self
                 .block(w.pos)
                 .is_some_and(|s| self.state_name(s) == crafter::CRAFTER),
@@ -15221,6 +15284,7 @@ impl PlayPlan {
                     }
                 }
                 Kind::Stonecutter => back.extend(w.slots[0].take()),
+                Kind::Beacon => back.extend(w.slots[0].take()),
                 Kind::Lectern => {}
                 Kind::Furnace => {
                     if let Some(e) = self.sim().furnaces.lock().unwrap().get_mut(&w.pos) {
@@ -15305,6 +15369,7 @@ impl PlayPlan {
             Kind::Cartography if w.slots.is_empty() => vec![None; 3],
             Kind::Lectern => vec![self.lectern_book(w.pos)],
             Kind::Stonecutter if w.slots.is_empty() => vec![None; 2],
+            Kind::Beacon if w.slots.is_empty() => vec![None; 1],
             _ => w.slots.clone(),
         }
     }
