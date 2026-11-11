@@ -69,22 +69,27 @@ mod tests {
     use super::*;
 
     /// Страница не должна подгружать внешние ресурсы: иначе она сломается
-    /// без интернета и потянет чужой код в бинарник. `xmlns` у SVG — это
-    /// пространство имён, а не запрос в сеть, поэтому проверяем именно
-    /// загрузчики: `src`/`href` на http, `@import` и `url(...)`.
+    /// без интернета и потянет чужой код в бинарник. Исключение — Google
+    /// Fonts: при недоступности сети остаётся системный fallback.
+    /// `xmlns` у SVG — пространство имён, а не запрос в сеть.
     #[test]
     fn page_is_self_contained() {
         assert!(index_text().contains("<title>Chunkwake"));
         assert!(index_text().contains("/api/events"));
-        for loader in [
-            "src=\"http",
-            "href=\"http",
-            "@import",
-            "url(http",
-            "url('http",
-        ] {
+        for loader in ["src=\"http", "@import", "url(http", "url('http"] {
             assert!(!index_text().contains(loader), "внешний ресурс: {loader}");
         }
+        for href in index_text().split("href=\"").skip(1) {
+            if href.starts_with("https://") {
+                assert!(
+                    href.starts_with("https://fonts.googleapis.com")
+                        || href.starts_with("https://fonts.gstatic.com"),
+                    "внешний href: {href}"
+                );
+            }
+        }
+        assert!(index_text().contains("\"Segoe UI\""));
+        assert!(index_text().contains("\"Cascadia Code\""));
         // Иконки вшиты спрайтом, а не подключаются как шрифт или CDN.
         assert!(
             index_text().contains("<symbol id=\"i-"),

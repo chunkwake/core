@@ -4,44 +4,91 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#181818">
 <meta name="robots" content="noindex">
-<title>Chunkwake · Вход</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<title>Chunkwake — вход</title>
 <style>
-  :root{--bg:#080d14;--surface:#131c27;--stroke:#26374a;--text:#eaf2fb;
-        --muted:#93a6bb;--cyan:#65cce9;--red:#f18b96}
+  :root{
+    --bg:#181818;--bg-code:#141414;--panel:#202020;--panel-hover:#262626;--panel-active:#2B2B2B;
+    --border:#303030;--border-strong:#3A3A38;
+    --text:#E7E7E7;--text-muted:#9A9A96;--text-subtle:#7A7A75;
+    --accent:#A6A092;--accent-hover:#B7B1A3;--accent-soft:rgba(166,160,146,.12);
+    --accent-border:rgba(166,160,146,.35);--on-accent:#181818;--selection:rgba(166,160,146,.25);
+    --ok:#9DB283;--warn:#C7A96B;--danger:#C77E72;--info:#8FA3B8;--idle:#7A7A75;
+    --ok-soft:rgba(157,178,131,.12);--warn-soft:rgba(199,169,107,.12);
+    --danger-soft:rgba(199,126,114,.12);--info-soft:rgba(143,163,184,.12);
+    --ok-border:rgba(157,178,131,.35);--warn-border:rgba(199,169,107,.35);
+    --danger-border:rgba(199,126,114,.35);--info-border:rgba(143,163,184,.35);
+    --series-1:#A6A092;--series-2:#8FA3B8;--series-3:#9DB283;--series-4:#B9A9C4;--series-5:#C2A98A;
+    --syn-keyword:#C2A98A;--syn-string:#9DB283;--syn-number:#C7A96B;--syn-function:#A8B6C4;
+    --syn-type:#B9A9C4;--syn-comment:#80807A;--syn-punctuation:#A0A0A0;--syn-variable:#E7E7E7;
+    --r:6px;
+  }
+  /* Светлая тема заложена токенами, но не включается в v1. */
+  :root[data-theme="light"]{
+    --bg:#F4F1EA;--bg-code:#EAE6DE;--panel:#FBFAF7;--panel-hover:#F1EEE7;--panel-active:#E8E4DB;
+    --border:#D9D4C9;--border-strong:#C6BFB2;
+    --text:#1F1E1B;--text-muted:#5F5B53;--text-subtle:#78736A;
+    --accent:#6D685C;--accent-hover:#59554B;--accent-soft:rgba(109,104,92,.10);
+    --accent-border:rgba(109,104,92,.32);--on-accent:#FAF8F3;--selection:rgba(109,104,92,.22);
+    --ok:#4F6B3D;--warn:#8A6A2F;--danger:#9C4F45;--info:#4F6378;--idle:#78736A;
+    --danger-soft:rgba(156,79,69,.10);--danger-border:rgba(156,79,69,.32);
+    --series-1:#6D685C;--series-2:#4F6378;--series-3:#4F6B3D;--series-4:#75657E;--series-5:#8A6A2F;
+  }
   *{box-sizing:border-box}
-  body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;
-    background:radial-gradient(ellipse 80% 40% at 50% -8%,#16304a 0,transparent 70%),var(--bg);
-    color:var(--text);font:13px/1.5 "Inter","Segoe UI",Arial,sans-serif;
-    -webkit-font-smoothing:antialiased}
-  .card{width:min(380px,100%);border:1px solid var(--stroke);border-radius:12px;
-    background:var(--surface);padding:22px;box-shadow:0 24px 70px #0007}
-  h1{margin:0 0 4px;font-size:16px;font-weight:750;letter-spacing:-.01em}
-  p{margin:0 0 18px;color:var(--muted);font-size:12px}
-  label{display:block;font-size:10px;font-weight:700;letter-spacing:.13em;
-    text-transform:uppercase;color:var(--muted);margin-bottom:6px}
-  input{width:100%;padding:9px 11px;border-radius:7px;border:1px solid var(--stroke);
-    background:#0d1720;color:var(--text);font:inherit;font-family:ui-monospace,Consolas,monospace;
-    transition:border-color .2s ease, box-shadow .2s ease}
-  input:focus{outline:none;border-color:#3f6f8c;box-shadow:0 0 0 3px #65cce91f}
-  button{width:100%;margin-top:14px;padding:10px 12px;border-radius:7px;border:0;
-    background:linear-gradient(140deg,#2f7f9c,#2a6191);color:#fff;font:inherit;font-weight:650;
-    cursor:pointer;transition:filter .2s ease, transform .12s ease}
-  button:hover{filter:brightness(1.1)}
-  button:active{transform:translateY(1px)}
-  .hint{margin-top:14px;padding-top:12px;border-top:1px solid #1e2b39;
-    color:var(--muted);font-size:11px;line-height:1.6}
-  code{font-family:ui-monospace,Consolas,monospace;color:var(--cyan);
-    background:#0d1720;padding:1px 5px;border-radius:4px}
-  .error{padding:8px 10px;border-radius:6px;border:1px solid #6d3742;background:#2b171c80;
-    color:var(--red);font-size:11px;margin-bottom:14px}
+  html{color-scheme:dark}
+  body{
+    margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:var(--bg);
+    color:var(--text);font:14px/1.55 Inter,"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Noto Sans",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection{background:var(--selection);color:var(--text)}
+  .card{
+    width:min(380px,100%);border:1px solid var(--border);border-radius:var(--r);
+    background:var(--panel);padding:22px;
+  }
+  h1{margin:0 0 4px;font-size:17px;line-height:1.3;font-weight:600;letter-spacing:-.01em}
+  p{margin:0 0 18px;color:var(--text-muted);font-size:12px}
+  label{
+    display:block;font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--text-muted);margin-bottom:6px;
+  }
+  input{
+    width:100%;padding:9px 11px;border-radius:var(--r);border:1px solid var(--border);
+    background:var(--bg-code);color:var(--text);
+    font:12.5px/1.5 "JetBrains Mono","Cascadia Code","Cascadia Mono",Consolas,ui-monospace,monospace;
+  }
+  input:focus{outline:2px solid var(--accent-border);outline-offset:1px;border-color:var(--border-strong)}
+  button{
+    width:100%;margin-top:14px;padding:9px 12px;border-radius:var(--r);border:1px solid transparent;
+    background:var(--accent);color:var(--on-accent);font:inherit;font-weight:600;cursor:pointer;
+    transition:background .14s ease;
+  }
+  button:hover{background:var(--accent-hover)}
+  button:active{background:var(--accent)}
+  button:focus-visible{outline:2px solid var(--accent-border);outline-offset:2px}
+  .hint{
+    margin-top:14px;padding-top:12px;border-top:1px solid var(--border);
+    color:var(--text-muted);font-size:11px;line-height:1.6;
+  }
+  code{
+    font-family:"JetBrains Mono","Cascadia Code","Cascadia Mono",Consolas,ui-monospace,monospace;
+    font-size:.95em;color:var(--accent);background:var(--bg-code);padding:1px 5px;border-radius:4px;
+  }
+  .error{
+    padding:8px 10px;border-radius:var(--r);border:1px solid var(--danger-border);
+    background:var(--danger-soft);color:var(--danger);font-size:11px;margin-bottom:14px;
+  }
 </style>
 </head>
 <body>
 <main class="card">
-  <h1>Chunkwake · метрики</h1>
-  <p>Этот дашборд открыт из сети, поэтому нужен токен из настроек сервера.</p>
-  <div id="err" class="error" hidden>Токен не подошёл. Проверьте <code>metrics-token</code> в <code>server.properties</code>.</div>
+  <h1>Chunkwake — вход</h1>
+  <p>Введите токен метрик, чтобы открыть панель состояния сервера.</p>
+  <div id="err" class="error" hidden>Неверный токен. Проверьте <code>metrics-token</code> в <code>server.properties</code>.</div>
   <form method="get" action="/" id="form">
     <label for="token">Токен</label>
     <input id="token" name="token" type="password" autocomplete="current-password"
@@ -49,15 +96,15 @@
     <button type="submit">Войти</button>
   </form>
   <div class="hint">
-    Токен задаётся на сервере: <code>chunkwake config set metrics-token &lt;значение&gt;</code>.
-    Чтобы открывать дашборд только с этой машины, привяжите его к loopback:
+    Токен задаётся в конфигурации: <code>chunkwake config set metrics-token &lt;значение&gt;</code>.
+    Если панель нужна только с этой машины, оставьте metrics-bind на loopback:
     <code>metrics-bind=127.0.0.1</code>.
   </div>
 </main>
 <script>
 (function(){
-  // Сервер отвечает 401, когда токен не подошёл: показываем подсказку, а не
-  // пустую страницу. Форма уходит обычным GET, куку ставит сервер.
+  // Сервер отвечает 401, когда токен не подошёл: показываем сообщение,
+  // но саму форму оставляем. Страница отдаётся только по GET.
   if (location.search.indexOf("token=") >= 0) {
     document.getElementById("err").hidden = false;
   }
