@@ -33,6 +33,7 @@ pub struct Ids {
     teleport_entity: i32,
     entity_position_sync: i32,
     remove_entities: i32,
+    set_passengers: i32,
     set_time: i32,
     level_chunk: i32,
     forget_level_chunk: i32,
@@ -69,6 +70,7 @@ impl Ids {
             teleport_entity: id(Play, C, "teleport_entity")?,
             entity_position_sync: id(Play, C, "entity_position_sync")?,
             remove_entities: id(Play, C, "remove_entities")?,
+            set_passengers: id(Play, C, "set_passengers")?,
             set_time: id(Play, C, "set_time")?,
             level_chunk: id(Play, C, "level_chunk_with_light")?,
             forget_level_chunk: id(Play, C, "forget_level_chunk")?,
@@ -125,6 +127,11 @@ pub enum Event {
         steps: Vec<(i32, [f64; 3])>,
     },
     EntityRemoved(Vec<i32>),
+    /// Список пассажиров транспорта (`ClientboundSetPassengersPacket`).
+    EntityPassengers {
+        vehicle: i32,
+        passengers: Vec<i32>,
+    },
     /// Игровое время из `set_time`: сервер шлёт раз в 20 тиков.
     GameTime(i64),
     Other,
@@ -534,6 +541,20 @@ impl Client {
                 ids.push(r.var_int().map_err(err)?);
             }
             Ok(Event::EntityRemoved(ids))
+        } else if id == self.ids.set_passengers {
+            let vehicle = r.var_int().map_err(err)?;
+            let count = r.var_int().map_err(err)?;
+            if !(0..=256).contains(&count) {
+                return Err(format!("invalid passenger count {count}"));
+            }
+            let mut passengers = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                passengers.push(r.var_int().map_err(err)?);
+            }
+            Ok(Event::EntityPassengers {
+                vehicle,
+                passengers,
+            })
         } else if id == self.ids.set_time {
             let game_time = r.i64().map_err(err)?;
             Ok(Event::GameTime(game_time))

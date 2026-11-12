@@ -67,6 +67,11 @@ impl PlayPlan {
                         for p in packets {
                             out.extend(self.hub.frame(&p));
                         }
+                        // Моб-пассажир: вместе с ним — пассажиры его лодки
+                        // (`ServerEntity.sendPairingData`).
+                        if let Some(p) = self.mob_vehicle_passengers(t.id) {
+                            out.extend(self.hub.frame(&p));
+                        }
                         visible.insert(t.id);
                     }
                 }

@@ -303,6 +303,17 @@ impl PlayPlan {
         self.sim().boats.lock().unwrap().contains_key(&id)
     }
 
+    /// `ServerEntity.sendPairingData` для пассажира: клиент, впервые
+    /// увидевший моба, получает и список пассажиров его лодки.
+    pub(super) fn mob_vehicle_passengers(&self, id: i32) -> Option<Vec<u8>> {
+        // Порядок замков как в `tick_boats`: лодки, затем мобы.
+        let boats = self.sim().boats.lock().unwrap();
+        let vehicle = self.sim().mobs.lock().unwrap().get(&id)?.vehicle?;
+        let b = boats.get(&vehicle)?;
+        let ids: Vec<i32> = b.riders.iter().map(|r| r.1).collect();
+        Some(play::set_passengers(self.ids.set_passengers, vehicle, &ids))
+    }
+
     /// `/summon minecraft:oak_boat`: лодка без предмета в руке.
     pub(super) fn summon_boat(&self, kind: &str, pos: [f64; 3]) -> Option<i32> {
         // В реестре есть все сущности: лодкой считаем только `*_boat`/`*_raft`.
@@ -809,11 +820,19 @@ impl PlayPlan {
             simulated.is_empty()
                 || simulated.contains(&((p[0].floor() as i32) >> 4, (p[2].floor() as i32) >> 4))
         };
-        let players: FastSet<Uuid> = self.hub.players.lock().unwrap().keys().copied().collect();
+        let players: FastMap<Uuid, f32> = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .values()
+            .map(|p| (p.entry.uuid, p.yaw))
+            .collect();
         let now = self.game_time.load(Ordering::Relaxed);
         let mut packets = Vec::new();
         let mut gone = Vec::new();
         let mut marks = Vec::new();
+        let mut player_ejects = Vec::new();
         self.with_world(|w| {
             let mut boats = self.sim().boats.lock().unwrap();
             let mut mobs = self.sim().mobs.lock().unwrap();
@@ -827,43 +846,46 @@ impl PlayPlan {
                 }
                 // В лодке с водителем физику считает его клиент
                 // (`handleMoveVehicle`), сервер только принимает позицию.
-                let player_controlled = b.riders.first().is_some_and(|r| players.contains(&r.0));
-                if !player_controlled {
-                    b.old_status = b.status;
-                    b.status = self.boat_status(b, w);
-                    b.out_of_control =
-                        if matches!(b.status, Status::UnderWater | Status::UnderFlowingWater) {
-                            b.out_of_control + 1.0
-                        } else {
-                            0.0
-                        };
-                    // `AbstractBoat.tick`: три секунды под водой — пассажиры
-                    // сходят (для пустой лодки это мобы).
-                    if b.out_of_control >= 60.0 && !b.riders.is_empty() {
-                        let riders: Vec<(Uuid, i32)> = std::mem::take(&mut b.riders);
-                        for (uuid, rider) in riders {
-                            if let Some(e) = mobs.get_mut(&rider) {
-                                e.vehicle = None;
-                                let yaw = e.mob.yaw;
-                                let spot = self.dismount_spot(b.pos, yaw);
-                                e.ride_to(spot, yaw);
-                                marks.push(spot);
-                                packets.push((
+                let player_controlled =
+                    b.riders.first().is_some_and(|r| players.contains_key(&r.0));
+                b.old_status = b.status;
+                b.status = self.boat_status(b, w);
+                b.out_of_control =
+                    if matches!(b.status, Status::UnderWater | Status::UnderFlowingWater) {
+                        b.out_of_control + 1.0
+                    } else {
+                        0.0
+                    };
+                // `AbstractBoat.tick`: три секунды под водой — пассажиры
+                // сходят (`ejectPassengers`), в том числе игрок.
+                if b.out_of_control >= 60.0 && !b.riders.is_empty() {
+                    let riders: Vec<(Uuid, i32)> = std::mem::take(&mut b.riders);
+                    for (uuid, rider) in riders {
+                        let yaw = players.get(&uuid).copied().unwrap_or(b.yaw);
+                        let spot = self.dismount_spot(b.pos, yaw);
+                        if players.contains_key(&uuid) {
+                            player_ejects.push((uuid, spot));
+                        } else if let Some(e) = mobs.get_mut(&rider) {
+                            e.vehicle = None;
+                            e.ride_to(spot, yaw);
+                            marks.push(spot);
+                            packets.push((
+                                rider,
+                                play::teleport_entity(
+                                    self.ids.teleport_entity,
                                     rider,
-                                    play::teleport_entity(
-                                        self.ids.teleport_entity,
-                                        rider,
-                                        spot,
-                                        yaw,
-                                        0.0,
-                                        true,
-                                    ),
-                                ));
-                            }
-                            self.unlink_rider(uuid);
+                                    spot,
+                                    yaw,
+                                    0.0,
+                                    true,
+                                ),
+                            ));
                         }
-                        packets.push((id, play::set_passengers(self.ids.set_passengers, id, &[])));
+                        self.unlink_rider(uuid);
                     }
+                    packets.push((id, play::set_passengers(self.ids.set_passengers, id, &[])));
+                }
+                if !player_controlled {
                     // `Entity.baseTick` → `updateFluidInteraction`: течение
                     // добавляется к скорости до `floatBoat`.
                     self.apply_fluid_current(b, w);
@@ -958,6 +980,18 @@ impl PlayPlan {
         for pos in marks {
             self.mark_entity_changed(pos);
         }
+        // Игрока-пассажира высаживаем после снятия замков: клиент сам
+        // спешивается по `set_passengers`, а сервер ставит его в точку высадки.
+        for (uuid, spot) in player_ejects {
+            self.moved(
+                uuid,
+                Move {
+                    pos: Some(spot),
+                    rot: None,
+                    on_ground: true,
+                },
+            );
+        }
     }
 
     /// `AbstractBoat.positionRider`: мобы-пассажиры едут с лодкой (игроков
@@ -965,7 +999,7 @@ impl PlayPlan {
     fn boat_riders(
         &self,
         b: &mut Boat,
-        players: &FastSet<Uuid>,
+        players: &FastMap<Uuid, f32>,
         mobs: &mut FastMap<i32, mobs::MobEntry>,
         packets: &mut Vec<(i32, Vec<u8>)>,
         marks: &mut Vec<[f64; 3]>,
@@ -973,7 +1007,7 @@ impl PlayPlan {
         let mut i = 0;
         while i < b.riders.len() {
             let (uuid, rider) = b.riders[i];
-            if players.contains(&uuid) {
+            if players.contains_key(&uuid) {
                 i += 1;
                 continue;
             }
@@ -1040,7 +1074,7 @@ impl PlayPlan {
         &self,
         b: &mut Boat,
         id: i32,
-        players: &FastSet<Uuid>,
+        players: &FastMap<Uuid, f32>,
         mobs: &mut FastMap<i32, mobs::MobEntry>,
         packets: &mut Vec<(i32, Vec<u8>)>,
         marks: &mut Vec<[f64; 3]>,
@@ -1048,7 +1082,7 @@ impl PlayPlan {
         let (lo, hi) = b.bounds();
         let slo = [lo[0] - 0.2, lo[1] + 0.01, lo[2] - 0.2];
         let shi = [hi[0] + 0.2, hi[1] - 0.01, hi[2] + 0.2];
-        let player_controlled = b.riders.first().is_some_and(|r| players.contains(&r.0));
+        let player_controlled = b.riders.first().is_some_and(|r| players.contains_key(&r.0));
         let can_board = !player_controlled
             && !matches!(b.status, Status::UnderWater | Status::UnderFlowingWater)
             && b.out_of_control < 60.0
