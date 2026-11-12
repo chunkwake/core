@@ -1644,6 +1644,11 @@ pub enum Meta {
         particle: i32,
         colors: Vec<i32>,
     },
+    VillagerData {
+        kind: i32,
+        profession: i32,
+        level: i32,
+    },
 }
 
 /// `set_entity_data` с произвольными полями `(индекс, значение)`.
@@ -1679,6 +1684,17 @@ pub fn entity_meta(id: i32, entity_id: i32, fields: &[(u8, Meta)]) -> Vec<u8> {
                 for color in colors {
                     w.var_int(*particle).i32(*color);
                 }
+            }
+            Meta::VillagerData {
+                kind,
+                profession,
+                level,
+            } => {
+                w.u8(*i)
+                    .var_int(18)
+                    .var_int(*kind)
+                    .var_int(*profession)
+                    .var_int(*level);
             }
         };
     }

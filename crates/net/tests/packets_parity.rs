@@ -34,7 +34,6 @@ const UNHANDLED: &[&str] = &[
     "recipe_book_seen_recipe",
     "resource_pack",
     "seen_advancements",
-    "select_trade",
     "set_command_block",
     "set_command_minecart",
     "set_game_rule",

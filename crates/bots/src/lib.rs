@@ -36,6 +36,7 @@ pub struct Ids {
     set_passengers: i32,
     set_entity_link: i32,
     set_time: i32,
+    open_screen: i32,
     level_chunk: i32,
     forget_level_chunk: i32,
     chunk_batch_finished: i32,
@@ -74,6 +75,7 @@ impl Ids {
             set_passengers: id(Play, C, "set_passengers")?,
             set_entity_link: id(Play, C, "set_entity_link")?,
             set_time: id(Play, C, "set_time")?,
+            open_screen: id(Play, C, "open_screen")?,
             level_chunk: id(Play, C, "level_chunk_with_light")?,
             forget_level_chunk: id(Play, C, "forget_level_chunk")?,
             chunk_batch_finished: id(Play, C, "chunk_batch_finished")?,
@@ -138,6 +140,11 @@ pub enum Event {
     EntityLink {
         source: i32,
         dest: i32,
+    },
+    /// Открылось окно контейнера (`window`, id меню).
+    OpenScreen {
+        window: i32,
+        menu: i32,
     },
     /// Игровое время из `set_time`: сервер шлёт раз в 20 тиков.
     GameTime(i64),
@@ -566,6 +573,10 @@ impl Client {
             let source = i32::from_be_bytes(r.bytes(4).map_err(err)?.try_into().unwrap());
             let dest = i32::from_be_bytes(r.bytes(4).map_err(err)?.try_into().unwrap());
             Ok(Event::EntityLink { source, dest })
+        } else if id == self.ids.open_screen {
+            let window = r.var_int().map_err(err)?;
+            let menu = r.var_int().map_err(err)?;
+            Ok(Event::OpenScreen { window, menu })
         } else if id == self.ids.set_time {
             let game_time = r.i64().map_err(err)?;
             Ok(Event::GameTime(game_time))

@@ -180,6 +180,14 @@ impl PlayPlan {
             }
         }
         {
+            let villagers = self.sim().villagers.lock().unwrap();
+            for (entity_id, v) in villagers.iter() {
+                let mut target = entity_ref(*entity_id, v.pos, "minecraft:villager");
+                target.yaw = v.yaw;
+                out.push(target);
+            }
+        }
+        {
             let boats = self.sim().boats.lock().unwrap();
             for (entity_id, boat) in boats.iter() {
                 let mut target = entity_ref(*entity_id, boat.pos, &boat.kind);
@@ -276,6 +284,13 @@ impl PlayPlan {
                     )
                 })
         };
+        let mob = mob.or_else(|| {
+            let villagers = self.sim().villagers.lock().unwrap();
+            villagers
+                .iter()
+                .find(|(_, v)| v.uuid == uuid)
+                .map(|(&id, v)| (id, v.pos, "minecraft:villager", v.yaw, 0.0))
+        });
         let (entity_id, pos, name, yaw, pitch) = mob?;
         let mut target = entity_ref(entity_id, pos, name);
         target.yaw = yaw;
@@ -954,7 +969,14 @@ impl PlayPlan {
                 .remove(&entity_id)
                 .is_some()
             | self.sim().eyes.lock().unwrap().remove(&entity_id).is_some()
-            | self.sim().fish.lock().unwrap().remove(&entity_id).is_some();
+            | self.sim().fish.lock().unwrap().remove(&entity_id).is_some()
+            | self
+                .sim()
+                .villagers
+                .lock()
+                .unwrap()
+                .remove(&entity_id)
+                .is_some();
         if let Some(b) = boat {
             self.remove_boat(entity_id, &b);
             self.mark_entity_changed(b.pos);
@@ -1420,6 +1442,17 @@ impl PlayPlan {
                 root.insert("OpenWater".into(), Tag::Byte(i8::from(b.open_water)));
                 return root;
             }
+        }
+        if let Some(nbt) = self.villager_nbt_of(target.entity_id) {
+            if let Some((pos, yaw)) = self.villager_at(target.entity_id) {
+                insert_pos_rot(&mut root, pos, yaw, 0.0);
+            }
+            for (key, tag) in nbt {
+                if key != "Pos" && key != "Rotation" {
+                    root.insert(key, tag);
+                }
+            }
+            return root;
         }
         {
             let boats = self.sim().boats.lock().unwrap();

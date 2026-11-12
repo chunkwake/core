@@ -167,6 +167,56 @@ pub fn write_stack(w: &mut Writer, s: Slot) {
     }
 }
 
+/// Одна сделка жителя для `merchant_offers`.
+#[derive(Clone, Copy, Debug)]
+pub struct MerchantOffer {
+    pub buy: (i32, i32),
+    pub buy_b: Option<(i32, i32)>,
+    pub sell: Slot,
+    pub out_of_stock: bool,
+    pub uses: i32,
+    pub max_uses: i32,
+    pub xp: i32,
+    pub price_diff: i32,
+    pub price_mul: f32,
+    pub demand: i32,
+}
+
+/// `merchant_offers`: окно торговли и список сделок.
+pub fn merchant_offers(
+    id: i32,
+    window: i32,
+    offers: &[MerchantOffer],
+    level: i32,
+    xp: i32,
+    show_progress: bool,
+    can_restock: bool,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(window).var_int(offers.len() as i32);
+    for o in offers {
+        // `ItemCost.STREAM_CODEC`: item, count, пустой `DataComponentExactPredicate`.
+        w.var_int(o.buy.0).var_int(o.buy.1).var_int(0);
+        write_stack(&mut w, o.sell);
+        w.bool(o.buy_b.is_some());
+        if let Some((item, count)) = o.buy_b {
+            w.var_int(item).var_int(count).var_int(0);
+        }
+        w.bool(o.out_of_stock)
+            .i32(o.uses)
+            .i32(o.max_uses)
+            .i32(o.xp)
+            .i32(o.price_diff)
+            .f32(o.price_mul)
+            .i32(o.demand);
+    }
+    w.var_int(level)
+        .var_int(xp)
+        .bool(show_progress)
+        .bool(can_restock);
+    w.buf
+}
+
 /// Патч компонентов стопки: добавленные (износ, чары, имя, описание), удалённых нет.
 /// Если патч пришёл с неизвестным компонентом, он пишется байт в байт.
 fn write_patch(w: &mut Writer, s: &Stack) {

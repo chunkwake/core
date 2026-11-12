@@ -747,6 +747,14 @@ fn survival_data(
         menu_hopper: menu("minecraft:hopper")?,
         menu_3x3: menu("minecraft:generic_3x3")?,
         menu_crafter: menu("minecraft:crafter_3x3")?,
+        menu_merchant: menu("minecraft:merchant")?,
+        villager_professions: chunkwake_data::registries::builtin_entries_of(
+            builtin,
+            "villager_profession",
+        )
+        .map_err(s)?,
+        villager_types: chunkwake_data::registries::builtin_entries_of(builtin, "villager_type")
+            .map_err(s)?,
         menu_rows: [
             menu("minecraft:generic_9x1")?,
             menu("minecraft:generic_9x2")?,

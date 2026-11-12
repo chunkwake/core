@@ -32,6 +32,7 @@ impl PlayPlan {
         self.track_orbs(&mut out);
         self.track_boats(&mut out);
         self.track_fish(&mut out);
+        self.track_villagers(&mut out);
         self.track_knots(&mut out);
         self.track_minecarts(&mut out);
         self.track_item_frames(&mut out);
@@ -47,6 +48,7 @@ impl PlayPlan {
             .or_else(|| self.orb_spawn(id))
             .or_else(|| self.boat_spawn(id))
             .or_else(|| self.fish_spawn(id))
+            .or_else(|| self.villager_spawn(id))
             .or_else(|| self.knot_spawn(id))
             .or_else(|| self.minecart_spawn(id))
             .or_else(|| self.item_frame_spawn(id))

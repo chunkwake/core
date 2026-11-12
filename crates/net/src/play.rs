@@ -85,6 +85,7 @@ struct Ids {
     swing_animation: i32,
     set_passengers: i32,
     set_entity_link: i32,
+    merchant_offers: i32,
     boss_event: i32,
     post_effects: i32,
     chunks_biomes: i32,
@@ -143,6 +144,7 @@ struct Ids {
     damage_event: i32,
     entity_event: i32,
     sb_container_click: i32,
+    sb_select_trade: i32,
     sb_rename_item: i32,
     sb_sign_update: i32,
     sb_edit_book: i32,
@@ -1764,6 +1766,10 @@ pub(crate) struct DimSim {
     knots: Mutex<FastMap<i32, leashes::Knot>>,
     /// Поплавки рыбалки (`FishingHook`).
     fish: Mutex<FastMap<i32, fishing::Bobber>>,
+    /// Жители (`Villager`) по ID сущности.
+    villagers: Mutex<FastMap<i32, villagers::Villager>>,
+    /// Загруженные из `entities/*.mca` жители до первого тика.
+    villagers_loaded: Mutex<Vec<villagers::Villager>>,
     /// Вагонетки по ID сущности.
     minecarts: Mutex<FastMap<i32, minecarts::MinecartEntry>>,
     /// Рамки для предметов по ID сущности.
@@ -1991,6 +1997,8 @@ struct Window {
     anvil_only_renaming: bool,
     /// Последние отправленные данные крафтера (`CrafterMenu`: слоты 0–8, `triggered`).
     crafter: [i32; 10],
+    /// Торговля жителя: кто и выбранная сделка.
+    merchant: Option<villagers::MerchantWindow>,
 }
 
 impl Window {
@@ -2285,6 +2293,7 @@ mod stream;
 mod swing;
 mod tracking;
 mod unload;
+mod villagers;
 
 pub use poi::group_of as poi_group;
 pub use unload::UnloadWrite;
@@ -2484,6 +2493,12 @@ pub struct SurvivalData {
     pub menu_3x3: i32,
     /// `crafter_3x3`.
     pub menu_crafter: i32,
+    /// `minecraft:merchant`.
+    pub menu_merchant: i32,
+    /// Профессии жителей (`villager_profession`) по именам.
+    pub villager_professions: HashMap<String, i32>,
+    /// Типы жителей (`villager_type`) по именам.
+    pub villager_types: HashMap<String, i32>,
     /// `generic_9x1` … `generic_9x6` для окон плагинов.
     pub menu_rows: [i32; 6],
     /// Состояния сундуков (`ChestBlock`): свойства по состоянию и обратно.
@@ -2731,6 +2746,7 @@ impl PlayPlan {
                 swing_animation: cb("swing_animation")?,
                 set_passengers: cb("set_passengers")?,
                 set_entity_link: cb("set_entity_link")?,
+                merchant_offers: cb("merchant_offers")?,
                 boss_event: cb("boss_event")?,
                 post_effects: cb("post_effects")?,
                 chunks_biomes: cb("chunks_biomes")?,
@@ -2789,6 +2805,7 @@ impl PlayPlan {
                 damage_event: cb("damage_event")?,
                 entity_event: cb("entity_event")?,
                 sb_container_click: sb("container_click")?,
+                sb_select_trade: sb("select_trade")?,
                 sb_rename_item: sb("rename_item")?,
                 sb_sign_update: sb("sign_update")?,
                 sb_edit_book: sb("edit_book")?,
@@ -10816,6 +10833,7 @@ impl PlayPlan {
                 Kind::Lectern => "LECTERN",
                 Kind::Beacon => "BEACON",
                 Kind::Crafter(_) => "CRAFTER",
+                Kind::Merchant => "MERCHANT",
                 Kind::Player => "CRAFTING",
             };
             (ty, plugin_of(w.pos).unwrap_or(-1), n, cur)
@@ -10989,6 +11007,7 @@ impl PlayPlan {
         self.tick_boats();
         self.tick_leashes();
         self.tick_fishing();
+        self.tick_villagers();
         self.tick_item_frames();
         self.tick_paintings();
         self.tick_beacons();
@@ -11656,7 +11675,7 @@ impl PlayPlan {
                                 self.close_with_event(&mut state.inv, &mut window, uuid).await;
                                 next_window = next_window % 100 + 1;
                                 let pos = plugin_pos(pid);
-                                let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10] };
+                                let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10], merchant: None };
                                 w.slots = self.window_slots(&w);
                                 let title = serde_json::from_str(&title).unwrap_or_else(|_| serde_json::json!({"translate": "container.chest"}));
                                 conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &title)).await?;
@@ -12506,6 +12525,21 @@ impl PlayPlan {
                         }
                         continue;
                     }
+                    if id == ids.sb_select_trade {
+                        let idx = r.var_int()?;
+                        if let Some(w) = window.as_mut().filter(|w| w.kind == Kind::Merchant) {
+                            if let Some(m) = w.merchant.as_mut() {
+                                m.selected = Some(idx.max(0) as usize);
+                            }
+                            let first = [w.slots[0], w.slots[1]];
+                            w.slots[2] = w
+                                .merchant
+                                .and_then(|m| self.merchant_result(m, &first));
+                            let wid = w.id;
+                            self.send_window(conn, &mut state.inv, Some(&*w), wid).await?;
+                        }
+                        continue;
+                    }
                     if id == ids.sb_container_click {
                         let c = inv::read_container_click(&mut r)?;
                         // Сундук сломали, пока окно открыто: закрываем без клика.
@@ -12562,6 +12596,12 @@ impl PlayPlan {
                             }
                             if kept {
                                 self.send_window(conn, &mut state.inv, window.as_ref(), c.window).await?;
+                            }
+                            if let Some(w) = window.as_ref().filter(|w| w.id == c.window && w.kind == Kind::Merchant)
+                                && let Some(m) = w.merchant
+                                && let Some(p) = self.villager_offers_packet(w.id, m.villager)
+                            {
+                                conn.send(&p).await?;
                             }
                         }
                         self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
@@ -12711,6 +12751,38 @@ impl PlayPlan {
                                 continue;
                             }
                         }
+                        // `Villager.mobInteract`: ПКМ без приседа открывает торговлю.
+                        if !state.vitals.dead
+                            && login.spawn.game_mode != 3
+                            && it.hand == 0
+                            && !it.sneaking
+                            && let Some((vpos, vyaw)) = self.villager_at(it.entity)
+                        {
+                            let _ = vyaw;
+                            if let Some(w) = window.as_ref() {
+                                conn.send(&inv::container_close(ids.container_close, w.id))
+                                    .await?;
+                            }
+                            self.close_with_event(&mut state.inv, &mut window, uuid).await;
+                            next_window = next_window % 100 + 1;
+                            let pos = [
+                                vpos[0].floor() as i32,
+                                vpos[1].floor() as i32,
+                                vpos[2].floor() as i32,
+                            ];
+                            let w = Window { id: next_window, kind: Kind::Merchant, pos, second: None, slots: vec![None; 3], data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10], merchant: Some(villagers::MerchantWindow { villager: it.entity, selected: None }) };
+                            let menu = self.survival.menu_merchant;
+                            let title = self.villager_title(it.entity);
+                            conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &title))
+                                .await?;
+                            self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
+                            if let Some(p) = self.villager_offers_packet(w.id, it.entity) {
+                                conn.send(&p).await?;
+                            }
+                            window = Some(w);
+                            self.reset_after_use(me.entity_id, uuid, it.hand, state, &mut swing);
+                            continue;
+                        }
                         if self.is_minecart(it.entity) {
                             if state.vitals.dead || it.hand != 0 || login.spawn.game_mode == 3 {
                                 continue;
@@ -12735,7 +12807,7 @@ impl PlayPlan {
                                     next_window = next_window % 100 + 1;
                                     let menu = if size == 5 { self.survival.menu_hopper } else { self.survival.menu_chest };
                                     let pos = cart_pos(it.entity);
-                                    let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10] };
+                                    let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10], merchant: None };
                                     w.slots = self.window_slots(&w);
                                     conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &title)).await?;
                                     self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
@@ -12819,7 +12891,7 @@ impl PlayPlan {
                                     self.close_with_event(&mut state.inv, &mut window, uuid).await;
                                     next_window = next_window % 100 + 1;
                                     let pos = boat_pos(it.entity);
-                                    let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10] };
+                                    let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10], merchant: None };
                                     w.slots = self.window_slots(&w);
                                     conn.send(&inv::open_screen(
                                         ids.open_screen,
@@ -14116,7 +14188,7 @@ impl PlayPlan {
                                 _ if clicked.ends_with("shulker_box") => (self.survival.menu_chest, "container.shulkerBox"),
                                 _ => (self.survival.menu_chest, "container.chest"),
                             };
-                            let mut w = Window { id: next_window, kind, pos, second, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10] };
+                            let mut w = Window { id: next_window, kind, pos, second, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10], merchant: None };
                             if kind == Kind::EnderChest {
                                 if state.ender.len() < survival::ENDER_SLOTS {
                                     state.ender.resize(survival::ENDER_SLOTS, None);
@@ -15349,6 +15421,7 @@ impl PlayPlan {
         } else {
             return (Vec::new(), false);
         };
+        let merchant = window.as_ref().and_then(|w| w.merchant);
         // Что клиент ожидает увидеть после своего клика.
         let mut expected = view.clone();
         for &(s, stack) in &c.changed {
@@ -15372,7 +15445,8 @@ impl PlayPlan {
             | Kind::Cartography
             | Kind::Lectern
             | Kind::Stonecutter
-            | Kind::Beacon => 0,
+            | Kind::Beacon
+            | Kind::Merchant => 0,
         };
         let anvil_name = window.as_ref().and_then(|w| w.anvil_name.clone());
         let anvil_before = if kind == Kind::Anvil {
@@ -15417,6 +15491,9 @@ impl PlayPlan {
                 slots[2] = self.cartography_result(slots[0], slots[1]);
             } else if kind == Kind::Stonecutter {
                 slots[1] = self.stone_result(slots[0], stone_selection);
+            } else if kind == Kind::Merchant {
+                let first = [slots[0], slots[1]];
+                slots[2] = merchant.and_then(|m| self.merchant_result(m, &first));
             } else if matches!(kind, Kind::Crafter(_)) {
                 slots[45] = self.crafter_result(&slots[..9]);
             } else if size > 0 {
@@ -15431,7 +15508,32 @@ impl PlayPlan {
         let mut smithing_took = false;
         let mut loom_took = false;
         let mut carto_took = false;
+        let mut merchant_took: Option<(i32, usize)> = None;
         let mut craft = |slots: &mut [Slot]| {
+            if kind == Kind::Merchant {
+                if let Some(m) = merchant
+                    && let Some(idx) = self.merchant_match(m, &[slots[0], slots[1]])
+                    && let Some(offer) = self.villager_offer(m.villager, idx)
+                {
+                    let pay = |slot: &mut Slot, item: i32, count: i32| {
+                        if let Some(s) = slot
+                            && s.item == item
+                        {
+                            s.count -= count;
+                            if s.count <= 0 {
+                                *slot = None;
+                            }
+                        }
+                    };
+                    pay(&mut slots[0], offer.buy.0, offer.price().max(1));
+                    if let Some((item, count)) = offer.buy_b {
+                        pay(&mut slots[1], item, count);
+                    }
+                    merchant_took = Some((m.villager, idx));
+                }
+                slots[2] = None;
+                return;
+            }
             if kind == Kind::Cartography {
                 // `CartographyTableMenu$5.onTake`: по одной из обоих входов.
                 carto_took = true;
@@ -15614,6 +15716,9 @@ impl PlayPlan {
             craft: &mut craft,
         }
         .click(c.slot, c.button, c.mode);
+        if let Some((villager, idx)) = merchant_took {
+            self.notify_trade(villager, idx);
+        }
         // `ShulkerBoxSlot.mayPlace`: шалкер в шалкер не кладётся. Клик
         // откатываем целиком, иначе предмет мог уехать в инвентарь.
         let shulker_reject = shulker_container
@@ -15681,7 +15786,12 @@ impl PlayPlan {
         let resync = shulker_reject
             || matches!(
                 kind,
-                Kind::Grindstone | Kind::Anvil | Kind::Smithing | Kind::Loom | Kind::Cartography
+                Kind::Grindstone
+                    | Kind::Anvil
+                    | Kind::Smithing
+                    | Kind::Loom
+                    | Kind::Cartography
+                    | Kind::Merchant
             )
             || c.state != inv.state
             || view.iter().zip(&expected).any(|(a, b)| !same(a, b))
@@ -15977,6 +16087,7 @@ impl PlayPlan {
             Kind::Crafter(_) => self
                 .block(w.pos)
                 .is_some_and(|s| self.state_name(s) == crafter::CRAFTER),
+            Kind::Merchant => w.merchant.is_some_and(|m| self.is_villager(m.villager)),
             _ => self
                 .block(w.pos)
                 .is_some_and(|s| self.state_name(s) == "minecraft:crafting_table"),
@@ -16182,6 +16293,10 @@ impl PlayPlan {
                 }
                 Kind::Stonecutter => back.extend(w.slots[0].take()),
                 Kind::Beacon => back.extend(w.slots[0].take()),
+                Kind::Merchant => {
+                    back.extend(w.slots[0].take());
+                    back.extend(w.slots[1].take());
+                }
                 Kind::Lectern => {}
                 Kind::Furnace => {
                     if let Some(e) = self.sim().furnaces.lock().unwrap().get_mut(&w.pos) {

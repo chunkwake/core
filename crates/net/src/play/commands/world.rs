@@ -408,7 +408,9 @@ pub(super) fn summon(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         }
     };
     // `/summon` в ванили принимает и не-живых: стрелу, лодку, вагонетку.
-    let spawned = if name == "minecraft:arrow" {
+    let spawned = if name == "minecraft:villager" {
+        ctx.plan.summon_villager(coords, nbt.as_ref())
+    } else if name == "minecraft:arrow" {
         let vel = nbt
             .as_ref()
             .and_then(|n| n.get("Motion").and_then(Tag::as_list))

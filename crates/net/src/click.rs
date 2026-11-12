@@ -50,6 +50,8 @@ pub enum Kind {
     /// `CrafterMenu`: 0–8 сетка, 9–44 инвентарь, 45 результат (только показ).
     /// Бит `i` — слот `i` выключен (`CrafterSlot.mayPlace`).
     Crafter(u16),
+    /// `MerchantMenu`: 0-1 покупка, 2 результат, 3-38 инвентарь.
+    Merchant,
 }
 
 impl Kind {
@@ -60,7 +62,9 @@ impl Kind {
             Kind::Chest(n) => n + 36,
             Kind::EnderChest => 27 + 36,
             Kind::Crafting | Kind::Crafter(_) => 46,
-            Kind::Furnace | Kind::Grindstone | Kind::Anvil | Kind::Cartography => 39,
+            Kind::Furnace | Kind::Grindstone | Kind::Anvil | Kind::Cartography | Kind::Merchant => {
+                39
+            }
             Kind::Brewing => 41,
             Kind::Smithing | Kind::Loom => 40,
             Kind::Enchanting | Kind::Stonecutter => 38,
@@ -77,7 +81,9 @@ impl Kind {
             Kind::EnderChest => 27,
             Kind::Crafting => 10,
             Kind::Crafter(_) => 9,
-            Kind::Furnace | Kind::Grindstone | Kind::Anvil | Kind::Cartography => 3,
+            Kind::Furnace | Kind::Grindstone | Kind::Anvil | Kind::Cartography | Kind::Merchant => {
+                3
+            }
             Kind::Brewing => 5,
             Kind::Smithing | Kind::Loom => 4,
             Kind::Enchanting | Kind::Stonecutter => 2,
@@ -89,7 +95,9 @@ impl Kind {
     fn output(self) -> Option<usize> {
         match self {
             Kind::Player | Kind::Crafting => Some(0),
-            Kind::Furnace | Kind::Grindstone | Kind::Anvil | Kind::Cartography => Some(2),
+            Kind::Furnace | Kind::Grindstone | Kind::Anvil | Kind::Cartography | Kind::Merchant => {
+                Some(2)
+            }
             Kind::Smithing | Kind::Loom => Some(3),
             Kind::Stonecutter => Some(1),
             Kind::Crafter(_) => Some(45),
@@ -106,7 +114,7 @@ impl Kind {
     fn craft_output(self) -> Option<usize> {
         match self {
             Kind::Player | Kind::Crafting => Some(0),
-            Kind::Grindstone | Kind::Anvil | Kind::Cartography => Some(2),
+            Kind::Grindstone | Kind::Anvil | Kind::Cartography | Kind::Merchant => Some(2),
             Kind::Smithing | Kind::Loom => Some(3),
             Kind::Stonecutter => Some(1),
             _ => None,
@@ -516,7 +524,7 @@ impl Menu<'_> {
                     self.move_to(&mut s, inv..end, false);
                 }
             }
-            Kind::Chest(_) | Kind::EnderChest => {
+            Kind::Chest(_) | Kind::EnderChest | Kind::Merchant => {
                 if i < inv {
                     self.move_to(&mut s, inv..end, true);
                 } else {
