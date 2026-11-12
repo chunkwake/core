@@ -12,6 +12,49 @@ use super::*;
 /// Пороги уровней (`VillagerData.NEXT_LEVEL_XP_THRESHOLDS`).
 pub const LEVEL_XP: [i32; 5] = [0, 10, 70, 150, 250];
 
+/// Вид торговца: обычный житель или странствующий торговец.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TraderKind {
+    Villager,
+    Wandering,
+}
+
+impl TraderKind {
+    pub fn entity_name(self) -> &'static str {
+        match self {
+            TraderKind::Villager => "minecraft:villager",
+            TraderKind::Wandering => "minecraft:wandering_trader",
+        }
+    }
+}
+
+/// Рабочий блок профессии (`VillagerProfession.workstation`).
+fn workstation(profession: &str) -> Option<&'static str> {
+    Some(match profession {
+        "minecraft:farmer" => "minecraft:composter",
+        "minecraft:librarian" => "minecraft:lectern",
+        "minecraft:fisherman" => "minecraft:barrel",
+        "minecraft:fletcher" => "minecraft:fletching_table",
+        "minecraft:cleric" => "minecraft:brewing_stand",
+        "minecraft:armorer" => "minecraft:blast_furnace",
+        "minecraft:weaponsmith" => "minecraft:grindstone",
+        "minecraft:toolsmith" => "minecraft:smithing_table",
+        "minecraft:butcher" => "minecraft:smoker",
+        "minecraft:leatherworker" => "minecraft:cauldron",
+        "minecraft:cartographer" => "minecraft:cartography_table",
+        "minecraft:mason" => "minecraft:stonecutter",
+        "minecraft:shepherd" => "minecraft:loom",
+        _ => return None,
+    })
+}
+
+/// Звук работы (`VillagerProfession.workSound`).
+fn work_sound(profession: &str) -> Option<String> {
+    let short = profession.strip_prefix("minecraft:")?;
+    workstation(profession)?;
+    Some(format!("minecraft:entity.villager.work_{short}"))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Offer {
     pub buy: (i32, i32),
@@ -54,11 +97,20 @@ pub struct Villager {
     pub pos: [f64; 3],
     pub yaw: f32,
     pub uuid: Uuid,
+    pub trader: TraderKind,
     pub kind: String,
     pub profession: String,
     pub level: i32,
     pub xp: i32,
     pub offers: Vec<Offer>,
+    /// `WanderingTrader.DespawnDelay`: 0 — не исчезает.
+    pub despawn_delay: i32,
+    /// Игровое время последнего пополнения (`LastRestock`).
+    pub last_restock: i64,
+    /// `RestocksToday`.
+    pub restocks_today: i32,
+    /// Последняя проверка рабочего блока (в игровых тиках).
+    pub last_work_check: i64,
     pub custom_name: Option<String>,
     pub persistent: bool,
 }
@@ -71,10 +123,10 @@ pub struct MerchantWindow {
 }
 
 impl PlayPlan {
-    fn villager_type(&self) -> Option<i32> {
+    fn type_of(&self, trader: TraderKind) -> Option<i32> {
         self.survival
             .entity_types
-            .get("minecraft:villager")
+            .get(trader.entity_name())
             .copied()
     }
 
@@ -144,7 +196,86 @@ impl PlayPlan {
         out
     }
 
-    fn villager_named(&self, kind: &str, profession: &str) -> String {
+    /// Сделки странствующего торговца (`TradeSets.WANDERING_TRADER_*`):
+    /// 2 покупки, 5 обычных и 2 редких, каждый раз случайная выборка.
+    fn wandering_offers(&self) -> Vec<Offer> {
+        // (цена, товар) для покупки у игрока: `wants` → `gives`.
+        const BUYING: &[(&str, i32, &str, i32, i32)] = &[
+            ("minecraft:water_bottle", 1, "minecraft:emerald", 1, 2),
+            ("minecraft:water_bucket", 1, "minecraft:emerald", 2, 2),
+            ("minecraft:milk_bucket", 1, "minecraft:emerald", 2, 2),
+            (
+                "minecraft:fermented_spider_eye",
+                1,
+                "minecraft:emerald",
+                3,
+                2,
+            ),
+            ("minecraft:baked_potato", 4, "minecraft:emerald", 1, 2),
+            ("minecraft:hay_block", 1, "minecraft:emerald", 1, 2),
+        ];
+        const COMMON: &[(&str, i32, &str, i32, i32)] = &[
+            ("minecraft:emerald", 1, "minecraft:white_dye", 3, 12),
+            ("minecraft:emerald", 1, "minecraft:orange_dye", 3, 12),
+            ("minecraft:emerald", 1, "minecraft:blue_dye", 3, 12),
+            ("minecraft:emerald", 1, "minecraft:red_dye", 3, 12),
+            ("minecraft:emerald", 1, "minecraft:glowstone", 1, 12),
+            ("minecraft:emerald", 1, "minecraft:sea_pickle", 1, 12),
+            ("minecraft:emerald", 1, "minecraft:slime_ball", 1, 12),
+            ("minecraft:emerald", 1, "minecraft:sugar_cane", 1, 12),
+            ("minecraft:emerald", 1, "minecraft:pumpkin", 1, 12),
+            ("minecraft:emerald", 1, "minecraft:kelp", 1, 12),
+            ("minecraft:emerald", 1, "minecraft:cactus", 1, 12),
+            ("minecraft:emerald", 1, "minecraft:sand", 8, 12),
+            ("minecraft:emerald", 1, "minecraft:fern", 1, 12),
+            ("minecraft:emerald", 1, "minecraft:oak_sapling", 1, 12),
+        ];
+        const UNCOMMON: &[(&str, i32, &str, i32, i32)] = &[
+            ("minecraft:emerald", 1, "minecraft:packed_ice", 1, 6),
+            ("minecraft:emerald", 1, "minecraft:blue_ice", 1, 6),
+            ("minecraft:emerald", 1, "minecraft:gunpowder", 4, 2),
+            ("minecraft:emerald", 1, "minecraft:podzol", 3, 6),
+            ("minecraft:emerald", 1, "minecraft:oak_log", 8, 12),
+            ("minecraft:emerald", 1, "minecraft:birch_log", 8, 12),
+            ("minecraft:emerald", 1, "minecraft:acacia_log", 8, 12),
+            ("minecraft:emerald", 5, "minecraft:nautilus_shell", 1, 5),
+            ("minecraft:emerald", 1, "minecraft:name_tag", 1, 5),
+        ];
+        let item = |n: &str| self.item_id(n);
+        let mut out = Vec::new();
+        let mut add = |table: &[(&str, i32, &str, i32, i32)], amount: usize| {
+            let mut picks: Vec<usize> = (0..table.len()).collect();
+            for i in (1..picks.len()).rev() {
+                let j = rand::random::<usize>() % (i + 1);
+                picks.swap(i, j);
+            }
+            for &k in picks.iter().take(amount) {
+                let (buy_name, buy_count, sell_name, sell_count, max_uses) = table[k];
+                let (Some(buy), Some(sell)) = (item(buy_name), item(sell_name)) else {
+                    continue;
+                };
+                out.push(Offer {
+                    buy: (buy, buy_count),
+                    buy_b: None,
+                    sell: Stack::new(sell, sell_count),
+                    uses: 0,
+                    max_uses,
+                    xp: 0,
+                    price_mul: 0.05,
+                    demand: 0,
+                });
+            }
+        };
+        add(BUYING, 2);
+        add(UNCOMMON, 2);
+        add(COMMON, 5);
+        out
+    }
+
+    fn villager_named(&self, trader: TraderKind, kind: &str, profession: &str) -> String {
+        if trader == TraderKind::Wandering {
+            return "entity.minecraft.wandering_trader".into();
+        }
         let short = |n: &str| n.trim_start_matches("minecraft:").to_owned();
         if profession == "minecraft:none" {
             return format!("entity.minecraft.villager.{}", short(kind));
@@ -154,17 +285,44 @@ impl PlayPlan {
 
     /// `/summon minecraft:villager <pos> <nbt>`.
     pub(super) fn summon_villager(&self, pos: [f64; 3], nbt: Option<&Compound>) -> Option<i32> {
+        self.summon_trader(TraderKind::Villager, pos, nbt)
+    }
+
+    /// `/summon minecraft:wandering_trader <pos> <nbt>`.
+    pub(super) fn summon_wandering_trader(
+        &self,
+        pos: [f64; 3],
+        nbt: Option<&Compound>,
+    ) -> Option<i32> {
+        self.summon_trader(TraderKind::Wandering, pos, nbt)
+    }
+
+    fn summon_trader(
+        &self,
+        trader: TraderKind,
+        pos: [f64; 3],
+        nbt: Option<&Compound>,
+    ) -> Option<i32> {
         let mut v = Villager {
             pos,
             yaw: 0.0,
             uuid: Uuid::from_u128(rand::random()),
+            trader,
             kind: "minecraft:plains".into(),
             profession: "minecraft:farmer".into(),
             level: 1,
             xp: 0,
-            offers: self.farmer_offers(),
+            offers: if trader == TraderKind::Wandering {
+                self.wandering_offers()
+            } else {
+                self.farmer_offers()
+            },
+            despawn_delay: 0,
+            last_restock: 0,
+            restocks_today: 0,
+            last_work_check: self.game_time(),
             custom_name: None,
-            persistent: true,
+            persistent: trader == TraderKind::Villager,
         };
         if let Some(nbt) = nbt {
             apply_villager_nbt(&mut v, nbt, |n| self.item_id(n));
@@ -180,7 +338,7 @@ impl PlayPlan {
             Tracked {
                 id,
                 pos: v.pos,
-                range: self.tracking_range(self.villager_type()?),
+                range: self.tracking_range(self.type_of(v.trader)?),
             },
             self.villager_packets(id, &v).unwrap_or_default(),
         );
@@ -188,21 +346,21 @@ impl PlayPlan {
     }
 
     fn villager_packets(&self, id: i32, v: &Villager) -> Option<Vec<Vec<u8>>> {
-        Some(vec![
-            play::add_entity_moving(
-                self.ids.add_entity,
-                id,
-                v.uuid,
-                self.villager_type()?,
-                v.pos,
-                [0.0; 3],
-                v.yaw,
-                0.0,
-                0,
-            ),
+        let mut out = vec![play::add_entity_moving(
+            self.ids.add_entity,
+            id,
+            v.uuid,
+            self.type_of(v.trader)?,
+            v.pos,
+            [0.0; 3],
+            v.yaw,
+            0.0,
+            0,
+        )];
+        if v.trader == TraderKind::Villager {
             // `Villager.DATA_VILLAGER_DATA` (индекс 18) и
             // `DATA_VILLAGER_DATA_FINALIZED` (19).
-            play::entity_meta(
+            out.push(play::entity_meta(
                 self.ids.set_entity_data,
                 id,
                 &[
@@ -216,11 +374,13 @@ impl PlayPlan {
                     ),
                     (19, play::Meta::Bool(true)),
                 ],
-            ),
-        ])
+            ));
+        }
+        Some(out)
     }
 
-    /// Жители из `entities/*.mca` появляются после первого тика.
+    /// Тик загруженных жителей: спавн, исчезновение торговца и пополнение
+    /// запасов у рабочего блока (`WorkAtPoi` + `Villager.shouldRestock`).
     pub(super) fn tick_villagers(&self) {
         let loaded = std::mem::take(&mut *self.sim().villagers_loaded.lock().unwrap());
         for v in loaded {
@@ -229,24 +389,126 @@ impl PlayPlan {
             let tracked = Tracked {
                 id,
                 pos: v.pos,
-                range: self.tracking_range(self.villager_type().unwrap_or(0)),
+                range: self.tracking_range(self.type_of(v.trader).unwrap_or(0)),
             };
             self.sim().villagers.lock().unwrap().insert(id, v);
             self.hub.spawn_tracked(tracked, packets);
             self.mark_work();
         }
+        if self.sim().villagers.lock().unwrap().is_empty() {
+            return;
+        }
+        let now = self.game_time();
+        let ids: Vec<i32> = self
+            .sim()
+            .villagers
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
+        let mut gone = Vec::new();
+        let mut work: Vec<([f64; 3], String)> = Vec::new();
+        for id in ids {
+            let mut villagers = self.sim().villagers.lock().unwrap();
+            let Some(v) = villagers.get_mut(&id) else {
+                continue;
+            };
+            if v.despawn_delay > 0 {
+                v.despawn_delay -= 1;
+                if v.despawn_delay == 0 {
+                    gone.push(id);
+                    continue;
+                }
+            }
+            if v.trader == TraderKind::Villager && now - v.last_work_check >= 300 {
+                v.last_work_check = now;
+                if let Some(ws) = workstation(&v.profession)
+                    && self.near_block(v.pos, ws)
+                {
+                    let needs = v.offers.iter().any(|o| o.uses > 0);
+                    let day = now.div_euclid(24_000);
+                    if day > v.last_restock.div_euclid(24_000) {
+                        v.last_restock = now;
+                        v.restocks_today = 0;
+                    }
+                    let allowed = v.restocks_today == 0
+                        || (v.restocks_today < 2 && now > v.last_restock + 2_400);
+                    if allowed && needs {
+                        for o in &mut v.offers {
+                            o.demand += o.uses - (o.max_uses - o.uses);
+                            o.uses = 0;
+                        }
+                        v.last_restock = now;
+                        v.restocks_today += 1;
+                        work.push((v.pos, v.profession.clone()));
+                    }
+                }
+            }
+        }
+        if !gone.is_empty() {
+            let mut villagers = self.sim().villagers.lock().unwrap();
+            for id in &gone {
+                villagers.remove(id);
+            }
+            drop(villagers);
+            self.hub.remove_tracked(&gone);
+            self.mark_work();
+        }
+        for (pos, profession) in work {
+            if let Some(sound) = work_sound(&profession) {
+                self.play_sound(None, &sound, crate::sounds::NEUTRAL, pos, 1.0, 1.0);
+            }
+            let at = [pos[0], pos[1] + 1.0, pos[2]];
+            if let Some(&particle) = self
+                .particle_types
+                .lock()
+                .unwrap()
+                .get("minecraft:happy_villager")
+            {
+                self.hub.send(
+                    None,
+                    play::level_particles(
+                        self.ids.level_particles,
+                        particle,
+                        false,
+                        at,
+                        [0.0; 3],
+                        0.0,
+                        3,
+                    ),
+                );
+            }
+            self.mark_work();
+        }
+    }
+
+    /// Есть ли рядом (в кубе ±2) блок рабочего места.
+    fn near_block(&self, pos: [f64; 3], name: &str) -> bool {
+        let c = [
+            pos[0].floor() as i32,
+            pos[1].floor() as i32,
+            pos[2].floor() as i32,
+        ];
+        for dy in -2..=2 {
+            for dx in -2..=2 {
+                for dz in -2..=2 {
+                    let p = [c[0] + dx, c[1] + dy, c[2] + dz];
+                    if self.block(p).is_some_and(|s| self.state_name(s) == name) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     pub(super) fn track_villagers(&self, out: &mut Vec<Tracked>) {
-        let Some(ty) = self.villager_type() else {
-            return;
-        };
-        let range = self.tracking_range(ty);
         for (&id, v) in self.sim().villagers.lock().unwrap().iter() {
             out.push(Tracked {
                 id,
                 pos: v.pos,
-                range,
+                range: self.tracking_range(self.type_of(v.trader).unwrap_or(0)),
             });
         }
     }
@@ -281,7 +543,7 @@ impl PlayPlan {
             .as_ref()
             .map(|n| serde_json::json!({ "text": n }))
             .unwrap_or_else(|| {
-                let key = self.villager_named(&v.kind, &v.profession);
+                let key = self.villager_named(v.trader, &v.kind, &v.profession);
                 serde_json::json!({"translate": key})
             })
     }
@@ -367,6 +629,16 @@ impl PlayPlan {
         let level = level_for_xp(v.xp);
         let changed = level != v.level;
         v.level = level;
+        let pos = v.pos;
+        let wandering = v.trader == TraderKind::Wandering;
+        drop(villagers);
+        if wandering {
+            // `WanderingTrader.rewardTradeXp`: 3 + nextInt(4).
+            self.spawn_orbs(
+                [pos[0], pos[1] + 0.5, pos[2]],
+                3 + rand::random::<i32>().rem_euclid(4),
+            );
+        }
         Some((offer, changed))
     }
 
@@ -400,7 +672,7 @@ impl PlayPlan {
     /// NBT одного жителя.
     fn villager_to_nbt(&self, v: &Villager) -> Compound {
         let mut c = Compound::new();
-        c.insert("id".into(), Tag::String("minecraft:villager".into()));
+        c.insert("id".into(), Tag::String(v.trader.entity_name().into()));
         c.insert("UUID".into(), Tag::IntArray(uuid_ints(v.uuid)));
         c.insert(
             "Pos".into(),
@@ -410,12 +682,18 @@ impl PlayPlan {
             "Rotation".into(),
             Tag::List(vec![Tag::Float(v.yaw), Tag::Float(0.0)]),
         );
-        let mut data = Compound::new();
-        data.insert("type".into(), Tag::String(v.kind.clone()));
-        data.insert("profession".into(), Tag::String(v.profession.clone()));
-        data.insert("level".into(), Tag::Int(v.level));
-        c.insert("VillagerData".into(), Tag::Compound(data));
-        c.insert("Xp".into(), Tag::Int(v.xp));
+        if v.trader == TraderKind::Villager {
+            let mut data = Compound::new();
+            data.insert("type".into(), Tag::String(v.kind.clone()));
+            data.insert("profession".into(), Tag::String(v.profession.clone()));
+            data.insert("level".into(), Tag::Int(v.level));
+            c.insert("VillagerData".into(), Tag::Compound(data));
+            c.insert("Xp".into(), Tag::Int(v.xp));
+            c.insert("LastRestock".into(), Tag::Long(v.last_restock));
+            c.insert("RestocksToday".into(), Tag::Int(v.restocks_today));
+        } else {
+            c.insert("DespawnDelay".into(), Tag::Int(v.despawn_delay));
+        }
         c.insert("Offers".into(), self.offers_nbt(v));
         if let Some(n) = &v.custom_name {
             c.insert("CustomName".into(), Tag::String(n.clone()));
@@ -449,11 +727,13 @@ impl PlayPlan {
             .collect()
     }
 
-    /// Загрузка жителя из `entities/*.mca`; `true` — сущность распознана.
+    /// Загрузка жителя или торговца из `entities/*.mca`; `true` — распознан.
     pub(super) fn load_villager(&self, c: &Compound) -> bool {
-        if !matches!(c.get("id"), Some(Tag::String(id)) if id == "minecraft:villager") {
-            return false;
-        }
+        let trader = match c.get("id") {
+            Some(Tag::String(id)) if id == "minecraft:villager" => TraderKind::Villager,
+            Some(Tag::String(id)) if id == "minecraft:wandering_trader" => TraderKind::Wandering,
+            _ => return false,
+        };
         let Some(Tag::List(pos)) = c.get("Pos") else {
             return false;
         };
@@ -472,13 +752,22 @@ impl PlayPlan {
             pos: [nums[0], nums[1], nums[2]],
             yaw: 0.0,
             uuid: Uuid::from_u128(rand::random()),
+            trader,
             kind: "minecraft:plains".into(),
             profession: "minecraft:farmer".into(),
             level: 1,
             xp: 0,
-            offers: self.farmer_offers(),
+            offers: if trader == TraderKind::Wandering {
+                self.wandering_offers()
+            } else {
+                self.farmer_offers()
+            },
+            despawn_delay: 0,
+            last_restock: 0,
+            restocks_today: 0,
+            last_work_check: self.game_time(),
             custom_name: None,
-            persistent: true,
+            persistent: trader == TraderKind::Villager,
         };
         apply_villager_nbt(&mut v, c, |n| self.item_id(n));
         self.sim().villagers_loaded.lock().unwrap().push(v);
@@ -573,6 +862,15 @@ fn apply_villager_nbt(v: &mut Villager, c: &Compound, item: impl Fn(&str) -> Opt
     }
     if let Some(Tag::String(n)) = c.get("CustomName") {
         v.custom_name = Some(n.clone());
+    }
+    if let Some(delay) = c.get("DespawnDelay").and_then(Tag::as_i64) {
+        v.despawn_delay = delay.max(0) as i32;
+    }
+    if let Some(last) = c.get("LastRestock").and_then(Tag::as_i64) {
+        v.last_restock = last;
+    }
+    if let Some(n) = c.get("RestocksToday").and_then(Tag::as_i64) {
+        v.restocks_today = n as i32;
     }
     if let Some(Tag::Byte(p)) = c.get("PersistenceRequired") {
         v.persistent = *p != 0;

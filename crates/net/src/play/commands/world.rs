@@ -410,6 +410,8 @@ pub(super) fn summon(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     // `/summon` в ванили принимает и не-живых: стрелу, лодку, вагонетку.
     let spawned = if name == "minecraft:villager" {
         ctx.plan.summon_villager(coords, nbt.as_ref())
+    } else if name == "minecraft:wandering_trader" {
+        ctx.plan.summon_wandering_trader(coords, nbt.as_ref())
     } else if name == "minecraft:arrow" {
         let vel = nbt
             .as_ref()

@@ -182,7 +182,7 @@ impl PlayPlan {
         {
             let villagers = self.sim().villagers.lock().unwrap();
             for (entity_id, v) in villagers.iter() {
-                let mut target = entity_ref(*entity_id, v.pos, "minecraft:villager");
+                let mut target = entity_ref(*entity_id, v.pos, v.trader.entity_name());
                 target.yaw = v.yaw;
                 out.push(target);
             }
