@@ -34,6 +34,7 @@ pub struct Ids {
     entity_position_sync: i32,
     remove_entities: i32,
     set_passengers: i32,
+    set_entity_link: i32,
     set_time: i32,
     level_chunk: i32,
     forget_level_chunk: i32,
@@ -71,6 +72,7 @@ impl Ids {
             entity_position_sync: id(Play, C, "entity_position_sync")?,
             remove_entities: id(Play, C, "remove_entities")?,
             set_passengers: id(Play, C, "set_passengers")?,
+            set_entity_link: id(Play, C, "set_entity_link")?,
             set_time: id(Play, C, "set_time")?,
             level_chunk: id(Play, C, "level_chunk_with_light")?,
             forget_level_chunk: id(Play, C, "forget_level_chunk")?,
@@ -131,6 +133,11 @@ pub enum Event {
     EntityPassengers {
         vehicle: i32,
         passengers: Vec<i32>,
+    },
+    /// Поводок (`ClientboundSetEntityLinkPacket`): `dest = 0` — снят.
+    EntityLink {
+        source: i32,
+        dest: i32,
     },
     /// Игровое время из `set_time`: сервер шлёт раз в 20 тиков.
     GameTime(i64),
@@ -555,6 +562,10 @@ impl Client {
                 vehicle,
                 passengers,
             })
+        } else if id == self.ids.set_entity_link {
+            let source = i32::from_be_bytes(r.bytes(4).map_err(err)?.try_into().unwrap());
+            let dest = i32::from_be_bytes(r.bytes(4).map_err(err)?.try_into().unwrap());
+            Ok(Event::EntityLink { source, dest })
         } else if id == self.ids.set_time {
             let game_time = r.i64().map_err(err)?;
             Ok(Event::GameTime(game_time))

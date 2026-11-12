@@ -651,6 +651,8 @@ pub struct Mob {
     /// `Mob.isNoAi`: без целей, навигации и управления движением, но с
     /// физикой, гравитацией и получением урона.
     pub no_ai: bool,
+    /// Поводок (`Leashable`): держатель-сущность или узел на заборе.
+    pub leash: Option<crate::leash::Leash>,
     /// `Entity.horizontalCollision` прошлого хода: условие `DoorInteractGoal`.
     pub horizontal_collision: bool,
     /// Навигация по пути (`GroundPathNavigation`).
@@ -732,6 +734,7 @@ impl Mob {
             persistent: false,
             can_break_doors: false,
             no_ai: false,
+            leash: None,
             horizontal_collision: false,
             nav: Navigation::new(species == Species::Spider),
             move_ctl: MoveControl::default(),

@@ -293,6 +293,13 @@ pub fn set_passengers(id: i32, vehicle: i32, passengers: &[i32]) -> Vec<u8> {
     w.buf
 }
 
+/// `set_entity_link`: привязь сущности к держателю (0 — снять поводок).
+pub fn set_entity_link(id: i32, entity: i32, holder: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).i32(entity).i32(holder);
+    w.buf
+}
+
 /// `level_chunk_with_light`: координаты + заранее закодированное тело чанка.
 pub fn level_chunk_with_light(id: i32, x: i32, z: i32, body: &[u8]) -> Vec<u8> {
     let mut w = Writer::new();

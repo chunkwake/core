@@ -14,6 +14,7 @@ pub mod furnace;
 pub mod grindstone;
 pub mod hoppers;
 pub mod items;
+pub mod leash;
 pub mod live;
 pub mod loot;
 pub mod maps;

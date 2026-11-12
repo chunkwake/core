@@ -1230,6 +1230,11 @@ impl PlayPlan {
         if let Some(Tag::Byte(no_ai)) = nbt.get("NoAI") {
             m.no_ai = *no_ai != 0;
         }
+        if let Some(Tag::Compound(l)) = nbt.get("leash")
+            && let Some(leash) = crate::leash::from_nbt(l)
+        {
+            m.leash = Some(leash);
+        }
         if m.species == Species::Zombie
             && let Some(Tag::Byte(breaks)) = nbt.get("CanBreakDoors")
         {
@@ -3440,6 +3445,9 @@ pub(super) fn mob_to_nbt(
     // `Mob.addAdditionalSaveData` пишет флаг только когда он включён.
     if m.no_ai {
         c.insert("NoAI".into(), Tag::Byte(1));
+    }
+    if let Some(leash) = &m.leash {
+        c.insert("leash".into(), crate::leash::to_nbt(leash));
     }
     match m.species {
         Species::Zombie => {

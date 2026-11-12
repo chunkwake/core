@@ -33,7 +33,7 @@ pub(crate) struct Boat {
     hurt_dir: i32,
     paddles: (bool, bool),
     /// Скорость (`getDeltaMovement`).
-    vel: [f64; 3],
+    pub(super) vel: [f64; 3],
     /// `onGround` после последнего `move`.
     on_ground: bool,
     /// Статус плавучести (`getStatus`) и прошлого тика.
@@ -50,6 +50,8 @@ pub(crate) struct Boat {
     sent: ([f64; 3], f32),
     /// Пассажиры: UUID и ID сущности игрока. Первый — водитель.
     riders: Vec<(Uuid, i32)>,
+    /// Поводок (`Leashable`).
+    pub leash: Option<crate::leash::Leash>,
     custom_name: Option<String>,
 }
 
@@ -86,6 +88,7 @@ impl Boat {
             out_of_control: 0.0,
             sent: (pos, yaw),
             riders: Vec::new(),
+            leash: None,
             custom_name: None,
         }
     }
@@ -742,6 +745,11 @@ impl PlayPlan {
         if let Some(Tag::String(n)) = c.get("CustomName") {
             b.custom_name = Some(n.clone());
         }
+        if let Some(Tag::Compound(l)) = c.get("leash")
+            && let Some(leash) = crate::leash::from_nbt(l)
+        {
+            b.leash = Some(leash);
+        }
         if !b.slots.is_empty()
             && let Some(Tag::List(list)) = c.get("Items")
         {
@@ -793,6 +801,9 @@ impl PlayPlan {
                 );
                 if let Some(n) = &b.custom_name {
                     c.insert("CustomName".into(), Tag::String(n.clone()));
+                }
+                if let Some(leash) = &b.leash {
+                    c.insert("leash".into(), crate::leash::to_nbt(leash));
                 }
                 if !b.slots.is_empty() {
                     c.insert("Items".into(), Tag::List(self.items_nbt(&b.slots)));

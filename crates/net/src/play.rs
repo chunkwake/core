@@ -84,6 +84,7 @@ struct Ids {
     set_camera: i32,
     swing_animation: i32,
     set_passengers: i32,
+    set_entity_link: i32,
     boss_event: i32,
     post_effects: i32,
     chunks_biomes: i32,
@@ -1759,6 +1760,8 @@ pub(crate) struct DimSim {
     mobs: Mutex<FastMap<i32, mobs::MobEntry>>,
     /// Лодки и плоты по ID сущности.
     boats: Mutex<FastMap<i32, boats::Boat>>,
+    /// Узлы поводков на заборах (`LeashFenceKnotEntity`).
+    knots: Mutex<FastMap<i32, leashes::Knot>>,
     /// Вагонетки по ID сущности.
     minecarts: Mutex<FastMap<i32, minecarts::MinecartEntry>>,
     /// Рамки для предметов по ID сущности.
@@ -2265,6 +2268,7 @@ mod crafter;
 mod item_frames;
 mod jukebox;
 mod kinds;
+mod leashes;
 mod maps;
 mod minecarts;
 mod minerals;
@@ -2723,6 +2727,7 @@ impl PlayPlan {
                 set_camera: cb("set_camera")?,
                 swing_animation: cb("swing_animation")?,
                 set_passengers: cb("set_passengers")?,
+                set_entity_link: cb("set_entity_link")?,
                 boss_event: cb("boss_event")?,
                 post_effects: cb("post_effects")?,
                 chunks_biomes: cb("chunks_biomes")?,
@@ -10793,6 +10798,7 @@ impl PlayPlan {
         self.tick_mobs();
         self.tick_minecarts();
         self.tick_boats();
+        self.tick_leashes();
         self.tick_item_frames();
         self.tick_paintings();
         self.tick_beacons();
@@ -12491,6 +12497,28 @@ impl PlayPlan {
                     }
                     if id == ids.sb_interact {
                         let it = play::read_interact(&mut r)?;
+                        // `LeadItem`/`Leashable`: поводок на моба, лодку или узел.
+                        if !state.vitals.dead && login.spawn.game_mode != 3
+                            && let Some(slot) = Self::hand_index(&state.inv, it.hand)
+                        {
+                            let lead = state.inv.slots[slot]
+                                .is_some_and(|h| self.item_name(h.item) == "minecraft:lead");
+                            if (lead || self.knot_block(it.entity).is_some())
+                                && let Some(consumed) = self.leash_entity(
+                                    uuid,
+                                    me.entity_id,
+                                    it.entity,
+                                    login.spawn.game_mode == 1,
+                                )
+                            {
+                                if consumed && login.spawn.game_mode != 1 {
+                                    state.inv.consume_at(slot);
+                                    self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                }
+                                self.reset_after_use(me.entity_id, uuid, it.hand, state, &mut swing);
+                                continue;
+                            }
+                        }
                         if self.is_minecart(it.entity) {
                             if state.vitals.dead || it.hand != 0 || login.spawn.game_mode == 3 {
                                 continue;
@@ -13443,6 +13471,31 @@ impl PlayPlan {
                             }
                         }
                         let clicked = self.state_name(self.block(u.pos).unwrap_or(AIR)).to_owned();
+                        // `LeadItem.useOn`: забор — привязать мобов игрока к узлу.
+                        if !state.vitals.dead
+                            && login.spawn.game_mode != 3
+                            && self
+                                .survival
+                                .block_tags
+                                .get("minecraft:fences")
+                                .is_some_and(|t| t.contains(clicked.as_str()))
+                            && self.player_at(uuid).is_some_and(|(p, _, _)| {
+                                block_reach(
+                                    eye_of(p),
+                                    u.pos,
+                                    if login.spawn.game_mode == 1 { 5.0 } else { 4.5 },
+                                )
+                            })
+                            && let Some(slot) = Self::hand_index(&state.inv, u.hand)
+                            && let Some(held) = state.inv.slots[slot]
+                            && self.item_name(held.item) == "minecraft:lead"
+                            && self.leash_to_fence(uuid, me.entity_id, u.pos)
+                        {
+                            self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence))
+                                .await?;
+                            continue;
+                        }
                         if clicked == "minecraft:end_portal_frame" && !state.vitals.dead && login.spawn.game_mode != 3
                             && self.player_at(uuid).is_some_and(|(p, _, _)| block_reach(eye_of(p), u.pos, if login.spawn.game_mode == 1 { 5.0 } else { 4.5 }))
                             && let Some(slot) = Self::hand_index(&state.inv, u.hand)
