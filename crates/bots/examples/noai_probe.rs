@@ -146,6 +146,8 @@ async fn main() {
     p.cmd("clear @s").await;
     p.cmd("effect clear @s").await;
     p.cmd("kill @e[type=minecraft:zombie]").await;
+    // Смерть занимает ~20 тиков: ждём, чтобы труп не попал в выборку.
+    p.pump(1200).await;
     p.cmd(&format!(
         "fill {} {} {} {} {} {} minecraft:air",
         bx - 2,
@@ -184,6 +186,8 @@ async fn main() {
 
     // 2. Обычный зомби с теми же условиями идёт к игроку или бьёт его.
     p.cmd("kill @e[type=minecraft:zombie]").await;
+    // Смерть занимает ~20 тиков: ждём, чтобы труп не попал в выборку.
+    p.pump(1200).await;
     p.cmd(&format!(
         "summon minecraft:zombie {} {} {} {{PersistenceRequired:1b}}",
         mob_at[0], mob_at[1], mob_at[2]
@@ -201,6 +205,8 @@ async fn main() {
     );
 
     p.cmd("kill @e[type=minecraft:zombie]").await;
+    // Смерть занимает ~20 тиков: ждём, чтобы труп не попал в выборку.
+    p.pump(1200).await;
     p.cmd("clear @s").await;
     println!("noai: ok");
 }

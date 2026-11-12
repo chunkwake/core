@@ -109,7 +109,7 @@ fn escape_vector(vehicle_width: f64, passenger_width: f64, yaw: f32) -> [f64; 2]
 }
 
 impl PlayPlan {
-    fn boat_type(&self, kind: &str) -> Option<i32> {
+    pub(super) fn boat_type(&self, kind: &str) -> Option<i32> {
         self.survival.entity_types.get(kind).copied()
     }
 
@@ -175,6 +175,16 @@ impl PlayPlan {
 
     pub(super) fn is_boat(&self, id: i32) -> bool {
         self.sim().boats.lock().unwrap().contains_key(&id)
+    }
+
+    /// `/summon minecraft:oak_boat`: лодка без предмета в руке.
+    pub(super) fn summon_boat(&self, kind: &str, pos: [f64; 3]) -> Option<i32> {
+        // В реестре есть все сущности: лодкой считаем только `*_boat`/`*_raft`.
+        if !(kind.ends_with("_boat") || kind.ends_with("_raft")) {
+            return None;
+        }
+        self.boat_type(kind)?;
+        Some(self.add_boat(Boat::new(kind.to_owned(), pos, 0.0)))
     }
 
     fn add_boat(&self, b: Boat) -> i32 {

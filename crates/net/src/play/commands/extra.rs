@@ -75,6 +75,44 @@ impl PlayPlan {
     }
 
     /// Ставит сущность в точку. Игроку уходит телепорт, мобу — `teleport_entity`.
+    /// Не-живые сущности: стрела, лодка, вагонетка (`TeleportCommand`).
+    fn place_non_mob(&self, target: &Target, pos: [f64; 3], yaw: f32, rotation: bool) -> bool {
+        let id = target.entity_id;
+        let (pos, yaw, pitch) = {
+            if let Some(a) = self.sim().arrows.lock().unwrap().get_mut(&id) {
+                a.pos = pos;
+                let (y, p) = crate::arrows::rotation(a.vel);
+                (a.pos, y, p)
+            } else if let Some(b) = self.sim().boats.lock().unwrap().get_mut(&id) {
+                b.pos = pos;
+                if rotation {
+                    b.yaw = yaw;
+                }
+                (b.pos, b.yaw, 0.0)
+            } else if let Some(e) = self.sim().minecarts.lock().unwrap().get_mut(&id) {
+                e.cart.pos = pos;
+                if rotation {
+                    e.cart.yaw = yaw;
+                }
+                (e.cart.pos, e.cart.yaw, 0.0)
+            } else {
+                return false;
+            }
+        };
+        self.hub.send(
+            None,
+            chunkwake_protocol::play::teleport_entity(
+                self.ids.teleport_entity,
+                id,
+                pos,
+                yaw,
+                pitch,
+                true,
+            ),
+        );
+        true
+    }
+
     pub(crate) fn place_at(&self, target: &Target, pos: [f64; 3]) -> bool {
         if target.game_mode.is_some() {
             if let Some(player) = self.hub.players.lock().unwrap().get_mut(&target.uuid) {
@@ -85,11 +123,13 @@ impl PlayPlan {
         }
         let found = {
             let mut mobs = self.sim().mobs.lock().unwrap();
-            let Some(entry) = mobs.get_mut(&target.entity_id) else {
-                return false;
-            };
-            entry.mob.pos = pos;
-            true
+            match mobs.get_mut(&target.entity_id) {
+                Some(entry) => {
+                    entry.mob.pos = pos;
+                    true
+                }
+                None => false,
+            }
         };
         if found {
             self.hub.send_about(
@@ -103,8 +143,9 @@ impl PlayPlan {
                     true,
                 ),
             );
+            return true;
         }
-        found
+        self.place_non_mob(target, pos, target.yaw, false)
     }
 
     /// `/tp` для любой цели: игроку — обычный телепорт, мобу и выпавшему
@@ -165,8 +206,9 @@ impl PlayPlan {
                     true,
                 ),
             );
+            return true;
         }
-        teleported
+        self.place_non_mob(target, pos, yaw, true)
     }
 }
 

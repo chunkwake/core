@@ -7521,6 +7521,33 @@ impl PlayPlan {
         );
     }
 
+    /// `/summon minecraft:arrow`: стрела с заданной `Motion` (`SummonCommand`).
+    pub(super) fn summon_arrow(&self, pos: [f64; 3], vel: [f64; 3]) -> Option<i32> {
+        let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
+        self.sim()
+            .arrows
+            .lock()
+            .unwrap()
+            .insert(id, crate::arrows::Arrow::flight(pos, vel, false));
+        self.mark_work();
+        let (yaw, pitch) = crate::arrows::rotation(vel);
+        self.hub.send(
+            None,
+            play::add_entity_moving(
+                self.ids.add_entity,
+                id,
+                Uuid::from_u128(rand::random()),
+                self.survival.arrow_entity_type,
+                pos,
+                vel,
+                yaw,
+                pitch,
+                0,
+            ),
+        );
+        Some(id)
+    }
+
     fn launch(&self, entity_type: i32, arrow: crate::arrows::Arrow) {
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
         let (pos, vel) = (arrow.pos, arrow.vel);

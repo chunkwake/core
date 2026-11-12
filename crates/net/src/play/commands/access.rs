@@ -162,6 +162,33 @@ impl PlayPlan {
                 out.push(entity_ref(*entity_id, item.pos, "item"));
             }
         }
+        // Снаряды и транспорт: тоже `@e` (`tp`, `data get`).
+        {
+            let arrows = self.sim().arrows.lock().unwrap();
+            for (entity_id, arrow) in arrows.iter() {
+                let (yaw, pitch) = crate::arrows::rotation(arrow.vel);
+                let mut target = entity_ref(*entity_id, arrow.pos, arrow.entity_name());
+                target.yaw = yaw;
+                target.pitch = pitch;
+                out.push(target);
+            }
+        }
+        {
+            let boats = self.sim().boats.lock().unwrap();
+            for (entity_id, boat) in boats.iter() {
+                let mut target = entity_ref(*entity_id, boat.pos, &boat.kind);
+                target.yaw = boat.yaw;
+                out.push(target);
+            }
+        }
+        {
+            let carts = self.sim().minecarts.lock().unwrap();
+            for (entity_id, entry) in carts.iter() {
+                let mut target = entity_ref(*entity_id, entry.cart.pos, entry.variant_name());
+                target.yaw = entry.cart.yaw;
+                out.push(target);
+            }
+        }
         let tags = self.entity_tags.lock().unwrap();
         for target in &mut out {
             if let Some(held) = tags.get(&target.uuid) {
@@ -861,6 +888,20 @@ impl PlayPlan {
                 .lock()
                 .unwrap()
                 .remove(&entity_id)
+                .is_some()
+            | self
+                .sim()
+                .boats
+                .lock()
+                .unwrap()
+                .remove(&entity_id)
+                .is_some()
+            | self
+                .sim()
+                .minecarts
+                .lock()
+                .unwrap()
+                .remove(&entity_id)
                 .is_some();
         if removed {
             let packet =
@@ -1293,6 +1334,28 @@ impl PlayPlan {
                 );
             }
             return root;
+        }
+        {
+            let arrows = self.sim().arrows.lock().unwrap();
+            if let Some(a) = arrows.get(&target.entity_id) {
+                let (yaw, pitch) = crate::arrows::rotation(a.vel);
+                insert_pos_rot(&mut root, a.pos, yaw, pitch);
+                return root;
+            }
+        }
+        {
+            let boats = self.sim().boats.lock().unwrap();
+            if let Some(b) = boats.get(&target.entity_id) {
+                insert_pos_rot(&mut root, b.pos, b.yaw, 0.0);
+                return root;
+            }
+        }
+        {
+            let carts = self.sim().minecarts.lock().unwrap();
+            if let Some(e) = carts.get(&target.entity_id) {
+                insert_pos_rot(&mut root, e.cart.pos, e.cart.yaw, 0.0);
+                return root;
+            }
         }
         let mobs = self.sim().mobs.lock().unwrap();
         if let Some(entry) = mobs.get(&target.entity_id) {
@@ -2261,6 +2324,17 @@ fn is_live_key(key: &str) -> bool {
 /// UUID моба выводится из `entity_id` — тот же вывод, что в `entity_ref`.
 fn entity_uuid(entity_id: i32) -> Uuid {
     Uuid::from_u128(u128::from(entity_id as u32).rotate_left(32))
+}
+
+fn insert_pos_rot(root: &mut Compound, pos: [f64; 3], yaw: f32, pitch: f32) {
+    root.insert(
+        "Pos".into(),
+        Tag::List(pos.into_iter().map(Tag::Double).collect()),
+    );
+    root.insert(
+        "Rotation".into(),
+        Tag::List(vec![Tag::Float(yaw), Tag::Float(pitch)]),
+    );
 }
 
 fn insert_pose(root: &mut Compound, pos: [f64; 3], yaw: f32, pitch: f32, health: f32) {

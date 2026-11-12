@@ -111,6 +111,10 @@ pub(crate) struct MinecartEntry {
 }
 
 impl MinecartEntry {
+    pub(super) fn variant_name(&self) -> &'static str {
+        self.variant.name()
+    }
+
     fn new(cart: Cart, variant: Variant) -> Self {
         let mut cart = cart;
         cart.drag = match variant {
@@ -297,6 +301,12 @@ impl PlayPlan {
 
     pub(super) fn is_minecart(&self, id: i32) -> bool {
         self.sim().minecarts.lock().unwrap().contains_key(&id)
+    }
+
+    /// `/summon minecraft:minecart`: вагонетка без рельса (`SummonCommand`).
+    pub(super) fn summon_minecart(&self, name: &str, pos: [f64; 3]) -> Option<i32> {
+        let variant = Variant::of(name)?;
+        Some(self.add_minecart(MinecartEntry::new(Cart::new(pos, 0.0), variant)))
     }
 
     fn add_minecart(&self, e: MinecartEntry) -> i32 {

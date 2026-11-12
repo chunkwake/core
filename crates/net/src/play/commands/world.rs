@@ -397,14 +397,8 @@ pub(super) fn summon(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
             ],
         ));
     }
-    let Some(species) = crate::mobs::Species::from_name(&name) else {
-        return Outcome::Feedback(translate(
-            "argument.entity.id.invalid",
-            vec![Value::String(name)],
-        ));
-    };
-    // `/summon <entity> <pos> <nbt>`: NBT применяется после создания моба,
-    // `finalizeSpawn` при этом не вызывается (как `SummonCommand.createEntity`).
+    // `/summon <entity> <pos> <nbt>`: NBT применяется после создания, как в
+    // `SummonCommand.createEntity` (`finalizeSpawn` при этом не вызывается).
     let nbt = if input.rest().is_empty() {
         None
     } else {
@@ -413,6 +407,40 @@ pub(super) fn summon(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
             _ => return Outcome::Feedback(translate("argument.nbt.malformed", Vec::new())),
         }
     };
+    // `/summon` в ванили принимает и не-живых: стрелу, лодку, вагонетку.
+    let spawned = if name == "minecraft:arrow" {
+        let vel = nbt
+            .as_ref()
+            .and_then(|n| n.get("Motion").and_then(Tag::as_list))
+            .map(|list| {
+                list.iter()
+                    .filter_map(super::snbt::number)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| v.len() >= 3)
+            .map_or([0.0; 3], |v| [v[0], v[1], v[2]]);
+        ctx.plan.summon_arrow(coords, vel)
+    } else {
+        ctx.plan
+            .summon_boat(&name, coords)
+            .or_else(|| ctx.plan.summon_minecart(&name, coords))
+    };
+    if let Some(id) = spawned {
+        return Outcome::Feedback(translate(
+            "commands.summon.success",
+            vec![
+                json!({"translate": format!("entity.{}", name.replace(':', "."))}),
+                Value::from(id),
+            ],
+        ));
+    }
+    let Some(species) = crate::mobs::Species::from_name(&name) else {
+        return Outcome::Feedback(translate(
+            "argument.entity.id.invalid",
+            vec![Value::String(name)],
+        ));
+    };
+    // NBT уже разобран выше.
     let spawned = match &nbt {
         Some(nbt) => ctx.plan.summon_mob_nbt(species, coords, nbt),
         None => ctx.plan.summon_mob(species, coords),

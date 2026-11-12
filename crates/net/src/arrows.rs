@@ -79,6 +79,21 @@ pub struct Arrow {
 }
 
 impl Arrow {
+    /// Тип сущности для `@e[type=…]` и `/summon` (`Projectile.getType`).
+    pub fn entity_name(&self) -> &'static str {
+        if self.firework {
+            return "minecraft:firework_rocket";
+        }
+        match self.thrown_kind {
+            Some(ThrownKind::Snowball) => "minecraft:snowball",
+            Some(ThrownKind::Egg) => "minecraft:egg",
+            Some(ThrownKind::Pearl) => "minecraft:ender_pearl",
+            Some(ThrownKind::Potion) => "minecraft:splash_potion",
+            Some(ThrownKind::Lingering) => "minecraft:lingering_potion",
+            None => "minecraft:arrow",
+        }
+    }
+
     pub fn flight(pos: [f64; 3], vel: [f64; 3], thrown: bool) -> Self {
         Self {
             pos,
