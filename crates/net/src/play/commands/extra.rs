@@ -109,6 +109,9 @@ impl PlayPlan {
                 o.vel[1] = 0.0;
                 o.on_ground = true;
                 (o.pos, 0.0, 0.0)
+            } else if let Some(c) = self.sim().clouds.lock().unwrap().get_mut(&id) {
+                c.pos = pos;
+                (c.pos, 0.0, 0.0)
             } else {
                 return false;
             }

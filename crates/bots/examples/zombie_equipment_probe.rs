@@ -270,8 +270,18 @@ async fn main() {
         p.pump(1100).await;
     }
     let gear = enchanted.expect("60 спавнов скелета без зачарованного лука");
+    // `#minecraft:on_mob_spawn_equipment` (`#non_treasure`) на луке: Power,
+    // Punch, Flame, Infinity и Unbreaking — все они `canEnchant` лук.
     assert!(
-        gear.contains("minecraft:power") || gear.contains("minecraft:punch"),
+        [
+            "minecraft:power",
+            "minecraft:punch",
+            "minecraft:flame",
+            "minecraft:infinity",
+            "minecraft:unbreaking",
+        ]
+        .iter()
+        .any(|name| gear.contains(name)),
         "чары не из тега спавна снаряжения: {gear}"
     );
     p.clear("skeleton").await;

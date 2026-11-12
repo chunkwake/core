@@ -201,6 +201,16 @@ impl PlayPlan {
                 out.push(entity_ref(*entity_id, orb.pos, "minecraft:experience_orb"));
             }
         }
+        {
+            let clouds = self.sim().clouds.lock().unwrap();
+            for (entity_id, cloud) in clouds.iter() {
+                out.push(entity_ref(
+                    *entity_id,
+                    cloud.pos,
+                    "minecraft:area_effect_cloud",
+                ));
+            }
+        }
         let tags = self.entity_tags.lock().unwrap();
         for target in &mut out {
             if let Some(held) = tags.get(&target.uuid) {
@@ -916,7 +926,14 @@ impl PlayPlan {
                 .remove(&entity_id)
                 .is_some()
             | self.sim().tnt.lock().unwrap().remove(&entity_id).is_some()
-            | self.sim().orbs.lock().unwrap().remove(&entity_id).is_some();
+            | self.sim().orbs.lock().unwrap().remove(&entity_id).is_some()
+            | self
+                .sim()
+                .clouds
+                .lock()
+                .unwrap()
+                .remove(&entity_id)
+                .is_some();
         if removed {
             let packet =
                 chunkwake_protocol::play::remove_entities(self.ids.remove_entities, &[entity_id]);
@@ -1383,6 +1400,43 @@ impl PlayPlan {
             if let Some(o) = orbs.get(&target.entity_id) {
                 insert_pos_rot(&mut root, o.pos, 0.0, 0.0);
                 root.insert("Value".into(), Tag::Short(o.value as i16));
+                return root;
+            }
+        }
+        {
+            let clouds = self.sim().clouds.lock().unwrap();
+            if let Some(c) = clouds.get(&target.entity_id) {
+                insert_pos_rot(&mut root, c.pos, 0.0, 0.0);
+                root.insert("Age".into(), Tag::Int(c.age));
+                root.insert("Duration".into(), Tag::Int(c.duration));
+                root.insert("WaitTime".into(), Tag::Int(c.wait));
+                root.insert("ReapplicationDelay".into(), Tag::Int(c.reapply));
+                root.insert("DurationOnUse".into(), Tag::Int(c.duration_on_use));
+                root.insert("RadiusOnUse".into(), Tag::Float(c.radius_on_use));
+                root.insert("RadiusPerTick".into(), Tag::Float(c.radius_per_tick));
+                root.insert("Radius".into(), Tag::Float(c.radius));
+                if !c.effects.is_empty() {
+                    let list = c
+                        .effects
+                        .iter()
+                        .map(|e| {
+                            let mut effect = Compound::new();
+                            if let Some(name) = self.effect_name(e.id) {
+                                effect.insert("id".into(), Tag::String(name.to_owned()));
+                            }
+                            effect.insert("amplifier".into(), Tag::Byte(e.amplifier as i8));
+                            effect.insert("duration".into(), Tag::Int(e.duration));
+                            effect.insert("ambient".into(), Tag::Byte(i8::from(e.ambient)));
+                            effect
+                                .insert("show_particles".into(), Tag::Byte(i8::from(e.particles)));
+                            effect.insert("show_icon".into(), Tag::Byte(i8::from(e.show_icon)));
+                            Tag::Compound(effect)
+                        })
+                        .collect();
+                    let mut contents = Compound::new();
+                    contents.insert("custom_effects".into(), Tag::List(list));
+                    root.insert("potion_contents".into(), Tag::Compound(contents));
+                }
                 return root;
             }
         }

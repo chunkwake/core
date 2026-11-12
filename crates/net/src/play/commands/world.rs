@@ -432,6 +432,8 @@ pub(super) fn summon(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
             .and_then(|n| n.get("Value").and_then(super::snbt::number))
             .map_or(1, |v| v as i32);
         ctx.plan.summon_orb(coords, value)
+    } else if name == "minecraft:area_effect_cloud" {
+        ctx.plan.summon_cloud(coords, nbt.as_ref())
     } else {
         ctx.plan
             .summon_boat(&name, coords)

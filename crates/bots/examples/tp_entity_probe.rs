@@ -173,6 +173,7 @@ async fn main() {
         "minecraft:minecart",
         "minecraft:tnt",
         "minecraft:experience_orb",
+        "minecraft:area_effect_cloud",
     ] {
         p.cmd(&format!("kill @e[type={kind}]")).await;
     }
@@ -285,10 +286,51 @@ async fn main() {
         "Value не сохранился: {value}"
     );
 
+    // Облако зелья: /summon с NBT, /tp и чтение полей.
+    let cloud_from = [base[0] - 1.0, base[1] + 1.0, base[2] + 3.0];
+    let cloud_to = [base[0] - 1.0, base[1] + 1.0, base[2] - 2.0];
+    p.cmd(&format!(
+        "summon minecraft:area_effect_cloud {} {} {} {{Radius:2.5f,Duration:600,WaitTime:100,potion_contents:{{potion:\"minecraft:poison\"}}}}",
+        cloud_from[0], cloud_from[1], cloud_from[2]
+    ))
+    .await;
+    p.cmd(&format!(
+        "tp @e[type=minecraft:area_effect_cloud,limit=1,sort=nearest] {} {} {}",
+        cloud_to[0], cloud_to[1], cloud_to[2]
+    ))
+    .await;
+    let at = p.pos("minecraft:area_effect_cloud").await;
+    assert!(
+        (at[0] - cloud_to[0]).abs() < 0.1 && (at[2] - cloud_to[2]).abs() < 0.1,
+        "облако не телепортировалось: {at:?}, ждали {cloud_to:?}"
+    );
+    let radius = p
+        .data("@e[type=minecraft:area_effect_cloud,limit=1,sort=nearest] Radius")
+        .await;
+    assert!(
+        last_number(&radius) == Some(2.5),
+        "Radius не сохранился: {radius}"
+    );
+    let duration = p
+        .data("@e[type=minecraft:area_effect_cloud,limit=1,sort=nearest] Duration")
+        .await;
+    assert!(
+        last_number(&duration) == Some(600.0),
+        "Duration не сохранился: {duration}"
+    );
+    let contents = p
+        .data("@e[type=minecraft:area_effect_cloud,limit=1,sort=nearest] potion_contents")
+        .await;
+    assert!(
+        contents.contains("poison"),
+        "potion_contents не сохранился: {contents}"
+    );
+
     p.cmd("kill @e[type=minecraft:arrow]").await;
     p.cmd("kill @e[type=minecraft:oak_boat]").await;
     p.cmd("kill @e[type=minecraft:minecart]").await;
     p.cmd("kill @e[type=minecraft:tnt]").await;
     p.cmd("kill @e[type=minecraft:experience_orb]").await;
+    p.cmd("kill @e[type=minecraft:area_effect_cloud]").await;
     println!("tp_entity: ok");
 }
