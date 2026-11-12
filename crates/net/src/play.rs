@@ -6141,6 +6141,25 @@ impl PlayPlan {
         }
     }
 
+    /// `/summon minecraft:experience_orb`: орб с заданным `Value`.
+    pub(super) fn summon_orb(&self, pos: [f64; 3], value: i32) -> Option<i32> {
+        let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
+        let orb = crate::orbs::Orb {
+            pos,
+            vel: [0.0; 3],
+            on_ground: false,
+            value: value.max(1),
+            count: 1,
+            age: 0,
+        };
+        self.sim().orbs.lock().unwrap().insert(id, orb);
+        self.mark_work();
+        let range = self.tracking_range(self.survival.orb_entity_type);
+        let tracked = Tracked { id, pos, range };
+        self.hub.spawn_tracked(tracked, self.orb_packets(id, &orb));
+        Some(id)
+    }
+
     fn orb_packets(&self, id: i32, o: &crate::orbs::Orb) -> [Vec<u8>; 2] {
         [
             play::add_entity_moving(

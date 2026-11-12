@@ -81,6 +81,9 @@ impl PlayPlan {
         let (pos, yaw, pitch) = {
             if let Some(a) = self.sim().arrows.lock().unwrap().get_mut(&id) {
                 a.pos = pos;
+                // `TeleportCommand.performTeleport`: вертикальная скорость
+                // сбрасывается, горизонтальная сохраняется.
+                a.vel[1] = 0.0;
                 let (y, p) = crate::arrows::rotation(a.vel);
                 (a.pos, y, p)
             } else if let Some(b) = self.sim().boats.lock().unwrap().get_mut(&id) {
@@ -97,7 +100,15 @@ impl PlayPlan {
                 (e.cart.pos, e.cart.yaw, 0.0)
             } else if let Some(t) = self.sim().tnt.lock().unwrap().get_mut(&id) {
                 t.pos = pos;
+                t.vel[1] = 0.0;
                 (t.pos, 0.0, 0.0)
+            } else if let Some(o) = self.sim().orbs.lock().unwrap().get_mut(&id) {
+                o.pos = pos;
+                // `TeleportCommand.performTeleport`: `setDeltaMovement(x, 0, z)`
+                // и `setOnGround(true)` для всех, кто не в полёте.
+                o.vel[1] = 0.0;
+                o.on_ground = true;
+                (o.pos, 0.0, 0.0)
             } else {
                 return false;
             }

@@ -426,6 +426,12 @@ pub(super) fn summon(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
             .and_then(|n| n.get("fuse").and_then(super::snbt::number))
             .map_or(80, |f| f as i32);
         ctx.plan.summon_tnt(coords, fuse)
+    } else if name == "minecraft:experience_orb" {
+        let value = nbt
+            .as_ref()
+            .and_then(|n| n.get("Value").and_then(super::snbt::number))
+            .map_or(1, |v| v as i32);
+        ctx.plan.summon_orb(coords, value)
     } else {
         ctx.plan
             .summon_boat(&name, coords)

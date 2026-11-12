@@ -58,9 +58,12 @@ impl Probe {
     }
 
     async fn pos(&mut self, kind: &str) -> [f64; 3] {
-        let text = self
-            .data(&format!("@e[type={kind},limit=1,sort=nearest] Pos"))
-            .await;
+        let query = format!("@e[type={kind},limit=1,sort=nearest] Pos");
+        let mut text = self.data(&query).await;
+        // Первый ответ может потеряться на холодном сервере — один повтор.
+        if vec3(&text).is_none() {
+            text = self.data(&query).await;
+        }
         vec3(&text).unwrap_or_else(|| panic!("нет Pos у {kind}: {text}"))
     }
 
@@ -105,6 +108,12 @@ fn numbers(text: &str) -> Vec<f64> {
                 .ok()
         })
         .collect()
+}
+
+fn last_number(text: &str) -> Option<f64> {
+    text.split_whitespace()
+        .rev()
+        .find_map(|t| t.trim_end_matches(['f', 'b', 's']).parse().ok())
 }
 
 fn vec3(text: &str) -> Option<[f64; 3]> {
@@ -157,7 +166,17 @@ async fn main() {
     .await;
     p.cmd(&format!("tp @s {} {} {} 0 0", base[0], base[1], base[2]))
         .await;
-    p.pump(300).await;
+    // Чистим хвосты прошлых прогонов, чтобы `sort=nearest` не уводил к старым.
+    for kind in [
+        "minecraft:arrow",
+        "minecraft:oak_boat",
+        "minecraft:minecart",
+        "minecraft:tnt",
+        "minecraft:experience_orb",
+    ] {
+        p.cmd(&format!("kill @e[type={kind}]")).await;
+    }
+    p.pump(800).await;
 
     // Стрела: /summon в ванили создаёт projectile, /tp двигает его.
     let arrow_from = [base[0], base[1] + 1.0, base[2] + 3.0];
@@ -237,9 +256,39 @@ async fn main() {
         "ТНТ не телепортировался: {at:?}, ждали {tnt_to:?}"
     );
 
+    // Сфера опыта: /summon с Value и /tp. Держим обе точки дальше 8 блоков
+    // от игрока, иначе орб притягивается (`ExperienceOrb.playerTouch`) и
+    // горизонтальная скорость уносит его от точки телепорта (ванильный
+    // `TeleportCommand` сохраняет `x`/`z` скорость).
+    let orb_from = [base[0] + 1.0, base[1] + 1.0, base[2] + 14.0];
+    let orb_to = [base[0] + 1.0, base[1] + 1.0, base[2] + 10.0];
+    p.cmd(&format!(
+        "summon minecraft:experience_orb {} {} {} {{Value:7}}",
+        orb_from[0], orb_from[1], orb_from[2]
+    ))
+    .await;
+    p.cmd(&format!(
+        "tp @e[type=minecraft:experience_orb,limit=1,sort=nearest] {} {} {}",
+        orb_to[0], orb_to[1], orb_to[2]
+    ))
+    .await;
+    let at = p.pos("minecraft:experience_orb").await;
+    assert!(
+        (at[0] - orb_to[0]).abs() < 0.1 && (at[2] - orb_to[2]).abs() < 0.1,
+        "сфера опыта не телепортировалась: {at:?}, ждали {orb_to:?}"
+    );
+    let value = p
+        .data("@e[type=minecraft:experience_orb,limit=1,sort=nearest] Value")
+        .await;
+    assert!(
+        last_number(&value) == Some(7.0),
+        "Value не сохранился: {value}"
+    );
+
     p.cmd("kill @e[type=minecraft:arrow]").await;
     p.cmd("kill @e[type=minecraft:oak_boat]").await;
     p.cmd("kill @e[type=minecraft:minecart]").await;
     p.cmd("kill @e[type=minecraft:tnt]").await;
+    p.cmd("kill @e[type=minecraft:experience_orb]").await;
     println!("tp_entity: ok");
 }

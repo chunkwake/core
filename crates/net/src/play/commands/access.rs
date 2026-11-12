@@ -195,6 +195,12 @@ impl PlayPlan {
                 out.push(entity_ref(*entity_id, primed.pos, "minecraft:tnt"));
             }
         }
+        {
+            let orbs = self.sim().orbs.lock().unwrap();
+            for (entity_id, orb) in orbs.iter() {
+                out.push(entity_ref(*entity_id, orb.pos, "minecraft:experience_orb"));
+            }
+        }
         let tags = self.entity_tags.lock().unwrap();
         for target in &mut out {
             if let Some(held) = tags.get(&target.uuid) {
@@ -909,7 +915,8 @@ impl PlayPlan {
                 .unwrap()
                 .remove(&entity_id)
                 .is_some()
-            | self.sim().tnt.lock().unwrap().remove(&entity_id).is_some();
+            | self.sim().tnt.lock().unwrap().remove(&entity_id).is_some()
+            | self.sim().orbs.lock().unwrap().remove(&entity_id).is_some();
         if removed {
             let packet =
                 chunkwake_protocol::play::remove_entities(self.ids.remove_entities, &[entity_id]);
@@ -1368,6 +1375,14 @@ impl PlayPlan {
             let tnt = self.sim().tnt.lock().unwrap();
             if let Some(t) = tnt.get(&target.entity_id) {
                 insert_pos_rot(&mut root, t.pos, 0.0, 0.0);
+                return root;
+            }
+        }
+        {
+            let orbs = self.sim().orbs.lock().unwrap();
+            if let Some(o) = orbs.get(&target.entity_id) {
+                insert_pos_rot(&mut root, o.pos, 0.0, 0.0);
+                root.insert("Value".into(), Tag::Short(o.value as i16));
                 return root;
             }
         }
