@@ -231,6 +231,7 @@ impl PlayPlan {
                             crate::potions::splash_instant_amount(amount, 0.5),
                             Cause::Magic,
                             None,
+                            0.0,
                         ),
                     );
                 }

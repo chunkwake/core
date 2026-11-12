@@ -227,7 +227,11 @@ async fn main() {
     let back = [base[0], base[1] + 1.0, base[2] - 3.0];
     p.damage_at(6.0, "arrow", back).await;
     let h = p.health().await;
-    assert!((h - 14.0).abs() < 0.1, "удар в спину должен пройти: {h}");
+    // Регенерация от полной сытости добавляет ~0.17 HP за тик.
+    assert!(
+        (13.5..=14.5).contains(&h),
+        "удар в спину должен пройти: {h}"
+    );
 
     // 3. После отпускания щит больше не блокирует.
     p.release().await;
@@ -237,7 +241,7 @@ async fn main() {
     p.damage_at(6.0, "arrow", front).await;
     let h = p.health().await;
     assert!(
-        (h - 14.0).abs() < 0.1,
+        (13.5..=14.5).contains(&h),
         "опущенный щит не должен блокировать: {h}"
     );
 

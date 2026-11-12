@@ -2516,6 +2516,8 @@ pub struct SurvivalData {
     pub damage_magic: i32,
     pub damage_wither: i32,
     pub damage_arrow: i32,
+    /// `minecraft:player_attack` (PvP).
+    pub damage_player_attack: i32,
     pub damage_explosion: i32,
     pub damage_fire: i32,
     pub damage_lava: i32,
@@ -6992,7 +6994,7 @@ impl PlayPlan {
             self.emit_vibration(pos, "minecraft:projectile_land");
         }
         for (owner, damage) in blasted {
-            self.push_control(owner, Control::Hurt(damage, Cause::Explosion, None));
+            self.push_control(owner, Control::Hurt(damage, Cause::Explosion, None, 0.0));
         }
         for (id, rocket, pos) in broken {
             if rocket && !quiet.contains(&id) {
@@ -7045,7 +7047,7 @@ impl PlayPlan {
                             self.teleport_event(uuid, "ENDER_PEARL", (feet, yaw, pitch, dim))
                         {
                             self.push_control(uuid, Control::Teleport(feet, yaw, pitch));
-                            self.push_control(uuid, Control::Hurt(5.0, Cause::Fall, None));
+                            self.push_control(uuid, Control::Hurt(5.0, Cause::Fall, None, 0.0));
                         }
                     }
                 }
@@ -7098,7 +7100,7 @@ impl PlayPlan {
             if d <= 0.0 {
                 continue;
             }
-            self.push_control(uuid, Control::Hurt(d, cause, Some(pos)));
+            self.push_control(uuid, Control::Hurt(d, cause, Some(pos), 0.0));
             if punch > 0 {
                 let h = (vel[0] * vel[0] + vel[2] * vel[2]).sqrt();
                 if h > 1e-6 {
@@ -7228,6 +7230,7 @@ impl PlayPlan {
                                 crate::potions::splash_instant_amount(amount, strength),
                                 Cause::Magic,
                                 Some(pos),
+                                0.0,
                             ),
                         );
                         continue;
@@ -8812,7 +8815,7 @@ impl PlayPlan {
             let dx = feet[0] - pos[0];
             let dz = feet[2] - pos[2];
             if dx * dx + dz * dz <= 9.0 && (feet[1] - pos[1]).abs() <= 6.0 {
-                self.push_control(uuid, Control::Hurt(5.0, Cause::Fire, Some(pos)));
+                self.push_control(uuid, Control::Hurt(5.0, Cause::Fire, Some(pos), 0.0));
             }
         }
         self.lightning_mobs(pos);
@@ -9898,7 +9901,7 @@ impl PlayPlan {
                 crate::tnt::damage(dist, self.explosion_exposure(center, eye), power),
             );
             if damage > 0.0 {
-                self.push_control(uuid, Control::Hurt(damage, cause, Some(center)));
+                self.push_control(uuid, Control::Hurt(damage, cause, Some(center), 0.0));
             }
         }
         let mut mobs = self.sim().mobs.lock().unwrap();
@@ -11207,9 +11210,9 @@ impl PlayPlan {
                                 state.inv.add_components(item, count, max, extra, damage);
                             self.send_slots(conn, &mut state.inv, &changed).await?;
                         }
-                        Control::Hurt(d, cause, origin) => {
+                        Control::Hurt(d, cause, origin, disable) => {
                             if !state.vitals.dead && matches!(login.spawn.game_mode, 0 | 2) {
-                                self.hurt_at(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, d, cause, origin).await?;
+                                self.hurt_at(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, d, cause, origin, disable).await?;
                             }
                         }
                         Control::Heal(amount) => {
@@ -11933,7 +11936,7 @@ impl PlayPlan {
                                 feet.map_or(1.0, |p| self.fall_scale(p))
                             };
                             if scale > 0.0 {
-                                self.hurt_at(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, d * scale, Cause::Fall, feet).await?;
+                                self.hurt_at(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, d * scale, Cause::Fall, feet, 0.0).await?;
                             }
                         }
                         if !in_water && landing.is_some_and(|fall| fall > 0.0)
@@ -11954,7 +11957,7 @@ impl PlayPlan {
                             && last_void.is_none_or(|t| t.elapsed() >= TICK * survival::VOID_INTERVAL_TICKS as u32)
                         {
                             last_void = Some(Instant::now());
-                            self.hurt_at(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, survival::VOID_DAMAGE, Cause::Void, m.pos).await?;
+                            self.hurt_at(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, survival::VOID_DAMAGE, Cause::Void, m.pos, 0.0).await?;
                         }
                         // `LivingEntity.baseTick`: за границей мира бьёт
                         // `max(1, floor(-dist * damage))`, где `dist` — расстояние
@@ -11966,7 +11969,7 @@ impl PlayPlan {
                             let per_block = border.damage as f64;
                             if dist < 0.0 && per_block > 0.0 {
                                 let amount = ((-dist) * per_block).floor().max(1.0) as f32;
-                                self.hurt_at(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, amount, Cause::OutsideBorder, m.pos).await?;
+                                self.hurt_at(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, amount, Cause::OutsideBorder, m.pos, 0.0).await?;
                             }
                         }
                         if let Some([x, _, z]) = m.pos {
@@ -12227,7 +12230,20 @@ impl PlayPlan {
                             let stop_sprint = state.vitals.sprinting
                                 && (hit.scale > 0.9 || knockback_level > 0);
                             let mut handled = false;
-                            if self
+                            if let Some(slot) = self.attack_player(
+                                uuid,
+                                target,
+                                &mut state.inv,
+                                &mut state.vitals,
+                                hit,
+                                creative,
+                            ) {
+                                handled = true;
+                                if state.inv.slots[slot].is_none() {
+                                    self.break_in_hand(me.entity_id, false);
+                                }
+                                self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                            } else if self
                                 .attack_boat(uuid, target, held, creative, hit)
                                 .is_some()
                                 || self
@@ -12634,6 +12650,7 @@ impl PlayPlan {
                         // `Item.use` для `BLOCKS_ATTACKS`: поднять щит.
                         if !state.vitals.dead
                             && login.spawn.game_mode != 3
+                            && !state.vitals.blocking_disabled()
                             && let Some(slot) = Self::hand_index(&state.inv, hand)
                             && let Some(held) = state.inv.slots[slot]
                             && self
@@ -21857,6 +21874,9 @@ impl PlayPlan {
         inv: &Inventory,
     ) -> Option<(usize, Stack, chunkwake_data::world::BlocksAttacksInfo)> {
         let (slot, item, started) = v.block_use?;
+        if v.blocking_disabled() {
+            return None;
+        }
         let stack = inv.slots[slot]?;
         if stack.item != item {
             return None;
@@ -21967,11 +21987,12 @@ impl PlayPlan {
         &self,
         conn: &mut Connection,
         me: &Online,
-        v: &Vitals,
+        v: &mut Vitals,
         inv: &mut Inventory,
         amount: f32,
         cause: Cause,
         origin: Option<[f64; 3]>,
+        disable_seconds: f32,
     ) -> Result<f32, NetError> {
         let Some((slot, _stack, info)) = self.blocking_with(v, inv) else {
             return Ok(0.0);
@@ -22018,6 +22039,36 @@ impl PlayPlan {
             }
             self.send_slots(conn, inv, &[slot]).await?;
         }
+        // `Player.blockUsingItem` → `BlocksAttacks.disable`: топор отключает
+        // щит на `disable_blocking_for_seconds`, плюс звук поломки.
+        if disable_seconds > 0.0 {
+            let ticks = (disable_seconds * 20.0).round().max(0.0) as u64;
+            if ticks > 0 {
+                v.stop_blocking();
+                v.block_disabled_until =
+                    Some(std::time::Instant::now() + Duration::from_millis(ticks * 50));
+                if let Some((feet, _, _)) = self.player_at(me.entry.uuid)
+                    && let Some(sound) = info.disable_sound
+                {
+                    self.play_sound(
+                        None,
+                        sound,
+                        crate::sounds::PLAYERS,
+                        feet,
+                        0.8,
+                        0.8 + rand::random::<f32>() * 0.4,
+                    );
+                }
+                self.hub.send(
+                    None,
+                    play::entity_meta(
+                        self.ids.set_entity_data,
+                        me.entity_id,
+                        &[(8, play::Meta::Byte(0))],
+                    ),
+                );
+            }
+        }
         Ok(blocked)
     }
 
@@ -22032,7 +22083,7 @@ impl PlayPlan {
         amount: f32,
         cause: Cause,
     ) -> Result<(), NetError> {
-        self.hurt_at(conn, me, v, inv, xp, amount, cause, None)
+        self.hurt_at(conn, me, v, inv, xp, amount, cause, None, 0.0)
             .await
     }
 
@@ -22047,6 +22098,7 @@ impl PlayPlan {
         amount: f32,
         cause: Cause,
         origin: Option<[f64; 3]>,
+        disable_shield: f32,
     ) -> Result<(), NetError> {
         // `ServerPlayer.isInvulnerableTo`: пока клиент не загрузился, урона нет.
         if !self.client_loaded(me.entry.uuid) {
@@ -22056,14 +22108,19 @@ impl PlayPlan {
         let mut amount = amount.max(0.0);
         // `LivingEntity.hurt`: щит блокирует часть урона до брони и эффектов.
         let blocked = self
-            .apply_shield(conn, me, v, inv, amount, cause, origin)
+            .apply_shield(conn, me, v, inv, amount, cause, origin, disable_shield)
             .await?;
         if blocked > 0.0 {
             amount -= blocked;
             if amount <= 0.0 {
+                v.mark_blocked_hit();
                 return Ok(());
             }
         }
+        // `LivingEntity.hurt`: 20 тиков неуязвимости, сильный удар добирает разницу.
+        let Some(amount) = v.damage_cooldown(amount) else {
+            return Ok(());
+        };
         let mut amount = survival::resisted(
             amount,
             self.effect_amp(v, "minecraft:resistance"),
@@ -22149,6 +22206,7 @@ impl PlayPlan {
             // `minecraft:outside_border` — сетевой ID из реестра.
             Cause::OutsideBorder => Some(self.survival.damage_void),
             Cause::Mob(_) => Some(self.survival.damage_mob),
+            Cause::Player(_) => Some(self.survival.damage_player_attack),
             Cause::MobArrow(_) => Some(self.survival.damage_arrow),
             Cause::MobExplosion(_) => Some(self.survival.damage_explosion),
             Cause::Generic => None,
@@ -22205,6 +22263,9 @@ impl PlayPlan {
                         kind.strip_prefix("minecraft:").unwrap_or(kind)
                     );
                     serde_json::json!({"translate": cause.death_key(), "with": [me.entry.name, {"translate": key}]})
+                }
+                Cause::Player(attacker) => {
+                    serde_json::json!({"translate": cause.death_key(), "with": [me.entry.name, attacker]})
                 }
                 _ => serde_json::json!({"translate": cause.death_key(), "with": [me.entry.name]}),
             };

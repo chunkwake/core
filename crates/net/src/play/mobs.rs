@@ -1808,6 +1808,127 @@ impl PlayPlan {
         !hits.is_empty()
     }
 
+    /// Игрок по ID сущности (для PvP): UUID, позиция, «на земле», режим.
+    fn player_entity(&self, id: i32) -> Option<(Uuid, [f64; 3], bool, i32)> {
+        self.hub
+            .players
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, p)| p.entity_id == id)
+            .map(|(uuid, p)| (*uuid, p.pos, p.on_ground, p.entry.game_mode))
+    }
+
+    /// `Player.attack` по другому игроку: тот же расчёт урона, что по мобу,
+    /// но получатель — сессия защищающегося (`Control::Hurt`).
+    pub(super) fn attack_player(
+        &self,
+        uuid: Uuid,
+        target: i32,
+        inv: &mut Inventory,
+        vitals: &mut Vitals,
+        hit: MeleeHit,
+        creative: bool,
+    ) -> Option<usize> {
+        let (target_uuid, target_pos, target_ground, mode) = self.player_entity(target)?;
+        if target_uuid == uuid || matches!(mode, 1 | 3) {
+            return None;
+        }
+        let (pos, _, _) = self.player_at(uuid)?;
+        let slot = inv.held_slot();
+        let held = inv.slots[slot];
+        let item = held.and_then(|s| self.survival.items.get(s.item as usize));
+        if !self.in_attack_range(
+            super::eye_of(pos),
+            target_pos,
+            (0.6, 1.8),
+            self.attack_range_for(held),
+            creative,
+            false,
+        ) {
+            return None;
+        }
+        let level = |n: &str| {
+            held.map_or(0, |s| {
+                chunkwake_protocol::components::stack_level(s.extra, n)
+            })
+        };
+        let base = 1.0 + item.map_or(0.0, |i| i.attack);
+        let sharp = level("minecraft:sharpness");
+        let bonus = if sharp > 0 {
+            0.5 * sharp as f32 + 0.5
+        } else {
+            0.0
+        };
+        let mut damage = Self::melee_damage(base, bonus, hit.scale, hit.crit);
+        let fall = vitals.fall_distance() as f32;
+        let smash = held.is_some_and(|s| self.item_name(s.item) == "minecraft:mace")
+            && fall > 1.5
+            && !hit.gliding;
+        if smash {
+            damage += Self::mace_smash_damage(fall, level("minecraft:density"))
+                * if hit.crit { 1.5 } else { 1.0 };
+        }
+        let full = hit.scale > 0.9;
+        let sprint_knock = vitals.sprinting && full;
+        let power = 0.4
+            + 0.5 * f64::from(level("minecraft:knockback"))
+            + if sprint_knock { 0.5 } else { 0.0 };
+        let name = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .get(&uuid)
+            .map_or("Player".to_owned(), |p| p.entry.name.clone());
+        let disable = item
+            .and_then(|i| i.weapon)
+            .map_or(0.0, |w| w.disable_blocking_for_seconds);
+        if !self.push_control(
+            target_uuid,
+            Control::Hurt(
+                damage,
+                Cause::Player(survival::intern_name(&name)),
+                Some(pos),
+                disable,
+            ),
+        ) {
+            return None;
+        }
+        // `causeExtraKnockback`: толчок от атакующего (20 тиков/с клиент).
+        let (dx, dz) = (target_pos[0] - pos[0], target_pos[2] - pos[2]);
+        let len = (dx * dx + dz * dz).sqrt();
+        if len > 1e-6 {
+            let vel = [
+                -dx / len * power,
+                if target_ground { 0.4 } else { 0.0 },
+                -dz / len * power,
+            ];
+            self.hub.send(
+                None,
+                play::set_entity_motion(self.ids.set_entity_motion, target, vel),
+            );
+        }
+        if smash {
+            vitals.reset_fall(pos);
+        }
+        if creative {
+            return None;
+        }
+        let mut worn = held?;
+        let wear = item
+            .and_then(|i| i.weapon)
+            .map_or(1, |w| w.item_damage_per_attack.max(1));
+        for _ in 0..wear {
+            if self.wear_one(&mut worn) {
+                inv.slots[slot] = None;
+                return Some(slot);
+            }
+        }
+        inv.slots[slot] = Some(worn);
+        Some(slot)
+    }
+
     pub(super) async fn attack_mob(
         &self,
         uuid: Uuid,
@@ -2029,9 +2150,17 @@ impl PlayPlan {
             return None;
         }
         let mut s = inv.slots[slot]?;
-        if self.wear_one(&mut s) {
-            inv.slots[slot] = None;
-        } else {
+        // `Weapon.itemDamagePerAttack`: у топора 2 за удар.
+        let wear = item
+            .and_then(|i| i.weapon)
+            .map_or(1, |w| w.item_damage_per_attack.max(1));
+        for _ in 0..wear {
+            if self.wear_one(&mut s) {
+                inv.slots[slot] = None;
+                break;
+            }
+        }
+        if inv.slots[slot].is_some() {
             inv.slots[slot] = Some(s);
         }
         Some(slot)
@@ -3913,7 +4042,7 @@ impl PlayPlan {
         };
         if !self.push_control(
             target,
-            Control::Hurt(damage, Cause::Mob(species.name()), Some(from)),
+            Control::Hurt(damage, Cause::Mob(species.name()), Some(from), 0.0),
         ) {
             return;
         }

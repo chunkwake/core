@@ -713,7 +713,7 @@ pub(super) fn damage(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     };
     if ctx
         .plan
-        .push_control(first.uuid, Control::Hurt(amount, cause, origin))
+        .push_control(first.uuid, Control::Hurt(amount, cause, origin, 0.0))
     {
         success(
             "commands.damage.success",

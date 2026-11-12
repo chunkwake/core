@@ -3,6 +3,7 @@
 
 use chunkwake_data::tools::Tool;
 use chunkwake_protocol::inventory::{Slot, Stack};
+use std::collections::HashMap;
 
 /// Слоты окна инвентаря игрока: 0 — результат крафта, 1–4 — сетка, 5–8 — броня,
 /// 9–35 — основной, 36–44 — хотбар, 45 — вторая рука.
@@ -317,6 +318,22 @@ pub enum Cause {
     MobArrow(&'static str),
     /// Взрыв моба (`minecraft:player_explosion`): внутри — ключ вида (крипер).
     MobExplosion(&'static str),
+    /// Удар игрока (`minecraft:player_attack`): имя атакующего.
+    Player(&'static str),
+}
+
+/// Имя игрока для `death.attack.player`: одна аллокация на имя.
+pub fn intern_name(name: &str) -> &'static str {
+    static NAMES: std::sync::OnceLock<std::sync::Mutex<HashMap<String, &'static str>>> =
+        std::sync::OnceLock::new();
+    let names = NAMES.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut names = names.lock().unwrap();
+    if let Some(&s) = names.get(name) {
+        return s;
+    }
+    let s: &'static str = Box::leak(name.to_owned().into_boxed_str());
+    names.insert(name.to_owned(), s);
+    s
 }
 
 impl Cause {
@@ -338,6 +355,7 @@ impl Cause {
             "freeze" => Cause::Freeze,
             "hot_floor" => Cause::Magma,
             "outside_border" => Cause::OutsideBorder,
+            "player_attack" => Cause::Player("Player"),
             _ => Cause::Generic,
         }
     }
@@ -364,6 +382,7 @@ impl Cause {
             Cause::Mob(_) => "death.attack.mob",
             Cause::MobArrow(_) => "death.attack.arrow",
             Cause::MobExplosion(_) => "death.attack.explosion.player",
+            Cause::Player(_) => "death.attack.player",
         }
     }
 
@@ -390,6 +409,7 @@ impl Cause {
             Cause::Mob(_) => "ENTITY_ATTACK",
             Cause::MobArrow(_) => "PROJECTILE",
             Cause::MobExplosion(_) => "ENTITY_EXPLOSION",
+            Cause::Player(_) => "ENTITY_ATTACK",
         }
     }
 
@@ -415,6 +435,7 @@ impl Cause {
             Cause::Mob(_) => "minecraft:mob_attack",
             Cause::MobArrow(_) => "minecraft:arrow",
             Cause::MobExplosion(_) => "minecraft:player_explosion",
+            Cause::Player(_) => "minecraft:player_attack",
         }
     }
 
@@ -864,6 +885,11 @@ pub struct Vitals {
     attack_item: Option<i32>,
     /// `LivingEntity.useItem` щита: слот, предмет и начало удержания.
     pub block_use: Option<(usize, i32, std::time::Instant)>,
+    /// `LivingEntity.invulnerableTime` и `lastHurt`.
+    invulnerable: u8,
+    last_damage: f32,
+    /// `Player.getCooldowns` щита после удара топором.
+    pub block_disabled_until: Option<std::time::Instant>,
 }
 
 impl Default for Vitals {
@@ -884,6 +910,9 @@ impl Default for Vitals {
             attack_ticker: 0,
             attack_item: None,
             block_use: None,
+            invulnerable: 0,
+            last_damage: 0.0,
+            block_disabled_until: None,
         }
     }
 }
@@ -899,9 +928,39 @@ impl Vitals {
         self.block_use.take().is_some()
     }
 
+    /// `getCooldowns().isOnCooldown(щит)`.
+    pub fn blocking_disabled(&self) -> bool {
+        self.block_disabled_until
+            .is_some_and(|until| std::time::Instant::now() < until)
+    }
+
+    /// `LivingEntity.hurt`: неуязвимость 20 тиков; более сильный удар
+    /// добирает разницу (`damage - lastHurt`).
+    pub fn damage_cooldown(&mut self, amount: f32) -> Option<f32> {
+        if self.invulnerable > 10 {
+            if amount <= self.last_damage {
+                return None;
+            }
+            let dealt = amount - self.last_damage;
+            self.last_damage = amount;
+            Some(dealt)
+        } else {
+            self.invulnerable = 20;
+            self.last_damage = amount;
+            Some(amount)
+        }
+    }
+
+    /// Полностью заблокированный удар: тикер неуязвимости всё равно идёт.
+    pub fn mark_blocked_hit(&mut self) {
+        self.invulnerable = 20;
+        self.last_damage = 0.0;
+    }
+
     /// `Player.tick`: `++attackStrengthTicker`; смена предмета в руке сбрасывает
     /// заряд (`resetAttackStrengthTicker`).
     pub fn tick_attack(&mut self, held_item: Option<i32>) {
+        self.invulnerable = self.invulnerable.saturating_sub(1);
         if held_item == self.attack_item {
             self.attack_ticker = self.attack_ticker.saturating_add(1);
         } else {
@@ -1553,6 +1612,22 @@ mod tests {
         assert_eq!(effect_color("minecraft:unknown"), None);
         assert_eq!(effect_particle_argb(0x33EBFF, false), 0xFF33EBFFu32 as i32);
         assert_eq!(effect_particle_argb(0x33EBFF, true), 0x2633EBFF);
+    }
+
+    #[test]
+    fn damage_cooldown_matches_vanilla() {
+        let mut v = Vitals::default();
+        assert_eq!(v.damage_cooldown(5.0), Some(5.0));
+        // В окне неуязвимости слабый удар игнорируется, сильный добирает разницу.
+        assert_eq!(v.damage_cooldown(4.0), None);
+        assert_eq!(v.damage_cooldown(8.0), Some(3.0));
+        for _ in 0..11 {
+            v.tick_attack(None);
+        }
+        assert_eq!(v.damage_cooldown(6.0), Some(6.0));
+        // Полностью заблокированный удар всё равно ставит тикер.
+        v.mark_blocked_hit();
+        assert_eq!(v.damage_cooldown(9.0), Some(9.0));
     }
 
     #[test]

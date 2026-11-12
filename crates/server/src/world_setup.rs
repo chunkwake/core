@@ -854,6 +854,9 @@ fn survival_data(
         damage_arrow: registries
             .network_id("damage_type", "minecraft:arrow")
             .map_err(s)?,
+        damage_player_attack: registries
+            .network_id("damage_type", "minecraft:player_attack")
+            .map_err(s)?,
         damage_explosion: registries
             .network_id("damage_type", "minecraft:explosion")
             .map_err(s)?,

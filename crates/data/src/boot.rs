@@ -1,5 +1,5 @@
 //! Образ данных запуска: всё, что сервер собирает из дерева ванильных JSON,
-//! упаковывается в `chunkwake-derived-v1/boot.v8.bin` и дальше читается одним
+//! упаковывается в `chunkwake-derived-v1/boot.v9.bin` и дальше читается одним
 //! последовательным файлом вместо тысяч открытий и разборов.
 //!
 //! Сборка образа вызывает обычные загрузчики; повторный старт их не трогает.
@@ -15,15 +15,16 @@ use crate::tools::{Tool, ToolRule};
 use crate::world::{
     AttackRangeInfo, Blocks, BlocksAttacksInfo, DeathEffectInfo, DeathProtectionInfo, Drink, Food,
     Fuel, ItemInfo, KineticCondition, KineticWeaponInfo, PiercingWeaponInfo, Properties,
+    WeaponInfo,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Версия формата. Меняется вместе с любым полем образа.
-const SCHEMA: u32 = 8;
+const SCHEMA: u32 = 9;
 const MAGIC: u32 = 0x434B_424F; // "CKBO"
-const FILE: &str = "boot.v8.bin";
+const FILE: &str = "boot.v9.bin";
 
 /// Слоты экипировки в порядке кодов образа (`ItemInfo::equip`).
 const EQUIP: [&str; 8] = [
@@ -485,6 +486,10 @@ fn w_items(w: &mut W, items: &[ItemInfo]) {
                 w.u8(e.amplifier);
                 w.i32(e.duration);
             }
+        });
+        w.opt(i.weapon, |w, x| {
+            w.i32(x.item_damage_per_attack);
+            w.f32(x.disable_blocking_for_seconds);
         });
     }
 }
@@ -1075,6 +1080,12 @@ fn r_items(r: &mut R<'_>) -> Result<Vec<ItemInfo>, DataError> {
                     effects: Box::leak(effects.into_boxed_slice()),
                 })
             })?,
+            weapon: r.opt(|r| {
+                Ok(WeaponInfo {
+                    item_damage_per_attack: r.i32()?,
+                    disable_blocking_for_seconds: r.f32()?,
+                })
+            })?,
         });
     }
     Ok(out)
@@ -1450,6 +1461,10 @@ mod tests {
                         amplifier: 1,
                         duration: 900,
                     }],
+                }),
+                weapon: Some(WeaponInfo {
+                    item_damage_per_attack: 2,
+                    disable_blocking_for_seconds: 5.0,
                 }),
             },
         ];

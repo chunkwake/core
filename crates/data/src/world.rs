@@ -258,6 +258,8 @@ pub struct ItemInfo {
     pub blocks: Option<BlocksAttacksInfo>,
     /// `minecraft:death_protection`: тотем бессмертия.
     pub death_protection: Option<DeathProtectionInfo>,
+    /// `minecraft:weapon`: износ за удар и отключение щита.
+    pub weapon: Option<WeaponInfo>,
 }
 
 impl Default for ItemInfo {
@@ -279,6 +281,7 @@ impl Default for ItemInfo {
             piercing: None,
             blocks: None,
             death_protection: None,
+            weapon: None,
         }
     }
 }
@@ -487,6 +490,13 @@ pub struct DeathProtectionInfo {
     pub effects: &'static [DeathEffectInfo],
 }
 
+/// `minecraft:weapon` (`Weapon`): износ за удар и отключение щита.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WeaponInfo {
+    pub item_damage_per_attack: i32,
+    pub disable_blocking_for_seconds: f32,
+}
+
 /// `SwingAnimation.DEFAULT`: `whack` на 6 тиков.
 pub const DEFAULT_SWING: (u8, u8) = (1, 6);
 
@@ -571,6 +581,7 @@ pub fn load_items(root: &Path, items: &HashMap<String, i32>) -> Result<Vec<ItemI
             || text.contains("\"minecraft:piercing_weapon\"")
             || text.contains("\"minecraft:blocks_attacks\"")
             || text.contains("\"minecraft:death_protection\"")
+            || text.contains("\"minecraft:weapon\"")
         {
             let json: serde_json::Value =
                 serde_json::from_str(&text).map_err(|e| DataError::Format {
@@ -594,6 +605,7 @@ pub fn load_items(root: &Path, items: &HashMap<String, i32>) -> Result<Vec<ItemI
             out[id as usize].piercing = parse_piercing(c);
             out[id as usize].blocks = parse_blocks(c);
             out[id as usize].death_protection = parse_death_protection(c);
+            out[id as usize].weapon = parse_weapon(c);
         }
     }
     Ok(out)
@@ -786,6 +798,21 @@ fn parse_death_protection(c: &serde_json::Value) -> Option<DeathProtectionInfo> 
     Some(DeathProtectionInfo {
         clear_all,
         effects: Box::leak(effects.into_boxed_slice()),
+    })
+}
+
+fn parse_weapon(c: &serde_json::Value) -> Option<WeaponInfo> {
+    let v = c.get("minecraft:weapon")?;
+    Some(WeaponInfo {
+        item_damage_per_attack: v
+            .get("item_damage_per_attack")
+            .and_then(|n| n.as_i64())
+            .unwrap_or(1)
+            .max(0) as i32,
+        disable_blocking_for_seconds: v
+            .get("disable_blocking_for_seconds")
+            .and_then(|n| n.as_f64())
+            .unwrap_or(0.0) as f32,
     })
 }
 
@@ -1288,12 +1315,12 @@ impl Drop for MarkReady {
     }
 }
 
-/// `load_items` через сводку `items.v6.tsv`: имя, стопка, питьё, броня, урон, копья, щит, тотем и для еды — сытость.
+/// `load_items` через сводку `items.v7.tsv`: имя, стопка, питьё, броня, урон, копья, щит, тотем, оружие и для еды — сытость.
 pub fn load_items_cached(
     root: &Path,
     items: &HashMap<String, i32>,
 ) -> Result<Vec<ItemInfo>, DataError> {
-    let path = derived(root, "items.v6.tsv");
+    let path = derived(root, "items.v7.tsv");
     let len = items.values().max().map_or(0, |&m| m as usize + 1);
     if let Ok(text) = std::fs::read_to_string(&path) {
         let mut out = vec![ItemInfo::default(); len];
@@ -1423,6 +1450,12 @@ fn item_line(name: &str, i: &ItemInfo) -> String {
             .join(">");
         format!("{};{}", u8::from(d.clear_all), effects)
     });
+    let weapon = i.weapon.map_or("-".to_owned(), |w| {
+        format!(
+            "{};{}",
+            w.item_damage_per_attack, w.disable_blocking_for_seconds
+        )
+    });
     let head = format!(
         "{name}\t{}\t{}\t{}\t{fuel}\t{drink}\t{}\t{}\t{}\t{}\t{},{}",
         i.max_stack,
@@ -1435,7 +1468,7 @@ fn item_line(name: &str, i: &ItemInfo) -> String {
         i.swing.0,
         i.swing.1
     );
-    let head = format!("{head}\t{range}\t{kinetic}\t{piercing}\t{blocks}\t{death}");
+    let head = format!("{head}\t{range}\t{kinetic}\t{piercing}\t{blocks}\t{death}\t{weapon}");
     match i.food {
         Some(f) => format!(
             "{head}\t{}\t{}\t{}\t{}",
@@ -1628,6 +1661,19 @@ fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, I
             })
         }
     };
+    let weapon = match f.next()? {
+        "-" => None,
+        s => {
+            let v: Vec<&str> = s.split(';').collect();
+            if v.len() != 2 {
+                return None;
+            }
+            Some(WeaponInfo {
+                item_damage_per_attack: v[0].parse().ok()?,
+                disable_blocking_for_seconds: v[1].parse().ok()?,
+            })
+        }
+    };
     let food = match (f.next(), f.next(), f.next(), f.next()) {
         (Some(n), Some(s), Some(a), Some(sec)) => Some(Food {
             nutrition: n.parse().ok()?,
@@ -1656,6 +1702,7 @@ fn parse_item_line(line: &str, items: &HashMap<String, i32>) -> Option<(usize, I
             piercing,
             blocks,
             death_protection,
+            weapon,
         },
     ))
 }
@@ -1812,6 +1859,7 @@ mod loot_tests {
                 piercing: None,
                 blocks: None,
                 death_protection: None,
+                weapon: None,
             },
             ItemInfo {
                 max_stack: 16,
@@ -1926,7 +1974,8 @@ mod loot_tests {
         let json: serde_json::Value = serde_json::from_str(
             r##"{"components":{
               "minecraft:blocks_attacks":{"block_delay_seconds":0.25,"block_sound":"minecraft:item.shield.block","bypassed_by":"#minecraft:bypasses_shield","disabled_sound":"minecraft:item.shield.break","item_damage":{"base":1.0,"factor":1.0,"threshold":3.0}},
-              "minecraft:death_protection":{"death_effects":[{"type":"minecraft:clear_all_effects"},{"type":"minecraft:apply_effects","effects":[{"amplifier":1,"duration":900,"id":"minecraft:regeneration","show_icon":true},{"duration":800,"id":"minecraft:fire_resistance","show_icon":true}]}]}
+              "minecraft:death_protection":{"death_effects":[{"type":"minecraft:clear_all_effects"},{"type":"minecraft:apply_effects","effects":[{"amplifier":1,"duration":900,"id":"minecraft:regeneration","show_icon":true},{"duration":800,"id":"minecraft:fire_resistance","show_icon":true}]}]},
+              "minecraft:weapon":{"disable_blocking_for_seconds":5.0,"item_damage_per_attack":2}
             }}"##,
         )
         .unwrap();
@@ -1960,6 +2009,9 @@ mod loot_tests {
         );
         assert_eq!(death.effects[1].id, "minecraft:fire_resistance");
         assert_eq!(death.effects[1].duration, 800);
+        let weapon = parse_weapon(c).unwrap();
+        assert_eq!(weapon.item_damage_per_attack, 2);
+        assert_eq!(weapon.disable_blocking_for_seconds, 5.0);
     }
 
     #[test]
@@ -1989,6 +2041,10 @@ mod loot_tests {
                     amplifier: 1,
                     duration: 900,
                 }],
+            }),
+            weapon: Some(WeaponInfo {
+                item_damage_per_attack: 2,
+                disable_blocking_for_seconds: 5.0,
             }),
             ..Default::default()
         };
