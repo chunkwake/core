@@ -1838,6 +1838,18 @@ impl PlayPlan {
         if target_uuid == uuid || matches!(mode, 1 | 3) {
             return None;
         }
+        // `Player.skipAttackInteraction` → `canHarmPlayer`: союзника без
+        // friendly fire не бьём; заряд и прочность при этом не тратятся.
+        let (attacker_name, target_name) = {
+            let players = self.hub.players.lock().unwrap();
+            (
+                players.get(&uuid)?.entry.name.clone(),
+                players.get(&target_uuid)?.entry.name.clone(),
+            )
+        };
+        if !self.can_harm_player(&attacker_name, &target_name) {
+            return None;
+        }
         let (pos, yaw, _) = self.player_at(uuid)?;
         let on_ground = self
             .hub
@@ -2503,6 +2515,10 @@ impl PlayPlan {
                     || other == uuid
                     || matches!(p.entry.game_mode, 1 | 3)
                 {
+                    continue;
+                }
+                // `Player.attack`: разящий удар не задевает союзников.
+                if self.allied(&name, &p.entry.name) {
                     continue;
                 }
                 let at = p.pos;

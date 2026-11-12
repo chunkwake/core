@@ -57,6 +57,25 @@ impl Board {
     }
 
     /// Имя команды участника (`/spreadplayers` с `respectTeams`).
+    /// `Avatar.doTeamsAllowDamage`: союзник без friendly fire не получает удар.
+    pub(crate) fn can_harm(&self, attacker: &str, target: &str) -> bool {
+        let Some(team) = self.of_member(attacker) else {
+            return true;
+        };
+        if !team.members.contains(target) {
+            return true;
+        }
+        team.friendly_fire
+    }
+
+    /// `Entity.isAlliedTo`: одна команда (разящий удар союзников не задевает).
+    pub(crate) fn allied(&self, a: &str, b: &str) -> bool {
+        match (self.of_member(a), self.of_member(b)) {
+            (Some(x), Some(y)) => x.name == y.name,
+            _ => false,
+        }
+    }
+
     pub(crate) fn team_of(&self, member: &str) -> Option<String> {
         self.of_member(member).map(|team| team.name.clone())
     }
@@ -104,6 +123,16 @@ impl PlayPlan {
                 })
                 .collect(),
         )
+    }
+
+    /// `Player.canHarmPlayer`: союзник без friendly fire не получает удар.
+    pub(crate) fn can_harm_player(&self, attacker: &str, target: &str) -> bool {
+        self.teams.lock().unwrap().can_harm(attacker, target)
+    }
+
+    /// `Entity.isAlliedTo`: общая команда.
+    pub(crate) fn allied(&self, a: &str, b: &str) -> bool {
+        self.teams.lock().unwrap().allied(a, b)
     }
 }
 
@@ -528,4 +557,35 @@ fn component(raw: &str) -> Option<Value> {
         return serde_json::from_str(raw).ok();
     }
     Some(json!({"text": raw}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn board(team: &str, friendly: bool, members: &[&str]) -> Board {
+        let mut board = Board::default();
+        let mut t = Team::new(team, json!({"text": team}));
+        t.friendly_fire = friendly;
+        t.members = members.iter().map(|m| (*m).to_owned()).collect();
+        board.teams.insert(team.to_owned(), t);
+        board
+    }
+
+    #[test]
+    fn friendly_fire_blocks_only_teammates() {
+        let board = board("red", false, &["alice", "bob"]);
+        assert!(!board.can_harm("alice", "bob"));
+        assert!(board.can_harm("alice", "carol"));
+        assert!(board.can_harm("carol", "dave"));
+        assert!(board.allied("alice", "bob"));
+        assert!(!board.allied("alice", "carol"));
+    }
+
+    #[test]
+    fn friendly_fire_allows_teammate_damage() {
+        let board = board("red", true, &["alice", "bob"]);
+        assert!(board.can_harm("alice", "bob"));
+        assert!(board.allied("alice", "bob"));
+    }
 }
