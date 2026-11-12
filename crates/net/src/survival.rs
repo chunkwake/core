@@ -280,6 +280,8 @@ impl Inventory {
 pub const MAX_HEALTH: f32 = 20.0;
 pub const MAX_FOOD: i32 = 20;
 pub const START_SATURATION: f32 = 5.0;
+/// `Attributes.MAX_ABSORPTION`: предел жёлтых сердец.
+pub const MAX_ABSORPTION: f32 = 2048.0;
 
 /// Ниже этой глубины под миром — урон пустотой.
 pub const VOID_DEPTH: f64 = 64.0;
@@ -867,6 +869,9 @@ pub struct Vitals {
     pub health: f32,
     pub food: i32,
     pub saturation: f32,
+    /// `LivingEntity.absorptionAmount`: запас жёлтых сердец, которые
+    /// урон снимает раньше здоровья (`Attributes.MAX_ABSORPTION` — 2048).
+    pub absorption: f32,
     /// Пройденное вниз расстояние в текущем падении.
     fall: f64,
     /// `Attributes.SAFE_FALL_DISTANCE` с модификатором Прыгучести.
@@ -898,6 +903,7 @@ impl Default for Vitals {
             health: MAX_HEALTH,
             food: MAX_FOOD,
             saturation: START_SATURATION,
+            absorption: 0.0,
             fall: 0.0,
             safe_fall: BASE_SAFE_FALL,
             last_pos: None,
@@ -1048,6 +1054,21 @@ impl Vitals {
         self.health = (self.health - amount).max(0.0);
         self.dead = self.health <= 0.0;
         self.dead
+    }
+
+    /// `AbsorptionMobEffect.onEffectStarted`: `+(amp + 1) * 4` к сердцам,
+    /// но не больше `MAX_ABSORPTION` (2048).
+    pub fn add_absorption(&mut self, amplifier: u8) {
+        let add = (f32::from(amplifier) + 1.0) * 4.0;
+        self.absorption = (self.absorption + add).min(MAX_ABSORPTION);
+    }
+
+    /// `LivingEntity.actuallyHurt`: поглощение списывается раньше здоровья;
+    /// возвращает остаток удара, который идёт в тело.
+    pub fn absorb(&mut self, amount: f32) -> f32 {
+        let absorbed = amount.min(self.absorption.max(0.0));
+        self.absorption -= absorbed;
+        amount - absorbed
     }
 
     pub fn exhaust(&mut self, amount: f32) {
@@ -1903,5 +1924,36 @@ mod tests {
         assert!(Cause::Poison.bypasses_armor());
         assert!(!Cause::Fall.bypasses_armor());
         assert!(!Cause::Arrow.bypasses_armor());
+    }
+
+    #[test]
+    fn absorption_takes_damage_before_health() {
+        let mut v = Vitals::default();
+        v.add_absorption(0); // (0 + 1) * 4
+        assert_eq!(v.absorption, 4.0);
+        // 3 урона целиком уходят в сердца.
+        assert_eq!(v.absorb(3.0), 0.0);
+        assert_eq!(v.absorption, 1.0);
+        assert_eq!(v.health, MAX_HEALTH);
+        // 1 уходит в поглощение, 4 — в здоровье.
+        assert_eq!(v.absorb(5.0), 4.0);
+        assert_eq!(v.absorption, 0.0);
+        v.damage(4.0);
+        assert_eq!(v.health, MAX_HEALTH - 4.0);
+        // Смерть и респаун обнуляют жёлтые сердца.
+        v.add_absorption(1); // (1 + 1) * 4
+        v.respawn();
+        assert_eq!(v.absorption, 0.0);
+    }
+
+    #[test]
+    fn absorption_effect_stacks_but_caps_at_max() {
+        let mut v = Vitals::default();
+        v.add_absorption(1);
+        v.add_absorption(0);
+        assert_eq!(v.absorption, 12.0);
+        v.add_absorption(255);
+        v.add_absorption(255);
+        assert_eq!(v.absorption, MAX_ABSORPTION);
     }
 }

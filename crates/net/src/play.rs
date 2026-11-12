@@ -21479,8 +21479,16 @@ impl PlayPlan {
                 return Ok(());
             }
         }
+        let fresh = v.effect(e.id).is_none();
         if !v.add_effect(e, force) {
             return Ok(());
+        }
+        let name = self.effect_name(e.id).unwrap_or_default();
+        // `AbsorptionMobEffect.onEffectStarted`: жёлтые сердца выдаются
+        // только при старте эффекта (`onEffectUpdated` их не добавляет).
+        if fresh && name == "minecraft:absorption" {
+            v.add_absorption(e.amplifier);
+            self.send_absorption(conn, me, v).await?;
         }
         conn.send(&inv::update_mob_effect(
             self.ids.update_mob_effect,
@@ -21494,7 +21502,6 @@ impl PlayPlan {
         self.sync_motion(conn, me.entry.uuid, me.entity_id, v, self.motion_mask(e.id))
             .await?;
         self.sync_effect_particles(conn, me, v).await?;
-        let name = self.effect_name(e.id).unwrap_or_default();
         match survival::instant_effect(name, e.amplifier) {
             survival::Instant::Heal(n) if !v.dead => {
                 v.heal(n);
@@ -21851,6 +21858,21 @@ impl PlayPlan {
         .await
     }
 
+    /// `LivingEntity.setAbsorptionAmount` для игрока: обновляет жёлтые
+    /// сердца у себя и наблюдателей (`DATA_PLAYER_ABSORPTION_ID`).
+    async fn send_absorption(
+        &self,
+        conn: &mut Connection,
+        me: &Online,
+        v: &Vitals,
+    ) -> Result<(), NetError> {
+        let packet =
+            inv::set_entity_absorption(self.ids.set_entity_data, me.entity_id, v.absorption);
+        conn.send(&packet).await?;
+        self.hub.send(Some(me.entry.uuid), packet);
+        Ok(())
+    }
+
     /// `ServerGamePacketListenerImpl.clientLoadedTimeoutTimer`: `Some(тиков)`
     /// от текущего игрового тика (или `i64::MAX` — до респауна), `None` —
     /// загрузился.
@@ -21958,7 +21980,12 @@ impl PlayPlan {
                 continue;
             };
             let effect = survival::Effect::plain(id, e.amplifier, e.duration);
+            let fresh = v.effect(effect.id).is_none();
             if v.add_effect(effect, false) {
+                if fresh && self.effect_name(effect.id) == Some("minecraft:absorption") {
+                    v.add_absorption(effect.amplifier);
+                    self.send_absorption(conn, me, v).await?;
+                }
                 conn.send(&inv::update_mob_effect(
                     self.ids.update_mob_effect,
                     me.entity_id,
@@ -22178,8 +22205,15 @@ impl PlayPlan {
         if amount <= 0.0 {
             return Ok(());
         }
+        // `LivingEntity.actuallyHurt`: жёлтые сердца списываются раньше тела,
+        // и полностью поглощённый удар не уменьшает здоровье.
+        let incoming = amount;
+        amount = v.absorb(amount);
+        if amount < incoming {
+            self.send_absorption(conn, me, v).await?;
+        }
         let was_dead = v.dead;
-        let died = v.damage(amount);
+        let died = amount > 0.0 && v.damage(amount);
         if !was_dead
             && let Some(at) =
                 origin.or_else(|| self.player_at(me.entry.uuid).map(|(pos, _, _)| pos))

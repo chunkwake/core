@@ -900,6 +900,23 @@ pub fn set_entity_frozen(id: i32, entity_id: i32, ticks: i32) -> Vec<u8> {
     set_entity_int(id, entity_id, 7, ticks)
 }
 
+/// `Player.DATA_PLAYER_ABSORPTION_ID` (индекс 15, `FLOAT` = 3): жёлтые
+/// сердца игрока (в 26.3 поле переехало из `LivingEntity` в `Player`).
+pub fn set_entity_absorption(id: i32, entity_id: i32, amount: f32) -> Vec<u8> {
+    set_entity_float(id, entity_id, 15, amount)
+}
+
+fn set_entity_float(id: i32, entity_id: i32, index: u8, value: f32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .var_int(entity_id)
+        .u8(index)
+        .var_int(3)
+        .f32(value)
+        .u8(0xff);
+    w.buf
+}
+
 fn set_entity_int(id: i32, entity_id: i32, index: u8, value: i32) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id)
