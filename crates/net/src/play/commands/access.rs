@@ -1389,6 +1389,15 @@ impl PlayPlan {
             if let Some(a) = arrows.get(&target.entity_id) {
                 let (yaw, pitch) = crate::arrows::rotation(a.vel);
                 insert_pos_rot(&mut root, a.pos, yaw, pitch);
+                if a.trident {
+                    if let Some(stack) = a.trident_item
+                        && let Some(item) =
+                            crate::stack_nbt::to_nbt(stack, self.item_name(stack.item))
+                    {
+                        root.insert("item".into(), Tag::Compound(item));
+                    }
+                    root.insert("DealtDamage".into(), Tag::Byte(i8::from(a.dealt_damage)));
+                }
                 return root;
             }
         }

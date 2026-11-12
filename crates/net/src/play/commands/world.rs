@@ -420,6 +420,8 @@ pub(super) fn summon(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
             .filter(|v| v.len() >= 3)
             .map_or([0.0; 3], |v| [v[0], v[1], v[2]]);
         ctx.plan.summon_arrow(coords, vel)
+    } else if name == "minecraft:trident" {
+        ctx.plan.summon_trident(coords, nbt.as_ref())
     } else if name == "minecraft:tnt" {
         let fuse = nbt
             .as_ref()

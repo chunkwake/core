@@ -1,6 +1,8 @@
 //! Стрелы 26.3 (`AbstractArrow`): выстрел из раздатчика (`Projectile.shoot`),
 //! полёт с сопротивлением и гравитацией, втыкание в блок, попадание в игрока.
 
+use chunkwake_protocol::inventory::Stack;
+
 /// Гравитация за тик (`getDefaultGravity`).
 pub const GRAVITY: f64 = 0.05;
 /// Сопротивление воздуха и воды (`getWaterInertia`).
@@ -78,6 +80,12 @@ pub struct Arrow {
     pub stopped: bool,
     /// `PickupStatus.CREATIVE_ONLY`: стрела Бесконечности или креатива — не подбирается.
     pub creative_only: bool,
+    /// `ThrownTrident`: урон 8, отскок от сущности и возврат по `loyalty`.
+    pub trident: bool,
+    pub loyalty: u8,
+    pub dealt_damage: bool,
+    /// Предмет для подбора/возврата (`pickupItemStack`).
+    pub trident_item: Option<Stack>,
 }
 
 impl Arrow {
@@ -85,6 +93,9 @@ impl Arrow {
     pub fn entity_name(&self) -> &'static str {
         if self.firework {
             return "minecraft:firework_rocket";
+        }
+        if self.trident {
+            return "minecraft:trident";
         }
         match self.thrown_kind {
             Some(ThrownKind::Snowball) => "minecraft:snowball",
@@ -121,6 +132,10 @@ impl Arrow {
             pierced_n: 0,
             stopped: false,
             creative_only: false,
+            trident: false,
+            loyalty: 0,
+            dealt_damage: false,
+            trident_item: None,
         }
     }
 }
@@ -234,6 +249,9 @@ pub fn step(
 ) -> Vec<Hit> {
     if a.stuck {
         a.age += 1;
+        if a.trident && a.age > 4 {
+            a.dealt_damage = true;
+        }
         return Vec::new();
     }
     if a.firework && a.life >= FIREWORK_FUSE && a.lifetime == 0 {
@@ -278,6 +296,7 @@ pub fn step(
             return hits;
         }
         if !a.firework
+            && !(a.trident && a.dealt_damage)
             && let Some(k) = players.iter().position(|(id, f)| {
                 touches(*f, p)
                     && !remembers(a, *id)
@@ -286,7 +305,9 @@ pub fn step(
             })
         {
             let roll = a.crit.then(rand::random::<u32>);
-            let dmg = if a.thrown {
+            let dmg = if a.trident {
+                a.base_damage as f32
+            } else if a.thrown {
                 0.0
             } else {
                 arrow_damage(speed, a.base_damage, roll)
@@ -294,6 +315,12 @@ pub fn step(
             a.pos = p;
             let id = players[k].0;
             hits.push(Hit::Player(k, dmg, a.vel));
+            if a.trident {
+                // `onHitEntity` → `deflect(REVERSE, power 0.02/0.2/0.02)`.
+                a.dealt_damage = true;
+                a.vel = [a.vel[0] * -0.01, a.vel[1] * -0.1, a.vel[2] * -0.01];
+                return hits;
+            }
             if a.pierce > 0 && (a.pierced_n as usize) < a.pierced.len() {
                 remember(a, id);
                 a.pierce -= 1;
@@ -304,6 +331,7 @@ pub fn step(
             return hits;
         }
         if !a.firework
+            && !(a.trident && a.dealt_damage)
             && let Some(k) = mobs.iter().position(|(id, feet, (width, height))| {
                 (p[0] - feet[0]).abs() <= width / 2.0 + 0.3
                     && (p[2] - feet[2]).abs() <= width / 2.0 + 0.3
@@ -314,13 +342,20 @@ pub fn step(
             })
         {
             let roll = a.crit.then(rand::random::<u32>);
-            let dmg = if a.thrown {
+            let dmg = if a.trident {
+                a.base_damage as f32
+            } else if a.thrown {
                 0.0
             } else {
                 arrow_damage(speed, a.base_damage, roll)
             };
             a.pos = p;
             hits.push(Hit::Mob(k, dmg, a.vel));
+            if a.trident {
+                a.dealt_damage = true;
+                a.vel = [a.vel[0] * -0.01, a.vel[1] * -0.1, a.vel[2] * -0.01];
+                return hits;
+            }
             if a.pierce > 0 && (a.pierced_n as usize) < a.pierced.len() {
                 remember(a, uuid::Uuid::from_u128(mobs[k].0));
                 a.pierce -= 1;

@@ -6929,6 +6929,9 @@ impl PlayPlan {
         let mut landed = Vec::new();
         let mut hurt = Vec::new();
         let mut hurt_mobs = Vec::new();
+        // Вернувшиеся трезубцы: позиция для клиента и предмет для дропа.
+        let mut trident_syncs: Vec<(i32, [f64; 3], [f64; 3])> = Vec::new();
+        let mut trident_returns: Vec<(i32, Option<Stack>, [f64; 3], bool)> = Vec::new();
         let simulated = self.simulated_set();
         let now = self.game_time.load(Ordering::Relaxed);
         let border = self.border_at(now);
@@ -6941,6 +6944,42 @@ impl PlayPlan {
                         continue;
                     }
                     let punch = a.punch;
+                    // `ThrownTrident.tick`: с Loyalty после попадания летит к
+                    // хозяину, игнорируя блоки (`noPhysics`).
+                    if a.trident && a.loyalty > 0 && a.dealt_damage {
+                        let owner = a.owner.and_then(|u| {
+                            alive.iter().find(|(id, _)| *id == u).map(|(_, feet)| *feet)
+                        });
+                        let Some(feet) = owner else {
+                            trident_returns.push((id, a.trident_item, a.pos, a.creative_only));
+                            gone.push(id);
+                            continue;
+                        };
+                        let eye = [feet[0], feet[1] + items::EYE_HEIGHT, feet[2]];
+                        let d = [eye[0] - a.pos[0], eye[1] - a.pos[1], eye[2] - a.pos[2]];
+                        let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                        if dist < 1.3 {
+                            trident_returns.push((id, a.trident_item, feet, a.creative_only));
+                            gone.push(id);
+                            continue;
+                        }
+                        let loyalty = a.loyalty as f64;
+                        a.pos[1] += d[1] * 0.015 * loyalty;
+                        let accel = 0.05 * loyalty;
+                        let len = dist.max(1e-6);
+                        a.vel = [
+                            a.vel[0] * 0.95 + d[0] / len * accel,
+                            a.vel[1] * 0.95 + d[1] / len * accel,
+                            a.vel[2] * 0.95 + d[2] / len * accel,
+                        ];
+                        a.pos = [
+                            a.pos[0] + a.vel[0],
+                            a.pos[1] + a.vel[1],
+                            a.pos[2] + a.vel[2],
+                        ];
+                        trident_syncs.push((id, a.pos, a.vel));
+                        continue;
+                    }
                     for hit in ar::step(
                         a,
                         &alive,
@@ -7041,6 +7080,21 @@ impl PlayPlan {
                     } else if a.pos[1] < self.min_y() as f64 - 64.0 {
                         gone.push(id);
                     }
+                    // `ThrownTrident.playerTouch`: подобрать воткнутый трезубец.
+                    if a.trident
+                        && !(a.loyalty > 0 && a.dealt_damage)
+                        && (a.stuck || a.dealt_damage)
+                        && let Some((_, feet)) = alive.iter().find(|(u, f)| {
+                            (a.owner.is_none() || a.owner == Some(*u))
+                                && (a.pos[0] - f[0]).abs() < 0.8
+                                && (a.pos[2] - f[2]).abs() < 0.8
+                                && a.pos[1] >= f[1] - 0.3
+                                && a.pos[1] <= f[1] + 1.8
+                        })
+                    {
+                        trident_returns.push((id, a.trident_item, *feet, a.creative_only));
+                        gone.push(id);
+                    }
                 }
                 gone.sort_unstable();
                 gone.dedup();
@@ -7127,6 +7181,26 @@ impl PlayPlan {
                         (rand::random::<u8>() % 5) as i32 + (rand::random::<u8>() % 5) as i32;
                     self.spawn_orbs(pos, 3 + bonus);
                 }
+            }
+        }
+        for (id, pos, vel) in trident_syncs {
+            self.hub.send(
+                None,
+                play::teleport_entity(self.ids.teleport_entity, id, pos, 0.0, 0.0, false),
+            );
+            self.hub.send(
+                None,
+                play::set_entity_motion(self.ids.set_entity_motion, id, vel),
+            );
+        }
+        for (_, item, pos, creative_only) in trident_returns {
+            if !creative_only && let Some(stack) = item {
+                self.drop_item(
+                    pos,
+                    items::pop_velocity(rand::random(), rand::random()),
+                    stack,
+                    Duration::ZERO,
+                );
             }
         }
         for (id, pos) in stuck {
@@ -7685,6 +7759,118 @@ impl PlayPlan {
         Some(id)
     }
 
+    fn trident_type(&self) -> Option<i32> {
+        self.survival.entity_types.get("minecraft:trident").copied()
+    }
+
+    /// `TridentItem.releaseUsing`: бросок с силой 2.5 и износ 1.
+    /// `Some(Some(stack))` — в креативе предмет остался (с износом),
+    /// `Some(None)` — в выживании стек израсходован, `None` — нельзя.
+    fn throw_trident(&self, uuid: Uuid, stack: Stack, creative: bool) -> Option<Option<Stack>> {
+        // `getTridentSpinAttackStrength`: с Riptide бросок не делается.
+        if chunkwake_protocol::components::stack_level(stack.extra, "minecraft:riptide") > 0 {
+            return None;
+        }
+        let max = self.item_max_damage(stack.item);
+        if max > 0 && stack.damage + 1 >= max {
+            return None;
+        }
+        let (feet, yaw, pitch) = self.player_at(uuid)?;
+        let unbreaking =
+            chunkwake_protocol::components::stack_level(stack.extra, "minecraft:unbreaking");
+        let mut damage = stack.damage;
+        if unbreaking <= 0 || !rand::random::<u32>().is_multiple_of(unbreaking as u32 + 1) {
+            damage += 1;
+        }
+        let pickup = Stack {
+            count: 1,
+            damage,
+            ..stack
+        };
+        let dir = crate::arrows::aim(yaw as f64, pitch as f64, 0.0);
+        let vel = crate::arrows::shoot(dir, 2.5, 1.0, rand::random());
+        let mut arrow = crate::arrows::Arrow::flight(
+            [feet[0], feet[1] + items::EYE_HEIGHT - 0.1, feet[2]],
+            vel,
+            false,
+        );
+        arrow.owner = Some(uuid);
+        arrow.left_owner = false;
+        arrow.base_damage = 8.0;
+        arrow.trident = true;
+        arrow.loyalty =
+            chunkwake_protocol::components::stack_level(stack.extra, "minecraft:loyalty")
+                .clamp(0, 127) as u8;
+        arrow.trident_item = Some(pickup);
+        arrow.creative_only = creative;
+        self.launch(self.trident_type()?, arrow);
+        self.play_sound(
+            None,
+            "minecraft:item.trident.throw",
+            crate::sounds::PLAYERS,
+            feet,
+            1.0,
+            1.0,
+        );
+        Some((!creative).then_some(Stack { damage, ..stack }))
+    }
+
+    /// `/summon minecraft:trident`: `Motion`, `item` и `DealtDamage`.
+    pub(super) fn summon_trident(&self, pos: [f64; 3], nbt: Option<&Compound>) -> Option<i32> {
+        let vel = nbt
+            .and_then(|n| n.get("Motion").and_then(Tag::as_list))
+            .map(|list| {
+                list.iter()
+                    .filter_map(|t| match t {
+                        Tag::Double(v) => Some(*v),
+                        Tag::Float(v) => Some(*v as f64),
+                        Tag::Int(v) => Some(*v as f64),
+                        Tag::Long(v) => Some(*v as f64),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| v.len() >= 3)
+            .map_or([0.0; 3], |v| [v[0], v[1], v[2]]);
+        let mut arrow = crate::arrows::Arrow::flight(pos, vel, false);
+        arrow.base_damage = 8.0;
+        arrow.trident = true;
+        if let Some(Tag::Compound(item)) = nbt.and_then(|n| n.get("item"))
+            && let Some(stack) = crate::stack_nbt::from_nbt(item, |n| self.item_id(n))
+        {
+            arrow.loyalty =
+                chunkwake_protocol::components::stack_level(stack.extra, "minecraft:loyalty")
+                    .clamp(0, 127) as u8;
+            arrow.trident_item = Some(stack);
+        }
+        if arrow.trident_item.is_none() {
+            arrow.trident_item = self.item_id("minecraft:trident").map(|i| Stack::new(i, 1));
+        }
+        arrow.dealt_damage = matches!(
+            nbt.and_then(|n| n.get("DealtDamage")),
+            Some(Tag::Byte(b)) if *b != 0
+        );
+        let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
+        self.sim().arrows.lock().unwrap().insert(id, arrow);
+        self.mark_work();
+        let (yaw, pitch) = crate::arrows::rotation(vel);
+        self.hub.send(
+            None,
+            play::add_entity_moving(
+                self.ids.add_entity,
+                id,
+                Uuid::from_u128(rand::random()),
+                self.trident_type()?,
+                pos,
+                vel,
+                yaw,
+                pitch,
+                0,
+            ),
+        );
+        Some(id)
+    }
+
     fn launch(&self, entity_type: i32, arrow: crate::arrows::Arrow) {
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
         let (pos, vel) = (arrow.pos, arrow.vel);
@@ -7702,8 +7888,8 @@ impl PlayPlan {
                 entity_type,
                 pos,
                 vel,
-                pitch,
                 yaw,
+                pitch,
                 0,
             ),
         );
@@ -11285,6 +11471,8 @@ impl PlayPlan {
         let mut drinking: Option<(usize, i32, u32, Instant)> = None;
         // Копьё в режиме удержания (`KineticWeapon`).
         let mut spear_use: Option<SpearUse> = None;
+        // Трезубец: заряд броска (`TridentItem.releaseUsing`, порог 10 тиков).
+        let mut trident_use: Option<(usize, i32, u32, u64)> = None;
         // Открытое окно (сундук, верстак) и счётчик номеров окон.
         let mut window: Option<Window> = None;
         let mut next_window = 0;
@@ -12900,6 +13088,21 @@ impl PlayPlan {
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
                             continue;
                         }
+                        // `TridentItem.use`: копить заряд броска, не начиная щит/еду.
+                        if !state.vitals.dead
+                            && login.spawn.game_mode != 3
+                            && let Some(slot) = Self::hand_index(&state.inv, hand)
+                            && let Some(held) = state.inv.slots[slot]
+                            && self.item_name(held.item) == "minecraft:trident"
+                        {
+                            eating = None;
+                            drinking = None;
+                            drawing = None;
+                            trident_use.get_or_insert((slot, held.item, held.extra, game_ticks));
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence))
+                                .await?;
+                            continue;
+                        }
                         // `Item.use` для `BLOCKS_ATTACKS`: поднять щит.
                         if !state.vitals.dead
                             && login.spawn.game_mode != 3
@@ -13364,6 +13567,19 @@ impl PlayPlan {
                                         login.spawn.game_mode,
                                     )
                                     .await?;
+                                }
+                                if let Some((slot, item, _extra, start)) = trident_use.take()
+                                    && game_ticks.saturating_sub(start) >= 10
+                                    && state.inv.slots[slot].is_some_and(|s| s.item == item)
+                                    && let Some(updated) = self.throw_trident(
+                                        uuid,
+                                        state.inv.slots[slot].unwrap(),
+                                        login.spawn.game_mode == 1,
+                                    )
+                                {
+                                    state.inv.slots[slot] = updated;
+                                    self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                    state.vitals.reset_attack();
                                 }
                                 if spear_use.take().is_some() | state.vitals.stop_blocking() {
                                     self.hub.send(
