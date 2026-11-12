@@ -1304,6 +1304,10 @@ impl PlayPlan {
                 entry.mob.pitch,
                 entry.mob.health,
             );
+            // `Mob.addAdditionalSaveData`: флаг пишется только когда включён.
+            if entry.mob.no_ai {
+                root.insert("NoAI".into(), Tag::Byte(1));
+            }
             if let Some(name) = &entry.mob.custom_name {
                 root.insert("CustomName".into(), Tag::String(name.clone()));
             }

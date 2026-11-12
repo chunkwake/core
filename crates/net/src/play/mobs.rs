@@ -400,8 +400,9 @@ impl PlayPlan {
         let mobs = self.sim().mobs.lock().unwrap();
         let e = mobs.get(&id)?;
         let mut out = self.mob_packets(id, &e.mob);
-        if e.aggressive {
-            out.push(play::mob_flags(self.ids.set_entity_data, id, 4));
+        let flags = (u8::from(e.aggressive) * 4) | u8::from(e.mob.no_ai);
+        if flags != 0 {
+            out.push(play::mob_flags(self.ids.set_entity_data, id, flags));
         }
         Some(out)
     }
@@ -847,7 +848,7 @@ impl PlayPlan {
                             play::mob_flags(
                                 self.ids.set_entity_data,
                                 id,
-                                if aggressive { 4 } else { 0 },
+                                if aggressive { 4 } else { 0 } | u8::from(e.mob.no_ai),
                             ),
                         ));
                     }
@@ -1199,6 +1200,9 @@ impl PlayPlan {
         }
         if let Some(Tag::Byte(persistent)) = nbt.get("PersistenceRequired") {
             m.persistent = *persistent != 0;
+        }
+        if let Some(Tag::Byte(no_ai)) = nbt.get("NoAI") {
+            m.no_ai = *no_ai != 0;
         }
         if m.species == Species::Zombie
             && let Some(Tag::Byte(breaks)) = nbt.get("CanBreakDoors")
@@ -3391,6 +3395,10 @@ pub(super) fn mob_to_nbt(
         "PersistenceRequired".into(),
         Tag::Byte(i8::from(m.persistent)),
     );
+    // `Mob.addAdditionalSaveData` пишет флаг только когда он включён.
+    if m.no_ai {
+        c.insert("NoAI".into(), Tag::Byte(1));
+    }
     match m.species {
         Species::Zombie => {
             c.insert("IsBaby".into(), Tag::Byte(i8::from(m.is_baby())));
@@ -3499,6 +3507,7 @@ pub(super) fn mob_from_nbt(
         m.egg_time = t;
     }
     m.persistent = byte("PersistenceRequired").is_some_and(|b| b != 0);
+    m.no_ai = byte("NoAI").is_some_and(|b| b != 0);
     // Зомби: детёныш навсегда (`IsBaby`), возраста у него нет.
     if species == Species::Zombie {
         m.age = if byte("IsBaby").is_some_and(|b| b != 0) {
@@ -4590,6 +4599,25 @@ mod tests {
         )
         .unwrap();
         assert!(back.can_break_doors);
+    }
+
+    #[test]
+    fn mob_nbt_keeps_no_ai() {
+        let mut m = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 9);
+        m.no_ai = true;
+        let nbt = mob_to_nbt(&m, &std::collections::HashMap::new(), &[]);
+        assert_eq!(nbt.get("NoAI"), Some(&Tag::Byte(1)));
+        let back = mob_from_nbt(
+            &nbt,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+        assert!(back.no_ai);
+        // Выключенный флаг в NBT не пишется (`addAdditionalSaveData`).
+        let plain = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 9);
+        let nbt = mob_to_nbt(&plain, &std::collections::HashMap::new(), &[]);
+        assert!(!nbt.contains_key("NoAI"));
     }
 
     #[test]

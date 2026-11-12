@@ -648,6 +648,9 @@ pub struct Mob {
     pub persistent: bool,
     /// `Zombie.canBreakDoors`: ломает деревянные двери (`BreakDoorGoal`).
     pub can_break_doors: bool,
+    /// `Mob.isNoAi`: без целей, навигации и управления движением, но с
+    /// физикой, гравитацией и получением урона.
+    pub no_ai: bool,
     /// `Entity.horizontalCollision` прошлого хода: условие `DoorInteractGoal`.
     pub horizontal_collision: bool,
     /// Навигация по пути (`GroundPathNavigation`).
@@ -728,6 +731,7 @@ impl Mob {
             no_action: 0,
             persistent: false,
             can_break_doors: false,
+            no_ai: false,
             horizontal_collision: false,
             nav: Navigation::new(species == Species::Spider),
             move_ctl: MoveControl::default(),
@@ -1350,6 +1354,10 @@ pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walke
 
 /// `Mob.serverAiStep`: селекторы → навигация → `MoveControl` → `LookControl`.
 fn server_ai_step(m: &mut Mob, w: &World, s: &mut Senses) {
+    // `Mob.isEffectiveAi`: без целей, навигации и LookControl.
+    if m.no_ai {
+        return;
+    }
     let mut goals = std::mem::take(&mut m.goals);
     let mut targets = std::mem::take(&mut m.targets);
     {
