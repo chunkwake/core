@@ -58,6 +58,11 @@ impl Probe {
         self.chat.clear();
         self.pump(120).await;
         self.cmd(&format!("data get entity {query}")).await;
+        // Ответ иногда теряется под нагрузкой — один повтор.
+        if self.chat.trim().is_empty() {
+            self.pump(300).await;
+            self.cmd(&format!("data get entity {query}")).await;
+        }
         self.chat.clone()
     }
 
@@ -201,7 +206,8 @@ async fn main() {
     };
     let (x, z) = (spawn[0].floor() as i32, spawn[2].floor() as i32);
     let (bx, bz) = (x + 40, z + 40);
-    let by = -60;
+    // Площадка выше нулевой высоты: ниже min_y блоки не считаются опорой.
+    let by = 64;
     let cow = [bx as f64 + 2.5, by as f64, bz as f64 + 0.5];
     let cloud_type = ty("minecraft:area_effect_cloud");
 
@@ -216,6 +222,17 @@ async fn main() {
         bz - 1,
         bx + 6,
         by + 2,
+        bz + 1
+    ))
+    .await;
+    // Флэт-мир стоит на нулевой высоте: под площадкой y=-60 пустота.
+    p.cmd(&format!(
+        "fill {} {} {} {} {} {} minecraft:stone",
+        bx - 1,
+        by - 1,
+        bz - 1,
+        bx + 6,
+        by - 1,
         bz + 1
     ))
     .await;

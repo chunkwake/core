@@ -7107,6 +7107,21 @@ impl PlayPlan {
                 }
                 ar::ThrownKind::Potion => self.splash_potion(extra, pos, direct_hit),
                 ar::ThrownKind::Lingering => self.spawn_lingering(extra, pos),
+                ar::ThrownKind::Experience => {
+                    // `ThrownExperienceBottle.onHit`: звук разбития и
+                    // `ExperienceOrb.award(3 + nextInt(5) + nextInt(5))`.
+                    self.play_sound(
+                        None,
+                        "minecraft:entity.experience_bottle.break",
+                        crate::sounds::NEUTRAL,
+                        pos,
+                        1.0,
+                        1.0,
+                    );
+                    let bonus =
+                        (rand::random::<u8>() % 5) as i32 + (rand::random::<u8>() % 5) as i32;
+                    self.spawn_orbs(pos, 3 + bonus);
+                }
             }
         }
         for (id, pos) in stuck {
@@ -13003,6 +13018,18 @@ impl PlayPlan {
                                 "minecraft:ender_pearl" => Some((self.survival.pearl_entity_type, crate::arrows::ThrownKind::Pearl, "minecraft:entity.ender_pearl.throw")),
                                 "minecraft:splash_potion" => Some((self.survival.potion_entity_type, crate::arrows::ThrownKind::Potion, "minecraft:entity.splash_potion.throw")),
                                 "minecraft:lingering_potion" => Some((self.survival.lingering_entity_type, crate::arrows::ThrownKind::Lingering, "minecraft:entity.lingering_potion.throw")),
+                                "minecraft:experience_bottle" => self
+                                    .survival
+                                    .entity_types
+                                    .get("minecraft:experience_bottle")
+                                    .copied()
+                                    .map(|ty| {
+                                        (
+                                            ty,
+                                            crate::arrows::ThrownKind::Experience,
+                                            "minecraft:entity.experience_bottle.throw",
+                                        )
+                                    }),
                                 _ => None,
                             };
                             if let Some((ty, kind, sound)) = thrown
@@ -13010,7 +13037,13 @@ impl PlayPlan {
                             {
                                 let mut origin = eye_of(feet);
                                 origin[1] -= 0.1;
-                                let vel = crate::arrows::shoot(crate::arrows::aim(yaw as f64, pitch as f64, 0.0), 1.5, 1.0, rand::random());
+                                // `ThrownExperienceBottle`: угол -20°, сила 0.7.
+                                let (speed, offset) = if kind == crate::arrows::ThrownKind::Experience {
+                                    (0.7, -20.0)
+                                } else {
+                                    (1.5, 0.0)
+                                };
+                                let vel = crate::arrows::shoot(crate::arrows::aim(yaw as f64, pitch as f64 + offset, 0.0), speed, 1.0, rand::random());
                                 let mut shot = crate::arrows::Arrow::flight(origin, vel, true);
                                 shot.thrown_kind = Some(kind);
                                 if matches!(
@@ -18437,7 +18470,8 @@ impl PlayPlan {
             | "minecraft:snowball"
             | "minecraft:egg"
             | "minecraft:splash_potion"
-            | "minecraft:lingering_potion" => {
+            | "minecraft:lingering_potion"
+            | "minecraft:experience_bottle" => {
                 let d = crate::placement::step(facing);
                 let at = [
                     front[0] as f64 + 0.5 - 0.3 * d[0] as f64,
@@ -18467,6 +18501,14 @@ impl PlayPlan {
                     "minecraft:lingering_potion" => (
                         self.survival.lingering_entity_type,
                         Some(crate::arrows::ThrownKind::Lingering),
+                    ),
+                    "minecraft:experience_bottle" => (
+                        self.survival
+                            .entity_types
+                            .get("minecraft:experience_bottle")
+                            .copied()
+                            .unwrap_or(self.survival.arrow_entity_type),
+                        Some(crate::arrows::ThrownKind::Experience),
                     ),
                     _ => (self.survival.arrow_entity_type, None),
                 };

@@ -38,6 +38,8 @@ pub enum ThrownKind {
     Pearl,
     Potion,
     Lingering,
+    /// `ThrownExperienceBottle` (`minecraft:experience_bottle`).
+    Experience,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -90,6 +92,7 @@ impl Arrow {
             Some(ThrownKind::Pearl) => "minecraft:ender_pearl",
             Some(ThrownKind::Potion) => "minecraft:splash_potion",
             Some(ThrownKind::Lingering) => "minecraft:lingering_potion",
+            Some(ThrownKind::Experience) => "minecraft:experience_bottle",
             None => "minecraft:arrow",
         }
     }

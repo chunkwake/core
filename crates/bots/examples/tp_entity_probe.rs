@@ -54,6 +54,11 @@ impl Probe {
         self.pump(150).await;
         self.chat.clear();
         self.cmd(&format!("data get entity {query}")).await;
+        // Ответ иногда теряется под нагрузкой — один повтор.
+        if self.chat.trim().is_empty() {
+            self.pump(300).await;
+            self.cmd(&format!("data get entity {query}")).await;
+        }
         self.chat.clone()
     }
 
@@ -146,7 +151,8 @@ async fn main() {
     };
     let (x, z) = (spawn[0].floor() as i32, spawn[2].floor() as i32);
     let (bx, bz) = (x + 90, z + 90);
-    let by = -60;
+    // Площадка выше нулевой высоты: ниже min_y блоки не считаются опорой.
+    let by = 64;
     let base = [bx as f64 + 0.5, by as f64, bz as f64 + 0.5];
 
     p.cmd("gamemode survival").await;
@@ -162,6 +168,18 @@ async fn main() {
         bx + 4,
         by + 3,
         bz + 6
+    ))
+    .await;
+    // Флэт-мир `load-gate-server` стоит на нулевой высоте: площадка ниже
+    // (y=-60) — пустота, поэтому нужен свой пол.
+    p.cmd(&format!(
+        "fill {} {} {} {} {} {} minecraft:stone",
+        bx - 4,
+        by - 1,
+        bz - 4,
+        bx + 4,
+        by - 1,
+        bz + 16
     ))
     .await;
     p.cmd(&format!("tp @s {} {} {} 0 0", base[0], base[1], base[2]))
@@ -274,17 +292,17 @@ async fn main() {
         orb_to[0], orb_to[1], orb_to[2]
     ))
     .await;
-    let at = p.pos("minecraft:experience_orb").await;
-    assert!(
-        (at[0] - orb_to[0]).abs() < 0.1 && (at[2] - orb_to[2]).abs() < 0.1,
-        "сфера опыта не телепортировалась: {at:?}, ждали {orb_to:?}"
-    );
     let value = p
         .data("@e[type=minecraft:experience_orb,limit=1,sort=nearest] Value")
         .await;
     assert!(
         last_number(&value) == Some(7.0),
         "Value не сохранился: {value}"
+    );
+    let at = p.pos("minecraft:experience_orb").await;
+    assert!(
+        (at[0] - orb_to[0]).abs() < 0.1 && (at[2] - orb_to[2]).abs() < 0.1,
+        "сфера опыта не телепортировалась: {at:?}, ждали {orb_to:?}"
     );
 
     // Облако зелья: /summon с NBT, /tp и чтение полей.
