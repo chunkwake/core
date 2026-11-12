@@ -180,6 +180,7 @@ struct Ids {
     sound: i32,
     level_event: i32,
     set_time: i32,
+    award_stats: i32,
     change_difficulty: i32,
     update_mob_effect: i32,
     update_attributes: i32,
@@ -279,6 +280,8 @@ pub struct PlayPlan {
     pub(crate) seen_credits: Mutex<HashSet<Uuid>>,
     /// `BukkitValues` игроков: PDC плагинов (`Player.getPersistentDataContainer`).
     bukkit_values: Mutex<FastMap<Uuid, chunkwake_world::nbt::Compound>>,
+    /// Статистика по игрокам: (тип, значение) → счётчик.
+    stats: Mutex<FastMap<Uuid, PlayerStats>>,
     /// `SignBlockEntity.playerWhoMayEdit`: кому открыт редактор таблички.
     sign_editors: Mutex<FastMap<(Dimension, [i32; 3]), Uuid>>,
     /// Игроки на экране титров: `PERFORM_RESPAWN` вернёт их из Края.
@@ -655,6 +658,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Быстрая карта: ключи — целые числа и их кортежи.
 type FastMap<K, V> = FxHashMap<K, V>;
+/// Статистика игрока: (тип, значение) → счётчик.
+pub(crate) type PlayerStats = FastMap<(String, String), i32>;
 /// Быстрое множество: те же ключи.
 type FastSet<K> = FxHashSet<K>;
 
@@ -2289,6 +2294,7 @@ mod poi;
 mod respawn;
 mod section_order;
 mod signs;
+mod stats;
 mod stream;
 mod swing;
 mod tracking;
@@ -2499,6 +2505,10 @@ pub struct SurvivalData {
     pub villager_professions: HashMap<String, i32>,
     /// Типы жителей (`villager_type`) по именам.
     pub villager_types: HashMap<String, i32>,
+    /// Типы статистики (`stat_type`) по именам.
+    pub stat_types: HashMap<String, i32>,
+    /// Пользовательские счётчики (`custom_stat`) по именам.
+    pub custom_stats: HashMap<String, i32>,
     /// `generic_9x1` … `generic_9x6` для окон плагинов.
     pub menu_rows: [i32; 6],
     /// Состояния сундуков (`ChestBlock`): свойства по состоянию и обратно.
@@ -2840,6 +2850,7 @@ impl PlayPlan {
                 sound: cb("sound")?,
                 level_event: cb("level_event")?,
                 set_time: cb("set_time")?,
+                award_stats: cb("award_stats")?,
                 change_difficulty: cb("change_difficulty")?,
                 update_mob_effect: cb("update_mob_effect")?,
                 update_attributes: cb("update_attributes")?,
@@ -2922,6 +2933,7 @@ impl PlayPlan {
             portal_time: Mutex::new(FastMap::default()),
             seen_credits: Mutex::new(HashSet::new()),
             bukkit_values: Mutex::new(FastMap::default()),
+            stats: Mutex::new(FastMap::default()),
             sign_editors: Mutex::new(FastMap::default()),
             won_game: Mutex::new(HashSet::new()),
             players_source: std::sync::OnceLock::new(),
@@ -5173,6 +5185,7 @@ impl PlayPlan {
             .get(&uuid)
             .map_or(Dimension::Overworld, |p| p.dimension);
         save.dimension = (dim != Dimension::Overworld).then(|| dim.key().to_owned());
+        save.stats = self.collect_stats(uuid);
         // `/spawnpoint` живёт отдельно от инвентаря: снимок не должен его стирать.
         match self.spawn_points.lock().unwrap().get(&uuid).copied() {
             Some(spawn) => {
@@ -5840,6 +5853,10 @@ impl PlayPlan {
         if let Some(c) = loaded.as_ref().and_then(|s| s.bukkit_values.clone()) {
             self.bukkit_values.lock().unwrap().insert(player.uuid, c);
         }
+        self.load_stats(
+            player.uuid,
+            loaded.as_ref().map(|s| s.stats.clone()).unwrap_or_default(),
+        );
         if let Some(save) = loaded.as_ref()
             && let Some(pos) = save.spawn
         {
@@ -5942,6 +5959,9 @@ impl PlayPlan {
         self.hub
             .send_entity(Some(uuid), Vec::new(), Some(EntityEvent::At(me.at())));
         self.publish_live(uuid, &state, game_mode);
+        if let Some(packet) = self.stats_packet(uuid) {
+            conn.send(&packet).await?;
+        }
         // Канал команд — до `PlayerJoinEvent`: плагин может сразу слать
         // игроку сообщения канала (`minecraft:register`), они ждут в очереди.
         let (control_tx, controls) = tokio::sync::mpsc::unbounded_channel();
@@ -6009,6 +6029,7 @@ impl PlayPlan {
             });
         }
         self.hub.players.lock().unwrap().remove(&uuid);
+        self.forget_stats(uuid);
         self.forget_ping(uuid);
         self.hub.send_entity(
             None,
@@ -12780,6 +12801,12 @@ impl PlayPlan {
                                 conn.send(&p).await?;
                             }
                             window = Some(w);
+                            self.award_stat(
+                                uuid,
+                                "minecraft:custom",
+                                "minecraft:talked_to_villager",
+                                1,
+                            );
                             self.reset_after_use(me.entity_id, uuid, it.hand, state, &mut swing);
                             continue;
                         }
@@ -13109,6 +13136,13 @@ impl PlayPlan {
                             p.pitch = pitch.clamp(-90.0, 90.0);
                         }
                         let hand_name = if hand == 0 { "HAND" } else { "OFF_HAND" };
+                        if !state.vitals.dead
+                            && let Some(slot) = Self::hand_index(&state.inv, hand)
+                            && let Some(held) = state.inv.slots[slot]
+                        {
+                            let name = self.item_name(held.item).to_owned();
+                            self.award_stat(uuid, "minecraft:used", &name, 1);
+                        }
                         if !state.vitals.dead
                             && self.cancelled(Event::Interact, uuid, || format!("RIGHT_CLICK_AIR ~ ~ ~ SELF {hand_name}")).await
                         {
@@ -13712,6 +13746,13 @@ impl PlayPlan {
                             }
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
                             continue;
+                        }
+                        if !state.vitals.dead
+                            && let Some(slot) = Self::hand_index(&state.inv, u.hand)
+                            && let Some(held) = state.inv.slots[slot]
+                        {
+                            let name = self.item_name(held.item).to_owned();
+                            self.award_stat(uuid, "minecraft:used", &name, 1);
                         }
                         // Еда на костёр — до обхода окна: присед с едой тоже кладёт её.
                         if !state.vitals.dead && login.spawn.game_mode != 3
@@ -15718,6 +15759,7 @@ impl PlayPlan {
         .click(c.slot, c.button, c.mode);
         if let Some((villager, idx)) = merchant_took {
             self.notify_trade(villager, idx);
+            self.award_stat(me, "minecraft:custom", "minecraft:traded_with_villager", 1);
         }
         // `ShulkerBoxSlot.mayPlace`: шалкер в шалкер не кладётся. Клик
         // откатываем целиком, иначе предмет мог уехать в инвентарь.

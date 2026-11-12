@@ -755,6 +755,10 @@ fn survival_data(
         .map_err(s)?,
         villager_types: chunkwake_data::registries::builtin_entries_of(builtin, "villager_type")
             .map_err(s)?,
+        stat_types: chunkwake_data::registries::builtin_entries_of(builtin, "stat_type")
+            .map_err(s)?,
+        custom_stats: chunkwake_data::registries::builtin_entries_of(builtin, "custom_stat")
+            .map_err(s)?,
         menu_rows: [
             menu("minecraft:generic_9x1")?,
             menu("minecraft:generic_9x2")?,

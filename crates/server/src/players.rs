@@ -20,6 +20,8 @@ const HOTBAR: usize = 36;
 
 pub struct PlayerFiles {
     dir: PathBuf,
+    /// `stats/<uuid>.json` (ванильный формат счётчиков).
+    stats_dir: PathBuf,
     data_version: i32,
     item_names: Vec<String>,
     item_ids: HashMap<String, i32>,
@@ -41,6 +43,7 @@ impl PlayerFiles {
         }
         Self {
             dir: world_dir.join("playerdata"),
+            stats_dir: world_dir.join("stats"),
             data_version,
             item_names,
             item_ids,
@@ -59,8 +62,62 @@ impl PlayerFiles {
         let mut s = from_nbt(&root, &self.item_ids);
         if let Some(s) = s.as_mut() {
             s.effects = effects_from(&root, &self.effects);
+            s.stats = self.read_stats(uuid);
         }
         Ok(s)
+    }
+
+    fn stats_path(&self, uuid: Uuid) -> PathBuf {
+        self.stats_dir.join(format!("{}.json", uuid.hyphenated()))
+    }
+
+    /// `stats/<uuid>.json`: `{"stats":{"<тип>":{"<значение>":N}}}`.
+    fn read_stats(&self, uuid: Uuid) -> Vec<((String, String), i32)> {
+        let Ok(bytes) = std::fs::read(self.stats_path(uuid)) else {
+            return Vec::new();
+        };
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let Some(map) = json.get("stats").and_then(serde_json::Value::as_object) else {
+            return out;
+        };
+        for (kind, values) in map {
+            let Some(values) = values.as_object() else {
+                continue;
+            };
+            for (value, n) in values {
+                if let Some(n) = n.as_i64() {
+                    out.push(((kind.clone(), value.clone()), n as i32));
+                }
+            }
+        }
+        out
+    }
+
+    fn write_stats(&self, uuid: Uuid, stats: &[((String, String), i32)]) -> Result<(), String> {
+        if stats.is_empty() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(&self.stats_dir)
+            .map_err(|e| format!("create {}: {e}", self.stats_dir.display()))?;
+        let mut map = serde_json::Map::new();
+        for ((kind, value), n) in stats {
+            let entry = map
+                .entry(kind.clone())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            if let Some(values) = entry.as_object_mut() {
+                values.insert(value.clone(), serde_json::Value::from(*n));
+            }
+        }
+        let root = serde_json::json!({
+            "stats": serde_json::Value::Object(map),
+            "DataVersion": self.data_version,
+        });
+        let bytes = serde_json::to_vec(&root).map_err(|e| format!("stats json: {e}"))?;
+        std::fs::write(self.stats_path(uuid), bytes)
+            .map_err(|e| format!("write {}: {e}", self.stats_path(uuid).display()))
     }
 
     pub fn save(&self, uuid: Uuid, s: &PlayerSave) -> Result<(), String> {
@@ -85,6 +142,7 @@ impl PlayerFiles {
         if !list.is_empty() {
             root.insert("active_effects".into(), Tag::List(list));
         }
+        self.write_stats(uuid, &s.stats)?;
         nbt::write_gzip_file(&self.path(uuid), &root)
     }
 }
@@ -344,6 +402,7 @@ pub fn from_nbt(root: &Compound, ids: &HashMap<String, i32>) -> Option<PlayerSav
             .and_then(Tag::as_i64)
             .is_some_and(|v| v != 0),
         bukkit_values: root.get("BukkitValues").and_then(Tag::as_compound).cloned(),
+        stats: Vec::new(),
         dimension: root
             .get("Dimension")
             .and_then(Tag::as_str)
@@ -404,6 +463,7 @@ mod tests {
             spawn_angle: [90.0, 0.0],
             seen_credits: true,
             bukkit_values: Some(Compound::from([("myplugin:coins".into(), Tag::Int(42))])),
+            stats: Vec::new(),
             dimension: Some("minecraft:the_nether".into()),
             ender: vec![(
                 2,

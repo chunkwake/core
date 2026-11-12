@@ -37,6 +37,7 @@ pub struct Ids {
     set_entity_link: i32,
     set_time: i32,
     open_screen: i32,
+    award_stats: i32,
     level_chunk: i32,
     forget_level_chunk: i32,
     chunk_batch_finished: i32,
@@ -76,6 +77,7 @@ impl Ids {
             set_entity_link: id(Play, C, "set_entity_link")?,
             set_time: id(Play, C, "set_time")?,
             open_screen: id(Play, C, "open_screen")?,
+            award_stats: id(Play, C, "award_stats")?,
             level_chunk: id(Play, C, "level_chunk_with_light")?,
             forget_level_chunk: id(Play, C, "forget_level_chunk")?,
             chunk_batch_finished: id(Play, C, "chunk_batch_finished")?,
@@ -145,6 +147,10 @@ pub enum Event {
     OpenScreen {
         window: i32,
         menu: i32,
+    },
+    /// Статистика (`award_stats`): (тип, значение) → счётчик.
+    Stats {
+        stats: Vec<((i32, i32), i32)>,
     },
     /// Игровое время из `set_time`: сервер шлёт раз в 20 тиков.
     GameTime(i64),
@@ -577,6 +583,16 @@ impl Client {
             let window = r.var_int().map_err(err)?;
             let menu = r.var_int().map_err(err)?;
             Ok(Event::OpenScreen { window, menu })
+        } else if id == self.ids.award_stats {
+            let count = r.var_int().map_err(err)?.max(0);
+            let mut stats = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                let kind = r.var_int().map_err(err)?;
+                let value = r.var_int().map_err(err)?;
+                let n = r.var_int().map_err(err)?;
+                stats.push(((kind, value), n));
+            }
+            Ok(Event::Stats { stats })
         } else if id == self.ids.set_time {
             let game_time = r.i64().map_err(err)?;
             Ok(Event::GameTime(game_time))

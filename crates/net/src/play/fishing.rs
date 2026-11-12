@@ -213,6 +213,7 @@ impl PlayPlan {
             [feet[0], feet[1] + 0.5, feet[2]],
             rand::random::<i32>() % 6 + 1,
         );
+        self.award_stat(uuid, "minecraft:custom", "minecraft:fish_caught", 1);
         self.play_sound(
             None,
             "minecraft:entity.fishing_bobber.splash",
