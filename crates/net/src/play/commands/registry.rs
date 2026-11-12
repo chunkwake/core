@@ -9,8 +9,8 @@
 
 use super::dispatch::{Handler, Spec};
 use super::{
-    admin, attribute, chat, data, dialog, entity, execute, extra, item_cmd, living, loot_cmd, meta,
-    particle, place_cmd, ret, scoreboard, team as team_cmd, waypoint, world,
+    admin, advancement, attribute, chat, data, dialog, entity, execute, extra, item_cmd, living,
+    loot_cmd, meta, particle, place_cmd, ret, scoreboard, team as team_cmd, waypoint, world,
 };
 use chunkwake_protocol::text::Parser;
 use std::sync::OnceLock;
@@ -259,6 +259,7 @@ pub fn commands() -> Vec<Spec> {
     out.extend(item_cmd::specs());
     out.extend(loot_cmd::specs());
     out.extend(place_cmd::specs());
+    out.extend(advancement::specs());
     out
 }
 /// Таблица строится один раз: разбор идёт на каждую команду игрока.

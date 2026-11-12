@@ -1379,6 +1379,8 @@ pub struct PlayerSave {
     /// `BukkitValues`: PDC плагинов, как у CraftBukkit.
     pub bukkit_values: Option<chunkwake_world::nbt::Compound>,
     pub stats: Vec<((String, String), i32)>,
+    /// Достижения: id → (критерий → время получения).
+    pub advancements: Vec<(String, Vec<(String, i64)>)>,
 }
 
 /// Живое состояние игрока в сессии: инвентарь и здоровье.
@@ -1444,6 +1446,7 @@ impl PlayerState {
             seen_credits: false,
             bukkit_values: None,
             stats: Vec::new(),
+            advancements: Vec::new(),
             dimension: None,
             slots: (0..SLOTS)
                 .filter_map(|i| self.inv.slots[i].map(|s| (i, s)))

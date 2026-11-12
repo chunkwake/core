@@ -38,6 +38,7 @@ pub struct Ids {
     set_time: i32,
     open_screen: i32,
     award_stats: i32,
+    update_advancements: i32,
     level_chunk: i32,
     forget_level_chunk: i32,
     chunk_batch_finished: i32,
@@ -78,6 +79,7 @@ impl Ids {
             set_time: id(Play, C, "set_time")?,
             open_screen: id(Play, C, "open_screen")?,
             award_stats: id(Play, C, "award_stats")?,
+            update_advancements: id(Play, C, "update_advancements")?,
             level_chunk: id(Play, C, "level_chunk_with_light")?,
             forget_level_chunk: id(Play, C, "forget_level_chunk")?,
             chunk_batch_finished: id(Play, C, "chunk_batch_finished")?,
@@ -151,6 +153,13 @@ pub enum Event {
     /// Статистика (`award_stats`): (тип, значение) → счётчик.
     Stats {
         stats: Vec<((i32, i32), i32)>,
+    },
+    /// Достижения (`update_advancements`): добавленные id и прогресс.
+    Advancements {
+        reset: bool,
+        added: Vec<String>,
+        /// id → полученные критерии.
+        progress: Vec<(String, Vec<String>)>,
     },
     /// Игровое время из `set_time`: сервер шлёт раз в 20 тиков.
     GameTime(i64),
@@ -593,6 +602,71 @@ impl Client {
                 stats.push(((kind, value), n));
             }
             Ok(Event::Stats { stats })
+        } else if id == self.ids.update_advancements {
+            let reset = r.bool().map_err(err)?;
+            let count = r.var_int().map_err(err)?.max(0);
+            let mut added = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                let adv = r.string(32767).map_err(err)?.to_owned();
+                added.push(adv);
+                // Advancement: parent?, display?, requirements, telemetry.
+                if r.bool().map_err(err)? {
+                    r.string(32767).map_err(err)?;
+                }
+                if r.bool().map_err(err)? {
+                    chunkwake_protocol::text::read_component(&mut r).map_err(err)?;
+                    chunkwake_protocol::text::read_component(&mut r).map_err(err)?;
+                    r.var_int().map_err(err)?; // icon item
+                    r.var_int().map_err(err)?; // count
+                    let plus = r.var_int().map_err(err)?.max(0);
+                    let minus = r.var_int().map_err(err)?.max(0);
+                    // Патчи компонентов в наших достижениях пустые.
+                    if plus != 0 || minus != 0 {
+                        return Err("advancement icon components are not empty".into());
+                    }
+                    r.var_int().map_err(err)?; // frame
+                    let flags = i32::from_be_bytes(r.bytes(4).map_err(err)?.try_into().unwrap());
+                    if flags & 1 != 0 {
+                        r.string(32767).map_err(err)?;
+                    }
+                }
+                let groups = r.var_int().map_err(err)?.max(0);
+                for _ in 0..groups {
+                    let n = r.var_int().map_err(err)?.max(0);
+                    for _ in 0..n {
+                        r.string(32767).map_err(err)?;
+                    }
+                }
+                r.bool().map_err(err)?; // sends_telemetry_event
+                r.f32().map_err(err)?; // x
+                r.f32().map_err(err)?; // y
+            }
+            let removed = r.var_int().map_err(err)?.max(0);
+            for _ in 0..removed {
+                r.string(32767).map_err(err)?;
+            }
+            let n = r.var_int().map_err(err)?.max(0);
+            let mut progress = Vec::with_capacity(n as usize);
+            for _ in 0..n {
+                let adv = r.string(32767).map_err(err)?.to_owned();
+                let m = r.var_int().map_err(err)?.max(0);
+                let mut criteria = Vec::new();
+                for _ in 0..m {
+                    let name = r.string(32767).map_err(err)?.to_owned();
+                    let obtained = r.bool().map_err(err)?;
+                    r.i64().map_err(err)?;
+                    if obtained {
+                        criteria.push(name);
+                    }
+                }
+                progress.push((adv, criteria));
+            }
+            r.bool().map_err(err)?; // show_advancements
+            Ok(Event::Advancements {
+                reset,
+                added,
+                progress,
+            })
         } else if id == self.ids.set_time {
             let game_time = r.i64().map_err(err)?;
             Ok(Event::GameTime(game_time))

@@ -22,6 +22,8 @@ pub struct PlayerFiles {
     dir: PathBuf,
     /// `stats/<uuid>.json` (ванильный формат счётчиков).
     stats_dir: PathBuf,
+    /// `advancements/<uuid>.json`.
+    advancements_dir: PathBuf,
     data_version: i32,
     item_names: Vec<String>,
     item_ids: HashMap<String, i32>,
@@ -44,6 +46,7 @@ impl PlayerFiles {
         Self {
             dir: world_dir.join("playerdata"),
             stats_dir: world_dir.join("stats"),
+            advancements_dir: world_dir.join("advancements"),
             data_version,
             item_names,
             item_ids,
@@ -63,6 +66,7 @@ impl PlayerFiles {
         if let Some(s) = s.as_mut() {
             s.effects = effects_from(&root, &self.effects);
             s.stats = self.read_stats(uuid);
+            s.advancements = self.read_advancements(uuid);
         }
         Ok(s)
     }
@@ -120,6 +124,91 @@ impl PlayerFiles {
             .map_err(|e| format!("write {}: {e}", self.stats_path(uuid).display()))
     }
 
+    fn advancements_path(&self, uuid: Uuid) -> PathBuf {
+        self.advancements_dir
+            .join(format!("{}.json", uuid.hyphenated()))
+    }
+
+    /// `advancements/<uuid>.json`: `{ "<id>": {"criteria": {...}, "done": bool} }`.
+    fn read_advancements(&self, uuid: Uuid) -> Vec<(String, Vec<(String, i64)>)> {
+        let Ok(bytes) = std::fs::read(self.advancements_path(uuid)) else {
+            return Vec::new();
+        };
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return Vec::new();
+        };
+        let Some(map) = json.as_object() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (id, progress) in map {
+            if id == "DataVersion" {
+                continue;
+            }
+            let Some(criteria) = progress.get("criteria").and_then(|c| c.as_object()) else {
+                continue;
+            };
+            let rows: Vec<(String, i64)> = criteria
+                .iter()
+                .map(|(name, at)| {
+                    let millis = at
+                        .as_i64()
+                        .or_else(|| {
+                            at.as_str().and_then(|s| {
+                                chrono::DateTime::parse_from_rfc3339(s)
+                                    .ok()
+                                    .map(|d| d.timestamp_millis())
+                            })
+                        })
+                        .unwrap_or(0);
+                    (name.clone(), millis)
+                })
+                .collect();
+            if !rows.is_empty() {
+                out.push((id.clone(), rows));
+            }
+        }
+        out
+    }
+
+    fn write_advancements(
+        &self,
+        uuid: Uuid,
+        data: &[(String, Vec<(String, i64)>)],
+    ) -> Result<(), String> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(&self.advancements_dir)
+            .map_err(|e| format!("create {}: {e}", self.advancements_dir.display()))?;
+        let mut map = serde_json::Map::new();
+        for (id, criteria) in data {
+            let mut rows = serde_json::Map::new();
+            for (name, at) in criteria {
+                let stamp = chrono::DateTime::from_timestamp_millis(*at)
+                    .map(|d| d.to_rfc3339())
+                    .unwrap_or_default();
+                rows.insert(name.clone(), serde_json::Value::String(stamp));
+            }
+            let done = !rows.is_empty();
+            map.insert(
+                format!("minecraft:{id}"),
+                serde_json::json!({
+                    "criteria": serde_json::Value::Object(rows),
+                    "done": done,
+                }),
+            );
+        }
+        map.insert(
+            "DataVersion".into(),
+            serde_json::Value::from(self.data_version),
+        );
+        let bytes = serde_json::to_vec(&serde_json::Value::Object(map))
+            .map_err(|e| format!("advancements json: {e}"))?;
+        std::fs::write(self.advancements_path(uuid), bytes)
+            .map_err(|e| format!("write {}: {e}", self.advancements_path(uuid).display()))
+    }
+
     pub fn save(&self, uuid: Uuid, s: &PlayerSave) -> Result<(), String> {
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| format!("create {}: {e}", self.dir.display()))?;
@@ -143,6 +232,7 @@ impl PlayerFiles {
             root.insert("active_effects".into(), Tag::List(list));
         }
         self.write_stats(uuid, &s.stats)?;
+        self.write_advancements(uuid, &s.advancements)?;
         nbt::write_gzip_file(&self.path(uuid), &root)
     }
 }
@@ -403,6 +493,7 @@ pub fn from_nbt(root: &Compound, ids: &HashMap<String, i32>) -> Option<PlayerSav
             .is_some_and(|v| v != 0),
         bukkit_values: root.get("BukkitValues").and_then(Tag::as_compound).cloned(),
         stats: Vec::new(),
+        advancements: Vec::new(),
         dimension: root
             .get("Dimension")
             .and_then(Tag::as_str)
@@ -464,6 +555,7 @@ mod tests {
             seen_credits: true,
             bukkit_values: Some(Compound::from([("myplugin:coins".into(), Tag::Int(42))])),
             stats: Vec::new(),
+            advancements: Vec::new(),
             dimension: Some("minecraft:the_nether".into()),
             ender: vec![(
                 2,

@@ -81,7 +81,6 @@ const EXTENSIONS: &[&str] = &["top", "tps"];
 
 /// Команды ванили, которых у нас пока нет: этап C и позже.
 const NOT_YET: &[&str] = &[
-    "advancement",
     "compute",
     "datapack",
     "fetchprofile",

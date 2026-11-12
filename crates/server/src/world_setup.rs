@@ -739,6 +739,13 @@ fn survival_data(
     // Типы сущностей из `server.jar`: дальность слежения и данные видов мобов.
     let entity_types_info = chunkwake_data::world::load_entity_types(data_dir).map_err(s)?;
     chunkwake_net::mobs::install_species_data(&entity_types_info);
+    // Жители и торговля уже загружены; достижения читаются из data-пака.
+    let advancements = chunkwake_net::play::load_advancements(data_dir);
+    let advancement_ids = advancements
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (a.id.clone(), i))
+        .collect();
     let mut survival = SurvivalData {
         enchantments: loaded.enchantment_lines,
         recipes,
@@ -759,6 +766,8 @@ fn survival_data(
             .map_err(s)?,
         custom_stats: chunkwake_data::registries::builtin_entries_of(builtin, "custom_stat")
             .map_err(s)?,
+        advancements,
+        advancement_ids,
         menu_rows: [
             menu("minecraft:generic_9x1")?,
             menu("minecraft:generic_9x2")?,

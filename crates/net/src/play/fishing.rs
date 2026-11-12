@@ -198,10 +198,12 @@ impl PlayPlan {
         let Some((feet, _, _)) = self.player_at(uuid) else {
             return;
         };
+        let mut caught: Option<&'static str> = None;
         for (name, count) in self.fishing_loot(b.luck, b.open_water) {
             let Some(item) = self.item_id(name) else {
                 continue;
             };
+            caught.get_or_insert(name);
             let vel = [
                 (feet[0] - b.pos[0]) * 0.1,
                 (feet[1] - b.pos[1]) * 0.1 + 0.3,
@@ -214,6 +216,9 @@ impl PlayPlan {
             rand::random::<i32>() % 6 + 1,
         );
         self.award_stat(uuid, "minecraft:custom", "minecraft:fish_caught", 1);
+        if let Some(name) = caught {
+            self.advancement_trigger(uuid, "minecraft:fishing_rod_hooked", Some(name));
+        }
         self.play_sound(
             None,
             "minecraft:entity.fishing_bobber.splash",

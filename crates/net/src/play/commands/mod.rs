@@ -11,6 +11,7 @@
 
 pub mod access;
 pub mod admin;
+pub mod advancement;
 pub mod args;
 pub mod attribute;
 pub mod chat;

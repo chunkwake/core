@@ -181,6 +181,7 @@ struct Ids {
     level_event: i32,
     set_time: i32,
     award_stats: i32,
+    update_advancements: i32,
     change_difficulty: i32,
     update_mob_effect: i32,
     update_attributes: i32,
@@ -282,6 +283,8 @@ pub struct PlayPlan {
     bukkit_values: Mutex<FastMap<Uuid, chunkwake_world::nbt::Compound>>,
     /// Статистика по игрокам: (тип, значение) → счётчик.
     stats: Mutex<FastMap<Uuid, PlayerStats>>,
+    /// Прогресс достижений по игрокам.
+    advancement_progress: Mutex<FastMap<Uuid, AdvProgress>>,
     /// `SignBlockEntity.playerWhoMayEdit`: кому открыт редактор таблички.
     sign_editors: Mutex<FastMap<(Dimension, [i32; 3]), Uuid>>,
     /// Игроки на экране титров: `PERFORM_RESPAWN` вернёт их из Края.
@@ -660,6 +663,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 type FastMap<K, V> = FxHashMap<K, V>;
 /// Статистика игрока: (тип, значение) → счётчик.
 pub(crate) type PlayerStats = FastMap<(String, String), i32>;
+/// Прогресс достижений: advancement → критерий → время получения (мс).
+pub(crate) type AdvProgress = FastMap<String, FastMap<String, i64>>;
 /// Быстрое множество: те же ключи.
 type FastSet<K> = FxHashSet<K>;
 
@@ -2269,6 +2274,7 @@ fn furnace_kind(block: &str) -> Option<u8> {
 
 use chunkwake_data::world::FURNACES;
 
+mod advancements;
 mod area_cloud;
 mod armor_stands;
 mod banners;
@@ -2295,6 +2301,7 @@ mod respawn;
 mod section_order;
 mod signs;
 mod stats;
+pub use advancements::load_advancements;
 mod stream;
 mod swing;
 mod tracking;
@@ -2509,6 +2516,10 @@ pub struct SurvivalData {
     pub stat_types: HashMap<String, i32>,
     /// Пользовательские счётчики (`custom_stat`) по именам.
     pub custom_stats: HashMap<String, i32>,
+    /// Определения достижений из `data/minecraft/advancement`.
+    pub advancements: Vec<advancements::AdvancementDef>,
+    /// Индекс `advancement id → позиция в `advancements`.
+    pub advancement_ids: HashMap<String, usize>,
     /// `generic_9x1` … `generic_9x6` для окон плагинов.
     pub menu_rows: [i32; 6],
     /// Состояния сундуков (`ChestBlock`): свойства по состоянию и обратно.
@@ -2851,6 +2862,7 @@ impl PlayPlan {
                 level_event: cb("level_event")?,
                 set_time: cb("set_time")?,
                 award_stats: cb("award_stats")?,
+                update_advancements: cb("update_advancements")?,
                 change_difficulty: cb("change_difficulty")?,
                 update_mob_effect: cb("update_mob_effect")?,
                 update_attributes: cb("update_attributes")?,
@@ -2934,6 +2946,7 @@ impl PlayPlan {
             seen_credits: Mutex::new(HashSet::new()),
             bukkit_values: Mutex::new(FastMap::default()),
             stats: Mutex::new(FastMap::default()),
+            advancement_progress: Mutex::new(FastMap::default()),
             sign_editors: Mutex::new(FastMap::default()),
             won_game: Mutex::new(HashSet::new()),
             players_source: std::sync::OnceLock::new(),
@@ -5186,6 +5199,7 @@ impl PlayPlan {
             .map_or(Dimension::Overworld, |p| p.dimension);
         save.dimension = (dim != Dimension::Overworld).then(|| dim.key().to_owned());
         save.stats = self.collect_stats(uuid);
+        save.advancements = self.collect_advancement_progress(uuid);
         // `/spawnpoint` живёт отдельно от инвентаря: снимок не должен его стирать.
         match self.spawn_points.lock().unwrap().get(&uuid).copied() {
             Some(spawn) => {
@@ -5857,6 +5871,13 @@ impl PlayPlan {
             player.uuid,
             loaded.as_ref().map(|s| s.stats.clone()).unwrap_or_default(),
         );
+        self.load_advancement_progress(
+            player.uuid,
+            loaded
+                .as_ref()
+                .map(|s| s.advancements.clone())
+                .unwrap_or_default(),
+        );
         if let Some(save) = loaded.as_ref()
             && let Some(pos) = save.spawn
         {
@@ -5962,6 +5983,9 @@ impl PlayPlan {
         if let Some(packet) = self.stats_packet(uuid) {
             conn.send(&packet).await?;
         }
+        if let Some(packet) = self.full_advancement_packet(uuid) {
+            conn.send(&packet).await?;
+        }
         // Канал команд — до `PlayerJoinEvent`: плагин может сразу слать
         // игроку сообщения канала (`minecraft:register`), они ждут в очереди.
         let (control_tx, controls) = tokio::sync::mpsc::unbounded_channel();
@@ -6030,6 +6054,7 @@ impl PlayPlan {
         }
         self.hub.players.lock().unwrap().remove(&uuid);
         self.forget_stats(uuid);
+        self.forget_advancements(uuid);
         self.forget_ping(uuid);
         self.hub.send_entity(
             None,
@@ -12069,6 +12094,7 @@ impl PlayPlan {
                         // Предмет мог смениться (клики): едим, только если еда на месте.
                         let same = state.inv.slots[slot].and_then(|s| self.survival.items.get(s.item as usize))
                             .and_then(|i| i.food) == Some(food);
+                        let eaten = state.inv.slots[slot].map(|s| self.item_name(s.item).to_owned());
                         if same
                             && (slot == state.inv.held_slot() || slot == survival::OFFHAND)
                             && state.inv.consume_at(slot)
@@ -12078,6 +12104,9 @@ impl PlayPlan {
                             self.send_health(conn, &state.vitals).await?;
                             conn.send(&inv::entity_event(ids.entity_event, me.entity_id, inv::ENTITY_EVENT_USE_ITEM_COMPLETE)).await?;
                             self.player_sound(uuid, "minecraft:entity.player.burp", 0.5, crate::sounds::pitch_09());
+                            if let Some(name) = eaten {
+                                self.advancement_trigger(uuid, "minecraft:consume_item", Some(&name));
+                            }
                         }
                     }
                     // Длительность тикает и в креативе. Урон от эффектов — только там, где игрок уязвим.
@@ -15760,6 +15789,7 @@ impl PlayPlan {
         if let Some((villager, idx)) = merchant_took {
             self.notify_trade(villager, idx);
             self.award_stat(me, "minecraft:custom", "minecraft:traded_with_villager", 1);
+            self.advancement_trigger(me, "minecraft:villager_trade", None);
         }
         // `ShulkerBoxSlot.mayPlace`: шалкер в шалкер не кладётся. Клик
         // откатываем целиком, иначе предмет мог уехать в инвентарь.
