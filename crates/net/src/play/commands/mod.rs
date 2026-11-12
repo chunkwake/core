@@ -30,6 +30,7 @@ pub mod net;
 pub mod particle;
 pub mod perf;
 pub mod place_cmd;
+pub mod recipe;
 pub mod registry;
 pub mod ret;
 pub mod scoreboard;

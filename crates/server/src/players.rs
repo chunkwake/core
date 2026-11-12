@@ -358,7 +358,68 @@ pub fn to_nbt(s: &PlayerSave, data_version: i32, names: &[String]) -> Compound {
     if let Some(values) = s.bukkit_values.as_ref().filter(|c| !c.is_empty()) {
         root.insert("BukkitValues".into(), Tag::Compound(values.clone()));
     }
+    root.insert("recipeBook".into(), recipe_book_nbt(s));
     root
+}
+
+/// `ServerRecipeBook.pack()`: `recipes`, `toBeDisplayed` и настройки книги.
+fn recipe_book_nbt(s: &PlayerSave) -> Tag {
+    let list = |v: &[String]| Tag::List(v.iter().map(|x| Tag::String(x.clone())).collect());
+    let mut c = Compound::new();
+    c.insert("recipes".into(), list(&s.recipes));
+    c.insert("toBeDisplayed".into(), list(&s.recipes_highlight));
+    let keys = [
+        ("isGuiOpen", "isFilteringCraftable"),
+        ("isFurnaceGuiOpen", "isFurnaceFilteringCraftable"),
+        (
+            "isBlastingFurnaceGuiOpen",
+            "isBlastingFurnaceFilteringCraftable",
+        ),
+        ("isSmokerGuiOpen", "isSmokerFilteringCraftable"),
+    ];
+    for (i, (open, filtering)) in keys.iter().enumerate() {
+        c.insert(
+            (*open).into(),
+            Tag::Byte(i8::from(s.recipe_book_settings[i][0])),
+        );
+        c.insert(
+            (*filtering).into(),
+            Tag::Byte(i8::from(s.recipe_book_settings[i][1])),
+        );
+    }
+    Tag::Compound(c)
+}
+
+fn recipe_book_from(root: &Compound) -> (Vec<String>, Vec<String>, [[bool; 2]; 4]) {
+    let mut settings = [[false; 2]; 4];
+    let Some(c) = root.get("recipeBook").and_then(Tag::as_compound) else {
+        return (Vec::new(), Vec::new(), settings);
+    };
+    let list = |key: &str| -> Vec<String> {
+        c.get(key)
+            .and_then(Tag::as_list)
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|t| t.as_str().map(str::to_owned))
+            .collect()
+    };
+    let keys = [
+        ("isGuiOpen", "isFilteringCraftable"),
+        ("isFurnaceGuiOpen", "isFurnaceFilteringCraftable"),
+        (
+            "isBlastingFurnaceGuiOpen",
+            "isBlastingFurnaceFilteringCraftable",
+        ),
+        ("isSmokerGuiOpen", "isSmokerFilteringCraftable"),
+    ];
+    for (i, (open, filtering)) in keys.iter().enumerate() {
+        settings[i][0] = c.get(*open).and_then(Tag::as_i64).is_some_and(|v| v != 0);
+        settings[i][1] = c
+            .get(*filtering)
+            .and_then(Tag::as_i64)
+            .is_some_and(|v| v != 0);
+    }
+    (list("recipes"), list("toBeDisplayed"), settings)
 }
 
 /// Точка возрождения из сохранения.
@@ -462,6 +523,7 @@ pub fn from_nbt(root: &Compound, ids: &HashMap<String, i32>) -> Option<PlayerSav
     }
     ender.sort_by_key(|&(i, _)| i);
     let spawn = spawn_from(root);
+    let (recipes, recipes_highlight, recipe_book_settings) = recipe_book_from(root);
     Some(PlayerSave {
         pos,
         yaw,
@@ -494,6 +556,9 @@ pub fn from_nbt(root: &Compound, ids: &HashMap<String, i32>) -> Option<PlayerSav
         bukkit_values: root.get("BukkitValues").and_then(Tag::as_compound).cloned(),
         stats: Vec::new(),
         advancements: Vec::new(),
+        recipes,
+        recipes_highlight,
+        recipe_book_settings,
         dimension: root
             .get("Dimension")
             .and_then(Tag::as_str)
@@ -556,6 +621,9 @@ mod tests {
             bukkit_values: Some(Compound::from([("myplugin:coins".into(), Tag::Int(42))])),
             stats: Vec::new(),
             advancements: Vec::new(),
+            recipes: Vec::new(),
+            recipes_highlight: Vec::new(),
+            recipe_book_settings: [[false; 2]; 4],
             dimension: Some("minecraft:the_nether".into()),
             ender: vec![(
                 2,

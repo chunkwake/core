@@ -86,7 +86,6 @@ const NOT_YET: &[&str] = &[
     "fetchprofile",
     "function",
     "jfr",
-    "recipe",
     "schedule",
     "test",
 ];

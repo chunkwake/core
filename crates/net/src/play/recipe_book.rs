@@ -1,0 +1,1077 @@
+//! Книга рецептов (`ServerRecipeBook`): загрузка рецептов, отображения
+//! (`RecipeDisplay`), пакеты `recipe_book_add`/`remove`/`settings` и
+//! раскладка ингредиентов по сетке (`ServerPlaceRecipe`).
+//!
+//! Рецепты читаются из `data/minecraft/recipe/**/*.json`; каждому рецепту
+//! (у которого есть отображение) выдаётся `RecipeDisplayId` в порядке
+//! сортировки id — так же, как `RecipeManager.unpackRecipeInfo` нумерует
+//! `allDisplays`. Знания игрока хранятся в [`BookState`] и в `playerdata`
+//! (`recipeBook.recipes`/`toBeDisplayed`/настройки).
+
+use super::*;
+use std::collections::HashSet;
+use std::path::Path;
+
+/// Отображение рецепта (`RecipeDisplay`): тип и данные для пакета.
+#[derive(Clone, Debug)]
+pub enum Display {
+    Shapeless {
+        ingredients: Vec<Vec<i32>>,
+        result: (i32, i32),
+        station: i32,
+    },
+    Shaped {
+        width: usize,
+        height: usize,
+        cells: Vec<Vec<i32>>,
+        result: (i32, i32),
+        station: i32,
+    },
+    Furnace {
+        ingredient: Vec<i32>,
+        result: (i32, i32),
+        station: i32,
+        duration: i32,
+        experience: f32,
+    },
+    Stonecutter {
+        input: Vec<i32>,
+        result: (i32, i32),
+        station: i32,
+    },
+    Smithing {
+        template: Vec<i32>,
+        base: Vec<i32>,
+        addition: Vec<i32>,
+        result: (i32, i32),
+        station: i32,
+    },
+}
+
+/// Как раскладывать рецепт по сетке.
+#[derive(Clone, Debug)]
+pub enum Placement {
+    Crafting {
+        width: usize,
+        height: usize,
+        cells: Vec<Vec<i32>>,
+        /// `true` — shapeless: клетки кладутся подряд.
+        shapeless: bool,
+    },
+    Furnace {
+        input: Vec<i32>,
+    },
+    Stonecutter {
+        input: Vec<i32>,
+        index: usize,
+    },
+    Smithing {
+        template: Vec<i32>,
+        base: Vec<i32>,
+        addition: Vec<i32>,
+    },
+    None,
+}
+
+#[derive(Clone, Debug)]
+pub struct RecipeEntry {
+    pub id: String,
+    pub display_id: i32,
+    pub category: i32,
+    pub group: Option<i32>,
+    pub display: Display,
+    /// `craftingRequirements`: по одному ингредиенту на позицию.
+    pub requirements: Vec<Vec<i32>>,
+    pub result: (i32, i32),
+    pub placement: Placement,
+    /// `showNotification` (флаг 1 в `recipe_book_add`).
+    pub notification: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct RecipeBookData {
+    pub entries: Vec<RecipeEntry>,
+    pub by_id: FastMap<String, usize>,
+}
+
+impl RecipeBookData {
+    pub fn entry(&self, id: &str) -> Option<&RecipeEntry> {
+        let full;
+        let key = if id.starts_with("minecraft:") {
+            id
+        } else {
+            full = format!("minecraft:{id}");
+            &full
+        };
+        self.by_id.get(key).and_then(|&i| self.entries.get(i))
+    }
+
+    pub fn entry_by_display(&self, display_id: i32) -> Option<&RecipeEntry> {
+        self.entries.iter().find(|e| e.display_id == display_id)
+    }
+
+    /// `*`: все «обучаемые» рецепты (у нас — все с отображением).
+    pub fn learnable(&self) -> Vec<String> {
+        self.entries.iter().map(|e| e.id.clone()).collect()
+    }
+}
+
+/// Знания игрока (`ServerRecipeBook.known`/`highlight` + настройки).
+#[derive(Clone, Debug, Default)]
+pub struct BookState {
+    pub known: HashSet<String>,
+    pub highlight: HashSet<String>,
+    /// `RecipeBookSettings`: crafting, furnace, blast furnace, smoker →
+    /// `(open, filtering)`.
+    pub settings: [[bool; 2]; 4],
+}
+
+fn item_of(name: &str, items: &HashMap<String, i32>) -> Option<i32> {
+    items.get(name).copied()
+}
+
+fn expand(
+    name: &str,
+    items: &HashMap<String, i32>,
+    tags: &HashMap<String, HashSet<String>>,
+) -> Vec<i32> {
+    if let Some(tag) = name.strip_prefix('#') {
+        let mut out: Vec<i32> = tags
+            .get(tag)
+            .into_iter()
+            .flatten()
+            .filter_map(|n| item_of(n, items))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        return out;
+    }
+    item_of(name, items).into_iter().collect()
+}
+
+/// Один ингредиент: строка, `#тег`, список или объект `{item|tag}`.
+fn ingredient(
+    v: &serde_json::Value,
+    items: &HashMap<String, i32>,
+    tags: &HashMap<String, HashSet<String>>,
+) -> Vec<i32> {
+    match v {
+        serde_json::Value::String(s) => expand(s, items, tags),
+        serde_json::Value::Array(a) => {
+            let mut out = Vec::new();
+            for e in a {
+                out.extend(ingredient(e, items, tags));
+            }
+            out.sort_unstable();
+            out.dedup();
+            out
+        }
+        serde_json::Value::Object(o) => {
+            if let Some(s) = o.get("item").and_then(|s| s.as_str()) {
+                return expand(s, items, tags);
+            }
+            if let Some(s) = o.get("tag").and_then(|s| s.as_str()) {
+                return expand(&format!("#{s}"), items, tags);
+            }
+            if let Some(a) = o.get("items").and_then(|a| a.as_array()) {
+                let mut out = Vec::new();
+                for e in a {
+                    out.extend(ingredient(e, items, tags));
+                }
+                out.sort_unstable();
+                out.dedup();
+                out
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn result_of(v: &serde_json::Value, items: &HashMap<String, i32>) -> Option<(i32, i32)> {
+    let id = v.get("id").and_then(|s| s.as_str())?;
+    let item = item_of(id, items)?;
+    let count = v.get("count").and_then(|c| c.as_i64()).unwrap_or(1) as i32;
+    Some((item, count.max(1)))
+}
+
+fn crafting_category(name: &str, categories: &HashMap<String, i32>) -> i32 {
+    let key = match name {
+        "building" => "minecraft:crafting_building_blocks",
+        "equipment" => "minecraft:crafting_equipment",
+        "redstone" => "minecraft:crafting_redstone",
+        _ => "minecraft:crafting_misc",
+    };
+    categories.get(key).copied().unwrap_or(0)
+}
+
+fn cooking_category(type_name: &str, category: &str, categories: &HashMap<String, i32>) -> i32 {
+    let key = match (type_name, category) {
+        ("smelting", "blocks") => "minecraft:furnace_blocks",
+        ("smelting", "food") => "minecraft:furnace_food",
+        ("smelting", _) => "minecraft:furnace_misc",
+        ("blasting", "blocks") => "minecraft:blast_furnace_blocks",
+        ("blasting", _) => "minecraft:blast_furnace_misc",
+        ("smoking", _) => "minecraft:smoker_food",
+        _ => "minecraft:campfire",
+    };
+    categories.get(key).copied().unwrap_or(0)
+}
+
+fn station_id(type_name: &str, items: &HashMap<String, i32>) -> i32 {
+    let name = match type_name {
+        "smelting" => "minecraft:furnace",
+        "blasting" => "minecraft:blast_furnace",
+        "smoking" => "minecraft:smoker",
+        "campfire_cooking" => "minecraft:campfire",
+        "stonecutting" => "minecraft:stonecutter",
+        "smithing_transform" => "minecraft:smithing_table",
+        _ => "minecraft:crafting_table",
+    };
+    item_of(name, items).unwrap_or(0)
+}
+
+fn collect(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect(&path, out);
+        } else if path.extension().is_some_and(|e| e == "json") {
+            out.push(path);
+        }
+    }
+}
+
+/// Прочитать все рецепты из `data/minecraft/recipe` (кроме brewing).
+pub fn load(
+    data_dir: &Path,
+    items: &HashMap<String, i32>,
+    tags: &HashMap<String, HashSet<String>>,
+    categories: &HashMap<String, i32>,
+) -> RecipeBookData {
+    let root = data_dir.join("data/minecraft/recipe");
+    let mut paths = Vec::new();
+    collect(&root, &mut paths);
+    paths.retain(|p| {
+        !p.strip_prefix(&root).is_ok_and(|r| {
+            r.components()
+                .next()
+                .is_some_and(|c| c.as_os_str() == "brewing")
+        })
+    });
+    paths.sort();
+    let mut entries = Vec::new();
+    let mut groups: HashMap<String, i32> = HashMap::new();
+    let mut stone_index = 0usize;
+    for path in paths {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .with_extension("")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let id = format!("minecraft:{rel}");
+        let type_name = json
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .trim_start_matches("minecraft:");
+        let group = json
+            .get("group")
+            .and_then(|g| g.as_str())
+            .filter(|g| !g.is_empty());
+        let group_id = group.map(|g| {
+            let next = groups.len() as i32;
+            *groups.entry(g.to_owned()).or_insert(next)
+        });
+        let notification = json
+            .get("show_notification")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(true);
+        let (display, placement, requirements, result, category) = match type_name {
+            "crafting_shaped" => {
+                let key = json.get("key").and_then(|k| k.as_object());
+                let pattern: Vec<&str> = json
+                    .get("pattern")
+                    .and_then(|p| p.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|l| l.as_str())
+                    .collect();
+                let height = pattern.len();
+                let width = pattern.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+                let Some(result) = json.get("result").and_then(|r| result_of(r, items)) else {
+                    continue;
+                };
+                let mut cells = Vec::with_capacity(width * height);
+                let mut reqs = Vec::new();
+                for row in &pattern {
+                    for x in 0..width {
+                        let ch = row.chars().nth(x).unwrap_or(' ');
+                        let ing = key
+                            .and_then(|k| k.get(&ch.to_string()))
+                            .map(|v| ingredient(v, items, tags))
+                            .unwrap_or_default();
+                        if !ing.is_empty() {
+                            reqs.push(ing.clone());
+                        }
+                        cells.push(ing);
+                    }
+                }
+                if width == 0 || height == 0 {
+                    continue;
+                }
+                let station = station_id("crafting", items);
+                (
+                    Display::Shaped {
+                        width,
+                        height,
+                        cells: cells.clone(),
+                        result,
+                        station,
+                    },
+                    Placement::Crafting {
+                        width,
+                        height,
+                        cells,
+                        shapeless: false,
+                    },
+                    reqs,
+                    result,
+                    crafting_category(
+                        json.get("category")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("misc"),
+                        categories,
+                    ),
+                )
+            }
+            "crafting_shapeless" => {
+                let ings: Vec<Vec<i32>> = json
+                    .get("ingredients")
+                    .and_then(|i| i.as_array())
+                    .into_iter()
+                    .flatten()
+                    .map(|v| ingredient(v, items, tags))
+                    .filter(|v| !v.is_empty())
+                    .collect();
+                let Some(result) = json.get("result").and_then(|r| result_of(r, items)) else {
+                    continue;
+                };
+                if ings.is_empty() {
+                    continue;
+                }
+                let station = station_id("crafting", items);
+                (
+                    Display::Shapeless {
+                        ingredients: ings.clone(),
+                        result,
+                        station,
+                    },
+                    Placement::Crafting {
+                        width: 1,
+                        height: ings.len(),
+                        cells: ings.clone(),
+                        shapeless: true,
+                    },
+                    ings,
+                    result,
+                    crafting_category(
+                        json.get("category")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("misc"),
+                        categories,
+                    ),
+                )
+            }
+            "smelting" | "blasting" | "smoking" | "campfire_cooking" => {
+                let input = json
+                    .get("ingredient")
+                    .map(|v| ingredient(v, items, tags))
+                    .unwrap_or_default();
+                let Some(result) = json.get("result").and_then(|r| result_of(r, items)) else {
+                    continue;
+                };
+                if input.is_empty() {
+                    continue;
+                }
+                let duration = json.get("cookingtime").and_then(|c| c.as_i64()).unwrap_or(
+                    if type_name == "campfire_cooking" {
+                        600
+                    } else {
+                        200
+                    },
+                ) as i32;
+                let experience = json
+                    .get("experience")
+                    .and_then(|e| e.as_f64())
+                    .unwrap_or(0.0) as f32;
+                let station = station_id(type_name, items);
+                let cat = cooking_category(
+                    type_name,
+                    json.get("category")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("misc"),
+                    categories,
+                );
+                (
+                    Display::Furnace {
+                        ingredient: input.clone(),
+                        result,
+                        station,
+                        duration,
+                        experience,
+                    },
+                    Placement::Furnace {
+                        input: input.clone(),
+                    },
+                    vec![input],
+                    result,
+                    cat,
+                )
+            }
+            "stonecutting" => {
+                let input = json
+                    .get("ingredient")
+                    .map(|v| ingredient(v, items, tags))
+                    .unwrap_or_default();
+                let Some(result) = json.get("result").and_then(|r| result_of(r, items)) else {
+                    continue;
+                };
+                if input.is_empty() {
+                    continue;
+                }
+                let index = stone_index;
+                stone_index += 1;
+                let station = station_id(type_name, items);
+                (
+                    Display::Stonecutter {
+                        input: input.clone(),
+                        result,
+                        station,
+                    },
+                    Placement::Stonecutter {
+                        input: input.clone(),
+                        index,
+                    },
+                    vec![input],
+                    result,
+                    categories
+                        .get("minecraft:stonecutter")
+                        .copied()
+                        .unwrap_or(0),
+                )
+            }
+            "smithing_transform" => {
+                let template = json
+                    .get("template")
+                    .map(|v| ingredient(v, items, tags))
+                    .unwrap_or_default();
+                let base = json
+                    .get("base")
+                    .map(|v| ingredient(v, items, tags))
+                    .unwrap_or_default();
+                let addition = json
+                    .get("addition")
+                    .map(|v| ingredient(v, items, tags))
+                    .unwrap_or_default();
+                let Some(result) = json.get("result").and_then(|r| result_of(r, items)) else {
+                    continue;
+                };
+                let station = station_id(type_name, items);
+                (
+                    Display::Smithing {
+                        template: template.clone(),
+                        base: base.clone(),
+                        addition: addition.clone(),
+                        result,
+                        station,
+                    },
+                    Placement::Smithing {
+                        template: template.clone(),
+                        base: base.clone(),
+                        addition: addition.clone(),
+                    },
+                    vec![template, base, addition],
+                    result,
+                    categories.get("minecraft:smithing").copied().unwrap_or(0),
+                )
+            }
+            _ => continue,
+        };
+        let display_id = entries.len() as i32;
+        entries.push(RecipeEntry {
+            id,
+            display_id,
+            category,
+            group: group_id,
+            display,
+            requirements,
+            result,
+            placement,
+            notification,
+        });
+    }
+    let by_id = entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (e.id.clone(), i))
+        .collect();
+    RecipeBookData { entries, by_id }
+}
+
+/// `SlotDisplay`: пустой.
+fn write_empty(w: &mut Writer) {
+    w.var_int(0);
+}
+
+/// `SlotDisplay::TagSlotDisplay` с прямым набором предметов.
+fn write_items(w: &mut Writer, items: &[i32]) {
+    if items.is_empty() {
+        write_empty(w);
+        return;
+    }
+    w.var_int(6).var_int(items.len() as i32 + 1);
+    for &item in items {
+        w.var_int(item);
+    }
+}
+
+/// `SlotDisplay::ItemSlotDisplay`.
+fn write_item(w: &mut Writer, item: i32) {
+    w.var_int(4).var_int(item);
+}
+
+/// `SlotDisplay::ItemStackSlotDisplay`.
+fn write_stack(w: &mut Writer, item: i32, count: i32) {
+    w.var_int(5)
+        .var_int(item)
+        .var_int(count)
+        .var_int(0)
+        .var_int(0);
+}
+
+fn write_display(w: &mut Writer, display: &Display) {
+    match display {
+        Display::Shapeless {
+            ingredients,
+            result,
+            station,
+        } => {
+            w.var_int(0).var_int(ingredients.len() as i32);
+            for ing in ingredients {
+                write_items(w, ing);
+            }
+            write_stack(w, result.0, result.1);
+            write_item(w, *station);
+        }
+        Display::Shaped {
+            width,
+            height,
+            cells,
+            result,
+            station,
+        } => {
+            w.var_int(1)
+                .var_int(*width as i32)
+                .var_int(*height as i32)
+                .var_int(cells.len() as i32);
+            for cell in cells {
+                write_items(w, cell);
+            }
+            write_stack(w, result.0, result.1);
+            write_item(w, *station);
+        }
+        Display::Furnace {
+            ingredient,
+            result,
+            station,
+            duration,
+            experience,
+        } => {
+            w.var_int(2);
+            write_items(w, ingredient);
+            w.var_int(1); // `AnyFuel`
+            write_stack(w, result.0, result.1);
+            write_item(w, *station);
+            w.var_int(*duration).f32(*experience);
+        }
+        Display::Stonecutter {
+            input,
+            result,
+            station,
+        } => {
+            w.var_int(3);
+            write_items(w, input);
+            write_stack(w, result.0, result.1);
+            write_item(w, *station);
+        }
+        Display::Smithing {
+            template,
+            base,
+            addition,
+            result,
+            station,
+        } => {
+            w.var_int(4);
+            write_items(w, template);
+            write_items(w, base);
+            write_items(w, addition);
+            write_stack(w, result.0, result.1);
+            write_item(w, *station);
+        }
+    }
+}
+
+fn write_requirements(w: &mut Writer, requirements: &[Vec<i32>]) {
+    w.var_int(requirements.len() as i32);
+    for ing in requirements {
+        if ing.is_empty() {
+            w.var_int(0);
+        } else {
+            w.var_int(ing.len() as i32 + 1);
+            for &item in ing {
+                w.var_int(item);
+            }
+        }
+    }
+}
+
+/// `ClientboundRecipeBookAddPacket`: список записей и флаг замены.
+pub fn recipe_book_add(
+    id: i32,
+    entries: &[(i32, bool, bool, &RecipeEntry)],
+    replace: bool,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(entries.len() as i32);
+    for &(display_id, notification, highlight, entry) in entries {
+        w.var_int(display_id);
+        write_display(&mut w, &entry.display);
+        w.bool(entry.group.is_some());
+        if let Some(group) = entry.group {
+            w.var_int(group);
+        }
+        w.var_int(entry.category);
+        w.bool(!entry.requirements.is_empty());
+        if !entry.requirements.is_empty() {
+            write_requirements(&mut w, &entry.requirements);
+        }
+        let mut flags = 0u8;
+        if notification {
+            flags |= 1;
+        }
+        if highlight {
+            flags |= 2;
+        }
+        w.u8(flags);
+    }
+    w.bool(replace);
+    w.buf
+}
+
+/// `ClientboundRecipeBookRemovePacket`.
+pub fn recipe_book_remove(id: i32, displays: &[i32]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(displays.len() as i32);
+    for &display in displays {
+        w.var_int(display);
+    }
+    w.buf
+}
+
+/// `ClientboundRecipeBookSettingsPacket` (`RecipeBookSettings.STREAM_CODEC`).
+pub fn recipe_book_settings(id: i32, settings: &[[bool; 2]; 4]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id);
+    for s in settings {
+        w.bool(s[0]).bool(s[1]);
+    }
+    w.buf
+}
+
+/// `ClientboundPlaceGhostRecipePacket`.
+pub fn place_ghost(id: i32, container: i32, entry: &RecipeEntry) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(container);
+    write_display(&mut w, &entry.display);
+    w.buf
+}
+
+impl PlayPlan {
+    fn recipe_book(&self) -> &RecipeBookData {
+        &self.survival.recipe_book
+    }
+
+    /// `ServerRecipeBook.sendInitialRecipeBook`: настройки и все известные
+    /// рецепты (с заменой книги).
+    pub(crate) fn recipe_book_initial(&self, uuid: Uuid) -> Vec<Vec<u8>> {
+        let state = self.recipe_books.lock().unwrap().get(&uuid).cloned();
+        let state = state.unwrap_or_default();
+        let mut out = vec![recipe_book_settings(
+            self.ids.recipe_book_settings,
+            &state.settings,
+        )];
+        let rows: Vec<(i32, bool, bool, &RecipeEntry)> = state
+            .known
+            .iter()
+            .filter_map(|id| self.recipe_book().entry(id))
+            .map(|e| (e.display_id, false, state.highlight.contains(&e.id), e))
+            .collect();
+        out.push(recipe_book_add(self.ids.recipe_book_add, &rows, true));
+        out
+    }
+
+    /// Загруженные знания книги после входа.
+    pub(crate) fn load_recipe_book(
+        &self,
+        uuid: Uuid,
+        known: Vec<String>,
+        highlight: Vec<String>,
+        settings: [[bool; 2]; 4],
+    ) {
+        let mut all = self.recipe_books.lock().unwrap();
+        all.insert(
+            uuid,
+            BookState {
+                known: known.into_iter().collect(),
+                highlight: highlight.into_iter().collect(),
+                settings,
+            },
+        );
+    }
+
+    /// Данные для сохранения в `playerdata`.
+    pub(crate) fn collect_recipe_book(
+        &self,
+        uuid: Uuid,
+    ) -> (Vec<String>, Vec<String>, [[bool; 2]; 4]) {
+        let all = self.recipe_books.lock().unwrap();
+        let Some(state) = all.get(&uuid) else {
+            return (Vec::new(), Vec::new(), [[false; 2]; 4]);
+        };
+        let mut known: Vec<String> = state.known.iter().cloned().collect();
+        let mut highlight: Vec<String> = state.highlight.iter().cloned().collect();
+        known.sort();
+        highlight.sort();
+        (known, highlight, state.settings)
+    }
+
+    pub(crate) fn forget_recipe_book(&self, uuid: Uuid) {
+        self.recipe_books.lock().unwrap().remove(&uuid);
+    }
+
+    /// `/recipe give`: выдать рецепты и отправить `recipe_book_add`.
+    pub(crate) fn recipe_give(&self, uuid: Uuid, ids: &[String]) -> usize {
+        let mut rows = Vec::new();
+        let mut added = 0;
+        let mut all = self.recipe_books.lock().unwrap();
+        let state = all.entry(uuid).or_default();
+        for id in ids {
+            let Some(entry) = self.recipe_book().entry(id) else {
+                continue;
+            };
+            let canonical = entry.id.clone();
+            if state.known.contains(&canonical) {
+                continue;
+            }
+            state.known.insert(canonical.clone());
+            state.highlight.insert(canonical);
+            rows.push((entry.display_id, entry.notification, true, entry));
+            added += 1;
+        }
+        drop(all);
+        if !rows.is_empty() {
+            let packet = recipe_book_add(self.ids.recipe_book_add, &rows, false);
+            self.send_to(uuid, packet);
+        }
+        added
+    }
+
+    /// `/recipe take`: убрать рецепты и отправить `recipe_book_remove`.
+    pub(crate) fn recipe_take(&self, uuid: Uuid, ids: &[String]) -> usize {
+        let mut displays = Vec::new();
+        let mut removed = 0;
+        let mut all = self.recipe_books.lock().unwrap();
+        let state = all.entry(uuid).or_default();
+        for id in ids {
+            let Some(entry) = self.recipe_book().entry(id) else {
+                continue;
+            };
+            let canonical = &entry.id;
+            if !state.known.remove(canonical) {
+                continue;
+            }
+            state.highlight.remove(canonical);
+            displays.push(entry.display_id);
+            removed += 1;
+        }
+        drop(all);
+        if !displays.is_empty() {
+            let packet = recipe_book_remove(self.ids.recipe_book_remove, &displays);
+            self.send_to(uuid, packet);
+        }
+        removed
+    }
+
+    pub(crate) fn recipe_book_change_settings(
+        &self,
+        uuid: Uuid,
+        kind: i32,
+        open: bool,
+        filtering: bool,
+    ) {
+        if !(0..4).contains(&kind) {
+            return;
+        }
+        let mut all = self.recipe_books.lock().unwrap();
+        all.entry(uuid).or_default().settings[kind as usize] = [open, filtering];
+    }
+
+    pub(crate) fn recipe_book_seen(&self, uuid: Uuid, display_id: i32) {
+        let Some(entry) = self.recipe_book().entry_by_display(display_id) else {
+            return;
+        };
+        let mut all = self.recipe_books.lock().unwrap();
+        all.entry(uuid).or_default().highlight.remove(&entry.id);
+    }
+
+    /// `*` для `/recipe give|take`.
+    pub(crate) fn recipe_book_ids(&self) -> Vec<String> {
+        self.recipe_book().learnable()
+    }
+
+    /// Рецепт по id (без namespace).
+    pub(crate) fn recipe_book_entry(&self, id: &str) -> Option<&RecipeEntry> {
+        self.recipe_book().entry(id)
+    }
+
+    /// Проверка, выдан ли игроку рецепт.
+    pub(crate) fn recipe_known(&self, uuid: Uuid, id: &str) -> bool {
+        self.recipe_books
+            .lock()
+            .unwrap()
+            .get(&uuid)
+            .is_some_and(|s| s.known.contains(id))
+    }
+
+    /// `ServerPlaceRecipe`: разложить ингредиенты по сетке.
+    ///
+    /// `container` — id окна, к которому относится запрос:
+    /// [`inv::PLAYER_WINDOW`] для 2×2 в инвентаре или id открытого окна.
+    /// `Ok(true)` — разложено, `Ok(false)` — рецепт не помещается,
+    /// `Err(())` — окно не подходит.
+    pub(super) fn place_recipe(
+        &self,
+        inv: &mut Inventory,
+        window: &mut Option<Window>,
+        container: i32,
+        entry: &RecipeEntry,
+        use_max: bool,
+    ) -> Result<bool, ()> {
+        if container == inv::PLAYER_WINDOW {
+            let mut grid: Vec<Slot> = inv.slots[1..5].to_vec();
+            let ok = self.fill_grid(inv, &mut grid, 2, entry, use_max);
+            inv.slots[1..5].copy_from_slice(&grid);
+            inv.slots[0] = if ok {
+                self.craft_result(&inv.slots[1..5], 2)
+            } else {
+                None
+            };
+            return Ok(ok);
+        }
+        let window = window.as_mut().filter(|w| w.id == container).ok_or(())?;
+        match window.kind {
+            Kind::Crafting => {
+                let ok = self.fill_grid(inv, &mut window.slots[1..10], 3, entry, use_max);
+                window.slots[0] = if ok {
+                    self.craft_result(&window.slots[1..10], 3)
+                } else {
+                    None
+                };
+                Ok(ok)
+            }
+            Kind::Furnace => {
+                if let Placement::Furnace { input } = &entry.placement {
+                    return Ok(self.put_ingredient(inv, &mut window.slots[0], input, 1));
+                }
+                Ok(false)
+            }
+            Kind::Stonecutter => {
+                if let Placement::Stonecutter { input, index } = &entry.placement {
+                    self.put_ingredient(inv, &mut window.slots[0], input, 1);
+                    window.stone_selection = Some(*index);
+                    window.slots[1] = self.stone_result(window.slots[0], window.stone_selection);
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+            Kind::Smithing => {
+                if let Placement::Smithing {
+                    template,
+                    base,
+                    addition,
+                } = &entry.placement
+                {
+                    self.put_ingredient(inv, &mut window.slots[0], template, 1);
+                    self.put_ingredient(inv, &mut window.slots[1], base, 1);
+                    self.put_ingredient(inv, &mut window.slots[2], addition, 1);
+                    window.slots[3] =
+                        crate::smithing::result(&window.slots, &self.survival.smithing);
+                    return Ok(window.slots[3].is_some());
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Найти в инвентаре и переложить `count` предмета из `input`.
+    fn put_ingredient(
+        &self,
+        inv: &mut Inventory,
+        target: &mut Slot,
+        input: &[i32],
+        count: i32,
+    ) -> bool {
+        let Some((slot, item)) = input.iter().find_map(|&item| {
+            Inventory::storage_order()
+                .find(|&i| inv.slots[i].is_some_and(|s| s.item == item && s.count > 0))
+                .map(|i| (i, item))
+        }) else {
+            return false;
+        };
+        let take = count.min(inv.slots[slot].map_or(0, |s| s.count));
+        if take <= 0 {
+            return false;
+        }
+        let stack = inv.slots[slot].take().unwrap();
+        let left = Stack {
+            count: stack.count - take,
+            ..stack
+        };
+        if left.count > 0 {
+            inv.slots[slot] = Some(left);
+        }
+        match target {
+            Some(s) if s.item == item => s.count += take,
+            _ => {
+                *target = Some(Stack::new(item, take));
+            }
+        }
+        true
+    }
+
+    /// Очистить сетку и разложить `entry`; `true` — разложено.
+    fn fill_grid(
+        &self,
+        inv: &mut Inventory,
+        grid: &mut [Slot],
+        size: usize,
+        entry: &RecipeEntry,
+        use_max: bool,
+    ) -> bool {
+        let Placement::Crafting {
+            width,
+            height,
+            cells,
+            shapeless,
+        } = &entry.placement
+        else {
+            return false;
+        };
+        if !shapeless && (*width > size || *height > size) {
+            self.clear_grid(inv, grid);
+            return false;
+        }
+        if *shapeless && cells.len() > size * size {
+            self.clear_grid(inv, grid);
+            return false;
+        }
+        self.clear_grid(inv, grid);
+        let mut targets: Vec<(usize, &Vec<i32>)> = Vec::new();
+        if *shapeless {
+            for (i, cell) in cells.iter().enumerate() {
+                if !cell.is_empty() {
+                    targets.push((i, cell));
+                }
+            }
+        } else {
+            for (i, cell) in cells.iter().enumerate() {
+                if cell.is_empty() {
+                    continue;
+                }
+                let (x, y) = (i % width, i / width);
+                targets.push((y * size + x, cell));
+            }
+        }
+        let mut max_crafts = 1;
+        if use_max {
+            for (_, cell) in &targets {
+                let have: i32 = cell
+                    .iter()
+                    .map(|&item| {
+                        Inventory::storage_order()
+                            .filter(|&i| inv.slots[i].is_some_and(|s| s.item == item))
+                            .map(|i| inv.slots[i].map_or(0, |s| s.count))
+                            .sum::<i32>()
+                    })
+                    .max()
+                    .unwrap_or(0);
+                max_crafts = max_crafts.min(have);
+            }
+            max_crafts = max_crafts.max(1);
+        }
+        let mut placed = false;
+        for (index, cell) in targets {
+            let Some(target) = grid.get_mut(index) else {
+                continue;
+            };
+            if !self.put_ingredient(inv, target, cell, max_crafts) {
+                self.clear_grid(inv, grid);
+                return false;
+            }
+            placed = true;
+        }
+        placed
+    }
+
+    /// `clearGrid`: вернуть содержимое сетки в инвентарь.
+    fn clear_grid(&self, inv: &mut Inventory, grid: &mut [Slot]) {
+        for slot in grid {
+            if let Some(stack) = slot.take() {
+                let max = self.max_stack(stack.item);
+                if let Some(left) = inv.add_stack(stack, max)
+                    && left.count > 0
+                {
+                    inv.carried = Some(left);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slot_display_item_encoding() {
+        let mut w = Writer::new();
+        write_items(&mut w, &[7, 9]);
+        assert_eq!(w.buf, vec![6, 3, 7, 9]);
+        let mut w = Writer::new();
+        write_stack(&mut w, 12, 3);
+        assert_eq!(w.buf, vec![5, 12, 3, 0, 0]);
+    }
+}

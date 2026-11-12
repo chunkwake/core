@@ -1381,6 +1381,12 @@ pub struct PlayerSave {
     pub stats: Vec<((String, String), i32)>,
     /// Достижения: id → (критерий → время получения).
     pub advancements: Vec<(String, Vec<(String, i64)>)>,
+    /// `recipeBook.recipes`: выданные рецепты.
+    pub recipes: Vec<String>,
+    /// `recipeBook.toBeDisplayed`: подсвеченные рецепты.
+    pub recipes_highlight: Vec<String>,
+    /// `recipeBook`: настройки книги (open, filtering) × 4.
+    pub recipe_book_settings: [[bool; 2]; 4],
 }
 
 /// Живое состояние игрока в сессии: инвентарь и здоровье.
@@ -1447,6 +1453,9 @@ impl PlayerState {
             bukkit_values: None,
             stats: Vec::new(),
             advancements: Vec::new(),
+            recipes: Vec::new(),
+            recipes_highlight: Vec::new(),
+            recipe_book_settings: [[false; 2]; 4],
             dimension: None,
             slots: (0..SLOTS)
                 .filter_map(|i| self.inv.slots[i].map(|s| (i, s)))

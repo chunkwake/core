@@ -39,6 +39,9 @@ pub struct Ids {
     open_screen: i32,
     award_stats: i32,
     update_advancements: i32,
+    recipe_book_add: i32,
+    recipe_book_remove: i32,
+    place_ghost_recipe: i32,
     level_chunk: i32,
     forget_level_chunk: i32,
     chunk_batch_finished: i32,
@@ -80,6 +83,9 @@ impl Ids {
             open_screen: id(Play, C, "open_screen")?,
             award_stats: id(Play, C, "award_stats")?,
             update_advancements: id(Play, C, "update_advancements")?,
+            recipe_book_add: id(Play, C, "recipe_book_add")?,
+            recipe_book_remove: id(Play, C, "recipe_book_remove")?,
+            place_ghost_recipe: id(Play, C, "place_ghost_recipe")?,
             level_chunk: id(Play, C, "level_chunk_with_light")?,
             forget_level_chunk: id(Play, C, "forget_level_chunk")?,
             chunk_batch_finished: id(Play, C, "chunk_batch_finished")?,
@@ -161,6 +167,15 @@ pub enum Event {
         /// id → полученные критерии.
         progress: Vec<(String, Vec<String>)>,
     },
+    /// Книга рецептов (`recipe_book_add`): (display id, флаги) и замена.
+    RecipeBookAdd {
+        entries: Vec<(i32, u8)>,
+        replace: bool,
+    },
+    /// Книга рецептов (`recipe_book_remove`): id отображений.
+    RecipeBookRemove(Vec<i32>),
+    /// `place_ghost_recipe`: окно, для которого не хватило ингредиентов.
+    PlaceGhostRecipe(i32),
     /// Игровое время из `set_time`: сервер шлёт раз в 20 тиков.
     GameTime(i64),
     Other,
@@ -667,6 +682,38 @@ impl Client {
                 added,
                 progress,
             })
+        } else if id == self.ids.recipe_book_add {
+            let n = r.var_int().map_err(err)?.max(0);
+            let mut entries = Vec::new();
+            for _ in 0..n {
+                let display = r.var_int().map_err(err)?;
+                read_recipe_display(&mut r)?;
+                if r.bool().map_err(err)? {
+                    r.var_int().map_err(err)?;
+                }
+                r.var_int().map_err(err)?; // recipe_book_category
+                if r.bool().map_err(err)? {
+                    let k = r.var_int().map_err(err)?.max(0);
+                    for _ in 0..k {
+                        read_ingredient(&mut r)?;
+                    }
+                }
+                let flags = r.u8().map_err(err)?;
+                entries.push((display, flags));
+            }
+            let replace = r.bool().map_err(err)?;
+            Ok(Event::RecipeBookAdd { entries, replace })
+        } else if id == self.ids.recipe_book_remove {
+            let n = r.var_int().map_err(err)?.max(0);
+            let mut displays = Vec::with_capacity(n as usize);
+            for _ in 0..n {
+                displays.push(r.var_int().map_err(err)?);
+            }
+            Ok(Event::RecipeBookRemove(displays))
+        } else if id == self.ids.place_ghost_recipe {
+            let container = r.var_int().map_err(err)?;
+            read_recipe_display(&mut r)?;
+            Ok(Event::PlaceGhostRecipe(container))
         } else if id == self.ids.set_time {
             let game_time = r.i64().map_err(err)?;
             Ok(Event::GameTime(game_time))
@@ -731,6 +778,105 @@ pub async fn status(addr: &str, protocol: i32) -> Result<serde_json::Value, Stri
         return Err("invalid status pong".into());
     }
     Ok(value)
+}
+
+/// `Ingredient.CONTENTS_STREAM_CODEC`: 0 — пусто, иначе `размер + 1` и id.
+fn read_ingredient(r: &mut Reader) -> Result<(), String> {
+    let n = r.var_int().map_err(err)?.max(0);
+    if n > 0 {
+        for _ in 0..n - 1 {
+            r.var_int().map_err(err)?;
+        }
+    }
+    Ok(())
+}
+
+/// `SlotDisplay.STREAM_CODEC`: id реестра `slot_display` и тело.
+fn read_slot_display(r: &mut Reader) -> Result<(), String> {
+    let kind = r.var_int().map_err(err)?;
+    match kind {
+        0 | 1 => {}
+        2 => read_slot_display(r)?,
+        3 => {
+            read_slot_display(r)?;
+            r.var_int().map_err(err)?;
+        }
+        4 => {
+            r.var_int().map_err(err)?;
+        }
+        5 => {
+            r.var_int().map_err(err)?;
+            r.var_int().map_err(err)?;
+            r.var_int().map_err(err)?;
+            r.var_int().map_err(err)?;
+        }
+        6 => read_ingredient(r)?,
+        7 => {
+            read_slot_display(r)?;
+            read_slot_display(r)?;
+        }
+        8 => {
+            read_slot_display(r)?;
+            read_slot_display(r)?;
+            r.var_int().map_err(err)?;
+        }
+        9 => {
+            read_slot_display(r)?;
+            read_slot_display(r)?;
+        }
+        10 => {
+            let n = r.var_int().map_err(err)?.max(0);
+            for _ in 0..n {
+                read_slot_display(r)?;
+            }
+        }
+        _ => return Err(format!("unknown slot display {kind}")),
+    }
+    Ok(())
+}
+
+/// `RecipeDisplay.STREAM_CODEC`: id реестра `recipe_display` и тело.
+fn read_recipe_display(r: &mut Reader) -> Result<(), String> {
+    let kind = r.var_int().map_err(err)?;
+    match kind {
+        0 => {
+            let n = r.var_int().map_err(err)?.max(0);
+            for _ in 0..n {
+                read_slot_display(r)?;
+            }
+            read_slot_display(r)?;
+            read_slot_display(r)?;
+        }
+        1 => {
+            r.var_int().map_err(err)?;
+            r.var_int().map_err(err)?;
+            let n = r.var_int().map_err(err)?.max(0);
+            for _ in 0..n {
+                read_slot_display(r)?;
+            }
+            read_slot_display(r)?;
+            read_slot_display(r)?;
+        }
+        2 => {
+            for _ in 0..4 {
+                read_slot_display(r)?;
+            }
+            r.var_int().map_err(err)?;
+            r.f32().map_err(err)?;
+        }
+        3 => {
+            for _ in 0..3 {
+                read_slot_display(r)?;
+            }
+        }
+        4 => {
+            for _ in 0..5 {
+                read_slot_display(r)?;
+            }
+        }
+        _ => return Err(format!("unknown recipe display {kind}")),
+    }
+    Ok(())
 }
 
 fn err(e: impl std::fmt::Debug) -> String {

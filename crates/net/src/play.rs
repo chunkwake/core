@@ -137,6 +137,10 @@ struct Ids {
     container_set_slot: i32,
     container_set_data: i32,
     update_recipes: i32,
+    recipe_book_add: i32,
+    recipe_book_remove: i32,
+    recipe_book_settings: i32,
+    place_ghost_recipe: i32,
     set_experience: i32,
     sb_container_button_click: i32,
     set_health: i32,
@@ -173,6 +177,9 @@ struct Ids {
     sb_player_loaded: i32,
     sb_player_command: i32,
     sb_use_item: i32,
+    sb_place_recipe: i32,
+    sb_recipe_book_change_settings: i32,
+    sb_recipe_book_seen_recipe: i32,
     /// `LOAD_GATED_PACKETS`, разрешённые в id текущей таблицы пакетов.
     load_gated: [i32; LOAD_GATED_PACKETS.len()],
     commands: i32,
@@ -285,6 +292,8 @@ pub struct PlayPlan {
     stats: Mutex<FastMap<Uuid, PlayerStats>>,
     /// Прогресс достижений по игрокам.
     advancement_progress: Mutex<FastMap<Uuid, AdvProgress>>,
+    /// Книга рецептов по игрокам.
+    recipe_books: Mutex<FastMap<Uuid, recipe_book::BookState>>,
     /// `SignBlockEntity.playerWhoMayEdit`: кому открыт редактор таблички.
     sign_editors: Mutex<FastMap<(Dimension, [i32; 3]), Uuid>>,
     /// Игроки на экране титров: `PERFORM_RESPAWN` вернёт их из Края.
@@ -2297,11 +2306,13 @@ mod minerals;
 mod mobs;
 mod paintings;
 mod poi;
+mod recipe_book;
 mod respawn;
 mod section_order;
 mod signs;
 mod stats;
 pub use advancements::load_advancements;
+pub use recipe_book::load as load_recipe_book;
 mod stream;
 mod swing;
 mod tracking;
@@ -2520,6 +2531,10 @@ pub struct SurvivalData {
     pub advancements: Vec<advancements::AdvancementDef>,
     /// Индекс `advancement id → позиция в `advancements`.
     pub advancement_ids: HashMap<String, usize>,
+    /// `recipe_book_category` по именам.
+    pub recipe_book_categories: HashMap<String, i32>,
+    /// Рецепты для книги (`RecipeManager.allDisplays` + раскладка).
+    pub recipe_book: recipe_book::RecipeBookData,
     /// `generic_9x1` … `generic_9x6` для окон плагинов.
     pub menu_rows: [i32; 6],
     /// Состояния сундуков (`ChestBlock`): свойства по состоянию и обратно.
@@ -2821,6 +2836,10 @@ impl PlayPlan {
                 set_experience: cb("set_experience")?,
                 sb_container_button_click: sb("container_button_click")?,
                 update_recipes: cb("update_recipes")?,
+                recipe_book_add: cb("recipe_book_add")?,
+                recipe_book_remove: cb("recipe_book_remove")?,
+                recipe_book_settings: cb("recipe_book_settings")?,
+                place_ghost_recipe: cb("place_ghost_recipe")?,
                 set_health: cb("set_health")?,
                 respawn: cb("respawn")?,
                 damage_event: cb("damage_event")?,
@@ -2855,6 +2874,9 @@ impl PlayPlan {
                 sb_player_loaded: sb("player_loaded")?,
                 sb_player_command: sb("player_command")?,
                 sb_use_item: sb("use_item")?,
+                sb_place_recipe: sb("place_recipe")?,
+                sb_recipe_book_change_settings: sb("recipe_book_change_settings")?,
+                sb_recipe_book_seen_recipe: sb("recipe_book_seen_recipe")?,
                 load_gated,
                 commands: cb("commands")?,
                 block_event: cb("block_event")?,
@@ -2947,6 +2969,7 @@ impl PlayPlan {
             bukkit_values: Mutex::new(FastMap::default()),
             stats: Mutex::new(FastMap::default()),
             advancement_progress: Mutex::new(FastMap::default()),
+            recipe_books: Mutex::new(FastMap::default()),
             sign_editors: Mutex::new(FastMap::default()),
             won_game: Mutex::new(HashSet::new()),
             players_source: std::sync::OnceLock::new(),
@@ -5200,6 +5223,10 @@ impl PlayPlan {
         save.dimension = (dim != Dimension::Overworld).then(|| dim.key().to_owned());
         save.stats = self.collect_stats(uuid);
         save.advancements = self.collect_advancement_progress(uuid);
+        let (recipes, highlight, settings) = self.collect_recipe_book(uuid);
+        save.recipes = recipes;
+        save.recipes_highlight = highlight;
+        save.recipe_book_settings = settings;
         // `/spawnpoint` живёт отдельно от инвентаря: снимок не должен его стирать.
         match self.spawn_points.lock().unwrap().get(&uuid).copied() {
             Some(spawn) => {
@@ -5878,6 +5905,17 @@ impl PlayPlan {
                 .map(|s| s.advancements.clone())
                 .unwrap_or_default(),
         );
+        let (known, highlight, settings) = loaded
+            .as_ref()
+            .map(|s| {
+                (
+                    s.recipes.clone(),
+                    s.recipes_highlight.clone(),
+                    s.recipe_book_settings,
+                )
+            })
+            .unwrap_or_default();
+        self.load_recipe_book(player.uuid, known, highlight, settings);
         if let Some(save) = loaded.as_ref()
             && let Some(pos) = save.spawn
         {
@@ -6055,6 +6093,7 @@ impl PlayPlan {
         self.hub.players.lock().unwrap().remove(&uuid);
         self.forget_stats(uuid);
         self.forget_advancements(uuid);
+        self.forget_recipe_book(uuid);
         self.forget_ping(uuid);
         self.hub.send_entity(
             None,
@@ -11421,6 +11460,9 @@ impl PlayPlan {
         login.spawn.game_mode = state.game_mode.unwrap_or(login.spawn.game_mode);
         conn.send(&play::login(ids.login, &login)).await?;
         conn.send(&self.stonecutter_recipes_packet()).await?;
+        for packet in self.recipe_book_initial(uuid) {
+            conn.send(&packet).await?;
+        }
         // Спавн и граница — до чанков: Xaero по ним выбирает мир и включает
         // локальную карту. Без спавна тайлы так и не пишутся.
         self.send_map_markers(conn).await?;
@@ -12573,6 +12615,63 @@ impl PlayPlan {
                                 self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
                             }
                         }
+                        continue;
+                    }
+                    if id == ids.sb_place_recipe {
+                        let container = r.var_int()?;
+                        let display = r.var_int()?;
+                        let use_max = r.bool()?;
+                        let entry = self
+                            .survival
+                            .recipe_book
+                            .entry_by_display(display)
+                            .cloned();
+                        if let Some(entry) = entry
+                            && self.recipe_known(uuid, &entry.id)
+                        {
+                            match self.place_recipe(
+                                &mut state.inv,
+                                &mut window,
+                                container,
+                                &entry,
+                                use_max,
+                            ) {
+                                Ok(true) => {
+                                    if container == inv::PLAYER_WINDOW {
+                                        self.send_inventory(conn, &mut state.inv).await?;
+                                    } else {
+                                        self.send_window(
+                                            conn,
+                                            &mut state.inv,
+                                            window.as_ref(),
+                                            container,
+                                        )
+                                        .await?;
+                                    }
+                                }
+                                Ok(false) => {
+                                    conn.send(&recipe_book::place_ghost(
+                                        ids.place_ghost_recipe,
+                                        container,
+                                        &entry,
+                                    ))
+                                    .await?;
+                                }
+                                Err(()) => {}
+                            }
+                        }
+                        continue;
+                    }
+                    if id == ids.sb_recipe_book_change_settings {
+                        let kind = r.var_int()?;
+                        let open = r.bool()?;
+                        let filtering = r.bool()?;
+                        self.recipe_book_change_settings(uuid, kind, open, filtering);
+                        continue;
+                    }
+                    if id == ids.sb_recipe_book_seen_recipe {
+                        let display = r.var_int()?;
+                        self.recipe_book_seen(uuid, display);
                         continue;
                     }
                     if id == ids.sb_select_trade {

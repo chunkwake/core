@@ -746,6 +746,12 @@ fn survival_data(
         .enumerate()
         .map(|(i, a)| (a.id.clone(), i))
         .collect();
+    let item_tags = chunkwake_net::play::load_registry_tags(data_dir, "item");
+    let recipe_book_categories =
+        chunkwake_data::registries::builtin_entries_of(builtin, "recipe_book_category")
+            .map_err(s)?;
+    let recipe_book =
+        chunkwake_net::play::load_recipe_book(data_dir, items, &item_tags, &recipe_book_categories);
     let mut survival = SurvivalData {
         enchantments: loaded.enchantment_lines,
         recipes,
@@ -768,6 +774,8 @@ fn survival_data(
             .map_err(s)?,
         advancements,
         advancement_ids,
+        recipe_book_categories,
+        recipe_book,
         menu_rows: [
             menu("minecraft:generic_9x1")?,
             menu("minecraft:generic_9x2")?,
@@ -1035,7 +1043,7 @@ fn survival_data(
             .ok()
             .map(std::sync::Arc::new),
         path_cells: None,
-        item_tags: chunkwake_net::play::load_registry_tags(data_dir, "item"),
+        item_tags: item_tags.clone(),
         block_tags: chunkwake_net::play::load_registry_tags(data_dir, "block"),
         damage_tags: chunkwake_net::play::load_registry_tags(data_dir, "damage_type"),
         biome_names: registries
