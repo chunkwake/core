@@ -163,8 +163,8 @@ async fn main() {
     p.pump(1500).await;
     // Фиксированная площадка: позиция входа у бота — это его сохранённая
     // точка, она меняется от прогона к прогону.
-    let base = [1000.5, -60.0, 1000.5];
-    let (bx, by, bz) = (1000, -60, 1000);
+    let base = [1000.5, 64.0, 1000.5];
+    let (bx, by, bz) = (1000, 64, 1000);
     let mode = a.get(3).map_or("put", String::as_str);
 
     if mode == "check" {
@@ -214,6 +214,7 @@ async fn main() {
         ),
         "difficulty peaceful".into(),
         "gamemode survival".into(),
+        "kill @e[type=minecraft:oak_chest_boat]".into(),
         "clear boater".into(),
         "give boater minecraft:diamond 1".into(),
         format!("tp boater {} {} {}", base[0], base[1], base[2] + 2.0),
@@ -226,7 +227,7 @@ async fn main() {
         base[0], base[1], base[2]
     ))
     .await;
-    p.pump(600).await;
+    p.pump(1500).await;
     let Some((boat, _)) = p.find("minecraft:oak_chest_boat") else {
         panic!("лодка не появилась");
     };
@@ -243,6 +244,8 @@ async fn main() {
     // Повторное открытие и закрытие: окно не должно падать.
     p.interact(boat, true).await;
     p.close(1).await;
+    // Вернуть бота на естественную землю: вход в пустоту убивает игрока.
+    p.command("tp boater 1000.5 4 1000.5".into()).await;
     p.command("save-all".into()).await;
     p.pump(800).await;
     // Мягкая остановка: `Stop-Process` не успевает дописать `entities/*.mca`.

@@ -902,7 +902,21 @@ impl PlayPlan {
 
     /// Убирает сущность из мира (`/kill` для предмета, снаряда или уже мёртвого моба).
     pub(crate) fn remove_entity(&self, entity_id: i32) -> bool {
-        let removed = self.sim().mobs.lock().unwrap().remove(&entity_id).is_some()
+        let boat = self.sim().boats.lock().unwrap().remove(&entity_id);
+        let mob = self.sim().mobs.lock().unwrap().remove(&entity_id);
+        // Моб-пассажир: убрать его из списка пассажиров лодки.
+        if let Some(boat_id) = mob.as_ref().and_then(|e| e.vehicle) {
+            if let Some(e) = mob.as_ref() {
+                self.unlink_rider(Uuid::from_u128(e.mob.uuid));
+            }
+            let ids: Vec<i32> = self.drop_boat_rider(boat_id, entity_id).unwrap_or_default();
+            self.hub.send_about(
+                boat_id,
+                chunkwake_protocol::play::set_passengers(self.ids.set_passengers, boat_id, &ids),
+            );
+        }
+        let removed = mob.is_some()
+            | boat.is_some()
             | self
                 .sim()
                 .dropped
@@ -913,13 +927,6 @@ impl PlayPlan {
             | self
                 .sim()
                 .arrows
-                .lock()
-                .unwrap()
-                .remove(&entity_id)
-                .is_some()
-            | self
-                .sim()
-                .boats
                 .lock()
                 .unwrap()
                 .remove(&entity_id)
@@ -941,6 +948,10 @@ impl PlayPlan {
                 .remove(&entity_id)
                 .is_some()
             | self.sim().eyes.lock().unwrap().remove(&entity_id).is_some();
+        if let Some(b) = boat {
+            self.remove_boat(entity_id, &b);
+            self.mark_entity_changed(b.pos);
+        }
         if removed {
             let packet =
                 chunkwake_protocol::play::remove_entities(self.ids.remove_entities, &[entity_id]);

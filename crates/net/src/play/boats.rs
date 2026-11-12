@@ -657,10 +657,39 @@ impl PlayPlan {
         Some(())
     }
 
+    /// Убрать пассажира из лодки (например, `/kill` моба) и вернуть
+    /// актуальный список ID для `set_passengers`.
+    pub(super) fn drop_boat_rider(&self, boat: i32, entity_id: i32) -> Option<Vec<i32>> {
+        let mut boats = self.sim().boats.lock().unwrap();
+        let b = boats.get_mut(&boat)?;
+        b.riders.retain(|r| r.1 != entity_id);
+        Some(b.riders.iter().map(|r| r.1).collect())
+    }
+
     /// Лодка исчезла: пассажиры сходят, клиенты её забывают.
-    fn remove_boat(&self, id: i32, b: &Boat) {
-        for r in &b.riders {
-            self.unlink_rider(r.0);
+    pub(super) fn remove_boat(&self, id: i32, b: &Boat) {
+        let mut spots = Vec::new();
+        {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            for r in &b.riders {
+                if let Some(e) = mobs.get_mut(&r.1) {
+                    e.vehicle = None;
+                    let yaw = e.mob.yaw;
+                    let old = e.mob.pos;
+                    let spot = self.dismount_spot(b.pos, yaw);
+                    e.ride_to(spot, yaw);
+                    spots.push(old);
+                    spots.push(spot);
+                    self.hub.send_about(
+                        r.1,
+                        play::teleport_entity(self.ids.teleport_entity, r.1, spot, yaw, 0.0, true),
+                    );
+                }
+                self.unlink_rider(r.0);
+            }
+        }
+        for pos in spots {
+            self.mark_entity_changed(pos);
         }
         self.hub.remove_tracked(&[id]);
     }
@@ -766,9 +795,11 @@ impl PlayPlan {
             .collect()
     }
 
-    /// Тик пустых лодок в симулируемых чанках (`AbstractBoat.tick`):
-    /// статус воды, `floatBoat`, движение `move(MoverType.SELF, ...)` со
-    /// столкновениями и рассылка сдвига. Лодку с водителем двигает клиент.
+    /// Тик лодок в симулируемых чанках (`AbstractBoat.tick`): статус воды,
+    /// `floatBoat`, движение `move(MoverType.SELF, ...)` со столкновениями и
+    /// рассылка сдвига. Лодку с водителем двигает клиент; мобы-пассажиры
+    /// едут с лодкой (`positionRider`), в конце тика лодка подбирает мобов и
+    /// толкает задевающие сущности (`push`).
     pub(super) fn tick_boats(&self) {
         if self.sim().boats.lock().unwrap().is_empty() {
             return;
@@ -778,67 +809,302 @@ impl PlayPlan {
             simulated.is_empty()
                 || simulated.contains(&((p[0].floor() as i32) >> 4, (p[2].floor() as i32) >> 4))
         };
+        let players: FastSet<Uuid> = self.hub.players.lock().unwrap().keys().copied().collect();
         let now = self.game_time.load(Ordering::Relaxed);
         let mut packets = Vec::new();
         let mut gone = Vec::new();
+        let mut marks = Vec::new();
         self.with_world(|w| {
             let mut boats = self.sim().boats.lock().unwrap();
+            let mut mobs = self.sim().mobs.lock().unwrap();
             let ids: Vec<i32> = boats.keys().copied().collect();
             for id in ids {
                 let Some(b) = boats.get_mut(&id) else {
                     continue;
                 };
+                if !awake(b.pos) {
+                    continue;
+                }
                 // В лодке с водителем физику считает его клиент
                 // (`handleMoveVehicle`), сервер только принимает позицию.
-                if !b.riders.is_empty() || !awake(b.pos) {
-                    continue;
-                }
-                b.old_status = b.status;
-                b.status = self.boat_status(b, w);
-                b.out_of_control =
-                    if matches!(b.status, Status::UnderWater | Status::UnderFlowingWater) {
-                        b.out_of_control + 1.0
-                    } else {
-                        0.0
-                    };
-                // `Entity.baseTick` → `updateFluidInteraction`: течение
-                // добавляется к скорости до `floatBoat`.
-                self.apply_fluid_current(b, w);
-                self.float_boat(b, w);
-                let moved = self.move_boat(b, w, now);
-                // `checkFallDamage`: `lastYd` — фактический сдвиг по Y.
-                b.last_yd = moved[1];
-                // `checkBelowWorld`: под миром лодка исчезает.
-                if b.pos[1] < self.min_y() as f64 - 64.0 {
-                    gone.push(id);
-                    continue;
-                }
-                // `ServerEntity.sendChanges`: сдвиг от квадрата длины
-                // 7.6293945e-6, иначе затухающая лодка слала бы крошечные шаги.
-                let d: f64 = (0..3).map(|i| (b.pos[i] - b.sent.0[i]).powi(2)).sum();
-                if d >= 7.629_394_5e-6 || (b.yaw - b.sent.1).abs() > 0.5 {
-                    b.sent = (b.pos, b.yaw);
-                    packets.push((
-                        id,
-                        play::teleport_entity(
-                            self.ids.teleport_entity,
+                let player_controlled = b.riders.first().is_some_and(|r| players.contains(&r.0));
+                if !player_controlled {
+                    b.old_status = b.status;
+                    b.status = self.boat_status(b, w);
+                    b.out_of_control =
+                        if matches!(b.status, Status::UnderWater | Status::UnderFlowingWater) {
+                            b.out_of_control + 1.0
+                        } else {
+                            0.0
+                        };
+                    // `AbstractBoat.tick`: три секунды под водой — пассажиры
+                    // сходят (для пустой лодки это мобы).
+                    if b.out_of_control >= 60.0 && !b.riders.is_empty() {
+                        let riders: Vec<(Uuid, i32)> = std::mem::take(&mut b.riders);
+                        for (uuid, rider) in riders {
+                            if let Some(e) = mobs.get_mut(&rider) {
+                                e.vehicle = None;
+                                let yaw = e.mob.yaw;
+                                let spot = self.dismount_spot(b.pos, yaw);
+                                e.ride_to(spot, yaw);
+                                marks.push(spot);
+                                packets.push((
+                                    rider,
+                                    play::teleport_entity(
+                                        self.ids.teleport_entity,
+                                        rider,
+                                        spot,
+                                        yaw,
+                                        0.0,
+                                        true,
+                                    ),
+                                ));
+                            }
+                            self.unlink_rider(uuid);
+                        }
+                        packets.push((id, play::set_passengers(self.ids.set_passengers, id, &[])));
+                    }
+                    // `Entity.baseTick` → `updateFluidInteraction`: течение
+                    // добавляется к скорости до `floatBoat`.
+                    self.apply_fluid_current(b, w);
+                    self.float_boat(b, w);
+                    let moved = self.move_boat(b, w, now);
+                    // `checkFallDamage`: `lastYd` — фактический сдвиг по Y.
+                    b.last_yd = moved[1];
+                    // `checkBelowWorld`: под миром лодка исчезает.
+                    if b.pos[1] < self.min_y() as f64 - 64.0 {
+                        gone.push(id);
+                        continue;
+                    }
+                    // `ServerEntity.sendChanges`: сдвиг от квадрата длины
+                    // 7.6293945e-6, иначе затухающая лодка слала бы крошечные шаги.
+                    let d: f64 = (0..3).map(|i| (b.pos[i] - b.sent.0[i]).powi(2)).sum();
+                    if d >= 7.629_394_5e-6 || (b.yaw - b.sent.1).abs() > 0.5 {
+                        b.sent = (b.pos, b.yaw);
+                        packets.push((
                             id,
-                            b.pos,
-                            b.yaw,
-                            0.0,
-                            b.on_ground,
-                        ),
-                    ));
+                            play::teleport_entity(
+                                self.ids.teleport_entity,
+                                id,
+                                b.pos,
+                                b.yaw,
+                                0.0,
+                                b.on_ground,
+                            ),
+                        ));
+                    }
+                }
+                self.boat_riders(b, &players, &mut mobs, &mut packets, &mut marks);
+                // `AbstractBoat.tick` в конце: посадка мобов и толчки.
+                if let Some(b) = boats.get_mut(&id) {
+                    self.boat_contacts(b, id, &players, &mut mobs, &mut packets, &mut marks);
+                }
+            }
+            // Лодки толкают друг друга (`AbstractBoat.push` → `Entity.push`).
+            let boxes: Vec<(i32, [f64; 3], [f64; 3])> = boats
+                .iter()
+                .filter(|(_, b)| awake(b.pos))
+                .map(|(&id, b)| {
+                    let (lo, hi) = b.bounds();
+                    (
+                        id,
+                        [lo[0] - 0.2, lo[1] + 0.01, lo[2] - 0.2],
+                        [hi[0] + 0.2, hi[1] - 0.01, hi[2] + 0.2],
+                    )
+                })
+                .collect();
+            for i in 0..boxes.len() {
+                for j in i + 1..boxes.len() {
+                    let (ia, la, ha) = boxes[i];
+                    let (ib, lb, hb) = boxes[j];
+                    if (0..3).any(|k| la[k] >= hb[k] || lb[k] >= ha[k]) {
+                        continue;
+                    }
+                    if let [Some(a), Some(b)] = boats.get_disjoint_mut([&ia, &ib]) {
+                        push_boats(a, b);
+                    }
                 }
             }
             for &id in &gone {
-                boats.remove(&id);
+                if let Some(b) = boats.remove(&id) {
+                    for r in &b.riders {
+                        if let Some(e) = mobs.get_mut(&r.1) {
+                            e.vehicle = None;
+                            let yaw = e.mob.yaw;
+                            let spot = self.dismount_spot(b.pos, yaw);
+                            e.ride_to(spot, yaw);
+                            marks.push(spot);
+                            packets.push((
+                                r.1,
+                                play::teleport_entity(
+                                    self.ids.teleport_entity,
+                                    r.1,
+                                    spot,
+                                    yaw,
+                                    0.0,
+                                    true,
+                                ),
+                            ));
+                        }
+                        self.unlink_rider(r.0);
+                    }
+                }
             }
         });
         if !packets.is_empty() {
             self.hub.send_many_about(packets);
         }
         self.hub.remove_tracked(&gone);
+        for pos in marks {
+            self.mark_entity_changed(pos);
+        }
+    }
+
+    /// `AbstractBoat.positionRider`: мобы-пассажиры едут с лодкой (игроков
+    /// двигает их клиент).
+    fn boat_riders(
+        &self,
+        b: &mut Boat,
+        players: &FastSet<Uuid>,
+        mobs: &mut FastMap<i32, mobs::MobEntry>,
+        packets: &mut Vec<(i32, Vec<u8>)>,
+        marks: &mut Vec<[f64; 3]>,
+    ) {
+        let mut i = 0;
+        while i < b.riders.len() {
+            let (uuid, rider) = b.riders[i];
+            if players.contains(&uuid) {
+                i += 1;
+                continue;
+            }
+            let Some(e) = mobs.get_mut(&rider) else {
+                b.riders.remove(i);
+                self.unlink_rider(uuid);
+                continue;
+            };
+            let animal = e.mob.species.is_animal();
+            let at = self.passenger_seat(b, i, animal);
+            let yaw = self.passenger_yaw(b, i, animal);
+            let old = e.mob.pos;
+            if e.ride_to(at, yaw) {
+                packets.push((
+                    rider,
+                    play::teleport_entity(self.ids.teleport_entity, rider, at, yaw, 0.0, true),
+                ));
+                if (old[0].floor() as i32) >> 4 != (at[0].floor() as i32) >> 4
+                    || (old[2].floor() as i32) >> 4 != (at[2].floor() as i32) >> 4
+                {
+                    marks.push(old);
+                    marks.push(at);
+                }
+            }
+            i += 1;
+        }
+    }
+
+    /// Точка пассажира в лодке (`getPassengerAttachmentPoint`).
+    fn passenger_seat(&self, b: &Boat, index: usize, animal: bool) -> [f64; 3] {
+        let mut offset = if b.kind.contains("_chest_") {
+            0.15
+        } else {
+            0.0
+        };
+        if b.riders.len() > 1 {
+            offset = if index == 0 { 0.2 } else { -0.6 };
+            if animal {
+                offset += 0.2;
+            }
+        }
+        let angle = -(b.yaw as f64).to_radians();
+        let (sin, cos) = angle.sin_cos();
+        [
+            b.pos[0] + offset * sin,
+            b.pos[1] + HEIGHT / 3.0,
+            b.pos[2] + offset * cos,
+        ]
+    }
+
+    /// `calculatePassengerBodyYRot`: животные в полной лодке сидят боком.
+    fn passenger_yaw(&self, b: &Boat, index: usize, animal: bool) -> f32 {
+        if animal && b.riders.len() == b.seats() {
+            let id = b.riders[index].1;
+            b.yaw + if id % 2 == 0 { 90.0 } else { 270.0 }
+        } else {
+            b.yaw
+        }
+    }
+
+    /// `AbstractBoat.tick` в конце: задевающих мобов сажает
+    /// (`startRiding`), остальных толкает (`push`).
+    fn boat_contacts(
+        &self,
+        b: &mut Boat,
+        id: i32,
+        players: &FastSet<Uuid>,
+        mobs: &mut FastMap<i32, mobs::MobEntry>,
+        packets: &mut Vec<(i32, Vec<u8>)>,
+        marks: &mut Vec<[f64; 3]>,
+    ) {
+        let (lo, hi) = b.bounds();
+        let slo = [lo[0] - 0.2, lo[1] + 0.01, lo[2] - 0.2];
+        let shi = [hi[0] + 0.2, hi[1] - 0.01, hi[2] + 0.2];
+        let player_controlled = b.riders.first().is_some_and(|r| players.contains(&r.0));
+        let can_board = !player_controlled
+            && !matches!(b.status, Status::UnderWater | Status::UnderFlowingWater)
+            && b.out_of_control < 60.0
+            && b.riders.len() < b.seats();
+        for (&rider, e) in mobs.iter_mut() {
+            if e.vehicle.is_some() || !e.mob.alive() {
+                continue;
+            }
+            let (w, h) = e.mob.size();
+            let mlo = [e.mob.pos[0] - w / 2.0, e.mob.pos[1], e.mob.pos[2] - w / 2.0];
+            let mhi = [
+                e.mob.pos[0] + w / 2.0,
+                e.mob.pos[1] + h,
+                e.mob.pos[2] + w / 2.0,
+            ];
+            if (0..3).any(|k| slo[k] >= mhi[k] || mlo[k] >= shi[k]) {
+                continue;
+            }
+            if can_board && b.riders.len() < b.seats() && w < WIDTH && boardable(&e.mob) {
+                e.vehicle = Some(id);
+                b.riders.push((Uuid::from_u128(e.mob.uuid), rider));
+                self.link_rider(Uuid::from_u128(e.mob.uuid), b.uuid);
+                let index = b.riders.len() - 1;
+                let animal = e.mob.species.is_animal();
+                let at = self.passenger_seat(b, index, animal);
+                let yaw = self.passenger_yaw(b, index, animal);
+                e.ride_to(at, yaw);
+                packets.push((
+                    rider,
+                    play::teleport_entity(self.ids.teleport_entity, rider, at, yaw, 0.0, true),
+                ));
+                let ids: Vec<i32> = b.riders.iter().map(|r| r.1).collect();
+                packets.push((id, play::set_passengers(self.ids.set_passengers, id, &ids)));
+                marks.push(e.mob.pos);
+                continue;
+            }
+            self.push_mob(b, &mut e.mob);
+        }
+    }
+
+    /// `Entity.push(Entity)` для моба: взаимный импульс 0.05.
+    fn push_mob(&self, b: &mut Boat, m: &mut crate::mobs::Mob) {
+        let (dx, dz) = (m.pos[0] - b.pos[0], m.pos[2] - b.pos[2]);
+        let dd = dx.abs().max(dz.abs());
+        if dd < 0.01 {
+            return;
+        }
+        let d = dd.sqrt();
+        let power = (1.0 / d).min(1.0) * 0.05;
+        let (ix, iz) = (dx / d * power, dz / d * power);
+        if b.riders.is_empty() {
+            b.vel[0] -= ix;
+            b.vel[2] -= iz;
+        }
+        m.vel[0] += ix;
+        m.vel[2] += iz;
     }
 
     /// `AbstractBoat.getStatus`: сверху вниз вода, трение земли, воздух.
@@ -1248,6 +1514,51 @@ impl Boat {
     }
 }
 
+/// `EntityTypeTags.CANNOT_BE_PUSHED_ONTO_BOATS`.
+fn boardable(m: &crate::mobs::Mob) -> bool {
+    !matches!(
+        m.species.short(),
+        "elder_guardian"
+            | "cod"
+            | "pufferfish"
+            | "salmon"
+            | "tropical_fish"
+            | "dolphin"
+            | "squid"
+            | "glow_squid"
+            | "tadpole"
+            | "creaking"
+            | "nautilus"
+            | "zombie_nautilus"
+            | "sulfur_cube"
+    )
+}
+
+/// `AbstractBoat.push` → `Entity.push` между двумя лодками.
+fn push_boats(a: &mut Boat, b: &mut Boat) {
+    // Чужую лодку толкаем, только если её низ ниже нашего верха.
+    let (_, ahi) = a.bounds();
+    if b.pos[1] >= ahi[1] {
+        return;
+    }
+    let (dx, dz) = (b.pos[0] - a.pos[0], b.pos[2] - a.pos[2]);
+    let dd = dx.abs().max(dz.abs());
+    if dd < 0.01 {
+        return;
+    }
+    let d = dd.sqrt();
+    let power = (1.0 / d).min(1.0) * 0.05;
+    let (ix, iz) = (dx / d * power, dz / d * power);
+    if a.riders.is_empty() {
+        a.vel[0] -= ix;
+        a.vel[2] -= iz;
+    }
+    if b.riders.is_empty() {
+        b.vel[0] += ix;
+        b.vel[2] += iz;
+    }
+}
+
 /// `Block.getFriction`: лёд и слизь скользят, остальное — 0.6.
 fn block_friction(name: &str) -> f32 {
     if name.ends_with(":blue_ice") {
@@ -1304,6 +1615,16 @@ fn collide_all(lo: [f64; 3], hi: [f64; 3], mv: [f64; 3], boxes: &[[f64; 6]]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boats_push_each_other_apart() {
+        let mut a = Boat::new("minecraft:oak_boat".into(), [0.0, 0.0, 0.0], 0.0);
+        let mut b = Boat::new("minecraft:spruce_boat".into(), [0.9, 0.0, 0.0], 0.0);
+        push_boats(&mut a, &mut b);
+        assert!(a.vel[0] < 0.0, "{:?}", a.vel);
+        assert!(b.vel[0] > 0.0, "{:?}", b.vel);
+        assert_eq!(a.vel[1], 0.0);
+    }
 
     #[test]
     fn collide_all_stops_at_wall_and_floor() {

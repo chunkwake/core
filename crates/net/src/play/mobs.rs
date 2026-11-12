@@ -27,6 +27,8 @@ pub(super) struct MobEntry {
     /// Убит игроком: лут с `killed_by_player` и опыт.
     killer: Option<(Uuid, i32)>,
     environment: crate::environment::State,
+    /// Транспорт моба (лодка): позицию и поворот задаёт он (`rideTick`).
+    pub(super) vehicle: Option<i32>,
     fall: f64,
     /// Клиентам разослан флаг «агрессивен» (зомби с поднятыми руками).
     aggressive: bool,
@@ -104,10 +106,27 @@ impl MobEntry {
             ambient: 80 + rand::random::<i32>().rem_euclid(120),
             killer: None,
             environment: Default::default(),
+            vehicle: None,
             fall: 0.0,
             aggressive: false,
             effect_meta: (Vec::new(), false),
         }
+    }
+
+    /// `Entity.positionRider` для моба: позиция и поворот из лодки.
+    /// `true` — клиентам нужен новый `teleport_entity`.
+    pub(super) fn ride_to(&mut self, pos: [f64; 3], yaw: f32) -> bool {
+        self.mob.pos = pos;
+        self.mob.vel = [0.0; 3];
+        self.mob.on_ground = true;
+        self.mob.yaw = yaw;
+        self.mob.head_yaw = yaw;
+        self.mob.pitch = 0.0;
+        let q = play::quantize(pos);
+        let changed = q != self.sent || (yaw - self.sent_rot.0).abs() > 0.5;
+        self.sent = q;
+        self.sent_rot = (yaw, 0.0, yaw);
+        changed
     }
 }
 
@@ -526,6 +545,13 @@ impl PlayPlan {
                     // Выгруженный чанк не тикает: иначе исследование мира копит
                     // работу, которую никто не видит.
                     if !awake(e.mob.pos) {
+                        continue;
+                    }
+                    // `Entity.rideTick`: в транспорте моб не думает и не идёт,
+                    // позицию ему каждый тик ставит лодка.
+                    if e.vehicle.is_some() {
+                        e.mob.vel = [0.0; 3];
+                        e.mob.on_ground = true;
                         continue;
                     }
                     let species = e.mob.species;
