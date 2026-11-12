@@ -174,6 +174,12 @@ impl PlayPlan {
             }
         }
         {
+            let fish = self.sim().fish.lock().unwrap();
+            for (entity_id, b) in fish.iter() {
+                out.push(entity_ref(*entity_id, b.pos, "minecraft:fishing_bobber"));
+            }
+        }
+        {
             let boats = self.sim().boats.lock().unwrap();
             for (entity_id, boat) in boats.iter() {
                 let mut target = entity_ref(*entity_id, boat.pos, &boat.kind);
@@ -947,7 +953,8 @@ impl PlayPlan {
                 .unwrap()
                 .remove(&entity_id)
                 .is_some()
-            | self.sim().eyes.lock().unwrap().remove(&entity_id).is_some();
+            | self.sim().eyes.lock().unwrap().remove(&entity_id).is_some()
+            | self.sim().fish.lock().unwrap().remove(&entity_id).is_some();
         if let Some(b) = boat {
             self.remove_boat(entity_id, &b);
             self.mark_entity_changed(b.pos);
@@ -1398,6 +1405,19 @@ impl PlayPlan {
                     }
                     root.insert("DealtDamage".into(), Tag::Byte(i8::from(a.dealt_damage)));
                 }
+                return root;
+            }
+        }
+        {
+            let fish = self.sim().fish.lock().unwrap();
+            if let Some(b) = fish.get(&target.entity_id) {
+                let (yaw, pitch) = crate::arrows::rotation(b.vel);
+                insert_pos_rot(&mut root, b.pos, yaw, pitch);
+                root.insert("Biting".into(), Tag::Byte(i8::from(b.biting)));
+                root.insert("TimeUntilLured".into(), Tag::Int(b.time_until_lured));
+                root.insert("TimeUntilHooked".into(), Tag::Int(b.time_until_hooked));
+                root.insert("Nibble".into(), Tag::Int(b.nibble));
+                root.insert("OpenWater".into(), Tag::Byte(i8::from(b.open_water)));
                 return root;
             }
         }

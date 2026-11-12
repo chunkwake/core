@@ -1762,6 +1762,8 @@ pub(crate) struct DimSim {
     boats: Mutex<FastMap<i32, boats::Boat>>,
     /// Узлы поводков на заборах (`LeashFenceKnotEntity`).
     knots: Mutex<FastMap<i32, leashes::Knot>>,
+    /// Поплавки рыбалки (`FishingHook`).
+    fish: Mutex<FastMap<i32, fishing::Bobber>>,
     /// Вагонетки по ID сущности.
     minecarts: Mutex<FastMap<i32, minecarts::MinecartEntry>>,
     /// Рамки для предметов по ID сущности.
@@ -2265,6 +2267,7 @@ mod client_info;
 /// Ванильные команды: дерево, права, селекторы и обработчики.
 pub mod commands;
 mod crafter;
+mod fishing;
 mod item_frames;
 mod jukebox;
 mod kinds;
@@ -10985,6 +10988,7 @@ impl PlayPlan {
         self.tick_minecarts();
         self.tick_boats();
         self.tick_leashes();
+        self.tick_fishing();
         self.tick_item_frames();
         self.tick_paintings();
         self.tick_beacons();
@@ -13086,6 +13090,23 @@ impl PlayPlan {
                                 }
                             }
                             conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence)).await?;
+                            continue;
+                        }
+                        // `FishingRodItem.use`: заброс или вытаскивание.
+                        if !state.vitals.dead
+                            && login.spawn.game_mode != 3
+                            && let Some(slot) = Self::hand_index(&state.inv, hand)
+                            && let Some(held) = state.inv.slots[slot]
+                            && self.item_name(held.item) == "minecraft:fishing_rod"
+                        {
+                            eating = None;
+                            drinking = None;
+                            drawing = None;
+                            state.inv.slots[slot] =
+                                self.fishing_use(uuid, held, login.spawn.game_mode == 1);
+                            self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence))
+                                .await?;
                             continue;
                         }
                         // `TridentItem.use`: копить заряд броска, не начиная щит/еду.
