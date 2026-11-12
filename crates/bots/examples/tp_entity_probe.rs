@@ -218,8 +218,28 @@ async fn main() {
         "вагонетка не телепортировалась: {at:?}, ждали {cart_to:?}"
     );
 
+    // ТНТ: /summon с длинным фитилём, затем /tp.
+    let tnt_from = [base[0], base[1] + 1.0, base[2] + 3.0];
+    let tnt_to = [base[0] - 3.0, base[1] + 1.0, base[2] - 2.0];
+    p.cmd(&format!(
+        "summon minecraft:tnt {} {} {} {{fuse:600}}",
+        tnt_from[0], tnt_from[1], tnt_from[2]
+    ))
+    .await;
+    p.cmd(&format!(
+        "tp @e[type=minecraft:tnt,limit=1,sort=nearest] {} {} {}",
+        tnt_to[0], tnt_to[1], tnt_to[2]
+    ))
+    .await;
+    let at = p.pos("minecraft:tnt").await;
+    assert!(
+        (at[0] - tnt_to[0]).abs() < 0.1 && (at[2] - tnt_to[2]).abs() < 0.1,
+        "ТНТ не телепортировался: {at:?}, ждали {tnt_to:?}"
+    );
+
     p.cmd("kill @e[type=minecraft:arrow]").await;
     p.cmd("kill @e[type=minecraft:oak_boat]").await;
     p.cmd("kill @e[type=minecraft:minecart]").await;
+    p.cmd("kill @e[type=minecraft:tnt]").await;
     println!("tp_entity: ok");
 }

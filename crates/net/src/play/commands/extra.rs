@@ -95,6 +95,9 @@ impl PlayPlan {
                     e.cart.yaw = yaw;
                 }
                 (e.cart.pos, e.cart.yaw, 0.0)
+            } else if let Some(t) = self.sim().tnt.lock().unwrap().get_mut(&id) {
+                t.pos = pos;
+                (t.pos, 0.0, 0.0)
             } else {
                 return false;
             }

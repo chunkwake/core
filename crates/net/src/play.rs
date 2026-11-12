@@ -9593,6 +9593,37 @@ impl PlayPlan {
         true
     }
 
+    /// `/summon minecraft:tnt`: подожжённый ТНТ без разброса (`SummonCommand`).
+    pub(super) fn summon_tnt(&self, pos: [f64; 3], fuse: i32) -> Option<i32> {
+        let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
+        let tnt = crate::tnt::Primed {
+            pos,
+            vel: [0.0; 3],
+            fuse: fuse.max(1),
+        };
+        self.sim().tnt.lock().unwrap().insert(id, tnt);
+        self.mark_work();
+        self.hub.send(
+            None,
+            play::add_entity_moving(
+                self.ids.add_entity,
+                id,
+                Uuid::from_u128(rand::random()),
+                self.survival.tnt_entity_type,
+                pos,
+                [0.0; 3],
+                0.0,
+                0.0,
+                0,
+            ),
+        );
+        self.hub.send(
+            None,
+            inv::set_tnt_fuse(self.ids.set_entity_data, id, tnt.fuse),
+        );
+        Some(id)
+    }
+
     fn spawn_primed_tnt(&self, origin: [f64; 3], fuse: i32) {
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
         let angle = rand::random::<f64>() * std::f64::consts::TAU;

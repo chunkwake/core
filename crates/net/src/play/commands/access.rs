@@ -189,6 +189,12 @@ impl PlayPlan {
                 out.push(target);
             }
         }
+        {
+            let tnt = self.sim().tnt.lock().unwrap();
+            for (entity_id, primed) in tnt.iter() {
+                out.push(entity_ref(*entity_id, primed.pos, "minecraft:tnt"));
+            }
+        }
         let tags = self.entity_tags.lock().unwrap();
         for target in &mut out {
             if let Some(held) = tags.get(&target.uuid) {
@@ -902,7 +908,8 @@ impl PlayPlan {
                 .lock()
                 .unwrap()
                 .remove(&entity_id)
-                .is_some();
+                .is_some()
+            | self.sim().tnt.lock().unwrap().remove(&entity_id).is_some();
         if removed {
             let packet =
                 chunkwake_protocol::play::remove_entities(self.ids.remove_entities, &[entity_id]);
@@ -1354,6 +1361,13 @@ impl PlayPlan {
             let carts = self.sim().minecarts.lock().unwrap();
             if let Some(e) = carts.get(&target.entity_id) {
                 insert_pos_rot(&mut root, e.cart.pos, e.cart.yaw, 0.0);
+                return root;
+            }
+        }
+        {
+            let tnt = self.sim().tnt.lock().unwrap();
+            if let Some(t) = tnt.get(&target.entity_id) {
+                insert_pos_rot(&mut root, t.pos, 0.0, 0.0);
                 return root;
             }
         }

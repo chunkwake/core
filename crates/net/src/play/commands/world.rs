@@ -420,6 +420,12 @@ pub(super) fn summon(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
             .filter(|v| v.len() >= 3)
             .map_or([0.0; 3], |v| [v[0], v[1], v[2]]);
         ctx.plan.summon_arrow(coords, vel)
+    } else if name == "minecraft:tnt" {
+        let fuse = nbt
+            .as_ref()
+            .and_then(|n| n.get("fuse").and_then(super::snbt::number))
+            .map_or(80, |f| f as i32);
+        ctx.plan.summon_tnt(coords, fuse)
     } else {
         ctx.plan
             .summon_boat(&name, coords)
