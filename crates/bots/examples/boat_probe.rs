@@ -70,6 +70,7 @@ async fn main() {
         w.buf
     };
     c.send_raw(&cmd("gamemode survival")).await.unwrap();
+    c.send_raw(&cmd("clear boater")).await.unwrap();
     c.send_raw(&cmd("give boater minecraft:oak_boat 2"))
         .await
         .unwrap();

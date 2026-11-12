@@ -19,6 +19,8 @@ const HURT_TIME: i32 = 10;
 pub(crate) struct Boat {
     /// Имя типа сущности, оно же предмет: `minecraft:oak_boat`, `minecraft:bamboo_chest_raft`.
     pub kind: String,
+    /// 27 слотов сундука (только `*_chest_boat*`/`*_chest_raft`).
+    pub slots: Vec<Slot>,
     pub uuid: Uuid,
     pub pos: [f64; 3],
     pub yaw: f32,
@@ -34,8 +36,10 @@ pub(crate) struct Boat {
 
 impl Boat {
     fn new(kind: String, pos: [f64; 3], yaw: f32) -> Self {
+        let size = if kind.contains("_chest_") { 27 } else { 0 };
         Self {
             kind,
+            slots: vec![None; size],
             uuid: Uuid::from_u128(rand::random()),
             pos,
             yaw,
@@ -108,9 +112,93 @@ fn escape_vector(vehicle_width: f64, passenger_width: f64, yaw: f32) -> [f64; 2]
     [f * d / h, g * d / h]
 }
 
+/// `AbstractChestBoat.interact`: с сундуком ПКМ открывает контейнер.
+pub(super) enum BoatUse {
+    Ride,
+    /// Размер контейнера и заголовок окна.
+    Open(usize, serde_json::Value),
+}
+
 impl PlayPlan {
     pub(super) fn boat_type(&self, kind: &str) -> Option<i32> {
         self.survival.entity_types.get(kind).copied()
+    }
+
+    /// `AbstractChestBoat.interact`: лодка с сундуком открывает окно.
+    pub(super) fn boat_use(&self, id: i32) -> BoatUse {
+        let boats = self.sim().boats.lock().unwrap();
+        let Some(b) = boats.get(&id).filter(|b| !b.slots.is_empty()) else {
+            return BoatUse::Ride;
+        };
+        let name = b.kind.strip_prefix("minecraft:").unwrap_or(&b.kind);
+        let title = b
+            .custom_name
+            .as_deref()
+            .map(|n| serde_json::from_str(n).unwrap_or_else(|_| serde_json::json!({ "text": n })))
+            .unwrap_or_else(
+                || serde_json::json!({ "translate": format!("entity.minecraft.{name}") }),
+            );
+        BoatUse::Open(b.slots.len(), title)
+    }
+
+    /// `AbstractBoat.canAddPassenger`: мест больше нет.
+    pub(super) fn boat_full(&self, id: i32) -> bool {
+        self.sim()
+            .boats
+            .lock()
+            .unwrap()
+            .get(&id)
+            .is_some_and(|b| b.riders.len() >= b.seats())
+    }
+
+    /// Слоты сундука лодки (только у `*_chest_*`).
+    pub(super) fn boat_slots(&self, id: i32) -> Option<Vec<Slot>> {
+        self.sim()
+            .boats
+            .lock()
+            .unwrap()
+            .get(&id)
+            .filter(|b| !b.slots.is_empty())
+            .map(|b| b.slots.clone())
+    }
+
+    pub(super) fn set_boat_slots(&self, id: i32, slots: &[Slot]) {
+        let (changed, pos) = {
+            let mut boats = self.sim().boats.lock().unwrap();
+            match boats.get_mut(&id) {
+                Some(b) if b.slots.len() == slots.len() => {
+                    b.slots = slots.to_vec();
+                    (true, b.pos)
+                }
+                _ => (false, [0.0; 3]),
+            }
+        };
+        if changed {
+            self.mark_entity_changed(pos);
+            self.mark_work();
+        }
+    }
+
+    /// `HopperBlockEntity.getContainerAt`: сундук лодки в клетке `p`.
+    pub(super) fn boat_cont_at(&self, p: [i32; 3]) -> Option<Cont> {
+        let lo = p.map(f64::from);
+        let hi = lo.map(|v| v + 1.0);
+        let boats = self.sim().boats.lock().unwrap();
+        let (&id, b) = boats.iter().find(|(_, b)| {
+            if b.slots.is_empty() {
+                return false;
+            }
+            let h = WIDTH / 2.0;
+            let a = [b.pos[0] - h, b.pos[1], b.pos[2] - h];
+            let z = [b.pos[0] + h, b.pos[1] + HEIGHT, b.pos[2] + h];
+            (0..3).all(|i| a[i] < hi[i] && z[i] > lo[i])
+        })?;
+        Some(Cont {
+            parts: vec![boat_pos(id)],
+            slots: b.slots.clone(),
+            furnace: false,
+            name: b.kind.clone(),
+        })
     }
 
     fn boat_packets(&self, id: i32, b: &Boat, now: i64) -> Vec<Vec<u8>> {
@@ -184,7 +272,9 @@ impl PlayPlan {
             return None;
         }
         self.boat_type(kind)?;
-        Some(self.add_boat(Boat::new(kind.to_owned(), pos, 0.0)))
+        let id = self.add_boat(Boat::new(kind.to_owned(), pos, 0.0));
+        self.mark_entity_changed(pos);
+        Some(id)
     }
 
     fn add_boat(&self, b: Boat) -> i32 {
@@ -245,6 +335,7 @@ impl PlayPlan {
             return false;
         }
         self.add_boat(Boat::new(item.to_owned(), at, yaw));
+        self.mark_entity_changed(at);
         true
     }
 
@@ -316,6 +407,7 @@ impl PlayPlan {
             _ => 0.0,
         };
         self.add_boat(Boat::new(item.to_owned(), at, yaw));
+        self.mark_entity_changed(at);
         Some(true)
     }
 
@@ -512,12 +604,17 @@ impl PlayPlan {
         let b = boats.remove(&target)?;
         drop(boats);
         self.remove_boat(target, &b);
+        self.mark_entity_changed(b.pos);
         if broken
             && self.vars.flag("entity_drops")
             && let Some(item) = self.item_id(&b.kind)
         {
             let vel = items::pop_velocity(rand::random(), rand::random());
             self.drop_item(b.pos, vel, Stack::new(item, 1), items::BLOCK_DELAY);
+        }
+        for stack in b.slots.iter().flatten() {
+            let vel = items::pop_velocity(rand::random(), rand::random());
+            self.drop_item(b.pos, vel, *stack, items::BLOCK_DELAY);
         }
         Some(())
     }
@@ -563,6 +660,19 @@ impl PlayPlan {
         if let Some(Tag::String(n)) = c.get("CustomName") {
             b.custom_name = Some(n.clone());
         }
+        if !b.slots.is_empty()
+            && let Some(Tag::List(list)) = c.get("Items")
+        {
+            for t in list {
+                let Some(item) = t.as_compound() else {
+                    continue;
+                };
+                let slot = item.get("Slot").and_then(Tag::as_i64).unwrap_or(-1);
+                if let Some(dst) = b.slots.get_mut(slot.max(0) as usize).filter(|_| slot >= 0) {
+                    *dst = crate::stack_nbt::from_nbt(item, |n| self.item_id(n));
+                }
+            }
+        }
         self.add_boat(b);
         true
     }
@@ -598,6 +708,9 @@ impl PlayPlan {
                 );
                 if let Some(n) = &b.custom_name {
                     c.insert("CustomName".into(), Tag::String(n.clone()));
+                }
+                if !b.slots.is_empty() {
+                    c.insert("Items".into(), Tag::List(self.items_nbt(&b.slots)));
                 }
                 let chunk = (
                     (b.pos[0].floor() as i32) >> 4,

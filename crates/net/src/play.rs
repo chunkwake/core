@@ -1955,6 +1955,15 @@ fn cart_of(pos: [i32; 3]) -> Option<i32> {
     (pos[0] == i32::MIN && pos[1] == i32::MIN + 1).then_some(pos[2])
 }
 
+/// Позиция-ключ контейнера лодки: `(MIN, MIN+2, id)`.
+fn boat_pos(id: i32) -> [i32; 3] {
+    [i32::MIN, i32::MIN + 2, id]
+}
+
+fn boat_of(pos: [i32; 3]) -> Option<i32> {
+    (pos[0] == i32::MIN && pos[1] == i32::MIN + 2).then_some(pos[2])
+}
+
 struct Window {
     id: i32,
     kind: Kind,
@@ -4649,6 +4658,13 @@ impl PlayPlan {
     /// 1024 чанков NBT, на тике он превращался в замирание мира.
     /// Загрузка синхронна намеренно: `generate_chunk` должен видеть уже
     /// прочитанный столбец, иначе сгенерирует поверх сохранённого.
+    /// Помечает чанк сущности к перезаписи в `entities/*.mca`.
+    pub(super) fn mark_entity_changed(&self, pos: [f64; 3]) {
+        let key = ((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+        self.ensure_region(key.0, key.1);
+        self.sim().entity_new.lock().unwrap().insert(key);
+    }
+
     fn ensure_region(&self, x: i32, z: i32) {
         let Some(source) = self.source.get() else {
             return;
@@ -12550,9 +12566,43 @@ impl PlayPlan {
                             }
                             continue;
                         }
-                        // `AbstractBoat.interact`: без шифта — сесть.
+                        // `AbstractChestBoat.interact`: с сундуком ПКМ открывает
+                        // окно; шифт или полная лодка — посадка.
                         if self.is_boat(it.entity) {
-                            if !state.vitals.dead && !it.sneaking && !in_boat && it.hand == 0
+                            if state.vitals.dead || it.hand != 0 {
+                                continue;
+                            }
+                            let opened = match self.boat_use(it.entity) {
+                                boats::BoatUse::Open(size, title)
+                                    if it.sneaking || self.boat_full(it.entity) =>
+                                {
+                                    if let Some(w) = window.as_ref() {
+                                        conn.send(&inv::container_close(ids.container_close, w.id))
+                                            .await?;
+                                    }
+                                    self.close_with_event(&mut state.inv, &mut window, uuid).await;
+                                    next_window = next_window % 100 + 1;
+                                    let pos = boat_pos(it.entity);
+                                    let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10] };
+                                    w.slots = self.window_slots(&w);
+                                    conn.send(&inv::open_screen(
+                                        ids.open_screen,
+                                        w.id,
+                                        self.survival.menu_chest,
+                                        &title,
+                                    ))
+                                    .await?;
+                                    self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
+                                    window = Some(w);
+                                    self.container_viewers(uuid, &[pos], true);
+                                    true
+                                }
+                                _ => false,
+                            };
+                            if opened {
+                                self.reset_after_use(me.entity_id, uuid, it.hand, state, &mut swing);
+                            } else if !it.sneaking
+                                && !in_boat
                                 && self.mount_boat(uuid, me.entity_id, it.entity)
                             {
                                 in_boat = true;
@@ -15549,6 +15599,9 @@ impl PlayPlan {
                 None if cart_of(p).is_some() => {
                     cart_of(p).and_then(|id| self.minecart_slots(id)).is_some()
                 }
+                None if boat_of(p).is_some() => {
+                    boat_of(p).and_then(|id| self.boat_slots(id)).is_some()
+                }
                 // Пустой контейнер из `/setblock` ещё без записи блок-сущности:
                 // у ванили она создаётся вместе с блоком, окно живо, пока блок на месте.
                 None => {
@@ -17699,7 +17752,9 @@ impl PlayPlan {
     fn cont_get(&self, p: [i32; 3]) -> Option<Cont> {
         // `HopperBlockEntity.getContainerAt`: блок-контейнер, иначе
         // вагонетка с инвентарём в этой клетке.
-        self.block_cont(p).or_else(|| self.minecart_cont_at(p))
+        self.block_cont(p)
+            .or_else(|| self.minecart_cont_at(p))
+            .or_else(|| self.boat_cont_at(p))
     }
 
     fn block_cont(&self, p: [i32; 3]) -> Option<Cont> {
@@ -20852,6 +20907,9 @@ impl PlayPlan {
         if let Some(id) = cart_of(pos) {
             return self.minecart_slots(id).unwrap_or_default();
         }
+        if let Some(id) = boat_of(pos) {
+            return self.boat_slots(id).unwrap_or_default();
+        }
         if let Some(id) = plugin_of(pos) {
             return self
                 .plugin_invs
@@ -20881,6 +20939,10 @@ impl PlayPlan {
     fn save_container(&self, pos: [i32; 3], slots: &[Slot]) {
         if let Some(id) = cart_of(pos) {
             self.set_minecart_slots(id, slots);
+            return;
+        }
+        if let Some(id) = boat_of(pos) {
+            self.set_boat_slots(id, slots);
             return;
         }
         if let Some(id) = plugin_of(pos) {
