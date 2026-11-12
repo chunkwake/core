@@ -1,9 +1,12 @@
 //! Лодки и плоты (`AbstractBoat`, `VehicleEntity`, `BoatItem`).
 //!
-//! Как у ванили, лодкой с водителем правит его клиент: он считает плавучесть
-//! и вёсла и шлёт `move_vehicle`, а сервер принимает позицию, рассылает её
-//! остальным и тянет за ней игрока (подгрузку чанков). Пустая лодка стоит на
-//! месте: дрейф по течению и падение без водителя не перенесены.
+//! Пустая лодка живёт на сервере: `AbstractBoat.tick`/`floatBoat` —
+//! гравитация, плавучесть, трение о воду/землю, статусы
+//! `IN_WATER`/`UNDER_WATER`/`UNDER_FLOWING_WATER`/`IN_AIR`/`ON_LAND`,
+//! движение `move(MoverType.SELF, ...)` со столкновениями и рассылка
+//! сдвига. Лодкой с водителем правит его клиент (`move_vehicle`), как у
+//! ванили: сервер принимает позицию, рассылает её остальным и тянет за
+//! ней игрока (подгрузку чанков).
 
 use super::*;
 
@@ -29,9 +32,35 @@ pub(crate) struct Boat {
     hit_at: i64,
     hurt_dir: i32,
     paddles: (bool, bool),
+    /// Скорость (`getDeltaMovement`).
+    vel: [f64; 3],
+    /// `onGround` после последнего `move`.
+    on_ground: bool,
+    /// Статус плавучести (`getStatus`) и прошлого тика.
+    status: Status,
+    old_status: Status,
+    /// Верх воды под лодкой и трение земли (`checkInWater`, `getGroundFriction`).
+    water_level: f64,
+    land_friction: f32,
+    /// Вертикальный сдвиг прошлого тика (`checkFallDamage`).
+    last_yd: f64,
+    /// Тики под водой (`outOfControlTicks`): на 60 пассажиры сходят.
+    out_of_control: f32,
+    /// Последняя разосланная позиция и поворот (`ServerEntity.sendChanges`).
+    sent: ([f64; 3], f32),
     /// Пассажиры: UUID и ID сущности игрока. Первый — водитель.
     riders: Vec<(Uuid, i32)>,
     custom_name: Option<String>,
+}
+
+/// `AbstractBoat.Status`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Status {
+    InWater,
+    UnderWater,
+    UnderFlowingWater,
+    InAir,
+    OnLand,
 }
 
 impl Boat {
@@ -47,6 +76,15 @@ impl Boat {
             hit_at: 0,
             hurt_dir: 1,
             paddles: (false, false),
+            vel: [0.0; 3],
+            on_ground: false,
+            status: Status::InAir,
+            old_status: Status::InAir,
+            water_level: f64::NEG_INFINITY,
+            land_friction: 0.6,
+            last_yd: 0.0,
+            out_of_control: 0.0,
+            sent: (pos, yaw),
             riders: Vec::new(),
             custom_name: None,
         }
@@ -652,6 +690,10 @@ impl PlayPlan {
         }
         let yaw = doubles("Rotation").first().copied().unwrap_or(0.0) as f32;
         let mut b = Boat::new(kind.clone(), [pos[0], pos[1], pos[2]], yaw);
+        let motion = doubles("Motion");
+        if motion.len() == 3 && motion.iter().all(|v| v.is_finite()) {
+            b.vel = [motion[0], motion[1], motion[2]];
+        }
         if let Some(Tag::IntArray(u)) = c.get("UUID")
             && u.len() == 4
         {
@@ -691,7 +733,10 @@ impl PlayPlan {
                     "Pos".into(),
                     Tag::List(b.pos.iter().map(|v| Tag::Double(*v)).collect()),
                 );
-                c.insert("Motion".into(), Tag::List(vec![Tag::Double(0.0); 3]));
+                c.insert(
+                    "Motion".into(),
+                    Tag::List(b.vel.iter().map(|v| Tag::Double(*v)).collect()),
+                );
                 c.insert(
                     "Rotation".into(),
                     Tag::List(vec![Tag::Float(b.yaw), Tag::Float(0.0)]),
@@ -720,11 +765,558 @@ impl PlayPlan {
             })
             .collect()
     }
+
+    /// Тик пустых лодок в симулируемых чанках (`AbstractBoat.tick`):
+    /// статус воды, `floatBoat`, движение `move(MoverType.SELF, ...)` со
+    /// столкновениями и рассылка сдвига. Лодку с водителем двигает клиент.
+    pub(super) fn tick_boats(&self) {
+        if self.sim().boats.lock().unwrap().is_empty() {
+            return;
+        }
+        let simulated = self.simulated_set();
+        let awake = |p: [f64; 3]| {
+            simulated.is_empty()
+                || simulated.contains(&((p[0].floor() as i32) >> 4, (p[2].floor() as i32) >> 4))
+        };
+        let now = self.game_time.load(Ordering::Relaxed);
+        let mut packets = Vec::new();
+        let mut gone = Vec::new();
+        self.with_world(|w| {
+            let mut boats = self.sim().boats.lock().unwrap();
+            let ids: Vec<i32> = boats.keys().copied().collect();
+            for id in ids {
+                let Some(b) = boats.get_mut(&id) else {
+                    continue;
+                };
+                // В лодке с водителем физику считает его клиент
+                // (`handleMoveVehicle`), сервер только принимает позицию.
+                if !b.riders.is_empty() || !awake(b.pos) {
+                    continue;
+                }
+                b.old_status = b.status;
+                b.status = self.boat_status(b, w);
+                b.out_of_control =
+                    if matches!(b.status, Status::UnderWater | Status::UnderFlowingWater) {
+                        b.out_of_control + 1.0
+                    } else {
+                        0.0
+                    };
+                // `Entity.baseTick` → `updateFluidInteraction`: течение
+                // добавляется к скорости до `floatBoat`.
+                self.apply_fluid_current(b, w);
+                self.float_boat(b, w);
+                let moved = self.move_boat(b, w, now);
+                // `checkFallDamage`: `lastYd` — фактический сдвиг по Y.
+                b.last_yd = moved[1];
+                // `checkBelowWorld`: под миром лодка исчезает.
+                if b.pos[1] < self.min_y() as f64 - 64.0 {
+                    gone.push(id);
+                    continue;
+                }
+                // `ServerEntity.sendChanges`: сдвиг от квадрата длины
+                // 7.6293945e-6, иначе затухающая лодка слала бы крошечные шаги.
+                let d: f64 = (0..3).map(|i| (b.pos[i] - b.sent.0[i]).powi(2)).sum();
+                if d >= 7.629_394_5e-6 || (b.yaw - b.sent.1).abs() > 0.5 {
+                    b.sent = (b.pos, b.yaw);
+                    packets.push((
+                        id,
+                        play::teleport_entity(
+                            self.ids.teleport_entity,
+                            id,
+                            b.pos,
+                            b.yaw,
+                            0.0,
+                            b.on_ground,
+                        ),
+                    ));
+                }
+            }
+            for &id in &gone {
+                boats.remove(&id);
+            }
+        });
+        if !packets.is_empty() {
+            self.hub.send_many_about(packets);
+        }
+        self.hub.remove_tracked(&gone);
+    }
+
+    /// `AbstractBoat.getStatus`: сверху вниз вода, трение земли, воздух.
+    fn boat_status(&self, b: &mut Boat, w: &WorldView<'_>) -> Status {
+        if let Some(status) = self.boat_underwater(b, w) {
+            let (_, hi) = b.bounds();
+            b.water_level = hi[1];
+            return status;
+        }
+        if self.boat_check_in_water(b, w) {
+            return Status::InWater;
+        }
+        let friction = self.boat_ground_friction(b, w);
+        if friction > 0.0 {
+            b.land_friction = friction;
+            Status::OnLand
+        } else {
+            Status::InAir
+        }
+    }
+
+    /// Высота воды в клетке (`FluidState.getHeight`): источник 8/9, течение
+    /// `(8 − уровень)/9`, падающая — 8/9.
+    fn water_height(&self, w: &WorldView<'_>, p: [i32; 3]) -> f32 {
+        let Some(state) = w.block(p) else {
+            return 0.0;
+        };
+        match crate::fluids::state_fluid(&self.survival.placement, state) {
+            Some(f) if f.kind == crate::fluids::Kind::Water => f.amount as f32 / 9.0,
+            _ => 0.0,
+        }
+    }
+
+    /// `EntityFluidInteraction` + `CurrentAccumulator`: сумма течений воды
+    /// под коробкой, нормированная, с силой 0.014 (и минимумом 0.0045, если
+    /// лодка стоит).
+    fn apply_fluid_current(&self, b: &mut Boat, w: &WorldView<'_>) {
+        let (lo, hi) = b.bounds();
+        let x0 = lo[0].floor() as i32;
+        let y0 = lo[1].floor() as i32;
+        let z0 = lo[2].floor() as i32;
+        let x1 = hi[0].ceil() as i32 - 1;
+        let y1 = hi[1].ceil() as i32 - 1;
+        let z1 = hi[2].ceil() as i32 - 1;
+        let mut height = 0.0f64;
+        let mut acc = [0.0; 3];
+        let mut any = false;
+        for x in x0..=x1 {
+            for y in y0..=y1 {
+                for z in z0..=z1 {
+                    let Some(state) = w.block([x, y, z]) else {
+                        continue;
+                    };
+                    let Some(f) = crate::fluids::state_fluid(&self.survival.placement, state)
+                    else {
+                        continue;
+                    };
+                    if f.kind != crate::fluids::Kind::Water {
+                        continue;
+                    }
+                    let top = y as f64 + f.amount as f64 / 9.0;
+                    if top < lo[1] {
+                        continue;
+                    }
+                    any = true;
+                    height = height.max(top - lo[1]);
+                    let mut flow = self.fluid_flow(w, [x, y, z]);
+                    if height < 0.4 {
+                        for v in &mut flow {
+                            *v *= height;
+                        }
+                    }
+                    for (a, v) in acc.iter_mut().zip(flow) {
+                        *a += v;
+                    }
+                }
+            }
+        }
+        let len = (acc[0] * acc[0] + acc[2] * acc[2]).sqrt();
+        if !any || len * len < 1.0e-5 {
+            return;
+        }
+        let mut impulse = [acc[0] / len * 0.014, 0.0, acc[2] / len * 0.014];
+        if b.vel[0].abs() < 0.003 && b.vel[2].abs() < 0.003 {
+            let l = (impulse[0] * impulse[0] + impulse[2] * impulse[2]).sqrt();
+            if l < 0.004_5 {
+                impulse = [impulse[0] / l * 0.0045, 0.0, impulse[2] / l * 0.0045];
+            }
+        }
+        b.vel[0] += impulse[0];
+        b.vel[1] += impulse[1];
+        b.vel[2] += impulse[2];
+    }
+
+    /// `FlowingFluid.getFlow`: разница высот воды с соседями (в том числе
+    /// с водой под пустой клеткой).
+    fn fluid_flow(&self, w: &WorldView<'_>, p: [i32; 3]) -> [f64; 3] {
+        let own = self.water_height(w, p);
+        if own <= 0.0 {
+            return [0.0; 3];
+        }
+        let mut flow = [0.0f64; 3];
+        for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            let n = [p[0] + dx, p[1], p[2] + dz];
+            let nh = self.water_height(w, n);
+            let distance = if nh > 0.0 {
+                own - nh
+            } else {
+                let below = self.water_height(w, [n[0], n[1] - 1, n[2]]);
+                if below > 0.0 {
+                    own - (below - 0.888_888_9)
+                } else {
+                    0.0
+                }
+            };
+            flow[0] += dx as f64 * distance as f64;
+            flow[2] += dz as f64 * distance as f64;
+        }
+        let len = (flow[0] * flow[0] + flow[2] * flow[2]).sqrt();
+        if len > 0.0 {
+            flow[0] /= len;
+            flow[2] /= len;
+        }
+        flow
+    }
+
+    /// `AbstractBoat.getWaterLevelAbove`: верх воды над коробкой (или
+    /// `maxY + 1`, если воды нет).
+    fn boat_water_level_above(&self, b: &Boat, w: &WorldView<'_>) -> f32 {
+        let (lo, hi) = b.bounds();
+        let min_x = lo[0].floor() as i32;
+        let max_x = hi[0].ceil() as i32;
+        let min_y = hi[1].floor() as i32;
+        let max_y = (hi[1] - b.last_yd).ceil() as i32;
+        let min_z = lo[2].floor() as i32;
+        let max_z = hi[2].ceil() as i32;
+        for y in min_y..max_y {
+            let mut block_height = 0.0f32;
+            'x: for x in min_x..max_x {
+                for z in min_z..max_z {
+                    block_height = block_height.max(self.water_height(w, [x, y, z]));
+                    if block_height >= 1.0 {
+                        break 'x;
+                    }
+                }
+            }
+            if block_height < 1.0 {
+                return y as f32 + block_height;
+            }
+        }
+        (max_y + 1) as f32
+    }
+
+    /// `AbstractBoat.getGroundFriction`: среднее трение блоков под дном,
+    /// задевающих коробку.
+    fn boat_ground_friction(&self, b: &Boat, w: &WorldView<'_>) -> f32 {
+        let (lo, hi) = b.bounds();
+        let box_lo = [lo[0], lo[1] - 0.001, lo[2]];
+        let box_hi = [hi[0], lo[1], hi[2]];
+        let x0 = box_lo[0].floor() as i32 - 1;
+        let x1 = box_hi[0].ceil() as i32 + 1;
+        let y0 = box_lo[1].floor() as i32 - 1;
+        let y1 = box_hi[1].ceil() as i32 + 1;
+        let z0 = box_lo[2].floor() as i32 - 1;
+        let z1 = box_hi[2].ceil() as i32 + 1;
+        let mut friction = 0.0f32;
+        let mut count = 0i32;
+        for x in x0..x1 {
+            for z in z0..z1 {
+                let edges = i32::from(x == x0 || x == x1 - 1) + i32::from(z == z0 || z == z1 - 1);
+                if edges == 2 {
+                    continue;
+                }
+                for y in y0..y1 {
+                    if edges > 0 && (y == y0 || y == y1 - 1) {
+                        continue;
+                    }
+                    let Some(state) = w.block([x, y, z]) else {
+                        continue;
+                    };
+                    let name = self.state_name(state);
+                    // `LilyPadBlock`: лист не даёт трения.
+                    if name.ends_with(":lily_pad") {
+                        continue;
+                    }
+                    let touches = self.collision_boxes(state).iter().any(|s| {
+                        let a = [
+                            s[0] + x as f64,
+                            s[1] + y as f64,
+                            s[2] + z as f64,
+                            s[3] + x as f64,
+                            s[4] + y as f64,
+                            s[5] + z as f64,
+                        ];
+                        a[3] > box_lo[0]
+                            && a[0] < box_hi[0]
+                            && a[4] > box_lo[1]
+                            && a[1] < box_hi[1]
+                            && a[5] > box_lo[2]
+                            && a[2] < box_hi[2]
+                    });
+                    if touches {
+                        friction += block_friction(name);
+                        count += 1;
+                    }
+                }
+            }
+        }
+        if count == 0 {
+            0.0
+        } else {
+            friction / count as f32
+        }
+    }
+
+    /// `AbstractBoat.checkInWater`: коробка задевает воду — запомнить
+    /// уровень и вернуть `true`.
+    fn boat_check_in_water(&self, b: &mut Boat, w: &WorldView<'_>) -> bool {
+        let (lo, hi) = b.bounds();
+        let min_x = lo[0].floor() as i32;
+        let max_x = hi[0].ceil() as i32;
+        let min_y = lo[1].floor() as i32;
+        let max_y = (lo[1] + 0.001).ceil() as i32;
+        let min_z = lo[2].floor() as i32;
+        let max_z = hi[2].ceil() as i32;
+        let mut in_water = false;
+        b.water_level = f64::NEG_INFINITY;
+        for x in min_x..max_x {
+            for y in min_y..max_y {
+                for z in min_z..max_z {
+                    let h = self.water_height(w, [x, y, z]);
+                    if h <= 0.0 {
+                        continue;
+                    }
+                    let height = y as f64 + h as f64;
+                    b.water_level = b.water_level.max(height);
+                    in_water |= lo[1] < height;
+                }
+            }
+        }
+        in_water
+    }
+
+    /// `AbstractBoat.isUnderwater`: коробка целиком под водой.
+    fn boat_underwater(&self, b: &Boat, w: &WorldView<'_>) -> Option<Status> {
+        let (lo, hi) = b.bounds();
+        let max_y = hi[1] + 0.001;
+        let x0 = lo[0].floor() as i32;
+        let x1 = hi[0].ceil() as i32;
+        let y0 = hi[1].floor() as i32;
+        let y1 = max_y.ceil() as i32;
+        let z0 = lo[2].floor() as i32;
+        let z1 = hi[2].ceil() as i32;
+        let mut under_water = false;
+        for x in x0..x1 {
+            for y in y0..y1 {
+                for z in z0..z1 {
+                    let Some(state) = w.block([x, y, z]) else {
+                        continue;
+                    };
+                    let Some(f) = crate::fluids::state_fluid(&self.survival.placement, state)
+                    else {
+                        continue;
+                    };
+                    if f.kind != crate::fluids::Kind::Water {
+                        continue;
+                    }
+                    let height = y as f64 + f.amount as f64 / 9.0;
+                    if max_y >= height {
+                        continue;
+                    }
+                    if f.source {
+                        under_water = true;
+                    } else {
+                        return Some(Status::UnderFlowingWater);
+                    }
+                }
+            }
+        }
+        under_water.then_some(Status::UnderWater)
+    }
+
+    /// `AbstractBoat.floatBoat`: гравитация, плавучесть, трение.
+    fn float_boat(&self, b: &mut Boat, w: &WorldView<'_>) {
+        let mut vspeed = -GRAVITY;
+        let mut buoyancy = 0.0f32;
+        let friction;
+        if b.old_status == Status::InAir && b.status != Status::InAir && b.status != Status::OnLand
+        {
+            // Вход в воду: лодку ставит на поверхность, вертикаль гасится.
+            b.water_level = b.pos[1] + HEIGHT;
+            let target = self.boat_water_level_above(b, w) as f64 - HEIGHT + 0.101;
+            let (lo, hi) = b.bounds();
+            let dy = target - b.pos[1];
+            let (l, h) = ([lo[0], lo[1] + dy, lo[2]], [hi[0], hi[1] + dy, hi[2]]);
+            if self.boat_boxes(l, h, w).is_empty() {
+                b.pos[1] = target;
+                b.vel[1] = 0.0;
+                b.last_yd = 0.0;
+            }
+            b.status = Status::InWater;
+            return;
+        }
+        match b.status {
+            Status::InWater => {
+                buoyancy = ((b.water_level - b.pos[1]) / HEIGHT) as f32;
+                friction = 0.9;
+            }
+            Status::UnderFlowingWater => {
+                vspeed = -7.0e-4;
+                friction = 0.9;
+            }
+            Status::UnderWater => {
+                buoyancy = 0.01;
+                friction = 0.45;
+            }
+            Status::InAir => friction = 0.9,
+            // `getControllingPassenger() instanceof Player` — у пустой лодки
+            // водителя нет, поэтому трение не делится пополам.
+            Status::OnLand => friction = b.land_friction,
+        }
+        b.vel[0] *= friction as f64;
+        b.vel[1] += vspeed;
+        b.vel[2] *= friction as f64;
+        if buoyancy > 0.0 {
+            b.vel[1] = (b.vel[1] + buoyancy as f64 * (GRAVITY / 0.65)) * 0.75;
+        }
+    }
+
+    /// `Entity.move(MoverType.SELF, delta)` для коробки лодки: подъём по
+    /// осям Y, затем большей из X/Z, и мировой бордер.
+    fn move_boat(&self, b: &mut Boat, w: &WorldView<'_>, now: i64) -> [f64; 3] {
+        let mv = b.vel;
+        let (lo, hi) = b.bounds();
+        let l = [
+            lo[0] + mv[0].min(0.0),
+            lo[1] + mv[1].min(0.0),
+            lo[2] + mv[2].min(0.0),
+        ];
+        let h = [
+            hi[0] + mv[0].max(0.0),
+            hi[1] + mv[1].max(0.0),
+            hi[2] + mv[2].max(0.0),
+        ];
+        let got = collide_all(lo, hi, mv, &self.boat_boxes(l, h, w));
+        let old = b.pos;
+        b.pos = [old[0] + got[0], old[1] + got[1], old[2] + got[2]];
+        let clipped = self.border_at(now).clip_movement(now, old, b.pos, WIDTH);
+        for axis in [0, 2] {
+            if clipped[axis] != b.pos[axis] {
+                b.pos[axis] = clipped[axis];
+            }
+        }
+        // `verticalCollisionBelow` == упёрлись при движении вниз.
+        b.on_ground = got[1] != mv[1] && mv[1] < 0.0;
+        got
+    }
+
+    /// Коробки блоков, задевающих область `lo..hi`.
+    fn boat_boxes(&self, lo: [f64; 3], hi: [f64; 3], w: &WorldView<'_>) -> Vec<[f64; 6]> {
+        let r = |v: f64| (v - COLLIDE_EPS).floor() as i32;
+        let mut out = Vec::new();
+        for x in r(lo[0])..=r(hi[0] + 2.0 * COLLIDE_EPS) {
+            for y in r(lo[1]) - 1..=r(hi[1] + 2.0 * COLLIDE_EPS) {
+                for z in r(lo[2])..=r(hi[2] + 2.0 * COLLIDE_EPS) {
+                    let Some(state) = w.block([x, y, z]) else {
+                        continue;
+                    };
+                    for s in self.collision_boxes(state) {
+                        let a = [
+                            s[0] + x as f64,
+                            s[1] + y as f64,
+                            s[2] + z as f64,
+                            s[3] + x as f64,
+                            s[4] + y as f64,
+                            s[5] + z as f64,
+                        ];
+                        if a[3] > lo[0]
+                            && a[0] < hi[0]
+                            && a[4] > lo[1]
+                            && a[1] < hi[1]
+                            && a[5] > lo[2]
+                            && a[2] < hi[2]
+                        {
+                            out.push(a);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// `getDefaultGravity` лодки.
+const GRAVITY: f64 = 0.04;
+/// Допуск `Shapes.collide`.
+const COLLIDE_EPS: f64 = 1e-7;
+
+impl Boat {
+    fn bounds(&self) -> ([f64; 3], [f64; 3]) {
+        let half = WIDTH / 2.0;
+        (
+            [self.pos[0] - half, self.pos[1], self.pos[2] - half],
+            [self.pos[0] + half, self.pos[1] + HEIGHT, self.pos[2] + half],
+        )
+    }
+}
+
+/// `Block.getFriction`: лёд и слизь скользят, остальное — 0.6.
+fn block_friction(name: &str) -> f32 {
+    if name.ends_with(":blue_ice") {
+        0.989
+    } else if name.ends_with(":ice")
+        || name.ends_with(":packed_ice")
+        || name.ends_with(":frosted_ice")
+    {
+        0.98
+    } else if name.ends_with(":slime_block") {
+        0.8
+    } else {
+        0.6
+    }
+}
+
+/// `Shapes.collide`: сколько коробка `lo..hi` пройдёт по оси `axis` на `d`.
+fn collide(lo: [f64; 3], hi: [f64; 3], axis: usize, mut d: f64, boxes: &[[f64; 6]]) -> f64 {
+    if d == 0.0 {
+        return 0.0;
+    }
+    let (o1, o2) = ((axis + 1) % 3, (axis + 2) % 3);
+    for b in boxes {
+        let overlaps = |o: usize| b[o + 3] - COLLIDE_EPS > lo[o] && b[o] + COLLIDE_EPS < hi[o];
+        if !overlaps(o1) || !overlaps(o2) {
+            continue;
+        }
+        if d > 0.0 && b[axis] >= hi[axis] - COLLIDE_EPS {
+            d = d.min(b[axis] - hi[axis]);
+        } else if d < 0.0 && b[axis + 3] <= lo[axis] + COLLIDE_EPS {
+            d = d.max(b[axis + 3] - lo[axis]);
+        }
+    }
+    d
+}
+
+/// `Entity.collideWithShapes`: оси по `Direction.axisStepOrder` — Y, затем
+/// большая из X и Z.
+fn collide_all(lo: [f64; 3], hi: [f64; 3], mv: [f64; 3], boxes: &[[f64; 6]]) -> [f64; 3] {
+    let order = if mv[0].abs() < mv[2].abs() {
+        [1, 2, 0]
+    } else {
+        [1, 0, 2]
+    };
+    let mut done = [0.0; 3];
+    for axis in order {
+        let l = [lo[0] + done[0], lo[1] + done[1], lo[2] + done[2]];
+        let h = [hi[0] + done[0], hi[1] + done[1], hi[2] + done[2]];
+        done[axis] = collide(l, h, axis, mv[axis], boxes);
+    }
+    done
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collide_all_stops_at_wall_and_floor() {
+        // Стена x∈[1,2] и пол y∈[-1,0] под коробкой.
+        let boxes = [
+            [1.0, 0.0, 0.0, 2.0, 1.0, 1.0],
+            [0.0, -1.0, 0.0, 2.0, 0.0, 1.0],
+        ];
+        let got = collide_all([0.0, 0.0, 0.0], [0.5, 0.5, 0.5], [2.0, -1.0, 0.0], &boxes);
+        assert!((got[0] - 0.5).abs() < 1e-9, "{got:?}");
+        assert!(got[1].abs() < 1e-9, "{got:?}");
+        assert!(got[2].abs() < 1e-9, "{got:?}");
+    }
 
     #[test]
     fn escape_vector_steps_past_the_boat() {

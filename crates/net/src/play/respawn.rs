@@ -73,7 +73,7 @@ pub(super) enum AnchorUse {
 
 impl PlayPlan {
     /// Коробки коллизии; без `shapes.csv` твёрдое — полный куб.
-    fn collision_boxes(&self, state: u32) -> Vec<[f64; 6]> {
+    pub(super) fn collision_boxes(&self, state: u32) -> Vec<[f64; 6]> {
         if let Some(p) = self.survival.physics.as_deref() {
             return p.boxes_of(state).to_vec();
         }

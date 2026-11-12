@@ -69,6 +69,34 @@ async fn main() {
         w.var_int(sb("chat_command")).string(c);
         w.buf
     };
+    // Своя площадка: пробы не должны зависеть от того, что сохранилось в
+    // мире (чанки с правками могут выгрузиться без записи на диск).
+    let (bx, bz) = (3100, 3100);
+    for line in [
+        "kill @e[type=minecraft:oak_boat]".to_string(),
+        format!(
+            "fill {} {} {} {} {} {} minecraft:air",
+            bx - 10,
+            64,
+            bz - 10,
+            bx + 10,
+            68,
+            bz + 10
+        ),
+        format!(
+            "fill {} {} {} {} {} {} minecraft:stone",
+            bx - 10,
+            63,
+            bz - 10,
+            bx + 10,
+            63,
+            bz + 10
+        ),
+        format!("tp boater {} 64 {}", bx as f64 + 0.5, bz as f64 + 0.5),
+    ] {
+        c.send_raw(&cmd(&line)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
     c.send_raw(&cmd("gamemode survival")).await.unwrap();
     c.send_raw(&cmd("clear boater")).await.unwrap();
     c.send_raw(&cmd("give boater minecraft:oak_boat 2"))
@@ -144,12 +172,20 @@ async fn main() {
     c.send_raw(&w.buf).await.unwrap();
     c.move_to(off).await.unwrap();
 
-    // Разбить: пять ударов кулаком (10 урона каждый, ломается после 40).
-    for _ in 0..5 {
-        let mut w = Writer::new();
-        w.var_int(sb("attack")).var_int(boat);
-        c.send_raw(&w.buf).await.unwrap();
-    }
+    // Разбить: меч даёт 80 урона за удар — лодка ломается сразу
+    // (урон копится до 40, дальше предмет и содержимое падают).
+    c.send_raw(&cmd("clear boater")).await.unwrap();
+    c.send_raw(&cmd("give boater minecraft:netherite_sword 1"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let mut w = Writer::new();
+    w.var_int(sb("set_carried_item")).u16(0);
+    c.send_raw(&w.buf).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut w = Writer::new();
+    w.var_int(sb("attack")).var_int(boat);
+    c.send_raw(&w.buf).await.unwrap();
     let mut removed = false;
     let mut dropped = None;
     while let Some(ev) = wait(&mut c, 3, |e| match e {
@@ -170,10 +206,18 @@ async fn main() {
         }
     }
     println!("broken: removed={removed} drop={dropped:?}");
+    assert!(removed, "лодка не сломалась от удара мечом");
+    assert!(dropped.is_some(), "из лодки не выпал предмет");
 
-    // Вторая лодка (лодки не стакаются: она в слоте 2 хотбара) остаётся до перезапуска.
+    // Вторая лодка: выдаём заново и ставим в первый слот (лодки не
+    // стакаются, поэтому `give 2` может дать один слот).
+    c.send_raw(&cmd("clear boater")).await.unwrap();
+    c.send_raw(&cmd("give boater minecraft:oak_boat 1"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
     let mut w = Writer::new();
-    w.var_int(sb("set_carried_item")).u16(1);
+    w.var_int(sb("set_carried_item")).u16(0);
     c.send_raw(&w.buf).await.unwrap();
     let mut w = Writer::new();
     w.var_int(sb("move_player_rot")).f32(180.0).f32(60.0).u8(1);
@@ -191,5 +235,7 @@ async fn main() {
     .await;
     println!("second boat {second:?}");
     c.send_raw(&cmd("save-all")).await.unwrap();
+    // Вернуть бота на естественную землю: вход в пустоту убивает игрока.
+    c.send_raw(&cmd("tp boater 3100.5 4 3100.5")).await.unwrap();
     tokio::time::sleep(Duration::from_secs(3)).await;
 }

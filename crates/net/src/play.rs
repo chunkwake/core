@@ -10792,6 +10792,7 @@ impl PlayPlan {
         self.tick_lightning();
         self.tick_mobs();
         self.tick_minecarts();
+        self.tick_boats();
         self.tick_item_frames();
         self.tick_paintings();
         self.tick_beacons();
