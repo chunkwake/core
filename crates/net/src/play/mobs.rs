@@ -1834,7 +1834,14 @@ impl PlayPlan {
         if target_uuid == uuid || matches!(mode, 1 | 3) {
             return None;
         }
-        let (pos, _, _) = self.player_at(uuid)?;
+        let (pos, yaw, _) = self.player_at(uuid)?;
+        let on_ground = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .get(&uuid)
+            .is_some_and(|p| p.on_ground);
         let slot = inv.held_slot();
         let held = inv.slots[slot];
         let item = held.and_then(|s| self.survival.items.get(s.item as usize));
@@ -1860,6 +1867,16 @@ impl PlayPlan {
         } else {
             0.0
         };
+        let full = hit.scale > 0.9;
+        let sprint_knock = vitals.sprinting && full;
+        let sword = held.is_some_and(|s| {
+            self.survival
+                .item_tags
+                .get("minecraft:swords")
+                .is_some_and(|set| set.contains(self.item_name(s.item)))
+        });
+        let sweep = full && !hit.crit && !sprint_knock && on_ground && sword;
+        let sweeping = level("minecraft:sweeping_edge");
         let mut damage = Self::melee_damage(base, bonus, hit.scale, hit.crit);
         let fall = vitals.fall_distance() as f32;
         let smash = held.is_some_and(|s| self.item_name(s.item) == "minecraft:mace")
@@ -1907,6 +1924,32 @@ impl PlayPlan {
             self.hub.send(
                 None,
                 play::set_entity_motion(self.ids.set_entity_motion, target, vel),
+            );
+        }
+        if sweep {
+            self.play_sound(
+                None,
+                "minecraft:entity.player.attack.sweep",
+                crate::sounds::PLAYERS,
+                pos,
+                1.0,
+                1.0,
+            );
+            self.sweep_attack(
+                uuid,
+                target_pos,
+                (0.6, 1.8),
+                pos,
+                yaw,
+                SweepHit {
+                    scale: hit.scale,
+                    slot,
+                    item_damage: base,
+                    sharpness: bonus,
+                    sweeping,
+                },
+                None,
+                Some(target_uuid),
             );
         }
         if smash {
@@ -1983,7 +2026,7 @@ impl PlayPlan {
         let sweep = full && !crit && !sprint_knock && on_ground && sword;
         let sweeping = level("minecraft:sweeping_edge");
         let species = self.sim().mobs.lock().unwrap().get(&target)?.mob.species;
-        {
+        let (target_box_pos, target_box_size) = {
             let mobs = self.sim().mobs.lock().unwrap();
             let e = mobs.get(&target)?;
             // `AttackRange.isInRange`: дальность предмета в руке (у копья —
@@ -1998,7 +2041,8 @@ impl PlayPlan {
             ) {
                 return None;
             }
-        }
+            (e.mob.pos, e.mob.size())
+        };
         // `Player.onAttack`: заряд сбрасывается до расчёта урона.
         vitals.reset_attack();
         match self
@@ -2125,7 +2169,8 @@ impl PlayPlan {
             );
             self.sweep_attack(
                 uuid,
-                target,
+                target_box_pos,
+                target_box_size,
                 pos,
                 yaw,
                 SweepHit {
@@ -2135,6 +2180,8 @@ impl PlayPlan {
                     sharpness: bonus,
                     sweeping,
                 },
+                Some(target),
+                None,
             );
         }
         // `EnchantmentHelper` бонус (Острота и т.п.) — «магический крит».
@@ -2355,9 +2402,20 @@ impl PlayPlan {
         }
     }
 
-    /// `Player.doSweepAttack`: `1 + sweeping_damage_ratio × база` урона всем
-    /// рядом с целью, всё умножается на заряд.
-    fn sweep_attack(&self, uuid: Uuid, target: i32, pos: [f64; 3], yaw: f32, sweep: SweepHit) {
+    /// `Player.doSweepAttack`: `1 + sweeping_damage_ratio × урон` всем живым
+    /// вокруг цели, кроме самой цели и союзников. Бьёт и мобов, и игроков.
+    #[allow(clippy::too_many_arguments)]
+    fn sweep_attack(
+        &self,
+        uuid: Uuid,
+        target_pos: [f64; 3],
+        target_size: (f64, f64),
+        pos: [f64; 3],
+        yaw: f32,
+        sweep: SweepHit,
+        exclude_mob: Option<i32>,
+        exclude_player: Option<Uuid>,
+    ) {
         let amount = Self::sweep_damage(
             sweep.item_damage,
             sweep.sharpness,
@@ -2365,23 +2423,31 @@ impl PlayPlan {
             sweep.scale,
         );
         let slot = sweep.slot;
+        let Some(name) = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .get(&uuid)
+            .map(|p| p.entry.name.clone())
+        else {
+            return;
+        };
+        let cause = Cause::Player(survival::intern_name(&name));
         let mut hits = Vec::new();
         {
             let mut mobs = self.sim().mobs.lock().unwrap();
-            let Some((tpos, tsize)) = mobs.get(&target).map(|e| (e.mob.pos, e.mob.size())) else {
-                return;
-            };
             for (&id, e) in mobs.iter_mut() {
-                if id == target || !e.mob.alive() {
+                if Some(id) == exclude_mob || !e.mob.alive() {
                     continue;
                 }
                 let p = e.mob.pos;
                 let size = e.mob.size();
-                // AABB цели, расширенный на (1.0, 0.25, 1.0).
-                if (p[0] - tpos[0]).abs() > tsize.0 / 2.0 + 1.0 + size.0 / 2.0
-                    || (p[2] - tpos[2]).abs() > tsize.0 / 2.0 + 1.0 + size.0 / 2.0
-                    || p[1] > tpos[1] + tsize.1 + 0.25
-                    || p[1] + size.1 < tpos[1] - 0.25
+                // AABB цели, раздутый на (1.0, 0.25, 1.0).
+                if (p[0] - target_pos[0]).abs() > target_size.0 / 2.0 + 1.0 + size.0 / 2.0
+                    || (p[2] - target_pos[2]).abs() > target_size.0 / 2.0 + 1.0 + size.0 / 2.0
+                    || p[1] > target_pos[1] + target_size.1 + 0.25
+                    || p[1] + size.1 < target_pos[1] - 0.25
                 {
                     continue;
                 }
@@ -2389,7 +2455,7 @@ impl PlayPlan {
                 if d2 >= 9.0 {
                     continue;
                 }
-                // `LivingEntity.hurtServer` затем `knockback(0.4)`.
+                // `LivingEntity.hurtServer` вместе с `knockback(0.4)`.
                 let r = mb::hurt(
                     &mut e.mob,
                     amount,
@@ -2424,6 +2490,55 @@ impl PlayPlan {
                 self.emit_vibration(p, "minecraft:entity_die");
             }
         }
+        // Игроки в той же области: урон считается в их сессии.
+        let mut hits = Vec::new();
+        {
+            let players = self.hub.players.lock().unwrap();
+            for (&other, p) in players.iter() {
+                if Some(other) == exclude_player
+                    || other == uuid
+                    || matches!(p.entry.game_mode, 1 | 3)
+                {
+                    continue;
+                }
+                let at = p.pos;
+                let (width, height) = (0.6, 1.8);
+                if (at[0] - target_pos[0]).abs() > target_size.0 / 2.0 + 1.0 + width / 2.0
+                    || (at[2] - target_pos[2]).abs() > target_size.0 / 2.0 + 1.0 + width / 2.0
+                    || at[1] > target_pos[1] + target_size.1 + 0.25
+                    || at[1] + height < target_pos[1] - 0.25
+                {
+                    continue;
+                }
+                let d2: f64 = (0..3).map(|i| (at[i] - pos[i]).powi(2)).sum();
+                if d2 >= 9.0 {
+                    continue;
+                }
+                hits.push((p.entity_id, other, at, p.on_ground));
+            }
+        }
+        for (id, other, at, on_ground) in hits {
+            if !self.push_control(other, Control::Hurt(amount, cause, Some(pos), 0.0)) {
+                continue;
+            }
+            let (dx, dz) = (at[0] - pos[0], at[2] - pos[2]);
+            let len = (dx * dx + dz * dz).sqrt();
+            if len > 1e-6 {
+                let vel = [
+                    -dx / len * 0.4,
+                    if on_ground { 0.4 } else { 0.0 },
+                    -dz / len * 0.4,
+                ];
+                self.hub.send(
+                    None,
+                    play::set_entity_motion(self.ids.set_entity_motion, id, vel),
+                );
+            }
+            self.hub
+                .send_about(id, play::hurt_animation(self.ids.hurt_animation, id, yaw));
+            self.emit_vibration(at, "minecraft:entity_damage");
+        }
+        // Частицы `sweep_attack` перед игроком.
         if let Some(&particle) = self
             .particle_types
             .lock()
