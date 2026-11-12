@@ -434,6 +434,18 @@ pub(super) fn summon(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         ctx.plan.summon_orb(coords, value)
     } else if name == "minecraft:area_effect_cloud" {
         ctx.plan.summon_cloud(coords, nbt.as_ref())
+    } else if name == "minecraft:eye_of_ender" {
+        let vel = nbt
+            .as_ref()
+            .and_then(|n| n.get("Motion").and_then(Tag::as_list))
+            .map(|list| {
+                list.iter()
+                    .filter_map(super::snbt::number)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| v.len() >= 3)
+            .map_or([0.0; 3], |v| [v[0], v[1], v[2]]);
+        ctx.plan.summon_eye(coords, vel, nbt.as_ref())
     } else {
         ctx.plan
             .summon_boat(&name, coords)

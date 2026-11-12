@@ -425,11 +425,15 @@ pub type TerrainFn = Arc<dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync>;
 pub type TerrainTrimFn = Arc<dyn Fn() + Send + Sync>;
 /// `/locate`: ближайшая точка от блока.
 pub type LocateFn = Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync>;
+/// `EyeOfEnder.DATA_ITEM_STACK`: индекс после данных `Entity`.
+const EYE_ITEM_META: u8 = 8;
+
 /// Летящий глаз Края.
 struct EnderEye {
     pos: [f64; 3],
     vel: [f64; 3],
-    target: [f64; 3],
+    /// Цель броска (`signalTo`); у `/summon` её нет.
+    target: Option<[f64; 3]>,
     life: u32,
     /// `surviveAfterDeath`: в конце падает предметом.
     survive: bool,
@@ -7384,7 +7388,7 @@ impl PlayPlan {
         let eye = EnderEye {
             pos,
             vel: [0.0; 3],
-            target,
+            target: Some(target),
             life: 0,
             survive: !rand::random::<u32>().is_multiple_of(5),
             stack: Stack { count: 1, ..stack },
@@ -7406,6 +7410,14 @@ impl PlayPlan {
                 0,
             ),
         );
+        self.hub.send(
+            None,
+            play::entity_meta(
+                self.ids.set_entity_data,
+                id,
+                &[(EYE_ITEM_META, play::Meta::Slot(Some(stack)))],
+            ),
+        );
         let pitch = 0.33 + rand::random::<f32>() * (0.5 - 0.33);
         self.play_sound(
             None,
@@ -7416,6 +7428,59 @@ impl PlayPlan {
             pitch,
         );
         true
+    }
+
+    /// `/summon minecraft:eye_of_ender`: глаз без цели и с `Motion` из NBT.
+    pub(super) fn summon_eye(
+        &self,
+        pos: [f64; 3],
+        vel: [f64; 3],
+        nbt: Option<&Compound>,
+    ) -> Option<i32> {
+        let mut stack = self
+            .item_id("minecraft:ender_eye")
+            .map(|item| Stack::new(item, 1));
+        if let Some(nbt) = nbt
+            && let Some(Tag::Compound(item)) = nbt.get("Item")
+            && let Some(parsed) = crate::stack_nbt::from_nbt(item, |name| self.item_id(name))
+        {
+            stack = Some(parsed);
+        }
+        let stack = stack?;
+        let eye = EnderEye {
+            pos,
+            vel,
+            target: None,
+            life: 0,
+            survive: false,
+            stack,
+        };
+        let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
+        self.sim().eyes.lock().unwrap().insert(id, eye);
+        self.mark_work();
+        self.hub.send(
+            None,
+            play::add_entity_moving(
+                self.ids.add_entity,
+                id,
+                Uuid::from_u128(rand::random()),
+                self.survival.eye_entity_type,
+                pos,
+                vel,
+                0.0,
+                0.0,
+                0,
+            ),
+        );
+        self.hub.send(
+            None,
+            play::entity_meta(
+                self.ids.set_entity_data,
+                id,
+                &[(EYE_ITEM_META, play::Meta::Slot(Some(stack)))],
+            ),
+        );
+        Some(id)
     }
 
     /// `EyeOfEnder.tick`: два шага `updateDeltaMovement` за тик, через 80
@@ -7434,7 +7499,9 @@ impl PlayPlan {
                     e.pos[1] + e.vel[1],
                     e.pos[2] + e.vel[2],
                 ];
-                e.vel = eye_motion(eye_motion(e.vel, next, e.target), next, e.target);
+                if let Some(target) = e.target {
+                    e.vel = eye_motion(eye_motion(e.vel, next, target), next, target);
+                }
                 e.pos = next;
                 e.life += 1;
                 if e.life > 80 {

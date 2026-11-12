@@ -112,6 +112,10 @@ impl PlayPlan {
             } else if let Some(c) = self.sim().clouds.lock().unwrap().get_mut(&id) {
                 c.pos = pos;
                 (c.pos, 0.0, 0.0)
+            } else if let Some(e) = self.sim().eyes.lock().unwrap().get_mut(&id) {
+                e.pos = pos;
+                e.vel[1] = 0.0;
+                (e.pos, 0.0, 0.0)
             } else {
                 return false;
             }

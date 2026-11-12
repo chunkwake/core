@@ -174,6 +174,7 @@ async fn main() {
         "minecraft:tnt",
         "minecraft:experience_orb",
         "minecraft:area_effect_cloud",
+        "minecraft:eye_of_ender",
     ] {
         p.cmd(&format!("kill @e[type={kind}]")).await;
     }
@@ -326,11 +327,38 @@ async fn main() {
         "potion_contents не сохранился: {contents}"
     );
 
+    // Глаз Эндера: /summon без цели, /tp и Item в data get.
+    let eye_from = [base[0] + 3.0, base[1] + 2.0, base[2] + 3.0];
+    let eye_to = [base[0] + 3.0, base[1] + 2.0, base[2] - 2.0];
+    p.cmd(&format!(
+        "summon minecraft:eye_of_ender {} {} {} {{Motion:[0.0,0.0,0.0]}}",
+        eye_from[0], eye_from[1], eye_from[2]
+    ))
+    .await;
+    p.cmd(&format!(
+        "tp @e[type=minecraft:eye_of_ender,limit=1,sort=nearest] {} {} {}",
+        eye_to[0], eye_to[1], eye_to[2]
+    ))
+    .await;
+    let at = p.pos("minecraft:eye_of_ender").await;
+    assert!(
+        (at[0] - eye_to[0]).abs() < 0.1 && (at[2] - eye_to[2]).abs() < 0.1,
+        "глаз Эндера не телепортировался: {at:?}, ждали {eye_to:?}"
+    );
+    let item = p
+        .data("@e[type=minecraft:eye_of_ender,limit=1,sort=nearest] Item")
+        .await;
+    assert!(
+        item.contains("minecraft:ender_eye"),
+        "Item глаза не сохранился: {item}"
+    );
+
     p.cmd("kill @e[type=minecraft:arrow]").await;
     p.cmd("kill @e[type=minecraft:oak_boat]").await;
     p.cmd("kill @e[type=minecraft:minecart]").await;
     p.cmd("kill @e[type=minecraft:tnt]").await;
     p.cmd("kill @e[type=minecraft:experience_orb]").await;
     p.cmd("kill @e[type=minecraft:area_effect_cloud]").await;
+    p.cmd("kill @e[type=minecraft:eye_of_ender]").await;
     println!("tp_entity: ok");
 }

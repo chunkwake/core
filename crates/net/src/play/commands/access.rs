@@ -211,6 +211,12 @@ impl PlayPlan {
                 ));
             }
         }
+        {
+            let eyes = self.sim().eyes.lock().unwrap();
+            for (entity_id, eye) in eyes.iter() {
+                out.push(entity_ref(*entity_id, eye.pos, "minecraft:eye_of_ender"));
+            }
+        }
         let tags = self.entity_tags.lock().unwrap();
         for target in &mut out {
             if let Some(held) = tags.get(&target.uuid) {
@@ -933,7 +939,8 @@ impl PlayPlan {
                 .lock()
                 .unwrap()
                 .remove(&entity_id)
-                .is_some();
+                .is_some()
+            | self.sim().eyes.lock().unwrap().remove(&entity_id).is_some();
         if removed {
             let packet =
                 chunkwake_protocol::play::remove_entities(self.ids.remove_entities, &[entity_id]);
@@ -1436,6 +1443,17 @@ impl PlayPlan {
                     let mut contents = Compound::new();
                     contents.insert("custom_effects".into(), Tag::List(list));
                     root.insert("potion_contents".into(), Tag::Compound(contents));
+                }
+                return root;
+            }
+        }
+        {
+            let eyes = self.sim().eyes.lock().unwrap();
+            if let Some(e) = eyes.get(&target.entity_id) {
+                insert_pos_rot(&mut root, e.pos, 0.0, 0.0);
+                if let Some(item) = crate::stack_nbt::to_nbt(e.stack, self.item_name(e.stack.item))
+                {
+                    root.insert("Item".into(), Tag::Compound(item));
                 }
                 return root;
             }

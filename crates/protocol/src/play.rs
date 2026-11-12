@@ -1628,6 +1628,8 @@ pub enum Meta {
     Int(i32),
     Float(f32),
     Bool(bool),
+    /// `EntityDataSerializers.ITEM_STACK` (id 7): `ItemStack.OPTIONAL_STREAM_CODEC`.
+    Slot(crate::inventory::Slot),
     /// `EntityDataSerializers.ROTATIONS` (id 9): три угла `FLOAT`.
     Rotations([f32; 3]),
     /// `EntityDataSerializers.PARTICLES` (id 17): список частиц одного типа.
@@ -1654,6 +1656,10 @@ pub fn entity_meta(id: i32, entity_id: i32, fields: &[(u8, Meta)]) -> Vec<u8> {
             }
             Meta::Bool(b) => {
                 w.u8(*i).var_int(8).bool(*b);
+            }
+            Meta::Slot(s) => {
+                w.u8(*i).var_int(7);
+                crate::inventory::write_stack(&mut w, *s);
             }
             Meta::Rotations(r) => {
                 w.u8(*i).var_int(9);
