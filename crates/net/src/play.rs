@@ -6901,6 +6901,21 @@ impl PlayPlan {
                         a,
                         &alive,
                         &mob_boxes,
+                        |owner, target| {
+                            // `Projectile.canHitEntity`: союзник без friendly
+                            // fire пропускает стрелу насквозь.
+                            let players = self.hub.players.lock().unwrap();
+                            let name = |id: Uuid| {
+                                players
+                                    .values()
+                                    .find(|p| p.entry.uuid == id)
+                                    .map(|p| p.entry.name.clone())
+                            };
+                            match (name(owner), name(target)) {
+                                (Some(a), Some(b)) => self.can_harm_player(&a, &b),
+                                _ => true,
+                            }
+                        },
                         |c| solid(w, c),
                         |c| water(w, c),
                         |from, to| border.clip_projectile(now, from, to),

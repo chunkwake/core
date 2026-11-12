@@ -224,6 +224,7 @@ pub fn step(
     a: &mut Arrow,
     players: &[(uuid::Uuid, [f64; 3])],
     mobs: &[(u128, [f64; 3], (f64, f64))],
+    can_harm: impl Fn(uuid::Uuid, uuid::Uuid) -> bool,
     solid: impl Fn([i32; 3]) -> bool,
     water: impl Fn([i32; 3]) -> bool,
     border: impl Fn([f64; 3], [f64; 3]) -> [f64; 3],
@@ -275,7 +276,10 @@ pub fn step(
         }
         if !a.firework
             && let Some(k) = players.iter().position(|(id, f)| {
-                touches(*f, p) && !remembers(a, *id) && (a.left_owner || a.owner != Some(*id))
+                touches(*f, p)
+                    && !remembers(a, *id)
+                    && (a.left_owner || a.owner != Some(*id))
+                    && a.owner.is_none_or(|owner| can_harm(owner, *id))
             })
         {
             let roll = a.crit.then(rand::random::<u32>);
@@ -423,7 +427,15 @@ mod tests {
         let target = [(uuid::Uuid::nil(), [3.0, 64.0, 0.0])];
         let mut arrow = Arrow::flight([0.0, 64.0, 0.0], [3.0, 0.3, 0.6], false);
         assert_eq!(
-            step(&mut arrow, &target, &[], |_| false, |_| false, clip),
+            step(
+                &mut arrow,
+                &target,
+                &[],
+                |_, _| true,
+                |_| false,
+                |_| false,
+                clip
+            ),
             vec![Hit::Border]
         );
         let edge = 2.0 - 1e-5_f32 as f64;
@@ -433,12 +445,31 @@ mod tests {
         assert!((arrow.vel[1] + 0.03).abs() < 1e-12);
         assert!((arrow.vel[2] + 0.06).abs() < 1e-12);
         assert!(!arrow.stuck);
-        assert!(step(&mut arrow, &[], &[], |_| false, |_| false, clip).is_empty());
+        assert!(
+            step(
+                &mut arrow,
+                &[],
+                &[],
+                |_, _| true,
+                |_| false,
+                |_| false,
+                clip
+            )
+            .is_empty()
+        );
         assert!(arrow.pos[0] < edge);
 
         let mut snowball = Arrow::flight([0.0, 64.0, 0.0], [3.0, 0.0, 0.0], true);
         assert_eq!(
-            step(&mut snowball, &target, &[], |_| false, |_| false, clip),
+            step(
+                &mut snowball,
+                &target,
+                &[],
+                |_, _| true,
+                |_| false,
+                |_| false,
+                clip
+            ),
             vec![Hit::Block]
         );
         assert_eq!(snowball.pos, [edge, 64.0, 0.0]);
@@ -452,7 +483,15 @@ mod tests {
         // Стена на x = 5.
         let mut hit = Vec::new();
         for _ in 0..20 {
-            hit = step(&mut a, &[], &[], |p| p[0] >= 5, |_| false, |_, to| to);
+            hit = step(
+                &mut a,
+                &[],
+                &[],
+                |_, _| true,
+                |p| p[0] >= 5,
+                |_| false,
+                |_, to| to,
+            );
             if !hit.is_empty() {
                 break;
             }
@@ -465,6 +504,7 @@ mod tests {
                 &mut b,
                 &[(uuid::Uuid::nil(), [1.2, 1.0, 0.5])],
                 &[],
+                |_, _| true,
                 |_| false,
                 |_| false,
                 |_, to| to,
@@ -505,6 +545,7 @@ mod tests {
             &mut own,
             &[(shooter, [0.5, 64.0, 0.5])],
             &[],
+            |_, _| true,
             |_| false,
             |_| false,
             |_, to| to,
@@ -517,6 +558,7 @@ mod tests {
             &mut pierce,
             &[(uuid::Uuid::from_u128(1), [1.2, 1.0, 0.5])],
             &[],
+            |_, _| true,
             |_| false,
             |_| false,
             |_, to| to,
@@ -531,6 +573,7 @@ mod tests {
                 &mut snowball,
                 &[],
                 &[chicken],
+                |_, _| true,
                 |_| false,
                 |_| false,
                 |_, to| to
@@ -561,6 +604,7 @@ mod tests {
                     &mut r,
                     &[(owner, [x, 80.0, 1.0])],
                     &[],
+                    |_, _| true,
                     |_| true,
                     |_| false,
                     |_, to| to
@@ -574,11 +618,53 @@ mod tests {
                 &mut r,
                 &[(owner, [7.0, 80.0, 1.0])],
                 &[],
+                |_, _| true,
                 |_| true,
                 |_| false,
                 |_, to| to
             ),
             vec![Hit::Pop]
+        );
+    }
+
+    #[test]
+    fn teammate_arrow_does_not_hit() {
+        let owner = uuid::Uuid::from_u128(1);
+        let friend = uuid::Uuid::from_u128(2);
+        let players = [(owner, [0.0, 70.0, 0.0]), (friend, [0.5, 64.0, 0.0])];
+        let arrow = || {
+            let mut a = Arrow::flight([0.0, 64.0, 0.0], [1.0, 0.0, 0.0], false);
+            a.owner = Some(owner);
+            a.left_owner = true;
+            a
+        };
+        // `Projectile.canHitEntity`: союзник без friendly fire — насквозь.
+        let mut a = arrow();
+        let hits = step(
+            &mut a,
+            &players,
+            &[],
+            |_, _| false,
+            |_| false,
+            |_| false,
+            |_, to| to,
+        );
+        assert!(hits.is_empty(), "союзник получил стрелу: {hits:?}");
+        assert!(a.pos[0] > 0.5);
+        // С разрешённым friendly fire стрела попадает.
+        let mut b = arrow();
+        let hits = step(
+            &mut b,
+            &players,
+            &[],
+            |_, _| true,
+            |_| false,
+            |_| false,
+            |_, to| to,
+        );
+        assert!(
+            matches!(hits.as_slice(), [Hit::Player(1, _, _)]),
+            "стрела не попала в союзника: {hits:?}"
         );
     }
 }
