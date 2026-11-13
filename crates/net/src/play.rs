@@ -1194,6 +1194,22 @@ fn dye_color(name: &str) -> Option<i32> {
     })
 }
 
+/// `CopperChestBlock.getFromCopperBlock`: блок меди → сундук той же
+/// окисленности (включая вощёные варианты).
+fn copper_chest_of(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "minecraft:copper_block" => "minecraft:copper_chest",
+        "minecraft:exposed_copper" => "minecraft:exposed_copper_chest",
+        "minecraft:weathered_copper" => "minecraft:weathered_copper_chest",
+        "minecraft:oxidized_copper" => "minecraft:oxidized_copper_chest",
+        "minecraft:waxed_copper_block" => "minecraft:waxed_copper_chest",
+        "minecraft:waxed_exposed_copper" => "minecraft:waxed_exposed_copper_chest",
+        "minecraft:waxed_weathered_copper" => "minecraft:waxed_weathered_copper_chest",
+        "minecraft:waxed_oxidized_copper" => "minecraft:waxed_oxidized_copper_chest",
+        _ => return None,
+    })
+}
+
 fn eye_of(feet: [f64; 3]) -> [f64; 3] {
     [feet[0], feet[1] + 1.62, feet[2]]
 }
@@ -3509,7 +3525,10 @@ impl PlayPlan {
         if self.try_spawn_snow_golem(pos) {
             return;
         }
-        self.try_spawn_iron_golem(pos);
+        if self.try_spawn_iron_golem(pos) {
+            return;
+        }
+        self.try_spawn_copper_golem(pos);
     }
 
     /// Снежный голем: тыква на двух блоках снега (`"^"`, `"#"`, `"#"`).
@@ -3543,23 +3562,23 @@ impl PlayPlan {
     /// `CarvedPumpkinBlock.trySpawnGolem`: железный голем из тыквы и блоков
     /// железа. Шаблон `ironGolemFull`: `"~^~"`, `"###"`, `"~#~"` (верхний
     /// центр - тыква, средний ряд из трёх блоков железа и центр снизу).
-    fn try_spawn_iron_golem(&self, [x, y, z]: [i32; 3]) {
+    fn try_spawn_iron_golem(&self, [x, y, z]: [i32; 3]) -> bool {
         let at = |p: [i32; 3]| self.block(p).map(|s| self.state_name(s).to_owned());
         let is = |p: [i32; 3], name: &str| at(p).as_deref() == Some(name);
         let air = |p: [i32; 3]| is(p, "minecraft:air");
         if !air([x - 1, y, z]) || !air([x + 1, y, z]) {
-            return;
+            return false;
         }
         let middle = [[x - 1, y - 1, z], [x, y - 1, z], [x + 1, y - 1, z]];
         if middle.iter().any(|&p| !is(p, "minecraft:iron_block")) {
-            return;
+            return false;
         }
         if !air([x - 1, y - 2, z]) || !air([x + 1, y - 2, z]) {
-            return;
+            return false;
         }
         let bottom = [x, y - 2, z];
         if !is(bottom, "minecraft:iron_block") {
-            return;
+            return false;
         }
         // `clearPatternBlocks`: тыква, средний ряд и нижний центр.
         for p in [[x, y, z], middle[0], middle[1], middle[2], bottom] {
@@ -3576,9 +3595,54 @@ impl PlayPlan {
             )
             .is_none()
         {
-            return;
+            return true;
         }
         self.trigger_summoned_entity(pos, crate::mobs::Species::IronGolem, 5.0);
+        true
+    }
+
+    /// Медный голем: тыква на блоке из `#minecraft:copper`; блок заменяется
+    /// медным сундуком той же окисленности (`replaceCopperBlockWithChest`).
+    fn try_spawn_copper_golem(&self, [x, y, z]: [i32; 3]) -> bool {
+        let at = |p: [i32; 3]| self.block(p).map(|s| self.state_name(s).to_owned());
+        let Some(chest) = at([x, y - 1, z]).as_deref().and_then(copper_chest_of) else {
+            return false;
+        };
+        let facing = self
+            .block([x, y, z])
+            .and_then(|s| self.survival.placement.prop(s, "facing"))
+            .unwrap_or("north")
+            .to_owned();
+        self.set_block([x, y, z], AIR);
+        self.set_block([x, y - 1, z], AIR);
+        let pos = [x as f64 + 0.5, f64::from(y) + 0.05, z as f64 + 0.5];
+        if self
+            .spawn_mob(
+                crate::mobs::Species::CopperGolem,
+                pos,
+                0.0,
+                false,
+                Some("TRIGGERED"),
+            )
+            .is_none()
+        {
+            return true;
+        }
+        self.trigger_summoned_entity(pos, crate::mobs::Species::CopperGolem, 5.0);
+        if let Some(state) = self.survival.placement.default_state(chest) {
+            let state = self
+                .survival
+                .placement
+                .with_prop(state, "facing", &facing)
+                .unwrap_or(state);
+            let state = self
+                .survival
+                .placement
+                .with_prop(state, "type", "single")
+                .unwrap_or(state);
+            self.set_block([x, y - 1, z], state);
+        }
+        true
     }
 
     /// `WitherSkullBlock.checkSpawn`: три черепа визер-скелета на

@@ -1,0 +1,25 @@
+{
+  "display": {
+    "title": {"text": "copper probe"},
+    "description": {"text": "summoned copper golem probe"},
+    "icon": {"id": "minecraft:copper_block"},
+    "frame": "task",
+    "show_toast": false,
+    "announce_to_chat": false
+  },
+  "criteria": {
+    "summoned": {
+      "trigger": "minecraft:summoned_entity",
+      "conditions": {
+        "entity": {
+          "type": "minecraft:entity_properties",
+          "entity": "this",
+          "predicate": {
+            "minecraft:entity_type": "minecraft:copper_golem"
+          }
+        }
+      }
+    }
+  },
+  "requirements": [["summoned"]]
+}

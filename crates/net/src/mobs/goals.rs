@@ -1619,7 +1619,8 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
         | Species::Phantom
         | Species::Pillager
         | Species::Wither
-        | Species::SnowGolem => {
+        | Species::SnowGolem
+        | Species::CopperGolem => {
             return (
                 Selector::new(vec![stroll_at(5, 1.0), look(6, 8.0), around(8)]),
                 Selector::default(),

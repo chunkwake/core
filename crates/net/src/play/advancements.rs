@@ -2077,9 +2077,14 @@ impl PlayPlan {
         uuid: Uuid,
         data: Vec<(String, Vec<(String, i64)>)>,
     ) {
+        // Неизвестные id (например, удалённый датапак) в ванили отбрасываются.
         let map: AdvProgress = data
             .into_iter()
-            .map(|(id, criteria)| (short(&id).to_owned(), criteria.into_iter().collect()))
+            .filter_map(|(id, criteria)| {
+                let id = short(&id);
+                self.adv(id)
+                    .map(|_| (id.to_owned(), criteria.into_iter().collect()))
+            })
             .collect();
         self.advancement_progress.lock().unwrap().insert(uuid, map);
     }

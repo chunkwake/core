@@ -126,10 +126,11 @@ async fn main() {
         "difficulty peaceful".into(),
         "gamemode creative".into(),
         "effect clear @s".into(),
-        "kill @e[type=!minecraft:player,distance=..48]".into(),
         format!("fill {} 98 4 {} 98 12 minecraft:stone", X - 4, X + 4),
         format!("fill {} 99 4 {} 103 12 minecraft:air", X - 4, X + 4),
         format!("tp @s {} 99 12.5", X as f64 + 0.5),
+        // Чанк загружен - убираем старых големов.
+        "kill @e[type=!minecraft:player,distance=..48]".into(),
         format!("advancement revoke @s only {ADV}"),
         // Верхний блок снега; нижнего пока нет - шаблон неполный.
         format!("setblock {X} 100 {Z} minecraft:snow_block"),
