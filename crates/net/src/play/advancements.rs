@@ -39,6 +39,10 @@ pub struct AdvancementCriterion {
     pub damage_tags_req: Vec<String>,
     /// `conditions.damage.blocked`.
     pub blocked: Option<bool>,
+    /// `conditions.victims[].predicate.minecraft:entity_type` (`channeled_lightning`).
+    pub victims: Vec<String>,
+    /// `conditions.distance.horizontal` (`nether_travel`).
+    pub travel_distance: Option<(f64, f64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -305,6 +309,24 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
             let blocked = damage
                 .and_then(|d| d.get("blocked"))
                 .and_then(|b| b.as_bool());
+            let mut victims = Vec::new();
+            if let Some(list) = cond
+                .and_then(|c| c.get("victims"))
+                .and_then(|v| v.as_array())
+            {
+                for victim in list {
+                    let names = victim
+                        .get("predicate")
+                        .and_then(|p| p.get("minecraft:entity_type"))
+                        .map(string_or_list)
+                        .unwrap_or_default();
+                    victims.extend(names);
+                }
+            }
+            let travel_distance = cond
+                .and_then(|c| c.get("distance"))
+                .and_then(|d| d.get("horizontal"))
+                .and_then(bounds_f64);
             criteria.push(AdvancementCriterion {
                 name: name.clone(),
                 trigger,
@@ -322,6 +344,8 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 direct_entities,
                 damage_tags_req,
                 blocked,
+                victims,
+                travel_distance,
             });
         }
     }
@@ -527,6 +551,37 @@ impl PlayPlan {
             (c.items.is_empty() || c.items.iter().any(|w| self.item_matches(w, item)))
                 && c.levels
                     .is_none_or(|(min, max)| levels >= min && levels <= max)
+        });
+    }
+
+    /// `shot_crossbow`: предмет, из которого стреляли (`conditions.item`).
+    pub(crate) fn advancement_shot_crossbow(&self, uuid: Uuid, item: &str) {
+        self.advancement_run(uuid, "minecraft:shot_crossbow", |c| {
+            c.items.is_empty() || c.items.iter().any(|w| self.item_matches(w, item))
+        });
+    }
+
+    /// `used_totem`: предмет тотема (`conditions.item`).
+    pub(crate) fn advancement_used_totem(&self, uuid: Uuid, item: &str) {
+        self.advancement_run(uuid, "minecraft:used_totem", |c| {
+            c.items.is_empty() || c.items.iter().any(|w| self.item_matches(w, item))
+        });
+    }
+
+    /// `nether_travel`: горизонталь от входа в Нижний мир.
+    pub(crate) fn advancement_nether_travel(&self, uuid: Uuid, horizontal: f64) {
+        self.advancement_run(uuid, "minecraft:nether_travel", |c| {
+            c.travel_distance
+                .is_none_or(|(min, max)| horizontal >= min && horizontal <= max)
+        });
+    }
+
+    /// `channeled_lightning`: каждый `victims` должен найтись среди поражённых.
+    pub(crate) fn advancement_channeled_lightning(&self, uuid: Uuid, struck: &[&str]) {
+        self.advancement_run(uuid, "minecraft:channeled_lightning", |c| {
+            c.victims
+                .iter()
+                .all(|want| struck.iter().any(|name| self.entity_matches(want, name)))
         });
     }
 

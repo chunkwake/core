@@ -179,7 +179,19 @@ impl PlayPlan {
         pitch: f32,
     ) -> bool {
         if target.game_mode.is_some() {
-            if let Some(player) = self.hub.players.lock().unwrap().get_mut(&target.uuid) {
+            // При смене измерения позицию выставит `switch_player_dimension`:
+            // если записать её заранее, потеряется точка входа в Нижний мир
+            // (`nether_travel`) и предыдущее положение для триггеров.
+            let here = self
+                .hub
+                .players
+                .lock()
+                .unwrap()
+                .get(&target.uuid)
+                .map(|p| p.dimension);
+            if here == Some(self.active_dim())
+                && let Some(player) = self.hub.players.lock().unwrap().get_mut(&target.uuid)
+            {
                 player.pos = pos;
                 player.yaw = yaw;
                 player.pitch = pitch;

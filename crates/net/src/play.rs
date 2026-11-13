@@ -284,6 +284,8 @@ pub struct PlayPlan {
     portal_cooldown: Mutex<FastMap<Uuid, u64>>,
     /// `PortalProcessor.portalTime` игроков, стоящих в портале.
     portal_time: Mutex<FastMap<Uuid, u32>>,
+    /// Позиция входа в Нижний мир (`ServerPlayer.enteredNetherPosition`).
+    nether_entry: Mutex<FastMap<Uuid, [f64; 3]>>,
     /// `ServerPlayer.seenCredits`: титры Края уже показаны.
     pub(crate) seen_credits: Mutex<HashSet<Uuid>>,
     /// `BukkitValues` игроков: PDC плагинов (`Player.getPersistentDataContainer`).
@@ -3013,6 +3015,7 @@ impl PlayPlan {
             server_ticks: std::sync::atomic::AtomicU64::new(0),
             portal_cooldown: Mutex::new(FastMap::default()),
             portal_time: Mutex::new(FastMap::default()),
+            nether_entry: Mutex::new(FastMap::default()),
             seen_credits: Mutex::new(HashSet::new()),
             bukkit_values: Mutex::new(FastMap::default()),
             stats: Mutex::new(FastMap::default()),
@@ -7503,11 +7506,14 @@ impl PlayPlan {
                         ) > 0
                         && self.vars.weather().thunder
                     {
-                        strikes.push([
-                            entry.mob.pos[0].floor() as i32,
-                            entry.mob.pos[1].floor() as i32,
-                            entry.mob.pos[2].floor() as i32,
-                        ]);
+                        strikes.push((
+                            owner,
+                            [
+                                entry.mob.pos[0].floor() as i32,
+                                entry.mob.pos[1].floor() as i32,
+                                entry.mob.pos[2].floor() as i32,
+                            ],
+                        ));
                     }
                     self.hub
                         .send(None, play::hurt_animation(self.ids.hurt_animation, id, 0.0));
@@ -7517,8 +7523,13 @@ impl PlayPlan {
             for (id, uuid) in killers {
                 self.set_mob_killer(id, uuid, -1);
             }
-            for pos in strikes {
-                self.thunder_strike(pos);
+            for (owner, pos) in strikes {
+                match owner {
+                    Some(owner) => self.channel_lightning(Uuid::from_u128(owner), pos),
+                    None => {
+                        self.thunder_strike(pos);
+                    }
+                }
             }
             for pos in damaged {
                 self.emit_vibration(pos, "minecraft:entity_damage");
@@ -9005,7 +9016,9 @@ impl PlayPlan {
         look: (f32, f32),
     ) {
         let mut from = to;
+        let mut before = None;
         if let Some(p) = self.hub.players.lock().unwrap().get_mut(&uuid) {
+            before = Some(p.pos);
             p.pos = pos;
             from = p.dimension;
             p.dimension = to;
@@ -9017,6 +9030,69 @@ impl PlayPlan {
         *self.active.lock().unwrap() = to;
         self.push_control(uuid, Control::DimensionChange(to, pos, look));
         self.changed_world(uuid, from, to);
+        if let Some(before) = before {
+            self.track_nether_travel(uuid, from, to, before, pos);
+        }
+    }
+
+    /// `ServerPlayer.triggerDimensionChangeTriggers`: запоминаем точку входа в
+    /// Нижний мир и при возврате в Верхний мир считаем горизонталь.
+    fn track_nether_travel(
+        &self,
+        uuid: Uuid,
+        from: Dimension,
+        to: Dimension,
+        before: [f64; 3],
+        after: [f64; 3],
+    ) {
+        let mut entries = self.nether_entry.lock().unwrap();
+        if from == Dimension::Overworld && to == Dimension::Nether {
+            entries.insert(uuid, before);
+            return;
+        }
+        if from == Dimension::Nether && to == Dimension::Overworld {
+            if let Some(entry) = entries.remove(&uuid) {
+                let dx = after[0] - entry[0];
+                let dz = after[2] - entry[2];
+                drop(entries);
+                self.advancement_nether_travel(uuid, (dx * dx + dz * dz).sqrt());
+            }
+            return;
+        }
+        if to != Dimension::Nether {
+            entries.remove(&uuid);
+        }
+    }
+
+    /// `LightningBolt`: удар молнии по цели заклинания «Проводимость» и
+    /// триггер `channeled_lightning` по всем задетым сущностям.
+    fn channel_lightning(&self, owner: Uuid, at: [i32; 3]) {
+        let pos = self.thunder_strike(at);
+        let center = [pos[0] as f64 + 0.5, pos[1] as f64, pos[2] as f64 + 0.5];
+        let inside = |p: [f64; 3]| {
+            (p[0] - center[0]).abs() <= 3.0
+                && p[1] >= center[1] - 3.0
+                && p[1] <= center[1] + 9.0
+                && (p[2] - center[2]).abs() <= 3.0
+        };
+        let mut names: Vec<String> = Vec::new();
+        for e in self.sim().mobs.lock().unwrap().values() {
+            if e.mob.alive() && inside(e.mob.pos) {
+                names.push(e.mob.species.name().to_owned());
+            }
+        }
+        for v in self.sim().villagers.lock().unwrap().values() {
+            if inside(v.pos) {
+                names.push(v.trader.entity_name().to_owned());
+            }
+        }
+        for p in self.hub.players.lock().unwrap().values() {
+            if inside(p.pos) {
+                names.push("minecraft:player".to_owned());
+            }
+        }
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        self.advancement_channeled_lightning(owner, &refs);
     }
 
     /// `SpawnInfo` для измерения: клиент по нему понимает, куда попал.
@@ -10893,6 +10969,7 @@ impl PlayPlan {
         {
             return self.send_slots(conn, inv, &[slot]).await;
         }
+        self.advancement_shot_crossbow(uuid, self.item_name(stack.item));
         let multi =
             chunkwake_protocol::components::stack_level(stack.extra, "minecraft:multishot") > 0;
         let pierce = chunkwake_protocol::components::stack_level(stack.extra, "minecraft:piercing");
@@ -23334,6 +23411,7 @@ impl PlayPlan {
             self.break_in_hand(me.entity_id, slot == survival::OFFHAND);
         }
         self.send_slots(conn, inv, &[slot]).await?;
+        self.advancement_used_totem(me.entry.uuid, self.item_name(stack.item));
         if info.clear_all {
             let old: Vec<i32> = v.effects.iter().map(|e| e.id).collect();
             v.effects.clear();
