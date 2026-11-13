@@ -1,5 +1,5 @@
 //! Образ данных запуска: всё, что сервер собирает из дерева ванильных JSON,
-//! упаковывается в `chunkwake-derived-v1/boot.v9.bin` и дальше читается одним
+//! упаковывается в `chunkwake-derived-v1/boot.v10.bin` и дальше читается одним
 //! последовательным файлом вместо тысяч открытий и разборов.
 //!
 //! Сборка образа вызывает обычные загрузчики; повторный старт их не трогает.
@@ -22,9 +22,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Версия формата. Меняется вместе с любым полем образа.
-const SCHEMA: u32 = 9;
+const SCHEMA: u32 = 10;
 const MAGIC: u32 = 0x434B_424F; // "CKBO"
-const FILE: &str = "boot.v9.bin";
+const FILE: &str = "boot.v10.bin";
 
 /// Слоты экипировки в порядке кодов образа (`ItemInfo::equip`).
 const EQUIP: [&str; 8] = [
@@ -529,12 +529,14 @@ fn w_recipes(w: &mut W, r: &Recipes) {
     for recipe in list {
         match recipe {
             Recipe::Shaped {
+                id,
                 width,
                 height,
                 cells,
                 result,
             } => {
                 w.u8(0);
+                w.str(id);
                 w.u32(*width as u32);
                 w.u32(*height as u32);
                 w.u32(cells.len() as u32);
@@ -545,10 +547,12 @@ fn w_recipes(w: &mut W, r: &Recipes) {
                 w.i32(result.1);
             }
             Recipe::Shapeless {
+                id,
                 ingredients,
                 result,
             } => {
                 w.u8(1);
+                w.str(id);
                 w.u32(ingredients.len() as u32);
                 for i in ingredients {
                     w_ingredient(w, i);
@@ -1137,6 +1141,7 @@ fn r_recipes(r: &mut R<'_>) -> Result<Recipes, DataError> {
     for _ in 0..n {
         match r.u8()? {
             0 => {
+                let id = r.str()?;
                 let width = r.u32()? as usize;
                 let height = r.u32()? as usize;
                 let m = r.count()?;
@@ -1146,6 +1151,7 @@ fn r_recipes(r: &mut R<'_>) -> Result<Recipes, DataError> {
                 }
                 let result = (r.i32()?, r.i32()?);
                 list.push(Recipe::Shaped {
+                    id,
                     width,
                     height,
                     cells,
@@ -1153,6 +1159,7 @@ fn r_recipes(r: &mut R<'_>) -> Result<Recipes, DataError> {
                 });
             }
             1 => {
+                let id = r.str()?;
                 let m = r.count()?;
                 let mut ingredients = Vec::with_capacity(m);
                 for _ in 0..m {
@@ -1160,6 +1167,7 @@ fn r_recipes(r: &mut R<'_>) -> Result<Recipes, DataError> {
                 }
                 let result = (r.i32()?, r.i32()?);
                 list.push(Recipe::Shapeless {
+                    id,
                     ingredients,
                     result,
                 });
@@ -1482,6 +1490,7 @@ mod tests {
         ];
         let recipes = Recipes::from_parts(
             vec![Recipe::Shaped {
+                id: "minecraft:test".into(),
                 width: 1,
                 height: 1,
                 cells: vec![Some(Arc::new(HashSet::from([1])))],

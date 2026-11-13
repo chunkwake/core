@@ -56,12 +56,14 @@ mod tests {
         let data = SmithingData {
             recipes: vec![
                 Smithing {
+                    id: "minecraft:transform".into(),
                     template: Some(ing(1)),
                     base: ing(2),
                     addition: Some(ing(3)),
                     kind: SmithingKind::Transform(4),
                 },
                 Smithing {
+                    id: "minecraft:trim".into(),
                     template: Some(ing(5)),
                     base: ing(4),
                     addition: Some(ing(6)),

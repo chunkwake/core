@@ -12,15 +12,27 @@ pub type Ingredient = Arc<HashSet<i32>>;
 #[derive(Clone, Debug)]
 pub enum Recipe {
     Shaped {
+        /// `minecraft:<имя файла>` — для `recipe_crafted`.
+        id: String,
         width: usize,
         height: usize,
         cells: Vec<Option<Ingredient>>,
         result: (i32, i32),
     },
     Shapeless {
+        id: String,
         ingredients: Vec<Ingredient>,
         result: (i32, i32),
     },
+}
+
+impl Recipe {
+    /// `Recipe.id()` в виде `minecraft:<имя файла>`.
+    pub fn id(&self) -> &str {
+        match self {
+            Recipe::Shaped { id, .. } | Recipe::Shapeless { id, .. } => id,
+        }
+    }
 }
 
 /// Рецепт печи: `kind` — индекс в `world::FURNACES` (плавка, доменная, копчение).
@@ -54,6 +66,8 @@ pub struct Stonecutting {
 /// Рецепт кузнечного стола 26.3.
 #[derive(Clone, Debug)]
 pub struct Smithing {
+    /// `minecraft:<имя файла>` — для `recipe_crafted`.
+    pub id: String,
     pub template: Option<Ingredient>,
     pub base: Ingredient,
     pub addition: Option<Ingredient>,
@@ -182,6 +196,10 @@ pub fn load_smithing(
         let template = json.get("template").and_then(|v| tags.ingredient(v));
         let addition = json.get("addition").and_then(|v| tags.ingredient(v));
         out.recipes.push(Smithing {
+            id: format!(
+                "minecraft:{}",
+                path.file_stem().and_then(|s| s.to_str()).unwrap_or("")
+            ),
             template,
             base,
             addition,
@@ -313,6 +331,11 @@ impl Recipes {
 
     /// `(предмет, количество)` для квадратной сетки `size × size` (предметы по строкам).
     pub fn find(&self, grid: &[Option<i32>], size: usize) -> Option<(i32, i32)> {
+        self.find_recipe(grid, size).map(|(_, result)| result)
+    }
+
+    /// Рецепт и `(результат, количество)` для сетки `size × size`.
+    pub fn find_recipe(&self, grid: &[Option<i32>], size: usize) -> Option<(&Recipe, (i32, i32))> {
         let filled: Vec<(usize, usize)> = (0..grid.len())
             .filter(|&i| grid[i].is_some())
             .map(|i| (i % size, i / size))
@@ -331,6 +354,7 @@ impl Recipes {
                 height,
                 cells,
                 result,
+                ..
             } if *width == w && *height == h => {
                 let fits = |mirror: bool| {
                     (0..h).all(|y| {
@@ -344,14 +368,16 @@ impl Recipes {
                         })
                     })
                 };
-                (fits(false) || fits(true)).then_some(*result)
+                (fits(false) || fits(true)).then_some((r, *result))
             }
             Recipe::Shapeless {
                 ingredients,
                 result,
+                ..
             } if ingredients.len() == filled.len() => {
                 let items: Vec<i32> = grid.iter().flatten().copied().collect();
-                matches_all(ingredients, &items, &mut vec![false; items.len()]).then_some(*result)
+                matches_all(ingredients, &items, &mut vec![false; items.len()])
+                    .then_some((r, *result))
             }
             _ => None,
         })
@@ -442,7 +468,7 @@ fn result(json: &serde_json::Value, items: &HashMap<String, i32>) -> Option<(i32
     Some((id, r["count"].as_i64().unwrap_or(1) as i32))
 }
 
-fn parse(json: &serde_json::Value, tags: &mut ItemTags) -> Option<Recipe> {
+fn parse(json: &serde_json::Value, tags: &mut ItemTags, id: &str) -> Option<Recipe> {
     match json["type"].as_str()? {
         "minecraft:crafting_shaped" => {
             let pattern: Vec<&str> = json["pattern"]
@@ -463,6 +489,7 @@ fn parse(json: &serde_json::Value, tags: &mut ItemTags) -> Option<Recipe> {
                 }
             }
             Some(Recipe::Shaped {
+                id: id.to_owned(),
                 width,
                 height,
                 cells,
@@ -470,6 +497,7 @@ fn parse(json: &serde_json::Value, tags: &mut ItemTags) -> Option<Recipe> {
             })
         }
         "minecraft:crafting_shapeless" => Some(Recipe::Shapeless {
+            id: id.to_owned(),
             ingredients: json["ingredients"]
                 .as_array()?
                 .iter()
@@ -517,8 +545,12 @@ pub fn load_recipes(root: &Path, items: &HashMap<String, i32>) -> Result<Recipes
                 file: path.display().to_string(),
                 msg: e.to_string(),
             })?;
+        let recipe_id = format!(
+            "minecraft:{}",
+            path.file_stem().and_then(|s| s.to_str()).unwrap_or("")
+        );
         if crafting {
-            list.extend(parse(&json, &mut tags));
+            list.extend(parse(&json, &mut tags, &recipe_id));
         } else if let Some(kind) = cooking
             && json["type"]
                 .as_str()
@@ -611,14 +643,12 @@ mod tests {
         let data = load_smithing(&root, &items, &registries).unwrap();
         assert_eq!(data.recipes.len(), 2);
         assert_eq!(data.materials.get(&3), Some(&0));
-        assert!(matches!(
-            data.find(1, 2, 3).unwrap().kind,
-            SmithingKind::Transform(4)
-        ));
-        assert!(matches!(
-            data.find(5, 4, 3).unwrap().kind,
-            SmithingKind::Trim(0)
-        ));
+        let transform = data.find(1, 2, 3).unwrap();
+        assert!(matches!(transform.kind, SmithingKind::Transform(4)));
+        assert_eq!(transform.id, "minecraft:upgrade");
+        let trim = data.find(5, 4, 3).unwrap();
+        assert!(matches!(trim.kind, SmithingKind::Trim(0)));
+        assert_eq!(trim.id, "minecraft:trim");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -676,8 +706,10 @@ mod tests {
             "result": {"id": "minecraft:planks", "count": 4}});
         let list: Vec<Recipe> = [stick, axe, planks]
             .iter()
-            .filter_map(|j| parse(j, &mut tags))
+            .filter_map(|j| parse(j, &mut tags, "minecraft:test"))
             .collect();
+        assert_eq!(list[0].id(), "minecraft:test");
+        assert_eq!(list[2].id(), "minecraft:test");
         let cooking = Vec::new();
         let campfire = Vec::new();
         let r = Recipes::from_parts(list, cooking, campfire, Vec::new());
@@ -700,6 +732,9 @@ mod tests {
             r.find(&[p, s, None, None, None, None, None, None, None], 3),
             None
         );
+        let (recipe, result) = r.find_recipe(&[None, Some(1), None, Some(1)], 2).unwrap();
+        assert_eq!(result, (2, 4));
+        assert_eq!(recipe.id(), "minecraft:test");
     }
 
     #[test]

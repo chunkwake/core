@@ -16206,6 +16206,7 @@ impl PlayPlan {
         let mut grind_took = false;
         let mut anvil_took = false;
         let mut smithing_took = false;
+        let mut smithing_recipe: Option<(String, Vec<String>)> = None;
         let mut loom_took = false;
         let mut carto_took = false;
         let mut merchant_took: Option<(i32, usize)> = None;
@@ -16250,6 +16251,23 @@ impl PlayPlan {
             }
             if kind == Kind::Smithing {
                 smithing_took = true;
+                // `SmithingMenu.onTake` → `triggerRecipeCrafted`: id рецепта
+                // и ингредиенты до расхода.
+                if let [Some(template), Some(base), Some(addition), ..] = slots[..3]
+                    && let Some(recipe) =
+                        self.survival
+                            .smithing
+                            .find(template.item, base.item, addition.item)
+                {
+                    smithing_recipe = Some((
+                        recipe.id.clone(),
+                        vec![
+                            self.item_name(template.item).to_owned(),
+                            self.item_name(base.item).to_owned(),
+                            self.item_name(addition.item).to_owned(),
+                        ],
+                    ));
+                }
                 for slot in &mut slots[..3] {
                     if let Some(s) = slot {
                         s.count -= 1;
@@ -16458,11 +16476,32 @@ impl PlayPlan {
                 .flatten()
                 .any(|s| self.item_name(s.item).ends_with("shulker_box"));
         if shulker_reject {
-            view = view_before;
+            view = view_before.clone();
             inv.slots = inv_before;
             inv.carried = carried_before;
             thrown.clear();
             crafted_taken.clear();
+        }
+        if let Some((recipe, used)) = smithing_recipe
+            && !crafted_taken.is_empty()
+        {
+            self.advancement_recipe_crafted(me, &recipe, &used);
+        }
+        if matches!(kind, Kind::Player | Kind::Crafting) && !crafted_taken.is_empty() {
+            // `RecipeCraftingHolder.awardUsedRecipes`: id рецепта и состав
+            // сетки до расхода (сетка 2×2 в инвентаре, 3×3 у верстака).
+            let size = if kind == Kind::Crafting { 3 } else { 2 };
+            let grid = &view_before[1..1 + size * size];
+            let items: Vec<Option<i32>> = grid.iter().map(|s| s.map(|s| s.item)).collect();
+            if let Some((recipe, _)) = self.survival.recipes.find_recipe(&items, size) {
+                let used: Vec<String> = grid
+                    .iter()
+                    .flatten()
+                    .map(|s| self.item_name(s.item).to_owned())
+                    .collect();
+                let id = recipe.id().to_owned();
+                self.advancement_recipe_crafted(me, &id, &used);
+            }
         }
         if matches!(kind, Kind::Player | Kind::Crafting | Kind::Furnace) {
             for s in &crafted_taken {

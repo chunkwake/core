@@ -47,6 +47,8 @@ pub struct AdvancementCriterion {
     pub child_entities: Vec<String>,
     pub parent_entities: Vec<String>,
     pub partner_entities: Vec<String>,
+    /// `conditions.ingredients` (`recipe_crafted`): список предикатов.
+    pub ingredients: Vec<Vec<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -347,6 +349,24 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 entity_type("parent"),
                 entity_type("partner"),
             );
+            let ingredients = cond
+                .and_then(|c| c.get("ingredients"))
+                .and_then(|i| i.as_array())
+                .map(|list| {
+                    list.iter()
+                        .map(|pred| {
+                            pred.get("items")
+                                .map(string_or_list)
+                                .or_else(|| {
+                                    pred.get("tag")
+                                        .and_then(|t| t.as_str())
+                                        .map(|t| vec![format!("#{t}")])
+                                })
+                                .unwrap_or_default()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             criteria.push(AdvancementCriterion {
                 name: name.clone(),
                 trigger,
@@ -369,6 +389,7 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 child_entities,
                 parent_entities,
                 partner_entities,
+                ingredients,
             });
         }
     }
@@ -574,6 +595,28 @@ impl PlayPlan {
             (c.items.is_empty() || c.items.iter().any(|w| self.item_matches(w, item)))
                 && c.levels
                     .is_none_or(|(min, max)| levels >= min && levels <= max)
+        });
+    }
+
+    /// `recipe_crafted`: id рецепта и использованные ингредиенты.
+    pub(crate) fn advancement_recipe_crafted(&self, uuid: Uuid, recipe: &str, used: &[String]) {
+        self.advancement_run(uuid, "minecraft:recipe_crafted", |c| {
+            if !c.recipes.is_empty() && !c.recipes.iter().any(|w| short(w) == short(recipe)) {
+                return false;
+            }
+            // `RecipeCraftedTrigger.TriggerInstance.matches`: каждый предикат
+            // съедает один подходящий ингредиент (мультимножество).
+            let mut remaining: Vec<&String> = used.iter().collect();
+            for pred in &c.ingredients {
+                let Some(pos) = remaining
+                    .iter()
+                    .position(|name| pred.iter().any(|w| self.item_matches(w, name)))
+                else {
+                    return false;
+                };
+                remaining.remove(pos);
+            }
+            true
         });
     }
 
