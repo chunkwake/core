@@ -7176,6 +7176,7 @@ impl PlayPlan {
                                         d,
                                         a.pos,
                                         a.owner.map(|u| u.as_u128()),
+                                        a.trident_item,
                                     ));
                                     if a.stopped {
                                         gone.push(id);
@@ -7379,7 +7380,23 @@ impl PlayPlan {
             let mut mobs = self.sim().mobs.lock().unwrap();
             let mut damaged = Vec::new();
             let mut died = Vec::new();
-            for (id, damage, at, owner) in hurt_mobs {
+            let mut killers = Vec::new();
+            let mut strikes = Vec::new();
+            for (id, damage, at, owner, trident) in hurt_mobs {
+                let mut damage = damage;
+                if let Some(item) = trident {
+                    let impaling = chunkwake_protocol::components::stack_level(
+                        item.extra,
+                        "minecraft:impaling",
+                    );
+                    if impaling > 0
+                        && mobs
+                            .get(&id)
+                            .is_some_and(|e| Self::is_aquatic(e.mob.species))
+                    {
+                        damage += 2.5 * impaling as f32;
+                    }
+                }
                 if damage > 0.0
                     && let Some(entry) = mobs.get_mut(&id)
                     && let Some(dead) = crate::mobs::hurt(
@@ -7392,12 +7409,34 @@ impl PlayPlan {
                     damaged.push(entry.mob.pos);
                     if dead {
                         died.push(entry.mob.pos);
+                        if let Some(owner) = owner {
+                            killers.push((id, Uuid::from_u128(owner)));
+                        }
+                    }
+                    if let Some(item) = trident
+                        && chunkwake_protocol::components::stack_level(
+                            item.extra,
+                            "minecraft:channeling",
+                        ) > 0
+                        && self.vars.weather().thunder
+                    {
+                        strikes.push([
+                            entry.mob.pos[0].floor() as i32,
+                            entry.mob.pos[1].floor() as i32,
+                            entry.mob.pos[2].floor() as i32,
+                        ]);
                     }
                     self.hub
                         .send(None, play::hurt_animation(self.ids.hurt_animation, id, 0.0));
                 }
             }
             drop(mobs);
+            for (id, uuid) in killers {
+                self.set_mob_killer(id, uuid, -1);
+            }
+            for pos in strikes {
+                self.thunder_strike(pos);
+            }
             for pos in damaged {
                 self.emit_vibration(pos, "minecraft:entity_damage");
             }
@@ -7878,9 +7917,63 @@ impl PlayPlan {
     /// `Some(Some(stack))` — в креативе предмет остался (с износом),
     /// `Some(None)` — в выживании стек израсходован, `None` — нельзя.
     fn throw_trident(&self, uuid: Uuid, stack: Stack, creative: bool) -> Option<Option<Stack>> {
-        // `getTridentSpinAttackStrength`: с Riptide бросок не делается.
-        if chunkwake_protocol::components::stack_level(stack.extra, "minecraft:riptide") > 0 {
-            return None;
+        let riptide = chunkwake_protocol::components::stack_level(stack.extra, "minecraft:riptide");
+        if riptide > 0 {
+            let (feet, yaw, pitch) = self.player_at(uuid)?;
+            if !self.standing_in_water(feet) && !self.vars.weather().rain {
+                return None;
+            }
+            let max = self.item_max_damage(stack.item);
+            if max > 0 && stack.damage + 1 >= max {
+                return None;
+            }
+            let unbreaking =
+                chunkwake_protocol::components::stack_level(stack.extra, "minecraft:unbreaking");
+            let mut damage = stack.damage;
+            if unbreaking <= 0 || !rand::random::<u32>().is_multiple_of(unbreaking as u32 + 1) {
+                damage += 1;
+            }
+            let dir = crate::arrows::aim(yaw as f64, pitch as f64, 0.0);
+            let strength = f64::from(riptide);
+            let up = if self
+                .hub
+                .players
+                .lock()
+                .unwrap()
+                .get(&uuid)
+                .is_some_and(|p| p.on_ground)
+            {
+                1.2
+            } else {
+                0.0
+            };
+            if let Some(entity) = self
+                .hub
+                .players
+                .lock()
+                .unwrap()
+                .get(&uuid)
+                .map(|p| p.entity_id)
+            {
+                self.hub.send(
+                    None,
+                    play::set_entity_motion(
+                        self.ids.set_entity_motion,
+                        entity,
+                        [dir[0] * strength, dir[1] * strength + up, dir[2] * strength],
+                    ),
+                );
+            }
+            self.riptide_spin(uuid, feet, riptide);
+            self.play_sound(
+                None,
+                "minecraft:item.trident.riptide_1",
+                crate::sounds::PLAYERS,
+                feet,
+                1.0,
+                1.0,
+            );
+            return Some((!creative).then_some(Stack { damage, ..stack }));
         }
         let max = self.item_max_damage(stack.item);
         if max > 0 && stack.damage + 1 >= max {

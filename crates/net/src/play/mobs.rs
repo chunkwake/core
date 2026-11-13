@@ -152,6 +152,70 @@ pub(super) struct SweepHit {
 }
 
 impl PlayPlan {
+    /// Пометить убийцу для добычи/статистики (стрелы, трезубец, riptide).
+    pub(super) fn set_mob_killer(&self, id: i32, uuid: Uuid, slot: i32) {
+        if let Some(e) = self.sim().mobs.lock().unwrap().get_mut(&id) {
+            e.killer = Some((uuid, slot));
+        }
+    }
+
+    /// `Player.startAutoSpinAttack`: урон по мобам вокруг и пометка убийцы.
+    pub(super) fn riptide_spin(&self, uuid: Uuid, feet: [f64; 3], level: i32) {
+        let radius = 3.0 + 0.5 * f64::from(level);
+        let mut hits = Vec::new();
+        {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            for (&id, e) in mobs.iter_mut() {
+                let p = e.mob.pos;
+                let d = ((p[0] - feet[0]).powi(2)
+                    + (p[1] - feet[1]).powi(2)
+                    + (p[2] - feet[2]).powi(2))
+                .sqrt();
+                if d > radius {
+                    continue;
+                }
+                let dead = crate::mobs::hurt(
+                    &mut e.mob,
+                    8.0,
+                    crate::mobs::Source::at(feet, Some(uuid.as_u128())),
+                    0.3,
+                )
+                .is_some_and(|dead| dead);
+                if dead {
+                    e.killer = Some((uuid, -1));
+                }
+                hits.push((id, p, dead));
+            }
+        }
+        for (id, pos, dead) in hits {
+            self.hub
+                .send(None, play::hurt_animation(self.ids.hurt_animation, id, 0.0));
+            if dead {
+                self.emit_vibration(pos, "minecraft:entity_die");
+            }
+        }
+    }
+
+    /// `MobType.isAquatic`: цель для Impaling.
+    pub(super) fn is_aquatic(species: Species) -> bool {
+        matches!(
+            species.name(),
+            "minecraft:drowned"
+                | "minecraft:guardian"
+                | "minecraft:elder_guardian"
+                | "minecraft:squid"
+                | "minecraft:glow_squid"
+                | "minecraft:dolphin"
+                | "minecraft:turtle"
+                | "minecraft:cod"
+                | "minecraft:salmon"
+                | "minecraft:tropical_fish"
+                | "minecraft:pufferfish"
+                | "minecraft:axolotl"
+                | "minecraft:tadpole"
+        )
+    }
+
     fn mob_type(&self, s: Species) -> i32 {
         // Собран при старте по `Species::ALL`; без него (тесты) — по имени.
         self.survival
