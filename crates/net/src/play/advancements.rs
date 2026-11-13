@@ -20,6 +20,15 @@ pub struct AdvancementCriterion {
     pub recipes: Vec<String>,
     /// `conditions.location.*.blocks` (для `placed_block`).
     pub blocks: Vec<String>,
+    /// `conditions.from`/`to` (для `changed_dimension`).
+    pub from_dims: Vec<String>,
+    pub to_dims: Vec<String>,
+    /// `conditions.potion` (для `brewed_potion`).
+    pub potions: Vec<String>,
+    /// `conditions.distance` (для `used_ender_eye`, по квадрату расстояния).
+    pub distance: Option<(f64, f64)>,
+    /// `conditions.levels` (для `enchanted_item`).
+    pub levels: Option<(i32, i32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +83,66 @@ fn collect_blocks(v: &serde_json::Value, out: &mut Vec<String>) {
         for term in terms {
             collect_blocks(term, out);
         }
+    }
+}
+
+/// `match_tool` внутри дерева `location`: `predicate.items`.
+fn collect_location_items(v: &serde_json::Value, out: &mut Vec<String>) {
+    if let Some(items) = v.get("predicate").and_then(|p| p.get("items")) {
+        out.extend(json_string_list(items));
+    }
+    if let Some(terms) = v.get("terms").and_then(|t| t.as_array()) {
+        for term in terms {
+            collect_location_items(term, out);
+        }
+    }
+}
+
+/// Строка или список строк в JSON.
+fn string_or_list(v: &serde_json::Value) -> Vec<String> {
+    match v {
+        serde_json::Value::String(s) => vec![s.clone()],
+        serde_json::Value::Array(a) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(str::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn bounds_f64(v: &serde_json::Value) -> Option<(f64, f64)> {
+    match v {
+        serde_json::Value::Number(n) => {
+            let x = n.as_f64()?;
+            Some((x, x))
+        }
+        serde_json::Value::Object(o) => Some((
+            o.get("min")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(f64::NEG_INFINITY),
+            o.get("max")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(f64::INFINITY),
+        )),
+        _ => None,
+    }
+}
+
+fn bounds_i32(v: &serde_json::Value) -> Option<(i32, i32)> {
+    match v {
+        serde_json::Value::Number(n) => {
+            let x = n.as_i64()? as i32;
+            Some((x, x))
+        }
+        serde_json::Value::Object(o) => Some((
+            o.get("min")
+                .and_then(|x| x.as_i64())
+                .map_or(i32::MIN, |x| x as i32),
+            o.get("max")
+                .and_then(|x| x.as_i64())
+                .map_or(i32::MAX, |x| x as i32),
+        )),
+        _ => None,
     }
 }
 
@@ -171,7 +240,26 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
             let mut blocks = Vec::new();
             if let Some(location) = c.get("conditions").and_then(|c| c.get("location")) {
                 collect_blocks(location, &mut blocks);
+                // `match_tool.predicate.items` внутри location.
+                collect_location_items(location, &mut items);
             }
+            let cond = c.get("conditions");
+            let dim = |key: &str| {
+                cond.and_then(|c| c.get(key))
+                    .map(string_or_list)
+                    .unwrap_or_default()
+            };
+            let potions = cond
+                .and_then(|c| c.get("potion"))
+                .map(|v| match v {
+                    serde_json::Value::Object(o) => {
+                        o.get("potions").map(string_or_list).unwrap_or_default()
+                    }
+                    other => string_or_list(other),
+                })
+                .unwrap_or_default();
+            let distance = cond.and_then(|c| c.get("distance")).and_then(bounds_f64);
+            let levels = cond.and_then(|c| c.get("levels")).and_then(bounds_i32);
             criteria.push(AdvancementCriterion {
                 name: name.clone(),
                 trigger,
@@ -179,6 +267,11 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 entities,
                 recipes,
                 blocks,
+                from_dims: dim("from"),
+                to_dims: dim("to"),
+                potions,
+                distance,
+                levels,
             });
         }
     }
@@ -343,6 +436,47 @@ impl PlayPlan {
                 || c.recipes
                     .iter()
                     .any(|want| ids.iter().any(|id| short(want) == short(id)))
+        });
+    }
+
+    /// `item_used_on_block`: предмет в руке и блок под прицелом.
+    pub(crate) fn advancement_item_used_on_block(&self, uuid: Uuid, item: &str, block: &str) {
+        self.advancement_run(uuid, "minecraft:item_used_on_block", |c| {
+            (c.items.is_empty() || c.items.iter().any(|w| self.item_matches(w, item)))
+                && (c.blocks.is_empty() || c.blocks.iter().any(|w| self.block_matches(w, block)))
+        });
+    }
+
+    /// `used_ender_eye`: условие `distance` по квадрату расстояния.
+    pub(crate) fn advancement_used_ender_eye(&self, uuid: Uuid, sqr_distance: f64) {
+        self.advancement_run(uuid, "minecraft:used_ender_eye", |c| {
+            c.distance
+                .is_none_or(|(min, max)| sqr_distance >= min && sqr_distance <= max)
+        });
+    }
+
+    /// `changed_dimension`: `from`/`to` измерий.
+    pub(crate) fn advancement_changed_dimension(&self, uuid: Uuid, from: &str, to: &str) {
+        self.advancement_run(uuid, "minecraft:changed_dimension", |c| {
+            (c.from_dims.is_empty() || c.from_dims.iter().any(|w| short(w) == short(from)))
+                && (c.to_dims.is_empty() || c.to_dims.iter().any(|w| short(w) == short(to)))
+        });
+    }
+
+    /// `brewed_potion`: зелье из `PotionContents`.
+    pub(crate) fn advancement_brewed_potion(&self, uuid: Uuid, potion: Option<&str>) {
+        self.advancement_run(uuid, "minecraft:brewed_potion", |c| {
+            c.potions.is_empty()
+                || potion.is_some_and(|p| c.potions.iter().any(|w| short(w) == short(p)))
+        });
+    }
+
+    /// `enchanted_item`: зачарованный предмет и стоимость в уровнях.
+    pub(crate) fn advancement_enchanted_item(&self, uuid: Uuid, item: &str, levels: i32) {
+        self.advancement_run(uuid, "minecraft:enchanted_item", |c| {
+            (c.items.is_empty() || c.items.iter().any(|w| self.item_matches(w, item)))
+                && c.levels
+                    .is_none_or(|(min, max)| levels >= min && levels <= max)
         });
     }
 

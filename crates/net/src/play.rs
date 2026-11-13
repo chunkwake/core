@@ -4653,6 +4653,9 @@ impl PlayPlan {
 
     /// `PlayerChangedWorldEvent`, если мир сменился; ответа не ждём.
     fn changed_world(&self, uuid: Uuid, from: Dimension, to: Dimension) {
+        if from != to {
+            self.advancement_changed_dimension(uuid, from.key(), to.key());
+        }
         if from != to
             && let Some(h) = self.hooks().filter(|h| h.listens(Event::ChangedWorld))
         {
@@ -7658,6 +7661,11 @@ impl PlayPlan {
         let Some(found) = locate("#minecraft:eye_of_ender_located", block) else {
             return false;
         };
+        {
+            let dx = feet[0] - f64::from(found[0]);
+            let dz = feet[2] - f64::from(found[2]);
+            self.advancement_used_ender_eye(uuid, dx * dx + dz * dz);
+        }
         // `player.getY(0.5)`: середина хитбокса высотой 1.8.
         let pos = [feet[0], feet[1] + 0.9, feet[2]];
         let goal = [found[0] as f64, found[1] as f64, found[2] as f64];
@@ -14329,6 +14337,11 @@ impl PlayPlan {
                                 }
                                 // `shrink(1)` без оглядки на творческий режим.
                                 "minecraft:glass_bottle" if self.bottle_hive(u.pos, Some((uuid, feet))) => {
+                                    self.advancement_item_used_on_block(
+                                        uuid,
+                                        "minecraft:glass_bottle",
+                                        &clicked,
+                                    );
                                     if let Some(honey) = self.item_id("minecraft:honey_bottle") {
                                         if held.count == 1 {
                                             state.inv.slots[slot] = Some(Stack::new(honey, 1));
@@ -14915,6 +14928,12 @@ impl PlayPlan {
                                     "minecraft:placed_block",
                                     Some(&name),
                                 );
+                                if let Some(item) = hand_slot
+                                    .and_then(|i| state.inv.slots[i])
+                                    .map(|s| self.item_name(s.item).to_owned())
+                                {
+                                    self.advancement_item_used_on_block(uuid, &item, &clicked);
+                                }
                                 if survival && let Some(i) = hand_slot && state.inv.consume_at(i) {
                                     self.send_slots(conn, &mut state.inv, &[i]).await?;
                                 }
@@ -16130,6 +16149,19 @@ impl PlayPlan {
         let inv_before = inv.slots;
         let carried_before = inv.carried;
         let view_before = view.clone();
+        let brewing_take = if kind == Kind::Brewing && c.window != inv::PLAYER_WINDOW {
+            usize::try_from(c.slot)
+                .ok()
+                .filter(|&slot| slot < 3)
+                .and_then(|slot| view_before.get(slot).copied().flatten())
+                .filter(|stack| {
+                    chunkwake_protocol::components::get(stack.extra)
+                        .raw
+                        .is_some()
+                })
+        } else {
+            None
+        };
         let (mut thrown, mut crafted_taken) = {
             let mut menu = click::Menu {
                 kind,
@@ -16143,6 +16175,18 @@ impl PlayPlan {
             let thrown = menu.click(c.slot, c.button, c.mode);
             (thrown, menu.taken)
         };
+        if let Some(stack) = brewing_take
+            && view
+                .get(usize::try_from(c.slot).unwrap_or(usize::MAX))
+                .copied()
+                .flatten()
+                .is_none_or(|now| now.count < stack.count)
+        {
+            let potion = self
+                .brewing_potion(stack)
+                .and_then(|id| self.survival.potions.get(id as usize).map(String::as_str));
+            self.advancement_brewed_potion(me, potion);
+        }
         if let Some((villager, idx)) = merchant_took {
             self.notify_trade(villager, idx);
             self.award_stat(me, "minecraft:custom", "minecraft:traded_with_villager", 1);
@@ -22951,6 +22995,7 @@ impl PlayPlan {
             });
         }
         xp.enchanted(need, rand::random());
+        self.advancement_enchanted_item(uuid, self.item_name(out.item), cost);
         true
     }
 
