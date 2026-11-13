@@ -54,6 +54,12 @@ pub struct AdvancementCriterion {
     /// Предикат `location` содержит то, что мы не умеем проверять
     /// (`structures`, `position`, `equipment`, `stepping_on`, ...).
     pub unsupported_location: bool,
+    /// `conditions.effects` (`effects_changed`): имя и требуемый уровень.
+    pub effects_req: Vec<(String, Option<i32>)>,
+    /// `conditions.source.predicate.minecraft:entity_type`.
+    pub source_entities: Vec<String>,
+    /// В `conditions.effects`/`source` есть то, что мы не умеем проверять.
+    pub unsupported_effects: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -376,6 +382,36 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                     unsupported_location = true;
                 }
             }
+            let mut effects_req = Vec::new();
+            let mut unsupported_effects = false;
+            if let Some(map) = cond
+                .and_then(|c| c.get("effects"))
+                .and_then(|e| e.as_object())
+            {
+                for (name, pred) in map {
+                    if pred.as_object().is_some_and(|o| {
+                        o.keys().any(|k| {
+                            !matches!(k.as_str(), "amplifier" | "duration" | "ambient" | "visible")
+                        })
+                    }) {
+                        unsupported_effects = true;
+                    }
+                    let amp = pred
+                        .get("amplifier")
+                        .and_then(|a| a.as_i64())
+                        .map(|v| v as i32);
+                    effects_req.push((name.clone(), amp));
+                }
+            }
+            let source = cond.and_then(|c| c.get("source"));
+            let source_entities = source
+                .and_then(|s| s.get("predicate"))
+                .and_then(|p| p.get("minecraft:entity_type"))
+                .map(string_or_list)
+                .unwrap_or_default();
+            if source.is_some() && source_entities.is_empty() {
+                unsupported_effects = true;
+            }
             let ingredients = cond
                 .and_then(|c| c.get("ingredients"))
                 .and_then(|i| i.as_array())
@@ -419,6 +455,9 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 ingredients,
                 biomes,
                 unsupported_location,
+                effects_req,
+                source_entities,
+                unsupported_effects,
             });
         }
     }
@@ -624,6 +663,35 @@ impl PlayPlan {
             (c.items.is_empty() || c.items.iter().any(|w| self.item_matches(w, item)))
                 && c.levels
                     .is_none_or(|(min, max)| levels >= min && levels <= max)
+        });
+    }
+
+    /// `EffectsChangedTrigger`: активные эффекты и (необязательно) источник.
+    pub(crate) fn advancement_effects_changed(
+        &self,
+        uuid: Uuid,
+        active: &[(&str, i32)],
+        source: Option<&str>,
+    ) {
+        self.advancement_run(uuid, "minecraft:effects_changed", |c| {
+            if c.unsupported_effects {
+                return false;
+            }
+            if !c.source_entities.is_empty() {
+                let Some(source) = source else { return false };
+                if !c
+                    .source_entities
+                    .iter()
+                    .any(|w| self.entity_matches(w, source))
+                {
+                    return false;
+                }
+            }
+            c.effects_req.iter().all(|(name, amp)| {
+                active.iter().any(|(have, level)| {
+                    short(have) == short(name) && amp.is_none_or(|want| *level == want)
+                })
+            })
         });
     }
 

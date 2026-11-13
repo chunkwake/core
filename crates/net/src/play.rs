@@ -15422,6 +15422,16 @@ impl PlayPlan {
         }
     }
 
+    /// `EffectsChangedTrigger`: активные эффекты игрока по имени и уровню.
+    fn effects_changed(&self, uuid: Uuid, v: &Vitals, source: Option<&str>) {
+        let active: Vec<(&str, i32)> = v
+            .effects
+            .iter()
+            .filter_map(|e| self.effect_name(e.id).map(|n| (n, i32::from(e.amplifier))))
+            .collect();
+        self.advancement_effects_changed(uuid, &active, source);
+    }
+
     /// `ServerPlayer.tick` → `CriteriaTriggers.LOCATION`: раз в тик по позиции.
     fn tick_player_triggers(&self) {
         let players: Vec<(Uuid, [f64; 3], Dimension)> = self
@@ -23068,6 +23078,7 @@ impl PlayPlan {
         if !v.add_effect(e, force) {
             return Ok(());
         }
+        self.effects_changed(me.entry.uuid, v, None);
         let name = self.effect_name(e.id).unwrap_or_default();
         // `AbsorptionMobEffect.onEffectStarted`: жёлтые сердца выдаются
         // только при старте эффекта (`onEffectUpdated` их не добавляет).
