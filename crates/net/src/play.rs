@@ -3457,7 +3457,7 @@ impl PlayPlan {
             "minecraft:carved_pumpkin" | "minecraft:jack_o_lantern"
         );
         if pumpkin && self.state_name(old) != self.state_name(state) {
-            self.try_spawn_iron_golem([x, y, z]);
+            self.try_spawn_golem([x, y, z]);
         }
         let (fire_new, fire_old) = (
             self.is_kind(state, kinds::FIRE),
@@ -3503,6 +3503,43 @@ impl PlayPlan {
     ///
     /// Возвращает прежнее состояние каждой позиции (`None` — вне мира или
     /// чанка нет).
+    /// `CarvedPumpkinBlock.trySpawnGolem`: сначала снежный голем, затем
+    /// железный (медный не реализован).
+    fn try_spawn_golem(&self, pos: [i32; 3]) {
+        if self.try_spawn_snow_golem(pos) {
+            return;
+        }
+        self.try_spawn_iron_golem(pos);
+    }
+
+    /// Снежный голем: тыква на двух блоках снега (`"^"`, `"#"`, `"#"`).
+    fn try_spawn_snow_golem(&self, [x, y, z]: [i32; 3]) -> bool {
+        let at = |p: [i32; 3]| self.block(p).map(|s| self.state_name(s).to_owned());
+        let is = |p: [i32; 3], name: &str| at(p).as_deref() == Some(name);
+        if !is([x, y - 1, z], "minecraft:snow_block") || !is([x, y - 2, z], "minecraft:snow_block")
+        {
+            return false;
+        }
+        for p in [[x, y, z], [x, y - 1, z], [x, y - 2, z]] {
+            self.set_block(p, AIR);
+        }
+        let pos = [x as f64 + 0.5, f64::from(y - 2) + 0.05, z as f64 + 0.5];
+        if self
+            .spawn_mob(
+                crate::mobs::Species::SnowGolem,
+                pos,
+                0.0,
+                false,
+                Some("TRIGGERED"),
+            )
+            .is_none()
+        {
+            return true;
+        }
+        self.trigger_summoned_entity(pos, crate::mobs::Species::SnowGolem, 5.0);
+        true
+    }
+
     /// `CarvedPumpkinBlock.trySpawnGolem`: железный голем из тыквы и блоков
     /// железа. Шаблон `ironGolemFull`: `"~^~"`, `"###"`, `"~#~"` (верхний
     /// центр - тыква, средний ряд из трёх блоков железа и центр снизу).

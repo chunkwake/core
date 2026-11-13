@@ -1,0 +1,25 @@
+{
+  "display": {
+    "title": {"text": "snow probe"},
+    "description": {"text": "summoned snow golem probe"},
+    "icon": {"id": "minecraft:carved_pumpkin"},
+    "frame": "task",
+    "show_toast": false,
+    "announce_to_chat": false
+  },
+  "criteria": {
+    "summoned": {
+      "trigger": "minecraft:summoned_entity",
+      "conditions": {
+        "entity": {
+          "type": "minecraft:entity_properties",
+          "entity": "this",
+          "predicate": {
+            "minecraft:entity_type": "minecraft:snow_golem"
+          }
+        }
+      }
+    }
+  },
+  "requirements": [["summoned"]]
+}
