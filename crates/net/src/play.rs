@@ -5452,6 +5452,7 @@ impl PlayPlan {
                 inv::set_entity_sleeping(self.ids.set_entity_data, player.entity_id, Some(head)),
             );
         }
+        self.advancement_trigger(uuid, "minecraft:slept_in_bed", None);
         true
     }
 
@@ -23195,6 +23196,11 @@ impl PlayPlan {
         match cause {
             Cause::Mob(kind) | Cause::MobArrow(kind) | Cause::MobExplosion(kind) => {
                 self.award_stat(me.entry.uuid, "minecraft:killed_by", kind, 1);
+                self.advancement_trigger(
+                    me.entry.uuid,
+                    "minecraft:entity_killed_player",
+                    Some(kind),
+                );
             }
             Cause::Player(_) => {
                 self.award_stat(me.entry.uuid, "minecraft:killed_by", "minecraft:player", 1);

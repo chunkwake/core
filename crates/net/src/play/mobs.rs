@@ -1086,6 +1086,11 @@ impl PlayPlan {
         if let Some((uuid, _)) = e.killer {
             self.award_stat(uuid, "minecraft:killed", m.species.name(), 1);
             self.award_stat(uuid, "minecraft:custom", "minecraft:mob_kills", 1);
+            self.advancement_trigger(
+                uuid,
+                "minecraft:player_killed_entity",
+                Some(m.species.name()),
+            );
         }
         if m.is_baby() && m.species.is_animal() {
             return;

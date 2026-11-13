@@ -26,6 +26,7 @@ struct Probe {
     seq: i32,
     stats: HashMap<(i32, i32), i32>,
     book: Vec<(i32, u8)>,
+    adv: HashMap<String, Vec<String>>,
     zombie: Option<i32>,
 }
 
@@ -88,6 +89,13 @@ impl Probe {
                     }
                 }
                 Event::RecipeBookAdd { entries, .. } => self.book.extend(entries),
+                Event::Advancements { progress, .. } => {
+                    for (id, criteria) in progress {
+                        if !criteria.is_empty() {
+                            self.adv.entry(id).or_default().extend(criteria);
+                        }
+                    }
+                }
                 Event::EntitySpawned {
                     entity_id,
                     kind,
@@ -243,6 +251,7 @@ async fn main() {
         seq: 0,
         stats: HashMap::new(),
         book: Vec::new(),
+        adv: HashMap::new(),
         zombie: None,
     };
     p.pump(2000).await;
@@ -352,6 +361,8 @@ async fn main() {
     p.cmd("tp boater 4401.5 64 4400.5 -90 0").await;
     p.cmd("difficulty normal").await;
     p.cmd("time set midnight").await;
+    p.cmd("advancement grant @s only minecraft:adventure/root")
+        .await;
     p.zombie = None;
     p.cmd(&format!(
         "summon minecraft:zombie {} {} {} {{Health:1f,NoAI:1b}}",
@@ -374,6 +385,14 @@ async fn main() {
     );
     assert!(p.stat(custom, mob_kills) > mob_before, "mob_kills не вырос");
     println!("killed ok");
+    assert!(
+        p.adv
+            .get("minecraft:adventure/kill_a_mob")
+            .is_some_and(|v| v.iter().any(|c| c == "minecraft:zombie")),
+        "advancement kill_a_mob не получил критерий zombie: {:?}",
+        p.adv.get("minecraft:adventure/kill_a_mob")
+    );
+    println!("player_killed_entity advancement ok");
 
     // 5. play_time: +~20 тиков за секунду.
     let play_before = p.stat(custom, play_time);

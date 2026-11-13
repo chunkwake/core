@@ -14,6 +14,10 @@ pub struct AdvancementCriterion {
     pub trigger: String,
     /// `conditions.item.items`: какие предметы закрывают критерий.
     pub items: Vec<String>,
+    /// `conditions.entity.predicate.minecraft:entity_type`.
+    pub entities: Vec<String>,
+    /// `conditions.recipes` (для `recipe_unlocked`).
+    pub recipes: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -115,10 +119,24 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 .and_then(|i| i.get("items"))
                 .map(json_string_list)
                 .unwrap_or_default();
+            let entities = c
+                .get("conditions")
+                .and_then(|c| c.get("entity"))
+                .and_then(|e| e.get("predicate"))
+                .and_then(|p| p.get("minecraft:entity_type"))
+                .map(json_string_list)
+                .unwrap_or_default();
+            let recipes = c
+                .get("conditions")
+                .and_then(|c| c.get("recipes"))
+                .map(json_string_list)
+                .unwrap_or_default();
             criteria.push(AdvancementCriterion {
                 name: name.clone(),
                 trigger,
                 items,
+                entities,
+                recipes,
             });
         }
     }
@@ -273,6 +291,20 @@ impl PlayPlan {
                         if !c.items.is_empty()
                             && !item
                                 .is_some_and(|name| c.items.iter().any(|n| short(n) == short(name)))
+                        {
+                            continue;
+                        }
+                        if !c.entities.is_empty()
+                            && !item.is_some_and(|name| {
+                                c.entities.iter().any(|n| short(n) == short(name))
+                            })
+                        {
+                            continue;
+                        }
+                        if !c.recipes.is_empty()
+                            && !item.is_some_and(|name| {
+                                c.recipes.iter().any(|n| short(n) == short(name))
+                            })
                         {
                             continue;
                         }
