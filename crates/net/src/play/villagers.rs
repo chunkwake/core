@@ -111,6 +111,10 @@ pub struct Villager {
     pub restocks_today: i32,
     /// Последняя проверка рабочего блока (в игровых тиках).
     pub last_work_check: i64,
+    /// Занятое рабочее место; `None` — безработный или место потеряно.
+    pub job_site: Option<[i32; 3]>,
+    /// Тик последней проверки профессии по точкам интереса.
+    pub last_job_check: i64,
     pub custom_name: Option<String>,
     pub persistent: bool,
 }
@@ -136,6 +140,109 @@ impl PlayPlan {
             .get(name)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Сделки для профессии: у нас детально описаны только фермер и
+    /// странствующий торговец, остальные получают фермерский набор.
+    fn offers_for(&self, profession: &str) -> Vec<Offer> {
+        match profession {
+            "minecraft:none" => Vec::new(),
+            "minecraft:wandering_trader" => self.wandering_offers(),
+            _ => self.farmer_offers(),
+        }
+    }
+
+    fn claim_poi(&self, pos: [i32; 3], id: i32) {
+        self.dim_state().poi_claims.lock().unwrap().insert(pos, id);
+    }
+
+    /// `PoiManager.release`: освободить рабочую точку.
+    pub(crate) fn release_poi(&self, pos: [i32; 3]) {
+        self.dim_state().poi_claims.lock().unwrap().remove(&pos);
+    }
+
+    /// `PoiManager.getInRange`: ближайшая свободная точка нужных типов.
+    fn free_poi(
+        &self,
+        types: &std::collections::HashSet<String>,
+        origin: [i32; 3],
+        radius: i32,
+    ) -> Option<[i32; 3]> {
+        let (cx, cz) = (origin[0] >> 4, origin[2] >> 4);
+        let reach = radius.div_euclid(16) + 1;
+        let map = self.dim_state().pois.lock().unwrap();
+        let claims = self.dim_state().poi_claims.lock().unwrap();
+        let mut best: Option<([i32; 3], i64)> = None;
+        for ((x, z), list) in map.iter() {
+            if (x - cx).abs() > reach || (z - cz).abs() > reach {
+                continue;
+            }
+            for (pos, kind) in list {
+                if !types.contains(*kind) || claims.contains_key(pos) {
+                    continue;
+                }
+                let dist = (pos[0] as i64 - origin[0] as i64).pow(2)
+                    + (pos[1] as i64 - origin[1] as i64).pow(2)
+                    + (pos[2] as i64 - origin[2] as i64).pow(2);
+                if dist <= (radius as i64).pow(2) && best.is_none_or(|(_, d)| dist < d) {
+                    best = Some((*pos, dist));
+                }
+            }
+        }
+        best.map(|(pos, _)| pos)
+    }
+
+    /// `Villager` + `AcquirePoi`/`WorkAtPoi`: профессия по рабочему блоку.
+    ///
+    /// Безработный занимает ближайшую свободную точку в 48 блоках и
+    /// получает её профессию; если блок исчез или сменился, профессия
+    /// сбрасывается в `none`, а место освобождается. Возвращает данные для
+    /// `DATA_VILLAGER_DATA`, если профессия/уровень изменились.
+    fn update_villager_job(&self, id: i32, v: &mut Villager) -> Option<(i32, String, String, i32)> {
+        if v.trader != TraderKind::Villager {
+            return None;
+        }
+        if let Some(site) = v.job_site {
+            let state = self.block(site)?;
+            let kind = poi::of_block(self.state_name(state));
+            if kind == Some(v.profession.as_str()) {
+                return None;
+            }
+            self.release_poi(site);
+            v.job_site = None;
+            v.profession = "minecraft:none".into();
+            v.xp = 0;
+            v.level = 1;
+            v.offers.clear();
+            return Some((id, v.kind.clone(), v.profession.clone(), v.level));
+        }
+        let types = if v.profession == "minecraft:none" {
+            poi::job_types()
+        } else {
+            poi::query(&self.poi_tags, &v.profession)?
+        };
+        let origin = [
+            v.pos[0].floor() as i32,
+            v.pos[1].floor() as i32,
+            v.pos[2].floor() as i32,
+        ];
+        let site = self.free_poi(&types, origin, 48)?;
+        let kind = self
+            .block(site)
+            .and_then(|s| poi::of_block(self.state_name(s)))?;
+        if v.profession != "minecraft:none" && kind != v.profession {
+            return None;
+        }
+        self.claim_poi(site, id);
+        v.job_site = Some(site);
+        if v.profession != kind {
+            v.profession = kind.to_owned();
+            v.xp = 0;
+            v.level = 1;
+            v.offers = self.offers_for(&v.profession);
+            return Some((id, v.kind.clone(), v.profession.clone(), v.level));
+        }
+        None
     }
 
     fn villager_type_id(&self, name: &str) -> i32 {
@@ -312,20 +419,24 @@ impl PlayPlan {
             profession: "minecraft:farmer".into(),
             level: 1,
             xp: 0,
-            offers: if trader == TraderKind::Wandering {
-                self.wandering_offers()
-            } else {
-                self.farmer_offers()
-            },
+            offers: self.offers_for(match trader {
+                TraderKind::Wandering => "minecraft:wandering_trader",
+                TraderKind::Villager => "minecraft:farmer",
+            }),
             despawn_delay: 0,
             last_restock: 0,
             restocks_today: 0,
             last_work_check: self.game_time(),
+            job_site: None,
+            last_job_check: 0,
             custom_name: None,
             persistent: trader == TraderKind::Villager,
         };
         if let Some(nbt) = nbt {
             apply_villager_nbt(&mut v, nbt, |n| self.item_id(n));
+            if v.profession == "minecraft:none" {
+                v.offers.clear();
+            }
         }
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
         self.sim().villagers.lock().unwrap().insert(id, v.clone());
@@ -409,6 +520,7 @@ impl PlayPlan {
             .collect();
         let mut gone = Vec::new();
         let mut work: Vec<([f64; 3], String)> = Vec::new();
+        let mut jobs: Vec<(i32, String, String, i32)> = Vec::new();
         for id in ids {
             let mut villagers = self.sim().villagers.lock().unwrap();
             let Some(v) = villagers.get_mut(&id) else {
@@ -419,6 +531,12 @@ impl PlayPlan {
                 if v.despawn_delay == 0 {
                     gone.push(id);
                     continue;
+                }
+            }
+            if v.trader == TraderKind::Villager && now - v.last_job_check >= 20 {
+                v.last_job_check = now;
+                if let Some(change) = self.update_villager_job(id, v) {
+                    jobs.push(change);
                 }
             }
             if v.trader == TraderKind::Villager && now - v.last_work_check >= 300 {
@@ -454,6 +572,40 @@ impl PlayPlan {
             drop(villagers);
             self.hub.remove_tracked(&gone);
             self.mark_work();
+        }
+        // Точки исчезнувших жителей освобождаем (обычно их снимает
+        // `release_poi` при сбросе профессии, здесь — страховка).
+        if now % 100 == 0 {
+            let alive: std::collections::HashSet<i32> = self
+                .sim()
+                .villagers
+                .lock()
+                .unwrap()
+                .keys()
+                .copied()
+                .collect();
+            self.dim_state()
+                .poi_claims
+                .lock()
+                .unwrap()
+                .retain(|_, id| alive.contains(id));
+        }
+        for (id, kind, profession, level) in jobs {
+            self.hub.send(
+                None,
+                play::entity_meta(
+                    self.ids.set_entity_data,
+                    id,
+                    &[(
+                        18,
+                        play::Meta::VillagerData {
+                            kind: self.villager_type_id(&kind),
+                            profession: self.profession_id(&profession),
+                            level,
+                        },
+                    )],
+                ),
+            );
         }
         for (pos, profession) in work {
             if let Some(sound) = work_sound(&profession) {
@@ -757,19 +909,23 @@ impl PlayPlan {
             profession: "minecraft:farmer".into(),
             level: 1,
             xp: 0,
-            offers: if trader == TraderKind::Wandering {
-                self.wandering_offers()
-            } else {
-                self.farmer_offers()
-            },
+            offers: self.offers_for(match trader {
+                TraderKind::Wandering => "minecraft:wandering_trader",
+                TraderKind::Villager => "minecraft:farmer",
+            }),
             despawn_delay: 0,
             last_restock: 0,
             restocks_today: 0,
             last_work_check: self.game_time(),
+            job_site: None,
+            last_job_check: 0,
             custom_name: None,
             persistent: trader == TraderKind::Villager,
         };
         apply_villager_nbt(&mut v, c, |n| self.item_id(n));
+        if v.profession == "minecraft:none" {
+            v.offers.clear();
+        }
         self.sim().villagers_loaded.lock().unwrap().push(v);
         true
     }

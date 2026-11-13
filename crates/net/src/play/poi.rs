@@ -120,6 +120,28 @@ fn expand(
     }
 }
 
+/// Все типы рабочих точек (`PoiTypes` с `point_of_interest_type`).
+pub(super) fn job_types() -> HashSet<String> {
+    HashSet::from(
+        [
+            "minecraft:armorer",
+            "minecraft:butcher",
+            "minecraft:cartographer",
+            "minecraft:cleric",
+            "minecraft:farmer",
+            "minecraft:fisherman",
+            "minecraft:fletcher",
+            "minecraft:leatherworker",
+            "minecraft:librarian",
+            "minecraft:mason",
+            "minecraft:shepherd",
+            "minecraft:toolsmith",
+            "minecraft:weaponsmith",
+        ]
+        .map(str::to_owned),
+    )
+}
+
 /// Имя из команды (`farmer`, `#village`, `minecraft:#village`) → типы для поиска.
 pub(super) fn query(
     tags: &HashMap<String, HashSet<String>>,

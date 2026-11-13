@@ -1874,6 +1874,8 @@ pub(crate) struct DimState {
     dirty: Mutex<FastSet<(i32, i32)>>,
     /// Точки интереса загруженных чанков.
     pois: Mutex<FastMap<(i32, i32), Vec<Poi>>>,
+    /// Занятые рабочие места: точка → id жителя (`PoiManager`-ticket).
+    poi_claims: Mutex<FastMap<[i32; 3], i32>>,
     /// Уже прочитанные с диска регионы.
     regions: Mutex<FastSet<(i32, i32)>>,
     /// Регионы, из которых выгружали столбцы: блоки читаются заново при
@@ -1917,6 +1919,7 @@ impl DimState {
             saved: Mutex::new(FastMap::default()),
             dirty: Mutex::new(FastSet::default()),
             pois: Mutex::new(FastMap::default()),
+            poi_claims: Mutex::new(FastMap::default()),
             regions: Mutex::new(FastSet::default()),
             evicted: Mutex::new(FastSet::default()),
             region_epoch: std::sync::atomic::AtomicU64::new(0),

@@ -936,8 +936,15 @@ impl PlayPlan {
                 chunkwake_protocol::play::set_passengers(self.ids.set_passengers, boat_id, &ids),
             );
         }
+        let villager = self.sim().villagers.lock().unwrap().remove(&entity_id);
+        if let Some(v) = &villager
+            && let Some(site) = v.job_site
+        {
+            self.release_poi(site);
+        }
         let removed = mob.is_some()
             | boat.is_some()
+            | villager.is_some()
             | self
                 .sim()
                 .dropped
@@ -969,14 +976,7 @@ impl PlayPlan {
                 .remove(&entity_id)
                 .is_some()
             | self.sim().eyes.lock().unwrap().remove(&entity_id).is_some()
-            | self.sim().fish.lock().unwrap().remove(&entity_id).is_some()
-            | self
-                .sim()
-                .villagers
-                .lock()
-                .unwrap()
-                .remove(&entity_id)
-                .is_some();
+            | self.sim().fish.lock().unwrap().remove(&entity_id).is_some();
         if let Some(b) = boat {
             self.remove_boat(entity_id, &b);
             self.mark_entity_changed(b.pos);
