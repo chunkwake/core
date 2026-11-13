@@ -14524,6 +14524,7 @@ impl PlayPlan {
                                         uuid,
                                         "minecraft:glass_bottle",
                                         &clicked,
+                                        u.pos,
                                     );
                                     if let Some(honey) = self.item_id("minecraft:honey_bottle") {
                                         if held.count == 1 {
@@ -15196,7 +15197,9 @@ impl PlayPlan {
                                     .and_then(|i| state.inv.slots[i])
                                     .map(|s| self.item_name(s.item).to_owned())
                                 {
-                                    self.advancement_item_used_on_block(uuid, &item, &clicked);
+                                    self.advancement_item_used_on_block(
+                                        uuid, &item, &clicked, u.pos,
+                                    );
                                 }
                                 if survival && let Some(i) = hand_slot && state.inv.consume_at(i) {
                                     self.send_slots(conn, &mut state.inv, &[i]).await?;

@@ -116,6 +116,9 @@ pub struct AdvancementCriterion {
     pub killing_blow_tags: Vec<String>,
     /// `conditions.killing_blow` содержит неподдержанные поля.
     pub killing_blow_unsupported: bool,
+    /// `conditions.location` (`item_used_on_block`) содержит неподдержанные
+    /// поля `location_check`.
+    pub item_location_unsupported: bool,
     /// `conditions.player` (`player_interacted_with_entity`).
     pub player_pred: Option<EntityPred>,
     /// `conditions.player` содержит неподдержанные узлы.
@@ -276,6 +279,50 @@ fn collect_blocks(v: &serde_json::Value, out: &mut Vec<String>) {
     if let Some(terms) = v.get("terms").and_then(|t| t.as_array()) {
         for term in terms {
             collect_blocks(term, out);
+        }
+    }
+}
+
+/// `location_check` внутри `item_used_on_block`: поддержан `smokey` и
+/// `block.blocks` (последний собирается отдельно). Остальное - unsupported.
+fn collect_item_location(v: &serde_json::Value, smokey: &mut Option<bool>, ok: &mut bool) {
+    if let Some(terms) = v.get("terms").and_then(|t| t.as_array()) {
+        for term in terms {
+            collect_item_location(term, smokey, ok);
+        }
+    }
+    if v.get("type").and_then(|t| t.as_str()) != Some("minecraft:location_check") {
+        return;
+    }
+    if v.as_object()
+        .is_some_and(|o| o.keys().any(|k| k != "type" && k != "predicate"))
+    {
+        *ok = false;
+        return;
+    }
+    let Some(pred) = v.get("predicate").and_then(|p| p.as_object()) else {
+        return;
+    };
+    for (key, value) in pred {
+        match key.as_str() {
+            "smokey" => match value.as_bool() {
+                Some(flag) => {
+                    if smokey.is_some_and(|old| old != flag) {
+                        *ok = false;
+                    }
+                    *smokey = Some(flag);
+                }
+                None => *ok = false,
+            },
+            "block" => {
+                let simple = value
+                    .as_object()
+                    .is_some_and(|o| o.keys().all(|k| k == "blocks"));
+                if !simple {
+                    *ok = false;
+                }
+            }
+            _ => *ok = false,
         }
     }
 }
@@ -500,6 +547,9 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 }
             }
             let mut blocks = Vec::new();
+            // `item_used_on_block`: `smokey` из `location_check`.
+            let mut smokey = None;
+            let mut item_location_supported = true;
             // `enter_block`: `conditions.blocks` — блок или список блоков.
             if let Some(blocks_v) = c.get("conditions").and_then(|c| c.get("blocks")) {
                 blocks.extend(string_or_list(blocks_v));
@@ -508,7 +558,9 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 collect_blocks(location, &mut blocks);
                 // `match_tool.predicate.items` внутри location.
                 collect_location_items(location, &mut items);
+                collect_item_location(location, &mut smokey, &mut item_location_supported);
             }
+            let item_location_unsupported = !item_location_supported;
             let cond = c.get("conditions");
             let dim = |key: &str| {
                 cond.and_then(|c| c.get(key))
@@ -598,7 +650,6 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
             let mut structures = Vec::new();
             let mut position = Vec::new();
             let mut dimension = None;
-            let mut smokey = None;
             let mut light = None;
             let mut block = None;
             let mut block_unsupported = false;
@@ -876,6 +927,7 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 victim_unsupported,
                 killing_blow_tags,
                 killing_blow_unsupported,
+                item_location_unsupported,
                 player_pred: entity_pred,
                 player_pred_unsupported: entity_pred_bad,
             });
@@ -1046,10 +1098,18 @@ impl PlayPlan {
     }
 
     /// `item_used_on_block`: предмет в руке и блок под прицелом.
-    pub(crate) fn advancement_item_used_on_block(&self, uuid: Uuid, item: &str, block: &str) {
+    pub(crate) fn advancement_item_used_on_block(
+        &self,
+        uuid: Uuid,
+        item: &str,
+        block: &str,
+        pos: [i32; 3],
+    ) {
         self.advancement_run(uuid, "minecraft:item_used_on_block", |c| {
-            (c.items.is_empty() || c.items.iter().any(|w| self.item_matches(w, item)))
+            !c.item_location_unsupported
+                && (c.items.is_empty() || c.items.iter().any(|w| self.item_matches(w, item)))
                 && (c.blocks.is_empty() || c.blocks.iter().any(|w| self.block_matches(w, block)))
+                && c.smokey.is_none_or(|want| want == self.is_smokey_at(pos))
         });
     }
 
@@ -2232,5 +2292,67 @@ mod tests {
         let c = &def.criteria[0];
         assert!(c.victim_unsupported);
         assert!(c.killing_blow_unsupported);
+    }
+
+    #[test]
+    fn item_used_on_block_smokey_parses() {
+        let json = serde_json::json!({
+            "criteria": {
+                "c": {
+                    "trigger": "minecraft:item_used_on_block",
+                    "conditions": {
+                        "location": {
+                            "type": "minecraft:all_of",
+                            "terms": [
+                                {
+                                    "type": "minecraft:location_check",
+                                    "predicate": {
+                                        "block": {"blocks": "#minecraft:beehives"},
+                                        "smokey": true
+                                    }
+                                },
+                                {
+                                    "type": "minecraft:match_tool",
+                                    "predicate": {"items": "minecraft:glass_bottle"}
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+            "requirements": [["c"]]
+        });
+        let def = parse_advancement("test/honey", &json).expect("advancement");
+        let c = &def.criteria[0];
+        assert!(!c.item_location_unsupported);
+        assert_eq!(c.smokey, Some(true));
+        assert_eq!(c.blocks, vec!["#minecraft:beehives".to_owned()]);
+        assert_eq!(c.items, vec!["minecraft:glass_bottle".to_owned()]);
+    }
+
+    #[test]
+    fn item_used_on_block_unknown_location_is_unsupported() {
+        let json = serde_json::json!({
+            "criteria": {
+                "c": {
+                    "trigger": "minecraft:item_used_on_block",
+                    "conditions": {
+                        "location": {
+                            "type": "minecraft:location_check",
+                            "predicate": {
+                                "block": {
+                                    "blocks": "minecraft:beehive",
+                                    "state": {"honey_level": "5"}
+                                },
+                                "smokey": true
+                            }
+                        }
+                    }
+                }
+            },
+            "requirements": [["c"]]
+        });
+        let def = parse_advancement("test/honey2", &json).expect("advancement");
+        assert!(def.criteria[0].item_location_unsupported);
     }
 }
