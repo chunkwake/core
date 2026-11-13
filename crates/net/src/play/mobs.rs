@@ -154,6 +154,9 @@ pub(super) struct SweepHit {
     pub sweeping: i32,
 }
 
+/// Экипировка сущности для триггеров: слот, имя предмета, прочность.
+pub(super) type MobEquipment = Vec<(&'static str, String, i32)>;
+
 impl PlayPlan {
     /// Пометить убийцу для добычи/статистики (стрелы, трезубец, riptide).
     pub(super) fn set_mob_killer(
@@ -228,10 +231,19 @@ impl PlayPlan {
     }
 
     /// Вид и «детёныш ли» моб: для триггеров взаимодействия.
-    pub(super) fn mob_species_baby(&self, id: i32) -> Option<(&'static str, bool)> {
+    pub(super) fn mob_interact_info(&self, id: i32) -> Option<(&'static str, bool, MobEquipment)> {
         let mobs = self.sim().mobs.lock().unwrap();
-        mobs.get(&id)
-            .map(|e| (e.mob.species.name(), e.mob.is_baby()))
+        let e = mobs.get(&id)?;
+        let mut equipment = Vec::new();
+        for (i, (slot, _)) in mb::EQUIPMENT_SLOTS.iter().enumerate() {
+            if let Some(stack) = e.mob.item(i) {
+                equipment.push((*slot, self.item_name(stack.item).to_owned(), stack.damage));
+            }
+        }
+        if let Some(armor) = e.mob.body_armor {
+            equipment.push(("body", self.item_name(armor.item).to_owned(), armor.damage));
+        }
+        Some((e.mob.species.name(), e.mob.is_baby(), equipment))
     }
 
     fn mob_type(&self, s: Species) -> i32 {
@@ -304,11 +316,14 @@ impl PlayPlan {
             ));
         }
         // `EntityEquipment`: все надетые предметы (`set_equipment`).
-        let worn: Vec<(u8, Slot)> = mb::EQUIPMENT_SLOTS
+        let mut worn: Vec<(u8, Slot)> = mb::EQUIPMENT_SLOTS
             .iter()
             .enumerate()
             .filter_map(|(i, (_, id))| m.item(i).map(|s| (*id, Some(s))))
             .collect();
+        if let Some(armor) = m.body_armor {
+            worn.push((6, Some(armor)));
+        }
         if !worn.is_empty() {
             out.push(play::set_equipment(self.ids.set_equipment, id, &worn));
         }
@@ -1337,6 +1352,9 @@ impl PlayPlan {
         {
             m.owner = Some(a.iter().fold(0u128, |acc, &v| acc << 32 | v as u32 as u128));
         }
+        if let Some(Tag::Byte(sitting)) = nbt.get("Sitting") {
+            m.sitting = *sitting != 0;
+        }
         if matches!(m.species, Species::Zombie | Species::Drowned)
             && let Some(Tag::Byte(breaks)) = nbt.get("CanBreakDoors")
         {
@@ -1387,6 +1405,16 @@ impl PlayPlan {
                 };
                 m.set_item(i, stack);
                 changed.push((*id, m.item(i)));
+            }
+            // `EquipmentSlot.BODY` (id 6) - волчья броня.
+            if let Some(tag) = eq.get("body") {
+                m.body_armor = match tag {
+                    Tag::Compound(c) if c.contains_key("id") => {
+                        crate::stack_nbt::from_nbt(c, |n| self.item_id(n))
+                    }
+                    _ => None,
+                };
+                changed.push((6, m.body_armor));
             }
         }
         if let Some(Tag::Compound(chances)) = nbt.get("drop_chances") {
@@ -2887,6 +2915,20 @@ impl PlayPlan {
         {
             return None;
         }
+        // `Wolf.mobInteract`: пустая рука у владельца переключает «сидеть».
+        if inv.slots[slot].is_none() {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            let m = &mut mobs.get_mut(&target)?.mob;
+            if !m.alive()
+                || m.species != Species::Wolf
+                || !m.tamed
+                || m.owner != Some(uuid.as_u128())
+            {
+                return None;
+            }
+            m.sitting = !m.sitting;
+            return Some(Vec::new());
+        }
         let stack = inv.slots[slot]?;
         let name = self.item_name(stack.item).to_owned();
         if name == "minecraft:shears"
@@ -2908,6 +2950,8 @@ impl PlayPlan {
             Admire([f64; 3]),
             Tame(bool),
             FishBucket(&'static str),
+            EquipBody,
+            RepairBody([f64; 3]),
         }
         let act = {
             let mut mobs = self.sim().mobs.lock().unwrap();
@@ -2973,6 +3017,28 @@ impl PlayPlan {
                 // `AbstractFish.mobInteract`: ведро воды превращается в ведро
                 // с рыбой, сама рыба исчезает.
                 Act::FishBucket("minecraft:cod_bucket")
+            } else if m.species == Species::Wolf
+                && m.tamed
+                && m.owner == Some(uuid.as_u128())
+                && !m.is_baby()
+                && name == "minecraft:wolf_armor"
+                && m.body_armor.is_none()
+            {
+                // `Wolf.mobInteract`: надеть броню на приручённого волка.
+                m.body_armor = Some(Stack { count: 1, ..stack });
+                Act::EquipBody
+            } else if m.species == Species::Wolf
+                && m.tamed
+                && m.sitting
+                && name == "minecraft:armadillo_scute"
+                && let Some(armor) = m.body_armor.as_mut()
+                && armor.damage > 0
+            {
+                // `Wolf.mobInteract`: починка на `maxDamage * 0.125` за щиток.
+                let max = self.item_max_damage(armor.item);
+                let unit = (max as f32 * 0.125) as i32;
+                armor.damage = (armor.damage - unit).max(0);
+                Act::RepairBody(m.pos)
             } else if m.species == Species::Wolf && !m.is_baby() && name == "minecraft:bone" {
                 // `Wolf.mobInteract` → `tryToTame`: кость тратится всегда,
                 // приручение - с шансом 1/3.
@@ -2983,6 +3049,7 @@ impl PlayPlan {
                 if tamed {
                     m.tamed = true;
                     m.owner = Some(uuid.as_u128());
+                    m.sitting = true;
                 }
                 Act::Tame(tamed)
             } else if m.species == Species::Piglin && !m.is_baby() && name == "minecraft:gold_ingot"
@@ -3054,6 +3121,25 @@ impl PlayPlan {
                 }
                 self.advancement_filled_bucket(uuid, bucket);
                 remove = Some(target);
+            }
+            Act::EquipBody => {
+                if !creative {
+                    inv.consume_at(slot);
+                }
+                self.refresh_mob(target);
+            }
+            Act::RepairBody(pos) => {
+                // В ванили ремонт всегда тратит щиток (`shrink(1)`).
+                inv.consume_at(slot);
+                self.play_sound(
+                    None,
+                    "minecraft:item.wolf_armor.repair",
+                    crate::sounds::NEUTRAL,
+                    pos,
+                    1.0,
+                    1.0,
+                );
+                self.refresh_mob(target);
             }
             Act::Tame(tamed) => {
                 if !creative {
@@ -3534,6 +3620,15 @@ pub(super) fn equipment_to_nbt(m: &Mob, item_names: &[String]) -> Option<Tag> {
             map.insert((*slot).to_owned(), Tag::Compound(c));
         }
     }
+    if let Some(s) = m.body_armor {
+        let name = item_names
+            .get(s.item as usize)
+            .filter(|n| !n.is_empty())
+            .map_or("minecraft:air", String::as_str);
+        if let Some(c) = crate::stack_nbt::to_nbt(s, name) {
+            map.insert("body".to_owned(), Tag::Compound(c));
+        }
+    }
     (!map.is_empty()).then_some(Tag::Compound(map))
 }
 
@@ -3570,6 +3665,9 @@ pub(super) fn equipment_from_nbt(
             if let Some(tag) = eq.get(*slot) {
                 m.set_item(i, read_stack(Some(tag)));
             }
+        }
+        if let Some(tag) = eq.get("body") {
+            m.body_armor = read_stack(Some(tag));
         }
     } else {
         let mut legacy = |key: &str, order: &[usize]| {
@@ -3693,6 +3791,7 @@ pub(super) fn mob_to_nbt(
         // `TameableAnimal.addAdditionalSaveData`: `Tame`/`Owner`.
         Species::Wolf => {
             c.insert("Tame".into(), Tag::Byte(i8::from(m.tamed)));
+            c.insert("Sitting".into(), Tag::Byte(i8::from(m.sitting)));
             if let Some(owner) = m.owner {
                 c.insert(
                     "Owner".into(),
@@ -3815,6 +3914,7 @@ pub(super) fn mob_from_nbt(
     }
     if species == Species::Wolf {
         m.tamed = byte("Tame").is_some_and(|b| b != 0);
+        m.sitting = byte("Sitting").is_some_and(|b| b != 0);
         if let Some(Tag::IntArray(a)) = c.get("Owner")
             && a.len() == 4
         {

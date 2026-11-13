@@ -13430,7 +13430,15 @@ impl PlayPlan {
                             if let Some(slots) = self.interact_mob(uuid, it.entity, it.hand, &mut state.inv, creative).await {
                                 self.send_slots(conn, &mut state.inv, &slots).await?;
                                 self.reset_after_use(me.entity_id, uuid, it.hand, state, &mut swing);
-                                if let Some((species, baby)) = self.mob_species_baby(it.entity) {
+                                if let Some((species, baby, equipment)) =
+                                    self.mob_interact_info(it.entity)
+                                {
+                                    let target_equipment = |slot: &str| {
+                                        equipment
+                                            .iter()
+                                            .find(|(s, _, _)| *s == slot)
+                                            .map(|(_, name, damage)| (name.clone(), *damage))
+                                    };
                                     self.advancement_player_interacted_with_entity(
                                         uuid,
                                         species,
@@ -13438,6 +13446,7 @@ impl PlayPlan {
                                         held.as_deref(),
                                         &state.inv.slots,
                                         state.inv.selected,
+                                        &target_equipment,
                                     );
                                 }
                             }

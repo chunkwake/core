@@ -8,6 +8,15 @@
 use super::*;
 use std::path::Path;
 
+/// `ItemPredicate` из предиката сущности: предметы и `components`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ItemPred {
+    /// `items`: id или `#тег` (пусто - любой предмет).
+    pub items: Vec<String>,
+    /// `components.minecraft:damage` (точное значение; `None` - не проверять).
+    pub damage: Option<i32>,
+}
+
 /// `EntityPredicate` из JSON (`conditions.player`/`conditions.entity`).
 #[derive(Clone, Debug)]
 pub enum EntityPred {
@@ -16,7 +25,7 @@ pub enum EntityPred {
     AllOf(Vec<EntityPred>),
     /// `entity_properties` с поддержанными полями.
     Properties {
-        equipment: Vec<(String, Vec<String>)>,
+        equipment: Vec<(String, ItemPred)>,
         entities: Vec<String>,
         baby: Option<bool>,
     },
@@ -119,6 +128,10 @@ pub struct AdvancementCriterion {
     /// `conditions.location` (`item_used_on_block`) содержит неподдержанные
     /// поля `location_check`.
     pub item_location_unsupported: bool,
+    /// `conditions.entity.predicate.minecraft:equipment` (экипировка цели).
+    pub target_equipment: Vec<(String, ItemPred)>,
+    /// В предикате цели есть неподдержанные поля (компоненты, nbt, ...).
+    pub target_unsupported: bool,
     /// `conditions.player` (`player_interacted_with_entity`).
     pub player_pred: Option<EntityPred>,
     /// `conditions.player` содержит неподдержанные узлы.
@@ -156,6 +169,35 @@ fn short(id: &str) -> &str {
 /// Разбор `EntityPredicate` (`player`/`entity`): `inverted`, `any_of`,
 /// `all_of` и `entity_properties` с `entity_type`/`flags.is_baby`/`equipment`.
 /// Неподдержанные узлы помечают `ok = false`.
+/// `ItemPredicate`: `items` (id/тег) и `components.minecraft:damage`.
+/// Прочие поля и компоненты - неподдержаны (`None`).
+fn parse_item_pred(v: &serde_json::Value) -> Option<ItemPred> {
+    let items = v.get("items").map(string_or_list)?;
+    if items.is_empty() {
+        return None;
+    }
+    let mut damage = None;
+    if let Some(map) = v.as_object() {
+        for (key, value) in map {
+            match key.as_str() {
+                "items" => {}
+                "components" => {
+                    let comps = value.as_object()?;
+                    for (name, comp) in comps {
+                        if name == "minecraft:damage" {
+                            damage = Some(comp.as_i64()? as i32);
+                        } else {
+                            return None;
+                        }
+                    }
+                }
+                _ => return None,
+            }
+        }
+    }
+    Some(ItemPred { items, damage })
+}
+
 fn parse_entity_pred(v: &serde_json::Value, ok: &mut bool) -> Option<EntityPred> {
     let typ = v.get("type").and_then(|t| t.as_str())?;
     match typ {
@@ -210,14 +252,11 @@ fn parse_entity_pred(v: &serde_json::Value, ok: &mut bool) -> Option<EntityPred>
                             continue;
                         };
                         for (slot, item) in slots {
-                            let items = item.get("items").map(string_or_list).unwrap_or_default();
-                            let simple = item
-                                .as_object()
-                                .is_some_and(|o| o.keys().all(|k| k == "items"));
-                            if items.is_empty() || !simple || equipment_slot(slot, 0).is_none() {
-                                *ok = false;
-                            } else {
-                                equipment.push((slot.clone(), items));
+                            match parse_item_pred(item) {
+                                Some(pred) if equipment_slot(slot, 0).is_some() => {
+                                    equipment.push((slot.clone(), pred));
+                                }
+                                _ => *ok = false,
                             }
                         }
                     }
@@ -544,6 +583,35 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 }
                 if !ok {
                     killing_blow_unsupported = true;
+                }
+            }
+            // `conditions.entity.predicate.minecraft:equipment` (цель).
+            let mut target_equipment = Vec::new();
+            let mut target_unsupported = false;
+            if let Some(pred) = c
+                .get("conditions")
+                .and_then(|c| c.get("entity"))
+                .and_then(|e| e.get("predicate"))
+                .and_then(|p| p.as_object())
+            {
+                for (key, value) in pred {
+                    match key.as_str() {
+                        // Уже разобраны выше либо поддержаны триггером.
+                        "minecraft:entity_type" | "minecraft:flags" | "minecraft:distance" => {}
+                        "minecraft:equipment" => {
+                            let Some(slots) = value.as_object() else {
+                                target_unsupported = true;
+                                continue;
+                            };
+                            for (slot, item) in slots {
+                                match parse_item_pred(item) {
+                                    Some(pred) => target_equipment.push((slot.clone(), pred)),
+                                    None => target_unsupported = true,
+                                }
+                            }
+                        }
+                        _ => target_unsupported = true,
+                    }
                 }
             }
             let mut blocks = Vec::new();
@@ -928,6 +996,8 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 killing_blow_tags,
                 killing_blow_unsupported,
                 item_location_unsupported,
+                target_equipment,
+                target_unsupported,
                 player_pred: entity_pred,
                 player_pred_unsupported: entity_pred_bad,
             });
@@ -1368,6 +1438,7 @@ impl PlayPlan {
         item: Option<&str>,
         slots: &[Option<Stack>],
         selected: usize,
+        target_equipment: &dyn Fn(&str) -> Option<(String, i32)>,
     ) {
         self.advancement_run(uuid, "minecraft:player_interacted_with_entity", |c| {
             if c.player_pred_unsupported {
@@ -1378,8 +1449,19 @@ impl PlayPlan {
             let baby_ok = c.entity_baby.is_none_or(|want| want == baby);
             let item_ok = c.items.is_empty()
                 || item.is_some_and(|name| c.items.iter().any(|w| self.item_matches(w, name)));
-            entity_ok && baby_ok && item_ok && self.player_pred_ok(c, slots, selected)
+            let target_ok = !c.target_unsupported
+                && c.target_equipment.iter().all(|(slot, pred)| {
+                    target_equipment(slot)
+                        .is_some_and(|(name, damage)| self.item_pred_matches(pred, &name, damage))
+                });
+            entity_ok && baby_ok && item_ok && target_ok && self.player_pred_ok(c, slots, selected)
         });
+    }
+
+    /// `ItemPredicate`: предметы и точное значение `minecraft:damage`.
+    fn item_pred_matches(&self, pred: &ItemPred, name: &str, damage: i32) -> bool {
+        (pred.items.is_empty() || pred.items.iter().any(|w| self.item_matches(w, name)))
+            && pred.damage.is_none_or(|want| want == damage)
     }
 
     /// `conditions.player` критерия (общая часть триггеров взаимодействия).
@@ -1393,13 +1475,13 @@ impl PlayPlan {
             return false;
         }
         c.player_pred.as_ref().is_none_or(|pred| {
-            let equipment = |slot: &str| -> Option<String> {
+            let equipment = |slot: &str| -> Option<(String, i32)> {
                 let index = equipment_slot(slot, selected)?;
                 slots
                     .get(index)
                     .copied()
                     .flatten()
-                    .map(|s| self.item_name(s.item).to_owned())
+                    .map(|s| (self.item_name(s.item).to_owned(), s.damage))
             };
             self.entity_pred_matches(pred, &equipment, "minecraft:player", false)
         })
@@ -1418,7 +1500,7 @@ impl PlayPlan {
             let entity_ok =
                 c.entities.is_empty() || c.entities.iter().any(|w| self.entity_matches(w, entity));
             let baby_ok = c.entity_baby.is_none_or(|want| want == baby);
-            entity_ok && baby_ok && self.player_pred_ok(c, slots, selected)
+            entity_ok && baby_ok && !c.target_unsupported && self.player_pred_ok(c, slots, selected)
         });
     }
 
@@ -1426,7 +1508,7 @@ impl PlayPlan {
     fn entity_pred_matches(
         &self,
         pred: &EntityPred,
-        equipment: &dyn Fn(&str) -> Option<String>,
+        equipment: &dyn Fn(&str) -> Option<(String, i32)>,
         entity: &str,
         baby: bool,
     ) -> bool {
@@ -1448,9 +1530,9 @@ impl PlayPlan {
                         .iter()
                         .any(|want| self.entity_matches(want, entity)))
                     && want_baby.is_none_or(|want| want == baby)
-                    && eq.iter().all(|(slot, items)| {
-                        equipment(slot).is_some_and(|name| {
-                            items.iter().any(|want| self.item_matches(want, &name))
+                    && eq.iter().all(|(slot, pred)| {
+                        equipment(slot).is_some_and(|(name, damage)| {
+                            self.item_pred_matches(pred, &name, damage)
                         })
                     })
             }
@@ -2193,7 +2275,7 @@ mod tests {
     }
 
     #[test]
-    fn entity_pred_equipment_components_is_unsupported() {
+    fn entity_pred_equipment_unknown_component_is_unsupported() {
         let json = serde_json::json!({
             "criteria": {
                 "c": {
@@ -2206,7 +2288,7 @@ mod tests {
                                 "minecraft:equipment": {
                                     "head": {
                                         "items": "minecraft:golden_helmet",
-                                        "components": {"minecraft:damage": 0}
+                                        "components": {"minecraft:enchantments": {}}
                                     }
                                 }
                             }
@@ -2218,6 +2300,74 @@ mod tests {
         });
         let def = parse_advancement("test/interact2", &json).expect("advancement");
         assert!(def.criteria[0].player_pred_unsupported);
+    }
+
+    #[test]
+    fn target_equipment_body_damage_parses() {
+        let json = serde_json::json!({
+            "criteria": {
+                "repair_wolf_armor": {
+                    "trigger": "minecraft:player_interacted_with_entity",
+                    "conditions": {
+                        "entity": {
+                            "type": "minecraft:entity_properties",
+                            "entity": "this",
+                            "predicate": {
+                                "minecraft:entity_type": "minecraft:wolf",
+                                "minecraft:equipment": {
+                                    "body": {
+                                        "items": "minecraft:wolf_armor",
+                                        "components": {"minecraft:damage": 0}
+                                    }
+                                }
+                            }
+                        },
+                        "item": {"items": "minecraft:armadillo_scute"}
+                    }
+                }
+            },
+            "requirements": [["repair_wolf_armor"]]
+        });
+        let def = parse_advancement("test/repair_wolf", &json).expect("advancement");
+        let c = &def.criteria[0];
+        assert!(!c.target_unsupported);
+        assert_eq!(c.entities, vec!["minecraft:wolf".to_owned()]);
+        assert_eq!(
+            c.target_equipment,
+            vec![(
+                "body".to_owned(),
+                ItemPred {
+                    items: vec!["minecraft:wolf_armor".to_owned()],
+                    damage: Some(0)
+                }
+            )]
+        );
+        assert_eq!(c.items, vec!["minecraft:armadillo_scute".to_owned()]);
+    }
+
+    #[test]
+    fn target_equipment_unknown_field_is_unsupported() {
+        let json = serde_json::json!({
+            "criteria": {
+                "c": {
+                    "trigger": "minecraft:player_interacted_with_entity",
+                    "conditions": {
+                        "entity": {
+                            "type": "minecraft:entity_properties",
+                            "entity": "this",
+                            "predicate": {
+                                "minecraft:components": {
+                                    "minecraft:frog/variant": "minecraft:cold"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "requirements": [["c"]]
+        });
+        let def = parse_advancement("test/frog", &json).expect("advancement");
+        assert!(def.criteria[0].target_unsupported);
     }
 
     #[test]

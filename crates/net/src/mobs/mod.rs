@@ -741,6 +741,10 @@ pub struct Mob {
     pub effects: Vec<crate::survival::Effect>,
     /// `EntityEquipment`: mainhand, offhand, feet, legs, chest, head.
     pub equipment: [Option<Stack>; 6],
+    /// `EquipmentSlot.BODY` (`DataComponents.BODY_ARMOR`): волчья броня.
+    pub body_armor: Option<Stack>,
+    /// `Wolf.isInSittingPose` (`DATA_FLAGS_ID`, бит 0x01).
+    pub sitting: bool,
     /// `DropChances` по тем же слотам; > 1 — предмет сохраняется всегда.
     pub drop_chances: [f32; 6],
     /// Множитель скорости от `Speed`/`Slowness` (пересчитывается в тике).
@@ -815,6 +819,8 @@ impl Mob {
             on_fire: false,
             effects: Vec::new(),
             equipment: [None; 6],
+            body_armor: None,
+            sitting: false,
             drop_chances: [DEFAULT_DROP_CHANCE; 6],
             effect_speed: 1.0,
             effect_weakness: 0.0,
@@ -1427,6 +1433,18 @@ pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walke
 fn server_ai_step(m: &mut Mob, w: &World, s: &mut Senses) {
     // `Mob.isEffectiveAi`: без целей, навигации и LookControl.
     if m.no_ai {
+        return;
+    }
+    // `Wolf` в позе сидения (`isOrderedToSit`): цели и навигация стоят.
+    if m.sitting {
+        m.nav.stop();
+        m.move_ctl.op = path::MoveOp::Wait;
+        m.move_ctl.speed = 0.0;
+        m.move_ctl.strafe_fwd = 0.0;
+        m.move_ctl.strafe_right = 0.0;
+        m.zza = 0.0;
+        m.xxa = 0.0;
+        goals::look_tick(m);
         return;
     }
     let mut goals = std::mem::take(&mut m.goals);

@@ -1563,6 +1563,7 @@ impl PlayPlan {
                 }
                 crate::mobs::Species::Wolf => {
                     root.insert("Tame".into(), Tag::Byte(i8::from(entry.mob.tamed)));
+                    root.insert("Sitting".into(), Tag::Byte(i8::from(entry.mob.sitting)));
                     if let Some(owner) = entry.mob.owner {
                         root.insert(
                             "Owner".into(),
@@ -2511,7 +2512,39 @@ fn args_name(name: &str) -> String {
 }
 
 fn is_live_key(key: &str) -> bool {
-    matches!(key, "Pos" | "Rotation" | "Health" | "Inventory" | "id")
+    // Всё, что `entity_base` собирает из живого состояния: такие поля нельзя
+    // замораживать в `entity_extra`, иначе `data get` покажет старое значение
+    // (`Sitting` после клика, `equipment` после починки брони, ...).
+    matches!(
+        key,
+        "Pos"
+            | "Rotation"
+            | "Health"
+            | "Inventory"
+            | "id"
+            | "UUID"
+            | "NoAI"
+            | "CustomName"
+            | "PersistenceRequired"
+            | "leash"
+            | "active_effects"
+            | "equipment"
+            | "drop_chances"
+            | "Tame"
+            | "Owner"
+            | "Sitting"
+            | "IsBaby"
+            | "CanBreakDoors"
+            | "Sheared"
+            | "Color"
+            | "powered"
+            | "Fuse"
+            | "ExplosionRadius"
+            | "ignited"
+            | "EggLayTime"
+            | "Size"
+            | "wasOnGround"
+    )
 }
 
 /// UUID моба выводится из `entity_id` — тот же вывод, что в `entity_ref`.
