@@ -1085,6 +1085,7 @@ impl PlayPlan {
         // Детёныши животных ничего не роняют; детёныш зомби — как взрослый.
         if let Some((uuid, _)) = e.killer {
             self.award_stat(uuid, "minecraft:killed", m.species.name(), 1);
+            self.award_stat(uuid, "minecraft:custom", "minecraft:mob_kills", 1);
         }
         if m.is_baby() && m.species.is_animal() {
             return;

@@ -11596,6 +11596,7 @@ impl PlayPlan {
         let mut next_window = 0;
         // Шифт из `player_input` (`isSecondaryUseActive`).
         let mut sneaking = false;
+        let mut was_sleeping = false;
         // Полёт на элитрах. Клиент включает его сам и гасит только по метаданным.
         let mut gliding = false;
         // `LivingEntity.swingState` игрока и момент последнего пересчёта его тиков.
@@ -11979,6 +11980,32 @@ impl PlayPlan {
                     game_ticks += 1;
                     state.vitals.tick_attack(state.inv.held().map(|s| s.item));
                     self.award_stat(uuid, "minecraft:custom", "minecraft:play_time", 1);
+                    self.award_stat(uuid, "minecraft:custom", "minecraft:total_world_time", 1);
+                    if sneaking {
+                        self.award_stat(uuid, "minecraft:custom", "minecraft:sneak_time", 1);
+                    }
+                    if !state.vitals.dead {
+                        self.award_stat(uuid, "minecraft:custom", "minecraft:time_since_death", 1);
+                    }
+                    let sleeping = self
+                        .hub
+                        .players
+                        .lock()
+                        .unwrap()
+                        .get(&uuid)
+                        .is_some_and(|p| p.sleeping.is_some());
+                    if sleeping {
+                        if !was_sleeping {
+                            self.reset_stat(
+                                uuid,
+                                "minecraft:custom",
+                                "minecraft:time_since_rest",
+                            );
+                        }
+                    } else {
+                        self.award_stat(uuid, "minecraft:custom", "minecraft:time_since_rest", 1);
+                    }
+                    was_sleeping = sleeping;
                     // Слежение до отправки чанков, как в ванили (тик мира, затем
                     // `send chunks`): сущность в только что пришедшем чанке
                     // появится тиком позже.
@@ -23149,6 +23176,22 @@ impl PlayPlan {
     ) -> Result<(), NetError> {
         self.wake_player(me.entry.uuid);
         // `markClientUnloadedAfterDeath`: неуязвим до респауна.
+        self.award_stat(me.entry.uuid, "minecraft:custom", "minecraft:deaths", 1);
+        self.reset_stat(
+            me.entry.uuid,
+            "minecraft:custom",
+            "minecraft:time_since_death",
+        );
+        self.reset_stat(
+            me.entry.uuid,
+            "minecraft:custom",
+            "minecraft:time_since_rest",
+        );
+        if let Cause::Player(attacker) = cause
+            && let Some(killer) = self.player_uuid_by_name(attacker)
+        {
+            self.award_stat(killer, "minecraft:custom", "minecraft:player_kills", 1);
+        }
         match cause {
             Cause::Mob(kind) | Cause::MobArrow(kind) | Cause::MobExplosion(kind) => {
                 self.award_stat(me.entry.uuid, "minecraft:killed_by", kind, 1);

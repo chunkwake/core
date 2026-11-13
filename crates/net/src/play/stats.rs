@@ -41,6 +41,22 @@ impl PlayPlan {
         self.send_to(uuid, packet);
     }
 
+    /// `ServerStatsCounter.setValue`: сбросить счётчик (например
+    /// `time_since_death`) и отправить новое значение.
+    pub(crate) fn reset_stat(&self, uuid: Uuid, kind: &str, value: &str) {
+        let Some((stat, id)) = self.stat_id(kind, value) else {
+            return;
+        };
+        {
+            let mut all = self.stats.lock().unwrap();
+            all.entry(uuid)
+                .or_default()
+                .insert((kind.to_owned(), value.to_owned()), 0);
+        }
+        let packet = award_stats(self.ids.award_stats, &[(stat, id, 0)]);
+        self.send_to(uuid, packet);
+    }
+
     /// Загруженные счётчики игрока после входа.
     pub(crate) fn load_stats(&self, uuid: Uuid, stats: Vec<((String, String), i32)>) {
         self.stats

@@ -19,6 +19,7 @@ struct Probe {
     sb_click: i32,
     sb_place_recipe: i32,
     sb_set_carried: i32,
+    sb_input: i32,
     cb_chat: i32,
     zombie_ty: i32,
     chat: String,
@@ -83,8 +84,7 @@ impl Probe {
             match ev {
                 Event::Stats { stats } => {
                     for (key, n) in stats {
-                        let e = self.stats.entry(key).or_insert(0);
-                        *e = (*e).max(n);
+                        self.stats.insert(key, n);
                     }
                 }
                 Event::RecipeBookAdd { entries, .. } => self.book.extend(entries),
@@ -118,6 +118,13 @@ impl Probe {
     async fn select(&mut self, slot: u16) {
         let mut w = self.packet(self.sb_set_carried);
         w.u16(slot);
+        self.c.send_raw(&w.buf).await.unwrap();
+        self.pump(150).await;
+    }
+
+    async fn input(&mut self, flags: u8) {
+        let mut w = self.packet(self.sb_input);
+        w.u8(flags);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(150).await;
     }
@@ -201,7 +208,13 @@ async fn main() {
         stat("minecraft:killed_by"),
     );
     let custom = stat("minecraft:custom");
-    let play_time = entry("minecraft:custom_stat", "minecraft:play_time");
+    let cstat = |name: &str| entry("minecraft:custom_stat", name);
+    let play_time = cstat("minecraft:play_time");
+    let total_time = cstat("minecraft:total_world_time");
+    let sneak_time = cstat("minecraft:sneak_time");
+    let time_death = cstat("minecraft:time_since_death");
+    let deaths = cstat("minecraft:deaths");
+    let mob_kills = cstat("minecraft:mob_kills");
     let (stone, planks, pickaxe) = (
         block("minecraft:stone"),
         item("minecraft:oak_planks"),
@@ -223,6 +236,7 @@ async fn main() {
         sb_click: sb("container_click"),
         sb_place_recipe: sb("place_recipe"),
         sb_set_carried: sb("set_carried_item"),
+        sb_input: sb("player_input"),
         cb_chat,
         zombie_ty: zombie,
         chat: String::new(),
@@ -265,6 +279,19 @@ async fn main() {
     }
     p.select(0).await;
     let base = p.stats.clone();
+
+    // 0. sneak_time: приседание на 1.2 с.
+    let sneak_before = p.stat(custom, sneak_time);
+    p.input(0x20).await;
+    p.pump(1200).await;
+    p.input(0).await;
+    assert!(
+        p.stat(custom, sneak_time) >= sneak_before + 5,
+        "sneak_time не растёт: {} -> {}",
+        sneak_before,
+        p.stat(custom, sneak_time)
+    );
+    println!("sneak_time ok");
 
     // 1. mined + broken: деревянная кирка (damage 58) ломает камень.
     p.mine([BX + 1, by, BZ]).await;
@@ -336,6 +363,7 @@ async fn main() {
     p.pump(700).await;
     let zombie_id = p.zombie.expect("зомби не появился");
     let killed_before = p.stat(killed, zombie);
+    let mob_before = p.stat(custom, mob_kills);
     for _ in 0..8 {
         p.attack(zombie_id).await;
     }
@@ -344,24 +372,39 @@ async fn main() {
         p.stat(killed, zombie) > killed_before,
         "killed zombie не вырос"
     );
+    assert!(p.stat(custom, mob_kills) > mob_before, "mob_kills не вырос");
     println!("killed ok");
 
     // 5. play_time: +~20 тиков за секунду.
     let play_before = p.stat(custom, play_time);
+    let total_before = p.stat(custom, total_time);
     p.pump(1000).await;
     let played = p.stat(custom, play_time) - play_before;
     assert!(played >= 10, "play_time не растёт: +{played} за секунду");
+    assert!(
+        p.stat(custom, total_time) > total_before,
+        "total_world_time не растёт"
+    );
     println!("play_time ok (+{played})");
 
-    // 6. killed_by: смерть от игрока (/damage player_attack).
+    // 6. killed_by + deaths + сброс time_since_death.
     let before = p.stat(killed_by, entity("minecraft:player"));
+    let deaths_before = p.stat(custom, deaths);
+    let since_before = p.stat(custom, time_death);
     p.cmd("damage @s 100 minecraft:player_attack").await;
     p.pump(1500).await;
     assert!(
         p.stat(killed_by, entity("minecraft:player")) > before,
         "killed_by player не вырос"
     );
-    println!("killed_by ok");
+    assert_eq!(p.stat(custom, deaths), deaths_before + 1, "deaths не вырос");
+    assert!(
+        p.stat(custom, time_death) < since_before,
+        "time_since_death не сбросился: {} -> {}",
+        since_before,
+        p.stat(custom, time_death)
+    );
+    println!("killed_by + deaths + time_since_death ok");
 
     println!("stats_extra: ok");
 }
