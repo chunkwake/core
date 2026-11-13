@@ -1,5 +1,5 @@
 //! Образ данных запуска: всё, что сервер собирает из дерева ванильных JSON,
-//! упаковывается в `chunkwake-derived-v1/boot.v10.bin` и дальше читается одним
+//! упаковывается в `chunkwake-derived-v1/boot.v11.bin` и дальше читается одним
 //! последовательным файлом вместо тысяч открытий и разборов.
 //!
 //! Сборка образа вызывает обычные загрузчики; повторный старт их не трогает.
@@ -22,9 +22,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Версия формата. Меняется вместе с любым полем образа.
-const SCHEMA: u32 = 10;
+const SCHEMA: u32 = 11;
 const MAGIC: u32 = 0x434B_424F; // "CKBO"
-const FILE: &str = "boot.v10.bin";
+const FILE: &str = "boot.v11.bin";
 
 /// Слоты экипировки в порядке кодов образа (`ItemInfo::equip`).
 const EQUIP: [&str; 8] = [
@@ -556,6 +556,19 @@ fn w_recipes(w: &mut W, r: &Recipes) {
                 w.u32(ingredients.len() as u32);
                 for i in ingredients {
                     w_ingredient(w, i);
+                }
+                w.i32(result.0);
+                w.i32(result.1);
+            }
+            Recipe::DecoratedPot {
+                id,
+                patterns,
+                result,
+            } => {
+                w.u8(2);
+                w.str(id);
+                for p in patterns {
+                    w_ingredient(w, p);
                 }
                 w.i32(result.0);
                 w.i32(result.1);
@@ -1169,6 +1182,21 @@ fn r_recipes(r: &mut R<'_>) -> Result<Recipes, DataError> {
                 list.push(Recipe::Shapeless {
                     id,
                     ingredients,
+                    result,
+                });
+            }
+            2 => {
+                let id = r.str()?;
+                let patterns = [
+                    r_ingredient(r)?,
+                    r_ingredient(r)?,
+                    r_ingredient(r)?,
+                    r_ingredient(r)?,
+                ];
+                let result = (r.i32()?, r.i32()?);
+                list.push(Recipe::DecoratedPot {
+                    id,
+                    patterns,
                     result,
                 });
             }

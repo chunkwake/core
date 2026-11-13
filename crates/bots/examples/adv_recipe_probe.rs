@@ -130,12 +130,16 @@ impl Probe {
     }
 
     async fn click(&mut self, window: i32, slot: u16) {
+        self.click_button(window, slot, 0).await;
+    }
+
+    async fn click_button(&mut self, window: i32, slot: u16, button: u8) {
         self.seq += 1;
         let mut w = self.packet(self.sb_click);
         w.var_int(window)
             .var_int(self.seq)
             .u16(slot)
-            .u8(0)
+            .u8(button)
             .var_int(0)
             .var_int(0)
             .bool(false);
@@ -208,7 +212,10 @@ async fn main() {
         "clear boater".to_string(),
         "effect clear @s".to_string(),
         "advancement revoke @s only minecraft:adventure/trim_with_any_armor_pattern".to_string(),
+        "advancement revoke @s only minecraft:adventure/craft_decorated_pot_using_only_sherds"
+            .to_string(),
         "advancement grant @s only minecraft:adventure/root".to_string(),
+        "advancement grant @s only minecraft:adventure/salvage_sherd".to_string(),
     ] {
         p.cmd(&line).await;
     }
@@ -246,6 +253,41 @@ async fn main() {
         p.adv.get("minecraft:adventure/trim_with_any_armor_pattern")
     );
     println!("recipe_crafted (smithing trim) ok");
+    p.close(win).await;
+
+    // 2. Верстак: декорированный горшок из четырёх черепков.
+    p.cmd("clear boater").await;
+    for _ in 0..4 {
+        p.cmd("give boater minecraft:angler_pottery_sherd 1").await;
+    }
+    p.cmd(&format!(
+        "setblock {} {} {} minecraft:crafting_table",
+        BX + 3,
+        by,
+        BZ
+    ))
+    .await;
+    p.window = None;
+    p.use_on([BX + 3, by, BZ], 1).await;
+    let win = p.window.expect("верстак не открылся");
+    // Сетка 1-9, инвентарь с 10, хотбар 0 -> 37. Берём стопку один раз и
+    // раскладываем по одному черепку в крестик.
+    p.click(win, 37).await;
+    for slot in [2, 4, 6, 8] {
+        p.click_button(win, slot, 1).await;
+    }
+    p.click(win, 0).await;
+    p.pump(600).await;
+    assert!(
+        p.done(
+            "minecraft:adventure/craft_decorated_pot_using_only_sherds",
+            "pot_crafted_using_only_sherds"
+        ),
+        "recipe_crafted (decorated pot) не сработал: {:?}",
+        p.adv
+            .get("minecraft:adventure/craft_decorated_pot_using_only_sherds")
+    );
+    println!("recipe_crafted (decorated pot) ok");
     p.close(win).await;
 
     p.cmd("effect clear @s").await;

@@ -15992,6 +15992,32 @@ impl PlayPlan {
             .collect()
     }
 
+    /// Сырой патч компонента `minecraft:pot_decorations` (4 необязательных
+    /// `ItemStackTemplate` — back, left, right, front).
+    fn pot_decorations_extra(&self, sides: [Option<i32>; 4]) -> u32 {
+        let id = chunkwake_protocol::components::POT_DECORATIONS_COMPONENT
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if id < 0 {
+            return 0;
+        }
+        let mut w = Writer::new();
+        w.var_int(1).var_int(0).var_int(id);
+        for side in sides {
+            match side {
+                Some(item) => {
+                    w.bool(true).var_int(item).var_int(1).var_int(0).var_int(0);
+                }
+                None => {
+                    w.bool(false);
+                }
+            }
+        }
+        chunkwake_protocol::components::intern(chunkwake_protocol::components::Extra {
+            raw: Some(w.buf),
+            ..Default::default()
+        })
+    }
+
     fn max_stack(&self, item: i32) -> i32 {
         self.survival
             .items
@@ -16002,12 +16028,23 @@ impl PlayPlan {
     /// Результат крафта для сетки `size × size`.
     fn craft_result(&self, grid: &[Slot], size: usize) -> Slot {
         let ids: Vec<Option<i32>> = grid.iter().map(|s| s.map(|s| s.item)).collect();
-        if let Some((item, count)) = self.survival.recipes.find(&ids, size) {
+        if let Some((recipe, (item, count))) = self.survival.recipes.find_recipe(&ids, size) {
+            // `DecoratedPotRecipe.assemble`: компонент `pot_decorations` со
+            // четырьмя сторонами (back, left, right, front).
+            let extra = if matches!(recipe, chunkwake_data::recipes::Recipe::DecoratedPot { .. })
+                && size == 3
+            {
+                let sides =
+                    [1usize, 3, 5, 7].map(|i| grid.get(i).copied().flatten().map(|s| s.item));
+                self.pot_decorations_extra(sides)
+            } else {
+                0
+            };
             return Some(Stack {
                 item,
                 count,
                 damage: 0,
-                extra: 0,
+                extra,
             });
         }
         let special = self.survival.recipe_book.special_craft(&ids, size)?;

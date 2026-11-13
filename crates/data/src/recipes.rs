@@ -24,13 +24,21 @@ pub enum Recipe {
         ingredients: Vec<Ingredient>,
         result: (i32, i32),
     },
+    /// `crafting_decorated_pot`: `back`, `left`, `right`, `front` крестиком.
+    DecoratedPot {
+        id: String,
+        patterns: [Ingredient; 4],
+        result: (i32, i32),
+    },
 }
 
 impl Recipe {
     /// `Recipe.id()` в виде `minecraft:<имя файла>`.
     pub fn id(&self) -> &str {
         match self {
-            Recipe::Shaped { id, .. } | Recipe::Shapeless { id, .. } => id,
+            Recipe::Shaped { id, .. }
+            | Recipe::Shapeless { id, .. }
+            | Recipe::DecoratedPot { id, .. } => id,
         }
     }
 }
@@ -379,6 +387,17 @@ impl Recipes {
                 matches_all(ingredients, &items, &mut vec![false; items.len()])
                     .then_some((r, *result))
             }
+            // `DecoratedPotRecipe.matches`: сетка 3×3, ровно 4 ингредиента
+            // крестиком. После обрезки до рамки это даёт w = h = 3.
+            Recipe::DecoratedPot {
+                patterns, result, ..
+            } if w == 3 && h == 3 && filled.len() == 4 => {
+                let sides = [(1, 0, 0), (0, 1, 1), (2, 1, 2), (1, 2, 3)];
+                let ok = sides
+                    .iter()
+                    .all(|&(x, y, i)| at(x, y).is_some_and(|item| patterns[i].contains(&item)));
+                ok.then_some((r, *result))
+            }
             _ => None,
         })
     }
@@ -505,6 +524,16 @@ fn parse(json: &serde_json::Value, tags: &mut ItemTags, id: &str) -> Option<Reci
                 .collect::<Option<_>>()?,
             result: result(json, tags.items)?,
         }),
+        "minecraft:crafting_decorated_pot" => Some(Recipe::DecoratedPot {
+            id: id.to_owned(),
+            patterns: [
+                tags.ingredient(&json["back"])?,
+                tags.ingredient(&json["left"])?,
+                tags.ingredient(&json["right"])?,
+                tags.ingredient(&json["front"])?,
+            ],
+            result: result(json, tags.items)?,
+        }),
         _ => None,
     }
 }
@@ -531,7 +560,8 @@ pub fn load_recipes(root: &Path, items: &HashMap<String, i32>) -> Result<Recipes
     for path in paths {
         let text = std::fs::read_to_string(&path)
             .map_err(|e| DataError::Io(format!("read {}: {e}", path.display())))?;
-        let crafting = text.contains("\"minecraft:crafting_sha");
+        let crafting = text.contains("\"minecraft:crafting_sha")
+            || text.contains("\"minecraft:crafting_decorated_pot\"");
         let cooking = ["smelting", "blasting", "smoking"]
             .iter()
             .position(|t| text.contains(&format!("\"minecraft:{t}\"")));
@@ -735,6 +765,61 @@ mod tests {
         let (recipe, result) = r.find_recipe(&[None, Some(1), None, Some(1)], 2).unwrap();
         assert_eq!(result, (2, 4));
         assert_eq!(recipe.id(), "minecraft:test");
+    }
+
+    #[test]
+    fn decorated_pot_needs_four_ingredients_in_a_cross() {
+        let items: HashMap<String, i32> = [
+            ("minecraft:sherd", 1),
+            ("minecraft:pot", 2),
+            ("minecraft:stone", 3),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+        let mut tags = ItemTags {
+            root: Path::new("."),
+            items: &items,
+            memo: HashMap::new(),
+        };
+        let json = serde_json::json!({
+            "type": "minecraft:crafting_decorated_pot",
+            "back": "minecraft:sherd",
+            "left": "minecraft:sherd",
+            "right": "minecraft:sherd",
+            "front": "minecraft:sherd",
+            "result": {"id": "minecraft:pot"}
+        });
+        let recipe = parse(&json, &mut tags, "minecraft:decorated_pot").unwrap();
+        assert!(matches!(recipe, Recipe::DecoratedPot { .. }));
+        let r = Recipes::from_parts(vec![recipe], Vec::new(), Vec::new(), Vec::new());
+        let cross = [
+            None,
+            Some(1),
+            None,
+            Some(1),
+            None,
+            Some(1),
+            None,
+            Some(1),
+            None,
+        ];
+        let (recipe, result) = r.find_recipe(&cross, 3).unwrap();
+        assert_eq!(recipe.id(), "minecraft:decorated_pot");
+        assert_eq!(result, (2, 1));
+        // Четыре ингредиента подряд, а не крестиком, не подходят.
+        let row = [
+            Some(1),
+            Some(1),
+            Some(1),
+            Some(1),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ];
+        assert!(r.find_recipe(&row, 3).is_none());
     }
 
     #[test]

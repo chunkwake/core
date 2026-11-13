@@ -658,6 +658,7 @@ fn survival_data(
         c::CUSTOM_DATA_COMPONENT.store(component("minecraft:custom_data")?, order);
         c::CHARGED_PROJECTILES_COMPONENT.store(component("minecraft:charged_projectiles")?, order);
         c::CONTAINER_COMPONENT.store(component("minecraft:container")?, order);
+        c::POT_DECORATIONS_COMPONENT.store(component("minecraft:pot_decorations")?, order);
         c::REPAIR_COST_COMPONENT.store(component("minecraft:repair_cost")?, order);
         c::TRIM_COMPONENT.store(component("minecraft:trim")?, order);
         c::BANNER_PATTERNS_COMPONENT.store(component("minecraft:banner_patterns")?, order);

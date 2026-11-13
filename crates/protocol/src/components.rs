@@ -55,6 +55,10 @@ pub struct Extra {
 pub static DYED_COLOR_COMPONENT: std::sync::atomic::AtomicI32 =
     std::sync::atomic::AtomicI32::new(-1);
 
+/// ID `minecraft:pot_decorations` в реестре компонентов; -1 - неизвестен.
+pub static POT_DECORATIONS_COMPONENT: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(-1);
+
 /// Строка с необязательной отфильтрованной версией (`Filterable<T>`).
 pub type Filterable = (String, Option<String>);
 
