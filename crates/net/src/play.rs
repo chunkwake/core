@@ -2500,6 +2500,8 @@ struct OwnedShot {
     punch: i32,
     pierce: i32,
     rocket: bool,
+    /// Оружие, из которого выпущена стрела (`firedFromWeapon`).
+    weapon: Option<Stack>,
     /// Стрела не подбирается (Бесконечность, креатив, `setConsumeItem(false)`).
     creative_only: bool,
 }
@@ -7358,6 +7360,10 @@ impl PlayPlan {
                                         a.owner.map(|u| u.as_u128()),
                                         a.trident_item,
                                         a.entity_name(),
+                                        a.weapon,
+                                        id,
+                                        a.killed,
+                                        a.killed_n,
                                     ));
                                     if a.stopped {
                                         gone.push(id);
@@ -7566,7 +7572,19 @@ impl PlayPlan {
             let mut died = Vec::new();
             let mut killers = Vec::new();
             let mut strikes = Vec::new();
-            for (id, damage, at, owner, trident, direct) in hurt_mobs {
+            for (
+                id,
+                damage,
+                at,
+                owner,
+                trident,
+                direct,
+                weapon,
+                arrow_id,
+                arrow_kills,
+                arrow_kills_n,
+            ) in hurt_mobs
+            {
                 let mut damage = damage;
                 let victim = mobs.get(&id).map(|e| e.mob.species);
                 if let Some(item) = trident {
@@ -7614,6 +7632,44 @@ impl PlayPlan {
                                 "minecraft:arrow"
                             };
                             killers.push((id, Uuid::from_u128(owner), damage));
+                        }
+                        // `KilledByArrowTrigger`: жертвы этой стрелы.
+                        if trident.is_none()
+                            && let Some(owner) = owner
+                            && let Some(victim) = victim
+                        {
+                            let mut victims: Vec<&'static str> = arrow_kills
+                                [..arrow_kills_n as usize]
+                                .iter()
+                                .flatten()
+                                .copied()
+                                .collect();
+                            victims.push(victim.name());
+                            if let Some(arrow) =
+                                self.sim().arrows.lock().unwrap().get_mut(&arrow_id)
+                                && (arrow.killed_n as usize) < arrow.killed.len()
+                            {
+                                arrow.killed[arrow.killed_n as usize] = Some(victim.name());
+                                arrow.killed_n += 1;
+                            }
+                            let weapon = weapon.map(|s| self.item_name(s.item));
+                            let live = self
+                                .live
+                                .lock()
+                                .unwrap()
+                                .get(&Uuid::from_u128(owner))
+                                .cloned();
+                            let (slots, selected) = match &live {
+                                Some(l) => (&l.slots[..], l.selected),
+                                None => (&[][..], 0),
+                            };
+                            self.advancement_killed_by_arrow(
+                                Uuid::from_u128(owner),
+                                &victims,
+                                weapon,
+                                slots,
+                                selected,
+                            );
                         }
                     }
                     if let Some(item) = trident
@@ -10842,6 +10898,7 @@ impl PlayPlan {
         arrow.owner = Some(shot.uuid);
         arrow.left_owner = false;
         arrow.base_damage = shot.base;
+        arrow.weapon = shot.weapon;
         arrow.crit = shot.crit;
         arrow.punch = shot.punch;
         arrow.pierce = shot.pierce;
@@ -10997,6 +11054,7 @@ impl PlayPlan {
             pierce: 0,
             rocket: false,
             creative_only: !consume,
+            weapon: Some(stack),
         });
         if !creative && let Some(mut s) = inv.slots[slot] {
             let broke = self.wear_one(&mut s);
@@ -11119,6 +11177,7 @@ impl PlayPlan {
                     rocket,
                     // Мультивыстрел: боковые стрелы не подбираются (`Projectile.pickup`).
                     creative_only: off != 0.0 || mode == 1,
+                    weapon: Some(stack),
                 });
             }
         }

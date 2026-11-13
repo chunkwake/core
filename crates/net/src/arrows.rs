@@ -74,12 +74,18 @@ pub struct Arrow {
     pub punch: i32,
     /// Сколько целей ещё пробить, не останавливаясь (`piercing`).
     pub pierce: i32,
-    pierced: [u128; 4],
+    pierced: [u128; 8],
     pierced_n: u8,
     /// Попадание в сущность закончило полёт.
     pub stopped: bool,
     /// `PickupStatus.CREATIVE_ONLY`: стрела Бесконечности или креатива — не подбирается.
     pub creative_only: bool,
+    /// `firedFromWeapon`: оружие, из которого выпущена стрела (для
+    /// `killed_by_arrow.fired_from_weapon`).
+    pub weapon: Option<Stack>,
+    /// `piercedAndKilledEntities`: жертвы, убитые этой стрелой.
+    pub killed: [Option<&'static str>; 8],
+    pub killed_n: u8,
     /// `ThrownTrident`: урон 8, отскок от сущности и возврат по `loyalty`.
     pub trident: bool,
     pub loyalty: u8,
@@ -128,10 +134,13 @@ impl Arrow {
             crit: false,
             punch: 0,
             pierce: 0,
-            pierced: [0; 4],
+            pierced: [0; 8],
             pierced_n: 0,
             stopped: false,
             creative_only: false,
+            weapon: None,
+            killed: [None; 8],
+            killed_n: 0,
             trident: false,
             loyalty: 0,
             dealt_damage: false,
@@ -321,9 +330,10 @@ pub fn step(
                 a.vel = [a.vel[0] * -0.01, a.vel[1] * -0.1, a.vel[2] * -0.01];
                 return hits;
             }
-            if a.pierce > 0 && (a.pierced_n as usize) < a.pierced.len() {
+            // `piercingIgnoreEntityIds.size() < pierceLevel + 1`, только
+            // при `pierceLevel > 0`.
+            if a.pierce > 0 && (a.pierced_n as usize) < a.pierce as usize + 1 {
                 remember(a, id);
-                a.pierce -= 1;
                 prev = p;
                 continue;
             }
@@ -356,9 +366,8 @@ pub fn step(
                 a.vel = [a.vel[0] * -0.01, a.vel[1] * -0.1, a.vel[2] * -0.01];
                 return hits;
             }
-            if a.pierce > 0 && (a.pierced_n as usize) < a.pierced.len() {
+            if a.pierce > 0 && (a.pierced_n as usize) < a.pierce as usize + 1 {
                 remember(a, uuid::Uuid::from_u128(mobs[k].0));
-                a.pierce -= 1;
                 prev = p;
                 continue;
             }
@@ -602,7 +611,9 @@ mod tests {
             |_, to| to,
         );
         assert_eq!(hits.len(), 1);
-        assert!(!pierce.stopped && !pierce.stuck && pierce.pierce == 0);
+        // Пронзание не тратит уровень: бюджет - `pierce + 1` цель.
+        assert!(!pierce.stopped && !pierce.stuck && pierce.pierce == 1);
+        assert_eq!(pierce.pierced_n, 1);
 
         let mut snowball = Arrow::flight([0.5, 1.5, 0.5], [1.1, 0.0, 0.0], true);
         let chicken = (9, [1.2, 1.0, 0.5], (0.4, 0.7));

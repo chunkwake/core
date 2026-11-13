@@ -1613,7 +1613,11 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
         // Рыба: без целей, только плавает на месте.
         Species::Cod => return (Selector::default(), Selector::default()),
         // `Piglin`/`Wolf`: для проб и взаимодействия достаточно прогулки.
-        Species::Piglin | Species::Wolf | Species::IronGolem => {
+        Species::Piglin
+        | Species::Wolf
+        | Species::IronGolem
+        | Species::Phantom
+        | Species::Pillager => {
             return (
                 Selector::new(vec![stroll_at(5, 1.0), look(6, 8.0), around(8)]),
                 Selector::default(),

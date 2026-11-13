@@ -132,6 +132,14 @@ pub struct AdvancementCriterion {
     pub target_equipment: Vec<(String, ItemPred)>,
     /// В предикате цели есть неподдержанные поля (компоненты, nbt, ...).
     pub target_unsupported: bool,
+    /// `conditions.victims` (`killed_by_arrow`): предикаты жертв.
+    pub arrow_victims: Vec<EntityPred>,
+    /// Предикаты жертв содержат неподдержанные поля.
+    pub arrow_victims_unsupported: bool,
+    /// `conditions.fired_from_weapon` (`killed_by_arrow`).
+    pub fired_from_weapon: Option<ItemPred>,
+    /// `conditions.unique_entity_types` (`killed_by_arrow`).
+    pub unique_entity_types: Option<(i32, i32)>,
     /// `conditions.player` (`player_interacted_with_entity`).
     pub player_pred: Option<EntityPred>,
     /// `conditions.player` содержит неподдержанные узлы.
@@ -585,6 +593,31 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                     killing_blow_unsupported = true;
                 }
             }
+            // `killed_by_arrow`: жертвы, оружие и число уникальных типов.
+            let mut arrow_victims = Vec::new();
+            let mut arrow_victims_unsupported = false;
+            if let Some(list) = c
+                .get("conditions")
+                .and_then(|c| c.get("victims"))
+                .and_then(|v| v.as_array())
+            {
+                let mut ok = true;
+                for item in list {
+                    match parse_entity_pred(item, &mut ok) {
+                        Some(pred) => arrow_victims.push(pred),
+                        None => ok = false,
+                    }
+                }
+                arrow_victims_unsupported = !ok;
+            }
+            let fired_from_weapon = c
+                .get("conditions")
+                .and_then(|c| c.get("fired_from_weapon"))
+                .and_then(parse_item_pred);
+            let unique_entity_types = c
+                .get("conditions")
+                .and_then(|c| c.get("unique_entity_types"))
+                .and_then(bounds_i32);
             // `conditions.entity.predicate.minecraft:equipment` (цель).
             let mut target_equipment = Vec::new();
             let mut target_unsupported = false;
@@ -998,6 +1031,10 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 item_location_unsupported,
                 target_equipment,
                 target_unsupported,
+                arrow_victims,
+                arrow_victims_unsupported,
+                fired_from_weapon,
+                unique_entity_types,
                 player_pred: entity_pred,
                 player_pred_unsupported: entity_pred_bad,
             });
@@ -1169,6 +1206,52 @@ impl PlayPlan {
 
     /// `item_used_on_block`: предмет в руке и блок под прицелом.
     /// `FilledBucketTrigger`: игрок получил ведро с существом.
+    /// `KilledByArrowTrigger`: жертвы, убитые одной стрелой.
+    pub(crate) fn advancement_killed_by_arrow(
+        &self,
+        uuid: Uuid,
+        victims: &[&'static str],
+        weapon: Option<&str>,
+        slots: &[Option<Stack>],
+        selected: usize,
+    ) {
+        self.advancement_run(uuid, "minecraft:killed_by_arrow", |c| {
+            if c.arrow_victims_unsupported {
+                return false;
+            }
+            if let Some(pred) = &c.fired_from_weapon {
+                let Some(weapon) = weapon else {
+                    return false;
+                };
+                if !self.item_pred_matches(pred, weapon, 0) {
+                    return false;
+                }
+            }
+            // Каждый предикат жертвы должен совпасть с отдельной жертвой.
+            let mut pool: Vec<usize> = (0..victims.len()).collect();
+            for pred in &c.arrow_victims {
+                let mut found = None;
+                for (i, &victim) in pool.iter().enumerate() {
+                    if self.entity_pred_matches(pred, &|_| None, victims[victim], false) {
+                        found = Some(i);
+                        break;
+                    }
+                }
+                let Some(i) = found else {
+                    return false;
+                };
+                pool.remove(i);
+            }
+            let unique = victims
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len() as i32;
+            c.unique_entity_types
+                .is_none_or(|(min, max)| unique >= min && unique <= max)
+                && self.player_pred_ok(c, slots, selected)
+        });
+    }
+
     /// `SummonedEntityTrigger`: игрок призвал сущность (голем из тыквы).
     pub(crate) fn advancement_summoned_entity(
         &self,
@@ -2576,5 +2659,90 @@ mod tests {
         assert_eq!(c.entities, vec!["minecraft:iron_golem".to_owned()]);
         assert!(!c.target_unsupported);
         assert!(c.player_pred.is_none());
+    }
+
+    #[test]
+    fn killed_by_arrow_two_birds_parses() {
+        let json = serde_json::json!({
+            "criteria": {
+                "two_birds": {
+                    "trigger": "minecraft:killed_by_arrow",
+                    "conditions": {
+                        "fired_from_weapon": {"items": "minecraft:crossbow"},
+                        "victims": [
+                            {
+                                "type": "minecraft:entity_properties",
+                                "entity": "this",
+                                "predicate": {"minecraft:entity_type": "minecraft:phantom"}
+                            },
+                            {
+                                "type": "minecraft:entity_properties",
+                                "entity": "this",
+                                "predicate": {"minecraft:entity_type": "minecraft:phantom"}
+                            }
+                        ]
+                    }
+                }
+            },
+            "requirements": [["two_birds"]]
+        });
+        let def = parse_advancement("test/two_birds", &json).expect("advancement");
+        let c = &def.criteria[0];
+        assert!(!c.arrow_victims_unsupported);
+        assert_eq!(c.arrow_victims.len(), 2);
+        assert_eq!(c.unique_entity_types, None);
+        assert_eq!(
+            c.fired_from_weapon,
+            Some(ItemPred {
+                items: vec!["minecraft:crossbow".to_owned()],
+                damage: None
+            })
+        );
+    }
+
+    #[test]
+    fn killed_by_arrow_arbalistic_parses() {
+        let json = serde_json::json!({
+            "criteria": {
+                "arbalistic": {
+                    "trigger": "minecraft:killed_by_arrow",
+                    "conditions": {
+                        "fired_from_weapon": {"items": "minecraft:crossbow"},
+                        "unique_entity_types": 5
+                    }
+                }
+            },
+            "requirements": [["arbalistic"]]
+        });
+        let def = parse_advancement("test/arbalistic", &json).expect("advancement");
+        let c = &def.criteria[0];
+        assert_eq!(c.unique_entity_types, Some((5, 5)));
+        assert!(c.arrow_victims.is_empty());
+        assert!(!c.arrow_victims_unsupported);
+    }
+
+    #[test]
+    fn killed_by_arrow_unknown_victim_is_unsupported() {
+        let json = serde_json::json!({
+            "criteria": {
+                "c": {
+                    "trigger": "minecraft:killed_by_arrow",
+                    "conditions": {
+                        "victims": [
+                            {
+                                "type": "minecraft:entity_properties",
+                                "entity": "this",
+                                "predicate": {
+                                    "minecraft:components": {"minecraft:cat/variant": "minecraft:calico"}
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+            "requirements": [["c"]]
+        });
+        let def = parse_advancement("test/arrow_bad", &json).expect("advancement");
+        assert!(def.criteria[0].arrow_victims_unsupported);
     }
 }
