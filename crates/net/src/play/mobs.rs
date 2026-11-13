@@ -216,6 +216,13 @@ impl PlayPlan {
         )
     }
 
+    /// Вид и «детёныш ли» моб: для триггеров взаимодействия.
+    pub(super) fn mob_species_baby(&self, id: i32) -> Option<(&'static str, bool)> {
+        let mobs = self.sim().mobs.lock().unwrap();
+        mobs.get(&id)
+            .map(|e| (e.mob.species.name(), e.mob.is_baby()))
+    }
+
     fn mob_type(&self, s: Species) -> i32 {
         // Собран при старте по `Species::ALL`; без него (тесты) — по имени.
         self.survival
@@ -2873,6 +2880,7 @@ impl PlayPlan {
             Dye([f64; 3]),
             Name([f64; 3]),
             Ignite([f64; 3], bool),
+            Admire([f64; 3]),
         }
         let act = {
             let mut mobs = self.sim().mobs.lock().unwrap();
@@ -2934,6 +2942,11 @@ impl PlayPlan {
                 // `Creeper.mobInteract`: `#creeper_igniters` поджигают.
                 m.ignited = true;
                 Act::Ignite(m.pos, name == "minecraft:fire_charge")
+            } else if m.species == Species::Piglin && !m.is_baby() && name == "minecraft:gold_ingot"
+            {
+                // `PiglinAi.mobInteract` → `canAdmire`: взрослый пиглин
+                // забирает золото и любуется им.
+                Act::Admire(m.pos)
             } else {
                 return None;
             }
@@ -2975,6 +2988,19 @@ impl PlayPlan {
                         (!self.wear_one(&mut s)).then_some(s)
                     };
                 }
+            }
+            Act::Admire(pos) => {
+                if !creative {
+                    inv.consume_at(slot);
+                }
+                self.play_sound(
+                    None,
+                    "minecraft:entity.piglin.admiring_item",
+                    crate::sounds::NEUTRAL,
+                    pos,
+                    1.0,
+                    1.0,
+                );
             }
             Act::Milk(pos) => {
                 self.play_sound(

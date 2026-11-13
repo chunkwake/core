@@ -231,6 +231,7 @@ pub enum Species {
     Spider,
     Slime,
     Drowned,
+    Piglin,
 }
 
 /// Всё о виде в одном месте. Встроенные значения — запасные: при старте
@@ -303,7 +304,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 10] = [
+const BUILTIN: [SpeciesInfo; 11] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -438,6 +439,20 @@ const BUILTIN: [SpeciesInfo; 10] = [
             "minecraft:entities/drowned",
         )
     },
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (0.6, 1.95),
+        eye_height: 1.79,
+        max_health: 16.0,
+        speed: 0.35,
+        follow_range: 16.0,
+        attack_damage: 0.0,
+        ..base(
+            "minecraft:piglin",
+            "minecraft:entity.piglin",
+            "minecraft:entities/piglin",
+        )
+    },
 ];
 
 static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
@@ -474,7 +489,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 10] = [
+    pub const ALL: [Species; 11] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -485,6 +500,7 @@ impl Species {
         Species::Spider,
         Species::Slime,
         Species::Drowned,
+        Species::Piglin,
     ];
 
     /// Данные вида: выгрузка, если она установлена, иначе встроенные.

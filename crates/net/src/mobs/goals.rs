@@ -1610,6 +1610,13 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
                 Selector::new(vec![nearest(1, false)]),
             );
         }
+        // `Piglin`: для проб и взаимодействия достаточно прогулки и взгляда.
+        Species::Piglin => {
+            return (
+                Selector::new(vec![stroll_at(5, 1.0), look(6, 8.0), around(8)]),
+                Selector::default(),
+            );
+        }
         _ => {}
     }
     // Животные: `Cow`, `Pig`, `Sheep`, `Chicken`. У овцы своя нумерация:

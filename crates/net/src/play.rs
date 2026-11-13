@@ -13419,9 +13419,22 @@ impl PlayPlan {
                         }
                         if !state.vitals.dead {
                             let creative = login.spawn.game_mode == 1;
+                            let held = Self::hand_index(&state.inv, it.hand)
+                                .and_then(|slot| state.inv.slots[slot])
+                                .map(|s| self.item_name(s.item).to_owned());
                             if let Some(slots) = self.interact_mob(uuid, it.entity, it.hand, &mut state.inv, creative).await {
                                 self.send_slots(conn, &mut state.inv, &slots).await?;
                                 self.reset_after_use(me.entity_id, uuid, it.hand, state, &mut swing);
+                                if let Some((species, baby)) = self.mob_species_baby(it.entity) {
+                                    self.advancement_player_interacted_with_entity(
+                                        uuid,
+                                        species,
+                                        baby,
+                                        held.as_deref(),
+                                        &state.inv.slots,
+                                        state.inv.selected,
+                                    );
+                                }
                             }
                         }
                         continue;
