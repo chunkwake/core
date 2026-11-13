@@ -558,8 +558,8 @@ impl SectorMap {
     fn allocate(&mut self, need: usize, offset: usize, count: usize) -> usize {
         let mut run = 0;
         let mut at = None;
-        for i in 2..self.0.len() {
-            if self.0[i] {
+        for (i, used) in self.0.iter().enumerate().skip(2) {
+            if *used {
                 run = 0;
                 continue;
             }

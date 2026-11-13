@@ -596,8 +596,8 @@ fn break_door_can_use(g: &mut BreakDoor, m: &Mob, c: &Ctx) -> bool {
         return false;
     };
     g.door = None;
-    for i in 0..path.nodes.len().min(path.next + 2) {
-        let n = path.nodes[i].0;
+    for node in path.nodes.iter().take(path.next + 2) {
+        let n = node.0;
         // Ванильный `DoorInteractGoal` берёт блок над узлом пути.
         let door = [n[0], n[1] + 1, n[2]];
         if door_flat_dist2(m.pos, door) > 2.25 || !wooden_door_closed(c.w, door) {

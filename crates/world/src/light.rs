@@ -779,8 +779,7 @@ fn queue_emitters<A: LightAccess>(e: &mut Engine<A>, origin: (i32, i32), table: 
         return;
     };
     let mut lights = Vec::new();
-    for si in 0..col.sections.len() {
-        let sec = &col.sections[si];
+    for (si, sec) in col.sections.iter().enumerate() {
         if sec.is_uniform() && table.emission(sec.get(0)) == 0 {
             continue;
         }

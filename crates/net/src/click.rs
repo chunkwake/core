@@ -560,12 +560,12 @@ impl Menu<'_> {
                 } else if (self.rules.brewing_accept)(4, s.item) {
                     self.move_to(&mut s, 4..5, false);
                 } else if (self.rules.brewing_accept)(0, s.item) {
-                    for slot in 0..3 {
+                    for slot in self.slots.iter_mut().take(3) {
                         if s.count == 0 {
                             break;
                         }
-                        if self.slots[slot].is_none() {
-                            self.slots[slot] = Some(Stack { count: 1, ..s });
+                        if slot.is_none() {
+                            *slot = Some(Stack { count: 1, ..s });
                             s.count -= 1;
                         }
                     }

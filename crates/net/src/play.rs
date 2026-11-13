@@ -20562,8 +20562,8 @@ impl PlayPlan {
             return c;
         };
         let items = self.container_items(pos);
-        for i in 0..crate::campfire::SLOTS {
-            c.slots[i] = items.get(i).copied().flatten();
+        for (slot, item) in c.slots.iter_mut().zip(items.iter()) {
+            *slot = *item;
         }
         let copy = |src: Option<&[i32]>, dst: &mut [i32]| {
             for (i, &v) in src.unwrap_or(&[]).iter().take(dst.len()).enumerate() {

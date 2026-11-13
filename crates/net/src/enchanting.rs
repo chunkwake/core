@@ -99,7 +99,7 @@ pub fn offer(e: &Enchanting, item: &str, shelves: i32, seed: i32) -> Offer {
     }
     let shelves = shelves.min(15);
     let mut r = JavaRandom::new(seed as i64);
-    for slot in 0..3 {
+    for (slot, cost_slot) in o.costs.iter_mut().enumerate() {
         // `getEnchantmentCost`.
         let i = r.below(8) + 1 + (shelves >> 1) + r.below(shelves + 1);
         let cost = match slot {
@@ -107,12 +107,13 @@ pub fn offer(e: &Enchanting, item: &str, shelves: i32, seed: i32) -> Offer {
             1 => i * 2 / 3 + 1,
             _ => i.max(shelves * 2),
         };
-        o.costs[slot] = if cost < slot as i32 + 1 { 0 } else { cost };
+        *cost_slot = if cost < slot as i32 + 1 { 0 } else { cost };
     }
-    for slot in 0..3 {
-        if o.costs[slot] > 0 {
+    let costs = o.costs;
+    for (slot, cost) in costs.into_iter().enumerate() {
+        if cost > 0 {
             // Как в ваниле: подсказку берёт тот же генератор после `getEnchantmentList`.
-            let (list, mut r) = enchantments_rng(e, item, slot as i32, o.costs[slot], seed);
+            let (list, mut r) = enchantments_rng(e, item, slot as i32, cost, seed);
             if !list.is_empty() {
                 let pick = list[r.below(list.len() as i32) as usize];
                 o.clue[slot] = pick.0;

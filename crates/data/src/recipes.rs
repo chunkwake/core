@@ -408,8 +408,8 @@ fn matches_all(ings: &[Ingredient], items: &[i32], used: &mut [bool]) -> bool {
     let Some((first, rest)) = ings.split_first() else {
         return true;
     };
-    for i in 0..items.len() {
-        if !used[i] && first.contains(&items[i]) {
+    for (i, item) in items.iter().enumerate() {
+        if !used[i] && first.contains(item) {
             used[i] = true;
             if matches_all(rest, items, used) {
                 return true;

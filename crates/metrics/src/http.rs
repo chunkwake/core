@@ -80,8 +80,8 @@ impl Access {
             return false;
         }
         let mut diff = 0u8;
-        for i in 0..a.len() {
-            diff |= a[i] ^ b[i];
+        for (x, y) in a.iter().zip(b.iter()) {
+            diff |= x ^ y;
         }
         diff == 0
     }
