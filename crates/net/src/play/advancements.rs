@@ -56,6 +56,22 @@ pub struct AdvancementCriterion {
     /// `conditions.player.predicate.minecraft:location.position`: ось и
     /// границы (включительно), например `x` -> `(1.0, 2.0)`.
     pub position: Vec<(String, (f64, f64))>,
+    /// `...location.dimension` (`minecraft:overworld` и т.п.).
+    pub dimension: Option<String>,
+    /// `...location.smokey`: дым от зажжённого костра под точкой.
+    pub smokey: Option<bool>,
+    /// `...location.light.light`: границы яркости (`getMaxLocalRawBrightness`).
+    pub light: Option<(i32, i32)>,
+    /// `...location.block.blocks`.
+    pub block: Option<Vec<String>>,
+    /// `...location.block` содержит `state`/`nbt`.
+    pub block_unsupported: bool,
+    /// `...location.fluid.fluid`.
+    pub fluid: Option<Vec<String>>,
+    /// `...location.fluid` содержит что-то кроме `fluid`.
+    pub fluid_unsupported: bool,
+    /// `...location.can_see_sky`.
+    pub can_see_sky: Option<bool>,
     /// `conditions.player.predicate.minecraft:stepping_on.block.blocks`.
     pub stepping_on: Vec<String>,
     /// `stepping_on` содержит неподдержанные части предиката.
@@ -103,6 +119,11 @@ pub struct AdvancementDef {
 
 fn short(id: &str) -> &str {
     id.trim_start_matches("minecraft:")
+}
+
+/// Пересечение AABB с положительным объёмом (`Shapes.joinIsNotEmpty`).
+fn box_overlaps(a: [f64; 6], b: [f64; 6]) -> bool {
+    a[0] < b[3] && a[3] > b[0] && a[1] < b[4] && a[4] > b[1] && a[2] < b[5] && a[5] > b[2]
 }
 
 /// Слот экипировки (`EquipmentSlot`) в `Inventory.slots`.
@@ -395,6 +416,14 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
             let mut biomes = Vec::new();
             let mut structures = Vec::new();
             let mut position = Vec::new();
+            let mut dimension = None;
+            let mut smokey = None;
+            let mut light = None;
+            let mut block = None;
+            let mut block_unsupported = false;
+            let mut fluid = None;
+            let mut fluid_unsupported = false;
+            let mut can_see_sky = None;
             let mut stepping_on = Vec::new();
             let mut stepping_on_unsupported = false;
             let mut equipment = Vec::new();
@@ -433,9 +462,84 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                             unsupported_location = true;
                         }
                     }
+                    if let Some(v) = loc.get("dimension") {
+                        match v.as_str() {
+                            Some(name) => dimension = Some(short(name).to_owned()),
+                            None => unsupported_location = true,
+                        }
+                    }
+                    if let Some(v) = loc.get("smokey") {
+                        match v.as_bool() {
+                            Some(flag) => smokey = Some(flag),
+                            None => unsupported_location = true,
+                        }
+                    }
+                    if let Some(v) = loc.get("can_see_sky") {
+                        match v.as_bool() {
+                            Some(flag) => can_see_sky = Some(flag),
+                            None => unsupported_location = true,
+                        }
+                    }
+                    if let Some(v) = loc.get("light") {
+                        let inner = v.get("light");
+                        let simple = v
+                            .as_object()
+                            .is_some_and(|o| o.keys().all(|k| k == "light"));
+                        // `min_exclusive`/`max_exclusive` не поддержаны.
+                        let inner_simple = inner.is_none_or(|b| match b {
+                            serde_json::Value::Object(o) => {
+                                o.keys().all(|k| k == "min" || k == "max")
+                            }
+                            _ => true,
+                        });
+                        match inner.map(bounds_i32) {
+                            Some(Some(range)) if simple && inner_simple => light = Some(range),
+                            Some(None) => unsupported_location = true,
+                            _ => {}
+                        }
+                        if !simple || !inner_simple {
+                            unsupported_location = true;
+                        }
+                    }
+                    if let Some(v) = loc.get("block") {
+                        let blocks = v.get("blocks").map(string_or_list).unwrap_or_default();
+                        let extra = v
+                            .as_object()
+                            .is_none_or(|o| o.keys().any(|k| k != "blocks"));
+                        if blocks.is_empty() && !extra {
+                            // `{}` - любой блок.
+                        } else if blocks.is_empty() || extra {
+                            block_unsupported = true;
+                        } else {
+                            block = Some(blocks);
+                        }
+                    }
+                    if let Some(v) = loc.get("fluid") {
+                        let fluids = v.get("fluid").map(string_or_list).unwrap_or_default();
+                        let extra = v.as_object().is_none_or(|o| o.keys().any(|k| k != "fluid"));
+                        if fluids.is_empty() && !extra {
+                            // `{}` - любая жидкость.
+                        } else if fluids.is_empty() || extra {
+                            fluid_unsupported = true;
+                        } else {
+                            fluid = Some(fluids);
+                        }
+                    }
                     if loc.as_object().is_some_and(|o| {
-                        o.keys()
-                            .any(|k| k != "biomes" && k != "structures" && k != "position")
+                        o.keys().any(|k| {
+                            !matches!(
+                                k.as_str(),
+                                "biomes"
+                                    | "structures"
+                                    | "position"
+                                    | "dimension"
+                                    | "smokey"
+                                    | "light"
+                                    | "block"
+                                    | "fluid"
+                                    | "can_see_sky"
+                            )
+                        })
                     }) {
                         unsupported_location = true;
                     }
@@ -558,6 +662,14 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 biomes,
                 structures,
                 position,
+                dimension,
+                smokey,
+                light,
+                block,
+                block_unsupported,
+                fluid,
+                fluid_unsupported,
+                can_see_sky,
                 stepping_on,
                 stepping_on_unsupported,
                 equipment,
@@ -851,6 +963,46 @@ impl PlayPlan {
                 };
                 v >= *min && v <= *max
             });
+            let feet = [
+                pos[0].floor() as i32,
+                pos[1].floor() as i32,
+                pos[2].floor() as i32,
+            ];
+            let dimension_ok = c
+                .dimension
+                .as_ref()
+                .is_none_or(|want| short(want) == short(self.active_dim().key()));
+            let block_ok = match &c.block {
+                None => true,
+                Some(want) => {
+                    !c.block_unsupported
+                        && self
+                            .block_name_at(feet)
+                            .is_some_and(|name| want.iter().any(|w| self.block_matches(w, &name)))
+                }
+            };
+            let fluid_ok = match &c.fluid {
+                None => true,
+                Some(want) => {
+                    !c.fluid_unsupported && {
+                        let kind = self
+                            .block(feet)
+                            .and_then(|s| crate::fluids::state_fluid(&self.survival.placement, s))
+                            .map(|f| f.kind);
+                        want.iter().any(|w| self.fluid_matches(w, kind))
+                    }
+                }
+            };
+            let light_ok = match c.light {
+                None => true,
+                Some((min, max)) => self
+                    .raw_brightness_at(feet)
+                    .is_some_and(|v| v >= min && v <= max),
+            };
+            let smokey_ok = c.smokey.is_none_or(|want| want == self.is_smokey_at(feet));
+            let sky_ok = c.can_see_sky.is_none_or(|want| {
+                want == self.with_world(|w| w.sky_light_at(feet).is_some_and(|l| l >= 15))
+            });
             let step_ok = c.stepping_on.is_empty()
                 || (!c.stepping_on_unsupported
                     && on_block.is_some_and(|block| {
@@ -870,8 +1022,73 @@ impl PlayPlan {
                                 .any(|want| self.item_matches(want, self.item_name(s.item)))
                         })
                     }));
-            biome_ok && structure_ok && position_ok && step_ok && equipment_ok
+            biome_ok
+                && structure_ok
+                && position_ok
+                && dimension_ok
+                && block_ok
+                && fluid_ok
+                && light_ok
+                && smokey_ok
+                && sky_ok
+                && step_ok
+                && equipment_ok
         });
+    }
+
+    /// `Level.getMaxLocalRawBrightness`: свет с учётом времени и погоды.
+    fn raw_brightness_at(&self, pos: [i32; 3]) -> Option<i32> {
+        let (sky, block) =
+            self.with_world(|w| Some((w.sky_light_at(pos)?, w.block_light_at(pos)?)))?;
+        let weather = self.vars.weather();
+        let darken = self.sky_darken_now(self.active_dim(), weather.rain, weather.thunder);
+        Some(i32::from(crate::mobs::raw_brightness(sky, block, darken)))
+    }
+
+    /// `FluidPredicate`: id или тег (`water`/`lava`).
+    fn fluid_matches(&self, want: &str, kind: Option<crate::fluids::Kind>) -> bool {
+        use crate::fluids::Kind;
+        let Some(kind) = kind else {
+            return false;
+        };
+        match short(want.trim_start_matches('#')) {
+            "water" | "flowing_water" => kind == Kind::Water,
+            "lava" | "flowing_lava" => kind == Kind::Lava,
+            _ => false,
+        }
+    }
+
+    /// `CampfireBlock.isLitCampfire`.
+    fn is_lit_campfire(&self, state: u32) -> bool {
+        matches!(
+            self.state_name(state),
+            "minecraft:campfire" | "minecraft:soul_campfire"
+        ) && self.survival.placement.prop(state, "lit") != Some("false")
+    }
+
+    /// `CampfireBlock.isSmokeyPos`: зажжённый костёр под точкой, дым не
+    /// перекрыт коллизией (виртуальный столб `Block.column(4, 0, 16)`).
+    fn is_smokey_at(&self, pos: [i32; 3]) -> bool {
+        const POST: [f64; 6] = [0.375, 0.0, 0.375, 0.625, 1.0, 0.625];
+        for i in 1..=5 {
+            let below = [pos[0], pos[1] - i, pos[2]];
+            let Some(state) = self.block(below) else {
+                return false;
+            };
+            if self.is_lit_campfire(state) {
+                return true;
+            }
+            if self
+                .collision_boxes(state)
+                .iter()
+                .any(|b| box_overlaps(*b, POST))
+            {
+                return self
+                    .block([below[0], below[1] - 1, below[2]])
+                    .is_some_and(|s| self.is_lit_campfire(s));
+            }
+        }
+        false
     }
 
     /// `recipe_crafted`: id рецепта и использованные ингредиенты.
@@ -1463,6 +1680,52 @@ mod tests {
     fn location_position_exclusive_is_unsupported() {
         let c = location_advancement(serde_json::json!({
             "position": {"x": {"min_exclusive": 0.0}}
+        }));
+        assert!(c.unsupported_location);
+    }
+
+    #[test]
+    fn location_extra_fields_parse() {
+        let c = location_advancement(serde_json::json!({
+            "dimension": "minecraft:the_nether",
+            "smokey": true,
+            "light": {"light": {"min": 0, "max": 7}},
+            "block": {"blocks": ["minecraft:beehive", "#minecraft:campfires"]},
+            "fluid": {"fluid": "#minecraft:water"},
+            "can_see_sky": false
+        }));
+        assert!(!c.unsupported_location);
+        assert_eq!(c.dimension.as_deref(), Some("the_nether"));
+        assert_eq!(c.smokey, Some(true));
+        assert_eq!(c.light, Some((0, 7)));
+        assert_eq!(
+            c.block,
+            Some(vec![
+                "minecraft:beehive".to_owned(),
+                "#minecraft:campfires".to_owned()
+            ])
+        );
+        assert_eq!(c.fluid, Some(vec!["#minecraft:water".to_owned()]));
+        assert!(!c.fluid_unsupported);
+        assert_eq!(c.can_see_sky, Some(false));
+    }
+
+    #[test]
+    fn location_block_state_and_fluid_nbt_are_unsupported() {
+        let c = location_advancement(serde_json::json!({
+            "block": {"blocks": "minecraft:stone", "state": {"lit": "true"}}
+        }));
+        assert!(c.block_unsupported);
+        assert!(!c.unsupported_location);
+
+        let c = location_advancement(serde_json::json!({
+            "fluid": {"fluid": "minecraft:water", "nbt": 1}
+        }));
+        assert!(c.fluid_unsupported);
+        assert!(!c.unsupported_location);
+
+        let c = location_advancement(serde_json::json!({
+            "light": {"light": {"min_exclusive": 1}}
         }));
         assert!(c.unsupported_location);
     }

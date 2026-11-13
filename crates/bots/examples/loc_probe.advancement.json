@@ -1,0 +1,76 @@
+{
+  "display": {
+    "title": {"text": "loc probe"},
+    "description": {"text": "location predicate probe"},
+    "icon": {"id": "minecraft:campfire"},
+    "frame": "task",
+    "show_toast": false,
+    "announce_to_chat": false
+  },
+  "criteria": {
+    "smoky": {
+      "trigger": "minecraft:location",
+      "conditions": {
+        "player": {
+          "type": "minecraft:entity_properties",
+          "entity": "this",
+          "predicate": {
+            "minecraft:location": {
+              "position": {
+                "x": {"min": 25.0, "max": 35.0},
+                "y": {"min": 95.0, "max": 105.0},
+                "z": {"min": 3.0, "max": 13.0}
+              },
+              "dimension": "minecraft:overworld",
+              "smokey": true,
+              "block": {"blocks": "minecraft:air"},
+              "can_see_sky": true
+            }
+          }
+        }
+      }
+    },
+    "wet": {
+      "trigger": "minecraft:location",
+      "conditions": {
+        "player": {
+          "type": "minecraft:entity_properties",
+          "entity": "this",
+          "predicate": {
+            "minecraft:location": {
+              "position": {
+                "x": {"min": 15.0, "max": 25.0},
+                "y": {"min": 95.0, "max": 105.0},
+                "z": {"min": 3.0, "max": 13.0}
+              },
+              "dimension": "minecraft:overworld",
+              "block": {"blocks": "minecraft:water"},
+              "fluid": {"fluid": "#minecraft:water"},
+              "light": {"light": {"min": 10, "max": 15}}
+            }
+          }
+        }
+      }
+    },
+    "not_lava": {
+      "trigger": "minecraft:location",
+      "conditions": {
+        "player": {
+          "type": "minecraft:entity_properties",
+          "entity": "this",
+          "predicate": {
+            "minecraft:location": {
+              "position": {
+                "x": {"min": 15.0, "max": 25.0},
+                "y": {"min": 95.0, "max": 105.0},
+                "z": {"min": 3.0, "max": 13.0}
+              },
+              "fluid": {"fluid": "minecraft:lava"}
+            }
+          }
+        }
+      }
+    }
+  },
+  "requirements": [["smoky"], ["wet"]]
+}

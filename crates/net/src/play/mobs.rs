@@ -4132,7 +4132,7 @@ struct SpawnLight {
 impl PlayPlan {
     /// Затемнение неба сейчас (`Level.skyDarken`): по таймлайну дня и погоде. В Аду и Краю времени суток нет — «светло снаружи» там не
     /// бывает, поэтому 11, как ночью.
-    fn sky_darken_now(&self, dim: Dimension, rain: bool, thunder: bool) -> i32 {
+    pub(crate) fn sky_darken_now(&self, dim: Dimension, rain: bool, thunder: bool) -> i32 {
         if dim != Dimension::Overworld {
             return 11;
         }
