@@ -13906,6 +13906,15 @@ impl PlayPlan {
                                     // прогресса: по блоку в приключении он не ломается.
                                     if crate::redstone::is_note_block(self.state_name(block)) {
                                         self.play_note(a.pos);
+                                        self.award_stat(
+                                            uuid,
+                                            "minecraft:custom",
+                                            "minecraft:play_noteblock",
+                                            1,
+                                        );
+                                    }
+                                    if self.state_name(block) == "minecraft:bell" {
+                                        self.ring_bell(uuid, a.pos, a.face as u8, block);
                                     }
                                     if self.cancelled(Event::Interact, uuid, || {
                                         format!("LEFT_CLICK_BLOCK {} {} {} {face} HAND", a.pos[0], a.pos[1], a.pos[2])
@@ -14513,6 +14522,43 @@ impl PlayPlan {
                                     .await?;
                             }
                         }
+                        // `FlowerPotBlock.useItemOn`: цветок в пустой горшок.
+                        if clicked == "minecraft:flower_pot"
+                            && !state.vitals.dead
+                            && login.spawn.game_mode != 3
+                            && let Some(slot) = Self::hand_index(&state.inv, u.hand)
+                            && let Some(held) = state.inv.slots[slot]
+                        {
+                            let short = self
+                                .item_name(held.item)
+                                .trim_start_matches("minecraft:")
+                                .to_owned();
+                            let potted = format!("minecraft:potted_{short}");
+                            let state_id = self
+                                .survival
+                                .block_defaults
+                                .get(&format!("{potted}[]"))
+                                .or_else(|| self.survival.block_defaults.get(&potted))
+                                .copied();
+                            if let Some(state_id) = state_id {
+                                self.set_block(u.pos, state_id);
+                                let sound = crate::sounds::place_sound(&potted, |s| {
+                                    self.survival.sounds.contains_key(s)
+                                });
+                                self.block_sound(Some(uuid), &sound, u.pos, 1.0, 0.8);
+                                if login.spawn.game_mode != 1 {
+                                    state.inv.consume_at(slot);
+                                    self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                }
+                                self.award_stat(uuid, "minecraft:custom", "minecraft:pot_flower", 1);
+                                self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
+                                conn.send(&play::block_update(ids.block_update, u.pos, state_id as i32))
+                                    .await?;
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence))
+                                    .await?;
+                                continue;
+                            }
+                        }
                         let kind = match clicked.as_str() {
                             "minecraft:crafting_table" => Some(Kind::Crafting),
                             "minecraft:enchanting_table" => Some(Kind::Enchanting),
@@ -14630,6 +14676,9 @@ impl PlayPlan {
                                 "minecraft:smithing_table" => {
                                     Some("minecraft:interact_with_smithing_table")
                                 }
+                                "minecraft:hopper" => Some("minecraft:inspect_hopper"),
+                                "minecraft:dispenser" => Some("minecraft:inspect_dispenser"),
+                                "minecraft:dropper" => Some("minecraft:inspect_dropper"),
                                 n if is_copper_chest(n) => Some("minecraft:open_chest"),
                                 n if n.ends_with("shulker_box") => {
                                     Some("minecraft:open_shulker_box")
@@ -19948,6 +19997,7 @@ impl PlayPlan {
                     .await?;
             }
             self.play_note(pos);
+            self.award_stat(uuid, "minecraft:custom", "minecraft:tune_noteblock", 1);
             return Ok(true);
         }
         // Повторитель: задержка 1→4 по кругу (`RepeaterBlock.useWithoutItem`).
@@ -21065,6 +21115,30 @@ impl PlayPlan {
     /// Звук — `playSeededSound(…, SoundSource.RECORDS, NOTE_VOLUME, pitch, seed)`,
     /// где pitch для настраиваемых инструментов считается из `note`, а у
     /// голов всегда 1. Сверху летит частица ноты (`ParticleTypes.NOTE`).
+    /// `BellBlock.attemptToRing`: звук `block.bell.hit`, blockEvent 1 и
+    /// статистика `bell_ring`.
+    fn ring_bell(&self, uuid: Uuid, pos: [i32; 3], face: u8, state: u32) {
+        let at = [
+            pos[0] as f64 + 0.5,
+            pos[1] as f64 + 0.5,
+            pos[2] as f64 + 0.5,
+        ];
+        self.play_sound(
+            Some(uuid),
+            "minecraft:block.bell.hit",
+            crate::sounds::BLOCKS,
+            at,
+            2.0,
+            1.0,
+        );
+        self.hub.send(
+            None,
+            play::block_event(self.ids.block_event, pos, 1, face.min(5), state as i32),
+        );
+        self.award_stat(uuid, "minecraft:custom", "minecraft:bell_ring", 1);
+        self.emit_vibration(at, "minecraft:block_change");
+    }
+
     fn play_note(&self, pos: [i32; 3]) -> bool {
         let pl = &self.survival.placement;
         let Some(state) = self.block(pos) else {
@@ -22114,6 +22188,12 @@ impl PlayPlan {
         pos: [i32; 3],
         yaw: f32,
     ) -> Result<bool, NetError> {
+        let state = self.block(pos).unwrap_or(AIR);
+        let name = self.state_name(state);
+        if name == "minecraft:bell" {
+            self.ring_bell(uuid, pos, 0, state);
+            return Ok(true);
+        }
         let Some(state) = self.block(pos) else {
             return Ok(false);
         };
