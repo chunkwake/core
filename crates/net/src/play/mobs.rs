@@ -2184,9 +2184,10 @@ impl PlayPlan {
         // применяется в `hurt`, это — добавка `causeExtraKnockback`.
         let extra =
             0.25 * level("minecraft:knockback") as f64 + if sprint_knock { 0.5 } else { 0.0 };
-        let (result, mpos, species, baby, sound, target_ground) = {
+        let (result, mpos, species, baby, sound, target_ground, dealt) = {
             let mut mobs = self.sim().mobs.lock().unwrap();
             let e = mobs.get_mut(&target)?;
+            let health_before = e.mob.health;
             // Обидчика монстр берёт целью сам (`HurtByTargetGoal`), творческого — нет.
             let r = mb::hurt(
                 &mut e.mob,
@@ -2214,9 +2215,18 @@ impl PlayPlan {
                 e.mob.is_baby(),
                 sound,
                 e.mob.on_ground,
+                (health_before - e.mob.health).max(0.0),
             )
         };
         let died = result?;
+        if dealt > 0.0 {
+            self.award_stat(
+                uuid,
+                "minecraft:custom",
+                "minecraft:damage_dealt",
+                (dealt * 10.0).round() as i32,
+            );
+        }
         if smash {
             self.mace_smash(target, pos, fall, target_ground);
             vitals.reset_fall(pos);

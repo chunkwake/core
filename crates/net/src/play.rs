@@ -12648,6 +12648,13 @@ impl PlayPlan {
                             }
                         }
                         let landed = m.on_ground;
+                        self.movement_stats(
+                            uuid,
+                            m.pos,
+                            m.on_ground,
+                            state.vitals.sprinting,
+                            sneaking,
+                        );
                         self.moved(uuid, m);
                         if gliding && landed {
                             self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
@@ -14535,6 +14542,21 @@ impl PlayPlan {
                             }
                             conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &serde_json::json!({"translate": title}))).await?;
                             self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
+                            let open_stat = match clicked.as_str() {
+                                "minecraft:ender_chest" => Some("minecraft:open_enderchest"),
+                                "minecraft:barrel" => Some("minecraft:open_barrel"),
+                                "minecraft:chest" | "minecraft:trapped_chest" => {
+                                    Some("minecraft:open_chest")
+                                }
+                                n if is_copper_chest(n) => Some("minecraft:open_chest"),
+                                n if n.ends_with("shulker_box") => {
+                                    Some("minecraft:open_shulker_box")
+                                }
+                                _ => None,
+                            };
+                            if let Some(stat) = open_stat {
+                                self.award_stat(uuid, "minecraft:custom", stat, 1);
+                            }
                             if kind == Kind::Enchanting {
                                 self.refresh_enchant(conn, &mut w, state.xp.seed, uuid).await?;
                             }
@@ -23273,6 +23295,14 @@ impl PlayPlan {
         amount = v.absorb(amount);
         if amount < incoming {
             self.send_absorption(conn, me, v).await?;
+        }
+        if amount > 0.0 {
+            self.award_stat(
+                me.entry.uuid,
+                "minecraft:custom",
+                "minecraft:damage_taken",
+                (amount * 10.0).round() as i32,
+            );
         }
         let was_dead = v.dead;
         let died = amount > 0.0 && v.damage(amount);

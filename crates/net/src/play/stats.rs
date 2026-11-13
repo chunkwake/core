@@ -57,6 +57,57 @@ impl PlayPlan {
         self.send_to(uuid, packet);
     }
 
+    /// `ServerPlayer.checkMovementStatistics`: шаг, спринт и прыжок.
+    ///
+    /// `to` — новая позиция из пакета движения; статистика считается по
+    /// разнице с предыдущей позицией, как в ванили.
+    pub(crate) fn movement_stats(
+        &self,
+        uuid: Uuid,
+        to: Option<[f64; 3]>,
+        on_ground: bool,
+        sprint: bool,
+        sneak: bool,
+    ) {
+        let Some(to) = to else {
+            return;
+        };
+        let Some((old, old_ground)) = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .get(&uuid)
+            .map(|p| (p.pos, p.on_ground))
+        else {
+            return;
+        };
+        let (dx, dy, dz) = (to[0] - old[0], to[1] - old[1], to[2] - old[2]);
+        if dx == 0.0 && dy == 0.0 && dz == 0.0 {
+            return;
+        }
+        // `ServerGamePacketListenerImpl.handleMovePlayer`: прыжок — отрыв от
+        // земли вверх после кадра «на земле».
+        if old_ground && !on_ground && dy > 0.0 {
+            self.award_stat(uuid, "minecraft:custom", "minecraft:jump", 1);
+        }
+        if !on_ground {
+            return;
+        }
+        let horizontal = ((dx * dx + dz * dz).sqrt() * 100.0).round() as i32;
+        if horizontal <= 0 {
+            return;
+        }
+        let key = if sprint {
+            "minecraft:sprint_one_cm"
+        } else if sneak {
+            "minecraft:crouch_one_cm"
+        } else {
+            "minecraft:walk_one_cm"
+        };
+        self.award_stat(uuid, "minecraft:custom", key, horizontal);
+    }
+
     /// Загруженные счётчики игрока после входа.
     pub(crate) fn load_stats(&self, uuid: Uuid, stats: Vec<((String, String), i32)>) {
         self.stats
