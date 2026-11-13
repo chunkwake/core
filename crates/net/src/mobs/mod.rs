@@ -95,7 +95,7 @@ pub fn random_equipment(
         }
     }
     match species {
-        Species::Zombie => {
+        Species::Zombie | Species::Drowned => {
             let chance = if difficulty == 3 { 0.05 } else { 0.01 };
             if rng() < chance {
                 let name = match (rng() * 6.0) as u32 % 6 {
@@ -230,6 +230,7 @@ pub enum Species {
     Skeleton,
     Spider,
     Slime,
+    Drowned,
 }
 
 /// Всё о виде в одном месте. Встроенные значения — запасные: при старте
@@ -302,7 +303,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 9] = [
+const BUILTIN: [SpeciesInfo; 10] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -422,6 +423,21 @@ const BUILTIN: [SpeciesInfo; 9] = [
             "minecraft:entities/slime",
         )
     },
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (0.6, 1.95),
+        eye_height: 1.74,
+        speed: 0.23,
+        follow_range: 35.0,
+        attack_damage: 3.0,
+        armor: 2.0,
+        burns_in_sun: false,
+        ..base(
+            "minecraft:drowned",
+            "minecraft:entity.drowned",
+            "minecraft:entities/drowned",
+        )
+    },
 ];
 
 static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
@@ -458,7 +474,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 9] = [
+    pub const ALL: [Species; 10] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -468,6 +484,7 @@ impl Species {
         Species::Skeleton,
         Species::Spider,
         Species::Slime,
+        Species::Drowned,
     ];
 
     /// Данные вида: выгрузка, если она установлена, иначе встроенные.
@@ -496,7 +513,7 @@ impl Species {
 
     /// `EntityTypeTags.UNDEAD`: лечение вредит, урон лечит.
     pub fn is_undead(self) -> bool {
-        matches!(self, Species::Zombie | Species::Skeleton)
+        matches!(self, Species::Zombie | Species::Skeleton | Species::Drowned)
     }
 
     pub fn attack_damage(self) -> f32 {
@@ -767,7 +784,7 @@ impl Mob {
     pub fn speed(&self) -> f64 {
         let base = if self.species == Species::Slime {
             cube::speed(self.cube_size)
-        } else if self.species == Species::Zombie && self.is_baby() {
+        } else if matches!(self.species, Species::Zombie | Species::Drowned) && self.is_baby() {
             self.species.speed() * 1.5
         } else {
             self.species.speed()

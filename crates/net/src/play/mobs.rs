@@ -421,7 +421,7 @@ impl PlayPlan {
             );
         }
         // `Zombie.finalizeSpawn`: шанс ломать двери `specialMultiplier × 0.1`.
-        if finalize && m.species == Species::Zombie {
+        if finalize && matches!(m.species, Species::Zombie | Species::Drowned) {
             let special = mb::cube::special_multiplier(
                 self.difficulty().id(),
                 self.day_time.load(Ordering::Relaxed),
@@ -1308,7 +1308,7 @@ impl PlayPlan {
         {
             m.leash = Some(leash);
         }
-        if m.species == Species::Zombie
+        if matches!(m.species, Species::Zombie | Species::Drowned)
             && let Some(Tag::Byte(breaks)) = nbt.get("CanBreakDoors")
         {
             m.can_break_doors = *breaks != 0;
@@ -3632,7 +3632,7 @@ pub(super) fn mob_from_nbt(
     m.persistent = byte("PersistenceRequired").is_some_and(|b| b != 0);
     m.no_ai = byte("NoAI").is_some_and(|b| b != 0);
     // Зомби: детёныш навсегда (`IsBaby`), возраста у него нет.
-    if species == Species::Zombie {
+    if matches!(species, Species::Zombie | Species::Drowned) {
         m.age = if byte("IsBaby").is_some_and(|b| b != 0) {
             mb::BABY_AGE
         } else {
@@ -4427,7 +4427,8 @@ impl PlayPlan {
         });
         for (species, at) in plan {
             // `Zombie.getSpawnAsBabyOdds`: 5 %.
-            let baby = species == Species::Zombie && rng.r#gen::<f64>() < 0.05;
+            let baby =
+                matches!(species, Species::Zombie | Species::Drowned) && rng.r#gen::<f64>() < 0.05;
             let pos = [
                 f64::from(at[0]) + 0.5,
                 f64::from(at[1]),

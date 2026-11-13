@@ -19,10 +19,12 @@ struct Probe {
     sb_select: i32,
     cb_chat: i32,
     zombie_ty: i32,
+    drowned_ty: i32,
     lightning_ty: i32,
     chat: String,
     seq: i32,
     zombies: Vec<i32>,
+    drowned: Vec<i32>,
     removed: HashSet<i32>,
     lightning: Vec<[f64; 3]>,
     stats: HashMap<(i32, i32), i32>,
@@ -88,6 +90,8 @@ impl Probe {
                 } => {
                     if kind == self.zombie_ty {
                         self.zombies.push(entity_id);
+                    } else if kind == self.drowned_ty {
+                        self.drowned.push(entity_id);
                     } else if kind == self.lightning_ty {
                         self.lightning.push(pos);
                     }
@@ -124,6 +128,19 @@ impl Probe {
         w.var_int(0).var_int(self.seq).f32(yaw).f32(pitch);
         self.c.send_raw(&w.buf).await.unwrap();
         self.pump(150).await;
+    }
+
+    /// Отпустить трезубец; до 3 попыток, пока `target` не исчезнет.
+    async fn throw_until_gone(&mut self, target: i32) {
+        for _ in 0..3 {
+            self.use_item(-90.0, 0.0).await;
+            self.pump(900).await;
+            self.release().await;
+            self.pump(1200).await;
+            if self.removed.contains(&target) {
+                return;
+            }
+        }
     }
 
     async fn release(&mut self) {
@@ -168,10 +185,12 @@ async fn main() {
         sb_select: sb("set_carried_item"),
         cb_chat,
         zombie_ty: ent("minecraft:zombie"),
+        drowned_ty: ent("minecraft:drowned"),
         lightning_ty: ent("minecraft:lightning_bolt"),
         chat: String::new(),
         seq: 0,
         zombies: Vec::new(),
+        drowned: Vec::new(),
         removed: HashSet::new(),
         lightning: Vec::new(),
         stats: HashMap::new(),
@@ -266,10 +285,7 @@ async fn main() {
     p.pump(500).await;
     let wet_zombie = *p.zombies.last().expect("зомби в воде не появился");
     p.removed.clear();
-    p.use_item(0.0, 0.0).await;
-    p.pump(700).await;
-    p.release().await;
-    p.pump(800).await;
+    p.throw_until_gone(wet_zombie).await;
     assert!(
         p.removed.contains(&wet_zombie),
         "Riptide не убил зомби в воде: removed={:?}",
@@ -311,6 +327,63 @@ async fn main() {
         "Channeling не вызвал молнию (цель {target})"
     );
     println!("channeling ok ({} lightning)", p.lightning.len());
+
+    // 4. Impaling: +2.5×уровень по водным мобам (drowned).
+    p.cmd("weather clear").await;
+    p.cmd("clear boater").await;
+    p.cmd("give boater minecraft:trident 1").await;
+    p.cmd("enchant boater minecraft:impaling 3").await;
+    p.cmd(&format!(
+        "tp boater {} {} {} -90 0",
+        BX as f64 + 0.5,
+        by,
+        BZ as f64 + 0.5
+    ))
+    .await;
+    p.select(0).await;
+    p.drowned.clear();
+    p.cmd(&format!(
+        "summon minecraft:drowned {} {} {} {{Health:12f,NoAI:1b}}",
+        BX as f64 + 3.5,
+        by as f64,
+        BZ as f64 + 0.5
+    ))
+    .await;
+    p.pump(600).await;
+    let impaled = *p.drowned.last().expect("drowned для Impaling не появился");
+    p.removed.clear();
+    p.throw_until_gone(impaled).await;
+    assert!(
+        p.removed.contains(&impaled),
+        "Impaling 3 не убил drowned с 12 HP: removed={:?}",
+        p.removed
+    );
+    println!("impaling ok");
+
+    // 5. Без Impaling тот же удар (8 урона) drowned с 12 HP не убивает.
+    p.cmd("clear boater").await;
+    p.cmd("give boater minecraft:trident 1").await;
+    p.select(0).await;
+    p.drowned.clear();
+    p.cmd(&format!(
+        "summon minecraft:drowned {} {} {} {{Health:12f,NoAI:1b}}",
+        BX as f64 + 3.5,
+        by as f64,
+        BZ as f64 + 0.5
+    ))
+    .await;
+    p.pump(600).await;
+    let plain = *p.drowned.last().expect("drowned для контроля не появился");
+    p.removed.clear();
+    p.use_item(-90.0, 0.0).await;
+    p.pump(700).await;
+    p.release().await;
+    p.pump(1500).await;
+    assert!(
+        !p.removed.contains(&plain),
+        "обычный трезубец убил drowned с 12 HP"
+    );
+    println!("impaling control ok");
 
     println!("trident_enchants: ok");
 }

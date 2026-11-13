@@ -1511,15 +1511,25 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
         )
     };
     match species {
-        Species::Zombie => {
+        Species::Zombie | Species::Drowned => {
+            let float = if species == Species::Drowned {
+                vec![(0, Goal::Float)]
+            } else {
+                Vec::new()
+            };
             return (
-                Selector::new(vec![
-                    (1, Goal::BreakDoor(BreakDoor::new())),
-                    (3, Goal::Melee(Box::new(Melee::new(1.0, true)))),
-                    stroll_at(7, 1.0),
-                    look(8, 8.0),
-                    around(8),
-                ]),
+                Selector::new(
+                    float
+                        .into_iter()
+                        .chain([
+                            (1, Goal::BreakDoor(BreakDoor::new())),
+                            (3, Goal::Melee(Box::new(Melee::new(1.0, true)))),
+                            stroll_at(7, 1.0),
+                            look(8, 8.0),
+                            around(8),
+                        ])
+                        .collect(),
+                ),
                 Selector::new(vec![hurt_by(1, true), nearest(2, false)]),
             );
         }
