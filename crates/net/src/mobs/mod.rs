@@ -237,6 +237,7 @@ pub enum Species {
     IronGolem,
     Phantom,
     Pillager,
+    Wither,
 }
 
 /// Всё о виде в одном месте. Встроенные значения — запасные: при старте
@@ -309,7 +310,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 16] = [
+const BUILTIN: [SpeciesInfo; 17] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -526,6 +527,22 @@ const BUILTIN: [SpeciesInfo; 16] = [
             "minecraft:entities/pillager",
         )
     },
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (0.9, 3.5),
+        eye_height: 2.9750001,
+        max_health: 300.0,
+        speed: 0.6,
+        follow_range: 40.0,
+        attack_damage: 2.0,
+        armor: 4.0,
+        fire_immune: true,
+        ..base(
+            "minecraft:wither",
+            "minecraft:entity.wither",
+            "minecraft:entities/wither",
+        )
+    },
 ];
 
 static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
@@ -562,7 +579,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 16] = [
+    pub const ALL: [Species; 17] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -579,6 +596,7 @@ impl Species {
         Species::IronGolem,
         Species::Phantom,
         Species::Pillager,
+        Species::Wither,
     ];
 
     /// Данные вида: выгрузка, если она установлена, иначе встроенные.

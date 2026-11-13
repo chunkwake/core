@@ -3541,12 +3541,89 @@ impl PlayPlan {
         {
             return;
         }
-        self.trigger_summoned_entity(pos, crate::mobs::Species::IronGolem);
+        self.trigger_summoned_entity(pos, crate::mobs::Species::IronGolem, 5.0);
+    }
+
+    /// `WitherSkullBlock.checkSpawn`: три черепа визер-скелета на
+    /// `#wither_summon_base_blocks`. Ваниль вызывает проверку при установке
+    /// черепа игроком, поэтому хук стоит в ветке размещения блока.
+    fn try_spawn_wither(&self, pos: [i32; 3]) {
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let center = [pos[0] + dx, pos[1], pos[2] + dz];
+                if self.wither_pattern(center, [1, 0]) || self.wither_pattern(center, [0, 1]) {
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Шаблон `"^^^"`, `"###"`, `"~#~"` вдоль оси `axis` (`[1,0]` - x, `[0,1]` - z).
+    fn wither_pattern(&self, [x, y, z]: [i32; 3], axis: [i32; 2]) -> bool {
+        if self.difficulty() == crate::survival::Difficulty::Peaceful {
+            return false;
+        }
+        let at = |p: [i32; 3]| self.block(p).map(|s| self.state_name(s).to_owned());
+        let is_skull = |p: [i32; 3]| {
+            matches!(
+                at(p).as_deref(),
+                Some("minecraft:wither_skeleton_skull" | "minecraft:wither_skeleton_wall_skull")
+            )
+        };
+        let is_base = |p: [i32; 3]| {
+            matches!(
+                at(p).as_deref(),
+                Some("minecraft:soul_sand" | "minecraft:soul_soil")
+            )
+        };
+        let air = |p: [i32; 3]| at(p).as_deref() == Some("minecraft:air");
+        let step = |k: i32| [x + axis[0] * k, y, z + axis[1] * k];
+        if !(is_skull(step(-1)) && is_skull(step(0)) && is_skull(step(1))) {
+            return false;
+        }
+        for k in -1..=1 {
+            if !is_base([step(k)[0], y - 1, step(k)[2]]) {
+                return false;
+            }
+        }
+        if !air([step(-1)[0], y - 2, step(-1)[2]])
+            || !is_base([step(0)[0], y - 2, step(0)[2]])
+            || !air([step(1)[0], y - 2, step(1)[2]])
+        {
+            return false;
+        }
+        // `clearPatternBlocks`: 3 черепа, 3 основания и центр снизу.
+        for k in -1..=1 {
+            self.set_block(step(k), AIR);
+            self.set_block([step(k)[0], y - 1, step(k)[2]], AIR);
+        }
+        self.set_block([step(0)[0], y - 2, step(0)[2]], AIR);
+        let bottom = [step(0)[0], y - 2, step(0)[2]];
+        let pos = [
+            f64::from(bottom[0]) + 0.5,
+            f64::from(bottom[1]) + 0.55,
+            f64::from(bottom[2]) + 0.5,
+        ];
+        let yaw = if axis[0] != 0 { 0.0 } else { 90.0 };
+        if self
+            .spawn_mob(
+                crate::mobs::Species::Wither,
+                pos,
+                yaw,
+                false,
+                Some("TRIGGERED"),
+            )
+            .is_none()
+        {
+            return true;
+        }
+        self.trigger_summoned_entity(pos, crate::mobs::Species::Wither, 50.0);
+        true
     }
 
     /// `SummonedEntityTrigger`: игроки в кубе 5 блоков вокруг призванной
     /// сущности (`getEntitiesOfClass(ServerPlayer.class, box.inflate(5.0))`).
-    fn trigger_summoned_entity(&self, pos: [f64; 3], species: crate::mobs::Species) {
+    fn trigger_summoned_entity(&self, pos: [f64; 3], species: crate::mobs::Species, radius: f64) {
         let (width, height) = species.size();
         let dim = self.active_dim();
         let players: Vec<(Uuid, [f64; 3])> = self
@@ -3561,7 +3638,7 @@ impl PlayPlan {
         let target_equipment = |_: &str| -> Option<(String, i32)> { None };
         for (uuid, ppos) in players {
             let overlap = |a0: f64, a1: f64, b0: f64, b1: f64| a0 <= b1 && a1 >= b0;
-            let inflate = 5.0;
+            let inflate = radius;
             let (gx0, gx1) = (
                 pos[0] - width / 2.0 - inflate,
                 pos[0] + width / 2.0 + inflate,
@@ -15361,6 +15438,14 @@ impl PlayPlan {
                                     "minecraft:placed_block",
                                     Some(&name),
                                 );
+                                // `WitherSkullBlock.setPlacedBy`.
+                                if matches!(
+                                    name.as_str(),
+                                    "minecraft:wither_skeleton_skull"
+                                        | "minecraft:wither_skeleton_wall_skull"
+                                ) {
+                                    self.try_spawn_wither(target);
+                                }
                                 if let Some(item) = hand_slot
                                     .and_then(|i| state.inv.slots[i])
                                     .map(|s| self.item_name(s.item).to_owned())
