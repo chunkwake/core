@@ -1109,6 +1109,11 @@ impl PlayPlan {
             self.hub.remove_tracked(&gone);
             for (id, e) in dead {
                 self.mob_loot(id, &e);
+                if e.mob.species == Species::EnderDragon
+                    && self.active_dim() == crate::play::Dimension::End
+                {
+                    self.dragon_fight.lock().unwrap().killed = true;
+                }
                 if let Some(&(_, count)) = splits.iter().find(|s| s.0 == id) {
                     self.slime_split(&e.mob, count);
                 }
@@ -1338,6 +1343,9 @@ impl PlayPlan {
         }
         if let Some(Tag::Byte(no_ai)) = nbt.get("NoAI") {
             m.no_ai = *no_ai != 0;
+        }
+        if let Some(Tag::Byte(no_gravity)) = nbt.get("NoGravity") {
+            m.no_gravity = *no_gravity != 0;
         }
         if let Some(Tag::Compound(l)) = nbt.get("leash")
             && let Some(leash) = crate::leash::from_nbt(l)
@@ -3764,6 +3772,9 @@ pub(super) fn mob_to_nbt(
     if m.no_ai {
         c.insert("NoAI".into(), Tag::Byte(1));
     }
+    if m.no_gravity {
+        c.insert("NoGravity".into(), Tag::Byte(1));
+    }
     if let Some(leash) = &m.leash {
         c.insert("leash".into(), crate::leash::to_nbt(leash));
     }
@@ -3883,6 +3894,7 @@ pub(super) fn mob_from_nbt(
         m.health = h.clamp(0.0, m.max_health());
     }
     m.on_ground = byte("OnGround").is_some_and(|b| b != 0);
+    m.no_gravity = byte("NoGravity").is_some_and(|b| b != 0);
     m.age = int("Age").unwrap_or(0);
     m.love = int("InLove").unwrap_or(0);
     m.sheared = byte("Sheared").is_some_and(|b| b != 0);

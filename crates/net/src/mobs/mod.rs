@@ -240,6 +240,8 @@ pub enum Species {
     Wither,
     SnowGolem,
     CopperGolem,
+    EnderDragon,
+    EndCrystal,
 }
 
 /// Всё о виде в одном месте. Встроенные значения — запасные: при старте
@@ -312,7 +314,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 19] = [
+const BUILTIN: [SpeciesInfo; 21] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -570,6 +572,31 @@ const BUILTIN: [SpeciesInfo; 19] = [
             "minecraft:entities/copper_golem",
         )
     },
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (16.0, 8.0),
+        eye_height: 6.8,
+        max_health: 200.0,
+        speed: 0.7,
+        follow_range: 16.0,
+        fire_immune: true,
+        ..base(
+            "minecraft:ender_dragon",
+            "minecraft:entity.ender_dragon",
+            "minecraft:entities/ender_dragon",
+        )
+    },
+    SpeciesInfo {
+        size: (2.0, 2.0),
+        eye_height: 1.7,
+        max_health: 5.0,
+        fire_immune: true,
+        ..base(
+            "minecraft:end_crystal",
+            "minecraft:entity.end_crystal",
+            "minecraft:entities/end_crystal",
+        )
+    },
 ];
 
 static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
@@ -606,7 +633,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 19] = [
+    pub const ALL: [Species; 21] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -626,6 +653,8 @@ impl Species {
         Species::Wither,
         Species::SnowGolem,
         Species::CopperGolem,
+        Species::EnderDragon,
+        Species::EndCrystal,
     ];
 
     /// Данные вида: выгрузка, если она установлена, иначе встроенные.
@@ -840,6 +869,8 @@ pub struct Mob {
     pub body_armor: Option<Stack>,
     /// `Wolf.isInSittingPose` (`DATA_FLAGS_ID`, бит 0x01).
     pub sitting: bool,
+    /// `Entity.isNoGravity` (`NoGravity`): кристаллы/визер/дракон не падают.
+    pub no_gravity: bool,
     /// `DropChances` по тем же слотам; > 1 — предмет сохраняется всегда.
     pub drop_chances: [f32; 6],
     /// Множитель скорости от `Speed`/`Slowness` (пересчитывается в тике).
@@ -903,6 +934,7 @@ impl Mob {
             horizontal_collision: false,
             tamed: false,
             owner: None,
+            no_gravity: false,
             nav: Navigation::new(species == Species::Spider),
             move_ctl: MoveControl::default(),
             move_speed: 0.0,
@@ -1475,7 +1507,9 @@ pub fn travel(m: &mut Mob, forward: f64, w: &World) -> bool {
         } else {
             AIR_FRICTION
         };
-        m.vel[1] = (m.vel[1] - GRAVITY) * AIR_DRAG;
+        if !m.no_gravity {
+            m.vel[1] = (m.vel[1] - GRAVITY) * AIR_DRAG;
+        }
         // Курица планирует (`Chicken.aiStep`).
         if m.species == Species::Chicken && !m.on_ground && m.vel[1] < 0.0 {
             m.vel[1] *= 0.6;

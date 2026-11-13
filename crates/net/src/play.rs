@@ -392,6 +392,8 @@ pub struct PlayPlan {
     /// Точки возрождения игроков (`/spawnpoint`); `None` — спавн мира.
     pub(crate) spawn_points: Mutex<HashMap<Uuid, Option<SpawnPoint>>>,
     sleepers: Mutex<HashMap<Uuid, [i32; 3]>>,
+    /// Мини-`EnderDragonFight`: убийство и возрождение дракона Края.
+    dragon_fight: Mutex<DragonFight>,
     /// Режим игры по умолчанию (`/defaultgamemode`).
     pub(crate) default_game_mode: std::sync::atomic::AtomicU8,
     /// Просьба сохранить мир (`/save-all`).
@@ -498,6 +500,16 @@ type SpawnFrameCache = FastMap<
     ),
     Frame,
 >;
+
+/// Мини-состояние `EnderDragonFight`: нужен только путь возрождения
+/// дракона (`summoned_entity` для `end/respawn_dragon`).
+#[derive(Default)]
+struct DragonFight {
+    /// `dragonKilled`: без убитого дракона возрождение не начинается.
+    killed: bool,
+    /// Кристаллы на портале: позиция блока над обсидианом и id сущности.
+    crystals: Vec<([i32; 3], i32)>,
+}
 
 fn sleep_required(players: usize, percentage: i64) -> usize {
     players
@@ -3012,6 +3024,7 @@ impl PlayPlan {
                 types
             },
             active: Mutex::new(Dimension::Overworld),
+            dragon_fight: Mutex::new(DragonFight::default()),
             trees,
             poi_tags,
             structure_names,
@@ -3519,6 +3532,97 @@ impl PlayPlan {
     ///
     /// Возвращает прежнее состояние каждой позиции (`None` — вне мира или
     /// чанка нет).
+    /// `EndCrystalItem.useOn`: кристалл на обсидиан/бедрок в Крае; когда
+    /// вокруг центра стоят четыре кристалла, начинается возрождение дракона.
+    fn spawn_end_crystal(&self, pos: [i32; 3]) -> Option<i32> {
+        if self.active_dim() != Dimension::End {
+            return None;
+        }
+        let id = self.spawn_mob_with(
+            crate::mobs::Species::EndCrystal,
+            [
+                f64::from(pos[0]) + 0.5,
+                f64::from(pos[1]),
+                f64::from(pos[2]) + 0.5,
+            ],
+            0.0,
+            false,
+            Some("TRIGGERED"),
+            |m| {
+                m.no_gravity = true;
+                m.no_ai = true;
+                m.persistent = true;
+            },
+        )?;
+        {
+            let mut fight = self.dragon_fight.lock().unwrap();
+            fight.crystals.push((pos, id));
+        }
+        self.try_respawn_dragon();
+        Some(id)
+    }
+
+    /// `EnderDragonFight.tryRespawn`: после убийства дракона и четырёх
+    /// кристаллов по сторонам центра (по 3 блока) дракон появляется снова.
+    fn try_respawn_dragon(&self) {
+        if self.active_dim() != Dimension::End {
+            return;
+        }
+        let (killed, crystals) = {
+            let fight = self.dragon_fight.lock().unwrap();
+            (fight.killed, fight.crystals.clone())
+        };
+        if !killed || crystals.len() < 4 {
+            return;
+        }
+        let dirs = [[3, 0], [-3, 0], [0, 3], [0, -3]];
+        let mut center = None;
+        'outer: for &(pos, _) in &crystals {
+            for d in dirs {
+                let c = [pos[0] - d[0], pos[1], pos[2] - d[1]];
+                let all = dirs.iter().all(|o| {
+                    crystals
+                        .iter()
+                        .any(|(p, _)| *p == [c[0] + o[0], c[1], c[2] + o[1]])
+                });
+                if all {
+                    center = Some(c);
+                    break 'outer;
+                }
+            }
+        }
+        let Some(center) = center else {
+            return;
+        };
+        let ids: Vec<i32> = crystals.iter().map(|(_, id)| *id).collect();
+        {
+            let mut fight = self.dragon_fight.lock().unwrap();
+            fight.killed = false;
+            fight.crystals.clear();
+        }
+        for id in ids {
+            self.remove_entity(id);
+        }
+        let spawn = [
+            f64::from(center[0]) + 0.5,
+            128.0,
+            f64::from(center[2]) + 0.5,
+        ];
+        if self
+            .spawn_mob(
+                crate::mobs::Species::EnderDragon,
+                spawn,
+                0.0,
+                false,
+                Some("TRIGGERED"),
+            )
+            .is_none()
+        {
+            return;
+        }
+        self.trigger_summoned_entity(spawn, crate::mobs::Species::EnderDragon, 192.0);
+    }
+
     /// `CarvedPumpkinBlock.trySpawnGolem`: сначала снежный голем, затем
     /// железный (медный не реализован).
     fn try_spawn_golem(&self, pos: [i32; 3]) {
@@ -14671,6 +14775,38 @@ impl PlayPlan {
                             }
                         }
                         let clicked = self.state_name(self.block(u.pos).unwrap_or(AIR)).to_owned();
+                        // `EndCrystalItem.useOn`: кристалл на обсидиан/бедрок в Крае.
+                        if !state.vitals.dead
+                            && login.spawn.game_mode != 3
+                            && self.active_dim() == Dimension::End
+                            && matches!(clicked.as_str(), "minecraft:obsidian" | "minecraft:bedrock")
+                            && self.player_at(uuid).is_some_and(|(p, _, _)| {
+                                block_reach(
+                                    eye_of(p),
+                                    u.pos,
+                                    if login.spawn.game_mode == 1 { 5.0 } else { 4.5 },
+                                )
+                            })
+                            && self.block([u.pos[0], u.pos[1] + 1, u.pos[2]]) == Some(AIR)
+                            && let Some(slot) = Self::hand_index(&state.inv, u.hand)
+                            && let Some(held) = state.inv.slots[slot]
+                            && self.item_name(held.item) == "minecraft:end_crystal"
+                        {
+                            let above = [u.pos[0], u.pos[1] + 1, u.pos[2]];
+                            if self.spawn_end_crystal(above).is_some() {
+                                if login.spawn.game_mode != 1 {
+                                    state.inv.consume_at(slot);
+                                    self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                }
+                                self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
+                                conn.send(&play::block_changed_ack(
+                                    ids.block_changed_ack,
+                                    u.sequence,
+                                ))
+                                .await?;
+                                continue;
+                            }
+                        }
                         // `LeadItem.useOn`: забор — привязать мобов игрока к узлу.
                         if !state.vitals.dead
                             && login.spawn.game_mode != 3
