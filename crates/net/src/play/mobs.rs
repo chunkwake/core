@@ -25,6 +25,8 @@ pub(super) struct MobEntry {
     /// Тики до следующего звука `ambient`.
     ambient: i32,
     /// Убит игроком: лут с `killed_by_player` и опыт.
+    /// Тип урона добивающего удара (`minecraft:arrow`, `minecraft:trident`, ...).
+    killer_damage: Option<&'static str>,
     killer: Option<(Uuid, i32)>,
     environment: crate::environment::State,
     /// Транспорт моба (лодка): позицию и поворот задаёт он (`rideTick`).
@@ -105,6 +107,7 @@ impl MobEntry {
             moves: 0,
             ambient: 80 + rand::random::<i32>().rem_euclid(120),
             killer: None,
+            killer_damage: None,
             environment: Default::default(),
             vehicle: None,
             fall: 0.0,
@@ -153,9 +156,16 @@ pub(super) struct SweepHit {
 
 impl PlayPlan {
     /// Пометить убийцу для добычи/статистики (стрелы, трезубец, riptide).
-    pub(super) fn set_mob_killer(&self, id: i32, uuid: Uuid, slot: i32) {
+    pub(super) fn set_mob_killer(
+        &self,
+        id: i32,
+        uuid: Uuid,
+        slot: i32,
+        damage: Option<&'static str>,
+    ) {
         if let Some(e) = self.sim().mobs.lock().unwrap().get_mut(&id) {
             e.killer = Some((uuid, slot));
+            e.killer_damage = damage;
         }
     }
 
@@ -183,6 +193,7 @@ impl PlayPlan {
                 .is_some_and(|dead| dead);
                 if dead {
                     e.killer = Some((uuid, -1));
+                    e.killer_damage = Some("minecraft:trident");
                 }
                 hits.push((id, p, dead));
             }
@@ -1157,10 +1168,13 @@ impl PlayPlan {
         if let Some((uuid, _)) = e.killer {
             self.award_stat(uuid, "minecraft:killed", m.species.name(), 1);
             self.award_stat(uuid, "minecraft:custom", "minecraft:mob_kills", 1);
-            self.advancement_trigger(
+            let killer_pos = self.live.lock().unwrap().get(&uuid).map(|l| l.pos);
+            self.advancement_player_killed_entity(
                 uuid,
-                "minecraft:player_killed_entity",
-                Some(m.species.name()),
+                m.species.name(),
+                m.pos,
+                killer_pos,
+                e.killer_damage,
             );
         }
         if m.is_baby() && m.species.is_animal() {
@@ -1643,6 +1657,7 @@ impl PlayPlan {
                 });
                 if died {
                     e.killer = Some((uuid, slot as i32));
+                    e.killer_damage = None;
                 }
                 if deals_knockback {
                     // `causeExtraKnockback(target, 0.4 + getKnockback)`.
@@ -1878,6 +1893,7 @@ impl PlayPlan {
                     hit = true;
                     if died {
                         e.killer = Some((uuid, slot as i32));
+                        e.killer_damage = None;
                     }
                 }
                 if deals_knockback {
@@ -2617,6 +2633,7 @@ impl PlayPlan {
                 if let Some(died) = r {
                     if died {
                         e.killer = Some((uuid, slot as i32));
+                        e.killer_damage = None;
                     }
                     hits.push((
                         id,

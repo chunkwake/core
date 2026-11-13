@@ -107,6 +107,15 @@ pub struct AdvancementCriterion {
     pub loot_tables: Vec<String>,
     /// `conditions.entity.predicate.minecraft:flags.is_baby`.
     pub entity_baby: Option<bool>,
+    /// `conditions.entity.predicate.minecraft:distance.horizontal`
+    /// (`player_killed_entity`): расстояние жертвы до игрока.
+    pub victim_distance: Option<(f64, f64)>,
+    /// В предикате жертвы есть неподдержанные поля.
+    pub victim_unsupported: bool,
+    /// `conditions.killing_blow.tags` (id без `#`, только `expected: true`).
+    pub killing_blow_tags: Vec<String>,
+    /// `conditions.killing_blow` содержит неподдержанные поля.
+    pub killing_blow_unsupported: bool,
     /// `conditions.player` (`player_interacted_with_entity`).
     pub player_pred: Option<EntityPred>,
     /// `conditions.player` содержит неподдержанные узлы.
@@ -429,6 +438,67 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 .and_then(|c| c.get("recipes"))
                 .map(json_string_list)
                 .unwrap_or_default();
+            // `player_killed_entity`: предикат жертвы и `killing_blow`.
+            let mut victim_distance = None;
+            let mut victim_unsupported = false;
+            let mut killing_blow_tags = Vec::new();
+            let mut killing_blow_unsupported = false;
+            if let Some(pred) = c
+                .get("conditions")
+                .and_then(|c| c.get("entity"))
+                .and_then(|e| e.get("predicate"))
+            {
+                if let Some(dist) = pred.get("minecraft:distance") {
+                    match dist.get("horizontal").map(bounds_f64) {
+                        Some(Some(range)) => victim_distance = Some(range),
+                        Some(None) => victim_unsupported = true,
+                        None => {}
+                    }
+                    if dist
+                        .as_object()
+                        .is_some_and(|o| o.keys().any(|k| k != "horizontal"))
+                    {
+                        victim_unsupported = true;
+                    }
+                }
+                if pred.as_object().is_some_and(|o| {
+                    o.keys().any(|k| {
+                        !matches!(
+                            k.as_str(),
+                            "minecraft:entity_type" | "minecraft:flags" | "minecraft:distance"
+                        )
+                    })
+                }) {
+                    victim_unsupported = true;
+                }
+            }
+            if let Some(kb) = c.get("conditions").and_then(|c| c.get("killing_blow")) {
+                let mut ok = kb.is_object();
+                if let Some(map) = kb.as_object() {
+                    for (key, value) in map {
+                        if key != "tags" {
+                            ok = false;
+                            continue;
+                        }
+                        for tag in value.as_array().into_iter().flatten() {
+                            let expected = tag
+                                .get("expected")
+                                .and_then(|b| b.as_bool())
+                                .unwrap_or(true);
+                            match tag.get("id").and_then(|s| s.as_str()) {
+                                Some(id) if expected => {
+                                    killing_blow_tags.push(id.trim_start_matches('#').to_owned());
+                                }
+                                Some(_) => ok = false,
+                                None => ok = false,
+                            }
+                        }
+                    }
+                }
+                if !ok {
+                    killing_blow_unsupported = true;
+                }
+            }
             let mut blocks = Vec::new();
             // `enter_block`: `conditions.blocks` — блок или список блоков.
             if let Some(blocks_v) = c.get("conditions").and_then(|c| c.get("blocks")) {
@@ -802,6 +872,10 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 unsupported_effects,
                 loot_tables,
                 entity_baby,
+                victim_distance,
+                victim_unsupported,
+                killing_blow_tags,
+                killing_blow_unsupported,
                 player_pred: entity_pred,
                 player_pred_unsupported: entity_pred_bad,
             });
@@ -1404,6 +1478,41 @@ impl PlayPlan {
     }
 
     /// `player_hurt_entity`: цель, прямой источник и тип урона.
+    /// `PlayerKillEntityTrigger`: игрок убил сущность.
+    pub(crate) fn advancement_player_killed_entity(
+        &self,
+        uuid: Uuid,
+        victim: &str,
+        victim_pos: [f64; 3],
+        killer_pos: Option<[f64; 3]>,
+        damage: Option<&str>,
+    ) {
+        self.advancement_run(uuid, "minecraft:player_killed_entity", |c| {
+            if c.victim_unsupported || c.killing_blow_unsupported {
+                return false;
+            }
+            let entity_ok =
+                c.entities.is_empty() || c.entities.iter().any(|w| self.entity_matches(w, victim));
+            let distance_ok = c.victim_distance.is_none_or(|(min, max)| {
+                killer_pos.is_some_and(|k| {
+                    let dx = victim_pos[0] - k[0];
+                    let dz = victim_pos[2] - k[2];
+                    let d = (dx * dx + dz * dz).sqrt();
+                    d >= min && d <= max
+                })
+            });
+            let blow_ok = c.killing_blow_tags.iter().all(|tag| {
+                damage.is_some_and(|damage| {
+                    self.survival
+                        .damage_tags
+                        .get(tag)
+                        .is_some_and(|set| set.contains(damage))
+                })
+            });
+            entity_ok && distance_ok && blow_ok
+        });
+    }
+
     pub(crate) fn advancement_player_hurt_entity(
         &self,
         uuid: Uuid,
@@ -2060,5 +2169,68 @@ mod tests {
         assert!(c.entity_baby.is_none());
         assert!(c.player_pred.is_none());
         assert!(!c.player_pred_unsupported);
+    }
+
+    #[test]
+    fn killed_entity_distance_and_killing_blow_parse() {
+        let json = serde_json::json!({
+            "criteria": {
+                "c": {
+                    "trigger": "minecraft:player_killed_entity",
+                    "conditions": {
+                        "entity": {
+                            "type": "minecraft:entity_properties",
+                            "entity": "this",
+                            "predicate": {
+                                "minecraft:distance": {"horizontal": {"min": 50.0}},
+                                "minecraft:entity_type": "minecraft:skeleton"
+                            }
+                        },
+                        "killing_blow": {
+                            "tags": [{"expected": true, "id": "#minecraft:is_projectile"}]
+                        }
+                    }
+                }
+            },
+            "requirements": [["c"]]
+        });
+        let def = parse_advancement("test/sniper", &json).expect("advancement");
+        let c = &def.criteria[0];
+        assert!(!c.victim_unsupported);
+        assert!(!c.killing_blow_unsupported);
+        assert_eq!(c.victim_distance, Some((50.0, f64::INFINITY)));
+        assert_eq!(
+            c.killing_blow_tags,
+            vec!["minecraft:is_projectile".to_owned()]
+        );
+        assert_eq!(c.entities, vec!["minecraft:skeleton".to_owned()]);
+    }
+
+    #[test]
+    fn killed_entity_unsupported_fields() {
+        let json = serde_json::json!({
+            "criteria": {
+                "c": {
+                    "trigger": "minecraft:player_killed_entity",
+                    "conditions": {
+                        "entity": {
+                            "type": "minecraft:entity_properties",
+                            "entity": "this",
+                            "predicate": {
+                                "minecraft:equipment": {"head": {"items": "minecraft:white_banner"}}
+                            }
+                        },
+                        "killing_blow": {
+                            "direct_entity": {"minecraft:entity_type": "minecraft:wind_charge"}
+                        }
+                    }
+                }
+            },
+            "requirements": [["c"]]
+        });
+        let def = parse_advancement("test/sniper2", &json).expect("advancement");
+        let c = &def.criteria[0];
+        assert!(c.victim_unsupported);
+        assert!(c.killing_blow_unsupported);
     }
 }

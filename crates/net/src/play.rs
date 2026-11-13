@@ -7508,7 +7508,12 @@ impl PlayPlan {
                     if dead {
                         died.push(entry.mob.pos);
                         if let Some(owner) = owner {
-                            killers.push((id, Uuid::from_u128(owner)));
+                            let damage = if trident.is_some() {
+                                "minecraft:trident"
+                            } else {
+                                "minecraft:arrow"
+                            };
+                            killers.push((id, Uuid::from_u128(owner), damage));
                         }
                     }
                     if let Some(item) = trident
@@ -7532,8 +7537,8 @@ impl PlayPlan {
                 }
             }
             drop(mobs);
-            for (id, uuid) in killers {
-                self.set_mob_killer(id, uuid, -1);
+            for (id, uuid, damage) in killers {
+                self.set_mob_killer(id, uuid, -1, Some(damage));
             }
             for (owner, pos) in strikes {
                 match owner {
