@@ -53,6 +53,9 @@ pub struct AdvancementCriterion {
     pub biomes: Vec<String>,
     /// `conditions.player.predicate.minecraft:location.structures`.
     pub structures: Vec<String>,
+    /// `conditions.player.predicate.minecraft:location.position`: ось и
+    /// границы (включительно), например `x` -> `(1.0, 2.0)`.
+    pub position: Vec<(String, (f64, f64))>,
     /// `conditions.player.predicate.minecraft:stepping_on.block.blocks`.
     pub stepping_on: Vec<String>,
     /// `stepping_on` содержит неподдержанные части предиката.
@@ -391,6 +394,7 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 .and_then(|p| p.get("predicate"));
             let mut biomes = Vec::new();
             let mut structures = Vec::new();
+            let mut position = Vec::new();
             let mut stepping_on = Vec::new();
             let mut stepping_on_unsupported = false;
             let mut equipment = Vec::new();
@@ -403,10 +407,36 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                         .get("structures")
                         .map(string_or_list)
                         .unwrap_or_default();
-                    if loc
-                        .as_object()
-                        .is_some_and(|o| o.keys().any(|k| k != "biomes" && k != "structures"))
-                    {
+                    if let Some(bounds) = loc.get("position") {
+                        let mut ok = bounds.is_object();
+                        if let Some(map) = bounds.as_object() {
+                            for (axis, bound) in map {
+                                if !matches!(axis.as_str(), "x" | "y" | "z") {
+                                    ok = false;
+                                    continue;
+                                }
+                                // `min_exclusive`/`max_exclusive` пока не
+                                // поддержаны: такой предикат не проверяем.
+                                let simple = match bound {
+                                    serde_json::Value::Object(o) => {
+                                        o.keys().all(|k| k == "min" || k == "max")
+                                    }
+                                    _ => true,
+                                };
+                                match bounds_f64(bound).filter(|_| simple) {
+                                    Some(range) => position.push((axis.clone(), range)),
+                                    None => ok = false,
+                                }
+                            }
+                        }
+                        if !ok {
+                            unsupported_location = true;
+                        }
+                    }
+                    if loc.as_object().is_some_and(|o| {
+                        o.keys()
+                            .any(|k| k != "biomes" && k != "structures" && k != "position")
+                    }) {
                         unsupported_location = true;
                     }
                 }
@@ -527,6 +557,7 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 ingredients,
                 biomes,
                 structures,
+                position,
                 stepping_on,
                 stepping_on_unsupported,
                 equipment,
@@ -787,12 +818,13 @@ impl PlayPlan {
         });
     }
 
-    /// `PlayerTrigger` для `minecraft:location`: биом, структуры, блок под
-    /// ногами (`stepping_on`) и экипировка в точке игрока.
+    /// `PlayerTrigger` для `minecraft:location`: биом, структуры, позиция,
+    /// блок под ногами (`stepping_on`) и экипировка в точке игрока.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn advancement_location(
         &self,
         uuid: Uuid,
+        pos: [f64; 3],
         biome: &str,
         on_block: Option<&str>,
         slots: &[Option<Stack>],
@@ -811,6 +843,14 @@ impl PlayPlan {
                 || c.structures
                     .iter()
                     .any(|w| w.strip_prefix('#').is_none() && inside(w));
+            let position_ok = c.position.iter().all(|(axis, (min, max))| {
+                let v = match axis.as_str() {
+                    "x" => pos[0],
+                    "y" => pos[1],
+                    _ => pos[2],
+                };
+                v >= *min && v <= *max
+            });
             let step_ok = c.stepping_on.is_empty()
                 || (!c.stepping_on_unsupported
                     && on_block.is_some_and(|block| {
@@ -830,7 +870,7 @@ impl PlayPlan {
                                 .any(|want| self.item_matches(want, self.item_name(s.item)))
                         })
                     }));
-            biome_ok && structure_ok && step_ok && equipment_ok
+            biome_ok && structure_ok && position_ok && step_ok && equipment_ok
         });
     }
 
@@ -1372,5 +1412,58 @@ impl PlayPlan {
             out.insert(0, id.to_owned());
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn location_advancement(location: serde_json::Value) -> AdvancementCriterion {
+        let json = serde_json::json!({
+            "criteria": {
+                "here": {
+                    "trigger": "minecraft:location",
+                    "conditions": {
+                        "player": {
+                            "type": "minecraft:entity_properties",
+                            "entity": "this",
+                            "predicate": {"minecraft:location": location}
+                        }
+                    }
+                }
+            },
+            "requirements": [["here"]]
+        });
+        let def = parse_advancement("test/pos", &json).expect("advancement");
+        def.criteria.into_iter().next().expect("criterion")
+    }
+
+    #[test]
+    fn location_position_parses_axes() {
+        let c = location_advancement(serde_json::json!({
+            "position": {
+                "x": {"min": 1.0, "max": 2.0},
+                "y": 3.0,
+                "z": {"max": 4.5}
+            }
+        }));
+        assert!(!c.unsupported_location);
+        assert_eq!(
+            c.position,
+            vec![
+                ("x".to_owned(), (1.0, 2.0)),
+                ("y".to_owned(), (3.0, 3.0)),
+                ("z".to_owned(), (f64::NEG_INFINITY, 4.5)),
+            ]
+        );
+    }
+
+    #[test]
+    fn location_position_exclusive_is_unsupported() {
+        let c = location_advancement(serde_json::json!({
+            "position": {"x": {"min_exclusive": 0.0}}
+        }));
+        assert!(c.unsupported_location);
     }
 }

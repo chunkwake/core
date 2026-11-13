@@ -15492,6 +15492,7 @@ impl PlayPlan {
                 };
                 self.advancement_location(
                     uuid,
+                    pos,
                     &biome,
                     on_block.as_deref(),
                     slots,
