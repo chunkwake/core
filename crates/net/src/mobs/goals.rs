@@ -1610,8 +1610,8 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
                 Selector::new(vec![nearest(1, false)]),
             );
         }
-        // `Piglin`: для проб и взаимодействия достаточно прогулки и взгляда.
-        Species::Piglin => {
+        // `Piglin`/`Wolf`: для проб и взаимодействия достаточно прогулки.
+        Species::Piglin | Species::Wolf => {
             return (
                 Selector::new(vec![stroll_at(5, 1.0), look(6, 8.0), around(8)]),
                 Selector::default(),

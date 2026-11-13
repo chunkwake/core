@@ -1561,6 +1561,20 @@ impl PlayPlan {
                     root.insert("Color".into(), Tag::Byte(entry.mob.color as i8));
                     root.insert("Sheared".into(), Tag::Byte(i8::from(entry.mob.sheared)));
                 }
+                crate::mobs::Species::Wolf => {
+                    root.insert("Tame".into(), Tag::Byte(i8::from(entry.mob.tamed)));
+                    if let Some(owner) = entry.mob.owner {
+                        root.insert(
+                            "Owner".into(),
+                            Tag::IntArray(
+                                (0..4)
+                                    .rev()
+                                    .map(|i| (owner >> (32 * i)) as u32 as i32)
+                                    .collect(),
+                            ),
+                        );
+                    }
+                }
                 crate::mobs::Species::Zombie | crate::mobs::Species::Drowned => {
                     root.insert("IsBaby".into(), Tag::Byte(i8::from(entry.mob.is_baby())));
                     root.insert(

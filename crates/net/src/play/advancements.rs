@@ -1237,18 +1237,47 @@ impl PlayPlan {
             let baby_ok = c.entity_baby.is_none_or(|want| want == baby);
             let item_ok = c.items.is_empty()
                 || item.is_some_and(|name| c.items.iter().any(|w| self.item_matches(w, name)));
-            let player_ok = c.player_pred.as_ref().is_none_or(|pred| {
-                let equipment = |slot: &str| -> Option<String> {
-                    let index = equipment_slot(slot, selected)?;
-                    slots
-                        .get(index)
-                        .copied()
-                        .flatten()
-                        .map(|s| self.item_name(s.item).to_owned())
-                };
-                self.entity_pred_matches(pred, &equipment, "minecraft:player", false)
-            });
-            entity_ok && baby_ok && item_ok && player_ok
+            entity_ok && baby_ok && item_ok && self.player_pred_ok(c, slots, selected)
+        });
+    }
+
+    /// `conditions.player` критерия (общая часть триггеров взаимодействия).
+    fn player_pred_ok(
+        &self,
+        c: &AdvancementCriterion,
+        slots: &[Option<Stack>],
+        selected: usize,
+    ) -> bool {
+        if c.player_pred_unsupported {
+            return false;
+        }
+        c.player_pred.as_ref().is_none_or(|pred| {
+            let equipment = |slot: &str| -> Option<String> {
+                let index = equipment_slot(slot, selected)?;
+                slots
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .map(|s| self.item_name(s.item).to_owned())
+            };
+            self.entity_pred_matches(pred, &equipment, "minecraft:player", false)
+        })
+    }
+
+    /// `TameAnimalTrigger`: животное приручено.
+    pub(crate) fn advancement_tame_animal(
+        &self,
+        uuid: Uuid,
+        entity: &str,
+        baby: bool,
+        slots: &[Option<Stack>],
+        selected: usize,
+    ) {
+        self.advancement_run(uuid, "minecraft:tame_animal", |c| {
+            let entity_ok =
+                c.entities.is_empty() || c.entities.iter().any(|w| self.entity_matches(w, entity));
+            let baby_ok = c.entity_baby.is_none_or(|want| want == baby);
+            entity_ok && baby_ok && self.player_pred_ok(c, slots, selected)
         });
     }
 
@@ -2013,5 +2042,23 @@ mod tests {
         });
         let def = parse_advancement("test/interact2", &json).expect("advancement");
         assert!(def.criteria[0].player_pred_unsupported);
+    }
+
+    #[test]
+    fn tame_animal_without_conditions_matches_any() {
+        let json = serde_json::json!({
+            "criteria": {
+                "tamed_animal": {"trigger": "minecraft:tame_animal"}
+            },
+            "requirements": [["tamed_animal"]]
+        });
+        let def = parse_advancement("test/tame", &json).expect("advancement");
+        let c = &def.criteria[0];
+        assert_eq!(c.trigger, "minecraft:tame_animal");
+        assert!(c.entities.is_empty());
+        assert!(c.items.is_empty());
+        assert!(c.entity_baby.is_none());
+        assert!(c.player_pred.is_none());
+        assert!(!c.player_pred_unsupported);
     }
 }

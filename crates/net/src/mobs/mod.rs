@@ -232,6 +232,7 @@ pub enum Species {
     Slime,
     Drowned,
     Piglin,
+    Wolf,
 }
 
 /// Всё о виде в одном месте. Встроенные значения — запасные: при старте
@@ -304,7 +305,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 11] = [
+const BUILTIN: [SpeciesInfo; 12] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -453,6 +454,20 @@ const BUILTIN: [SpeciesInfo; 11] = [
             "minecraft:entities/piglin",
         )
     },
+    SpeciesInfo {
+        size: (0.6, 0.85),
+        eye_height: 0.68,
+        max_health: 8.0,
+        speed: 0.3,
+        follow_range: 16.0,
+        attack_damage: 3.0,
+        panic_speed: 1.5,
+        ..base(
+            "minecraft:wolf",
+            "minecraft:entity.wolf",
+            "minecraft:entities/wolf",
+        )
+    },
 ];
 
 static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
@@ -489,7 +504,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 11] = [
+    pub const ALL: [Species; 12] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -501,6 +516,7 @@ impl Species {
         Species::Slime,
         Species::Drowned,
         Species::Piglin,
+        Species::Wolf,
     ];
 
     /// Данные вида: выгрузка, если она установлена, иначе встроенные.
@@ -688,6 +704,9 @@ pub struct Mob {
     pub leash: Option<crate::leash::Leash>,
     /// `Entity.horizontalCollision` прошлого хода: условие `DoorInteractGoal`.
     pub horizontal_collision: bool,
+    /// `TameableAnimal.isTame` (`Tame` в NBT); владелец - UUID игрока.
+    pub tamed: bool,
+    pub owner: Option<u128>,
     /// Навигация по пути (`GroundPathNavigation`).
     pub nav: Navigation,
     /// `MoveControl`.
@@ -769,6 +788,8 @@ impl Mob {
             no_ai: false,
             leash: None,
             horizontal_collision: false,
+            tamed: false,
+            owner: None,
             nav: Navigation::new(species == Species::Spider),
             move_ctl: MoveControl::default(),
             move_speed: 0.0,

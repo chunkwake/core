@@ -1315,6 +1315,14 @@ impl PlayPlan {
         {
             m.leash = Some(leash);
         }
+        if let Some(Tag::Byte(tame)) = nbt.get("Tame") {
+            m.tamed = *tame != 0;
+        }
+        if let Some(Tag::IntArray(a)) = nbt.get("Owner")
+            && a.len() == 4
+        {
+            m.owner = Some(a.iter().fold(0u128, |acc, &v| acc << 32 | v as u32 as u128));
+        }
         if matches!(m.species, Species::Zombie | Species::Drowned)
             && let Some(Tag::Byte(breaks)) = nbt.get("CanBreakDoors")
         {
@@ -2881,6 +2889,7 @@ impl PlayPlan {
             Name([f64; 3]),
             Ignite([f64; 3], bool),
             Admire([f64; 3]),
+            Tame(bool),
         }
         let act = {
             let mut mobs = self.sim().mobs.lock().unwrap();
@@ -2942,6 +2951,18 @@ impl PlayPlan {
                 // `Creeper.mobInteract`: `#creeper_igniters` поджигают.
                 m.ignited = true;
                 Act::Ignite(m.pos, name == "minecraft:fire_charge")
+            } else if m.species == Species::Wolf && !m.is_baby() && name == "minecraft:bone" {
+                // `Wolf.mobInteract` → `tryToTame`: кость тратится всегда,
+                // приручение - с шансом 1/3.
+                if m.tamed {
+                    return None;
+                }
+                let tamed = rand::random::<u32>().is_multiple_of(3);
+                if tamed {
+                    m.tamed = true;
+                    m.owner = Some(uuid.as_u128());
+                }
+                Act::Tame(tamed)
             } else if m.species == Species::Piglin && !m.is_baby() && name == "minecraft:gold_ingot"
             {
                 // `PiglinAi.mobInteract` → `canAdmire`: взрослый пиглин
@@ -2987,6 +3008,25 @@ impl PlayPlan {
                     } else {
                         (!self.wear_one(&mut s)).then_some(s)
                     };
+                }
+            }
+            Act::Tame(tamed) => {
+                if !creative {
+                    inv.consume_at(slot);
+                }
+                // `EntityEvent`: 7 - сердечки (приручён), 6 - дым (не вышло).
+                self.hub.send_about(
+                    target,
+                    inv::entity_event(self.ids.entity_event, target, if tamed { 7 } else { 6 }),
+                );
+                if tamed {
+                    self.advancement_tame_animal(
+                        uuid,
+                        Species::Wolf.name(),
+                        false,
+                        &inv.slots,
+                        inv.selected,
+                    );
                 }
             }
             Act::Admire(pos) => {
@@ -3602,6 +3642,21 @@ pub(super) fn mob_to_nbt(
             c.insert("wasOnGround".into(), Tag::Byte(i8::from(m.was_on_ground)));
         }
         // `Creeper.addAdditionalSaveData`.
+        // `TameableAnimal.addAdditionalSaveData`: `Tame`/`Owner`.
+        Species::Wolf => {
+            c.insert("Tame".into(), Tag::Byte(i8::from(m.tamed)));
+            if let Some(owner) = m.owner {
+                c.insert(
+                    "Owner".into(),
+                    Tag::IntArray(
+                        (0..4)
+                            .rev()
+                            .map(|i| (owner >> (32 * i)) as u32 as i32)
+                            .collect(),
+                    ),
+                );
+            }
+        }
         Species::Creeper => {
             c.insert("powered".into(), Tag::Byte(i8::from(m.powered)));
             c.insert("Fuse".into(), Tag::Short(m.max_swell as i16));
@@ -3709,6 +3764,14 @@ pub(super) fn mob_from_nbt(
             m.explosion_radius = i32::from(r);
         }
         m.ignited = byte("ignited").is_some_and(|b| b != 0);
+    }
+    if species == Species::Wolf {
+        m.tamed = byte("Tame").is_some_and(|b| b != 0);
+        if let Some(Tag::IntArray(a)) = c.get("Owner")
+            && a.len() == 4
+        {
+            m.owner = Some(a.iter().fold(0u128, |acc, &v| acc << 32 | v as u32 as u128));
+        }
     }
     if let Some(Tag::String(n)) = c.get("CustomName") {
         m.custom_name = Some(n.clone());
