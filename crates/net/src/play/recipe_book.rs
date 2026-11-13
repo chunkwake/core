@@ -1324,6 +1324,7 @@ impl PlayPlan {
     /// `/recipe give`: выдать рецепты и отправить `recipe_book_add`.
     pub(crate) fn recipe_give(&self, uuid: Uuid, ids: &[String]) -> usize {
         let mut rows = Vec::new();
+        let mut unlocked: Vec<String> = Vec::new();
         let mut added = 0;
         let mut all = self.recipe_books.lock().unwrap();
         let state = all.entry(uuid).or_default();
@@ -1339,6 +1340,7 @@ impl PlayPlan {
             for &entry in &list {
                 rows.push((entry.display_id, entry.notification, true, entry));
             }
+            unlocked.push(canonical.clone());
             state.known.insert(canonical.clone());
             state.highlight.insert(canonical);
             added += 1;
@@ -1347,6 +1349,9 @@ impl PlayPlan {
         if !rows.is_empty() {
             let packet = recipe_book_add(self.ids.recipe_book_add, &rows, false);
             self.send_to(uuid, packet);
+        }
+        if !unlocked.is_empty() {
+            self.advancement_recipes_unlocked(uuid, &unlocked);
         }
         added
     }

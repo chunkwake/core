@@ -6821,6 +6821,7 @@ impl PlayPlan {
             );
             let name = self.item_name(d.stack.item).to_owned();
             self.award_stat(uuid, "minecraft:picked_up", &name, got);
+            self.advancement_trigger(uuid, "minecraft:inventory_changed", Some(&name));
             if left == 0 {
                 taken.push(id);
             } else {
@@ -11833,6 +11834,13 @@ impl PlayPlan {
                             let max = self.max_stack(item);
                             let (changed, _) =
                                 state.inv.add_components(item, count, max, extra, damage);
+                            if !changed.is_empty() {
+                                self.advancement_trigger(
+                                    uuid,
+                                    "minecraft:inventory_changed",
+                                    Some(self.item_name(item)),
+                                );
+                            }
                             self.send_slots(conn, &mut state.inv, &changed).await?;
                         }
                         Control::Hurt(d, cause, origin, disable) => {
@@ -14888,6 +14896,11 @@ impl PlayPlan {
                                     "minecraft:block_place",
                                 );
                                 drop(edit);
+                                self.advancement_trigger(
+                                    uuid,
+                                    "minecraft:placed_block",
+                                    Some(&name),
+                                );
                                 if survival && let Some(i) = hand_slot && state.inv.consume_at(i) {
                                     self.send_slots(conn, &mut state.inv, &[i]).await?;
                                 }
@@ -16139,6 +16152,7 @@ impl PlayPlan {
             for s in &crafted_taken {
                 let name = self.item_name(s.item).to_owned();
                 self.award_stat(me, "minecraft:crafted", &name, s.count);
+                self.advancement_trigger(me, "minecraft:inventory_changed", Some(&name));
             }
         }
         if carto_took {

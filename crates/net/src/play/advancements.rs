@@ -18,6 +18,8 @@ pub struct AdvancementCriterion {
     pub entities: Vec<String>,
     /// `conditions.recipes` (для `recipe_unlocked`).
     pub recipes: Vec<String>,
+    /// `conditions.location.*.blocks` (для `placed_block`).
+    pub blocks: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +58,22 @@ fn json_string_list(v: &serde_json::Value) -> Vec<String> {
             .filter_map(|x| x.as_str().map(str::to_owned))
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+/// Собрать `blocks` из дерева block predicate (`match_block`, `location_check`,
+/// `all_of`/`any_of`).
+fn collect_blocks(v: &serde_json::Value, out: &mut Vec<String>) {
+    if let Some(b) = v.get("blocks") {
+        out.extend(json_string_list(b));
+    }
+    if let Some(block) = v.get("predicate").and_then(|p| p.get("block")) {
+        collect_blocks(block, out);
+    }
+    if let Some(terms) = v.get("terms").and_then(|t| t.as_array()) {
+        for term in terms {
+            collect_blocks(term, out);
+        }
     }
 }
 
@@ -113,12 +131,31 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 .and_then(|t| t.as_str())
                 .unwrap_or("")
                 .to_owned();
-            let items = c
+            let mut items = c
                 .get("conditions")
                 .and_then(|c| c.get("item"))
                 .and_then(|i| i.get("items"))
                 .map(json_string_list)
                 .unwrap_or_default();
+            // `inventory_changed`: `conditions.items` — список предикатов.
+            if let Some(list) = c
+                .get("conditions")
+                .and_then(|c| c.get("items"))
+                .and_then(|i| i.as_array())
+            {
+                for pred in list {
+                    let names = pred
+                        .get("items")
+                        .map(json_string_list)
+                        .or_else(|| {
+                            pred.get("tag")
+                                .and_then(|t| t.as_str())
+                                .map(|t| vec![format!("#{t}")])
+                        })
+                        .unwrap_or_default();
+                    items.extend(names);
+                }
+            }
             let entities = c
                 .get("conditions")
                 .and_then(|c| c.get("entity"))
@@ -131,12 +168,17 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 .and_then(|c| c.get("recipes"))
                 .map(json_string_list)
                 .unwrap_or_default();
+            let mut blocks = Vec::new();
+            if let Some(location) = c.get("conditions").and_then(|c| c.get("location")) {
+                collect_blocks(location, &mut blocks);
+            }
             criteria.push(AdvancementCriterion {
                 name: name.clone(),
                 trigger,
                 items,
                 entities,
                 recipes,
+                blocks,
             });
         }
     }
@@ -266,6 +308,50 @@ impl PlayPlan {
 
     /// Добавить критерии по триггеру и отправить прогресс.
     pub(crate) fn advancement_trigger(&self, uuid: Uuid, trigger: &str, item: Option<&str>) {
+        self.advancement_run(uuid, trigger, |c| {
+            if !c.items.is_empty()
+                && !item
+                    .is_some_and(|name| c.items.iter().any(|want| self.item_matches(want, name)))
+            {
+                return false;
+            }
+            if !c.blocks.is_empty()
+                && !item
+                    .is_some_and(|name| c.blocks.iter().any(|want| self.block_matches(want, name)))
+            {
+                return false;
+            }
+            if !c.entities.is_empty()
+                && !item.is_some_and(|name| c.entities.iter().any(|n| short(n) == short(name)))
+            {
+                return false;
+            }
+            if !c.recipes.is_empty()
+                && !item.is_some_and(|name| c.recipes.iter().any(|n| short(n) == short(name)))
+            {
+                return false;
+            }
+            true
+        });
+    }
+
+    /// `RecipeUnlockedTrigger` для набора рецептов: один проход вместо
+    /// вызова `advancement_trigger` на каждый рецепт (`/recipe give *`).
+    pub(crate) fn advancement_recipes_unlocked(&self, uuid: Uuid, ids: &[String]) {
+        self.advancement_run(uuid, "minecraft:recipe_unlocked", |c| {
+            c.recipes.is_empty()
+                || c.recipes
+                    .iter()
+                    .any(|want| ids.iter().any(|id| short(want) == short(id)))
+        });
+    }
+
+    fn advancement_run(
+        &self,
+        uuid: Uuid,
+        trigger: &str,
+        accept: impl Fn(&AdvancementCriterion) -> bool,
+    ) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
@@ -285,27 +371,7 @@ impl PlayPlan {
                 {
                     let entry = progress.entry(def.id.clone()).or_default();
                     for c in &def.criteria {
-                        if c.trigger != trigger {
-                            continue;
-                        }
-                        if !c.items.is_empty()
-                            && !item
-                                .is_some_and(|name| c.items.iter().any(|n| short(n) == short(name)))
-                        {
-                            continue;
-                        }
-                        if !c.entities.is_empty()
-                            && !item.is_some_and(|name| {
-                                c.entities.iter().any(|n| short(n) == short(name))
-                            })
-                        {
-                            continue;
-                        }
-                        if !c.recipes.is_empty()
-                            && !item.is_some_and(|name| {
-                                c.recipes.iter().any(|n| short(n) == short(name))
-                            })
-                        {
+                        if c.trigger != trigger || !accept(c) {
                             continue;
                         }
                         if !entry.contains_key(&c.name) {
@@ -329,6 +395,40 @@ impl PlayPlan {
         for id in completed {
             self.announce_advancement(uuid, &id);
         }
+    }
+
+    /// `ItemPredicate.test` по имени: предмет или `#тег`.
+    fn item_matches(&self, want: &str, name: &str) -> bool {
+        if let Some(tag) = want.strip_prefix('#') {
+            let key = if tag.contains(':') {
+                tag.to_owned()
+            } else {
+                format!("minecraft:{tag}")
+            };
+            return self
+                .survival
+                .item_tags
+                .get(&key)
+                .is_some_and(|set| set.contains(name));
+        }
+        short(want) == short(name)
+    }
+
+    /// `BlockPredicate` по имени блока: блок или `#тег`.
+    fn block_matches(&self, want: &str, name: &str) -> bool {
+        if let Some(tag) = want.strip_prefix('#') {
+            let key = if tag.contains(':') {
+                tag.to_owned()
+            } else {
+                format!("minecraft:{tag}")
+            };
+            return self
+                .survival
+                .block_tags
+                .get(&key)
+                .is_some_and(|set| set.contains(name));
+        }
+        short(want) == short(name)
     }
 
     fn announce_advancement(&self, uuid: Uuid, id: &str) {
