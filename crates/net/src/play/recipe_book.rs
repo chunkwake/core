@@ -115,6 +115,41 @@ pub enum Placement {
     None,
 }
 
+/// Особый крафт, который не выражается shaped/shapeless-сеткой.
+#[derive(Clone, Debug)]
+pub enum SpecialCraft {
+    Transmute {
+        input: Vec<i32>,
+        material: Vec<i32>,
+        result: Option<i32>,
+        count: i32,
+        add_material: bool,
+        min: i32,
+        max: i32,
+    },
+    Dye {
+        target: Vec<i32>,
+        dye: Vec<i32>,
+        result: i32,
+        count: i32,
+    },
+    Imbue {
+        material: Vec<i32>,
+        source: Vec<i32>,
+        result: i32,
+        count: i32,
+    },
+}
+
+/// Результат особого крафта: предмет, количество и слот-источник
+/// компонентов (для dye/transmute с сохранением входного стека).
+#[derive(Clone, Copy, Debug)]
+pub struct SpecialResult {
+    pub item: i32,
+    pub count: i32,
+    pub copy_from: Option<usize>,
+}
+
 #[derive(Clone, Debug)]
 pub struct RecipeEntry {
     pub id: String,
@@ -128,6 +163,7 @@ pub struct RecipeEntry {
     pub placement: Placement,
     /// `showNotification` (флаг 1 в `recipe_book_add`).
     pub notification: bool,
+    pub special: Option<SpecialCraft>,
 }
 
 #[derive(Clone, Debug)]
@@ -160,6 +196,119 @@ impl RecipeBookData {
 
     pub fn entry_by_display(&self, display_id: i32) -> Option<&RecipeEntry> {
         self.entries.iter().find(|e| e.display_id == display_id)
+    }
+
+    /// Подобрать особый рецепт (transmute/dye/imbue) под сетку.
+    pub fn special_craft(&self, grid: &[Option<i32>], size: usize) -> Option<SpecialResult> {
+        let filled: Vec<(usize, i32)> = grid
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.map(|item| (i, item)))
+            .collect();
+        for e in &self.entries {
+            let Some(special) = &e.special else {
+                continue;
+            };
+            match special {
+                SpecialCraft::Transmute {
+                    input,
+                    material,
+                    result,
+                    count,
+                    add_material,
+                    min,
+                    max,
+                } => {
+                    if filled.len() < 2 {
+                        continue;
+                    }
+                    let n = filled.len() as i32 - 1;
+                    if n < *min || n > *max {
+                        continue;
+                    }
+                    let mut found = None;
+                    for (slot, item) in &filled {
+                        if !input.contains(item) {
+                            continue;
+                        }
+                        if filled
+                            .iter()
+                            .filter(|(s, _)| s != slot)
+                            .all(|(_, i)| material.contains(i))
+                        {
+                            found = Some(*slot);
+                            break;
+                        }
+                    }
+                    let Some(slot) = found else {
+                        continue;
+                    };
+                    let base = *count;
+                    let total = if *add_material { n + base } else { base };
+                    let (item, copy_from) = match result {
+                        Some(item) => (*item, None),
+                        None => (filled.iter().find(|(s, _)| *s == slot)?.1, Some(slot)),
+                    };
+                    return Some(SpecialResult {
+                        item,
+                        count: total,
+                        copy_from,
+                    });
+                }
+                SpecialCraft::Dye {
+                    target,
+                    dye,
+                    result,
+                    count,
+                } => {
+                    if filled.len() != 2 {
+                        continue;
+                    }
+                    let ((a_slot, a), (b_slot, b)) = (filled[0], filled[1]);
+                    let (slot, ok) = if target.contains(&a) && dye.contains(&b) {
+                        (a_slot, true)
+                    } else if target.contains(&b) && dye.contains(&a) {
+                        (b_slot, true)
+                    } else {
+                        (0, false)
+                    };
+                    if !ok {
+                        continue;
+                    }
+                    return Some(SpecialResult {
+                        item: *result,
+                        count: *count,
+                        copy_from: Some(slot),
+                    });
+                }
+                SpecialCraft::Imbue {
+                    material,
+                    source,
+                    result,
+                    count,
+                } => {
+                    if size != 3 || filled.len() != 9 {
+                        continue;
+                    }
+                    let center = grid.get(4).copied().flatten();
+                    if !center.is_some_and(|i| source.contains(&i)) {
+                        continue;
+                    }
+                    if grid
+                        .iter()
+                        .enumerate()
+                        .all(|(i, s)| i == 4 || s.is_some_and(|item| material.contains(&item)))
+                    {
+                        return Some(SpecialResult {
+                            item: *result,
+                            count: *count,
+                            copy_from: None,
+                        });
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// `*`: все «обучаемые» рецепты (у нас — все с отображением).
@@ -791,7 +940,8 @@ pub fn load(
                 .and_then(|c| c.as_str())
                 .unwrap_or("misc")),
         };
-        for display in displays {
+        let special = special_of(type_name, &json, items, tags);
+        for (di, display) in displays.into_iter().enumerate() {
             let display_id = entries.len() as i32;
             entries.push(RecipeEntry {
                 id: id.clone(),
@@ -803,6 +953,7 @@ pub fn load(
                 result,
                 placement: placement.clone(),
                 notification,
+                special: if di == 0 { special.clone() } else { None },
             });
         }
     }
@@ -811,6 +962,80 @@ pub fn load(
         by_id.entry(e.id.clone()).or_default().push(i);
     }
     RecipeBookData { entries, by_id }
+}
+
+/// Особый крафт из JSON (transmute/dye/imbue).
+fn special_of(
+    type_name: &str,
+    json: &serde_json::Value,
+    items: &HashMap<String, i32>,
+    tags: &HashMap<String, HashSet<String>>,
+) -> Option<SpecialCraft> {
+    match type_name {
+        "crafting_transmute" => {
+            let input = json.get("input").map(|v| ingredient(v, items, tags))?;
+            let material = json.get("material").map(|v| ingredient(v, items, tags))?;
+            if input.is_empty() || material.is_empty() {
+                return None;
+            }
+            let res = json.get("result");
+            let result = res
+                .and_then(|r| r.get("id"))
+                .and_then(|s| s.as_str())
+                .and_then(|s| items.get(s).copied());
+            let count = res
+                .and_then(|r| r.get("count"))
+                .and_then(|c| c.as_i64())
+                .unwrap_or(1) as i32;
+            let add_material = json
+                .get("add_material_count_to_result")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            let (min, max) = match json.get("material_count") {
+                Some(serde_json::Value::Number(n)) => {
+                    let n = n.as_i64().unwrap_or(1) as i32;
+                    (n, n)
+                }
+                Some(serde_json::Value::Object(o)) => (
+                    o.get("min").and_then(|v| v.as_i64()).unwrap_or(1) as i32,
+                    o.get("max").and_then(|v| v.as_i64()).unwrap_or(8) as i32,
+                ),
+                _ => (1, 1),
+            };
+            Some(SpecialCraft::Transmute {
+                input,
+                material,
+                result,
+                count,
+                add_material,
+                min,
+                max,
+            })
+        }
+        "crafting_dye" => {
+            let target = json.get("target").map(|v| ingredient(v, items, tags))?;
+            let dye = json.get("dye").map(|v| ingredient(v, items, tags))?;
+            let result = json.get("result").and_then(|r| result_of(r, items))?.0;
+            Some(SpecialCraft::Dye {
+                target,
+                dye,
+                result,
+                count: 1,
+            })
+        }
+        "crafting_imbue" => {
+            let material = json.get("material").map(|v| ingredient(v, items, tags))?;
+            let source = json.get("source").map(|v| ingredient(v, items, tags))?;
+            let result = json.get("result").and_then(|r| result_of(r, items))?;
+            Some(SpecialCraft::Imbue {
+                material,
+                source,
+                result: result.0,
+                count: result.1,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// `SlotDisplay.STREAM_CODEC`.

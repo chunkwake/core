@@ -15649,12 +15649,23 @@ impl PlayPlan {
     /// Результат крафта для сетки `size × size`.
     fn craft_result(&self, grid: &[Slot], size: usize) -> Slot {
         let ids: Vec<Option<i32>> = grid.iter().map(|s| s.map(|s| s.item)).collect();
-        let (item, count) = self.survival.recipes.find(&ids, size)?;
+        if let Some((item, count)) = self.survival.recipes.find(&ids, size) {
+            return Some(Stack {
+                item,
+                count,
+                damage: 0,
+                extra: 0,
+            });
+        }
+        let special = self.survival.recipe_book.special_craft(&ids, size)?;
+        let base = special
+            .copy_from
+            .and_then(|i| grid.get(i).copied().flatten());
         Some(Stack {
-            item,
-            count,
-            damage: 0,
-            extra: 0,
+            item: special.item,
+            count: special.count,
+            damage: base.map_or(0, |b| b.damage),
+            extra: base.map_or(0, |b| b.extra),
         })
     }
 
