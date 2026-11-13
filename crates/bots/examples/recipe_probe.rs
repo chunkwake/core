@@ -267,12 +267,30 @@ async fn main() {
     p.add.clear();
     p.cmd("recipe give @s *").await;
     assert!(
-        p.add.len() > 1500,
+        p.add.len() > 1700,
         "по `*` пришло слишком мало рецептов: {}",
         p.add.len()
     );
     println!("recipe give *: {} entries", p.add.len());
     p.cmd("recipe take @s *").await;
+
+    // 4b. Отображения transmute/dye/imbue/trim.
+    p.add.clear();
+    for id in [
+        "minecraft:black_bundle",
+        "minecraft:leather_boots_dyed",
+        "minecraft:tipped_arrow",
+        "minecraft:coast_armor_trim_smithing_template_smithing_trim",
+    ] {
+        p.cmd(&format!("recipe give @s {id}")).await;
+    }
+    assert_eq!(
+        p.add.len(),
+        4,
+        "не все отображения особых рецептов: {:?}",
+        p.add
+    );
+    println!("transmute/dye/imbue/trim displays ok");
 
     // 5. Настройки и «просмотрено».
     p.settings(0, true, true).await;

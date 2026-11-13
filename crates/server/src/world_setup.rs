@@ -750,8 +750,29 @@ fn survival_data(
     let recipe_book_categories =
         chunkwake_data::registries::builtin_entries_of(builtin, "recipe_book_category")
             .map_err(s)?;
-    let recipe_book =
-        chunkwake_net::play::load_recipe_book(data_dir, items, &item_tags, &recipe_book_categories);
+    let trim_patterns: HashMap<String, i32> = registries
+        .synchronized
+        .iter()
+        .find(|r| r.name == "trim_pattern")
+        .map(|r| {
+            r.entries
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.clone(), i as i32))
+                .collect()
+        })
+        .unwrap_or_default();
+    let data_components =
+        chunkwake_data::registries::builtin_entries_of(builtin, "data_component_type")
+            .map_err(s)?;
+    let recipe_book = chunkwake_net::play::load_recipe_book(
+        data_dir,
+        items,
+        &item_tags,
+        &recipe_book_categories,
+        &trim_patterns,
+        &data_components,
+    );
     let mut survival = SurvivalData {
         enchantments: loaded.enchantment_lines,
         recipes,
