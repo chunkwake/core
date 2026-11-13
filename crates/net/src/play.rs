@@ -15450,16 +15450,16 @@ impl PlayPlan {
 
     /// `ServerPlayer.tick` → `CriteriaTriggers.LOCATION`: раз в тик по позиции.
     fn tick_player_triggers(&self) {
-        let players: Vec<(Uuid, [f64; 3], Dimension)> = self
+        let players: Vec<(Uuid, [f64; 3], Dimension, bool)> = self
             .hub
             .players
             .lock()
             .unwrap()
             .values()
             .filter(|p| p.collects)
-            .map(|p| (p.entry.uuid, p.pos, p.dimension))
+            .map(|p| (p.entry.uuid, p.pos, p.dimension, p.on_ground))
             .collect();
-        for (uuid, pos, dim) in players {
+        for (uuid, pos, dim, on_ground) in players {
             with_dim(dim, || {
                 let feet = [
                     pos[0].floor() as i32,
@@ -15468,6 +15468,16 @@ impl PlayPlan {
                 ];
                 let Some(biome) = self.biome_name_at(feet) else {
                     return;
+                };
+                // `SteppingOnPredicate`: только на земле, блок под ногами берётся
+                // со смещением 0.2 (как `getOnPosLegacy`), иначе половинные
+                // блоки (порошковый снег) дают соседний по y блок.
+                let on = [feet[0], (pos[1] - 0.2).floor() as i32, feet[2]];
+                let on_block = on_ground.then(|| self.block_name_at(on)).flatten();
+                let live = self.live.lock().unwrap().get(&uuid).cloned();
+                let (slots, selected) = match &live {
+                    Some(live) => (&live.slots[..], live.selected),
+                    None => (&[][..], 0),
                 };
                 let names = std::cell::OnceCell::new();
                 let inside = |name: &str| {
@@ -15478,7 +15488,14 @@ impl PlayPlan {
                         })
                         .contains(name)
                 };
-                self.advancement_location(uuid, &biome, &inside);
+                self.advancement_location(
+                    uuid,
+                    &biome,
+                    on_block.as_deref(),
+                    slots,
+                    selected,
+                    &inside,
+                );
             });
         }
     }

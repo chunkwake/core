@@ -165,6 +165,17 @@ async fn main() {
             BZ as f64 + 0.5
         ),
         "effect clear @s".to_string(),
+        // Проба сама ставит пустыню ниже; возвращаем равнины, чтобы прогон
+        // повторялся на сохранённом мире.
+        format!(
+            "fillbiome {} {} {} {} {} {} minecraft:plains",
+            BX - 8,
+            by - 8,
+            BZ - 8,
+            BX + 8,
+            by + 8,
+            BZ + 8
+        ),
         "advancement revoke @s only minecraft:adventure/adventuring_time".to_string(),
         "advancement revoke @s only minecraft:adventure/minecraft_trials_edition".to_string(),
         "advancement revoke @s only minecraft:end/find_end_city".to_string(),

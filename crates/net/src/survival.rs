@@ -8,7 +8,7 @@ use std::collections::HashMap;
 /// Слоты окна инвентаря игрока: 0 — результат крафта, 1–4 — сетка, 5–8 — броня,
 /// 9–35 — основной, 36–44 — хотбар, 45 — вторая рука.
 pub const SLOTS: usize = 46;
-const HOTBAR: usize = 36;
+pub const HOTBAR: usize = 36;
 /// Слот шлема в окне инвентаря игрока.
 /// `PlayerEnderChestContainer.SLOTS`.
 pub const ENDER_SLOTS: usize = 27;
@@ -16,6 +16,8 @@ pub const ENDER_SLOTS: usize = 27;
 pub const HEAD: usize = 5;
 /// Нагрудник: элитры носят здесь.
 pub const CHEST: usize = 6;
+pub const LEGS: usize = 7;
+pub const FEET: usize = 8;
 pub const OFFHAND: usize = 45;
 const MAIN: usize = 9;
 

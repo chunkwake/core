@@ -53,8 +53,16 @@ pub struct AdvancementCriterion {
     pub biomes: Vec<String>,
     /// `conditions.player.predicate.minecraft:location.structures`.
     pub structures: Vec<String>,
+    /// `conditions.player.predicate.minecraft:stepping_on.block.blocks`.
+    pub stepping_on: Vec<String>,
+    /// `stepping_on` содержит неподдержанные части предиката.
+    pub stepping_on_unsupported: bool,
+    /// `conditions.player.predicate.minecraft:equipment`: слот и предметы.
+    pub equipment: Vec<(String, Vec<String>)>,
+    /// `equipment` содержит неподдержанные части (`count`, `components`, ...).
+    pub equipment_unsupported: bool,
     /// Предикат `location` содержит то, что мы не умеем проверять
-    /// (`position`, `equipment`, `stepping_on`, ...).
+    /// (`position`, `light`, ...).
     pub unsupported_location: bool,
     /// `conditions.effects` (`effects_changed`): имя и требуемый уровень.
     pub effects_req: Vec<(String, Option<i32>)>,
@@ -92,6 +100,20 @@ pub struct AdvancementDef {
 
 fn short(id: &str) -> &str {
     id.trim_start_matches("minecraft:")
+}
+
+/// Слот экипировки (`EquipmentSlot`) в `Inventory.slots`.
+fn equipment_slot(slot: &str, selected: usize) -> Option<usize> {
+    use crate::survival::{CHEST, FEET, HEAD, HOTBAR, LEGS, OFFHAND};
+    match slot {
+        "head" => Some(HEAD),
+        "chest" => Some(CHEST),
+        "legs" => Some(LEGS),
+        "feet" => Some(FEET),
+        "mainhand" => Some(HOTBAR + selected.min(8)),
+        "offhand" => Some(OFFHAND),
+        _ => None,
+    }
 }
 
 fn json_string_list(v: &serde_json::Value) -> Vec<String> {
@@ -369,6 +391,10 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 .and_then(|p| p.get("predicate"));
             let mut biomes = Vec::new();
             let mut structures = Vec::new();
+            let mut stepping_on = Vec::new();
+            let mut stepping_on_unsupported = false;
+            let mut equipment = Vec::new();
+            let mut equipment_unsupported = false;
             let mut unsupported_location = false;
             if let Some(pred) = player_pred {
                 if let Some(loc) = pred.get("minecraft:location") {
@@ -384,10 +410,43 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                         unsupported_location = true;
                     }
                 }
-                if pred
-                    .as_object()
-                    .is_some_and(|o| o.keys().any(|k| k != "minecraft:location"))
-                {
+                if let Some(step) = pred.get("minecraft:stepping_on") {
+                    let block = step.get("block");
+                    stepping_on = block
+                        .and_then(|b| b.get("blocks"))
+                        .map(string_or_list)
+                        .unwrap_or_default();
+                    let extra = step
+                        .as_object()
+                        .is_some_and(|o| o.keys().any(|k| k != "block"));
+                    let block_extra = block
+                        .and_then(|b| b.as_object())
+                        .is_some_and(|o| o.keys().any(|k| k != "blocks"));
+                    if stepping_on.is_empty() || extra || block_extra {
+                        stepping_on_unsupported = true;
+                    }
+                }
+                if let Some(map) = pred.get("minecraft:equipment").and_then(|e| e.as_object()) {
+                    for (slot, want) in map {
+                        let items = want.get("items").map(string_or_list).unwrap_or_default();
+                        let extra = want
+                            .as_object()
+                            .is_some_and(|o| o.keys().any(|k| k != "items"));
+                        if items.is_empty() || extra || equipment_slot(slot, 0).is_none() {
+                            equipment_unsupported = true;
+                        } else {
+                            equipment.push((slot.clone(), items));
+                        }
+                    }
+                }
+                if pred.as_object().is_some_and(|o| {
+                    o.keys().any(|k| {
+                        !matches!(
+                            k.as_str(),
+                            "minecraft:location" | "minecraft:equipment" | "minecraft:stepping_on"
+                        )
+                    })
+                }) {
                     unsupported_location = true;
                 }
             }
@@ -468,6 +527,10 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 ingredients,
                 biomes,
                 structures,
+                stepping_on,
+                stepping_on_unsupported,
+                equipment,
+                equipment_unsupported,
                 unsupported_location,
                 effects_req,
                 source_entities,
@@ -724,11 +787,16 @@ impl PlayPlan {
         });
     }
 
-    /// `PlayerTrigger` для `minecraft:location`: биом и структуры в точке игрока.
+    /// `PlayerTrigger` для `minecraft:location`: биом, структуры, блок под
+    /// ногами (`stepping_on`) и экипировка в точке игрока.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn advancement_location(
         &self,
         uuid: Uuid,
         biome: &str,
+        on_block: Option<&str>,
+        slots: &[Option<Stack>],
+        selected: usize,
         inside: &dyn Fn(&str) -> bool,
     ) {
         self.advancement_run(uuid, "minecraft:location", |c| {
@@ -743,7 +811,26 @@ impl PlayPlan {
                 || c.structures
                     .iter()
                     .any(|w| w.strip_prefix('#').is_none() && inside(w));
-            biome_ok && structure_ok
+            let step_ok = c.stepping_on.is_empty()
+                || (!c.stepping_on_unsupported
+                    && on_block.is_some_and(|block| {
+                        c.stepping_on
+                            .iter()
+                            .any(|want| self.block_matches(want, block))
+                    }));
+            let equipment_ok = c.equipment.is_empty()
+                || (!c.equipment_unsupported
+                    && c.equipment.iter().all(|(slot, items)| {
+                        let Some(index) = equipment_slot(slot, selected) else {
+                            return false;
+                        };
+                        slots.get(index).copied().flatten().is_some_and(|s| {
+                            items
+                                .iter()
+                                .any(|want| self.item_matches(want, self.item_name(s.item)))
+                        })
+                    }));
+            biome_ok && structure_ok && step_ok && equipment_ok
         });
     }
 
