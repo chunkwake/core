@@ -6613,6 +6613,7 @@ impl PlayPlan {
     fn throw(&self, uuid: Uuid, feet: [f64; 3], yaw: f32, pitch: f32, stack: Stack) {
         let name = self.item_name(stack.item).to_owned();
         self.award_stat(uuid, "minecraft:dropped", &name, stack.count);
+        self.award_stat(uuid, "minecraft:custom", "minecraft:drop", 1);
         self.drop_item(
             items::throw_origin(feet),
             items::throw_velocity(yaw, pitch, rand::random()),
@@ -14143,6 +14144,12 @@ impl PlayPlan {
                                     });
                                 }
                                 self.send_slots(conn, &mut state.inv, &[slot]).await?;
+                                self.award_stat(
+                                    uuid,
+                                    "minecraft:custom",
+                                    "minecraft:interact_with_campfire",
+                                    1,
+                                );
                                 conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence))
                                     .await?;
                                 self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
@@ -14291,6 +14298,14 @@ impl PlayPlan {
                         {
                             let slot = if u.hand == 0 { state.inv.held_slot() } else { survival::OFFHAND };
                             if let Some(spent) = self.use_jukebox(u.pos, u.hand, state.inv.slots[slot]) {
+                                if spent {
+                                    self.award_stat(
+                                        uuid,
+                                        "minecraft:custom",
+                                        "minecraft:play_record",
+                                        1,
+                                    );
+                                }
                                 if spent && login.spawn.game_mode != 1 {
                                     state.inv.consume_at(slot);
                                     self.send_slots(conn, &mut state.inv, &[slot]).await?;
@@ -14580,8 +14595,40 @@ impl PlayPlan {
                             let open_stat = match clicked.as_str() {
                                 "minecraft:ender_chest" => Some("minecraft:open_enderchest"),
                                 "minecraft:barrel" => Some("minecraft:open_barrel"),
-                                "minecraft:chest" | "minecraft:trapped_chest" => {
-                                    Some("minecraft:open_chest")
+                                "minecraft:chest" => Some("minecraft:open_chest"),
+                                "minecraft:trapped_chest" => {
+                                    Some("minecraft:trigger_trapped_chest")
+                                }
+                                "minecraft:crafting_table" => {
+                                    Some("minecraft:interact_with_crafting_table")
+                                }
+                                "minecraft:furnace" => Some("minecraft:interact_with_furnace"),
+                                "minecraft:blast_furnace" => {
+                                    Some("minecraft:interact_with_blast_furnace")
+                                }
+                                "minecraft:smoker" => Some("minecraft:interact_with_smoker"),
+                                "minecraft:anvil"
+                                | "minecraft:chipped_anvil"
+                                | "minecraft:damaged_anvil" => {
+                                    Some("minecraft:interact_with_anvil")
+                                }
+                                "minecraft:grindstone" => {
+                                    Some("minecraft:interact_with_grindstone")
+                                }
+                                "minecraft:stonecutter" => {
+                                    Some("minecraft:interact_with_stonecutter")
+                                }
+                                "minecraft:loom" => Some("minecraft:interact_with_loom"),
+                                "minecraft:cartography_table" => {
+                                    Some("minecraft:interact_with_cartography_table")
+                                }
+                                "minecraft:lectern" => Some("minecraft:interact_with_lectern"),
+                                "minecraft:brewing_stand" => {
+                                    Some("minecraft:interact_with_brewingstand")
+                                }
+                                "minecraft:beacon" => Some("minecraft:interact_with_beacon"),
+                                "minecraft:smithing_table" => {
+                                    Some("minecraft:interact_with_smithing_table")
                                 }
                                 n if is_copper_chest(n) => Some("minecraft:open_chest"),
                                 n if n.ends_with("shulker_box") => {
