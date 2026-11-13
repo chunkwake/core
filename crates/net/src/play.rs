@@ -3449,6 +3449,14 @@ impl PlayPlan {
     /// огонь, листва соседей, кровать. Общая часть [`Self::set_block`] и
     /// [`Self::set_blocks`].
     fn after_block_change(&self, [x, y, z]: [i32; 3], old: u32, state: u32) {
+        // `CarvedPumpkinBlock.onPlace`: тыква/фонарь на блоках железа.
+        let pumpkin = matches!(
+            self.state_name(state),
+            "minecraft:carved_pumpkin" | "minecraft:jack_o_lantern"
+        );
+        if pumpkin && self.state_name(old) != self.state_name(state) {
+            self.try_spawn_iron_golem([x, y, z]);
+        }
         let (fire_new, fire_old) = (
             self.is_kind(state, kinds::FIRE),
             self.is_kind(old, kinds::FIRE),
@@ -3493,6 +3501,98 @@ impl PlayPlan {
     ///
     /// Возвращает прежнее состояние каждой позиции (`None` — вне мира или
     /// чанка нет).
+    /// `CarvedPumpkinBlock.trySpawnGolem`: железный голем из тыквы и блоков
+    /// железа. Шаблон `ironGolemFull`: `"~^~"`, `"###"`, `"~#~"` (верхний
+    /// центр - тыква, средний ряд из трёх блоков железа и центр снизу).
+    fn try_spawn_iron_golem(&self, [x, y, z]: [i32; 3]) {
+        let at = |p: [i32; 3]| self.block(p).map(|s| self.state_name(s).to_owned());
+        let is = |p: [i32; 3], name: &str| at(p).as_deref() == Some(name);
+        let air = |p: [i32; 3]| is(p, "minecraft:air");
+        if !air([x - 1, y, z]) || !air([x + 1, y, z]) {
+            return;
+        }
+        let middle = [[x - 1, y - 1, z], [x, y - 1, z], [x + 1, y - 1, z]];
+        if middle.iter().any(|&p| !is(p, "minecraft:iron_block")) {
+            return;
+        }
+        if !air([x - 1, y - 2, z]) || !air([x + 1, y - 2, z]) {
+            return;
+        }
+        let bottom = [x, y - 2, z];
+        if !is(bottom, "minecraft:iron_block") {
+            return;
+        }
+        // `clearPatternBlocks`: тыква, средний ряд и нижний центр.
+        for p in [[x, y, z], middle[0], middle[1], middle[2], bottom] {
+            self.set_block(p, AIR);
+        }
+        let pos = [x as f64 + 0.5, f64::from(bottom[1]) + 0.05, z as f64 + 0.5];
+        if self
+            .spawn_mob(
+                crate::mobs::Species::IronGolem,
+                pos,
+                0.0,
+                false,
+                Some("TRIGGERED"),
+            )
+            .is_none()
+        {
+            return;
+        }
+        self.trigger_summoned_entity(pos, crate::mobs::Species::IronGolem);
+    }
+
+    /// `SummonedEntityTrigger`: игроки в кубе 5 блоков вокруг призванной
+    /// сущности (`getEntitiesOfClass(ServerPlayer.class, box.inflate(5.0))`).
+    fn trigger_summoned_entity(&self, pos: [f64; 3], species: crate::mobs::Species) {
+        let (width, height) = species.size();
+        let dim = self.active_dim();
+        let players: Vec<(Uuid, [f64; 3])> = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|p| p.collects && p.dimension == dim)
+            .map(|p| (p.entry.uuid, p.pos))
+            .collect();
+        let target_equipment = |_: &str| -> Option<(String, i32)> { None };
+        for (uuid, ppos) in players {
+            let overlap = |a0: f64, a1: f64, b0: f64, b1: f64| a0 <= b1 && a1 >= b0;
+            let inflate = 5.0;
+            let (gx0, gx1) = (
+                pos[0] - width / 2.0 - inflate,
+                pos[0] + width / 2.0 + inflate,
+            );
+            let (gz0, gz1) = (
+                pos[2] - width / 2.0 - inflate,
+                pos[2] + width / 2.0 + inflate,
+            );
+            let (gy0, gy1) = (pos[1] - inflate, pos[1] + height + inflate);
+            let (px0, px1) = (ppos[0] - 0.3, ppos[0] + 0.3);
+            let (pz0, pz1) = (ppos[2] - 0.3, ppos[2] + 0.3);
+            let (py0, py1) = (ppos[1], ppos[1] + 1.8);
+            if !(overlap(px0, px1, gx0, gx1)
+                && overlap(py0, py1, gy0, gy1)
+                && overlap(pz0, pz1, gz0, gz1))
+            {
+                continue;
+            }
+            let live = self.live.lock().unwrap().get(&uuid).cloned();
+            let (slots, selected) = match &live {
+                Some(l) => (&l.slots[..], l.selected),
+                None => (&[][..], 0),
+            };
+            self.advancement_summoned_entity(
+                uuid,
+                species.name(),
+                &target_equipment,
+                slots,
+                selected,
+            );
+        }
+    }
+
     pub(crate) fn set_blocks(&self, list: &[([i32; 3], u32)]) -> Vec<Option<u32>> {
         let min_y = self.min_y();
         let height = self.template().height();

@@ -1169,6 +1169,29 @@ impl PlayPlan {
 
     /// `item_used_on_block`: предмет в руке и блок под прицелом.
     /// `FilledBucketTrigger`: игрок получил ведро с существом.
+    /// `SummonedEntityTrigger`: игрок призвал сущность (голем из тыквы).
+    pub(crate) fn advancement_summoned_entity(
+        &self,
+        uuid: Uuid,
+        entity: &str,
+        target_equipment: &dyn Fn(&str) -> Option<(String, i32)>,
+        slots: &[Option<Stack>],
+        selected: usize,
+    ) {
+        self.advancement_run(uuid, "minecraft:summoned_entity", |c| {
+            if c.target_unsupported {
+                return false;
+            }
+            let entity_ok =
+                c.entities.is_empty() || c.entities.iter().any(|w| self.entity_matches(w, entity));
+            let target_ok = c.target_equipment.iter().all(|(slot, pred)| {
+                target_equipment(slot)
+                    .is_some_and(|(name, damage)| self.item_pred_matches(pred, &name, damage))
+            });
+            entity_ok && target_ok && self.player_pred_ok(c, slots, selected)
+        });
+    }
+
     pub(crate) fn advancement_filled_bucket(&self, uuid: Uuid, item: &str) {
         self.advancement_run(uuid, "minecraft:filled_bucket", |c| {
             c.items.is_empty() || c.items.iter().any(|w| self.item_matches(w, item))
@@ -2528,5 +2551,30 @@ mod tests {
         let c = &def.criteria[0];
         assert_eq!(c.trigger, "minecraft:filled_bucket");
         assert_eq!(c.items, vec!["minecraft:cod_bucket".to_owned()]);
+    }
+
+    #[test]
+    fn summoned_entity_parses_entity_type() {
+        let json = serde_json::json!({
+            "criteria": {
+                "summoned_golem": {
+                    "trigger": "minecraft:summoned_entity",
+                    "conditions": {
+                        "entity": {
+                            "type": "minecraft:entity_properties",
+                            "entity": "this",
+                            "predicate": {"minecraft:entity_type": "minecraft:iron_golem"}
+                        }
+                    }
+                }
+            },
+            "requirements": [["summoned_golem"]]
+        });
+        let def = parse_advancement("test/golem", &json).expect("advancement");
+        let c = &def.criteria[0];
+        assert_eq!(c.trigger, "minecraft:summoned_entity");
+        assert_eq!(c.entities, vec!["minecraft:iron_golem".to_owned()]);
+        assert!(!c.target_unsupported);
+        assert!(c.player_pred.is_none());
     }
 }
