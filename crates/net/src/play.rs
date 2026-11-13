@@ -11303,6 +11303,7 @@ impl PlayPlan {
         self.flush_blocks();
         lap(PH_BLOCKS, &mut watch);
         self.flush_moves();
+        self.tick_player_triggers();
         lap(PH_MOVES, &mut watch);
         if let Some(h) = self.hooks() {
             h.tick();
@@ -15418,6 +15419,31 @@ impl PlayPlan {
                     self.advancement_enter_block(uuid, name);
                 }
             }
+        }
+    }
+
+    /// `ServerPlayer.tick` → `CriteriaTriggers.LOCATION`: раз в тик по позиции.
+    fn tick_player_triggers(&self) {
+        let players: Vec<(Uuid, [f64; 3], Dimension)> = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|p| p.collects)
+            .map(|p| (p.entry.uuid, p.pos, p.dimension))
+            .collect();
+        for (uuid, pos, dim) in players {
+            with_dim(dim, || {
+                let feet = [
+                    pos[0].floor() as i32,
+                    pos[1].floor() as i32,
+                    pos[2].floor() as i32,
+                ];
+                if let Some(biome) = self.biome_name_at(feet) {
+                    self.advancement_location(uuid, &biome);
+                }
+            });
         }
     }
 

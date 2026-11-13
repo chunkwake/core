@@ -49,6 +49,11 @@ pub struct AdvancementCriterion {
     pub partner_entities: Vec<String>,
     /// `conditions.ingredients` (`recipe_crafted`): список предикатов.
     pub ingredients: Vec<Vec<String>>,
+    /// `conditions.player.predicate.minecraft:location.biomes` (`location`).
+    pub biomes: Vec<String>,
+    /// Предикат `location` содержит то, что мы не умеем проверять
+    /// (`structures`, `position`, `equipment`, `stepping_on`, ...).
+    pub unsupported_location: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -349,6 +354,28 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 entity_type("parent"),
                 entity_type("partner"),
             );
+            let player_pred = cond
+                .and_then(|c| c.get("player"))
+                .and_then(|p| p.get("predicate"));
+            let mut biomes = Vec::new();
+            let mut unsupported_location = false;
+            if let Some(pred) = player_pred {
+                if let Some(loc) = pred.get("minecraft:location") {
+                    biomes = loc.get("biomes").map(string_or_list).unwrap_or_default();
+                    if loc
+                        .as_object()
+                        .is_some_and(|o| o.keys().any(|k| k != "biomes"))
+                    {
+                        unsupported_location = true;
+                    }
+                }
+                if pred
+                    .as_object()
+                    .is_some_and(|o| o.keys().any(|k| k != "minecraft:location"))
+                {
+                    unsupported_location = true;
+                }
+            }
             let ingredients = cond
                 .and_then(|c| c.get("ingredients"))
                 .and_then(|i| i.as_array())
@@ -390,6 +417,8 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 parent_entities,
                 partner_entities,
                 ingredients,
+                biomes,
+                unsupported_location,
             });
         }
     }
@@ -595,6 +624,17 @@ impl PlayPlan {
             (c.items.is_empty() || c.items.iter().any(|w| self.item_matches(w, item)))
                 && c.levels
                     .is_none_or(|(min, max)| levels >= min && levels <= max)
+        });
+    }
+
+    /// `PlayerTrigger` для `minecraft:location`: биом точки игрока.
+    pub(crate) fn advancement_location(&self, uuid: Uuid, biome: &str) {
+        self.advancement_run(uuid, "minecraft:location", |c| {
+            !c.unsupported_location
+                && (c.biomes.is_empty()
+                    || c.biomes
+                        .iter()
+                        .any(|w| w.strip_prefix('#').is_none() && short(w) == short(biome)))
         });
     }
 
