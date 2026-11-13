@@ -635,6 +635,14 @@ fn survival_data(
     .map_err(s)?;
     chunkwake_protocol::inventory::DAMAGE_COMPONENT
         .store(damage, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(id) = chunkwake_data::registries::builtin_id_of(
+        builtin,
+        "data_component_type",
+        "minecraft:dyed_color",
+    ) {
+        chunkwake_protocol::components::DYED_COLOR_COMPONENT
+            .store(id, std::sync::atomic::Ordering::Relaxed);
+    }
     // Чары, имя и описание предметов: номера компонентов и сетевые ID чар.
     {
         use chunkwake_protocol::components as c;

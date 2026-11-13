@@ -148,6 +148,10 @@ pub struct SpecialResult {
     pub item: i32,
     pub count: i32,
     pub copy_from: Option<usize>,
+    /// Слот красителя (для `dyed_color`).
+    pub dye_slot: Option<usize>,
+    /// Слот зелья-источника (для `potion_contents`).
+    pub potion_slot: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -253,6 +257,8 @@ impl RecipeBookData {
                         item,
                         count: total,
                         copy_from,
+                        dye_slot: None,
+                        potion_slot: None,
                     });
                 }
                 SpecialCraft::Dye {
@@ -265,12 +271,12 @@ impl RecipeBookData {
                         continue;
                     }
                     let ((a_slot, a), (b_slot, b)) = (filled[0], filled[1]);
-                    let (slot, ok) = if target.contains(&a) && dye.contains(&b) {
-                        (a_slot, true)
+                    let (slot, dye_slot, ok) = if target.contains(&a) && dye.contains(&b) {
+                        (a_slot, b_slot, true)
                     } else if target.contains(&b) && dye.contains(&a) {
-                        (b_slot, true)
+                        (b_slot, a_slot, true)
                     } else {
-                        (0, false)
+                        (0, 0, false)
                     };
                     if !ok {
                         continue;
@@ -279,6 +285,8 @@ impl RecipeBookData {
                         item: *result,
                         count: *count,
                         copy_from: Some(slot),
+                        dye_slot: Some(dye_slot),
+                        potion_slot: None,
                     });
                 }
                 SpecialCraft::Imbue {
@@ -303,6 +311,8 @@ impl RecipeBookData {
                             item: *result,
                             count: *count,
                             copy_from: None,
+                            dye_slot: None,
+                            potion_slot: Some(4),
                         });
                     }
                 }
@@ -1510,9 +1520,14 @@ impl PlayPlan {
             inv.slots[slot] = Some(left);
         }
         match target {
-            Some(s) if s.item == item => s.count += take,
+            Some(s) if s.item == item && s.damage == stack.damage && s.extra == stack.extra => {
+                s.count += take;
+            }
             _ => {
-                *target = Some(Stack::new(item, take));
+                *target = Some(Stack {
+                    count: take,
+                    ..stack
+                });
             }
         }
         true

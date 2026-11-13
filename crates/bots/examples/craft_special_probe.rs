@@ -257,7 +257,8 @@ async fn main() {
     let window = p.window.expect("верстак не открылся");
     let display = p.give_recipe("minecraft:tipped_arrow").await;
     p.cmd("give boater minecraft:arrow 8").await;
-    p.cmd("give boater minecraft:lingering_potion 1").await;
+    p.cmd("give boater minecraft:lingering_potion[potion_contents=\"minecraft:swiftness\"] 1")
+        .await;
     p.select(0).await;
     p.place(window, display).await;
     p.click(window, 0).await;
@@ -266,6 +267,10 @@ async fn main() {
     assert!(
         inv.contains("tipped_arrow"),
         "imbue не дал tipped_arrow: {inv}"
+    );
+    assert!(
+        inv.contains("chunkwake:component_patch"),
+        "imbue не перенёс potion_contents: {inv}"
     );
     println!("imbue craft ok");
 

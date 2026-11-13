@@ -47,7 +47,13 @@ pub struct Extra {
     /// `minecraft:map_post_processing` у результата стола картографа:
     /// 0 — `LOCK`, 1 — `SCALE`. Снимается, как только стопку забрали.
     pub map_post_processing: Option<u8>,
+    /// `minecraft:dyed_color`: RGB кожи/брони.
+    pub dyed_color: Option<i32>,
 }
+
+/// ID `minecraft:dyed_color` в реестре компонентов; -1 — неизвестен.
+pub static DYED_COLOR_COMPONENT: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(-1);
 
 /// Строка с необязательной отфильтрованной версией (`Filterable<T>`).
 pub type Filterable = (String, Option<String>);
@@ -100,6 +106,7 @@ impl Extra {
             && self.rest.is_none()
             && self.map_id.is_none()
             && self.map_post_processing.is_none()
+            && self.dyed_color.is_none()
     }
 
     pub fn level(&self, enchantment: i32) -> i32 {

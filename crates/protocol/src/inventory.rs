@@ -312,6 +312,7 @@ fn write_patch(w: &mut Writer, s: &Stack) {
             && id_of(&crate::components::MAP_POST_PROCESSING_COMPONENT) >= 0,
         e.book.is_some() && book_id(e.book.as_ref()) >= 0,
         !e.container.is_empty() && id_of(&CONTAINER_COMPONENT) >= 0,
+        e.dyed_color.is_some() && id_of(&crate::components::DYED_COLOR_COMPONENT) >= 0,
     ];
     w.var_int(parts.iter().filter(|&&p| p).count() as i32)
         .var_int(0);
@@ -386,6 +387,10 @@ fn write_patch(w: &mut Writer, s: &Stack) {
     if parts[13] {
         w.var_int(id_of(&CONTAINER_COMPONENT));
         write_container_value(w, &e.container);
+    }
+    if let (true, Some(color)) = (parts[14], e.dyed_color) {
+        w.var_int(id_of(&crate::components::DYED_COLOR_COMPONENT))
+            .i32(color);
     }
 }
 

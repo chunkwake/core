@@ -66,6 +66,30 @@ pub fn splash_strength(distance: f64, direct_hit: bool) -> f64 {
 
 /// Ищет `potion_contents` в сыром патче компонентов и читает его.
 /// `None` — компонента нет или перед ним стоит компонент, который нельзя пропустить.
+/// `PotionContents` в патч компонентов: `potion_contents` с теми же
+/// зельем/эффектами (без custom color/name, как в нашем `Contents`).
+pub fn contents_patch(contents: &Contents, component: i32) -> Vec<u8> {
+    let mut w = chunkwake_protocol::Writer::new();
+    w.var_int(1).var_int(0).var_int(component);
+    w.bool(contents.potion.is_some());
+    if let Some(potion) = contents.potion {
+        w.var_int(potion);
+    }
+    w.bool(false); // custom color
+    w.var_int(contents.effects.len() as i32);
+    for e in &contents.effects {
+        w.var_int(e.id)
+            .var_int(i32::from(e.amplifier))
+            .var_int(e.duration)
+            .bool(e.ambient)
+            .bool(e.particles)
+            .bool(e.show_icon)
+            .bool(false); // hidden effect
+    }
+    w.bool(false); // custom name
+    w.buf
+}
+
 pub fn read_contents(raw: &[u8], component: i32) -> Option<Contents> {
     if component < 0 {
         return None;

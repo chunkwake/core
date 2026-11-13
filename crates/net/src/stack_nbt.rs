@@ -108,6 +108,9 @@ pub fn named_nbt(
             .collect();
         comps.insert("minecraft:container".into(), Tag::List(list));
     }
+    if let Some(color) = e.dyed_color {
+        comps.insert("minecraft:dyed_color".into(), Tag::Int(color));
+    }
     if !comps.is_empty() {
         c.insert("components".into(), Tag::Compound(comps));
     }
@@ -177,6 +180,10 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>, depth: u32)
             .get("minecraft:map_id")
             .and_then(Tag::as_i64)
             .map(|v| v as i32);
+        e.dyed_color = m.get("minecraft:dyed_color").and_then(|t| match t {
+            Tag::Int(v) => Some(*v),
+            other => other.as_i64().map(|v| v as i32),
+        });
         e.trim = m
             .get("minecraft:trim")
             .and_then(Tag::as_compound)
@@ -963,6 +970,7 @@ mod tests {
             rest: None,
             map_id: Some(12),
             map_post_processing: None,
+            dyed_color: None,
             charged: Vec::new(),
             container: Vec::new(),
             custom_data: Some(compound_to_net(&Compound::from([(
