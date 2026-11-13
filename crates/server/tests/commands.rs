@@ -1378,9 +1378,34 @@ fn item_replaces_a_player_slot_and_refuses_a_mob() {
     assert!(cow.contains("commands.item.target.no_such_slot"), "{cow}");
     let block = run(
         &plan,
-        "item replace block 0 0 0 weapon with minecraft:stone",
+        "item replace block 0 0 0 container.0 with minecraft:stone",
     );
-    assert!(block.contains("not supported"), "{block}");
+    assert!(
+        block.contains("commands.item.block.no_such_container"),
+        "{block}"
+    );
+
+    let y = plan.spawn_point()[1].floor() as i32;
+    assert!(
+        run(&plan, &format!("setblock 0 {y} 0 minecraft:chest"))
+            .contains("commands.setblock.success")
+    );
+    let filled = run(
+        &plan,
+        &format!("item replace block 0 {y} 0 container.0 with minecraft:stone 3"),
+    );
+    assert!(
+        filled.contains("commands.item.block.set.success"),
+        "{filled}"
+    );
+    let missing = run(
+        &plan,
+        &format!("item replace block 0 {y} 0 container.30 with minecraft:stone"),
+    );
+    assert!(
+        missing.contains("commands.item.target.no_such_slot"),
+        "{missing}"
+    );
 }
 
 #[test]

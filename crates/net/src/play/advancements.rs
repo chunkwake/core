@@ -673,6 +673,13 @@ impl PlayPlan {
         });
     }
 
+    /// `CrafterRecipeCraftedTrigger`: крафтер выбросил результат рецепта.
+    pub(crate) fn advancement_crafter_recipe_crafted(&self, uuid: Uuid, recipe: &str) {
+        self.advancement_run(uuid, "minecraft:crafter_recipe_crafted", |c| {
+            c.recipes.is_empty() || c.recipes.iter().any(|w| short(w) == short(recipe))
+        });
+    }
+
     /// `LootTableTrigger`: игрок открыл контейнер с таблицей добычи.
     pub(crate) fn advancement_container_loot(&self, uuid: Uuid, table: &str) {
         self.advancement_run(uuid, "minecraft:player_generates_container_loot", |c| {

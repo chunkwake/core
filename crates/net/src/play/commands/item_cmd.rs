@@ -76,10 +76,7 @@ pub(super) fn item(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     let path: Vec<&str> = call.path.iter().map(String::as_str).collect();
     match path.as_slice() {
         ["replace", "entity"] | ["replace", "entity", ..] => replace(ctx, call),
-        ["replace", "block", ..] => Outcome::Feedback(json!({
-            "text": "item replace block is not supported yet: blocks here keep no container slots",
-            "color": "red",
-        })),
+        ["replace", "block", ..] => replace_block(ctx, call),
         _ => usage("/item replace entity <targets> <slots> with <item> [count]"),
     }
 }
@@ -195,6 +192,103 @@ fn replace(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     }
 }
 
+/// `/item replace block <pos> container.N with <item> [count]`.
+fn replace_block(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
+    let mut input = call.t();
+    let Some(x) = input.word() else {
+        return usage("/item replace block <pos> container.N with <item> [count]");
+    };
+    let Some(y) = input.word() else {
+        return usage("/item replace block <pos> container.N with <item> [count]");
+    };
+    let Some(z) = input.word() else {
+        return usage("/item replace block <pos> container.N with <item> [count]");
+    };
+    let Some(coords) = super::args::coords3(x, y, z) else {
+        return usage("/item replace block <pos> container.N with <item> [count]");
+    };
+    let base = call.position(ctx);
+    let pos = super::args::block_pos(coords, base, super::args::Basis::from_rotation(0.0, 0.0));
+    let Some(slot_token) = input.word() else {
+        return usage("/item replace block <pos> container.N with <item> [count]");
+    };
+    let Some((name, index)) = slot_token.split_once('.') else {
+        return Outcome::Feedback(json!({
+            "text": format!("unknown slot \"{slot_token}\": use container.N"),
+            "color": "red",
+        }));
+    };
+    let Some(index) = index.parse::<usize>().ok().filter(|_| name == "container") else {
+        return Outcome::Feedback(json!({
+            "text": format!("unknown slot \"{slot_token}\": use container.N"),
+            "color": "red",
+        }));
+    };
+    let Some(mode) = input.word() else {
+        return usage("/item replace block <pos> container.N with <item> [count]");
+    };
+    if mode != "with" {
+        return Outcome::Feedback(json!({
+            "text": format!("item replace block ... {mode} is not supported yet; use \"with <item> [count]\""),
+            "color": "red",
+        }));
+    }
+    let Some(stack_token) = input.balanced() else {
+        return usage("/item replace block <pos> container.N with <item> [count]");
+    };
+    let Some(parsed) = parse_item(stack_token, &ctx.plan.survival.item_ids) else {
+        return failed(
+            "argument.item.id.invalid",
+            vec![json!({"text": stack_token})],
+        );
+    };
+    let count = match input.word() {
+        Some(token) => match token.parse::<i32>() {
+            Ok(count) if (1..=99).contains(&count) => count,
+            _ => {
+                return failed(
+                    "argument.integer.range",
+                    vec![json!(1), json!(99), json!({"text": token})],
+                );
+            }
+        },
+        None => 1,
+    };
+    let extra = parsed
+        .potion
+        .as_deref()
+        .and_then(|p| ctx.plan.with_potion(parsed.id, parsed.extra, p))
+        .unwrap_or(parsed.extra);
+    let stack = Stack {
+        item: parsed.id,
+        count,
+        damage: parsed.damage.unwrap_or(0),
+        extra,
+    };
+    let Some(mut slots) = ctx.plan.container_slots(pos) else {
+        return failed(
+            "commands.item.block.no_such_container",
+            vec![json!({"text": format!("{} {} {}", pos[0], pos[1], pos[2])})],
+        );
+    };
+    if index >= slots.len() {
+        return failed(
+            "commands.item.target.no_such_slot",
+            vec![json!({"text": slot_token})],
+        );
+    }
+    slots[index] = Some(stack);
+    ctx.plan.set_container_slots(pos, &slots);
+    let shown = item_name(ctx, parsed.id);
+    Outcome::Feedback(translate(
+        "commands.item.block.set.success",
+        vec![
+            json!({"text": format!("{} {} {}", pos[0], pos[1], pos[2])}),
+            shown,
+        ],
+    ))
+}
+
 fn item_name(ctx: &Context<'_>, id: i32) -> Value {
     let name = ctx.plan.item_name_of(id);
     let path = name.strip_prefix("minecraft:").unwrap_or(name);
@@ -211,7 +305,7 @@ fn failed(key: &str, with: Vec<Value>) -> Outcome {
 
 pub(super) fn specs() -> Vec<super::dispatch::Spec> {
     use super::dispatch::Spec;
-    use super::registry::{GAMEMASTERS, ent, int, item_stack};
+    use super::registry::{GAMEMASTERS, block_pos, ent, int, item_stack};
     vec![
         Spec::group(
             "item",
@@ -220,7 +314,33 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
                 "replace",
                 GAMEMASTERS,
                 vec![
-                    Spec::group("block", GAMEMASTERS, Vec::new()),
+                    Spec::group(
+                        "block",
+                        GAMEMASTERS,
+                        vec![Spec::arg(
+                            "target",
+                            GAMEMASTERS,
+                            block_pos(),
+                            vec![Spec::arg(
+                                "slots",
+                                GAMEMASTERS,
+                                chunkwake_protocol::text::Parser::Raw("minecraft:slot_source"),
+                                vec![Spec::group(
+                                    "with",
+                                    GAMEMASTERS,
+                                    vec![
+                                        Spec::arg_leaf("item", GAMEMASTERS, item_stack(), item)
+                                            .with_children(vec![Spec::arg_leaf(
+                                                "count",
+                                                GAMEMASTERS,
+                                                int(1, 99),
+                                                item,
+                                            )]),
+                                    ],
+                                )],
+                            )],
+                        )],
+                    ),
                     Spec::group(
                         "entity",
                         GAMEMASTERS,

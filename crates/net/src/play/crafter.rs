@@ -147,6 +147,15 @@ impl PlayPlan {
         let Some(mut me) = self.cont_get(pos) else {
             return;
         };
+        // `CrafterBlock.dispenseFrom`: id рецепта нужен триггеру
+        // `crafter_recipe_crafted`.
+        let recipe = {
+            let ids: Vec<Option<i32>> = me.slots[..9].iter().map(|s| s.map(|s| s.item)).collect();
+            self.survival
+                .recipes
+                .find_recipe(&ids, 3)
+                .map(|(r, _)| r.id().to_owned())
+        };
         let Some(result) = self.crafter_result(&me.slots) else {
             self.hub.send(
                 None,
@@ -171,7 +180,7 @@ impl PlayPlan {
             .prop(s, "orientation")
             .and_then(crafter_front)
             .unwrap_or(2);
-        self.crafter_dispense(pos, f, result);
+        self.crafter_dispense(pos, f, result, recipe.as_deref());
         let rests: Vec<Stack> = me
             .slots
             .iter()
@@ -179,7 +188,7 @@ impl PlayPlan {
             .filter_map(|x| self.craft_remainder(x.item))
             .collect();
         for r in rests {
-            self.crafter_dispense(pos, f, r);
+            self.crafter_dispense(pos, f, r, recipe.as_deref());
         }
         for slot in me.slots.iter_mut() {
             if let Some(x) = slot {
@@ -194,7 +203,7 @@ impl PlayPlan {
 
     /// `CrafterBlock.dispenseItem`: в контейнер впереди (в крафтер — по
     /// одному), остаток — предметом со скоростью 6, звук и дым.
-    fn crafter_dispense(&self, pos: [i32; 3], f: usize, stack: Stack) {
+    fn crafter_dispense(&self, pos: [i32; 3], f: usize, stack: Stack, recipe: Option<&str>) {
         use crate::hoppers as hp;
         let mut left = stack;
         if let Some(mut t) = self.cont_get(crate::redstone::step(pos, f)) {
@@ -217,6 +226,11 @@ impl PlayPlan {
         let d = crate::placement::step(f);
         let (at, vel) = hp::dispense_motion(pos, d, rand::random());
         self.drop_item(at, vel, left, std::time::Duration::ZERO);
+        // `CrafterBlock.dispenseItem`: только когда предмет выброшен (не влез
+        // в контейнер), игроки в кубе 17×17×17 получают триггер.
+        if let Some(recipe) = recipe {
+            self.crafter_recipe_players(pos, recipe);
+        }
         self.hub.send(
             None,
             play::level_event(self.ids.level_event, EVENT_CRAFT, pos, 0, false),
@@ -227,6 +241,32 @@ impl PlayPlan {
         );
     }
 
+    /// Игроки в кубе 17×17×17 получают `crafter_recipe_crafted`.
+    fn crafter_recipe_players(&self, pos: [i32; 3], recipe: &str) {
+        let center = [
+            f64::from(pos[0]) + 0.5,
+            f64::from(pos[1]) + 0.5,
+            f64::from(pos[2]) + 0.5,
+        ];
+        let dim = self.active_dim();
+        let players: Vec<Uuid> = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|p| p.collects && p.dimension == dim)
+            .filter(|p| {
+                (p.pos[0] - center[0]).abs() <= 8.5
+                    && (p.pos[1] - center[1]).abs() <= 8.5
+                    && (p.pos[2] - center[2]).abs() <= 8.5
+            })
+            .map(|p| p.entry.uuid)
+            .collect();
+        for uuid in players {
+            self.advancement_crafter_recipe_crafted(uuid, recipe);
+        }
+    }
     /// `CrafterBlockEntity.serverTick`: по истечении `crafting` гаснет.
     pub(super) fn tick_crafters(&self) {
         let done: Vec<[i32; 3]> = {
