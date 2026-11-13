@@ -552,18 +552,27 @@ impl PlayPlan {
         }
         let now = self.game_time.load(Ordering::Relaxed);
         let border = self.border_at(now);
-        let (id, pos, corrected) = {
+        let (id, pos, corrected, moved) = {
             let mut boats = self.sim().boats.lock().unwrap();
             let (&id, b) = boats
                 .iter_mut()
                 .find(|(_, b)| b.riders.first().is_some_and(|r| r.0 == uuid))?;
             let clipped = border.clip_movement(now, b.pos, pos, WIDTH);
             let corrected = clipped != pos;
+            let old = b.pos;
             let pos = clipped;
+            let dx = pos[0] - old[0];
+            let dy = pos[1] - old[1];
+            let dz = pos[2] - old[2];
+            let moved = (dx * dx + dy * dy + dz * dz).sqrt();
             b.pos = pos;
             b.yaw = yaw;
-            (id, pos, corrected)
+            (id, pos, corrected, moved)
         };
+        let cm = (moved * 100.0).round() as i32;
+        if cm > 0 {
+            self.award_stat(uuid, "minecraft:custom", "minecraft:boat_one_cm", cm);
+        }
         self.hub.send_about_except(
             if corrected { None } else { Some(uuid) },
             id,

@@ -57,10 +57,8 @@ impl PlayPlan {
         self.send_to(uuid, packet);
     }
 
-    /// `ServerPlayer.checkMovementStatistics`: шаг, спринт и прыжок.
-    ///
-    /// `to` — новая позиция из пакета движения; статистика считается по
-    /// разнице с предыдущей позицией, как в ванили.
+    /// `ServerPlayer.checkMovementStatistics`: шаг, спринт, вода, подъём,
+    /// полёт и прыжок. `to` — позиция из пакета движения.
     pub(crate) fn movement_stats(
         &self,
         uuid: Uuid,
@@ -68,6 +66,7 @@ impl PlayPlan {
         on_ground: bool,
         sprint: bool,
         sneak: bool,
+        glide: bool,
     ) {
         let Some(to) = to else {
             return;
@@ -91,21 +90,83 @@ impl PlayPlan {
         if old_ground && !on_ground && dy > 0.0 {
             self.award_stat(uuid, "minecraft:custom", "minecraft:jump", 1);
         }
-        if !on_ground {
-            return;
-        }
+        let feet = [
+            to[0].floor() as i32,
+            to[1].floor() as i32,
+            to[2].floor() as i32,
+        ];
+        let in_water = self.standing_in_water(to);
+        let eye_water = self.standing_in_water([to[0], to[1] + 1.62, to[2]]);
+        let climbable = self.block(feet).is_some_and(|s| {
+            matches!(
+                self.state_name(s),
+                "minecraft:ladder"
+                    | "minecraft:vine"
+                    | "minecraft:scaffolding"
+                    | "minecraft:twisting_vines"
+                    | "minecraft:twisting_vines_plant"
+                    | "minecraft:weeping_vines"
+                    | "minecraft:weeping_vines_plant"
+                    | "minecraft:cave_vines"
+                    | "minecraft:cave_vines_plant"
+            )
+        });
         let horizontal = ((dx * dx + dz * dz).sqrt() * 100.0).round() as i32;
-        if horizontal <= 0 {
+        let full = ((dx * dx + dy * dy + dz * dz).sqrt() * 100.0).round() as i32;
+        if in_water {
+            if sprint {
+                if full > 0 {
+                    self.award_stat(uuid, "minecraft:custom", "minecraft:swim_one_cm", full);
+                }
+            } else if eye_water {
+                if full > 0 {
+                    self.award_stat(
+                        uuid,
+                        "minecraft:custom",
+                        "minecraft:walk_under_water_one_cm",
+                        full,
+                    );
+                }
+            } else if horizontal > 0 {
+                self.award_stat(
+                    uuid,
+                    "minecraft:custom",
+                    "minecraft:walk_on_water_one_cm",
+                    horizontal,
+                );
+            }
             return;
         }
-        let key = if sprint {
-            "minecraft:sprint_one_cm"
-        } else if sneak {
-            "minecraft:crouch_one_cm"
-        } else {
-            "minecraft:walk_one_cm"
-        };
-        self.award_stat(uuid, "minecraft:custom", key, horizontal);
+        if climbable {
+            if dy > 0.0 {
+                let climb = (dy * 100.0).round() as i32;
+                if climb > 0 {
+                    self.award_stat(uuid, "minecraft:custom", "minecraft:climb_one_cm", climb);
+                }
+            }
+            return;
+        }
+        if on_ground {
+            if horizontal <= 0 {
+                return;
+            }
+            let key = if sprint {
+                "minecraft:sprint_one_cm"
+            } else if sneak {
+                "minecraft:crouch_one_cm"
+            } else {
+                "minecraft:walk_one_cm"
+            };
+            self.award_stat(uuid, "minecraft:custom", key, horizontal);
+            return;
+        }
+        if glide {
+            if full > 0 {
+                self.award_stat(uuid, "minecraft:custom", "minecraft:aviate_one_cm", full);
+            }
+        } else if horizontal > 25 {
+            self.award_stat(uuid, "minecraft:custom", "minecraft:fly_one_cm", horizontal);
+        }
     }
 
     /// Загруженные счётчики игрока после входа.

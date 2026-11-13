@@ -304,9 +304,45 @@ impl PlayPlan {
     }
 
     /// `/summon minecraft:minecart`: вагонетка без рельса (`SummonCommand`).
-    pub(super) fn summon_minecart(&self, name: &str, pos: [f64; 3]) -> Option<i32> {
+    pub(super) fn summon_minecart(
+        &self,
+        name: &str,
+        pos: [f64; 3],
+        nbt: Option<&Compound>,
+    ) -> Option<i32> {
         let variant = Variant::of(name)?;
-        Some(self.add_minecart(MinecartEntry::new(Cart::new(pos, 0.0), variant)))
+        let mut e = MinecartEntry::new(Cart::new(pos, 0.0), variant);
+        if let Some(c) = nbt {
+            let numbers = |key: &str| -> Vec<f64> {
+                c.get(key)
+                    .and_then(Tag::as_list)
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|t| match t {
+                                Tag::Double(v) => Some(*v),
+                                Tag::Float(v) => Some(*v as f64),
+                                _ => None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            if let [x, y, z] = numbers("Motion")[..]
+                && [x, y, z].iter().all(|v| v.is_finite())
+            {
+                e.cart.vel = [x, y, z];
+            }
+            if let Some(yaw) = numbers("Rotation").first() {
+                e.cart.yaw = *yaw as f32;
+            }
+            if let Some(Tag::IntArray(u)) = c.get("UUID")
+                && u.len() == 4
+            {
+                e.uuid =
+                    Uuid::from_u128(u.iter().fold(0u128, |acc, &w| acc << 32 | w as u32 as u128));
+            }
+        }
+        Some(self.add_minecart(e))
     }
 
     fn add_minecart(&self, e: MinecartEntry) -> i32 {
@@ -847,6 +883,15 @@ impl PlayPlan {
                 let old_pos = e.cart.pos;
                 let y0 = old_pos[1];
                 let step = e.cart.tick(&track, intent);
+                if let Some((rider, _)) = e.rider {
+                    let dx = e.cart.pos[0] - old_pos[0];
+                    let dy = e.cart.pos[1] - old_pos[1];
+                    let dz = e.cart.pos[2] - old_pos[2];
+                    let cm = ((dx * dx + dy * dy + dz * dz).sqrt() * 100.0).round() as i32;
+                    if cm > 0 {
+                        self.award_stat(rider, "minecraft:custom", "minecraft:minecart_one_cm", cm);
+                    }
+                }
                 let clipped =
                     border.clip_movement(now, old_pos, e.cart.pos, crate::minecart::WIDTH);
                 for axis in [0, 2] {

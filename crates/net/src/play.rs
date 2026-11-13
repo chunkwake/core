@@ -12601,6 +12601,19 @@ impl PlayPlan {
                         let feet = m.pos.or_else(|| self.player_at(uuid).map(|(pos, _, _)| pos));
                         let in_water = feet.is_some_and(|p| self.standing_in_water(p));
                         let landing = state.vitals.landing_fall(m.pos, m.on_ground);
+                        if let Some(fall) = landing
+                            && fall >= 2.0
+                            && !in_water
+                            && !gliding
+                            && login.spawn.game_mode != 1
+                        {
+                            self.award_stat(
+                                uuid,
+                                "minecraft:custom",
+                                "minecraft:fall_one_cm",
+                                (fall * 100.0).round() as i32,
+                            );
+                        }
                         if let Some(d) = state.vitals.on_move(m.pos, m.on_ground, survival, slow) {
                             let scale = if in_water {
                                 0.0
@@ -12662,6 +12675,7 @@ impl PlayPlan {
                             m.on_ground,
                             state.vitals.sprinting,
                             sneaking,
+                            gliding,
                         );
                         self.moved(uuid, m);
                         if gliding && landed {

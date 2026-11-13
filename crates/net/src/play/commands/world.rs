@@ -455,7 +455,7 @@ pub(super) fn summon(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     } else {
         ctx.plan
             .summon_boat(&name, coords)
-            .or_else(|| ctx.plan.summon_minecart(&name, coords))
+            .or_else(|| ctx.plan.summon_minecart(&name, coords, nbt.as_ref()))
     };
     if let Some(id) = spawned {
         return Outcome::Feedback(translate(
