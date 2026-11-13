@@ -6579,7 +6579,9 @@ impl PlayPlan {
     }
 
     /// Игрок бросает предмет вперёд (`Player.drop`).
-    fn throw(&self, feet: [f64; 3], yaw: f32, pitch: f32, stack: Stack) {
+    fn throw(&self, uuid: Uuid, feet: [f64; 3], yaw: f32, pitch: f32, stack: Stack) {
+        let name = self.item_name(stack.item).to_owned();
+        self.award_stat(uuid, "minecraft:dropped", &name, stack.count);
         self.drop_item(
             items::throw_origin(feet),
             items::throw_velocity(yaw, pitch, rand::random()),
@@ -6738,6 +6740,7 @@ impl PlayPlan {
 
     fn pickup(
         &self,
+        uuid: Uuid,
         collector: i32,
         feet: [f64; 3],
         inv: &mut Inventory,
@@ -6788,6 +6791,8 @@ impl PlayPlan {
                 id,
                 inv::take_item_entity(self.ids.take_item_entity, id, collector, got),
             );
+            let name = self.item_name(d.stack.item).to_owned();
+            self.award_stat(uuid, "minecraft:picked_up", &name, got);
             if left == 0 {
                 taken.push(id);
             } else {
@@ -10622,6 +10627,7 @@ impl PlayPlan {
             let broke = self.wear_one(&mut s);
             inv.slots[slot] = (!broke).then_some(s);
             if broke {
+                self.award_stat(uuid, "minecraft:broken", self.item_name(s.item), 1);
                 self.break_in_hand(entity, slot == survival::OFFHAND);
             }
         }
@@ -10744,6 +10750,7 @@ impl PlayPlan {
         next.extra = charged_extra(stack.extra, Vec::new());
         let creative = mode == 1;
         if !creative && self.wear_one(&mut next) {
+            self.award_stat(uuid, "minecraft:broken", self.item_name(next.item), 1);
             inv.slots[slot] = None;
             self.break_in_hand(entity, slot == survival::OFFHAND);
         } else {
@@ -11971,6 +11978,7 @@ impl PlayPlan {
                 _ = food_ticker.tick() => {
                     game_ticks += 1;
                     state.vitals.tick_attack(state.inv.held().map(|s| s.item));
+                    self.award_stat(uuid, "minecraft:custom", "minecraft:play_time", 1);
                     // Слежение до отправки чанков, как в ванили (тик мира, затем
                     // `send chunks`): сущность в только что пришедшем чанке
                     // появится тиком позже.
@@ -12105,7 +12113,7 @@ impl PlayPlan {
                                 }
                             }
                         }
-                        let changed = self.pickup(me.entity_id, feet, &mut state.inv, &vetoed);
+                        let changed = self.pickup(uuid, me.entity_id, feet, &mut state.inv, &vetoed);
                         if !changed.is_empty() {
                             self.send_slots(conn, &mut state.inv, &changed).await?;
                         }
@@ -12247,7 +12255,15 @@ impl PlayPlan {
                             && let Some(mut chest) = state.inv.slots[survival::CHEST]
                         {
                             let before = chest.damage;
-                            self.wear_one(&mut chest);
+                            let broke = self.wear_one(&mut chest);
+                            if broke {
+                                self.award_stat(
+                                    uuid,
+                                    "minecraft:broken",
+                                    self.item_name(chest.item),
+                                    1,
+                                );
+                            }
                             if chest.damage != before {
                                 state.inv.slots[survival::CHEST] = Some(chest);
                                 self.send_slots(conn, &mut state.inv, &[survival::CHEST]).await?;
@@ -12608,7 +12624,7 @@ impl PlayPlan {
                             // Слот < 0 — выброс из креатив-меню (`handleSetCreativeModeSlot`).
                             if slot < 0 {
                                 if let (Some(s), Some((feet, yaw, pitch))) = (stack, self.player_at(uuid)) {
-                                    self.throw(feet, yaw, pitch, s);
+                                    self.throw(uuid, feet, yaw, pitch, s);
                                 }
                             } else {
                                 state.inv.set(slot, stack);
@@ -12735,11 +12751,11 @@ impl PlayPlan {
                                     let name = self.item_name(s.item);
                                     if self.cancelled(Event::Drop, uuid, || format!("{name} {}", s.count)).await {
                                         if let Some(left) = state.inv.add_stack(s, self.max_stack(s.item)) {
-                                            self.throw(feet, yaw, pitch, left);
+                                            self.throw(uuid, feet, yaw, pitch, left);
                                         }
                                         kept = true;
                                     } else {
-                                        self.throw(feet, yaw, pitch, s);
+                                        self.throw(uuid, feet, yaw, pitch, s);
                                     }
                                 }
                             }
@@ -13192,7 +13208,7 @@ impl PlayPlan {
                             if button == 3 && !matches!(login.spawn.game_mode, 2 | 3) {
                                 if let Some(book) = self.lectern_take_book(w.pos) {
                                     if let Some(left) = state.inv.add_stack(book, self.max_stack(book.item))
-                                        && let Some((feet, yaw, pitch)) = self.player_at(uuid) { self.throw(feet, yaw, pitch, left); }
+                                        && let Some((feet, yaw, pitch)) = self.player_at(uuid) { self.throw(uuid, feet, yaw, pitch, left); }
                                     w.slots[0] = None;
                                     self.send_inventory(conn, &mut state.inv).await?;
                                     self.send_window(conn, &mut state.inv, Some(w), wid).await?;
@@ -13800,7 +13816,7 @@ impl PlayPlan {
                                     let name = self.item_name(s.item);
                                     if !self.cancelled(Event::Drop, uuid, || format!("{name} {n}")).await {
                                         state.inv.slots[held] = (s.count > n).then_some(Stack { count: s.count - n, ..s });
-                                        self.throw(feet, yaw, pitch, Stack { count: n, ..s });
+                                        self.throw(uuid, feet, yaw, pitch, Stack { count: n, ..s });
                                         // `ServerPlayer.drop`: выброс сбрасывает заряд удара.
                                         state.vitals.reset_attack();
                                         eating = None;
@@ -14017,6 +14033,7 @@ impl PlayPlan {
                                     if login.spawn.game_mode != 1 {
                                         if item == "minecraft:fire_charge" { state.inv.consume_at(slot); }
                                         else if self.wear_one(&mut held) {
+                                            self.award_stat(uuid, "minecraft:broken", self.item_name(held.item), 1);
                                             state.inv.slots[slot] = None;
                                             self.break_in_hand(me.entity_id, u.hand != 0);
                                         } else { state.inv.slots[slot] = Some(held); }
@@ -14042,6 +14059,7 @@ impl PlayPlan {
                                 if login.spawn.game_mode != 1 {
                                     if self.item_name(held.item) == "minecraft:fire_charge" { state.inv.consume_at(slot); }
                                     else if self.wear_one(&mut held) {
+                                        self.award_stat(uuid, "minecraft:broken", self.item_name(held.item), 1);
                                         state.inv.slots[slot] = None;
                                         self.break_in_hand(me.entity_id, u.hand != 0);
                                     } else { state.inv.slots[slot] = Some(held); }
@@ -14123,6 +14141,7 @@ impl PlayPlan {
                                 "minecraft:shears" if self.shear_hive(u.pos, feet) => {
                                     if !creative {
                                         if self.wear_one(&mut held) {
+                                            self.award_stat(uuid, "minecraft:broken", self.item_name(held.item), 1);
                                             state.inv.slots[slot] = None;
                                             self.break_in_hand(me.entity_id, u.hand != 0);
                                         } else {
@@ -14465,6 +14484,7 @@ impl PlayPlan {
                                     let mut broke = false;
                                     for _ in 0..damage {
                                         if self.wear_one(&mut held) {
+                                            self.award_stat(uuid, "minecraft:broken", self.item_name(held.item), 1);
                                             broke = true;
                                             break;
                                         }
@@ -15110,6 +15130,7 @@ impl PlayPlan {
         if !self.break_block(conn, uuid, pos, drops).await? {
             return Ok(());
         }
+        self.award_stat(uuid, "minecraft:mined", self.state_name(block), 1);
         state.vitals.exhaust(survival::EXHAUSTION_BREAK);
         // Опыт за руду (`DropExperienceBlock.spawnAfterBreak`) — сразу игроку, без сфер.
         let silk = held.map_or(0, |s| {
@@ -15158,6 +15179,9 @@ impl PlayPlan {
                 .count() as i32;
             if max > 0 && wear > 0 {
                 s.damage += wear;
+                if s.damage >= max {
+                    self.award_stat(uuid, "minecraft:broken", self.item_name(s.item), 1);
+                }
                 state.inv.slots[slot] = (s.damage < max).then_some(s);
                 let entity = self
                     .hub
@@ -15876,15 +15900,19 @@ impl PlayPlan {
         let inv_before = inv.slots;
         let carried_before = inv.carried;
         let view_before = view.clone();
-        let mut thrown = click::Menu {
-            kind,
-            slots: &mut view,
-            carried: &mut inv.carried,
-            drag: &mut inv.drag,
-            rules: &rules,
-            craft: &mut craft,
-        }
-        .click(c.slot, c.button, c.mode);
+        let (mut thrown, mut crafted_taken) = {
+            let mut menu = click::Menu {
+                kind,
+                slots: &mut view,
+                carried: &mut inv.carried,
+                drag: &mut inv.drag,
+                rules: &rules,
+                craft: &mut craft,
+                taken: Vec::new(),
+            };
+            let thrown = menu.click(c.slot, c.button, c.mode);
+            (thrown, menu.taken)
+        };
         if let Some((villager, idx)) = merchant_took {
             self.notify_trade(villager, idx);
             self.award_stat(me, "minecraft:custom", "minecraft:traded_with_villager", 1);
@@ -15902,6 +15930,13 @@ impl PlayPlan {
             inv.slots = inv_before;
             inv.carried = carried_before;
             thrown.clear();
+            crafted_taken.clear();
+        }
+        if matches!(kind, Kind::Player | Kind::Crafting | Kind::Furnace) {
+            for s in &crafted_taken {
+                let name = self.item_name(s.item).to_owned();
+                self.award_stat(me, "minecraft:crafted", &name, s.count);
+            }
         }
         if carto_took {
             // `MapItem.onCraftedBy`: увеличенная или запертая копия — новая карта.
@@ -16490,7 +16525,7 @@ impl PlayPlan {
             if let Some(left) = inv.add_stack(s, self.max_stack(s.item))
                 && let Some((feet, yaw, pitch)) = self.player_at(uuid)
             {
-                self.throw(feet, yaw, pitch, left);
+                self.throw(uuid, feet, yaw, pitch, left);
             }
         }
     }
@@ -22894,6 +22929,12 @@ impl PlayPlan {
             let mut broken = false;
             for _ in 0..wear {
                 if self.wear_one(&mut held) {
+                    self.award_stat(
+                        me.entry.uuid,
+                        "minecraft:broken",
+                        self.item_name(held.item),
+                        1,
+                    );
                     broken = true;
                     break;
                 }
@@ -23108,6 +23149,15 @@ impl PlayPlan {
     ) -> Result<(), NetError> {
         self.wake_player(me.entry.uuid);
         // `markClientUnloadedAfterDeath`: неуязвим до респауна.
+        match cause {
+            Cause::Mob(kind) | Cause::MobArrow(kind) | Cause::MobExplosion(kind) => {
+                self.award_stat(me.entry.uuid, "minecraft:killed_by", kind, 1);
+            }
+            Cause::Player(_) => {
+                self.award_stat(me.entry.uuid, "minecraft:killed_by", "minecraft:player", 1);
+            }
+            _ => {}
+        }
         self.set_client_loading(me.entry.uuid, Some(i64::MAX));
         self.leave_boat(me.entry.uuid, 0.0);
         self.leave_minecart(me.entry.uuid);

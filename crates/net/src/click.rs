@@ -177,6 +177,8 @@ pub struct Menu<'a> {
     pub drag: &'a mut Drag,
     pub rules: &'a Rules<'a>,
     pub craft: &'a mut dyn FnMut(&mut [Slot]),
+    /// Что забрали из слота результата (для `crafted`).
+    pub taken: Vec<Stack>,
 }
 
 fn same(a: &Stack, b: &Stack) -> bool {
@@ -340,6 +342,7 @@ impl Menu<'_> {
         let i = self.kind.craft_output()?;
         let out = self.slots.get_mut(i)?.take()?;
         (self.craft)(self.slots);
+        self.taken.push(out);
         Some(out)
     }
 
@@ -856,6 +859,7 @@ mod tests {
             drag: &mut drag,
             rules: &rules,
             craft: &mut craft,
+            taken: Vec::new(),
         };
         assert!(menu.click(0, 0, PICKUP).is_empty());
         assert_eq!(menu.slots[0], Some(Stack::new(7, 1)));
@@ -904,6 +908,7 @@ mod tests {
             drag: &mut drag,
             rules: &rules,
             craft: &mut craft,
+            taken: Vec::new(),
         };
         menu.click(3, 0, QUICK_MOVE);
         assert_eq!(menu.slots[0], None);
@@ -957,6 +962,7 @@ mod tests {
             drag: &mut drag,
             rules: &rules,
             craft: &mut craft,
+            taken: Vec::new(),
         };
         menu.click(3, 0, QUICK_MOVE);
         assert!(menu.slots[..4].iter().all(Option::is_none));
@@ -995,6 +1001,7 @@ mod tests {
             drag: &mut drag,
             rules: &rules,
             craft: &mut craft,
+            taken: Vec::new(),
         };
         menu.click(2, 0, PICKUP);
         menu.click(2, 0, QUICK_MOVE);
@@ -1038,6 +1045,7 @@ mod tests {
             drag: &mut drag,
             rules: &rules,
             craft: &mut craft,
+            taken: Vec::new(),
         };
         menu.click(2, 0, QUICK_MOVE);
         assert_eq!(menu.slots[0], Some(Stack::new(1, 64)));
@@ -1093,6 +1101,7 @@ mod tests {
             drag: &mut drag,
             rules: &rules,
             craft: &mut craft,
+            taken: Vec::new(),
         };
         clicks
             .iter()
@@ -1139,6 +1148,7 @@ mod tests {
             drag: &mut drag,
             rules: &rules,
             craft: &mut craft,
+            taken: Vec::new(),
         };
         menu.click(1, 0, PICKUP);
         assert_eq!(
@@ -1328,6 +1338,7 @@ mod tests {
             drag: &mut drag,
             rules: &rules,
             craft: &mut craft,
+            taken: Vec::new(),
         };
         for slot in 5..=7 {
             menu.click(slot, 0, QUICK_MOVE);
@@ -1379,6 +1390,7 @@ mod tests {
             drag: &mut drag,
             rules: &rules,
             craft: &mut craft,
+            taken: Vec::new(),
         };
         menu.click(3, 0, QUICK_MOVE);
         menu.click(4, 0, QUICK_MOVE);

@@ -1083,6 +1083,9 @@ impl PlayPlan {
     fn mob_loot(&self, id: i32, e: &MobEntry) {
         let m = &e.mob;
         // Детёныши животных ничего не роняют; детёныш зомби — как взрослый.
+        if let Some((uuid, _)) = e.killer {
+            self.award_stat(uuid, "minecraft:killed", m.species.name(), 1);
+        }
         if m.is_baby() && m.species.is_animal() {
             return;
         }
@@ -2903,7 +2906,7 @@ impl PlayPlan {
                         && let Some(left) = inv.add_stack(milk, 1)
                         && let Some((feet, yaw, pitch)) = self.player_at(uuid)
                     {
-                        self.throw(feet, yaw, pitch, left);
+                        self.throw(uuid, feet, yaw, pitch, left);
                     }
                     slots = (0..inv.slots.len()).collect();
                 } else {

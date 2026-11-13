@@ -196,7 +196,7 @@ impl PlayPlan {
         let max = self.max_stack(map.item);
         let (mut changed, left) = inv.add_components(map.item, 1, max, map.extra, 0);
         if left > 0 {
-            self.throw(feet, yaw, pitch, map);
+            self.throw(uuid, feet, yaw, pitch, map);
         }
         if !creative {
             changed.push(slot);

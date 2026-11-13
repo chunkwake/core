@@ -16,6 +16,7 @@ impl PlayPlan {
         let value = match kind {
             "minecraft:custom" => *self.survival.custom_stats.get(value)?,
             "minecraft:killed" | "minecraft:killed_by" => *self.survival.entity_types.get(value)?,
+            "minecraft:mined" => *self.survival.block_types.get(value)?,
             _ => self.item_id(value)?,
         };
         Some((stat, value))
