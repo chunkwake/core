@@ -51,8 +51,10 @@ pub struct AdvancementCriterion {
     pub ingredients: Vec<Vec<String>>,
     /// `conditions.player.predicate.minecraft:location.biomes` (`location`).
     pub biomes: Vec<String>,
+    /// `conditions.player.predicate.minecraft:location.structures`.
+    pub structures: Vec<String>,
     /// Предикат `location` содержит то, что мы не умеем проверять
-    /// (`structures`, `position`, `equipment`, `stepping_on`, ...).
+    /// (`position`, `equipment`, `stepping_on`, ...).
     pub unsupported_location: bool,
     /// `conditions.effects` (`effects_changed`): имя и требуемый уровень.
     pub effects_req: Vec<(String, Option<i32>)>,
@@ -366,13 +368,18 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 .and_then(|c| c.get("player"))
                 .and_then(|p| p.get("predicate"));
             let mut biomes = Vec::new();
+            let mut structures = Vec::new();
             let mut unsupported_location = false;
             if let Some(pred) = player_pred {
                 if let Some(loc) = pred.get("minecraft:location") {
                     biomes = loc.get("biomes").map(string_or_list).unwrap_or_default();
+                    structures = loc
+                        .get("structures")
+                        .map(string_or_list)
+                        .unwrap_or_default();
                     if loc
                         .as_object()
-                        .is_some_and(|o| o.keys().any(|k| k != "biomes"))
+                        .is_some_and(|o| o.keys().any(|k| k != "biomes" && k != "structures"))
                     {
                         unsupported_location = true;
                     }
@@ -460,6 +467,7 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 partner_entities,
                 ingredients,
                 biomes,
+                structures,
                 unsupported_location,
                 effects_req,
                 source_entities,
@@ -716,14 +724,26 @@ impl PlayPlan {
         });
     }
 
-    /// `PlayerTrigger` для `minecraft:location`: биом точки игрока.
-    pub(crate) fn advancement_location(&self, uuid: Uuid, biome: &str) {
+    /// `PlayerTrigger` для `minecraft:location`: биом и структуры в точке игрока.
+    pub(crate) fn advancement_location(
+        &self,
+        uuid: Uuid,
+        biome: &str,
+        inside: &dyn Fn(&str) -> bool,
+    ) {
         self.advancement_run(uuid, "minecraft:location", |c| {
-            !c.unsupported_location
-                && (c.biomes.is_empty()
-                    || c.biomes
-                        .iter()
-                        .any(|w| w.strip_prefix('#').is_none() && short(w) == short(biome)))
+            if c.unsupported_location {
+                return false;
+            }
+            let biome_ok = c.biomes.is_empty()
+                || c.biomes
+                    .iter()
+                    .any(|w| w.strip_prefix('#').is_none() && short(w) == short(biome));
+            let structure_ok = c.structures.is_empty()
+                || c.structures
+                    .iter()
+                    .any(|w| w.strip_prefix('#').is_none() && inside(w));
+            biome_ok && structure_ok
         });
     }
 

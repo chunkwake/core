@@ -454,6 +454,11 @@ pub(crate) struct Layout {
 }
 
 /// Два набора: деревни и аванпосты. Раскладка кэшируется на сид и чанк старта.
+/// Рамка куска структуры: имя, минимум и максимум по осям.
+type PieceBox = (String, [i32; 3], [i32; 3]);
+/// Кэш рамок кусков по чанку для `getStructureAt`.
+type AtCache = Mutex<HashMap<(i32, i32), Arc<Vec<PieceBox>>>>;
+
 pub(crate) struct Structures {
     sets: Vec<Set>,
     pools: HashMap<String, Pool>,
@@ -467,6 +472,8 @@ pub(crate) struct Structures {
     ruins: ocean_ruin::Loaded,
     empty: Arc<Elem>,
     cache: LayoutCache,
+    /// Рамки кусков по чанку для `getStructureAt` (`location.structures`).
+    at_cache: AtCache,
     /// Кольца крепости на сид мира. Финальный чанк заполняется по мере надобности.
     ring_cache: Mutex<HashMap<i64, Vec<RingSlot>>>,
     /// Тег `minecraft:village` → id структур из `tags/worldgen/structure`.
@@ -555,6 +562,7 @@ impl Structures {
             ruins: ocean_ruin::load(data_dir, palette)?,
             empty: Arc::new(Elem::Empty),
             cache: Mutex::new(HashMap::new()),
+            at_cache: Mutex::new(HashMap::new()),
             ring_cache: Mutex::new(HashMap::new()),
             tags: load_structure_tags(data_dir)?,
             failures,
@@ -615,6 +623,43 @@ impl Structures {
         beard
     }
 
+    /// `StructureManager.getStructureAt`: имена структур, в чью рамку куска
+    /// попадает точка (рамки строятся по тем же `Piece`, что и генерация).
+    pub(crate) fn at(
+        &self,
+        columns: &dyn Columns,
+        pos: [i32; 3],
+    ) -> std::collections::HashSet<String> {
+        let (cx, cz) = (pos[0] >> 4, pos[2] >> 4);
+        // Перебор ячеек `nearby` небесплатный, а триггер `location` зовётся
+        // каждый тик: рамки считаем один раз на чанк и потом только сверяем y.
+        let boxes = {
+            let cache = self.at_cache.lock().unwrap();
+            cache.get(&(cx, cz)).cloned()
+        };
+        let boxes = boxes.unwrap_or_else(|| {
+            let mut out = Vec::new();
+            for (si, _, _, layout) in self.nearby(cx, cz, REACH, columns) {
+                for kind in &self.sets[si].kinds {
+                    for p in &layout.pieces {
+                        out.push((kind.name.clone(), p.min, p.max));
+                    }
+                }
+            }
+            let boxes = Arc::new(out);
+            let mut cache = self.at_cache.lock().unwrap();
+            if cache.len() >= 4096 && !cache.contains_key(&(cx, cz)) {
+                cache.clear();
+            }
+            cache.insert((cx, cz), boxes.clone());
+            boxes
+        });
+        boxes
+            .iter()
+            .filter(|(_, min, max)| (0..3).all(|i| pos[i] >= min[i] && pos[i] <= max[i]))
+            .map(|(name, _, _)| name.clone())
+            .collect()
+    }
     /// Ближайший старт структуры или тега `#…` в 100 кольцах клетки `spacing`.
     ///
     /// Выбор вида и проверка биома — как у сборки, но дочерние куски jigsaw

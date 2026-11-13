@@ -447,6 +447,8 @@ pub type TerrainFn = Arc<dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync>;
 pub type TerrainTrimFn = Arc<dyn Fn() + Send + Sync>;
 /// `/locate`: ближайшая точка от блока.
 pub type LocateFn = Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync>;
+/// `StructureManager.getStructureAt`: имена структур в точке (радиус кусков).
+pub type StructuresAtFn = Arc<dyn Fn([i32; 3]) -> HashSet<String> + Send + Sync>;
 /// `EyeOfEnder.DATA_ITEM_STACK`: индекс после данных `Entity`.
 const EYE_ITEM_META: u8 = 8;
 
@@ -1867,6 +1869,8 @@ pub(crate) struct DimState {
     locate_biome: Option<LocateFn>,
     /// `/locate structure` в этом измерении.
     locate_structure: Option<LocateFn>,
+    /// Структуры, в которые попадает точка (для `location.structures`).
+    structures_at: Option<StructuresAtFn>,
     /// Плоский `the_void`: камень и булыжник платформы.
     void_platform: Option<(u32, u32)>,
     min_y: i32,
@@ -1917,6 +1921,7 @@ impl DimState {
             trim_idle: spec.trim_idle,
             locate_biome: spec.locate_biome,
             locate_structure: spec.locate_structure,
+            structures_at: spec.structures_at,
             void_platform: spec.void_platform,
             min_y: spec.min_y,
             edited: std::sync::RwLock::new(Columns::default()),
@@ -1948,6 +1953,7 @@ pub struct DimSpec {
     pub trim_idle: Option<TerrainTrimFn>,
     pub locate_biome: Option<LocateFn>,
     pub locate_structure: Option<LocateFn>,
+    pub structures_at: Option<StructuresAtFn>,
     pub void_platform: Option<(u32, u32)>,
     pub min_y: i32,
 }
@@ -2972,6 +2978,7 @@ impl PlayPlan {
                             trim_idle: spec.trim_idle.clone(),
                             locate_biome: spec.locate_biome.clone(),
                             locate_structure: spec.locate_structure.clone(),
+                            structures_at: spec.structures_at.clone(),
                             void_platform: spec.void_platform,
                             min_y: spec.min_y,
                         }),
@@ -15459,9 +15466,19 @@ impl PlayPlan {
                     pos[1].floor() as i32,
                     pos[2].floor() as i32,
                 ];
-                if let Some(biome) = self.biome_name_at(feet) {
-                    self.advancement_location(uuid, &biome);
-                }
+                let Some(biome) = self.biome_name_at(feet) else {
+                    return;
+                };
+                let names = std::cell::OnceCell::new();
+                let inside = |name: &str| {
+                    names
+                        .get_or_init(|| {
+                            self.structures_at_fn()
+                                .map_or_else(HashSet::new, |f| f(feet))
+                        })
+                        .contains(name)
+                };
+                self.advancement_location(uuid, &biome, &inside);
             });
         }
     }

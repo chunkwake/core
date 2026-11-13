@@ -486,6 +486,17 @@ impl Overworld {
         structures.nearest(&self.columns()?, origin, name)
     }
 
+    /// `StructureManager.getStructureAt`: структуры, в которые попадает точка.
+    pub fn structures_at(&self, pos: [i32; 3]) -> HashSet<String> {
+        let Some(structures) = self.features.as_ref().and_then(|f| f.structures.as_ref()) else {
+            return HashSet::new();
+        };
+        let Some(columns) = self.columns() else {
+            return HashSet::new();
+        };
+        structures.at(&columns, pos)
+    }
+
     fn columns(&self) -> Option<Cols<'_>> {
         let features = self.features.as_ref()?;
         Some(Cols {

@@ -120,6 +120,11 @@ impl PlayPlan {
         self.locate_structure_fn().and_then(|f| f(name, origin))
     }
 
+    /// `StructureManager.getStructureAt` из генератора мира.
+    pub(crate) fn structures_at_fn(&self) -> Option<&crate::play::StructuresAtFn> {
+        self.dim_state().structures_at.as_ref()
+    }
+
     /// Все цели мира для селекторов: игроки, мобы, выпавшие предметы, стрелы.
     pub(crate) fn command_targets(&self) -> Vec<Target> {
         // Точная ёмкость: иначе вектор растёт и копирует цели два-три раза.

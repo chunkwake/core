@@ -1822,6 +1822,46 @@ mod tests {
     }
 
     #[test]
+    fn stronghold_seed_12345_structures_at() {
+        let Some(data) = std::env::var_os("CHUNKWAKE_DATA").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let registries = chunkwake_data::registries::RegistryData::load(&data).unwrap();
+        let biome_ids: std::collections::HashMap<String, u32> = registries
+            .synchronized
+            .iter()
+            .find(|r| r.name == "worldgen/biome")
+            .map(|r| {
+                r.entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.clone(), i as u32))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let blocks = chunkwake_data::world::Blocks::load(&data).unwrap();
+        let states = blocks.states();
+        let mut noise = crate::Generator::load_with_version(&data, 12345, None).unwrap();
+        noise.bind_biomes(biome_ids.clone());
+        let state = |n: &str| blocks.default_state(n).ok().map(|s| s as u32);
+        let world = crate::pipeline::Overworld::new(std::sync::Arc::new(noise), &state, &biome_ids)
+            .unwrap()
+            .with_features(&data, &states, &state, &biome_ids)
+            .unwrap();
+        let pos = world
+            .locate_structure("minecraft:stronghold", [0, 64, 0])
+            .expect("крепость");
+        // `/locate` отдаёт только x/z: ищем высоту, на которой кусок крепости
+        // накрывает точку (`StructureManager.getStructureAt`).
+        let hit = (0..=100).find(|y| {
+            world
+                .structures_at([pos[0], *y, pos[2]])
+                .contains("minecraft:stronghold")
+        });
+        assert!(hit.is_some(), "в точке {pos:?} нет куска крепости");
+    }
+
+    #[test]
     fn mansion_seed_12345_locate() {
         let Some(data) = std::env::var_os("CHUNKWAKE_DATA").map(std::path::PathBuf::from) else {
             return;
