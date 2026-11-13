@@ -2218,7 +2218,14 @@ impl PlayPlan {
                 (health_before - e.mob.health).max(0.0),
             )
         };
+        // `hurt` вернул None — урон не прошёл, триггер не шлём.
         let died = result?;
+        self.advancement_player_hurt_entity(
+            uuid,
+            species.name(),
+            "minecraft:player",
+            "minecraft:player_attack",
+        );
         if dealt > 0.0 {
             self.award_stat(
                 uuid,

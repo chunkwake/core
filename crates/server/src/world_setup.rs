@@ -1075,6 +1075,7 @@ fn survival_data(
         item_tags: item_tags.clone(),
         block_tags: chunkwake_net::play::load_registry_tags(data_dir, "block"),
         damage_tags: chunkwake_net::play::load_registry_tags(data_dir, "damage_type"),
+        entity_type_tags: chunkwake_net::play::load_registry_tags(data_dir, "entity_type"),
         biome_names: registries
             .synchronized
             .iter()

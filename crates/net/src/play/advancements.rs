@@ -29,6 +29,16 @@ pub struct AdvancementCriterion {
     pub distance: Option<(f64, f64)>,
     /// `conditions.levels` (для `enchanted_item`).
     pub levels: Option<(i32, i32)>,
+    /// `conditions.signal_strength` (для `target_hit`).
+    pub signal_strength: Option<(i32, i32)>,
+    /// `conditions.projectile.predicate.minecraft:distance.horizontal`.
+    pub proj_distance: Option<(f64, f64)>,
+    /// `conditions.damage.type.direct_entity.minecraft:entity_type`.
+    pub direct_entities: Vec<String>,
+    /// `conditions.damage.type.tags` с `expected: true`.
+    pub damage_tags_req: Vec<String>,
+    /// `conditions.damage.blocked`.
+    pub blocked: Option<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -260,6 +270,41 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 .unwrap_or_default();
             let distance = cond.and_then(|c| c.get("distance")).and_then(bounds_f64);
             let levels = cond.and_then(|c| c.get("levels")).and_then(bounds_i32);
+            let signal_strength = cond
+                .and_then(|c| c.get("signal_strength"))
+                .and_then(bounds_i32);
+            let proj_distance = cond
+                .and_then(|c| c.get("projectile"))
+                .and_then(|p| p.get("predicate"))
+                .and_then(|p| p.get("minecraft:distance"))
+                .and_then(|d| d.get("horizontal"))
+                .and_then(bounds_f64);
+            let damage = cond.and_then(|c| c.get("damage"));
+            let direct_entities = damage
+                .and_then(|d| d.get("type"))
+                .and_then(|t| t.get("direct_entity"))
+                .and_then(|e| e.get("minecraft:entity_type"))
+                .map(string_or_list)
+                .unwrap_or_default();
+            let mut damage_tags_req = Vec::new();
+            if let Some(tags) = damage
+                .and_then(|d| d.get("type"))
+                .and_then(|t| t.get("tags"))
+                .and_then(|t| t.as_array())
+            {
+                for tag in tags {
+                    let expected = tag
+                        .get("expected")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(true);
+                    if expected && let Some(id) = tag.get("id").and_then(|s| s.as_str()) {
+                        damage_tags_req.push(id.trim_start_matches('#').to_owned());
+                    }
+                }
+            }
+            let blocked = damage
+                .and_then(|d| d.get("blocked"))
+                .and_then(|b| b.as_bool());
             criteria.push(AdvancementCriterion {
                 name: name.clone(),
                 trigger,
@@ -272,6 +317,11 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 potions,
                 distance,
                 levels,
+                signal_strength,
+                proj_distance,
+                direct_entities,
+                damage_tags_req,
+                blocked,
             });
         }
     }
@@ -478,6 +528,74 @@ impl PlayPlan {
                 && c.levels
                     .is_none_or(|(min, max)| levels >= min && levels <= max)
         });
+    }
+
+    /// `target_hit`: сила сигнала и горизонталь до точки попадания.
+    pub(crate) fn advancement_target_hit(&self, uuid: Uuid, signal: i32, horizontal: f64) {
+        self.advancement_run(uuid, "minecraft:target_hit", |c| {
+            c.signal_strength
+                .is_none_or(|(min, max)| signal >= min && signal <= max)
+                && c.proj_distance
+                    .is_none_or(|(min, max)| horizontal >= min && horizontal <= max)
+        });
+    }
+
+    /// `player_hurt_entity`: цель, прямой источник и тип урона.
+    pub(crate) fn advancement_player_hurt_entity(
+        &self,
+        uuid: Uuid,
+        victim: &str,
+        direct: &str,
+        damage_type: &str,
+    ) {
+        self.advancement_run(uuid, "minecraft:player_hurt_entity", |c| {
+            (c.entities.is_empty() || c.entities.iter().any(|w| self.entity_matches(w, victim)))
+                && self.damage_matches(c, direct, damage_type)
+        });
+    }
+
+    /// `entity_hurt_player`: игрок получил урон (и был ли он заблокирован).
+    pub(crate) fn advancement_entity_hurt_player(
+        &self,
+        uuid: Uuid,
+        direct: &str,
+        damage_type: &str,
+        blocked: bool,
+    ) {
+        self.advancement_run(uuid, "minecraft:entity_hurt_player", |c| {
+            c.blocked.is_none_or(|b| b == blocked) && self.damage_matches(c, direct, damage_type)
+        });
+    }
+
+    /// `DamagePredicate`: прямой источник и теги типа урона.
+    fn damage_matches(&self, c: &AdvancementCriterion, direct: &str, damage_type: &str) -> bool {
+        (c.direct_entities.is_empty()
+            || c.direct_entities
+                .iter()
+                .any(|w| self.entity_matches(w, direct)))
+            && c.damage_tags_req.iter().all(|tag| {
+                self.survival
+                    .damage_tags
+                    .get(tag)
+                    .is_some_and(|set| set.contains(damage_type))
+            })
+    }
+
+    /// Тип сущности или `#тег` (`entity_type_tags`).
+    fn entity_matches(&self, want: &str, name: &str) -> bool {
+        if let Some(tag) = want.strip_prefix('#') {
+            let key = if tag.contains(':') {
+                tag.to_owned()
+            } else {
+                format!("minecraft:{tag}")
+            };
+            return self
+                .survival
+                .entity_type_tags
+                .get(&key)
+                .is_some_and(|set| set.contains(name));
+        }
+        short(want) == short(name)
     }
 
     fn advancement_run(

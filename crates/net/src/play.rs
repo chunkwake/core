@@ -2212,6 +2212,25 @@ fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
 
 /// Ось, вдоль которой летел снаряд: 0 — X, 1 — Y, 2 — Z. По ней считается
 /// сторона попадания в мишень.
+/// Попадание снаряда в мишень, отложенное до выхода из `with_world`.
+struct TargetHit {
+    pos: [f64; 3],
+    vel: [f64; 3],
+    owner: Option<Uuid>,
+    direct: String,
+}
+
+/// Прямой источник урона (`DamageSource.getDirectEntity`) по нашему `Cause`.
+fn damage_direct(cause: Cause) -> &'static str {
+    match cause {
+        Cause::Player(_) => "minecraft:player",
+        Cause::Mob(kind) | Cause::MobExplosion(kind) => kind,
+        // `#minecraft:arrows` (стрелы и трезубец).
+        Cause::MobArrow(_) | Cause::Arrow => "minecraft:arrow",
+        other => other.damage_type(),
+    }
+}
+
 fn dominant_axis(vel: [f64; 3]) -> usize {
     let (x, y, z) = (vel[0].abs(), vel[1].abs(), vel[2].abs());
     if y > x && y > z {
@@ -2670,6 +2689,8 @@ pub struct SurvivalData {
     pub block_tags: HashMap<String, HashSet<String>>,
     /// Теги типов урона (`#minecraft:bypasses_shield`).
     pub damage_tags: HashMap<String, HashSet<String>>,
+    /// Теги видов сущностей (`#minecraft:arrows`).
+    pub entity_type_tags: HashMap<String, HashSet<String>>,
     /// Имя биома по сетевому ID (`worldgen/biome`).
     pub biome_names: Vec<String>,
     /// Осадки и базовая температура из `worldgen/biome`.
@@ -7070,6 +7091,9 @@ impl PlayPlan {
         let mut blasted = Vec::new();
         let mut impacts = Vec::new();
         let mut landed = Vec::new();
+        // Попадания в мишень: `set_block` нельзя звать под `with_world`
+        // (там уже держится чтение `edited`, а запись ждёт его же).
+        let mut target_hits: Vec<TargetHit> = Vec::new();
         let mut hurt = Vec::new();
         let mut hurt_mobs = Vec::new();
         // Вернувшиеся трезубцы: позиция для клиента и предмет для дропа.
@@ -7123,6 +7147,10 @@ impl PlayPlan {
                         trident_syncs.push((id, a.pos, a.vel));
                         continue;
                     }
+                    // `Arrows::step` гасит скорость при попадании в блок.
+                    // Для мишени нужна скорость до шага (направление грани и
+                    // ось расчёта сигнала).
+                    let vel_before = a.vel;
                     for hit in ar::step(
                         a,
                         &alive,
@@ -7169,7 +7197,12 @@ impl PlayPlan {
                             }
                             ar::Hit::Block => {
                                 landed.push(a.pos);
-                                self.target_hit(a.pos, [a.vel[0], a.vel[1], a.vel[2]]);
+                                target_hits.push(TargetHit {
+                                    pos: a.pos,
+                                    vel: vel_before,
+                                    owner: a.owner,
+                                    direct: a.entity_name().to_owned(),
+                                });
                                 stuck.push((id, a.pos));
                             }
                             ar::Hit::Border => {
@@ -7209,6 +7242,7 @@ impl PlayPlan {
                                         a.pos,
                                         a.owner.map(|u| u.as_u128()),
                                         a.trident_item,
+                                        a.entity_name(),
                                     ));
                                     if a.stopped {
                                         gone.push(id);
@@ -7327,6 +7361,9 @@ impl PlayPlan {
                 }
             }
         }
+        for hit in target_hits {
+            self.target_hit(hit.pos, hit.vel, hit.owner, &hit.direct);
+        }
         for (id, pos, vel) in trident_syncs {
             self.hub.send(
                 None,
@@ -7414,8 +7451,9 @@ impl PlayPlan {
             let mut died = Vec::new();
             let mut killers = Vec::new();
             let mut strikes = Vec::new();
-            for (id, damage, at, owner, trident) in hurt_mobs {
+            for (id, damage, at, owner, trident, direct) in hurt_mobs {
                 let mut damage = damage;
+                let victim = mobs.get(&id).map(|e| e.mob.species);
                 if let Some(item) = trident {
                     let impaling = chunkwake_protocol::components::stack_level(
                         item.extra,
@@ -7439,6 +7477,19 @@ impl PlayPlan {
                     )
                 {
                     damaged.push(entry.mob.pos);
+                    if let (Some(owner), Some(victim)) = (owner, victim) {
+                        let damage_type = if trident.is_some() {
+                            "minecraft:trident"
+                        } else {
+                            "minecraft:arrow"
+                        };
+                        self.advancement_player_hurt_entity(
+                            Uuid::from_u128(owner),
+                            victim.name(),
+                            direct,
+                            damage_type,
+                        );
+                    }
                     if dead {
                         died.push(entry.mob.pos);
                         if let Some(owner) = owner {
@@ -17653,12 +17704,45 @@ impl PlayPlan {
     ///
     /// Ось попадания — та, куда летела стрела; `dist` считается по двум
     /// другим осям, поэтому центр даёт 15, край — 1.
-    fn target_hit(&self, pos: [f64; 3], vel: [f64; 3]) {
-        let at = [
+    fn target_hit(&self, pos: [f64; 3], vel: [f64; 3], owner: Option<Uuid>, direct: &str) {
+        let mut at = [
             pos[0].floor() as i32,
             pos[1].floor() as i32,
             pos[2].floor() as i32,
         ];
+        // Снаряд останавливается у самой грани, поэтому `pos` может лежать
+        // ещё в предыдущем блоке. Как и ванильный `BlockHitResult`, берём блок
+        // за ближайшей гранью по направлению движения.
+        if !self
+            .block(at)
+            .is_some_and(|s| self.state_name(s) == "minecraft:target")
+        {
+            let mut best: Option<(f64, usize, i32)> = None;
+            for axis in 0..3 {
+                if vel[axis].abs() < 1e-9 {
+                    continue;
+                }
+                let f = pos[axis] - pos[axis].floor();
+                let (t, dir) = if vel[axis] > 0.0 {
+                    (1.0 - f, 1)
+                } else {
+                    (f, -1)
+                };
+                if best.is_none_or(|(bt, _, _)| t < bt) {
+                    best = Some((t, axis, dir));
+                }
+            }
+            if let Some((_, axis, dir)) = best {
+                let mut cand = at;
+                cand[axis] += dir;
+                if self
+                    .block(cand)
+                    .is_some_and(|s| self.state_name(s) == "minecraft:target")
+                {
+                    at = cand;
+                }
+            }
+        }
         let Some(state) = self.block(at) else { return };
         let name = self.state_name(state);
         if name != "minecraft:target" {
@@ -17684,7 +17768,18 @@ impl PlayPlan {
         self.set_block(at, next);
         self.update_power(next, at);
         // `ACTIVATION_TICKS_ARROWS` 20 для стрел, 8 для прочих снарядов.
-        self.schedule(at, 20);
+        if let Some(uuid) = owner {
+            self.award_stat(uuid, "minecraft:custom", "minecraft:target_hit", 1);
+            let horizontal = self.player_at(uuid).map_or(0.0, |(p, _, _)| {
+                ((pos[0] - p[0]).powi(2) + (pos[2] - p[2]).powi(2)).sqrt()
+            });
+            self.advancement_target_hit(uuid, power, horizontal);
+        }
+        let arrow = matches!(
+            direct,
+            "minecraft:arrow" | "minecraft:spectral_arrow" | "minecraft:trident"
+        );
+        self.schedule(at, if arrow { 20 } else { 8 });
     }
 
     /// `DaylightDetectorBlock.updateSignalStrength`: сила сигнала — небесный
@@ -23425,6 +23520,14 @@ impl PlayPlan {
             amount -= blocked;
             if amount <= 0.0 {
                 v.mark_blocked_hit();
+                // `LivingEntity.hurtServer`: `ENTITY_HURT_PLAYER` срабатывает и
+                // при полностью заблокированном уроне (`blocked = true`).
+                self.advancement_entity_hurt_player(
+                    me.entry.uuid,
+                    damage_direct(cause),
+                    cause.damage_type(),
+                    true,
+                );
                 return Ok(());
             }
         }
@@ -23513,6 +23616,12 @@ impl PlayPlan {
             self.emit_vibration(at, "minecraft:entity_damage");
         }
         let saved = died && self.totem_save(conn, me, v, inv).await?;
+        self.advancement_entity_hurt_player(
+            me.entry.uuid,
+            damage_direct(cause),
+            cause.damage_type(),
+            blocked > 0.0,
+        );
         self.send_health(conn, v).await?;
         let damage_type = match cause {
             Cause::Fall => Some(self.survival.damage_fall),
