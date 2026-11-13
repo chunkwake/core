@@ -1610,6 +1610,8 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
                 Selector::new(vec![nearest(1, false)]),
             );
         }
+        // Рыба: без целей, только плавает на месте.
+        Species::Cod => return (Selector::default(), Selector::default()),
         // `Piglin`/`Wolf`: для проб и взаимодействия достаточно прогулки.
         Species::Piglin | Species::Wolf => {
             return (

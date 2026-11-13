@@ -2907,6 +2907,7 @@ impl PlayPlan {
             Ignite([f64; 3], bool),
             Admire([f64; 3]),
             Tame(bool),
+            FishBucket(&'static str),
         }
         let act = {
             let mut mobs = self.sim().mobs.lock().unwrap();
@@ -2968,6 +2969,10 @@ impl PlayPlan {
                 // `Creeper.mobInteract`: `#creeper_igniters` поджигают.
                 m.ignited = true;
                 Act::Ignite(m.pos, name == "minecraft:fire_charge")
+            } else if m.species == Species::Cod && name == "minecraft:water_bucket" {
+                // `AbstractFish.mobInteract`: ведро воды превращается в ведро
+                // с рыбой, сама рыба исчезает.
+                Act::FishBucket("minecraft:cod_bucket")
             } else if m.species == Species::Wolf && !m.is_baby() && name == "minecraft:bone" {
                 // `Wolf.mobInteract` → `tryToTame`: кость тратится всегда,
                 // приручение - с шансом 1/3.
@@ -2990,6 +2995,7 @@ impl PlayPlan {
             }
         };
         let mut slots = vec![slot];
+        let mut remove = None;
         match act {
             Act::Love | Act::Grow => {
                 if !creative {
@@ -3026,6 +3032,28 @@ impl PlayPlan {
                         (!self.wear_one(&mut s)).then_some(s)
                     };
                 }
+            }
+            Act::FishBucket(bucket) => {
+                let fish = self.item_id(bucket)?;
+                if creative {
+                    if let Some((feet, yaw, pitch)) = self.player_at(uuid) {
+                        self.throw(uuid, feet, yaw, pitch, Stack::new(fish, 1));
+                    }
+                } else if stack.count > 1 {
+                    inv.consume_at(slot);
+                    let (mut changed, left) = inv.add(fish, 1, 1);
+                    changed.push(slot);
+                    slots = changed;
+                    if left > 0
+                        && let Some((feet, yaw, pitch)) = self.player_at(uuid)
+                    {
+                        self.throw(uuid, feet, yaw, pitch, Stack::new(fish, 1));
+                    }
+                } else {
+                    inv.slots[slot] = Some(Stack::new(fish, 1));
+                }
+                self.advancement_filled_bucket(uuid, bucket);
+                remove = Some(target);
             }
             Act::Tame(tamed) => {
                 if !creative {
@@ -3109,6 +3137,9 @@ impl PlayPlan {
                 );
                 inv.consume_at(slot);
             }
+        }
+        if let Some(id) = remove {
+            self.remove_entity(id);
         }
         Some(slots)
     }

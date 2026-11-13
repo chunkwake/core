@@ -1098,6 +1098,13 @@ impl PlayPlan {
     }
 
     /// `item_used_on_block`: предмет в руке и блок под прицелом.
+    /// `FilledBucketTrigger`: игрок получил ведро с существом.
+    pub(crate) fn advancement_filled_bucket(&self, uuid: Uuid, item: &str) {
+        self.advancement_run(uuid, "minecraft:filled_bucket", |c| {
+            c.items.is_empty() || c.items.iter().any(|w| self.item_matches(w, item))
+        });
+    }
+
     pub(crate) fn advancement_item_used_on_block(
         &self,
         uuid: Uuid,
@@ -2354,5 +2361,22 @@ mod tests {
         });
         let def = parse_advancement("test/honey2", &json).expect("advancement");
         assert!(def.criteria[0].item_location_unsupported);
+    }
+
+    #[test]
+    fn filled_bucket_cod_parses() {
+        let json = serde_json::json!({
+            "criteria": {
+                "cod_bucket": {
+                    "trigger": "minecraft:filled_bucket",
+                    "conditions": {"item": {"items": "minecraft:cod_bucket"}}
+                }
+            },
+            "requirements": [["cod_bucket"]]
+        });
+        let def = parse_advancement("test/fish", &json).expect("advancement");
+        let c = &def.criteria[0];
+        assert_eq!(c.trigger, "minecraft:filled_bucket");
+        assert_eq!(c.items, vec!["minecraft:cod_bucket".to_owned()]);
     }
 }
