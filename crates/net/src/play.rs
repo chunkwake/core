@@ -5516,6 +5516,8 @@ impl PlayPlan {
                 inv::set_entity_sleeping(self.ids.set_entity_data, player.entity_id, Some(head)),
             );
         }
+        // `ServerPlayer.startSleepInBed`: `awardStat(SLEEP_IN_BED)` до триггера.
+        self.award_stat(uuid, "minecraft:custom", "minecraft:sleep_in_bed", 1);
         self.advancement_trigger(uuid, "minecraft:slept_in_bed", None);
         true
     }
