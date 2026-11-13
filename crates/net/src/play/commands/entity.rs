@@ -674,11 +674,9 @@ pub(super) fn damage(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     let Some(amount) = input.word().and_then(|t| t.parse::<f32>().ok()) else {
         return usage("/damage <target> <amount> [type]");
     };
-    let cause = match input.word() {
-        Some(type_id) => {
-            let name = args::resource_name(type_id);
-            crate::survival::Cause::from_damage_type(&name)
-        }
+    let damage_type = input.word().map(args::resource_name);
+    let mut cause = match &damage_type {
+        Some(name) => crate::survival::Cause::from_damage_type(name),
         None => crate::survival::Cause::Generic,
     };
     let Some(first) = targets.first().cloned() else {
@@ -705,7 +703,24 @@ pub(super) fn damage(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
                 return usage("/damage <target> <amount> [type] [at <pos> | by <entity>]");
             };
             match ctx.select(call.source, token, true) {
-                Ok(list) => list.first().map(|t| t.pos),
+                Ok(list) => {
+                    if let Some(attacker) = list.first() {
+                        let kind = damage_type
+                            .as_deref()
+                            .unwrap_or("")
+                            .trim_start_matches("minecraft:");
+                        if kind == "mob_attack" || kind == "mob_projectile" {
+                            cause = crate::survival::Cause::Mob(crate::survival::intern_name(
+                                &attacker.name,
+                            ));
+                        } else if kind == "player_attack" {
+                            cause = crate::survival::Cause::Player(crate::survival::intern_name(
+                                &attacker.name,
+                            ));
+                        }
+                    }
+                    list.first().map(|t| t.pos)
+                }
                 Err(e) => return Outcome::Feedback(e.component()),
             }
         }
