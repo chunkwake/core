@@ -14724,6 +14724,15 @@ impl PlayPlan {
                             }
                         }
                         if let Some(kind) = kind.filter(|_| !state.vitals.dead && login.spawn.game_mode != 3 && !bypass) {
+                            // `RandomizableContainerBlockEntity.unpackLootTable`:
+                            // при первом открытии контейнер получает добычу.
+                            let mut opened = vec![u.pos];
+                            if let Some(second) = self.chest_partner(u.pos) {
+                                opened.push(second.0);
+                            }
+                            for pos in opened {
+                                self.unpack_container_loot(uuid, pos);
+                            }
                             self.close_window(&mut state.inv, &mut window, uuid);
                             next_window = next_window % 100 + 1;
                             // Двойной сундук: первая половина — та, что `type=right` (`CompoundContainer`).
@@ -20612,6 +20621,67 @@ impl PlayPlan {
         );
     }
 
+    /// `RandomizableContainerBlockEntity.unpackLootTable`: первое открытие
+    /// контейнера с `LootTable` в NBT генерирует добычу и закрывает триггер.
+    fn unpack_container_loot(&self, uuid: Uuid, pos: [i32; 3]) {
+        let Some(be) = self.block_entity(pos) else {
+            return;
+        };
+        let Some(table) = be.nbt.get("LootTable").and_then(Tag::as_str) else {
+            return;
+        };
+        let table = table.to_owned();
+        if self.survival.loot.table(&table).is_none() {
+            return;
+        }
+        let seed = be
+            .nbt
+            .get("LootTableSeed")
+            .and_then(Tag::as_i64)
+            .unwrap_or(0);
+        let ctx = crate::loot::Ctx {
+            prop: &|_| None,
+            block: &table,
+            tool: None,
+            level: &|_| 0,
+            entity: None,
+            killed_by_player: false,
+            smelt: &|_| None,
+        };
+        let drops = if seed != 0 {
+            use rand::SeedableRng;
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed as u64);
+            crate::loot::roll(&self.survival.loot, &ctx, &mut rng)
+        } else {
+            crate::loot::roll(&self.survival.loot, &ctx, &mut rand::thread_rng())
+        };
+        let mut slots = self.container_slots(pos).unwrap_or_default();
+        let mut next = 0usize;
+        for (name, count) in drops {
+            let Some(item) = self.item_id(&name) else {
+                continue;
+            };
+            let max = self.max_stack(item).max(1);
+            let mut left = count;
+            while left > 0 && next < slots.len() {
+                if slots[next].is_some() {
+                    next += 1;
+                    continue;
+                }
+                let n = left.min(max);
+                slots[next] = Some(Stack::new(item, n));
+                left -= n;
+                next += 1;
+            }
+        }
+        if let Some(mut be) = self.block_entity(pos) {
+            be.nbt.remove("LootTable");
+            be.nbt.remove("LootTableSeed");
+            self.set_block_entity(pos, Some(be));
+        }
+        self.save_container(pos, &slots);
+        self.advancement_container_loot(uuid, &table);
+    }
     /// Слоты контейнера в позиции (`/loot insert|replace`): сундук, бочка, воронка.
     pub(crate) fn container_slots(&self, pos: [i32; 3]) -> Option<Vec<Slot>> {
         let name = self.block(pos).map(|s| self.state_name(s))?;

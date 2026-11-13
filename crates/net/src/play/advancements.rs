@@ -60,6 +60,8 @@ pub struct AdvancementCriterion {
     pub source_entities: Vec<String>,
     /// В `conditions.effects`/`source` есть то, что мы не умеем проверять.
     pub unsupported_effects: bool,
+    /// `conditions.loot_tables` (`player_generates_container_loot`).
+    pub loot_tables: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -412,6 +414,10 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
             if source.is_some() && source_entities.is_empty() {
                 unsupported_effects = true;
             }
+            let loot_tables = cond
+                .and_then(|c| c.get("loot_tables"))
+                .map(string_or_list)
+                .unwrap_or_default();
             let ingredients = cond
                 .and_then(|c| c.get("ingredients"))
                 .and_then(|i| i.as_array())
@@ -458,6 +464,7 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 effects_req,
                 source_entities,
                 unsupported_effects,
+                loot_tables,
             });
         }
     }
@@ -663,6 +670,13 @@ impl PlayPlan {
             (c.items.is_empty() || c.items.iter().any(|w| self.item_matches(w, item)))
                 && c.levels
                     .is_none_or(|(min, max)| levels >= min && levels <= max)
+        });
+    }
+
+    /// `LootTableTrigger`: игрок открыл контейнер с таблицей добычи.
+    pub(crate) fn advancement_container_loot(&self, uuid: Uuid, table: &str) {
+        self.advancement_run(uuid, "minecraft:player_generates_container_loot", |c| {
+            c.loot_tables.is_empty() || c.loot_tables.iter().any(|w| short(w) == short(table))
         });
     }
 
