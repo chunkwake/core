@@ -25,6 +25,8 @@ pub struct Bobber {
     pub out_of_water: u8,
     pub life: u32,
     pub on_ground: bool,
+    /// `DATA_HOOKED_ENTITY`: entity_id + 1 (0 — не зацеплено).
+    pub hooked: Option<i32>,
     pub lure: i32,
     pub luck: i32,
 }
@@ -103,6 +105,7 @@ impl PlayPlan {
             out_of_water: 0,
             life: 0,
             on_ground: false,
+            hooked: None,
             lure: lure.max(0) * 100,
             luck: luck.max(0),
         };
@@ -113,17 +116,24 @@ impl PlayPlan {
             let range = self.tracking_range(ty);
             self.hub.spawn_tracked(
                 Tracked { id, pos, range },
-                [play::add_entity_moving(
-                    self.ids.add_entity,
-                    id,
-                    bobber.uuid,
-                    ty,
-                    pos,
-                    vel,
-                    yaw,
-                    pitch,
-                    0,
-                )],
+                [
+                    play::add_entity_moving(
+                        self.ids.add_entity,
+                        id,
+                        bobber.uuid,
+                        ty,
+                        pos,
+                        vel,
+                        yaw,
+                        pitch,
+                        0,
+                    ),
+                    play::entity_meta(
+                        self.ids.set_entity_data,
+                        id,
+                        &[(8, play::Meta::Int(0)), (9, play::Meta::Bool(false))],
+                    ),
+                ],
             );
         }
         self.play_sound(
@@ -177,7 +187,45 @@ impl PlayPlan {
     }
 
     fn hooked_entity(&self, b: &Bobber) -> Option<i32> {
-        let _ = b;
+        b.hooked
+    }
+
+    /// Позиция сущности, за которую зацеплен поплавок.
+    fn hooked_pos(&self, id: i32) -> Option<[f64; 3]> {
+        if let Some(e) = self.sim().mobs.lock().unwrap().get(&id) {
+            return Some(e.mob.pos);
+        }
+        self.sim().dropped.lock().unwrap().get(&id).map(|d| d.pos)
+    }
+
+    /// `ProjectileUtil.getEntityHitResult`: моб или предмет рядом с поплавком.
+    fn hook_target(&self, pos: [f64; 3]) -> Option<i32> {
+        {
+            let mobs = self.sim().mobs.lock().unwrap();
+            for (&id, e) in mobs.iter() {
+                if !e.mob.alive() {
+                    continue;
+                }
+                let (w, h) = e.mob.size();
+                let p = e.mob.pos;
+                if (pos[0] - p[0]).abs() <= w / 2.0 + 0.3
+                    && (pos[2] - p[2]).abs() <= w / 2.0 + 0.3
+                    && pos[1] >= p[1] - 0.3
+                    && pos[1] <= p[1] + h + 0.3
+                {
+                    return Some(id);
+                }
+            }
+        }
+        let dropped = self.sim().dropped.lock().unwrap();
+        for (&id, d) in dropped.iter() {
+            if (pos[0] - d.pos[0]).abs() <= 0.6
+                && (pos[1] - d.pos[1]).abs() <= 0.6
+                && (pos[2] - d.pos[2]).abs() <= 0.6
+            {
+                return Some(id);
+            }
+        }
         None
     }
 
@@ -353,6 +401,56 @@ impl PlayPlan {
                     gone.push(id);
                     continue;
                 };
+                if let Some(hooked) = b.hooked {
+                    if let Some(hpos) = self.hooked_pos(hooked) {
+                        b.pos = [hpos[0], hpos[1] + 0.8, hpos[2]];
+                        let pull = [
+                            (feet[0] - b.pos[0]) * 0.1,
+                            (feet[1] - b.pos[1]) * 0.1,
+                            (feet[2] - b.pos[2]) * 0.1,
+                        ];
+                        self.pull_hooked(hooked, pull);
+                        let (yaw, pitch) = crate::arrows::rotation(b.vel);
+                        packets.push((
+                            id,
+                            play::teleport_entity(
+                                self.ids.teleport_entity,
+                                id,
+                                b.pos,
+                                yaw,
+                                pitch,
+                                false,
+                            ),
+                        ));
+                        continue;
+                    }
+                    b.hooked = None;
+                    packets.push((
+                        id,
+                        play::entity_meta(self.ids.set_entity_data, id, &[(8, play::Meta::Int(0))]),
+                    ));
+                }
+                if let Some(target) = self.hook_target(b.pos) {
+                    b.hooked = Some(target);
+                    b.vel = [0.0; 3];
+                    if let Some(hpos) = self.hooked_pos(target) {
+                        b.pos = [hpos[0], hpos[1] + 0.8, hpos[2]];
+                    }
+                    packets.push((
+                        id,
+                        play::entity_meta(
+                            self.ids.set_entity_data,
+                            id,
+                            &[(8, play::Meta::Int(target + 1))],
+                        ),
+                    ));
+                    packets.push((
+                        id,
+                        play::teleport_entity(self.ids.teleport_entity, id, b.pos, 0.0, 0.0, false),
+                    ));
+                    continue;
+                }
+                let was_biting = b.biting;
                 let dist2 = (feet[0] - b.pos[0]).powi(2)
                     + (feet[1] - b.pos[1]).powi(2)
                     + (feet[2] - b.pos[2]).powi(2);
@@ -410,6 +508,16 @@ impl PlayPlan {
                     }
                 }
                 b.vel = [b.vel[0] * 0.92, b.vel[1] * 0.92, b.vel[2] * 0.92];
+                if b.biting != was_biting {
+                    packets.push((
+                        id,
+                        play::entity_meta(
+                            self.ids.set_entity_data,
+                            id,
+                            &[(9, play::Meta::Bool(b.biting))],
+                        ),
+                    ));
+                }
                 let (yaw, pitch) = crate::arrows::rotation(b.vel);
                 packets.push((
                     id,
