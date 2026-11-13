@@ -1,5 +1,6 @@
 //! Триггер `killed_by_arrow`: `adventure/two_birds_one_arrow` (два фантома
-//! одной стрелой) и `adventure/arbalistic` (5 уникальных типов одной стрелой).
+//! одной стрелой), `adventure/arbalistic` (5 уникальных типов одной стрелой) и
+//! `adventure/whos_the_pillager_now` (разбойник из арбалета).
 //!
 //! `adv_arrow_kills_probe <addr> <packets.json> <registries.json>`
 use chunkwake_bots::{Client, Event, Ids};
@@ -10,6 +11,7 @@ use std::time::Duration;
 
 const TWO_BIRDS: &str = "minecraft:adventure/two_birds_one_arrow";
 const ARBALISTIC: &str = "minecraft:adventure/arbalistic";
+const PILLAGER: &str = "minecraft:adventure/whos_the_pillager_now";
 const BX: f64 = 1300.5;
 const BZ: f64 = 1200.5;
 
@@ -136,6 +138,7 @@ async fn main() {
         "item replace entity @s hotbar.1 with minecraft:arrow 64".into(),
         format!("advancement revoke @s only {TWO_BIRDS}"),
         format!("advancement revoke @s only {ARBALISTIC}"),
+        format!("advancement revoke @s only {PILLAGER}"),
         "advancement grant @s only minecraft:adventure/ol_betsy".into(),
     ];
     for line in setup {
@@ -194,5 +197,20 @@ async fn main() {
         p.adv.get(ARBALISTIC)
     );
     println!("arbalistic ok");
+
+    // Разбойник из арбалета (пронзание не нужно).
+    p.cmd("kill @e[type=!minecraft:player,distance=..48]").await;
+    p.cmd("kill @e[type=minecraft:arrow,distance=..64]").await;
+    p.cmd("summon minecraft:pillager 1300.5 100 1206.5 {NoAI:1b,Health:1.0f}")
+        .await;
+    p.pump(600).await;
+    p.select(0).await;
+    p.shoot().await;
+    assert!(
+        p.done(PILLAGER, "kill_pillager"),
+        "whos_the_pillager_now не закрылся: {:?}",
+        p.adv.get(PILLAGER)
+    );
+    println!("whos_the_pillager_now ok");
     println!("adv_arrow_kills: ok");
 }
