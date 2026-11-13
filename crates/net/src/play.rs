@@ -286,6 +286,8 @@ pub struct PlayPlan {
     portal_time: Mutex<FastMap<Uuid, u32>>,
     /// Позиция входа в Нижний мир (`ServerPlayer.enteredNetherPosition`).
     nether_entry: Mutex<FastMap<Uuid, [f64; 3]>>,
+    /// Кто ввёл животное в режим размножения (`Animal.getLoveCause`).
+    love_cause: Mutex<FastMap<i32, Uuid>>,
     /// `ServerPlayer.seenCredits`: титры Края уже показаны.
     pub(crate) seen_credits: Mutex<HashSet<Uuid>>,
     /// `BukkitValues` игроков: PDC плагинов (`Player.getPersistentDataContainer`).
@@ -3016,6 +3018,7 @@ impl PlayPlan {
             portal_cooldown: Mutex::new(FastMap::default()),
             portal_time: Mutex::new(FastMap::default()),
             nether_entry: Mutex::new(FastMap::default()),
+            love_cause: Mutex::new(FastMap::default()),
             seen_credits: Mutex::new(HashSet::new()),
             bukkit_values: Mutex::new(FastMap::default()),
             stats: Mutex::new(FastMap::default()),
@@ -15385,6 +15388,37 @@ impl PlayPlan {
                 || n == "minecraft:bubble_column"
                 || self.survival.placement.prop(s, "waterlogged") == Some("true")
         })
+    }
+
+    /// `Entity.checkInsideBlocks` → `ServerPlayer.onInsideBlock`: блоки,
+    /// пересекающиеся с хитбоксом игрока (0.6 × 1.8).
+    fn enter_block_stats(&self, uuid: Uuid, feet: [f64; 3]) {
+        let (x0, x1) = (
+            (feet[0] - 0.3).floor() as i32,
+            (feet[0] + 0.3).floor() as i32,
+        );
+        let (y0, y1) = (feet[1].floor() as i32, (feet[1] + 1.8).floor() as i32);
+        let (z0, z1) = (
+            (feet[2] - 0.3).floor() as i32,
+            (feet[2] + 0.3).floor() as i32,
+        );
+        let mut seen: Vec<String> = Vec::new();
+        for x in x0..=x1 {
+            for y in y0..=y1 {
+                for z in z0..=z1 {
+                    let Some(state) = self.block([x, y, z]) else {
+                        continue;
+                    };
+                    let name = self.state_name(state);
+                    // Воздух ничего не даёт, а называть его каждый шаг дорого.
+                    if name.ends_with("air") || seen.iter().any(|s| s == name) {
+                        continue;
+                    }
+                    seen.push(name.to_owned());
+                    self.advancement_enter_block(uuid, name);
+                }
+            }
+        }
     }
 
     fn environment_kind(&self, state: Option<u32>) -> u16 {

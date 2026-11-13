@@ -43,6 +43,10 @@ pub struct AdvancementCriterion {
     pub victims: Vec<String>,
     /// `conditions.distance.horizontal` (`nether_travel`).
     pub travel_distance: Option<(f64, f64)>,
+    /// `conditions.child`/`parent`/`partner` (`bred_animals`).
+    pub child_entities: Vec<String>,
+    pub parent_entities: Vec<String>,
+    pub partner_entities: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -252,6 +256,10 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 .map(json_string_list)
                 .unwrap_or_default();
             let mut blocks = Vec::new();
+            // `enter_block`: `conditions.blocks` — блок или список блоков.
+            if let Some(blocks_v) = c.get("conditions").and_then(|c| c.get("blocks")) {
+                blocks.extend(string_or_list(blocks_v));
+            }
             if let Some(location) = c.get("conditions").and_then(|c| c.get("location")) {
                 collect_blocks(location, &mut blocks);
                 // `match_tool.predicate.items` внутри location.
@@ -327,6 +335,18 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 .and_then(|c| c.get("distance"))
                 .and_then(|d| d.get("horizontal"))
                 .and_then(bounds_f64);
+            let entity_type = |key: &str| {
+                cond.and_then(|c| c.get(key))
+                    .and_then(|e| e.get("predicate"))
+                    .and_then(|p| p.get("minecraft:entity_type"))
+                    .map(string_or_list)
+                    .unwrap_or_default()
+            };
+            let (child_entities, parent_entities, partner_entities) = (
+                entity_type("child"),
+                entity_type("parent"),
+                entity_type("partner"),
+            );
             criteria.push(AdvancementCriterion {
                 name: name.clone(),
                 trigger,
@@ -346,6 +366,9 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 blocked,
                 victims,
                 travel_distance,
+                child_entities,
+                parent_entities,
+                partner_entities,
             });
         }
     }
@@ -554,6 +577,31 @@ impl PlayPlan {
         });
     }
 
+    /// `bred_animals`: ребёнок, родитель и партнёр.
+    pub(crate) fn advancement_bred_animals(
+        &self,
+        uuid: Uuid,
+        child: &str,
+        parent: &str,
+        partner: &str,
+    ) {
+        self.advancement_run(uuid, "minecraft:bred_animals", |c| {
+            let ok = |want: &[String], name: &str| {
+                want.is_empty() || want.iter().any(|w| self.entity_matches(w, name))
+            };
+            ok(&c.child_entities, child)
+                && ok(&c.parent_entities, parent)
+                && ok(&c.partner_entities, partner)
+        });
+    }
+
+    /// `enter_block`: блок, в который вошёл игрок (`conditions.blocks`).
+    pub(crate) fn advancement_enter_block(&self, uuid: Uuid, block: &str) {
+        self.advancement_run(uuid, "minecraft:enter_block", |c| {
+            c.blocks.is_empty() || c.blocks.iter().any(|w| self.block_matches(w, block))
+        });
+    }
+
     /// `shot_crossbow`: предмет, из которого стреляли (`conditions.item`).
     pub(crate) fn advancement_shot_crossbow(&self, uuid: Uuid, item: &str) {
         self.advancement_run(uuid, "minecraft:shot_crossbow", |c| {
@@ -667,35 +715,50 @@ impl PlayPlan {
         {
             let mut all = self.advancement_progress.lock().unwrap();
             let progress = all.entry(uuid).or_default();
-            for def in &self.survival.advancements {
-                if !self.adv_parent_done(progress, def.parent.as_deref()) {
-                    continue;
-                }
-                let was = progress
-                    .get(&def.id)
-                    .is_some_and(|p| Self::adv_done(p, def));
-                let mut touched = false;
-                {
-                    let entry = progress.entry(def.id.clone()).or_default();
-                    for c in &def.criteria {
-                        if c.trigger != trigger || !accept(c) {
-                            continue;
+            // Событие может закрыть и родителя, и ребёнка (первое размножение:
+            // `breed_an_animal` + критерий `minecraft:cow` в `bred_all_animals`).
+            // Поэтому проходим, пока появляются новые критерии: только что
+            // выполненный родитель открывает своих детей в этом же событии.
+            loop {
+                let mut pass = false;
+                for def in &self.survival.advancements {
+                    if !self.adv_parent_done(progress, def.parent.as_deref()) {
+                        continue;
+                    }
+                    let was = progress
+                        .get(&def.id)
+                        .is_some_and(|p| Self::adv_done(p, def));
+                    let mut touched = false;
+                    {
+                        let entry = progress.entry(def.id.clone()).or_default();
+                        for c in &def.criteria {
+                            if c.trigger != trigger || !accept(c) {
+                                continue;
+                            }
+                            if !entry.contains_key(&c.name) {
+                                entry.insert(c.name.clone(), now);
+                                touched = true;
+                            }
                         }
-                        if !entry.contains_key(&c.name) {
-                            entry.insert(c.name.clone(), now);
-                            touched = true;
+                    }
+                    if touched {
+                        pass = true;
+                        changed.push(def.id.clone());
+                        let entry = &progress[&def.id];
+                        if !was && Self::adv_done(entry, def) {
+                            completed.push(def.id.clone());
                         }
                     }
                 }
-                if touched {
-                    changed.push(def.id.clone());
-                    let entry = &progress[&def.id];
-                    if !was && Self::adv_done(entry, def) {
-                        completed.push(def.id.clone());
-                    }
+                if !pass {
+                    break;
                 }
             }
         }
+        changed.sort();
+        changed.dedup();
+        completed.sort();
+        completed.dedup();
         if !changed.is_empty() {
             self.send_advancement_progress(uuid, &changed);
         }

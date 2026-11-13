@@ -2886,6 +2886,8 @@ impl PlayPlan {
                     Act::Grow
                 } else if m.age == 0 && m.love == 0 {
                     m.love = 600;
+                    // `Animal.setInLove(player)`: запоминаем, кто покормил.
+                    self.love_cause.lock().unwrap().insert(target, uuid);
                     Act::Love
                 } else {
                     return None;
@@ -3214,6 +3216,12 @@ impl PlayPlan {
                     if !ready(mobs.get(&id)) || !ready(mobs.get(&partner)) {
                         continue;
                     }
+                    let cause = {
+                        let mut causes = self.love_cause.lock().unwrap();
+                        let cause = causes.remove(&id).or_else(|| causes.get(&partner).copied());
+                        causes.remove(&partner);
+                        cause
+                    };
                     let mut at = None;
                     for k in [id, partner] {
                         if let Some(e) = mobs.get_mut(&k) {
@@ -3223,7 +3231,7 @@ impl PlayPlan {
                         }
                     }
                     if let Some((species, pos)) = at {
-                        births.push((species, pos, id, partner));
+                        births.push((species, pos, id, partner, cause));
                     }
                 }
                 // `Creeper.tick`: шипение и игровое событие `prime_fuse`.
@@ -3343,7 +3351,7 @@ impl PlayPlan {
                 }
             }
         }
-        for (species, pos, mother, father) in births {
+        for (species, pos, mother, father, cause) in births {
             let Some(child) = self.spawn_mob(species, pos, 0.0, true, Some("BREEDING")) else {
                 continue;
             };
@@ -3360,6 +3368,14 @@ impl PlayPlan {
             }
             if xp > 0 {
                 self.spawn_orbs(pos, xp);
+            }
+            if let Some(cause) = cause {
+                self.advancement_bred_animals(
+                    cause,
+                    species.name(),
+                    species.name(),
+                    species.name(),
+                );
             }
         }
     }

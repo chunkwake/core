@@ -90,6 +90,7 @@ impl PlayPlan {
         if old_ground && !on_ground && dy > 0.0 {
             self.award_stat(uuid, "minecraft:custom", "minecraft:jump", 1);
         }
+        self.enter_block_stats(uuid, to);
         let feet = [
             to[0].floor() as i32,
             to[1].floor() as i32,
