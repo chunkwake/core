@@ -1027,6 +1027,12 @@ pub struct Mob {
     pub statue: bool,
     /// `EnderDragon`: кулдаун контактного урона (тиков).
     pub dragon_cooldown: u8,
+    /// `Warden`: задержка до следующего sonic boom (`SONIC_BOOM_COOLDOWN`).
+    pub sonic_cooldown: u32,
+    /// `Warden`: оставшиеся тики зарядки sonic boom (34 до выстрела).
+    pub sonic_charge: u32,
+    /// `Warden`: цель, по которой заряжен sonic boom.
+    pub sonic_target: Option<u128>,
     /// `DropChances` по тем же слотам; > 1 — предмет сохраняется всегда.
     pub drop_chances: [f32; 6],
     /// Множитель скорости от `Speed`/`Slowness` (пересчитывается в тике).
@@ -1096,6 +1102,9 @@ impl Mob {
             ticks: 0,
             statue: false,
             dragon_cooldown: 0,
+            sonic_cooldown: 0,
+            sonic_charge: 0,
+            sonic_target: None,
             nav: Navigation::new(species == Species::Spider),
             move_ctl: MoveControl::default(),
             move_speed: 0.0,

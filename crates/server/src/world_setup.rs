@@ -917,6 +917,9 @@ fn survival_data(
         damage_magic: registries
             .network_id("damage_type", "minecraft:magic")
             .map_err(s)?,
+        damage_sonic_boom: registries
+            .network_id("damage_type", "minecraft:sonic_boom")
+            .map_err(s)?,
         damage_arrow: registries
             .network_id("damage_type", "minecraft:arrow")
             .map_err(s)?,

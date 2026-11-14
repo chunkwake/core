@@ -324,6 +324,8 @@ pub enum Cause {
     MobExplosion(&'static str),
     /// Удар игрока (`minecraft:player_attack`): имя атакующего.
     Player(&'static str),
+    /// Звуковой удар стража (minecraft:sonic_boom): имя источника.
+    SonicBoom(&'static str),
 }
 
 /// Имя игрока для `death.attack.player`: одна аллокация на имя.
@@ -387,6 +389,7 @@ impl Cause {
             Cause::MobArrow(_) => "death.attack.arrow",
             Cause::MobExplosion(_) => "death.attack.explosion.player",
             Cause::Player(_) => "death.attack.player",
+            Cause::SonicBoom(_) => "death.attack.sonic_boom",
         }
     }
 
@@ -414,6 +417,7 @@ impl Cause {
             Cause::MobArrow(_) => "PROJECTILE",
             Cause::MobExplosion(_) => "ENTITY_EXPLOSION",
             Cause::Player(_) => "ENTITY_ATTACK",
+            Cause::SonicBoom(_) => "MAGIC",
         }
     }
 
@@ -440,6 +444,7 @@ impl Cause {
             Cause::MobArrow(_) => "minecraft:arrow",
             Cause::MobExplosion(_) => "minecraft:player_explosion",
             Cause::Player(_) => "minecraft:player_attack",
+            Cause::SonicBoom(_) => "minecraft:sonic_boom",
         }
     }
 
@@ -459,6 +464,7 @@ impl Cause {
                 | Cause::Fire
                 | Cause::Drown
                 | Cause::Freeze
+                | Cause::SonicBoom(_)
         )
     }
 }
@@ -1940,6 +1946,15 @@ mod tests {
         assert!(Cause::Poison.bypasses_armor());
         assert!(!Cause::Fall.bypasses_armor());
         assert!(!Cause::Arrow.bypasses_armor());
+    }
+
+    #[test]
+    fn sonic_boom_matches_vanilla_damage_type() {
+        let cause = Cause::SonicBoom("minecraft:warden");
+        assert!(cause.bypasses_armor());
+        assert!(!cause.bypasses_resistance());
+        assert_eq!(cause.damage_type(), "minecraft:sonic_boom");
+        assert_eq!(cause.death_key(), "death.attack.sonic_boom");
     }
 
     #[test]

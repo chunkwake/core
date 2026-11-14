@@ -2703,6 +2703,8 @@ pub struct SurvivalData {
     pub damage_void: i32,
     pub damage_starve: i32,
     pub damage_magic: i32,
+    /// `minecraft:sonic_boom` (звуковой удар стража).
+    pub damage_sonic_boom: i32,
     pub damage_wither: i32,
     pub damage_arrow: i32,
     /// `minecraft:player_attack` (PvP).
@@ -24695,6 +24697,7 @@ impl PlayPlan {
             Cause::Void => Some(self.survival.damage_void),
             Cause::Starve => Some(self.survival.damage_starve),
             Cause::Poison | Cause::Magic => Some(self.survival.damage_magic),
+            Cause::SonicBoom(_) => Some(self.survival.damage_sonic_boom),
             Cause::Wither => Some(self.survival.damage_wither),
             Cause::Arrow => Some(self.survival.damage_arrow),
             Cause::Explosion => Some(self.survival.damage_explosion),

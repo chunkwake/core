@@ -638,6 +638,11 @@ impl PlayPlan {
         let mut gone = Vec::new();
         let mut statues = Vec::new();
         let mut sounds = Vec::new();
+        // `Warden.applyDarknessAround`: кому наложить тьму в этот тик.
+        let mut darkness: Vec<Uuid> = Vec::new();
+        // `SonicBoom.tick`: (цель, грудь стража, глаза цели, направление).
+        type BoomShot = (Uuid, [f64; 3], [f64; 3], [f64; 3]);
+        let mut booms: Vec<BoomShot> = Vec::new();
         let mut trampling = Vec::new();
         let mut vibrations = Vec::new();
         let now = self.game_time.load(Ordering::Relaxed);
@@ -727,7 +732,79 @@ impl PlayPlan {
                     let old_pos = e.mob.pos;
                     let old_y = e.mob.pos[1];
                     e.mob.on_fire = e.environment.burning > 0;
+                    let prev_target = e.mob.target;
                     let removed = mb::tick(&mut e.mob, &world, &mut senses);
+                    // `Warden.customServerAiStep` + `SonicBoom`.
+                    if species == Species::Warden && e.mob.alive() {
+                        // `setAttackTarget`: первый sonic boom не раньше 200 тиков.
+                        if prev_target != e.mob.target && e.mob.target.is_some() {
+                            e.mob.sonic_cooldown = 200;
+                        }
+                        let darkness_id = self.survival.effects.get("minecraft:darkness").copied();
+                        if let Some(id) = darkness_id
+                            && (e.mob.tick_count.wrapping_add(id as u32)) % 120 == 0
+                        {
+                            for p in &watchers {
+                                if mb::dist2(e.mob.pos, p.pos) <= 20.0 * 20.0 {
+                                    darkness.push(Uuid::from_u128(p.uuid));
+                                }
+                            }
+                        }
+                        let target_near = |t: u128| watchers.iter().find(|p| p.uuid == t).copied();
+                        if e.mob.sonic_charge > 0 {
+                            e.mob.sonic_charge -= 1;
+                            if e.mob.sonic_charge == 0 {
+                                if let Some(t) = e.mob.sonic_target.take().or(e.mob.target)
+                                    && let Some(p) = target_near(t)
+                                {
+                                    let source = [e.mob.pos[0], e.mob.pos[1] + 1.6, e.mob.pos[2]];
+                                    let eye = p.eye();
+                                    let d = [
+                                        eye[0] - source[0],
+                                        eye[1] - source[1],
+                                        eye[2] - source[2],
+                                    ];
+                                    let horizontal = (d[0] * d[0] + d[2] * d[2]).sqrt();
+                                    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                                    if horizontal <= 15.0 && d[1].abs() <= 20.0 && len > 1e-4 {
+                                        booms.push((
+                                            Uuid::from_u128(t),
+                                            source,
+                                            eye,
+                                            [d[0] / len, d[1] / len, d[2] / len],
+                                        ));
+                                    }
+                                }
+                                // 26 тиков остатка поведения + 40 кулдауна.
+                                e.mob.sonic_cooldown = 66;
+                            }
+                        } else {
+                            e.mob.sonic_cooldown = e.mob.sonic_cooldown.saturating_sub(1);
+                            if e.mob.sonic_cooldown == 0
+                                && let Some(t) = e.mob.target
+                                && let Some(p) = target_near(t)
+                            {
+                                let dx = p.pos[0] - e.mob.pos[0];
+                                let dz = p.pos[2] - e.mob.pos[2];
+                                let dy = p.pos[1] - e.mob.pos[1];
+                                if (dx * dx + dz * dz).sqrt() <= 15.0 && dy.abs() <= 20.0 {
+                                    e.mob.sonic_charge = 34;
+                                    e.mob.sonic_target = Some(t);
+                                    packets.push((
+                                        id,
+                                        inv::entity_event(self.ids.entity_event, id, 62),
+                                    ));
+                                    sounds.push((
+                                        "minecraft:entity.warden.sonic_charge".to_owned(),
+                                        e.mob.pos,
+                                        3.0,
+                                        false,
+                                        crate::sounds::HOSTILE,
+                                    ));
+                                }
+                            }
+                        }
+                    }
                     // `CopperGolem` полностью окислился: статую поставим
                     // после тика, без дропа и статистик смерти.
                     if e.mob.statue {
@@ -1090,6 +1167,108 @@ impl PlayPlan {
         }
         for (name, pos, vol, baby, source) in sounds {
             self.play_sound(None, &name, source, pos, vol, mob_pitch(baby));
+        }
+        // `MobEffectUtil.addEffectToPlayersAround`: только выжившие и без
+        // достаточно долгой тьмы (эффект короче 200 тиков — обновляем).
+        if !darkness.is_empty()
+            && let Some(&effect_id) = self.survival.effects.get("minecraft:darkness")
+        {
+            let targets: Vec<Uuid> = {
+                let live = self.live.lock().unwrap();
+                darkness
+                    .into_iter()
+                    .filter(|uuid| {
+                        live.get(uuid).is_some_and(|l| {
+                            matches!(l.game_mode, 0 | 2)
+                                && !l
+                                    .effects
+                                    .iter()
+                                    .any(|e| e.id == effect_id && e.duration > 199)
+                        })
+                    })
+                    .collect()
+            };
+            for uuid in targets {
+                let mut effect = survival::Effect::plain(effect_id, 0, 260);
+                effect.particles = false;
+                self.push_control(
+                    uuid,
+                    Control::Effect {
+                        effect,
+                        force: false,
+                        command: false,
+                    },
+                );
+            }
+        }
+        // `SonicBoom.tick`: частицы по лучу, звук, 10 урона и отбрасывание.
+        for (target, source, eye, dir) in booms {
+            self.play_sound(
+                None,
+                "minecraft:entity.warden.sonic_boom",
+                crate::sounds::HOSTILE,
+                source,
+                3.0,
+                1.0,
+            );
+            if let Some(&particle) = self
+                .particle_types
+                .lock()
+                .unwrap()
+                .get("minecraft:sonic_boom")
+            {
+                let len = ((eye[0] - source[0]).powi(2)
+                    + (eye[1] - source[1]).powi(2)
+                    + (eye[2] - source[2]).powi(2))
+                .sqrt();
+                let steps = len.floor() as i32 + 7;
+                for i in 1..steps {
+                    let f = f64::from(i);
+                    let at = [
+                        source[0] + dir[0] * f,
+                        source[1] + dir[1] * f,
+                        source[2] + dir[2] * f,
+                    ];
+                    self.hub.send(
+                        None,
+                        play::level_particles(
+                            self.ids.level_particles,
+                            particle,
+                            false,
+                            at,
+                            [0.0; 3],
+                            0.0,
+                            1,
+                        ),
+                    );
+                }
+            }
+            let entity = self
+                .hub
+                .players
+                .lock()
+                .unwrap()
+                .get(&target)
+                .map(|p| p.entity_id);
+            self.push_control(
+                target,
+                Control::Hurt(
+                    10.0,
+                    Cause::SonicBoom("minecraft:warden"),
+                    Some(source),
+                    0.0,
+                ),
+            );
+            if let Some(entity) = entity {
+                self.hub.send(
+                    None,
+                    play::set_entity_motion(
+                        self.ids.set_entity_motion,
+                        entity,
+                        [dir[0] * 2.5, dir[1] * 0.5, dir[2] * 2.5],
+                    ),
+                );
+            }
         }
         if !despawned.is_empty() {
             {
