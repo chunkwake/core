@@ -1,0 +1,26 @@
+{
+  "display": {
+    "title": {"text": "offset negative probe"},
+    "description": {"text": "location_check offsetY=2 must not match"},
+    "icon": {"id": "minecraft:air"},
+    "frame": "task",
+    "show_toast": false,
+    "announce_to_chat": false
+  },
+  "criteria": {
+    "slab_two_above": {
+      "trigger": "minecraft:item_used_on_block",
+      "conditions": {
+        "location": [
+          {"type": "minecraft:match_block", "blocks": "minecraft:stone"},
+          {
+            "type": "minecraft:location_check",
+            "offsetY": 2,
+            "predicate": {"block": {"blocks": "minecraft:oak_slab"}}
+          }
+        ]
+      }
+    }
+  },
+  "requirements": [["slab_two_above"]]
+}

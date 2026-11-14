@@ -17,6 +17,19 @@ pub struct ItemPred {
     pub damage: Option<i32>,
 }
 
+/// `BlockPredicate` в точке со смещением (`LocationCheck.offsetX/Y/Z`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum BlockCheck {
+    Block {
+        offset: [i32; 3],
+        blocks: Vec<String>,
+        state: Vec<(String, Vec<String>)>,
+        nbt: Option<Tag>,
+    },
+    AllOf(Vec<BlockCheck>),
+    AnyOf(Vec<BlockCheck>),
+}
+
 /// `EntityPredicate` из JSON (`conditions.player`/`conditions.entity`).
 #[derive(Clone, Debug)]
 pub enum EntityPred {
@@ -51,6 +64,9 @@ pub struct AdvancementCriterion {
     /// `location.block.nbt` (`NbtPredicate`): частичное совпадение NBT
     /// блок-сущности в точке проверки.
     pub block_nbt: Option<Tag>,
+    /// `conditions.location` (`item_used_on_block`/`placed_block`) —
+    /// дерево блок-проверок со смещениями (`location_check.offsetX/Y/Z`).
+    pub item_location: Option<BlockCheck>,
     /// `conditions.from`/`to` (для `changed_dimension`).
     pub from_dims: Vec<String>,
     pub to_dims: Vec<String>,
@@ -410,95 +426,130 @@ fn collect_blocks(v: &serde_json::Value, out: &mut Vec<String>) {
     }
 }
 
-/// `location_check` внутри `item_used_on_block`: поддержан `smokey` и
-/// `block.blocks` (последний собирается отдельно). Остальное - unsupported.
-fn collect_item_location(
-    v: &serde_json::Value,
-    smokey: &mut Option<bool>,
-    states: &mut Vec<(String, Vec<String>)>,
-    nbt: &mut Option<Tag>,
-    ok: &mut bool,
-) {
-    if let Some(terms) = v.get("terms").and_then(|t| t.as_array()) {
-        for term in terms {
-            collect_item_location(term, smokey, states, nbt, ok);
-        }
-    }
-    let typ = v.get("type").and_then(|t| t.as_str());
-    if typ == Some("minecraft:match_block") {
-        // `placed_block`: блок и его свойства в точке установки.
-        if v.as_object().is_some_and(|o| {
-            o.keys()
-                .any(|k| !matches!(k.as_str(), "type" | "blocks" | "state" | "nbt"))
-        }) {
-            *ok = false;
-            return;
-        }
-        if let Some(state) = v.get("state") {
-            match parse_block_states(state) {
-                Some(list) => states.extend(list),
-                None => *ok = false,
+/// `conditions.location` (`item_used_on_block`/`placed_block`): дерево
+/// `LootItemCondition` над блоком. Поддержаны `location_check` (включая
+/// `offsetX/Y/Z` и `smokey`), `match_block`, `all_of`/`any_of`; всё прочее —
+/// `None` (неподдержано).
+/// `match_tool` в списке loot-условий: к блоку не относится.
+fn is_match_tool(v: &serde_json::Value) -> bool {
+    v.get("type").and_then(|t| t.as_str()) == Some("minecraft:match_tool")
+}
+
+fn parse_block_conditions(v: &serde_json::Value, smokey: &mut Option<bool>) -> Option<BlockCheck> {
+    if let Some(list) = v.as_array() {
+        let mut terms = Vec::with_capacity(list.len());
+        for term in list {
+            // `match_tool` относится к предмету (`collect_location_items`),
+            // а не к блоку.
+            if is_match_tool(term) {
+                continue;
             }
+            terms.push(parse_block_conditions(term, smokey)?);
         }
-        if let Some(raw) = v.get("nbt") {
-            match parse_nbt_predicate(raw) {
-                Some(tag) => *nbt = Some(tag),
-                None => *ok = false,
+        return Some(BlockCheck::AllOf(terms));
+    }
+    let typ = v.get("type")?.as_str()?;
+    match typ {
+        "minecraft:match_block" => {
+            if v.as_object().is_some_and(|o| {
+                o.keys()
+                    .any(|k| !matches!(k.as_str(), "type" | "blocks" | "state" | "nbt"))
+            }) {
+                return None;
             }
+            let blocks = v.get("blocks").map(string_or_list).unwrap_or_default();
+            let state = match v.get("state") {
+                Some(state) => parse_block_states(state)?,
+                None => Vec::new(),
+            };
+            let nbt = match v.get("nbt") {
+                Some(raw) => Some(parse_nbt_predicate(raw)?),
+                None => None,
+            };
+            Some(BlockCheck::Block {
+                offset: [0, 0, 0],
+                blocks,
+                state,
+                nbt,
+            })
         }
-        return;
-    }
-    if typ != Some("minecraft:location_check") {
-        return;
-    }
-    if v.as_object()
-        .is_some_and(|o| o.keys().any(|k| k != "type" && k != "predicate"))
-    {
-        *ok = false;
-        return;
-    }
-    let Some(pred) = v.get("predicate").and_then(|p| p.as_object()) else {
-        return;
-    };
-    for (key, value) in pred {
-        match key.as_str() {
-            "smokey" => match value.as_bool() {
-                Some(flag) => {
-                    if smokey.is_some_and(|old| old != flag) {
-                        *ok = false;
+        "minecraft:location_check" => {
+            if v.as_object().is_some_and(|o| {
+                o.keys().any(|k| {
+                    !matches!(
+                        k.as_str(),
+                        "type" | "predicate" | "offsetX" | "offsetY" | "offsetZ"
+                    )
+                })
+            }) {
+                return None;
+            }
+            let offset = ["offsetX", "offsetY", "offsetZ"].map(|key| match v.get(key) {
+                Some(n) => n.as_i64().map(|n| n as i32),
+                None => Some(0),
+            });
+            let offset = [offset[0]?, offset[1]?, offset[2]?];
+            let pred = v.get("predicate")?.as_object()?;
+            let mut blocks = Vec::new();
+            let mut state = Vec::new();
+            let mut nbt = None;
+            for (key, value) in pred {
+                match key.as_str() {
+                    "smokey" => {
+                        let flag = value.as_bool()?;
+                        if smokey.is_some_and(|old| old != flag) {
+                            return None;
+                        }
+                        *smokey = Some(flag);
                     }
-                    *smokey = Some(flag);
-                }
-                None => *ok = false,
-            },
-            "block" => {
-                let simple = value.as_object().is_some_and(|o| {
-                    o.keys()
-                        .all(|k| matches!(k.as_str(), "blocks" | "state" | "nbt"))
-                });
-                if !simple {
-                    *ok = false;
-                } else {
-                    if let Some(state) = value.get("state") {
-                        match parse_block_states(state) {
-                            Some(list) => states.extend(list),
-                            None => *ok = false,
+                    "block" => {
+                        if value.as_object().is_some_and(|o| {
+                            o.keys()
+                                .any(|k| !matches!(k.as_str(), "blocks" | "state" | "nbt"))
+                        }) {
+                            return None;
+                        }
+                        blocks = value.get("blocks").map(string_or_list).unwrap_or_default();
+                        if let Some(state_v) = value.get("state") {
+                            state = parse_block_states(state_v)?;
+                        }
+                        if let Some(raw) = value.get("nbt") {
+                            nbt = Some(parse_nbt_predicate(raw)?);
                         }
                     }
-                    if let Some(raw) = value.get("nbt") {
-                        match parse_nbt_predicate(raw) {
-                            Some(tag) => *nbt = Some(tag),
-                            None => *ok = false,
-                        }
-                    }
+                    _ => return None,
                 }
             }
-            _ => *ok = false,
+            Some(BlockCheck::Block {
+                offset,
+                blocks,
+                state,
+                nbt,
+            })
         }
+        "minecraft:all_of" | "minecraft:any_of" => {
+            if v.as_object()
+                .is_some_and(|o| o.keys().any(|k| k != "type" && k != "terms"))
+            {
+                return None;
+            }
+            let mut terms = Vec::new();
+            for term in v.get("terms")?.as_array()? {
+                if typ == "minecraft:all_of" && is_match_tool(term) {
+                    continue;
+                }
+                terms.push(parse_block_conditions(term, smokey)?);
+            }
+            Some(if typ == "minecraft:all_of" {
+                BlockCheck::AllOf(terms)
+            } else {
+                BlockCheck::AnyOf(terms)
+            })
+        }
+        _ => None,
     }
 }
 
-/// `match_tool` внутри дерева `location`: `predicate.items`.
 fn collect_location_items(v: &serde_json::Value, out: &mut Vec<String>) {
     if let Some(items) = v.get("predicate").and_then(|p| p.get("items")) {
         out.extend(json_string_list(items));
@@ -773,6 +824,7 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
             }
             let mut blocks = Vec::new();
             let mut block_state: Vec<(String, Vec<String>)> = Vec::new();
+            let mut item_location: Option<BlockCheck> = None;
             let mut block_nbt: Option<Tag> = None;
             // `item_used_on_block`: `smokey` из `location_check`.
             let mut smokey = None;
@@ -785,13 +837,10 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 collect_blocks(location, &mut blocks);
                 // `match_tool.predicate.items` внутри location.
                 collect_location_items(location, &mut items);
-                collect_item_location(
-                    location,
-                    &mut smokey,
-                    &mut block_state,
-                    &mut block_nbt,
-                    &mut item_location_supported,
-                );
+                match parse_block_conditions(location, &mut smokey) {
+                    Some(check) => item_location = Some(check),
+                    None => item_location_supported = false,
+                }
             }
             let item_location_unsupported = !item_location_supported;
             let cond = c.get("conditions");
@@ -1164,6 +1213,7 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 block,
                 block_state,
                 block_nbt,
+                item_location,
                 block_unsupported,
                 fluid,
                 fluid_unsupported,
@@ -1457,12 +1507,9 @@ impl PlayPlan {
 
     /// `placed_block` (`PlayerTrigger`): блок поставлен в мир; свойства блока
     /// проверяются в точке установки (`match_block.state`).
-    pub(crate) fn advancement_placed_block(&self, uuid: Uuid, block: &str, pos: [i32; 3]) {
+    pub(crate) fn advancement_placed_block(&self, uuid: Uuid, _block: &str, pos: [i32; 3]) {
         self.advancement_run(uuid, "minecraft:placed_block", |c| {
-            !c.item_location_unsupported
-                && (c.blocks.is_empty() || c.blocks.iter().any(|w| self.block_matches(w, block)))
-                && self.block_state_matches(pos, &c.block_state)
-                && self.block_nbt_matches(pos, c.block_nbt.as_ref())
+            self.item_location_ok(c, pos)
         });
     }
 
@@ -1470,15 +1517,12 @@ impl PlayPlan {
         &self,
         uuid: Uuid,
         item: &str,
-        block: &str,
+        _block: &str,
         pos: [i32; 3],
     ) {
         self.advancement_run(uuid, "minecraft:item_used_on_block", |c| {
-            !c.item_location_unsupported
-                && (c.items.is_empty() || c.items.iter().any(|w| self.item_matches(w, item)))
-                && (c.blocks.is_empty() || c.blocks.iter().any(|w| self.block_matches(w, block)))
-                && self.block_state_matches(pos, &c.block_state)
-                && self.block_nbt_matches(pos, c.block_nbt.as_ref())
+            (c.items.is_empty() || c.items.iter().any(|w| self.item_matches(w, item)))
+                && self.item_location_ok(c, pos)
                 && c.smokey.is_none_or(|want| want == self.is_smokey_at(pos))
         });
     }
@@ -1677,6 +1721,44 @@ impl PlayPlan {
         let weather = self.vars.weather();
         let darken = self.sky_darken_now(self.active_dim(), weather.rain, weather.thunder);
         Some(i32::from(crate::mobs::raw_brightness(sky, block, darken)))
+    }
+
+    /// `conditions.location` для `item_used_on_block`/`placed_block`:
+    /// проверка блока в `origin + offset`.
+    fn item_location_ok(&self, c: &AdvancementCriterion, origin: [i32; 3]) -> bool {
+        !c.item_location_unsupported
+            && c.item_location
+                .as_ref()
+                .is_none_or(|check| self.block_check_matches(origin, check))
+    }
+
+    fn block_check_matches(&self, origin: [i32; 3], check: &BlockCheck) -> bool {
+        match check {
+            BlockCheck::Block {
+                offset,
+                blocks,
+                state,
+                nbt,
+            } => {
+                let pos = [
+                    origin[0] + offset[0],
+                    origin[1] + offset[1],
+                    origin[2] + offset[2],
+                ];
+                (blocks.is_empty()
+                    || self
+                        .block_name_at(pos)
+                        .is_some_and(|name| blocks.iter().any(|w| self.block_matches(w, &name))))
+                    && self.block_state_matches(pos, state)
+                    && self.block_nbt_matches(pos, nbt.as_ref())
+            }
+            BlockCheck::AllOf(list) => list
+                .iter()
+                .all(|term| self.block_check_matches(origin, term)),
+            BlockCheck::AnyOf(list) => list
+                .iter()
+                .any(|term| self.block_check_matches(origin, term)),
+        }
     }
 
     /// `BlockPredicate.nbt`: NBT блок-сущности в точке проверки.
@@ -2939,7 +3021,13 @@ mod tests {
         let def = parse_advancement("test/nbt_item", &json).expect("advancement");
         let c = &def.criteria[0];
         assert!(!c.item_location_unsupported);
-        assert!(c.block_nbt.is_some());
+        let Some(BlockCheck::Block { nbt, .. }) = &c.item_location else {
+            panic!("location не разобран: {:?}", c.item_location);
+        };
+        let Some(Tag::Compound(nbt)) = nbt else {
+            panic!("nbt не разобран: {nbt:?}");
+        };
+        assert_eq!(nbt.get("Lock"), Some(&Tag::String("Probe".to_owned())));
     }
 
     #[test]
@@ -2962,7 +3050,11 @@ mod tests {
         let def = parse_advancement("test/nbt_placed", &json).expect("advancement");
         let c = &def.criteria[0];
         assert!(!c.item_location_unsupported);
-        assert!(c.block_nbt.is_some());
+        let Some(BlockCheck::Block { offset, nbt, .. }) = &c.item_location else {
+            panic!("location не разобран: {:?}", c.item_location);
+        };
+        assert_eq!(*offset, [0, 0, 0]);
+        assert!(nbt.is_some());
     }
 
     #[test]
@@ -2985,15 +3077,19 @@ mod tests {
         let def = parse_advancement("test/ghast", &json).expect("advancement");
         let c = &def.criteria[0];
         assert!(!c.item_location_unsupported);
-        assert_eq!(c.blocks, vec!["minecraft:dried_ghast".to_owned()]);
         assert_eq!(
-            c.block_state,
-            vec![("waterlogged".to_owned(), vec!["true".to_owned()])]
+            c.item_location,
+            Some(BlockCheck::Block {
+                offset: [0, 0, 0],
+                blocks: vec!["minecraft:dried_ghast".to_owned()],
+                state: vec![("waterlogged".to_owned(), vec!["true".to_owned()])],
+                nbt: None,
+            })
         );
     }
 
     #[test]
-    fn placed_block_location_offsets_are_unsupported() {
+    fn placed_block_location_offsets_parse() {
         let json = serde_json::json!({
             "criteria": {
                 "c": {
@@ -3020,7 +3116,64 @@ mod tests {
             "requirements": [["c"]]
         });
         let def = parse_advancement("test/bookshelf", &json).expect("advancement");
-        assert!(def.criteria[0].item_location_unsupported);
+        let c = &def.criteria[0];
+        assert!(!c.item_location_unsupported);
+        assert_eq!(
+            c.item_location,
+            Some(BlockCheck::AnyOf(vec![BlockCheck::Block {
+                offset: [0, 0, 1],
+                blocks: vec!["minecraft:comparator".to_owned()],
+                state: vec![("facing".to_owned(), vec!["north".to_owned()])],
+                nbt: None,
+            }]))
+        );
+    }
+
+    #[test]
+    fn item_used_on_block_location_list_and_offsets_parse() {
+        let json = serde_json::json!({
+            "criteria": {
+                "c": {
+                    "trigger": "minecraft:item_used_on_block",
+                    "conditions": {
+                        "location": [
+                            {
+                                "type": "minecraft:match_block",
+                                "blocks": "minecraft:stone"
+                            },
+                            {
+                                "type": "minecraft:location_check",
+                                "offsetY": 1,
+                                "predicate": {
+                                    "block": {"blocks": "minecraft:oak_slab"}
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+            "requirements": [["c"]]
+        });
+        let def = parse_advancement("test/offset", &json).expect("advancement");
+        let c = &def.criteria[0];
+        assert!(!c.item_location_unsupported);
+        assert_eq!(
+            c.item_location,
+            Some(BlockCheck::AllOf(vec![
+                BlockCheck::Block {
+                    offset: [0, 0, 0],
+                    blocks: vec!["minecraft:stone".to_owned()],
+                    state: Vec::new(),
+                    nbt: None,
+                },
+                BlockCheck::Block {
+                    offset: [0, 1, 0],
+                    blocks: vec!["minecraft:oak_slab".to_owned()],
+                    state: Vec::new(),
+                    nbt: None,
+                },
+            ]))
+        );
     }
 
     #[test]
@@ -3047,10 +3200,14 @@ mod tests {
         let def = parse_advancement("test/state", &json).expect("advancement");
         let c = &def.criteria[0];
         assert!(!c.item_location_unsupported);
-        assert_eq!(c.blocks, vec!["minecraft:farmland".to_owned()]);
         assert_eq!(
-            c.block_state,
-            vec![("moisture".to_owned(), vec!["7".to_owned()])]
+            c.item_location,
+            Some(BlockCheck::Block {
+                offset: [0, 0, 0],
+                blocks: vec!["minecraft:farmland".to_owned()],
+                state: vec![("moisture".to_owned(), vec!["7".to_owned()])],
+                nbt: None,
+            })
         );
     }
 
