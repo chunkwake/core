@@ -716,9 +716,12 @@ fn run_chain(ctx: &Context<'_>, exec: &Exec, rest: &str, budget: &mut usize) -> 
                                 pos[1].floor() as i32,
                                 pos[2].floor() as i32,
                             ];
-                            ctx.plan
-                                .block_name_at(pos)
-                                .is_some_and(|name| name == args::resource_name(block))
+                            // Ваниль принимает block predicate: имя и
+                            // свойства (`stone`, `chest[facing=north]`).
+                            match ctx.plan.parse_block_state(block) {
+                                Some(state) => ctx.plan.block(pos) == Some(state),
+                                None => false,
+                            }
                         });
                         Ok((ok, next))
                     }

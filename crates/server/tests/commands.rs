@@ -159,6 +159,77 @@ fn setblock_and_fill_change_world() {
 }
 
 #[test]
+fn execute_if_block_checks_state_properties() {
+    let plan = world!();
+    let y = plan.spawn_point()[1].floor() as i32;
+    run(
+        &plan,
+        &format!("setblock 4 {y} 4 minecraft:chest[facing=north]"),
+    );
+    assert!(
+        run(
+            &plan,
+            &format!("execute if block 4 {y} 4 minecraft:chest[facing=north] run seed")
+        )
+        .contains("42")
+    );
+    // Свойства сравниваются, а не игнорируются.
+    assert!(
+        run(
+            &plan,
+            &format!("execute if block 4 {y} 4 minecraft:chest[facing=south] run seed")
+        )
+        .is_empty()
+    );
+    assert!(
+        run(
+            &plan,
+            &format!("execute if block 4 {y} 4 minecraft:chest run seed")
+        )
+        .contains("42")
+    );
+}
+
+#[test]
+fn copper_golem_foundation_merges_with_neighbor_chest() {
+    let plan = world!();
+    let y = plan.spawn_point()[1].floor() as i32;
+    run(&plan, &format!("setblock 4 {y} 4 minecraft:copper_block"));
+    run(
+        &plan,
+        &format!("setblock 5 {y} 4 minecraft:copper_chest[facing=north,type=single]"),
+    );
+    run(
+        &plan,
+        &format!(
+            "setblock 4 {} 4 minecraft:carved_pumpkin[facing=north]",
+            y + 1
+        ),
+    );
+    // `getFromCopperBlock` + `getChestType`: новый сундук — left, сосед — right.
+    assert!(
+        run(
+            &plan,
+            &format!(
+                "execute if block 4 {y} 4 minecraft:copper_chest[facing=north,type=left] run seed"
+            )
+        )
+        .contains("42"),
+        "основание не стало left-сундуком"
+    );
+    assert!(
+        run(
+            &plan,
+            &format!(
+                "execute if block 5 {y} 4 minecraft:copper_chest[facing=north,type=right] run seed"
+            )
+        )
+        .contains("42"),
+        "сосед не стал right-сундуком"
+    );
+}
+
+#[test]
 fn summon_creates_a_mob() {
     let plan = world!();
     let before = plan.mob_count();

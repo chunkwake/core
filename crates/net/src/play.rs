@@ -3733,6 +3733,32 @@ impl PlayPlan {
             return true;
         }
         self.trigger_summoned_entity(pos, crate::mobs::Species::CopperGolem, 5.0);
+        // `CopperChestBlock.getFromCopperBlock`: сундук склеивается с соседним
+        // медным сундуком (`type`/`facing`) и берёт меньшую окисленность
+        // (`getLeastOxidizedChestOfConnectedBlocks`).
+        let base = self
+            .survival
+            .placement
+            .default_state(chest)
+            .and_then(|state| self.survival.chests.get(&state).copied());
+        let chest_pos = [x, y - 1, z];
+        if let Some(base) = base {
+            // `chest_placement` выводит `facing` из взгляда: подбираем yaw так,
+            // чтобы получить facing тыквы.
+            let index = match facing.as_str() {
+                "north" => 0.0,
+                "east" => 1.0,
+                "south" => 2.0,
+                _ => 3.0,
+            };
+            let yaw = index * 90.0;
+            let state = self.chest_placement(chest_pos, base, yaw, 1, false);
+            if state != 0 {
+                self.set_block(chest_pos, state);
+                self.link_chest(chest_pos, state);
+                return true;
+            }
+        }
         if let Some(state) = self.survival.placement.default_state(chest) {
             let state = self
                 .survival
