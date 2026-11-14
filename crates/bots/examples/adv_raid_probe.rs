@@ -4,7 +4,7 @@
 //! `adv_raid_probe <addr> <packets.json> <registries.json>`
 use chunkwake_bots::{Client, Event, Ids};
 use chunkwake_data::packets::{Direction, PacketTable, State};
-use chunkwake_protocol::Writer;
+use chunkwake_protocol::{Reader, Writer};
 use std::time::Duration;
 
 const X: i32 = 2176;
@@ -13,11 +13,19 @@ const Z: i32 = 8;
 struct Probe {
     c: Client,
     sb_command: i32,
+    cb_boss_event: i32,
     custom_kind: i32,
     raid_trigger: i32,
     raid_win: i32,
     trigger: i32,
     win: i32,
+    /// Значения статистик при входе (могли сохраниться с прошлых запусков).
+    trigger0: i32,
+    win0: i32,
+    bar_added: bool,
+    bar_removed: bool,
+    bar_progress: f32,
+    bar_updates: i32,
 }
 
 impl Probe {
@@ -25,6 +33,34 @@ impl Probe {
         let mut w = Writer::new();
         w.var_int(id);
         w
+    }
+
+    /// `boss_event`: ADD/REMOVE/UPDATE_PROGRESS (нужен только прогресс).
+    fn boss_packet(&mut self, body: &[u8]) {
+        let mut r = Reader::new(body);
+        if r.bytes(16).is_err() {
+            return;
+        }
+        let Ok(action) = r.var_int() else { return };
+        match action {
+            0 => {
+                let Ok(_name) = chunkwake_protocol::text::read_component(&mut r) else {
+                    return;
+                };
+                if let Ok(progress) = r.f32() {
+                    self.bar_added = true;
+                    self.bar_progress = self.bar_progress.max(progress);
+                }
+            }
+            1 => self.bar_removed = true,
+            2 => {
+                if let Ok(progress) = r.f32() {
+                    self.bar_progress = self.bar_progress.max(progress);
+                    self.bar_updates += 1;
+                }
+            }
+            _ => {}
+        }
     }
 
     async fn pump(&mut self, ms: u64) {
@@ -49,6 +85,11 @@ impl Probe {
                         self.win = n;
                     }
                 }
+            }
+        }
+        for (id, body) in std::mem::take(&mut self.c.captured_by) {
+            if id == self.cb_boss_event {
+                self.boss_packet(&body);
             }
         }
     }
@@ -80,17 +121,27 @@ async fn main() {
     let raid_win = pid("minecraft:custom_stat", "minecraft:raid_win");
     let ids = Ids::load(&table).unwrap();
     let sb = |n| table.id(State::Play, Direction::Serverbound, n).unwrap();
-    let c = Client::connect(&a[1], "boater", ids, 777, "26.3")
+    let cb = |n| table.id(State::Play, Direction::Clientbound, n).unwrap();
+    let cb_boss_event = cb("boss_event");
+    let mut c = Client::connect(&a[1], "boater", ids, 777, "26.3")
         .await
         .unwrap();
+    c.capture_also = vec![cb_boss_event];
     let mut p = Probe {
         c,
         sb_command: sb("chat_command"),
+        cb_boss_event,
         custom_kind,
         raid_trigger,
         raid_win,
         trigger: 0,
         win: 0,
+        trigger0: 0,
+        win0: 0,
+        bar_added: false,
+        bar_removed: false,
+        bar_progress: 0.0,
+        bar_updates: 0,
     };
     p.pump(2000).await;
 
@@ -108,26 +159,31 @@ async fn main() {
             "setblock {X} 100 {} minecraft:red_bed[part=head,facing=south]",
             Z + 1
         ),
-        "effect give @s minecraft:bad_omen 600 0".into(),
     ];
     for line in setup {
         p.cmd(&line).await;
     }
+    // Статистика сохраняется между запусками: считаем только прирост.
+    p.trigger0 = p.trigger;
+    p.win0 = p.win;
+    // Bad Omen даём после снятия базовых значений, иначе рейд успевает
+    // начаться прямо во время `pump` предыдущей команды.
+    p.cmd("effect give @s minecraft:bad_omen 600 0").await;
 
     // Ждём старт рейда: статистика `raid_trigger` и первый разбойник.
     for _ in 0..40 {
         p.pump(250).await;
-        if p.trigger > 0 {
+        if p.trigger > p.trigger0 {
             break;
         }
     }
-    assert!(p.trigger > 0, "raid_trigger не пришёл");
+    assert!(p.trigger > p.trigger0, "raid_trigger не пришёл");
     println!("raid_trigger ok");
 
     // Зачищаем волны (easy = 3), ждём `raid_win`.
     let mut waves = 0;
     for _ in 0..120 {
-        if p.win > 0 {
+        if p.win > p.win0 {
             break;
         }
         p.pump(250).await;
@@ -139,7 +195,22 @@ async fn main() {
             waves += 1;
         }
     }
-    assert!(p.win > 0, "raid_win не пришёл (волн: {waves})");
+    assert!(p.win > p.win0, "raid_win не пришёл (волн: {waves})");
     println!("raid_win ok (волн зачищено {waves})");
+    // Пакеты бара (`REMOVE`) могут прийти следом за статистикой.
+    p.pump(800).await;
+    // Босс-бар `event.minecraft.raid`: ADD → UPDATE_PROGRESS → REMOVE.
+    assert!(p.bar_added, "босс-бар рейда не появился");
+    assert!(
+        p.bar_progress > 0.5,
+        "прогресс босс-бара не рос: {}",
+        p.bar_progress
+    );
+    assert!(p.bar_updates > 0, "не было UPDATE_PROGRESS");
+    assert!(p.bar_removed, "босс-бар не снят после победы");
+    println!(
+        "raid boss bar ok (progress {:.2}, updates {})",
+        p.bar_progress, p.bar_updates
+    );
     println!("adv_raid: ok");
 }
