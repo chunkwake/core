@@ -1259,6 +1259,14 @@ impl PlayPlan {
 
     fn mob_loot(&self, id: i32, e: &MobEntry) {
         let m = &e.mob;
+        // `WitherBoss.die`: взрыв силой 7 (`ExplosionInteraction.MOB`).
+        if m.species == Species::Wither {
+            self.explode_mob(
+                [m.pos[0], m.pos[1] + m.size().1 / 2.0, m.pos[2]],
+                7.0,
+                "minecraft:wither",
+            );
+        }
         // Детёныши животных ничего не роняют; детёныш зомби — как взрослый.
         if let Some((uuid, _)) = e.killer {
             self.award_stat(uuid, "minecraft:killed", m.species.name(), 1);
@@ -3647,6 +3655,7 @@ impl PlayPlan {
                     self.play_sound(None, &name, crate::sounds::HOSTILE, pos, volume, pitch);
                 }
                 Out::Shoot { target, power } => self.mob_shoot(id, Uuid::from_u128(target), power),
+                Out::ShootSkull { target } => self.mob_shoot_skull(id, Uuid::from_u128(target)),
                 // `EatBlockGoal.start`: анимация опущенной головы.
                 Out::EatStart => self
                     .hub

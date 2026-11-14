@@ -1794,6 +1794,10 @@ pub(crate) struct DimSim {
     sculk_sections: Mutex<FastMap<[i32; 3], Vec<[i32; 3]>>>,
     /// Вибрации, ожидающие доставки (`game_time + distance`).
     vibrations: Mutex<Vec<game_events::PendingVibration>>,
+    /// Босс-бары визеров (`WitherBoss.bossEvent`).
+    wither_bars: Mutex<FastMap<u128, wither::WitherBar>>,
+    /// Летящие черепа визера (`minecraft:wither_skull`).
+    wither_skulls: Mutex<FastMap<i32, wither::WitherSkull>>,
     /// Индекс предметов по чанкам: `(cx, cz)` → ID предметов в нём.
     ///
     /// Подбор игроком и всасывание воронкой раньше сканировали **все**
@@ -2415,6 +2419,7 @@ mod swing;
 mod tracking;
 mod unload;
 mod villagers;
+mod wither;
 
 pub use poi::group_of as poi_group;
 pub use unload::UnloadWrite;
@@ -11887,6 +11892,7 @@ impl PlayPlan {
         self.tick_crafters();
         lap(PH_CAMPFIRES, watch);
         self.tick_copper_chests();
+        self.tick_withers();
         self.tick_vibrations();
         self.tick_random_blocks();
         self.tick_precipitation();

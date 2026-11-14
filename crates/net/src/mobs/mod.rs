@@ -1645,6 +1645,48 @@ pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walke
 }
 
 /// `Mob.serverAiStep`: селекторы → навигация → `MoveControl` → `LookControl`.
+/// `WitherBoss.customServerAiStep`: полёт на высоте ~5 над целью и черепа
+/// раз в 40 тиков (раз в 20 во второй половине здоровья).
+/// Период стрельбы визера: 40 тиков, 20 во второй половине здоровья.
+fn wither_period(health: f32, max: f32) -> u32 {
+    if health * 2.0 <= max { 20 } else { 40 }
+}
+
+fn wither_ai_step(m: &mut Mob, s: &mut Senses) {
+    m.no_gravity = true;
+    let target = m
+        .target
+        .and_then(|t| s.players.iter().find(|p| p.uuid == t).copied())
+        .or_else(|| {
+            s.players
+                .iter()
+                .copied()
+                .filter(|p| dist2(p.pos, m.pos) <= 40.0 * 40.0)
+                .min_by(|a, b| dist2(a.pos, m.pos).total_cmp(&dist2(b.pos, m.pos)))
+        });
+    let Some(p) = target else {
+        m.zza = 0.0;
+        m.xxa = 0.0;
+        m.vel[1] *= 0.98;
+        return;
+    };
+    m.target = Some(p.uuid);
+    let dx = p.pos[0] - m.pos[0];
+    let dz = p.pos[2] - m.pos[2];
+    let horizontal = (dx * dx + dz * dz).sqrt();
+    m.yaw = (path::atan2(dz, dx) * 57.295_776) as f32 - 90.0;
+    m.head_yaw = m.yaw;
+    let dy = p.pos[1] + 5.0 - m.pos[1];
+    m.pitch = -(path::atan2(dy, horizontal.max(1e-4)) * 57.295_776) as f32;
+    m.vel[1] = (dy * 0.08).clamp(-0.2, 0.2);
+    m.zza = if horizontal > 4.0 { 1.0 } else { 0.0 };
+    m.xxa = 0.0;
+    let period = wither_period(m.health, m.max_health());
+    if m.tick_count.is_multiple_of(period) {
+        m.out.push(Out::ShootSkull { target: p.uuid });
+    }
+}
+
 fn server_ai_step(m: &mut Mob, w: &World, s: &mut Senses) {
     // `Mob.isEffectiveAi`: без целей, навигации и LookControl.
     if m.no_ai {
@@ -1660,6 +1702,10 @@ fn server_ai_step(m: &mut Mob, w: &World, s: &mut Senses) {
         m.zza = 0.0;
         m.xxa = 0.0;
         goals::look_tick(m);
+        return;
+    }
+    if m.species == Species::Wither {
+        wither_ai_step(m, s);
         return;
     }
     let mut goals = std::mem::take(&mut m.goals);
@@ -2262,6 +2308,36 @@ mod tests {
         m.next_weather_age = -1;
         copper_golem_weathering(&mut m);
         assert!(m.next_weather_age >= 504_000);
+    }
+
+    #[test]
+    fn wither_shoots_faster_in_second_phase() {
+        assert_eq!(wither_period(300.0, 300.0), 40);
+        assert_eq!(wither_period(151.0, 300.0), 40);
+        assert_eq!(wither_period(150.0, 300.0), 20);
+        assert_eq!(wither_period(1.0, 300.0), 20);
+    }
+
+    #[test]
+    fn wither_flies_without_gravity() {
+        let mut m = Mob::new(Species::Wither, [0.0; 3], 1);
+        let mut rnd = || 0.5;
+        let sight = |_: [f64; 3], _: [f64; 3]| true;
+        let mut s = Senses {
+            players: &[],
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &sight,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: true,
+            mob_griefing: true,
+            jump_boost: None,
+        };
+        wither_ai_step(&mut m, &mut s);
+        assert!(m.no_gravity);
     }
 
     #[test]
