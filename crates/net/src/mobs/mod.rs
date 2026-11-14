@@ -826,6 +826,16 @@ impl WeatherState {
         })
     }
 
+    /// `WeatheringCopper.WeatherState` id для `set_entity_data`.
+    pub fn id(self) -> i32 {
+        match self {
+            WeatherState::Unaffected => 0,
+            WeatherState::Exposed => 1,
+            WeatherState::Weathered => 2,
+            WeatherState::Oxidized => 3,
+        }
+    }
+
     pub fn next(self) -> Self {
         match self {
             WeatherState::Unaffected => WeatherState::Exposed,
@@ -932,6 +942,8 @@ pub struct Mob {
     pub next_weather_age: i64,
     /// Счётчик тиков жизни (для `next_weather_age`, в NBT не пишется).
     pub ticks: u64,
+    /// `CopperGolem`: на этом тике голем стал статуей (удаляется из мира).
+    pub statue: bool,
     /// `DropChances` по тем же слотам; > 1 — предмет сохраняется всегда.
     pub drop_chances: [f32; 6],
     /// Множитель скорости от `Speed`/`Slowness` (пересчитывается в тике).
@@ -999,6 +1011,7 @@ impl Mob {
             weather_state: WeatherState::Unaffected,
             next_weather_age: -1,
             ticks: 0,
+            statue: false,
             nav: Navigation::new(species == Species::Spider),
             move_ctl: MoveControl::default(),
             move_speed: 0.0,
@@ -1702,6 +1715,14 @@ pub fn copper_golem_weathering(m: &mut Mob) {
         }
         _ => {}
     }
+    // `CopperGolem`: полностью окисленный и не вощёный голем с шансом
+    // 0.58 % за тик превращается в статую (случайная поза).
+    if m.weather_state == WeatherState::Oxidized
+        && m.next_weather_age != -2
+        && rand::random::<f32>() < 0.0058
+    {
+        m.statue = true;
+    }
 }
 
 pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
@@ -2241,6 +2262,36 @@ mod tests {
         m.next_weather_age = -1;
         copper_golem_weathering(&mut m);
         assert!(m.next_weather_age >= 504_000);
+    }
+
+    #[test]
+    fn weather_state_ids_match_vanilla() {
+        assert_eq!(WeatherState::Unaffected.id(), 0);
+        assert_eq!(WeatherState::Exposed.id(), 1);
+        assert_eq!(WeatherState::Weathered.id(), 2);
+        assert_eq!(WeatherState::Oxidized.id(), 3);
+    }
+
+    #[test]
+    fn oxidized_golem_turns_into_statue_but_waxed_does_not() {
+        let mut m = Mob::new(Species::CopperGolem, [0.0; 3], 1);
+        m.weather_state = WeatherState::Oxidized;
+        m.next_weather_age = 0;
+        for _ in 0..20_000 {
+            copper_golem_weathering(&mut m);
+            if m.statue {
+                break;
+            }
+        }
+        assert!(m.statue, "окисленный голем не стал статуей");
+
+        let mut waxed = Mob::new(Species::CopperGolem, [0.0; 3], 2);
+        waxed.weather_state = WeatherState::Oxidized;
+        waxed.next_weather_age = -2;
+        for _ in 0..20_000 {
+            copper_golem_weathering(&mut waxed);
+        }
+        assert!(!waxed.statue, "вощёный голем стал статуей");
     }
 
     #[test]

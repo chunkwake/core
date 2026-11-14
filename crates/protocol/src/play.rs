@@ -1649,6 +1649,10 @@ pub enum Meta {
         profession: i32,
         level: i32,
     },
+    /// `EntityDataSerializers.COPPER_GOLEM_STATE` (id 37): VarInt.
+    GolemState(i32),
+    /// `EntityDataSerializers.WEATHERING_COPPER_STATE` (id 38): VarInt.
+    WeatheringState(i32),
 }
 
 /// `set_entity_data` с произвольными полями `(индекс, значение)`.
@@ -1695,6 +1699,12 @@ pub fn entity_meta(id: i32, entity_id: i32, fields: &[(u8, Meta)]) -> Vec<u8> {
                     .var_int(*kind)
                     .var_int(*profession)
                     .var_int(*level);
+            }
+            Meta::GolemState(v) => {
+                w.u8(*i).var_int(37).var_int(*v);
+            }
+            Meta::WeatheringState(v) => {
+                w.u8(*i).var_int(38).var_int(*v);
             }
         };
     }
@@ -1797,6 +1807,32 @@ mod lp_tests {
         assert_eq!(r.u8().unwrap(), 8);
         assert_eq!(r.var_int().unwrap(), 3);
         assert_eq!(r.f32().unwrap(), 2.5);
+        assert_eq!(r.u8().unwrap(), 0xff);
+    }
+}
+
+#[cfg(test)]
+mod copper_golem_meta_tests {
+    use super::*;
+
+    /// `CopperGolem`: индекс 16 — `WEATHERING_COPPER_STATE` (38),
+    /// индекс 17 — `COPPER_GOLEM_STATE` (37), значения — VarInt.
+    #[test]
+    fn copper_golem_meta_uses_new_serializers() {
+        let packet = entity_meta(
+            0,
+            5,
+            &[(16, Meta::WeatheringState(3)), (17, Meta::GolemState(1))],
+        );
+        let mut r = Reader::new(&packet);
+        assert_eq!(r.var_int().unwrap(), 0);
+        assert_eq!(r.var_int().unwrap(), 5);
+        assert_eq!(r.u8().unwrap(), 16);
+        assert_eq!(r.var_int().unwrap(), 38);
+        assert_eq!(r.var_int().unwrap(), 3);
+        assert_eq!(r.u8().unwrap(), 17);
+        assert_eq!(r.var_int().unwrap(), 37);
+        assert_eq!(r.var_int().unwrap(), 1);
         assert_eq!(r.u8().unwrap(), 0xff);
     }
 }

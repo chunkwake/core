@@ -47,6 +47,10 @@ struct MobMeta {
     climbing: bool,
     using_item: bool,
     cube_size: i32,
+    /// `CopperGolem` `DATA_WEATHER_STATE` (id состояния окисления).
+    weather: i32,
+    /// `CopperGolem` `DATA_COPPER_GOLEM_STATE` (задача, пока всегда IDLE).
+    golem: i32,
 }
 
 impl MobMeta {
@@ -58,6 +62,8 @@ impl MobMeta {
             climbing: m.climbing,
             using_item: m.using_item.is_some(),
             cube_size: m.cube_size,
+            weather: m.weather_state.id(),
+            golem: 0,
         }
     }
 
@@ -90,6 +96,15 @@ impl MobMeta {
             // `LivingEntity.DATA_LIVING_ENTITY_FLAGS`: 1 — тянет предмет основной рукой.
             Species::Skeleton if changed(|m| m.using_item) => {
                 out.push((8, Meta::Byte(u8::from(self.using_item))));
+            }
+            // `CopperGolem.DATA_WEATHER_STATE`/`DATA_COPPER_GOLEM_STATE`.
+            Species::CopperGolem => {
+                if old.is_none_or(|m| m.weather != self.weather) {
+                    out.push((16, Meta::WeatheringState(self.weather)));
+                }
+                if old.is_none_or(|m| m.golem != self.golem) {
+                    out.push((17, Meta::GolemState(self.golem)));
+                }
             }
             _ => {}
         }
@@ -621,6 +636,7 @@ impl PlayPlan {
         let mut rand = || rand::Rng::r#gen::<f64>(&mut rng);
         let mut packets: Vec<(i32, Vec<u8>)> = Vec::new();
         let mut gone = Vec::new();
+        let mut statues = Vec::new();
         let mut sounds = Vec::new();
         let mut trampling = Vec::new();
         let mut vibrations = Vec::new();
@@ -711,7 +727,14 @@ impl PlayPlan {
                     let old_pos = e.mob.pos;
                     let old_y = e.mob.pos[1];
                     e.mob.on_fire = e.environment.burning > 0;
-                    if mb::tick(&mut e.mob, &world, &mut senses) {
+                    let removed = mb::tick(&mut e.mob, &world, &mut senses);
+                    // `CopperGolem` полностью окислился: статую поставим
+                    // после тика, без дропа и статистик смерти.
+                    if e.mob.statue {
+                        statues.push(id);
+                        continue;
+                    }
+                    if removed {
                         // Крипер взорвался (`discard`): без лута и анимации смерти.
                         let blast = e.mob.out.iter().find_map(|o| match o {
                             mb::goals::Out::Explode(p) => Some(*p),
@@ -1072,6 +1095,19 @@ impl PlayPlan {
             }
         }
         self.apply_mob_outs(outs);
+        if !statues.is_empty() {
+            let converted: Vec<(i32, MobEntry)> = {
+                let mut mobs = self.sim().mobs.lock().unwrap();
+                statues
+                    .iter()
+                    .filter_map(|id| Some((*id, mobs.remove(id)?)))
+                    .collect()
+            };
+            self.hub.remove_tracked(&statues);
+            for (_, e) in converted {
+                self.golem_statue(&e.mob);
+            }
+        }
         if !gone.is_empty() {
             // `Slime.remove`: число детей решается (и `SlimeSplitEvent` идёт),
             // пока умерший ещё в мире.
@@ -1182,6 +1218,45 @@ impl PlayPlan {
     }
 
     /// Лут и опыт умершего моба (`LivingEntity.dropAllDeathLoot`).
+    /// `CopperGolem`: поставить статую на месте голема и выронить предмет.
+    fn golem_statue(&self, m: &Mob) {
+        let pos = [
+            m.pos[0].floor() as i32,
+            m.pos[1].floor() as i32,
+            m.pos[2].floor() as i32,
+        ];
+        let pl = &self.survival.placement;
+        let water = self
+            .block(pos)
+            .and_then(|s| crate::fluids::state_fluid(pl, s))
+            .is_some_and(|f| f.kind == crate::fluids::Kind::Water);
+        let replaceable = self.block(pos).is_some_and(|s| {
+            matches!(
+                self.state_name(s),
+                "minecraft:air" | "minecraft:water" | "minecraft:cave_air" | "minecraft:void_air"
+            )
+        });
+        if replaceable
+            && let Some(mut st) = pl.default_state("minecraft:oxidized_copper_golem_statue")
+        {
+            let pose =
+                ["standing", "sitting", "running", "star"][rand::random::<u32>() as usize % 4];
+            for (key, value) in [
+                ("copper_golem_pose", pose),
+                ("facing", statue_facing(m.yaw)),
+                ("waterlogged", if water { "true" } else { "false" }),
+            ] {
+                if let Some(next) = pl.with_prop(st, key, value) {
+                    st = next;
+                }
+            }
+            self.set_block(pos, st);
+        }
+        if let Some(stack) = m.item(0) {
+            self.drop_item(m.pos, [0.0; 3], stack, items::BLOCK_DELAY);
+        }
+    }
+
     fn mob_loot(&self, id: i32, e: &MobEntry) {
         let m = &e.mob;
         // Детёныши животных ничего не роняют; детёныш зомби — как взрослый.
@@ -5057,9 +5132,28 @@ impl PlayPlan {
     }
 }
 
+/// `Direction.fromYRot`: 0 — юг, 90 — запад, 180 — север, 270 — восток.
+fn statue_facing(yaw: f32) -> &'static str {
+    match ((yaw.rem_euclid(360.0) + 45.0) / 90.0) as i32 % 4 {
+        0 => "south",
+        1 => "west",
+        2 => "north",
+        _ => "east",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statue_facing_follows_yaw() {
+        assert_eq!(statue_facing(0.0), "south");
+        assert_eq!(statue_facing(90.0), "west");
+        assert_eq!(statue_facing(180.0), "north");
+        assert_eq!(statue_facing(-90.0), "east");
+        assert_eq!(statue_facing(359.0), "south");
+    }
 
     #[test]
     fn mace_smash_bonus_matches_vanilla() {
