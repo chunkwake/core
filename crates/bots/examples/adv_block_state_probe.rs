@@ -151,7 +151,8 @@ async fn main() {
     for line in setup {
         p.cmd(&line).await;
     }
-    p.pump(500).await;
+    // `use_item_on` в load-gated списке: даём клиенту догрузиться.
+    p.pump(1500).await;
 
     // 1. placed_block: ghast на сухом камне — waterlogged=false, достижения нет.
     p.select(0).await;

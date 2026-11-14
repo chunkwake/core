@@ -3409,6 +3409,58 @@ mod tests {
     }
 
     #[test]
+    fn using_item_with_looking_at_types_parses() {
+        let json = serde_json::json!({
+            "criteria": {
+                "look": {
+                    "trigger": "minecraft:using_item",
+                    "conditions": {
+                        "item": {"items": ["minecraft:bow", "minecraft:crossbow"]},
+                        "player": {
+                            "type": "minecraft:entity_properties",
+                            "entity": "this",
+                            "predicate": {
+                                "minecraft:type_specific/player": {
+                                    "looking_at": {
+                                        "minecraft:entity_type": [
+                                            "minecraft:parrot",
+                                            "minecraft:ghast"
+                                        ],
+                                        "minecraft:flags": {"is_baby": false}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "requirements": [["look"]]
+        });
+        let def = parse_advancement("test/using_types", &json).expect("advancement");
+        let c = &def.criteria[0];
+        assert_eq!(
+            c.items,
+            vec!["minecraft:bow".to_owned(), "minecraft:crossbow".to_owned()]
+        );
+        assert!(!c.player_pred_unsupported);
+        let EntityPred::Properties {
+            looking_at: Some(look),
+            ..
+        } = c.player_pred.as_ref().expect("player predicate")
+        else {
+            panic!("looking_at не разобран: {:?}", c.player_pred);
+        };
+        let EntityPred::Properties { entities, baby, .. } = look.as_ref() else {
+            panic!("ожидался entity_properties: {look:?}");
+        };
+        assert_eq!(
+            entities,
+            &vec!["minecraft:parrot".to_owned(), "minecraft:ghast".to_owned()]
+        );
+        assert_eq!(*baby, Some(false));
+    }
+
+    #[test]
     fn using_item_unknown_type_specific_is_unsupported() {
         let json = serde_json::json!({
             "criteria": {

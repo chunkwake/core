@@ -142,7 +142,8 @@ async fn main() {
         p.cmd(&line).await;
     }
     p.select(0).await;
-    p.pump(400).await;
+    // `use_item_on` в load-gated списке: даём клиенту догрузиться.
+    p.pump(1500).await;
 
     // Ставим табличку рукой: у неё появляется блок-сущность (is_waxed=0b).
     p.place_on_top([X, 100, Z]).await;

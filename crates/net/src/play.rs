@@ -12707,8 +12707,15 @@ impl PlayPlan {
                     game_ticks += 1;
                     state.vitals.tick_attack(state.inv.held().map(|s| s.item));
                     // `ServerPlayer.updateUsingItem`: триггер каждый тик, пока
-                    // подзорная труба в руке (`using_item`).
-                    if let Some(slot) = spyglass {
+                    // предмет используется: труба, лук/арбалет, еда, зелья,
+                    // трезубец, копьё.
+                    let using = spyglass
+                        .or_else(|| drawing.map(|(slot, _)| slot))
+                        .or_else(|| trident_use.map(|(slot, _, _, _)| slot))
+                        .or_else(|| eating.map(|(slot, _, _)| slot))
+                        .or_else(|| drinking.map(|(slot, _, _, _)| slot))
+                        .or_else(|| spear_use.as_ref().map(|s| s.slot));
+                    if let Some(slot) = using {
                         let name = state
                             .inv
                             .slots
@@ -12716,7 +12723,6 @@ impl PlayPlan {
                             .copied()
                             .flatten()
                             .filter(|_| !state.vitals.dead)
-                            .filter(|s| self.item_name(s.item) == "minecraft:spyglass")
                             .map(|s| self.item_name(s.item));
                         match name {
                             Some(name) => {
@@ -12729,7 +12735,10 @@ impl PlayPlan {
                                     state.inv.selected,
                                 );
                             }
-                            None => spyglass = None,
+                            // Предмет исчез из слота: сбрасываем только трубу,
+                            // остальные машины состояний чистят себя сами.
+                            None if spyglass == Some(slot) => spyglass = None,
+                            None => {}
                         }
                     }
                     self.award_stat(uuid, "minecraft:custom", "minecraft:play_time", 1);

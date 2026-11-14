@@ -1,0 +1,19 @@
+{
+  "display": {
+    "title": {"text": "using item negative probe"},
+    "description": {"text": "crossbow must not match a drawn bow"},
+    "icon": {"id": "minecraft:crossbow"},
+    "frame": "task",
+    "show_toast": false,
+    "announce_to_chat": false
+  },
+  "criteria": {
+    "draw_crossbow": {
+      "trigger": "minecraft:using_item",
+      "conditions": {
+        "item": {"items": "minecraft:crossbow"}
+      }
+    }
+  },
+  "requirements": [["draw_crossbow"]]
+}

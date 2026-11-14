@@ -132,7 +132,8 @@ async fn main() {
         p.cmd(&line).await;
     }
     p.select(0).await;
-    p.pump(600).await;
+    // use_item в load-gated списке: даём клиенту догрузиться.
+    p.pump(1500).await;
 
     // Смотрим на попугая через подзорную трубу.
     p.use_item(0.0, 16.0).await;
