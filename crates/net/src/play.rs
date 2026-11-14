@@ -1861,6 +1861,10 @@ pub(crate) struct DimSim {
     beacons: Mutex<FastMap<[i32; 3], beacons::Beacon>>,
     /// Маяки в загруженных чанках, ещё не разобранные тиком.
     pending_beacons: Mutex<Vec<[i32; 3]>>,
+    /// Проводники (`ConduitBlockEntity`).
+    conduits: Mutex<FastMap<[i32; 3], conduits::Conduit>>,
+    /// Проводники в загруженных чанках, ещё не разобранные тиком.
+    pending_conduits: Mutex<Vec<[i32; 3]>>,
     /// Играющие проигрыватели (`JukeboxSongPlayer`).
     jukeboxes: Mutex<FastMap<[i32; 3], jukebox::Playing>>,
     /// Проигрыватели с диска, ещё не разобранные тиком.
@@ -2380,6 +2384,7 @@ mod books;
 mod client_info;
 /// Ванильные команды: дерево, права, селекторы и обработчики.
 pub mod commands;
+mod conduits;
 mod crafter;
 mod fishing;
 mod item_frames;
@@ -3419,6 +3424,11 @@ impl PlayPlan {
         self.sim().beacons.lock().unwrap().remove(&[x, y, z]);
         if beacon {
             self.sim().pending_beacons.lock().unwrap().push([x, y, z]);
+        }
+        let conduit = self.state_name(state) == "minecraft:conduit";
+        self.sim().conduits.lock().unwrap().remove(&[x, y, z]);
+        if conduit {
+            self.sim().pending_conduits.lock().unwrap().push([x, y, z]);
         }
         if inserted {
             if let Some((column, _)) = self.dim_state().edited.read().unwrap().get(&key) {
@@ -5318,6 +5328,12 @@ impl PlayPlan {
                 c.block_entities
                     .iter()
                     .filter(|(_, be)| be.id == "minecraft:beacon")
+                    .map(|(p, _)| *p),
+            );
+            self.sim().pending_conduits.lock().unwrap().extend(
+                c.block_entities
+                    .iter()
+                    .filter(|(_, be)| be.id == "minecraft:conduit")
                     .map(|(p, _)| *p),
             );
             fresh.push(pos);
@@ -11845,6 +11861,7 @@ impl PlayPlan {
         self.tick_item_frames();
         self.tick_paintings();
         self.tick_beacons();
+        self.tick_conduits();
         lap(PH_MOBS, watch);
         self.tick_animals();
         self.tick_natural_spawn();
