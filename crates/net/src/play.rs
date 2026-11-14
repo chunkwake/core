@@ -12303,6 +12303,8 @@ impl PlayPlan {
         // Поедание: слот хотбара, еда и момент окончания.
         let mut eating: Option<(usize, chunkwake_data::world::Food, Instant)> = None;
         let mut drawing: Option<(usize, u64)> = None;
+        // `SpyglassItem`: подзорная труба используется (для `using_item`).
+        let mut spyglass: Option<usize> = None;
         // Питьё зелья: слот, предмет, компоненты и момент окончания.
         let mut drinking: Option<(usize, i32, u32, Instant)> = None;
         // Копьё в режиме удержания (`KineticWeapon`).
@@ -12704,6 +12706,32 @@ impl PlayPlan {
                 _ = food_ticker.tick() => {
                     game_ticks += 1;
                     state.vitals.tick_attack(state.inv.held().map(|s| s.item));
+                    // `ServerPlayer.updateUsingItem`: триггер каждый тик, пока
+                    // подзорная труба в руке (`using_item`).
+                    if let Some(slot) = spyglass {
+                        let name = state
+                            .inv
+                            .slots
+                            .get(slot)
+                            .copied()
+                            .flatten()
+                            .filter(|_| !state.vitals.dead)
+                            .filter(|s| self.item_name(s.item) == "minecraft:spyglass")
+                            .map(|s| self.item_name(s.item));
+                        match name {
+                            Some(name) => {
+                                let look = self.looking_at_entity(uuid);
+                                self.advancement_using_item(
+                                    uuid,
+                                    name,
+                                    look,
+                                    &state.inv.slots,
+                                    state.inv.selected,
+                                );
+                            }
+                            None => spyglass = None,
+                        }
+                    }
                     self.award_stat(uuid, "minecraft:custom", "minecraft:play_time", 1);
                     self.award_stat(uuid, "minecraft:custom", "minecraft:total_world_time", 1);
                     if sneaking {
@@ -13293,6 +13321,7 @@ impl PlayPlan {
                         }
                         state.inv.selected = slot;
                         eating = None;
+                        spyglass = None;
                         continue;
                     }
                     if id == ids.sb_set_beacon {
@@ -14169,6 +14198,21 @@ impl PlayPlan {
                                 .await?;
                             continue;
                         }
+                        // `SpyglassItem.use`: подзорная труба (`using_item`).
+                        if !state.vitals.dead
+                            && login.spawn.game_mode != 3
+                            && let Some(slot) = Self::hand_index(&state.inv, hand)
+                            && let Some(held) = state.inv.slots[slot]
+                            && self.item_name(held.item) == "minecraft:spyglass"
+                        {
+                            eating = None;
+                            drinking = None;
+                            drawing = None;
+                            spyglass = Some(slot);
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence))
+                                .await?;
+                            continue;
+                        }
                         // `Item.use` для `BLOCKS_ATTACKS`: поднять щит.
                         if !state.vitals.dead
                             && login.spawn.game_mode != 3
@@ -14630,6 +14674,7 @@ impl PlayPlan {
                                 self.send_slots(conn, &mut state.inv, &[held]).await?;
                             }
                             play::RELEASE_USE_ITEM => {
+                                spyglass = None;
                                 if let Some((slot, start)) = drawing.take() {
                                     self.release_draw(
                                         conn,

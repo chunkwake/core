@@ -4392,6 +4392,38 @@ impl PlayPlan {
     /// Прямая видимость (`ClipContext.Block.COLLIDER`): точки отрезка через
     /// каждые 0.2 блока не попадают в коробки коллизии. Стекло видимость
     /// закрывает, трава и цветы — нет.
+    /// `ProjectileUtil.getEntityHitResult` для `PlayerPredicate.lookingAt`:
+    /// имя сущности, на которую смотрит игрок (до 100 блоков, с проверкой
+    /// линии видимости).
+    pub(super) fn looking_at_entity(&self, uuid: Uuid) -> Option<&'static str> {
+        let (feet, yaw, pitch) = self.player_at(uuid)?;
+        let eye = eye_of(feet);
+        let dir = crate::arrows::aim(f64::from(yaw), f64::from(pitch), 0.0);
+        type LookMob = (i32, [f64; 3], (f64, f64), &'static str);
+        let mobs: Vec<LookMob> = self
+            .sim()
+            .mobs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, e)| e.mob.alive())
+            .map(|(&id, e)| (id, e.mob.pos, e.mob.size(), e.mob.species.name()))
+            .collect();
+        let mut best: Option<(f64, &'static str, [f64; 3], f64)> = None;
+        for (_id, pos, size, name) in mobs {
+            if let Some(t) = ray_aabb(eye, dir, pos, size, 1.0)
+                && t <= 100.0
+                && best.as_ref().is_none_or(|(bt, _, _, _)| t < *bt)
+            {
+                best = Some((t, name, pos, size.1));
+            }
+        }
+        let (_, name, pos, height) = best?;
+        let target = [pos[0], pos[1] + height * 0.85, pos[2]];
+        self.with_world(|w| self.clear_line(w, eye, target))
+            .then_some(name)
+    }
+
     fn clear_line(&self, w: &WorldView<'_>, from: [f64; 3], to: [f64; 3]) -> bool {
         let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
         let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();

@@ -28,6 +28,9 @@ pub enum EntityPred {
         equipment: Vec<(String, ItemPred)>,
         entities: Vec<String>,
         baby: Option<bool>,
+        /// `type_specific/player.looking_at`: предикат сущности, на которую
+        /// смотрит игрок (`PlayerPredicate.lookingAt`).
+        looking_at: Option<Box<EntityPred>>,
     },
 }
 
@@ -206,6 +209,77 @@ fn parse_item_pred(v: &serde_json::Value) -> Option<ItemPred> {
     Some(ItemPred { items, damage })
 }
 
+/// Поля `EntityPredicate` (`entity_properties.predicate` и `looking_at`).
+fn parse_property_map(
+    map: &serde_json::Map<String, serde_json::Value>,
+    ok: &mut bool,
+) -> Option<EntityPred> {
+    let mut equipment = Vec::new();
+    let mut entities = Vec::new();
+    let mut baby = None;
+    let mut looking_at = None;
+    for (key, value) in map {
+        match key.as_str() {
+            "minecraft:entity_type" => entities = string_or_list(value),
+            "minecraft:flags" => {
+                if let Some(flag) = value.get("is_baby") {
+                    match flag.as_bool() {
+                        Some(b) => baby = Some(b),
+                        None => *ok = false,
+                    }
+                }
+                if value
+                    .as_object()
+                    .is_some_and(|o| o.keys().any(|k| k != "is_baby"))
+                {
+                    *ok = false;
+                }
+            }
+            "minecraft:equipment" => {
+                let Some(slots) = value.as_object() else {
+                    *ok = false;
+                    continue;
+                };
+                for (slot, item) in slots {
+                    match parse_item_pred(item) {
+                        Some(pred) if equipment_slot(slot, 0).is_some() => {
+                            equipment.push((slot.clone(), pred));
+                        }
+                        _ => *ok = false,
+                    }
+                }
+            }
+            "minecraft:type_specific/player" => {
+                let Some(player) = value.as_object() else {
+                    *ok = false;
+                    continue;
+                };
+                for (name, look) in player {
+                    if name != "looking_at" {
+                        *ok = false;
+                        continue;
+                    }
+                    let Some(look) = look.as_object() else {
+                        *ok = false;
+                        continue;
+                    };
+                    match parse_property_map(look, ok) {
+                        Some(pred) => looking_at = Some(Box::new(pred)),
+                        None => *ok = false,
+                    }
+                }
+            }
+            _ => *ok = false,
+        }
+    }
+    Some(EntityPred::Properties {
+        equipment,
+        entities,
+        baby,
+        looking_at,
+    })
+}
+
 fn parse_entity_pred(v: &serde_json::Value, ok: &mut bool) -> Option<EntityPred> {
     let typ = v.get("type").and_then(|t| t.as_str())?;
     match typ {
@@ -229,53 +303,8 @@ fn parse_entity_pred(v: &serde_json::Value, ok: &mut bool) -> Option<EntityPred>
             if v.get("entity").and_then(|e| e.as_str()) != Some("this") {
                 *ok = false;
             }
-            let pred = v.get("predicate")?;
-            let mut equipment = Vec::new();
-            let mut entities = Vec::new();
-            let mut baby = None;
-            let Some(map) = pred.as_object() else {
-                *ok = false;
-                return None;
-            };
-            for (key, value) in map {
-                match key.as_str() {
-                    "minecraft:entity_type" => entities = string_or_list(value),
-                    "minecraft:flags" => {
-                        if let Some(flag) = value.get("is_baby") {
-                            match flag.as_bool() {
-                                Some(b) => baby = Some(b),
-                                None => *ok = false,
-                            }
-                        }
-                        if value
-                            .as_object()
-                            .is_some_and(|o| o.keys().any(|k| k != "is_baby"))
-                        {
-                            *ok = false;
-                        }
-                    }
-                    "minecraft:equipment" => {
-                        let Some(slots) = value.as_object() else {
-                            *ok = false;
-                            continue;
-                        };
-                        for (slot, item) in slots {
-                            match parse_item_pred(item) {
-                                Some(pred) if equipment_slot(slot, 0).is_some() => {
-                                    equipment.push((slot.clone(), pred));
-                                }
-                                _ => *ok = false,
-                            }
-                        }
-                    }
-                    _ => *ok = false,
-                }
-            }
-            Some(EntityPred::Properties {
-                equipment,
-                entities,
-                baby,
-            })
+            let map = v.get("predicate")?.as_object()?;
+            parse_property_map(map, ok)
         }
         _ => {
             *ok = false;
@@ -1206,6 +1235,21 @@ impl PlayPlan {
 
     /// `item_used_on_block`: предмет в руке и блок под прицелом.
     /// `FilledBucketTrigger`: игрок получил ведро с существом.
+    /// `UsingItemTrigger`: предмет используется (`ServerPlayer.updateUsingItem`).
+    pub(crate) fn advancement_using_item(
+        &self,
+        uuid: Uuid,
+        item: &str,
+        look: Option<&str>,
+        slots: &[Option<Stack>],
+        selected: usize,
+    ) {
+        self.advancement_run(uuid, "minecraft:using_item", |c| {
+            (c.items.is_empty() || c.items.iter().any(|w| self.item_matches(w, item)))
+                && self.player_pred_ok(c, slots, selected, look)
+        });
+    }
+
     /// `KilledByArrowTrigger`: жертвы, убитые одной стрелой.
     pub(crate) fn advancement_killed_by_arrow(
         &self,
@@ -1232,7 +1276,7 @@ impl PlayPlan {
             for pred in &c.arrow_victims {
                 let mut found = None;
                 for (i, &victim) in pool.iter().enumerate() {
-                    if self.entity_pred_matches(pred, &|_| None, victims[victim], false) {
+                    if self.entity_pred_matches(pred, &|_| None, victims[victim], false, None) {
                         found = Some(i);
                         break;
                     }
@@ -1248,7 +1292,7 @@ impl PlayPlan {
                 .len() as i32;
             c.unique_entity_types
                 .is_none_or(|(min, max)| unique >= min && unique <= max)
-                && self.player_pred_ok(c, slots, selected)
+                && self.player_pred_ok(c, slots, selected, None)
         });
     }
 
@@ -1271,7 +1315,7 @@ impl PlayPlan {
                 target_equipment(slot)
                     .is_some_and(|(name, damage)| self.item_pred_matches(pred, &name, damage))
             });
-            entity_ok && target_ok && self.player_pred_ok(c, slots, selected)
+            entity_ok && target_ok && self.player_pred_ok(c, slots, selected, None)
         });
     }
 
@@ -1560,7 +1604,11 @@ impl PlayPlan {
                     target_equipment(slot)
                         .is_some_and(|(name, damage)| self.item_pred_matches(pred, &name, damage))
                 });
-            entity_ok && baby_ok && item_ok && target_ok && self.player_pred_ok(c, slots, selected)
+            entity_ok
+                && baby_ok
+                && item_ok
+                && target_ok
+                && self.player_pred_ok(c, slots, selected, None)
         });
     }
 
@@ -1576,6 +1624,7 @@ impl PlayPlan {
         c: &AdvancementCriterion,
         slots: &[Option<Stack>],
         selected: usize,
+        look: Option<&str>,
     ) -> bool {
         if c.player_pred_unsupported {
             return false;
@@ -1589,7 +1638,7 @@ impl PlayPlan {
                     .flatten()
                     .map(|s| (self.item_name(s.item).to_owned(), s.damage))
             };
-            self.entity_pred_matches(pred, &equipment, "minecraft:player", false)
+            self.entity_pred_matches(pred, &equipment, "minecraft:player", false, look)
         })
     }
 
@@ -1606,7 +1655,10 @@ impl PlayPlan {
             let entity_ok =
                 c.entities.is_empty() || c.entities.iter().any(|w| self.entity_matches(w, entity));
             let baby_ok = c.entity_baby.is_none_or(|want| want == baby);
-            entity_ok && baby_ok && !c.target_unsupported && self.player_pred_ok(c, slots, selected)
+            entity_ok
+                && baby_ok
+                && !c.target_unsupported
+                && self.player_pred_ok(c, slots, selected, None)
         });
     }
 
@@ -1617,19 +1669,23 @@ impl PlayPlan {
         equipment: &dyn Fn(&str) -> Option<(String, i32)>,
         entity: &str,
         baby: bool,
+        look: Option<&str>,
     ) -> bool {
         match pred {
-            EntityPred::Inverted(term) => !self.entity_pred_matches(term, equipment, entity, baby),
+            EntityPred::Inverted(term) => {
+                !self.entity_pred_matches(term, equipment, entity, baby, look)
+            }
             EntityPred::AnyOf(list) => list
                 .iter()
-                .any(|term| self.entity_pred_matches(term, equipment, entity, baby)),
+                .any(|term| self.entity_pred_matches(term, equipment, entity, baby, look)),
             EntityPred::AllOf(list) => list
                 .iter()
-                .all(|term| self.entity_pred_matches(term, equipment, entity, baby)),
+                .all(|term| self.entity_pred_matches(term, equipment, entity, baby, look)),
             EntityPred::Properties {
                 equipment: eq,
                 entities,
                 baby: want_baby,
+                looking_at,
             } => {
                 (entities.is_empty()
                     || entities
@@ -1639,6 +1695,11 @@ impl PlayPlan {
                     && eq.iter().all(|(slot, pred)| {
                         equipment(slot).is_some_and(|(name, damage)| {
                             self.item_pred_matches(pred, &name, damage)
+                        })
+                    })
+                    && looking_at.as_ref().is_none_or(|pred| {
+                        look.is_some_and(|name| {
+                            self.entity_pred_matches(pred, &|_| None, name, false, None)
                         })
                     })
             }
@@ -2749,5 +2810,74 @@ mod tests {
         });
         let def = parse_advancement("test/arrow_bad", &json).expect("advancement");
         assert!(def.criteria[0].arrow_victims_unsupported);
+    }
+
+    #[test]
+    fn using_item_looking_at_parses_parrot() {
+        let json = serde_json::json!({
+            "criteria": {
+                "spyglass_at_parrot": {
+                    "trigger": "minecraft:using_item",
+                    "conditions": {
+                        "item": {"items": "minecraft:spyglass"},
+                        "player": {
+                            "type": "minecraft:entity_properties",
+                            "entity": "this",
+                            "predicate": {
+                                "minecraft:type_specific/player": {
+                                    "looking_at": {
+                                        "minecraft:entity_type": "minecraft:parrot"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "requirements": [["spyglass_at_parrot"]]
+        });
+        let def = parse_advancement("test/spyglass", &json).expect("advancement");
+        let c = &def.criteria[0];
+        assert_eq!(c.trigger, "minecraft:using_item");
+        assert_eq!(c.items, vec!["minecraft:spyglass".to_owned()]);
+        assert!(!c.player_pred_unsupported);
+        let EntityPred::Properties {
+            looking_at: Some(look),
+            ..
+        } = c.player_pred.as_ref().expect("player predicate")
+        else {
+            panic!("looking_at не разобран: {:?}", c.player_pred);
+        };
+        match look.as_ref() {
+            EntityPred::Properties { entities, .. } => {
+                assert_eq!(entities, &vec!["minecraft:parrot".to_owned()]);
+            }
+            other => panic!("ожидался entity_properties, получено {other:?}"),
+        }
+    }
+
+    #[test]
+    fn using_item_unknown_type_specific_is_unsupported() {
+        let json = serde_json::json!({
+            "criteria": {
+                "c": {
+                    "trigger": "minecraft:using_item",
+                    "conditions": {
+                        "player": {
+                            "type": "minecraft:entity_properties",
+                            "entity": "this",
+                            "predicate": {
+                                "minecraft:type_specific/player": {
+                                    "gamemode": ["creative"]
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "requirements": [["c"]]
+        });
+        let def = parse_advancement("test/spyglass2", &json).expect("advancement");
+        assert!(def.criteria[0].player_pred_unsupported);
     }
 }
