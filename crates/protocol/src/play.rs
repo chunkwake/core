@@ -1644,6 +1644,8 @@ pub enum Meta {
         particle: i32,
         colors: Vec<i32>,
     },
+    /// `EntityDataSerializers.PARTICLES` (id 17): одна частица без данных.
+    Particle(i32),
     VillagerData {
         kind: i32,
         profession: i32,
@@ -1690,6 +1692,9 @@ pub fn entity_meta(id: i32, entity_id: i32, fields: &[(u8, Meta)]) -> Vec<u8> {
                 for color in colors {
                     w.var_int(*particle).i32(*color);
                 }
+            }
+            Meta::Particle(particle) => {
+                w.u8(*i).var_int(17).var_int(*particle);
             }
             Meta::VillagerData {
                 kind,

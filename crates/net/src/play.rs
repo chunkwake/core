@@ -1802,8 +1802,6 @@ pub(crate) struct DimSim {
     wither_bars: Mutex<FastMap<u128, wither::WitherBar>>,
     /// Летящие черепа визера (`minecraft:wither_skull`).
     wither_skulls: Mutex<FastMap<i32, wither::WitherSkull>>,
-    /// Облака дыхания дракона Края (`dragon_breath`).
-    breaths: Mutex<Vec<dragon::Breath>>,
     /// Скалк-визгуны: состояние предупреждений.
     shriekers: Mutex<FastMap<[i32; 3], sculk::Shrieker>>,
     /// Ожидающие появления стражи: точка и тик.
@@ -14456,6 +14454,77 @@ impl PlayPlan {
                         }
                         // `BottleItem.use`: пустая бутылка из воды — бутылка воды
                         // (`ItemUtils.createFilledResult`).
+                        // `BottleItem.use`: сначала флакон забирает дыхание
+                        // дракона из `AreaEffectCloud` с owner-драконом.
+                        if !state.vitals.dead
+                            && login.spawn.game_mode != 3
+                            && let Some(slot) = Self::hand_index(&state.inv, hand)
+                            && let Some(held) = state.inv.slots[slot]
+                            && self.item_name(held.item) == "minecraft:glass_bottle"
+                            && self.bottle_dragon_breath(uuid)
+                            && let Some(breath) = self.item_id("minecraft:dragon_breath")
+                        {
+                            let (feet, _, _) = self.player_at(uuid).unwrap_or((me.pos, 0.0, 0.0));
+                            self.play_sound(
+                                None,
+                                "minecraft:item.bottle.fill_dragonbreath",
+                                crate::sounds::NEUTRAL,
+                                feet,
+                                1.0,
+                                1.0,
+                            );
+                            self.emit_vibration(feet, "minecraft:fluid_pickup");
+                            self.award_stat(
+                                uuid,
+                                "minecraft:used",
+                                "minecraft:glass_bottle",
+                                1,
+                            );
+                            let no_equipment = |_: &str| None;
+                            self.advancement_player_interacted_with_entity(
+                                uuid,
+                                "minecraft:area_effect_cloud",
+                                false,
+                                Some("minecraft:glass_bottle"),
+                                &state.inv.slots,
+                                state.inv.selected,
+                                &no_equipment,
+                            );
+                            let free = survival::Inventory::storage_order()
+                                .find(|&i| state.inv.slots[i].is_none());
+                            if login.spawn.game_mode == 1 {
+                                if !state.inv.slots.iter().any(|s| {
+                                    s.is_some_and(|s| s.item == breath)
+                                }) && let Some(i) = free
+                                {
+                                    state.inv.slots[i] = Some(Stack::new(breath, 1));
+                                }
+                            } else if held.count == 1 {
+                                state.inv.slots[slot] = Some(Stack::new(breath, 1));
+                            } else {
+                                state.inv.slots[slot] =
+                                    Some(Stack { count: held.count - 1, ..held });
+                                if let Some(i) = free {
+                                    state.inv.slots[i] = Some(Stack::new(breath, 1));
+                                } else {
+                                    let (_, yaw, pitch) = self
+                                        .player_at(uuid)
+                                        .unwrap_or((feet, 0.0, 0.0));
+                                    let vel = items::throw_velocity(yaw, pitch, rand::random());
+                                    self.drop_item(
+                                        items::throw_origin(feet),
+                                        vel,
+                                        Stack::new(breath, 1),
+                                        items::THROW_DELAY,
+                                    );
+                                }
+                            }
+                            self.send_inventory(conn, &mut state.inv).await?;
+                            self.reset_after_use(me.entity_id, uuid, hand, state, &mut swing);
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, sequence))
+                                .await?;
+                            continue;
+                        }
                         if !state.vitals.dead && login.spawn.game_mode != 3
                             && let Some(slot) = Self::hand_index(&state.inv, hand)
                             && let Some(held) = state.inv.slots[slot]

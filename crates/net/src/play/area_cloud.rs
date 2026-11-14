@@ -30,6 +30,11 @@ const SUMMON_WAIT: i32 = 20;
 /// Индексы `SynchedEntityData` для `AreaEffectCloud`.
 const META_RADIUS: u8 = 8;
 const META_WAITING: u8 = 9;
+const META_PARTICLE: u8 = 10;
+/// Дыхание дракона (`DragonSittingFlamingPhase`): радиус 5 на 200 тиков.
+const DRAGON_RADIUS: f32 = 5.0;
+const DRAGON_DURATION: i32 = 200;
+const DRAGON_WAIT: i32 = 10;
 
 #[derive(Clone, Debug)]
 pub(super) struct Cloud {
@@ -49,6 +54,10 @@ pub(super) struct Cloud {
     /// Ключ сущности (UUID игрока или ID моба) -> тик, до которого повторно
     /// эффект не накладывается.
     pub victims: HashMap<u128, i32>,
+    /// `AreaEffectCloud.getOwner()` — дракон; по нему флакон забирает дыхание.
+    pub owner_dragon: bool,
+    /// `DATA_PARTICLE`: своя частица облака (`dragon_breath`).
+    pub particle: Option<i32>,
 }
 
 impl Cloud {
@@ -66,6 +75,8 @@ impl Cloud {
             duration_on_use: 0,
             age: 0,
             victims: HashMap::new(),
+            owner_dragon: false,
+            particle: None,
         }
     }
 
@@ -83,7 +94,36 @@ impl Cloud {
             duration_on_use: 0,
             age: 0,
             victims: HashMap::new(),
+            owner_dragon: false,
+            particle: None,
         }
+    }
+
+    /// `DragonSittingFlamingPhase`: облако дыхания дракона.
+    fn dragon_breath(pos: [f64; 3], effect: Option<i32>, particle: Option<i32>) -> Self {
+        Self {
+            pos,
+            effects: effect
+                .map(|id| survival::Effect::plain(id, 0, 1))
+                .into_iter()
+                .collect(),
+            radius: DRAGON_RADIUS,
+            radius_per_tick: -DRAGON_RADIUS / DRAGON_DURATION as f32,
+            duration: DRAGON_DURATION,
+            wait: DRAGON_WAIT,
+            reapply: REAPPLY,
+            radius_on_use: 0.0,
+            duration_on_use: 0,
+            age: 0,
+            victims: HashMap::new(),
+            owner_dragon: true,
+            particle,
+        }
+    }
+
+    /// `AreaEffectCloud.isAlive`/`isWaiting` для флакона.
+    fn alive(&self) -> bool {
+        self.duration == -1 || self.age < self.wait.saturating_add(self.duration)
     }
 
     /// `Level.getEntitiesOfClass` по AABB облака плюс проверка
@@ -119,6 +159,62 @@ impl PlayPlan {
         }
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
         self.spawn_cloud(id, Cloud::lingering(pos, effects));
+    }
+
+    /// `DragonSittingFlamingPhase`: облако дыхания дракона на земле.
+    pub(super) fn spawn_dragon_breath_cloud(&self, pos: [f64; 3]) {
+        let x = pos[0].floor() as i32;
+        let z = pos[2].floor() as i32;
+        let mut y = pos[1].floor() as i32;
+        for _ in 0..16 {
+            let air = self.block([x, y, z]).is_none_or(|s| {
+                matches!(
+                    self.state_name(s),
+                    "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
+                )
+            });
+            if !air {
+                y += 1;
+                break;
+            }
+            y -= 1;
+        }
+        let at = [f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5];
+        let effect = self
+            .survival
+            .effects
+            .get("minecraft:instant_damage")
+            .copied();
+        let particle = self
+            .particle_types
+            .lock()
+            .unwrap()
+            .get("minecraft:dragon_breath")
+            .copied();
+        let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
+        self.spawn_cloud(id, Cloud::dragon_breath(at, effect, particle));
+    }
+
+    /// `BottleItem.use`: флакон забирает дыхание дракона (`owner` — дракон).
+    pub(super) fn bottle_dragon_breath(&self, uuid: Uuid) -> bool {
+        let Some((feet, _, _)) = self.player_at(uuid) else {
+            return false;
+        };
+        let mut clouds = self.sim().clouds.lock().unwrap();
+        let Some(cloud) = clouds.values_mut().find(|c| c.owner_dragon && c.alive()) else {
+            return false;
+        };
+        // `getEntitiesOfClass` по AABB игрока, расширенному на 2 блока.
+        let r = f64::from(cloud.radius);
+        if (feet[0] - cloud.pos[0]).abs() > r + 2.0 + 0.3
+            || (feet[2] - cloud.pos[2]).abs() > r + 2.0 + 0.3
+            || feet[1] > cloud.pos[1] + 0.5 + 2.0
+            || feet[1] + crate::mobs::PLAYER_SIZE.1 < cloud.pos[1] - 2.0
+        {
+            return false;
+        }
+        cloud.radius = (cloud.radius - 0.5).clamp(0.0, MAXIMAL_RADIUS);
+        true
     }
 
     /// `/summon minecraft:area_effect_cloud`: NBT как `AreaEffectCloud.load`.
@@ -238,16 +334,23 @@ impl PlayPlan {
                 0,
             ),
         );
+        let mut fields = vec![
+            (META_RADIUS, Meta::Float(radius)),
+            (META_WAITING, Meta::Bool(waiting)),
+        ];
+        if let Some(particle) = self
+            .sim()
+            .clouds
+            .lock()
+            .unwrap()
+            .get(&id)
+            .and_then(|c| c.particle)
+        {
+            fields.push((META_PARTICLE, Meta::Particle(particle)));
+        }
         self.hub.send(
             None,
-            play::entity_meta(
-                self.ids.set_entity_data,
-                id,
-                &[
-                    (META_RADIUS, Meta::Float(radius)),
-                    (META_WAITING, Meta::Bool(waiting)),
-                ],
-            ),
+            play::entity_meta(self.ids.set_entity_data, id, &fields),
         );
     }
 
@@ -446,6 +549,18 @@ mod tests {
         assert!(cloud.radius < MINIMAL_RADIUS);
         assert_eq!((DURATION, WAIT, REAPPLY), (600, 10, 20));
         assert_eq!(RADIUS_ON_USE, -0.5);
+    }
+
+    #[test]
+    fn dragon_breath_cloud_matches_vanilla() {
+        let cloud = Cloud::dragon_breath([0.0, 64.0, 0.0], Some(7), Some(35));
+        assert_eq!((cloud.radius, cloud.duration, cloud.wait), (5.0, 200, 10));
+        assert!((cloud.radius_per_tick + 0.025).abs() < 1e-6);
+        assert!(cloud.owner_dragon);
+        assert_eq!(cloud.particle, Some(35));
+        assert_eq!(cloud.effects.len(), 1);
+        assert_eq!((cloud.effects[0].id, cloud.effects[0].amplifier), (7, 0));
+        assert!(cloud.alive());
     }
 
     #[test]
