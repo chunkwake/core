@@ -19,6 +19,7 @@ struct Probe {
     c: Client,
     sb_command: i32,
     sb_use_on: i32,
+    sb_select: i32,
     cb_add_entity: i32,
     cb_chat: i32,
     chat: String,
@@ -123,6 +124,13 @@ impl Probe {
         self.pump(180).await;
     }
 
+    async fn select(&mut self, slot: u16) {
+        let mut w = self.packet(self.sb_select);
+        w.u16(slot);
+        self.c.send_raw(&w.buf).await.unwrap();
+        self.pump(120).await;
+    }
+
     async fn use_on(&mut self, pos: [i32; 3]) {
         self.seq += 1;
         let mut w = self.packet(self.sb_use_on);
@@ -166,6 +174,7 @@ async fn main() {
         c,
         sb_command: sb("chat_command"),
         sb_use_on: sb("use_item_on"),
+        sb_select: sb("set_carried_item"),
         cb_add_entity,
         cb_chat,
         chat: String::new(),
@@ -181,9 +190,10 @@ async fn main() {
         "gamemode creative".into(),
         "effect clear @s".into(),
         // Площадка в Крае и сам игрок.
+        // Сначала переходим в Край (загружает чанки), только потом правим блоки.
+        "execute in minecraft:the_end run tp @s 0.5 127 6.5 0 20".into(),
         "execute in minecraft:the_end run fill -6 126 -6 6 126 6 minecraft:stone".into(),
         "execute in minecraft:the_end run fill -6 127 -6 6 131 6 minecraft:air".into(),
-        "execute in minecraft:the_end run tp @s 0.5 127 6.5 0 20".into(),
         format!("advancement revoke @s only {ADV}"),
         "advancement grant @s only minecraft:end/kill_dragon".into(),
     ];
@@ -211,6 +221,8 @@ async fn main() {
     // Четыре обсидиана по сторонам центра и кристаллы на них.
     p.cmd("execute in minecraft:the_end run item replace entity @s hotbar.0 with minecraft:end_crystal 4")
         .await;
+    // Предыдущие пробы могли оставить выбранным другой слот.
+    p.select(0).await;
     for (x, z) in [(3, 0), (-3, 0), (0, 3), (0, -3)] {
         p.cmd(&format!(
             "execute in minecraft:the_end run setblock {x} 127 {z} minecraft:obsidian"
@@ -244,5 +256,11 @@ async fn main() {
         .expect("add_entity возрождённого дракона не пришёл");
     assert!(p.done(), "respawn_dragon не закрылся: {:?}", p.adv.get(ADV));
     println!("respawned dragon entity {dragon}");
+
+    // Возвращаем игрока в Верхний мир: иначе следующие пробы работают в Крае
+    // (там нет небесного света и другая местность).
+    p.cmd("execute in minecraft:overworld run tp @s 0.5 100 0.5 0 0")
+        .await;
+    p.pump(600).await;
     println!("adv_dragon: ok");
 }

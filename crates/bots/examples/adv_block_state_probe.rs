@@ -128,6 +128,8 @@ async fn main() {
         "clear @s".into(),
         "time set noon".into(),
         "kill @e[type=!minecraft:player,distance=..48]".into(),
+        // Игрок мог остаться в другом измерении (например, после дракона).
+        "execute in minecraft:overworld run tp @s 1680.5 100 8.5 0 30".into(),
         "fill 1674 99 2 1690 99 14 minecraft:stone".into(),
         "fill 1674 100 2 1690 104 14 minecraft:air".into(),
         "tp @s 1680.5 100 8.5 0 30".into(),

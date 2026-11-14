@@ -98,6 +98,9 @@ async fn main() {
         "gamemode creative",
         "effect clear @s",
         "time set midnight",
+        // Игрок мог остаться в другом измерении (например, после дракона):
+        // `light`/`dimension` в предикате требуют Верхний мир.
+        "execute in minecraft:overworld run tp @s 20.5 100 8.5 0 0",
         "setblock 20 100 8 minecraft:water",
         // Чистим площадку для дыма от прошлых проб (костёр в мире сохраняется).
         "setblock 30 98 8 minecraft:air",
