@@ -1,0 +1,19 @@
+{
+  "display": {
+    "title": {"text": "shield using probe"},
+    "description": {"text": "using_item while blocking with a shield"},
+    "icon": {"id": "minecraft:shield"},
+    "frame": "task",
+    "show_toast": false,
+    "announce_to_chat": false
+  },
+  "criteria": {
+    "raise_shield": {
+      "trigger": "minecraft:using_item",
+      "conditions": {
+        "item": {"items": "minecraft:shield"}
+      }
+    }
+  },
+  "requirements": [["raise_shield"]]
+}

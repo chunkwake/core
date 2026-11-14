@@ -12710,6 +12710,7 @@ impl PlayPlan {
                     // предмет используется: труба, лук/арбалет, еда, зелья,
                     // трезубец, копьё.
                     let using = spyglass
+                        .or_else(|| state.vitals.block_use.map(|(slot, _, _)| slot))
                         .or_else(|| drawing.map(|(slot, _)| slot))
                         .or_else(|| trident_use.map(|(slot, _, _, _)| slot))
                         .or_else(|| eating.map(|(slot, _, _)| slot))

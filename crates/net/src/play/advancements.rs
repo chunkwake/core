@@ -2338,7 +2338,13 @@ impl PlayPlan {
             w.string(&format!("minecraft:{id}"));
             w.var_int(criteria.len() as i32);
             for (name, at) in criteria {
-                w.string(name).bool(*at > 0).i64(*at);
+                // `CriterionProgress`: optional Instant (bool + long). Время
+                // пишется только у полученного критерия, иначе клиент читает
+                // лишние 8 байт и падает на декодировании пакета.
+                w.string(name).bool(*at > 0);
+                if *at > 0 {
+                    w.i64(*at);
+                }
             }
         }
         w.bool(true);

@@ -119,9 +119,9 @@ async fn main() {
         "gamemode creative".into(),
         "effect clear @s".into(),
         "kill @e[type=!minecraft:player,distance=..48]".into(),
+        "tp @s 0.5 100 0.5 0 16".into(),
         "fill -4 99 -4 4 99 8 minecraft:stone".into(),
         "fill -4 100 -4 4 104 8 minecraft:air".into(),
-        "tp @s 0.5 100 0.5 0 16".into(),
         // Попугай на площадке в четырёх блоках по +Z.
         "summon minecraft:parrot 0.5 100 4.5 {NoAI:1b}".into(),
         "item replace entity @s hotbar.0 with minecraft:spyglass".into(),
@@ -133,7 +133,7 @@ async fn main() {
     }
     p.select(0).await;
     // use_item в load-gated списке: даём клиенту догрузиться.
-    p.pump(1500).await;
+    p.pump(1800).await;
 
     // Смотрим на попугая через подзорную трубу.
     p.use_item(0.0, 16.0).await;

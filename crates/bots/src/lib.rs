@@ -669,8 +669,8 @@ impl Client {
                 for _ in 0..m {
                     let name = r.string(32767).map_err(err)?.to_owned();
                     let obtained = r.bool().map_err(err)?;
-                    r.i64().map_err(err)?;
                     if obtained {
+                        r.i64().map_err(err)?;
                         criteria.push(name);
                     }
                 }
