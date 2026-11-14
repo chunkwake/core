@@ -1653,6 +1653,8 @@ pub enum Meta {
     GolemState(i32),
     /// `EntityDataSerializers.WEATHERING_COPPER_STATE` (id 38): VarInt.
     WeatheringState(i32),
+    /// `EntityDataSerializers.OPTIONAL_BLOCK_POS` (id 11): флаг + позиция.
+    OptBlockPos(Option<[i32; 3]>),
 }
 
 /// `set_entity_data` с произвольными полями `(индекс, значение)`.
@@ -1705,6 +1707,17 @@ pub fn entity_meta(id: i32, entity_id: i32, fields: &[(u8, Meta)]) -> Vec<u8> {
             }
             Meta::WeatheringState(v) => {
                 w.u8(*i).var_int(38).var_int(*v);
+            }
+            Meta::OptBlockPos(pos) => {
+                w.u8(*i).var_int(11);
+                match pos {
+                    Some(p) => {
+                        w.bool(true).i64(pack_block_pos(*p));
+                    }
+                    None => {
+                        w.bool(false);
+                    }
+                }
             }
         };
     }
@@ -1814,6 +1827,20 @@ mod lp_tests {
 #[cfg(test)]
 mod copper_golem_meta_tests {
     use super::*;
+
+    /// `EntityDataSerializers.OPTIONAL_BLOCK_POS` (id 11): луч кристалла.
+    #[test]
+    fn opt_block_pos_meta_uses_serializer_11() {
+        let packet = entity_meta(0, 7, &[(8, Meta::OptBlockPos(Some([1, 2, 3])))]);
+        let mut r = Reader::new(&packet);
+        assert_eq!(r.var_int().unwrap(), 0);
+        assert_eq!(r.var_int().unwrap(), 7);
+        assert_eq!(r.u8().unwrap(), 8);
+        assert_eq!(r.var_int().unwrap(), 11);
+        assert!(r.bool().unwrap());
+        assert_eq!(r.i64().unwrap(), pack_block_pos([1, 2, 3]));
+        assert_eq!(r.u8().unwrap(), 0xff);
+    }
 
     /// `CopperGolem`: индекс 16 — `WEATHERING_COPPER_STATE` (38),
     /// индекс 17 — `COPPER_GOLEM_STATE` (37), значения — VarInt.

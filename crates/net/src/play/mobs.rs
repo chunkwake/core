@@ -1172,6 +1172,29 @@ impl PlayPlan {
                 {
                     self.dragon_fight.lock().unwrap().killed = true;
                 }
+                // `EndCrystal`: смерть лечащего кристалла бьёт дракона на 10.
+                if e.mob.species == Species::EndCrystal {
+                    let mut mobs = self.sim().mobs.lock().unwrap();
+                    let dragon = mobs
+                        .values_mut()
+                        .filter(|d| {
+                            d.mob.species == Species::EnderDragon
+                                && d.mob.alive()
+                                && mb::dist2(d.mob.pos, e.mob.pos) <= 32.0 * 32.0
+                        })
+                        .min_by(|a, b| {
+                            mb::dist2(a.mob.pos, e.mob.pos)
+                                .total_cmp(&mb::dist2(b.mob.pos, e.mob.pos))
+                        });
+                    if let Some(d) = dragon {
+                        crate::mobs::hurt(
+                            &mut d.mob,
+                            10.0,
+                            crate::mobs::Source::at(e.mob.pos, None),
+                            0.0,
+                        );
+                    }
+                }
                 if let Some(&(_, count)) = splits.iter().find(|s| s.0 == id) {
                     self.slime_split(&e.mob, count);
                 }
@@ -3678,6 +3701,7 @@ impl PlayPlan {
                 }
                 Out::Shoot { target, power } => self.mob_shoot(id, Uuid::from_u128(target), power),
                 Out::ShootSkull { target } => self.mob_shoot_skull(id, Uuid::from_u128(target)),
+                Out::DragonBreath { target } => self.spawn_dragon_breath(Uuid::from_u128(target)),
                 // `EatBlockGoal.start`: анимация опущенной головы.
                 Out::EatStart => self
                     .hub

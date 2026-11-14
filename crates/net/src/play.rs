@@ -1802,6 +1802,8 @@ pub(crate) struct DimSim {
     wither_bars: Mutex<FastMap<u128, wither::WitherBar>>,
     /// Летящие черепа визера (`minecraft:wither_skull`).
     wither_skulls: Mutex<FastMap<i32, wither::WitherSkull>>,
+    /// Облака дыхания дракона Края (`dragon_breath`).
+    breaths: Mutex<Vec<dragon::Breath>>,
     /// Босс-бары дракона Края (`EnderDragon.bossEvent`).
     dragon_bars: Mutex<FastMap<u128, wither::WitherBar>>,
     /// Индекс предметов по чанкам: `(cx, cz)` → ID предметов в нём.
@@ -2400,6 +2402,7 @@ mod client_info;
 pub mod commands;
 mod conduits;
 mod crafter;
+mod dragon;
 mod fishing;
 mod game_events;
 mod item_frames;
@@ -11986,6 +11989,7 @@ impl PlayPlan {
         lap(PH_CAMPFIRES, watch);
         self.tick_copper_chests();
         self.tick_dragon_fight();
+        self.tick_dragons();
         self.tick_bosses();
         self.tick_vibrations();
         self.tick_random_blocks();

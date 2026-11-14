@@ -1709,6 +1709,17 @@ fn dragon_ai_step(m: &mut Mob, s: &mut Senses) {
     m.vel[1] = (dy * 0.1).clamp(-0.3, 0.3);
     m.zza = 0.0;
     m.xxa = 0.0;
+    // Дыхание по цели в 24 блоках раз в 100 тиков.
+    if m.tick_count.is_multiple_of(100)
+        && let Some(p) = s
+            .players
+            .iter()
+            .copied()
+            .filter(|p| dist2(p.pos, m.pos) <= 24.0 * 24.0)
+            .min_by(|a, b| dist2(a.pos, m.pos).total_cmp(&dist2(b.pos, m.pos)))
+    {
+        m.out.push(Out::DragonBreath { target: p.uuid });
+    }
 }
 
 fn wither_ai_step(m: &mut Mob, s: &mut Senses) {

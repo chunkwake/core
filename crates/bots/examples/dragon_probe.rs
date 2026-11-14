@@ -16,6 +16,11 @@ struct Probe {
     sb_use_on: i32,
     cb_boss: i32,
     cb_chat: i32,
+    cb_meta: i32,
+    cb_particles: i32,
+    breath: i32,
+    breath_particle: bool,
+    beam_seen: bool,
     seq: i32,
     bar_adds: i32,
     bar_removed: bool,
@@ -103,6 +108,31 @@ impl Probe {
                     }
                     _ => {}
                 }
+            } else if id == self.cb_meta {
+                // EndCrystal.DATA_BEAM_TARGET: индекс 8, OPTIONAL_BLOCK_POS (11).
+                let mut r = Reader::new(&body);
+                if r.var_int().is_err() {
+                    continue;
+                }
+                let Ok(index) = r.u8() else { continue };
+                if index != 8 {
+                    continue;
+                }
+                let Ok(serializer) = r.var_int() else {
+                    continue;
+                };
+                if serializer != 11 {
+                    continue;
+                }
+                if matches!(r.bool(), Ok(true)) && r.i64().is_ok() {
+                    self.beam_seen = true;
+                }
+            } else if id == self.cb_particles {
+                let mut r = Reader::new(&body);
+                let Ok(particle) = r.var_int() else { continue };
+                if particle == self.breath {
+                    self.breath_particle = true;
+                }
             } else if id == self.cb_chat {
                 let mut r = Reader::new(&body);
                 if let Ok(component) = text::read_component(&mut r) {
@@ -178,6 +208,14 @@ impl Probe {
         self.cmd("data get entity @s").await;
         number_after(&self.chat, "Health:").unwrap_or_else(|| panic!("нет Health: {}", self.chat))
     }
+
+    async fn entity_health(&mut self, kind: &str) -> f64 {
+        self.chat.clear();
+        self.cmd(&format!("data get entity @e[type={kind},limit=1]"))
+            .await;
+        number_after(&self.chat, "Health:")
+            .unwrap_or_else(|| panic!("нет Health у {kind}: {}", self.chat))
+    }
 }
 
 #[tokio::main]
@@ -192,7 +230,17 @@ async fn main() {
         .unwrap();
     let cb_boss = cb("boss_event");
     let cb_chat = cb("system_chat");
-    c.capture_also = vec![cb_boss, cb_chat];
+    let cb_meta = cb("set_entity_data");
+    let cb_particles = cb("level_particles");
+    c.capture_also = vec![cb_boss, cb_chat, cb_meta, cb_particles];
+    let reg: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(std::path::Path::new(&a[2]).with_file_name("registries.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let breath = reg["minecraft:particle_type"]["entries"]["minecraft:dragon_breath"]["protocol_id"]
+        .as_i64()
+        .unwrap() as i32;
     let mut p = Probe {
         c,
         sb_command: sb("chat_command"),
@@ -200,6 +248,11 @@ async fn main() {
         sb_use_on: sb("use_item_on"),
         cb_boss,
         cb_chat,
+        cb_meta,
+        cb_particles,
+        breath,
+        breath_particle: false,
+        beam_seen: false,
         seq: 0,
         bar_adds: 0,
         bar_removed: false,
@@ -258,6 +311,69 @@ async fn main() {
     let radius = (pos[0] * pos[0] + pos[2] * pos[2]).sqrt();
     assert!(radius > 5.0, "дракон не улетел по кругу: {pos:?}");
     println!("dragon flight ok (y={}, r={radius:.1})", pos[1]);
+
+    // Дыхание: новый дракон рядом с ботом, корова под облаком.
+    p.cmd("execute in minecraft:the_end run kill @e[type=minecraft:ender_dragon]")
+        .await;
+    p.pump(1200).await;
+    p.cmd("execute in minecraft:the_end run summon minecraft:cow 0.5 100 8.5 {NoAI:1b}")
+        .await;
+    p.cmd(
+        "execute in minecraft:the_end run summon minecraft:ender_dragon 0.5 103 12.5 {PersistenceRequired:1b}",
+    )
+    .await;
+    let mut waited = 0;
+    while !p.breath_particle && waited < 60 {
+        p.pump(250).await;
+        waited += 1;
+    }
+    assert!(p.breath_particle, "нет частиц dragon_breath");
+    let mut cow_hurt = false;
+    for _ in 0..20 {
+        p.chat.clear();
+        p.cmd("execute in minecraft:the_end run data get entity @e[type=minecraft:cow,limit=1]")
+            .await;
+        if !p.chat.contains("Health:") {
+            cow_hurt = true;
+            break;
+        }
+        if number_after(&p.chat, "Health:").is_some_and(|h| h < 10.0) {
+            cow_hurt = true;
+            break;
+        }
+        p.pump(200).await;
+    }
+    assert!(cow_hurt, "дыхание не ранило корову: {:?}", p.chat);
+    println!("dragon breath ok");
+
+    // Лечение кристаллом и урон от его смерти.
+    p.cmd("execute in minecraft:the_end run kill @e[type=minecraft:ender_dragon]")
+        .await;
+    p.pump(1200).await;
+    p.cmd("execute in minecraft:the_end run kill @e[type=minecraft:cow,distance=..32]")
+        .await;
+    p.cmd(&format!(
+        "execute in minecraft:the_end run summon minecraft:ender_dragon 0.5 {Y} 0.5 {{NoAI:1b,PersistenceRequired:1b,Health:50f}}"
+    ))
+    .await;
+    p.cmd(&format!(
+        "execute in minecraft:the_end run summon minecraft:end_crystal 3.5 {Y} 0.5 {{NoGravity:1b}}"
+    ))
+    .await;
+    p.pump(1800).await;
+    assert!(p.beam_seen, "кристалл не отправил луч к дракону");
+    let healed = p.entity_health("minecraft:ender_dragon").await;
+    assert!(healed > 50.0, "кристалл не лечит дракона: {healed}");
+    let before_kill = p.entity_health("minecraft:ender_dragon").await;
+    p.cmd("execute in minecraft:the_end run kill @e[type=minecraft:end_crystal]")
+        .await;
+    p.pump(1500).await;
+    let after = p.entity_health("minecraft:ender_dragon").await;
+    assert!(
+        after <= before_kill - 8.0,
+        "смерть кристалла не нанесла 10 урона: {before_kill} -> {after}"
+    );
+    println!("dragon crystal healing ok ({healed}, {before_kill} -> {after})");
 
     // Смерть и анимация возрождения: 4 кристалла, пауза, новый дракон.
     p.cmd("execute in minecraft:the_end run kill @e[type=minecraft:ender_dragon]")

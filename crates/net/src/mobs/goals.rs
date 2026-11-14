@@ -54,6 +54,8 @@ pub enum Out {
     Shoot { target: u128, power: f32 },
     /// WitherBoss.performRangedAttack: черёп визера в цель.
     ShootSkull { target: u128 },
+    /// EnderDragon breath: облако dragon_breath у цели.
+    DragonBreath { target: u128 },
     /// Слизень прыгнул (`jump`) или шлёпнулся на землю: звук `jump`/`squish`.
     CubeSound { jump: bool },
 }
