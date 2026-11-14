@@ -1314,6 +1314,8 @@ impl PlayPlan {
         }
         // Детёныши животных ничего не роняют; детёныш зомби — как взрослый.
         if let Some((uuid, _)) = e.killer {
+            // `Raider.die` → `Raid.addHeroOfTheVillage`.
+            self.raid_hero(uuid, m.uuid);
             self.award_stat(uuid, "minecraft:killed", m.species.name(), 1);
             self.award_stat(uuid, "minecraft:custom", "minecraft:mob_kills", 1);
             let killer_pos = self.live.lock().unwrap().get(&uuid).map(|l| l.pos);

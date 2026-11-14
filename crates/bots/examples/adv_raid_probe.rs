@@ -5,6 +5,7 @@
 use chunkwake_bots::{Client, Event, Ids};
 use chunkwake_data::packets::{Direction, PacketTable, State};
 use chunkwake_protocol::{Reader, Writer};
+use std::collections::HashMap;
 use std::time::Duration;
 
 const X: i32 = 2176;
@@ -13,7 +14,12 @@ const Z: i32 = 8;
 struct Probe {
     c: Client,
     sb_command: i32,
+    sb_attack: i32,
     cb_boss_event: i32,
+    /// protocol id вида разбойника → имя.
+    kinds: HashMap<i32, &'static str>,
+    /// id сущности → последняя известная позиция.
+    mobs: HashMap<i32, [f64; 3]>,
     custom_kind: i32,
     raid_trigger: i32,
     raid_win: i32,
@@ -33,6 +39,21 @@ impl Probe {
         let mut w = Writer::new();
         w.var_int(id);
         w
+    }
+
+    /// Телепорт к известной позиции моба и удар топором.
+    async fn hit(&mut self, target: i32) {
+        let Some(pos) = self.mobs.get(&target).copied() else {
+            return;
+        };
+        self.cmd(&format!("tp @s {:.2} {:.2} {:.2}", pos[0], pos[1], pos[2]))
+            .await;
+        self.c.confirm_loaded().await.unwrap();
+        self.pump(120).await;
+        let mut w = self.packet(self.sb_attack);
+        w.var_int(target);
+        self.c.send_raw(&w.buf).await.unwrap();
+        self.pump(1100).await;
     }
 
     /// `boss_event`: ADD/REMOVE/UPDATE_PROGRESS (нужен только прогресс).
@@ -74,6 +95,32 @@ impl Probe {
                 }
                 Err(_) => break,
             };
+            match &ev {
+                Event::EntitySpawned {
+                    entity_id,
+                    kind,
+                    pos,
+                } => {
+                    if self.kinds.contains_key(kind) {
+                        self.mobs.insert(*entity_id, *pos);
+                    }
+                }
+                Event::EntityMoved {
+                    entity_id, delta, ..
+                } => {
+                    if let Some(pos) = self.mobs.get_mut(entity_id) {
+                        pos[0] += delta[0];
+                        pos[1] += delta[1];
+                        pos[2] += delta[2];
+                    }
+                }
+                Event::EntityRemoved(ids) => {
+                    for id in ids {
+                        self.mobs.remove(id);
+                    }
+                }
+                _ => {}
+            }
             if let Event::Stats { stats } = ev {
                 for ((kind, value), n) in stats {
                     if kind != self.custom_kind {
@@ -132,6 +179,21 @@ async fn main() {
         sb_command: sb("chat_command"),
         cb_boss_event,
         custom_kind,
+        sb_attack: sb("attack"),
+        kinds: {
+            let mut m = HashMap::new();
+            for name in [
+                "minecraft:pillager",
+                "minecraft:vindicator",
+                "minecraft:evoker",
+                "minecraft:witch",
+                "minecraft:ravager",
+            ] {
+                m.insert(pid("minecraft:entity_type", name), name);
+            }
+            m
+        },
+        mobs: HashMap::new(),
         raid_trigger,
         raid_win,
         trigger: 0,
@@ -151,14 +213,27 @@ async fn main() {
         "effect clear @s".into(),
         "kill @e[type=!minecraft:player,distance=..64]".into(),
         "execute in minecraft:overworld run tp @s 2176.5 100 11.5 180 20".into(),
-        format!("fill {} 99 4 {} 104 12 minecraft:stone", X - 6, X + 6),
-        format!("fill {} 100 4 {} 104 12 minecraft:air", X - 6, X + 6),
+        format!(
+            "fill {} 99 {} {} 104 {} minecraft:stone",
+            X - 12,
+            Z - 16,
+            X + 12,
+            Z + 16
+        ),
+        format!(
+            "fill {} 100 {} {} 104 {} minecraft:air",
+            X - 12,
+            Z - 16,
+            X + 12,
+            Z + 16
+        ),
         // Кровать-«деревня»: POI `minecraft:home`.
         format!("setblock {X} 100 {Z} minecraft:red_bed[part=foot,facing=south]"),
         format!(
             "setblock {X} 100 {} minecraft:red_bed[part=head,facing=south]",
             Z + 1
         ),
+        "item replace entity @s weapon.mainhand with minecraft:netherite_axe".to_string(),
     ];
     for line in setup {
         p.cmd(&line).await;
@@ -171,14 +246,27 @@ async fn main() {
     p.cmd("effect give @s minecraft:bad_omen 600 0").await;
 
     // Ждём старт рейда: статистика `raid_trigger` и первый разбойник.
-    for _ in 0..40 {
+    for _ in 0..120 {
         p.pump(250).await;
-        if p.trigger > p.trigger0 {
+        if p.trigger > p.trigger0 && !p.mobs.is_empty() {
             break;
         }
     }
     assert!(p.trigger > p.trigger0, "raid_trigger не пришёл");
     println!("raid_trigger ok");
+
+    // Герой: игрок лично добивает разбойника (`Raider.die`).
+    let victim = *p.mobs.keys().next().expect("разбойник не появился");
+    for _ in 0..8 {
+        p.hit(victim).await;
+        if !p.mobs.contains_key(&victim) {
+            break;
+        }
+    }
+    assert!(
+        !p.mobs.contains_key(&victim),
+        "не удалось добить разбойника"
+    );
 
     // Зачищаем волны (easy = 3), ждём `raid_win`.
     let mut waves = 0;
@@ -189,16 +277,20 @@ async fn main() {
         p.pump(250).await;
         // `kill` пустой селектор безопасен; считаем фактические убийства.
         let before = p.win;
-        p.cmd("kill @e[type=minecraft:pillager,distance=..64]")
-            .await;
+        p.cmd("kill @e[type=!minecraft:player,distance=..64]").await;
         if p.win == before {
             waves += 1;
         }
     }
     assert!(p.win > p.win0, "raid_win не пришёл (волн: {waves})");
     println!("raid_win ok (волн зачищено {waves})");
-    // Пакеты бара (`REMOVE`) могут прийти следом за статистикой.
-    p.pump(800).await;
+    // Бар «победа» висит 600 тиков (30 секунд), затем REMOVE.
+    for _ in 0..160 {
+        if p.bar_removed {
+            break;
+        }
+        p.pump(250).await;
+    }
     // Босс-бар `event.minecraft.raid`: ADD → UPDATE_PROGRESS → REMOVE.
     assert!(p.bar_added, "босс-бар рейда не появился");
     assert!(

@@ -237,6 +237,10 @@ pub enum Species {
     IronGolem,
     Phantom,
     Pillager,
+    Vindicator,
+    Evoker,
+    Witch,
+    Ravager,
     Wither,
     SnowGolem,
     CopperGolem,
@@ -316,7 +320,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 23] = [
+const BUILTIN: [SpeciesInfo; 27] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -535,6 +539,63 @@ const BUILTIN: [SpeciesInfo; 23] = [
     },
     SpeciesInfo {
         category: Category::Monster,
+        size: (0.6, 1.95),
+        eye_height: 1.6575,
+        max_health: 24.0,
+        speed: 0.35,
+        follow_range: 32.0,
+        attack_damage: 5.0,
+        ..base(
+            "minecraft:vindicator",
+            "minecraft:entity.vindicator",
+            "minecraft:entities/vindicator",
+        )
+    },
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (0.6, 1.95),
+        eye_height: 1.6575,
+        max_health: 24.0,
+        speed: 0.5,
+        follow_range: 32.0,
+        attack_damage: 2.0,
+        ..base(
+            "minecraft:evoker",
+            "minecraft:entity.evoker",
+            "minecraft:entities/evoker",
+        )
+    },
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (0.6, 1.95),
+        eye_height: 1.6575,
+        max_health: 26.0,
+        speed: 0.25,
+        follow_range: 32.0,
+        attack_damage: 2.0,
+        ..base(
+            "minecraft:witch",
+            "minecraft:entity.witch",
+            "minecraft:entities/witch",
+        )
+    },
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (1.95, 2.2),
+        eye_height: 1.87,
+        max_health: 100.0,
+        speed: 0.3,
+        follow_range: 32.0,
+        attack_damage: 12.0,
+        step_height: 1.0,
+        ..base(
+            "minecraft:ravager",
+            "minecraft:entity.ravager",
+            "minecraft:entities/ravager",
+        )
+    },
+    SpeciesInfo {
+        category: Category::Monster,
         size: (0.9, 3.5),
         eye_height: 2.9750001,
         max_health: 300.0,
@@ -662,7 +723,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 23] = [
+    pub const ALL: [Species; 27] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -679,6 +740,10 @@ impl Species {
         Species::IronGolem,
         Species::Phantom,
         Species::Pillager,
+        Species::Vindicator,
+        Species::Evoker,
+        Species::Witch,
+        Species::Ravager,
         Species::Wither,
         Species::SnowGolem,
         Species::CopperGolem,

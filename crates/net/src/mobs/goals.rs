@@ -1515,6 +1515,23 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
         )
     };
     match species {
+        // `Vindicator`/`Ravager`: ближний бой; топор/таран без отдельной логики.
+        Species::Vindicator | Species::Ravager => {
+            return (
+                Selector::new(
+                    vec![
+                        (1, Goal::Float),
+                        (3, Goal::Melee(Box::new(Melee::new(1.0, true)))),
+                        stroll_at(7, 0.5),
+                        look(8, 8.0),
+                        around(8),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                Selector::new(vec![hurt_by(1, true), nearest(2, false)]),
+            );
+        }
         // `Warden`: обычный ближний бой; звуки/тьма пока без отдельной логики.
         Species::Warden => {
             return (
@@ -1639,6 +1656,8 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
         | Species::IronGolem
         | Species::Phantom
         | Species::Pillager
+        | Species::Evoker
+        | Species::Witch
         | Species::Wither
         | Species::SnowGolem
         | Species::CopperGolem

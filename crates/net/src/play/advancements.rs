@@ -1505,6 +1505,12 @@ impl PlayPlan {
         });
     }
 
+    /// `hero_of_the_village` (`CriteriaTriggers.RAID_WIN`): игрок убил
+    /// разбойника, и рейд закончился победой.
+    pub(crate) fn advancement_hero_of_the_village(&self, uuid: Uuid) {
+        self.advancement_run(uuid, "minecraft:hero_of_the_village", |_| true);
+    }
+
     /// `placed_block` (`PlayerTrigger`): блок поставлен в мир; свойства блока
     /// проверяются в точке установки (`match_block.state`).
     pub(crate) fn advancement_placed_block(&self, uuid: Uuid, _block: &str, pos: [i32; 3]) {
