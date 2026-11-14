@@ -1,0 +1,27 @@
+{
+  "display": {
+    "title": {"text": "block state probe"},
+    "description": {"text": "item_used_on_block with block.state"},
+    "icon": {"id": "minecraft:farmland"},
+    "frame": "task",
+    "show_toast": false,
+    "announce_to_chat": false
+  },
+  "criteria": {
+    "on_wet_farmland": {
+      "trigger": "minecraft:item_used_on_block",
+      "conditions": {
+        "location": {
+          "type": "minecraft:location_check",
+          "predicate": {
+            "block": {
+              "blocks": "minecraft:farmland",
+              "state": {"moisture": "7"}
+            }
+          }
+        }
+      }
+    }
+  },
+  "requirements": [["on_wet_farmland"]]
+}

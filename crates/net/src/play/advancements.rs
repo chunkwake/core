@@ -46,6 +46,8 @@ pub struct AdvancementCriterion {
     pub recipes: Vec<String>,
     /// `conditions.location.*.blocks` (для `placed_block`).
     pub blocks: Vec<String>,
+    /// `location.block.state`: свойства блока (имя -> допустимые значения).
+    pub block_state: Vec<(String, Vec<String>)>,
     /// `conditions.from`/`to` (для `changed_dimension`).
     pub from_dims: Vec<String>,
     pub to_dims: Vec<String>,
@@ -177,9 +179,27 @@ fn short(id: &str) -> &str {
     id.trim_start_matches("minecraft:")
 }
 
-/// Разбор `EntityPredicate` (`player`/`entity`): `inverted`, `any_of`,
-/// `all_of` и `entity_properties` с `entity_type`/`flags.is_baby`/`equipment`.
-/// Неподдержанные узлы помечают `ok = false`.
+/// `StatePropertiesPredicate`: свойство -> список значений. Числовые
+/// диапазоны (`min`/`max`) не поддержаны (`None`).
+fn parse_block_states(v: &serde_json::Value) -> Option<Vec<(String, Vec<String>)>> {
+    let mut out = Vec::new();
+    for (prop, want) in v.as_object()? {
+        let values = match want {
+            serde_json::Value::String(s) => vec![s.clone()],
+            serde_json::Value::Array(a) => a
+                .iter()
+                .map(|x| x.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()?,
+            _ => return None,
+        };
+        if values.is_empty() {
+            return None;
+        }
+        out.push((prop.clone(), values));
+    }
+    Some(out)
+}
+
 /// `ItemPredicate`: `items` (id/тег) и `components.minecraft:damage`.
 /// Прочие поля и компоненты - неподдержаны (`None`).
 fn parse_item_pred(v: &serde_json::Value) -> Option<ItemPred> {
@@ -280,6 +300,9 @@ fn parse_property_map(
     })
 }
 
+/// Разбор `EntityPredicate` (`player`/`entity`): `inverted`, `any_of`,
+/// `all_of` и `entity_properties` с `entity_type`/`flags.is_baby`/`equipment`.
+/// Неподдержанные узлы помечают `ok = false`.
 fn parse_entity_pred(v: &serde_json::Value, ok: &mut bool) -> Option<EntityPred> {
     let typ = v.get("type").and_then(|t| t.as_str())?;
     match typ {
@@ -361,13 +384,36 @@ fn collect_blocks(v: &serde_json::Value, out: &mut Vec<String>) {
 
 /// `location_check` внутри `item_used_on_block`: поддержан `smokey` и
 /// `block.blocks` (последний собирается отдельно). Остальное - unsupported.
-fn collect_item_location(v: &serde_json::Value, smokey: &mut Option<bool>, ok: &mut bool) {
+fn collect_item_location(
+    v: &serde_json::Value,
+    smokey: &mut Option<bool>,
+    states: &mut Vec<(String, Vec<String>)>,
+    ok: &mut bool,
+) {
     if let Some(terms) = v.get("terms").and_then(|t| t.as_array()) {
         for term in terms {
-            collect_item_location(term, smokey, ok);
+            collect_item_location(term, smokey, states, ok);
         }
     }
-    if v.get("type").and_then(|t| t.as_str()) != Some("minecraft:location_check") {
+    let typ = v.get("type").and_then(|t| t.as_str());
+    if typ == Some("minecraft:match_block") {
+        // `placed_block`: блок и его свойства в точке установки.
+        if v.as_object().is_some_and(|o| {
+            o.keys()
+                .any(|k| !matches!(k.as_str(), "type" | "blocks" | "state"))
+        }) {
+            *ok = false;
+            return;
+        }
+        if let Some(state) = v.get("state") {
+            match parse_block_states(state) {
+                Some(list) => states.extend(list),
+                None => *ok = false,
+            }
+        }
+        return;
+    }
+    if typ != Some("minecraft:location_check") {
         return;
     }
     if v.as_object()
@@ -393,9 +439,14 @@ fn collect_item_location(v: &serde_json::Value, smokey: &mut Option<bool>, ok: &
             "block" => {
                 let simple = value
                     .as_object()
-                    .is_some_and(|o| o.keys().all(|k| k == "blocks"));
+                    .is_some_and(|o| o.keys().all(|k| matches!(k.as_str(), "blocks" | "state")));
                 if !simple {
                     *ok = false;
+                } else if let Some(state) = value.get("state") {
+                    match parse_block_states(state) {
+                        Some(list) => states.extend(list),
+                        None => *ok = false,
+                    }
                 }
             }
             _ => *ok = false,
@@ -677,6 +728,7 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 }
             }
             let mut blocks = Vec::new();
+            let mut block_state: Vec<(String, Vec<String>)> = Vec::new();
             // `item_used_on_block`: `smokey` из `location_check`.
             let mut smokey = None;
             let mut item_location_supported = true;
@@ -688,7 +740,12 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 collect_blocks(location, &mut blocks);
                 // `match_tool.predicate.items` внутри location.
                 collect_location_items(location, &mut items);
-                collect_item_location(location, &mut smokey, &mut item_location_supported);
+                collect_item_location(
+                    location,
+                    &mut smokey,
+                    &mut block_state,
+                    &mut item_location_supported,
+                );
             }
             let item_location_unsupported = !item_location_supported;
             let cond = c.get("conditions");
@@ -865,15 +922,25 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                     }
                     if let Some(v) = loc.get("block") {
                         let blocks = v.get("blocks").map(string_or_list).unwrap_or_default();
-                        let extra = v
-                            .as_object()
-                            .is_none_or(|o| o.keys().any(|k| k != "blocks"));
-                        if blocks.is_empty() && !extra {
-                            // `{}` - любой блок.
-                        } else if blocks.is_empty() || extra {
+                        let valid = v.as_object().is_some_and(|o| {
+                            o.keys().all(|k| matches!(k.as_str(), "blocks" | "state"))
+                        });
+                        let mut states = Vec::new();
+                        if valid && let Some(state) = v.get("state") {
+                            match parse_block_states(state) {
+                                Some(list) => states = list,
+                                None => block_unsupported = true,
+                            }
+                        }
+                        if !valid
+                            || (blocks.is_empty()
+                                && states.is_empty()
+                                && v.as_object().is_some_and(|o| !o.is_empty()))
+                        {
                             block_unsupported = true;
-                        } else {
+                        } else if !blocks.is_empty() || !states.is_empty() {
                             block = Some(blocks);
+                            block_state = states;
                         }
                     }
                     if let Some(v) = loc.get("fluid") {
@@ -1039,6 +1106,7 @@ fn parse_advancement(id: &str, json: &serde_json::Value) -> Option<AdvancementDe
                 smokey,
                 light,
                 block,
+                block_state,
                 block_unsupported,
                 fluid,
                 fluid_unsupported,
@@ -1196,6 +1264,11 @@ impl PlayPlan {
     /// Добавить критерии по триггеру и отправить прогресс.
     pub(crate) fn advancement_trigger(&self, uuid: Uuid, trigger: &str, item: Option<&str>) {
         self.advancement_run(uuid, trigger, |c| {
+            // Без позиции свойства блока проверить нельзя (нужен
+            // `advancement_placed_block`).
+            if !c.block_state.is_empty() {
+                return false;
+            }
             if !c.items.is_empty()
                 && !item
                     .is_some_and(|name| c.items.iter().any(|want| self.item_matches(want, name)))
@@ -1325,6 +1398,16 @@ impl PlayPlan {
         });
     }
 
+    /// `placed_block` (`PlayerTrigger`): блок поставлен в мир; свойства блока
+    /// проверяются в точке установки (`match_block.state`).
+    pub(crate) fn advancement_placed_block(&self, uuid: Uuid, block: &str, pos: [i32; 3]) {
+        self.advancement_run(uuid, "minecraft:placed_block", |c| {
+            !c.item_location_unsupported
+                && (c.blocks.is_empty() || c.blocks.iter().any(|w| self.block_matches(w, block)))
+                && self.block_state_matches(pos, &c.block_state)
+        });
+    }
+
     pub(crate) fn advancement_item_used_on_block(
         &self,
         uuid: Uuid,
@@ -1336,6 +1419,7 @@ impl PlayPlan {
             !c.item_location_unsupported
                 && (c.items.is_empty() || c.items.iter().any(|w| self.item_matches(w, item)))
                 && (c.blocks.is_empty() || c.blocks.iter().any(|w| self.block_matches(w, block)))
+                && self.block_state_matches(pos, &c.block_state)
                 && c.smokey.is_none_or(|want| want == self.is_smokey_at(pos))
         });
     }
@@ -1459,12 +1543,13 @@ impl PlayPlan {
                 .as_ref()
                 .is_none_or(|want| short(want) == short(self.active_dim().key()));
             let block_ok = match &c.block {
-                None => true,
+                None => c.block_state.is_empty() || self.block_state_matches(feet, &c.block_state),
                 Some(want) => {
                     !c.block_unsupported
-                        && self
-                            .block_name_at(feet)
-                            .is_some_and(|name| want.iter().any(|w| self.block_matches(w, &name)))
+                        && self.block_name_at(feet).is_some_and(|name| {
+                            want.is_empty() || want.iter().any(|w| self.block_matches(w, &name))
+                        })
+                        && self.block_state_matches(feet, &c.block_state)
                 }
             };
             let fluid_ok = match &c.fluid {
@@ -1529,6 +1614,22 @@ impl PlayPlan {
         let weather = self.vars.weather();
         let darken = self.sky_darken_now(self.active_dim(), weather.rain, weather.thunder);
         Some(i32::from(crate::mobs::raw_brightness(sky, block, darken)))
+    }
+
+    /// `BlockPredicate.state`: совпадение свойств блока.
+    fn block_state_matches(&self, pos: [i32; 3], want: &[(String, Vec<String>)]) -> bool {
+        if want.is_empty() {
+            return true;
+        }
+        let Some(state) = self.block(pos) else {
+            return false;
+        };
+        want.iter().all(|(prop, values)| {
+            self.survival
+                .placement
+                .prop(state, prop)
+                .is_some_and(|have| values.iter().any(|v| v == have))
+        })
     }
 
     /// `FluidPredicate`: id или тег (`water`/`lava`).
@@ -2365,12 +2466,41 @@ mod tests {
     }
 
     #[test]
-    fn location_block_state_and_fluid_nbt_are_unsupported() {
+    fn location_block_state_parses_and_nbt_is_unsupported() {
         let c = location_advancement(serde_json::json!({
-            "block": {"blocks": "minecraft:stone", "state": {"lit": "true"}}
+            "block": {"blocks": "minecraft:campfire", "state": {"lit": "true"}}
+        }));
+        assert!(!c.block_unsupported);
+        assert!(!c.unsupported_location);
+        assert_eq!(c.block, Some(vec!["minecraft:campfire".to_owned()]));
+        assert_eq!(
+            c.block_state,
+            vec![("lit".to_owned(), vec!["true".to_owned()])]
+        );
+
+        // Список значений и состояние без `blocks` (любой блок).
+        let c = location_advancement(serde_json::json!({
+            "block": {"state": {"note": ["3", "5"]}}
+        }));
+        assert!(!c.block_unsupported);
+        assert_eq!(c.block, Some(Vec::new()));
+        assert_eq!(
+            c.block_state,
+            vec![("note".to_owned(), vec!["3".to_owned(), "5".to_owned()])]
+        );
+
+        // NBT блока не поддержан.
+        let c = location_advancement(serde_json::json!({
+            "block": {"blocks": "minecraft:chest", "nbt": "{Lock:\"x\"}"}
         }));
         assert!(c.block_unsupported);
         assert!(!c.unsupported_location);
+
+        // Числовой диапазон (`min`/`max`) не поддержан.
+        let c = location_advancement(serde_json::json!({
+            "block": {"state": {"level": {"min": "1"}}}
+        }));
+        assert!(c.block_unsupported);
 
         let c = location_advancement(serde_json::json!({
             "fluid": {"fluid": "minecraft:water", "nbt": 1}
@@ -2660,6 +2790,95 @@ mod tests {
     }
 
     #[test]
+    fn placed_block_match_block_state_parses() {
+        let json = serde_json::json!({
+            "criteria": {
+                "place_dried_ghast_in_water": {
+                    "trigger": "minecraft:placed_block",
+                    "conditions": {
+                        "location": {
+                            "type": "minecraft:match_block",
+                            "blocks": "minecraft:dried_ghast",
+                            "state": {"waterlogged": "true"}
+                        }
+                    }
+                }
+            },
+            "requirements": [["place_dried_ghast_in_water"]]
+        });
+        let def = parse_advancement("test/ghast", &json).expect("advancement");
+        let c = &def.criteria[0];
+        assert!(!c.item_location_unsupported);
+        assert_eq!(c.blocks, vec!["minecraft:dried_ghast".to_owned()]);
+        assert_eq!(
+            c.block_state,
+            vec![("waterlogged".to_owned(), vec!["true".to_owned()])]
+        );
+    }
+
+    #[test]
+    fn placed_block_location_offsets_are_unsupported() {
+        let json = serde_json::json!({
+            "criteria": {
+                "c": {
+                    "trigger": "minecraft:placed_block",
+                    "conditions": {
+                        "location": {
+                            "type": "minecraft:any_of",
+                            "terms": [
+                                {
+                                    "type": "minecraft:location_check",
+                                    "offsetZ": 1,
+                                    "predicate": {
+                                        "block": {
+                                            "blocks": "minecraft:comparator",
+                                            "state": {"facing": "north"}
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+            "requirements": [["c"]]
+        });
+        let def = parse_advancement("test/bookshelf", &json).expect("advancement");
+        assert!(def.criteria[0].item_location_unsupported);
+    }
+
+    #[test]
+    fn item_used_on_block_block_state_parses() {
+        let json = serde_json::json!({
+            "criteria": {
+                "c": {
+                    "trigger": "minecraft:item_used_on_block",
+                    "conditions": {
+                        "location": {
+                            "type": "minecraft:location_check",
+                            "predicate": {
+                                "block": {
+                                    "blocks": "minecraft:farmland",
+                                    "state": {"moisture": "7"}
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "requirements": [["c"]]
+        });
+        let def = parse_advancement("test/state", &json).expect("advancement");
+        let c = &def.criteria[0];
+        assert!(!c.item_location_unsupported);
+        assert_eq!(c.blocks, vec!["minecraft:farmland".to_owned()]);
+        assert_eq!(
+            c.block_state,
+            vec![("moisture".to_owned(), vec!["7".to_owned()])]
+        );
+    }
+
+    #[test]
     fn item_used_on_block_unknown_location_is_unsupported() {
         let json = serde_json::json!({
             "criteria": {
@@ -2671,7 +2890,7 @@ mod tests {
                             "predicate": {
                                 "block": {
                                     "blocks": "minecraft:beehive",
-                                    "state": {"honey_level": "5"}
+                                    "nbt": "{Lock:\"x\"}"
                                 },
                                 "smokey": true
                             }

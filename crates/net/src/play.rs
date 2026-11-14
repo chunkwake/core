@@ -15715,11 +15715,7 @@ impl PlayPlan {
                                     "minecraft:block_place",
                                 );
                                 drop(edit);
-                                self.advancement_trigger(
-                                    uuid,
-                                    "minecraft:placed_block",
-                                    Some(&name),
-                                );
+                                self.advancement_placed_block(uuid, &name, target);
                                 // `WitherSkullBlock.setPlacedBy`.
                                 if matches!(
                                     name.as_str(),
