@@ -1804,6 +1804,10 @@ pub(crate) struct DimSim {
     wither_skulls: Mutex<FastMap<i32, wither::WitherSkull>>,
     /// Облака дыхания дракона Края (`dragon_breath`).
     breaths: Mutex<Vec<dragon::Breath>>,
+    /// Скалк-визгуны: состояние предупреждений.
+    shriekers: Mutex<FastMap<[i32; 3], sculk::Shrieker>>,
+    /// Ожидающие появления стражи: точка и тик.
+    warden_spawns: Mutex<Vec<([f64; 3], i64)>>,
     /// Босс-бары дракона Края (`EnderDragon.bossEvent`).
     dragon_bars: Mutex<FastMap<u128, wither::WitherBar>>,
     /// Индекс предметов по чанкам: `(cx, cz)` → ID предметов в нём.
@@ -11991,6 +11995,7 @@ impl PlayPlan {
         self.tick_copper_chests();
         self.tick_dragon_fight();
         self.tick_dragons();
+        self.tick_shriekers();
         self.tick_bosses();
         self.tick_vibrations();
         self.tick_random_blocks();
@@ -22119,10 +22124,14 @@ impl PlayPlan {
     /// Наступили на скалк-сенсор (`SculkSensorBlock.stepOn`): вибрация шага.
     fn sculk_step_on(&self, pos: [i32; 3], entity: [f64; 3]) {
         let Some(state) = self.block(pos) else { return };
+        let origin = [entity[0], entity[1], entity[2]];
+        if crate::redstone::is_sculk_shrieker(self.state_name(state)) {
+            self.sculk_shrieker_hear(pos, origin);
+            return;
+        }
         if !crate::redstone::is_sculk_sensor(self.state_name(state)) {
             return;
         }
-        let origin = [entity[0], entity[1], entity[2]];
         let frequency = crate::redstone::vibration_frequency("minecraft:step");
         self.sculk_hears(pos, origin, frequency);
     }

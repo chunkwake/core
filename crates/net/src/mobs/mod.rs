@@ -243,6 +243,7 @@ pub enum Species {
     EnderDragon,
     EndCrystal,
     Parrot,
+    Warden,
 }
 
 /// Всё о виде в одном месте. Встроенные значения — запасные: при старте
@@ -315,7 +316,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 22] = [
+const BUILTIN: [SpeciesInfo; 23] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -611,6 +612,20 @@ const BUILTIN: [SpeciesInfo; 22] = [
             "minecraft:entities/parrot",
         )
     },
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (0.9, 2.9),
+        eye_height: 2.7,
+        max_health: 500.0,
+        speed: 0.3,
+        follow_range: 16.0,
+        attack_damage: 30.0,
+        ..base(
+            "minecraft:warden",
+            "minecraft:entity.warden",
+            "minecraft:entities/warden",
+        )
+    },
 ];
 
 static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
@@ -647,7 +662,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 22] = [
+    pub const ALL: [Species; 23] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -670,6 +685,7 @@ impl Species {
         Species::EnderDragon,
         Species::EndCrystal,
         Species::Parrot,
+        Species::Warden,
     ];
 
     /// Данные вида: выгрузка, если она установлена, иначе встроенные.
@@ -2351,6 +2367,15 @@ pub fn spawn_cell_forbidden(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn warden_species_matches_vanilla() {
+        assert_eq!(Species::Warden.name(), "minecraft:warden");
+        assert_eq!(Species::Warden.category(), Category::Monster);
+        assert_eq!(Species::Warden.max_health(), 500.0);
+        assert_eq!(Species::Warden.size(), (0.9, 2.9));
+        assert_eq!(Species::Warden.attack_damage(), 30.0);
+    }
+
     #[test]
     fn copper_golem_weathering_advances_stages() {
         let mut m = Mob::new(Species::CopperGolem, [0.0; 3], 1);

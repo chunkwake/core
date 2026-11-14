@@ -1515,6 +1515,23 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
         )
     };
     match species {
+        // `Warden`: обычный ближний бой; звуки/тьма пока без отдельной логики.
+        Species::Warden => {
+            return (
+                Selector::new(
+                    vec![
+                        (1, Goal::Float),
+                        (3, Goal::Melee(Box::new(Melee::new(1.0, true)))),
+                        stroll_at(7, 0.5),
+                        look(8, 8.0),
+                        around(8),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                Selector::new(vec![hurt_by(1, true), nearest(2, false)]),
+            );
+        }
         Species::Zombie | Species::Drowned => {
             let float = if species == Species::Drowned {
                 vec![(0, Goal::Float)]

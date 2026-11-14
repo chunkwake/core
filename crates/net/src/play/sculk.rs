@@ -11,10 +11,174 @@ use std::collections::HashSet;
 
 /// Радиус обнаружения смерти (`SculkCatalystBlockEntity.LISTENER_RADIUS`).
 const LISTENER_RADIUS: f64 = 8.0;
+/// `SculkShriekerBlockEntity`: окно между криками и сброс предупреждений.
+const SHRIEK_TICKS: i64 = 90;
+const WARNING_TICKS: i64 = 12_000;
+/// Задержка появления стража после 4-го предупреждения.
+const WARDEN_DELAY: i64 = 40;
+
+/// Состояние скалк-визгуна.
+#[derive(Default)]
+pub(crate) struct Shrieker {
+    warning: i32,
+    warn_until: i64,
+    shrieking_until: i64,
+}
 /// Ограничение расползания от точки смерти.
 const SPREAD_RADIUS: i32 = 8;
 
 impl PlayPlan {
+    /// `SculkShriekerBlockEntity.tryShriek`: крик и предупреждение.
+    pub(super) fn sculk_shrieker_hear(&self, pos: [i32; 3], _origin: [f64; 3]) {
+        let now = self.game_time.load(Ordering::Relaxed);
+        let (warning, _) = {
+            let mut map = self.sim().shriekers.lock().unwrap();
+            let entry = map.entry(pos).or_default();
+            if entry.shrieking_until > now {
+                return;
+            }
+            if now > entry.warn_until {
+                entry.warning = 0;
+            }
+            entry.warning = (entry.warning + 1).min(4);
+            entry.warn_until = now + WARNING_TICKS;
+            entry.shrieking_until = now + SHRIEK_TICKS;
+            (entry.warning, ())
+        };
+        if let Some(state) = self.block(pos)
+            && let Some(next) = self
+                .survival
+                .placement
+                .with_prop(state, "shrieking", "true")
+        {
+            self.set_block(pos, next);
+        }
+        let center = [
+            f64::from(pos[0]) + 0.5,
+            f64::from(pos[1]) + 0.5,
+            f64::from(pos[2]) + 0.5,
+        ];
+        self.play_sound(
+            None,
+            "minecraft:block.sculk_shrieker.shriek",
+            crate::sounds::BLOCKS,
+            center,
+            1.0,
+            1.0,
+        );
+        if warning >= 4 {
+            {
+                let mut map = self.sim().shriekers.lock().unwrap();
+                if let Some(entry) = map.get_mut(&pos) {
+                    entry.warning = 0;
+                }
+            }
+            let can_summon = self.block(pos).is_some_and(|state| {
+                self.survival.placement.prop(state, "can_summon") == Some("true")
+            });
+            if can_summon && self.difficulty() != survival::Difficulty::Peaceful {
+                self.sim()
+                    .warden_spawns
+                    .lock()
+                    .unwrap()
+                    .push((center, now + WARDEN_DELAY));
+            }
+        }
+    }
+
+    /// Тик визгунов: снять `shrieking`, сбросить предупреждения, выпустить стражей.
+    pub(super) fn tick_shriekers(&self) {
+        let now = self.game_time.load(Ordering::Relaxed);
+        let positions: Vec<[i32; 3]> = self
+            .sim()
+            .shriekers
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
+        for pos in positions {
+            let reset = {
+                let mut map = self.sim().shriekers.lock().unwrap();
+                let Some(entry) = map.get_mut(&pos) else {
+                    continue;
+                };
+                let mut reset = false;
+                if entry.shrieking_until != 0 && entry.shrieking_until <= now {
+                    entry.shrieking_until = 0;
+                    reset = true;
+                }
+                if entry.warning != 0 && entry.warn_until <= now {
+                    entry.warning = 0;
+                }
+                (reset, entry.warning == 0 && entry.shrieking_until == 0)
+            };
+            if reset.0
+                && let Some(state) = self.block(pos)
+                && self.state_name(state) == "minecraft:sculk_shrieker"
+                && let Some(next) = self
+                    .survival
+                    .placement
+                    .with_prop(state, "shrieking", "false")
+            {
+                self.set_block(pos, next);
+            }
+            if reset.1 {
+                self.sim().shriekers.lock().unwrap().remove(&pos);
+            }
+        }
+        let due: Vec<[f64; 3]> = {
+            let mut queue = self.sim().warden_spawns.lock().unwrap();
+            let mut due = Vec::new();
+            let mut rest = Vec::with_capacity(queue.len());
+            for (pos, at) in queue.drain(..) {
+                if at <= now {
+                    due.push(pos);
+                } else {
+                    rest.push((pos, at));
+                }
+            }
+            *queue = rest;
+            due
+        };
+        for pos in due {
+            if let Some(&particle) = self
+                .particle_types
+                .lock()
+                .unwrap()
+                .get("minecraft:sculk_soul")
+            {
+                self.hub.send(
+                    None,
+                    play::level_particles(
+                        self.ids.level_particles,
+                        particle,
+                        false,
+                        pos,
+                        [0.5; 3],
+                        0.05,
+                        16,
+                    ),
+                );
+            }
+            self.play_sound(
+                None,
+                "minecraft:entity.warden.emerge",
+                crate::sounds::HOSTILE,
+                pos,
+                1.0,
+                1.0,
+            );
+            self.spawn_mob(
+                crate::mobs::Species::Warden,
+                [pos[0], pos[1] - 0.5, pos[2]],
+                0.0,
+                false,
+                Some("WARDEN"),
+            );
+        }
+    }
+
     /// Смерть моба рядом с катализатором: `SculkCatalystBlockEntity.bloom`.
     pub(super) fn sculk_catalyst_death(&self, pos: [f64; 3], charge: i32) {
         if !self.vars.flag("mob_griefing") {

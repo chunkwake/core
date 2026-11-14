@@ -72,7 +72,10 @@ impl PlayPlan {
                         let Some(state) = w.block([x, y, z]) else {
                             continue;
                         };
-                        if crate::redstone::is_sculk_sensor(self.state_name(state)) {
+                        let name = self.state_name(state);
+                        if crate::redstone::is_sculk_sensor(name)
+                            || crate::redstone::is_sculk_shrieker(name)
+                        {
                             out.push([x, y, z]);
                         }
                     }
@@ -234,7 +237,14 @@ impl PlayPlan {
             return;
         }
         for v in pick_nearest(due) {
-            self.sculk_hears(v.sensor, v.origin, v.frequency);
+            let shrieker = self
+                .block(v.sensor)
+                .is_some_and(|state| crate::redstone::is_sculk_shrieker(self.state_name(state)));
+            if shrieker {
+                self.sculk_shrieker_hear(v.sensor, v.origin);
+            } else {
+                self.sculk_hears(v.sensor, v.origin, v.frequency);
+            }
         }
     }
 }
