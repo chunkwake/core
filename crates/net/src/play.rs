@@ -15165,8 +15165,21 @@ impl PlayPlan {
                         {
                             let slot = if u.hand == 0 { state.inv.held_slot() } else { survival::OFFHAND };
                             let held = state.inv.slots[slot];
-                            match self.use_sign(uuid, u.pos, held, u.hand == 0, login.spawn.game_mode != 2).await {
+                            match self
+                                .use_sign(uuid, u.pos, held, u.hand == 0, login.spawn.game_mode != 2)
+                                .await
+                            {
                                 signs::SignUse::Applied => {
+                                    // `ServerPlayerGameMode.useItemOn`:
+                                    // `ITEM_USED_ON_BLOCK` после успешного
+                                    // применения (воск, краситель, чернила).
+                                    self.advancement_item_used_on_block(
+                                        uuid,
+                                        state.inv.slots[slot]
+                                            .map_or("minecraft:air", |s| self.item_name(s.item)),
+                                        &clicked,
+                                        u.pos,
+                                    );
                                     if login.spawn.game_mode != 1 {
                                         state.inv.consume_at(slot);
                                     }

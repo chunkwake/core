@@ -1,0 +1,28 @@
+{
+  "display": {
+    "title": {"text": "block nbt negative probe"},
+    "description": {"text": "must not match is_waxed:0b after waxing"},
+    "icon": {"id": "minecraft:oak_sign"},
+    "frame": "task",
+    "show_toast": false,
+    "announce_to_chat": false
+  },
+  "criteria": {
+    "unwaxed_sign": {
+      "trigger": "minecraft:item_used_on_block",
+      "conditions": {
+        "item": {"items": "minecraft:honeycomb"},
+        "location": {
+          "type": "minecraft:location_check",
+          "predicate": {
+            "block": {
+              "blocks": "minecraft:oak_sign",
+              "nbt": "{is_waxed:0b}"
+            }
+          }
+        }
+      }
+    }
+  },
+  "requirements": [["unwaxed_sign"]]
+}

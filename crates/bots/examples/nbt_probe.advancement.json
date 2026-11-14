@@ -1,0 +1,28 @@
+{
+  "display": {
+    "title": {"text": "block nbt probe"},
+    "description": {"text": "item_used_on_block with block.nbt"},
+    "icon": {"id": "minecraft:honeycomb"},
+    "frame": "task",
+    "show_toast": false,
+    "announce_to_chat": false
+  },
+  "criteria": {
+    "waxed_sign": {
+      "trigger": "minecraft:item_used_on_block",
+      "conditions": {
+        "item": {"items": "minecraft:honeycomb"},
+        "location": {
+          "type": "minecraft:location_check",
+          "predicate": {
+            "block": {
+              "blocks": "minecraft:oak_sign",
+              "nbt": "{is_waxed:1b}"
+            }
+          }
+        }
+      }
+    }
+  },
+  "requirements": [["waxed_sign"]]
+}
