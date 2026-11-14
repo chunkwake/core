@@ -1379,6 +1379,108 @@ impl PlayPlan {
                 }
             }
         }
+        self.tick_witch_heals();
+    }
+
+    /// `Witch.performRangedAttack` по союзному разбойнику: бросок зелья
+    /// лечения (`instant_health` при HP ≤ 4, иначе `regeneration`).
+    pub(super) fn tick_witch_heals(&self) {
+        let raids: Vec<[f64; 3]> = self
+            .raids
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.center)
+            .collect();
+        if raids.is_empty() {
+            return;
+        }
+        let mut throws: Vec<([f64; 3], [f64; 3], bool)> = Vec::new();
+        {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            for entry in mobs.values_mut() {
+                if entry.mob.species == Species::Witch && entry.mob.alive() {
+                    entry.mob.witch_heal_cooldown = entry.mob.witch_heal_cooldown.saturating_sub(1);
+                }
+            }
+            let raiders: Vec<(i32, [f64; 3], f32, f32)> = mobs
+                .iter()
+                .filter(|(_, e)| {
+                    e.mob.alive() && e.mob.species.is_raider() && e.mob.species != Species::Witch
+                })
+                .map(|(&id, e)| (id, e.mob.pos, e.mob.health, e.mob.max_health()))
+                .collect();
+            let ready: Vec<(i32, [f64; 3])> = mobs
+                .iter()
+                .filter(|(_, e)| {
+                    e.mob.species == Species::Witch
+                        && e.mob.alive()
+                        && e.mob.witch_heal_cooldown == 0
+                        && raids
+                            .iter()
+                            .any(|c| mb::dist2(*c, e.mob.pos) <= 96.0 * 96.0)
+                })
+                .map(|(&id, e)| (id, e.mob.pos))
+                .collect();
+            for (witch, wpos) in ready {
+                let Some(target) = raiders
+                    .iter()
+                    .filter(|(_, pos, health, max)| {
+                        health < max && mb::dist2(*pos, wpos) <= 10.0 * 10.0
+                    })
+                    .min_by(|a, b| mb::dist2(a.1, wpos).total_cmp(&mb::dist2(b.1, wpos)))
+                else {
+                    continue;
+                };
+                if let Some(entry) = mobs.get_mut(&witch) {
+                    entry.mob.witch_heal_cooldown = 60;
+                }
+                throws.push((wpos, target.1, target.2 <= 4.0));
+            }
+        }
+        for (wpos, tpos, instant) in throws {
+            // Радиус splash-зелья — 4 блока, сила падает с расстоянием.
+            let allies: Vec<(i32, f64)> = {
+                let mobs = self.sim().mobs.lock().unwrap();
+                mobs.iter()
+                    .filter(|(_, e)| e.mob.alive() && e.mob.species.is_raider())
+                    .filter_map(|(&id, e)| {
+                        let d = mb::dist2(e.mob.pos, tpos).sqrt();
+                        (d <= 4.0).then(|| (id, (1.0 - d / 4.0).clamp(0.0, 1.0)))
+                    })
+                    .collect()
+            };
+            for (id, strength) in allies {
+                if instant {
+                    if let Some(&effect_id) = self.survival.effects.get("minecraft:instant_health")
+                    {
+                        self.mob_potion_effect(
+                            id,
+                            survival::Effect::plain(effect_id, 0, 1),
+                            survival::instant_effect("minecraft:instant_health", 0),
+                            strength,
+                        );
+                    }
+                } else if let Some(&effect_id) = self.survival.effects.get("minecraft:regeneration")
+                {
+                    let duration = (900.0 * strength).floor() as i32;
+                    self.mob_potion_effect(
+                        id,
+                        survival::Effect::plain(effect_id, 0, duration.max(1)),
+                        survival::instant_effect("minecraft:regeneration", 0),
+                        strength,
+                    );
+                }
+            }
+            self.play_sound(
+                None,
+                "minecraft:entity.witch.throw",
+                crate::sounds::HOSTILE,
+                wpos,
+                1.0,
+                1.0,
+            );
+        }
     }
 
     /// Коробки коллизии блока для моба: `getCollisionShape` 26.3.
@@ -1493,6 +1595,20 @@ impl PlayPlan {
         }
         // Детёныши животных ничего не роняют; детёныш зомби — как взрослый.
         if let Some((uuid, _)) = e.killer {
+            // Убийство капитана рейда (`Raider.isCaptain`): Bad Omen I на
+            // 100 минут, затем у деревни он станет Raid Omen.
+            if m.raid_leader
+                && let Some(&bad_omen) = self.survival.effects.get("minecraft:bad_omen")
+            {
+                self.push_control(
+                    uuid,
+                    Control::Effect {
+                        effect: survival::Effect::plain(bad_omen, 0, 120_000),
+                        force: false,
+                        command: false,
+                    },
+                );
+            }
             // `Raider.die` → `Raid.addHeroOfTheVillage`.
             self.raid_hero(uuid, m.uuid);
             self.award_stat(uuid, "minecraft:killed", m.species.name(), 1);
@@ -2753,6 +2869,7 @@ impl PlayPlan {
         strength: f64,
     ) -> bool {
         let mut hit = None;
+        let mut healed = false;
         {
             let mut mobs = self.sim().mobs.lock().unwrap();
             let Some(entry) = mobs.get_mut(&id) else {
@@ -2774,12 +2891,14 @@ impl PlayPlan {
                     } else {
                         entry.mob.health =
                             (entry.mob.health + amount(base)).min(entry.mob.max_health());
+                        healed = true;
                     }
                 }
                 survival::Instant::Harm(base) => {
                     if undead {
                         entry.mob.health =
                             (entry.mob.health + amount(base)).min(entry.mob.max_health());
+                        healed = true;
                     } else {
                         died_now = hurt(entry, amount(base));
                     }
@@ -2793,6 +2912,10 @@ impl PlayPlan {
             if let Some(died) = died_now {
                 hit = Some((died, entry.mob.sound(if died { "death" } else { "hurt" })));
             }
+        }
+        if healed {
+            // `LivingEntity.setHealth` синхронизирует `DATA_HEALTH_ID`.
+            self.refresh_mob(id);
         }
         if let Some((died, sound)) = hit {
             let mobs = self.sim().mobs.lock().unwrap();

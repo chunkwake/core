@@ -229,11 +229,12 @@ impl PlayPlan {
         self.raids.lock().unwrap().push(raid);
         // `absorbRaidOmen`: статистика только до первой волны.
         self.award_stat(uuid, "minecraft:custom", "minecraft:raid_trigger", 1);
-        // `Raid` забирает эффект: игрок получает Bad Omen только один раз.
+        // `Raid.absorbRaidOmen`: снимается только Bad Omen, остальные
+        // эффекты остаются.
         self.push_control(
             uuid,
             Control::ClearEffect {
-                id: None,
+                id: self.survival.effects.get("minecraft:bad_omen").copied(),
                 command: false,
             },
         );
@@ -265,6 +266,8 @@ impl PlayPlan {
         let mut out = Vec::new();
         let mut health = 0.0;
         let mut index = 0i32;
+        let mut leader_set = false;
+        let mut leader_packet: Option<(i32, Stack)> = None;
         for (kind, count) in counts {
             for _ in 0..count {
                 let angle = f64::from(index) * std::f64::consts::TAU / f64::from(total);
@@ -275,14 +278,46 @@ impl PlayPlan {
                     center[2] + angle.sin() * 6.0,
                 ];
                 if let Some(id) = self.spawn_mob(kind.species(), pos, 0.0f32, false, Some("RAID"))
-                    && let Some(entry) = self.sim().mobs.lock().unwrap().get(&id)
+                    && let Some(entry) = self.sim().mobs.lock().unwrap().get_mut(&id)
                 {
+                    // `Raid.spawnGroup` → `setLeader`: знамя в HEAD и шанс
+                    // дропа 2.0 (выпадает всегда).
+                    if !leader_set {
+                        leader_set = true;
+                        let banner = self.ominous_banner();
+                        entry.mob.raid_leader = true;
+                        entry.mob.equipment[5] = banner;
+                        entry.mob.drop_chances[5] = 2.0;
+                        if let Some(banner) = banner {
+                            leader_packet = Some((id, banner));
+                        }
+                    }
                     out.push(entry.mob.uuid);
                     health += entry.mob.health;
                 }
             }
         }
+        // Спавн уже отправлен `spawn_mob`; знамя в HEAD — отдельным пакетом.
+        if let Some((id, banner)) = leader_packet {
+            self.hub.send_about(
+                id,
+                play::set_equipment(self.ids.set_equipment, id, &[(4, Some(banner))]),
+            );
+        }
         (out, health)
+    }
+
+    /// `Raid.getOminousBannerInstance`: белое знамя с именем.
+    fn ominous_banner(&self) -> Option<Stack> {
+        let item = self.item_id("minecraft:white_banner")?;
+        let extra = chunkwake_protocol::components::Extra {
+            custom_name: Some(r#"{"translate":"block.minecraft.ominous_banner"}"#.to_owned()),
+            ..Default::default()
+        };
+        Some(Stack {
+            extra: chunkwake_protocol::components::intern(extra),
+            ..Stack::new(item, 1)
+        })
     }
 
     /// `Raid.hasMoreWaves`: бонусная волна при Bad Omen II и выше.

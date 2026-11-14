@@ -759,6 +759,18 @@ impl Species {
         INSTALLED.get().map_or(&BUILTIN[i], |t| &t[i])
     }
 
+    /// Разбойник (`#minecraft:raiders`).
+    pub fn is_raider(self) -> bool {
+        matches!(
+            self,
+            Species::Pillager
+                | Species::Vindicator
+                | Species::Evoker
+                | Species::Witch
+                | Species::Ravager
+        )
+    }
+
     pub fn name(self) -> &'static str {
         BUILTIN[self as usize].name
     }
@@ -1033,6 +1045,10 @@ pub struct Mob {
     pub sonic_charge: u32,
     /// `Warden`: цель, по которой заряжен sonic boom.
     pub sonic_target: Option<u128>,
+    /// `Raider.isCaptain`: лидер волны со знаменем.
+    pub raid_leader: bool,
+    /// `Witch`: кулдаун лечения союзников (`RangedAttackGoal`, 60 тиков).
+    pub witch_heal_cooldown: u32,
     /// `DropChances` по тем же слотам; > 1 — предмет сохраняется всегда.
     pub drop_chances: [f32; 6],
     /// Множитель скорости от `Speed`/`Slowness` (пересчитывается в тике).
@@ -1105,6 +1121,8 @@ impl Mob {
             sonic_cooldown: 0,
             sonic_charge: 0,
             sonic_target: None,
+            raid_leader: false,
+            witch_heal_cooldown: 0,
             nav: Navigation::new(species == Species::Spider),
             move_ctl: MoveControl::default(),
             move_speed: 0.0,
@@ -2441,6 +2459,21 @@ pub fn spawn_cell_forbidden(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn raider_species_match_tag() {
+        for species in [
+            Species::Pillager,
+            Species::Vindicator,
+            Species::Evoker,
+            Species::Witch,
+            Species::Ravager,
+        ] {
+            assert!(species.is_raider(), "{:?}", species);
+        }
+        assert!(!Species::Cow.is_raider());
+        assert!(!Species::Zombie.is_raider());
+    }
+
     #[test]
     fn warden_species_matches_vanilla() {
         assert_eq!(Species::Warden.name(), "minecraft:warden");
