@@ -2418,6 +2418,7 @@ mod poi;
 mod raids;
 mod recipe_book;
 mod respawn;
+mod sculk;
 mod section_order;
 mod signs;
 mod stats;

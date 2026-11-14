@@ -1444,6 +1444,9 @@ impl PlayPlan {
         if xp > 0 {
             self.spawn_orbs(m.pos, xp);
         }
+        // `SculkCatalystBlockEntity`: смерть моба рядом со скалк-катализатором.
+        let charge = m.xp(rand::random()).max(1);
+        self.sculk_catalyst_death(m.pos, charge);
     }
 
     /// Поля мобов из NBT: `/summon <entity> <pos> <nbt>` и
