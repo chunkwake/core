@@ -470,6 +470,42 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
 /// после имени команды целиком (литералы пути входят и в `path`, и в
 /// `rest`), поэтому цепочка берётся только из `rest` — иначе `positioned`
 /// попал бы в строку дважды.
+/// `BlockPredicate` для `execute if block`: id или `#тег`, плюс только
+/// перечисленные свойства (`chest[facing=north]`); остальные не важны.
+fn block_matches(ctx: &Context<'_>, state: u32, spec: &str) -> bool {
+    let plan = ctx.plan;
+    let (head, properties) = match spec.split_once('[') {
+        Some((head, tail)) => match tail.strip_suffix(']') {
+            Some(tail) => (head.trim(), Some(tail)),
+            None => return false,
+        },
+        None => (spec.trim(), None),
+    };
+    if let Some(tag) = head.strip_prefix('#') {
+        let tag = args::resource_name(tag);
+        return plan
+            .survival
+            .block_tags
+            .get(&tag)
+            .is_some_and(|set| set.contains(plan.state_name(state)));
+    }
+    let Some(parsed) = plan.parse_block_state(head) else {
+        return false;
+    };
+    if plan.state_name(parsed) != plan.state_name(state) {
+        return false;
+    }
+    properties
+        .into_iter()
+        .flat_map(|p| p.split(','))
+        .all(|pair| {
+            let Some((key, value)) = pair.split_once('=') else {
+                return false;
+            };
+            plan.survival.placement.prop(state, key.trim()) == Some(value.trim())
+        })
+}
+
 pub(super) fn execute(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     let Some(_depth) = ExecuteDepth::enter() else {
         return Outcome::Feedback(error_component("/execute: maximum nesting depth exceeded"));
@@ -718,10 +754,11 @@ fn run_chain(ctx: &Context<'_>, exec: &Exec, rest: &str, budget: &mut usize) -> 
                             ];
                             // Ваниль принимает block predicate: имя и
                             // свойства (`stone`, `chest[facing=north]`).
-                            match ctx.plan.parse_block_state(block) {
-                                Some(state) => ctx.plan.block(pos) == Some(state),
-                                None => false,
-                            }
+                            // `BlockPredicate`: id/тег и только перечисленные
+                            // свойства; остальные не важны.
+                            ctx.plan
+                                .block(pos)
+                                .is_some_and(|state| block_matches(ctx, state, block))
                         });
                         Ok((ok, next))
                     }

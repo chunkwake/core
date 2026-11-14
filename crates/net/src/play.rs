@@ -1790,6 +1790,10 @@ pub(crate) struct DimSim {
     dropped: Mutex<FastMap<i32, Dropped>>,
     /// Частота последней вибрации скалк-сенсора: для компаратора.
     sculk_frequency: Mutex<FastMap<[i32; 3], i32>>,
+    /// Сенсоры скалка по секциям (`GameEventListenerRegistry`).
+    sculk_sections: Mutex<FastMap<[i32; 3], Vec<[i32; 3]>>>,
+    /// Вибрации, ожидающие доставки (`game_time + distance`).
+    vibrations: Mutex<Vec<game_events::PendingVibration>>,
     /// Индекс предметов по чанкам: `(cx, cz)` → ID предметов в нём.
     ///
     /// Подбор игроком и всасывание воронкой раньше сканировали **все**
@@ -2387,6 +2391,7 @@ pub mod commands;
 mod conduits;
 mod crafter;
 mod fishing;
+mod game_events;
 mod item_frames;
 mod jukebox;
 mod kinds;
@@ -3430,6 +3435,12 @@ impl PlayPlan {
         if conduit {
             self.sim().pending_conduits.lock().unwrap().push([x, y, z]);
         }
+        // Блок изменился: регистратор секции пересоберётся при следующей вибрации.
+        self.sim().sculk_sections.lock().unwrap().remove(&[
+            x.div_euclid(16),
+            y.div_euclid(16),
+            z.div_euclid(16),
+        ]);
         if inserted {
             if let Some((column, _)) = self.dim_state().edited.read().unwrap().get(&key) {
                 let list = self.collect_pois(key.0, key.1, column);
@@ -11876,6 +11887,7 @@ impl PlayPlan {
         self.tick_crafters();
         lap(PH_CAMPFIRES, watch);
         self.tick_copper_chests();
+        self.tick_vibrations();
         self.tick_random_blocks();
         self.tick_precipitation();
         self.publish_tracked();
@@ -21938,7 +21950,7 @@ impl PlayPlan {
     ///
     /// Слышно только из фазы `inactive`; калиброванный дополнительно требует,
     /// чтобы частота совпала с сигналом сзади, если он ненулевой.
-    fn sculk_hears(&self, pos: [i32; 3], origin: [f64; 3], frequency: i32) -> bool {
+    pub(super) fn sculk_hears(&self, pos: [i32; 3], origin: [f64; 3], frequency: i32) -> bool {
         let pl = &self.survival.placement;
         let Some(state) = self.block(pos) else {
             return false;
@@ -21996,24 +22008,7 @@ impl PlayPlan {
     /// событие проверяет попадание. Здесь сенсоры ищутся в кубе радиуса
     /// вокруг источника — их в мире единицы, а обхода всех чанков нет.
     fn emit_vibration(&self, origin: [f64; 3], event: &str) {
-        let frequency = crate::redstone::vibration_frequency(event);
-        if frequency == 0 {
-            return;
-        }
-        let range = crate::redstone::SCULK_LISTENER_RANGE;
-        let (cx, cy, cz) = (
-            origin[0].floor() as i32,
-            origin[1].floor() as i32,
-            origin[2].floor() as i32,
-        );
-        for dx in -range..=range {
-            for dy in -range..=range {
-                for dz in -range..=range {
-                    let p = [cx + dx, cy + dy, cz + dz];
-                    self.sculk_hears(p, origin, frequency);
-                }
-            }
-        }
+        self.dispatch_vibration(origin, event);
     }
 
     /// Наступили на скалк-сенсор (`SculkSensorBlock.stepOn`): вибрация шага.

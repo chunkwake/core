@@ -188,6 +188,32 @@ fn execute_if_block_checks_state_properties() {
         )
         .contains("42")
     );
+    // Перечисленные свойства важны, остальные — нет (`BlockPredicate`).
+    run(
+        &plan,
+        &format!("setblock 4 {y} 4 minecraft:chest[facing=west]"),
+    );
+    assert!(
+        run(
+            &plan,
+            &format!("execute if block 4 {y} 4 minecraft:chest run seed")
+        )
+        .contains("42")
+    );
+    assert!(
+        run(
+            &plan,
+            &format!("execute if block 4 {y} 4 minecraft:chest[facing=north] run seed")
+        )
+        .is_empty()
+    );
+    assert!(
+        run(
+            &plan,
+            &format!("execute if block 4 {y} 4 minecraft:chest[facing=west] run seed")
+        )
+        .contains("42")
+    );
 }
 
 #[test]
