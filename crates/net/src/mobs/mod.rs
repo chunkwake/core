@@ -796,6 +796,45 @@ impl Species {
     }
 }
 
+/// `WeatheringCopper.WeatherState`: стадии окисления медного голема.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WeatherState {
+    #[default]
+    Unaffected,
+    Exposed,
+    Weathered,
+    Oxidized,
+}
+
+impl WeatherState {
+    pub fn name(self) -> &'static str {
+        match self {
+            WeatherState::Unaffected => "unaffected",
+            WeatherState::Exposed => "exposed",
+            WeatherState::Weathered => "weathered",
+            WeatherState::Oxidized => "oxidized",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "unaffected" => WeatherState::Unaffected,
+            "exposed" => WeatherState::Exposed,
+            "weathered" => WeatherState::Weathered,
+            "oxidized" => WeatherState::Oxidized,
+            _ => return None,
+        })
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            WeatherState::Unaffected => WeatherState::Exposed,
+            WeatherState::Exposed => WeatherState::Weathered,
+            WeatherState::Weathered | WeatherState::Oxidized => WeatherState::Oxidized,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mob {
     pub species: Species,
@@ -886,6 +925,13 @@ pub struct Mob {
     pub sitting: bool,
     /// `Entity.isNoGravity` (`NoGravity`): кристаллы/визер/дракон не падают.
     pub no_gravity: bool,
+    /// `CopperGolem.getWeatherState` (`weather_state`): стадия окисления.
+    pub weather_state: WeatherState,
+    /// `CopperGolem.nextWeatheringTick` (`next_weather_age`): -1 - не задан,
+    /// -2 - воск (не окисляется), иначе тик следующей стадии.
+    pub next_weather_age: i64,
+    /// Счётчик тиков жизни (для `next_weather_age`, в NBT не пишется).
+    pub ticks: u64,
     /// `DropChances` по тем же слотам; > 1 — предмет сохраняется всегда.
     pub drop_chances: [f32; 6],
     /// Множитель скорости от `Speed`/`Slowness` (пересчитывается в тике).
@@ -950,6 +996,9 @@ impl Mob {
             tamed: false,
             owner: None,
             no_gravity: false,
+            weather_state: WeatherState::Unaffected,
+            next_weather_age: -1,
+            ticks: 0,
             nav: Navigation::new(species == Species::Spider),
             move_ctl: MoveControl::default(),
             move_speed: 0.0,
@@ -1177,6 +1226,15 @@ impl Mob {
 
     /// Звук `kind` (`hurt`, `death`): у маленького слизня — `<kind>_small`.
     pub fn sound(&self, kind: &str) -> String {
+        if self.species == Species::CopperGolem {
+            // `CopperGolemOxidationLevels`: у weathered/oxidized свои звуки.
+            let base = match self.weather_state {
+                WeatherState::Weathered => "minecraft:entity.copper_golem_weathered",
+                WeatherState::Oxidized => "minecraft:entity.copper_golem_oxidized",
+                _ => "minecraft:entity.copper_golem",
+            };
+            return format!("{base}.{kind}");
+        }
         if self.species == Species::Slime && self.cube_size <= 1 {
             format!("{}.{kind}_small", self.species.sound())
         } else {
@@ -1623,6 +1681,29 @@ fn server_ai_step(m: &mut Mob, w: &World, s: &mut Senses) {
 }
 
 /// Тик моба (`LivingEntity.tick` → `aiStep`). Возвращает `true`, когда моб исчез.
+/// `CopperGolem.updateWeathering`: смена стадии раз в 504000..=552000 тиков;
+/// `-2` — воск (стоит), `-1` — пересчитать таймер заново.
+pub fn copper_golem_weathering(m: &mut Mob) {
+    if m.species != Species::CopperGolem {
+        return;
+    }
+    m.ticks = m.ticks.saturating_add(1);
+    let delta = || 504_000 + (rand::random::<u32>() % 48_001) as i64;
+    match m.next_weather_age {
+        -2 => {}
+        -1 => m.next_weather_age = m.ticks as i64 + delta(),
+        next if m.ticks as i64 >= next && m.weather_state != WeatherState::Oxidized => {
+            m.weather_state = m.weather_state.next();
+            m.next_weather_age = if m.weather_state == WeatherState::Oxidized {
+                0
+            } else {
+                next + delta()
+            };
+        }
+        _ => {}
+    }
+}
+
 pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
     if m.death_time > 0 {
         m.death_time += 1;
@@ -1630,6 +1711,7 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
         let _ = travel(m, 0.0, w);
         return m.death_time > DEATH_TICKS;
     }
+    copper_golem_weathering(m);
     m.out.clear();
     if m.species == Species::Creeper && creeper_tick(m) {
         return true;
@@ -2128,6 +2210,57 @@ pub fn spawn_cell_forbidden(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn copper_golem_weathering_advances_stages() {
+        let mut m = Mob::new(Species::CopperGolem, [0.0; 3], 1);
+        // Первый тик назначает таймер в диапазоне ванили.
+        copper_golem_weathering(&mut m);
+        assert!(
+            (504_000..=552_000).contains(&m.next_weather_age),
+            "таймер вне диапазона: {}",
+            m.next_weather_age
+        );
+        // Досрочная смена стадии (в NBT пришло `next_weather_age`).
+        m.next_weather_age = 1;
+        m.ticks = 2;
+        copper_golem_weathering(&mut m);
+        assert_eq!(m.weather_state, WeatherState::Exposed);
+        m.next_weather_age = 1;
+        copper_golem_weathering(&mut m);
+        assert_eq!(m.weather_state, WeatherState::Weathered);
+        m.next_weather_age = 1;
+        copper_golem_weathering(&mut m);
+        assert_eq!(m.weather_state, WeatherState::Oxidized);
+        // Воск (`-2`) останавливает окисление.
+        m.next_weather_age = -2;
+        for _ in 0..5 {
+            copper_golem_weathering(&mut m);
+        }
+        assert_eq!(m.weather_state, WeatherState::Oxidized);
+        // Снятие воска (`-1`) снова включает таймер.
+        m.next_weather_age = -1;
+        copper_golem_weathering(&mut m);
+        assert!(m.next_weather_age >= 504_000);
+    }
+
+    #[test]
+    fn copper_golem_sounds_follow_oxidation() {
+        let mut m = Mob::new(Species::CopperGolem, [0.0; 3], 1);
+        assert_eq!(m.sound("hurt"), "minecraft:entity.copper_golem.hurt");
+        m.weather_state = WeatherState::Exposed;
+        assert_eq!(m.sound("death"), "minecraft:entity.copper_golem.death");
+        m.weather_state = WeatherState::Weathered;
+        assert_eq!(
+            m.sound("hurt"),
+            "minecraft:entity.copper_golem_weathered.hurt"
+        );
+        m.weather_state = WeatherState::Oxidized;
+        assert_eq!(
+            m.sound("death"),
+            "minecraft:entity.copper_golem_oxidized.death"
+        );
+    }
+
     use super::*;
 
     #[test]

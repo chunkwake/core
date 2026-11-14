@@ -1554,6 +1554,16 @@ impl PlayPlan {
                 root.insert("CustomName".into(), Tag::String(name.clone()));
             }
             match entry.mob.species {
+                crate::mobs::Species::CopperGolem => {
+                    root.insert(
+                        "next_weather_age".into(),
+                        Tag::Long(entry.mob.next_weather_age),
+                    );
+                    root.insert(
+                        "weather_state".into(),
+                        Tag::String(entry.mob.weather_state.name().to_owned()),
+                    );
+                }
                 crate::mobs::Species::Creeper => {
                     root.insert("powered".into(), Tag::Byte(i8::from(entry.mob.powered)));
                 }
@@ -2533,6 +2543,8 @@ fn is_live_key(key: &str) -> bool {
             | "Tame"
             | "Owner"
             | "Sitting"
+            | "weather_state"
+            | "next_weather_age"
             | "IsBaby"
             | "CanBreakDoors"
             | "Sheared"

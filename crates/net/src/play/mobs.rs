@@ -1347,6 +1347,20 @@ impl PlayPlan {
         if let Some(Tag::Byte(no_gravity)) = nbt.get("NoGravity") {
             m.no_gravity = *no_gravity != 0;
         }
+        if m.species == Species::CopperGolem {
+            // `getLongOr`: принимаем любое число (`1`, `1L`, ...).
+            if let Some(age) = nbt
+                .get("next_weather_age")
+                .and_then(crate::play::commands::snbt::number)
+            {
+                m.next_weather_age = age as i64;
+            }
+            if let Some(Tag::String(state)) = nbt.get("weather_state")
+                && let Some(state) = crate::mobs::WeatherState::from_name(state)
+            {
+                m.weather_state = state;
+            }
+        }
         if let Some(Tag::Compound(l)) = nbt.get("leash")
             && let Some(leash) = crate::leash::from_nbt(l)
         {
@@ -2960,6 +2974,8 @@ impl PlayPlan {
             FishBucket(&'static str),
             EquipBody,
             RepairBody([f64; 3]),
+            Wax([f64; 3]),
+            Scrape([f64; 3]),
         }
         let act = {
             let mut mobs = self.sim().mobs.lock().unwrap();
@@ -3060,6 +3076,24 @@ impl PlayPlan {
                     m.sitting = true;
                 }
                 Act::Tame(tamed)
+            } else if m.species == Species::CopperGolem
+                && name == "minecraft:honeycomb"
+                && m.next_weather_age != -2
+            {
+                // `CopperGolem.mobInteract`: воск останавливает окисление.
+                m.next_weather_age = -2;
+                Act::Wax(m.pos)
+            } else if m.species == Species::CopperGolem
+                && m.next_weather_age == -2
+                && self
+                    .survival
+                    .item_tags
+                    .get("minecraft:axes")
+                    .is_some_and(|tag| tag.contains(&name))
+            {
+                // Топор снимает воск (`#minecraft:axes`).
+                m.next_weather_age = -1;
+                Act::Scrape(m.pos)
             } else if m.species == Species::Piglin && !m.is_baby() && name == "minecraft:gold_ingot"
             {
                 // `PiglinAi.mobInteract` → `canAdmire`: взрослый пиглин
@@ -3135,6 +3169,61 @@ impl PlayPlan {
                     inv.consume_at(slot);
                 }
                 self.refresh_mob(target);
+            }
+            Act::Wax(pos) => {
+                self.play_sound(
+                    None,
+                    "minecraft:item.honeycomb.wax_on",
+                    crate::sounds::BLOCKS,
+                    pos,
+                    1.0,
+                    1.0,
+                );
+                self.hub.send(
+                    None,
+                    play::level_event(
+                        self.ids.level_event,
+                        3003,
+                        [
+                            pos[0].floor() as i32,
+                            pos[1].floor() as i32,
+                            pos[2].floor() as i32,
+                        ],
+                        0,
+                        false,
+                    ),
+                );
+                if !creative {
+                    inv.consume_at(slot);
+                }
+            }
+            Act::Scrape(pos) => {
+                self.play_sound(
+                    None,
+                    "minecraft:item.axe.scrape",
+                    crate::sounds::PLAYERS,
+                    pos,
+                    1.0,
+                    1.0,
+                );
+                self.hub.send(
+                    None,
+                    play::level_event(
+                        self.ids.level_event,
+                        3004,
+                        [
+                            pos[0].floor() as i32,
+                            pos[1].floor() as i32,
+                            pos[2].floor() as i32,
+                        ],
+                        0,
+                        false,
+                    ),
+                );
+                if !creative {
+                    let mut s = stack;
+                    inv.slots[slot] = (!self.wear_one(&mut s)).then_some(s);
+                }
             }
             Act::RepairBody(pos) => {
                 // В ванили ремонт всегда тратит щиток (`shrink(1)`).
@@ -3815,6 +3904,13 @@ pub(super) fn mob_to_nbt(
                 );
             }
         }
+        Species::CopperGolem => {
+            c.insert("next_weather_age".into(), Tag::Long(m.next_weather_age));
+            c.insert(
+                "weather_state".into(),
+                Tag::String(m.weather_state.name().to_owned()),
+            );
+        }
         Species::Creeper => {
             c.insert("powered".into(), Tag::Byte(i8::from(m.powered)));
             c.insert("Fuse".into(), Tag::Short(m.max_swell as i16));
@@ -3913,6 +4009,17 @@ pub(super) fn mob_from_nbt(
         };
         m.love = 0;
         m.can_break_doors = byte("CanBreakDoors").is_some_and(|b| b != 0);
+    }
+    if species == Species::CopperGolem {
+        m.next_weather_age = match c.get("next_weather_age") {
+            Some(Tag::Long(v)) => *v,
+            _ => -1,
+        };
+        m.weather_state = c
+            .get("weather_state")
+            .and_then(Tag::as_str)
+            .and_then(crate::mobs::WeatherState::from_name)
+            .unwrap_or_default();
     }
     if species == Species::Creeper {
         m.powered = byte("powered").is_some_and(|b| b != 0);
@@ -5001,6 +5108,27 @@ mod tests {
         assert_eq!((back.yaw, back.health, back.age), (90.0, 5.0, -100));
         assert!(back.sheared);
         assert_eq!(back.color, 14);
+    }
+
+    #[test]
+    fn copper_golem_weather_nbt_roundtrip() {
+        let mut m = Mob::new(Species::CopperGolem, [0.5, 64.0, 0.5], 9);
+        m.weather_state = crate::mobs::WeatherState::Weathered;
+        m.next_weather_age = 123_456;
+        let nbt = mob_to_nbt(&m, &std::collections::HashMap::new(), &[]);
+        assert_eq!(
+            nbt.get("weather_state"),
+            Some(&Tag::String("weathered".into()))
+        );
+        assert_eq!(nbt.get("next_weather_age"), Some(&Tag::Long(123_456)));
+        let back = mob_from_nbt(
+            &nbt,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(back.weather_state, crate::mobs::WeatherState::Weathered);
+        assert_eq!(back.next_weather_age, 123_456);
     }
 
     #[test]

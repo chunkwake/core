@@ -6495,12 +6495,6 @@ impl PlayPlan {
         self.hub
             .send_entity(Some(uuid), Vec::new(), Some(EntityEvent::At(me.at())));
         self.publish_live(uuid, &state, game_mode);
-        if let Some(packet) = self.stats_packet(uuid) {
-            conn.send(&packet).await?;
-        }
-        if let Some(packet) = self.full_advancement_packet(uuid) {
-            conn.send(&packet).await?;
-        }
         // Канал команд — до `PlayerJoinEvent`: плагин может сразу слать
         // игроку сообщения канала (`minecraft:register`), они ждут в очереди.
         let (control_tx, controls) = tokio::sync::mpsc::unbounded_channel();
@@ -12210,6 +12204,15 @@ impl PlayPlan {
         login.entity_id = me.entity_id;
         login.spawn.game_mode = state.game_mode.unwrap_or(login.spawn.game_mode);
         conn.send(&play::login(ids.login, &login)).await?;
+        // Статистика и достижения — только после `login`: клиент обрабатывает
+        // `award_stats` через `LocalPlayer`, которого до login ещё нет
+        // (иначе NPE в `handleAwardStats` и «Ошибка сетевого протокола»).
+        if let Some(packet) = self.stats_packet(uuid) {
+            conn.send(&packet).await?;
+        }
+        if let Some(packet) = self.full_advancement_packet(uuid) {
+            conn.send(&packet).await?;
+        }
         conn.send(&self.stonecutter_recipes_packet()).await?;
         for packet in self.recipe_book_initial(uuid) {
             conn.send(&packet).await?;
