@@ -944,6 +944,8 @@ pub struct Mob {
     pub ticks: u64,
     /// `CopperGolem`: на этом тике голем стал статуей (удаляется из мира).
     pub statue: bool,
+    /// `EnderDragon`: кулдаун контактного урона (тиков).
+    pub dragon_cooldown: u8,
     /// `DropChances` по тем же слотам; > 1 — предмет сохраняется всегда.
     pub drop_chances: [f32; 6],
     /// Множитель скорости от `Speed`/`Slowness` (пересчитывается в тике).
@@ -1012,6 +1014,7 @@ impl Mob {
             next_weather_age: -1,
             ticks: 0,
             statue: false,
+            dragon_cooldown: 0,
             nav: Navigation::new(species == Species::Spider),
             move_ctl: MoveControl::default(),
             move_speed: 0.0,
@@ -1652,6 +1655,62 @@ fn wither_period(health: f32, max: f32) -> u32 {
     if health * 2.0 <= max { 20 } else { 40 }
 }
 
+/// `EnderDragon.customServerAiStep`: полёт по кругу вокруг портала
+/// (`[0.5, 80, 0.5]`, радиус 24) с рывками к ближайшему игроку.
+fn dragon_ai_step(m: &mut Mob, s: &mut Senses) {
+    m.no_gravity = true;
+    if m.dragon_cooldown > 0 {
+        m.dragon_cooldown -= 1;
+    }
+    const CENTER: [f64; 3] = [0.5, 80.0, 0.5];
+    const RADIUS: f64 = 24.0;
+    let target = m
+        .target
+        .and_then(|t| s.players.iter().find(|p| p.uuid == t).copied())
+        .or_else(|| {
+            s.players
+                .iter()
+                .copied()
+                .filter(|p| dist2(p.pos, m.pos) <= 64.0 * 64.0)
+                .min_by(|a, b| dist2(a.pos, m.pos).total_cmp(&dist2(b.pos, m.pos)))
+        });
+    if let Some(p) = target {
+        m.target = Some(p.uuid);
+    }
+    // Рывок к цели на 40 тиков каждые 240 тиков.
+    let charging = target.is_some() && m.tick_count % 240 < 40;
+    let goal = if charging {
+        let p = target.unwrap();
+        [p.pos[0], p.pos[1] + 2.0, p.pos[2]]
+    } else {
+        let angle = f64::from(m.tick_count) * 0.008 + f64::from(m.uuid as u32) * 0.5;
+        [
+            CENTER[0] + angle.cos() * RADIUS,
+            CENTER[1],
+            CENTER[2] + angle.sin() * RADIUS,
+        ]
+    };
+    let dx = goal[0] - m.pos[0];
+    let dy = goal[1] - m.pos[1];
+    let dz = goal[2] - m.pos[2];
+    let horizontal = (dx * dx + dz * dz).sqrt();
+    m.yaw = (path::atan2(dz, dx) * 57.295_776) as f32 - 90.0;
+    m.head_yaw = m.yaw;
+    m.pitch = -(path::atan2(dy, horizontal.max(1e-4)) * 57.295_776) as f32;
+    // Дракон летит заданной скоростью (воздушное ускорение `travel` мало).
+    let speed = if charging { 0.45 } else { 0.3 };
+    if horizontal > 1.0 {
+        m.vel[0] = dx / horizontal * speed;
+        m.vel[2] = dz / horizontal * speed;
+    } else {
+        m.vel[0] = 0.0;
+        m.vel[2] = 0.0;
+    }
+    m.vel[1] = (dy * 0.1).clamp(-0.3, 0.3);
+    m.zza = 0.0;
+    m.xxa = 0.0;
+}
+
 fn wither_ai_step(m: &mut Mob, s: &mut Senses) {
     m.no_gravity = true;
     let target = m
@@ -1706,6 +1765,10 @@ fn server_ai_step(m: &mut Mob, w: &World, s: &mut Senses) {
     }
     if m.species == Species::Wither {
         wither_ai_step(m, s);
+        return;
+    }
+    if m.species == Species::EnderDragon {
+        dragon_ai_step(m, s);
         return;
     }
     let mut goals = std::mem::take(&mut m.goals);
@@ -2316,6 +2379,29 @@ mod tests {
         assert_eq!(wither_period(151.0, 300.0), 40);
         assert_eq!(wither_period(150.0, 300.0), 20);
         assert_eq!(wither_period(1.0, 300.0), 20);
+    }
+
+    #[test]
+    fn dragon_flies_without_gravity() {
+        let mut m = Mob::new(Species::EnderDragon, [0.0; 3], 1);
+        let mut rnd = || 0.5;
+        let sight = |_: [f64; 3], _: [f64; 3]| true;
+        let mut s = Senses {
+            players: &[],
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &sight,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: true,
+            mob_griefing: true,
+            jump_boost: None,
+        };
+        dragon_ai_step(&mut m, &mut s);
+        assert!(m.no_gravity);
+        assert!(m.vel[1].abs() <= 0.3);
     }
 
     #[test]

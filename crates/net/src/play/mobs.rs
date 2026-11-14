@@ -734,6 +734,28 @@ impl PlayPlan {
                         statues.push(id);
                         continue;
                     }
+                    // `EnderDragon`: контактный урон 6 с кулдауном 20 тиков.
+                    if e.mob.species == Species::EnderDragon && e.mob.dragon_cooldown == 0 {
+                        let (width, height) = e.mob.size();
+                        let half = width / 2.0;
+                        if let Some(p) = watchers.iter().find(|p| {
+                            (p.pos[0] - e.mob.pos[0]).abs() <= half + 0.3
+                                && (p.pos[2] - e.mob.pos[2]).abs() <= half + 0.3
+                                && p.pos[1] + 1.8 >= e.mob.pos[1]
+                                && p.pos[1] <= e.mob.pos[1] + height
+                        }) {
+                            e.mob.dragon_cooldown = 20;
+                            self.push_control(
+                                Uuid::from_u128(p.uuid),
+                                Control::Hurt(
+                                    6.0,
+                                    Cause::Mob("minecraft:ender_dragon"),
+                                    Some(e.mob.pos),
+                                    0.4,
+                                ),
+                            );
+                        }
+                    }
                     if removed {
                         // Крипер взорвался (`discard`): без лута и анимации смерти.
                         let blast = e.mob.out.iter().find_map(|o| match o {

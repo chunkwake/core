@@ -11,6 +11,8 @@ use std::collections::HashSet;
 
 /// `WitherBoss` — максимальное здоровье.
 const WITHER_HEALTH: f32 = 300.0;
+/// `EnderDragon` — максимальное здоровье.
+const DRAGON_HEALTH: f32 = 200.0;
 /// Дальность, на которой виден босс-бар.
 const BAR_RANGE: f64 = 48.0;
 /// Скорость черепа за тик.
@@ -32,23 +34,36 @@ pub(crate) struct WitherSkull {
 }
 
 impl PlayPlan {
-    /// Тик визеров: босс-бары и черепа.
-    pub(super) fn tick_withers(&self) {
+    /// Тик боссов: босс-бары визера и дракона, черепа визера.
+    pub(super) fn tick_bosses(&self) {
         self.tick_wither_bars();
+        self.tick_dragon_bars();
         self.tick_wither_skulls();
     }
 
-    fn tick_wither_bars(&self) {
-        let dim = self.active_dim();
-        let withers: Vec<(u128, [f64; 3], f32)> = self
-            .sim()
+    /// Общий список живых боссов нужного вида.
+    fn boss_list(&self, species: crate::mobs::Species) -> Vec<(u128, [f64; 3], f32)> {
+        self.sim()
             .mobs
             .lock()
             .unwrap()
             .values()
-            .filter(|e| e.mob.species == crate::mobs::Species::Wither && e.mob.alive())
+            .filter(|e| e.mob.species == species && e.mob.alive())
             .map(|e| (e.mob.uuid, e.mob.pos, e.mob.health))
-            .collect();
+            .collect()
+    }
+
+    /// `ServerBossEvent`: ADD/UPDATE_PROGRESS/REMOVE по игрокам в радиусе.
+    fn tick_boss_bars(
+        &self,
+        bars: &Mutex<FastMap<u128, WitherBar>>,
+        mobs: &[(u128, [f64; 3], f32)],
+        max_health: f32,
+        color: i32,
+        name: &str,
+        range: f64,
+    ) {
+        let dim = self.active_dim();
         let players: Vec<(Uuid, [f64; 3])> = self
             .live
             .lock()
@@ -58,17 +73,17 @@ impl PlayPlan {
             .map(|(&uuid, l)| (uuid, l.pos))
             .collect();
         let mut packets: Vec<(Uuid, Vec<u8>)> = Vec::new();
-        let mut bars = self.sim().wither_bars.lock().unwrap();
-        for (uuid, pos, health) in &withers {
+        let mut bars = bars.lock().unwrap();
+        for (uuid, pos, health) in mobs {
             let bar = bars.entry(*uuid).or_insert_with(|| WitherBar {
-                bar: Uuid::from_u128(*uuid ^ 0x5749_5448_4552_0000_0000_0000_0000_0000),
+                bar: Uuid::from_u128(*uuid ^ 0x424f_5353_0000_0000_0000_0000_0000_0000),
                 players: HashSet::new(),
                 progress: -1.0,
             });
-            let progress = (health / WITHER_HEALTH).clamp(0.0, 1.0);
+            let progress = (health / max_health).clamp(0.0, 1.0);
             let near: HashSet<Uuid> = players
                 .iter()
-                .filter(|(_, p)| dist2(*p, *pos) <= BAR_RANGE * BAR_RANGE)
+                .filter(|(_, p)| dist2(*p, *pos) <= range * range)
                 .map(|(u, _)| *u)
                 .collect();
             let lost: Vec<Uuid> = bar.players.difference(&near).copied().collect();
@@ -86,9 +101,9 @@ impl PlayPlan {
                         chunkwake_protocol::play::boss_event_add(
                             self.ids.boss_event,
                             bar.bar,
-                            &serde_json::json!({"translate": "entity.minecraft.wither"}),
+                            &serde_json::json!({"translate": name}),
                             progress,
-                            5,
+                            color,
                             0,
                         ),
                     ));
@@ -108,7 +123,7 @@ impl PlayPlan {
                 }
             }
         }
-        let alive: HashSet<u128> = withers.iter().map(|w| w.0).collect();
+        let alive: HashSet<u128> = mobs.iter().map(|w| w.0).collect();
         let gone: Vec<u128> = bars
             .keys()
             .filter(|u| !alive.contains(u))
@@ -128,6 +143,30 @@ impl PlayPlan {
         for (player, packet) in packets {
             self.send_to(player, packet);
         }
+    }
+
+    fn tick_wither_bars(&self) {
+        let mobs = self.boss_list(crate::mobs::Species::Wither);
+        self.tick_boss_bars(
+            &self.sim().wither_bars,
+            &mobs,
+            WITHER_HEALTH,
+            5,
+            "entity.minecraft.wither",
+            BAR_RANGE,
+        );
+    }
+
+    fn tick_dragon_bars(&self) {
+        let mobs = self.boss_list(crate::mobs::Species::EnderDragon);
+        self.tick_boss_bars(
+            &self.sim().dragon_bars,
+            &mobs,
+            DRAGON_HEALTH,
+            0,
+            "entity.minecraft.ender_dragon",
+            128.0,
+        );
     }
 
     /// `WitherBoss.performRangedAttack`: череп из глаз визера в цель.

@@ -249,7 +249,8 @@ async fn main() {
         p.pump(250).await;
         p.use_on([x, 127, z]).await;
     }
-    p.pump(1200).await;
+    // Анимация возрождения — 100 тиков.
+    p.pump(6000).await;
 
     let dragon = p
         .dragon

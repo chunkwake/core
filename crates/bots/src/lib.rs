@@ -729,6 +729,16 @@ impl Client {
         self.conn.flush().await.map_err(err)
     }
 
+    /// Подтвердить загрузку мира (player_loaded) после телепорта или смены
+    /// измерения: сервер заново включает load-gate и до подтверждения
+    /// отбрасывает use_item/use_item_on.
+    pub async fn confirm_loaded(&mut self) -> Result<(), String> {
+        let mut w = Writer::new();
+        w.var_int(self.ids.sb_player_loaded);
+        self.sent_player_loaded = true;
+        self.send_raw(&w.buf).await
+    }
+
     pub async fn move_to(&mut self, pos: [f64; 3]) -> Result<(), String> {
         let mut w = Writer::new();
         w.var_int(self.ids.sb_move_pos);

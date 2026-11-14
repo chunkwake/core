@@ -511,6 +511,10 @@ struct DragonFight {
     killed: bool,
     /// Кристаллы на портале: позиция блока над обсидианом и id сущности.
     crystals: Vec<([i32; 3], i32)>,
+    /// `DragonRespawnAnimation`: тик появления дракона.
+    respawn_at: Option<i64>,
+    /// Точка появления во время анимации возрождения.
+    respawn_pos: Option<[f64; 3]>,
 }
 
 fn sleep_required(players: usize, percentage: i64) -> usize {
@@ -1798,6 +1802,8 @@ pub(crate) struct DimSim {
     wither_bars: Mutex<FastMap<u128, wither::WitherBar>>,
     /// Летящие черепа визера (`minecraft:wither_skull`).
     wither_skulls: Mutex<FastMap<i32, wither::WitherSkull>>,
+    /// Босс-бары дракона Края (`EnderDragon.bossEvent`).
+    dragon_bars: Mutex<FastMap<u128, wither::WitherBar>>,
     /// Индекс предметов по чанкам: `(cx, cz)` → ID предметов в нём.
     ///
     /// Подбор игроком и всасывание воронкой раньше сканировали **все**
@@ -3625,19 +3631,107 @@ impl PlayPlan {
             return;
         };
         let ids: Vec<i32> = crystals.iter().map(|(_, id)| *id).collect();
-        {
-            let mut fight = self.dragon_fight.lock().unwrap();
-            fight.killed = false;
-            fight.crystals.clear();
-        }
-        for id in ids {
-            self.remove_entity(id);
-        }
         let spawn = [
             f64::from(center[0]) + 0.5,
             128.0,
             f64::from(center[2]) + 0.5,
         ];
+        {
+            let mut fight = self.dragon_fight.lock().unwrap();
+            fight.killed = false;
+            fight.crystals.clear();
+            // `DragonRespawnAnimation`: 100 тиков лучей и взрывов кристаллов.
+            fight.respawn_at = Some(self.game_time.load(Ordering::Relaxed) + 100);
+            fight.respawn_pos = Some(spawn);
+        }
+        for (pos, _) in &crystals {
+            self.dragon_crystal_burst([
+                f64::from(pos[0]) + 0.5,
+                f64::from(pos[1]) + 0.5,
+                f64::from(pos[2]) + 0.5,
+            ]);
+        }
+        for id in ids {
+            self.remove_entity(id);
+        }
+    }
+
+    /// `DragonRespawnAnimation`: эффекты у кристалла при возрождении.
+    fn dragon_crystal_burst(&self, pos: [f64; 3]) {
+        if let Some(&particle) = self
+            .particle_types
+            .lock()
+            .unwrap()
+            .get("minecraft:explosion_emitter")
+        {
+            self.hub.send(
+                None,
+                play::level_particles(
+                    self.ids.level_particles,
+                    particle,
+                    false,
+                    pos,
+                    [0.0; 3],
+                    0.0,
+                    1,
+                ),
+            );
+        }
+        self.play_sound(
+            None,
+            "minecraft:block.end_portal.spawn",
+            crate::sounds::BLOCKS,
+            pos,
+            1.0,
+            1.0,
+        );
+    }
+
+    /// Тик анимации возрождения дракона (`EnderDragonFight.tick`).
+    fn tick_dragon_fight(&self) {
+        if self.active_dim() != Dimension::End {
+            return;
+        }
+        let now = self.game_time.load(Ordering::Relaxed);
+        let (at, spawn) = {
+            let fight = self.dragon_fight.lock().unwrap();
+            (fight.respawn_at, fight.respawn_pos)
+        };
+        let (Some(at), Some(spawn)) = (at, spawn) else {
+            return;
+        };
+        if now % 10 == 0 {
+            if let Some(&particle) = self.particle_types.lock().unwrap().get("minecraft:end_rod") {
+                self.hub.send(
+                    None,
+                    play::level_particles(
+                        self.ids.level_particles,
+                        particle,
+                        false,
+                        spawn,
+                        [0.5; 3],
+                        0.1,
+                        8,
+                    ),
+                );
+            }
+            self.play_sound(
+                None,
+                "minecraft:entity.ender_dragon.growl",
+                crate::sounds::HOSTILE,
+                spawn,
+                1.0,
+                0.8,
+            );
+        }
+        if now < at {
+            return;
+        }
+        {
+            let mut fight = self.dragon_fight.lock().unwrap();
+            fight.respawn_at = None;
+            fight.respawn_pos = None;
+        }
         if self
             .spawn_mob(
                 crate::mobs::Species::EnderDragon,
@@ -3646,11 +3740,10 @@ impl PlayPlan {
                 false,
                 Some("TRIGGERED"),
             )
-            .is_none()
+            .is_some()
         {
-            return;
+            self.trigger_summoned_entity(spawn, crate::mobs::Species::EnderDragon, 192.0);
         }
-        self.trigger_summoned_entity(spawn, crate::mobs::Species::EnderDragon, 192.0);
     }
 
     /// `CarvedPumpkinBlock.trySpawnGolem`: сначала снежный голем, затем
@@ -11892,7 +11985,8 @@ impl PlayPlan {
         self.tick_crafters();
         lap(PH_CAMPFIRES, watch);
         self.tick_copper_chests();
-        self.tick_withers();
+        self.tick_dragon_fight();
+        self.tick_bosses();
         self.tick_vibrations();
         self.tick_random_blocks();
         self.tick_precipitation();
