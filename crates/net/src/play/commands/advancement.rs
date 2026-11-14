@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 /// Мини-дерево для `only/from/through/until` (обработчик один).
 fn branch(mode: &str) -> Spec {
-    let resource = || chunkwake_protocol::text::Parser::Resource("minecraft:advancement");
+    let resource = || chunkwake_protocol::text::Parser::ResourceKey("minecraft:advancement");
     match mode {
         "only" => Spec::group(
             "only",

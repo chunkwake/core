@@ -87,7 +87,7 @@ pub(super) fn specs() -> Vec<Spec> {
                 Spec::arg_leaf(
                     "recipe",
                     GAMEMASTERS,
-                    chunkwake_protocol::text::Parser::Resource("minecraft:recipe"),
+                    chunkwake_protocol::text::Parser::ResourceKey("minecraft:recipe"),
                     recipe,
                 ),
             ],
