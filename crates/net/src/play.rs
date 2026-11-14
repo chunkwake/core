@@ -394,6 +394,8 @@ pub struct PlayPlan {
     sleepers: Mutex<HashMap<Uuid, [i32; 3]>>,
     /// Мини-`EnderDragonFight`: убийство и возрождение дракона Края.
     dragon_fight: Mutex<DragonFight>,
+    /// Активные рейды (`Raid`): волны разбойников и `raid_win`.
+    raids: Mutex<Vec<raids::Raid>>,
     /// Режим игры по умолчанию (`/defaultgamemode`).
     pub(crate) default_game_mode: std::sync::atomic::AtomicU8,
     /// Просьба сохранить мир (`/save-all`).
@@ -2390,6 +2392,7 @@ mod minerals;
 mod mobs;
 mod paintings;
 mod poi;
+mod raids;
 mod recipe_book;
 mod respawn;
 mod section_order;
@@ -3025,6 +3028,7 @@ impl PlayPlan {
             },
             active: Mutex::new(Dimension::Overworld),
             dragon_fight: Mutex::new(DragonFight::default()),
+            raids: Mutex::new(Vec::new()),
             trees,
             poi_tags,
             structure_names,
@@ -16056,6 +16060,7 @@ impl PlayPlan {
 
     /// `ServerPlayer.tick` → `CriteriaTriggers.LOCATION`: раз в тик по позиции.
     fn tick_player_triggers(&self) {
+        self.raid_tick();
         let players: Vec<(Uuid, [f64; 3], Dimension, bool)> = self
             .hub
             .players
