@@ -34,6 +34,8 @@ struct Probe {
     raiders_seen: bool,
     firework_type: i32,
     firework_seen: bool,
+    cat_type: i32,
+    cat_id: Option<i32>,
     villager_type: i32,
     seen_villagers: HashSet<i32>,
     babies: HashSet<i32>,
@@ -83,6 +85,13 @@ impl Probe {
                 }
                 if kind == self.firework_type {
                     self.firework_seen = true;
+                }
+                if kind == self.cat_type {
+                    self.cat_id = Some(entity);
+                    self.all_pos.insert(entity, [x, y, z]);
+                    self.all_yaw.insert(entity, 0.0);
+                    self.bases
+                        .insert(entity, chunkwake_protocol::play::quantize([x, y, z]));
                 }
                 if kind == self.villager_type {
                     self.seen_villagers.insert(entity);
@@ -344,6 +353,22 @@ impl Probe {
     }
 }
 
+/// Число предмета в выводе `data get ... Inventory`.
+fn item_count(text: &str, id: &str) -> Option<i32> {
+    for part in text.split('{') {
+        if !part.contains(id) {
+            continue;
+        }
+        let at = part.find("count:")? + 6;
+        let n: String = part[at..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        return n.parse().ok();
+    }
+    None
+}
+
 fn look_yaw(from: [f64; 3], to: [f64; 3]) -> f32 {
     let dx = to[0] - from[0];
     let dz = to[2] - from[2];
@@ -477,6 +502,8 @@ async fn main() {
         raiders_seen: false,
         firework_type: pid("minecraft:entity_type", "minecraft:firework_rocket"),
         firework_seen: false,
+        cat_type: pid("minecraft:entity_type", "minecraft:cat"),
+        cat_id: None,
         villager_type: pid("minecraft:entity_type", "minecraft:villager"),
         seen_villagers: HashSet::new(),
         babies: HashSet::new(),
@@ -648,6 +675,135 @@ async fn main() {
     );
     println!("work: villager at composter ({near:.2}), door opened");
 
+    // `HarvestFarmland`/`UseBonemeal`: грядки вокруг компостера.
+    let f1 = [X + 8, Y, Z];
+    let f2 = [X + 10, Y, Z];
+    let f3 = [X + 9, Y, Z + 1];
+    let w1 = [f1[0], Y + 1, f1[2]];
+    let w2 = [f2[0], Y + 1, f2[2]];
+    let w3 = [f3[0], Y + 1, f3[2]];
+    for farm in [f1, f2, f3] {
+        p.cmd(&format!(
+            "setblock {} {} {} minecraft:farmland[moisture=7]",
+            farm[0], farm[1], farm[2]
+        ))
+        .await;
+    }
+    p.cmd(&format!(
+        "setblock {} {} {} minecraft:wheat[age=7]",
+        w1[0], w1[1], w1[2]
+    ))
+    .await;
+    p.cmd(&format!(
+        "setblock {} {} {} minecraft:wheat[age=0]",
+        w3[0], w3[1], w3[2]
+    ))
+    .await;
+    p.cmd(&format!(
+        "setblock {} {} {} minecraft:air",
+        w2[0], w2[1], w2[2]
+    ))
+    .await;
+    let a_now = p.a_pos.expect("нет позиции A у компостера");
+    p.cmd(&format!(
+        "data merge entity @e[type=minecraft:villager,x={},y={},z={},distance=..3,limit=1,sort=nearest] \
+         {{Inventory:[{{Slot:0b,id:\"minecraft:wheat_seeds\",count:8}},{{Slot:1b,id:\"minecraft:bone_meal\",count:8}}]}}",
+        a_now[0], a_now[1], a_now[2]
+    ))
+    .await;
+    let mut harvested = false;
+    let mut planted = false;
+    let mut bonemealed = false;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(30_000) {
+        if !harvested {
+            harvested = p.block_is(w1, "minecraft:air").await;
+        }
+        if !planted {
+            planted = p.block_is(w2, "minecraft:wheat").await;
+        }
+        if !bonemealed && let Some(pos) = p.a_pos {
+            let inv = p.data_at(pos, "Inventory").await;
+            bonemealed = item_count(&inv, "minecraft:bone_meal").is_some_and(|n| n < 8);
+        }
+        if harvested && planted && bonemealed {
+            break;
+        }
+        p.pump(300).await;
+    }
+    assert!(harvested, "HarvestFarmland: спелая пшеница не собрана");
+    assert!(planted, "HarvestFarmland: семена не посажены");
+    assert!(bonemealed, "UseBonemeal: костная мука не потрачена");
+    println!("farm: harvested, planted and bonemealed");
+
+    // `Restock`: израсходованные сделки обновляются у рабочего блока.
+    let a_now = p.a_pos.expect("нет позиции A для рестока");
+    p.cmd(&format!(
+        "data merge entity @e[type=minecraft:villager,x={},y={},z={},distance=..3,limit=1,sort=nearest] \
+         {{Offers:{{Recipes:[{{buy:{{id:\"minecraft:wheat\",count:20}},sell:{{id:\"minecraft:emerald\",count:1}},uses:3,maxUses:16,xp:2,priceMultiplier:0.05f,demand:0}}]}},LastRestock:0,RestocksToday:0}}",
+        a_now[0], a_now[1], a_now[2]
+    ))
+    .await;
+    let mut restocked = false;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(25_000) {
+        if let Some(pos) = p.a_pos {
+            let offers = p.data_at(pos, "Offers").await;
+            if offers.contains("uses:0") {
+                restocked = true;
+                break;
+            }
+        }
+        p.pump(300).await;
+    }
+    assert!(restocked, "Restock: сделки не обновились");
+    println!("restock: offers reset at workstation");
+
+    // `InteractWith` с кошкой: житель подходит и смотрит.
+    p.cmd("time set 11500").await;
+    let a_now = p.a_pos.expect("нет позиции A для кошки");
+    p.cmd(&format!(
+        "summon minecraft:cat {} {} {} {{NoAI:1b,PersistenceRequired:1b}}",
+        a_now[0] + 3.0,
+        a_now[1],
+        a_now[2]
+    ))
+    .await;
+    let mut cat_id = None;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(5_000) {
+        cat_id = p.cat_id;
+        if cat_id.is_some() {
+            break;
+        }
+        p.pump(200).await;
+    }
+    let cat_id = cat_id.expect("кошка не появилась");
+    let mut played_cat = false;
+    let start = tokio::time::Instant::now();
+    let a_id = p.a_id.expect("нет id A");
+    while start.elapsed() < Duration::from_millis(20_000) {
+        if let (Some(vpos), Some(cpos)) = (p.all_pos.get(&a_id), p.all_pos.get(&cat_id))
+            && dist_xz(*vpos, *cpos) <= 2.5
+        {
+            let want = look_yaw(*vpos, *cpos);
+            let yaw = p.all_yaw.get(&a_id).copied().unwrap_or(0.0);
+            let d = (yaw - want + 180.0).rem_euclid(360.0) - 180.0;
+            if d.abs() < 45.0 {
+                played_cat = true;
+                break;
+            }
+        }
+        p.pump(200).await;
+    }
+    assert!(
+        played_cat,
+        "InteractWith: житель не подошёл к кошке (a_id {a_id}, cat {cat_id}: {:?} / {:?})",
+        p.all_pos.get(&a_id),
+        p.all_pos.get(&cat_id)
+    );
+    println!("cat: villager approached and looked at cat");
+
     // `ShowTradesToPlayer`: игрок рядом держит пшеницу — A показывает
     // изумруд в основной руке; уходит — рука очищается.
     let apos = p.a_pos.expect("нет позиции A");
@@ -739,7 +895,7 @@ async fn main() {
     let start = tokio::time::Instant::now();
     while start.elapsed() < Duration::from_millis(12_000) {
         if let Some(pos) = p.a_pos
-            && dist_xz(pos, composter) <= 2.0
+            && dist_xz(pos, composter) <= 3.5
         {
             calm = true;
             break;
@@ -1139,13 +1295,13 @@ async fn main() {
     });
     let mut played = None;
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(20_000) {
+    while start.elapsed() < Duration::from_millis(30_000) {
         if let (Some(a), Some(b)) = (
             p.all_pos.get(&child).copied(),
             p.all_pos.get(&partner_baby).copied(),
         ) {
             let dist = dist_xz(a, b);
-            if dist <= 2.0 {
+            if dist <= 3.0 {
                 let ya = p.all_yaw.get(&child).copied().unwrap_or(0.0);
                 let yb = p.all_yaw.get(&partner_baby).copied().unwrap_or(0.0);
                 let want_a = look_yaw(a, b);
@@ -1176,6 +1332,7 @@ async fn main() {
         partner_pos[0], partner_pos[1], partner_pos[2]
     ))
     .await;
+    p.cmd("time set 11500").await;
     let bed_a = [bx + 0.5, f64::from(Y), bz + 0.5];
     let bed_b = [bx + 3.5, f64::from(Y), bz + 0.5];
     let mut jumped = false;

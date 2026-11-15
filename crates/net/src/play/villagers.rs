@@ -448,6 +448,12 @@ pub struct Villager {
     pub last_bed_check: i64,
     /// `Entity.onGround`: false в прыжке.
     pub airborne: bool,
+    /// `HarvestFarmland`/`UseBonemeal`: цель и пауза между действиями.
+    pub farm_target: Option<[i32; 3]>,
+    pub farm_cooldown: i64,
+    /// `InteractWith` с кошкой (`INTERACTION_TARGET`).
+    pub cat_target: Option<[f64; 3]>,
+    pub cat_timer: i32,
     /// `MemoryModuleType.BREED_TARGET` и время рождения.
     pub breed_target: Option<u128>,
     pub breed_partner: Option<i32>,
@@ -1303,6 +1309,7 @@ impl PlayPlan {
         others: &[VillagerRef],
         profiles: &[VillagerProfile],
         threats: &[[f64; 3]],
+        cats: &[[f64; 3]],
         breedable: &[(i32, bool)],
         babies: &[(i32, u128, [f64; 3], Option<u128>)],
         births: &mut Vec<Birth>,
@@ -1345,7 +1352,7 @@ impl PlayPlan {
         }
         // `JumpOnBed`: малыш без партнёра прыгает на ближайшей кровати.
         if v.age < 0
-            && matches!(v.activity, Activity::Play | Activity::Idle)
+            && v.activity == Activity::Idle
             && let Some(step) = self.jump_on_bed_step(v)
         {
             return Some(step);
@@ -1353,6 +1360,19 @@ impl PlayPlan {
         // `SetRaidStatus`: пре-рейд/укрытие важнее расписания.
         if v.raid_phase != RaidPhase::None
             && let Some(step) = self.raid_step(v)
+        {
+            return Some(step);
+        }
+        // `HarvestFarmland`/`UseBonemeal` у фермера на работе.
+        if v.activity == Activity::Work
+            && v.profession == "minecraft:farmer"
+            && let Some(step) = self.farm_step(v)
+        {
+            return Some(step);
+        }
+        // `InteractWith` с кошкой (idle-пакет).
+        if v.activity == Activity::Idle
+            && let Some(step) = self.cat_step(v, cats)
         {
             return Some(step);
         }
@@ -1972,6 +1992,209 @@ impl PlayPlan {
         }
     }
 
+    /// `InteractWith.of(CAT, 8, INTERACTION_TARGET, speed, 2)`: подойти к
+    /// кошке и смотреть на неё.
+    fn cat_step(&self, v: &mut Villager, cats: &[[f64; 3]]) -> Option<([f64; 3], f32)> {
+        if let Some(target) = v.cat_target {
+            let nearest = cats.iter().copied().min_by(|a, b| {
+                crate::mobs::dist2(*a, target).total_cmp(&crate::mobs::dist2(*b, target))
+            });
+            let Some(cat) = nearest else {
+                v.cat_target = None;
+                return None;
+            };
+            if v.cat_timer > 0 {
+                v.cat_timer -= 1;
+                if crate::mobs::dist2(v.pos, cat) > 4.0 {
+                    return self.walk_step(v, [cat[0], v.pos[1], cat[2]], 0.14);
+                }
+                let yaw = look_yaw(v.pos, cat);
+                v.yaw = yaw;
+                return Some((v.pos, yaw));
+            }
+            v.cat_target = None;
+            return None;
+        }
+        // Пауза между играми с кошкой.
+        if !rand::random::<u32>().is_multiple_of(20) {
+            return None;
+        }
+        let cat = cats
+            .iter()
+            .filter(|p| crate::mobs::dist2(v.pos, **p) <= 8.0 * 8.0)
+            .min_by(|a, b| {
+                crate::mobs::dist2(v.pos, **a).total_cmp(&crate::mobs::dist2(v.pos, **b))
+            })
+            .copied()?;
+        v.cat_target = Some(cat);
+        v.cat_timer = 60;
+        if crate::mobs::dist2(v.pos, cat) <= 4.0 {
+            let yaw = look_yaw(v.pos, cat);
+            v.yaw = yaw;
+            Some((v.pos, yaw))
+        } else {
+            self.walk_step(v, [cat[0], v.pos[1], cat[2]], 0.14)
+        }
+    }
+
+    /// Максимальный возраст ванильных `CropBlock`.
+    fn crop_max_age(name: &str) -> Option<i32> {
+        Some(match name {
+            "minecraft:wheat" | "minecraft:carrots" | "minecraft:potatoes" => 7,
+            "minecraft:beetroots" => 3,
+            _ => return None,
+        })
+    }
+
+    /// Есть ли у жителя предмет (по имени) в инвентаре.
+    fn has_item(&self, v: &Villager, name: &str) -> bool {
+        v.inventory
+            .iter()
+            .flatten()
+            .any(|s| self.item_name(s.item) == name)
+    }
+
+    /// Забрать один предмет из инвентаря жителя.
+    fn take_item(&self, v: &mut Villager, name: &str) -> bool {
+        for slot in &mut v.inventory {
+            let Some(stack) = slot else { continue };
+            if self.item_name(stack.item) != name {
+                continue;
+            }
+            stack.count -= 1;
+            if stack.count <= 0 {
+                *slot = None;
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Семена, которые фермер может посадить (`#villager_plantable_seeds`).
+    fn plantable_seed(&self, v: &Villager) -> Option<(&'static str, &'static str)> {
+        const SEEDS: [(&str, &str); 4] = [
+            ("minecraft:wheat_seeds", "minecraft:wheat"),
+            ("minecraft:carrot", "minecraft:carrots"),
+            ("minecraft:potato", "minecraft:potatoes"),
+            ("minecraft:beetroot_seeds", "minecraft:beetroots"),
+        ];
+        SEEDS.into_iter().find(|(seed, _)| self.has_item(v, seed))
+    }
+
+    /// `HarvestFarmland`/`UseBonemeal`: собрать спелое, посадить семена или
+    /// ускорить рост костной мукой в 3×3×3 вокруг фермера.
+    fn farm_step(&self, v: &mut Villager) -> Option<([f64; 3], f32)> {
+        let now = self.game_time();
+        if now < v.farm_cooldown {
+            return None;
+        }
+        if let Some(target) = v.farm_target {
+            let center = [
+                target[0] as f64 + 0.5,
+                target[1] as f64,
+                target[2] as f64 + 0.5,
+            ];
+            if crate::mobs::dist2(v.pos, center) <= 2.25 {
+                self.farm_action(v, target);
+                v.farm_target = None;
+                v.farm_cooldown = now + 40;
+                return Some((v.pos, v.yaw));
+            }
+            return self.walk_step(v, [center[0], v.pos[1], center[2]], 0.14);
+        }
+        let base = [
+            v.pos[0].floor() as i32,
+            v.pos[1].floor() as i32,
+            v.pos[2].floor() as i32,
+        ];
+        let mut targets = Vec::new();
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let p = [base[0] + dx, base[1] + dy, base[2] + dz];
+                    let Some(state) = self.block(p) else { continue };
+                    let name = self.state_name(state);
+                    let below = self
+                        .block([p[0], p[1] - 1, p[2]])
+                        .map(|s| self.state_name(s))
+                        .unwrap_or("");
+                    if let Some(max) = Self::crop_max_age(name) {
+                        let age = self
+                            .survival
+                            .placement
+                            .prop(state, "age")
+                            .and_then(|a| a.parse::<i32>().ok())
+                            .unwrap_or(0);
+                        if age >= max || self.has_item(v, "minecraft:bone_meal") {
+                            targets.push(p);
+                        }
+                    } else if name.ends_with(":air")
+                        && below.ends_with("farmland")
+                        && self.plantable_seed(v).is_some()
+                    {
+                        targets.push(p);
+                    }
+                }
+            }
+        }
+        if targets.is_empty() {
+            return None;
+        }
+        let pick = targets[rand::random::<usize>() % targets.len()];
+        v.farm_target = Some(pick);
+        let center = [pick[0] as f64 + 0.5, v.pos[1], pick[2] as f64 + 0.5];
+        self.walk_step(v, center, 0.14)
+    }
+
+    /// Одно действие на выбранном блоке (`HarvestFarmland.tick`).
+    fn farm_action(&self, v: &mut Villager, p: [i32; 3]) {
+        let Some(state) = self.block(p) else { return };
+        let name = self.state_name(state);
+        let below = self
+            .block([p[0], p[1] - 1, p[2]])
+            .map(|s| self.state_name(s))
+            .unwrap_or("");
+        if let Some(max) = Self::crop_max_age(name) {
+            let age = self
+                .survival
+                .placement
+                .prop(state, "age")
+                .and_then(|a| a.parse::<i32>().ok())
+                .unwrap_or(0);
+            if age >= max {
+                self.break_drops(p);
+                self.set_block(p, 0);
+                return;
+            }
+            if self.has_item(v, "minecraft:bone_meal")
+                && self.bonemeal_at(p)
+                && self.take_item(v, "minecraft:bone_meal")
+            {
+                self.hub.send(
+                    None,
+                    play::level_event(self.ids.level_event, 1505, p, 15, false),
+                );
+            }
+            return;
+        }
+        if name.ends_with(":air")
+            && below.ends_with("farmland")
+            && let Some((seed, crop)) = self.plantable_seed(v)
+            && let Some(block) = self.survival.placement.default_state(crop)
+            && self.take_item(v, seed)
+        {
+            self.set_block(p, block);
+            self.play_sound(
+                None,
+                "minecraft:item.crop.plant",
+                crate::sounds::BLOCKS,
+                [p[0] as f64 + 0.5, p[1] as f64 + 0.5, p[2] as f64 + 0.5],
+                1.0,
+                1.0,
+            );
+        }
+    }
+
     /// `JumpOnBed`: малыш идёт к ближайшей кровати и прыгает 3-6 раз с
     /// паузой 5 тиков; прекращает после 100 тиков ходьбы.
     fn jump_on_bed_step(&self, v: &mut Villager) -> Option<([f64; 3], f32)> {
@@ -2050,7 +2273,7 @@ impl PlayPlan {
             let target = v.tag_target?;
             let (_, _, pos, _) = babies.iter().find(|(_, u, _, _)| *u == target)?;
             v.yaw = look_yaw(v.pos, *pos);
-            return self.walk_step(v, *pos, 0.17);
+            return self.walk_step(v, [pos[0], v.pos[1], pos[2]], 0.17);
         }
         // Кто-то гонится за мной — убегаем (`LandRandomPos` 20 x 8).
         let chased = babies
@@ -2089,7 +2312,7 @@ impl PlayPlan {
         let (_, _, pos, _) = babies.iter().find(|(_, u, _, _)| *u == candidate)?;
         v.tag_target = Some(candidate);
         v.yaw = look_yaw(v.pos, *pos);
-        self.walk_step(v, *pos, 0.17)
+        self.walk_step(v, [pos[0], v.pos[1], pos[2]], 0.17)
     }
 
     /// Случайная проходимая точка в 20 блоках по XZ и 8 по Y.
@@ -2147,7 +2370,7 @@ impl PlayPlan {
                     .send(None, inv::entity_event(self.ids.entity_event, id, 12));
             }
             if dist > 2.25 {
-                return self.walk_step(v, *pos, 0.21);
+                return self.walk_step(v, [pos[0], v.pos[1], pos[2]], 0.21);
             }
             let yaw = look_yaw(v.pos, *pos);
             v.yaw = yaw;
@@ -2275,7 +2498,7 @@ impl PlayPlan {
                 return None;
             }
             if crate::mobs::dist2(v.pos, *pos) > 1.2 * 1.2 {
-                return self.walk_step(v, *pos, 0.14);
+                return self.walk_step(v, [pos[0], v.pos[1], pos[2]], 0.14);
             }
             // `TradeWithVillager.tick`: смотреть друг на друга, обмениваться
             // слухами (`Villager.gossip`) и едой/requestedItems.
@@ -2575,6 +2798,10 @@ impl PlayPlan {
             jump_deadline: 0,
             last_bed_check: 0,
             airborne: false,
+            farm_target: None,
+            farm_cooldown: 0,
+            cat_target: None,
+            cat_timer: 0,
             breed_target: None,
             breed_partner: None,
             breed_until: 0,
@@ -2732,6 +2959,15 @@ impl PlayPlan {
             .filter(|e| e.mob.alive() && e.mob.species.is_monster())
             .map(|e| e.mob.pos)
             .collect();
+        let cats: Vec<[f64; 3]> = self
+            .sim()
+            .mobs
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|e| e.mob.alive() && e.mob.species == crate::mobs::Species::Cat)
+            .map(|e| e.mob.pos)
+            .collect();
         let players: Vec<(Uuid, [f64; 3], Option<Stack>)> = self
             .live
             .lock()
@@ -2850,6 +3086,7 @@ impl PlayPlan {
                         &others,
                         &profiles,
                         &threats,
+                        &cats,
                         &breedable,
                         &babies,
                         &mut births,
@@ -2893,8 +3130,9 @@ impl PlayPlan {
                     && self.near_block(v.pos, ws)
                 {
                     let needs = v.offers.iter().any(|o| o.uses > 0);
-                    let day = now.div_euclid(24_000);
-                    if day > v.last_restock.div_euclid(24_000) {
+                    // `shouldRestock`: новый день (полдня с прошлого
+                    // рестока) сбрасывает счётчик.
+                    if now > v.last_restock + 12_000 {
                         v.last_restock = now;
                         v.restocks_today = 0;
                     }
@@ -3572,6 +3810,10 @@ impl PlayPlan {
             jump_deadline: 0,
             last_bed_check: 0,
             airborne: false,
+            farm_target: None,
+            farm_cooldown: 0,
+            cat_target: None,
+            cat_timer: 0,
             breed_target: None,
             breed_partner: None,
             breed_until: 0,
@@ -3891,6 +4133,10 @@ mod tests {
             jump_deadline: 0,
             last_bed_check: 0,
             airborne: false,
+            farm_target: None,
+            farm_cooldown: 0,
+            cat_target: None,
+            cat_timer: 0,
             breed_target: None,
             breed_partner: None,
             breed_until: 0,
@@ -4017,6 +4263,14 @@ mod tests {
         assert!((look_yaw([0.0; 3], [1.0, 0.0, 0.0]) + 90.0).abs() < 0.001);
         assert!((look_yaw([0.0; 3], [-1.0, 0.0, 0.0]) - 90.0).abs() < 0.001);
         assert!((look_yaw([0.0; 3], [0.0, 0.0, -1.0]).abs() - 180.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn crop_ages_match_vanilla() {
+        assert_eq!(PlayPlan::crop_max_age("minecraft:wheat"), Some(7));
+        assert_eq!(PlayPlan::crop_max_age("minecraft:carrots"), Some(7));
+        assert_eq!(PlayPlan::crop_max_age("minecraft:beetroots"), Some(3));
+        assert_eq!(PlayPlan::crop_max_age("minecraft:air"), None);
     }
 
     #[test]

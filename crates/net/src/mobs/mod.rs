@@ -249,6 +249,7 @@ pub enum Species {
     EndCrystal,
     Parrot,
     Warden,
+    Cat,
 }
 
 /// Всё о виде в одном месте. Встроенные значения — запасные: при старте
@@ -321,7 +322,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 28] = [
+const BUILTIN: [SpeciesInfo; 29] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -703,6 +704,19 @@ const BUILTIN: [SpeciesInfo; 28] = [
             "minecraft:entities/warden",
         )
     },
+    SpeciesInfo {
+        size: (0.6, 0.7),
+        eye_height: 0.5,
+        max_health: 10.0,
+        speed: 0.3,
+        panic_speed: 1.25,
+        tempt_speed: 1.0,
+        ..base(
+            "minecraft:cat",
+            "minecraft:entity.cat",
+            "minecraft:entities/cat",
+        )
+    },
 ];
 
 static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
@@ -739,7 +753,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 28] = [
+    pub const ALL: [Species; 29] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -768,6 +782,7 @@ impl Species {
         Species::EndCrystal,
         Species::Parrot,
         Species::Warden,
+        Species::Cat,
     ];
 
     /// Данные вида: выгрузка, если она установлена, иначе встроенные.
