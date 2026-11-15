@@ -274,6 +274,10 @@ pub struct Villager {
     pub sleeping: Option<[i32; 3]>,
     /// `Entity.DATA_POSE`: 0 standing, 2 sleeping.
     pub pose: u8,
+    /// `SleepInBed.nextOkStartTime`: 40 тиков после пробуждения.
+    pub sleep_cooldown: i64,
+    /// `MemoryModuleType.DOORS_TO_CLOSE`: открытые жителем двери.
+    pub doors_to_close: Vec<[i32; 3]>,
 }
 
 /// Состояние окна торговли: к какому жителю и какая сделка выбрана.
@@ -747,10 +751,7 @@ impl PlayPlan {
 
     /// Свободное место рядом с точкой интереса: сосед с твёрдым полом.
     fn stand_near(&self, block: [i32; 3], from: [f64; 3]) -> Option<[f64; 3]> {
-        let solid = |p: [i32; 3]| {
-            self.block(p)
-                .is_some_and(|s| self.survival.placement.solid(s))
-        };
+        let solid = |p: [i32; 3]| self.walk_blocked(p);
         let mut best: Option<([f64; 3], f64)> = None;
         for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
             let feet = [block[0] + dx, block[1], block[2] + dz];
@@ -775,6 +776,190 @@ impl PlayPlan {
         })
     }
 
+    /// Коллизия для ходьбы: открытые двери/калитки проходимы.
+    fn walk_blocked(&self, p: [i32; 3]) -> bool {
+        self.block(p).is_some_and(|s| {
+            let name = self.state_name(s);
+            let open = self.survival.placement.prop(s, "open") == Some("true");
+            let gate = name.ends_with("_door") || name.ends_with("_fence_gate");
+            !(gate && open) && self.survival.placement.solid(s)
+        })
+    }
+
+    /// `AbstractBedBlock.findStandUpPosition`: свободное место у изголовья
+    /// по направлению кровати (`bedSurroundStandUpOffsets` + `above`).
+    fn find_stand_up(&self, head: [i32; 3], yaw: f32) -> Option<[f64; 3]> {
+        let state = self.block(head)?;
+        let name = self.state_name(state);
+        if !name.ends_with("_bed") {
+            return None;
+        }
+        let facing = self.survival.placement.prop(state, "facing")?;
+        let (fx, fz) = match facing {
+            "north" => (0, -1),
+            "south" => (0, 1),
+            "west" => (-1, 0),
+            "east" => (1, 0),
+            _ => return None,
+        };
+        // `Direction.getClockWise`.
+        let (mut sx, mut sz) = (-fz, fx);
+        let angle = match (sx, sz) {
+            (0, -1) => 180.0,
+            (0, 1) => 0.0,
+            (-1, 0) => 90.0,
+            _ => -90.0,
+        };
+        let delta = (yaw - angle + 180.0).rem_euclid(360.0) - 180.0;
+        if delta.abs() < 45.0 {
+            sx = -sx;
+            sz = -sz;
+        }
+        let mut offsets = vec![
+            (sx, sz),
+            (sx - fx, sz - fz),
+            (sx - 2 * fx, sz - 2 * fz),
+            (-2 * fx, -2 * fz),
+            (-sx - 2 * fx, -sz - 2 * fz),
+            (-sx - fx, -sz - fz),
+            (-sx, -sz),
+            (-sx + fx, -sz + fz),
+            (fx, fz),
+            (sx + fx, sz + fz),
+        ];
+        offsets.push((0, 0));
+        offsets.push((-fx, -fz));
+        let solid = |p: [i32; 3]| self.walk_blocked(p);
+        for (dx, dz) in offsets {
+            let feet = [head[0] + dx, head[1], head[2] + dz];
+            if solid(feet) || solid([feet[0], feet[1] + 1, feet[2]]) {
+                continue;
+            }
+            if !solid([feet[0], feet[1] - 1, feet[2]]) {
+                continue;
+            }
+            if self.entity_at(feet) {
+                continue;
+            }
+            return Some([feet[0] as f64 + 0.5, feet[1] as f64, feet[2] as f64 + 0.5]);
+        }
+        None
+    }
+
+    /// Есть ли игрок или моб в блоке (жители проверяются отдельно).
+    fn entity_at(&self, pos: [i32; 3]) -> bool {
+        let inside = |p: [f64; 3]| {
+            p[0].floor() as i32 == pos[0]
+                && p[1].floor() as i32 == pos[1]
+                && p[2].floor() as i32 == pos[2]
+        };
+        if self.live.lock().unwrap().values().any(|l| inside(l.pos)) {
+            return true;
+        }
+        self.sim()
+            .mobs
+            .lock()
+            .unwrap()
+            .values()
+            .any(|e| e.mob.alive() && inside(e.mob.pos))
+    }
+
+    /// `DoorBlock.setOpen`: обе половины двери со звуком.
+    fn set_door_open(&self, pos: [i32; 3], open: bool) {
+        let Some(state) = self.block(pos) else {
+            return;
+        };
+        let name = self.state_name(state);
+        if !name.ends_with("_door") || name.contains("iron") {
+            return;
+        }
+        let want = if open { "true" } else { "false" };
+        if self.survival.placement.prop(state, "open") == Some(want) {
+            return;
+        }
+        if let Some(partner) = self.survival.placement.partner(state) {
+            let other = [
+                pos[0] + partner[0],
+                pos[1] + partner[1],
+                pos[2] + partner[2],
+            ];
+            if let Some(os) = self.block(other)
+                && self.state_name(os) == name
+                && let Some(next) = self.survival.placement.with_prop(os, "open", want)
+            {
+                self.set_block(other, next);
+            }
+        }
+        if let Some(next) = self.survival.placement.with_prop(state, "open", want) {
+            self.set_block(pos, next);
+        }
+        let sound = if open {
+            "minecraft:block.wooden_door.open"
+        } else {
+            "minecraft:block.wooden_door.close"
+        };
+        self.play_sound(
+            None,
+            sound,
+            crate::sounds::NEUTRAL,
+            [
+                pos[0] as f64 + 0.5,
+                pos[1] as f64 + 0.5,
+                pos[2] as f64 + 0.5,
+            ],
+            1.0,
+            1.0,
+        );
+    }
+
+    /// `InteractWithDoor`: открыть дверь на пути и запомнить её.
+    fn open_door_on_path(&self, v: &mut Villager, pos: [i32; 3]) {
+        let Some(state) = self.block(pos) else {
+            return;
+        };
+        let name = self.state_name(state);
+        if !name.ends_with("_door") || name.contains("iron") {
+            return;
+        }
+        self.set_door_open(pos, true);
+        if !v.doors_to_close.contains(&pos) {
+            v.doors_to_close.push(pos);
+        }
+    }
+
+    /// `closeDoorsThatIHaveOpenedOrPassedThrough`: закрыть дверь, если
+    /// житель отошёл, рядом никого нет и она ещё открыта.
+    fn close_villager_doors(&self, v: &mut Villager) {
+        let mut keep = Vec::new();
+        for door in std::mem::take(&mut v.doors_to_close) {
+            let center = [door[0] as f64 + 0.5, door[1] as f64, door[2] as f64 + 0.5];
+            let dist = crate::mobs::dist2(v.pos, center);
+            if dist > 3.0 * 3.0 {
+                continue;
+            }
+            // Пока житель в проёме, дверь не закрываем (vanilla пропускает
+            // узлы `from`/`to` текущего пути) — запомним до следующего тика.
+            if dist < 1.0 {
+                keep.push(door);
+                continue;
+            }
+            let Some(state) = self.block(door) else {
+                continue;
+            };
+            if !self.state_name(state).ends_with("_door")
+                || self.survival.placement.prop(state, "open") != Some("true")
+            {
+                continue;
+            }
+            if self.entity_at([door[0], door[1], door[2]]) {
+                keep.push(door);
+                continue;
+            }
+            self.set_door_open(door, false);
+        }
+        v.doors_to_close = keep;
+    }
+
     /// `SleepInBed.start`: лечь в кровать, занять её и включить позу сна.
     fn start_villager_sleep(&self, id: i32, v: &mut Villager) {
         let Some(bed) = v.home else {
@@ -790,6 +975,7 @@ impl PlayPlan {
             return;
         }
         self.set_bed_occupied(head, true);
+        v.home = Some(head);
         v.sleeping = Some(head);
         v.pose = 2;
         v.pos = [
@@ -813,13 +999,15 @@ impl PlayPlan {
     fn stop_villager_sleep(&self, id: i32, v: &mut Villager) {
         if let Some(bed) = v.sleeping.take() {
             self.set_bed_occupied(bed, false);
+            // `SleepInBed.stop`: nextOkStartTime = timestamp + 40.
+            v.sleep_cooldown = self.game_time() + 40;
+            if let Some(pos) = self.find_stand_up(bed, v.yaw) {
+                v.pos = pos;
+            } else if let Some(pos) = self.stand_near(bed, v.pos) {
+                v.pos = pos;
+            }
         }
         v.pose = 0;
-        if let Some(bed) = v.home
-            && let Some(pos) = self.stand_near(bed, v.pos)
-        {
-            v.pos = pos;
-        }
         v.sent_pos = play::quantize(v.pos);
         v.move_target = None;
         self.hub.send(
@@ -843,6 +1031,7 @@ impl PlayPlan {
                     v.pos,
                     [home[0] as f64 + 0.5, home[1] as f64, home[2] as f64 + 0.5],
                 ) <= 2.0 * 2.0
+                    && self.game_time() >= v.sleep_cooldown
                 {
                     self.start_villager_sleep(id, v);
                     return None;
@@ -894,15 +1083,14 @@ impl PlayPlan {
         let step = 0.14f64.min(dist);
         let nx = v.pos[0] + dx / dist * step;
         let nz = v.pos[2] + dz / dist * step;
-        let feet = [
-            nx.floor() as i32,
-            v.pos[1].floor() as i32,
-            nz.floor() as i32,
-        ];
-        let solid = |p: [i32; 3]| {
-            self.block(p)
-                .is_some_and(|s| self.survival.placement.solid(s))
-        };
+        let feet_y = v.pos[1].floor() as i32;
+        let here = [v.pos[0].floor() as i32, feet_y, v.pos[2].floor() as i32];
+        let feet = [nx.floor() as i32, feet_y, nz.floor() as i32];
+        self.open_door_on_path(v, here);
+        if feet != here {
+            self.open_door_on_path(v, feet);
+        }
+        let solid = |p: [i32; 3]| self.walk_blocked(p);
         if solid(feet) {
             let up = [feet[0], feet[1] + 1, feet[2]];
             if solid(up) || solid([up[0], up[1] + 1, up[2]]) {
@@ -1109,6 +1297,8 @@ impl PlayPlan {
             last_home_check: 0,
             sleeping: None,
             pose: 0,
+            sleep_cooldown: 0,
+            doors_to_close: Vec::new(),
             last_work_check: self.game_time(),
             job_site: None,
             last_job_check: 0,
@@ -1263,6 +1453,7 @@ impl PlayPlan {
                 if v.sleeping.is_some() && (v.activity != Activity::Rest || bed_gone) {
                     self.stop_villager_sleep(id, v);
                 }
+                self.close_villager_doors(v);
                 if v.sleeping.is_none()
                     && let Some((pos, yaw)) = self.villager_ai_step(id, v)
                 {
@@ -1906,6 +2097,8 @@ impl PlayPlan {
             last_home_check: 0,
             sleeping: None,
             pose: 0,
+            sleep_cooldown: 0,
+            doors_to_close: Vec::new(),
         };
         apply_villager_nbt(&mut v, c, |n| self.item_id(n));
         if v.profession == "minecraft:none" {
@@ -2167,6 +2360,8 @@ mod tests {
             last_home_check: 0,
             sleeping: None,
             pose: 0,
+            sleep_cooldown: 0,
+            doors_to_close: Vec::new(),
         };
         let player = Uuid::from_u128(7);
         let target = player.as_u128();
