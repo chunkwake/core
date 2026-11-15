@@ -724,6 +724,18 @@ fn survival_data(
             })
             .unwrap_or_default()
     };
+    let banner_patterns: HashMap<String, i32> = registries
+        .synchronized
+        .iter()
+        .find(|r| r.name == "banner_pattern")
+        .map(|r| {
+            r.entries
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (name.clone(), i as i32))
+                .collect()
+        })
+        .unwrap_or_default();
     let loom_basic = banner_tag("minecraft:no_item_required");
     let mut loom_special = HashMap::new();
     for (name, &id) in items
@@ -836,6 +848,7 @@ fn survival_data(
         menu_beacon: menu("minecraft:beacon")?,
         loom_basic,
         loom_special,
+        banner_patterns,
         anvil_repair: chunkwake_data::enchanting::repair_materials(data_dir, items),
         smithing: chunkwake_data::recipes::load_smithing(data_dir, items, registries).map_err(s)?,
         brewing: chunkwake_data::recipes::load_brewing(

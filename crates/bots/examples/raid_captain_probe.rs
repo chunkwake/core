@@ -4,7 +4,7 @@
 //! `raid_captain_probe <addr> <packets.json> <registries.json>`
 use chunkwake_bots::{Client, Event, Ids};
 use chunkwake_data::packets::{Direction, PacketTable, State};
-use chunkwake_protocol::{Reader, Writer};
+use chunkwake_protocol::{Reader, Writer, text};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -22,6 +22,8 @@ struct Probe {
     cb_effect: i32,
     cb_sound: i32,
     cb_remove: i32,
+    cb_chat: i32,
+    chat: String,
     pillager_type: i32,
     banner_item: i32,
     bad_omen_id: i32,
@@ -98,7 +100,10 @@ impl Probe {
                     let Ok(stack) = chunkwake_protocol::inventory::read_stack(&mut r) else {
                         break;
                     };
-                    if slot & 0x7F == 4 && stack.is_some_and(|s| s.item == self.banner_item) {
+                    if slot & 0x7F == 4
+                        && let Some(banner) = stack
+                        && banner.item == self.banner_item
+                    {
                         self.leader = Some(entity);
                     }
                     if slot & 0x80 == 0 {
@@ -116,6 +121,11 @@ impl Probe {
                 }
             } else if id == self.cb_sound && r.var_int().ok() == Some(self.witch_throw_sound + 1) {
                 self.witch_throw = true;
+            } else if id == self.cb_chat {
+                if let Ok(component) = text::read_component(&mut r) {
+                    flatten(&component, &mut self.chat);
+                    self.chat.push(' ');
+                }
             } else if id == self.cb_remove {
                 let count = r.var_int().unwrap_or(0);
                 for _ in 0..count {
@@ -198,6 +208,24 @@ impl Probe {
     }
 }
 
+fn flatten(v: &serde_json::Value, out: &mut String) {
+    if let Some(s) = v.as_str() {
+        out.push_str(s);
+        return;
+    }
+    if let Some(s) = v.get("text").and_then(serde_json::Value::as_str) {
+        out.push_str(s);
+    }
+    for key in ["with", "extra"] {
+        if let Some(args) = v.get(key).and_then(serde_json::Value::as_array) {
+            for arg in args {
+                flatten(arg, out);
+                out.push(' ');
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let a: Vec<String> = std::env::args().collect();
@@ -221,6 +249,7 @@ async fn main() {
     let cb_effect = cb("update_mob_effect");
     let cb_sound = cb("sound");
     let cb_remove = cb("remove_entities");
+    let cb_chat = cb("system_chat");
     let mut c = Client::connect(&a[1], "boater", ids, 777, "26.3")
         .await
         .unwrap();
@@ -231,6 +260,7 @@ async fn main() {
         cb_effect,
         cb_sound,
         cb_remove,
+        cb_chat,
     ];
     let mut p = Probe {
         c,
@@ -242,6 +272,8 @@ async fn main() {
         cb_effect,
         cb_sound,
         cb_remove,
+        cb_chat,
+        chat: String::new(),
         pillager_type: pid("minecraft:entity_type", "minecraft:pillager"),
         banner_item: pid("minecraft:item", "minecraft:white_banner"),
         bad_omen_id: pid("minecraft:mob_effect", "minecraft:bad_omen"),
@@ -298,8 +330,11 @@ async fn main() {
         }
     }
     let leader = p.leader.expect("у лидера волны нет знамени в HEAD");
-    println!("raid captain banner ok (entity {leader})");
-
+    // `Raid.getBannerComponentPatch`: 8 слоёв — rhombus/cyan,
+    // stripe_bottom/light_gray, stripe_center/gray, border/light_gray,
+    // stripe_middle/black, half_horizontal/light_gray, circle/light_gray,
+    // border/black. Проверяем по выпавшему знамени (серверный NBT):
+    // клиент бота не инициализирует таблицу компонентов предметов.
     // Убираем старый Bad Omen (мог остаться с прошлой сессии), чтобы
     // пакет от убийства капитана был новым.
     p.cmd("effect clear @s").await;
@@ -318,6 +353,48 @@ async fn main() {
         "длительность Bad Omen не 120000: {duration}"
     );
     println!("raid captain bad omen ok (duration {duration})");
+
+    // Знамя капитана падает всегда (`drop_chances[head] = 2.0`); в его NBT
+    // 8 слоёв `minecraft:banner_patterns`.
+    let mut banner = String::new();
+    for _ in 0..10 {
+        p.chat.clear();
+        p.cmd("data get entity @e[type=minecraft:item,distance=..16,sort=nearest,limit=1] Item")
+            .await;
+        banner = p.chat.clone();
+        if banner.contains("banner_patterns") {
+            break;
+        }
+        p.pump(200).await;
+    }
+    assert!(
+        banner.contains("banner_patterns"),
+        "в NBT выпавшего знамени нет banner_patterns: {banner}"
+    );
+    for pattern in [
+        "rhombus",
+        "stripe_bottom",
+        "stripe_center",
+        "border",
+        "stripe_middle",
+        "half_horizontal",
+        "circle",
+    ] {
+        assert!(
+            banner.contains(pattern),
+            "в NBT знамени нет узора {pattern}: {banner}"
+        );
+    }
+    assert!(
+        banner.contains("cyan")
+            && banner.contains("light_gray")
+            && banner.contains("gray")
+            && banner.contains("black"),
+        "в NBT знамени нет ожидаемых цветов: {banner}"
+    );
+    let layers = banner.matches("pattern:").count();
+    assert_eq!(layers, 8, "слоёв знамени не 8: {banner}");
+    println!("raid captain banner ok (entity {leader}, {layers} layers, NBT names)");
 
     // Ведьма лечит раненого разбойника: HP 3 → 7 от splash healing.
     p.witch_pillager = None;

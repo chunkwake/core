@@ -2617,6 +2617,9 @@ pub struct SurvivalData {
     pub brewing: chunkwake_data::recipes::BrewingData,
     pub loom_basic: Vec<i32>,
     pub loom_special: HashMap<i32, Vec<i32>>,
+    /// `banner_pattern` 26.3: имя записи -> ID реестра (0-база, как в
+    /// компоненте `minecraft:banner_patterns`).
+    pub banner_patterns: HashMap<String, i32>,
     pub anvil_repair: std::collections::HashMap<i32, std::collections::HashSet<i32>>,
     pub smithing: chunkwake_data::recipes::SmithingData,
     /// Чары для плагинов по порядку сетевых ID (строки запроса `enchantments`).

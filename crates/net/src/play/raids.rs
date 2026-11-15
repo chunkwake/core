@@ -100,6 +100,28 @@ pub(super) struct Raid {
     bar_remaining: i32,
 }
 
+/// `Raid.getBannerComponentPatch`: восемь слоёв знамени капитана
+/// (`BannerPatterns` + `DyeColor` ID).
+const OMINOUS_BANNER_LAYERS: [(&str, i32); 8] = [
+    ("minecraft:rhombus", 9),
+    ("minecraft:stripe_bottom", 8),
+    ("minecraft:stripe_center", 7),
+    ("minecraft:border", 8),
+    ("minecraft:stripe_middle", 15),
+    ("minecraft:half_horizontal", 8),
+    ("minecraft:circle", 8),
+    ("minecraft:border", 15),
+];
+
+/// Слои знамени по именам: неизвестные шаблоны пропускаются
+/// (`addIfRegistered`).
+fn ominous_banner_layers(patterns: &HashMap<String, i32>) -> Vec<(i32, i32)> {
+    OMINOUS_BANNER_LAYERS
+        .iter()
+        .filter_map(|(name, color)| Some((*patterns.get(*name)?, *color)))
+        .collect()
+}
+
 /// `Raid.spawnGroup`: наездник раввагера по номеру группы и индексу.
 fn ravager_rider(group_number: i32, ravager_index: i32) -> Option<crate::mobs::Species> {
     if group_number == 5 {
@@ -358,11 +380,12 @@ impl PlayPlan {
         (out, health)
     }
 
-    /// `Raid.getOminousBannerInstance`: белое знамя с именем.
+    /// `Raid.getOminousBannerInstance`: белое знамя с восемью узорами.
     fn ominous_banner(&self) -> Option<Stack> {
         let item = self.item_id("minecraft:white_banner")?;
         let extra = chunkwake_protocol::components::Extra {
             custom_name: Some(r#"{"translate":"block.minecraft.ominous_banner"}"#.to_owned()),
+            banner_patterns: ominous_banner_layers(&self.survival.banner_patterns),
             ..Default::default()
         };
         Some(Stack {
@@ -768,6 +791,39 @@ mod tests {
         assert_eq!(counts(RaiderKind::Vindicator, 7), 5);
         assert_eq!(counts(RaiderKind::Ravager, 7), 2);
         assert_eq!(counts(RaiderKind::Witch, 7), 1);
+    }
+
+    /// `Raid.getBannerComponentPatch`: восемь слоёв в ванильном порядке.
+    #[test]
+    fn ominous_banner_layers_match_vanilla() {
+        let patterns: HashMap<String, i32> = [
+            ("minecraft:rhombus", 0),
+            ("minecraft:stripe_bottom", 1),
+            ("minecraft:stripe_center", 2),
+            ("minecraft:border", 3),
+            ("minecraft:stripe_middle", 4),
+            ("minecraft:half_horizontal", 5),
+            ("minecraft:circle", 6),
+        ]
+        .into_iter()
+        .map(|(name, id)| (name.to_owned(), id))
+        .collect();
+        assert_eq!(
+            ominous_banner_layers(&patterns),
+            vec![
+                (0, 9),
+                (1, 8),
+                (2, 7),
+                (3, 8),
+                (4, 15),
+                (5, 8),
+                (6, 8),
+                (3, 15),
+            ]
+        );
+        // Неизвестные шаблоны (как `addIfRegistered`) выпадают.
+        let only = HashMap::from([("minecraft:border".to_owned(), 3)]);
+        assert_eq!(ominous_banner_layers(&only), vec![(3, 8), (3, 15)]);
     }
 
     /// `Raid.spawnGroup`: раввагеры получают наездников только на
