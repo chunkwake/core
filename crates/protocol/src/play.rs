@@ -1045,6 +1045,12 @@ mod move_tests {
     use super::*;
 
     #[test]
+    fn pose_metadata_uses_serializer_20() {
+        let p = entity_meta(0x10, 7, &[(6, Meta::Pose(2))]);
+        assert_eq!(p, [0x10, 7, 6, 20, 2, 0xff]);
+    }
+
+    #[test]
     fn deltas() {
         let a = quantize([1.0, 2.0, 3.0]);
         assert_eq!(delta(a, quantize([1.5, 2.0, 2.0])), Some([2048, 0, -4096]));
@@ -1657,6 +1663,8 @@ pub enum Meta {
     WeatheringState(i32),
     /// `EntityDataSerializers.OPTIONAL_BLOCK_POS` (id 11): флаг + позиция.
     OptBlockPos(Option<[i32; 3]>),
+    /// `EntityDataSerializers.POSE` (id 20): `Pose` как VarInt.
+    Pose(u8),
 }
 
 /// `set_entity_data` с произвольными полями `(индекс, значение)`.
@@ -1723,6 +1731,9 @@ pub fn entity_meta(id: i32, entity_id: i32, fields: &[(u8, Meta)]) -> Vec<u8> {
                         w.bool(false);
                     }
                 }
+            }
+            Meta::Pose(pose) => {
+                w.u8(*i).var_int(20).var_int(i32::from(*pose));
             }
         };
     }

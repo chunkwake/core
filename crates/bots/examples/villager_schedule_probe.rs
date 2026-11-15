@@ -15,7 +15,10 @@ struct Probe {
     c: Client,
     sb_command: i32,
     cb_chat: i32,
+    cb_meta: i32,
     chat: String,
+    /// Последняя поза из `set_entity_data` (индекс 6).
+    pose: Option<i32>,
 }
 
 impl Probe {
@@ -32,6 +35,15 @@ impl Probe {
                 if let Ok(component) = text::read_component(&mut r) {
                     flatten(&component, &mut self.chat);
                     self.chat.push(' ');
+                }
+            } else if id == self.cb_meta {
+                let mut r = Reader::new(&body);
+                if let (Ok(_entity), Ok(index)) = (r.var_int(), r.u8())
+                    && index == 6
+                    && let (Ok(kind), Ok(pose)) = (r.var_int(), r.var_int())
+                    && kind == 20
+                {
+                    self.pose = Some(pose);
                 }
             }
         }
@@ -64,6 +76,17 @@ impl Probe {
         self.chat.clear();
         self.cmd(&format!("data get entity {query}")).await;
         self.chat.clone()
+    }
+
+    /// `/execute if block`: состояние блока (у кровати нет block entity).
+    async fn block_is(&mut self, pos: [i32; 3], predicate: &str) -> bool {
+        self.chat.clear();
+        self.cmd(&format!(
+            "execute if block {} {} {} {predicate} run say BLOCK_YES",
+            pos[0], pos[1], pos[2]
+        ))
+        .await;
+        self.chat.contains("BLOCK_YES")
     }
 
     async fn pos(&mut self) -> Option<[f64; 3]> {
@@ -141,15 +164,18 @@ async fn main() {
     let sb = |n| table.id(State::Play, Direction::Serverbound, n).unwrap();
     let cb = |n| table.id(State::Play, Direction::Clientbound, n).unwrap();
     let cb_chat = cb("system_chat");
+    let cb_meta = cb("set_entity_data");
     let mut c = Client::connect(&a[1], "boater", ids, 777, "26.3")
         .await
         .unwrap();
-    c.capture_also = vec![cb_chat];
+    c.capture_also = vec![cb_chat, cb_meta];
     let mut p = Probe {
         c,
         sb_command: sb("chat_command"),
         cb_chat,
+        cb_meta,
         chat: String::new(),
+        pose: None,
     };
     p.pump(1500).await;
 
@@ -254,6 +280,50 @@ async fn main() {
     let near = dist_xz(at_bed, bed_foot).min(dist_xz(at_bed, bed_head));
     assert!(near <= 2.0, "житель не дошёл до кровати: {at_bed:?}");
     println!("rest: villager at bed ({near:.2})");
+
+    // Сон: поза SLEEPING, кровать занята, позиция на кровати.
+    let mut slept = None;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(8_000) {
+        if p.pose == Some(2)
+            && p.block_is([X + 8, Y, Z - 4], "minecraft:red_bed[occupied=true]")
+                .await
+        {
+            slept = p.pos().await;
+            break;
+        }
+        p.pump(200).await;
+    }
+    let slept = slept.unwrap_or_else(|| panic!("житель не лёг спать (pose {:?})", p.pose));
+    assert!(
+        slept[1] > f64::from(Y) + 0.4,
+        "позиция во сне не на кровати: {slept:?}"
+    );
+    println!("sleep: pose sleeping, bed occupied (y {:.3})", slept[1]);
+
+    // Пробуждение: вне `rest` поза STANDING и кровать свободна.
+    p.cmd("time set 1000").await;
+    let mut woken = false;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(8_000) {
+        if p.pose == Some(0)
+            && p.block_is([X + 8, Y, Z - 4], "minecraft:red_bed[occupied=false]")
+                .await
+        {
+            woken = true;
+            break;
+        }
+        p.pump(200).await;
+    }
+    let bed_busy = p
+        .block_is([X + 8, Y, Z - 4], "minecraft:red_bed[occupied=true]")
+        .await;
+    assert!(
+        woken,
+        "житель не проснулся (pose {:?}, bed занята: {bed_busy})",
+        p.pose
+    );
+    println!("wake: pose standing, bed free");
 
     println!("villager_schedule_probe: ok");
 }

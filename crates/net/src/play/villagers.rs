@@ -270,6 +270,10 @@ pub struct Villager {
     pub wander_timer: i32,
     /// Когда последний раз искали кровать.
     pub last_home_check: i64,
+    /// `LivingEntity.sleepingPos`: кровать, на которой спит житель.
+    pub sleeping: Option<[i32; 3]>,
+    /// `Entity.DATA_POSE`: 0 standing, 2 sleeping.
+    pub pose: u8,
 }
 
 /// Состояние окна торговли: к какому жителю и какая сделка выбрана.
@@ -771,12 +775,80 @@ impl PlayPlan {
         })
     }
 
+    /// `SleepInBed.start`: лечь в кровать, занять её и включить позу сна.
+    fn start_villager_sleep(&self, id: i32, v: &mut Villager) {
+        let Some(bed) = v.home else {
+            return;
+        };
+        let Some((head, _foot)) = self.bed_pair(bed) else {
+            return;
+        };
+        let Some(state) = self.block(head) else {
+            return;
+        };
+        if self.survival.placement.prop(state, "occupied") == Some("true") {
+            return;
+        }
+        self.set_bed_occupied(head, true);
+        v.sleeping = Some(head);
+        v.pose = 2;
+        v.pos = [
+            head[0] as f64 + 0.5,
+            head[1] as f64 + 0.6875,
+            head[2] as f64 + 0.5,
+        ];
+        v.move_target = None;
+        v.sent_pos = play::quantize(v.pos);
+        self.hub.send(
+            None,
+            play::entity_meta(self.ids.set_entity_data, id, &[(6, play::Meta::Pose(2))]),
+        );
+        self.hub.send(
+            None,
+            play::teleport_entity(self.ids.teleport_entity, id, v.pos, v.yaw, 0.0, true),
+        );
+    }
+
+    /// `WakeUp`/`SleepInBed.stop`: освободить кровать и встать рядом.
+    fn stop_villager_sleep(&self, id: i32, v: &mut Villager) {
+        if let Some(bed) = v.sleeping.take() {
+            self.set_bed_occupied(bed, false);
+        }
+        v.pose = 0;
+        if let Some(bed) = v.home
+            && let Some(pos) = self.stand_near(bed, v.pos)
+        {
+            v.pos = pos;
+        }
+        v.sent_pos = play::quantize(v.pos);
+        v.move_target = None;
+        self.hub.send(
+            None,
+            play::entity_meta(self.ids.set_entity_data, id, &[(6, play::Meta::Pose(0))]),
+        );
+        self.hub.send(
+            None,
+            play::teleport_entity(self.ids.teleport_entity, id, v.pos, v.yaw, 0.0, true),
+        );
+    }
+
     /// Один шаг `Brain`/`WalkTarget`: работа, встреча у колокола, отдых дома
     /// и прогулка в `idle`.
-    fn villager_ai_step(&self, v: &mut Villager) -> Option<([f64; 3], f32)> {
+    fn villager_ai_step(&self, id: i32, v: &mut Villager) -> Option<([f64; 3], f32)> {
         let target = match v.activity {
             Activity::Work => v.job_site.and_then(|p| self.stand_near(p, v.pos)),
-            Activity::Rest => v.home.and_then(|p| self.stand_near(p, v.pos)),
+            Activity::Rest => {
+                let home = v.home?;
+                if crate::mobs::dist2(
+                    v.pos,
+                    [home[0] as f64 + 0.5, home[1] as f64, home[2] as f64 + 0.5],
+                ) <= 2.0 * 2.0
+                {
+                    self.start_villager_sleep(id, v);
+                    return None;
+                }
+                self.stand_near(home, v.pos)
+            }
             Activity::Meet => {
                 if v.move_target.is_none() {
                     let types = std::collections::HashSet::from(["minecraft:meeting".to_owned()]);
@@ -1035,6 +1107,8 @@ impl PlayPlan {
             no_ai: false,
             wander_timer: 0,
             last_home_check: 0,
+            sleeping: None,
+            pose: 0,
             last_work_check: self.game_time(),
             job_site: None,
             last_job_check: 0,
@@ -1181,7 +1255,17 @@ impl PlayPlan {
                     v.last_home_check = now;
                     self.update_villager_home(id, v);
                 }
-                if let Some((pos, yaw)) = self.villager_ai_step(v) {
+                let bed_gone = v.sleeping.is_some_and(|bed| {
+                    self.block(bed)
+                        .and_then(|s| poi::of_block(self.state_name(s)))
+                        != Some("minecraft:home")
+                });
+                if v.sleeping.is_some() && (v.activity != Activity::Rest || bed_gone) {
+                    self.stop_villager_sleep(id, v);
+                }
+                if v.sleeping.is_none()
+                    && let Some((pos, yaw)) = self.villager_ai_step(id, v)
+                {
                     moves.push((id, pos, yaw, v.sent_pos));
                     v.sent_pos = play::quantize(pos);
                 }
@@ -1820,6 +1904,8 @@ impl PlayPlan {
             no_ai: false,
             wander_timer: 0,
             last_home_check: 0,
+            sleeping: None,
+            pose: 0,
         };
         apply_villager_nbt(&mut v, c, |n| self.item_id(n));
         if v.profession == "minecraft:none" {
@@ -2079,6 +2165,8 @@ mod tests {
             no_ai: false,
             wander_timer: 0,
             last_home_check: 0,
+            sleeping: None,
+            pose: 0,
         };
         let player = Uuid::from_u128(7);
         let target = player.as_u128();
