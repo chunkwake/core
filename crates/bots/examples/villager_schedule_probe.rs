@@ -715,7 +715,7 @@ async fn main() {
     let mut planted = false;
     let mut bonemealed = false;
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(30_000) {
+    while start.elapsed() < Duration::from_millis(90_000) {
         if !harvested {
             harvested = p.block_is(w1, "minecraft:air").await;
         }

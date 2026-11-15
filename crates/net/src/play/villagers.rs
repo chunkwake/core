@@ -244,6 +244,83 @@ fn raid_phase(groups: i32, alive: i32, cooldown: i64, celebration: i32) -> RaidP
     }
 }
 
+/// `RunOne` рабочего пакета (`getWorkPackage`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkGoal {
+    WorkAtPoi,
+    StrollAroundPoi,
+    StrollToPoi,
+    StrollToPoiList,
+    Harvest,
+    UseBonemeal,
+}
+
+/// `RunOne` idle/play пакетов (`getIdlePackage`/`getPlayPackage`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdleGoal {
+    InteractVillager,
+    Breed,
+    Cat,
+    Stroll,
+    Look,
+    JumpBed,
+    DoNothing,
+}
+
+/// `WeightedRandom.getRandomItem`: вес выбирается из суммы.
+fn weighted_pick<T: Copy>(items: &[(T, u32)], roll: u32) -> Option<T> {
+    let total: u32 = items.iter().map(|(_, w)| *w).sum();
+    if total == 0 {
+        return None;
+    }
+    let mut r = roll % total;
+    for &(item, weight) in items {
+        if r < weight {
+            return Some(item);
+        }
+        r -= weight;
+    }
+    items.last().map(|(item, _)| *item)
+}
+
+/// Веса `getWorkPackage`: `HarvestFarmland` 2/5 и `UseBonemeal` 4/7
+/// (фермер/остальные), остальные — одинаковые.
+fn work_weights(profession: &str) -> Vec<(WorkGoal, u32)> {
+    let farmer = profession == "minecraft:farmer";
+    vec![
+        (WorkGoal::WorkAtPoi, 7),
+        (WorkGoal::StrollAroundPoi, 2),
+        (WorkGoal::StrollToPoi, 5),
+        (WorkGoal::StrollToPoiList, 5),
+        (WorkGoal::Harvest, if farmer { 2 } else { 5 }),
+        (WorkGoal::UseBonemeal, if farmer { 4 } else { 7 }),
+    ]
+}
+
+/// Веса `getIdlePackage` (RunOne): взаимодействие 2, остальное по 1.
+fn idle_weights() -> Vec<(IdleGoal, u32)> {
+    vec![
+        (IdleGoal::InteractVillager, 2),
+        (IdleGoal::Breed, 1),
+        (IdleGoal::Cat, 1),
+        (IdleGoal::Stroll, 1),
+        (IdleGoal::Look, 1),
+        (IdleGoal::JumpBed, 1),
+        (IdleGoal::DoNothing, 1),
+    ]
+}
+
+/// Веса `getPlayPackage` RunOne (когда рядом нет других малышей).
+fn play_weights() -> Vec<(IdleGoal, u32)> {
+    vec![
+        (IdleGoal::InteractVillager, 2),
+        (IdleGoal::Cat, 1),
+        (IdleGoal::Stroll, 1),
+        (IdleGoal::JumpBed, 2),
+        (IdleGoal::DoNothing, 2),
+    ]
+}
+
 /// Стек целей: первая доступная цель по приоритету, `Idle` — всегда
 /// запасной вариант (в ванили нижние поведения срабатывают, если верхние
 /// не могут стартовать).
@@ -454,6 +531,10 @@ pub struct Villager {
     /// `InteractWith` с кошкой (`INTERACTION_TARGET`).
     pub cat_target: Option<[f64; 3]>,
     pub cat_timer: i32,
+    /// Выбранная ветка `RunOne` и срок её действия.
+    pub work_goal: WorkGoal,
+    pub idle_goal: IdleGoal,
+    pub goal_timer: i32,
     /// `MemoryModuleType.BREED_TARGET` и время рождения.
     pub breed_target: Option<u128>,
     pub breed_partner: Option<i32>,
@@ -1350,48 +1431,64 @@ impl PlayPlan {
             v.hurt_until = 0;
             v.hurt_from = None;
         }
-        // `JumpOnBed`: малыш без партнёра прыгает на ближайшей кровати.
-        if v.age < 0
-            && v.activity == Activity::Idle
-            && let Some(step) = self.jump_on_bed_step(v)
-        {
-            return Some(step);
-        }
         // `SetRaidStatus`: пре-рейд/укрытие важнее расписания.
         if v.raid_phase != RaidPhase::None
             && let Some(step) = self.raid_step(v)
         {
             return Some(step);
         }
-        // `HarvestFarmland`/`UseBonemeal` у фермера на работе.
+        // `HarvestFarmland`/`UseBonemeal` у фермера (RunOne work-пакета).
         if v.activity == Activity::Work
             && v.profession == "minecraft:farmer"
+            && matches!(v.work_goal, WorkGoal::Harvest | WorkGoal::UseBonemeal)
             && let Some(step) = self.farm_step(v)
         {
             return Some(step);
         }
-        // `InteractWith` с кошкой (idle-пакет).
-        if v.activity == Activity::Idle
-            && let Some(step) = self.cat_step(v, cats)
-        {
-            return Some(step);
-        }
-        // `JumpOnBed`: только если рядом нет других малышей (в ванили
-        // при `VISIBLE_VILLAGER_BABIES` работает лишь `PlayTagWithOtherKids`).
         let other_babies = babies.iter().filter(|(bid, ..)| *bid != id).count();
-        if v.age < 0
-            && other_babies == 0
-            && matches!(v.activity, Activity::Play | Activity::Idle)
-            && let Some(step) = self.jump_on_bed_step(v)
-        {
-            return Some(step);
+        // `getPlayPackage`: салки (5) при других малышах, иначе RunOne.
+        if v.age < 0 && v.activity == Activity::Play {
+            if other_babies > 0 {
+                if let Some(step) = self.play_tag_step(id, v, babies) {
+                    return Some(step);
+                }
+            } else {
+                let branch = weighted_pick(&play_weights(), rand::random::<u32>());
+                match branch {
+                    Some(IdleGoal::Cat) => {
+                        if let Some(step) = self.cat_step(v, cats) {
+                            return Some(step);
+                        }
+                    }
+                    Some(IdleGoal::JumpBed) => {
+                        if let Some(step) = self.jump_on_bed_step(v) {
+                            return Some(step);
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
-        // `PlayTagWithOtherKids`: малыши в `play` играют в салки.
-        if v.age < 0
-            && v.activity == Activity::Play
-            && let Some(step) = self.play_tag_step(id, v, babies)
-        {
-            return Some(step);
+        // `getIdlePackage` RunOne: кошка/прыжки/размножение по весам.
+        if v.activity == Activity::Idle {
+            match v.idle_goal {
+                IdleGoal::Cat => {
+                    if let Some(step) = self.cat_step(v, cats) {
+                        return Some(step);
+                    }
+                }
+                IdleGoal::JumpBed if v.age < 0 => {
+                    if let Some(step) = self.jump_on_bed_step(v) {
+                        return Some(step);
+                    }
+                }
+                IdleGoal::Breed if self.can_breed(v) => {
+                    if let Some(step) = self.breed_step(id, v, others, breedable, births) {
+                        return Some(step);
+                    }
+                }
+                _ => {}
+            }
         }
         if v.activity == Activity::Idle
             && (v.breed_target.is_some() || self.can_breed(v))
@@ -1399,6 +1496,7 @@ impl PlayPlan {
         {
             return Some(step);
         }
+
         let goal = *goals_for(
             v.activity,
             v.home.is_some(),
@@ -1992,6 +2090,28 @@ impl PlayPlan {
         }
     }
 
+    /// `SecondaryPoiSensor`: есть ли грядка в ±4 по XZ и ±2 по Y.
+    fn has_secondary_job_site(&self, pos: [f64; 3]) -> bool {
+        let base = [
+            pos[0].floor() as i32,
+            pos[1].floor() as i32,
+            pos[2].floor() as i32,
+        ];
+        for dx in -4..=4 {
+            for dy in -2..=2 {
+                for dz in -4..=4 {
+                    if self
+                        .block([base[0] + dx, base[1] + dy, base[2] + dz])
+                        .is_some_and(|s| self.state_name(s).ends_with("farmland"))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// `InteractWith.of(CAT, 8, INTERACTION_TARGET, speed, 2)`: подойти к
     /// кошке и смотреть на неё.
     fn cat_step(&self, v: &mut Villager, cats: &[[f64; 3]]) -> Option<([f64; 3], f32)> {
@@ -2084,6 +2204,10 @@ impl PlayPlan {
     /// `HarvestFarmland`/`UseBonemeal`: собрать спелое, посадить семена или
     /// ускорить рост костной мукой в 3×3×3 вокруг фермера.
     fn farm_step(&self, v: &mut Villager) -> Option<([f64; 3], f32)> {
+        // `HarvestFarmland` требует `SECONDARY_JOB_SITE`.
+        if !self.has_secondary_job_site(v.pos) {
+            return None;
+        }
         let now = self.game_time();
         if now < v.farm_cooldown {
             return None;
@@ -2802,6 +2926,9 @@ impl PlayPlan {
             farm_cooldown: 0,
             cat_target: None,
             cat_timer: 0,
+            work_goal: WorkGoal::WorkAtPoi,
+            idle_goal: IdleGoal::Stroll,
+            goal_timer: 0,
             breed_target: None,
             breed_partner: None,
             breed_until: 0,
@@ -3064,6 +3191,18 @@ impl PlayPlan {
                 v.meeting_point = None;
                 v.interaction_target = None;
                 v.tag_target = None;
+                v.goal_timer = 0;
+            }
+            if v.trader == TraderKind::Villager {
+                if v.goal_timer <= 0 {
+                    v.work_goal =
+                        weighted_pick(&work_weights(&v.profession), rand::random::<u32>())
+                            .unwrap_or(WorkGoal::WorkAtPoi);
+                    v.idle_goal = weighted_pick(&idle_weights(), rand::random::<u32>())
+                        .unwrap_or(IdleGoal::Stroll);
+                    v.goal_timer = 40;
+                }
+                v.goal_timer -= 1;
             }
             if v.trader == TraderKind::Villager && !v.no_ai {
                 if now - v.last_home_check >= 100 {
@@ -3814,6 +3953,9 @@ impl PlayPlan {
             farm_cooldown: 0,
             cat_target: None,
             cat_timer: 0,
+            work_goal: WorkGoal::WorkAtPoi,
+            idle_goal: IdleGoal::Stroll,
+            goal_timer: 0,
             breed_target: None,
             breed_partner: None,
             breed_until: 0,
@@ -4137,6 +4279,9 @@ mod tests {
             farm_cooldown: 0,
             cat_target: None,
             cat_timer: 0,
+            work_goal: WorkGoal::WorkAtPoi,
+            idle_goal: IdleGoal::Stroll,
+            goal_timer: 0,
             breed_target: None,
             breed_partner: None,
             breed_until: 0,
@@ -4263,6 +4408,22 @@ mod tests {
         assert!((look_yaw([0.0; 3], [1.0, 0.0, 0.0]) + 90.0).abs() < 0.001);
         assert!((look_yaw([0.0; 3], [-1.0, 0.0, 0.0]) - 90.0).abs() < 0.001);
         assert!((look_yaw([0.0; 3], [0.0, 0.0, -1.0]).abs() - 180.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn run_one_weights_match_vanilla() {
+        let farmer = work_weights("minecraft:farmer");
+        assert_eq!(farmer.iter().map(|(_, w)| w).sum::<u32>(), 25);
+        assert_eq!(weighted_pick(&farmer, 24), Some(WorkGoal::UseBonemeal));
+        let other = work_weights("minecraft:librarian");
+        assert_eq!(other.iter().map(|(_, w)| w).sum::<u32>(), 31);
+        assert_eq!(idle_weights().iter().map(|(_, w)| w).sum::<u32>(), 8);
+        assert_eq!(play_weights().iter().map(|(_, w)| w).sum::<u32>(), 8);
+        assert_eq!(
+            weighted_pick(&idle_weights(), 0),
+            Some(IdleGoal::InteractVillager)
+        );
+        assert_eq!(weighted_pick(&idle_weights(), 7), Some(IdleGoal::DoNothing));
     }
 
     #[test]
