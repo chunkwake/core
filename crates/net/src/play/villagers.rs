@@ -65,6 +65,8 @@ pub struct Offer {
     pub xp: i32,
     pub price_mul: f32,
     pub demand: i32,
+    /// `MerchantOffer.specialPriceDiff` (скидка героя и репутация).
+    pub special_price: i32,
 }
 
 impl Offer {
@@ -77,7 +79,7 @@ impl Offer {
         let check = |s: Slot, (item, count): (i32, i32)| {
             s.is_some_and(|s| s.item == item && s.count >= count)
         };
-        if !check(a, self.buy) {
+        if !check(a, (self.buy.0, self.price())) {
             return false;
         }
         match self.buy_b {
@@ -87,8 +89,20 @@ impl Offer {
     }
 
     pub(super) fn price(&self) -> i32 {
-        // `MerchantOffer.getModifiedCostCount`: base + specialPrice + demand.
-        self.buy.1.max(1)
+        // `MerchantOffer.getModifiedCostCount`: base + demand + specialPrice.
+        let base = self.buy.1.max(1);
+        let demand = ((base as f32 * self.demand as f32 * self.price_mul).floor() as i32).max(0);
+        (base + demand + self.special_price).clamp(1, 64)
+    }
+
+    /// `Villager.updateSpecialPrices`: скидка героя деревни.
+    fn apply_hero_discount(&mut self, amplifier: Option<u8>) {
+        self.special_price = 0;
+        if let Some(amplifier) = amplifier {
+            let modifier = 0.3 + 0.0625 * f64::from(amplifier);
+            let reduction = (modifier * f64::from(self.buy.1.max(1))).floor() as i32;
+            self.special_price -= reduction.max(1);
+        }
     }
 }
 
@@ -117,9 +131,32 @@ pub struct Villager {
     pub last_job_check: i64,
     pub custom_name: Option<String>,
     pub persistent: bool,
+    /// `GiveGiftToHero.timeUntilNextGift`: тики до подарка.
+    pub gift_timer: i32,
+    /// `GiveGiftToHero`: пауза на поворот головы перед броском.
+    pub gift_wait: Option<i32>,
 }
 
 /// Состояние окна торговли: к какому жителю и какая сделка выбрана.
+impl Villager {
+    /// `Villager.updateSpecialPrices`: сброс скидок и скидка героя.
+    fn update_special_prices(&mut self, amplifier: Option<u8>) {
+        for offer in &mut self.offers {
+            offer.apply_hero_discount(amplifier);
+        }
+    }
+}
+
+/// `GiveGiftToHero.getLootTableToThrow`: подарок по профессии.
+fn gift_table(profession: &str) -> String {
+    let short = profession.strip_prefix("minecraft:").unwrap_or(profession);
+    if short == "none" {
+        "minecraft:gameplay/hero_of_the_village/unemployed_gift".to_owned()
+    } else {
+        format!("minecraft:gameplay/hero_of_the_village/{short}_gift")
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct MerchantWindow {
     pub villager: i32,
@@ -270,6 +307,7 @@ impl PlayPlan {
                 xp,
                 price_mul: 0.05,
                 demand: 0,
+                special_price: 0,
             });
         };
         push(
@@ -370,6 +408,7 @@ impl PlayPlan {
                     xp: 0,
                     price_mul: 0.05,
                     demand: 0,
+                    special_price: 0,
                 });
             }
         };
@@ -426,6 +465,8 @@ impl PlayPlan {
             despawn_delay: 0,
             last_restock: 0,
             restocks_today: 0,
+            gift_timer: 600,
+            gift_wait: None,
             last_work_check: self.game_time(),
             job_site: None,
             last_job_check: 0,
@@ -521,6 +562,23 @@ impl PlayPlan {
         let mut gone = Vec::new();
         let mut work: Vec<([f64; 3], String)> = Vec::new();
         let mut jobs: Vec<(i32, String, String, i32)> = Vec::new();
+        let hero_id = self
+            .survival
+            .effects
+            .get("minecraft:hero_of_the_village")
+            .copied();
+        let heroes: Vec<[f64; 3]> = match hero_id {
+            Some(id) => self
+                .live
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|l| l.effects.iter().any(|e| e.id == id))
+                .map(|l| l.pos)
+                .collect(),
+            None => Vec::new(),
+        };
+        let mut gifts: Vec<([f64; 3], [f64; 3], String)> = Vec::new();
         for id in ids {
             let mut villagers = self.sim().villagers.lock().unwrap();
             let Some(v) = villagers.get_mut(&id) else {
@@ -537,6 +595,32 @@ impl PlayPlan {
                 v.last_job_check = now;
                 if let Some(change) = self.update_villager_job(id, v) {
                     jobs.push(change);
+                }
+            }
+            if v.trader == TraderKind::Villager {
+                let hero = heroes
+                    .iter()
+                    .filter(|p| crate::mobs::dist2(**p, v.pos) <= 8.0 * 8.0)
+                    .min_by(|a, b| {
+                        crate::mobs::dist2(**a, v.pos).total_cmp(&crate::mobs::dist2(**b, v.pos))
+                    })
+                    .copied();
+                match hero {
+                    Some(hero_pos) => {
+                        if let Some(wait) = &mut v.gift_wait {
+                            *wait -= 1;
+                            if *wait <= 0 && crate::mobs::dist2(hero_pos, v.pos) <= 5.0 * 5.0 {
+                                gifts.push((v.pos, hero_pos, v.profession.clone()));
+                                v.gift_timer = 600 + (rand::random::<u32>() % 6001) as i32;
+                                v.gift_wait = None;
+                            }
+                        } else if v.gift_timer > 0 {
+                            v.gift_timer -= 1;
+                        } else {
+                            v.gift_wait = Some(20);
+                        }
+                    }
+                    None => v.gift_wait = None,
                 }
             }
             if v.trader == TraderKind::Villager && now - v.last_work_check >= 300 {
@@ -562,6 +646,38 @@ impl PlayPlan {
                         work.push((v.pos, v.profession.clone()));
                     }
                 }
+            }
+        }
+        for (vpos, ppos, profession) in gifts {
+            let table = gift_table(&profession);
+            let no_prop = |_: &str| None;
+            let level = |_: &str| 0;
+            let smelt = |_: &str| None;
+            let ctx = crate::loot::Ctx {
+                prop: &no_prop,
+                block: &table,
+                tool: None,
+                level: &level,
+                entity: None,
+                killed_by_player: false,
+                smelt: &smelt,
+            };
+            let mut rng = rand::thread_rng();
+            for (name, count) in crate::loot::roll(&self.survival.loot, &ctx, &mut rng) {
+                let Some(item) = self.item_id(&name) else {
+                    continue;
+                };
+                let dx = ppos[0] - vpos[0];
+                let dy = ppos[1] + 1.0 - (vpos[1] + 1.2);
+                let dz = ppos[2] - vpos[2];
+                let len = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-4);
+                let vel = [dx / len * 0.3, dy / len * 0.3 + 0.1, dz / len * 0.3];
+                self.drop_item(
+                    [vpos[0], vpos[1] + 1.2, vpos[2]],
+                    vel,
+                    Stack::new(item, count.min(self.max_stack(item).max(1))),
+                    items::BLOCK_DELAY,
+                );
             }
         }
         if !gone.is_empty() {
@@ -700,10 +816,28 @@ impl PlayPlan {
             })
     }
 
+    /// `Villager.startTrading`: обновить скидки героя деревни.
+    fn hero_amplifier(&self, uuid: Uuid) -> Option<u8> {
+        let id = *self.survival.effects.get("minecraft:hero_of_the_village")?;
+        let live = self.live.lock().unwrap();
+        live.get(&uuid)?
+            .effects
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.amplifier)
+    }
+
     /// `ClientboundMerchantOffersPacket` для окна.
-    pub(super) fn villager_offers_packet(&self, window: i32, id: i32) -> Option<Vec<u8>> {
-        let villagers = self.sim().villagers.lock().unwrap();
-        let v = villagers.get(&id)?;
+    pub(super) fn villager_offers_packet(
+        &self,
+        window: i32,
+        id: i32,
+        uuid: Uuid,
+    ) -> Option<Vec<u8>> {
+        let amplifier = self.hero_amplifier(uuid);
+        let mut villagers = self.sim().villagers.lock().unwrap();
+        let v = villagers.get_mut(&id)?;
+        v.update_special_prices(amplifier);
         let offers: Vec<inv::MerchantOffer> = v
             .offers
             .iter()
@@ -715,7 +849,7 @@ impl PlayPlan {
                 uses: o.uses,
                 max_uses: o.max_uses,
                 xp: o.xp,
-                price_diff: 0,
+                price_diff: o.special_price,
                 price_mul: o.price_mul,
                 demand: o.demand,
             })
@@ -814,6 +948,7 @@ impl PlayPlan {
             c.insert("rewardExp".into(), Tag::Byte(1));
             c.insert("priceMultiplier".into(), Tag::Float(o.price_mul));
             c.insert("demand".into(), Tag::Int(o.demand));
+            c.insert("specialPrice".into(), Tag::Int(o.special_price));
             recipes.push(Tag::Compound(c));
         }
         let mut offers = Compound::new();
@@ -921,6 +1056,8 @@ impl PlayPlan {
             last_job_check: 0,
             custom_name: None,
             persistent: trader == TraderKind::Villager,
+            gift_timer: 600,
+            gift_wait: None,
         };
         apply_villager_nbt(&mut v, c, |n| self.item_id(n));
         if v.profession == "minecraft:none" {
@@ -1009,6 +1146,7 @@ fn apply_villager_nbt(v: &mut Villager, c: &Compound, item: impl Fn(&str) -> Opt
                         _ => 0.0,
                     },
                     demand: r.get("demand").and_then(Tag::as_i64).unwrap_or(0) as i32,
+                    special_price: r.get("specialPrice").and_then(Tag::as_i64).unwrap_or(0) as i32,
                 })
             })
             .collect();
@@ -1045,6 +1183,45 @@ fn apply_villager_nbt(v: &mut Villager, c: &Compound, item: impl Fn(&str) -> Opt
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hero_discount_matches_vanilla() {
+        let mut offer = Offer {
+            buy: (1, 20),
+            buy_b: None,
+            sell: Stack::new(2, 1),
+            uses: 0,
+            max_uses: 12,
+            xp: 2,
+            price_mul: 0.05,
+            demand: 0,
+            special_price: 0,
+        };
+        offer.apply_hero_discount(Some(0));
+        // floor(0.3 * 20) = 6.
+        assert_eq!(offer.price(), 14);
+        offer.apply_hero_discount(Some(4));
+        // floor((0.3 + 4 * 0.0625) * 20) = 11.
+        assert_eq!(offer.price(), 9);
+        offer.apply_hero_discount(None);
+        assert_eq!(offer.price(), 20);
+        // Скидка не опускает цену ниже 1.
+        let mut cheap = offer;
+        cheap.buy.1 = 1;
+        cheap.apply_hero_discount(Some(0));
+        assert_eq!(cheap.price(), 1);
+    }
+
+    #[test]
+    fn gift_tables_match_professions() {
+        assert_eq!(
+            gift_table("minecraft:farmer"),
+            "minecraft:gameplay/hero_of_the_village/farmer_gift"
+        );
+        assert_eq!(
+            gift_table("minecraft:none"),
+            "minecraft:gameplay/hero_of_the_village/unemployed_gift"
+        );
+    }
     use super::*;
 
     #[test]

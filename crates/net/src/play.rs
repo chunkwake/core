@@ -13748,7 +13748,7 @@ impl PlayPlan {
                             }
                             if let Some(w) = window.as_ref().filter(|w| w.id == c.window && w.kind == Kind::Merchant)
                                 && let Some(m) = w.merchant
-                                && let Some(p) = self.villager_offers_packet(w.id, m.villager)
+                                && let Some(p) = self.villager_offers_packet(w.id, m.villager, uuid)
                             {
                                 conn.send(&p).await?;
                             }
@@ -13925,7 +13925,7 @@ impl PlayPlan {
                             conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &title))
                                 .await?;
                             self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
-                            if let Some(p) = self.villager_offers_packet(w.id, it.entity) {
+                            if let Some(p) = self.villager_offers_packet(w.id, it.entity, uuid) {
                                 conn.send(&p).await?;
                             }
                             window = Some(w);
