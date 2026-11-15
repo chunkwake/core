@@ -217,6 +217,30 @@ impl Goal {
     }
 }
 
+/// `SetRaidStatus`/`Raid`: фаза рейда рядом с жителем.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RaidPhase {
+    None,
+    /// Первая волна не вышла или перерыв между волнами (`RingBell`).
+    PreRaid,
+    /// Волна идёт: житель прячется в доме (`LocateHidingPlace`).
+    Raid,
+    /// Рейд отбит: жители празднуют у колокола.
+    Victory,
+}
+
+/// `SetRaidStatus`: фаза по состоянию рейда.
+fn raid_phase(groups: i32, alive: i32, cooldown: i64, celebration: i32) -> RaidPhase {
+    if celebration > 0 {
+        return RaidPhase::Victory;
+    }
+    if groups == 0 || (alive == 0 && cooldown > 0) {
+        RaidPhase::PreRaid
+    } else {
+        RaidPhase::Raid
+    }
+}
+
 /// Стек целей: первая доступная цель по приоритету, `Idle` — всегда
 /// запасной вариант (в ванили нижние поведения срабатывают, если верхние
 /// не могут стартовать).
@@ -403,6 +427,14 @@ pub struct Villager {
     pub food_level: i32,
     /// `MemoryModuleType.INTERACTION_TARGET` детской игры в салки.
     pub tag_target: Option<u128>,
+    /// `SetRaidStatus`: текущая фаза рейда.
+    pub raid_phase: RaidPhase,
+    /// `MemoryModuleType.HIDING_PLACE`.
+    pub hiding_place: Option<[i32; 3]>,
+    /// `RingBell`: пауза между ударами.
+    pub bell_cooldown: i64,
+    /// Когда последний раз проверяли рейд.
+    pub last_raid_check: i64,
     /// `MemoryModuleType.BREED_TARGET` и время рождения.
     pub breed_target: Option<u128>,
     pub breed_partner: Option<i32>,
@@ -1298,6 +1330,12 @@ impl PlayPlan {
             v.hurt_until = 0;
             v.hurt_from = None;
         }
+        // `SetRaidStatus`: пре-рейд/укрытие важнее расписания.
+        if v.raid_phase != RaidPhase::None
+            && let Some(step) = self.raid_step(v)
+        {
+            return Some(step);
+        }
         // `PlayTagWithOtherKids`: малыши в `play` играют в салки.
         if v.age < 0
             && v.activity == Activity::Play
@@ -1659,6 +1697,136 @@ impl PlayPlan {
     /// `Villager.canBreed`: еда + инвентарь >= 12, не спит, `age == 0`.
     fn can_breed(&self, v: &Villager) -> bool {
         v.food_level + self.food_points(v) >= 12 && v.sleeping.is_none() && v.age == 0
+    }
+
+    /// `Raids.getNearbyRaid` (96 блоков) и фаза `SetRaidStatus`.
+    fn raid_phase_at(&self, pos: [f64; 3]) -> RaidPhase {
+        let dim = self.active_dim();
+        let alive: std::collections::HashSet<u128> = self
+            .sim()
+            .mobs
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|e| e.mob.alive())
+            .map(|e| e.mob.uuid)
+            .collect();
+        let raids = self.raids.lock().unwrap();
+        let Some(raid) = raids
+            .iter()
+            .filter(|r| r.dim == dim && crate::mobs::dist2(r.center, pos) < 96.0 * 96.0)
+            .min_by(|a, b| {
+                crate::mobs::dist2(a.center, pos).total_cmp(&crate::mobs::dist2(b.center, pos))
+            })
+        else {
+            return RaidPhase::None;
+        };
+        let alive_count = raid.raiders.iter().filter(|u| alive.contains(u)).count() as i32;
+        raid_phase(raid.groups, alive_count, raid.cooldown, raid.celebration)
+    }
+
+    /// `RingBell`: удар в колокол без игрока.
+    fn ring_villager_bell(&self, bell: [i32; 3]) {
+        let Some(state) = self.block(bell) else {
+            return;
+        };
+        if !self.state_name(state).ends_with("bell") {
+            return;
+        }
+        let at = [
+            bell[0] as f64 + 0.5,
+            bell[1] as f64 + 0.5,
+            bell[2] as f64 + 0.5,
+        ];
+        self.play_sound(
+            None,
+            "minecraft:block.bell.hit",
+            crate::sounds::BLOCKS,
+            at,
+            2.0,
+            1.0,
+        );
+        self.hub.send(
+            None,
+            play::block_event(self.ids.block_event, bell, 1, 1, state as i32),
+        );
+        self.emit_vibration(at, "minecraft:block_change");
+    }
+
+    /// `getPreRaidPackage`/`getRaidPackage`: сбор у колокола или укрытие.
+    fn raid_step(&self, v: &mut Villager) -> Option<([f64; 3], f32)> {
+        match v.raid_phase {
+            RaidPhase::None => None,
+            RaidPhase::PreRaid | RaidPhase::Victory => {
+                if v.meeting_point.is_none() {
+                    let types = std::collections::HashSet::from(["minecraft:meeting".to_owned()]);
+                    let origin = [
+                        v.pos[0].floor() as i32,
+                        v.pos[1].floor() as i32,
+                        v.pos[2].floor() as i32,
+                    ];
+                    v.meeting_point = self.nearest_poi(&types, origin, 48);
+                }
+                let Some(bell) = v.meeting_point else {
+                    // Колокола нет — тревожная прогулка (`VillageBoundRandomStroll`).
+                    if v.move_target.is_none() {
+                        v.move_target = self.flee_point(v.pos);
+                    }
+                    return self.walk_step(v, v.move_target?, 0.21);
+                };
+                let center = [bell[0] as f64 + 0.5, bell[1] as f64, bell[2] as f64 + 0.5];
+                if crate::mobs::dist2(v.pos, center) <= 4.0 * 4.0 {
+                    if self.game_time() >= v.bell_cooldown {
+                        self.ring_villager_bell(bell);
+                        v.bell_cooldown = self.game_time() + 30;
+                    }
+                    let yaw = look_yaw(v.pos, center);
+                    v.yaw = yaw;
+                    v.move_target = None;
+                    return Some((v.pos, yaw));
+                }
+                let target = self.stand_near(bell, v.pos)?;
+                self.walk_step(v, target, 0.21)
+            }
+            RaidPhase::Raid => {
+                let hiding = match v.hiding_place {
+                    Some(h) => h,
+                    None => {
+                        let types = std::collections::HashSet::from(["minecraft:home".to_owned()]);
+                        let origin = [
+                            v.pos[0].floor() as i32,
+                            v.pos[1].floor() as i32,
+                            v.pos[2].floor() as i32,
+                        ];
+                        // `LocateHidingPlace`: любой дом в 24 блоках, иначе свой.
+                        let h = self.nearest_poi(&types, origin, 24).or(v.home)?;
+                        v.hiding_place = Some(h);
+                        h
+                    }
+                };
+                let valid = self
+                    .block(hiding)
+                    .and_then(|s| poi::of_block(self.state_name(s)))
+                    == Some("minecraft:home");
+                if !valid {
+                    v.hiding_place = None;
+                    return None;
+                }
+                let center = [
+                    hiding[0] as f64 + 0.5,
+                    hiding[1] as f64,
+                    hiding[2] as f64 + 0.5,
+                ];
+                if crate::mobs::dist2(v.pos, center) <= 1.0 {
+                    let yaw = look_yaw(v.pos, center);
+                    v.yaw = yaw;
+                    v.move_target = None;
+                    return Some((v.pos, yaw));
+                }
+                let target = self.stand_near(hiding, v.pos)?;
+                self.walk_step(v, target, 0.196)
+            }
+        }
     }
 
     /// `PlayTagWithOtherKids`: раз в 10 тиков малыш либо убегает от того,
@@ -2187,6 +2355,10 @@ impl PlayPlan {
             age: 0,
             food_level: 0,
             tag_target: None,
+            raid_phase: RaidPhase::None,
+            hiding_place: None,
+            bell_cooldown: 0,
+            last_raid_check: 0,
             breed_target: None,
             breed_partner: None,
             breed_until: 0,
@@ -2404,6 +2576,19 @@ impl PlayPlan {
                 v.age += 1;
             } else if v.age > 0 {
                 v.age -= 1;
+            }
+            if !v.no_ai
+                && v.trader == TraderKind::Villager
+                && now % 10 == 0
+                && now != v.last_raid_check
+            {
+                v.last_raid_check = now;
+                let phase = self.raid_phase_at(v.pos);
+                if phase != v.raid_phase {
+                    v.raid_phase = phase;
+                    v.hiding_place = None;
+                    v.move_target = None;
+                }
             }
             let activity = if v.age < 0 {
                 Activity::at_baby(day)
@@ -3142,6 +3327,10 @@ impl PlayPlan {
             age: 0,
             food_level: 0,
             tag_target: None,
+            raid_phase: RaidPhase::None,
+            hiding_place: None,
+            bell_cooldown: 0,
+            last_raid_check: 0,
             breed_target: None,
             breed_partner: None,
             breed_until: 0,
@@ -3449,6 +3638,10 @@ mod tests {
             age: 0,
             food_level: 0,
             tag_target: None,
+            raid_phase: RaidPhase::None,
+            hiding_place: None,
+            bell_cooldown: 0,
+            last_raid_check: 0,
             breed_target: None,
             breed_partner: None,
             breed_until: 0,
@@ -3575,6 +3768,16 @@ mod tests {
         assert!((look_yaw([0.0; 3], [1.0, 0.0, 0.0]) + 90.0).abs() < 0.001);
         assert!((look_yaw([0.0; 3], [-1.0, 0.0, 0.0]) - 90.0).abs() < 0.001);
         assert!((look_yaw([0.0; 3], [0.0, 0.0, -1.0]).abs() - 180.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn raid_phase_follows_raid_state() {
+        assert_eq!(raid_phase(0, 0, 300, 0), RaidPhase::PreRaid);
+        assert_eq!(raid_phase(1, 3, 0, 0), RaidPhase::Raid);
+        assert_eq!(raid_phase(1, 0, 300, 0), RaidPhase::PreRaid);
+        assert_eq!(raid_phase(2, 0, 0, 0), RaidPhase::Raid);
+        assert_eq!(raid_phase(2, 1, 0, 5), RaidPhase::Victory);
+        assert_eq!(raid_phase(3, 2, 0, 0), RaidPhase::Raid);
     }
 
     #[test]

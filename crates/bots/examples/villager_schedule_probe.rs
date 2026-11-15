@@ -24,7 +24,14 @@ struct Probe {
     cb_move: i32,
     cb_teleport: i32,
     cb_equip: i32,
+    cb_block_event: i32,
     chat: String,
+    /// Колокол рейда и признак удара (`block_event` 1).
+    bell: [i32; 3],
+    bell_rang: bool,
+    /// ID типов рейдеров и факт их появления.
+    raider_types: HashSet<i32>,
+    raiders_seen: bool,
     villager_type: i32,
     seen_villagers: HashSet<i32>,
     babies: HashSet<i32>,
@@ -69,6 +76,9 @@ impl Probe {
                 else {
                     continue;
                 };
+                if self.raider_types.contains(&kind) {
+                    self.raiders_seen = true;
+                }
                 if kind == self.villager_type {
                     self.seen_villagers.insert(entity);
                     self.all_pos.insert(entity, [x, y, z]);
@@ -134,6 +144,14 @@ impl Probe {
                     self.a_yaw = yaw;
                     self.a_pos = Some([x, y, z]);
                     self.a_base = base;
+                }
+            } else if id == self.cb_block_event {
+                let mut r = Reader::new(&body);
+                if let (Ok(pos), Ok(event)) = (r.i64(), r.u8())
+                    && chunkwake_protocol::play::unpack_block_pos(pos) == self.bell
+                    && event == 1
+                {
+                    self.bell_rang = true;
                 }
             } else if id == self.cb_equip {
                 let mut r = Reader::new(&body);
@@ -407,6 +425,17 @@ async fn main() {
     let cb_move = cb("move_entity_pos_rot");
     let cb_teleport = cb("teleport_entity");
     let cb_equip = cb("set_equipment");
+    let cb_block_event = cb("block_event");
+    let raider_types: HashSet<i32> = [
+        "minecraft:pillager",
+        "minecraft:vindicator",
+        "minecraft:evoker",
+        "minecraft:witch",
+        "minecraft:ravager",
+    ]
+    .iter()
+    .map(|name| pid("minecraft:entity_type", name))
+    .collect();
     let (door_open, door_closed) = door_state_ids(&root)
         .unwrap_or_else(|| panic!("нет состояний oak_door в reports/blocks.json"));
     let mut c = Client::connect(&a[1], "boater", ids, 777, "26.3")
@@ -421,6 +450,7 @@ async fn main() {
         cb_move,
         cb_teleport,
         cb_equip,
+        cb_block_event,
     ];
     let mut p = Probe {
         c,
@@ -434,7 +464,12 @@ async fn main() {
         cb_move,
         cb_teleport,
         cb_equip,
+        cb_block_event,
         chat: String::new(),
+        bell: [0; 3],
+        bell_rang: false,
+        raider_types,
+        raiders_seen: false,
         villager_type: pid("minecraft:entity_type", "minecraft:villager"),
         seen_villagers: HashSet::new(),
         babies: HashSet::new(),
@@ -1126,6 +1161,109 @@ async fn main() {
         )
     });
     println!("play: babies tag at {dist:.2} (yaw {ya:.1}/{yb:.1}, {a:?}/{b:?})");
+
+    // `SetRaidStatus`: пре-рейд — сбор у колокола и удары; активная волна —
+    // укрытие в доме. Рейд запускается Bad Omen рядом с кроватью.
+    let bell_pos = [bx.floor() as i32 + 6, Y, bz.floor() as i32 + 6];
+    p.bell = bell_pos;
+    p.cmd(&format!(
+        "setblock {} {} {} minecraft:bell[attachment=floor,facing=north]",
+        bell_pos[0], bell_pos[1], bell_pos[2]
+    ))
+    .await;
+    let before_raid: HashSet<i32> = p.seen_villagers.iter().copied().collect();
+    p.cmd(&format!(
+        "summon minecraft:villager {} {Y} {} {{PersistenceRequired:1b,VillagerData:{{type:\"minecraft:plains\",profession:\"minecraft:none\",level:1}}}}",
+        bx + 1.5,
+        bz + 3.5
+    ))
+    .await;
+    p.cmd(&format!("tp @s {} {Y} {}", bx + 2.5, bz + 2.5)).await;
+    p.cmd("difficulty hard").await;
+    p.cmd("effect clear @s").await;
+    p.cmd("effect give @s minecraft:bad_omen 600 0").await;
+    // Новый житель (не рейдер) — объект проверки.
+    let mut raider_v = None;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(5_000) {
+        raider_v = p
+            .seen_villagers
+            .difference(&before_raid)
+            .copied()
+            .find(|id| !before_raid.contains(id));
+        if raider_v.is_some() {
+            break;
+        }
+        p.pump(200).await;
+    }
+    let raider_v = raider_v.expect("житель для рейда не появился");
+
+    let bell_center = [
+        bell_pos[0] as f64 + 0.5,
+        f64::from(Y),
+        bell_pos[2] as f64 + 0.5,
+    ];
+    let mut gathered = false;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(25_000) {
+        let near = p
+            .all_pos
+            .get(&raider_v)
+            .is_some_and(|pos| dist_xz(*pos, bell_center) <= 4.0);
+        if p.bell_rang && near {
+            gathered = true;
+            break;
+        }
+        p.pump(300).await;
+    }
+    assert!(
+        gathered,
+        "пре-рейд: колокол {bell_center:?} rang={}, villager={:?}",
+        p.bell_rang,
+        p.all_pos.get(&raider_v)
+    );
+    println!("raid: villager rang the bell at {bell_center:?}");
+
+    let mut wave = false;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(40_000) {
+        if p.raiders_seen {
+            wave = true;
+            break;
+        }
+        p.pump(300).await;
+    }
+    assert!(wave, "первая волна рейда не появилась");
+    // Рейдеров уводим далеко (но в 112 блоках): волна жива, житель прячется.
+    for name in ["pillager", "vindicator", "evoker", "witch", "ravager"] {
+        p.cmd(&format!(
+            "tp @e[type=minecraft:{name}] {} {Y} {}",
+            bx + 60.5,
+            bz + 60.5
+        ))
+        .await;
+    }
+    let bed_a = [bx + 0.5, f64::from(Y), bz + 0.5];
+    let bed_b = [bx + 3.5, f64::from(Y), bz + 0.5];
+    let mut hidden = false;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(30_000) {
+        if let Some(pos) = p.all_pos.get(&raider_v).copied() {
+            let near = dist_xz(pos, bed_a).min(dist_xz(pos, bed_b)) <= 2.0;
+            if near {
+                hidden = true;
+                break;
+            }
+        }
+        p.pump(300).await;
+    }
+    assert!(
+        hidden,
+        "рейд: житель не спрятался в доме: {:?}",
+        p.all_pos.get(&raider_v)
+    );
+    println!("raid: villager hid at home");
+    p.cmd("difficulty peaceful").await;
 
     println!("villager_schedule_probe: ok");
 }
