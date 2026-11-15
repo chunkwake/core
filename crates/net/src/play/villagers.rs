@@ -149,6 +149,16 @@ type VillagerPath = (i32, [f64; 3], [i32; 3], [i32; 3]);
 /// Профессия и голод жителя для `TradeWithVillager`.
 type VillagerProfile = (i32, String, bool);
 
+/// Отложенное рождение (`VillagerMakeLove.tryToGiveBirth`): нельзя спавнить
+/// ребёнка под блокировкой жителей, поэтому запрос выполняется после цикла.
+struct Birth {
+    parent: i32,
+    partner: Option<i32>,
+    pos: [f64; 3],
+    kind: String,
+    bed: [i32; 3],
+}
+
 /// `timeline/villager_schedule.json` 26.3 (взрослый житель).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Activity {
@@ -373,6 +383,14 @@ pub struct Villager {
     /// `HURT_BY`: до какого тика житель в панике и от кого бежит.
     pub hurt_until: i64,
     pub hurt_from: Option<[f64; 3]>,
+    /// `AgeableMob.age`: <0 ребёнок, >0 кулдаун размножения.
+    pub age: i32,
+    /// `Villager.foodLevel`.
+    pub food_level: i32,
+    /// `MemoryModuleType.BREED_TARGET` и время рождения.
+    pub breed_target: Option<u128>,
+    pub breed_partner: Option<i32>,
+    pub breed_until: i64,
     /// `InteractWithDoor` cooldown после закрытия двери.
     pub door_node: Option<[i32; 3]>,
     pub door_cooldown: i64,
@@ -1216,6 +1234,7 @@ impl PlayPlan {
 
     /// Один шаг `Brain`/`WalkTarget`: работа, встреча у колокола, отдых дома
     /// и прогулка в `idle`.
+    #[allow(clippy::too_many_arguments)]
     fn villager_ai_step(
         &self,
         id: i32,
@@ -1223,6 +1242,8 @@ impl PlayPlan {
         others: &[VillagerRef],
         profiles: &[VillagerProfile],
         threats: &[[f64; 3]],
+        breedable: &[(i32, bool)],
+        births: &mut Vec<Birth>,
         gossip: &mut Vec<(i32, i32)>,
     ) -> Option<([f64; 3], f32)> {
         // `MEETING_POINT` ищется до выбора цели, иначе стек не увидит встречу.
@@ -1259,6 +1280,12 @@ impl PlayPlan {
         if v.hurt_until != 0 {
             v.hurt_until = 0;
             v.hurt_from = None;
+        }
+        if v.activity == Activity::Idle
+            && (v.breed_target.is_some() || self.can_breed(v))
+            && let Some(step) = self.breed_step(id, v, others, breedable, births)
+        {
+            return Some(step);
         }
         let goal = *goals_for(
             v.activity,
@@ -1605,6 +1632,148 @@ impl PlayPlan {
         }
     }
 
+    /// `Villager.canBreed`: еда + инвентарь >= 12, не спит, `age == 0`.
+    fn can_breed(&self, v: &Villager) -> bool {
+        v.food_level + self.food_points(v) >= 12 && v.sleeping.is_none() && v.age == 0
+    }
+
+    /// `VillagerMakeLove`: пара, 275-325 тиков, свободная кровать и ребёнок.
+    fn breed_step(
+        &self,
+        id: i32,
+        v: &mut Villager,
+        others: &[VillagerRef],
+        breedable: &[(i32, bool)],
+        births: &mut Vec<Birth>,
+    ) -> Option<([f64; 3], f32)> {
+        let now = self.game_time();
+        if let Some(target) = v.breed_target {
+            let Some((other_id, _, pos)) = others
+                .iter()
+                .find(|(other, uuid, _)| *other != id && *uuid == target)
+            else {
+                v.breed_target = None;
+                v.breed_until = 0;
+                return None;
+            };
+            let partner_ok = breedable.iter().any(|(pid, ok)| pid == other_id && *ok);
+            if !partner_ok || !self.can_breed(v) {
+                v.breed_target = None;
+                v.breed_until = 0;
+                return None;
+            }
+            let dist = crate::mobs::dist2(v.pos, *pos);
+            if v.breed_until == 0 {
+                v.breed_until = now + 275 + i64::from(rand::random::<u32>() % 50);
+                self.hub
+                    .send(None, inv::entity_event(self.ids.entity_event, id, 12));
+            }
+            if dist > 2.25 {
+                return self.walk_step(v, *pos, 0.21);
+            }
+            let yaw = look_yaw(v.pos, *pos);
+            v.yaw = yaw;
+            if now >= v.breed_until {
+                self.try_birth(id, v, births);
+            }
+            return Some((v.pos, yaw));
+        }
+        if !self.can_breed(v) || v.activity != Activity::Idle {
+            return None;
+        }
+        let partner = others
+            .iter()
+            .filter(|(other, _, _)| *other != id)
+            .filter(|(other, _, pos)| {
+                breedable.iter().any(|(pid, ok)| pid == other && *ok)
+                    && crate::mobs::dist2(v.pos, *pos) <= 8.0 * 8.0
+            })
+            .min_by(|a, b| {
+                crate::mobs::dist2(v.pos, a.2).total_cmp(&crate::mobs::dist2(v.pos, b.2))
+            });
+        let (partner_id, uuid, pos) = partner?;
+        v.breed_target = Some(*uuid);
+        v.breed_partner = Some(*partner_id);
+        v.breed_until = 0;
+        self.walk_step(v, *pos, 0.21)
+    }
+
+    /// `VillagerMakeLove.tryToGiveBirth`: свободная кровать и запрос на
+    /// рождение (сам спавн — после цикла, без блокировки жителей).
+    fn try_birth(&self, id: i32, v: &mut Villager, births: &mut Vec<Birth>) {
+        let origin = [
+            v.pos[0].floor() as i32,
+            v.pos[1].floor() as i32,
+            v.pos[2].floor() as i32,
+        ];
+        let types = std::collections::HashSet::from(["minecraft:home".to_owned()]);
+        let Some(bed) = self.free_poi(&types, origin, 48) else {
+            self.hub
+                .send(None, inv::entity_event(self.ids.entity_event, id, 13));
+            v.breed_target = None;
+            v.breed_until = 0;
+            return;
+        };
+        let kind = if rand::random::<u32>().is_multiple_of(2) {
+            v.kind.clone()
+        } else {
+            "minecraft:plains".to_owned()
+        };
+        births.push(Birth {
+            parent: id,
+            partner: v.breed_partner,
+            pos: v.pos,
+            kind,
+            bed,
+        });
+        v.breed_target = None;
+        v.breed_partner = None;
+        v.breed_until = 0;
+    }
+
+    /// Выполняет отложенные рождения: ребёнок с `Age:-24000`, кулдаун
+    /// `6000` у обоих родителей (вне блокировки жителей).
+    fn process_births(&self, births: Vec<Birth>) {
+        for birth in births {
+            let Some(child) = self.summon_trader(TraderKind::Villager, birth.pos, None) else {
+                self.release_poi(birth.bed);
+                continue;
+            };
+            {
+                let mut villagers = self.sim().villagers.lock().unwrap();
+                if let Some(c) = villagers.get_mut(&child) {
+                    c.age = -24_000;
+                    c.kind = birth.kind.clone();
+                    c.profession = "minecraft:none".into();
+                    c.level = 1;
+                    c.xp = 0;
+                    c.offers.clear();
+                    c.home = Some(birth.bed);
+                    c.sent_pos = play::quantize(birth.pos);
+                }
+                if let Some(p) = villagers.get_mut(&birth.parent) {
+                    p.age = 6000;
+                }
+                if let Some(pid) = birth.partner
+                    && let Some(p) = villagers.get_mut(&pid)
+                {
+                    p.age = 6000;
+                }
+            }
+            self.claim_poi(birth.bed, child);
+            self.hub.send(
+                None,
+                play::entity_meta(
+                    self.ids.set_entity_data,
+                    child,
+                    &[(16, play::Meta::Bool(true))],
+                ),
+            );
+            self.hub
+                .send(None, inv::entity_event(self.ids.entity_event, child, 12));
+        }
+    }
+
     /// `SocializeAtBell`: раз в 100 тиков у колокола выбрать ближайшего
     /// жителя в 32 блоках, подойти и смотреть на него.
     fn socialize_step(
@@ -1699,6 +1868,11 @@ impl PlayPlan {
             if self.walk_blocked(up) || self.walk_blocked([up[0], up[1] + 1, up[2]]) {
                 return None;
             }
+        }
+        // `WalkNodeEvaluator`: опасные блоки (огонь/лава/магма/кактус…) не
+        // проходятся, иначе житель сгорит при прогулке.
+        if self.dangerous_block(feet) || self.dangerous_block([feet[0], feet[1] - 1, feet[2]]) {
+            return None;
         }
         let yaw = look_yaw(v.pos, target);
         v.pos[0] = nx;
@@ -1907,6 +2081,11 @@ impl PlayPlan {
             last_gossip_time: 0,
             hurt_until: 0,
             hurt_from: None,
+            age: 0,
+            food_level: 0,
+            breed_target: None,
+            breed_partner: None,
+            breed_until: 0,
             door_node: None,
             door_cooldown: 0,
             inventory: [None; 8],
@@ -1977,6 +2156,7 @@ impl PlayPlan {
                             level: v.level,
                         },
                     ),
+                    (16, play::Meta::Bool(v.age < 0)),
                     (19, play::Meta::Bool(true)),
                 ],
             ));
@@ -2024,6 +2204,14 @@ impl PlayPlan {
             .iter()
             .map(|(&id, v)| (id, v.uuid.as_u128(), v.pos))
             .collect();
+        let breedable: Vec<(i32, bool)> = self
+            .sim()
+            .villagers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(&id, v)| (id, self.can_breed(v)))
+            .collect();
         let profiles: Vec<VillagerProfile> = self
             .sim()
             .villagers
@@ -2056,6 +2244,7 @@ impl PlayPlan {
             .iter()
             .filter_map(|(&id, v)| Some((id, v.pos, v.path_from?, v.path_to?)))
             .collect();
+        let mut births: Vec<Birth> = Vec::new();
         let mut gossip: Vec<(i32, i32)> = Vec::new();
         let mut gone = Vec::new();
         let mut work: Vec<([f64; 3], String)> = Vec::new();
@@ -2096,6 +2285,11 @@ impl PlayPlan {
                 }
             }
             v.maybe_decay_gossip(now);
+            if v.age < 0 {
+                v.age += 1;
+            } else if v.age > 0 {
+                v.age -= 1;
+            }
             let activity = Activity::at(day);
             if v.activity != activity {
                 v.activity = activity;
@@ -2119,8 +2313,16 @@ impl PlayPlan {
                 }
                 self.close_villager_doors(id, v, &others, &paths);
                 if v.sleeping.is_none()
-                    && let Some((pos, yaw)) =
-                        self.villager_ai_step(id, v, &others, &profiles, &threats, &mut gossip)
+                    && let Some((pos, yaw)) = self.villager_ai_step(
+                        id,
+                        v,
+                        &others,
+                        &profiles,
+                        &threats,
+                        &breedable,
+                        &mut births,
+                        &mut gossip,
+                    )
                 {
                     moves.push((id, pos, yaw, v.sent_pos));
                     v.sent_pos = play::quantize(v.pos);
@@ -2178,6 +2380,7 @@ impl PlayPlan {
                 }
             }
         }
+        self.process_births(births);
         for (a, b) in gossip {
             self.gossip_villagers(a, b, now);
         }
@@ -2683,6 +2886,8 @@ impl PlayPlan {
             c.insert("DespawnDelay".into(), Tag::Int(v.despawn_delay));
         }
         c.insert("Offers".into(), self.offers_nbt(v));
+        c.insert("Age".into(), Tag::Int(v.age));
+        c.insert("FoodLevel".into(), Tag::Byte(v.food_level as i8));
         let inventory: Vec<Tag> = v
             .inventory
             .iter()
@@ -2813,6 +3018,11 @@ impl PlayPlan {
             last_gossip_time: 0,
             hurt_until: 0,
             hurt_from: None,
+            age: 0,
+            food_level: 0,
+            breed_target: None,
+            breed_partner: None,
+            breed_until: 0,
             door_node: None,
             door_cooldown: 0,
             inventory: [None; 8],
@@ -2944,6 +3154,12 @@ fn apply_villager_nbt(v: &mut Villager, c: &Compound, item: impl Fn(&str) -> Opt
         if !parsed.is_empty() {
             v.offers = parsed;
         }
+    }
+    if let Some(age) = c.get("Age").and_then(Tag::as_i64) {
+        v.age = age as i32;
+    }
+    if let Some(Tag::Byte(food)) = c.get("FoodLevel") {
+        v.food_level = i32::from(*food);
     }
     if let Some(Tag::List(items)) = c.get("Inventory") {
         for entry in items {
@@ -3106,6 +3322,11 @@ mod tests {
             last_gossip_time: 0,
             hurt_until: 0,
             hurt_from: None,
+            age: 0,
+            food_level: 0,
+            breed_target: None,
+            breed_partner: None,
+            breed_until: 0,
             door_node: None,
             door_cooldown: 0,
             inventory: [None; 8],

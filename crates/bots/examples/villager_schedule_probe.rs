@@ -5,6 +5,7 @@
 use chunkwake_bots::{Client, Ids};
 use chunkwake_data::packets::{Direction, PacketTable, State};
 use chunkwake_protocol::{Reader, Writer, text};
+use std::collections::HashSet;
 use std::time::Duration;
 
 const X: i32 = 3456;
@@ -24,6 +25,9 @@ struct Probe {
     cb_teleport: i32,
     cb_equip: i32,
     chat: String,
+    villager_type: i32,
+    seen_villagers: HashSet<i32>,
+    babies: HashSet<i32>,
     /// Первый житель (спавн у X+0.5) и его позиция из пакетов.
     a_id: Option<i32>,
     a_pos: Option<[f64; 3]>,
@@ -55,10 +59,13 @@ impl Probe {
                 let (Ok(entity), Ok(_uuid)) = (r.var_int(), r.bytes(16)) else {
                     continue;
                 };
-                let (Ok(_kind), Ok(x), Ok(y), Ok(z)) = (r.var_int(), r.f64(), r.f64(), r.f64())
+                let (Ok(kind), Ok(x), Ok(y), Ok(z)) = (r.var_int(), r.f64(), r.f64(), r.f64())
                 else {
                     continue;
                 };
+                if kind == self.villager_type {
+                    self.seen_villagers.insert(entity);
+                }
                 let spawn = [X as f64 + 0.5, f64::from(Y), Z as f64 + 0.5];
                 if dist_xz([x, y, z], spawn) < 0.6 {
                     self.a_id = Some(entity);
@@ -147,12 +154,20 @@ impl Probe {
                 }
             } else if id == self.cb_meta {
                 let mut r = Reader::new(&body);
-                if let (Ok(_entity), Ok(index)) = (r.var_int(), r.u8())
-                    && index == 6
-                    && let (Ok(kind), Ok(pose)) = (r.var_int(), r.var_int())
-                    && kind == 20
-                {
-                    self.pose = Some(pose);
+                if let (Ok(entity), Ok(index)) = (r.var_int(), r.u8()) {
+                    if index == 6
+                        && let (Ok(kind), Ok(pose)) = (r.var_int(), r.var_int())
+                        && kind == 20
+                    {
+                        self.pose = Some(pose);
+                    } else if index == 16
+                        && let Ok(kind) = r.var_int()
+                        && kind == 8
+                        && let Ok(baby) = r.bool()
+                        && baby
+                    {
+                        self.babies.insert(entity);
+                    }
                 }
             }
         }
@@ -382,6 +397,9 @@ async fn main() {
         cb_teleport,
         cb_equip,
         chat: String::new(),
+        villager_type: pid("minecraft:entity_type", "minecraft:villager"),
+        seen_villagers: HashSet::new(),
+        babies: HashSet::new(),
         a_id: None,
         a_pos: None,
         a_yaw: 0.0,
@@ -749,25 +767,22 @@ async fn main() {
     );
     println!("gossip: transferred minor_negative 25 -> 5");
 
-    // A (фермер) с избытком еды бросает B половину стака хлеба.
-    let mut items = String::new();
+    // A (фермер) с избытком еды бросает B половину стака хлеба:
+    // в инвентаре остаётся 32 из 64.
+    let mut inv = String::new();
     let start = tokio::time::Instant::now();
     while start.elapsed() < Duration::from_millis(10_000) {
-        p.chat.clear();
-        p.cmd(&format!(
-            "data get entity @e[type=minecraft:item,x={},y={},z={},distance=..8,limit=1,sort=nearest] Item",
-            friend[0], friend[1], friend[2]
-        ))
-        .await;
-        items = p.chat.clone();
-        if items.contains("minecraft:bread") {
-            break;
+        if let Some(pos) = p.pos().await {
+            inv = p.data_at(pos, "Inventory").await;
+            if inv.contains("minecraft:bread") && inv.contains("count:32") {
+                break;
+            }
         }
         p.pump(500).await;
     }
     assert!(
-        items.contains("minecraft:bread"),
-        "TradeWithVillager не бросил хлеб: {items}"
+        inv.contains("minecraft:bread") && inv.contains("count:32"),
+        "TradeWithVillager не бросал хлеб (Inventory: {inv})"
     );
     println!("trade: bread thrown to neighbour");
 
@@ -850,7 +865,7 @@ async fn main() {
         p.pose
     );
     p.pump(300).await;
-    let wake_pos = p.a_pos.expect("нет позиции после пробуждения");
+    let wake_pos = p.pos().await.expect("нет позиции после пробуждения");
     let cell = [
         wake_pos[0].floor() as i32,
         wake_pos[1].floor() as i32,
@@ -911,6 +926,80 @@ async fn main() {
         p.a_pos
     );
     println!("priority: no bed -> idle wander");
+
+    // `VillagerMakeLove`: две взрослые особи с едой и свободная кровать.
+    let apos = p.pos().await.expect("нет серверной позиции A");
+    // Убираем прежних жителей (они могли занять кровати), A остаётся.
+    p.cmd(&format!(
+        "kill @e[type=minecraft:villager,x={},y={},z={},distance=3..]",
+        apos[0], apos[1], apos[2]
+    ))
+    .await;
+    p.cmd(&format!(
+        "setblock {} {} {} minecraft:red_bed[part=foot,facing=south]",
+        apos[0].floor() as i32 + 3,
+        Y,
+        apos[2].floor() as i32
+    ))
+    .await;
+    p.cmd(&format!(
+        "setblock {} {} {} minecraft:red_bed[part=head,facing=south]",
+        apos[0].floor() as i32 + 3,
+        Y,
+        apos[2].floor() as i32 + 1
+    ))
+    .await;
+    p.cmd(&format!(
+        "setblock {} {} {} minecraft:red_bed[part=foot,facing=south]",
+        apos[0].floor() as i32 + 5,
+        Y,
+        apos[2].floor() as i32
+    ))
+    .await;
+    p.cmd(&format!(
+        "setblock {} {} {} minecraft:red_bed[part=head,facing=south]",
+        apos[0].floor() as i32 + 5,
+        Y,
+        apos[2].floor() as i32 + 1
+    ))
+    .await;
+    p.cmd(&format!(
+        "summon minecraft:villager {} {} {} {{NoAI:1b,Age:0,FoodLevel:12b,PersistenceRequired:1b,VillagerData:{{type:\"minecraft:plains\",profession:\"minecraft:none\",level:1}}}}",
+        apos[0] + 2.0,
+        apos[1],
+        apos[2]
+    ))
+    .await;
+    // `/data merge` меняет только одну сущность: A отдельно.
+    p.cmd(&format!(
+        "data merge entity @e[type=minecraft:villager,x={},y={},z={},distance=..2,limit=1,sort=nearest] {{Age:0,FoodLevel:12b}}",
+        apos[0], apos[1], apos[2]
+    ))
+    .await;
+    p.cmd("time set 1000").await;
+
+    let before: HashSet<i32> = p.seen_villagers.iter().copied().collect();
+    let mut born = None;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(45_000) {
+        if let Some(child) = p
+            .seen_villagers
+            .difference(&before)
+            .copied()
+            .find(|id| p.babies.contains(id))
+        {
+            born = Some(child);
+            break;
+        }
+        p.pump(300).await;
+    }
+    let child = born.unwrap_or_else(|| {
+        panic!(
+            "ребёнок не родился: seen {:?}, babies {:?}",
+            p.seen_villagers, p.babies
+        )
+    });
+    println!("breed: child {child} with DATA_BABY_ID=true");
 
     println!("villager_schedule_probe: ok");
 }
