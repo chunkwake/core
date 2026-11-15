@@ -100,6 +100,21 @@ pub(super) struct Raid {
     bar_remaining: i32,
 }
 
+/// `Raid.spawnGroup`: наездник раввагера по номеру группы и индексу.
+fn ravager_rider(group_number: i32, ravager_index: i32) -> Option<crate::mobs::Species> {
+    if group_number == 5 {
+        Some(crate::mobs::Species::Pillager)
+    } else if group_number >= 7 {
+        Some(if ravager_index == 0 {
+            crate::mobs::Species::Evoker
+        } else {
+            crate::mobs::Species::Vindicator
+        })
+    } else {
+        None
+    }
+}
+
 impl PlayPlan {
     /// `PoiManager.getInRange` по кроватям (`minecraft:home`).
     fn raid_bed_near(&self, origin: [i32; 3], radius: i32) -> bool {
@@ -268,6 +283,8 @@ impl PlayPlan {
         let mut index = 0i32;
         let mut leader_set = false;
         let mut leader_packet: Option<(i32, Stack)> = None;
+        let mut ravagers = 0i32;
+        let mut passengers: Vec<(i32, i32)> = Vec::new();
         for (kind, count) in counts {
             for _ in 0..count {
                 let angle = f64::from(index) * std::f64::consts::TAU / f64::from(total);
@@ -277,9 +294,37 @@ impl PlayPlan {
                     f64::from(ground),
                     center[2] + angle.sin() * 6.0,
                 ];
-                if let Some(id) = self.spawn_mob(kind.species(), pos, 0.0f32, false, Some("RAID"))
-                    && let Some(entry) = self.sim().mobs.lock().unwrap().get_mut(&id)
-                {
+                if let Some(id) = self.spawn_mob(kind.species(), pos, 0.0f32, false, Some("RAID")) {
+                    // `Raid.spawnGroup`: на раввагера сажаем наездника —
+                    // пиллагера на Normal-волне (5) или эвокера/виндикатора
+                    // на Hard (7+).
+                    if kind == RaiderKind::Ravager {
+                        let rider = ravager_rider(group_number, ravagers);
+                        ravagers += 1;
+                        if let Some(species) = rider
+                            && let Some(rider_id) = self.spawn_mob(
+                                species,
+                                [pos[0], pos[1] + 1.6, pos[2]],
+                                0.0f32,
+                                false,
+                                Some("RAID"),
+                            )
+                        {
+                            let mut mobs = self.sim().mobs.lock().unwrap();
+                            if let Some(rider) = mobs.get_mut(&rider_id) {
+                                rider.vehicle = Some(id);
+                                rider.mob.pos = [pos[0], pos[1] + 1.6, pos[2]];
+                                rider.mob.no_gravity = false;
+                                out.push(rider.mob.uuid);
+                                health += rider.mob.health;
+                            }
+                            passengers.push((id, rider_id));
+                        }
+                    }
+                    let mut mobs = self.sim().mobs.lock().unwrap();
+                    let Some(entry) = mobs.get_mut(&id) else {
+                        continue;
+                    };
                     // `Raid.spawnGroup` → `setLeader`: знамя в HEAD и шанс
                     // дропа 2.0 (выпадает всегда).
                     if !leader_set {
@@ -296,6 +341,12 @@ impl PlayPlan {
                     health += entry.mob.health;
                 }
             }
+        }
+        for (vehicle, passenger) in passengers {
+            self.hub.send_about(
+                vehicle,
+                play::set_passengers(self.ids.set_passengers, vehicle, &[passenger]),
+            );
         }
         // Спавн уже отправлен `spawn_mob`; знамя в HEAD — отдельным пакетом.
         if let Some((id, banner)) = leader_packet {
@@ -717,6 +768,18 @@ mod tests {
         assert_eq!(counts(RaiderKind::Vindicator, 7), 5);
         assert_eq!(counts(RaiderKind::Ravager, 7), 2);
         assert_eq!(counts(RaiderKind::Witch, 7), 1);
+    }
+
+    /// `Raid.spawnGroup`: раввагеры получают наездников только на
+    /// Normal-волне 5 и Hard-волнах 7+.
+    #[test]
+    fn ravager_riders_match_vanilla() {
+        use crate::mobs::Species;
+        assert_eq!(ravager_rider(4, 0), None);
+        assert_eq!(ravager_rider(5, 0), Some(Species::Pillager));
+        assert_eq!(ravager_rider(6, 0), None);
+        assert_eq!(ravager_rider(7, 0), Some(Species::Evoker));
+        assert_eq!(ravager_rider(7, 1), Some(Species::Vindicator));
     }
 
     /// Полоса рейда показывает долю живого здоровья текущей волны.

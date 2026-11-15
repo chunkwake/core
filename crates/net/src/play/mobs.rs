@@ -643,6 +643,8 @@ impl PlayPlan {
         // `SonicBoom.tick`: (цель, грудь стража, глаза цели, направление).
         type BoomShot = (Uuid, [f64; 3], [f64; 3], [f64; 3]);
         let mut booms: Vec<BoomShot> = Vec::new();
+        // `EvokerSummonSpellGoal.performSpellCasting`: 3 позиции vexes.
+        let mut vex_summons: Vec<[f64; 3]> = Vec::new();
         let mut trampling = Vec::new();
         let mut vibrations = Vec::new();
         let now = self.game_time.load(Ordering::Relaxed);
@@ -657,6 +659,17 @@ impl PlayPlan {
                 .collect();
             // `EatBlockGoal.IS_EDIBLE`: `#edible_for_sheep`.
             let edible = self.survival.block_tags.get("minecraft:edible_for_sheep");
+            // Транспорт для наездников (`Ravager` + разбойник).
+            let vehicle_pos: HashMap<i32, ([f64; 3], f32, f64)> = mobs
+                .iter()
+                .map(|(&id, e)| (id, (e.mob.pos, e.mob.yaw, e.mob.size().1)))
+                .collect();
+            // `EvokerSummonSpellGoal`: vexes в 16 блоках.
+            let vex_positions: Vec<[f64; 3]> = mobs
+                .values()
+                .filter(|e| e.mob.species == Species::Vex && e.mob.alive())
+                .map(|e| e.mob.pos)
+                .collect();
             // Один замок мира на всю фазу: коробки коллизий читаются тысячами раз.
             self.with_world(|w| {
                 for (&id, e) in mobs.iter_mut() {
@@ -667,7 +680,12 @@ impl PlayPlan {
                     }
                     // `Entity.rideTick`: в транспорте моб не думает и не идёт,
                     // позицию ему каждый тик ставит лодка.
-                    if e.vehicle.is_some() {
+                    if let Some(vehicle) = e.vehicle {
+                        if let Some((vpos, yaw, height)) = vehicle_pos.get(&vehicle) {
+                            e.mob.pos = [vpos[0], vpos[1] + height * 0.75, vpos[2]];
+                            e.mob.yaw = *yaw;
+                            e.mob.head_yaw = *yaw;
+                        }
                         e.mob.vel = [0.0; 3];
                         e.mob.on_ground = true;
                         continue;
@@ -734,6 +752,50 @@ impl PlayPlan {
                     e.mob.on_fire = e.environment.burning > 0;
                     let prev_target = e.mob.target;
                     let removed = mb::tick(&mut e.mob, &world, &mut senses);
+                    // `Vex.setLimitedLife`: истёк срок — discard без лута.
+                    if e.mob.discard {
+                        despawned.push(id);
+                        continue;
+                    }
+                    // `EvokerSummonSpellGoal`: каст 100 тиков, затем 3 vexes
+                    // с ограниченным сроком жизни (600..2400 тиков).
+                    if species == Species::Evoker && e.mob.alive() {
+                        e.mob.spell_cooldown = e.mob.spell_cooldown.saturating_sub(1);
+                        if e.mob.spell_cast > 0 {
+                            e.mob.spell_cast -= 1;
+                            if e.mob.spell_cast == 0 {
+                                let near = vex_positions
+                                    .iter()
+                                    .filter(|p| mb::dist2(**p, e.mob.pos) <= 16.0 * 16.0)
+                                    .count();
+                                if near < (rand::random::<u32>() % 8 + 1) as usize {
+                                    for _ in 0..3 {
+                                        let ox = i32::try_from(rand::random::<u32>() % 5)
+                                            .unwrap_or(0)
+                                            - 2;
+                                        let oz = i32::try_from(rand::random::<u32>() % 5)
+                                            .unwrap_or(0)
+                                            - 2;
+                                        vex_summons.push([
+                                            e.mob.pos[0] + f64::from(ox),
+                                            e.mob.pos[1] + 1.0,
+                                            e.mob.pos[2] + f64::from(oz),
+                                        ]);
+                                    }
+                                }
+                            }
+                        } else if e.mob.spell_cooldown == 0 && e.mob.target.is_some() {
+                            e.mob.spell_cast = 100;
+                            e.mob.spell_cooldown = 340;
+                            sounds.push((
+                                "minecraft:entity.evoker.prepare_summon".to_owned(),
+                                e.mob.pos,
+                                1.0,
+                                false,
+                                crate::sounds::HOSTILE,
+                            ));
+                        }
+                    }
                     // `Warden.customServerAiStep` + `SonicBoom`.
                     if species == Species::Warden && e.mob.alive() {
                         // `setAttackTarget`: первый sonic boom не раньше 200 тиков.
@@ -1201,6 +1263,17 @@ impl PlayPlan {
                 );
             }
         }
+        // `EvokerSummonSpellGoal.performSpellCasting`: 3 vexes.
+        for pos in vex_summons {
+            if let Some(id) = self.spawn_mob(Species::Vex, pos, 0.0, false, None) {
+                let mut mobs = self.sim().mobs.lock().unwrap();
+                if let Some(entry) = mobs.get_mut(&id) {
+                    entry.mob.limited_life =
+                        20 * (30 + i32::try_from(rand::random::<u32>() % 90).unwrap_or(0));
+                    entry.mob.no_gravity = true;
+                }
+            }
+        }
         // `SonicBoom.tick`: частицы по лучу, звук, 10 урона и отбрасывание.
         for (target, source, eye, dir) in booms {
             self.play_sound(
@@ -1344,6 +1417,41 @@ impl PlayPlan {
                     .collect()
             };
             self.hub.remove_tracked(&gone);
+            // Смерть наездника/раввагера: снять посадку и обновить
+            // `set_passengers` живого транспорта.
+            let refresh: Vec<(i32, Vec<i32>)> = {
+                let mut mobs = self.sim().mobs.lock().unwrap();
+                let mut vehicles: Vec<i32> = Vec::new();
+                for (id, e) in &dead {
+                    if let Some(v) = e.vehicle {
+                        vehicles.push(v);
+                    }
+                    for other in mobs.values_mut() {
+                        if other.vehicle == Some(*id) {
+                            other.vehicle = None;
+                        }
+                    }
+                }
+                let mut out = Vec::new();
+                for v in vehicles {
+                    if !mobs.contains_key(&v) {
+                        continue;
+                    }
+                    let riders: Vec<i32> = mobs
+                        .iter()
+                        .filter(|(_, e)| e.vehicle == Some(v))
+                        .map(|(&id, _)| id)
+                        .collect();
+                    out.push((v, riders));
+                }
+                out
+            };
+            for (vehicle, riders) in refresh {
+                self.hub.send_about(
+                    vehicle,
+                    play::set_passengers(self.ids.set_passengers, vehicle, &riders),
+                );
+            }
             for (id, e) in dead {
                 self.mob_loot(id, &e);
                 if e.mob.species == Species::EnderDragon

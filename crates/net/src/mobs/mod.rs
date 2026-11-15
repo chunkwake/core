@@ -239,6 +239,7 @@ pub enum Species {
     Pillager,
     Vindicator,
     Evoker,
+    Vex,
     Witch,
     Ravager,
     Wither,
@@ -320,7 +321,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 27] = [
+const BUILTIN: [SpeciesInfo; 28] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -567,6 +568,21 @@ const BUILTIN: [SpeciesInfo; 27] = [
     },
     SpeciesInfo {
         category: Category::Monster,
+        size: (0.4, 0.8),
+        eye_height: 0.4,
+        max_health: 14.0,
+        speed: 0.7,
+        follow_range: 16.0,
+        attack_damage: 3.0,
+        ambient: false,
+        ..base(
+            "minecraft:vex",
+            "minecraft:entity.vex",
+            "minecraft:entities/vex",
+        )
+    },
+    SpeciesInfo {
+        category: Category::Monster,
         size: (0.6, 1.95),
         eye_height: 1.6575,
         max_health: 26.0,
@@ -723,7 +739,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 27] = [
+    pub const ALL: [Species; 28] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -742,6 +758,7 @@ impl Species {
         Species::Pillager,
         Species::Vindicator,
         Species::Evoker,
+        Species::Vex,
         Species::Witch,
         Species::Ravager,
         Species::Wither,
@@ -1045,6 +1062,14 @@ pub struct Mob {
     pub sonic_charge: u32,
     /// `Warden`: цель, по которой заряжен sonic boom.
     pub sonic_target: Option<u128>,
+    /// `Evoker`: оставшиеся тики каста (100 — призыв vexes).
+    pub spell_cast: u32,
+    /// `Evoker`: кулдаун между кастами (340 тиков).
+    pub spell_cooldown: u32,
+    /// `Vex.setLimitedLife`: оставшиеся тики жизни, 0 — без ограничения.
+    pub limited_life: i32,
+    /// `Vex`: срок жизни истёк — удалить без лута (`discard`).
+    pub discard: bool,
     /// `Raider.isCaptain`: лидер волны со знаменем.
     pub raid_leader: bool,
     /// `Witch`: кулдаун лечения союзников (`RangedAttackGoal`, 60 тиков).
@@ -1121,6 +1146,10 @@ impl Mob {
             sonic_cooldown: 0,
             sonic_charge: 0,
             sonic_target: None,
+            spell_cast: 0,
+            spell_cooldown: 0,
+            limited_life: 0,
+            discard: false,
             raid_leader: false,
             witch_heal_cooldown: 0,
             nav: Navigation::new(species == Species::Spider),
@@ -1830,6 +1859,57 @@ fn dragon_ai_step(m: &mut Mob, s: &mut Senses) {
     }
 }
 
+/// `Vex`: полёт к цели, удар раз в 20 тиков и срок жизни
+/// (`setLimitedLife`, затем `discard` без лута).
+fn vex_ai_step(m: &mut Mob, s: &mut Senses) {
+    m.no_gravity = true;
+    if m.limited_life > 0 {
+        m.limited_life -= 1;
+        if m.limited_life == 0 {
+            m.discard = true;
+            return;
+        }
+    }
+    let target = m
+        .target
+        .and_then(|t| s.players.iter().find(|p| p.uuid == t).copied())
+        .or_else(|| {
+            s.players
+                .iter()
+                .copied()
+                .filter(|p| dist2(p.pos, m.pos) <= 16.0 * 16.0)
+                .min_by(|a, b| dist2(a.pos, m.pos).total_cmp(&dist2(b.pos, m.pos)))
+        });
+    let Some(p) = target else {
+        m.zza = 0.0;
+        m.xxa = 0.0;
+        m.vel[1] *= 0.9;
+        return;
+    };
+    m.target = Some(p.uuid);
+    let dx = p.pos[0] - m.pos[0];
+    let dz = p.pos[2] - m.pos[2];
+    let dy = p.pos[1] + 1.0 - m.pos[1];
+    let horizontal = (dx * dx + dz * dz).sqrt();
+    m.yaw = (path::atan2(dz, dx) * 57.295_776) as f32 - 90.0;
+    m.head_yaw = m.yaw;
+    m.pitch = -(path::atan2(dy, horizontal.max(1e-4)) * 57.295_776) as f32;
+    if horizontal > 0.4 {
+        m.vel[0] = dx / horizontal * 0.45;
+        m.vel[2] = dz / horizontal * 0.45;
+    } else {
+        m.vel[0] = 0.0;
+        m.vel[2] = 0.0;
+    }
+    m.vel[1] = (dy * 0.15).clamp(-0.3, 0.3);
+    m.zza = 0.0;
+    m.xxa = 0.0;
+    let distance = (dx * dx + dy * dy + dz * dz).sqrt();
+    if distance <= 1.5 && m.tick_count.is_multiple_of(20) {
+        m.strike = Some(p.uuid);
+    }
+}
+
 fn wither_ai_step(m: &mut Mob, s: &mut Senses) {
     m.no_gravity = true;
     let target = m
@@ -1880,6 +1960,10 @@ fn server_ai_step(m: &mut Mob, w: &World, s: &mut Senses) {
         m.zza = 0.0;
         m.xxa = 0.0;
         goals::look_tick(m);
+        return;
+    }
+    if m.species == Species::Vex {
+        vex_ai_step(m, s);
         return;
     }
     if m.species == Species::Wither {
@@ -2459,6 +2543,32 @@ pub fn spawn_cell_forbidden(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vex_limited_life_discards() {
+        let mut m = Mob::new(Species::Vex, [0.0; 3], 1);
+        m.limited_life = 2;
+        let mut rnd = || 0.5;
+        let sight = |_: [f64; 3], _: [f64; 3]| true;
+        let mut s = Senses {
+            players: &[],
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &sight,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: true,
+            mob_griefing: true,
+            jump_boost: None,
+        };
+        vex_ai_step(&mut m, &mut s);
+        assert!(!m.discard);
+        vex_ai_step(&mut m, &mut s);
+        assert!(m.discard);
+        assert!(m.no_gravity);
+    }
+
     #[test]
     fn raider_species_match_tag() {
         for species in [

@@ -1515,6 +1515,19 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
         )
     };
     match species {
+        // `Vex`: полёт и удар — в `vex_ai_step`; цели назначает он же.
+        Species::Vex => return (Selector::default(), Selector::default()),
+        // `Evoker`: выбирает цель для каста vexes, ходит как обычный житель.
+        Species::Evoker => {
+            return (
+                Selector::new(
+                    vec![stroll_at(7, 0.5), look(8, 8.0), around(8)]
+                        .into_iter()
+                        .collect(),
+                ),
+                Selector::new(vec![hurt_by(1, true), nearest(2, false)]),
+            );
+        }
         // `Vindicator`/`Ravager`: ближний бой; топор/таран без отдельной логики.
         Species::Vindicator | Species::Ravager => {
             return (
@@ -1656,7 +1669,6 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
         | Species::IronGolem
         | Species::Phantom
         | Species::Pillager
-        | Species::Evoker
         | Species::Witch
         | Species::Wither
         | Species::SnowGolem
