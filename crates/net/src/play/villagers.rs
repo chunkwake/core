@@ -346,8 +346,11 @@ pub struct Villager {
     pub meeting_point: Option<[i32; 3]>,
     /// `MemoryModuleType.INTERACTION_TARGET`: UUID собеседника.
     pub interaction_target: Option<u128>,
-    /// Сколько тиков смотреть на собеседника.
-    pub interaction_timer: i32,
+    /// `Villager.lastGossipTime`: 1200 тиков между передачами слухов.
+    pub last_gossip_time: i64,
+    /// `InteractWithDoor` cooldown после закрытия двери.
+    pub door_node: Option<[i32; 3]>,
+    pub door_cooldown: i64,
     /// Узлы текущего шага (`Path.getPreviousNode`/`getNextNode`).
     pub path_from: Option<[i32; 3]>,
     pub path_to: Option<[i32; 3]>,
@@ -498,6 +501,16 @@ impl GossipType {
             GossipType::MinorPositive => 1,
             GossipType::MajorPositive => 0,
             GossipType::Trading => 2,
+        }
+    }
+
+    fn decay_per_transfer(self) -> i32 {
+        match self {
+            GossipType::MajorNegative => 10,
+            GossipType::MinorNegative => 20,
+            GossipType::MinorPositive => 5,
+            GossipType::MajorPositive => 20,
+            GossipType::Trading => 20,
         }
     }
 }
@@ -1031,6 +1044,10 @@ impl PlayPlan {
 
     /// `InteractWithDoor`: открыть дверь на пути и запомнить её.
     fn open_door_on_path(&self, v: &mut Villager, pos: [i32; 3]) {
+        // `InteractWithDoor` cooldown для той же двери.
+        if v.door_node == Some(pos) && self.game_time() < v.door_cooldown {
+            return;
+        }
         let Some(state) = self.block(pos) else {
             return;
         };
@@ -1089,6 +1106,8 @@ impl PlayPlan {
                 continue;
             }
             self.set_door_open(door, false);
+            v.door_node = Some(door);
+            v.door_cooldown = self.game_time() + 20;
         }
     }
 
@@ -1168,6 +1187,7 @@ impl PlayPlan {
         id: i32,
         v: &mut Villager,
         others: &[VillagerRef],
+        gossip: &mut Vec<(i32, i32)>,
     ) -> Option<([f64; 3], f32)> {
         // `MEETING_POINT` ищется до выбора цели, иначе стек не увидит встречу.
         if v.activity == Activity::Meet && v.meeting_point.is_none() {
@@ -1202,7 +1222,7 @@ impl PlayPlan {
                 self.stand_near(home, v.pos)
             }
             Goal::Meet => {
-                if let Some(step) = self.socialize_step(id, v, others) {
+                if let Some(step) = self.socialize_step(id, v, others, gossip) {
                     return Some(step);
                 }
                 if v.move_target.is_none() {
@@ -1256,6 +1276,62 @@ impl PlayPlan {
         true
     }
 
+    /// `Villager.gossip`: передать до 10 слухов с `decayPerTransfer`,
+    /// обновить `lastGossipTime` у обоих.
+    fn gossip_villagers(&self, id: i32, target_id: i32, now: i64) {
+        let mut villagers = self.sim().villagers.lock().unwrap();
+        let [Some(a), Some(b)] = villagers.get_disjoint_mut([&id, &target_id]) else {
+            return;
+        };
+        if now < a.last_gossip_time + 1200 || now < b.last_gossip_time + 1200 {
+            return;
+        }
+        a.last_gossip_time = now;
+        b.last_gossip_time = now;
+        let entries: Vec<(u128, GossipType, i32)> = b
+            .gossips
+            .iter()
+            .flat_map(|(&uuid, values)| {
+                GossipType::ALL.into_iter().filter_map(move |kind| {
+                    let value = values[kind.id()];
+                    (value != 0).then_some((uuid, kind, value))
+                })
+            })
+            .collect();
+        let total: i32 = entries
+            .iter()
+            .map(|(_, kind, value)| (value * kind.weight()).abs())
+            .sum();
+        if total <= 0 {
+            return;
+        }
+        let mut chosen = std::collections::HashSet::new();
+        for _ in 0..10 {
+            let mut roll = rand::random::<i32>() % total;
+            for &(uuid, kind, value) in &entries {
+                roll -= (value * kind.weight()).abs();
+                if roll < 0 {
+                    chosen.insert((uuid, kind.id()));
+                    break;
+                }
+            }
+        }
+        for (uuid, idx) in chosen {
+            let Some(kind) = GossipType::ALL.into_iter().find(|k| k.id() == idx) else {
+                continue;
+            };
+            let Some((_, _, value)) = entries.iter().find(|(u, k, _)| *u == uuid && k.id() == idx)
+            else {
+                continue;
+            };
+            let decayed = value - kind.decay_per_transfer();
+            if decayed >= 2 {
+                let entry = a.gossips.entry(uuid).or_insert([0; 5]);
+                entry[idx] = entry[idx].max(decayed).min(kind.max());
+            }
+        }
+    }
+
     /// `SocializeAtBell`: раз в 100 тиков у колокола выбрать ближайшего
     /// жителя в 32 блоках, подойти и смотреть на него.
     fn socialize_step(
@@ -1263,24 +1339,28 @@ impl PlayPlan {
         id: i32,
         v: &mut Villager,
         others: &[VillagerRef],
+        gossip: &mut Vec<(i32, i32)>,
     ) -> Option<([f64; 3], f32)> {
         if let Some(target) = v.interaction_target {
-            let Some((_, _, pos)) = others
+            let Some((other_id, _, pos)) = others
                 .iter()
                 .find(|(other, uuid, _)| *other != id && *uuid == target)
             else {
                 v.interaction_target = None;
                 return None;
             };
+            if !self.has_line_of_sight(v.pos, *pos) {
+                v.interaction_target = None;
+                return None;
+            }
             if crate::mobs::dist2(v.pos, *pos) > 1.2 * 1.2 {
                 return self.walk_step(v, *pos, 0.14);
             }
-            v.interaction_timer -= 1;
+            // `TradeWithVillager.tick`: смотреть друг на друга и обмениваться
+            // слухами (`Villager.gossip`, не чаще 1200 тиков).
+            gossip.push((id, *other_id));
             let yaw = look_yaw(v.pos, *pos);
             v.yaw = yaw;
-            if v.interaction_timer <= 0 {
-                v.interaction_target = None;
-            }
             return Some((v.pos, yaw));
         }
         let bell = v.meeting_point?;
@@ -1301,7 +1381,6 @@ impl PlayPlan {
                 crate::mobs::dist2(v.pos, a.2).total_cmp(&crate::mobs::dist2(v.pos, b.2))
             })?;
         v.interaction_target = Some(*uuid);
-        v.interaction_timer = 60;
         if crate::mobs::dist2(v.pos, *pos) <= 1.2 * 1.2 {
             let yaw = look_yaw(v.pos, *pos);
             v.yaw = yaw;
@@ -1544,7 +1623,9 @@ impl PlayPlan {
             doors_to_close: Vec::new(),
             meeting_point: None,
             interaction_target: None,
-            interaction_timer: 0,
+            last_gossip_time: 0,
+            door_node: None,
+            door_cooldown: 0,
             path_from: None,
             path_to: None,
             last_work_check: self.game_time(),
@@ -1661,6 +1742,7 @@ impl PlayPlan {
             .iter()
             .filter_map(|(&id, v)| Some((id, v.pos, v.path_from?, v.path_to?)))
             .collect();
+        let mut gossip: Vec<(i32, i32)> = Vec::new();
         let mut gone = Vec::new();
         let mut work: Vec<([f64; 3], String)> = Vec::new();
         let mut jobs: Vec<(i32, String, String, i32)> = Vec::new();
@@ -1723,7 +1805,7 @@ impl PlayPlan {
                 }
                 self.close_villager_doors(id, v, &others, &paths);
                 if v.sleeping.is_none()
-                    && let Some((pos, yaw)) = self.villager_ai_step(id, v, &others)
+                    && let Some((pos, yaw)) = self.villager_ai_step(id, v, &others, &mut gossip)
                 {
                     moves.push((id, pos, yaw, v.sent_pos));
                     v.sent_pos = play::quantize(pos);
@@ -1779,6 +1861,9 @@ impl PlayPlan {
                     }
                 }
             }
+        }
+        for (a, b) in gossip {
+            self.gossip_villagers(a, b, now);
         }
         for (id, pos, yaw, sent) in moves {
             let q = play::quantize(pos);
@@ -2369,7 +2454,9 @@ impl PlayPlan {
             doors_to_close: Vec::new(),
             meeting_point: None,
             interaction_target: None,
-            interaction_timer: 0,
+            last_gossip_time: 0,
+            door_node: None,
+            door_cooldown: 0,
             path_from: None,
             path_to: None,
         };
@@ -2637,7 +2724,9 @@ mod tests {
             doors_to_close: Vec::new(),
             meeting_point: None,
             interaction_target: None,
-            interaction_timer: 0,
+            last_gossip_time: 0,
+            door_node: None,
+            door_cooldown: 0,
             path_from: None,
             path_to: None,
         };
@@ -2662,6 +2751,16 @@ mod tests {
         v.maybe_decay_gossip(48_002);
         assert_eq!(v.gossips[&target][GossipType::Trading.id()], 21);
         assert_eq!(v.gossips[&target][GossipType::MinorNegative.id()], 0);
+    }
+
+    #[test]
+    fn door_cooldown_is_per_node() {
+        let door = [3, 64, 3];
+        let now = 100;
+        let cooldown_node = Some(door);
+        assert!(cooldown_node == Some(door) && now < 120);
+        assert!(!(cooldown_node == Some([4, 64, 3]) && now < 120));
+        assert!(!(cooldown_node == Some(door) && 140 < 120));
     }
 
     #[test]

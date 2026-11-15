@@ -216,6 +216,17 @@ impl Probe {
         (nums.len() >= 3).then(|| [nums[0], nums[1], nums[2]])
     }
 
+    async fn data_at(&mut self, pos: [f64; 3], path: &str) -> String {
+        self.pump(100).await;
+        self.chat.clear();
+        self.cmd(&format!(
+            "data get entity @e[type=minecraft:villager,x={},y={},z={},distance=..3,limit=1,sort=nearest] {path}",
+            pos[0], pos[1], pos[2]
+        ))
+        .await;
+        self.chat.clone()
+    }
+
     async fn wait_near(&mut self, target: [f64; 3], radius: f64, ms: u64) -> Option<[f64; 3]> {
         let start = tokio::time::Instant::now();
         let mut last = None;
@@ -458,6 +469,14 @@ async fn main() {
         p.block_is([X + 4, Y, Z + 10], "minecraft:stone").await,
         "стена для проверки линии видимости не поставилась"
     );
+    // Слух о «игроке» [1,2,3,4]: при социальной встрече A должен получить
+    // его с `decayPerTransfer` 20 (25 -> 5).
+    p.cmd(&format!(
+        "data merge entity @e[type=minecraft:villager,x={}.5,y={Y},z={}.5,distance=..1]          {{Gossips:[{{Target:[I;1,2,3,4],Type:\"minor_negative\",Value:25}}]}}",
+        X + 8,
+        Z + 13
+    ))
+    .await;
 
     let data = p
         .data("@e[type=minecraft:villager,limit=1,sort=nearest] VillagerData")
@@ -558,6 +577,24 @@ async fn main() {
         dist_xz(social_pos, friend),
         yaw
     );
+
+    // `Villager.gossip`: A получает слух B (25 - 20 = 5).
+    let mut gossip = String::new();
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(20_000) {
+        if let Some(pos) = p.a_pos {
+            gossip = p.data_at(pos, "Gossips").await;
+            if gossip.contains("minor_negative") {
+                break;
+            }
+        }
+        p.pump(500).await;
+    }
+    assert!(
+        gossip.contains("minor_negative") && gossip.contains("Value:5"),
+        "слух не передан при встрече: {gossip}"
+    );
+    println!("gossip: transferred minor_negative 25 -> 5");
 
     // 3. Отдых: 12000.. — идёт к своей кровати.
     p.cmd("time set 13000").await;
