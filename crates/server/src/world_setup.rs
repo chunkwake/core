@@ -849,6 +849,7 @@ fn survival_data(
         loom_basic,
         loom_special,
         banner_patterns,
+        trades: chunkwake_data::trades::load(data_dir).map_err(s)?,
         anvil_repair: chunkwake_data::enchanting::repair_materials(data_dir, items),
         smithing: chunkwake_data::recipes::load_smithing(data_dir, items, registries).map_err(s)?,
         brewing: chunkwake_data::recipes::load_brewing(

@@ -281,6 +281,12 @@ async fn main() {
     .await;
     p.pump(600).await;
     let villager = p.villager.expect("житель не появился");
+    // Скидку героя проверяем на фиксированной сделке (20 пшеницы), чтобы
+    // не зависеть от случайного выбора `TradeSet`.
+    p.cmd(
+        "data merge entity @e[type=minecraft:villager,limit=1,sort=nearest] {Offers:{Recipes:[{buy:{id:\"minecraft:wheat\",count:20},sell:{id:\"minecraft:emerald\",count:1},uses:0,maxUses:16,xp:2,priceMultiplier:0.05f,demand:0}]}}",
+    )
+    .await;
 
     // 1. Базовая цена без героя (20 пшеницы).
     p.first_offer = None;

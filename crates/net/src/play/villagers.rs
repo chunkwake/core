@@ -321,12 +321,161 @@ impl PlayPlan {
 
     /// Сделки для профессии: у нас детально описаны только фермер и
     /// странствующий торговец, остальные получают фермерский набор.
-    fn offers_for(&self, profession: &str) -> Vec<Offer> {
-        match profession {
-            "minecraft:none" => Vec::new(),
-            "minecraft:wandering_trader" => self.wandering_offers(),
-            _ => self.farmer_offers(),
+    /// Все сделки уровней `1..=level` (`Villager.updateTrades`).
+    fn offers_for(&self, profession: &str, level: i32, kind: &str) -> Vec<Offer> {
+        if profession == "minecraft:none" {
+            return Vec::new();
         }
+        if profession == "minecraft:wandering_trader" {
+            return self.wandering_offers();
+        }
+        self.offers_for_levels(profession, 1, level.max(1), kind)
+    }
+
+    /// Сделки для диапазона уровней (при повышении уровня добавляются
+    /// только новые).
+    fn offers_for_levels(&self, profession: &str, from: i32, to: i32, kind: &str) -> Vec<Offer> {
+        let mut out = Vec::new();
+        for level in from.max(1)..=to.max(1) {
+            out.extend(self.offers_for_level(profession, level, kind));
+        }
+        out
+    }
+
+    /// Один `TradeSet` уровня: `amount` сделок без повторов, если
+    /// `allow_duplicates` не задан.
+    fn offers_for_level(&self, profession: &str, level: i32, kind: &str) -> Vec<Offer> {
+        let short = profession.strip_prefix("minecraft:").unwrap_or(profession);
+        let Some(set) = self.survival.trades.set(short, level) else {
+            return Vec::new();
+        };
+        let allowed: Vec<&String> = set
+            .trades
+            .iter()
+            .filter(|id| {
+                self.survival.trades.defs.get(*id).is_some_and(|def| {
+                    !def.unsupported
+                        && def
+                            .variants
+                            .as_ref()
+                            .is_none_or(|variants| variants.iter().any(|v| v == kind))
+                })
+            })
+            .collect();
+        if allowed.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut pool = allowed.clone();
+        while (out.len() as i32) < set.amount {
+            if pool.is_empty() {
+                break;
+            }
+            let index = rand::random::<usize>() % pool.len();
+            let id = pool[index];
+            match self
+                .survival
+                .trades
+                .defs
+                .get(id)
+                .and_then(|def| self.offer_from_def(def))
+            {
+                Some(offer) => {
+                    out.push(offer);
+                    if !set.allow_duplicates {
+                        pool.remove(index);
+                    }
+                }
+                None => {
+                    pool.remove(index);
+                }
+            }
+        }
+        out
+    }
+
+    /// `VillagerTrade.getOffer`: предметы, цена, `max_uses`, `xp` и
+    /// зачарование из `given_item_modifier`.
+    fn offer_from_def(&self, def: &chunkwake_data::trades::TradeDef) -> Option<Offer> {
+        let buy_item = self.item_id(&def.wants.id)?;
+        let sell_item = self.item_id(&def.gives.id)?;
+        let mut sell = Stack::new(sell_item, def.gives.count.max(1));
+        let mut extra_cost = 0i32;
+        if let Some(spec) = &def.enchant {
+            let ench = self.pick_enchantment(spec, &def.gives.id)?;
+            let level = 1 + rand::random::<i32>() % ench.max_level.max(1);
+            let mut extra = chunkwake_protocol::components::Extra::default();
+            if def.gives.id == "minecraft:enchanted_book" {
+                extra.stored = vec![(ench.id, level)];
+            } else {
+                extra.enchantments = vec![(ench.id, level)];
+            }
+            sell.extra = chunkwake_protocol::components::intern(extra);
+            if spec.include_cost {
+                extra_cost = if spec.random {
+                    // `EnchantRandomlyFunction`: 2 + [0, 5+10*level) + 3*level,
+                    // затем x2 для `#double_trade_price`.
+                    let mut cost = 2 + rand::random::<i32>() % (5 + level * 10) + 3 * level;
+                    if def.double_price.iter().any(|name| name == &ench.name) {
+                        cost *= 2;
+                    }
+                    cost
+                } else {
+                    let (min, max) = spec.levels.unwrap_or((1, 1));
+                    min + rand::random::<i32>() % (max - min + 1).max(1)
+                };
+            }
+        }
+        let buy = def.wants.count.max(0) + extra_cost;
+        if buy < 1 {
+            return None;
+        }
+        Some(Offer {
+            buy: (buy_item, buy),
+            buy_b: def
+                .additional
+                .as_ref()
+                .and_then(|item| Some((self.item_id(&item.id)?, item.count.max(1)))),
+            sell,
+            uses: 0,
+            max_uses: def.max_uses.max(1),
+            xp: def.xp.max(0),
+            price_mul: def.price_mul,
+            demand: 0,
+            special_price: 0,
+        })
+    }
+
+    /// Случайное зачарование из `options`, совместимое с предметом.
+    fn pick_enchantment(
+        &self,
+        spec: &chunkwake_data::trades::EnchantSpec,
+        item: &str,
+    ) -> Option<&chunkwake_data::enchanting::EnchantDef> {
+        let pool: Vec<&chunkwake_data::enchanting::EnchantDef> = self
+            .survival
+            .enchanting
+            .defs
+            .iter()
+            .filter(|def| {
+                (spec.options.is_empty() || spec.options.iter().any(|name| name == &def.name))
+                    && (!spec.only_compatible
+                        || item == "minecraft:enchanted_book"
+                        || def.supported.contains(item))
+            })
+            .collect();
+        if pool.is_empty() {
+            return None;
+        }
+        let total: i32 = pool.iter().map(|def| def.weight.max(1)).sum();
+        let mut roll = rand::random::<i32>() % total.max(1);
+        for def in pool {
+            roll -= def.weight.max(1);
+            if roll < 0 {
+                return Some(def);
+            }
+        }
+        None
     }
 
     fn claim_poi(&self, pos: [i32; 3], id: i32) {
@@ -416,7 +565,7 @@ impl PlayPlan {
             v.profession = kind.to_owned();
             v.xp = 0;
             v.level = 1;
-            v.offers = self.offers_for(&v.profession);
+            v.offers = self.offers_for(&v.profession, v.level, &v.kind);
             return Some((id, v.kind.clone(), v.profession.clone(), v.level));
         }
         None
@@ -424,61 +573,6 @@ impl PlayPlan {
 
     fn villager_type_id(&self, name: &str) -> i32 {
         self.survival.villager_types.get(name).copied().unwrap_or(0)
-    }
-
-    /// Стандартный набор сделок фермера (первая — 20 пшеницы за изумруд).
-    fn farmer_offers(&self) -> Vec<Offer> {
-        let item = |n: &str| self.item_id(n);
-        let mut out = Vec::new();
-        let mut push = |buy: (&str, i32),
-                        buy_b: Option<(&str, i32)>,
-                        sell: (&str, i32),
-                        max_uses: i32,
-                        xp: i32| {
-            let (Some(buy_item), Some(sell_item)) = (item(buy.0), item(sell.0)) else {
-                return;
-            };
-            out.push(Offer {
-                buy: (buy_item, buy.1),
-                buy_b: buy_b.and_then(|(n, c)| item(n).map(|i| (i, c))),
-                sell: Stack::new(sell_item, sell.1),
-                uses: 0,
-                max_uses,
-                xp,
-                price_mul: 0.05,
-                demand: 0,
-                special_price: 0,
-            });
-        };
-        push(
-            ("minecraft:wheat", 20),
-            None,
-            ("minecraft:emerald", 1),
-            16,
-            2,
-        );
-        push(
-            ("minecraft:potato", 26),
-            None,
-            ("minecraft:emerald", 1),
-            16,
-            2,
-        );
-        push(
-            ("minecraft:emerald", 1),
-            None,
-            ("minecraft:bread", 6),
-            16,
-            2,
-        );
-        push(
-            ("minecraft:emerald", 1),
-            None,
-            ("minecraft:pumpkin_pie", 4),
-            12,
-            2,
-        );
-        out
     }
 
     /// Сделки странствующего торговца (`TradeSets.WANDERING_TRADER_*`):
@@ -598,10 +692,7 @@ impl PlayPlan {
             profession: "minecraft:farmer".into(),
             level: 1,
             xp: 0,
-            offers: self.offers_for(match trader {
-                TraderKind::Wandering => "minecraft:wandering_trader",
-                TraderKind::Villager => "minecraft:farmer",
-            }),
+            offers: Vec::new(),
             despawn_delay: 0,
             last_restock: 0,
             restocks_today: 0,
@@ -618,9 +709,11 @@ impl PlayPlan {
         };
         if let Some(nbt) = nbt {
             apply_villager_nbt(&mut v, nbt, |n| self.item_id(n));
-            if v.profession == "minecraft:none" {
-                v.offers.clear();
-            }
+        }
+        if v.profession == "minecraft:none" {
+            v.offers.clear();
+        } else if v.offers.is_empty() {
+            v.offers = self.offers_for(&v.profession, v.level, &v.kind);
         }
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
         self.sim().villagers.lock().unwrap().insert(id, v.clone());
@@ -1075,6 +1168,68 @@ impl PlayPlan {
 
     /// `MerchantContainer.getRecipeFor`: выбранная сделка, если цена в слотах
     /// подходит, иначе первая подходящая нераспроданная.
+    /// `/data merge entity` для жителя: применяет NBT к живому состоянию
+    /// (`Offers`, `VillagerData`, `Xp`, `Health`, `Pos`, `Gossips`, ...).
+    pub(super) fn store_villager_nbt(&self, id: i32, nbt: &Compound) -> bool {
+        let meta = {
+            let mut villagers = self.sim().villagers.lock().unwrap();
+            let Some(v) = villagers.get_mut(&id) else {
+                return false;
+            };
+            apply_villager_nbt(v, nbt, |n| self.item_id(n));
+            if let Some(health) = nbt.get("Health").and_then(number) {
+                v.health = (health as f32).clamp(0.0, 20.0);
+            }
+            if let Some(pos) = list3(nbt.get("Pos")) {
+                v.pos = pos;
+            }
+            if let Some(Tag::List(rot)) = nbt.get("Rotation")
+                && let Some(Tag::Float(yaw)) = rot.first()
+            {
+                v.yaw = *yaw;
+            }
+            if let Some(name) = nbt.get("CustomName").and_then(|t| match t {
+                Tag::String(s) => Some(s.clone()),
+                _ => None,
+            }) {
+                v.custom_name = Some(name);
+            }
+            (
+                v.trader == TraderKind::Villager,
+                self.villager_type_id(&v.kind),
+                self.profession_id(&v.profession),
+                v.level,
+                v.pos,
+                v.yaw,
+            )
+        };
+        if meta.0 {
+            self.hub.send_about(
+                id,
+                play::entity_meta(
+                    self.ids.set_entity_data,
+                    id,
+                    &[
+                        (
+                            18,
+                            play::Meta::VillagerData {
+                                kind: meta.1,
+                                profession: meta.2,
+                                level: meta.3,
+                            },
+                        ),
+                        (19, play::Meta::Bool(true)),
+                    ],
+                ),
+            );
+        }
+        self.hub.send_about(
+            id,
+            play::teleport_entity(self.ids.teleport_entity, id, meta.4, meta.5, 0.0, true),
+        );
+        true
+    }
+
     pub(super) fn merchant_match(&self, m: MerchantWindow, slots: &[Slot]) -> Option<usize> {
         let villagers = self.sim().villagers.lock().unwrap();
         let v = villagers.get(&m.villager)?;
@@ -1115,7 +1270,12 @@ impl PlayPlan {
         v.xp += offer.xp;
         let level = level_for_xp(v.xp);
         let changed = level != v.level;
+        let old_level = v.level;
         v.level = level;
+        if changed {
+            v.offers
+                .extend(self.offers_for_levels(&v.profession, old_level + 1, level, &v.kind));
+        }
         let reputation = v.reputation(player.as_u128());
         v.update_special_prices(amplifier, reputation);
         let pos = v.pos;
@@ -1270,10 +1430,7 @@ impl PlayPlan {
             profession: "minecraft:farmer".into(),
             level: 1,
             xp: 0,
-            offers: self.offers_for(match trader {
-                TraderKind::Wandering => "minecraft:wandering_trader",
-                TraderKind::Villager => "minecraft:farmer",
-            }),
+            offers: Vec::new(),
             despawn_delay: 0,
             last_restock: 0,
             restocks_today: 0,
@@ -1291,10 +1448,35 @@ impl PlayPlan {
         apply_villager_nbt(&mut v, c, |n| self.item_id(n));
         if v.profession == "minecraft:none" {
             v.offers.clear();
+        } else if v.offers.is_empty() {
+            v.offers = self.offers_for(&v.profession, v.level, &v.kind);
         }
         self.sim().villagers_loaded.lock().unwrap().push(v);
         true
     }
+}
+
+/// Число из NBT (Int/Float/Double/Long).
+fn number(tag: &Tag) -> Option<f64> {
+    match tag {
+        Tag::Int(v) => Some(f64::from(*v)),
+        Tag::Float(v) => Some(f64::from(*v)),
+        Tag::Double(v) => Some(*v),
+        Tag::Long(v) => Some(*v as f64),
+        _ => None,
+    }
+}
+
+/// Три координаты из NBT-списка.
+fn list3(tag: Option<&Tag>) -> Option<[f64; 3]> {
+    let Tag::List(list) = tag? else {
+        return None;
+    };
+    let mut out = [0.0; 3];
+    for (i, tag) in list.iter().take(3).enumerate() {
+        out[i] = number(tag)?;
+    }
+    (list.len() >= 3).then_some(out)
 }
 
 /// `VillagerData.nextLevelXp` / `getLevel`.

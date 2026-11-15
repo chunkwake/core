@@ -12,6 +12,7 @@ pub mod packets;
 pub mod recipes;
 pub mod registries;
 pub mod tools;
+pub mod trades;
 pub mod world;
 
 pub use chunkwake_datacache as cache;

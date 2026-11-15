@@ -388,6 +388,12 @@ async fn main() {
         X + 2,
         Z
     );
+    // Скидка/наценка репутации проверяется на фиксированной сделке
+    // (20 пшеницы), независимо от случайного набора `TradeSet`.
+    p.cmd(&format!(
+        "data merge entity {farmer} {{Offers:{{Recipes:[{{buy:{{id:\"minecraft:wheat\",count:20}},sell:{{id:\"minecraft:emerald\",count:1}},uses:0,maxUses:16,xp:2,priceMultiplier:0.05f,demand:0}}]}}}}"
+    ))
+    .await;
     let witness = format!(
         "@e[type=minecraft:villager,x={}.5,y={Y},z={}.5,distance=..3,sort=nearest,limit=1]",
         X + 5,

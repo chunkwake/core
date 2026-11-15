@@ -240,6 +240,12 @@ async fn main() {
     .await;
     p.pump(700).await;
     let villager = p.villager.expect("житель не появился");
+    // Фиксированные сделки для регрессии: набор `TradeSet` проверяется
+    // отдельно в `trade_set_probe`.
+    p.cmd(
+        "data merge entity @e[type=minecraft:villager,limit=1,sort=nearest] {Offers:{Recipes:[{buy:{id:\"minecraft:wheat\",count:20},sell:{id:\"minecraft:emerald\",count:1},uses:0,maxUses:16,xp:2,priceMultiplier:0.05f,demand:0},{buy:{id:\"minecraft:emerald\",count:1},sell:{id:\"minecraft:bread\",count:6},uses:0,maxUses:16,xp:2,priceMultiplier:0.05f,demand:0}]}}",
+    )
+    .await;
     p.interact(villager).await;
     let window = p.window.expect("окно торговли не открылось");
     println!(
@@ -263,10 +269,10 @@ async fn main() {
     let xp = p
         .data("@e[type=minecraft:villager,limit=1,sort=nearest] Xp")
         .await;
-    assert_eq!(last_number(&xp), Some(2.0), "опыт жителя не вырос: {xp}");
     let offers = p
         .data("@e[type=minecraft:villager,limit=1,sort=nearest] Offers")
         .await;
+    assert_eq!(last_number(&xp), Some(2.0), "опыт жителя не вырос: {xp}");
     assert!(
         offers.contains("uses:1"),
         "сделка не отмечена использованной: {offers}"
@@ -274,7 +280,7 @@ async fn main() {
     println!("trade: 20 wheat -> emerald, xp=2, uses=1");
 
     // 3. Выбор другой сделки (изумруд → хлеб) и повторный обмен.
-    p.trade_select(2).await;
+    p.trade_select(1).await;
     p.click(window, 31).await; // изумруд в курсор
     p.click(window, 0).await;
     p.click(window, 2).await; // забрать хлеб

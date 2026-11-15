@@ -1684,6 +1684,17 @@ impl PlayPlan {
             }
             return;
         }
+        // Житель живёт отдельно от `mobs`: применяем NBT к его состоянию.
+        if self
+            .sim()
+            .villagers
+            .lock()
+            .unwrap()
+            .contains_key(&target.entity_id)
+        {
+            self.store_villager_nbt(target.entity_id, nbt);
+            return;
+        }
         let changed: Vec<(u8, chunkwake_protocol::inventory::Slot)> = {
             let mut mobs = self.sim().mobs.lock().unwrap();
             let Some(entry) = mobs.get_mut(&target.entity_id) else {
@@ -2555,6 +2566,13 @@ fn is_live_key(key: &str) -> bool {
             | "weather_state"
             | "next_weather_age"
             | "IsBaby"
+            | "VillagerData"
+            | "Offers"
+            | "Xp"
+            | "Gossips"
+            | "LastRestock"
+            | "RestocksToday"
+            | "DespawnDelay"
             | "CanBreakDoors"
             | "Sheared"
             | "Color"

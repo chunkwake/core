@@ -2620,6 +2620,8 @@ pub struct SurvivalData {
     /// `banner_pattern` 26.3: имя записи -> ID реестра (0-база, как в
     /// компоненте `minecraft:banner_patterns`).
     pub banner_patterns: HashMap<String, i32>,
+    /// Сделки жителей по `villager_trade`/`trade_set`.
+    pub trades: chunkwake_data::trades::Trades,
     pub anvil_repair: std::collections::HashMap<i32, std::collections::HashSet<i32>>,
     pub smithing: chunkwake_data::recipes::SmithingData,
     /// Чары для плагинов по порядку сетевых ID (строки запроса `enchantments`).
