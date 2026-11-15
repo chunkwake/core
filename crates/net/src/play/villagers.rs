@@ -100,12 +100,32 @@ fn select_enchantments(
 /// Пороги уровней (`VillagerData.NEXT_LEVEL_XP_THRESHOLDS`).
 pub const LEVEL_XP: [i32; 5] = [0, 10, 70, 150, 250];
 
+/// Идёт ли другой житель через дверь (`areOtherMobsComingThroughDoor`):
+/// его узел пути совпадает с дверью и он в 2 блоках от неё.
+fn other_villager_on_door(
+    id: i32,
+    door: [i32; 3],
+    center: [f64; 3],
+    paths: &[VillagerPath],
+) -> bool {
+    paths.iter().any(|(other, pos, from, to)| {
+        *other != id
+            && (*from == door || *to == door)
+            && crate::mobs::dist2(*pos, center) <= 2.0 * 2.0
+    })
+}
+
 /// `Mth.atan2`-подобный yaw взгляда из `from` в `to`.
 fn look_yaw(from: [f64; 3], to: [f64; 3]) -> f32 {
     let dx = to[0] - from[0];
     let dz = to[2] - from[2];
     (-dx).atan2(dz).to_degrees() as f32
 }
+
+/// Снимок жителя для сенсоров: id, UUID и позиция.
+type VillagerRef = (i32, u128, [f64; 3]);
+/// Узлы пути жителя: id, позиция, `from`, `to`.
+type VillagerPath = (i32, [f64; 3], [i32; 3], [i32; 3]);
 
 /// `timeline/villager_schedule.json` 26.3 (взрослый житель).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -328,6 +348,9 @@ pub struct Villager {
     pub interaction_target: Option<u128>,
     /// Сколько тиков смотреть на собеседника.
     pub interaction_timer: i32,
+    /// Узлы текущего шага (`Path.getPreviousNode`/`getNextNode`).
+    pub path_from: Option<[i32; 3]>,
+    pub path_to: Option<[i32; 3]>,
 }
 
 /// Состояние окна торговли: к какому жителю и какая сделка выбрана.
@@ -811,6 +834,9 @@ impl PlayPlan {
             if !solid([feet[0], feet[1] - 1, feet[2]]) {
                 continue;
             }
+            if self.dangerous_block(feet) || self.dangerous_block([feet[0], feet[1] - 1, feet[2]]) {
+                continue;
+            }
             let pos = [feet[0] as f64 + 0.5, feet[1] as f64, feet[2] as f64 + 0.5];
             let dist = crate::mobs::dist2(pos, from);
             if best.is_none_or(|(_, d)| dist < d) {
@@ -836,9 +862,39 @@ impl PlayPlan {
         })
     }
 
+    /// `EntityType.isBlockDangerous`: огонь/лава/магма/костёр и колючие
+    /// блоки, на которые житель не встаёт.
+    fn dangerous_block(&self, p: [i32; 3]) -> bool {
+        let Some(state) = self.block(p) else {
+            return false;
+        };
+        let name = self.state_name(state);
+        if matches!(
+            name,
+            "minecraft:fire"
+                | "minecraft:soul_fire"
+                | "minecraft:lava"
+                | "minecraft:magma_block"
+                | "minecraft:lava_cauldron"
+                | "minecraft:wither_rose"
+                | "minecraft:sweet_berry_bush"
+                | "minecraft:cactus"
+                | "minecraft:powder_snow"
+        ) {
+            return true;
+        }
+        name.ends_with("campfire") && self.survival.placement.prop(state, "lit") == Some("true")
+    }
+
     /// `AbstractBedBlock.findStandUpPosition`: свободное место у изголовья
     /// по направлению кровати (`bedSurroundStandUpOffsets` + `above`).
-    fn find_stand_up(&self, head: [i32; 3], yaw: f32) -> Option<[f64; 3]> {
+    fn find_stand_up(
+        &self,
+        head: [i32; 3],
+        yaw: f32,
+        id: i32,
+        others: &[VillagerRef],
+    ) -> Option<[f64; 3]> {
         let state = self.block(head)?;
         let name = self.state_name(state);
         if !name.ends_with("_bed") {
@@ -888,7 +944,18 @@ impl PlayPlan {
             if !solid([feet[0], feet[1] - 1, feet[2]]) {
                 continue;
             }
-            if self.entity_at(feet) {
+            if self.entity_at(feet)
+                || others.iter().any(|(other, _, p)| {
+                    *other != id
+                        && p[0].floor() as i32 == feet[0]
+                        && p[1].floor() as i32 == feet[1]
+                        && p[2].floor() as i32 == feet[2]
+                })
+            {
+                continue;
+            }
+            // `findSafeDismountLocation(checkDangerous=true)`.
+            if self.dangerous_block(feet) || self.dangerous_block([feet[0], feet[1] - 1, feet[2]]) {
                 continue;
             }
             return Some([feet[0] as f64 + 0.5, feet[1] as f64, feet[2] as f64 + 0.5]);
@@ -977,20 +1044,30 @@ impl PlayPlan {
         }
     }
 
+    /// Идёт ли другой житель через дверь (`areOtherMobsComingThroughDoor`).
     /// `closeDoorsThatIHaveOpenedOrPassedThrough`: закрыть дверь, если
     /// житель отошёл, рядом никого нет и она ещё открыта.
-    fn close_villager_doors(&self, v: &mut Villager) {
-        let mut keep = Vec::new();
+    fn close_villager_doors(
+        &self,
+        id: i32,
+        v: &mut Villager,
+        others: &[VillagerRef],
+        paths: &[VillagerPath],
+    ) {
         for door in std::mem::take(&mut v.doors_to_close) {
             let center = [door[0] as f64 + 0.5, door[1] as f64, door[2] as f64 + 0.5];
             let dist = crate::mobs::dist2(v.pos, center);
             if dist > 3.0 * 3.0 {
                 continue;
             }
-            // Пока житель в проёме, дверь не закрываем (vanilla пропускает
-            // узлы `from`/`to` текущего пути) — запомним до следующего тика.
-            if dist < 1.0 {
-                keep.push(door);
+            // Узлы `from`/`to` текущего пути не закрываем (vanilla пропускает
+            // их), даже если житель уже рядом.
+            if v.path_from == Some(door) || v.path_to == Some(door) {
+                v.doors_to_close.push(door);
+                continue;
+            }
+            // Другой житель идёт через эту дверь — не закрываем.
+            if other_villager_on_door(id, door, center, paths) {
                 continue;
             }
             let Some(state) = self.block(door) else {
@@ -1001,13 +1078,18 @@ impl PlayPlan {
             {
                 continue;
             }
-            if self.entity_at([door[0], door[1], door[2]]) {
-                keep.push(door);
+            if self.entity_at([door[0], door[1], door[2]])
+                || others.iter().any(|(other, _, p)| {
+                    *other != id
+                        && p[0].floor() as i32 == door[0]
+                        && p[1].floor() as i32 == door[1]
+                        && p[2].floor() as i32 == door[2]
+                })
+            {
                 continue;
             }
             self.set_door_open(door, false);
         }
-        v.doors_to_close = keep;
     }
 
     /// `SleepInBed.start`: лечь в кровать, занять её и включить позу сна.
@@ -1046,7 +1128,7 @@ impl PlayPlan {
     }
 
     /// `WakeUp`/`SleepInBed.stop`: освободить кровать и встать рядом.
-    fn stop_villager_sleep(&self, id: i32, v: &mut Villager) {
+    fn stop_villager_sleep(&self, id: i32, v: &mut Villager, others: &[VillagerRef]) {
         if let Some(bed) = v.sleeping.take() {
             self.set_bed_occupied(bed, false);
             // Кровать исчезла: забываем `HOME`, чтобы стек ушёл в `Idle`.
@@ -1060,7 +1142,7 @@ impl PlayPlan {
             }
             // `SleepInBed.stop`: nextOkStartTime = timestamp + 40.
             v.sleep_cooldown = self.game_time() + 40;
-            if let Some(pos) = self.find_stand_up(bed, v.yaw) {
+            if let Some(pos) = self.find_stand_up(bed, v.yaw, id, others) {
                 v.pos = pos;
             } else if let Some(pos) = self.stand_near(bed, v.pos) {
                 v.pos = pos;
@@ -1085,7 +1167,7 @@ impl PlayPlan {
         &self,
         id: i32,
         v: &mut Villager,
-        others: &[(i32, u128, [f64; 3])],
+        others: &[VillagerRef],
     ) -> Option<([f64; 3], f32)> {
         // `MEETING_POINT` ищется до выбора цели, иначе стек не увидит встречу.
         if v.activity == Activity::Meet && v.meeting_point.is_none() {
@@ -1180,7 +1262,7 @@ impl PlayPlan {
         &self,
         id: i32,
         v: &mut Villager,
-        others: &[(i32, u128, [f64; 3])],
+        others: &[VillagerRef],
     ) -> Option<([f64; 3], f32)> {
         if let Some(target) = v.interaction_target {
             let Some((_, _, pos)) = others
@@ -1236,6 +1318,8 @@ impl PlayPlan {
         let dist = (dx * dx + dz * dz).sqrt();
         if dist < 0.8 {
             v.move_target = None;
+            v.path_from = None;
+            v.path_to = None;
             return None;
         }
         let step = speed.min(dist);
@@ -1244,6 +1328,8 @@ impl PlayPlan {
         let feet_y = v.pos[1].floor() as i32;
         let here = [v.pos[0].floor() as i32, feet_y, v.pos[2].floor() as i32];
         let feet = [nx.floor() as i32, feet_y, nz.floor() as i32];
+        v.path_from = Some(here);
+        v.path_to = Some(feet);
         self.open_door_on_path(v, here);
         if feet != here {
             self.open_door_on_path(v, feet);
@@ -1459,6 +1545,8 @@ impl PlayPlan {
             meeting_point: None,
             interaction_target: None,
             interaction_timer: 0,
+            path_from: None,
+            path_to: None,
             last_work_check: self.game_time(),
             job_site: None,
             last_job_check: 0,
@@ -1557,13 +1645,21 @@ impl PlayPlan {
             .collect();
         // Сенсор `NEAREST_VISIBLE_LIVING_ENTITIES` (упрощённо — без
         // проверки линии видимости): снимок жителей на этот тик.
-        let others: Vec<(i32, u128, [f64; 3])> = self
+        let others: Vec<VillagerRef> = self
             .sim()
             .villagers
             .lock()
             .unwrap()
             .iter()
             .map(|(&id, v)| (id, v.uuid.as_u128(), v.pos))
+            .collect();
+        let paths: Vec<VillagerPath> = self
+            .sim()
+            .villagers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(&id, v)| Some((id, v.pos, v.path_from?, v.path_to?)))
             .collect();
         let mut gone = Vec::new();
         let mut work: Vec<([f64; 3], String)> = Vec::new();
@@ -1623,9 +1719,9 @@ impl PlayPlan {
                         != Some("minecraft:home")
                 });
                 if v.sleeping.is_some() && (v.activity != Activity::Rest || bed_gone) {
-                    self.stop_villager_sleep(id, v);
+                    self.stop_villager_sleep(id, v, &others);
                 }
-                self.close_villager_doors(v);
+                self.close_villager_doors(id, v, &others, &paths);
                 if v.sleeping.is_none()
                     && let Some((pos, yaw)) = self.villager_ai_step(id, v, &others)
                 {
@@ -2274,6 +2370,8 @@ impl PlayPlan {
             meeting_point: None,
             interaction_target: None,
             interaction_timer: 0,
+            path_from: None,
+            path_to: None,
         };
         apply_villager_nbt(&mut v, c, |n| self.item_id(n));
         if v.profession == "minecraft:none" {
@@ -2540,6 +2638,8 @@ mod tests {
             meeting_point: None,
             interaction_target: None,
             interaction_timer: 0,
+            path_from: None,
+            path_to: None,
         };
         let player = Uuid::from_u128(7);
         let target = player.as_u128();
@@ -2562,6 +2662,21 @@ mod tests {
         v.maybe_decay_gossip(48_002);
         assert_eq!(v.gossips[&target][GossipType::Trading.id()], 21);
         assert_eq!(v.gossips[&target][GossipType::MinorNegative.id()], 0);
+    }
+
+    #[test]
+    fn other_villager_path_keeps_door_open() {
+        let door = [3, 64, 3];
+        let center = [3.5, 64.0, 3.5];
+        let paths = vec![
+            (1, [3.5, 64.0, 3.5], [3, 64, 3], [4, 64, 3]),
+            (2, [5.0, 64.0, 3.5], [4, 64, 3], [5, 64, 3]),
+        ];
+        // Для жителя 2 другой (id 1) идёт через дверь.
+        assert!(other_villager_on_door(2, door, center, &paths));
+        assert!(!other_villager_on_door(1, door, center, &paths));
+        let far = vec![(1, [10.0, 64.0, 3.5], [3, 64, 3], [4, 64, 3])];
+        assert!(!other_villager_on_door(2, door, center, &far));
     }
 
     #[test]

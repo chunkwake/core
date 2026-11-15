@@ -448,10 +448,10 @@ async fn main() {
     p.cmd(&format!(
         "fill {} {Y} {} {} {} {} minecraft:stone",
         X + 4,
-        Z + 10,
+        Z + 6,
         X + 4,
         Y + 1,
-        Z + 12
+        Z + 14
     ))
     .await;
     assert!(
@@ -521,10 +521,10 @@ async fn main() {
     p.cmd(&format!(
         "fill {} {Y} {} {} {} {} minecraft:air",
         X + 4,
-        Z + 10,
+        Z + 6,
         X + 4,
         Y + 1,
-        Z + 12
+        Z + 14
     ))
     .await;
 
@@ -599,6 +599,22 @@ async fn main() {
     );
     println!("sleep: pose sleeping, bed occupied (y {:.3})", slept[1]);
 
+    // `findSafeDismountLocation`: вокруг изголовья магма — вставать на неё
+    // нельзя.
+    let magma = [
+        [X + 7, Y, Z - 3],
+        [X + 7, Y, Z - 2],
+        [X + 9, Y, Z - 3],
+        [X + 9, Y, Z - 2],
+    ];
+    for pos in magma {
+        p.cmd(&format!(
+            "setblock {} {} {} minecraft:magma_block",
+            pos[0], pos[1], pos[2]
+        ))
+        .await;
+    }
+
     // Пробуждение: вне `rest` поза STANDING и кровать свободна.
     p.cmd("time set 1000").await;
     let mut woken = false;
@@ -621,12 +637,30 @@ async fn main() {
         "житель не проснулся (pose {:?}, bed занята: {bed_busy})",
         p.pose
     );
-    println!("wake: pose standing, bed free");
+    p.pump(300).await;
+    let wake_pos = p.a_pos.expect("нет позиции после пробуждения");
+    let cell = [
+        wake_pos[0].floor() as i32,
+        wake_pos[1].floor() as i32,
+        wake_pos[2].floor() as i32,
+    ];
+    assert!(
+        !magma.contains(&cell),
+        "житель встал на опасный блок: {cell:?}"
+    );
+    println!("wake: pose standing, bed free, safe dismount {cell:?}");
 
     // 40 тиков после пробуждения житель не ложится снова.
     p.cmd("time set 13000").await;
-    p.pump(600).await;
+    p.pump(300).await;
     assert_eq!(p.pose, Some(0), "житель лёг раньше 40-тикового кулдауна");
+    for pos in magma {
+        p.cmd(&format!(
+            "setblock {} {} {} minecraft:air",
+            pos[0], pos[1], pos[2]
+        ))
+        .await;
+    }
     let mut slept_again = false;
     let start = tokio::time::Instant::now();
     while start.elapsed() < Duration::from_millis(8_000) {
