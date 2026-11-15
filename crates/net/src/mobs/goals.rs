@@ -56,6 +56,8 @@ pub enum Out {
     ShootSkull { target: u128 },
     /// EnderDragon breath: облако dragon_breath у цели.
     DragonBreath { target: u128 },
+    /// EnderDragon sitting-flaming: облако в заданной точке.
+    DragonBreathAt([f64; 3]),
     /// Слизень прыгнул (`jump`) или шлёпнулся на землю: звук `jump`/`squish`.
     CubeSound { jump: bool },
 }

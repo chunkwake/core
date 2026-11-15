@@ -1070,6 +1070,16 @@ pub struct Mob {
     pub limited_life: i32,
     /// `Vex`: срок жизни истёк — удалить без лута (`discard`).
     pub discard: bool,
+    /// Текущая фаза `EnderDragonPhase`.
+    pub dragon_phase: u8,
+    /// Тики в текущей фазе.
+    pub dragon_phase_time: u32,
+    /// Цель фазы (точка полёта/рывка).
+    pub dragon_target: Option<[f64; 3]>,
+    /// `DragonSittingFlamingPhase.flameCount`: 0..=4.
+    pub dragon_flame_count: u32,
+    /// Счётчик циклов holding pattern.
+    pub dragon_cycle: u32,
     /// `Raider.isCaptain`: лидер волны со знаменем.
     pub raid_leader: bool,
     /// `Witch`: кулдаун лечения союзников (`RangedAttackGoal`, 60 тиков).
@@ -1150,6 +1160,11 @@ impl Mob {
             spell_cooldown: 0,
             limited_life: 0,
             discard: false,
+            dragon_phase: 0,
+            dragon_phase_time: 0,
+            dragon_target: None,
+            dragon_flame_count: 0,
+            dragon_cycle: 0,
             raid_leader: false,
             witch_heal_cooldown: 0,
             nav: Navigation::new(species == Species::Spider),
@@ -1794,13 +1809,35 @@ fn wither_period(health: f32, max: f32) -> u32 {
 
 /// `EnderDragon.customServerAiStep`: полёт по кругу вокруг портала
 /// (`[0.5, 80, 0.5]`, радиус 24) с рывками к ближайшему игроку.
+// `EnderDragonPhase` (подмножество, используемое сервером).
+const DRAGON_HOLDING: u8 = 0;
+const DRAGON_STRAFE: u8 = 1;
+const DRAGON_LANDING_APPROACH: u8 = 2;
+const DRAGON_LANDING: u8 = 3;
+const DRAGON_TAKEOFF: u8 = 4;
+const DRAGON_SITTING_FLAMING: u8 = 5;
+const DRAGON_SITTING_SCANNING: u8 = 6;
+const DRAGON_SITTING_ATTACKING: u8 = 7;
+const DRAGON_CHARGING: u8 = 8;
+
+fn dragon_begin(m: &mut Mob, phase: u8, target: Option<[f64; 3]>) {
+    m.dragon_phase = phase;
+    m.dragon_phase_time = 0;
+    m.dragon_target = target;
+}
+
+/// `EnderDragon.customServerAiStep`: фазы holding/strafe/charge/landing и
+/// дыхание только в `SITTING_FLAMING` (`DragonSittingFlamingPhase`).
 fn dragon_ai_step(m: &mut Mob, s: &mut Senses) {
     m.no_gravity = true;
     if m.dragon_cooldown > 0 {
         m.dragon_cooldown -= 1;
     }
+    m.dragon_phase_time += 1;
     const CENTER: [f64; 3] = [0.5, 80.0, 0.5];
+    const LAND: [f64; 3] = [0.5, 70.0, 0.5];
     const RADIUS: f64 = 24.0;
+
     let target = m
         .target
         .and_then(|t| s.players.iter().find(|p| p.uuid == t).copied())
@@ -1808,55 +1845,158 @@ fn dragon_ai_step(m: &mut Mob, s: &mut Senses) {
             s.players
                 .iter()
                 .copied()
-                .filter(|p| dist2(p.pos, m.pos) <= 64.0 * 64.0)
+                .filter(|p| dist2(p.pos, m.pos) <= 150.0 * 150.0)
                 .min_by(|a, b| dist2(a.pos, m.pos).total_cmp(&dist2(b.pos, m.pos)))
         });
     if let Some(p) = target {
         m.target = Some(p.uuid);
     }
-    // Рывок к цели на 40 тиков каждые 240 тиков.
-    let charging = target.is_some() && m.tick_count % 240 < 40;
-    let goal = if charging {
-        let p = target.unwrap();
-        [p.pos[0], p.pos[1] + 2.0, p.pos[2]]
-    } else {
-        let angle = f64::from(m.tick_count) * 0.008 + f64::from(m.uuid as u32) * 0.5;
-        [
-            CENTER[0] + angle.cos() * RADIUS,
-            CENTER[1],
-            CENTER[2] + angle.sin() * RADIUS,
-        ]
-    };
-    let dx = goal[0] - m.pos[0];
-    let dy = goal[1] - m.pos[1];
-    let dz = goal[2] - m.pos[2];
-    let horizontal = (dx * dx + dz * dz).sqrt();
-    m.yaw = (path::atan2(dz, dx) * 57.295_776) as f32 - 90.0;
-    m.head_yaw = m.yaw;
-    m.pitch = -(path::atan2(dy, horizontal.max(1e-4)) * 57.295_776) as f32;
-    // Дракон летит заданной скоростью (воздушное ускорение `travel` мало).
-    let speed = if charging { 0.45 } else { 0.3 };
-    if horizontal > 1.0 {
-        m.vel[0] = dx / horizontal * speed;
-        m.vel[2] = dz / horizontal * speed;
-    } else {
-        m.vel[0] = 0.0;
-        m.vel[2] = 0.0;
+
+    let mut goal: Option<[f64; 3]> = None;
+    let mut speed = 0.3f64;
+    match m.dragon_phase {
+        DRAGON_HOLDING => {
+            if m.dragon_phase_time >= 200
+                && let Some(p) = target
+            {
+                m.dragon_cycle += 1;
+                match m.dragon_cycle % 3 {
+                    1 => {
+                        dragon_begin(m, DRAGON_STRAFE, Some(p.pos));
+                        return dragon_ai_step(m, s);
+                    }
+                    2 => {
+                        dragon_begin(m, DRAGON_CHARGING, Some(p.pos));
+                        return dragon_ai_step(m, s);
+                    }
+                    _ => {
+                        dragon_begin(m, DRAGON_LANDING_APPROACH, Some(LAND));
+                        return dragon_ai_step(m, s);
+                    }
+                }
+            }
+            let angle = f64::from(m.tick_count) * 0.008 + f64::from(m.uuid as u32) * 0.5;
+            goal = Some([
+                CENTER[0] + angle.cos() * RADIUS,
+                CENTER[1],
+                CENTER[2] + angle.sin() * RADIUS,
+            ]);
+        }
+        DRAGON_STRAFE => {
+            if let Some(p) = target {
+                m.dragon_target = Some(p.pos);
+                goal = Some([p.pos[0], p.pos[1] + 5.0, p.pos[2]]);
+                speed = 0.4;
+            }
+            if m.dragon_phase_time >= 80 {
+                dragon_begin(m, DRAGON_HOLDING, None);
+            }
+        }
+        DRAGON_CHARGING => {
+            goal = m.dragon_target;
+            speed = 0.5;
+            let close = goal.is_some_and(|g| dist2(g, m.pos) < 9.0);
+            if close || m.dragon_phase_time > 60 {
+                dragon_begin(m, DRAGON_HOLDING, None);
+            }
+        }
+        DRAGON_LANDING_APPROACH => {
+            goal = Some([LAND[0], LAND[1] + 4.0, LAND[2]]);
+            speed = 0.35;
+            if m.dragon_phase_time >= 100 {
+                dragon_begin(m, DRAGON_LANDING, Some(LAND));
+            }
+        }
+        DRAGON_LANDING => {
+            goal = m.dragon_target;
+            speed = 0.35;
+            let close = m.dragon_target.is_some_and(|g| dist2(g, m.pos) < 4.0);
+            if close || m.dragon_phase_time > 100 {
+                m.dragon_flame_count = 0;
+                dragon_begin(m, DRAGON_SITTING_SCANNING, None);
+            }
+        }
+        DRAGON_SITTING_SCANNING => {
+            if m.dragon_phase_time >= 100 {
+                let near = s.players.iter().any(|p| {
+                    dist2(p.pos, m.pos) <= 20.0 * 20.0 && (p.pos[1] - m.pos[1]).abs() <= 10.0
+                });
+                if near {
+                    dragon_begin(m, DRAGON_SITTING_ATTACKING, None);
+                } else {
+                    dragon_begin(m, DRAGON_TAKEOFF, None);
+                }
+            }
+        }
+        DRAGON_SITTING_ATTACKING => {
+            if m.dragon_phase_time >= 40 {
+                dragon_begin(m, DRAGON_SITTING_FLAMING, None);
+            }
+        }
+        DRAGON_SITTING_FLAMING => {
+            if m.dragon_phase_time == 10 {
+                let at = target.map_or_else(
+                    || {
+                        let angle = f64::from(m.yaw + 90.0).to_radians();
+                        [
+                            m.pos[0] + angle.cos() * 2.5,
+                            m.pos[1],
+                            m.pos[2] + angle.sin() * 2.5,
+                        ]
+                    },
+                    |p| {
+                        let dx = p.pos[0] - m.pos[0];
+                        let dz = p.pos[2] - m.pos[2];
+                        let len = (dx * dx + dz * dz).sqrt().max(1e-4);
+                        [
+                            m.pos[0] + dx / len * 2.5,
+                            m.pos[1],
+                            m.pos[2] + dz / len * 2.5,
+                        ]
+                    },
+                );
+                m.out.push(Out::DragonBreathAt(at));
+            }
+            if m.dragon_phase_time >= 200 {
+                m.dragon_flame_count += 1;
+                if m.dragon_flame_count >= 4 {
+                    dragon_begin(m, DRAGON_TAKEOFF, None);
+                } else {
+                    dragon_begin(m, DRAGON_SITTING_SCANNING, None);
+                }
+            }
+        }
+        DRAGON_TAKEOFF => {
+            goal = Some([CENTER[0], 90.0, CENTER[2]]);
+            speed = 0.4;
+            if m.dragon_phase_time >= 60 || m.pos[1] > 85.0 {
+                dragon_begin(m, DRAGON_HOLDING, None);
+            }
+        }
+        _ => dragon_begin(m, DRAGON_HOLDING, None),
     }
-    m.vel[1] = (dy * 0.1).clamp(-0.3, 0.3);
+
+    if let Some(goal) = goal {
+        let dx = goal[0] - m.pos[0];
+        let dy = goal[1] - m.pos[1];
+        let dz = goal[2] - m.pos[2];
+        let horizontal = (dx * dx + dz * dz).sqrt();
+        m.yaw = (path::atan2(dz, dx) * 57.295_776) as f32 - 90.0;
+        m.head_yaw = m.yaw;
+        m.pitch = -(path::atan2(dy, horizontal.max(1e-4)) * 57.295_776) as f32;
+        if horizontal > 1.0 {
+            m.vel[0] = dx / horizontal * speed;
+            m.vel[2] = dz / horizontal * speed;
+        } else {
+            m.vel[0] = 0.0;
+            m.vel[2] = 0.0;
+        }
+        m.vel[1] = (dy * 0.1).clamp(-0.3, 0.3);
+    } else {
+        m.vel = [0.0; 3];
+    }
     m.zza = 0.0;
     m.xxa = 0.0;
-    // Дыхание по цели в 24 блоках раз в 100 тиков.
-    if m.tick_count.is_multiple_of(100)
-        && let Some(p) = s
-            .players
-            .iter()
-            .copied()
-            .filter(|p| dist2(p.pos, m.pos) <= 24.0 * 24.0)
-            .min_by(|a, b| dist2(a.pos, m.pos).total_cmp(&dist2(b.pos, m.pos)))
-    {
-        m.out.push(Out::DragonBreath { target: p.uuid });
-    }
 }
 
 /// `Vex`: полёт к цели, удар раз в 20 тиков и срок жизни
@@ -2677,6 +2817,55 @@ mod tests {
         };
         wither_ai_step(&mut m, &mut s);
         assert!(m.no_gravity);
+    }
+
+    #[test]
+    fn dragon_phases_include_landing_and_flaming_breath() {
+        let mut m = Mob::new(Species::EnderDragon, [0.5, 80.0, 0.5], 3);
+        let players = [Prey {
+            uuid: 7,
+            pos: [0.5, 70.0, 5.5],
+        }];
+        let mut rnd = || 0.5;
+        let sight = |_: [f64; 3], _: [f64; 3]| true;
+        let mut s = Senses {
+            players: &players,
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &sight,
+            difficulty: 2,
+            entity_id: 3,
+            bright_outside: true,
+            mob_griefing: true,
+            jump_boost: None,
+        };
+        let mut seen = [false; 9];
+        let mut breaths = 0;
+        for _ in 0..4000 {
+            m.out.clear();
+            dragon_ai_step(&mut m, &mut s);
+            seen[usize::from(m.dragon_phase)] = true;
+            breaths += m
+                .out
+                .iter()
+                .filter(|o| matches!(o, Out::DragonBreathAt(_)))
+                .count();
+        }
+        for phase in [
+            DRAGON_STRAFE,
+            DRAGON_CHARGING,
+            DRAGON_LANDING_APPROACH,
+            DRAGON_LANDING,
+            DRAGON_SITTING_SCANNING,
+            DRAGON_SITTING_ATTACKING,
+            DRAGON_SITTING_FLAMING,
+            DRAGON_TAKEOFF,
+        ] {
+            assert!(seen[usize::from(phase)], "фаза {phase} не встретилась");
+        }
+        assert!(breaths >= 1, "дыхание не появилось в sitting flaming");
     }
 
     #[test]

@@ -4117,6 +4117,7 @@ impl PlayPlan {
                 Out::Shoot { target, power } => self.mob_shoot(id, Uuid::from_u128(target), power),
                 Out::ShootSkull { target } => self.mob_shoot_skull(id, Uuid::from_u128(target)),
                 Out::DragonBreath { target } => self.spawn_dragon_breath(Uuid::from_u128(target)),
+                Out::DragonBreathAt(pos) => self.spawn_dragon_breath_cloud(pos),
                 // `EatBlockGoal.start`: анимация опущенной головы.
                 Out::EatStart => self
                     .hub

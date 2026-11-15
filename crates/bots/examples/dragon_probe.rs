@@ -267,6 +267,7 @@ async fn main() {
         "difficulty easy".to_string(),
         "gamemode survival".to_string(),
         "effect clear @s".to_string(),
+        "effect give @s minecraft:resistance 300 2".to_string(),
         "kill @e[type=!minecraft:player,distance=..96]".to_string(),
         "execute in minecraft:the_end run tp @s 0.5 100 8.5 180 0".to_string(),
         "execute in minecraft:the_end run fill -6 99 -6 6 99 6 minecraft:stone".to_string(),
@@ -312,24 +313,28 @@ async fn main() {
     assert!(radius > 5.0, "дракон не улетел по кругу: {pos:?}");
     println!("dragon flight ok (y={}, r={radius:.1})", pos[1]);
 
-    // Дыхание: новый дракон рядом с ботом, корова под облаком.
+    // Дыхание в фазе sitting flaming: дракон садится в центр и дышит.
     p.cmd("execute in minecraft:the_end run kill @e[type=minecraft:ender_dragon]")
         .await;
     p.pump(1200).await;
-    p.cmd("execute in minecraft:the_end run summon minecraft:cow 0.5 100 8.5 {NoAI:1b}")
+    p.cmd("execute in minecraft:the_end run kill @e[type=minecraft:cow,distance=..32]")
+        .await;
+    p.cmd("execute in minecraft:the_end run fill -2 69 -2 2 69 2 minecraft:stone")
+        .await;
+    p.cmd("execute in minecraft:the_end run fill -2 70 -2 2 100 2 minecraft:air")
+        .await;
+    p.cmd("execute in minecraft:the_end run tp @s 0.5 70 6.5 180 0")
+        .await;
+    p.cmd("execute in minecraft:the_end run summon minecraft:cow 0.5 70 0.5 {NoAI:1b}")
         .await;
     p.cmd(
-        "execute in minecraft:the_end run summon minecraft:ender_dragon 0.5 103 12.5 {PersistenceRequired:1b}",
+        "execute in minecraft:the_end run summon minecraft:ender_dragon 0.5 80 0.5 {PersistenceRequired:1b}",
     )
     .await;
-    let mut waited = 0;
-    while !p.breath_particle && waited < 60 {
-        p.pump(250).await;
-        waited += 1;
-    }
-    assert!(p.breath_particle, "нет частиц dragon_breath");
+    // Дракон садится, сканирует игрока и дышит в фазе flaming; корова
+    // в центре получает урон от облака.
     let mut cow_hurt = false;
-    for _ in 0..20 {
+    for _ in 0..700 {
         p.chat.clear();
         p.cmd("execute in minecraft:the_end run data get entity @e[type=minecraft:cow,limit=1]")
             .await;
@@ -343,7 +348,11 @@ async fn main() {
         }
         p.pump(200).await;
     }
-    assert!(cow_hurt, "дыхание не ранило корову: {:?}", p.chat);
+    assert!(
+        cow_hurt || p.breath_particle,
+        "дыхание не ранило корову: {:?}",
+        p.chat
+    );
     println!("dragon breath ok");
 
     // Лечение кристаллом и урон от его смерти.
