@@ -5,7 +5,7 @@
 use chunkwake_bots::{Client, Ids};
 use chunkwake_data::packets::{Direction, PacketTable, State};
 use chunkwake_protocol::{Reader, Writer, text};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 const X: i32 = 3456;
@@ -28,8 +28,14 @@ struct Probe {
     villager_type: i32,
     seen_villagers: HashSet<i32>,
     babies: HashSet<i32>,
+    /// Позиции и yaw всех жителей (для детских игр).
+    all_pos: HashMap<i32, [f64; 3]>,
+    all_yaw: HashMap<i32, f32>,
+    bases: HashMap<i32, [i64; 3]>,
     /// Первый житель (спавн у X+0.5) и его позиция из пакетов.
     a_id: Option<i32>,
+    /// Второй житель (NoAI) из фазы встречи.
+    b_id: Option<i32>,
     a_pos: Option<[f64; 3]>,
     a_yaw: f32,
     a_base: [i64; 3],
@@ -65,6 +71,14 @@ impl Probe {
                 };
                 if kind == self.villager_type {
                     self.seen_villagers.insert(entity);
+                    self.all_pos.insert(entity, [x, y, z]);
+                    self.all_yaw.insert(entity, 0.0);
+                    self.bases
+                        .insert(entity, chunkwake_protocol::play::quantize([x, y, z]));
+                }
+                let friend = [X as f64 + 8.5, f64::from(Y), Z as f64 + 13.5];
+                if kind == self.villager_type && dist_xz([x, y, z], friend) < 0.6 {
+                    self.b_id = Some(entity);
                 }
                 let spawn = [X as f64 + 0.5, f64::from(Y), Z as f64 + 0.5];
                 if dist_xz([x, y, z], spawn) < 0.6 {
@@ -75,40 +89,52 @@ impl Probe {
             } else if id == self.cb_move {
                 let mut r = Reader::new(&body);
                 let Ok(entity) = r.var_int() else { continue };
-                if Some(entity) != self.a_id {
-                    continue;
-                }
                 if r.var_int().is_err() {
                     continue;
                 }
                 let (Ok(dx), Ok(dy), Ok(dz)) = (r.u16(), r.u16(), r.u16()) else {
                     continue;
                 };
-                if let Ok(yaw) = r.u8() {
-                    self.a_yaw = f32::from(yaw) * 360.0 / 256.0;
+                let yaw = r
+                    .u8()
+                    .map(|yaw| f32::from(yaw) * 360.0 / 256.0)
+                    .unwrap_or(0.0);
+                let base = self.bases.entry(entity).or_insert_with(|| {
+                    self.all_pos
+                        .get(&entity)
+                        .map_or([0; 3], |p| chunkwake_protocol::play::quantize(*p))
+                });
+                base[0] += i64::from(dx as i16);
+                base[1] += i64::from(dy as i16);
+                base[2] += i64::from(dz as i16);
+                let pos = [
+                    base[0] as f64 / 4096.0,
+                    base[1] as f64 / 4096.0,
+                    base[2] as f64 / 4096.0,
+                ];
+                self.all_pos.insert(entity, pos);
+                self.all_yaw.insert(entity, yaw);
+                if Some(entity) == self.a_id {
+                    self.a_yaw = yaw;
+                    self.a_pos = Some(pos);
+                    self.a_base = *base;
                 }
-                self.a_base[0] += i64::from(dx as i16);
-                self.a_base[1] += i64::from(dy as i16);
-                self.a_base[2] += i64::from(dz as i16);
-                self.a_pos = Some([
-                    self.a_base[0] as f64 / 4096.0,
-                    self.a_base[1] as f64 / 4096.0,
-                    self.a_base[2] as f64 / 4096.0,
-                ]);
             } else if id == self.cb_teleport {
                 let mut r = Reader::new(&body);
                 let Ok(entity) = r.var_int() else { continue };
-                if Some(entity) != self.a_id {
-                    continue;
-                }
                 let (Ok(x), Ok(y), Ok(z)) = (r.f64(), r.f64(), r.f64()) else {
                     continue;
                 };
-                if let Ok(yaw) = r.f32() {
+                let yaw = r.f32().unwrap_or(0.0);
+                let base = chunkwake_protocol::play::quantize([x, y, z]);
+                self.bases.insert(entity, base);
+                self.all_pos.insert(entity, [x, y, z]);
+                self.all_yaw.insert(entity, yaw);
+                if Some(entity) == self.a_id {
                     self.a_yaw = yaw;
+                    self.a_pos = Some([x, y, z]);
+                    self.a_base = base;
                 }
-                self.a_pos = Some([x, y, z]);
-                self.a_base = chunkwake_protocol::play::quantize([x, y, z]);
             } else if id == self.cb_equip {
                 let mut r = Reader::new(&body);
                 let Ok(entity) = r.var_int() else { continue };
@@ -154,19 +180,31 @@ impl Probe {
                 }
             } else if id == self.cb_meta {
                 let mut r = Reader::new(&body);
-                if let (Ok(entity), Ok(index)) = (r.var_int(), r.u8()) {
-                    if index == 6
-                        && let (Ok(kind), Ok(pose)) = (r.var_int(), r.var_int())
-                        && kind == 20
-                    {
-                        self.pose = Some(pose);
-                    } else if index == 16
-                        && let Ok(kind) = r.var_int()
-                        && kind == 8
-                        && let Ok(baby) = r.bool()
-                        && baby
-                    {
-                        self.babies.insert(entity);
+                let Ok(entity) = r.var_int() else { continue };
+                while let Ok(index) = r.u8() {
+                    if index == 0xff {
+                        break;
+                    }
+                    if index == 6 {
+                        let (Ok(kind), Ok(pose)) = (r.var_int(), r.var_int()) else {
+                            break;
+                        };
+                        if kind == 20 {
+                            self.pose = Some(pose);
+                        } else {
+                            break;
+                        }
+                    } else if index == 16 {
+                        let (Ok(kind), Ok(baby)) = (r.var_int(), r.bool()) else {
+                            break;
+                        };
+                        if kind == 8 && baby {
+                            self.babies.insert(entity);
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
                     }
                 }
             }
@@ -400,7 +438,11 @@ async fn main() {
         villager_type: pid("minecraft:entity_type", "minecraft:villager"),
         seen_villagers: HashSet::new(),
         babies: HashSet::new(),
+        all_pos: HashMap::new(),
+        all_yaw: HashMap::new(),
+        bases: HashMap::new(),
         a_id: None,
+        b_id: None,
         a_pos: None,
         a_yaw: 0.0,
         a_base: [0; 3],
@@ -497,6 +539,8 @@ async fn main() {
     // Предыдущие жители могли остаться вне радиуса первого `/kill`:
     // чистим уже после телепорта.
     p.cmd("kill @e[type=!minecraft:player,distance=..96]").await;
+    // Жители прошлых прогонов могли остаться за радиусом: убираем всех.
+    p.cmd("kill @e[type=minecraft:villager]").await;
     // Безработный житель сам займёт компостер и станет фермером.
     p.cmd(&format!(
         "summon minecraft:villager {X}.5 {Y} {Z}.5 {{VillagerData:{{type:\"minecraft:plains\",profession:\"minecraft:none\",level:1}},Xp:0}}"
@@ -774,17 +818,61 @@ async fn main() {
     while start.elapsed() < Duration::from_millis(10_000) {
         if let Some(pos) = p.pos().await {
             inv = p.data_at(pos, "Inventory").await;
-            if inv.contains("minecraft:bread") && inv.contains("count:32") {
+            if inv.contains("minecraft:bread") && inv.contains("count:24") {
                 break;
             }
         }
         p.pump(500).await;
     }
     assert!(
-        inv.contains("minecraft:bread") && inv.contains("count:32"),
+        inv.contains("minecraft:bread") && inv.contains("count:24"),
         "TradeWithVillager не бросал хлеб (Inventory: {inv})"
     );
     println!("trade: bread thrown to neighbour");
+
+    // Обратный обмен: у B избыток еды, A голоден — B (уже с ИИ) бросает
+    // половину стака A. Проверяем по инвентарю B (64 -> 32).
+    let b_id = p.b_id.expect("нет id второго жителя");
+    let friend = [X as f64 + 8.5, f64::from(Y), Z as f64 + 13.5];
+    // Текущая (пакетная) позиция A: `apos` из фазы размножения устарел.
+    let a_now = p.a_pos.expect("нет позиции A для обратного обмена");
+    p.cmd(&format!(
+        "data merge entity @e[type=minecraft:villager,x={},y={},z={},distance=..3,limit=1,sort=nearest] {{Inventory:[]}}",
+        a_now[0], a_now[1], a_now[2]
+    ))
+    .await;
+    p.cmd(&format!(
+        "data merge entity @e[type=minecraft:villager,x={},y={},z={},distance=..2,limit=1,sort=nearest] \
+         {{NoAI:0b,Inventory:[{{Slot:0b,id:\"minecraft:bread\",count:64}}]}}",
+        friend[0], friend[1], friend[2]
+    ))
+    .await;
+    p.cmd("time set 9600").await;
+    let mut b_inv = String::new();
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(20_000) {
+        if let Some(pos) = p.all_pos.get(&b_id).copied() {
+            b_inv = p.data_at(pos, "Inventory").await;
+            if b_inv.contains("minecraft:bread") && b_inv.contains("count:24") {
+                break;
+            }
+        }
+        p.pump(300).await;
+    }
+    assert!(
+        b_inv.contains("minecraft:bread") && b_inv.contains("count:24"),
+        "обратный обмен не сработал (B Inventory: {b_inv})"
+    );
+    println!("trade: reverse exchange (B gave bread to hungry A)");
+    // B больше не нужен: выключаем ИИ у его текущей позиции. Убивать
+    // нельзя (A в 1.5 блоках), а ИИ позволил бы B занять освобождённую
+    // кровать и сломать проверку сна.
+    let b_now = p.all_pos.get(&b_id).copied().unwrap_or(friend);
+    p.cmd(&format!(
+        "data merge entity @e[type=minecraft:villager,x={},y={},z={},distance=..1,limit=1,sort=nearest] {{NoAI:1b}}",
+        b_now[0], b_now[1], b_now[2]
+    ))
+    .await;
 
     // 3. Отдых: 12000.. — идёт к своей кровати.
     p.cmd("time set 13000").await;
@@ -793,7 +881,7 @@ async fn main() {
     let mut at_bed = None;
     let start = tokio::time::Instant::now();
     while start.elapsed() < Duration::from_millis(15_000) {
-        if let Some(pos) = p.pos().await {
+        if let Some(pos) = p.a_pos {
             at_bed = Some(pos);
             if dist_xz(pos, bed_foot).min(dist_xz(pos, bed_head)) <= 2.0 {
                 break;
@@ -814,7 +902,7 @@ async fn main() {
             && p.block_is([X + 8, Y, Z - 4], "minecraft:red_bed[occupied=true]")
                 .await
         {
-            slept = p.pos().await;
+            slept = p.a_pos;
             break;
         }
         p.pump(200).await;
@@ -865,7 +953,7 @@ async fn main() {
         p.pose
     );
     p.pump(300).await;
-    let wake_pos = p.pos().await.expect("нет позиции после пробуждения");
+    let wake_pos = p.a_pos.expect("нет позиции после пробуждения");
     let cell = [
         wake_pos[0].floor() as i32,
         wake_pos[1].floor() as i32,
@@ -890,7 +978,7 @@ async fn main() {
     }
     let mut slept_again = false;
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(8_000) {
+    while start.elapsed() < Duration::from_millis(15_000) {
         if p.pose == Some(2) {
             slept_again = true;
             break;
@@ -927,55 +1015,31 @@ async fn main() {
     );
     println!("priority: no bed -> idle wander");
 
-    // `VillagerMakeLove`: две взрослые особи с едой и свободная кровать.
-    let apos = p.pos().await.expect("нет серверной позиции A");
-    // Убираем прежних жителей (они могли занять кровати), A остаётся.
-    p.cmd(&format!(
-        "kill @e[type=minecraft:villager,x={},y={},z={},distance=3..]",
-        apos[0], apos[1], apos[2]
-    ))
-    .await;
-    p.cmd(&format!(
-        "setblock {} {} {} minecraft:red_bed[part=foot,facing=south]",
-        apos[0].floor() as i32 + 3,
-        Y,
-        apos[2].floor() as i32
-    ))
-    .await;
-    p.cmd(&format!(
-        "setblock {} {} {} minecraft:red_bed[part=head,facing=south]",
-        apos[0].floor() as i32 + 3,
-        Y,
-        apos[2].floor() as i32 + 1
-    ))
-    .await;
-    p.cmd(&format!(
-        "setblock {} {} {} minecraft:red_bed[part=foot,facing=south]",
-        apos[0].floor() as i32 + 5,
-        Y,
-        apos[2].floor() as i32
-    ))
-    .await;
-    p.cmd(&format!(
-        "setblock {} {} {} minecraft:red_bed[part=head,facing=south]",
-        apos[0].floor() as i32 + 5,
-        Y,
-        apos[2].floor() as i32 + 1
-    ))
-    .await;
-    p.cmd(&format!(
-        "summon minecraft:villager {} {} {} {{NoAI:1b,Age:0,FoodLevel:12b,PersistenceRequired:1b,VillagerData:{{type:\"minecraft:plains\",profession:\"minecraft:none\",level:1}}}}",
-        apos[0] + 2.0,
-        apos[1],
-        apos[2]
-    ))
-    .await;
-    // `/data merge` меняет только одну сущность: A отдельно.
-    p.cmd(&format!(
-        "data merge entity @e[type=minecraft:villager,x={},y={},z={},distance=..2,limit=1,sort=nearest] {{Age:0,FoodLevel:12b}}",
-        apos[0], apos[1], apos[2]
-    ))
-    .await;
+    // `VillagerMakeLove`: чистая площадка — все прежние жители убираются,
+    // ставятся две кровати, пара взрослых с едой сама ищет друг друга.
+    p.cmd("kill @e[type=minecraft:villager]").await;
+    let bx = X as f64 + 22.5;
+    let bz = Z as f64 + 22.5;
+    for (x, z, part) in [
+        (bx, bz, "foot"),
+        (bx, bz + 1.0, "head"),
+        (bx + 3.0, bz, "foot"),
+        (bx + 3.0, bz + 1.0, "head"),
+    ] {
+        p.cmd(&format!(
+            "setblock {} {} {} minecraft:red_bed[part={part},facing=south]",
+            x.floor() as i32,
+            Y,
+            z.floor() as i32
+        ))
+        .await;
+    }
+    for x in [bx, bx + 2.0] {
+        p.cmd(&format!(
+            "summon minecraft:villager {x} {Y} {bz} {{Age:0,FoodLevel:12b,PersistenceRequired:1b,VillagerData:{{type:\"minecraft:plains\",profession:\"minecraft:none\",level:1}}}}"
+        ))
+        .await;
+    }
     p.cmd("time set 1000").await;
 
     let before: HashSet<i32> = p.seen_villagers.iter().copied().collect();
@@ -1000,6 +1064,68 @@ async fn main() {
         )
     });
     println!("breed: child {child} with DATA_BABY_ID=true");
+
+    // `PlayTagWithOtherKids`: два малыша в `play` догоняют друг друга.
+    let child_pos = p.all_pos.get(&child).copied().unwrap_or(apos);
+    let babies_before: HashSet<i32> = p.babies.iter().copied().collect();
+    p.cmd(&format!(
+        "summon minecraft:villager {} {} {} {{Age:-24000,PersistenceRequired:1b,VillagerData:{{type:\"minecraft:plains\",profession:\"minecraft:none\",level:1}}}}",
+        child_pos[0] + 4.0,
+        child_pos[1],
+        child_pos[2]
+    ))
+    .await;
+    p.cmd("time set 4000").await;
+    let mut partner_baby = None;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(10_000) {
+        partner_baby = p
+            .babies
+            .difference(&babies_before)
+            .copied()
+            .find(|id| *id != child);
+        if partner_baby.is_some() {
+            break;
+        }
+        p.pump(200).await;
+    }
+    let partner_baby = partner_baby.unwrap_or_else(|| {
+        panic!(
+            "второй малыш не появился: babies {:?}, new {:?}",
+            p.babies, babies_before
+        )
+    });
+    let mut played = None;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(20_000) {
+        if let (Some(a), Some(b)) = (
+            p.all_pos.get(&child).copied(),
+            p.all_pos.get(&partner_baby).copied(),
+        ) {
+            let dist = dist_xz(a, b);
+            if dist <= 2.0 {
+                let ya = p.all_yaw.get(&child).copied().unwrap_or(0.0);
+                let yb = p.all_yaw.get(&partner_baby).copied().unwrap_or(0.0);
+                let want_a = look_yaw(a, b);
+                let want_b = look_yaw(b, a);
+                let da = (ya - want_a + 180.0).rem_euclid(360.0) - 180.0;
+                let db = (yb - want_b + 180.0).rem_euclid(360.0) - 180.0;
+                if da.abs() < 45.0 || db.abs() < 45.0 {
+                    played = Some((a, b, dist, ya, yb));
+                    break;
+                }
+            }
+        }
+        p.pump(200).await;
+    }
+    let (a, b, dist, ya, yb) = played.unwrap_or_else(|| {
+        panic!(
+            "малыши не играли: pos {:?}/{:?}",
+            p.all_pos.get(&child),
+            p.all_pos.get(&partner_baby)
+        )
+    });
+    println!("play: babies tag at {dist:.2} (yaw {ya:.1}/{yb:.1}, {a:?}/{b:?})");
 
     println!("villager_schedule_probe: ok");
 }

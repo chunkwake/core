@@ -163,6 +163,7 @@ struct Birth {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Activity {
     Idle,
+    Play,
     Work,
     Meet,
     Rest,
@@ -177,6 +178,19 @@ impl Activity {
             2000..9000 => Activity::Work,
             9000..11000 => Activity::Meet,
             11000..12000 => Activity::Idle,
+            _ => Activity::Rest,
+        }
+    }
+
+    /// Детское расписание (`baby_villager_activity`): 10 idle, 3000 play,
+    /// 6000 idle, 10000 play, 12000 rest.
+    fn at_baby(day_time: i64) -> Self {
+        match day_time.rem_euclid(24_000) {
+            0..10 => Activity::Rest,
+            10..3000 => Activity::Idle,
+            3000..6000 => Activity::Play,
+            6000..10_000 => Activity::Idle,
+            10_000..12_000 => Activity::Play,
             _ => Activity::Rest,
         }
     }
@@ -387,6 +401,8 @@ pub struct Villager {
     pub age: i32,
     /// `Villager.foodLevel`.
     pub food_level: i32,
+    /// `MemoryModuleType.INTERACTION_TARGET` детской игры в салки.
+    pub tag_target: Option<u128>,
     /// `MemoryModuleType.BREED_TARGET` и время рождения.
     pub breed_target: Option<u128>,
     pub breed_partner: Option<i32>,
@@ -1243,6 +1259,7 @@ impl PlayPlan {
         profiles: &[VillagerProfile],
         threats: &[[f64; 3]],
         breedable: &[(i32, bool)],
+        babies: &[(i32, u128, [f64; 3], Option<u128>)],
         births: &mut Vec<Birth>,
         gossip: &mut Vec<(i32, i32)>,
     ) -> Option<([f64; 3], f32)> {
@@ -1280,6 +1297,13 @@ impl PlayPlan {
         if v.hurt_until != 0 {
             v.hurt_until = 0;
             v.hurt_from = None;
+        }
+        // `PlayTagWithOtherKids`: малыши в `play` играют в салки.
+        if v.age < 0
+            && v.activity == Activity::Play
+            && let Some(step) = self.play_tag_step(id, v, babies)
+        {
+            return Some(step);
         }
         if v.activity == Activity::Idle
             && (v.breed_target.is_some() || self.can_breed(v))
@@ -1635,6 +1659,85 @@ impl PlayPlan {
     /// `Villager.canBreed`: еда + инвентарь >= 12, не спит, `age == 0`.
     fn can_breed(&self, v: &Villager) -> bool {
         v.food_level + self.food_points(v) >= 12 && v.sleeping.is_none() && v.age == 0
+    }
+
+    /// `PlayTagWithOtherKids`: раз в 10 тиков малыш либо убегает от того,
+    /// кто его догоняет, либо сам догоняет другого малыша (0.6 modifier).
+    fn play_tag_step(
+        &self,
+        id: i32,
+        v: &mut Villager,
+        babies: &[(i32, u128, [f64; 3], Option<u128>)],
+    ) -> Option<([f64; 3], f32)> {
+        let me = v.uuid.as_u128();
+        // `level.getRandom().nextInt(10) != 0` — продолжаем текущую погоню.
+        if !rand::random::<u32>().is_multiple_of(10) {
+            let target = v.tag_target?;
+            let (_, _, pos, _) = babies.iter().find(|(_, u, _, _)| *u == target)?;
+            v.yaw = look_yaw(v.pos, *pos);
+            return self.walk_step(v, *pos, 0.17);
+        }
+        // Кто-то гонится за мной — убегаем (`LandRandomPos` 20 x 8).
+        let chased = babies
+            .iter()
+            .any(|(other, _, _, target)| *other != id && *target == Some(me));
+        if chased {
+            v.tag_target = None;
+            if v.move_target.is_none() || v.wander_timer <= 0 {
+                v.move_target = self.flee_point(v.pos);
+                v.wander_timer = 40;
+            }
+            v.wander_timer -= 1;
+            return self.walk_step(v, v.move_target?, 0.17);
+        }
+        // Ищем, кого уже догоняют (1..=5 преследователей), иначе любого.
+        let mut counts: Vec<(u128, i32)> = Vec::new();
+        for (_, _, _, target) in babies {
+            if let Some(target) = target {
+                match counts.iter_mut().find(|(u, _)| u == target) {
+                    Some(entry) => entry.1 += 1,
+                    None => counts.push((*target, 1)),
+                }
+            }
+        }
+        let candidate = counts
+            .iter()
+            .filter(|(_, n)| (1..=5).contains(n))
+            .min_by_key(|(_, n)| *n)
+            .map(|(u, _)| *u)
+            .or_else(|| {
+                babies
+                    .iter()
+                    .find(|(other, _, _, _)| *other != id)
+                    .map(|(_, u, _, _)| *u)
+            })?;
+        let (_, _, pos, _) = babies.iter().find(|(_, u, _, _)| *u == candidate)?;
+        v.tag_target = Some(candidate);
+        v.yaw = look_yaw(v.pos, *pos);
+        self.walk_step(v, *pos, 0.17)
+    }
+
+    /// Случайная проходимая точка в 20 блоках по XZ и 8 по Y.
+    fn flee_point(&self, pos: [f64; 3]) -> Option<[f64; 3]> {
+        for _ in 0..10 {
+            let dx = f64::from(rand::random::<u32>() % 41) - 20.0;
+            let dz = f64::from(rand::random::<u32>() % 41) - 20.0;
+            let dy = f64::from(rand::random::<u32>() % 9) - 4.0;
+            let target = [pos[0] + dx, pos[1] + dy, pos[2] + dz];
+            let cell = target.map(|v| v.floor() as i32);
+            let below = [cell[0], cell[1] - 1, cell[2]];
+            if !self.walk_blocked(cell)
+                && !self.walk_blocked([cell[0], cell[1] + 1, cell[2]])
+                && self
+                    .block(below)
+                    .is_some_and(|s| self.survival.placement.solid(s))
+                && !self.dangerous_block(cell)
+                && !self.dangerous_block(below)
+            {
+                return Some(target);
+            }
+        }
+        None
     }
 
     /// `VillagerMakeLove`: пара, 275-325 тиков, свободная кровать и ребёнок.
@@ -2083,6 +2186,7 @@ impl PlayPlan {
             hurt_from: None,
             age: 0,
             food_level: 0,
+            tag_target: None,
             breed_target: None,
             breed_partner: None,
             breed_until: 0,
@@ -2148,6 +2252,9 @@ impl PlayPlan {
                 self.ids.set_entity_data,
                 id,
                 &[
+                    // Флаг ребёнка первым: клиентские сенсоры читают его
+                    // раньше остальных метаданных.
+                    (16, play::Meta::Bool(v.age < 0)),
                     (
                         18,
                         play::Meta::VillagerData {
@@ -2156,7 +2263,6 @@ impl PlayPlan {
                             level: v.level,
                         },
                     ),
-                    (16, play::Meta::Bool(v.age < 0)),
                     (19, play::Meta::Bool(true)),
                 ],
             ));
@@ -2203,6 +2309,15 @@ impl PlayPlan {
             .unwrap()
             .iter()
             .map(|(&id, v)| (id, v.uuid.as_u128(), v.pos))
+            .collect();
+        let babies: Vec<(i32, u128, [f64; 3], Option<u128>)> = self
+            .sim()
+            .villagers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, v)| v.age < 0)
+            .map(|(&id, v)| (id, v.uuid.as_u128(), v.pos, v.tag_target))
             .collect();
         let breedable: Vec<(i32, bool)> = self
             .sim()
@@ -2290,13 +2405,18 @@ impl PlayPlan {
             } else if v.age > 0 {
                 v.age -= 1;
             }
-            let activity = Activity::at(day);
+            let activity = if v.age < 0 {
+                Activity::at_baby(day)
+            } else {
+                Activity::at(day)
+            };
             if v.activity != activity {
                 v.activity = activity;
                 v.move_target = None;
                 v.wander_timer = 0;
                 v.meeting_point = None;
                 v.interaction_target = None;
+                v.tag_target = None;
             }
             if v.trader == TraderKind::Villager && !v.no_ai {
                 if now - v.last_home_check >= 100 {
@@ -2320,6 +2440,7 @@ impl PlayPlan {
                         &profiles,
                         &threats,
                         &breedable,
+                        &babies,
                         &mut births,
                         &mut gossip,
                     )
@@ -3020,6 +3141,7 @@ impl PlayPlan {
             hurt_from: None,
             age: 0,
             food_level: 0,
+            tag_target: None,
             breed_target: None,
             breed_partner: None,
             breed_until: 0,
@@ -3162,6 +3284,8 @@ fn apply_villager_nbt(v: &mut Villager, c: &Compound, item: impl Fn(&str) -> Opt
         v.food_level = i32::from(*food);
     }
     if let Some(Tag::List(items)) = c.get("Inventory") {
+        // `/data merge` заменяет список, а не дополняет его.
+        v.inventory = [None; 8];
         for entry in items {
             let Tag::Compound(e) = entry else { continue };
             let Some(slot) = e.get("Slot").and_then(Tag::as_i64) else {
@@ -3324,6 +3448,7 @@ mod tests {
             hurt_from: None,
             age: 0,
             food_level: 0,
+            tag_target: None,
             breed_target: None,
             breed_partner: None,
             breed_until: 0,
@@ -3450,6 +3575,21 @@ mod tests {
         assert!((look_yaw([0.0; 3], [1.0, 0.0, 0.0]) + 90.0).abs() < 0.001);
         assert!((look_yaw([0.0; 3], [-1.0, 0.0, 0.0]) - 90.0).abs() < 0.001);
         assert!((look_yaw([0.0; 3], [0.0, 0.0, -1.0]).abs() - 180.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn baby_schedule_matches_timeline() {
+        use Activity::*;
+        assert_eq!(Activity::at_baby(0), Rest);
+        assert_eq!(Activity::at_baby(10), Idle);
+        assert_eq!(Activity::at_baby(2999), Idle);
+        assert_eq!(Activity::at_baby(3000), Play);
+        assert_eq!(Activity::at_baby(5999), Play);
+        assert_eq!(Activity::at_baby(6000), Idle);
+        assert_eq!(Activity::at_baby(9999), Idle);
+        assert_eq!(Activity::at_baby(10_000), Play);
+        assert_eq!(Activity::at_baby(11_999), Play);
+        assert_eq!(Activity::at_baby(12_000), Rest);
     }
 
     #[test]
