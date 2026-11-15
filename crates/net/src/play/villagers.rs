@@ -126,6 +126,8 @@ fn look_yaw(from: [f64; 3], to: [f64; 3]) -> f32 {
 type VillagerRef = (i32, u128, [f64; 3]);
 /// Узлы пути жителя: id, позиция, `from`, `to`.
 type VillagerPath = (i32, [f64; 3], [i32; 3], [i32; 3]);
+/// Профессия и голод жителя для `TradeWithVillager`.
+type VillagerProfile = (i32, String, bool);
 
 /// `timeline/villager_schedule.json` 26.3 (взрослый житель).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -351,6 +353,15 @@ pub struct Villager {
     /// `InteractWithDoor` cooldown после закрытия двери.
     pub door_node: Option<[i32; 3]>,
     pub door_cooldown: i64,
+    /// `AbstractVillager.inventory` (8 слотов).
+    pub inventory: [Option<Stack>; 8],
+    /// `ShowTradesToPlayer`: игрок, которому показываем сделки.
+    pub show_player: Option<Uuid>,
+    pub show_items: Vec<Stack>,
+    pub show_index: usize,
+    pub show_cycle: i32,
+    pub show_timer: i32,
+    pub show_sent: Option<i32>,
     /// Узлы текущего шага (`Path.getPreviousNode`/`getNextNode`).
     pub path_from: Option<[i32; 3]>,
     pub path_to: Option<[i32; 3]>,
@@ -1187,6 +1198,7 @@ impl PlayPlan {
         id: i32,
         v: &mut Villager,
         others: &[VillagerRef],
+        profiles: &[VillagerProfile],
         gossip: &mut Vec<(i32, i32)>,
     ) -> Option<([f64; 3], f32)> {
         // `MEETING_POINT` ищется до выбора цели, иначе стек не увидит встречу.
@@ -1222,7 +1234,7 @@ impl PlayPlan {
                 self.stand_near(home, v.pos)
             }
             Goal::Meet => {
-                if let Some(step) = self.socialize_step(id, v, others, gossip) {
+                if let Some(step) = self.socialize_step(id, v, others, profiles, gossip) {
                     return Some(step);
                 }
                 if v.move_target.is_none() {
@@ -1274,6 +1286,218 @@ impl PlayPlan {
             }
         }
         true
+    }
+
+    /// `Villager.countFoodPointsInInventory`.
+    fn food_points(&self, v: &Villager) -> i32 {
+        v.inventory
+            .iter()
+            .flatten()
+            .map(|s| {
+                self.survival
+                    .items
+                    .get(s.item as usize)
+                    .and_then(|i| i.food)
+                    .map_or(0, |f| f.nutrition * s.count)
+            })
+            .sum()
+    }
+
+    fn has_excess_food(&self, v: &Villager) -> bool {
+        self.food_points(v) >= 24
+    }
+
+    fn wants_more_food(&self, v: &Villager) -> bool {
+        self.food_points(v) < 12
+    }
+
+    /// `VillagerProfession.requestedItems` (в 26.3 только фермер).
+    fn requested_items(profession: &str) -> &'static [&'static str] {
+        if profession == "minecraft:farmer" {
+            &[
+                "minecraft:wheat",
+                "minecraft:wheat_seeds",
+                "minecraft:beetroot_seeds",
+                "minecraft:bone_meal",
+            ]
+        } else {
+            &[]
+        }
+    }
+
+    /// `TradeWithVillager.throwHalfStack`: половина стака (или всё сверх 24).
+    fn throw_half_stack(
+        &self,
+        v: &mut Villager,
+        target: [f64; 3],
+        predicate: impl Fn(i32) -> bool,
+    ) -> Option<Stack> {
+        for slot in &mut v.inventory {
+            let Some(stack) = slot else { continue };
+            if !predicate(stack.item) {
+                continue;
+            }
+            let max = self.max_stack(stack.item).max(1);
+            let count = if stack.count > max / 2 {
+                stack.count / 2
+            } else if stack.count > 24 {
+                stack.count - 24
+            } else {
+                continue;
+            };
+            if count <= 0 {
+                continue;
+            }
+            stack.count -= count;
+            let out = Stack::new(stack.item, count);
+            if stack.count <= 0 {
+                *slot = None;
+            }
+            let dx = target[0] - v.pos[0];
+            let dy = target[1] + 1.0 - (v.pos[1] + 1.2);
+            let dz = target[2] - v.pos[2];
+            let len = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-4);
+            let vel = [dx / len * 0.3, dy / len * 0.3 + 0.1, dz / len * 0.3];
+            self.drop_item(
+                [v.pos[0], v.pos[1] + 1.2, v.pos[2]],
+                vel,
+                out,
+                items::BLOCK_DELAY,
+            );
+            return Some(out);
+        }
+        None
+    }
+
+    /// `TradeWithVillager.tick`: еда и requestedItems.
+    fn trade_step(
+        &self,
+        v: &mut Villager,
+        target: [f64; 3],
+        target_profession: &str,
+        target_wants_food: bool,
+    ) {
+        let is_farmer = v.profession == "minecraft:farmer";
+        if self.has_excess_food(v) && (is_farmer || target_wants_food) {
+            self.throw_half_stack(v, target, |item| {
+                self.survival
+                    .items
+                    .get(item as usize)
+                    .is_some_and(|i| i.food.is_some())
+            });
+        }
+        if is_farmer {
+            let wheat = self.item_id("minecraft:wheat");
+            if let Some(wheat) = wheat {
+                let total: i32 = v
+                    .inventory
+                    .iter()
+                    .flatten()
+                    .filter(|s| s.item == wheat)
+                    .map(|s| s.count)
+                    .sum();
+                if total > 32 {
+                    self.throw_half_stack(v, target, |item| item == wheat);
+                }
+            }
+        }
+        let wanted: Vec<&str> = Self::requested_items(target_profession)
+            .iter()
+            .copied()
+            .filter(|name| !Self::requested_items(&v.profession).contains(name))
+            .collect();
+        if !wanted.is_empty() {
+            self.throw_half_stack(v, target, |item| {
+                wanted.iter().any(|name| self.item_id(name) == Some(item))
+            });
+        }
+    }
+
+    /// `ShowTradesToPlayer`: показать в основной руке результат сделки,
+    /// чью цену держит nearby-игрок; цикл раз в 40 тиков.
+    fn show_trades_step(
+        &self,
+        id: i32,
+        v: &mut Villager,
+        players: &[(Uuid, [f64; 3], Option<Stack>)],
+    ) {
+        let mut best: Option<(Uuid, [f64; 3], Stack)> = None;
+        for &(uuid, pos, held) in players {
+            let Some(held) = held else { continue };
+            if crate::mobs::dist2(v.pos, pos) > 4.1 * 4.1 || !self.has_line_of_sight(v.pos, pos) {
+                continue;
+            }
+            let offer = v.offers.iter().find(|o| {
+                !o.out_of_stock()
+                    && (o.buy.0 == held.item || o.buy_b.is_some_and(|(item, _)| item == held.item))
+            });
+            if let Some(offer) = offer
+                && best.is_none()
+            {
+                best = Some((uuid, pos, offer.sell));
+            }
+        }
+        let Some((uuid, pos, _)) = best else {
+            if v.show_player.is_some() {
+                self.hub.send(
+                    None,
+                    play::set_equipment(self.ids.set_equipment, id, &[(0, None)]),
+                );
+            }
+            v.show_player = None;
+            v.show_items.clear();
+            v.show_sent = None;
+            return;
+        };
+        if v.show_player != Some(uuid) {
+            v.show_player = Some(uuid);
+            let held = players
+                .iter()
+                .find(|(u, _, _)| *u == uuid)
+                .and_then(|(_, _, s)| *s);
+            v.show_items = v
+                .offers
+                .iter()
+                .filter(|o| !o.out_of_stock())
+                .filter(|o| {
+                    held.is_some_and(|h| {
+                        o.buy.0 == h.item || o.buy_b.is_some_and(|(item, _)| item == h.item)
+                    })
+                })
+                .map(|o| o.sell)
+                .collect();
+            v.show_index = 0;
+            v.show_cycle = 0;
+            v.show_timer = 900;
+            v.show_sent = None;
+        }
+        if v.show_items.is_empty() {
+            return;
+        }
+        v.show_cycle += 1;
+        if v.show_cycle >= 40 && v.show_items.len() >= 2 {
+            v.show_cycle = 0;
+            v.show_index = (v.show_index + 1) % v.show_items.len();
+        }
+        let item = v.show_items[v.show_index];
+        if v.show_sent != Some(item.item) {
+            v.show_sent = Some(item.item);
+            self.hub.send(
+                None,
+                play::set_equipment(self.ids.set_equipment, id, &[(0, Some(item))]),
+            );
+        }
+        v.yaw = look_yaw(v.pos, pos);
+        v.show_timer -= 1;
+        if v.show_timer <= 0 {
+            self.hub.send(
+                None,
+                play::set_equipment(self.ids.set_equipment, id, &[(0, None)]),
+            );
+            v.show_player = None;
+            v.show_items.clear();
+            v.show_sent = None;
+        }
     }
 
     /// `Villager.gossip`: передать до 10 слухов с `decayPerTransfer`,
@@ -1339,6 +1563,7 @@ impl PlayPlan {
         id: i32,
         v: &mut Villager,
         others: &[VillagerRef],
+        profiles: &[VillagerProfile],
         gossip: &mut Vec<(i32, i32)>,
     ) -> Option<([f64; 3], f32)> {
         if let Some(target) = v.interaction_target {
@@ -1356,9 +1581,16 @@ impl PlayPlan {
             if crate::mobs::dist2(v.pos, *pos) > 1.2 * 1.2 {
                 return self.walk_step(v, *pos, 0.14);
             }
-            // `TradeWithVillager.tick`: смотреть друг на друга и обмениваться
-            // слухами (`Villager.gossip`, не чаще 1200 тиков).
+            // `TradeWithVillager.tick`: смотреть друг на друга, обмениваться
+            // слухами (`Villager.gossip`) и едой/requestedItems.
             gossip.push((id, *other_id));
+            if let Some((_, _, target_pos)) =
+                others.iter().find(|(other, _, _)| *other == *other_id)
+                && let Some((_, profession, wants_food)) =
+                    profiles.iter().find(|(pid, _, _)| pid == other_id)
+            {
+                self.trade_step(v, *target_pos, profession, *wants_food);
+            }
             let yaw = look_yaw(v.pos, *pos);
             v.yaw = yaw;
             return Some((v.pos, yaw));
@@ -1626,6 +1858,13 @@ impl PlayPlan {
             last_gossip_time: 0,
             door_node: None,
             door_cooldown: 0,
+            inventory: [None; 8],
+            show_player: None,
+            show_items: Vec::new(),
+            show_index: 0,
+            show_cycle: 0,
+            show_timer: 0,
+            show_sent: None,
             path_from: None,
             path_to: None,
             last_work_check: self.game_time(),
@@ -1734,6 +1973,21 @@ impl PlayPlan {
             .iter()
             .map(|(&id, v)| (id, v.uuid.as_u128(), v.pos))
             .collect();
+        let profiles: Vec<VillagerProfile> = self
+            .sim()
+            .villagers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(&id, v)| (id, v.profession.clone(), self.wants_more_food(v)))
+            .collect();
+        let players: Vec<(Uuid, [f64; 3], Option<Stack>)> = self
+            .live
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(uuid, l)| (*uuid, l.pos, l.slots[36 + l.selected.min(8)]))
+            .collect();
         let paths: Vec<VillagerPath> = self
             .sim()
             .villagers
@@ -1805,11 +2059,13 @@ impl PlayPlan {
                 }
                 self.close_villager_doors(id, v, &others, &paths);
                 if v.sleeping.is_none()
-                    && let Some((pos, yaw)) = self.villager_ai_step(id, v, &others, &mut gossip)
+                    && let Some((pos, yaw)) =
+                        self.villager_ai_step(id, v, &others, &profiles, &mut gossip)
                 {
                     moves.push((id, pos, yaw, v.sent_pos));
-                    v.sent_pos = play::quantize(pos);
+                    v.sent_pos = play::quantize(v.pos);
                 }
+                self.show_trades_step(id, v, &players);
             }
             if v.trader == TraderKind::Villager {
                 let hero = heroes
@@ -2342,6 +2598,21 @@ impl PlayPlan {
             c.insert("DespawnDelay".into(), Tag::Int(v.despawn_delay));
         }
         c.insert("Offers".into(), self.offers_nbt(v));
+        let inventory: Vec<Tag> = v
+            .inventory
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, stack)| {
+                let stack = (*stack)?;
+                let name = self.item_name(stack.item);
+                let mut e = crate::stack_nbt::to_nbt(stack, name)?;
+                e.insert("Slot".into(), Tag::Byte(slot as i8));
+                Some(Tag::Compound(e))
+            })
+            .collect();
+        if !inventory.is_empty() {
+            c.insert("Inventory".into(), Tag::List(inventory));
+        }
         if !v.gossips.is_empty() {
             let list: Vec<Tag> = v
                 .gossips
@@ -2457,6 +2728,13 @@ impl PlayPlan {
             last_gossip_time: 0,
             door_node: None,
             door_cooldown: 0,
+            inventory: [None; 8],
+            show_player: None,
+            show_items: Vec::new(),
+            show_index: 0,
+            show_cycle: 0,
+            show_timer: 0,
+            show_sent: None,
             path_from: None,
             path_to: None,
         };
@@ -2578,6 +2856,20 @@ fn apply_villager_nbt(v: &mut Villager, c: &Compound, item: impl Fn(&str) -> Opt
             .collect();
         if !parsed.is_empty() {
             v.offers = parsed;
+        }
+    }
+    if let Some(Tag::List(items)) = c.get("Inventory") {
+        for entry in items {
+            let Tag::Compound(e) = entry else { continue };
+            let Some(slot) = e.get("Slot").and_then(Tag::as_i64) else {
+                continue;
+            };
+            if !(0..8).contains(&slot) {
+                continue;
+            }
+            if let Some(stack) = crate::stack_nbt::from_nbt(e, &item) {
+                v.inventory[slot as usize] = Some(stack);
+            }
         }
     }
     if let Some(Tag::List(gossips)) = c.get("Gossips") {
@@ -2727,6 +3019,13 @@ mod tests {
             last_gossip_time: 0,
             door_node: None,
             door_cooldown: 0,
+            inventory: [None; 8],
+            show_player: None,
+            show_items: Vec::new(),
+            show_index: 0,
+            show_cycle: 0,
+            show_timer: 0,
+            show_sent: None,
             path_from: None,
             path_to: None,
         };
@@ -2751,6 +3050,20 @@ mod tests {
         v.maybe_decay_gossip(48_002);
         assert_eq!(v.gossips[&target][GossipType::Trading.id()], 21);
         assert_eq!(v.gossips[&target][GossipType::MinorNegative.id()], 0);
+    }
+
+    #[test]
+    fn requested_items_farmer_only() {
+        assert_eq!(
+            PlayPlan::requested_items("minecraft:farmer"),
+            &[
+                "minecraft:wheat",
+                "minecraft:wheat_seeds",
+                "minecraft:beetroot_seeds",
+                "minecraft:bone_meal"
+            ]
+        );
+        assert!(PlayPlan::requested_items("minecraft:librarian").is_empty());
     }
 
     #[test]

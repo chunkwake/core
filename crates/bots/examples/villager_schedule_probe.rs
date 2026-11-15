@@ -14,6 +14,7 @@ const Y: i32 = 100;
 struct Probe {
     c: Client,
     sb_command: i32,
+    sb_carried: i32,
     cb_chat: i32,
     cb_meta: i32,
     cb_block: i32,
@@ -21,12 +22,15 @@ struct Probe {
     cb_add: i32,
     cb_move: i32,
     cb_teleport: i32,
+    cb_equip: i32,
     chat: String,
     /// Первый житель (спавн у X+0.5) и его позиция из пакетов.
     a_id: Option<i32>,
     a_pos: Option<[f64; 3]>,
     a_yaw: f32,
     a_base: [i64; 3],
+    /// Предмет в основной руке A из `set_equipment` (ShowTradesToPlayer).
+    a_hand: Option<i32>,
     /// Последняя поза из `set_entity_data` (индекс 6).
     pose: Option<i32>,
     /// Дверь на пути и ID её состояний (`block_update`).
@@ -98,6 +102,20 @@ impl Probe {
                 }
                 self.a_pos = Some([x, y, z]);
                 self.a_base = chunkwake_protocol::play::quantize([x, y, z]);
+            } else if id == self.cb_equip {
+                let mut r = Reader::new(&body);
+                let Ok(entity) = r.var_int() else { continue };
+                while let Ok(slot) = r.u8() {
+                    let Ok(stack) = chunkwake_protocol::inventory::read_stack(&mut r) else {
+                        break;
+                    };
+                    if Some(entity) == self.a_id && slot & 0x7f == 0 {
+                        self.a_hand = stack.map(|s| s.item);
+                    }
+                    if slot & 0x80 == 0 {
+                        break;
+                    }
+                }
             } else if id == self.cb_chat {
                 let mut r = Reader::new(&body);
                 if let Ok(component) = text::read_component(&mut r) {
@@ -160,6 +178,13 @@ impl Probe {
             self.saw_open |= state == self.door_open;
             self.saw_close |= state == self.door_closed;
         }
+    }
+
+    async fn select_slot(&mut self, slot: u16) {
+        let mut w = self.packet(self.sb_carried);
+        w.u16(slot);
+        self.c.send_raw(&w.buf).await.unwrap();
+        self.pump(150).await;
     }
 
     async fn cmd(&mut self, line: &str) {
@@ -308,6 +333,16 @@ async fn main() {
         .and_then(std::path::Path::parent)
         .unwrap()
         .to_path_buf();
+    let reg: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(std::path::Path::new(&a[2]).with_file_name("registries.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let pid = |reg_name: &str, name: &str| {
+        reg[reg_name]["entries"][name]["protocol_id"]
+            .as_i64()
+            .unwrap() as i32
+    };
     let ids = Ids::load(&table).unwrap();
     let sb = |n| table.id(State::Play, Direction::Serverbound, n).unwrap();
     let cb = |n| table.id(State::Play, Direction::Clientbound, n).unwrap();
@@ -318,6 +353,7 @@ async fn main() {
     let cb_add = cb("add_entity");
     let cb_move = cb("move_entity_pos_rot");
     let cb_teleport = cb("teleport_entity");
+    let cb_equip = cb("set_equipment");
     let (door_open, door_closed) = door_state_ids(&root)
         .unwrap_or_else(|| panic!("нет состояний oak_door в reports/blocks.json"));
     let mut c = Client::connect(&a[1], "boater", ids, 777, "26.3")
@@ -331,10 +367,12 @@ async fn main() {
         cb_add,
         cb_move,
         cb_teleport,
+        cb_equip,
     ];
     let mut p = Probe {
         c,
         sb_command: sb("chat_command"),
+        sb_carried: sb("set_carried_item"),
         cb_chat,
         cb_meta,
         cb_block,
@@ -342,11 +380,13 @@ async fn main() {
         cb_add,
         cb_move,
         cb_teleport,
+        cb_equip,
         chat: String::new(),
         a_id: None,
         a_pos: None,
         a_yaw: 0.0,
         a_base: [0; 3],
+        a_hand: None,
         pose: None,
         door: [X + 3, Y, Z],
         door_open,
@@ -504,6 +544,54 @@ async fn main() {
     );
     println!("work: villager at composter ({near:.2}), door opened");
 
+    // `ShowTradesToPlayer`: игрок рядом держит пшеницу — A показывает
+    // изумруд в основной руке; уходит — рука очищается.
+    let apos = p.a_pos.expect("нет позиции A");
+    p.cmd(&format!(
+        "data merge entity @e[type=minecraft:villager,x={},y={},z={},distance=..3,limit=1,sort=nearest]          {{Offers:{{Recipes:[{{buy:{{id:\"minecraft:wheat\",count:20}},sell:{{id:\"minecraft:emerald\",count:1}},uses:0,maxUses:16,xp:2,priceMultiplier:0.05f,demand:0}}]}}}}",
+        apos[0], apos[1], apos[2]
+    ))
+    .await;
+    p.cmd(&format!("tp @s {} {} {}", apos[0], apos[1], apos[2] + 2.0))
+        .await;
+    p.cmd("item replace entity @s hotbar.0 with minecraft:wheat 1")
+        .await;
+    p.select_slot(0).await;
+    let emerald = pid("minecraft:item", "minecraft:emerald");
+    let mut shown = false;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(5_000) {
+        if p.a_hand == Some(emerald) {
+            shown = true;
+            break;
+        }
+        p.pump(200).await;
+    }
+    assert!(
+        shown,
+        "ShowTradesToPlayer не показал изумруд: {:?}",
+        p.a_hand
+    );
+    p.cmd(&format!("tp @s {}.5 {Y} {}.5", X, Z + 2)).await;
+    p.cmd("item replace entity @s hotbar.0 with minecraft:air")
+        .await;
+    p.select_slot(0).await;
+    let mut cleared = false;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(5_000) {
+        if p.a_hand.is_none() {
+            cleared = true;
+            break;
+        }
+        p.pump(200).await;
+    }
+    assert!(
+        cleared,
+        "ShowTradesToPlayer не очистил руку: {:?}",
+        p.a_hand
+    );
+    println!("show trades: emerald shown and cleared");
+
     let start = tokio::time::Instant::now();
     while start.elapsed() < Duration::from_millis(3_000) && !p.saw_close {
         p.pump(100).await;
@@ -520,6 +608,14 @@ async fn main() {
     let near = dist_xz(at_bell, [X as f64 + 0.5, f64::from(Y), Z as f64 + 6.5]);
     assert!(near <= 2.0, "житель не дошёл до колокола: {at_bell:?}");
     println!("meet: villager at bell ({near:.2})");
+
+    // `TradeWithVillager`: у A 64 хлеба — при встрече отдаст половину B.
+    let apos = p.a_pos.expect("нет позиции A у колокола");
+    p.cmd(&format!(
+        "data merge entity @e[type=minecraft:villager,x={},y={},z={},distance=..3,limit=1,sort=nearest]          {{Inventory:[{{Slot:0b,id:\"minecraft:bread\",count:64}},{{Slot:1b,id:\"minecraft:wheat\",count:64}}]}}",
+        apos[0], apos[1], apos[2]
+    ))
+    .await;
 
     // Стена между колоколом и соседом уже стоит (поставлена до встречи).
     let friend = [X as f64 + 8.5, f64::from(Y), Z as f64 + 13.5];
@@ -595,6 +691,28 @@ async fn main() {
         "слух не передан при встрече: {gossip}"
     );
     println!("gossip: transferred minor_negative 25 -> 5");
+
+    // A (фермер) с избытком еды бросает B половину стака хлеба.
+    let mut items = String::new();
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(10_000) {
+        p.chat.clear();
+        p.cmd(&format!(
+            "data get entity @e[type=minecraft:item,x={},y={},z={},distance=..8,limit=1,sort=nearest] Item",
+            friend[0], friend[1], friend[2]
+        ))
+        .await;
+        items = p.chat.clone();
+        if items.contains("minecraft:bread") {
+            break;
+        }
+        p.pump(500).await;
+    }
+    assert!(
+        items.contains("minecraft:bread"),
+        "TradeWithVillager не бросил хлеб: {items}"
+    );
+    println!("trade: bread thrown to neighbour");
 
     // 3. Отдых: 12000.. — идёт к своей кровати.
     p.cmd("time set 13000").await;

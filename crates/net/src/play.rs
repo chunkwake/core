@@ -16123,6 +16123,9 @@ impl PlayPlan {
                                 }
                                 crate::play::commands::dispatch::Outcome::Silent => {}
                             }
+                            // Команда могла изменить инвентарь/здоровье/позицию:
+                            // публикуем `Live` до следующего тика.
+                            self.publish_live(uuid, state, login.spawn.game_mode);
                             continue;
                         }
                         let known = match self.hooks() {
