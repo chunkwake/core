@@ -32,6 +32,8 @@ struct Probe {
     /// ID типов рейдеров и факт их появления.
     raider_types: HashSet<i32>,
     raiders_seen: bool,
+    firework_type: i32,
+    firework_seen: bool,
     villager_type: i32,
     seen_villagers: HashSet<i32>,
     babies: HashSet<i32>,
@@ -78,6 +80,9 @@ impl Probe {
                 };
                 if self.raider_types.contains(&kind) {
                     self.raiders_seen = true;
+                }
+                if kind == self.firework_type {
+                    self.firework_seen = true;
                 }
                 if kind == self.villager_type {
                     self.seen_villagers.insert(entity);
@@ -470,6 +475,8 @@ async fn main() {
         bell_rang: false,
         raider_types,
         raiders_seen: false,
+        firework_type: pid("minecraft:entity_type", "minecraft:firework_rocket"),
+        firework_seen: false,
         villager_type: pid("minecraft:entity_type", "minecraft:villager"),
         seen_villagers: HashSet::new(),
         babies: HashSet::new(),
@@ -1179,7 +1186,7 @@ async fn main() {
     ))
     .await;
     p.cmd(&format!("tp @s {} {Y} {}", bx + 2.5, bz + 2.5)).await;
-    p.cmd("difficulty hard").await;
+    p.cmd("difficulty easy").await;
     p.cmd("effect clear @s").await;
     p.cmd("effect give @s minecraft:bad_omen 600 0").await;
     // Новый житель (не рейдер) — объект проверки.
@@ -1263,6 +1270,27 @@ async fn main() {
         p.all_pos.get(&raider_v)
     );
     println!("raid: villager hid at home");
+
+    // Победа: добиваем волны — рейд переходит в `Victory`, жители
+    // празднуют (звук и фейерверк, `CelebrateVillagersSurvivedRaid`).
+    let mut fireworks = false;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(120_000) {
+        for name in ["pillager", "vindicator", "evoker", "witch", "ravager"] {
+            p.cmd(&format!("kill @e[type=minecraft:{name}]")).await;
+        }
+        p.pump(200).await;
+        if p.firework_seen {
+            fireworks = true;
+            break;
+        }
+    }
+    assert!(
+        fireworks,
+        "празднование рейда: фейерверк не появился (firework_type {})",
+        p.firework_type
+    );
+    println!("raid: victory celebration fireworks");
     p.cmd("difficulty peaceful").await;
 
     println!("villager_schedule_probe: ok");

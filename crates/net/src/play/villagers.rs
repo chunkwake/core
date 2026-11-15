@@ -1725,6 +1725,89 @@ impl PlayPlan {
         raid_phase(raid.groups, alive_count, raid.cooldown, raid.celebration)
     }
 
+    /// `MoveToSkySeeingSpot.hasNoBlocksAbove`: столбец над головой пуст.
+    fn has_no_blocks_above(&self, pos: [f64; 3]) -> bool {
+        let x = pos[0].floor() as i32;
+        let z = pos[2].floor() as i32;
+        let start = pos[1].floor() as i32 + 2;
+        let top = self.min_y() + self.template().height() as i32;
+        for y in start..top {
+            if let Some(state) = self.block([x, y, z])
+                && !self.state_name(state).ends_with(":air")
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Случайная точка с открытым небом в 10 блоках для празднования.
+    fn sky_point(&self, pos: [f64; 3]) -> Option<[f64; 3]> {
+        for _ in 0..10 {
+            let dx = f64::from(rand::random::<u32>() % 21) - 10.0;
+            let dz = f64::from(rand::random::<u32>() % 21) - 10.0;
+            let target = [pos[0] + dx, pos[1], pos[2] + dz];
+            let cell = target.map(|v| v.floor() as i32);
+            let below = [cell[0], cell[1] - 1, cell[2]];
+            if !self.walk_blocked(cell)
+                && self
+                    .block(below)
+                    .is_some_and(|s| self.survival.placement.solid(s))
+                && !self.dangerous_block(cell)
+                && !self.dangerous_block(below)
+                && self.has_no_blocks_above(target)
+            {
+                return Some(target);
+            }
+        }
+        None
+    }
+
+    /// `CelebrateVillagersSurvivedRaid`: 1% звук, 0.5% фейерверк за тик.
+    fn celebrate(&self, v: &mut Villager) {
+        if rand::random::<u32>().is_multiple_of(100) {
+            self.play_sound(
+                None,
+                "minecraft:entity.villager.celebrate",
+                crate::sounds::NEUTRAL,
+                [v.pos[0], v.pos[1] + 1.0, v.pos[2]],
+                1.0,
+                1.0,
+            );
+        }
+        if rand::random::<u32>().is_multiple_of(200) && self.has_no_blocks_above(v.pos) {
+            self.spawn_celebration_firework(v.pos);
+        }
+    }
+
+    /// `FireworkRocketEntity` без всадника: взлетает и взрывается по таймеру.
+    fn spawn_celebration_firework(&self, pos: [f64; 3]) {
+        let eye = [pos[0], pos[1] + 1.62, pos[2]];
+        let flight = rand::random::<u32>() % 3;
+        let mut rocket = crate::arrows::Arrow::flight(eye, [0.0; 3], false);
+        rocket.firework = true;
+        rocket.explosions = 1;
+        rocket.lifetime =
+            crate::arrows::rocket_lifetime(flight as i32, rand::random(), rand::random());
+        let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
+        self.sim().arrows.lock().unwrap().insert(id, rocket);
+        self.mark_work();
+        self.hub.send(
+            None,
+            play::add_entity_moving(
+                self.ids.add_entity,
+                id,
+                Uuid::from_u128(rand::random()),
+                self.survival.firework_entity_type,
+                eye,
+                [0.0; 3],
+                0.0,
+                0.0,
+                0,
+            ),
+        );
+    }
+
     /// `RingBell`: удар в колокол без игрока.
     fn ring_villager_bell(&self, bell: [i32; 3]) {
         let Some(state) = self.block(bell) else {
@@ -1757,7 +1840,21 @@ impl PlayPlan {
     fn raid_step(&self, v: &mut Villager) -> Option<([f64; 3], f32)> {
         match v.raid_phase {
             RaidPhase::None => None,
-            RaidPhase::PreRaid | RaidPhase::Victory => {
+            RaidPhase::Victory => {
+                // `Team` празднует под открытым небом: если над головой
+                // блоки, идём к ближайшей точке с небом.
+                if !self.has_no_blocks_above(v.pos) {
+                    if v.move_target.is_none() {
+                        v.move_target = self.sky_point(v.pos);
+                    }
+                    return self.walk_step(v, v.move_target?, 0.21);
+                }
+                v.move_target = None;
+                v.yaw = look_yaw(v.pos, [v.pos[0], v.pos[1] + 4.0, v.pos[2]]);
+                self.celebrate(v);
+                Some((v.pos, v.yaw))
+            }
+            RaidPhase::PreRaid => {
                 if v.meeting_point.is_none() {
                     let types = std::collections::HashSet::from(["minecraft:meeting".to_owned()]);
                     let origin = [
