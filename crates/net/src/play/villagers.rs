@@ -8,7 +8,94 @@
 //! порога (10/70/150/250 опыта) растёт уровень 1-5.
 
 use super::*;
+use rand::Rng;
 use std::collections::BTreeMap;
+
+/// `EnchantRandomlyFunction.enchantItem`: `2 + nextInt(5 + level*10) + 3*level`.
+fn random_enchant_cost(level: i32, roll: i32) -> i32 {
+    2 + roll + 3 * level
+}
+
+/// `EnchantmentHelper.getAvailableEnchantmentResults`: наибольший уровень,
+/// чей диапазон `[minCost, maxCost]` содержит стоимость.
+fn enchant_level_for_cost(def: &chunkwake_data::enchanting::EnchantDef, value: i32) -> Option<i32> {
+    (1..=def.max_level.max(1))
+        .rev()
+        .find(|&level| value >= def.min_cost(level) && value <= def.max_cost(level))
+}
+
+/// `WeightedRandom.getRandomItem` по весу чара.
+fn weighted_enchant(
+    pool: &[(usize, i32)],
+    defs: &[chunkwake_data::enchanting::EnchantDef],
+    rng: &mut impl Rng,
+) -> Option<(usize, i32)> {
+    let total: i32 = pool
+        .iter()
+        .map(|&(i, _)| defs.get(i).map_or(1, |d| d.weight.max(1)))
+        .sum();
+    let mut roll = rng.gen_range(0..total.max(1));
+    for &(i, level) in pool {
+        roll -= defs.get(i).map_or(1, |d| d.weight.max(1));
+        if roll < 0 {
+            return Some((i, level));
+        }
+    }
+    pool.last().copied()
+}
+
+/// `EnchantmentHelper.enchantItem` (`selectEnchantment`) для
+/// `enchant_with_levels`: стоимость с разбросом, уровни по диапазонам и
+/// совместимость только с последними чарами.
+fn select_enchantments(
+    defs: &[chunkwake_data::enchanting::EnchantDef],
+    options: &[String],
+    item: &str,
+    enchantable: i32,
+    level_cost: i32,
+    rng: &mut impl Rng,
+) -> Vec<(i32, i32)> {
+    let mut results: Vec<(i32, i32)> = Vec::new();
+    let mut cost = level_cost;
+    cost += 1 + rng.gen_range(0..enchantable / 4 + 1) + rng.gen_range(0..enchantable / 4 + 1);
+    let span = (rng.gen_range(0.0..1.0f32) + rng.gen_range(0.0..1.0f32) - 1.0) * 0.15;
+    cost = ((cost as f32 + cost as f32 * span).round() as i32).max(1);
+    let mut pool: Vec<(usize, i32)> = defs
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| options.is_empty() || options.iter().any(|n| n == &d.name))
+        .filter(|(_, d)| item == "minecraft:book" || d.primary.contains(item))
+        .filter_map(|(i, d)| enchant_level_for_cost(d, cost).map(|level| (i, level)))
+        .collect();
+    if pool.is_empty() {
+        return results;
+    }
+    let mut last_index = None;
+    if let Some((i, level)) = weighted_enchant(&pool, defs, rng)
+        && let Some(d) = defs.get(i)
+    {
+        last_index = Some(i);
+        results.push((d.id, level));
+    }
+    while rng.gen_range(0..50) <= cost {
+        if let Some(i) = last_index
+            && let Some(def) = defs.get(i)
+        {
+            pool.retain(|&(j, _)| defs.get(j).is_some_and(|d| def.compatible(d)));
+        }
+        if pool.is_empty() {
+            break;
+        }
+        if let Some((i, level)) = weighted_enchant(&pool, defs, rng)
+            && let Some(d) = defs.get(i)
+        {
+            last_index = Some(i);
+            results.push((d.id, level));
+        }
+        cost /= 2;
+    }
+    results
+}
 
 /// Пороги уровней (`VillagerData.NEXT_LEVEL_XP_THRESHOLDS`).
 pub const LEVEL_XP: [i32; 5] = [0, 10, 70, 150, 250];
@@ -421,28 +508,61 @@ impl PlayPlan {
         let mut decorated = false;
         let mut extra_cost = 0i32;
         if let Some(spec) = &def.enchant {
-            let ench = self.pick_enchantment(spec, &def.gives.id)?;
-            let level = 1 + rand::random::<i32>() % ench.max_level.max(1);
-            if def.gives.id == "minecraft:enchanted_book" {
-                extra.stored = vec![(ench.id, level)];
-            } else {
-                extra.enchantments = vec![(ench.id, level)];
-            }
-            decorated = true;
-            if spec.include_cost {
-                extra_cost = if spec.random {
-                    // `EnchantRandomlyFunction`: 2 + [0, 5+10*level) + 3*level,
-                    // затем x2 для `#double_trade_price`.
-                    let mut cost = 2 + rand::random::<i32>() % (5 + level * 10) + 3 * level;
+            let defs = &self.survival.enchanting.defs;
+            let mut rng = rand::thread_rng();
+            let enchants: Vec<(i32, i32)>;
+            if spec.random {
+                // `EnchantRandomlyFunction.run`: равномерный выбор из
+                // `options`, затем `nextInt(minLevel, maxLevel)`.
+                let book = def.gives.id == "minecraft:book";
+                let check = !book && spec.only_compatible;
+                let pool: Vec<&chunkwake_data::enchanting::EnchantDef> = defs
+                    .iter()
+                    .filter(|d| {
+                        (spec.options.is_empty() || spec.options.iter().any(|n| n == &d.name))
+                            && (!check || d.supported.contains(&def.gives.id))
+                    })
+                    .collect();
+                let ench = *pool.get(rng.gen_range(0..pool.len()))?;
+                let level = rng.gen_range(1..=ench.max_level.max(1));
+                if spec.include_cost {
+                    // `enchantItem`: 2 + nextInt(5 + level*10) + 3*level;
+                    // `#double_trade_price` удваивает `additional_trade_cost`.
+                    let mut cost = random_enchant_cost(level, rng.gen_range(0..5 + level * 10));
                     if def.double_price.iter().any(|name| name == &ench.name) {
                         cost *= 2;
                     }
-                    cost
-                } else {
-                    let (min, max) = spec.levels.unwrap_or((1, 1));
-                    min + rand::random::<i32>() % (max - min + 1).max(1)
-                };
+                    extra_cost = cost;
+                }
+                enchants = vec![(ench.id, level)];
+            } else {
+                // `EnchantWithLevelsFunction.run`: `EnchantmentHelper.enchantItem`
+                // по стоимости из `levels`, затем `additional_trade_cost`.
+                let enchantable = *self.survival.enchanting.enchantable.get(&def.gives.id)?;
+                let (min, max) = spec.levels.unwrap_or((1, 1));
+                let level_cost = rng.gen_range(min..=max.max(min));
+                enchants = select_enchantments(
+                    defs,
+                    &spec.options,
+                    &def.gives.id,
+                    enchantable,
+                    level_cost,
+                    &mut rng,
+                );
+                // `filtered` с `on_fail: discard`: без чар сделки нет.
+                if enchants.is_empty() {
+                    return None;
+                }
+                if spec.include_cost {
+                    extra_cost = level_cost;
+                }
             }
+            if def.gives.id == "minecraft:enchanted_book" || def.gives.id == "minecraft:book" {
+                extra.stored = enchants;
+            } else {
+                extra.enchantments = enchants;
+            }
+            decorated = true;
         }
         // `ExplorationMapFunction`: ближайшая структура тега, карта с
         // `map_id` и значком `+` нужного типа (`map_decoration_type`).
@@ -462,7 +582,14 @@ impl PlayPlan {
         if decorated {
             sell.extra = chunkwake_protocol::components::intern(extra);
         }
-        let buy = def.wants.count.max(0) + extra_cost;
+        // `TradeCost.toItemCost`: count + additionalCost, зажатый до
+        // `getDefaultMaxStackSize` предмета.
+        let max_stack = self
+            .survival
+            .items
+            .get(buy_item as usize)
+            .map_or(64, |info| i32::from(info.max_stack));
+        let buy = (def.wants.count.max(0) + extra_cost).min(max_stack.max(1));
         if buy < 1 {
             return None;
         }
@@ -480,38 +607,6 @@ impl PlayPlan {
             demand: 0,
             special_price: 0,
         })
-    }
-
-    /// Случайное зачарование из `options`, совместимое с предметом.
-    fn pick_enchantment(
-        &self,
-        spec: &chunkwake_data::trades::EnchantSpec,
-        item: &str,
-    ) -> Option<&chunkwake_data::enchanting::EnchantDef> {
-        let pool: Vec<&chunkwake_data::enchanting::EnchantDef> = self
-            .survival
-            .enchanting
-            .defs
-            .iter()
-            .filter(|def| {
-                (spec.options.is_empty() || spec.options.iter().any(|name| name == &def.name))
-                    && (!spec.only_compatible
-                        || item == "minecraft:enchanted_book"
-                        || def.supported.contains(item))
-            })
-            .collect();
-        if pool.is_empty() {
-            return None;
-        }
-        let total: i32 = pool.iter().map(|def| def.weight.max(1)).sum();
-        let mut roll = rand::random::<i32>() % total.max(1);
-        for def in pool {
-            roll -= def.weight.max(1);
-            if roll < 0 {
-                return Some(def);
-            }
-        }
-        None
     }
 
     fn claim_poi(&self, pos: [i32; 3], id: i32) {
@@ -1756,6 +1851,62 @@ mod tests {
         v.maybe_decay_gossip(48_002);
         assert_eq!(v.gossips[&target][GossipType::Trading.id()], 21);
         assert_eq!(v.gossips[&target][GossipType::MinorNegative.id()], 0);
+    }
+
+    #[test]
+    fn enchant_level_uses_highest_cost_range() {
+        let def = chunkwake_data::enchanting::EnchantDef {
+            id: 1,
+            name: "minecraft:sharpness".into(),
+            max_level: 5,
+            min_base: 1,
+            min_step: 11,
+            max_base: 21,
+            max_step: 11,
+            ..Default::default()
+        };
+        // `getAvailableEnchantmentResults` идёт от max_level вниз.
+        assert_eq!(enchant_level_for_cost(&def, 1), Some(1));
+        assert_eq!(enchant_level_for_cost(&def, 21), Some(2));
+        assert_eq!(enchant_level_for_cost(&def, 32), Some(3));
+        assert_eq!(enchant_level_for_cost(&def, 65), Some(5));
+        assert_eq!(enchant_level_for_cost(&def, 66), None);
+    }
+
+    #[test]
+    fn random_enchant_cost_matches_vanilla() {
+        // `2 + nextInt(5 + level*10) + 3*level`.
+        assert_eq!(random_enchant_cost(1, 0), 5);
+        assert_eq!(random_enchant_cost(1, 14), 19);
+        assert_eq!(random_enchant_cost(19, 194), 253);
+    }
+
+    #[test]
+    fn select_enchantments_picks_levels_within_bounds() {
+        use rand::SeedableRng;
+        let item = "minecraft:diamond_boots";
+        let def = chunkwake_data::enchanting::EnchantDef {
+            id: 7,
+            name: "minecraft:protection".into(),
+            max_level: 4,
+            weight: 10,
+            min_base: 1,
+            min_step: 0,
+            max_base: 100,
+            max_step: 0,
+            primary: HashSet::from([item.to_owned()]),
+            ..Default::default()
+        };
+        let defs = [def];
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        for _ in 0..50 {
+            let rolls = select_enchantments(&defs, &[], item, 10, 10, &mut rng);
+            assert!(!rolls.is_empty(), "нет чар при cost 10");
+            for &(id, level) in &rolls {
+                assert_eq!(id, 7);
+                assert!((1..=4).contains(&level), "уровень вне 1..=4: {level}");
+            }
+        }
     }
 
     #[test]
