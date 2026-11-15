@@ -255,6 +255,22 @@ pub enum WorkGoal {
     UseBonemeal,
 }
 
+/// `TriggerGate.triggerOneShuffled` встречи у колокола.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MeetGoal {
+    Stroll,
+    Socialize,
+}
+
+/// `RunOne` rest-пакета при отсутствии `HOME`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestGoal {
+    ClosestHome,
+    Brownian,
+    ClosestVillage,
+    DoNothing,
+}
+
 /// `RunOne` idle/play пакетов (`getIdlePackage`/`getPlayPackage`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IdleGoal {
@@ -294,6 +310,21 @@ fn work_weights(profession: &str) -> Vec<(WorkGoal, u32)> {
         (WorkGoal::StrollToPoiList, 5),
         (WorkGoal::Harvest, if farmer { 2 } else { 5 }),
         (WorkGoal::UseBonemeal, if farmer { 4 } else { 7 }),
+    ]
+}
+
+/// Веса `getMeetPackage` TriggerGate: прогулка 2, социализация 2.
+fn meet_weights() -> Vec<(MeetGoal, u32)> {
+    vec![(MeetGoal::Stroll, 2), (MeetGoal::Socialize, 2)]
+}
+
+/// Веса `getRestPackage` RunOne без `HOME`: 1/4/2/2.
+fn rest_weights() -> Vec<(RestGoal, u32)> {
+    vec![
+        (RestGoal::ClosestHome, 1),
+        (RestGoal::Brownian, 4),
+        (RestGoal::ClosestVillage, 2),
+        (RestGoal::DoNothing, 2),
     ]
 }
 
@@ -534,6 +565,10 @@ pub struct Villager {
     /// Выбранная ветка `RunOne` и срок её действия.
     pub work_goal: WorkGoal,
     pub idle_goal: IdleGoal,
+    pub meet_goal: MeetGoal,
+    pub rest_goal: RestGoal,
+    pub work_active: bool,
+    pub branch_timer: i32,
     pub goal_timer: i32,
     /// `MemoryModuleType.BREED_TARGET` и время рождения.
     pub breed_target: Option<u128>,
@@ -1437,13 +1472,152 @@ impl PlayPlan {
         {
             return Some(step);
         }
-        // `HarvestFarmland`/`UseBonemeal` у фермера (RunOne work-пакета).
-        if v.activity == Activity::Work
-            && v.profession == "minecraft:farmer"
-            && matches!(v.work_goal, WorkGoal::Harvest | WorkGoal::UseBonemeal)
-            && let Some(step) = self.farm_step(v)
-        {
-            return Some(step);
+        // `RunOne` work-пакета: действия выбираются по весам, а ветка
+        // завершается по факту (дошёл/собрал), затем перевыбор.
+        if v.activity == Activity::Work {
+            match v.work_goal {
+                WorkGoal::Harvest | WorkGoal::UseBonemeal => {
+                    if let Some(step) = self.farm_step(v) {
+                        return Some(step);
+                    }
+                    v.goal_timer = 0;
+                }
+                WorkGoal::WorkAtPoi => {
+                    let at_site = v.job_site.is_some_and(|site| {
+                        crate::mobs::dist2(
+                            v.pos,
+                            [site[0] as f64 + 0.5, site[1] as f64, site[2] as f64 + 0.5],
+                        ) <= 1.73 * 1.73
+                    });
+                    if at_site && !v.work_active {
+                        v.work_active = true;
+                        self.play_sound(
+                            None,
+                            "minecraft:entity.villager.work_farmer",
+                            crate::sounds::NEUTRAL,
+                            v.pos,
+                            1.0,
+                            1.0,
+                        );
+                        v.goal_timer = 0;
+                    } else if !at_site {
+                        v.goal_timer = 0;
+                    }
+                }
+                WorkGoal::StrollAroundPoi | WorkGoal::StrollToPoiList => {
+                    let base = v.job_site.unwrap_or([
+                        v.pos[0].floor() as i32,
+                        v.pos[1].floor() as i32,
+                        v.pos[2].floor() as i32,
+                    ]);
+                    if v.move_target.is_none() {
+                        v.move_target = self.stroll_point(
+                            [base[0] as f64 + 0.5, v.pos[1], base[2] as f64 + 0.5],
+                            8,
+                        );
+                    }
+                    if v.move_target.is_none() {
+                        v.goal_timer = 0;
+                    } else if let Some(step) = self.walk_step(v, v.move_target?, 0.14) {
+                        return Some(step);
+                    } else {
+                        v.goal_timer = 0;
+                    }
+                }
+                WorkGoal::StrollToPoi => {
+                    let site = v.job_site.and_then(|p| self.stand_near(p, v.pos));
+                    if let Some(step) = site.and_then(|t| self.walk_step(v, t, 0.14)) {
+                        return Some(step);
+                    }
+                    v.goal_timer = 0;
+                }
+            }
+        }
+        // `TriggerGate` встречи: прогулка у колокола или социализация.
+        if v.activity == Activity::Meet {
+            match v.meet_goal {
+                MeetGoal::Socialize => {
+                    if let Some(step) = self.socialize_step(id, v, others, profiles, gossip) {
+                        v.branch_timer = 200;
+                        return Some(step);
+                    }
+                    v.branch_timer -= 1;
+                    if v.branch_timer <= 0 {
+                        v.goal_timer = 0;
+                    }
+                }
+                MeetGoal::Stroll => {
+                    let bell = v.meeting_point;
+                    if v.move_target.is_none()
+                        && let Some(bell) = bell
+                    {
+                        v.move_target = self.stroll_point(
+                            [bell[0] as f64 + 0.5, v.pos[1], bell[2] as f64 + 0.5],
+                            8,
+                        );
+                    }
+                    if v.move_target.is_none() {
+                        v.goal_timer = 0;
+                    } else if let Some(step) = self.walk_step(v, v.move_target?, 0.21) {
+                        return Some(step);
+                    } else {
+                        v.goal_timer = 0;
+                    }
+                }
+            }
+        }
+        // `RunOne` rest-пакета без дома.
+        if v.activity == Activity::Rest && v.home.is_none() {
+            let now = self.game_time();
+            match v.rest_goal {
+                RestGoal::ClosestHome => {
+                    let types = std::collections::HashSet::from(["minecraft:home".to_owned()]);
+                    let origin = [
+                        v.pos[0].floor() as i32,
+                        v.pos[1].floor() as i32,
+                        v.pos[2].floor() as i32,
+                    ];
+                    let bed = self.nearest_poi(&types, origin, 48);
+                    if let Some(target) = bed.and_then(|b| self.stand_near(b, v.pos))
+                        && let Some(step) = self.walk_step(v, target, 0.14)
+                    {
+                        return Some(step);
+                    }
+                    v.goal_timer = 0;
+                }
+                RestGoal::Brownian => {
+                    if v.move_target.is_none() {
+                        v.move_target = self.stroll_point(v.pos, 8);
+                    }
+                    if let Some(step) = self.walk_step(v, v.move_target?, 0.14) {
+                        return Some(step);
+                    }
+                    v.goal_timer = 0;
+                }
+                RestGoal::ClosestVillage => {
+                    let types = std::collections::HashSet::from(["minecraft:meeting".to_owned()]);
+                    let origin = [
+                        v.pos[0].floor() as i32,
+                        v.pos[1].floor() as i32,
+                        v.pos[2].floor() as i32,
+                    ];
+                    let bell = self.nearest_poi(&types, origin, 48);
+                    if let Some(target) = bell.and_then(|b| self.stand_near(b, v.pos))
+                        && let Some(step) = self.walk_step(v, target, 0.14)
+                    {
+                        return Some(step);
+                    }
+                    v.goal_timer = 0;
+                }
+                RestGoal::DoNothing => {
+                    v.branch_timer -= 1;
+                    if v.branch_timer <= 0 {
+                        v.goal_timer = 0;
+                    }
+                    return Some((v.pos, v.yaw));
+                }
+            }
+            let _ = now;
         }
         let other_babies = babies.iter().filter(|(bid, ..)| *bid != id).count();
         // `getPlayPackage`: салки (5) при других малышах, иначе RunOne.
@@ -2088,6 +2262,27 @@ impl PlayPlan {
                 self.walk_step(v, target, 0.196)
             }
         }
+    }
+
+    /// Случайная проходимая точка в радиусе `r` (`LandRandomPos`).
+    fn stroll_point(&self, pos: [f64; 3], r: i32) -> Option<[f64; 3]> {
+        let span = u32::try_from(r * 2 + 1).ok()?;
+        for _ in 0..10 {
+            let dx = i32::try_from(rand::random::<u32>() % span).ok()? - r;
+            let dz = i32::try_from(rand::random::<u32>() % span).ok()? - r;
+            let target = [pos[0] + f64::from(dx), pos[1], pos[2] + f64::from(dz)];
+            let cell = target.map(|v| v.floor() as i32);
+            let below = [cell[0], cell[1] - 1, cell[2]];
+            if !self.walk_blocked(cell)
+                && self
+                    .block(below)
+                    .is_some_and(|s| self.survival.placement.solid(s))
+                && !self.dangerous_block(cell)
+            {
+                return Some(target);
+            }
+        }
+        None
     }
 
     /// `SecondaryPoiSensor`: есть ли грядка в ±4 по XZ и ±2 по Y.
@@ -2928,6 +3123,10 @@ impl PlayPlan {
             cat_timer: 0,
             work_goal: WorkGoal::WorkAtPoi,
             idle_goal: IdleGoal::Stroll,
+            meet_goal: MeetGoal::Socialize,
+            rest_goal: RestGoal::DoNothing,
+            work_active: false,
+            branch_timer: 0,
             goal_timer: 0,
             breed_target: None,
             breed_partner: None,
@@ -3193,16 +3392,18 @@ impl PlayPlan {
                 v.tag_target = None;
                 v.goal_timer = 0;
             }
-            if v.trader == TraderKind::Villager {
-                if v.goal_timer <= 0 {
-                    v.work_goal =
-                        weighted_pick(&work_weights(&v.profession), rand::random::<u32>())
-                            .unwrap_or(WorkGoal::WorkAtPoi);
-                    v.idle_goal = weighted_pick(&idle_weights(), rand::random::<u32>())
-                        .unwrap_or(IdleGoal::Stroll);
-                    v.goal_timer = 40;
-                }
-                v.goal_timer -= 1;
+            if v.trader == TraderKind::Villager && v.goal_timer <= 0 {
+                v.work_goal = weighted_pick(&work_weights(&v.profession), rand::random::<u32>())
+                    .unwrap_or(WorkGoal::WorkAtPoi);
+                v.idle_goal = weighted_pick(&idle_weights(), rand::random::<u32>())
+                    .unwrap_or(IdleGoal::Stroll);
+                v.meet_goal = weighted_pick(&meet_weights(), rand::random::<u32>())
+                    .unwrap_or(MeetGoal::Socialize);
+                v.rest_goal = weighted_pick(&rest_weights(), rand::random::<u32>())
+                    .unwrap_or(RestGoal::DoNothing);
+                v.branch_timer = 20 + i32::try_from(rand::random::<u32>() % 21).unwrap_or(0);
+                v.work_active = false;
+                v.goal_timer = 1;
             }
             if v.trader == TraderKind::Villager && !v.no_ai {
                 if now - v.last_home_check >= 100 {
@@ -3955,6 +4156,10 @@ impl PlayPlan {
             cat_timer: 0,
             work_goal: WorkGoal::WorkAtPoi,
             idle_goal: IdleGoal::Stroll,
+            meet_goal: MeetGoal::Socialize,
+            rest_goal: RestGoal::DoNothing,
+            work_active: false,
+            branch_timer: 0,
             goal_timer: 0,
             breed_target: None,
             breed_partner: None,
@@ -4281,6 +4486,10 @@ mod tests {
             cat_timer: 0,
             work_goal: WorkGoal::WorkAtPoi,
             idle_goal: IdleGoal::Stroll,
+            meet_goal: MeetGoal::Socialize,
+            rest_goal: RestGoal::DoNothing,
+            work_active: false,
+            branch_timer: 0,
             goal_timer: 0,
             breed_target: None,
             breed_partner: None,
@@ -4408,6 +4617,19 @@ mod tests {
         assert!((look_yaw([0.0; 3], [1.0, 0.0, 0.0]) + 90.0).abs() < 0.001);
         assert!((look_yaw([0.0; 3], [-1.0, 0.0, 0.0]) - 90.0).abs() < 0.001);
         assert!((look_yaw([0.0; 3], [0.0, 0.0, -1.0]).abs() - 180.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn meet_rest_weights_match_vanilla() {
+        assert_eq!(meet_weights().iter().map(|(_, w)| w).sum::<u32>(), 4);
+        assert_eq!(rest_weights().iter().map(|(_, w)| w).sum::<u32>(), 9);
+        assert_eq!(weighted_pick(&meet_weights(), 1), Some(MeetGoal::Stroll));
+        assert_eq!(weighted_pick(&meet_weights(), 2), Some(MeetGoal::Socialize));
+        assert_eq!(
+            weighted_pick(&rest_weights(), 0),
+            Some(RestGoal::ClosestHome)
+        );
+        assert_eq!(weighted_pick(&rest_weights(), 8), Some(RestGoal::DoNothing));
     }
 
     #[test]

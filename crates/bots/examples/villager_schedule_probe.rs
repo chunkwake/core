@@ -746,7 +746,7 @@ async fn main() {
     .await;
     let mut restocked = false;
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(25_000) {
+    while start.elapsed() < Duration::from_millis(70_000) {
         if let Some(pos) = p.a_pos {
             let offers = p.data_at(pos, "Offers").await;
             if offers.contains("uses:0") {
