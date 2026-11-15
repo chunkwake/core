@@ -411,6 +411,50 @@ fn work_sound(profession: &str) -> Option<String> {
     Some(format!("minecraft:entity.villager.work_{short}"))
 }
 
+/// `SecondaryJobSiteSensor`: ближайшая грядка в радиусе `radius` от работы.
+impl PlayPlan {
+    fn nearest_farmland(&self, origin: [i32; 3], radius: i32) -> Option<[i32; 3]> {
+        let mut best: Option<([i32; 3], i64)> = None;
+        for dx in -radius..=radius {
+            for dy in -2..=2 {
+                for dz in -radius..=radius {
+                    let p = [origin[0] + dx, origin[1] + dy, origin[2] + dz];
+                    if !self
+                        .block(p)
+                        .is_some_and(|s| self.state_name(s).ends_with("farmland"))
+                    {
+                        continue;
+                    }
+                    let dist = i64::from(dx).pow(2) + i64::from(dy).pow(2) + i64::from(dz).pow(2);
+                    if best.is_none_or(|(_, d)| dist < d) {
+                        best = Some((p, dist));
+                    }
+                }
+            }
+        }
+        best.map(|(p, _)| p)
+    }
+
+    /// `Villager.shouldRestock` + `restock` (на старте `WorkAtPoi`).
+    fn try_restock(&self, v: &mut Villager, now: i64) {
+        let needs = v.offers.iter().any(|o| o.uses > 0);
+        if now > v.last_restock + 12_000 {
+            v.last_restock = now;
+            v.restocks_today = 0;
+        }
+        let allowed =
+            v.restocks_today == 0 || (v.restocks_today < 2 && now > v.last_restock + 2_400);
+        if allowed && needs {
+            for o in &mut v.offers {
+                o.demand += o.uses - (o.max_uses - o.uses);
+                o.uses = 0;
+            }
+            v.last_restock = now;
+            v.restocks_today += 1;
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Offer {
     pub buy: (i32, i32),
@@ -484,7 +528,6 @@ pub struct Villager {
     /// `RestocksToday`.
     pub restocks_today: i32,
     /// Последняя проверка рабочего блока (в игровых тиках).
-    pub last_work_check: i64,
     /// Занятое рабочее место; `None` — безработный или место потеряно.
     pub job_site: Option<[i32; 3]>,
     /// Тик последней проверки профессии по точкам интереса.
@@ -568,6 +611,9 @@ pub struct Villager {
     pub meet_goal: MeetGoal,
     pub rest_goal: RestGoal,
     pub work_active: bool,
+    pub work_cooldown: i64,
+    pub stroll_cooldown: i64,
+    pub farm_actions_left: i32,
     pub branch_timer: i32,
     pub goal_timer: i32,
     /// `MemoryModuleType.BREED_TARGET` и время рождения.
@@ -1489,47 +1535,83 @@ impl PlayPlan {
                             [site[0] as f64 + 0.5, site[1] as f64, site[2] as f64 + 0.5],
                         ) <= 1.73 * 1.73
                     });
-                    if at_site && !v.work_active {
-                        v.work_active = true;
-                        self.play_sound(
-                            None,
-                            "minecraft:entity.villager.work_farmer",
-                            crate::sounds::NEUTRAL,
-                            v.pos,
-                            1.0,
-                            1.0,
-                        );
-                        v.goal_timer = 0;
-                    } else if !at_site {
-                        v.goal_timer = 0;
+                    // `WorkAtPoi`: пока житель у рабочего блока, поведение
+                    // продолжается; проверка старта — 300 тиков и 1/2.
+                    if at_site {
+                        if !v.work_active {
+                            if rand::random::<u32>().is_multiple_of(2) {
+                                v.work_active = true;
+                                v.work_cooldown = now + 300;
+                                if let Some(sound) = work_sound(&v.profession) {
+                                    self.play_sound(
+                                        None,
+                                        &sound,
+                                        crate::sounds::NEUTRAL,
+                                        v.pos,
+                                        1.0,
+                                        1.0,
+                                    );
+                                }
+                                self.try_restock(v, now);
+                            } else {
+                                v.goal_timer = 0;
+                            }
+                        } else if now >= v.work_cooldown {
+                            // Сессия работы закончилась — RunOne перевыбирает.
+                            v.work_active = false;
+                            v.goal_timer = 0;
+                        }
+                        return Some((v.pos, v.yaw));
                     }
+                    v.work_active = false;
+                    v.goal_timer = 0;
                 }
-                WorkGoal::StrollAroundPoi | WorkGoal::StrollToPoiList => {
-                    let base = v.job_site.unwrap_or([
+                WorkGoal::StrollAroundPoi => {
+                    // `StrollAroundPoi(JOB_SITE, 0.4, 4)`: пауза 180.
+                    let site = v.job_site.unwrap_or([
                         v.pos[0].floor() as i32,
                         v.pos[1].floor() as i32,
                         v.pos[2].floor() as i32,
                     ]);
-                    if v.move_target.is_none() {
-                        v.move_target = self.stroll_point(
-                            [base[0] as f64 + 0.5, v.pos[1], base[2] as f64 + 0.5],
-                            8,
-                        );
-                    }
-                    if v.move_target.is_none() {
+                    let center = [site[0] as f64 + 0.5, site[1] as f64, site[2] as f64 + 0.5];
+                    if crate::mobs::dist2(v.pos, center) > 16.0 {
                         v.goal_timer = 0;
-                    } else if let Some(step) = self.walk_step(v, v.move_target?, 0.14) {
-                        return Some(step);
-                    } else {
+                    } else if now >= v.stroll_cooldown {
+                        v.move_target = self.stroll_point(v.pos, 8);
+                        v.stroll_cooldown = now + 180;
+                        v.goal_timer = 0;
+                    }
+                }
+                WorkGoal::StrollToPoiList => {
+                    // `StrollToPoiList(SECONDARY_JOB_SITE, ..., 1, 6, JOB_SITE)`.
+                    let site = v.job_site.unwrap_or([
+                        v.pos[0].floor() as i32,
+                        v.pos[1].floor() as i32,
+                        v.pos[2].floor() as i32,
+                    ]);
+                    if now >= v.stroll_cooldown {
+                        v.move_target = self
+                            .nearest_farmland(site, 6)
+                            .and_then(|f| self.stand_near(f, v.pos));
+                        v.stroll_cooldown = now + 100;
                         v.goal_timer = 0;
                     }
                 }
                 WorkGoal::StrollToPoi => {
-                    let site = v.job_site.and_then(|p| self.stand_near(p, v.pos));
-                    if let Some(step) = site.and_then(|t| self.walk_step(v, t, 0.14)) {
-                        return Some(step);
+                    // `StrollToPoi(JOB_SITE, 0.4, 1, 10)`: пауза 80.
+                    let site = v.job_site.unwrap_or([
+                        v.pos[0].floor() as i32,
+                        v.pos[1].floor() as i32,
+                        v.pos[2].floor() as i32,
+                    ]);
+                    let center = [site[0] as f64 + 0.5, site[1] as f64, site[2] as f64 + 0.5];
+                    if crate::mobs::dist2(v.pos, center) > 100.0 {
+                        v.goal_timer = 0;
+                    } else if now >= v.stroll_cooldown {
+                        v.move_target = self.stand_near(site, v.pos);
+                        v.stroll_cooldown = now + 80;
+                        v.goal_timer = 0;
                     }
-                    v.goal_timer = 0;
                 }
             }
         }
@@ -1547,20 +1629,17 @@ impl PlayPlan {
                     }
                 }
                 MeetGoal::Stroll => {
-                    let bell = v.meeting_point;
-                    if v.move_target.is_none()
-                        && let Some(bell) = bell
-                    {
-                        v.move_target = self.stroll_point(
-                            [bell[0] as f64 + 0.5, v.pos[1], bell[2] as f64 + 0.5],
-                            8,
-                        );
-                    }
-                    if v.move_target.is_none() {
+                    // `StrollAroundPoi(MEETING_POINT, 0.4, 40)`: пауза 180.
+                    let Some(bell) = v.meeting_point else {
                         v.goal_timer = 0;
-                    } else if let Some(step) = self.walk_step(v, v.move_target?, 0.21) {
-                        return Some(step);
-                    } else {
+                        return None;
+                    };
+                    let center = [bell[0] as f64 + 0.5, bell[1] as f64, bell[2] as f64 + 0.5];
+                    if crate::mobs::dist2(v.pos, center) > 1600.0 {
+                        v.goal_timer = 0;
+                    } else if now >= v.stroll_cooldown {
+                        v.move_target = self.stroll_point(v.pos, 8);
+                        v.stroll_cooldown = now + 180;
                         v.goal_timer = 0;
                     }
                 }
@@ -1619,6 +1698,13 @@ impl PlayPlan {
             }
             let _ = now;
         }
+        // Навигация продолжается, пока поведение-«однократка» уже
+        // завершилось (`MoveToTargetSink`).
+        if let Some(target) = v.move_target
+            && let Some(step) = self.walk_step(v, target, 0.14)
+        {
+            return Some(step);
+        }
         let other_babies = babies.iter().filter(|(bid, ..)| *bid != id).count();
         // `getPlayPackage`: салки (5) при других малышах, иначе RunOne.
         if v.age < 0 && v.activity == Activity::Play {
@@ -1650,18 +1736,34 @@ impl PlayPlan {
                     if let Some(step) = self.cat_step(v, cats) {
                         return Some(step);
                     }
+                    v.goal_timer = 0;
                 }
                 IdleGoal::JumpBed if v.age < 0 => {
                     if let Some(step) = self.jump_on_bed_step(v) {
                         return Some(step);
                     }
+                    v.goal_timer = 0;
                 }
                 IdleGoal::Breed if self.can_breed(v) => {
                     if let Some(step) = self.breed_step(id, v, others, breedable, births) {
                         return Some(step);
                     }
+                    v.goal_timer = 0;
                 }
-                _ => {}
+                IdleGoal::Stroll => {
+                    if v.move_target.is_none() {
+                        v.move_target = self.stroll_point(v.pos, 8);
+                    }
+                    v.goal_timer = 0;
+                }
+                IdleGoal::DoNothing => {
+                    v.branch_timer -= 1;
+                    if v.branch_timer <= 0 {
+                        v.goal_timer = 0;
+                    }
+                    return Some((v.pos, v.yaw));
+                }
+                _ => v.goal_timer = 0,
             }
         }
         if v.activity == Activity::Idle
@@ -2460,6 +2562,13 @@ impl PlayPlan {
             return None;
         }
         let pick = targets[rand::random::<usize>() % targets.len()];
+        if v.farm_actions_left == 0 {
+            v.farm_actions_left = if v.work_goal == WorkGoal::UseBonemeal {
+                2
+            } else {
+                5
+            };
+        }
         v.farm_target = Some(pick);
         let center = [pick[0] as f64 + 0.5, v.pos[1], pick[2] as f64 + 0.5];
         self.walk_step(v, center, 0.14)
@@ -2483,6 +2592,7 @@ impl PlayPlan {
             if age >= max {
                 self.break_drops(p);
                 self.set_block(p, 0);
+                self.finish_farm_action(v);
                 return;
             }
             if self.has_item(v, "minecraft:bone_meal")
@@ -2493,6 +2603,7 @@ impl PlayPlan {
                     None,
                     play::level_event(self.ids.level_event, 1505, p, 15, false),
                 );
+                self.finish_farm_action(v);
             }
             return;
         }
@@ -2511,6 +2622,25 @@ impl PlayPlan {
                 1.0,
                 1.0,
             );
+            self.finish_farm_action(v);
+        }
+    }
+
+    /// Конец одного действия `HarvestFarmland` (200 тиков) или
+    /// `UseBonemeal` (80 тиков), затем пауза 200/160.
+    fn finish_farm_action(&self, v: &mut Villager) {
+        v.farm_actions_left -= 1;
+        if v.farm_actions_left <= 0 {
+            v.farm_actions_left = 0;
+            v.farm_cooldown = self.game_time()
+                + if v.work_goal == WorkGoal::UseBonemeal {
+                    160
+                } else {
+                    200
+                };
+            v.goal_timer = 0;
+        } else {
+            v.farm_cooldown = self.game_time() + 40;
         }
     }
 
@@ -3126,6 +3256,9 @@ impl PlayPlan {
             meet_goal: MeetGoal::Socialize,
             rest_goal: RestGoal::DoNothing,
             work_active: false,
+            work_cooldown: 0,
+            stroll_cooldown: 0,
+            farm_actions_left: 0,
             branch_timer: 0,
             goal_timer: 0,
             breed_target: None,
@@ -3142,7 +3275,6 @@ impl PlayPlan {
             show_sent: None,
             path_from: None,
             path_to: None,
-            last_work_check: self.game_time(),
             job_site: None,
             last_job_check: 0,
             custom_name: None,
@@ -3312,7 +3444,6 @@ impl PlayPlan {
         let mut births: Vec<Birth> = Vec::new();
         let mut gossip: Vec<(i32, i32)> = Vec::new();
         let mut gone = Vec::new();
-        let mut work: Vec<([f64; 3], String)> = Vec::new();
         let mut jobs: Vec<(i32, String, String, i32)> = Vec::new();
         let hero_id = self
             .survival
@@ -3464,31 +3595,6 @@ impl PlayPlan {
                     None => v.gift_wait = None,
                 }
             }
-            if v.trader == TraderKind::Villager && now - v.last_work_check >= 300 {
-                v.last_work_check = now;
-                if let Some(ws) = workstation(&v.profession)
-                    && self.near_block(v.pos, ws)
-                {
-                    let needs = v.offers.iter().any(|o| o.uses > 0);
-                    // `shouldRestock`: новый день (полдня с прошлого
-                    // рестока) сбрасывает счётчик.
-                    if now > v.last_restock + 12_000 {
-                        v.last_restock = now;
-                        v.restocks_today = 0;
-                    }
-                    let allowed = v.restocks_today == 0
-                        || (v.restocks_today < 2 && now > v.last_restock + 2_400);
-                    if allowed && needs {
-                        for o in &mut v.offers {
-                            o.demand += o.uses - (o.max_uses - o.uses);
-                            o.uses = 0;
-                        }
-                        v.last_restock = now;
-                        v.restocks_today += 1;
-                        work.push((v.pos, v.profession.clone()));
-                    }
-                }
-            }
         }
         self.process_births(births);
         for (a, b) in gossip {
@@ -3587,54 +3693,9 @@ impl PlayPlan {
                 ),
             );
         }
-        for (pos, profession) in work {
-            if let Some(sound) = work_sound(&profession) {
-                self.play_sound(None, &sound, crate::sounds::NEUTRAL, pos, 1.0, 1.0);
-            }
-            let at = [pos[0], pos[1] + 1.0, pos[2]];
-            if let Some(&particle) = self
-                .particle_types
-                .lock()
-                .unwrap()
-                .get("minecraft:happy_villager")
-            {
-                self.hub.send(
-                    None,
-                    play::level_particles(
-                        self.ids.level_particles,
-                        particle,
-                        false,
-                        at,
-                        [0.0; 3],
-                        0.0,
-                        3,
-                    ),
-                );
-            }
-            self.mark_work();
-        }
     }
 
     /// Есть ли рядом (в кубе ±2) блок рабочего места.
-    fn near_block(&self, pos: [f64; 3], name: &str) -> bool {
-        let c = [
-            pos[0].floor() as i32,
-            pos[1].floor() as i32,
-            pos[2].floor() as i32,
-        ];
-        for dy in -2..=2 {
-            for dx in -2..=2 {
-                for dz in -2..=2 {
-                    let p = [c[0] + dx, c[1] + dy, c[2] + dz];
-                    if self.block(p).is_some_and(|s| self.state_name(s) == name) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-
     pub(super) fn track_villagers(&self, out: &mut Vec<Tracked>) {
         for (&id, v) in self.sim().villagers.lock().unwrap().iter() {
             out.push(Tracked {
@@ -4109,7 +4170,6 @@ impl PlayPlan {
             despawn_delay: 0,
             last_restock: 0,
             restocks_today: 0,
-            last_work_check: self.game_time(),
             job_site: None,
             last_job_check: 0,
             custom_name: None,
@@ -4159,6 +4219,9 @@ impl PlayPlan {
             meet_goal: MeetGoal::Socialize,
             rest_goal: RestGoal::DoNothing,
             work_active: false,
+            work_cooldown: 0,
+            stroll_cooldown: 0,
+            farm_actions_left: 0,
             branch_timer: 0,
             goal_timer: 0,
             breed_target: None,
@@ -4439,7 +4502,6 @@ mod tests {
             despawn_delay: 0,
             last_restock: 0,
             restocks_today: 0,
-            last_work_check: 0,
             job_site: None,
             last_job_check: 0,
             custom_name: None,
@@ -4489,6 +4551,9 @@ mod tests {
             meet_goal: MeetGoal::Socialize,
             rest_goal: RestGoal::DoNothing,
             work_active: false,
+            work_cooldown: 0,
+            stroll_cooldown: 0,
+            farm_actions_left: 0,
             branch_timer: 0,
             goal_timer: 0,
             breed_target: None,

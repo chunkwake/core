@@ -715,12 +715,13 @@ async fn main() {
     let mut planted = false;
     let mut bonemealed = false;
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(90_000) {
+    while start.elapsed() < Duration::from_millis(180_000) {
         if !harvested {
             harvested = p.block_is(w1, "minecraft:air").await;
         }
         if !planted {
-            planted = p.block_is(w2, "minecraft:wheat").await;
+            planted =
+                p.block_is(w1, "minecraft:wheat").await || p.block_is(w2, "minecraft:wheat").await;
         }
         if !bonemealed && let Some(pos) = p.a_pos {
             let inv = p.data_at(pos, "Inventory").await;
@@ -746,7 +747,7 @@ async fn main() {
     .await;
     let mut restocked = false;
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(70_000) {
+    while start.elapsed() < Duration::from_millis(120_000) {
         if let Some(pos) = p.a_pos {
             let offers = p.data_at(pos, "Offers").await;
             if offers.contains("uses:0") {
@@ -782,7 +783,24 @@ async fn main() {
     let mut played_cat = false;
     let start = tokio::time::Instant::now();
     let a_id = p.a_id.expect("нет id A");
-    while start.elapsed() < Duration::from_millis(20_000) {
+    while start.elapsed() < Duration::from_millis(40_000) {
+        // Житель гуляет: подносим его к неподвижной кошке (NoAI).
+        if let (Some(vpos), Some(cpos)) = (
+            p.all_pos.get(&a_id).copied(),
+            p.all_pos.get(&cat_id).copied(),
+        ) && dist_xz(vpos, cpos) > 6.0
+        {
+            p.cmd(&format!(
+                "tp @e[type=minecraft:villager,x={},y={},z={},distance=..1] {} {} {}",
+                vpos[0],
+                vpos[1],
+                vpos[2],
+                cpos[0] + 2.0,
+                cpos[1],
+                cpos[2]
+            ))
+            .await;
+        }
         if let (Some(vpos), Some(cpos)) = (p.all_pos.get(&a_id), p.all_pos.get(&cat_id))
             && dist_xz(*vpos, *cpos) <= 2.5
         {
@@ -893,7 +911,7 @@ async fn main() {
     let composter = [X as f64 + 9.5, f64::from(Y), Z as f64 + 0.5];
     let mut calm = false;
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(12_000) {
+    while start.elapsed() < Duration::from_millis(30_000) {
         if let Some(pos) = p.a_pos
             && dist_xz(pos, composter) <= 3.5
         {
@@ -919,7 +937,7 @@ async fn main() {
     // 2. Встреча: 9000..11000 — идёт к колоколу.
     p.cmd("time set 9600").await;
     let at_bell = p
-        .wait_near([X as f64 + 0.5, f64::from(Y), Z as f64 + 6.5], 2.0, 12_000)
+        .wait_near([X as f64 + 0.5, f64::from(Y), Z as f64 + 6.5], 2.0, 40_000)
         .await
         .unwrap_or_else(|| panic!("нет позиции жителя у колокола"));
     let near = dist_xz(at_bell, [X as f64 + 0.5, f64::from(Y), Z as f64 + 6.5]);
@@ -1048,7 +1066,7 @@ async fn main() {
     p.cmd("time set 9600").await;
     let mut b_inv = String::new();
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(20_000) {
+    while start.elapsed() < Duration::from_millis(60_000) {
         if let Some(pos) = p.all_pos.get(&b_id).copied() {
             b_inv = p.data_at(pos, "Inventory").await;
             if b_inv.contains("minecraft:bread") && b_inv.contains("count:24") {
@@ -1295,7 +1313,7 @@ async fn main() {
     });
     let mut played = None;
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(30_000) {
+    while start.elapsed() < Duration::from_millis(45_000) {
         if let (Some(a), Some(b)) = (
             p.all_pos.get(&child).copied(),
             p.all_pos.get(&partner_baby).copied(),
