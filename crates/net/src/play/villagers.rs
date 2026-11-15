@@ -322,29 +322,42 @@ impl PlayPlan {
     /// Сделки для профессии: у нас детально описаны только фермер и
     /// странствующий торговец, остальные получают фермерский набор.
     /// Все сделки уровней `1..=level` (`Villager.updateTrades`).
-    fn offers_for(&self, profession: &str, level: i32, kind: &str) -> Vec<Offer> {
+    fn offers_for(&self, profession: &str, level: i32, kind: &str, origin: [f64; 3]) -> Vec<Offer> {
         if profession == "minecraft:none" {
             return Vec::new();
         }
         if profession == "minecraft:wandering_trader" {
             return self.wandering_offers();
         }
-        self.offers_for_levels(profession, 1, level.max(1), kind)
+        self.offers_for_levels(profession, 1, level.max(1), kind, origin)
     }
 
     /// Сделки для диапазона уровней (при повышении уровня добавляются
     /// только новые).
-    fn offers_for_levels(&self, profession: &str, from: i32, to: i32, kind: &str) -> Vec<Offer> {
+    fn offers_for_levels(
+        &self,
+        profession: &str,
+        from: i32,
+        to: i32,
+        kind: &str,
+        origin: [f64; 3],
+    ) -> Vec<Offer> {
         let mut out = Vec::new();
         for level in from.max(1)..=to.max(1) {
-            out.extend(self.offers_for_level(profession, level, kind));
+            out.extend(self.offers_for_level(profession, level, kind, origin));
         }
         out
     }
 
     /// Один `TradeSet` уровня: `amount` сделок без повторов, если
     /// `allow_duplicates` не задан.
-    fn offers_for_level(&self, profession: &str, level: i32, kind: &str) -> Vec<Offer> {
+    fn offers_for_level(
+        &self,
+        profession: &str,
+        level: i32,
+        kind: &str,
+        origin: [f64; 3],
+    ) -> Vec<Offer> {
         let short = profession.strip_prefix("minecraft:").unwrap_or(profession);
         let Some(set) = self.survival.trades.set(short, level) else {
             return Vec::new();
@@ -378,7 +391,7 @@ impl PlayPlan {
                 .trades
                 .defs
                 .get(id)
-                .and_then(|def| self.offer_from_def(def))
+                .and_then(|def| self.offer_from_def(def, origin))
             {
                 Some(offer) => {
                     out.push(offer);
@@ -396,21 +409,26 @@ impl PlayPlan {
 
     /// `VillagerTrade.getOffer`: предметы, цена, `max_uses`, `xp` и
     /// зачарование из `given_item_modifier`.
-    fn offer_from_def(&self, def: &chunkwake_data::trades::TradeDef) -> Option<Offer> {
+    fn offer_from_def(
+        &self,
+        def: &chunkwake_data::trades::TradeDef,
+        origin: [f64; 3],
+    ) -> Option<Offer> {
         let buy_item = self.item_id(&def.wants.id)?;
         let sell_item = self.item_id(&def.gives.id)?;
         let mut sell = Stack::new(sell_item, def.gives.count.max(1));
+        let mut extra = chunkwake_protocol::components::Extra::default();
+        let mut decorated = false;
         let mut extra_cost = 0i32;
         if let Some(spec) = &def.enchant {
             let ench = self.pick_enchantment(spec, &def.gives.id)?;
             let level = 1 + rand::random::<i32>() % ench.max_level.max(1);
-            let mut extra = chunkwake_protocol::components::Extra::default();
             if def.gives.id == "minecraft:enchanted_book" {
                 extra.stored = vec![(ench.id, level)];
             } else {
                 extra.enchantments = vec![(ench.id, level)];
             }
-            sell.extra = chunkwake_protocol::components::intern(extra);
+            decorated = true;
             if spec.include_cost {
                 extra_cost = if spec.random {
                     // `EnchantRandomlyFunction`: 2 + [0, 5+10*level) + 3*level,
@@ -425,6 +443,24 @@ impl PlayPlan {
                     min + rand::random::<i32>() % (max - min + 1).max(1)
                 };
             }
+        }
+        // `ExplorationMapFunction`: ближайшая структура тега, карта с
+        // `map_id` и значком `+` нужного типа (`map_decoration_type`).
+        if let Some(spec) = &def.exploration {
+            let origin = [
+                origin[0].floor() as i32,
+                origin[1].floor() as i32,
+                origin[2].floor() as i32,
+            ];
+            let pos = self.locate_structure(&spec.destination, origin)?;
+            let decoration = *self.survival.map_decorations.get(&spec.decoration)?;
+            let map_id = self.create_map(pos[0], pos[2], spec.zoom, true, true);
+            self.add_map_target(map_id, decoration, pos[0], pos[2], "+");
+            extra.map_id = Some(map_id);
+            decorated = true;
+        }
+        if decorated {
+            sell.extra = chunkwake_protocol::components::intern(extra);
         }
         let buy = def.wants.count.max(0) + extra_cost;
         if buy < 1 {
@@ -565,7 +601,7 @@ impl PlayPlan {
             v.profession = kind.to_owned();
             v.xp = 0;
             v.level = 1;
-            v.offers = self.offers_for(&v.profession, v.level, &v.kind);
+            v.offers = self.offers_for(&v.profession, v.level, &v.kind, v.pos);
             return Some((id, v.kind.clone(), v.profession.clone(), v.level));
         }
         None
@@ -713,7 +749,7 @@ impl PlayPlan {
         if v.profession == "minecraft:none" {
             v.offers.clear();
         } else if v.offers.is_empty() {
-            v.offers = self.offers_for(&v.profession, v.level, &v.kind);
+            v.offers = self.offers_for(&v.profession, v.level, &v.kind, v.pos);
         }
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
         self.sim().villagers.lock().unwrap().insert(id, v.clone());
@@ -1273,8 +1309,13 @@ impl PlayPlan {
         let old_level = v.level;
         v.level = level;
         if changed {
-            v.offers
-                .extend(self.offers_for_levels(&v.profession, old_level + 1, level, &v.kind));
+            v.offers.extend(self.offers_for_levels(
+                &v.profession,
+                old_level + 1,
+                level,
+                &v.kind,
+                v.pos,
+            ));
         }
         let reputation = v.reputation(player.as_u128());
         v.update_special_prices(amplifier, reputation);
@@ -1449,7 +1490,7 @@ impl PlayPlan {
         if v.profession == "minecraft:none" {
             v.offers.clear();
         } else if v.offers.is_empty() {
-            v.offers = self.offers_for(&v.profession, v.level, &v.kind);
+            v.offers = self.offers_for(&v.profession, v.level, &v.kind, v.pos);
         }
         self.sim().villagers_loaded.lock().unwrap().push(v);
         true

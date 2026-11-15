@@ -26,6 +26,8 @@ pub enum DecoKind {
     PlayerOffLimits,
     /// Знамя цвета `DyeColor` с этим номером (`banner_white` … `banner_black`).
     Banner(u8),
+    /// Произвольный тип из реестра `map_decoration_type` (структуры).
+    Target(i32),
 }
 
 impl DecoKind {
@@ -37,6 +39,7 @@ impl DecoKind {
             DecoKind::PlayerOffMap => 6,
             DecoKind::PlayerOffLimits => 7,
             DecoKind::Banner(c) => 10 + c as i32,
+            DecoKind::Target(id) => id,
         }
     }
 }
@@ -298,6 +301,19 @@ impl MapData {
         nether_time: Option<i64>,
     ) {
         self.put_named(kind, key, x, z, yaw, nether_time, None);
+    }
+
+    /// `MapItemSavedData.addTargetDecoration`: значок структуры с подписью.
+    pub fn put_target(&mut self, kind: i32, key: &str, x: f64, z: f64, name: &str) {
+        self.put_named(
+            DecoKind::Target(kind),
+            key,
+            x,
+            z,
+            0.0,
+            None,
+            Some(name.to_owned()),
+        );
     }
 
     /// `addDecoration` с подписью.

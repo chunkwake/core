@@ -33,6 +33,18 @@ pub struct EnchantSpec {
     pub include_cost: bool,
 }
 
+/// `given_item_modifier` `exploration_map`: карта к ближайшей структуре.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExplorationMapSpec {
+    /// Тег структур (`#minecraft:on_jungle_pyramid_maps`) или id.
+    pub destination: String,
+    /// `map_decoration_type` (например, `minecraft:jungle_temple`).
+    pub decoration: String,
+    pub zoom: u8,
+    pub search_radius: i32,
+    pub skip_existing: bool,
+}
+
 /// Одна сделка (`VillagerTrade`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TradeDef {
@@ -46,6 +58,8 @@ pub struct TradeDef {
     /// `merchant_predicate`: допустимые варианты жителя.
     pub variants: Option<Vec<String>>,
     pub enchant: Option<EnchantSpec>,
+    /// `given_item_modifier` `exploration_map`.
+    pub exploration: Option<ExplorationMapSpec>,
     /// `double_trade_price_enchantments` (имена зачарований).
     pub double_price: Vec<String>,
     /// Модификатор не поддержан (например, карты исследователя).
@@ -149,6 +163,7 @@ fn parse_trade(json: &Value, enchant_tags: &HashMap<String, Vec<String>>) -> Opt
             .unwrap_or(0.0) as f32,
         variants: merchant_variants(json.get("merchant_predicate")),
         enchant: None,
+        exploration: None,
         double_price: json
             .get("double_trade_price_enchantments")
             .and_then(Value::as_str)
@@ -196,7 +211,34 @@ fn parse_trade(json: &Value, enchant_tags: &HashMap<String, Vec<String>>) -> Opt
                 }
                 // `filtered` лишь отбраковывает пустой результат.
                 Some("minecraft:filtered") => {}
-                // Карты исследователя и прочие модификаторы не поддержаны.
+                Some("minecraft:exploration_map") => {
+                    def.exploration = Some(ExplorationMapSpec {
+                        destination: function
+                            .get("destination")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        decoration: function
+                            .get("decoration")
+                            .and_then(Value::as_str)
+                            .unwrap_or("minecraft:woodland_mansion")
+                            .to_owned(),
+                        zoom: function
+                            .get("zoom")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(2)
+                            .clamp(0, 4) as u8,
+                        search_radius: function
+                            .get("search_radius")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(50) as i32,
+                        skip_existing: function
+                            .get("skip_existing_chunks")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true),
+                    });
+                }
+                // Прочие модификаторы не поддержаны.
                 Some(_) => def.unsupported = true,
                 None => {}
             }
@@ -365,6 +407,35 @@ mod tests {
             trade_item(&serde_json::json!({"id": "minecraft:emerald", "count": 3})).unwrap();
         assert_eq!(emerald.count, 3);
         assert!(emerald.potion.is_none());
+    }
+
+    #[test]
+    fn exploration_map_parses() {
+        let json = serde_json::json!({
+            "wants": {"id": "minecraft:emerald", "count": 8},
+            "additional_wants": {"id": "minecraft:compass"},
+            "gives": {"id": "minecraft:jungle_pyramid_map"},
+            "max_uses": 12,
+            "xp": 5,
+            "reputation_discount": 0.2,
+            "given_item_modifier": [
+                {
+                    "type": "minecraft:exploration_map",
+                    "decoration": "minecraft:jungle_temple",
+                    "destination": "#minecraft:on_jungle_pyramid_maps",
+                    "search_radius": 100
+                },
+                {"type": "minecraft:filtered"}
+            ]
+        });
+        let def = parse_trade(&json, &HashMap::new()).unwrap();
+        let map = def.exploration.unwrap();
+        assert_eq!(map.destination, "#minecraft:on_jungle_pyramid_maps");
+        assert_eq!(map.decoration, "minecraft:jungle_temple");
+        assert_eq!(map.zoom, 2);
+        assert_eq!(map.search_radius, 100);
+        assert!(!def.unsupported);
+        assert_eq!(def.additional.unwrap().id, "minecraft:compass");
     }
 
     #[test]

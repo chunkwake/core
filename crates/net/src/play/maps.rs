@@ -138,6 +138,14 @@ impl PlayPlan {
         Some(id)
     }
 
+    /// `MapItemSavedData.addTargetDecoration`: значок структуры на карте.
+    pub(crate) fn add_map_target(&self, id: i32, kind: i32, x: i32, z: i32, name: &str) {
+        let mut store = self.maps.lock().unwrap();
+        self.with_map(&mut store, id, |m| {
+            m.put_target(kind, "target", f64::from(x), f64::from(z), name);
+        });
+    }
+
     /// Масштаб и замок карты (для стола картографа).
     pub(crate) fn map_info(&self, id: i32) -> Option<(u8, bool)> {
         let mut store = self.maps.lock().unwrap();
@@ -157,7 +165,9 @@ impl PlayPlan {
 
     /// Номер карты стопки, если это заполненная карта.
     pub(crate) fn map_id_of(&self, s: Stack) -> Option<i32> {
-        if s.extra == 0 || self.item_name(s.item) != "minecraft:filled_map" {
+        // 26.3: карты — отдельные предметы (`minecraft:plains_village_map`,
+        // `minecraft:jungle_pyramid_map`, ...), не только `filled_map`.
+        if s.extra == 0 {
             return None;
         }
         chunkwake_protocol::components::get(s.extra).map_id

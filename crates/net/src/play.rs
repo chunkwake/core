@@ -2622,6 +2622,8 @@ pub struct SurvivalData {
     pub banner_patterns: HashMap<String, i32>,
     /// Сделки жителей по `villager_trade`/`trade_set`.
     pub trades: chunkwake_data::trades::Trades,
+    /// `map_decoration_type`: имя -> ID реестра (значки карт).
+    pub map_decorations: HashMap<String, i32>,
     pub anvil_repair: std::collections::HashMap<i32, std::collections::HashSet<i32>>,
     pub smithing: chunkwake_data::recipes::SmithingData,
     /// Чары для плагинов по порядку сетевых ID (строки запроса `enchantments`).
