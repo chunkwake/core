@@ -18,7 +18,15 @@ struct Probe {
     cb_meta: i32,
     cb_block: i32,
     cb_section: i32,
+    cb_add: i32,
+    cb_move: i32,
+    cb_teleport: i32,
     chat: String,
+    /// Первый житель (спавн у X+0.5) и его позиция из пакетов.
+    a_id: Option<i32>,
+    a_pos: Option<[f64; 3]>,
+    a_yaw: f32,
+    a_base: [i64; 3],
     /// Последняя поза из `set_entity_data` (индекс 6).
     pose: Option<i32>,
     /// Дверь на пути и ID её состояний (`block_update`).
@@ -38,7 +46,59 @@ impl Probe {
 
     fn drain(&mut self) {
         for (id, body) in std::mem::take(&mut self.c.captured_by) {
-            if id == self.cb_chat {
+            if id == self.cb_add {
+                let mut r = Reader::new(&body);
+                let (Ok(entity), Ok(_uuid)) = (r.var_int(), r.bytes(16)) else {
+                    continue;
+                };
+                let (Ok(_kind), Ok(x), Ok(y), Ok(z)) = (r.var_int(), r.f64(), r.f64(), r.f64())
+                else {
+                    continue;
+                };
+                let spawn = [X as f64 + 0.5, f64::from(Y), Z as f64 + 0.5];
+                if dist_xz([x, y, z], spawn) < 0.6 {
+                    self.a_id = Some(entity);
+                    self.a_pos = Some([x, y, z]);
+                    self.a_base = chunkwake_protocol::play::quantize([x, y, z]);
+                }
+            } else if id == self.cb_move {
+                let mut r = Reader::new(&body);
+                let Ok(entity) = r.var_int() else { continue };
+                if Some(entity) != self.a_id {
+                    continue;
+                }
+                if r.var_int().is_err() {
+                    continue;
+                }
+                let (Ok(dx), Ok(dy), Ok(dz)) = (r.u16(), r.u16(), r.u16()) else {
+                    continue;
+                };
+                if let Ok(yaw) = r.u8() {
+                    self.a_yaw = f32::from(yaw) * 360.0 / 256.0;
+                }
+                self.a_base[0] += i64::from(dx as i16);
+                self.a_base[1] += i64::from(dy as i16);
+                self.a_base[2] += i64::from(dz as i16);
+                self.a_pos = Some([
+                    self.a_base[0] as f64 / 4096.0,
+                    self.a_base[1] as f64 / 4096.0,
+                    self.a_base[2] as f64 / 4096.0,
+                ]);
+            } else if id == self.cb_teleport {
+                let mut r = Reader::new(&body);
+                let Ok(entity) = r.var_int() else { continue };
+                if Some(entity) != self.a_id {
+                    continue;
+                }
+                let (Ok(x), Ok(y), Ok(z)) = (r.f64(), r.f64(), r.f64()) else {
+                    continue;
+                };
+                if let Ok(yaw) = r.f32() {
+                    self.a_yaw = yaw;
+                }
+                self.a_pos = Some([x, y, z]);
+                self.a_base = chunkwake_protocol::play::quantize([x, y, z]);
+            } else if id == self.cb_chat {
                 let mut r = Reader::new(&body);
                 if let Ok(component) = text::read_component(&mut r) {
                     flatten(&component, &mut self.chat);
@@ -172,6 +232,12 @@ impl Probe {
     }
 }
 
+fn look_yaw(from: [f64; 3], to: [f64; 3]) -> f32 {
+    let dx = to[0] - from[0];
+    let dz = to[2] - from[2];
+    (-dx).atan2(dz).to_degrees() as f32
+}
+
 fn dist_xz(a: [f64; 3], b: [f64; 3]) -> f64 {
     ((a[0] - b[0]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
@@ -238,12 +304,23 @@ async fn main() {
     let cb_meta = cb("set_entity_data");
     let cb_block = cb("block_update");
     let cb_section = cb("section_blocks_update");
+    let cb_add = cb("add_entity");
+    let cb_move = cb("move_entity_pos_rot");
+    let cb_teleport = cb("teleport_entity");
     let (door_open, door_closed) = door_state_ids(&root)
         .unwrap_or_else(|| panic!("нет состояний oak_door в reports/blocks.json"));
     let mut c = Client::connect(&a[1], "boater", ids, 777, "26.3")
         .await
         .unwrap();
-    c.capture_also = vec![cb_chat, cb_meta, cb_block, cb_section];
+    c.capture_also = vec![
+        cb_chat,
+        cb_meta,
+        cb_block,
+        cb_section,
+        cb_add,
+        cb_move,
+        cb_teleport,
+    ];
     let mut p = Probe {
         c,
         sb_command: sb("chat_command"),
@@ -251,7 +328,14 @@ async fn main() {
         cb_meta,
         cb_block,
         cb_section,
+        cb_add,
+        cb_move,
+        cb_teleport,
         chat: String::new(),
+        a_id: None,
+        a_pos: None,
+        a_yaw: 0.0,
+        a_base: [0; 3],
         pose: None,
         door: [X + 3, Y, Z],
         door_open,
@@ -349,6 +433,14 @@ async fn main() {
         "summon minecraft:villager {X}.5 {Y} {Z}.5 {{VillagerData:{{type:\"minecraft:plains\",profession:\"minecraft:none\",level:1}},Xp:0}}"
     ))
     .await;
+    // Второй житель (NoAI) в 8 блоках от колокола: цель социальной
+    // встречи, сам он не двигается.
+    p.cmd(&format!(
+        "summon minecraft:villager {}.5 {Y} {}.5 {{NoAI:1b,PersistenceRequired:1b,VillagerData:{{type:\"minecraft:plains\",profession:\"minecraft:none\",level:1}}}}",
+        X + 8,
+        Z + 13
+    ))
+    .await;
     p.pump(800).await;
 
     let data = p
@@ -393,6 +485,38 @@ async fn main() {
     let near = dist_xz(at_bell, [X as f64 + 0.5, f64::from(Y), Z as f64 + 6.5]);
     assert!(near <= 2.0, "житель не дошёл до колокола: {at_bell:?}");
     println!("meet: villager at bell ({near:.2})");
+
+    // `SocializeAtBell`: раз в 100 тиков житель у колокола выбирает
+    // ближайшего жителя (NoAI-сосед в 8 блоках) и подходит к нему.
+    let friend = [X as f64 + 8.5, f64::from(Y), Z as f64 + 13.5];
+    let mut social = None;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(30_000) {
+        if let Some(pos) = p.a_pos
+            && dist_xz(pos, friend) <= 2.0
+        {
+            social = Some((pos, p.a_yaw));
+            break;
+        }
+        p.pump(200).await;
+    }
+    let (social_pos, yaw) = social.unwrap_or_else(|| {
+        panic!(
+            "житель не подошёл к соседу у колокола (a_pos {:?})",
+            p.a_pos
+        )
+    });
+    let want = look_yaw(social_pos, friend);
+    let delta = (yaw - want + 180.0).rem_euclid(360.0) - 180.0;
+    assert!(
+        delta.abs() < 45.0,
+        "житель не смотрит на соседа: yaw {yaw}, ожидалось {want}"
+    );
+    println!(
+        "social: villager came to neighbour at bell ({:.2}, yaw {:.1})",
+        dist_xz(social_pos, friend),
+        yaw
+    );
 
     // 3. Отдых: 12000.. — идёт к своей кровати.
     p.cmd("time set 13000").await;

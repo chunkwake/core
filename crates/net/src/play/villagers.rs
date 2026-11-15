@@ -100,6 +100,13 @@ fn select_enchantments(
 /// Пороги уровней (`VillagerData.NEXT_LEVEL_XP_THRESHOLDS`).
 pub const LEVEL_XP: [i32; 5] = [0, 10, 70, 150, 250];
 
+/// `Mth.atan2`-подобный yaw взгляда из `from` в `to`.
+fn look_yaw(from: [f64; 3], to: [f64; 3]) -> f32 {
+    let dx = to[0] - from[0];
+    let dz = to[2] - from[2];
+    (-dx).atan2(dz).to_degrees() as f32
+}
+
 /// `timeline/villager_schedule.json` 26.3 (взрослый житель).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Activity {
@@ -278,6 +285,12 @@ pub struct Villager {
     pub sleep_cooldown: i64,
     /// `MemoryModuleType.DOORS_TO_CLOSE`: открытые жителем двери.
     pub doors_to_close: Vec<[i32; 3]>,
+    /// `MemoryModuleType.MEETING_POINT`: колокол на время `meet`.
+    pub meeting_point: Option<[i32; 3]>,
+    /// `MemoryModuleType.INTERACTION_TARGET`: UUID собеседника.
+    pub interaction_target: Option<u128>,
+    /// Сколько тиков смотреть на собеседника.
+    pub interaction_timer: i32,
 }
 
 /// Состояние окна торговли: к какому жителю и какая сделка выбрана.
@@ -1022,7 +1035,12 @@ impl PlayPlan {
 
     /// Один шаг `Brain`/`WalkTarget`: работа, встреча у колокола, отдых дома
     /// и прогулка в `idle`.
-    fn villager_ai_step(&self, id: i32, v: &mut Villager) -> Option<([f64; 3], f32)> {
+    fn villager_ai_step(
+        &self,
+        id: i32,
+        v: &mut Villager,
+        others: &[(i32, u128, [f64; 3])],
+    ) -> Option<([f64; 3], f32)> {
         let target = match v.activity {
             Activity::Work => v.job_site.and_then(|p| self.stand_near(p, v.pos)),
             Activity::Rest => {
@@ -1039,15 +1057,21 @@ impl PlayPlan {
                 self.stand_near(home, v.pos)
             }
             Activity::Meet => {
-                if v.move_target.is_none() {
+                if v.meeting_point.is_none() {
                     let types = std::collections::HashSet::from(["minecraft:meeting".to_owned()]);
                     let origin = [
                         v.pos[0].floor() as i32,
                         v.pos[1].floor() as i32,
                         v.pos[2].floor() as i32,
                     ];
-                    v.move_target = self
-                        .nearest_poi(&types, origin, 48)
+                    v.meeting_point = self.nearest_poi(&types, origin, 48);
+                }
+                if let Some(step) = self.socialize_step(id, v, others) {
+                    return Some(step);
+                }
+                if v.move_target.is_none() {
+                    v.move_target = v
+                        .meeting_point
                         .and_then(|bell| self.stand_near(bell, v.pos));
                 }
                 v.move_target
@@ -1072,6 +1096,63 @@ impl PlayPlan {
                 v.move_target
             }
         }?;
+        self.walk_step(v, target, 0.14)
+    }
+
+    /// `SocializeAtBell`: раз в 100 тиков у колокола выбрать ближайшего
+    /// жителя в 32 блоках, подойти и смотреть на него.
+    fn socialize_step(
+        &self,
+        id: i32,
+        v: &mut Villager,
+        others: &[(i32, u128, [f64; 3])],
+    ) -> Option<([f64; 3], f32)> {
+        if let Some(target) = v.interaction_target {
+            let Some((_, _, pos)) = others
+                .iter()
+                .find(|(other, uuid, _)| *other != id && *uuid == target)
+            else {
+                v.interaction_target = None;
+                return None;
+            };
+            if crate::mobs::dist2(v.pos, *pos) > 1.2 * 1.2 {
+                return self.walk_step(v, *pos, 0.14);
+            }
+            v.interaction_timer -= 1;
+            let yaw = look_yaw(v.pos, *pos);
+            v.yaw = yaw;
+            if v.interaction_timer <= 0 {
+                v.interaction_target = None;
+            }
+            return Some((v.pos, yaw));
+        }
+        let bell = v.meeting_point?;
+        let bell_pos = [bell[0] as f64 + 0.5, bell[1] as f64, bell[2] as f64 + 0.5];
+        if crate::mobs::dist2(v.pos, bell_pos) > 4.0 * 4.0
+            || !rand::random::<u32>().is_multiple_of(100)
+        {
+            return None;
+        }
+        let (_, uuid, pos) = others
+            .iter()
+            .filter(|(other, _, _)| *other != id)
+            .filter(|(_, _, pos)| crate::mobs::dist2(v.pos, *pos) <= 32.0 * 32.0)
+            .min_by(|a, b| {
+                crate::mobs::dist2(v.pos, a.2).total_cmp(&crate::mobs::dist2(v.pos, b.2))
+            })?;
+        v.interaction_target = Some(*uuid);
+        v.interaction_timer = 60;
+        if crate::mobs::dist2(v.pos, *pos) <= 1.2 * 1.2 {
+            let yaw = look_yaw(v.pos, *pos);
+            v.yaw = yaw;
+            Some((v.pos, yaw))
+        } else {
+            self.walk_step(v, *pos, 0.14)
+        }
+    }
+
+    /// Шаг к точке с проверкой коллизий и открыванием дверей.
+    fn walk_step(&self, v: &mut Villager, target: [f64; 3], speed: f64) -> Option<([f64; 3], f32)> {
         let dx = target[0] - v.pos[0];
         let dz = target[2] - v.pos[2];
         let dist = (dx * dx + dz * dz).sqrt();
@@ -1079,8 +1160,7 @@ impl PlayPlan {
             v.move_target = None;
             return None;
         }
-        // Скорость навигации: атрибут 0.5 × `SPEED_MODIFIER` 0.5.
-        let step = 0.14f64.min(dist);
+        let step = speed.min(dist);
         let nx = v.pos[0] + dx / dist * step;
         let nz = v.pos[2] + dz / dist * step;
         let feet_y = v.pos[1].floor() as i32;
@@ -1090,14 +1170,13 @@ impl PlayPlan {
         if feet != here {
             self.open_door_on_path(v, feet);
         }
-        let solid = |p: [i32; 3]| self.walk_blocked(p);
-        if solid(feet) {
+        if self.walk_blocked(feet) {
             let up = [feet[0], feet[1] + 1, feet[2]];
-            if solid(up) || solid([up[0], up[1] + 1, up[2]]) {
+            if self.walk_blocked(up) || self.walk_blocked([up[0], up[1] + 1, up[2]]) {
                 return None;
             }
         }
-        let yaw = (-dx).atan2(dz).to_degrees() as f32;
+        let yaw = look_yaw(v.pos, target);
         v.pos[0] = nx;
         v.pos[2] = nz;
         v.pos[1] += (target[1] - v.pos[1]).clamp(-0.2, 0.2);
@@ -1299,6 +1378,9 @@ impl PlayPlan {
             pose: 0,
             sleep_cooldown: 0,
             doors_to_close: Vec::new(),
+            meeting_point: None,
+            interaction_target: None,
+            interaction_timer: 0,
             last_work_check: self.game_time(),
             job_site: None,
             last_job_check: 0,
@@ -1395,6 +1477,16 @@ impl PlayPlan {
             .keys()
             .copied()
             .collect();
+        // Сенсор `NEAREST_VISIBLE_LIVING_ENTITIES` (упрощённо — без
+        // проверки линии видимости): снимок жителей на этот тик.
+        let others: Vec<(i32, u128, [f64; 3])> = self
+            .sim()
+            .villagers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(&id, v)| (id, v.uuid.as_u128(), v.pos))
+            .collect();
         let mut gone = Vec::new();
         let mut work: Vec<([f64; 3], String)> = Vec::new();
         let mut jobs: Vec<(i32, String, String, i32)> = Vec::new();
@@ -1439,6 +1531,8 @@ impl PlayPlan {
                 v.activity = activity;
                 v.move_target = None;
                 v.wander_timer = 0;
+                v.meeting_point = None;
+                v.interaction_target = None;
             }
             if v.trader == TraderKind::Villager && !v.no_ai {
                 if now - v.last_home_check >= 100 {
@@ -1455,7 +1549,7 @@ impl PlayPlan {
                 }
                 self.close_villager_doors(v);
                 if v.sleeping.is_none()
-                    && let Some((pos, yaw)) = self.villager_ai_step(id, v)
+                    && let Some((pos, yaw)) = self.villager_ai_step(id, v, &others)
                 {
                     moves.push((id, pos, yaw, v.sent_pos));
                     v.sent_pos = play::quantize(pos);
@@ -2099,6 +2193,9 @@ impl PlayPlan {
             pose: 0,
             sleep_cooldown: 0,
             doors_to_close: Vec::new(),
+            meeting_point: None,
+            interaction_target: None,
+            interaction_timer: 0,
         };
         apply_villager_nbt(&mut v, c, |n| self.item_id(n));
         if v.profession == "minecraft:none" {
@@ -2362,6 +2459,9 @@ mod tests {
             pose: 0,
             sleep_cooldown: 0,
             doors_to_close: Vec::new(),
+            meeting_point: None,
+            interaction_target: None,
+            interaction_timer: 0,
         };
         let player = Uuid::from_u128(7);
         let target = player.as_u128();
@@ -2384,6 +2484,14 @@ mod tests {
         v.maybe_decay_gossip(48_002);
         assert_eq!(v.gossips[&target][GossipType::Trading.id()], 21);
         assert_eq!(v.gossips[&target][GossipType::MinorNegative.id()], 0);
+    }
+
+    #[test]
+    fn look_yaw_matches_minecraft_axes() {
+        assert!((look_yaw([0.0; 3], [0.0, 0.0, 1.0]) - 0.0).abs() < 0.001);
+        assert!((look_yaw([0.0; 3], [1.0, 0.0, 0.0]) + 90.0).abs() < 0.001);
+        assert!((look_yaw([0.0; 3], [-1.0, 0.0, 0.0]) - 90.0).abs() < 0.001);
+        assert!((look_yaw([0.0; 3], [0.0, 0.0, -1.0]).abs() - 180.0).abs() < 0.001);
     }
 
     #[test]
