@@ -339,6 +339,10 @@ impl PlayPlan {
         if let Some(armor) = m.body_armor {
             worn.push((6, Some(armor)));
         }
+        // `CopperGolem.EQUIPMENT_SLOT_ANTENNA` (`EquipmentSlot.SADDLE`).
+        if let Some(antenna) = m.antenna {
+            worn.push((7, Some(antenna)));
+        }
         if !worn.is_empty() {
             out.push(play::set_equipment(self.ids.set_equipment, id, &worn));
         }
@@ -647,6 +651,8 @@ impl PlayPlan {
         let mut vex_summons: Vec<[f64; 3]> = Vec::new();
         let mut trampling = Vec::new();
         let mut vibrations = Vec::new();
+        // `OfferFlowerGoal.stop`: кому вручить цветок (UUID, item).
+        let mut gift_poppies: Vec<(u128, i32)> = Vec::new();
         let now = self.game_time.load(Ordering::Relaxed);
         let border = self.border_at(now);
         {
@@ -670,6 +676,21 @@ impl PlayPlan {
                 .filter(|e| e.mob.species == Species::Vex && e.mob.alive())
                 .map(|e| e.mob.pos)
                 .collect();
+            // `OfferFlowerGoal`: кандидаты `#candidate_for_iron_golem_gift`.
+            let gift_candidates: Vec<(u128, [f64; 3], bool)> = {
+                let villagers = self.sim().villagers.lock().unwrap();
+                let mut list: Vec<(u128, [f64; 3], bool)> = villagers
+                    .values()
+                    .filter(|v| v.health > 0.0)
+                    .map(|v| (v.uuid.as_u128(), v.pos, false))
+                    .collect();
+                list.extend(
+                    mobs.values()
+                        .filter(|e| e.mob.species == Species::CopperGolem && e.mob.alive())
+                        .map(|e| (e.mob.uuid, e.mob.pos, true)),
+                );
+                list
+            };
             // Один замок мира на всю фазу: коробки коллизий читаются тысячами раз.
             self.with_world(|w| {
                 for (&id, e) in mobs.iter_mut() {
@@ -691,6 +712,45 @@ impl PlayPlan {
                         continue;
                     }
                     let species = e.mob.species;
+                    // `OfferFlowerGoal` + `IronGolem.offerFlower`.
+                    if species == Species::IronGolem && e.mob.alive() {
+                        if e.mob.offer_flower > 0 {
+                            e.mob.offer_flower -= 1;
+                            if e.mob.offer_flower == 0 {
+                                packets
+                                    .push((id, inv::entity_event(self.ids.entity_event, id, 34)));
+                                let target = e.mob.offer_target.take();
+                                if let Some(target) = target
+                                    && let Some((_, pos, accepts)) =
+                                        gift_candidates.iter().find(|c| c.0 == target)
+                                    && *accepts
+                                    && (pos[0] - e.mob.pos[0]).abs() <= 6.3
+                                    && (pos[2] - e.mob.pos[2]).abs() <= 6.3
+                                    && (pos[1] - e.mob.pos[1]).abs() <= 3.0
+                                    && let Some(poppy) = self.item_id("minecraft:poppy")
+                                {
+                                    gift_poppies.push((target, poppy));
+                                }
+                            }
+                        } else if darken < 4 && rand::random::<u32>().is_multiple_of(8000) {
+                            let target = gift_candidates
+                                .iter()
+                                .filter(|(_, pos, _)| {
+                                    (pos[0] - e.mob.pos[0]).abs() <= 6.3
+                                        && (pos[2] - e.mob.pos[2]).abs() <= 6.3
+                                        && (pos[1] - e.mob.pos[1]).abs() <= 3.0
+                                })
+                                .min_by(|a, b| {
+                                    mb::dist2(a.1, e.mob.pos).total_cmp(&mb::dist2(b.1, e.mob.pos))
+                                });
+                            if let Some((target, _, _)) = target {
+                                e.mob.offer_flower = 400;
+                                e.mob.offer_target = Some(*target);
+                                packets
+                                    .push((id, inv::entity_event(self.ids.entity_event, id, 11)));
+                            }
+                        }
+                    }
                     let monster = species.is_monster();
                     // Замыкания мира — по два указателя, без аллокаций: они лишь
                     // держат ссылку на `WorldView` этой фазы.
@@ -1218,6 +1278,31 @@ impl PlayPlan {
                 }
             });
         }
+        // `OfferFlowerGoal.stop`: цветок в antenna-слот медного голема.
+        if !gift_poppies.is_empty() {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            for (target, poppy) in gift_poppies {
+                let target_id = mobs
+                    .iter()
+                    .find(|(_, e)| e.mob.uuid == target)
+                    .map(|(&id, _)| id);
+                let Some(target_id) = target_id else {
+                    continue;
+                };
+                let stack = Stack::new(poppy, 1);
+                let Some(entry) = mobs.get_mut(&target_id) else {
+                    continue;
+                };
+                if entry.mob.antenna.is_some() {
+                    continue;
+                }
+                entry.mob.antenna = Some(stack);
+                packets.push((
+                    target_id,
+                    play::set_equipment(self.ids.set_equipment, target_id, &[(7, Some(stack))]),
+                ));
+            }
+        }
         for (pos, event) in vibrations {
             self.emit_vibration(pos, event);
         }
@@ -1693,6 +1778,10 @@ impl PlayPlan {
 
     fn mob_loot(&self, id: i32, e: &MobEntry) {
         let m = &e.mob;
+        // `CopperGolem` antenna: `setGuaranteedDrop` — выпадает всегда.
+        if let Some(antenna) = m.antenna {
+            self.drop_item(m.pos, [0.0; 3], antenna, items::BLOCK_DELAY);
+        }
         // `WitherBoss.die`: взрыв силой 7 (`ExplosionInteraction.MOB`).
         if m.species == Species::Wither {
             self.explode_mob(
@@ -2762,6 +2851,50 @@ impl PlayPlan {
         });
         let sweep = full && !crit && !sprint_knock && on_ground && sword;
         let sweeping = level("minecraft:sweeping_edge");
+        // `Villager` хранится отдельно от `mobs`: ближний бой, репутация и
+        // смерть — через `hurt_villager`.
+        let villager_pos = self
+            .sim()
+            .villagers
+            .lock()
+            .unwrap()
+            .get(&target)
+            .map(|v| v.pos);
+        if let Some(vpos) = villager_pos {
+            if damage <= 0.0
+                || !self.in_attack_range(
+                    super::eye_of(pos),
+                    vpos,
+                    (0.6, 1.95),
+                    self.attack_range_for(held),
+                    creative,
+                    false,
+                )
+            {
+                return None;
+            }
+            vitals.reset_attack();
+            self.hurt_villager(target, damage, Some(uuid));
+            self.advancement_player_hurt_entity(
+                uuid,
+                "minecraft:villager",
+                "minecraft:player",
+                "minecraft:player_attack",
+            );
+            if !creative && let Some(mut worn) = held {
+                let wear = item
+                    .and_then(|i| i.weapon)
+                    .map_or(1, |w| w.item_damage_per_attack.max(1));
+                for _ in 0..wear {
+                    if self.wear_one(&mut worn) {
+                        inv.slots[slot] = None;
+                        return Some(slot);
+                    }
+                }
+                inv.slots[slot] = Some(worn);
+            }
+            return Some(slot);
+        }
         let species = self.sim().mobs.lock().unwrap().get(&target)?.mob.species;
         let (target_box_pos, target_box_size) = {
             let mobs = self.sim().mobs.lock().unwrap();

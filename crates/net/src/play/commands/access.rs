@@ -431,6 +431,15 @@ impl PlayPlan {
         if target.game_mode.is_some() {
             return self.push_control(target.uuid, Control::Health(0.0));
         }
+        if self
+            .sim()
+            .villagers
+            .lock()
+            .unwrap()
+            .contains_key(&target.entity_id)
+        {
+            return self.hurt_villager(target.entity_id, f32::MAX, None);
+        }
         let killed = {
             let mut mobs = self.sim().mobs.lock().unwrap();
             mobs.get_mut(&target.entity_id).and_then(|entry| {

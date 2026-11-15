@@ -17402,7 +17402,7 @@ impl PlayPlan {
             self.advancement_brewed_potion(me, potion);
         }
         if let Some((villager, idx)) = merchant_took {
-            self.notify_trade(villager, idx);
+            self.notify_trade(villager, idx, me);
             self.award_stat(me, "minecraft:custom", "minecraft:traded_with_villager", 1);
             self.advancement_trigger(me, "minecraft:villager_trade", None);
         }

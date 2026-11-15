@@ -1070,6 +1070,12 @@ pub struct Mob {
     pub limited_life: i32,
     /// `Vex`: срок жизни истёк — удалить без лута (`discard`).
     pub discard: bool,
+    /// `IronGolem.offerFlowerTick`: 400 тиков показа цветка.
+    pub offer_flower: i32,
+    /// `OfferFlowerGoal.entity`: UUID кандидата (житель или медный голем).
+    pub offer_target: Option<u128>,
+    /// `CopperGolem.EQUIPMENT_SLOT_ANTENNA` (`EquipmentSlot.SADDLE`).
+    pub antenna: Option<Stack>,
     /// Текущая фаза `EnderDragonPhase`.
     pub dragon_phase: u8,
     /// Тики в текущей фазе.
@@ -1160,6 +1166,9 @@ impl Mob {
             spell_cooldown: 0,
             limited_life: 0,
             discard: false,
+            offer_flower: 0,
+            offer_target: None,
+            antenna: None,
             dragon_phase: 0,
             dragon_phase_time: 0,
             dragon_target: None,

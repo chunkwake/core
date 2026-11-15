@@ -726,10 +726,15 @@ pub(super) fn damage(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         }
         _ => None,
     };
-    if ctx
+    let attacker = match cause {
+        crate::survival::Cause::Player(name) => ctx.plan.player_uuid_by_name(name),
+        _ => None,
+    };
+    let hit_player = ctx
         .plan
-        .push_control(first.uuid, Control::Hurt(amount, cause, origin, 0.0))
-    {
+        .push_control(first.uuid, Control::Hurt(amount, cause, origin, 0.0));
+    let hit_villager = !hit_player && ctx.plan.hurt_villager(first.entity_id, amount, attacker);
+    if hit_player || hit_villager {
         success(
             "commands.damage.success",
             "commands.damage.success",

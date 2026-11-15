@@ -8,6 +8,7 @@
 //! порога (10/70/150/250 опыта) растёт уровень 1-5.
 
 use super::*;
+use std::collections::BTreeMap;
 
 /// Пороги уровней (`VillagerData.NEXT_LEVEL_XP_THRESHOLDS`).
 pub const LEVEL_XP: [i32; 5] = [0, 10, 70, 150, 250];
@@ -95,9 +96,13 @@ impl Offer {
         (base + demand + self.special_price).clamp(1, 64)
     }
 
-    /// `Villager.updateSpecialPrices`: скидка героя деревни.
-    fn apply_hero_discount(&mut self, amplifier: Option<u8>) {
+    /// `Villager.updateSpecialPrices`: репутация и скидка героя деревни.
+    fn apply_special_prices(&mut self, amplifier: Option<u8>, reputation: i32) {
         self.special_price = 0;
+        if reputation != 0 {
+            // `addToSpecialPriceDiff(-floor(reputation * priceMultiplier))`.
+            self.special_price -= (reputation as f32 * self.price_mul).floor() as i32;
+        }
         if let Some(amplifier) = amplifier {
             let modifier = 0.3 + 0.0625 * f64::from(amplifier);
             let reduction = (modifier * f64::from(self.buy.1.max(1))).floor() as i32;
@@ -135,15 +140,74 @@ pub struct Villager {
     pub gift_timer: i32,
     /// `GiveGiftToHero`: пауза на поворот головы перед броском.
     pub gift_wait: Option<i32>,
+    /// `GossipContainer`: UUID игрока -> значения `GossipType::ALL`.
+    pub gossips: BTreeMap<u128, [i32; 5]>,
+    /// `lastGossipDecayTime`.
+    pub last_gossip_decay: i64,
+    /// `LivingEntity.health`.
+    pub health: f32,
 }
 
 /// Состояние окна торговли: к какому жителю и какая сделка выбрана.
 impl Villager {
-    /// `Villager.updateSpecialPrices`: сброс скидок и скидка героя.
-    fn update_special_prices(&mut self, amplifier: Option<u8>) {
+    /// `Villager.updateSpecialPrices`: сброс скидок, репутация и герой.
+    fn update_special_prices(&mut self, amplifier: Option<u8>, reputation: i32) {
         for offer in &mut self.offers {
-            offer.apply_hero_discount(amplifier);
+            offer.apply_special_prices(amplifier, reputation);
         }
+    }
+
+    /// `GossipContainer.add`: слияние, предел и отбрасывание значений < 2.
+    pub(super) fn add_gossip(&mut self, target: u128, kind: GossipType, amount: i32) {
+        let idx = kind.id();
+        let old = self.gossips.get(&target).map_or(0, |v| v[idx]);
+        let sum = old + amount;
+        let mut value = if sum > kind.max() {
+            old.max(kind.max())
+        } else {
+            sum
+        };
+        if value > kind.max() {
+            value = kind.max();
+        }
+        let entry = self.gossips.entry(target).or_insert([0; 5]);
+        if value < 2 {
+            entry[idx] = 0;
+            if entry.iter().all(|&v| v == 0) {
+                self.gossips.remove(&target);
+            }
+        } else {
+            entry[idx] = value;
+        }
+    }
+
+    /// `Villager.getPlayerReputation`: взвешенная сумма слухов.
+    pub(super) fn reputation(&self, target: u128) -> i32 {
+        self.gossips.get(&target).map_or(0, |values| {
+            GossipType::ALL
+                .iter()
+                .map(|kind| values[kind.id()] * kind.weight())
+                .sum()
+        })
+    }
+
+    /// `Villager.maybeDecayGossip`: раз в 24000 тиков.
+    fn maybe_decay_gossip(&mut self, now: i64) {
+        if self.last_gossip_decay == 0 {
+            self.last_gossip_decay = now;
+            return;
+        }
+        if now < self.last_gossip_decay + 24_000 {
+            return;
+        }
+        self.gossips.retain(|_, values| {
+            for kind in GossipType::ALL {
+                let next = values[kind.id()] - kind.decay_per_day();
+                values[kind.id()] = if next < 2 { 0 } else { next };
+            }
+            values.iter().any(|&v| v != 0)
+        });
+        self.last_gossip_decay = now;
     }
 }
 
@@ -154,6 +218,82 @@ fn gift_table(profession: &str) -> String {
         "minecraft:gameplay/hero_of_the_village/unemployed_gift".to_owned()
     } else {
         format!("minecraft:gameplay/hero_of_the_village/{short}_gift")
+    }
+}
+
+/// `GossipType` 26.3: вес, предел и суточный спад.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GossipType {
+    MajorNegative,
+    MinorNegative,
+    MinorPositive,
+    MajorPositive,
+    Trading,
+}
+
+impl GossipType {
+    pub const ALL: [GossipType; 5] = [
+        GossipType::MajorNegative,
+        GossipType::MinorNegative,
+        GossipType::MinorPositive,
+        GossipType::MajorPositive,
+        GossipType::Trading,
+    ];
+
+    /// Индекс в массиве значений `Villager.gossips`.
+    fn id(self) -> usize {
+        self as usize
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            GossipType::MajorNegative => "major_negative",
+            GossipType::MinorNegative => "minor_negative",
+            GossipType::MinorPositive => "minor_positive",
+            GossipType::MajorPositive => "major_positive",
+            GossipType::Trading => "trading",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "major_negative" => GossipType::MajorNegative,
+            "minor_negative" => GossipType::MinorNegative,
+            "minor_positive" => GossipType::MinorPositive,
+            "major_positive" => GossipType::MajorPositive,
+            "trading" => GossipType::Trading,
+            _ => return None,
+        })
+    }
+
+    fn weight(self) -> i32 {
+        match self {
+            GossipType::MajorNegative => -5,
+            GossipType::MinorNegative => -1,
+            GossipType::MinorPositive => 1,
+            GossipType::MajorPositive => 5,
+            GossipType::Trading => 1,
+        }
+    }
+
+    fn max(self) -> i32 {
+        match self {
+            GossipType::MajorNegative => 100,
+            GossipType::MinorNegative => 200,
+            GossipType::MinorPositive => 25,
+            GossipType::MajorPositive => 20,
+            GossipType::Trading => 25,
+        }
+    }
+
+    fn decay_per_day(self) -> i32 {
+        match self {
+            GossipType::MajorNegative => 10,
+            GossipType::MinorNegative => 20,
+            GossipType::MinorPositive => 1,
+            GossipType::MajorPositive => 0,
+            GossipType::Trading => 2,
+        }
     }
 }
 
@@ -467,6 +607,9 @@ impl PlayPlan {
             restocks_today: 0,
             gift_timer: 600,
             gift_wait: None,
+            gossips: BTreeMap::new(),
+            last_gossip_decay: 0,
+            health: 20.0,
             last_work_check: self.game_time(),
             job_site: None,
             last_job_check: 0,
@@ -597,6 +740,7 @@ impl PlayPlan {
                     jobs.push(change);
                 }
             }
+            v.maybe_decay_gossip(now);
             if v.trader == TraderKind::Villager {
                 let hero = heroes
                     .iter()
@@ -827,6 +971,59 @@ impl PlayPlan {
             .map(|e| e.amplifier)
     }
 
+    /// `Villager.hurt`: урон жителю, слухи о нападавшем и смерть.
+    pub(super) fn hurt_villager(&self, id: i32, amount: f32, attacker: Option<Uuid>) -> bool {
+        let (pos, died) = {
+            let mut villagers = self.sim().villagers.lock().unwrap();
+            let Some(v) = villagers.get_mut(&id) else {
+                return false;
+            };
+            if v.health <= 0.0 {
+                return false;
+            }
+            v.health = (v.health - amount.max(0.0)).max(0.0);
+            if let Some(player) = attacker {
+                // `Villager.setLastHurtByMob` -> `VILLAGER_HURT`.
+                v.add_gossip(player.as_u128(), GossipType::MinorNegative, 25);
+            }
+            (v.pos, v.health <= 0.0)
+        };
+        self.play_sound(
+            None,
+            if died {
+                "minecraft:entity.villager.death"
+            } else {
+                "minecraft:entity.villager.hurt"
+            },
+            crate::sounds::NEUTRAL,
+            pos,
+            1.0,
+            1.0,
+        );
+        self.emit_vibration(pos, "minecraft:entity_damage");
+        if !died {
+            self.hub
+                .send_about(id, play::hurt_animation(self.ids.hurt_animation, id, 0.0));
+            return true;
+        }
+        self.emit_vibration(pos, "minecraft:entity_die");
+        // `tellWitnessesThatIWasMurdered`: VILLAGER_KILLED свидетелям.
+        if let Some(player) = attacker {
+            let mut villagers = self.sim().villagers.lock().unwrap();
+            for (&other, v) in villagers.iter_mut() {
+                if other != id && crate::mobs::dist2(v.pos, pos) <= 16.0 * 16.0 {
+                    v.add_gossip(player.as_u128(), GossipType::MajorNegative, 25);
+                }
+            }
+        }
+        self.hub
+            .send_about(id, inv::entity_event(self.ids.entity_event, id, 3));
+        self.remove_entity(id);
+        self.hub
+            .send(None, play::remove_entities(self.ids.remove_entities, &[id]));
+        true
+    }
+
     /// `ClientboundMerchantOffersPacket` для окна.
     pub(super) fn villager_offers_packet(
         &self,
@@ -837,7 +1034,8 @@ impl PlayPlan {
         let amplifier = self.hero_amplifier(uuid);
         let mut villagers = self.sim().villagers.lock().unwrap();
         let v = villagers.get_mut(&id)?;
-        v.update_special_prices(amplifier);
+        let reputation = v.reputation(uuid.as_u128());
+        v.update_special_prices(amplifier, reputation);
         let offers: Vec<inv::MerchantOffer> = v
             .offers
             .iter()
@@ -904,17 +1102,22 @@ impl PlayPlan {
 
     /// `MerchantResultSlot.onTake`: `uses += 1`, `Xp += xp`, уровень по
     /// порогам. Возвращает `(сделка, сменился ли уровень)`.
-    pub(super) fn notify_trade(&self, id: i32, idx: usize) -> Option<(Offer, bool)> {
+    pub(super) fn notify_trade(&self, id: i32, idx: usize, player: Uuid) -> Option<(Offer, bool)> {
+        let amplifier = self.hero_amplifier(player);
         let mut villagers = self.sim().villagers.lock().unwrap();
         let v = villagers.get_mut(&id)?;
         let offer = *v.offers.get(idx)?;
         if let Some(o) = v.offers.get_mut(idx) {
             o.uses += 1;
         }
+        // `Villager.onReputationEventFrom(TRADE)`: +2 к `trading`.
+        v.add_gossip(player.as_u128(), GossipType::Trading, 2);
         v.xp += offer.xp;
         let level = level_for_xp(v.xp);
         let changed = level != v.level;
         v.level = level;
+        let reputation = v.reputation(player.as_u128());
+        v.update_special_prices(amplifier, reputation);
         let pos = v.pos;
         let wandering = v.trader == TraderKind::Wandering;
         drop(villagers);
@@ -982,6 +1185,29 @@ impl PlayPlan {
             c.insert("DespawnDelay".into(), Tag::Int(v.despawn_delay));
         }
         c.insert("Offers".into(), self.offers_nbt(v));
+        if !v.gossips.is_empty() {
+            let list: Vec<Tag> = v
+                .gossips
+                .iter()
+                .flat_map(|(&target, values)| {
+                    GossipType::ALL.into_iter().filter_map(move |kind| {
+                        let value = values[kind.id()];
+                        if value == 0 {
+                            return None;
+                        }
+                        let mut e = Compound::new();
+                        e.insert(
+                            "Target".into(),
+                            Tag::IntArray(uuid_ints(Uuid::from_u128(target))),
+                        );
+                        e.insert("Type".into(), Tag::String(kind.name().into()));
+                        e.insert("Value".into(), Tag::Int(value));
+                        Some(Tag::Compound(e))
+                    })
+                })
+                .collect();
+            c.insert("Gossips".into(), Tag::List(list));
+        }
         if let Some(n) = &v.custom_name {
             c.insert("CustomName".into(), Tag::String(n.clone()));
         }
@@ -1058,6 +1284,9 @@ impl PlayPlan {
             persistent: trader == TraderKind::Villager,
             gift_timer: 600,
             gift_wait: None,
+            gossips: BTreeMap::new(),
+            last_gossip_decay: 0,
+            health: 20.0,
         };
         apply_villager_nbt(&mut v, c, |n| self.item_id(n));
         if v.profession == "minecraft:none" {
@@ -1154,6 +1383,32 @@ fn apply_villager_nbt(v: &mut Villager, c: &Compound, item: impl Fn(&str) -> Opt
             v.offers = parsed;
         }
     }
+    if let Some(Tag::List(gossips)) = c.get("Gossips") {
+        for entry in gossips {
+            let Tag::Compound(e) = entry else { continue };
+            let Some(Tag::IntArray(target)) = e.get("Target") else {
+                continue;
+            };
+            if target.len() != 4 {
+                continue;
+            }
+            let Some(Tag::String(kind)) = e.get("Type") else {
+                continue;
+            };
+            let Some(kind) = GossipType::from_name(kind) else {
+                continue;
+            };
+            let Some(value) = e.get("Value").and_then(Tag::as_i64) else {
+                continue;
+            };
+            let uuid = ((target[0] as u32 as u128) << 96)
+                | ((target[1] as u32 as u128) << 64)
+                | ((target[2] as u32 as u128) << 32)
+                | (target[3] as u32 as u128);
+            v.gossips.entry(uuid).or_insert([0; 5])[kind.id()] =
+                (value as i32).clamp(0, kind.max());
+        }
+    }
     if let Some(Tag::String(n)) = c.get("CustomName") {
         v.custom_name = Some(n.clone());
     }
@@ -1196,19 +1451,88 @@ mod tests {
             demand: 0,
             special_price: 0,
         };
-        offer.apply_hero_discount(Some(0));
+        offer.apply_special_prices(Some(0), 0);
         // floor(0.3 * 20) = 6.
         assert_eq!(offer.price(), 14);
-        offer.apply_hero_discount(Some(4));
+        offer.apply_special_prices(Some(4), 0);
         // floor((0.3 + 4 * 0.0625) * 20) = 11.
         assert_eq!(offer.price(), 9);
-        offer.apply_hero_discount(None);
+        offer.apply_special_prices(None, 0);
         assert_eq!(offer.price(), 20);
         // Скидка не опускает цену ниже 1.
         let mut cheap = offer;
         cheap.buy.1 = 1;
-        cheap.apply_hero_discount(Some(0));
+        cheap.apply_special_prices(Some(0), 0);
         assert_eq!(cheap.price(), 1);
+    }
+
+    #[test]
+    fn gossip_merge_decay_and_reputation() {
+        let mut offer = Offer {
+            buy: (1, 20),
+            buy_b: None,
+            sell: Stack::new(2, 1),
+            uses: 0,
+            max_uses: 12,
+            xp: 2,
+            price_mul: 0.05,
+            demand: 0,
+            special_price: 0,
+        };
+        // Один трейд: trading = 2, репутация +2, скидка floor(0.1) = 0.
+        offer.apply_special_prices(None, 2);
+        assert_eq!(offer.price(), 20);
+        // Удар по жителю: minor_negative = 25, репутация -25,
+        // +floor(25*0.05) = +2 к цене.
+        offer.apply_special_prices(None, -25);
+        assert_eq!(offer.price(), 22);
+        assert_eq!(offer.special_price, 2);
+
+        let mut v = Villager {
+            pos: [0.0; 3],
+            yaw: 0.0,
+            uuid: Uuid::nil(),
+            trader: TraderKind::Villager,
+            kind: "minecraft:plains".into(),
+            profession: "minecraft:farmer".into(),
+            level: 1,
+            xp: 0,
+            offers: vec![offer],
+            despawn_delay: 0,
+            last_restock: 0,
+            restocks_today: 0,
+            last_work_check: 0,
+            job_site: None,
+            last_job_check: 0,
+            custom_name: None,
+            persistent: true,
+            gift_timer: 600,
+            gift_wait: None,
+            gossips: BTreeMap::new(),
+            last_gossip_decay: 0,
+            health: 20.0,
+        };
+        let player = Uuid::from_u128(7);
+        let target = player.as_u128();
+        v.add_gossip(target, GossipType::Trading, 2);
+        assert_eq!(v.reputation(target), 2);
+        // `MINOR_NEGATIVE` +25 при весе -1.
+        v.add_gossip(target, GossipType::MinorNegative, 25);
+        assert_eq!(v.reputation(target), 2 - 25);
+        // Предел `TRADING` = 25.
+        for _ in 0..20 {
+            v.add_gossip(target, GossipType::Trading, 2);
+        }
+        assert_eq!(v.gossips[&target][GossipType::Trading.id()], 25);
+        // Спад раз в 24000 тиков: trading 25 -> 23, minor_negative 25 -> 5.
+        v.last_gossip_decay = 1;
+        v.maybe_decay_gossip(24_001);
+        assert_eq!(v.gossips[&target][GossipType::Trading.id()], 23);
+        assert_eq!(v.gossips[&target][GossipType::MinorNegative.id()], 5);
+        // Повторный спад убирает записи со значением < 2.
+        v.maybe_decay_gossip(48_002);
+        assert_eq!(v.gossips[&target][GossipType::Trading.id()], 21);
+        assert_eq!(v.gossips[&target][GossipType::MinorNegative.id()], 0);
     }
 
     #[test]
