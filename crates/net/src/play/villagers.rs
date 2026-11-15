@@ -149,6 +149,9 @@ type VillagerPath = (i32, [f64; 3], [i32; 3], [i32; 3]);
 /// Профессия и голод жителя для `TradeWithVillager`.
 type VillagerProfile = (i32, String, bool);
 
+/// Отправка движения жителя: id, позиция, yaw, прошлая позиция, on_ground.
+type VillagerMove = (i32, [f64; 3], f32, [i64; 3], bool);
+
 /// Отложенное рождение (`VillagerMakeLove.tryToGiveBirth`): нельзя спавнить
 /// ребёнка под блокировкой жителей, поэтому запрос выполняется после цикла.
 struct Birth {
@@ -435,6 +438,16 @@ pub struct Villager {
     pub bell_cooldown: i64,
     /// Когда последний раз проверяли рейд.
     pub last_raid_check: i64,
+    /// `MemoryModuleType.NEAREST_BED` (сенсор кроватей у малышей).
+    pub nearest_bed: Option<[i32; 3]>,
+    pub jump_left: i32,
+    pub jump_cooldown: i32,
+    pub jump_phase: i32,
+    pub jump_base_y: f64,
+    pub jump_deadline: i64,
+    pub last_bed_check: i64,
+    /// `Entity.onGround`: false в прыжке.
+    pub airborne: bool,
     /// `MemoryModuleType.BREED_TARGET` и время рождения.
     pub breed_target: Option<u128>,
     pub breed_partner: Option<i32>,
@@ -1330,9 +1343,26 @@ impl PlayPlan {
             v.hurt_until = 0;
             v.hurt_from = None;
         }
+        // `JumpOnBed`: малыш без партнёра прыгает на ближайшей кровати.
+        if v.age < 0
+            && matches!(v.activity, Activity::Play | Activity::Idle)
+            && let Some(step) = self.jump_on_bed_step(v)
+        {
+            return Some(step);
+        }
         // `SetRaidStatus`: пре-рейд/укрытие важнее расписания.
         if v.raid_phase != RaidPhase::None
             && let Some(step) = self.raid_step(v)
+        {
+            return Some(step);
+        }
+        // `JumpOnBed`: только если рядом нет других малышей (в ванили
+        // при `VISIBLE_VILLAGER_BABIES` работает лишь `PlayTagWithOtherKids`).
+        let other_babies = babies.iter().filter(|(bid, ..)| *bid != id).count();
+        if v.age < 0
+            && other_babies == 0
+            && matches!(v.activity, Activity::Play | Activity::Idle)
+            && let Some(step) = self.jump_on_bed_step(v)
         {
             return Some(step);
         }
@@ -1725,37 +1755,53 @@ impl PlayPlan {
         raid_phase(raid.groups, alive_count, raid.cooldown, raid.celebration)
     }
 
-    /// `MoveToSkySeeingSpot.hasNoBlocksAbove`: столбец над головой пуст.
-    fn has_no_blocks_above(&self, pos: [f64; 3]) -> bool {
-        let x = pos[0].floor() as i32;
-        let z = pos[2].floor() as i32;
-        let start = pos[1].floor() as i32 + 2;
-        let top = self.min_y() + self.template().height() as i32;
-        for y in start..top {
+    /// `Heightmap.MOTION_BLOCKING`: самый высокий не-воздух в столбце.
+    fn heightmap_top(&self, x: i32, z: i32) -> i32 {
+        let mut top = self.min_y();
+        for y in self.min_y()..(self.min_y() + self.template().height() as i32) {
             if let Some(state) = self.block([x, y, z])
                 && !self.state_name(state).ends_with(":air")
             {
-                return false;
+                top = y;
             }
         }
-        true
+        top
     }
 
-    /// Случайная точка с открытым небом в 10 блоках для празднования.
+    /// `Level.canSeeSky`: высота столбца не выше точки.
+    fn can_see_sky(&self, pos: [f64; 3]) -> bool {
+        let cell = [
+            pos[0].floor() as i32,
+            pos[1].floor() as i32,
+            pos[2].floor() as i32,
+        ];
+        self.heightmap_top(cell[0], cell[2]) <= cell[1]
+    }
+
+    /// `MoveToSkySeeingSpot.hasNoBlocksAbove`.
+    fn has_no_blocks_above(&self, pos: [f64; 3]) -> bool {
+        self.can_see_sky(pos)
+            && self.heightmap_top(pos[0].floor() as i32, pos[2].floor() as i32)
+                <= pos[1].floor() as i32
+    }
+
+    /// `MoveToSkySeeingSpot.getOutdoorPosition`: 10 точек ±10/±3, где
+    /// небо видно и рельеф не выше ног.
     fn sky_point(&self, pos: [f64; 3]) -> Option<[f64; 3]> {
+        let base = [
+            pos[0].floor() as i32,
+            pos[1].floor() as i32,
+            pos[2].floor() as i32,
+        ];
         for _ in 0..10 {
-            let dx = f64::from(rand::random::<u32>() % 21) - 10.0;
-            let dz = f64::from(rand::random::<u32>() % 21) - 10.0;
-            let target = [pos[0] + dx, pos[1], pos[2] + dz];
-            let cell = target.map(|v| v.floor() as i32);
-            let below = [cell[0], cell[1] - 1, cell[2]];
-            if !self.walk_blocked(cell)
-                && self
-                    .block(below)
-                    .is_some_and(|s| self.survival.placement.solid(s))
+            let dx = i32::try_from(rand::random::<u32>() % 20).ok()? - 10;
+            let dy = i32::try_from(rand::random::<u32>() % 6).ok()? - 3;
+            let dz = i32::try_from(rand::random::<u32>() % 20).ok()? - 10;
+            let cell = [base[0] + dx, base[1] + dy, base[2] + dz];
+            let target = [cell[0] as f64 + 0.5, cell[1] as f64, cell[2] as f64 + 0.5];
+            if self.can_see_sky(target)
+                && self.heightmap_top(cell[0], cell[2]) <= base[1]
                 && !self.dangerous_block(cell)
-                && !self.dangerous_block(below)
-                && self.has_no_blocks_above(target)
             {
                 return Some(target);
             }
@@ -1924,6 +1970,70 @@ impl PlayPlan {
                 self.walk_step(v, target, 0.196)
             }
         }
+    }
+
+    /// `JumpOnBed`: малыш идёт к ближайшей кровати и прыгает 3-6 раз с
+    /// паузой 5 тиков; прекращает после 100 тиков ходьбы.
+    fn jump_on_bed_step(&self, v: &mut Villager) -> Option<([f64; 3], f32)> {
+        let now = self.game_time();
+        if v.jump_phase > 0 {
+            let off = 0.42 * (((10 - v.jump_phase) as f64) * std::f64::consts::PI / 10.0).sin();
+            v.pos[1] = v.jump_base_y + off;
+            v.jump_phase -= 1;
+            v.airborne = v.jump_phase > 0;
+            if v.jump_phase == 0 {
+                v.pos[1] = v.jump_base_y;
+                v.jump_cooldown = 5;
+            }
+            return Some((v.pos, v.yaw));
+        }
+        if v.jump_cooldown > 0 {
+            v.jump_cooldown -= 1;
+            v.airborne = false;
+            return Some((v.pos, v.yaw));
+        }
+        let bed = v.nearest_bed?;
+        if v.jump_left == 0 {
+            v.jump_left = 3 + i32::try_from(rand::random::<u32>() % 4).unwrap_or(0);
+        }
+        let state = self.block(bed)?;
+        if !self.state_name(state).ends_with("_bed") {
+            v.nearest_bed = None;
+            return None;
+        }
+        let center = [bed[0] as f64 + 0.5, bed[1] as f64, bed[2] as f64 + 0.5];
+        let xz = ((v.pos[0] - center[0]).powi(2) + (v.pos[2] - center[2]).powi(2)).sqrt();
+        if xz > 2.0 {
+            if v.jump_deadline == 0 {
+                v.jump_deadline = now + 100;
+            }
+            if now > v.jump_deadline {
+                v.jump_deadline = 0;
+                v.nearest_bed = None;
+                return None;
+            }
+            return self.walk_step(v, [center[0], v.pos[1], center[2]], 0.14);
+        }
+        // Забираемся на поверхность кровати (0.5625 блока).
+        if v.pos[1] < center[1] + 0.5 {
+            v.pos = [center[0], center[1] + 0.5625, center[2]];
+            v.jump_deadline = 0;
+            v.airborne = false;
+            return Some((v.pos, v.yaw));
+        }
+        if v.jump_left <= 0 {
+            if let Some(pos) = self.find_stand_up(bed, v.yaw, -1, &[]) {
+                v.pos = pos;
+            }
+            v.nearest_bed = None;
+            v.airborne = false;
+            return Some((v.pos, v.yaw));
+        }
+        v.jump_left -= 1;
+        v.jump_base_y = v.pos[1];
+        v.jump_phase = 10;
+        v.airborne = true;
+        Some((v.pos, v.yaw))
     }
 
     /// `PlayTagWithOtherKids`: раз в 10 тиков малыш либо убегает от того,
@@ -2247,6 +2357,7 @@ impl PlayPlan {
         v.pos[2] = nz;
         v.pos[1] += (target[1] - v.pos[1]).clamp(-0.2, 0.2);
         v.yaw = yaw;
+        v.airborne = false;
         Some((v.pos, yaw))
     }
 
@@ -2456,6 +2567,14 @@ impl PlayPlan {
             hiding_place: None,
             bell_cooldown: 0,
             last_raid_check: 0,
+            nearest_bed: None,
+            jump_left: 0,
+            jump_cooldown: 0,
+            jump_phase: 0,
+            jump_base_y: 0.0,
+            jump_deadline: 0,
+            last_bed_check: 0,
+            airborne: false,
             breed_target: None,
             breed_partner: None,
             breed_until: 0,
@@ -2560,7 +2679,7 @@ impl PlayPlan {
         }
         let now = self.game_time();
         let day = self.day_time.load(Ordering::Relaxed);
-        let mut moves: Vec<(i32, [f64; 3], f32, [i64; 3])> = Vec::new();
+        let mut moves: Vec<VillagerMove> = Vec::new();
         let ids: Vec<i32> = self
             .sim()
             .villagers
@@ -2687,6 +2806,16 @@ impl PlayPlan {
                     v.move_target = None;
                 }
             }
+            if v.age < 0 && now % 20 == 0 && now != v.last_bed_check {
+                v.last_bed_check = now;
+                let types = std::collections::HashSet::from(["minecraft:home".to_owned()]);
+                let origin = [
+                    v.pos[0].floor() as i32,
+                    v.pos[1].floor() as i32,
+                    v.pos[2].floor() as i32,
+                ];
+                v.nearest_bed = self.nearest_poi(&types, origin, 24);
+            }
             let activity = if v.age < 0 {
                 Activity::at_baby(day)
             } else {
@@ -2727,7 +2856,7 @@ impl PlayPlan {
                         &mut gossip,
                     )
                 {
-                    moves.push((id, pos, yaw, v.sent_pos));
+                    moves.push((id, pos, yaw, v.sent_pos, !v.airborne));
                     v.sent_pos = play::quantize(v.pos);
                 }
                 self.show_trades_step(id, v, &players);
@@ -2787,13 +2916,20 @@ impl PlayPlan {
         for (a, b) in gossip {
             self.gossip_villagers(a, b, now);
         }
-        for (id, pos, yaw, sent) in moves {
+        for (id, pos, yaw, sent, on_ground) in moves {
             let q = play::quantize(pos);
             let packet = match play::delta(sent, q) {
-                Some(d) => {
-                    play::move_entity_pos_rot(self.ids.move_entity_pos_rot, id, d, yaw, 0.0, true)
+                Some(d) => play::move_entity_pos_rot(
+                    self.ids.move_entity_pos_rot,
+                    id,
+                    d,
+                    yaw,
+                    0.0,
+                    on_ground,
+                ),
+                None => {
+                    play::teleport_entity(self.ids.teleport_entity, id, pos, yaw, 0.0, on_ground)
                 }
-                None => play::teleport_entity(self.ids.teleport_entity, id, pos, yaw, 0.0, true),
             };
             self.hub.send(None, packet);
             self.mark_work();
@@ -3428,6 +3564,14 @@ impl PlayPlan {
             hiding_place: None,
             bell_cooldown: 0,
             last_raid_check: 0,
+            nearest_bed: None,
+            jump_left: 0,
+            jump_cooldown: 0,
+            jump_phase: 0,
+            jump_base_y: 0.0,
+            jump_deadline: 0,
+            last_bed_check: 0,
+            airborne: false,
             breed_target: None,
             breed_partner: None,
             breed_until: 0,
@@ -3739,6 +3883,14 @@ mod tests {
             hiding_place: None,
             bell_cooldown: 0,
             last_raid_check: 0,
+            nearest_bed: None,
+            jump_left: 0,
+            jump_cooldown: 0,
+            jump_phase: 0,
+            jump_base_y: 0.0,
+            jump_deadline: 0,
+            last_bed_check: 0,
+            airborne: false,
             breed_target: None,
             breed_partner: None,
             breed_until: 0,

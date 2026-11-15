@@ -1169,6 +1169,34 @@ async fn main() {
     });
     println!("play: babies tag at {dist:.2} (yaw {ya:.1}/{yb:.1}, {a:?}/{b:?})");
 
+    // `JumpOnBed`: без второго малыша ребёнок прыгает на ближайшей кровати.
+    let partner_pos = p.all_pos.get(&partner_baby).copied().unwrap_or(b);
+    p.cmd(&format!(
+        "kill @e[type=minecraft:villager,x={},y={},z={},distance=..2]",
+        partner_pos[0], partner_pos[1], partner_pos[2]
+    ))
+    .await;
+    let bed_a = [bx + 0.5, f64::from(Y), bz + 0.5];
+    let bed_b = [bx + 3.5, f64::from(Y), bz + 0.5];
+    let mut jumped = false;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(20_000) {
+        if let Some(pos) = p.all_pos.get(&child).copied() {
+            let near = dist_xz(pos, bed_a).min(dist_xz(pos, bed_b)) <= 2.0;
+            if near && pos[1] >= f64::from(Y) + 0.5 {
+                jumped = true;
+                break;
+            }
+        }
+        p.pump(200).await;
+    }
+    assert!(
+        jumped,
+        "JumpOnBed: ребёнок не прыгал на кровати: {:?}",
+        p.all_pos.get(&child)
+    );
+    println!("jump: baby jumped on bed");
+
     // `SetRaidStatus`: пре-рейд — сбор у колокола и удары; активная волна —
     // укрытие в доме. Рейд запускается Bad Omen рядом с кроватью.
     let bell_pos = [bx.floor() as i32 + 6, Y, bz.floor() as i32 + 6];
