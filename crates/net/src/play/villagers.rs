@@ -115,6 +115,26 @@ fn other_villager_on_door(
     })
 }
 
+/// `VillagerPanicTrigger`: угроза — активный `HURT_BY` или монстр в 8 блоках.
+fn panic_threat(
+    pos: [f64; 3],
+    hurt_until: i64,
+    now: i64,
+    hurt_from: Option<[f64; 3]>,
+    threats: &[[f64; 3]],
+) -> Option<[f64; 3]> {
+    if now < hurt_until
+        && let Some(from) = hurt_from
+    {
+        return Some(from);
+    }
+    threats
+        .iter()
+        .filter(|p| crate::mobs::dist2(pos, **p) <= 8.0 * 8.0)
+        .min_by(|a, b| crate::mobs::dist2(pos, **a).total_cmp(&crate::mobs::dist2(pos, **b)))
+        .copied()
+}
+
 /// `Mth.atan2`-подобный yaw взгляда из `from` в `to`.
 fn look_yaw(from: [f64; 3], to: [f64; 3]) -> f32 {
     let dx = to[0] - from[0];
@@ -350,6 +370,9 @@ pub struct Villager {
     pub interaction_target: Option<u128>,
     /// `Villager.lastGossipTime`: 1200 тиков между передачами слухов.
     pub last_gossip_time: i64,
+    /// `HURT_BY`: до какого тика житель в панике и от кого бежит.
+    pub hurt_until: i64,
+    pub hurt_from: Option<[f64; 3]>,
     /// `InteractWithDoor` cooldown после закрытия двери.
     pub door_node: Option<[i32; 3]>,
     pub door_cooldown: i64,
@@ -1199,6 +1222,7 @@ impl PlayPlan {
         v: &mut Villager,
         others: &[VillagerRef],
         profiles: &[VillagerProfile],
+        threats: &[[f64; 3]],
         gossip: &mut Vec<(i32, i32)>,
     ) -> Option<([f64; 3], f32)> {
         // `MEETING_POINT` ищется до выбора цели, иначе стек не увидит встречу.
@@ -1210,6 +1234,31 @@ impl PlayPlan {
                 v.pos[2].floor() as i32,
             ];
             v.meeting_point = self.nearest_poi(&types, origin, 48);
+        }
+        // `VillagerPanicTrigger`/`VillagerCalmDown`: бег от угрозы важнее
+        // расписания; после 100 тиков без угрозы возврат к цели.
+        let now = self.game_time();
+        let threat = panic_threat(v.pos, v.hurt_until, now, v.hurt_from, threats);
+        if let Some(from) = threat {
+            v.hurt_from = Some(from);
+            v.move_target = None;
+            v.interaction_target = None;
+            let dx = v.pos[0] - from[0];
+            let dz = v.pos[2] - from[2];
+            let len = (dx * dx + dz * dz).sqrt().max(1e-4);
+            return self.walk_step(
+                v,
+                [
+                    v.pos[0] + dx / len * 8.0,
+                    v.pos[1],
+                    v.pos[2] + dz / len * 8.0,
+                ],
+                0.21,
+            );
+        }
+        if v.hurt_until != 0 {
+            v.hurt_until = 0;
+            v.hurt_from = None;
         }
         let goal = *goals_for(
             v.activity,
@@ -1856,6 +1905,8 @@ impl PlayPlan {
             meeting_point: None,
             interaction_target: None,
             last_gossip_time: 0,
+            hurt_until: 0,
+            hurt_from: None,
             door_node: None,
             door_cooldown: 0,
             inventory: [None; 8],
@@ -1981,6 +2032,15 @@ impl PlayPlan {
             .iter()
             .map(|(&id, v)| (id, v.profession.clone(), self.wants_more_food(v)))
             .collect();
+        let threats: Vec<[f64; 3]> = self
+            .sim()
+            .mobs
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|e| e.mob.alive() && e.mob.species.is_monster())
+            .map(|e| e.mob.pos)
+            .collect();
         let players: Vec<(Uuid, [f64; 3], Option<Stack>)> = self
             .live
             .lock()
@@ -2060,7 +2120,7 @@ impl PlayPlan {
                 self.close_villager_doors(id, v, &others, &paths);
                 if v.sleeping.is_none()
                     && let Some((pos, yaw)) =
-                        self.villager_ai_step(id, v, &others, &profiles, &mut gossip)
+                        self.villager_ai_step(id, v, &others, &profiles, &threats, &mut gossip)
                 {
                     moves.push((id, pos, yaw, v.sent_pos));
                     v.sent_pos = play::quantize(v.pos);
@@ -2325,9 +2385,34 @@ impl PlayPlan {
             if let Some(player) = attacker {
                 // `Villager.setLastHurtByMob` -> `VILLAGER_HURT`.
                 v.add_gossip(player.as_u128(), GossipType::MinorNegative, 25);
+                v.hurt_until = self.game_time() + 100;
+                v.hurt_from = None;
             }
             (v.pos, v.health <= 0.0)
         };
+        if let Some(player) = attacker {
+            let pos = self
+                .live
+                .lock()
+                .unwrap()
+                .get(&player)
+                .map(|l| l.pos)
+                .or_else(|| {
+                    self.sim()
+                        .mobs
+                        .lock()
+                        .unwrap()
+                        .values()
+                        .find(|e| e.mob.uuid == player.as_u128())
+                        .map(|e| e.mob.pos)
+                });
+            if let Some(pos) = pos {
+                let mut villagers = self.sim().villagers.lock().unwrap();
+                if let Some(v) = villagers.get_mut(&id) {
+                    v.hurt_from = Some(pos);
+                }
+            }
+        }
         self.play_sound(
             None,
             if died {
@@ -2726,6 +2811,8 @@ impl PlayPlan {
             meeting_point: None,
             interaction_target: None,
             last_gossip_time: 0,
+            hurt_until: 0,
+            hurt_from: None,
             door_node: None,
             door_cooldown: 0,
             inventory: [None; 8],
@@ -3017,6 +3104,8 @@ mod tests {
             meeting_point: None,
             interaction_target: None,
             last_gossip_time: 0,
+            hurt_until: 0,
+            hurt_from: None,
             door_node: None,
             door_cooldown: 0,
             inventory: [None; 8],
@@ -3050,6 +3139,24 @@ mod tests {
         v.maybe_decay_gossip(48_002);
         assert_eq!(v.gossips[&target][GossipType::Trading.id()], 21);
         assert_eq!(v.gossips[&target][GossipType::MinorNegative.id()], 0);
+    }
+
+    #[test]
+    fn panic_threat_uses_hurt_and_hostiles() {
+        let pos = [0.0, 64.0, 0.0];
+        assert_eq!(
+            panic_threat(pos, 120, 100, Some([4.0, 64.0, 0.0]), &[]),
+            Some([4.0, 64.0, 0.0])
+        );
+        assert_eq!(
+            panic_threat(pos, 80, 100, Some([4.0, 64.0, 0.0]), &[]),
+            None
+        );
+        assert_eq!(
+            panic_threat(pos, 0, 100, None, &[[9.0, 64.0, 0.0], [3.0, 64.0, 0.0]]),
+            Some([3.0, 64.0, 0.0])
+        );
+        assert_eq!(panic_threat(pos, 0, 100, None, &[[9.0, 64.0, 0.0]]), None);
     }
 
     #[test]

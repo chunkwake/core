@@ -592,6 +592,63 @@ async fn main() {
     );
     println!("show trades: emerald shown and cleared");
 
+    // `VillagerPanicTrigger`: зомби рядом — A убегает; после удаления
+    // угрозы `VillagerCalmDown` возвращает его к работе.
+    let ap = p.a_pos.expect("нет позиции A для паники");
+    p.cmd("difficulty easy").await;
+    let zombie = [ap[0] + 3.0, ap[1], ap[2] + 3.0];
+    p.cmd(&format!(
+        "summon minecraft:zombie {} {} {} {{NoAI:1b,PersistenceRequired:1b}}",
+        zombie[0], zombie[1], zombie[2]
+    ))
+    .await;
+    p.chat.clear();
+    p.cmd("execute if entity @e[type=minecraft:zombie] run say ZOMBIE_YES")
+        .await;
+    assert!(
+        p.chat.contains("ZOMBIE_YES"),
+        "зомби не появился: {}",
+        p.chat
+    );
+    let mut fled = false;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(5_000) {
+        if let Some(pos) = p.a_pos
+            && dist_xz(pos, zombie) > 4.0
+        {
+            fled = true;
+            break;
+        }
+        p.pump(200).await;
+    }
+    assert!(fled, "житель не убежал от зомби: {:?}", p.a_pos);
+    println!("panic: villager fled from zombie");
+
+    p.cmd(&format!(
+        "kill @e[type=minecraft:zombie,x={},y={},z={},distance=..3]",
+        zombie[0], zombie[1], zombie[2]
+    ))
+    .await;
+    p.cmd("difficulty peaceful").await;
+    let composter = [X as f64 + 9.5, f64::from(Y), Z as f64 + 0.5];
+    let mut calm = false;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(12_000) {
+        if let Some(pos) = p.a_pos
+            && dist_xz(pos, composter) <= 2.0
+        {
+            calm = true;
+            break;
+        }
+        p.pump(200).await;
+    }
+    assert!(
+        calm,
+        "житель не вернулся к работе после паники: {:?}",
+        p.a_pos
+    );
+    println!("panic: calmed down and returned to work");
+
     let start = tokio::time::Instant::now();
     while start.elapsed() < Duration::from_millis(3_000) && !p.saw_close {
         p.pump(100).await;
