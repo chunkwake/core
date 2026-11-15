@@ -130,6 +130,43 @@ impl Activity {
     }
 }
 
+/// Цели `Brain` в порядке приоритета: сон важнее работы, работа — встречи,
+/// встреча — прогулки.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Goal {
+    Idle,
+    Meet,
+    Work,
+    Rest,
+}
+
+impl Goal {
+    fn priority(self) -> i32 {
+        match self {
+            Goal::Idle => 0,
+            Goal::Meet => 1,
+            Goal::Work => 2,
+            Goal::Rest => 3,
+        }
+    }
+}
+
+/// Стек целей: первая доступная цель по приоритету, `Idle` — всегда
+/// запасной вариант (в ванили нижние поведения срабатывают, если верхние
+/// не могут стартовать).
+fn goals_for(activity: Activity, has_home: bool, has_job: bool, has_meeting: bool) -> Vec<Goal> {
+    let mut out = Vec::new();
+    match activity {
+        Activity::Rest if has_home => out.push(Goal::Rest),
+        Activity::Work if has_job => out.push(Goal::Work),
+        Activity::Meet if has_meeting => out.push(Goal::Meet),
+        _ => {}
+    }
+    out.push(Goal::Idle);
+    out.sort_by_key(|g| -g.priority());
+    out
+}
+
 /// Вид торговца: обычный житель или странствующий торговец.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TraderKind {
@@ -1012,6 +1049,15 @@ impl PlayPlan {
     fn stop_villager_sleep(&self, id: i32, v: &mut Villager) {
         if let Some(bed) = v.sleeping.take() {
             self.set_bed_occupied(bed, false);
+            // Кровать исчезла: забываем `HOME`, чтобы стек ушёл в `Idle`.
+            if self
+                .block(bed)
+                .and_then(|s| poi::of_block(self.state_name(s)))
+                != Some("minecraft:home")
+            {
+                self.release_poi(bed);
+                v.home = None;
+            }
             // `SleepInBed.stop`: nextOkStartTime = timestamp + 40.
             v.sleep_cooldown = self.game_time() + 40;
             if let Some(pos) = self.find_stand_up(bed, v.yaw) {
@@ -1041,9 +1087,26 @@ impl PlayPlan {
         v: &mut Villager,
         others: &[(i32, u128, [f64; 3])],
     ) -> Option<([f64; 3], f32)> {
-        let target = match v.activity {
-            Activity::Work => v.job_site.and_then(|p| self.stand_near(p, v.pos)),
-            Activity::Rest => {
+        // `MEETING_POINT` ищется до выбора цели, иначе стек не увидит встречу.
+        if v.activity == Activity::Meet && v.meeting_point.is_none() {
+            let types = std::collections::HashSet::from(["minecraft:meeting".to_owned()]);
+            let origin = [
+                v.pos[0].floor() as i32,
+                v.pos[1].floor() as i32,
+                v.pos[2].floor() as i32,
+            ];
+            v.meeting_point = self.nearest_poi(&types, origin, 48);
+        }
+        let goal = *goals_for(
+            v.activity,
+            v.home.is_some(),
+            v.job_site.is_some(),
+            v.meeting_point.is_some(),
+        )
+        .first()?;
+        let target = match goal {
+            Goal::Work => v.job_site.and_then(|p| self.stand_near(p, v.pos)),
+            Goal::Rest => {
                 let home = v.home?;
                 if crate::mobs::dist2(
                     v.pos,
@@ -1056,16 +1119,7 @@ impl PlayPlan {
                 }
                 self.stand_near(home, v.pos)
             }
-            Activity::Meet => {
-                if v.meeting_point.is_none() {
-                    let types = std::collections::HashSet::from(["minecraft:meeting".to_owned()]);
-                    let origin = [
-                        v.pos[0].floor() as i32,
-                        v.pos[1].floor() as i32,
-                        v.pos[2].floor() as i32,
-                    ];
-                    v.meeting_point = self.nearest_poi(&types, origin, 48);
-                }
+            Goal::Meet => {
                 if let Some(step) = self.socialize_step(id, v, others) {
                     return Some(step);
                 }
@@ -1076,7 +1130,7 @@ impl PlayPlan {
                 }
                 v.move_target
             }
-            Activity::Idle => {
+            Goal::Idle => {
                 if v.move_target.is_none() || v.wander_timer <= 0 {
                     let base = v.job_site.or(v.home).unwrap_or([
                         v.pos[0].floor() as i32,
@@ -1097,6 +1151,27 @@ impl PlayPlan {
             }
         }?;
         self.walk_step(v, target, 0.14)
+    }
+
+    /// `Sensing.hasLineOfSight`: трассировка взгляда по клеткам.
+    fn has_line_of_sight(&self, from: [f64; 3], to: [f64; 3]) -> bool {
+        let a = [from[0], from[1] + 1.62, from[2]];
+        let b = [to[0], to[1] + 1.62, to[2]];
+        let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        let steps = (len / 0.2).ceil().max(1.0) as usize;
+        for i in 1..steps {
+            let t = i as f64 / steps as f64;
+            let cell = [
+                (a[0] + d[0] * t).floor() as i32,
+                (a[1] + d[1] * t).floor() as i32,
+                (a[2] + d[2] * t).floor() as i32,
+            ];
+            if self.walk_blocked(cell) {
+                return false;
+            }
+        }
+        true
     }
 
     /// `SocializeAtBell`: раз в 100 тиков у колокола выбрать ближайшего
@@ -1136,7 +1211,10 @@ impl PlayPlan {
         let (_, uuid, pos) = others
             .iter()
             .filter(|(other, _, _)| *other != id)
-            .filter(|(_, _, pos)| crate::mobs::dist2(v.pos, *pos) <= 32.0 * 32.0)
+            .filter(|(_, _, pos)| {
+                crate::mobs::dist2(v.pos, *pos) <= 32.0 * 32.0
+                    && self.has_line_of_sight(v.pos, *pos)
+            })
             .min_by(|a, b| {
                 crate::mobs::dist2(v.pos, a.2).total_cmp(&crate::mobs::dist2(v.pos, b.2))
             })?;
@@ -2484,6 +2562,31 @@ mod tests {
         v.maybe_decay_gossip(48_002);
         assert_eq!(v.gossips[&target][GossipType::Trading.id()], 21);
         assert_eq!(v.gossips[&target][GossipType::MinorNegative.id()], 0);
+    }
+
+    #[test]
+    fn goal_stack_orders_by_priority_and_falls_back() {
+        use Goal::*;
+        // Активная цель по расписанию + `Idle` как запасная.
+        assert_eq!(
+            goals_for(Activity::Rest, true, true, true),
+            vec![Rest, Idle]
+        );
+        assert_eq!(goals_for(Activity::Rest, false, true, true), vec![Idle]);
+        assert_eq!(
+            goals_for(Activity::Work, true, true, true),
+            vec![Work, Idle]
+        );
+        assert_eq!(goals_for(Activity::Work, true, false, true), vec![Idle]);
+        assert_eq!(
+            goals_for(Activity::Meet, true, true, true),
+            vec![Meet, Idle]
+        );
+        assert_eq!(goals_for(Activity::Meet, true, true, false), vec![Idle]);
+        assert_eq!(goals_for(Activity::Idle, true, true, true), vec![Idle]);
+        assert!(Rest.priority() > Work.priority());
+        assert!(Work.priority() > Meet.priority());
+        assert!(Meet.priority() > Idle.priority());
     }
 
     #[test]

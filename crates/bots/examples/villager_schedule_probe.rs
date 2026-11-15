@@ -443,6 +443,22 @@ async fn main() {
     .await;
     p.pump(800).await;
 
+    // Стена между колоколом и соседом: сенсор не должен видеть цель
+    // сквозь блоки (проверка линии видимости).
+    p.cmd(&format!(
+        "fill {} {Y} {} {} {} {} minecraft:stone",
+        X + 4,
+        Z + 10,
+        X + 4,
+        Y + 1,
+        Z + 12
+    ))
+    .await;
+    assert!(
+        p.block_is([X + 4, Y, Z + 10], "minecraft:stone").await,
+        "стена для проверки линии видимости не поставилась"
+    );
+
     let data = p
         .data("@e[type=minecraft:villager,limit=1,sort=nearest] VillagerData")
         .await;
@@ -486,9 +502,34 @@ async fn main() {
     assert!(near <= 2.0, "житель не дошёл до колокола: {at_bell:?}");
     println!("meet: villager at bell ({near:.2})");
 
+    // Стена между колоколом и соседом уже стоит (поставлена до встречи).
+    let friend = [X as f64 + 8.5, f64::from(Y), Z as f64 + 13.5];
+    let mut blocked = true;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(6_000) {
+        if let Some(pos) = p.a_pos
+            && dist_xz(pos, friend) <= 4.0
+        {
+            blocked = false;
+            break;
+        }
+        p.pump(200).await;
+    }
+    assert!(blocked, "житель увидел соседа сквозь стену");
+    println!("sensor: neighbour hidden behind wall");
+
+    p.cmd(&format!(
+        "fill {} {Y} {} {} {} {} minecraft:air",
+        X + 4,
+        Z + 10,
+        X + 4,
+        Y + 1,
+        Z + 12
+    ))
+    .await;
+
     // `SocializeAtBell`: раз в 100 тиков житель у колокола выбирает
     // ближайшего жителя (NoAI-сосед в 8 блоках) и подходит к нему.
-    let friend = [X as f64 + 8.5, f64::from(Y), Z as f64 + 13.5];
     let mut social = None;
     let start = tokio::time::Instant::now();
     while start.elapsed() < Duration::from_millis(30_000) {
@@ -597,6 +638,33 @@ async fn main() {
     }
     assert!(slept_again, "житель не лёг после кулдауна");
     println!("cooldown: slept again after 40 ticks");
+
+    // Приоритеты: без кровати `Rest` падает в `Idle` (житель гуляет,
+    // а не стоит на месте).
+    let bed_pos = p
+        .a_pos
+        .unwrap_or([X as f64 + 8.5, f64::from(Y), Z as f64 - 3.5]);
+    p.cmd(&format!("setblock {} {Y} {} minecraft:air", X + 8, Z - 4))
+        .await;
+    p.cmd(&format!("setblock {} {Y} {} minecraft:air", X + 8, Z - 3))
+        .await;
+    let mut wandered = false;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(15_000) {
+        if let Some(pos) = p.a_pos
+            && dist_xz(pos, bed_pos) > 1.5
+        {
+            wandered = true;
+            break;
+        }
+        p.pump(200).await;
+    }
+    assert!(
+        wandered,
+        "без кровати житель не перешёл в idle (a_pos {:?})",
+        p.a_pos
+    );
+    println!("priority: no bed -> idle wander");
 
     println!("villager_schedule_probe: ok");
 }
