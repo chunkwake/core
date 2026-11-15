@@ -100,6 +100,29 @@ fn select_enchantments(
 /// Пороги уровней (`VillagerData.NEXT_LEVEL_XP_THRESHOLDS`).
 pub const LEVEL_XP: [i32; 5] = [0, 10, 70, 150, 250];
 
+/// `timeline/villager_schedule.json` 26.3 (взрослый житель).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Activity {
+    Idle,
+    Work,
+    Meet,
+    Rest,
+}
+
+impl Activity {
+    /// Ключевые кадры: 10 idle, 2000 work, 9000 meet, 11000 idle, 12000 rest.
+    fn at(day_time: i64) -> Self {
+        match day_time.rem_euclid(24_000) {
+            0..10 => Activity::Rest,
+            10..2000 => Activity::Idle,
+            2000..9000 => Activity::Work,
+            9000..11000 => Activity::Meet,
+            11000..12000 => Activity::Idle,
+            _ => Activity::Rest,
+        }
+    }
+}
+
 /// Вид торговца: обычный житель или странствующий торговец.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TraderKind {
@@ -233,6 +256,20 @@ pub struct Villager {
     pub last_gossip_decay: i64,
     /// `LivingEntity.health`.
     pub health: f32,
+    /// Текущее занятие по `villager_schedule`.
+    pub activity: Activity,
+    /// `MemoryModuleType.HOME`: занятая кровать.
+    pub home: Option<[i32; 3]>,
+    /// Точка, к которой идёт житель (`WalkTarget`).
+    pub move_target: Option<[f64; 3]>,
+    /// Последняя отправленная позиция (`VecDeltaCodec`).
+    pub sent_pos: [i64; 3],
+    /// `NoAI`: пробы и датапаки отключают мозг.
+    pub no_ai: bool,
+    /// Счётчик прогулки в `idle`.
+    pub wander_timer: i32,
+    /// Когда последний раз искали кровать.
+    pub last_home_check: i64,
 }
 
 /// Состояние окна торговли: к какому жителю и какая сделка выбрана.
@@ -649,6 +686,165 @@ impl PlayPlan {
         best.map(|(pos, _)| pos)
     }
 
+    /// `PoiManager.getInRange` без учёта занятости (колокол общий).
+    fn nearest_poi(
+        &self,
+        types: &std::collections::HashSet<String>,
+        origin: [i32; 3],
+        radius: i32,
+    ) -> Option<[i32; 3]> {
+        let (cx, cz) = (origin[0] >> 4, origin[2] >> 4);
+        let reach = radius.div_euclid(16) + 1;
+        let map = self.dim_state().pois.lock().unwrap();
+        let mut best: Option<([i32; 3], i64)> = None;
+        for ((x, z), list) in map.iter() {
+            if (x - cx).abs() > reach || (z - cz).abs() > reach {
+                continue;
+            }
+            for (pos, kind) in list {
+                if !types.contains(*kind) {
+                    continue;
+                }
+                let dist = (pos[0] as i64 - origin[0] as i64).pow(2)
+                    + (pos[1] as i64 - origin[1] as i64).pow(2)
+                    + (pos[2] as i64 - origin[2] as i64).pow(2);
+                if dist <= (radius as i64).pow(2) && best.is_none_or(|(_, d)| dist < d) {
+                    best = Some((*pos, dist));
+                }
+            }
+        }
+        best.map(|(pos, _)| pos)
+    }
+
+    /// `AcquirePoi` (`MemoryModuleType.HOME`): свободная кровать в 48 блоках.
+    fn update_villager_home(&self, id: i32, v: &mut Villager) {
+        if let Some(home) = v.home {
+            let valid = self
+                .block(home)
+                .and_then(|s| poi::of_block(self.state_name(s)))
+                == Some("minecraft:home");
+            if valid {
+                return;
+            }
+            self.release_poi(home);
+            v.home = None;
+        }
+        let types = std::collections::HashSet::from(["minecraft:home".to_owned()]);
+        let origin = [
+            v.pos[0].floor() as i32,
+            v.pos[1].floor() as i32,
+            v.pos[2].floor() as i32,
+        ];
+        if let Some(bed) = self.free_poi(&types, origin, 48) {
+            self.claim_poi(bed, id);
+            v.home = Some(bed);
+        }
+    }
+
+    /// Свободное место рядом с точкой интереса: сосед с твёрдым полом.
+    fn stand_near(&self, block: [i32; 3], from: [f64; 3]) -> Option<[f64; 3]> {
+        let solid = |p: [i32; 3]| {
+            self.block(p)
+                .is_some_and(|s| self.survival.placement.solid(s))
+        };
+        let mut best: Option<([f64; 3], f64)> = None;
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let feet = [block[0] + dx, block[1], block[2] + dz];
+            if solid(feet) || solid([feet[0], feet[1] + 1, feet[2]]) {
+                continue;
+            }
+            if !solid([feet[0], feet[1] - 1, feet[2]]) {
+                continue;
+            }
+            let pos = [feet[0] as f64 + 0.5, feet[1] as f64, feet[2] as f64 + 0.5];
+            let dist = crate::mobs::dist2(pos, from);
+            if best.is_none_or(|(_, d)| dist < d) {
+                best = Some((pos, dist));
+            }
+        }
+        best.map(|(pos, _)| pos).or_else(|| {
+            Some([
+                block[0] as f64 + 0.5,
+                block[1] as f64 + 1.0,
+                block[2] as f64 + 0.5,
+            ])
+        })
+    }
+
+    /// Один шаг `Brain`/`WalkTarget`: работа, встреча у колокола, отдых дома
+    /// и прогулка в `idle`.
+    fn villager_ai_step(&self, v: &mut Villager) -> Option<([f64; 3], f32)> {
+        let target = match v.activity {
+            Activity::Work => v.job_site.and_then(|p| self.stand_near(p, v.pos)),
+            Activity::Rest => v.home.and_then(|p| self.stand_near(p, v.pos)),
+            Activity::Meet => {
+                if v.move_target.is_none() {
+                    let types = std::collections::HashSet::from(["minecraft:meeting".to_owned()]);
+                    let origin = [
+                        v.pos[0].floor() as i32,
+                        v.pos[1].floor() as i32,
+                        v.pos[2].floor() as i32,
+                    ];
+                    v.move_target = self
+                        .nearest_poi(&types, origin, 48)
+                        .and_then(|bell| self.stand_near(bell, v.pos));
+                }
+                v.move_target
+            }
+            Activity::Idle => {
+                if v.move_target.is_none() || v.wander_timer <= 0 {
+                    let base = v.job_site.or(v.home).unwrap_or([
+                        v.pos[0].floor() as i32,
+                        v.pos[1].floor() as i32,
+                        v.pos[2].floor() as i32,
+                    ]);
+                    let dx = f64::from(rand::random::<u32>() % 13) - 6.0;
+                    let dz = f64::from(rand::random::<u32>() % 13) - 6.0;
+                    v.move_target = Some([
+                        base[0] as f64 + 0.5 + dx,
+                        v.pos[1],
+                        base[2] as f64 + 0.5 + dz,
+                    ]);
+                    v.wander_timer = 100 + (rand::random::<u32>() % 100) as i32;
+                }
+                v.wander_timer -= 1;
+                v.move_target
+            }
+        }?;
+        let dx = target[0] - v.pos[0];
+        let dz = target[2] - v.pos[2];
+        let dist = (dx * dx + dz * dz).sqrt();
+        if dist < 0.8 {
+            v.move_target = None;
+            return None;
+        }
+        // Скорость навигации: атрибут 0.5 × `SPEED_MODIFIER` 0.5.
+        let step = 0.14f64.min(dist);
+        let nx = v.pos[0] + dx / dist * step;
+        let nz = v.pos[2] + dz / dist * step;
+        let feet = [
+            nx.floor() as i32,
+            v.pos[1].floor() as i32,
+            nz.floor() as i32,
+        ];
+        let solid = |p: [i32; 3]| {
+            self.block(p)
+                .is_some_and(|s| self.survival.placement.solid(s))
+        };
+        if solid(feet) {
+            let up = [feet[0], feet[1] + 1, feet[2]];
+            if solid(up) || solid([up[0], up[1] + 1, up[2]]) {
+                return None;
+            }
+        }
+        let yaw = (-dx).atan2(dz).to_degrees() as f32;
+        v.pos[0] = nx;
+        v.pos[2] = nz;
+        v.pos[1] += (target[1] - v.pos[1]).clamp(-0.2, 0.2);
+        v.yaw = yaw;
+        Some((v.pos, yaw))
+    }
+
     /// `Villager` + `AcquirePoi`/`WorkAtPoi`: профессия по рабочему блоку.
     ///
     /// Безработный занимает ближайшую свободную точку в 48 блоках и
@@ -832,6 +1028,13 @@ impl PlayPlan {
             gossips: BTreeMap::new(),
             last_gossip_decay: 0,
             health: 20.0,
+            activity: Activity::Idle,
+            home: None,
+            move_target: None,
+            sent_pos: play::quantize(pos),
+            no_ai: false,
+            wander_timer: 0,
+            last_home_check: 0,
             last_work_check: self.game_time(),
             job_site: None,
             last_job_check: 0,
@@ -918,6 +1121,8 @@ impl PlayPlan {
             return;
         }
         let now = self.game_time();
+        let day = self.day_time.load(Ordering::Relaxed);
+        let mut moves: Vec<(i32, [f64; 3], f32, [i64; 3])> = Vec::new();
         let ids: Vec<i32> = self
             .sim()
             .villagers
@@ -965,6 +1170,22 @@ impl PlayPlan {
                 }
             }
             v.maybe_decay_gossip(now);
+            let activity = Activity::at(day);
+            if v.activity != activity {
+                v.activity = activity;
+                v.move_target = None;
+                v.wander_timer = 0;
+            }
+            if v.trader == TraderKind::Villager && !v.no_ai {
+                if now - v.last_home_check >= 100 {
+                    v.last_home_check = now;
+                    self.update_villager_home(id, v);
+                }
+                if let Some((pos, yaw)) = self.villager_ai_step(v) {
+                    moves.push((id, pos, yaw, v.sent_pos));
+                    v.sent_pos = play::quantize(pos);
+                }
+            }
             if v.trader == TraderKind::Villager {
                 let hero = heroes
                     .iter()
@@ -1015,6 +1236,17 @@ impl PlayPlan {
                     }
                 }
             }
+        }
+        for (id, pos, yaw, sent) in moves {
+            let q = play::quantize(pos);
+            let packet = match play::delta(sent, q) {
+                Some(d) => {
+                    play::move_entity_pos_rot(self.ids.move_entity_pos_rot, id, d, yaw, 0.0, true)
+                }
+                None => play::teleport_entity(self.ids.teleport_entity, id, pos, yaw, 0.0, true),
+            };
+            self.hub.send(None, packet);
+            self.mark_work();
         }
         for (vpos, ppos, profession) in gifts {
             let table = gift_table(&profession);
@@ -1313,6 +1545,7 @@ impl PlayPlan {
             }
             if let Some(pos) = list3(nbt.get("Pos")) {
                 v.pos = pos;
+                v.sent_pos = play::quantize(pos);
             }
             if let Some(Tag::List(rot)) = nbt.get("Rotation")
                 && let Some(Tag::Float(yaw)) = rot.first()
@@ -1580,6 +1813,13 @@ impl PlayPlan {
             gossips: BTreeMap::new(),
             last_gossip_decay: 0,
             health: 20.0,
+            activity: Activity::Idle,
+            home: None,
+            move_target: None,
+            sent_pos: play::quantize([nums[0], nums[1], nums[2]]),
+            no_ai: false,
+            wander_timer: 0,
+            last_home_check: 0,
         };
         apply_villager_nbt(&mut v, c, |n| self.item_id(n));
         if v.profession == "minecraft:none" {
@@ -1742,6 +1982,9 @@ fn apply_villager_nbt(v: &mut Villager, c: &Compound, item: impl Fn(&str) -> Opt
     if let Some(Tag::Byte(p)) = c.get("PersistenceRequired") {
         v.persistent = *p != 0;
     }
+    if let Some(Tag::Byte(p)) = c.get("NoAI") {
+        v.no_ai = *p != 0;
+    }
     if let Some(Tag::List(rot)) = c.get("Rotation")
         && let Some(Tag::Float(yaw)) = rot.first()
     {
@@ -1829,6 +2072,13 @@ mod tests {
             gossips: BTreeMap::new(),
             last_gossip_decay: 0,
             health: 20.0,
+            activity: Activity::Idle,
+            home: None,
+            move_target: None,
+            sent_pos: [0; 3],
+            no_ai: false,
+            wander_timer: 0,
+            last_home_check: 0,
         };
         let player = Uuid::from_u128(7);
         let target = player.as_u128();
@@ -1851,6 +2101,23 @@ mod tests {
         v.maybe_decay_gossip(48_002);
         assert_eq!(v.gossips[&target][GossipType::Trading.id()], 21);
         assert_eq!(v.gossips[&target][GossipType::MinorNegative.id()], 0);
+    }
+
+    #[test]
+    fn villager_schedule_matches_timeline() {
+        use Activity::*;
+        assert_eq!(Activity::at(0), Rest);
+        assert_eq!(Activity::at(9), Rest);
+        assert_eq!(Activity::at(10), Idle);
+        assert_eq!(Activity::at(1999), Idle);
+        assert_eq!(Activity::at(2000), Work);
+        assert_eq!(Activity::at(8999), Work);
+        assert_eq!(Activity::at(9000), Meet);
+        assert_eq!(Activity::at(10999), Meet);
+        assert_eq!(Activity::at(11000), Idle);
+        assert_eq!(Activity::at(12_000), Rest);
+        assert_eq!(Activity::at(23_999), Rest);
+        assert_eq!(Activity::at(24_010), Idle);
     }
 
     #[test]

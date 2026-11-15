@@ -217,21 +217,64 @@ fn enchant_max_levels(root: &std::path::Path) -> HashMap<i32, (String, i32)> {
     out
 }
 
-/// Тег `#minecraft:double_trade_price` как имена чар.
+/// Тег `#minecraft:double_trade_price` как имена чар (с вложенными тегами).
 fn double_trade_set(root: &std::path::Path) -> Vec<String> {
-    let file = root.join("data/minecraft/tags/enchantment/double_trade_price.json");
-    let Ok(text) = std::fs::read_to_string(file) else {
+    let dir = root.join("data/minecraft/tags/enchantment");
+    let mut raw: HashMap<String, Vec<String>> = HashMap::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return Vec::new();
-    };
-    json["values"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|v| v.as_str().map(str::to_owned))
-        .collect()
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        raw.insert(
+            format!("minecraft:{stem}"),
+            json["values"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect(),
+        );
+    }
+    fn expand(
+        name: &str,
+        raw: &HashMap<String, Vec<String>>,
+        seen: &mut std::collections::HashSet<String>,
+        out: &mut Vec<String>,
+    ) {
+        let name = name.trim_start_matches('#');
+        let name = if name.contains(':') {
+            name.to_owned()
+        } else {
+            format!("minecraft:{name}")
+        };
+        if !seen.insert(name.clone()) {
+            return;
+        }
+        for value in raw.get(&name).into_iter().flatten() {
+            if value.starts_with('#') {
+                expand(value, raw, seen, out);
+            } else {
+                out.push(value.clone());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    expand("#minecraft:double_trade_price", &raw, &mut seen, &mut out);
+    out
 }
 
 #[tokio::main]
