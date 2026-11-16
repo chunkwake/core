@@ -2802,6 +2802,24 @@ impl PlayPlan {
         }
     }
 
+    /// `LootTable` культур (`blocks/wheat|carrots|potatoes|beetroots`).
+    fn crop_drops(name: &str) -> Vec<(&'static str, i32)> {
+        let seeds = 1 + (rand::random::<u32>() % 3) as i32;
+        let roots = 1 + (rand::random::<u32>() % 4) as i32;
+        match name {
+            "minecraft:wheat" => vec![("minecraft:wheat", 1), ("minecraft:wheat_seeds", seeds)],
+            "minecraft:carrots" => vec![("minecraft:carrots", roots)],
+            "minecraft:potatoes" => vec![("minecraft:potatoes", roots)],
+            "minecraft:beetroots" => vec![
+                ("minecraft:beetroot", 1),
+                ("minecraft:beetroot_seeds", seeds),
+            ],
+            "minecraft:torchflower_crop" => vec![("minecraft:torchflower_seeds", 1)],
+            "minecraft:pitcher_crop" => vec![("minecraft:pitcher_pod", 1)],
+            _ => Vec::new(),
+        }
+    }
+
     /// Максимальный возраст ванильных `CropBlock`.
     fn crop_max_age(name: &str) -> Option<i32> {
         Some(match name {
@@ -2959,6 +2977,17 @@ impl PlayPlan {
                 }
                 self.break_drops(p);
                 self.set_block(p, 0);
+                // `destroyBlock(..., drop)`: лут культуры (урожай + семена).
+                for (item, count) in Self::crop_drops(name) {
+                    if let Some(id) = self.item_id(item) {
+                        self.drop_item(
+                            [p[0] as f64 + 0.5, p[1] as f64 + 0.5, p[2] as f64 + 0.5],
+                            [0.0, 0.2, 0.0],
+                            Stack::new(id, count.min(self.max_stack(id).max(1))),
+                            items::BLOCK_DELAY,
+                        );
+                    }
+                }
                 self.finish_farm_action(v);
                 return;
             }
@@ -3906,6 +3935,14 @@ impl PlayPlan {
                     v.move_target = None;
                 }
             }
+            // `Villager.customServerAiStep`: 1/100 за тик в активном рейде.
+            if !v.no_ai
+                && v.raid_phase == RaidPhase::Raid
+                && rand::random::<u32>().is_multiple_of(100)
+            {
+                self.hub
+                    .send(None, inv::entity_event(self.ids.entity_event, id, 42));
+            }
             if v.age < 0 && now % 20 == 0 && now != v.last_bed_check {
                 v.last_bed_check = now;
                 let types = std::collections::HashSet::from(["minecraft:home".to_owned()]);
@@ -4213,6 +4250,11 @@ impl PlayPlan {
             }
             (v.pos, v.health <= 0.0)
         };
+        if attacker.is_some() {
+            // `Villager.setLastHurtByMob`: event 13 (дым) при ударе игроком.
+            self.hub
+                .send(None, inv::entity_event(self.ids.entity_event, id, 13));
+        }
         if let Some(player) = attacker {
             let pos = self
                 .live
@@ -4442,6 +4484,10 @@ impl PlayPlan {
         let pos = v.pos;
         let wandering = v.trader == TraderKind::Wandering;
         drop(villagers);
+        // `Villager.customServerAiStep`: event 14 (зелёные частицы) после
+        // сделки (`lastTradedPlayer != null`).
+        self.hub
+            .send(None, inv::entity_event(self.ids.entity_event, id, 14));
         if wandering {
             // `WanderingTrader.rewardTradeXp`: 3 + nextInt(4).
             self.spawn_orbs(

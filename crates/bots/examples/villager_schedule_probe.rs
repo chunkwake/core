@@ -62,6 +62,10 @@ struct Probe {
     /// `VillagerMakeLove`: event 18 (старт) и 12 (1/35, сердечки).
     saw_love_18: bool,
     saw_love_12: bool,
+    /// `Villager.setLastHurtByMob` (13), сделка (14), рейд (42).
+    saw_hurt_13: bool,
+    saw_trade_14: bool,
+    saw_raid_42: bool,
     /// Дверь на пути и ID её состояний (`block_update`).
     door: [i32; 3],
     door_open: i32,
@@ -228,6 +232,15 @@ impl Probe {
                     }
                     if ev == 12 {
                         self.saw_love_12 = true;
+                    }
+                    if ev == 13 {
+                        self.saw_hurt_13 = true;
+                    }
+                    if ev == 14 {
+                        self.saw_trade_14 = true;
+                    }
+                    if ev == 42 {
+                        self.saw_raid_42 = true;
                     }
                 }
             } else if id == self.cb_sound {
@@ -568,6 +581,9 @@ async fn main() {
         saw_work_sound: false,
         saw_love_18: false,
         saw_love_12: false,
+        saw_hurt_13: false,
+        saw_trade_14: false,
+        saw_raid_42: false,
         door: [X + 3, Y, Z],
         door_open,
         door_closed,
@@ -1168,7 +1184,7 @@ async fn main() {
                 social_yaw = p.a_yaw;
             }
             gossip = p.data_tag("probe_a", "Gossips").await;
-            if gossip.contains("minor_negative") {
+            if gossip.contains("minor_negative") && gossip.contains("Value:5") {
                 social_pos = p.a_pos;
                 social_yaw = p.a_yaw;
                 break;
@@ -1245,6 +1261,17 @@ async fn main() {
         "обратный обмен не сработал (B Inventory: {b_inv})"
     );
     println!("trade: reverse exchange (B gave bread to hungry A)");
+
+    // `Villager.setLastHurtByMob`: удар игроком → entity_event 13.
+    p.saw_hurt_13 = false;
+    p.cmd("damage @e[tag=probe_a,limit=1] 1 minecraft:player_attack by @s")
+        .await;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(5_000) && !p.saw_hurt_13 {
+        p.pump(200).await;
+    }
+    assert!(p.saw_hurt_13, "нет entity_event 13 при ударе игроком");
+    println!("hurt: entity event 13");
     // B снова NoAI.
     p.cmd("data merge entity @e[tag=probe_b,limit=1] {NoAI:1b}")
         .await;
@@ -1597,6 +1624,7 @@ async fn main() {
     p.cmd(&format!("tp @s {} {Y} {}", bx + 2.5, bz + 2.5)).await;
     p.cmd("difficulty easy").await;
     p.cmd("effect clear @s").await;
+    p.saw_raid_42 = false;
     p.cmd("effect give @s minecraft:bad_omen 600 0").await;
     // Новый житель (не рейдер) — объект проверки.
     let mut raider_v = None;
@@ -1700,6 +1728,8 @@ async fn main() {
         p.firework_type
     );
     println!("raid: victory celebration fireworks");
+    assert!(p.saw_raid_42, "нет entity_event 42 во время рейда");
+    println!("raid: entity event 42");
     p.cmd("difficulty peaceful").await;
 
     // Изолированный сценарий: `GiveGiftToHero` (600..6600 тиков, 20 тиков
