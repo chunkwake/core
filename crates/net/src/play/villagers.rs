@@ -3184,11 +3184,25 @@ impl PlayPlan {
             let dist = crate::mobs::dist2(v.pos, *pos);
             if v.breed_until == 0 {
                 v.breed_until = now + 275 + i64::from(rand::random::<u32>() % 50);
+                // `VillagerMakeLove.start`: event 18 (сердечки) обоим.
                 self.hub
-                    .send(None, inv::entity_event(self.ids.entity_event, id, 12));
+                    .send(None, inv::entity_event(self.ids.entity_event, id, 18));
+                if let Some(partner) = v.breed_partner {
+                    self.hub
+                        .send(None, inv::entity_event(self.ids.entity_event, partner, 18));
+                }
             }
             if dist > 2.25 {
                 return self.walk_step(v, [pos[0], v.pos[1], pos[2]], 0.21);
+            }
+            // `VillagerMakeLove.tick`: 1/35 — сердечки (12) обоим.
+            if rand::random::<u32>().is_multiple_of(35) {
+                self.hub
+                    .send(None, inv::entity_event(self.ids.entity_event, id, 12));
+                if let Some(partner) = v.breed_partner {
+                    self.hub
+                        .send(None, inv::entity_event(self.ids.entity_event, partner, 12));
+                }
             }
             let yaw = look_yaw(v.pos, *pos);
             v.yaw = yaw;
@@ -3230,6 +3244,10 @@ impl PlayPlan {
         let Some(bed) = bed else {
             self.hub
                 .send(None, inv::entity_event(self.ids.entity_event, id, 13));
+            if let Some(partner) = v.breed_partner {
+                self.hub
+                    .send(None, inv::entity_event(self.ids.entity_event, partner, 13));
+            }
             v.breed_target = None;
             v.breed_until = 0;
             return;

@@ -38,6 +38,10 @@ impl<'a> Reader<'a> {
         Ok(u16::from_be_bytes(self.bytes(2)?.try_into().unwrap()))
     }
 
+    pub fn i32(&mut self) -> Result<i32> {
+        Ok(i32::from_be_bytes(self.bytes(4)?.try_into().unwrap()))
+    }
+
     pub fn i64(&mut self) -> Result<i64> {
         Ok(i64::from_be_bytes(self.bytes(8)?.try_into().unwrap()))
     }

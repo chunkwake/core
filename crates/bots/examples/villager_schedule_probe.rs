@@ -26,6 +26,7 @@ struct Probe {
     cb_equip: i32,
     cb_block_event: i32,
     cb_sound: i32,
+    cb_event: i32,
     chat: String,
     /// Колокол рейда и признак удара (`block_event` 1).
     bell: [i32; 3],
@@ -58,6 +59,9 @@ struct Probe {
     /// `VillagerProfession.workSound` фермера и признак, что он сыгран.
     work_sound: i32,
     saw_work_sound: bool,
+    /// `VillagerMakeLove`: event 18 (старт) и 12 (1/35, сердечки).
+    saw_love_18: bool,
+    saw_love_12: bool,
     /// Дверь на пути и ID её состояний (`block_update`).
     door: [i32; 3],
     door_open: i32,
@@ -212,6 +216,18 @@ impl Probe {
                             sz * 16 + (local >> 4 & 15),
                         ];
                         self.door_update(at, state);
+                    }
+                }
+            } else if id == self.cb_event {
+                // `entity_event`: varint(entity) + u8(event).
+                let mut r = Reader::new(&body);
+                // `entity_event`: i32(entity) + u8(event).
+                if let (Ok(_entity), Ok(ev)) = (r.i32(), r.u8()) {
+                    if ev == 18 {
+                        self.saw_love_18 = true;
+                    }
+                    if ev == 12 {
+                        self.saw_love_12 = true;
                     }
                 }
             } else if id == self.cb_sound {
@@ -479,6 +495,7 @@ async fn main() {
     let cb_equip = cb("set_equipment");
     let cb_block_event = cb("block_event");
     let cb_sound = cb("sound");
+    let cb_event = cb("entity_event");
     let raider_types: HashSet<i32> = [
         "minecraft:pillager",
         "minecraft:vindicator",
@@ -505,6 +522,7 @@ async fn main() {
         cb_equip,
         cb_block_event,
         cb_sound,
+        cb_event,
     ];
     let mut p = Probe {
         c,
@@ -520,6 +538,7 @@ async fn main() {
         cb_equip,
         cb_block_event,
         cb_sound,
+        cb_event,
         chat: String::new(),
         bell: [0; 3],
         bell_rang: false,
@@ -547,6 +566,8 @@ async fn main() {
             "minecraft:entity.villager.work_farmer",
         ),
         saw_work_sound: false,
+        saw_love_18: false,
+        saw_love_12: false,
         door: [X + 3, Y, Z],
         door_open,
         door_closed,
@@ -851,6 +872,11 @@ async fn main() {
         a_now[0], a_now[1], a_now[2]
     ))
     .await;
+
+    // Повторный merge по метке: координатный селектор мог не найти A,
+    // и `uses:3` не применялся (тогда ресток «не обновляется»).
+    p.cmd("data merge entity @e[tag=probe_a,limit=1] {Offers:{Recipes:[{buy:{id:\"minecraft:wheat\",count:20},sell:{id:\"minecraft:emerald\",count:1},uses:3,maxUses:16,xp:2,priceMultiplier:0.05f,demand:0}]},LastRestock:0,RestocksToday:0}")
+        .await;
     // Ставим жителя к рабочему блоку: `WorkAtPoi` стартует 1/2 раз в 300
     // тиков и только у блока, иначе ресток может не успеть за окно.
     p.cmd(&format!(
@@ -1059,6 +1085,19 @@ async fn main() {
     let mut blocked = true;
     let start = tokio::time::Instant::now();
     while start.elapsed() < Duration::from_millis(6_000) {
+        // Держим A у колокола: иначе обычная прогулка может случайно
+        // подвести его к соседу, и проверка «не увидел сквозь стену»
+        // ловит не сенсор, а маршрут.
+        if let Some(pos) = p.a_pos
+            && dist_xz(pos, [X as f64 + 0.5, f64::from(Y), Z as f64 + 6.5]) > 2.0
+        {
+            p.cmd(&format!(
+                "tp @e[tag=probe_a,limit=1] {} {Y} {}",
+                X as f64 + 0.5,
+                Z as f64 + 6.5
+            ))
+            .await;
+        }
         if let Some(pos) = p.a_pos
             && dist_xz(pos, friend) <= 4.0
         {
@@ -1353,6 +1392,10 @@ async fn main() {
     // `VillagerMakeLove`: чистая площадка — все прежние жители убираются,
     // ставятся две кровати, пара взрослых с едой сама ищет друг друга.
     p.cmd("kill @e[type=minecraft:villager]").await;
+    // Флаги событий сбрасываем ДО спавна пары: `VillagerMakeLove.start`
+    // может сыграть 18 ещё до первого опроса в цикле.
+    p.saw_love_18 = false;
+    p.saw_love_12 = false;
     // Дать серверу снять убитых и освободить их точки интереса.
     p.pump(1_000).await;
     let bx = X as f64 + 22.5;
@@ -1402,11 +1445,16 @@ async fn main() {
     while start.elapsed() < Duration::from_millis(90_000) {
         // Раз в ~5 с возвращаем пару в исходные точки (2 блока друг от друга).
         if tick % 15 == 0 {
-            p.cmd(&format!("tp @e[tag=probe_p1,limit=1] {} {Y} {bz}", bx))
-                .await;
+            // Ровно 1 блок друг от друга: `VillagerMakeLove` считает роды
+            // только на `distanceToSqr <= 1.5^2` в тик истечения таймера.
+            p.cmd(&format!(
+                "tp @e[tag=probe_p1,limit=1] {} {Y} {bz}",
+                bx + 0.5
+            ))
+            .await;
             p.cmd(&format!(
                 "tp @e[tag=probe_p2,limit=1] {} {Y} {bz}",
-                bx + 2.0
+                bx + 1.5
             ))
             .await;
         }
@@ -1429,6 +1477,15 @@ async fn main() {
         )
     });
     println!("breed: child {child} with DATA_BABY_ID=true");
+    assert!(
+        p.saw_love_18,
+        "VillagerMakeLove: нет entity_event 18 (старт)"
+    );
+    assert!(
+        p.saw_love_12,
+        "VillagerMakeLove: нет entity_event 12 (1/35, сердечки)"
+    );
+    println!("love: entity events 18 and 12");
 
     // `PlayTagWithOtherKids`: два малыша в `play` догоняют друг друга.
     let child_pos = p.all_pos.get(&child).copied().unwrap_or(apos);
