@@ -1712,7 +1712,12 @@ impl PlayPlan {
                     }
                 }
                 WorkGoal::StrollToPoiList => {
-                    // `StrollToPoiList(SECONDARY_JOB_SITE, ..., 1, 6, JOB_SITE)`.
+                    // `StrollToPoiList(SECONDARY_JOB_SITE, ...)`: у
+                    // не-фермеров память пуста → поведение fails.
+                    if v.profession != "minecraft:farmer" {
+                        v.goal_timer = 0;
+                        return Some((v.pos, v.yaw));
+                    }
                     let site = v.job_site.unwrap_or([
                         v.pos[0].floor() as i32,
                         v.pos[1].floor() as i32,
@@ -2614,7 +2619,12 @@ impl PlayPlan {
     }
 
     /// `SecondaryPoiSensor`: есть ли грядка в ±4 по XZ и ±2 по Y.
-    fn has_secondary_job_site(&self, pos: [f64; 3]) -> bool {
+    fn has_secondary_job_site(&self, v: &Villager) -> bool {
+        // `secondaryPoi` в 26.3 непуст только у фермера (`Blocks.FARMLAND`).
+        if v.profession != "minecraft:farmer" {
+            return false;
+        }
+        let pos = v.pos;
         let base = [
             pos[0].floor() as i32,
             pos[1].floor() as i32,
@@ -2839,8 +2849,12 @@ impl PlayPlan {
     /// `HarvestFarmland`/`UseBonemeal`: собрать спелое, посадить семена или
     /// ускорить рост костной мукой в 3×3×3 вокруг фермера.
     fn farm_step(&self, v: &mut Villager) -> Option<([f64; 3], f32)> {
-        // `HarvestFarmland` требует `SECONDARY_JOB_SITE`.
-        if !self.has_secondary_job_site(v.pos) {
+        // `HarvestFarmland.checkExtraStartConditions`: только FARMER
+        // (MOB_GRIEFING в сервере всегда включён — геймрулы нет) и
+        // `SECONDARY_JOB_SITE`. У `UseBonemeal` таких требований нет.
+        if v.work_goal == WorkGoal::Harvest
+            && (v.profession != "minecraft:farmer" || !self.has_secondary_job_site(v))
+        {
             return None;
         }
         let now = self.game_time();
@@ -2884,11 +2898,22 @@ impl PlayPlan {
                             .prop(state, "age")
                             .and_then(|a| a.parse::<i32>().ok())
                             .unwrap_or(0);
-                        if age >= max || self.has_item(v, "minecraft:bone_meal") {
+                        // `HarvestFarmland` берёт спелое; `UseBonemeal` —
+                        // только недозрелое (`validPos`: !isMaxAge) и при
+                        // наличии костной муки.
+                        let wanted = match v.work_goal {
+                            WorkGoal::Harvest => age >= max,
+                            WorkGoal::UseBonemeal => {
+                                age < max && self.has_item(v, "minecraft:bone_meal")
+                            }
+                            _ => false,
+                        };
+                        if wanted {
                             targets.push(p);
                         }
                     } else if name.ends_with(":air")
                         && below.ends_with("farmland")
+                        && v.work_goal == WorkGoal::Harvest
                         && self.plantable_seed(v).is_some()
                     {
                         targets.push(p);
@@ -2927,13 +2952,18 @@ impl PlayPlan {
                 .prop(state, "age")
                 .and_then(|a| a.parse::<i32>().ok())
                 .unwrap_or(0);
+            let harvest_goal = v.work_goal == WorkGoal::Harvest;
             if age >= max {
+                if !harvest_goal {
+                    return;
+                }
                 self.break_drops(p);
                 self.set_block(p, 0);
                 self.finish_farm_action(v);
                 return;
             }
-            if self.has_item(v, "minecraft:bone_meal")
+            if !harvest_goal
+                && self.has_item(v, "minecraft:bone_meal")
                 && self.bonemeal_at(p)
                 && self.take_item(v, "minecraft:bone_meal")
             {
@@ -2947,6 +2977,7 @@ impl PlayPlan {
         }
         if name.ends_with(":air")
             && below.ends_with("farmland")
+            && v.work_goal == WorkGoal::Harvest
             && let Some((seed, crop)) = self.plantable_seed(v)
             && let Some(block) = self.survival.placement.default_state(crop)
             && self.take_item(v, seed)

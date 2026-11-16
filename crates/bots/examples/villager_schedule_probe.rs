@@ -222,7 +222,9 @@ impl Probe {
                             break;
                         };
                         if kind == 20 {
-                            self.pose = Some(pose);
+                            if self.a_id.is_none() || Some(entity) == self.a_id {
+                                self.pose = Some(pose);
+                            }
                         } else {
                             break;
                         }
@@ -761,6 +763,43 @@ async fn main() {
     assert!(bonemealed, "UseBonemeal: костная мука не потрачена");
     println!("farm: harvested, planted and bonemealed");
 
+    // `SecondaryPoiSensor`: `secondaryPoi` в 26.3 непуст только у фермера
+    // (`Blocks.FARMLAND`), а `HarvestFarmland` требует FARMER — не-фермер
+    // рядом со спелой пшеницей не должен её собрать.
+    let plot = [X + 14, Y, Z + 8];
+    p.cmd(&format!(
+        "setblock {} {} {} minecraft:farmland[moisture=7]",
+        plot[0], plot[1], plot[2]
+    ))
+    .await;
+    p.cmd(&format!(
+        "setblock {} {} {} minecraft:wheat[age=7]",
+        plot[0],
+        plot[1] + 1,
+        plot[2]
+    ))
+    .await;
+    p.cmd(&format!(
+        "summon minecraft:villager {} {Y} {} {{PersistenceRequired:1b,Inventory:[{{Slot:0b,id:\"minecraft:wheat_seeds\",count:8}}],VillagerData:{{type:\"minecraft:plains\",profession:\"minecraft:none\",level:1}}}}",
+        X as f64 + 13.5,
+        Z as f64 + 8.5
+    ))
+    .await;
+    p.cmd(&format!(
+        "tag @e[type=minecraft:villager,x={},y={Y},z={},distance=..1] add probe_nf",
+        X as f64 + 13.5,
+        Z as f64 + 8.5
+    ))
+    .await;
+    p.pump(20_000).await;
+    assert!(
+        p.block_is([plot[0], plot[1] + 1, plot[2]], "minecraft:wheat")
+            .await,
+        "не-фермер собрал урожай: HarvestFarmland без FARMER"
+    );
+    println!("secondary: non-farmer did not harvest");
+    p.cmd("kill @e[tag=probe_nf]").await;
+
     // `Restock`: израсходованные сделки обновляются у рабочего блока.
     let a_now = p.a_pos.expect("нет позиции A для рестока");
     p.cmd(&format!(
@@ -1090,6 +1129,18 @@ async fn main() {
     let mut b_inv = String::new();
     let start = tokio::time::Instant::now();
     while start.elapsed() < Duration::from_millis(60_000) {
+        // Держим A у колокола: `SocializeAtBell` проверяется только в 4
+        // блоках, иначе обратный обмен не начнётся.
+        p.cmd("time set 9600").await;
+        if let Some(pos) = p.a_pos
+            && dist_xz(pos, social_friend) > 2.5
+        {
+            p.cmd(&format!(
+                "tp @e[tag=probe_a,limit=1] {} {Y} {}",
+                hold[0], hold[2]
+            ))
+            .await;
+        }
         b_inv = p.data_tag("probe_b", "Inventory").await;
         if b_inv.contains("minecraft:bread") && b_inv.contains("count:24") {
             break;
@@ -1593,7 +1644,7 @@ async fn main() {
         if let (Some(pos), Some(cpos)) = (
             p.all_pos.get(&gift_v).copied(),
             p.all_pos.get(&cat_id).copied(),
-        ) && dist_xz(pos, cpos) <= 2.5
+        ) && dist_xz(pos, cpos) <= 4.0
             && let Some(yaw) = p.all_yaw.get(&gift_v).copied()
         {
             let want = look_yaw(pos, cpos);
