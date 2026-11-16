@@ -687,6 +687,8 @@ pub struct Villager {
     pub show_cycle: i32,
     pub show_timer: i32,
     pub show_sent: Option<i32>,
+    /// `ShowTradesToPlayer.playerItemStack`: предыдущий предмет в руке.
+    pub show_held: Option<Stack>,
     /// Узлы текущего шага (`Path.getPreviousNode`/`getNextNode`).
     pub path_from: Option<[i32; 3]>,
     pub path_to: Option<[i32; 3]>,
@@ -2176,91 +2178,114 @@ impl PlayPlan {
         }
     }
 
-    /// `ShowTradesToPlayer`: показать в основной руке результат сделки,
-    /// чью цену держит nearby-игрок; цикл раз в 40 тиков.
+    /// `ShowTradesToPlayer(400, 1600)`: показывает свой предмет сделки,
+    /// которую можно совершить за предмет в руке игрока. `lookTime` — 40
+    /// на старте, 900 пока предмет показан; смена предмета раз в 40 тиков.
     fn show_trades_step(
         &self,
         id: i32,
         v: &mut Villager,
         players: &[(Uuid, [f64; 3], Option<Stack>)],
     ) {
-        let mut best: Option<(Uuid, [f64; 3], Stack)> = None;
-        for &(uuid, pos, held) in players {
-            let Some(held) = held else { continue };
-            if crate::mobs::dist2(v.pos, pos) > 4.1 * 4.1 || !self.has_line_of_sight(v.pos, pos) {
-                continue;
-            }
-            let offer = v.offers.iter().find(|o| {
-                !o.out_of_stock()
-                    && (o.buy.0 == held.item || o.buy_b.is_some_and(|(item, _)| item == held.item))
-            });
-            if let Some(offer) = offer
-                && best.is_none()
-            {
-                best = Some((uuid, pos, offer.sell));
+        // `checkExtraStartConditions`: INTERACTION_TARGET = игрок,
+        // не малыш, `distanceToSqr <= 17.0`.
+        let target = v
+            .player_target
+            .and_then(|uuid| players.iter().find(|(u, _, _)| *u == uuid).copied());
+        let Some((uuid, pos, held)) = target else {
+            self.stop_showing(id, v);
+            return;
+        };
+        if v.age < 0 || crate::mobs::dist2(v.pos, pos) > 17.0 {
+            self.stop_showing(id, v);
+            return;
+        }
+        if v.show_player != Some(uuid) {
+            // `start`
+            v.show_player = Some(uuid);
+            v.show_items.clear();
+            v.show_index = 0;
+            v.show_cycle = 0;
+            v.show_timer = 40;
+            v.show_sent = None;
+            v.show_held = None;
+        }
+        // `tick.findItemsToDisplay`: пересборка при смене предмета в руке.
+        let changed = v.show_held.map(|h| h.item) != held.map(|h| h.item);
+        if changed {
+            v.show_held = held;
+            v.show_items.clear();
+            if let Some(held) = held {
+                v.show_items = v
+                    .offers
+                    .iter()
+                    .filter(|o| !o.out_of_stock())
+                    .filter(|o| {
+                        o.buy.0 == held.item || o.buy_b.is_some_and(|(item, _)| item == held.item)
+                    })
+                    .map(|o| o.sell)
+                    .collect();
+                if !v.show_items.is_empty() {
+                    // `displayFirstItem`: показываем и держим 900 тиков.
+                    v.show_timer = 900;
+                    v.show_index = 0;
+                    v.show_cycle = 0;
+                    let item = v.show_items[0];
+                    v.show_sent = Some(item.item);
+                    self.hub.send(
+                        None,
+                        play::set_equipment(self.ids.set_equipment, id, &[(0, Some(item))]),
+                    );
+                }
             }
         }
-        let Some((uuid, pos, _)) = best else {
-            if v.show_player.is_some() {
+        if v.show_items.is_empty() {
+            // `clearHeldItem`; `lookTime = min(lookTime, 40)`.
+            if v.show_sent.take().is_some() {
                 self.hub.send(
                     None,
                     play::set_equipment(self.ids.set_equipment, id, &[(0, None)]),
                 );
             }
-            v.show_player = None;
-            v.show_items.clear();
-            v.show_sent = None;
-            return;
-        };
-        if v.show_player != Some(uuid) {
-            v.show_player = Some(uuid);
-            let held = players
-                .iter()
-                .find(|(u, _, _)| *u == uuid)
-                .and_then(|(_, _, s)| *s);
-            v.show_items = v
-                .offers
-                .iter()
-                .filter(|o| !o.out_of_stock())
-                .filter(|o| {
-                    held.is_some_and(|h| {
-                        o.buy.0 == h.item || o.buy_b.is_some_and(|(item, _)| item == h.item)
-                    })
-                })
-                .map(|o| o.sell)
-                .collect();
-            v.show_index = 0;
-            v.show_cycle = 0;
-            v.show_timer = 900;
-            v.show_sent = None;
-        }
-        if v.show_items.is_empty() {
-            return;
-        }
-        v.show_cycle += 1;
-        if v.show_cycle >= 40 && v.show_items.len() >= 2 {
-            v.show_cycle = 0;
-            v.show_index = (v.show_index + 1) % v.show_items.len();
-        }
-        let item = v.show_items[v.show_index];
-        if v.show_sent != Some(item.item) {
-            v.show_sent = Some(item.item);
-            self.hub.send(
-                None,
-                play::set_equipment(self.ids.set_equipment, id, &[(0, Some(item))]),
-            );
+            v.show_timer = v.show_timer.min(40);
+        } else if v.show_items.len() >= 2 {
+            // `displayCyclingItems`: каждые 40 тиков следующий предмет.
+            v.show_cycle += 1;
+            if v.show_cycle >= 40 {
+                v.show_cycle = 0;
+                v.show_index = (v.show_index + 1) % v.show_items.len();
+                let item = v.show_items[v.show_index];
+                if v.show_sent != Some(item.item) {
+                    v.show_sent = Some(item.item);
+                    self.hub.send(
+                        None,
+                        play::set_equipment(self.ids.set_equipment, id, &[(0, Some(item))]),
+                    );
+                }
+            }
         }
         v.yaw = look_yaw(v.pos, pos);
         v.show_timer -= 1;
         if v.show_timer <= 0 {
+            self.stop_showing(id, v);
+        }
+    }
+
+    /// `ShowTradesToPlayer.stop`: снять предмет, стереть память.
+    fn stop_showing(&self, id: i32, v: &mut Villager) {
+        if v.show_player.is_some() || v.show_sent.is_some() {
             self.hub.send(
                 None,
                 play::set_equipment(self.ids.set_equipment, id, &[(0, None)]),
             );
-            v.show_player = None;
-            v.show_items.clear();
-            v.show_sent = None;
         }
+        v.show_player = None;
+        v.show_items.clear();
+        v.show_sent = None;
+        v.show_held = None;
+        v.show_index = 0;
+        v.show_cycle = 0;
+        v.show_timer = 0;
     }
 
     /// `Villager.gossip`: передать до 10 слухов с `decayPerTransfer`,
@@ -2623,12 +2648,16 @@ impl PlayPlan {
                 .find(|(uuid, _, _)| *uuid == target)
                 .map(|(_, pos, _)| *pos);
             if let Some(pos) = pos
-                && v.player_timer > 0
                 && crate::mobs::dist2(v.pos, pos) <= 16.0
                 && self.has_line_of_sight(v.pos, pos)
             {
-                v.player_timer -= 1;
-                return Some(look_yaw(v.pos, pos));
+                if v.player_timer > 0 {
+                    v.player_timer -= 1;
+                    return Some(look_yaw(v.pos, pos));
+                }
+                // `LookAtTargetSink` истёк, но `INTERACTION_TARGET`
+                // (память) живёт до `ShowTradesToPlayer.stop`.
+                return None;
             }
             v.player_target = None;
             return None;
@@ -3600,6 +3629,7 @@ impl PlayPlan {
             show_cycle: 0,
             show_timer: 0,
             show_sent: None,
+            show_held: None,
             path_from: None,
             path_to: None,
             job_site: None,
@@ -4604,6 +4634,7 @@ impl PlayPlan {
             show_cycle: 0,
             show_timer: 0,
             show_sent: None,
+            show_held: None,
             path_from: None,
             path_to: None,
         };
@@ -4941,6 +4972,7 @@ mod tests {
             show_cycle: 0,
             show_timer: 0,
             show_sent: None,
+            show_held: None,
             path_from: None,
             path_to: None,
         };

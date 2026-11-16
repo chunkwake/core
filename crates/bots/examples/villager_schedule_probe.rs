@@ -807,10 +807,10 @@ async fn main() {
     println!("restock: offers reset at workstation");
 
     // `ShowTradesToPlayer`: игрок рядом держит пшеницу — A показывает
-    // изумруд в основной руке; уходит — рука очищается.
+    // предметы сделок; два оффера → смена раз в 40 тиков, `lookTime` 900.
     let apos = p.a_pos.expect("нет позиции A");
     p.cmd(&format!(
-        "data merge entity @e[type=minecraft:villager,x={},y={},z={},distance=..3,limit=1,sort=nearest]          {{Offers:{{Recipes:[{{buy:{{id:\"minecraft:wheat\",count:20}},sell:{{id:\"minecraft:emerald\",count:1}},uses:0,maxUses:16,xp:2,priceMultiplier:0.05f,demand:0}}]}}}}",
+        "data merge entity @e[type=minecraft:villager,x={},y={},z={},distance=..3,limit=1,sort=nearest]          {{Offers:{{Recipes:[{{buy:{{id:\"minecraft:wheat\",count:20}},sell:{{id:\"minecraft:emerald\",count:1}},uses:0,maxUses:16,xp:2,priceMultiplier:0.05f,demand:0}},{{buy:{{id:\"minecraft:wheat\",count:20}},sell:{{id:\"minecraft:bread\",count:1}},uses:0,maxUses:16,xp:2,priceMultiplier:0.05f,demand:0}}]}}}}",
         apos[0], apos[1], apos[2]
     ))
     .await;
@@ -820,18 +820,41 @@ async fn main() {
         .await;
     p.select_slot(0).await;
     let emerald = pid("minecraft:item", "minecraft:emerald");
+    let bread = pid("minecraft:item", "minecraft:bread");
     let mut shown = false;
+    let mut switched = false;
+    let mut last = None;
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(5_000) {
-        if p.a_hand == Some(emerald) {
+    while start.elapsed() < Duration::from_millis(10_000) {
+        if let Some(hand) = p.a_hand
+            && (hand == emerald || hand == bread)
+        {
             shown = true;
+            if last.is_some_and(|prev| prev != hand) {
+                switched = true;
+            }
+            last = Some(hand);
+        }
+        if shown && switched {
             break;
         }
         p.pump(200).await;
     }
     assert!(
         shown,
-        "ShowTradesToPlayer не показал изумруд: {:?}",
+        "ShowTradesToPlayer не показал предмет: {:?}",
+        p.a_hand
+    );
+    assert!(
+        switched,
+        "ShowTradesToPlayer не сменил предмет за 40 тиков: {:?}",
+        p.a_hand
+    );
+    // `lookTime` = 900 тиков: предмет держится, а не пропадает сразу.
+    p.pump(2_000).await;
+    assert!(
+        matches!(p.a_hand, Some(hand) if hand == emerald || hand == bread),
+        "ShowTradesToPlayer снял предмет раньше 900 тиков: {:?}",
         p.a_hand
     );
     p.cmd(&format!("tp @s {}.5 {Y} {}.5", X, Z + 2)).await;
@@ -849,10 +872,10 @@ async fn main() {
     }
     assert!(
         cleared,
-        "ShowTradesToPlayer не очистил руку: {:?}",
+        "ShowTradesToPlayer не снял предмет: {:?}",
         p.a_hand
     );
-    println!("show trades: emerald shown and cleared");
+    println!("show trades: items shown (cycle 40), held 900, cleared");
 
     // `VillagerPanicTrigger`: зомби рядом — A убегает; после удаления
     // угрозы `VillagerCalmDown` возвращает его к работе.
