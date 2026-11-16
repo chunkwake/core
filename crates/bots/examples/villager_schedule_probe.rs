@@ -920,7 +920,7 @@ async fn main() {
     // ближайшего жителя (NoAI-сосед в 8 блоках) и подходит к нему.
     let mut social = None;
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(30_000) {
+    while start.elapsed() < Duration::from_millis(60_000) {
         if let Some(pos) = p.a_pos
             && dist_xz(pos, friend) <= 2.0
         {
@@ -1172,13 +1172,23 @@ async fn main() {
     // `VillagerMakeLove`: чистая площадка — все прежние жители убираются,
     // ставятся две кровати, пара взрослых с едой сама ищет друг друга.
     p.cmd("kill @e[type=minecraft:villager]").await;
+    // Дать серверу снять убитых и освободить их точки интереса.
+    p.pump(1_000).await;
     let bx = X as f64 + 22.5;
     let bz = Z as f64 + 22.5;
+    // Запас кроватей: `VillagerMakeLove.takeVacantBed` ищет незанятую
+    // кровать для ребёнка, а родители и прочие жители занимают по одной.
     for (x, z, part) in [
         (bx, bz, "foot"),
         (bx, bz + 1.0, "head"),
         (bx + 3.0, bz, "foot"),
         (bx + 3.0, bz + 1.0, "head"),
+        (bx + 6.0, bz, "foot"),
+        (bx + 6.0, bz + 1.0, "head"),
+        (bx + 9.0, bz, "foot"),
+        (bx + 9.0, bz + 1.0, "head"),
+        (bx + 12.0, bz, "foot"),
+        (bx + 12.0, bz + 1.0, "head"),
     ] {
         p.cmd(&format!(
             "setblock {} {} {} minecraft:red_bed[part={part},facing=south]",

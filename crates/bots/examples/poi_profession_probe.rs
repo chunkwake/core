@@ -156,9 +156,21 @@ async fn main() {
         "житель не стал фермером: {data}"
     );
     let offers = p.query("Offers").await;
+    // `trade_set/farmer/level_1` берёт 2 случайные сделки из набора
+    // (wheat/potato/carrot/beetroot → emerald, emerald → bread), поэтому
+    // конкретный предмет не гарантирован — проверяем наличие любой.
+    let has_farmer_trade = [
+        "minecraft:wheat",
+        "minecraft:potato",
+        "minecraft:carrot",
+        "minecraft:beetroot",
+        "minecraft:bread",
+    ]
+    .iter()
+    .any(|item| offers.contains(item));
     assert!(
-        offers.contains("minecraft:wheat"),
-        "у фермера нет сделок: {offers}"
+        has_farmer_trade,
+        "у фермера нет сделок 1-го уровня: {offers}"
     );
     println!("poi profession gain ok");
 

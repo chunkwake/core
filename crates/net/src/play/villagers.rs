@@ -244,6 +244,40 @@ fn raid_phase(groups: i32, alive: i32, cooldown: i64, celebration: i32) -> RaidP
     }
 }
 
+/// Результат `ValidateNearbyPoi` для памяти точки интереса.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PoiValidation {
+    Keep,
+    Erase,
+    EraseAndRelease,
+}
+
+/// `ValidateNearbyPoi`: дальше 16 — не трогаем; точка исчезла — стираем;
+/// занятая кровать не спящим жителем — стираем (и освобождаем, если в ней
+/// никто не спит).
+fn validate_poi(
+    dist_sqr: f64,
+    exists: bool,
+    bed_occupied: bool,
+    self_sleeping: bool,
+    occupied_by_sleeper: bool,
+) -> PoiValidation {
+    if dist_sqr > 16.0 * 16.0 {
+        return PoiValidation::Keep;
+    }
+    if !exists {
+        return PoiValidation::EraseAndRelease;
+    }
+    if bed_occupied && !self_sleeping {
+        return if occupied_by_sleeper {
+            PoiValidation::Erase
+        } else {
+            PoiValidation::EraseAndRelease
+        };
+    }
+    PoiValidation::Keep
+}
+
 /// `RunOne` рабочего пакета (`getWorkPackage`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkGoal {
@@ -612,12 +646,17 @@ pub struct Villager {
     pub rest_goal: RestGoal,
     pub work_active: bool,
     pub work_cooldown: i64,
+    /// `Behavior` по умолчанию: 60 тиков работы после успешного старта.
+    pub work_end: i64,
     pub stroll_cooldown: i64,
     pub farm_actions_left: i32,
     pub branch_timer: i32,
     /// `LOOK_TARGET`: точка взгляда и пауза перед новым выбором.
     pub look_at: Option<[f64; 3]>,
     pub look_timer: i32,
+    /// `SetLookAndInteract(PLAYER, 4)`: цель-игрок и таймер.
+    pub player_target: Option<Uuid>,
+    pub player_timer: i32,
     pub goal_timer: i32,
     /// `MemoryModuleType.BREED_TARGET` и время рождения.
     pub breed_target: Option<u128>,
@@ -1094,17 +1133,51 @@ impl PlayPlan {
         best.map(|(pos, _)| pos)
     }
 
-    /// `AcquirePoi` (`MemoryModuleType.HOME`): свободная кровать в 48 блоках.
-    fn update_villager_home(&self, id: i32, v: &mut Villager) {
-        if let Some(home) = v.home {
-            let valid = self
-                .block(home)
+    /// `ValidateNearbyPoi(MEETING)` для колокола.
+    fn validate_meeting_poi(&self, v: &mut Villager) {
+        let Some(bell) = v.meeting_point else {
+            return;
+        };
+        let dist = crate::mobs::dist2(
+            v.pos,
+            [bell[0] as f64 + 0.5, bell[1] as f64, bell[2] as f64 + 0.5],
+        );
+        if dist <= 16.0 * 16.0
+            && self
+                .block(bell)
                 .and_then(|s| poi::of_block(self.state_name(s)))
-                == Some("minecraft:home");
-            if valid {
+                != Some("minecraft:meeting")
+        {
+            v.meeting_point = None;
+        }
+    }
+
+    /// `AcquirePoi` (`MemoryModuleType.HOME`): свободная кровать в 48 блоках.
+    /// `ValidateNearbyPoi`: дальше 16 — не трогаем, исчезла/занята — стираем.
+    fn update_villager_home(&self, id: i32, v: &mut Villager, sleepers: &[[i32; 3]]) {
+        if let Some(home) = v.home {
+            let dist = crate::mobs::dist2(
+                v.pos,
+                [home[0] as f64 + 0.5, home[1] as f64, home[2] as f64 + 0.5],
+            );
+            if dist > 16.0 * 16.0 {
                 return;
             }
-            self.release_poi(home);
+            let state = self.block(home);
+            let exists =
+                state.and_then(|s| poi::of_block(self.state_name(s))) == Some("minecraft:home");
+            let occupied =
+                state.is_some_and(|s| self.survival.placement.prop(s, "occupied") == Some("true"));
+            // Список спящих собирает вызывающий код под уже взятым
+            // `villagers`-lock: повторный `lock()` здесь — deadlock.
+            let sleeper = sleepers.contains(&home);
+            let action = validate_poi(dist, exists, occupied, v.sleeping.is_some(), sleeper);
+            if action == PoiValidation::Keep {
+                return;
+            }
+            if action == PoiValidation::EraseAndRelease || !sleeper {
+                self.release_poi(home);
+            }
             v.home = None;
         }
         let types = std::collections::HashSet::from(["minecraft:home".to_owned()]);
@@ -1521,8 +1594,31 @@ impl PlayPlan {
         {
             return Some(step);
         }
+
+        // `MoveToTargetSink` (приоритет 1): пока есть `WALK_TARGET`, житель
+        // только идёт к нему — рабочие поведения не запускаются.
+        if let Some(target) = v.move_target {
+            if let Some(step) = self.walk_step(v, target, 0.14) {
+                return Some(step);
+            }
+            // Цель достигнута или путь застрял (`MoveToTargetSink.stop`).
+            v.move_target = None;
+        }
         // `RunOne` work-пакета: действия выбираются по весам, а ветка
         // завершается по факту (дошёл/собрал), затем перевыбор.
+        // `SetWalkTargetFromBlockMemory(JOB_SITE, 0.4, 9, 100, 1200)`:
+        // приоритет 2 — пока до работы больше 9 блоков, житель только идёт.
+        if v.activity == Activity::Work
+            && v.move_target.is_none()
+            && let Some(site) = v.job_site
+        {
+            let d = (site[0] - v.pos[0].floor() as i32).abs()
+                + (site[1] - v.pos[1].floor() as i32).abs()
+                + (site[2] - v.pos[2].floor() as i32).abs();
+            if d > 9 {
+                v.move_target = self.stand_near(site, v.pos);
+            }
+        }
         if v.activity == Activity::Work {
             match v.work_goal {
                 WorkGoal::Harvest | WorkGoal::UseBonemeal => {
@@ -1538,36 +1634,51 @@ impl PlayPlan {
                             [site[0] as f64 + 0.5, site[1] as f64, site[2] as f64 + 0.5],
                         ) <= 1.73 * 1.73
                     });
-                    // `WorkAtPoi`: пока житель у рабочего блока, поведение
-                    // продолжается; проверка старта — 300 тиков и 1/2.
-                    if at_site {
+                    // `WorkAtPoi.checkExtraStartConditions`: не чаще 300 тиков,
+                    // затем 1/2; `canStillUse` — только дистанция, длительность
+                    // поведения 60 тиков (`Behavior` по умолчанию).
+                    if !at_site {
+                        v.work_active = false;
+                        v.goal_timer = 0;
+                    } else {
                         if !v.work_active {
-                            if rand::random::<u32>().is_multiple_of(2) {
-                                v.work_active = true;
+                            if now >= v.work_cooldown {
                                 v.work_cooldown = now + 300;
-                                if let Some(sound) = work_sound(&v.profession) {
-                                    self.play_sound(
-                                        None,
-                                        &sound,
-                                        crate::sounds::NEUTRAL,
-                                        v.pos,
-                                        1.0,
-                                        1.0,
-                                    );
+                                if rand::random::<u32>().is_multiple_of(2) {
+                                    v.work_active = true;
+                                    v.work_end = now + 60;
+                                    if let Some(sound) = work_sound(&v.profession) {
+                                        self.play_sound(
+                                            None,
+                                            &sound,
+                                            crate::sounds::NEUTRAL,
+                                            v.pos,
+                                            1.0,
+                                            1.0,
+                                        );
+                                    }
+                                    self.try_restock(v, now);
                                 }
-                                self.try_restock(v, now);
-                            } else {
+                            }
+                            if !v.work_active {
+                                // Старт не состоялся — RunOne перевыбирает.
                                 v.goal_timer = 0;
                             }
-                        } else if now >= v.work_cooldown {
-                            // Сессия работы закончилась — RunOne перевыбирает.
+                        } else if now >= v.work_end {
                             v.work_active = false;
                             v.goal_timer = 0;
                         }
+                        // `WorkAtPoi.start`: LOOK_TARGET на рабочий блок.
+                        if let Some(site) = v.job_site {
+                            let target = [
+                                site[0] as f64 + 0.5,
+                                site[1] as f64 + 0.5,
+                                site[2] as f64 + 0.5,
+                            ];
+                            return Some((v.pos, look_yaw(v.pos, target)));
+                        }
                         return Some((v.pos, v.yaw));
                     }
-                    v.work_active = false;
-                    v.goal_timer = 0;
                 }
                 WorkGoal::StrollAroundPoi => {
                     // `StrollAroundPoi(JOB_SITE, 0.4, 4)`: пауза 180.
@@ -1717,18 +1828,35 @@ impl PlayPlan {
                 }
             } else {
                 let branch = weighted_pick(&play_weights(), rand::random::<u32>());
+                // `getPlayPackage` RunOne: каждая ветка — OneShot/Behavior,
+                // после неудачи/завершения RunOne перевыбирает поведение.
                 match branch {
                     Some(IdleGoal::Cat) => {
                         if let Some(step) = self.cat_step(v, cats) {
                             return Some(step);
                         }
+                        v.goal_timer = 0;
                     }
                     Some(IdleGoal::JumpBed) => {
                         if let Some(step) = self.jump_on_bed_step(v) {
                             return Some(step);
                         }
+                        v.goal_timer = 0;
                     }
-                    _ => {}
+                    Some(IdleGoal::Stroll) => {
+                        if v.move_target.is_none() {
+                            v.move_target = self.stroll_point(v.pos, 8);
+                        }
+                        v.goal_timer = 0;
+                    }
+                    Some(IdleGoal::DoNothing) => {
+                        v.branch_timer -= 1;
+                        if v.branch_timer <= 0 {
+                            v.goal_timer = 0;
+                        }
+                        return Some((v.pos, v.yaw));
+                    }
+                    _ => v.goal_timer = 0,
                 }
             }
         }
@@ -2412,6 +2540,42 @@ impl PlayPlan {
         false
     }
 
+    /// `SetLookAndInteract(PLAYER, 4)`: запомнить игрока в 4 блоках и
+    /// смотреть на него (`INTERACTION_TARGET`).
+    fn player_interact_step(
+        &self,
+        v: &mut Villager,
+        players: &[(Uuid, [f64; 3], Option<Stack>)],
+    ) -> Option<f32> {
+        if let Some(target) = v.player_target {
+            let pos = players
+                .iter()
+                .find(|(uuid, _, _)| *uuid == target)
+                .map(|(_, pos, _)| *pos);
+            if let Some(pos) = pos
+                && v.player_timer > 0
+                && crate::mobs::dist2(v.pos, pos) <= 16.0
+                && self.has_line_of_sight(v.pos, pos)
+            {
+                v.player_timer -= 1;
+                return Some(look_yaw(v.pos, pos));
+            }
+            v.player_target = None;
+            return None;
+        }
+        let target = players
+            .iter()
+            .filter(|(_, pos, _)| crate::mobs::dist2(v.pos, *pos) <= 16.0)
+            .filter(|(_, pos, _)| self.has_line_of_sight(v.pos, *pos))
+            .min_by(|a, b| {
+                crate::mobs::dist2(v.pos, a.1).total_cmp(&crate::mobs::dist2(v.pos, b.1))
+            })?;
+        v.player_target = Some(target.0);
+        // `LookAtTargetSink(45, 90)` держит LOOK_TARGET после OneShot.
+        v.player_timer = 45 + (rand::random::<u32>() % 46) as i32;
+        Some(look_yaw(v.pos, target.1))
+    }
+
     /// `getFullLookBehavior`/`getMinimalLookBehavior`: взгляд на ближайшую
     /// сущность (кошка 8, житель 2, игрок 2, ничего 2).
     fn look_step(
@@ -2468,17 +2632,19 @@ impl PlayPlan {
         for (pos, weight) in candidates {
             if r < weight {
                 if pos == v.pos {
+                    // `DoNothing(30, 60)` в look-RunOne.
                     v.look_at = None;
-                    v.look_timer = 20;
+                    v.look_timer = 30 + (rand::random::<u32>() % 31) as i32;
                     return None;
                 }
                 v.look_at = Some(pos);
-                v.look_timer = 20;
+                // `LookAtTargetSink(45, 90)`.
+                v.look_timer = 45 + (rand::random::<u32>() % 46) as i32;
                 return Some(look_yaw(v.pos, pos));
             }
             r -= weight;
         }
-        v.look_timer = 20;
+        v.look_timer = 30 + (rand::random::<u32>() % 31) as i32;
         None
     }
 
@@ -2930,7 +3096,8 @@ impl PlayPlan {
             v.pos[2].floor() as i32,
         ];
         let types = std::collections::HashSet::from(["minecraft:home".to_owned()]);
-        let Some(bed) = self.free_poi(&types, origin, 48) else {
+        let bed = self.free_poi(&types, origin, 48);
+        let Some(bed) = bed else {
             self.hub
                 .send(None, inv::entity_event(self.ids.entity_event, id, 13));
             v.breed_target = None;
@@ -3117,6 +3284,14 @@ impl PlayPlan {
             return None;
         }
         if let Some(site) = v.job_site {
+            // `ValidateNearbyPoi(JOB_SITE)`: дальше 16 — память не трогаем.
+            let dist = crate::mobs::dist2(
+                v.pos,
+                [site[0] as f64 + 0.5, site[1] as f64, site[2] as f64 + 0.5],
+            );
+            if dist > 16.0 * 16.0 {
+                return None;
+            }
             let state = self.block(site)?;
             let kind = poi::of_block(self.state_name(state));
             if kind == Some(v.profession.as_str()) {
@@ -3330,11 +3505,14 @@ impl PlayPlan {
             rest_goal: RestGoal::DoNothing,
             work_active: false,
             work_cooldown: 0,
+            work_end: 0,
             stroll_cooldown: 0,
             farm_actions_left: 0,
             branch_timer: 0,
             look_at: None,
             look_timer: 0,
+            player_target: None,
+            player_timer: 0,
             goal_timer: 0,
             breed_target: None,
             breed_partner: None,
@@ -3539,6 +3717,7 @@ impl PlayPlan {
         let mut gifts: Vec<([f64; 3], [f64; 3], String)> = Vec::new();
         for id in ids {
             let mut villagers = self.sim().villagers.lock().unwrap();
+            let sleepers: Vec<[i32; 3]> = villagers.values().filter_map(|o| o.sleeping).collect();
             let Some(v) = villagers.get_mut(&id) else {
                 continue;
             };
@@ -3612,9 +3791,10 @@ impl PlayPlan {
                 v.goal_timer = 1;
             }
             if v.trader == TraderKind::Villager && !v.no_ai {
+                self.validate_meeting_poi(v);
                 if now - v.last_home_check >= 100 {
                     v.last_home_check = now;
-                    self.update_villager_home(id, v);
+                    self.update_villager_home(id, v, &sleepers);
                 }
                 let bed_gone = v.sleeping.is_some_and(|bed| {
                     self.block(bed)
@@ -3644,6 +3824,13 @@ impl PlayPlan {
                         v.yaw = yaw;
                         moves.push((id, v.pos, yaw, v.sent_pos, true));
                         v.sent_pos = play::quantize(v.pos);
+                    } else if let Some(yaw) = self.player_interact_step(v, &players) {
+                        // `SetLookAndInteract` ниже по приоритету (10), чем
+                        // look-RunOne (5) — срабатывает только в паузе
+                        // `DoNothing`, а не вместо взгляда на кошку/жителя.
+                        v.yaw = yaw;
+                        moves.push((id, v.pos, yaw, v.sent_pos, true));
+                        v.sent_pos = play::quantize(v.pos);
                     }
                 }
                 self.show_trades_step(id, v, &players);
@@ -3657,22 +3844,44 @@ impl PlayPlan {
                         crate::mobs::dist2(**a, v.pos).total_cmp(&crate::mobs::dist2(**b, v.pos))
                     })
                     .copied();
+                // `GiveGiftToHero`: Behavior с таймаутом 100 тиков; пока
+                // герой дальше 5 блоков, житель идёт к нему (0.5, close 5),
+                // смотрит на него и бросает подарок после 20 тиков.
                 match hero {
                     Some(hero_pos) => {
-                        if let Some(wait) = &mut v.gift_wait {
-                            *wait -= 1;
-                            if *wait <= 0 && crate::mobs::dist2(hero_pos, v.pos) <= 5.0 * 5.0 {
-                                gifts.push((v.pos, hero_pos, v.profession.clone()));
-                                v.gift_timer = 600 + (rand::random::<u32>() % 6001) as i32;
+                        if let Some(wait) = v.gift_wait {
+                            v.yaw = look_yaw(v.pos, hero_pos);
+                            if crate::mobs::dist2(hero_pos, v.pos) <= 5.0 * 5.0 {
+                                v.move_target = None;
+                                if wait <= 80 {
+                                    gifts.push((v.pos, hero_pos, v.profession.clone()));
+                                    v.gift_timer = 600 + (rand::random::<u32>() % 6001) as i32;
+                                    v.gift_wait = None;
+                                } else {
+                                    v.gift_wait = Some(wait - 1);
+                                }
+                            } else if wait <= 0 {
+                                // Таймаут поведения — `stop` пересчитывает паузу.
                                 v.gift_wait = None;
+                                v.gift_timer = 600 + (rand::random::<u32>() % 6001) as i32;
+                                v.move_target = None;
+                            } else {
+                                v.move_target = Some([hero_pos[0], v.pos[1], hero_pos[2]]);
+                                v.gift_wait = Some(wait - 1);
                             }
                         } else if v.gift_timer > 0 {
                             v.gift_timer -= 1;
                         } else {
-                            v.gift_wait = Some(20);
+                            v.gift_wait = Some(100);
                         }
                     }
-                    None => v.gift_wait = None,
+                    None => {
+                        if v.gift_wait.is_some() {
+                            // `canStillUse` = герой видим — иначе `stop`.
+                            v.gift_wait = None;
+                            v.gift_timer = 600 + (rand::random::<u32>() % 6001) as i32;
+                        }
+                    }
                 }
             }
         }
@@ -4300,11 +4509,14 @@ impl PlayPlan {
             rest_goal: RestGoal::DoNothing,
             work_active: false,
             work_cooldown: 0,
+            work_end: 0,
             stroll_cooldown: 0,
             farm_actions_left: 0,
             branch_timer: 0,
             look_at: None,
             look_timer: 0,
+            player_target: None,
+            player_timer: 0,
             goal_timer: 0,
             breed_target: None,
             breed_partner: None,
@@ -4634,11 +4846,14 @@ mod tests {
             rest_goal: RestGoal::DoNothing,
             work_active: false,
             work_cooldown: 0,
+            work_end: 0,
             stroll_cooldown: 0,
             farm_actions_left: 0,
             branch_timer: 0,
             look_at: None,
             look_timer: 0,
+            player_target: None,
+            player_timer: 0,
             goal_timer: 0,
             breed_target: None,
             breed_partner: None,
@@ -4766,6 +4981,34 @@ mod tests {
         assert!((look_yaw([0.0; 3], [1.0, 0.0, 0.0]) + 90.0).abs() < 0.001);
         assert!((look_yaw([0.0; 3], [-1.0, 0.0, 0.0]) - 90.0).abs() < 0.001);
         assert!((look_yaw([0.0; 3], [0.0, 0.0, -1.0]).abs() - 180.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn validate_poi_matches_vanilla() {
+        assert_eq!(
+            validate_poi(400.0, true, false, false, false),
+            PoiValidation::Keep
+        );
+        assert_eq!(
+            validate_poi(16.5 * 16.5, false, false, false, false),
+            PoiValidation::Keep
+        );
+        assert_eq!(
+            validate_poi(4.0, false, false, false, false),
+            PoiValidation::EraseAndRelease
+        );
+        assert_eq!(
+            validate_poi(4.0, true, true, false, false),
+            PoiValidation::EraseAndRelease
+        );
+        assert_eq!(
+            validate_poi(4.0, true, true, false, true),
+            PoiValidation::Erase
+        );
+        assert_eq!(
+            validate_poi(4.0, true, true, true, false),
+            PoiValidation::Keep
+        );
     }
 
     #[test]
