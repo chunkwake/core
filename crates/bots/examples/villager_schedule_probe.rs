@@ -59,6 +59,10 @@ struct Probe {
     /// `VillagerProfession.workSound` фермера и признак, что он сыгран.
     work_sound: i32,
     saw_work_sound: bool,
+    /// `Villager.getAmbientSound` (`entity.villager.ambient`) и голосовой pitch.
+    ambient_sound: i32,
+    saw_ambient_sound: bool,
+    ambient_pitch_ok: bool,
     /// `VillagerMakeLove`: event 18 (старт) и 12 (1/35, сердечки).
     saw_love_18: bool,
     saw_love_12: bool,
@@ -244,12 +248,29 @@ impl Probe {
                     }
                 }
             } else if id == self.cb_sound {
-                // `sound`: varint(sound_event_id + 1), source, x/y/z, ...
+                // `sound`: varint(sound_event_id + 1), source, x/y/z,
+                // volume, pitch, seed.
                 let mut r = Reader::new(&body);
                 if let Ok(ev) = r.var_int()
                     && ev == self.work_sound + 1
                 {
                     self.saw_work_sound = true;
+                }
+                let mut r = Reader::new(&body);
+                if let (Ok(ev), Ok(_src), Ok(_x), Ok(_y), Ok(_z), Ok(_vol), Ok(pitch)) = (
+                    r.var_int(),
+                    r.var_int(),
+                    r.i32(),
+                    r.i32(),
+                    r.i32(),
+                    r.f32(),
+                    r.f32(),
+                ) && ev == self.ambient_sound + 1
+                {
+                    self.saw_ambient_sound = true;
+                    if (0.8..1.2).contains(&pitch) {
+                        self.ambient_pitch_ok = true;
+                    }
                 }
             } else if id == self.cb_meta {
                 let mut r = Reader::new(&body);
@@ -579,6 +600,9 @@ async fn main() {
             "minecraft:entity.villager.work_farmer",
         ),
         saw_work_sound: false,
+        ambient_sound: pid("minecraft:sound_event", "minecraft:entity.villager.ambient"),
+        saw_ambient_sound: false,
+        ambient_pitch_ok: false,
         saw_love_18: false,
         saw_love_12: false,
         saw_hurt_13: false,
@@ -1845,6 +1869,18 @@ async fn main() {
     let _ = cat_at;
     assert!(gift, "GiveGiftToHero: подарок не брошен");
     println!("gift: hero received a gift; look at player ok");
+
+    // `Mob.baseTick` + `Villager.getAmbientSound`: ambient-звук
+    // с голосовым pitch взрослого (1.0 ± 0.2).
+    assert!(
+        p.saw_ambient_sound,
+        "нет ambient-звука жителя (entity.villager.ambient)"
+    );
+    assert!(
+        p.ambient_pitch_ok,
+        "ambient-звук без голосового pitch (1.0 ± 0.2)"
+    );
+    println!("ambient: villager ambient sound with voice pitch");
     p.cmd("effect clear @s").await;
 
     println!("villager_schedule_probe: ok");

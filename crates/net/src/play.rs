@@ -6706,6 +6706,7 @@ impl PlayPlan {
             });
         }
         self.hub.players.lock().unwrap().remove(&uuid);
+        self.clear_trading_player(uuid);
         self.forget_stats(uuid);
         self.forget_advancements(uuid);
         self.forget_recipe_book(uuid);
@@ -13935,6 +13936,9 @@ impl PlayPlan {
                             if let Some(p) = self.villager_offers_packet(w.id, it.entity, uuid) {
                                 conn.send(&p).await?;
                             }
+                            // `Villager.setTradingPlayer`: ambient становится
+                            // `entity.villager.trade`, пока окно открыто.
+                            self.set_villager_trading(it.entity, Some(uuid));
                             window = Some(w);
                             self.award_stat(
                                 uuid,
@@ -18025,6 +18029,9 @@ impl PlayPlan {
                 Kind::Stonecutter => back.extend(w.slots[0].take()),
                 Kind::Beacon => back.extend(w.slots[0].take()),
                 Kind::Merchant => {
+                    if let Some(m) = w.merchant {
+                        self.set_villager_trading(m.villager, None);
+                    }
                     back.extend(w.slots[0].take());
                     back.extend(w.slots[1].take());
                 }

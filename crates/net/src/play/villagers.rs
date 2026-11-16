@@ -148,6 +148,17 @@ fn stop_point(from: [f64; 3], target: [f64; 3], close: f64) -> Option<[f64; 3]> 
     Some([target[0] + dx * s, from[1], target[2] + dz * s])
 }
 
+/// `Mob.getVoicePitch`: малыши звучат выше (1.5), взрослые (1.0),
+/// в обоих случаях ±0.2 случайного разброса.
+fn villager_voice_pitch(v: &Villager) -> f32 {
+    voice_pitch(v.age < 0)
+}
+
+fn voice_pitch(baby: bool) -> f32 {
+    let r = rand::random::<f32>() - rand::random::<f32>();
+    r * 0.2 + if baby { 1.5 } else { 1.0 }
+}
+
 fn look_yaw(from: [f64; 3], to: [f64; 3]) -> f32 {
     let dx = to[0] - from[0];
     let dz = to[2] - from[2];
@@ -689,6 +700,10 @@ pub struct Villager {
     pub show_sent: Option<i32>,
     /// `ShowTradesToPlayer.playerItemStack`: предыдущий предмет в руке.
     pub show_held: Option<Stack>,
+    /// `Mob.ambientSoundTime`: -80 после звука/удара, растёт каждый тик.
+    pub ambient_timer: i32,
+    /// `Villager.tradingPlayer`: игрок с открытым окном торговли.
+    pub trading_player: Option<Uuid>,
     /// Узлы текущего шага (`Path.getPreviousNode`/`getNextNode`).
     pub path_from: Option<[i32; 3]>,
     pub path_to: Option<[i32; 3]>,
@@ -1669,7 +1684,7 @@ impl PlayPlan {
                                             crate::sounds::NEUTRAL,
                                             v.pos,
                                             1.0,
-                                            1.0,
+                                            villager_voice_pitch(v),
                                         );
                                     }
                                     self.try_restock(v, now);
@@ -3708,6 +3723,8 @@ impl PlayPlan {
             show_timer: 0,
             show_sent: None,
             show_held: None,
+            ambient_timer: 0,
+            trading_player: None,
             path_from: None,
             path_to: None,
             job_site: None,
@@ -3917,6 +3934,32 @@ impl PlayPlan {
                 }
             }
             v.maybe_decay_gossip(now);
+            // `Mob.baseTick`: `random(1000) < ambientSoundTime++`;
+            // `Villager.getAmbientSound` — ничего во сне,
+            // `entity.villager.trade` при торговле, иначе ambient.
+            if v.health > 0.0 {
+                let roll = i32::try_from(rand::random::<u32>() % 1000).unwrap_or(0);
+                if roll < v.ambient_timer {
+                    v.ambient_timer = -80;
+                    if v.sleeping.is_none() {
+                        let sound = if v.trading_player.is_some() {
+                            "minecraft:entity.villager.trade"
+                        } else {
+                            "minecraft:entity.villager.ambient"
+                        };
+                        self.play_sound(
+                            None,
+                            sound,
+                            crate::sounds::NEUTRAL,
+                            v.pos,
+                            1.0,
+                            villager_voice_pitch(v),
+                        );
+                    }
+                } else {
+                    v.ambient_timer += 1;
+                }
+            }
             if v.age < 0 {
                 v.age += 1;
             } else if v.age > 0 {
@@ -4234,7 +4277,7 @@ impl PlayPlan {
 
     /// `Villager.hurt`: урон жителю, слухи о нападавшем и смерть.
     pub(super) fn hurt_villager(&self, id: i32, amount: f32, attacker: Option<Uuid>) -> bool {
-        let (pos, died) = {
+        let (pos, died, pitch) = {
             let mut villagers = self.sim().villagers.lock().unwrap();
             let Some(v) = villagers.get_mut(&id) else {
                 return false;
@@ -4249,7 +4292,9 @@ impl PlayPlan {
                 v.hurt_until = self.game_time() + 100;
                 v.hurt_from = None;
             }
-            (v.pos, v.health <= 0.0)
+            // `Mob.playHurtSound` -> `resetAmbientSoundTime`.
+            v.ambient_timer = -80;
+            (v.pos, v.health <= 0.0, villager_voice_pitch(v))
         };
         if attacker.is_some() {
             // `Villager.setLastHurtByMob`: event 13 (дым) при ударе игроком.
@@ -4289,7 +4334,7 @@ impl PlayPlan {
             crate::sounds::NEUTRAL,
             pos,
             1.0,
-            1.0,
+            pitch,
         );
         self.emit_vibration(pos, "minecraft:entity_damage");
         if !died {
@@ -4497,6 +4542,22 @@ impl PlayPlan {
             );
         }
         Some((offer, changed))
+    }
+
+    /// `Villager.setTradingPlayer`: открыто/закрыто окно торговли.
+    pub(super) fn set_villager_trading(&self, id: i32, player: Option<Uuid>) {
+        if let Some(v) = self.sim().villagers.lock().unwrap().get_mut(&id) {
+            v.trading_player = player;
+        }
+    }
+
+    /// Отключение игрока: сбросить его торговые окна.
+    pub(super) fn clear_trading_player(&self, uuid: Uuid) {
+        for v in self.sim().villagers.lock().unwrap().values_mut() {
+            if v.trading_player == Some(uuid) {
+                v.trading_player = None;
+            }
+        }
     }
 
     /// Таблица сделок в NBT (`Offers.Recipes`).
@@ -4731,6 +4792,8 @@ impl PlayPlan {
             show_timer: 0,
             show_sent: None,
             show_held: None,
+            ambient_timer: 0,
+            trading_player: None,
             path_from: None,
             path_to: None,
         };
@@ -5069,6 +5132,8 @@ mod tests {
             show_timer: 0,
             show_sent: None,
             show_held: None,
+            ambient_timer: 0,
+            trading_player: None,
             path_from: None,
             path_to: None,
         };
@@ -5348,6 +5413,19 @@ mod tests {
                 assert_eq!(id, 7);
                 assert!((1..=4).contains(&level), "уровень вне 1..=4: {level}");
             }
+        }
+    }
+
+    #[test]
+    fn voice_pitch_matches_baby_and_adult() {
+        // `Mob.getVoicePitch`: малыш 1.5 ± 0.2, взрослый 1.0 ± 0.2.
+        for _ in 0..64 {
+            let p = voice_pitch(false);
+            assert!((0.8..1.2).contains(&p), "adult pitch {p}");
+        }
+        for _ in 0..64 {
+            let p = voice_pitch(true);
+            assert!((1.3..1.7).contains(&p), "baby pitch {p}");
         }
     }
 
