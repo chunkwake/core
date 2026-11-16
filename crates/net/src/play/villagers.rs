@@ -615,6 +615,9 @@ pub struct Villager {
     pub stroll_cooldown: i64,
     pub farm_actions_left: i32,
     pub branch_timer: i32,
+    /// `LOOK_TARGET`: точка взгляда и пауза перед новым выбором.
+    pub look_at: Option<[f64; 3]>,
+    pub look_timer: i32,
     pub goal_timer: i32,
     /// `MemoryModuleType.BREED_TARGET` и время рождения.
     pub breed_target: Option<u128>,
@@ -2409,6 +2412,76 @@ impl PlayPlan {
         false
     }
 
+    /// `getFullLookBehavior`/`getMinimalLookBehavior`: взгляд на ближайшую
+    /// сущность (кошка 8, житель 2, игрок 2, ничего 2).
+    fn look_step(
+        &self,
+        v: &mut Villager,
+        others: &[VillagerRef],
+        players: &[(Uuid, [f64; 3], Option<Stack>)],
+        cats: &[[f64; 3]],
+    ) -> Option<f32> {
+        if v.look_timer > 0 {
+            v.look_timer -= 1;
+            if let Some(target) = v.look_at {
+                if crate::mobs::dist2(v.pos, target) <= 64.0
+                    && self.has_line_of_sight(v.pos, target)
+                {
+                    return Some(look_yaw(v.pos, target));
+                }
+                v.look_at = None;
+            }
+            return None;
+        }
+        let nearest = |points: &[[f64; 3]]| {
+            points
+                .iter()
+                .filter(|p| crate::mobs::dist2(v.pos, **p) <= 64.0)
+                .filter(|p| self.has_line_of_sight(v.pos, **p))
+                .min_by(|a, b| {
+                    crate::mobs::dist2(v.pos, **a).total_cmp(&crate::mobs::dist2(v.pos, **b))
+                })
+                .copied()
+        };
+        let cat = nearest(cats);
+        let villager = others
+            .iter()
+            .filter(|(other, _, _)| *other != -1)
+            .map(|(_, _, p)| *p)
+            .min_by(|a, b| crate::mobs::dist2(v.pos, *a).total_cmp(&crate::mobs::dist2(v.pos, *b)))
+            .filter(|p| crate::mobs::dist2(v.pos, *p) <= 64.0)
+            .filter(|p| self.has_line_of_sight(v.pos, *p));
+        let player = nearest(&players.iter().map(|(_, pos, _)| *pos).collect::<Vec<_>>());
+        let mut candidates: Vec<([f64; 3], u32)> = Vec::new();
+        if let Some(c) = cat {
+            candidates.push((c, 8));
+        }
+        if let Some(c) = villager {
+            candidates.push((c, 2));
+        }
+        if let Some(c) = player {
+            candidates.push((c, 2));
+        }
+        candidates.push((v.pos, 2));
+        let roll = rand::random::<u32>() % candidates.iter().map(|(_, w)| *w).sum::<u32>().max(1);
+        let mut r = roll;
+        for (pos, weight) in candidates {
+            if r < weight {
+                if pos == v.pos {
+                    v.look_at = None;
+                    v.look_timer = 20;
+                    return None;
+                }
+                v.look_at = Some(pos);
+                v.look_timer = 20;
+                return Some(look_yaw(v.pos, pos));
+            }
+            r -= weight;
+        }
+        v.look_timer = 20;
+        None
+    }
+
     /// `InteractWith.of(CAT, 8, INTERACTION_TARGET, speed, 2)`: подойти к
     /// кошке и смотреть на неё.
     fn cat_step(&self, v: &mut Villager, cats: &[[f64; 3]]) -> Option<([f64; 3], f32)> {
@@ -3260,6 +3333,8 @@ impl PlayPlan {
             stroll_cooldown: 0,
             farm_actions_left: 0,
             branch_timer: 0,
+            look_at: None,
+            look_timer: 0,
             goal_timer: 0,
             breed_target: None,
             breed_partner: None,
@@ -3550,8 +3625,8 @@ impl PlayPlan {
                     self.stop_villager_sleep(id, v, &others);
                 }
                 self.close_villager_doors(id, v, &others, &paths);
-                if v.sleeping.is_none()
-                    && let Some((pos, yaw)) = self.villager_ai_step(
+                if v.sleeping.is_none() {
+                    if let Some((pos, yaw)) = self.villager_ai_step(
                         id,
                         v,
                         &others,
@@ -3562,10 +3637,14 @@ impl PlayPlan {
                         &babies,
                         &mut births,
                         &mut gossip,
-                    )
-                {
-                    moves.push((id, pos, yaw, v.sent_pos, !v.airborne));
-                    v.sent_pos = play::quantize(v.pos);
+                    ) {
+                        moves.push((id, pos, yaw, v.sent_pos, !v.airborne));
+                        v.sent_pos = play::quantize(v.pos);
+                    } else if let Some(yaw) = self.look_step(v, &others, &players, &cats) {
+                        v.yaw = yaw;
+                        moves.push((id, v.pos, yaw, v.sent_pos, true));
+                        v.sent_pos = play::quantize(v.pos);
+                    }
                 }
                 self.show_trades_step(id, v, &players);
             }
@@ -3573,6 +3652,7 @@ impl PlayPlan {
                 let hero = heroes
                     .iter()
                     .filter(|p| crate::mobs::dist2(**p, v.pos) <= 8.0 * 8.0)
+                    .filter(|p| self.has_line_of_sight(v.pos, **p))
                     .min_by(|a, b| {
                         crate::mobs::dist2(**a, v.pos).total_cmp(&crate::mobs::dist2(**b, v.pos))
                     })
@@ -4223,6 +4303,8 @@ impl PlayPlan {
             stroll_cooldown: 0,
             farm_actions_left: 0,
             branch_timer: 0,
+            look_at: None,
+            look_timer: 0,
             goal_timer: 0,
             breed_target: None,
             breed_partner: None,
@@ -4555,6 +4637,8 @@ mod tests {
             stroll_cooldown: 0,
             farm_actions_left: 0,
             branch_timer: 0,
+            look_at: None,
+            look_timer: 0,
             goal_timer: 0,
             breed_target: None,
             breed_partner: None,

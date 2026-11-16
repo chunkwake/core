@@ -760,68 +760,6 @@ async fn main() {
     assert!(restocked, "Restock: сделки не обновились");
     println!("restock: offers reset at workstation");
 
-    // `InteractWith` с кошкой: житель подходит и смотрит.
-    p.cmd("time set 11500").await;
-    let a_now = p.a_pos.expect("нет позиции A для кошки");
-    p.cmd(&format!(
-        "summon minecraft:cat {} {} {} {{NoAI:1b,PersistenceRequired:1b}}",
-        a_now[0] + 3.0,
-        a_now[1],
-        a_now[2]
-    ))
-    .await;
-    let mut cat_id = None;
-    let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(5_000) {
-        cat_id = p.cat_id;
-        if cat_id.is_some() {
-            break;
-        }
-        p.pump(200).await;
-    }
-    let cat_id = cat_id.expect("кошка не появилась");
-    let mut played_cat = false;
-    let start = tokio::time::Instant::now();
-    let a_id = p.a_id.expect("нет id A");
-    while start.elapsed() < Duration::from_millis(40_000) {
-        // Житель гуляет: подносим его к неподвижной кошке (NoAI).
-        if let (Some(vpos), Some(cpos)) = (
-            p.all_pos.get(&a_id).copied(),
-            p.all_pos.get(&cat_id).copied(),
-        ) && dist_xz(vpos, cpos) > 6.0
-        {
-            p.cmd(&format!(
-                "tp @e[type=minecraft:villager,x={},y={},z={},distance=..1] {} {} {}",
-                vpos[0],
-                vpos[1],
-                vpos[2],
-                cpos[0] + 2.0,
-                cpos[1],
-                cpos[2]
-            ))
-            .await;
-        }
-        if let (Some(vpos), Some(cpos)) = (p.all_pos.get(&a_id), p.all_pos.get(&cat_id))
-            && dist_xz(*vpos, *cpos) <= 2.5
-        {
-            let want = look_yaw(*vpos, *cpos);
-            let yaw = p.all_yaw.get(&a_id).copied().unwrap_or(0.0);
-            let d = (yaw - want + 180.0).rem_euclid(360.0) - 180.0;
-            if d.abs() < 45.0 {
-                played_cat = true;
-                break;
-            }
-        }
-        p.pump(200).await;
-    }
-    assert!(
-        played_cat,
-        "InteractWith: житель не подошёл к кошке (a_id {a_id}, cat {cat_id}: {:?} / {:?})",
-        p.all_pos.get(&a_id),
-        p.all_pos.get(&cat_id)
-    );
-    println!("cat: villager approached and looked at cat");
-
     // `ShowTradesToPlayer`: игрок рядом держит пшеницу — A показывает
     // изумруд в основной руке; уходит — рука очищается.
     let apos = p.a_pos.expect("нет позиции A");
@@ -1495,6 +1433,121 @@ async fn main() {
     );
     println!("raid: victory celebration fireworks");
     p.cmd("difficulty peaceful").await;
+
+    // Изолированный сценарий: `GiveGiftToHero` (600..6600 тиков, 20 тиков
+    // на поворот, бросок в 5 блоках) и look-пакет.
+    let px = X as f64 - 20.5;
+    let pz = Z as f64 + 30.5;
+    p.cmd(&format!(
+        "fill {} {} {} {} {} {} minecraft:stone",
+        px.floor() as i32 - 4,
+        Y - 1,
+        pz.floor() as i32 - 4,
+        px.floor() as i32 + 4,
+        Y - 1,
+        pz.floor() as i32 + 4
+    ))
+    .await;
+    p.cmd(&format!(
+        "fill {} {} {} {} {} {} minecraft:stone",
+        px.floor() as i32 - 2,
+        Y,
+        pz.floor() as i32 - 2,
+        px.floor() as i32 + 2,
+        Y + 3,
+        pz.floor() as i32 + 2
+    ))
+    .await;
+    p.cmd(&format!(
+        "fill {} {} {} {} {} {} minecraft:air",
+        px.floor() as i32 - 1,
+        Y,
+        pz.floor() as i32 - 1,
+        px.floor() as i32 + 1,
+        Y + 2,
+        pz.floor() as i32 + 1
+    ))
+    .await;
+    let before_gift: HashSet<i32> = p.seen_villagers.iter().copied().collect();
+    p.cmd(&format!(
+        "summon minecraft:villager {px} {Y} {pz} {{PersistenceRequired:1b,VillagerData:{{type:\"minecraft:plains\",profession:\"minecraft:farmer\",level:1}}}}"
+    ))
+    .await;
+    p.cmd(&format!(
+        "summon minecraft:cat {} {Y} {} {{NoAI:1b,PersistenceRequired:1b}}",
+        px - 1.0,
+        pz + 1.0
+    ))
+    .await;
+    p.cmd(&format!("tp @s {} {Y} {}", px + 1.5, pz)).await;
+    p.cmd("effect give @s minecraft:hero_of_the_village 6000 0")
+        .await;
+    let mut gift_v = None;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(5_000) {
+        gift_v = p
+            .seen_villagers
+            .difference(&before_gift)
+            .copied()
+            .find(|id| !before_gift.contains(id));
+        if gift_v.is_some() {
+            break;
+        }
+        p.pump(200).await;
+    }
+    let gift_v = gift_v.expect("житель для подарка не появился");
+    let cat_id = p.cat_id.expect("кошка для look-пакета не появилась");
+    let cat_at = [px - 1.0, f64::from(Y), pz + 1.0];
+    let mut looked_cat = false;
+    let player_at = [px + 1.5, f64::from(Y), pz];
+    let mut looked = false;
+    let mut gift = false;
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(70_000) {
+        if let (Some(pos), Some(cpos)) = (
+            p.all_pos.get(&gift_v).copied(),
+            p.all_pos.get(&cat_id).copied(),
+        ) && dist_xz(pos, cpos) <= 2.5
+            && let Some(yaw) = p.all_yaw.get(&gift_v).copied()
+        {
+            let want = look_yaw(pos, cpos);
+            let d = (yaw - want + 180.0).rem_euclid(360.0) - 180.0;
+            if d.abs() < 45.0 {
+                looked_cat = true;
+            }
+        }
+        if let Some(pos) = p.all_pos.get(&gift_v).copied() {
+            let want = look_yaw(pos, player_at);
+            if let Some(yaw) = p.all_yaw.get(&gift_v).copied() {
+                let d = (yaw - want + 180.0).rem_euclid(360.0) - 180.0;
+                if d.abs() < 45.0 {
+                    looked = true;
+                }
+            }
+        }
+        p.chat.clear();
+        p.cmd(&format!(
+            "execute if entity @e[type=minecraft:item,x={px},y={Y},z={pz},distance=..6] run say GIFT_YES"
+        ))
+        .await;
+        if p.chat.contains("GIFT_YES") {
+            gift = true;
+            break;
+        }
+        p.pump(300).await;
+    }
+    assert!(looked, "look-пакет: житель не смотрел на игрока");
+    assert!(
+        looked_cat,
+        "InteractWith: житель не смотрел на кошку (v {:?}/{:?}, cat {:?})",
+        p.all_pos.get(&gift_v),
+        p.all_yaw.get(&gift_v),
+        p.all_pos.get(&cat_id)
+    );
+    let _ = cat_at;
+    assert!(gift, "GiveGiftToHero: подарок не брошен");
+    println!("gift: hero received a gift; look at player ok");
+    p.cmd("effect clear @s").await;
 
     println!("villager_schedule_probe: ok");
 }
