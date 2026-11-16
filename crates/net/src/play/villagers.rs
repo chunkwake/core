@@ -5287,6 +5287,35 @@ mod tests {
     }
 
     #[test]
+    fn work_sounds_match_professions() {
+        // `VillagerProfession.bootstrap`: `SoundEvents.VILLAGER_WORK_*`
+        // у всех 13 профессий с рабочим блоком; none/nitwit — без звука.
+        for short in [
+            "armorer",
+            "butcher",
+            "cartographer",
+            "cleric",
+            "farmer",
+            "fisherman",
+            "fletcher",
+            "leatherworker",
+            "librarian",
+            "mason",
+            "shepherd",
+            "toolsmith",
+            "weaponsmith",
+        ] {
+            assert_eq!(
+                work_sound(&format!("minecraft:{short}")),
+                Some(format!("minecraft:entity.villager.work_{short}")),
+                "{short}"
+            );
+        }
+        assert_eq!(work_sound("minecraft:none"), None);
+        assert_eq!(work_sound("minecraft:nitwit"), None);
+    }
+
+    #[test]
     fn gift_tables_match_professions() {
         assert_eq!(
             gift_table("minecraft:farmer"),

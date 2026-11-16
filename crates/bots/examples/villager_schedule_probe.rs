@@ -25,6 +25,7 @@ struct Probe {
     cb_teleport: i32,
     cb_equip: i32,
     cb_block_event: i32,
+    cb_sound: i32,
     chat: String,
     /// Колокол рейда и признак удара (`block_event` 1).
     bell: [i32; 3],
@@ -54,6 +55,9 @@ struct Probe {
     a_hand: Option<i32>,
     /// Последняя поза из `set_entity_data` (индекс 6).
     pose: Option<i32>,
+    /// `VillagerProfession.workSound` фермера и признак, что он сыгран.
+    work_sound: i32,
+    saw_work_sound: bool,
     /// Дверь на пути и ID её состояний (`block_update`).
     door: [i32; 3],
     door_open: i32,
@@ -209,6 +213,14 @@ impl Probe {
                         ];
                         self.door_update(at, state);
                     }
+                }
+            } else if id == self.cb_sound {
+                // `sound`: varint(sound_event_id + 1), source, x/y/z, ...
+                let mut r = Reader::new(&body);
+                if let Ok(ev) = r.var_int()
+                    && ev == self.work_sound + 1
+                {
+                    self.saw_work_sound = true;
                 }
             } else if id == self.cb_meta {
                 let mut r = Reader::new(&body);
@@ -466,6 +478,7 @@ async fn main() {
     let cb_teleport = cb("teleport_entity");
     let cb_equip = cb("set_equipment");
     let cb_block_event = cb("block_event");
+    let cb_sound = cb("sound");
     let raider_types: HashSet<i32> = [
         "minecraft:pillager",
         "minecraft:vindicator",
@@ -491,6 +504,7 @@ async fn main() {
         cb_teleport,
         cb_equip,
         cb_block_event,
+        cb_sound,
     ];
     let mut p = Probe {
         c,
@@ -505,6 +519,7 @@ async fn main() {
         cb_teleport,
         cb_equip,
         cb_block_event,
+        cb_sound,
         chat: String::new(),
         bell: [0; 3],
         bell_rang: false,
@@ -527,6 +542,11 @@ async fn main() {
         a_base: [0; 3],
         a_hand: None,
         pose: None,
+        work_sound: pid(
+            "minecraft:sound_event",
+            "minecraft:entity.villager.work_farmer",
+        ),
+        saw_work_sound: false,
         door: [X + 3, Y, Z],
         door_open,
         door_closed,
@@ -742,8 +762,31 @@ async fn main() {
     let mut bonemealed = false;
     let start = tokio::time::Instant::now();
     while start.elapsed() < Duration::from_millis(180_000) {
+        // Держим фермера у грядок: `HarvestFarmland` берёт культуры только
+        // в ±1 блока от жителя, а прогулки RunOne могут увести его далеко.
+        if let Some(pos) = p.a_pos
+            && dist_xz(pos, [X as f64 + 9.5, f64::from(Y), Z as f64 + 0.5]) > 3.0
+        {
+            p.cmd(&format!(
+                "tp @e[tag=probe_a,limit=1] {} {Y} {}",
+                X as f64 + 9.5,
+                Z as f64 + 0.5
+            ))
+            .await;
+        }
         if !harvested {
             harvested = p.block_is(w1, "minecraft:air").await;
+        }
+        // Сбор создаёт дроп: даже если фермер сразу посадил обратно
+        // (блок снова wheat), предмет уже лежит на земле.
+        if !harvested {
+            p.chat.clear();
+            p.cmd(&format!(
+                "execute if entity @e[type=minecraft:item,x={},y={},z={},distance=..3] run say CROP_DROP",
+                w1[0], w1[1], w1[2]
+            ))
+            .await;
+            harvested = p.chat.contains("CROP_DROP");
         }
         if !planted {
             planted =
@@ -844,6 +887,17 @@ async fn main() {
     }
     assert!(restocked, "Restock: сделки не обновились");
     println!("restock: offers reset at workstation");
+
+    // `Villager.playWorkSound` → `SoundEvents.VILLAGER_WORK_FARMER`.
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(15_000) && !p.saw_work_sound {
+        p.pump(200).await;
+    }
+    assert!(
+        p.saw_work_sound,
+        "не было звука работы фермера (entity.villager.work_farmer)"
+    );
+    println!("sound: work_farmer played");
 
     // `ShowTradesToPlayer`: игрок рядом держит пшеницу — A показывает
     // предметы сделок; два оффера → смена раз в 40 тиков, `lookTime` 900.
@@ -1161,7 +1215,7 @@ async fn main() {
     let bed_head = [X as f64 + 8.5, f64::from(Y), Z as f64 - 2.5];
     let mut at_bed = None;
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(15_000) {
+    while start.elapsed() < Duration::from_millis(30_000) {
         if let Some(pos) = p.a_pos {
             at_bed = Some(pos);
             if dist_xz(pos, bed_foot).min(dist_xz(pos, bed_head)) <= 2.0 {
@@ -1178,7 +1232,7 @@ async fn main() {
     // Сон: поза SLEEPING, кровать занята, позиция на кровати.
     let mut slept = None;
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(8_000) {
+    while start.elapsed() < Duration::from_millis(12_000) {
         if p.pose == Some(2)
             && p.block_is([X + 8, Y, Z - 4], "minecraft:red_bed[occupied=true]")
                 .await
@@ -1332,11 +1386,31 @@ async fn main() {
         .await;
     }
     p.cmd("time set 1000").await;
+    // Метки на родителей: держим пару вместе, иначе `VillagerMakeLove`
+    // может не оказаться в 2.25 блоках на момент истечения 275-325 тиков.
+    for (x, tag) in [(bx, "probe_p1"), (bx + 2.0, "probe_p2")] {
+        p.cmd(&format!(
+            "tag @e[type=minecraft:villager,x={x},y={Y},z={bz},distance=..1] add {tag}"
+        ))
+        .await;
+    }
 
     let before: HashSet<i32> = p.seen_villagers.iter().copied().collect();
     let mut born = None;
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(45_000) {
+    let mut tick = 0;
+    while start.elapsed() < Duration::from_millis(90_000) {
+        // Раз в ~5 с возвращаем пару в исходные точки (2 блока друг от друга).
+        if tick % 15 == 0 {
+            p.cmd(&format!("tp @e[tag=probe_p1,limit=1] {} {Y} {bz}", bx))
+                .await;
+            p.cmd(&format!(
+                "tp @e[tag=probe_p2,limit=1] {} {Y} {bz}",
+                bx + 2.0
+            ))
+            .await;
+        }
+        tick += 1;
         if let Some(child) = p
             .seen_villagers
             .difference(&before)
