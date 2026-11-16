@@ -116,6 +116,19 @@ impl PlayPlan {
                 e.pos = pos;
                 e.vel[1] = 0.0;
                 (e.pos, 0.0, 0.0)
+            } else if let Some(v) = self.sim().villagers.lock().unwrap().get_mut(&id) {
+                // `/tp` должен двигать и жителей (`TeleportCommand`):
+                // иначе сценарные телепорты в пробах молча не срабатывают.
+                v.pos = pos;
+                if rotation {
+                    v.yaw = yaw;
+                }
+                v.move_target = None;
+                v.path_from = None;
+                v.path_to = None;
+                v.airborne = false;
+                v.sent_pos = chunkwake_protocol::play::quantize(pos);
+                (v.pos, v.yaw, 0.0)
             } else {
                 return false;
             }

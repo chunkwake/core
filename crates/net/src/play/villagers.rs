@@ -136,6 +136,18 @@ fn panic_threat(
 }
 
 /// `Mth.atan2`-подобный yaw взгляда из `from` в `to`.
+/// Точка остановки в `close` блоках от цели (`WalkTarget.closeEnoughDist`).
+fn stop_point(from: [f64; 3], target: [f64; 3], close: f64) -> Option<[f64; 3]> {
+    let dx = from[0] - target[0];
+    let dz = from[2] - target[2];
+    let d = (dx * dx + dz * dz).sqrt();
+    if d <= close + 0.5 {
+        return None;
+    }
+    let s = (d - close) / d;
+    Some([target[0] + dx * s, from[1], target[2] + dz * s])
+}
+
 fn look_yaw(from: [f64; 3], to: [f64; 3]) -> f32 {
     let dx = to[0] - from[0];
     let dz = to[2] - from[2];
@@ -381,6 +393,7 @@ fn play_weights() -> Vec<(IdleGoal, u32)> {
         (IdleGoal::InteractVillager, 2),
         (IdleGoal::Cat, 1),
         (IdleGoal::Stroll, 1),
+        (IdleGoal::Look, 1),
         (IdleGoal::JumpBed, 2),
         (IdleGoal::DoNothing, 2),
     ]
@@ -1849,6 +1862,14 @@ impl PlayPlan {
                         }
                         v.goal_timer = 0;
                     }
+                    Some(IdleGoal::Look) => {
+                        if let Some(target) = v.look_at
+                            && v.move_target.is_none()
+                        {
+                            v.move_target = stop_point(v.pos, target, 2.0);
+                        }
+                        v.goal_timer = 0;
+                    }
                     Some(IdleGoal::DoNothing) => {
                         v.branch_timer -= 1;
                         if v.branch_timer <= 0 {
@@ -1884,6 +1905,52 @@ impl PlayPlan {
                 IdleGoal::Stroll => {
                     if v.move_target.is_none() {
                         v.move_target = self.stroll_point(v.pos, 8);
+                    }
+                    v.goal_timer = 0;
+                }
+                IdleGoal::InteractVillager => {
+                    // `InteractWith(VILLAGER, 8, INTERACTION_TARGET, speed, 2)`.
+                    let target = if let Some(uuid) = v.interaction_target {
+                        others
+                            .iter()
+                            .find(|(other, u, _)| *other != id && *u == uuid)
+                            .map(|(_, _, pos)| *pos)
+                    } else {
+                        let found = others
+                            .iter()
+                            .filter(|(other, _, pos)| {
+                                *other != id
+                                    && crate::mobs::dist2(v.pos, *pos) <= 64.0
+                                    && self.has_line_of_sight(v.pos, *pos)
+                            })
+                            .min_by(|a, b| {
+                                crate::mobs::dist2(v.pos, a.2)
+                                    .total_cmp(&crate::mobs::dist2(v.pos, b.2))
+                            });
+                        if let Some((_, uuid, pos)) = found {
+                            v.interaction_target = Some(*uuid);
+                            Some(*pos)
+                        } else {
+                            None
+                        }
+                    };
+                    match target.and_then(|pos| stop_point(v.pos, pos, 2.0).map(|step| (step, pos)))
+                    {
+                        Some((step, pos)) if crate::mobs::dist2(v.pos, pos) > 4.0 => {
+                            v.move_target = Some(step);
+                        }
+                        _ => {
+                            v.interaction_target = None;
+                            v.goal_timer = 0;
+                        }
+                    }
+                }
+                IdleGoal::Look => {
+                    // `SetWalkTargetFromLookTarget(speed, 2)`.
+                    if let Some(target) = v.look_at
+                        && v.move_target.is_none()
+                    {
+                        v.move_target = stop_point(v.pos, target, 2.0);
                     }
                     v.goal_timer = 0;
                 }
@@ -1930,10 +1997,13 @@ impl PlayPlan {
                 if let Some(step) = self.socialize_step(id, v, others, profiles, gossip) {
                     return Some(step);
                 }
-                if v.move_target.is_none() {
-                    v.move_target = v
-                        .meeting_point
-                        .and_then(|bell| self.stand_near(bell, v.pos));
+                // `SetWalkTargetFromBlockMemory(MEETING_POINT, 0.4, 6, 100, 200)`:
+                // ближе 6 блоков цель не ставится, `closeEnoughDist` — 6.
+                if v.move_target.is_none()
+                    && let Some(bell) = v.meeting_point
+                {
+                    let center = [bell[0] as f64 + 0.5, v.pos[1], bell[2] as f64 + 0.5];
+                    v.move_target = stop_point(v.pos, center, 6.0);
                 }
                 v.move_target
             }
@@ -3186,8 +3256,12 @@ impl PlayPlan {
                 v.interaction_target = None;
                 return None;
             }
-            if crate::mobs::dist2(v.pos, *pos) > 1.2 * 1.2 {
-                return self.walk_step(v, [pos[0], v.pos[1], pos[2]], 0.14);
+            // `TradeWithVillager.tick`: сплетни на `distanceToSqr <= 5.0`
+            // (≈2.24 блока), иначе идём к партнёру (0.5, close 2).
+            if crate::mobs::dist2(v.pos, *pos) > 5.0
+                && let Some(step) = stop_point(v.pos, *pos, 2.0)
+            {
+                return self.walk_step(v, step, 0.5);
             }
             // `TradeWithVillager.tick`: смотреть друг на друга, обмениваться
             // слухами (`Villager.gossip`) и едой/requestedItems.
@@ -3214,8 +3288,8 @@ impl PlayPlan {
             .iter()
             .filter(|(other, _, _)| *other != id)
             .filter(|(_, _, pos)| {
-                crate::mobs::dist2(v.pos, *pos) <= 32.0 * 32.0
-                    && self.has_line_of_sight(v.pos, *pos)
+                // `SocializeAtBell`: `distanceToSqr <= 32.0` (≈5.66 блока).
+                crate::mobs::dist2(v.pos, *pos) <= 32.0 && self.has_line_of_sight(v.pos, *pos)
             })
             .min_by(|a, b| {
                 crate::mobs::dist2(v.pos, a.2).total_cmp(&crate::mobs::dist2(v.pos, b.2))
@@ -3226,7 +3300,7 @@ impl PlayPlan {
             v.yaw = yaw;
             Some((v.pos, yaw))
         } else {
-            self.walk_step(v, *pos, 0.14)
+            self.walk_step(v, *pos, 0.3)
         }
     }
 
@@ -5032,7 +5106,10 @@ mod tests {
         let other = work_weights("minecraft:librarian");
         assert_eq!(other.iter().map(|(_, w)| w).sum::<u32>(), 31);
         assert_eq!(idle_weights().iter().map(|(_, w)| w).sum::<u32>(), 8);
-        assert_eq!(play_weights().iter().map(|(_, w)| w).sum::<u32>(), 8);
+        // play-RunOne: InteractVillager 2, Cat 1, Stroll 1, Look 1,
+        // JumpBed 2, DoNothing 2 (getIdlePackage/getPlayPackage).
+        assert_eq!(play_weights().iter().map(|(_, w)| w).sum::<u32>(), 9);
+        assert_eq!(weighted_pick(&play_weights(), 4), Some(IdleGoal::Look));
         assert_eq!(
             weighted_pick(&idle_weights(), 0),
             Some(IdleGoal::InteractVillager)

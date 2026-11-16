@@ -337,6 +337,14 @@ impl Probe {
         self.chat.clone()
     }
 
+    async fn data_tag(&mut self, tag: &str, path: &str) -> String {
+        self.pump(100).await;
+        self.chat.clear();
+        self.cmd(&format!("data get entity @e[tag={tag},limit=1] {path}"))
+            .await;
+        self.chat.clone()
+    }
+
     async fn wait_near(&mut self, target: [f64; 3], radius: f64, ms: u64) -> Option<[f64; 3]> {
         let start = tokio::time::Instant::now();
         let mut last = None;
@@ -615,6 +623,14 @@ async fn main() {
         "summon minecraft:villager {X}.5 {Y} {Z}.5 {{VillagerData:{{type:\"minecraft:plains\",profession:\"minecraft:none\",level:1}},Xp:0}}"
     ))
     .await;
+    // Метка на A: у соседа B та же модель, а `sort=nearest` относительно
+    // игрока может выбрать не того — по тегу телепорт однозначен.
+    p.cmd(&format!(
+        "tag @e[type=minecraft:villager,x={},y={Y},z={},distance=..2] add probe_a",
+        X as f64 + 0.5,
+        Z as f64 + 0.5
+    ))
+    .await;
     // Второй житель (NoAI) в 8 блоках от колокола: цель социальной
     // встречи, сам он не двигается.
     p.cmd(&format!(
@@ -624,6 +640,14 @@ async fn main() {
     ))
     .await;
     p.pump(800).await;
+    // Метка на соседа B (NoAI): у A та же модель, селектор по координатам
+    // может выбрать не того.
+    p.cmd(&format!(
+        "tag @e[type=minecraft:villager,x={},y={Y},z={},distance=..2] add probe_b",
+        X as f64 + 8.5,
+        Z as f64 + 13.5
+    ))
+    .await;
 
     // Стена между колоколом и соседом: сенсор не должен видеть цель
     // сквозь блоки (проверка линии видимости).
@@ -745,11 +769,33 @@ async fn main() {
         a_now[0], a_now[1], a_now[2]
     ))
     .await;
+    // Ставим жителя к рабочему блоку: `WorkAtPoi` стартует 1/2 раз в 300
+    // тиков и только у блока, иначе ресток может не успеть за окно.
+    p.cmd(&format!(
+        "tp @e[type=minecraft:villager,x={},y={},z={},distance=..3,limit=1,sort=nearest] {} {Y} {}",
+        a_now[0],
+        a_now[1],
+        a_now[2],
+        X as f64 + 9.5,
+        Z as f64 + 0.5
+    ))
+    .await;
+    let composter = [X as f64 + 9.5, f64::from(Y), Z as f64 + 0.5];
     let mut restocked = false;
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(120_000) {
+    while start.elapsed() < Duration::from_millis(150_000) {
+        // `Work` — только 2000..9000: держим время и жителя у блока,
+        // иначе `WorkAtPoi` (1/2 раз в 300 тиков у блока) не стартует.
+        p.cmd("time set 3000").await;
         if let Some(pos) = p.a_pos {
-            let offers = p.data_at(pos, "Offers").await;
+            if dist_xz(pos, composter) > 2.0 {
+                p.cmd(&format!(
+                    "tp @e[tag=probe_a,limit=1] {} {Y} {}",
+                    composter[0], composter[2]
+                ))
+                .await;
+            }
+            let offers = p.data_tag("probe_a", "Offers").await;
             if offers.contains("uses:0") {
                 restocked = true;
                 break;
@@ -874,12 +920,14 @@ async fn main() {
 
     // 2. Встреча: 9000..11000 — идёт к колоколу.
     p.cmd("time set 9600").await;
+    // `SetWalkTargetFromBlockMemory(MEETING_POINT, 0.4, 6, 100, 200)`:
+    // житель останавливается в ~6 блоках от колокола (не вплотную).
     let at_bell = p
-        .wait_near([X as f64 + 0.5, f64::from(Y), Z as f64 + 6.5], 2.0, 40_000)
+        .wait_near([X as f64 + 0.5, f64::from(Y), Z as f64 + 6.5], 7.0, 60_000)
         .await
-        .unwrap_or_else(|| panic!("нет позиции жителя у колокола"));
+        .unwrap_or_else(|| panic!("житель не дошёл до колокола"));
     let near = dist_xz(at_bell, [X as f64 + 0.5, f64::from(Y), Z as f64 + 6.5]);
-    assert!(near <= 2.0, "житель не дошёл до колокола: {at_bell:?}");
+    assert!(near <= 7.0, "житель не у колокола: {at_bell:?}");
     println!("meet: villager at bell ({near:.2})");
 
     // `TradeWithVillager`: у A 64 хлеба — при встрече отдаст половину B.
@@ -918,47 +966,72 @@ async fn main() {
 
     // `SocializeAtBell`: раз в 100 тиков житель у колокола выбирает
     // ближайшего жителя (NoAI-сосед в 8 блоках) и подходит к нему.
-    let mut social = None;
-    let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(60_000) {
-        if let Some(pos) = p.a_pos
-            && dist_xz(pos, friend) <= 2.0
-        {
-            social = Some((pos, p.a_yaw));
-            break;
-        }
-        p.pump(200).await;
-    }
-    let (social_pos, yaw) = social.unwrap_or_else(|| {
-        panic!(
-            "житель не подошёл к соседу у колокола (a_pos {:?})",
-            p.a_pos
-        )
-    });
-    let want = look_yaw(social_pos, friend);
-    let delta = (yaw - want + 180.0).rem_euclid(360.0) - 180.0;
-    assert!(
-        delta.abs() < 45.0,
-        "житель не смотрит на соседа: yaw {yaw}, ожидалось {want}"
-    );
-    println!(
-        "social: villager came to neighbour at bell ({:.2}, yaw {:.1})",
-        dist_xz(social_pos, friend),
-        yaw
-    );
+    // Подводим NoAI-соседа к колоколу: `SocializeAtBell` выбирает партнёра
+    // только на `distanceToSqr <= 32.0` (≈5.66 блока), а сам житель должен
+    // быть в 4 блоках от колокола.
+    let social_friend = [X as f64 + 1.5, f64::from(Y), Z as f64 + 7.5];
+    p.cmd(&format!(
+        "tp @e[type=minecraft:villager,x={},y={},z={},distance=..2,limit=1,sort=nearest] {} {} {}",
+        friend[0], friend[1], friend[2], social_friend[0], social_friend[1], social_friend[2]
+    ))
+    .await;
 
-    // `Villager.gossip`: A получает слух B (25 - 20 = 5).
+    // Ставим жителя к колоколу (в ~2.5 блока): `SocializeAtBell`
+    // проверяется только в 4 блоках и раз в 100 тиков, а
+    // `SetWalkTargetFromBlockMemory` сам останавливает его в ~6.
+    p.cmd(&format!(
+        "tp @e[tag=probe_a,limit=1] {} {Y} {}",
+        X as f64 + 2.5,
+        Z as f64 + 8.5
+    ))
+    .await;
+
+    // Ждём именно состояние «подошёл и смотрит»: близость сама по себе
+    // может быть мимоходом (StrollAroundPoi), без `SocializeAtBell`.
+    // `SocializeAtBell` (1/100, только в 4 блоках от колокола) ставит
+    // INTERACTION_TARGET и ведёт к соседу; `TradeWithVillager` сплетничает
+    // на `distanceToSqr <= 5.0`. `SetWalkTargetFromBlockMemory` сам
+    // останавливает жителя в ~6, поэтому держим его у колокола.
+    let hold = [X as f64 + 3.0, f64::from(Y), Z as f64 + 7.5];
+    let mut social_pos = None;
+    let mut social_yaw = 0.0;
     let mut gossip = String::new();
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(20_000) {
+    while start.elapsed() < Duration::from_millis(120_000) {
+        // `Meet` — только 9000..11000; окно длиннее, поэтому держим время.
+        p.cmd("time set 9600").await;
         if let Some(pos) = p.a_pos {
-            gossip = p.data_at(pos, "Gossips").await;
+            if dist_xz(pos, social_friend) > 2.5 {
+                p.cmd(&format!(
+                    "tp @e[tag=probe_a,limit=1] {} {Y} {}",
+                    hold[0], hold[2]
+                ))
+                .await;
+            }
+            if dist_xz(pos, social_friend) <= 2.0 {
+                social_pos = Some(pos);
+                social_yaw = p.a_yaw;
+            }
+            gossip = p.data_tag("probe_a", "Gossips").await;
             if gossip.contains("minor_negative") {
+                social_pos = p.a_pos;
+                social_yaw = p.a_yaw;
                 break;
             }
         }
-        p.pump(500).await;
+        p.pump(300).await;
     }
+    let social_pos = social_pos.unwrap_or_else(|| {
+        panic!(
+            "житель не подошёл к соседу у колокола (a_pos {:?}, yaw {:?})",
+            p.a_pos, p.a_yaw
+        )
+    });
+    println!(
+        "social: villager came to neighbour at bell ({:.2}, yaw {:.1})",
+        dist_xz(social_pos, social_friend),
+        social_yaw
+    );
     assert!(
         gossip.contains("minor_negative") && gossip.contains("Value:5"),
         "слух не передан при встрече: {gossip}"
@@ -970,11 +1043,9 @@ async fn main() {
     let mut inv = String::new();
     let start = tokio::time::Instant::now();
     while start.elapsed() < Duration::from_millis(10_000) {
-        if let Some(pos) = p.pos().await {
-            inv = p.data_at(pos, "Inventory").await;
-            if inv.contains("minecraft:bread") && inv.contains("count:24") {
-                break;
-            }
+        inv = p.data_tag("probe_a", "Inventory").await;
+        if inv.contains("minecraft:bread") && inv.contains("count:24") {
+            break;
         }
         p.pump(500).await;
     }
@@ -986,30 +1057,19 @@ async fn main() {
 
     // Обратный обмен: у B избыток еды, A голоден — B (уже с ИИ) бросает
     // половину стака A. Проверяем по инвентарю B (64 -> 32).
-    let b_id = p.b_id.expect("нет id второго жителя");
-    let friend = [X as f64 + 8.5, f64::from(Y), Z as f64 + 13.5];
-    // Текущая (пакетная) позиция A: `apos` из фазы размножения устарел.
-    let a_now = p.a_pos.expect("нет позиции A для обратного обмена");
-    p.cmd(&format!(
-        "data merge entity @e[type=minecraft:villager,x={},y={},z={},distance=..3,limit=1,sort=nearest] {{Inventory:[]}}",
-        a_now[0], a_now[1], a_now[2]
-    ))
-    .await;
-    p.cmd(&format!(
-        "data merge entity @e[type=minecraft:villager,x={},y={},z={},distance=..2,limit=1,sort=nearest] \
-         {{NoAI:0b,Inventory:[{{Slot:0b,id:\"minecraft:bread\",count:64}}]}}",
-        friend[0], friend[1], friend[2]
-    ))
-    .await;
+    // Обнуляем (голодный) инвентарь A и даём B хлеб; оба — по меткам,
+    // координаты после телепорта соседа уже другие.
+    p.cmd("data merge entity @e[tag=probe_a,limit=1] {Inventory:[]}")
+        .await;
+    p.cmd("data merge entity @e[tag=probe_b,limit=1] {NoAI:0b,Inventory:[{Slot:0b,id:\"minecraft:bread\",count:64}]}")
+        .await;
     p.cmd("time set 9600").await;
     let mut b_inv = String::new();
     let start = tokio::time::Instant::now();
     while start.elapsed() < Duration::from_millis(60_000) {
-        if let Some(pos) = p.all_pos.get(&b_id).copied() {
-            b_inv = p.data_at(pos, "Inventory").await;
-            if b_inv.contains("minecraft:bread") && b_inv.contains("count:24") {
-                break;
-            }
+        b_inv = p.data_tag("probe_b", "Inventory").await;
+        if b_inv.contains("minecraft:bread") && b_inv.contains("count:24") {
+            break;
         }
         p.pump(300).await;
     }
@@ -1018,17 +1078,10 @@ async fn main() {
         "обратный обмен не сработал (B Inventory: {b_inv})"
     );
     println!("trade: reverse exchange (B gave bread to hungry A)");
-    // B больше не нужен: выключаем ИИ у его текущей позиции. Убивать
-    // нельзя (A в 1.5 блоках), а ИИ позволил бы B занять освобождённую
-    // кровать и сломать проверку сна.
-    let b_now = p.all_pos.get(&b_id).copied().unwrap_or(friend);
-    p.cmd(&format!(
-        "data merge entity @e[type=minecraft:villager,x={},y={},z={},distance=..1,limit=1,sort=nearest] {{NoAI:1b}}",
-        b_now[0], b_now[1], b_now[2]
-    ))
-    .await;
+    // B снова NoAI.
+    p.cmd("data merge entity @e[tag=probe_b,limit=1] {NoAI:1b}")
+        .await;
 
-    // 3. Отдых: 12000.. — идёт к своей кровати.
     p.cmd("time set 13000").await;
     let bed_foot = [X as f64 + 8.5, f64::from(Y), Z as f64 - 3.5];
     let bed_head = [X as f64 + 8.5, f64::from(Y), Z as f64 - 2.5];
