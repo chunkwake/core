@@ -2802,24 +2802,6 @@ impl PlayPlan {
         }
     }
 
-    /// `LootTable` культур (`blocks/wheat|carrots|potatoes|beetroots`).
-    fn crop_drops(name: &str) -> Vec<(&'static str, i32)> {
-        let seeds = 1 + (rand::random::<u32>() % 3) as i32;
-        let roots = 1 + (rand::random::<u32>() % 4) as i32;
-        match name {
-            "minecraft:wheat" => vec![("minecraft:wheat", 1), ("minecraft:wheat_seeds", seeds)],
-            "minecraft:carrots" => vec![("minecraft:carrots", roots)],
-            "minecraft:potatoes" => vec![("minecraft:potatoes", roots)],
-            "minecraft:beetroots" => vec![
-                ("minecraft:beetroot", 1),
-                ("minecraft:beetroot_seeds", seeds),
-            ],
-            "minecraft:torchflower_crop" => vec![("minecraft:torchflower_seeds", 1)],
-            "minecraft:pitcher_crop" => vec![("minecraft:pitcher_pod", 1)],
-            _ => Vec::new(),
-        }
-    }
-
     /// Максимальный возраст ванильных `CropBlock`.
     fn crop_max_age(name: &str) -> Option<i32> {
         Some(match name {
@@ -2977,9 +2959,27 @@ impl PlayPlan {
                 }
                 self.break_drops(p);
                 self.set_block(p, 0);
-                // `destroyBlock(..., drop)`: лут культуры (урожай + семена).
-                for (item, count) in Self::crop_drops(name) {
-                    if let Some(id) = self.item_id(item) {
+                // `destroyBlock(..., drop)`: настоящая block
+                // loot-таблица (`minecraft:blocks/wheat` и т. п.).
+                let short = name.strip_prefix("minecraft:").unwrap_or(name);
+                let table = format!("minecraft:blocks/{short}");
+                let age_s = age.to_string();
+                let prop = |q: &str| (q == "age").then(|| age_s.clone());
+                let level = |_: &str| 0;
+                let ctx = crate::loot::Ctx {
+                    prop: &prop,
+                    table: &table,
+                    block: name,
+                    tool: None,
+                    level: &level,
+                    entity: None,
+                    killed_by_player: false,
+                    smelt: &|_| None,
+                };
+                for (item, count) in
+                    crate::loot::roll(&self.survival.loot, &ctx, &mut rand::thread_rng())
+                {
+                    if let Some(id) = self.item_id(&item) {
                         self.drop_item(
                             [p[0] as f64 + 0.5, p[1] as f64 + 0.5, p[2] as f64 + 0.5],
                             [0.0, 0.2, 0.0],
@@ -4104,7 +4104,8 @@ impl PlayPlan {
             let smelt = |_: &str| None;
             let ctx = crate::loot::Ctx {
                 prop: &no_prop,
-                block: &table,
+                table: &table,
+                block: "",
                 tool: None,
                 level: &level,
                 entity: None,

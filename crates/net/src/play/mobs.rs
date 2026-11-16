@@ -1853,7 +1853,8 @@ impl PlayPlan {
         let no_prop = |_: &str| None;
         let ctx = crate::loot::Ctx {
             prop: &no_prop,
-            block: m.species.loot(),
+            table: m.species.loot(),
+            block: "",
             tool,
             level: &level,
             entity: Some(&props),

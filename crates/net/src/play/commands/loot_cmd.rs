@@ -328,7 +328,8 @@ fn roll_table(ctx: &Context<'_>, source: &Source, table: &str) -> Result<Vec<Sta
     let smelt = |_: &str| None;
     let loot_ctx = Ctx {
         prop: &prop,
-        block: &name,
+        table: &name,
+        block: "",
         tool: None,
         level: &level,
         entity: None,

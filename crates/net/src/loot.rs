@@ -15,6 +15,9 @@ use serde_json::Value;
 pub struct Ctx<'a> {
     /// Свойство сломанного блока (`age`, `type` и т. п.).
     pub prop: &'a dyn Fn(&str) -> Option<String>,
+    /// Имя лут-таблицы (`minecraft:blocks/wheat` и т. п.).
+    pub table: &'a str,
+    /// ID блока (`match_block`), не имя таблицы.
     pub block: &'a str,
     /// Имя предмета в руке.
     pub tool: Option<&'a str>,
@@ -33,7 +36,7 @@ pub type Props<'a> = dyn Fn(&str) -> Option<String> + 'a;
 /// Предметы (имя, количество) из таблицы блока `block`.
 pub fn roll(loot: &BlockLoot, c: &Ctx, rng: &mut impl Rng) -> Vec<(String, i32)> {
     let mut out = Vec::new();
-    roll_table(loot, c, c.block, rng, &mut out, 0);
+    roll_table(loot, c, c.table, rng, &mut out, 0);
     out
 }
 
@@ -478,6 +481,7 @@ mod tests {
             &loot(),
             &Ctx {
                 prop: &prop,
+                table: block,
                 block,
                 tool: Some("minecraft:diamond_pickaxe"),
                 level: &level,
@@ -529,6 +533,7 @@ mod tests {
                 &l,
                 &Ctx {
                     prop: &|_| None,
+                    table: "minecraft:entities/sheep",
                     block: "minecraft:entities/sheep",
                     tool: None,
                     level: &level,
@@ -571,6 +576,7 @@ mod tests {
                 &l,
                 &Ctx {
                     prop: &|_| None,
+                    table: "minecraft:entities/slime",
                     block: "minecraft:entities/slime",
                     tool: None,
                     level: &|_| 0,

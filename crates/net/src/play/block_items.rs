@@ -88,7 +88,8 @@ impl PlayPlan {
         let level = |_: &str| 0;
         let ctx = crate::loot::Ctx {
             prop: &none,
-            block: "minecraft:harvest/beehive",
+            table: "minecraft:harvest/beehive",
+            block: "minecraft:beehive",
             tool: Some("minecraft:shears"),
             level: &level,
             entity: None,

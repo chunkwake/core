@@ -16885,8 +16885,13 @@ impl PlayPlan {
                 chunkwake_protocol::components::stack_level(s.extra, n)
             })
         };
+        let table = format!(
+            "minecraft:blocks/{}",
+            block.strip_prefix("minecraft:").unwrap_or(block)
+        );
         let ctx = crate::loot::Ctx {
             prop: &prop,
+            table: &table,
             block,
             tool: held.map(|s| self.item_name(s.item)),
             level: &level,
@@ -19103,7 +19108,8 @@ impl PlayPlan {
                 let level = |_: &str| 0;
                 let ctx = crate::loot::Ctx {
                     prop: &none,
-                    block: table,
+                    table,
+                    block: "",
                     tool: Some(&item),
                     level: &level,
                     entity: None,
@@ -21507,7 +21513,8 @@ impl PlayPlan {
             .unwrap_or(0);
         let ctx = crate::loot::Ctx {
             prop: &|_| None,
-            block: &table,
+            table: &table,
+            block: "",
             tool: None,
             level: &|_| 0,
             entity: None,
