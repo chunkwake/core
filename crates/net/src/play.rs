@@ -13692,6 +13692,9 @@ impl PlayPlan {
                             w.slots[2] = w
                                 .merchant
                                 .and_then(|m| self.merchant_result(m, &first));
+                            if let Some(m) = w.merchant {
+                                self.notify_trade_updated(m.villager, w.slots[2].is_some());
+                            }
                             let wid = w.id;
                             self.send_window(conn, &mut state.inv, Some(&*w), wid).await?;
                         }
@@ -17506,6 +17509,12 @@ impl PlayPlan {
             }
         }
         fill(&mut view);
+        // `AbstractVillager.notifyTradeUpdated` на смену слотов.
+        if kind == Kind::Merchant
+            && let Some(m) = merchant
+        {
+            self.notify_trade_updated(m.villager, view[2].is_some());
+        }
         let anvil_after = if kind == Kind::Anvil {
             self.anvil_result(view[0], view[1], anvil_name.as_deref(), creative)
         } else {

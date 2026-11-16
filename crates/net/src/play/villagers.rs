@@ -154,6 +154,12 @@ fn villager_voice_pitch(v: &Villager) -> f32 {
     voice_pitch(v.age < 0)
 }
 
+/// `Villager.golemSpawnConditionsMet`: `LAST_SLEPT` не старше
+/// 24000 тиков.
+fn golem_spawn_conditions_met(last_slept: i64, now: i64) -> bool {
+    last_slept != 0 && now - last_slept < 24_000
+}
+
 fn voice_pitch(baby: bool) -> f32 {
     let r = rand::random::<f32>() - rand::random::<f32>();
     r * 0.2 + if baby { 1.5 } else { 1.0 }
@@ -493,6 +499,92 @@ impl PlayPlan {
         best.map(|(p, _)| p)
     }
 
+    /// `Villager.wantsToSpawnGolem`: спал за последние 24000 тиков и не
+    /// видел голема (`GOLEM_DETECTED_RECENTLY`, 599 тиков).
+    fn wants_golem(v: &Villager, now: i64, golems: &[[f64; 3]]) -> bool {
+        let slept = golem_spawn_conditions_met(v.last_slept, now);
+        let seen = now < v.golem_seen
+            || golems
+                .iter()
+                .any(|g| crate::mobs::dist2(*g, v.pos) <= 48.0 * 48.0);
+        slept && !seen
+    }
+
+    /// `Villager.spawnGolemIfNeeded`: согласие 5 соседей в 10 блоках
+    /// (3 в панике `VillagerPanicTrigger`), затем `trySpawnMob`.
+    fn spawn_golem_if_needed(&self, id: i32, needed: usize, golems: &[[f64; 3]]) {
+        let now = self.game_time();
+        let (origin, wanters) = {
+            let villagers = self.sim().villagers.lock().unwrap();
+            let Some(v) = villagers.get(&id) else { return };
+            if !Self::wants_golem(v, now, golems) {
+                return;
+            }
+            let origin = v.pos;
+            let mut wanters = Vec::new();
+            for (&other, o) in villagers.iter() {
+                if crate::mobs::dist2(o.pos, origin) > 10.0 * 10.0 {
+                    continue;
+                }
+                if Self::wants_golem(o, now, golems) {
+                    wanters.push(other);
+                    if wanters.len() >= 5 {
+                        break;
+                    }
+                }
+            }
+            (origin, wanters)
+        };
+        if wanters.len() < needed {
+            return;
+        }
+        if !self.spawn_village_golem(origin) {
+            return;
+        }
+        let mut villagers = self.sim().villagers.lock().unwrap();
+        for other in wanters {
+            if let Some(v) = villagers.get_mut(&other) {
+                v.golem_seen = now + 599;
+            }
+        }
+    }
+
+    /// `SpawnUtil.trySpawnMob(..., LEGACY_IRON_GOLEM)`: до 10 попыток в
+    /// радиусе ±10 по XZ и ±6 по Y, нужны твёрдая земля и 2 воздуха.
+    fn spawn_village_golem(&self, origin: [f64; 3]) -> bool {
+        let base = [
+            origin[0].floor() as i32,
+            origin[1].floor() as i32,
+            origin[2].floor() as i32,
+        ];
+        for _ in 0..10 {
+            let dx = i32::try_from(rand::random::<u32>() % 21).unwrap_or(10) - 10;
+            let dz = i32::try_from(rand::random::<u32>() % 21).unwrap_or(10) - 10;
+            let dy = i32::try_from(rand::random::<u32>() % 13).unwrap_or(6) - 6;
+            let feet = [base[0] + dx, base[1] + dy, base[2] + dz];
+            if self.walk_blocked(feet)
+                || self.walk_blocked([feet[0], feet[1] + 1, feet[2]])
+                || !self.walk_blocked([feet[0], feet[1] - 1, feet[2]])
+            {
+                continue;
+            }
+            let pos = [feet[0] as f64 + 0.5, feet[1] as f64, feet[2] as f64 + 0.5];
+            if self
+                .spawn_mob(
+                    crate::mobs::Species::IronGolem,
+                    pos,
+                    0.0,
+                    false,
+                    Some("MOB_SUMMONED"),
+                )
+                .is_some()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// `Villager.shouldRestock` + `restock` (на старте `WorkAtPoi`).
     fn try_restock(&self, v: &mut Villager, now: i64) {
         let needs = v.offers.iter().any(|o| o.uses > 0);
@@ -704,6 +796,10 @@ pub struct Villager {
     pub ambient_timer: i32,
     /// `Villager.tradingPlayer`: игрок с открытым окном торговли.
     pub trading_player: Option<Uuid>,
+    /// `MemoryModuleType.LAST_SLEPT`: когда проснулся (для голема).
+    pub last_slept: i64,
+    /// `GOLEM_DETECTED_RECENTLY`: до какого тика видел голема.
+    pub golem_seen: i64,
     /// Узлы текущего шага (`Path.getPreviousNode`/`getNextNode`).
     pub path_from: Option<[i32; 3]>,
     pub path_to: Option<[i32; 3]>,
@@ -1535,6 +1631,8 @@ impl PlayPlan {
 
     /// `WakeUp`/`SleepInBed.stop`: освободить кровать и встать рядом.
     fn stop_villager_sleep(&self, id: i32, v: &mut Villager, others: &[VillagerRef]) {
+        // `Villager.stopSleeping`: `LAST_SLEPT` = текущий тик.
+        v.last_slept = self.game_time();
         if let Some(bed) = v.sleeping.take() {
             self.set_bed_occupied(bed, false);
             // Кровать исчезла: забываем `HOME`, чтобы стек ушёл в `Idle`.
@@ -2458,7 +2556,7 @@ impl PlayPlan {
                 crate::sounds::NEUTRAL,
                 [v.pos[0], v.pos[1] + 1.0, v.pos[2]],
                 1.0,
-                1.0,
+                villager_voice_pitch(v),
             );
         }
         if rand::random::<u32>().is_multiple_of(200) && self.has_no_blocks_above(v.pos) {
@@ -3725,6 +3823,8 @@ impl PlayPlan {
             show_held: None,
             ambient_timer: 0,
             trading_player: None,
+            last_slept: 0,
+            golem_seen: 0,
             path_from: None,
             path_to: None,
             job_site: None,
@@ -3878,6 +3978,15 @@ impl PlayPlan {
             .filter(|e| e.mob.alive() && e.mob.species == crate::mobs::Species::Cat)
             .map(|e| e.mob.pos)
             .collect();
+        let golems: Vec<[f64; 3]> = self
+            .sim()
+            .mobs
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|e| e.mob.alive() && e.mob.species == crate::mobs::Species::IronGolem)
+            .map(|e| e.mob.pos)
+            .collect();
         let players: Vec<(Uuid, [f64; 3], Option<Stack>)> = self
             .live
             .lock()
@@ -3914,6 +4023,7 @@ impl PlayPlan {
             None => Vec::new(),
         };
         let mut gifts: Vec<([f64; 3], [f64; 3], String)> = Vec::new();
+        let mut golem_checks: Vec<(i32, usize)> = Vec::new();
         for id in ids {
             let mut villagers = self.sim().villagers.lock().unwrap();
             let sleepers: Vec<[i32; 3]> = villagers.values().filter_map(|o| o.sleeping).collect();
@@ -3959,6 +4069,26 @@ impl PlayPlan {
                 } else {
                     v.ambient_timer += 1;
                 }
+            }
+            // `GolemSensor` (200 тиков): голем рядом ->
+            // `GOLEM_DETECTED_RECENTLY` на 599 тиков.
+            if now % 200 == 0
+                && golems
+                    .iter()
+                    .any(|g| crate::mobs::dist2(*g, v.pos) <= 48.0 * 48.0)
+            {
+                v.golem_seen = now + 599;
+            }
+            // `VillagerPanicTrigger.tick`: раз в 100 тиков —
+            // `spawnGolemIfNeeded(..., 3)`.
+            if !v.no_ai
+                && now % 100 == 0
+                && (v.hurt_until > now
+                    || threats
+                        .iter()
+                        .any(|t| crate::mobs::dist2(*t, v.pos) <= 64.0))
+            {
+                golem_checks.push((id, 3));
             }
             if v.age < 0 {
                 v.age += 1;
@@ -4121,6 +4251,12 @@ impl PlayPlan {
         self.process_births(births);
         for (a, b) in gossip {
             self.gossip_villagers(a, b, now);
+            // `Villager.gossip` -> `spawnGolemIfNeeded(..., 5)`.
+            golem_checks.push((a, 5));
+            golem_checks.push((b, 5));
+        }
+        for (id, needed) in golem_checks {
+            self.spawn_golem_if_needed(id, needed, &golems);
         }
         for (id, pos, yaw, sent, on_ground) in moves {
             let q = play::quantize(pos);
@@ -4529,7 +4665,19 @@ impl PlayPlan {
         v.update_special_prices(amplifier, reputation);
         let pos = v.pos;
         let wandering = v.trader == TraderKind::Wandering;
+        // `AbstractVillager.notifyTrade`: `ambientSoundTime = -interval`.
+        v.ambient_timer = -80;
         drop(villagers);
+        // `MerchantMenu.playTradeSound`: `getNotifyTradeSound` = VILLAGER_YES
+        // (громкость 1.0, pitch 1.0 — в ваниле литералы).
+        self.play_sound(
+            None,
+            "minecraft:entity.villager.yes",
+            crate::sounds::NEUTRAL,
+            pos,
+            1.0,
+            1.0,
+        );
         // `Villager.customServerAiStep`: event 14 (зелёные частицы) после
         // сделки (`lastTradedPlayer != null`).
         self.hub
@@ -4542,6 +4690,35 @@ impl PlayPlan {
             );
         }
         Some((offer, changed))
+    }
+
+    /// `AbstractVillager.notifyTradeUpdated`: `entity.villager.yes` при
+    /// валидном результате и `entity.villager.no` при пустом; не чаще, чем
+    /// через 20 тиков после сброса ambient (`-80 + 20`).
+    pub(super) fn notify_trade_updated(&self, id: i32, valid: bool) {
+        let mut villagers = self.sim().villagers.lock().unwrap();
+        let Some(v) = villagers.get_mut(&id) else {
+            return;
+        };
+        if v.ambient_timer <= -60 {
+            return;
+        }
+        v.ambient_timer = -80;
+        let pos = v.pos;
+        let pitch = villager_voice_pitch(v);
+        drop(villagers);
+        self.play_sound(
+            None,
+            if valid {
+                "minecraft:entity.villager.yes"
+            } else {
+                "minecraft:entity.villager.no"
+            },
+            crate::sounds::NEUTRAL,
+            pos,
+            1.0,
+            pitch,
+        );
     }
 
     /// `Villager.setTradingPlayer`: открыто/закрыто окно торговли.
@@ -4794,6 +4971,8 @@ impl PlayPlan {
             show_held: None,
             ambient_timer: 0,
             trading_player: None,
+            last_slept: 0,
+            golem_seen: 0,
             path_from: None,
             path_to: None,
         };
@@ -5134,6 +5313,8 @@ mod tests {
             show_held: None,
             ambient_timer: 0,
             trading_player: None,
+            last_slept: 0,
+            golem_seen: 0,
             path_from: None,
             path_to: None,
         };
@@ -5414,6 +5595,14 @@ mod tests {
                 assert!((1..=4).contains(&level), "уровень вне 1..=4: {level}");
             }
         }
+    }
+
+    #[test]
+    fn golem_conditions_match_vanilla() {
+        // `LAST_SLEPT` живёт 24000 тиков.
+        assert!(!golem_spawn_conditions_met(0, 0));
+        assert!(golem_spawn_conditions_met(1_000, 24_999));
+        assert!(!golem_spawn_conditions_met(1_000, 25_000));
     }
 
     #[test]
