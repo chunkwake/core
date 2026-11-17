@@ -20,8 +20,14 @@ struct Probe {
     sb_close: i32,
     cb_chat: i32,
     cb_offers: i32,
+    cb_sound: i32,
     villager_type: i32,
     item_type: i32,
+    /// `AbstractVillager.notifyTrade*`: `entity.villager.yes`/`.no`.
+    yes_sound: i32,
+    no_sound: i32,
+    saw_yes: bool,
+    saw_no: bool,
     chat: String,
     villager: Option<i32>,
     window: Option<i32>,
@@ -106,6 +112,16 @@ impl Probe {
                 }
             } else if id == self.cb_offers {
                 self.parse_offers(&body);
+            } else if id == self.cb_sound {
+                let mut r = Reader::new(&body);
+                if let Ok(ev) = r.var_int() {
+                    if ev == self.yes_sound + 1 {
+                        self.saw_yes = true;
+                    }
+                    if ev == self.no_sound + 1 {
+                        self.saw_no = true;
+                    }
+                }
             }
         }
     }
@@ -221,7 +237,8 @@ async fn main() {
     let mut c = Client::connect(&a[1], "boater", ids, 777, "26.3")
         .await
         .unwrap();
-    c.capture_also = vec![cb_chat, cb_offers];
+    let cb_sound = cb("sound");
+    c.capture_also = vec![cb_chat, cb_offers, cb_sound];
     let mut p = Probe {
         c,
         sb_command: sb("chat_command"),
@@ -231,6 +248,11 @@ async fn main() {
         sb_close: sb("container_close"),
         cb_chat,
         cb_offers,
+        cb_sound,
+        yes_sound: pid("minecraft:sound_event", "minecraft:entity.villager.yes"),
+        no_sound: pid("minecraft:sound_event", "minecraft:entity.villager.no"),
+        saw_yes: false,
+        saw_no: false,
         villager_type: pid("minecraft:entity_type", "minecraft:villager"),
         item_type: pid("minecraft:entity_type", "minecraft:item"),
         chat: String::new(),
@@ -322,6 +344,20 @@ async fn main() {
     let inv = p.data("@s Inventory").await;
     assert!(inv.contains("emerald"), "сделка по скидке не прошла: {inv}");
     println!("hero discount payment ok (14 wheat -> emerald)");
+    // `AbstractVillager.notifyTradeUpdated` / `notifyTrade`: пустой
+    // результат — `entity.villager.no`, валидный — `yes`.
+    assert!(p.saw_yes, "нет entity.villager.yes при сделке");
+    if !p.saw_no {
+        for _ in 0..4 {
+            p.select_trade(0).await;
+            p.pump(400).await;
+            if p.saw_no {
+                break;
+            }
+        }
+    }
+    assert!(p.saw_no, "нет entity.villager.no на пустой сделке");
+    println!("trade sounds: yes on trade, no on empty offer");
     p.close(window).await;
 
     // 4. Подарок герою: таймер 600 тиков, затем предмет у жителя.

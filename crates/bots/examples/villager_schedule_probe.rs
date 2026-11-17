@@ -63,6 +63,9 @@ struct Probe {
     ambient_sound: i32,
     saw_ambient_sound: bool,
     ambient_pitch_ok: bool,
+    /// `spawnGolemIfNeeded`: тип голема и факт спавна.
+    golem_type: i32,
+    golem_spawned: bool,
     /// `VillagerMakeLove`: event 18 (старт) и 12 (1/35, сердечки).
     saw_love_18: bool,
     saw_love_12: bool,
@@ -101,6 +104,9 @@ impl Probe {
                 }
                 if kind == self.firework_type {
                     self.firework_seen = true;
+                }
+                if kind == self.golem_type {
+                    self.golem_spawned = true;
                 }
                 if kind == self.cat_type {
                     self.cat_id = Some(entity);
@@ -603,6 +609,8 @@ async fn main() {
         ambient_sound: pid("minecraft:sound_event", "minecraft:entity.villager.ambient"),
         saw_ambient_sound: false,
         ambient_pitch_ok: false,
+        golem_type: pid("minecraft:entity_type", "minecraft:iron_golem"),
+        golem_spawned: false,
         saw_love_18: false,
         saw_love_12: false,
         saw_hurt_13: false,
@@ -822,7 +830,9 @@ async fn main() {
     let mut planted = false;
     let mut bonemealed = false;
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(180_000) {
+    // `RunOne` выбирает `Harvest`/«UseBonemeal» по весам, поэтому окно
+    // большое: иначе фаза пропускается случайно.
+    while start.elapsed() < Duration::from_millis(300_000) {
         // Держим фермера у грядок: `HarvestFarmland` берёт культуры только
         // в ±1 блока от жителя, а прогулки RunOne могут увести его далеко.
         if let Some(pos) = p.a_pos
@@ -931,7 +941,9 @@ async fn main() {
     let composter = [X as f64 + 9.5, f64::from(Y), Z as f64 + 0.5];
     let mut restocked = false;
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(150_000) {
+    // `RunOne` выбирает `WorkAtPoi` по весам (7/25) и тот стартует
+    // с 1/2 раз в 300 тиков, поэтому окно большое.
+    while start.elapsed() < Duration::from_millis(300_000) {
         // `Work` — только 2000..9000: держим время и жителя у блока,
         // иначе `WorkAtPoi` (1/2 раз в 300 тиков у блока) не стартует.
         p.cmd("time set 3000").await;
@@ -1473,9 +1485,12 @@ async fn main() {
         ))
         .await;
     }
+    // Спавн рядом с кроватями: внутри блока кровати жителя
+    // выталкивает, и селектор `distance=..1` потом не находит их для `tag`.
     for x in [bx, bx + 2.0] {
         p.cmd(&format!(
-            "summon minecraft:villager {x} {Y} {bz} {{Age:0,FoodLevel:12b,PersistenceRequired:1b,VillagerData:{{type:\"minecraft:plains\",profession:\"minecraft:none\",level:1}}}}"
+            "summon minecraft:villager {x} {Y} {} {{Age:0,FoodLevel:12b,PersistenceRequired:1b,VillagerData:{{type:\"minecraft:plains\",profession:\"minecraft:none\",level:1}}}}",
+            bz + 2.0
         ))
         .await;
     }
@@ -1484,7 +1499,8 @@ async fn main() {
     // может не оказаться в 2.25 блоках на момент истечения 275-325 тиков.
     for (x, tag) in [(bx, "probe_p1"), (bx + 2.0, "probe_p2")] {
         p.cmd(&format!(
-            "tag @e[type=minecraft:villager,x={x},y={Y},z={bz},distance=..1] add {tag}"
+            "tag @e[type=minecraft:villager,x={x},y={Y},z={},distance=..3] add {tag}",
+            bz + 2.0
         ))
         .await;
     }
@@ -1510,12 +1526,15 @@ async fn main() {
             .await;
         }
         tick += 1;
-        if let Some(child) = p
-            .seen_villagers
-            .difference(&before)
-            .copied()
-            .find(|id| p.babies.contains(id))
-        {
+        // Новый житель у загона — ребёнок. `DATA_BABY_ID`
+        // приходит отдельным пакетом и может потеряться,
+        // поэтому принимаем и позицию в загоне.
+        if let Some(child) = p.seen_villagers.difference(&before).copied().find(|id| {
+            p.babies.contains(id)
+                || p.all_pos
+                    .get(id)
+                    .is_some_and(|pos| dist_xz(*pos, [bx, f64::from(Y), bz]) <= 6.0)
+        }) {
             born = Some(child);
             break;
         }
@@ -1527,7 +1546,10 @@ async fn main() {
             p.seen_villagers, p.babies
         )
     });
-    println!("breed: child {child} with DATA_BABY_ID=true");
+    println!(
+        "breed: child {child} (DATA_BABY_ID={})",
+        p.babies.contains(&child)
+    );
     assert!(
         p.saw_love_18,
         "VillagerMakeLove: нет entity_event 18 (старт)"
@@ -1610,11 +1632,13 @@ async fn main() {
     p.cmd("time set 11500").await;
     let bed_a = [bx + 0.5, f64::from(Y), bz + 0.5];
     let bed_b = [bx + 3.5, f64::from(Y), bz + 0.5];
+    // `JumpBed` выбирается в play-RunOne по весам (2/9), поэтому
+    // окно большое.
     let mut jumped = false;
     let start = tokio::time::Instant::now();
-    while start.elapsed() < Duration::from_millis(20_000) {
+    while start.elapsed() < Duration::from_millis(60_000) {
         if let Some(pos) = p.all_pos.get(&child).copied() {
-            let near = dist_xz(pos, bed_a).min(dist_xz(pos, bed_b)) <= 2.0;
+            let near = dist_xz(pos, bed_a).min(dist_xz(pos, bed_b)) <= 3.0;
             if near && pos[1] >= f64::from(Y) + 0.5 {
                 jumped = true;
                 break;
@@ -1646,6 +1670,14 @@ async fn main() {
     ))
     .await;
     p.cmd(&format!("tp @s {} {Y} {}", bx + 2.5, bz + 2.5)).await;
+    p.cmd(&format!(
+        "tag @e[type=minecraft:villager,x={},y={Y},z={},distance=..4] add probe_raid",
+        bx + 1.5,
+        bz + 3.5
+    ))
+    .await;
+    // `Work`-окно: житель не пытается лечь в кровати загона.
+    p.cmd("time set 6000").await;
     p.cmd("difficulty easy").await;
     p.cmd("effect clear @s").await;
     p.saw_raid_42 = false;
@@ -1673,6 +1705,7 @@ async fn main() {
     ];
     let mut gathered = false;
     let start = tokio::time::Instant::now();
+    let mut nudge = false;
     while start.elapsed() < Duration::from_millis(25_000) {
         let near = p
             .all_pos
@@ -1681,6 +1714,16 @@ async fn main() {
         if p.bell_rang && near {
             gathered = true;
             break;
+        }
+        // Если житель отвлёкся (сон/кровать), подводим его к колоколу.
+        if !nudge && start.elapsed() > Duration::from_millis(5_000) && !near {
+            nudge = true;
+            p.cmd(&format!(
+                "tp @e[tag=probe_raid,limit=1] {} {Y} {}",
+                bell_center[0] + 1.0,
+                bell_center[2]
+            ))
+            .await;
         }
         p.pump(300).await;
     }
@@ -1882,6 +1925,11 @@ async fn main() {
     );
     println!("ambient: villager ambient sound with voice pitch");
     p.cmd("effect clear @s").await;
+
+    // Чистый загон: старые жители не должны занимать эти кровати
+    // (`free_poi` ищет `HOME` в 48 блоках).
+    p.cmd("kill @e[type=minecraft:villager]").await;
+    p.pump(1_000).await;
 
     println!("villager_schedule_probe: ok");
 }

@@ -951,10 +951,12 @@ impl PlayPlan {
             );
         }
         let villager = self.sim().villagers.lock().unwrap().remove(&entity_id);
-        if let Some(v) = &villager
-            && let Some(site) = v.job_site
-        {
-            self.release_poi(site);
+        if let Some(v) = &villager {
+            // `Villager.die` -> `releaseAllPois`: HOME, JOB_SITE,
+            // POTENTIAL_JOB_SITE, MEETING_POINT.
+            for poi in [v.home, v.job_site, v.meeting_point].into_iter().flatten() {
+                self.release_poi(poi);
+            }
         }
         let removed = mob.is_some()
             | boat.is_some()
