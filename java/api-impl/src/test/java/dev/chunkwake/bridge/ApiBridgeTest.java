@@ -152,6 +152,28 @@ class ApiBridgeTest {
     }
 
     @Test
+    void jsonSimpleIsAvailableForPlugins() {
+        // CraftBukkit поставляет json-simple; Vault и старые экономики его ждут.
+        Object parsed = org.json.simple.JSONValue.parse(
+                "[{\"name\":\"Vault v1.7.3\",\"id\":7,\"latest\":true}]");
+        assertTrue(parsed instanceof org.json.simple.JSONArray);
+        var array = (org.json.simple.JSONArray) parsed;
+        assertEquals(1, array.size());
+        var object = (org.json.simple.JSONObject) array.get(0);
+        assertEquals("Vault v1.7.3", object.get("name"));
+        assertEquals(7L, object.get("id"));
+        assertEquals(Boolean.TRUE, object.get("latest"));
+        assertEquals("[{\"name\":\"Vault v1.7.3\",\"id\":7,\"latest\":true}]",
+                org.json.simple.JSONValue.toJSONString(parsed));
+
+        try {
+            new org.json.simple.parser.JSONParser().parse("{bad json");
+        } catch (org.json.simple.parser.ParseException expected) {
+            // ok: битый JSON даёт ParseException, как в json-simple
+        }
+    }
+
+    @Test
     void statisticCriteriaKeysMatchVanillaCustomStats() {
         assertEquals("minecraft.custom:minecraft.deaths",
                 BRIDGE.getStatisticCriteriaKey(org.bukkit.Statistic.DEATHS));

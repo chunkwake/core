@@ -223,3 +223,19 @@
   отдают пустое значение. На этом `defaultMannequinProfile()` возвращает
   пустой профиль (`name=null, uuid=null, properties=0`), как
   `Mannequin.DEFAULT_PROFILE`, без NPE.
+
+## Сторонние плагины: живые прогоны
+
+- Загружены и **включены** 4 плагина одновременно: `chunkwake-test-plugin`,
+  `EssentialsX 2.22.0`, `PlaceholderAPI 2.12.3`, `Vault 1.7.3-b131`
+  (`plugins: 4 of 4 enabled in 3419 ms`). Essentials нашёл
+  `Vault Compatibility Layer` для экономики — `ServicesManager` и
+  `Economy`-сервисы работают.
+- `/papi` отвечает справкой PlaceholderAPI (регистрация команд плагина).
+- Folia-планировщики (живой лог test-plugin): `folia: owned on enable=true`,
+  `async delayed on Folia Async Scheduler Thread #0`,
+  `global execute`, `global fixed rate x3, cancel=NEXT_RUNS_CANCELLED`,
+  `region delayed, state=RUNNING`.
+- `org.json.simple` (`JSONValue`/`JSONObject`/`JSONArray`/`JSONParser`)
+  добавлен как в CraftBukkit: без него Vault падал
+  `NoClassDefFoundError: org/json/simple/JSONValue` в проверке обновлений.
