@@ -79,14 +79,22 @@ public final class ApiBridge implements InternalAPIBridge {
     }
     @Override public Predicate<CommandSourceStack> restricted(Predicate<CommandSourceStack> p, boolean b) { return p; }
     @Override public ResolvableProfile defaultMannequinProfile() { throw todo("defaultMannequinProfile"); }
-    @Override public SkinParts.Mutable allSkinParts() { throw todo("allSkinParts"); }
-    @Override public Component defaultMannequinDescription() { throw todo("defaultMannequinDescription"); }
+    @Override public SkinParts.Mutable allSkinParts() { return new SkinPartsImpl(); }
+    @Override public Component defaultMannequinDescription() {
+        // Ваниль: `Component.translatable("entity.minecraft.mannequin.label")`.
+        return Component.translatable("entity.minecraft.mannequin.label");
+    }
     @Override
     @SuppressWarnings("unchecked")
     public <M, L> GameRule<L> legacyGameRuleBridge(GameRule<M> r, Function<L, M> a, Function<M, L> b, Class<L> c) {
         return new RegistryValues.Legacy<>((RegistryValues.GameRuleImpl<M>) r, a, b, c);
     }
-    @Override public Set<Pose> validMannequinPoses() { throw todo("validMannequinPoses"); }
+    @Override public Set<Pose> validMannequinPoses() {
+        // Ваниль: `Mannequin.VALID_POSES` = STANDING, CROUCHING, SWIMMING,
+        // FALL_FLYING, SLEEPING (Mojmap CROUCHING = Bukkit SNEAKING).
+        return Set.of(
+                Pose.STANDING, Pose.SNEAKING, Pose.SWIMMING, Pose.FALL_FLYING, Pose.SLEEPING);
+    }
     @Override public DamageSource.Builder createDamageSourceBuilder(DamageType t) { return Events.sourceBuilder(t); }
     private static final java.util.Map<String, DamageEffect> DAMAGE_EFFECTS = new java.util.HashMap<>();
     private static final java.util.Map<String, PoiType.Occupancy> OCCUPANCIES = new java.util.HashMap<>();
@@ -151,7 +159,14 @@ public final class ApiBridge implements InternalAPIBridge {
         }
         return null;
     }
-    @Override public String getStatisticCriteriaKey(Statistic s) { throw todo("getStatisticCriteriaKey"); }
+    @Override public String getStatisticCriteriaKey(Statistic s) {
+        // Ванильные custom-статистики: критерий `minecraft.custom:<stat>`,
+        // `Statistic.getKey()` = `minecraft:<имя в нижнем регистре>`.
+        // `Statistic.getKey()` = `minecraft:deaths`; критерий ванили —
+        // `minecraft.custom:minecraft.deaths` (namespace и path через точку).
+        NamespacedKey key = s.getKey();
+        return "minecraft.custom:" + key.getNamespace() + "." + key.getKey();
+    }
     @Override public ItemStack createEmptyStack() { return new StackImpl(org.bukkit.Material.AIR, 0); }
     @Override public Component resolveWithContext(Component c, CommandSender s, Entity e, boolean b) { return c; }
     @Override public ComponentFlattener componentFlattener() { return ComponentFlattener.basic(); }
@@ -187,5 +202,51 @@ public final class ApiBridge implements InternalAPIBridge {
             }
         }
         return offers;
+    }
+
+    /**
+     * `SkinParts.Mutable`: сырые биты как у ванильного
+     * `player.getModelPartCustomisation()` (установлен = слой скрыт).
+     */
+    private static final class SkinPartsImpl implements SkinParts.Mutable {
+        private static final int CAPE = 1;
+        private static final int JACKET = 2;
+        private static final int LEFT_SLEEVE = 4;
+        private static final int RIGHT_SLEEVE = 8;
+        private static final int LEFT_PANTS = 16;
+        private static final int RIGHT_PANTS = 32;
+        private static final int HAT = 64;
+
+        private int hidden;
+
+        @Override public boolean hasCapeEnabled() { return (this.hidden & CAPE) == 0; }
+        @Override public boolean hasJacketEnabled() { return (this.hidden & JACKET) == 0; }
+        @Override public boolean hasLeftSleeveEnabled() { return (this.hidden & LEFT_SLEEVE) == 0; }
+        @Override public boolean hasRightSleeveEnabled() { return (this.hidden & RIGHT_SLEEVE) == 0; }
+        @Override public boolean hasLeftPantsEnabled() { return (this.hidden & LEFT_PANTS) == 0; }
+        @Override public boolean hasRightPantsEnabled() { return (this.hidden & RIGHT_PANTS) == 0; }
+        @Override public boolean hasHatsEnabled() { return (this.hidden & HAT) == 0; }
+
+        @Override public void setCapeEnabled(boolean enabled) { this.hidden = set(CAPE, enabled); }
+        @Override public void setJacketEnabled(boolean enabled) { this.hidden = set(JACKET, enabled); }
+        @Override public void setLeftSleeveEnabled(boolean enabled) { this.hidden = set(LEFT_SLEEVE, enabled); }
+        @Override public void setRightSleeveEnabled(boolean enabled) { this.hidden = set(RIGHT_SLEEVE, enabled); }
+        @Override public void setLeftPantsEnabled(boolean enabled) { this.hidden = set(LEFT_PANTS, enabled); }
+        @Override public void setRightPantsEnabled(boolean enabled) { this.hidden = set(RIGHT_PANTS, enabled); }
+        @Override public void setHatsEnabled(boolean enabled) { this.hidden = set(HAT, enabled); }
+
+        private int set(int mask, boolean enabled) {
+            return enabled ? this.hidden & ~mask : this.hidden | mask;
+        }
+
+        @Override public int getRaw() { return this.hidden; }
+        @Override public SkinParts.Mutable mutableCopy() {
+            SkinPartsImpl copy = new SkinPartsImpl();
+            copy.hidden = this.hidden;
+            return copy;
+        }
+        @Override public SkinParts immutableCopy() { return mutableCopy(); }
+
+        @Override public String toString() { return "SkinParts{raw=" + this.hidden + "}"; }
     }
 }

@@ -93,6 +93,18 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             boolean waterlogged = data instanceof org.bukkit.block.data.Waterlogged wl && wl.isWaterlogged();
             getLogger().info("block data: " + data.getAsString() + " waterlogged=" + waterlogged);
         }
+        {
+            var bridge = io.papermc.paper.InternalAPIBridge.get();
+            var parts = com.destroystokyo.paper.SkinParts.allParts();
+            getLogger().info("mannequin: poses="
+                    + new java.util.TreeSet<>(bridge.validMannequinPoses().stream()
+                            .map(Enum::name).toList())
+                    + " desc=" + net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
+                            .plainText().serialize(bridge.defaultMannequinDescription())
+                    + " skinParts=" + parts.getRaw() + "/" + parts.hasCapeEnabled()
+                    + "/" + parts.hasHatsEnabled()
+                    + " statistic=" + bridge.getStatisticCriteriaKey(org.bukkit.Statistic.DEATHS));
+        }
         foliaProbe();
         ItemStack bread = new ItemStack(Material.BREAD, 3);
         getLogger().info("item api: " + bread.getType() + " x" + bread.getAmount() + " max " + bread.getMaxStackSize());

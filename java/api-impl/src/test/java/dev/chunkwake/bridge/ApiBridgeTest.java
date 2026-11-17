@@ -101,6 +101,16 @@ class ApiBridgeTest {
     }
 
     @Test
+    void statisticCriteriaKeysMatchVanillaCustomStats() {
+        assertEquals("minecraft.custom:minecraft.deaths",
+                BRIDGE.getStatisticCriteriaKey(org.bukkit.Statistic.DEATHS));
+        assertEquals("minecraft.custom:minecraft.walk_one_cm",
+                BRIDGE.getStatisticCriteriaKey(org.bukkit.Statistic.WALK_ONE_CM));
+        assertEquals("minecraft.custom:minecraft.animals_bred",
+                BRIDGE.getStatisticCriteriaKey(org.bukkit.Statistic.ANIMALS_BRED));
+    }
+
+    @Test
     void legacyMaterialsConvertLikeCraftBukkit() {
         // CraftLegacy.modernize: имя без `LEGACY_`, переименования и data-цвета.
         assertEquals(org.bukkit.Material.STONE,
