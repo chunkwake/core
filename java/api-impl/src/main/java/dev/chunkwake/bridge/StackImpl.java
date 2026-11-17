@@ -77,6 +77,28 @@ final class StackImpl extends ItemStack {
         return name + " " + s.getAmount() + (json == null ? "" : " " + json);
     }
 
+    /** `ItemStack.serializeAsBytes`: gzip-NBT `ItemStack.CODEC` из Rust. */
+    @Override
+    public byte @org.jetbrains.annotations.NotNull [] serializeAsBytes() {
+        String line = line(this);
+        if (line == null) {
+            throw new IllegalStateException("Empty item cannot be serialized");
+        }
+        String hex = Registries.world("itemnbt " + line);
+        if (hex.isEmpty()) {
+            throw new IllegalStateException("cannot serialize " + getType());
+        }
+        byte[] raw = Hex.decode(hex);
+        try (var out = new java.io.ByteArrayOutputStream();
+                var gz = new java.util.zip.GZIPOutputStream(out)) {
+            gz.write(raw);
+            gz.finish();
+            return out.toByteArray();
+        } catch (java.io.IOException error) {
+            throw new IllegalStateException("cannot serialize " + getType(), error);
+        }
+    }
+
     @Override public Material getType() { return type; }
     @Override public void setType(Material type) { this.type = Objects.requireNonNull(type, "type"); }
     @Override public int getAmount() { return amount; }

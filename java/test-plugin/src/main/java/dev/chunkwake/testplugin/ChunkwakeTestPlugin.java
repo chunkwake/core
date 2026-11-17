@@ -105,6 +105,20 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
                     + "/" + parts.hasHatsEnabled()
                     + " statistic=" + bridge.getStatisticCriteriaKey(org.bukkit.Statistic.DEATHS));
         }
+        {
+            // `ItemStack.serializeAsBytes`/`deserializeBytes` (формат CraftItemStack).
+            org.bukkit.inventory.ItemStack sword =
+                    new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND_SWORD);
+            sword.setAmount(2);
+            sword.addUnsafeEnchantment(org.bukkit.enchantments.Enchantment.SHARPNESS, 3);
+            byte[] bytes = sword.serializeAsBytes();
+            org.bukkit.inventory.ItemStack back = org.bukkit.inventory.ItemStack.deserializeBytes(bytes);
+            getLogger().info("item bytes: " + bytes.length + " -> " + back.getType() + " x"
+                    + back.getAmount() + " sharpness="
+                    + back.getEnchantmentLevel(org.bukkit.enchantments.Enchantment.SHARPNESS));
+            getLogger().info("mannequin profile: " + io.papermc.paper.InternalAPIBridge.get()
+                    .defaultMannequinProfile());
+        }
         foliaProbe();
         ItemStack bread = new ItemStack(Material.BREAD, 3);
         getLogger().info("item api: " + bread.getType() + " x" + bread.getAmount() + " max " + bread.getMaxStackSize());

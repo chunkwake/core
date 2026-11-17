@@ -78,7 +78,10 @@ public final class ApiBridge implements InternalAPIBridge {
         @Override public float getFallDistance() { return this.fallDistance; }
     }
     @Override public Predicate<CommandSourceStack> restricted(Predicate<CommandSourceStack> p, boolean b) { return p; }
-    @Override public ResolvableProfile defaultMannequinProfile() { throw todo("defaultMannequinProfile"); }
+    @Override public ResolvableProfile defaultMannequinProfile() {
+        // Ваниль: `Mannequin.DEFAULT_PROFILE = ResolvableProfile.Static.EMPTY`.
+        return ResolvableProfile.resolvableProfile().build();
+    }
     @Override public SkinParts.Mutable allSkinParts() { return new SkinPartsImpl(); }
     @Override public Component defaultMannequinDescription() {
         // Ваниль: `Component.translatable("entity.minecraft.mannequin.label")`.
@@ -140,7 +143,21 @@ public final class ApiBridge implements InternalAPIBridge {
     @Override public SpawnCategory getSpawnCategory(EntityType t) {
         return EntityCategories.of(t.name());
     }
-    @Override public ItemStack deserializeItem(byte[] b) { throw todo("deserializeItem"); }
+    @Override public ItemStack deserializeItem(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            throw new IllegalArgumentException("cannot deserialize nothing");
+        }
+        // Формат `CraftItemStack.serializeAsBytes`: gzip-NBT `ItemStack.CODEC`.
+        try (var in = new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(bytes))) {
+            String line = Registries.world("itemfromnbt " + Hex.encode(in.readAllBytes()));
+            if (line.isEmpty()) {
+                throw new IllegalArgumentException("invalid item bytes");
+            }
+            return StackImpl.parse(line);
+        } catch (java.io.IOException error) {
+            throw new IllegalArgumentException("invalid item bytes", error);
+        }
+    }
     @Override public boolean hasDefaultEntityAttributes(NamespacedKey k) {
         String name = entityName(k);
         return name != null && DefaultAttributeValues.has(name);

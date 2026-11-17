@@ -209,3 +209,17 @@
 - Регрессия: `crates/bots/examples/plugin_block_probe.rs` — плагин пишет
   блок в `onEnable`, бот входит и проверяет `/execute if block`; проба
   зелёная на чистом мире.
+
+## ItemStack bytes и профиль манекена
+
+- `ItemStack.serializeAsBytes()`/`deserializeBytes()`: формат Paper —
+  gzip-NBT `ItemStack.CODEC`. `StackImpl.serializeAsBytes` собирает NBT
+  через Rust (`itemnbt`, `stack_nbt::to_nbt`), `ApiBridge.deserializeItem`
+  разбирает gzip-NBT (`itemfromnbt`, `stack_nbt::from_nbt`). Живая
+  проверка: `DIAMOND_SWORD x2 sharpness=3` переживает round-trip.
+- `ItemComponentTypesBridge` (package-private ServiceLoader paper-api)
+  реализован вручную: `resolvableProfile()`/`resolvableProfile(PlayerProfile)`,
+  `skinPatch()`/`emptySkinPatch()` работают, остальные строители пока
+  отдают пустое значение. На этом `defaultMannequinProfile()` возвращает
+  пустой профиль (`name=null, uuid=null, properties=0`), как
+  `Mannequin.DEFAULT_PROFILE`, без NPE.

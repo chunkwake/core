@@ -32,7 +32,8 @@ public final class GenProviders {
      * Генератор их не трогает.
      */
     private static final Set<String> HANDWRITTEN = Set.of(
-            "io.papermc.paper.plugin.lifecycle.event.types.LifecycleEventTypeProvider");
+            "io.papermc.paper.plugin.lifecycle.event.types.LifecycleEventTypeProvider",
+            "io.papermc.paper.datacomponent.item.ItemComponentTypesBridge");
 
     public static void main(String[] args) throws Exception {
         if (args.length < 3) {

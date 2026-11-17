@@ -4672,7 +4672,28 @@ impl PlayPlan {
         }
         // `pdc <uuid>` → `BukkitValues` игрока типизированным JSON;
         // `pdc <uuid> <json>` — заменить (уходит в `playerdata`).
-        if let Some(rest) = line.strip_prefix("pdc ") {
+                // `itemfromnbt <hex>` -> строка стека (`item count [json]`): формат
+        // `CraftItemStack.deserializeBytes` (gzip-NBT `ItemStack.CODEC`).
+        if let Some(rest) = line.strip_prefix("itemfromnbt ") {
+            let line = crate::stack_nbt::unhex(rest.trim())
+                .and_then(|bytes| chunkwake_world::nbt::read_root(&bytes).ok())
+                .and_then(|root| crate::stack_nbt::from_nbt(&root, |n| self.item_id(n)))
+                .map(|s| crate::stack_nbt::to_line(s, self.item_name(s.item)))
+                .unwrap_or_default();
+            return line;
+        }
+        // `itemnbt <item count [json]>` -> hex корневого NBT (для
+        // `ItemStack.serializeAsBytes`).
+        if let Some(rest) = line.strip_prefix("itemnbt ") {
+            let Some(stack) = crate::stack_nbt::from_line(rest.trim(), |n| self.item_id(n)) else {
+                return String::new();
+            };
+            let Some(tag) = crate::stack_nbt::to_nbt(stack, self.item_name(stack.item)) else {
+                return String::new();
+            };
+            return crate::stack_nbt::hex(&chunkwake_world::nbt::write_root(&tag));
+        }
+if let Some(rest) = line.strip_prefix("pdc ") {
             let (id, json) = rest.split_once(' ').unwrap_or((rest, ""));
             let Ok(uuid) = Uuid::parse_str(id) else {
                 return String::new();

@@ -8,6 +8,36 @@ use chunkwake_world::nbt::{Compound, Tag};
 use serde_json::Value;
 
 /// `{id, count, components}`; `None` — у предмета нет имени.
+/// hex-кодирование байтов NBT для передачи через мост `world`.
+pub fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(DIGITS[(b >> 4) as usize] as char);
+        out.push(DIGITS[(b & 15) as usize] as char);
+    }
+    out
+}
+
+/// Обратное к [`hex`]; `None` — нечётная длина или не hex.
+pub fn unhex(text: &str) -> Option<Vec<u8>> {
+    let bytes = text.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let digit = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    };
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.as_chunks::<2>().0 {
+        out.push((digit(pair[0])? << 4) | digit(pair[1])?);
+    }
+    Some(out)
+}
+
 pub fn to_nbt(s: Stack, name: &str) -> Option<Compound> {
     named_nbt(s, name, &|_| None)
 }
@@ -811,6 +841,18 @@ pub fn tag_to_json(t: &Tag) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_roundtrip() {
+        let bytes: Vec<u8> = (0u8..=255).collect();
+        let text = hex(&bytes);
+        assert_eq!(text.len(), 512);
+        assert_eq!(unhex(&text).as_deref(), Some(bytes.as_slice()));
+        assert!(unhex("abc").is_none());
+        assert!(unhex("zz").is_none());
+        assert_eq!(hex(&[]), "");
+        assert_eq!(unhex("").as_deref(), Some(&[][..]));
+    }
 
     #[test]
     fn banner_patterns_round_trip_through_playerdata() {

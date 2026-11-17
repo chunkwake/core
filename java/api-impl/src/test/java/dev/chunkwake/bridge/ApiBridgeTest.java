@@ -101,6 +101,57 @@ class ApiBridgeTest {
     }
 
     @Test
+    void mannequinDefaultsMatchVanilla() {
+        // `Mannequin.DEFAULT_PROFILE` = `ResolvableProfile.Static.EMPTY`.
+        var profile = BRIDGE.defaultMannequinProfile();
+        assertEquals(null, profile.name());
+        assertEquals(null, profile.uuid());
+        assertTrue(profile.properties().isEmpty());
+        assertFalse(profile.dynamic());
+        assertNotNull(profile.skinPatch());
+        assertTrue(profile.skinPatch().isEmpty());
+
+        // Профиль собирается через ItemComponentTypesBridge (ServiceLoader).
+        var built = io.papermc.paper.datacomponent.item.ResolvableProfile.resolvableProfile()
+                .name("Notch")
+                .uuid(java.util.UUID.fromString("069a79f4-44e9-4726-a5be-fca90e38aaf5"))
+                .addProperty(new com.destroystokyo.paper.profile.ProfileProperty("textures", "abc"))
+                .build();
+        assertEquals("Notch", built.name());
+        assertEquals("069a79f4-44e9-4726-a5be-fca90e38aaf5", built.uuid().toString());
+        assertEquals(1, built.properties().size());
+
+        // Скин-патч: пустой и собранный.
+        var patch = io.papermc.paper.datacomponent.item.ResolvableProfile.SkinPatch.skinPatch()
+                .body(net.kyori.adventure.key.Key.key("minecraft", "textures/entity/zombie"))
+                .build();
+        assertFalse(patch.isEmpty());
+        assertEquals("minecraft:textures/entity/zombie", patch.body().asString());
+        assertTrue(io.papermc.paper.datacomponent.item.ResolvableProfile.SkinPatch.empty().isEmpty());
+
+        assertEquals(net.kyori.adventure.text.Component.translatable(
+                        "entity.minecraft.mannequin.label"),
+                BRIDGE.defaultMannequinDescription());
+
+        assertEquals(java.util.Set.of(
+                        org.bukkit.entity.Pose.STANDING,
+                        org.bukkit.entity.Pose.SNEAKING,
+                        org.bukkit.entity.Pose.SWIMMING,
+                        org.bukkit.entity.Pose.FALL_FLYING,
+                        org.bukkit.entity.Pose.SLEEPING),
+                BRIDGE.validMannequinPoses());
+
+        var parts = BRIDGE.allSkinParts();
+        assertEquals(0, parts.getRaw());
+        assertTrue(parts.hasCapeEnabled());
+        assertTrue(parts.hasHatsEnabled());
+        parts.setCapeEnabled(false);
+        assertFalse(parts.hasCapeEnabled());
+        assertEquals(1, parts.getRaw());
+        assertTrue(parts.mutableCopy().hasCapeEnabled() == false);
+    }
+
+    @Test
     void statisticCriteriaKeysMatchVanillaCustomStats() {
         assertEquals("minecraft.custom:minecraft.deaths",
                 BRIDGE.getStatisticCriteriaKey(org.bukkit.Statistic.DEATHS));
