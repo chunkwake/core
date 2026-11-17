@@ -63,8 +63,20 @@ public final class ApiBridge implements InternalAPIBridge {
             @Override public String toString() { return "CUSTOM"; }
         });
     }
-    @Override public CombatEntry createCombatEntry(LivingEntity e, DamageSource s, float d) { throw todo("createCombatEntry"); }
-    @Override public CombatEntry createCombatEntry(DamageSource s, float d, FallLocationType f, float dist) { throw todo("createCombatEntry"); }
+    @Override public CombatEntry createCombatEntry(LivingEntity e, DamageSource s, float d) {
+        return new CombatEntryImpl(s, d, null, e == null ? 0.0f : e.getFallDistance());
+    }
+    @Override public CombatEntry createCombatEntry(DamageSource s, float d, FallLocationType f, float dist) {
+        return new CombatEntryImpl(s, d, f, dist);
+    }
+
+    private record CombatEntryImpl(DamageSource source, float damage, FallLocationType fall,
+            float fallDistance) implements CombatEntry {
+        @Override public DamageSource getDamageSource() { return this.source; }
+        @Override public float getDamage() { return this.damage; }
+        @Override public FallLocationType getFallLocationType() { return this.fall; }
+        @Override public float getFallDistance() { return this.fallDistance; }
+    }
     @Override public Predicate<CommandSourceStack> restricted(Predicate<CommandSourceStack> p, boolean b) { return p; }
     @Override public ResolvableProfile defaultMannequinProfile() { throw todo("defaultMannequinProfile"); }
     @Override public SkinParts.Mutable allSkinParts() { throw todo("allSkinParts"); }

@@ -59,6 +59,18 @@ class ApiBridgeTest {
     }
 
     @Test
+    void combatEntriesKeepDamageAndFallData() {
+        var entry = BRIDGE.createCombatEntry(
+                (org.bukkit.damage.DamageSource) null, 4.5f,
+                io.papermc.paper.world.damagesource.FallLocationType.LADDER, 3.25f);
+        assertEquals(4.5f, entry.getDamage());
+        assertEquals(io.papermc.paper.world.damagesource.FallLocationType.LADDER,
+                entry.getFallLocationType());
+        assertEquals(3.25f, entry.getFallDistance());
+        assertEquals(null, entry.getDamageSource());
+    }
+
+    @Test
     void defaultEntityAttributesMatchVanilla() {
         // Значения из декомпилированного `Zombie.createAttributes`/«Cow».
         var zombie = DefaultAttributeValues.raw("ZOMBIE");
