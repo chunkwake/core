@@ -44,6 +44,19 @@ class ApiBridgeTest {
     }
 
     @Test
+    void damageEffectsAndOccupanciesFromVanillaRegistry() {
+        assertEquals(org.bukkit.damage.DamageEffect.HURT, BRIDGE.getDamageEffect("hurt"));
+        assertEquals(org.bukkit.damage.DamageEffect.THORNS, BRIDGE.getDamageEffect("thorns"));
+        assertEquals(org.bukkit.damage.DamageEffect.FREEZING, BRIDGE.getDamageEffect("freezing"));
+        assertEquals(org.bukkit.damage.DamageEffect.POKING, BRIDGE.getDamageEffect("poking"));
+        // Константы Paper берут тот же кэш, что и повторный вызов.
+        assertEquals(io.papermc.paper.entity.poi.PoiType.Occupancy.IS_OCCUPIED,
+                BRIDGE.createOccupancy("IS_OCCUPIED"));
+        assertEquals(io.papermc.paper.entity.poi.PoiType.Occupancy.ANY,
+                BRIDGE.createOccupancy("ANY"));
+    }
+
+    @Test
     void categoryTableCoversVanillaAndHasNoStaleNames() {
         // 160 записей из {@code EntityTypes} ванильного ядра 26.3.
         assertEquals(160, EntityCategories.size());

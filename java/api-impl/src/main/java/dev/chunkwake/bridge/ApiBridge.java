@@ -75,9 +75,43 @@ public final class ApiBridge implements InternalAPIBridge {
         return new RegistryValues.Legacy<>((RegistryValues.GameRuleImpl<M>) r, a, b, c);
     }
     @Override public Set<Pose> validMannequinPoses() { throw todo("validMannequinPoses"); }
-    @Override public PoiType.Occupancy createOccupancy(String s) { throw todo("createOccupancy"); }
     @Override public DamageSource.Builder createDamageSourceBuilder(DamageType t) { return Events.sourceBuilder(t); }
-    @Override public DamageEffect getDamageEffect(String s) { throw todo("getDamageEffect"); }
+    private static final java.util.Map<String, DamageEffect> DAMAGE_EFFECTS = new java.util.HashMap<>();
+    private static final java.util.Map<String, PoiType.Occupancy> OCCUPANCIES = new java.util.HashMap<>();
+
+    @Override public DamageEffect getDamageEffect(String s) {
+        return DAMAGE_EFFECTS.computeIfAbsent(s, name -> new DamageEffectImpl(switch (name) {
+            case "hurt" -> () -> org.bukkit.Sound.ENTITY_PLAYER_HURT;
+            case "thorns" -> () -> org.bukkit.Sound.ENCHANT_THORNS_HIT;
+            case "drowning" -> () -> org.bukkit.Sound.ENTITY_PLAYER_HURT_DROWN;
+            case "burning" -> () -> org.bukkit.Sound.ENTITY_PLAYER_HURT_ON_FIRE;
+            case "poking" -> () -> org.bukkit.Sound.ENTITY_PLAYER_HURT_SWEET_BERRY_BUSH;
+            case "freezing" -> () -> org.bukkit.Sound.ENTITY_PLAYER_HURT_FREEZE;
+            default -> throw new IllegalArgumentException("Unknown damage effect: " + name);
+        }));
+    }
+
+    /** Звук резолвится лениво: константы {@code Sound}
+     * требуют загруженного реестра. */
+    private record DamageEffectImpl(java.util.function.Supplier<org.bukkit.Sound> sound)
+            implements DamageEffect {
+        @Override public org.bukkit.Sound getSound() {
+            return this.sound.get();
+        }
+    }
+
+    @Override public PoiType.Occupancy createOccupancy(String s) {
+        return OCCUPANCIES.computeIfAbsent(s, name -> switch (name) {
+            case "HAS_SPACE", "IS_OCCUPIED", "ANY" -> new OccupancyImpl(name);
+            default -> throw new IllegalArgumentException("Unknown occupancy: " + name);
+        });
+    }
+
+    private record OccupancyImpl(String name) implements PoiType.Occupancy {
+        @Override public String toString() {
+            return this.name;
+        }
+    }
     @Override public String getTranslationKey(EntityType t) {
         // Ваниль: `EntityType.getDescriptionId()` = "entity.<namespace>.<path>".
         NamespacedKey key = t.getKey();
