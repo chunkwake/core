@@ -34,6 +34,14 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             return;
         }
         getServer().getPluginManager().registerEvents(this, this);
+        var zombieType = org.bukkit.entity.EntityType.ZOMBIE;
+        getLogger().info("default attributes: zombie has=" + zombieType.hasDefaultAttributes()
+                + " hp=" + zombieType.getDefaultAttributes()
+                        .getAttribute(org.bukkit.attribute.Attribute.MAX_HEALTH).getValue()
+                + " attack=" + zombieType.getDefaultAttributes()
+                        .getAttribute(org.bukkit.attribute.Attribute.ATTACK_DAMAGE).getValue()
+                + " cow hp=" + org.bukkit.entity.EntityType.COW.getDefaultAttributes()
+                        .getAttribute(org.bukkit.attribute.Attribute.MAX_HEALTH).getValue());
         foliaProbe();
         ItemStack bread = new ItemStack(Material.BREAD, 3);
         getLogger().info("item api: " + bread.getType() + " x" + bread.getAmount() + " max " + bread.getMaxStackSize());

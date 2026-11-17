@@ -121,8 +121,24 @@ public final class ApiBridge implements InternalAPIBridge {
         return EntityCategories.of(t.name());
     }
     @Override public ItemStack deserializeItem(byte[] b) { throw todo("deserializeItem"); }
-    @Override public boolean hasDefaultEntityAttributes(NamespacedKey k) { throw todo("hasDefaultEntityAttributes"); }
-    @Override public Attributable getDefaultEntityAttributes(NamespacedKey k) { throw todo("getDefaultEntityAttributes"); }
+    @Override public boolean hasDefaultEntityAttributes(NamespacedKey k) {
+        String name = entityName(k);
+        return name != null && DefaultAttributeValues.has(name);
+    }
+
+    @Override public Attributable getDefaultEntityAttributes(NamespacedKey k) {
+        String name = entityName(k);
+        return name == null ? null : DefaultAttributeValues.create(name);
+    }
+
+    private static String entityName(NamespacedKey key) {
+        for (EntityType type : EntityType.values()) {
+            if (type != EntityType.UNKNOWN && type.getKey().equals(key)) {
+                return type.name();
+            }
+        }
+        return null;
+    }
     @Override public String getStatisticCriteriaKey(Statistic s) { throw todo("getStatisticCriteriaKey"); }
     @Override public ItemStack createEmptyStack() { return new StackImpl(org.bukkit.Material.AIR, 0); }
     @Override public Component resolveWithContext(Component c, CommandSender s, Entity e, boolean b) { return c; }

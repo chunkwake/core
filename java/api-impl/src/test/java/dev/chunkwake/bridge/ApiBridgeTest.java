@@ -1,7 +1,9 @@
 package dev.chunkwake.bridge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.papermc.paper.InternalAPIBridge;
 import org.bukkit.entity.EntityType;
@@ -54,6 +56,36 @@ class ApiBridgeTest {
                 BRIDGE.createOccupancy("IS_OCCUPIED"));
         assertEquals(io.papermc.paper.entity.poi.PoiType.Occupancy.ANY,
                 BRIDGE.createOccupancy("ANY"));
+    }
+
+    @Test
+    void defaultEntityAttributesMatchVanilla() {
+        // Значения из декомпилированного `Zombie.createAttributes`/«Cow».
+        var zombie = DefaultAttributeValues.raw("ZOMBIE");
+        assertEquals(20.0, zombie.get("max_health"));
+        assertEquals(3.0, zombie.get("attack_damage"));
+        assertEquals(2.0, zombie.get("armor"));
+        assertEquals(35.0, zombie.get("follow_range"));
+        assertEquals(0.23, zombie.get("movement_speed"));
+        var cow = DefaultAttributeValues.raw("COW");
+        assertEquals(10.0, cow.get("max_health"));
+        assertEquals(0.2, cow.get("movement_speed"));
+        assertEquals(100.0, DefaultAttributeValues.raw("IRON_GOLEM").get("max_health"));
+        assertEquals(20.0, DefaultAttributeValues.raw("CREEPER").get("max_health"));
+        assertTrue(EntityType.ZOMBIE.hasDefaultAttributes());
+        assertFalse(EntityType.ITEM.hasDefaultAttributes());
+    }
+
+    @Test
+    void defaultAttributeTableHasAllLivingTypes() {
+        for (EntityType type : EntityType.values()) {
+            if (type == EntityType.UNKNOWN) {
+                continue;
+            }
+            boolean living = type.getEntityClass() != null
+                    && org.bukkit.entity.LivingEntity.class.isAssignableFrom(type.getEntityClass());
+            assertEquals(living, type.hasDefaultAttributes(), type.name());
+        }
     }
 
     @Test
