@@ -162,5 +162,30 @@ public final class ApiBridge implements InternalAPIBridge {
     private record PersistentDataKeyImpl<C>(NamespacedKey key, PersistentDataType<?, C> dataType)
             implements PersistentDataKey<C> {
     }
-    @Override public EnchantmentOffer[] rollEnchantmentOffers(ItemStack i, int a, int b, int c) { throw todo("rollEnchantmentOffers"); }
+    @Override public EnchantmentOffer[] rollEnchantmentOffers(ItemStack item, int seed, int bookshelves, int amount) {
+        if (item == null || item.getType().isAir() || amount <= 0) {
+            return new EnchantmentOffer[0];
+        }
+        String reply = Registries.world("enchant offers " + item.getType().getKey() + " " + seed + " "
+                + bookshelves);
+        EnchantmentOffer[] offers = new EnchantmentOffer[amount];
+        String[] lines = reply.split("\n");
+        for (int i = 0; i < amount && i < lines.length; i++) {
+            String[] fields = lines[i].split(" ", 3);
+            if (fields.length < 3) {
+                continue;
+            }
+            int cost = Integer.parseInt(fields[0]);
+            int level = Integer.parseInt(fields[1]);
+            if (cost <= 0 || "-".equals(fields[2])) {
+                continue;
+            }
+            org.bukkit.enchantments.Enchantment enchantment = org.bukkit.Registry.ENCHANTMENT
+                    .get(NamespacedKey.fromString(fields[2]));
+            if (enchantment != null) {
+                offers[i] = new EnchantmentOffer(enchantment, level, cost);
+            }
+        }
+        return offers;
+    }
 }

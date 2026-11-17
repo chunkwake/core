@@ -4706,6 +4706,9 @@ impl PlayPlan {
         if let Some(rest) = line.strip_prefix("attr ") {
             return self.plugin_attribute(rest);
         }
+        if let Some(rest) = line.strip_prefix("enchant ") {
+            return self.plugin_enchant(rest);
+        }
         if line == "tps" {
             return self.tick_meter_line();
         }
@@ -24125,6 +24128,36 @@ impl PlayPlan {
 
     /// Варианты стола для предмета в окне (зачарованный или незачаряемый — пусто)
     /// и число полок.
+    /// `EnchantmentOffer.rollEnchantmentOffers` (плагины): три
+    /// предложения для стола. Формат строки:
+    /// `offers <item> <seed> <shelves>`, ответ — три строки
+    /// `<cost> <level> <enchantment>`, где `0 0 -` — слот недоступен.
+    pub(crate) fn plugin_enchant(&self, line: &str) -> String {
+        let mut it = line.split_whitespace();
+        let (Some("offers"), Some(item), Some(seed), Some(shelves)) =
+            (it.next(), it.next(), it.next(), it.next())
+        else {
+            return String::new();
+        };
+        let (Ok(seed), Ok(shelves)) = (seed.parse::<i32>(), shelves.parse::<i32>()) else {
+            return String::new();
+        };
+        let offer = crate::enchanting::offer(&self.survival.enchanting, item, shelves, seed);
+        let mut out = Vec::with_capacity(3);
+        for (slot, &cost) in offer.costs.iter().enumerate() {
+            if cost > 0 && offer.clue[slot] >= 0 {
+                out.push(format!(
+                    "{cost} {} {}",
+                    offer.level[slot],
+                    self.enchant_name(offer.clue[slot])
+                ));
+            } else {
+                out.push("0 0 -".to_owned());
+            }
+        }
+        out.join("\n")
+    }
+
     fn enchant_offer(&self, w: &Window, seed: i32) -> (crate::enchanting::Offer, i32) {
         let none = crate::enchanting::Offer {
             clue: [-1; 3],

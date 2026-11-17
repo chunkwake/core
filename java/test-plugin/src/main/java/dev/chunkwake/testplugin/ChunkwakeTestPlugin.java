@@ -42,6 +42,57 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
                         .getAttribute(org.bukkit.attribute.Attribute.ATTACK_DAMAGE).getValue()
                 + " cow hp=" + org.bukkit.entity.EntityType.COW.getDefaultAttributes()
                         .getAttribute(org.bukkit.attribute.Attribute.MAX_HEALTH).getValue());
+        var offers = org.bukkit.enchantments.EnchantmentOffer.rollEnchantmentOffers(
+                new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND_SWORD), 12345, 15, 3);
+        StringBuilder enchantLog = new StringBuilder("enchant offers:");
+        for (var offer : offers) {
+            enchantLog.append(' ').append(offer == null ? "-"
+                    : offer.getEnchantment().getKey() + "/" + offer.getEnchantmentLevel() + "@"
+                            + offer.getCost());
+        }
+        getLogger().info(enchantLog.toString());
+        // Проверка совместимости: все Material проходят isBlock/isTransparent/getKey
+        // без исключений, как у CraftBukkit.
+        int transparent = 0;
+        int errors = 0;
+        StringBuilder bad = new StringBuilder();
+        for (org.bukkit.Material material : org.bukkit.Material.values()) {
+            try {
+                if (material.isTransparent()) {
+                    transparent++;
+                }
+                material.isBlock();
+                material.isItem();
+                if (!material.isLegacy()) {
+                    material.getKey();
+                }
+            } catch (Throwable error) {
+                errors++;
+                if (bad.length() < 200) {
+                    bad.append(' ').append(material).append('=').append(error.getClass().getSimpleName());
+                }
+            }
+        }
+        getLogger().info("materials: transparent=" + transparent + " errors=" + errors + bad
+                + " stone.transparent=" + org.bukkit.Material.STONE.isTransparent()
+                + " air.transparent=" + org.bukkit.Material.AIR.isTransparent());
+        getLogger().info("legacy: stone->" + getServer().getUnsafe()
+                        .fromLegacy(org.bukkit.Material.LEGACY_STONE)
+                + " grass->" + getServer().getUnsafe().fromLegacy(org.bukkit.Material.LEGACY_GRASS)
+                + " wool15->" + getServer().getUnsafe().fromLegacy(
+                        new org.bukkit.material.MaterialData(org.bukkit.Material.LEGACY_WOOL, (byte) 15))
+                + " lily->" + getServer().getUnsafe()
+                        .fromLegacy(org.bukkit.Material.LEGACY_WATER_LILY));
+        {
+            // BlockData: запись/чтение состояния и каст к `Waterlogged`, как у Paper.
+            org.bukkit.World w = getServer().getWorlds().get(0);
+            org.bukkit.block.Block b = w.getBlockAt(50, 100, 0);
+            b.setType(org.bukkit.Material.STONE);
+            b.setBlockData(getServer().createBlockData("minecraft:oak_stairs[waterlogged=true]"));
+            org.bukkit.block.data.BlockData data = w.getBlockAt(50, 100, 0).getBlockData();
+            boolean waterlogged = data instanceof org.bukkit.block.data.Waterlogged wl && wl.isWaterlogged();
+            getLogger().info("block data: " + data.getAsString() + " waterlogged=" + waterlogged);
+        }
         foliaProbe();
         ItemStack bread = new ItemStack(Material.BREAD, 3);
         getLogger().info("item api: " + bread.getType() + " x" + bread.getAmount() + " max " + bread.getMaxStackSize());
@@ -131,7 +182,9 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             getLogger().info("fluids: flow=" + w.getBlockAt(33, 200, 2).getType() + " fall=" + w.getBlockAt(33, 199, 5).getType() + " edge=" + w.getBlockAt(33, 200, 4).getType()
                     + " meet=" + w.getBlockAt(40, 200, 0).getType()
                     + " logged=" + w.getBlockAt(50, 200, 1).getType() + "/" + w.getBlockAt(52, 200, 0).getType()
-                    + " " + ((org.bukkit.block.data.Waterlogged) w.getBlockAt(50, 200, 0).getBlockData()).isWaterlogged());
+                    + " " + w.getBlockAt(50, 200, 0).getBlockData().getAsString()
+                    + " waterlogged=" + (w.getBlockAt(50, 200, 0).getBlockData()
+                            instanceof org.bukkit.block.data.Waterlogged wl && wl.isWaterlogged()));
         }, 140);
         getServer().getScheduler().runTaskLater(this, () -> getLogger().info("hopper: moves=" + hopperMoves + " pickups=" + hopperPickups), 120);
         getServer().getScheduler().runTaskLater(this, () -> {

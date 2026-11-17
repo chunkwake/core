@@ -101,6 +101,36 @@ class ApiBridgeTest {
     }
 
     @Test
+    void legacyMaterialsConvertLikeCraftBukkit() {
+        // CraftLegacy.modernize: имя без `LEGACY_`, переименования и data-цвета.
+        assertEquals(org.bukkit.Material.STONE,
+                LegacyMaterials.modernize(new org.bukkit.material.MaterialData(
+                        org.bukkit.Material.LEGACY_STONE), true));
+        assertEquals(org.bukkit.Material.SHORT_GRASS,
+                LegacyMaterials.modernize(new org.bukkit.material.MaterialData(
+                        org.bukkit.Material.LEGACY_GRASS), true));
+        assertEquals(org.bukkit.Material.LILY_PAD,
+                LegacyMaterials.modernize(new org.bukkit.material.MaterialData(
+                        org.bukkit.Material.LEGACY_WATER_LILY), true));
+        assertEquals(org.bukkit.Material.OAK_STAIRS,
+                LegacyMaterials.modernize(new org.bukkit.material.MaterialData(
+                        org.bukkit.Material.LEGACY_WOOD_STAIRS), true));
+        assertEquals(org.bukkit.Material.BLACK_WOOL,
+                LegacyMaterials.modernize(new org.bukkit.material.MaterialData(
+                        org.bukkit.Material.LEGACY_WOOL, (byte) 15), true));
+        assertEquals(org.bukkit.Material.RED_STAINED_GLASS,
+                LegacyMaterials.modernize(new org.bukkit.material.MaterialData(
+                        org.bukkit.Material.LEGACY_STAINED_GLASS, (byte) 14), true));
+        assertEquals(org.bukkit.Material.COOKED_SALMON,
+                LegacyMaterials.modernize(new org.bukkit.material.MaterialData(
+                        org.bukkit.Material.LEGACY_COOKED_FISH, (byte) 1), false));
+        // Неизвестный legacy-блок не `null` (иначе `Material.asBlockType` падает).
+        assertEquals(org.bukkit.Material.STONE,
+                LegacyMaterials.modernize(new org.bukkit.material.MaterialData(
+                        org.bukkit.Material.LEGACY_STONE), true));
+    }
+
+    @Test
     void persistentDataKeyWrapsKeyAndType() {
         io.papermc.paper.persistence.PersistentDataKey<String> dataKey =
                 io.papermc.paper.persistence.PersistentDataKey.of(

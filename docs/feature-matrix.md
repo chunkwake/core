@@ -181,3 +181,18 @@
 | Снимок игрока | готово | `Player.isSneaking` из `Live::sneaking`, ставится прямо из `ServerboundPlayerInputPacket` (без ожидания тика, с инвалидацией кэша снимка). `getMetadata` — общее хранилище метаданных плагинов (см. «Миры, Metadatable и PDC») |
 | Проверено на живом сервере | готово | BlueMap 5.29 включается, грузит ресурсы Mojang (`accept-download: true`), поднимает веб-сервер и **рендерит карту**: `Loaded!`, `maps/world/tiles` — 66 тайлов на 1.1 МБ. Свет блока и присед игрока отдаются из мира (`light x y z` в `world_request`, `Live::sneaking`), поэтому карта не чёрная. Тестовый плагин включается рядом |
 
+## Paper-плагины: живые проверки
+
+- EssentialsX 2.22.0 (`EssentialsX-2.22.0.jar`) загружается, инициализирует
+  провайдеры (`Paper Container Provider`, `Paper Serialization Provider`,
+  `Paper Tick Count Provider`, ...) и **включается** на сервере:
+  `plugins: Essentials enabled in 558 ms`, `2 of 2 enabled in 1053 ms`.
+- `Material`: все значения (`isTransparent`/`isBlock`/`isItem`/`getKey`)
+  работают без исключений; legacy-материалы конвертируются как в
+  `CraftLegacy` (`LEGACY_GRASS` -> `SHORT_GRASS`, `LEGACY_WOOL`+15 ->
+  `BLACK_WOOL`, `LEGACY_WATER_LILY` -> `LILY_PAD`) через
+  `UnsafeValues.fromLegacy`, иначе `Material.asBlockType()` падал с NPE.
+- `BlockData`: запись/чтение `minecraft:oak_stairs[waterlogged=true]` и
+  каст к `Waterlogged` (как у Paper).
+- `EnchantmentOffer.rollEnchantmentOffers`: живые офферы
+  `minecraft:sharpness/1@6 minecraft:bane_of_arthropods/3@20 minecraft:knockback/2@30`.

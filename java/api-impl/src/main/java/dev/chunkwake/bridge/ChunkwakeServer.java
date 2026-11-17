@@ -206,11 +206,47 @@ final class ChunkwakeServer {
     }
 
     /** {@code UnsafeValues}: только версии, их спрашивают ViaVersion и ProtocolLib. */
+    @SuppressWarnings("deprecation")
     public static final class Unsafe {
         static final int PROTOCOL = 777;
         public int getProtocolVersion() { return PROTOCOL; }
         static final int DATA_VERSION = 5023;
         public int getDataVersion() { return DATA_VERSION; }
+
+        /** `Material.asBlockType()` для legacy-констант: без этого `isBlock()` падал. */
+        public org.bukkit.Material fromLegacy(org.bukkit.Material type) {
+            if (type == null || !type.isLegacy()) {
+                return type;
+            }
+            return LegacyMaterials.modernize(type, type.getId() < 256);
+        }
+
+        public org.bukkit.Material fromLegacy(org.bukkit.material.MaterialData data) {
+            return fromLegacy(data, false);
+        }
+
+        public org.bukkit.Material fromLegacy(org.bukkit.material.MaterialData data,
+                boolean legacyName) {
+            if (data == null || data.getItemType() == null) {
+                return null;
+            }
+            org.bukkit.Material type = data.getItemType();
+            if (!type.isLegacy()) {
+                return type;
+            }
+            if (legacyName) {
+                return type;
+            }
+            return LegacyMaterials.modernize(data, type.getId() < 256);
+        }
+
+        public org.bukkit.Material toLegacy(org.bukkit.Material type) {
+            return type;
+        }
+
+        public org.bukkit.Material getMaterial(String name, int data) {
+            return org.bukkit.Material.matchMaterial(name);
+        }
     }
 
     /** Загружает jar из каталога и включает плагины. Возвращает число включённых. */
