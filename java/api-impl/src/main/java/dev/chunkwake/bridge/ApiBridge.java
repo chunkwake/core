@@ -78,8 +78,14 @@ public final class ApiBridge implements InternalAPIBridge {
     @Override public PoiType.Occupancy createOccupancy(String s) { throw todo("createOccupancy"); }
     @Override public DamageSource.Builder createDamageSourceBuilder(DamageType t) { return Events.sourceBuilder(t); }
     @Override public DamageEffect getDamageEffect(String s) { throw todo("getDamageEffect"); }
-    @Override public String getTranslationKey(EntityType t) { throw todo("getTranslationKey"); }
-    @Override public SpawnCategory getSpawnCategory(EntityType t) { throw todo("getSpawnCategory"); }
+    @Override public String getTranslationKey(EntityType t) {
+        // Ваниль: `EntityType.getDescriptionId()` = "entity.<namespace>.<path>".
+        NamespacedKey key = t.getKey();
+        return "entity." + key.getNamespace() + "." + key.getKey();
+    }
+    @Override public SpawnCategory getSpawnCategory(EntityType t) {
+        return EntityCategories.of(t.name());
+    }
     @Override public ItemStack deserializeItem(byte[] b) { throw todo("deserializeItem"); }
     @Override public boolean hasDefaultEntityAttributes(NamespacedKey k) { throw todo("hasDefaultEntityAttributes"); }
     @Override public Attributable getDefaultEntityAttributes(NamespacedKey k) { throw todo("getDefaultEntityAttributes"); }
