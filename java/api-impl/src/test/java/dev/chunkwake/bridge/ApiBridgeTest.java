@@ -57,6 +57,16 @@ class ApiBridgeTest {
     }
 
     @Test
+    void persistentDataKeyWrapsKeyAndType() {
+        io.papermc.paper.persistence.PersistentDataKey<String> dataKey =
+                io.papermc.paper.persistence.PersistentDataKey.of(
+                        net.kyori.adventure.key.Key.key("chunkwake", "probe"),
+                        org.bukkit.persistence.PersistentDataType.STRING);
+        assertEquals("chunkwake:probe", dataKey.key().toString());
+        assertEquals(org.bukkit.persistence.PersistentDataType.STRING, dataKey.dataType());
+    }
+
+    @Test
     void categoryTableCoversVanillaAndHasNoStaleNames() {
         // 160 записей из {@code EntityTypes} ванильного ядра 26.3.
         assertEquals(160, EntityCategories.size());

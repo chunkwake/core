@@ -127,6 +127,12 @@ public final class ApiBridge implements InternalAPIBridge {
     @Override public ItemStack createEmptyStack() { return new StackImpl(org.bukkit.Material.AIR, 0); }
     @Override public Component resolveWithContext(Component c, CommandSender s, Entity e, boolean b) { return c; }
     @Override public ComponentFlattener componentFlattener() { return ComponentFlattener.basic(); }
-    @Override public <C> PersistentDataKey<C> createPersistentDataKey(Key k, PersistentDataType<?, C> t) { throw todo("createPersistentDataKey"); }
+    @Override public <C> PersistentDataKey<C> createPersistentDataKey(Key k, PersistentDataType<?, C> t) {
+        return new PersistentDataKeyImpl<>(new NamespacedKey(k.namespace(), k.value()), t);
+    }
+
+    private record PersistentDataKeyImpl<C>(NamespacedKey key, PersistentDataType<?, C> dataType)
+            implements PersistentDataKey<C> {
+    }
     @Override public EnchantmentOffer[] rollEnchantmentOffers(ItemStack i, int a, int b, int c) { throw todo("rollEnchantmentOffers"); }
 }
