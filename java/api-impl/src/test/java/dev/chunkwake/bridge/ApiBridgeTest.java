@@ -152,6 +152,22 @@ class ApiBridgeTest {
     }
 
     @Test
+    void offlinePlayersAndDisplayNames() {
+        // Юнит-тесты не поднимают Bukkit-сервер: проверяем сам серверный класс.
+        var server = new ChunkwakeServer(java.nio.file.Path.of("."));
+        var offline = server.getOfflinePlayer("Steve");
+        assertEquals("Steve", offline.getName());
+        assertFalse(offline.isOnline());
+        assertNotNull(offline.getUniqueId());
+        // Тот же UUID для того же имени (offline-режим, как у ванили).
+        assertEquals(offline.getUniqueId(), server.getOfflinePlayer("Steve").getUniqueId());
+        assertEquals(null, server.getOfflinePlayerIfCached("Nobody"));
+        assertEquals(java.util.UUID.nameUUIDFromBytes(
+                        "OfflinePlayer:Steve".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                offline.getUniqueId());
+    }
+
+    @Test
     void jsonSimpleIsAvailableForPlugins() {
         // CraftBukkit поставляет json-simple; Vault и старые экономики его ждут.
         Object parsed = org.json.simple.JSONValue.parse(

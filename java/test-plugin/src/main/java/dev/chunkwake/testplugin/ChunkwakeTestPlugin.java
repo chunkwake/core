@@ -119,6 +119,13 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             getLogger().info("mannequin profile: " + io.papermc.paper.InternalAPIBridge.get()
                     .defaultMannequinProfile());
         }
+        {
+            org.bukkit.World w = getServer().getWorlds().get(0);
+            long before = w.getTime();
+            w.setTime(6000);
+            getLogger().info("world time: before=" + before + " after=" + w.getTime()
+                    + " day=" + w.isDayTime() + " full=" + w.getFullTime());
+        }
         foliaProbe();
         ItemStack bread = new ItemStack(Material.BREAD, 3);
         getLogger().info("item api: " + bread.getType() + " x" + bread.getAmount() + " max " + bread.getMaxStackSize());
@@ -254,6 +261,17 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
     }
 
     // --- вход, кик, телепорт, респавн, слот, присед, бег ---
+
+    @EventHandler
+    public void onServiceRegister(org.bukkit.event.server.ServiceRegisterEvent event) {
+        getLogger().info("service: " + event.getProvider().getService().getName() + " <- "
+                + event.getProvider().getPlugin().getName());
+    }
+
+    @EventHandler
+    public void onServiceUnregister(org.bukkit.event.server.ServiceUnregisterEvent event) {
+        getLogger().info("service removed: " + event.getProvider().getService().getName());
+    }
 
     @EventHandler
     public void onPreLogin(org.bukkit.event.player.AsyncPlayerPreLoginEvent e) {

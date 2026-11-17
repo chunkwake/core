@@ -512,10 +512,16 @@ final class ChunkwakeServer {
     /** Игроки между {@code PlayerLoginEvent} и входом: тот же объект уходит в {@code join}. */
     final Map<UUID, PlayerImpl> logins = new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** Имена входов: нужны `getOfflinePlayer`/`OfflinePlayer.getName`. */
+    private final Map<UUID, String> knownNames = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Map<UUID, Long> seen = new java.util.concurrent.ConcurrentHashMap<>();
+
     void join(UUID id, String name) {
         PlayerImpl pending = logins.remove(id);
         PlayerImpl p = pending != null ? pending : new PlayerImpl(this, id, name);
         p.online = true;
+        knownNames.put(id, name);
+        seen.put(id, System.currentTimeMillis());
         online.put(id, p);
         Component msg = Component.translatable("multiplayer.player.joined", NamedTextColor.YELLOW,
                 Component.text(name));
@@ -544,6 +550,8 @@ final class ChunkwakeServer {
                 p.kicked ? PlayerQuitEvent.QuitReason.KICKED : PlayerQuitEvent.QuitReason.DISCONNECTED);
         plugins.callEvent(e);
         online.remove(id);
+        knownNames.put(id, p.name);
+        seen.put(id, System.currentTimeMillis());
         p.online = false;
         if (e.quitMessage() != null) {
             announce(e.quitMessage());
@@ -890,6 +898,78 @@ final class ChunkwakeServer {
     public Player getPlayer(UUID id) {
         PlayerImpl p = online.get(id);
         return p == null ? null : p.api;
+    }
+
+    /** `Server.getOfflinePlayer(UUID)`: онлайн-игрок или офлайн-обёртка. */
+    public org.bukkit.OfflinePlayer getOfflinePlayer(UUID id) {
+        Player online = getPlayer(id);
+        if (online != null) {
+            return online;
+        }
+        return new OfflinePlayerImpl(this, id, knownNames.get(id)).api;
+    }
+
+    /** `Server.getOfflinePlayer(String)`: как в offline-режиме (`OfflinePlayer:<имя>`). */
+    public org.bukkit.OfflinePlayer getOfflinePlayer(String name) {
+        Player online = getPlayerExact(name);
+        if (online != null) {
+            return online;
+        }
+        for (Map.Entry<UUID, String> e : knownNames.entrySet()) {
+            if (e.getValue().equalsIgnoreCase(name)) {
+                return new OfflinePlayerImpl(this, e.getKey(), e.getValue()).api;
+            }
+        }
+        UUID id = UUID.nameUUIDFromBytes(
+                ("OfflinePlayer:" + name).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        knownNames.put(id, name);
+        return new OfflinePlayerImpl(this, id, name).api;
+    }
+
+    /** `Server.getOfflinePlayerIfCached(String)`: только известные имена. */
+    public org.bukkit.OfflinePlayer getOfflinePlayerIfCached(String name) {
+        Player online = getPlayerExact(name);
+        if (online != null) {
+            return online;
+        }
+        for (Map.Entry<UUID, String> e : knownNames.entrySet()) {
+            if (e.getValue().equalsIgnoreCase(name)) {
+                return new OfflinePlayerImpl(this, e.getKey(), e.getValue()).api;
+            }
+        }
+        return null;
+    }
+
+    public org.bukkit.OfflinePlayer[] getOfflinePlayers() {
+        java.util.List<org.bukkit.OfflinePlayer> out = new java.util.ArrayList<>();
+        for (Map.Entry<UUID, String> e : knownNames.entrySet()) {
+            if (getPlayer(e.getKey()) == null) {
+                out.add(new OfflinePlayerImpl(this, e.getKey(), e.getValue()).api);
+            }
+        }
+        return out.toArray(new org.bukkit.OfflinePlayer[0]);
+    }
+
+    /** Имя по UUID из кэша входов (для `OfflinePlayer.getName`). */
+    String nameOf(UUID id) {
+        PlayerImpl p = online.get(id);
+        return p != null ? p.name : knownNames.get(id);
+    }
+
+    boolean hasPlayed(UUID id) {
+        return knownNames.containsKey(id);
+    }
+
+    long lastSeen(UUID id) {
+        return seen.getOrDefault(id, 0L);
+    }
+
+    com.destroystokyo.paper.profile.PlayerProfile profile(UUID id, String name) {
+        return createProfile(id, name);
+    }
+
+    org.bukkit.profile.PlayerProfile bukkitProfile(UUID id, String name) {
+        return createProfile(id, name);
     }
 
     public Player getPlayerExact(String name) {

@@ -239,3 +239,24 @@
 - `org.json.simple` (`JSONValue`/`JSONObject`/`JSONArray`/`JSONParser`)
   добавлен как в CraftBukkit: без него Vault падал
   `NoClassDefFoundError: org/json/simple/JSONValue` в проверке обновлений.
+
+## Плагины: события плагинов, OfflinePlayer, время мира
+
+- `PluginManager` теперь посылает `PluginEnableEvent`/`PluginDisableEvent`
+  (как CraftBukkit). Без них Essentials не пересобирал
+  `PermissionsHandler` и падал `NPE` в join-таске; после фикса —
+  `[Essentials] Using superperms-based permissions.`
+- `Server.getOfflinePlayer(UUID/String)`, `getOfflinePlayerIfCached`,
+  `getOfflinePlayers` + `OfflinePlayer` (`getName`, `getUniqueId`,
+  `isOnline`, `hasPlayedBefore`, `getLastSeen`, `getPlayerProfile`).
+  Неизвестное имя — UUID как в offline-режиме
+  (`UUID.nameUUIDFromBytes("OfflinePlayer:<name>")`).
+- `Player`: `setDisplayName`/`getDisplayName`/`getPlayerListName`,
+  `getRespawnLocation(boolean)`/`setRespawnLocation`, `getFallDistance`,
+  `isSleepingIgnored`, `getLocale`, `isInWater`/`isInLava`/`isUnderWater`
+  (по состоянию блока в ногах/голове через `data x y z`).
+- `PlayerInventory.getViewers` — владелец инвентаря.
+- `World.getTime`/`getFullTime`/`setTime`/`isDayTime` (Rust `time`,
+  `gametime`, `settime`); живая проверка: `before=61 after=6000`.
+- В живом логе с EssentialsX + PlaceholderAPI + Vault больше нет
+  предупреждений `api: <метод> is not implemented`.

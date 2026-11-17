@@ -29,6 +29,8 @@ final class InventoryImpl {
     public int getSize() { return SIZE; }
     public InventoryType getType() { return InventoryType.PLAYER; }
     public HumanEntity getHolder() { return player.api; }
+    /** `PlayerInventory.getViewers`: свой инвентарь видит только владелец. */
+    public java.util.List<HumanEntity> getViewers() { return java.util.List.of(player.api); }
     public int getMaxStackSize() { return 99; }
 
     public ItemStack getItem(int index) {

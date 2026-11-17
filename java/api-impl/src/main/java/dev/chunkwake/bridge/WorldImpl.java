@@ -78,6 +78,31 @@ final class WorldImpl {
         };
     }
 
+    /** `World.getTime`: время суток 0..24000 (не путать с `getFullTime`). */
+    public long getTime() {
+        String value = request("time").trim();
+        return value.isEmpty() ? 0L : Math.floorMod(Long.parseLong(value), 24_000L);
+    }
+
+    /** `World.getFullTime`: полное игровое время (game time). */
+    public long getFullTime() {
+        String value = request("gametime").trim();
+        return value.isEmpty() ? 0L : Long.parseLong(value);
+    }
+
+    public boolean isDayTime() {
+        long time = getTime();
+        return time < 12_300L || time > 23_850L;
+    }
+
+    public void setTime(long time) {
+        request("settime " + Math.floorMod(time, 24_000L));
+    }
+
+    public void setFullTime(long time) {
+        request("settime " + Math.max(0L, time));
+    }
+
     public long getSeed() {
         String seed = Bridge.world("seed").trim();
         return seed.isEmpty() ? 0L : Long.parseLong(seed);

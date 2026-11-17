@@ -57,6 +57,9 @@ final class PluginManagerImpl {
         p.getLogger().info("Enabling " + p.getPluginMeta().getDisplayName());
         try {
             setEnabled(p, true);
+            // `JavaPlugin.setEnabled(true)` -> `PluginEnableEvent`: на него
+            // подписаны менеджеры разрешений (Essentials) и другие плагины.
+            callEvent(new org.bukkit.event.server.PluginEnableEvent(p));
         } catch (Throwable t) {
             if (!Internals.report(server.logger, p.getName(), "enabling", t)) {
                 server.logger.log(Level.SEVERE, "Error occurred while enabling " + p.getName(), t);
@@ -72,6 +75,7 @@ final class PluginManagerImpl {
         }
         p.getLogger().info("Disabling " + p.getPluginMeta().getDisplayName());
         setEnabledQuietly(p, false);
+        callEvent(new org.bukkit.event.server.PluginDisableEvent(p));
         server.scheduler().cancelTasks(p);
         server.folia().cancelTasks(p);
         server.metadata().removeAll(p);

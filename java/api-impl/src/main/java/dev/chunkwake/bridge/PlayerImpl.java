@@ -31,6 +31,16 @@ final class PlayerImpl {
     /** Права как у CraftBukkit: {@code PermissibleBase} над {@link #isOp()}. */
     private PermissibleBase perms;
     private boolean permsOp;
+    /** `Player.setDisplayName`/`setPlayerListName` (не в Rust: только витрина). */
+    private String display;
+    /** `Player.getRespawnLocation`: кровать/якорь, если плагин её задал. */
+    private org.bukkit.Location respawn;
+    /** `Player.setFallDistance`: витрина (Rust считает свою физику). */
+    private float fallDistance;
+    /** `Player.setSleepingIgnored`: не мешать спать (Essentials). */
+    private boolean sleepingIgnored;
+    /** `Player.getLocale`: клиентский язык (по умолчанию `en_us`). */
+    private String locale = "en_us";
 
     PlayerImpl(ChunkwakeServer server, UUID id, String name) {
         this.server = server;
@@ -95,8 +105,77 @@ final class PlayerImpl {
     }
     public Set<PermissionAttachmentInfo> getEffectivePermissions() { return perms().getEffectivePermissions(); }
     public Component name() { return Component.text(name); }
-    public Component displayName() { return Component.text(name); }
-    public String getDisplayName() { return name; }
+    public Component displayName() { return Component.text(getDisplayName()); }
+    public String getDisplayName() { return display != null ? display : name; }
+    public void setDisplayName(String display) {
+        this.display = display;
+    }
+    public String getPlayerListName() { return getDisplayName(); }
+    public void setPlayerListName(String name) {
+        this.display = name;
+    }
+
+    /** `Player.getRespawnLocation(boolean)`: точка возрождения (кровать/якорь). */
+    public org.bukkit.Location getRespawnLocation(boolean loadLocationAndValidate) {
+        return respawn;
+    }
+
+    public void setRespawnLocation(org.bukkit.Location location, boolean force) {
+        this.respawn = location;
+    }
+
+    public void setBedSpawnLocation(org.bukkit.Location location, boolean force) {
+        this.respawn = location;
+    }
+
+    public float getFallDistance() { return this.fallDistance; }
+
+    public void setFallDistance(float distance) { this.fallDistance = distance; }
+
+    public boolean isSleepingIgnored() { return this.sleepingIgnored; }
+
+    public void setSleepingIgnored(boolean ignored) { this.sleepingIgnored = ignored; }
+
+    public String getLocale() { return this.locale; }
+
+    public void setLocale(String locale) {
+        this.locale = locale == null ? "en_us" : locale;
+    }
+
+    /** `Player.isInWater`: вода или waterlogged-блок в ногах/голове. */
+    public boolean isInWater() {
+        return inFluid("minecraft:water");
+    }
+
+    public boolean isInLava() {
+        return inFluid("minecraft:lava");
+    }
+
+    public boolean isUnderWater() {
+        if (online) {
+            // Верх головы чуть ниже глаз: если и там вода — игрок под водой.
+            return inFluidAt(0.0, 0.1, "minecraft:water");
+        }
+        return false;
+    }
+
+    private boolean inFluid(String fluid) {
+        return inFluidAt(0.0, 0.0, fluid) || inFluidAt(0.0, 0.9, fluid);
+    }
+
+    private boolean inFluidAt(double dx, double dy, String fluid) {
+        WorldImpl world = WorldImpl.of(getWorld());
+        if (world == null || !online) {
+            return false;
+        }
+        var st = state();
+        int x = (int) Math.floor(st.x() + dx);
+        int y = (int) Math.floor(st.y() + dy);
+        int z = (int) Math.floor(st.z());
+        String data = WorldImpl.request(world.api, "data " + x + " " + y + " " + z);
+        return data.startsWith(fluid + "[") || data.equals(fluid)
+                || (fluid.equals("minecraft:water") && data.contains("waterlogged=true"));
+    }
 
     public void sendMessage(String message) {
         sendMessage(ChunkwakeServer.legacy(message));

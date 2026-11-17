@@ -4674,7 +4674,22 @@ impl PlayPlan {
         // `pdc <uuid> <json>` — заменить (уходит в `playerdata`).
                 // `itemfromnbt <hex>` -> строка стека (`item count [json]`): формат
         // `CraftItemStack.deserializeBytes` (gzip-NBT `ItemStack.CODEC`).
-        if let Some(rest) = line.strip_prefix("itemfromnbt ") {
+                // `time` / `gametime` -> `World.getTime`/`getFullTime`;
+        // `settime <ticks>` -> `World.setTime` (в пределах суток).
+        if line == "time" {
+            return self.day_time().to_string();
+        }
+        if line == "gametime" {
+            return self.game_time().to_string();
+        }
+        if let Some(rest) = line.strip_prefix("settime ") {
+            let Ok(ticks) = rest.trim().parse::<i64>() else {
+                return String::new();
+            };
+            self.set_day_time(ticks);
+            return "1".into();
+        }
+if let Some(rest) = line.strip_prefix("itemfromnbt ") {
             let line = crate::stack_nbt::unhex(rest.trim())
                 .and_then(|bytes| chunkwake_world::nbt::read_root(&bytes).ok())
                 .and_then(|root| crate::stack_nbt::from_nbt(&root, |n| self.item_id(n)))
