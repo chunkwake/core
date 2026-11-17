@@ -3426,6 +3426,10 @@ impl PlayPlan {
         let key = (x >> 4, z >> 4);
         let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
         self.wait_lent(self.dim_state(), key);
+        // Колонка могла быть выгружена (`unload_far`) и лежать на диске:
+        // поднимаем регион, иначе правка ляжет в шаблон и сотрёт всё, что
+        // было сохранено в этом чанке (баг «запись из плагина пропала»).
+        self.ensure_region(key.0, key.1);
         // Чанк шума появится при отправке игроку, а не из тика.
         // В шумовом мире чанк появляется при первом обращении: `/setblock` и
         // портал должны работать до того, как чанк дойдёт до игрока.
@@ -4055,6 +4059,7 @@ impl PlayPlan {
         let mut ready: FastSet<(i32, i32)> = FastSet::default();
         for key in keys {
             self.wait_lent(self.dim_state(), key);
+            self.ensure_region(key.0, key.1);
             if self.terrain().is_some()
                 && !self.dim_state().edited.read().unwrap().contains_key(&key)
             {
@@ -6448,10 +6453,21 @@ impl PlayPlan {
             let Some(updated) = columns.remove(&pos) else {
                 continue;
             };
-            // Ревизия прежнего столбца: свет — не правка, но кадр устарел.
+            // Пока шёл пересчёт, колонку могли создать или изменить
+            // (`setBlock` из плагина, физика): блоки новее снимка. Переносим
+            // только свет, правки не затираем.
+            if let Some(entry) = world.get_mut(&pos) {
+                entry.0.sky_light.clone_from(&updated.sky_light);
+                entry.0.block_light.clone_from(&updated.block_light);
+                entry.1 += 1;
+                frames.remove(&pos);
+                dirty.insert(pos);
+                resent.push(pos);
+                continue;
+            }
+            // Смена ревизии колонны: свет - не правка, но клиенту переслать.
             let revision = world.get(&pos).map_or(0, |e| e.1);
             let had = frames.remove(&pos).is_some();
-            // Свой чанк остаётся с ревизией 0: он не правлен, только посчитан.
             let revision = if revision != 0 || had {
                 dirty.insert(pos);
                 if had {
@@ -6463,11 +6479,14 @@ impl PlayPlan {
             };
             world.insert(pos, (updated, revision));
         }
-        // Незатронутые столбцы области тоже надо вернуть: их сняли на время
-        // пролива, и потерять их значило бы потерять чанк из мира.
+        // Незатронутые колонки возвращаем без изменений блоков.
         for (pos, column) in columns.drain() {
-            let revision = world.get(&pos).map_or(0, |e| e.1);
-            world.insert(pos, (column, revision));
+            if let Some(entry) = world.get_mut(&pos) {
+                entry.0.sky_light.clone_from(&column.sky_light);
+                entry.0.block_light.clone_from(&column.block_light);
+                continue;
+            }
+            world.insert(pos, (column, 0));
         }
         resent
     }

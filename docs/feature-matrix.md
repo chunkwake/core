@@ -196,3 +196,16 @@
   каст к `Waterlogged` (как у Paper).
 - `EnchantmentOffer.rollEnchantmentOffers`: живые офферы
   `minecraft:sharpness/1@6 minecraft:bane_of_arthropods/3@20 minecraft:knockback/2@30`.
+
+## Запись блоков из плагинов до входа игрока
+
+- `unload_far` выгружает чанки без игроков. Раньше `setBlock` после
+  выгрузки создавал колонку из шаблона (для flat-мира — просто шаблон),
+  и всё сохранённое в чанке терялось: правка из `onEnable` исчезала после
+  входа игрока (`/execute if block` не находил блок).
+- Исправлено: `set_block`/`set_blocks` поднимают регион с диска
+  (`ensure_region`) до создания колонки, а `commit_light` не заменяет
+  колонку, изменённую во время пересчёта света, а переносит только свет.
+- Регрессия: `crates/bots/examples/plugin_block_probe.rs` — плагин пишет
+  блок в `onEnable`, бот входит и проверяет `/execute if block`; проба
+  зелёная на чистом мире.
