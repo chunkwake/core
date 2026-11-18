@@ -1,13 +1,48 @@
 package net.minecraft.network.chat;
 
-import com.mojang.serialization.Codec;
-import com.mojang.serialization.SimpleCodec;
+import net.minecraft.network.chat.contents.objects.ObjectInfo;
 
-/** Минимальный NMS-компонент текста для ProtocolLib. */
+/** Минимальный NMS-компонент текста с методами, которые использует TAB. */
 public class Component {
+    protected String text = "";
+    protected Style style = Style.EMPTY;
+    protected ObjectInfo object;
+
+    public Component() {
+    }
+
+    public static MutableComponent literal(String text) {
+        return new MutableComponent(text);
+    }
+
+    public static MutableComponent translatable(String key) {
+        return new MutableComponent(key);
+    }
+
+    public static MutableComponent keybind(String keybind) {
+        return new MutableComponent(keybind);
+    }
+
+    public static MutableComponent object(ObjectInfo info) {
+        return new MutableComponent(info);
+    }
+
+    public String getString() {
+        return this.text;
+    }
+
+    public Style getStyle() {
+        return this.style;
+    }
+
+    public ObjectInfo objectInfo() {
+        return this.object;
+    }
+
     public static class Serializer {
         @SuppressWarnings({"rawtypes", "unchecked"})
-        public static final Codec<Component> CODEC = (Codec) SimpleCodec.INSTANCE;
+        public static final com.mojang.serialization.Codec<Component> CODEC =
+                (com.mojang.serialization.Codec) com.mojang.serialization.SimpleCodec.INSTANCE;
 
         private Serializer() {
         }

@@ -520,3 +520,32 @@ implemented` исчезло.
 Итог прогона: `11 of 12 enabled`; единственный незапустившийся —
 DecentHolograms (NMS-слой пакетов). Остаются также `World.getLoadedChunks`
 (WorldGuard warning) и TAB-инициализация.
+
+
+## DecentHolograms и TAB: 12/12 плагинов
+
+Добавлены NMS/классы, которых не хватало:
+
+- `org.bukkit.craftbukkit.entity.CraftPlayer` (наследник `CraftHumanEntity`)
+  с `getHandle()`; `PlayerImpl.api` теперь `CraftPlayer`.
+- `net.minecraft.server.level.ServerPlayer` (поле `connection`),
+  `ServerGamePacketListenerImpl`/`ServerCommonPacketListenerImpl`/
+  `ServerPlayerConnection`, `net.minecraft.network.Connection`
+  (`channel` через Netty `EmbeddedChannel`), `ServerLevel.ENTITY_COUNTER`.
+- chat/NMS для TAB: `Component`/`MutableComponent` (`literal`, `translatable`,
+  `keybind`, `object`), `Style`, `TextColor`, `FontDescription`,
+  `Identifier`, `ResolvableProfile`, `AtlasSprite`/`PlayerSprite`,
+  authlib `GameProfile`/`Property`/`PropertyMap`.
+
+Живой прогон:
+```
+[DecentHolograms] Detected PAPER 26.3, using NMS module v26_2.
+plugins: DecentHolograms enabled in 234 ms
+[TAB] Found NMS implementation: me.neznamy.tab.platforms.bukkit.paper_26_2.NMSImplementationProvider
+[TAB] Enabled in 117ms
+plugins: TAB enabled in 144 ms
+plugins: 12 of 12 enabled in 3807 ms
+```
+Остаётся `World.getLoadedChunks` (WorldGuard warning) и реальная отправка
+Java-пакетов в Rust (сейчас `ServerCommonPacketListenerImpl.send` — точка
+моста, без транспорта).

@@ -145,6 +145,20 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
         ItemStack bread = new ItemStack(Material.BREAD, 3);
         getLogger().info("item api: " + bread.getType() + " x" + bread.getAmount() + " max " + bread.getMaxStackSize());
         {
+            var tab = getServer().getPluginManager().getPlugin("TAB");
+            if (tab != null) {
+                try {
+                    Class<?> impl = Class.forName(
+                            "me.neznamy.tab.platforms.bukkit.paper_26_2.NMSImplementationProvider",
+                            true, tab.getClass().getClassLoader());
+                    impl.getConstructor().newInstance();
+                    getLogger().info("tab probe: ok");
+                } catch (Throwable error) {
+                    getLogger().log(java.util.logging.Level.WARNING, "tab probe", error);
+                }
+            }
+        }
+        {
             var lore = io.papermc.paper.datacomponent.item.ItemLore.lore()
                     .addLine(Component.text("line1")).build();
             var ench = io.papermc.paper.datacomponent.item.ItemEnchantments.itemEnchantments()
