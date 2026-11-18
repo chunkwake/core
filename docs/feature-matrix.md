@@ -825,3 +825,39 @@ Rust отдаёт в Java **каждый clientbound-пакет** (по имен
 
 Гейт 20 плагинов после включения моста: **19 of 20 enabled**, ошибок
 `NoSuchMethodError`/`VerifyError` нет.
+
+
+## Расширенный набор плагинов (27 jar'ов, 25 enabled)
+
+Проверены сборки под 26.3:
+
+| плагин | итог |
+|---|---|
+| SkinsRestorer 15.12.6 | enabled, вход/предупреждение без ошибок |
+| armor-stand-arms 2.7.1 | enabled |
+| WorldGuard 7.0.21 | enabled |
+| TPS HUD 2.0.0 | enabled, данные уходят клиенту |
+| SetHome 6.3 | enabled |
+| Zannagh's Armor Hider 0.14.6 | enabled |
+| ImageFrame 2026.1.5 | failed: собственный `NMSWrapper` V26_3 не создаётся |
+| Orebfuscator 5.6.2 | enabled |
+| VoxyServerSide 0.21.1 | failed: требует MC `<26.2-` (сам отключается) |
+
+Исправлено по ходу:
+
+- `Server.getTickTimes()` (TPS HUD: `ArrayIndexOutOfBounds` каждый тик);
+- `CommandSender.spigot()`/`Player.Spigot` (SkinsRestorer: NPE на
+  `BaseComponent`);
+- `Player.sendPluginMessage` без жёсткой проверки исходящего канала
+  (как CraftPlayer; TPS HUD шлёт `tpshud:tps` без регистрации);
+- `FriendlyByteBuf.writeLong/writeVarInt/writeUtf/...` — fluent-методы
+  (Axiom: `NoSuchMethodError: writeLong`);
+- `org.bukkit.craftbukkit.CraftWorld`, поле `CraftWorld` в `Level`
+  (ProtocolLib `BukkitConverters`);
+- `Registry`/`DefaultedRegistry` — теперь интерфейсы + `SimpleRegistry`/
+  `SimpleDefaultedRegistry`, `entrySet()`, `getTags()`;
+- `Block.getId/stateById` (static), `BuiltInRegistries.BLOCK` типа
+  `DefaultedRegistry`, `HolderSet$Named`, `ChunkAccess`,
+  `LevelChunkSection`, `ClientboundBlockUpdatePacket` и др. — Orebfuscator
+  включает свой v26_1-адаптер;
+- `Player.getEquipment()` (ImageFrame/другие).

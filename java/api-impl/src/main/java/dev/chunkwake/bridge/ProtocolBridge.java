@@ -112,7 +112,13 @@ final class ProtocolBridge {
                 if (!Boolean.TRUE.equals(isSupported.invoke(candidate))
                         && "PLAY".equals(String.valueOf(getProtocol.invoke(candidate)))
                         && "SERVER".equals(String.valueOf(getSender.invoke(candidate)))) {
-                    registerPacket.invoke(register, candidate, RawPayload.class, clientSender, null);
+                    Class<?> carrier = "SYSTEM_CHAT".equalsIgnoreCase(
+                            String.valueOf(candidate.getClass().getMethod("name").invoke(candidate)))
+                                    ? Class.forName(
+                                            "net.minecraft.network.protocol.game.ClientboundSystemChatPacket",
+                                            true, loader)
+                                    : RawPayload.class;
+                    registerPacket.invoke(register, candidate, carrier, clientSender, null);
                     registered++;
                 }
             }
@@ -164,6 +170,9 @@ final class ProtocolBridge {
             Object type = byName.get(name.toUpperCase(java.util.Locale.ROOT));
             if (type == null) {
                 return data;
+            }
+            if ("SYSTEM_CHAT".equalsIgnoreCase(name)) {
+                return systemChat(player, type, data);
             }
             Set<?> listeners = (Set<?>) getListeners.invoke(manager);
             boolean any = false;
@@ -218,6 +227,82 @@ final class ProtocolBridge {
             Bridge.log(1, "protocol: sending probe failed: " + broken);
         }
         return false;
+    }
+
+    /** Real-field путь для {@code ClientboundSystemChatPacket}. */
+    private static byte[] systemChat(org.bukkit.entity.Player player, Object type, byte[] data) {
+        try {
+            int[] pos = {0};
+            int id = readVarInt(data, pos);
+            java.io.DataInputStream in = new java.io.DataInputStream(
+                    new java.io.ByteArrayInputStream(data, pos[0], data.length - pos[0]));
+            net.minecraft.nbt.CompoundTag tag = net.minecraft.nbt.NbtIo.readNetwork(
+                    in, net.minecraft.nbt.NbtAccounter.unlimitedHeap());
+            boolean overlay = in.readBoolean();
+            String text = tag.getStringOr("text", null);
+            String translate = tag.getStringOr("translate", null);
+            net.minecraft.network.chat.Component content = text != null
+                    ? net.minecraft.network.chat.Component.literal(text)
+                    : translate != null
+                            ? net.minecraft.network.chat.Component.translatable(translate)
+                            : net.minecraft.network.chat.Component.literal(tag.toString());
+            Object packet = Class.forName(
+                    "net.minecraft.network.protocol.game.ClientboundSystemChatPacket", true,
+                    type.getClass().getClassLoader())
+                    .getConstructor(net.minecraft.network.chat.Component.class, boolean.class)
+                    .newInstance(content, overlay);
+            Object container = containerConstructor.newInstance(type, packet);
+            Object event = fromServer.invoke(null, plugin, container, player);
+            for (Object listener : (Set<?>) getListeners.invoke(manager)) {
+                Set<?> types = (Set<?>) getTypes.invoke(getSendingWhitelist.invoke(listener));
+                if (types.contains(type)) {
+                    onSending.invoke(listener, event);
+                }
+            }
+            if (Boolean.TRUE.equals(event.getClass().getMethod("isCancelled").invoke(event))) {
+                return null;
+            }
+            net.minecraft.network.chat.Component changed = (net.minecraft.network.chat.Component)
+                    packet.getClass().getMethod("content").invoke(packet);
+            boolean changedOverlay = (Boolean) packet.getClass().getMethod("overlay").invoke(packet);
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream(data.length + 16);
+            writeVarInt(bytes, id);
+            net.minecraft.nbt.CompoundTag outTag = new net.minecraft.nbt.CompoundTag();
+            outTag.putString("text", changed == null ? "" : changed.getString());
+            net.minecraft.nbt.NbtIo.writeNetwork(outTag,
+                    new java.io.DataOutputStream(bytes));
+            bytes.write(changedOverlay ? 1 : 0);
+            return bytes.toByteArray();
+        } catch (Throwable broken) {
+            Throwable cause = broken.getCause() == null ? broken : broken.getCause();
+            java.util.logging.Logger.getLogger("Chunkwake").warning(
+                    "protocol: system_chat field bridge failed: " + cause);
+            return data;
+        }
+    }
+
+    private static int readVarInt(byte[] data, int[] pos) {
+        int value = 0;
+        int shift = 0;
+        while (true) {
+            byte b = data[pos[0]++];
+            value |= (b & 0x7f) << shift;
+            if ((b & 0x80) == 0) {
+                return value;
+            }
+            shift += 7;
+        }
+    }
+
+    private static void writeVarInt(java.io.ByteArrayOutputStream out, int value) {
+        while (true) {
+            if ((value & ~0x7F) == 0) {
+                out.write(value);
+                return;
+            }
+            out.write((value & 0x7F) | 0x80);
+            value >>>= 7;
+        }
     }
 
     private static synchronized void init() {

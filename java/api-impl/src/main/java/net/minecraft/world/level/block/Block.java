@@ -19,6 +19,14 @@ public class Block {
         return this.defaultState;
     }
 
+    public static int getId(net.minecraft.world.level.block.state.BlockState state) {
+        return BLOCK_STATE_REGISTRY.getId(state);
+    }
+
+    public static net.minecraft.world.level.block.state.BlockState stateById(int id) {
+        return BLOCK_STATE_REGISTRY.byId(id);
+    }
+
     public net.minecraft.world.level.block.state.StateDefinition<Block,
             net.minecraft.world.level.block.state.BlockState> getStateDefinition() {
         return new net.minecraft.world.level.block.state.StateDefinition<>(this, java.util.List.of());

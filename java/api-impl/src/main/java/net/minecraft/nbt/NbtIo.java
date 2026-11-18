@@ -29,6 +29,24 @@ public final class NbtIo {
         writeCompound(tag, output, new NbtAccounter.Limited(Long.MAX_VALUE));
     }
 
+    /** Чтение сетевого NBT: корневой тег без имени (как в пакетах). */
+    public static CompoundTag readNetwork(DataInput input, NbtAccounter accounter) throws IOException {
+        byte id = input.readByte();
+        if (id == 0) {
+            return new CompoundTag();
+        }
+        if (id != 10) {
+            throw new IOException("Root network tag must be a compound, got " + id);
+        }
+        return readCompound(input, accounter);
+    }
+
+    /** Запись сетевого NBT: тип 10 + поля + end (без имени). */
+    public static void writeNetwork(CompoundTag tag, DataOutput output) throws IOException {
+        output.writeByte(10);
+        writeCompound(tag, output, new NbtAccounter.Limited(Long.MAX_VALUE));
+    }
+
     public static CompoundTag readCompressed(InputStream input, NbtAccounter accounter) throws IOException {
         try (java.util.zip.GZIPInputStream gzip = new java.util.zip.GZIPInputStream(input)) {
             return read(new java.io.DataInputStream(gzip), accounter);

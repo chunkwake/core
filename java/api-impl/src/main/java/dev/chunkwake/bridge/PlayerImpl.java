@@ -253,9 +253,7 @@ public final class PlayerImpl {
     private final Set<String> channels = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     public void sendPluginMessage(Plugin source, String channel, byte[] message) {
-        org.bukkit.plugin.messaging.StandardMessenger.validatePluginMessage(server.getMessenger(), source, channel,
-                message);
-        // Как `CraftPlayer`: клиенту, не объявившему канал, не шлём.
+        // Как CraftPlayer: клиент сам объявляет каналы через `minecraft:register`.
         if (channels.contains(channel)) {
             sendPayload(channel, message);
         }
@@ -443,6 +441,171 @@ public final class PlayerImpl {
     }
 
     public PlayerInventory getInventory() { return inventory.api; }
+
+    /** `CommandSender.spigot()`: SkinsRestorer и другие шлют BaseComponent. */
+    public org.bukkit.entity.Player.Spigot spigot() {
+        return new SpigotImpl(this);
+    }
+
+    static final class SpigotImpl extends org.bukkit.entity.Player.Spigot {
+        private final PlayerImpl player;
+
+        SpigotImpl(PlayerImpl player) {
+            this.player = player;
+        }
+
+        @Override
+        public void sendMessage(net.md_5.bungee.api.chat.BaseComponent component) {
+            this.player.sendMessage(net.md_5.bungee.api.chat.TextComponent.toLegacyText(component));
+        }
+
+        @Override
+        public void sendMessage(net.md_5.bungee.api.chat.BaseComponent... components) {
+            this.player.sendMessage(net.md_5.bungee.api.chat.TextComponent.toLegacyText(components));
+        }
+
+        @Override
+        public void sendMessage(java.util.UUID sender,
+                net.md_5.bungee.api.chat.BaseComponent component) {
+            this.sendMessage(component);
+        }
+
+        @Override
+        public void sendMessage(java.util.UUID sender,
+                net.md_5.bungee.api.chat.BaseComponent... components) {
+            this.sendMessage(components);
+        }
+
+        @Override
+        public void sendMessage(net.md_5.bungee.api.ChatMessageType type,
+                net.md_5.bungee.api.chat.BaseComponent component) {
+            this.sendMessage(component);
+        }
+
+        @Override
+        public void sendMessage(net.md_5.bungee.api.ChatMessageType type,
+                net.md_5.bungee.api.chat.BaseComponent... components) {
+            this.sendMessage(components);
+        }
+
+        @Override
+        public void sendMessage(net.md_5.bungee.api.ChatMessageType type, java.util.UUID sender,
+                net.md_5.bungee.api.chat.BaseComponent component) {
+            this.sendMessage(component);
+        }
+
+        @Override
+        public void sendMessage(net.md_5.bungee.api.ChatMessageType type, java.util.UUID sender,
+                net.md_5.bungee.api.chat.BaseComponent... components) {
+            this.sendMessage(components);
+        }
+
+        @Override
+        public int getPing() {
+            return 0;
+        }
+
+        @Override
+        public java.net.InetSocketAddress getRawAddress() {
+            return null;
+        }
+
+        @Override
+        public void respawn() {
+        }
+
+        @Override
+        public java.util.Set<org.bukkit.entity.Player> getHiddenPlayers() {
+            return java.util.Set.of();
+        }
+    }
+
+    /** `Player.getEquipment()`: ImageFrame и другие плагины. */
+    public org.bukkit.inventory.EntityEquipment getEquipment() {
+        return Stub.of(org.bukkit.inventory.EntityEquipment.class, new EquipmentImpl(this));
+    }
+
+    static final class EquipmentImpl {
+        private final PlayerImpl player;
+
+        EquipmentImpl(PlayerImpl player) {
+            this.player = player;
+        }
+
+        public org.bukkit.inventory.ItemStack getItemInMainHand() {
+            return this.player.getInventory().getItemInMainHand();
+        }
+
+        public void setItemInMainHand(org.bukkit.inventory.ItemStack item) {
+            this.player.getInventory().setItemInMainHand(item);
+        }
+
+        public org.bukkit.inventory.ItemStack getItemInOffHand() {
+            return this.player.getInventory().getItemInOffHand();
+        }
+
+        public void setItemInOffHand(org.bukkit.inventory.ItemStack item) {
+            this.player.getInventory().setItemInOffHand(item);
+        }
+
+        public org.bukkit.inventory.ItemStack getItem(org.bukkit.inventory.EquipmentSlot slot) {
+            return switch (slot) {
+                case HAND -> this.getItemInMainHand();
+                case OFF_HAND -> this.getItemInOffHand();
+                case HEAD -> this.player.getInventory().getHelmet();
+                case CHEST -> this.player.getInventory().getChestplate();
+                case LEGS -> this.player.getInventory().getLeggings();
+                case FEET -> this.player.getInventory().getBoots();
+                default -> null;
+            };
+        }
+
+        public void setItem(org.bukkit.inventory.EquipmentSlot slot,
+                org.bukkit.inventory.ItemStack item) {
+            switch (slot) {
+                case HAND -> this.setItemInMainHand(item);
+                case OFF_HAND -> this.setItemInOffHand(item);
+                case HEAD -> this.player.getInventory().setHelmet(item);
+                case CHEST -> this.player.getInventory().setChestplate(item);
+                case LEGS -> this.player.getInventory().setLeggings(item);
+                case FEET -> this.player.getInventory().setBoots(item);
+                default -> {
+                }
+            }
+        }
+
+        public org.bukkit.inventory.ItemStack getHelmet() {
+            return this.player.getInventory().getHelmet();
+        }
+
+        public void setHelmet(org.bukkit.inventory.ItemStack item) {
+            this.player.getInventory().setHelmet(item);
+        }
+
+        public org.bukkit.inventory.ItemStack getChestplate() {
+            return this.player.getInventory().getChestplate();
+        }
+
+        public void setChestplate(org.bukkit.inventory.ItemStack item) {
+            this.player.getInventory().setChestplate(item);
+        }
+
+        public org.bukkit.inventory.ItemStack getLeggings() {
+            return this.player.getInventory().getLeggings();
+        }
+
+        public void setLeggings(org.bukkit.inventory.ItemStack item) {
+            this.player.getInventory().setLeggings(item);
+        }
+
+        public org.bukkit.inventory.ItemStack getBoots() {
+            return this.player.getInventory().getBoots();
+        }
+
+        public void setBoots(org.bukkit.inventory.ItemStack item) {
+            this.player.getInventory().setBoots(item);
+        }
+    }
 
     /** Открытое окно плагина (null — своё окно игрока или окно блока). */
     private volatile ViewImpl openView;

@@ -1,40 +1,35 @@
 package net.minecraft.core;
 
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.Optional;
 import net.minecraft.resources.Identifier;
 
-/** Рабочий NMS {@code Registry}: id → значение. */
-public class Registry<T> {
-    private final Map<Identifier, T> values = new LinkedHashMap<>();
+/** NMS {@code Registry} — интерфейс (как в 26.x). */
+public interface Registry<T> {
+    void register(Identifier id, T value);
 
-    public void register(Identifier id, T value) {
-        this.values.put(id, value);
-    }
+    Optional<Holder.Reference<T>> get(Identifier id);
 
-    public Optional<Holder.Reference<T>> get(Identifier id) {
-        T value = this.values.get(id);
-        return value == null ? Optional.empty() : Optional.of(new Holder.Reference<>(value));
-    }
-
-    public Optional<Holder.Reference<T>> get(String id) {
+    default Optional<Holder.Reference<T>> get(String id) {
         return this.get(Identifier.parse(id));
     }
 
-    public T getValue(Identifier id) {
-        return this.values.get(id);
+    T getValue(Identifier id);
+
+    boolean containsKey(Identifier id);
+
+    int size();
+
+    java.util.Set<Identifier> keySet();
+
+    java.util.Set<java.util.Map.Entry<net.minecraft.resources.Identifier, T>> entrySet();
+
+    java.util.stream.Stream<?> getTags();
+
+    default java.util.Optional<?> getTag(net.minecraft.resources.Identifier id) {
+        return java.util.Optional.empty();
     }
 
-    public boolean containsKey(Identifier id) {
-        return this.values.containsKey(id);
-    }
+    int getId(T value);
 
-    public int size() {
-        return this.values.size();
-    }
-
-    public java.util.Set<Identifier> keySet() {
-        return this.values.keySet();
-    }
+    T byId(int id);
 }

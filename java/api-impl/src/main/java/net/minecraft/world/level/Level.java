@@ -5,6 +5,9 @@ import net.minecraft.world.level.block.state.BlockState;
 
 /** NMS {@code Level} (минимально, но с настоящей иерархией). */
 public class Level implements LevelAccessor {
+    /** Поле нужно ProtocolLib (BukkitConverters ищет CraftWorld в Level). */
+    public org.bukkit.craftbukkit.CraftWorld world;
+
     @Override
     public int getHeight() {
         return 384;

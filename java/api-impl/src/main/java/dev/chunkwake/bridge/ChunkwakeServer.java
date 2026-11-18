@@ -778,6 +778,13 @@ final class ChunkwakeServer {
         return new double[] {tps, tps, tps};
     }
     public double getAverageTickTime() { return tickNumber("MSPT:", 0.0); }
+
+    /** `Server.getTickTimes()`: наносекунды последних тиков (tps-hud). */
+    public long[] getTickTimes() {
+        double mspt = tickNumber("MSPT:", 0.0);
+        long nanos = Math.max(1L, (long) (mspt * 1_000_000.0));
+        return new long[] {nanos, nanos, nanos, nanos, nanos};
+    }
     public org.bukkit.help.HelpMap getHelpMap() { return help; }
 
     /** Число после метки в строке Rust `TPS: … MSPT: … interval: …`. */
