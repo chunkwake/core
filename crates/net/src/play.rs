@@ -4643,7 +4643,11 @@ impl PlayPlan {
             keys.extend(state.chunk_frames.lock().unwrap().keys().copied());
             keys.sort_unstable();
             keys.dedup();
-            return keys.iter().map(|(x, z)| format!("{x} {z}")).collect::<Vec<_>>().join("\n");
+            return keys
+                .iter()
+                .map(|(x, z)| format!("{x} {z}"))
+                .collect::<Vec<_>>()
+                .join("\n");
         }
         // `nbtread <путь>` → корень gzip-NBT файла типизированным JSON (пусто —
         // файла нет); `nbtwrite <путь>\n<json>` → `1`/`0`. Данные Paper о мире
