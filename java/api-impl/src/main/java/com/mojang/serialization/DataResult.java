@@ -1,39 +1,45 @@
 package com.mojang.serialization;
 
-/** Минимальный DFU-результат: ProtocolLib оборачивает его в WrappedDataResult. */
-public final class DataResult<A> {
-    private final A result;
-    private final String error;
+/** Минимальный DFU {@code DataResult}. */
+public interface DataResult<A> {
+    A result();
 
-    private DataResult(A result, String error) {
-        this.result = result;
-        this.error = error;
+    A getOrThrow();
+
+    boolean isSuccess();
+
+    java.util.Optional<String> error();
+
+    static <A> DataResult<A> success(A value) {
+        return new SimpleDataResult<>(value, null);
     }
 
-    public A result() {
-        return this.result;
+    static <A> DataResult<A> error(String message) {
+        return new SimpleDataResult<>(null, message);
     }
 
-    public A getOrThrow() {
-        if (this.error != null) {
-            throw new IllegalStateException(this.error);
+    final class SimpleDataResult<A> implements DataResult<A> {
+        private final A result;
+        private final String error;
+
+        SimpleDataResult(A result, String error) {
+            this.result = result;
+            this.error = error;
         }
-        return this.result;
-    }
 
-    public boolean isSuccess() {
-        return this.error == null;
-    }
+        @Override public A result() { return this.result; }
 
-    public java.util.Optional<String> error() {
-        return java.util.Optional.ofNullable(this.error);
-    }
+        @Override public A getOrThrow() {
+            if (this.error != null) {
+                throw new IllegalStateException(this.error);
+            }
+            return this.result;
+        }
 
-    public static <A> DataResult<A> success(A value) {
-        return new DataResult<>(value, null);
-    }
+        @Override public boolean isSuccess() { return this.error == null; }
 
-    public static <A> DataResult<A> error(String message) {
-        return new DataResult<>(null, message);
+        @Override public java.util.Optional<String> error() {
+            return java.util.Optional.ofNullable(this.error);
+        }
     }
 }

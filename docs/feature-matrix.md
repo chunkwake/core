@@ -678,3 +678,23 @@ VoiceMessages и AxiomPaper:
 
 Итог: стабильно `16 of 20 enabled`; следующие шаги — реализовать
 `Codec.encode/xmap`/`JsonOps`-операции и полный набор `Blocks`.
+
+
+## DFU/Blocks: следующий пласт (16/20, блокеры уточнены)
+
+- `Codec.encode(Object,DynamicOps,Object)`, `xmap`, `fieldOf`, `listOf`;
+- `DataResult` стал интерфейсом (был класс — VoiceMessages падал
+  `IncompatibleClassChangeError`);
+- `Blocks` сгенерирован из всех `Material` (2278 полей, включая `VOID_AIR`);
+- `BlockState` + `Block.defaultBlockState()`;
+- `ArgumentTypeInfos` (GrimAC/cloud).
+
+Живой прогон: `16 of 20 enabled`, GrimAC включается. Уточнённые блокеры:
+- **InvSee++** — `ItemMeta` для блочного предмета должен быть
+  `BlockStateMeta` (сейчас dynamic proxy);
+- **VoiceMessages** — `Codec.encode` должен реально сериализовать в
+  `JsonElement` (наш Codec возвращает вход; получается ClassCastException
+  `ServerConfig -> JsonElement`);
+- **AxiomPaper** — пустые `Blocks`/`IdMapper` дают
+  `IndexOutOfBoundsException` (нужны реальные состояния блоков);
+- **VoxyServerSide** — требует MC `<26.2`.
