@@ -365,10 +365,31 @@ dynamic-proxy `BukkitImplAdapter` (пустая карта свойств бло
 /worldedit version   -> WorldEdit version 7.4.6, Platforms: Bukkit-Official
 //wand               -> Left click: select pos #1; Right click: select pos #2
 //pos 0,0,0 4,4,4    -> Position 1/2, Positions updated.
-//toggleplace         -> Now placing at pos #1 (состояние сессии сохраняется)
+//size               -> Type: cuboid, Size: (5, 5, 5), # of blocks: 125
+//set stone          -> Operation completed (125 blocks affected).
 ```
-Ограничение: `//set`/`//size` после `//pos` пока сообщают «Make a region
-selection first.» — селектор региона сбрасывается между командами через
-`LocalSession.getRegionSelector(world)`; это следующий шаг (равенство
-World-обёрток/селектор). Блочные свойства (`oak_stairs[facing=...]`) через
-Bukkit-адаптер не отдаются — только базовые блоки.
+
+Корень бага с выделением: в `Stub` прокси `equals`/`hashCode`/`toString`
+обслуживались **после** поиска метода в impl, а `getMethods()` всегда содержит
+`Object.equals(Object)` — поэтому `proxy.equals(proxy)` звал
+`WorldImpl.equals(proxy)` (identity) и возвращал `false`. WorldEdit считал мир
+другим и в `LocalSession.getRegionSelector(world)` делал `clear()`. Теперь
+`equals`/`hashCode`/`toString` обрабатываются до поиска метода (равенство по
+impl или по identity прокси). После этого `//pos` → `//size` → `//set`
+работают, блоки реально пишутся:
+```
+> //set stone
+  Operation completed (125 blocks affected).
+> /execute if block 1 1 1 minecraft:stone run say WE_SET_OK
+  [boater] WE_SET_OK
+```
+
+Адаптер также отдаёт `getBlock`/`getFullBlock` (через
+`BukkitAdapter.adapt(blockData)`), иначе `ChangeSetExtent` падал на
+`previous == null`; для записи включается `unsupportedVersionEditing`
+(Bukkit-путь WorldEdit без NMS).
+
+Ограничения: карта свойств блоков пока пустая, поэтому
+`oak_stairs[facing=...]` не парсится — только базовые блоки; первый
+`PlatformReadyEvent` при включении всё ещё пишет одну ошибку в лог (адаптер
+ставится после `onEnable`), затем событие переотправляется.

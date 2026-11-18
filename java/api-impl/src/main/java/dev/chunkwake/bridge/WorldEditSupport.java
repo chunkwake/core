@@ -36,15 +36,30 @@ final class WorldEditSupport {
             ClassLoader loader2 = plugin.getClass().getClassLoader();
             Class<?> adapterType = Class.forName(
                     "com.sk89q.worldedit.bukkit.adapter.BukkitImplAdapter", true, loader2);
-            Object adapter = Proxy.newProxyInstance(loader2, new Class<?>[] { adapterType }, new Adapter());
+            Object adapter = Proxy.newProxyInstance(
+                    loader2, new Class<?>[] { adapterType }, new Adapter(loader2));
             Field field = plugin.getClass().getDeclaredField("adapter");
             field.setAccessible(true);
             Object lifecycle = field.get(plugin);
             lifecycle.getClass().getMethod("newValue", Object.class).invoke(lifecycle, adapter);
+            allowUnsupportedVersionEditing(plugin, loader2);
             repostReady(loader2);
         } catch (Throwable t) {
             plugin.getLogger().warning("WorldEdit: не удалось включить API-режим: " + t);
         }
+    }
+
+    /**
+     * Без NMS-адаптера WorldEdit умеет писать блоки только через generic-путь,
+     * который включается флагом {@code unsupported-version-editing}.
+     */
+    private static void allowUnsupportedVersionEditing(Plugin plugin, ClassLoader loader)
+            throws Exception {
+        // WorldEditPlugin.getLocalConfiguration() -> тот же BukkitConfiguration,
+        // который читает BukkitWorld.setBlock.
+        Object config = plugin.getClass().getMethod("getLocalConfiguration").invoke(plugin);
+        Field flag = config.getClass().getField("unsupportedVersionEditing");
+        flag.setBoolean(config, true);
     }
 
     /** Повторно шлём {@code PlatformReadyEvent} с зарегистрированным адаптером. */
@@ -82,6 +97,12 @@ final class WorldEditSupport {
 
     /** Минимальный {@code BukkitImplAdapter}: Bukkit-API + пустые свойства. */
     private static final class Adapter implements InvocationHandler {
+        private final ClassLoader loader;
+
+        Adapter(ClassLoader loader) {
+            this.loader = loader;
+        }
+
         @Override
         public Object invoke(Object proxy, Method method, Object[] args) {
             switch (method.getName()) {
@@ -89,6 +110,22 @@ final class WorldEditSupport {
                     return Map.of();
                 case "getInternalBlockStateId":
                     return OptionalInt.empty();
+                case "getBlock":
+                    // WorldEdit читает блок через адаптер, если он не null.
+                    // Возвращаем BlockState из Bukkit-данных, иначе
+                    // ChangeSetExtent падает на previous == null.
+                    if (args != null && args.length == 1
+                            && args[0] instanceof org.bukkit.Location location) {
+                        return toBlockState(location);
+                    }
+                    break;
+                case "getFullBlock":
+                    if (args != null && args.length == 1
+                            && args[0] instanceof org.bukkit.Location location) {
+                        Object state = toBlockState(location);
+                        return state == null ? null : toBaseBlock(state);
+                    }
+                    break;
                 case "toString":
                     return "ChunkwakeWorldEditAdapter";
                 case "hashCode":
@@ -97,6 +134,29 @@ final class WorldEditSupport {
                     return proxy == args[0];
                 default:
                     return defaultValue(method.getReturnType());
+            }
+            return defaultValue(method.getReturnType());
+        }
+
+        /** {@code BlockState.toBaseBlock()} (класс WorldEdit, не виден на компиляции). */
+        private static Object toBaseBlock(Object state) {
+            try {
+                return state.getClass().getMethod("toBaseBlock").invoke(state);
+            } catch (Throwable broken) {
+                return null;
+            }
+        }
+
+        /** {@code BukkitAdapter.adapt(blockData)} через classloader плагина. */
+        private Object toBlockState(org.bukkit.Location location) {
+            try {
+                org.bukkit.block.data.BlockData data = location.getBlock().getBlockData();
+                Class<?> adapter = Class.forName(
+                        "com.sk89q.worldedit.bukkit.BukkitAdapter", true, loader);
+                return adapter.getMethod("adapt", org.bukkit.block.data.BlockData.class)
+                        .invoke(null, data);
+            } catch (Throwable broken) {
+                return null;
             }
         }
 

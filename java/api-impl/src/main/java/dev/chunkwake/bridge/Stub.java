@@ -81,6 +81,33 @@ final class Stub {
     static Object ofAll(Class<?>[] ifaces, Object impl) {
         Class<?> iface = ifaces[ifaces.length - 1];
         InvocationHandler h = (proxy, m, args) -> {
+            // `equals`/`hashCode`/`toString` обслуживаем до поиска метода в impl:
+            // `impl.getClass().getMethods()` всегда содержит `Object.equals(Object)`,
+            // и раньше прокси сравнивал *impl* с *proxy* (всегда false). Из-за
+            // этого WorldEdit считал миры разными и сбрасывал выделение.
+            switch (m.getName()) {
+                case "equals":
+                    if (m.getParameterCount() == 1) {
+                        if (proxy == args[0]) {
+                            return true;
+                        }
+                        Object other = impl(args[0]);
+                        return other != null && impl == other;
+                    }
+                    break;
+                case "hashCode":
+                    if (m.getParameterCount() == 0) {
+                        return impl.hashCode();
+                    }
+                    break;
+                case "toString":
+                    if (m.getParameterCount() == 0) {
+                        return impl.toString();
+                    }
+                    break;
+                default:
+                    break;
+            }
             Optional<Method> target = CACHE.get(impl.getClass()).computeIfAbsent(m, k -> find(impl.getClass(), k));
             if (target.isPresent()) {
             if (TRACE && (m.getName().contains("Level") || m.getName().contains("WorldPath"))) {
@@ -91,25 +118,6 @@ final class Stub {
                 } catch (InvocationTargetException e) {
                     throw e.getCause();
                 }
-            }
-            switch (m.getName()) {
-                case "equals":
-                    if (m.getParameterCount() == 1) {
-                        return proxy == args[0];
-                    }
-                    break;
-                case "hashCode":
-                    if (m.getParameterCount() == 0) {
-                        return System.identityHashCode(proxy);
-                    }
-                    break;
-                case "toString":
-                    if (m.getParameterCount() == 0) {
-                        return impl.toString();
-                    }
-                    break;
-                default:
-                    break;
             }
             if (m.isDefault()) {
                 return InvocationHandler.invokeDefault(proxy, m, args);
