@@ -58,6 +58,34 @@ final class WorldImpl {
         return Stub.impl(w) instanceof WorldImpl wi ? wi : null;
     }
 
+    public org.bukkit.Chunk[] getLoadedChunks() {
+        String data = request("loadedchunks");
+        if (data == null || data.isBlank()) {
+            return new org.bukkit.Chunk[0];
+        }
+        java.util.List<org.bukkit.Chunk> chunks = new java.util.ArrayList<>();
+        for (String line : data.split("\n")) {
+            String[] parts = line.trim().split(" ");
+            if (parts.length == 2) {
+                try {
+                    chunks.add(ChunkImpl.api(this, Integer.parseInt(parts[0]),
+                            Integer.parseInt(parts[1])));
+                } catch (NumberFormatException ignored) {
+                    // пропускаем битую строку
+                }
+            }
+        }
+        return chunks.toArray(new org.bukkit.Chunk[0]);
+    }
+
+    public org.bukkit.Chunk getChunkAt(int x, int z) {
+        return ChunkImpl.api(this, x, z);
+    }
+
+    public org.bukkit.Chunk getChunkAt(org.bukkit.Location location) {
+        return getChunkAt(location.getBlockX() >> 4, location.getBlockZ() >> 4);
+    }
+
     public org.bukkit.WorldBorder getWorldBorder() {
         WorldBorderImpl current = this.border;
         if (current == null) {

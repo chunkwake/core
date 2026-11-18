@@ -594,3 +594,43 @@ InvSee++ 0.31.22 (+Clear/+Give), VoiceMessages 1.0.14, AxiomPaper 6.0.1.
   `lss-minecraft-dependency` (проверка версии);
 - **AxiomPaper** — нужен `net.minecraft.world.level.chunk.LevelChunk`
   (реальные чанки).
+
+
+## Folia-нагрузка и World.getLoadedChunks
+
+`World.getLoadedChunks()` реализован через новую Rust-операцию
+`loadedchunks` в `PlayPlan::world_request`: возвращает колонны активной
+размерности из `simulated` + `chunk_frames`. Java-сторона
+(`WorldImpl.getLoadedChunks`/`getChunkAt`) отдаёт `Chunk[]` с реальными
+координатами (`ChunkImpl`), а не пустой массив. В живом прогоне:
+```
+loaded chunks: world=155
+loaded chunks: world_nether=0
+loaded chunks: world_the_end=0
+```
+
+Нагрузочный прогон (release, 1000 коров, region-планировщики Folia активны,
+155 загруженных чанков):
+```
+TPS: 19.7 MSPT: 2.1 interval: 46.7 ms
+Server tick times (avg/min/max): 2,0/1,2/34,8 … 2,1/0,4/193,6
+```
+debug-сборка в том же сценарии — MSPT 13.6 (накладные расходы debug).
+
+## Плагины: 15/20 enabled
+
+Добавлены Simple Voice Chat, GrimAC, VoxyServerSide, InvSee++, VoiceMessages,
+AxiomPaper. Закрыто: `CraftServer.getServer()`,
+`CraftPlayer.addChannel/removeChannel` (voicechat включается),
+`Server.spigot()/getPaperConfig()`, `Item`/`ItemStack(Item,int)/EMPTY`,
+`FriendlyByteBuf extends WrappedByteBuf`, `StreamDecoder/Encoder`,
+`RegistryFriendlyByteBuf`, `MapCodec`, `Applicative/Functor`,
+`DedicatedServer`, `RegistryAccess$Frozen`, `AbstractContainerMenu`,
+`HolderLookup$Provider`, `EntityArgument`.
+
+Остаточные отказы (честно):
+- GrimAC — PacketEvents ищет NMS-поля (`Reflection.getField` → null);
+- InvSee++ — следующий NMS-класс после `HolderLookup$Provider`;
+- VoiceMessages — `ServerConfig`/NMS;
+- AxiomPaper — `LevelChunk`;
+- VoxyServerSide — сам требует MC `<26.2` и отключается.

@@ -193,6 +193,12 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             ticks += 100;
             getLogger().info("scheduler: " + ticks + " ticks");
         }, 100, 100);
+        getServer().getScheduler().runTaskTimer(this, () -> {
+            for (org.bukkit.World w : getServer().getWorlds()) {
+                getLogger().info("loaded chunks: " + w.getName() + "="
+                        + w.getLoadedChunks().length);
+            }
+        }, 100, 200);
         // Редстоун: поршень от редстоун-блока и поршень через провод.
         getServer().getScheduler().runTaskLater(this, () -> {
             org.bukkit.World w = getServer().getWorlds().get(0);

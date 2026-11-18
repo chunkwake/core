@@ -4635,6 +4635,16 @@ impl PlayPlan {
             dims.sort();
             return dims.iter().map(|d| d.key()).collect::<Vec<_>>().join("\n");
         }
+        // `loadedchunks`: loaded chunk columns in the active dimension.
+        if line == "loadedchunks" {
+            let state = self.dim_state();
+            let mut keys: Vec<(i32, i32)> =
+                state.simulated.lock().unwrap().iter().copied().collect();
+            keys.extend(state.chunk_frames.lock().unwrap().keys().copied());
+            keys.sort_unstable();
+            keys.dedup();
+            return keys.iter().map(|(x, z)| format!("{x} {z}")).collect::<Vec<_>>().join("\n");
+        }
         // `nbtread <путь>` → корень gzip-NBT файла типизированным JSON (пусто —
         // файла нет); `nbtwrite <путь>\n<json>` → `1`/`0`. Данные Paper о мире
         // (`data/paper/metadata.dat`, `persistent_data_container.dat`).
