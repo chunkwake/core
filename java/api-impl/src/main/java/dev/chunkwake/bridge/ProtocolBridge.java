@@ -40,6 +40,8 @@ final class ProtocolBridge {
     private static java.util.Map<String, Object> byName = java.util.Map.of();
     private static Object soundType;
     private static Object titleType;
+    private static Object entityDataType;
+    private static Object chunkForgetType;
     /** Класс-носитель сырых байтов для PacketContainer. */
     public static final class RawPayload {
         public byte[] data;
@@ -136,6 +138,18 @@ final class ProtocolBridge {
                             "net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket",
                             true, loader);
                     titleType = candidate;
+                } else if (classNames.contains(
+                        "net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket")) {
+                    carrier = Class.forName(
+                            "net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket",
+                            true, loader);
+                    entityDataType = candidate;
+                } else if (classNames.contains(
+                        "net.minecraft.network.protocol.game.ClientboundForgetLevelChunkPacket")) {
+                    carrier = Class.forName(
+                            "net.minecraft.network.protocol.game.ClientboundForgetLevelChunkPacket",
+                            true, loader);
+                    chunkForgetType = candidate;
                 }
                 if (carrier != RawPayload.class
                         || !Boolean.TRUE.equals(isSupported.invoke(candidate))) {
@@ -193,6 +207,12 @@ final class ProtocolBridge {
             }
             if ("set_title_text".equalsIgnoreCase(name) && titleType != null) {
                 return title(player, titleType, data);
+            }
+            if ("set_entity_data".equalsIgnoreCase(name) && entityDataType != null) {
+                return entityData(player, entityDataType, data);
+            }
+            if ("forget_level_chunk".equalsIgnoreCase(name) && chunkForgetType != null) {
+                return forgetChunk(player, chunkForgetType, data);
             }
             Object type = byName.get(name.toUpperCase(java.util.Locale.ROOT));
             if (type == null) {
@@ -254,6 +274,91 @@ final class ProtocolBridge {
             Bridge.log(1, "protocol: sending probe failed: " + broken);
         }
         return false;
+    }
+
+    /** Field-level для {@code ClientboundSetEntityDataPacket}. */
+    private static byte[] entityData(org.bukkit.entity.Player player, Object type, byte[] data) {
+        try {
+            int[] pos = {0};
+            int id = readVarInt(data, pos);
+            java.io.DataInputStream in = new java.io.DataInputStream(
+                    new java.io.ByteArrayInputStream(data, pos[0], data.length - pos[0]));
+            int entityId = readVarInt(in);
+            byte[] rest = in.readAllBytes();
+            Object packet = Class.forName(
+                    "net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket", true,
+                    type.getClass().getClassLoader())
+                    .getConstructor(int.class, byte[].class)
+                    .newInstance(entityId, rest);
+            Object container = containerConstructor.newInstance(type, packet);
+            Object event = fromServer.invoke(null, plugin, container, player);
+            for (Object listener : (Set<?>) getListeners.invoke(manager)) {
+                Set<?> types = (Set<?>) getTypes.invoke(getSendingWhitelist.invoke(listener));
+                if (types.contains(type)) {
+                    onSending.invoke(listener, event);
+                }
+            }
+            if (Boolean.TRUE.equals(event.getClass().getMethod("isCancelled").invoke(event))) {
+                return null;
+            }
+            int newId = (Integer) packet.getClass().getMethod("id").invoke(packet);
+            byte[] values = (byte[]) packet.getClass().getMethod("packedItems").invoke(packet);
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream(data.length);
+            writeVarInt(bytes, id);
+            writeVarInt(bytes, newId);
+            if (values != null) {
+                bytes.write(values);
+            }
+            byte[] result = bytes.toByteArray();
+            if (!java.util.Arrays.equals(result, data)) {
+                Bridge.log(2, "protocol: entity_data re-encoded (entity=" + newId + ")");
+            }
+            return result;
+        } catch (Throwable broken) {
+            Throwable cause = broken.getCause() == null ? broken : broken.getCause();
+            Bridge.log(1, "protocol: entity_data bridge failed: " + cause);
+            return data;
+        }
+    }
+
+    /** Field-level для {@code ClientboundForgetLevelChunkPacket}. */
+    private static byte[] forgetChunk(org.bukkit.entity.Player player, Object type, byte[] data) {
+        try {
+            int[] pos = {0};
+            int id = readVarInt(data, pos);
+            java.io.DataInputStream in = new java.io.DataInputStream(
+                    new java.io.ByteArrayInputStream(data, pos[0], data.length - pos[0]));
+            long chunkPos = in.readLong();
+            Object packet = Class.forName(
+                    "net.minecraft.network.protocol.game.ClientboundForgetLevelChunkPacket", true,
+                    type.getClass().getClassLoader())
+                    .getConstructor(long.class)
+                    .newInstance(chunkPos);
+            Object container = containerConstructor.newInstance(type, packet);
+            Object event = fromServer.invoke(null, plugin, container, player);
+            for (Object listener : (Set<?>) getListeners.invoke(manager)) {
+                Set<?> types = (Set<?>) getTypes.invoke(getSendingWhitelist.invoke(listener));
+                if (types.contains(type)) {
+                    onSending.invoke(listener, event);
+                }
+            }
+            if (Boolean.TRUE.equals(event.getClass().getMethod("isCancelled").invoke(event))) {
+                return null;
+            }
+            long newPos = (Long) packet.getClass().getMethod("pos").invoke(packet);
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream(data.length);
+            writeVarInt(bytes, id);
+            new java.io.DataOutputStream(bytes).writeLong(newPos);
+            byte[] result = bytes.toByteArray();
+            if (!java.util.Arrays.equals(result, data)) {
+                Bridge.log(2, "protocol: forget_chunk re-encoded (pos=" + newPos + ")");
+            }
+            return result;
+        } catch (Throwable broken) {
+            Throwable cause = broken.getCause() == null ? broken : broken.getCause();
+            Bridge.log(1, "protocol: forget_chunk bridge failed: " + cause);
+            return data;
+        }
     }
 
     /** Field-level для {@code ClientboundSoundPacket}. */

@@ -947,3 +947,21 @@ protocol: title re-encoded (text=CB-TITLE-308)
 
 `26 of 27 enabled`: единственный отказ — VoxyServerSide (его plugin.yml
 требует MC `>=26.1 <26.2-`). ImageFrame включён.
+
+
+## Entity/chunk-пакеты: классы добавлены, live-перехват ограничен
+
+- `ClientboundSetEntityDataPacket` (int id + opaque metadata) и
+  `ClientboundForgetLevelChunkPacket` (long pos) — реальные NMS-классы,
+  зарегистрированы в ProtocolBridge (`set_entity_data`,
+  `forget_level_chunk`), декодируются/перекодируются.
+- Однако Rust отправляет эти пакеты **батчами**
+  (`send_many_about`/`spawn_tracked`, общий frame), а мост сейчас
+  перехватывает только `Broadcast.raw` (одиночные send/send_to). Поэтому
+  живого события для entity-data пока нет — нужен `raw_parts` для
+  batched-частиц (реализация отложена, чтобы не ломать WIP play.rs).
+- Field-level подтверждён живьём для SYSTEM_CHAT, SOUND, SET_TITLE_TEXT;
+  для CHAT/PlayerInfo полей нет.
+
+Итоговый гейт: **26 of 27 enabled**, единственный отказ — VoxyServerSide
+(требует MC `<26.2`).
