@@ -35,6 +35,7 @@ import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.PluginDescriptionFile;
 import org.bukkit.plugin.PluginManager;
+import org.bukkit.plugin.SimplePluginManager;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitScheduler;
 
@@ -48,6 +49,13 @@ final class ChunkwakeServer {
     private final FoliaSchedulers folia = new FoliaSchedulers(scheduler);
     final PluginManagerImpl plugins = new PluginManagerImpl(this);
     private final SimpleCommandMap commands = new SimpleCommandMap(api, new LinkedHashMap<>());
+    /**
+     * Настоящий {@link SimplePluginManager}: Paper-овский фасад, который
+     * делегирует всё в {@link #plugins}, но хранит поля прав
+     * (`permissions`, `defaultPerms`, `permSubs`, `defSubs`), которые
+     * подменяет LuckPerms (`PermissibleInjector`/`InjectorPermissionMap`).
+     */
+    final SimplePluginManager simple = new SimplePluginManager(api, commands);
     /** `/help`: темы по командам, пересобираются после загрузки плагинов. */
     private final HelpMapImpl help = new HelpMapImpl();
     /** Каталог плагинов: его заново читает `/reload`. */
@@ -72,6 +80,14 @@ final class ChunkwakeServer {
 
     ChunkwakeServer(java.nio.file.Path levelDirectory) {
         this.levelDirectory = levelDirectory;
+        // Paper: SimplePluginManager — фасад, реальная работа в paperPluginManager.
+        this.simple.paperPluginManager = this.plugins.api;
+        // Как CraftServer: создание сервера делает его доступным через
+        // `Bukkit.getServer()`. Важно для `PermissibleBase` игрока (он сразу
+        // читает default-права через сервер) и для тестов.
+        if (Bukkit.getServer() == null) {
+            Bukkit.setServer(api);
+        }
     }
 
     java.nio.file.Path levelDirectory() {
@@ -359,6 +375,9 @@ final class ChunkwakeServer {
                 }
             }
             plugins.enablePlugin(plugin);
+            // WorldEdit без NMS-адаптера: подставить API-адаптер и повторно
+            // разослать PlatformReadyEvent (первый падал NPE в BlockType).
+            WorldEditSupport.install(plugin);
             if (plugin.isEnabled()) {
                 enabled++;
             }
@@ -768,7 +787,7 @@ final class ChunkwakeServer {
         return fallback;
     }
     public Logger getLogger() { return logger; }
-    public PluginManager getPluginManager() { return plugins.api; }
+    public PluginManager getPluginManager() { return simple; }
     public org.bukkit.inventory.ItemFactory getItemFactory() { return ItemFactoryImpl.API; }
     public BukkitScheduler getScheduler() { return scheduler.api; }
     public CommandMap getCommandMap() { return commands; }

@@ -317,3 +317,58 @@
   внутренний код сервера.
 - Плагины без NMS (EssentialsX, PlaceholderAPI, Vault, WorldEdit, ViaVersion)
   включаются: `5 of 5 enabled` в этом прогоне.
+
+
+## LuckPerms: настоящий CraftHumanEntity и SimplePluginManager
+
+Две дыры, из-за которых LuckPerms 5.5.71 запрещал вход:
+
+1. `PermissibleInjector` ищет поле `perm` у
+   `org.bukkit.craftbukkit.entity.CraftHumanEntity` (иначе — Glowstone
+   `GlowHumanEntity`) и падал `ClassNotFoundException`.
+   Игрок теперь — настоящий класс
+   `java/api-impl/src/main/java/org/bukkit/craftbukkit/entity/CraftHumanEntity.java`
+   (не dynamic proxy) с полем `public PermissibleBase perm`; все ~500 методов
+   `Player` делегируются в `PlayerImpl` через `PlayerCalls`. `PlayerImpl.api`
+   создаётся как `new CraftHumanEntity(this)`.
+2. `InjectorPermissionMap`/`InjectorDefaultsMap`/`InjectorSubscriptionMap`
+   требуют, чтобы `Server.getPluginManager()` был `instanceof SimplePluginManager`.
+   Теперь сервер держит настоящий Paper-овский `SimplePluginManager`
+   (`ChunkwakeServer.simple`), чей `paperPluginManager` указывает на наш
+   `PluginManagerImpl`; карты прав (`permissions`, `defaultPerms`, `permSubs`,
+   `defSubs`) живут в нём, и LuckPerms подменяет именно их.
+
+Живой прогон (6 плагинов, включая LuckPerms):
+```
+plugins: 6 of 6 enabled
+[LuckPerms] Successfully enabled.
+> /lp user boater info
+  Информация о пользователе boater
+  - Родительские группы: default
+  Контекстные данные: режим: активный игрок
+> /lp user boater permission set test.node true
+> /lp user boater permission check test.node
+  boater имеет test.node с установленным значением true в контексте global
+```
+`denying login` больше нет, права и команды LuckPerms работают.
+
+## WorldEdit: API-адаптер без NMS
+
+`PlatformReadyEvent` падал NPE в `BlockType.computeProperties`
+(`propertiesMap == null`), потому что NMS-адаптер WorldEdit не загружается на
+сервере без `net.minecraft.*`. Добавлен `dev.chunkwake.bridge.WorldEditSupport`:
+после включения плагина он подставляет в `WorldEditPlugin.adapter` лёгкий
+dynamic-proxy `BukkitImplAdapter` (пустая карта свойств блоков,
+`OptionalInt.empty()` для internal id) и повторно рассылает
+`PlatformReadyEvent`. Команды после этого регистрируются и выполняются:
+```
+/worldedit version   -> WorldEdit version 7.4.6, Platforms: Bukkit-Official
+//wand               -> Left click: select pos #1; Right click: select pos #2
+//pos 0,0,0 4,4,4    -> Position 1/2, Positions updated.
+//toggleplace         -> Now placing at pos #1 (состояние сессии сохраняется)
+```
+Ограничение: `//set`/`//size` после `//pos` пока сообщают «Make a region
+selection first.» — селектор региона сбрасывается между командами через
+`LocalSession.getRegionSelector(world)`; это следующий шаг (равенство
+World-обёрток/селектор). Блочные свойства (`oak_stairs[facing=...]`) через
+Bukkit-адаптер не отдаются — только базовые блоки.

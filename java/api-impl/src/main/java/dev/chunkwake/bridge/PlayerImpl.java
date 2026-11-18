@@ -22,15 +22,13 @@ import org.bukkit.permissions.PermissionAttachmentInfo;
 import org.bukkit.plugin.Plugin;
 
 /** {@link Player}: онлайн-игрок Rust-сервера (MVP — всё, что нужно для чата и событий). */
-final class PlayerImpl {
-    final Player api = Stub.of(Player.class, this);
+public final class PlayerImpl {
+    final Player api = new org.bukkit.craftbukkit.entity.CraftHumanEntity(this);
     private final ChunkwakeServer server;
     final UUID id;
     final String name;
     volatile boolean online = true;
     /** Права как у CraftBukkit: {@code PermissibleBase} над {@link #isOp()}. */
-    private PermissibleBase perms;
-    private boolean permsOp;
     /** `Player.setDisplayName`/`setPlayerListName` (не в Rust: только витрина). */
     private String display;
     /** `Player.getRespawnLocation`: кровать/якорь, если плагин её задал. */
@@ -73,15 +71,8 @@ final class PlayerImpl {
 
     /** Базовые права; при смене op (в т.ч. {@code /op} из Rust) пересчитываются. */
     private PermissibleBase perms() {
-        boolean op = isOp();
-        if (perms == null) {
-            permsOp = op;
-            perms = new PermissibleBase(api);
-        } else if (op != permsOp) {
-            permsOp = op;
-            perms.recalculatePermissions();
-        }
-        return perms;
+        // Единый Permissible из CraftHumanEntity.perm: его подменяет LuckPerms.
+        return ((org.bukkit.craftbukkit.entity.CraftHumanEntity) api).perm;
     }
 
     public boolean hasPermission(String p) { return perms().hasPermission(p); }
@@ -98,10 +89,7 @@ final class PlayerImpl {
     }
     public void removeAttachment(PermissionAttachment attachment) { perms().removeAttachment(attachment); }
     public void recalculatePermissions() {
-        if (perms != null) {
-            permsOp = isOp();
-            perms.recalculatePermissions();
-        }
+        perms().recalculatePermissions();
     }
     public Set<PermissionAttachmentInfo> getEffectivePermissions() { return perms().getEffectivePermissions(); }
     public Component name() { return Component.text(name); }

@@ -27,7 +27,6 @@ final class PluginManagerImpl {
     final PluginManager api = Stub.of(PluginManager.class, this);
     private final ChunkwakeServer server;
     final Map<String, Plugin> plugins = new LinkedHashMap<>();
-    private final Map<String, Permission> permissions = new HashMap<>();
 
     PluginManagerImpl(ChunkwakeServer server) {
         this.server = server;
@@ -333,15 +332,24 @@ final class PluginManagerImpl {
 
     // --- права: реестр как у SimplePluginManager, умолчания считаются по запросу ---
 
+    /**
+     * Карты прав — поля настоящего {@link org.bukkit.plugin.SimplePluginManager}:
+     * LuckPerms подменяет их своими (`InjectorPermissionMap`/`InjectorDefaultsMap`/
+     * `InjectorSubscriptionMap`), и сервер должен читать именно подменённые.
+     */
+    private Map<String, Permission> permissions() {
+        return server.simple.permissions;
+    }
+
     public Permission getPermission(String name) {
-        return permissions.get(name.toLowerCase(java.util.Locale.ROOT));
+        return permissions().get(name.toLowerCase(java.util.Locale.ROOT));
     }
 
     public void addPermission(Permission perm) {
         if (getPermission(perm.getName()) != null) {
             throw new IllegalArgumentException("The permission " + perm.getName() + " is already defined!");
         }
-        permissions.put(perm.getName().toLowerCase(java.util.Locale.ROOT), perm);
+        permissions().put(perm.getName().toLowerCase(java.util.Locale.ROOT), perm);
     }
 
     public void removePermission(Permission perm) {
@@ -349,44 +357,73 @@ final class PluginManagerImpl {
     }
 
     public void removePermission(String name) {
-        permissions.remove(name.toLowerCase(java.util.Locale.ROOT));
+        permissions().remove(name.toLowerCase(java.util.Locale.ROOT));
     }
 
     /** `/reload`: права плагинов регистрируются заново. */
     void clearPermissions() {
-        permissions.clear();
+        permissions().clear();
     }
 
     public Set<Permission> getPermissions() {
-        return Set.copyOf(permissions.values());
+        return Set.copyOf(permissions().values());
     }
 
     public Set<Permission> getDefaultPermissions(boolean op) {
-        Set<Permission> out = new java.util.HashSet<>();
-        for (Permission p : permissions.values()) {
-            if (p.getDefault().getValue(op)) {
-                out.add(p);
+        Set<Permission> out = server.simple.defaultPerms.get(op);
+        return out == null ? Set.of() : Set.copyOf(out);
+    }
+
+    public void recalculatePermissionDefaults(Permission perm) {
+        if (perm == null) {
+            return;
+        }
+        for (boolean op : new boolean[] { true, false }) {
+            Set<Permission> set = server.simple.defaultPerms.computeIfAbsent(op, k -> new java.util.LinkedHashSet<>());
+            if (perm.getDefault().getValue(op)) {
+                set.add(perm);
+            } else {
+                set.remove(perm);
             }
         }
-        return out;
     }
 
-    public void recalculatePermissionDefaults(Permission perm) {}
+    public void subscribeToPermission(String perm, Permissible p) {
+        server.simple.permSubs.computeIfAbsent(perm, k -> new java.util.HashMap<>()).put(p, Boolean.TRUE);
+    }
 
-    public void subscribeToPermission(String perm, Permissible p) {}
-
-    public void unsubscribeFromPermission(String perm, Permissible p) {}
+    public void unsubscribeFromPermission(String perm, Permissible p) {
+        Map<Permissible, Boolean> map = server.simple.permSubs.get(perm);
+        if (map != null) {
+            map.remove(p);
+            if (map.isEmpty()) {
+                server.simple.permSubs.remove(perm);
+            }
+        }
+    }
 
     public Set<Permissible> getPermissionSubscriptions(String perm) {
-        return Set.of();
+        Map<Permissible, Boolean> map = server.simple.permSubs.get(perm);
+        return map == null ? Set.of() : Set.copyOf(map.keySet());
     }
 
-    public void subscribeToDefaultPerms(boolean op, Permissible p) {}
+    public void subscribeToDefaultPerms(boolean op, Permissible p) {
+        server.simple.defSubs.computeIfAbsent(op, k -> new java.util.HashMap<>()).put(p, Boolean.TRUE);
+    }
 
-    public void unsubscribeFromDefaultPerms(boolean op, Permissible p) {}
+    public void unsubscribeFromDefaultPerms(boolean op, Permissible p) {
+        Map<Permissible, Boolean> map = server.simple.defSubs.get(op);
+        if (map != null) {
+            map.remove(p);
+            if (map.isEmpty()) {
+                server.simple.defSubs.remove(op);
+            }
+        }
+    }
 
     public Set<Permissible> getDefaultPermSubscriptions(boolean op) {
-        return Set.of();
+        Map<Permissible, Boolean> map = server.simple.defSubs.get(op);
+        return map == null ? Set.of() : Set.copyOf(map.keySet());
     }
 
     public boolean useTimings() {
