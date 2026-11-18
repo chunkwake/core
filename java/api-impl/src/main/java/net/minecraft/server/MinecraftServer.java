@@ -14,7 +14,7 @@ public class MinecraftServer {
     public static final String VERSION = "26.3";
     public static final MinecraftServer SERVER = new MinecraftServer();
 
-    private final ServerConnection connection = new ServerConnection();
+    public final ServerConnection connection = new ServerConnection();
 
     public static MinecraftServer getServer() {
         return SERVER;

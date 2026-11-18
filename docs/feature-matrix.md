@@ -634,3 +634,26 @@ AxiomPaper. Закрыто: `CraftServer.getServer()`,
 - VoiceMessages — `ServerConfig`/NMS;
 - AxiomPaper — `LevelChunk`;
 - VoxyServerSide — сам требует MC `<26.2` и отключается.
+
+
+## NMS-слой: 16/20 плагинов
+
+Добавлены классы/поля, которые требовали PacketEvents/GrimAC, InvSee++,
+VoiceMessages и AxiomPaper:
+
+- `net.minecraft.network.codec.StreamCodec`, `SimpleStreamCodec`,
+  `ItemStack.STREAM_CODEC` — PacketEvents `initObjects`;
+- `MinecraftServer.connection` (public) — `getMinecraftServerConnectionInstance`;
+- `org.bukkit.craftbukkit.command.VanillaCommandWrapper.getListener`;
+- `net.minecraft.util.ProblemReporter`, `net.minecraft.world.level.Level`,
+  `net.minecraft.world.level.block.entity.BlockEntity`,
+  `LevelChunk.updateBlockEntityTicker`;
+- `com.mojang.serialization.codecs.RecordCodecBuilder$Instance`.
+
+Итог прогона: **16 of 20 enabled** (GrimAC теперь включается).
+
+Остаточные отказы:
+- InvSee++ — следующий NMS-класс;
+- VoiceMessages — `RecordCodecBuilder`/`ServerConfig`;
+- AxiomPaper — `net.minecraft.core.IdMapper`;
+- VoxyServerSide — сам требует MC `<26.2`.

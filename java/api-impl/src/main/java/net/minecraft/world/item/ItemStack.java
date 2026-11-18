@@ -10,6 +10,8 @@ public class ItemStack {
     public int count;
 
     public static final ItemStack EMPTY = new ItemStack("minecraft:air", 0);
+    public static final net.minecraft.network.codec.StreamCodec<Object> STREAM_CODEC =
+            net.minecraft.network.codec.SimpleStreamCodec.INSTANCE;
 
     public ItemStack() {
         this("minecraft:air", 0);
