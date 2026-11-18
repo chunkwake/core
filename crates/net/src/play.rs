@@ -4672,9 +4672,9 @@ impl PlayPlan {
         }
         // `pdc <uuid>` → `BukkitValues` игрока типизированным JSON;
         // `pdc <uuid> <json>` — заменить (уходит в `playerdata`).
-                // `itemfromnbt <hex>` -> строка стека (`item count [json]`): формат
+        // `itemfromnbt <hex>` -> строка стека (`item count [json]`): формат
         // `CraftItemStack.deserializeBytes` (gzip-NBT `ItemStack.CODEC`).
-                // `time` / `gametime` -> `World.getTime`/`getFullTime`;
+        // `time` / `gametime` -> `World.getTime`/`getFullTime`;
         // `settime <ticks>` -> `World.setTime` (в пределах суток).
         if line == "time" {
             return self.day_time().to_string();
@@ -4689,7 +4689,7 @@ impl PlayPlan {
             self.set_day_time(ticks);
             return "1".into();
         }
-if let Some(rest) = line.strip_prefix("itemfromnbt ") {
+        if let Some(rest) = line.strip_prefix("itemfromnbt ") {
             let line = crate::stack_nbt::unhex(rest.trim())
                 .and_then(|bytes| chunkwake_world::nbt::read_root(&bytes).ok())
                 .and_then(|root| crate::stack_nbt::from_nbt(&root, |n| self.item_id(n)))
@@ -4708,7 +4708,7 @@ if let Some(rest) = line.strip_prefix("itemfromnbt ") {
             };
             return crate::stack_nbt::hex(&chunkwake_world::nbt::write_root(&tag));
         }
-if let Some(rest) = line.strip_prefix("pdc ") {
+        if let Some(rest) = line.strip_prefix("pdc ") {
             let (id, json) = rest.split_once(' ').unwrap_or((rest, ""));
             let Ok(uuid) = Uuid::parse_str(id) else {
                 return String::new();
