@@ -736,3 +736,31 @@ VoiceMessages и AxiomPaper:
 - **VoxyServerSide 0.21.1** — сам отключается: его `plugin.yml` объявляет
   `lss-minecraft-dependency: '>=26.1 <26.2-'`, а сервер — 26.3.
   Это ограничение самого jar'а, а не API; нужен билд под 26.3.
+
+
+## NMS-слой Axiom: BlockPos/Vec3i, ValueIO, payload'ы
+
+Добавлено по живым ошибкам AxiomPaper:
+
+- `Vec3i` ↔ `BlockPos` теперь настоящая иерархия (`BlockPos extends Vec3i`,
+  `MutableBlockPos` мутирует себя) — ушёл `VerifyError` в
+  `SetBlockPacketListener`;
+- `Direction` (+`Axis`), `SectionPos`, `Position`, `Rotation`, `Mirror`,
+  `GameType`, `InteractionHand`, `ChunkPos`, `Vec3`;
+- `WorldVersion` (`name()/dataVersion()/protocolVersion()`) и
+  `SharedConstants.getCurrentVersion()` возвращает его, а не строку;
+- `CustomPacketPayload`, `DiscardedPayload` (конструкторы
+  `(Identifier, byte[])` и `(Identifier, ByteBuf)`),
+  `ClientboundCustomPayloadPacket`, `ServerGamePacketListenerImpl.send`;
+- `ValueInput`/`ValueOutput`, `TagValueInput`/`TagValueOutput`
+  (`create`, `createWithContext`, `buildResult`, публичное `input`);
+- рабочий `NbtOps` поверх NBT (`convertTo`, map/list, `remove`);
+- `PalettedContainer`/`Strategy`, `Holder`/`Registry`/`BuiltInRegistries`,
+  `EntityType`, `ProblemReporter.DISCARDING`;
+- `BlockState` c `getValue/setValue/getProperties`,
+  `Property`/`BooleanProperty`/`IntegerProperty`/`EnumProperty`,
+  `StateDefinition`.
+
+Текущий блокер Axiom — `net.minecraft.world.entity.LivingEntity`:
+дальше нужен полноценный слой сущностей (`Entity`/`LivingEntity`/
+`HoveringEntity`/`Vec3`), это следующий крупный пласт.

@@ -1,5 +1,11 @@
 package net.minecraft.util;
 
-/** Минимальный NMS {@code ProblemReporter} (InvSee++). */
+/** NMS {@code ProblemReporter}. */
 public interface ProblemReporter {
+    ProblemReporter DISCARDING = new ProblemReporter() {
+    };
+
+    default void report(String message) {
+        // по умолчанию проблемы игнорируются (как DISCARDING)
+    }
 }

@@ -24,6 +24,8 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
     @Override
     public void onEnable() {
         getLogger().info("onEnable on " + getServer().getName() + " " + getServer().getVersion());
+        getLogger().info("resource plugin.yml: " + (getResource("plugin.yml") != null)
+                + " classloader: " + getClassLoader().getClass().getName());
         for (org.bukkit.World w : getServer().getWorlds()) {
             getLogger().info("world: " + w.getName() + " " + w.getKey() + " " + w.getEnvironment() + " uid=" + w.getUID()
                     + " path=" + w.getWorldPath());

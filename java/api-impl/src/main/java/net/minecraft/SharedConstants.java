@@ -12,8 +12,8 @@ public final class SharedConstants {
         return PROTOCOL;
     }
 
-    public static String getCurrentVersion() {
-        return VERSION;
+    public static WorldVersion getCurrentVersion() {
+        return WorldVersion.Current.INSTANCE;
     }
 
     public static String getVersionName() {

@@ -19,6 +19,19 @@ public class Block {
         return this.defaultState;
     }
 
+    public net.minecraft.world.level.block.state.StateDefinition<Block,
+            net.minecraft.world.level.block.state.BlockState> getStateDefinition() {
+        return new net.minecraft.world.level.block.state.StateDefinition<>(this, java.util.List.of());
+    }
+
+    public String getDescriptionId() {
+        return "block.minecraft.air";
+    }
+
+    public String getName() {
+        return "Air";
+    }
+
     @Override
     public String toString() {
         return "Block@" + Integer.toHexString(System.identityHashCode(this));

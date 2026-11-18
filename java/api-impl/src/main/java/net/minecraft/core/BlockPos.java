@@ -1,39 +1,15 @@
 package net.minecraft.core;
 
-/** NMS {@code BlockPos}. */
-public class BlockPos {
+/** NMS {@code BlockPos} (+ изменяемый вариант). */
+public class BlockPos extends Vec3i {
     public static final BlockPos ZERO = new BlockPos(0, 0, 0);
 
-    private final int x;
-    private final int y;
-    private final int z;
-
     public BlockPos(int x, int y, int z) {
-        this.x = x;
-        this.y = y;
-        this.z = z;
+        super(x, y, z);
     }
 
     public static BlockPos containing(double x, double y, double z) {
         return new BlockPos((int) Math.floor(x), (int) Math.floor(y), (int) Math.floor(z));
-    }
-
-    public int getX() {
-        return this.x;
-    }
-
-    public int getY() {
-        return this.y;
-    }
-
-    public int getZ() {
-        return this.z;
-    }
-
-    public long asLong() {
-        return ((long) this.x & 0x3FFFFFFL) << 38
-                | ((long) this.z & 0x3FFFFFFL) << 12
-                | ((long) this.y & 0xFFFL);
     }
 
     public static BlockPos of(long packed) {
@@ -44,18 +20,65 @@ public class BlockPos {
     }
 
     @Override
-    public boolean equals(Object other) {
-        return other instanceof BlockPos p && p.x == this.x && p.y == this.y && p.z == this.z;
+    public BlockPos offset(int dx, int dy, int dz) {
+        return new BlockPos(this.x + dx, this.y + dy, this.z + dz);
     }
 
     @Override
-    public int hashCode() {
-        return (this.y + this.z * 31) * 31 + this.x;
+    public BlockPos offset(Vec3i other) {
+        return this.offset(other.getX(), other.getY(), other.getZ());
     }
 
     @Override
-    public String toString() {
-        return "BlockPos[" + this.x + ", " + this.y + ", " + this.z + "]";
+    public BlockPos above() {
+        return this.above(1);
+    }
+
+    @Override
+    public BlockPos above(int steps) {
+        return this.offset(0, steps, 0);
+    }
+
+    public BlockPos below() {
+        return this.below(1);
+    }
+
+    public BlockPos below(int steps) {
+        return this.offset(0, -steps, 0);
+    }
+
+    @Override
+    public BlockPos relative(Direction direction) {
+        return this.offset(direction.getStepX(), direction.getStepY(), direction.getStepZ());
+    }
+
+    public BlockPos relative(Direction direction, int steps) {
+        return this.offset(direction.getStepX() * steps, direction.getStepY() * steps,
+                direction.getStepZ() * steps);
+    }
+
+    public BlockPos north() {
+        return this.relative(Direction.NORTH);
+    }
+
+    public BlockPos south() {
+        return this.relative(Direction.SOUTH);
+    }
+
+    public BlockPos east() {
+        return this.relative(Direction.EAST);
+    }
+
+    public BlockPos west() {
+        return this.relative(Direction.WEST);
+    }
+
+    public BlockPos immutable() {
+        return this;
+    }
+
+    public MutableBlockPos mutable() {
+        return new MutableBlockPos(this.x, this.y, this.z);
     }
 
     /** Изменяемая позиция (NMS {@code BlockPos.MutableBlockPos}). */
@@ -69,23 +92,36 @@ public class BlockPos {
         }
 
         public MutableBlockPos setX(int x) {
-            return this.set(x, this.getY(), this.getZ());
+            this.x = x;
+            return this;
         }
 
         public MutableBlockPos setY(int y) {
-            return this.set(this.getX(), y, this.getZ());
+            this.y = y;
+            return this;
         }
 
         public MutableBlockPos setZ(int z) {
-            return this.set(this.getX(), this.getY(), z);
+            this.z = z;
+            return this;
         }
 
         public MutableBlockPos set(int x, int y, int z) {
-            return new MutableBlockPos(x, y, z);
+            this.x = x;
+            this.y = y;
+            this.z = z;
+            return this;
         }
 
         public MutableBlockPos move(int dx, int dy, int dz) {
-            return this.set(this.getX() + dx, this.getY() + dy, this.getZ() + dz);
+            this.x += dx;
+            this.y += dy;
+            this.z += dz;
+            return this;
+        }
+
+        public MutableBlockPos move(Direction direction) {
+            return this.move(direction.getStepX(), direction.getStepY(), direction.getStepZ());
         }
     }
 }
