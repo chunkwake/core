@@ -36,6 +36,7 @@ final class WorldImpl {
     final String dim;
     private volatile UUID uid;
     private volatile PdcImpl pdc;
+    private volatile WorldBorderImpl border;
 
     WorldImpl(ChunkwakeServer server, String dim) {
         this.server = server;
@@ -55,6 +56,20 @@ final class WorldImpl {
 
     static WorldImpl of(World w) {
         return Stub.impl(w) instanceof WorldImpl wi ? wi : null;
+    }
+
+    public org.bukkit.WorldBorder getWorldBorder() {
+        WorldBorderImpl current = this.border;
+        if (current == null) {
+            synchronized (this) {
+                current = this.border;
+                if (current == null) {
+                    current = new WorldBorderImpl(this.api);
+                    this.border = current;
+                }
+            }
+        }
+        return current;
     }
 
     public String getName() {

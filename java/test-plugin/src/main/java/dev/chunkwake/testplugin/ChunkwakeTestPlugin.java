@@ -144,6 +144,20 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
         foliaProbe();
         ItemStack bread = new ItemStack(Material.BREAD, 3);
         getLogger().info("item api: " + bread.getType() + " x" + bread.getAmount() + " max " + bread.getMaxStackSize());
+        {
+            var lore = io.papermc.paper.datacomponent.item.ItemLore.lore()
+                    .addLine(Component.text("line1")).build();
+            var ench = io.papermc.paper.datacomponent.item.ItemEnchantments.itemEnchantments()
+                    .add(org.bukkit.enchantments.Enchantment.SHARPNESS, 3).build();
+            var color = io.papermc.paper.datacomponent.item.DyedItemColor.dyedItemColor()
+                    .color(org.bukkit.Color.RED).build();
+            var model = io.papermc.paper.datacomponent.item.CustomModelData.customModelData()
+                    .addString("abc").addFloat(1.5f).build();
+            var map = io.papermc.paper.datacomponent.item.MapId.mapId(7);
+            getLogger().info("components: lore=" + lore.lines().size()
+                    + " ench=" + ench.enchantments() + " color=" + color.color()
+                    + " model=" + model.strings() + "/" + model.floats() + " map=" + map.id());
+        }
         getServer().getScheduler().runTaskTimer(this, () -> {
             ticks += 100;
             getLogger().info("scheduler: " + ticks + " ticks");

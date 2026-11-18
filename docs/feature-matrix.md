@@ -474,3 +474,49 @@ plugins: ProtocolLib enabled in 13 ms
 (`ChunkwakeServer.command`). Полный перехват всех пакетов (включая
 clientbound) потребует владения Netty-каналом на Java-стороне — сеть пока
 в Rust.
+
+
+## ItemComponentTypesBridge: реальные значения вместо SoftValue
+
+Простые и списочные компоненты теперь реализованы классами с настоящим
+состоянием (`dev.chunkwake.bridge.ItemComponents`):
+
+- `ItemLore` (`lines`/`styledLines`), `ItemEnchantments`,
+  `DyedItemColor`, `CustomModelData`, `TooltipDisplay`, `MapId`,
+  `UseRemainder`, `OminousBottleAmplifier`, `Enchantable`,
+  `DamageResistant`, `Repairable`;
+- списки/карты: `ChargedProjectiles`, `BundleContents`,
+  `ItemContainerContents`, `SuspiciousStewEffects`, `BannerPatternLayers`,
+  `MapDecorations` (+`DecorationEntry`), `SeededContainerLoot`,
+  `PotDecorations`, `Fireworks`;
+- `BlockItemDataProperties` (`createBlockData`/`applyTo` через
+  `BlockType.createBlockData()`), `JukeboxPlayable`, `ItemArmorTrim`,
+  `LodestoneTracker`.
+
+Живой прогон во встроенном тест-плагине:
+```
+components: lore=1 ench={minecraft:sharpness=3} color=Color:[argb0xFFFF0000]
+            model=[abc]/[1.5] map=7
+```
+То есть билдеры реально сохраняют и отдают значения.
+
+## WorldBorder: функциональная реализация
+
+`World.getWorldBorder()` раньше был `SoftValue`-заглушкой (Chunky и WorldGuard
+писали warning). Добавлен `WorldBorderImpl`: size/center/damage
+buffer/amount/warning time/distance, `isInside`, ванильные пределы
+(29999984), состояние в памяти. Предупреждение `World.getWorldBorder is not
+implemented` исчезло.
+
+## Новые плагины с Modrinth (26.3)
+
+| Плагин | Результат |
+|---|---|
+| **Chunky 1.5.66** (Paper/Folia) | включается, `Chunky enabled` |
+| **WorldGuard 7.0.21** | включается, регионы загружаются |
+| **TAB 6.2.1** | включается, но `implementation for Paper 26.3` не инициализируется (его Paper-детект/`ServerBuildInfo`) |
+| **DecentHolograms 2.10.2** | не включается: нужен `net.minecraft.server.network.ServerCommonPacketListenerImpl` (NMS-пакеты), пока нет |
+
+Итог прогона: `11 of 12 enabled`; единственный незапустившийся —
+DecentHolograms (NMS-слой пакетов). Остаются также `World.getLoadedChunks`
+(WorldGuard warning) и TAB-инициализация.
