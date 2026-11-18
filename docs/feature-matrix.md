@@ -657,3 +657,24 @@ VoiceMessages и AxiomPaper:
 - VoiceMessages — `RecordCodecBuilder`/`ServerConfig`;
 - AxiomPaper — `net.minecraft.core.IdMapper`;
 - VoxyServerSide — сам требует MC `<26.2`.
+
+
+## NMS/DFU: следующий пласт (16/20, продвижение по каждому)
+
+Добавлены:
+- `IdMapper` (+`iterator`), `IdMap`, `Block.BLOCK_STATE_REGISTRY`;
+- `ReportedException`; `ServerLevel extends Level`;
+- `PrimitiveCodec` (`STRING`/`BOOL`/`INT`/… в `Codec`), `comapFlatMap`;
+  `RecordCodecBuilder.create`;
+- `JsonOps` (+`empty`), `Blocks` (AIR/STONE/…);
+- `LevelChunk.updateBlockEntityTicker`, `VanillaCommandWrapper.getListener`.
+
+После этого:
+- **GrimAC** включается (PacketEvents проходит);
+- InvSee++ дошёл до `Codec.encode(Object,DynamicOps,Object)`;
+- VoiceMessages — до `JsonOps`/`Codec`-методов;
+- AxiomPaper — до полей `Blocks` (`VOID_AIR` и т.п.);
+- VoxyServerSide — по-прежнему сам требует MC `<26.2`.
+
+Итог: стабильно `16 of 20 enabled`; следующие шаги — реализовать
+`Codec.encode/xmap`/`JsonOps`-операции и полный набор `Blocks`.
