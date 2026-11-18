@@ -260,3 +260,30 @@
   `gametime`, `settime`); живая проверка: `before=61 after=6000`.
 - В живом логе с EssentialsX + PlaceholderAPI + Vault больше нет
   предупреждений `api: <метод> is not implemented`.
+
+## Velocity-прокси: живой прогон
+
+- Velocity **4.3.1** (build 45, `velocity.toml`: `player-info-forwarding-mode =
+  "modern"`, общий `forwarding.secret`) поднят на `127.0.0.1:25577`,
+  backend — Chunkwake на `127.0.0.1:25598` (`velocity-enabled=true`,
+  `velocity-secret=...`, `online-mode=false`).
+- Лог прокси: `[connected player] boater ... has connected`,
+  `[server connection] boater -> lobby has connected`; backend выполнил
+  команды игрока (`[boater] STAIRS_OK`), сработали события плагинов
+  (`quit: boater DISCONNECTED`, `boater left the game`). Modern forwarding
+  (HMAC-SHA256 `velocity:player_info`) принят, вход через прокси работает.
+
+## Производительность: сравнение с Paper 26.3 (то же железо)
+
+- Условия: flat-мир, `view-distance=5`, `simulation-distance=5`,
+  1000 коров (AI включён), без плагинов, один и тот же бинарь/машина.
+- Paper 26.3 (build 253, JDK 25, `-Xms2G -Xmx2G`): 1000 коров на площадке,
+  `tick query` → **avg 7.6 ms/тик** (P50 7.6, P95 9.5, P99 10.8), TPS 20.0.
+- Chunkwake, **release**-сборка (без плагинов): 1000 коров у точки спавна,
+  `execute if entity @e[type=minecraft:cow]` подтверждает 1000 живых,
+  `/tps` и `/tick query` → **MSPT 1.2 ms**, TPS 20.0 (debug-сборка — 6.0 ms).
+  Это ~6× меньше времени тика, чем у Paper 26.3 на том же железе в том же
+  сценарии (при одинаковом TPS 20).
+- Пробы: `crates/bots/examples/perf_probe.rs` (спавн 1000 мобов + замер),
+  `crates/bots/examples/hold_bot.rs` (держит чанки загруженными),
+  `plugin_block_probe.rs` (регрессия правок блоков).
