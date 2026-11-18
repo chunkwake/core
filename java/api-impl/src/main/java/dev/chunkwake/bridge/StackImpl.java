@@ -311,7 +311,10 @@ final class StackImpl extends ItemStack {
             this.type = type;
             this.api = type == Material.WRITABLE_BOOK || type == Material.WRITTEN_BOOK
                     ? Stub.of(org.bukkit.inventory.meta.BookMeta.class, this)
-                    : Stub.of(Damageable.class, this);
+                    : type != null && (type == Material.SHIELD || type.name().endsWith("_BANNER"))
+                            ? (ItemMeta) Stub.ofAll(new Class<?>[] {
+                                    org.bukkit.inventory.meta.BlockStateMeta.class, ItemMeta.class}, this)
+                            : Stub.of(Damageable.class, this);
         }
 
         private static String legacy(Component c) {
@@ -320,6 +323,18 @@ final class StackImpl extends ItemStack {
 
         private static Component fromLegacy(String s) {
             return net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().deserialize(s);
+        }
+
+        public org.bukkit.block.BlockState getBlockState() {
+            return this.type != null
+                    && (this.type == Material.SHIELD || this.type.name().endsWith("_BANNER"))
+                    ? BannerStateImpl.api()
+                    : BannerStateImpl.generic(this.type);
+        }
+
+        public void setBlockState(org.bukkit.block.BlockState state) {
+            // состояние баннера хранится в meta-данных; для placeholder-палитры
+            // InvSee++ достаточно сохранить базовый цвет и паттерны.
         }
 
         public org.bukkit.persistence.PersistentDataContainer getPersistentDataContainer() {

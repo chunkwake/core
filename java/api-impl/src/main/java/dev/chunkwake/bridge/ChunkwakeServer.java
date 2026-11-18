@@ -867,6 +867,9 @@ final class ChunkwakeServer {
 
     public File getWorldContainer() { return levelDirectory.getParent().toFile(); }
 
+    /** `Server.getPluginsFolder()` (faststats в InvSee++, метрики плагинов). */
+    public File getPluginsFolder() { return pluginsDir; }
+
     public World getWorld(String name) {
         for (WorldImpl w : worlds().values()) {
             if (w.getName().equals(name)) {

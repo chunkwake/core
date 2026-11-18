@@ -18,12 +18,28 @@ import org.bukkit.permissions.PermissionAttachmentInfo;
 public class CraftHumanEntity implements org.bukkit.entity.Player {
     /** Поле, которое ищет LuckPerms (`CraftHumanEntity.perm`). */
     public PermissibleBase perm;
+    /** CraftBukkit-поля: их читают NMS-плагины через FakeCraftPlayer. */
+    public final org.bukkit.craftbukkit.CraftServer server;
+    public final net.minecraft.server.level.ServerPlayer entity;
     final Object handle;
     /** `false`, пока `PermissibleBase` ещё в своём конструкторе. */
     private boolean ready;
 
     public CraftHumanEntity(Object handle) {
+        this(handle, null, null);
+    }
+
+    /** Конструктор как у CraftBukkit: `CraftHumanEntity(CraftServer, Entity)`. */
+    public CraftHumanEntity(org.bukkit.craftbukkit.CraftServer server,
+            net.minecraft.server.level.ServerPlayer entity) {
+        this(entity, server, entity);
+    }
+
+    private CraftHumanEntity(Object handle, org.bukkit.craftbukkit.CraftServer server,
+            net.minecraft.server.level.ServerPlayer entity) {
         this.handle = handle;
+        this.server = server;
+        this.entity = entity;
         this.perm = new PermissibleBase(this);
         this.ready = true;
     }

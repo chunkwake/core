@@ -40,9 +40,10 @@ public class Component {
     }
 
     public static class Serializer {
-        @SuppressWarnings({"rawtypes", "unchecked"})
+        /** Настоящий DFU-кодек: строка ↔ компонент (как plain-text fallback). */
         public static final com.mojang.serialization.Codec<Component> CODEC =
-                (com.mojang.serialization.Codec) com.mojang.serialization.SimpleCodec.INSTANCE;
+                com.mojang.serialization.Codec.STRING.xmap(
+                        Component::literal, Component::getString);
 
         private Serializer() {
         }

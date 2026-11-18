@@ -2,6 +2,11 @@ val paperApi: String by rootProject.extra
 
 dependencies {
     "implementation"(paperApi)
+    // Настоящие библиотеки Mojang, на которые рассчитаны Paper-плагины:
+    // DFU (Codec/JsonOps/RecordCodecBuilder) и Brigadier (аргументы команд).
+    // Версии те же, что у 26.3; jar-ы уже в Gradle-кэше.
+    "implementation"("com.mojang:datafixerupper:10.0.21")
+    "implementation"("com.mojang:brigadier:1.3.11")
     // Провайдер SLF4J 2.x. Без него SLF4J пишет в stderr три строки
     // «No SLF4J providers were found»: API плагинов (и библиотеки, которые
     // плагины объявляют в `libraries:`) логируют через SLF4J, а реализации

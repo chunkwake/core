@@ -13,9 +13,15 @@ import dev.chunkwake.bridge.PlayerCalls;
  */
 public class CraftServer implements org.bukkit.Server {
     private final Object handle;
+    private final net.minecraft.server.dedicated.DedicatedPlayerList nmsHandle =
+            new net.minecraft.server.dedicated.DedicatedPlayerList();
 
     public CraftServer(Object handle) {
         this.handle = handle;
+    }
+
+    public net.minecraft.server.dedicated.DedicatedPlayerList getHandle() {
+        return this.nmsHandle;
     }
 
     @Override public java.lang.String getName() {

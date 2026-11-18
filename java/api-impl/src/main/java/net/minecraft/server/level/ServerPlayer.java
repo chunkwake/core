@@ -12,4 +12,8 @@ public class ServerPlayer extends net.minecraft.world.entity.player.Player {
     public ServerPlayer() {
         this.connection = new ServerGamePacketListenerImpl();
     }
+
+    public net.minecraft.core.RegistryAccess registryAccess() {
+        return net.minecraft.core.RegistryAccess.EMPTY_REGISTRY_ACCESS();
+    }
 }

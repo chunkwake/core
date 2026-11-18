@@ -2280,6 +2280,24 @@ public final class Blocks {
     public static final Block ZOMBIE_WALL_HEAD = new Block();
     public static final Block ZOMBIFIED_PIGLIN_SPAWN_EGG = new Block();
 
+    static {
+        // Наполняем реестр block states: Axiom и палитры чанков ожидают
+        // непустой Block.BLOCK_STATE_REGISTRY с устойчивыми id.
+        for (java.lang.reflect.Field field : Blocks.class.getDeclaredFields()) {
+            if (field.getType() == Block.class
+                    && java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
+                try {
+                    Block block = (Block) field.get(null);
+                    if (block != null) {
+                        Block.BLOCK_STATE_REGISTRY.add(block.defaultBlockState());
+                    }
+                } catch (IllegalAccessException ignored) {
+                    // поле недоступно — пропускаем
+                }
+            }
+        }
+    }
+
     private Blocks() {
     }
 }

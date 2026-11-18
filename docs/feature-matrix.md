@@ -698,3 +698,41 @@ VoiceMessages и AxiomPaper:
 - **AxiomPaper** — пустые `Blocks`/`IdMapper` дают
   `IndexOutOfBoundsException` (нужны реальные состояния блоков);
 - **VoxyServerSide** — требует MC `<26.2`.
+
+
+## Настоящие DFU и Brigadier вместо заглушек — 18/20
+
+Вместо самодельных `com.mojang.serialization.*` подключены реальные
+библиотеки Mojang из Gradle-кэша (те же версии, что у 26.3):
+
+- `com.mojang:datafixerupper:10.0.21` — `Codec`, `JsonOps`,
+  `RecordCodecBuilder`, `Products`, `DataResult`, `MapCodec`;
+- `com.mojang:brigadier:1.3.11` — аргументы команд для cloud/GrimAC.
+
+После этого:
+- **VoiceMessages 1.0.14 включается** и реально сериализует `ServerConfig`
+  через `Codec.encode(..., JsonOps.INSTANCE, ...)`;
+- **InvSee++ 0.31.22 включается** (нужны были `Server.getPluginsFolder`,
+  `CraftServer.getHandle()`/`DedicatedPlayerList`, `BlockStateMeta` для
+  `SHIELD`, `IdMapper`, `Level`/`ReportedException`);
+- **GrimAC** включается (PacketEvents + cloud).
+
+Живой прогон 20 jar'ов: **18 of 20 enabled**.
+
+Дополнительно:
+- `Block.BLOCK_STATE_REGISTRY` наполняется состояниями всех 2278 блоков
+  (`Blocks`), у блока стабильный `defaultBlockState()`;
+- `IdMapper`: `add`, `addMapping`, `getId`, `byId`, `size`, `iterator`,
+  конструктор с capacity;
+- рабочий бинарный NBT: `Tag` (интерфейс, как в 26.x), `CompoundTag`,
+  `ListTag`, `Byte/Short/Int/Long/Float/Double/StringTag`,
+  `ByteArrayTag`/`LongArrayTag`, `NbtAccounter`, `NbtIo` (gzip);
+- `BlockPos` (+`MutableBlockPos`), `Holder`/`Holder.Reference`,
+  `Registry`, `BuiltInRegistries`, `EntityType`, `SharedConstants`.
+
+Остаточные отказы:
+- **AxiomPaper 6.0.1** — следующий NMS-пласт (палитры чанков, POI,
+  datafixers, `NbtOps`); включается по шагам, но 92 NMS-класса ещё нет;
+- **VoxyServerSide 0.21.1** — сам отключается: его `plugin.yml` объявляет
+  `lss-minecraft-dependency: '>=26.1 <26.2-'`, а сервер — 26.3.
+  Это ограничение самого jar'а, а не API; нужен билд под 26.3.

@@ -20,6 +20,11 @@ public final class Identifier {
         return new Identifier(namespace.isEmpty() ? "minecraft" : namespace, path);
     }
 
+    public static Identifier fromNamespaceAndPath(String namespace, String path) {
+        return new Identifier(namespace == null || namespace.isEmpty() ? "minecraft" : namespace,
+                path == null ? "" : path);
+    }
+
     public String getNamespace() { return this.namespace; }
     public String getPath() { return this.path; }
 
