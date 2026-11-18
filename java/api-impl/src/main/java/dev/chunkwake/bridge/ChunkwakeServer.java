@@ -374,6 +374,8 @@ final class ChunkwakeServer {
                             + perm.getName() + "' but it's already registered", e);
                 }
             }
+            // ProtocolLib: привязать CHAT_COMMAND к нашему NMS-классу до onEnable.
+            ProtocolBridge.prepare(plugin);
             // WorldEdit без NMS-адаптера: подписаться на ConfigurationLoadEvent,
             // чтобы поставить API-адаптер до первого PlatformReadyEvent.
             WorldEditSupport.prepare(plugin);
@@ -666,6 +668,9 @@ final class ChunkwakeServer {
         if (sender == null) {
             return false;
         }
+        // PacketType.Play.Client.CHAT_COMMAND: Rust уже принял пакет и позвал
+        // Bukkit — отдаём его слушателям ProtocolLib (пока без Netty-канала).
+        ProtocolBridge.command(sender, line);
         String label = line.split(" ", 2)[0];
         if (commands.getCommand(label) == null) {
             return false;

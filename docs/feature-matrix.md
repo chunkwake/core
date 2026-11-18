@@ -312,9 +312,9 @@
   LuckPerms запрещает вход (`denying login`). То же ограничение —
   `PluginManager instance is not a 'SimplePluginManager'` при инъекции карт
   прав. Нужен слой совместимости CraftBukkit-классов игрока.
-- **ProtocolLib 5.4.0** — не загружается: `Unable to find network.EnumProtocol`
-  (NMS-классы Mojang), как и ожидается для плагина, работающего через
-  внутренний код сервера.
+- **ProtocolLib 5.4.0** — включается (см. раздел ниже); слушатели
+  `PacketListener` регистрируются, но доставка события упирается в
+  `PacketContainer` и NMS `ItemStack`.
 - Плагины без NMS (EssentialsX, PlaceholderAPI, Vault, WorldEdit, ViaVersion)
   включаются: `5 of 5 enabled` в этом прогоне.
 
@@ -440,7 +440,20 @@ plugins: ProtocolLib enabled in 13 ms
 Ошибок `Unable to find ...` нет; остаются только предупреждения проверки
 обновлений (нет поддерживаемой версии/сети).
 
-Ограничение: реестр пакетов ProtocolLib пуст (`*PacketTypes`/`*Protocols`
-не отдаются), а Java-сторона не владеет реальными Netty-каналами (сеть в
-Rust), поэтому фактический перехват пакетов пока не работает — это следующий
-крупный кусок NMS-слоя.
+Что уже работает:
+
+- `ProtocolBridge.prepare()` до `onEnable` регистрирует
+  `PacketType.Play.Client.CHAT_COMMAND` в `PacketRegistry`
+  (`typeToClass`/`clientPackets`), поэтому ProtocolLib принимает слушателей:
+  `ProtocolProbe listening on CHAT_COMMAND`, без `unknown packet`.
+- `PacketType.CHAT_COMMAND` привязан к нашему NMS-классу
+  `net.minecraft.network.protocol.game.ServerboundChatCommandPacket`
+  (`implements net.minecraft.network.protocol.Packet`, поле `command`).
+- `ProtocolBridge.command()` вызывается из `ChunkwakeServer.command()` для
+  команд, дошедших до Bukkit, и пытается отдать событие слушателям.
+
+Ограничение: `PacketContainer`/`PacketEvent` при инициализации тянут
+`DefaultInstances`/`MinecraftGenerator`, которым нужны
+`net.minecraft.world.item.ItemStack`, `NonNullList`, chat-codec и т.п. — то
+есть доставка `PacketEvent` упирается в следующий пласт NMS. До него
+перехват остаётся на уровне регистрации слушателей, а не событий.
