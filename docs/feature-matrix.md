@@ -367,6 +367,8 @@ dynamic-proxy `BukkitImplAdapter` (пустая карта свойств бло
 //pos 0,0,0 4,4,4    -> Position 1/2, Positions updated.
 //size               -> Type: cuboid, Size: (5, 5, 5), # of blocks: 125
 //set stone          -> Operation completed (125 blocks affected).
+//set oak_stairs[facing=east,half=top]
+                    -> Operation completed (27 blocks affected).
 ```
 
 Корень бага с выделением: в `Stub` прокси `equals`/`hashCode`/`toString`
@@ -389,7 +391,19 @@ impl или по identity прокси). После этого `//pos` → `//si
 `previous == null`; для записи включается `unsupportedVersionEditing`
 (Bukkit-путь WorldEdit без NMS).
 
-Ограничения: карта свойств блоков пока пустая, поэтому
-`oak_stairs[facing=...]` не парсится — только базовые блоки; первый
-`PlatformReadyEvent` при включении всё ещё пишет одну ошибку в лог (адаптер
-ставится после `onEnable`), затем событие переотправляется.
+Свойства блоков: `getProperties(BlockType)` строит карту из Bukkit
+`BlockData` — имена/значения разбираются из `getAsString()`, а домены
+(`BooleanProperty`/`IntegerProperty`/`EnumProperty`) берутся из таблицы
+свойств (`facing`, `half`, `shape`, `axis`, `age`, `level`, `rotation`,
+`power`, …). Проверка живьём:
+```
+//pos 0,100,0 2,102,2
+//set oak_stairs[facing=east,half=top]  -> 27 blocks affected
+/execute if block 1 101 1 minecraft:oak_stairs[facing=east,half=top] run say STAIRS_OK
+  [boater] STAIRS_OK
+```
+
+`PlatformReadyEvent` больше не падает: адаптер ставится по
+`ConfigurationLoadEvent` (подписка через `MethodHandleEventHandler`) — это
+происходит после неудачной загрузки NMS-адаптера, но до первого
+`PlatformReadyEvent`. В логе включения WorldEdit ошибок нет.

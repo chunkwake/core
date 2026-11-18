@@ -374,9 +374,11 @@ final class ChunkwakeServer {
                             + perm.getName() + "' but it's already registered", e);
                 }
             }
+            // WorldEdit без NMS-адаптера: подписаться на ConfigurationLoadEvent,
+            // чтобы поставить API-адаптер до первого PlatformReadyEvent.
+            WorldEditSupport.prepare(plugin);
             plugins.enablePlugin(plugin);
-            // WorldEdit без NMS-адаптера: подставить API-адаптер и повторно
-            // разослать PlatformReadyEvent (первый падал NPE в BlockType).
+            // Запасной путь, если слушатель не сработал (другая версия WorldEdit).
             WorldEditSupport.install(plugin);
             if (plugin.isEnabled()) {
                 enabled++;
