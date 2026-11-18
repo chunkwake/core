@@ -764,3 +764,29 @@ VoiceMessages и AxiomPaper:
 Текущий блокер Axiom — `net.minecraft.world.entity.LivingEntity`:
 дальше нужен полноценный слой сущностей (`Entity`/`LivingEntity`/
 `HoveringEntity`/`Vec3`), это следующий крупный пласт.
+
+
+## 19/20: AxiomPaper включается
+
+Последний пласт для Axiom:
+
+- `LevelAccessor` ← `LevelReader` ← `BlockGetter`; `Level implements
+  LevelAccessor`, `ServerLevel extends Level` (ушёл `NoClassDefFoundError`);
+- иерархия сущностей: `Entity` → `LivingEntity` → `Player`,
+  `Marker`, `HangingEntity` → `ItemFrame`, `EntityType`/`EntityTypes`;
+- `Vec3`, `Entity$RemovalReason`, `EntitySpawnReason`, `Relative`,
+  `EntityProcessor`, `EntitySpawnRequest`;
+- `MinecraftServer.isSameThread()`/`isRunning`/`levelKeys`/`getAllLevels`/
+  `getLevel`/`getTickCount`/`getPlayerList`.
+
+Живой прогон 20 jar'ов: **19 of 20 enabled**.
+
+Остался только **VoxyServerSide 0.21.1**: его `plugin.yml` объявляет
+`lss-minecraft-dependency: '>=26.1 <26.2-'`, а сервер — 26.3, поэтому
+плагин сам себя отключает («Download the build for Minecraft 26.3»).
+`getResource("plugin.yml")` при этом работает (проверено тест-плагином),
+то есть это ограничение версии самого jar'а, а не API.
+
+Известный остаток у Axiom: его тик-задача обращается к ещё не
+реализованным методам `MinecraftServer` (например,
+`getAllLevels`/`getPlayerList` уже закрыты); это следующий пласт.

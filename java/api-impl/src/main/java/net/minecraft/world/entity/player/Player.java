@@ -1,7 +1,9 @@
 package net.minecraft.world.entity.player;
 
-/** Минимальный NMS {@code Player} (InvSee++ проверяет иерархию). */
-public class Player {
+import net.minecraft.world.entity.LivingEntity;
+
+/** NMS {@code Player} (InvSee++, Axiom). */
+public class Player extends LivingEntity {
     private String name;
 
     public Player() {
@@ -13,5 +15,9 @@ public class Player {
 
     public String getName() {
         return this.name;
+    }
+
+    public net.minecraft.world.entity.EntityType<?> getType() {
+        return net.minecraft.world.entity.EntityTypes.PLAYER;
     }
 }

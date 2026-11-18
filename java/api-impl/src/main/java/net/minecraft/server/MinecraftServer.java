@@ -23,4 +23,36 @@ public class MinecraftServer {
     public ServerConnection getConnection() {
         return this.connection;
     }
+
+    /** Тики Chunkwake идут в главном потоке сервера (Axiom, Paper API). */
+    public boolean isSameThread() {
+        return true;
+    }
+
+    public boolean isRunning() {
+        return true;
+    }
+
+    /** Ключи измерений (Axiom обходит их каждый тик). */
+    public java.util.Set<net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level>> levelKeys() {
+        return java.util.Set.of();
+    }
+
+    public net.minecraft.server.level.ServerLevel getLevel(
+            net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> key) {
+        return null;
+    }
+
+    /** Все измерения (Axiom обходит их каждый тик). */
+    public Iterable<net.minecraft.server.level.ServerLevel> getAllLevels() {
+        return java.util.List.of();
+    }
+
+    public int getTickCount() {
+        return 0;
+    }
+
+    public net.minecraft.server.players.PlayerList getPlayerList() {
+        return new net.minecraft.server.players.PlayerList();
+    }
 }
