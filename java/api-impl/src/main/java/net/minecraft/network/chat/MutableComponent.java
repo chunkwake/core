@@ -5,8 +5,11 @@ import java.util.List;
 import net.minecraft.network.chat.contents.objects.ObjectInfo;
 
 /** Изменяемый NMS-компонент: стиль и вложенные siblings. */
-public class MutableComponent extends Component {
+public class MutableComponent implements Component {
     private final List<Component> siblings = new ArrayList<>();
+    private String text = "";
+    private Style style = Style.EMPTY;
+    private ObjectInfo object;
 
     public MutableComponent(String text) {
         this.text = text == null ? "" : text;
@@ -15,6 +18,40 @@ public class MutableComponent extends Component {
     public MutableComponent(ObjectInfo object) {
         this.object = object;
         this.text = "";
+    }
+
+    @Override
+    public Style getStyle() {
+        return this.style;
+    }
+
+    @Override
+    public ObjectInfo objectInfo() {
+        return this.object;
+    }
+
+    public MutableComponent withStyle(Style style) {
+        return this.setStyle(style);
+    }
+
+    public MutableComponent withStyle(net.minecraft.ChatFormatting... formats) {
+        Style style = this.getStyle();
+        for (net.minecraft.ChatFormatting format : formats) {
+            if (format == null) continue;
+            if (format.isColor()) {
+                style = style.withColor(format);
+            } else {
+                switch (format) {
+                    case BOLD -> style = style.withBold(true);
+                    case ITALIC -> style = style.withItalic(true);
+                    case UNDERLINE -> style = style.withUnderlined(true);
+                    case STRIKETHROUGH -> style = style.withStrikethrough(true);
+                    case OBFUSCATED -> style = style.withObfuscated(true);
+                    default -> { }
+                }
+            }
+        }
+        return this.setStyle(style);
     }
 
     public MutableComponent setStyle(Style style) {

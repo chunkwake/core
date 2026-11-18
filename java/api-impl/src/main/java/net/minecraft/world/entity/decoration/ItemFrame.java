@@ -5,6 +5,14 @@ import net.minecraft.world.level.Level;
 
 /** NMS {@code ItemFrame}. */
 public class ItemFrame extends HangingEntity {
+    /** ImageFrame: `ItemFrame.DATA_ITEM`. */
+    public static final net.minecraft.network.syncher.EntityDataAccessor<
+            net.minecraft.world.item.ItemStack> DATA_ITEM =
+            new net.minecraft.network.syncher.EntityDataAccessor<>(8,
+                    new net.minecraft.network.syncher.EntityDataSerializer<
+                            net.minecraft.world.item.ItemStack>() {
+                    });
+
     private int rotation;
 
     public ItemFrame(Level level, net.minecraft.core.BlockPos pos, Direction direction) {

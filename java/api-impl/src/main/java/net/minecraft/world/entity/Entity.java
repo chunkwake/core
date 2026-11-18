@@ -21,6 +21,11 @@ public class Entity {
     private float xRot;
     private boolean removed;
 
+    /** ImageFrame: `Entity.DATA_SHARED_FLAGS_ID`. */
+    public static final net.minecraft.network.syncher.EntityDataAccessor<Byte>
+            DATA_SHARED_FLAGS_ID = new net.minecraft.network.syncher.EntityDataAccessor<>(
+                    0, net.minecraft.network.syncher.EntityDataSerializers.BYTE);
+
     public Entity() {
     }
 

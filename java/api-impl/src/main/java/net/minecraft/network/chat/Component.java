@@ -2,48 +2,36 @@ package net.minecraft.network.chat;
 
 import net.minecraft.network.chat.contents.objects.ObjectInfo;
 
-/** Минимальный NMS-компонент текста с методами, которые использует TAB. */
-public class Component {
-    protected String text = "";
-    protected Style style = Style.EMPTY;
-    protected ObjectInfo object;
+/** NMS {@code Component} — интерфейс (как в 26.x). */
+public interface Component {
+    String getString();
 
-    public Component() {
-    }
+    Style getStyle();
 
-    public static MutableComponent literal(String text) {
+    ObjectInfo objectInfo();
+
+    static MutableComponent literal(String text) {
         return new MutableComponent(text);
     }
 
-    public static MutableComponent translatable(String key) {
+    static MutableComponent translatable(String key) {
         return new MutableComponent(key);
     }
 
-    public static MutableComponent keybind(String keybind) {
+    static MutableComponent keybind(String keybind) {
         return new MutableComponent(keybind);
     }
 
-    public static MutableComponent object(ObjectInfo info) {
+    static MutableComponent object(ObjectInfo info) {
         return new MutableComponent(info);
     }
 
-    public String getString() {
-        return this.text;
+    static MutableComponent empty() {
+        return new MutableComponent("");
     }
 
-    public Style getStyle() {
-        return this.style;
-    }
-
-    public ObjectInfo objectInfo() {
-        return this.object;
-    }
-
-    public static class Serializer {
-        /**
-         * DFU-кодек JSON-компонента (`{"text": "..."}`) поверх JsonOps.
-         * Его использует ProtocolLib WrappedChatComponent (CODEC-поле).
-         */
+    /** DFU-кодек JSON-компонента (`{"text": ...}`) поверх JsonOps. */
+    final class Serializer {
         public static final com.mojang.serialization.Codec<Component> CODEC =
                 new com.mojang.serialization.Codec<Component>() {
                     @Override

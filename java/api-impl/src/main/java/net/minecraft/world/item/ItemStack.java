@@ -50,4 +50,19 @@ public class ItemStack {
     public String toString() {
         return this.item + " x " + this.count;
     }
+
+    /** DataComponent-API (ImageFrame): значения не хранятся, но API есть. */
+    public <T> T get(net.minecraft.core.component.DataComponentType<T> type) {
+        return null;
+    }
+
+    public <T> T getOrDefault(net.minecraft.core.component.DataComponentType<T> type, T fallback) {
+        return fallback;
+    }
+
+    public <T> void set(net.minecraft.core.component.DataComponentType<T> type, T value) {
+    }
+
+    public void applyComponents(net.minecraft.core.component.DataComponentPatch patch) {
+    }
 }

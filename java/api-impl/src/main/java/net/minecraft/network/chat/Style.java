@@ -30,6 +30,10 @@ public final class Style {
         this.shadowColor = shadowColor;
     }
 
+    public Style withColor(net.minecraft.ChatFormatting formatting) {
+        return this.withColor(TextColor.fromLegacyFormat(formatting));
+    }
+
     public Style withColor(TextColor color) {
         return new Style(color, bold, italic, underlined, strikethrough, obfuscated, font, shadowColor);
     }

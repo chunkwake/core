@@ -890,3 +890,28 @@ CB-MODIFIED-16
 CB-MODIFIED-26
 ```
 Клиент получает именно изменённый текст; `field bridge failed` в логе нет.
+
+
+## ImageFrame включён (26/27)
+
+ImageFrame 2026.1.5 создаёт свой `NMSWrapper V26_3` через рефлексию.
+Добавлены реальные зависимости:
+
+- `Component` теперь **интерфейс** (как в 26.x), `MutableComponent` —
+  реализация; `Component.Serializer.CODEC`, `Component.empty()`;
+- `MutableComponent.withStyle(Style)`/`withStyle(ChatFormatting...)`;
+- `Style.withColor(ChatFormatting)`, `TextColor.fromLegacyFormat`;
+- `DataComponents` (`CUSTOM_DATA`, `LORE`), `DataComponentType`,
+  `DataComponentPatch`, `CustomData`, `ItemLore`;
+- `ItemStack.get/getOrDefault/set/applyComponents`;
+- `Entity.DATA_SHARED_FLAGS_ID`, `ItemFrame.DATA_ITEM`,
+  `EntityDataAccessor`/`SynchedEntityData`/`EntityDataSerializers`;
+- `CraftMapView` (`worldMap`), `RenderData.cursors`, `MapIndex.lastMapId`,
+  `MapItemSavedData`, `CraftChatMessage.fromString/fromComponent`.
+
+Живой прогон: **26 of 27 enabled**, `ImageFrame enabled in 31827 ms`.
+Единственный отказ — **VoxyServerSide 0.21.1**: его `plugin.yml` требует
+MC `>=26.1 <26.2-`, сервер 26.3, плагин отключается сам.
+
+Field-level по-прежнему только у `SYSTEM_CHAT`; CHAT/sound/PlayerInfo/
+chunk-entity пока идут через `RawPayload` (событие и отмена).
