@@ -915,3 +915,35 @@ MC `>=26.1 <26.2-`, сервер 26.3, плагин отключается са�
 
 Field-level по-прежнему только у `SYSTEM_CHAT`; CHAT/sound/PlayerInfo/
 chunk-entity пока идут через `RawPayload` (событие и отмена).
+
+
+## Field-level SOUND и SET_TITLE_TEXT (проверено)
+
+Добавлены реальные NMS-классы:
+
+- `ClientboundSoundPacket`: `soundId`, `source`, `x/y/z`, `volume`,
+  `pitch`, `seed` — ProtocolLib видит `floats=2`, `ints=5`;
+- `ClientboundSetTitleTextPacket`: `Component text` — `chat-components=1`.
+
+Мост `ProtocolBridge` теперь декодирует эти пакеты в объекты, отдаёт
+плагину их поля и перекодирует изменённые значения в исходящие байты.
+Проверка ClientboundProbe (пишет volume=2.0 и `CB-TITLE-N`):
+
+```
+SOUND floats=2 ints=5
+WROTE sound volume
+protocol: sound re-encoded (volume=2.0)
+...
+TITLE chat-components=1
+WROTE title component
+protocol: title re-encoded (text=CB-TITLE-308)
+```
+
+То есть изменённые поля действительно попадают в пакет для клиента.
+Отмена (`setCancelled(true)`) по-прежнему отбрасывает пакет
+(`CANCELLED SET_TITLE_TEXT`).
+
+## Гейт после изменений
+
+`26 of 27 enabled`: единственный отказ — VoxyServerSide (его plugin.yml
+требует MC `>=26.1 <26.2-`). ImageFrame включён.

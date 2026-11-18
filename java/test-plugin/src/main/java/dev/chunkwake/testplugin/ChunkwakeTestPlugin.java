@@ -195,6 +195,16 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             ticks += 100;
             getLogger().info("scheduler: " + ticks + " ticks");
         }, 100, 100);
+
+        // Clientbound sound/title probe: ванильные команды -> пакеты Rust.
+        getServer().getScheduler().runTaskTimer(this, () -> {
+            for (org.bukkit.entity.Player player : getServer().getOnlinePlayers()) {
+                getServer().dispatchCommand(getServer().getConsoleSender(),
+                        "title " + player.getName() + " title {\"text\":\"ORIGINAL\"}");
+                getServer().dispatchCommand(getServer().getConsoleSender(),
+                        "playsound minecraft:ui.button.click master " + player.getName());
+            }
+        }, 100, 40);
         getServer().getScheduler().runTaskTimer(this, () -> {
             for (org.bukkit.World w : getServer().getWorlds()) {
                 getLogger().info("loaded chunks: " + w.getName() + "="

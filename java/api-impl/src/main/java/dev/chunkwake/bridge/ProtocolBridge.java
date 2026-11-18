@@ -38,6 +38,8 @@ final class ProtocolBridge {
     private static Object senderClient;
     private static Object senderServer;
     private static java.util.Map<String, Object> byName = java.util.Map.of();
+    private static Object soundType;
+    private static Object titleType;
     /** Класс-носитель сырых байтов для PacketContainer. */
     public static final class RawPayload {
         public byte[] data;
@@ -109,15 +111,34 @@ final class ProtocolBridge {
             java.lang.reflect.Method getSender = packetType.getMethod("getSender");
             int registered = 0;
             for (Object candidate : (Iterable<?>) values.invoke(null)) {
-                if (!Boolean.TRUE.equals(isSupported.invoke(candidate))
-                        && "PLAY".equals(String.valueOf(getProtocol.invoke(candidate)))
-                        && "SERVER".equals(String.valueOf(getSender.invoke(candidate)))) {
-                    Class<?> carrier = "SYSTEM_CHAT".equalsIgnoreCase(
-                            String.valueOf(candidate.getClass().getMethod("name").invoke(candidate)))
-                                    ? Class.forName(
-                                            "net.minecraft.network.protocol.game.ClientboundSystemChatPacket",
-                                            true, loader)
-                                    : RawPayload.class;
+                if (!"PLAY".equals(String.valueOf(getProtocol.invoke(candidate)))
+                        || !"SERVER".equals(String.valueOf(getSender.invoke(candidate)))) {
+                    continue;
+                }
+                @SuppressWarnings("unchecked")
+                java.util.List<String> classNames = (java.util.List<String>)
+                        candidate.getClass().getMethod("getClassNames").invoke(candidate);
+                Class<?> carrier = RawPayload.class;
+                if (classNames.contains(
+                        "net.minecraft.network.protocol.game.ClientboundSystemChatPacket")) {
+                    carrier = Class.forName(
+                            "net.minecraft.network.protocol.game.ClientboundSystemChatPacket",
+                            true, loader);
+                } else if (classNames.contains(
+                        "net.minecraft.network.protocol.game.ClientboundSoundPacket")) {
+                    carrier = Class.forName(
+                            "net.minecraft.network.protocol.game.ClientboundSoundPacket",
+                            true, loader);
+                    soundType = candidate;
+                } else if (classNames.contains(
+                        "net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket")) {
+                    carrier = Class.forName(
+                            "net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket",
+                            true, loader);
+                    titleType = candidate;
+                }
+                if (carrier != RawPayload.class
+                        || !Boolean.TRUE.equals(isSupported.invoke(candidate))) {
                     registerPacket.invoke(register, candidate, carrier, clientSender, null);
                     registered++;
                 }
@@ -167,6 +188,12 @@ final class ProtocolBridge {
             return data;
         }
         try {
+            if ("sound".equalsIgnoreCase(name) && soundType != null) {
+                return sound(player, soundType, data);
+            }
+            if ("set_title_text".equalsIgnoreCase(name) && titleType != null) {
+                return title(player, titleType, data);
+            }
             Object type = byName.get(name.toUpperCase(java.util.Locale.ROOT));
             if (type == null) {
                 return data;
@@ -227,6 +254,122 @@ final class ProtocolBridge {
             Bridge.log(1, "protocol: sending probe failed: " + broken);
         }
         return false;
+    }
+
+    /** Field-level для {@code ClientboundSoundPacket}. */
+    private static byte[] sound(org.bukkit.entity.Player player, Object type, byte[] data) {
+        try {
+            int[] pos = {0};
+            int id = readVarInt(data, pos);
+            java.io.DataInputStream in = new java.io.DataInputStream(
+                    new java.io.ByteArrayInputStream(data, pos[0], data.length - pos[0]));
+            int soundId = readVarInt(in);
+            int source = readVarInt(in);
+            int x = in.readInt();
+            int y = in.readInt();
+            int z = in.readInt();
+            float volume = in.readFloat();
+            float pitch = in.readFloat();
+            long seed = in.readLong();
+            Object packet = Class.forName(
+                    "net.minecraft.network.protocol.game.ClientboundSoundPacket", true,
+                    type.getClass().getClassLoader())
+                    .getConstructor(int.class, int.class, int.class, int.class, int.class,
+                            float.class, float.class, long.class)
+                    .newInstance(soundId, source, x, y, z, volume, pitch, seed);
+            Object container = containerConstructor.newInstance(type, packet);
+            Object event = fromServer.invoke(null, plugin, container, player);
+            for (Object listener : (Set<?>) getListeners.invoke(manager)) {
+                Set<?> types = (Set<?>) getTypes.invoke(getSendingWhitelist.invoke(listener));
+                if (types.contains(type)) {
+                    onSending.invoke(listener, event);
+                }
+            }
+            if (Boolean.TRUE.equals(event.getClass().getMethod("isCancelled").invoke(event))) {
+                return null;
+            }
+            int newSound = (Integer) packet.getClass().getMethod("soundId").invoke(packet);
+            int newSource = (Integer) packet.getClass().getMethod("source").invoke(packet);
+            int newX = (Integer) packet.getClass().getMethod("x").invoke(packet);
+            int newY = (Integer) packet.getClass().getMethod("y").invoke(packet);
+            int newZ = (Integer) packet.getClass().getMethod("z").invoke(packet);
+            float newVolume = (Float) packet.getClass().getMethod("volume").invoke(packet);
+            float newPitch = (Float) packet.getClass().getMethod("pitch").invoke(packet);
+            long newSeed = (Long) packet.getClass().getMethod("seed").invoke(packet);
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream(data.length);
+            writeVarInt(bytes, id);
+            writeVarInt(bytes, newSound);
+            writeVarInt(bytes, newSource);
+            java.io.DataOutputStream out = new java.io.DataOutputStream(bytes);
+            out.writeInt(newX);
+            out.writeInt(newY);
+            out.writeInt(newZ);
+            out.writeFloat(newVolume);
+            out.writeFloat(newPitch);
+            out.writeLong(newSeed);
+            out.flush();
+            byte[] result = bytes.toByteArray();
+            if (!java.util.Arrays.equals(result, data)) {
+                Bridge.log(2, "protocol: sound re-encoded (volume=" + newVolume + ")");
+            }
+            return result;
+        } catch (Throwable broken) {
+            Throwable cause = broken.getCause() == null ? broken : broken.getCause();
+            Bridge.log(1, "protocol: sound field bridge failed: " + cause);
+            return data;
+        }
+    }
+
+    /** Field-level для {@code ClientboundSetTitleTextPacket}. */
+    private static byte[] title(org.bukkit.entity.Player player, Object type, byte[] data) {
+        try {
+            int[] pos = {0};
+            int id = readVarInt(data, pos);
+            java.io.DataInputStream in = new java.io.DataInputStream(
+                    new java.io.ByteArrayInputStream(data, pos[0], data.length - pos[0]));
+            net.minecraft.nbt.Tag root = net.minecraft.nbt.NbtIo.readNetworkTag(
+                    in, net.minecraft.nbt.NbtAccounter.unlimitedHeap());
+            String text = root instanceof net.minecraft.nbt.CompoundTag tag
+                    ? tag.getStringOr("text", null)
+                    : root.getAsString();
+            net.minecraft.network.chat.Component content = text != null
+                    ? net.minecraft.network.chat.Component.literal(text)
+                    : net.minecraft.network.chat.Component.literal("");
+            Object packet = Class.forName(
+                    "net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket", true,
+                    type.getClass().getClassLoader())
+                    .getConstructor(net.minecraft.network.chat.Component.class)
+                    .newInstance(content);
+            Object container = containerConstructor.newInstance(type, packet);
+            Object event = fromServer.invoke(null, plugin, container, player);
+            for (Object listener : (Set<?>) getListeners.invoke(manager)) {
+                Set<?> types = (Set<?>) getTypes.invoke(getSendingWhitelist.invoke(listener));
+                if (types.contains(type)) {
+                    onSending.invoke(listener, event);
+                }
+            }
+            if (Boolean.TRUE.equals(event.getClass().getMethod("isCancelled").invoke(event))) {
+                return null;
+            }
+            net.minecraft.network.chat.Component changed =
+                    (net.minecraft.network.chat.Component) packet.getClass()
+                            .getMethod("text").invoke(packet);
+            net.minecraft.nbt.CompoundTag outTag = new net.minecraft.nbt.CompoundTag();
+            outTag.putString("text", changed == null ? "" : changed.getString());
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream(data.length);
+            writeVarInt(bytes, id);
+            net.minecraft.nbt.NbtIo.writeNetwork(outTag, new java.io.DataOutputStream(bytes));
+            byte[] result = bytes.toByteArray();
+            if (!java.util.Arrays.equals(result, data)) {
+                Bridge.log(2, "protocol: title re-encoded (text="
+                        + (changed == null ? "" : changed.getString()) + ")");
+            }
+            return result;
+        } catch (Throwable broken) {
+            Throwable cause = broken.getCause() == null ? broken : broken.getCause();
+            Bridge.log(1, "protocol: title field bridge failed: " + cause);
+            return data;
+        }
     }
 
     /** Real-field путь для {@code ClientboundSystemChatPacket}. */
@@ -294,6 +437,19 @@ final class ProtocolBridge {
         int shift = 0;
         while (true) {
             byte b = data[pos[0]++];
+            value |= (b & 0x7f) << shift;
+            if ((b & 0x80) == 0) {
+                return value;
+            }
+            shift += 7;
+        }
+    }
+
+    private static int readVarInt(java.io.DataInputStream in) throws java.io.IOException {
+        int value = 0;
+        int shift = 0;
+        while (true) {
+            byte b = in.readByte();
             value |= (b & 0x7f) << shift;
             if ((b & 0x80) == 0) {
                 return value;
