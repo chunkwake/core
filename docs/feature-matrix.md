@@ -861,3 +861,32 @@ Rust отдаёт в Java **каждый clientbound-пакет** (по имен
   `LevelChunkSection`, `ClientboundBlockUpdatePacket` и др. — Orebfuscator
   включает свой v26_1-адаптер;
 - `Player.getEquipment()` (ImageFrame/другие).
+
+
+## Field-level SYSTEM_CHAT через ProtocolLib (проверено)
+
+- `Component.Serializer.CODEC` стал настоящим JSON-кодеком
+  (`{"text": ...}`) поверх `JsonOps`; ProtocolLib
+  `WrappedChatComponent.fromText(...)` больше не падает в
+  `WrappedDataResult`.
+- `ClientboundSystemChatPacket` содержит реальные поля `content`
+  (`net.minecraft.network.chat.Component`) и `overlay`; ProtocolLib видит
+  `chat-components=1`, `booleans=1`.
+- Сетевой NBT читается любым корневым тегом (`readNetworkTag`: compound,
+  string, list) — раньше plain-text компонент ломал декод
+  (`Root network tag must be a compound, got 8`).
+- После события пакет перекодируется из изменённых полей; отмена по-прежнему
+  возвращает `-1`.
+
+Живая проверка (ClientboundProbe пишет
+`WrappedChatComponent.fromText("CB-MODIFIED-N")`):
+```
+[ClientboundProbe] SYSTEM_CHAT chat-components=1 booleans=1
+[ClientboundProbe] WROTE chat component
+...
+CB-MODIFIED-8
+CB-MODIFIED-9
+CB-MODIFIED-16
+CB-MODIFIED-26
+```
+Клиент получает именно изменённый текст; `field bridge failed` в логе нет.

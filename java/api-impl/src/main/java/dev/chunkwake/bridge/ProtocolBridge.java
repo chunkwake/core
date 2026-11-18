@@ -236,16 +236,24 @@ final class ProtocolBridge {
             int id = readVarInt(data, pos);
             java.io.DataInputStream in = new java.io.DataInputStream(
                     new java.io.ByteArrayInputStream(data, pos[0], data.length - pos[0]));
-            net.minecraft.nbt.CompoundTag tag = net.minecraft.nbt.NbtIo.readNetwork(
+            net.minecraft.nbt.Tag root = net.minecraft.nbt.NbtIo.readNetworkTag(
                     in, net.minecraft.nbt.NbtAccounter.unlimitedHeap());
             boolean overlay = in.readBoolean();
-            String text = tag.getStringOr("text", null);
-            String translate = tag.getStringOr("translate", null);
+            String text = null;
+            String translate = null;
+            if (root instanceof net.minecraft.nbt.CompoundTag tag) {
+                text = tag.getStringOr("text", null);
+                translate = tag.getStringOr("translate", null);
+            } else if (root instanceof net.minecraft.nbt.StringTag string) {
+                text = string.getAsString();
+            } else {
+                text = root.getAsString();
+            }
             net.minecraft.network.chat.Component content = text != null
                     ? net.minecraft.network.chat.Component.literal(text)
                     : translate != null
                             ? net.minecraft.network.chat.Component.translatable(translate)
-                            : net.minecraft.network.chat.Component.literal(tag.toString());
+                            : net.minecraft.network.chat.Component.literal(root.toString());
             Object packet = Class.forName(
                     "net.minecraft.network.protocol.game.ClientboundSystemChatPacket", true,
                     type.getClass().getClassLoader())

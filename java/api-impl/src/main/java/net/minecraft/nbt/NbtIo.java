@@ -41,6 +41,15 @@ public final class NbtIo {
         return readCompound(input, accounter);
     }
 
+    /** Чтение сетевого NBT любого корневого типа (строка/compound/list). */
+    public static Tag readNetworkTag(DataInput input, NbtAccounter accounter) throws IOException {
+        byte id = input.readByte();
+        if (id == 0) {
+            return new CompoundTag();
+        }
+        return readPayload(id, input, accounter);
+    }
+
     /** Запись сетевого NBT: тип 10 + поля + end (без имени). */
     public static void writeNetwork(CompoundTag tag, DataOutput output) throws IOException {
         output.writeByte(10);

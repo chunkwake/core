@@ -40,10 +40,60 @@ public class Component {
     }
 
     public static class Serializer {
-        /** Настоящий DFU-кодек: строка ↔ компонент (как plain-text fallback). */
+        /**
+         * DFU-кодек JSON-компонента (`{"text": "..."}`) поверх JsonOps.
+         * Его использует ProtocolLib WrappedChatComponent (CODEC-поле).
+         */
         public static final com.mojang.serialization.Codec<Component> CODEC =
-                com.mojang.serialization.Codec.STRING.xmap(
-                        Component::literal, Component::getString);
+                new com.mojang.serialization.Codec<Component>() {
+                    @Override
+                    public <T> com.mojang.serialization.DataResult<
+                            com.mojang.datafixers.util.Pair<Component, T>> decode(
+                            com.mojang.serialization.DynamicOps<T> ops, T input) {
+                        com.mojang.serialization.DataResult<
+                                com.mojang.serialization.MapLike<T>> map = ops.getMap(input);
+                        if (!map.isSuccess()) {
+                            return com.mojang.serialization.DataResult.error(
+                                    () -> "Not a chat component: " + input);
+                        }
+                        com.mojang.serialization.MapLike<T> like = map.result().orElse(null);
+                        if (like == null) {
+                            return com.mojang.serialization.DataResult.error(
+                                    () -> "Not a chat component: " + input);
+                        }
+                        T textTag = like.get("text");
+                        if (textTag != null) {
+                            com.mojang.serialization.DataResult<String> text =
+                                    ops.getStringValue(textTag);
+                            if (text.isSuccess()) {
+                                return com.mojang.serialization.DataResult.success(
+                                        com.mojang.datafixers.util.Pair.of(
+                                                Component.literal(text.result().orElse("")), input));
+                            }
+                        }
+                        T translateTag = like.get("translate");
+                        if (translateTag != null) {
+                            com.mojang.serialization.DataResult<String> key =
+                                    ops.getStringValue(translateTag);
+                            if (key.isSuccess()) {
+                                return com.mojang.serialization.DataResult.success(
+                                        com.mojang.datafixers.util.Pair.of(
+                                                Component.translatable(key.result().orElse("")),
+                                                input));
+                            }
+                        }
+                        return com.mojang.serialization.DataResult.success(
+                                com.mojang.datafixers.util.Pair.of(Component.literal(""), input));
+                    }
+
+                    @Override
+                    public <T> com.mojang.serialization.DataResult<T> encode(Component input,
+                            com.mojang.serialization.DynamicOps<T> ops, T prefix) {
+                        com.mojang.serialization.RecordBuilder<T> builder = ops.mapBuilder();
+                        builder.add("text", ops.createString(input.getString()));
+                        return builder.build(prefix);
+                    }
+                };
 
         private Serializer() {
         }
