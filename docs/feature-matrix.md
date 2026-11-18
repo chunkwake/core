@@ -452,8 +452,25 @@ plugins: ProtocolLib enabled in 13 ms
 - `ProtocolBridge.command()` вызывается из `ChunkwakeServer.command()` для
   команд, дошедших до Bukkit, и пытается отдать событие слушателям.
 
-Ограничение: `PacketContainer`/`PacketEvent` при инициализации тянут
-`DefaultInstances`/`MinecraftGenerator`, которым нужны
-`net.minecraft.world.item.ItemStack`, `NonNullList`, chat-codec и т.п. — то
-есть доставка `PacketEvent` упирается в следующий пласт NMS. До него
-перехват остаётся на уровне регистрации слушателей, а не событий.
+Доставка события работает. Для `DefaultInstances`/`MinecraftGenerator`
+добавлены **рабочие** (не пустые) NMS-классы:
+
+- `net.minecraft.world.item.ItemStack` (id + count, `isEmpty`, `copy`) и
+  `org.bukkit.craftbukkit.inventory.CraftItemStack` (`asNMSCopy`/
+  `asBukkitCopy`/`asCraftMirror` через `Material` и `NamespacedKey`);
+- `net.minecraft.core.NonNullList.create()`;
+- `net.minecraft.network.FriendlyByteBuf` (обёртка над `ByteBuf`);
+- `net.minecraft.world.level.block.Block` (класс для рефлексии пакетов).
+
+Живой прогон (`ProtocolProbe` подписан на `CHAT_COMMAND`):
+```
+[ProtocolProbe] PACKET_RECEIVED type=CHAT_COMMAND[class=ServerboundChatCommandPacket, id=6]
+                player=boater cmd=worldedit version
+```
+То есть `PacketListener` получает реальный `PacketEvent` с нашим пакетом и
+полем `command`.
+
+Ограничение: событие приходит для команд, которые Rust передал в Bukkit
+(`ChunkwakeServer.command`). Полный перехват всех пакетов (включая
+clientbound) потребует владения Netty-каналом на Java-стороне — сеть пока
+в Rust.

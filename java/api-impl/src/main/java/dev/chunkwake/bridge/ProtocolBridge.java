@@ -105,7 +105,7 @@ final class ProtocolBridge {
                 }
             }
         } catch (Throwable unavailable) {
-            // ProtocolLib выключен/другая версия — не мешаем команде.
+            Bridge.log(1, "protocol: fire failed: " + unavailable);
         }
     }
 
@@ -150,8 +150,10 @@ final class ProtocolBridge {
                     "net.minecraft.network.protocol.game.ServerboundChatCommandPacket", true, loader);
             plugin = protocolLib;
             available = true;
+            Bridge.log(3, "protocol: bridge ready");
         } catch (Throwable unavailable) {
             available = false;
+            Bridge.log(1, "protocol: init failed: " + unavailable);
         }
     }
 }
