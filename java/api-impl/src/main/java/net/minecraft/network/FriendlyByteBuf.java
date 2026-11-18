@@ -1,17 +1,19 @@
 package net.minecraft.network;
 
-/**
- * Минимальный NMS {@code FriendlyByteBuf}/{@code PacketDataSerializer}.
- * ProtocolLib использует класс при выборе конструкторов пакетов.
- */
-public class FriendlyByteBuf {
-    private final io.netty.buffer.ByteBuf buf;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.WrappedByteBuf;
 
-    public FriendlyByteBuf(io.netty.buffer.ByteBuf buf) {
-        this.buf = buf;
+/**
+ * NMS {@code FriendlyByteBuf}/{@code PacketDataSerializer}: реальный
+ * {@link ByteBuf}, чтобы плагины (Axiom) могли передавать его в методы,
+ * ожидающие {@code io.netty.buffer.ByteBuf}.
+ */
+public class FriendlyByteBuf extends WrappedByteBuf {
+    public FriendlyByteBuf(ByteBuf buf) {
+        super(buf);
     }
 
-    public io.netty.buffer.ByteBuf source() {
+    public ByteBuf source() {
         return this.buf;
     }
 }

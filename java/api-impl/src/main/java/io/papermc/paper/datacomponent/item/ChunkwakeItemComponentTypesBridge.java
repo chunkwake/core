@@ -29,13 +29,11 @@ public final class ChunkwakeItemComponentTypesBridge implements ItemComponentTyp
     }
 
     @Override public io.papermc.paper.datacomponent.item.ItemAttributeModifiers.Builder modifiers() {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.modifiers");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.itemAttributes();
     }
 
     @Override public io.papermc.paper.datacomponent.item.FoodProperties.Builder food() {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.food");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.food();
     }
 
     @Override public io.papermc.paper.datacomponent.item.DyedItemColor.Builder dyedItemColor() {
@@ -43,8 +41,7 @@ public final class ChunkwakeItemComponentTypesBridge implements ItemComponentTyp
     }
 
     @Override public io.papermc.paper.datacomponent.item.PotionContents.Builder potionContents() {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.potionContents");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.potionContents();
     }
 
     @Override public io.papermc.paper.datacomponent.item.BundleContents.Builder bundleContents() {
@@ -68,13 +65,11 @@ public final class ChunkwakeItemComponentTypesBridge implements ItemComponentTyp
     }
 
     @Override public io.papermc.paper.datacomponent.item.WrittenBookContent.Builder writtenBookContent(io.papermc.paper.text.Filtered<java.lang.String> p0, java.lang.String p1) {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.writtenBookContent");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.writtenBookContent(p0, p1);
     }
 
     @Override public io.papermc.paper.datacomponent.item.WritableBookContent.Builder writeableBookContent() {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.writeableBookContent");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.writeableBookContent();
     }
 
     @Override public io.papermc.paper.datacomponent.item.ItemArmorTrim.Builder itemArmorTrim(org.bukkit.inventory.meta.trim.ArmorTrim p0) {
@@ -122,18 +117,15 @@ public final class ChunkwakeItemComponentTypesBridge implements ItemComponentTyp
     }
 
     @Override public io.papermc.paper.datacomponent.item.Tool.Builder tool() {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.tool");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.tool();
     }
 
     @Override public io.papermc.paper.datacomponent.item.Tool.Rule toolRule(io.papermc.paper.registry.set.RegistryKeySet<org.bukkit.block.BlockType> p0, java.lang.Float p1, net.kyori.adventure.util.TriState p2) {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.toolRule");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.toolRule(p0, p1, p2);
     }
 
     @Override public io.papermc.paper.datacomponent.item.ItemAdventurePredicate.Builder itemAdventurePredicate() {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.itemAdventurePredicate");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.itemAdventurePredicate();
     }
 
     @Override public io.papermc.paper.datacomponent.item.CustomModelData.Builder customModelData() {
@@ -149,13 +141,11 @@ public final class ChunkwakeItemComponentTypesBridge implements ItemComponentTyp
     }
 
     @Override public io.papermc.paper.datacomponent.item.Consumable.Builder consumable() {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.consumable");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.consumable();
     }
 
     @Override public io.papermc.paper.datacomponent.item.UseCooldown.Builder useCooldown(float p0) {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.useCooldown");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.useCooldown(p0);
     }
 
     @Override public io.papermc.paper.datacomponent.item.DamageResistant damageResistant(io.papermc.paper.registry.set.RegistryKeySet<org.bukkit.damage.DamageType> p0) {
@@ -171,13 +161,11 @@ public final class ChunkwakeItemComponentTypesBridge implements ItemComponentTyp
     }
 
     @Override public io.papermc.paper.datacomponent.item.Equippable.Builder equippable(org.bukkit.inventory.EquipmentSlot p0) {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.equippable");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.equippable(p0);
     }
 
     @Override public io.papermc.paper.datacomponent.item.DeathProtection.Builder deathProtection() {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.deathProtection");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.deathProtection();
     }
 
     @Override public io.papermc.paper.datacomponent.item.OminousBottleAmplifier ominousBottleAmplifier(int p0) {
@@ -185,8 +173,7 @@ public final class ChunkwakeItemComponentTypesBridge implements ItemComponentTyp
     }
 
     @Override public io.papermc.paper.datacomponent.item.BlocksAttacks.Builder blocksAttacks() {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.blocksAttacks");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.blocksAttacks();
     }
 
     @Override public io.papermc.paper.datacomponent.item.TooltipDisplay.Builder tooltipDisplay() {
@@ -194,57 +181,46 @@ public final class ChunkwakeItemComponentTypesBridge implements ItemComponentTyp
     }
 
     @Override public io.papermc.paper.datacomponent.item.Weapon.Builder weapon() {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.weapon");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.weapon();
     }
 
     @Override public io.papermc.paper.datacomponent.item.KineticWeapon.Builder kineticWeapon() {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.kineticWeapon");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.kineticWeapon();
     }
 
     @Override public io.papermc.paper.datacomponent.item.KineticWeapon.Condition kineticWeaponCondition(int p0, float p1, float p2) {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.kineticWeaponCondition");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.kineticWeaponCondition(p0, p1, p2);
     }
 
     @Override public io.papermc.paper.datacomponent.item.UseEffects.Builder useEffects() {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.useEffects");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.useEffects();
     }
 
     @Override public io.papermc.paper.datacomponent.item.PiercingWeapon.Builder piercingWeapon() {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.piercingWeapon");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.piercingWeapon();
     }
 
     @Override public io.papermc.paper.datacomponent.item.AttackRange.Builder attackRange() {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.attackRange");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.attackRange();
     }
 
     @Override public io.papermc.paper.datacomponent.item.SwingAnimation.Builder swingAnimation() {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.swingAnimation");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.swingAnimation();
     }
 
     @Override public io.papermc.paper.datacomponent.item.SulfurCubeContent sulfurCubeContent(org.bukkit.inventory.ItemStack p0) {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.sulfurCubeContent");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.sulfurCubeContent(p0);
     }
 
     @Override public io.papermc.paper.datacomponent.item.MobVisibility mobVisibility(io.papermc.paper.registry.set.RegistryKeySet<org.bukkit.entity.EntityType> p0, float p1) {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.mobVisibility");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.mobVisibility(p0, p1);
     }
 
     @Override public io.papermc.paper.datacomponent.item.VillagerFood villagerFood(int p0) {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.villagerFood");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.villagerFood(p0);
     }
 
     @Override public io.papermc.paper.datacomponent.item.SignText.Builder signText() {
-        dev.chunkwake.bridge.SoftValue.note("ItemComponentTypesBridge.signText");
-        return dev.chunkwake.bridge.SoftValue.object();
+        return dev.chunkwake.bridge.ItemComponents2.signText();
     }
 }

@@ -49,6 +49,7 @@ final class ChunkwakeServer {
     private final FoliaSchedulers folia = new FoliaSchedulers(scheduler);
     final PluginManagerImpl plugins = new PluginManagerImpl(this);
     private final SimpleCommandMap commands = new SimpleCommandMap(api, new LinkedHashMap<>());
+    private final SpigotImpl spigot = new SpigotImpl();
     /**
      * Настоящий {@link SimplePluginManager}: Paper-овский фасад, который
      * делегирует всё в {@link #plugins}, но хранит поля прав
@@ -793,6 +794,7 @@ final class ChunkwakeServer {
         }
         return fallback;
     }
+    public org.bukkit.Server.Spigot spigot() { return spigot; }
     public Logger getLogger() { return logger; }
     public PluginManager getPluginManager() { return simple; }
     public org.bukkit.inventory.ItemFactory getItemFactory() { return ItemFactoryImpl.API; }

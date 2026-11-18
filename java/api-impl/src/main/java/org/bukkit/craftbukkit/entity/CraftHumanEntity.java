@@ -18,7 +18,7 @@ import org.bukkit.permissions.PermissionAttachmentInfo;
 public class CraftHumanEntity implements org.bukkit.entity.Player {
     /** Поле, которое ищет LuckPerms (`CraftHumanEntity.perm`). */
     public PermissibleBase perm;
-    private final Object handle;
+    final Object handle;
     /** `false`, пока `PermissibleBase` ещё в своём конструкторе. */
     private boolean ready;
 

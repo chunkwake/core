@@ -1,5 +1,6 @@
 package org.bukkit.craftbukkit.entity;
 
+import dev.chunkwake.bridge.PlayerCalls;
 import net.minecraft.server.level.ServerPlayer;
 
 /**
@@ -15,5 +16,16 @@ public class CraftPlayer extends CraftHumanEntity {
 
     public ServerPlayer getHandle() {
         return this.handle;
+    }
+
+    /** CraftBukkit-методы каналов, которые ищет Simple Voice Chat. */
+    public void addChannel(String channel) {
+        PlayerCalls.call(this.handle, "addChannel", new Class<?>[]{ String.class },
+                new Object[]{ channel }, void.class);
+    }
+
+    public void removeChannel(String channel) {
+        PlayerCalls.call(this.handle, "removeChannel", new Class<?>[]{ String.class },
+                new Object[]{ channel }, void.class);
     }
 }

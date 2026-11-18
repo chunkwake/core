@@ -261,6 +261,18 @@ public final class PlayerImpl {
         }
     }
 
+    public void addChannel(String channel) {
+        if (channel != null) {
+            this.channels.add(channel);
+        }
+    }
+
+    public void removeChannel(String channel) {
+        if (channel != null) {
+            this.channels.remove(channel);
+        }
+    }
+
     public Set<String> getListeningPluginChannels() {
         return Set.copyOf(channels);
     }

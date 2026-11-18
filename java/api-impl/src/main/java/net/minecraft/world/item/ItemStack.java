@@ -9,8 +9,14 @@ public class ItemStack {
     public String item;
     public int count;
 
+    public static final ItemStack EMPTY = new ItemStack("minecraft:air", 0);
+
     public ItemStack() {
         this("minecraft:air", 0);
+    }
+
+    public ItemStack(Item item, int count) {
+        this(item == null ? "minecraft:air" : item.getId(), count);
     }
 
     public ItemStack(String item, int count) {

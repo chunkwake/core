@@ -549,3 +549,48 @@ plugins: 12 of 12 enabled in 3807 ms
 Остаётся `World.getLoadedChunks` (WorldGuard warning) и реальная отправка
 Java-пакетов в Rust (сейчас `ServerCommonPacketListenerImpl.send` — точка
 моста, без транспорта).
+
+
+## Все ItemComponentTypesBridge-строители — реальные
+
+`SoftValue.note("ItemComponentTypesBridge...")` больше не встречается (0).
+`ItemComponents2` реализует оставшиеся сложные компоненты реальными данными:
+food, consumable, tool (+rule), equippable, weapon, kinetic weapon
+(+condition), piercing weapon, use effects, attack range, swing animation,
+adventure predicate, death protection, blocks attacks (+damage reduction,
+item damage), potion contents, use cooldown, mob visibility, villager food,
+sulfur cube, sign text, attribute modifiers, written/writable books,
+`toBuilder()` у buildable-компонентов.
+
+Проверка тест-плагином:
+```
+components2: food=4/2.5 weapon=7 equip=HEAD/chunkwake:test book=A/1 sign=1
+components: lore=1 ench={minecraft:sharpness=3} color=Color:[argb0xFFFF0000] model=[abc]/[1.5] map=7
+```
+
+## Ещё плагины с Modrinth (26.3) и результат
+
+Добавлены Simple Voice Chat 2.6.27, GrimAC 2.3.75, VoxyServerSide 0.21.1,
+InvSee++ 0.31.22 (+Clear/+Give), VoiceMessages 1.0.14, AxiomPaper 6.0.1.
+
+Закрыто по логам:
+- `CraftServer.getServer()` (NMS-сервер) и `CraftPlayer.addChannel`/
+  `removeChannel` — **Simple Voice Chat включается** (Spigot-fallback, с
+  предупреждением о командных аргументах).
+- `Server.spigot()`/`getPaperConfig()` — InvSee++ проходит дальше.
+- `Item`/`ItemStack(Item,int)`/`ItemStack.EMPTY`, `StreamDecoder`/
+  `StreamEncoder`, `FriendlyByteBuf extends WrappedByteBuf` (Axiom),
+  `RegistryFriendlyByteBuf`, `MapCodec`, `Applicative`/`Functor`,
+  `DedicatedServer`, `RegistryAccess$Frozen`, `AbstractContainerMenu`,
+  `HolderLookup$Provider`, `EntityArgument`.
+
+Итог последнего прогона: **15 of 20 enabled**. Остались:
+- **GrimAC** — PacketEvents ищет поля NMS-объектов (после конструкторов),
+  нужен более глубокий NMS-слой;
+- **InvSee++** — следующий NMS-класс (`HolderLookup$Provider`, затем,
+  вероятно, инвентари/меню);
+- **VoiceMessages** — `ServerConfig` (NMS/DFU);
+- **VoxyServerSide** — сам отключается: ему нужен MC `<26.2` и ключ
+  `lss-minecraft-dependency` (проверка версии);
+- **AxiomPaper** — нужен `net.minecraft.world.level.chunk.LevelChunk`
+  (реальные чанки).

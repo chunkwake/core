@@ -168,6 +168,23 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             var model = io.papermc.paper.datacomponent.item.CustomModelData.customModelData()
                     .addString("abc").addFloat(1.5f).build();
             var map = io.papermc.paper.datacomponent.item.MapId.mapId(7);
+            var food = io.papermc.paper.datacomponent.item.FoodProperties.food()
+                    .nutrition(4).saturation(2.5f).build();
+            var weapon = io.papermc.paper.datacomponent.item.Weapon.weapon()
+                    .itemDamagePerAttack(7).build();
+            var equip = io.papermc.paper.datacomponent.item.Equippable
+                    .equippable(org.bukkit.inventory.EquipmentSlot.HEAD)
+                    .assetId(net.kyori.adventure.key.Key.key("chunkwake:test")).build();
+            var book = io.papermc.paper.datacomponent.item.WrittenBookContent
+                    .writtenBookContent("T", "A")
+                    .addPage(Component.text("page")).build();
+            var sign = io.papermc.paper.datacomponent.item.SignText.signText()
+                    .line(0, Component.text("line")).build();
+            getLogger().info("components2: food=" + food.nutrition() + "/" + food.saturation()
+                    + " weapon=" + weapon.itemDamagePerAttack()
+                    + " equip=" + equip.slot() + "/" + equip.assetId()
+                    + " book=" + book.author() + "/" + book.pages().size()
+                    + " sign=" + sign.lines().size());
             getLogger().info("components: lore=" + lore.lines().size()
                     + " ench=" + ench.enchantments() + " color=" + color.color()
                     + " model=" + model.strings() + "/" + model.floats() + " map=" + map.id());

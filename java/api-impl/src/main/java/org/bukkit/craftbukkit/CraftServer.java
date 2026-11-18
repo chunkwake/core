@@ -1137,4 +1137,9 @@ public class CraftServer implements org.bukkit.Server {
     @Override public java.lang.Object getOrDefaultFrom(net.kyori.adventure.pointer.Pointer p0, java.util.function.Supplier p1) {
         return (java.lang.Object) PlayerCalls.call(this.handle, "getOrDefaultFrom", new Class<?>[]{ net.kyori.adventure.pointer.Pointer.class, java.util.function.Supplier.class }, new Object[]{ p0, p1 }, java.lang.Object.class);
     }
+
+    /** {@code CraftServer.getServer()}: NMS-сервер для Simple Voice Chat/TAB. */
+    public net.minecraft.server.MinecraftServer getServer() {
+        return net.minecraft.server.MinecraftServer.SERVER;
+    }
 }
