@@ -30,6 +30,22 @@ final class ProtocolBridge {
     private static Method getTypes;
     private static Method onReceiving;
     private static Method fromClient;
+    private static Method fromServer;
+    private static Method onSending;
+    private static Method getSendingWhitelist;
+    private static Method findCurrent;
+    private static Object protocolPlay;
+    private static Object senderClient;
+    private static Object senderServer;
+    private static java.util.Map<String, Object> byName = java.util.Map.of();
+    /** Класс-носитель сырых байтов для PacketContainer. */
+    public static final class RawPayload {
+        public byte[] data;
+
+        public RawPayload(byte[] data) {
+            this.data = data;
+        }
+    }
 
     private ProtocolBridge() {
     }
@@ -44,6 +60,8 @@ final class ProtocolBridge {
         if (!"ProtocolLib".equals(protocolLib.getName())) {
             return;
         }
+        initialized = false;
+        init();
         try {
             ClassLoader loader = protocolLib.getClass().getClassLoader();
             Class<?> packetType = Class.forName(
@@ -78,6 +96,27 @@ final class ProtocolBridge {
             }
             registerPacket.invoke(register, type, packet, sender, null);
             protocolLib.getLogger().info("ProtocolBridge: CHAT_COMMAND -> " + packet.getName());
+            // Остальные clientbound-типы: их NMS-классов у Chunkwake нет, но
+            // слушатели ProtocolLib должны регистрироваться. Даём каждому
+            // типу носитель сырых байтов (RawPayload) — события и отмена
+            // работают, доступ к полям пакета — нет.
+            Class<?> senderClass = Class.forName(
+                    "com.comphenix.protocol.PacketType$Sender", true, loader);
+            Object clientSender = java.lang.Enum.valueOf((Class) senderClass, "SERVER");
+            java.lang.reflect.Method values = packetType.getMethod("values");
+            java.lang.reflect.Method isSupported = packetType.getMethod("isSupported");
+            java.lang.reflect.Method getProtocol = packetType.getMethod("getProtocol");
+            java.lang.reflect.Method getSender = packetType.getMethod("getSender");
+            int registered = 0;
+            for (Object candidate : (Iterable<?>) values.invoke(null)) {
+                if (!Boolean.TRUE.equals(isSupported.invoke(candidate))
+                        && "PLAY".equals(String.valueOf(getProtocol.invoke(candidate)))
+                        && "SERVER".equals(String.valueOf(getSender.invoke(candidate)))) {
+                    registerPacket.invoke(register, candidate, RawPayload.class, clientSender, null);
+                    registered++;
+                }
+            }
+            protocolLib.getLogger().info("ProtocolBridge: clientbound raw types registered: " + registered);
         } catch (Throwable broken) {
             protocolLib.getLogger().log(java.util.logging.Level.WARNING,
                     "ProtocolBridge: prepare failed", broken);
@@ -109,6 +148,78 @@ final class ProtocolBridge {
         }
     }
 
+    /**
+     * Clientbound-пакет из Rust: событие ProtocolLib для конкретного игрока.
+     * Возвращает байты для отправки либо {@code null}, если плагин отменил пакет.
+     */
+    static byte[] clientbound(org.bukkit.entity.Player player, String name, byte[] data) {
+        if (player == null || data == null || name == null) {
+            return data;
+        }
+        init();
+        if (!available) {
+            return data;
+        }
+        try {
+            Object type = byName.get(name.toUpperCase(java.util.Locale.ROOT));
+            if (type == null) {
+                return data;
+            }
+            Set<?> listeners = (Set<?>) getListeners.invoke(manager);
+            boolean any = false;
+            for (Object listener : listeners) {
+                Set<?> types = (Set<?>) getTypes.invoke(getSendingWhitelist.invoke(listener));
+                if (types.isEmpty()) {
+                    continue;
+                }
+                if (types.contains(type)) {
+                    any = true;
+                }
+            }
+            if (!any) {
+                return data;
+            }
+            Object container = containerConstructor.newInstance(type, new RawPayload(data));
+            Object event = fromServer.invoke(null, plugin, container, player);
+            for (Object listener : listeners) {
+                Set<?> types = (Set<?>) getTypes.invoke(getSendingWhitelist.invoke(listener));
+                if (types.contains(type)) {
+                    onSending.invoke(listener, event);
+                }
+            }
+            if (Boolean.TRUE.equals(event.getClass().getMethod("isCancelled").invoke(event))) {
+                return null;
+            }
+            Object handle = container.getClass().getMethod("getHandle").invoke(container);
+            if (handle instanceof RawPayload raw && raw.data != null) {
+                return raw.data;
+            }
+            return data;
+        } catch (Throwable broken) {
+            Bridge.log(1, "protocol: clientbound failed: " + broken);
+            return data;
+        }
+    }
+
+    /** Есть ли хоть один слушатель clientbound-пакетов. */
+    static boolean hasSending() {
+        init();
+        if (!available) {
+            return false;
+        }
+        try {
+            for (Object listener : (Set<?>) getListeners.invoke(manager)) {
+                Set<?> types = (Set<?>) getTypes.invoke(getSendingWhitelist.invoke(listener));
+                if (!types.isEmpty()) {
+                    return true;
+                }
+            }
+        } catch (Throwable broken) {
+            Bridge.log(1, "protocol: sending probe failed: " + broken);
+        }
+        return false;
+    }
+
     private static synchronized void init() {
         if (initialized) {
             return;
@@ -117,7 +228,7 @@ final class ProtocolBridge {
         try {
             org.bukkit.plugin.Plugin protocolLib = org.bukkit.Bukkit.getPluginManager()
                     .getPlugin("ProtocolLib");
-            if (protocolLib == null || !protocolLib.isEnabled()) {
+            if (protocolLib == null) {
                 return;
             }
             ClassLoader loader = protocolLib.getClass().getClassLoader();
@@ -146,6 +257,31 @@ final class ProtocolBridge {
             getTypes = whitelist.getMethod("getTypes");
             fromClient = event.getMethod("fromClient", Object.class, container,
                     org.bukkit.entity.Player.class);
+            fromServer = event.getMethod("fromServer", Object.class, container,
+                    org.bukkit.entity.Player.class);
+            onSending = listener.getMethod("onPacketSending", event);
+            getSendingWhitelist = listener.getMethod("getSendingWhitelist");
+            Class<?> protocol = Class.forName(
+                    "com.comphenix.protocol.PacketType$Protocol", true, loader);
+            Class<?> sender = Class.forName(
+                    "com.comphenix.protocol.PacketType$Sender", true, loader);
+            protocolPlay = protocol.getField("PLAY").get(null);
+            senderClient = java.lang.Enum.valueOf((Class) sender, "CLIENT");
+            senderServer = java.lang.Enum.valueOf((Class) sender, "SERVER");
+            findCurrent = packetType.getMethod("findCurrent", protocol, sender, int.class);
+            java.lang.reflect.Method values = packetType.getMethod("values");
+            java.lang.reflect.Method getProtocol = packetType.getMethod("getProtocol");
+            java.lang.reflect.Method getSender = packetType.getMethod("getSender");
+            java.lang.reflect.Method nameOf = packetType.getMethod("name");
+            java.util.Map<String, Object> names = new java.util.HashMap<>();
+            for (Object candidate : (Iterable<?>) values.invoke(null)) {
+                if (protocolPlay.equals(getProtocol.invoke(candidate))
+                        && senderServer.equals(getSender.invoke(candidate))) {
+                    names.put(((String) nameOf.invoke(candidate))
+                            .toUpperCase(java.util.Locale.ROOT), candidate);
+                }
+            }
+            byName = names;
             packetClass = Class.forName(
                     "net.minecraft.network.protocol.game.ServerboundChatCommandPacket", true, loader);
             plugin = protocolLib;

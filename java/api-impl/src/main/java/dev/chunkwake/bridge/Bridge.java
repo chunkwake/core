@@ -58,8 +58,10 @@ public final class Bridge {
     static final int UP_VIA = 27;
     static final int UP_VIA_POLL = 28;
     static final int UP_VIA_CLOSE = 29;
+    static final int UP_PACKET = 31;
+    static final int FLAG_PACKETS = 32;
     static final int DOWN_VIA_EMIT = 30;
-    static final int SLOTS = 31;
+    static final int SLOTS = 33;
 
     /** События с ответом ({@code chunkwake_net::live::Event}). */
     static final int EVENT_DAMAGE = 1, EVENT_DEATH = 2, EVENT_DROP = 3, EVENT_PICKUP = 4, EVENT_GAME_MODE = 5,
@@ -96,6 +98,24 @@ public final class Bridge {
     /** Вызывается из Rust один раз в потоке плагинов. */
     public static void boot(long tableAddress) {
         table = MemorySegment.ofAddress(tableAddress).reinterpret(SLOTS * 8L);
+        // Флаг «есть clientbound-слушатели» обновляем из отдельного потока:
+        // ProtocolLib может зарегистрировать слушателя в любой момент, а
+        // тик Java-планировщика бывает пустым.
+        Thread protocolFlag = new Thread(() -> {
+            while (true) {
+                try {
+                    Thread.sleep(500L);
+                    table.setAtIndex(JAVA_LONG, FLAG_PACKETS,
+                            ProtocolBridge.hasSending() ? 1L : 0L);
+                } catch (InterruptedException stopped) {
+                    return;
+                } catch (Throwable ignored) {
+                    // ProtocolLib ещё не загрузился — попробуем позже.
+                }
+            }
+        }, "chunkwake-protocol-flag");
+        protocolFlag.setDaemon(true);
+        protocolFlag.start();
         Linker linker = Linker.nativeLinker();
         sendMessage = down(linker, DOWN_SEND_MESSAGE,
                 FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_INT));
@@ -129,6 +149,8 @@ public final class Bridge {
                 FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_INT));
         up(linker, UP_EVENT, "event", FunctionDescriptor.of(JAVA_INT,
                 JAVA_INT, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT));
+        up(linker, UP_PACKET, "packet", FunctionDescriptor.of(JAVA_INT,
+                JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT));
     }
 
     private static MethodHandle down(Linker linker, int slot, FunctionDescriptor fd) {
@@ -237,9 +259,40 @@ public final class Bridge {
 
     static void tick() {
         try {
+            table.setAtIndex(JAVA_LONG, FLAG_PACKETS,
+                    ProtocolBridge.hasSending() ? 1L : 0L);
             server.scheduler().tick();
         } catch (Throwable t) {
             Logger.getLogger("Chunkwake").log(Level.SEVERE, "tick failed", t);
+        }
+    }
+
+    /**
+     * Clientbound-пакет Rust → ProtocolLib. 0 - без изменений, >0 - длина
+     * изменённых байтов в {@code out}, -1 - пакет отменён.
+     */
+    static int packet(long hi, long lo, MemorySegment name, int nameLen,
+            MemorySegment data, int len, MemorySegment out, int cap) {
+        try {
+            String packetName = string(name, nameLen);
+            byte[] bytes = new byte[len];
+            MemorySegment.copy(data.reinterpret(len), 0, MemorySegment.ofArray(bytes), 0, len);
+            org.bukkit.entity.Player target =
+                    server != null ? server.api.getPlayer(new UUID(hi, lo)) : null;
+            byte[] result = ProtocolBridge.clientbound(target, packetName, bytes);
+            if (result == null) {
+                return -1;
+            }
+            if (result.length > cap) {
+                return -2;
+            }
+            MemorySegment.copy(MemorySegment.ofArray(result), 0, out.reinterpret(cap), 0,
+                    result.length);
+            return result.length == bytes.length && java.util.Arrays.equals(result, bytes) ? 0
+                    : result.length;
+        } catch (Throwable broken) {
+            Logger.getLogger("Chunkwake").log(Level.WARNING, "clientbound packet bridge failed", broken);
+            return 0;
         }
     }
 

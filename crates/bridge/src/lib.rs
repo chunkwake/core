@@ -63,8 +63,10 @@ enum Slot {
     UpViaPoll = 28,
     UpViaClose = 29,
     DownViaEmit = 30,
+    UpPacket = 31,
+    FlagPackets = 32,
 }
-const SLOTS: usize = 31;
+const SLOTS: usize = 33;
 
 /// Буфер ответа на событие (смерть с полным инвентарём укладывается с запасом).
 const EVENT_REPLY_CAP: usize = 64 << 10;
@@ -72,6 +74,9 @@ const EVENT_REPLY_CAP: usize = 64 << 10;
 const LISTEN_BLOCK_BREAK: u64 = 4;
 
 type Table = [AtomicU64; SLOTS];
+
+/// Clientbound-пакет: uuid, id, сырые байты -> изменённые байты / отмена.
+type PacketFn = extern "C" fn(u64, u64, *const u8, usize, *const u8, usize, *mut u8, usize) -> i32;
 
 /// Сервер для downcall-ов из Java (одна JVM на процесс).
 static HOST: OnceLock<Weak<PlayPlan>> = OnceLock::new();
@@ -408,6 +413,38 @@ impl PluginHooks for Bridge {
             })
             .ok()?;
         Some(rx)
+    }
+
+    fn packet_events(&self) -> bool {
+        get(self.table, Slot::FlagPackets) != 0
+    }
+
+    /// Clientbound-мост: Java получает событие ProtocolLib синхронно в этом
+    /// потоке (как netty-поток в Paper) и возвращает байты или отмену.
+    fn packet(&self, uuid: Uuid, name: &str, data: &[u8]) -> Option<Vec<u8>> {
+        let call = unsafe { up::<PacketFn>(self.table, Slot::UpPacket) };
+        let (hi, lo) = uuid.as_u64_pair();
+        let cap = data.len() + 4096;
+        let mut out = vec![0u8; cap];
+        let n = call(
+            hi,
+            lo,
+            name.as_ptr(),
+            name.len(),
+            data.as_ptr(),
+            data.len(),
+            out.as_mut_ptr(),
+            cap,
+        );
+        match n {
+            -1 => None,
+            0 => Some(data.to_vec()),
+            n if n > 0 && (n as usize) <= cap => {
+                out.truncate(n as usize);
+                Some(out)
+            }
+            _ => Some(data.to_vec()),
+        }
     }
 
     fn tick(&self) {

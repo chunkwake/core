@@ -790,3 +790,38 @@ VoiceMessages и AxiomPaper:
 Известный остаток у Axiom: его тик-задача обращается к ещё не
 реализованным методам `MinecraftServer` (например,
 `getAllLevels`/`getPlayerList` уже закрыты); это следующий пласт.
+
+
+## Clientbound-мост ProtocolLib (работает и проверен)
+
+Раньше ProtocolLib видел только `CHAT_COMMAND`, дошедший до Bukkit. Теперь
+Rust отдаёт в Java **каждый clientbound-пакет** (по имени типа из
+`packets.json`) до записи в сокет:
+
+- `Broadcast` хранит сырые байты пакета (`raw`) рядом с готовым frame;
+  перехватываются пакеты, адресованные конкретному игроку/всем (`only`,
+  `dim`), включая `send_json`/`send_to`;
+- новый upcall `UP_PACKET` (slot 31): Java находит `PacketType` по имени,
+  создаёт `PacketContainer` с носителем `RawPayload`, вызывает
+  `PacketEvent.fromServer(...)` и всех слушателей `onPacketSending`;
+- отмена (`event.setCancelled(true)`) возвращает `-1` — Rust не отправляет
+  пакет; изменённые байты возвращаются в буфер и отправляются заново;
+- флаг «есть clientbound-слушатели» обновляет демон-поток раз в 500 мс
+  (не зависит от тика Java-планировщика); при отсутствии слушателей
+  мост не вызывается;
+- для типов, чьих NMS-классов у Chunkwake нет, `ProtocolBridge.prepare`
+  регистрирует `RawPayload` во все 157 clientbound-типов ProtocolLib,
+  поэтому плагины могут подписываться; поля пакета недоступны, но
+  событие, `getPacketType()`, `getPacketID()` и отмена работают.
+
+Живая проверка (`ClientboundProbe` + `perf_probe`, игрок boater):
+```
+[ClientboundProbe] SENDING SYSTEM_CHAT id=114 player=boater
+[ClientboundProbe] SENDING SYSTEM_CHAT id=114 player=boater
+[ClientboundProbe] CANCELLED SYSTEM_CHAT
+[ClientboundProbe] clientbound events: 9 cancelled=1
+```
+`cb-probe-N`-сообщения приходят клиенту, каждое 5-е (отменённое) — нет.
+
+Гейт 20 плагинов после включения моста: **19 of 20 enabled**, ошибок
+`NoSuchMethodError`/`VerifyError` нет.

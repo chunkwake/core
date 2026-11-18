@@ -68,6 +68,17 @@ pub trait PluginHooks: Send + Sync {
     ) -> Option<oneshot::Receiver<String>> {
         self.event(kind, uuid, arg)
     }
+
+    /// Есть ли подписчики ProtocolLib на clientbound-пакеты.
+    fn packet_events(&self) -> bool {
+        false
+    }
+
+    /// Clientbound-пакет по имени типа: `Some(data)` - отправить
+    /// (возможно изменённые плагином), `None` - пакет отменён.
+    fn packet(&self, _uuid: Uuid, _name: &str, data: &[u8]) -> Option<Vec<u8>> {
+        Some(data.to_vec())
+    }
 }
 #[derive(Debug, Clone, Copy)]
 struct Ids {
@@ -212,6 +223,8 @@ struct Ids {
 
 pub struct PlayPlan {
     ids: Ids,
+    /// id пакета play/clientbound -> имя из packets.json (для ProtocolLib).
+    packet_names: FastMap<i32, String>,
     login: Login,
     /// Состояние каждого включённого измерения.
     dims: FastMap<Dimension, DimState>,
@@ -984,6 +997,8 @@ struct Broadcast {
     /// Только этому игроку (сообщения плагинов).
     only: Option<Uuid>,
     packet: Frame,
+    /// Сырые байты пакета (id+data) для clientbound-моста ProtocolLib.
+    raw: Option<Arc<Vec<u8>>>,
     /// Событие сущности: получатель сам решает по дальности, слать ли `packet`,
     /// заспавнить сущность или убрать её.
     entity: Option<EntityEvent>,
@@ -1287,6 +1302,20 @@ fn in_view(center: (i32, i32), r: i32, (x, z): (i32, i32)) -> bool {
 }
 
 /// Чанк, в котором лежит позиция.
+/// VarInt-id пакета в начале сырых данных (id + payload).
+fn packet_id(data: &[u8]) -> Option<i32> {
+    let mut value = 0i32;
+    let mut shift = 0;
+    for &b in data.iter().take(5) {
+        value |= ((b & 0x7f) as i32) << shift;
+        if b & 0x80 == 0 {
+            return Some(value);
+        }
+        shift += 7;
+    }
+    None
+}
+
 fn chunk_of(pos: [f64; 3]) -> (i32, i32) {
     ((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4)
 }
@@ -1342,6 +1371,7 @@ impl Hub {
             dim: Some(dim),
             only: None,
             packet: Arc::new(self.frame(&packet)),
+            raw: Some(Arc::new(packet)),
             entity: None,
             moves: None,
             blocks: None,
@@ -1355,6 +1385,7 @@ impl Hub {
             dim: None,
             only: None,
             packet: Arc::new(self.frame(&packet)),
+            raw: Some(Arc::new(packet)),
             entity: None,
             moves: None,
             blocks: None,
@@ -1368,6 +1399,7 @@ impl Hub {
             dim: tick_dim(),
             only: None,
             packet: frame,
+            raw: None,
             entity: None,
             moves: None,
             blocks: None,
@@ -1406,6 +1438,7 @@ impl Hub {
             dim: tick_dim(),
             only: None,
             packet: Arc::new(out),
+            raw: None,
             entity: Some(EntityEvent::Many(Arc::new(parts))),
             moves: None,
             blocks: None,
@@ -1423,6 +1456,7 @@ impl Hub {
             dim: tick_dim(),
             only: None,
             packet: Arc::new(out),
+            raw: None,
             entity: Some(EntityEvent::Spawn(t)),
             moves: None,
             blocks: None,
@@ -1443,6 +1477,7 @@ impl Hub {
 
     fn send_entity(&self, skip: Option<Uuid>, packet: Vec<u8>, entity: Option<EntityEvent>) {
         // Ошибка = нет подписчиков; это нормально.
+        let raw = (!packet.is_empty()).then(|| Arc::new(packet.clone()));
         let _ = self.tx.send(Broadcast {
             skip,
             dim: tick_dim(),
@@ -1452,6 +1487,7 @@ impl Hub {
             } else {
                 self.frame(&packet)
             }),
+            raw: raw.clone(),
             entity,
             moves: None,
             blocks: None,
@@ -2893,7 +2929,14 @@ impl PlayPlan {
             *slot = sb(name)?;
         }
         let painting_variants = paintings::load_variants(&survival.data_dir);
+        let mut packet_names: FastMap<i32, String> = FastMap::default();
+        for (state, dir, name, id) in packets.entries() {
+            if state == State::Play && dir == Direction::Clientbound {
+                packet_names.insert(id, name.to_owned());
+            }
+        }
         Ok(Self {
+            packet_names,
             ids: Ids {
                 login: cb("login")?,
                 game_event: cb("game_event")?,
@@ -4303,14 +4346,14 @@ impl PlayPlan {
 
     /// Системное сообщение (JSON-компонент) одному игроку.
     pub fn send_json(&self, to: Uuid, json: &str) {
-        let packet = self
-            .hub
-            .frame(&text::system_chat_json(self.ids.system_chat, json, false));
+        let raw = text::system_chat_json(self.ids.system_chat, json, false);
+        let packet = self.hub.frame(&raw);
         let _ = self.hub.tx.send(Broadcast {
             skip: None,
             dim: None,
             only: Some(to),
             packet: Arc::new(packet),
+            raw: Some(Arc::new(raw)),
             entity: None,
             moves: None,
             blocks: None,
@@ -4369,11 +4412,14 @@ impl PlayPlan {
 
     /// Пакет только одному игроку.
     fn send_to(&self, to: Uuid, packet: Vec<u8>) {
+        let raw = packet;
+        let framed = self.hub.frame(&raw);
         let _ = self.hub.tx.send(Broadcast {
             skip: None,
             dim: None,
             only: Some(to),
-            packet: Arc::new(self.hub.frame(&packet)),
+            packet: Arc::new(framed),
+            raw: Some(Arc::new(raw)),
             entity: None,
             moves: None,
             blocks: None,
@@ -12258,6 +12304,7 @@ impl PlayPlan {
             dim: None,
             only: None,
             packet: Arc::new(Vec::new()),
+            raw: None,
             entity: None,
             moves: None,
             blocks: Some(Arc::new(batch)),
@@ -12319,6 +12366,7 @@ impl PlayPlan {
             dim: None,
             only: None,
             packet: Arc::new(Vec::new()),
+            raw: None,
             entity: None,
             moves: Some(Arc::new(batch)),
             blocks: None,
@@ -25289,7 +25337,23 @@ impl PlayPlan {
             return;
         }
         match &b.entity {
-            None => out.extend_from_slice(&b.packet),
+            None => {
+                if let (Some(raw), Some(hooks)) = (&b.raw, self.hooks())
+                    && hooks.packet_events()
+                    && let Some(id) = packet_id(raw)
+                    && let Some(name) = self.packet_names.get(&id)
+                {
+                    match hooks.packet(me, name, raw) {
+                        None => return,
+                        Some(data) if data.as_slice() == raw.as_slice() => {
+                            out.extend_from_slice(&b.packet);
+                        }
+                        Some(data) => out.extend_from_slice(&self.hub.frame(&data)),
+                    }
+                    return;
+                }
+                out.extend_from_slice(&b.packet)
+            }
             Some(EntityEvent::Gone(id)) => {
                 if visible.remove(id) {
                     out.extend_from_slice(&b.packet);
