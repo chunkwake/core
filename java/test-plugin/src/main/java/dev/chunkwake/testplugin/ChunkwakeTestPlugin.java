@@ -126,6 +126,21 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             getLogger().info("world time: before=" + before + " after=" + w.getTime()
                     + " day=" + w.isDayTime() + " full=" + w.getFullTime());
         }
+        {
+            Object direct = getServer().getCommandMap();
+            Object viaBukkit = null;
+            String error = null;
+            try {
+                viaBukkit = org.bukkit.Bukkit.getCommandMap();
+            } catch (Throwable t) {
+                error = t.getClass().getSimpleName() + ": " + t.getMessage();
+            }
+            getLogger().info("commandmaps: server=" + (direct == null ? "null" : direct.getClass().getName())
+                    + " bukkit=" + (viaBukkit == null ? "null" : viaBukkit.getClass().getName())
+                    + " error=" + error
+                    + " known=" + (direct instanceof org.bukkit.command.SimpleCommandMap m
+                            ? m.getCommands().size() : -1));
+        }
         foliaProbe();
         ItemStack bread = new ItemStack(Material.BREAD, 3);
         getLogger().info("item api: " + bread.getType() + " x" + bread.getAmount() + " max " + bread.getMaxStackSize());

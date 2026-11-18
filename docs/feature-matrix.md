@@ -287,3 +287,33 @@
 - Пробы: `crates/bots/examples/perf_probe.rs` (спавн 1000 мобов + замер),
   `crates/bots/examples/hold_bot.rs` (держит чанки загруженными),
   `plugin_block_probe.rs` (регрессия правок блоков).
+
+## Ещё плагины: WorldEdit, LuckPerms, ProtocolLib, ViaVersion
+
+Живой прогон 8 jar'ов в `plugins/`:
+
+- **WorldEdit 7.4.6** — включается, команды регистрируются и работают
+  (`/worldedit`, `/worldedit version` → `WorldEdit version 7.4.6`,
+  `Platforms: Bukkit-Official`). Для этого добавлены Paper-маркеры
+  `io.papermc.paper.configuration.Configuration` и
+  `com.destroystokyo.paper.PaperConfig`: PaperLib внутри WorldEdit считал
+  сервер CraftBukkit и лез за полем `commandMap` в PluginManager
+  (`Could not retrieve server CommandMap, using fallback instead!`).
+  Ограничение: `PlatformReadyEvent` падает NPE в `BlockType`
+  (`propertiesMap == null`) — блок-состояния WorldEdit берёт из
+  CraftBukkit-адаптера, которого у нас нет; базовые команды от этого не
+  страдают.
+- **ViaVersion 5.12.2** — загружается как встроенная библиотека
+  (`ViaVersion loaded as a library`), протокол-трансляция идёт через наш via-мост.
+- **LuckPerms 5.5.71** — включается, но не может внедрить свой `Permissible`:
+  `PermissibleInjector` ищет поле `perm` у `CraftHumanEntity` (CraftBukkit)
+  или `permissions` у `GlowHumanEntity` (Glowstone); на нашем сервере
+  `ClassNotFoundException: net.glowstone.entity.GlowHumanEntity`, после чего
+  LuckPerms запрещает вход (`denying login`). То же ограничение —
+  `PluginManager instance is not a 'SimplePluginManager'` при инъекции карт
+  прав. Нужен слой совместимости CraftBukkit-классов игрока.
+- **ProtocolLib 5.4.0** — не загружается: `Unable to find network.EnumProtocol`
+  (NMS-классы Mojang), как и ожидается для плагина, работающего через
+  внутренний код сервера.
+- Плагины без NMS (EssentialsX, PlaceholderAPI, Vault, WorldEdit, ViaVersion)
+  включаются: `5 of 5 enabled` в этом прогоне.
