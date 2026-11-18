@@ -407,3 +407,40 @@ impl или по identity прокси). После этого `//pos` → `//si
 `ConfigurationLoadEvent` (подписка через `MethodHandleEventHandler`) — это
 происходит после неудачной загрузки NMS-адаптера, но до первого
 `PlatformReadyEvent`. В логе включения WorldEdit ошибок нет.
+
+
+## ProtocolLib 5.4.0: NMS-слой начат, плагин включается
+
+Раньше загрузка падала на `Unable to find network.EnumProtocol`. Цепочка
+закрытых классов (все — минимальные NMS-совместимые заглушки в api-impl):
+
+- `net.minecraft.network.ConnectionProtocol` (enum HANDSHAKING/PLAY/STATUS/LOGIN)
+  — `MinecraftReflection.getEnumProtocolClass()`;
+- `net.minecraft.network.protocol.PacketFlow` (SERVERBOUND/CLIENTBOUND);
+- `net.minecraft.network.protocol.PacketType` — `ProtocolRegistry_1_20_5`
+  (`*PacketTypes`/`*Protocols` отсутствуют и пропускаются через
+  `getNullableNMS`);
+- `org.apache.commons.lang.Validate` — CraftBukkit традиционно нёс
+  commons-lang в classpath (ProtocolLib использует `Validate.notNull/isTrue`);
+- `org.bukkit.craftbukkit.CraftServer` — настоящий класс сервера
+  (`ChunkwakeServer.api`), иначе `MinecraftReflection.getMinecraftPackage()`
+  брал пакет `jdk.proxy1` и не находил `CraftServer`;
+- `net.minecraft.server.MinecraftServer` + `players.PlayerList` — точка опоры
+  для `getMinecraftServerClass()`/`getPlayerListClass()`;
+- `net.minecraft.server.network.ServerConnection` с
+  `List<io.netty.channel.ChannelFuture>` — `NetworkManagerInjector` оборачивает
+  это поле своим `ListeningList`.
+
+Живой прогон (7 плагинов):
+```
+plugins: 7 of 7 enabled in 4102 ms
+[ProtocolLib] Enabling ProtocolLib v5.4.0
+plugins: ProtocolLib enabled in 13 ms
+```
+Ошибок `Unable to find ...` нет; остаются только предупреждения проверки
+обновлений (нет поддерживаемой версии/сети).
+
+Ограничение: реестр пакетов ProtocolLib пуст (`*PacketTypes`/`*Protocols`
+не отдаются), а Java-сторона не владеет реальными Netty-каналами (сеть в
+Rust), поэтому фактический перехват пакетов пока не работает — это следующий
+крупный кусок NMS-слоя.

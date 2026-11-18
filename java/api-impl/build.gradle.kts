@@ -12,6 +12,7 @@ dependencies {
     // Версия та же, что у ванильного 26.3 (`META-INF/libraries.list`), чтобы
     // не ловить несовместимость с нативными транспорт-библиотеками.
     val netty = "4.2.16.Final"
+    "compileOnly"("io.netty:netty-transport:$netty")
     "runtimeOnly"("io.netty:netty-buffer:$netty")
     "runtimeOnly"("io.netty:netty-common:$netty")
     "runtimeOnly"("io.netty:netty-transport:$netty")

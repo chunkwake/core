@@ -43,7 +43,7 @@ import org.bukkit.scheduler.BukkitScheduler;
 final class ChunkwakeServer {
     static final String VERSION = "26.3";
 
-    final Server api = Stub.of(Server.class, this);
+    final Server api = new org.bukkit.craftbukkit.CraftServer(this);
     final Logger logger = Logger.getLogger("Chunkwake");
     private final Scheduler scheduler = new Scheduler();
     private final FoliaSchedulers folia = new FoliaSchedulers(scheduler);
