@@ -51,7 +51,7 @@ val toolsClasses = layout.buildDirectory.dir("generated/provider-tools")
 /** Компиляция самого генератора: ему нужен paper-api в classpath для рефлексии. */
 val compileProviderTools by tasks.registering(JavaCompile::class) {
     description = "Компилирует генератор провайдеров"
-    source = fileTree(toolsDir) { include("GenProviders.java") }
+    source = fileTree(toolsDir) { include("*.java") }
     classpath = configurations.named("compileClasspath").get() + files(toolsDir)
     destinationDirectory.set(toolsClasses)
     options.encoding = "UTF-8"
@@ -74,13 +74,34 @@ val generateProviders by tasks.registering(JavaExec::class) {
         )
     })
     inputs.files(configurations.named("compileClasspath"))
-    inputs.files(fileTree(toolsDir) { include("GenProviders.java") })
+    inputs.files(fileTree(toolsDir) { include("*.java") })
     outputs.dir(generatedDir)
+}
+
+/**
+ * Патч Brigadier как в Paper: CommandNode.requirement становится public.
+ * Плагины, собранные против Paper (DreamDisplays), читают это поле напрямую;
+ * в ванильном brigadier.jar оно private. Патченый класс кладём в API-jar,
+ * который стоит первым в classpath и перекрывает обычный brigadier.
+ */
+val patchedBrigadier = layout.buildDirectory.dir("generated/brigadier")
+
+val patchBrigadier by tasks.registering(JavaExec::class) {
+    description = "Делает CommandNode.requirement public (патч Paper)"
+    dependsOn(compileProviderTools)
+    classpath = files(toolsClasses)
+    mainClass.set("PatchBrigadier")
+    val brigadier = configurations.named("compileClasspath").get()
+        .first { it.name.startsWith("brigadier") }
+    args(brigadier.absolutePath, patchedBrigadier.get().asFile.absolutePath)
+    inputs.file(brigadier)
+    outputs.dir(patchedBrigadier)
 }
 
 sourceSets.named("main") {
     java.srcDir(generatedDir.map { it.dir("java") })
     resources.srcDir(generatedDir.map { it.dir("resources") })
+    resources.srcDir(patchedBrigadier)
 }
 
 tasks.named<JavaCompile>("compileJava") {
@@ -88,7 +109,7 @@ tasks.named<JavaCompile>("compileJava") {
 }
 
 tasks.named<ProcessResources>("processResources") {
-    dependsOn(generateProviders)
+    dependsOn(generateProviders, patchBrigadier)
 }
 
 // Готовый к запуску каталог: сервер берёт из него classpath JVM.

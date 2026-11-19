@@ -2012,3 +2012,42 @@ VoxyServerSide, паник нет.
 (`net.minecraft.commands.CommandBuildContext`/`Commands`), этого слоя
 пока нет; DreamDisplays включается, но его lifecycle-команда падает на
 приватном поле `CommandNode.requirement` (Paper патчит Brigadier).
+
+## Патч Brigadier как в Paper: DreamDisplays регистрирует команду
+
+DreamDisplays при регистрации lifecycle-команды читает
+`com.mojang.brigadier.tree.CommandNode.requirement` напрямую; в ванильном
+brigadier 1.3.11 поле `private`, Paper его патчит. Отсюда был:
+
+```
+java.lang.IllegalAccessError: class ...ServerAnsweredKt tried to access
+private field com.mojang.brigadier.tree.CommandNode.requirement
+```
+
+Сделано: `java/tools/PatchBrigadier.java` разбирает class-файл
+`CommandNode` из brigadier.jar и меняет `access_flags` поля
+`requirement` с private на public (байткод и раскладка не меняются —
+подклассы из обычного brigadier.jar работают как раньше). Gradle-таск
+`patchBrigadier` кладёт патченый класс в `chunkwake-api.jar`, который
+стоит первым в classpath и перекрывает стоковый brigadier.
+
+Проверка патча:
+
+```
+javap -p -classpath api-impl/build/generated/brigadier \
+      com.mojang.brigadier.tree.CommandNode
+  public final java.util.function.Predicate<S> requirement;
+  public java.util.function.Predicate<S> getRequirement();
+```
+
+Живой расширенный стенд после патча:
+
+```
+plugins: enabled 31 plugin(s) in 33607 ms
+DreamDisplays enabled in 208 ms
+lifecycle[DreamDisplays] errors: 0
+IllegalAccessError: 0
+```
+
+Базовый стенд: `26 of 27 enabled` (только VoxyServerSide), паник нет.
+Остался один отказ по матрице — NpcPlugin (NMS command internals).
