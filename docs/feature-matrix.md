@@ -1447,3 +1447,29 @@ prepare render). Нужен следующий заход: сравнить `Hol
 
 YAML-баг подтверждён: без кавычек `location: world:8,500:...` не
 парсится, с кавычками — грузится (`Loaded 1 holograms!`).
+
+## DH render-путь: найдены и закрыты Style-методы
+
+Трассировка `HologramLine.show` → `TextHologramRenderer.display` →
+`EntityMetadataBuilder.withCustomName` упёрлась в наши заглушки `Style`:
+
+- `NoSuchMethodError: Style.applyFormats(ChatFormatting[])`
+- `NoSuchMethodError: Style.withColor(int)`
+
+Добавлены `Style.applyFormats(ChatFormatting...)`, `applyFormat(...)`,
+`withColor(int)` (legacy 0xRRGGBB). После этого `Hologram.show(player, 0)`
+возвращает `true` и строка помечается видимой:
+```
+dh-line: reshow boater=true
+```
+Но DH по-прежнему не вызывает `Connection.send` (бот видит только
+пакеты тест-плагина). То есть блокер сместился внутрь DH: строка уже
+считается visible, а первичный render (до фиксов) не отправил пакеты и
+не сбросил viewers, поэтому повторный `show` её пропускает.
+
+Следующий шаг: сбросить line-viewers (`line.hide(player)`/удалить строку)
+после фиксов и вызвать show заново — тогда DH должен пройти
+`EntityPacketsBuilder.sendTo` и вызвать наш `Connection.send`.
+
+YAML location (без кавычек) — подтверждённый баг нашего YAML-слоя;
+обход — кавычки.

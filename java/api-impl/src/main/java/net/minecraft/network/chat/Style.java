@@ -30,8 +30,44 @@ public final class Style {
         this.shadowColor = shadowColor;
     }
 
+    /** NMS {@code Style.withColor(int)}: legacy 0xRRGGBB. */
+    public Style withColor(int rgb) {
+        return this.withColor(TextColor.fromRgb(rgb));
+    }
+
     public Style withColor(net.minecraft.ChatFormatting formatting) {
         return this.withColor(TextColor.fromLegacyFormat(formatting));
+    }
+
+    /** NMS {@code Style.applyFormats} (DecentHolograms). */
+    public Style applyFormats(net.minecraft.ChatFormatting... formats) {
+        Style style = this;
+        if (formats == null) {
+            return style;
+        }
+        for (net.minecraft.ChatFormatting format : formats) {
+            if (format == null) {
+                continue;
+            }
+            if (format.isColor()) {
+                style = style.withColor(format);
+                continue;
+            }
+            style = switch (format) {
+                case BOLD -> style.withBold(true);
+                case ITALIC -> style.withItalic(true);
+                case UNDERLINE -> style.withUnderlined(true);
+                case STRIKETHROUGH -> style.withStrikethrough(true);
+                case OBFUSCATED -> style.withObfuscated(true);
+                default -> style;
+            };
+        }
+        return style;
+    }
+
+    /** NMS {@code Style.applyFormat}. */
+    public Style applyFormat(net.minecraft.ChatFormatting format) {
+        return this.applyFormats(format);
     }
 
     public Style withColor(TextColor color) {
