@@ -1233,3 +1233,36 @@ java.lang.NoClassDefFoundError: Could not initialize class
 Клиентский мост (наш clientbound-перехват) при этом работает, но
 injector-API ProtocolLib (серверные пакеты/каналы) не поддержан. Это
 ограничение совместимости, которое нужно закрывать отдельно.
+
+## ProtocolLib injector: инициализация починена
+
+`PacketListenerInvoker` больше не падает с `NoClassDefFoundError`:
+
+- `Connection` (NMS) получил методы, которые ищет инжектор:
+  `send(Packet)`, `read(ChannelHandlerContext, Packet)`,
+  `disconnect(Component)`, `getPacketListener()/setPacketListener(...)`;
+- в пайплайне `Connection.channel` появились заглушки `encoder`/`decoder` —
+  инжектор вставляет свои обработчики именно после них;
+- `connection` теперь лежит в `ServerCommonPacketListenerImpl` (его ищет
+  DecentHolograms), `ServerGamePacketListenerImpl` наследует поле.
+
+Живой прогон (4 бота входят одновременно): ошибки
+`Could not pass event ... to ProtocolLib` и упоминания
+`PacketListenerInvoker` из лога исчезли (раньше — на каждый вход).
+Клиентский мост не сломался: `player_chat re-encoded (text=CB-CHAT-229)`
+и клиент печатает `player_chat: CB-CHAT-229`.
+
+### Остающиеся дыры (найдены тем же прогоном)
+
+- **DecentHolograms**: `Failed to modify player's pipeline` — плагин
+  вставляет свои Netty-обработчики в пайплайн, а у нас транспорт не Netty;
+  нужен либо полноценный Netty-фасад, либо адаптер на наш мост.
+- **EssentialsX**: `NullPointerException: player` в
+  `LuckPerms AbstractVaultPermission.getPrimaryGroup` при MOTD на входе —
+  Vault/LuckPerms-интеграция отдаёт null-игрока.
+- **WorldGuard**: `ClassCastException: $Proxy cannot be cast to
+  org.bukkit.block.data.type.Dispenser` в `BlockDispenseEvent` — наши
+  `getBlockData()` возвращают общий прокси, а не конкретный интерфейс
+  block-data.
+
+Гейт: 26 of 27 enabled (Voxy требует MC <26.2).

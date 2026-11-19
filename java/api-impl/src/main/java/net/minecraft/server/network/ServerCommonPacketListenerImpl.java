@@ -1,16 +1,25 @@
 package net.minecraft.server.network;
 
+import net.minecraft.network.Connection;
 import net.minecraft.network.protocol.Packet;
 
 /**
- * База NMS-слушателя соединения. Нужна плагинам (DecentHolograms/TAB),
- * которые ищут {@code ServerCommonPacketListenerImpl} и вызывают
- * {@code send(Packet)}.
+ * Минимальный NMS-слушатель соединения. Нужен плагинам
+ * (DecentHolograms/TAB), которые ищут поле {@code connection}.
  */
 public class ServerCommonPacketListenerImpl implements ServerPlayerConnection {
+    public final Connection connection;
+
+    public ServerCommonPacketListenerImpl() {
+        this(new Connection());
+    }
+
+    public ServerCommonPacketListenerImpl(Connection connection) {
+        this.connection = connection;
+    }
+
     @Override
     public void send(Packet packet) {
-        // Пакеты Java-стороны пока не уходят в Rust-транспорт; точка для
-        // будущего моста. Вызов не должен ломать плагин.
+        // Отправкой управляет Rust-транспорт; здесь пусто.
     }
 }
