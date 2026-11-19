@@ -1050,3 +1050,45 @@ final class Region implements RegionScheduler {
 чанков с межрегиональной синхронизацией сущностей/игроков) и только
 потом стенд. Сейчас это архитектурная работа, а не вопрос запуска
 существующего кластера.
+
+## Player chat: ServerboundChatMessage → ClientboundPlayerChatPacket (проверено)
+
+Раньше сообщение игрока уходило как `system_chat`. Теперь есть настоящий
+player-chat пайплайн:
+
+- `play::PlayerChatBody` + `play::player_chat` (crates/protocol):
+  `sender`, `index`, `signature?`, `content`, `timestamp`, `salt`,
+  `lastSeen`, `unsignedContent?`, `filterMask`, `chatType(id, name, target?)`.
+  Мы не подписываем чат (`signature = None`), поэтому видимый текст лежит
+  в `unsignedContent`.
+- Rust-ядро (crates/net) отправляет `player_chat` и на обычное сообщение,
+  и на JSON от плагинного chat-рендерера (`AsyncChatEvent`).
+- Java: `ClientboundPlayerChatPacket` с реальными полями (`Seen`,
+  `ChatTypeBound`), ProtocolBridge декодирует/перекодирует их.
+  ProtocolLib называет этот тип `PacketType.Play.Server.CHAT` (legacy),
+  поэтому мост регистрирует для него наш NMS-класс по имени `CHAT`.
+- Найден и исправлен побочный баг: `system_chat`/`player_chat`
+  перекодировались в `{"text": <plain>}`, из-за чего компоненты с
+  `translate` (например, `chat.type.text`) теряли аргументы. Теперь если
+  плагин не заменял компонент, пишется **исходный NBT-тег**
+  (`NbtIo.writeNetworkTag`), а `{"text": ...}` — только для изменённого.
+
+Живая проверка (ClientboundProbe пишет `CB-CHAT-N`):
+```
+[ClientboundProbe] PLAYER_CHAT chat-components=1
+[ClientboundProbe] WROTE player chat component
+protocol: player_chat re-encoded (text=CB-CHAT-6)
+```
+и клиент-бот, разобравший пакет, печатает:
+```
+player_chat: CB-CHAT-6
+```
+То есть изменённое плагином поле доходит до клиента.
+
+Ограничения:
+- формат — unsigned-вариант (без подписи); `INITIALIZE_CHAT` в
+  PlayerInfo и `filterMask=2` пока passthrough;
+- `chat_type` отправляется как id 0 (`minecraft:chat`);
+- `system_chat` модификация по-прежнему работает (`CB-MODIFIED-N`).
+
+Гейт: 26 of 27 enabled (Voxy требует MC <26.2).

@@ -56,6 +56,12 @@ public final class NbtIo {
         writeCompound(tag, output, new NbtAccounter.Limited(Long.MAX_VALUE));
     }
 
+    /** Запись сетевого NBT любого корневого тега (тип + payload, без имени). */
+    public static void writeNetworkTag(Tag tag, DataOutput output) throws IOException {
+        output.writeByte(tag.getId());
+        writePayload(tag, output, new NbtAccounter.Limited(Long.MAX_VALUE));
+    }
+
     public static CompoundTag readCompressed(InputStream input, NbtAccounter accounter) throws IOException {
         try (java.util.zip.GZIPInputStream gzip = new java.util.zip.GZIPInputStream(input)) {
             return read(new java.io.DataInputStream(gzip), accounter);

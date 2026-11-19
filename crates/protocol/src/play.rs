@@ -837,6 +837,78 @@ mod chat_tests {
         assert!(r.bool().unwrap());
         assert!(r.remaining().is_empty());
     }
+
+    #[test]
+    fn player_chat_layout() {
+        let sender = Uuid::from_u128(9);
+        let unsigned = serde_json::json!({ "text": "hi" });
+        let name = serde_json::json!({ "text": "" });
+        let p = player_chat(
+            0x42,
+            sender,
+            3,
+            &PlayerChatBody {
+                content: "hi",
+                timestamp: 1_700_000_000_000,
+                salt: 0,
+                unsigned: &unsigned,
+                chat_type: 0,
+                name: &name,
+                target: None,
+            },
+        );
+        let mut r = Reader::new(&p);
+        assert_eq!(r.var_int().unwrap(), 0x42);
+        assert_eq!(r.uuid().unwrap(), sender);
+        assert_eq!(r.var_int().unwrap(), 3);
+        assert!(!r.bool().unwrap());
+        assert_eq!(r.string(256).unwrap(), "hi");
+        assert_eq!(r.i64().unwrap(), 1_700_000_000_000);
+        assert_eq!(r.i64().unwrap(), 0);
+        assert_eq!(r.var_int().unwrap(), 0);
+        assert!(r.bool().unwrap());
+        assert_eq!(crate::text::read_component(&mut r).unwrap(), unsigned);
+        assert_eq!(r.var_int().unwrap(), 0);
+        assert_eq!(r.var_int().unwrap(), 0);
+        assert_eq!(crate::text::read_component(&mut r).unwrap(), name);
+        assert!(!r.bool().unwrap());
+        assert!(r.remaining().is_empty());
+    }
+
+    #[test]
+    fn player_chat_translate_roundtrip() {
+        let unsigned = serde_json::json!({
+            "translate": "chat.type.text",
+            "with": ["boater", "hello-from-bot"],
+        });
+        let name = serde_json::json!({ "text": "" });
+        let p = player_chat(
+            0x42,
+            Uuid::from_u128(1),
+            0,
+            &PlayerChatBody {
+                content: "hello-from-bot",
+                timestamp: 0,
+                salt: 0,
+                unsigned: &unsigned,
+                chat_type: 0,
+                name: &name,
+                target: None,
+            },
+        );
+        let mut r = Reader::new(&p);
+        r.var_int().unwrap();
+        r.uuid().unwrap();
+        r.var_int().unwrap();
+        r.bool().unwrap();
+        r.string(256).unwrap();
+        r.i64().unwrap();
+        r.i64().unwrap();
+        assert_eq!(r.var_int().unwrap(), 0);
+        assert!(r.bool().unwrap());
+        let component = crate::text::read_component(&mut r).unwrap();
+        assert_eq!(component, unsigned);
+    }
 }
 
 /// Угол в градусах → байт (1/256 оборота), как `Mth.packDegrees`.
@@ -1157,6 +1229,49 @@ pub fn plain_component_packet(id: i32, text: &serde_json::Value) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id);
     crate::text::write_component(&mut w, text);
+    w.buf
+}
+
+/// Тело player-chat пакета (без адресации): текст, время и тип чата.
+pub struct PlayerChatBody<'a> {
+    pub content: &'a str,
+    pub timestamp: i64,
+    pub salt: i64,
+    pub unsigned: &'a serde_json::Value,
+    pub chat_type: i32,
+    pub name: &'a serde_json::Value,
+    pub target: Option<&'a serde_json::Value>,
+}
+
+/// `ClientboundPlayerChatPacket`: сообщение игрока (unsigned-вариант).
+///
+/// Раскладка (26.x): sender, index, signature?, body(content,timestamp,salt),
+/// lastSeen, unsignedContent?, filterMask, chatType(id, name, target?).
+/// Мы не подписываем чат (`signature = None`), поэтому видимый текст всегда
+/// лежит в `unsignedContent`.
+pub fn player_chat(id: i32, sender: Uuid, index: i32, body: &PlayerChatBody<'_>) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .uuid(sender)
+        .var_int(index)
+        .bool(false)
+        .string(body.content)
+        .i64(body.timestamp)
+        .i64(body.salt)
+        .var_int(0)
+        .bool(true);
+    crate::text::write_component(&mut w, body.unsigned);
+    w.var_int(0).var_int(body.chat_type);
+    crate::text::write_component(&mut w, body.name);
+    match body.target {
+        Some(component) => {
+            w.bool(true);
+            crate::text::write_component(&mut w, component);
+        }
+        None => {
+            w.bool(false);
+        }
+    }
     w.buf
 }
 

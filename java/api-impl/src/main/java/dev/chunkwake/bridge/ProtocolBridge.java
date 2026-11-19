@@ -43,6 +43,7 @@ final class ProtocolBridge {
     private static Object entityDataType;
     private static Object chunkForgetType;
     private static Object playerInfoType;
+    private static Object playerChatType;
     /** Класс-носитель сырых байтов для PacketContainer. */
     public static final class RawPayload {
         public byte[] data;
@@ -140,6 +141,16 @@ final class ProtocolBridge {
                             true, loader);
                     titleType = candidate;
                 } else if (classNames.contains(
+                        "net.minecraft.network.protocol.game.ClientboundPlayerChatPacket")
+                        || "CHAT".equals(String.valueOf(
+                                candidate.getClass().getMethod("name").invoke(candidate)))) {
+                    // ProtocolLib называет этот тип `CHAT` (legacy), а классы
+                    // ищет по именам PlayerChat/Chat.
+                    carrier = Class.forName(
+                            "net.minecraft.network.protocol.game.ClientboundPlayerChatPacket",
+                            true, loader);
+                    playerChatType = candidate;
+                } else if (classNames.contains(
                         "net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket")) {
                     carrier = Class.forName(
                             "net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket",
@@ -199,7 +210,8 @@ final class ProtocolBridge {
                     + " title=" + (titleType != null)
                     + " entity=" + (entityDataType != null)
                     + " chunk=" + (chunkForgetType != null)
-                    + " playerInfo=" + (playerInfoType != null));
+                    + " playerInfo=" + (playerInfoType != null)
+                    + " playerChat=" + (playerChatType != null));
         } catch (Throwable broken) {
             protocolLib.getLogger().log(java.util.logging.Level.WARNING,
                     "ProtocolBridge: prepare failed", broken);
@@ -252,6 +264,9 @@ final class ProtocolBridge {
             }
             if ("player_info_update".equalsIgnoreCase(name) && playerInfoType != null) {
                 return playerInfo(player, playerInfoType, data);
+            }
+            if ("player_chat".equalsIgnoreCase(name) && playerChatType != null) {
+                return playerChat(player, playerChatType, data);
             }
             if ("set_entity_data".equalsIgnoreCase(name) && entityDataType != null) {
                 return entityData(player, entityDataType, data);
@@ -319,6 +334,148 @@ final class ProtocolBridge {
             Bridge.log(1, "protocol: sending probe failed: " + broken);
         }
         return false;
+    }
+
+    /** Field-level for {@code ClientboundPlayerChatPacket}. */
+    private static byte[] playerChat(org.bukkit.entity.Player player, Object type, byte[] data) {
+        try {
+            int[] pos = {0};
+            int id = readVarInt(data, pos);
+            java.io.DataInputStream in = new java.io.DataInputStream(
+                    new java.io.ByteArrayInputStream(data, pos[0], data.length - pos[0]));
+            java.util.UUID sender = new java.util.UUID(in.readLong(), in.readLong());
+            int index = readVarInt(in);
+            byte[] signature = in.readBoolean() ? readFixed(in, 256) : null;
+            String content = readString(in);
+            long timestamp = in.readLong();
+            long salt = in.readLong();
+            int seenCount = readVarInt(in);
+            java.util.List<Object> lastSeen = new java.util.ArrayList<>(seenCount);
+            Class<?> packetClass = Class.forName(
+                    "net.minecraft.network.protocol.game.ClientboundPlayerChatPacket", true,
+                    type.getClass().getClassLoader());
+            Class<?> seenClass = Class.forName(
+                    "net.minecraft.network.protocol.game.ClientboundPlayerChatPacket$Seen", true,
+                    type.getClass().getClassLoader());
+            for (int i = 0; i < seenCount; i++) {
+                java.util.UUID seenSender = new java.util.UUID(in.readLong(), in.readLong());
+                lastSeen.add(seenClass.getConstructor(java.util.UUID.class, byte[].class)
+                        .newInstance(seenSender, readFixed(in, 256)));
+            }
+            net.minecraft.nbt.Tag unsignedTag = null;
+            net.minecraft.network.chat.Component unsignedContent = null;
+            if (in.readBoolean()) {
+                unsignedTag = net.minecraft.nbt.NbtIo.readNetworkTag(
+                        in, net.minecraft.nbt.NbtAccounter.unlimitedHeap());
+                unsignedContent = componentOf(unsignedTag);
+            }
+            int filterMaskType = readVarInt(in);
+            if (filterMaskType == 2) {
+                // Частичная фильтрация: битсет не моделируем, пропускаем как есть.
+                Bridge.log(2, "protocol: player_chat partial-filter passthrough");
+                return data;
+            }
+            int chatTypeId = readVarInt(in);
+            net.minecraft.nbt.Tag chatNameTag = net.minecraft.nbt.NbtIo.readNetworkTag(
+                    in, net.minecraft.nbt.NbtAccounter.unlimitedHeap());
+            net.minecraft.network.chat.Component chatName = componentOf(chatNameTag);
+            net.minecraft.nbt.Tag targetTag = in.readBoolean()
+                    ? net.minecraft.nbt.NbtIo.readNetworkTag(
+                            in, net.minecraft.nbt.NbtAccounter.unlimitedHeap())
+                    : null;
+            net.minecraft.network.chat.Component targetName =
+                    targetTag == null ? null : componentOf(targetTag);
+            Class<?> boundClass = Class.forName(
+                    "net.minecraft.network.protocol.game.ClientboundPlayerChatPacket$ChatTypeBound",
+                    true, type.getClass().getClassLoader());
+            Object bound = boundClass.getConstructor(int.class,
+                    net.minecraft.network.chat.Component.class,
+                    net.minecraft.network.chat.Component.class)
+                    .newInstance(chatTypeId, chatName, targetName);
+            Object packet = packetClass.getConstructor(
+                    java.util.UUID.class, int.class, byte[].class, String.class,
+                    long.class, long.class, java.util.List.class,
+                    net.minecraft.network.chat.Component.class, int.class, boundClass)
+                    .newInstance(sender, index, signature, content, timestamp, salt, lastSeen,
+                            unsignedContent, filterMaskType, bound);
+            Object container = containerConstructor.newInstance(type, packet);
+            Object event = fromServer.invoke(null, plugin, container, player);
+            for (Object listener : (Set<?>) getListeners.invoke(manager)) {
+                Set<?> types = (Set<?>) getTypes.invoke(getSendingWhitelist.invoke(listener));
+                if (types.contains(type)) {
+                    onSending.invoke(listener, event);
+                }
+            }
+            if (Boolean.TRUE.equals(event.getClass().getMethod("isCancelled").invoke(event))) {
+                return null;
+            }
+            java.util.UUID changedSender =
+                    (java.util.UUID) packetClass.getMethod("sender").invoke(packet);
+            int changedIndex = (Integer) packetClass.getMethod("index").invoke(packet);
+            byte[] changedSignature =
+                    (byte[]) packetClass.getMethod("signature").invoke(packet);
+            String changedContent = (String) packetClass.getMethod("content").invoke(packet);
+            long changedTimestamp = (Long) packetClass.getMethod("timestamp").invoke(packet);
+            long changedSalt = (Long) packetClass.getMethod("salt").invoke(packet);
+            java.util.List<?> changedSeen =
+                    (java.util.List<?>) packetClass.getMethod("lastSeen").invoke(packet);
+            net.minecraft.network.chat.Component changedUnsigned =
+                    (net.minecraft.network.chat.Component) packetClass
+                            .getMethod("unsignedContent").invoke(packet);
+            int changedFilter = (Integer) packetClass.getMethod("filterMaskType").invoke(packet);
+            Object changedBound = packetClass.getMethod("chatType").invoke(packet);
+
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream(data.length);
+            writeVarInt(bytes, id);
+            java.io.DataOutputStream out = new java.io.DataOutputStream(bytes);
+            out.writeLong(changedSender.getMostSignificantBits());
+            out.writeLong(changedSender.getLeastSignificantBits());
+            writeVarInt(bytes, changedIndex);
+            out.writeBoolean(changedSignature != null);
+            if (changedSignature != null) {
+                out.write(fixed(changedSignature, 256));
+            }
+            writeString(bytes, changedContent);
+            out.writeLong(changedTimestamp);
+            out.writeLong(changedSalt);
+            writeVarInt(bytes, changedSeen.size());
+            for (Object seen : changedSeen) {
+                java.util.UUID seenSender = (java.util.UUID) seenClass.getMethod("sender")
+                        .invoke(seen);
+                out.writeLong(seenSender.getMostSignificantBits());
+                out.writeLong(seenSender.getLeastSignificantBits());
+                out.write(fixed((byte[]) seenClass.getMethod("signature").invoke(seen), 256));
+            }
+            out.writeBoolean(changedUnsigned != null);
+            if (changedUnsigned != null) {
+                writeComponentLike(out, changedUnsigned, unsignedTag, unsignedContent);
+            }
+            writeVarInt(bytes, changedFilter);
+            writeVarInt(bytes, (Integer) boundClass.getMethod("chatType").invoke(changedBound));
+            net.minecraft.network.chat.Component changedName =
+                    (net.minecraft.network.chat.Component) boundClass.getMethod("name")
+                            .invoke(changedBound);
+            writeComponentLike(out, changedName, chatNameTag, chatName);
+            net.minecraft.network.chat.Component changedTarget =
+                    (net.minecraft.network.chat.Component) boundClass.getMethod("targetName")
+                            .invoke(changedBound);
+            out.writeBoolean(changedTarget != null);
+            if (changedTarget != null) {
+                writeComponentLike(out, changedTarget, targetTag, targetName);
+            }
+            out.flush();
+            byte[] result = bytes.toByteArray();
+            if (!java.util.Arrays.equals(result, data)) {
+                Bridge.log(2, "protocol: player_chat re-encoded (text="
+                        + (changedUnsigned == null ? changedContent : changedUnsigned.getString())
+                        + ")");
+            }
+            return result;
+        } catch (Throwable broken) {
+            Throwable cause = broken.getCause() == null ? broken : broken.getCause();
+            Bridge.log(1, "protocol: player_chat bridge failed: " + cause);
+            return data;
+        }
     }
 
     /** Field-level for {@code ClientboundPlayerInfoUpdatePacket}. */
@@ -743,9 +900,10 @@ final class ProtocolBridge {
             boolean changedOverlay = (Boolean) packet.getClass().getMethod("overlay").invoke(packet);
             java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream(data.length + 16);
             writeVarInt(bytes, id);
-            net.minecraft.nbt.CompoundTag outTag = new net.minecraft.nbt.CompoundTag();
-            outTag.putString("text", changed == null ? "" : changed.getString());
-            net.minecraft.nbt.NbtIo.writeNetwork(outTag,
+            net.minecraft.nbt.Tag outTag = changed == content && root != null
+                    ? root
+                    : literalTag(changed);
+            net.minecraft.nbt.NbtIo.writeNetworkTag(outTag,
                     new java.io.DataOutputStream(bytes));
             bytes.write(changedOverlay ? 1 : 0);
             return bytes.toByteArray();
@@ -768,6 +926,64 @@ final class ProtocolBridge {
             }
             shift += 7;
         }
+    }
+
+    private static byte[] readFixed(java.io.DataInputStream in, int length)
+            throws java.io.IOException {
+        byte[] bytes = new byte[length];
+        in.readFully(bytes);
+        return bytes;
+    }
+
+    private static byte[] fixed(byte[] value, int length) {
+        byte[] bytes = new byte[length];
+        if (value != null) {
+            System.arraycopy(value, 0, bytes, 0, Math.min(value.length, length));
+        }
+        return bytes;
+    }
+
+    private static net.minecraft.network.chat.Component componentOf(net.minecraft.nbt.Tag root) {
+        String text = null;
+        if (root instanceof net.minecraft.nbt.CompoundTag tag) {
+            text = tag.getStringOr("text", null);
+        } else if (root instanceof net.minecraft.nbt.StringTag string) {
+            text = string.getAsString();
+        } else if (root != null) {
+            text = root.getAsString();
+        }
+        return net.minecraft.network.chat.Component.literal(text == null ? "" : text);
+    }
+
+    private static net.minecraft.nbt.CompoundTag literalTag(
+            net.minecraft.network.chat.Component component) {
+        net.minecraft.nbt.CompoundTag tag = new net.minecraft.nbt.CompoundTag();
+        tag.putString("text", component == null ? "" : component.getString());
+        return tag;
+    }
+
+    /** Неизменённый компонент пишем исходным тегом (translate/extra сохраняются). */
+    private static void writeComponentLike(java.io.DataOutputStream out,
+            net.minecraft.network.chat.Component component, net.minecraft.nbt.Tag original,
+            net.minecraft.network.chat.Component decoded) throws java.io.IOException {
+        if (component == decoded && original != null) {
+            net.minecraft.nbt.NbtIo.writeNetworkTag(original, out);
+        } else {
+            writeComponent(out, component);
+        }
+    }
+
+    private static net.minecraft.network.chat.Component readComponent(java.io.DataInputStream in)
+            throws java.io.IOException {
+        return componentOf(net.minecraft.nbt.NbtIo.readNetworkTag(
+                in, net.minecraft.nbt.NbtAccounter.unlimitedHeap()));
+    }
+
+    private static void writeComponent(java.io.DataOutputStream out,
+            net.minecraft.network.chat.Component component) throws java.io.IOException {
+        net.minecraft.nbt.CompoundTag tag = new net.minecraft.nbt.CompoundTag();
+        tag.putString("text", component == null ? "" : component.getString());
+        net.minecraft.nbt.NbtIo.writeNetwork(tag, out);
     }
 
     private static String readString(java.io.DataInputStream in) throws java.io.IOException {

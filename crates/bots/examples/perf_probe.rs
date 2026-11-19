@@ -9,7 +9,9 @@ use std::time::Duration;
 struct Probe {
     c: Client,
     sb_command: i32,
+    sb_chat: i32,
     cb_chat: i32,
+    cb_player_chat: i32,
     chat: String,
 }
 
@@ -30,6 +32,12 @@ impl Probe {
                     self.chat.push_str(&out);
                     self.chat.push('\n');
                 }
+            } else if id == self.cb_player_chat
+                && let Some(text) = read_player_chat_unsigned(&body)
+            {
+                println!("player_chat: {text}");
+                self.chat.push_str(&text);
+                self.chat.push('\n');
             }
         }
     }
@@ -49,6 +57,13 @@ impl Probe {
         self.drain();
     }
 
+    async fn say(&mut self, text: &str, ms: u64) {
+        let mut w = self.packet(self.sb_chat);
+        w.string(text);
+        self.c.send_raw(&w.buf).await.unwrap();
+        self.pump(ms).await;
+    }
+
     async fn cmd(&mut self, line: &str, ms: u64) {
         let mut w = self.packet(self.sb_command);
         w.string(line);
@@ -64,6 +79,9 @@ fn flatten(v: &serde_json::Value, out: &mut String) {
     }
     if let Some(s) = v.get("text").and_then(serde_json::Value::as_str) {
         out.push_str(s);
+    }
+    if let Some(key) = v.get("translate").and_then(serde_json::Value::as_str) {
+        out.push_str(key);
     }
     for key in ["with", "extra"] {
         if let Some(args) = v.get(key).and_then(serde_json::Value::as_array) {
@@ -83,15 +101,18 @@ async fn main() {
     let sb = |n| table.id(State::Play, Direction::Serverbound, n).unwrap();
     let cb = |n| table.id(State::Play, Direction::Clientbound, n).unwrap();
     let cb_chat = cb("system_chat");
+    let cb_player_chat = cb("player_chat");
     let name = std::env::var("PERF_NAME").unwrap_or_else(|_| "boater".into());
     let mut c = Client::connect(&a[1], &name, ids, 777, "26.3")
         .await
         .unwrap();
-    c.capture_also = vec![cb_chat];
+    c.capture_also = vec![cb_chat, cb_player_chat];
     let mut p = Probe {
         c,
         sb_command: sb("chat_command"),
+        sb_chat: sb("chat"),
         cb_chat,
+        cb_player_chat,
         chat: String::new(),
     };
     // Точка спавна игрока: спавним мобов рядом с ней (иначе чанки
@@ -112,6 +133,7 @@ async fn main() {
     }
     p.pump(500).await;
 
+    p.say("hello-from-bot", 500).await;
     for line in [
         "gamerule doMobSpawning false",
         "gamerule doFireTick false",
@@ -218,4 +240,29 @@ async fn main() {
     println!("--- mspt ---\n{}", mspt.trim());
     println!("--- tps ---\n{}", tps.trim());
     println!("--- tick query ---\n{}", tick.trim());
+}
+
+/// Разбор `player_chat` до unsigned-компонента (наш сетевой формат).
+fn read_player_chat_unsigned(body: &[u8]) -> Option<String> {
+    let mut r = Reader::new(body);
+    let _ = r.uuid().ok()?;
+    let _ = r.var_int().ok()?;
+    if r.bool().ok()? {
+        let _ = r.bytes(256).ok()?;
+    }
+    let _ = r.string(256).ok()?;
+    let _ = r.i64().ok()?;
+    let _ = r.i64().ok()?;
+    let seen = r.var_int().ok()?;
+    for _ in 0..seen {
+        let _ = r.uuid().ok()?;
+        let _ = r.bytes(256).ok()?;
+    }
+    if r.bool().ok()? {
+        let component = chunkwake_protocol::text::read_component(&mut r).ok()?;
+        let mut out = String::new();
+        flatten(&component, &mut out);
+        return Some(out);
+    }
+    None
 }
