@@ -1423,3 +1423,27 @@ async update). Голограмма end-to-end пока **не подтверж�
 голограмма грузится). Это ограничение нашего YAML-слоя, не DH.
 
 Гейт: 26 of 27 enabled (Voxy требует MC <26.2).
+
+## DH-голограмма: диагностика видимости (без финального рендера)
+
+Инструментировали DH через его API/рефлексию на живом сервере:
+
+```
+dh-diag: cached=1 [dhprobe4 disabled=false defaultVisible=true
+         inRange=true canShow=true visible=true]
+dh-range: name=world same=true player=true dist2=2.0 pos=9.5,-59.0,9.5
+```
+То есть мир/дистанция/права в порядке, DH считает голограмму видимой.
+Добавили строку через API (`HologramPage.addLine(HologramLine)`):
+`dh-line: added HELLO-DH` — но DH всё равно не вызывает
+`Connection.send` (в логе только пакеты тест-плагина).
+
+Вывод: проблема уже не в видимости/range/YAML и не в нашем пакетном
+мосте (полный набор add/metadata/teleport/passengers/remove проверен),
+а внутри render-пути DH с нашими NMS-заглушками (подготовка part-data/
+prepare render). Нужен следующий заход: сравнить `HologramLine.show`
+путь с реальными NMS-классами (`NmsPreparedRender`, `NmsHologramPartData`)
+и добавить недостающие вызовы.
+
+YAML-баг подтверждён: без кавычек `location: world:8,500:...` не
+парсится, с кавычками — грузится (`Loaded 1 holograms!`).
