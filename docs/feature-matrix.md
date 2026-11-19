@@ -976,3 +976,21 @@ protocol: title re-encoded (text=CB-TITLE-308)
 frame). Сырые `add_entity`-пакеты пока идут батчем без поля.
 
 Гейт: 26 of 27 enabled (Voxy отключается сам).
+
+
+## PlayerInfoUpdate: кодек добавлен, live-событие не поймано
+
+- Реальные NMS-классы: `ClientboundPlayerInfoUpdatePacket` с `Action`,
+  `Entry` (profileId/profile/listed/latency/gameMode/displayName/listOrder/
+  chatSession/showHat), `RemoteChatSession$Data`, `GameProfile(UUID,name)`.
+- `ProtocolBridge.playerInfo` декодирует actions/entries, отдаёт
+  `getPlayerInfoDataLists()` и перекодирует изменённые поля.
+- В живом прогоне событие `PLAYER_INFO` у тест-плагина **не появилось**:
+  пакет player-info уходит до старта цикла доставки broadcast, либо не
+  попадает в `Broadcast.raw`; нужен отдельный per-connection hook. Кодек
+  компилируется и готов, но field-level для PlayerInfo пока не подтверждён.
+
+`ClientboundPlayerChatPacket` не реализован.
+
+Folia multi-region по-прежнему не тестировался: нет multi-region
+кластера/харнесса.

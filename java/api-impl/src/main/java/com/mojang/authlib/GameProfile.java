@@ -9,6 +9,10 @@ public class GameProfile {
     private final String name;
     private final PropertyMap properties;
 
+    public GameProfile(UUID id, String name) {
+        this(id, name, new PropertyMap(com.google.common.collect.ArrayListMultimap.create()));
+    }
+
     public GameProfile(UUID id, String name, PropertyMap properties) {
         this.id = id;
         this.name = name;

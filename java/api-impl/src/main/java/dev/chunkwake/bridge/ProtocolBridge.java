@@ -42,6 +42,7 @@ final class ProtocolBridge {
     private static Object titleType;
     private static Object entityDataType;
     private static Object chunkForgetType;
+    private static Object playerInfoType;
     /** Класс-носитель сырых байтов для PacketContainer. */
     public static final class RawPayload {
         public byte[] data;
@@ -139,11 +140,11 @@ final class ProtocolBridge {
                             true, loader);
                     titleType = candidate;
                 } else if (classNames.contains(
-                        "net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket")) {
+                        "net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket")) {
                     carrier = Class.forName(
-                            "net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket",
+                            "net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket",
                             true, loader);
-                    entityDataType = candidate;
+                    playerInfoType = candidate;
                 } else if (classNames.contains(
                         "net.minecraft.network.protocol.game.ClientboundForgetLevelChunkPacket")) {
                     carrier = Class.forName(
@@ -207,6 +208,9 @@ final class ProtocolBridge {
             }
             if ("set_title_text".equalsIgnoreCase(name) && titleType != null) {
                 return title(player, titleType, data);
+            }
+            if ("player_info_update".equalsIgnoreCase(name) && playerInfoType != null) {
+                return playerInfo(player, playerInfoType, data);
             }
             if ("set_entity_data".equalsIgnoreCase(name) && entityDataType != null) {
                 return entityData(player, entityDataType, data);
@@ -274,6 +278,184 @@ final class ProtocolBridge {
             Bridge.log(1, "protocol: sending probe failed: " + broken);
         }
         return false;
+    }
+
+    /** Field-level для {@code ClientboundPlayerInfoUpdatePacket}. */
+    private static byte[] playerInfo(org.bukkit.entity.Player player, Object type, byte[] data) {
+        try {
+            int[] pos = {0};
+            int id = readVarInt(data, pos);
+            java.io.DataInputStream in = new java.io.DataInputStream(
+                    new java.io.ByteArrayInputStream(data, pos[0], data.length - pos[0]));
+            int actionBits = in.readUnsignedByte();
+            int count = readVarInt(in);
+            java.util.List<Object> entries = new java.util.ArrayList<>(count);
+            Class<?> packetClass = Class.forName(
+                    "net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket", true,
+                    type.getClass().getClassLoader());
+            Class<?> entryClass = Class.forName(
+                    "net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket$Entry",
+                    true, type.getClass().getClassLoader());
+            java.util.EnumSet<?> actions = java.util.EnumSet.noneOf(
+                    (Class) Class.forName(
+                            "net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket$Action",
+                            true, type.getClass().getClassLoader()));
+            for (Object constant : actions.clone().getClass().getEnumConstants()) {
+                @SuppressWarnings("unchecked")
+                java.util.EnumSet raw = actions;
+                if ((actionBits & (1 << ((Enum<?>) constant).ordinal())) != 0) {
+                    raw.add((Enum) constant);
+                }
+            }
+            for (int i = 0; i < count; i++) {
+                java.util.UUID uuid = new java.util.UUID(in.readLong(), in.readLong());
+                String name = "";
+                com.mojang.authlib.properties.PropertyMap properties =
+                        new com.mojang.authlib.properties.PropertyMap(
+                                com.google.common.collect.ArrayListMultimap.create());
+                if ((actionBits & 1) != 0) {
+                    name = in.readUTF();
+                    int props = readVarInt(in);
+                    for (int j = 0; j < props; j++) {
+                        String key = in.readUTF();
+                        String value = in.readUTF();
+                        String signature = in.readBoolean() ? in.readUTF() : null;
+                        properties.put(key, new com.mojang.authlib.properties.Property(
+                                key, value, signature));
+                    }
+                }
+                if ((actionBits & 2) != 0) {
+                    boolean hasSession = in.readBoolean();
+                    if (hasSession) {
+                        in.readBoolean();
+                        in.readLong();
+                        in.readLong();
+                    }
+                }
+                int gameMode = (actionBits & 4) != 0 ? readVarInt(in) : 0;
+                boolean listed = (actionBits & 8) == 0 || in.readBoolean();
+                int latency = (actionBits & 16) != 0 ? readVarInt(in) : 0;
+                net.minecraft.network.chat.Component displayName = null;
+                if ((actionBits & 32) != 0 && in.readBoolean()) {
+                    net.minecraft.nbt.Tag root = net.minecraft.nbt.NbtIo.readNetworkTag(
+                            in, net.minecraft.nbt.NbtAccounter.unlimitedHeap());
+                    String text = root instanceof net.minecraft.nbt.CompoundTag tag
+                            ? tag.getStringOr("text", null)
+                            : root.getAsString();
+                    displayName = net.minecraft.network.chat.Component.literal(
+                            text == null ? "" : text);
+                }
+                int listOrder = (actionBits & 64) != 0 ? readVarInt(in) : 0;
+                boolean showHat = (actionBits & 128) == 0 || in.readBoolean();
+                com.mojang.authlib.GameProfile profile =
+                        new com.mojang.authlib.GameProfile(uuid, name, properties);
+                Object entry = entryClass.getConstructor(
+                        java.util.UUID.class, com.mojang.authlib.GameProfile.class,
+                        boolean.class, int.class, net.minecraft.world.level.GameType.class,
+                        net.minecraft.network.chat.Component.class, int.class,
+                        net.minecraft.network.chat.RemoteChatSession.Data.class, boolean.class)
+                        .newInstance(uuid, profile, listed, latency,
+                                net.minecraft.world.level.GameType.byId(gameMode), displayName,
+                                listOrder, null, showHat);
+                entries.add(entry);
+            }
+            Object packet = packetClass.getConstructor(java.util.EnumSet.class, java.util.List.class)
+                    .newInstance(actions, entries);
+            Object container = containerConstructor.newInstance(type, packet);
+            Object event = fromServer.invoke(null, plugin, container, player);
+            for (Object listener : (Set<?>) getListeners.invoke(manager)) {
+                Set<?> types = (Set<?>) getTypes.invoke(getSendingWhitelist.invoke(listener));
+                if (types.contains(type)) {
+                    onSending.invoke(listener, event);
+                }
+            }
+            if (Boolean.TRUE.equals(event.getClass().getMethod("isCancelled").invoke(event))) {
+                return null;
+            }
+            java.util.EnumSet<?> changedActions =
+                    (java.util.EnumSet<?>) packetClass.getMethod("actions").invoke(packet);
+            java.util.List<?> changedEntries =
+                    (java.util.List<?>) packetClass.getMethod("entries").invoke(packet);
+            int newBits = 0;
+            for (Object constant : changedActions) {
+                newBits |= 1 << ((Enum<?>) constant).ordinal();
+            }
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream(data.length);
+            writeVarInt(bytes, id);
+            bytes.write(newBits);
+            writeVarInt(bytes, changedEntries.size());
+            java.io.DataOutputStream out = new java.io.DataOutputStream(bytes);
+            for (Object entry : changedEntries) {
+                java.util.UUID uuid = (java.util.UUID) entryClass.getMethod("profileId")
+                        .invoke(entry);
+                out.writeLong(uuid.getMostSignificantBits());
+                out.writeLong(uuid.getLeastSignificantBits());
+                com.mojang.authlib.GameProfile profile =
+                        (com.mojang.authlib.GameProfile) entryClass.getMethod("profile")
+                                .invoke(entry);
+                if ((newBits & 1) != 0) {
+                    out.writeUTF(profile == null ? "" : profile.getName());
+                    com.google.common.collect.Multimap<String,
+                            com.mojang.authlib.properties.Property> props =
+                            profile == null ? com.google.common.collect.ArrayListMultimap.create()
+                                    : profile.getProperties();
+                    writeVarInt(bytes, props.size());
+                    for (Object value : props.values()) {
+                        com.mojang.authlib.properties.Property property =
+                                (com.mojang.authlib.properties.Property) value;
+                        out.writeUTF(property.getName());
+                        out.writeUTF(property.getValue());
+                        out.writeBoolean(property.getSignature() != null);
+                        if (property.getSignature() != null) {
+                            out.writeUTF(property.getSignature());
+                        }
+                    }
+                }
+                if ((newBits & 2) != 0) {
+                    out.writeBoolean(false);
+                }
+                if ((newBits & 4) != 0) {
+                    net.minecraft.world.level.GameType mode =
+                            (net.minecraft.world.level.GameType) entryClass.getMethod("gameMode")
+                                    .invoke(entry);
+                    writeVarInt(bytes, mode == null ? 0 : mode.getId());
+                }
+                if ((newBits & 8) != 0) {
+                    out.writeBoolean((Boolean) entryClass.getMethod("listed").invoke(entry));
+                }
+                if ((newBits & 16) != 0) {
+                    writeVarInt(bytes, (Integer) entryClass.getMethod("latency").invoke(entry));
+                }
+                if ((newBits & 32) != 0) {
+                    net.minecraft.network.chat.Component display =
+                            (net.minecraft.network.chat.Component) entryClass
+                                    .getMethod("displayName").invoke(entry);
+                    out.writeBoolean(display != null);
+                    if (display != null) {
+                        net.minecraft.nbt.CompoundTag tag = new net.minecraft.nbt.CompoundTag();
+                        tag.putString("text", display.getString());
+                        net.minecraft.nbt.NbtIo.writeNetwork(tag, out);
+                    }
+                }
+                if ((newBits & 64) != 0) {
+                    writeVarInt(bytes, (Integer) entryClass.getMethod("listOrder").invoke(entry));
+                }
+                if ((newBits & 128) != 0) {
+                    out.writeBoolean((Boolean) entryClass.getMethod("showHat").invoke(entry));
+                }
+            }
+            out.flush();
+            byte[] result = bytes.toByteArray();
+            if (!java.util.Arrays.equals(result, data)) {
+                Bridge.log(2, "protocol: player_info re-encoded (" + changedEntries.size()
+                        + " entries)");
+            }
+            return result;
+        } catch (Throwable broken) {
+            Throwable cause = broken.getCause() == null ? broken : broken.getCause();
+            Bridge.log(1, "protocol: player_info bridge failed: " + cause);
+            return data;
+        }
     }
 
     /** Field-level для {@code ClientboundSetEntityDataPacket}. */
