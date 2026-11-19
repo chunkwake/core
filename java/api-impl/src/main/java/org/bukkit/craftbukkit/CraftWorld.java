@@ -21,4 +21,9 @@ public class CraftWorld {
     public net.minecraft.server.level.ServerLevel getHandle() {
         return this.handle;
     }
+
+    /** `CraftWorld.getName()`: squaremap читает имя мира из NMS-хендла. */
+    public String getName() {
+        return "world";
+    }
 }

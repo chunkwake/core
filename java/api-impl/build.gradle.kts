@@ -98,14 +98,32 @@ val patchBrigadier by tasks.registering(JavaExec::class) {
     outputs.dir(patchedBrigadier)
 }
 
+/**
+ * Генерирует настоящий класс мира: `WorldApi extends CraftWorld implements World`
+ * с делегированием в `WorldImpl` через `Stub.call`. Нужен плагинам, которые
+ * кастуют World к CraftWorld (squaremap): java-прокси не может наследовать класс.
+ */
+val worldApiDir = layout.buildDirectory.dir("generated/world-api")
+
+val generateWorldApi by tasks.registering(JavaExec::class) {
+    description = "Генерирует WorldApi (настоящий класс мира поверх WorldImpl)"
+    dependsOn(compileProviderTools)
+    classpath = files(toolsClasses, configurations.named("compileClasspath"))
+    mainClass.set("GenWorldApi")
+    args(worldApiDir.get().dir("java").asFile.absolutePath)
+    inputs.files(fileTree(toolsDir) { include("*.java") })
+    outputs.dir(worldApiDir)
+}
+
 sourceSets.named("main") {
     java.srcDir(generatedDir.map { it.dir("java") })
+    java.srcDir(worldApiDir.map { it.dir("java") })
     resources.srcDir(generatedDir.map { it.dir("resources") })
     resources.srcDir(patchedBrigadier)
 }
 
 tasks.named<JavaCompile>("compileJava") {
-    dependsOn(generateProviders)
+    dependsOn(generateProviders, generateWorldApi)
 }
 
 tasks.named<ProcessResources>("processResources") {

@@ -1,5 +1,7 @@
 package dev.chunkwake.bridge;
 
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Array;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
@@ -133,6 +135,50 @@ final class Stub {
         };
         return Proxy.newProxyInstance(iface.getClassLoader(), ifaces, new Handler(impl, h));
     }
+
+    /**
+     * Вызов метода интерфейса из сгенерированного Java-класса (не прокси):
+     * сначала метод делегата, затем default-метод интерфейса через
+     * `MethodHandles.privateLookupIn`, иначе мягкий дефолт. Нужен для
+     * {@code WorldApi}, который наследует CraftWorld (прокси не может).
+     */
+    static Object call(Object impl, Object self, Class<?> iface, String name,
+            Class<?>[] types, Object[] args) {
+        try {
+            Method m = iface.getMethod(name, types);
+            Optional<Method> target = CACHE.get(impl.getClass()).computeIfAbsent(m, k -> find(impl.getClass(), k));
+            if (target.isPresent()) {
+                try {
+                    return target.get().invoke(impl, args);
+                } catch (InvocationTargetException e) {
+                    throw e.getCause();
+                }
+            }
+            if (m.isDefault()) {
+                MethodHandle handle = DEFAULTS.computeIfAbsent(m, k -> {
+                    try {
+                        MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(iface, MethodHandles.lookup());
+                        return lookup.unreflectSpecial(k, iface);
+                    } catch (IllegalAccessException e) {
+                        throw new IllegalStateException(e);
+                    }
+                });
+                return handle.bindTo(self).invokeWithArguments(args);
+            }
+            if (STRICT) {
+                throw new UnsupportedOperationException("chunkwake: " + iface.getSimpleName() + "."
+                        + name + Arrays.toString(types) + " is not implemented yet");
+            }
+            return Soft.value(iface, m);
+        } catch (RuntimeException | Error e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
+    /** Кэш default-методов интерфейсов для {@link #call}. */
+    private static final Map<Method, MethodHandle> DEFAULTS = new ConcurrentHashMap<>();
 
     private static Optional<Method> find(Class<?> impl, Method m) {
         try {

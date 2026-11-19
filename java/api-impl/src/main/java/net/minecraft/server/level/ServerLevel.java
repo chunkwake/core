@@ -15,4 +15,26 @@ public class ServerLevel extends net.minecraft.world.level.Level {
     public ServerChunkCache getChunkSource() {
         return this.chunkSource;
     }
+
+    /**
+     * {@code ServerLevel.dimension()}: ключ измерения. squaremap читает его
+     * для конфигурации миров; отдаём overworld-ключ (карта всё равно не
+     * рендерится — ServerLevel у нас заглушка).
+     */
+    private volatile org.bukkit.craftbukkit.CraftWorld world;
+
+    /** Привязка заглушки к реальному API-миру (WorldApi). */
+    public void setWorld(org.bukkit.craftbukkit.CraftWorld world) {
+        this.world = world;
+    }
+
+    /** {@code ServerLevel.getWorld()}: API-мир (squaremap). */
+    public org.bukkit.craftbukkit.CraftWorld getWorld() {
+        return this.world;
+    }
+
+    public net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension() {
+        return net.minecraft.resources.ResourceKey.entryKey(
+                net.minecraft.resources.Identifier.parse("minecraft:overworld"));
+    }
 }

@@ -30,7 +30,7 @@ final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implements World
     static final String NETHER = "minecraft:the_nether";
     static final String END = "minecraft:the_end";
 
-    final World api = (World) Stub.ofAll(new Class<?>[] {World.class, WorldHandle.class}, this);
+    final World api = new WorldApi(this);
     private final ChunkwakeServer server;
     /** Ключ измерения, например {@code minecraft:the_nether}. */
     final String dim;
@@ -45,6 +45,7 @@ final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implements World
     WorldImpl(ChunkwakeServer server, String dim) {
         this.server = server;
         this.dim = dim;
+        this.handle.setWorld((org.bukkit.craftbukkit.CraftWorld) this.api);
     }
 
     @Override
@@ -64,6 +65,9 @@ final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implements World
     }
 
     static WorldImpl of(World w) {
+        if (w instanceof WorldApi api) {
+            return api.impl instanceof WorldImpl wi ? wi : null;
+        }
         return Stub.impl(w) instanceof WorldImpl wi ? wi : null;
     }
 

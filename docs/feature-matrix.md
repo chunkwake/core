@@ -2362,3 +2362,34 @@ getHandle()`; интерфейсом CraftWorld сделать нельзя).
 Это отдельная крупная работа, не решаемая стабами. Задокументировано как
 blocked; из 36 jar включаются 34 (BlueMap включился, squaremap и
 VoxyServerSide — нет).
+
+## Настоящий класс мира (WorldApi) вместо прокси: squaremap прошёл каст
+
+Сделано по шагам:
+
+- `tools/GenWorldApi.java` + Gradle-таск `generateWorldApi` генерируют
+  `dev.chunkwake.bridge.WorldApi`: настоящий класс
+  `extends org.bukkit.craftbukkit.CraftWorld implements World, WorldHandle`
+  с 421 методом, делегирующим в `WorldImpl` через новый `Stub.call`
+  (метод делегата -> default-метод интерфейса через MethodHandles ->
+  мягкий дефолт);
+- `WorldImpl.api` теперь `new WorldApi(this)` (не `Proxy`);
+  `WorldImpl.of` понимает `WorldApi`;
+- в `CraftWorld` добавлен `getName()`, в `ServerLevel` — `dimension()`,
+  `getWorld()`/`setWorld()` (привязка к API-миру).
+
+Результат: каст `World -> CraftWorld` у squaremap **проходит** (раньше
+падал `$Proxy3 cannot be cast to CraftWorld`), плагин доходит дальше:
+
+```
+squaremap: enabling needs Minecraft server internals
+  (net.minecraft.world.level.CommonLevelAccessor ...) -> skipped
+```
+
+То есть остался уже не «прокси vs класс», а необходимость настоящего
+`ServerLevel`, реализующего `CommonLevelAccessor` и отдающего реальные
+чанки/блоки из Rust. Это следующий, существенно больший слой (NMS-уровень),
+пока задокументирован как blocked.
+
+Гейт после изменений: `34 of 36` (VoxyServerSide и squaremap), паник нет,
+`cargo fmt` 0, gradle `cleanTest test :test-plugin:jar dist` = успех.
