@@ -1349,3 +1349,38 @@ ItemStack>` и сериализация метаданных по serializer-id.
 сейчас DH-голограмма не отрисуется, хотя путь отправки пакетов работает.
 
 Гейт: 26 of 27 enabled (Voxy требует MC <26.2).
+
+## set_entity_data: метаданные с реальными id 26.3
+
+Реализована сериализация `ClientboundSetEntityDataPacket`:
+
+- `SynchedEntityData.DataValue`/`DataItem`, `EntityDataSerializer.id()`;
+- `EntityDataSerializers` с id из реального реестра 26.3:
+  BYTE=0, INT=1, LONG=2, FLOAT=3, STRING=4, COMPONENT=5,
+  OPTIONAL_COMPONENT=6, ITEM_STACK=7, BLOCK_STATE=8, BOOLEAN=10,
+  POSE=21, VECTOR3=39, QUATERNION=40 (проверено по
+  `minecraft-extracted_server.jar` 26.3 из loom-кэша, а не угадано);
+- accessor-id из реального `<clinit>`: Entity 0..7, Display 8..22,
+  TextDisplay 23..27, ItemDisplay/BlockDisplay 23.., ArmorStand
+  `DATA_CLIENT_FLAGS`=14, ItemEntity `DATA_ITEM`=8, ItemFrame
+  `DATA_ITEM`=9 / `DATA_ROTATION`=10;
+- `PacketWire` пишет `(accessor id, serializer id, value)` для
+  byte/int(varint)/float/bool/string/component/optional-component/
+  vector3/quaternion.
+
+Живая проверка (тест-плагин шлёт text-display метаданные, бот ловит):
+```
+nms add_entity id=9999
+nms metadata key=23 text=DH-TEXT-9999
+nms remove id=9999
+```
+
+### Что осталось для голограммы DH
+
+DH ещё шлёт `ClientboundTeleportEntityPacket`,
+`ClientboundSetEquipmentPacket`, `ClientboundSetPassengersPacket`
+(и `PositionMoveRotation`/`Pair` модели). После них можно пробовать
+голограмму целиком; сейчас проверен путь add_entity → metadata →
+remove с реальными id.
+
+Гейт: 26 of 27 enabled (Voxy требует MC <26.2).

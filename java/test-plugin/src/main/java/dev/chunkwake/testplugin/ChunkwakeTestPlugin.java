@@ -234,6 +234,27 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
                                     p.getLocation().getZ(), 0f, 0f, 1, 0, zero, 0.0);
                     Object remove = removeClass.getConstructor(int[].class)
                             .newInstance((Object) new int[] {9999});
+                    // Метаданные: текст для entity 9999 (text display).
+                    Class<?> serializerClass = Class.forName(
+                            "net.minecraft.network.syncher.EntityDataSerializer");
+                    Object componentSerializer = Class.forName(
+                            "net.minecraft.network.syncher.EntityDataSerializers")
+                            .getField("COMPONENT").get(null);
+                    Object accessor = Class.forName(
+                            "net.minecraft.network.syncher.EntityDataAccessor")
+                            .getConstructor(int.class, serializerClass)
+                            .newInstance(23, componentSerializer);
+                    Object text = Class.forName("net.minecraft.network.chat.Component")
+                            .getMethod("literal", String.class)
+                            .invoke(null, "DH-TEXT-9999");
+                    Object dataValue = Class.forName(
+                            "net.minecraft.network.syncher.SynchedEntityData$DataValue")
+                            .getConstructor(int.class, serializerClass, Object.class)
+                            .newInstance(23, componentSerializer, text);
+                    Object metadata = Class.forName(
+                            "net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket")
+                            .getConstructor(int.class, java.util.List.class)
+                            .newInstance(9999, java.util.List.of(dataValue));
                     Object handle = p.getClass().getMethod("getHandle").invoke(p);
                     Object listener = handle.getClass().getField("connection").get(handle);
                     Object connection = listener.getClass().getField("connection")
@@ -241,6 +262,7 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
                     Class<?> packetClass = Class.forName("net.minecraft.network.protocol.Packet");
                     var send = connection.getClass().getMethod("send", packetClass);
                     send.invoke(connection, add);
+                    send.invoke(connection, metadata);
                     send.invoke(connection, remove);
                     getLogger().info("nms-wire: sent add/remove 9999 to " + p.getName());
                 } catch (Throwable broken) {

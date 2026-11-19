@@ -14,6 +14,7 @@ struct Probe {
     cb_player_chat: i32,
     cb_add_entity: i32,
     cb_remove_entities: i32,
+    cb_entity_data: i32,
     chat: String,
 }
 
@@ -33,6 +34,40 @@ impl Probe {
                     flatten(&component, &mut out);
                     self.chat.push_str(&out);
                     self.chat.push('\n');
+                }
+            } else if id == self.cb_entity_data {
+                let mut r = Reader::new(&body);
+                if r.var_int().is_ok_and(|entity| entity == 9999)
+                    && let Ok(count) = r.var_int()
+                {
+                    for _ in 0..count {
+                        let key = r.var_int().unwrap_or(-1);
+                        let serializer = r.var_int().unwrap_or(-1);
+                        match serializer {
+                            5 => {
+                                if let Ok(component) =
+                                    chunkwake_protocol::text::read_component(&mut r)
+                                {
+                                    let mut out = String::new();
+                                    flatten(&component, &mut out);
+                                    println!("nms metadata key={key} text={out}");
+                                }
+                            }
+                            0 => {
+                                let _ = r.u8();
+                            }
+                            1 => {
+                                let _ = r.var_int();
+                            }
+                            3 => {
+                                let _ = r.f32();
+                            }
+                            10 => {
+                                let _ = r.bool();
+                            }
+                            _ => break,
+                        }
+                    }
                 }
             } else if id == self.cb_add_entity {
                 let mut r = Reader::new(&body);
@@ -120,11 +155,18 @@ async fn main() {
     let cb_player_chat = cb("player_chat");
     let cb_add_entity = cb("add_entity");
     let cb_remove_entities = cb("remove_entities");
+    let cb_entity_data = cb("set_entity_data");
     let name = std::env::var("PERF_NAME").unwrap_or_else(|_| "boater".into());
     let mut c = Client::connect(&a[1], &name, ids, 777, "26.3")
         .await
         .unwrap();
-    c.capture_also = vec![cb_chat, cb_player_chat, cb_add_entity, cb_remove_entities];
+    c.capture_also = vec![
+        cb_chat,
+        cb_player_chat,
+        cb_add_entity,
+        cb_remove_entities,
+        cb_entity_data,
+    ];
     let mut p = Probe {
         c,
         sb_command: sb("chat_command"),
@@ -133,6 +175,7 @@ async fn main() {
         cb_player_chat,
         cb_add_entity,
         cb_remove_entities,
+        cb_entity_data,
         chat: String::new(),
     };
     // Точка спавна игрока: спавним мобов рядом с ней (иначе чанки

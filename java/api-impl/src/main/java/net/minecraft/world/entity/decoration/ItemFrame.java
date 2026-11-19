@@ -5,13 +5,14 @@ import net.minecraft.world.level.Level;
 
 /** NMS {@code ItemFrame}. */
 public class ItemFrame extends HangingEntity {
-    /** ImageFrame: `ItemFrame.DATA_ITEM`. */
+    /** ImageFrame: `ItemFrame.DATA_ITEM` (id 9: HangingEntity занимает 8). */
     public static final net.minecraft.network.syncher.EntityDataAccessor<
             net.minecraft.world.item.ItemStack> DATA_ITEM =
-            new net.minecraft.network.syncher.EntityDataAccessor<>(8,
-                    new net.minecraft.network.syncher.EntityDataSerializer<
-                            net.minecraft.world.item.ItemStack>() {
-                    });
+            new net.minecraft.network.syncher.EntityDataAccessor<>(9,
+                    net.minecraft.network.syncher.EntityDataSerializers.ITEM_STACK);
+    public static final net.minecraft.network.syncher.EntityDataAccessor<Integer>
+            DATA_ROTATION = new net.minecraft.network.syncher.EntityDataAccessor<>(10,
+                    net.minecraft.network.syncher.EntityDataSerializers.INT);
 
     private int rotation;
 

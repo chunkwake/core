@@ -1,21 +1,25 @@
 package dev.chunkwake.bridge;
 
 import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
 import java.util.UUID;
+import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
+import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
+import net.minecraft.network.syncher.SynchedEntityData;
 
 /**
  * NMS {@link Packet} → сетевые байты для Rust-транспорта.
  *
- * <p>Нужен плагинам (DecentHolograms/TAB), которые отправляют пакеты через
- * NMS {@code Connection.send(Packet)}, а не через Bukkit-API.
+ * <p>Id пакетов и сериализаторов — протокол 26.3 (из reports/packets.json и
+ * реального реестра EntityDataSerializers).
  */
 final class PacketWire {
-    /** id пакетов протокола 26.3 (reports/packets.json). */
     private static final int ID_ADD_ENTITY = 1;
     private static final int ID_REMOVE_ENTITIES = 78;
+    private static final int ID_SET_ENTITY_DATA = 101;
 
     private PacketWire() {
     }
@@ -27,6 +31,9 @@ final class PacketWire {
         }
         if (packet instanceof ClientboundRemoveEntitiesPacket remove) {
             return removeEntities(remove);
+        }
+        if (packet instanceof ClientboundSetEntityDataPacket data && !data.values().isEmpty()) {
+            return setEntityData(data);
         }
         return null;
     }
@@ -59,6 +66,82 @@ final class PacketWire {
         return out.bytes();
     }
 
+    static byte[] setEntityData(ClientboundSetEntityDataPacket p) {
+        Out out = new Out(64);
+        out.varInt(ID_SET_ENTITY_DATA);
+        out.varInt(p.id());
+        out.varInt(p.values().size());
+        for (SynchedEntityData.DataValue<?> value : p.values()) {
+            int serializer = value.serializer().id();
+            out.varInt(value.id());
+            out.varInt(serializer);
+            if (!writeValue(out, serializer, value.value())) {
+                return null;
+            }
+        }
+        return out.bytes();
+    }
+
+    private static boolean writeValue(Out out, int serializer, Object value) {
+        switch (serializer) {
+            case 0 -> out.u8(value instanceof Byte b ? b : 0);
+            case 1 -> out.varInt(value instanceof Integer i ? i : 0);
+            case 3 -> out.f32(value instanceof Float f ? f : 0f);
+            case 4 -> out.string(value == null ? "" : value.toString());
+            case 5 -> out.component(value instanceof Component c ? c : null);
+            case 6 -> {
+                java.util.Optional<?> optional = value instanceof java.util.Optional<?> o
+                        ? o : java.util.Optional.empty();
+                out.bool(optional.isPresent());
+                if (optional.isPresent()) {
+                    out.component(optional.get() instanceof Component c ? c : null);
+                }
+            }
+            case 10 -> out.bool(value instanceof Boolean b && b);
+            case 21 -> {
+                // Pose: enum ordinal как varint.
+                Object pose = value;
+                out.varInt(pose instanceof Enum<?> e ? e.ordinal() : 0);
+            }
+            case 39 -> {
+                if (!writeFloats(out, value, 3)) {
+                    return false;
+                }
+            }
+            case 40 -> {
+                if (!writeFloats(out, value, 4)) {
+                    return false;
+                }
+            }
+            default -> {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** JOML-вектор/кватернион без зависимости от joml: x(), y(), z(), (w()). */
+    private static boolean writeFloats(Out out, Object value, int count) {
+        if (value == null) {
+            return false;
+        }
+        String[] names = count == 3 ? new String[] {"x", "y", "z"}
+                : new String[] {"x", "y", "z", "w"};
+        float[] floats = new float[count];
+        for (int i = 0; i < count; i++) {
+            try {
+                floats[i] = ((Number) value.getClass().getMethod(names[i]).invoke(value))
+                        .floatValue();
+            } catch (Throwable broken) {
+                return false;
+            }
+        }
+        for (float f : floats) {
+            out.f32(f);
+        }
+        return true;
+    }
+
     /** Минимальный writer сетевого формата. */
     private static final class Out {
         private final ByteArrayOutputStream buf;
@@ -71,6 +154,10 @@ final class PacketWire {
             this.buf.write(v & 0xFF);
         }
 
+        void bool(boolean v) {
+            this.buf.write(v ? 1 : 0);
+        }
+
         void varInt(int value) {
             while ((value & ~0x7F) != 0) {
                 this.buf.write((value & 0x7F) | 0x80);
@@ -79,10 +166,34 @@ final class PacketWire {
             this.buf.write(value);
         }
 
+        void f32(float v) {
+            int bits = Float.floatToIntBits(v);
+            for (int shift = 24; shift >= 0; shift -= 8) {
+                this.buf.write((bits >>> shift) & 0xFF);
+            }
+        }
+
         void f64(double v) {
             long bits = Double.doubleToLongBits(v);
             for (int shift = 56; shift >= 0; shift -= 8) {
                 this.buf.write((int) (bits >>> shift) & 0xFF);
+            }
+        }
+
+        void string(String value) {
+            byte[] bytes = (value == null ? "" : value)
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            varInt(bytes.length);
+            this.buf.write(bytes, 0, bytes.length);
+        }
+
+        void component(Component component) {
+            net.minecraft.nbt.CompoundTag tag = new net.minecraft.nbt.CompoundTag();
+            tag.putString("text", component == null ? "" : component.getString());
+            try {
+                net.minecraft.nbt.NbtIo.writeNetwork(tag, new DataOutputStream(this.buf));
+            } catch (java.io.IOException broken) {
+                throw new IllegalStateException(broken);
             }
         }
 

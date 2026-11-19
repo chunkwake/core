@@ -21,10 +21,32 @@ public class Entity {
     private float xRot;
     private boolean removed;
 
-    /** ImageFrame: `Entity.DATA_SHARED_FLAGS_ID`. */
+    /** Метаданные Entity: id 0..7 как в реальном 26.3. */
     public static final net.minecraft.network.syncher.EntityDataAccessor<Byte>
             DATA_SHARED_FLAGS_ID = new net.minecraft.network.syncher.EntityDataAccessor<>(
                     0, net.minecraft.network.syncher.EntityDataSerializers.BYTE);
+    public static final net.minecraft.network.syncher.EntityDataAccessor<Integer>
+            DATA_AIR_SUPPLY_ID = new net.minecraft.network.syncher.EntityDataAccessor<>(
+                    1, net.minecraft.network.syncher.EntityDataSerializers.INT);
+    public static final net.minecraft.network.syncher.EntityDataAccessor<
+            java.util.Optional<net.minecraft.network.chat.Component>> DATA_CUSTOM_NAME =
+            new net.minecraft.network.syncher.EntityDataAccessor<>(2,
+                    net.minecraft.network.syncher.EntityDataSerializers.OPTIONAL_COMPONENT);
+    public static final net.minecraft.network.syncher.EntityDataAccessor<Boolean>
+            DATA_CUSTOM_NAME_VISIBLE = new net.minecraft.network.syncher.EntityDataAccessor<>(
+                    3, net.minecraft.network.syncher.EntityDataSerializers.BOOLEAN);
+    public static final net.minecraft.network.syncher.EntityDataAccessor<Boolean>
+            DATA_SILENT = new net.minecraft.network.syncher.EntityDataAccessor<>(
+                    4, net.minecraft.network.syncher.EntityDataSerializers.BOOLEAN);
+    public static final net.minecraft.network.syncher.EntityDataAccessor<Boolean>
+            DATA_NO_GRAVITY = new net.minecraft.network.syncher.EntityDataAccessor<>(
+                    5, net.minecraft.network.syncher.EntityDataSerializers.BOOLEAN);
+    public static final net.minecraft.network.syncher.EntityDataAccessor<Object>
+            DATA_POSE = new net.minecraft.network.syncher.EntityDataAccessor<>(
+                    6, net.minecraft.network.syncher.EntityDataSerializers.POSE);
+    public static final net.minecraft.network.syncher.EntityDataAccessor<Integer>
+            DATA_TICKS_FROZEN = new net.minecraft.network.syncher.EntityDataAccessor<>(
+                    7, net.minecraft.network.syncher.EntityDataSerializers.INT);
 
     public Entity() {
     }
