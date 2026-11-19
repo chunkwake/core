@@ -197,6 +197,19 @@ async fn main() {
             if i == 0 {
                 println!("reporter ready at x={x}");
             }
+            // REDSTONE=1: цепь из редстоун-пыли для стресс-теста блочных фаз
+            // (много запланированных тиков в разных регионах).
+            if i == 0 && std::env::var("REDSTONE").as_deref() == Ok("1") {
+                bot.command("fill 0 -59 0 40 -59 40 minecraft:redstone_wire")
+                    .await;
+                bot.command("setblock 0 -59 0 minecraft:redstone_block")
+                    .await;
+                bot.command("fill 8 -59 8 24 -59 24 minecraft:repeater")
+                    .await;
+                bot.command("setblock 8 -59 8 minecraft:lever[powered=true]")
+                    .await;
+                bot.pump(800).await;
+            }
             let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
             while tokio::time::Instant::now() < deadline {
                 if i == 0 {
