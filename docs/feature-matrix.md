@@ -1720,3 +1720,51 @@ DH: nms metadata key=2 optional=HELLO-DH
 
 `region_load` умеет `SPLIT_DIM=1` — половина ботов уходит в
 `minecraft:the_nether` (для будущих замеров межрегионального тика).
+
+## Lock-order аудит тик-пути (перед region-тиком)
+
+Добавлен `scripts/lock_audit.py`: находит захваты `Mutex`/`RwLock`
+(`lock()/read()/write()`), строит граф «держим A — берём B» и отмечает
+вложения, противоречащие каноническому порядку. Отчёт:
+`docs/lock-order.md` (генерируется, 528 захватов, 136 уникальных
+блокировок).
+
+Канонический порядок (по доминирующим направлениям в коде):
+
+```
+live -> sleepers -> player_saves -> hub.players ->
+sim.villagers -> sim.mobs_loaded -> sim.mobs ->
+dim_state.edited -> dim_state.chunk_frames -> dim_state.dirty -> world_edit
+```
+
+Найденные нарушения (держат более поздний лок, берут более ранний):
+
+| держим | берём | функция | раз |
+| --- | --- | --- | ---: |
+| `hub.players` | `player_saves` | `snapshot` | 2 |
+| `sim.mobs` | `live` | `tick_arrows` | 2 |
+| `player_saves` | `live` | `run` | 1 |
+| `sim.mobs` | `hub.players` | `tick_arrows` | 1 |
+| `hub.players` | `sleepers` | `session` | 1 |
+| `world_edit` | `live` | `break_block` | 1 |
+| `hub.players` | `live` | `scan_tripwires` | 1 |
+| `sim.mobs` | `sim.villagers` | `tick_mobs` | 1 |
+
+Именно такие инверсии объясняют deadlock, который был получен при
+параллельном тике измерений: две «половины» тика берут `hub.players` и
+`live`/`player_saves` в разном порядке.
+
+Следующий шаг — не включать параллель, а сначала убрать инверсии:
+
+1. `tick_arrows`: отпускать `sim.mobs` до `live`/`hub.players`
+   (собрать изменения в локальный `Vec`, применить после `drop`).
+2. `snapshot`: снимать `hub.players` в локальный список и отпускать до
+   `player_saves`.
+3. `session`/`scan_tripwires`: не держать `hub.players` при захвате
+   `sleepers`/`live`.
+4. `break_block`: отпускать `world_edit` до `live` (или брать `live`
+   первым).
+5. `tick_mobs`: освобождать `sim.mobs` до `sim.villagers`.
+
+Только после этого можно резать `run_dim_phases` на 8x8 регионы и мерить
+`region_load`; сейчас region-тика нет, baseline остаётся 21.68 мс.
