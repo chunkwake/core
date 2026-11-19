@@ -33,6 +33,29 @@ cd java && ./gradlew :api-impl:test
 Сверки с ванилью в тестах включаются переменной `CHUNKWAKE_DATA` — путь к
 дереву `generated/26.3`, которое `build.rs` собирает из `server.jar`.
 
+## README и превью
+
+Счётчики механик в README и `docs/assets/preview-ru.svg` не правятся руками:
+источник — [фич-матрица](docs/feature-matrix.md). Нужен Python 3.10+.
+Обновить их:
+
+```bash
+python scripts/readme_stats.py
+```
+
+Проверить без изменений (так делает CI):
+
+```bash
+python scripts/readme_stats.py --check
+```
+
+Чтобы при коммите с изменённой матрицей README и превью обновлялись сами,
+один раз включите хук:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ## Правила
 
 - **Сначала ваниль.** Прочитайте нужный класс `server.jar` или Paper (`javap`,
@@ -58,6 +81,7 @@ cd java && ./gradlew :api-impl:test
 | `cargo fmt --check` | всегда |
 | clippy и тесты на Linux | если менялся Rust |
 | JUnit моста | если менялась Java-часть или `crates/bridge` |
+| счётчики в README | всегда, быстро |
 
 Полный CI — две ОС и релизные бинарники со встроенным API — идёт после слияния,
 на push в ветку версии. Теги в сообщении коммита:

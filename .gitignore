@@ -36,3 +36,7 @@ logs/
 *.obj
 *.exp
 *.lib
+
+# Python-скрипты для README: кэш байткода не нужен.
+__pycache__/
+*.py[cod]

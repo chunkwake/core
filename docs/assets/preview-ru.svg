@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="preview-title preview-desc">
+  <title id="preview-title">Chunkwake — сервер Minecraft на Rust</title>
+  <desc id="preview-desc">Плагины Paper без переписывания. Сервер Minecraft на Rust.</desc>
+
+  <defs>
+    <pattern id="grid" width="44" height="44" patternUnits="userSpaceOnUse">
+      <path d="M44 0H0V44" fill="none" stroke="#ffffff" stroke-opacity="0.031" stroke-width="1"/>
+    </pattern>
+    <radialGradient id="grid-fade" cx="30%" cy="10%" r="80%">
+      <stop offset="0.1" stop-color="#ffffff"/>
+      <stop offset="0.72" stop-color="#000000"/>
+    </radialGradient>
+    <mask id="grid-mask">
+      <rect width="1200" height="630" fill="url(#grid-fade)"/>
+    </mask>
+    <clipPath id="window-clip">
+      <rect x="650" y="154" width="502" height="243" rx="8"/>
+    </clipPath>
+    <filter id="window-shadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="24" stdDeviation="35" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="630" fill="#181818"/>
+  <rect width="1200" height="630" fill="url(#grid)" mask="url(#grid-mask)"/>
+
+  <!-- Шапка -->
+  <g font-family="Inter, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif">
+    <svg x="48" y="21" width="22" height="22" viewBox="0 0 24 24">
+      <rect x="2" y="2" width="5.5" height="5.5" rx="1" fill="#E7E7E7" opacity="0.4"/>
+      <rect x="9.25" y="2" width="5.5" height="5.5" rx="1" fill="#E7E7E7" opacity="0.4"/>
+      <rect x="16.5" y="2" width="5.5" height="5.5" rx="1" fill="#E7E7E7" opacity="0.4"/>
+      <rect x="2" y="9.25" width="5.5" height="5.5" rx="1" fill="#E7E7E7" opacity="0.4"/>
+      <rect x="16.5" y="9.25" width="5.5" height="5.5" rx="1" fill="#E7E7E7" opacity="0.4"/>
+      <rect x="2" y="16.5" width="5.5" height="5.5" rx="1" fill="#E7E7E7" opacity="0.4"/>
+      <rect x="9.25" y="16.5" width="5.5" height="5.5" rx="1" fill="#E7E7E7" opacity="0.4"/>
+      <rect x="16.5" y="16.5" width="5.5" height="5.5" rx="1" fill="#E7E7E7" opacity="0.18"/>
+      <rect x="9.25" y="9.25" width="5.5" height="5.5" rx="1" fill="#A6A092"/>
+    </svg>
+    <text x="79" y="38" font-size="16" font-weight="600" letter-spacing="-0.32" fill="#E7E7E7">chunkwake</text>
+    <text x="1152" y="38" text-anchor="end" font-family="'JetBrains Mono', 'Cascadia Code', 'Cascadia Mono', Consolas, ui-monospace, monospace" font-size="10.5" letter-spacing="1.05" fill="#7A7A75">MINECRAFT 26.3 / RUST + JVM</text>
+    <line x1="48" y1="64" x2="1152" y2="64" stroke="#303030"/>
+  </g>
+
+  <!-- Левая колонка -->
+  <g font-family="Inter, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif">
+    <rect x="48" y="124" width="240" height="26" rx="13" fill="#202020" stroke="#303030"/>
+    <circle cx="61" cy="137" r="3" fill="#9DB283"/>
+    <text x="72" y="141" font-family="'JetBrains Mono', 'Cascadia Code', 'Cascadia Mono', Consolas, ui-monospace, monospace" font-size="10.5" fill="#9A9A96">Ранняя стадия · Minecraft 26.3</text>
+
+    <text x="48" y="223" font-size="66" font-weight="600" letter-spacing="-2.5" fill="#E7E7E7">Сервер Minecraft</text>
+    <text x="48" y="292" font-size="66" font-weight="600" letter-spacing="-2.5" fill="#E7E7E7">на <tspan fill="#A6A092">Rust.</tspan></text>
+
+    <text font-size="16.5" fill="#9A9A96">
+      <tspan x="48" y="338">Плагины Paper работают без переписывания. Движок, сеть,</tspan>
+      <tspan x="48" dy="26.5">генерация и свет — на Rust, без GC-пауз. Всё в одном</tspan>
+      <tspan x="48" dy="26.5">бинарнике.</tspan>
+    </text>
+
+    <line x1="48" y1="426" x2="610" y2="426" stroke="#303030"/>
+
+    <g font-family="'JetBrains Mono', 'Cascadia Code', 'Cascadia Mono', Consolas, ui-monospace, monospace">
+      <text id="stat-ready" x="48" y="466" font-size="27" letter-spacing="-0.8" fill="#E7E7E7">70</text>
+      <text id="stat-partial" x="182" y="466" font-size="27" letter-spacing="-0.8" fill="#E7E7E7">39</text>
+      <text id="stat-none" x="286" y="466" font-size="27" letter-spacing="-0.8" fill="#E7E7E7">3</text>
+
+      <text x="48" y="483" font-size="10" letter-spacing="0.6" fill="#7A7A75">МЕХАНИК ГОТОВО</text>
+      <text x="182" y="483" font-size="10" letter-spacing="0.6" fill="#7A7A75">ЧАСТИЧНО</text>
+      <text x="286" y="483" font-size="10" letter-spacing="0.6" fill="#7A7A75">НЕ НАЧАТО</text>
+
+      <text x="48" y="516" font-size="10" letter-spacing="0.5" fill="#7A7A75">WINDOWS X86_64 · LINUX X86_64 · MUSL</text>
+    </g>
+  </g>
+
+  <!-- Окно терминала -->
+  <g filter="url(#window-shadow)">
+    <g clip-path="url(#window-clip)">
+      <rect x="650" y="154" width="502" height="243" fill="#202020"/>
+      <path d="M650 162a8 8 0 0 1 8-8h486a8 8 0 0 1 8 8v26H650z" fill="#1C1C1C"/>
+      <line x1="650" y1="188" x2="1152" y2="188" stroke="#303030"/>
+      <rect x="650" y="188" width="502" height="180" fill="#141414"/>
+      <rect x="650" y="368" width="502" height="29" fill="#1C1C1C"/>
+      <line x1="650" y1="368" x2="1152" y2="368" stroke="#303030"/>
+
+      <g font-family="'JetBrains Mono', 'Cascadia Code', 'Cascadia Mono', Consolas, ui-monospace, monospace" font-size="10.5">
+        <circle cx="663" cy="171" r="3.5" fill="#3A3A38"/>
+        <circle cx="675" cy="171" r="3.5" fill="#3A3A38"/>
+        <circle cx="687" cy="171" r="3.5" fill="#3A3A38"/>
+        <text x="700" y="175" fill="#E7E7E7">chunkwake doctor</text>
+        <text x="1140" y="175" text-anchor="end" font-size="10" fill="#7A7A75">~/server</text>
+      </g>
+
+      <g font-family="'JetBrains Mono', 'Cascadia Code', 'Cascadia Mono', Consolas, ui-monospace, monospace" font-size="11.5">
+        <text x="666" y="209" fill="#A6A092">$</text>
+        <text x="678" y="209" fill="#C9C9C4">chunkwake doctor --dir ./server</text>
+
+        <g fill="#7A7A75">
+          <text x="666" y="231">server.properties</text>
+          <text x="666" y="253">embedded vanilla data</text>
+          <text x="666" y="275">port</text>
+          <text x="666" y="297">java 25 (plugins)</text>
+          <text x="666" y="319">ready in</text>
+          <text x="666" y="341">paper-api.jar</text>
+        </g>
+        <g fill="#E7E7E7" text-anchor="end">
+          <text x="1136" y="231" fill="#9DB283">ok</text>
+          <text x="1136" y="253">26.3</text>
+          <text x="1136" y="275">25565</text>
+          <text x="1136" y="297" fill="#9DB283">found</text>
+          <text x="1136" y="319">34 ms</text>
+          <text x="1136" y="341">embedded · 1 binary</text>
+        </g>
+      </g>
+
+      <g font-family="'JetBrains Mono', 'Cascadia Code', 'Cascadia Mono', Consolas, ui-monospace, monospace" font-size="10" fill="#7A7A75">
+        <circle cx="663" cy="382.5" r="2.5" fill="#9DB283"/>
+        <text x="672" y="386">engine: rust · plugins: jvm · ticking: 20 tps</text>
+      </g>
+    </g>
+    <rect x="650" y="154" width="502" height="243" rx="8" fill="none" stroke="#303030"/>
+  </g>
+
+  <!-- Панель под окном -->
+  <g font-family="'JetBrains Mono', 'Cascadia Code', 'Cascadia Mono', Consolas, ui-monospace, monospace" font-size="10.5">
+    <rect x="650" y="407" width="502" height="87" rx="6" fill="#202020" stroke="#303030"/>
+    <g fill="#7A7A75">
+      <text x="666" y="426">engine</text>
+      <text x="908" y="426">plugins</text>
+      <text x="666" y="442">tick</text>
+      <text x="908" y="442">binary</text>
+    </g>
+    <g fill="#E7E7E7" text-anchor="end">
+      <text x="826" y="426">rust · tokio</text>
+      <text x="1136" y="426">paper-api 26.3</text>
+      <text x="826" y="442">0.4–0.5 ms</text>
+      <text x="1136" y="442">~40 MB</text>
+    </g>
+    <rect x="666" y="454" width="470" height="3" rx="1.5" fill="#2C2C2C"/>
+    <rect x="666" y="454" width="300" height="3" rx="1.5" fill="#A6A092"/>
+    <text x="666" y="470" font-size="10" fill="#7A7A75">vanilla data embedded</text>
+  </g>
+
+  <!-- Подвал -->
+  <g font-family="'JetBrains Mono', 'Cascadia Code', 'Cascadia Mono', Consolas, ui-monospace, monospace" font-size="10.5" fill="#7A7A75">
+    <line x1="48" y1="578" x2="1152" y2="578" stroke="#303030"/>
+    <text x="48" y="606">chunkwake.github.io</text>
+    <text x="1152" y="606" text-anchor="end"><tspan fill="#9DB283">●</tspan> открытый код · GPL-3.0</text>
+  </g>
+</svg>
