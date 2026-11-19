@@ -30,11 +30,11 @@ public class ClientboundAddEntityPacket implements Packet {
      * (id, uuid, x, y, z, pitch, yaw, type, data, velocity, headYaw).
      */
     public ClientboundAddEntityPacket(int id, UUID uuid, double x, double y, double z,
-            float pitch, float yaw, int type, int data,
+            float pitch, float yaw, net.minecraft.world.entity.EntityType<?> type, int data,
             net.minecraft.world.phys.Vec3 velocity, double headYaw) {
         this.id = id;
         this.uuid = uuid;
-        this.type = type;
+        this.type = type == null ? 0 : type.getProtocolId();
         this.x = x;
         this.y = y;
         this.z = z;

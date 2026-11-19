@@ -11,8 +11,24 @@ public class MutableComponent implements Component {
     private Style style = Style.EMPTY;
     private ObjectInfo object;
 
+    private ComponentContents contents;
+
     public MutableComponent(String text) {
         this.text = text == null ? "" : text;
+    }
+
+    /** NMS {@code MutableComponent.create(ComponentContents)} (DecentHolograms). */
+    public static MutableComponent create(ComponentContents contents) {
+        MutableComponent component = new MutableComponent("");
+        component.contents = contents;
+        if (contents instanceof net.minecraft.network.chat.contents.PlainTextContents plain) {
+            component.text = plain.text();
+        }
+        return component;
+    }
+
+    public ComponentContents getContents() {
+        return this.contents;
     }
 
     public MutableComponent(ObjectInfo object) {

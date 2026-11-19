@@ -225,13 +225,17 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
                             "net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket");
                     Class<?> vecClass = Class.forName("net.minecraft.world.phys.Vec3");
                     Object zero = vecClass.getField("ZERO").get(null);
+                    Class<?> entityTypeClass = Class.forName(
+                            "net.minecraft.world.entity.EntityType");
+                    Object entityType = entityTypeClass.getConstructor(String.class, int.class)
+                            .newInstance("minecraft:item", 72);
                     Object add = addClass
                             .getConstructor(int.class, java.util.UUID.class, double.class,
                                     double.class, double.class, float.class, float.class,
-                                    int.class, int.class, vecClass, double.class)
+                                    entityTypeClass, int.class, vecClass, double.class)
                             .newInstance(9999, java.util.UUID.randomUUID(),
                                     p.getLocation().getX(), p.getLocation().getY(),
-                                    p.getLocation().getZ(), 0f, 0f, 1, 0, zero, 0.0);
+                                    p.getLocation().getZ(), 0f, 0f, entityType, 0, zero, 0.0);
                     Object remove = removeClass.getConstructor(int[].class)
                             .newInstance((Object) new int[] {9999});
                     // Метаданные: текст для entity 9999 (text display).
@@ -255,6 +259,22 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
                             "net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket")
                             .getConstructor(int.class, java.util.List.class)
                             .newInstance(9999, java.util.List.of(dataValue));
+                    Class<?> pmpClass = Class.forName(
+                            "net.minecraft.world.entity.PositionMoveRotation");
+                    Object moved = vecClass.getConstructor(double.class, double.class,
+                            double.class).newInstance(p.getLocation().getX() + 0.5,
+                                    p.getLocation().getY(), p.getLocation().getZ());
+                    Object pmp = pmpClass
+                            .getConstructor(vecClass, vecClass, float.class, float.class)
+                            .newInstance(moved, zero, 0f, 0f);
+                    Object teleport = Class.forName(
+                            "net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket")
+                            .getConstructor(int.class, pmpClass, java.util.Set.class, boolean.class)
+                            .newInstance(9999, pmp, java.util.Set.of(), true);
+                    Object passengers = Class.forName(
+                            "net.minecraft.network.protocol.game.ClientboundSetPassengersPacket")
+                            .getConstructor(int.class, int[].class)
+                            .newInstance(9999, new int[] {10000});
                     Object handle = p.getClass().getMethod("getHandle").invoke(p);
                     Object listener = handle.getClass().getField("connection").get(handle);
                     Object connection = listener.getClass().getField("connection")
@@ -263,6 +283,8 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
                     var send = connection.getClass().getMethod("send", packetClass);
                     send.invoke(connection, add);
                     send.invoke(connection, metadata);
+                    send.invoke(connection, teleport);
+                    send.invoke(connection, passengers);
                     send.invoke(connection, remove);
                     getLogger().info("nms-wire: sent add/remove 9999 to " + p.getName());
                 } catch (Throwable broken) {

@@ -15,6 +15,10 @@ public interface Registry<T> {
 
     T getValue(Identifier id);
 
+    default java.util.Optional<T> getOptional(Identifier id) {
+        return java.util.Optional.ofNullable(this.getValue(id));
+    }
+
     boolean containsKey(Identifier id);
 
     int size();

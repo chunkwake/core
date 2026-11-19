@@ -1384,3 +1384,42 @@ DH ещё шлёт `ClientboundTeleportEntityPacket`,
 remove с реальными id.
 
 Гейт: 26 of 27 enabled (Voxy требует MC <26.2).
+
+## Teleport/passengers + путь DecentHolograms (частично)
+
+Добавлены в NMS мост:
+
+- `ClientboundTeleportEntityPacket` + `PositionMoveRotation` (`Vec3`),
+  `ClientboundSetPassengersPacket` (+ `StreamCodec.decode`, который
+  использует DH) и `FriendlyByteBuf.writeVarIntArray`;
+- `PacketWire` пишет teleport (`id, x/y/z, LpVec3=0, yRot, xRot,
+  onGround`) и passengers (`vehicle, count, ids`).
+
+Живая проверка (тот же путь, что у DH — `connection.send(...)`):
+```
+nms add_entity id=9999
+nms metadata key=23 text=DH-TEXT-9999
+nms teleport id=9999 pos=10.0,-59.0,9.5 yaw=0.0
+nms passengers vehicle=9999 ids=[10000]
+nms remove id=9999
+```
+
+Попутно для загрузки DH-голограмм понадобились:
+`Identifier.tryParse`, `Registry.getOptional`, `EntityType` с
+protocol-id и `BuiltInRegistries.ENTITY_TYPE` (text_display=135,
+item_display=73, block_display=15, armor_stand=5, item=72),
+`ComponentContents`/`PlainTextContents`/`MutableComponent.create`.
+
+### Где остановились
+
+DH успешно создаёт и **загружает** голограмму после рестарта
+(`Loaded 1 holograms!`), но при входе игрока сам DH не вызывает
+`Connection.send` — в логе есть только пакеты тест-плагина. То есть
+осталась не передача пакетов, а видимость/тикер DH (range/permission/
+async update). Голограмма end-to-end пока **не подтверждена**.
+
+Также найден баг YAML: DH сохраняет `location: world:8,500:-59,000:8,500`
+без кавычек, и при чтении это не парсится как строка (с кавычками
+голограмма грузится). Это ограничение нашего YAML-слоя, не DH.
+
+Гейт: 26 of 27 enabled (Voxy требует MC <26.2).

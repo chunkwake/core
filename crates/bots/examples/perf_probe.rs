@@ -15,6 +15,8 @@ struct Probe {
     cb_add_entity: i32,
     cb_remove_entities: i32,
     cb_entity_data: i32,
+    cb_teleport: i32,
+    cb_passengers: i32,
     chat: String,
 }
 
@@ -37,9 +39,10 @@ impl Probe {
                 }
             } else if id == self.cb_entity_data {
                 let mut r = Reader::new(&body);
-                if r.var_int().is_ok_and(|entity| entity == 9999)
+                if let Ok(entity) = r.var_int()
                     && let Ok(count) = r.var_int()
                 {
+                    let _ = entity;
                     for _ in 0..count {
                         let key = r.var_int().unwrap_or(-1);
                         let serializer = r.var_int().unwrap_or(-1);
@@ -69,10 +72,33 @@ impl Probe {
                         }
                     }
                 }
-            } else if id == self.cb_add_entity {
+            } else if id == self.cb_teleport {
                 let mut r = Reader::new(&body);
                 if r.var_int().is_ok_and(|entity| entity == 9999) {
-                    println!("nms add_entity id=9999");
+                    let x = r.f64().unwrap_or(0.0);
+                    let y = r.f64().unwrap_or(0.0);
+                    let z = r.f64().unwrap_or(0.0);
+                    let _ = r.u8();
+                    let yaw = r.f32().unwrap_or(0.0);
+                    let _ = r.f32();
+                    let _ = r.bool();
+                    println!("nms teleport id=9999 pos={x:.1},{y:.1},{z:.1} yaw={yaw:.1}");
+                }
+            } else if id == self.cb_passengers {
+                let mut r = Reader::new(&body);
+                if r.var_int().is_ok_and(|vehicle| vehicle == 9999)
+                    && let Ok(count) = r.var_int()
+                {
+                    let mut ids = Vec::new();
+                    for _ in 0..count {
+                        ids.push(r.var_int().unwrap_or(-1));
+                    }
+                    println!("nms passengers vehicle=9999 ids={ids:?}");
+                }
+            } else if id == self.cb_add_entity {
+                let mut r = Reader::new(&body);
+                if let Ok(entity) = r.var_int() {
+                    println!("nms add_entity id={entity}");
                 }
             } else if id == self.cb_remove_entities {
                 let mut r = Reader::new(&body);
@@ -156,6 +182,8 @@ async fn main() {
     let cb_add_entity = cb("add_entity");
     let cb_remove_entities = cb("remove_entities");
     let cb_entity_data = cb("set_entity_data");
+    let cb_teleport = cb("teleport_entity");
+    let cb_passengers = cb("set_passengers");
     let name = std::env::var("PERF_NAME").unwrap_or_else(|_| "boater".into());
     let mut c = Client::connect(&a[1], &name, ids, 777, "26.3")
         .await
@@ -166,6 +194,8 @@ async fn main() {
         cb_add_entity,
         cb_remove_entities,
         cb_entity_data,
+        cb_teleport,
+        cb_passengers,
     ];
     let mut p = Probe {
         c,
@@ -176,6 +206,8 @@ async fn main() {
         cb_add_entity,
         cb_remove_entities,
         cb_entity_data,
+        cb_teleport,
+        cb_passengers,
         chat: String::new(),
     };
     // Точка спавна игрока: спавним мобов рядом с ней (иначе чанки

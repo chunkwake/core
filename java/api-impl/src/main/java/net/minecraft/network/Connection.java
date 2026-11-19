@@ -37,6 +37,9 @@ public class Connection {
         byte[] wire = dev.chunkwake.bridge.PacketWireAccess.encode(packet);
         if (wire != null) {
             dev.chunkwake.bridge.PacketWireAccess.send(this.owner, wire);
+        } else {
+            dev.chunkwake.bridge.PacketWireAccess.log("nms-wire: unsupported "
+                    + packet.getClass().getSimpleName());
         }
     }
 

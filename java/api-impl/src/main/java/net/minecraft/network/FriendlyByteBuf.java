@@ -52,6 +52,14 @@ public class FriendlyByteBuf extends WrappedByteBuf {
         return this;
     }
 
+    /** `FriendlyByteBuf.writeVarIntArray` (DecentHolograms). */
+    public void writeVarIntArray(int[] values) {
+        this.writeVarInt(values.length);
+        for (int value : values) {
+            this.writeVarInt(value);
+        }
+    }
+
     public FriendlyByteBuf writeVarInt(int value) {
         while ((value & ~0x7F) != 0) {
             this.buf.writeByte((value & 0x7F) | 0x80);

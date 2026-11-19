@@ -34,4 +34,13 @@ public final class Identifier {
                 && i.path.equals(this.path);
     }
     @Override public int hashCode() { return Objects.hash(this.namespace, this.path); }
+
+    /** NMS {@code Identifier.tryParse}: null при невалидном id. */
+    public static Identifier tryParse(String value) {
+        try {
+            return parse(value);
+        } catch (RuntimeException broken) {
+            return null;
+        }
+    }
 }

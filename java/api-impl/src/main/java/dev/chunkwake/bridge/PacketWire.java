@@ -20,6 +20,8 @@ final class PacketWire {
     private static final int ID_ADD_ENTITY = 1;
     private static final int ID_REMOVE_ENTITIES = 78;
     private static final int ID_SET_ENTITY_DATA = 101;
+    private static final int ID_SET_PASSENGERS = 109;
+    private static final int ID_TELEPORT_ENTITY = 128;
 
     private PacketWire() {
     }
@@ -34,6 +36,12 @@ final class PacketWire {
         }
         if (packet instanceof ClientboundSetEntityDataPacket data && !data.values().isEmpty()) {
             return setEntityData(data);
+        }
+        if (packet instanceof net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket tp) {
+            return teleport(tp);
+        }
+        if (packet instanceof net.minecraft.network.protocol.game.ClientboundSetPassengersPacket ps) {
+            return passengers(ps);
         }
         return null;
     }
@@ -78,6 +86,36 @@ final class PacketWire {
             if (!writeValue(out, serializer, value.value())) {
                 return null;
             }
+        }
+        return out.bytes();
+    }
+
+    static byte[] teleport(
+            net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket p) {
+        net.minecraft.world.entity.PositionMoveRotation change = p.change();
+        net.minecraft.world.phys.Vec3 pos = change == null ? null : change.position();
+        Out out = new Out(48);
+        out.varInt(ID_TELEPORT_ENTITY);
+        out.varInt(p.id());
+        out.f64(pos == null ? 0.0 : pos.x());
+        out.f64(pos == null ? 0.0 : pos.y());
+        out.f64(pos == null ? 0.0 : pos.z());
+        out.u8(0); // LpVec3: нулевая скорость
+        out.f32(change == null ? 0f : change.yRot());
+        out.f32(change == null ? 0f : change.xRot());
+        out.bool(p.onGround());
+        return out.bytes();
+    }
+
+    static byte[] passengers(
+            net.minecraft.network.protocol.game.ClientboundSetPassengersPacket p) {
+        int[] ids = p.getPassengers();
+        Out out = new Out(16);
+        out.varInt(ID_SET_PASSENGERS);
+        out.varInt(p.getVehicle());
+        out.varInt(ids.length);
+        for (int id : ids) {
+            out.varInt(id);
         }
         return out.bytes();
     }

@@ -15,4 +15,8 @@ public final class PacketWireAccess {
     public static boolean send(UUID owner, byte[] wire) {
         return Bridge.sendPacket(owner, wire);
     }
+
+    public static void log(String message) {
+        Bridge.log(2, message);
+    }
 }
