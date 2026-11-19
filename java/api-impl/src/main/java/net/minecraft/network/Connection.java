@@ -23,6 +23,9 @@ public class Connection {
         EmbeddedChannel embedded = new EmbeddedChannel();
         embedded.pipeline().addLast("encoder", new ChannelOutboundHandlerAdapter());
         embedded.pipeline().addLast("decoder", new ChannelInboundHandlerAdapter());
+        // `packet_handler` нужен плагинам (DecentHolograms), которые
+        // вставляют свои обработчики через addBefore("packet_handler", ...).
+        embedded.pipeline().addLast("packet_handler", new ChannelInboundHandlerAdapter());
         this.channel = embedded;
     }
 

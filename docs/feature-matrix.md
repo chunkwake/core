@@ -1290,3 +1290,30 @@ injector-API ProtocolLib (серверные пакеты/каналы) не п�
 Netty-обработчики, а транспорт не Netty.
 
 Гейт: 26 of 27 enabled (Voxy требует MC <26.2).
+
+## DecentHolograms: pipeline injection (исправлено)
+
+`Connection` теперь содержит обработчик `packet_handler` в пайплайне
+`EmbeddedChannel`. DecentHolograms вставляет свой слушатель через
+`addBefore("packet_handler", ...)`; раньше такого имени не было и плагин
+бросал `Failed to modify player's pipeline` на каждом входе.
+
+Живой прогон (вход игрока):
+```
+boater joined the game
+Failed to modify: 0
+Could not pass event PlayerJoinEvent: 0
+```
+Регрессия клиентского моста: `player_chat re-encoded (text=CB-CHAT-11)`,
+клиент печатает `player_chat: CB-CHAT-11`.
+
+### Честное ограничение
+
+Ошибка устранена и слушатель регистрируется, но транспорт у нас не Netty:
+пакеты в `decent_holograms_packet_handler` не проходят, поэтому сами
+голограммы через этот путь пока не рендерятся. Для полной поддержки нужен
+мост «NMS Packet → наш протокол» (или реальный Netty-транспорт).
+NBT-API при включении DH пишет `NBT-API could not be loaded` — отдельное
+ограничение NBT-обвязки.
+
+Гейт: 26 of 27 enabled (Voxy требует MC <26.2).
