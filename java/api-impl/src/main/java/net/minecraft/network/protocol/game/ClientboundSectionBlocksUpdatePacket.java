@@ -23,6 +23,11 @@ public class ClientboundSectionBlocksUpdatePacket implements Packet {
         this.states = states == null ? new int[0] : states;
     }
 
+
+    /** Paper/ProtocolLib-конвертеры ищут getter-формы. */
+    public long getSectionPos() { return this.sectionPos; }
+    public short[] getPositions() { return this.positions; }
+    public int[] getStates() { return this.states; }
     public long sectionPos() {
         return this.sectionPos;
     }

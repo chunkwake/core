@@ -2077,3 +2077,30 @@ VerifyError: 0, internals: 0, panic: 0
 
 GrimAC снова включается. Остался только VoxyServerSide со своим
 `plugin.yml`.
+
+## Clientbound: MULTI_BLOCK_CHANGE info-массивы и статус SET_EQUIPMENT
+
+Стаб `ClientboundSectionBlocksUpdatePacket` теперь отдаёт и getter-формы,
+которые ищут конвертеры Paper/ProtocolLib:
+
+```java
+public long getSectionPos();
+public short[] getPositions();
+public int[] getStates();
+```
+
+Вместе с уже существующими `sectionPos()/positions()/states()` это
+закрывает доступ к info-массивам MULTI_BLOCK_CHANGE: бридж
+`sectionBlocks` по-прежнему перекодирует пакет из этих массивов
+(VarLong `state << 12 | pos`).
+
+SET_EQUIPMENT field-level пока **не закрыт**: проводной формат ItemStack
+в 26.3 содержит патч компонентов (VarInt added/removed + данные
+компонентов), и без декодирования компонентов нельзя ни прочитать
+следующую запись слота, ни безопасно перекодировать. Оставляем
+passthrough осознанно; для полноценного моста нужен `ItemStack.STREAM_CODEC`
+с настоящим `RegistryFriendlyByteBuf` (то есть NMS-реестры в JVM, а не
+стабы).
+
+Живой стенд после правки: `enabled 32 plugin(s)`, падений только
+VoxyServerSide, паник нет.
