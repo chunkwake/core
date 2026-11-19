@@ -1978,3 +1978,37 @@ read-after-write (соседнее обновление сразу видно с
 `add_entity bridge failed 0`.
 
 Гейты: fmt 0, clippy 0, cargo test 953 passed, gradle test+dist BUILD SUCCESSFUL.
+
+## Двухфазная загрузка плагинов: 31 из 33
+
+Загрузка разделена на две фазы, как в Paper/CraftBukkit:
+
+1. для каждого jar создаётся `PluginLoader` и регистрируется в общем
+   `PluginClassGroup` (плюс резолв `libraries:`);
+2. во втором проходе в порядке зависимостей вызываются
+   `runPaperLoader`/`runBootstrapper`/`create()`/`onLoad()`, затем
+   `onEnable`.
+
+Причина: CustomDiscs (`paper-plugin.yml`) реализует интерфейс
+PacketEvents в main-классе, а PacketEvents грузится позже по алфавиту;
+`Class.forName(main)` падал с
+`NoClassDefFoundError: com/github/retrooper/packetevents/event/PacketListener`.
+После двухфазной загрузки все classloader'ы уже в группе, и класс
+находится.
+
+Живой прогон расширенного стенда (33 jar):
+
+```
+plugins: enabled 31 plugin(s) in 18593 ms
+CustomDiscs enabled in 58 ms
+failed in: NpcPlugin-Paper (NMS commands), VoxyServerSide (self-disable)
+Could not load: нет
+```
+
+Базовый стенд без изменений: `26 of 27 enabled`, единственный отказ —
+VoxyServerSide, паник нет.
+
+Оставшаяся дыра по матрице — NpcPlugin: ему нужны NMS-команды
+(`net.minecraft.commands.CommandBuildContext`/`Commands`), этого слоя
+пока нет; DreamDisplays включается, но его lifecycle-команда падает на
+приватном поле `CommandNode.requirement` (Paper патчит Brigadier).

@@ -304,41 +304,59 @@ final class ChunkwakeServer {
         // Как на Paper: реестры ванили подняты до первого класса плагина.
         VanillaBootstrap.await();
         List<JavaPlugin> loaded = new ArrayList<>();
-        // Имена и `provides` загруженных: по ним проверяются `depend`.
+        // Two-phase loading, as Paper/CraftBukkit: first create and register
+        // every plugin class loader in the shared group, then resolve
+        // dependencies and create main classes in dependency order. Without
+        // the first phase a plugin cannot see classes of a plugin that comes
+        // later in the order (CustomDiscs implements a PacketEvents
+        // interface, PacketEvents is loaded after it alphabetically).
         java.util.Set<String> loadedNames = new java.util.HashSet<>(plugins.plugins.keySet());
+        List<PluginLoader> loaders = new ArrayList<>(order.size());
+        List<PluginDescriptionFile> descriptions = new ArrayList<>(order.size());
+        List<File> loaderJars = new ArrayList<>(order.size());
         for (int i = 0; i < order.size(); i++) {
             File jar = order.get(i).jar();
             PluginDescriptionFile desc = order.get(i).description();
             String label = jar.getName();
             logger.info("plugins: [" + (i + 1) + "/" + order.size() + "] " + label);
             try {
-                long one = System.nanoTime();
                 if (plugins.plugins.containsKey(desc.getName())) {
                     logger.warning("Duplicate plugin " + desc.getName() + " in " + jar.getName());
                     continue;
                 }
-                List<String> missing = PluginOrder.missing(desc, loadedNames);
-                if (!missing.isEmpty()) {
-                    // Зависимость была, но не загрузилась: без неё плагин упадёт
-                    // на первом же её классе.
-                    logger.severe("Could not load '" + jar.getName() + "': dependencies failed to load: "
-                            + missing);
-                    continue;
-                }
-                PluginLoader loader = new PluginLoader(this, jar, desc, via.parent(getClass().getClassLoader()),
-                        classGroup);
+                PluginLoader loader = new PluginLoader(this, jar, desc,
+                        via.parent(getClass().getClassLoader()), classGroup);
                 classGroup.add(loader);
-                // Библиотеки из `plugin.yml` качаются из сети: на первом запуске
-                // это десятки секунд, и без строки в журнале это не отличить от
-                // зависания.
+                loaders.add(loader);
+                descriptions.add(desc);
+                loaderJars.add(jar);
                 int before = loader.declaredLibraryCount();
                 if (before > 0) {
                     logger.info("plugins: " + desc.getName() + " declares " + before
                             + " library(ies), resolving...");
                 }
                 loader.addDeclaredLibraries(logger);
-                // `paper-plugin.yml`: `loader:` добавляет свои библиотеки, `bootstrapper:`
-                // регистрирует команды до создания плагина и создаёт его сам.
+            } catch (Throwable t) {
+                if (!Internals.report(logger, jar.getName(), "loading", t)) {
+                    logger.log(Level.SEVERE, "Could not load " + jar.getName(), t);
+                }
+            }
+        }
+        for (int k = 0; k < loaders.size(); k++) {
+            PluginLoader loader = loaders.get(k);
+            PluginDescriptionFile desc = descriptions.get(k);
+            File jar = loaderJars.get(k);
+            try {
+                long one = System.nanoTime();
+                List<String> missing = PluginOrder.missing(desc, loadedNames);
+                if (!missing.isEmpty()) {
+                    logger.severe("Could not load '" + jar.getName()
+                            + "': dependencies failed to load: " + missing);
+                    classGroup.remove(loader);
+                    continue;
+                }
+                // `paper-plugin.yml`: `loader:` runs before the main class,
+                // `bootstrapper:` prepares state for onLoad.
                 loader.runPaperLoader(logger);
                 loader.runBootstrapper();
                 JavaPlugin plugin;
