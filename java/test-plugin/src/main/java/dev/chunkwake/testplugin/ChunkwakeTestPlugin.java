@@ -216,45 +216,6 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
         // getHandle().connection.send(...); проверяем, что байты доходят
         // до клиента (бот ловит add_entity/remove_entities с id 9999).
         // Всё через рефлексию: тест-плагин собран только против paper-api.
-        // Добавляем DH-голограмме реальную строку через API и показываем её:
-        // так проверяется, что DH сам отправляет пакеты через наш мост.
-        getServer().getScheduler().runTaskTimer(this, () -> {
-            try {
-                Class<?> holoClass = Class.forName(
-                        "eu.decentsoftware.holograms.api.holograms.Hologram");
-                java.util.Collection<?> cached = (java.util.Collection<?>) holoClass
-                        .getMethod("getCachedHolograms").invoke(null);
-                if (cached.isEmpty()) {
-                    return;
-                }
-                Object holo = cached.iterator().next();
-                Object page = holoClass.getMethod("getPage", int.class).invoke(holo, 0);
-                Class<?> lineClass = Class.forName(
-                        "eu.decentsoftware.holograms.api.holograms.HologramLine");
-                if (!java.util.Arrays.stream(lineClass.getMethods())
-                        .anyMatch(m -> m.getName().equals("getContent"))) {
-                    return;
-                }
-                boolean already = ((java.util.List<?>) page.getClass()
-                        .getMethod("getLines").invoke(page)).stream()
-                        .anyMatch(l -> String.valueOf(l).contains("HELLO-DH"));
-                if (already) {
-                    return;
-                }
-                Object loc = holoClass.getMethod("getLocation").invoke(holo);
-                Object line = lineClass
-                        .getConstructor(page.getClass(), org.bukkit.Location.class, String.class)
-                        .newInstance(page, loc, "&eHELLO-DH");
-                page.getClass().getMethod("addLine", lineClass).invoke(page, line);
-                for (org.bukkit.entity.Player p : getServer().getOnlinePlayers()) {
-                    holoClass.getMethod("show", org.bukkit.entity.Player.class, int.class)
-                            .invoke(holo, p, 0);
-                }
-                getLogger().info("dh-line: added HELLO-DH");
-            } catch (Throwable broken) {
-                getLogger().warning("dh-line failed: " + broken);
-            }
-        }, 220, 200);
         getServer().getScheduler().runTaskTimer(this, () -> {
             for (org.bukkit.entity.Player p : getServer().getOnlinePlayers()) {
                 try {

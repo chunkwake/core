@@ -17,7 +17,8 @@ async fn main() {
         .id(State::Play, Direction::Serverbound, "chat_command")
         .unwrap();
     let d: Vec<i32> = a[3].split(',').map(|v| v.parse().unwrap()).collect();
-    let mut c = Client::connect(&a[1], "carter", ids, 777, "26.3")
+    let name = std::env::var("PROBE_NAME").unwrap_or_else(|_| "carter".into());
+    let mut c = Client::connect(&a[1], &name, ids, 777, "26.3")
         .await
         .unwrap();
     let spawn = loop {

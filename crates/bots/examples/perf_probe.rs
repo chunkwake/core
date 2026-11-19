@@ -42,33 +42,56 @@ impl Probe {
                 if let Ok(entity) = r.var_int()
                     && let Ok(count) = r.var_int()
                 {
-                    let _ = entity;
                     for _ in 0..count {
                         let key = r.var_int().unwrap_or(-1);
                         let serializer = r.var_int().unwrap_or(-1);
                         match serializer {
-                            5 => {
-                                if let Ok(component) =
-                                    chunkwake_protocol::text::read_component(&mut r)
-                                {
-                                    let mut out = String::new();
-                                    flatten(&component, &mut out);
-                                    println!("nms metadata key={key} text={out}");
-                                }
-                            }
                             0 => {
                                 let _ = r.u8();
                             }
                             1 => {
                                 let _ = r.var_int();
                             }
+                            2 => {
+                                let _ = r.i64();
+                            }
                             3 => {
                                 let _ = r.f32();
+                            }
+                            5 => {
+                                if let Ok(component) =
+                                    chunkwake_protocol::text::read_component(&mut r)
+                                {
+                                    let mut out = String::new();
+                                    flatten(&component, &mut out);
+                                    println!("nms metadata entity={entity} key={key} text={out}");
+                                }
+                            }
+                            6 => {
+                                if r.bool().unwrap_or(false)
+                                    && let Ok(component) =
+                                        chunkwake_protocol::text::read_component(&mut r)
+                                {
+                                    let mut out = String::new();
+                                    flatten(&component, &mut out);
+                                    println!(
+                                        "nms metadata entity={entity} key={key} optional={out}"
+                                    );
+                                }
                             }
                             10 => {
                                 let _ = r.bool();
                             }
-                            _ => break,
+                            39 => {
+                                let _ = (r.f32(), r.f32(), r.f32());
+                            }
+                            40 => {
+                                let _ = (r.f32(), r.f32(), r.f32(), r.f32());
+                            }
+                            other => {
+                                println!("nms metadata unknown serializer={other}");
+                                break;
+                            }
                         }
                     }
                 }

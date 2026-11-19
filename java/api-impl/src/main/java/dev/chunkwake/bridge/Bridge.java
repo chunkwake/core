@@ -98,6 +98,13 @@ public final class Bridge {
 
     /** Вызывается из Rust один раз в потоке плагинов. */
     public static void boot(long tableAddress) {
+        // Плагины (DecentHolograms) форматируют координаты через %.3f и пишут
+        // их в YAML; в локали с десятичной запятой получается
+        // `world:8,500:-59,000:8,500`, что потом не читается. Paper-серверы
+        // живут с локалью системы, но для совместимости берём en-US.
+        if (!"en".equalsIgnoreCase(java.util.Locale.getDefault().getLanguage())) {
+            java.util.Locale.setDefault(java.util.Locale.US);
+        }
         table = MemorySegment.ofAddress(tableAddress).reinterpret(SLOTS * 8L);
         // Флаг «есть clientbound-слушатели» обновляем из отдельного потока:
         // ProtocolLib может зарегистрировать слушателя в любой момент, а

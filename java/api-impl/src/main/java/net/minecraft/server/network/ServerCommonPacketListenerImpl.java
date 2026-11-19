@@ -20,6 +20,11 @@ public class ServerCommonPacketListenerImpl implements ServerPlayerConnection {
 
     @Override
     public void send(Packet packet) {
-        // Отправкой управляет Rust-транспорт; здесь пусто.
+        // Плагины (DecentHolograms/TAB) шлют через
+        // `player.getHandle().connection.send(packet)`, где `connection` —
+        // этот слушатель. Делегируем в сетевой Connection (NMS→wire мост).
+        if (this.connection != null) {
+            this.connection.send(packet);
+        }
     }
 }

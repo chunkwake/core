@@ -1499,3 +1499,38 @@ dh-render: boater=true
 end-to-end.
 
 YAML `location:` без кавычек — подтверждённый баг нашего YAML-слоя.
+
+## DecentHolograms: голограмма отрисована end-to-end (исправлено)
+
+Причина, почему DH не отправлял ничего, найдена и закрыта:
+
+- DH шлёт пакеты через
+  `((CraftPlayer) player).getHandle().connection.send(packet)`, где
+  `connection` — **packet listener** (`ServerGamePacketListenerImpl`),
+  а не netty-`Connection`. Наш `ServerCommonPacketListenerImpl.send(Packet)`
+  был пустой заглушкой, поэтому вызов уходил в никуда. Теперь он
+  делегирует в сетевой `Connection` (NMS→wire мост).
+- Локаль JVM: DH форматирует координаты через `%.3f` и пишет их в YAML;
+  в локали с десятичной запятой получалось
+  `location: world:8,500:-59,000:8,500`, и файл не читался. `Bridge.boot`
+  теперь ставит `Locale.US`, если локаль не английская — координаты
+  пишутся как `8.500`, файл грузится без кавычек.
+
+Живая проверка (обычный вход бота, без ручных `show`/трассировок; в
+`plugins/DecentHolograms/holograms/dhfinal.yml` строка `&eHELLO-DH`):
+```
+[DecentHolograms] Loaded 1 holograms!
+plugins: 26 of 27 enabled
+бот:
+nms metadata entity=1 key=2 optional=HELLO-DH
+nms metadata entity=1 key=2 optional=HELLO-DH
+```
+То есть DH сам, по своему тикеру, отправил `add_entity` +
+`set_entity_data` через наш NMS-мост, и клиент получил текст голограммы
+(`key=2` — `Entity.DATA_CUSTOM_NAME`, serializer 6 — optional component).
+
+Заодно в `PacketWire` подтверждены все пакеты DH: `add_entity`,
+`set_entity_data`, `teleport_entity`, `set_passengers`,
+`remove_entities`.
+
+Гейт: 26 of 27 enabled (Voxy требует MC <26.2).
