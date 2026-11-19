@@ -85,6 +85,24 @@ public final class PlayerImpl {
     public boolean hasPermission(Permission p) { return perms().hasPermission(p); }
     public boolean isPermissionSet(String p) { return perms().isPermissionSet(p); }
     public boolean isPermissionSet(Permission p) { return perms().isPermissionSet(p); }
+
+    /**
+     * {@code Permissible#permissionValue}: Paper API объявляет его default-методом,
+     * но наш прокси {@code Stub} не выполняет default-тела, поэтому AxiomPaper
+     * получал {@code null} и падал на {@code TriState.ordinal()}.
+     */
+    public net.kyori.adventure.util.TriState permissionValue(String permission) {
+        if (permission == null || !this.isPermissionSet(permission)) {
+            return net.kyori.adventure.util.TriState.NOT_SET;
+        }
+        return this.hasPermission(permission)
+                ? net.kyori.adventure.util.TriState.TRUE
+                : net.kyori.adventure.util.TriState.FALSE;
+    }
+
+    public net.kyori.adventure.util.TriState permissionValue(Permission permission) {
+        return this.permissionValue(permission == null ? null : permission.getName());
+    }
     public PermissionAttachment addAttachment(Plugin plugin) { return perms().addAttachment(plugin); }
     public PermissionAttachment addAttachment(Plugin plugin, String name, boolean value) {
         return perms().addAttachment(plugin, name, value);

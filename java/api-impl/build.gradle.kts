@@ -25,6 +25,11 @@ dependencies {
     "runtimeOnly"("io.netty:netty-handler:$netty")
     "runtimeOnly"("io.netty:netty-codec-base:$netty")
     "runtimeOnly"("io.netty:netty-codec-compression:$netty")
+    // SQLite JDBC: настоящий Paper кладёт его в libraries, поэтому плагины
+    // (GrimAC datastore, WorldGuard profile cache) ожидают org.sqlite.JDBC
+    // в classpath. Без него они пишут «SQLite JDBC driver missing» и
+    // отключают хранилище.
+    "runtimeOnly"("org.xerial:sqlite-jdbc:3.45.3.0")
 }
 
 tasks.named<Jar>("jar") {

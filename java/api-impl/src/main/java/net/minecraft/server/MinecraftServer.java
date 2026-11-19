@@ -1,6 +1,6 @@
 package net.minecraft.server;
 
-import net.minecraft.server.network.ServerConnection;
+import net.minecraft.server.network.ServerConnectionListener;
 
 /**
  * Минимальный NMS-класс для ProtocolLib.
@@ -14,13 +14,13 @@ public class MinecraftServer {
     public static final String VERSION = "26.3";
     public static final MinecraftServer SERVER = new MinecraftServer();
 
-    public final ServerConnection connection = new ServerConnection();
+    public final ServerConnectionListener connection = new ServerConnectionListener();
 
     public static MinecraftServer getServer() {
         return SERVER;
     }
 
-    public ServerConnection getConnection() {
+    public net.minecraft.server.network.ServerConnection getConnection() {
         return this.connection;
     }
 

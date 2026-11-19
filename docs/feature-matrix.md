@@ -1534,3 +1534,55 @@ nms metadata entity=1 key=2 optional=HELLO-DH
 `remove_entities`.
 
 Гейт: 26 of 27 enabled (Voxy требует MC <26.2).
+
+## Плагинные ошибки: закрыто ещё четыре класса
+
+1. **AxiomPaper NPE (`TriState.ordinal()`)**. Paper объявляет
+   `Permissible.permissionValue(...)` default-методом, а наш прокси
+   (`Stub`) не выполняет default-тела и возвращал `null`. Добавили
+   `PlayerImpl.permissionValue(String|Permission)` с honest-семантикой
+   (`NOT_SET` / `TRUE` / `FALSE`). Ошибка `Task #54 ... TriState` исчезла.
+2. **`ItemMeta.addItemFlags`** — реализованы `addItemFlags`,
+   `removeItemFlags`, `getItemFlags`, `hasItemFlag` (флаги хранятся в
+   meta-данных). Предупреждение `api: ... addItemFlags is not implemented`
+   исчезло.
+3. **GrimAC/PacketEvents (`Field.get` NPE)**. PacketEvents ищет у
+   `MinecraftServer` поле типа `ServerConnectionListener` и читает два
+   `List`-поля. Добавлены `ServerConnectionListener` (оба списка объявлены
+   в самом классе — PacketEvents читает `getDeclaredFields()`) и легаси
+   `ServerConnection` (ProtocolLib ищет геттер с этим типом; геттер
+   возвращает `ServerConnection`, т.к. Listener его наследует).
+   `PacketEventsInit`/`PacketManager` больше не падают.
+4. **SQLite JDBC**. Настоящий Paper кладёт `sqlite-jdbc` в `libraries`;
+   GrimAC datastore и WorldGuard profile cache без него писали
+   `SQLite JDBC driver missing` и отключали хранилище. Добавлена
+   `runtimeOnly("org.xerial:sqlite-jdbc:3.45.3.0")` в `api-impl`,
+   `dist` копирует jar в `java/dist/libs`.
+
+Живой прогон (обычный вход бота, тот же набор 27 плагинов):
+```
+plugins: 26 of 27 enabled
+AxiomPaper TriState errors: 0
+Could not pass PlayerJoinEvent: 0
+WorldGuard BlockDispenseEvent errors: 0
+grim-datastore sqlite errors: 0
+api: addItemFlags warnings: 0
+DH: nms metadata key=2 optional=HELLO-DH
+```
+
+### Что осталось (не наш код)
+
+- Essentials: `unsupported server version` — плагин знает версии только
+  до `26.1.2`; это его собственный список.
+- voicechat: `26.3-R0.1` неизвестен плагину (fallback на Spigot API) и
+  UDP-порт 24454 занят в окружении.
+- ViaVersion: нет совместимых версий для сервера 26.3 (нужен
+  ViaBackwards/обновление плагина).
+- ProtocolLib: `Version (MC: 26.3.0) has not yet been tested` —
+  информационное предупреждение.
+- NBT-API (внутри DecentHolograms) ищет легаси-имена классов
+  (`CraftMetaItem`, `NBTTagType`, ...), которых нет; DH работает, но
+  кастомный NBT в предметах ограничен.
+- GrimAC: Brigadier-маппер (`MinecraftArgumentTypes`) падает и
+  откатывается на стандартные completions; Orebfuscator не видит
+  block-теги (`minecraft:base_stone_overworld`) через `Server.getTag`.

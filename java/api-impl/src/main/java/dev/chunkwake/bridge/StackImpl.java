@@ -394,8 +394,39 @@ final class StackImpl extends ItemStack {
         public void resetDamage() { data.damage = 0; }
 
         public boolean isUnbreakable() { return false; }
-        public java.util.Set<org.bukkit.inventory.ItemFlag> getItemFlags() { return java.util.Set.of(); }
-        public boolean hasItemFlag(org.bukkit.inventory.ItemFlag flag) { return false; }
+        public java.util.Set<org.bukkit.inventory.ItemFlag> getItemFlags() {
+            return java.util.Set.copyOf(flags());
+        }
+        public boolean hasItemFlag(org.bukkit.inventory.ItemFlag flag) {
+            return flag != null && flags().contains(flag);
+        }
+        public void addItemFlags(org.bukkit.inventory.ItemFlag... flags) {
+            if (flags != null) {
+                for (org.bukkit.inventory.ItemFlag flag : flags) {
+                    if (flag != null) {
+                        flags().add(flag);
+                    }
+                }
+            }
+        }
+        public void removeItemFlags(org.bukkit.inventory.ItemFlag... flags) {
+            if (flags != null) {
+                for (org.bukkit.inventory.ItemFlag flag : flags) {
+                    flags().remove(flag);
+                }
+            }
+        }
+        @SuppressWarnings("unchecked")
+        private java.util.Set<org.bukkit.inventory.ItemFlag> flags() {
+            Object stored = data.custom.get("item_flags");
+            if (stored instanceof java.util.Set<?> set) {
+                return (java.util.Set<org.bukkit.inventory.ItemFlag>) set;
+            }
+            java.util.Set<org.bukkit.inventory.ItemFlag> created =
+                    java.util.EnumSet.noneOf(org.bukkit.inventory.ItemFlag.class);
+            data.custom.put("item_flags", created);
+            return created;
+        }
 
         public ItemMeta clone() { return new MetaImpl(data.copy(), type).api; }
 
