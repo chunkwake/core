@@ -212,6 +212,27 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             }
         }, 100, 200);
 
+        // Теги через Server.getTag: проверяем, что ванильные block-теги
+        // доступны плагинам (Orebfuscator и др.).
+        getServer().getScheduler().runTaskLater(this, () -> {
+            for (String name : new String[] {"base_stone_overworld", "coal_ores",
+                    "diamond_ores", "minecraft:base_stone_overworld"}) {
+                try {
+                    org.bukkit.NamespacedKey key = name.contains(":")
+                            ? org.bukkit.NamespacedKey.fromString(name)
+                            : org.bukkit.NamespacedKey.minecraft(name);
+                    org.bukkit.Tag<org.bukkit.Material> tag = getServer().getTag(
+                            org.bukkit.Tag.REGISTRY_BLOCKS, key, org.bukkit.Material.class);
+                    getLogger().info("tag-probe: " + name + " -> " + (tag == null ? "null"
+                            : tag.getValues().size() + " " + tag.getValues().stream()
+                                    .limit(3).toList()));
+                } catch (Throwable broken) {
+                    Throwable cause = broken.getCause() == null ? broken : broken.getCause();
+                    getLogger().warning("tag-probe failed: " + name + " " + cause);
+                }
+            }
+        }, 160);
+
         // NMS-мост: плагины (DecentHolograms/TAB) шлют пакеты через
         // getHandle().connection.send(...); проверяем, что байты доходят
         // до клиента (бот ловит add_entity/remove_entities с id 9999).

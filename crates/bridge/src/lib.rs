@@ -66,8 +66,10 @@ enum Slot {
     UpPacket = 31,
     FlagPackets = 32,
     DownSendPacket = 33,
+    ArgDataDir = 34,
+    ArgDataDirLen = 35,
 }
-const SLOTS: usize = 34;
+const SLOTS: usize = 36;
 
 /// Буфер ответа на событие (смерть с полным инвентарём укладывается с запасом).
 const EVENT_REPLY_CAP: usize = 64 << 10;
@@ -146,6 +148,7 @@ impl Bridge {
         api_dir: &Path,
         plugins_dir: &Path,
         world_dir: &Path,
+        data_dir: &Path,
         game_jar: Option<&Path>,
         plan: &Arc<PlayPlan>,
     ) -> Result<(Arc<Self>, i32), String> {
@@ -208,6 +211,12 @@ impl Bridge {
             Box::leak(world_dir.to_string_lossy().into_owned().into_boxed_str());
         set(table, Slot::ArgWorldDir, world.as_ptr() as u64);
         set(table, Slot::ArgWorldDirLen, world.len() as u64);
+        // Каталог сгенерированных данных (reports/blocks.json, data/tags):
+        // Java строит из него NMS-реестр блоков для плагинов.
+        let data: &'static str =
+            Box::leak(data_dir.to_string_lossy().into_owned().into_boxed_str());
+        set(table, Slot::ArgDataDir, data.as_ptr() as u64);
+        set(table, Slot::ArgDataDirLen, data.len() as u64);
         let items: &'static str = Box::leak(plan.item_list().into_boxed_str());
         set(table, Slot::ArgItems, items.as_ptr() as u64);
         set(table, Slot::ArgItemsLen, items.len() as u64);

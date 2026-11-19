@@ -25,7 +25,7 @@ public interface Registry<T> {
 
     java.util.Set<Identifier> keySet();
 
-    java.util.Set<java.util.Map.Entry<net.minecraft.resources.Identifier, T>> entrySet();
+    java.util.Set<java.util.Map.Entry<net.minecraft.resources.ResourceKey<T>, T>> entrySet();
 
     java.util.stream.Stream<?> getTags();
 

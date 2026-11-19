@@ -23,6 +23,16 @@ public final class ResourceKey<T> {
         return this.location;
     }
 
+    /** 26.x имя: {@code ResourceKey.identifier()}. */
+    public Identifier identifier() {
+        return this.location;
+    }
+
+    /** Ключ записи реестра (registry-тип неизвестен). */
+    public static <T> ResourceKey<T> entryKey(Identifier location) {
+        return new ResourceKey<>(location);
+    }
+
     @Override
     public String toString() {
         return "ResourceKey[" + this.location + "]";

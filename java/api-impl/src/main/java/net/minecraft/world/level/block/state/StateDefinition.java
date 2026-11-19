@@ -8,10 +8,16 @@ import net.minecraft.world.level.block.state.properties.Property;
 public class StateDefinition<O, S> {
     private final O owner;
     private final Collection<Property<?>> properties;
+    private final Collection<S> states;
 
     public StateDefinition(O owner, Collection<Property<?>> properties) {
+        this(owner, properties, List.of());
+    }
+
+    public StateDefinition(O owner, Collection<Property<?>> properties, Collection<S> states) {
         this.owner = owner;
         this.properties = List.copyOf(properties);
+        this.states = List.copyOf(states);
     }
 
     public O getOwner() {
@@ -29,7 +35,7 @@ public class StateDefinition<O, S> {
                 .orElse(null);
     }
 
-    public Collection<S> getPossibleStates() {
-        return List.of();
+    public com.google.common.collect.ImmutableList<S> getPossibleStates() {
+        return com.google.common.collect.ImmutableList.copyOf(this.states);
     }
 }

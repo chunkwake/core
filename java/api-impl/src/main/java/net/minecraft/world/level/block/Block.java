@@ -1,47 +1,72 @@
 package net.minecraft.world.level.block;
 
+import java.util.List;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.StateDefinition;
+
 /**
- * Базовая NMS-реализация блока. У каждого блока есть стабильный default
- * block state (vanilla хранит его полем) — на идентичности состояний
- * держатся палитры чанков и реестр Axiom.
+ * NMS {@code Block}. Реестр состояний наполняется из настоящего
+ * {@code reports/blocks.json} (id состояний = сетевые id), поэтому
+ * плагины (Orebfuscator, Axiom) видят ванильные блоки и их состояния.
  */
 public class Block {
-    public static final net.minecraft.core.IdMapper<net.minecraft.world.level.block.state.BlockState>
-            BLOCK_STATE_REGISTRY = new net.minecraft.core.IdMapper<>();
+    public static final net.minecraft.core.IdMapper<BlockState> BLOCK_STATE_REGISTRY =
+            new net.minecraft.core.IdMapper<>();
 
-    private final net.minecraft.world.level.block.state.BlockState defaultState;
+    private final String name;
+    private BlockState defaultState;
+    private StateDefinition<Block, BlockState> definition;
 
     public Block() {
-        this.defaultState = new net.minecraft.world.level.block.state.BlockState(this);
+        this("minecraft:air");
     }
 
-    public net.minecraft.world.level.block.state.BlockState defaultBlockState() {
+    public Block(String name) {
+        this.name = name == null ? "minecraft:air" : name;
+        this.defaultState = new BlockState(this);
+    }
+
+    /** Заполняет состояния блока (вызывается бутстрапом). */
+    public void defineStates(List<BlockState> states, BlockState defaultState) {
+        this.definition = new StateDefinition<>(this, List.of(), states);
+        if (defaultState != null) {
+            this.defaultState = defaultState;
+        }
+    }
+
+    public BlockState defaultBlockState() {
         return this.defaultState;
     }
 
-    public static int getId(net.minecraft.world.level.block.state.BlockState state) {
+    public String name() {
+        return this.name;
+    }
+
+    public static int getId(BlockState state) {
         return BLOCK_STATE_REGISTRY.getId(state);
     }
 
-    public static net.minecraft.world.level.block.state.BlockState stateById(int id) {
+    public static BlockState stateById(int id) {
         return BLOCK_STATE_REGISTRY.byId(id);
     }
 
-    public net.minecraft.world.level.block.state.StateDefinition<Block,
-            net.minecraft.world.level.block.state.BlockState> getStateDefinition() {
-        return new net.minecraft.world.level.block.state.StateDefinition<>(this, java.util.List.of());
+    public StateDefinition<Block, BlockState> getStateDefinition() {
+        return this.definition != null ? this.definition
+                : new StateDefinition<>(this, List.of());
     }
 
     public String getDescriptionId() {
-        return "block.minecraft.air";
+        return "block." + this.name.replace(':', '.');
     }
 
     public String getName() {
-        return "Air";
+        String path = this.name.contains(":")
+                ? this.name.substring(this.name.indexOf(':') + 1) : this.name;
+        return path;
     }
 
     @Override
     public String toString() {
-        return "Block@" + Integer.toHexString(System.identityHashCode(this));
+        return this.name;
     }
 }

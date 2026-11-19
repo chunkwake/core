@@ -62,7 +62,9 @@ public final class Bridge {
     static final int FLAG_PACKETS = 32;
     static final int DOWN_VIA_EMIT = 30;
     static final int DOWN_SEND_PACKET = 33;
-    static final int SLOTS = 34;
+    static final int ARG_DATA_DIR = 34;
+    static final int ARG_DATA_DIR_LEN = 35;
+    static final int SLOTS = 36;
 
     /** События с ответом ({@code chunkwake_net::live::Event}). */
     static final int EVENT_DAMAGE = 1, EVENT_DEATH = 2, EVENT_DROP = 3, EVENT_PICKUP = 4, EVENT_GAME_MODE = 5,
@@ -249,6 +251,10 @@ public final class Bridge {
                     (int) table.getAtIndex(JAVA_LONG, ARG_ITEMS_LEN)));
             String world = string(MemorySegment.ofAddress(table.getAtIndex(JAVA_LONG, ARG_WORLD_DIR)),
                     (int) table.getAtIndex(JAVA_LONG, ARG_WORLD_DIR_LEN));
+            String data = string(MemorySegment.ofAddress(table.getAtIndex(JAVA_LONG, ARG_DATA_DIR)),
+                    (int) table.getAtIndex(JAVA_LONG, ARG_DATA_DIR_LEN));
+            // NMS-реестр блоков из данных генератора (Orebfuscator/теги).
+            BlockBootstrap.load(data.isEmpty() ? null : java.nio.file.Path.of(data));
             server = new ChunkwakeServer(java.nio.file.Path.of(world));
             return server.loadAndEnable(new File(dir));
         } catch (Throwable t) {

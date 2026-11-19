@@ -304,7 +304,7 @@ async fn serve(dir: &Path) -> Result<(), String> {
             }
         });
     }
-    let bridge = start_plugins(dir, &props, &play).await;
+    let bridge = start_plugins(dir, &props, data_dir.clone(), &play).await;
 
     let mut net = props.net_config(version);
     net.configuration = Some(std::sync::Arc::new(plan));
@@ -620,6 +620,7 @@ fn log_player_exit(name: &str, result: Result<(), chunkwake_net::NetError>) {
 async fn start_plugins(
     dir: &Path,
     props: &config::Properties,
+    data_dir: std::path::PathBuf,
     play: &std::sync::Arc<chunkwake_net::play::PlayPlan>,
 ) -> Option<std::sync::Arc<chunkwake_bridge::Bridge>> {
     let plugins = dir.join("plugins");
@@ -676,6 +677,7 @@ async fn start_plugins(
             &api,
             &plugins,
             &world_dir,
+            &data_dir,
             game_jar.as_deref(),
             &plan,
         )

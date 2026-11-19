@@ -41,13 +41,25 @@ public class SimpleRegistry<T> implements Registry<T> {
     }
 
     @Override
-    public java.util.Set<java.util.Map.Entry<Identifier, T>> entrySet() {
-        return java.util.Collections.unmodifiableSet(this.values.entrySet());
+    public java.util.Set<java.util.Map.Entry<net.minecraft.resources.ResourceKey<T>, T>> entrySet() {
+        java.util.Set<java.util.Map.Entry<net.minecraft.resources.ResourceKey<T>, T>> out =
+                new java.util.LinkedHashSet<>();
+        this.values.forEach((id, value) -> out.add(
+                new java.util.AbstractMap.SimpleEntry<>(
+                        net.minecraft.resources.ResourceKey.entryKey(id), value)));
+        return java.util.Collections.unmodifiableSet(out);
+    }
+
+    /** Теги реестра ({@code HolderSet.Named}); заполняется бутстрапом. */
+    private final java.util.List<Object> tags = new java.util.ArrayList<>();
+
+    public void registerTag(Object tag) {
+        this.tags.add(tag);
     }
 
     @Override
     public java.util.stream.Stream<?> getTags() {
-        return java.util.stream.Stream.empty();
+        return this.tags.stream();
     }
 
     @Override

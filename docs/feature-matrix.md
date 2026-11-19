@@ -1586,3 +1586,46 @@ DH: nms metadata key=2 optional=HELLO-DH
 - GrimAC: Brigadier-маппер (`MinecraftArgumentTypes`) падает и
   откатывается на стандартные completions; Orebfuscator не видит
   block-теги (`minecraft:base_stone_overworld`) через `Server.getTag`.
+
+## NMS-реестр блоков: Orebfuscator и теги (исправлено)
+
+`Server.getTag` работал и раньше (проверено: `base_stone_overworld -> 6
+[ANDESITE, DEEPSLATE, DIORITE]`), но Orebfuscator читает **не его**, а
+`BuiltInRegistries.BLOCK` напрямую:
+
+```java
+for (var entry : BuiltInRegistries.BLOCK.entrySet()) { ... }
+BuiltInRegistries.BLOCK.getTags().forEach(tag -> tag.key().location() ...);
+block.getStateDefinition().getPossibleStates();
+```
+
+Наши `BuiltInRegistries.BLOCK`/`StateDefinition` были пустыми заглушками,
+поэтому плагин видел 0 блоков и 0 тегов (207 замечаний к конфигу).
+
+Сделано:
+
+- `bridges`: данные генератора (`data_dir`) передаются в JVM новыми
+  слотами `ArgDataDir/ArgDataDirLen` (34/35).
+- `BlockBootstrap` читает настоящие
+  `reports/blocks.json` (1286 блоков, 35723 состояния, id = сетевые) и
+  `data/minecraft/tags/block/**.json` (300 тегов, с вложенными `#тегами`),
+  наполняет `Block.BLOCK_STATE_REGISTRY`, `BuiltInRegistries.BLOCK`,
+  `StateDefinition` и `getTags()`.
+- `Registry.entrySet()` теперь отдаёт `ResourceKey`-ключи (как в 26.x),
+  `ResourceKey.identifier()`, `Holder.Reference.unwrapKey()`,
+  `HolderSet.Named` с `TagKey`/`stream()`,
+  `StateDefinition.getPossibleStates()` возвращает `ImmutableList`
+  (сигнатура, которую ждёт Orebfuscator).
+
+Живой прогон:
+```
+blocks: 1286 blocks, 35723 states, 300 tags
+plugins: 26 of 27 enabled
+Orebfuscator enabled in 473 ms
+skipping unknown block tag: 0
+Orebfuscator warnings: 0
+nms metadata entity=1 key=2 optional=HELLO-DH   (DH-голограмма цела)
+```
+
+Осталось из ошибок плагинов: только GrimAC Brigadier-маппер
+(`MinecraftArgumentTypes`, откат на стандартные completions).
