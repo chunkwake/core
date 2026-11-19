@@ -103,11 +103,21 @@ async fn main() {
                 .get(i)
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| format!("load{i}"));
-            let mut c = match Client::connect(&addr, &name, ids, 777, "26.3").await {
-                Ok(c) => c,
-                Err(e) => {
-                    println!("{name}: connect failed: {e}");
-                    return;
+            // Сервер на входе может быть занят загрузкой чанков: один
+            // таймаут не должен срывать весь замер, поэтому retry.
+            let mut attempt = 0u32;
+            let mut c = loop {
+                match Client::connect(&addr, &name, ids, 777, "26.3").await {
+                    Ok(c) => break c,
+                    Err(e) if attempt < 2 => {
+                        println!("{name}: connect failed: {e} (retry {})", attempt + 1);
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        attempt += 1;
+                    }
+                    Err(e) => {
+                        println!("{name}: connect failed: {e}");
+                        return;
+                    }
                 }
             };
             c.capture_also = vec![cb_chat];
@@ -135,6 +145,39 @@ async fn main() {
                 bot.command(&format!("tp @s {x} -59 8")).await;
             }
             bot.pump(600).await;
+            // MOBS=N: N свиней вокруг точки бота — нагрузка на регионный тик.
+            // Только для overworld-прогона (без SPLIT_DIM), где y=-59 — пол.
+            let mobs: usize = std::env::var("MOBS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            if mobs > 0 && !(std::env::var("SPLIT_DIM").as_deref() == Ok("1") && i % 2 == 1) {
+                // Чистим хвосты прошлого прогона, чтобы замер был одинаковым.
+                bot.command("kill @e[type=minecraft:pig]").await;
+                bot.pump(300).await;
+                for m in 0..mobs {
+                    let dx = (m % 8) as f64 * 1.5 - 6.0;
+                    let dz = (m / 8) as f64 * 1.5;
+                    bot.command(&format!(
+                        "summon minecraft:pig {:.1} -59.0 {:.1}",
+                        x as f64 + dx,
+                        8.0 + dz
+                    ))
+                    .await;
+                }
+                bot.pump(600).await;
+                // Проверка, что мобы действительно появились (иначе замер
+                // молча измеряет пустой мир).
+                bot.command("execute if entity @e[type=minecraft:pig] run say PIGS_PRESENT")
+                    .await;
+                bot.pump(400).await;
+                let echoed = std::mem::take(&mut bot.chat);
+                if echoed.contains("PIGS_PRESENT") {
+                    println!("{name}: mobs present (MOBS={mobs} per bot)");
+                } else {
+                    println!("{name}: WARNING no mobs spawned");
+                }
+            }
             if i == 0 {
                 println!("reporter ready at x={x}");
             }
@@ -160,6 +203,11 @@ async fn main() {
                 } else {
                     bot.pump(1500).await;
                 }
+            }
+            if i == 0 && mobs > 0 {
+                // Убираем мобов, чтобы следующий прогон стартовал с нуля.
+                bot.command("kill @e[type=minecraft:pig]").await;
+                bot.pump(400).await;
             }
         }));
     }
