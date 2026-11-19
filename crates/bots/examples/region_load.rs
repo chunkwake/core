@@ -126,7 +126,14 @@ async fn main() {
                 }
             }
             let x = if i % 2 == 0 { 8 } else { 200 };
-            bot.command(&format!("tp @s {x} -59 8")).await;
+            if std::env::var("SPLIT_DIM").as_deref() == Ok("1") && i % 2 == 1 {
+                // Половина ботов — в другое измерение: измерения у нас
+                // независимые регионы верхнего уровня.
+                bot.command("execute in minecraft:the_nether run tp @s 8 70 8")
+                    .await;
+            } else {
+                bot.command(&format!("tp @s {x} -59 8")).await;
+            }
             bot.pump(600).await;
             if i == 0 {
                 println!("reporter ready at x={x}");

@@ -1684,3 +1684,39 @@ Orebfuscator errors: 0
 GrimAC Brigadier/Exception: 0
 DH: nms metadata key=2 optional=HELLO-DH
 ```
+
+## Region-тик: попытка и её результат (важно)
+
+По разрешению править WIP `play.rs` был сделан первый шаг: измерения
+тикаются параллельно (`CHUNKWAKE_PARALLEL_DIMS=1`), каждый поток со своим
+`with_dim`. Замер `region_load` (4 бота: двое в overworld, двое в nether):
+
+```
+без параллели: avg_mspt=32.95 max=35.70   (12 проб)
+с параллелью:  avg_mspt=21.57 max=24.80   (12 проб)
+```
+
+Однако повторный прогон с уже сгенерированным nether **завис**: боты
+входят, после нескольких тиков сервер перестаёт тикать (нет ответов
+`/tick query`, нет MSPT). Это классический deadlock разного порядка
+захвата блокировок между измерениями (глобальные `hub/live` + per-dim
+`DimState`). Поэтому:
+
+- параллельный путь **убран** из `play.rs` (файл вернулся к вашему WIP
+  без изменений);
+- цифра 21.57 мс **не считается доказательством**: нестабильно/дедлок;
+- для настоящего 8x8 region-тика сначала нужен единый порядок захвата
+  блокировок и региональные очереди, затем уже замеры.
+
+## ImageFrame и mob-интерфейсы (исправлено)
+
+При заходе в nether появился piglin, и `MobImpl.iface` бросал
+`IllegalArgumentException: chunkwake: no mob piglin` — ImageFrame не
+включался (`Error occurred while enabling ImageFrame`), а события
+сущностей писали `event 29 failed`. Теперь неизвестный вид берётся из
+`EntityType.getEntityClass()` (Piglin/Hoglin/Blaze/...), с безопасным
+фолбэком на `LivingEntity`. Живой прогон: `26 of 27 enabled`,
+`no mob ...: 0`, `event ... failed: 0`.
+
+`region_load` умеет `SPLIT_DIM=1` — половина ботов уходит в
+`minecraft:the_nether` (для будущих замеров межрегионального тика).

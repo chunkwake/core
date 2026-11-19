@@ -50,8 +50,29 @@ final class MobImpl {
             case "skeleton" -> org.bukkit.entity.Skeleton.class;
             case "spider" -> org.bukkit.entity.Spider.class;
             case "slime" -> org.bukkit.entity.Slime.class;
-            default -> throw new IllegalArgumentException("chunkwake: no mob " + species);
+            default -> fallbackIface(species);
         };
+    }
+
+    /**
+     * Любой вид, которого нет в списке выше: берём настоящий Bukkit-интерфейс
+     * из {@code EntityType.getEntityClass()} (Piglin, Hoglin, Blaze, ...).
+     * Если интерфейс неизвестен — общий {@link LivingEntity}, но без падения:
+     * перечисление сущностей мира (ImageFrame/WorldEdit) не должно ломаться.
+     */
+    @SuppressWarnings("unchecked")
+    private static Class<? extends LivingEntity> fallbackIface(String species) {
+        try {
+            org.bukkit.entity.EntityType type = org.bukkit.entity.EntityType
+                    .valueOf(species.toUpperCase(java.util.Locale.ROOT));
+            Class<? extends org.bukkit.entity.Entity> cls = type.getEntityClass();
+            if (cls != null && LivingEntity.class.isAssignableFrom(cls)) {
+                return (Class<? extends LivingEntity>) cls;
+            }
+        } catch (IllegalArgumentException ignored) {
+            // вид без EntityType — общий интерфейс
+        }
+        return LivingEntity.class;
     }
 
     /** Вид для {@link EntityType}; {@code null} — такого моба сервер не умеет. */
