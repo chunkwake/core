@@ -145,25 +145,41 @@ async fn main() {
                 bot.command(&format!("tp @s {x} -59 8")).await;
             }
             bot.pump(600).await;
-            // MOBS=N: N свиней вокруг точки бота — нагрузка на регионный тик.
-            // Только для overworld-прогона (без SPLIT_DIM), где y=-59 — пол.
+            // MOBS=N: N свиней на каждый из двух регионов (x=8 и x=200).
+            // Спавнит только репортёр и только после того, как все боты
+            // зашли: иначе поздний логин не успевает прогрузить чанк, часть
+            // summon падает, и замер идёт с другим числом мобов.
             let mobs: usize = std::env::var("MOBS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
-            if mobs > 0 && !(std::env::var("SPLIT_DIM").as_deref() == Ok("1") && i % 2 == 1) {
+            let split = std::env::var("SPLIT_DIM").as_deref() == Ok("1");
+            if i == 0 && mobs > 0 && !split {
+                let names = ["boater", "framer", "carter", "pather"];
+                let names = &names[..bots.min(names.len())];
+                let mut online = String::new();
+                for _ in 0..60 {
+                    bot.command("list").await;
+                    bot.pump(1500).await;
+                    online.push_str(&std::mem::take(&mut bot.chat));
+                    if names.iter().all(|n| online.contains(n)) {
+                        break;
+                    }
+                }
                 // Чистим хвосты прошлого прогона, чтобы замер был одинаковым.
                 bot.command("kill @e[type=minecraft:pig]").await;
                 bot.pump(300).await;
-                for m in 0..mobs {
-                    let dx = (m % 8) as f64 * 1.5 - 6.0;
-                    let dz = (m / 8) as f64 * 1.5;
-                    bot.command(&format!(
-                        "summon minecraft:pig {:.1} -59.0 {:.1}",
-                        x as f64 + dx,
-                        8.0 + dz
-                    ))
-                    .await;
+                for bx in [8.0, 200.0] {
+                    for m in 0..mobs {
+                        let dx = (m % 8) as f64 * 1.5 - 6.0;
+                        let dz = (m / 8) as f64 * 1.5;
+                        bot.command(&format!(
+                            "summon minecraft:pig {:.1} -59.0 {:.1}",
+                            bx + dx,
+                            8.0 + dz
+                        ))
+                        .await;
+                    }
                 }
                 bot.pump(600).await;
                 // Проверка, что мобы действительно появились (иначе замер
@@ -173,9 +189,9 @@ async fn main() {
                 bot.pump(400).await;
                 let echoed = std::mem::take(&mut bot.chat);
                 if echoed.contains("PIGS_PRESENT") {
-                    println!("{name}: mobs present (MOBS={mobs} per bot)");
+                    println!("reporter: mobs present (MOBS={mobs} x2 regions)");
                 } else {
-                    println!("{name}: WARNING no mobs spawned");
+                    println!("reporter: WARNING no mobs spawned");
                 }
             }
             if i == 0 {
