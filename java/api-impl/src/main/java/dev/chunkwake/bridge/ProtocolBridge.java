@@ -158,7 +158,48 @@ final class ProtocolBridge {
                     registered++;
                 }
             }
-            protocolLib.getLogger().info("ProtocolBridge: clientbound raw types registered: " + registered);
+            // Serverbound USE_ENTITY: ProtocolLib выводит из него EnumEntityUseAction,
+            // без этого `EnumWrappers` не инициализируется (PlayerInfoData).
+            try {
+                Object useEntity = null;
+                for (Object candidate : (Iterable<?>) values.invoke(null)) {
+                    if (!"PLAY".equals(String.valueOf(getProtocol.invoke(candidate)))
+                            || !"CLIENT".equals(String.valueOf(getSender.invoke(candidate)))) {
+                        continue;
+                    }
+                    @SuppressWarnings("unchecked")
+                    java.util.List<String> names = (java.util.List<String>) candidate.getClass()
+                            .getMethod("getClassNames").invoke(candidate);
+                    boolean interact = false;
+                    for (String packetName : names) {
+                        if (packetName != null
+                                && packetName.endsWith("ServerboundInteractPacket")) {
+                            interact = true;
+                        }
+                    }
+                    if (interact) {
+                        useEntity = candidate;
+                        break;
+                    }
+                }
+                if (useEntity != null) {
+                    Class<?> carrier = Class.forName(
+                            "net.minecraft.network.protocol.game.ServerboundInteractPacket",
+                            true, loader);
+                    Object client = java.lang.Enum.valueOf((Class) senderClass, "CLIENT");
+                    registerPacket.invoke(register, useEntity, carrier, client, null);
+                    Bridge.log(2, "protocol: serverbound USE_ENTITY registered");
+                }
+            } catch (Throwable broken) {
+                Bridge.log(1, "protocol: USE_ENTITY registration failed: " + broken);
+            }
+            protocolLib.getLogger().info("ProtocolBridge: clientbound raw types registered: "
+                    + registered
+                    + "; carriers sound=" + (soundType != null)
+                    + " title=" + (titleType != null)
+                    + " entity=" + (entityDataType != null)
+                    + " chunk=" + (chunkForgetType != null)
+                    + " playerInfo=" + (playerInfoType != null));
         } catch (Throwable broken) {
             protocolLib.getLogger().log(java.util.logging.Level.WARNING,
                     "ProtocolBridge: prepare failed", broken);
@@ -280,7 +321,7 @@ final class ProtocolBridge {
         return false;
     }
 
-    /** Field-level для {@code ClientboundPlayerInfoUpdatePacket}. */
+    /** Field-level for {@code ClientboundPlayerInfoUpdatePacket}. */
     private static byte[] playerInfo(org.bukkit.entity.Player player, Object type, byte[] data) {
         try {
             int[] pos = {0};
@@ -288,25 +329,31 @@ final class ProtocolBridge {
             java.io.DataInputStream in = new java.io.DataInputStream(
                     new java.io.ByteArrayInputStream(data, pos[0], data.length - pos[0]));
             int actionBits = in.readUnsignedByte();
+            if ((actionBits & 2) != 0) {
+                // INITIALIZE_CHAT: chat session data is not modelled yet; pass through.
+                Bridge.log(2, "protocol: player_info init-chat passthrough");
+                return data;
+            }
             int count = readVarInt(in);
-            java.util.List<Object> entries = new java.util.ArrayList<>(count);
             Class<?> packetClass = Class.forName(
                     "net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket", true,
                     type.getClass().getClassLoader());
             Class<?> entryClass = Class.forName(
                     "net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket$Entry",
                     true, type.getClass().getClassLoader());
-            java.util.EnumSet<?> actions = java.util.EnumSet.noneOf(
-                    (Class) Class.forName(
-                            "net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket$Action",
-                            true, type.getClass().getClassLoader()));
-            for (Object constant : actions.clone().getClass().getEnumConstants()) {
-                @SuppressWarnings("unchecked")
-                java.util.EnumSet raw = actions;
+            Class<?> actionClass = Class.forName(
+                    "net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket$Action",
+                    true, type.getClass().getClassLoader());
+            @SuppressWarnings({"unchecked", "rawtypes"})
+            java.util.EnumSet actions = java.util.EnumSet.noneOf((Class) actionClass);
+            for (Object constant : actionClass.getEnumConstants()) {
                 if ((actionBits & (1 << ((Enum<?>) constant).ordinal())) != 0) {
+                    @SuppressWarnings("unchecked")
+                    java.util.EnumSet raw = actions;
                     raw.add((Enum) constant);
                 }
             }
+            java.util.List<Object> entries = new java.util.ArrayList<>(count);
             for (int i = 0; i < count; i++) {
                 java.util.UUID uuid = new java.util.UUID(in.readLong(), in.readLong());
                 String name = "";
@@ -314,22 +361,14 @@ final class ProtocolBridge {
                         new com.mojang.authlib.properties.PropertyMap(
                                 com.google.common.collect.ArrayListMultimap.create());
                 if ((actionBits & 1) != 0) {
-                    name = in.readUTF();
+                    name = readString(in);
                     int props = readVarInt(in);
                     for (int j = 0; j < props; j++) {
-                        String key = in.readUTF();
-                        String value = in.readUTF();
-                        String signature = in.readBoolean() ? in.readUTF() : null;
+                        String key = readString(in);
+                        String value = readString(in);
+                        String signature = in.readBoolean() ? readString(in) : null;
                         properties.put(key, new com.mojang.authlib.properties.Property(
                                 key, value, signature));
-                    }
-                }
-                if ((actionBits & 2) != 0) {
-                    boolean hasSession = in.readBoolean();
-                    if (hasSession) {
-                        in.readBoolean();
-                        in.readLong();
-                        in.readLong();
                     }
                 }
                 int gameMode = (actionBits & 4) != 0 ? readVarInt(in) : 0;
@@ -352,11 +391,11 @@ final class ProtocolBridge {
                 Object entry = entryClass.getConstructor(
                         java.util.UUID.class, com.mojang.authlib.GameProfile.class,
                         boolean.class, int.class, net.minecraft.world.level.GameType.class,
-                        net.minecraft.network.chat.Component.class, int.class,
-                        net.minecraft.network.chat.RemoteChatSession.Data.class, boolean.class)
+                        net.minecraft.network.chat.Component.class, boolean.class, int.class,
+                        net.minecraft.network.chat.RemoteChatSession.Data.class)
                         .newInstance(uuid, profile, listed, latency,
                                 net.minecraft.world.level.GameType.byId(gameMode), displayName,
-                                listOrder, null, showHat);
+                                showHat, listOrder, null);
                 entries.add(entry);
             }
             Object packet = packetClass.getConstructor(java.util.EnumSet.class, java.util.List.class)
@@ -394,7 +433,7 @@ final class ProtocolBridge {
                         (com.mojang.authlib.GameProfile) entryClass.getMethod("profile")
                                 .invoke(entry);
                 if ((newBits & 1) != 0) {
-                    out.writeUTF(profile == null ? "" : profile.getName());
+                    writeString(bytes, profile == null ? "" : profile.getName());
                     com.google.common.collect.Multimap<String,
                             com.mojang.authlib.properties.Property> props =
                             profile == null ? com.google.common.collect.ArrayListMultimap.create()
@@ -403,16 +442,13 @@ final class ProtocolBridge {
                     for (Object value : props.values()) {
                         com.mojang.authlib.properties.Property property =
                                 (com.mojang.authlib.properties.Property) value;
-                        out.writeUTF(property.getName());
-                        out.writeUTF(property.getValue());
+                        writeString(bytes, property.getName());
+                        writeString(bytes, property.getValue());
                         out.writeBoolean(property.getSignature() != null);
                         if (property.getSignature() != null) {
-                            out.writeUTF(property.getSignature());
+                            writeString(bytes, property.getSignature());
                         }
                     }
-                }
-                if ((newBits & 2) != 0) {
-                    out.writeBoolean(false);
                 }
                 if ((newBits & 4) != 0) {
                     net.minecraft.world.level.GameType mode =
@@ -447,8 +483,10 @@ final class ProtocolBridge {
             out.flush();
             byte[] result = bytes.toByteArray();
             if (!java.util.Arrays.equals(result, data)) {
+                int firstLatency = changedEntries.isEmpty() ? -1
+                        : (Integer) entryClass.getMethod("latency").invoke(changedEntries.get(0));
                 Bridge.log(2, "protocol: player_info re-encoded (" + changedEntries.size()
-                        + " entries)");
+                        + " entries, latency=" + firstLatency + ")");
             }
             return result;
         } catch (Throwable broken) {
@@ -730,6 +768,20 @@ final class ProtocolBridge {
             }
             shift += 7;
         }
+    }
+
+    private static String readString(java.io.DataInputStream in) throws java.io.IOException {
+        int length = readVarInt(in);
+        byte[] bytes = new byte[length];
+        in.readFully(bytes);
+        return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    private static void writeString(java.io.ByteArrayOutputStream out, String value) {
+        byte[] bytes = (value == null ? "" : value)
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        writeVarInt(out, bytes.length);
+        out.write(bytes, 0, bytes.length);
     }
 
     private static int readVarInt(java.io.DataInputStream in) throws java.io.IOException {

@@ -16,8 +16,10 @@ public class ClientboundPlayerInfoUpdatePacket implements Packet {
         UPDATE_DISPLAY_NAME, UPDATE_LIST_ORDER, UPDATE_HAT
     }
 
-    private EnumSet<Action> actions = EnumSet.noneOf(Action.class);
+    // `entries` объявлено первым: ProtocolLib `getPlayerInfoDataLists()` берёт
+    // первый Collection-подобный филд, а `EnumSet` тоже Collection.
     private List<Entry> entries = new ArrayList<>();
+    private EnumSet<Action> actions = EnumSet.noneOf(Action.class);
 
     public ClientboundPlayerInfoUpdatePacket() {
     }
@@ -48,8 +50,8 @@ public class ClientboundPlayerInfoUpdatePacket implements Packet {
         private final boolean showHat;
 
         public Entry(UUID profileId, com.mojang.authlib.GameProfile profile, boolean listed,
-                int latency, GameType gameMode, Component displayName, int listOrder,
-                RemoteChatSession.Data chatSession, boolean showHat) {
+                int latency, GameType gameMode, Component displayName, boolean showHat,
+                int listOrder, RemoteChatSession.Data chatSession) {
             this.profileId = profileId;
             this.profile = profile;
             this.listed = listed;

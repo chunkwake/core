@@ -994,3 +994,34 @@ frame). Сырые `add_entity`-пакеты пока идут батчем бе
 
 Folia multi-region по-прежнему не тестировался: нет multi-region
 кластера/харнесса.
+
+## PlayerInfoUpdate field-level — подтверждено живьём
+
+- `ClientboundPlayerInfoUpdatePacket` теперь отдаёт ProtocolLib настоящие
+  `Entry`-объекты: `getPlayerInfoDataLists().read(0)` возвращает
+  `PlayerInfoData[latency=0, listed=true, gameMode=SURVIVAL, ...]`.
+- Кодек читает/пишет строки по протоколу (varint-длина + UTF-8), а не
+  `DataInput.readUTF`; порядок полей `Entry` совпадает с ванильным
+  (showHat перед listOrder), поэтому `PlayerInfoData.getConverter()`
+  находит конструктор.
+- Поле `entries` объявлено раньше `actions`: ProtocolLib берёт первый
+  Collection-филд, а `EnumSet` тоже Collection (из-за этого раньше
+  читались actions и получались null-элементы).
+- Свой TAB-лист при входе идёт через clientbound-мост
+  (`frame_for`), поэтому `PLAYER_INFO` приходит и для только что
+  вошедшего игрока.
+- ProtocolLib `EnumWrappers` инициализируется: добавлены
+  `ChatVisibility` и `ServerboundInteractPacket` (+ регистрация
+  serverbound `USE_ENTITY`), без них конвертер падал с NPE в
+  `getEnumEntityUseActionClass`.
+
+Живая проверка (ClientboundProbe пишет latency=1234):
+```
+PLAYER_INFO read ok: 1 first=PlayerInfoData[latency=0, listed=true, gameMode=SURVIVAL, ...]
+WROTE player latency
+protocol: player_info re-encoded (1 entries, latency=1234)
+```
+То есть изменённое плагином поле попадает в перекодированный пакет.
+
+`ClientboundPlayerChatPacket` по-прежнему не реализован; player chat в
+Rust-ядре не формируется (чат идёт через system chat).
