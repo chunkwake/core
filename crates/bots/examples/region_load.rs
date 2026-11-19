@@ -167,16 +167,26 @@ async fn main() {
                     }
                 }
                 // Чистим хвосты прошлого прогона, чтобы замер был одинаковым.
+                let clean = std::env::var("CLEAN").as_deref() == Ok("1");
+                if clean {
+                    bot.command("gamerule doMobSpawning false").await;
+                    bot.command("gamerule randomTickSpeed 0").await;
+                    bot.command("gamerule doFireTick false").await;
+                    bot.command("kill @e[type=minecraft:item]").await;
+                    bot.pump(400).await;
+                }
                 bot.command("kill @e[type=minecraft:pig]").await;
                 bot.pump(300).await;
                 for bx in [8.0, 200.0] {
                     for m in 0..mobs {
                         let dx = (m % 8) as f64 * 1.5 - 6.0;
                         let dz = (m / 8) as f64 * 1.5;
+                        let nbt = if clean { " {NoAI:1b}" } else { "" };
                         bot.command(&format!(
-                            "summon minecraft:pig {:.1} -59.0 {:.1}",
+                            "summon minecraft:pig {:.1} -59.0 {:.1}{}",
                             bx + dx,
-                            8.0 + dz
+                            8.0 + dz,
+                            nbt
                         ))
                         .await;
                     }
