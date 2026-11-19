@@ -31,84 +31,25 @@
 | `dim_state.saved` | `sim.pending_campfires` | 1 |
 | `dim_state.saved` | `sim.pending_conduits` | 1 |
 | `dim_state.saved` | `sim.pending_jukeboxes` | 1 |
-| `hub.players` | `hub.players` | 11 |
-| `hub.players` | `live` | 1 |
-| `hub.players` | `player_saves` | 2 |
-| `hub.players` | `plugin_invs` | 1 |
 | `hub.players` | `sim.dropped` | 1 |
-| `hub.players` | `sim.mobs` | 2 |
-| `hub.players` | `sleepers` | 1 |
-| `hub.players` | `spawn_points` | 3 |
-| `hub.players` | `state.sim.forced` | 1 |
-| `hub.players` | `won_game` | 1 |
-| `hub.players` | `world_edit` | 1 |
+| `hub.players` | `sim.mobs` | 1 |
 | `light_lock` | `dim_state.edited` | 1 |
 | `light_lock` | `state.lent` | 2 |
 | `live` | `hub.players` | 3 |
-| `live` | `sim.campfires` | 1 |
-| `live` | `sim.comparators` | 1 |
-| `live` | `sim.furnaces` | 1 |
-| `live` | `sim.hopper_ticks` | 1 |
-| `live` | `state_cache` | 2 |
-| `player_saves` | `active` | 1 |
-| `player_saves` | `bukkit_values` | 1 |
-| `player_saves` | `client_loading` | 1 |
-| `player_saves` | `controls` | 3 |
-| `player_saves` | `hub.players` | 3 |
-| `player_saves` | `live` | 1 |
-| `player_saves` | `mob_hits` | 1 |
-| `player_saves` | `seen_credits` | 1 |
-| `player_saves` | `spawn_points` | 1 |
-| `s.regions` | `s.evicted` | 1 |
 | `sim.arrows` | `hub.players` | 1 |
-| `sim.campfires` | `sim.campfires` | 1 |
 | `sim.dropped` | `sim.items_gone` | 1 |
 | `sim.dropped` | `sim.items_merging` | 1 |
 | `sim.dropped` | `sim.items_syncs` | 1 |
 | `sim.dropped_by_chunk` | `sim.dropped` | 1 |
 | `sim.entity_written` | `sim.entity_new` | 1 |
 | `sim.entity_written` | `sim.mobs_loaded` | 1 |
-| `sim.forced` | `dim_state.simulated` | 1 |
-| `sim.forced` | `hub.players` | 1 |
-| `sim.forced` | `sim.simulated_key` | 1 |
-| `sim.furnaces` | `sim.campfires` | 1 |
-| `sim.mobs` | `hub.players` | 1 |
-| `sim.mobs` | `live` | 2 |
-| `sim.mobs` | `love_cause` | 3 |
+| `sim.mobs` | `love_cause` | 2 |
 | `sim.mobs` | `particle_types` | 1 |
-| `sim.mobs` | `sim.arrows` | 3 |
-| `sim.mobs` | `sim.dropped` | 1 |
-| `sim.mobs` | `sim.mobs` | 7 |
-| `sim.mobs` | `sim.villagers` | 1 |
 | `sim.orbs` | `hub.players` | 1 |
 | `sim.populated` | `sim.entity_written` | 1 |
 | `sim.populated` | `sim.mobs_loaded` | 1 |
 | `sim.simulated_key` | `hub.players` | 1 |
 | `sim.torch_toggles` | `sim.torch_cool` | 1 |
-| `sim.villagers` | `sim.mobs` | 4 |
-| `sleepers` | `hub.players` | 2 |
-| `sleepers` | `sleepers` | 1 |
-| `st.pois` | `st.saved` | 1 |
-| `st.pois` | `st.sim.dropped` | 1 |
-| `st.pois` | `st.sim.entity_new` | 1 |
-| `st.pois` | `st.sim.entity_written` | 1 |
-| `st.pois` | `st.sim.mobs` | 1 |
-| `st.pois` | `st.sim.populated` | 1 |
-| `st.saved` | `st.sim.entity_new` | 1 |
-| `st.saved` | `st.sim.entity_written` | 1 |
-| `st.sim.dropped` | `st.saved` | 1 |
-| `st.sim.dropped` | `st.sim.entity_new` | 1 |
-| `st.sim.dropped` | `st.sim.entity_written` | 1 |
-| `st.sim.dropped` | `st.sim.populated` | 1 |
-| `st.sim.entity_written` | `st.sim.entity_new` | 1 |
-| `st.sim.mobs` | `st.saved` | 1 |
-| `st.sim.mobs` | `st.sim.dropped` | 1 |
-| `st.sim.mobs` | `st.sim.entity_new` | 1 |
-| `st.sim.mobs` | `st.sim.entity_written` | 1 |
-| `st.sim.mobs` | `st.sim.populated` | 1 |
-| `st.sim.populated` | `st.saved` | 1 |
-| `st.sim.populated` | `st.sim.entity_new` | 1 |
-| `st.sim.populated` | `st.sim.entity_written` | 1 |
 | `state.dirty` | `state.sim.jukeboxes` | 1 |
 | `state.edited` | `state.dirty` | 2 |
 | `state.edited` | `state.saved` | 2 |
@@ -116,15 +57,12 @@
 | `state.generating` | `state.edited` | 1 |
 | `state.saved` | `state.dirty` | 2 |
 | `state.saved` | `state.sim.jukeboxes` | 1 |
-| `state.simulated` | `state.chunk_frames` | 1 |
-| `this.controls` | `this.hub.players` | 1 |
 | `weather_levels` | `hub.players` | 6 |
 | `weather_levels` | `plugin_invs` | 1 |
 | `weather_levels` | `sleepers` | 1 |
 | `weather_levels` | `spawn_points` | 2 |
 | `weather_levels` | `won_game` | 1 |
 | `weather_levels` | `world_edit` | 1 |
-| `world_edit` | `live` | 1 |
 
 ## Канонический порядок (предложение)
 
@@ -132,28 +70,13 @@
 
 ### Нарушения порядка (берут более ранний лок, держа более поздний)
 
-| удерживается | берётся | функция | раз |
-| --- | --- | --- | ---: |
-| `hub.players` | `player_saves` | `snapshot` | 2 |
-| `sim.mobs` | `live` | `tick_arrows` | 2 |
-| `player_saves` | `live` | `run` | 1 |
-| `sim.mobs` | `hub.players` | `tick_arrows` | 1 |
-| `hub.players` | `sleepers` | `session` | 1 |
-| `world_edit` | `live` | `break_block` | 1 |
-| `hub.players` | `live` | `scan_tripwires` | 1 |
-| `sim.mobs` | `sim.villagers` | `tick_mobs` | 1 |
+Нарушений нет.
+
 
 ## Циклы
 
-- `live` → `hub.players` → `player_saves`
-- `live` → `hub.players` → `sim.mobs`
-- `live` → `hub.players`
-- `live` → `hub.players` → `world_edit`
-- `hub.players` → `player_saves`
-- `hub.players` → `sim.mobs` → `sim.arrows`
-- `hub.players` → `sim.mobs`
-- `hub.players` → `sleepers`
-- `sim.mobs` → `sim.villagers`
+Циклов в наблюдаемых рёбрах нет.
+
 
 ## По файлам
 
@@ -453,8 +376,8 @@
 - `clone_entity_item`: `sim.mobs.lock()` → `mobs`
 - `clone_entity_item`: `sim.boats.lock()` → `boats`
 - `mine`: `hub.players.lock()` → `entity`
+- `break_block`: `live.lock()` → `held_shears`
 - `break_block`: `world_edit.lock()` → `edit`
-- `break_block`: `live.lock()` → `disarmed_by_shears`
 - `break_block`: `sim.comparators.lock()` → `?`
 - `break_block`: `sim.hopper_ticks.lock()` → `?`
 - `break_block`: `sim.furnaces.lock()` → `removed`
@@ -555,8 +478,8 @@
 - `tick_mobs`: `sim.mobs.lock()` → `?`
 - `tick_mobs`: `live.lock()` → `live`
 - `tick_mobs`: `hub.players.lock()` → `players`
-- `tick_mobs`: `sim.mobs.lock()` → `mobs`
 - `tick_mobs`: `sim.villagers.lock()` → `villagers`
+- `tick_mobs`: `sim.mobs.lock()` → `mobs`
 - `tick_mobs`: `particle_types.lock()` → `?`
 - `tick_mobs`: `hub.players.lock()` → `entity`
 - `tick_mobs`: `dragon_fight.lock()` → `?`

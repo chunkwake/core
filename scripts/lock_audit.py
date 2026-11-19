@@ -223,10 +223,19 @@ def audit_file(path: str):
             events.append((i, fn, m.group(1), var, key, depth))
             # Временный guard (`expr.lock().unwrap().iter()`) живёт до `;`,
             # а не до `}`; иначе отчёт полон ложных вложений.
-            # `let x = std::mem::take(&mut *...lock()...)`: guard временный.
+            # Guard живёт только если `let x = ...lock().unwrap();` —
+            # то есть после `.unwrap()` сразу `;`. Если цепочка продолжается
+            # (`let v = ...lock().unwrap().get(..);`), guard временный.
             recent = code[max(0, i - 60):i]
+            tail = code[m.end():m.end() + 48]
+            guard_alive = bool(re.match(r"\s*(?:;|,\s*\n)", tail))
+            if not guard_alive:
+                after = re.match(r"\s*\.\s*(?:unwrap|expect)\s*\([^)]*\)", tail)
+                if after:
+                    rest = tail[after.end():]
+                    guard_alive = bool(re.match(r"\s*;", rest))
             ephemeral = "mem::take" in recent or "mem::swap" in recent
-            if pending_let is not None and not ephemeral:
+            if pending_let is not None and not ephemeral and guard_alive:
                 guard_stack.append((depth, var, key))
             pending_let = None
             i = m.end()
