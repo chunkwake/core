@@ -1,22 +1,24 @@
 package org.bukkit.craftbukkit;
 
-/** CraftBukkit-носитель мира: нужен ProtocolLib (BukkitConverters). */
+/**
+ * Заглушка CraftBukkit {@code CraftWorld}: плагины (squaremap и др.)
+ * кастуют {@code org.bukkit.World} к этому классу и берут NMS
+ * {@code ServerLevel} через {@code getHandle()}.
+ *
+ * <p>Наши миры ({@code WorldImpl}) наследуются от этого класса, поэтому
+ * каст проходит. NMS-часть — заглушка {@code ServerLevel}; она не умеет
+ * отдавать настоящие чанки, поэтому плагинам, которым нужен реальный
+ * уровень (рендер карт), этого недостаточно — такие места падают уже на
+ * методах ServerLevel.
+ */
 public class CraftWorld {
-    private final Object handle;
+    private final net.minecraft.server.level.ServerLevel handle =
+            new net.minecraft.server.level.ServerLevel();
 
     public CraftWorld() {
-        this(null);
     }
 
-    public CraftWorld(Object handle) {
-        this.handle = handle;
-    }
-
-    public Object getHandle() {
+    public net.minecraft.server.level.ServerLevel getHandle() {
         return this.handle;
-    }
-
-    public String getName() {
-        return "world";
     }
 }

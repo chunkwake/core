@@ -2334,3 +2334,31 @@ failed: squaremap, VoxyServerSide
 - Для squaremap добавлен NMS-стаб
   `net.minecraft.commands.arguments.DimensionArgument` (первая ошибка была
   именно о нём), после чего плагин дошёл до CraftWorld-каста.
+
+## squaremap: архитектурный блокер CraftWorld (точная причина)
+
+Попытка закрыть каст: добавлен стаб
+`org.bukkit.craftbukkit.CraftWorld` (класс с `getHandle(): ServerLevel`),
+`WorldImpl` унаследован от него, API-jar и сервер пересобраны.
+
+Результат — каст всё равно падает:
+
+```
+ClassCastException: class dev.chunkwake.bridge.$Proxy3
+  cannot be cast to class org.bukkit.craftbukkit.CraftWorld
+  at xyz.jpenilla.squaremap.paper.util.CraftBukkitHelper.serverLevel
+```
+
+Причина архитектурная: миры, которые видит плагин, — не `WorldImpl`, а
+динамические прокси `Stub.ofAll({World.class, WorldHandle.class}, impl)`
+(`WorldImpl.java:33`). `java.lang.reflect.Proxy` умеет реализовывать
+только интерфейсы и не может быть наследником класса `CraftWorld`
+(в байткоде squaremap — `checkcast CraftWorld` + `invokevirtual
+getHandle()`; интерфейсом CraftWorld сделать нельзя).
+
+Чтобы squaremap заработал, нужен либо полный Java-класс мира,
+реализующий все методы `World` (сейчас они делегируются в Rust через
+прокси), либо генерация байткода подкласса `CraftWorld` (ASM/ByteBuddy).
+Это отдельная крупная работа, не решаемая стабами. Задокументировано как
+blocked; из 36 jar включаются 34 (BlueMap включился, squaremap и
+VoxyServerSide — нет).

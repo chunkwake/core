@@ -25,7 +25,7 @@ import org.bukkit.entity.Player;
  * {@code data/paper/metadata.dat} и {@code data/paper/persistent_data_container.dat}
  * каталога измерения: мир с Paper переносится вместе с ними.
  */
-final class WorldImpl implements WorldHandle {
+final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implements WorldHandle {
     static final String OVERWORLD = "minecraft:overworld";
     static final String NETHER = "minecraft:the_nether";
     static final String END = "minecraft:the_end";
