@@ -7,8 +7,9 @@ import org.bukkit.Material;
  * Рабочая конвертация Bukkit ↔ NMS {@code ItemStack} (id + количество).
  * Нужна ProtocolLib для {@code MinecraftGenerator} и item-пакетов.
  */
-public final class CraftItemStack {
+public final class CraftItemStack extends org.bukkit.inventory.ItemStack {
     private CraftItemStack() {
+        super(org.bukkit.Material.AIR);
     }
 
     public static ItemStack asNMSCopy(org.bukkit.inventory.ItemStack stack) {

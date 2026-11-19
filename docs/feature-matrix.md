@@ -2051,3 +2051,29 @@ IllegalAccessError: 0
 
 Базовый стенд: `26 of 27 enabled` (только VoxyServerSide), паник нет.
 Остался один отказ по матрице — NpcPlugin (NMS command internals).
+
+## NpcPlugin: 32/33 — NMS-слой команд закрыт
+
+Причина падения `EditCommand$EditOptionRegistry.<clinit>` была не в NMS,
+а в нашем стабе: `org.bukkit.craftbukkit.inventory.CraftItemStack` не
+наследовал `org.bukkit.inventory.ItemStack` (в Paper наследует), из-за
+чего верификатор падал с
+
+```
+VerifyError: Type 'CraftItemStack' is not assignable to 'ItemStack'
+```
+
+Теперь `CraftItemStack extends ItemStack`. Регресс GrimAC был не из-за
+этого, а из-за нового стаба `ItemInput`: Incendo Cloud ищет у него
+`createItemStack(int, boolean)` и поля `item`/`tag`. После добавления
+этих членов и `CompoundTagArgument` стенд даёт:
+
+```
+plugins: enabled 32 plugin(s) in 20219 ms
+NpcPlugin-Paper enabled in 140 ms
+failed in: VoxyServerSide (сам отключается)
+VerifyError: 0, internals: 0, panic: 0
+```
+
+GrimAC снова включается. Остался только VoxyServerSide со своим
+`plugin.yml`.
