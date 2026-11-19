@@ -443,11 +443,27 @@ final class ProtocolBridge {
             double x = in.readDouble();
             double y = in.readDouble();
             double z = in.readDouble();
-            int velocity = in.readUnsignedByte();
-            if (velocity != 0) {
-                // Ненулевая скорость (`LpVec3`) пока не разбирается.
-                Bridge.log(2, "protocol: add_entity velocity passthrough");
-                return data;
+            // `Vec3.LP_STREAM_CODEC` (LpVec3): 1 байт b0; если не 0 — b1,
+            // 4 байта unsigned int BE и VarInt масштаба при continuation-бите
+            // (b0 & 4). Скорость сохраняем как есть: плагин может заменить
+            // байты, а нулевая — это просто один 0.
+            java.io.ByteArrayOutputStream velocity = new java.io.ByteArrayOutputStream(9);
+            int b0 = in.readUnsignedByte();
+            velocity.write(b0);
+            if (b0 != 0) {
+                velocity.write(in.readUnsignedByte());
+                for (int i = 0; i < 4; i++) {
+                    velocity.write(in.readUnsignedByte());
+                }
+                if ((b0 & 4) != 0) {
+                    while (true) {
+                        int part = in.readUnsignedByte();
+                        velocity.write(part);
+                        if ((part & 0x80) == 0) {
+                            break;
+                        }
+                    }
+                }
             }
             int pitch = in.readUnsignedByte();
             int yaw = in.readUnsignedByte();
@@ -459,7 +475,7 @@ final class ProtocolBridge {
             Object packet = packetClass.getConstructor(int.class, java.util.UUID.class, int.class,
                     double.class, double.class, double.class, byte[].class, int.class, int.class,
                     int.class, int.class)
-                    .newInstance(entityId, uuid, entityType, x, y, z, new byte[] {0}, pitch, yaw,
+                    .newInstance(entityId, uuid, entityType, x, y, z, velocity.toByteArray(), pitch, yaw,
                             headYaw, extra);
             Object container = containerConstructor.newInstance(type, packet);
             Object event = fromServer.invoke(null, plugin, container, player);

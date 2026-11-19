@@ -1,8 +1,10 @@
 package com.destroystokyo.paper;
 
 /**
- * Маркер Paper: PaperLib проверяет `hasClass("com.destroystokyo.paper.PaperConfig")`.
- * Нужен плагинам, которые ищут современный Paper через этот класс.
+ * Заглушка старого маркера Paper: PaperLib 1.x проверяет его через
+ * {@code Class.forName("com.destroystokyo.paper.PaperConfig")}. Как и
+ * {@code io.papermc.paper.configuration.PaperConfigurations}, нужен только
+ * для определения платформы.
  */
 public final class PaperConfig {
     private PaperConfig() {

@@ -1932,3 +1932,49 @@ read-after-write (соседнее обновление сразу видно с
 после `/list` со всеми четырьмя ботами (иначе поздние логины не
 прогружали чанк и часть `summon` падала), `max-players=10`, чистка
 свиней до и после прогона.
+
+## Расширенная матрица плагинов (33 jar) и найденные дыры
+
+Добавлены в стенд (Modrinth, 26.3):
+
+| плагин | загрузчик | итог |
+| --- | --- | --- |
+| DreamDisplays 1.10.9 | paper/folia/purpur | включился (225 мс); lifecycle-команда падает на `CommandNode.requirement` |
+| webcam 4.4.0 | paper | включился (93 мс) |
+| CustomDiscs 2.7.0 | paper/folia | не загрузился: нет классов PacketEvents при `Class.forName` main |
+| NpcPlugin 3.6.4 | folia/paper | не включился: нужны NMS `commands.CommandBuildContext` |
+| DeathAnnouncer 2.0.0 | все | включился (18 с — резолвинг 8 библиотек, JDA/Mongo/MySQL) |
+| PacketEvents 2.14.0 | paper | включился (зависимость CustomDiscs) |
+
+Итог: **30 из 33** включились (VoxyServerSide по-прежнему отключается
+сам). Найдены три реальные дыры совместимости:
+
+1. **Paper-детект.** NpcPlugin проверяет
+   `Class.forName("io.papermc.paper.configuration.PaperConfigurations")`
+   и считал сервер Spigot. Добавлены заглушки
+   `io.papermc.paper.configuration.PaperConfigurations` и
+   `com.destroystokyo.paper.PaperConfig` (PaperLib). После этого плагин
+   дошёл до включения и упал уже на NMS-командах.
+2. **NMS command internals.** NpcPlugin строит Brigadier-команды через
+   `net.minecraft.commands.CommandBuildContext`/`Commands` — этого слоя
+   у нас нет. Плагин помечен «needs Minecraft server internals» и
+   пропущен.
+3. **Paper-патч Brigadier.** DreamDisplays обращается к
+   `com.mojang.brigadier.tree.CommandNode.requirement` как к полю; в
+   ванильном brigadier 1.3.11 оно `private`, у Paper — доступно.
+   Отсюда `IllegalAccessError` при регистрации команды.
+4. **Видимость классов между плагинами.** CustomDiscs (paper-plugin.yml)
+   реализует PacketEvents-интерфейс в main-классе, а PacketEvents
+   грузится позже: `Class.forName(main)` не находит
+   `com.github.retrooper.packetevents.event.PacketListener`. Нужен
+   двухфазный load (сначала classloader'ы всех плагинов, потом create).
+
+### Clientbound field-level: LpVec3
+
+`add_entity` теперь разбирает скорость как настоящий `Vec3.LP_STREAM_CODEC`
+(1 байт b0; если не 0 — b1, 4 байта unsigned int BE и VarInt при
+бите 0x04), а не как один байт. Раньше при ненулевой скорости парсер
+съезжал и пакет уходил без события. Живой прогон: `velocity passthrough 0`,
+`add_entity bridge failed 0`.
+
+Гейты: fmt 0, clippy 0, cargo test 953 passed, gradle test+dist BUILD SUCCESSFUL.
