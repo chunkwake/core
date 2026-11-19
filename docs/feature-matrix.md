@@ -965,3 +965,14 @@ protocol: title re-encoded (text=CB-TITLE-308)
 
 Итоговый гейт: **26 of 27 enabled**, единственный отказ — VoxyServerSide
 (требует MC `<26.2`).
+
+
+## Entity metadata field-level — проверено живьём
+
+`ClientboundSetEntityDataPacket` теперь реально доходит до ProtocolLib:
+`ENTITY_METADATA ints=1`, плагин пишет entity id, мост перекодирует
+(`protocol: entity_data re-encoded (entity=442)`). Для этого spawn-часть
+получает per-player frame через `frame_for` (raw packet -> событие ->
+frame). Сырые `add_entity`-пакеты пока идут батчем без поля.
+
+Гейт: 26 of 27 enabled (Voxy отключается сам).
