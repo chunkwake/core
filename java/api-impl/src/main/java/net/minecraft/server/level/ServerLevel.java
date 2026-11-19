@@ -8,4 +8,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class ServerLevel extends net.minecraft.world.level.Level {
     public static final AtomicInteger ENTITY_COUNTER = new AtomicInteger();
+
+    private final ServerChunkCache chunkSource = new ServerChunkCache();
+
+    /** {@code ServerLevel.getChunkSource()} (Orebfuscator). */
+    public ServerChunkCache getChunkSource() {
+        return this.chunkSource;
+    }
 }

@@ -17,6 +17,11 @@ public class ServerChunkCache {
         return false;
     }
 
+    /** {@code ServerChunkCache.isChunkLoaded(int,int)} (Orebfuscator). */
+    public boolean isChunkLoaded(int x, int z) {
+        return false;
+    }
+
     public net.minecraft.world.level.chunk.ChunkAccess getChunk(ChunkPos pos) {
         return null;
     }

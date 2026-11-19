@@ -280,6 +280,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_common_commands() {
+        for line in [
+            "seed",
+            "list",
+            "tps",
+            "time set day",
+            "gamemode creative",
+            "say hello",
+            "gamerule doMobSpawning false",
+            "tp @s 1 2 3",
+        ] {
+            assert!(
+                tree().parse(line).is_some(),
+                "command is not in the tree: {line}"
+            );
+        }
+    }
+
+    #[test]
     fn no_duplicate_roots() {
         let mut names: Vec<String> = commands().iter().map(|s| s.name.clone()).collect();
         names.sort();

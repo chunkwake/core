@@ -392,6 +392,9 @@ final class ChunkwakeServer {
                     + (plugin.isEnabled() ? " enabled" : " failed") + " in " + ms(one) + " ms");
         }
         // `CraftServer.enablePlugins(POSTWORLD)`: `/help` — запасной, после плагинов.
+        // Paper: LifecycleEvents.COMMANDS выполняются после onEnable всех
+        // плагинов (Incendo Cloud ожидает именно этот порядок).
+        flushLifecycleCommands();
         commands.setFallbackCommands();
         help.rebuild(commands.getCommands());
         publishCommands();
@@ -551,6 +554,9 @@ final class ChunkwakeServer {
                 Component.text(name));
         PlayerJoinEvent e = new PlayerJoinEvent(p.api, msg);
         plugins.callEvent(e);
+        if (p.api instanceof org.bukkit.craftbukkit.entity.CraftPlayer craft) {
+            craft.getHandle().connection.connection.restoreChannel();
+        }
         if (e.joinMessage() != null) {
             announce(e.joinMessage());
         }
@@ -1065,7 +1071,33 @@ final class ChunkwakeServer {
      * поэтому событие наступает в момент подписки — плагин получает регистратор
      * сразу, а команды попадают в игру тем же порядком, что и из {@code plugin.yml}.
      */
+    /** Отложенные обработчики {@code LifecycleEvents.COMMANDS}. */
+    private final java.util.List<Runnable> pendingCommands = new java.util.ArrayList<>();
+
     void runLifecycleCommands(String owner, Object configuration, LifecycleEventHandler<?> handler) {
+        // Paper запускает COMMANDS после onEnable всех плагинов; синхронный
+        // запуск ломает state-machine Incendo Cloud (GrimAC): обработчик
+        // вызывался прямо из registerEventHandler, лок регистрации
+        // срабатывал раньше, чем Cloud выставит commandRegistrationHandler.
+        pendingCommands.add(() -> dispatchCommands(owner, configuration, handler));
+    }
+
+    /** Выполняет отложенные COMMANDS-обработчики (конец включения плагинов). */
+    void flushLifecycleCommands() {
+        java.util.List<Runnable> queued = new java.util.ArrayList<>(this.pendingCommands);
+        this.pendingCommands.clear();
+        for (Runnable runnable : queued) {
+            try {
+                runnable.run();
+            } catch (Throwable broken) {
+                this.logger.log(Level.WARNING, "lifecycle: deferred command registration failed",
+                        broken);
+            }
+        }
+    }
+
+    private void dispatchCommands(String owner, Object configuration,
+            LifecycleEventHandler<?> handler) {
         LifecycleCommands registrar = new LifecycleCommands(this);
         PluginMeta meta = plugins.plugins.get(owner) != null
                 ? plugins.plugins.get(owner).getPluginMeta()

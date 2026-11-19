@@ -211,8 +211,13 @@ final class LifecycleCommands implements Commands {
         }
         // Контекст несёт исходную строку и узел: плагины читают `getInput()`,
         // а аргументы у нас не разбираются — команда получает строку целиком.
+        // Cloud (GrimAC) читает ctx.getNodes().get(0) и заново парсит input:
+        // пустой список нод приводил к IndexOutOfBoundsException.
+        java.util.List<com.mojang.brigadier.context.ParsedCommandNode<CommandSourceStack>> nodes =
+                java.util.List.of(new com.mojang.brigadier.context.ParsedCommandNode<>(
+                        current, new com.mojang.brigadier.context.StringRange(0, line.length())));
         CommandContext<CommandSourceStack> ctx = new CommandContext<>(source, line, Map.of(), exec, current,
-                java.util.List.of(),
+                nodes,
                 new com.mojang.brigadier.context.StringRange(0, line.length()), null, null, false);
         try {
             exec.run(ctx);

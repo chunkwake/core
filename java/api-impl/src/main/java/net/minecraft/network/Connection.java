@@ -17,6 +17,10 @@ import net.minecraft.network.protocol.Packet;
  */
 public class Connection {
     public Channel channel;
+    /** Исходный EmbeddedChannel: ProtocolLib подменяет {@link #channel}
+     *  своим прокси, из-за чего PacketEvents (GrimAC) перестаёт узнавать
+     *  канал и кикает игрока. После событий входа возвращаем исходный. */
+    private final Channel originalChannel;
     private PacketListener listener;
     private java.util.UUID owner;
 
@@ -28,6 +32,21 @@ public class Connection {
         // вставляют свои обработчики через addBefore("packet_handler", ...).
         embedded.pipeline().addLast("packet_handler", new ChannelInboundHandlerAdapter());
         this.channel = embedded;
+        this.originalChannel = embedded;
+    }
+
+    /** Возвращает исходный канал, если плагин подменил поле прокси. */
+    public void restoreChannel() {
+        if (this.originalChannel != null && this.channel != this.originalChannel) {
+            this.channel = this.originalChannel;
+            // PacketEvents (GrimAC) в отложенной задаче кикает, если канал
+            // открыт и узнать его не удалось. Наш EmbeddedChannel не
+            // используется для ввода-вывода (транспорт в Rust), поэтому
+            // закрываем его: тогда клиент не выкидывается.
+            if (this.originalChannel.isOpen()) {
+                this.originalChannel.close();
+            }
+        }
     }
 
     public void send(Packet packet) {

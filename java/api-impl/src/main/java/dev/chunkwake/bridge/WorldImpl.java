@@ -25,12 +25,12 @@ import org.bukkit.entity.Player;
  * {@code data/paper/metadata.dat} и {@code data/paper/persistent_data_container.dat}
  * каталога измерения: мир с Paper переносится вместе с ними.
  */
-final class WorldImpl {
+final class WorldImpl implements WorldHandle {
     static final String OVERWORLD = "minecraft:overworld";
     static final String NETHER = "minecraft:the_nether";
     static final String END = "minecraft:the_end";
 
-    final World api = Stub.of(World.class, this);
+    final World api = (World) Stub.ofAll(new Class<?>[] {World.class, WorldHandle.class}, this);
     private final ChunkwakeServer server;
     /** Ключ измерения, например {@code minecraft:the_nether}. */
     final String dim;
@@ -38,9 +38,18 @@ final class WorldImpl {
     private volatile PdcImpl pdc;
     private volatile WorldBorderImpl border;
 
+    /** NMS-уровень для плагинов (Orebfuscator: {@code world.getHandle()}). */
+    private final net.minecraft.server.level.ServerLevel handle =
+            new net.minecraft.server.level.ServerLevel();
+
     WorldImpl(ChunkwakeServer server, String dim) {
         this.server = server;
         this.dim = dim;
+    }
+
+    @Override
+    public net.minecraft.server.level.ServerLevel getHandle() {
+        return this.handle;
     }
 
     /** Запрос к миру этого измерения. */

@@ -212,6 +212,7 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             }
         }, 100, 200);
 
+
         // Теги через Server.getTag: проверяем, что ванильные block-теги
         // доступны плагинам (Orebfuscator и др.).
         getServer().getScheduler().runTaskLater(this, () -> {

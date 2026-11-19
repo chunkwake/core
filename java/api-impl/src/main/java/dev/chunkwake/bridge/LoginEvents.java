@@ -140,6 +140,9 @@ final class LoginEvents {
                 e.disallow(kind, result);
             }
             plugins.callEvent(e);
+            // ProtocolLib подменил Connection.channel прокси; PacketEvents
+            // (GrimAC) узнаёт только исходный EmbeddedChannel.
+            restoreChannel(p);
             result = e.getResult() == PlayerLoginEvent.Result.ALLOWED ? null : e.kickMessage();
         }
         if (result != null) {
@@ -151,6 +154,12 @@ final class LoginEvents {
     }
 
     /** Соединение входа ({@code PaperPlayerLoginConnection}): профиль и адрес. */
+    private static void restoreChannel(PlayerImpl p) {
+        if (p.api instanceof org.bukkit.craftbukkit.entity.CraftPlayer craft) {
+            craft.getHandle().connection.connection.restoreChannel();
+        }
+    }
+
     private static PlayerLoginConnection connection(ProfileImpl profile, InetSocketAddress address) {
         return Stub.of(PlayerLoginConnection.class, new Object() {
             public com.destroystokyo.paper.profile.PlayerProfile getAuthenticatedProfile() { return profile; }

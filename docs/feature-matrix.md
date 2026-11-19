@@ -1629,3 +1629,58 @@ nms metadata entity=1 key=2 optional=HELLO-DH   (DH-голограмма цел�
 
 Осталось из ошибок плагинов: только GrimAC Brigadier-маппер
 (`MinecraftArgumentTypes`, откат на стандартные completions).
+
+## GrimAC: Brigadier + PacketEvents (закрыто)
+
+1. **`MinecraftArgumentTypes.getClassByKey`** (Incendo Cloud):
+   не хватало Paper-реестра аргументов. Добавлены
+   `net.minecraft.commands.synchronization.ArgumentTypeInfos` (поле
+   `BY_CLASS` объявлено первым — Cloud читает `getDeclaredFields()[0]`),
+   `BuiltInRegistries.REGISTRY` (реестр реестров) и
+   `COMMAND_ARGUMENT_TYPE` с ключами `uuid`, `resource_location`,
+   `item_enchantment`, `item_stack`, `item_predicate`,
+   `block_predicate`, `entity`, `vec3`, `vec2`, `resource_key`;
+   плюс классы-заглушки аргументов с нужными конструкторами
+   (`EntityArgument(boolean,boolean)`, `Vec3Argument(boolean)` и т.д.).
+   `ExceptionInInitializerError` исчез.
+
+2. **`LifecycleEvents.COMMANDS`**: Paper выполняет их после `onEnable`
+   всех плагинов; мы вызывали синхронно из `registerEventHandler`, из-за
+   чего Cloud переходил в `AFTER_REGISTRATION` раньше времени
+   (`Failed to register ModernPaperBrigadier`). Теперь обработчики
+   откладываются и выполняются в `flushLifecycleCommands()` после цикла
+   включения, до `publishCommands()`.
+
+3. **`/grim` падал** на `ctx.getNodes().get(0)` — `LifecycleCommands.run`
+   создавал `CommandContext` с пустым списком нод. Теперь передаём
+   `ParsedCommandNode`, Cloud заново парсит input. `Unhandled exception`
+   больше нет.
+
+4. **PacketEvents кикал игрока** (`failed to inject into a channel`):
+   ProtocolLib подменяет `Connection.channel` своим
+   `NettyChannelProxy`, PacketEvents не узнаёт канал и в отложенной
+   задаче кикает. После событий login/join возвращаем исходный
+   `EmbeddedChannel` и закрываем его (транспорт всё равно в Rust) —
+   `isOpen=false`, кика нет; `getChannel` снова `EmbeddedChannel`
+   (для PacketEvents это fake-channel).
+
+5. **`Unknown command` для `/seed`, `/say`, `/gamerule`** оказался
+   следствием окружения: из тестового каталога пропал `ops.json`,
+   `op_level` стал 0, и команды уровня ≥2 отбрасывались. Восстановили
+   файл; попутно добавили регрессионный тест
+   `parses_common_commands` (дерево команд содержит типовые команды).
+
+6. **Orebfuscator**: `world.getHandle()` (интерфейс `WorldHandle` на
+   прокси), `ServerLevel.getChunkSource()`,
+   `ServerChunkCache.isChunkLoaded`, `ServerPlayer.level()` —
+   proximity worker больше не падает; `An error occurred: 0`.
+
+Живой прогон:
+```
+plugins: 26 of 27 enabled
+Unknown command: 0
+PacketEvents failed to inject: 0
+Orebfuscator errors: 0
+GrimAC Brigadier/Exception: 0
+DH: nms metadata key=2 optional=HELLO-DH
+```

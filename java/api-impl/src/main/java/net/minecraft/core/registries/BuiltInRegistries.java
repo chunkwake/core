@@ -13,7 +13,41 @@ public final class BuiltInRegistries {
             new SimpleDefaultedRegistry<>(
                     net.minecraft.resources.Identifier.parse("minecraft:pig"));
 
+    /**
+     * Реестр реестров ({@code BuiltInRegistries.REGISTRY}). PacketEvents/
+     * Incendo Cloud достают через него {@code command_argument_type}.
+     */
+    public static final net.minecraft.core.Registry<net.minecraft.core.Registry<?>> REGISTRY =
+            new net.minecraft.core.SimpleRegistry<>();
+
+    /** Аргументы Brigadier (ключ → info); используется Cloud-маппером. */
+    public static final net.minecraft.core.Registry<Object> COMMAND_ARGUMENT_TYPE =
+            new SimpleDefaultedRegistry<>(net.minecraft.resources.Identifier.parse("minecraft:uuid"));
+
+    private static void argument(String key, Class<?> type) {
+        Object info = new Object();
+        COMMAND_ARGUMENT_TYPE.register(net.minecraft.resources.Identifier.parse("minecraft:" + key),
+                info);
+        net.minecraft.commands.synchronization.ArgumentTypeInfos.register(type, info);
+    }
+
     static {
+        REGISTRY.register(net.minecraft.resources.Identifier.parse("minecraft:command_argument_type"),
+                COMMAND_ARGUMENT_TYPE);
+        argument("uuid", net.minecraft.commands.arguments.UuidArgument.class);
+        argument("resource_location",
+                net.minecraft.commands.arguments.ResourceLocationArgument.class);
+        argument("item_enchantment",
+                net.minecraft.commands.arguments.ItemEnchantmentArgument.class);
+        argument("item_stack", net.minecraft.commands.arguments.ItemArgument.class);
+        argument("item_predicate",
+                net.minecraft.commands.arguments.ItemPredicateArgument.class);
+        argument("block_predicate",
+                net.minecraft.commands.arguments.BlockPredicateArgument.class);
+        argument("entity", net.minecraft.commands.arguments.EntityArgument.class);
+        argument("vec3", net.minecraft.commands.arguments.Vec3Argument.class);
+        argument("vec2", net.minecraft.commands.arguments.Vec2Argument.class);
+        argument("resource_key", net.minecraft.commands.arguments.ResourceKeyArgument.class);
         entity("minecraft:pig", 0);
         entity("minecraft:text_display", 135);
         entity("minecraft:item_display", 73);
