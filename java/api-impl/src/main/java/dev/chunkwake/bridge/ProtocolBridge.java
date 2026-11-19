@@ -44,6 +44,8 @@ final class ProtocolBridge {
     private static Object chunkForgetType;
     private static Object playerInfoType;
     private static Object playerChatType;
+    private static Object addEntityType;
+    private static Object blockUpdateType;
     /** Класс-носитель сырых байтов для PacketContainer. */
     public static final class RawPayload {
         public byte[] data;
@@ -140,6 +142,18 @@ final class ProtocolBridge {
                             "net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket",
                             true, loader);
                     titleType = candidate;
+                } else if ("SPAWN_ENTITY".equals(String.valueOf(
+                        candidate.getClass().getMethod("name").invoke(candidate)))) {
+                    carrier = Class.forName(
+                            "net.minecraft.network.protocol.game.ClientboundAddEntityPacket",
+                            true, loader);
+                    addEntityType = candidate;
+                } else if ("BLOCK_CHANGE".equals(String.valueOf(
+                        candidate.getClass().getMethod("name").invoke(candidate)))) {
+                    carrier = Class.forName(
+                            "net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket",
+                            true, loader);
+                    blockUpdateType = candidate;
                 } else if (classNames.contains(
                         "net.minecraft.network.protocol.game.ClientboundPlayerChatPacket")
                         || "CHAT".equals(String.valueOf(
@@ -211,7 +225,9 @@ final class ProtocolBridge {
                     + " entity=" + (entityDataType != null)
                     + " chunk=" + (chunkForgetType != null)
                     + " playerInfo=" + (playerInfoType != null)
-                    + " playerChat=" + (playerChatType != null));
+                    + " playerChat=" + (playerChatType != null)
+                    + " addEntity=" + (addEntityType != null)
+                    + " blockUpdate=" + (blockUpdateType != null));
         } catch (Throwable broken) {
             protocolLib.getLogger().log(java.util.logging.Level.WARNING,
                     "ProtocolBridge: prepare failed", broken);
@@ -267,6 +283,12 @@ final class ProtocolBridge {
             }
             if ("player_chat".equalsIgnoreCase(name) && playerChatType != null) {
                 return playerChat(player, playerChatType, data);
+            }
+            if ("add_entity".equalsIgnoreCase(name) && addEntityType != null) {
+                return addEntity(player, addEntityType, data);
+            }
+            if ("block_update".equalsIgnoreCase(name) && blockUpdateType != null) {
+                return blockUpdate(player, blockUpdateType, data);
             }
             if ("set_entity_data".equalsIgnoreCase(name) && entityDataType != null) {
                 return entityData(player, entityDataType, data);
@@ -334,6 +356,139 @@ final class ProtocolBridge {
             Bridge.log(1, "protocol: sending probe failed: " + broken);
         }
         return false;
+    }
+
+    /** Field-level for {@code ClientboundAddEntityPacket}. */
+    private static byte[] addEntity(org.bukkit.entity.Player player, Object type, byte[] data) {
+        try {
+            int[] pos = {0};
+            int id = readVarInt(data, pos);
+            java.io.DataInputStream in = new java.io.DataInputStream(
+                    new java.io.ByteArrayInputStream(data, pos[0], data.length - pos[0]));
+            int entityId = readVarInt(in);
+            java.util.UUID uuid = new java.util.UUID(in.readLong(), in.readLong());
+            int entityType = readVarInt(in);
+            double x = in.readDouble();
+            double y = in.readDouble();
+            double z = in.readDouble();
+            int velocity = in.readUnsignedByte();
+            if (velocity != 0) {
+                // Ненулевая скорость (`LpVec3`) пока не разбирается.
+                Bridge.log(2, "protocol: add_entity velocity passthrough");
+                return data;
+            }
+            int pitch = in.readUnsignedByte();
+            int yaw = in.readUnsignedByte();
+            int headYaw = in.readUnsignedByte();
+            int extra = readVarInt(in);
+            Class<?> packetClass = Class.forName(
+                    "net.minecraft.network.protocol.game.ClientboundAddEntityPacket", true,
+                    type.getClass().getClassLoader());
+            Object packet = packetClass.getConstructor(int.class, java.util.UUID.class, int.class,
+                    double.class, double.class, double.class, byte[].class, int.class, int.class,
+                    int.class, int.class)
+                    .newInstance(entityId, uuid, entityType, x, y, z, new byte[] {0}, pitch, yaw,
+                            headYaw, extra);
+            Object container = containerConstructor.newInstance(type, packet);
+            Object event = fromServer.invoke(null, plugin, container, player);
+            for (Object listener : (Set<?>) getListeners.invoke(manager)) {
+                Set<?> types = (Set<?>) getTypes.invoke(getSendingWhitelist.invoke(listener));
+                if (types.contains(type)) {
+                    onSending.invoke(listener, event);
+                }
+            }
+            if (Boolean.TRUE.equals(event.getClass().getMethod("isCancelled").invoke(event))) {
+                return null;
+            }
+            int newId = (Integer) packetClass.getMethod("id").invoke(packet);
+            java.util.UUID newUuid = (java.util.UUID) packetClass.getMethod("uuid").invoke(packet);
+            int newType = (Integer) packetClass.getMethod("type").invoke(packet);
+            double newX = (Double) packetClass.getMethod("x").invoke(packet);
+            double newY = (Double) packetClass.getMethod("y").invoke(packet);
+            double newZ = (Double) packetClass.getMethod("z").invoke(packet);
+            byte[] newVelocity = (byte[]) packetClass.getMethod("velocity").invoke(packet);
+            int newPitch = (Integer) packetClass.getMethod("pitch").invoke(packet);
+            int newYaw = (Integer) packetClass.getMethod("yaw").invoke(packet);
+            int newHead = (Integer) packetClass.getMethod("headYaw").invoke(packet);
+            int newData = (Integer) packetClass.getMethod("data").invoke(packet);
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream(data.length);
+            writeVarInt(bytes, id);
+            writeVarInt(bytes, newId);
+            java.io.DataOutputStream out = new java.io.DataOutputStream(bytes);
+            out.writeLong(newUuid.getMostSignificantBits());
+            out.writeLong(newUuid.getLeastSignificantBits());
+            out.flush();
+            writeVarInt(bytes, newType);
+            out.writeDouble(newX);
+            out.writeDouble(newY);
+            out.writeDouble(newZ);
+            out.write(newVelocity == null ? new byte[] {0} : newVelocity);
+            out.writeByte(newPitch);
+            out.writeByte(newYaw);
+            out.writeByte(newHead);
+            out.flush();
+            writeVarInt(bytes, newData);
+            out.flush();
+            byte[] result = bytes.toByteArray();
+            if (!java.util.Arrays.equals(result, data)) {
+                Bridge.log(2, "protocol: add_entity re-encoded (entity=" + newId + ", y=" + newY
+                        + ")");
+            }
+            return result;
+        } catch (Throwable broken) {
+            Throwable cause = broken.getCause() == null ? broken : broken.getCause();
+            Bridge.log(1, "protocol: add_entity bridge failed: " + cause);
+            return data;
+        }
+    }
+
+    /** Field-level for {@code ClientboundBlockUpdatePacket}. */
+    private static byte[] blockUpdate(org.bukkit.entity.Player player, Object type, byte[] data) {
+        try {
+            int[] pos = {0};
+            int id = readVarInt(data, pos);
+            java.io.DataInputStream in = new java.io.DataInputStream(
+                    new java.io.ByteArrayInputStream(data, pos[0], data.length - pos[0]));
+            long packed = in.readLong();
+            int stateId = readVarInt(in);
+            net.minecraft.core.BlockPos blockPos = net.minecraft.core.BlockPos.of(packed);
+            Class<?> packetClass = Class.forName(
+                    "net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket", true,
+                    type.getClass().getClassLoader());
+            Object packet = packetClass.getConstructor(net.minecraft.core.BlockPos.class,
+                    int.class).newInstance(blockPos, stateId);
+            Object container = containerConstructor.newInstance(type, packet);
+            Object event = fromServer.invoke(null, plugin, container, player);
+            for (Object listener : (Set<?>) getListeners.invoke(manager)) {
+                Set<?> types = (Set<?>) getTypes.invoke(getSendingWhitelist.invoke(listener));
+                if (types.contains(type)) {
+                    onSending.invoke(listener, event);
+                }
+            }
+            if (Boolean.TRUE.equals(event.getClass().getMethod("isCancelled").invoke(event))) {
+                return null;
+            }
+            net.minecraft.core.BlockPos newPos =
+                    (net.minecraft.core.BlockPos) packetClass.getMethod("getPos").invoke(packet);
+            int newState = (Integer) packetClass.getMethod("stateId").invoke(packet);
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream(data.length);
+            writeVarInt(bytes, id);
+            java.io.DataOutputStream out = new java.io.DataOutputStream(bytes);
+            out.writeLong(newPos.asLong());
+            out.flush();
+            writeVarInt(bytes, newState);
+            out.flush();
+            byte[] result = bytes.toByteArray();
+            if (!java.util.Arrays.equals(result, data)) {
+                Bridge.log(2, "protocol: block_update re-encoded (pos=" + newPos.getX() + ","
+                        + newPos.getY() + "," + newPos.getZ() + " state=" + newState + ")");
+            }
+            return result;
+        } catch (Throwable broken) {
+            Throwable cause = broken.getCause() == null ? broken : broken.getCause();
+            Bridge.log(1, "protocol: block_update bridge failed: " + cause);
+            return data;
+        }
     }
 
     /** Field-level for {@code ClientboundPlayerChatPacket}. */

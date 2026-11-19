@@ -1092,3 +1092,34 @@ player_chat: CB-CHAT-6
 - `system_chat` модификация по-прежнему работает (`CB-MODIFIED-N`).
 
 Гейт: 26 of 27 enabled (Voxy требует MC <26.2).
+
+## Батчевые spawn/block-пакеты: field-level (проверено)
+
+- `ClientboundAddEntityPacket`: `ClientboundBlockUpdatePacket` получили
+  реальные поля и декодер/энкодер в `ProtocolBridge`.
+  ProtocolLib-типы называются legacy: `SPAWN_ENTITY` и `BLOCK_CHANGE`;
+  мост регистрирует для них наши NMS-классы по имени типа.
+- Rust: `flush_blocks` теперь хранит **нефреймленный** пакет в
+  `BlockItem.raw`, а доставка идёт через `frame_for(me, raw)` —
+  per-player, как у `ENTITY_METADATA`. Спавны (`spawn_tracked`) уже шли
+  через `raw_spawn`.
+
+Живая проверка (ClientboundProbe меняет поля):
+```
+[ClientboundProbe] ADD_ENTITY doubles=3 ints=6
+[ClientboundProbe] WROTE add_entity y=-59.0
+protocol: add_entity re-encoded (entity=435, y=-59.0)
+
+[ClientboundProbe] BLOCK_CHANGE ints=1
+[ClientboundProbe] WROTE block state=11
+protocol: block_update re-encoded (pos=27,-61,23 state=11)
+```
+
+Ограничения:
+- `add_entity` с ненулевой скоростью (`LpVec3`) пока passthrough: наши
+  спавны пишут нулевую скорость (один байт 0);
+- block-update отдаёт `BlockPos` + `int stateId` (не `WrappedBlockData`):
+  реестр блоков ещё не наполнен, поэтому `getBlockState()` может быть null;
+- `section_blocks_update` (`MULTI_BLOCK_CHANGE`) остаётся RawPayload.
+
+Гейт: 26 of 27 enabled (Voxy требует MC <26.2).
