@@ -211,6 +211,18 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
                         + w.getLoadedChunks().length);
             }
         }, 100, 200);
+
+        // Folia: две задачи в разных регионах (8x8 чанков) на реальных
+        // region-воркерах. Проверяем параллельность и владение регионом.
+        getServer().getScheduler().runTaskTimer(this, () -> {
+            if (getServer().getWorlds().isEmpty()) {
+                return;
+            }
+            org.bukkit.World w = getServer().getWorlds().get(0);
+            var scheduler = getServer().getRegionScheduler();
+            scheduler.run(this, w, 0, 0, task -> regionProbe(w, 0, 0, 64, 64));
+            scheduler.run(this, w, 64, 64, task -> regionProbe(w, 64, 64, 0, 0));
+        }, 120, 200);
         // Редстоун: поршень от редстоун-блока и поршень через провод.
         getServer().getScheduler().runTaskLater(this, () -> {
             org.bukkit.World w = getServer().getWorlds().get(0);
@@ -696,4 +708,29 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
                 + Thread.currentThread().getName() + " owned=" + getServer().isGlobalTickThread()), 500,
                 java.util.concurrent.TimeUnit.MILLISECONDS);
     }
+    private static final java.util.concurrent.atomic.AtomicInteger REGION_BUSY =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private static final java.util.concurrent.atomic.AtomicInteger REGION_MAX =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    private void regionProbe(org.bukkit.World w, int cx, int cz, int ox, int oz) {
+        int busy = REGION_BUSY.incrementAndGet();
+        REGION_MAX.accumulateAndGet(busy, Math::max);
+        try {
+            boolean self = getServer().isOwnedByCurrentRegion(w, cx, cz);
+            boolean other = getServer().isOwnedByCurrentRegion(w, ox, oz);
+            getLogger().info("region task: chunk=" + cx + "," + cz
+                    + " thread=" + Thread.currentThread().getName()
+                    + " ownsSelf=" + self + " ownsOther=" + other
+                    + " overlap=" + REGION_MAX.get());
+            try {
+                Thread.sleep(40);
+            } catch (InterruptedException stop) {
+                Thread.currentThread().interrupt();
+            }
+        } finally {
+            REGION_BUSY.decrementAndGet();
+        }
+    }
+
 }

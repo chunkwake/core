@@ -1151,3 +1151,38 @@ protocol: section_blocks_update re-encoded (section=1048572, changes=2, first_st
 - states остаются id-ами, без `WrappedBlockData`.
 
 Гейт: 26 of 27 enabled (Voxy требует MC <26.2).
+
+## Folia: реальные регионные петли (первый шаг)
+
+Добавлен `RegionTicker`: N даун-потоков («Folia Region Worker #k») с
+собственными очередями. Регион — 8×8 чанков (как у Folia), закрепляется
+за воркером при первой задаче (round-robin), поэтому задачи одного
+региона выполняются последовательно, а разных — параллельно.
+
+- `FoliaSchedulers.Region` больше не делегирует в
+  `GlobalRegionScheduler`: `execute/run/runDelayed/runAtFixedRate`
+  ставят задачу в очередь своего региона (`RegionTask` реализует
+  `ScheduledTask` с корректными состояниями и `cancel()`).
+- `ChunkwakeServer.isOwnedByCurrentRegion(...)` теперь проверяет
+  **регион чанка**, а не «главный поток»: thread-local текущего региона
+  выставляется только на время выполнения задачи этого региона.
+
+Живая проверка (`ChunkwakeTest` планирует две задачи в регионах
+`(0,0)` и `(8,8)`):
+```
+region task: chunk=0,0 thread=Folia Region Worker #0 ownsSelf=true ownsOther=false overlap=2
+region task: chunk=64,64 thread=Folia Region Worker #1 ownsSelf=true ownsOther=false overlap=2
+```
+`overlap=2` — задачи действительно выполняются одновременно на разных
+потоках; `ownsSelf=true/ownsOther=false` — владение регионом корректное.
+
+### Честное ограничение
+
+Симуляция мира (чанки, мобы, редстоун, сущности) по-прежнему идёт одним
+тиком (`PlayPlan::run_phases`), регионные воркеры сейчас выполняют только
+**плагинные** region-задачи. Поэтому сравнение MSPT/TPS «multi-region
+против single-thread» пока невозможно: базовый замер при 1 игроке —
+`TPS: 15.8 MSPT: 17.1`. Следующий шаг — разрезать `run_dim_phases` по
+регионам и перенести тик чанков/сущностей в воркеры.
+
+Гейт: 26 of 27 enabled (Voxy требует MC <26.2).

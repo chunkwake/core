@@ -45,6 +45,13 @@ final class FoliaSchedulers {
     private final ExecutorService workers = Executors.newThreadPerTaskExecutor(
             Thread.ofVirtual().name("Folia Async Scheduler Thread #", 0).factory());
 
+    /** Регионные задачи (живут отдельно от {@link Task}). */
+    private final Set<RegionTask> regionLive = ConcurrentHashMap.newKeySet();
+
+    /** Настоящие регионные петли (8x8 чанков на регион). */
+    final RegionTicker ticker = new RegionTicker(
+            Math.max(2, Math.min(4, Runtime.getRuntime().availableProcessors() / 4)));
+
     final GlobalRegionScheduler global = new Global();
     final RegionScheduler region = new Region();
     final AsyncScheduler async = new Async();
@@ -54,6 +61,14 @@ final class FoliaSchedulers {
     }
 
     /** Планировщик сущности; {@code retired} — сущность исчезла (тогда вместо задачи вызывается {@code retired}). */
+    boolean ownsRegion(World world, int blockX, int blockZ) {
+        return this.ticker.owns(RegionTicker.Key.ofBlock(world, blockX, blockZ));
+    }
+
+    boolean ownsRegionChunk(World world, int chunkX, int chunkZ) {
+        return this.ticker.owns(RegionTicker.Key.of(world, chunkX, chunkZ));
+    }
+
     EntityScheduler entity(BooleanSupplier retired) {
         return new Entity(retired);
     }
@@ -61,6 +76,11 @@ final class FoliaSchedulers {
     /** Отмена всех задач плагина при его выключении (как Paper после {@code onDisable}). */
     void cancelTasks(Plugin plugin) {
         for (Task t : live) {
+            if (t.plugin == plugin) {
+                t.cancel();
+            }
+        }
+        for (RegionTask t : regionLive) {
             if (t.plugin == plugin) {
                 t.cancel();
             }
@@ -260,24 +280,135 @@ final class FoliaSchedulers {
     private final class Region implements RegionScheduler {
         @Override
         public void execute(Plugin plugin, World world, int chunkX, int chunkZ, Runnable run) {
-            plugin.getServer().getGlobalRegionScheduler().execute(plugin, run);
+            Objects.requireNonNull(plugin, "Plugin may not be null");
+            Objects.requireNonNull(run, "Runnable may not be null");
+            Objects.requireNonNull(world, "World may not be null");
+            checkEnabled(plugin);
+            schedule(plugin, world, chunkX, chunkZ, 1, 0, t -> run.run());
         }
 
         @Override
-        public ScheduledTask run(Plugin plugin, World world, int chunkX, int chunkZ, Consumer<ScheduledTask> task) {
-            return plugin.getServer().getGlobalRegionScheduler().run(plugin, task);
+        public ScheduledTask run(Plugin plugin, World world, int chunkX, int chunkZ,
+                Consumer<ScheduledTask> task) {
+            Objects.requireNonNull(plugin, "Plugin may not be null");
+            Objects.requireNonNull(task, "Task may not be null");
+            Objects.requireNonNull(world, "World may not be null");
+            checkEnabled(plugin);
+            return schedule(plugin, world, chunkX, chunkZ, 1, 0, task);
         }
 
         @Override
         public ScheduledTask runDelayed(Plugin plugin, World world, int chunkX, int chunkZ,
                 Consumer<ScheduledTask> task, long delay) {
-            return plugin.getServer().getGlobalRegionScheduler().runDelayed(plugin, task, delay);
+            Objects.requireNonNull(plugin, "Plugin may not be null");
+            Objects.requireNonNull(task, "Task may not be null");
+            Objects.requireNonNull(world, "World may not be null");
+            if (delay <= 0) {
+                throw new IllegalArgumentException("Delay ticks may not be <= 0");
+            }
+            checkEnabled(plugin);
+            return schedule(plugin, world, chunkX, chunkZ, delay, 0, task);
         }
 
         @Override
         public ScheduledTask runAtFixedRate(Plugin plugin, World world, int chunkX, int chunkZ,
                 Consumer<ScheduledTask> task, long initialDelay, long period) {
-            return plugin.getServer().getGlobalRegionScheduler().runAtFixedRate(plugin, task, initialDelay, period);
+            Objects.requireNonNull(plugin, "Plugin may not be null");
+            Objects.requireNonNull(task, "Task may not be null");
+            Objects.requireNonNull(world, "World may not be null");
+            if (initialDelay <= 0) {
+                throw new IllegalArgumentException("Initial delay ticks may not be <= 0");
+            }
+            if (period <= 0) {
+                throw new IllegalArgumentException("Period ticks may not be <= 0");
+            }
+            checkEnabled(plugin);
+            return schedule(plugin, world, chunkX, chunkZ, initialDelay, period, task);
+        }
+
+        private ScheduledTask schedule(Plugin plugin, World world, int chunkX, int chunkZ,
+                long delay, long period, Consumer<ScheduledTask> task) {
+            RegionTicker.Key key = RegionTicker.Key.of(world, chunkX, chunkZ);
+            RegionTask handle = new RegionTask(plugin, period > 0);
+            RegionTicker.RegionJob job = ticker.schedule(key, delay, period, j -> {
+                if (handle.begin()) {
+                    try {
+                        task.accept(handle);
+                    } finally {
+                        handle.end();
+                    }
+                }
+            });
+            handle.attach(job);
+            return handle;
+        }
+    }
+
+    /** {@link ScheduledTask} поверх регионной задачи. */
+    final class RegionTask implements ScheduledTask {
+        private final Plugin plugin;
+        private final boolean repeating;
+        private final java.util.concurrent.atomic.AtomicInteger state =
+                new java.util.concurrent.atomic.AtomicInteger(0);
+        private volatile RegionTicker.RegionJob job;
+
+        RegionTask(Plugin plugin, boolean repeating) {
+            this.plugin = plugin;
+            this.repeating = repeating;
+            regionLive.add(this);
+        }
+
+        void attach(RegionTicker.RegionJob job) {
+            this.job = job;
+        }
+
+        boolean begin() {
+            return this.state.compareAndSet(0, 1);
+        }
+
+        void end() {
+            if (!this.repeating) {
+                this.state.set(2);
+                regionLive.remove(this);
+            } else if (this.state.get() == 1) {
+                this.state.set(0);
+            }
+        }
+
+        @Override
+        public Plugin getOwningPlugin() {
+            return this.plugin;
+        }
+
+        @Override
+        public boolean isRepeatingTask() {
+            return this.repeating;
+        }
+
+        @Override
+        public CancelledState cancel() {
+            RegionTicker.RegionJob j = this.job;
+            if (j != null) {
+                j.cancel();
+            }
+            int previous = this.state.getAndUpdate(v -> v == 1 ? 4 : 3);
+            regionLive.remove(this);
+            if (previous == 3 || previous == 4) {
+                return CancelledState.CANCELLED_ALREADY;
+            }
+            return previous == 1 ? CancelledState.NEXT_RUNS_CANCELLED
+                    : CancelledState.CANCELLED_BY_CALLER;
+        }
+
+        @Override
+        public ExecutionState getExecutionState() {
+            return switch (this.state.get()) {
+                case 1 -> ExecutionState.RUNNING;
+                case 2 -> ExecutionState.FINISHED;
+                case 3 -> ExecutionState.CANCELLED;
+                case 4 -> ExecutionState.CANCELLED_RUNNING;
+                default -> ExecutionState.IDLE;
+            };
         }
     }
 
