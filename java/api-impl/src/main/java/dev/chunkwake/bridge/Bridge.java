@@ -61,7 +61,8 @@ public final class Bridge {
     static final int UP_PACKET = 31;
     static final int FLAG_PACKETS = 32;
     static final int DOWN_VIA_EMIT = 30;
-    static final int SLOTS = 33;
+    static final int DOWN_SEND_PACKET = 33;
+    static final int SLOTS = 34;
 
     /** События с ответом ({@code chunkwake_net::live::Event}). */
     static final int EVENT_DAMAGE = 1, EVENT_DEATH = 2, EVENT_DROP = 3, EVENT_PICKUP = 4, EVENT_GAME_MODE = 5,
@@ -87,7 +88,7 @@ public final class Bridge {
     }
 
     static MemorySegment table;
-    static MethodHandle sendMessage, broadcast, log, setCommands, opLevel, setOp, playerState, playerVersion, playerControl, world;
+    static MethodHandle sendMessage, broadcast, log, setCommands, opLevel, setOp, playerState, playerVersion, playerControl, world, sendPacket;
     static MethodHandle viaEmit;
     /** ViaVersion как библиотека; {@code null} — Via в `plugins/` нет. */
     static ViaHost via;
@@ -131,6 +132,8 @@ public final class Bridge {
         playerControl = down(linker, DOWN_PLAYER_CONTROL,
                 FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_INT));
         world = down(linker, DOWN_WORLD, FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT));
+        sendPacket = down(linker, DOWN_SEND_PACKET,
+                FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_INT));
         // Результат перевода: Java отдаёт буфер Netty как есть (бывает и в куче),
         // Rust копирует его в свой коллектор и в JVM не возвращается.
         viaEmit = linker.downcallHandle(MemorySegment.ofAddress(table.getAtIndex(JAVA_LONG, DOWN_VIA_EMIT)),
@@ -394,6 +397,21 @@ public final class Bridge {
             int n = (int) world.invokeExact(a.allocateFrom(java.lang.foreign.ValueLayout.JAVA_BYTE, b), b.length,
                     out, 8192);
             return string(out, n);
+        } catch (Throwable t) {
+            throw new IllegalStateException(t);
+        }
+    }
+
+    /** Сырой пакет игроку (NMS-мост: DecentHolograms/TAB). */
+    static boolean sendPacket(UUID id, byte[] data) {
+        if (data == null || data.length == 0) {
+            return false;
+        }
+        try (Arena a = Arena.ofConfined()) {
+            return (int) sendPacket.invokeExact(id.getMostSignificantBits(),
+                    id.getLeastSignificantBits(),
+                    a.allocateFrom(java.lang.foreign.ValueLayout.JAVA_BYTE, data),
+                    data.length) != 0;
         } catch (Throwable t) {
             throw new IllegalStateException(t);
         }

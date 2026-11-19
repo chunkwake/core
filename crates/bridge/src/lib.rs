@@ -65,8 +65,9 @@ enum Slot {
     DownViaEmit = 30,
     UpPacket = 31,
     FlagPackets = 32,
+    DownSendPacket = 33,
 }
-const SLOTS: usize = 33;
+const SLOTS: usize = 34;
 
 /// Буфер ответа на событие (смерть с полным инвентарём укладывается с запасом).
 const EVENT_REPLY_CAP: usize = 64 << 10;
@@ -195,6 +196,7 @@ impl Bridge {
             player_version as *const () as u64,
         );
         set(table, Slot::DownWorld, world as *const () as u64);
+        set(table, Slot::DownSendPacket, send_packet as *const () as u64);
         set(table, Slot::DownViaEmit, via::emit as *const () as u64);
         let dir: &'static str =
             Box::leak(plugins_dir.to_string_lossy().into_owned().into_boxed_str());
@@ -537,6 +539,17 @@ extern "C" fn player_version(hi: i64, lo: i64) -> i64 {
     host()
         .and_then(|p| p.state_version(uuid))
         .map_or(-1, |v| v as i64)
+}
+
+/// Отправка сырого пакета игроку (NMS-мост: DecentHolograms/TAB).
+extern "C" fn send_packet(hi: i64, lo: i64, ptr: *const u8, len: i32) -> i32 {
+    let bytes: &[u8] = if ptr.is_null() || len <= 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(ptr, len as usize) }
+    };
+    host().is_some_and(|p| p.send_raw_packet(Uuid::from_u64_pair(hi as u64, lo as u64), bytes))
+        as i32
 }
 
 extern "C" fn player_control(hi: i64, lo: i64, ptr: *const u8, len: i32) -> i32 {

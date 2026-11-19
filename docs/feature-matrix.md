@@ -1317,3 +1317,35 @@ NBT-API при включении DH пишет `NBT-API could not be loaded` �
 ограничение NBT-обвязки.
 
 Гейт: 26 of 27 enabled (Voxy требует MC <26.2).
+
+## NMS → wire мост (первый пакетный набор)
+
+Плагины, которые шлют NMS-пакеты через
+`player.getHandle().connection.send(packet)`, теперь доходят до клиента:
+добавлен downcall `DownSendPacket` (slot 33), `Bridge.sendPacket(uuid, bytes)`,
+`Connection` привязан к игроку (`CraftPlayer.bindConnection`), а
+`PacketWire` сериализует поддерживаемые пакеты в сетевые байты.
+
+Поддержаны:
+- `ClientboundAddEntityPacket` (реальная сигнатура DecentHolograms:
+  id, uuid, x/y/z, pitch, yaw, type, data, velocity, headYaw);
+- `ClientboundRemoveEntitiesPacket`.
+
+Живая проверка (тест-плагин шлёт NMS-пакеты, бот их ловит):
+```
+[ChunkwakeTest] nms-wire: sent add/remove 9999 to boater
+бот:
+nms add_entity id=9999
+nms remove id=9999
+```
+
+### Что ещё нужно для голограммы DecentHolograms
+
+DH использует ещё `ClientboundSetEntityDataPacket` (метаданные текст-дисплея),
+`ClientboundTeleportEntityPacket`, `ClientboundSetEquipmentPacket`,
+`ClientboundSetPassengersPacket`. Для них нужны NMS-модели
+`SynchedEntityData.DataValue`, `PositionMoveRotation`, `Pair<EquipmentSlot,
+ItemStack>` и сериализация метаданных по serializer-id. Это следующий шаг;
+сейчас DH-голограмма не отрисуется, хотя путь отправки пакетов работает.
+
+Гейт: 26 of 27 enabled (Voxy требует MC <26.2).

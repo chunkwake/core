@@ -14,6 +14,11 @@ public class CraftPlayer extends CraftHumanEntity {
         super(impl);
     }
 
+    /** Привязывает NMS-соединение к игроку (NMS-мост плагинов). */
+    public void bindConnection(java.util.UUID owner) {
+        this.fallback.connection.connection.setOwner(owner);
+    }
+
     /** Конструктор как у CraftBukkit: `CraftPlayer(CraftServer, ServerPlayer)`. */
     public CraftPlayer(org.bukkit.craftbukkit.CraftServer server, ServerPlayer entity) {
         super(server, entity);

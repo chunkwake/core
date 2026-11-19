@@ -25,6 +25,29 @@ public class ClientboundAddEntityPacket implements Packet {
     public ClientboundAddEntityPacket() {
     }
 
+    /**
+     * Сигнатура, которую использует DecentHolograms:
+     * (id, uuid, x, y, z, pitch, yaw, type, data, velocity, headYaw).
+     */
+    public ClientboundAddEntityPacket(int id, UUID uuid, double x, double y, double z,
+            float pitch, float yaw, int type, int data,
+            net.minecraft.world.phys.Vec3 velocity, double headYaw) {
+        this.id = id;
+        this.uuid = uuid;
+        this.type = type;
+        this.x = x;
+        this.y = y;
+        this.z = z;
+        this.pitch = angle(pitch);
+        this.yaw = angle(yaw);
+        this.headYaw = angle((float) headYaw);
+        this.data = data;
+    }
+
+    private static int angle(float degrees) {
+        return ((int) Math.floor(degrees * 256.0 / 360.0)) & 0xFF;
+    }
+
     public ClientboundAddEntityPacket(int id, UUID uuid, int type, double x, double y, double z,
             byte[] velocity, int pitch, int yaw, int headYaw, int data) {
         this.id = id;

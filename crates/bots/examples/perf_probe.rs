@@ -12,6 +12,8 @@ struct Probe {
     sb_chat: i32,
     cb_chat: i32,
     cb_player_chat: i32,
+    cb_add_entity: i32,
+    cb_remove_entities: i32,
     chat: String,
 }
 
@@ -31,6 +33,20 @@ impl Probe {
                     flatten(&component, &mut out);
                     self.chat.push_str(&out);
                     self.chat.push('\n');
+                }
+            } else if id == self.cb_add_entity {
+                let mut r = Reader::new(&body);
+                if r.var_int().is_ok_and(|entity| entity == 9999) {
+                    println!("nms add_entity id=9999");
+                }
+            } else if id == self.cb_remove_entities {
+                let mut r = Reader::new(&body);
+                if let Ok(count) = r.var_int() {
+                    for _ in 0..count {
+                        if r.var_int().is_ok_and(|entity| entity == 9999) {
+                            println!("nms remove id=9999");
+                        }
+                    }
                 }
             } else if id == self.cb_player_chat
                 && let Some(text) = read_player_chat_unsigned(&body)
@@ -102,17 +118,21 @@ async fn main() {
     let cb = |n| table.id(State::Play, Direction::Clientbound, n).unwrap();
     let cb_chat = cb("system_chat");
     let cb_player_chat = cb("player_chat");
+    let cb_add_entity = cb("add_entity");
+    let cb_remove_entities = cb("remove_entities");
     let name = std::env::var("PERF_NAME").unwrap_or_else(|_| "boater".into());
     let mut c = Client::connect(&a[1], &name, ids, 777, "26.3")
         .await
         .unwrap();
-    c.capture_also = vec![cb_chat, cb_player_chat];
+    c.capture_also = vec![cb_chat, cb_player_chat, cb_add_entity, cb_remove_entities];
     let mut p = Probe {
         c,
         sb_command: sb("chat_command"),
         sb_chat: sb("chat"),
         cb_chat,
         cb_player_chat,
+        cb_add_entity,
+        cb_remove_entities,
         chat: String::new(),
     };
     // Точка спавна игрока: спавним мобов рядом с ней (иначе чанки

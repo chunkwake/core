@@ -18,6 +18,7 @@ import net.minecraft.network.protocol.Packet;
 public class Connection {
     public Channel channel;
     private PacketListener listener;
+    private java.util.UUID owner;
 
     public Connection() {
         EmbeddedChannel embedded = new EmbeddedChannel();
@@ -30,6 +31,22 @@ public class Connection {
     }
 
     public void send(Packet packet) {
+        if (this.owner == null || packet == null) {
+            return;
+        }
+        byte[] wire = dev.chunkwake.bridge.PacketWireAccess.encode(packet);
+        if (wire != null) {
+            dev.chunkwake.bridge.PacketWireAccess.send(this.owner, wire);
+        }
+    }
+
+    /** Игрок-владелец этого соединения (для NMS-моста). */
+    public java.util.UUID owner() {
+        return this.owner;
+    }
+
+    public void setOwner(java.util.UUID owner) {
+        this.owner = owner;
     }
 
     public void read(ChannelHandlerContext context, Packet packet) {

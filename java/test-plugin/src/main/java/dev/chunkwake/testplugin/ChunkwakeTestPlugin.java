@@ -212,6 +212,43 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             }
         }, 100, 200);
 
+        // NMS-мост: плагины (DecentHolograms/TAB) шлют пакеты через
+        // getHandle().connection.send(...); проверяем, что байты доходят
+        // до клиента (бот ловит add_entity/remove_entities с id 9999).
+        // Всё через рефлексию: тест-плагин собран только против paper-api.
+        getServer().getScheduler().runTaskTimer(this, () -> {
+            for (org.bukkit.entity.Player p : getServer().getOnlinePlayers()) {
+                try {
+                    Class<?> addClass = Class.forName(
+                            "net.minecraft.network.protocol.game.ClientboundAddEntityPacket");
+                    Class<?> removeClass = Class.forName(
+                            "net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket");
+                    Class<?> vecClass = Class.forName("net.minecraft.world.phys.Vec3");
+                    Object zero = vecClass.getField("ZERO").get(null);
+                    Object add = addClass
+                            .getConstructor(int.class, java.util.UUID.class, double.class,
+                                    double.class, double.class, float.class, float.class,
+                                    int.class, int.class, vecClass, double.class)
+                            .newInstance(9999, java.util.UUID.randomUUID(),
+                                    p.getLocation().getX(), p.getLocation().getY(),
+                                    p.getLocation().getZ(), 0f, 0f, 1, 0, zero, 0.0);
+                    Object remove = removeClass.getConstructor(int[].class)
+                            .newInstance((Object) new int[] {9999});
+                    Object handle = p.getClass().getMethod("getHandle").invoke(p);
+                    Object listener = handle.getClass().getField("connection").get(handle);
+                    Object connection = listener.getClass().getField("connection")
+                            .get(listener);
+                    Class<?> packetClass = Class.forName("net.minecraft.network.protocol.Packet");
+                    var send = connection.getClass().getMethod("send", packetClass);
+                    send.invoke(connection, add);
+                    send.invoke(connection, remove);
+                    getLogger().info("nms-wire: sent add/remove 9999 to " + p.getName());
+                } catch (Throwable broken) {
+                    getLogger().warning("nms-wire failed: " + broken);
+                }
+            }
+        }, 150, 200);
+
         // Folia: две задачи в разных регионах (8x8 чанков) на реальных
         // region-воркерах. Проверяем параллельность и владение регионом.
         getServer().getScheduler().runTaskTimer(this, () -> {

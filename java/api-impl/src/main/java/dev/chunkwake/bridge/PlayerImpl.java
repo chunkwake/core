@@ -44,6 +44,9 @@ public final class PlayerImpl {
         this.server = server;
         this.id = id;
         this.name = name;
+        // NMS-мост: плагины (DecentHolograms/TAB) шлют пакеты через
+        // `player.getHandle().connection.send(...)`.
+        ((org.bukkit.craftbukkit.entity.CraftPlayer) this.api).bindConnection(id);
     }
 
     public String getName() { return name; }
