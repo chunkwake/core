@@ -53,6 +53,11 @@ final class BlockDataImpl {
         if (path.equals("observer")) {
             ifaces.add(org.bukkit.block.data.type.Observer.class);
         }
+        // Dispenser/Dropper: WorldGuard и другие плагины кастуют BlockData
+        // к конкретному интерфейсу, а не к общему BlockData.
+        if (path.endsWith("dispenser") || path.endsWith("dropper")) {
+            ifaces.add(org.bukkit.block.data.type.Dispenser.class);
+        }
         if (props.containsKey("facing")) ifaces.add(org.bukkit.block.data.Directional.class);
         if (props.containsKey("powered")) ifaces.add(org.bukkit.block.data.Powerable.class);
         if (props.containsKey("open")) ifaces.add(org.bukkit.block.data.Openable.class);
@@ -110,6 +115,12 @@ final class BlockDataImpl {
 
     public BlockFace getFacing() { return BlockFace.valueOf(props.get("facing").toUpperCase(Locale.ROOT)); }
     public void setFacing(BlockFace f) { props.put("facing", f.name().toLowerCase(Locale.ROOT)); }
+
+    /** {@code org.bukkit.block.data.type.Dispenser#isTriggered}. */
+    public boolean isTriggered() { return flag("triggered"); }
+
+    /** {@code org.bukkit.block.data.type.Dispenser#setTriggered}. */
+    public void setTriggered(boolean triggered) { flag("triggered", triggered); }
 
     public Set<BlockFace> getFaces() {
         return props.containsKey("facing")

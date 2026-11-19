@@ -1266,3 +1266,27 @@ injector-API ProtocolLib (серверные пакеты/каналы) не п�
   block-data.
 
 Гейт: 26 of 27 enabled (Voxy требует MC <26.2).
+
+## WorldGuard Dispenser и Essentials getPlayer (исправлено, проверено)
+
+- `BlockDataImpl` для `dispenser`/`dropper` теперь реализует конкретный
+  `org.bukkit.block.data.type.Dispenser` (а не только общий `BlockData`),
+  плюс `isTriggered/setTriggered`. Раньше WorldGuard в
+  `BlockDispenseEvent` падал:
+  `ClassCastException: $Proxy cannot be cast to ...Dispenser`.
+- `PlayerImpl.getPlayer()` добавлен и возвращает сам API-прокси. Раньше
+  `CraftHumanEntity.getPlayer()` уходил в `PlayerCalls` к `PlayerImpl`,
+  получал null, и Essentials/LuckPerms падали:
+  `NullPointerException: player` в
+  `AbstractVaultPermission.getPrimaryGroup`.
+
+Живой замер:
+- до фиксов (`p196`): 2 события `dispense` → 2 ошибки WorldGuard;
+- после (`p199`): 3 события `dispense` → 0 ошибок WorldGuard,
+  вход игрока (`boater joined the game`) — без NPE Essentials.
+
+Осталась одна известная дыра из этой тройки: **DecentHolograms**
+(`Failed to modify player's pipeline`) — плагин вставляет собственные
+Netty-обработчики, а транспорт не Netty.
+
+Гейт: 26 of 27 enabled (Voxy требует MC <26.2).

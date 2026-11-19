@@ -63,6 +63,9 @@ public final class PlayerImpl {
     public World getWorld() { return server.world(state().dim()).api; }
     public boolean isOnline() { return online; }
     public boolean isConnected() { return online; }
+
+    /** {@code OfflinePlayer#getPlayer}: для онлайн-игрока — он сам. */
+    public Player getPlayer() { return this.api; }
     public boolean isOp() { return Bridge.opLevel(id) > 0; }
     public void setOp(boolean op) {
         Bridge.setOp(id, op);
