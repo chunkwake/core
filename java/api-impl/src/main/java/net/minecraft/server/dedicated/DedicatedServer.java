@@ -4,7 +4,14 @@ import net.minecraft.server.MinecraftServer;
 
 /** Минимальный NMS {@code DedicatedServer} (Voxy и другие проверяют класс). */
 public class DedicatedServer extends MinecraftServer {
+    private final net.minecraft.commands.Commands commands = new net.minecraft.commands.Commands();
+
     public static DedicatedServer create() {
         return new DedicatedServer();
+    }
+
+    /** `DedicatedServer.getCommands()`: диспетчер Brigadier для плагинов. */
+    public net.minecraft.commands.Commands getCommands() {
+        return this.commands;
     }
 }

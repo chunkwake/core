@@ -15,10 +15,13 @@ public class CraftServer implements org.bukkit.Server {
     private final Object handle;
     private final net.minecraft.server.dedicated.DedicatedPlayerList nmsHandle =
             new net.minecraft.server.dedicated.DedicatedPlayerList();
+    private final net.minecraft.server.dedicated.DedicatedServer nmsServer =
+            net.minecraft.server.dedicated.DedicatedServer.create();
 
     public CraftServer(Object handle) {
         this.handle = handle;
     }
+
 
     public net.minecraft.server.dedicated.DedicatedPlayerList getHandle() {
         return this.nmsHandle;
@@ -1144,8 +1147,12 @@ public class CraftServer implements org.bukkit.Server {
         return (java.lang.Object) PlayerCalls.call(this.handle, "getOrDefaultFrom", new Class<?>[]{ net.kyori.adventure.pointer.Pointer.class, java.util.function.Supplier.class }, new Object[]{ p0, p1 }, java.lang.Object.class);
     }
 
-    /** {@code CraftServer.getServer()}: NMS-сервер для Simple Voice Chat/TAB. */
-    public net.minecraft.server.MinecraftServer getServer() {
-        return net.minecraft.server.MinecraftServer.SERVER;
+    /**
+     * {@code CraftServer.getServer()}: NMS-сервер для Simple Voice Chat/TAB и
+     * для Brigadier-диспетчера (NpcPlugin). Как в Paper, тип —
+     * {@code DedicatedServer} (ковариантный возврат).
+     */
+    public net.minecraft.server.dedicated.DedicatedServer getServer() {
+        return this.nmsServer;
     }
 }

@@ -7,6 +7,10 @@ import com.mojang.brigadier.arguments.ArgumentType;
 public class UuidArgument implements ArgumentType<Object> {
     public UuidArgument() {
     }
+
+    public static UuidArgument uuid() {
+        return new UuidArgument();
+    }
     @Override
     public Object parse(StringReader reader) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         return null;
