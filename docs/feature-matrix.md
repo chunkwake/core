@@ -1473,3 +1473,29 @@ dh-line: reshow boater=true
 
 YAML location (без кавычек) — подтверждённый баг нашего YAML-слоя;
 обход — кавычки.
+
+## DH: сброс viewer-состояния не помог (диагностика)
+
+После фиксов `Style` проверили гипотезу «строка помечена видимой, поэтому
+повторный show её пропускает»:
+
+- сброс на уровне голограммы: `Hologram.hide(player)`;
+- сброс на уровне строк: `HologramLine.hide(player...)` (varargs, через
+  рефлексию);
+- повторный `Hologram.show(player, 0)`.
+
+Результат:
+```
+dh-render: boater=true
+```
+`show` возвращает `true`, но `Connection.send` от DH так и не вызывается
+(в логе только пакеты тест-плагина), `nms-wire: unsupported` нет.
+
+Значит блокер глубже: DH-строка не доходит до `EntityPacketsBuilder`
+(вероятно `HologramLine.getPartData`/renderer не инициализируется для
+строки, добавленной через API, либо `PlatformPlayer`-путь DH пуст).
+Следующий шаг — трассировать `HologramLine.show` и `getPartData` изнутри
+(например, временным Java-агентом/дебагом) и только потом снова гонять
+end-to-end.
+
+YAML `location:` без кавычек — подтверждённый баг нашего YAML-слоя.
