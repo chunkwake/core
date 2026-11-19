@@ -1025,3 +1025,28 @@ protocol: player_info re-encoded (1 entries, latency=1234)
 
 `ClientboundPlayerChatPacket` по-прежнему не реализован; player chat в
 Rust-ядре не формируется (чат идёт через system chat).
+
+## Folia multi-region: заблокировано реализацией, не только окружением
+
+Проверка кода показала, что настоящего multi-region в ядре нет:
+`FoliaSchedulers.Region` не имеет собственных региональных потоков и
+делегирует всё в `GlobalRegionScheduler`:
+
+```java
+final class Region implements RegionScheduler {
+    public void execute(Plugin plugin, World world, int chunkX, int chunkZ, Runnable run) {
+        plugin.getServer().getGlobalRegionScheduler().execute(plugin, run);
+    }
+    // run/runDelayed/runAtFixedRate — так же
+}
+```
+
+`isOwnedByCurrentRegion(...)` в `ChunkwakeServer` возвращает
+`isPrimaryThread()`; тик один (`Bridge.tick`), поэтому «несколько
+регионов одновременно» физически не запускаются.
+
+Чтобы прогнать честный multi-region нагрузочный тест, нужно сначала
+реализовать regionized-тик (несколько независимых тиков по регионам
+чанков с межрегиональной синхронизацией сущностей/игроков) и только
+потом стенд. Сейчас это архитектурная работа, а не вопрос запуска
+существующего кластера.
