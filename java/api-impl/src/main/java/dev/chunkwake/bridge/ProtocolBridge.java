@@ -46,6 +46,7 @@ final class ProtocolBridge {
     private static Object playerChatType;
     private static Object addEntityType;
     private static Object blockUpdateType;
+    private static Object multiBlockType;
     /** Класс-носитель сырых байтов для PacketContainer. */
     public static final class RawPayload {
         public byte[] data;
@@ -154,6 +155,12 @@ final class ProtocolBridge {
                             "net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket",
                             true, loader);
                     blockUpdateType = candidate;
+                } else if ("MULTI_BLOCK_CHANGE".equals(String.valueOf(
+                        candidate.getClass().getMethod("name").invoke(candidate)))) {
+                    carrier = Class.forName(
+                            "net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket",
+                            true, loader);
+                    multiBlockType = candidate;
                 } else if (classNames.contains(
                         "net.minecraft.network.protocol.game.ClientboundPlayerChatPacket")
                         || "CHAT".equals(String.valueOf(
@@ -227,7 +234,8 @@ final class ProtocolBridge {
                     + " playerInfo=" + (playerInfoType != null)
                     + " playerChat=" + (playerChatType != null)
                     + " addEntity=" + (addEntityType != null)
-                    + " blockUpdate=" + (blockUpdateType != null));
+                    + " blockUpdate=" + (blockUpdateType != null)
+                    + " multiBlock=" + (multiBlockType != null));
         } catch (Throwable broken) {
             protocolLib.getLogger().log(java.util.logging.Level.WARNING,
                     "ProtocolBridge: prepare failed", broken);
@@ -289,6 +297,9 @@ final class ProtocolBridge {
             }
             if ("block_update".equalsIgnoreCase(name) && blockUpdateType != null) {
                 return blockUpdate(player, blockUpdateType, data);
+            }
+            if ("section_blocks_update".equalsIgnoreCase(name) && multiBlockType != null) {
+                return sectionBlocks(player, multiBlockType, data);
             }
             if ("set_entity_data".equalsIgnoreCase(name) && entityDataType != null) {
                 return entityData(player, entityDataType, data);
@@ -356,6 +367,67 @@ final class ProtocolBridge {
             Bridge.log(1, "protocol: sending probe failed: " + broken);
         }
         return false;
+    }
+
+    /** Field-level for {@code ClientboundSectionBlocksUpdatePacket}. */
+    private static byte[] sectionBlocks(org.bukkit.entity.Player player, Object type, byte[] data) {
+        try {
+            int[] pos = {0};
+            int id = readVarInt(data, pos);
+            java.io.DataInputStream in = new java.io.DataInputStream(
+                    new java.io.ByteArrayInputStream(data, pos[0], data.length - pos[0]));
+            long sectionPos = in.readLong();
+            int count = readVarInt(in);
+            short[] positions = new short[count];
+            int[] states = new int[count];
+            for (int i = 0; i < count; i++) {
+                long packed = readVarLong(in);
+                positions[i] = (short) (packed & 0xFFF);
+                states[i] = (int) (packed >>> 12);
+            }
+            Class<?> packetClass = Class.forName(
+                    "net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket",
+                    true, type.getClass().getClassLoader());
+            Object packet = packetClass.getConstructor(long.class, short[].class, int[].class)
+                    .newInstance(sectionPos, positions, states);
+            Object container = containerConstructor.newInstance(type, packet);
+            Object event = fromServer.invoke(null, plugin, container, player);
+            for (Object listener : (Set<?>) getListeners.invoke(manager)) {
+                Set<?> types = (Set<?>) getTypes.invoke(getSendingWhitelist.invoke(listener));
+                if (types.contains(type)) {
+                    onSending.invoke(listener, event);
+                }
+            }
+            if (Boolean.TRUE.equals(event.getClass().getMethod("isCancelled").invoke(event))) {
+                return null;
+            }
+            long newSection = (Long) packetClass.getMethod("sectionPos").invoke(packet);
+            short[] newPositions = (short[]) packetClass.getMethod("positions").invoke(packet);
+            int[] newStates = (int[]) packetClass.getMethod("states").invoke(packet);
+            int size = Math.min(newPositions.length, newStates.length);
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream(data.length);
+            writeVarInt(bytes, id);
+            java.io.DataOutputStream out = new java.io.DataOutputStream(bytes);
+            out.writeLong(newSection);
+            out.flush();
+            writeVarInt(bytes, size);
+            for (int i = 0; i < size; i++) {
+                writeVarLong(bytes, (((long) newStates[i]) << 12)
+                        | (newPositions[i] & 0xFFFL));
+            }
+            out.flush();
+            byte[] result = bytes.toByteArray();
+            if (!java.util.Arrays.equals(result, data)) {
+                Bridge.log(2, "protocol: section_blocks_update re-encoded (section=" + newSection
+                        + ", changes=" + size + ", first_state="
+                        + (size == 0 ? -1 : newStates[0]) + ")");
+            }
+            return result;
+        } catch (Throwable broken) {
+            Throwable cause = broken.getCause() == null ? broken : broken.getCause();
+            Bridge.log(1, "protocol: section_blocks_update bridge failed: " + cause);
+            return data;
+        }
     }
 
     /** Field-level for {@code ClientboundAddEntityPacket}. */
@@ -1153,6 +1225,27 @@ final class ProtocolBridge {
                 .getBytes(java.nio.charset.StandardCharsets.UTF_8);
         writeVarInt(out, bytes.length);
         out.write(bytes, 0, bytes.length);
+    }
+
+    private static long readVarLong(java.io.DataInputStream in) throws java.io.IOException {
+        long value = 0L;
+        int shift = 0;
+        while (true) {
+            byte b = in.readByte();
+            value |= (long) (b & 0x7f) << shift;
+            if ((b & 0x80) == 0) {
+                return value;
+            }
+            shift += 7;
+        }
+    }
+
+    private static void writeVarLong(java.io.ByteArrayOutputStream out, long value) {
+        while ((value & ~0x7FL) != 0L) {
+            out.write((int) (value & 0x7F) | 0x80);
+            value >>>= 7;
+        }
+        out.write((int) value);
     }
 
     private static int readVarInt(java.io.DataInputStream in) throws java.io.IOException {

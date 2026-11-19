@@ -1123,3 +1123,31 @@ protocol: block_update re-encoded (pos=27,-61,23 state=11)
 - `section_blocks_update` (`MULTI_BLOCK_CHANGE`) остаётся RawPayload.
 
 Гейт: 26 of 27 enabled (Voxy требует MC <26.2).
+
+## MULTI_BLOCK_CHANGE (section_blocks_update): field-level (проверено)
+
+- `ClientboundSectionBlocksUpdatePacket` теперь с реальными полями:
+  `sectionPos` (`long`), `positions` (`short[]`, локальные 12-битные
+  индексы), `states` (`int[]`). Такой набор виден в ProtocolLib как
+  `getShortArrays()` / `getIntegerArrays()`.
+- `ProtocolBridge.sectionBlocks` декодирует пары
+  `varLong((state << 12) | local)`, отдаёт пакет слушателям и
+  перекодирует изменённые массивы. Carrier регистрируется для
+  legacy-типа ProtocolLib `MULTI_BLOCK_CHANGE`.
+- Доставка — тот же per-player путь, что у `block_update`:
+  `BlockItem.raw` + `frame_for(me, raw)` в `flush_blocks`.
+
+Живая проверка (ClientboundProbe меняет `states[0]`):
+```
+[ClientboundProbe] MULTI_BLOCK_CHANGE int-arrays=1 shorts=1
+[ClientboundProbe] WROTE section state=11
+protocol: section_blocks_update re-encoded (section=1048572, changes=2, first_state=11)
+```
+
+Ограничения:
+- `getMultiBlockChangeInfoArrays()` ProtocolLib не работает: для него
+  нужен `MultiBlockChangeInfo[]`, а у нас массивы позиций/состояний
+  (реестр блоков всё ещё не наполнен);
+- states остаются id-ами, без `WrappedBlockData`.
+
+Гейт: 26 of 27 enabled (Voxy требует MC <26.2).
