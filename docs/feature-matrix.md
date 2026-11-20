@@ -2521,3 +2521,47 @@ CoreProtect/Towny/Floodgate под 26.3/paper на Modrinth отсутствую
 расширенный (37 jar): 36 of 37 enabled, failed: только VoxyServerSide, panics=0
 базовый:              26 of 27 enabled,     failed: только VoxyServerSide, panics=0
 ```
+
+## SET_EQUIPMENT: почему «точечный парсер компонентов» не закрывает мост
+
+Разобрал точный набор компонентов, который пишет наш Rust-энкодер
+(`protocol::inventory::write_patch`): damage, enchantments, custom_name,
+lore, stored_enchantments, custom_data, charged_projectiles, repair_cost,
+trim, banner_patterns, map_id, map_post_processing, book, container,
+dyed_color. Их payload'ы — ванильные сетевые кодеки:
+
+- custom_name/lore -> `text::write_component` (компонент текста);
+- book -> `write_book`; container -> `write_container_value`;
+- charged_projectiles -> рекурсивные `write_stack`;
+- простые (damage/enchantments/repair_cost/trim/banner/map_*/dyed) —
+  VarInt-пары.
+
+Даже «точечный» парсер требует двух вещей, которых в JVM-стабах нет:
+
+1. **таблицы id компонентов**: в пакете компонент идентифицируется
+   числовым id из реестра `data_component_type`, а наш стаб
+   `BuiltInRegistries` содержит только BLOCK/ENTITY_TYPE/REGISTRY/
+   COMMAND_ARGUMENT_TYPE — `DATA_COMPONENT_TYPE` отсутствует, сопоставить
+   id -> вид компонента нечем;
+2. **кодеков сложных payload'ов** (текст, книга, контейнер, рекурсивный
+   ItemStack) — это уже не «точечный парсер», а перенос NMS-кодеков.
+
+Плюс подтверждённое ранее: в `ProtocolBridge` нет диспетчера
+`set_equipment`, а стаб `StreamCodec.decode` возвращает `null`.
+
+Поэтому честный путь к SET_EQUIPMENT:
+1) отдать из Rust таблицу `component id` (новая команда моста) и завести
+   `BuiltInRegistries.DATA_COMPONENT_TYPE`;
+2) реализовать парсер для фиксированных компонентов, а на
+   custom_name/lore/book/container/charged_projectiles — passthrough;
+3) добавить тестовый слушатель ProtocolLib с логом SET_EQUIPMENT, чтобы
+   живьём видеть событие и перекодирование.
+
+Это отдельная итерация; сейчас SET_EQUIPMENT остаётся passthrough.
+
+Живые гейты (проверено):
+
+```
+расширенный (37 jar): 36 of 37 enabled, failed: только VoxyServerSide, panics=0
+базовый:              26 of 27 enabled,     failed: только VoxyServerSide, panics=0
+```
