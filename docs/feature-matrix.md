@@ -2459,3 +2459,23 @@ Registry`), а не чанки. Цепочка реестров тянет за 
 NMS-регистрацию (biome/dimension_type), которую стабами не закрыть; для
 squaremap это по-прежнему архитектурный блокер, теперь с точным
 следующим символом.
+
+## squaremap включён: 35/36
+
+Причина прежнего `MapWorld already exists for 'minecraft:overworld'`:
+`ServerLevel.dimension()` всегда возвращал overworld-ключ, поэтому все
+миры squaremap считал одним. Теперь ключ берётся из `dimensionKey`,
+который выставляет `WorldImpl`. Плюс `Registry.iterator()` добавлен как
+default (пустой итератор).
+
+Живой гейт расширенного стенда (36 jar):
+
+```
+plugins: enabled 35 plugin(s) in 15356 ms
+squaremap enabled in 481 ms
+FAILED: только VoxyServerSide (сам отключается по plugin.yml)
+PANICS: 0
+```
+
+Базовый стенд: `26 of 27`, отказ только VoxyServerSide, паник нет.
+Итог: 35/36 — единственный оставшийся отказ самоотключающийся Voxy.
