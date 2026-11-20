@@ -12,6 +12,8 @@ public class ItemStack {
     public int rawId = -1;
     /** Исходные байты патча компонентов (сохраняются при правке count). */
     public byte[] patch = new byte[0];
+    /** NBT в терминах старого API (DeluxeMenus: {@code u()}/{@code v()}/{@code c()}). */
+    private net.minecraft.nbt.NBTTagCompound legacyTag;
 
     public static final ItemStack EMPTY = new ItemStack("minecraft:air", 0);
     public static final net.minecraft.network.codec.StreamCodec<Object> STREAM_CODEC =
@@ -48,6 +50,24 @@ public class ItemStack {
 
     public Item getItem() {
         return new Item(this.item);
+    }
+
+    /**
+     * Старый {@code ItemStack.hasTag()}: DeluxeMenus ищет метод по имени
+     * {@code u} (его таблица версий для 26.3 выбирает «обфусцированные»).
+     */
+    public boolean u() {
+        return this.legacyTag != null && !this.legacyTag.getAllKeys().isEmpty();
+    }
+
+    /** Старый {@code ItemStack.getTag()}. */
+    public net.minecraft.nbt.NBTTagCompound v() {
+        return this.legacyTag;
+    }
+
+    /** Старый {@code ItemStack.setTag(NBTTagCompound)}. */
+    public void c(net.minecraft.nbt.NBTTagCompound tag) {
+        this.legacyTag = tag;
     }
 
     public ItemStack copy() {

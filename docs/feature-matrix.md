@@ -2818,10 +2818,7 @@ VoxyServerSide), паник нет.
 
 - EssentialsX 2.22: `You are running an unsupported server version!` —
   его собственный список версий не знает 26.3 (на Paper 26.3 то же);
-- DeluxeMenus 1.14.1: `Could not setup a NMS hook ... nbt_int/nbt_string` —
-  `NbtProvider` ищет дореформенный `net.minecraft.nbt.NBTTagCompound` и
-  выбирает имена методов по своей таблице версий; 26.3 там нет. Плагин
-  работает, отключаются только NBT-опции предметов;
+- DeluxeMenus 1.14.1 — **починено** (см. ниже);
 - DecentHolograms (встроенный NBT-API) печатает WARN на каждый
   отсутствующий старый класс (`CraftMetaItem`, `NBTTagType`, ...) — это
   его собственный fallback-перебор имён, на Paper он также пишет WARN для
@@ -2832,3 +2829,55 @@ VoxyServerSide), паник нет.
 Тесты: `gradlew --offline cleanTest test` — 53 теста, включая новые
 `PluginOrderTest.paperDependencyLoadBefore/After` и
 `VanillaRegistriesTest` (67 биомов, 4 dimension_type).
+
+## DeluxeMenus: NMS hook включён (NBT-совместимость)
+
+Разобрал `com.extendedclip.deluxemenus.nbt.NbtProvider` по байткоду.
+Причина предупреждения `Could not setup a NMS hook for your server
+version`:
+
+- провайдер ищет класс `net.minecraft.nbt.NBTTagCompound` (старое имя
+  NBT-компаунда) и методы по «обфусцированным» именам своей таблицы
+  версий (`CURRENT_VERSION=2630`, `HAS_OBFUSCATED_NAMES=true`):
+  `e`, `l`, `a(...)`, `r`; на `ItemStack` — `u()`, `v()`, `c(...)`;
+- Craft-класс он строит как
+  `"org.bukkit.craftbukkit." + NMS_VERSION + "." + класс`, где
+  `NMS_VERSION` — хвост пакета `Bukkit.getServer().getClass()`. У Paper
+  1.20.5+ (и у нас) пакет без версии, поэтому `NMS_VERSION="craftbukkit"`
+  и ищется `org.bukkit.craftbukkit.craftbukkit.inventory.CraftItemStack` —
+  такого класса на настоящем Paper нет, хук не включается.
+
+Что добавлено:
+
+- `net.minecraft.nbt.NBTTagCompound` — map-совместимый шим со старыми
+  именами (`e/l/a/r`) и обычными алиасами (`hasKey`, `getString`,
+  `putInt`, ...);
+- у `net.minecraft.world.item.ItemStack` — `u()`, `v()`, `c(NBTTagCompound)`;
+- `org.bukkit.craftbukkit.craftbukkit.inventory.CraftItemStack` —
+  делегирующий алиас `asNMSCopy`/`asBukkitCopy` для имени с удвоенным
+  `craftbukkit`;
+- тест `NbtCompatTest` (старые имена + тег на ItemStack).
+
+Живая проверка (расширенный стенд, временный `NbtProbe`):
+
+```
+CURRENT_VERSION=2630
+HAS_OBFUSCATED_NAMES=true
+NMS_VERSION=[craftbukkit]
+NBT_HOOKED=true
+[DeluxeMenus] NMS hook has been setup successfully!
+```
+
+Ограничение: значения NBT живут в Java-обёртке предмета и пока не
+переносятся в Rust-стек (мост компонентов предметов — отдельная задача),
+поэтому `nbt_*`-опции меню не влияют на реальный предмет; предупреждение
+и отказ опций устранены, поведение зафиксировано честно.
+
+Гейты после изменения:
+
+```
+расширенный (42 плагина): 41 of 42 enabled in 18229 ms
+  failed: только VoxyServerSide, PANICS: 0
+базовый:                  26 of 27 enabled in 11647 ms
+  failed: только VoxyServerSide, PANICS: 0
+```
