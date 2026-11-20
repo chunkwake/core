@@ -61,6 +61,15 @@ impl Cli {
                 command.push(arg);
             }
         }
+        // main делает chdir в каталог сервера и кладёт абсолютный путь в
+        // CHUNKWAKE_ABS_DIR: после chdir относительный `--dir` резолвился бы
+        // уже от нового каталога.
+        if dir.is_relative()
+            && let Ok(abs) = std::env::var("CHUNKWAKE_ABS_DIR")
+            && !abs.is_empty()
+        {
+            dir = PathBuf::from(abs);
+        }
         let command = match command.as_slice() {
             [] => Command::Run,
             [s] if s == "run" => Command::Run,

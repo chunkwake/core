@@ -3012,3 +3012,48 @@ OS can't spawn worker thread: Отказано в доступе. (os error 5)
   конфигов плагина (файлы `config.yml`/`sections`/`shops` в data-папке
   есть, ошибок загрузки в лог не пишется); для закрытия нужен разбор его
   `onLoad`/`ConfigManager.init()`.
+
+## 51/52: EconomyShopGUI включён — рабочий каталог сервера как в ванили
+
+Причина `config == null` в `EconomyShopGUI.overrideSellCommand` найдена по
+байткоду и подтверждена пробником:
+
+```java
+// EconomyShopGUI.overrideSellCommand
+File file = new File(new File("commands.yml").getAbsolutePath());
+YamlConfiguration config = loadConfiguration(file, "commands.yml");
+// ... config.contains("aliases.sell")
+```
+
+`loadConfiguration` при `FileNotFoundException` молча возвращает `null`
+(и ставит `ConfigManager.badYaml`), после чего плагин падает с
+`NullPointerException`. У нас процесс запускался из `E:\paper_rust`, а
+данные сервера лежали в `--dir .../load-gate-extra`; `commands.yml`
+относительно рабочего каталога не существовал.
+
+Исправление в ядре (как в ванильном сервере, где CWD = каталог сервера):
+
+- `crates/server/src/main.rs`: после разбора `--dir` каталог
+  канонизируется и выполняется `std::env::set_current_dir(dir)` **до**
+  запуска JVM (поэтому Java видит правильный `user.dir`);
+- абсолютный путь кладётся в `CHUNKWAKE_ABS_DIR`, `cli.rs` использует его
+  для относительного `--dir` (иначе после chdir аргумент резолвился бы
+  от нового каталога);
+- при старте создаётся `commands.yml` (`aliases: {}`), как Bukkit при
+  первом запуске.
+
+Живые гейты после изменения:
+
+```
+расширенный (52 плагина): 51 of 52 enabled in 45752 ms
+  failed: только VoxyServerSide (сам отключается по plugin.yml)
+  PANICS: 0
+базовый:                  26 of 27 enabled in 9534 ms
+  failed: только VoxyServerSide, PANICS: 0
+```
+
+Для сравнения, до правки EconomyShopGUI стабильно падал на
+`ConfigManager.getConfig() == null`; пробник `EconProbe` показал, что
+`ConfigManager.loadConfig()` сам по себе работает (`CommentedConfig`
+читается, `contains("commands.sellgui")=true`), а падение было именно
+из-за отсутствующего `commands.yml` по относительному пути.

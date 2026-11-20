@@ -34,6 +34,23 @@ fn main() {
             || std::path::PathBuf::from("."),
             |pair| std::path::PathBuf::from(&pair[1]),
         );
+    // Как в ванильном сервере: рабочий каталог процесса — каталог сервера.
+    // Плагины открывают файлы по относительному пути (Bukkit `commands.yml`
+    // в EconomyShopGUI), и при `--dir` они уходили мимо каталога сервера.
+    // JVM стартует уже после chdir, поэтому видит правильный `user.dir`.
+    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+    if let Err(error) = std::env::set_current_dir(&dir) {
+        eprintln!(
+            "warning: cannot enter server directory {}: {error}",
+            dir.display()
+        );
+    }
+    if let Some(text) = dir.to_str() {
+        // SAFETY: до запуска JVM/потоков, никто не читает окружение
+        // параллельно.
+        unsafe { std::env::set_var("CHUNKWAKE_ABS_DIR", text) };
+    }
+    ensure_commands_yml(&dir);
     let (requested, view_distance) = config::Properties::load(&dir.join("server.properties"))
         .map_or((config::MemoryProfile::Auto, 8), |p| {
             (p.memory_profile, p.view_distance)
@@ -48,6 +65,19 @@ fn main() {
     if let Err(error) = runtime.block_on(cli::execute()) {
         eprintln!("error: {error}");
         std::process::exit(1);
+    }
+}
+
+/// Создаёт `commands.yml` (как Bukkit при первом запуске): плагины
+/// (EconomyShopGUI) открывают его по относительному пути и падают, если
+/// файла нет.
+fn ensure_commands_yml(dir: &Path) {
+    let path = dir.join("commands.yml");
+    if path.exists() {
+        return;
+    }
+    if let Err(error) = std::fs::write(&path, "aliases: {}\n") {
+        eprintln!("warning: commands.yml: {}: {error}", path.display());
     }
 }
 
