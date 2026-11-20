@@ -90,6 +90,15 @@ public class CraftServer implements org.bukkit.Server {
         return ((java.lang.Number) PlayerCalls.call(this.handle, "broadcast", new Class<?>[]{ net.kyori.adventure.text.Component.class }, new Object[]{ p0 }, int.class)).intValue();
     }
 
+    /**
+     * Paper {@code CraftServer.syncCommands()}: пересобрать Brigadier-дерево
+     * после регистрации/снятия команд (PlugManX и др.). Команды у нас
+     * диспетчеризуются из Rust, поэтому достаточно уведомить Java-сторону.
+     */
+    public void syncCommands() {
+        PlayerCalls.call(this.handle, "syncCommands", new Class<?>[0], new Object[] { }, void.class);
+    }
+
     @Override public void reload() {
         PlayerCalls.call(this.handle, "reload", new Class<?>[0], new Object[]{  }, void.class);
     }

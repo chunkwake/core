@@ -3799,3 +3799,77 @@ cargo fmt --all --check -> 0
 cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4 -> зелёный
 ```
+
+## Ещё 5 плагинов: 73/75; PlugManX-дыра закрыта, LibertyBans требует предзагрузки зависимости
+
+Добавлены CommandAPI 12.1.0, LibertyBans 1.2.0-M1, Maintenance 5.1.1,
+PlugManX 3.2.1, ChunkyBorder 1.2.75 (все — с Modrinth, Paper 26.3).
+
+Живой гейт:
+
+```
+plugins: 73 of 75 enabled in 84168 ms
+FAILED: MiniMOTD failed in 4 ms; VoxyServerSide failed in 4 ms
+LOADERR: Could not load craft-engine-paper-plugin-26.9.2.jar
+PANICS: 0
+базовый: 26 of 27 (только VoxyServerSide)
+```
+
+### PlugManX: `CraftServer.syncCommands()`
+
+PlugManX в `<clinit>` делает
+`Lookup.findVirtual(Bukkit.getServer().getClass(), "syncCommands", ()V)`
+и без метода писал `ERROR [PlugManX] Failed to initialize
+syncCommandsRunnable`. Добавлен публичный `CraftServer.syncCommands()`
+(делегирует в `ChunkwakeServer.syncCommands()`, у нас это no-op: команды
+диспетчеризуются из Rust). После этого ERROR исчез, плагин включается.
+
+Попутно у тестовых `EquipProbe.jar` убран BOM из `plugin.yml` — из-за него
+PlugManX писал `No name field found in plugin.yml` (это был наш probe-jar,
+не ядро).
+
+### LibertyBans: зависимость качается при enable
+
+LibertyBans при включении скачивает `org.libertybans:bans-download`
+(12 МБ) со своего Maven-репозитория Cloudsmith. В этой сети чтение
+обрывается (`SocketException: Connection reset`) и плагин падает с
+`BootstrapException: Failed to download dependency`. Артефакт при этом
+доступен: прямой GET
+`https://dl.cloudsmith.io/public/anand-beh/affero-gpl3/maven/org/libertybans/bans-download/1.2.0-M1/bans-download-1.2.0-M1.jar`
+отдаёт 200 и 12 124 678 байт.
+
+Если положить его в
+`plugins/LibertyBans/internal/libraries/org.libertybans.bans-download_1.2.0-M1.jar`
+(плюс уже скачанные `caffeine` и `jakarta.inject`), плагин включается:
+
+```
+LibertyBans enabled in 9152 ms
+```
+
+То есть это не дыра ядра, а сорвавшаяся загрузка зависимости в текущей
+сети; для чистого гейта библиотека предзагружена в стенд.
+
+### FastAsyncWorldEdit: включается, но несовместим с WorldEdit в одном каталоге
+
+FAWE 2.16.2 (Paper 26.3) на отдельном стенде без WorldEdit:
+
+```
+FastAsyncWorldEdit loaded in 430 ms
+FastAsyncWorldEdit enabled in 401 ms
+plugins: 1 of 1 enabled in 867 ms
+```
+
+Если положить FAWE рядом с `worldedit-bukkit-7.4.6.jar`, оба поставляют
+`com.sk89q.worldedit.bukkit.WorldEditPlugin`; QuickShop падает на
+`ClassCastException ... loader 'worldedit-bukkit-7.4.6.jar' vs loader
+'FastAsyncWorldEdit-Paper-2.16.2.jar'`. Это ожидаемое поведение: FAWE
+заменяет WorldEdit и не ставится вместе с ним. Поэтому FAWE проверен
+изолированно, а в общий стенд не добавлен.
+
+### Остаточный нефатальный шум (не ядро)
+
+- ImageFrame: `api.loohpjames.com` вернул HTTP 522 (внешний сервис).
+- Проверки обновлений (SkinsRestorer, TabTPS, FAWE): GitHub 403/лимиты.
+- DeluxeHub/item-nbt-api: `Unmapped*` WARN из-за Optional-геттеров NBT в
+  26.3 (см. раздел выше).
+- MythicMobs: собственный парсер версии WorldGuard.

@@ -922,6 +922,10 @@ final class ChunkwakeServer {
         return this.serverConfig;
     }
 
+    /** Paper {@code CraftServer.syncCommands()}: у нас команды ведёт Rust. */
+    public void syncCommands() {
+    }
+
     public int getViewDistance() { return intProperty("view-distance", 10); }
     public int getSimulationDistance() { return intProperty("simulation-distance", 10); }
     public boolean getAllowNether() { return property("allow-nether", "true").equals("true"); }
