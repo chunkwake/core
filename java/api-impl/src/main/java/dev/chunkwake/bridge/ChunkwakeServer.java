@@ -269,6 +269,25 @@ final class ChunkwakeServer {
         public org.bukkit.Material getMaterial(String name, int data) {
             return org.bukkit.Material.matchMaterial(name);
         }
+
+        /**
+         * Paper API: {@code ItemStack(Material, int)} создаёт craftDelegate
+         * через {@code ItemType.createItemStack -> Unsafe.createItemStack}.
+         * Без этого у обычного {@code new ItemStack(...)} craftDelegate
+         * остаётся null, и {@code ItemStack.getData(...)} падает (nightcore,
+         * ExcellentCrates).
+         */
+        public org.bukkit.inventory.ItemStack createItemStack(
+                org.bukkit.inventory.ItemType type, int amount) {
+            org.bukkit.Material material = type == null ? null : type.asMaterial();
+            return new StackImpl(material == null ? org.bukkit.Material.AIR : material,
+                    Math.max(amount, 1));
+        }
+
+        public org.bukkit.inventory.ItemStack createItemStack(
+                org.bukkit.inventory.ItemType type) {
+            return createItemStack(type, 1);
+        }
     }
 
     /** Загружает jar из каталога и включает плагины. Возвращает число включённых. */

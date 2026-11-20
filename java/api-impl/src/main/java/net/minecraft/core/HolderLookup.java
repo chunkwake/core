@@ -5,6 +5,12 @@ import net.minecraft.resources.ResourceKey;
 /** Заглушка NMS {@code HolderLookup}. */
 public interface HolderLookup<T> {
     interface Provider {
+        /** {@code HolderLookup.Provider.createSerializationContext} (nightcore). */
+        default <T> net.minecraft.resources.RegistryOps<T> createSerializationContext(
+                com.mojang.serialization.DynamicOps<T> ops) {
+            return net.minecraft.resources.RegistryOps.create(
+                    ops, RegistryAccess.Frozen.empty());
+        }
     }
 
     interface RegistryLookup<T> extends HolderLookup<T> {

@@ -99,6 +99,42 @@ final class StackImpl extends ItemStack {
         }
     }
 
+    // Paper data-component API: у CraftItemStack-делегата значения хранятся
+    // в Rust-модели, поэтому компонентные запросы отвечают пусто, но не
+    // падают NPE (nightcore/ExcellentCrates вызывают их у нового ItemStack).
+    @Override public java.util.Set<io.papermc.paper.datacomponent.DataComponentType> getDataTypes() {
+        return java.util.Set.of();
+    }
+
+    @Override public <T> T getData(
+            io.papermc.paper.datacomponent.DataComponentType.Valued<T> component) {
+        return null;
+    }
+
+    @Override public <T> T getDataOrDefault(
+            io.papermc.paper.datacomponent.DataComponentType.Valued<? extends T> component,
+            T fallback) {
+        return fallback;
+    }
+
+    @Override public <T> void setData(
+            io.papermc.paper.datacomponent.DataComponentType.Valued<T> component,
+            io.papermc.paper.datacomponent.DataComponentBuilder<T> builder) {
+    }
+
+    @Override public <T> void setData(
+            io.papermc.paper.datacomponent.DataComponentType.Valued<T> component, T value) {
+    }
+
+    @Override public void setData(io.papermc.paper.datacomponent.DataComponentType.NonValued component) {
+    }
+
+    @Override public void unsetData(io.papermc.paper.datacomponent.DataComponentType component) {
+    }
+
+    @Override public void resetData(io.papermc.paper.datacomponent.DataComponentType component) {
+    }
+
     @Override public Material getType() { return type; }
     @Override public void setType(Material type) { this.type = Objects.requireNonNull(type, "type"); }
     @Override public int getAmount() { return amount; }

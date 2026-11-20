@@ -3057,3 +3057,55 @@ YamlConfiguration config = loadConfiguration(file, "commands.yml");
 `ConfigManager.loadConfig()` сам по себе работает (`CommentedConfig`
 читается, `contains("commands.sellgui")=true`), а падение было именно
 из-за отсутствующего `commands.yml` по относительному пути.
+
+## Матрица 60 плагинов: 57/60 (новые Paper/Folia)
+
+Добавлены: BentoBox 3.23.7, ExcellentCrates 7.2.0 (+ nightcore 2.16.7),
+MiniMOTD 2.2.5, ItemJoin 6.1.9, LetMeDespawn 1.26.10.3 (Folia),
+PlasmoVoice 2.2.0-beta.4 (Folia), PatPat 1.2.5 (Folia).
+
+```
+plugins: 57 of 60 enabled in 33317 ms
+failed: MiniMOTD, nightcore, VoxyServerSide (сам по plugin.yml)
+PANICS: 0
+базовый: 26 of 27 (только VoxyServerSide), PANICS: 0
+```
+
+### Что закрыто
+
+- **PlasmoVoice**: `NoClassDefFoundError: io/netty/channel/epoll/Epoll` —
+  добавлена заглушка `Epoll.isAvailable() == false`, плагин выбирает NIO
+  и включается.
+- **Paper ItemStack data components (ExcellentCrates/nightcore)**:
+  `new ItemStack(...)` на Paper создаёт `craftDelegate` через
+  `ItemType.createItemStack -> UnsafeValues.createItemStack`; у нас
+  `Unsafe` его не реализовывал, `craftDelegate` был `null`, и
+  `ItemStack.getData(...)` падал NPE. Добавлены `Unsafe.createItemStack`
+  (возвращает `StackImpl`) и переопределения data-component API в
+  `StackImpl` (`getDataTypes`, `getData`, `setData`, `unsetData`,
+  `resetData`) — компонентные запросы отвечают пусто, но не падают.
+  **ExcellentCrates после этого включается.**
+- **nightcore**: `CraftRegistry.getMinecraftRegistry()`,
+  `net.minecraft.nbt.TagParser.parseCompoundFully`, `HolderLookup.Provider.createSerializationContext`,
+  `RegistryAccess extends HolderLookup.Provider` (ванильная иерархия).
+
+### Оставшиеся отказы (точные причины)
+
+- **nightcore**: статический `NbtSerializer` берёт
+  `net.minecraft.world.item.ItemStack.CODEC` (поле `b`). В нашей заглушке
+  `ItemStack` этого поля нет, `Reflex` возвращает `null`, и
+  `encodeItemStack` падает с `NPE` на `Encoder.encodeStart`. Нужен
+  настоящий NMS `ItemStack.CODEC` (полный codec предмета с компонентами),
+  а не заглушка.
+- **MiniMOTD**: плагин сам отключается. Его детект:
+  `Material.MUSIC_DISC_LAVA_CHICKEN` есть в API 26.3 и
+  `new ItemStack(...)` работает, а `Bukkit.getBukkitVersion()` не
+  содержит `1.21.7-` → он считает сервер Spigot и пишет
+  `MiniMOTD does not support Spigot on Minecraft 1.21.8 or newer`.
+  Это его собственный version-gate; поведение зафиксировано.
+- **VoxyServerSide** — самоотключается по `plugin.yml`
+  (`lss-minecraft-dependency`).
+
+Тесты: `gradlew --offline cleanTest test :test-plugin:jar dist` — 55
+Java-тестов; `cargo fmt --all --check` — 0; базовый и расширенный гейты
+без паник.

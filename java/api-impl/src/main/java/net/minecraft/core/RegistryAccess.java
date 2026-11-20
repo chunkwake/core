@@ -7,7 +7,7 @@ import java.util.Map;
  * плагины проверяют его как интерфейс, класс даёт
  * {@code IncompatibleClassChangeError}.
  */
-public interface RegistryAccess {
+public interface RegistryAccess extends HolderLookup.Provider {
     RegistryAccess EMPTY = new RegistryAccess() {
     };
 
