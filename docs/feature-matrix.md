@@ -2393,3 +2393,39 @@ squaremap: enabling needs Minecraft server internals
 
 Гейт после изменений: `34 of 36` (VoxyServerSide и squaremap), паник нет,
 `cargo fmt` 0, gradle `cleanTest test :test-plugin:jar dist` = успех.
+
+## squaremap: архитектурный блокер (точная цепочка) и снятие заявки на производительность
+
+Цепочка, пройденная по шагам:
+
+```
+$Proxy3 -> CraftWorld          исправлено: настоящий WorldApi (extends CraftWorld)
+CommonLevelAccessor            исправлено: ServerLevel implements, стабы LevelReader/EntityGetter
+PalettedContainerFactory       стаб добавлен
+MissingPaletteEntryException   стаб добавлен
+PalettedContainerFactory.defaultBiome()  добавлен
+-> следующий: net.minecraft.core.registries.Registries
+```
+
+Вывод: squaremap требует настоящий NMS-уровень (реестры, чанки, блоки), а
+не набор стабов. Это архитектурная работа «мост Rust-мир -> NMS
+LevelChunk/Level», отдельная от точечных заглушек; погоню за символами
+останавливаю, плагин остаётся заблокированным. Из 36 jar включаются 34
+(BlueMap работает, squaremap — blocked, VoxyServerSide — сам).
+
+## Производительность: заявка снята
+
+Явно фиксирую: **«отличная производительность» не доказана и не
+заявляется**. Синтетический 5-парный A/B (200 NoAI-свиней, без плагинов,
+affinity 0-15):
+
+```
+regions: медиана 2.37 мс, среднее 2.25
+chunks:  медиана 2.06 мс, среднее 2.08
+парные разницы (r-c): -0.27, +0.41, +0.34, +0.49, -0.12
+```
+
+Регионализация не быстрее; дефолт — куски (проще и слегка быстрее),
+регионы (`CHUNKWAKE_TICK_REGIONS=1`) и Folia-воркеры
+(`CHUNKWAKE_FOLIA=1`) остаются opt-in. Никаких утверждений о выигрыше
+тик-режима в документации не остаётся.

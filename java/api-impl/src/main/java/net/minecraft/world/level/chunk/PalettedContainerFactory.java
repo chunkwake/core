@@ -4,4 +4,9 @@ package net.minecraft.world.level.chunk;
 public class PalettedContainerFactory {
     public PalettedContainerFactory() {
     }
+
+    /** {@code PalettedContainerFactory.defaultBiome()} (squaremap). */
+    public net.minecraft.core.Holder defaultBiome() {
+        return null;
+    }
 }
