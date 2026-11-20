@@ -4,7 +4,7 @@ package net.minecraft;
 public interface WorldVersion {
     String name();
 
-    int dataVersion();
+    net.minecraft.world.level.storage.DataVersion dataVersion();
 
     int protocolVersion();
 
@@ -13,7 +13,7 @@ public interface WorldVersion {
     }
 
     default int getDataVersion() {
-        return this.dataVersion();
+        return this.dataVersion().version();
     }
 
     default int getProtocolVersion() {
@@ -33,8 +33,8 @@ public interface WorldVersion {
         }
 
         @Override
-        public int dataVersion() {
-            return 4556;
+        public net.minecraft.world.level.storage.DataVersion dataVersion() {
+            return new net.minecraft.world.level.storage.DataVersion(5023);
         }
 
         @Override

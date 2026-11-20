@@ -19,6 +19,14 @@ public abstract class ChunkAccess implements LevelHeightAccessor {
 
     public abstract LevelChunkSection[] getSections();
 
+    public net.minecraft.world.level.chunk.status.ChunkStatus getPersistedStatus() {
+        return net.minecraft.world.level.chunk.status.ChunkStatus.FULL;
+    }
+
+    public net.minecraft.world.level.levelgen.BelowZeroRetrogen getBelowZeroRetrogen() {
+        return null;
+    }
+
     public boolean hasPrimedHeightmap(Heightmap.Types type) {
         return getOrCreateHeightmapUnprimed(type) != null;
     }

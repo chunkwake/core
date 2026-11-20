@@ -194,4 +194,12 @@ public final class NbtOps implements DynamicOps<Tag> {
         return new JsonPrimitive(String.valueOf(tag));
     }
 
+
+    public com.mojang.serialization.DataResult<java.util.stream.LongStream> getLongStream(Tag tag) {
+        if (tag instanceof LongArrayTag array) {
+            return com.mojang.serialization.DataResult.success(
+                    java.util.Arrays.stream(array.getAsLongArray()));
+        }
+        return com.mojang.serialization.DataResult.success(java.util.stream.LongStream.empty());
+    }
 }

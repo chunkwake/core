@@ -50,6 +50,27 @@ public final class CompoundTag implements Tag {
         this.put(key, StringTag.valueOf(value));
     }
 
+    public CompoundTag copy() {
+        CompoundTag copy = new CompoundTag();
+        copy.tags.putAll(this.tags);
+        return copy;
+    }
+
+    public java.util.Optional<CompoundTag> getCompound(String key) {
+        return this.get(key) instanceof CompoundTag tag
+                ? java.util.Optional.of(tag) : java.util.Optional.empty();
+    }
+
+    public java.util.Optional<long[]> getLongArray(String key) {
+        return this.get(key) instanceof LongArrayTag tag
+                ? java.util.Optional.of(tag.getAsLongArray()) : java.util.Optional.empty();
+    }
+
+    public <T> java.util.Optional<T> read(String key,
+            com.mojang.serialization.Codec<T> codec) {
+        return java.util.Optional.empty();
+    }
+
     public Tag get(String key) {
         return this.tags.get(key);
     }

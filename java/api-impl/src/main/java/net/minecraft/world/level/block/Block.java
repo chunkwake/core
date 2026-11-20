@@ -38,6 +38,11 @@ public class Block {
         return this.defaultState;
     }
 
+    /** {@code Block.defaultMapColor()} (squaremap). */
+    public net.minecraft.world.level.material.MapColor defaultMapColor() {
+        return net.minecraft.world.level.material.MapColor.NONE;
+    }
+
     public String name() {
         return this.name;
     }

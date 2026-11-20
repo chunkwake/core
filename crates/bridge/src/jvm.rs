@@ -127,6 +127,15 @@ pub fn boot(lib: &Path, class_path: &str, table: i64) -> Result<(), String> {
         "--enable-native-access=ALL-UNNAMED".to_owned(),
         // Сигналы (Ctrl+C) остаются у сервера.
         "-Xrs".to_owned(),
+        // Paper parity: плагины (PacketEvents и др.) рефлексией лезут в
+        // java.base; без --add-opens JDK 25 бросает InaccessibleObjectException.
+        "--add-opens=java.base/java.lang=ALL-UNNAMED".to_owned(),
+        "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED".to_owned(),
+        "--add-opens=java.base/java.util=ALL-UNNAMED".to_owned(),
+        "--add-opens=java.base/java.nio=ALL-UNNAMED".to_owned(),
+        "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED".to_owned(),
+        "--add-opens=java.base/java.text=ALL-UNNAMED".to_owned(),
+        "--add-opens=java.desktop/java.awt.font=ALL-UNNAMED".to_owned(),
     ];
     if let Ok(extra) = std::env::var("CHUNKWAKE_JVM_ARGS") {
         opts.extend(extra.split_whitespace().map(str::to_owned));

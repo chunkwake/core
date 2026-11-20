@@ -44,6 +44,12 @@ public interface Registry<T> extends HolderLookup.RegistryLookup<T> {
         return this.getOrThrow(key);
     }
 
+    /** {@code Registry.holderByNameCodec()} (squaremap SectionDecoder). */
+    default com.mojang.serialization.Codec<net.minecraft.core.Holder<T>> holderByNameCodec() {
+        return com.mojang.serialization.Codec.STRING.xmap(
+                name -> null, holder -> "minecraft:air");
+    }
+
     int getId(T value);
 
     T byId(int id);

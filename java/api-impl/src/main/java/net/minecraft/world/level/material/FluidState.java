@@ -1,17 +1,22 @@
 package net.minecraft.world.level.material;
 
-/** NMS {@code FluidState} (минимально: пусто/не пусто). */
+/** NMS {@code FluidState}: состояние жидкости (water/lava/empty). */
 public final class FluidState {
-    public static final FluidState EMPTY = new FluidState(true);
-    public static final FluidState WATER = new FluidState(false);
+    public static final FluidState EMPTY = new FluidState(Fluids.EMPTY);
+    public static final FluidState WATER = new FluidState(Fluids.WATER);
 
-    private final boolean empty;
+    private final Fluid fluid;
 
-    private FluidState(boolean empty) {
-        this.empty = empty;
+    public FluidState(Fluid fluid) {
+        this.fluid = fluid == null ? Fluids.EMPTY : fluid;
     }
 
     public boolean isEmpty() {
-        return this.empty;
+        return this.fluid == Fluids.EMPTY;
+    }
+
+    /** {@code FluidState.getType()}: тип жидкости. */
+    public Fluid getType() {
+        return this.fluid;
     }
 }

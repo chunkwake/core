@@ -14,6 +14,10 @@ public final class SharedConstants {
     private SharedConstants() {
     }
 
+    public static net.minecraft.WorldVersion getCurrentVersion() {
+        return net.minecraft.WorldVersion.Current.INSTANCE;
+    }
+
     public static int getProtocolVersion() {
         return RELEASE_NETWORK_PROTOCOL_VERSION;
     }

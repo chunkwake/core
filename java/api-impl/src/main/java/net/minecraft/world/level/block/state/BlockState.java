@@ -8,6 +8,12 @@ import net.minecraft.world.level.material.FluidState;
 
 /** NMS {@code BlockState}: блок + сетевой id + свойства для плагинов. */
 public class BlockState {
+    /** {@code BlockState.CODEC}: минимальный строковый codec состояния. */
+    public static final com.mojang.serialization.Codec<BlockState> CODEC =
+            com.mojang.serialization.Codec.STRING.xmap(
+                    text -> net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(),
+                    state -> "minecraft:air");
+
     private final Block block;
     private final int id;
     private final boolean air;
@@ -65,6 +71,11 @@ public class BlockState {
 
     public boolean hasProperty(Property<?> property) {
         return this.block.getStateDefinition().getProperties().contains(property);
+    }
+
+    public net.minecraft.world.level.material.MapColor getMapColor(
+            net.minecraft.world.level.BlockGetter level, net.minecraft.core.BlockPos pos) {
+        return this.block.defaultMapColor();
     }
 
     public java.util.Collection<Property<?>> getProperties() {

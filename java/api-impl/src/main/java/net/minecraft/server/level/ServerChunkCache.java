@@ -5,6 +5,9 @@ import net.minecraft.world.level.chunk.LevelChunk;
 
 /** NMS {@code ServerChunkCache}. */
 public class ServerChunkCache {
+    /** Поле, которое squaremap читает для плана рендера. */
+    public net.minecraft.server.level.ChunkMap chunkMap = new net.minecraft.server.level.ChunkMap();
+
     public LevelChunk getChunkNow(int x, int z) {
         return null;
     }

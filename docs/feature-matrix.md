@@ -3459,3 +3459,79 @@ cargo fmt --all --check -> 0
 cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4 -> 45 suites, 953 passed, 0 failed
 ```
+
+## squaremap render: получен реальный стек, RenderJob создаётся; PNG всё ещё 0
+
+Чтобы не гадать, пробник `RenderProbe` вызывает `ChunkScanner.scan(...)`
+на живом снапшоте чанка и создаёт `RenderFactory.createBackgroundRender`
+рефлексией, а затем вызывает `RenderJob.render()` (исключение не
+проглатывается рендер-планировщиком).
+
+Что подтвердилось:
+
+- **сканер рендера работает** на живом чанке:
+  `RProbe: snapshot=...ChunkSnapshotImpl`, `RProbe: scan ok`;
+- создание background-задачи падало по цепочке (каждый шаг — реальный
+  `NoSuchFieldError`/`IncompatibleClassChangeError`/`NoSuchMethodError`,
+  а не догадка):
+  1. `BlockState.CODEC` (добавлен статический codec);
+  2. `Strategy` оказался **абстрактным классом**, а не интерфейсом →
+     `IncompatibleClassChangeError` (переделан в класс с
+     `entryCount()` и фабриками blockStates/biomes);
+  3. `Registry.holderByNameCodec()` (добавлен default codec);
+- после этого `RenderFactory.createBackgroundRender` **успешно
+  создаёт job** (`RProbe: job=...`), то есть SectionDecoder/палитры/биомы
+  для рендера теперь конструируются.
+
+Дополнительно закрыты классы/члены, которые нужны рендеру и плану:
+`QuartPos`, `MapColor` (поле `col`, NONE/PLANT/WATER), `Fluid`/
+`FlowingFluid`/`Fluids`, `FluidState.getType()`, `BiomeSpecialEffects`
+(+`GrassColorModifier`), `Biome.getSpecialEffects/getBaseTemperature`,
+`Block.defaultMapColor`, `BlockState.getMapColor`, `CropBlock.AGE`,
+`StemBlock.AGE`, `EmptyBlockGetter.INSTANCE`, `LevelResource`,
+`DataVersion`, `SavedDataStorage`, `NbtUtils`, `ChunkResult`,
+`ChunkMap`, `ChunkHolder`, `ChunkLevel`, `Ticket`, `TicketType`,
+`TicketStorage`, `TracingExecutor`, `Util`, `ImposterProtoChunk`,
+`BelowZeroRetrogen`; `ChunkAccess.getPersistedStatus/getBelowZeroRetrogen`,
+`ServerChunkCache.getChunkFuture/chunkMap`, `ServerLevel.getServer/
+getDataStorage`, `MinecraftServer.execute/getRespawnData/getWorldPath`,
+`RespawnData.dimension`, `ChunkStatus.EMPTY/SPAWN/CODEC/isOrAfter`,
+`CompoundTag.copy/getCompound/getLongArray/read`, `ListTag.getCompound/
+isEmpty`, `NbtOps.getLongStream`, `BlockPos.asLong`, `ChunkPos.pack/x/z`,
+`DimensionType.hasCeiling/getStorageFolder`,
+`BiomeManager.getBiome/withDifferentSource`,
+`PalettedContainerFactory.defaultBlockState/blockStatesStrategy/
+biomeStrategy`, `SimpleBitStorage`, `Mth.ceillog2`.
+
+Тем не менее **PNG-тайлы по-прежнему не создаются** (`png count: 0`).
+Асинхронный пробник `AsyncRenderProbe` при вызове `RenderJob.render()`
+блокируется (рендер ждёт снапшоты/тики), поэтому точку падения самого
+`render()` пока получить не удалось; `/squaremap fullrender` всё так же
+пишет `Rendering failed`. Следующий шаг — трассировка `render()` без
+блокировки главного потока (например, дамп стеков после таймаута) либо
+отдельный поток с серверными тиками, затем фикс конкретного NMS-вызова
+в Celadon/RegionRenderer.
+
+## Paper parity: JVM `--add-opens`
+
+Побочно выяснилось, что после появления `SharedConstants.getCurrentVersion`
+PacketEvents 2.14 на JDK 25 начал падать на `onLoad`:
+`InaccessibleObjectException: Unable to make ... Object.wait0 ... accessible:
+module java.base does not "opens java.lang"`. На Paper JVM запускается с
+`--add-opens`; у нас флагов не было. В `crates/bridge/src/jvm.rs` добавлен
+набор как у Paper (`java.base/java.lang`, `java.lang.reflect`, `java.util`,
+`java.nio`, `sun.nio.ch`, `java.text`, `java.desktop/java.awt.font`),
+после чего PacketEvents снова загружается.
+
+Гейты после всех изменений:
+
+```
+расширенный (60 плагинов): 58 of 60 enabled in 31623 ms
+  failed: MiniMOTD (сам), VoxyServerSide (сам); LOADERR: пусто; PANICS: 0
+базовый: 26 of 27 enabled in 10337 ms
+  failed: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4 -> 45 suites, 953 passed, 0 failed
+```

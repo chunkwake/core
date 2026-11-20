@@ -57,6 +57,24 @@ public class MinecraftServer {
         return net.minecraft.core.RegistryAccess.Frozen.empty();
     }
 
+    public void execute(Runnable runnable) {
+        runnable.run();
+    }
+
+    public net.minecraft.world.level.storage.LevelData.RespawnData getRespawnData() {
+        return net.minecraft.world.level.storage.LevelData.RespawnData.DEFAULT;
+    }
+
+    public java.nio.file.Path getWorldPath(
+            net.minecraft.world.level.storage.LevelResource resource) {
+        java.nio.file.Path root = java.nio.file.Path.of(
+                System.getProperty("user.dir", ".")).resolve("world");
+        if (resource == null || resource.getName().isEmpty()) {
+            return root;
+        }
+        return root.resolve(resource.getName());
+    }
+
     public net.minecraft.server.players.PlayerList getPlayerList() {
         return new net.minecraft.server.players.PlayerList();
     }

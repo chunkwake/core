@@ -77,6 +77,16 @@ public class BlockPos extends Vec3i {
         return this;
     }
 
+    public long asLong() {
+        return pack(this.getX(), this.getY(), this.getZ());
+    }
+
+    public static long pack(int x, int y, int z) {
+        return ((long) (x & 0x3FFFFFF) << 38)
+                | ((long) (y & 0xFFF) << 26)
+                | (z & 0x3FFFFFF);
+    }
+
     public MutableBlockPos mutable() {
         return new MutableBlockPos(this.x, this.y, this.z);
     }

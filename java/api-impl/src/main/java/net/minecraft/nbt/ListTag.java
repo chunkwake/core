@@ -16,6 +16,16 @@ public final class ListTag extends java.util.AbstractList<Tag> implements Tag, j
     }
 
     @Override
+    public boolean isEmpty() {
+        return this.size() == 0;
+    }
+
+    public java.util.Optional<CompoundTag> getCompound(int index) {
+        Tag tag = this.get(index);
+        return tag instanceof CompoundTag compound
+                ? java.util.Optional.of(compound) : java.util.Optional.empty();
+    }
+
     public int size() {
         return this.values.size();
     }

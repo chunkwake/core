@@ -29,6 +29,10 @@ public interface LevelData {
             return this.yaw;
         }
 
+        public net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension() {
+            return net.minecraft.world.level.Level.OVERWORLD;
+        }
+
         public float pitch() {
             return this.pitch;
         }

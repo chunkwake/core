@@ -91,7 +91,14 @@ public class ServerLevel extends net.minecraft.world.level.Level implements Comm
 
     // --- CommonLevelAccessor / LevelReader ---
 
-    @Override
+    public net.minecraft.world.level.storage.SavedDataStorage getDataStorage() {
+        return new net.minecraft.world.level.storage.SavedDataStorage();
+    }
+
+    public net.minecraft.server.MinecraftServer getServer() {
+        return net.minecraft.server.MinecraftServer.getServer();
+    }
+
     public ChunkAccess getChunk(int x, int z, ChunkStatus status, boolean load) {
         return new net.minecraft.world.level.chunk.LevelChunk(this, x, z);
     }

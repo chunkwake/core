@@ -21,6 +21,18 @@ public class ChunkPos {
         return new ChunkPos(pos.getX() >> 4, pos.getZ() >> 4);
     }
 
+    public long pack() {
+        return this.toLong();
+    }
+
+    public int x() {
+        return this.x;
+    }
+
+    public int z() {
+        return this.z;
+    }
+
     public long toLong() {
         return ((long) this.x & 0xFFFFFFFFL) | (((long) this.z & 0xFFFFFFFFL) << 32);
     }
