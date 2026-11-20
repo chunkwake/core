@@ -8,7 +8,7 @@ import net.minecraft.world.level.block.state.BlockState;
  * {@code ServerLevel.blockStateAt}. Нужен squaremap/BlueMap-подобным
  * плагинам, которые обходят чанки.
  */
-public class LevelChunk implements ChunkAccess {
+public class LevelChunk extends ChunkAccess {
     private final net.minecraft.server.level.ServerLevel level;
     private final int x;
     private final int z;

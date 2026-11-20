@@ -49,6 +49,29 @@ public class LevelChunkSection {
         return true;
     }
 
+    /** Пустой read-only контейнер биомов (squaremap читает для снапшота). */
+    public net.minecraft.world.level.chunk.PalettedContainerRO<
+            net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome>> getBiomes() {
+        return new net.minecraft.world.level.chunk.PalettedContainerRO<>() {
+            private final net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome> biome =
+                    new net.minecraft.core.Holder.Reference<>(
+                            new net.minecraft.world.level.biome.Biome());
+
+            @Override
+            public net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome> get(
+                    int x, int y, int z) {
+                return this.biome;
+            }
+
+            @Override
+            public net.minecraft.world.level.chunk.PalettedContainer<
+                    net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome>> copy() {
+                return new net.minecraft.world.level.chunk.PalettedContainer<>(null,
+                        net.minecraft.world.level.chunk.Strategy.createForBiomes());
+            }
+        };
+    }
+
     public net.minecraft.world.level.chunk.PalettedContainer<BlockState> getStates() {
         return new net.minecraft.world.level.chunk.PalettedContainer<>(Blocks.AIR.defaultBlockState(),
                 net.minecraft.world.level.chunk.Strategy.createForBlockStates(

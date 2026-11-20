@@ -32,6 +32,17 @@ import net.minecraft.world.phys.AABB;
 public class ServerLevel extends net.minecraft.world.level.Level implements CommonLevelAccessor {
     public static final AtomicInteger ENTITY_COUNTER = new AtomicInteger();
 
+    /** Paper-поле, которое читает squaremap ({@code PaperMapWorld}). */
+    public io.papermc.paper.world.saveddata.PaperLevelOverrides serverLevelData =
+            new io.papermc.paper.world.saveddata.PaperLevelOverrides();
+
+    private final net.minecraft.world.level.border.WorldBorder worldBorder =
+            new net.minecraft.world.level.border.WorldBorder();
+
+    public net.minecraft.world.level.border.WorldBorder getWorldBorder() {
+        return this.worldBorder;
+    }
+
     private final ServerChunkCache chunkSource = new ServerChunkCache();
     private final BiomeManager biomeManager = new BiomeManager();
     private final DimensionType dimensionType = new DimensionType();

@@ -3328,3 +3328,77 @@ powershell -ExecutionPolicy Bypass -File scripts/ab-regions.ps1 `
     -ServerDir <стенд> -Rounds 5 -Mobs 100 -Bots 2 -Seconds 30
 py -3 scripts/ab-regions-stats.py <каталог прогонов>
 ```
+
+## squaremap: снапшот живого чанка заработал, fullrender всё ещё падает
+
+Проверка шла на отдельном стенде `sq-check` (flat, без других плагинов,
+`squaremap-paper-mc26.3-1.4.4.jar`). Важное окружение: порт 8080 на машине
+занят Docker/WSL, поэтому прошлый «enabled» squaremap на самом деле не
+поднимал web-сервер (`BindException`). В стенде порт переключён на 25590 —
+после этого `GET /` отдаёт **HTTP 200 (2046 байт)**, т.е. внутренний
+веб-сервер работает.
+
+Диагностика рендера шла пробником `SquaremapProbe`, который вызывает
+`ChunkSnapshotFactory.snapshotLiveChunk(ServerLevel, ChunkAccess)`.
+Исходно он падал, вскрылась цепочка реальных NMS-расхождений (все
+исправлены):
+
+- `ChunkAccess` был **интерфейсом**, а в 26.3 это абстрактный класс →
+  `IncompatibleClassChangeError: Found interface ChunkAccess, but class was
+  expected`;
+- `ServerLevel.serverLevelData` отсутствовало (тип
+  `io.papermc.paper.world.saveddata.PaperLevelOverrides`) +
+  `LevelData`/`LevelData.RespawnData` (squaremap `PaperMapWorld.getSpawnPos`);
+- не было `WorldBorder`/`ServerLevel.getWorldBorder`, `Level.NETHER`
+  (и OVERWORLD/END);
+- не было `LevelHeightAccessor` (ChunkAccess/Level не реализовывали его);
+- не было `Heightmap`/`Heightmap.Types.isOpaque/getSerializationKey`,
+  `ChunkAccess.getOrCreateHeightmapUnprimed`, `BitStorage`/
+  `SimpleBitStorage`, `Mth.ceillog2` — squaremap требует примированную
+  heightmap и строит из неё `HeightmapSnapshot`;
+- `PalettedContainer` не имел `get(int)`, `maybeHas`, `copy`;
+  `PalettedContainerRO` отсутствовал, `LevelChunkSection.getBiomes()` не
+  было; добавлен `Strategy.createForBiomes`;
+- не было `BiomeResolver` (ChunkSnapshot extends его).
+
+Живое подтверждение (лог пробника):
+
+```
+SQProbe: snapshot=public static ...ChunkSnapshotFactory.snapshotLiveChunk(...)
+SQProbe: snapshot ok=ChunkSnapshotImpl[heightAccessor=...,
+         states=[Lxyz...SectionData; ...]
+SQProbe: snapshot class=xyz.jpenilla.squaremap.common.chunksnapshot.ChunkSnapshotImpl
+```
+
+То есть **живой чанк теперь превращается в снапшот squaremap без ошибок** —
+это и был MissingPaletteEntry-путь (палитры/секции/биомы/высоты).
+
+Однако `/squaremap fullrender` всё ещё не закрыт:
+
+```
+> /squaremap fullrender
+| /Started full map render for minecraft:overworld
+squaremap-render-[minecraft:overworld] ERROR Rendering failed for world 'minecraft:overworld'
+png count: 0
+```
+
+При включённом `log4j root level=DEBUG` и `squaremap.debug-mode: true`
+всё равно печатается только `Rendering failed` без stack trace, PNG не
+создаются. Следующий шаг — разобрать именно fullrender-путь (он строит
+план из региональных файлов, в отличие от живого снапшота) либо
+реализовать `ChunkLoadEvent`/`ChunkPopulateEvent` (сейчас сервер их не
+шлёт вообще), чтобы карты обновлялись по мере загрузки чанков.
+
+Гейты после изменений (без регрессий):
+
+```
+расширенный (60 плагинов): 58 of 60 enabled in 81774 ms
+  failed: MiniMOTD (сам), VoxyServerSide (сам); squaremap enabled in 655 ms
+  PANICS: 0
+базовый: 26 of 27 enabled in 12505 ms
+  failed: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4 -> 45 suites, 953 passed, 0 failed
+```

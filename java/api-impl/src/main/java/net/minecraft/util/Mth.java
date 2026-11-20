@@ -5,6 +5,10 @@ public final class Mth {
     private Mth() {
     }
 
+    public static int ceillog2(int value) {
+        return value <= 1 ? 0 : 32 - Integer.numberOfLeadingZeros(value - 1);
+    }
+
     public static int clamp(int value, int min, int max) {
         return Math.max(min, Math.min(max, value));
     }

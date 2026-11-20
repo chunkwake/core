@@ -12,4 +12,13 @@ public interface Strategy<T> {
             }
         };
     }
+
+    static <T> Strategy<T> createForBiomes() {
+        return new Strategy<T>() {
+            @Override
+            public String toString() {
+                return "Strategy[biomes]";
+            }
+        };
+    }
 }
