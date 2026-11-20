@@ -8,6 +8,10 @@ package net.minecraft.world.item;
 public class ItemStack {
     public String item;
     public int count;
+    /** Числовой id предмета из пакета (для перекодирования). */
+    public int rawId = -1;
+    /** Исходные байты патча компонентов (сохраняются при правке count). */
+    public byte[] patch = new byte[0];
 
     public static final ItemStack EMPTY = new ItemStack("minecraft:air", 0);
     public static final net.minecraft.network.codec.StreamCodec<Object> STREAM_CODEC =
@@ -40,6 +44,10 @@ public class ItemStack {
 
     public String getItemId() {
         return this.item;
+    }
+
+    public Item getItem() {
+        return new Item(this.item);
     }
 
     public ItemStack copy() {

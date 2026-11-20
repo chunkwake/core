@@ -2679,3 +2679,36 @@ plugins: enabled 37 plugin(s)   (38 jar с EquipProbe)
 `ClientboundSetEquipmentPacket` с `getSlots()` (List<Pair<EquipmentSlot,
 ItemStack>>) и корректным конвертером ProtocolLib; это следующий шаг.
 Базовый гейт без изменений: 26/27 (только Voxy).
+
+## SET_EQUIPMENT: field-level закрыт и подтверждён живьём
+
+Сделано:
+- настоящий носитель `ClientboundSetEquipmentPacket` с
+  `getEntity()`/`getSlots(): List<Pair<EquipmentSlot, ItemStack>>`;
+- стабы `EquipmentSlot` (порядок = проводной id) и `ItemStack`
+  (`rawId`, `patch`, `getItem()`);
+- `EquipmentWire.parseSlots/encode`;
+- `setEquipment` строит носитель, поднимает событие ProtocolLib,
+  забирает изменённые слоты и перекодирует пакет; на сложных компонентах
+  — прежний RawPayload-passthrough;
+- Rust-команды `components` и `itemname <id>` (WIP `play.rs`).
+
+Живой прогон с `EQUIP=1` (EquipProbe меняет count первого слота на 2):
+
+```
+[EquipProbe] EQUIP event, pairs=1 first=MAINHAND count=1
+[EquipProbe] EQUIP modified first count=2
+protocol: set_equipment re-encoded (slots=1, modified=true)
+```
+
+То есть: событие доходит, структура слотов читается (pairs=1,
+MAINHAND, count=1), плагин меняет слот, сервер перекодирует пакет с
+изменением.
+
+Гейты:
+
+```
+базовый:                       26 of 27 (только VoxyServerSide), panics=0
+расширенный без EquipProbe:    36 of 37 (только VoxyServerSide)
+расширенный с EquipProbe:      37 of 38 (только VoxyServerSide), panics=0
+```

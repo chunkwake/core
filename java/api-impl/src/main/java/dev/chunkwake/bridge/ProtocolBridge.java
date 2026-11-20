@@ -589,25 +589,95 @@ final class ProtocolBridge {
         }
     }
 
+    /** Прогоняет пакет через ProtocolLib; true — событие отменено. */
+    private static boolean fireEvent(org.bukkit.entity.Player player, Object type, Object packet)
+            throws Exception {
+        Object container = containerConstructor.newInstance(type, packet);
+        Object event = fromServer.invoke(null, plugin, container, player);
+        for (Object listener : (Set<?>) getListeners.invoke(manager)) {
+            Set<?> types = (Set<?>) getTypes.invoke(getSendingWhitelist.invoke(listener));
+            if (types.contains(type)) {
+                onSending.invoke(listener, event);
+            }
+        }
+        return Boolean.TRUE.equals(event.getClass().getMethod("isCancelled").invoke(event));
+    }
+
     /**
-     * SET_EQUIPMENT: разбор проводного формата (см. {@link EquipmentWire}).
-     * Сложные компоненты -> passthrough. Событие для плагинов поднимается
-     * общим RawPayload-путём; здесь фиксируем, что пакет реально разобран.
+     * SET_EQUIPMENT: настоящий носитель с `getSlots()` + перекодирование.
+     * Сложные компоненты — passthrough через RawPayload (прежняя семантика).
      */
     private static byte[] setEquipment(org.bukkit.entity.Player player, Object type, byte[] data) {
         try {
             int[] pos = {0};
             int id = readVarInt(data, pos);
-            EquipmentWire.Parsed parsed = EquipmentWire.parse(data, pos[0]);
-            if (parsed.supported()) {
-                staticMap();
-                if (EQUIPMENT_LOGGED.compareAndSet(false, true)) {
-                    Bridge.log(2, "protocol: set_equipment parsed (slots=" + parsed.slots()
-                            + ", field-level ready)");
-                }
+            java.util.List<EquipmentWire.RawSlot> raw = EquipmentWire.parseSlots(data, pos[0]);
+            if (raw == null) {
+                return rawEvent(player, type, data);
             }
-            // Событие для плагинов: держим прежнюю семантику RawPayload
-            // (раньше пакет шёл общим путём) + отмена/замена данных.
+            if (EQUIPMENT_LOGGED.compareAndSet(false, true)) {
+                Bridge.log(2, "protocol: set_equipment parsed (slots=" + raw.size()
+                        + ", field-level ready)");
+            }
+            int entity = readEntity(data, pos[0]);
+            java.util.List<com.mojang.datafixers.util.Pair<
+                    net.minecraft.world.entity.EquipmentSlot,
+                    net.minecraft.world.item.ItemStack>> slots = new java.util.ArrayList<>();
+            for (EquipmentWire.RawSlot slot : raw) {
+                net.minecraft.world.item.ItemStack stack =
+                        new net.minecraft.world.item.ItemStack(nameOf(slot.itemId()), slot.count());
+                stack.rawId = slot.itemId();
+                stack.patch = slot.patch();
+                slots.add(com.mojang.datafixers.util.Pair.of(
+                        net.minecraft.world.entity.EquipmentSlot.byId(slot.slot()), stack));
+            }
+            net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket packet =
+                    new net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket(entity, slots);
+            if (fireEvent(player, type, packet)) {
+                return null;
+            }
+            java.util.List<com.mojang.datafixers.util.Pair<
+                    net.minecraft.world.entity.EquipmentSlot,
+                    net.minecraft.world.item.ItemStack>> after = packet.getSlots();
+            java.util.List<EquipmentWire.RawSlot> out = new java.util.ArrayList<>();
+            for (com.mojang.datafixers.util.Pair<net.minecraft.world.entity.EquipmentSlot,
+                    net.minecraft.world.item.ItemStack> pair : after) {
+                net.minecraft.world.item.ItemStack stack = pair.getSecond();
+                int slot = pair.getFirst() == null ? 0 : pair.getFirst().ordinal();
+                int count = stack == null ? 0 : stack.getCount();
+                int itemId = stack == null ? -1 : stack.rawId;
+                byte[] patch = stack == null ? new byte[0] : stack.patch;
+                out.add(new EquipmentWire.RawSlot(slot, count, itemId, patch));
+            }
+            byte[] body = EquipmentWire.encode(packet.getEntity(), out);
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream(body.length + 5);
+            writeVarInt(bytes, id);
+            bytes.write(body, 0, body.length);
+            byte[] result = bytes.toByteArray();
+            if (!java.util.Arrays.equals(result, data)) {
+                Bridge.log(2, "protocol: set_equipment re-encoded (slots=" + out.size()
+                        + ", modified=true)");
+            }
+            return result;
+        } catch (Throwable broken) {
+            Bridge.log(1, "protocol: set_equipment fallback: " + broken);
+            return rawEvent(player, type, data);
+        }
+    }
+
+    private static String nameOf(int itemId) {
+        String name = Bridge.world("itemname " + itemId);
+        return name == null || name.isBlank() ? "minecraft:air" : name.trim();
+    }
+
+    private static int readEntity(byte[] data, int offset) {
+        int[] pos = {offset};
+        return readVarInt(data, pos);
+    }
+
+    /** Прежняя семантика: RawPayload-событие (отмена/замена данных). */
+    private static byte[] rawEvent(org.bukkit.entity.Player player, Object type, byte[] data) {
+        try {
             Object container = containerConstructor.newInstance(type, new RawPayload(data));
             Object event = fromServer.invoke(null, plugin, container, player);
             for (Object listener : (Set<?>) getListeners.invoke(manager)) {
@@ -620,12 +690,12 @@ final class ProtocolBridge {
                 return null;
             }
             Object handle = container.getClass().getMethod("getHandle").invoke(container);
-            if (handle instanceof RawPayload raw && raw.data != null) {
-                return raw.data;
+            if (handle instanceof RawPayload rawPayload && rawPayload.data != null) {
+                return rawPayload.data;
             }
             return data;
         } catch (Throwable broken) {
-            Bridge.log(1, "protocol: set_equipment parse failed: " + broken);
+            Bridge.log(1, "protocol: set_equipment raw event failed: " + broken);
             return data;
         }
     }

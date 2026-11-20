@@ -16,6 +16,10 @@ final class EquipmentWire {
     record Parsed(int slots, boolean supported) {
     }
 
+    /** Сырой слот: id слота, count/itemId и байты патча компонентов. */
+    record RawSlot(int slot, int count, int itemId, byte[] patch) {
+    }
+
     private EquipmentWire() {
     }
 
@@ -50,6 +54,73 @@ final class EquipmentWire {
             }
         }
         return new Parsed(slots, true);
+    }
+
+    /** Разбор в список слотов; null — если формат не поддержан. */
+    static java.util.List<RawSlot> parseSlots(byte[] data, int offset) {
+        int[] pos = {offset};
+        int entity = readVarInt(data, pos);
+        if (entity < 0) {
+            return null;
+        }
+        java.util.List<RawSlot> out = new java.util.ArrayList<>();
+        while (pos[0] < data.length) {
+            int slot = data[pos[0]++] & 0xFF;
+            boolean more = (slot & 0x80) != 0;
+            int count = readVarInt(data, pos);
+            if (count < 0) {
+                return null;
+            }
+            int itemId = -1;
+            byte[] patch = new byte[0];
+            if (count > 0) {
+                itemId = readVarInt(data, pos);
+                int added = readVarInt(data, pos);
+                int removed = readVarInt(data, pos);
+                if (itemId < 0 || added < 0 || removed < 0) {
+                    return null;
+                }
+                int start = pos[0];
+                for (int i = 0; i < added; i++) {
+                    int kind = readVarInt(data, pos);
+                    if (!skipComponent(data, pos, kind)) {
+                        return null;
+                    }
+                }
+                patch = java.util.Arrays.copyOfRange(data, start, pos[0]);
+            }
+            out.add(new RawSlot(slot & 0x7F, count, itemId, patch));
+            if (!more) {
+                break;
+            }
+        }
+        return out;
+    }
+
+    /** Перекодирование списка слотов (без id пакета). */
+    static byte[] encode(int entity, java.util.List<RawSlot> slots) {
+        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        writeVarInt(bytes, entity);
+        for (int i = 0; i < slots.size(); i++) {
+            RawSlot s = slots.get(i);
+            bytes.write(s.slot() | (i + 1 < slots.size() ? 0x80 : 0));
+            writeVarInt(bytes, s.count());
+            if (s.count() > 0) {
+                writeVarInt(bytes, s.itemId());
+                writeVarInt(bytes, 0);
+                writeVarInt(bytes, 0);
+                bytes.write(s.patch(), 0, s.patch().length);
+            }
+        }
+        return bytes.toByteArray();
+    }
+
+    private static void writeVarInt(java.io.ByteArrayOutputStream out, int value) {
+        while ((value & ~0x7F) != 0) {
+            out.write((value & 0x7F) | 0x80);
+            value >>>= 7;
+        }
+        out.write(value);
     }
 
     /** Пропускает payload известного фиксированного компонента. */
