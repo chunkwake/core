@@ -135,6 +135,64 @@ final class StackImpl extends ItemStack {
     @Override public void resetData(io.papermc.paper.datacomponent.DataComponentType component) {
     }
 
+    /**
+     * Paper {@code ItemStack.withType}: базовая реализация делегирует в
+     * {@code craftDelegate}, которого у нашего стека нет. Возвращаем копию
+     * с тем же содержимым и новым типом.
+     */
+    @Override
+    public ItemStack withType(Material type) {
+        StackImpl copy = new StackImpl(type, this.amount);
+        copy.data = this.data.copy();
+        return copy;
+    }
+
+    @Override public boolean hasData(io.papermc.paper.datacomponent.DataComponentType component) {
+        return false;
+    }
+
+    @Override public void copyDataFrom(ItemStack other,
+            java.util.function.Predicate<io.papermc.paper.datacomponent.DataComponentType> filter) {
+        if (other != null) {
+            this.data = data(other).copy();
+        }
+    }
+
+    @Override public boolean isDataOverridden(io.papermc.paper.datacomponent.DataComponentType component) {
+        return false;
+    }
+
+    @Override public boolean matchesWithoutData(ItemStack other,
+            java.util.Set<io.papermc.paper.datacomponent.DataComponentType> types, boolean ignoreCount) {
+        return other != null && isSimilar(other);
+    }
+
+    @Override public net.kyori.adventure.text.Component effectiveName() {
+        return this.data.name == null ? net.kyori.adventure.text.Component.empty() : this.data.name;
+    }
+
+    @Override public String translationKey() {
+        return "item." + this.type.getKey().getNamespace() + "." + this.type.getKey().getKey();
+    }
+
+    @Override public boolean isRepairableBy(ItemStack other) {
+        return other != null && other.getType() == this.type;
+    }
+
+    @Override public int getMaxItemUseDuration(org.bukkit.entity.LivingEntity entity) {
+        return 0;
+    }
+
+    @Override public java.util.List<net.kyori.adventure.text.Component> computeTooltipLines(
+            io.papermc.paper.inventory.tooltip.TooltipContext context, org.bukkit.entity.Player player) {
+        return java.util.List.of();
+    }
+
+    @Override public boolean editPersistentDataContainer(
+            java.util.function.Consumer<org.bukkit.persistence.PersistentDataContainer> consumer) {
+        return false;
+    }
+
     @Override public Material getType() { return type; }
     @Override public void setType(Material type) { this.type = Objects.requireNonNull(type, "type"); }
     @Override public int getAmount() { return amount; }
@@ -336,11 +394,69 @@ final class StackImpl extends ItemStack {
     /** Ключ данных плагинов в {@code custom_data} (как у CraftBukkit). */
     static final String PDC = "PublicBukkitValues";
 
+    /** Пустой {@code CustomModelDataComponent}: плагины (nightcore) ждут
+     * не-null, даже если данных нет. */
+    static final class CmdImpl {
+        public java.util.List<Float> getFloats() {
+            return java.util.List.of();
+        }
+
+        public void setFloats(java.util.List<Float> floats) {
+        }
+
+        public java.util.List<Boolean> getFlags() {
+            return java.util.List.of();
+        }
+
+        public void setFlags(java.util.List<Boolean> flags) {
+        }
+
+        public java.util.List<String> getStrings() {
+            return java.util.List.of();
+        }
+
+        public void setStrings(java.util.List<String> strings) {
+        }
+
+        public java.util.List<org.bukkit.Color> getColors() {
+            return java.util.List.of();
+        }
+
+        public void setColors(java.util.List<org.bukkit.Color> colors) {
+        }
+
+        public java.util.Map<String, Object> serialize() {
+            return java.util.Map.of();
+        }
+    }
+
+    /** Общий пустой custom-model-data для всех реализаций меты. */
+    private static final org.bukkit.inventory.meta.components.CustomModelDataComponent CUSTOM_MODEL_DATA =
+            Stub.of(org.bukkit.inventory.meta.components.CustomModelDataComponent.class,
+                    new CmdImpl());
+
+    static org.bukkit.inventory.meta.components.CustomModelDataComponent customModelData() {
+        return CUSTOM_MODEL_DATA;
+    }
+
     static final class MetaImpl {
         final ItemMeta api;
         final Data data;
         /** Тип стопки: у книг мета ещё и {@link org.bukkit.inventory.meta.BookMeta}, как CraftMetaBook. */
         final Material type;
+
+        private static final org.bukkit.inventory.meta.components.CustomModelDataComponent CMD =
+                StackImpl.customModelData();
+
+        /** Paper-компонент custom model data: не-null (nightcore). */
+        public org.bukkit.inventory.meta.components.CustomModelDataComponent
+                getCustomModelDataComponent() {
+            return CMD;
+        }
+
+        public void setCustomModelDataComponent(
+                org.bukkit.inventory.meta.components.CustomModelDataComponent component) {
+        }
 
         MetaImpl(Data data, Material type) {
             this.data = data;

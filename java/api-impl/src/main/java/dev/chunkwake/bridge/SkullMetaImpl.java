@@ -76,7 +76,7 @@ final class SkullMetaImpl implements SkullMeta {
     }
     @Override
     public org.bukkit.inventory.meta.components.CustomModelDataComponent getCustomModelDataComponent() {
-        return null;
+        return StackImpl.customModelData();
     }
     @Override
     public org.bukkit.inventory.meta.tags.CustomItemTagContainer getCustomTagContainer() {

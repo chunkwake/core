@@ -3146,3 +3146,79 @@ Java-тестов; `cargo fmt --all --check` — 0; базовый и расши
 name/lore), и `ItemStack.isSimilar` не совпадает. Это точный оставшийся
 разрыв: нужен полноценный NMS `ItemStack.CODEC` с компонентами/`DataComponentMap`,
 а не минимальный.
+
+## 58/60: nightcore и ExcellentCrates включены (ItemStack.CODEC переносит компоненты)
+
+`NightCore.testNbt()` теперь проходит: в логе больше нет
+`Could not initialize NBT Utils.`, есть `nightcore enabled in 156 ms`,
+следом включается `ExcellentCrates enabled in 278 ms` (он зависит от
+nightcore).
+
+Причина прежнего отказа была не в самом codec, а в том, что компоненты
+терялись ещё на мосту Bukkit -> NMS:
+
+1. `CraftItemStack.asNMSCopy` брал только `type` и `amount`; display
+   name/lore/PDC не попадали в NMS-стек;
+2. `ItemStack.CODEC` сериализовал только `id`+`count`;
+3. `asBukkitCopy` не восстанавливал мету.
+
+Исправление (round-trip компонентов):
+
+- `dev.chunkwake.bridge.ItemBridge` — публичный мост к
+  `StackImpl.line/parse` (`id count [json]`);
+- `CraftItemStack.asNMSCopy` кладёт `ItemBridge.line(stack)` в новое поле
+  NMS `ItemStack.meta`; `asBukkitCopy` при непустом `meta` восстанавливает
+  стек через `ItemBridge.parse` (display name, lore, зачарования, PDC);
+- `ItemStack.CODEC`: в CompoundTag пишутся `id`, `count` и `meta`
+  (Base64url без padding — строка должна пережить
+  `CompoundTag.toString()` + `TagParser.parseCompoundFully`);
+  `decode` возвращает стек с восстановленным `meta`.
+- `TagParser.parseCompoundFully` разбирает компаунд нашего вида, поэтому
+  `ItemTag(tagString) -> getItemStack()` возвращает эквивалентный предмет.
+
+Попутно закрыты два Paper-метода, на которых nightcore падал после NBT:
+
+- `ItemStack.withType(Material)` (и `hasData`/`copyDataFrom`/
+  `isDataOverridden`/`matchesWithoutData`/`effectiveName`/
+  `translationKey`/`isRepairableBy`/`getMaxItemUseDuration`/
+  `computeTooltipLines`/`editPersistentDataContainer`) — базовые
+  реализации делегируют в `craftDelegate`, которого у нашего стека нет;
+- `ItemMeta.getCustomModelDataComponent()` — возвращает не-null пустой
+  компонент и для обычной меты, и для `SkullMetaImpl` (nightcore строит
+  кастомные головы).
+
+Добавлен тест `ItemCodecRoundTripTest`: Bukkit-стек с display name и
+lore -> `asNMSCopy` -> `ItemStack.CODEC.encode` (CompoundTag) ->
+`decode` -> `asBukkitCopy` -> `isSimilar` = true.
+
+Живые гейты:
+
+```
+расширенный (60 плагинов): 58 of 60 enabled in 32755 ms
+  failed: MiniMOTD (сам по version-gate), VoxyServerSide (сам по plugin.yml)
+  nightcore enabled, ExcellentCrates enabled, EconomyShopGUI enabled,
+  FancyNpcs enabled, MythicMobs enabled
+  PANICS: 0
+базовый: 26 of 27 enabled in 10768 ms
+  failed: только VoxyServerSide, PANICS: 0
+```
+
+Оставшиеся два отказа — не дыры ядра:
+
+- **MiniMOTD 2.2.5** сам отключается: `lavaChicken()` true и
+  `Bukkit.getBukkitVersion()` не содержит `1.21.7-` -> он считает сервер
+  Spigot и пишет `MiniMOTD does not support Spigot on Minecraft 1.21.8 or
+  newer`. Это его собственный version-gate; подделывать версию сервера
+  ради одного плагина не стали.
+- **VoxyServerSide** — самоотключается по `plugin.yml`
+  (`lss-minecraft-dependency`).
+
+Тесты/гейты:
+
+```
+gradlew --offline cleanTest test :test-plugin:jar dist -> BUILD SUCCESSFUL
+Java-тесты: 56 (включая ItemCodecRoundTripTest)
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4 -> 45 suites, 953 passed, 0 failed
+```

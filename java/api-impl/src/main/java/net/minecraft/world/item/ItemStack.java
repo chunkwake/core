@@ -12,6 +12,13 @@ public class ItemStack {
     public int rawId = -1;
     /** Исходные байты патча компонентов (сохраняются при правке count). */
     public byte[] patch = new byte[0];
+    /**
+     * Компоненты предмета в сериализованном виде (`id count [json]` из
+     * {@code StackImpl.line}). Нужны, чтобы {@code ItemStack.CODEC}
+     * переносил display name/lore/PDC, а не только id+count: nightcore
+     * проверяет round-trip через {@code ItemStack.isSimilar}.
+     */
+    public String meta = "";
     /** NBT в терминах старого API (DeluxeMenus: {@code u()}/{@code v()}/{@code c()}). */
     private net.minecraft.nbt.NBTTagCompound legacyTag;
     /** Компоненты предмета (как ванильный {@code ItemStack.components}). */
@@ -38,6 +45,16 @@ public class ItemStack {
                     net.minecraft.nbt.CompoundTag tag = new net.minecraft.nbt.CompoundTag();
                     tag.putString("id", input.getItemId());
                     tag.putInt("count", input.getCount());
+                    if (input.meta != null && !input.meta.isEmpty()) {
+                        // Base64url без padding: строка попадает в
+                        // CompoundTag.toString() и разбирается нашим
+                        // TagParser, поэтому не должна содержать запятых,
+                        // кавычек и `=`.
+                        tag.putString("meta", java.util.Base64.getUrlEncoder()
+                                .withoutPadding()
+                                .encodeToString(input.meta.getBytes(
+                                        java.nio.charset.StandardCharsets.UTF_8)));
+                    }
                     return com.mojang.serialization.DataResult.success((T) tag);
                 }
 
@@ -52,9 +69,18 @@ public class ItemStack {
                                     () -> "No element id in the map");
                         }
                         int count = Math.max(tag.getIntOr("count", 1), 1);
+                        ItemStack stack = new ItemStack(id, count);
+                        String meta = tag.getStringOr("meta", "");
+                        if (!meta.isEmpty()) {
+                            try {
+                                stack.meta = new String(java.util.Base64.getUrlDecoder()
+                                        .decode(meta), java.nio.charset.StandardCharsets.UTF_8);
+                            } catch (IllegalArgumentException ignored) {
+                                stack.meta = "";
+                            }
+                        }
                         return com.mojang.serialization.DataResult.success(
-                                com.mojang.datafixers.util.Pair.of(
-                                        new ItemStack(id, count), input));
+                                com.mojang.datafixers.util.Pair.of(stack, input));
                     }
                     return com.mojang.serialization.DataResult.error(
                             () -> "ItemStack tag must be a compound");

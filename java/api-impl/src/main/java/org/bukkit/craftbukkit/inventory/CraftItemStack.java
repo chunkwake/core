@@ -16,7 +16,11 @@ public final class CraftItemStack extends org.bukkit.inventory.ItemStack {
         if (stack == null || stack.getType() == Material.AIR) {
             return new ItemStack("minecraft:air", 0);
         }
-        return new ItemStack(stack.getType().getKey().toString(), stack.getAmount());
+        ItemStack nms = new ItemStack(stack.getType().getKey().toString(), stack.getAmount());
+        // Компоненты (display name, lore, PDC, зачарования) переносим
+        // строкой Rust-модели: иначе CODEC сериализует только id+count.
+        nms.meta = dev.chunkwake.bridge.ItemBridge.line(stack);
+        return nms;
     }
 
     public static ItemStack asCraftCopy(org.bukkit.inventory.ItemStack stack) {
@@ -35,6 +39,12 @@ public final class CraftItemStack extends org.bukkit.inventory.ItemStack {
     public static org.bukkit.inventory.ItemStack asBukkitCopy(ItemStack stack) {
         if (stack == null || stack.isEmpty()) {
             return new org.bukkit.inventory.ItemStack(Material.AIR);
+        }
+        if (stack.meta != null && !stack.meta.isEmpty()) {
+            org.bukkit.inventory.ItemStack parsed = dev.chunkwake.bridge.ItemBridge.parse(stack.meta);
+            if (parsed != null) {
+                return parsed;
+            }
         }
         Material material = Material.matchMaterial(stack.getItemId());
         return new org.bukkit.inventory.ItemStack(
