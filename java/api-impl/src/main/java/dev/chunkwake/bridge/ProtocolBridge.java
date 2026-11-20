@@ -47,6 +47,7 @@ final class ProtocolBridge {
     private static Object addEntityType;
     private static Object blockUpdateType;
     private static Object multiBlockType;
+    private static Object equipmentType;
     /** Класс-носитель сырых байтов для PacketContainer. */
     public static final class RawPayload {
         public byte[] data;
@@ -161,6 +162,12 @@ final class ProtocolBridge {
                             "net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket",
                             true, loader);
                     multiBlockType = candidate;
+                } else if (classNames.contains(
+                        "net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket")) {
+                    carrier = Class.forName(
+                            "net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket",
+                            true, loader);
+                    equipmentType = candidate;
                 } else if (classNames.contains(
                         "net.minecraft.network.protocol.game.ClientboundPlayerChatPacket")
                         || "CHAT".equals(String.valueOf(
@@ -300,6 +307,9 @@ final class ProtocolBridge {
             }
             if ("section_blocks_update".equalsIgnoreCase(name) && multiBlockType != null) {
                 return sectionBlocks(player, multiBlockType, data);
+            }
+            if ("set_equipment".equalsIgnoreCase(name) && equipmentType != null) {
+                return setEquipment(player, equipmentType, data);
             }
             if ("set_entity_data".equalsIgnoreCase(name) && entityDataType != null) {
                 return entityData(player, entityDataType, data);
@@ -577,6 +587,38 @@ final class ProtocolBridge {
             Bridge.log(1, "protocol: block_update bridge failed: " + cause);
             return data;
         }
+    }
+
+    /**
+     * SET_EQUIPMENT: разбор проводного формата (см. {@link EquipmentWire}).
+     * Сложные компоненты -> passthrough. Событие для плагинов поднимается
+     * общим RawPayload-путём; здесь фиксируем, что пакет реально разобран.
+     */
+    private static byte[] setEquipment(org.bukkit.entity.Player player, Object type, byte[] data) {
+        try {
+            int[] pos = {0};
+            int id = readVarInt(data, pos);
+            EquipmentWire.Parsed parsed = EquipmentWire.parse(data, pos[0]);
+            if (parsed.supported()) {
+                staticMap();
+                if (EQUIPMENT_LOGGED.compareAndSet(false, true)) {
+                    Bridge.log(2, "protocol: set_equipment parsed (slots=" + parsed.slots()
+                            + ", field-level ready)");
+                }
+            }
+            return data;
+        } catch (Throwable broken) {
+            Bridge.log(1, "protocol: set_equipment parse failed: " + broken);
+            return data;
+        }
+    }
+
+    private static final java.util.concurrent.atomic.AtomicBoolean EQUIPMENT_LOGGED =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    private static void staticMap() {
+        // прогрев таблицы component id (нужна парсеру)
+        ComponentIds.count();
     }
 
     /** Field-level for {@code ClientboundPlayerChatPacket}. */

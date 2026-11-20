@@ -2592,3 +2592,33 @@ FAILED: только VoxyServerSide, PANICS: 0
 (damage/enchantments/repair_cost/trim/banner/map_*/dyed) с passthrough на
 custom_name/lore/book/container/charged_projectiles, затем тестовый
 слушатель ProtocolLib и гейты.
+
+## SET_EQUIPMENT, шаг 2: парсер и диспетчер (без живого трафика в стенде)
+
+Сделано:
+
+- `EquipmentWire`: разбор проводного SET_EQUIPMENT (entityId, слоты с
+  байтом 0x80, ItemStack: count/itemId/added/removed + компоненты).
+  Поддержаны фиксированные компоненты (damage, enchantments,
+  repair_cost, trim, banner_patterns, map_id, map_post_processing,
+  dyed_color) через таблицу `ComponentIds`; при
+  custom_name/lore/book/container/charged_projectiles разбор помечается
+  unsupported и пакет уходит passthrough.
+- `ProtocolBridge`: регистрация типа `ClientboundSetEquipmentPacket` и
+  диспетчер `set_equipment` -> `setEquipment`, который парсит пакет и
+  логирует `protocol: set_equipment parsed (slots=N, field-level ready)`
+  один раз.
+
+Сборка: gradle `BUILD SUCCESSFUL`, сервер пересобран, гейт:
+
+```
+plugins: 36 of 37 enabled
+FAILED: только VoxyServerSide, PANICS: 0
+```
+
+Важно: в стенде за прогон не встретилось ни одного SET_EQUIPMENT
+(мобы без экипировки), поэтому строка `set_equipment parsed` в логе не
+появилась — парсер и диспетчер скомпилированы и включены, но живого
+подтверждения события пока нет. Следующий шаг: `EQUIP=1` в стенде
+(summon зомби с ArmorItems/HandItems) или тестовый слушатель ProtocolLib,
+затем лог события и перекодированного слота, и повторные гейты.
