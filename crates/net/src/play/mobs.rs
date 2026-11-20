@@ -629,6 +629,14 @@ impl PlayPlan {
         let peaceful = self.difficulty() == Difficulty::Peaceful;
         let difficulty = self.difficulty().id();
         let mob_griefing = self.vars.flag("mob_griefing");
+        // Правила и ID эффектов не меняются за тик: каждый `vars.flag` — замок
+        // и поиск по строке, а спрашивались они на каждого моба.
+        let fire_damage = self.vars.flag("fire_damage");
+        let drowning_damage = self.vars.flag("drowning_damage");
+        let freeze_damage = self.vars.flag("freeze_damage");
+        let jump_boost_id = self.survival.effects.get("minecraft:jump_boost").copied();
+        let darkness_id = self.survival.effects.get("minecraft:darkness").copied();
+        let server_ticks = self.server_ticks.load(Ordering::Relaxed);
         let min_y = self.min_y();
         let weather = self.vars.weather();
         let darken = self.sky_darken_now(dim, weather.rain, weather.thunder);
@@ -636,8 +644,6 @@ impl PlayPlan {
         let mut outs = Vec::new();
         let mut blasts = Vec::new();
         let mut despawned = Vec::new();
-        let mut rng = rand::thread_rng();
-        let mut rand = || rand::Rng::r#gen::<f64>(&mut rng);
         let mut packets: Vec<(i32, Vec<u8>)> = Vec::new();
         let mut gone = Vec::new();
         let mut statues = Vec::new();
@@ -655,6 +661,16 @@ impl PlayPlan {
         let mut gift_poppies: Vec<(u128, i32)> = Vec::new();
         let now = self.game_time.load(Ordering::Relaxed);
         let border = self.border_at(now);
+        // Снимок жителей берём до `sim.mobs`: канонический порядок —
+        // `sim.villagers` -> `sim.mobs` (иначе deadlock в параллельном тике).
+        let villager_points: Vec<(u128, [f64; 3])> = {
+            let villagers = self.sim().villagers.lock().unwrap();
+            villagers
+                .values()
+                .filter(|v| v.health > 0.0)
+                .map(|v| (v.uuid.as_u128(), v.pos))
+                .collect()
+        };
         {
             let mut mobs = self.sim().mobs.lock().unwrap();
             // Животные до тика: пары (`BreedGoal`) и родители (`FollowParentGoal`).
@@ -663,13 +679,18 @@ impl PlayPlan {
                 .filter(|(_, e)| e.mob.species.is_animal() && e.mob.alive())
                 .map(|(&id, e)| e.mob.kin(id))
                 .collect();
-            // `EatBlockGoal.IS_EDIBLE`: `#edible_for_sheep`.
-            let edible = self.survival.block_tags.get("minecraft:edible_for_sheep");
+            // `EatBlockGoal.IS_EDIBLE` (`#edible_for_sheep`), вода и среда — таблицей.
+            let cells = self.mob_cells();
             // Транспорт для наездников (`Ravager` + разбойник).
-            let vehicle_pos: HashMap<i32, ([f64; 3], f32, f64)> = mobs
-                .iter()
-                .map(|(&id, e)| (id, (e.mob.pos, e.mob.yaw, e.mob.size().1)))
-                .collect();
+            // Карта строится, только если кто-то едет: обычно не едет никто.
+            let vehicle_pos: FastMap<i32, ([f64; 3], f32, f64)> =
+                if mobs.values().any(|e| e.vehicle.is_some()) {
+                    mobs.iter()
+                        .map(|(&id, e)| (id, (e.mob.pos, e.mob.yaw, e.mob.size().1)))
+                        .collect()
+                } else {
+                    FastMap::default()
+                };
             // `EvokerSummonSpellGoal`: vexes в 16 блоках.
             let vex_positions: Vec<[f64; 3]> = mobs
                 .values()
@@ -678,11 +699,9 @@ impl PlayPlan {
                 .collect();
             // `OfferFlowerGoal`: кандидаты `#candidate_for_iron_golem_gift`.
             let gift_candidates: Vec<(u128, [f64; 3], bool)> = {
-                let villagers = self.sim().villagers.lock().unwrap();
-                let mut list: Vec<(u128, [f64; 3], bool)> = villagers
-                    .values()
-                    .filter(|v| v.health > 0.0)
-                    .map(|v| (v.uuid.as_u128(), v.pos, false))
+                let mut list: Vec<(u128, [f64; 3], bool)> = villager_points
+                    .iter()
+                    .map(|&(uuid, pos)| (uuid, pos, false))
                     .collect();
                 list.extend(
                     mobs.values()
@@ -693,588 +712,709 @@ impl PlayPlan {
             };
             // Один замок мира на всю фазу: коробки коллизий читаются тысячами раз.
             self.with_world(|w| {
-                for (&id, e) in mobs.iter_mut() {
-                    // Выгруженный чанк не тикает: иначе исследование мира копит
-                    // работу, которую никто не видит.
-                    if !awake(e.mob.pos) {
-                        continue;
-                    }
-                    // `Entity.rideTick`: в транспорте моб не думает и не идёт,
-                    // позицию ему каждый тик ставит лодка.
-                    if let Some(vehicle) = e.vehicle {
-                        if let Some((vpos, yaw, height)) = vehicle_pos.get(&vehicle) {
-                            e.mob.pos = [vpos[0], vpos[1] + height * 0.75, vpos[2]];
-                            e.mob.yaw = *yaw;
-                            e.mob.head_yaw = *yaw;
-                        }
-                        e.mob.vel = [0.0; 3];
-                        e.mob.on_ground = true;
-                        continue;
-                    }
-                    let species = e.mob.species;
-                    // `OfferFlowerGoal` + `IronGolem.offerFlower`.
-                    if species == Species::IronGolem && e.mob.alive() {
-                        if e.mob.offer_flower > 0 {
-                            e.mob.offer_flower -= 1;
-                            if e.mob.offer_flower == 0 {
-                                packets
-                                    .push((id, inv::entity_event(self.ids.entity_event, id, 34)));
-                                let target = e.mob.offer_target.take();
-                                if let Some(target) = target
-                                    && let Some((_, pos, accepts)) =
-                                        gift_candidates.iter().find(|c| c.0 == target)
-                                    && *accepts
-                                    && (pos[0] - e.mob.pos[0]).abs() <= 6.3
-                                    && (pos[2] - e.mob.pos[2]).abs() <= 6.3
-                                    && (pos[1] - e.mob.pos[1]).abs() <= 3.0
-                                    && let Some(poppy) = self.item_id("minecraft:poppy")
-                                {
-                                    gift_poppies.push((target, poppy));
+                // Мобы считаются кусками на пуле тика (`crate::par`): каждый
+                // кусок меняет только своих мобов, мир лишь читает, а всё, что
+                // касается других (пакеты, звуки, удары, выпадения), копит в
+                // своих списках. Списки сливаются в порядке кусков — как при
+                // последовательном проходе.
+                let mut entries: Vec<(i32, &mut MobEntry)> =
+                    mobs.iter_mut().map(|(&id, e)| (id, e)).collect();
+                let run = |chunk: &mut [(i32, &mut MobEntry)]| {
+                    super::with_dim(dim, || {
+                        let mut strikes = Vec::new();
+                        let mut outs = Vec::new();
+                        let mut blasts = Vec::new();
+                        let mut despawned = Vec::new();
+                        let mut packets = Vec::new();
+                        let mut gone = Vec::new();
+                        let mut statues = Vec::new();
+                        let mut sounds = Vec::new();
+                        let mut darkness = Vec::new();
+                        let mut booms = Vec::new();
+                        let mut vex_summons = Vec::new();
+                        let mut trampling = Vec::new();
+                        let mut vibrations = Vec::new();
+                        let mut gift_poppies = Vec::new();
+                        let mut rng = rand::thread_rng();
+                        let mut rand = || rand::Rng::r#gen::<f64>(&mut rng);
+                        for (id, e) in chunk.iter_mut() {
+                            let id = *id;
+                            let e: &mut MobEntry = e;
+                            // Выгруженный чанк не тикает: иначе исследование мира копит
+                            // работу, которую никто не видит.
+                            if !awake(e.mob.pos) {
+                                continue;
+                            }
+                            // `Entity.rideTick`: в транспорте моб не думает и не идёт,
+                            // позицию ему каждый тик ставит лодка.
+                            if let Some(vehicle) = e.vehicle {
+                                if let Some((vpos, yaw, height)) = vehicle_pos.get(&vehicle) {
+                                    e.mob.pos = [vpos[0], vpos[1] + height * 0.75, vpos[2]];
+                                    e.mob.yaw = *yaw;
+                                    e.mob.head_yaw = *yaw;
+                                }
+                                e.mob.vel = [0.0; 3];
+                                e.mob.on_ground = true;
+                                continue;
+                            }
+                            let species = e.mob.species;
+                            // `OfferFlowerGoal` + `IronGolem.offerFlower`.
+                            if species == Species::IronGolem && e.mob.alive() {
+                                if e.mob.offer_flower > 0 {
+                                    e.mob.offer_flower -= 1;
+                                    if e.mob.offer_flower == 0 {
+                                        packets.push((
+                                            id,
+                                            inv::entity_event(self.ids.entity_event, id, 34),
+                                        ));
+                                        let target = e.mob.offer_target.take();
+                                        if let Some(target) = target
+                                            && let Some((_, pos, accepts)) =
+                                                gift_candidates.iter().find(|c| c.0 == target)
+                                            && *accepts
+                                            && (pos[0] - e.mob.pos[0]).abs() <= 6.3
+                                            && (pos[2] - e.mob.pos[2]).abs() <= 6.3
+                                            && (pos[1] - e.mob.pos[1]).abs() <= 3.0
+                                            && let Some(poppy) = self.item_id("minecraft:poppy")
+                                        {
+                                            gift_poppies.push((target, poppy));
+                                        }
+                                    }
+                                } else if darken < 4 && rand::random::<u32>().is_multiple_of(8000) {
+                                    let target = gift_candidates
+                                        .iter()
+                                        .filter(|(_, pos, _)| {
+                                            (pos[0] - e.mob.pos[0]).abs() <= 6.3
+                                                && (pos[2] - e.mob.pos[2]).abs() <= 6.3
+                                                && (pos[1] - e.mob.pos[1]).abs() <= 3.0
+                                        })
+                                        .min_by(|a, b| {
+                                            mb::dist2(a.1, e.mob.pos)
+                                                .total_cmp(&mb::dist2(b.1, e.mob.pos))
+                                        });
+                                    if let Some((target, _, _)) = target {
+                                        e.mob.offer_flower = 400;
+                                        e.mob.offer_target = Some(*target);
+                                        packets.push((
+                                            id,
+                                            inv::entity_event(self.ids.entity_event, id, 11),
+                                        ));
+                                    }
                                 }
                             }
-                        } else if darken < 4 && rand::random::<u32>().is_multiple_of(8000) {
-                            let target = gift_candidates
-                                .iter()
-                                .filter(|(_, pos, _)| {
-                                    (pos[0] - e.mob.pos[0]).abs() <= 6.3
-                                        && (pos[2] - e.mob.pos[2]).abs() <= 6.3
-                                        && (pos[1] - e.mob.pos[1]).abs() <= 3.0
-                                })
-                                .min_by(|a, b| {
-                                    mb::dist2(a.1, e.mob.pos).total_cmp(&mb::dist2(b.1, e.mob.pos))
-                                });
-                            if let Some((target, _, _)) = target {
-                                e.mob.offer_flower = 400;
-                                e.mob.offer_target = Some(*target);
-                                packets
-                                    .push((id, inv::entity_event(self.ids.entity_event, id, 11)));
-                            }
-                        }
-                    }
-                    let monster = species.is_monster();
-                    // Замыкания мира — по два указателя, без аллокаций: они лишь
-                    // держат ссылку на `WorldView` этой фазы.
-                    let shape = |c: [i32; 3]| self.shape_at(w.block(c), c);
-                    let water = |c: [i32; 3]| self.water_at(w.block(c));
-                    let cell = |c: [i32; 3]| self.cell_at(w.block(c), c);
-                    // `getWalkTargetValue` и `EatBlockGoal`: дёрн, трава и яркость.
-                    let info = |c: [i32; 3]| {
-                        let state = w.block(c);
-                        let sky = w.sky_light_at(c).unwrap_or(0);
-                        let raw = mb::raw_brightness(sky, w.block_light_at(c).unwrap_or(0), darken);
-                        mb::goals::CellInfo {
-                            grass_block: state.is_some_and(|s| {
-                                chunkwake_world::has_flag(s, chunkwake_world::flags::GRASS)
-                            }),
-                            short_grass: state.is_some_and(|s| {
-                                edible.is_some_and(|t| t.contains(self.state_name(s)))
-                            }),
-                            brightness: mb::brightness(raw),
-                            sky: sky == 15,
-                        }
-                    };
-                    let world = mb::World {
-                        shape: &shape,
-                        water: &water,
-                        cell: Some(&cell),
-                        info: Some(&info),
-                        min_y,
-                    };
-                    let sight = |a: [f64; 3], b: [f64; 3]| self.clear_line(w, a, b);
-                    let jump_boost =
-                        self.survival
-                            .effects
-                            .get("minecraft:jump_boost")
-                            .and_then(|&id| {
+                            let monster = species.is_monster();
+                            // Замыкания мира — по два указателя, без аллокаций: они лишь
+                            // держат ссылку на `WorldView` этой фазы.
+                            let shape = |c: [i32; 3]| self.shape_at(w.block(c), c);
+                            let water = |c: [i32; 3]| self.water_at(w.block(c));
+                            let cell = |c: [i32; 3]| self.cell_at(w.block(c), c);
+                            // `getWalkTargetValue` и `EatBlockGoal`: дёрн, трава и яркость.
+                            let info = |c: [i32; 3]| {
+                                let state = w.block(c);
+                                let sky = w.sky_light_at(c).unwrap_or(0);
+                                let raw = mb::raw_brightness(
+                                    sky,
+                                    w.block_light_at(c).unwrap_or(0),
+                                    darken,
+                                );
+                                mb::goals::CellInfo {
+                                    grass_block: state.is_some_and(|s| {
+                                        chunkwake_world::has_flag(s, chunkwake_world::flags::GRASS)
+                                    }),
+                                    short_grass: state.is_some_and(|s| {
+                                        cells.get(s as usize).is_some_and(|c| c.edible_sheep)
+                                    }),
+                                    brightness: mb::brightness(raw),
+                                    sky: sky == 15,
+                                }
+                            };
+                            let world = mb::World {
+                                shape: &shape,
+                                water: &water,
+                                cell: Some(&cell),
+                                info: Some(&info),
+                                min_y,
+                            };
+                            let sight = |a: [f64; 3], b: [f64; 3]| self.clear_line(w, a, b);
+                            let jump_boost = jump_boost_id.and_then(|id| {
                                 e.mob
                                     .effects
                                     .iter()
                                     .find(|effect| effect.id == id)
                                     .map(|effect| effect.amplifier)
                             });
-                    let mut senses = mb::Senses {
-                        players: &watchers,
-                        rand: &mut rand,
-                        prey: if monster { &prey[..] } else { &[] },
-                        // Уже отфильтрованные по виду: строки предметов не сравниваются.
-                        tempters: &food_by_species[species as usize][..],
-                        kin: if monster { &[] } else { &kin[..] },
-                        sight: &sight,
-                        difficulty,
-                        entity_id: id,
-                        bright_outside: darken < 4,
-                        mob_griefing,
-                        jump_boost,
-                    };
-                    let was_grounded = e.mob.on_ground;
-                    let old_pos = e.mob.pos;
-                    let old_y = e.mob.pos[1];
-                    e.mob.on_fire = e.environment.burning > 0;
-                    let prev_target = e.mob.target;
-                    let removed = mb::tick(&mut e.mob, &world, &mut senses);
-                    // `Vex.setLimitedLife`: истёк срок — discard без лута.
-                    if e.mob.discard {
-                        despawned.push(id);
-                        continue;
-                    }
-                    // `EvokerSummonSpellGoal`: каст 100 тиков, затем 3 vexes
-                    // с ограниченным сроком жизни (600..2400 тиков).
-                    if species == Species::Evoker && e.mob.alive() {
-                        e.mob.spell_cooldown = e.mob.spell_cooldown.saturating_sub(1);
-                        if e.mob.spell_cast > 0 {
-                            e.mob.spell_cast -= 1;
-                            if e.mob.spell_cast == 0 {
-                                let near = vex_positions
-                                    .iter()
-                                    .filter(|p| mb::dist2(**p, e.mob.pos) <= 16.0 * 16.0)
-                                    .count();
-                                if near < (rand::random::<u32>() % 8 + 1) as usize {
-                                    for _ in 0..3 {
-                                        let ox = i32::try_from(rand::random::<u32>() % 5)
-                                            .unwrap_or(0)
-                                            - 2;
-                                        let oz = i32::try_from(rand::random::<u32>() % 5)
-                                            .unwrap_or(0)
-                                            - 2;
-                                        vex_summons.push([
-                                            e.mob.pos[0] + f64::from(ox),
-                                            e.mob.pos[1] + 1.0,
-                                            e.mob.pos[2] + f64::from(oz),
-                                        ]);
+                            let mut senses = mb::Senses {
+                                players: &watchers,
+                                rand: &mut rand,
+                                prey: if monster { &prey[..] } else { &[] },
+                                // Уже отфильтрованные по виду: строки предметов не сравниваются.
+                                tempters: &food_by_species[species as usize][..],
+                                kin: if monster { &[] } else { &kin[..] },
+                                sight: &sight,
+                                difficulty,
+                                entity_id: id,
+                                bright_outside: darken < 4,
+                                mob_griefing,
+                                jump_boost,
+                            };
+                            let was_grounded = e.mob.on_ground;
+                            let old_pos = e.mob.pos;
+                            let old_y = e.mob.pos[1];
+                            e.mob.on_fire = e.environment.burning > 0;
+                            let prev_target = e.mob.target;
+                            let removed = mb::tick(&mut e.mob, &world, &mut senses);
+                            // `Vex.setLimitedLife`: истёк срок — discard без лута.
+                            if e.mob.discard {
+                                despawned.push(id);
+                                continue;
+                            }
+                            // `EvokerSummonSpellGoal`: каст 100 тиков, затем 3 vexes
+                            // с ограниченным сроком жизни (600..2400 тиков).
+                            if species == Species::Evoker && e.mob.alive() {
+                                e.mob.spell_cooldown = e.mob.spell_cooldown.saturating_sub(1);
+                                if e.mob.spell_cast > 0 {
+                                    e.mob.spell_cast -= 1;
+                                    if e.mob.spell_cast == 0 {
+                                        let near = vex_positions
+                                            .iter()
+                                            .filter(|p| mb::dist2(**p, e.mob.pos) <= 16.0 * 16.0)
+                                            .count();
+                                        if near < (rand::random::<u32>() % 8 + 1) as usize {
+                                            for _ in 0..3 {
+                                                let ox = i32::try_from(rand::random::<u32>() % 5)
+                                                    .unwrap_or(0)
+                                                    - 2;
+                                                let oz = i32::try_from(rand::random::<u32>() % 5)
+                                                    .unwrap_or(0)
+                                                    - 2;
+                                                vex_summons.push([
+                                                    e.mob.pos[0] + f64::from(ox),
+                                                    e.mob.pos[1] + 1.0,
+                                                    e.mob.pos[2] + f64::from(oz),
+                                                ]);
+                                            }
+                                        }
                                     }
-                                }
-                            }
-                        } else if e.mob.spell_cooldown == 0 && e.mob.target.is_some() {
-                            e.mob.spell_cast = 100;
-                            e.mob.spell_cooldown = 340;
-                            sounds.push((
-                                "minecraft:entity.evoker.prepare_summon".to_owned(),
-                                e.mob.pos,
-                                1.0,
-                                false,
-                                crate::sounds::HOSTILE,
-                            ));
-                        }
-                    }
-                    // `Warden.customServerAiStep` + `SonicBoom`.
-                    if species == Species::Warden && e.mob.alive() {
-                        // `setAttackTarget`: первый sonic boom не раньше 200 тиков.
-                        if prev_target != e.mob.target && e.mob.target.is_some() {
-                            e.mob.sonic_cooldown = 200;
-                        }
-                        let darkness_id = self.survival.effects.get("minecraft:darkness").copied();
-                        if let Some(id) = darkness_id
-                            && (e.mob.tick_count.wrapping_add(id as u32)) % 120 == 0
-                        {
-                            for p in &watchers {
-                                if mb::dist2(e.mob.pos, p.pos) <= 20.0 * 20.0 {
-                                    darkness.push(Uuid::from_u128(p.uuid));
-                                }
-                            }
-                        }
-                        let target_near = |t: u128| watchers.iter().find(|p| p.uuid == t).copied();
-                        if e.mob.sonic_charge > 0 {
-                            e.mob.sonic_charge -= 1;
-                            if e.mob.sonic_charge == 0 {
-                                if let Some(t) = e.mob.sonic_target.take().or(e.mob.target)
-                                    && let Some(p) = target_near(t)
-                                {
-                                    let source = [e.mob.pos[0], e.mob.pos[1] + 1.6, e.mob.pos[2]];
-                                    let eye = p.eye();
-                                    let d = [
-                                        eye[0] - source[0],
-                                        eye[1] - source[1],
-                                        eye[2] - source[2],
-                                    ];
-                                    let horizontal = (d[0] * d[0] + d[2] * d[2]).sqrt();
-                                    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-                                    if horizontal <= 15.0 && d[1].abs() <= 20.0 && len > 1e-4 {
-                                        booms.push((
-                                            Uuid::from_u128(t),
-                                            source,
-                                            eye,
-                                            [d[0] / len, d[1] / len, d[2] / len],
-                                        ));
-                                    }
-                                }
-                                // 26 тиков остатка поведения + 40 кулдауна.
-                                e.mob.sonic_cooldown = 66;
-                            }
-                        } else {
-                            e.mob.sonic_cooldown = e.mob.sonic_cooldown.saturating_sub(1);
-                            if e.mob.sonic_cooldown == 0
-                                && let Some(t) = e.mob.target
-                                && let Some(p) = target_near(t)
-                            {
-                                let dx = p.pos[0] - e.mob.pos[0];
-                                let dz = p.pos[2] - e.mob.pos[2];
-                                let dy = p.pos[1] - e.mob.pos[1];
-                                if (dx * dx + dz * dz).sqrt() <= 15.0 && dy.abs() <= 20.0 {
-                                    e.mob.sonic_charge = 34;
-                                    e.mob.sonic_target = Some(t);
-                                    packets.push((
-                                        id,
-                                        inv::entity_event(self.ids.entity_event, id, 62),
-                                    ));
+                                } else if e.mob.spell_cooldown == 0 && e.mob.target.is_some() {
+                                    e.mob.spell_cast = 100;
+                                    e.mob.spell_cooldown = 340;
                                     sounds.push((
-                                        "minecraft:entity.warden.sonic_charge".to_owned(),
+                                        "minecraft:entity.evoker.prepare_summon".to_owned(),
                                         e.mob.pos,
-                                        3.0,
+                                        1.0,
                                         false,
                                         crate::sounds::HOSTILE,
                                     ));
                                 }
                             }
-                        }
-                    }
-                    // `CopperGolem` полностью окислился: статую поставим
-                    // после тика, без дропа и статистик смерти.
-                    if e.mob.statue {
-                        statues.push(id);
-                        continue;
-                    }
-                    // `EnderDragon`: контактный урон 6 с кулдауном 20 тиков.
-                    if e.mob.species == Species::EnderDragon && e.mob.dragon_cooldown == 0 {
-                        let (width, height) = e.mob.size();
-                        let half = width / 2.0;
-                        if let Some(p) = watchers.iter().find(|p| {
-                            (p.pos[0] - e.mob.pos[0]).abs() <= half + 0.3
-                                && (p.pos[2] - e.mob.pos[2]).abs() <= half + 0.3
-                                && p.pos[1] + 1.8 >= e.mob.pos[1]
-                                && p.pos[1] <= e.mob.pos[1] + height
-                        }) {
-                            e.mob.dragon_cooldown = 20;
-                            self.push_control(
-                                Uuid::from_u128(p.uuid),
-                                Control::Hurt(
-                                    6.0,
-                                    Cause::Mob("minecraft:ender_dragon"),
-                                    Some(e.mob.pos),
-                                    0.4,
-                                ),
-                            );
-                        }
-                    }
-                    if removed {
-                        // Крипер взорвался (`discard`): без лута и анимации смерти.
-                        let blast = e.mob.out.iter().find_map(|o| match o {
-                            mb::goals::Out::Explode(p) => Some(*p),
-                            _ => None,
-                        });
-                        if let Some(power) = blast {
-                            blasts.push((id, e.mob.pos, power, species.name()));
-                            e.mob.out.clear();
-                            continue;
-                        }
-                        gone.push(id);
-                        continue;
-                    }
-                    let clipped = border.clip_movement(now, old_pos, e.mob.pos, e.mob.size().0);
-                    for axis in [0, 2] {
-                        if clipped[axis] != e.mob.pos[axis] {
-                            e.mob.pos[axis] = clipped[axis];
-                            e.mob.vel[axis] = 0.0;
-                        }
-                    }
-                    let descent = (old_y - e.mob.pos[1]).max(0.0);
-                    let landed_fall = if !was_grounded && e.mob.on_ground {
-                        let fall = e.fall + descent;
-                        if rand() < crate::soil::trample_chance(fall) {
-                            trampling.push(e.mob.pos);
-                        }
-                        e.fall = 0.0;
-                        Some(fall)
-                    } else if !e.mob.on_ground {
-                        e.fall += descent;
-                        None
-                    } else {
-                        e.fall = 0.0;
-                        None
-                    };
-                    let (width, height) = e.mob.size();
-                    let view =
-                        crate::environment::probe(e.mob.pos, width, height, height * 0.85, |p| {
-                            self.environment_kind(w.block(p))
-                        });
-                    if !view.water && !view.lava && landed_fall.is_some_and(|fall| fall > 0.0) {
-                        vibrations.push((e.mob.pos, "minecraft:hit_ground"));
-                    }
-                    // `LivingEntity.causeFallDamage`: в воде и лаве падение
-                    // сбрасывается без урона.
-                    if view.water || view.lava {
-                        e.fall = 0.0;
-                    } else if let Some(fall) = landed_fall {
-                        let damage = mb::fall_damage(
-                            fall,
-                            mb::safe_fall_distance(species.safe_fall(), jump_boost),
-                        );
-                        if damage > 0.0
-                            && let Some(died) =
-                                mb::hurt(&mut e.mob, damage, mb::Source::default(), 0.0)
-                        {
-                            packets
-                                .push((id, play::hurt_animation(self.ids.hurt_animation, id, 0.0)));
-                            packets.push((
-                                id,
-                                play::mob_data(
-                                    self.ids.set_entity_data,
-                                    id,
-                                    e.mob.health,
-                                    None,
-                                    None,
-                                    None,
-                                ),
-                            ));
-                            sounds.push((
-                                e.mob.sound(if died { "death" } else { "hurt" }),
-                                e.mob.pos,
-                                e.mob.volume(),
-                                e.mob.is_baby(),
-                                sound_source(species),
-                            ));
-                            vibrations.push((e.mob.pos, "minecraft:entity_damage"));
-                            if died {
-                                vibrations.push((e.mob.pos, "minecraft:entity_die"));
+                            // `Warden.customServerAiStep` + `SonicBoom`.
+                            if species == Species::Warden && e.mob.alive() {
+                                // `setAttackTarget`: первый sonic boom не раньше 200 тиков.
+                                if prev_target != e.mob.target && e.mob.target.is_some() {
+                                    e.mob.sonic_cooldown = 200;
+                                }
+                                if let Some(id) = darkness_id
+                                    && (e.mob.tick_count.wrapping_add(id as u32))
+                                        .is_multiple_of(120)
+                                {
+                                    for p in &watchers {
+                                        if mb::dist2(e.mob.pos, p.pos) <= 20.0 * 20.0 {
+                                            darkness.push(Uuid::from_u128(p.uuid));
+                                        }
+                                    }
+                                }
+                                let target_near =
+                                    |t: u128| watchers.iter().find(|p| p.uuid == t).copied();
+                                if e.mob.sonic_charge > 0 {
+                                    e.mob.sonic_charge -= 1;
+                                    if e.mob.sonic_charge == 0 {
+                                        if let Some(t) = e.mob.sonic_target.take().or(e.mob.target)
+                                            && let Some(p) = target_near(t)
+                                        {
+                                            let source =
+                                                [e.mob.pos[0], e.mob.pos[1] + 1.6, e.mob.pos[2]];
+                                            let eye = p.eye();
+                                            let d = [
+                                                eye[0] - source[0],
+                                                eye[1] - source[1],
+                                                eye[2] - source[2],
+                                            ];
+                                            let horizontal = (d[0] * d[0] + d[2] * d[2]).sqrt();
+                                            let len =
+                                                (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                                            if horizontal <= 15.0
+                                                && d[1].abs() <= 20.0
+                                                && len > 1e-4
+                                            {
+                                                booms.push((
+                                                    Uuid::from_u128(t),
+                                                    source,
+                                                    eye,
+                                                    [d[0] / len, d[1] / len, d[2] / len],
+                                                ));
+                                            }
+                                        }
+                                        // 26 тиков остатка поведения + 40 кулдауна.
+                                        e.mob.sonic_cooldown = 66;
+                                    }
+                                } else {
+                                    e.mob.sonic_cooldown = e.mob.sonic_cooldown.saturating_sub(1);
+                                    if e.mob.sonic_cooldown == 0
+                                        && let Some(t) = e.mob.target
+                                        && let Some(p) = target_near(t)
+                                    {
+                                        let dx = p.pos[0] - e.mob.pos[0];
+                                        let dz = p.pos[2] - e.mob.pos[2];
+                                        let dy = p.pos[1] - e.mob.pos[1];
+                                        if (dx * dx + dz * dz).sqrt() <= 15.0 && dy.abs() <= 20.0 {
+                                            e.mob.sonic_charge = 34;
+                                            e.mob.sonic_target = Some(t);
+                                            packets.push((
+                                                id,
+                                                inv::entity_event(self.ids.entity_event, id, 62),
+                                            ));
+                                            sounds.push((
+                                                "minecraft:entity.warden.sonic_charge".to_owned(),
+                                                e.mob.pos,
+                                                3.0,
+                                                false,
+                                                crate::sounds::HOSTILE,
+                                            ));
+                                        }
+                                    }
+                                }
                             }
-                        }
-                    }
-                    let old = e.environment;
-                    if monster && e.mob.alive() {
-                        // Сырая яркость у глаз: монстр на свету быстрее «скучает»
-                        // (`Monster.updateNoActionTime`), зомби горит на солнце.
-                        let cell = e.mob.eye().map(|v| v.floor() as i32);
-                        let sky = w.sky_light_at(cell).unwrap_or(0);
-                        let raw =
-                            mb::raw_brightness(sky, w.block_light_at(cell).unwrap_or(0), darken);
-                        if mb::brightness(raw) > 0.5 {
-                            e.mob.no_action = e.mob.no_action.saturating_add(2);
-                        }
-                        let sees_sky = sky == 15;
-                        let wet = view.water || (weather.rain && sees_sky);
-                        if species.burns_in_sun()
-                            && mb::sun_burn_tick(raw, darken, sees_sky, wet, rand())
-                        {
-                            // `igniteForSeconds(8)`.
-                            e.environment.burning = e.environment.burning.max(160);
-                        }
-                    }
-                    let pulse =
-                        e.environment
-                            .step(view, self.server_ticks.load(Ordering::Relaxed), false);
-                    if old.burning == 0 && e.environment.burning > 0
-                        || old.burning > 0 && e.environment.burning == 0
-                    {
-                        packets.push((
-                            id,
-                            inv::set_entity_flags(
-                                self.ids.set_entity_data,
-                                id,
-                                u8::from(e.environment.burning > 0),
-                            ),
-                        ));
-                    }
-                    if old.air != e.environment.air {
-                        packets.push((
-                            id,
-                            inv::set_entity_air(self.ids.set_entity_data, id, e.environment.air),
-                        ));
-                    }
-                    if old.frozen != e.environment.frozen {
-                        packets.push((
-                            id,
-                            inv::set_entity_frozen(
-                                self.ids.set_entity_data,
-                                id,
-                                e.environment.frozen as i32,
-                            ),
-                        ));
-                    }
-                    let moving = e.mob.vel.iter().any(|v| v.abs() > 0.003);
-                    let fire_damage = self.vars.flag("fire_damage");
-                    // Зелья: регенерация лечит, яд и иссушение бьют раз в
-                    // `25 >> amp` / `40 >> amp` тиков (`LivingEntity.tickEffects`).
-                    let fx = e.mob.tick_effects(self.effect_kinds());
-                    let effect_meta = self.effect_particles(&e.mob.effects);
-                    if effect_meta != e.effect_meta {
-                        e.effect_meta = effect_meta;
-                        let (colors, ambient) = &e.effect_meta;
-                        if let Some(&particle) = self
-                            .particle_types
-                            .lock()
-                            .unwrap()
-                            .get("minecraft:entity_effect")
-                        {
-                            packets.push((
-                                id,
-                                play::entity_meta(
-                                    self.ids.set_entity_data,
-                                    id,
-                                    &[
-                                        (
-                                            10,
-                                            play::Meta::Particles {
-                                                particle,
-                                                colors: colors.clone(),
-                                            },
+                            // `CopperGolem` полностью окислился: статую поставим
+                            // после тика, без дропа и статистик смерти.
+                            if e.mob.statue {
+                                statues.push(id);
+                                continue;
+                            }
+                            // `EnderDragon`: контактный урон 6 с кулдауном 20 тиков.
+                            if e.mob.species == Species::EnderDragon && e.mob.dragon_cooldown == 0 {
+                                let (width, height) = e.mob.size();
+                                let half = width / 2.0;
+                                if let Some(p) = watchers.iter().find(|p| {
+                                    (p.pos[0] - e.mob.pos[0]).abs() <= half + 0.3
+                                        && (p.pos[2] - e.mob.pos[2]).abs() <= half + 0.3
+                                        && p.pos[1] + 1.8 >= e.mob.pos[1]
+                                        && p.pos[1] <= e.mob.pos[1] + height
+                                }) {
+                                    e.mob.dragon_cooldown = 20;
+                                    self.push_control(
+                                        Uuid::from_u128(p.uuid),
+                                        Control::Hurt(
+                                            6.0,
+                                            Cause::Mob("minecraft:ender_dragon"),
+                                            Some(e.mob.pos),
+                                            0.4,
                                         ),
-                                        (11, play::Meta::Bool(*ambient)),
-                                    ],
-                                ),
-                            ));
-                        }
-                    }
-                    if fx.heal > 0.0 && e.mob.alive() {
-                        e.mob.health = (e.mob.health + fx.heal).min(e.mob.max_health());
-                        packets.push((
-                            id,
-                            play::mob_data(
-                                self.ids.set_entity_data,
-                                id,
-                                e.mob.health,
-                                None,
-                                None,
-                                None,
-                            ),
-                        ));
-                    }
-                    for (hit, amount) in [
-                        (pulse.drown && self.vars.flag("drowning_damage"), 2.0),
-                        (pulse.freeze && self.vars.flag("freeze_damage"), 1.0),
-                        (pulse.lava && fire_damage, 4.0),
-                        (pulse.burn && fire_damage && !pulse.lava, 1.0),
-                        (pulse.cactus, 1.0),
-                        (pulse.berries && moving, 1.0),
-                        (pulse.magma && fire_damage, 1.0),
-                    ]
-                    .into_iter()
-                    .chain([
-                        // `PoisonMobEffect`: не добивает, пока здоровье > 1.
-                        (fx.poison && e.mob.health > 1.0, 1.0),
-                        (fx.wither, 1.0),
-                    ]) {
-                        if hit
-                            && let Some(died) =
-                                mb::hurt(&mut e.mob, amount, mb::Source::default(), 0.0)
-                        {
-                            packets
-                                .push((id, play::hurt_animation(self.ids.hurt_animation, id, 0.0)));
-                            packets.push((
-                                id,
-                                play::mob_data(
-                                    self.ids.set_entity_data,
+                                    );
+                                }
+                            }
+                            if removed {
+                                // Крипер взорвался (`discard`): без лута и анимации смерти.
+                                let blast = e.mob.out.iter().find_map(|o| match o {
+                                    mb::goals::Out::Explode(p) => Some(*p),
+                                    _ => None,
+                                });
+                                if let Some(power) = blast {
+                                    blasts.push((id, e.mob.pos, power, species.name()));
+                                    e.mob.out.clear();
+                                    continue;
+                                }
+                                gone.push(id);
+                                continue;
+                            }
+                            let clipped =
+                                border.clip_movement(now, old_pos, e.mob.pos, e.mob.size().0);
+                            for axis in [0, 2] {
+                                if clipped[axis] != e.mob.pos[axis] {
+                                    e.mob.pos[axis] = clipped[axis];
+                                    e.mob.vel[axis] = 0.0;
+                                }
+                            }
+                            let descent = (old_y - e.mob.pos[1]).max(0.0);
+                            let landed_fall = if !was_grounded && e.mob.on_ground {
+                                let fall = e.fall + descent;
+                                if rand() < crate::soil::trample_chance(fall) {
+                                    trampling.push(e.mob.pos);
+                                }
+                                e.fall = 0.0;
+                                Some(fall)
+                            } else if !e.mob.on_ground {
+                                e.fall += descent;
+                                None
+                            } else {
+                                e.fall = 0.0;
+                                None
+                            };
+                            let (width, height) = e.mob.size();
+                            let view = crate::environment::probe(
+                                e.mob.pos,
+                                width,
+                                height,
+                                height * 0.85,
+                                |p| self.environment_kind(w.block(p)),
+                            );
+                            if !view.water
+                                && !view.lava
+                                && landed_fall.is_some_and(|fall| fall > 0.0)
+                            {
+                                vibrations.push((e.mob.pos, "minecraft:hit_ground"));
+                            }
+                            // `LivingEntity.causeFallDamage`: в воде и лаве падение
+                            // сбрасывается без урона.
+                            if view.water || view.lava {
+                                e.fall = 0.0;
+                            } else if let Some(fall) = landed_fall {
+                                let damage = mb::fall_damage(
+                                    fall,
+                                    mb::safe_fall_distance(species.safe_fall(), jump_boost),
+                                );
+                                if damage > 0.0
+                                    && let Some(died) =
+                                        mb::hurt(&mut e.mob, damage, mb::Source::default(), 0.0)
+                                {
+                                    packets.push((
+                                        id,
+                                        play::hurt_animation(self.ids.hurt_animation, id, 0.0),
+                                    ));
+                                    packets.push((
+                                        id,
+                                        play::mob_data(
+                                            self.ids.set_entity_data,
+                                            id,
+                                            e.mob.health,
+                                            None,
+                                            None,
+                                            None,
+                                        ),
+                                    ));
+                                    sounds.push((
+                                        e.mob.sound(if died { "death" } else { "hurt" }),
+                                        e.mob.pos,
+                                        e.mob.volume(),
+                                        e.mob.is_baby(),
+                                        sound_source(species),
+                                    ));
+                                    vibrations.push((e.mob.pos, "minecraft:entity_damage"));
+                                    if died {
+                                        vibrations.push((e.mob.pos, "minecraft:entity_die"));
+                                    }
+                                }
+                            }
+                            let old = e.environment;
+                            if monster && e.mob.alive() {
+                                // Сырая яркость у глаз: монстр на свету быстрее «скучает»
+                                // (`Monster.updateNoActionTime`), зомби горит на солнце.
+                                let cell = e.mob.eye().map(|v| v.floor() as i32);
+                                let sky = w.sky_light_at(cell).unwrap_or(0);
+                                let raw = mb::raw_brightness(
+                                    sky,
+                                    w.block_light_at(cell).unwrap_or(0),
+                                    darken,
+                                );
+                                if mb::brightness(raw) > 0.5 {
+                                    e.mob.no_action = e.mob.no_action.saturating_add(2);
+                                }
+                                let sees_sky = sky == 15;
+                                let wet = view.water || (weather.rain && sees_sky);
+                                if species.burns_in_sun()
+                                    && mb::sun_burn_tick(raw, darken, sees_sky, wet, rand())
+                                {
+                                    // `igniteForSeconds(8)`.
+                                    e.environment.burning = e.environment.burning.max(160);
+                                }
+                            }
+                            let pulse = e.environment.step(view, server_ticks, false);
+                            if old.burning == 0 && e.environment.burning > 0
+                                || old.burning > 0 && e.environment.burning == 0
+                            {
+                                packets.push((
                                     id,
-                                    e.mob.health,
-                                    None,
-                                    None,
-                                    None,
-                                ),
-                            ));
-                            vibrations.push((e.mob.pos, "minecraft:entity_damage"));
-                            if died {
-                                vibrations.push((e.mob.pos, "minecraft:entity_die"));
+                                    inv::set_entity_flags(
+                                        self.ids.set_entity_data,
+                                        id,
+                                        u8::from(e.environment.burning > 0),
+                                    ),
+                                ));
+                            }
+                            if old.air != e.environment.air {
+                                packets.push((
+                                    id,
+                                    inv::set_entity_air(
+                                        self.ids.set_entity_data,
+                                        id,
+                                        e.environment.air,
+                                    ),
+                                ));
+                            }
+                            if old.frozen != e.environment.frozen {
+                                packets.push((
+                                    id,
+                                    inv::set_entity_frozen(
+                                        self.ids.set_entity_data,
+                                        id,
+                                        e.environment.frozen as i32,
+                                    ),
+                                ));
+                            }
+                            let moving = e.mob.vel.iter().any(|v| v.abs() > 0.003);
+                            // Зелья: регенерация лечит, яд и иссушение бьют раз в
+                            // `25 >> amp` / `40 >> amp` тиков (`LivingEntity.tickEffects`).
+                            let fx = e.mob.tick_effects(self.effect_kinds());
+                            let effect_meta =
+                                if std::env::var("CHUNKWAKE_NO_FX_FASTPATH").as_deref() != Ok("1")
+                                    && e.mob.effects.is_empty()
+                                    && e.effect_meta.0.is_empty()
+                                {
+                                    // Быстрый путь: у моба нет эффектов и кэш пуст —
+                                    // не создаём Vec каждый тик.
+                                    e.effect_meta.clone()
+                                } else {
+                                    self.effect_particles(&e.mob.effects)
+                                };
+                            if effect_meta != e.effect_meta {
+                                e.effect_meta = effect_meta;
+                                let (colors, ambient) = &e.effect_meta;
+                                if let Some(&particle) = self
+                                    .particle_types
+                                    .lock()
+                                    .unwrap()
+                                    .get("minecraft:entity_effect")
+                                {
+                                    packets.push((
+                                        id,
+                                        play::entity_meta(
+                                            self.ids.set_entity_data,
+                                            id,
+                                            &[
+                                                (
+                                                    10,
+                                                    play::Meta::Particles {
+                                                        particle,
+                                                        colors: colors.clone(),
+                                                    },
+                                                ),
+                                                (11, play::Meta::Bool(*ambient)),
+                                            ],
+                                        ),
+                                    ));
+                                }
+                            }
+                            if fx.heal > 0.0 && e.mob.alive() {
+                                e.mob.health = (e.mob.health + fx.heal).min(e.mob.max_health());
+                                packets.push((
+                                    id,
+                                    play::mob_data(
+                                        self.ids.set_entity_data,
+                                        id,
+                                        e.mob.health,
+                                        None,
+                                        None,
+                                        None,
+                                    ),
+                                ));
+                            }
+                            for (hit, amount) in [
+                                (pulse.drown && drowning_damage, 2.0),
+                                (pulse.freeze && freeze_damage, 1.0),
+                                (pulse.lava && fire_damage, 4.0),
+                                (pulse.burn && fire_damage && !pulse.lava, 1.0),
+                                (pulse.cactus, 1.0),
+                                (pulse.berries && moving, 1.0),
+                                (pulse.magma && fire_damage, 1.0),
+                            ]
+                            .into_iter()
+                            .chain([
+                                // `PoisonMobEffect`: не добивает, пока здоровье > 1.
+                                (fx.poison && e.mob.health > 1.0, 1.0),
+                                (fx.wither, 1.0),
+                            ]) {
+                                if hit
+                                    && let Some(died) =
+                                        mb::hurt(&mut e.mob, amount, mb::Source::default(), 0.0)
+                                {
+                                    packets.push((
+                                        id,
+                                        play::hurt_animation(self.ids.hurt_animation, id, 0.0),
+                                    ));
+                                    packets.push((
+                                        id,
+                                        play::mob_data(
+                                            self.ids.set_entity_data,
+                                            id,
+                                            e.mob.health,
+                                            None,
+                                            None,
+                                            None,
+                                        ),
+                                    ));
+                                    vibrations.push((e.mob.pos, "minecraft:entity_damage"));
+                                    if died {
+                                        vibrations.push((e.mob.pos, "minecraft:entity_die"));
+                                    }
+                                }
+                            }
+                            if let Some(target) = e.mob.strike.take() {
+                                strikes.push((
+                                    species,
+                                    Uuid::from_u128(target),
+                                    e.mob.pos,
+                                    e.mob.attack_damage(),
+                                ));
+                            }
+                            // `Slime.playerTouch` вызывается для каждого игрока,
+                            // чья раздутая рамка пересекла слизня.
+                            for target in std::mem::take(&mut e.mob.touch_strikes) {
+                                strikes.push((
+                                    species,
+                                    Uuid::from_u128(target),
+                                    e.mob.pos,
+                                    e.mob.attack_damage(),
+                                ));
+                            }
+                            if !e.mob.out.is_empty() {
+                                outs.extend(e.mob.out.drain(..).map(|o| (id, o)));
+                            }
+                            let meta = MobMeta::of(&e.mob);
+                            if meta != e.meta {
+                                let fields = meta.fields(species, Some(e.meta));
+                                e.meta = meta;
+                                if !fields.is_empty() {
+                                    packets.push((
+                                        id,
+                                        play::entity_meta(self.ids.set_entity_data, id, &fields),
+                                    ));
+                                }
+                            }
+                            let aggressive = e.mob.aggressive;
+                            if aggressive != e.aggressive {
+                                e.aggressive = aggressive;
+                                packets.push((
+                                    id,
+                                    play::mob_flags(
+                                        self.ids.set_entity_data,
+                                        id,
+                                        if aggressive { 4 } else { 0 } | u8::from(e.mob.no_ai),
+                                    ),
+                                ));
+                            }
+                            // `Mob.checkDespawn`: монстры вдали от игроков и в мирной сложности.
+                            let nearest = watchers
+                                .iter()
+                                .map(|p| mb::dist2(p.pos, e.mob.pos))
+                                .min_by(f64::total_cmp);
+                            if e.mob.alive()
+                                && mb::check_despawn(&mut e.mob, nearest, peaceful, rand())
+                            {
+                                despawned.push(id);
+                                continue;
+                            }
+                            let m = &e.mob;
+                            if m.alive() && species.info().ambient {
+                                e.ambient -= 1;
+                                if e.ambient <= 0 {
+                                    e.ambient = 80 + rand::random::<i32>().rem_euclid(120);
+                                    sounds.push((
+                                        format!("{}.ambient", species.sound()),
+                                        m.pos,
+                                        species.volume(),
+                                        m.is_baby(),
+                                        sound_source(species),
+                                    ));
+                                }
+                            }
+                            let q = play::quantize(m.pos);
+                            let rot = (m.yaw, m.pitch, m.head_yaw);
+                            let moved = q != e.sent;
+                            let turned = (rot.0 - e.sent_rot.0).abs() > 1.0
+                                || (rot.1 - e.sent_rot.1).abs() > 1.0;
+                            if moved || turned {
+                                e.moves += 1;
+                                let packet = match play::delta(e.sent, q)
+                                    .filter(|_| !e.moves.is_multiple_of(60))
+                                {
+                                    Some(d) => play::move_entity_pos_rot(
+                                        self.ids.move_entity_pos_rot,
+                                        id,
+                                        d,
+                                        m.yaw,
+                                        m.pitch,
+                                        m.on_ground,
+                                    ),
+                                    None => play::teleport_entity(
+                                        self.ids.teleport_entity,
+                                        id,
+                                        m.pos,
+                                        m.yaw,
+                                        m.pitch,
+                                        m.on_ground,
+                                    ),
+                                };
+                                packets.push((id, packet));
+                                e.sent = q;
+                                (e.sent_rot.0, e.sent_rot.1) = (rot.0, rot.1);
+                            }
+                            if (rot.2 - e.sent_rot.2).abs() > 1.0 {
+                                packets.push((
+                                    id,
+                                    play::rotate_head(self.ids.rotate_head, id, m.head_yaw),
+                                ));
+                                e.sent_rot.2 = rot.2;
                             }
                         }
-                    }
-                    if let Some(target) = e.mob.strike.take() {
-                        strikes.push((
-                            species,
-                            Uuid::from_u128(target),
-                            e.mob.pos,
-                            e.mob.attack_damage(),
-                        ));
-                    }
-                    // `Slime.playerTouch` вызывается для каждого игрока,
-                    // чья раздутая рамка пересекла слизня.
-                    for target in std::mem::take(&mut e.mob.touch_strikes) {
-                        strikes.push((
-                            species,
-                            Uuid::from_u128(target),
-                            e.mob.pos,
-                            e.mob.attack_damage(),
-                        ));
-                    }
-                    if !e.mob.out.is_empty() {
-                        outs.extend(e.mob.out.drain(..).map(|o| (id, o)));
-                    }
-                    let meta = MobMeta::of(&e.mob);
-                    if meta != e.meta {
-                        let fields = meta.fields(species, Some(e.meta));
-                        e.meta = meta;
-                        if !fields.is_empty() {
-                            packets.push((
-                                id,
-                                play::entity_meta(self.ids.set_entity_data, id, &fields),
-                            ));
-                        }
-                    }
-                    let aggressive = e.mob.aggressive;
-                    if aggressive != e.aggressive {
-                        e.aggressive = aggressive;
-                        packets.push((
-                            id,
-                            play::mob_flags(
-                                self.ids.set_entity_data,
-                                id,
-                                if aggressive { 4 } else { 0 } | u8::from(e.mob.no_ai),
-                            ),
-                        ));
-                    }
-                    // `Mob.checkDespawn`: монстры вдали от игроков и в мирной сложности.
-                    let nearest = watchers
-                        .iter()
-                        .map(|p| mb::dist2(p.pos, e.mob.pos))
-                        .min_by(f64::total_cmp);
-                    if e.mob.alive() && mb::check_despawn(&mut e.mob, nearest, peaceful, rand()) {
-                        despawned.push(id);
-                        continue;
-                    }
-                    let m = &e.mob;
-                    if m.alive() && species.info().ambient {
-                        e.ambient -= 1;
-                        if e.ambient <= 0 {
-                            e.ambient = 80 + rand::random::<i32>().rem_euclid(120);
-                            sounds.push((
-                                format!("{}.ambient", species.sound()),
-                                m.pos,
-                                species.volume(),
-                                m.is_baby(),
-                                sound_source(species),
-                            ));
-                        }
-                    }
-                    let q = play::quantize(m.pos);
-                    let rot = (m.yaw, m.pitch, m.head_yaw);
-                    let moved = q != e.sent;
-                    let turned =
-                        (rot.0 - e.sent_rot.0).abs() > 1.0 || (rot.1 - e.sent_rot.1).abs() > 1.0;
-                    if moved || turned {
-                        e.moves += 1;
-                        let packet = match play::delta(e.sent, q).filter(|_| e.moves % 60 != 0) {
-                            Some(d) => play::move_entity_pos_rot(
-                                self.ids.move_entity_pos_rot,
-                                id,
-                                d,
-                                m.yaw,
-                                m.pitch,
-                                m.on_ground,
-                            ),
-                            None => play::teleport_entity(
-                                self.ids.teleport_entity,
-                                id,
-                                m.pos,
-                                m.yaw,
-                                m.pitch,
-                                m.on_ground,
-                            ),
-                        };
-                        packets.push((id, packet));
-                        e.sent = q;
-                        (e.sent_rot.0, e.sent_rot.1) = (rot.0, rot.1);
-                    }
-                    if (rot.2 - e.sent_rot.2).abs() > 1.0 {
-                        packets.push((id, play::rotate_head(self.ids.rotate_head, id, m.head_yaw)));
-                        e.sent_rot.2 = rot.2;
-                    }
+                        (
+                            strikes,
+                            outs,
+                            blasts,
+                            despawned,
+                            packets,
+                            gone,
+                            statues,
+                            sounds,
+                            darkness,
+                            booms,
+                            vex_summons,
+                            trampling,
+                            vibrations,
+                            gift_poppies,
+                        )
+                    })
+                };
+                // Регион владеет сущностями (как в Folia), но размер
+                // адаптивный: par::regions дробит его, если регионов
+                // меньше, чем потоков пула.
+                let chunk = |(_, e): &(i32, &mut MobEntry)| {
+                    let p = e.mob.pos;
+                    ((p[0].floor() as i32) >> 4, (p[2].floor() as i32) >> 4)
+                };
+                // A/B: `CHUNKWAKE_TICK_REGIONS=0` — старые произвольные куски
+                // по 64 сущности; 1 (по умолчанию) — 8x8-регионы.
+                // Дефолт — куски: синтетический A/B (200 NoAI-свиней, без
+                // плагинов) стабильно дал куски не медленнее регионов.
+                // Регионный тик остаётся opt-in: CHUNKWAKE_TICK_REGIONS=1.
+                let parts = if std::env::var("CHUNKWAKE_TICK_REGIONS").as_deref() == Ok("1") {
+                    crate::par::regions(&mut entries, chunk, run)
+                } else {
+                    crate::par::chunks(&mut entries, 64, run)
+                };
+                for part in parts {
+                    strikes.extend(part.0);
+                    outs.extend(part.1);
+                    blasts.extend(part.2);
+                    despawned.extend(part.3);
+                    packets.extend(part.4);
+                    gone.extend(part.5);
+                    statues.extend(part.6);
+                    sounds.extend(part.7);
+                    darkness.extend(part.8);
+                    booms.extend(part.9);
+                    vex_summons.extend(part.10);
+                    trampling.extend(part.11);
+                    vibrations.extend(part.12);
+                    gift_poppies.extend(part.13);
                 }
             });
         }
@@ -1732,8 +1872,12 @@ impl PlayPlan {
 
     /// Вода ли в блоке (`state_fluid`).
     fn water_at(&self, s: Option<u32>) -> bool {
-        s.and_then(|s| crate::fluids::state_fluid(&self.survival.placement, s))
-            .is_some_and(|f| f.kind == crate::fluids::Kind::Water)
+        let Some(s) = s else { return false };
+        match self.mob_cells().get(s as usize) {
+            Some(c) => c.water,
+            None => crate::fluids::state_fluid(&self.survival.placement, s)
+                .is_some_and(|f| f.kind == crate::fluids::Kind::Water),
+        }
     }
 
     /// Лут и опыт умершего моба (`LivingEntity.dropAllDeathLoot`).
