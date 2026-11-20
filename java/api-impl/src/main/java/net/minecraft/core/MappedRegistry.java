@@ -12,6 +12,8 @@ import net.minecraft.resources.ResourceKey;
 /** NMS {@code MappedRegistry}: реестр id/ключ -> значение. */
 public class MappedRegistry<T> implements Registry<T> {
     private final Map<Identifier, T> byKey = new LinkedHashMap<>();
+    /** Поле, которое ищет CraftEngine (MappedRegistryProxy#isFrozen). */
+    private boolean frozen;
     private final Map<Identifier, Integer> ids = new LinkedHashMap<>();
     private final Map<Integer, T> byId = new LinkedHashMap<>();
 
@@ -60,6 +62,16 @@ public class MappedRegistry<T> implements Registry<T> {
     @Override
     public Stream<?> getTags() {
         return Stream.empty();
+    }
+
+    @Override
+    public Identifier getKey(T value) {
+        for (Map.Entry<Identifier, T> entry : this.byKey.entrySet()) {
+            if (entry.getValue() == value) {
+                return entry.getKey();
+            }
+        }
+        return null;
     }
 
     @Override

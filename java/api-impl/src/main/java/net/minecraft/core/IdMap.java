@@ -5,4 +5,7 @@ public interface IdMap<T> {
     int getId(T value);
 
     T byId(int id);
+
+    /** {@code IdMap.size()} (CraftEngine). */
+    int size();
 }

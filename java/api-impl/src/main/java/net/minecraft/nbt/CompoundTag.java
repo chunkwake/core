@@ -71,6 +71,11 @@ public final class CompoundTag implements Tag {
         return java.util.Optional.empty();
     }
 
+    /** {@code CompoundTag.remove(String)} (CraftEngine). */
+    public Tag remove(String key) {
+        return this.tags.remove(key);
+    }
+
     public Tag get(String key) {
         return this.tags.get(key);
     }

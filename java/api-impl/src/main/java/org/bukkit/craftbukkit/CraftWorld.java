@@ -14,6 +14,14 @@ package org.bukkit.craftbukkit;
 public class CraftWorld {
     private final net.minecraft.server.level.ServerLevel handle =
             new net.minecraft.server.level.ServerLevel();
+    /**
+     * Алиас, который CraftEngine (CraftWorldProxy) находит по имени:
+     * getWorld(World) читает именно поле world.
+     */
+    public final net.minecraft.server.level.ServerLevel world = this.handle;
+    /** Алиас для CraftEngine (CraftWorldProxy#getWorldBorder/setWorldBorder). */
+    public final net.minecraft.world.level.border.WorldBorder worldBorder =
+            new net.minecraft.world.level.border.WorldBorder();
 
     public CraftWorld() {
     }

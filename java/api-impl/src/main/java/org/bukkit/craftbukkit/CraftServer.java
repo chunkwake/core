@@ -23,6 +23,12 @@ public class CraftServer implements org.bukkit.Server {
      * привязывается снаружи через {@link #bindCommandMap}.
      */
     private volatile org.bukkit.command.CommandMap commandMap;
+    /**
+     * Алиас для CraftEngine (CraftServerProxy): getPlayerList() читает
+     * поле playerList.
+     */
+    public final net.minecraft.server.players.PlayerList playerList;
+
     private final net.minecraft.server.dedicated.DedicatedPlayerList nmsHandle =
             new net.minecraft.server.dedicated.DedicatedPlayerList();
     private final net.minecraft.server.dedicated.DedicatedServer nmsServer =
@@ -30,6 +36,7 @@ public class CraftServer implements org.bukkit.Server {
 
     public CraftServer(Object handle) {
         this.handle = handle;
+        this.playerList = this.nmsHandle;
     }
 
     /** Привязка карты команд (см. {@link #commandMap}). */

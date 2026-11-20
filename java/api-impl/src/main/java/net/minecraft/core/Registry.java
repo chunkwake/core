@@ -15,6 +15,9 @@ public interface Registry<T> extends HolderLookup.RegistryLookup<T> {
 
     T getValue(Identifier id);
 
+    /** {@code Registry.getKey(T)} (CraftEngine). */
+    Identifier getKey(T value);
+
     default java.util.Optional<T> getOptional(Identifier id) {
         return java.util.Optional.ofNullable(this.getValue(id));
     }

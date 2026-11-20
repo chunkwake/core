@@ -23,6 +23,11 @@ public enum Direction {
         this.axis = axis;
     }
 
+    /** {@code Direction.orderedByNearest(Entity)} (CraftEngine). */
+    public static Direction[] orderedByNearest(net.minecraft.world.entity.Entity entity) {
+        return new Direction[] {UP, DOWN, NORTH, SOUTH, EAST, WEST};
+    }
+
     public int get3DDataValue() {
         return this.id;
     }

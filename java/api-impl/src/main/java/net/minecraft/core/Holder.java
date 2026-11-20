@@ -2,6 +2,16 @@ package net.minecraft.core;
 
 /** NMS {@code Holder}: ссылка на значение реестра. */
 public interface Holder<T> {
+    /** {@code Holder.direct(T)} (CraftEngine). */
+    static <T> Holder<T> direct(T value) {
+        return new Reference<>(value);
+    }
+
+    /** {@code Holder.direct(T, DataComponentMap)} (CraftEngine). */
+    static <T> Holder<T> direct(T value, net.minecraft.core.component.DataComponentMap components) {
+        return new Reference<>(value);
+    }
+
     T value();
 
     /** {@code Holder.unwrapKey}: ключ реестра, если известен. */

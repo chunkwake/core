@@ -26,6 +26,16 @@ public class SimpleRegistry<T> implements Registry<T> {
     }
 
     @Override
+    public Identifier getKey(T value) {
+        for (Map.Entry<Identifier, T> entry : this.values.entrySet()) {
+            if (entry.getValue() == value) {
+                return entry.getKey();
+            }
+        }
+        return null;
+    }
+
+    @Override
     public boolean containsKey(Identifier id) {
         return this.values.containsKey(id);
     }

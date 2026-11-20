@@ -39,6 +39,12 @@ public final class ListTag extends java.util.AbstractList<Tag> implements Tag, j
         this.values.add(index, tag);
     }
 
+    /** {@code ListTag.addTag(int, Tag)} (CraftEngine). */
+    public boolean addTag(int index, Tag tag) {
+        this.add(index, tag);
+        return true;
+    }
+
     public Tag remove(int index) {
         return this.values.remove(index);
     }

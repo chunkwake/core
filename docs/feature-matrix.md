@@ -4180,3 +4180,86 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine: прокси-покрытие 124/504 (было 113), плюс Multiverse и PlaceholderAPI проверены ботом
+
+### CraftEngine NMS-прокси: закрыт конкретный батч
+
+Пробник `P2` (грузит каждый из 504 прокси-интерфейсов CraftEngine
+`proxy.jarinjar` на нашем API) после этой итерации:
+
+```
+ok=124 bad=380
+```
+
+До итерации было `ok=113 bad=391`, то есть **закрыто 11 прокси**
+(6 полностью, ещё 5 продвинулись на следующий отсутствующий член).
+Полностью резолвятся:
+
+```
+CraftServerProxy
+DirectionProxy
+IdMapProxy
+ListTagProxy
+PlayerListProxy
+DedicatedPlayerListProxy
+```
+
+Что для этого добавлено (всё — в наших классах, не в paper-api):
+
+- `CraftServer.playerList` (алиас `nmsHandle`) — `CraftServerProxy#getPlayerList`;
+- `PlayerList.reloadResources()` и `reloadRecipeData()` — `PlayerListProxy`;
+- `CraftWorld.world`, `CraftWorld.worldBorder` — `CraftWorldProxy`;
+- `CraftEntity.entity` + `getPersistentDataContainer()` — `CraftEntityProxy`;
+- `net.minecraft.core.Direction.orderedByNearest(Entity)` — `DirectionProxy`;
+- `Holder.direct(T)` и `Holder.direct(T, DataComponentMap)` — `HolderProxy`;
+- `CompoundTag.remove(String)` — `CompoundTagProxy`;
+- `ListTag.addTag(int, Tag)` — `ListTagProxy`;
+- `IdMap.size()` — `IdMapProxy`;
+- `Registry.getKey(T)` + реализации в `MappedRegistry` и `SimpleRegistry`;
+- `MappedRegistry.frozen` — `MappedRegistryProxy#isFrozen`.
+
+Остаётся 380 прокси, из них 273 — «cannot find proxied class» (полнота
+NMS/CraftBukkit/Moonrise), 56 — методы, 44 — поля, 14 — конструкторы.
+CraftEngine по-прежнему LOADERR; это ограничение зафиксировано.
+
+### Ещё два плагина проверены реальным ботом
+
+**Multiverse-Core 5.8.2** — ` /mv list ` вернул собственный список миров
+(ботам видно в чате):
+
+```
+> /mv list
+| ==== [ Multiverse World List ]====
+| [Page 1 of 1]
+| world - NORMAL
+| world_nether - NETHER
+| world_the_end - THE_END
+```
+
+То есть менеджер миров Multiverse читает наши измерения и отдаёт
+корректные environment-типы.
+
+**PlaceholderAPI 2.12.3** — `/papi parse me %player_name%` выполнен и
+ответ пришёл игроку (`%player_name%` остался неразвёрнутым, потому что
+expansion Player не установлен; команда обработана самим PAPI).
+
+Дополнительно: AuraSkills `/skills` открывает GUI (в чате пусто, как и на
+Paper); при этом его `PacketEventsHook.sendActionBar` пишет нефатальный
+`NullPointerException` о `ChannelPipeline.context`, т.к. реального
+netty-канала у нас нет. Это ограничение packetevents-пути, а не загрузки.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 42149 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 10978 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

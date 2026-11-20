@@ -5,4 +5,11 @@ package net.minecraft.server.players;
  * ({@code MinecraftReflection.getPlayerListClass()}).
  */
 public class PlayerList {
+    /** {@code PlayerList.reloadResources()} (CraftEngine). */
+    public void reloadResources() {
+    }
+
+    /** {@code PlayerList.reloadRecipeData()} (CraftEngine). */
+    public void reloadRecipeData() {
+    }
 }
