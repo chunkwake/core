@@ -938,6 +938,20 @@ final class ChunkwakeServer {
     public void syncCommands() {
     }
 
+    /** Paper API: {@code Server.createBossBar(...)}. */
+    public org.bukkit.boss.BossBar createBossBar(String title,
+            org.bukkit.boss.BarColor color, org.bukkit.boss.BarStyle style,
+            org.bukkit.boss.BarFlag... flags) {
+        return new BossBarImpl(title, color, style, flags);
+    }
+
+    /** Paper API: keyed-вариант {@code createBossBar}. */
+    public org.bukkit.boss.KeyedBossBar createBossBar(org.bukkit.NamespacedKey key,
+            String title, org.bukkit.boss.BarColor color, org.bukkit.boss.BarStyle style,
+            org.bukkit.boss.BarFlag... flags) {
+        return new KeyedBossBarImpl(key, title, color, style, flags);
+    }
+
     public int getViewDistance() { return intProperty("view-distance", 10); }
     public int getSimulationDistance() { return intProperty("simulation-distance", 10); }
     public boolean getAllowNether() { return property("allow-nether", "true").equals("true"); }

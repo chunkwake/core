@@ -14,6 +14,15 @@ public class EntityType<T> {
         this.protocolId = protocolId;
     }
 
+    /** {@code EntityType.getDescriptionId()} (LevelledMobs). */
+    public String getDescriptionId() {
+        return "entity." + this.getId().replace(':', '.');
+    }
+
+    public String getTranslationKey() {
+        return this.getDescriptionId();
+    }
+
     public String getId() {
         return this.id;
     }

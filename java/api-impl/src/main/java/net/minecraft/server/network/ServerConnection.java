@@ -12,4 +12,6 @@ import java.util.concurrent.CopyOnWriteArrayList;
  */
 public class ServerConnection {
     public final List<ChannelFuture> connections = new CopyOnWriteArrayList<>();
+    /** Алиас, который ищет SCore (resource-pack injector). */
+    public final List<ChannelFuture> channels = this.connections;
 }

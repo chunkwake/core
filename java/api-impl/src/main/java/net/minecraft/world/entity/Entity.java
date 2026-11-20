@@ -8,7 +8,7 @@ import net.minecraft.world.level.storage.ValueOutput;
 import net.minecraft.world.phys.Vec3;
 
 /** NMS {@code Entity} (минимальная, но настоящая база). */
-public class Entity {
+public class Entity implements net.minecraft.network.syncher.SyncedDataHolder {
     private static int nextId = 1;
     private final int id = nextId++;
     private final UUID uuid;
@@ -73,8 +73,26 @@ public class Entity {
         return this.id;
     }
 
+    private final net.minecraft.network.syncher.SynchedEntityData entityData =
+            new net.minecraft.network.syncher.SynchedEntityData();
+
+    /** {@code Entity.getEntityData()} (LevelledMobs). */
+    @Override
+    public net.minecraft.network.syncher.SynchedEntityData getEntityData() {
+        return this.entityData;
+    }
+
     public UUID getUUID() {
         return this.uuid;
+    }
+
+    /** {@code Entity.getName()} (LevelledMobs). */
+    public String getName() {
+        return this.type == null ? "" : this.type.getId();
+    }
+
+    public String getTranslationKey() {
+        return this.getName();
     }
 
     public EntityType<?> getType() {

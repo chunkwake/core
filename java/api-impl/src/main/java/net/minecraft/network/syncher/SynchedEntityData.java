@@ -56,6 +56,16 @@ public class SynchedEntityData {
             return this.accessor;
         }
 
+        /** {@code DataItem.getAccessor()} (LevelledMobs). */
+        public EntityDataAccessor<T> getAccessor() {
+            return this.accessor;
+        }
+
+        /** {@code DataItem.getValue()} (LevelledMobs). */
+        public DataValue<T> getValue() {
+            return this.value();
+        }
+
         public T rawValue() {
             return this.value;
         }
@@ -64,6 +74,22 @@ public class SynchedEntityData {
             return new DataValue<>(this.accessor.getId(), this.accessor.getSerializer(),
                     this.value);
         }
+    }
+
+    /** {@code SynchedEntityData.getNonDefaultValues()} (LevelledMobs). */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public java.util.List<DataValue<?>> getNonDefaultValues() {
+        java.util.List<DataValue<?>> out = new java.util.ArrayList<>();
+        for (java.util.Map.Entry<EntityDataAccessor<?>, Object> entry : this.values.entrySet()) {
+            out.add(new DataValue(entry.getKey().getId(),
+                    entry.getKey().getSerializer(), entry.getValue()));
+        }
+        return out;
+    }
+
+    /** {@code SynchedEntityData.define(...)}. */
+    public <T> void define(EntityDataAccessor<T> accessor, T value) {
+        this.set(accessor, value);
     }
 
     public static final class Builder {

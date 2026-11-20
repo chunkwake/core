@@ -23,6 +23,13 @@ public class CraftLivingEntity extends CraftHumanEntity {
         super(server, entity);
     }
 
+    /** CraftBukkit: у CraftLivingEntity getHandle() объявлен здесь. */
+    @Override
+    public net.minecraft.world.entity.LivingEntity getHandle() {
+        net.minecraft.world.entity.Entity handle = super.getHandle();
+        return handle instanceof net.minecraft.world.entity.LivingEntity living ? living : null;
+    }
+
     @Override
     public Set<Player> getTrackedBy() {
         return new LinkedHashSet<>(Bukkit.getOnlinePlayers());

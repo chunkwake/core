@@ -3956,3 +3956,87 @@ cargo fmt --all --check -> 0
 cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4 -> зелёный
 ```
+
+## Ещё 4 плагина + SCore: 78/81; Maintenance проверен ботом
+
+Добавлены с Modrinth: EliteMobs 10.9.14, LevelledMobs 4.5.3.2,
+BetonQuest 3.4.0-DEV-14, ExecutableItems 7.26.11.17 (со зависимостью
+SCore 5.26.11.17).
+
+Живой гейт:
+
+```
+plugins: 78 of 81 enabled in 65667 ms
+FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs
+LOADERR: craft-engine
+EliteMobs enabled in 35 ms
+BetonQuest enabled in 536 ms
+ExecutableItems enabled in 1701 ms
+SCore enabled in 368 ms
+базовый: 26 of 27 (только VoxyServerSide)
+```
+
+### Функциональная проверка Maintenance ботом
+
+Бот (op) выполнил `/maintenance` на полном стенде. Команда
+зарегистрирована через `plugin.yml` и реально исполнена, ответ пришёл
+игроку:
+
+```
+> /maintenance
+| [========== MaintenancePaper ==========]
+| /maintenance help [page]   (Shows this beautiful help window)
+| /maintenance reload        (Reloads the config file, whitelist file ...)
+| /maintenance <on/off> [mode] ...
+```
+
+Это подтверждает не только загрузку, но и путь «команда из plugin.yml ->
+Bukkit command map -> обработчик плагина -> отформатированный ответ».
+
+### Что закрыто по NMS
+
+- **EliteMobs**: `net.minecraft.network.chat.numbers.NumberFormat` и
+  `BlankFormat.INSTANCE`, `Objective.setNumberFormat(NumberFormat)`;
+  прогресс-бар через `Server.createBossBar` — добавлены
+  `BossBarImpl`/`KeyedBossBarImpl` и `ChunkwakeServer.createBossBar`.
+- **LevelledMobs**: NMS-рефлексия nametag дошла до конца после
+  `SyncedDataHolder`/`SynchedEntityData`, `CommonComponents`,
+  алиасов `IChatBaseComponent`/`IChatMutableComponent`,
+  `CraftLivingEntity.getHandle()`, `SynchedEntityData$DataItem`
+  (`getAccessor/getValue`), `Entity.getEntityData/getName`,
+  `EntityType.getDescriptionId`, `getNonDefaultValues`.
+- **SCore/ExecutableItems**: `ServerConnection.channels` (алиас
+  `connections`) и `MinecraftServer.getConnection()`.
+
+### Оставшийся отказ: LevelledMobs — плагинный legacy-аlias
+
+После закрытия NMS-рефлексии LevelledMobs падает уже не на NMS, а на
+своём коде:
+
+```
+java.lang.IllegalArgumentException: No enum constant org.bukkit.entity.EntityType.ENDER_CRYSTAL
+  at io.github.arcaneplugins.levelledmobs.managers.LevelManager.mapLegacyEntityTypeName
+```
+
+В 26.3 Bukkit-перечисление называется `END_CRYSTAL` (проверено по
+paper-api: `ENDER_CRYSTAL` отсутствует), то есть на настоящем Paper этот
+же вызов упадёт так же — это дефект плагина, а не ядра. В логе он также
+пишет `Server version "v26" is unsupported`, но продолжает работу.
+
+### Нефатальный шум SCore (не ядро)
+
+- `Could not find channels field in ServerConnection` — инжектор
+  resource-pack'ов SCore не находит поле по своему предикату, хотя
+  `channels`/`connections` объявлены; на включение не влияет.
+- `BentoBox.getInstance()` == null: SCore не объявляет BentoBox в
+  depend/softdepend и обращается к нему до его onEnable; это его
+  собственная ошибка порядка.
+
+### Гейты
+
+```
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4 -> зелёный
+```
