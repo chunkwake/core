@@ -8,7 +8,8 @@ import java.util.Map;
  * {@code IncompatibleClassChangeError}.
  */
 public interface RegistryAccess extends HolderLookup.Provider {
-    RegistryAccess EMPTY = new RegistryAccess() {
+    /** В 26.3 {@code RegistryAccess.EMPTY} имеет тип {@code Frozen}. */
+    RegistryAccess.Frozen EMPTY = new RegistryAccess.Frozen() {
     };
 
     static RegistryAccess EMPTY_REGISTRY_ACCESS() {

@@ -3609,3 +3609,64 @@ cargo +1.100.0 test --workspace -- --test-threads=4 -> 45 suites, 953 passed, 0 
 Замечание: live/fullrender проверялись debug-бинарником с актуальным
 `api/chunkwake-api.jar`; `release`-бинарник нужно пересобрать перед
 релизом (он содержит старую копию API).
+
+## Emotecraft закрыт: 64/66, LOADERR пуст
+
+Emotecraft 3.5.0 (paper, 26.3) раньше падал на загрузке. Разбор шёл по
+байткоду плагина, каждый шаг — реальный `NoClassDefFoundError`/`NoSuchField`
+из его собственных вызовов:
+
+1. `io.papermc.paper.network.ChannelInitializeListener` —
+   добавлен вместе с `ChannelInitializeListenerHolder` (`addListener`,
+   `removeListener`, `listeners`) и `afterInitChannel(Channel)`.
+2. `io.papermc.paper.connection.PaperCommonConnection` — Emotecraft делает
+   `findVarHandle(PaperCommonConnection.class, "packetListener",
+   ServerCommonPacketListenerImpl.class)`, то есть поле должно быть
+   обычным (не static) и ровно такого типа. Добавлен класс с этим полем.
+3. `ServerConfigurationPacketListenerImpl.configurationTasks` —
+   `findVarHandle(..., "configurationTasks", Queue.class)`; добавлен класс
+   с полем `Queue<Runnable>`.
+4. `CustomPacketPayload.Type`/`FallbackProvider` и
+   `Serverbound/ClientboundCustomPayloadPacket` —
+   `ServerboundCustomPayloadPacket.STREAM_CODEC` (Emotecraft подменяет
+   fallback для неизвестных payload'ов).
+5. «Failed to hack size!» — Emotecraft разворачивает анонимный StreamCodec
+   через `findVarHandle(..., "this$0", StreamCodec.class)` и
+   `val$fallback`. В `SimpleStreamCodec` добавлены ровно эти поля, после
+   чего hack проходит (иначе плагин вызывал `getServer().shutdown()`).
+6. `net.minecraft.world.entity.Avatar` — в 26.3 это базовая живая сущность.
+   `Avatar` добавлен (health/alive, `getBukkitEntity(): CraftLivingEntity`),
+   `LivingEntity extends Avatar`, `Player extends LivingEntity`,
+   `ServerPlayer` тем самым `instanceof Avatar`. Заодно выстроена
+   CraftBukkit-иерархия: `CraftEntity.getHandle(): Entity` (нужен именно
+   этот дескриптор — ковариантные override дают bridge), `CraftLivingEntity
+   extends CraftHumanEntity`, `CraftPlayer extends CraftLivingEntity`.
+7. `Bukkit.getServerConfig()` возвращал null → `ServerConfiguration`
+   (интерфейс, `isProxyEnabled()`) + `ChunkwakeServer.getServerConfig()`.
+8. `Registration` команд: `Commands.literal/argument`,
+   `Commands.CommandSelection.DEDICATED`, `CommandSourceStack`
+   (`getPlayerOrException`, `permissions()`), `EntityArgument.getEntity`,
+   `PermissionLevel`, `Permission.HasCommandLevel`, `PermissionSet`.
+   `RegistryAccess.EMPTY` теперь имеет тип `RegistryAccess.Frozen`
+   (как в 26.3).
+
+Живой результат (стенд только с emotecraft, затем полный):
+
+```
+emotecraft loaded in 250 ms
+emotecraft enabled in 26 ms
+plugins: 1 of 1 enabled in 303 ms
+```
+
+```
+plugins: 64 of 66 enabled in 49651 ms
+FAILED: MiniMOTD failed in 4 ms; VoxyServerSide failed in 7 ms
+LOADERR: (пусто)
+PANICS: 0
+базовый: 26 of 27 enabled in 14578 ms
+FAILED: только VoxyServerSide
+PANICS: 0
+```
+
+Остаются те же два самодисквалифицирующихся плагина (MiniMOTD version-gate,
+Voxy `plugin.yml`); LOADERR пуст.

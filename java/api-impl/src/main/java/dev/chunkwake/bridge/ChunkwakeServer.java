@@ -914,6 +914,14 @@ final class ChunkwakeServer {
     public int getPort() { return intProperty("server-port", 25565); }
     public String getIp() { return property("server-ip", ""); }
     public String getMotd() { return property("motd", "A Minecraft Server"); }
+    private final io.papermc.paper.configuration.ServerConfiguration serverConfig =
+            io.papermc.paper.configuration.ServerConfiguration.EMPTY;
+
+    /** Paper API: {@code Bukkit.getServerConfig()}. */
+    public io.papermc.paper.configuration.ServerConfiguration getServerConfig() {
+        return this.serverConfig;
+    }
+
     public int getViewDistance() { return intProperty("view-distance", 10); }
     public int getSimulationDistance() { return intProperty("simulation-distance", 10); }
     public boolean getAllowNether() { return property("allow-nether", "true").equals("true"); }

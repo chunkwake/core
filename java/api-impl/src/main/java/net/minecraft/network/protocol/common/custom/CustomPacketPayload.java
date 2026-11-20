@@ -1,21 +1,16 @@
 package net.minecraft.network.protocol.common.custom;
 
-import net.minecraft.network.codec.StreamCodec;
-import net.minecraft.resources.Identifier;
-
-/** NMS {@code CustomPacketPayload}. */
+/** NMS {@code CustomPacketPayload} (Emotecraft). */
 public interface CustomPacketPayload {
     Type<? extends CustomPacketPayload> type();
 
-    default Identifier id() {
-        return this.type().id();
+    /** NMS {@code CustomPacketPayload.Type}. */
+    record Type<T extends CustomPacketPayload>(
+            net.minecraft.resources.Identifier id, Object codec) {
     }
 
-    /** Тип payload'а: id + кодек. */
-    record Type<T extends CustomPacketPayload>(Identifier id, StreamCodec<T> codec) {
-        public static <T extends CustomPacketPayload> Type<T> create(Identifier id,
-                StreamCodec<T> codec) {
-            return new Type<>(id, codec);
-        }
+    /** NMS {@code CustomPacketPayload.FallbackProvider}. */
+    interface FallbackProvider<T extends CustomPacketPayload> {
+        Type<? extends T> type();
     }
 }

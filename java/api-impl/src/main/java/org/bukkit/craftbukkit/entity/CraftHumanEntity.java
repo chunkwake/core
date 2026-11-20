@@ -15,13 +15,13 @@ import org.bukkit.permissions.PermissionAttachmentInfo;
  * {@link PlayerCalls}; права обслуживает {@link #perm}, который плагин прав
  * может заменить своим {@code Permissible}.
  */
-public class CraftHumanEntity implements org.bukkit.entity.Player {
+public class CraftHumanEntity extends CraftEntity implements org.bukkit.entity.Player {
     /** Поле, которое ищет LuckPerms (`CraftHumanEntity.perm`). */
     public PermissibleBase perm;
     /** CraftBukkit-поля: их читают NMS-плагины через FakeCraftPlayer. */
     public final org.bukkit.craftbukkit.CraftServer server;
     public final net.minecraft.server.level.ServerPlayer entity;
-    final Object handle;
+
     /** `false`, пока `PermissibleBase` ещё в своём конструкторе. */
     private boolean ready;
 
@@ -37,7 +37,7 @@ public class CraftHumanEntity implements org.bukkit.entity.Player {
 
     private CraftHumanEntity(Object handle, org.bukkit.craftbukkit.CraftServer server,
             net.minecraft.server.level.ServerPlayer entity) {
-        this.handle = handle;
+        super(handle);
         this.server = server;
         this.entity = entity;
         this.perm = new PermissibleBase(this);

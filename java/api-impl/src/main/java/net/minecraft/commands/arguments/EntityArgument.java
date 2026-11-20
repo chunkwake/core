@@ -23,6 +23,12 @@ public class EntityArgument implements ArgumentType<Object> {
     public static EntityArgument entity() {
         return new EntityArgument(true, false);
     }
+    public static net.minecraft.world.entity.Entity getEntity(
+            com.mojang.brigadier.context.CommandContext<?> context, String name) {
+        Object value = context.getArgument(name, Object.class);
+        return value instanceof net.minecraft.world.entity.Entity entity ? entity : null;
+    }
+
     @Override
     public Object parse(StringReader reader) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         return null;

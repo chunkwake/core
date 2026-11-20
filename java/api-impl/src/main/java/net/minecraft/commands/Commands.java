@@ -22,6 +22,24 @@ public class Commands {
         return this.dispatcher;
     }
 
+    /** {@code Commands.literal(String)} (Emotecraft: /emote). */
+    public static com.mojang.brigadier.builder.LiteralArgumentBuilder<Object> literal(String name) {
+        return com.mojang.brigadier.builder.LiteralArgumentBuilder.literal(name);
+    }
+
+    /** {@code Commands.argument(String, ArgumentType)}. */
+    public static com.mojang.brigadier.builder.RequiredArgumentBuilder<Object, ?> argument(
+            String name, com.mojang.brigadier.arguments.ArgumentType<?> type) {
+        return com.mojang.brigadier.builder.RequiredArgumentBuilder.argument(name, type);
+    }
+
+    /** {@code Commands.CommandSelection}: где доступна команда. */
+    public enum CommandSelection {
+        ALL,
+        DEDICATED,
+        INTEGRATED
+    }
+
     /** `Commands.createValidationContext(HolderLookup.Provider)`. */
     public static CommandBuildContext createValidationContext(
             net.minecraft.core.HolderLookup.Provider provider) {

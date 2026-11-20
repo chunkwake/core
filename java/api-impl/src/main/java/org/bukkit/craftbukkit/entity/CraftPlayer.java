@@ -7,7 +7,7 @@ import net.minecraft.server.level.ServerPlayer;
  * CraftBukkit-совместимый класс игрока: наследник {@link CraftHumanEntity}
  * с {@code getHandle()}, который ищут DecentHolograms, TAB и другие плагины.
  */
-public class CraftPlayer extends CraftHumanEntity {
+public class CraftPlayer extends CraftLivingEntity {
     private final ServerPlayer fallback = new ServerPlayer();
 
     public CraftPlayer(Object impl) {
