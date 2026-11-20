@@ -11,6 +11,17 @@ public final class CraftChatMessage {
     private CraftChatMessage() {
     }
 
+    /**
+     * {@code CraftChatMessage.fromJSON(String)}: Paper-метод, который ищет
+     * рефлексией Simple Voice Chat (совместимость чата).
+     */
+    public static Component fromJSON(String json) {
+        if (json == null || json.isEmpty()) {
+            return Component.literal("");
+        }
+        return Component.literal(json);
+    }
+
     public static Component[] fromString(String message, boolean keepNewlines) {
         return new Component[] {Component.literal(message == null ? "" : message)};
     }

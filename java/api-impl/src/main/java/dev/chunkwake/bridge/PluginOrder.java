@@ -23,7 +23,8 @@ import org.bukkit.plugin.PluginDescriptionFile;
  * всех его участников. При прочих равных порядок — по имени файла.
  */
 final class PluginOrder {
-    record Candidate(File jar, PluginDescriptionFile description) {
+    record Candidate(File jar, PluginDescriptionFile description,
+            PluginLoader.PaperDeps deps) {
         String name() {
             return description.getName();
         }
@@ -74,8 +75,21 @@ final class PluginOrder {
         Map<Candidate, Set<Candidate>> hard = new HashMap<>();
         Map<Candidate, Set<Candidate>> soft = new HashMap<>();
         for (Candidate c : alive) {
-            hard.put(c, resolve(c.description().getDepend(), byName, alive, c));
-            soft.put(c, resolve(c.description().getSoftDepend(), byName, alive, c));
+            Set<Candidate> h = resolve(c.description().getDepend(), byName, alive, c);
+            h.addAll(resolve(c.deps().requiredBefore(), byName, alive, c));
+            Set<Candidate> sf = resolve(c.description().getSoftDepend(), byName, alive, c);
+            sf.addAll(resolve(c.deps().optionalBefore(), byName, alive, c));
+            hard.put(c, h);
+            soft.put(c, sf);
+        }
+        // `load: AFTER`: этот плагин грузится раньше указанной зависимости.
+        for (Candidate c : alive) {
+            for (Candidate target : resolve(c.deps().requiredAfter(), byName, alive, c)) {
+                hard.get(target).add(c);
+            }
+            for (Candidate target : resolve(c.deps().optionalAfter(), byName, alive, c)) {
+                soft.get(target).add(c);
+            }
         }
         for (Candidate c : alive) {
             for (Candidate target : resolve(c.description().getLoadBefore(), byName, alive, c)) {
@@ -138,5 +152,17 @@ final class PluginOrder {
     /** Обязательные зависимости плагина, которых среди загруженных нет. */
     static List<String> missing(PluginDescriptionFile desc, Collection<String> loaded) {
         return desc.getDepend().stream().filter(d -> !loaded.contains(d)).toList();
+    }
+
+    /** То же с учётом обязательных зависимостей из `paper-plugin.yml`. */
+    static List<String> missing(PluginDescriptionFile desc, PluginLoader.PaperDeps deps,
+            Collection<String> loaded) {
+        List<String> out = new ArrayList<>(missing(desc, loaded));
+        for (String d : deps.requiredBefore()) {
+            if (!loaded.contains(d) && !out.contains(d)) {
+                out.add(d);
+            }
+        }
+        return out;
     }
 }

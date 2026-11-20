@@ -89,6 +89,11 @@ final class ChunkwakeServer {
         if (Bukkit.getServer() == null) {
             Bukkit.setServer(api);
         }
+        // `CraftServer.commandMap`: Lamp/revxrsal (FancyHolograms и др.)
+        // читает это поле рефлексией из `Bukkit.getServer().getClass()`.
+        if (api instanceof org.bukkit.craftbukkit.CraftServer craft) {
+            craft.bindCommandMap(this.commands);
+        }
     }
 
     java.nio.file.Path levelDirectory() {
@@ -294,7 +299,8 @@ final class ChunkwakeServer {
         List<PluginOrder.Candidate> candidates = new ArrayList<>();
         for (File jar : jars) {
             try {
-                candidates.add(new PluginOrder.Candidate(jar, PluginLoader.describe(jar)));
+                candidates.add(new PluginOrder.Candidate(jar, PluginLoader.describe(jar),
+                        PluginLoader.paperDeps(jar)));
             } catch (Throwable t) {
                 logger.log(Level.SEVERE, "Could not load " + jar.getName() + ": " + t.getMessage());
             }
@@ -348,7 +354,8 @@ final class ChunkwakeServer {
             File jar = loaderJars.get(k);
             try {
                 long one = System.nanoTime();
-                List<String> missing = PluginOrder.missing(desc, loadedNames);
+                List<String> missing = PluginOrder.missing(desc,
+                        PluginLoader.paperDeps(jar), loadedNames);
                 if (!missing.isEmpty()) {
                     logger.severe("Could not load '" + jar.getName()
                             + "': dependencies failed to load: " + missing);

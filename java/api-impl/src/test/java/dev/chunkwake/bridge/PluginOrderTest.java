@@ -17,7 +17,7 @@ class PluginOrderTest {
     private static PluginOrder.Candidate plugin(String name, String extra) throws Exception {
         String yaml = "name: " + name + "\nversion: 1\nmain: x." + name + "\n" + extra;
         return new PluginOrder.Candidate(new File(name + ".jar"),
-                new PluginDescriptionFile(new StringReader(yaml)));
+                new PluginDescriptionFile(new StringReader(yaml)), PluginLoader.PaperDeps.NONE);
     }
 
     private static List<String> names(List<PluginOrder.Candidate> order) {
@@ -58,6 +58,29 @@ class PluginOrderTest {
                 plugin("A", "depend: [ViaVersion, Economy]\n"),
                 plugin("Eco", "provides: [Economy]\n")), Set.of("ViaVersion"), LOG);
         assertEquals(List.of("Eco", "A"), names(order));
+    }
+
+    @Test
+    void paperDependencyLoadBeforePutsDependencyFirst() throws Exception {
+        var deps = new PluginLoader.PaperDeps(List.of("voicechat"), List.of(), List.of(), List.of());
+        var order = PluginOrder.sort(List.of(
+                new PluginOrder.Candidate(new File("CustomDiscs.jar"),
+                        new PluginDescriptionFile(new StringReader(
+                                "name: CustomDiscs\nversion: 1\nmain: x.CustomDiscs\n")), deps),
+                plugin("voicechat", "")), Set.of(), LOG);
+        assertEquals(List.of("voicechat", "CustomDiscs"), names(order));
+    }
+
+    @Test
+    void paperDependencyLoadAfterPutsDependencyLast() throws Exception {
+        var deps = new PluginLoader.PaperDeps(List.of(), List.of("Z"), List.of(), List.of());
+        var order = PluginOrder.sort(List.of(
+                plugin("A", ""),
+                new PluginOrder.Candidate(new File("B.jar"),
+                        new PluginDescriptionFile(new StringReader(
+                                "name: B\nversion: 1\nmain: x.B\n")), deps),
+                plugin("Z", "")), Set.of(), LOG);
+        assertEquals(List.of("A", "B", "Z"), names(order));
     }
 
     @Test

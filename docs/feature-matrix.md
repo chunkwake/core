@@ -2763,3 +2763,72 @@ after:  1.69, 1.82, 1.71, 1.83, 1.69   медиана 1.71, среднее 1.75
 
 Гейты после изменения: база 26/27, расширенный 36/37 (только
 VoxyServerSide), паник нет.
+
+## Матрица расширена: 41/42 (FancyHolograms, FancyNpcs, DeluxeMenus, ajLeaderboards, GriefPrevention, ViaBackwards)
+
+Добавлены 6 плагинов paper/26.3: ViaBackwards 5.12.3, FancyHolograms
+3.0.0-SNAPSHOT.95, FancyNpcs 2.12.1, ajLeaderboards 2.11.0, DeluxeMenus
+1.14.1, GriefPrevention 16.18.8.
+
+Первый прогон дал `40 of 42`: FancyHolograms падал. Закрытые дыры:
+
+1. **Brigadier-аргументы Lamp/revxrsal.** `MinecraftArgumentType`
+   ищет классы по именам, но `net.minecraft.commands.arguments.coordinates.BlockPosArgument`
+   в api-jar не было. Добавлен стаб (приватный конструктор + `blockPos()`),
+   после чего FancyHolograms прошёл регистрацию команд.
+2. **`CraftServer.commandMap`.** Lamp читает это поле рефлексией
+   (`Bukkit.getServer().getClass().getDeclaredField("commandMap")`), как в
+   CraftBukkit. Поле добавлено и привязывается из `ChunkwakeServer`
+   (`bindCommandMap`) — важно, что не в конструкторе: `api` создаётся
+   раньше поля `commands`.
+3. **`paper-plugin.yml` `dependencies`.** Порядок загрузки учитывал только
+   `depend`/`softdepend`/`loadbefore` из `plugin.yml`. Теперь
+   `PluginLoader.paperDeps` разбирает `dependencies.bootstrap/server`
+   (`load: BEFORE|AFTER`, `required`) и `PluginOrder` строит по ним рёбра
+   порядка (плюс проверка обязательных зависимостей). Это починило
+   CustomDiscs: voicechat теперь включается *до* него, и хук
+   `BukkitVoicechatService` регистрируется (`Successfully enabled
+   voicechat hook`, раньше был `Failed to enable voicechat hook`).
+4. **Simple Voice Chat.** `voicechat` не мог загрузить совместимость:
+   не хватало `CraftChatMessage.fromJSON(String)` и
+   `ServerPlayer.sendSystemMessage(Component)`. Добавлены — в логе
+   `Compatibility version 20`, сервис регистрируется.
+5. **squaremap: реестры и `Mth`.** Ошибки конфига
+   (`WorldConfig.biomeSettings`, `WorldAdvanced.colorOverrideBiome*`)
+   были из-за отсутствующих `net.minecraft.util.Mth` и реальных записей
+   `Registries.BIOME` / `DIMENSION_TYPE`. Добавлены `Mth` и
+   `VanillaRegistries` (67 биомов и 4 dimension_type из data-секции
+   серверного jar 26.3), `Registry.key()`; `RegistryAccess.lookupOrThrow`
+   теперь кэширует реестры по строке ключа и наполняет их. Ошибок
+   squaremap в логе не осталось.
+
+Итоговые живые гейты:
+
+```
+расширенный стенд (43 jar, 42 плагина): 41 of 42 enabled in 16489 ms
+  failed: только VoxyServerSide (сам отключается по plugin.yml)
+  squaremap enabled in 458 ms
+  voicechat: Compatibility version 20, service зарегистрирован
+  PANICS: 0
+базовый стенд:                          26 of 27 enabled in 11773 ms
+  failed: только VoxyServerSide, PANICS: 0
+```
+
+Остаточные записи в логе, не являющиеся дырами ядра:
+
+- EssentialsX 2.22: `You are running an unsupported server version!` —
+  его собственный список версий не знает 26.3 (на Paper 26.3 то же);
+- DeluxeMenus 1.14.1: `Could not setup a NMS hook ... nbt_int/nbt_string` —
+  `NbtProvider` ищет дореформенный `net.minecraft.nbt.NBTTagCompound` и
+  выбирает имена методов по своей таблице версий; 26.3 там нет. Плагин
+  работает, отключаются только NBT-опции предметов;
+- DecentHolograms (встроенный NBT-API) печатает WARN на каждый
+  отсутствующий старый класс (`CraftMetaItem`, `NBTTagType`, ...) — это
+  его собственный fallback-перебор имён, на Paper он также пишет WARN для
+  несуществующих в 26.3 старых имён;
+- VoxyServerSide самоотключается по `plugin.yml`
+  (`lss-minecraft-dependency`).
+
+Тесты: `gradlew --offline cleanTest test` — 53 теста, включая новые
+`PluginOrderTest.paperDependencyLoadBefore/After` и
+`VanillaRegistriesTest` (67 биомов, 4 dimension_type).

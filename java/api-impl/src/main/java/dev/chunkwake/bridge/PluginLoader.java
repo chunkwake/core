@@ -181,6 +181,56 @@ final class PluginLoader extends URLClassLoader implements ConfiguredPluginClass
     }
 
     /** Сколько библиотек плагин объявил в `libraries:` — для журнала до загрузки. */
+    /**
+     * Зависимости из `paper-plugin.yml` (`dependencies.bootstrap/server`).
+     * Paper учитывает их в порядке загрузки: `load: BEFORE` — зависимость
+     * раньше плагина, `load: AFTER` — позже. `PluginDescriptionFile` эти
+     * ключи не читает, поэтому разбираем сами: CustomDiscs объявляет
+     * voicechat и packetevents обязательными и ждёт их сервисы в onEnable.
+     */
+    record PaperDeps(List<String> requiredBefore, List<String> requiredAfter,
+            List<String> optionalBefore, List<String> optionalAfter) {
+        static final PaperDeps NONE =
+                new PaperDeps(List.of(), List.of(), List.of(), List.of());
+    }
+
+    static PaperDeps paperDeps(File jar) throws IOException {
+        Object deps = paperYaml(jar).get("dependencies");
+        if (!(deps instanceof Map<?, ?> scopes)) {
+            return PaperDeps.NONE;
+        }
+        List<String> requiredBefore = new ArrayList<>();
+        List<String> requiredAfter = new ArrayList<>();
+        List<String> optionalBefore = new ArrayList<>();
+        List<String> optionalAfter = new ArrayList<>();
+        for (Object scope : scopes.values()) {
+            if (!(scope instanceof Map<?, ?> entries)) {
+                continue;
+            }
+            for (Map.Entry<?, ?> e : entries.entrySet()) {
+                String name = String.valueOf(e.getKey());
+                boolean required = true;
+                boolean before = true;
+                if (e.getValue() instanceof Map<?, ?> spec) {
+                    if (spec.get("required") instanceof Boolean b) {
+                        required = b;
+                    }
+                    Object load = spec.get("load");
+                    if (load != null) {
+                        before = !"AFTER".equalsIgnoreCase(String.valueOf(load));
+                    }
+                }
+                if (required) {
+                    (before ? requiredBefore : requiredAfter).add(name);
+                } else {
+                    (before ? optionalBefore : optionalAfter).add(name);
+                }
+            }
+        }
+        return new PaperDeps(List.copyOf(requiredBefore), List.copyOf(requiredAfter),
+                List.copyOf(optionalBefore), List.copyOf(optionalAfter));
+    }
+
     int declaredLibraryCount() {
         List<String> declared = description.getLibraries();
         return declared == null ? 0 : declared.size();

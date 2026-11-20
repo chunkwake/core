@@ -37,6 +37,14 @@ public interface Registry<T> {
 
     T byId(int id);
 
+    /**
+     * {@code Registry.key()}: ключ самого реестра. Нужен squaremap
+     * (`MinecraftRegistries.requireEntry`), вызывается на пустых реестрах.
+     */
+    default net.minecraft.resources.ResourceKey<? extends Registry<T>> key() {
+        return null;
+    }
+
     /** {@code Registry.iterator()} — плагины обходят реестр. */
     default java.util.Iterator<T> iterator() {
         return java.util.Collections.emptyIterator();

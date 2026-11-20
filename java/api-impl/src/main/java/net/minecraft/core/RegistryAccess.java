@@ -27,8 +27,9 @@ public interface RegistryAccess {
     @SuppressWarnings("unchecked")
     default <E> Registry<E> lookupOrThrow(
             net.minecraft.resources.ResourceKey<? extends Registry<? extends E>> key) {
-        return (Registry<E>) EMPTY_REGISTRIES.computeIfAbsent(key,
-                k -> new net.minecraft.core.SimpleRegistry<>());
+        String name = key.location().toString();
+        return (Registry<E>) EMPTY_REGISTRIES.computeIfAbsent(name,
+                k -> dev.chunkwake.bridge.VanillaRegistries.create(k));
     }
 
     default <E> java.util.Optional<Registry<E>> lookup(
@@ -37,7 +38,7 @@ public interface RegistryAccess {
     }
 
     /** Пустые реестры по ключу (biome/dimension_type/...). */
-    java.util.Map<Object, Registry<?>> EMPTY_REGISTRIES =
+    java.util.Map<String, Registry<?>> EMPTY_REGISTRIES =
             new java.util.concurrent.ConcurrentHashMap<>();
 
     /** Заглушка {@code RegistryAccess$Frozen}. */

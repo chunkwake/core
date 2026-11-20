@@ -13,6 +13,16 @@ import dev.chunkwake.bridge.PlayerCalls;
  */
 public class CraftServer implements org.bukkit.Server {
     private final Object handle;
+    /**
+     * `SimpleCommandMap` реального сервера. Lamp/revxrsal (FancyHolograms и др.)
+     * достаёт это поле рефлексией из `Bukkit.getServer().getClass()`
+     * (`getDeclaredField("commandMap")`), как в CraftBukkit.
+     *
+     * <p>Поле заполняется не в конструкторе: `ChunkwakeServer` создаёт этот
+     * объект до инициализации собственного `commands`, поэтому карта
+     * привязывается снаружи через {@link #bindCommandMap}.
+     */
+    private volatile org.bukkit.command.CommandMap commandMap;
     private final net.minecraft.server.dedicated.DedicatedPlayerList nmsHandle =
             new net.minecraft.server.dedicated.DedicatedPlayerList();
     private final net.minecraft.server.dedicated.DedicatedServer nmsServer =
@@ -20,6 +30,11 @@ public class CraftServer implements org.bukkit.Server {
 
     public CraftServer(Object handle) {
         this.handle = handle;
+    }
+
+    /** Привязка карты команд (см. {@link #commandMap}). */
+    public void bindCommandMap(org.bukkit.command.CommandMap map) {
+        this.commandMap = map;
     }
 
 
