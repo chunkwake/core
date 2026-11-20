@@ -467,6 +467,20 @@ public final class PlayerImpl {
 
     public PlayerInventory getInventory() { return inventory.api; }
 
+    /**
+     * Устаревший {@code Player.getItemInHand()}: CraftHumanEntity
+     * делегирует его в handle, поэтому метод должен быть здесь.
+     * GriefPrevention вызывает {@code getItemInHand().getType()} и падал
+     * на null.
+     */
+    public org.bukkit.inventory.ItemStack getItemInHand() {
+        return inventory.api.getItemInMainHand();
+    }
+
+    public void setItemInHand(org.bukkit.inventory.ItemStack item) {
+        inventory.api.setItemInMainHand(item);
+    }
+
     /** `CommandSender.spigot()`: SkinsRestorer и другие шлют BaseComponent. */
     public org.bukkit.entity.Player.Spigot spigot() {
         return new SpigotImpl(this);

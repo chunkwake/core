@@ -88,18 +88,27 @@ final class InventoryImpl {
 
     public void clear(int index) { setItem(index, null); }
 
-    public ItemStack getItemInMainHand() { return contents()[getHeldItemSlot()]; }
+    /**
+     * Ванильный контракт {@code PlayerInventory}: рука/броня никогда не
+     * возвращают null — пустой слот отдаёт {@code AIR} (GriefPrevention
+     * вызывает {@code getItemInHand().getType()} и падал на null).
+     */
+    private static ItemStack airIfEmpty(ItemStack stack) {
+        return stack == null || stack.isEmpty() ? new StackImpl(Material.AIR, 0) : stack;
+    }
+
+    public ItemStack getItemInMainHand() { return airIfEmpty(contents()[getHeldItemSlot()]); }
     public void setItemInMainHand(ItemStack item) { setItem(getHeldItemSlot(), item); }
-    public ItemStack getItemInOffHand() { return contents()[OFFHAND]; }
+    public ItemStack getItemInOffHand() { return airIfEmpty(contents()[OFFHAND]); }
     public ItemStack getItem(org.bukkit.inventory.EquipmentSlot slot) {
         return switch (slot) {
             case HAND -> getItemInMainHand();
             case OFF_HAND -> getItemInOffHand();
-            case FEET -> getItem(36);
-            case LEGS -> getItem(37);
-            case CHEST -> getItem(38);
-            case HEAD -> getItem(39);
-            default -> new StackImpl(org.bukkit.Material.AIR, 0);
+            case FEET -> getBoots();
+            case LEGS -> getLeggings();
+            case CHEST -> getChestplate();
+            case HEAD -> getHelmet();
+            default -> new StackImpl(Material.AIR, 0);
         };
     }
     public void setItemInOffHand(ItemStack item) { setItem(OFFHAND, item); }
@@ -112,10 +121,10 @@ final class InventoryImpl {
         player.control("held " + slot);
     }
 
-    public ItemStack getHelmet() { return getItem(HELMET); }
-    public ItemStack getChestplate() { return getItem(CHESTPLATE); }
-    public ItemStack getLeggings() { return getItem(LEGGINGS); }
-    public ItemStack getBoots() { return getItem(BOOTS); }
+    public ItemStack getHelmet() { return airIfEmpty(contents()[HELMET]); }
+    public ItemStack getChestplate() { return airIfEmpty(contents()[CHESTPLATE]); }
+    public ItemStack getLeggings() { return airIfEmpty(contents()[LEGGINGS]); }
+    public ItemStack getBoots() { return airIfEmpty(contents()[BOOTS]); }
     public void setHelmet(ItemStack s) { setItem(HELMET, s); }
     public void setChestplate(ItemStack s) { setItem(CHESTPLATE, s); }
     public void setLeggings(ItemStack s) { setItem(LEGGINGS, s); }

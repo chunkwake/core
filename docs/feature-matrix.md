@@ -4105,3 +4105,78 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## GriefPrevention: `/claim` и `/claimslist` реально исполняются ботом
+
+Ещё один сквозной функциональный сценарий на полном стенде (82
+плагина). Бот выполняет команды GriefPrevention и получает его
+собственные ответы:
+
+```
+> /claim 2
+| /You must be holding a golden shovel to do that.
+
+> /claimslist
+| +100 blocks from play + 0 bonus = 100 total.
+```
+
+Это ровно ванильное поведение плагина (для `/claim` нужна золотая
+лопата), то есть цепочка `Rust -> Bukkit command map ->
+PluginCommand/executor -> сообщение игроку` работает вместе с чтением
+инвентаря и `Player`-состояния.
+
+### Найденная и закрытая дыра ядра
+
+- **`Player.getItemInHand()` возвращал `null`.** `CraftHumanEntity`
+  делегирует устаревший метод в handle (`PlayerImpl`), а метода там не
+  было — GriefPrevention падал на
+  `getItemInHand().getType()` (`NullPointerException`) и писал
+  `Unhandled exception executing command 'claim'`. Добавлены
+  `PlayerImpl.getItemInHand()/setItemInHand()`.
+- **`PlayerInventory.getItemInMainHand()`/offhand/брони возвращали
+  `null` для пустого слота.** По контракту Bukkit они всегда отдают
+  `AIR` (в отличие от `Inventory.getItem(int)`, который для пустого слота
+  возвращает `null`). Добавлен `airIfEmpty(...)`; это же используется
+  `EquipmentSlot`-веткой.
+
+### Про «pending MissingPaletteEntryException»
+
+Этот WARN остался в старых логах (`full263.log`,
+`logs/chunkwake.2026-11-20.log`): тогда squaremap отключался с
+`enabling needs Minecraft server internals
+(net.minecraft.world.level.chunk.MissingPaletteEntryException)`. В
+текущем дереве squaremap включается:
+
+```
+plugins: squaremap enabled in 688 ms
+```
+
+То есть результат уже закрыт более ранним коммитом (Moonrise-заглушки);
+в текущем гейте этой ошибки нет.
+
+### Известное ограничение (не влияет на загрузку)
+
+DeluxeHub при входе пытается запустить праздничный фейерверк через
+`World.spawn(location, Firework.class)`. Наша `WorldImpl.spawn` умеет
+только мобов (`MobImpl.species`), поэтому пишет
+`UnsupportedOperationException: chunkwake: spawn Firework` в WARN.
+Фейерверк — косметика; на работу DeluxeHub и остальных плагинов не
+влияет, но это честно зафиксированная дыра в `World.spawn` для
+не-мобовых entity.
+
+### Точные числа гейтов (после правок)
+
+```
+расширенный: 79 of 82 enabled in 53229 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его
+          собственный EntityType.ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar
+  PANICS: 0
+базовый: 26 of 27 enabled in 13771 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
