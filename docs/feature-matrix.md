@@ -2479,3 +2479,18 @@ PANICS: 0
 
 Базовый стенд: `26 of 27`, отказ только VoxyServerSide, паник нет.
 Итог: 35/36 — единственный оставшийся отказ самоотключающийся Voxy.
+
+## Матрица расширена: Geyser — 36/37
+
+Добавлен Geyser-Spigot 2.12.1 (paper, 26.3; 49.8 МБ). Живой гейт:
+
+```
+plugins: 36 of 37 enabled in 15684 ms
+Geyser-Spigot enabled in 413 ms
+FAILED: только VoxyServerSide (сам отключается по plugin.yml)
+PANICS: 0
+```
+
+CoreProtect/Towny/Floodgate под 26.3/paper на Modrinth отсутствуют —
+добавить не удалось. Итог: расширенный стенд 36/37, база 26/27
+(единственный отказ всюду — VoxyServerSide).
