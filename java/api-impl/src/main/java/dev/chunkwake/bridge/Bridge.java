@@ -80,7 +80,7 @@ public final class Bridge {
             EVENT_PRE_LOGIN = 38, EVENT_LOGIN = 39, EVENT_KICK = 40, EVENT_RESPAWN = 41, EVENT_TELEPORT = 42,
             EVENT_ITEM_HELD = 43, EVENT_TOGGLE_SNEAK = 44, EVENT_TOGGLE_SPRINT = 45, EVENT_CHANGED_WORLD = 46,
             EVENT_SIGN_UNCHECKED = 47, EVENT_SIGN_CHANGE = 48, EVENT_OPEN_SIGN = 49,
-            EVENT_EDIT_BOOK = 50, EVENT_SLIME_SPLIT = 51;
+            EVENT_EDIT_BOOK = 50, EVENT_SLIME_SPLIT = 51, EVENT_CHUNK_LOAD = 52;
 
     /** Биты маски слушателей. */
     static final long LISTEN_JOIN = 1, LISTEN_QUIT = 2, LISTEN_BLOCK_BREAK = 4;
@@ -278,6 +278,7 @@ public final class Bridge {
             table.setAtIndex(JAVA_LONG, FLAG_PACKETS,
                     ProtocolBridge.hasSending() ? 1L : 0L);
             server.scheduler().tick();
+            ChunkEvents.tick(server.api.getPluginManager());
         } catch (Throwable t) {
             Logger.getLogger("Chunkwake").log(Level.SEVERE, "tick failed", t);
         }

@@ -3402,3 +3402,60 @@ cargo fmt --all --check -> 0
 cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4 -> 45 suites, 953 passed, 0 failed
 ```
+
+## ChunkLoadEvent реализован и проверен; squaremap его получает
+
+Раньше сервер не отправлял `ChunkLoadEvent` вообще. Теперь:
+
+- Rust: `live::Event::ChunkLoad = 52`; в `play/stream.rs` при первой
+  отправке чанка игроку (`stream_tick`, чанк ещё не в `s.sent`) уходит
+  событие `<dimension> <x> <z> <isNew>`;
+- Java: `Bridge` принимает kind 52, `ChunkwakeServer.event` ставит его в
+  `ChunkEvents`, а `Bridge.tick()` (главный поток сервера) вызывает
+  `ChunkLoadEvent` — как в Paper, а не в потоке игрока;
+- в `PluginManagerImpl.listeners()` добавлен бит для `ChunkLoadEvent`,
+  поэтому событие уходит в Rust только если есть слушатели;
+- повторы на одного и того же чанка (разные игроки/повторная отправка)
+  дедуплицируются на Java-стороне.
+
+Живая проверка (стенд `sq-check`, 2 бота, `region_load`):
+
+```
+CLProbe: listeners=2
+CLProbe: listener ChunkLoadProbe
+CLProbe: listener squaremap
+CLProbe: ChunkLoad world -1,-1 new=false
+CLProbe: ChunkLoad world_nether 12,-2 new=false
+CLProbe: more chunk loads follow
+```
+
+То есть squaremap **подписан и получает** события загрузки чанков
+(в `advanced.yml` у squaremap `ChunkLoadEvent` по умолчанию `false` —
+для проверки включён в `true`; `ChunkPopulateEvent` у него включён по
+умолчанию, но populate-событие мы пока не шлём).
+
+Однако PNG-тайлы всё ещё не создаются:
+
+```
+png count: 0
+```
+
+Это уже не отсутствие события: цепочка `Rust -> ChunkLoadEvent ->
+squaremap listener` работает. Остаётся рендер-путь squaremap
+(`/squaremap fullrender` тоже пишет `Rendering failed` без stack trace),
+поэтому задача «получить PNG-тайлы» пока не закрыта; следующий шаг —
+разобрать именно рендер (план из region-файлов + live-снапшоты), а не
+события.
+
+Гейты после изменений:
+
+```
+расширенный (60 плагинов): 58 of 60 enabled in 40811 ms
+  failed: MiniMOTD (сам), VoxyServerSide (сам); PANICS: 0
+базовый: 26 of 27 enabled in 12341 ms
+  failed: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4 -> 45 suites, 953 passed, 0 failed
+```

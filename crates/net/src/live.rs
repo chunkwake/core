@@ -551,6 +551,9 @@ pub enum Event {
     /// `SlimeSplitEvent` умершего слизня (он ещё в мире): `id вид детей` →
     /// `c` (без деления), пусто или новое число детей.
     SlimeSplit = 51,
+    /// `ChunkLoadEvent`: `<измерение> <x> <z> <isNew>`; без игрока,
+    /// событие вызывается на тике сервера (squaremap обновляет карту).
+    ChunkLoad = 52,
 }
 
 impl Event {

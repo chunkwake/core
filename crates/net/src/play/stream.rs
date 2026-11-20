@@ -22,7 +22,7 @@ const LIGHT_BATCH: usize = 96;
 pub(super) struct ChunkSender {
     /// Готовы и ждут отправки (`pendingChunks`): уход из обзора снимает их
     /// без `forget_level_chunk`.
-    pending: HashSet<(i32, i32)>,
+    pending: FastSet<(i32, i32)>,
     /// `desiredChunksPerTick`: с 9, дальше — из ответа клиента в `0.01..=64`.
     desired: f32,
     batch_quota: f32,
@@ -34,7 +34,7 @@ pub(super) struct ChunkSender {
 impl Default for ChunkSender {
     fn default() -> Self {
         Self {
-            pending: HashSet::new(),
+            pending: FastSet::default(),
             desired: 9.0,
             batch_quota: 0.0,
             unacknowledged: 0,
@@ -88,13 +88,13 @@ pub(super) struct ChunkStream {
     center: (i32, i32),
     radius: i32,
     /// Ещё не отданы клиенту.
-    waiting: HashSet<(i32, i32)>,
+    waiting: FastSet<(i32, i32)>,
     /// Не отданы в пул; ближние к центру — в конце (`pop`).
     queue: Vec<(i32, i32)>,
     /// В пуле прямо сейчас.
     in_flight: usize,
     /// Построены (сгенерированы этим потоком или уже были в мире).
-    built: HashSet<(i32, i32)>,
+    built: FastSet<(i32, i32)>,
     /// Готовы к свету, ждут конца текущей пачки.
     to_light: Vec<(i32, i32)>,
     /// Пачка сейчас светится в отдельном потоке.
@@ -105,7 +105,7 @@ pub(super) struct ChunkStream {
     /// Темп отправки (`PlayerChunkSender`): переживает `restart`, как в ваниле.
     pub(super) sender: ChunkSender,
     /// Уже у клиента: в них видны сущности и приходят блоки (`isChunkTracked`).
-    sent: HashSet<(i32, i32)>,
+    sent: FastSet<(i32, i32)>,
     /// Позиция игрока для дальности слежения: обновляет сессия.
     pub(super) pos: [f64; 3],
 }
@@ -123,12 +123,12 @@ impl ChunkStream {
             ready,
             center,
             radius,
-            waiting: HashSet::new(),
+            waiting: FastSet::default(),
             queue: Vec::new(),
             in_flight: 0,
-            built: HashSet::new(),
+            built: FastSet::default(),
             sender: ChunkSender::default(),
-            sent: HashSet::new(),
+            sent: FastSet::default(),
             pos: [0.0; 3],
         }
     }
@@ -340,6 +340,18 @@ impl PlayPlan {
     /// Свет и кодирование — вне сессии: пачка уходит в блокирующий поток, а
     /// пока она считается, готовые копятся в следующую. Крупная пачка дешевле:
     /// соседи копируются и проливаются один раз на всю.
+    /// `ChunkLoadEvent` для только что отправленного игроку чанка.
+    ///
+    /// Событие уходит в Java без ожидания ответа; там оно ставится в
+    /// очередь и вызывается на тике сервера. `isNew = 0`: чанк уже
+    /// существовал (генерация отмечается отдельно).
+    fn notify_chunk_load(&self, x: i32, z: i32) {
+        if let Some(hooks) = self.hooks() {
+            let arg = format!("{} {x} {z} 0", self.active_dim().key());
+            let _ = hooks.event(Event::ChunkLoad, Uuid::nil(), arg);
+        }
+    }
+
     fn stream_light(&self, s: &mut ChunkStream) {
         if s.lighting || s.to_light.is_empty() {
             return;
@@ -392,8 +404,16 @@ impl PlayPlan {
         if batch.is_empty() {
             return Ok(false);
         }
+        let fresh: Vec<(i32, i32)> = batch
+            .iter()
+            .copied()
+            .filter(|p| !s.sent.contains(p))
+            .collect();
         let frames: Vec<Frame> = batch.iter().map(|&(x, z)| self.chunk_frame(x, z)).collect();
         s.sent.extend(batch);
+        for (x, z) in fresh {
+            self.notify_chunk_load(x, z);
+        }
         self.send_batch(conn, &frames).await?;
         Ok(true)
     }

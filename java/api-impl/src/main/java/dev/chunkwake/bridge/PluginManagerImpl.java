@@ -269,6 +269,9 @@ final class PluginManagerImpl {
         if (has(org.bukkit.event.player.PlayerShearEntityEvent.getHandlerList())) {
             mask |= Bridge.listenBit(Bridge.EVENT_SHEAR);
         }
+        if (has(org.bukkit.event.world.ChunkLoadEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_CHUNK_LOAD);
+        }
         if (has(org.bukkit.event.block.CampfireStartEvent.getHandlerList())) {
             mask |= Bridge.listenBit(Bridge.EVENT_CAMPFIRE_START);
         }

@@ -646,6 +646,17 @@ final class ChunkwakeServer {
 
     /** Событие с ответом из Rust (формат — {@link Events}). */
     String event(int kind, UUID id, String arg) {
+        if (kind == Bridge.EVENT_CHUNK_LOAD) {
+            // `<dimension> <x> <z> <isNew>`; событие вызовется на тике.
+            String[] f = arg.split(" ");
+            WorldImpl target = world(f.length > 0 ? f[0] : null);
+            if (target == null) {
+                target = overworld;
+            }
+            boolean isNew = f.length > 3 && !"0".equals(f[3]);
+            ChunkEvents.queue(target, Integer.parseInt(f[1]), Integer.parseInt(f[2]), isNew);
+            return "";
+        }
         if (kind == Bridge.EVENT_REDSTONE) {
             // Без игрока, пачкой через `;`: x y z старая новая → новая сила по
             // каждому (пусто — плагин не менял).
