@@ -2649,3 +2649,33 @@ CHAT_COMMAND). Для этого нужен отдельный тестовый 
 
 Гейты: базовый `26 of 27` (только Voxy), расширенный `36 of 37` (только
 Voxy), паник нет.
+
+## SET_EQUIPMENT: событие ProtocolLib подтверждено живьём
+
+Собран тестовый плагин `EquipProbe` (вне репозитория, лежит в стенде):
+слушатель `PacketType.Play.Server.ENTITY_EQUIPMENT`, логирует событие и
+пробует прочитать слоты через `getSlotStackPairLists()`.
+
+Прогон с `EQUIP=1` (зомби в броне и с мечом):
+
+```
+[EquipProbe] EquipProbe enabled
+[EquipProbe] EQUIP event fired class=RawPayload
+[EquipProbe] EQUIP structure readable, pairs=0
+[EquipProbe] EQUIP structure not readable:
+             FieldAccessException: Field index 0 is out of bounds for length 0
+protocol: set_equipment parsed (slots=1, field-level ready)
+plugins: enabled 37 plugin(s)   (38 jar с EquipProbe)
+```
+
+Итог:
+
+- событие SET_EQUIPMENT **доходит** до плагина (RawPayload-носитель);
+- наш парсер пакет разбирает;
+- но структура слотов для плагина пуста (`pairs=0`): носитель — RawPayload
+  без NMS-полей, поэтому изменить слот через структуру нельзя.
+
+Для модификации слота нужен настоящий носитель
+`ClientboundSetEquipmentPacket` с `getSlots()` (List<Pair<EquipmentSlot,
+ItemStack>>) и корректным конвертером ProtocolLib; это следующий шаг.
+Базовый гейт без изменений: 26/27 (только Voxy).
