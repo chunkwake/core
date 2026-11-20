@@ -3222,3 +3222,48 @@ cargo fmt --all --check -> 0
 cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4 -> 45 suites, 953 passed, 0 failed
 ```
+
+## MythicMobs: рефлексия по NMS-полям закрыта (0 NoSuchFieldException)
+
+Раньше MythicMobs включался, но его `VolatileCodeEnabled_v26_3` писал
+`NoSuchFieldException` по полям, которые он ищет через
+`io.lumine.mythic.bukkit.utils.reflection.Reflector`:
+
+- `attributes` (тип `AttributeMap`);
+- `dimensions`, `eyeHeight` (тип `Entity`);
+- `cooldowns`, `tickCount` (тип `ItemCooldowns`);
+- `handle` (тип `CraftItemStack`).
+
+Добавлено (по байткоду MythicMobs, не по догадкам):
+
+- `Entity`: поля `dimensions: EntityDimensions`, `eyeHeight: float`,
+  `tickCount: int`, `boundingBox: AABB` и `setBoundingBox/getBoundingBox`;
+- `EntityDimensions` (конструктор `(float,float,float,EntityAttachments,boolean)`,
+  `scalable/fixed`) и `EntityAttachments.createDefault(float,float)` —
+  MythicMobs создаёт их в `setHitBox`;
+- `AttributeMap.attributes` — `Map<Attribute, AttributeInstance>`;
+- `ItemCooldowns`: `tickCount` и вложенный `CooldownInstance{startTime,endTime}`
+  (MythicMobs читает их рефлексией через `Reflector.getValue`);
+- `CraftItemStack.handle` — поле объявлено для Reflector (наши стеки
+  строит `StackImpl`, поэтому значение остаётся `null`).
+
+Живой гейт: в логе **0 строк `NoSuchFieldException`**, при этом
+
+```
+plugins: 58 of 60 enabled in 31467 ms
+  failed: MiniMOTD (сам по version-gate), VoxyServerSide (сам по plugin.yml)
+  MythicMobs enabled in 645 ms
+  nightcore enabled, ExcellentCrates enabled
+  PANICS: 0
+базовый: 26 of 27 (только VoxyServerSide), PANICS: 0
+```
+
+Остаточная запись MythicMobs — его собственный парсер версии WorldGuard:
+он делает `plugin.yml` -> `line.substring(10, 11)` для строки `version`, а у
+WorldGuard 7.0.21 строка `version: "7.0.21+2424-da30a99"` (кавычка на
+позиции 10) -> `NumberFormatException` -> `Invalid WorldGuard version`.
+На настоящем Paper с этим же jar поведение идентичное, это не дыра ядра.
+
+Тесты: Java 56; `cargo +1.100.0 clippy ... -D warnings` — 0;
+`cargo +1.100.0 test --workspace` — 45 suites, 953 passed, 0 failed;
+`cargo fmt --all --check` — 0.

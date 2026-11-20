@@ -5,7 +5,9 @@ import java.util.Map;
 
 /** NMS {@code ItemCooldowns}. */
 public class ItemCooldowns {
-    private final Map<Item, Integer> cooldowns = new HashMap<>();
+    /** В 26.3 ключ — id предмета (Identifier), значение — таймеры. */
+    private final Map<Object, CooldownInstance> cooldowns = new HashMap<>();
+    public int tickCount;
 
     public ItemCooldowns() {
     }
@@ -15,7 +17,7 @@ public class ItemCooldowns {
     }
 
     public void addCooldown(Item item, int ticks) {
-        this.cooldowns.put(item, ticks);
+        this.cooldowns.put(item, new CooldownInstance(this.tickCount, this.tickCount + ticks));
     }
 
     public void removeCooldown(Item item) {
@@ -23,5 +25,21 @@ public class ItemCooldowns {
     }
 
     public void tick() {
+        this.tickCount++;
+    }
+
+    /** NMS {@code ItemCooldowns.CooldownInstance}: MythicMobs читает startTime/endTime. */
+    public static final class CooldownInstance {
+        public int startTime;
+        public int endTime;
+
+        public CooldownInstance(int startTime, int endTime) {
+            this.startTime = startTime;
+            this.endTime = endTime;
+        }
+
+        public int remainingTicks() {
+            return this.endTime - this.startTime;
+        }
     }
 }

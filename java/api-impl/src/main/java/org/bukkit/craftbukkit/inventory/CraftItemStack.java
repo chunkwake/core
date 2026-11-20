@@ -8,8 +8,17 @@ import org.bukkit.Material;
  * Нужна ProtocolLib для {@code MinecraftGenerator} и item-пакетов.
  */
 public final class CraftItemStack extends org.bukkit.inventory.ItemStack {
+    /**
+     * Поле, которое MythicMobs читает рефлексией
+     * ({@code CraftItemStack.handle}). У настоящего CraftItemStack здесь
+     * лежит NMS-стек; у нас Bukkit-представление строит {@code StackImpl},
+     * поэтому поле объявлено для совместимости и остаётся {@code null}.
+     */
+    private final net.minecraft.world.item.ItemStack handle;
+
     private CraftItemStack() {
         super(org.bukkit.Material.AIR);
+        this.handle = null;
     }
 
     public static ItemStack asNMSCopy(org.bukkit.inventory.ItemStack stack) {

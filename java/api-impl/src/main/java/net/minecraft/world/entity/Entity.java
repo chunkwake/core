@@ -20,6 +20,12 @@ public class Entity {
     private float yRot;
     private float xRot;
     private boolean removed;
+    /** Поля, которые MythicMobs меняет рефлексией (setHitBox). */
+    public EntityDimensions dimensions = EntityDimensions.scalable(0.6F, 1.8F);
+    public float eyeHeight = 1.62F;
+    public int tickCount;
+    public net.minecraft.world.phys.AABB boundingBox =
+            new net.minecraft.world.phys.AABB(0, 0, 0, 0, 0, 0);
 
     /** Метаданные Entity: id 0..7 как в реальном 26.3. */
     public static final net.minecraft.network.syncher.EntityDataAccessor<Byte>
@@ -96,6 +102,14 @@ public class Entity {
 
     public void setPos(double x, double y, double z) {
         this.setPosRaw(x, y, z);
+    }
+
+    public void setBoundingBox(net.minecraft.world.phys.AABB box) {
+        this.boundingBox = box;
+    }
+
+    public net.minecraft.world.phys.AABB getBoundingBox() {
+        return this.boundingBox;
     }
 
     public Vec3 position() {

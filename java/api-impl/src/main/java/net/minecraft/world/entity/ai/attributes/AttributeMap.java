@@ -4,6 +4,10 @@ import net.minecraft.core.Holder;
 
 /** NMS {@code AttributeMap} (MythicMobs: кастомные атрибуты). */
 public class AttributeMap {
+    /** Поле, которое MythicMobs читает рефлексией. */
+    private final java.util.Map<Attribute, AttributeInstance> attributes =
+            new java.util.LinkedHashMap<>();
+
     public AttributeMap() {
     }
 
