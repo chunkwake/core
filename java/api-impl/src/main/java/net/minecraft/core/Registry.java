@@ -36,4 +36,9 @@ public interface Registry<T> {
     int getId(T value);
 
     T byId(int id);
+
+    /** {@code Registry.iterator()} — плагины обходят реестр. */
+    default java.util.Iterator<T> iterator() {
+        return java.util.Collections.emptyIterator();
+    }
 }

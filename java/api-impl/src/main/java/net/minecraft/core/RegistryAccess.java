@@ -23,6 +23,23 @@ public interface RegistryAccess {
         return Map.of();
     }
 
+    /** {@code RegistryAccess.lookupOrThrow}: пустой реестр нужного ключа. */
+    @SuppressWarnings("unchecked")
+    default <E> Registry<E> lookupOrThrow(
+            net.minecraft.resources.ResourceKey<? extends Registry<? extends E>> key) {
+        return (Registry<E>) EMPTY_REGISTRIES.computeIfAbsent(key,
+                k -> new net.minecraft.core.SimpleRegistry<>());
+    }
+
+    default <E> java.util.Optional<Registry<E>> lookup(
+            net.minecraft.resources.ResourceKey<? extends Registry<? extends E>> key) {
+        return java.util.Optional.of(this.lookupOrThrow(key));
+    }
+
+    /** Пустые реестры по ключу (biome/dimension_type/...). */
+    java.util.Map<Object, Registry<?>> EMPTY_REGISTRIES =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     /** Заглушка {@code RegistryAccess$Frozen}. */
     final class Frozen implements RegistryAccess {
         private static final Frozen EMPTY = new Frozen();

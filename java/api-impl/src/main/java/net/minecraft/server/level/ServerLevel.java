@@ -75,7 +75,7 @@ public class ServerLevel extends net.minecraft.world.level.Level implements Comm
      */
     public net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension() {
         return net.minecraft.resources.ResourceKey.entryKey(
-                net.minecraft.resources.Identifier.parse("minecraft:overworld"));
+                net.minecraft.resources.Identifier.parse(this.dimensionKey));
     }
 
     // --- CommonLevelAccessor / LevelReader ---
