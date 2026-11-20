@@ -2956,3 +2956,59 @@ Plan, GravesX, VeinMiner** (7 из 9).
 
 Базовый гейт после изменений: `26 of 27 enabled`, падает только
 VoxyServerSide, паник нет.
+
+## 50/52: FancyNpcs и MythicMobs включены; паника autosave убрана
+
+После серии точечных NMS-заглушек живой расширенный гейт вырос с 48/52 до
+**50/52**:
+
+```
+plugins: 50 of 52 enabled in 27496 ms
+failed: VoxyServerSide (сам отключается по plugin.yml), EconomyShopGUI
+PANICS: 0
+базовый: 26 of 27 (только VoxyServerSide), PANICS: 0
+```
+
+### FancyNpcs — включён (регрессия закрыта)
+
+Цепочка, которую он проходит при enable (все классы добавлены):
+`SpellcasterIllager$IllagerSpell`, `equine.Variant`/`Markings`,
+`parrot.Parrot$Variant`, `axolotl.Axolotl$Variant`,
+`TropicalFish$Pattern/Base`, `fox.Fox$Variant`, `cow.MushroomCow$Variant`,
+`sniffer.Sniffer$State`, `panda.Panda$Gene`, `Registries.PIG_VARIANT` и
+другие ключи вариантов, `HolderLookup.RegistryLookup.listElementIds`
+(`Registry extends HolderLookup.RegistryLookup`).
+
+### MythicMobs — включён
+
+Добавлены `DefaultAttributes`/`AttributeSupplier` (null-safe: MythicMobs
+передаёт null, когда реестр типов пуст), `SharedConstants`,
+`DedicatedPlayerList.getServer()`, `CraftEntityType`, `MobCategory`,
+`AttributeMap`, `ItemCooldowns`, `GoalSelector`, `DamageSource`,
+`HitResult`/`BlockHitResult`/`EntityHitResult`, `Registry.getOrThrow`,
+entity-классы (`Mob`, `Monster`, `PathfinderMob`, ...), варианты существ.
+
+### Ядро: убрана паника autosave
+
+В логе был реальный паник воркера:
+
+```
+thread 'tokio-rt-worker' panicked at crates\server\src\storage.rs:408:
+OS can't spawn worker thread: Отказано в доступе. (os error 5)
+```
+
+`spawn_autosave` использовал `tokio::task::spawn_blocking`, а тот при
+исчерпании лимита ОС на потоки паникует. Заменено на
+`tokio::task::block_in_place(|| storage.save(&plan))` — переиспользует уже
+существующий воркер, не создаёт новый поток. Гейт после этого: паник нет.
+
+### Остались
+
+- **VoxyServerSide** — самоотключается по `plugin.yml`
+  (`lss-minecraft-dependency`).
+- **EconomyShopGUI** — доходит до `registerCommands`, но
+  `ConfigManager.getConfig()` возвращает null (`NullPointerException` в
+  `EconomyShopGUI.overrideSellCommand`). Это внутренний порядок загрузки
+  конфигов плагина (файлы `config.yml`/`sections`/`shops` в data-папке
+  есть, ошибок загрузки в лог не пишется); для закрытия нужен разбор его
+  `onLoad`/`ConfigManager.init()`.

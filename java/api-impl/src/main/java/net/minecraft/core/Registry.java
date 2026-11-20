@@ -33,6 +33,17 @@ public interface Registry<T> extends HolderLookup.RegistryLookup<T> {
         return java.util.Optional.empty();
     }
 
+    /** {@code Registry.getOrThrow(ResourceKey)} (MythicMobs). */
+    default Holder.Reference<T> getOrThrow(
+            net.minecraft.resources.ResourceKey<T> key) {
+        return this.get(key.location()).orElse(null);
+    }
+
+    default Holder.Reference<T> getHolderOrThrow(
+            net.minecraft.resources.ResourceKey<T> key) {
+        return this.getOrThrow(key);
+    }
+
     int getId(T value);
 
     T byId(int id);

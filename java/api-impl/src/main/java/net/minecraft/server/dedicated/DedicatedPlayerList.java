@@ -7,4 +7,9 @@ package net.minecraft.server.dedicated;
 public class DedicatedPlayerList extends net.minecraft.server.players.PlayerList {
     public net.minecraft.world.level.storage.PlayerDataStorage playerIo =
             new net.minecraft.world.level.storage.PlayerDataStorage();
+
+    /** {@code DedicatedPlayerList.getServer()} (MythicMobs). */
+    public DedicatedServer getServer() {
+        return DedicatedServer.create();
+    }
 }

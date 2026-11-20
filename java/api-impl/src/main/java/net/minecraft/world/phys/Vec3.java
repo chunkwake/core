@@ -37,6 +37,17 @@ public class Vec3 {
         return new Vec3(this.x - other.x, this.y - other.y, this.z - other.z);
     }
 
+    public double distanceTo(Vec3 other) {
+        return Math.sqrt(this.distanceToSqr(other));
+    }
+
+    public double distanceToSqr(Vec3 other) {
+        double dx = this.x - other.x;
+        double dy = this.y - other.y;
+        double dz = this.z - other.z;
+        return dx * dx + dy * dy + dz * dz;
+    }
+
     public double length() {
         return Math.sqrt(this.x * this.x + this.y * this.y + this.z * this.z);
     }
