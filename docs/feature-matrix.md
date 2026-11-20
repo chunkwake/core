@@ -2494,3 +2494,30 @@ PANICS: 0
 CoreProtect/Towny/Floodgate под 26.3/paper на Modrinth отсутствуют —
 добавить не удалось. Итог: расширенный стенд 36/37, база 26/27
 (единственный отказ всюду — VoxyServerSide).
+
+## SET_EQUIPMENT: точная причина passthrough (проверено)
+
+Разбор по фактам текущего дерева:
+
+- в `ProtocolBridge` нет диспетчеризации `set_equipment`: поиск
+  `set_equipment|equipmentType` в файле не даёт совпадений — пакет идёт
+  общим RawPayload-путём, событие ProtocolLib для него не поднимается;
+- наш стаб `net.minecraft.world.item.ItemStack` имеет
+  `STREAM_CODEC` типа `StreamCodec<Object>`, но `StreamCodec.decode`
+  в стабе возвращает `null`, то есть декодировать стек им нельзя;
+- проводной ItemStack в 26.3 содержит патч компонентов переменной длины
+  (`protocol::inventory::write_stack` -> `write_patch`: custom_name, lore,
+  enchantments, trim, banner_patterns, ...), поэтому без настоящего
+  `ItemStack.STREAM_CODEC`/`RegistryFriendlyByteBuf` с NMS-реестрами
+  нельзя ни найти следующий слот, ни перекодировать изменённый стек.
+
+Вывод: SET_EQUIPMENT остаётся passthrough осознанно; для моста нужен
+реальный NMS item-кодек и реестры компонентов (не стабы) — крупная
+отдельная работа. Зафиксировано.
+
+Живые гейты после проверки:
+
+```
+расширенный (37 jar): 36 of 37 enabled, failed: только VoxyServerSide, panics=0
+базовый:              26 of 27 enabled,     failed: только VoxyServerSide, panics=0
+```
