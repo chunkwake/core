@@ -2565,3 +2565,30 @@ dyed_color. Их payload'ы — ванильные сетевые кодеки:
 расширенный (37 jar): 36 of 37 enabled, failed: только VoxyServerSide, panics=0
 базовый:              26 of 27 enabled,     failed: только VoxyServerSide, panics=0
 ```
+
+## SET_EQUIPMENT, шаг 1: таблица component id из Rust в Java
+
+Сделано:
+
+- Rust: команда мира `components` отдаёт таблицу `name id` для 16
+  компонентов, которые пишет наш энкодер (damage, enchantments,
+  custom_name, lore, stored_enchantments, custom_data,
+  charged_projectiles, repair_cost, trim, banner_patterns, map_id,
+  map_post_processing, writable/written_book_content, container,
+  dyed_color). Команда в WIP `play.rs`.
+- Java: `dev.chunkwake.bridge.ComponentIds` читает её через
+  `Bridge.world("components")` и держит оба направления (id<->name);
+  в `ProtocolBridge.init` пишется `protocol: component ids=N`.
+
+Живая проверка (расширенный стенд):
+
+```
+protocol: component ids=16
+plugins: 36 of 37 enabled
+FAILED: только VoxyServerSide, PANICS: 0
+```
+
+Следующий шаг: парсер SET_EQUIPMENT для фиксированных компонентов
+(damage/enchantments/repair_cost/trim/banner/map_*/dyed) с passthrough на
+custom_name/lore/book/container/charged_projectiles, затем тестовый
+слушатель ProtocolLib и гейты.

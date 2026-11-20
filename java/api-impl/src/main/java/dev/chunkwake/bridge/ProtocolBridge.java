@@ -1293,6 +1293,7 @@ final class ProtocolBridge {
             return;
         }
         initialized = true;
+        Bridge.log(2, "protocol: component ids=" + ComponentIds.count());
         try {
             org.bukkit.plugin.Plugin protocolLib = org.bukkit.Bukkit.getPluginManager()
                     .getPlugin("ProtocolLib");
