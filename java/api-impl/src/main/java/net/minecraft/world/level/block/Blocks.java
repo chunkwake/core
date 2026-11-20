@@ -2,6 +2,8 @@ package net.minecraft.world.level.block;
 
 /** Сгенерированный набор NMS-блоков (имена Material). */
 public final class Blocks {
+    public static final Block POTTED_FLOWERING_AZALEA = new Block();
+    public static final Block POTTED_AZALEA = new Block();
     public static final Block ACACIA_BOAT = new Block();
     public static final Block ACACIA_BUTTON = new Block();
     public static final Block ACACIA_CHEST_BOAT = new Block();

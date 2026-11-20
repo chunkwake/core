@@ -5,7 +5,7 @@ package net.minecraft.world.item;
  * количество. Используется ProtocolLib для создания «пустого» стека и
  * конвертации Bukkit-предметов.
  */
-public class ItemStack {
+public class ItemStack implements net.minecraft.core.component.DataComponentHolder {
     public String item;
     public int count;
     /** Числовой id предмета из пакета (для перекодирования). */

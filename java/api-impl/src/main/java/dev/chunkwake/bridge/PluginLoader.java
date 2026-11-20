@@ -23,7 +23,8 @@ import org.bukkit.plugin.java.JavaPlugin;
  * загрузчиком {@link ConfiguredPluginClassLoader}: конструктор плагина вызывает
  * {@link #init(JavaPlugin)}, где мы передаём плагину сервер и описание.
  */
-final class PluginLoader extends URLClassLoader implements ConfiguredPluginClassLoader {
+final class PluginLoader extends io.papermc.paper.plugin.entrypoint.classloader.PaperPluginClassLoader
+        implements ConfiguredPluginClassLoader {
     static {
         // Загрузчики ищут классы друг у друга: с замком на весь загрузчик два
         // плагина, ссылающиеся друг на друга из разных потоков, встали бы.

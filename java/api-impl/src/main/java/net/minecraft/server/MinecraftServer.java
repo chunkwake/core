@@ -16,6 +16,23 @@ public class MinecraftServer {
 
     public final ServerConnectionListener connection = new ServerConnectionListener();
 
+    /**
+     * Поля, которые TabTPS ищет рефлексией: тип {@code TickData} и имя,
+     * начинающееся с {@code tickTimes}. Нужно минимум три.
+     */
+    public static final ca.spottedleaf.common.time.TickData tickTimes5s =
+            new ca.spottedleaf.common.time.TickData();
+    public static final ca.spottedleaf.common.time.TickData tickTimes10s =
+            new ca.spottedleaf.common.time.TickData();
+    public static final ca.spottedleaf.common.time.TickData tickTimes1m =
+            new ca.spottedleaf.common.time.TickData();
+
+    private final ServerTickRateManager tickRateManager = new ServerTickRateManager();
+
+    public ServerTickRateManager tickRateManager() {
+        return this.tickRateManager;
+    }
+
     public static MinecraftServer getServer() {
         return SERVER;
     }

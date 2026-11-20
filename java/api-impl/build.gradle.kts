@@ -30,6 +30,8 @@ dependencies {
     // в classpath. Без него они пишут «SQLite JDBC driver missing» и
     // отключают хранилище.
     "runtimeOnly"("org.xerial:sqlite-jdbc:3.45.3.0")
+    // ASM: Paper держит его в libraries; CraftEngine генерирует блоки через ASM.
+    "runtimeOnly"("org.ow2.asm:asm:9.8")
 }
 
 tasks.named<Jar>("jar") {

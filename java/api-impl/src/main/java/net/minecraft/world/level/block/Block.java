@@ -9,13 +9,25 @@ import net.minecraft.world.level.block.state.StateDefinition;
  * {@code reports/blocks.json} (id состояний = сетевые id), поэтому
  * плагины (Orebfuscator, Axiom) видят ванильные блоки и их состояния.
  */
-public class Block {
+public class Block extends net.minecraft.world.level.block.state.BlockBehaviour {
     public static final net.minecraft.core.IdMapper<BlockState> BLOCK_STATE_REGISTRY =
             new net.minecraft.core.IdMapper<>();
 
     private final String name;
-    private BlockState defaultState;
-    private StateDefinition<Block, BlockState> definition;
+    private BlockState defaultBlockState;
+    protected StateDefinition<Block, BlockState> stateDefinition;
+    private Object builtInRegistryHolder;
+    // Поля BlockBehaviour, но объявленные здесь: ProxyBinder (CraftEngine)
+    // ищет их через getDeclaredField именно у Block.
+    protected boolean hasCollision = true;
+    protected float explosionResistance;
+    protected boolean isRandomlyTicking;
+    protected Object soundType;
+    protected float friction = 0.6F;
+    protected float speedFactor = 1.0F;
+    protected float jumpFactor = 1.0F;
+    protected float bounceRestitution;
+    protected String descriptionId = "";
 
     public Block() {
         this("minecraft:air");
@@ -23,19 +35,19 @@ public class Block {
 
     public Block(String name) {
         this.name = name == null ? "minecraft:air" : name;
-        this.defaultState = new BlockState(this);
+        this.defaultBlockState = new BlockState(this);
     }
 
     /** Заполняет состояния блока (вызывается бутстрапом). */
     public void defineStates(List<BlockState> states, BlockState defaultState) {
-        this.definition = new StateDefinition<>(this, List.of(), states);
+        this.stateDefinition = new StateDefinition<>(this, List.of(), states);
         if (defaultState != null) {
-            this.defaultState = defaultState;
+            this.defaultBlockState = defaultState;
         }
     }
 
     public BlockState defaultBlockState() {
-        return this.defaultState;
+        return this.defaultBlockState;
     }
 
     /** {@code Block.defaultMapColor()} (squaremap). */
@@ -56,8 +68,36 @@ public class Block {
     }
 
     public StateDefinition<Block, BlockState> getStateDefinition() {
-        return this.definition != null ? this.definition
+        return this.stateDefinition != null ? this.stateDefinition
                 : new StateDefinition<>(this, List.of());
+    }
+
+    /** {@code Block.asItem()}. */
+    public net.minecraft.world.item.Item asItem() {
+        return null;
+    }
+
+    /** {@code Block.getStateForPlacement(BlockPlaceContext)}. */
+    public BlockState getStateForPlacement(
+            net.minecraft.world.item.context.BlockPlaceContext context) {
+        return this.defaultBlockState();
+    }
+
+    /** {@code Block.dropResources(BlockState, Level, BlockPos)}. */
+    public static void dropResources(BlockState state, net.minecraft.world.level.Level level,
+            net.minecraft.core.BlockPos pos) {
+    }
+
+    /** {@code Block.canSupportCenter(LevelReader, BlockPos, Direction)}. */
+    public static boolean canSupportCenter(net.minecraft.world.level.LevelReader level,
+            net.minecraft.core.BlockPos pos, net.minecraft.core.Direction direction) {
+        return true;
+    }
+
+    /** {@code Block.canSupportRigidBlock(BlockGetter, BlockPos)}. */
+    public static boolean canSupportRigidBlock(net.minecraft.world.level.BlockGetter level,
+            net.minecraft.core.BlockPos pos) {
+        return true;
     }
 
     public String getDescriptionId() {

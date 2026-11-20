@@ -3670,3 +3670,132 @@ PANICS: 0
 
 Остаются те же два самодисквалифицирующихся плагина (MiniMOTD version-gate,
 Voxy `plugin.yml`); LOADERR пуст.
+
+## Новые плагины вне набора: 69/71, закрыты TabTPS, zMenu, DeluxeHub; CraftEngine заблокирован
+
+Добавлены 6 плагинов с Modrinth для Paper 26.3: TabTPS 1.4.3, EvenMoreFish
+2.5.5, AuraSkills 2.4.0, zMenu 1.1.2.1, DeluxeHub 3.8.6, CraftEngine 26.9.2
+(итого 71 плагин в расширенном стенде).
+
+Живой гейт:
+
+```
+plugins: 69 of 71 enabled in 68797 ms
+FAILED: MiniMOTD failed in 3 ms; VoxyServerSide failed in 4 ms
+LOADERR: Could not load craft-engine-paper-plugin-26.9.2.jar
+PANICS: 0
+базовый: 26 of 27 enabled in 13970 ms
+FAILED: только VoxyServerSide
+```
+
+### TabTPS: Moonrise `TickData`
+
+TabTPS строит MethodHandle'ы по классам
+`ca.spottedleaf.common.time.{TickData,TickTime}` и
+`TickData$TickReportData`/`TickData$SegmentedAverage`, читает
+`MinecraftServer.tickRateManager().nanosecondsPerTick()` и ищет у
+`MinecraftServer` минимум три поля типа `TickData` с именами
+`tickTimes*`. Добавлены:
+
+- `TickData.generateTickReport(TickTime, long, long) -> TickReportData`,
+  `TickReportData.timePerTickData() -> SegmentedAverage`,
+  `SegmentedAverage.rawData() -> long[]`;
+- `MinecraftServer.tickTimes5s/10s/1m` (тип `TickData`) и
+  `tickRateManager()`;
+- `ServerTickRateManager.nanosecondsPerTick()` (50 мс).
+
+### zMenu: провайдер ArgumentTypes больше не отдаёт null
+
+Плагин строил команду через Paper/Brigadier и падал на
+`Preconditions.checkNotNull("Argument type cannot be null")`, потому что
+сгенерированный провайдер `VanillaArgumentProvider` возвращал
+`SoftValue.object()` (null).
+
+Генератор `java/tools/GenProviders.java` теперь для возвращаемого типа
+`ArgumentType` печатает `ArgumentTypeFactory.byName("<method>")`.
+`ArgumentTypeFactory` отдаёт реальные типы:
+
+- `player`/`players` — селектор с `PlayerSelectorArgumentResolver`
+  (разбирает имя или `@...`, на исполнении — онлайн-игроки);
+- `entity`/`entities` — `EntitySelectorArgumentResolver`;
+- остальные (`blockState`, `itemStack`, ...) — word-тип, чтобы команда
+  строилась, а значение проверял сам плагин.
+
+### DeluxeHub: SpigotConfig, commons-lang, item-nbt-api
+
+DeluxeHub падал по трём причинам, все закрыты:
+
+1. `isSpigotEnvironment()` — `Class.forName("org.spigotmc.SpigotConfig")`;
+   добавлен класс `org.spigotmc.SpigotConfig`.
+2. `org.apache.commons.lang.ArrayUtils.addAll` — добавлен минимальный
+   commons-lang 2.x `ArrayUtils` (`addAll/add/contains/indexOf/remove/isEmpty`).
+3. Встроенный item-nbt-api 2.16.1:
+   - `CraftMetaItem.unhandledTags`, `CraftItemStack.handle`;
+   - `DataComponents.CUSTOM_DATA` и `MinecraftServer.registryAccess()`;
+   - `net.minecraft.nbt.TagType/IntArrayTag`,
+     `net.minecraft.core.MappedRegistry`,
+     `net.minecraft.core.component.DataComponentHolder`;
+   - `ItemStack implements DataComponentHolder`;
+   - `CraftPersistentDataContainer` (`toTagCompound`, `getRaw`,
+     `putAll(CompoundTag)`), иначе hotbar-модуль падал на
+     `object of type ItemStack is not an instance of DataComponentHolder`.
+
+Остаются WARN самой библиотеки (`Unable to find the method 'Unmapped...'`):
+item-nbt-api 2.16.1 ждёт `String getString(String)`/`long[] getLongArray`,
+а в 26.3 эти методы возвращают `Optional` (проверено по реальному
+`minecraft-extracted_server.jar`). На настоящем Paper 26.3 будет тот же
+WARN; на включение плагина не влияет.
+
+### CraftEngine: заблокирован полнотой NMS-прокси (не дыра загрузчика)
+
+Первые шаги закрыты и подтверждены:
+
+- `PaperPluginClassPathAppender` падал на `Optional.orElseThrow`
+  (`io.papermc.paper.plugin.entrypoint.classloader.PaperPluginClassLoader`
+  не находился). Добавлен `PaperPluginClassLoader` (с полем
+  `URLClassLoader libraryLoader`, `registerAsParallelCapable`), и
+  `PluginLoader` теперь наследуется от него.
+- `org.objectweb.asm.Opcodes` — ASM добавлен в runtime-зависимости
+  (`org.ow2.asm:asm:9.8`, попадает в `dist/libs`).
+- `VersionHelper`: CraftEngine ищет класс из списка
+  `net.minecraft.{server.Main,...}` и читает `/version.json`. Добавлены
+  `net.minecraft.server.Main` и `version.json` (`id 26.3`,
+  `world_version 5023`, `protocol_version 777`).
+- `BlocksProxy`: сначала не было полей `Block`
+  (`defaultBlockState`, `stateDefinition`, `builtInRegistryHolder`,
+  `descriptionId`, `hasCollision`, `isRandomlyTicking`,
+  `explosionResistance`, `soundType`, `friction`, `speedFactor`,
+  `jumpFactor`, `bounceRestitution`), методов `asItem`,
+  `getStateForPlacement`, `dropResources`, `canSupportCenter`,
+  `canSupportRigidBlock`; добавлены вместе с `BlockBehaviour` и
+  `BlockPlaceContext`. Затем `Fallable`, `BonemealableBlock`,
+  `SimpleWaterloggedBlock`.
+
+После этого `BlocksProxy` инициализируется (проверено отдельным
+Java-процессом: `PROXY OK`), но `BlockGenerator` идёт дальше и требует
+следующий прокси-класс (`BonemealSource`), а всего CraftEngine несёт
+**504 прокси-интерфейса** на NMS/CraftBukkit/Moonrise. Пробник, который
+грузит каждый прокси из `proxy.jarinjar` на нашем API:
+
+```
+ok=113 bad=391
+```
+
+Среди отсутствующего — `Material#isBlock`, `CraftServer#playerList`,
+реестры (`MappedRegistry#isFrozen`, `Holder`, `RegistryAccess`),
+частицы, advancement'ы, `CraftWorld#world`, Moonrise chunk scheduler.
+`Material` приходит из paper-api, то есть добавить ему поля мы не можем
+без собственной реализации класса. Это не единичная дыра: CraftEngine
+рассчитан на полный внутренний слой Paper, поэтому он остаётся
+единственным LOADERR в наборе и зафиксирован как известное ограничение,
+а не «зелёный» плагин.
+
+Проверки после изменений:
+
+```
+gradlew --offline cleanTest test :test-plugin:jar dist -> BUILD SUCCESSFUL
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4 -> зелёный
+```

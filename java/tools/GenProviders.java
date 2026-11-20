@@ -238,6 +238,11 @@ public final class GenProviders {
             String component = typeName(type.getComponentType());
             return "dev.chunkwake.bridge.SoftValue.array(" + component + ".class)";
         }
+        // Brigadier ArgumentType: null ломает построение команды
+        // (zMenu: "Argument type cannot be null"), поэтому отдаём реальный.
+        if (type.getSimpleName().equals("ArgumentType")) {
+            return "dev.chunkwake.bridge.ArgumentTypeFactory.byName(\"" + m.getName() + "\")";
+        }
         return "dev.chunkwake.bridge.SoftValue.object()";
     }
 
