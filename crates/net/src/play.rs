@@ -4345,6 +4345,15 @@ impl PlayPlan {
     }
 
     /// Системное сообщение (JSON-компонент) одному игроку.
+    /// Отправить сырой пакет клиенту (NMS `Connection.send` из Java: DH/TAB).
+    pub fn send_raw_packet(&self, uuid: Uuid, packet: &[u8]) -> bool {
+        if packet.is_empty() {
+            return false;
+        }
+        self.send_to(uuid, packet.to_vec());
+        true
+    }
+
     pub fn send_json(&self, to: Uuid, json: &str) {
         let raw = text::system_chat_json(self.ids.system_chat, json, false);
         let packet = self.hub.frame(&raw);
