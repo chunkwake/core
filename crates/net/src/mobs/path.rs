@@ -7,9 +7,9 @@
 //! повторяют байткод: от них зависит, какой из равных по цене путей выберет A*,
 //! а значит и по каким клеткам моб пойдёт.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
-use super::{Mob, World, colliders, wrap};
+use super::{Mob, World, any_collider, wrap};
 
 /// Тип клетки для поиска пути (`PathType`), в порядке объявления: по нему
 /// же идёт обход `EnumSet` в [`Search::type_of_mob`].
@@ -409,9 +409,9 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
             w,
             m,
             nodes: Vec::new(),
-            index: HashMap::new(),
-            types: HashMap::new(),
-            collisions: HashMap::new(),
+            index: HashMap::default(),
+            types: HashMap::default(),
+            collisions: HashMap::default(),
             heap: Vec::new(),
             ew: (m.width as f32 + 1.0).floor() as i32,
             eh: (m.height as f32 + 1.0).floor() as i32,
@@ -675,7 +675,7 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
         if let Some(&c) = self.collisions.get(&key) {
             return c;
         }
-        let c = !colliders(lo, hi, self.w).is_empty();
+        let c = any_collider(lo, hi, self.w);
         self.collisions.insert(key, c);
         c
     }

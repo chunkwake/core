@@ -22,6 +22,7 @@ pub mod minecart;
 pub mod mobs;
 pub mod ops;
 pub mod orbs;
+pub mod par;
 pub mod payload;
 pub mod pistons;
 pub mod placement;

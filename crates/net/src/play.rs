@@ -74,8 +74,8 @@ pub trait PluginHooks: Send + Sync {
         false
     }
 
-    /// Clientbound-пакет по имени типа: `Some(data)` - отправить
-    /// (возможно изменённые плагином), `None` - пакет отменён.
+    /// Clientbound-пакет: `Some(data)` - отправить (возможно изменённые),
+    /// `None` - пакет отменён плагином.
     fn packet(&self, _uuid: Uuid, _name: &str, data: &[u8]) -> Option<Vec<u8>> {
         Some(data.to_vec())
     }
@@ -113,6 +113,7 @@ struct Ids {
     player_abilities: i32,
     player_info_remove: i32,
     system_chat: i32,
+    player_chat: i32,
     sb_chat: i32,
     sb_command_suggestion: i32,
     command_suggestions: i32,
@@ -284,6 +285,9 @@ pub struct PlayPlan {
     random_ticking: std::sync::OnceLock<Vec<bool>>,
     /// Виды состояний (`kinds`): огонь, кровать, листва, медь — по номеру.
     state_kinds: std::sync::OnceLock<Vec<u16>>,
+    /// Среда, вода и еда овцы по номеру состояния (`kinds::MobCell`): тик мобов
+    /// спрашивает их тысячи раз за тик.
+    mob_cells: std::sync::OnceLock<Vec<kinds::MobCell>>,
     /// Состояние блока → имя (`minecraft:stone`), для событий плагинов.
     block_names: Arc<Vec<String>>,
     /// ID `brigadier:string` в `command_argument_type`.
@@ -999,6 +1003,8 @@ struct Broadcast {
     packet: Frame,
     /// Сырые байты пакета (id+data) для clientbound-моста ProtocolLib.
     raw: Option<Arc<Vec<u8>>>,
+    /// Сырые пакеты spawn-батча (для per-player ProtocolLib).
+    raw_spawn: Option<Arc<Vec<Vec<u8>>>>,
     /// Событие сущности: получатель сам решает по дальности, слать ли `packet`,
     /// заспавнить сущность или убрать её.
     entity: Option<EntityEvent>,
@@ -1013,6 +1019,8 @@ struct BlockItem {
     dim: Dimension,
     chunk: (i32, i32),
     frame: Vec<u8>,
+    /// Нефреймленный пакет: нужен для per-player clientbound-моста.
+    raw: Arc<Vec<u8>>,
 }
 
 /// Движение одной сущности в пачке тика: кадр(ы) дельты и состояние для спавна.
@@ -1372,6 +1380,7 @@ impl Hub {
             only: None,
             packet: Arc::new(self.frame(&packet)),
             raw: Some(Arc::new(packet)),
+            raw_spawn: None,
             entity: None,
             moves: None,
             blocks: None,
@@ -1386,6 +1395,7 @@ impl Hub {
             only: None,
             packet: Arc::new(self.frame(&packet)),
             raw: Some(Arc::new(packet)),
+            raw_spawn: None,
             entity: None,
             moves: None,
             blocks: None,
@@ -1400,6 +1410,7 @@ impl Hub {
             only: None,
             packet: frame,
             raw: None,
+            raw_spawn: None,
             entity: None,
             moves: None,
             blocks: None,
@@ -1439,6 +1450,7 @@ impl Hub {
             only: None,
             packet: Arc::new(out),
             raw: None,
+            raw_spawn: None,
             entity: Some(EntityEvent::Many(Arc::new(parts))),
             moves: None,
             blocks: None,
@@ -1448,8 +1460,10 @@ impl Hub {
     /// Новая сущность: спавн получат те, у кого она в дальности.
     fn spawn_tracked(&self, t: Tracked, packets: impl IntoIterator<Item = Vec<u8>>) {
         let mut out = Vec::new();
+        let mut raws = Vec::new();
         for p in packets {
             self.codec.encode(&p, &mut out);
+            raws.push(p);
         }
         let _ = self.tx.send(Broadcast {
             skip: None,
@@ -1457,6 +1471,7 @@ impl Hub {
             only: None,
             packet: Arc::new(out),
             raw: None,
+            raw_spawn: Some(Arc::new(raws)),
             entity: Some(EntityEvent::Spawn(t)),
             moves: None,
             blocks: None,
@@ -1488,6 +1503,7 @@ impl Hub {
                 self.frame(&packet)
             }),
             raw: raw.clone(),
+            raw_spawn: None,
             entity,
             moves: None,
             blocks: None,
@@ -1683,6 +1699,28 @@ fn tick_dim() -> Option<Dimension> {
 }
 
 /// Выполнить `f` в измерении `dim` на этом потоке.
+/// Регион 8x8 чанков (как в регионном тике сущностей).
+fn block_region(pos: [i32; 3]) -> (i32, i32) {
+    ((pos[0] >> 4) >> 3, (pos[2] >> 4) >> 3)
+}
+
+/// Folia-режим: правки блоков вне текущего региона складываются в очередь
+/// воркера и применяются после параллельной фазы в порядке регионов.
+struct FoliaEditCtx {
+    region: (i32, i32),
+    queue: Vec<([i32; 3], u32)>,
+}
+
+thread_local! {
+    static FOLIA_EDIT: std::cell::RefCell<Option<FoliaEditCtx>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn folia_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CHUNKWAKE_FOLIA").as_deref() == Ok("1"))
+}
+
 pub(crate) fn with_dim<R>(dim: Dimension, f: impl FnOnce() -> R) -> R {
     struct Restore(Option<Dimension>);
     impl Drop for Restore {
@@ -2077,10 +2115,10 @@ fn player_flags(sneaking: bool, sprinting: bool, gliding: bool, burning: bool) -
 }
 
 fn permission_event(id: i32, entity: i32, level: i32) -> Vec<u8> {
-    inv::entity_event(
+    chunkwake_protocol::inventory::entity_event(
         id,
         entity,
-        inv::ENTITY_EVENT_PERMISSION_LEVEL_0 + level.clamp(0, 4) as u8,
+        chunkwake_protocol::inventory::ENTITY_EVENT_PERMISSION_LEVEL_0 + level.clamp(0, 4) as u8,
     )
 }
 
@@ -2506,6 +2544,30 @@ pub mod bench {
         made
     }
 
+    /// Сетка `side × side` коров с шагом в блок вокруг `center`, как профиль
+    /// `cows` в `chunkwake-lab` (`summon cow x.5 y z.5`). Число появившихся.
+    pub fn populate_grid(plan: &PlayPlan, center: [f64; 3], side: usize) -> usize {
+        let half = (side / 2) as f64;
+        let mut made = 0;
+        for i in 0..side * side {
+            let x = center[0] + (i % side) as f64 - half + 0.5;
+            let z = center[2] + (i / side) as f64 - half + 0.5;
+            if plan
+                .spawn_mob(
+                    crate::mobs::Species::Cow,
+                    [x, center[1], z],
+                    0.0,
+                    false,
+                    Some("BENCH"),
+                )
+                .is_some()
+            {
+                made += 1;
+            }
+        }
+        made
+    }
+
     /// Ставит `side × side` блоков с именем `block` вокруг `origin` (мировые
     /// координаты). Меряет путь записи блока целиком: `set_block`, свет,
     /// индексы, очередь рассылки.
@@ -2523,6 +2585,19 @@ pub mod bench {
             }
         }
         placed
+    }
+
+    /// Числовое правило игры (`random_tick_speed`): как `/gamerule`.
+    pub fn set_rule(plan: &PlayPlan, name: &str, value: i64) -> bool {
+        plan.vars
+            .set_rule(name, commands::state::RuleValue::Int(value))
+            .is_some()
+    }
+
+    /// Только случайные тики (`tick_random_blocks`) в оверворлде: без мобов и
+    /// прочих фаз, чтобы бенч мерил ровно их.
+    pub fn random_ticks(plan: &PlayPlan) {
+        with_dim(Dimension::Overworld, || plan.tick_random_blocks());
     }
 
     /// Состояние блока по умолчанию (`minecraft:stone` → ID состояния).
@@ -2789,7 +2864,7 @@ pub struct SurvivalData {
     pub entity_types: HashMap<String, i32>,
     /// Дальность слежения в блоках (`clientTrackingRange` × 16) по ID типа
     /// из `reports/entities.csv`; нет записи — [`DEFAULT_TRACKING_RANGE`].
-    pub tracking_ranges: HashMap<i32, i32>,
+    pub tracking_ranges: FastMap<i32, i32>,
     /// Категория `creature` биомов по сетевому ID биома.
     pub creature_spawns: Vec<CreatureSpawns>,
     /// Категория `monster` биомов по сетевому ID биома (`chance` не используется).
@@ -2969,6 +3044,7 @@ impl PlayPlan {
                 player_abilities: cb("player_abilities")?,
                 player_info_remove: cb("player_info_remove")?,
                 system_chat: cb("system_chat")?,
+                player_chat: cb("player_chat")?,
                 sb_chat: sb("chat")?,
                 sb_command_suggestion: sb("command_suggestion")?,
                 command_suggestions: cb("command_suggestions")?,
@@ -3128,6 +3204,7 @@ impl PlayPlan {
             remove_frames: Mutex::new(FastMap::default()),
             random_ticking: std::sync::OnceLock::new(),
             state_kinds: std::sync::OnceLock::new(),
+            mob_cells: std::sync::OnceLock::new(),
             block_names,
             parsers,
             survival,
@@ -3267,7 +3344,12 @@ impl PlayPlan {
             }
         };
         let packet = play::level_chunk_with_light(self.ids.level_chunk_with_light, x, z, body);
-        let frame = Arc::new(self.hub.frame(&packet));
+        let mut frame = self.hub.frame(&packet);
+        // Кадр чанка живёт в кэше долго, а `Hub::frame` резервирует под
+        // несжатый размер: ~45 КБ ёмкости на ~9 КБ данных. Один realloc на
+        // сжатие чанка дешевле, чем пятикратный перерасход на тысячах кадров.
+        frame.shrink_to_fit();
+        let frame = Arc::new(frame);
         // В кэш — только если чанк не изменили, пока мы его сжимали.
         let limit = self.chunk_frame_limit(self.active_dim());
         let world = self.dim_state().edited.read().unwrap();
@@ -3465,6 +3547,17 @@ impl PlayPlan {
         let ry = y - self.min_y();
         if ry < 0 || ry as usize >= self.template().height() {
             return None;
+        }
+        if let Some(region) = FOLIA_EDIT.with(|c| c.borrow().as_ref().map(|c| c.region))
+            && block_region([x, y, z]) != region
+        {
+            let old = self.block([x, y, z]);
+            FOLIA_EDIT.with(|c| {
+                if let Some(edit) = c.borrow_mut().as_mut() {
+                    edit.queue.push(([x, y, z], state));
+                }
+            });
+            return old;
         }
         let key = (x >> 4, z >> 4);
         let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
@@ -4345,15 +4438,6 @@ impl PlayPlan {
     }
 
     /// Системное сообщение (JSON-компонент) одному игроку.
-    /// Отправить сырой пакет клиенту (NMS `Connection.send` из Java: DH/TAB).
-    pub fn send_raw_packet(&self, uuid: Uuid, packet: &[u8]) -> bool {
-        if packet.is_empty() {
-            return false;
-        }
-        self.send_to(uuid, packet.to_vec());
-        true
-    }
-
     pub fn send_json(&self, to: Uuid, json: &str) {
         let raw = text::system_chat_json(self.ids.system_chat, json, false);
         let packet = self.hub.frame(&raw);
@@ -4363,6 +4447,7 @@ impl PlayPlan {
             only: Some(to),
             packet: Arc::new(packet),
             raw: Some(Arc::new(raw)),
+            raw_spawn: None,
             entity: None,
             moves: None,
             blocks: None,
@@ -4429,6 +4514,7 @@ impl PlayPlan {
             only: Some(to),
             packet: Arc::new(framed),
             raw: Some(Arc::new(raw)),
+            raw_spawn: None,
             entity: None,
             moves: None,
             blocks: None,
@@ -4608,6 +4694,15 @@ impl PlayPlan {
     }
 
     /// Команда плагина сессии игрока (формат — [`Control::parse`]).
+    /// Сырой пакет конкретному игроку (NMS-мост плагинов: DH/TAB).
+    pub fn send_raw_packet(&self, uuid: Uuid, packet: &[u8]) -> bool {
+        if packet.is_empty() {
+            return false;
+        }
+        self.send_to(uuid, packet.to_vec());
+        true
+    }
+
     pub fn player_control(&self, uuid: Uuid, line: &str) -> bool {
         // `tp x y z yaw pitch <мир>`: телепорт плагина в другое измерение —
         // переход, как у `/tp` в `execute in`.
@@ -4703,6 +4798,107 @@ impl PlayPlan {
                 .map(|(x, z)| format!("{x} {z}"))
                 .collect::<Vec<_>>()
                 .join("\n");
+        }
+        // `itemname <id>`: имя предмета по числовому id (мост для ItemStack).
+        if let Some(rest) = line.strip_prefix("itemname ") {
+            return rest
+                .trim()
+                .parse::<i32>()
+                .ok()
+                .map(|id| self.item_name(id).to_owned())
+                .unwrap_or_default();
+        }
+        // `components`: таблица `name id` компонентов предметов (Java-мост).
+        if line == "components" {
+            use std::sync::atomic::Ordering;
+            let table: [(&str, i32); 16] = [
+                (
+                    "minecraft:damage",
+                    chunkwake_protocol::inventory::DAMAGE_COMPONENT.load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:enchantments",
+                    chunkwake_protocol::components::ENCHANTMENTS_COMPONENT.load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:custom_name",
+                    chunkwake_protocol::components::CUSTOM_NAME_COMPONENT.load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:lore",
+                    chunkwake_protocol::components::LORE_COMPONENT.load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:stored_enchantments",
+                    chunkwake_protocol::components::STORED_ENCHANTMENTS_COMPONENT
+                        .load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:custom_data",
+                    chunkwake_protocol::components::CUSTOM_DATA_COMPONENT.load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:charged_projectiles",
+                    chunkwake_protocol::components::CHARGED_PROJECTILES_COMPONENT
+                        .load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:repair_cost",
+                    chunkwake_protocol::components::REPAIR_COST_COMPONENT.load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:trim",
+                    chunkwake_protocol::components::TRIM_COMPONENT.load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:banner_patterns",
+                    chunkwake_protocol::components::BANNER_PATTERNS_COMPONENT
+                        .load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:map_id",
+                    chunkwake_protocol::components::MAP_ID_COMPONENT.load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:map_post_processing",
+                    chunkwake_protocol::components::MAP_POST_PROCESSING_COMPONENT
+                        .load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:writable_book_content",
+                    chunkwake_protocol::components::WRITABLE_BOOK_CONTENT_COMPONENT
+                        .load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:written_book_content",
+                    chunkwake_protocol::components::WRITTEN_BOOK_CONTENT_COMPONENT
+                        .load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:container",
+                    chunkwake_protocol::components::CONTAINER_COMPONENT.load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:dyed_color",
+                    chunkwake_protocol::components::DYED_COLOR_COMPONENT.load(Ordering::Relaxed),
+                ),
+            ];
+            return table
+                .iter()
+                .filter(|(_, id)| *id >= 0)
+                .map(|(name, id)| format!("{name} {id}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        // `state x y z`: числовой id блока (NMS-мост для squaremap).
+        if let Some(rest) = line.strip_prefix("state ") {
+            let mut it = rest.split_whitespace();
+            let parse = |v: Option<&str>| v.and_then(|v| v.parse::<i32>().ok());
+            let (x, y, z) = (parse(it.next()), parse(it.next()), parse(it.next()));
+            let (Some(x), Some(y), Some(z)) = (x, y, z) else {
+                return "0".into();
+            };
+            return self.block([x, y, z]).unwrap_or(0).to_string();
         }
         // `nbtread <путь>` → корень gzip-NBT файла типизированным JSON (пусто —
         // файла нет); `nbtwrite <путь>\n<json>` → `1`/`0`. Данные Paper о мире
@@ -6180,7 +6376,11 @@ impl PlayPlan {
             player.sleeping = Some(head);
             self.hub.send(
                 None,
-                inv::set_entity_sleeping(self.ids.set_entity_data, player.entity_id, Some(head)),
+                chunkwake_protocol::inventory::set_entity_sleeping(
+                    self.ids.set_entity_data,
+                    player.entity_id,
+                    Some(head),
+                ),
             );
         }
         // `ServerPlayer.startSleepInBed`: `awardStat(SLEEP_IN_BED)` до триггера.
@@ -6199,7 +6399,11 @@ impl PlayPlan {
             player.sleeping = None;
             self.hub.send(
                 None,
-                inv::set_entity_sleeping(self.ids.set_entity_data, player.entity_id, None),
+                chunkwake_protocol::inventory::set_entity_sleeping(
+                    self.ids.set_entity_data,
+                    player.entity_id,
+                    None,
+                ),
             );
         }
     }
@@ -6861,10 +7065,21 @@ impl PlayPlan {
         result
     }
 
-    fn spawn_frame(&self, e: &EntityRef) -> Vec<u8> {
-        // Один и тот же игрок появляется у многих наблюдателей сразу, а
-        // пакет зависит только от его позиции и флагов. Кэш по квантованной
-        // позиции убирает повторные сборку и сжатие на каждого зрителя.
+    /// Clientbound-мост для конкретного игрока.
+    fn frame_for(&self, me: Uuid, packet: &[u8]) -> Option<Vec<u8>> {
+        if let Some(hooks) = self.hooks()
+            && hooks.packet_events()
+            && let Some(id) = packet_id(packet)
+            && let Some(name) = self.packet_names.get(&id)
+        {
+            return hooks
+                .packet(me, name, packet)
+                .map(|data| self.hub.frame(&data));
+        }
+        Some(self.hub.frame(packet))
+    }
+
+    fn spawn_frame(&self, e: &EntityRef, me: Uuid) -> Vec<u8> {
         let key = (
             e.entity_id,
             play::quantize(e.pos),
@@ -6875,10 +7090,11 @@ impl PlayPlan {
             e.sleeping,
             e.model,
         );
-        if let Some(hit) = self.spawn_frames.lock().unwrap().get(&key) {
+        let intercept = self.hooks().is_some_and(|h| h.packet_events());
+        if !intercept && let Some(hit) = self.spawn_frames.lock().unwrap().get(&key) {
             return hit.as_ref().clone();
         }
-        let mut out = self.hub.frame(&play::add_entity(
+        let mut packets: Vec<Vec<u8>> = vec![play::add_entity(
             self.ids.add_entity,
             e.entity_id,
             e.uuid,
@@ -6887,47 +7103,52 @@ impl PlayPlan {
             e.yaw,
             e.pitch,
             0,
-        ));
+        )];
         if e.gliding || e.burning {
-            out.extend(self.hub.frame(&inv::set_entity_flags(
+            packets.push(chunkwake_protocol::inventory::set_entity_flags(
                 self.ids.set_entity_data,
                 e.entity_id,
                 player_flags(false, false, e.gliding, e.burning),
-            )));
+            ));
         }
         if let Some(head) = e.sleeping {
-            out.extend(self.hub.frame(&inv::set_entity_sleeping(
+            packets.push(chunkwake_protocol::inventory::set_entity_sleeping(
                 self.ids.set_entity_data,
                 e.entity_id,
                 Some(head),
-            )));
+            ));
         }
-        // `getNonDefaultValues`: рука и части скина, если клиент их менял.
         let d = ClientInfo::DEFAULT;
         let hand = (e.model[0] != d.main_hand).then_some(e.model[0]);
         let skin = (e.model[1] != d.skin_parts).then_some(e.model[1]);
         if hand.is_some() || skin.is_some() {
-            out.extend(self.hub.frame(&inv::set_player_model(
+            packets.push(chunkwake_protocol::inventory::set_player_model(
                 self.ids.set_entity_data,
                 e.entity_id,
                 hand,
                 skin,
-            )));
+            ));
         }
-        let mut cache = self.spawn_frames.lock().unwrap();
-        if cache.len() >= SPAWN_CACHE_LIMIT {
-            cache.clear();
+        let mut out = Vec::new();
+        for packet in &packets {
+            if intercept {
+                if let Some(frame) = self.frame_for(me, packet) {
+                    out.extend(frame);
+                }
+            } else {
+                out.extend(self.hub.frame(packet));
+            }
         }
-        cache.insert(key, Arc::new(out.clone()));
+        if !intercept {
+            let mut cache = self.spawn_frames.lock().unwrap();
+            if cache.len() >= SPAWN_CACHE_LIMIT {
+                cache.clear();
+            }
+            cache.insert(key, Arc::new(out.clone()));
+        }
         out
     }
 
-    /// Готовый кадр «удалить сущность» для одного получателя.
-    ///
-    /// Пакет зависит только от id, поэтому собирать и сжимать его на каждого
-    /// зрителя незачем: при уходе группы сущностей из виду это десятки
-    /// одинаковых zlib-потоков за один тик. Кэш маленький и живёт один тик —
-    /// id сущностей переиспользуются, поэтому записи сбрасываются по размеру.
     fn remove_frame(&self, entity_id: i32) -> Vec<u8> {
         {
             let cache = self.remove_frames.lock().unwrap();
@@ -6974,7 +7195,11 @@ impl PlayPlan {
                     0.0,
                     0,
                 ),
-                inv::set_entity_item(self.ids.set_entity_data, entity_id, Some(stack)),
+                chunkwake_protocol::inventory::set_entity_item(
+                    self.ids.set_entity_data,
+                    entity_id,
+                    Some(stack),
+                ),
             ],
         );
     }
@@ -7046,7 +7271,7 @@ impl PlayPlan {
                 0.0,
                 0,
             ),
-            inv::set_orb_value(self.ids.set_entity_data, id, o.value),
+            chunkwake_protocol::inventory::set_orb_value(self.ids.set_entity_data, id, o.value),
         ]
     }
 
@@ -7221,7 +7446,12 @@ impl PlayPlan {
         // Клиент на подбор сферы сам играет её звук.
         self.hub.send_about(
             id,
-            inv::take_item_entity(self.ids.take_item_entity, id, collector, 1),
+            chunkwake_protocol::inventory::take_item_entity(
+                self.ids.take_item_entity,
+                id,
+                collector,
+                1,
+            ),
         );
         if last {
             self.hub.remove_tracked(&[id]);
@@ -7361,7 +7591,11 @@ impl PlayPlan {
                 0.0,
                 0,
             ),
-            inv::set_entity_item(self.ids.set_entity_data, id, Some(d.stack)),
+            chunkwake_protocol::inventory::set_entity_item(
+                self.ids.set_entity_data,
+                id,
+                Some(d.stack),
+            ),
         ])
     }
 
@@ -7474,7 +7708,12 @@ impl PlayPlan {
             changed.extend(slots);
             self.hub.send_about(
                 id,
-                inv::take_item_entity(self.ids.take_item_entity, id, collector, 1),
+                chunkwake_protocol::inventory::take_item_entity(
+                    self.ids.take_item_entity,
+                    id,
+                    collector,
+                    1,
+                ),
             );
             taken.push(id);
         }
@@ -7533,7 +7772,12 @@ impl PlayPlan {
             changed.extend(slots);
             self.hub.send_about(
                 id,
-                inv::take_item_entity(self.ids.take_item_entity, id, collector, got),
+                chunkwake_protocol::inventory::take_item_entity(
+                    self.ids.take_item_entity,
+                    id,
+                    collector,
+                    got,
+                ),
             );
             let name = self.item_name(d.stack.item).to_owned();
             self.award_stat(uuid, "minecraft:picked_up", &name, got);
@@ -7544,7 +7788,11 @@ impl PlayPlan {
                 d.stack.count = left;
                 self.hub.send_about(
                     id,
-                    inv::set_entity_item(self.ids.set_entity_data, id, Some(d.stack)),
+                    chunkwake_protocol::inventory::set_entity_item(
+                        self.ids.set_entity_data,
+                        id,
+                        Some(d.stack),
+                    ),
                 );
             }
         }
@@ -7704,7 +7952,11 @@ impl PlayPlan {
             if !gone.contains(&id) {
                 self.hub.send_about(
                     id,
-                    inv::set_entity_item(self.ids.set_entity_data, id, Some(stack)),
+                    chunkwake_protocol::inventory::set_entity_item(
+                        self.ids.set_entity_data,
+                        id,
+                        Some(stack),
+                    ),
                 );
             }
         }
@@ -7999,8 +8251,10 @@ impl PlayPlan {
             } else {
                 crate::arrows::EVENT_BREAK
             };
-            self.hub
-                .send(None, inv::entity_event(self.ids.entity_event, id, event));
+            self.hub.send(
+                None,
+                chunkwake_protocol::inventory::entity_event(self.ids.entity_event, id, event),
+            );
         }
         for (kind, owner, pos, extra, direct_hit) in impacts {
             match kind {
@@ -8141,6 +8395,20 @@ impl PlayPlan {
             }
         }
         if !hurt_mobs.is_empty() {
+            // Достижения и добивание стрелы применяем после того, как
+            // отпустим `sim.mobs`: внутри них берётся `live`, а порядок
+            // захвата — `live` -> `sim.mobs`.
+            let mut hurt_advancements: Vec<(Uuid, &'static str, &'static str, &'static str)> =
+                Vec::new();
+            type ArrowKillAdv = (
+                Uuid,
+                &'static str,
+                i32,
+                [Option<&'static str>; 8],
+                u8,
+                Option<Stack>,
+            );
+            let mut arrow_kill_advancements: Vec<ArrowKillAdv> = Vec::new();
             let mut mobs = self.sim().mobs.lock().unwrap();
             let mut damaged = Vec::new();
             let mut died = Vec::new();
@@ -8190,12 +8458,12 @@ impl PlayPlan {
                         } else {
                             "minecraft:arrow"
                         };
-                        self.advancement_player_hurt_entity(
+                        hurt_advancements.push((
                             Uuid::from_u128(owner),
                             victim.name(),
                             direct,
                             damage_type,
-                        );
+                        ));
                     }
                     if dead {
                         died.push(entry.mob.pos);
@@ -8212,38 +8480,14 @@ impl PlayPlan {
                             && let Some(owner) = owner
                             && let Some(victim) = victim
                         {
-                            let mut victims: Vec<&'static str> = arrow_kills
-                                [..arrow_kills_n as usize]
-                                .iter()
-                                .flatten()
-                                .copied()
-                                .collect();
-                            victims.push(victim.name());
-                            if let Some(arrow) =
-                                self.sim().arrows.lock().unwrap().get_mut(&arrow_id)
-                                && (arrow.killed_n as usize) < arrow.killed.len()
-                            {
-                                arrow.killed[arrow.killed_n as usize] = Some(victim.name());
-                                arrow.killed_n += 1;
-                            }
-                            let weapon = weapon.map(|s| self.item_name(s.item));
-                            let live = self
-                                .live
-                                .lock()
-                                .unwrap()
-                                .get(&Uuid::from_u128(owner))
-                                .cloned();
-                            let (slots, selected) = match &live {
-                                Some(l) => (&l.slots[..], l.selected),
-                                None => (&[][..], 0),
-                            };
-                            self.advancement_killed_by_arrow(
+                            arrow_kill_advancements.push((
                                 Uuid::from_u128(owner),
-                                &victims,
+                                victim.name(),
+                                arrow_id,
+                                arrow_kills,
+                                arrow_kills_n,
                                 weapon,
-                                slots,
-                                selected,
-                            );
+                            ));
                         }
                     }
                     if let Some(item) = trident
@@ -8267,6 +8511,35 @@ impl PlayPlan {
                 }
             }
             drop(mobs);
+            for (owner, victim, direct, damage_type) in hurt_advancements {
+                self.advancement_player_hurt_entity(owner, victim, direct, damage_type);
+            }
+            for (owner, victim, arrow_id, arrow_kills, arrow_kills_n, weapon) in
+                arrow_kill_advancements
+            {
+                let mut victims: Vec<&'static str> = arrow_kills[..arrow_kills_n as usize]
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .collect();
+                victims.push(victim);
+                {
+                    let mut arrows = self.sim().arrows.lock().unwrap();
+                    if let Some(arrow) = arrows.get_mut(&arrow_id)
+                        && (arrow.killed_n as usize) < arrow.killed.len()
+                    {
+                        arrow.killed[arrow.killed_n as usize] = Some(victim);
+                        arrow.killed_n += 1;
+                    }
+                }
+                let weapon = weapon.map(|s| self.item_name(s.item));
+                let live = self.live.lock().unwrap().get(&owner).cloned();
+                let (slots, selected) = match &live {
+                    Some(l) => (&l.slots[..], l.selected),
+                    None => (&[][..], 0),
+                };
+                self.advancement_killed_by_arrow(owner, &victims, weapon, slots, selected);
+            }
             for (id, uuid, damage) in killers {
                 self.set_mob_killer(id, uuid, -1, Some(damage));
             }
@@ -8444,13 +8717,13 @@ impl PlayPlan {
 
     fn break_in_hand(&self, entity: i32, offhand: bool) {
         let event = if offhand {
-            inv::ENTITY_EVENT_BREAK_OFFHAND
+            chunkwake_protocol::inventory::ENTITY_EVENT_BREAK_OFFHAND
         } else {
-            inv::ENTITY_EVENT_BREAK_MAINHAND
+            chunkwake_protocol::inventory::ENTITY_EVENT_BREAK_MAINHAND
         };
         self.hub.send(
             None,
-            inv::entity_event(self.ids.entity_event, entity, event),
+            chunkwake_protocol::inventory::entity_event(self.ids.entity_event, entity, event),
         );
     }
 
@@ -8716,7 +8989,11 @@ impl PlayPlan {
         );
         self.hub.send(
             None,
-            inv::set_firework_attached(self.ids.set_entity_data, id, entity_id),
+            chunkwake_protocol::inventory::set_firework_attached(
+                self.ids.set_entity_data,
+                id,
+                entity_id,
+            ),
         );
         self.play_sound(
             None,
@@ -10040,7 +10317,20 @@ impl PlayPlan {
         let mut sampled = Vec::new();
         {
             let world = self.dim_state().edited.read().unwrap();
+            let min_y = self.min_y();
             let mut rng = rand::thread_rng();
+            // Номер клетки — 12 равномерных бит; из одного `u64` их пять.
+            let (mut bits, mut left) = (0u64, 0u32);
+            let mut cell = || {
+                if left == 0 {
+                    bits = rand::RngCore::next_u64(&mut rng);
+                    left = 5;
+                }
+                let i = (bits & 4095) as usize;
+                bits >>= 12;
+                left -= 1;
+                i
+            };
             for &(cx, cz) in simulated.iter() {
                 let Some((column, _)) = world.get(&(cx, cz)) else {
                     continue;
@@ -10050,21 +10340,17 @@ impl PlayPlan {
                     if !section.any_state(ticks) {
                         continue;
                     }
-                    for _ in 0..speed {
-                        let i = rand::Rng::gen_range(&mut rng, 0..4096usize);
-                        let state = section.get(i);
-                        if !ticks(state) {
-                            continue;
-                        }
+                    let base_y = min_y + sy as i32 * 16;
+                    section.sample(speed, ticks, &mut cell, |i, state| {
                         sampled.push((
                             [
                                 cx * 16 + (i & 15) as i32,
-                                self.min_y() + sy as i32 * 16 + (i >> 8) as i32,
+                                base_y + (i >> 8) as i32,
                                 cz * 16 + ((i >> 4) & 15) as i32,
                             ],
                             state,
                         ));
-                    }
+                    });
                 }
             }
         }
@@ -10691,11 +10977,16 @@ impl PlayPlan {
         let name = self.state_name(state);
         let above = [pos[0], pos[1] + 1, pos[2]];
         let pl = &self.survival.placement;
+        let cells = self.mob_cells();
         if name == "minecraft:farmland" {
-            let wet = crate::soil::hydrated(pos, self.fire_rained_on(above), |p| {
-                self.block(p)
-                    .and_then(|s| crate::fluids::state_fluid(pl, s))
-                    .is_some_and(|fluid| fluid.kind == crate::fluids::Kind::Water)
+            // 162 клетки вокруг грядки — под одним замком мира и по таблице
+            // воды, а не замок и разбор свойств на каждую.
+            let raining = self.fire_rained_on(above);
+            let wet = self.with_world(|w| {
+                crate::soil::hydrated(pos, raining, |p| {
+                    w.block(p)
+                        .is_some_and(|s| cells.get(s as usize).is_some_and(|c| c.water))
+                })
             });
             let moisture = pl
                 .prop(state, "moisture")
@@ -10720,59 +11011,77 @@ impl PlayPlan {
             }
             return;
         }
-        let suitable = |at: [i32; 3]| {
-            let above = [at[0], at[1] + 1, at[2]];
-            let Some(cover) = self.block(above) else {
-                return false;
-            };
-            if self.light.dampening(cover) >= 15
-                || crate::fluids::state_fluid(pl, cover).is_some_and(|fluid| fluid.amount >= 8)
-            {
-                return false;
-            }
-            self.with_world(|w| {
-                w.sky_light_at(above)
+        // `SpreadingSnowyDirtBlock.randomTick`: решение — под одним замком
+        // мира, запись — после. Четыре попытки распространения в ванили пишут
+        // сразу, но запись дёрна поверх земли не меняет ни свет, ни покров
+        // других попыток (оба блока непрозрачны), поэтому итог тот же.
+        enum Soil {
+            Dirt,
+            Keep,
+            Spread([Option<([i32; 3], u32)>; 4]),
+        }
+        let dirt = self.survival.block_defaults.get("minecraft:dirt").copied();
+        let decision = self.with_world(|w| {
+            let light_at = |p: [i32; 3]| {
+                w.sky_light_at(p)
                     .unwrap_or(0)
-                    .max(w.block_light_at(above).unwrap_or(0))
-            }) >= 4
-        };
-        if !suitable(pos) {
-            if let Some(&dirt) = self.survival.block_defaults.get("minecraft:dirt") {
-                self.set_block(pos, dirt);
+                    .max(w.block_light_at(p).unwrap_or(0))
+            };
+            let suitable = |at: [i32; 3]| {
+                let above = [at[0], at[1] + 1, at[2]];
+                let Some(cover) = w.block(above) else {
+                    return false;
+                };
+                if self.light.dampening(cover) >= 15
+                    || cells.get(cover as usize).is_some_and(|c| c.full_fluid)
+                {
+                    return false;
+                }
+                light_at(above) >= 4
+            };
+            if !suitable(pos) {
+                return Soil::Dirt;
             }
-            return;
-        }
-        let light = self.with_world(|w| {
-            w.sky_light_at(above)
-                .unwrap_or(0)
-                .max(w.block_light_at(above).unwrap_or(0))
+            if light_at(above) < 9 {
+                return Soil::Keep;
+            }
+            let mut spread = [None; 4];
+            for slot in &mut spread {
+                let target = [
+                    pos[0] + rand::random::<i32>().rem_euclid(3) - 1,
+                    pos[1] + rand::random::<i32>().rem_euclid(5) - 3,
+                    pos[2] + rand::random::<i32>().rem_euclid(3) - 1,
+                ];
+                if dirt.is_some() && w.block(target) == dirt && suitable(target) {
+                    let cover = w
+                        .block([target[0], target[1] + 1, target[2]])
+                        .unwrap_or(AIR);
+                    *slot = Some((target, cover));
+                }
+            }
+            Soil::Spread(spread)
         });
-        if light < 9 {
-            return;
-        }
-        for _ in 0..4 {
-            let target = [
-                pos[0] + rand::random::<i32>().rem_euclid(3) - 1,
-                pos[1] + rand::random::<i32>().rem_euclid(5) - 3,
-                pos[2] + rand::random::<i32>().rem_euclid(3) - 1,
-            ];
-            if self
-                .block(target)
-                .is_some_and(|s| self.state_name(s) == "minecraft:dirt")
-                && suitable(target)
-                && let Some(&base) = self.survival.block_defaults.get(name)
-            {
-                let cover = self
-                    .block([target[0], target[1] + 1, target[2]])
-                    .unwrap_or(AIR);
-                let snowy = matches!(
-                    self.state_name(cover),
-                    "minecraft:snow" | "minecraft:snow_block"
-                );
-                let next = pl
-                    .with_prop(base, "snowy", if snowy { "true" } else { "false" })
-                    .unwrap_or(base);
-                self.set_block(target, next);
+        match decision {
+            Soil::Dirt => {
+                if let Some(dirt) = dirt {
+                    self.set_block(pos, dirt);
+                }
+            }
+            Soil::Keep => {}
+            Soil::Spread(spread) => {
+                let Some(&base) = self.survival.block_defaults.get(name) else {
+                    return;
+                };
+                for (target, cover) in spread.into_iter().flatten() {
+                    let snowy = matches!(
+                        self.state_name(cover),
+                        "minecraft:snow" | "minecraft:snow_block"
+                    );
+                    let next = pl
+                        .with_prop(base, "snowy", if snowy { "true" } else { "false" })
+                        .unwrap_or(base);
+                    self.set_block(target, next);
+                }
             }
         }
     }
@@ -11042,7 +11351,7 @@ impl PlayPlan {
         );
         self.hub.send(
             None,
-            inv::set_tnt_fuse(self.ids.set_entity_data, id, tnt.fuse),
+            chunkwake_protocol::inventory::set_tnt_fuse(self.ids.set_entity_data, id, tnt.fuse),
         );
         Some(id)
     }
@@ -11067,8 +11376,10 @@ impl PlayPlan {
                 0,
             ),
         );
-        self.hub
-            .send(None, inv::set_tnt_fuse(self.ids.set_entity_data, id, fuse));
+        self.hub.send(
+            None,
+            chunkwake_protocol::inventory::set_tnt_fuse(self.ids.set_entity_data, id, fuse),
+        );
         self.play_sound(
             None,
             "minecraft:entity.tnt.primed",
@@ -11893,7 +12204,7 @@ impl PlayPlan {
         uuid: Uuid,
         inv: &Inventory,
         window: Option<&Window>,
-        c: &inv::ContainerClick,
+        c: &chunkwake_protocol::inventory::ContainerClick,
     ) -> bool {
         if c.mode == 5
             || !self
@@ -11902,7 +12213,7 @@ impl PlayPlan {
         {
             return false;
         }
-        let (ty, pid, top, current) = if c.window == inv::PLAYER_WINDOW {
+        let (ty, pid, top, current) = if c.window == chunkwake_protocol::inventory::PLAYER_WINDOW {
             let cur = usize::try_from(c.slot)
                 .ok()
                 .and_then(|i| inv.slots.get(i).copied().flatten());
@@ -12044,8 +12355,32 @@ impl PlayPlan {
         };
         // У каждого мира свой тик, как `ServerLevel.tick` у ванили: фазы ниже
         // идут под `with_dim`, поэтому `sim()`, блоки и рассылки — его.
-        for dim in self.ticking_dims() {
-            with_dim(dim, || self.run_dim_phases(&mut watch));
+        // Один `watch` нельзя делить между потоками: под параллелью профиль
+        // отключается. Порядок захвата блокировок в тик-пути канонический
+        // (docs/lock-order.md), поэтому измерения можно тикать одновременно.
+        let dims = self.ticking_dims();
+        let parallel =
+            std::env::var("CHUNKWAKE_PARALLEL_DIMS").as_deref() == Ok("1") && dims.len() > 1;
+        if parallel {
+            watch = None;
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = dims
+                    .iter()
+                    .map(|&dim| {
+                        scope.spawn(move || {
+                            let mut none: Option<&mut chunkwake_metrics::profile::Stopwatch> = None;
+                            with_dim(dim, || self.run_dim_phases(&mut none));
+                        })
+                    })
+                    .collect();
+                for handle in handles {
+                    let _ = handle.join();
+                }
+            });
+        } else {
+            for dim in dims {
+                with_dim(dim, || self.run_dim_phases(&mut watch));
+            }
         }
         self.flush_blocks();
         lap(PH_BLOCKS, &mut watch);
@@ -12305,6 +12640,7 @@ impl PlayPlan {
                     dim,
                     chunk: (sx, sz),
                     frame: self.hub.frame(&packet),
+                    raw: Arc::new(packet),
                 }
             })
             .collect();
@@ -12314,6 +12650,7 @@ impl PlayPlan {
             only: None,
             packet: Arc::new(Vec::new()),
             raw: None,
+            raw_spawn: None,
             entity: None,
             moves: None,
             blocks: Some(Arc::new(batch)),
@@ -12376,6 +12713,7 @@ impl PlayPlan {
             only: None,
             packet: Arc::new(Vec::new()),
             raw: None,
+            raw_spawn: None,
             entity: None,
             moves: Some(Arc::new(batch)),
             blocks: None,
@@ -12387,7 +12725,7 @@ impl PlayPlan {
         &self,
         me: Uuid,
         view: &stream::ChunkStream,
-        visible: &mut HashSet<i32>,
+        visible: &mut FastSet<i32>,
         out: &mut Vec<u8>,
     ) {
         let all: Vec<EntityRef> = self
@@ -12404,7 +12742,7 @@ impl PlayPlan {
             let here = e.dim == self.active_dim() && view.sees(e.pos, PLAYER_TRACKING_RANGE);
             match (here, visible.contains(&e.entity_id)) {
                 (true, false) => {
-                    out.extend(self.spawn_frame(e));
+                    out.extend(self.spawn_frame(e, me));
                     visible.insert(e.entity_id);
                 }
                 (false, true) => {
@@ -12570,16 +12908,20 @@ impl PlayPlan {
             .values()
             .map(|p| p.entry.clone())
             .collect();
-        conn.send(&play::player_info_add(ids.player_info_update, &tab))
-            .await?;
-        let mut visible: HashSet<i32> = HashSet::new();
+        // Свой TAB-лист тоже идёт через clientbound-мост: иначе плагин не
+        // увидит `PLAYER_INFO` для только что вошедшего игрока.
+        let tab_packet = play::player_info_add(ids.player_info_update, &tab);
+        if let Some(frame) = self.frame_for(uuid, &tab_packet) {
+            conn.send_frames(&frame).await?;
+        }
+        let mut visible: FastSet<i32> = FastSet::default();
         let mut out = Vec::new();
         let dim = self.active_dim();
         for e in others
             .iter()
             .filter(|e| e.dim == dim && stream.sees(e.pos, PLAYER_TRACKING_RANGE))
         {
-            out.extend(self.spawn_frame(e));
+            out.extend(self.spawn_frame(e, me.entry.uuid));
             visible.insert(e.entity_id);
         }
         if !out.is_empty() {
@@ -12642,7 +12984,7 @@ impl PlayPlan {
         food_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         self.send_inventory(conn, &mut state.inv).await?;
         // Выбранная ячейка из сохранения: иначе клиент держит 0-ю, а сервер другую.
-        conn.send(&inv::set_held_slot(
+        conn.send(&chunkwake_protocol::inventory::set_held_slot(
             ids.set_held_slot,
             state.inv.selected as i32,
         ))
@@ -12651,7 +12993,7 @@ impl PlayPlan {
         self.send_xp(conn, &state.xp).await?;
         let mut motion = 0u8;
         for e in &state.vitals.effects {
-            conn.send(&inv::update_mob_effect(
+            conn.send(&chunkwake_protocol::inventory::update_mob_effect(
                 ids.update_mob_effect,
                 me.entity_id,
                 e.id,
@@ -12802,7 +13144,7 @@ impl PlayPlan {
                             let menu = self.plugin_invs.lock().unwrap().get(&pid).map(|p| (p.slots.len(), p.menu));
                             if let Some((size, menu)) = menu.filter(|_| !state.vitals.dead) {
                                 if let Some(w) = window.as_ref() {
-                                    conn.send(&inv::container_close(ids.container_close, w.id)).await?;
+                                    conn.send(&chunkwake_protocol::inventory::container_close(ids.container_close, w.id)).await?;
                                 }
                                 self.close_with_event(&mut state.inv, &mut window, uuid).await;
                                 next_window = next_window % 100 + 1;
@@ -12810,7 +13152,7 @@ impl PlayPlan {
                                 let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10], merchant: None };
                                 w.slots = self.window_slots(&w);
                                 let title = serde_json::from_str(&title).unwrap_or_else(|_| serde_json::json!({"translate": "container.chest"}));
-                                conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &title)).await?;
+                                conn.send(&chunkwake_protocol::inventory::open_screen(ids.open_screen, w.id, menu, &title)).await?;
                                 self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
                                 window = Some(w);
                                 self.container_viewers(uuid, &[pos], true);
@@ -12822,7 +13164,7 @@ impl PlayPlan {
                         }
                         Control::CloseWindow => {
                             if let Some(w) = window.as_ref() {
-                                conn.send(&inv::container_close(ids.container_close, w.id)).await?;
+                                conn.send(&chunkwake_protocol::inventory::container_close(ids.container_close, w.id)).await?;
                                 self.close_with_event(&mut state.inv, &mut window, uuid).await;
                                 self.send_inventory(conn, &mut state.inv).await?;
                             }
@@ -12854,14 +13196,14 @@ impl PlayPlan {
                         Control::Selected(s) => {
                             state.inv.selected = s;
                             eating = None;
-                            conn.send(&inv::set_held_slot(ids.set_held_slot, s as i32)).await?;
+                            conn.send(&chunkwake_protocol::inventory::set_held_slot(ids.set_held_slot, s as i32)).await?;
                         }
                         Control::Furnace(pos, data, items) => {
                             if let Some(w) = window.as_mut().filter(|w| w.pos == pos) {
                                 for (i, (&v, old)) in data.iter().zip(w.data.iter_mut()).enumerate() {
                                     if v != *old {
                                         *old = v;
-                                        conn.send(&inv::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
+                                        conn.send(&chunkwake_protocol::inventory::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
                                     }
                                 }
                                 if items {
@@ -12875,7 +13217,7 @@ impl PlayPlan {
                                 for (i, &v) in data.iter().enumerate() {
                                     if v != w.data[i] {
                                         w.data[i] = v;
-                                        conn.send(&inv::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
+                                        conn.send(&chunkwake_protocol::inventory::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
                                     }
                                 }
                                 if items {
@@ -12892,7 +13234,7 @@ impl PlayPlan {
                                     for (i, (&v, old)) in data.iter().zip(w.crafter.iter_mut()).enumerate() {
                                         if v != *old {
                                             *old = v;
-                                            conn.send(&inv::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
+                                            conn.send(&chunkwake_protocol::inventory::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
                                         }
                                     }
                                 }
@@ -12908,7 +13250,7 @@ impl PlayPlan {
                                     let (_, page, _) = self.lectern_page_state(pos);
                                     if page != w.data[0] {
                                         w.data[0] = page;
-                                        conn.send(&inv::container_set_data(ids.container_set_data, w.id, 0, page as i16)).await?;
+                                        conn.send(&chunkwake_protocol::inventory::container_set_data(ids.container_set_data, w.id, 0, page as i16)).await?;
                                     }
                                 }
                             }
@@ -12962,7 +13304,7 @@ impl PlayPlan {
                                 // сложность, права, способности и `sendLevelInfo`,
                                 // который кончается `LEVEL_CHUNKS_LOAD_START`, —
                                 // без него клиент не снимает экран загрузки.
-                                conn.send(&inv::respawn(ids.respawn, &spawn, 3)).await?;
+                                conn.send(&chunkwake_protocol::inventory::respawn(ids.respawn, &spawn, 3)).await?;
                                 conn.send(&play::change_difficulty(ids.change_difficulty, self.difficulty().id())).await?;
                                 let level = self.op_level(uuid);
                                 conn.send(&permission_event(ids.entity_event, me.entity_id, level)).await?;
@@ -12985,11 +13327,11 @@ impl PlayPlan {
                                 // клиента пуст — инвентарь, ячейка, здоровье, опыт
                                 // и эффекты приходят заново.
                                 self.send_inventory(conn, &mut state.inv).await?;
-                                conn.send(&inv::set_held_slot(ids.set_held_slot, state.inv.selected as i32)).await?;
+                                conn.send(&chunkwake_protocol::inventory::set_held_slot(ids.set_held_slot, state.inv.selected as i32)).await?;
                                 self.send_health(conn, &state.vitals).await?;
                                 self.send_xp(conn, &state.xp).await?;
                                 for e in &state.vitals.effects {
-                                    conn.send(&inv::update_mob_effect(
+                                    conn.send(&chunkwake_protocol::inventory::update_mob_effect(
                                         ids.update_mob_effect,
                                         me.entity_id,
                                         e.id,
@@ -13119,12 +13461,12 @@ impl PlayPlan {
                         self.send_pose(conn, me, player_flags(sneaking, state.vitals.sprinting, gliding, burning_now)).await?;
                     }
                     if environment.air != old_air {
-                        let packet = inv::set_entity_air(ids.set_entity_data, me.entity_id, environment.air);
+                        let packet = chunkwake_protocol::inventory::set_entity_air(ids.set_entity_data, me.entity_id, environment.air);
                         conn.send(&packet).await?;
                         self.hub.send(Some(uuid), packet);
                     }
                     if environment.frozen != old_frozen {
-                        let packet = inv::set_entity_frozen(ids.set_entity_data, me.entity_id, environment.frozen as i32);
+                        let packet = chunkwake_protocol::inventory::set_entity_frozen(ids.set_entity_data, me.entity_id, environment.frozen as i32);
                         conn.send(&packet).await?;
                         self.hub.send(Some(uuid), packet);
                     }
@@ -13251,7 +13593,7 @@ impl PlayPlan {
                             state.vitals.eat(food.nutrition, food.saturation);
                             self.send_slots(conn, &mut state.inv, &[slot]).await?;
                             self.send_health(conn, &state.vitals).await?;
-                            conn.send(&inv::entity_event(ids.entity_event, me.entity_id, inv::ENTITY_EVENT_USE_ITEM_COMPLETE)).await?;
+                            conn.send(&chunkwake_protocol::inventory::entity_event(ids.entity_event, me.entity_id, chunkwake_protocol::inventory::ENTITY_EVENT_USE_ITEM_COMPLETE)).await?;
                             self.player_sound(uuid, "minecraft:entity.player.burp", 0.5, crate::sounds::pitch_09());
                             if let Some(name) = eaten {
                                 self.advancement_trigger(uuid, "minecraft:consume_item", Some(&name));
@@ -13321,7 +13663,7 @@ impl PlayPlan {
                         if self.potion_cancelled(uuid, "EXPIRATION", "REMOVED", name, None, Some(&e)).await {
                             state.vitals.effects.push(e);
                         } else {
-                            conn.send(&inv::remove_mob_effect(ids.remove_mob_effect, me.entity_id, e.id)).await?;
+                            conn.send(&chunkwake_protocol::inventory::remove_mob_effect(ids.remove_mob_effect, me.entity_id, e.id)).await?;
                             motion |= self.motion_mask(e.id);
                         }
                     }
@@ -13635,7 +13977,7 @@ impl PlayPlan {
                             .sync_player_event(Event::ItemHeld, uuid, || format!("{old} {slot}"))
                             .is_some_and(|r| r.trim() == "c")
                         {
-                            conn.send(&inv::set_held_slot(ids.set_held_slot, old as i32)).await?;
+                            conn.send(&chunkwake_protocol::inventory::set_held_slot(ids.set_held_slot, old as i32)).await?;
                             continue;
                         }
                         state.inv.selected = slot;
@@ -13654,7 +13996,7 @@ impl PlayPlan {
                                 w.slots[0] = None;
                                 let data = self.beacon_data(w.pos);
                                 for (i, &v) in data.iter().take(3).enumerate() {
-                                    conn.send(&inv::container_set_data(
+                                    conn.send(&chunkwake_protocol::inventory::container_set_data(
                                         ids.container_set_data,
                                         w.id,
                                         i as i16,
@@ -13709,7 +14051,7 @@ impl PlayPlan {
                                 if !changed.is_empty() {
                                     self.send_slots(conn, &mut state.inv, &changed).await?;
                                 }
-                                conn.send(&inv::set_held_slot(ids.set_held_slot, state.inv.selected as i32)).await?;
+                                conn.send(&chunkwake_protocol::inventory::set_held_slot(ids.set_held_slot, state.inv.selected as i32)).await?;
                             }
                         }
                         continue;
@@ -13727,7 +14069,7 @@ impl PlayPlan {
                                 if !changed.is_empty() {
                                     self.send_slots(conn, &mut state.inv, &changed).await?;
                                 }
-                                conn.send(&inv::set_held_slot(ids.set_held_slot, state.inv.selected as i32)).await?;
+                                conn.send(&chunkwake_protocol::inventory::set_held_slot(ids.set_held_slot, state.inv.selected as i32)).await?;
                             }
                         }
                         continue;
@@ -13740,7 +14082,7 @@ impl PlayPlan {
                         if login.spawn.game_mode != 1 {
                             continue;
                         }
-                        let (slot, stack) = inv::read_creative_slot(&mut r)?;
+                        let (slot, stack) = chunkwake_protocol::inventory::read_creative_slot(&mut r)?;
                         {
                             // Слот < 0 — выброс из креатив-меню (`handleSetCreativeModeSlot`).
                             if slot < 0 {
@@ -13774,7 +14116,7 @@ impl PlayPlan {
                                 use_max,
                             ) {
                                 Ok(true) => {
-                                    if container == inv::PLAYER_WINDOW {
+                                    if container == chunkwake_protocol::inventory::PLAYER_WINDOW {
                                         self.send_inventory(conn, &mut state.inv).await?;
                                     } else {
                                         self.send_window(
@@ -13830,10 +14172,10 @@ impl PlayPlan {
                         continue;
                     }
                     if id == ids.sb_container_click {
-                        let c = inv::read_container_click(&mut r)?;
+                        let c = chunkwake_protocol::inventory::read_container_click(&mut r)?;
                         // Сундук сломали, пока окно открыто: закрываем без клика.
                         if let Some(w) = window.as_ref().filter(|w| w.id == c.window && !self.window_valid(w)) {
-                            conn.send(&inv::container_close(ids.container_close, w.id)).await?;
+                            conn.send(&chunkwake_protocol::inventory::container_close(ids.container_close, w.id)).await?;
                             self.close_window(&mut state.inv, &mut window, uuid);
                             self.send_inventory(conn, &mut state.inv).await?;
                             continue;
@@ -13855,13 +14197,13 @@ impl PlayPlan {
                                 self.send_window(conn, &mut state.inv, window.as_ref(), c.window).await?;
                             }
                             if let Some(w) = window.as_ref().filter(|w| w.id == c.window && w.kind == Kind::Anvil) {
-                                conn.send(&inv::container_set_data(ids.container_set_data, w.id, 0, w.anvil_cost.min(i16::MAX as i32) as i16)).await?;
+                                conn.send(&chunkwake_protocol::inventory::container_set_data(ids.container_set_data, w.id, 0, w.anvil_cost.min(i16::MAX as i32) as i16)).await?;
                             }
                             if let Some(w) = window.as_ref().filter(|w| w.id == c.window && w.kind == Kind::Stonecutter) {
-                                conn.send(&inv::container_set_data(ids.container_set_data, w.id, 0, w.stone_selection.map_or(-1, |n| n as i16))).await?;
+                                conn.send(&chunkwake_protocol::inventory::container_set_data(ids.container_set_data, w.id, 0, w.stone_selection.map_or(-1, |n| n as i16))).await?;
                             }
                             if let Some(w) = window.as_ref().filter(|w| w.id == c.window && w.kind == Kind::Loom) {
-                                conn.send(&inv::container_set_data(ids.container_set_data, w.id, 0, w.loom_selection.map_or(-1, |n| n as i16))).await?;
+                                conn.send(&chunkwake_protocol::inventory::container_set_data(ids.container_set_data, w.id, 0, w.loom_selection.map_or(-1, |n| n as i16))).await?;
                             }
                             if let Some(w) = window.as_mut().filter(|w| w.kind == Kind::Enchanting) {
                                 self.refresh_enchant(conn, w, state.xp.seed, uuid).await?;
@@ -14049,7 +14391,7 @@ impl PlayPlan {
                         {
                             let _ = vyaw;
                             if let Some(w) = window.as_ref() {
-                                conn.send(&inv::container_close(ids.container_close, w.id))
+                                conn.send(&chunkwake_protocol::inventory::container_close(ids.container_close, w.id))
                                     .await?;
                             }
                             self.close_with_event(&mut state.inv, &mut window, uuid).await;
@@ -14062,7 +14404,7 @@ impl PlayPlan {
                             let w = Window { id: next_window, kind: Kind::Merchant, pos, second: None, slots: vec![None; 3], data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10], merchant: Some(villagers::MerchantWindow { villager: it.entity, selected: None }) };
                             let menu = self.survival.menu_merchant;
                             let title = self.villager_title(it.entity);
-                            conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &title))
+                            conn.send(&chunkwake_protocol::inventory::open_screen(ids.open_screen, w.id, menu, &title))
                                 .await?;
                             self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
                             if let Some(p) = self.villager_offers_packet(w.id, it.entity, uuid) {
@@ -14099,7 +14441,7 @@ impl PlayPlan {
                                 // `ContainerEntity.interactWithContainerVehicle`: окно инвентаря.
                                 minecarts::CartUse::Open(size, title) => {
                                     if let Some(w) = window.as_ref() {
-                                        conn.send(&inv::container_close(ids.container_close, w.id)).await?;
+                                        conn.send(&chunkwake_protocol::inventory::container_close(ids.container_close, w.id)).await?;
                                     }
                                     self.close_with_event(&mut state.inv, &mut window, uuid).await;
                                     next_window = next_window % 100 + 1;
@@ -14107,7 +14449,7 @@ impl PlayPlan {
                                     let pos = cart_pos(it.entity);
                                     let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10], merchant: None };
                                     w.slots = self.window_slots(&w);
-                                    conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &title)).await?;
+                                    conn.send(&chunkwake_protocol::inventory::open_screen(ids.open_screen, w.id, menu, &title)).await?;
                                     self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
                                     window = Some(w);
                                     self.container_viewers(uuid, &[pos], true);
@@ -14183,7 +14525,7 @@ impl PlayPlan {
                                     if it.sneaking || self.boat_full(it.entity) =>
                                 {
                                     if let Some(w) = window.as_ref() {
-                                        conn.send(&inv::container_close(ids.container_close, w.id))
+                                        conn.send(&chunkwake_protocol::inventory::container_close(ids.container_close, w.id))
                                             .await?;
                                     }
                                     self.close_with_event(&mut state.inv, &mut window, uuid).await;
@@ -14191,7 +14533,7 @@ impl PlayPlan {
                                     let pos = boat_pos(it.entity);
                                     let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10], merchant: None };
                                     w.slots = self.window_slots(&w);
-                                    conn.send(&inv::open_screen(
+                                    conn.send(&chunkwake_protocol::inventory::open_screen(
                                         ids.open_screen,
                                         w.id,
                                         self.survival.menu_chest,
@@ -14346,7 +14688,7 @@ impl PlayPlan {
                             w.anvil_materials = result.materials;
                             w.anvil_only_renaming = result.only_renaming;
                             self.send_window(conn, &mut state.inv, Some(w), w.id).await?;
-                            conn.send(&inv::container_set_data(ids.container_set_data, w.id, 0, w.anvil_cost.min(i16::MAX as i32) as i16)).await?;
+                            conn.send(&chunkwake_protocol::inventory::container_set_data(ids.container_set_data, w.id, 0, w.anvil_cost.min(i16::MAX as i32) as i16)).await?;
                         }
                         continue;
                     }
@@ -14365,7 +14707,7 @@ impl PlayPlan {
                             } else if let Some(requested) = lectern_page_request(button, self.lectern_page_state(w.pos).1)
                                 && let Some(page) = self.lectern_set_page(w.pos, requested) {
                                     w.data[0] = page;
-                                    conn.send(&inv::container_set_data(ids.container_set_data, wid, 0, page as i16)).await?;
+                                    conn.send(&chunkwake_protocol::inventory::container_set_data(ids.container_set_data, wid, 0, page as i16)).await?;
                                 }
                             continue;
                         }
@@ -14375,7 +14717,7 @@ impl PlayPlan {
                             {
                                 w.loom_selection = Some(button as usize);
                                 w.slots[3] = self.loom_result(&w.slots, w.loom_selection);
-                                conn.send(&inv::container_set_data(ids.container_set_data, wid, 0, button as i16)).await?;
+                                conn.send(&chunkwake_protocol::inventory::container_set_data(ids.container_set_data, wid, 0, button as i16)).await?;
                                 self.send_window(conn, &mut state.inv, Some(w), wid).await?;
                             }
                             continue;
@@ -14385,7 +14727,7 @@ impl PlayPlan {
                             if button >= 0 && (button as usize) < choices.len() {
                                 w.stone_selection = Some(button as usize);
                                 w.slots[1] = self.stone_result(w.slots[0], w.stone_selection);
-                                conn.send(&inv::container_set_data(ids.container_set_data, wid, 0, button as i16)).await?;
+                                conn.send(&chunkwake_protocol::inventory::container_set_data(ids.container_set_data, wid, 0, button as i16)).await?;
                                 self.send_window(conn, &mut state.inv, Some(w), wid).await?;
                             }
                             continue;
@@ -14914,7 +15256,7 @@ impl PlayPlan {
                         let command = r.var_int()?;
                         // После титров Края клиент просит респаун живым:
                         // `ServerPlayer` возвращается на точку возрождения.
-                        if command == inv::PERFORM_RESPAWN && !state.vitals.dead
+                        if command == chunkwake_protocol::inventory::PERFORM_RESPAWN && !state.vitals.dead
                             && self.won_game.lock().unwrap().remove(&uuid)
                         {
                             let mut at = self.respawn_target(uuid, false);
@@ -14926,7 +15268,7 @@ impl PlayPlan {
                             self.set_client_loading(uuid, Some(CLIENT_LOADED_TIMEOUT));
                             continue;
                         }
-                        if command == inv::PERFORM_RESPAWN && state.vitals.dead {
+                        if command == chunkwake_protocol::inventory::PERFORM_RESPAWN && state.vitals.dead {
                             teleport_id += 1;
                             center = self.respawn(conn, me, &login, &mut state.vitals, &mut state.inv, &mut stream, teleport_id, &mut client_dim).await?;
                             // Опыт после смерти выставлен в `die`.
@@ -15741,7 +16083,7 @@ impl PlayPlan {
                             } else {
                                 w.slots = self.window_slots(&w);
                             }
-                            conn.send(&inv::open_screen(ids.open_screen, w.id, menu, &serde_json::json!({"translate": title}))).await?;
+                            conn.send(&chunkwake_protocol::inventory::open_screen(ids.open_screen, w.id, menu, &serde_json::json!({"translate": title}))).await?;
                             self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
                             let open_stat = match clicked.as_str() {
                                 "minecraft:ender_chest" => Some("minecraft:open_enderchest"),
@@ -15797,11 +16139,11 @@ impl PlayPlan {
                                 self.refresh_enchant(conn, &mut w, state.xp.seed, uuid).await?;
                             }
                             if kind == Kind::Loom {
-                                conn.send(&inv::container_set_data(ids.container_set_data, w.id, 0, -1)).await?;
+                                conn.send(&chunkwake_protocol::inventory::container_set_data(ids.container_set_data, w.id, 0, -1)).await?;
                             }
                             if kind == Kind::Lectern {
                                 let (_, page, _) = self.lectern_page_state(pos);
-                                conn.send(&inv::container_set_data(ids.container_set_data, w.id, 0, page as i16)).await?;
+                                conn.send(&chunkwake_protocol::inventory::container_set_data(ids.container_set_data, w.id, 0, page as i16)).await?;
                                 w.data[0] = page;
                             }
                             if kind == Kind::Furnace {
@@ -15810,31 +16152,31 @@ impl PlayPlan {
                                     e.f.data()
                                 }).unwrap_or_default();
                                 for (i, v) in data.into_iter().enumerate() {
-                                    conn.send(&inv::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
+                                    conn.send(&chunkwake_protocol::inventory::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
                                 }
                                 w.data = data;
                             }
                             if kind == Kind::Brewing {
                                 let data = self.brewing_data(pos);
                                 for (i, v) in data.into_iter().enumerate() {
-                                    conn.send(&inv::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
+                                    conn.send(&chunkwake_protocol::inventory::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
                                 }
                                 w.data[..2].copy_from_slice(&data);
                             }
                             if kind == Kind::Beacon {
                                 let data = self.beacon_data(pos);
                                 for (i, &v) in data.iter().take(3).enumerate() {
-                                    conn.send(&inv::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
+                                    conn.send(&chunkwake_protocol::inventory::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
                                 }
                                 w.data[..3].copy_from_slice(&data[..3]);
                             }
                             if kind == Kind::Anvil {
-                                conn.send(&inv::container_set_data(ids.container_set_data, w.id, 0, 0)).await?;
+                                conn.send(&chunkwake_protocol::inventory::container_set_data(ids.container_set_data, w.id, 0, 0)).await?;
                             }
                             if matches!(kind, Kind::Crafter(_)) {
                                 let data = self.crafter_data(pos);
                                 for (i, v) in data.into_iter().enumerate() {
-                                    conn.send(&inv::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
+                                    conn.send(&chunkwake_protocol::inventory::container_set_data(ids.container_set_data, w.id, i as i16, v as i16)).await?;
                                 }
                                 w.crafter = data;
                             }
@@ -16326,13 +16668,51 @@ impl PlayPlan {
                             Some(json) if !json.is_empty() => {
                                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
                                     tracing::info!("{}", text::plain_text(&v));
+                                    let now = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map_or(0, |d| d.as_millis() as i64);
+                                    let name = serde_json::json!({ "text": "" });
+                                    let packet = play::player_chat(
+                                        ids.player_chat,
+                                        uuid,
+                                        0,
+                                        &play::PlayerChatBody {
+                                            content: &text,
+                                            timestamp: now,
+                                            salt: 0,
+                                            unsigned: &v,
+                                            chat_type: 0,
+                                            name: &name,
+                                            target: None,
+                                        },
+                                    );
+                                    self.hub.send_global(packet);
                                 }
-                                self.broadcast_json(json);
                             }
                             _ => {
-                                let line = format!("<{}> {text}", me.entry.name);
-                                tracing::info!("{line}");
-                                self.hub.send(None, play::system_chat(ids.system_chat, &line, false));
+                                tracing::info!("<{}> {text}", me.entry.name);
+                                // Ванильный путь: player chat (unsigned) вместо
+                                // system chat, чтобы плагины видели PLAYER_CHAT.
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map_or(0, |d| d.as_millis() as i64);
+                                let unsigned = serde_json::json!({ "text": text });
+                                let name = serde_json::json!({ "text": "" });
+                                let packet = play::player_chat(
+                                    ids.player_chat,
+                                    uuid,
+                                    0,
+                                    &play::PlayerChatBody {
+                                        content: &text,
+                                        timestamp: now,
+                                        salt: 0,
+                                        unsigned: &unsigned,
+                                        chat_type: 0,
+                                        name: &name,
+                                        target: None,
+                                    },
+                                );
+                                self.hub.send_global(packet);
                             }
                         }
                         continue;
@@ -16470,6 +16850,13 @@ impl PlayPlan {
 
     fn environment_kind(&self, state: Option<u32>) -> u16 {
         let Some(state) = state else { return 0 };
+        self.mob_cells()
+            .get(state as usize)
+            .map_or_else(|| self.environment_kind_of(state), |c| c.env)
+    }
+
+    /// [`Self::environment_kind`] по имени и свойствам: строит таблицу `mob_cells`.
+    fn environment_kind_of(&self, state: u32) -> u16 {
         let name = self.state_name(state);
         let waterlogged = self.survival.placement.prop(state, "waterlogged") == Some("true");
         let mut kind = crate::environment::block_kind(name, waterlogged);
@@ -16715,10 +17102,10 @@ impl PlayPlan {
                     // `broadcastBreakEvent(MAINHAND)`: звук и осколки у всех.
                     self.hub.send(
                         None,
-                        inv::entity_event(
+                        chunkwake_protocol::inventory::entity_event(
                             self.ids.entity_event,
                             entity,
-                            inv::ENTITY_EVENT_BREAK_MAINHAND,
+                            chunkwake_protocol::inventory::ENTITY_EVENT_BREAK_MAINHAND,
                         ),
                     );
                 }
@@ -16746,6 +17133,11 @@ impl PlayPlan {
         }
         // Одна правка: тик не разошлёт промежуточные состояния соседей.
         self.wake_bed(pos);
+        // Предмет в руке читаем до `world_edit`: канонический порядок —
+        // `live` -> `world_edit`, иначе параллельный тик даёт deadlock.
+        let held_shears = self.live.lock().unwrap().get(&uuid).is_some_and(|l| {
+            self.item_name(l.slots[36 + l.selected].map_or(0, |s| s.item)) == "minecraft:shears"
+        });
         let edit = self.world_edit.lock().unwrap();
         let Some(old) = self.set_block(pos, AIR) else {
             return Ok(false);
@@ -16756,10 +17148,7 @@ impl PlayPlan {
         // `playerWillDestroy` помечает нить разоружённой до снятия блока.
         // При пересчёте крюкам передаётся это состояние, хотя блок уже убран.
         let is_tripwire = chunkwake_world::has_rare(old, chunkwake_world::rare::TRIPWIRE);
-        let disarmed_by_shears = is_tripwire
-            && self.live.lock().unwrap().get(&uuid).is_some_and(|l| {
-                self.item_name(l.slots[36 + l.selected].map_or(0, |s| s.item)) == "minecraft:shears"
-            });
+        let disarmed_by_shears = is_tripwire && held_shears;
         if disarmed_by_shears {
             self.emit_vibration(
                 [
@@ -17187,12 +17576,12 @@ impl PlayPlan {
         inv: &mut Inventory,
         ender: &mut Vec<Slot>,
         window: &mut Option<Window>,
-        c: &inv::ContainerClick,
+        c: &chunkwake_protocol::inventory::ContainerClick,
         xp: &mut crate::xp::Experience,
         creative: bool,
         me: Uuid,
     ) -> (Vec<Stack>, bool) {
-        let (kind, mut view) = if c.window == inv::PLAYER_WINDOW {
+        let (kind, mut view) = if c.window == chunkwake_protocol::inventory::PLAYER_WINDOW {
             (Kind::Player, inv.slots.to_vec())
         } else if let Some(w) = window.as_mut().filter(|w| w.id == c.window) {
             if matches!(w.kind, Kind::Chest(_) | Kind::Furnace | Kind::Brewing) {
@@ -17514,19 +17903,20 @@ impl PlayPlan {
         let inv_before = inv.slots;
         let carried_before = inv.carried;
         let view_before = view.clone();
-        let brewing_take = if kind == Kind::Brewing && c.window != inv::PLAYER_WINDOW {
-            usize::try_from(c.slot)
-                .ok()
-                .filter(|&slot| slot < 3)
-                .and_then(|slot| view_before.get(slot).copied().flatten())
-                .filter(|stack| {
-                    chunkwake_protocol::components::get(stack.extra)
-                        .raw
-                        .is_some()
-                })
-        } else {
-            None
-        };
+        let brewing_take =
+            if kind == Kind::Brewing && c.window != chunkwake_protocol::inventory::PLAYER_WINDOW {
+                usize::try_from(c.slot)
+                    .ok()
+                    .filter(|&slot| slot < 3)
+                    .and_then(|slot| view_before.get(slot).copied().flatten())
+                    .filter(|stack| {
+                        chunkwake_protocol::components::get(stack.extra)
+                            .raw
+                            .is_some()
+                    })
+            } else {
+                None
+            };
         let (mut thrown, mut crafted_taken) = {
             let mut menu = click::Menu {
                 kind,
@@ -17999,7 +18389,11 @@ impl PlayPlan {
         me: &Online,
         flags: u8,
     ) -> Result<(), NetError> {
-        let packet = inv::set_entity_flags(self.ids.set_entity_data, me.entity_id, flags);
+        let packet = chunkwake_protocol::inventory::set_entity_flags(
+            self.ids.set_entity_data,
+            me.entity_id,
+            flags,
+        );
         conn.send(&packet).await?;
         self.hub.send(Some(me.entry.uuid), packet);
         Ok(())
@@ -18208,7 +18602,9 @@ impl PlayPlan {
         window: Option<&Window>,
         id: i32,
     ) -> Result<(), NetError> {
-        let Some(w) = window.filter(|w| w.id == id && id != inv::PLAYER_WINDOW) else {
+        let Some(w) =
+            window.filter(|w| w.id == id && id != chunkwake_protocol::inventory::PLAYER_WINDOW)
+        else {
             return self.send_inventory(conn, inv).await;
         };
         let view: Vec<Slot> = if w.kind == Kind::Lectern {
@@ -18225,7 +18621,7 @@ impl PlayPlan {
             w.slots.iter().chain(&inv.slots[9..45]).copied().collect()
         };
         let state = inv.next_state();
-        conn.send(&inv::container_set_content(
+        conn.send(&chunkwake_protocol::inventory::container_set_content(
             self.ids.container_set_content,
             w.id,
             state,
@@ -18621,15 +19017,15 @@ impl PlayPlan {
             + 1;
         let simulated = self.simulated_set();
         let deferred = std::mem::take(&mut *self.sim().deferred_updates.lock().unwrap());
-        for p in deferred {
+        self.run_block_regions(deferred, move |p| {
             // Правка плагина в нетикающем чанке подождёт своей симуляции.
             if !simulated.is_empty() && !simulated.contains(&(p[0] >> 4, p[2] >> 4)) {
                 self.sim().deferred_updates.lock().unwrap().push(p);
                 self.mark_work();
-                continue;
+                return;
             }
             self.redstone_update(&crate::redstone::around(p));
-        }
+        });
         lap!(PH_DEFERRED);
         self.scan_tripwires();
         self.scan_portals();
@@ -18648,9 +19044,7 @@ impl PlayPlan {
         }
         // Расписание вдалеке не теряется: тик подождёт, пока чанк тикает.
         let due = self.take_ticking(&self.sim().redstone_ticks, now);
-        for pos in due {
-            self.scheduled_tick(pos, now);
-        }
+        self.run_block_regions(due, move |pos| self.scheduled_tick(pos, now));
         lap!(PH_SCHEDULED);
     }
 
@@ -18662,6 +19056,56 @@ impl PlayPlan {
     /// Смена входа диода: срок тика становится `delay` от текущего тика.
     fn reschedule(&self, pos: [i32; 3], delay: u64) {
         self.enqueue_tick(pos, delay, true);
+    }
+
+    /// Прогоняет наступившие позиции по регионам. По умолчанию — как
+    /// раньше; в Folia-режиме (`CHUNKWAKE_FOLIA=1`) — параллельно, один
+    /// регион на задачу, с очередью межрегиональных правок, применяемой
+    /// после фазы в порядке регионов.
+    fn run_block_regions(&self, mut due: Vec<[i32; 3]>, tick: impl Fn([i32; 3]) + Sync) {
+        if !folia_enabled() || due.len() < 2 {
+            for p in due {
+                tick(p);
+            }
+            return;
+        }
+        due.sort_unstable_by_key(|p| block_region(*p));
+        due.dedup();
+        {
+            static MAX: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let prev = MAX.fetch_max(due.len(), std::sync::atomic::Ordering::Relaxed);
+            if due.len() > prev {
+                tracing::info!(due = due.len(), "folia: parallel block regions (max)");
+            }
+        }
+        let mut out: Vec<([i32; 3], u32)> = Vec::new();
+        let parts = crate::par::regions_strict(
+            &mut due,
+            |p| block_region(*p),
+            |slice| {
+                let region = block_region(slice[0]);
+                FOLIA_EDIT.with(|c| {
+                    *c.borrow_mut() = Some(FoliaEditCtx {
+                        region,
+                        queue: Vec::new(),
+                    });
+                });
+                for &p in slice.iter() {
+                    tick(p);
+                }
+                FOLIA_EDIT
+                    .with(|c| c.borrow_mut().take())
+                    .map(|c| c.queue)
+                    .unwrap_or_default()
+            },
+        );
+        for q in parts {
+            out.extend(q);
+        }
+        out.sort_by_key(|(p, _)| block_region(*p));
+        for (p, state) in out {
+            self.set_block(p, state);
+        }
     }
 
     fn enqueue_tick(&self, pos: [i32; 3], delay: u64, replace: bool) {
@@ -18682,35 +19126,43 @@ impl PlayPlan {
     /// и только те, где действительно лежит нить.
     fn scan_tripwires(&self) {
         // Быстрый выход: никто не двигается — нечего обходить.
-        let players = self.hub.players.lock().unwrap();
-        if players.values().all(|p| !p.collects)
-            && self
-                .sim()
-                .mobs
-                .lock()
-                .unwrap()
-                .values()
-                .all(|e| !e.mob.alive())
-            && self.sim().dropped.lock().unwrap().is_empty()
-        {
-            return;
-        }
-        let mut spots: Vec<[i32; 3]> = {
-            let live = self.live.lock().unwrap();
+        // Быстрый выход: если никого нет — ничего не делаем.
+        // `hub.players` отпускаем до `live`: порядок `hub.players` -> `live`
+        // нарушил бы канонический (`live` раньше), дав deadlock в параллели.
+        let collecting: Vec<(Uuid, [f64; 3])> = {
+            let players = self.hub.players.lock().unwrap();
+            if players.values().all(|p| !p.collects)
+                && self
+                    .sim()
+                    .mobs
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .all(|e| !e.mob.alive())
+                && self.sim().dropped.lock().unwrap().is_empty()
+            {
+                return;
+            }
             players
                 .values()
                 .filter(|p| p.collects)
-                .filter(|p| live.get(&p.entry.uuid).is_some_and(|l| l.health > 0.0))
-                .map(|p| {
+                .map(|p| (p.entry.uuid, p.pos))
+                .collect()
+        };
+        let mut spots: Vec<[i32; 3]> = {
+            let live = self.live.lock().unwrap();
+            collecting
+                .iter()
+                .filter(|(uuid, _)| live.get(uuid).is_some_and(|l| l.health > 0.0))
+                .map(|(_, p)| {
                     [
-                        p.pos[0].floor() as i32,
-                        p.pos[1].floor() as i32,
-                        p.pos[2].floor() as i32,
+                        p[0].floor() as i32,
+                        p[1].floor() as i32,
+                        p[2].floor() as i32,
                     ]
                 })
                 .collect()
         };
-        drop(players);
         spots.extend(
             self.sim()
                 .mobs
@@ -20481,7 +20933,11 @@ impl PlayPlan {
                 drop(dropped);
                 self.hub.send_about(
                     id,
-                    inv::set_entity_item(self.ids.set_entity_data, id, Some(stack)),
+                    chunkwake_protocol::inventory::set_entity_item(
+                        self.ids.set_entity_data,
+                        id,
+                        Some(stack),
+                    ),
                 );
             }
         }
@@ -21267,7 +21723,7 @@ impl PlayPlan {
         }
         // Вне тикающих чанков тик откладывается, а не теряется.
         let due = self.take_ticking(&self.sim().fluid_ticks, now);
-        for p in due {
+        self.run_block_regions(due, move |p| {
             let changes = {
                 let at = |q: [i32; 3]| self.block(q).unwrap_or(AIR);
                 fl::Ctx {
@@ -21297,7 +21753,7 @@ impl PlayPlan {
                     }
                 }
             }
-        }
+        });
     }
 
     /// Компонент без опоры выпадает предметом (`canSurvive` → `destroyBlock`).
@@ -23432,9 +23888,9 @@ impl PlayPlan {
         inv: &mut Inventory,
     ) -> Result<(), NetError> {
         let state = inv.next_state();
-        conn.send(&inv::container_set_content(
+        conn.send(&chunkwake_protocol::inventory::container_set_content(
             self.ids.container_set_content,
-            inv::PLAYER_WINDOW,
+            chunkwake_protocol::inventory::PLAYER_WINDOW,
             state,
             &inv.slots,
             inv.carried,
@@ -23521,13 +23977,16 @@ impl PlayPlan {
         for &s in slots {
             let state = inv.next_state();
             let stack: Slot = inv.slots[s];
-            out.extend(self.hub.frame(&inv::container_set_slot(
-                self.ids.container_set_slot,
-                inv::PLAYER_WINDOW,
-                state,
-                s as i16,
-                stack,
-            )));
+            out.extend(
+                self.hub
+                    .frame(&chunkwake_protocol::inventory::container_set_slot(
+                        self.ids.container_set_slot,
+                        chunkwake_protocol::inventory::PLAYER_WINDOW,
+                        state,
+                        s as i16,
+                        stack,
+                    )),
+            );
         }
         if out.is_empty() {
             return Ok(());
@@ -23562,7 +24021,7 @@ impl PlayPlan {
             "minecraft:movement_speed",
             survival::BASE_MOVEMENT_SPEED,
         );
-        conn.send(&inv::update_attribute(
+        conn.send(&chunkwake_protocol::inventory::update_attribute(
             self.ids.update_attributes,
             entity,
             self.survival.attribute_speed,
@@ -23753,7 +24212,7 @@ impl PlayPlan {
             merged.extend(self.live_motion_modifiers(uuid, name));
             let merged = self.merge_attribute_modifiers(uuid, name, &merged);
             let base = self.attribute_base(uuid, name, self.attribute_fallback(uuid, name));
-            conn.send(&inv::update_attribute(
+            conn.send(&chunkwake_protocol::inventory::update_attribute(
                 self.ids.update_attributes,
                 entity,
                 id,
@@ -23882,7 +24341,7 @@ impl PlayPlan {
             "minecraft:jump_strength",
             survival::BASE_JUMP_STRENGTH,
         );
-        conn.send(&inv::update_attribute(
+        conn.send(&chunkwake_protocol::inventory::update_attribute(
             self.ids.update_attributes,
             entity,
             self.survival.attribute_jump,
@@ -23903,7 +24362,7 @@ impl PlayPlan {
         let mods = survival::gravity_modifiers(slow);
         let mods = self.merge_attribute_modifiers(uuid, "minecraft:gravity", &mods);
         let base = self.attribute_base(uuid, "minecraft:gravity", survival::BASE_GRAVITY);
-        conn.send(&inv::update_attribute(
+        conn.send(&chunkwake_protocol::inventory::update_attribute(
             self.ids.update_attributes,
             entity,
             self.survival.attribute_gravity,
@@ -24072,10 +24531,10 @@ impl PlayPlan {
                 .await?;
             }
         }
-        conn.send(&inv::entity_event(
+        conn.send(&chunkwake_protocol::inventory::entity_event(
             self.ids.entity_event,
             me.entity_id,
-            inv::ENTITY_EVENT_USE_ITEM_COMPLETE,
+            chunkwake_protocol::inventory::ENTITY_EVENT_USE_ITEM_COMPLETE,
         ))
         .await?;
         Ok(())
@@ -24161,7 +24620,7 @@ impl PlayPlan {
             v.add_absorption(e.amplifier);
             self.send_absorption(conn, me, v).await?;
         }
-        conn.send(&inv::update_mob_effect(
+        conn.send(&chunkwake_protocol::inventory::update_mob_effect(
             self.ids.update_mob_effect,
             me.entity_id,
             e.id,
@@ -24224,7 +24683,7 @@ impl PlayPlan {
         }
         let mut motion = 0u8;
         for e in &targets {
-            conn.send(&inv::remove_mob_effect(
+            conn.send(&chunkwake_protocol::inventory::remove_mob_effect(
                 self.ids.remove_mob_effect,
                 me.entity_id,
                 e.id,
@@ -24243,7 +24702,7 @@ impl PlayPlan {
         conn: &mut Connection,
         xp: &crate::xp::Experience,
     ) -> Result<(), NetError> {
-        conn.send(&inv::set_experience(
+        conn.send(&chunkwake_protocol::inventory::set_experience(
             self.ids.set_experience,
             xp.progress,
             xp.level,
@@ -24439,7 +24898,7 @@ impl PlayPlan {
         let data = offer.data(seed);
         for (i, &v) in data.iter().enumerate() {
             if w.enchant[i] != v {
-                conn.send(&inv::container_set_data(
+                conn.send(&chunkwake_protocol::inventory::container_set_data(
                     self.ids.container_set_data,
                     w.id,
                     i as i16,
@@ -24551,7 +25010,7 @@ impl PlayPlan {
     }
 
     async fn send_health(&self, conn: &mut Connection, v: &Vitals) -> Result<(), NetError> {
-        conn.send(&inv::set_health(
+        conn.send(&chunkwake_protocol::inventory::set_health(
             self.ids.set_health,
             v.health,
             v.food,
@@ -24568,8 +25027,11 @@ impl PlayPlan {
         me: &Online,
         v: &Vitals,
     ) -> Result<(), NetError> {
-        let packet =
-            inv::set_entity_absorption(self.ids.set_entity_data, me.entity_id, v.absorption);
+        let packet = chunkwake_protocol::inventory::set_entity_absorption(
+            self.ids.set_entity_data,
+            me.entity_id,
+            v.absorption,
+        );
         conn.send(&packet).await?;
         self.hub.send(Some(me.entry.uuid), packet);
         Ok(())
@@ -24668,7 +25130,7 @@ impl PlayPlan {
             let old: Vec<i32> = v.effects.iter().map(|e| e.id).collect();
             v.effects.clear();
             for id in old {
-                conn.send(&inv::remove_mob_effect(
+                conn.send(&chunkwake_protocol::inventory::remove_mob_effect(
                     self.ids.remove_mob_effect,
                     me.entity_id,
                     id,
@@ -24689,7 +25151,7 @@ impl PlayPlan {
                     v.add_absorption(effect.amplifier);
                     self.send_absorption(conn, me, v).await?;
                 }
-                conn.send(&inv::update_mob_effect(
+                conn.send(&chunkwake_protocol::inventory::update_mob_effect(
                     self.ids.update_mob_effect,
                     me.entity_id,
                     id,
@@ -24705,7 +25167,7 @@ impl PlayPlan {
         // `EntityEvent.PROTECTED_FROM_DEATH`: клиент играет звук и частицы.
         self.hub.send(
             None,
-            inv::entity_event(self.ids.entity_event, me.entity_id, 35),
+            chunkwake_protocol::inventory::entity_event(self.ids.entity_event, me.entity_id, 35),
         );
         Ok(true)
     }
@@ -24980,7 +25442,7 @@ impl PlayPlan {
         if let Some(t) = damage_type {
             self.hub.send(
                 None,
-                inv::damage_event(self.ids.damage_event, me.entity_id, t),
+                chunkwake_protocol::inventory::damage_event(self.ids.damage_event, me.entity_id, t),
             );
         }
         if died && !saved {
@@ -25039,7 +25501,11 @@ impl PlayPlan {
         {
             self.hub.send(
                 Some(me.entry.uuid),
-                inv::entity_event(self.ids.entity_event, me.entity_id, inv::ENTITY_EVENT_DEATH),
+                chunkwake_protocol::inventory::entity_event(
+                    self.ids.entity_event,
+                    me.entity_id,
+                    chunkwake_protocol::inventory::ENTITY_EVENT_DEATH,
+                ),
             );
             let mut drops: Vec<Stack> = inv
                 .slots
@@ -25185,7 +25651,11 @@ impl PlayPlan {
         let lingering: Vec<i32> = v.effects.iter().map(|e| e.id).collect();
         let mut motion = 0u8;
         for id in lingering {
-            let pkt = inv::remove_mob_effect(self.ids.remove_mob_effect, me.entity_id, id);
+            let pkt = chunkwake_protocol::inventory::remove_mob_effect(
+                self.ids.remove_mob_effect,
+                me.entity_id,
+                id,
+            );
             conn.send(&pkt).await?;
             self.hub.send(Some(me.entry.uuid), pkt);
             motion |= self.motion_mask(id);
@@ -25228,7 +25698,12 @@ impl PlayPlan {
             let _ = SESSION_DIM.try_with(|c| c.set(dim));
             *self.active.lock().unwrap() = dim;
         }
-        conn.send(&inv::respawn(self.ids.respawn, &info, 0)).await?;
+        conn.send(&chunkwake_protocol::inventory::respawn(
+            self.ids.respawn,
+            &info,
+            0,
+        ))
+        .await?;
         self.send_map_markers(conn).await?;
         for packet in self.joined_packets(uuid) {
             conn.send(&packet).await?;
@@ -25326,14 +25801,22 @@ impl PlayPlan {
         me: Uuid,
         b: &Broadcast,
         view: &stream::ChunkStream,
-        visible: &mut HashSet<i32>,
+        visible: &mut FastSet<i32>,
         out: &mut Vec<u8>,
     ) {
         if let Some(batch) = &b.blocks {
             let dim = self.active_dim();
+            let intercept = self.hooks().is_some_and(|h| h.packet_events());
             for item in batch.iter().filter(|i| i.dim == dim) {
                 let (x, z) = item.chunk;
-                if view.tracks((x, z)) {
+                if !view.tracks((x, z)) {
+                    continue;
+                }
+                if intercept {
+                    if let Some(frame) = self.frame_for(me, &item.raw) {
+                        out.extend(frame);
+                    }
+                } else {
                     out.extend_from_slice(&item.frame);
                 }
             }
@@ -25341,7 +25824,7 @@ impl PlayPlan {
         }
         if let Some(batch) = &b.moves {
             for m in batch.iter().filter(|m| m.e.uuid != me) {
-                self.track(&m.e, &m.frame, view, visible, out);
+                self.track(me, &m.e, &m.frame, view, visible, out);
             }
             return;
         }
@@ -25368,7 +25851,7 @@ impl PlayPlan {
                     out.extend_from_slice(&b.packet);
                 }
             }
-            Some(EntityEvent::At(e)) => self.track(e, &b.packet, view, visible, out),
+            Some(EntityEvent::At(e)) => self.track(me, e, &b.packet, view, visible, out),
             Some(EntityEvent::GoneAll(ids)) => {
                 for id in ids.iter() {
                     if visible.remove(id) {
@@ -25390,7 +25873,17 @@ impl PlayPlan {
             }
             Some(EntityEvent::Spawn(t)) => {
                 if !visible.contains(&t.id) && view.sees(t.pos, t.range) {
-                    out.extend_from_slice(&b.packet);
+                    if let (Some(raws), Some(hooks)) = (&b.raw_spawn, self.hooks())
+                        && hooks.packet_events()
+                    {
+                        for raw in raws.iter() {
+                            if let Some(frame) = self.frame_for(me, raw) {
+                                out.extend(frame);
+                            }
+                        }
+                    } else {
+                        out.extend_from_slice(&b.packet);
+                    }
                     visible.insert(t.id);
                 }
             }
@@ -25400,17 +25893,18 @@ impl PlayPlan {
     /// Видимость одной сущности у получателя: дельта, спавн, удаление или ничего.
     fn track(
         &self,
+        me: Uuid,
         e: &EntityRef,
         frame: &[u8],
         view: &stream::ChunkStream,
-        visible: &mut HashSet<i32>,
+        visible: &mut FastSet<i32>,
         out: &mut Vec<u8>,
     ) {
         let here = e.dim == self.active_dim() && view.sees(e.pos, PLAYER_TRACKING_RANGE);
         match (here, visible.contains(&e.entity_id)) {
             (true, true) => out.extend_from_slice(frame),
             (true, false) => {
-                out.extend(self.spawn_frame(e));
+                out.extend(self.spawn_frame(e, me));
                 visible.insert(e.entity_id);
             }
             (false, true) => {

@@ -25,7 +25,38 @@ pub(super) const LAVA: u16 = 1 << 6;
 /// Воздух любого вида (`minecraft:air`, `cave_air`, `void_air`).
 pub(super) const AIR: u16 = 1 << 7;
 
+/// Что тик мобов спрашивает о состоянии блока: вид среды
+/// (`environment::block_kind`), вода (`fluids::state_fluid`) и
+/// `#edible_for_sheep`. Без таблицы каждый вопрос — сравнение строк.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct MobCell {
+    pub env: u16,
+    pub water: bool,
+    pub edible_sheep: bool,
+    /// Полная жидкость (`amount >= 8`): под ней трава не живёт.
+    pub full_fluid: bool,
+}
+
 impl PlayPlan {
+    /// [`MobCell`] всех состояний.
+    pub(super) fn mob_cells(&self) -> &[MobCell] {
+        self.mob_cells.get_or_init(|| {
+            let pl = &self.survival.placement;
+            let edible = self.survival.block_tags.get("minecraft:edible_for_sheep");
+            (0..self.survival.block_names.len() as u32)
+                .map(|state| {
+                    let fluid = crate::fluids::state_fluid(pl, state);
+                    MobCell {
+                        env: self.environment_kind_of(state),
+                        water: fluid.is_some_and(|f| f.kind == crate::fluids::Kind::Water),
+                        edible_sheep: edible.is_some_and(|t| t.contains(self.state_name(state))),
+                        full_fluid: fluid.is_some_and(|f| f.amount >= 8),
+                    }
+                })
+                .collect()
+        })
+    }
+
     /// Флаги видов всех состояний.
     pub(super) fn kinds(&self) -> &[u16] {
         self.state_kinds.get_or_init(|| {

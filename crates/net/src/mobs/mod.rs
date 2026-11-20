@@ -1537,10 +1537,35 @@ pub fn in_reach(m: &Mob, p: &Prey) -> bool {
 
 const EPS: f64 = 1e-7;
 
-/// Коробки блоков, задевающих область `lo..hi`, в мировых координатах. Снизу
+/// Есть ли хоть одна коробка в области `lo..hi` — [`colliders_into`] без
+/// списка: выход на первой (поиск пути спрашивает только «пусто ли»).
+fn any_collider(lo: [f64; 3], hi: [f64; 3], w: &World) -> bool {
+    let r = |v: f64| (v - EPS).floor() as i32;
+    for x in r(lo[0])..=r(hi[0] + 2.0 * EPS) {
+        for y in r(lo[1]) - 1..=r(hi[1] + 2.0 * EPS) {
+            for z in r(lo[2])..=r(hi[2] + 2.0 * EPS) {
+                for b in (w.shape)([x, y, z]) {
+                    if b[3] + x as f64 > lo[0]
+                        && b[0] + (x as f64) < hi[0]
+                        && b[4] + y as f64 > lo[1]
+                        && b[1] + (y as f64) < hi[1]
+                        && b[5] + z as f64 > lo[2]
+                        && b[2] + (z as f64) < hi[2]
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Коробки блоков, задевающих область `lo..hi`, в мировых координатах, в
+/// готовый буфер (он очищается): без аллокации на каждый шаг моба. Снизу
 /// берётся лишний слой: забор и стена выше своего блока.
-fn colliders(lo: [f64; 3], hi: [f64; 3], w: &World) -> Vec<[f64; 6]> {
-    let mut out = Vec::new();
+fn colliders_into(lo: [f64; 3], hi: [f64; 3], w: &World, out: &mut Vec<[f64; 6]>) {
+    out.clear();
     let r = |v: f64| (v - EPS).floor() as i32;
     for x in r(lo[0])..=r(hi[0] + 2.0 * EPS) {
         for y in r(lo[1]) - 1..=r(hi[1] + 2.0 * EPS) {
@@ -1567,7 +1592,14 @@ fn colliders(lo: [f64; 3], hi: [f64; 3], w: &World) -> Vec<[f64; 6]> {
             }
         }
     }
-    out
+}
+
+/// Буферы `collide_move` (thread-local, переиспользуются).
+type CollideScratch = (Vec<[f64; 6]>, Vec<[f64; 6]>, Vec<f32>);
+
+thread_local! {
+    static COLLIDE_SCRATCH: std::cell::RefCell<CollideScratch> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new(), Vec::new())) };
 }
 
 /// `Shapes.collide`: сколько коробка `lo..hi` пройдёт по оси `axis` на `d`.
@@ -1617,6 +1649,27 @@ fn collide_move(
     step: f64,
     w: &World,
 ) -> [f64; 3] {
+    COLLIDE_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        let (first, boxes, heights) = &mut *scratch;
+        collide_move_in(pos, half, h, mv, on_ground, step, w, first, boxes, heights)
+    })
+}
+
+/// Тело [`collide_move`] с буферами вызывающего.
+#[allow(clippy::too_many_arguments)]
+fn collide_move_in(
+    pos: [f64; 3],
+    half: f64,
+    h: f64,
+    mv: [f64; 3],
+    on_ground: bool,
+    step: f64,
+    w: &World,
+    first: &mut Vec<[f64; 6]>,
+    boxes: &mut Vec<[f64; 6]>,
+    heights: &mut Vec<f32>,
+) -> [f64; 3] {
     let lo = [pos[0] - half, pos[1], pos[2] - half];
     let hi = [pos[0] + half, pos[1] + h, pos[2] + half];
     let span = |a: [f64; 3], b: [f64; 3], m: [f64; 3]| {
@@ -1633,7 +1686,8 @@ fn collide_move(
         (l, u)
     };
     let (l, u) = span(lo, hi, mv);
-    let got = collide_all(lo, hi, mv, &colliders(l, u, w));
+    colliders_into(l, u, w, first);
+    let got = collide_all(lo, hi, mv, first);
     let landed = got[1] != mv[1] && mv[1] < 0.0;
     if step <= 0.0 || !(landed || on_ground) || (got[0] == mv[0] && got[2] == mv[2]) {
         return got;
@@ -1645,11 +1699,11 @@ fn collide_move(
     if !landed {
         l[1] -= 1.0e-5f32 as f64;
     }
-    let boxes = colliders(l, u, w);
+    colliders_into(l, u, w, boxes);
     // `collectCandidateStepUpHeights`: верхние и нижние грани коробок от пола.
     let skip = got[1] as f32;
-    let mut heights: Vec<f32> = Vec::new();
-    for b in &boxes {
+    heights.clear();
+    for b in boxes.iter() {
         for y in [b[1], b[4]] {
             let rel = (y - glo[1]) as f32;
             if rel >= 0.0 && rel != skip && rel as f64 <= step && !heights.contains(&rel) {
@@ -1659,8 +1713,8 @@ fn collide_move(
     }
     heights.sort_by(f32::total_cmp);
     let flat = got[0] * got[0] + got[2] * got[2];
-    for h in heights {
-        let up = collide_all(glo, ghi, [mv[0], h as f64, mv[2]], &boxes);
+    for &h in heights.iter() {
+        let up = collide_all(glo, ghi, [mv[0], h as f64, mv[2]], boxes);
         if up[0] * up[0] + up[2] * up[2] > flat {
             return [up[0], up[1] + shift, up[2]];
         }

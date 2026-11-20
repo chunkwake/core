@@ -61,7 +61,7 @@ impl PlayPlan {
     pub(super) fn update_tracking(
         &self,
         view: &stream::ChunkStream,
-        visible: &mut HashSet<i32>,
+        visible: &mut FastSet<i32>,
         out: &mut Vec<u8>,
     ) {
         let snapshot = self.dim_state().tracked.lock().unwrap().clone();

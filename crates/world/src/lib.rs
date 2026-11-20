@@ -557,6 +557,70 @@ impl Section {
         }
     }
 
+    /// Случайная выборка `draws` клеток (`ServerLevel.tickChunk`): `cell()`
+    /// даёт номер клетки (0..4096), `hit(i, state)` зовётся по порядку
+    /// выборки для каждой клетки, чьё состояние прошло `ticks`. То же, что
+    /// `get(cell())` в цикле, но `ticks` спрашивается по палитре один раз, а не
+    /// на каждую выборку, и клетка читается прямо из индексов.
+    pub fn sample(
+        &self,
+        draws: usize,
+        ticks: impl Fn(u32) -> bool,
+        mut cell: impl FnMut() -> usize,
+        mut hit: impl FnMut(usize, u32),
+    ) {
+        match &self.storage {
+            Storage::Single(state) => {
+                if ticks(*state) {
+                    for _ in 0..draws {
+                        hit(cell(), *state);
+                    }
+                }
+            }
+            Storage::Paletted(p) => {
+                let mask: Vec<bool> = p
+                    .palette
+                    .iter()
+                    .zip(&p.counts)
+                    .map(|(&s, &c)| c > 0 && ticks(s))
+                    .collect();
+                match &p.idx {
+                    Indices::Nibble(a) => {
+                        let mut small = [false; 16];
+                        for (slot, &m) in small.iter_mut().zip(&mask) {
+                            *slot = m;
+                        }
+                        for _ in 0..draws {
+                            let i = cell() & 4095;
+                            let slot = ((a[i >> 1] >> ((i & 1) * 4)) & 0xf) as usize;
+                            if small[slot] {
+                                hit(i, p.palette[slot]);
+                            }
+                        }
+                    }
+                    Indices::Narrow(a) => {
+                        for _ in 0..draws {
+                            let i = cell() & 4095;
+                            let slot = a[i] as usize;
+                            if mask[slot] {
+                                hit(i, p.palette[slot]);
+                            }
+                        }
+                    }
+                    Indices::Wide(a) => {
+                        for _ in 0..draws {
+                            let i = cell() & 4095;
+                            let slot = a[i] as usize;
+                            if mask[slot] {
+                                hit(i, p.palette[slot]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Ставит состояние, возвращает прежнее. O(1), кроме роста палитры.
     pub fn set(&mut self, i: usize, state: u32) -> u32 {
         let old = self.get(i);
@@ -1624,6 +1688,32 @@ mod tests {
         assert_eq!(maps[1][0], 4, "движение останавливается на камне");
         assert_eq!(maps[2][0], 4);
         assert_eq!(maps[0][1], 4);
+    }
+
+    #[test]
+    fn sample_matches_get() {
+        // Все три ширины индексов и однородная секция: `sample` обязан дать
+        // ровно те клетки и состояния, что `get` на тех же номерах.
+        for kinds in [1u32, 5, 40, 600] {
+            let blocks: Vec<u32> = (0..4096u32).map(|i| (i * 7919) % kinds).collect();
+            let section = Section::from_blocks(blocks.clone(), 0);
+            let ticks = |s: u32| s % 3 == 1;
+            let cells: Vec<usize> = (0..5000usize).map(|k| (k * 2654435761) % 4096).collect();
+            let mut next = cells.iter().copied();
+            let mut got = Vec::new();
+            section.sample(
+                cells.len(),
+                ticks,
+                || next.next().unwrap(),
+                |i, s| got.push((i, s)),
+            );
+            let want: Vec<(usize, u32)> = cells
+                .iter()
+                .map(|&i| (i, section.get(i)))
+                .filter(|&(_, s)| ticks(s))
+                .collect();
+            assert_eq!(got, want, "kinds {kinds}");
+        }
     }
 
     #[test]
