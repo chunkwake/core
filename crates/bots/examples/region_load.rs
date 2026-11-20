@@ -207,6 +207,15 @@ async fn main() {
             if i == 0 {
                 println!("reporter ready at x={x}");
             }
+            // EQUIP=1: зомби с бронёй и мечом — гарантированный трафик
+            // SET_EQUIPMENT для проверки field-level парсера.
+            if i == 0 && std::env::var("EQUIP").as_deref() == Ok("1") {
+                bot.command(
+                    "summon minecraft:zombie 8 -59 8 {NoAI:1b,ArmorItems:[{id:\"minecraft:diamond_helmet\",count:1},{id:\"minecraft:diamond_chestplate\",count:1},{id:\"minecraft:diamond_leggings\",count:1},{id:\"minecraft:diamond_boots\",count:1}],HandItems:[{id:\"minecraft:diamond_sword\",count:1},{}]}",
+                )
+                .await;
+                bot.pump(800).await;
+            }
             // REDSTONE=1: цепь из редстоун-пыли для стресс-теста блочных фаз
             // (много запланированных тиков в разных регионах).
             if i == 0 && std::env::var("REDSTONE").as_deref() == Ok("1") {

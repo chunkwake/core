@@ -606,6 +606,23 @@ final class ProtocolBridge {
                             + ", field-level ready)");
                 }
             }
+            // Событие для плагинов: держим прежнюю семантику RawPayload
+            // (раньше пакет шёл общим путём) + отмена/замена данных.
+            Object container = containerConstructor.newInstance(type, new RawPayload(data));
+            Object event = fromServer.invoke(null, plugin, container, player);
+            for (Object listener : (Set<?>) getListeners.invoke(manager)) {
+                Set<?> types = (Set<?>) getTypes.invoke(getSendingWhitelist.invoke(listener));
+                if (types.contains(type)) {
+                    onSending.invoke(listener, event);
+                }
+            }
+            if (Boolean.TRUE.equals(event.getClass().getMethod("isCancelled").invoke(event))) {
+                return null;
+            }
+            Object handle = container.getClass().getMethod("getHandle").invoke(container);
+            if (handle instanceof RawPayload raw && raw.data != null) {
+                return raw.data;
+            }
             return data;
         } catch (Throwable broken) {
             Bridge.log(1, "protocol: set_equipment parse failed: " + broken);
