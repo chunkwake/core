@@ -6,6 +6,10 @@ import net.minecraft.world.entity.player.Player;
 public class Avatar extends Entity {
     private float health = 20.0F;
 
+    protected Avatar(java.util.UUID uuid) {
+        super(uuid);
+    }
+
     public Avatar() {
     }
 
@@ -39,6 +43,12 @@ public class Avatar extends Entity {
      */
     @Override
     public org.bukkit.craftbukkit.entity.CraftLivingEntity getBukkitEntity() {
+        if (this instanceof net.minecraft.server.level.ServerPlayer) {
+            org.bukkit.entity.Player player = org.bukkit.Bukkit.getPlayer(this.getUUID());
+            if (player instanceof org.bukkit.craftbukkit.entity.CraftLivingEntity living) {
+                return living;
+            }
+        }
         return new org.bukkit.craftbukkit.entity.CraftLivingEntity(this);
     }
 }

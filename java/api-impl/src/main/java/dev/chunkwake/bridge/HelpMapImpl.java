@@ -22,7 +22,7 @@ import org.bukkit.help.IndexHelpTopic;
  * команду из {@code CommandMap}, алиасы, индекс по плагину и общий индекс.
  * Без {@code help.yml}: своих тем и поправок у сервера нет.
  */
-final class HelpMapImpl implements HelpMap {
+final class HelpMapImpl extends org.bukkit.craftbukkit.help.SimpleHelpMap implements HelpMap {
     private final Map<String, HelpTopic> topics = new TreeMap<>(HelpTopicComparator.topicNameComparatorInstance());
     private final Map<Class<?>, HelpTopicFactory<Command>> factories = new HashMap<>();
     private HelpTopic index = index(List.of());

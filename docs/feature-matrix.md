@@ -3873,3 +3873,86 @@ plugins: 1 of 1 enabled in 867 ms
 - DeluxeHub/item-nbt-api: `Unmapped*` WARN из-за Optional-геттеров NBT в
   26.3 (см. раздел выше).
 - MythicMobs: собственный парсер версии WorldGuard.
+
+## Функциональная проверка CommandAPI: команда зарегистрирована и выполнена ботом
+
+Проверялось не только включение, но и реальное исполнение. Тестовый плагин
+`CmdProbe` (зависит от CommandAPI) регистрирует команду:
+
+```java
+new CommandAPICommand("cprobe")
+    .executes((sender, args) -> sender.sendMessage(
+        Component.text("CPROBE_OK " + sender.getName())))
+    .register();
+```
+
+Бот `opcmd_probe` заходит на сервер и выполняет `/cprobe`:
+
+```
+> /cprobe
+| CPROBE_OK boater
+```
+
+В логе сервера:
+
+```
+plugins: CommandAPI enabled in 1 ms
+plugins: CmdProbe enabled in 5 ms
+boater issued server command: /cprobe
+[CmdProbe] CPROBE sender=org.bukkit.craftbukkit.entity.CraftPlayer name=boater adv=boater
+```
+
+То есть цепочка `Rust -> Bukkit command map -> Brigadier -> CommandAPI ->
+исполнитель плагина -> ответ игроку` работает целиком.
+
+### Что пришлось закрыть для CommandAPI
+
+- **Bootstrap-семантика Paper**: во время `bootstrap` `Bukkit.getServer()`
+  ещё `null`. CommandAPI именно так различает bootstrap- и onLoad-
+  регистрацию (`PaperCommandRegistration.registerLifecycleEvent`), иначе
+  делает `checkcast JavaPlugin` на `BootstrapContext`. В
+  `ChunkwakeServer` на время `runBootstrapper()` поле `Bukkit.server`
+  временно обнуляется (через рефлексию: `Bukkit.setServer` запрещает
+  переопределение singleton) и восстанавливается в `finally`.
+- **NMS/CraftBukkit-классы**, которые CommandAPI проверяет и использует:
+  `FunctionInstantiationException`, `ExecutionCommandSource`,
+  `CommandResultCallback`, `SharedSuggestionProvider`, `CommandSourceStack`
+  (методы `getBukkitSender/getEntity/getPosition/getRotation/getLevel/
+  with*/enabledFeatures/getAvailableSounds`), аргументные классы
+  (`EntitySelector`, `BlockInput`, `MinMaxBounds` во всех трёх пакетах и
+  т.д.), CraftBukkit `CustomHelpTopic`, `SimpleHelpMap`,
+  `CraftLootTable/CraftParticle/CraftSound/CraftBlockData/...`,
+  `ProxiedNativeCommandSender`.
+- **`MessageComponentSerializer`** — реализация + ServiceLoader-файл
+  (CommandAPI зовёт `MessageComponentSerializer.message()`).
+- **Identity игрока**: `ServerPlayer(UUID, name)`,
+  `Player(UUID, name)`, `Avatar`/`LivingEntity` с UUID-конструктором,
+  `CraftPlayer` с настоящей identity, `PlayerImpl.api` создаётся в
+  конструкторе после `id/name`. Без этого source-entity имел случайный
+  UUID, и `sender.getName()` был `null` (в первом прогоне бот получал
+  `CPROBE_OK null`).
+- **`Entity.getBukkitEntity()`** теперь возвращает `CraftEntity`
+  (дескриптор Paper; CommandAPI вызывает именно его).
+- `Vec2` с полями `x/y`, `SimpleHelpMap.helpTopics`,
+  `EntitySelector.usesSelector`, `BlockInput.tag` — чтобы убрать
+  нефатальные стектрейсы CommandAPI в логе.
+
+Отдельно важный откат: сгенерированный стаб
+`net/minecraft/resources/ResourceLocation` ломал cloud (Geyser, squaremap,
+TabTPS): cloud ищет `Identifier` в порядке `MinecraftKey, ResourceLocation,
+Identifier` и, найдя нашу заглушку, не матчил `Registry.get(Identifier)`.
+Стаб удалён — Geyser/squaremap/TabTPS снова включаются.
+
+### Гейты после изменений
+
+```
+расширенный (76 плагинов): 74 of 76 enabled in 60868 ms
+  failed: MiniMOTD (сам), VoxyServerSide (сам); LOADERR: craft-engine
+  PANICS: 0
+базовый: 26 of 27 enabled in 12544 ms
+  failed: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4 -> зелёный
+```

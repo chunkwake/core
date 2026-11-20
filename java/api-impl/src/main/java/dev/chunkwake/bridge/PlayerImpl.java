@@ -23,7 +23,7 @@ import org.bukkit.plugin.Plugin;
 
 /** {@link Player}: онлайн-игрок Rust-сервера (MVP — всё, что нужно для чата и событий). */
 public final class PlayerImpl {
-    final Player api = new org.bukkit.craftbukkit.entity.CraftPlayer(this);
+    final Player api;
     private final ChunkwakeServer server;
     final UUID id;
     final String name;
@@ -44,6 +44,7 @@ public final class PlayerImpl {
         this.server = server;
         this.id = id;
         this.name = name;
+        this.api = new org.bukkit.craftbukkit.entity.CraftPlayer(this, id, name);
         // NMS-мост: плагины (DecentHolograms/TAB) шлют пакеты через
         // `player.getHandle().connection.send(...)`.
         ((org.bukkit.craftbukkit.entity.CraftPlayer) this.api).bindConnection(id);

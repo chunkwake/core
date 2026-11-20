@@ -13,6 +13,12 @@ public class Player extends LivingEntity {
         this.name = name;
     }
 
+    /** Игрок с заданным UUID (CraftPlayer.getHandle() должен совпадать). */
+    protected Player(java.util.UUID uuid, String name) {
+        super(uuid);
+        this.name = name;
+    }
+
     public String getName() {
         return this.name;
     }

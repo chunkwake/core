@@ -384,7 +384,19 @@ final class ChunkwakeServer {
                 // `paper-plugin.yml`: `loader:` runs before the main class,
                 // `bootstrapper:` prepares state for onLoad.
                 loader.runPaperLoader(logger);
-                loader.runBootstrapper();
+                // Paper-семантика: во время bootstrap `Bukkit.getServer()`
+                // ещё null (сервер создаётся позже). Плагины вроде CommandAPI
+                // именно так различают bootstrap- и onLoad-регистрацию.
+                java.lang.reflect.Field bukkitServer =
+                        org.bukkit.Bukkit.class.getDeclaredField("server");
+                bukkitServer.setAccessible(true);
+                Object savedServer = bukkitServer.get(null);
+                try {
+                    bukkitServer.set(null, null);
+                    loader.runBootstrapper();
+                } finally {
+                    bukkitServer.set(null, savedServer);
+                }
                 JavaPlugin plugin;
                 try {
                     plugin = loader.create();

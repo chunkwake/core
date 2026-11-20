@@ -8,10 +8,17 @@ import net.minecraft.server.level.ServerPlayer;
  * с {@code getHandle()}, который ищут DecentHolograms, TAB и другие плагины.
  */
 public class CraftPlayer extends CraftLivingEntity {
-    private final ServerPlayer fallback = new ServerPlayer();
+    private final ServerPlayer fallback;
 
     public CraftPlayer(Object impl) {
         super(impl);
+        this.fallback = new ServerPlayer();
+    }
+
+    /** CraftPlayer с настоящей identity игрока (UUID + имя). */
+    public CraftPlayer(Object impl, java.util.UUID id, String name) {
+        super(impl);
+        this.fallback = new ServerPlayer(id, name);
     }
 
     /** Привязывает NMS-соединение к игроку (NMS-мост плагинов). */
@@ -22,6 +29,7 @@ public class CraftPlayer extends CraftLivingEntity {
     /** Конструктор как у CraftBukkit: `CraftPlayer(CraftServer, ServerPlayer)`. */
     public CraftPlayer(org.bukkit.craftbukkit.CraftServer server, ServerPlayer entity) {
         super(server, entity);
+        this.fallback = entity == null ? new ServerPlayer() : entity;
     }
 
     public ServerPlayer getHandle() {

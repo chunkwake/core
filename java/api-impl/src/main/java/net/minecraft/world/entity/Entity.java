@@ -11,7 +11,7 @@ import net.minecraft.world.phys.Vec3;
 public class Entity {
     private static int nextId = 1;
     private final int id = nextId++;
-    private final UUID uuid = UUID.randomUUID();
+    private final UUID uuid;
     private EntityType<?> type;
     protected Level level;
     private double x;
@@ -55,11 +55,18 @@ public class Entity {
                     7, net.minecraft.network.syncher.EntityDataSerializers.INT);
 
     public Entity() {
+        this.uuid = UUID.randomUUID();
     }
 
     public Entity(EntityType<?> type, Level level) {
+        this.uuid = UUID.randomUUID();
         this.type = type;
         this.level = level;
+    }
+
+    /** Конструктор с заданным UUID (CraftPlayer должен иметь UUID игрока). */
+    protected Entity(UUID uuid) {
+        this.uuid = uuid == null ? UUID.randomUUID() : uuid;
     }
 
     public int getId() {
@@ -149,8 +156,9 @@ public class Entity {
         this.removed = true;
     }
 
-    public org.bukkit.entity.Entity getBukkitEntity() {
-        return null;
+    /** Paper: {@code Entity.getBukkitEntity()} возвращает CraftEntity. */
+    public org.bukkit.craftbukkit.entity.CraftEntity getBukkitEntity() {
+        return new org.bukkit.craftbukkit.entity.CraftEntity(this);
     }
 
     public void saveWithoutId(ValueOutput output) {

@@ -23,6 +23,15 @@ public class ServerPlayer extends net.minecraft.world.entity.player.Player {
         this.connection = new ServerGamePacketListenerImpl();
     }
 
+    public ServerPlayer(java.util.UUID uuid, String name) {
+        super(uuid, name);
+        this.connection = new ServerGamePacketListenerImpl();
+    }
+
+    public String getScoreboardName() {
+        return this.getName();
+    }
+
     private final net.minecraft.server.level.ServerLevel level =
             new net.minecraft.server.level.ServerLevel();
 

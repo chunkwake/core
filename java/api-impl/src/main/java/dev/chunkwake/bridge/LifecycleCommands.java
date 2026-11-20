@@ -132,12 +132,43 @@ final class LifecycleCommands implements Commands {
         return new Source(sender, at, sender instanceof Entity e ? e : null);
     }
 
-    private record Source(CommandSender getSender, Location getLocation, Entity getExecutor)
+    /**
+     * Источник команды: Paper-интерфейс {@code CommandSourceStack} и
+     * одновременно NMS-класс с тем же именем — CommandAPI (Paper-режим)
+     * приводит source именно к NMS-типу.
+     */
+    private static final class Source extends net.minecraft.commands.CommandSourceStack
             implements CommandSourceStack {
+        private final CommandSender sender;
+        private final Location location;
+        private final Entity executor;
+
+        Source(CommandSender sender, Location location, Entity executor) {
+            super(sender, executor instanceof org.bukkit.craftbukkit.entity.CraftEntity craft
+                    ? craft.getHandle() : null);
+            this.sender = sender;
+            this.location = location;
+            this.executor = executor;
+        }
+
+        @Override
+        public CommandSender getSender() {
+            return this.sender;
+        }
+
+        @Override
+        public Location getLocation() {
+            return this.location;
+        }
+
+        @Override
+        public Entity getExecutor() {
+            return this.executor;
+        }
 
         @Override
         public Player getPlayerOrThrow() throws com.mojang.brigadier.exceptions.CommandSyntaxException {
-            if (getSender instanceof Player p) {
+            if (this.sender instanceof Player p) {
                 return p;
             }
             throw new com.mojang.brigadier.exceptions.SimpleCommandExceptionType(
@@ -146,8 +177,8 @@ final class LifecycleCommands implements Commands {
 
         @Override
         public Entity getEntityOrThrow() throws com.mojang.brigadier.exceptions.CommandSyntaxException {
-            if (getExecutor != null) {
-                return getExecutor;
+            if (this.executor != null) {
+                return this.executor;
             }
             throw new com.mojang.brigadier.exceptions.SimpleCommandExceptionType(
                     string("You must be a player to run this command")).create();
@@ -155,12 +186,12 @@ final class LifecycleCommands implements Commands {
 
         @Override
         public CommandSourceStack withLocation(Location location) {
-            return new Source(getSender, location, getExecutor);
+            return new Source(this.sender, location, this.executor);
         }
 
         @Override
         public CommandSourceStack withExecutor(Entity executor) {
-            return new Source(getSender, getLocation, executor);
+            return new Source(this.sender, this.location, executor);
         }
     }
 
