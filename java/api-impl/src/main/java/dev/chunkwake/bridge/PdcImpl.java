@@ -245,7 +245,9 @@ final class PdcImpl {
                     o.add("list", arr);
                 }
                 case Map<?, ?> m -> o.add("c", encode(castMap(m)));
-                default -> throw new IllegalArgumentException("Unsupported NBT value " + v.getClass());
+                // Значение не относится к NBT (например, EnumSet из API):
+                // не роняем сериализацию предмета, пишем строковое представление.
+                default -> o.addProperty("str", String.valueOf(v));
             }
             return o;
         }

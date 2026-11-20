@@ -22,6 +22,45 @@ public class ItemStack {
     public static final net.minecraft.network.codec.StreamCodec<Object> STREAM_CODEC =
             net.minecraft.network.codec.SimpleStreamCodec.INSTANCE;
 
+    /**
+     * Минимальный {@code ItemStack.CODEC} (поле, которое nightcore берёт
+     * рефлексией). Кодирует в настоящий CompoundTag (`id` + `count`):
+     * nightcore проверяет результат именно на CompoundTag и затем
+     * декодирует его обратно. Полные компоненты живут в Rust-модели и
+     * через этот codec пока не переносятся.
+     */
+    public static final com.mojang.serialization.Codec<ItemStack> CODEC =
+            new com.mojang.serialization.Codec<>() {
+                @Override
+                @SuppressWarnings("unchecked")
+                public <T> com.mojang.serialization.DataResult<T> encode(
+                        ItemStack input, com.mojang.serialization.DynamicOps<T> ops, T prefix) {
+                    net.minecraft.nbt.CompoundTag tag = new net.minecraft.nbt.CompoundTag();
+                    tag.putString("id", input.getItemId());
+                    tag.putInt("count", input.getCount());
+                    return com.mojang.serialization.DataResult.success((T) tag);
+                }
+
+                @Override
+                public <T> com.mojang.serialization.DataResult<
+                        com.mojang.datafixers.util.Pair<ItemStack, T>> decode(
+                        com.mojang.serialization.DynamicOps<T> ops, T input) {
+                    if (input instanceof net.minecraft.nbt.CompoundTag tag) {
+                        String id = tag.getStringOr("id", "");
+                        if (id.isEmpty()) {
+                            return com.mojang.serialization.DataResult.error(
+                                    () -> "No element id in the map");
+                        }
+                        int count = Math.max(tag.getIntOr("count", 1), 1);
+                        return com.mojang.serialization.DataResult.success(
+                                com.mojang.datafixers.util.Pair.of(
+                                        new ItemStack(id, count), input));
+                    }
+                    return com.mojang.serialization.DataResult.error(
+                            () -> "ItemStack tag must be a compound");
+                }
+            };
+
     public ItemStack() {
         this("minecraft:air", 0);
     }

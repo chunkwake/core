@@ -3109,3 +3109,40 @@ PANICS: 0
 Тесты: `gradlew --offline cleanTest test :test-plugin:jar dist` — 55
 Java-тестов; `cargo fmt --all --check` — 0; базовый и расширенный гейты
 без паник.
+
+## nightcore: ItemStack.CODEC реализован, NPE в encodeItemStack убран
+
+Сделано:
+
+- `net.minecraft.world.item.ItemStack.CODEC` — настоящий
+  `Codec<ItemStack>`: кодирует в `CompoundTag` (`id`, `count`), как ждёт
+  nightcore (`NbtSerializer` проверяет результат на `CompoundTag`),
+  декодирует обратно; при отсутствии `id` возвращает `DataResult.error`
+  (без NPE);
+- `net.minecraft.util.datafix.DataFixers` /
+  `DataConverterRegistry` → тождественный `NoopDataFixer`
+  (`update` возвращает вход, сервер поддерживает только 26.3);
+- `net.minecraft.util.datafix.fixes.References` /
+  `DataConverterTypes` с `ITEM_STACK` (`DSL.TypeReference`);
+- `TagParser.parseCompoundFully` умеет разбирать наш компаунд
+  (`{id=minecraft:stone, count=1}`) и простой SNBT — нужен для
+  round-trip `ItemTag`;
+- `PdcImpl.Nbt.encodeTag` больше не бросает исключение на не-NBT
+  значениях (например, `EnumSet`), а пишет строку — иначе
+  `StackImpl.line()` падал у EconomyShopGUI.
+
+Результат:
+
+```
+расширенный (60 плагинов): 57 of 60 enabled in 32370 ms
+  failed: MiniMOTD, nightcore, VoxyServerSide
+  PANICS: 0
+базовый: 26 of 27 (только VoxyServerSide), PANICS: 0
+```
+
+`nightcore` больше **не падает с NPE** в `NbtSerializer.encodeItemStack`;
+его `NightCore.testNbt()` всё ещё возвращает false: codec переносит
+только `id`+`count`, поэтому после decode теряются компоненты (display
+name/lore), и `ItemStack.isSimilar` не совпадает. Это точный оставшийся
+разрыв: нужен полноценный NMS `ItemStack.CODEC` с компонентами/`DataComponentMap`,
+а не минимальный.
