@@ -39,6 +39,12 @@ public class ServerLevel extends net.minecraft.world.level.Level implements Comm
     private final EnvironmentAttributeReader attributes = new EnvironmentAttributeReader();
 
     private volatile org.bukkit.craftbukkit.CraftWorld world;
+    private volatile String dimensionKey = "minecraft:overworld";
+
+    /** Ключ измерения для запросов в Rust (`@minecraft:the_nether ...`). */
+    public void setDimension(String key) {
+        this.dimensionKey = key;
+    }
 
     /** Привязка заглушки к реальному API-миру (WorldApi). */
     public void setWorld(org.bukkit.craftbukkit.CraftWorld world) {
@@ -76,7 +82,7 @@ public class ServerLevel extends net.minecraft.world.level.Level implements Comm
 
     @Override
     public ChunkAccess getChunk(int x, int z, ChunkStatus status, boolean load) {
-        return null;
+        return new net.minecraft.world.level.chunk.LevelChunk(this, x, z);
     }
 
     @Override
@@ -152,9 +158,23 @@ public class ServerLevel extends net.minecraft.world.level.Level implements Comm
         return List.of();
     }
 
-    /** Блоки: пока воздух (настоящие данные — в Rust). */
+    /** Блоки: настоящий state id из Rust-мира через мост. */
     @Override
     public net.minecraft.world.level.block.state.BlockState getBlockState(BlockPos pos) {
-        return net.minecraft.world.level.block.Blocks.AIR.defaultBlockState();
+        return blockStateAt(this.dimensionKey, pos.getX(), pos.getY(), pos.getZ());
+    }
+
+    /** Запрос state id у Rust: `@dim state x y z` -> число. */
+    public static net.minecraft.world.level.block.state.BlockState blockStateAt(
+            String dim, int x, int y, int z) {
+        String answer = dev.chunkwake.bridge.RustWorld.request(
+                "@" + dim + " state " + x + " " + y + " " + z);
+        int id = 0;
+        try {
+            id = Integer.parseInt(answer.trim());
+        } catch (NumberFormatException ignored) {
+            // пусто/ошибка — воздух
+        }
+        return net.minecraft.world.level.block.Block.stateById(id);
     }
 }

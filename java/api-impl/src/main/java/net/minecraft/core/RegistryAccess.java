@@ -2,25 +2,29 @@ package net.minecraft.core;
 
 import java.util.Map;
 
-/** Минимальный NMS {@code RegistryAccess} (Axiom и другие). */
-public class RegistryAccess {
-    private static final RegistryAccess EMPTY = new RegistryAccess();
-    private static final Map<Object, Object> NO_REGISTRIES = Map.of();
+/**
+ * NMS {@code RegistryAccess} — интерфейс (как в ванили): squaremap и другие
+ * плагины проверяют его как интерфейс, класс даёт
+ * {@code IncompatibleClassChangeError}.
+ */
+public interface RegistryAccess {
+    RegistryAccess EMPTY = new RegistryAccess() {
+    };
 
-    public static RegistryAccess EMPTY_REGISTRY_ACCESS() {
+    static RegistryAccess EMPTY_REGISTRY_ACCESS() {
         return EMPTY;
     }
 
-    public static RegistryAccess empty() {
+    static RegistryAccess empty() {
         return EMPTY;
     }
 
-    public Map<Object, Object> registries() {
-        return NO_REGISTRIES;
+    default Map<Object, Object> registries() {
+        return Map.of();
     }
 
-    /** Вложенный {@code RegistryAccess$Frozen}, который ищет Axiom. */
-    public static final class Frozen extends RegistryAccess {
+    /** Заглушка {@code RegistryAccess$Frozen}. */
+    final class Frozen implements RegistryAccess {
         private static final Frozen EMPTY = new Frozen();
 
         private Frozen() {

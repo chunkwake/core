@@ -2429,3 +2429,33 @@ chunks:  медиана 2.06 мс, среднее 2.08
 регионы (`CHUNKWAKE_TICK_REGIONS=1`) и Folia-воркеры
 (`CHUNKWAKE_FOLIA=1`) остаются opt-in. Никаких утверждений о выигрыше
 тик-режима в документации не остаётся.
+
+## Rust-backed chunk/block мост (squaremap): сделано, но регистры впереди
+
+Реализовано:
+
+- Rust: команда мира `state x y z` -> числовой state id блока (WIP
+  `play.rs`, используется Java-мостом);
+- `dev.chunkwake.bridge.RustWorld` — публичный доступ к `Bridge.world`;
+- `ServerLevel.getBlockState` читает настоящий state id из Rust и отдаёт
+  `Block.stateById`; `ServerLevel.getChunk(...)` возвращает
+  `LevelChunk implements ChunkAccess`;
+- `LevelChunk`/`LevelChunkSection` читают блоки через
+  `ServerLevel.getBlockState` по глобальным координатам (секции 24 шт.);
+- `RegistryAccess` переделан в интерфейс (как в ванили): плагины ждут
+  интерфейс, класс давал `IncompatibleClassChangeError`;
+- добавлен стаб `net.minecraft.core.registries.Registries`.
+
+Живой гейт (36 jar): `34 of 36`, паник нет. squaremap прошёл
+`RegistryAccess`-каст, `CommonLevelAccessor`, палитры и дошёл до:
+
+```
+squaremap: enabling needs Minecraft server internals
+  ('net.minecraft.core.Registry net.minecraft.core.RegistryAccess.lookupOrThrow(...)')
+```
+
+То есть следующий барьер — **реестры** (`RegistryAccess.lookupOrThrow ->
+Registry`), а не чанки. Цепочка реестров тянет за собой реальную
+NMS-регистрацию (biome/dimension_type), которую стабами не закрыть; для
+squaremap это по-прежнему архитектурный блокер, теперь с точным
+следующим символом.

@@ -46,6 +46,7 @@ final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implements World
         this.server = server;
         this.dim = dim;
         this.handle.setWorld((org.bukkit.craftbukkit.CraftWorld) this.api);
+        this.handle.setDimension(this.dim);
     }
 
     @Override
