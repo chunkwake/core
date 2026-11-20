@@ -161,4 +161,9 @@ public class ItemStack implements net.minecraft.core.component.DataComponentHold
 
     public void applyComponents(net.minecraft.core.component.DataComponentPatch patch) {
     }
+
+    /** Paper 26.x: {@code applyComponentsAndValidate(patch)} (ItemJoin). */
+    public void applyComponentsAndValidate(net.minecraft.core.component.DataComponentPatch patch) {
+        applyComponents(patch);
+    }
 }

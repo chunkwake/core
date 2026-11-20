@@ -4040,3 +4040,68 @@ cargo fmt --all --check -> 0
 cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4 -> зелёный
 ```
+
+## EliteMobs: `/elitemobs` реально исполняется; Attribute и legacy-чары
+
+Проверено ботом на полном стенде (82 плагина): команда `/elitemobs`
+доходит до обработчика EliteMobs и возвращает его собственный ответ
+(подсказку о меню и `/em dismiss`), а не "An internal error".
+
+```
+> /elitemobs
+| [EliteMobs] /elitemobs menu not working for you? Try /elitemobs alt ...
+| ... #+---------------***---------------+ ...
+boater issued server command: /elitemobs
+[EliteMobs] User a0ad1a0e-... data successfully read!
+```
+
+### Что было сломано в ядре и закрыто
+
+1. **`Attribute.valueOf` возвращал прокси.** В paper-api `Attribute` —
+   интерфейс, статические поля и `valueOf` идут через
+   `Unsafe.get(RegistryKey.ATTRIBUTE, NamespacedKey)`. Наш `Unsafe`
+   возвращал `Stub`-прокси, и EliteMobs падал на
+   `ClassCastException: $Proxy cannot be cast to org.bukkit.attribute.Attribute`.
+   Добавлены `AttributeImpl` (реализация `Attribute`, включая
+   `compareTo`, `ordinal`, `getSentiment`, `getDefaultValue`,
+   `getTranslationKey`/`translationKey`) и `Attributes` — реестр
+   современных и legacy-имён (`generic_max_health` и т. д.).
+2. **Legacy-имена зачарований.** `DAMAGE_ALL`, `PROTECTION_FIRE`,
+   `DURABILITY` и др. не резолвились (MythicMobs/ItemJoin писали
+   `Enchantment 'DAMAGE_ALL' not found`). Добавлена карта
+   `Registries.LEGACY_ENCHANTS` и `Registries.enchantment(NamespacedKey)`;
+   `Unsafe.get(RegistryKey.ENCHANTMENT, key)` идёт через неё.
+3. **`LivingEntity.getAttribute(...)` возвращал null.** Ванильный Paper
+   всегда отдаёт экземпляр для стандартного атрибута. Теперь
+   `AttributeInstanceImpl.of` не возвращает null, а при пустом ответе
+   Rust отдаёт значение по умолчанию; `setBaseValue` запоминает значение
+   и в Java-фолбэке.
+4. **`getMaxHealth` игнорировал атрибут.** В Rust `set health` клампился
+   по видовому максимуму, а `mob get` отдавал его же. EliteMobs сначала
+   поднимает `Attribute.MAX_HEALTH` до level-зависимого значения, затем
+   ставит `health`; на мобе с малым видовым максимумом это давало
+   `Health value (3.8...) must be between 0 and 1.0`. Теперь
+   `mob get` и `set health` используют base атрибута `minecraft:max_health`
+   из `entity_attributes` (`effective_mob_max_health`), как в Paper.
+5. **`ItemStack.applyComponentsAndValidate`** — добавлен (вызывается
+   ItemJoin и др.); делегирует в `applyComponents`.
+
+Тест `AttributeInstanceTest` обновлён под ванильную семантику:
+неизвестный/неподтверждённый атрибут даёт не null, а instance со
+значением по умолчанию.
+
+### Гейты после изменений
+
+```
+расширенный (82 плагина): 79 of 82 enabled in 57490 ms
+  failed: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его
+          собственный EntityType.ENDER_CRYSTAL); LOADERR: craft-engine
+  PANICS: 0
+базовый: 26 of 27 enabled in 12139 ms
+  failed: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

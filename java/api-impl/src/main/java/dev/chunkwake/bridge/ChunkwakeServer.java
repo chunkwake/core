@@ -231,6 +231,23 @@ final class ChunkwakeServer {
     @SuppressWarnings("deprecation")
     public static final class Unsafe {
         static final int PROTOCOL = 777;
+        /**
+         * Paper {@code UnsafeValues.get(RegistryKey, NamespacedKey)}:
+         * Attribute.valueOf и статические поля Attribute идут сюда.
+         */
+        @SuppressWarnings("unchecked")
+        public <T extends org.bukkit.Keyed> T get(
+                io.papermc.paper.registry.RegistryKey<T> registryKey,
+                org.bukkit.NamespacedKey key) {
+            if (registryKey == io.papermc.paper.registry.RegistryKey.ATTRIBUTE) {
+                return (T) Attributes.byKey(key);
+            }
+            if (registryKey == io.papermc.paper.registry.RegistryKey.ENCHANTMENT) {
+                return (T) Registries.enchantment(key);
+            }
+            return null;
+        }
+
         public int getProtocolVersion() { return PROTOCOL; }
         static final int DATA_VERSION = 5023;
         public int getDataVersion() { return DATA_VERSION; }

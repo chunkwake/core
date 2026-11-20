@@ -1,7 +1,7 @@
 package dev.chunkwake.bridge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.ArrayList;
@@ -88,9 +88,14 @@ class AttributeInstanceTest {
     }
 
     @Test
-    void missingAttributeIsNull() {
+    void unknownAttributeFallsBackToDefault() {
         RegistriesTest.vanillaSourceIfPresent();
         instance();
-        assertNull(AttributeInstanceImpl.of(() -> ID, Attribute.MAX_HEALTH));
+        // Ванильная семантика: LivingEntity.getAttribute для стандартного
+        // атрибута не возвращает null; если Rust атрибут не подтвердил,
+        // Instance отдаёт значение по умолчанию.
+        AttributeInstance instance = AttributeInstanceImpl.of(() -> ID, Attribute.MAX_HEALTH);
+        assertNotNull(instance);
+        assertEquals(instance.getDefaultValue(), instance.getBaseValue(), 1e-9);
     }
 }

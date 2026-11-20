@@ -24,19 +24,28 @@ import org.bukkit.attribute.AttributeModifier;
 final class AttributeInstanceImpl implements AttributeInstance {
     private final Supplier<UUID> owner;
     private final Attribute attribute;
+    /** База, заданная плагином, если Rust не подтвердил атрибут. */
+    private Double fallbackBase;
 
     AttributeInstanceImpl(Supplier<UUID> owner, Attribute attribute) {
         this.owner = owner;
         this.attribute = attribute;
     }
 
-    /** Экземпляр, если у сущности есть такой атрибут (как {@code LivingEntity.getAttribute}). */
+    /**
+     * Экземпляр атрибута сущности (как {@code LivingEntity.getAttribute}).
+     *
+     * <p>Ванильная семантика: для стандартных атрибутов возвращается
+     * экземпляр, а не {@code null}. Раньше при пустом ответе Rust
+     * возвращался {@code null}, и EliteMobs падал на
+     * {@code getBaseValue()} у null. Теперь база по умолчанию берётся из
+     * {@link AttributeImpl#getDefaultValue()}.
+     */
     static AttributeInstance of(Supplier<UUID> owner, Attribute attribute) {
         if (attribute == null) {
             return null;
         }
-        AttributeInstanceImpl a = new AttributeInstanceImpl(owner, attribute);
-        return a.query().isEmpty() ? null : a;
+        return new AttributeInstanceImpl(owner, attribute);
     }
 
     private String request(String action) {
@@ -46,7 +55,13 @@ final class AttributeInstanceImpl implements AttributeInstance {
     /** Ответ {@code get}: первая строка — база, значение, умолчание; дальше модификаторы. */
     private List<String> query() {
         String reply = request("get");
-        return reply.isEmpty() ? List.of() : List.of(reply.split("\n"));
+        if (!reply.isEmpty()) {
+            return List.of(reply.split("\n"));
+        }
+        double base = this.fallbackBase != null
+                ? this.fallbackBase
+                : (this.attribute instanceof AttributeImpl impl ? impl.getDefaultValue() : 0.0);
+        return List.of(base + " " + base + " " + base);
     }
 
     private double number(int field) {
@@ -64,6 +79,7 @@ final class AttributeInstanceImpl implements AttributeInstance {
         if (!Double.isFinite(value)) {
             throw new IllegalArgumentException("Base value must be finite");
         }
+        this.fallbackBase = value;
         request("base " + value);
     }
 

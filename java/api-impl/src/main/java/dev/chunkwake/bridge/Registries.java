@@ -82,6 +82,54 @@ public final class Registries implements RegistryAccess {
     private KeyedRegistry<org.bukkit.enchantments.Enchantment> enchantments;
 
     /** Чары сервера (запрос {@code enchantments}): строки с уровнями, весом и ценой. */
+    /** Bukkit-легаси имена зачарований (1.12-) → современные ключи. */
+    private static final Map<String, String> LEGACY_ENCHANTS = Map.ofEntries(
+            Map.entry("DAMAGE_ALL", "sharpness"),
+            Map.entry("DAMAGE_UNDEAD", "smite"),
+            Map.entry("DAMAGE_ARTHROPODS", "bane_of_arthropods"),
+            Map.entry("PROTECTION_ENVIRONMENTAL", "protection"),
+            Map.entry("PROTECTION_FIRE", "fire_protection"),
+            Map.entry("PROTECTION_FALL", "feather_falling"),
+            Map.entry("PROTECTION_EXPLOSIONS", "blast_protection"),
+            Map.entry("PROTECTION_PROJECTILE", "projectile_protection"),
+            Map.entry("OXYGEN", "respiration"),
+            Map.entry("WATER_WORKER", "aqua_affinity"),
+            Map.entry("DEPTH_STRIDER", "depth_strider"),
+            Map.entry("FROST_WALKER", "frost_walker"),
+            Map.entry("BINDING_CURSE", "binding_curse"),
+            Map.entry("VANISHING_CURSE", "vanishing_curse"),
+            Map.entry("DIG_SPEED", "efficiency"),
+            Map.entry("SILK_TOUCH", "silk_touch"),
+            Map.entry("DURABILITY", "unbreaking"),
+            Map.entry("LOOT_BONUS_BLOCKS", "fortune"),
+            Map.entry("LOOT_BONUS_MOBS", "looting"),
+            Map.entry("LUCK", "luck_of_the_sea"),
+            Map.entry("LURE", "lure"),
+            Map.entry("MENDING", "mending"),
+            Map.entry("ARROW_DAMAGE", "power"),
+            Map.entry("ARROW_KNOCKBACK", "punch"),
+            Map.entry("ARROW_FIRE", "flame"),
+            Map.entry("ARROW_INFINITE", "infinity"),
+            Map.entry("CHANNELING", "channeling"),
+            Map.entry("IMPALING", "impaling"),
+            Map.entry("LOYALTY", "loyalty"),
+            Map.entry("RIPTIDE", "riptide"),
+            Map.entry("MULTISHOT", "multishot"),
+            Map.entry("QUICK_CHARGE", "quick_charge"),
+            Map.entry("PIERCING", "piercing"),
+            Map.entry("SOUL_SPEED", "soul_speed"),
+            Map.entry("SWIFT_SNEAK", "swift_sneak"));
+
+    /** Доступ к зачарованию по ключу (для Unsafe.get). */
+    static org.bukkit.enchantments.Enchantment enchantment(NamespacedKey key) {
+        io.papermc.paper.registry.RegistryAccess access =
+                io.papermc.paper.registry.RegistryAccess.registryAccess();
+        if (access instanceof Registries registries) {
+            return registries.enchantments().get(key);
+        }
+        return null;
+    }
+
     private synchronized KeyedRegistry<org.bukkit.enchantments.Enchantment> enchantments() {
         if (enchantments == null) {
             Map<NamespacedKey, String[]> all = new java.util.LinkedHashMap<>();
@@ -92,8 +140,26 @@ public final class Registries implements RegistryAccess {
                     all.put(k, f);
                 }
             }
+            // Legacy-имена (DAMAGE_ALL, PROTECTION_FIRE, ...) Paper находит
+            // через реестр; добавляем алиасы на современные ключи.
+            Map<NamespacedKey, NamespacedKey> legacy = new java.util.LinkedHashMap<>();
+            for (String line : world("enchantments").split("\n")) {
+                String modern = line.trim().split(" ")[0];
+                String shortName = modern.contains(":")
+                        ? modern.substring(modern.indexOf(':') + 1) : modern;
+                for (Map.Entry<String, String> alias : LEGACY_ENCHANTS.entrySet()) {
+                    if (alias.getValue().equals(shortName)) {
+                        legacy.put(NamespacedKey.minecraft(alias.getKey().toLowerCase(Locale.ROOT)),
+                                NamespacedKey.fromString(modern));
+                    }
+                }
+            }
             enchantments = new KeyedRegistry<>(
-                    k -> all.containsKey(k) ? new EnchantmentImpl(k, all.get(k)) : null,
+                    k -> {
+                        NamespacedKey target = legacy.getOrDefault(k, k);
+                        return all.containsKey(target)
+                                ? new EnchantmentImpl(target, all.get(target)) : null;
+                    },
                     () -> all.keySet().stream());
         }
         return enchantments;
@@ -338,6 +404,22 @@ public final class Registries implements RegistryAccess {
         public String translationKey() { return getTranslationKey(); }
         public ItemStack createItemStack() { return createItemStack(1); }
         public ItemStack createItemStack(int amount) { return new StackImpl(asMaterial(), amount); }
+
+        /**
+         * Производные атрибуты предмета (Paper). EliteMobs читает их через
+         * {@code Material.getDefaultAttributeModifiers(slot)} и падал на null;
+         * ванильный Paper всегда возвращает (возможно пустую) Multimap.
+         */
+        public com.google.common.collect.Multimap<org.bukkit.attribute.Attribute,
+                org.bukkit.attribute.AttributeModifier> getDefaultAttributeModifiers() {
+            return com.google.common.collect.ImmutableMultimap.of();
+        }
+
+        public com.google.common.collect.Multimap<org.bukkit.attribute.Attribute,
+                org.bukkit.attribute.AttributeModifier> getDefaultAttributeModifiers(
+                org.bukkit.inventory.EquipmentSlot slot) {
+            return com.google.common.collect.ImmutableMultimap.of();
+        }
 
         @Override
         public String toString() {

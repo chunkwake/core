@@ -5139,6 +5139,14 @@ impl PlayPlan {
     /// Запросы плагинов к мобам:
     /// `spawn вид x y z yaw` → id; `get id` → строка состояния (пусто — моба нет);
     /// `list` → строки `id вид x y z`; `set id поле значение…` → `1`/`0`.
+    fn effective_mob_max_health(&self, uuid: u128, species_max: f32) -> f32 {
+        self.attribute_base(
+            Uuid::from_u128(uuid),
+            "minecraft:max_health",
+            f64::from(species_max),
+        ) as f32
+    }
+
     pub(super) fn mob_request(&self, line: &str) -> String {
         let f: Vec<&str> = line.split(' ').collect();
         let num = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok());
@@ -5199,7 +5207,7 @@ impl PlayPlan {
                     m.yaw,
                     m.pitch,
                     m.health,
-                    m.max_health(),
+                    self.effective_mob_max_health(m.uuid, m.max_health()),
                     m.age,
                     u8::from(m.sheared),
                     m.color,
@@ -5231,7 +5239,8 @@ impl PlayPlan {
                     match f.get(2).copied() {
                         Some("health") => {
                             let h = num(3).unwrap_or(0.0) as f32;
-                            m.health = h.clamp(0.0, m.max_health());
+                            let max = self.effective_mob_max_health(m.uuid, m.max_health());
+                            m.health = h.clamp(0.0, max.max(0.0));
                             if m.health <= 0.0 && m.alive() {
                                 m.death_time = 1;
                                 died = true;
