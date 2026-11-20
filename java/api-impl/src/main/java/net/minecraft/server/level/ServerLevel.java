@@ -95,6 +95,15 @@ public class ServerLevel extends net.minecraft.world.level.Level implements Comm
         return new net.minecraft.world.level.storage.SavedDataStorage();
     }
 
+    private final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler
+            moonriseChunkTaskScheduler =
+            new ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler(this);
+
+    public ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler
+            moonrise$getChunkTaskScheduler() {
+        return this.moonriseChunkTaskScheduler;
+    }
+
     public net.minecraft.server.MinecraftServer getServer() {
         return net.minecraft.server.MinecraftServer.getServer();
     }

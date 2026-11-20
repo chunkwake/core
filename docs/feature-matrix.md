@@ -3535,3 +3535,77 @@ cargo fmt --all --check -> 0
 cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4 -> 45 suites, 953 passed, 0 failed
 ```
+
+## squaremap: PNG-тайлы создаются (live и fullrender)
+
+Трассировка `RenderJob.render()` на отдельном потоке дала точку отказа:
+
+```
+ExecutorCompletionService.take <- RenderJob.render
+```
+
+`execute()` возвращал `FAILED`, а прямой `render()` (без проглатывания
+планировщиком) показал:
+
+```
+ExecutionException -> ... -> NoClassDefFoundError:
+net/minecraft/world/level/block/StainedGlassBlock
+```
+
+После добавления `StainedGlassBlock` следующий `render()` вернул `null`
+(успех), и тайлы появились. Но полностью помочь squaremap смогли
+**Moonrise-совместимые заглушки**, без которых `PaperChunkSnapshotProvider`
+не завершал снапшоты:
+
+- `ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler`
+  (поля `schedulingLockArea`, `chunkHolderManager`, `loadExecutor`);
+- `ChunkHolderManager`, `NewChunkHolder` (отдаёт живой `LevelChunk` из Rust
+  для `getChunkIfPresentUnchecked(ChunkStatus.EMPTY)`);
+- `ca.spottedleaf.concurrentutil.lock.ReentrantAreaLock` (+`Node`);
+- `BalancedPrioritisedThreadPool$OrderedStreamGroup$Queue` (Executor);
+- `ServerLevel.moonrise$getChunkTaskScheduler()`;
+- `net.minecraft.world.level.block.StainedGlassBlock`.
+
+Живые доказательства:
+
+1. Пробник с `RenderJob.render()`:
+   `SProbe: render returned: null`.
+2. Боты (`region_load`, 2 бота, 25 с) на свежем `chunkwake-api.jar`:
+
+```
+png count: 24
+  \minecraft_overworld\0\-1_-1.png 1146 bytes
+  \minecraft_overworld\0\-1_0.png 1164 bytes
+  \minecraft_overworld\0\0_-1.png 1151 bytes
+  \minecraft_overworld\0\0_0.png 1169 bytes
+  \minecraft_overworld\1\-1_-1.png 1200 bytes
+```
+
+3. `/squaremap fullrender`:
+
+```
+> /squaremap fullrender
+| /Started full map render for minecraft:overworld
+png count: 16
+```
+
+То есть **и live-обновление по `ChunkLoadEvent`, и fullrender теперь
+создают PNG-тайлы**. Ранее полученные `BlockState.CODEC`, `Strategy`
+(класс, не интерфейс), `Registry.holderByNameCodec` тоже нужны для этого.
+
+Гейты после изменений:
+
+```
+расширенный (60 плагинов): 58 of 60 enabled in 41437 ms
+  failed: MiniMOTD (сам), VoxyServerSide (сам); LOADERR: пусто; PANICS: 0
+базовый: 26 of 27 enabled in 11718 ms
+  failed: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4 -> 45 suites, 953 passed, 0 failed
+```
+
+Замечание: live/fullrender проверялись debug-бинарником с актуальным
+`api/chunkwake-api.jar`; `release`-бинарник нужно пересобрать перед
+релизом (он содержит старую копию API).
