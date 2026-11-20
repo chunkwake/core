@@ -4,7 +4,7 @@ import java.util.Optional;
 import net.minecraft.resources.Identifier;
 
 /** NMS {@code Registry} — интерфейс (как в 26.x). */
-public interface Registry<T> {
+public interface Registry<T> extends HolderLookup.RegistryLookup<T> {
     void register(Identifier id, T value);
 
     Optional<Holder.Reference<T>> get(Identifier id);
@@ -38,11 +38,17 @@ public interface Registry<T> {
     T byId(int id);
 
     /**
-     * {@code Registry.key()}: ключ самого реестра. Нужен squaremap
-     * (`MinecraftRegistries.requireEntry`), вызывается на пустых реестрах.
+     * {@code Registry.key()}: ключ самого реестра (нужен squaremap и
+     * FancyNpcs, который кастует реестр к {@code RegistryLookup}).
      */
-    default net.minecraft.resources.ResourceKey<? extends Registry<T>> key() {
+    @Override
+    default net.minecraft.resources.ResourceKey<? extends Registry<? extends T>> key() {
         return null;
+    }
+
+    @Override
+    default com.mojang.serialization.Lifecycle registryLifecycle() {
+        return com.mojang.serialization.Lifecycle.stable();
     }
 
     /** {@code Registry.iterator()} — плагины обходят реестр. */

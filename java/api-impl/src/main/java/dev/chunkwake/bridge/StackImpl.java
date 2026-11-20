@@ -309,12 +309,61 @@ final class StackImpl extends ItemStack {
         MetaImpl(Data data, Material type) {
             this.data = data;
             this.type = type;
+            // SkullMeta нужен EconomyShopGUI, но его clone() возвращает
+            // SkullMeta, а Damageable.clone() — Damageable, поэтому один
+            // Proxy с обоими интерфейсами невозможен: выбираем по типу.
+            boolean skull = type != null
+                    && (type == Material.PLAYER_HEAD || type == Material.PLAYER_WALL_HEAD
+                            || type.name().endsWith("_SKULL") || type.name().endsWith("_HEAD"));
+            boolean potion = type != null
+                    && (type == Material.POTION || type == Material.SPLASH_POTION
+                            || type == Material.LINGERING_POTION || type == Material.TIPPED_ARROW);
+            boolean enchantedBook = type == Material.ENCHANTED_BOOK;
+            boolean map = type == Material.MAP || type == Material.FILLED_MAP;
+            boolean leather = type != null && type.name().startsWith("LEATHER_");
+            boolean firework = type == Material.FIREWORK_ROCKET || type == Material.FIREWORK_STAR;
+            boolean instrument = type == Material.GOAT_HORN;
             this.api = type == Material.WRITABLE_BOOK || type == Material.WRITTEN_BOOK
-                    ? Stub.of(org.bukkit.inventory.meta.BookMeta.class, this)
+                    ? (ItemMeta) Stub.ofAll(new Class<?>[] {
+                            org.bukkit.inventory.meta.BookMeta.class,
+                            ItemMeta.class}, this)
                     : type != null && (type == Material.SHIELD || type.name().endsWith("_BANNER"))
                             ? (ItemMeta) Stub.ofAll(new Class<?>[] {
                                     org.bukkit.inventory.meta.BlockStateMeta.class, ItemMeta.class}, this)
-                            : Stub.of(Damageable.class, this);
+                            : skull
+                                    ? new SkullMetaImpl(
+                                            new net.minecraft.world.item.component.ResolvableProfile())
+                                    : potion
+                                            ? Stub.of(org.bukkit.inventory.meta.PotionMeta.class, this)
+                                            : enchantedBook
+                                                    ? Stub.of(
+                                                            org.bukkit.inventory.meta
+                                                                    .EnchantmentStorageMeta.class, this)
+                                                    : map
+                                                            ? Stub.of(
+                                                                    org.bukkit.inventory.meta
+                                                                            .MapMeta.class, this)
+                                                            : leather
+                                                                    ? Stub.of(
+                                                                            org.bukkit.inventory.meta
+                                                                                    .LeatherArmorMeta.class,
+                                                                            this)
+                                                                    : firework
+                                                                            ? Stub.of(
+                                                                                    org.bukkit.inventory
+                                                                                            .meta
+                                                                                            .FireworkMeta.class,
+                                                                                    this)
+                                                                            : instrument
+                                                                                    ? Stub.of(
+                                                                                            org.bukkit
+                                                                                                    .inventory
+                                                                                                    .meta
+                                                                                                    .MusicInstrumentMeta.class,
+                                                                                            this)
+                                                                                    : Stub.of(
+                                                                                            Damageable.class,
+                                                                                            this);
         }
 
         private static String legacy(Component c) {

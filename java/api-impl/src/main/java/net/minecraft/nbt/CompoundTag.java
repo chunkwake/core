@@ -8,15 +8,14 @@ import java.util.Set;
 public final class CompoundTag implements Tag {
     private final Map<String, Tag> tags = new LinkedHashMap<>();
 
-    public void put(String key, Tag value) {
+    public Tag put(String key, Tag value) {
         if (key == null) {
-            return;
+            return null;
         }
         if (value == null) {
-            this.tags.remove(key);
-        } else {
-            this.tags.put(key, value);
+            return this.tags.remove(key);
         }
+        return this.tags.put(key, value);
     }
 
     public void putByte(String key, byte value) {

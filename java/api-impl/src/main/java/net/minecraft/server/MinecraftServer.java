@@ -52,6 +52,11 @@ public class MinecraftServer {
         return 0;
     }
 
+    /** {@code MinecraftServer.registryAccess()}: реестры для команд/плагинов. */
+    public net.minecraft.core.RegistryAccess.Frozen registryAccess() {
+        return net.minecraft.core.RegistryAccess.Frozen.empty();
+    }
+
     public net.minecraft.server.players.PlayerList getPlayerList() {
         return new net.minecraft.server.players.PlayerList();
     }

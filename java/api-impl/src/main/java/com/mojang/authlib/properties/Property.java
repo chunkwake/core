@@ -6,6 +6,10 @@ public class Property {
     private final String value;
     private final String signature;
 
+    public Property(String name, String value) {
+        this(name, value, null);
+    }
+
     public Property(String name, String value, String signature) {
         this.name = name;
         this.value = value;

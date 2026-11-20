@@ -41,15 +41,23 @@ public interface RegistryAccess {
     java.util.Map<String, Registry<?>> EMPTY_REGISTRIES =
             new java.util.concurrent.ConcurrentHashMap<>();
 
-    /** Заглушка {@code RegistryAccess$Frozen}. */
-    final class Frozen implements RegistryAccess {
-        private static final Frozen EMPTY = new Frozen();
+    /**
+     * {@code RegistryAccess.Frozen} — в ванили интерфейс
+     * ({@code extends RegistryAccess}); класс даёт
+     * {@code IncompatibleClassChangeError} (AxGraves).
+     */
+    interface Frozen extends RegistryAccess {
+        Frozen EMPTY = new Frozen() {
+        };
 
-        private Frozen() {
+        static Frozen empty() {
+            return EMPTY;
         }
 
-        public static Frozen empty() {
-            return EMPTY;
+        /** {@code Frozen.createSerializationContext} (AxGraves). */
+        default <T> net.minecraft.resources.RegistryOps<T> createSerializationContext(
+                com.mojang.serialization.DynamicOps<T> ops) {
+            return net.minecraft.resources.RegistryOps.create(ops, this);
         }
     }
 }

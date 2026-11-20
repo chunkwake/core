@@ -14,6 +14,9 @@ public class ItemStack {
     public byte[] patch = new byte[0];
     /** NBT в терминах старого API (DeluxeMenus: {@code u()}/{@code v()}/{@code c()}). */
     private net.minecraft.nbt.NBTTagCompound legacyTag;
+    /** Компоненты предмета (как ванильный {@code ItemStack.components}). */
+    public net.minecraft.core.component.PatchedDataComponentMap components =
+            new net.minecraft.core.component.PatchedDataComponentMap(null);
 
     public static final ItemStack EMPTY = new ItemStack("minecraft:air", 0);
     public static final net.minecraft.network.codec.StreamCodec<Object> STREAM_CODEC =

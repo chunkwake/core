@@ -1,34 +1,25 @@
 package net.minecraft.world.item.component;
 
-import com.mojang.authlib.GameProfile;
-import java.util.UUID;
-
-/** Минимальный NMS {@code ResolvableProfile} для object-компонентов TAB. */
+/**
+ * NMS {@code ResolvableProfile} (26.x): профиль головы.
+ *
+ * <p>EconomyShopGUI ищет в этом классе поле типа
+ * {@code com.mojang.authlib.GameProfile}, чтобы читать/писать владельца
+ * черепа.
+ */
 public class ResolvableProfile {
-    private final UUID id;
-    private final String name;
-    private final GameProfile profile;
+    public com.mojang.authlib.GameProfile profile;
 
-    private ResolvableProfile(UUID id, String name, GameProfile profile) {
-        this.id = id;
-        this.name = name;
+    public ResolvableProfile() {
+        this.profile = new com.mojang.authlib.GameProfile(
+                java.util.UUID.randomUUID(), "Chunkwake");
+    }
+
+    public ResolvableProfile(com.mojang.authlib.GameProfile profile) {
         this.profile = profile;
     }
 
-    public static ResolvableProfile createUnresolved(UUID id) {
-        return new ResolvableProfile(id, null, null);
+    public com.mojang.authlib.GameProfile profile() {
+        return this.profile;
     }
-
-    public static ResolvableProfile createUnresolved(String name) {
-        return new ResolvableProfile(null, name, null);
-    }
-
-    public static ResolvableProfile createResolved(GameProfile profile) {
-        return new ResolvableProfile(profile == null ? null : profile.getId(),
-                profile == null ? null : profile.getName(), profile);
-    }
-
-    public UUID id() { return this.id; }
-    public String name() { return this.name; }
-    public GameProfile gameProfile() { return this.profile; }
 }

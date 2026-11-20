@@ -2881,3 +2881,78 @@ NBT_HOOKED=true
 базовый:                  26 of 27 enabled in 11647 ms
   failed: только VoxyServerSide, PANICS: 0
 ```
+
+## Матрица расширена до 52 плагинов: 48/52 (7 из 9 новых включились)
+
+Добавлены paper/26.3: MythicMobs 5.14.0, HuskHomes 4.11.1,
+QuickShop-Hikari 6.3.0.4, EconomyShopGUI 7.3.4, DiscordSRV 1.30.5,
+Plan 5.9, GravesX 2026.4.9.2, AxGraves 1.32.2, VeinMiner 2.14.0.
+
+Живой гейт:
+
+```
+plugins: 48 of 52 enabled in 71723 ms
+failed: FancyNpcs, VoxyServerSide (сам), EconomyShopGUI, MythicMobs
+PANICS: 0
+```
+
+Включились новые: **AxGraves, HuskHomes, QuickShop-Hikari, DiscordSRV,
+Plan, GravesX, VeinMiner** (7 из 9).
+
+Что закрыто по пути (реальные NMS-символы, а не догадки):
+
+- `net.minecraft.SharedConstants` (AxGraves: `getProtocolVersion()`,
+  протокол 777 = 26.3; `VERSION`, `WORLD_VERSION`);
+- `net.minecraft.network.protocol.game.VecDelta` как интерфейс + `Linear`
+  (26.3; раньше был ошибочный record), `VecDeltaCodec`, `PositionPath`;
+- `RegistryAccess.Frozen` — **интерфейс**, а не класс
+  (`IncompatibleClassChangeError` у AxGraves), плюс
+  `createSerializationContext` -> `RegistryOps`;
+- `com.mojang.logging.LogUtils` (VeinMiner: `NoClassDefFoundError`);
+- `MinecraftServer.registryAccess()` -> `RegistryAccess.Frozen`;
+- `com.mojang.authlib.properties.Property(String,String)` (SkullUtil);
+- `PropertyMap` с полем `properties` (SkullUtil рефлексией);
+- `SkullMetaImpl` — конкретная реализация `SkullMeta` с полем
+  `profile: ResolvableProfile` (у динамического Proxy полей нет) +
+  `ResolvableProfile` с полем `GameProfile`;
+- мета-прокси по типу предмета: PotionMeta, EnchantmentStorageMeta,
+  MapMeta, LeatherArmorMeta, FireworkMeta, MusicInstrumentMeta,
+  BlockStateMeta, BookMeta (из-за конфликта `clone()` нельзя один Proxy
+  на все интерфейсы);
+- `org.apache.commons.lang.StringUtils` (commons-lang 2.x,
+  EconomyShopGUI: remove/split/join/...);
+- `net.minecraft.world.item.ItemStack.components`
+  (`PatchedDataComponentMap`) и `PatchedDataComponentMap` с полем
+  `Reference2ObjectMap` (+ `asBukkitMirror`);
+- `Registry` теперь `extends HolderLookup.RegistryLookup`, у него
+  `listElementIds/listElements/get/registryLifecycle` (FancyNpcs кастует
+  реестр к `RegistryLookup`);
+- `DamageSource`/`DamageType`, `AttributeMap`/`Attribute`/
+  `AttributeInstance`, `Mob`/`PathfinderMob`/`Monster`/`AbstractSkeleton`/
+  `SpellcasterIllager`, `GoalSelector` с полями `lockedFlags`/
+  `availableGoals`, `ItemCooldowns`, `VecDelta`, `DyeColor`,
+  `FallingBlockEntity`, `PrimedTnt`, `ResolvableFloat`/`ResolvableInt`,
+  варианты сущностей (лошади, попугаи, MobCategory), `Mth`, `SharedConstants`;
+- `CustomData` (уже был) и `CompoundTag.put` теперь возвращает `Tag`
+  (26.3), как ожидает EconomyShopGUI.
+
+Точные оставшиеся блокеры (первый недостающий символ, дальше цепочка
+продолжается — это уже не точечные заглушки, а полноценный NMS-слой):
+
+- **FancyNpcs**: `net.minecraft.world.entity.animal.axolotl.Axolotl$Variant`
+  (до этого — `Parrot$Variant`, `Markings`, `equine.Variant`,
+  `SpellcasterIllager$IllagerSpell`). Плагин ранее включался; после того
+  как `Registry` стал `RegistryLookup`, он пошёл глубже и теперь требует
+  реальные варианты сущностей. Зафиксировано как регрессия.
+- **MythicMobs**: `net.minecraft.world.phys.HitResult` (до этого —
+  `MobCategory`, `Mob`, `AttributeMap`, `ItemCooldowns`,
+  `FallingBlockEntity`, `PrimedTnt`, `DamageSource`, `GoalSelector`,
+  `ResolvableFloat/Int`). Плагин рассчитан на настоящий NMS-entity-слой.
+- **EconomyShopGUI**: прошёл все рефлексии (SkullUtil, ItemStack-
+  компоненты, StringUtils), теперь `NullPointerException: config is
+  null` внутри самого плагина при загрузке дефолтных магазинов —
+  его собственный конфиг не создался.
+- **VoxyServerSide** — самоотключается по `plugin.yml`.
+
+Базовый гейт после изменений: `26 of 27 enabled`, падает только
+VoxyServerSide, паник нет.

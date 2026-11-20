@@ -13,6 +13,17 @@ public final class BuiltInRegistries {
             new SimpleDefaultedRegistry<>(
                     net.minecraft.resources.Identifier.parse("minecraft:pig"));
 
+    /** Реестры жителей (FancyNpcs: {@code VILLAGER_PROFESSION}). */
+    public static final DefaultedRegistry<Object> VILLAGER_PROFESSION =
+            new SimpleDefaultedRegistry<>(
+                    net.minecraft.resources.Identifier.parse("minecraft:none"));
+
+    public static final DefaultedRegistry<Object> VILLAGER_TYPE =
+            new SimpleDefaultedRegistry<>(
+                    net.minecraft.resources.Identifier.parse("minecraft:plains"));
+
+
+
     /**
      * Реестр реестров ({@code BuiltInRegistries.REGISTRY}). PacketEvents/
      * Incendo Cloud достают через него {@code command_argument_type}.

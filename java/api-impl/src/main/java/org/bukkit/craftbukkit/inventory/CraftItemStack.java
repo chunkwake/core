@@ -27,6 +27,11 @@ public final class CraftItemStack extends org.bukkit.inventory.ItemStack {
         return asBukkitCopy(stack);
     }
 
+    /** Paper-метод {@code asBukkitMirror}: копия без клонирования NMS-стека. */
+    public static org.bukkit.inventory.ItemStack asBukkitMirror(ItemStack stack) {
+        return asBukkitCopy(stack);
+    }
+
     public static org.bukkit.inventory.ItemStack asBukkitCopy(ItemStack stack) {
         if (stack == null || stack.isEmpty()) {
             return new org.bukkit.inventory.ItemStack(Material.AIR);

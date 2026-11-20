@@ -5,14 +5,14 @@ import com.google.common.collect.Multimap;
 
 /** Минимальный authlib {@code PropertyMap} поверх Guava Multimap. */
 public class PropertyMap extends ForwardingMultimap<String, Property> {
-    private final Multimap<String, Property> delegate;
+    private final Multimap<String, Property> properties;
 
-    public PropertyMap(Multimap<String, Property> delegate) {
-        this.delegate = delegate;
+    public PropertyMap(Multimap<String, Property> properties) {
+        this.properties = properties;
     }
 
     @Override
     protected Multimap<String, Property> delegate() {
-        return this.delegate;
+        return this.properties;
     }
 }
