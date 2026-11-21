@@ -11,6 +11,11 @@ public class ClientboundBlockUpdatePacket implements Packet {
     private BlockState state;
     private int stateId;
 
+    /** {@code ClientboundBlockUpdatePacket(BlockGetter, BlockPos)} (CraftEngine). */
+    public ClientboundBlockUpdatePacket(net.minecraft.world.level.BlockGetter level, BlockPos pos) {
+        this(pos, level == null ? null : level.getBlockState(pos));
+    }
+
     public ClientboundBlockUpdatePacket(BlockPos pos, BlockState state) {
         this(pos, state, Block.getId(state));
     }

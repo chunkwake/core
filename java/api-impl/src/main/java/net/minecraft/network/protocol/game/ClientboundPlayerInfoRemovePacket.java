@@ -8,4 +8,7 @@ package net.minecraft.network.protocol.game;
 public class ClientboundPlayerInfoRemovePacket {
     public ClientboundPlayerInfoRemovePacket() {
     }
+
+    public ClientboundPlayerInfoRemovePacket(java.util.List<java.util.UUID> ids) {
+    }
 }

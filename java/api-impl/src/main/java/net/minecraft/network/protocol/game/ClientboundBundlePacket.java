@@ -8,4 +8,7 @@ package net.minecraft.network.protocol.game;
 public class ClientboundBundlePacket {
     public ClientboundBundlePacket() {
     }
+
+    public ClientboundBundlePacket(Iterable<?> packets) {
+    }
 }

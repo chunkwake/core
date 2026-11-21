@@ -6,6 +6,10 @@ import net.minecraft.network.protocol.Packet;
 public class ClientboundRemoveEntitiesPacket implements Packet {
     private final int[] ids;
 
+    public ClientboundRemoveEntitiesPacket(it.unimi.dsi.fastutil.ints.IntList ids) {
+        this(ids == null ? new int[0] : ids.toIntArray());
+    }
+
     public ClientboundRemoveEntitiesPacket(int... ids) {
         this.ids = ids == null ? new int[0] : ids.clone();
     }

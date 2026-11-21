@@ -3,8 +3,26 @@ package net.minecraft.core;
 import net.minecraft.resources.ResourceKey;
 
 /** Заглушка NMS {@code HolderLookup}. */
-public interface HolderLookup<T> {
-    interface Provider {
+public interface HolderLookup<T> extends HolderGetter<T> {
+    @Override
+    default java.util.Optional<Holder.Reference<T>> get(
+            ResourceKey<T> key) {
+        return java.util.Optional.empty();
+    }
+
+    @Override
+    default java.util.Optional<HolderSet.Named<T>> get(
+            net.minecraft.tags.TagKey<T> tag) {
+        return java.util.Optional.empty();
+    }
+
+    interface Provider extends HolderGetter.Provider {
+        @Override
+        default <T> HolderGetter<T> lookupOrThrow(
+                ResourceKey<? extends Registry<? extends T>> key) {
+            return null;
+        }
+
         /** {@code HolderLookup.Provider.createSerializationContext} (nightcore). */
         default <T> net.minecraft.resources.RegistryOps<T> createSerializationContext(
                 com.mojang.serialization.DynamicOps<T> ops) {

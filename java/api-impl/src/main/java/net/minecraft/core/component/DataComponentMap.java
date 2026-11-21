@@ -4,7 +4,7 @@ import java.util.Iterator;
 import java.util.Set;
 
 /** NMS {@code DataComponentMap}. */
-public interface DataComponentMap extends Iterable<Object> {
+public interface DataComponentMap extends Iterable<Object>, DataComponentGetter {
     /** {@code DataComponentMap.builder()} (CraftEngine). */
     static Builder builder() {
         return new Builder() {

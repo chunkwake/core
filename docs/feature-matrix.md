@@ -4774,3 +4774,65 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 180/504 (было 169)
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=169 bad=335
+стало: ok=180 bad=324
+```
+
+Полностью закрылись 11 прокси:
+
+```
+HolderGetterProxy
+HolderLookupProxy
+LayeredRegistryAccessProxy
+RegistryAccessProxy
+RegistryProxy
+DataComponentGetterProxy
+DataComponentMapProxy
+ClientboundBlockUpdatePacketProxy
+ClientboundPlayerInfoRemovePacketProxy
+ClientboundRemoveEntitiesPacketProxy
+BlockInWorldProxy
+```
+
+Ключевое: не хватало цепочки `HolderOwner` → `HolderGetter` →
+`HolderGetter.Provider`, из-за чего не резолвились `Registry`,
+`RegistryAccess` и `DataComponentMap` (они наследуют эти интерфейсы).
+
+Добавлено:
+
+- `HolderOwner` + `HolderGetter` (методы `get/getOrThrow` для
+  `ResourceKey` и `TagKey`, `getRandomElementOf`) и вложенный `Provider`;
+- `HolderLookup extends HolderGetter`, `HolderLookup.Provider extends
+  HolderGetter.Provider`;
+- `LayeredRegistryAccess`, `TypedInstance`, `DataComponentGetter`;
+- `DataComponentMap extends DataComponentGetter`;
+- `BlockInWorld(LevelReader, BlockPos, boolean)` + `getState/setState`;
+- `PlayerTeam(Scoreboard, String)`;
+- `ClientboundBlockUpdatePacket(BlockGetter, BlockPos)`,
+  `ClientboundBundlePacket(Iterable)`,
+  `ClientboundRemoveEntitiesPacket(IntList)`,
+  `ClientboundPlayerInfoRemovePacket(List<UUID>)`.
+
+Остаётся 324 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 93111 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 19608 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
