@@ -29,6 +29,11 @@ final class ItemFactoryImpl {
         return type == null || type.isAir() ? null : new StackImpl.MetaImpl(new StackImpl.Data(), type).api;
     }
 
+    /** {@code ItemFactory#getDefaultLeatherColor}: ванильный цвет кожи. */
+    public org.bukkit.Color getDefaultLeatherColor() {
+        return org.bukkit.Color.fromRGB(0xA06540);
+    }
+
     public boolean equals(ItemMeta a, ItemMeta b) {
         return a == b || data(a).equals(data(b));
     }

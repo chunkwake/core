@@ -252,6 +252,9 @@ final class ChunkwakeServer {
         static final int DATA_VERSION = 5023;
         public int getDataVersion() { return DATA_VERSION; }
 
+        /** {@code UnsafeValues#getMainLevelName}: имя основного мира. */
+        public String getMainLevelName() { return "world"; }
+
         /** `Material.asBlockType()` для legacy-констант: без этого `isBlock()` падал. */
         public org.bukkit.Material fromLegacy(org.bukkit.Material type) {
             if (type == null || !type.isLegacy()) {

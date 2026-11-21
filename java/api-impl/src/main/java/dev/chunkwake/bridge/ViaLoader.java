@@ -201,6 +201,12 @@ final class ViaLoader {
             return server.api;
         }
 
+        /** {@code Plugin#getDefaultWorldGenerator}: у библиотечных плагинов его нет. */
+        public org.bukkit.generator.ChunkGenerator getDefaultWorldGenerator(
+                String worldName, String id) {
+            return null;
+        }
+
         public Logger getLogger() {
             return Logger.getLogger(description.getName());
         }

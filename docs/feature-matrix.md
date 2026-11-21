@@ -6088,3 +6088,35 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## Паритет API, батч 2: UnsafeValues, ItemFactory, Plugin; попытка Typed.isSolid
+
+Закрыты ещё три заглушки, которые давали `api: ... is not implemented`:
+
+- `UnsafeValues#getMainLevelName()` — `world`;
+- `ItemFactory#getDefaultLeatherColor()` — ванильный `0xA06540`;
+- `Plugin#getDefaultWorldGenerator(String, String)` — `null` для
+  библиотечных плагинов Via (раньше был Soft-warn на каждом старте).
+
+`Typed.isSolid` (это `ItemType.Typed`/`BlockType.Typed`):
+попытка реализовать через `Material.isSolid()` привела к
+`StackOverflowError` — в paper-api `Material.isSolid()` сам идёт в
+`asBlockType().isSolid()` (наш прокси) и возвращается обратно.
+Изменение откатили, MythicMobs снова включается. Правильная реализация
+требует данных о твёрдости блока из реестров Rust, а не обёртки над
+`Material`.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 54245 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 14291 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
