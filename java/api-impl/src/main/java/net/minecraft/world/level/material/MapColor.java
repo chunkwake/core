@@ -11,6 +11,11 @@ public class MapColor {
 
     private final int id;
 
+    /** {@code MapColor.byId(int)} (CraftEngine). */
+    public static MapColor byId(int id) {
+        return NONE;
+    }
+
     public MapColor(int id, int col) {
         this.id = id;
         this.col = 0xFF000000 | (col & 0xFFFFFF);

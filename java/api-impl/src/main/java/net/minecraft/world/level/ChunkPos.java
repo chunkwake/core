@@ -43,6 +43,11 @@ public class ChunkPos {
         return out.stream();
     }
 
+    /** {@code ChunkPos.getWorldPosition()} (CraftEngine). */
+    public net.minecraft.core.BlockPos getWorldPosition() {
+        return new net.minecraft.core.BlockPos(this.x << 4, 0, this.z << 4);
+    }
+
     public long pack() {
         return this.toLong();
     }

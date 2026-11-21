@@ -14,6 +14,8 @@ public class MappedRegistry<T> implements Registry<T> {
     private final Map<Identifier, T> byKey = new LinkedHashMap<>();
     /** Поле, которое ищет CraftEngine (MappedRegistryProxy#isFrozen). */
     private boolean frozen;
+    /** Поле, которое ищет CraftEngine (setUnregisteredIntrusiveHolders). */
+    private Map<Object, Object> unregisteredIntrusiveHolders = new LinkedHashMap<>();
     private final Map<Identifier, Integer> ids = new LinkedHashMap<>();
     private final Map<Integer, T> byId = new LinkedHashMap<>();
 

@@ -13,6 +13,8 @@ public class DamageSource {
     private final Entity causingEntity;
     private final Entity directEntity;
     private final Vec3 position;
+    /** Поле, которое ищет CraftEngine (DamageSourceProxy#isCritical). */
+    public boolean critical;
 
     public DamageSource(Holder<DamageType> type) {
         this(type, null, null, null);

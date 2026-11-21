@@ -12,6 +12,10 @@ public class ItemCooldowns {
     public ItemCooldowns() {
     }
 
+    /** {@code ItemCooldowns.addCooldown(ItemStack, int)} (CraftEngine). */
+    public void addCooldown(net.minecraft.world.item.ItemStack item, int ticks) {
+    }
+
     public boolean isOnCooldown(Item item) {
         return this.cooldowns.containsKey(item);
     }

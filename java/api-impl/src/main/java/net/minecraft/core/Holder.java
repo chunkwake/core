@@ -12,6 +12,11 @@ public interface Holder<T> {
         return new Reference<>(value);
     }
 
+    /** {@code Holder.isBound()} (CraftEngine). */
+    default boolean isBound() {
+        return true;
+    }
+
     /** {@code Holder.getRegisteredName()} (CraftEngine). */
     default String getRegisteredName() {
         return "";

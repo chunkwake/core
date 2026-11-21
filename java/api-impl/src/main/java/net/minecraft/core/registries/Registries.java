@@ -9,6 +9,7 @@ public final class Registries {
     /** Поле, которое ищет CraftEngine (RegistriesProxy#getAttribute). */
     public static final ResourceKey<Registry<Object>> attribute =
             ResourceKey.createRegistryKey(Identifier.parse("minecraft:attribute"));
+    public static final ResourceKey<Registry<Object>> ATTRIBUTE = attribute;
 
     public static final ResourceKey<Registry<Object>> BIOME =
             key("biome");

@@ -4406,3 +4406,68 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 143/504 (было 135)
+
+Очередной батч членов, которые CraftEngine ищет рефлексией. Пробник
+`P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=135 bad=369
+стало: ok=143 bad=361
+```
+
+Полностью закрылись 8 прокси:
+
+```
+ParticleOptionsProxy
+ComponentSerializationProxy
+StyleProxy
+ServerCommonPacketListenerImplProxy
+InteractionResultProxy
+DamageSourceProxy
+MapColorProxy
+SpigotConfigProxy
+```
+
+Добавлено:
+
+- `Holder.isBound()`;
+- `MappedRegistry.unregisteredIntrusiveHolders`;
+- `BuiltInRegistries.ATTRIBUTE` / `Registries.ATTRIBUTE` (алиасы);
+- `Item.components()` + поле `components`;
+- `Player.inventory` (поле);
+- `ServerPlayer.getBukkitEntity()` (ковариантный override);
+- `SoundEvent.location`;
+- `AbstractContainerMenu.incrementStateId()`;
+- `Slot.getItem()`;
+- `ItemCooldowns.addCooldown(ItemStack, int)`;
+- `ChunkPos.getWorldPosition()`;
+- `MapColor.byId(int)`;
+- `AABB.setMinX(double)`;
+- `Vec3.multiply(double,double,double)` и `multiply(Vec3)`;
+- `SpigotConfig.bungee`;
+- `DamageSource.critical`;
+- `ComponentSerialization.CODEC` + класс `HoverEvent` и `Style.hoverEvent`;
+- `InteractionResult.SUCCESS_SERVER`;
+- `Entity.position` (поле);
+- `ServerCommonPacketListenerImpl.closed`;
+- `ParticleOptions.writeToNetwork(FriendlyByteBuf)`.
+
+Итог: 361 прокси ещё не резолвятся, в основном отсутствующие
+NMS/CraftBukkit/Moonrise-классы. CraftEngine остаётся LOADERR.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 49966 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 11917 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

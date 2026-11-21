@@ -28,6 +28,12 @@ public class ServerPlayer extends net.minecraft.world.entity.player.Player {
         this.connection = new ServerGamePacketListenerImpl();
     }
 
+    /** {@code ServerPlayer.getBukkitEntity()} (CraftEngine). */
+    @Override
+    public org.bukkit.craftbukkit.entity.CraftLivingEntity getBukkitEntity() {
+        return super.getBukkitEntity();
+    }
+
     public String getScoreboardName() {
         return this.getName();
     }

@@ -9,6 +9,8 @@ import net.minecraft.network.protocol.Packet;
  */
 public class ServerCommonPacketListenerImpl implements ServerPlayerConnection {
     public final Connection connection;
+    /** Поле, которое ищет CraftEngine (ServerCommonPacketListenerImplProxy). */
+    public boolean closed;
 
     public ServerCommonPacketListenerImpl() {
         this(new Connection());

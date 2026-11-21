@@ -137,6 +137,9 @@ public class Entity implements net.minecraft.network.syncher.SyncedDataHolder {
         return this.boundingBox;
     }
 
+    /** Поле, которое ищет CraftEngine (EntityProxy#getPosition). */
+    public Vec3 position = Vec3.ZERO;
+
     public Vec3 position() {
         return new Vec3(this.x, this.y, this.z);
     }

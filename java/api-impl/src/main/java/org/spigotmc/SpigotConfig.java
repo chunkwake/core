@@ -7,6 +7,8 @@ package org.spigotmc;
  */
 public final class SpigotConfig {
     public static boolean bungeecord;
+    /** Алиас, который ищет CraftEngine (SpigotConfigProxy#getBungee). */
+    public static boolean bungee = bungeecord;
 
     private SpigotConfig() {
     }

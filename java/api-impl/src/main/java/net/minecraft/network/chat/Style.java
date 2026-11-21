@@ -12,6 +12,8 @@ public final class Style {
     private final Boolean obfuscated;
     private final FontDescription font;
     private final Integer shadowColor;
+    /** Поле, которое ищет CraftEngine (StyleProxy#getHoverEvent). */
+    private HoverEvent hoverEvent;
 
     private Style() {
         this(null, null, null, null, null, null, null, null);

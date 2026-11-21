@@ -25,6 +25,16 @@ public class Vec3 {
         return this.z;
     }
 
+    /** {@code Vec3.multiply(double,double,double)} (CraftEngine). */
+    public Vec3 multiply(double fx, double fy, double fz) {
+        return new Vec3(this.x * fx, this.y * fy, this.z * fz);
+    }
+
+    /** {@code Vec3.multiply(Vec3)} (CraftEngine). */
+    public Vec3 multiply(Vec3 other) {
+        return this.multiply(other.x, other.y, other.z);
+    }
+
     public Vec3 add(double dx, double dy, double dz) {
         return new Vec3(this.x + dx, this.y + dy, this.z + dz);
     }

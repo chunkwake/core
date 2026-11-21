@@ -13,6 +13,9 @@ public class Player extends LivingEntity {
         this.name = name;
     }
 
+    /** Поле, которое ищет CraftEngine (PlayerProxy#setInventory). */
+    private Object inventory;
+
     /** Игрок с заданным UUID (CraftPlayer.getHandle() должен совпадать). */
     protected Player(java.util.UUID uuid, String name) {
         super(uuid);
