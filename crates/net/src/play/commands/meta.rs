@@ -503,6 +503,7 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
             ],
         ),
         Spec::leaf("version", GAMEMASTERS, version),
+        Spec::leaf("mspt", ADMINS, mspt),
         Spec::group(
             "setidletimeout",
             ADMINS,
@@ -521,6 +522,11 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
 }
 
 /// `/perf start`: снимок нагрузки и запуск профиля тика.
+/// `/mspt`: времена тиков как у Paper (avg/min/max для 5с, 10с, 1м).
+fn mspt(ctx: &Context<'_>, _call: &Call<'_>) -> Outcome {
+    Outcome::text(ctx.plan.tick_meter_line())
+}
+
 fn perf_start(ctx: &Context<'_>, _call: &Call<'_>) -> Outcome {
     let started = ctx.plan.start_debug_profile();
     let snapshot = crate::play::commands::perf::render_snapshot(ctx.plan);

@@ -334,6 +334,7 @@ mod tests {
             ("msg", EVERYONE),
             ("teammsg", EVERYONE),
             ("tps", EVERYONE),
+            ("mspt", ADMINS),
         ] {
             assert_eq!(level_of(name), Some(level), "{name}");
         }

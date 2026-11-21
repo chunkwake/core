@@ -6388,3 +6388,65 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## A/B против Paper 26.3: MSPT на одинаковой нагрузке
+
+Инструмент: `scripts/ab_paper.ps1` (плоский мир, один бот-игрок подаёт нагрузку
+и снимает `/mspt`; Paper jar задаётся через `PAPER_JAR`).
+
+Условия:
+
+- Paper 26.3 build 248 (`E:\minecraft_server\data\paper-26.3-248.jar`),
+  Java 25, `-Xms2G -Xmx2G`; Chunkwake `target\debug\chunkwake.exe`;
+- плоский мир, seed 1, view/simulation distance 8, `doMobSpawning=false`,
+  `maxEntityCramming=0`, бот в игре всё время;
+- коровы: кольцо радиусом 6..18 блоков вокруг игрока (200, затем +800);
+- редстоун: линия из 64 `redstone_wire` + левер, 20 переключений по 250 мс,
+  замер после 4 с;
+- `/mspt` на обоих серверах (в Chunkwake команда добавлена этим шагом — раньше
+  её не было в дереве команд).
+
+Медианы из 3 замеров `/mspt` (окно 5 с), мс:
+
+```
+прогон 1 (cramming по умолчанию):
+  Chunkwake   200: 4.50   1000: 6.60   1000+redstone: 7.80
+  Paper       200: 5.00   1000: 15.80  1000+redstone: 10.30
+
+прогон 2 (maxEntityCramming=0, чтобы стадо не вымирало):
+  Chunkwake   200: 4.70   1000: 7.70   1000+redstone: 8.90
+  Paper       200: 5.90   1000: 11.00  1000+redstone: 10.40
+```
+
+Вывод: на 200 мобах разница в пределах шума (Chunkwake 4.5-4.7 против
+Paper 5.0-5.9), на 1000 мобах Chunkwake ниже в 1.4-2 раза, на
+1000+редстоуне — примерно паритет или немного лучше (8.9 против 10.3-10.4).
+Числа получены на одной машине, двух прогонах и одном билде Paper;
+статистической значимости нет, это ориентир, а не сертификация.
+
+Оговорки: Paper не показывает число сущностей в `execute if entity`, а
+Chunkwake не поддерживает эту форму `execute`, поэтому фактическое число
+коров не сверялось независимо; в прогоне 1 Paper-стадо могло частично
+погибнуть от cramming (потому прогон 2 с `maxEntityCramming=0`).
+
+### Заодно
+
+- `scripts/ab_paper.ps1` — воспроизводимый стенд (Paper/Chunkwake + бот);
+- бот `opcmd_probe`: `CMD_FILE` (команды из файла), `wait <ms>` между ними,
+  `HOLD_MS` — остаться в игре;
+- в Chunkwake добавлена команда `/mspt` (Paper parity), тест дерева команд
+  обновлён: `mspt` внесён в список не-ванильных дополнений.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 83598 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 20126 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

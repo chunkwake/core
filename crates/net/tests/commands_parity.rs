@@ -76,8 +76,8 @@ fn our_roots() -> Vec<String> {
         .collect()
 }
 
-/// Команды, которых в ванили нет: наши дополнения.
-const EXTENSIONS: &[&str] = &["top", "tps"];
+/// Команды, которых в ванили нет: дополнения Paper/Chunkwake.
+const EXTENSIONS: &[&str] = &["top", "tps", "mspt"];
 
 /// Команды ванили, которых у нас пока нет: этап C и позже.
 const NOT_YET: &[&str] = &[

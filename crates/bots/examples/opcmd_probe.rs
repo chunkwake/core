@@ -80,6 +80,34 @@ async fn main() {
     }
     // `INPUTS=1`: слот 3, шифт вкл/выкл, бег вкл/выкл — события
     // `PlayerItemHeld`/`ToggleSneak`/`ToggleSprint`.
+    // `CMD_FILE=<path>`: отправить строки файла как команды с паузой `GAP_MS`.
+    if let Ok(path) = std::env::var("CMD_FILE")
+        && let Ok(text) = std::fs::read_to_string(&path)
+    {
+        let gap = std::env::var("GAP_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200);
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(ms) = line.strip_prefix("wait ") {
+                if let Ok(ms) = ms.trim().parse::<u64>() {
+                    wait(&mut c, ms).await;
+                    drain(&mut c);
+                }
+                continue;
+            }
+            println!("> /{line}");
+            let mut w = Writer::new();
+            w.var_int(cmd).string(line);
+            c.send_raw(&w.buf).await.unwrap();
+            wait(&mut c, gap).await;
+            drain(&mut c);
+        }
+    }
     if std::env::var("INPUTS").is_ok() {
         let held = id(Direction::Serverbound, "set_carried_item");
         let input = id(Direction::Serverbound, "player_input");
@@ -215,6 +243,15 @@ async fn main() {
         w.var_int(action).var_int(0).i64(p).u8(1).var_int(1);
         c.send_raw(&w.buf).await.unwrap();
         wait(&mut c, 2000).await;
+        drain(&mut c);
+    }
+    // `HOLD_MS=n`: остаться в игре (для A/B-замеров тика с игроком).
+    if let Some(ms) = std::env::var("HOLD_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        println!("> hold {ms}");
+        wait(&mut c, ms).await;
         drain(&mut c);
     }
 }
