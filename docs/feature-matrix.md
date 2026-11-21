@@ -6512,3 +6512,47 @@ cargo +1.100.0 test --workspace -- --test-threads=4
 
 Проверка: `CommandArgumentsTest` (парсинг селекторов/имён и отказ на пустой
 строке) проходит в `gradlew test`.
+
+## CraftEngine: `BlockBehaviour$BlockStateBase` — жёсткий NMS-блокер (263/504)
+
+Проверено без серверных прогонов:
+
+- `gradlew --offline dist` — BUILD SUCCESSFUL (jar после правок
+  `VanillaArgumentProvider` и сохранения сущностей);
+- пробник `P2` по 504 прокси: `ok=263 bad=241` (без изменений — правки
+  этого шага не добавляли NMS-классов).
+
+Цепочка загрузки CraftEngine сейчас:
+
+```
+BonemealableBlockProxy        (закрыт)
+  -> WorldlyContainerHolderProxy (закрыт)
+  -> BlockReflections.<clinit>
+     -> Cannot find proxied class
+        BlockBehaviourProxy$BlockStateBaseProxy
+```
+
+Факты по цели:
+
+- прокси `BlockStateBaseProxy` требует 80 абстрактных методов
+  (40 пар get/set + `initCache`, `getLightDampening$0/$1`, `getBlock`,
+  `getShape`, `getCollisionShape`, `asBlockData`, `randomTick`, ...);
+- реальный `BlockBehaviour$BlockStateBase` — это
+  `StateHolder<Block, BlockState>` с 27 полями-кэшами
+  (`lightEmission`, `useShapeForLightOcclusion`, `isAir`, `pushReaction`,
+  `mapColor`, `destroySpeed`, `isRedstoneConductor`, `isSuffocating`,
+  `isViewBlocking`, `postProcess`, `emissiveRendering`, `offsetFunction`,
+  `instrument`, `replaceable`, `cache`, `fluidState`, ...);
+- CraftEngine при инъекции блоков **пишет** эти поля через прокси и затем
+  пользуется реальными `getShape`/`getCollisionShape`/`asBlockData`/
+  `randomTick`, т.е. пустые заглушки свяжутся, но дадут неверное
+  поведение блоков и падения на `cache == null`.
+
+Вывод: это не «добавить класс», а реализовать настоящий
+NMS-слой block-state (StateHolder + BlockState + кэш + регистрация
+состояний). Без этого CraftEngine остаётся LOADERR; ближайший корректный
+путь — собственная реализация block-state/реестра, а не заглушка.
+
+Тяжёлые гейты (расширенный/базовый, 82/27 плагинов) после этих правок не
+перезапускались — по договорённости отложены до разрешения пользователя;
+последние известные числа: 79/82, 26/27, PANICS 0.
