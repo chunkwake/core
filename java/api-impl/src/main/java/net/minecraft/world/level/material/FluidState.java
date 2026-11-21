@@ -2,6 +2,11 @@ package net.minecraft.world.level.material;
 
 /** NMS {@code FluidState}: состояние жидкости (water/lava/empty). */
 public final class FluidState {
+    /** {@code FluidState.is(TagKey)} (CraftEngine). */
+    public boolean is(net.minecraft.tags.TagKey<Fluid> tag) {
+        return false;
+    }
+
     /** {@code FluidState.getAmount()} (CraftEngine). */
     public int getAmount() {
         return 0;

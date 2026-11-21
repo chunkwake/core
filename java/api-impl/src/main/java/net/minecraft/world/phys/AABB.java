@@ -13,6 +13,11 @@ public class AABB {
     public final double maxY;
     public final double maxZ;
 
+    /** {@code AABB.setMinZ(double)} (CraftEngine). */
+    public AABB setMinZ(double minZ) {
+        return new AABB(this.minX, this.minY, minZ, this.maxX, this.maxY, this.maxZ);
+    }
+
     /** {@code AABB.setMinY(double)} (CraftEngine). */
     public AABB setMinY(double minY) {
         return new AABB(this.minX, minY, this.minZ, this.maxX, this.maxY, this.maxZ);

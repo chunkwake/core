@@ -5,6 +5,11 @@ import net.minecraft.world.level.block.state.BlockState;
 
 /** NMS {@code Level} (минимально, но с настоящей иерархией). */
 public class Level implements LevelAccessor, net.minecraft.world.level.LevelHeightAccessor {
+    /** {@code Level.getWorld()} (CraftEngine). */
+    public org.bukkit.craftbukkit.CraftWorld getWorld() {
+        return null;
+    }
+
     /** {@code Level.dimensionType()} (CraftEngine). */
     public net.minecraft.world.level.dimension.DimensionType dimensionType() {
         return new net.minecraft.world.level.dimension.DimensionType();

@@ -2,6 +2,10 @@ package net.minecraft.world.item;
 
 /** Минимальный NMS {@code Item} (id предмета). */
 public class Item {
+    /** Поле, которое ищет CraftEngine (ItemProxy#getBuiltInRegistryHolder). */
+    public final net.minecraft.core.Holder.Reference<Item> builtInRegistryHolder =
+            new net.minecraft.core.Holder.Reference<>(this);
+
     /** {@code Item.getDescriptionId()} (CraftEngine). */
     public String getDescriptionId() {
         return "item.minecraft.air";

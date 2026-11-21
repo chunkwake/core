@@ -9,6 +9,8 @@ public class BlockHitResult extends HitResult {
     private final Direction direction;
     /** Поле, которое ищет CraftEngine (BlockHitResultProxy#isInside). */
     private boolean inside;
+    /** Поле, которое ищет CraftEngine (BlockHitResultProxy#isMiss). */
+    private boolean miss;
 
     public BlockHitResult(Vec3 location, Direction direction, BlockPos blockPos, boolean miss) {
         super(location);

@@ -22,6 +22,8 @@ public class Connection {
      *  канал и кикает игрока. После событий входа возвращаем исходный. */
     private final Channel originalChannel;
     private PacketListener listener;
+    /** Алиас, который ищет CraftEngine (ConnectionProxy#setPacketListener). */
+    private PacketListener packetListener;
     private java.util.UUID owner;
 
     public Connection() {

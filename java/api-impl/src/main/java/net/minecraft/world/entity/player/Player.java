@@ -13,6 +13,9 @@ public class Player extends LivingEntity {
         this.name = name;
     }
 
+    /** Поле, которое ищет CraftEngine (PlayerProxy#getContainerMenu). */
+    public net.minecraft.world.inventory.AbstractContainerMenu containerMenu;
+
     /** Поле, которое ищет CraftEngine (PlayerProxy#getInventoryMenu). */
     public final net.minecraft.world.inventory.InventoryMenu inventoryMenu =
             new net.minecraft.world.inventory.InventoryMenu();

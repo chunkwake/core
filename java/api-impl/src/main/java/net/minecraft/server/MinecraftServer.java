@@ -32,6 +32,11 @@ public class MinecraftServer {
     private final net.minecraft.world.scores.Scoreboard scoreboard =
             new net.minecraft.world.scores.Scoreboard();
 
+    /** {@code MinecraftServer.registries()} (CraftEngine). */
+    public net.minecraft.core.RegistryAccess registries() {
+        return net.minecraft.core.RegistryAccess.EMPTY;
+    }
+
     public ServerTickRateManager tickRateManager() {
         return this.tickRateManager;
     }

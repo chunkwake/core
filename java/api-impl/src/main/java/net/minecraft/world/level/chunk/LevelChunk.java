@@ -29,6 +29,10 @@ public class LevelChunk extends ChunkAccess {
         this.sections = new LevelChunkSection[24];
     }
 
+    /** Поле, которое ищет CraftEngine (LevelChunkProxy#getPersistentDataContainer). */
+    private net.minecraft.nbt.CompoundTag persistentDataContainer =
+            new net.minecraft.nbt.CompoundTag();
+
     /** {@code LevelChunk.markUnsaved()} (CraftEngine). */
     public void markUnsaved() {
     }

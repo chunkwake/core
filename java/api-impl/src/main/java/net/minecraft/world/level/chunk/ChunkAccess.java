@@ -6,6 +6,10 @@ import net.minecraft.world.level.levelgen.Heightmap;
 
 /** NMS {@code ChunkAccess} (в 26.3 — абстрактный класс). */
 public abstract class ChunkAccess implements LevelHeightAccessor {
+    /** Поле, которое ищет CraftEngine (ChunkAccessProxy#getPersistentDataContainer). */
+    protected net.minecraft.nbt.CompoundTag persistentDataContainer =
+            new net.minecraft.nbt.CompoundTag();
+
     protected ChunkAccess() {
     }
 

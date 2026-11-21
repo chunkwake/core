@@ -4533,3 +4533,70 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 157/504 (было 149)
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=149 bad=355
+стало: ok=157 bad=347
+```
+
+Полностью закрылись 8 прокси:
+
+```
+MappedRegistryProxy
+DedicatedServerSettingsProxy
+SlotProxy
+ChunkPosProxy
+BiomeSourceProxy
+ChunkGeneratorProxy
+DimensionTypeProxy
+BlockHitResultProxy
+```
+
+Добавлено:
+
+- `Registry.registerForHolder(...)` (static, обе перегрузки),
+  `MappedRegistry.getOrCreateTagForRegistration(...)`;
+- `AbstractContainerMenu.quickMoveStack(Player,int)`;
+- `CraftingContainer` + `InventoryMenu.getCraftSlots()`;
+- `Slot.safeTake(int,int,Player)`;
+- `FluidState.is(TagKey)`;
+- `LevelReader.getMaxLocalRawBrightness(BlockPos[,int])`;
+- `BiomeSource` + `ChunkGenerator.biomeSource/getBiomeSource()`;
+- `DimensionType.minY`;
+- `MapItemSavedData.colors`;
+- `PalettedContainer.data` (+ вложенный `Data`);
+- `Container.getItem(int)`;
+- `LivingEntity.getAttribute(Holder)`;
+- `Player.containerMenu`;
+- `EntityType.builtInRegistryHolder`, `Item.builtInRegistryHolder`;
+- `ChunkPos.getMaxBlockZ()`, `AABB.setMinZ(double)`;
+- `BlockHitResult.miss`;
+- `MinecraftServer.registries()`, `DedicatedServer.registries()`;
+- `DedicatedServerSettings.properties/getProperties()`;
+- `Connection.packetListener`;
+- `BuiltInRegistries.dataComponentType`, `Registries.recipe` (алиасы);
+- `EntityTypes.ITEM` (алиас поля `item`);
+- `ServerLevel.sendBlockUpdated(...)`, `Level.getWorld()`;
+- `ChunkAccess`/`LevelChunk.persistentDataContainer`.
+
+Остаётся 347 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 106543 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 41591 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

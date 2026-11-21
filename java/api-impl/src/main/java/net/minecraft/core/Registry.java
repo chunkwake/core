@@ -18,6 +18,21 @@ public interface Registry<T> extends HolderLookup.RegistryLookup<T> {
     /** {@code Registry.getKey(T)} (CraftEngine). */
     Identifier getKey(T value);
 
+    /** {@code Registry.registerForHolder(...)} (CraftEngine). */
+    @SuppressWarnings("unchecked")
+    static <R, T extends R> Holder.Reference<T> registerForHolder(
+            Registry<R> registry, net.minecraft.resources.ResourceKey<R> key, T value) {
+        registry.register(key.location(), value);
+        return (Holder.Reference<T>) (Holder.Reference<?>) new Holder.Reference<R>(value, key);
+    }
+
+    @SuppressWarnings("unchecked")
+    static <R, T extends R> Holder.Reference<T> registerForHolder(
+            Registry<R> registry, Identifier id, T value) {
+        registry.register(id, value);
+        return (Holder.Reference<T>) (Holder.Reference<?>) new Holder.Reference<R>(value);
+    }
+
     default java.util.Optional<T> getOptional(Identifier id) {
         return java.util.Optional.ofNullable(this.getValue(id));
     }

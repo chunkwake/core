@@ -23,6 +23,10 @@ public class EntityType<T> {
         return this.getDescriptionId();
     }
 
+    /** Поле, которое ищет CraftEngine (EntityTypeProxy#getBuiltInRegistryHolder). */
+    public final net.minecraft.core.Holder.Reference<EntityType<T>> builtInRegistryHolder =
+            new net.minecraft.core.Holder.Reference<>(this);
+
     /** Поле, которое ищет CraftEngine (EntityTypeProxy#getDimensions). */
     public final net.minecraft.world.entity.EntityDimensions dimensions =
             net.minecraft.world.entity.EntityDimensions.scalable(0.6f, 1.8f);

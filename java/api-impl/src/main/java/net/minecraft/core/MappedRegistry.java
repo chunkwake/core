@@ -66,6 +66,12 @@ public class MappedRegistry<T> implements Registry<T> {
         return Stream.empty();
     }
 
+    /** {@code MappedRegistry.getOrCreateTagForRegistration(...)} (CraftEngine). */
+    public Iterable<Holder<T>> getOrCreateTagForRegistration(
+            net.minecraft.tags.TagKey<T> tag) {
+        return java.util.List.of();
+    }
+
     @Override
     public Identifier getKey(T value) {
         for (Map.Entry<Identifier, T> entry : this.byKey.entrySet()) {

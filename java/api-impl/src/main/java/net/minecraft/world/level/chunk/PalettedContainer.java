@@ -6,6 +6,15 @@ import java.util.Map;
 
 /** NMS {@code PalettedContainer} (упрощённая рабочая реализация). */
 public class PalettedContainer<T> implements PalettedContainerRO<T> {
+    /** Поле, которое ищет CraftEngine (PalettedContainerProxy#getData). */
+    private Data<T> data = new Data<>();
+
+    /** NMS {@code PalettedContainer.Data}. */
+    public static class Data<T> {
+        public Data() {
+        }
+    }
+
     /** {@code PalettedContainer.getAndSet(int,int,int,T)} (CraftEngine). */
     public T getAndSet(int x, int y, int z, T value) {
         long key = (((long) x) & 0xFFFFL) << 32 | (((long) z) & 0xFFFFL);

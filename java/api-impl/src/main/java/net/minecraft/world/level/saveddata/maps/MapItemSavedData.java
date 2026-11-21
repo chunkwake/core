@@ -4,6 +4,8 @@ package net.minecraft.world.level.saveddata.maps;
 public class MapItemSavedData {
     /** Поле, которое ищет CraftEngine (getScale). */
     private int scale;
+    /** Поле, которое ищет CraftEngine (getColors). */
+    public byte[] colors = new byte[0];
 
     public static final class MapPatch {
     }

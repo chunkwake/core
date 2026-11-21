@@ -43,6 +43,11 @@ public class ChunkPos {
         return out.stream();
     }
 
+    /** {@code ChunkPos.getMaxBlockZ()} (CraftEngine). */
+    public int getMaxBlockZ() {
+        return (this.z << 4) + 15;
+    }
+
     /** {@code ChunkPos.getMaxBlockX()} (CraftEngine). */
     public int getMaxBlockX() {
         return (this.x << 4) + 15;

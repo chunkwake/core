@@ -47,6 +47,12 @@ public class ServerLevel extends net.minecraft.world.level.Level implements Comm
     private final BiomeManager biomeManager = new BiomeManager();
     private final DimensionType dimensionType = new DimensionType();
     /** Поле, которое ищет CraftEngine (ServerLevelProxy#getStructureManager). */
+    /** {@code ServerLevel.sendBlockUpdated(...)} (CraftEngine). */
+    public void sendBlockUpdated(net.minecraft.core.BlockPos pos,
+            net.minecraft.world.level.block.state.BlockState oldState,
+            net.minecraft.world.level.block.state.BlockState newState, int flags) {
+    }
+
     private final net.minecraft.world.level.levelgen.structure.StructureManager structureManager =
             new net.minecraft.world.level.levelgen.structure.StructureManager();
     private final FeatureFlagSet features = FeatureFlagSet.of();

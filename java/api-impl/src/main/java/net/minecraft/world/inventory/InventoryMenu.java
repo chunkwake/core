@@ -4,4 +4,9 @@ package net.minecraft.world.inventory;
 public class InventoryMenu {
     public InventoryMenu() {
     }
+
+    /** {@code InventoryMenu.getCraftSlots()} (CraftEngine). */
+    public CraftingContainer getCraftSlots() {
+        return new CraftingContainer();
+    }
 }

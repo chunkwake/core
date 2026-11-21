@@ -29,6 +29,15 @@ public interface LevelReader extends BlockGetter {
         return 0;
     }
 
+    /** {@code LevelReader.getMaxLocalRawBrightness(BlockPos[, int])} (CraftEngine). */
+    default int getMaxLocalRawBrightness(net.minecraft.core.BlockPos pos) {
+        return 15;
+    }
+
+    default int getMaxLocalRawBrightness(net.minecraft.core.BlockPos pos, int amount) {
+        return 15;
+    }
+
     /** {@code LevelReader.getNoiseBiome(int,int,int)} (CraftEngine). */
     default net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome> getNoiseBiome(
             int x, int y, int z) {

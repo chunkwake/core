@@ -5,6 +5,12 @@ public class AbstractContainerMenu {
     /** Поле, которое ищет CraftEngine (getCheckReachable). */
     private boolean checkReachable = true;
 
+    /** {@code AbstractContainerMenu.quickMoveStack(Player, int)} (CraftEngine). */
+    public net.minecraft.world.item.ItemStack quickMoveStack(
+            net.minecraft.world.entity.player.Player player, int index) {
+        return net.minecraft.world.item.ItemStack.EMPTY;
+    }
+
     /** {@code AbstractContainerMenu.incrementStateId()} (CraftEngine). */
     public int incrementStateId() {
         return 0;

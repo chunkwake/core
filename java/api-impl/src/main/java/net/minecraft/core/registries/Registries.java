@@ -13,6 +13,9 @@ public final class Registries {
     public static final ResourceKey<Registry<Object>> lootTable =
             ResourceKey.createRegistryKey(Identifier.parse("minecraft:loot_table"));
     public static final ResourceKey<Registry<Object>> LOOT_TABLE = lootTable;
+    public static final ResourceKey<Registry<Object>> recipe =
+            ResourceKey.createRegistryKey(Identifier.parse("minecraft:recipe"));
+    public static final ResourceKey<Registry<Object>> RECIPE = recipe;
 
     public static final ResourceKey<Registry<Object>> BIOME =
             key("biome");
