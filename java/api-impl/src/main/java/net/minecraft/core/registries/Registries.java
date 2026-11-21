@@ -31,6 +31,9 @@ public final class Registries {
     public static final ResourceKey<Registry<Object>> dimension =
             ResourceKey.createRegistryKey(Identifier.parse("minecraft:dimension"));
     public static final ResourceKey<Registry<Object>> DIMENSION = dimension;
+    public static final ResourceKey<Registry<Object>> soundEvent =
+            ResourceKey.createRegistryKey(Identifier.parse("minecraft:sound_event"));
+    public static final ResourceKey<Registry<Object>> SOUND_EVENT = soundEvent;
 
     public static final ResourceKey<Registry<Object>> BIOME =
             key("biome");

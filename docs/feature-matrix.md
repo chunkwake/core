@@ -5826,3 +5826,67 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 261/504 (member-батч), бенчмарк: block_read/write -9%/-7.5%
+
+### Прокси-покрытие
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=261 bad=243
+стало: ok=261 bad=243
+```
+
+Новых полностью закрытых прокси на этом шаге нет, но продвинуты
+member-цепочки (следующий отсутствующий член стал ближе):
+
+- `EntityDataSerializers.RESOLVABLE_PROFILE` (+ ранее добавленный набор
+  полей `PARTICLE/ROTATIONS/BLOCK_POS/.../COMPOUND_TAG`);
+- `BuiltInRegistries.soundEvent` / `Registries.soundEvent` (алиасы);
+- `LootData` + `MinecraftServer.lootData` (поле, которое ищет
+  `MinecraftServerProxy#getLootData`).
+
+`ClientboundContainerSetContentPacket#newInstance$legacy` остаётся
+несовместимым: в 26.3 у класса нет соответствующего legacy-конструктора
+(это ограничение прокси, а не ядра).
+
+Остаётся 243 прокси. CraftEngine остаётся LOADERR.
+
+### Производительность: воспроизводимый бенчмарк
+
+Запуски:
+
+```
+cargo bench -p chunkwake-server --bench tick -- idle
+cargo bench -p chunkwake-server --bench tick -- block_
+```
+
+Результаты текущего бинаря (Criterion, сравнение с сохранённым baseline):
+
+```
+tick/idle        56.411..56.707 ns   change +2.76%..+3.23%  (регрессия)
+tick/block_read  2.5427..2.5720 us   change -10.47%..-8.32% (улучшение)
+tick/block_write 29.144..29.335 us   change -9.18%..-5.84%  (улучшение)
+```
+
+То есть в путях чтения/записи блока есть измеримый выигрыш ~7–10%
+относительно сохранённого baseline, но idle-тик деградировал на ~3%.
+Суммарно это **не доказывает требование «отличная производительность»**:
+нужен либо отдельный контролируемый A/B с выигрышем на основном тике,
+либо пересмотр требования пользователем.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 57781 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 12746 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

@@ -33,6 +33,9 @@ public final class BuiltInRegistries {
     public static final net.minecraft.core.Registry<Object> particleType =
             new net.minecraft.core.SimpleRegistry<>();
     public static final net.minecraft.core.Registry<Object> PARTICLE_TYPE = particleType;
+    public static final net.minecraft.core.Registry<Object> soundEvent =
+            new net.minecraft.core.SimpleRegistry<>();
+    public static final net.minecraft.core.Registry<Object> SOUND_EVENT = soundEvent;
 
     public static final DefaultedRegistry<Block> BLOCK = new SimpleDefaultedRegistry<>(
             net.minecraft.resources.Identifier.parse("minecraft:air"));

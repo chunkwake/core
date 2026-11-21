@@ -43,6 +43,7 @@ public final class EntityDataSerializers {
     public static final EntityDataSerializer<Object> FROG_VARIANT = serializer(0);
     public static final EntityDataSerializer<Object> SNIFFER_STATE = serializer(0);
     public static final EntityDataSerializer<Object> COMPOUND_TAG = serializer(0);
+    public static final EntityDataSerializer<Object> RESOLVABLE_PROFILE = serializer(0);
 
     public static final EntityDataSerializer<Byte> BYTE = serializer(0);
     public static final EntityDataSerializer<Integer> INT = serializer(1);

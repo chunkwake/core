@@ -32,6 +32,10 @@ public class MinecraftServer {
     private final net.minecraft.world.scores.Scoreboard scoreboard =
             new net.minecraft.world.scores.Scoreboard();
 
+    /** Поле, которое ищет CraftEngine (getLootData). */
+    private final net.minecraft.world.level.storage.loot.LootData lootData =
+            new net.minecraft.world.level.storage.loot.LootData();
+
     /** {@code MinecraftServer.getRecipeManager()} (CraftEngine). */
     public net.minecraft.world.item.crafting.RecipeManager getRecipeManager() {
         return new net.minecraft.world.item.crafting.RecipeManager();
