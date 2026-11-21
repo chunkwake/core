@@ -6556,3 +6556,27 @@ NMS-слой block-state (StateHolder + BlockState + кэш + регистрац
 Тяжёлые гейты (расширенный/базовый, 82/27 плагинов) после этих правок не
 перезапускались — по договорённости отложены до разрешения пользователя;
 последние известные числа: 79/82, 26/27, PANICS 0.
+
+## Повторные гейты после правок (VanillaArgumentProvider, сохранение сущностей)
+
+Пересобраны dist и сервер, прогнаны гейты (по одному, последовательно):
+
+```
+gradlew --offline --no-daemon dist -> BUILD SUCCESSFUL
+P2 (504 прокси) -> ok=263 bad=241
+
+расширенный: 79 of 82 enabled in 94273 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 22316 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+```
+
+Предупреждения `VanillaArgumentProvider.player/players/playerProfiles` из
+лога исчезли (остались только другие аргументы: `resource`, `rotation`, ...).
+Регрессий от фикса сущностей и аргумент-провайдера нет.
+
+CraftEngine по-прежнему LOADERR и упирается в
+`BlockBehaviour$BlockStateBase` (см. отдельную секцию выше): это требует
+настоящего NMS block-state/StateHolder-слоя (80 методов прокси, 27
+полей-кэшей), а не заглушки.
