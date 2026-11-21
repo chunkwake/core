@@ -157,6 +157,203 @@ pub fn build_play_plan(
     let palette = chunkwake_worldgen::feature::Palette::new(data_dir, &blocks.states(), &|name| {
         blocks.default_state(name).ok().map(|s| s as u32)
     });
+    // Ад и Край: у ванили они есть в любом пресете `world_preset`, плоский
+    // мир и пустота тоже получают обычные `nether` и `end`. Строятся в своих
+    // потоках, пока этот строит оверворлд: генераторы независимы, а старт
+    // сервера раньше ждал все три по очереди.
+    let nether_type = registries
+        .network_id("dimension_type", "minecraft:the_nether")
+        .map_err(s)?;
+    let end_type = registries
+        .network_id("dimension_type", "minecraft:the_end")
+        .map_err(s)?;
+    let (overworld_parts, nether_dim, end_dim) = std::thread::scope(|scope| {
+        let nether = scope.spawn(|| {
+            build_dimension(
+                data_dir,
+                level.seed,
+                data_version,
+                &blocks,
+                &biome_ids,
+                nether_type,
+                "minecraft:the_nether",
+                "minecraft:nether",
+                "minecraft:netherrack",
+                "minecraft:lava",
+                "minecraft:nether_wastes",
+                memory,
+                palette.clone(),
+            )
+        });
+        let end = scope.spawn(|| {
+            build_dimension(
+                data_dir,
+                level.seed,
+                data_version,
+                &blocks,
+                &biome_ids,
+                end_type,
+                "minecraft:the_end",
+                "minecraft:end",
+                "minecraft:end_stone",
+                "minecraft:air",
+                "minecraft:the_end",
+                memory,
+                palette.clone(),
+            )
+        });
+        let overworld = (|| -> Result<_, String> {
+            Ok(match &level.kind {
+                level::Kind::Flat(_) => (None, None, None, None, None, None, 63, true),
+                level::Kind::Noise(noise) => {
+                    let mut loaded = chunkwake_worldgen::Generator::load_settings(
+                        data_dir,
+                        level.seed,
+                        Some(data_version),
+                        &noise.settings,
+                    )?;
+                    if loaded.min_y != dim.min_y || loaded.height != dim.height {
+                        return Err(format!(
+                            "noise settings y {} height {} do not match the overworld y {} height {}",
+                            loaded.min_y, loaded.height, dim.min_y, dim.height
+                        ));
+                    }
+                    // Биомы выбирает климат (`MultiNoiseBiomeSource`), а не один plains.
+                    // `single_biome_surface` подменяет климат одним биомом.
+                    loaded.bind_biomes(biome_ids.clone());
+                    let fixed = noise.biome.is_some();
+                    if let Some(name) = &noise.biome {
+                        loaded.set_fixed_biome(name, &biome_ids)?;
+                    }
+                    let climate = loaded.has_biomes();
+                    let noise = std::sync::Arc::new(loaded);
+                    let sea = noise.sea_level;
+                    // `NoiseSpawnFinder.findSpawnPosition` даёт точку `(x, 0, z)`;
+                    // высоту берём по столбцу этой точки, как `ServerLevel`.
+                    let stand = noise
+                        .spawn_position()
+                        .map(|p| {
+                            let cx = p[0].div_euclid(16);
+                            let cz = p[2].div_euclid(16);
+                            let y = stand_on_solid(
+                                &noise.fill(cx, cz),
+                                noise.height,
+                                dim.min_y,
+                                p[0],
+                                p[2],
+                            );
+                            [p[0] as f64 + 0.5, y, p[2] as f64 + 0.5]
+                        })
+                        .unwrap_or([8.5, 64.0, 8.5]);
+                    let biome_id = biome as u32;
+                    let sky = dim.has_skylight;
+                    // Шум, поверхность и карверы — один конвейер генератора.
+                    let state = |name: &str| blocks.default_state(name).ok().map(|s| s as u32);
+                    let overworld =
+                        chunkwake_worldgen::pipeline::Overworld::new(noise, &state, &biome_ids)?
+                            .with_memory_limits(memory.proto_limit, memory.base_column_limit)
+                            .with_features_palette(data_dir, palette.clone(), &biome_ids)?;
+                    if let Some((done, all)) = overworld.feature_coverage() {
+                        tracing::info!("worldgen features: {done} of {all} ported");
+                        for (name, why) in overworld.feature_failures().iter().take(5) {
+                            tracing::warn!("worldgen feature {name}: {why}");
+                        }
+                    }
+                    if !overworld.has_surface() {
+                        tracing::warn!(
+                            "no material_rule in the data cache: the world keeps bare stone"
+                        );
+                    }
+                    // Свет считает пролив при отправке: здесь только блоки.
+                    // Тот же генератор отвечает `/locate biome`, не строя чанк.
+                    let overworld = std::sync::Arc::new(overworld);
+                    if std::env::var_os("CHUNKWAKE_MEMSTATS").is_some() {
+                        let wg = overworld.clone();
+                        std::thread::spawn(move || {
+                            loop {
+                                std::thread::sleep(std::time::Duration::from_secs(10));
+                                tracing::info!("memstats gen: {}", wg.mem_stats());
+                            }
+                        });
+                    }
+                    let locate_world = overworld.clone();
+                    let locate: Locate = std::sync::Arc::new(move |name, origin| {
+                        locate_world.locate_biome(name, origin)
+                    });
+                    let locate_struct_world = overworld.clone();
+                    let locate_structure: Locate = std::sync::Arc::new(move |name, origin| {
+                        locate_struct_world.locate_structure(name, origin)
+                    });
+                    let structures_world = overworld.clone();
+                    let structures_at: StructuresAtFn =
+                        std::sync::Arc::new(move |pos| structures_world.structures_at(pos));
+                    let trim_world = overworld.clone();
+                    let trim_idle: chunkwake_net::play::TerrainTrimFn =
+                        std::sync::Arc::new(move || trim_world.trim_idle());
+                    let built: std::sync::Arc<
+                        dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync,
+                    > = std::sync::Arc::new(move |cx, cz| {
+                        // `None` — чанк уже отдан: генератор его не повторяет, и
+                        // вызывающему нужен готовый столбец из мира, а не копия.
+                        let chunk = overworld.chunk(cx, cz)?;
+                        let mut column = match chunk.biomes {
+                            Some(biomes) => ChunkColumn::from_blocks_with_biomes(
+                                &chunk.states,
+                                &biomes,
+                                block_bits,
+                                biome_bits,
+                                sky,
+                            ),
+                            None => ChunkColumn::from_blocks(
+                                &chunk.states,
+                                biome_id,
+                                block_bits,
+                                biome_bits,
+                                sky,
+                            ),
+                        };
+                        // Лут структур: ванила кладёт в сундук `LootTable` и
+                        // `LootTableSeed`, содержимое считается при открытии.
+                        column.fluid_posts = chunk.fluid_posts.clone();
+                        column.block_ticks = chunk.block_ticks.clone();
+                        for ([x, y, z], id, nbt) in &chunk.block_entities {
+                            column.block_entities.insert(
+                                [*x, *y, *z],
+                                chunkwake_world::BlockEntity {
+                                    id: id.clone(),
+                                    nbt: nbt.clone(),
+                                },
+                            );
+                        }
+                        Some(column)
+                    });
+                    if !fixed && !climate {
+                        tracing::warn!(
+                            "reports/biomes.csv is missing: the noise world keeps a single biome. \
+                             Delete the data cache or rebuild it to get real biomes"
+                        );
+                    }
+                    (
+                        Some(built),
+                        Some(trim_idle),
+                        Some(locate),
+                        Some(locate_structure),
+                        Some(structures_at),
+                        Some(stand),
+                        sea,
+                        false,
+                    )
+                }
+            })
+        })();
+        let nether_dim = nether
+            .join()
+            .map_err(|_| "nether generator build panicked".to_owned())?;
+        let end_dim = end
+            .join()
+            .map_err(|_| "end generator build panicked".to_owned())?;
+        Ok::<_, String>((overworld?, nether_dim?, end_dim?))
+    })?;
     let (
         terrain,
         trim_idle,
@@ -166,178 +363,9 @@ pub fn build_play_plan(
         spawn_noise,
         sea_level,
         is_flat,
-    ) = match &level.kind {
-        level::Kind::Flat(_) => (None, None, None, None, None, None, 63, true),
-        level::Kind::Noise(noise) => {
-            let mut loaded = chunkwake_worldgen::Generator::load_settings(
-                data_dir,
-                level.seed,
-                Some(data_version),
-                &noise.settings,
-            )?;
-            if loaded.min_y != dim.min_y || loaded.height != dim.height {
-                return Err(format!(
-                    "noise settings y {} height {} do not match the overworld y {} height {}",
-                    loaded.min_y, loaded.height, dim.min_y, dim.height
-                ));
-            }
-            // Биомы выбирает климат (`MultiNoiseBiomeSource`), а не один plains.
-            // `single_biome_surface` подменяет климат одним биомом.
-            loaded.bind_biomes(biome_ids.clone());
-            let fixed = noise.biome.is_some();
-            if let Some(name) = &noise.biome {
-                loaded.set_fixed_biome(name, &biome_ids)?;
-            }
-            let climate = loaded.has_biomes();
-            let noise = std::sync::Arc::new(loaded);
-            let sea = noise.sea_level;
-            // `NoiseSpawnFinder.findSpawnPosition` даёт точку `(x, 0, z)`;
-            // высоту берём по столбцу этой точки, как `ServerLevel`.
-            let stand = noise
-                .spawn_position()
-                .map(|p| {
-                    let cx = p[0].div_euclid(16);
-                    let cz = p[2].div_euclid(16);
-                    let y =
-                        stand_on_solid(&noise.fill(cx, cz), noise.height, dim.min_y, p[0], p[2]);
-                    [p[0] as f64 + 0.5, y, p[2] as f64 + 0.5]
-                })
-                .unwrap_or([8.5, 64.0, 8.5]);
-            let biome_id = biome as u32;
-            let sky = dim.has_skylight;
-            // Шум, поверхность и карверы — один конвейер генератора.
-            let state = |name: &str| blocks.default_state(name).ok().map(|s| s as u32);
-            let overworld =
-                chunkwake_worldgen::pipeline::Overworld::new(noise, &state, &biome_ids)?
-                    .with_memory_limits(memory.proto_limit, memory.base_column_limit)
-                    .with_features_palette(data_dir, palette.clone(), &biome_ids)?;
-            if let Some((done, all)) = overworld.feature_coverage() {
-                tracing::info!("worldgen features: {done} of {all} ported");
-                for (name, why) in overworld.feature_failures().iter().take(5) {
-                    tracing::warn!("worldgen feature {name}: {why}");
-                }
-            }
-            if !overworld.has_surface() {
-                tracing::warn!("no material_rule in the data cache: the world keeps bare stone");
-            }
-            // Свет считает пролив при отправке: здесь только блоки.
-            // Тот же генератор отвечает `/locate biome`, не строя чанк.
-            let overworld = std::sync::Arc::new(overworld);
-            if std::env::var_os("CHUNKWAKE_MEMSTATS").is_some() {
-                let wg = overworld.clone();
-                std::thread::spawn(move || {
-                    loop {
-                        std::thread::sleep(std::time::Duration::from_secs(10));
-                        tracing::info!("memstats gen: {}", wg.mem_stats());
-                    }
-                });
-            }
-            let locate_world = overworld.clone();
-            let locate: Locate =
-                std::sync::Arc::new(move |name, origin| locate_world.locate_biome(name, origin));
-            let locate_struct_world = overworld.clone();
-            let locate_structure: Locate = std::sync::Arc::new(move |name, origin| {
-                locate_struct_world.locate_structure(name, origin)
-            });
-            let structures_world = overworld.clone();
-            let structures_at: StructuresAtFn =
-                std::sync::Arc::new(move |pos| structures_world.structures_at(pos));
-            let trim_world = overworld.clone();
-            let trim_idle: chunkwake_net::play::TerrainTrimFn =
-                std::sync::Arc::new(move || trim_world.trim_idle());
-            let built: std::sync::Arc<dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync> =
-                std::sync::Arc::new(move |cx, cz| {
-                    // `None` — чанк уже отдан: генератор его не повторяет, и
-                    // вызывающему нужен готовый столбец из мира, а не копия.
-                    let chunk = overworld.chunk(cx, cz)?;
-                    let mut column = match chunk.biomes {
-                        Some(biomes) => ChunkColumn::from_blocks_with_biomes(
-                            &chunk.states,
-                            &biomes,
-                            block_bits,
-                            biome_bits,
-                            sky,
-                        ),
-                        None => ChunkColumn::from_blocks(
-                            &chunk.states,
-                            biome_id,
-                            block_bits,
-                            biome_bits,
-                            sky,
-                        ),
-                    };
-                    // Лут структур: ванила кладёт в сундук `LootTable` и
-                    // `LootTableSeed`, содержимое считается при открытии.
-                    column.fluid_posts = chunk.fluid_posts.clone();
-                    column.block_ticks = chunk.block_ticks.clone();
-                    for ([x, y, z], id, nbt) in &chunk.block_entities {
-                        column.block_entities.insert(
-                            [*x, *y, *z],
-                            chunkwake_world::BlockEntity {
-                                id: id.clone(),
-                                nbt: nbt.clone(),
-                            },
-                        );
-                    }
-                    Some(column)
-                });
-            if !fixed && !climate {
-                tracing::warn!(
-                    "reports/biomes.csv is missing: the noise world keeps a single biome. \
-                     Delete the data cache or rebuild it to get real biomes"
-                );
-            }
-            (
-                Some(built),
-                Some(trim_idle),
-                Some(locate),
-                Some(locate_structure),
-                Some(structures_at),
-                Some(stand),
-                sea,
-                false,
-            )
-        }
-    };
+    ) = overworld_parts;
 
     let dimension = format!("minecraft:{DIMENSION}");
-
-    // Ад и Край: у ванили они есть в любом пресете `world_preset`, плоский
-    // мир и пустота тоже получают обычные `nether` и `end`.
-    let nether_dim = build_dimension(
-        data_dir,
-        level.seed,
-        data_version,
-        &blocks,
-        &biome_ids,
-        registries
-            .network_id("dimension_type", "minecraft:the_nether")
-            .map_err(s)?,
-        "minecraft:the_nether",
-        "minecraft:nether",
-        "minecraft:netherrack",
-        "minecraft:lava",
-        "minecraft:nether_wastes",
-        memory,
-        palette.clone(),
-    )?;
-    let end_dim = build_dimension(
-        data_dir,
-        level.seed,
-        data_version,
-        &blocks,
-        &biome_ids,
-        registries
-            .network_id("dimension_type", "minecraft:the_end")
-            .map_err(s)?,
-        "minecraft:the_end",
-        "minecraft:end",
-        "minecraft:end_stone",
-        "minecraft:air",
-        "minecraft:the_end",
-        memory,
-        palette.clone(),
-    )?;
 
     let login = Login {
         entity_id: 0,
@@ -676,6 +704,12 @@ fn survival_data(
         c::FIREWORKS_COMPONENT.store(component("minecraft:fireworks")?, order);
         c::MAP_ID_COMPONENT.store(component("minecraft:map_id")?, order);
         c::MAP_POST_PROCESSING_COMPONENT.store(component("minecraft:map_post_processing")?, order);
+        c::ITEM_NAME_COMPONENT.store(component("minecraft:item_name")?, order);
+        c::ITEM_MODEL_COMPONENT.store(component("minecraft:item_model")?, order);
+        c::TOOLTIP_STYLE_COMPONENT.store(component("minecraft:tooltip_style")?, order);
+        c::TOOLTIP_DISPLAY_COMPONENT.store(component("minecraft:tooltip_display")?, order);
+        c::GLINT_OVERRIDE_COMPONENT
+            .store(component("minecraft:enchantment_glint_override")?, order);
         c::set_banner_pattern_names(
             registries
                 .synchronized

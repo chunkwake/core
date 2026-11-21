@@ -202,10 +202,23 @@ public final class Registries implements RegistryAccess {
     }
 
     private static final Map<NamespacedKey, Boolean> IS_BLOCK = new ConcurrentHashMap<>();
+    private static final Map<NamespacedKey, Boolean> IS_SOLID = new ConcurrentHashMap<>();
     private static volatile List<NamespacedKey> blockKeys;
 
     static boolean isBlock(NamespacedKey k) {
         return IS_BLOCK.computeIfAbsent(k, key -> "1".equals(world("isblock " + key)));
+    }
+
+    /** {@code Typed#isSolid}: флаг SOLID (бит 1) из реестра состояний Rust. */
+    static boolean isSolid(NamespacedKey k) {
+        return IS_SOLID.computeIfAbsent(k, key -> {
+            try {
+                int flags = Integer.parseInt(world("blockflags " + key).trim());
+                return (flags & 2) != 0;
+            } catch (NumberFormatException e) {
+                return false;
+            }
+        });
     }
 
     private static List<NamespacedKey> blockKeys() {
@@ -393,6 +406,7 @@ public final class Registries implements RegistryAccess {
         public NamespacedKey getKey() { return key; }
         public net.kyori.adventure.key.Key key() { return key; }
         public Material asMaterial() { return Material.matchMaterial(key.toString()); }
+        public boolean isSolid() { return Registries.isSolid(key); }
         public int getMaxStackSize() { return ITEM_STACKS.getOrDefault(key, 64); }
         public short getMaxDurability() { return 0; }
         public boolean hasBlockType() { return isBlock(key); }
@@ -447,6 +461,7 @@ public final class Registries implements RegistryAccess {
             return k.equals("air") || k.equals("cave_air") || k.equals("void_air");
         }
         public boolean isBlock() { return true; }
+        public boolean isSolid() { return Registries.isSolid(key); }
         public String getTranslationKey() { return "block." + key.getNamespace() + "." + key.getKey(); }
         public String translationKey() { return getTranslationKey(); }
 

@@ -669,6 +669,18 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             book.setItemMeta(meta);
             org.bukkit.inventory.meta.EnchantmentStorageMeta back =
                     (org.bukkit.inventory.meta.EnchantmentStorageMeta) book.getItemMeta();
+            ItemStack visual = new ItemStack(Material.STONE);
+            org.bukkit.inventory.meta.ItemMeta visualMeta = visual.getItemMeta();
+            visualMeta.setItemModel(org.bukkit.NamespacedKey.minecraft("apple"));
+            visualMeta.setTooltipStyle(org.bukkit.NamespacedKey.minecraft("default"));
+            visualMeta.setHideTooltip(true);
+            visualMeta.setEnchantmentGlintOverride(false);
+            visualMeta.itemName(Component.text("Visual Stone"));
+            visual.setItemMeta(visualMeta);
+            org.bukkit.inventory.meta.ItemMeta visualBack = visual.getItemMeta();
+            if (sender instanceof Player vp) {
+                vp.getInventory().addItem(visual);
+            }
             org.bukkit.Location spawn = w.getSpawnLocation();
             sender.sendMessage("worldstate world=" + w.getName() + " pvp=" + w.getPVP()
                     + " difficulty=" + w.getDifficulty() + " clear=" + w.isClearWeather()
@@ -678,7 +690,16 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
                     + " level=" + back.getStoredEnchantLevel(
                             org.bukkit.enchantments.Enchantment.SHARPNESS)
                     + " conflict=" + back.hasConflictingStoredEnchant(
-                            org.bukkit.enchantments.Enchantment.SMITE));
+                            org.bukkit.enchantments.Enchantment.SMITE)
+                    + " solid(stone)=" + Material.STONE.isSolid()
+                    + " solid(air)=" + Material.AIR.isSolid()
+                    + " solid(water)=" + Material.WATER.isSolid()
+                    + " solid(short_grass)=" + Material.SHORT_GRASS.isSolid()
+                    + " solid(block_registry)=" + org.bukkit.Registry.BLOCK
+                            .get(org.bukkit.NamespacedKey.minecraft("stone")).isSolid()
+                    + " visual=" + visualBack.getItemModel() + "/" + visualBack.getTooltipStyle()
+                    + "/" + visualBack.isHideTooltip() + "/"
+                    + visualBack.getEnchantmentGlintOverride() + "/" + visualBack.getItemName());
             return true;
         }
         sender.sendMessage(Component.text("Hello, " + sender.getName() + "!", NamedTextColor.GREEN));

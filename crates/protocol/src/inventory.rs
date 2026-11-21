@@ -313,7 +313,13 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         e.book.is_some() && book_id(e.book.as_ref()) >= 0,
         !e.container.is_empty() && id_of(&CONTAINER_COMPONENT) >= 0,
         e.dyed_color.is_some() && id_of(&crate::components::DYED_COLOR_COMPONENT) >= 0,
+        e.item_name.is_some() && id_of(&crate::components::ITEM_NAME_COMPONENT) >= 0,
+        e.item_model.is_some() && id_of(&crate::components::ITEM_MODEL_COMPONENT) >= 0,
+        e.tooltip_style.is_some() && id_of(&crate::components::TOOLTIP_STYLE_COMPONENT) >= 0,
+        e.hide_tooltip && id_of(&crate::components::TOOLTIP_DISPLAY_COMPONENT) >= 0,
+        e.glint_override.is_some() && id_of(&crate::components::GLINT_OVERRIDE_COMPONENT) >= 0,
     ];
+
     w.var_int(parts.iter().filter(|&&p| p).count() as i32)
         .var_int(0);
     if parts[0] {
@@ -391,6 +397,29 @@ fn write_patch(w: &mut Writer, s: &Stack) {
     if let (true, Some(color)) = (parts[14], e.dyed_color) {
         w.var_int(id_of(&crate::components::DYED_COLOR_COMPONENT))
             .i32(color);
+    }
+
+    if let (true, Some(n)) = (parts[15], &e.item_name) {
+        w.var_int(id_of(&crate::components::ITEM_NAME_COMPONENT));
+        crate::text::write_component(w, &json(n));
+    }
+    if let (true, Some(m)) = (parts[16], &e.item_model) {
+        w.var_int(id_of(&crate::components::ITEM_MODEL_COMPONENT))
+            .string(m);
+    }
+    if let (true, Some(t)) = (parts[17], &e.tooltip_style) {
+        w.var_int(id_of(&crate::components::TOOLTIP_STYLE_COMPONENT))
+            .string(t);
+    }
+    if parts[18] {
+        // `minecraft:tooltip_display`: {hide_tooltip: true, hidden_components: []}.
+        w.var_int(id_of(&crate::components::TOOLTIP_DISPLAY_COMPONENT))
+            .bool(true)
+            .var_int(0);
+    }
+    if let (true, Some(v)) = (parts[19], e.glint_override) {
+        w.var_int(id_of(&crate::components::GLINT_OVERRIDE_COMPONENT))
+            .bool(v);
     }
 }
 

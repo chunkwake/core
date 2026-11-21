@@ -288,6 +288,15 @@ final class StackImpl extends ItemStack {
         Map<String, Object> custom = new LinkedHashMap<>();
         /** {@code writable_book_content} / {@code written_book_content}; нет книги — {@code null}. */
         BookData book;
+        /** item_name: отдельно от custom_name (Paper). */
+        Component itemName;
+        /** item_model и tooltip_style: ключи. */
+        String itemModel;
+        String tooltipStyle;
+        /** hide_tooltip. */
+        boolean hideTooltip;
+        /** enchantment_glint_override: null - по умолчанию. */
+        Boolean glintOverride;
 
         /** {@code custom_data} без пустого {@code PublicBukkitValues} (пустой PDC не сохраняется). */
         Map<String, Object> customOut() {
@@ -301,7 +310,9 @@ final class StackImpl extends ItemStack {
 
         boolean isEmpty() {
             return damage == 0 && enchants.isEmpty() && name == null && lore.isEmpty() && raw == null
-                    && stored == null && book == null && customOut().isEmpty();
+                    && stored == null && book == null && customOut().isEmpty()
+                    && itemName == null && itemModel == null && tooltipStyle == null
+                    && !hideTooltip && glintOverride == null;
         }
 
         Data copy() {
@@ -313,6 +324,11 @@ final class StackImpl extends ItemStack {
             d.raw = raw;
             d.stored = stored == null ? null : stored.deepCopy();
             d.book = book == null ? null : book.copy();
+            d.itemName = itemName;
+            d.itemModel = itemModel;
+            d.tooltipStyle = tooltipStyle;
+            d.hideTooltip = hideTooltip;
+            d.glintOverride = glintOverride;
             @SuppressWarnings("unchecked")
             Map<String, Object> c = (Map<String, Object>) PdcImpl.copy(custom);
             d.custom = c;
@@ -338,6 +354,11 @@ final class StackImpl extends ItemStack {
             if (j.has("raw")) d.raw = j.get("raw").getAsString();
             if (j.has("stored")) d.stored = j.getAsJsonObject("stored");
             if (j.has("book")) d.book = BookData.parse(j.getAsJsonObject("book"));
+            if (j.has("item_name")) d.itemName = gson.deserializeFromTree(j.get("item_name"));
+            if (j.has("item_model")) d.itemModel = j.get("item_model").getAsString();
+            if (j.has("tooltip_style")) d.tooltipStyle = j.get("tooltip_style").getAsString();
+            if (j.has("hide_tooltip")) d.hideTooltip = j.get("hide_tooltip").getAsBoolean();
+            if (j.has("glint_override")) d.glintOverride = j.get("glint_override").getAsBoolean();
             if (j.has("custom")) d.custom = PdcImpl.Nbt.decode(j.getAsJsonObject("custom"));
             return d;
         }
@@ -362,6 +383,11 @@ final class StackImpl extends ItemStack {
             if (raw != null) j.addProperty("raw", raw);
             if (stored != null) j.add("stored", stored);
             if (book != null) j.add("book", book.json());
+            if (itemName != null) j.add("item_name", gson.serializeToTree(itemName));
+            if (itemModel != null) j.addProperty("item_model", itemModel);
+            if (tooltipStyle != null) j.addProperty("tooltip_style", tooltipStyle);
+            if (hideTooltip) j.addProperty("hide_tooltip", true);
+            if (glintOverride != null) j.addProperty("glint_override", glintOverride);
             if (!customOut().isEmpty()) j.add("custom", PdcImpl.Nbt.encode(customOut()));
             return j.toString();
         }
@@ -372,12 +398,19 @@ final class StackImpl extends ItemStack {
                     && Objects.equals(d.name, name) && d.lore.equals(lore) && Objects.equals(d.raw, raw)
                     && Objects.equals(d.stored, stored)
                     && Objects.equals(d.book, book)
+                    && Objects.equals(d.itemName, itemName)
+                    && Objects.equals(d.itemModel, itemModel)
+                    && Objects.equals(d.tooltipStyle, tooltipStyle)
+                    && d.hideTooltip == hideTooltip
+                    && Objects.equals(d.glintOverride, glintOverride)
                     && PdcImpl.Nbt.encode(d.customOut()).equals(PdcImpl.Nbt.encode(customOut()));
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(damage, enchants, name, lore, raw, stored, book, PdcImpl.Nbt.encode(customOut()));
+            return Objects.hash(damage, enchants, name, lore, raw, stored, book, itemName,
+                    itemModel, tooltipStyle, hideTooltip, glintOverride,
+                    PdcImpl.Nbt.encode(customOut()));
         }
 
         @Override
@@ -662,6 +695,39 @@ final class StackImpl extends ItemStack {
             return storedEnchants().keySet().stream()
                     .anyMatch(other -> !other.equals(e) && other.conflictsWith(e));
         }
+
+        // --- компоненты внешнего вида предмета (Paper ItemMeta) ---
+
+        public boolean hasItemName() { return data.itemName != null; }
+        public Component itemName() { return data.itemName; }
+        public void itemName(Component name) { data.itemName = name; }
+        public String getItemName() { return data.itemName == null ? "" : legacy(data.itemName); }
+        public void setItemName(String name) {
+            data.itemName = name == null ? null : fromLegacy(name);
+        }
+
+        public boolean hasItemModel() { return data.itemModel != null; }
+        public NamespacedKey getItemModel() {
+            return data.itemModel == null ? null : NamespacedKey.fromString(data.itemModel);
+        }
+        public void setItemModel(NamespacedKey key) {
+            data.itemModel = key == null ? null : key.toString();
+        }
+
+        public boolean hasTooltipStyle() { return data.tooltipStyle != null; }
+        public NamespacedKey getTooltipStyle() {
+            return data.tooltipStyle == null ? null : NamespacedKey.fromString(data.tooltipStyle);
+        }
+        public void setTooltipStyle(NamespacedKey key) {
+            data.tooltipStyle = key == null ? null : key.toString();
+        }
+
+        public boolean isHideTooltip() { return data.hideTooltip; }
+        public void setHideTooltip(boolean hide) { data.hideTooltip = hide; }
+
+        public boolean hasEnchantmentGlintOverride() { return data.glintOverride != null; }
+        public Boolean getEnchantmentGlintOverride() { return data.glintOverride; }
+        public void setEnchantmentGlintOverride(Boolean value) { data.glintOverride = value; }
 
         public boolean hasDamage() { return data.damage > 0; }
         public int getDamage() { return data.damage; }

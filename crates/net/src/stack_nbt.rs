@@ -106,6 +106,27 @@ pub fn named_nbt(
     if let Some(n) = &e.custom_name {
         comps.insert("minecraft:custom_name".into(), json_to_tag(&parse(n)));
     }
+    if let Some(n) = &e.item_name {
+        comps.insert("minecraft:item_name".into(), json_to_tag(&parse(n)));
+    }
+    if let Some(m) = &e.item_model {
+        comps.insert("minecraft:item_model".into(), Tag::String(m.clone()));
+    }
+    if let Some(t) = &e.tooltip_style {
+        comps.insert("minecraft:tooltip_style".into(), Tag::String(t.clone()));
+    }
+    if e.hide_tooltip {
+        let mut display = Compound::new();
+        display.insert("hide_tooltip".into(), Tag::Byte(1));
+        display.insert("hidden_components".into(), Tag::List(Vec::new()));
+        comps.insert("minecraft:tooltip_display".into(), Tag::Compound(display));
+    }
+    if let Some(v) = e.glint_override {
+        comps.insert(
+            "minecraft:enchantment_glint_override".into(),
+            Tag::Byte(i8::from(v)),
+        );
+    }
     if !e.lore.is_empty() {
         let lines = e.lore.iter().map(|l| json_to_tag(&parse(l))).collect();
         comps.insert("minecraft:lore".into(), Tag::List(lines));
@@ -249,6 +270,27 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>, depth: u32)
         e.custom_name = m
             .get("minecraft:custom_name")
             .map(|t| tag_to_json(t).to_string());
+        e.item_name = m
+            .get("minecraft:item_name")
+            .map(|t| tag_to_json(t).to_string());
+        e.item_model = m
+            .get("minecraft:item_model")
+            .and_then(Tag::as_str)
+            .map(str::to_owned);
+        e.tooltip_style = m
+            .get("minecraft:tooltip_style")
+            .and_then(Tag::as_str)
+            .map(str::to_owned);
+        e.hide_tooltip = m
+            .get("minecraft:tooltip_display")
+            .and_then(Tag::as_compound)
+            .and_then(|c| c.get("hide_tooltip"))
+            .and_then(Tag::as_i64)
+            .is_some_and(|v| v != 0);
+        e.glint_override = m
+            .get("minecraft:enchantment_glint_override")
+            .and_then(Tag::as_i64)
+            .map(|v| v != 0);
         if let Some(lines) = m.get("minecraft:lore").and_then(Tag::as_list) {
             e.lore = lines.iter().map(|t| tag_to_json(t).to_string()).collect();
         }
@@ -521,6 +563,21 @@ pub fn to_line(s: Stack, name: &str) -> String {
     if let Some(n) = &e.custom_name {
         j.insert("name".into(), parse(n));
     }
+    if let Some(n) = &e.item_name {
+        j.insert("item_name".into(), parse(n));
+    }
+    if let Some(m) = &e.item_model {
+        j.insert("item_model".into(), Value::from(m.clone()));
+    }
+    if let Some(t) = &e.tooltip_style {
+        j.insert("tooltip_style".into(), Value::from(t.clone()));
+    }
+    if e.hide_tooltip {
+        j.insert("hide_tooltip".into(), Value::Bool(true));
+    }
+    if let Some(v) = e.glint_override {
+        j.insert("glint_override".into(), Value::Bool(v));
+    }
     if !e.lore.is_empty() {
         j.insert("lore".into(), e.lore.iter().map(|l| parse(l)).collect());
     }
@@ -619,6 +676,23 @@ pub fn from_line(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<St
                 .collect();
         }
         e.custom_name = j.get("name").filter(|v| !v.is_null()).map(Value::to_string);
+        e.item_name = j
+            .get("item_name")
+            .filter(|v| !v.is_null())
+            .map(Value::to_string);
+        e.item_model = j
+            .get("item_model")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        e.tooltip_style = j
+            .get("tooltip_style")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        e.hide_tooltip = j
+            .get("hide_tooltip")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        e.glint_override = j.get("glint_override").and_then(Value::as_bool);
         if let Some(Value::Array(lore)) = j.get("lore") {
             e.lore = lore.iter().map(Value::to_string).collect();
         }
@@ -1013,6 +1087,11 @@ mod tests {
             map_id: Some(12),
             map_post_processing: None,
             dyed_color: None,
+            item_name: Some(r#""Visual Stone""#.into()),
+            item_model: Some("minecraft:apple".into()),
+            tooltip_style: Some("minecraft:default".into()),
+            hide_tooltip: true,
+            glint_override: Some(false),
             charged: Vec::new(),
             container: Vec::new(),
             custom_data: Some(compound_to_net(&Compound::from([(
@@ -1037,6 +1116,20 @@ mod tests {
             Tag::Int(5)
         );
         let back = from_nbt(&c, |n| (n == "minecraft:diamond_pickaxe").then_some(7)).unwrap();
+        assert_eq!(
+            comps["minecraft:item_model"].as_str(),
+            Some("minecraft:apple")
+        );
+        assert_eq!(
+            comps["minecraft:tooltip_style"].as_str(),
+            Some("minecraft:default")
+        );
+        assert_eq!(comps["minecraft:item_name"].as_str(), Some("Visual Stone"));
+        assert_eq!(
+            comps["minecraft:tooltip_display"].as_compound().unwrap()["hide_tooltip"],
+            Tag::Byte(1)
+        );
+        assert_eq!(comps["minecraft:enchantment_glint_override"], Tag::Byte(0));
         assert_eq!(back, s);
         let line = to_line(s, "minecraft:diamond_pickaxe");
         assert_eq!(

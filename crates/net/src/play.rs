@@ -4852,6 +4852,24 @@ impl PlayPlan {
             }
             return String::new();
         }
+        // `blockflags <block>`: флаги состояния блока (SOLID = бит 1).
+        if let Some(rest) = line.strip_prefix("blockflags ") {
+            let name = rest.trim();
+            let idx = self
+                .survival
+                .block_names
+                .iter()
+                .position(|n| n == name)
+                .or_else(|| {
+                    self.survival
+                        .block_names
+                        .iter()
+                        .position(|n| n.split('[').next() == Some(name))
+                });
+            return idx
+                .map(|state| chunkwake_world::state_flags(state as u32).to_string())
+                .unwrap_or_default();
+        }
         // `itemname <id>`: имя предмета по числовому id (мост для ItemStack).
         if let Some(rest) = line.strip_prefix("itemname ") {
             return rest
@@ -4864,7 +4882,7 @@ impl PlayPlan {
         // `components`: таблица `name id` компонентов предметов (Java-мост).
         if line == "components" {
             use std::sync::atomic::Ordering;
-            let table: [(&str, i32); 16] = [
+            let table: [(&str, i32); 21] = [
                 (
                     "minecraft:damage",
                     chunkwake_protocol::inventory::DAMAGE_COMPONENT.load(Ordering::Relaxed),
@@ -4934,6 +4952,28 @@ impl PlayPlan {
                 (
                     "minecraft:dyed_color",
                     chunkwake_protocol::components::DYED_COLOR_COMPONENT.load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:item_name",
+                    chunkwake_protocol::components::ITEM_NAME_COMPONENT.load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:item_model",
+                    chunkwake_protocol::components::ITEM_MODEL_COMPONENT.load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:tooltip_style",
+                    chunkwake_protocol::components::TOOLTIP_STYLE_COMPONENT.load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:tooltip_display",
+                    chunkwake_protocol::components::TOOLTIP_DISPLAY_COMPONENT
+                        .load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:enchantment_glint_override",
+                    chunkwake_protocol::components::GLINT_OVERRIDE_COMPONENT
+                        .load(Ordering::Relaxed),
                 ),
             ];
             return table

@@ -6120,3 +6120,90 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## Паритет API, батч 3: Typed.isSolid и визуальные компоненты предмета
+
+### Typed.isSolid (ItemType/BlockType)
+
+Твёрдость больше не выводится из `Material` (там рекурсия
+`Material.isSolid -> asBlockType().isSolid`), а берётся из реестра
+состояний Rust:
+
+- `world_request("blockflags <block>")` возвращает `state_flags` состояния
+  (`SOLID` = бит 1, считается в `world_setup::state_flags`);
+- `Registries.isSolid` кэширует результат, `ItemTypeImpl.isSolid` и
+  `BlockTypeImpl.isSolid` используют его.
+
+Проверка ботом:
+
+```
+solid(stone)=true solid(air)=false solid(water)=false
+solid(short_grass)=false solid(block_registry)=true
+```
+
+Предыдущая попытка через `Material.isSolid()` давала StackOverflow и
+валила MythicMobs — откачена.
+
+### Визуальные компоненты предмета
+
+Добавлены сквозные компоненты (Java ItemMeta → JSON → Rust Extra → NBT →
+патч компонентов):
+
+```
+minecraft:item_model
+minecraft:tooltip_style
+minecraft:tooltip_display   (hide_tooltip в Paper API)
+minecraft:enchantment_glint_override
+minecraft:item_name
+```
+
+`minecraft:hide_tooltip` в 26.3 не существует: Paper-овский
+`setHideTooltip` пишется в `minecraft:tooltip_display` как
+`{hide_tooltip:1b, hidden_components:[]}`. Первый запуск с несуществующим
+именем падал на `unknown data_component_type entry minecraft:hide_tooltip`,
+поэтому имя заменено.
+
+Проверка ботом (`/worldstate` кладёт камень с этими компонентами в
+инвентарь):
+
+```
+visual=minecraft:apple/minecraft:default/true/false/Visual Stone
+```
+
+и реальный NBT предмета:
+
+```
+{Slot:0b,components:{
+  minecraft:enchantment_glint_override:0b,
+  minecraft:item_model:"minecraft:apple",
+  minecraft:item_name:"Visual Stone",
+  minecraft:tooltip_display:{hidden_components:[],hide_tooltip:1b},
+  minecraft:tooltip_style:"minecraft:default"},count:1,id:"minecraft:stone"}
+```
+
+Rust-тест `stack_nbt::round_trip_with_components` расширен: проверяет
+все пять компонентов через `to_nbt`/`from_nbt`/`to_line`.
+
+В логе гейта пропали предупреждения `Damageable.getItemModel`,
+`getTooltipStyle`, `isHideTooltip`, `hasEnchantmentGlintOverride`,
+`hasItemName` и `Typed.isSolid`.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 81821 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 34820 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+CraftEngine P2: ok=263 bad=241
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
+
+Заодно в репозиторий попали ранее незакоммиченные
+`crates/server/benches/tick.rs` (A/B-бенчмарк тика) и
+`crates/server/src/world_setup.rs` (гейт зелёный, сервер стартует).
