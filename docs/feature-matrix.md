@@ -4900,3 +4900,75 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 192/504; `/dm list` проверен ботом
+
+### Прокси-покрытие
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=183 bad=321
+стало: ok=192 bad=312
+```
+
+Полностью закрылись 9 прокси:
+
+```
+ClientboundBlockDestructionPacketProxy
+ClientboundContainerSetDataPacketProxy
+ClientboundContainerSetSlotPacketProxy
+ClientboundDisconnectPacketProxy
+ClientboundEntityEventPacketProxy
+ClientboundLevelEventPacketProxy
+ClientboundOpenScreenPacketProxy
+ServerboundContainerClickPacketProxy
+ClientInformationProxy
+```
+
+Созданы пакетные NMS-классы с членами, которые ищет CraftEngine:
+
+- `ClientboundContainerSetSlotPacket` (containerId/stateId/slot/itemStack + ctor);
+- `ClientboundContainerSetContentPacket` (items/carriedItem + два ctor);
+- `ClientboundContainerSetDataPacket` (ctor int,int,int);
+- `ClientboundOpenScreenPacket` (MenuType/Component + ctor);
+- `ClientboundDisconnectPacket(Component)`;
+- `ClientboundEntityEventPacket` (entityId/eventId + ctor);
+- `ServerboundContainerClickPacket` (carriedItem/changedSlots);
+- `ClientboundBlockDestructionPacket` (ctor int,BlockPos,int);
+- `ClientboundLevelEventPacket` (ctor int,BlockPos,int,boolean);
+- `MenuType`, `ClientInformation`.
+
+Остаётся 312 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Функциональная проверка: DeluxeMenus `/dm list`
+
+```
+> /dm list
+| Page 1/1 - 3 menus:
+| - advanced_menu.yml - advanced_menu
+| - basics_menu.yml - basics_menu
+| - requirements_menu.yml - requirements_menu
+```
+
+DeluxeMenus реально прочитал свои конфиги, построил меню и ответил игроку —
+цепочка `plugin.yml command -> Bukkit -> DeluxeMenus -> chat` работает.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 242231 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 54039 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
+
+(Расширенный гейт шёл 242 с из-за сетевых таймаутов проверок обновлений
+плагинов; итоговый результат тот же 79/82.)
