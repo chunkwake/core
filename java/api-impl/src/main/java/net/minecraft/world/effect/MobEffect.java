@@ -1,6 +1,6 @@
 package net.minecraft.world.effect;
 
-/** NMS-заглушка {@code MobEffect} (CommandAPI проверяет наличие). */
+/** NMS {@code MobEffect} (CraftEngine). */
 public class MobEffect {
     public MobEffect() {
     }

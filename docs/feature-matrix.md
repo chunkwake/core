@@ -5106,3 +5106,66 @@ cargo +1.100.0 test --workspace -- --test-threads=4
 
 (Расширенный гейт шёл 250 с из-за сетевых таймаутов проверок обновлений
 плагинов; итоговый результат тот же — 79/82.)
+
+## CraftEngine-прокси: 209/504; `/imageframe` проверен ботом
+
+### Прокси-покрытие
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=199 bad=305
+стало: ok=209 bad=295
+```
+
+Полностью закрылись 10 прокси (пакетный батч):
+
+```
+ClientboundCustomChatCompletionsPacketProxy
+ClientboundOpenBookPacketProxy
+ClientboundPlayerCombatKillPacketProxy
+ClientboundRemoveMobEffectPacketProxy
+ClientboundServerDataPacketProxy
+ClientboundSetActionBarTextPacketProxy
+ClientboundSetCursorItemPacketProxy
+ClientboundSetHealthPacketProxy
+ClientboundSetSubtitleTextPacketProxy
+ClientboundSetTitlesAnimationPacketProxy
+```
+
+Созданы NMS-классы: `ClientboundSetActionBarTextPacket`,
+`ClientboundSetSubtitleTextPacket`, `ClientboundSetTitlesAnimationPacket`,
+`ClientboundSetHealthPacket`, `ClientboundOpenBookPacket`,
+`ClientboundSetCursorItemPacket`, `ClientboundServerDataPacket`,
+`ClientboundPlayerCombatKillPacket`, `ClientboundRemoveMobEffectPacket`
+(+ `MobEffect`), `ClientboundCustomChatCompletionsPacket` с вложенным
+`Action`.
+
+Остаётся 295 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Функциональная проверка: ImageFrame `/imageframe`
+
+```
+> /imageframe
+| ImageFrame written by LOOHP!
+| You are running ImageFrame version: 2026.1.5.0
+| This server supports ImageFrame Client but you are not using it.
+```
+
+ImageFrame реально обработал команду и вернул свою версию/статус клиента.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 39444 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 13814 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
