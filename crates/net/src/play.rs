@@ -4802,6 +4802,56 @@ impl PlayPlan {
                 .collect::<Vec<_>>()
                 .join("\n");
         }
+        // `pvp` / `pvp 0|1`: серверный PvP (`server.properties` / gamerule pvp).
+        if line == "pvp" {
+            return if self.vars.flag("pvp") { "1" } else { "0" }.to_owned();
+        }
+        if let Some(value) = line.strip_prefix("pvp ") {
+            let on = match value.trim() {
+                "1" | "true" => Some(true),
+                "0" | "false" => Some(false),
+                _ => None,
+            };
+            if let Some(on) = on {
+                self.vars
+                    .set_rule("pvp", crate::play::commands::state::RuleValue::Bool(on));
+            }
+            return String::new();
+        }
+        // `difficulty` / `difficulty <0-3>`: сложность как `World#getDifficulty`.
+        if line == "difficulty" {
+            return self.difficulty().id().to_string();
+        }
+        if let Some(value) = line.strip_prefix("difficulty ") {
+            if let Ok(level) = value.trim().parse::<u8>() {
+                self.set_difficulty(level);
+            }
+            return String::new();
+        }
+        // `clearweather`: `World#isClearWeather` - нет дождя и грозы.
+        if line == "clearweather" {
+            let weather = self.vars.weather();
+            return if !weather.rain && !weather.thunder {
+                "1"
+            } else {
+                "0"
+            }
+            .to_owned();
+        }
+        // `spawnpos` / `spawnpos x y z`: точка появления мира.
+        if line == "spawnpos" {
+            let spawn = self.vars.world_spawn().unwrap_or(self.spawn);
+            return format!("{} {} {}", spawn[0], spawn[1], spawn[2]);
+        }
+        if let Some(rest) = line.strip_prefix("spawnpos ") {
+            let n = |s: &str| s.parse::<f64>().ok().filter(|v| v.is_finite());
+            let pos: Vec<f64> = rest.split(' ').filter_map(n).collect();
+            if let [x, y, z] = pos[..] {
+                self.vars.set_world_spawn([x, y, z]);
+                self.broadcast_world_spawn();
+            }
+            return String::new();
+        }
         // `itemname <id>`: имя предмета по числовому id (мост для ItemStack).
         if let Some(rest) = line.strip_prefix("itemname ") {
             return rest

@@ -650,6 +650,37 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             p.sendMessage(Component.text("Kit given", NamedTextColor.GREEN));
             return true;
         }
+        if (command.getName().equals("worldstate")) {
+            org.bukkit.World w = sender instanceof Player p
+                    ? p.getWorld()
+                    : getServer().getWorlds().get(0);
+            if (args.length == 1 && args[0].equals("set")) {
+                w.setPVP(!w.getPVP());
+                w.setDifficulty(org.bukkit.Difficulty.HARD);
+                w.setSpawnLocation(12, 70, 12);
+                sender.sendMessage("worldstate set done");
+                return true;
+            }
+            ItemStack book = new ItemStack(Material.ENCHANTED_BOOK);
+            org.bukkit.inventory.meta.EnchantmentStorageMeta meta =
+                    (org.bukkit.inventory.meta.EnchantmentStorageMeta) book.getItemMeta();
+            boolean added = meta.addStoredEnchant(
+                    org.bukkit.enchantments.Enchantment.SHARPNESS, 3, true);
+            book.setItemMeta(meta);
+            org.bukkit.inventory.meta.EnchantmentStorageMeta back =
+                    (org.bukkit.inventory.meta.EnchantmentStorageMeta) book.getItemMeta();
+            org.bukkit.Location spawn = w.getSpawnLocation();
+            sender.sendMessage("worldstate world=" + w.getName() + " pvp=" + w.getPVP()
+                    + " difficulty=" + w.getDifficulty() + " clear=" + w.isClearWeather()
+                    + " spawn=" + spawn.getBlockX() + "," + spawn.getBlockY() + ","
+                    + spawn.getBlockZ()
+                    + " bookAdded=" + added + " stored=" + back.getStoredEnchants()
+                    + " level=" + back.getStoredEnchantLevel(
+                            org.bukkit.enchantments.Enchantment.SHARPNESS)
+                    + " conflict=" + back.hasConflictingStoredEnchant(
+                            org.bukkit.enchantments.Enchantment.SMITE));
+            return true;
+        }
         sender.sendMessage(Component.text("Hello, " + sender.getName() + "!", NamedTextColor.GREEN));
         return true;
     }

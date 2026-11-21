@@ -355,7 +355,54 @@ final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implements World
     // --- Блоки ---
 
     public Location getSpawnLocation() {
+        String[] p = request("spawnpos").trim().split(" ");
+        if (p.length == 3) {
+            try {
+                return new Location(api, Double.parseDouble(p[0]), Double.parseDouble(p[1]),
+                        Double.parseDouble(p[2]));
+            } catch (NumberFormatException ignored) {
+                // ниже — запасная точка, как в старом поведении
+            }
+        }
         return new Location(api, 0, 64, 0);
+    }
+
+    public boolean setSpawnLocation(int x, int y, int z) {
+        request("spawnpos " + x + " " + y + " " + z);
+        return true;
+    }
+
+    public boolean setSpawnLocation(Location location) {
+        return setSpawnLocation(location.getBlockX(), location.getBlockY(), location.getBlockZ());
+    }
+
+    /** {@code World#getPVP}: серверный флаг из {@code server.properties}. */
+    public boolean getPVP() {
+        return "1".equals(request("pvp").trim());
+    }
+
+    public void setPVP(boolean pvp) {
+        request("pvp " + (pvp ? "1" : "0"));
+    }
+
+    /** {@code World#getDifficulty}: сложность сервера (общая для всех миров). */
+    public org.bukkit.Difficulty getDifficulty() {
+        try {
+            return org.bukkit.Difficulty.getByValue(Integer.parseInt(request("difficulty").trim()));
+        } catch (NumberFormatException e) {
+            return org.bukkit.Difficulty.NORMAL;
+        }
+    }
+
+    public void setDifficulty(org.bukkit.Difficulty difficulty) {
+        if (difficulty != null) {
+            request("difficulty " + difficulty.getValue());
+        }
+    }
+
+    /** {@code World#isClearWeather}: сейчас нет дождя и грозы. */
+    public boolean isClearWeather() {
+        return "1".equals(request("clearweather").trim());
     }
     public org.bukkit.block.Block getBlockAt(int x, int y, int z) {
         return new BlockImpl(api, x, y, z, null).api;

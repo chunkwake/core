@@ -588,6 +588,81 @@ final class StackImpl extends ItemStack {
             return old == null || old != level;
         }
 
+        // EnchantmentStorageMeta: компонент minecraft:stored_enchantments.
+        private Map<Enchantment, Integer> storedEnchants() {
+            Map<Enchantment, Integer> out = new LinkedHashMap<>();
+            if (data.stored == null) {
+                return out;
+            }
+            for (Map.Entry<String, JsonElement> e : data.stored.entrySet()) {
+                NamespacedKey key = NamespacedKey.fromString(e.getKey());
+                Enchantment ench = key == null ? null : Registry.ENCHANTMENT.get(key);
+                if (ench != null) {
+                    out.put(ench, e.getValue().getAsInt());
+                }
+            }
+            return out;
+        }
+
+        private JsonObject storedRaw() {
+            if (data.stored == null) {
+                data.stored = new JsonObject();
+            }
+            return data.stored;
+        }
+
+        private void pruneStored() {
+            if (data.stored != null && data.stored.isEmpty()) {
+                data.stored = null;
+            }
+        }
+
+        public boolean hasStoredEnchants() {
+            return data.stored != null && !data.stored.isEmpty();
+        }
+
+        public boolean hasStoredEnchant(Enchantment e) {
+            return e != null && data.stored != null && data.stored.has(e.getKey().toString());
+        }
+
+        public int getStoredEnchantLevel(Enchantment e) {
+            JsonElement level = e == null || data.stored == null
+                    ? null
+                    : data.stored.get(e.getKey().toString());
+            return level == null ? 0 : level.getAsInt();
+        }
+
+        public Map<Enchantment, Integer> getStoredEnchants() {
+            return Map.copyOf(storedEnchants());
+        }
+
+        public boolean addStoredEnchant(Enchantment e, int level, boolean ignoreLevelRestriction) {
+            Objects.requireNonNull(e, "Enchantment cannot be null");
+            if (!ignoreLevelRestriction && (level < e.getStartLevel() || level > e.getMaxLevel())) {
+                return false;
+            }
+            JsonObject raw = storedRaw();
+            String key = e.getKey().toString();
+            JsonElement old = raw.get(key);
+            raw.addProperty(key, level);
+            return old == null || old.getAsInt() != level;
+        }
+
+        public boolean removeStoredEnchant(Enchantment e) {
+            Objects.requireNonNull(e, "Enchantment cannot be null");
+            JsonElement old = data.stored == null ? null : data.stored.remove(e.getKey().toString());
+            if (old == null) {
+                throw new IllegalArgumentException("Enchantment " + e + " not found");
+            }
+            pruneStored();
+            return true;
+        }
+
+        public boolean hasConflictingStoredEnchant(Enchantment e) {
+            return storedEnchants().keySet().stream()
+                    .anyMatch(other -> !other.equals(e) && other.conflictsWith(e));
+        }
+
         public boolean hasDamage() { return data.damage > 0; }
         public int getDamage() { return data.damage; }
         public void setDamage(int damage) { data.damage = Math.max(0, damage); }

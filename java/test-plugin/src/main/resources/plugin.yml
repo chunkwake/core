@@ -18,6 +18,9 @@ commands:
   world:
     description: Teleports to the spawn of another world
     usage: /world <name>
+  worldstate:
+    description: Prints world state and stored-enchant round-trip
+    usage: /worldstate
 permissions:
   chunkwake.test.kit:
     description: Use /kit

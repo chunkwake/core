@@ -6033,3 +6033,58 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## Паритет World API по Paper: PVP, сложность, погода, спавн, stored enchantments
+
+Закрыты «тихие» заглушки, которые раньше возвращали пустое значение:
+
+- `World#getPVP` / `setPVP` — флаг `pvp` (`server.properties` / gamerule);
+- `World#getDifficulty` / `setDifficulty` — общая сложность сервера;
+- `World#isClearWeather` — нет дождя и грозы;
+- `World#getSpawnLocation` больше не `(0, 64, 0)`, а реальная точка
+  появления; `setSpawnLocation(x,y,z)` её меняет и рассылает клиентам;
+- `EnchantmentStorageMeta`: `addStoredEnchant`, `getStoredEnchants`,
+  `getStoredEnchantLevel`, `hasStoredEnchant(s)`,
+  `removeStoredEnchant`, `hasConflictingStoredEnchant` — через реальный
+  компонент `minecraft:stored_enchantments`, а не заглушку.
+
+Реализация: `world_request` в `crates/net/src/play.rs` (`pvp`,
+`difficulty`, `clearweather`, `spawnpos`), `WorldImpl` в бридже,
+`StackImpl.MetaImpl` — stored enchants кладутся в JSON-ключ `stored`,
+который Rust уже отображает в компонент.
+
+### Проверка ботом на базовом стенде
+
+```
+> /worldstate
+| worldstate world=world pvp=true difficulty=EASY clear=true spawn=8,-60,8
+|   bookAdded=true stored={minecraft:sharpness=3} level=3 conflict=true
+
+> /worldstate set
+| worldstate set done
+
+> /worldstate
+| worldstate world=world pvp=false difficulty=HARD clear=true spawn=12,70,12
+|   bookAdded=true stored={minecraft:sharpness=3} level=3 conflict=true
+```
+
+То есть API-сеттеры реально меняют состояние (PVP, сложность, спавн), а
+книга с `stored_enchantments` собирается и читается обратно.
+
+Из лога гейта исчезли предупреждения `World.*` и
+`EnchantmentStorageMeta.addStoredEnchant`.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 45790 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 13744 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
