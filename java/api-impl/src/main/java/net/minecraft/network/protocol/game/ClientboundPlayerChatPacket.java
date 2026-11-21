@@ -13,6 +13,9 @@ import net.minecraft.network.protocol.Packet;
  * ({@code getChatComponents()}) и могут его менять.
  */
 public class ClientboundPlayerChatPacket implements Packet {
+    /** Поле, которое ищет CraftEngine (getBody). */
+    private Object body;
+
     private UUID sender;
     private int index;
     private byte[] signature;

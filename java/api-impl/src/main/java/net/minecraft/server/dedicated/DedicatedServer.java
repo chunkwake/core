@@ -4,6 +4,10 @@ import net.minecraft.server.MinecraftServer;
 
 /** Минимальный NMS {@code DedicatedServer} (Voxy и другие проверяют класс). */
 public class DedicatedServer extends MinecraftServer {
+    /** Поле, которое ищет CraftEngine (getStructureTemplateManager). */
+    private final net.minecraft.world.level.levelgen.structure.StructureTemplateManager structureTemplateManager =
+            new net.minecraft.world.level.levelgen.structure.StructureTemplateManager();
+
     @Override
     public boolean hasStopped() {
         return super.hasStopped();

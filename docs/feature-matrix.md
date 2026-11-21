@@ -4660,3 +4660,58 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 165/504 (было 161)
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=161 bad=343
+стало: ok=165 bad=339
+```
+
+Полностью закрылись 4 прокси:
+
+```
+ClientboundPlayerChatPacketProxy
+ServerboundSignUpdatePacketProxy
+FluidProxy
+FluidsProxy
+```
+
+Добавлено:
+
+- `Registry.getHolder(ResourceKey)`;
+- `BuiltInRegistries.fluid`, `Registries.entityType` (+ uppercase-алиасы);
+- `Entity.zo`, `EntityTypes.spectralArrow` (+ алиас);
+- `Container.setChanged()`, `CraftingContainer.setChanged()`;
+- `AbstractContainerMenu.broadcastFullState()`;
+- `BlockGetter.getFluidState(BlockPos)`;
+- `ChunkAccess`/`LevelChunk.blockEntities`;
+- `Fluid.defaultFluidState`, `Fluids.getDefaultFluidState()`;
+- `AABB.move(double,double,double)`;
+- `StructureTemplateManager` + поля в `MinecraftServer`/`DedicatedServer`;
+- `ServerConfigurationPacketListenerImpl.returnToWorld()`;
+- `ServerGamePacketListenerImpl.tryPickItem(int)`;
+- поля пакетов: `ClientboundAnimatePacket.id`,
+  `ClientboundMoveEntityPacket` (`entityId/x/y/z/xRot/yRot/onGround`),
+  `ClientboundTeleportEntityPacket.yRot`, `ClientboundPlayerChatPacket.body`,
+  `ServerboundPlayerActionPacket.action`, `ServerboundSignUpdatePacket.lines`.
+
+Остаётся 339 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 76297 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 16394 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

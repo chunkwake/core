@@ -8,6 +8,10 @@ public class AbstractContainerMenu {
     /** Поле, которое ищет CraftEngine (getCheckReachable). */
     private boolean checkReachable = true;
 
+    /** {@code AbstractContainerMenu.broadcastFullState()} (CraftEngine). */
+    public void broadcastFullState() {
+    }
+
     /** {@code AbstractContainerMenu.quickMoveStack(Player, int)} (CraftEngine). */
     public net.minecraft.world.item.ItemStack quickMoveStack(
             net.minecraft.world.entity.player.Player player, int index) {

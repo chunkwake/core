@@ -19,6 +19,9 @@ public final class Registries {
     public static final ResourceKey<Registry<Object>> fluid =
             ResourceKey.createRegistryKey(Identifier.parse("minecraft:fluid"));
     public static final ResourceKey<Registry<Object>> FLUID = fluid;
+    public static final ResourceKey<Registry<Object>> entityType =
+            ResourceKey.createRegistryKey(Identifier.parse("minecraft:entity_type"));
+    public static final ResourceKey<Registry<Object>> ENTITY_TYPE = entityType;
 
     public static final ResourceKey<Registry<Object>> BIOME =
             key("biome");

@@ -5,6 +5,10 @@ package net.minecraft.server.network;
  * от {@link ServerCommonPacketListenerImpl}.
  */
 public class ServerGamePacketListenerImpl extends ServerCommonPacketListenerImpl {
+    /** {@code tryPickItem(int)} (CraftEngine). */
+    public void tryPickItem(int index) {
+    }
+
     /** Алиас, который ищет CraftEngine (getConnection). */
     public net.minecraft.network.Connection connection = super.connection;
 

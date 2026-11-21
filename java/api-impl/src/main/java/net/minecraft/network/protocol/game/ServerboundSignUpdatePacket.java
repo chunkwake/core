@@ -6,6 +6,9 @@ package net.minecraft.network.protocol.game;
  * пакета в Chunkwake не используется — пакеты собираются в Rust.
  */
 public class ServerboundSignUpdatePacket {
+    /** Поле, которое ищет CraftEngine (getLines). */
+    private String[] lines = new String[0];
+
     public ServerboundSignUpdatePacket() {
     }
 }

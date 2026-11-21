@@ -32,6 +32,10 @@ public class MinecraftServer {
     private final net.minecraft.world.scores.Scoreboard scoreboard =
             new net.minecraft.world.scores.Scoreboard();
 
+    /** Поле, которое ищет CraftEngine (getStructureTemplateManager). */
+    private final net.minecraft.world.level.levelgen.structure.StructureTemplateManager structureTemplateManager =
+            new net.minecraft.world.level.levelgen.structure.StructureTemplateManager();
+
     /** {@code MinecraftServer.hasStopped()} (CraftEngine). */
     public boolean hasStopped() {
         return false;

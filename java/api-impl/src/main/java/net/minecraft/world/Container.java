@@ -2,6 +2,9 @@ package net.minecraft.world;
 
 /** NMS {@code Container} (CraftEngine). */
 public interface Container {
+    default void setChanged() {
+    }
+
     default net.minecraft.world.item.crafting.RecipeHolder getCurrentRecipe() {
         return null;
     }

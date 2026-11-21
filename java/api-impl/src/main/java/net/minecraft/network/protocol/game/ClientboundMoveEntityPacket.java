@@ -6,6 +6,15 @@ package net.minecraft.network.protocol.game;
  * движение собирается в Rust, поэтому нужны только классы.
  */
 public class ClientboundMoveEntityPacket {
+    /** Поля, которые ищет CraftEngine. */
+    private int entityId;
+    private double x;
+    private double y;
+    private double z;
+    private float xRot;
+    private float yRot;
+    private boolean onGround;
+
     public ClientboundMoveEntityPacket() {
     }
 

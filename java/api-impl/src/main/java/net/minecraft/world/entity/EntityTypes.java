@@ -7,6 +7,8 @@ public final class EntityTypes {
     public static final EntityType<Entity> ITEM = item;
     public static final EntityType<Entity> fallingBlock = new EntityType<>("minecraft:falling_block");
     public static final EntityType<Entity> FALLING_BLOCK = fallingBlock;
+    public static final EntityType<Entity> spectralArrow = new EntityType<>("minecraft:spectral_arrow");
+    public static final EntityType<Entity> SPECTRAL_ARROW = spectralArrow;
 
     public static final EntityType<Entity> MARKER = new EntityType<>("minecraft:marker");
     public static final EntityType<Entity> ITEM_FRAME = new EntityType<>("minecraft:item_frame");

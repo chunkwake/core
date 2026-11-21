@@ -6,6 +6,9 @@ package net.minecraft.network.protocol.game;
  * пакета в Chunkwake не используется — пакеты собираются в Rust.
  */
 public class ServerboundPlayerActionPacket {
+    /** Поле, которое ищет CraftEngine (getAction). */
+    private Object action;
+
     public ServerboundPlayerActionPacket() {
     }
 }

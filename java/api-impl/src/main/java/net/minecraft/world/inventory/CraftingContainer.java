@@ -5,6 +5,9 @@ public class CraftingContainer {
     public CraftingContainer() {
     }
 
+    public void setChanged() {
+    }
+
     public net.minecraft.world.item.crafting.RecipeHolder getCurrentRecipe() {
         return null;
     }

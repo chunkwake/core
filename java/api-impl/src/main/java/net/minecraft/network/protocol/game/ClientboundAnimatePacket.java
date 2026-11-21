@@ -6,6 +6,9 @@ package net.minecraft.network.protocol.game;
  * пакета в Chunkwake не используется — пакеты собираются в Rust.
  */
 public class ClientboundAnimatePacket {
+    /** Поле, которое ищет CraftEngine (getId). */
+    private int id;
+
     public ClientboundAnimatePacket() {
     }
 }

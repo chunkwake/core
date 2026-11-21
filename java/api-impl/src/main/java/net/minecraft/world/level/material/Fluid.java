@@ -2,6 +2,9 @@ package net.minecraft.world.level.material;
 
 /** NMS {@code Fluid}. */
 public class Fluid {
+    /** Поле, которое ищет CraftEngine (getDefaultFluidState). */
+    private net.minecraft.world.level.material.FluidState defaultFluidState;
+
     /** {@code Fluid.getPickupSound()} (CraftEngine). */
     public java.util.Optional<net.minecraft.sounds.SoundEvent> getPickupSound() {
         return java.util.Optional.empty();

@@ -2,6 +2,11 @@ package net.minecraft.world.level.material;
 
 /** NMS {@code Fluids}: ванильные жидкости. */
 public final class Fluids {
+    /** {@code Fluids.getDefaultFluidState()} (CraftEngine). */
+    public net.minecraft.world.level.material.FluidState getDefaultFluidState() {
+        return net.minecraft.world.level.material.FluidState.EMPTY;
+    }
+
     public static final Fluid EMPTY = new Fluid("empty");
     public static final FlowingFluid WATER = new FlowingFluid("water");
     public static final FlowingFluid LAVA = new FlowingFluid("lava");
