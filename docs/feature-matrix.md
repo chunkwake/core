@@ -4323,3 +4323,86 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 135/504; WorldEdit проверен ботом
+
+### Прокси-покрытие
+
+Пробник `P2` по всем 504 прокси-интерфейсам CraftEngine:
+
+```
+было:  ok=132 bad=372
+стало: ok=135 bad=369
+```
+
+Полностью закрылись ещё 3 прокси (остальные члены продвинулись на
+следующий отсутствующий):
+
+```
+MutableBlockPosProxy
+StreamCodecProxy
+TagKeyProxy
+```
+
+Добавлено:
+
+- `BlockPos.MutableBlockPos.setWithOffset(Vec3i, Direction | int,int,int |
+  Vec3i)` (вложенный класс `net.minecraft.core.BlockPos$MutableBlockPos`);
+- `StreamCodec.unit(T)`;
+- `TagKey.create(ResourceKey, Identifier)`.
+
+Кроме того, добавлены члены, которые CraftEngine ищет у классов, где
+прокси пока упирается в следующий пункт:
+
+- `Holder.getRegisteredName()`;
+- `ParticleOptions.getType()`;
+- `Entity.isAlive()`;
+- `ItemStack.remove(DataComponentType)`;
+- `Enchantment.getFullname(Holder, int)`;
+- `ChunkPos.rangeClosed(ChunkPos, int)` и `rangeClosed(ChunkPos, ChunkPos)`;
+- `AttributeSupplier.hasAttribute(Holder)`;
+- `Level.isLoaded(BlockPos)`;
+- `LevelReader.getBiome(BlockPos)`;
+- `AbstractContainerMenu.getSlot(int)` + класс `Slot`;
+- `Item.use(Level, Player, InteractionHand)` + класс `InteractionResult`;
+- `BuiltInRegistries.attribute`, `Registries.attribute`.
+
+Итог: 369 прокси ещё не резолвятся, подавляющее большинство — целые
+NMS/CraftBukkit/Moonrise-классы. CraftEngine остаётся LOADERR.
+
+### WorldEdit 7.4.6 проверен ботом end-to-end
+
+```
+> /we version
+| WorldEdit version 7.4.6
+| 'https://github.com/EngineHub/WorldEdit/
+| ------------------ Platforms ------------------
+| * Bukkit-Official(7.4.6+7648-00664b0)
+| ----------------- Capabilities -----------------
+| GAME_HOOKS: Bukkit-Official
+| CONFIGURATION: Bukkit-Official
+| USER_COMMANDS: Bukkit-Official
+| PERMISSIONS: Bukkit-Official
+| WORLDEDIT_CUI: Bukkit-Official
+| WORLD_EDITING: Bukkit-Official
+```
+
+То есть WorldEdit проходит собственную инициализацию платформы,
+регистрацию команд и permission-слой и отвечает игроку. (`/wand` в
+одиночном слэше — не команда WorldEdit: в игре используется `//wand`;
+это поведение самого плагина.)
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 60838 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 11211 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

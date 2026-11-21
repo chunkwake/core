@@ -16,6 +16,13 @@ public final class TagKey<T> {
         return new TagKey<>(registry, location);
     }
 
+    /** {@code TagKey.create(ResourceKey, Identifier)} (CraftEngine). */
+    public static <T> TagKey<T> create(
+            net.minecraft.resources.ResourceKey<? extends net.minecraft.core.Registry<T>> registry,
+            Identifier location) {
+        return new TagKey<>(registry, location);
+    }
+
     public Identifier location() {
         return this.location;
     }

@@ -7,6 +7,10 @@ import net.minecraft.world.level.block.Block;
 
 /** NMS {@code BuiltInRegistries}: базовые реестры. */
 public final class BuiltInRegistries {
+    /** Поле, которое ищет CraftEngine (BuiltInRegistriesProxy#getAttribute). */
+    public static final net.minecraft.core.Registry<Object> attribute =
+            new net.minecraft.core.SimpleRegistry<>();
+
     public static final DefaultedRegistry<Block> BLOCK = new SimpleDefaultedRegistry<>(
             net.minecraft.resources.Identifier.parse("minecraft:air"));
     public static final DefaultedRegistry<EntityType<?>> ENTITY_TYPE =

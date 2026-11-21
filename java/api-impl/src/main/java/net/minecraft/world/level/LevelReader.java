@@ -29,6 +29,12 @@ public interface LevelReader extends BlockGetter {
         return 0;
     }
 
+    /** {@code LevelReader.getBiome(BlockPos)} (CraftEngine). */
+    default net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome> getBiome(
+            net.minecraft.core.BlockPos pos) {
+        return null;
+    }
+
     default net.minecraft.world.level.biome.BiomeManager getBiomeManager() {
         return null;
     }

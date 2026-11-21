@@ -21,6 +21,28 @@ public class ChunkPos {
         return new ChunkPos(pos.getX() >> 4, pos.getZ() >> 4);
     }
 
+    /** {@code ChunkPos.rangeClosed(ChunkPos, int)} (CraftEngine). */
+    public static java.util.stream.Stream<ChunkPos> rangeClosed(ChunkPos center, int radius) {
+        java.util.List<ChunkPos> out = new java.util.ArrayList<>();
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                out.add(new ChunkPos(center.x + dx, center.z + dz));
+            }
+        }
+        return out.stream();
+    }
+
+    /** {@code ChunkPos.rangeClosed(ChunkPos, ChunkPos)} (CraftEngine). */
+    public static java.util.stream.Stream<ChunkPos> rangeClosed(ChunkPos from, ChunkPos to) {
+        java.util.List<ChunkPos> out = new java.util.ArrayList<>();
+        for (int x = Math.min(from.x, to.x); x <= Math.max(from.x, to.x); x++) {
+            for (int z = Math.min(from.z, to.z); z <= Math.max(from.z, to.z); z++) {
+                out.add(new ChunkPos(x, z));
+            }
+        }
+        return out.stream();
+    }
+
     public long pack() {
         return this.toLong();
     }

@@ -133,5 +133,19 @@ public class BlockPos extends Vec3i {
         public MutableBlockPos move(Direction direction) {
             return this.move(direction.getStepX(), direction.getStepY(), direction.getStepZ());
         }
+
+        /** {@code MutableBlockPos.setWithOffset(Vec3i, Direction)} (CraftEngine). */
+        public MutableBlockPos setWithOffset(Vec3i pos, Direction direction) {
+            return this.setWithOffset(pos, direction.getStepX(), direction.getStepY(),
+                    direction.getStepZ());
+        }
+
+        public MutableBlockPos setWithOffset(Vec3i pos, int dx, int dy, int dz) {
+            return this.set(pos.getX() + dx, pos.getY() + dy, pos.getZ() + dz);
+        }
+
+        public MutableBlockPos setWithOffset(Vec3i pos, Vec3i offset) {
+            return this.setWithOffset(pos, offset.getX(), offset.getY(), offset.getZ());
+        }
     }
 }

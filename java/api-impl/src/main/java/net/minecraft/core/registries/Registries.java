@@ -6,6 +6,10 @@ import net.minecraft.resources.ResourceKey;
 
 /** Заглушка NMS {@code Registries}: ключи основных реестров. */
 public final class Registries {
+    /** Поле, которое ищет CraftEngine (RegistriesProxy#getAttribute). */
+    public static final ResourceKey<Registry<Object>> attribute =
+            ResourceKey.createRegistryKey(Identifier.parse("minecraft:attribute"));
+
     public static final ResourceKey<Registry<Object>> BIOME =
             key("biome");
     public static final ResourceKey<Registry<Object>> DIMENSION_TYPE =

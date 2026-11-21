@@ -5,6 +5,11 @@ import net.minecraft.world.level.block.state.BlockState;
 
 /** NMS {@code Level} (минимально, но с настоящей иерархией). */
 public class Level implements LevelAccessor, net.minecraft.world.level.LevelHeightAccessor {
+    /** {@code Level.isLoaded(BlockPos)} (CraftEngine). */
+    public boolean isLoaded(net.minecraft.core.BlockPos pos) {
+        return true;
+    }
+
 
     /** Ключи измерений (squaremap проверяет NETHER/END). */
     public static final net.minecraft.resources.ResourceKey<Level> OVERWORLD =

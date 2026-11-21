@@ -12,6 +12,11 @@ public interface Holder<T> {
         return new Reference<>(value);
     }
 
+    /** {@code Holder.getRegisteredName()} (CraftEngine). */
+    default String getRegisteredName() {
+        return "";
+    }
+
     T value();
 
     /** {@code Holder.unwrapKey}: ключ реестра, если известен. */

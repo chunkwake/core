@@ -162,6 +162,11 @@ public class Entity implements net.minecraft.network.syncher.SyncedDataHolder {
         this.xRot = xRot;
     }
 
+    /** {@code Entity.isAlive()} (CraftEngine). */
+    public boolean isAlive() {
+        return !this.isRemoved();
+    }
+
     public boolean isRemoved() {
         return this.removed;
     }

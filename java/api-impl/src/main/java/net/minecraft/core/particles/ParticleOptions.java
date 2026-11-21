@@ -4,4 +4,9 @@ package net.minecraft.core.particles;
 public class ParticleOptions {
     public ParticleOptions() {
     }
+
+    /** {@code ParticleOptions.getType()} (CraftEngine). */
+    public ParticleType getType() {
+        return null;
+    }
 }

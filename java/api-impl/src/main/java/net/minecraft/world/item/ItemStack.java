@@ -159,6 +159,11 @@ public class ItemStack implements net.minecraft.core.component.DataComponentHold
     public <T> void set(net.minecraft.core.component.DataComponentType<T> type, T value) {
     }
 
+    /** {@code ItemStack.remove(DataComponentType)} (CraftEngine). */
+    public <T> T remove(net.minecraft.core.component.DataComponentType<? extends T> type) {
+        return null;
+    }
+
     public void applyComponents(net.minecraft.core.component.DataComponentPatch patch) {
     }
 

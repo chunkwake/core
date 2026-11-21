@@ -13,6 +13,11 @@ public class AttributeSupplier {
         this.values = values == null ? Collections.emptyMap() : values;
     }
 
+    /** {@code AttributeSupplier.hasAttribute(Holder)} (CraftEngine). */
+    public boolean hasAttribute(net.minecraft.core.Holder<Attribute> attribute) {
+        return attribute != null && this.hasAttribute(attribute.value());
+    }
+
     public boolean hasAttribute(Attribute attribute) {
         return this.values.containsKey(attribute);
     }
