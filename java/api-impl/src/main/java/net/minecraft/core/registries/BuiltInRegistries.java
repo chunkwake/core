@@ -23,6 +23,9 @@ public final class BuiltInRegistries {
     public static final net.minecraft.core.Registry<Object> fluid =
             new net.minecraft.core.SimpleRegistry<>();
     public static final net.minecraft.core.Registry<Object> FLUID = fluid;
+    public static final net.minecraft.core.Registry<Object> recipeType =
+            new net.minecraft.core.SimpleRegistry<>();
+    public static final net.minecraft.core.Registry<Object> RECIPE_TYPE = recipeType;
 
     public static final DefaultedRegistry<Block> BLOCK = new SimpleDefaultedRegistry<>(
             net.minecraft.resources.Identifier.parse("minecraft:air"));

@@ -5,6 +5,13 @@ public class CraftingContainer {
     public CraftingContainer() {
     }
 
+    public void setItem(int slot, net.minecraft.world.item.ItemStack item) {
+    }
+
+    public net.minecraft.world.item.ItemStack removeItem(int slot, int amount) {
+        return net.minecraft.world.item.ItemStack.EMPTY;
+    }
+
     public void setChanged() {
     }
 

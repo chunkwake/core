@@ -14,6 +14,8 @@ public class ClientboundMoveEntityPacket {
     private float xRot;
     private float yRot;
     private boolean onGround;
+    /** Поле, которое ищет CraftEngine (getHasRot). */
+    private boolean hasRot;
 
     public ClientboundMoveEntityPacket() {
     }

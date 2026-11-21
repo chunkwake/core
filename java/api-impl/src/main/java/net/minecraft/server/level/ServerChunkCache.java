@@ -5,6 +5,11 @@ import net.minecraft.world.level.chunk.LevelChunk;
 
 /** NMS {@code ServerChunkCache}. */
 public class ServerChunkCache {
+    /** {@code ServerChunkCache.randomState()} (CraftEngine). */
+    public net.minecraft.world.level.chunk.RandomState randomState() {
+        return null;
+    }
+
     /** {@code ServerChunkCache.blockChanged(BlockPos)} (CraftEngine). */
     public void blockChanged(net.minecraft.core.BlockPos pos) {
     }

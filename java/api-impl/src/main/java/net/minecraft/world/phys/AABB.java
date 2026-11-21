@@ -13,6 +13,11 @@ public class AABB {
     public final double maxY;
     public final double maxZ;
 
+    /** {@code AABB.move(Vec3)} (CraftEngine). */
+    public AABB move(Vec3 offset) {
+        return this.move(offset.x, offset.y, offset.z);
+    }
+
     /** {@code AABB.move(double,double,double)} (CraftEngine). */
     public AABB move(double dx, double dy, double dz) {
         return new AABB(this.minX + dx, this.minY + dy, this.minZ + dz,

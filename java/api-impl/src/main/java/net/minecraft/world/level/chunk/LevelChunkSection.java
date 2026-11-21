@@ -73,6 +73,9 @@ public class LevelChunkSection {
         };
     }
 
+    /** Поле, которое ищет CraftEngine (getStates). */
+    private net.minecraft.world.level.chunk.PalettedContainer<BlockState> states;
+
     public net.minecraft.world.level.chunk.PalettedContainer<BlockState> getStates() {
         return new net.minecraft.world.level.chunk.PalettedContainer<>(Blocks.AIR.defaultBlockState(),
                 net.minecraft.world.level.chunk.Strategy.createForBlockStates(

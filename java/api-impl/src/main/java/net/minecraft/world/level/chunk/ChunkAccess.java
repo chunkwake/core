@@ -6,6 +6,9 @@ import net.minecraft.world.level.levelgen.Heightmap;
 
 /** NMS {@code ChunkAccess} (в 26.3 — абстрактный класс). */
 public abstract class ChunkAccess implements LevelHeightAccessor {
+    /** Поле, которое ищет CraftEngine (getChunkPos). */
+    protected net.minecraft.world.level.ChunkPos chunkPos = new net.minecraft.world.level.ChunkPos(0, 0);
+
     /** Поле, которое ищет CraftEngine (setBlockEntities). */
     protected java.util.Map<net.minecraft.core.BlockPos, net.minecraft.world.level.block.entity.BlockEntity> blockEntities =
             new java.util.HashMap<>();

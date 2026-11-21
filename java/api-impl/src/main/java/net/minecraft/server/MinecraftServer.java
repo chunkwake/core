@@ -32,6 +32,11 @@ public class MinecraftServer {
     private final net.minecraft.world.scores.Scoreboard scoreboard =
             new net.minecraft.world.scores.Scoreboard();
 
+    /** {@code MinecraftServer.getRecipeManager()} (CraftEngine). */
+    public net.minecraft.world.item.crafting.RecipeManager getRecipeManager() {
+        return new net.minecraft.world.item.crafting.RecipeManager();
+    }
+
     /** Поле, которое ищет CraftEngine (getStructureTemplateManager). */
     private final net.minecraft.world.level.levelgen.structure.StructureTemplateManager structureTemplateManager =
             new net.minecraft.world.level.levelgen.structure.StructureTemplateManager();

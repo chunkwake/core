@@ -15,6 +15,11 @@ public interface Registry<T> extends HolderLookup.RegistryLookup<T> {
 
     T getValue(Identifier id);
 
+    /** {@code Registry.getHolder(Identifier)} (CraftEngine). */
+    default java.util.Optional<Holder.Reference<T>> getHolder(Identifier id) {
+        return this.get(id);
+    }
+
     /** {@code Registry.getHolder(ResourceKey)} (CraftEngine). */
     default java.util.Optional<Holder.Reference<T>> getHolder(
             net.minecraft.resources.ResourceKey<T> key) {

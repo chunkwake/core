@@ -10,6 +10,7 @@ public class ArmorStand extends Entity {
     private Pose defaultLeftArmPose = new Pose();
     private Pose defaultRightArmPose = new Pose();
     private Pose defaultBodyPose = new Pose();
+    private Pose defaultHeadPose = new Pose();
 
     public static final EntityDataAccessor<Byte> DATA_CLIENT_FLAGS =
             new EntityDataAccessor<>(14, EntityDataSerializers.BYTE);

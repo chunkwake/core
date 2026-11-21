@@ -9,6 +9,11 @@ public class DedicatedServer extends MinecraftServer {
             new net.minecraft.world.level.levelgen.structure.StructureTemplateManager();
 
     @Override
+    public net.minecraft.world.item.crafting.RecipeManager getRecipeManager() {
+        return super.getRecipeManager();
+    }
+
+    @Override
     public boolean hasStopped() {
         return super.hasStopped();
     }

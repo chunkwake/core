@@ -4715,3 +4715,62 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 169/504 (было 165)
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=165 bad=339
+стало: ok=169 bad=335
+```
+
+Полностью закрылись 4 прокси:
+
+```
+ClientboundAnimatePacketProxy
+ServerboundPlayerActionPacketProxy
+ContainerProxy
+CraftingContainerProxy
+```
+
+Добавлено:
+
+- `Registry.getHolder(Identifier)`;
+- `BuiltInRegistries.recipeType`, `Registries.recipeType` (+ uppercase-алиасы);
+- поля пакетов: `ClientboundAnimatePacket.action`,
+  `ClientboundMoveEntityPacket.hasRot`,
+  `ClientboundTeleportEntityPacket.z`, `ServerboundPlayerActionPacket.pos`;
+- `EntityDataSerializers.particle` (+ `paintingVariant`);
+- `MinecraftServer.getRecipeManager()`, override в `DedicatedServer`;
+- `ServerConfigurationPacketListenerImpl.startNextTask()`;
+- `Container.setItem(int, ItemStack)`/`removeItem(...)`,
+  `CraftingContainer.setItem/removeItem`;
+- `EntityTypes.happyGhast`, `EntityTypes.tntMinecart` (+ алиасы);
+- `AttributeInstance.cachedValue`;
+- `AbstractContainerMenu.containerId`, `broadcastChanges()`;
+- `BlockGetter.getBlockFloorHeight(BlockPos)`;
+- `ChunkAccess`/`LevelChunk.chunkPos`;
+- `AABB.move(Vec3)`;
+- `RandomState` + `ServerChunkCache.randomState()`;
+- `LevelChunkSection.states` и `setBlockState(...)` (существующий метод);
+- `ItemLore.styleLines`, `RecipeHolder.id`, `RecipeManager.recipes`;
+- `ArmorStand.defaultHeadPose`.
+
+Остаётся 335 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 68652 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 16052 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

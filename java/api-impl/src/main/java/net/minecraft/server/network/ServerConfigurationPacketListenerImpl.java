@@ -12,6 +12,10 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 public class ServerConfigurationPacketListenerImpl extends ServerCommonPacketListenerImpl {
     public final Queue<Runnable> configurationTasks = new ConcurrentLinkedQueue<>();
 
+    /** {@code startNextTask()} (CraftEngine). */
+    public void startNextTask() {
+    }
+
     /** {@code returnToWorld()} (CraftEngine). */
     public void returnToWorld() {
     }

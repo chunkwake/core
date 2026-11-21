@@ -10,6 +10,13 @@ package net.minecraft.network.syncher;
  */
 public final class EntityDataSerializers {
     /** Поле, которое ищет CraftEngine (getPaintingVariant). */
+    public static final EntityDataSerializer<Object> particle =
+            new EntityDataSerializer<Object>() {
+                @Override
+                public int id() {
+                    return 0;
+                }
+            };
     public static final EntityDataSerializer<Object> paintingVariant =
             new EntityDataSerializer<Object>() {
                 @Override

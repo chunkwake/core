@@ -12,6 +12,8 @@ public class ClientboundTeleportEntityPacket implements Packet {
     private final boolean onGround;
     /** Поле, которое ищет CraftEngine (getYRot). */
     private float yRot;
+    /** Поле, которое ищет CraftEngine (getZ). */
+    private double z;
 
     public ClientboundTeleportEntityPacket(int id, PositionMoveRotation change,
             Set<?> relatives, boolean onGround) {

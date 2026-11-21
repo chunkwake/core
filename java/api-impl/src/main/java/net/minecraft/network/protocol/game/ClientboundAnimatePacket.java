@@ -8,6 +8,8 @@ package net.minecraft.network.protocol.game;
 public class ClientboundAnimatePacket {
     /** Поле, которое ищет CraftEngine (getId). */
     private int id;
+    /** Поле, которое ищет CraftEngine (getAction). */
+    private int action;
 
     public ClientboundAnimatePacket() {
     }

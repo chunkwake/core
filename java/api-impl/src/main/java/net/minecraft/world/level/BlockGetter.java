@@ -5,6 +5,11 @@ import net.minecraft.world.level.block.state.BlockState;
 
 /** NMS {@code BlockGetter}. */
 public interface BlockGetter {
+    /** {@code BlockGetter.getBlockFloorHeight(BlockPos)} (CraftEngine). */
+    default double getBlockFloorHeight(BlockPos pos) {
+        return 0.0;
+    }
+
     /** {@code BlockGetter.getFluidState(BlockPos)} (CraftEngine). */
     default net.minecraft.world.level.material.FluidState getFluidState(BlockPos pos) {
         return net.minecraft.world.level.material.FluidState.EMPTY;

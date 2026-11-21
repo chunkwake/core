@@ -8,6 +8,8 @@ package net.minecraft.network.protocol.game;
 public class ServerboundPlayerActionPacket {
     /** Поле, которое ищет CraftEngine (getAction). */
     private Object action;
+    /** Поле, которое ищет CraftEngine (getPos). */
+    private net.minecraft.core.BlockPos pos = net.minecraft.core.BlockPos.ZERO;
 
     public ServerboundPlayerActionPacket() {
     }
