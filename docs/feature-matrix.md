@@ -6602,3 +6602,32 @@ CraftEngineMutating-блоки требуют настоящий слой
 `StateHolder/BlockState/VoxelShape/pathfinder`. Эксперимент откачен,
 `dist` пересобран из закоммиченного состояния, дерево зелёное. Блокер
 подтверждён на уровне нескольких NMS-подсистем, а не одного класса.
+
+## BlockStateBase: scoped-слой доведён до `is$0` (proxy/version mismatch)
+
+Продолжение эксперимента (без серверных гейтов, только javac + `P3`):
+
+1. `BlockStateBase` из 80 методов прокси собран заново: 35 полей-кэшей
+   + 78 методов, `BlockState extends BlockStateBase`. `BlockStateBaseProxy`
+   и `BlockStateProxy` связываются.
+2. Добавлены недостающие NMS-типы:
+   - `net.minecraft.world.phys.shapes.CollisionContext` (empty/of/...),
+   - `net.minecraft.world.phys.shapes.VoxelShape` (EMPTY/bounds/move/...),
+   - `net.minecraft.world.level.pathfinder.PathComputationType`,
+   - `net.minecraft.world.level.block.SupportType`,
+   - `net.minecraft.world.level.block.SoundType`.
+3. Следующая ошибка `P3`:
+   `BlockStateBaseProxy#is$0` — прокси требует метод `is(Object)` (1 параметр),
+   а в 26.3 у `BlockStateBase` есть только
+   `is(TagKey<Block>, Predicate<BlockStateBase>)` (2 параметра).
+   Это несовпадение версии прокси и 26.3, а не отсутствие класса: заглушкой
+   не закрывается (binder ищет точную арность/типы).
+
+Эксперимент откачен (все пять NMS-заглушек и правки BlockState/BlockStateBehaviour
+удалены), `dist` пересобран из закоммиченного состояния, дерево зелёное.
+Вывод: для CraftEngine нужен либо его прокси-набор под 26.3, либо полная
+реализация NMS block-state/shape/pathfinder, включая версионные различия
+методов. Простыми заглушками CraftEngine не поднимается.
+
+Гейты после этого шага не менялись (последние: расширенный 79/82,
+базовый 26/27, PANICS 0; P2 ok=263 bad=241).
