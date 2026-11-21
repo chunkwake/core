@@ -5425,3 +5425,67 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 248/504; `/sr` (SkinsRestorer) проверен ботом
+
+### Прокси-покрытие
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=243 bad=261
+стало: ok=248 bad=256
+```
+
+Полностью закрылись 5 прокси:
+
+```
+CraftBlockStateProxy
+CraftDamageSourceProxy
+CraftMagicNumbersProxy
+HashedPatchMapProxy
+ByteBufCodecsProxy
+```
+
+Добавлено:
+
+- CraftBukkit-классы: `CraftChunk`, `CraftBlock`, `CraftBlockState`,
+  `CraftEventFactory` (open/grow/form/redstone-события),
+  `CraftMagicNumbers.getBlockMaterial()`, `CraftDamageSource`,
+  `CraftEnchantment`;
+- `ParticleTypes`, `BlockStateParser.parseForBlock(...)`;
+- `HashedStack`/`HashedPatchMap`, `IdDispatchCodec.getById(...)`;
+- `ByteBufCodecs.trackDepth(StreamCodec)` с точными типами 26.3
+  (раньше возвращал `Object`, из-за чего прокси не связывался).
+
+Остаётся 256 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Функциональная проверка: SkinsRestorer `/sr`
+
+```
+> /sr
+| └─ Available Commands
+|   ├─ sr applyskin <selector>
+|   ├─ sr createcustom <skinName> <skinInput> [variant]
+|   ├─ sr drop player|skin <target> / sr dump / sr help [query]
+|   ├─ sr info player|skin <input> / sr purgeolddata <days>
+|   ├─ sr reload / sr setcustomname ... / sr status
+```
+
+SkinsRestorer реально обработал команду и вернул своё дерево команд.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 43372 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 12179 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

@@ -6,7 +6,8 @@ public final class ByteBufCodecs {
     }
 
     /** {@code ByteBufCodecs.trackDepth(StreamCodec)} (CraftEngine). */
-    public static Object trackDepth(Object codec) {
+    @SuppressWarnings("rawtypes")
+    public static StreamCodec trackDepth(StreamCodec codec) {
         return codec;
     }
 }
