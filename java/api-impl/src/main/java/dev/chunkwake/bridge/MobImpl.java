@@ -161,6 +161,59 @@ final class MobImpl {
     public EntityType getType() { return EntityType.valueOf(species.toUpperCase(Locale.ROOT)); }
     public World getWorld() { return world.api; }
 
+    private volatile PdcImpl pdc;
+
+    /** {@code Entity#getScoreboardTags}: NBT {@code Tags}. */
+    public java.util.Set<String> getScoreboardTags() {
+        java.util.Set<String> out = new java.util.LinkedHashSet<>();
+        String json = world.request("mob tags " + id);
+        try {
+            com.google.gson.JsonArray array =
+                    com.google.gson.JsonParser.parseString(json).getAsJsonArray();
+            for (com.google.gson.JsonElement tag : array) {
+                out.add(tag.getAsString());
+            }
+        } catch (RuntimeException ignored) {
+            // пустой ответ — тегов нет
+        }
+        return out;
+    }
+
+    public boolean addScoreboardTag(String tag) {
+        if (tag == null || tag.isEmpty()) {
+            return false;
+        }
+        return "1".equals(world.request("mob tag " + id + " add " + tag));
+    }
+
+    public boolean removeScoreboardTag(String tag) {
+        if (tag == null) {
+            return false;
+        }
+        return "1".equals(world.request("mob tag " + id + " remove " + tag));
+    }
+
+    /** {@code Entity#getPersistentDataContainer}: NBT {@code BukkitValues}. */
+    public org.bukkit.persistence.PersistentDataContainer getPersistentDataContainer() {
+        PdcImpl p = pdc;
+        if (p == null) {
+            synchronized (this) {
+                if (pdc == null) {
+                    java.util.Map<String, Object> tags = new java.util.LinkedHashMap<>();
+                    String json = world.request("mob pdc " + id);
+                    if (!json.isEmpty()) {
+                        tags.putAll(PdcImpl.Nbt.decode(
+                                com.google.gson.JsonParser.parseString(json).getAsJsonObject()));
+                    }
+                    pdc = new PdcImpl(tags,
+                            t -> world.request("mob pdc " + id + " " + PdcImpl.Nbt.encode(t)));
+                }
+                p = pdc;
+            }
+        }
+        return p.api;
+    }
+
     public void setMetadata(String key, org.bukkit.metadata.MetadataValue value) {
         Bridge.server.metadata().entities.setMetadata(api, key, value);
     }

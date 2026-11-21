@@ -6334,3 +6334,57 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## Паритет: scoreboard-теги и PDC мобов, рабочий `/stop`
+
+### Scoreboard-теги и PersistentDataContainer мобов
+
+- `MobEntry` получил `tags: Vec<String>` и `pdc: Option<Compound>`;
+- сохранение в NBT: `Tags` (список строк) и `BukkitValues` (compound),
+  загрузка — обратно в `MobEntry`;
+- новые запросы `mob tags <id>`, `mob tag <id> add|remove <tag...>`,
+  `mob pdc <id> [json]` (тот же JSON-формат, что у PDC игрока);
+- `MobImpl#getScoreboardTags/addScoreboardTag/removeScoreboardTag` и
+  `getPersistentDataContainer` (через `PdcImpl`).
+
+Проверка ботом на базовом стенде:
+
+```
+mobtag=true/[cwt] mobpdc=yes
+```
+
+Проверка персистентности (два запуска сервера, `save-all` + `/stop`,
+затем чтение после рестарта):
+
+```
+phase1: mobtag=true/[cwt] mobpdc=yes
+cows d3e2c1a4-a712-7e41-cb8a-9e5f892cc531:[cwt] pdc=yes ...
+```
+
+Тот же UUID после рестарта сохранил и тег, и PDC.
+
+### `/stop` из игры
+
+Нашлась ванильная дыра: `/stop` выставлял флаг `PlayPlan::shutdown`, но
+никто его не опрашивал — сервер не останавливался (останавливался только
+консольный `stop` и Ctrl+C). В главный `select` добавлен опрос раз в 250 мс
+(`shutdown_requested()`), после чего идёт обычное graceful-завершение:
+отключение игроков, `bridge.shutdown()`, финальный `storage.save`.
+Проверено: `stopped=True` после `/stop`, затем рестарт поднял мир с
+сохранёнными сущностями.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 81514 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 17454 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+CraftEngine P2: ok=263 bad=241
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

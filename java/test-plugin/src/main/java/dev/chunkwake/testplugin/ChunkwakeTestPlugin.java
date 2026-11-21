@@ -654,10 +654,25 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             org.bukkit.World w = sender instanceof Player p
                     ? p.getWorld()
                     : getServer().getWorlds().get(0);
+            if (args.length == 1 && args[0].equals("read")) {
+                StringBuilder sb = new StringBuilder("cows");
+                for (org.bukkit.entity.Entity entity : w.getEntities()) {
+                    if (entity.getType() != org.bukkit.entity.EntityType.COW) {
+                        continue;
+                    }
+                    Object value = entity.getPersistentDataContainer().get(
+                            new org.bukkit.NamespacedKey(this, "mobprobe"),
+                            org.bukkit.persistence.PersistentDataType.STRING);
+                    sb.append(' ').append(entity.getUniqueId()).append(':')
+                            .append(entity.getScoreboardTags()).append(" pdc=").append(value);
+                }
+                sender.sendMessage(sb.toString());
+                return true;
+            }
             if (args.length == 1 && args[0].equals("set")) {
                 w.setPVP(!w.getPVP());
                 w.setDifficulty(org.bukkit.Difficulty.HARD);
-                w.setSpawnLocation(12, 70, 12);
+                w.setSpawnLocation(12, -59, 12);
                 sender.sendMessage("worldstate set done");
                 return true;
             }
@@ -717,6 +732,16 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             boolean factoryName = made.getItemMeta().hasDisplayName()
                     && "Factory Sword".equals(made.getItemMeta().getDisplayName());
 
+            org.bukkit.Location cowAt = new org.bukkit.Location(w, 12, -60, 12);
+            org.bukkit.entity.Entity cow = w.spawnEntity(cowAt, org.bukkit.entity.EntityType.COW);
+            boolean tagAdded = cow.addScoreboardTag("cwt");
+            java.util.Set<String> cowTags = cow.getScoreboardTags();
+            org.bukkit.NamespacedKey mobKey = new org.bukkit.NamespacedKey(this, "mobprobe");
+            cow.getPersistentDataContainer().set(mobKey,
+                    org.bukkit.persistence.PersistentDataType.STRING, "yes");
+            String mobPdc = cow.getPersistentDataContainer().get(mobKey,
+                    org.bukkit.persistence.PersistentDataType.STRING);
+
             if (sender instanceof Player vp) {
                 vp.getInventory().addItem(potion, rocket, horn);
             }
@@ -743,7 +768,9 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
                     + " firework=" + fireworkBack.getPower() + "/"
                     + fireworkBack.getEffectsSize()
                     + " instrument=" + hornBack.getInstrument()
-                    + " factory=" + factoryName + "/" + made.getType());
+                    + " factory=" + factoryName + "/" + made.getType()
+                    + " mobtag=" + tagAdded + "/" + cowTags
+                    + " mobpdc=" + mobPdc);
             return true;
         }
         sender.sendMessage(Component.text("Hello, " + sender.getName() + "!", NamedTextColor.GREEN));

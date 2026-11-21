@@ -36,6 +36,10 @@ pub(super) struct MobEntry {
     aggressive: bool,
     /// Разосланные поля вида: набухание крипера, лазание паука, лук скелета.
     meta: MobMeta,
+    /// scoreboard-теги (`Tags`).
+    pub(super) tags: Vec<String>,
+    /// PersistentDataContainer (`BukkitValues`).
+    pub(super) pdc: Option<chunkwake_world::nbt::Compound>,
 }
 
 /// Синхронизируемые поля вида (`SynchedEntityData`), которые меняет тик.
@@ -128,6 +132,8 @@ impl MobEntry {
             fall: 0.0,
             aggressive: false,
             effect_meta: (Vec::new(), false),
+            tags: Vec::new(),
+            pdc: None,
         }
     }
 
@@ -4929,11 +4935,19 @@ impl PlayPlan {
                     continue;
                 };
                 written.insert(pos);
-                self.sim()
-                    .mobs_loaded
-                    .lock()
-                    .unwrap()
-                    .push(MobEntry::new(m));
+                let mut entry = MobEntry::new(m);
+                entry.tags = c
+                    .get("Tags")
+                    .and_then(Tag::as_list)
+                    .map(|l| {
+                        l.iter()
+                            .filter_map(Tag::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                entry.pdc = c.get("BukkitValues").and_then(Tag::as_compound).cloned();
+                self.sim().mobs_loaded.lock().unwrap().push(entry);
             }
         }
     }
@@ -5097,11 +5111,17 @@ impl PlayPlan {
                 (e.mob.pos[0].floor() as i32) >> 4,
                 (e.mob.pos[2].floor() as i32) >> 4,
             );
-            by_chunk.entry(pos).or_default().push(mob_to_nbt(
-                &e.mob,
-                &self.survival.effects,
-                &self.item_names,
-            ));
+            let mut nbt = mob_to_nbt(&e.mob, &self.survival.effects, &self.item_names);
+            if !e.tags.is_empty() {
+                nbt.insert(
+                    "Tags".into(),
+                    Tag::List(e.tags.iter().cloned().map(Tag::String).collect()),
+                );
+            }
+            if let Some(pdc) = &e.pdc {
+                nbt.insert("BukkitValues".into(), Tag::Compound(pdc.clone()));
+            }
+            by_chunk.entry(pos).or_default().push(nbt);
         }
         for (pos, c) in self
             .boats_nbt()
@@ -5188,6 +5208,79 @@ impl PlayPlan {
                     out.push_str(&line);
                 }
                 out
+            }
+            Some("tags") => {
+                let Some(id) = f.get(1).and_then(|v| v.parse::<i32>().ok()) else {
+                    return String::new();
+                };
+                let tags = self
+                    .sim()
+                    .mobs
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .map_or_else(Vec::new, |e| e.tags.clone());
+                serde_json::to_string(&tags).unwrap_or_else(|_| "[]".into())
+            }
+            Some("tag") => {
+                let Some(id) = f.get(1).and_then(|v| v.parse::<i32>().ok()) else {
+                    return String::new();
+                };
+                let Some(action) = f.get(2).copied() else {
+                    return String::new();
+                };
+                let prefix = format!("tag {id} {action} ");
+                let Some(tag) = line
+                    .strip_prefix(&prefix)
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                else {
+                    return String::new();
+                };
+                let mut mobs = self.sim().mobs.lock().unwrap();
+                let Some(e) = mobs.get_mut(&id) else {
+                    return String::new();
+                };
+                match action {
+                    "add" => {
+                        if e.tags.iter().any(|t| t == tag) {
+                            "0".into()
+                        } else {
+                            e.tags.push(tag.to_owned());
+                            "1".into()
+                        }
+                    }
+                    "remove" => {
+                        let before = e.tags.len();
+                        e.tags.retain(|t| t != tag);
+                        if e.tags.len() == before { "0" } else { "1" }.into()
+                    }
+                    _ => String::new(),
+                }
+            }
+            Some("pdc") => {
+                let Some(id) = f.get(1).and_then(|v| v.parse::<i32>().ok()) else {
+                    return String::new();
+                };
+                let prefix = format!("pdc {id}");
+                let json = line.strip_prefix(&prefix).map(str::trim).unwrap_or("");
+                let mut mobs = self.sim().mobs.lock().unwrap();
+                let Some(e) = mobs.get_mut(&id) else {
+                    return String::new();
+                };
+                if json.is_empty() {
+                    return e.pdc.as_ref().map_or_else(String::new, |c| {
+                        crate::stack_nbt::typed_compound(c).to_string()
+                    });
+                }
+                let Some(c) = serde_json::from_str(json)
+                    .ok()
+                    .and_then(|v| crate::stack_nbt::untyped_compound(&v))
+                else {
+                    return "0".into();
+                };
+                e.pdc = (!c.is_empty()).then_some(c);
+                "1".into()
             }
             Some("get") => {
                 let Some(id) = f.get(1).and_then(|v| v.parse::<i32>().ok()) else {

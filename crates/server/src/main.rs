@@ -376,6 +376,9 @@ async fn serve(dir: &Path) -> Result<(), String> {
     // Ctrl+C, SIGTERM или `stop`: завершить соединения, плагины и сохранить мир.
     let terminate = terminate_signal();
     tokio::pin!(terminate);
+    // `/stop` sets a flag in PlayPlan; poll it while serving.
+    let mut shutdown_poll = tokio::time::interval(std::time::Duration::from_millis(250));
+    shutdown_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             result = &mut serving => {
@@ -385,6 +388,12 @@ async fn serve(dir: &Path) -> Result<(), String> {
             },
             _ = tokio::signal::ctrl_c() => break,
             _ = &mut terminate => break,
+            _ = shutdown_poll.tick() => {
+                if play.shutdown_requested() {
+                    tracing::info!("stopping: /stop requested");
+                    break;
+                }
+            },
             Some((player, mut conn)) = session_rx.recv() => {
                 let play = play.clone();
                 sessions.spawn(async move {
