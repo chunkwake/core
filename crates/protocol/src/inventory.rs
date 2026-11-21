@@ -318,6 +318,8 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         e.tooltip_style.is_some() && id_of(&crate::components::TOOLTIP_STYLE_COMPONENT) >= 0,
         e.hide_tooltip && id_of(&crate::components::TOOLTIP_DISPLAY_COMPONENT) >= 0,
         e.glint_override.is_some() && id_of(&crate::components::GLINT_OVERRIDE_COMPONENT) >= 0,
+        e.potion.is_some() && id_of(&crate::components::POTION_CONTENTS_COMPONENT) >= 0,
+        e.fireworks.is_some() && id_of(&crate::components::FIREWORKS_COMPONENT) >= 0,
     ];
 
     w.var_int(parts.iter().filter(|&&p| p).count() as i32)
@@ -420,6 +422,32 @@ fn write_patch(w: &mut Writer, s: &Stack) {
     if let (true, Some(v)) = (parts[19], e.glint_override) {
         w.var_int(id_of(&crate::components::GLINT_OVERRIDE_COMPONENT))
             .bool(v);
+    }
+    if let (true, Some(potion)) = (parts[20], e.potion) {
+        // PotionContents: optional potion, optional color, effects, optional name.
+        w.var_int(id_of(&crate::components::POTION_CONTENTS_COMPONENT))
+            .bool(true)
+            .var_int(potion)
+            .bool(false)
+            .var_int(0)
+            .bool(false);
+    }
+    if let (true, Some(fw)) = (parts[21], &e.fireworks) {
+        w.var_int(id_of(&crate::components::FIREWORKS_COMPONENT))
+            .var_int(fw.flight)
+            .var_int(fw.explosions.len() as i32);
+        for ex in &fw.explosions {
+            w.var_int(i32::from(ex.shape))
+                .var_int(ex.colors.len() as i32);
+            for &c in &ex.colors {
+                w.i32(c);
+            }
+            w.var_int(ex.fade.len() as i32);
+            for &c in &ex.fade {
+                w.i32(c);
+            }
+            w.bool(ex.trail).bool(ex.twinkle);
+        }
     }
 }
 

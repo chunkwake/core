@@ -710,6 +710,7 @@ fn survival_data(
         c::TOOLTIP_DISPLAY_COMPONENT.store(component("minecraft:tooltip_display")?, order);
         c::GLINT_OVERRIDE_COMPONENT
             .store(component("minecraft:enchantment_glint_override")?, order);
+        c::POTION_CONTENTS_COMPONENT.store(component("minecraft:potion_contents")?, order);
         c::set_banner_pattern_names(
             registries
                 .synchronized
@@ -1090,6 +1091,7 @@ fn survival_data(
                     *slot = name;
                 }
             }
+            chunkwake_protocol::components::set_potions(names.clone());
             names
         },
         potion_component: chunkwake_data::registries::builtin_id_of(

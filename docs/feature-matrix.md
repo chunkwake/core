@@ -6207,3 +6207,69 @@ cargo +1.100.0 test --workspace -- --test-threads=4
 Заодно в репозиторий попали ранее незакоммиченные
 `crates/server/benches/tick.rs` (A/B-бенчмарк тика) и
 `crates/server/src/world_setup.rs` (гейт зелёный, сервер стартует).
+
+## Паритет API, батч 4: potion_contents, fireworks; instrument заблокирован реестром
+
+### Что сделано
+
+Через тот же пайплайн (Java ItemMeta -> JSON -> Rust Extra -> NBT -> патч
+компонентов) добавлены:
+
+- `minecraft:potion_contents` для `PotionMeta.setBasePotionType` /
+  `hasBasePotionType` / `getBasePotionType` (формат — из уже проверенного
+  `potions::contents_patch`);
+- `minecraft:fireworks` для `FireworkMeta`: `addEffect(s)`, `getEffects`,
+  `getEffectsSize`, `removeEffect`, `clearEffects`, `hasEffects`,
+  `setPower/getPower/hasPower`.
+
+Имена зелий берутся из реестра `potion` (46 записей) и кладутся в глобальную
+таблицу `components::set_potions` рядом с enchantments; NBT пишет
+`potion_contents:{potion:"minecraft:swiftness"}` и
+`fireworks:{flight_duration, explosions:[{shape, colors, fade_colors,
+has_trail, has_twinkle}]}`.
+
+`MusicInstrumentMeta` **не реализован**: `instrument` в 26.3 — datapack-реестр
+(`data/minecraft/instrument/`), которого нет в нашем `registries.json`, поэтому
+id для holder-компонента взять неоткуда. Предупреждение
+`MusicInstrumentMeta.setInstrument is not implemented` остаётся; нужен
+загрузчик динамических реестров.
+
+### Проверка ботом
+
+`/worldstate` кладёт в инвентарь зелье и фейерверк, затем читает мету:
+
+```
+potion=SWIFTNESS firework=2/1
+```
+
+и реальный NBT:
+
+```
+{Slot:1b,components:{minecraft:potion_contents:{potion:"minecraft:swiftness"}},
+ count:1,id:"minecraft:potion"}
+{Slot:2b,components:{minecraft:fireworks:{
+ explosions:[{colors:[16711680],fade_colors:[255],has_trail:1b,
+              has_twinkle:0b,shape:"star"}],flight_duration:2b}},
+ count:1,id:"minecraft:firework_rocket"}
+```
+
+Rust-тест `stack_nbt::round_trip_with_components` расширен: potion и fireworks
+(NBT + JSON) проверяются на равенство после round-trip.
+
+В логе гейта исчезли `PotionMeta.*` и `FireworkMeta.*` предупреждения.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 84668 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 20051 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+CraftEngine P2: ok=263 bad=241
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

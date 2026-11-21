@@ -59,6 +59,10 @@ pub struct Extra {
     pub hide_tooltip: bool,
     /// `minecraft:enchantment_glint_override`: prinuditelnyy blesk.
     pub glint_override: Option<bool>,
+    /// `minecraft:potion_contents.potion`: id в реестре зелий.
+    pub potion: Option<i32>,
+    /// `minecraft:fireworks`: длительность полёта и взрывы.
+    pub fireworks: Option<Fireworks>,
 }
 
 /// ID `minecraft:dyed_color` в реестре компонентов; -1 — неизвестен.
@@ -70,6 +74,24 @@ pub static POT_DECORATIONS_COMPONENT: std::sync::atomic::AtomicI32 =
     std::sync::atomic::AtomicI32::new(-1);
 
 /// Строка с необязательной отфильтрованной версией (`Filterable<T>`).
+/// `minecraft:fireworks`: длительность полёта и список взрывов.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Fireworks {
+    pub flight: i32,
+    pub explosions: Vec<Explosion>,
+}
+
+/// Один взрыв фейерверка (`FireworkExplosion`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Explosion {
+    /// Позиция в enum `FireworkExplosion.Shape` 26.3: 0..4.
+    pub shape: u8,
+    pub colors: Vec<i32>,
+    pub fade: Vec<i32>,
+    pub trail: bool,
+    pub twinkle: bool,
+}
+
 pub type Filterable = (String, Option<String>);
 
 /// Содержимое книги. У черновой (`writable_book_content`) страницы — простой
@@ -126,6 +148,8 @@ impl Extra {
             && self.tooltip_style.is_none()
             && !self.hide_tooltip
             && self.glint_override.is_none()
+            && self.potion.is_none()
+            && self.fireworks.is_none()
     }
 
     pub fn level(&self, enchantment: i32) -> i32 {
@@ -219,6 +243,24 @@ pub static ITEM_MODEL_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static TOOLTIP_STYLE_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static TOOLTIP_DISPLAY_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static GLINT_OVERRIDE_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+/// `minecraft:potion_contents` (PotionMeta) и имена ванильных зелий.
+pub static POTION_CONTENTS_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+static POTION_NAMES: OnceLock<Vec<String>> = OnceLock::new();
+
+pub fn set_potions(names: Vec<String>) {
+    let _ = POTION_NAMES.set(names);
+}
+
+pub fn potion_name(id: i32) -> Option<&'static str> {
+    POTION_NAMES
+        .get()?
+        .get(id.max(0) as usize)
+        .map(String::as_str)
+}
+
+pub fn potion_id(name: &str) -> Option<i32> {
+    Some(POTION_NAMES.get()?.iter().position(|n| n == name)? as i32)
+}
 
 /// `minecraft:fireworks` ракеты из сырого патча: `(flight_duration, число
 /// взрывов)`. Скрафченная ракета несёт в патче только этот компонент, и он
@@ -226,6 +268,9 @@ pub static GLINT_OVERRIDE_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 /// и действует прототип предмета (полёт 1, без взрывов).
 pub fn fireworks(extra: u32) -> Option<(i32, usize)> {
     let e = get(extra);
+    if let Some(f) = &e.fireworks {
+        return Some((f.flight, f.explosions.len()));
+    }
     let raw = e.raw.as_deref()?;
     let mut r = crate::Reader::new(raw);
     let added = r.var_int().ok()?;

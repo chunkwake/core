@@ -275,6 +275,72 @@ final class StackImpl extends ItemStack {
     }
 
     /** Компоненты стопки. */
+    /** Один взрыв фейерверка: shape 0..4, цвета, trail/twinkle. */
+    static final class Shot {
+        final int shape;
+        final int[] colors;
+        final int[] fade;
+        final boolean trail;
+        final boolean twinkle;
+
+        Shot(int shape, int[] colors, int[] fade, boolean trail, boolean twinkle) {
+            this.shape = shape;
+            this.colors = colors;
+            this.fade = fade;
+            this.trail = trail;
+            this.twinkle = twinkle;
+        }
+
+        static Shot of(org.bukkit.FireworkEffect effect) {
+            int shape = switch (effect.getType()) {
+                case BALL -> 0;
+                case BALL_LARGE -> 1;
+                case STAR -> 2;
+                case CREEPER -> 3;
+                case BURST -> 4;
+            };
+            return new Shot(shape,
+                    effect.getColors().stream().mapToInt(org.bukkit.Color::asRGB).toArray(),
+                    effect.getFadeColors().stream().mapToInt(org.bukkit.Color::asRGB).toArray(),
+                    effect.hasTrail(), effect.hasFlicker());
+        }
+
+        org.bukkit.FireworkEffect effect() {
+            org.bukkit.FireworkEffect.Type type = switch (shape) {
+                case 1 -> org.bukkit.FireworkEffect.Type.BALL_LARGE;
+                case 2 -> org.bukkit.FireworkEffect.Type.STAR;
+                case 3 -> org.bukkit.FireworkEffect.Type.CREEPER;
+                case 4 -> org.bukkit.FireworkEffect.Type.BURST;
+                default -> org.bukkit.FireworkEffect.Type.BALL;
+            };
+            org.bukkit.FireworkEffect.Builder builder = org.bukkit.FireworkEffect.builder()
+                    .with(type)
+                    .trail(trail)
+                    .flicker(twinkle);
+            for (int c : colors) {
+                builder.withColor(org.bukkit.Color.fromRGB(c));
+            }
+            for (int c : fade) {
+                builder.withFade(org.bukkit.Color.fromRGB(c));
+            }
+            return builder.build();
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof Shot s && s.shape == shape && s.trail == trail
+                    && s.twinkle == twinkle && java.util.Arrays.equals(s.colors, colors)
+                    && java.util.Arrays.equals(s.fade, fade);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(shape, java.util.Arrays.hashCode(colors),
+                    java.util.Arrays.hashCode(fade), trail, twinkle);
+        }
+    }
+
+    /** Данные стека. */
     static final class Data {
         int damage;
         final Map<Enchantment, Integer> enchants = new LinkedHashMap<>();
@@ -297,6 +363,11 @@ final class StackImpl extends ItemStack {
         boolean hideTooltip;
         /** enchantment_glint_override: null - по умолчанию. */
         Boolean glintOverride;
+        /** potion_contents.potion: ключ зелья. */
+        String potion;
+        /** fireworks: длительность полёта и взрывы. */
+        Integer fireworkFlight;
+        final List<Shot> fireworkShots = new ArrayList<>();
 
         /** {@code custom_data} без пустого {@code PublicBukkitValues} (пустой PDC не сохраняется). */
         Map<String, Object> customOut() {
@@ -312,7 +383,8 @@ final class StackImpl extends ItemStack {
             return damage == 0 && enchants.isEmpty() && name == null && lore.isEmpty() && raw == null
                     && stored == null && book == null && customOut().isEmpty()
                     && itemName == null && itemModel == null && tooltipStyle == null
-                    && !hideTooltip && glintOverride == null;
+                    && !hideTooltip && glintOverride == null
+                    && potion == null && fireworkFlight == null && fireworkShots.isEmpty();
         }
 
         Data copy() {
@@ -329,10 +401,25 @@ final class StackImpl extends ItemStack {
             d.tooltipStyle = tooltipStyle;
             d.hideTooltip = hideTooltip;
             d.glintOverride = glintOverride;
+            d.potion = potion;
+            d.fireworkFlight = fireworkFlight;
+            d.fireworkShots.addAll(fireworkShots);
             @SuppressWarnings("unchecked")
             Map<String, Object> c = (Map<String, Object>) PdcImpl.copy(custom);
             d.custom = c;
             return d;
+        }
+
+        private static int[] ints(JsonElement e) {
+            if (e == null || !e.isJsonArray()) {
+                return new int[0];
+            }
+            JsonArray a = e.getAsJsonArray();
+            int[] out = new int[a.size()];
+            for (int i = 0; i < out.length; i++) {
+                out[i] = a.get(i).getAsInt();
+            }
+            return out;
         }
 
         static Data parse(String json) {
@@ -359,6 +446,20 @@ final class StackImpl extends ItemStack {
             if (j.has("tooltip_style")) d.tooltipStyle = j.get("tooltip_style").getAsString();
             if (j.has("hide_tooltip")) d.hideTooltip = j.get("hide_tooltip").getAsBoolean();
             if (j.has("glint_override")) d.glintOverride = j.get("glint_override").getAsBoolean();
+            if (j.has("potion")) d.potion = j.get("potion").getAsString();
+            if (j.has("fireworks")) {
+                JsonObject fw = j.getAsJsonObject("fireworks");
+                if (fw.has("flight")) d.fireworkFlight = fw.get("flight").getAsInt();
+                if (fw.has("explosions")) {
+                    for (JsonElement ex : fw.getAsJsonArray("explosions")) {
+                        JsonObject o = ex.getAsJsonObject();
+                        d.fireworkShots.add(new Shot(o.get("shape").getAsInt(),
+                                ints(o.get("colors")), ints(o.get("fade")),
+                                o.has("trail") && o.get("trail").getAsBoolean(),
+                                o.has("twinkle") && o.get("twinkle").getAsBoolean()));
+                    }
+                }
+            }
             if (j.has("custom")) d.custom = PdcImpl.Nbt.decode(j.getAsJsonObject("custom"));
             return d;
         }
@@ -388,6 +489,27 @@ final class StackImpl extends ItemStack {
             if (tooltipStyle != null) j.addProperty("tooltip_style", tooltipStyle);
             if (hideTooltip) j.addProperty("hide_tooltip", true);
             if (glintOverride != null) j.addProperty("glint_override", glintOverride);
+            if (potion != null) j.addProperty("potion", potion);
+            if (fireworkFlight != null || !fireworkShots.isEmpty()) {
+                JsonObject fw = new JsonObject();
+                fw.addProperty("flight", fireworkFlight == null ? 0 : fireworkFlight);
+                JsonArray shots = new JsonArray();
+                for (Shot shot : fireworkShots) {
+                    JsonObject o = new JsonObject();
+                    o.addProperty("shape", shot.shape);
+                    JsonArray colors = new JsonArray();
+                    for (int c : shot.colors) colors.add(c);
+                    o.add("colors", colors);
+                    JsonArray fade = new JsonArray();
+                    for (int c : shot.fade) fade.add(c);
+                    o.add("fade", fade);
+                    o.addProperty("trail", shot.trail);
+                    o.addProperty("twinkle", shot.twinkle);
+                    shots.add(o);
+                }
+                fw.add("explosions", shots);
+                j.add("fireworks", fw);
+            }
             if (!customOut().isEmpty()) j.add("custom", PdcImpl.Nbt.encode(customOut()));
             return j.toString();
         }
@@ -403,14 +525,17 @@ final class StackImpl extends ItemStack {
                     && Objects.equals(d.tooltipStyle, tooltipStyle)
                     && d.hideTooltip == hideTooltip
                     && Objects.equals(d.glintOverride, glintOverride)
+                    && Objects.equals(d.potion, potion)
+                    && Objects.equals(d.fireworkFlight, fireworkFlight)
+                    && d.fireworkShots.equals(fireworkShots)
                     && PdcImpl.Nbt.encode(d.customOut()).equals(PdcImpl.Nbt.encode(customOut()));
         }
 
         @Override
         public int hashCode() {
             return Objects.hash(damage, enchants, name, lore, raw, stored, book, itemName,
-                    itemModel, tooltipStyle, hideTooltip, glintOverride,
-                    PdcImpl.Nbt.encode(customOut()));
+                    itemModel, tooltipStyle, hideTooltip, glintOverride, potion,
+                    fireworkFlight, fireworkShots, PdcImpl.Nbt.encode(customOut()));
         }
 
         @Override
@@ -728,6 +853,79 @@ final class StackImpl extends ItemStack {
         public boolean hasEnchantmentGlintOverride() { return data.glintOverride != null; }
         public Boolean getEnchantmentGlintOverride() { return data.glintOverride; }
         public void setEnchantmentGlintOverride(Boolean value) { data.glintOverride = value; }
+
+        // --- PotionMeta ---
+
+        private static org.bukkit.potion.PotionType potionType(String key) {
+            NamespacedKey k = NamespacedKey.fromString(key);
+            if (k == null) {
+                return null;
+            }
+            for (org.bukkit.potion.PotionType type : org.bukkit.potion.PotionType.values()) {
+                if (type.getKey().equals(k)) {
+                    return type;
+                }
+            }
+            return null;
+        }
+
+        public boolean hasBasePotionType() { return data.potion != null; }
+
+        public org.bukkit.potion.PotionType getBasePotionType() {
+            return data.potion == null ? null : potionType(data.potion);
+        }
+
+        public void setBasePotionType(org.bukkit.potion.PotionType type) {
+            data.potion = type == null ? null : type.getKey().toString();
+        }
+
+        // --- FireworkMeta ---
+
+        public void addEffect(org.bukkit.FireworkEffect effect) {
+            if (effect == null) {
+                throw new IllegalArgumentException("effect cannot be null");
+            }
+            data.fireworkShots.add(Shot.of(effect));
+        }
+
+        public void addEffects(org.bukkit.FireworkEffect... effects) {
+            for (org.bukkit.FireworkEffect effect : effects) {
+                addEffect(effect);
+            }
+        }
+
+        public void addEffects(Iterable<org.bukkit.FireworkEffect> effects) {
+            for (org.bukkit.FireworkEffect effect : effects) {
+                addEffect(effect);
+            }
+        }
+
+        public java.util.List<org.bukkit.FireworkEffect> getEffects() {
+            java.util.List<org.bukkit.FireworkEffect> out = new ArrayList<>();
+            for (Shot shot : data.fireworkShots) {
+                out.add(shot.effect());
+            }
+            return out;
+        }
+
+        public int getEffectsSize() { return data.fireworkShots.size(); }
+
+        public void removeEffect(int index) { data.fireworkShots.remove(index); }
+
+        public void clearEffects() { data.fireworkShots.clear(); }
+
+        public boolean hasEffects() { return !data.fireworkShots.isEmpty(); }
+
+        public boolean hasPower() { return data.fireworkFlight != null && data.fireworkFlight > 0; }
+
+        public int getPower() { return data.fireworkFlight == null ? 0 : data.fireworkFlight; }
+
+        public void setPower(int power) {
+            if (power < 0 || power > 255) {
+                throw new IllegalArgumentException("power must be 0..255, got " + power);
+            }
+            data.fireworkFlight = power;
+        }
 
         public boolean hasDamage() { return data.damage > 0; }
         public int getDamage() { return data.damage; }

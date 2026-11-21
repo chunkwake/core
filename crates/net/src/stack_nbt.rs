@@ -127,6 +127,36 @@ pub fn named_nbt(
             Tag::Byte(i8::from(v)),
         );
     }
+    if let Some(name) = e.potion.and_then(components::potion_name) {
+        let mut contents = Compound::new();
+        contents.insert("potion".into(), Tag::String(name.to_owned()));
+        comps.insert("minecraft:potion_contents".into(), Tag::Compound(contents));
+    }
+    if let Some(fw) = &e.fireworks {
+        let mut fireworks = Compound::new();
+        fireworks.insert("flight_duration".into(), Tag::Byte(fw.flight as i8));
+        let explosions = fw
+            .explosions
+            .iter()
+            .map(|ex| {
+                let mut c = Compound::new();
+                c.insert("shape".into(), Tag::String(firework_shape_name(ex.shape)));
+                c.insert(
+                    "colors".into(),
+                    Tag::List(ex.colors.iter().copied().map(Tag::Int).collect()),
+                );
+                c.insert(
+                    "fade_colors".into(),
+                    Tag::List(ex.fade.iter().copied().map(Tag::Int).collect()),
+                );
+                c.insert("has_trail".into(), Tag::Byte(i8::from(ex.trail)));
+                c.insert("has_twinkle".into(), Tag::Byte(i8::from(ex.twinkle)));
+                Tag::Compound(c)
+            })
+            .collect();
+        fireworks.insert("explosions".into(), Tag::List(explosions));
+        comps.insert("minecraft:fireworks".into(), Tag::Compound(fireworks));
+    }
     if !e.lore.is_empty() {
         let lines = e.lore.iter().map(|l| json_to_tag(&parse(l))).collect();
         comps.insert("minecraft:lore".into(), Tag::List(lines));
@@ -291,6 +321,44 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>, depth: u32)
             .get("minecraft:enchantment_glint_override")
             .and_then(Tag::as_i64)
             .map(|v| v != 0);
+        e.potion = m
+            .get("minecraft:potion_contents")
+            .and_then(Tag::as_compound)
+            .and_then(|c| c.get("potion"))
+            .and_then(Tag::as_str)
+            .and_then(components::potion_id);
+        e.fireworks = m
+            .get("minecraft:fireworks")
+            .and_then(Tag::as_compound)
+            .map(|c| components::Fireworks {
+                flight: c.get("flight_duration").and_then(Tag::as_i64).unwrap_or(0) as i32,
+                explosions: c
+                    .get("explosions")
+                    .and_then(Tag::as_list)
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(Tag::as_compound)
+                            .map(|ex| components::Explosion {
+                                shape: ex
+                                    .get("shape")
+                                    .and_then(Tag::as_str)
+                                    .and_then(firework_shape_id)
+                                    .unwrap_or(0),
+                                colors: int_list(ex.get("colors")),
+                                fade: int_list(ex.get("fade_colors")),
+                                trail: ex
+                                    .get("has_trail")
+                                    .and_then(Tag::as_i64)
+                                    .is_some_and(|v| v != 0),
+                                twinkle: ex
+                                    .get("has_twinkle")
+                                    .and_then(Tag::as_i64)
+                                    .is_some_and(|v| v != 0),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            });
         if let Some(lines) = m.get("minecraft:lore").and_then(Tag::as_list) {
             e.lore = lines.iter().map(|t| tag_to_json(t).to_string()).collect();
         }
@@ -578,6 +646,28 @@ pub fn to_line(s: Stack, name: &str) -> String {
     if let Some(v) = e.glint_override {
         j.insert("glint_override".into(), Value::Bool(v));
     }
+    if let Some(name) = e.potion.and_then(components::potion_name) {
+        j.insert("potion".into(), Value::from(name));
+    }
+    if let Some(fw) = &e.fireworks {
+        let explosions: Vec<Value> = fw
+            .explosions
+            .iter()
+            .map(|ex| {
+                serde_json::json!({
+                    "shape": ex.shape,
+                    "colors": ex.colors,
+                    "fade": ex.fade,
+                    "trail": ex.trail,
+                    "twinkle": ex.twinkle,
+                })
+            })
+            .collect();
+        j.insert(
+            "fireworks".into(),
+            serde_json::json!({"flight": fw.flight, "explosions": explosions}),
+        );
+    }
     if !e.lore.is_empty() {
         j.insert("lore".into(), e.lore.iter().map(|l| parse(l)).collect());
     }
@@ -693,6 +783,28 @@ pub fn from_line(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<St
             .and_then(Value::as_bool)
             .unwrap_or(false);
         e.glint_override = j.get("glint_override").and_then(Value::as_bool);
+        e.potion = j
+            .get("potion")
+            .and_then(Value::as_str)
+            .and_then(components::potion_id);
+        e.fireworks = j.get("fireworks").map(|fw| components::Fireworks {
+            flight: fw.get("flight").and_then(Value::as_i64).unwrap_or(0) as i32,
+            explosions: fw
+                .get("explosions")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .map(|ex| components::Explosion {
+                            shape: ex.get("shape").and_then(Value::as_u64).unwrap_or(0) as u8,
+                            colors: json_ints(ex.get("colors")),
+                            fade: json_ints(ex.get("fade")),
+                            trail: ex.get("trail").and_then(Value::as_bool).unwrap_or(false),
+                            twinkle: ex.get("twinkle").and_then(Value::as_bool).unwrap_or(false),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        });
         if let Some(Value::Array(lore)) = j.get("lore") {
             e.lore = lore.iter().map(Value::to_string).collect();
         }
@@ -863,6 +975,44 @@ pub fn banner_layers_from_tag(t: &Tag) -> Vec<(i32, i32)> {
                         components::DYE_COLORS.iter().position(|&n| n == name)? as i32,
                     ))
                 })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn firework_shape_name(shape: u8) -> String {
+    match shape {
+        1 => "large_ball".into(),
+        2 => "star".into(),
+        3 => "creeper".into(),
+        4 => "burst".into(),
+        _ => "small_ball".into(),
+    }
+}
+
+fn firework_shape_id(name: &str) -> Option<u8> {
+    Some(match name {
+        "small_ball" => 0,
+        "large_ball" => 1,
+        "star" => 2,
+        "creeper" => 3,
+        "burst" => 4,
+        _ => return None,
+    })
+}
+
+fn int_list(tag: Option<&Tag>) -> Vec<i32> {
+    tag.and_then(Tag::as_list)
+        .map(|l| l.iter().filter_map(Tag::as_i64).map(|v| v as i32).collect())
+        .unwrap_or_default()
+}
+
+fn json_ints(v: Option<&Value>) -> Vec<i32> {
+    v.and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_i64)
+                .map(|v| v as i32)
                 .collect()
         })
         .unwrap_or_default()
@@ -1072,6 +1222,7 @@ mod tests {
             "minecraft:efficiency".into(),
             "minecraft:unbreaking".into(),
         ]);
+        components::set_potions(vec!["minecraft:water".into()]);
         let e = Extra {
             enchantments: vec![(0, 5), (1, 3)],
             stored: vec![(1, 2)],
@@ -1092,6 +1243,17 @@ mod tests {
             tooltip_style: Some("minecraft:default".into()),
             hide_tooltip: true,
             glint_override: Some(false),
+            potion: Some(0),
+            fireworks: Some(components::Fireworks {
+                flight: 2,
+                explosions: vec![components::Explosion {
+                    shape: 2,
+                    colors: vec![0xff0000],
+                    fade: vec![0x0000ff],
+                    trail: true,
+                    twinkle: false,
+                }],
+            }),
             charged: Vec::new(),
             container: Vec::new(),
             custom_data: Some(compound_to_net(&Compound::from([(
@@ -1130,6 +1292,18 @@ mod tests {
             Tag::Byte(1)
         );
         assert_eq!(comps["minecraft:enchantment_glint_override"], Tag::Byte(0));
+        assert_eq!(
+            comps["minecraft:potion_contents"].as_compound().unwrap()["potion"].as_str(),
+            Some("minecraft:water")
+        );
+        let fw = comps["minecraft:fireworks"].as_compound().unwrap();
+        assert_eq!(fw["flight_duration"], Tag::Byte(2));
+        let ex = fw["explosions"].as_list().unwrap()[0]
+            .as_compound()
+            .unwrap();
+        assert_eq!(ex["shape"].as_str(), Some("star"));
+        assert_eq!(ex["colors"].as_list().unwrap()[0], Tag::Int(0xff0000));
+        assert_eq!(ex["has_trail"], Tag::Byte(1));
         assert_eq!(back, s);
         let line = to_line(s, "minecraft:diamond_pickaxe");
         assert_eq!(

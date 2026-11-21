@@ -4882,7 +4882,7 @@ impl PlayPlan {
         // `components`: таблица `name id` компонентов предметов (Java-мост).
         if line == "components" {
             use std::sync::atomic::Ordering;
-            let table: [(&str, i32); 21] = [
+            let table: [(&str, i32); 23] = [
                 (
                     "minecraft:damage",
                     chunkwake_protocol::inventory::DAMAGE_COMPONENT.load(Ordering::Relaxed),
@@ -4974,6 +4974,15 @@ impl PlayPlan {
                     "minecraft:enchantment_glint_override",
                     chunkwake_protocol::components::GLINT_OVERRIDE_COMPONENT
                         .load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:potion_contents",
+                    chunkwake_protocol::components::POTION_CONTENTS_COMPONENT
+                        .load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:fireworks",
+                    chunkwake_protocol::components::FIREWORKS_COMPONENT.load(Ordering::Relaxed),
                 ),
             ];
             return table

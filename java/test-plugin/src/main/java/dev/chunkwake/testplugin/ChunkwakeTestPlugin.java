@@ -681,6 +681,32 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             if (sender instanceof Player vp) {
                 vp.getInventory().addItem(visual);
             }
+            ItemStack potion = new ItemStack(Material.POTION);
+            org.bukkit.inventory.meta.PotionMeta potionMeta =
+                    (org.bukkit.inventory.meta.PotionMeta) potion.getItemMeta();
+            potionMeta.setBasePotionType(org.bukkit.potion.PotionType.SWIFTNESS);
+            potion.setItemMeta(potionMeta);
+            org.bukkit.inventory.meta.PotionMeta potionBack =
+                    (org.bukkit.inventory.meta.PotionMeta) potion.getItemMeta();
+
+            ItemStack rocket = new ItemStack(Material.FIREWORK_ROCKET);
+            org.bukkit.inventory.meta.FireworkMeta fireworkMeta =
+                    (org.bukkit.inventory.meta.FireworkMeta) rocket.getItemMeta();
+            fireworkMeta.setPower(2);
+            fireworkMeta.addEffect(org.bukkit.FireworkEffect.builder()
+                    .with(org.bukkit.FireworkEffect.Type.STAR)
+                    .withColor(org.bukkit.Color.RED)
+                    .withFade(org.bukkit.Color.BLUE)
+                    .trail(true)
+                    .flicker(false)
+                    .build());
+            rocket.setItemMeta(fireworkMeta);
+            org.bukkit.inventory.meta.FireworkMeta fireworkBack =
+                    (org.bukkit.inventory.meta.FireworkMeta) rocket.getItemMeta();
+
+            if (sender instanceof Player vp) {
+                vp.getInventory().addItem(potion, rocket);
+            }
             org.bukkit.Location spawn = w.getSpawnLocation();
             sender.sendMessage("worldstate world=" + w.getName() + " pvp=" + w.getPVP()
                     + " difficulty=" + w.getDifficulty() + " clear=" + w.isClearWeather()
@@ -699,7 +725,10 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
                             .get(org.bukkit.NamespacedKey.minecraft("stone")).isSolid()
                     + " visual=" + visualBack.getItemModel() + "/" + visualBack.getTooltipStyle()
                     + "/" + visualBack.isHideTooltip() + "/"
-                    + visualBack.getEnchantmentGlintOverride() + "/" + visualBack.getItemName());
+                    + visualBack.getEnchantmentGlintOverride() + "/" + visualBack.getItemName()
+                    + " potion=" + potionBack.getBasePotionType()
+                    + " firework=" + fireworkBack.getPower() + "/"
+                    + fireworkBack.getEffectsSize());
             return true;
         }
         sender.sendMessage(Component.text("Hello, " + sender.getName() + "!", NamedTextColor.GREEN));
