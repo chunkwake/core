@@ -22,8 +22,12 @@ public class ClientboundSetPassengersPacket implements Packet {
                 }
             };
 
-    private final int vehicle;
-    private final int[] passengers;
+    private int vehicle;
+    private int[] passengers;
+
+    public ClientboundSetPassengersPacket(net.minecraft.world.entity.Entity vehicle) {
+        this(vehicle == null ? 0 : vehicle.getId(), new int[0]);
+    }
 
     public ClientboundSetPassengersPacket(int vehicle, int[] passengers) {
         this.vehicle = vehicle;
@@ -36,5 +40,13 @@ public class ClientboundSetPassengersPacket implements Packet {
 
     public int[] getPassengers() {
         return this.passengers;
+    }
+
+    public void setVehicle(int vehicle) {
+        this.vehicle = vehicle;
+    }
+
+    public void setPassengers(int[] passengers) {
+        this.passengers = passengers == null ? new int[0] : passengers.clone();
     }
 }

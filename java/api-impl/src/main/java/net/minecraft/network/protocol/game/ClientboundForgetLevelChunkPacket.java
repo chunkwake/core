@@ -13,6 +13,10 @@ public class ClientboundForgetLevelChunkPacket implements Packet {
         this.pos = pos;
     }
 
+    public ClientboundForgetLevelChunkPacket(net.minecraft.world.level.ChunkPos pos) {
+        this(pos == null ? 0L : pos.pack());
+    }
+
     public long pos() {
         return this.pos;
     }

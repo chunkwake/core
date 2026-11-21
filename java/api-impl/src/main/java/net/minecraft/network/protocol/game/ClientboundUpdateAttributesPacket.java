@@ -8,4 +8,12 @@ package net.minecraft.network.protocol.game;
 public class ClientboundUpdateAttributesPacket {
     public ClientboundUpdateAttributesPacket() {
     }
+
+    public ClientboundUpdateAttributesPacket(int entityId,
+            java.util.Collection<net.minecraft.world.entity.ai.attributes.AttributeInstance> values) {
+    }
+
+    public ClientboundUpdateAttributesPacket(int entityId,
+            java.util.List<net.minecraft.world.entity.ai.attributes.AttributeInstance> values) {
+    }
 }

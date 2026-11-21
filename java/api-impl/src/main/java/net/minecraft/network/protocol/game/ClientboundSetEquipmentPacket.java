@@ -19,6 +19,11 @@ public class ClientboundSetEquipmentPacket {
         return this.entity;
     }
 
+    public int getEntityId() {
+        return this.entity;
+    }
+
+
     public List<Pair<EquipmentSlot, ItemStack>> getSlots() {
         return this.slots;
     }

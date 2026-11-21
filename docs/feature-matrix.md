@@ -5609,3 +5609,69 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 257/504; `/ess` (Essentials) проверен ботом
+
+### Прокси-покрытие
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=255 bad=249
+стало: ok=257 bad=247
+```
+
+Полностью закрылись 2 прокси:
+
+```
+ClientboundUpdateAttributesPacketProxy
+PositionPathProxy
+```
+
+Добавлено:
+
+- интерфейс `net.minecraft.world.entity.PositionPath`
+  (`endPosition`, `type`, `of(Vec3)`, `stepped`, nested `Type`);
+- `ClientboundEntityPositionSyncPacket` переведён на `PositionPath`
+  (в 26.3 второй параметр — `PositionPath`, а не `PositionMoveRotation`);
+- `ClientboundUpdateAttributesPacket(int, Collection|List<AttributeInstance>)`;
+- `ClientboundSetPassengersPacket(Entity)` + `setVehicle/setPassengers`;
+- `ClientboundSetEquipmentPacket.getEntityId()`;
+- `ClientboundBlockEventPacket`, `ClientboundBlockEntityDataPacket(...)`,
+  `ClientboundForgetLevelChunkPacket(ChunkPos)`.
+
+Остаётся 247 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Функциональная проверка: Essentials `/ess`
+
+```
+> /ess
+| /ess Command Help:
+| /ess reload   - Reloads essentials.
+| /ess version  - Gives information about the Essentials version
+| /ess commands - information about forwarded commands
+| /ess debug    - Toggles Essentials' debug mode
+| /ess reset    - Resets the given player's userdata
+| /ess cleanup / homes / dump ...
+```
+
+Essentials реально обработал команду и вернул свой help.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 137814 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 34863 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
+
+(Расширенный гейт шёл 138 с из-за сетевых таймаутов проверок обновлений
+плагинов; итог тот же — 79/82.)

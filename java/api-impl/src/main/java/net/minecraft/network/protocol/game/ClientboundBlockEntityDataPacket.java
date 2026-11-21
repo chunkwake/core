@@ -8,4 +8,8 @@ package net.minecraft.network.protocol.game;
 public class ClientboundBlockEntityDataPacket {
     public ClientboundBlockEntityDataPacket() {
     }
+
+    public ClientboundBlockEntityDataPacket(net.minecraft.core.BlockPos pos,
+            Object blockEntityType, net.minecraft.nbt.CompoundTag tag) {
+    }
 }
