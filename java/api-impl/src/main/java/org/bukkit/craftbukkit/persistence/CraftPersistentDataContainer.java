@@ -103,6 +103,11 @@ public class CraftPersistentDataContainer implements PersistentDataContainer {
         return new net.minecraft.nbt.CompoundTag();
     }
 
+    /** {@code CraftPersistentDataContainer.put(String, Tag)} (CraftEngine). */
+    public void put(String key, net.minecraft.nbt.Tag tag) {
+        this.values.put(org.bukkit.NamespacedKey.fromString(key), tag);
+    }
+
     /** {@code CraftPersistentDataContainer.getRaw()}. */
     public Map<NamespacedKey, Object> getRaw() {
         return this.values;

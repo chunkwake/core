@@ -25,6 +25,8 @@ public final class EntityDataSerializers {
                 }
             };
 
+    public static final EntityDataSerializer<Object> PAINTING_VARIANT = paintingVariant;
+
     public static final EntityDataSerializer<Byte> BYTE = serializer(0);
     public static final EntityDataSerializer<Integer> INT = serializer(1);
     public static final EntityDataSerializer<Long> LONG = serializer(2);

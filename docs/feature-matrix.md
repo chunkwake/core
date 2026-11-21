@@ -5302,3 +5302,66 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 232/504; `/grim` проверен ботом
+
+### Прокси-покрытие
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=225 bad=279
+стало: ok=232 bad=272
+```
+
+Полностью закрылись 7 прокси:
+
+```
+CraftPersistentDataContainerProxy
+ClientboundUpdateTagsPacketProxy
+ClientboundLevelChunkWithLightPacketProxy
+ClientboundLightUpdatePacketProxy
+ClientboundMapItemDataPacketProxy
+ServerboundEditBookPacketProxy
+MapIdProxy
+```
+
+Добавлено:
+
+- `CraftPersistentDataContainer.put(String, Tag)`;
+- `EntityDataSerializers.PAINTING_VARIANT` (алиас);
+- `LevelLightEngine`, `MapId`, `MapDecoration`;
+- `ClientboundLevelChunkWithLightPacket(LevelChunk, LevelLightEngine, BitSet, BitSet)`;
+- `ClientboundLightUpdatePacket(ChunkPos, LevelLightEngine, BitSet, BitSet)`;
+- `ClientboundMapItemDataPacket` (все 3 ctor-варианта 26.3);
+- `ClientboundUpdateTagsPacket(Map)`;
+- `ServerboundEditBookPacket(int, List<String>, Optional<String>)`;
+- `ServerboundUseItemOnPacket(BlockHitResult, InteractionHand, int)`.
+
+Остаётся 272 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Функциональная проверка: GrimAC `/grim`
+
+```
+> /grim
+| grim alerts|brands|consoledebug|debug|dump|help|history|log|perf|
+| profile|reload|sendalert|spectate|stopspectating|testwebhook|verbose|version
+```
+
+GrimAC реально обработал команду и вернул список своих подкоманд.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 45321 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 20680 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
