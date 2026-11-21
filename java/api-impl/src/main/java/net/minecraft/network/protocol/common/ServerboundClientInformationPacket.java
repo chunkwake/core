@@ -5,6 +5,8 @@ import net.minecraft.server.level.ClientInformation;
 
 /** NMS {@code ServerboundClientInformationPacket} (CraftEngine). */
 public class ServerboundClientInformationPacket implements Packet {
+    /** Поля, которые ищет CraftEngine (getLanguage/getInformation). */
+    private String language = "en_us";
     private ClientInformation information = new ClientInformation();
 
     public ServerboundClientInformationPacket() {

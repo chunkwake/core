@@ -13,6 +13,10 @@ public final class EntityTypes {
     public static final EntityType<Entity> HAPPY_GHAST = happyGhast;
     public static final EntityType<Entity> tntMinecart = new EntityType<>("minecraft:tnt_minecart");
     public static final EntityType<Entity> TNT_MINECART = tntMinecart;
+    public static final EntityType<Entity> shulker = new EntityType<>("minecraft:shulker");
+    public static final EntityType<Entity> SHULKER = shulker;
+    public static final EntityType<Entity> textDisplay = new EntityType<>("minecraft:text_display");
+    public static final EntityType<Entity> TEXT_DISPLAY = textDisplay;
 
     public static final EntityType<Entity> MARKER = new EntityType<>("minecraft:marker");
     public static final EntityType<Entity> ITEM_FRAME = new EntityType<>("minecraft:item_frame");

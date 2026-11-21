@@ -7,10 +7,14 @@ import net.minecraft.world.entity.Entity;
 /** NMS {@code ArmorStand} (метаданные; id 14 — Entity 0..7 + LivingEntity 8..13). */
 public class ArmorStand extends Entity {
     /** Поля, которые ищет CraftEngine (позы по умолчанию). */
-    private Pose defaultLeftArmPose = new Pose();
-    private Pose defaultRightArmPose = new Pose();
-    private Pose defaultBodyPose = new Pose();
-    private Pose defaultHeadPose = new Pose();
+    private net.minecraft.world.entity.Pose defaultLeftArmPose =
+            new net.minecraft.world.entity.Pose();
+    private net.minecraft.world.entity.Pose defaultRightArmPose =
+            new net.minecraft.world.entity.Pose();
+    private net.minecraft.world.entity.Pose defaultBodyPose =
+            new net.minecraft.world.entity.Pose();
+    private net.minecraft.world.entity.Pose defaultHeadPose =
+            new net.minecraft.world.entity.Pose();
 
     public static final EntityDataAccessor<Byte> DATA_CLIENT_FLAGS =
             new EntityDataAccessor<>(14, EntityDataSerializers.BYTE);

@@ -4972,3 +4972,65 @@ cargo +1.100.0 test --workspace -- --test-threads=4
 
 (Расширенный гейт шёл 242 с из-за сетевых таймаутов проверок обновлений
 плагинов; итоговый результат тот же 79/82.)
+
+## CraftEngine-прокси: 195/504; `/ei` (ExecutableItems) проверен ботом
+
+### Прокси-покрытие
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=192 bad=312
+стало: ok=195 bad=309
+```
+
+Полностью закрылись 3 прокси:
+
+```
+ServerboundClientInformationPacketProxy
+WorldlyContainerProxy
+ResultContainerProxy
+```
+
+Добавлено:
+
+- `net.minecraft.server.level.ClientInformation` + поля
+  `ServerboundClientInformationPacket.language/information`;
+- `net.minecraft.world.entity.Pose` и позы `ArmorStand` переведены на него
+  (правильный пакет класса — прокси ищет `net.minecraft.world.entity.Pose`);
+- `WorldlyContainer.getSlotsForFace(Direction)`, `Recipe`,
+  `ResultContainer.getRecipeUsed()`;
+- `AbstractContainerMenu.carried/getCarried()`;
+- `EntityTypes.shulker`, `EntityTypes.textDisplay` (+ алиасы);
+- `SoundEvent.fixedRange/create/createVariableRangeEvent/createFixedRangeEvent/getRange`;
+- `org.bukkit.craftbukkit.inventory.CraftContainer`.
+
+Остаётся 309 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Функциональная проверка: ExecutableItems `/ei`
+
+```
+> /ei
+| [ExecutableItems] Invalid argument! Usage: /ei [ reload | create | ... |
+| give | giveall | giveslot | drop | ... ]
+```
+
+ExecutableItems (вместе с SCore) реально обработал команду и вернул свой
+список подкоманд — цепочка `plugin.yml -> Bukkit -> ExecutableItems`
+работает.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 158899 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 52644 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

@@ -2,6 +2,9 @@ package net.minecraft.world.inventory;
 
 /** Минимальный NMS {@code AbstractContainerMenu} (InvSee++). */
 public class AbstractContainerMenu {
+    /** Поле, которое ищет CraftEngine (getCarried). */
+    private net.minecraft.world.item.ItemStack carried = net.minecraft.world.item.ItemStack.EMPTY;
+
     /** Поле, которое ищет CraftEngine (getContainerId). */
     private int containerId;
 
@@ -10,6 +13,11 @@ public class AbstractContainerMenu {
 
     /** Поле, которое ищет CraftEngine (getCheckReachable). */
     private boolean checkReachable = true;
+
+    /** {@code AbstractContainerMenu.getCarried()} (CraftEngine). */
+    public net.minecraft.world.item.ItemStack getCarried() {
+        return this.carried;
+    }
 
     /** {@code AbstractContainerMenu.broadcastChanges()} (CraftEngine). */
     public void broadcastChanges() {
