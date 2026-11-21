@@ -27,6 +27,23 @@ public final class EntityDataSerializers {
 
     public static final EntityDataSerializer<Object> PAINTING_VARIANT = paintingVariant;
 
+    // Остальные поля, которые CraftEngine ищет по именам get*.
+    public static final EntityDataSerializer<Object> PARTICLE = particle;
+    public static final EntityDataSerializer<Object> OPTIONAL_LIVING_ENTITY_REFERENCE =
+            serializer(0);
+    public static final EntityDataSerializer<Object> ROTATIONS = serializer(0);
+    public static final EntityDataSerializer<Object> BLOCK_POS = serializer(0);
+    public static final EntityDataSerializer<Object> OPTIONAL_BLOCK_POS = serializer(0);
+    public static final EntityDataSerializer<Object> OPTIONAL_BLOCK_STATE = serializer(0);
+    public static final EntityDataSerializer<Object> DIRECTION = serializer(0);
+    public static final EntityDataSerializer<Object> OPTIONAL_GLOBAL_POS = serializer(0);
+    public static final EntityDataSerializer<Object> VILLAGER_DATA = serializer(0);
+    public static final EntityDataSerializer<Object> OPTIONAL_UNSIGNED_INT = serializer(0);
+    public static final EntityDataSerializer<Object> CAT_VARIANT = serializer(0);
+    public static final EntityDataSerializer<Object> FROG_VARIANT = serializer(0);
+    public static final EntityDataSerializer<Object> SNIFFER_STATE = serializer(0);
+    public static final EntityDataSerializer<Object> COMPOUND_TAG = serializer(0);
+
     public static final EntityDataSerializer<Byte> BYTE = serializer(0);
     public static final EntityDataSerializer<Integer> INT = serializer(1);
     public static final EntityDataSerializer<Long> LONG = serializer(2);

@@ -13,6 +13,14 @@ public class SynchedEntityData {
         return value;
     }
 
+    public java.util.List<DataValue<?>> packAll() {
+        return this.getNonDefaultValues();
+    }
+
+    public <T> void set(EntityDataAccessor<T> accessor, T value, boolean force) {
+        this.set(accessor, value);
+    }
+
     public <T> void set(EntityDataAccessor<T> accessor, T value) {
         this.values.put(accessor, value);
     }

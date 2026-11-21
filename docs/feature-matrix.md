@@ -5741,3 +5741,88 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 261/504; `/libertybans` ботом; бенчмарк tick
+
+### Прокси-покрытие
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=259 bad=245
+стало: ok=261 bad=243
+```
+
+Полностью закрылись 2 прокси:
+
+```
+ServerboundUseItemOnPacketProxy
+SynchedEntityDataProxy
+```
+
+Добавлено:
+
+- `ServerboundUseItemOnPacket(InteractionHand, BlockHitResult, int)` —
+  правильный порядок параметров 26.3 (был обратный) + поле `timestamp`;
+- `SynchedEntityData.set(accessor, value, boolean)` и `packAll()`;
+- `EntityDataSerializers`: поля `PARTICLE`,
+  `OPTIONAL_LIVING_ENTITY_REFERENCE`, `ROTATIONS`, `BLOCK_POS`,
+  `OPTIONAL_BLOCK_POS`, `OPTIONAL_BLOCK_STATE`, `DIRECTION`,
+  `OPTIONAL_GLOBAL_POS`, `VILLAGER_DATA`, `OPTIONAL_UNSIGNED_INT`,
+  `CAT_VARIANT`, `FROG_VARIANT`, `SNIFFER_STATE`, `COMPOUND_TAG`.
+
+`ClientboundContainerSetContentPacket#newInstance$legacy` всё ещё не
+связывается: в 26.3 у класса только один ctor
+`(int,int,List<ItemStack>,ItemStack)`, и прокси требует несуществующий
+legacy-вариант. Это ограничение самого прокси, а не отсутствие класса.
+
+Остаётся 243 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Функциональная проверка: LibertyBans `/libertybans`
+
+```
+> /libertybans
+| LibertyBans 1.2.0-M1 /on Chunkwake (Bukkit) 26.3-chunkwake (MC: 26.3)
+| The be-all, end-all of discipline.
+| Use '/libertybans usage' for help
+```
+
+LibertyBans (с предзагруженной `bans-download`) реально обработал команду.
+
+### Производительность: воспроизводимый бенчмарк
+
+Запуск:
+
+```
+cargo bench -p chunkwake-server --bench tick -- idle
+```
+
+Результат (release, 100 samples):
+
+```
+tick/idle  time: [56.411 ns 56.555 ns 56.707 ns]
+           change: [+2.76% +2.99% +3.23%] (p = 0.00 < 0.05)
+           Performance has regressed.
+```
+
+То есть относительно сохранённого baseline'а Criterion текущий idle-тик
+не ускорился, а деградировал на ~3%. **Требование «отличная
+производительность» по-прежнему не выполнено и должно быть либо
+пересмотрено, либо закрыто отдельной оптимизацией с A/B-выигрышем.**
+Бенчмарк воспроизводим (фиксированный вход, Criterion),
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 63976 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 12996 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
