@@ -5489,3 +5489,62 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 252/504; `/ajlb` (ajLeaderboards) проверен ботом
+
+### Прокси-покрытие
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=248 bad=256
+стало: ok=252 bad=252
+```
+
+Полностью закрылись 4 прокси:
+
+```
+CraftMerchantCustomProxy
+CraftMerchantProxy
+ServerCommonPacketListenerProxy
+ClientboundLoginPacketProxy
+```
+
+Добавлено:
+
+- CraftBukkit-классы инвентарей: `CraftInventory`, `CraftInventoryView`,
+  `CraftInventoryAnvil`, `CraftMerchant`, `CraftMerchantCustom`,
+  `CraftComplexRecipe`;
+- `ClientboundLoginPacket` (`dimension`, `commonPlayerSpawnInfo`,
+  `setEnforcesSecureChat`);
+- `ClientboundUpdateAdvancementsPacket` (оба ctor-варианта 26.3);
+- интерфейс `ServerCommonPacketListener.handleResourcePackResponse(...)`.
+
+Остаётся 252 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Функциональная проверка: ajLeaderboards `/ajlb`
+
+```
+> /ajlb
+| /ajlb version / reload / add / checkupdate / updateplayer /
+| removeplayer / remove / list / signs / export / import /
+| viewer / reset / updatealloffline / update
+```
+
+ajLeaderboards реально обработал команду и вернул свой список подкоманд.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 54076 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 12428 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
