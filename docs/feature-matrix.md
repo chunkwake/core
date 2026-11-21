@@ -5548,3 +5548,64 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 255/504; `/tabtps` (TabTPS) проверен ботом
+
+### Прокси-покрытие
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=252 bad=252
+стало: ok=255 bad=249
+```
+
+Полностью закрылись 3 прокси:
+
+```
+CommonPlayerSpawnInfoProxy
+ChunkAccessProxy
+LevelChunkProxy
+```
+
+Добавлено/исправлено:
+
+- `Pose` переделан в enum, как в 26.3 (прокси ждал
+  `java.lang.Enum<?>[]` из `values()`, а не массив классов);
+- `CraftChunk.newInstance`/`CraftBlock.at` приведены к типам прокси;
+- новый `CraftBlockStates.getBlockState(World, BlockPos)`;
+- `ParticleTypes.getStreamCodec()`;
+- `BuiltInRegistries.blockstateProviderType`, `Registries.particleType`;
+- `SoundSource.getName()`;
+- `Entity.setPose(Pose)`, `EntityTypes.trident`, `LivingEntity.getEffect(...)`;
+- `ChunkAccess`/`LevelChunk.isUnsaved()`;
+- поля `dimension` в `Level`/`ServerLevel`/`CommonPlayerSpawnInfo`;
+- `ServerboundSetCreativeModeSlotPacket`: примитивы `int`/`short`
+  приведены к ожиданиям прокси.
+
+Остаётся 249 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Функциональная проверка: TabTPS `/tabtps`
+
+```
+> /tabtps
+| Usage: tabtps
+```
+
+TabTPS (paper-команда через Cloud framework) реально обработал команду.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 45392 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 11780 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

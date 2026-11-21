@@ -25,6 +25,9 @@ public final class Registries {
     public static final ResourceKey<Registry<Object>> recipeType =
             ResourceKey.createRegistryKey(Identifier.parse("minecraft:recipe_type"));
     public static final ResourceKey<Registry<Object>> RECIPE_TYPE = recipeType;
+    public static final ResourceKey<Registry<Object>> particleType =
+            ResourceKey.createRegistryKey(Identifier.parse("minecraft:particle_type"));
+    public static final ResourceKey<Registry<Object>> PARTICLE_TYPE = particleType;
 
     public static final ResourceKey<Registry<Object>> BIOME =
             key("biome");

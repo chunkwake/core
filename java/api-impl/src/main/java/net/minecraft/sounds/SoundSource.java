@@ -11,5 +11,9 @@ public enum SoundSource {
     NEUTRAL,
     PLAYER,
     AMBIENT,
-    VOICE
+    VOICE;
+
+    public String getName() {
+        return this.name().toLowerCase(java.util.Locale.ROOT);
+    }
 }

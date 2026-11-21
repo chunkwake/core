@@ -7,8 +7,8 @@ public class CraftChunk {
     public CraftChunk() {
     }
 
-    public static CraftChunk newInstance(Object handle) {
-        return new CraftChunk();
+    public static org.bukkit.Chunk newInstance(Object handle) {
+        return null;
     }
 
     public Object getWorld() {

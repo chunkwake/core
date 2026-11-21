@@ -137,6 +137,10 @@ public class Entity implements net.minecraft.network.syncher.SyncedDataHolder {
         return this.boundingBox;
     }
 
+    /** {@code Entity.setPose(Pose)} (CraftEngine). */
+    public void setPose(Pose pose) {
+    }
+
     /** Поле, которое ищет CraftEngine (EntityProxy#setHurtMarked). */
     public boolean hurtMarked;
 

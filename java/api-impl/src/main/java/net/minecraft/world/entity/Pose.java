@@ -1,12 +1,13 @@
 package net.minecraft.world.entity;
 
-/** NMS {@code Pose} (CraftEngine). */
-public class Pose {
-    public Pose() {
-    }
-
-    /** {@code Pose.values()} (CraftEngine). */
-    public static Pose[] values() {
-        return new Pose[0];
-    }
+/** NMS {@code Pose} (CraftEngine) — enum как в 26.3. */
+public enum Pose {
+    STANDING,
+    FALL_FLYING,
+    SLEEPING,
+    SWIMMING,
+    SPIN_ATTACK,
+    CROUCHING,
+    LONG_JUMPING,
+    DYING
 }

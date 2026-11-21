@@ -5,7 +5,8 @@ public class CraftBlock {
     public CraftBlock() {
     }
 
-    public static org.bukkit.block.Block at(Object world, Object pos) {
+    public static org.bukkit.block.Block at(org.bukkit.World world,
+            net.minecraft.core.BlockPos pos) {
         return null;
     }
 }

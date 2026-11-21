@@ -4,4 +4,8 @@ package net.minecraft.core.particles;
 public final class ParticleTypes {
     private ParticleTypes() {
     }
+
+    public static Object getStreamCodec() {
+        return null;
+    }
 }

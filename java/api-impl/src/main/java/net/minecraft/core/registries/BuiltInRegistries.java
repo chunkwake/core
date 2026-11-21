@@ -26,6 +26,10 @@ public final class BuiltInRegistries {
     public static final net.minecraft.core.Registry<Object> recipeType =
             new net.minecraft.core.SimpleRegistry<>();
     public static final net.minecraft.core.Registry<Object> RECIPE_TYPE = recipeType;
+    public static final net.minecraft.core.Registry<Object> blockstateProviderType =
+            new net.minecraft.core.SimpleRegistry<>();
+    public static final net.minecraft.core.Registry<Object> BLOCKSTATE_PROVIDER_TYPE =
+            blockstateProviderType;
 
     public static final DefaultedRegistry<Block> BLOCK = new SimpleDefaultedRegistry<>(
             net.minecraft.resources.Identifier.parse("minecraft:air"));

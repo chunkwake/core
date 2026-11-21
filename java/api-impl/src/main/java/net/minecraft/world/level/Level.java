@@ -15,6 +15,9 @@ public class Level implements LevelAccessor, net.minecraft.world.level.LevelHeig
             net.minecraft.world.level.redstone.Orientation orientation) {
     }
 
+    /** Поле, которое ищет CraftEngine (getDimension). */
+    private net.minecraft.resources.ResourceKey<?> dimension;
+
     /** Поле, которое ищет CraftEngine (LevelProxy#getRandom). */
     private net.minecraft.util.RandomSource random;
 

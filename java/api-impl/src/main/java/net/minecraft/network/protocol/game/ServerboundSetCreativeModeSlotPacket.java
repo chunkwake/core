@@ -20,7 +20,7 @@ public class ServerboundSetCreativeModeSlotPacket implements Packet {
         this((short) slotNum, itemStack);
     }
 
-    public short getSlotNum() { return this.slotNum; }
-    public int getSlotNum$legacy() { return this.slotNum; }
+    public int getSlotNum() { return this.slotNum; }
+    public short getSlotNum$legacy() { return this.slotNum; }
     public ItemStack getItemStack() { return this.itemStack; }
 }

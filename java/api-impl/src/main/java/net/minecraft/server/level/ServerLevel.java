@@ -46,6 +46,8 @@ public class ServerLevel extends net.minecraft.world.level.Level implements Comm
     private final ServerChunkCache chunkSource = new ServerChunkCache();
     private final BiomeManager biomeManager = new BiomeManager();
     private final DimensionType dimensionType = new DimensionType();
+    /** Поле, которое ищет CraftEngine (getDimension). */
+    private net.minecraft.resources.ResourceKey<?> dimension;
     /** Поле, которое ищет CraftEngine (ServerLevelProxy#getStructureManager). */
     /** {@code ServerLevel.getEntityLookup()} (CraftEngine). */
     public net.minecraft.world.level.entity.LevelEntityGetter<net.minecraft.world.entity.Entity> getEntityLookup() {

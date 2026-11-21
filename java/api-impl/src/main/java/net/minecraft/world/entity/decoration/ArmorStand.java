@@ -8,13 +8,13 @@ import net.minecraft.world.entity.Entity;
 public class ArmorStand extends Entity {
     /** Поля, которые ищет CraftEngine (позы по умолчанию). */
     private net.minecraft.world.entity.Pose defaultLeftArmPose =
-            new net.minecraft.world.entity.Pose();
+            net.minecraft.world.entity.Pose.STANDING;
     private net.minecraft.world.entity.Pose defaultRightArmPose =
-            new net.minecraft.world.entity.Pose();
+            net.minecraft.world.entity.Pose.STANDING;
     private net.minecraft.world.entity.Pose defaultBodyPose =
-            new net.minecraft.world.entity.Pose();
+            net.minecraft.world.entity.Pose.STANDING;
     private net.minecraft.world.entity.Pose defaultHeadPose =
-            new net.minecraft.world.entity.Pose();
+            net.minecraft.world.entity.Pose.STANDING;
 
     /** Статические поля, которые ищет CraftEngine (DEFAULT_*_POSE). */
     public static final net.minecraft.core.Rotations DEFAULT_HEAD_POSE =
