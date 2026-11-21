@@ -6481,5 +6481,34 @@ cows 44 unique 44 tagged 2
 До фикса в том же мире было ~150 записей с повторяющимися UUID;
 теги/PDC сохранённых коров (`[cwt]`, `pdc=yes`) переживают рестарт.
 
-Гейты для этого шага прогоняются отдельно (fmt/clippy/test), результаты
-добавлю после завершения прогона.
+Гейты этого шага:
+
+```
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
+
+## VanillaArgumentProvider: player/players/playerProfiles
+
+Раньше генератор ServiceLoader-провайдеров отдавал для
+`io.papermc.paper.command.brigadier.argument.VanillaArgumentProvider`
+заглушки, и `player`/`players`/`playerProfiles` возвращали `null`
+(предупреждение `api: VanillaArgumentProvider.player is not implemented`).
+
+Теперь:
+
+- `dev.chunkwake.bridge.CommandArguments` — настоящие
+  `ArgumentType<PlayerSelectorArgumentResolver>` и
+  `ArgumentType<PlayerProfileListResolver>`;
+- парсер селекторов: `@a`, `@p`, `@r`, `@s`, имя игрока,
+  опции `limit=` и `distance=[min..max]`;
+- резолвер работает через Bukkit API
+  (`CommandSourceStack.getSender()/getLocation()`), без NMS;
+- `playerProfiles` для офлайн-имени отдаёт `Bukkit.createProfile(name)`;
+- `GenProviders` для этих трёх методов генерирует вызов
+  `CommandArguments.*` вместо Soft-заглушки.
+
+Проверка: `CommandArgumentsTest` (парсинг селекторов/имён и отказ на пустой
+строке) проходит в `gradlew test`.
