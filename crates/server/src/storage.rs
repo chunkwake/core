@@ -300,8 +300,22 @@ impl WorldStorage {
                 }
             }
         }
-        let mobs = plan.unsaved_entities();
-        if !mobs.is_empty() {
+        // Сущности — по своему измерению, плюс очистка устаревших чанков.
+        for (dim, _, _) in plan.dimension_layouts() {
+            let mut mobs = plan.unsaved_entities_in(dim);
+            let current: std::collections::HashSet<(i32, i32)> = mobs
+                .iter()
+                .filter(|(_, list)| !list.is_empty())
+                .map(|(pos, _)| *pos)
+                .collect();
+            for pos in plan.entity_chunks_written_in(dim) {
+                if !current.contains(&pos) && !mobs.iter().any(|(p, _)| *p == pos) {
+                    mobs.push((pos, Vec::new()));
+                }
+            }
+            if mobs.is_empty() {
+                continue;
+            }
             let nbt: Vec<_> = mobs
                 .iter()
                 .map(|(pos, list)| {
@@ -315,15 +329,13 @@ impl WorldStorage {
                     (*pos, root)
                 })
                 .collect();
-            match self
-                .dim("minecraft:overworld")
-                .get("minecraft:overworld")
-                .unwrap()
-                .entities
-                .save(&nbt)
-            {
-                Ok(()) => plan.mark_entities_saved(&mobs),
-                Err(e) => errors.push(format!("save entities: {e}")),
+            let dims = self.dim(dim.key());
+            let Some(store) = dims.get(dim.key()) else {
+                continue;
+            };
+            match store.entities.save(&nbt) {
+                Ok(()) => plan.mark_entities_saved_in(dim, &mobs),
+                Err(e) => errors.push(format!("save entities {}: {e}", dim.key())),
             }
         }
         if errors.is_empty() {

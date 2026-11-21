@@ -4913,6 +4913,15 @@ impl PlayPlan {
     pub(super) fn load_mobs(&self, chunks: Vec<((i32, i32), Compound)>) {
         let mut populated = self.sim().populated.lock().unwrap();
         let mut written = self.sim().entity_written.lock().unwrap();
+        // Дедуп по UUID: старые сохранения могли оставить моба в двух чанках.
+        let mut known: std::collections::HashSet<u128> = self
+            .sim()
+            .mobs
+            .lock()
+            .unwrap()
+            .values()
+            .map(|e| e.mob.uuid)
+            .collect();
         for (pos, root) in chunks {
             populated.insert(pos);
             let Some(Tag::List(list)) = root.get("Entities") else {
@@ -4934,6 +4943,9 @@ impl PlayPlan {
                 else {
                     continue;
                 };
+                if !known.insert(m.uuid) {
+                    continue;
+                }
                 written.insert(pos);
                 let mut entry = MobEntry::new(m);
                 entry.tags = c
@@ -5094,6 +5106,19 @@ impl PlayPlan {
     /// После записи сущностей измерения `dim`.
     pub fn mark_entities_saved_in(&self, dim: Dimension, saved: &[((i32, i32), Vec<Compound>)]) {
         with_dim(dim, || self.mark_entities_saved(saved));
+    }
+
+    /// Чанки, где на прошлом сохранении были сущности.
+    pub fn entity_chunks_written_in(&self, dim: Dimension) -> Vec<(i32, i32)> {
+        with_dim(dim, || {
+            self.sim()
+                .entity_written
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect()
+        })
     }
 
     /// Чанки `entities/*.mca` к записи: где есть мобы, где они были и новые заселённые.
