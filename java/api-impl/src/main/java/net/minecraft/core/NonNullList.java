@@ -10,4 +10,11 @@ public class NonNullList<E> extends ArrayList<E> {
     public static <E> NonNullList<E> create() {
         return new NonNullList<>();
     }
+
+    /** {@code NonNullList.createWithCapacity(int)} (CraftEngine). */
+    public static <E> NonNullList<E> createWithCapacity(int capacity) {
+        NonNullList<E> list = new NonNullList<>();
+        list.ensureCapacity(capacity);
+        return list;
+    }
 }

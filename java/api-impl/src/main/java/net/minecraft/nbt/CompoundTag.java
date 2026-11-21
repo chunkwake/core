@@ -50,6 +50,17 @@ public final class CompoundTag implements Tag {
         this.put(key, StringTag.valueOf(value));
     }
 
+    /** {@code CompoundTag.merge(CompoundTag)} (CraftEngine). */
+    public CompoundTag merge(CompoundTag other) {
+        CompoundTag merged = this.copy();
+        if (other != null) {
+            for (String key : other.keySet()) {
+                merged.put(key, other.get(key));
+            }
+        }
+        return merged;
+    }
+
     public CompoundTag copy() {
         CompoundTag copy = new CompoundTag();
         copy.tags.putAll(this.tags);

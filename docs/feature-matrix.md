@@ -4263,3 +4263,63 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 132/504 (было 124), без регрессий
+
+Ещё один батч членов, которые CraftEngine ищет рефлексией. Пробник
+`P2` по всем 504 прокси-интерфейсам:
+
+```
+ok=132 bad=372     (предыдущая итерация: ok=124 bad=380)
+```
+
+Полностью закрыты ещё 8 прокси:
+
+```
+CraftParticleProxy
+NonNullListProxy
+DataComponentHolderProxy
+DataComponentTypeProxy
+PatchedDataComponentMapProxy
+CompoundTagProxy
+RegistryOpsProxy
+ResourceKeyProxy
+```
+
+Добавлено:
+
+- `CompoundTag.merge(CompoundTag)`;
+- `NonNullList.createWithCapacity(int)`;
+- `DataComponentHolder.getComponents()`;
+- `DataComponentMap.builder()` + `DataComponentMap.Builder`;
+- `DataComponentType.codecOrThrow()`;
+- `PatchedDataComponentMap.fromPatch(DataComponentMap, DataComponentPatch)`;
+- `RegistryOps.create(DynamicOps, HolderLookup.Provider)`;
+- `ResourceKey.registryName`/`identifier` (оба `Identifier`, как в 26.3);
+- `CraftBlockData.getState(BlockData)`/`fromData(BlockState)`;
+- `CraftParticle.minecraftToBukkit(ParticleType)`.
+
+Остаток: 372 прокси, из них подавляющее большинство — отсутствующие
+NMS/CraftBukkit/Moonrise-классы. CraftEngine остаётся LOADERR; граница
+не изменилась концептуально, но покрытие растёт измеримо.
+
+Про `MissingPaletteEntryException`: класс
+`net.minecraft.world.level.chunk.MissingPaletteEntryException` уже есть в
+дереве (squaremap его больше не требует для включения — `squaremap
+enabled in 560 ms`), отдельная заглушка не нужна; повторно проверять не
+требуется.
+
+### Гейты (сеть была медленной: плагины ждали таймауты обновлений)
+
+```
+расширенный: 79 of 82 enabled in 221892 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 57499 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

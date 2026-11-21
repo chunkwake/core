@@ -13,6 +13,12 @@ public final class PatchedDataComponentMap implements DataComponentMap {
         this.prototype = prototype;
     }
 
+    /** {@code PatchedDataComponentMap.fromPatch(prototype, patch)} (CraftEngine). */
+    public static PatchedDataComponentMap fromPatch(DataComponentMap prototype,
+            DataComponentPatch patch) {
+        return new PatchedDataComponentMap(prototype);
+    }
+
     @SuppressWarnings("unchecked")
     @Override
     public <T> T get(DataComponentType<? extends T> type) {

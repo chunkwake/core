@@ -5,14 +5,26 @@ import net.minecraft.core.Registry;
 /** NMS {@code ResourceKey}. */
 public final class ResourceKey<T> {
     private final Identifier location;
+    /**
+     * Поля, которые CraftEngine (ResourceKeyProxy) ищет по именам:
+     * в 26.3 оба имеют тип Identifier.
+     */
+    private Identifier registryName;
+    private Identifier identifier;
 
     private ResourceKey(Identifier location) {
         this.location = location;
+        this.identifier = location;
+        this.registryName = Identifier.parse("minecraft:root");
     }
 
     public static <T> ResourceKey<T> create(ResourceKey<? extends Registry<T>> registry,
             Identifier location) {
-        return new ResourceKey<>(location);
+        ResourceKey<T> key = new ResourceKey<>(location);
+        if (registry != null) {
+            key.registryName = registry.location();
+        }
+        return key;
     }
 
     public static <T> ResourceKey<Registry<T>> createRegistryKey(Identifier location) {

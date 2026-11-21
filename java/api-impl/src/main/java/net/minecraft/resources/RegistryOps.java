@@ -17,6 +17,12 @@ public class RegistryOps<T> implements DynamicOps<T> {
         return new RegistryOps<>(delegate, registries);
     }
 
+    /** {@code RegistryOps.create(DynamicOps, HolderLookup.Provider)} (CraftEngine). */
+    public static <T> RegistryOps<T> create(DynamicOps<T> delegate,
+            net.minecraft.core.HolderLookup.Provider provider) {
+        return new RegistryOps<>(delegate, null);
+    }
+
     public RegistryAccess registryAccess() {
         return this.registries;
     }

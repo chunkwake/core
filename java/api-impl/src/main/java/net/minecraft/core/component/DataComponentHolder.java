@@ -2,6 +2,11 @@ package net.minecraft.core.component;
 
 /** NMS {@code DataComponentHolder}: носитель data-компонентов. */
 public interface DataComponentHolder {
+    /** {@code DataComponentHolder.getComponents()} (CraftEngine). */
+    default net.minecraft.core.component.DataComponentMap getComponents() {
+        return new net.minecraft.core.component.PatchedDataComponentMap(null);
+    }
+
     default <T> T get(net.minecraft.core.component.DataComponentType<T> type) {
         return null;
     }
