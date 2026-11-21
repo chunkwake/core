@@ -5169,3 +5169,68 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 213/504; `/chunky` проверен ботом
+
+### Прокси-покрытие
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=209 bad=295
+стало: ok=213 bad=291
+```
+
+Полностью закрылись 4 прокси:
+
+```
+ClientboundMoveEntityPacketProxy
+ClientboundRespawnPacketProxy
+ClientboundSetPlayerTeamPacketProxy
+ClientboundTeleportEntityPacketProxy
+```
+
+Добавлено:
+
+- `ClientboundMoveEntityPacket`: точные типы полей 26.3
+  (`short xa/ya/za`, `byte xRot/yRot`, `hasPos/hasRot`) и get/set;
+- `ClientboundTeleportEntityPacket`: `x/y/z`, `byte xRot/yRot`,
+  `setId/setOnGround`;
+- `ClientboundRespawnPacket` + `CommonPlayerSpawnInfo`
+  (`dimension`/`commonPlayerSpawnInfo`);
+- `ClientboundSetPlayerTeamPacket`:
+  `(String,int,Optional<Component>,Collection<String>)` и
+  `createAddOrModifyPacket(PlayerTeam,boolean)`.
+
+Остаётся 291 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Функциональная проверка: Chunky `/chunky`
+
+```
+> /chunky
+| Chunky Commands
+| chunky start    - Start a new chunk generation task
+| chunky pause    - Pause current tasks and save progress
+| chunky continue - Continue current or saved tasks
+| chunky cancel   - Stop and delete current or saved tasks
+| chunky world <world> / worldborder / center <x> <z> / spawn / help 2
+```
+
+Chunky реально обработал команду и отдал свой help (значит, регистрация
+команд и permission-слой работают).
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 44249 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 13359 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
