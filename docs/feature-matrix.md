@@ -5034,3 +5034,75 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 199/504; `/bq` (BetonQuest) проверен ботом
+
+### Прокси-покрытие
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=195 bad=309
+стало: ok=199 bad=305
+```
+
+Полностью закрылись 4 прокси:
+
+```
+EntityTypeProxy
+ArmorStandProxy
+OrientationProxy
+MapItemSavedDataProxy
+```
+
+Добавлено:
+
+- `net.minecraft.world.entity.Pose.values()`;
+- `Entity.hurtMarked`, `EntityTypes.oakBoat` (+ алиас);
+- `AABB.ofSize(Vec3,double,double,double)`;
+- `Level.updateNeighborsAt(BlockPos, Block[, Orientation])` + класс
+  `net.minecraft.world.level.redstone.Orientation`;
+- `ChunkAccess`/`LevelChunk.setUnsaved(boolean)`;
+- `LevelChunkSection.setTickingFluidCount(int)`;
+- `AbstractContainerMenu.getMenuType()`;
+- `Recipe.getId()`;
+- `MapItemSavedData.scale` теперь `byte` (как в 26.3 — прокси требует
+  точный примитив);
+- `EntityType.getHeight()` теперь `float` (как в 26.3);
+- `net.minecraft.core.Rotations` + статические `DEFAULT_*_POSE` в
+  `ArmorStand` (именно эти поля ищет прокси, а не инстансные позы).
+
+Остаётся 305 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Функциональная проверка: BetonQuest `/bq`
+
+```
+> /bq
+| ----- BetonQuest -----
+| /bq give <name>        gives you the specified item
+| /bq item <name>        creates an item from the one you're holding
+| /bq version            displays version information
+| /bq journal <player> ...   /bq tag <player> ...  ...
+```
+
+BetonQuest реально обработал команду и отдал свой help с hover-событиями
+(значит, работают и компоненты/hover-event в сообщениях).
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 249850 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 54052 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
+
+(Расширенный гейт шёл 250 с из-за сетевых таймаутов проверок обновлений
+плагинов; итоговый результат тот же — 79/82.)

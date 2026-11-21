@@ -13,6 +13,10 @@ public abstract class ChunkAccess implements LevelHeightAccessor {
     protected java.util.Map<net.minecraft.core.BlockPos, net.minecraft.world.level.block.entity.BlockEntity> blockEntities =
             new java.util.HashMap<>();
 
+    /** {@code ChunkAccess.setUnsaved(boolean)} (CraftEngine). */
+    public void setUnsaved(boolean unsaved) {
+    }
+
     /** {@code ChunkAccess.canvas$getAllBlockEntities()} (CraftEngine). */
     public java.util.Collection<net.minecraft.world.level.block.entity.BlockEntity> canvas$getAllBlockEntities() {
         return java.util.List.of();

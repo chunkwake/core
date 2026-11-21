@@ -16,6 +16,20 @@ public class ArmorStand extends Entity {
     private net.minecraft.world.entity.Pose defaultHeadPose =
             new net.minecraft.world.entity.Pose();
 
+    /** Статические поля, которые ищет CraftEngine (DEFAULT_*_POSE). */
+    public static final net.minecraft.core.Rotations DEFAULT_HEAD_POSE =
+            new net.minecraft.core.Rotations();
+    public static final net.minecraft.core.Rotations DEFAULT_BODY_POSE =
+            new net.minecraft.core.Rotations();
+    public static final net.minecraft.core.Rotations DEFAULT_LEFT_ARM_POSE =
+            new net.minecraft.core.Rotations();
+    public static final net.minecraft.core.Rotations DEFAULT_RIGHT_ARM_POSE =
+            new net.minecraft.core.Rotations();
+    public static final net.minecraft.core.Rotations DEFAULT_LEFT_LEG_POSE =
+            new net.minecraft.core.Rotations();
+    public static final net.minecraft.core.Rotations DEFAULT_RIGHT_LEG_POSE =
+            new net.minecraft.core.Rotations();
+
     public static final EntityDataAccessor<Byte> DATA_CLIENT_FLAGS =
             new EntityDataAccessor<>(14, EntityDataSerializers.BYTE);
 }

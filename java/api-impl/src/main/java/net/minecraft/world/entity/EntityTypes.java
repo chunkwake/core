@@ -17,6 +17,8 @@ public final class EntityTypes {
     public static final EntityType<Entity> SHULKER = shulker;
     public static final EntityType<Entity> textDisplay = new EntityType<>("minecraft:text_display");
     public static final EntityType<Entity> TEXT_DISPLAY = textDisplay;
+    public static final EntityType<Entity> oakBoat = new EntityType<>("minecraft:oak_boat");
+    public static final EntityType<Entity> OAK_BOAT = oakBoat;
 
     public static final EntityType<Entity> MARKER = new EntityType<>("minecraft:marker");
     public static final EntityType<Entity> ITEM_FRAME = new EntityType<>("minecraft:item_frame");

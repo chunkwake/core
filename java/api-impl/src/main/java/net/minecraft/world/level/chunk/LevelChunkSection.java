@@ -73,6 +73,10 @@ public class LevelChunkSection {
         };
     }
 
+    /** {@code LevelChunkSection.setTickingFluidCount(int)} (CraftEngine). */
+    public void setTickingFluidCount(int count) {
+    }
+
     /** Поле, которое ищет CraftEngine (getStates). */
     private net.minecraft.world.level.chunk.PalettedContainer<BlockState> states;
 

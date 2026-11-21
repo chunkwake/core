@@ -41,8 +41,8 @@ public class EntityType<T> {
     }
 
     /** Высота для spacing голограмм (DecentHolograms). */
-    public double getHeight() {
-        return this.id.endsWith("text_display") ? 0.5 : 1.975;
+    public float getHeight() {
+        return this.id.endsWith("text_display") ? 0.5f : 1.975f;
     }
 
     @Override

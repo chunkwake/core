@@ -137,6 +137,9 @@ public class Entity implements net.minecraft.network.syncher.SyncedDataHolder {
         return this.boundingBox;
     }
 
+    /** Поле, которое ищет CraftEngine (EntityProxy#setHurtMarked). */
+    public boolean hurtMarked;
+
     /** Поле, которое ищет CraftEngine (EntityProxy#setZo). */
     public double zo;
 

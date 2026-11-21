@@ -36,6 +36,10 @@ public class LevelChunk extends ChunkAccess {
     private java.util.Map<net.minecraft.core.BlockPos, net.minecraft.world.level.block.entity.BlockEntity> blockEntities =
             new java.util.HashMap<>();
 
+    /** {@code LevelChunk.setUnsaved(boolean)} (CraftEngine). */
+    public void setUnsaved(boolean unsaved) {
+    }
+
     /** {@code LevelChunk.canvas$getAllBlockEntities()} (CraftEngine). */
     public java.util.Collection<net.minecraft.world.level.block.entity.BlockEntity> canvas$getAllBlockEntities() {
         return java.util.List.of();

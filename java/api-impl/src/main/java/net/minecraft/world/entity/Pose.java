@@ -4,4 +4,9 @@ package net.minecraft.world.entity;
 public class Pose {
     public Pose() {
     }
+
+    /** {@code Pose.values()} (CraftEngine). */
+    public static Pose[] values() {
+        return new Pose[0];
+    }
 }

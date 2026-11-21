@@ -13,6 +13,12 @@ public class AABB {
     public final double maxY;
     public final double maxZ;
 
+    /** {@code AABB.ofSize(Vec3,double,double,double)} (CraftEngine). */
+    public static AABB ofSize(Vec3 center, double dx, double dy, double dz) {
+        return new AABB(center.x - dx / 2, center.y - dy / 2, center.z - dz / 2,
+                center.x + dx / 2, center.y + dy / 2, center.z + dz / 2);
+    }
+
     /** {@code AABB.move(Vec3)} (CraftEngine). */
     public AABB move(Vec3 offset) {
         return this.move(offset.x, offset.y, offset.z);

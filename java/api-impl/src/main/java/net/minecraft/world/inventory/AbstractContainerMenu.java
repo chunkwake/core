@@ -14,6 +14,11 @@ public class AbstractContainerMenu {
     /** Поле, которое ищет CraftEngine (getCheckReachable). */
     private boolean checkReachable = true;
 
+    /** {@code AbstractContainerMenu.getMenuType()} (CraftEngine). */
+    public net.minecraft.world.inventory.MenuType<?> getMenuType() {
+        return null;
+    }
+
     /** {@code AbstractContainerMenu.getCarried()} (CraftEngine). */
     public net.minecraft.world.item.ItemStack getCarried() {
         return this.carried;

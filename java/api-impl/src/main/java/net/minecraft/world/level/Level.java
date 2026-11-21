@@ -5,6 +5,16 @@ import net.minecraft.world.level.block.state.BlockState;
 
 /** NMS {@code Level} (минимально, но с настоящей иерархией). */
 public class Level implements LevelAccessor, net.minecraft.world.level.LevelHeightAccessor {
+    /** {@code Level.updateNeighborsAt(BlockPos, Block[, Orientation])} (CraftEngine). */
+    public void updateNeighborsAt(net.minecraft.core.BlockPos pos,
+            net.minecraft.world.level.block.Block block) {
+    }
+
+    public void updateNeighborsAt(net.minecraft.core.BlockPos pos,
+            net.minecraft.world.level.block.Block block,
+            net.minecraft.world.level.redstone.Orientation orientation) {
+    }
+
     /** Поле, которое ищет CraftEngine (LevelProxy#getRandom). */
     private net.minecraft.util.RandomSource random;
 
