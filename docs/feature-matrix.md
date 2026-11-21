@@ -5234,3 +5234,71 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 225/504; `/plan` проверен ботом
+
+### Прокси-покрытие
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=213 bad=291
+стало: ok=225 bad=279
+```
+
+Полностью закрылись 12 прокси:
+
+```
+ClientboundResourcePackPopPacketProxy
+ServerboundResourcePackPacketProxy
+ClientboundSoundPacketProxy
+ClientboundStopSoundPacketProxy
+ClientboundTakeItemEntityPacketProxy
+ServerboundPickItemFromBlockPacketProxy
+ServerboundPickItemFromEntityPacketProxy
+ServerboundRenameItemPacketProxy
+ServerboundSwingPacketProxy
+ClientboundLoginDisconnectPacketProxy
+ClientboundLoginFinishedPacketProxy
+ServerboundHelloPacketProxy
+```
+
+Созданы NMS-классы: `ClientboundSoundPacket`, `ClientboundStopSoundPacket`,
+`ClientboundTakeItemEntityPacket`, `ClientboundUpdateMobEffectPacket`,
+`ServerboundRenameItemPacket`, `ServerboundSwingPacket`,
+`ServerboundSetCreativeModeSlotPacket`, `ServerboundPickItemFromBlockPacket`,
+`ServerboundPickItemFromEntityPacket`, `ClientboundResourcePackPopPacket`,
+`ClientboundResourcePackPushPacket`, `ServerboundResourcePackPacket`,
+`ClientboundLoginDisconnectPacket`, `ClientboundLoginFinishedPacket`,
+`ServerboundHelloPacket`, а также `SoundSource`, `MobEffectInstance`.
+
+Остаётся 279 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Функциональная проверка: Plan `/plan`
+
+```
+> /plan
+| > /plan Help
+| plan server / servers / network / player / players / search /
+| plan ingame / json / register / unregister / logout / users /
+| plan groups / setgroup / info / reload / disable / db / export / import
+| Hover over command or arguments or use '/plan ?' ...
+```
+
+Plan реально обработал команду и отдал help с hover-подсказками.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 46250 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 13406 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
