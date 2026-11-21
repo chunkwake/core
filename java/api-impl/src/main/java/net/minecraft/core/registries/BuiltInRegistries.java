@@ -11,6 +11,9 @@ public final class BuiltInRegistries {
     public static final net.minecraft.core.Registry<Object> attribute =
             new net.minecraft.core.SimpleRegistry<>();
     public static final net.minecraft.core.Registry<Object> ATTRIBUTE = attribute;
+    public static final net.minecraft.core.Registry<Object> item =
+            new net.minecraft.core.SimpleRegistry<>();
+    public static final net.minecraft.core.Registry<Object> ITEM = item;
 
     public static final DefaultedRegistry<Block> BLOCK = new SimpleDefaultedRegistry<>(
             net.minecraft.resources.Identifier.parse("minecraft:air"));

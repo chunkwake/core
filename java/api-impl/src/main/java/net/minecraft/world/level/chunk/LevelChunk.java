@@ -29,6 +29,10 @@ public class LevelChunk extends ChunkAccess {
         this.sections = new LevelChunkSection[24];
     }
 
+    /** {@code LevelChunk.markUnsaved()} (CraftEngine). */
+    public void markUnsaved() {
+    }
+
     public int getPosX() { return this.x; }
     public int getPosZ() { return this.z; }
 

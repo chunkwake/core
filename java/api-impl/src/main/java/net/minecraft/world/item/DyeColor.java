@@ -19,6 +19,10 @@ public enum DyeColor {
     RED(14, "red"),
     BLACK(15, "black");
 
+    /** Поля, которые ищет CraftEngine (textureDiffuseColor/fireworkColor). */
+    private int textureDiffuseColor;
+    private int fireworkColor;
+
     private final int id;
     private final String name;
 

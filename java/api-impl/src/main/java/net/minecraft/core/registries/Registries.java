@@ -10,6 +10,9 @@ public final class Registries {
     public static final ResourceKey<Registry<Object>> attribute =
             ResourceKey.createRegistryKey(Identifier.parse("minecraft:attribute"));
     public static final ResourceKey<Registry<Object>> ATTRIBUTE = attribute;
+    public static final ResourceKey<Registry<Object>> lootTable =
+            ResourceKey.createRegistryKey(Identifier.parse("minecraft:loot_table"));
+    public static final ResourceKey<Registry<Object>> LOOT_TABLE = lootTable;
 
     public static final ResourceKey<Registry<Object>> BIOME =
             key("biome");

@@ -7,6 +7,8 @@ import net.minecraft.core.Direction;
 public class BlockHitResult extends HitResult {
     private final BlockPos blockPos;
     private final Direction direction;
+    /** Поле, которое ищет CraftEngine (BlockHitResultProxy#isInside). */
+    private boolean inside;
 
     public BlockHitResult(Vec3 location, Direction direction, BlockPos blockPos, boolean miss) {
         super(location);

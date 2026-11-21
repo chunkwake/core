@@ -28,6 +28,9 @@ public class MinecraftServer {
             new ca.spottedleaf.common.time.TickData();
 
     private final ServerTickRateManager tickRateManager = new ServerTickRateManager();
+    /** Поле, которое ищет CraftEngine (MinecraftServerProxy#getScoreboard). */
+    private final net.minecraft.world.scores.Scoreboard scoreboard =
+            new net.minecraft.world.scores.Scoreboard();
 
     public ServerTickRateManager tickRateManager() {
         return this.tickRateManager;

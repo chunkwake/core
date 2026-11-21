@@ -6,6 +6,9 @@ import java.util.Optional;
 
 /** NMS {@code EnumProperty}. */
 public final class EnumProperty<E extends Enum<E>> extends Property<E> {
+    /** Поле, которое ищет CraftEngine (getValues). */
+    private java.util.List<E> values;
+
     private EnumProperty(String name, Class<E> type, List<E> values) {
         super(name, type, values);
     }

@@ -4471,3 +4471,65 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 149/504 (было 143)
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=143 bad=361
+стало: ok=149 bad=355
+```
+
+Полностью закрылись 6 прокси:
+
+```
+HolderProxy
+ServerEntityProxy
+ItemCooldownsProxy
+EnumPropertyProxy
+Vec3Proxy
+ScoreboardProxy
+```
+
+Добавлено:
+
+- `Holder.is(Identifier | ResourceKey | Predicate | TagKey | Holder)`
+  (все перегрузки, которые ищет прокси);
+- `ChunkPos.getMaxBlockX()`;
+- `LevelReader.getNoiseBiome(int,int,int)`, `Level.dimensionType()`;
+- `AABB.setMinY(double)`, `Vec3.subtract(double | double,double,double | Vec3)`;
+- `Item.getDescriptionId()`, `ItemCooldowns.addCooldown(Identifier,int)`;
+- `Slot.container`/`getContainer()` + интерфейс `Container`;
+- `AbstractContainerMenu.checkReachable`, `Player.inventoryMenu` (+ `InventoryMenu`);
+- `EntityType.dimensions`, `EntityTypes.item`;
+- `ItemParticleOption.itemStack`;
+- `BuiltInRegistries.item`, `Registries.lootTable` (алиасы);
+- `Fluid.getPickupSound()`, `FluidState.getAmount()`;
+- `LevelChunk.markUnsaved()`, `LevelChunkSection.getStates()`, `PalettedContainer.getAndSet(...)`;
+- `MapItemSavedData.scale`, `EnumProperty.values`, `DyeColor.textureDiffuseColor/fireworkColor`;
+- `BlockHitResult.inside`;
+- `Pose` + `ArmorStand` позы по умолчанию;
+- `ServerPlayer.gameMode`, `ServerLevel.structureManager` (+ `StructureManager`);
+- `MinecraftServer.scoreboard` (+ `Scoreboard`);
+- `DedicatedServer.settings` (+ `DedicatedServerSettings`);
+- `ServerEntity.updateInterval`;
+- `ChunkMap.generator`, `ServerChunkCache.getGenerator()` (+ класс `ChunkGenerator`).
+
+Остаётся 355 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 69796 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 26638 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

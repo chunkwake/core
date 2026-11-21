@@ -12,6 +12,10 @@ public class ItemCooldowns {
     public ItemCooldowns() {
     }
 
+    /** {@code ItemCooldowns.addCooldown(Identifier, int)} (CraftEngine). */
+    public void addCooldown(net.minecraft.resources.Identifier id, int ticks) {
+    }
+
     /** {@code ItemCooldowns.addCooldown(ItemStack, int)} (CraftEngine). */
     public void addCooldown(net.minecraft.world.item.ItemStack item, int ticks) {
     }

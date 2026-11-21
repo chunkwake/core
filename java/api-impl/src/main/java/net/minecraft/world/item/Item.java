@@ -2,6 +2,11 @@ package net.minecraft.world.item;
 
 /** Минимальный NMS {@code Item} (id предмета). */
 public class Item {
+    /** {@code Item.getDescriptionId()} (CraftEngine). */
+    public String getDescriptionId() {
+        return "item.minecraft.air";
+    }
+
     /** Поле, которое ищет CraftEngine (ItemProxy#setComponents). */
     private net.minecraft.core.component.DataComponentMap components;
 

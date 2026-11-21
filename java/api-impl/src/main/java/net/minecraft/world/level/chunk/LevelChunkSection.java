@@ -8,6 +8,7 @@ import net.minecraft.world.level.block.state.BlockState;
  * из Rust по глобальным координатам; без него — воздух (Orebfuscator).
  */
 public class LevelChunkSection {
+
     private final int sectionY;
     private final net.minecraft.server.level.ServerLevel level;
     private final int chunkX;

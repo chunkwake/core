@@ -12,6 +12,26 @@ public interface Holder<T> {
         return new Reference<>(value);
     }
 
+    default boolean is(net.minecraft.resources.Identifier id) {
+        return false;
+    }
+
+    default boolean is(net.minecraft.resources.ResourceKey<T> key) {
+        return false;
+    }
+
+    default boolean is(java.util.function.Predicate<net.minecraft.resources.ResourceKey<T>> predicate) {
+        return false;
+    }
+
+    default boolean is(net.minecraft.tags.TagKey<T> tag) {
+        return false;
+    }
+
+    default boolean is(Holder<T> holder) {
+        return this == holder;
+    }
+
     /** {@code Holder.isBound()} (CraftEngine). */
     default boolean isBound() {
         return true;

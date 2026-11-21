@@ -18,6 +18,8 @@ public class ServerPlayer extends net.minecraft.world.entity.player.Player {
     }
 
     public ServerGamePacketListenerImpl connection;
+    /** Поле, которое ищет CraftEngine (ServerPlayerProxy#setGameMode). */
+    private net.minecraft.world.level.GameType gameMode = net.minecraft.world.level.GameType.SURVIVAL;
 
     public ServerPlayer() {
         this.connection = new ServerGamePacketListenerImpl();

@@ -4,6 +4,9 @@ import net.minecraft.server.MinecraftServer;
 
 /** Минимальный NMS {@code DedicatedServer} (Voxy и другие проверяют класс). */
 public class DedicatedServer extends MinecraftServer {
+    /** Поле, которое ищет CraftEngine (DedicatedServerProxy#getSettings). */
+    private final DedicatedServerSettings settings = new DedicatedServerSettings();
+
     private final net.minecraft.commands.Commands commands = new net.minecraft.commands.Commands();
 
     public static DedicatedServer create() {
