@@ -4836,3 +4836,67 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 183/504; `/papi list` проверен ботом (27 хуков)
+
+### Прокси-покрытие
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=180 bad=324
+стало: ok=183 bad=321
+```
+
+Полностью закрылись 3 прокси:
+
+```
+PacketSendListenerProxy
+BundlePacketProxy
+ClientboundBundlePacketProxy
+```
+
+Добавлено:
+
+- `net.minecraft.network.protocol.BundlePacket` (get/setPackets),
+  `ClientboundBundlePacket extends BundlePacket`;
+- `net.minecraft.network.PacketSendListener.thenRun(Runnable)`;
+- `net.minecraft.network.codec.ByteBufCodecs.trackDepth(Object)`.
+
+Остаётся 321 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Функциональная проверка: PlaceholderAPI `/papi list`
+
+Бот на полном стенде выполнил `/papi list`; PAPI отдал собственный список
+активных expansion-хуков:
+
+```
+> /papi list
+| A total of 27 placeholder hook(s) are active:
+| ajlb, auraskills, aureliumskills, axgraves, bentobox, betonquest,
+| deathannouncer, deluxemenus, elitemobs, emfesgui, excellentcrates,
+| executableitems, gravesx, grim, huskhomes, imageframe, multiverse-core,
+| mythic, planplasmovoice, qs, score, skinsrestorer, ultimateshop,
+| voicechat, zmenu
+```
+
+То есть регистрация expansion'ов из множества разных плагинов
+(AuraSkills, BentoBox, BetonQuest, EliteMobs, Multiverse, MythicMobs,
+SkinsRestorer, zMenu, SCore/ExecutableItems и др.) реально работает, а не
+только «плагин включился».
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 63519 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 16375 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
