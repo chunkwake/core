@@ -6580,3 +6580,25 @@ CraftEngine по-прежнему LOADERR и упирается в
 `BlockBehaviour$BlockStateBase` (см. отдельную секцию выше): это требует
 настоящего NMS block-state/StateHolder-слоя (80 методов прокси, 27
 полей-кэшей), а не заглушки.
+
+## Попытка scoped-слоя BlockStateBase (откачена, вывод зафиксирован)
+
+Проверено экспериментально, без серверных прогонов (javac + `P3`):
+
+1. Сгенерировал `BlockBehaviour$BlockStateBase` из 80 методов прокси:
+   33 поля-кэша + геттеры/сеттеры, `BlockState extends BlockStateBase`.
+   `P3` на `BlockReflections`: `BlockStateBaseProxy` и `BlockStateProxy`
+   **связались** — ошибка «Cannot find proxied class» ушла.
+2. Следующий блокер: `CollisionContextProxy` (нет `CollisionContext`).
+   Добавил минимальный `CollisionContext` (`empty/of/placementContext`) —
+   связался.
+3. Дальше `BlockStateBaseProxy#getShape`: binder ищет реальную сигнатуру
+   (`BlockGetter`, `BlockPos`, `CollisionContext`), а затем требует
+   `net.minecraft.world.level.pathfinder.*`, `VoxelShape`, `SoundType` и
+   прочие NMS-типы, которых в проекте нет.
+
+Итог: карта-заглушка связывает прокси ровно до первого реального вызова;
+CraftEngineMutating-блоки требуют настоящий слой
+`StateHolder/BlockState/VoxelShape/pathfinder`. Эксперимент откачен,
+`dist` пересобран из закоммиченного состояния, дерево зелёное. Блокер
+подтверждён на уровне нескольких NMS-подсистем, а не одного класса.
