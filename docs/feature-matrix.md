@@ -5890,3 +5890,83 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## Индекс предметов: пересборка только при смене состава чанков (+5-9% на tick/mobs)
+
+Раньше `tick_items` каждый тик пересобирал индекс «чанк -> dropped items»
+целиком (`rebuild_drop_index`, O(предметов) с блокировкой). Предметы же
+почти всегда покоятся и чанк не меняют, так что это была чистая трата.
+
+Теперь индекс пересобирается только когда он действительно устарел:
+
+- предмет перешёл в другой чанк за тик (`chunk_of(old) != chunk_of(new)`);
+- предмет исчез (деспавн, слияние, подбор, воронка) —
+  `mark_drops_dirty()` / непустой `gone`;
+- флаг `drops_dirty` (AtomicBool на измерение) выставляется при изъятии
+  предмета игроком и воронкой.
+
+Сама пересборка осталась прежней (переиспользует карту и векторы), просто
+вызывается по событию, а не каждый тик.
+
+### A/B на `cargo bench -p chunkwake-server --bench tick -- "tick/mobs"`
+
+Baseline снят до изменения (`--save-baseline pre_dropidx`):
+
+```
+tick/mobs  time: [27.194 µs 27.526 µs 27.804 µs]
+```
+
+После изменения (5 прогонов того же бинаря, сравнение с baseline):
+
+```
+прогон 1: 34.161 µs  change +25.4..+29.4%   <- шум машины, сразу перепрогнан
+прогон 1': 24.631 µs change -8.69..-6.65% (p=0.00)
+прогон 2: 23.865 µs  change -6.68..-2.82% (p=0.00)
+прогон 3: 26.500 µs  change -3.13..-0.72% (p=0.00)
+прогон 4: 24.940 µs  change -7.07..-5.03% (p=0.00)
+```
+
+4 из 5 прогонов — ускорение 1.9-7.7% (медиана ~-4.8%); медиана времени
+24.94 µs против 27.53 µs (~-9.4%). Один прогон поймал внешнюю нагрузку
+машины — это видно по мгновенному перепрогону (24.6 µs).
+
+Вывод: оптимизация реальная и воспроизводимая, но по масштабу это единицы
+процентов на тик предметов. Требование «отличная производительность» этим
+не закрывается: нужен либо отдельный крупный выигрыш на основном тике,
+либо серверный A/B против Paper на одинаковой нагрузке.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 54474 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 13852 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+CraftEngine P2: ok=261 bad=243 (без изменений: Java не трогали)
+```
+
+### Функциональная проверка: `/loot spawn` -> подбор предметов
+
+Бот на базовом стенде (25598):
+
+```
+> /loot spawn ~ ~ ~ loot minecraft:chests/simple_dungeon
+| Spawned 8 item(s) ... minecraft:chests/simple_dungeon 8 -60 8
+> /data get entity @s Inventory
+| [{Slot:0b,count:4,id:"minecraft:redstone"},
+|  {Slot:1b,count:1,id:"minecraft:golden_horse_armor"},
+|  {Slot:2b,count:3,id:"minecraft:string"},
+|  {Slot:3b,count:6,id:"minecraft:bone"},
+|  {Slot:4b,count:1,id:"minecraft:enchanted_golden_apple"},
+|  {Slot:5b,count:4,id:"minecraft:wheat"}, ...]
+```
+
+Через 5 секунд все стаки из лут-таблицы лежали в инвентаре: спавн
+item-сущностей, индекс «чанк -> предметы», тик и подбор работают после
+перехода на пересборку индекса по событию.

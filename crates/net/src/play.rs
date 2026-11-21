@@ -1888,6 +1888,9 @@ pub(crate) struct DimSim {
     /// предметы мира: O(игроков × предметов) и O(воронок × предметов) за тик.
     /// С индексом ищутся только чанки в радиусе действия.
     dropped_by_chunk: Mutex<FastMap<(i32, i32), Vec<i32>>>,
+    /// Индекс `dropped_by_chunk` устарел: предмет забрали или он перешёл
+    /// в другой чанк. Пересобираем только тогда, а не каждый тик.
+    drops_dirty: std::sync::atomic::AtomicBool,
     /// Сферы опыта.
     orbs: Mutex<FastMap<i32, crate::orbs::Orb>>,
     /// Работающие и открытые печи.
@@ -7614,6 +7617,11 @@ impl PlayPlan {
             .push(id);
     }
 
+    /// Пометить индекс «чанк -> предметы» устаревшим после изъятия предмета.
+    fn mark_drops_dirty(&self) {
+        self.sim().drops_dirty.store(true, Ordering::Relaxed);
+    }
+
     /// Пересобирает индекс «чанк → предметы» по текущему набору.
     fn rebuild_drop_index(&self) {
         let dropped = self.sim().dropped.lock().unwrap();
@@ -7796,6 +7804,9 @@ impl PlayPlan {
                 );
             }
         }
+        if !taken.is_empty() {
+            self.mark_drops_dirty();
+        }
         for id in &taken {
             dropped.remove(id);
         }
@@ -7831,6 +7842,9 @@ impl PlayPlan {
         syncs.clear();
         gone.clear();
         merging.clear();
+        // Пересборка индекса - O(предметов). Делаем её только когда состав
+        // чанков реально изменился, а не каждый тик на покоящихся предметах.
+        let mut index_stale = self.sim().drops_dirty.swap(false, Ordering::Relaxed);
         self.with_world(|w| {
             for (&id, d) in dropped.iter_mut() {
                 if asleep(d) {
@@ -7861,6 +7875,9 @@ impl PlayPlan {
                         hit = true;
                     }
                 }
+                if chunk_of(old_pos) != chunk_of(d.pos) {
+                    index_stale = true;
+                }
                 if hit || d.age.is_multiple_of(items::SYNC_TICKS) {
                     syncs.push((id, d.pos, d.vel, d.on_ground));
                 }
@@ -7871,6 +7888,9 @@ impl PlayPlan {
                 }
             }
         });
+        if !gone.is_empty() {
+            index_stale = true;
+        }
         for id in &gone {
             dropped.remove(id);
         }
@@ -7917,11 +7937,13 @@ impl PlayPlan {
             gone.push(absorbed);
         }
         drop(dropped);
-        // Индекс по чанкам перестраивается раз в тик: предметы летают между
-        // чанками и исчезают, а точечно поддерживать его в пяти местах —
-        // лишний риск. Перестройка O(предметов) и без новых аллокаций: карта
-        // и её векторы переиспользуются.
-        self.rebuild_drop_index();
+        // Индекс пересобираем только когда поменялся состав чанков: предметы
+        // обычно покоятся, и полная перестройка O(предметов) каждый тик -
+        // чистая трата. Появление/изъятие предмета или переход в другой чанк
+        // выставляют `index_stale`, и тогда карта пересобирается как раньше.
+        if index_stale {
+            self.rebuild_drop_index();
+        }
         // Синхронизация всех сущностей тика — одной рассылкой.
         let gone_set: FastSet<i32> = gone.iter().copied().collect();
         self.hub.send_many_about(
@@ -20926,6 +20948,7 @@ impl PlayPlan {
             if left == 0 {
                 dropped.remove(&id);
                 drop(dropped);
+                self.mark_drops_dirty();
                 self.hub.remove_tracked(&[id]);
             } else if let Some(d) = dropped.get_mut(&id) {
                 d.stack.count = left;
