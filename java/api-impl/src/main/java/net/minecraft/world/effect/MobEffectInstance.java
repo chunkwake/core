@@ -13,6 +13,18 @@ public class MobEffectInstance {
         this.amplifier = amplifier;
     }
 
+    public MobEffectInstance(net.minecraft.core.Holder<MobEffect> effect) {
+    }
+
+    public MobEffectInstance(net.minecraft.core.Holder<MobEffect> effect, int duration) {
+    }
+
+    public MobEffectInstance(net.minecraft.core.Holder<MobEffect> effect, int duration,
+            int amplifier) {
+        this.duration = duration;
+        this.amplifier = amplifier;
+    }
+
     public int getDuration() {
         return this.duration;
     }

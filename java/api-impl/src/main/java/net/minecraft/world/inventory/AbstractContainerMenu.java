@@ -14,6 +14,11 @@ public class AbstractContainerMenu {
     /** Поле, которое ищет CraftEngine (getCheckReachable). */
     private boolean checkReachable = true;
 
+    /** {@code AbstractContainerMenu.getDataSlots()} (CraftEngine). */
+    public java.util.List<DataSlot> getDataSlots() {
+        return java.util.List.of();
+    }
+
     /** {@code AbstractContainerMenu.getMenuType()} (CraftEngine). */
     public net.minecraft.world.inventory.MenuType<?> getMenuType() {
         return null;

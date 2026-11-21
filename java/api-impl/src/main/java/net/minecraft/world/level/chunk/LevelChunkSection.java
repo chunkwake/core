@@ -73,6 +73,11 @@ public class LevelChunkSection {
         };
     }
 
+    /** {@code LevelChunkSection.getNonEmptyBlockCount()} (CraftEngine). */
+    public int getNonEmptyBlockCount() {
+        return 0;
+    }
+
     /** {@code LevelChunkSection.setTickingFluidCount(int)} (CraftEngine). */
     public void setTickingFluidCount(int count) {
     }

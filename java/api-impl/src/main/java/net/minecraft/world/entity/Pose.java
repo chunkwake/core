@@ -9,5 +9,15 @@ public enum Pose {
     SPIN_ATTACK,
     CROUCHING,
     LONG_JUMPING,
-    DYING
+    DYING,
+    CROAKING,
+    USING_TONGUE,
+    SITTING,
+    ROARING,
+    SNIFFING,
+    EMERGING,
+    DIGGING,
+    SLIDING,
+    SHOOTING,
+    INHALING
 }

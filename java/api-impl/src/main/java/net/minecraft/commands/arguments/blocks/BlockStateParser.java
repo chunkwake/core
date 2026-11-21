@@ -5,7 +5,15 @@ public final class BlockStateParser {
     private BlockStateParser() {
     }
 
-    public static Object parseForBlock(Object block, String input, boolean allowNbt) {
+    /** NMS {@code BlockStateParser.BlockResult}. */
+    public static final class BlockResult {
+        public BlockResult() {
+        }
+    }
+
+    public static BlockResult parseForBlock(
+            net.minecraft.core.HolderLookup<net.minecraft.world.level.block.Block> lookup,
+            String input, boolean allowNbt) {
         return null;
     }
 }

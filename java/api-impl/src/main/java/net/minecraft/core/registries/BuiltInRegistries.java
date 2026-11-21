@@ -30,6 +30,9 @@ public final class BuiltInRegistries {
             new net.minecraft.core.SimpleRegistry<>();
     public static final net.minecraft.core.Registry<Object> BLOCKSTATE_PROVIDER_TYPE =
             blockstateProviderType;
+    public static final net.minecraft.core.Registry<Object> particleType =
+            new net.minecraft.core.SimpleRegistry<>();
+    public static final net.minecraft.core.Registry<Object> PARTICLE_TYPE = particleType;
 
     public static final DefaultedRegistry<Block> BLOCK = new SimpleDefaultedRegistry<>(
             net.minecraft.resources.Identifier.parse("minecraft:air"));

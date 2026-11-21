@@ -9,19 +9,27 @@ public final class CraftEventFactory {
         return menu;
     }
 
-    public static boolean handleBlockGrowEvent(Object world, Object pos, Object state, int flags) {
+    public static boolean handleBlockGrowEvent(net.minecraft.world.level.Level world,
+            net.minecraft.core.BlockPos pos, net.minecraft.world.level.block.state.BlockState state,
+            int flags) {
         return false;
     }
 
-    public static boolean handleBlockGrowEvent(Object world, Object pos, Object state) {
+    public static boolean handleBlockGrowEvent(net.minecraft.world.level.Level world,
+            net.minecraft.core.BlockPos pos,
+            net.minecraft.world.level.block.state.BlockState state) {
         return false;
     }
 
-    public static boolean handleBlockFormEvent(Object world, Object pos, Object state, int flags) {
+    public static boolean handleBlockFormEvent(net.minecraft.world.level.Level world,
+            net.minecraft.core.BlockPos pos, net.minecraft.world.level.block.state.BlockState state,
+            int flags) {
         return false;
     }
 
-    public static boolean callEntityChangeBlockEvent(Object entity, Object pos, Object state) {
+    public static boolean callEntityChangeBlockEvent(net.minecraft.world.entity.Entity entity,
+            net.minecraft.core.BlockPos pos,
+            net.minecraft.world.level.block.state.BlockState state) {
         return false;
     }
 

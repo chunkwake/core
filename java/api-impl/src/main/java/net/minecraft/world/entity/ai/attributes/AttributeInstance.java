@@ -9,6 +9,10 @@ public class AttributeInstance {
     public AttributeInstance() {
     }
 
+    public AttributeInstance(net.minecraft.core.Holder<Attribute> attribute,
+            java.util.function.Consumer<AttributeInstance> onDirty) {
+    }
+
     public double getValue() {
         return this.baseValue;
     }

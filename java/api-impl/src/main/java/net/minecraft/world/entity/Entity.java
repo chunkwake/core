@@ -137,9 +137,16 @@ public class Entity implements net.minecraft.network.syncher.SyncedDataHolder {
         return this.boundingBox;
     }
 
+    /** {@code Entity.isSilent()} (CraftEngine). */
+    public boolean isSilent() {
+        return this.silent;
+    }
+
     /** {@code Entity.setPose(Pose)} (CraftEngine). */
     public void setPose(Pose pose) {
     }
+
+    private boolean silent;
 
     /** Поле, которое ищет CraftEngine (EntityProxy#setHurtMarked). */
     public boolean hurtMarked;

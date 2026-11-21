@@ -5675,3 +5675,69 @@ cargo +1.100.0 test --workspace -- --test-threads=4
 
 (Расширенный гейт шёл 138 с из-за сетевых таймаутов проверок обновлений
 плагинов; итог тот же — 79/82.)
+
+## CraftEngine-прокси: 259/504; `/viaversion` проверен ботом
+
+### Прокси-покрытие
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=257 bad=247
+стало: ok=259 bad=245
+```
+
+Полностью закрылись 2 прокси:
+
+```
+PoseProxy
+BlockStateParserProxy
+```
+
+Добавлено:
+
+- `Pose` расширен до полного enum 26.3 (17 значений в правильном порядке —
+  прокси индексирует `values()` по ordinal);
+- `BlockStateParser.parseForBlock(HolderLookup<Block>, String, boolean)` +
+  вложенный `BlockResult` (точная сигнатура 26.3);
+- `TeamColor` + `PlayerTeam.setColor(TeamColor)`;
+- `MobEffectInstance(Holder<MobEffect>[, duration[, amplifier]])`;
+- `Entity.isSilent()`, `EntityTypes.potion`;
+- `DataSlot` + `AbstractContainerMenu.getDataSlots()`;
+- `RecipeType`, `Recipe.getType()`, `RecipeManager.getEnabledFlags()`;
+- `BlockGetter.getBlockEntity(BlockPos)`, `LevelAccessor.getRandom()`;
+- `LevelChunkSection.getNonEmptyBlockCount()`, `AABB.move(Vec3i)`;
+- `AttributeInstance(Holder<Attribute>, Consumer<AttributeInstance>)`;
+- `CraftEventFactory` с типизированными параметрами 26.3;
+- алиасы `BuiltInRegistries.particleType`, `Registries.dimension`.
+
+Остаётся 245 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Функциональная проверка: ViaVersion `/viaversion`
+
+```
+> /viaversion
+| ViaVersion 5.12.2
+| Commands:
+| /viaversion displayleaks [level] / player <name|*> / dump /
+| /viaversion reload / dontbugme / debug [...] / autoteam /
+| /viaversion pps / list
+```
+
+ViaVersion реально обработал команду и вернул версию и список команд.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 40924 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 11721 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

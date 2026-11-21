@@ -13,4 +13,7 @@ public class PlayerTeam {
         this.scoreboard = scoreboard;
         this.name = name;
     }
+
+    public void setColor(TeamColor color) {
+    }
 }

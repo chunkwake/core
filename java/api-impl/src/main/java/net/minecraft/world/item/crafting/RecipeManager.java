@@ -9,4 +9,8 @@ public class RecipeManager {
 
     public RecipeManager() {
     }
+
+    public net.minecraft.world.flag.FeatureFlagSet getEnabledFlags() {
+        return null;
+    }
 }

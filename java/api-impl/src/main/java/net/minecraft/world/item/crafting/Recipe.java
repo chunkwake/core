@@ -4,4 +4,7 @@ package net.minecraft.world.item.crafting;
 public interface Recipe {
     /** {@code Recipe.getId()} (CraftEngine). */
     net.minecraft.resources.Identifier getId();
+
+    /** {@code Recipe.getType()} (CraftEngine). */
+    RecipeType<?> getType();
 }

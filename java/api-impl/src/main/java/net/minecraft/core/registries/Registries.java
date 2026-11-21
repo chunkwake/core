@@ -28,6 +28,9 @@ public final class Registries {
     public static final ResourceKey<Registry<Object>> particleType =
             ResourceKey.createRegistryKey(Identifier.parse("minecraft:particle_type"));
     public static final ResourceKey<Registry<Object>> PARTICLE_TYPE = particleType;
+    public static final ResourceKey<Registry<Object>> dimension =
+            ResourceKey.createRegistryKey(Identifier.parse("minecraft:dimension"));
+    public static final ResourceKey<Registry<Object>> DIMENSION = dimension;
 
     public static final ResourceKey<Registry<Object>> BIOME =
             key("biome");

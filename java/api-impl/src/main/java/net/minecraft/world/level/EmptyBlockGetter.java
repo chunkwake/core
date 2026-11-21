@@ -13,6 +13,7 @@ public final class EmptyBlockGetter implements BlockGetter {
     private EmptyBlockGetter() {
     }
 
+
     @Override
     public BlockState getBlockState(BlockPos pos) {
         return Blocks.AIR.defaultBlockState();

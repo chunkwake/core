@@ -21,6 +21,8 @@ public final class EntityTypes {
     public static final EntityType<Entity> OAK_BOAT = oakBoat;
     public static final EntityType<Entity> trident = new EntityType<>("minecraft:trident");
     public static final EntityType<Entity> TRIDENT = trident;
+    public static final EntityType<Entity> potion = new EntityType<>("minecraft:potion");
+    public static final EntityType<Entity> POTION = potion;
 
     public static final EntityType<Entity> MARKER = new EntityType<>("minecraft:marker");
     public static final EntityType<Entity> ITEM_FRAME = new EntityType<>("minecraft:item_frame");

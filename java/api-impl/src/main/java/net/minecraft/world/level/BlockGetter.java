@@ -5,6 +5,12 @@ import net.minecraft.world.level.block.state.BlockState;
 
 /** NMS {@code BlockGetter}. */
 public interface BlockGetter {
+    /** {@code BlockGetter.getBlockEntity(BlockPos)} (CraftEngine). */
+    default net.minecraft.world.level.block.entity.BlockEntity getBlockEntity(
+            BlockPos pos) {
+        return null;
+    }
+
     /** {@code BlockGetter.getBlockFloorHeight(BlockPos)} (CraftEngine). */
     default double getBlockFloorHeight(BlockPos pos) {
         return 0.0;

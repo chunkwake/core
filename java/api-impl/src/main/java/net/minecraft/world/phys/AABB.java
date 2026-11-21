@@ -19,6 +19,11 @@ public class AABB {
                 center.x + dx / 2, center.y + dy / 2, center.z + dz / 2);
     }
 
+    /** {@code AABB.move(Vec3i)} (CraftEngine). */
+    public AABB move(net.minecraft.core.Vec3i offset) {
+        return this.move(offset.getX(), offset.getY(), offset.getZ());
+    }
+
     /** {@code AABB.move(Vec3)} (CraftEngine). */
     public AABB move(Vec3 offset) {
         return this.move(offset.x, offset.y, offset.z);
