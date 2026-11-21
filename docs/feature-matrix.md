@@ -5365,3 +5365,63 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 243/504; `/holograms` (DecentHolograms) проверен ботом
+
+### Прокси-покрытие
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=232 bad=272
+стало: ok=243 bad=261
+```
+
+Полностью закрылись 11 прокси:
+
+```
+AdvancementHolderProxy
+AdvancementRequirementsProxy
+AdvancementRewardsProxy
+AdvancementTypeProxy
+CriterionTriggerInstanceProxy
+triggers.CriterionProxy
+triggers.CriterionTriggerProxy
+triggers.ImpossibleTriggerProxy
+ChatTypeProxy
+SignedMessageBodyProxy
+contents.TranslatableContentsProxy
+```
+
+Созданы NMS-классы: `AdvancementType`, `DisplayInfo`, `AdvancementHolder`,
+`Advancement`, `AdvancementProgress`, `CriterionProgress`,
+`AdvancementRequirements`, `AdvancementRewards`, `Criterion`,
+`CriterionTriggerInstance`, `CriterionTrigger`, `ImpossibleTrigger`,
+`ChatType`, `SignedMessageBody`, `TranslatableContents`.
+
+Остаётся 261 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Функциональная проверка: DecentHolograms `/holograms`
+
+```
+> /holograms
+| [DecentHolograms] Use /holograms help to view possible commands.
+```
+
+DecentHolograms реально обработал команду и ответил игроку.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 44518 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 13070 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
