@@ -711,6 +711,7 @@ fn survival_data(
         c::GLINT_OVERRIDE_COMPONENT
             .store(component("minecraft:enchantment_glint_override")?, order);
         c::POTION_CONTENTS_COMPONENT.store(component("minecraft:potion_contents")?, order);
+        c::INSTRUMENT_COMPONENT.store(component("minecraft:instrument")?, order);
         c::set_banner_pattern_names(
             registries
                 .synchronized
@@ -1092,6 +1093,13 @@ fn survival_data(
                 }
             }
             chunkwake_protocol::components::set_potions(names.clone());
+            if let Some(reg) = registries
+                .synchronized
+                .iter()
+                .find(|r| r.name == "instrument")
+            {
+                chunkwake_protocol::components::set_instruments(reg.entries.clone());
+            }
             names
         },
         potion_component: chunkwake_data::registries::builtin_id_of(

@@ -4870,6 +4870,27 @@ impl PlayPlan {
                 .map(|state| chunkwake_world::state_flags(state as u32).to_string())
                 .unwrap_or_default();
         }
+        // `itemstack <item arg>`: ItemFactory#createItemStack (строка как в /give).
+        if let Some(rest) = line.strip_prefix("itemstack ") {
+            let Some(parsed) =
+                crate::play::commands::item::parse_item(rest.trim(), &self.survival.item_ids)
+            else {
+                return String::new();
+            };
+            let mut extra = parsed.extra;
+            if let Some(potion) = parsed.potion.as_deref()
+                && let Some(patched) = self.with_potion(parsed.id, extra, potion)
+            {
+                extra = patched;
+            }
+            let stack = Stack {
+                item: parsed.id,
+                count: 1,
+                damage: parsed.damage.unwrap_or(0),
+                extra,
+            };
+            return crate::stack_nbt::to_line(stack, self.item_name(parsed.id));
+        }
         // `itemname <id>`: имя предмета по числовому id (мост для ItemStack).
         if let Some(rest) = line.strip_prefix("itemname ") {
             return rest
@@ -4882,7 +4903,7 @@ impl PlayPlan {
         // `components`: таблица `name id` компонентов предметов (Java-мост).
         if line == "components" {
             use std::sync::atomic::Ordering;
-            let table: [(&str, i32); 23] = [
+            let table: [(&str, i32); 24] = [
                 (
                     "minecraft:damage",
                     chunkwake_protocol::inventory::DAMAGE_COMPONENT.load(Ordering::Relaxed),
@@ -4983,6 +5004,10 @@ impl PlayPlan {
                 (
                     "minecraft:fireworks",
                     chunkwake_protocol::components::FIREWORKS_COMPONENT.load(Ordering::Relaxed),
+                ),
+                (
+                    "minecraft:instrument",
+                    chunkwake_protocol::components::INSTRUMENT_COMPONENT.load(Ordering::Relaxed),
                 ),
             ];
             return table

@@ -704,8 +704,21 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             org.bukkit.inventory.meta.FireworkMeta fireworkBack =
                     (org.bukkit.inventory.meta.FireworkMeta) rocket.getItemMeta();
 
+            ItemStack horn = new ItemStack(Material.GOAT_HORN);
+            org.bukkit.inventory.meta.MusicInstrumentMeta hornMeta =
+                    (org.bukkit.inventory.meta.MusicInstrumentMeta) horn.getItemMeta();
+            hornMeta.setInstrument(org.bukkit.MusicInstrument.PONDER_GOAT_HORN);
+            horn.setItemMeta(hornMeta);
+            org.bukkit.inventory.meta.MusicInstrumentMeta hornBack =
+                    (org.bukkit.inventory.meta.MusicInstrumentMeta) horn.getItemMeta();
+
+            ItemStack made = getServer().getItemFactory().createItemStack(
+                    "minecraft:diamond_sword[minecraft:custom_name=\"Factory Sword\"]");
+            boolean factoryName = made.getItemMeta().hasDisplayName()
+                    && "Factory Sword".equals(made.getItemMeta().getDisplayName());
+
             if (sender instanceof Player vp) {
-                vp.getInventory().addItem(potion, rocket);
+                vp.getInventory().addItem(potion, rocket, horn);
             }
             org.bukkit.Location spawn = w.getSpawnLocation();
             sender.sendMessage("worldstate world=" + w.getName() + " pvp=" + w.getPVP()
@@ -728,7 +741,9 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
                     + visualBack.getEnchantmentGlintOverride() + "/" + visualBack.getItemName()
                     + " potion=" + potionBack.getBasePotionType()
                     + " firework=" + fireworkBack.getPower() + "/"
-                    + fireworkBack.getEffectsSize());
+                    + fireworkBack.getEffectsSize()
+                    + " instrument=" + hornBack.getInstrument()
+                    + " factory=" + factoryName + "/" + made.getType());
             return true;
         }
         sender.sendMessage(Component.text("Hello, " + sender.getName() + "!", NamedTextColor.GREEN));

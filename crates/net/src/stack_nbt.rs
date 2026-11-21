@@ -157,6 +157,9 @@ pub fn named_nbt(
         fireworks.insert("explosions".into(), Tag::List(explosions));
         comps.insert("minecraft:fireworks".into(), Tag::Compound(fireworks));
     }
+    if let Some(name) = e.instrument.and_then(components::instrument_name) {
+        comps.insert("minecraft:instrument".into(), Tag::String(name.to_owned()));
+    }
     if !e.lore.is_empty() {
         let lines = e.lore.iter().map(|l| json_to_tag(&parse(l))).collect();
         comps.insert("minecraft:lore".into(), Tag::List(lines));
@@ -359,6 +362,10 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>, depth: u32)
                     })
                     .unwrap_or_default(),
             });
+        e.instrument = m
+            .get("minecraft:instrument")
+            .and_then(Tag::as_str)
+            .and_then(components::instrument_id);
         if let Some(lines) = m.get("minecraft:lore").and_then(Tag::as_list) {
             e.lore = lines.iter().map(|t| tag_to_json(t).to_string()).collect();
         }
@@ -668,6 +675,9 @@ pub fn to_line(s: Stack, name: &str) -> String {
             serde_json::json!({"flight": fw.flight, "explosions": explosions}),
         );
     }
+    if let Some(name) = e.instrument.and_then(components::instrument_name) {
+        j.insert("instrument".into(), Value::from(name));
+    }
     if !e.lore.is_empty() {
         j.insert("lore".into(), e.lore.iter().map(|l| parse(l)).collect());
     }
@@ -805,6 +815,10 @@ pub fn from_line(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<St
                 })
                 .unwrap_or_default(),
         });
+        e.instrument = j
+            .get("instrument")
+            .and_then(Value::as_str)
+            .and_then(components::instrument_id);
         if let Some(Value::Array(lore)) = j.get("lore") {
             e.lore = lore.iter().map(Value::to_string).collect();
         }
@@ -1223,6 +1237,7 @@ mod tests {
             "minecraft:unbreaking".into(),
         ]);
         components::set_potions(vec!["minecraft:water".into()]);
+        components::set_instruments(vec!["minecraft:ponder_goat_horn".into()]);
         let e = Extra {
             enchantments: vec![(0, 5), (1, 3)],
             stored: vec![(1, 2)],
@@ -1244,6 +1259,7 @@ mod tests {
             hide_tooltip: true,
             glint_override: Some(false),
             potion: Some(0),
+            instrument: Some(0),
             fireworks: Some(components::Fireworks {
                 flight: 2,
                 explosions: vec![components::Explosion {
@@ -1304,6 +1320,10 @@ mod tests {
         assert_eq!(ex["shape"].as_str(), Some("star"));
         assert_eq!(ex["colors"].as_list().unwrap()[0], Tag::Int(0xff0000));
         assert_eq!(ex["has_trail"], Tag::Byte(1));
+        assert_eq!(
+            comps["minecraft:instrument"].as_str(),
+            Some("minecraft:ponder_goat_horn")
+        );
         assert_eq!(back, s);
         let line = to_line(s, "minecraft:diamond_pickaxe");
         assert_eq!(

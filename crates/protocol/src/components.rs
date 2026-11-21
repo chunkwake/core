@@ -63,6 +63,8 @@ pub struct Extra {
     pub potion: Option<i32>,
     /// `minecraft:fireworks`: длительность полёта и взрывы.
     pub fireworks: Option<Fireworks>,
+    /// `minecraft:instrument`: id инструмента (MusicInstrumentMeta).
+    pub instrument: Option<i32>,
 }
 
 /// ID `minecraft:dyed_color` в реестре компонентов; -1 — неизвестен.
@@ -150,6 +152,7 @@ impl Extra {
             && self.glint_override.is_none()
             && self.potion.is_none()
             && self.fireworks.is_none()
+            && self.instrument.is_none()
     }
 
     pub fn level(&self, enchantment: i32) -> i32 {
@@ -245,6 +248,24 @@ pub static TOOLTIP_DISPLAY_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static GLINT_OVERRIDE_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 /// `minecraft:potion_contents` (PotionMeta) и имена ванильных зелий.
 pub static POTION_CONTENTS_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+/// `minecraft:instrument` (MusicInstrumentMeta) и имена инструментов.
+pub static INSTRUMENT_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+static INSTRUMENT_NAMES: OnceLock<Vec<String>> = OnceLock::new();
+
+pub fn set_instruments(names: Vec<String>) {
+    let _ = INSTRUMENT_NAMES.set(names);
+}
+
+pub fn instrument_name(id: i32) -> Option<&'static str> {
+    INSTRUMENT_NAMES
+        .get()?
+        .get(id.max(0) as usize)
+        .map(String::as_str)
+}
+
+pub fn instrument_id(name: &str) -> Option<i32> {
+    Some(INSTRUMENT_NAMES.get()?.iter().position(|n| n == name)? as i32)
+}
 static POTION_NAMES: OnceLock<Vec<String>> = OnceLock::new();
 
 pub fn set_potions(names: Vec<String>) {

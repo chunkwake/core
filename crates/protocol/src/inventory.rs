@@ -320,6 +320,7 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         e.glint_override.is_some() && id_of(&crate::components::GLINT_OVERRIDE_COMPONENT) >= 0,
         e.potion.is_some() && id_of(&crate::components::POTION_CONTENTS_COMPONENT) >= 0,
         e.fireworks.is_some() && id_of(&crate::components::FIREWORKS_COMPONENT) >= 0,
+        e.instrument.is_some() && id_of(&crate::components::INSTRUMENT_COMPONENT) >= 0,
     ];
 
     w.var_int(parts.iter().filter(|&&p| p).count() as i32)
@@ -448,6 +449,10 @@ fn write_patch(w: &mut Writer, s: &Stack) {
             }
             w.bool(ex.trail).bool(ex.twinkle);
         }
+    }
+    if let (true, Some(instrument)) = (parts[22], e.instrument) {
+        w.var_int(id_of(&crate::components::INSTRUMENT_COMPONENT))
+            .var_int(instrument);
     }
 }
 

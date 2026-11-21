@@ -368,6 +368,8 @@ final class StackImpl extends ItemStack {
         /** fireworks: длительность полёта и взрывы. */
         Integer fireworkFlight;
         final List<Shot> fireworkShots = new ArrayList<>();
+        /** instrument: ключ инструмента (козий рог). */
+        String instrument;
 
         /** {@code custom_data} без пустого {@code PublicBukkitValues} (пустой PDC не сохраняется). */
         Map<String, Object> customOut() {
@@ -384,7 +386,8 @@ final class StackImpl extends ItemStack {
                     && stored == null && book == null && customOut().isEmpty()
                     && itemName == null && itemModel == null && tooltipStyle == null
                     && !hideTooltip && glintOverride == null
-                    && potion == null && fireworkFlight == null && fireworkShots.isEmpty();
+                    && potion == null && fireworkFlight == null && fireworkShots.isEmpty()
+                    && instrument == null;
         }
 
         Data copy() {
@@ -404,6 +407,7 @@ final class StackImpl extends ItemStack {
             d.potion = potion;
             d.fireworkFlight = fireworkFlight;
             d.fireworkShots.addAll(fireworkShots);
+            d.instrument = instrument;
             @SuppressWarnings("unchecked")
             Map<String, Object> c = (Map<String, Object>) PdcImpl.copy(custom);
             d.custom = c;
@@ -447,6 +451,7 @@ final class StackImpl extends ItemStack {
             if (j.has("hide_tooltip")) d.hideTooltip = j.get("hide_tooltip").getAsBoolean();
             if (j.has("glint_override")) d.glintOverride = j.get("glint_override").getAsBoolean();
             if (j.has("potion")) d.potion = j.get("potion").getAsString();
+            if (j.has("instrument")) d.instrument = j.get("instrument").getAsString();
             if (j.has("fireworks")) {
                 JsonObject fw = j.getAsJsonObject("fireworks");
                 if (fw.has("flight")) d.fireworkFlight = fw.get("flight").getAsInt();
@@ -490,6 +495,7 @@ final class StackImpl extends ItemStack {
             if (hideTooltip) j.addProperty("hide_tooltip", true);
             if (glintOverride != null) j.addProperty("glint_override", glintOverride);
             if (potion != null) j.addProperty("potion", potion);
+            if (instrument != null) j.addProperty("instrument", instrument);
             if (fireworkFlight != null || !fireworkShots.isEmpty()) {
                 JsonObject fw = new JsonObject();
                 fw.addProperty("flight", fireworkFlight == null ? 0 : fireworkFlight);
@@ -528,6 +534,7 @@ final class StackImpl extends ItemStack {
                     && Objects.equals(d.potion, potion)
                     && Objects.equals(d.fireworkFlight, fireworkFlight)
                     && d.fireworkShots.equals(fireworkShots)
+                    && Objects.equals(d.instrument, instrument)
                     && PdcImpl.Nbt.encode(d.customOut()).equals(PdcImpl.Nbt.encode(customOut()));
         }
 
@@ -535,7 +542,8 @@ final class StackImpl extends ItemStack {
         public int hashCode() {
             return Objects.hash(damage, enchants, name, lore, raw, stored, book, itemName,
                     itemModel, tooltipStyle, hideTooltip, glintOverride, potion,
-                    fireworkFlight, fireworkShots, PdcImpl.Nbt.encode(customOut()));
+                    fireworkFlight, fireworkShots, instrument,
+                    PdcImpl.Nbt.encode(customOut()));
         }
 
         @Override
@@ -925,6 +933,20 @@ final class StackImpl extends ItemStack {
                 throw new IllegalArgumentException("power must be 0..255, got " + power);
             }
             data.fireworkFlight = power;
+        }
+
+        // --- MusicInstrumentMeta ---
+
+        public org.bukkit.MusicInstrument getInstrument() {
+            if (data.instrument == null) {
+                return null;
+            }
+            NamespacedKey key = NamespacedKey.fromString(data.instrument);
+            return key == null ? null : org.bukkit.MusicInstrument.getByKey(key);
+        }
+
+        public void setInstrument(org.bukkit.MusicInstrument instrument) {
+            data.instrument = instrument == null ? null : instrument.getKey().toString();
         }
 
         public boolean hasDamage() { return data.damage > 0; }

@@ -6273,3 +6273,64 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## Паритет API, батч 5: instrument (MusicInstrumentMeta), ItemFactory.createItemStack
+
+### Уточнение по instrument
+
+Прошлая запись «instrument заблокирован реестром» была неверной:
+`instrument` уже входит в `RegistryData::SYNCHRONIZED` и грузится из
+`data/minecraft/instrument/`, просто его нет в `reports/registries.json`.
+Загрузчик динамических реестров писать не понадобилось — id берутся из
+`synchronized` (порядок записей = сетевой id).
+
+Реализовано:
+
+- `minecraft:instrument` в `Extra` (`instrument: Option<i32>`),
+  таблица имён `components::set_instruments` из реестра `instrument`;
+- патч: `varint(component) varint(instrumentId)` (Holder<Instrument>);
+- NBT `minecraft:instrument: "minecraft:ponder_goat_horn"`, JSON `"instrument"`;
+- `MusicInstrumentMeta.getInstrument/setInstrument` через
+  `MusicInstrument.getByKey`.
+
+### ItemFactory.createItemStack(String)
+
+Строка разбирается тем же парсером, что и `/give`:
+
+- Rust `world_request("itemstack <arg>")` → `commands::item::parse_item`
+  (компоненты, damage, potion) → `stack_nbt::to_line`;
+- Java `ItemFactoryImpl.createItemStack` → `StackImpl.parse(line)`;
+- неизвестный предмет → `IllegalArgumentException`.
+
+### Проверка ботом
+
+```
+instrument=minecraft:ponder_goat_horn factory=true/DIAMOND_SWORD
+{Slot:4b,components:{minecraft:instrument:"minecraft:ponder_goat_horn"},
+ count:1,id:"minecraft:goat_horn"}
+```
+
+`factory=true` означает, что `createItemStack("minecraft:diamond_sword[minecraft:custom_name="Factory Sword"]")`
+вернул меч с заданным custom_name.
+
+Rust-тест `stack_nbt::round_trip_with_components` проверяет instrument через
+`to_nbt`/`from_nbt`/`to_line`.
+
+В логе гейта больше нет `MusicInstrumentMeta.setInstrument` и
+`ItemFactory.createItemStack` предупреждений.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 108871 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 36296 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+CraftEngine P2: ok=263 bad=241
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

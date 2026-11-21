@@ -34,6 +34,18 @@ final class ItemFactoryImpl {
         return org.bukkit.Color.fromRGB(0xA06540);
     }
 
+    /** {@code ItemFactory#createItemStack(String)}: разбор как у {@code /give}. */
+    public ItemStack createItemStack(String input) {
+        if (input == null || input.isBlank()) {
+            throw new IllegalArgumentException("input cannot be empty");
+        }
+        ItemStack stack = StackImpl.parse(Bridge.world("itemstack " + input.trim()));
+        if (stack.getType() == Material.AIR) {
+            throw new IllegalArgumentException("Unknown item: " + input);
+        }
+        return stack;
+    }
+
     public boolean equals(ItemMeta a, ItemMeta b) {
         return a == b || data(a).equals(data(b));
     }
