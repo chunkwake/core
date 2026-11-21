@@ -5,6 +5,9 @@ import net.minecraft.world.level.block.state.BlockState;
 
 /** NMS {@code Level} (минимально, но с настоящей иерархией). */
 public class Level implements LevelAccessor, net.minecraft.world.level.LevelHeightAccessor {
+    /** Поле, которое ищет CraftEngine (LevelProxy#getRandom). */
+    private net.minecraft.util.RandomSource random;
+
     /** {@code Level.getWorld()} (CraftEngine). */
     public org.bukkit.craftbukkit.CraftWorld getWorld() {
         return null;

@@ -17,6 +17,9 @@ public final class BuiltInRegistries {
     public static final net.minecraft.core.Registry<Object> dataComponentType =
             new net.minecraft.core.SimpleRegistry<>();
     public static final net.minecraft.core.Registry<Object> DATA_COMPONENT_TYPE = dataComponentType;
+    public static final net.minecraft.core.Registry<Object> feature =
+            new net.minecraft.core.SimpleRegistry<>();
+    public static final net.minecraft.core.Registry<Object> FEATURE = feature;
 
     public static final DefaultedRegistry<Block> BLOCK = new SimpleDefaultedRegistry<>(
             net.minecraft.resources.Identifier.parse("minecraft:air"));

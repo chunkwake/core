@@ -5,6 +5,10 @@ import net.minecraft.world.level.chunk.LevelChunk;
 
 /** NMS {@code ServerChunkCache}. */
 public class ServerChunkCache {
+    /** {@code ServerChunkCache.blockChanged(BlockPos)} (CraftEngine). */
+    public void blockChanged(net.minecraft.core.BlockPos pos) {
+    }
+
     /** {@code ServerChunkCache.getGenerator()} (CraftEngine). */
     public net.minecraft.world.level.chunk.ChunkGenerator getGenerator() {
         return null;

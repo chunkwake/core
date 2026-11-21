@@ -15,6 +15,11 @@ public class PalettedContainer<T> implements PalettedContainerRO<T> {
         }
     }
 
+    /** {@code PalettedContainer.getAndSetUnchecked(int,int,int,T)} (CraftEngine). */
+    public T getAndSetUnchecked(int x, int y, int z, T value) {
+        return this.getAndSet(x, y, z, value);
+    }
+
     /** {@code PalettedContainer.getAndSet(int,int,int,T)} (CraftEngine). */
     public T getAndSet(int x, int y, int z, T value) {
         long key = (((long) x) & 0xFFFFL) << 32 | (((long) z) & 0xFFFFL);

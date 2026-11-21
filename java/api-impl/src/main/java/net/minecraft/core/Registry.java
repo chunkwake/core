@@ -15,6 +15,11 @@ public interface Registry<T> extends HolderLookup.RegistryLookup<T> {
 
     T getValue(Identifier id);
 
+    /** {@code Registry.asLookup()} (CraftEngine). */
+    default HolderLookup.RegistryLookup<T> asLookup() {
+        return this;
+    }
+
     /** {@code Registry.getKey(T)} (CraftEngine). */
     Identifier getKey(T value);
 

@@ -5,6 +5,11 @@ import net.minecraft.server.MinecraftServer;
 /** Минимальный NMS {@code DedicatedServer} (Voxy и другие проверяют класс). */
 public class DedicatedServer extends MinecraftServer {
     @Override
+    public boolean hasStopped() {
+        return super.hasStopped();
+    }
+
+    @Override
     public net.minecraft.core.RegistryAccess registries() {
         return super.registries();
     }

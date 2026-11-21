@@ -2,6 +2,11 @@ package net.minecraft.world.item;
 
 /** Минимальный NMS {@code Item} (id предмета). */
 public class Item {
+    /** {@code Item.canBeDepleted()} (CraftEngine). */
+    public boolean canBeDepleted() {
+        return true;
+    }
+
     /** Поле, которое ищет CraftEngine (ItemProxy#getBuiltInRegistryHolder). */
     public final net.minecraft.core.Holder.Reference<Item> builtInRegistryHolder =
             new net.minecraft.core.Holder.Reference<>(this);

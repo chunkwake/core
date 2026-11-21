@@ -4,4 +4,8 @@ package net.minecraft.world.inventory;
 public class CraftingContainer {
     public CraftingContainer() {
     }
+
+    public net.minecraft.world.item.crafting.RecipeHolder getCurrentRecipe() {
+        return null;
+    }
 }

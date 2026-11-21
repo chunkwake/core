@@ -4600,3 +4600,63 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine-прокси: 161/504 (было 157)
+
+Пробник `P2` по всем 504 прокси-интерфейсам:
+
+```
+было:  ok=157 bad=347
+стало: ok=161 bad=343
+```
+
+Полностью закрылись 4 прокси:
+
+```
+InventoryMenuProxy
+DyeColorProxy
+ImposterProtoChunkProxy
+PalettedContainerProxy
+```
+
+Добавлено:
+
+- `Registry.asLookup()`;
+- `BuiltInRegistries.feature`, `Registries.fluid` (+ uppercase-алиасы);
+- `MinecraftServer.hasStopped()` и override в `DedicatedServer`;
+- `WorldGenContext` + `ChunkMap.worldGenContext`;
+- `ServerChunkCache.blockChanged(BlockPos)`;
+- `ServerLevel.getEntityLookup()`;
+- `ServerGamePacketListenerImpl.connection` (алиас поля);
+- `Container.getCurrentRecipe()`, `CraftingContainer.getCurrentRecipe()`;
+- `Entity.vehicle`, `EntityTypes.fallingBlock` (+ алиас);
+- `AttributeSupplier.getBaseValue(Holder)`;
+- `AbstractContainerMenu.slots`, `InventoryMenu.slotsChanged(Container)`;
+- `DyeColor.textureDiffuseColors`;
+- `Item.canBeDepleted()`;
+- `AABB.setMaxX(double)`;
+- `MapItemSavedData.locked`;
+- `FluidState.createLegacyBlock()`;
+- `PalettedContainer.getAndSetUnchecked(...)`;
+- `Level.random` (поле);
+- `ChunkAccess`/`LevelChunk.canvas$getAllBlockEntities()`;
+- `ImposterProtoChunk.wrapped`;
+- `EntityDataSerializers.paintingVariant`.
+
+Остаётся 343 прокси, в основном отсутствующие NMS/CraftBukkit/Moonrise-классы.
+CraftEngine остаётся LOADERR.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 57676 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 14481 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

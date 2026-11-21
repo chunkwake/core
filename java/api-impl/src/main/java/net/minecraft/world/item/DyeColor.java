@@ -21,6 +21,7 @@ public enum DyeColor {
 
     /** Поля, которые ищет CraftEngine (textureDiffuseColor/fireworkColor). */
     private int textureDiffuseColor;
+    private final int[] textureDiffuseColors = new int[3];
     private int fireworkColor;
 
     private final int id;

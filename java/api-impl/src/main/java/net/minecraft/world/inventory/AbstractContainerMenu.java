@@ -2,6 +2,9 @@ package net.minecraft.world.inventory;
 
 /** Минимальный NMS {@code AbstractContainerMenu} (InvSee++). */
 public class AbstractContainerMenu {
+    /** Поле, которое ищет CraftEngine (getSlots). */
+    public final net.minecraft.core.NonNullList<Slot> slots = new net.minecraft.core.NonNullList<>();
+
     /** Поле, которое ищет CraftEngine (getCheckReachable). */
     private boolean checkReachable = true;
 

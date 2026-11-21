@@ -137,6 +137,9 @@ public class Entity implements net.minecraft.network.syncher.SyncedDataHolder {
         return this.boundingBox;
     }
 
+    /** Поле, которое ищет CraftEngine (EntityProxy#getVehicle). */
+    public Entity vehicle;
+
     /** Поле, которое ищет CraftEngine (EntityProxy#getPosition). */
     public Vec3 position = Vec3.ZERO;
 

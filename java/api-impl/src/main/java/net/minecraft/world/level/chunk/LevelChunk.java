@@ -29,6 +29,11 @@ public class LevelChunk extends ChunkAccess {
         this.sections = new LevelChunkSection[24];
     }
 
+    /** {@code LevelChunk.canvas$getAllBlockEntities()} (CraftEngine). */
+    public java.util.Collection<net.minecraft.world.level.block.entity.BlockEntity> canvas$getAllBlockEntities() {
+        return java.util.List.of();
+    }
+
     /** Поле, которое ищет CraftEngine (LevelChunkProxy#getPersistentDataContainer). */
     private net.minecraft.nbt.CompoundTag persistentDataContainer =
             new net.minecraft.nbt.CompoundTag();

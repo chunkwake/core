@@ -9,6 +9,15 @@ package net.minecraft.network.syncher;
  * BOOLEAN=10, VECTOR3=39, QUATERNION=40.
  */
 public final class EntityDataSerializers {
+    /** Поле, которое ищет CraftEngine (getPaintingVariant). */
+    public static final EntityDataSerializer<Object> paintingVariant =
+            new EntityDataSerializer<Object>() {
+                @Override
+                public int id() {
+                    return 0;
+                }
+            };
+
     public static final EntityDataSerializer<Byte> BYTE = serializer(0);
     public static final EntityDataSerializer<Integer> INT = serializer(1);
     public static final EntityDataSerializer<Long> LONG = serializer(2);
