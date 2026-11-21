@@ -5970,3 +5970,66 @@ CraftEngine P2: ok=261 bad=243 (без изменений: Java не трога�
 Через 5 секунд все стаки из лут-таблицы лежали в инвентаре: спавн
 item-сущностей, индекс «чанк -> предметы», тик и подбор работают после
 перехода на пересборку индекса по событию.
+
+## CraftEngine-прокси 263/504; EconomyShopGUI: DataComponents и OminousBottleAmplifier
+
+### Прокси-покрытие
+
+```
+было:  ok=261 bad=243
+стало: ok=263 bad=241
+```
+
+Полностью закрылись 2 прокси:
+
+```
+BonemealSourceProxy
+WorldlyContainerHolderProxy
+```
+
+Добавлено:
+
+- `net.minecraft.world.level.block.BonemealSource` (enum `INTERACTION/MOB`);
+- `BonemealableBlock` приведён к 26.3: параметры `BonemealSource`,
+  вложенный `Type` и `getType()` (раньше вместо `BonemealSource` был
+  `Object`, из-за чего прокси не связывался);
+- `net.minecraft.world.WorldlyContainerHolder#getContainer(BlockState,
+  LevelAccessor, BlockPos)`.
+
+CraftEngine при загрузке прошёл дальше: раньше падал на
+`BonemealableBlockProxy`, теперь — на `BlockReflections.<clinit>`,
+которому нужен `net.minecraft.world.level.block.state.BlockBehaviour$BlockStateBase`
+с полями-кэшами 26.3 (`lightEmission`, `useShapeForLightOcclusion`,
+`isAir`, `pushReaction`, `mapColor`, ...). Это уже не «пустой класс»:
+CE мутирует эти поля при инъекции блоков, т.е. нужен реальный
+NMS/CraftBukkit-слой, а не заглушки. CraftEngine остаётся LOADERR.
+
+Проверка ускорена: `P3` (маленький класс-пробник) грузит конкретный
+класс CE с нашим jar и печатает корневую причину — не нужно поднимать
+сервер на каждую итерацию.
+
+### EconomyShopGUI
+
+- `DataComponents` дополнен полями 26.3: `MAX_STACK_SIZE`, `MAX_DAMAGE`,
+  `DAMAGE`, `UNBREAKABLE`, `CUSTOM_NAME`, ... , `CONTAINER_LOOT`
+  (57 констант; P3 на `v26_3$Components` теперь печатает OK);
+- `OminousBottleAmplifier(int)` (record) добавлен.
+
+После этого в логе гейта пропал `WARN Failed to set the ominous-strength`
+и ошибки `DataComponents does not have member field ...`.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 79115 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 11320 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+CraftEngine P2: ok=263 bad=241
+Java-тесты: 56
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
