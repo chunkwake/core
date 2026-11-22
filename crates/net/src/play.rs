@@ -53,7 +53,7 @@ pub trait PluginHooks: Send + Sync {
     /// Команда без `/`; `true` — команда известна плагинам.
     fn command(&self, uuid: Uuid, line: &str) -> oneshot::Receiver<bool>;
     /// Тик сервера (20/с).
-    fn tick(&self);
+    fn tick(&self, duration_ms: f64);
     /// Есть ли у плагинов слушатели события.
     fn listens(&self, kind: Event) -> bool;
     /// Событие с ответом (формат — в [`Event`]); `None` — слушателей нет.
@@ -12523,7 +12523,7 @@ impl PlayPlan {
                 self.advance_time();
                 return;
             }
-            self.run_phases(None);
+            self.run_phases(None, started);
             self.recompute_work();
             self.record_tick(started, None);
             return;
@@ -12538,7 +12538,7 @@ impl PlayPlan {
             self.record_tick(started, Some(&watch));
             return;
         }
-        self.run_phases(Some(&mut watch));
+        self.run_phases(Some(&mut watch), started);
         // Работа кончилась? Следующий тик снова станет простым: пересчёт
         // здесь, потому что только здесь видны все очереди после фаз.
         self.recompute_work();
@@ -12547,7 +12547,11 @@ impl PlayPlan {
     }
 
     /// Все подсистемы за тик; с профилем — с отметкой времени после каждой.
-    fn run_phases(&self, mut watch: Option<&mut chunkwake_metrics::profile::Stopwatch>) {
+    fn run_phases(
+        &self,
+        mut watch: Option<&mut chunkwake_metrics::profile::Stopwatch>,
+        tick_started: std::time::Instant,
+    ) {
         use chunkwake_metrics::profile::*;
         let lap = |phase: usize, watch: &mut Option<&mut chunkwake_metrics::profile::Stopwatch>| {
             if let Some(w) = watch.as_deref_mut() {
@@ -12589,7 +12593,7 @@ impl PlayPlan {
         self.tick_player_triggers();
         lap(PH_MOVES, &mut watch);
         if let Some(h) = self.hooks() {
-            h.tick();
+            h.tick(tick_started.elapsed().as_secs_f64() * 1000.0);
         }
         lap(PH_PLUGINS, &mut watch);
         self.advance_time();

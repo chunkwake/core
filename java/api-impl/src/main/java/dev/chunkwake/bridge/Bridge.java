@@ -13,6 +13,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import static java.lang.foreign.ValueLayout.ADDRESS;
+import static java.lang.foreign.ValueLayout.JAVA_DOUBLE;
 import static java.lang.foreign.ValueLayout.JAVA_INT;
 import static java.lang.foreign.ValueLayout.JAVA_LONG;
 
@@ -64,7 +65,8 @@ public final class Bridge {
     static final int DOWN_SEND_PACKET = 33;
     static final int ARG_DATA_DIR = 34;
     static final int ARG_DATA_DIR_LEN = 35;
-    static final int SLOTS = 36;
+    static final int FLAG_TICK_EVENTS = 36;
+    static final int SLOTS = 37;
 
     /** События с ответом ({@code chunkwake_net::live::Event}). */
     static final int EVENT_DAMAGE = 1, EVENT_DEATH = 2, EVENT_DROP = 3, EVENT_PICKUP = 4, EVENT_GAME_MODE = 5,
@@ -152,7 +154,7 @@ public final class Bridge {
 
         up(linker, UP_ENABLE, "enable", FunctionDescriptor.of(JAVA_INT));
         up(linker, UP_DISABLE, "disable", FunctionDescriptor.of(JAVA_INT));
-        up(linker, UP_TICK, "tick", FunctionDescriptor.ofVoid());
+        up(linker, UP_TICK, "tick", FunctionDescriptor.ofVoid(JAVA_DOUBLE));
         up(linker, UP_JOIN, "join", FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_INT));
         up(linker, UP_QUIT, "quit", FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG));
         up(linker, UP_BLOCK_BREAK, "blockBreak", FunctionDescriptor.of(JAVA_INT,
@@ -273,12 +275,16 @@ public final class Bridge {
         }
     }
 
-    static void tick() {
+    static void tick(double durationMs) {
+        long started = System.nanoTime();
         try {
             table.setAtIndex(JAVA_LONG, FLAG_PACKETS,
                     ProtocolBridge.hasSending() ? 1L : 0L);
+            int tickNumber = TickEvents.start(server.api.getPluginManager());
             server.scheduler().tick();
             ChunkEvents.tick(server.api.getPluginManager());
+            double javaMs = (System.nanoTime() - started) / 1_000_000.0;
+            TickEvents.end(server.api.getPluginManager(), tickNumber, durationMs + javaMs);
         } catch (Throwable t) {
             Logger.getLogger("Chunkwake").log(Level.SEVERE, "tick failed", t);
         }

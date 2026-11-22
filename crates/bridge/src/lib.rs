@@ -68,8 +68,9 @@ enum Slot {
     DownSendPacket = 33,
     ArgDataDir = 34,
     ArgDataDirLen = 35,
+    FlagTickEvents = 36,
 }
-const SLOTS: usize = 36;
+const SLOTS: usize = 37;
 
 /// Буфер ответа на событие (смерть с полным инвентарём укладывается с запасом).
 const EVENT_REPLY_CAP: usize = 64 << 10;
@@ -86,7 +87,7 @@ static HOST: OnceLock<Weak<PlayPlan>> = OnceLock::new();
 
 enum Call {
     Disable(std::sync::mpsc::Sender<bool>),
-    Tick,
+    Tick(f64),
     Join(Uuid, String),
     Quit(Uuid),
     BlockBreak(Uuid, [i32; 3], String, oneshot::Sender<bool>),
@@ -310,7 +311,7 @@ fn run(table: &'static Table, rx: mpsc::Receiver<Call>, tick_queued: &AtomicBool
     type CommandFn = extern "C" fn(i64, i64, *const u8, i32) -> i32;
     let (tick, join, quit, block_break, command, event) = unsafe {
         (
-            up::<extern "C" fn()>(table, Slot::UpTick),
+            up::<extern "C" fn(f64)>(table, Slot::UpTick),
             up::<JoinFn>(table, Slot::UpJoin),
             up::<QuitFn>(table, Slot::UpQuit),
             up::<BreakFn>(table, Slot::UpBlockBreak),
@@ -330,9 +331,9 @@ fn run(table: &'static Table, rx: mpsc::Receiver<Call>, tick_queued: &AtomicBool
                 let _ = reply.send(ok);
                 break;
             }
-            Call::Tick => {
+            Call::Tick(duration_ms) => {
                 tick_queued.store(false, Ordering::Release);
-                tick();
+                tick(duration_ms);
             }
             Call::Join(u, name) => {
                 let (hi, lo) = id(u);
@@ -458,12 +459,12 @@ impl PluginHooks for Bridge {
         }
     }
 
-    fn tick(&self) {
+    fn tick(&self, duration_ms: f64) {
         // Без задач планировщика граница не пересекается вовсе.
-        if get(self.table, Slot::FlagHasTasks) != 0
+        if (get(self.table, Slot::FlagHasTasks) != 0 || get(self.table, Slot::FlagTickEvents) != 0)
             && !self.tick_queued.swap(true, Ordering::AcqRel)
         {
-            let _ = self.tx.send(Call::Tick);
+            let _ = self.tx.send(Call::Tick(duration_ms));
         }
     }
 }

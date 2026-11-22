@@ -117,6 +117,23 @@ impl<'a> Context<'a> {
         token: &str,
         allow_entities: bool,
     ) -> Result<Vec<Target>, args::ArgError> {
+        let out = self.select_any(source, token, allow_entities)?;
+        if out.is_empty() {
+            return Err(args::ArgError::new("argument.entity.notfound.player"));
+        }
+        Ok(out)
+    }
+
+    /// Как [`Self::select`], но пустой результат - это `Ok(vec![])`.
+    ///
+    /// Нужен условным командам (`execute if entity`): отсутствие целей -
+    /// не ошибка аргумента, а ложное условие.
+    pub fn select_any(
+        &self,
+        source: &Source,
+        token: &str,
+        allow_entities: bool,
+    ) -> Result<Vec<Target>, args::ArgError> {
         let selector = Selector::parse(token)?;
         if selector.entities && !allow_entities && selector.kind != selector::Kind::AllEntities {
             return Err(args::ArgError::new("argument.entity.invalid"));
@@ -141,11 +158,7 @@ impl<'a> Context<'a> {
                     })
                 })
         });
-        let out = selector.apply(me.as_ref(), &targets, |t| t.tags.clone())?;
-        if out.is_empty() {
-            return Err(args::ArgError::new("argument.entity.notfound.player"));
-        }
-        Ok(out)
+        selector.apply(me.as_ref(), &targets, |t| t.tags.clone())
     }
 
     /// Первая цель по селектору или `None`.

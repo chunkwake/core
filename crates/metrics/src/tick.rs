@@ -305,6 +305,30 @@ impl TickStats {
             window.tps, window.mspt_avg
         )
     }
+
+    /// `/tick query`: TPS и перцентили времени тика, как у Paper.
+    pub fn query_line(&self) -> String {
+        let Some(window) = self.window(PERCENTILE_TICKS) else {
+            return format!(
+                "TPS: {:.1} MSPT: 0.0 p50: 0.0 p95: 0.0 p99: 0.0 max: 0.0 interval: {:.1} ms",
+                self.rate, self.interval
+            );
+        };
+        let interval = if self.last_gap > 0.0 {
+            self.last_gap
+        } else {
+            self.interval
+        };
+        format!(
+            "TPS: {:.1} MSPT: {:.1} p50: {:.1} p95: {:.1} p99: {:.1} max: {:.1} interval: {interval:.1} ms",
+            window.tps,
+            window.mspt_avg,
+            window.mspt_p50,
+            window.mspt_p95,
+            window.mspt_p99,
+            window.mspt_max
+        )
+    }
 }
 
 /// Статистика окна.
@@ -350,6 +374,19 @@ mod tests {
         assert!((window.tps - 20.0).abs() < 1e-9);
         assert!((window.mspt_avg - 5.0).abs() < 1e-9);
         assert_eq!(stats.line(), "TPS: 20.0 MSPT: 5.0 interval: 50.0 ms");
+    }
+
+    /// `/tick query`: перцентили времени тика, как в Paper.
+    #[test]
+    fn query_reports_percentiles() {
+        let mut stats = TickStats::new();
+        for i in 0..100 {
+            stats.record(if i >= 98 { 20.0 } else { 1.0 }, 50.0);
+        }
+        assert_eq!(
+            stats.query_line(),
+            "TPS: 20.0 MSPT: 1.4 p50: 1.0 p95: 1.0 p99: 20.0 max: 20.0 interval: 50.0 ms"
+        );
     }
 
     /// `/mspt`: окно берёт только последние тики.

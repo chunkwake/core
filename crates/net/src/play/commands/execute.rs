@@ -524,8 +524,15 @@ pub(super) fn execute(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
 fn run_chain(ctx: &Context<'_>, exec: &Exec, rest: &str, budget: &mut usize) -> Outcome {
     let mut exec = exec.clone();
     let mut rest = rest.trim().to_owned();
+    // Последнее успешно проверенное условие: Some(count) для условий с
+    // количеством (entity/items/blocks), Some(None) для boolean-условий.
+    // Терминальный `/execute if ...` возвращает "Test passed [count: N]".
+    let mut condition: Option<Option<i64>> = None;
     loop {
         if rest.is_empty() {
+            if let Some(count) = condition {
+                return conditional_outcome(true, count);
+            }
             return Outcome::Feedback(super::dispatch::error_component(
                 "/execute <as|at|positioned|rotated|facing|in|if|unless|run> …",
             ));
@@ -736,8 +743,16 @@ fn run_chain(ctx: &Context<'_>, exec: &Exec, rest: &str, budget: &mut usize) -> 
                 let checked = match kind {
                     "entity" => {
                         let (token, next) = split(tail2);
-                        let ok = !token.is_empty() && ctx.select(&exec.source, token, true).is_ok();
-                        Ok((ok, next))
+                        if token.is_empty() {
+                            return Outcome::Feedback(error_component(
+                                "/execute if|unless entity <targets> …",
+                            ));
+                        }
+                        let count = match ctx.select_any(&exec.source, token, true) {
+                            Ok(list) => list.len(),
+                            Err(error) => return Outcome::Feedback(error.component()),
+                        };
+                        Ok((count > 0, Some(count as i64), next))
                     }
                     "block" => {
                         let (x, tail3) = split(tail2);
@@ -760,29 +775,34 @@ fn run_chain(ctx: &Context<'_>, exec: &Exec, rest: &str, budget: &mut usize) -> 
                                 .block(pos)
                                 .is_some_and(|state| block_matches(ctx, state, block))
                         });
-                        Ok((ok, next))
+                        Ok((ok, None, next))
                     }
-                    "score" => Ok(score_compare(ctx, tail2)),
-                    "biome" => biome_test(ctx, &exec, tail2),
-                    "blocks" => blocks_test(ctx, &exec, tail2),
-                    "data" => data_test(ctx, &exec, tail2),
-                    "loaded" => loaded_test(ctx, &exec, tail2),
-                    "items" => items_test(ctx, &exec, tail2),
-                    "slots" => slots_test(ctx, &exec, tail2),
+                    "score" => {
+                        let (ok, next) = score_compare(ctx, tail2);
+                        Ok((ok, None, next))
+                    }
+                    "biome" => biome_test(ctx, &exec, tail2).map(|(ok, next)| (ok, None, next)),
+                    "blocks" => blocks_test(ctx, &exec, tail2).map(|(ok, next)| (ok, None, next)),
+                    "data" => data_test(ctx, &exec, tail2).map(|(ok, next)| (ok, None, next)),
+                    "loaded" => loaded_test(ctx, &exec, tail2).map(|(ok, next)| (ok, None, next)),
+                    "items" => items_test(ctx, &exec, tail2).map(|(ok, next)| (ok, None, next)),
+                    "slots" => slots_test(ctx, &exec, tail2).map(|(ok, next)| (ok, None, next)),
                     _ => {
                         return Outcome::Feedback(error_component(
                             "/execute if|unless <entity|block|score|biome|blocks|data|loaded|items|slots> …",
                         ));
                     }
                 };
-                let (ok, next) = match checked {
+                let (ok, count, next) = match checked {
                     Ok(pair) => pair,
                     Err(outcome) => return outcome,
                 };
-                // Условие не выполнено — хвост не запускаем.
+                // Условие не выполнено — хвост не запускаем, но сообщаем
+                // "Test failed", как ваниль/Paper.
                 if ok != want {
-                    return Outcome::Silent;
+                    return conditional_outcome(false, count);
                 }
+                condition = Some(count);
                 rest = next.to_owned();
                 continue;
             }
@@ -793,6 +813,19 @@ fn run_chain(ctx: &Context<'_>, exec: &Exec, rest: &str, budget: &mut usize) -> 
             }
         }
     }
+}
+
+/// Результат терминального `/execute if|unless`: Paper печатает
+/// "Test passed [count: N]" или "Test failed [count: N]".
+fn conditional_outcome(pass: bool, count: Option<i64>) -> Outcome {
+    let key = match (pass, count.is_some()) {
+        (true, true) => "commands.execute.conditional.pass_count",
+        (true, false) => "commands.execute.conditional.pass",
+        (false, true) => "commands.execute.conditional.fail_count",
+        (false, false) => "commands.execute.conditional.fail",
+    };
+    let with = count.map(|n| vec![json!(n)]).unwrap_or_default();
+    Outcome::Feedback(translate(key, with))
 }
 
 /// `execute summon <entity> …`: ставит сущность и выполняет хвост от её имени.

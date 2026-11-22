@@ -323,6 +323,10 @@ final class PluginManagerImpl {
             mask |= Bridge.listenBit(Bridge.EVENT_EDIT_BOOK);
         }
         Bridge.setFlag(Bridge.FLAG_LISTENERS, mask);
+        long tickFlag = has(com.destroystokyo.paper.event.server.ServerTickEndEvent.getHandlerList())
+                || has(com.destroystokyo.paper.event.server.ServerTickStartEvent.getHandlerList())
+                        ? 1L : 0L;
+        Bridge.setFlag(Bridge.FLAG_TICK_EVENTS, tickFlag);
     }
 
     private static boolean has(HandlerList h) {

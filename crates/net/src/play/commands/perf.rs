@@ -93,6 +93,11 @@ impl PlayPlan {
         self.ticks.lock().unwrap().line()
     }
 
+    /// `/tick query`: TPS и p50/p95/p99 времени тика.
+    pub fn tick_query_line(&self) -> String {
+        self.ticks.lock().unwrap().query_line()
+    }
+
     /// `None` — профилировщик уже запущен.
     pub fn start_debug_profile(&self) -> bool {
         let mut slot = self.debug_profile.lock().unwrap();

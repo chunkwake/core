@@ -179,7 +179,7 @@ fn execute_if_block_checks_state_properties() {
             &plan,
             &format!("execute if block 4 {y} 4 minecraft:chest[facing=south] run seed")
         )
-        .is_empty()
+        .contains("commands.execute.conditional.fail")
     );
     assert!(
         run(
@@ -205,7 +205,7 @@ fn execute_if_block_checks_state_properties() {
             &plan,
             &format!("execute if block 4 {y} 4 minecraft:chest[facing=north] run seed")
         )
-        .is_empty()
+        .contains("commands.execute.conditional.fail")
     );
     assert!(
         run(
@@ -284,6 +284,45 @@ fn summon_applies_can_break_doors() {
         "execute if entity @e[type=minecraft:zombie] run say zombie",
     );
     assert!(has.contains("zombie"), "{has}");
+}
+
+#[test]
+fn execute_if_entity_is_terminal_and_reports_count() {
+    let plan = world!();
+    let y = plan.spawn_point()[1].floor() as i32;
+    assert!(
+        run(&plan, &format!("summon minecraft:cow 8 {y} 8")).contains("commands.summon.success")
+    );
+
+    let passed = run(&plan, "execute if entity @e[type=minecraft:cow]");
+    assert!(
+        passed.contains("commands.execute.conditional.pass_count"),
+        "{passed}"
+    );
+    assert!(passed.contains('1'), "{passed}");
+
+    let failed = run(&plan, "execute if entity @e[type=minecraft:zombie]");
+    assert!(
+        failed.contains("commands.execute.conditional.fail"),
+        "{failed}"
+    );
+    assert!(!failed.contains("pass"), "{failed}");
+
+    let unless = run(&plan, "execute unless entity @e[type=minecraft:zombie]");
+    assert!(
+        unless.contains("commands.execute.conditional.pass"),
+        "{unless}"
+    );
+
+    let blocked = run(
+        &plan,
+        "execute if entity @e[type=minecraft:zombie] run say zombie",
+    );
+    assert!(!blocked.contains("zombie"), "{blocked}");
+    assert!(
+        blocked.contains("commands.execute.conditional.fail"),
+        "{blocked}"
+    );
 }
 
 #[test]
@@ -794,7 +833,10 @@ fn execute_slots_and_summon() {
         &plan,
         &format!("execute if slots block 30 {y} 30 container.0 minecraft:cobblestone run say yes"),
     );
-    assert!(empty.is_empty(), "{empty}");
+    assert!(
+        empty.contains("commands.execute.conditional.fail"),
+        "{empty}"
+    );
     let placed = run(
         &plan,
         &format!("loot replace block 30 {y} 30 0 loot minecraft:blocks/stone"),
@@ -813,7 +855,10 @@ fn execute_slots_and_summon() {
         &plan,
         &format!("execute if slots block 30 {y} 30 container.0 minecraft:dirt run say yes"),
     );
-    assert!(wrong.is_empty(), "{wrong}");
+    assert!(
+        wrong.contains("commands.execute.conditional.fail"),
+        "{wrong}"
+    );
 
     // `execute summon`: моб появляется, хвост идёт от его имени.
     let summon = run(&plan, "execute summon minecraft:cow run say moo");
@@ -835,7 +880,7 @@ fn execute_conditions_height_and_numberformat() {
     assert!(biome.contains("yes"), "{biome}");
 
     let cold = run(&plan, &format!("execute if loaded 80 {y} 80 run say yes"));
-    assert!(cold.is_empty(), "{cold}");
+    assert!(cold.contains("commands.execute.conditional.fail"), "{cold}");
     assert!(
         run(&plan, &format!("setblock 80 {y} 80 minecraft:stone"))
             .contains("commands.setblock.success")
@@ -864,7 +909,10 @@ fn execute_conditions_height_and_numberformat() {
         &plan,
         &format!("execute if blocks 10 {y} 10 11 {y} 10 20 {y} 10 all run say yes"),
     );
-    assert!(diverged.is_empty(), "{diverged}");
+    assert!(
+        diverged.contains("commands.execute.conditional.fail"),
+        "{diverged}"
+    );
     let masked = run(
         &plan,
         &format!("execute if blocks 10 {y} 10 11 {y} 10 20 {y} 10 masked run say yes"),
@@ -891,7 +939,10 @@ fn execute_conditions_height_and_numberformat() {
         &plan,
         "execute if data storage minecraft:foo Foo run say yes",
     );
-    assert!(stored.is_empty(), "{stored}");
+    assert!(
+        stored.contains("commands.execute.conditional.fail"),
+        "{stored}"
+    );
 
     let uuid = chunkwake_net::Uuid::from_u128(21);
     plan.present_player(uuid, "Ada");
@@ -905,19 +956,25 @@ fn execute_conditions_height_and_numberformat() {
         &plan,
         "execute if items entity Ada weapon.offhand minecraft:stone run say yes",
     );
-    assert!(off.is_empty(), "{off}");
+    assert!(off.contains("commands.execute.conditional.fail"), "{off}");
 
     assert!(run(&plan, "scoreboard objectives add obj dummy").contains("success"));
     assert!(run(&plan, "scoreboard players set Ada obj 3").contains("success"));
     let matched = run(&plan, "execute if score Ada obj matches 1..5 run say yes");
     assert!(matched.contains("yes"), "{matched}");
     let outside = run(&plan, "execute if score Ada obj matches 10.. run say yes");
-    assert!(outside.is_empty(), "{outside}");
+    assert!(
+        outside.contains("commands.execute.conditional.fail"),
+        "{outside}"
+    );
     let missing = run(
         &plan,
         "execute if score Nobody obj matches 1..5 run say yes",
     );
-    assert!(missing.is_empty(), "{missing}");
+    assert!(
+        missing.contains("commands.execute.conditional.fail"),
+        "{missing}"
+    );
 
     let raised = run(
         &plan,

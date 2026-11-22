@@ -163,12 +163,12 @@ pub(super) fn tick(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         None => {
             // `/tick` без подкоманды — ванильный `query`.
             return Outcome::Feedback(serde_json::json!({
-                "text": ctx.plan.tick_meter_line(),
+                "text": ctx.plan.tick_query_line(),
             }));
         }
     };
     match sub {
-        "query" => Outcome::Feedback(serde_json::json!({"text": ctx.plan.tick_meter_line()})),
+        "query" => Outcome::Feedback(serde_json::json!({"text": ctx.plan.tick_query_line()})),
         "rate" => {
             let Some(token) = input.word() else {
                 return usage("/tick rate <rate>");
