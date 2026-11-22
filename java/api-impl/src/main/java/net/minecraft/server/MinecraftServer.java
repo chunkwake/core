@@ -63,6 +63,11 @@ public class MinecraftServer {
         return SERVER;
     }
 
+    /** Paper: {@code SharedConstants.getCurrentVersion().name()} = "26.3". */
+    public String getServerVersion() {
+        return VERSION;
+    }
+
     public net.minecraft.server.network.ServerConnection getConnection() {
         return this.connection;
     }

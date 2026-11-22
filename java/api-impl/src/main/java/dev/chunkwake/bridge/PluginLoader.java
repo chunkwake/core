@@ -240,10 +240,21 @@ final class PluginLoader extends io.papermc.paper.plugin.entrypoint.classloader.
     /** `plugin.yml` (или `paper-plugin.yml`) из jar. */
     static PluginDescriptionFile describe(File jar) throws IOException, InvalidDescriptionException {
         try (JarFile jf = new JarFile(jar)) {
-            var entry = jf.getEntry("plugin.yml");
-            if (entry == null) {
-                entry = jf.getEntry("paper-plugin.yml");
+            // Paper: если в jar есть paper-plugin.yml, он полностью заменяет
+            // plugin.yml. Именно так MiniMOTD выбирает MiniMOTDPaper вместо
+            // Spigot-заглушки MiniMOTDStub, которая отключается с "switch to Paper".
+            var paper = jf.getEntry("paper-plugin.yml");
+            if (paper != null) {
+                try (InputStream in = jf.getInputStream(paper)) {
+                    PluginDescriptionFile desc = new PluginDescriptionFile(in);
+                    if (desc.getMain() != null && !desc.getMain().isBlank()) {
+                        return desc;
+                    }
+                } catch (InvalidDescriptionException ignored) {
+                    // Неполный paper-plugin.yml: не теряем плагин, пробуем plugin.yml.
+                }
             }
+            var entry = jf.getEntry("plugin.yml");
             if (entry == null) {
                 throw new InvalidDescriptionException("no plugin.yml");
             }
@@ -276,6 +287,60 @@ final class PluginLoader extends io.papermc.paper.plugin.entrypoint.classloader.
     @Override
     public PluginMeta getConfiguration() {
         return description;
+    }
+
+    /**
+     * Ресурсы плагина: сначала его собственный jar, затем родитель.
+     *
+     * <p>Стандартный {@link URLClassLoader#getResource} идёт parent-first, а у нас
+     * в родителях лежит загрузчик ViaVersion. Из-за этого
+     * {@code getResource("plugin.yml")} у VoxyServerSide возвращал
+     * {@code ViaVersion.jar!/plugin.yml} (там нет lss-minecraft-dependency), и
+     * плагин отключался с «version is missing». Paper изолирует ресурсы
+     * плагинов, поэтому ищем в своём jar первыми.
+     */
+    @Override
+    public URL getResource(String name) {
+        URL own = findResource(name);
+        if (own != null) {
+            return own;
+        }
+        ClassLoader parent = getParent();
+        return parent == null ? null : parent.getResource(name);
+    }
+
+    @Override
+    public java.io.InputStream getResourceAsStream(String name) {
+        URL own = findResource(name);
+        if (own != null) {
+            try {
+                return own.openStream();
+            } catch (IOException e) {
+                return null;
+            }
+        }
+        ClassLoader parent = getParent();
+        return parent == null ? null : parent.getResourceAsStream(name);
+    }
+
+    @Override
+    public java.util.Enumeration<URL> getResources(String name) throws IOException {
+        List<URL> found = new ArrayList<>();
+        java.util.Enumeration<URL> own = findResources(name);
+        while (own.hasMoreElements()) {
+            found.add(own.nextElement());
+        }
+        ClassLoader parent = getParent();
+        if (parent != null) {
+            java.util.Enumeration<URL> rest = parent.getResources(name);
+            while (rest.hasMoreElements()) {
+                URL url = rest.nextElement();
+                if (!found.contains(url)) {
+                    found.add(url);
+                }
+            }
+        }
+        return java.util.Collections.enumeration(found);
     }
 
     @Override

@@ -32,6 +32,11 @@ dependencies {
     "runtimeOnly"("org.xerial:sqlite-jdbc:3.45.3.0")
     // ASM: Paper держит его в libraries; CraftEngine генерирует блоки через ASM.
     "runtimeOnly"("org.ow2.asm:asm:9.8")
+    // geantyref: Paper держит его на classpath сервера. Configurate
+    // (в том числе встроенный в MiniMOTD) грузит
+    // io.leangen.geantyref.TypeToken из родительского загрузчика; без него
+    // MiniMOTDPaper падает с NoClassDefFoundError до чтения конфига.
+    "runtimeOnly"("io.leangen.geantyref:geantyref:1.3.16")
 }
 
 tasks.named<Jar>("jar") {
@@ -153,4 +158,6 @@ dependencies {
 
 tasks.named<Test>("test") {
     useJUnitPlatform()
+    // LegacyEnums правит Class.enumConstantDirectory (java.base/java.lang).
+    jvmArgs("--add-opens=java.base/java.lang=ALL-UNNAMED")
 }

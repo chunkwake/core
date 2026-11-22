@@ -313,6 +313,7 @@ final class ChunkwakeServer {
     /** Загружает jar из каталога и включает плагины. Возвращает число включённых. */
     int loadAndEnable(File dir) {
         pluginsDir = dir;
+        LegacyEnums.install();
         if (Bukkit.getServer() == null) {
             Bukkit.setServer(api);
         }

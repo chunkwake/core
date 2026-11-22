@@ -6789,3 +6789,91 @@ LevelledMobs — `EntityType.valueOf("ENDER_CRYSTAL")`). Значит это **�
 
 Гейты не менялись (код возвращён к закоммиченному): 79/82, 26/27,
 P2 263/241, PANICS 0.
+
+## Закрыты MiniMOTD, LevelledMobs и VoxyServerSide: 82/82
+
+После oracle-прогона выяснилось, что все три — наши дыры, а не «плагины
+сами отключаются». Три отдельные причины:
+
+### 1. `paper-plugin.yml` должен заменять `plugin.yml`
+
+MiniMOTD — dual-format jar. На Paper он грузит `MiniMOTDPaper` из
+`paper-plugin.yml`, а `MiniMOTDStub` из `plugin.yml` — заглушка для Spigot,
+которая намеренно печатает «switch to Paper» и отключается. Наш
+`PluginLoader.describe` предпочитал `plugin.yml`; теперь приоритет у
+`paper-plugin.yml` (с откатом на `plugin.yml`, если в paper-файле нет `main`).
+
+### 2. geantyref на classpath сервера
+
+После правильного entrypoint MiniMOTD падал в Configurate:
+`NoClassDefFoundError: io/leangen/geantyref/TypeToken`. Paper держит
+`io.leangen.geantyref:geantyref:1.3.16` в libraries сервера; добавлен
+`runtimeOnly` в `api-impl/build.gradle.kts` (jar есть в `java/dist/libs`).
+
+### 3. Изоляция ресурсов плагинов + NMS `getServerVersion()`
+
+VoxyServerSide 0.21.1 собран под MC 26.1–26.2 и корректно отказывается
+работать на 26.3 **и на Paper, и у нас** (проверено oracle-прогоном).
+Обновлён на 0.22.0 для 26.3:
+`sha512=cdd39ee272b100f5c7d1dc93dd77e5d87e189a49be33b657e78551ef185873fd7e8c5b0741ab9f2a6eeaeb322b38a1c265f13234ec45fbeb2e9d6ad97356a373`.
+
+Дальше вскрылись две наших проблемы:
+
+- `getResource("plugin.yml")` у плагина возвращал
+  `ViaVersion.jar!/plugin.yml` (в родителях лежит загрузчик Via, а
+  `URLClassLoader.getResource` идёт parent-first). Voxy читал оттуда
+  `lss-minecraft-dependency`, не находил и отключался. `PluginLoader`
+  теперь ищет ресурсы сначала в собственном jar (как изолирует Paper),
+  затем у родителя; переопределены `getResource`, `getResourceAsStream`,
+  `getResources`.
+- Voxy 0.22.0 вызывает `MinecraftServer.getServerVersion()`. Добавлена
+  заглушка, возвращающая `"26.3"` (Paper: `SharedConstants
+  .getCurrentVersion().name()`).
+
+### 4. Legacy-имена enum'ов Bukkit
+
+LevelledMobs вызывает `EntityType.valueOf("ENDER_CRYSTAL")`,
+`"ENDER_SIGNAL"` и т.п. Paper принимает старые имена в рантайме, публичные
+paper-api jar — нет. `LegacyEnums.install()` (вызывается до загрузки
+плагинов) добавляет 33 алиаса из Paper `FieldRename` (`entity_type`) в
+`Class.enumConstantDirectory`: `ENDER_CRYSTAL -> END_CRYSTAL`,
+`ENDER_SIGNAL -> EYE_OF_ENDER`, `PIG_ZOMBIE -> ZOMBIFIED_PIGLIN`,
+`BOAT -> OAK_BOAT`, ... Идемпотентно, с `--add-opens=java.base/java.lang`
+для тестов.
+
+### Проверка
+
+Отдельный стенд из четырёх jar'ов (MiniMOTD 2.2.5, LevelledMobs 4.5.3.2,
+VoxyServerSide 0.22.0, probe):
+
+```
+[MiniMOTD] Enabling MiniMOTD v2.2.5
+[MiniMOTD] ... enabled in 118 ms
+[LevelledMobs] Enabling LevelledMobs v4.5.3.2 b159
+[LevelledMobs] Start-up complete (took 237ms)
+[VoxyServerSide] Enabling VoxyServerSide v0.22.0
+VoxyServerSide enabled in 383 ms
+plugins: 4 of 4 enabled
+```
+
+Полные гейты (тот же набор 82/27):
+
+```
+расширенный: 82 of 82 enabled in 54429 ms
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: enabled 27 plugin(s) in 12983 ms; PANICS: 0
+Java-тесты: 62 (LegacyEnumsTest, PluginLoaderDescribeTest + прежние)
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
+
+Единственный оставшийся LOADERR — CraftEngine 26.9.2: его
+`BlockReflections` требует `BlockStateBase.is(Block)` и другие члены,
+которых нет в NMS 26.3. Это внешний контракт: нужна сборка CE под 26.3
+или полный NMS block-state/shape/pathfinder слой, скелетные заглушки не
+помогают.
+
+Производительность по-прежнему без изменений: два прогона A/B на одной
+машине, статистически строгого подтверждения нет, заявка снята.
