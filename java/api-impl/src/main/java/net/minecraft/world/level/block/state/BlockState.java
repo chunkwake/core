@@ -25,6 +25,10 @@ public class BlockState extends BlockBehaviour.BlockStateBase {
         this(block, -1, false, true, false, FluidState.EMPTY);
     }
 
+    public BlockState(Block block, Property<?>[] keys, Comparable<?>[] values) {
+        this(block);
+    }
+
     public BlockState(Block block, int id, boolean air, boolean solidRender,
             boolean blockEntity, FluidState fluid) {
         this.block = block;

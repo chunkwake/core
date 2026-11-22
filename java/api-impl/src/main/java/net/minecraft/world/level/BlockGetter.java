@@ -16,6 +16,12 @@ public interface BlockGetter {
         return 0.0;
     }
 
+    /** {@code BlockGetter.getBlockFloorHeight(VoxelShape, Supplier)}. */
+    default double getBlockFloorHeight(net.minecraft.world.phys.shapes.VoxelShape shape,
+            java.util.function.Supplier<net.minecraft.world.phys.shapes.VoxelShape> fallback) {
+        return 0.0;
+    }
+
     /** {@code BlockGetter.getFluidState(BlockPos)} (CraftEngine). */
     default net.minecraft.world.level.material.FluidState getFluidState(BlockPos pos) {
         return net.minecraft.world.level.material.FluidState.EMPTY;
@@ -23,5 +29,17 @@ public interface BlockGetter {
 
     default BlockState getBlockState(BlockPos pos) {
         return net.minecraft.world.level.block.Blocks.AIR.defaultBlockState();
+    }
+
+    default BlockState getBlockStateIfLoaded(BlockPos pos) {
+        return getBlockState(pos);
+    }
+
+    default net.minecraft.world.level.material.FluidState getFluidIfLoaded(BlockPos pos) {
+        return getFluidState(pos);
+    }
+
+    default net.minecraft.world.phys.BlockHitResult clip(ClipContext context) {
+        return null;
     }
 }

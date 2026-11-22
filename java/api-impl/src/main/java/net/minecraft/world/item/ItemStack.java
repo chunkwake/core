@@ -5,7 +5,7 @@ package net.minecraft.world.item;
  * количество. Используется ProtocolLib для создания «пустого» стека и
  * конвертации Bukkit-предметов.
  */
-public class ItemStack implements net.minecraft.core.component.DataComponentHolder {
+public class ItemStack implements net.minecraft.core.component.DataComponentHolder, ItemInstance {
     public String item;
     public int count;
     /** Числовой id предмета из пакета (для перекодирования). */
@@ -26,6 +26,8 @@ public class ItemStack implements net.minecraft.core.component.DataComponentHold
             new net.minecraft.core.component.PatchedDataComponentMap(null);
 
     public static final ItemStack EMPTY = new ItemStack("minecraft:air", 0);
+    public static final Object OPTIONAL_STREAM_CODEC = null;
+    public static final Object OPTIONAL_UNTRUSTED_STREAM_CODEC = null;
     public static final net.minecraft.network.codec.StreamCodec<Object> STREAM_CODEC =
             net.minecraft.network.codec.SimpleStreamCodec.INSTANCE;
 
@@ -91,6 +93,10 @@ public class ItemStack implements net.minecraft.core.component.DataComponentHold
         this("minecraft:air", 0);
     }
 
+    public ItemStack(net.minecraft.world.level.ItemLike item, int count) {
+        this(item == null ? null : item.asItem(), count);
+    }
+
     public ItemStack(Item item, int count) {
         this(item == null ? "minecraft:air" : item.getId(), count);
     }
@@ -102,6 +108,16 @@ public class ItemStack implements net.minecraft.core.component.DataComponentHold
 
     public boolean isEmpty() {
         return this.count <= 0 || "minecraft:air".equals(this.item);
+    }
+
+    @Override
+    public int count() {
+        return getCount();
+    }
+
+    @Override
+    public net.minecraft.core.Holder<Item> typeHolder() {
+        return null;
     }
 
     public int getCount() {
@@ -138,6 +154,121 @@ public class ItemStack implements net.minecraft.core.component.DataComponentHold
         this.legacyTag = tag;
     }
 
+    public void hurtAndBreak(int amount, net.minecraft.server.level.ServerLevel level,
+            net.minecraft.world.entity.LivingEntity entity,
+            java.util.function.Consumer<ItemStack> onBreak) {
+    }
+
+    public void hurtAndBreak(int amount, net.minecraft.world.entity.LivingEntity entity,
+            net.minecraft.world.InteractionHand hand) {
+    }
+
+    public void hurtAndBreak(int amount, net.minecraft.world.entity.LivingEntity entity,
+            net.minecraft.world.entity.EquipmentSlot slot) {
+    }
+
+    public void grow(int amount) {
+        this.setCount(this.getCount() + amount);
+    }
+
+    public void shrink(int amount) {
+        this.setCount(Math.max(0, this.getCount() - amount));
+    }
+
+    public ItemStack copyWithCount(int count) {
+        ItemStack copy = copy();
+        copy.setCount(count);
+        return copy;
+    }
+
+    public ItemStack transmuteCopy(net.minecraft.world.level.ItemLike item, int count) {
+        return new ItemStack(item, count);
+    }
+
+    public boolean is(net.minecraft.world.item.Item item) {
+        return this.getItem() == item;
+    }
+
+    private net.minecraft.nbt.CompoundTag modernTag;
+
+    public net.minecraft.nbt.CompoundTag getTag() {
+        return this.modernTag;
+    }
+
+    public void setTag(net.minecraft.nbt.CompoundTag tag) {
+        this.modernTag = tag;
+    }
+
+    public net.minecraft.nbt.CompoundTag getOrCreateTag() {
+        net.minecraft.nbt.CompoundTag tag = getTag();
+        if (tag == null) {
+            tag = new net.minecraft.nbt.CompoundTag();
+            setTag(tag);
+        }
+        return tag;
+    }
+
+    public void save(net.minecraft.nbt.CompoundTag tag) {
+    }
+
+    public boolean hasNonDefault(net.minecraft.core.component.DataComponentType<?> type) {
+        return false;
+    }
+
+    public net.minecraft.core.component.DataComponentPatch getComponentsPatch() {
+        return new net.minecraft.core.component.DataComponentPatch();
+    }
+
+    public void setComponents(net.minecraft.core.component.DataComponentPatch patch) {
+    }
+
+    public boolean isCorrectToolForDrops(net.minecraft.world.level.block.state.BlockState state) {
+        return false;
+    }
+
+    public boolean canBreakBlockInAdventureMode(net.minecraft.world.level.block.state.pattern.BlockInWorld state) {
+        return true;
+    }
+
+    public boolean canPlaceOnBlockInAdventureMode(net.minecraft.world.level.block.state.pattern.BlockInWorld state) {
+        return true;
+    }
+
+    public boolean hasAdventureModeBreakTagForBlock(net.minecraft.core.HolderSet<net.minecraft.world.level.block.Block> set,
+            net.minecraft.world.level.block.state.BlockState state) {
+        return false;
+    }
+
+    public boolean hasAdventureModePlaceTagForBlock(net.minecraft.core.HolderSet<net.minecraft.world.level.block.Block> set,
+            net.minecraft.world.level.block.state.BlockState state) {
+        return false;
+    }
+
+    public static net.minecraft.network.codec.StreamCodec<?> validatedStreamCodec(
+            net.minecraft.network.codec.StreamCodec<?> codec) {
+        return codec;
+    }
+
+    public static boolean isSameItemSameTags(ItemStack first, ItemStack second) {
+        if (first == null || second == null) {
+            return first == second;
+        }
+        return first.is(second.getItem())
+                && java.util.Objects.equals(first.getTag(), second.getTag());
+    }
+
+    public static boolean isSameItemSameComponents(ItemStack first, ItemStack second) {
+        return isSameItemSameTags(first, second);
+    }
+
+    public boolean isValidRepairItem(ItemStack repair) {
+        return false;
+    }
+
+    public static int hashItemAndComponents(ItemStack stack) {
+        return stack == null ? 0 : java.util.Objects.hash(stack.getItem(), stack.getTag());
+    }
+
     public ItemStack copy() {
         return new ItemStack(this.item, this.count);
     }
@@ -148,11 +279,11 @@ public class ItemStack implements net.minecraft.core.component.DataComponentHold
     }
 
     /** DataComponent-API (ImageFrame): значения не хранятся, но API есть. */
-    public <T> T get(net.minecraft.core.component.DataComponentType<T> type) {
+    public <T> T get(net.minecraft.core.component.DataComponentType<? extends T> type) {
         return null;
     }
 
-    public <T> T getOrDefault(net.minecraft.core.component.DataComponentType<T> type, T fallback) {
+    public <T> T getOrDefault(net.minecraft.core.component.DataComponentType<? extends T> type, T fallback) {
         return fallback;
     }
 

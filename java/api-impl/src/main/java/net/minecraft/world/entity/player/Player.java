@@ -15,6 +15,7 @@ public class Player extends LivingEntity {
 
     /** Поле, которое ищет CraftEngine (PlayerProxy#getContainerMenu). */
     public net.minecraft.world.inventory.AbstractContainerMenu containerMenu;
+    public Object abilities;
 
     /** Поле, которое ищет CraftEngine (PlayerProxy#getInventoryMenu). */
     public final net.minecraft.world.inventory.InventoryMenu inventoryMenu =
@@ -35,5 +36,27 @@ public class Player extends LivingEntity {
 
     public net.minecraft.world.entity.EntityType<?> getType() {
         return net.minecraft.world.entity.EntityTypes.PLAYER;
+    }
+
+    public net.minecraft.world.item.ItemCooldowns getCooldowns() {
+        return new net.minecraft.world.item.ItemCooldowns();
+    }
+
+    public int getXpNeededForNextLevel() {
+        return 0;
+    }
+
+    public float getAttackStrengthScale(float adjustTicks) {
+        return 1.0F;
+    }
+
+    public net.minecraft.world.entity.item.ItemEntity drop(net.minecraft.world.item.ItemStack stack,
+            boolean dropAround, boolean includeNonPlayerKills, boolean suppressAnimation) {
+        return null;
+    }
+
+    public net.minecraft.world.entity.item.ItemEntity drop(net.minecraft.world.item.ItemStack stack,
+            boolean dropAround) {
+        return null;
     }
 }

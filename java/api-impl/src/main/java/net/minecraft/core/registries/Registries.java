@@ -43,6 +43,10 @@ public final class Registries {
             key("block");
     public static final ResourceKey<Registry<Object>> ITEM =
             key("item");
+    public static final ResourceKey<Registry<Object>> ROOT_REGISTRY_NAME = key("root");
+    public static final ResourceKey<Registry<Object>> MOB_EFFECT = key("mob_effect");
+    public static final ResourceKey<Registry<Object>> PLACED_FEATURE = key("worldgen/placed_feature");
+    public static final ResourceKey<Registry<Object>> CONFIGURED_FEATURE = key("worldgen/configured_feature");
 
     public static final ResourceKey<Registry<Object>> FROG_VARIANT = key("frog_variant");
     public static final ResourceKey<Registry<Object>> CAT_VARIANT = key("cat_variant");

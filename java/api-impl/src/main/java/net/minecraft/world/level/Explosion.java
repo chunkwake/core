@@ -8,4 +8,8 @@ package net.minecraft.world.level;
 public class Explosion {
     public Explosion() {
     }
+
+    public boolean canTriggerBlocks() {
+        return true;
+    }
 }

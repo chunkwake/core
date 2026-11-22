@@ -33,6 +33,12 @@ public class Block extends net.minecraft.world.level.block.state.BlockBehaviour 
         this("minecraft:air");
     }
 
+    public Block(net.minecraft.world.level.block.state.BlockBehaviour.Properties properties) {
+        super(properties);
+        this.name = "minecraft:air";
+        this.defaultBlockState = new BlockState(this);
+    }
+
     public Block(String name) {
         this.name = name == null ? "minecraft:air" : name;
         this.defaultBlockState = new BlockState(this);

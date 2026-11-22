@@ -1,23 +1,19 @@
 package net.minecraft.core.component;
 
-/** NMS {@code DataComponentHolder}: носитель data-компонентов. */
-public interface DataComponentHolder {
+/** NMS {@code DataComponentHolder}: держатель data-компонентов. */
+public interface DataComponentHolder extends DataComponentGetter {
     /** {@code DataComponentHolder.getComponents()} (CraftEngine). */
     default net.minecraft.core.component.DataComponentMap getComponents() {
         return new net.minecraft.core.component.PatchedDataComponentMap(null);
     }
 
-    default <T> T get(net.minecraft.core.component.DataComponentType<T> type) {
+    @Override
+    default <T> T get(DataComponentType<? extends T> type) {
         return null;
     }
 
-    default <T> T getOrDefault(
-            net.minecraft.core.component.DataComponentType<T> type, T defaultValue) {
-        T value = this.get(type);
-        return value == null ? defaultValue : value;
-    }
-
-    default boolean has(net.minecraft.core.component.DataComponentType<?> type) {
+    @Override
+    default boolean has(DataComponentType<?> type) {
         return this.get(type) != null;
     }
 }

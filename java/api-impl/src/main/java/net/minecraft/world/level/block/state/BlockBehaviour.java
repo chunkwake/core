@@ -28,6 +28,10 @@ public class BlockBehaviour {
     public BlockBehaviour() {
     }
 
+    public BlockBehaviour(Properties properties) {
+        this.properties = properties;
+    }
+
     protected boolean isPathfindable(BlockState state,
             net.minecraft.world.level.pathfinder.PathComputationType type) {
         return false;
@@ -126,6 +130,11 @@ public class BlockBehaviour {
             net.minecraft.core.BlockPos pos, net.minecraft.util.RandomSource random) {
     }
 
+    protected void affectNeighborsAfterRemoval(BlockState state,
+            net.minecraft.server.level.ServerLevel level, net.minecraft.core.BlockPos pos,
+            boolean movedByPiston) {
+    }
+
     protected void spawnAfterBreak(BlockState state, net.minecraft.server.level.ServerLevel level,
             net.minecraft.core.BlockPos pos, net.minecraft.world.item.ItemStack stack, boolean dropExperience) {
     }
@@ -162,6 +171,53 @@ public class BlockBehaviour {
         return false;
     }
 
+    /** NMS {@code BlockBehaviour.StatePredicate}. */
+    public interface StatePredicate {
+        boolean test(BlockState state, net.minecraft.world.level.BlockGetter level,
+                net.minecraft.core.BlockPos pos);
+    }
+
+    /** NMS {@code BlockBehaviour.StateArgumentPredicate}. */
+    public interface StateArgumentPredicate<A> {
+        boolean test(BlockState state, net.minecraft.world.level.BlockGetter level,
+                net.minecraft.core.BlockPos pos, A argument);
+    }
+
+    /** NMS {@code BlockBehaviour.PostProcess}. */
+    public interface PostProcess {
+        net.minecraft.core.BlockPos getPostProcessPos(BlockState state,
+                net.minecraft.world.level.BlockGetter level, net.minecraft.core.BlockPos pos);
+    }
+
+    /** NMS {@code BlockBehaviour.OffsetFunction}. */
+    public interface OffsetFunction {
+        net.minecraft.world.phys.Vec3 evaluate(BlockState state, net.minecraft.core.BlockPos pos);
+    }
+
+    /** NMS {@code BlockBehaviour.OffsetType}. */
+    public enum OffsetType {
+        NONE,
+        XZ,
+        XYZ
+    }
+
+    /** NMS {@code BlockBehaviour.Properties}: builder свойств блока. */
+    public static class Properties {
+        public net.minecraft.resources.ResourceKey<net.minecraft.world.level.block.Block> id;
+
+        private Properties() {
+        }
+
+        public static Properties of() {
+            return new Properties();
+        }
+
+        public Properties setId(net.minecraft.resources.ResourceKey<net.minecraft.world.level.block.Block> id) {
+            this.id = id;
+            return this;
+        }
+    }
+
     /**
      * NMS {@code BlockBehaviour.BlockStateBase}.
      *
@@ -170,15 +226,62 @@ public class BlockBehaviour {
      * <em>объявленные</em> здесь {@code is(Block)} и
      * {@code getDrops(LootParams.Builder)}.
      */
-    public static class BlockStateBase extends StateHolder<net.minecraft.world.level.block.Block, BlockState> {
+    public static class BlockStateBase extends StateHolder<net.minecraft.world.level.block.Block, BlockState>
+            implements net.minecraft.core.TypedInstance<net.minecraft.world.level.block.Block> {
         /**
          * Paper кэширует вычисленные флаги состояния в этом поле;
          * CraftEngine биндит его как {@code BlockStateBaseProxy#getCache}.
          */
+        protected BlockStateBase() {
+        }
+
+        protected BlockStateBase(net.minecraft.world.level.block.Block owner,
+                net.minecraft.world.level.block.state.properties.Property<?>[] keys,
+                Comparable<?>[] values) {
+        }
+
+        private int lightEmission;
+        private boolean useShapeForLightOcclusion;
+        private boolean isAir;
+        private boolean ignitedByLava;
+        private boolean liquid;
+        private boolean legacySolid;
+        private Object pushReaction;
+        private Object mapColor;
+        private float destroySpeed;
+        private boolean requiresCorrectToolForDrops;
+        private boolean canOcclude;
+        private Object isRedstoneConductor;
+        private Object isSuffocating;
+        private Object isViewBlocking;
+        private Object postProcess;
+        private Object emissiveRendering;
+        private Object offsetFunction;
+        private Object instrument;
+        private boolean replaceable;
+        private Object fluidState;
+        private boolean isRandomlyTicking;
+        private boolean solidRender;
+        private Object occlusionShape;
+        private boolean propagatesSkylightDown;
+        private int lightDampening;
+        private boolean conditionallyFullOpaque;
+        private int opacityIfCached;
+        protected boolean shapeExceedsCube;
         private Cache cache;
 
         public Cache getCache() {
             return this.cache;
+        }
+
+        @Override
+        public net.minecraft.core.Holder<net.minecraft.world.level.block.Block> typeHolder() {
+            return null;
+        }
+
+        @Override
+        public java.util.stream.Stream<net.minecraft.tags.TagKey<net.minecraft.world.level.block.Block>> tags() {
+            return java.util.stream.Stream.empty();
         }
 
         public void setCache(Cache cache) {
@@ -228,6 +331,91 @@ public class BlockBehaviour {
         public java.util.List<net.minecraft.world.item.ItemStack> getDrops(
                 net.minecraft.world.level.storage.loot.LootParams.Builder builder) {
             return java.util.List.of();
+        }
+
+        public int getLightDampening() {
+            return this.lightDampening;
+        }
+
+        public int getLightBlock(net.minecraft.world.level.BlockGetter level,
+                net.minecraft.core.BlockPos pos) {
+            return this.lightDampening;
+        }
+
+        public void randomTick(net.minecraft.server.level.ServerLevel level,
+                net.minecraft.core.BlockPos pos, net.minecraft.util.RandomSource random) {
+        }
+
+        public net.minecraft.world.level.block.SoundType getSoundType() {
+            return null;
+        }
+
+        public boolean isPathfindable(net.minecraft.world.level.pathfinder.PathComputationType type) {
+            return false;
+        }
+
+        public boolean isPathfindable(net.minecraft.world.level.BlockGetter level,
+                net.minecraft.core.BlockPos pos,
+                net.minecraft.world.level.pathfinder.PathComputationType type) {
+            return false;
+        }
+
+        public boolean isFaceSturdy(net.minecraft.world.level.BlockGetter level,
+                net.minecraft.core.BlockPos pos, net.minecraft.core.Direction direction,
+                net.minecraft.world.level.block.SupportType type) {
+            return false;
+        }
+
+        public boolean isCollisionShapeFullBlock(net.minecraft.world.level.BlockGetter level,
+                net.minecraft.core.BlockPos pos) {
+            return false;
+        }
+
+        public boolean canSurvive(net.minecraft.world.level.LevelReader level,
+                net.minecraft.core.BlockPos pos) {
+            return true;
+        }
+
+        public boolean isSignalSource() {
+            return false;
+        }
+
+        public net.minecraft.world.phys.shapes.VoxelShape getShape(
+                net.minecraft.world.level.BlockGetter level, net.minecraft.core.BlockPos pos,
+                net.minecraft.world.phys.shapes.CollisionContext context) {
+            return net.minecraft.world.phys.shapes.VoxelShape.EMPTY;
+        }
+
+        public net.minecraft.world.phys.shapes.VoxelShape getCollisionShape(
+                net.minecraft.world.level.BlockGetter level, net.minecraft.core.BlockPos pos,
+                net.minecraft.world.phys.shapes.CollisionContext context) {
+            return net.minecraft.world.phys.shapes.VoxelShape.EMPTY;
+        }
+
+        public net.minecraft.world.phys.shapes.VoxelShape getBlockSupportShape(
+                net.minecraft.world.level.BlockGetter level, net.minecraft.core.BlockPos pos) {
+            return net.minecraft.world.phys.shapes.VoxelShape.EMPTY;
+        }
+
+        public void onPlace(net.minecraft.world.level.Level level, net.minecraft.core.BlockPos pos,
+                BlockState state, boolean movedByPiston) {
+        }
+
+        public float getDestroyProgress(net.minecraft.world.entity.player.Player player,
+                net.minecraft.world.level.BlockGetter level, net.minecraft.core.BlockPos pos) {
+            return 0.0F;
+        }
+
+        public void updateNeighbourShapes(net.minecraft.world.level.LevelAccessor level,
+                net.minecraft.core.BlockPos pos, int flags, int recursionLeft) {
+        }
+
+        public boolean hasBlockEntity() {
+            return false;
+        }
+
+        public org.bukkit.block.data.BlockData asBlockData() {
+            return null;
         }
 
         /** NMS {@code BlockBehaviour.BlockStateBase.Cache}. */

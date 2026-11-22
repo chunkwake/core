@@ -53,6 +53,7 @@ public interface Holder<T> {
     final class Reference<T> implements Holder<T> {
         private final T value;
         private final net.minecraft.resources.ResourceKey<T> key;
+        private java.util.Set<net.minecraft.tags.TagKey<T>> tags = java.util.Set.of();
 
         public Reference(T value) {
             this(value, null);
@@ -71,6 +72,24 @@ public interface Holder<T> {
         @Override
         public java.util.Optional<net.minecraft.resources.ResourceKey<T>> unwrapKey() {
             return java.util.Optional.ofNullable(this.key);
+        }
+
+        public java.util.Set<net.minecraft.tags.TagKey<T>> getTags() {
+            return this.tags;
+        }
+
+        public void setTags(java.util.Set<net.minecraft.tags.TagKey<T>> tags) {
+            this.tags = tags == null ? java.util.Set.of() : tags;
+        }
+
+        public void bindValue(T value) {
+        }
+
+        public void bindComponents(net.minecraft.core.component.DataComponentMap components) {
+        }
+
+        public net.minecraft.resources.ResourceKey<T> getKey() {
+            return this.key;
         }
 
         @Override

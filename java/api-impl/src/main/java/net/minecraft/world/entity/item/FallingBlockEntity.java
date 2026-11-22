@@ -27,6 +27,9 @@ public class FallingBlockEntity extends Entity {
     public void setHurtsEntities(float damage, int maxDamage) {
     }
 
+    public void tick() {
+    }
+
     public void setStartPos(BlockPos pos) {
     }
 }

@@ -36,6 +36,16 @@ public final class BuiltInRegistries {
     public static final net.minecraft.core.Registry<Object> soundEvent =
             new net.minecraft.core.SimpleRegistry<>();
     public static final net.minecraft.core.Registry<Object> SOUND_EVENT = soundEvent;
+    public static final net.minecraft.core.Registry<Object> BLOCK_ENTITY_TYPE =
+            new net.minecraft.core.SimpleRegistry<>();
+    public static final net.minecraft.core.Registry<Object> DATA_COMPONENT_PREDICATE_TYPE =
+            new net.minecraft.core.SimpleRegistry<>();
+    public static final net.minecraft.core.Registry<Object> GAME_EVENT =
+            new net.minecraft.core.SimpleRegistry<>();
+    public static final net.minecraft.core.Registry<Object> LOOT_POOL_ENTRY_TYPE =
+            new net.minecraft.core.SimpleRegistry<>();
+    public static final net.minecraft.core.Registry<Object> MOB_EFFECT =
+            new net.minecraft.core.SimpleRegistry<>();
 
     public static final DefaultedRegistry<Block> BLOCK = new SimpleDefaultedRegistry<>(
             net.minecraft.resources.Identifier.parse("minecraft:air"));

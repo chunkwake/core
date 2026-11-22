@@ -6942,3 +6942,65 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## CraftEngine 26.9.2 загрузился: 82/82, LOADERR пуст
+
+После того как `BlockReflections` прошёл, CE последовательно вскрывал
+следующие слои NMS. Каждый блокер снимался точечно, с проверкой через
+P4-пробник (`BukkitProxy.init` + `Class.forName` нужного класса CE) и
+полным гейтом.
+
+Цепочка (все пункты закрыты):
+
+1. `BlockBehaviour.BlockStateBase`: `getCache`/`setCache`, `initCache`,
+   поля `lightEmission`, `pushReaction`, `mapColor`, `cache`, ...
+   (`BlockStateBaseProxy`).
+2. `StateHolder`: `getProperties`, `cycle`, `trySetValue`.
+3. `TypedInstance`: `typeHolder`, `tags`, `is(...)`; `ClipContext`,
+   `BlockGetter` (`getBlockFloorHeight(VoxelShape, Supplier)`),
+   `CollisionContext` (`of`, `placementContext`), `Level`
+   (`dimensionTypeRegistration`, `checkEntityCollision`),
+   `LevelAccessor` (`levelEvent`, `gameEvent`, `playSound`,
+   `scheduleTick`), `EntityGetter`, `BlockAndLightGetter`,
+   `CollisionGetter`, `SignalGetter`, `LevelWriter`,
+   `ScheduledTickAccess` (Block и Fluid).
+4. `Entity`: поля `xo/yo/blocksBuilding/trackedEntity/...`, `move`,
+   `getEyeHeight(Pose)`, `setDeltaMovement(double,double,double)`,
+   `spawnAtLocation(...)`, и т.д.; `LivingEntity` (`drop`, `lastDamageSource`,
+   `getLocalBoundsForPose`, ...); `Player` (`abilities`, `getCooldowns`,
+   ...); `ItemEntity` (`age`, `pickupDelay`, `target`, `setTarget`, ...);
+   `Prediction`; `ItemStack`/`ItemInstance`/`DataComponentHolder`; `Items`.
+5. Динамическая генерация классов CE: `BlockBehaviour.Properties`,
+   `Block(Properties)`, `BlockStateBase(Block, Property[], Comparable[])`,
+   `StateDefinition.Factory`/`Builder`, `RepairItemRecipe`,
+   `FireworkStarFadeRecipe`, `RecipeSerializer` (record-класс),
+   `ItemStackTemplate`, `DispenserBlock`, `LootParams.Builder`,
+   `ContextKey`/`ContextKeySet`.
+6. Реестры: `BuiltInRegistries` (`BLOCK_ENTITY_TYPE`, `GAME_EVENT`,
+   `MOB_EFFECT`, `LOOT_POOL_ENTRY_TYPE`,
+   `DATA_COMPONENT_PREDICATE_TYPE`), `Registries` (`ROOT_REGISTRY_NAME`,
+   `PLACED_FEATURE`, `CONFIGURED_FEATURE`, ...), `Holder.Reference`
+   (`tags`, `bindComponents`), `SimpleRegistry extends MappedRegistry`
+   (CE кастует `BLOCK` к `MappedRegistry`).
+
+Блок-инъекция CE завершилась (создание `CraftEngineBlock` и
+`DelegatingBlockState` через сгенерированные классы), затем прошли
+инъекции рецептов и раздатчиков. Итог гейта:
+
+```
+расширенный: 82 of 82 enabled in 48413 ms
+  FAILED: (пусто)
+  LOADERR: (пусто)
+  PANICS: 0
+базовый: enabled 27 plugin(s) in 14633 ms; PANICS: 0
+Java: 62 теста (cleanTest test :test-plugin:jar dist)
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
+
+Важная оговорка: проверены загрузка и `onEnable` CE, включая реальную
+инъекцию блоков/рецептов/раздатчиков. Геймплей кастомных блоков
+(дропы, формы, поведение) на наших no-op NMS-заглушках не проверялся;
+это следующий уровень валидации, а не «CE полностью эквивалентен Paper».

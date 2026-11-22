@@ -6,7 +6,7 @@ import java.util.Optional;
 import net.minecraft.resources.Identifier;
 
 /** Рабочая реализация {@link Registry}. */
-public class SimpleRegistry<T> implements Registry<T> {
+public class SimpleRegistry<T> extends MappedRegistry<T> implements Registry<T> {
     private final Map<Identifier, T> values = new LinkedHashMap<>();
 
     @Override

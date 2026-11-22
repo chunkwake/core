@@ -26,14 +26,47 @@ public class Level implements LevelAccessor, net.minecraft.world.level.LevelHeig
         return null;
     }
 
+    /** {@code Level.dimensionTypeRegistration} (CraftEngine FieldGetter). */
+    private net.minecraft.core.Holder<net.minecraft.world.level.dimension.DimensionType> dimensionTypeRegistration;
+
     /** {@code Level.dimensionType()} (CraftEngine). */
     public net.minecraft.world.level.dimension.DimensionType dimensionType() {
         return new net.minecraft.world.level.dimension.DimensionType();
     }
 
+    public net.minecraft.core.Holder<net.minecraft.world.level.dimension.DimensionType> dimensionTypeRegistration() {
+        return this.dimensionTypeRegistration;
+    }
+
     /** {@code Level.isLoaded(BlockPos)} (CraftEngine). */
     public boolean isLoaded(net.minecraft.core.BlockPos pos) {
         return true;
+    }
+
+    public final boolean checkEntityCollision(BlockState state,
+            net.minecraft.world.entity.Entity entity,
+            net.minecraft.world.phys.shapes.CollisionContext context,
+            net.minecraft.core.BlockPos pos, boolean checkCollision) {
+        return false;
+    }
+
+    public void updateNeighbourForOutputSignal(net.minecraft.core.BlockPos pos,
+            net.minecraft.world.level.block.Block block) {
+    }
+
+    public void setBlocksDirty(net.minecraft.core.BlockPos pos, BlockState oldState,
+            BlockState newState) {
+    }
+
+    public Object moonrise$getEntityLookup() {
+        return null;
+    }
+
+    public boolean removeBlock(net.minecraft.core.BlockPos pos, boolean move) {
+        return false;
+    }
+
+    public void removeBlockEntity(net.minecraft.core.BlockPos pos) {
     }
 
 

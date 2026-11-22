@@ -153,6 +153,15 @@ public class Entity implements net.minecraft.network.syncher.SyncedDataHolder {
 
     /** Поле, которое ищет CraftEngine (EntityProxy#setZo). */
     public double zo;
+    public double xo;
+    public double yo;
+    protected boolean blocksBuilding;
+    public static final java.util.concurrent.atomic.AtomicInteger ENTITY_COUNTER =
+            new java.util.concurrent.atomic.AtomicInteger();
+    protected Vec3 syncVelocity = Vec3.ZERO;
+    public Object trackedEntity;
+    public Object tracker;
+    public boolean wasTouchingWater;
 
     /** Поле, которое ищет CraftEngine (EntityProxy#getVehicle). */
     public Entity vehicle;
@@ -211,6 +220,137 @@ public class Entity implements net.minecraft.network.syncher.SyncedDataHolder {
     }
 
     public void load(ValueInput input) {
+    }
+
+    public void move(MoverType type, Vec3 movement) {
+        this.setPos(this.x + movement.x, this.y + movement.y, this.z + movement.z);
+    }
+
+    public net.minecraft.world.entity.item.ItemEntity spawnAtLocation(
+            net.minecraft.server.level.ServerLevel level, net.minecraft.world.level.ItemLike item) {
+        return null;
+    }
+
+    public net.minecraft.world.entity.item.ItemEntity spawnAtLocation(
+            net.minecraft.server.level.ServerLevel level, net.minecraft.world.item.ItemStack stack) {
+        return null;
+    }
+
+    public net.minecraft.world.entity.item.ItemEntity spawnAtLocation(
+            net.minecraft.server.level.ServerLevel level, net.minecraft.world.item.ItemStack stack,
+            Vec3 offset) {
+        return null;
+    }
+
+    public net.minecraft.world.entity.item.ItemEntity spawnAtLocation(
+            net.minecraft.server.level.ServerLevel level, net.minecraft.world.item.ItemStack stack,
+            float yOffset) {
+        return null;
+    }
+
+    public net.minecraft.world.entity.item.ItemEntity spawnAtLocation(
+            net.minecraft.server.level.ServerLevel level,
+            net.minecraft.world.entity.item.ItemEntity entity) {
+        return null;
+    }
+
+    public net.minecraft.core.BlockPos blockPosition() {
+        return new net.minecraft.core.BlockPos((int) Math.floor(this.x), (int) Math.floor(this.y),
+                (int) Math.floor(this.z));
+    }
+
+    public net.minecraft.core.BlockPos getOnPos() {
+        return new net.minecraft.core.BlockPos((int) Math.floor(this.x), (int) Math.floor(this.y) - 1,
+                (int) Math.floor(this.z));
+    }
+
+    public boolean causeFallDamage(double fallDistance, float multiplier,
+            net.minecraft.world.damagesource.DamageSource source) {
+        return false;
+    }
+
+    public net.minecraft.world.damagesource.DamageSources damageSources() {
+        return new net.minecraft.world.damagesource.DamageSources();
+    }
+
+    public Vec3 getDeltaMovement() {
+        return this.syncVelocity;
+    }
+
+    public void setDeltaMovement(Vec3 movement) {
+        this.syncVelocity = movement == null ? Vec3.ZERO : movement;
+    }
+
+    public void setDeltaMovement(double x, double y, double z) {
+        this.syncVelocity = new Vec3(x, y, z);
+    }
+
+    public float getEyeHeight() {
+        return this.eyeHeight;
+    }
+
+    public final float getEyeHeight(Pose pose) {
+        return this.eyeHeight;
+    }
+
+    public final Vec3 getEyePosition(float partialTicks) {
+        return getEyePosition();
+    }
+
+    public double getMyRidingOffset(Entity passenger) {
+        return 0.0;
+    }
+
+    public net.minecraft.core.BlockPos getOnPos(float offset) {
+        return getOnPos();
+    }
+
+    public double getEyeY() {
+        return this.y + this.eyeHeight;
+    }
+
+    public Vec3 getEyePosition() {
+        return new Vec3(this.x, getEyeY(), this.z);
+    }
+
+    public Vec3 getLookAngle() {
+        return Vec3.ZERO;
+    }
+
+    public double getMyRidingOffset() {
+        return 0.0;
+    }
+
+    public double getPassengersRidingOffset() {
+        return 0.0;
+    }
+
+    public Vec3 getPassengerRidingPosition(Entity passenger) {
+        return position();
+    }
+
+    public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
+        return position();
+    }
+
+    public Pose getPose() {
+        return Pose.STANDING;
+    }
+
+    public boolean getSharedFlag(int flag) {
+        return false;
+    }
+
+    public boolean isIgnoringBlockTriggers() {
+        return false;
+    }
+
+    public boolean isShiftKeyDown() {
+        return false;
+    }
+
+    public boolean isSpectator() {
+        return false;
     }
 
     public enum RemovalReason {
