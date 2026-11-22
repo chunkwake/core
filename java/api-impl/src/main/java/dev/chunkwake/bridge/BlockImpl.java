@@ -158,9 +158,19 @@ final class BlockImpl {
         return BlockDataImpl.parse(WorldImpl.request(world, "data " + x + " " + y + " " + z));
     }
 
-    /** Коллизия: для custom-блока CE берём полный куб (topaz_ore и т.п.). */
+    /** Коллизия: у custom-блока CE берём форму его visual/carrier-состояния. */
     public org.bukkit.util.VoxelShape getCollisionShape() {
-        if (customState() != null) {
+        Object custom = customState();
+        if (custom != null) {
+            try {
+                Object visual = custom.getClass().getMethod("visualBlockState").invoke(custom);
+                Object raw = visual.getClass().getMethod("minecraftState").invoke(visual);
+                if (raw instanceof net.minecraft.world.level.block.state.BlockState state) {
+                    return VoxelShapeImpl.of(CustomShapes.collision(state));
+                }
+            } catch (Throwable ignored) {
+                // fallback ниже
+            }
             return VoxelShapeImpl.fullCube();
         }
         Material type = getType();

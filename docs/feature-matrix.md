@@ -7293,3 +7293,100 @@ item-entity в Paper-мире. Это подтверждает, что persisten
 базовый: enabled 27 plugin(s) in 13883 ms; PANICS: 0
 Java: 62 теста
 ```
+
+
+## Multi-property custom-блоки: palm_stairs/palm_door + коллизии + A/B
+
+`CEStateProbe` расширен на несколько stateful-блоков CE 26.9.2:
+
+- `default:table_lamp` — `facing=east,lit=true`;
+- `default:palm_stairs` — `facing=east,half=top,shape=straight,waterlogged=true`;
+- `default:palm_door` — `facing=east,half=upper,hinge=right,open=true,powered=true`.
+
+На Chunkwake после рестарта все три состояния восстанавливаются полностью
+из `chunkwake-custom-blocks.txt`:
+
+```
+default:table_lamp[facing=east,lit=true]
+default:palm_stairs[facing=east,half=top,shape=straight,waterlogged=true]
+default:palm_door[facing=east,half=upper,hinge=right,open=true,powered=true]
+```
+
+Paper-эталон совпадает по state/type/data/collision/drops. Пример
+`palm_stairs`:
+
+```
+Chunkwake collision=[0.5,0,0 -> 1,1,1] + [0,0.5,0 -> 0.5,1,1]
+Paper     collision=[0.5,0,0 -> 1,1,1] + [0,0.5,0 -> 0.5,1,1]
+```
+
+`palm_door` (open, facing=east) на обеих сторонах:
+
+```
+[0,0,0.8125 -> 1,1,1]
+```
+
+Для этого добавлен `CustomShapes`: коллизия custom-блока теперь берётся из
+его visual/carrier-состояния (`barrier`, `*_stairs`, `*_door`, `*_slab`,
+`*_trapdoor`), а не всегда полный куб.
+
+### Folia scheduling probe
+
+Добавлен временный `FoliaProbe` (global/region/async, 7 задач). В живом
+прогоне:
+
+```
+FOLIAPROBE done async-now (1/7)
+FOLIAPROBE done region-execute (2/7)
+FOLIAPROBE done region-delayed (3/7)
+FOLIAPROBE done async-delayed (4/7)
+FOLIAPROBE done global-execute (5/7)
+FOLIAPROBE done global-delayed (6/7)
+FOLIAPROBE done global-repeating (7/7)
+FOLIAPROBE all-schedulers-ok
+```
+
+Гейт с ним:
+
+```
+84 of 84 enabled in 62793 ms
+FAILED: (пусто); LOADERR: (пусто); SKIPPED: (пусто); PANICS: 0
+базовый: 27 plugin(s) in 37946 ms; PANICS: 0
+```
+
+### HorizonFrontier (bootstrap)
+
+`HorizonFrontier 1.102.3` сначала падал на отсутствующем
+`RegistryEventTypeProvider.compose()`. Добавлен service-provider и
+`registryCompose`-контракт, после чего **bootstrap-фаза проходит**. Плагин
+всё равно не включается, потому что требует внешнюю MariaDB (`mariadb:3306`,
+`UnknownHostException`), то есть это ограничение окружения, а не API.
+В финальный гейт он не добавлен.
+
+### A/B: 5 пар Chunkwake/Paper
+
+`scripts/ab_paper.ps1`, 200/1000 cows + redstone, 5 независимых пар:
+
+| сценарий | Chunkwake | Paper | delta (CW-Paper) | знаков |
+|---|---:|---:|---:|---:|
+| 200 cows | 5.6/5.8/5.1/6.4/4.3 | 6.0/6.1/4.5/5.0/4.5 | avg +0.22 ms | 3/5 лучше |
+| 1000 cows | 8.6/8.7/7.2/9.7/6.3 | 11.0/12.3/10.5/11.5/12.2 | avg −3.40 ms | 5/5 лучше |
+| 1000 cows + redstone | 10.3/11.8/7.6/10.5/7.1 | 11.0/12.6/9.8/10.0/10.1 | avg −1.24 ms | 4/5 лучше |
+
+Для 1000 cows точный sign-test 5/5 = p≈0.031; paired t≈−4.84 (df=4).
+Для redstone 4/5 sign-test p≈0.188 (t≈−2.02), то есть результат ниже
+строгого порога; для 200 cows разницы нет.
+
+**Итог по производительности:** узкий сценарий «1000 мобов» показывает
+устойчивое преимущество, но это не даёт права на общую заявку «сервер
+быстрее Paper». Формулировка остаётся: преимущество в mob-сценарии
+предварительное, полный A/B с большим N и стабильной нагрузкой нужен
+отдельно.
+
+### Ограничения
+
+- 100% совместимость с любыми Paper/Folia-плагинами не доказана; гейт —
+  фиксированный набор + FoliaProbe.
+- `HorizonFrontier` требует MariaDB; для его проверки нужна внешняя БД.
+- `CustomShapes` покрывает типовые носители; экзотические формы (заборы,
+  стены, кнопки, сложные inner/outer stairs) пока дают fallback.

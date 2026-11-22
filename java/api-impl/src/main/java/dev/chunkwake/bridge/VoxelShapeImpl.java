@@ -21,6 +21,10 @@ final class VoxelShapeImpl implements VoxelShape {
         return new VoxelShapeImpl(List.of(new BoundingBox(0, 0, 0, 1, 1, 1)));
     }
 
+    static VoxelShape of(List<BoundingBox> boxes) {
+        return new VoxelShapeImpl(List.copyOf(boxes));
+    }
+
     @Override
     public Collection<BoundingBox> getBoundingBoxes() {
         return this.boxes;

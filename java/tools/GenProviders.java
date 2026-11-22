@@ -33,6 +33,7 @@ public final class GenProviders {
      */
     private static final Set<String> HANDWRITTEN = Set.of(
             "io.papermc.paper.plugin.lifecycle.event.types.LifecycleEventTypeProvider",
+            "io.papermc.paper.registry.event.RegistryEventTypeProvider",
             "io.papermc.paper.datacomponent.item.ItemComponentTypesBridge");
 
     public static void main(String[] args) throws Exception {
