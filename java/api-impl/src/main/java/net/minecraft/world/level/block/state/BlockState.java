@@ -7,7 +7,7 @@ import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.material.FluidState;
 
 /** NMS {@code BlockState}: блок + сетевой id + свойства для плагинов. */
-public class BlockState {
+public class BlockState extends BlockBehaviour.BlockStateBase {
     /** {@code BlockState.CODEC}: минимальный строковый codec состояния. */
     public static final com.mojang.serialization.Codec<BlockState> CODEC =
             com.mojang.serialization.Codec.STRING.xmap(
@@ -60,15 +60,19 @@ public class BlockState {
         return this.fluid;
     }
 
-    public Comparable<?> getValue(Property<?> property) {
+    @Override
+    @SuppressWarnings("unchecked")
+    public <T extends Comparable<T>> T getValue(Property<T> property) {
         List<?> values = List.copyOf(property.getPossibleValues());
-        return values.isEmpty() ? null : (Comparable<?>) values.get(0);
+        return values.isEmpty() ? null : (T) values.get(0);
     }
 
-    public <T extends Comparable<T>> BlockState setValue(Property<T> property, T value) {
+    @Override
+    public <T extends Comparable<T>, V extends T> BlockState setValue(Property<T> property, V value) {
         return this;
     }
 
+    @Override
     public boolean hasProperty(Property<?> property) {
         return this.block.getStateDefinition().getProperties().contains(property);
     }
@@ -80,10 +84,6 @@ public class BlockState {
 
     public java.util.Collection<Property<?>> getProperties() {
         return this.block.getStateDefinition().getProperties();
-    }
-
-    public boolean is(Block block) {
-        return this.block == block;
     }
 
     public String getDescriptionId() {

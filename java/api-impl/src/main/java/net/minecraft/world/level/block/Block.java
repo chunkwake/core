@@ -110,6 +110,30 @@ public class Block extends net.minecraft.world.level.block.state.BlockBehaviour 
         return path;
     }
 
+    public void stepOn(net.minecraft.world.level.Level level, net.minecraft.core.BlockPos pos,
+            BlockState state, net.minecraft.world.entity.Entity entity) {
+    }
+
+    /** Paper 1.20.3+: возвращает состояние после разрушения игроком. */
+    public BlockState playerWillDestroy(net.minecraft.world.level.Level level,
+            net.minecraft.core.BlockPos pos, BlockState state,
+            net.minecraft.world.entity.player.Player player) {
+        return state;
+    }
+
+    public void fallOn(net.minecraft.world.level.Level level, BlockState state,
+            net.minecraft.core.BlockPos pos, net.minecraft.world.entity.Entity entity, double fallDistance) {
+    }
+
+    public void setPlacedBy(net.minecraft.world.level.Level level, net.minecraft.core.BlockPos pos,
+            BlockState state, net.minecraft.world.entity.LivingEntity placer,
+            net.minecraft.world.item.ItemStack stack) {
+    }
+
+    public void handlePrecipitation(BlockState state, net.minecraft.world.level.Level level,
+            net.minecraft.core.BlockPos pos, net.minecraft.world.level.biome.Biome.Precipitation precipitation) {
+    }
+
     @Override
     public String toString() {
         return this.name;

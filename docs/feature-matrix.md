@@ -6877,3 +6877,68 @@ cargo +1.100.0 test --workspace -- --test-threads=4
 
 Производительность по-прежнему без изменений: два прогона A/B на одной
 машине, статистически строгого подтверждения нет, заявка снята.
+
+## Поправка: CraftEngine 26.9.2 на Paper 26.3 работает
+
+Предыдущий вывод «CE требует `BlockStateBase.is(Block)`, которого нет в 26.3»
+неверен: в Paper 26.3 `BlockBehaviour$BlockStateBase` **есть** и
+`is(Block)`, и `is(TagKey)`, и `getDrops(LootParams$Builder)`.
+
+Oracle-прогон того же jar'а на Paper 26.3 (build 248):
+
+```
+[CraftEngine] Loaded blocks in 52,59ms (40)
+[CraftEngine] Loaded block state mappings in 55,07ms (4280)
+[CraftEngine] Done (41.044s)!
+```
+
+Значит LOADERR — наш пробел. Что уже сделано в этом шаге:
+
+- `version.json` (Mojang, 26.3) добавлен ресурсом в api-jar. CraftEngine
+  читает его через `net.minecraft.server.Main.getResourceAsStream(
+  "/version.json")` в `VersionHelper.<clinit>`; без файла падал весь
+  `BlockReflections`.
+- `BlockBehaviour$BlockStateBase` теперь наследует `StateHolder` и объявляет
+  `is(Block)`, `getDrops(LootParams.Builder)`, `getCache/setCache`,
+  `initCache`.
+- `BlockBehaviour` получил методы Paper 26.3 (`isPathfindable`, `getShape`,
+  `getCollisionShape`, `updateShape`, `neighborChanged`, `rotate`, `mirror`,
+  `tick`, `randomTick`, `entityInside`, `onExplosionHit`, ...);
+  `Block`, `Fallable`, `SimpleWaterloggedBlock`, `WorldlyContainerHolder`,
+  `BonemealableBlock` — свои методы.
+- Добавлены типы `StateHolder`, `ScheduledTickAccess`, `VoxelShape`,
+  `CollisionContext`, `PathComputationType`, `InsideBlockEffectApplier`,
+  `Explosion`, `Projectile`, `LootParams`, `UseOnContext`,
+  `Biome.Precipitation`.
+
+Точный текущий блокер (диагностика через отдельный P4-пробник, который
+вызывает `BukkitProxy.init` и грузит `BlockReflections`):
+
+```
+NullPointerException: Method not found for proxy interface
+BlockStateProxy -> BlockBehaviourProxy$BlockStateBaseProxy#getShape
+  at ProxyBinder.resolveMethodInvoker(ProxyBinder.java:162)
+  at BlockStateProxy.<clinit>(BlockStateProxy.java:9)
+```
+
+То есть ProxyBinder требует **весь** surface `BlockStateBase`, который
+использует CE: `getShape/getCollisionShape/getBlockSupportShape`,
+`getLightBlock`, `getDestroyProgress`, `updateNeighbourShapes`,
+`hasBlockEntity`, `asBlockData` и т.д., плюс поля `lightEmission`,
+`pushReaction`, `mapColor`, `cache`, ... Это уже не одна сигнатура, а
+block-state слой целиком; после него CE пойдёт в инъекцию блоков в
+реестр (`Blocks`/`Registry`/`BlockBehaviour.Properties`). Поэтому CE пока
+единственный LOADERR; на Paper jar грузится.
+
+## Итоговые гейты после шага
+
+```
+расширенный (82 jar'а): 82 of 82 enabled in 56454 ms
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый (27 jar'ов): enabled 27 plugin(s) in 12852 ms; PANICS: 0
+Java-тесты: 62 (offline: cleanTest test :test-plugin:jar dist)
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

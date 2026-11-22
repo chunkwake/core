@@ -15,4 +15,11 @@ public class Biome {
     public float getBaseTemperature() {
         return 0.5F;
     }
+
+    /** NMS {@code Biome.Precipitation}. */
+    public enum Precipitation {
+        NONE,
+        RAIN,
+        SNOW
+    }
 }

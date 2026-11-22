@@ -385,6 +385,7 @@ final class ChunkwakeServer {
             } catch (Throwable t) {
                 if (!Internals.report(logger, jar.getName(), "loading", t)) {
                     logger.log(Level.SEVERE, "Could not load " + jar.getName(), t);
+                    logCauseChain(jar.getName(), t);
                 }
             }
         }
@@ -434,6 +435,7 @@ final class ChunkwakeServer {
             } catch (Throwable t) {
                 if (!Internals.report(logger, jar.getName(), "loading", t)) {
                     logger.log(Level.SEVERE, "Could not load " + jar.getName(), t);
+                    logCauseChain(jar.getName(), t);
                 }
             }
         }
@@ -1230,11 +1232,27 @@ final class ChunkwakeServer {
     }
 
     /** {@code DATAPACK_DISCOVERY}: теги паков плагина становятся видны {@code getTag}. */
+    /** Явно печатает цепочку причин (log4j теряет причину ExceptionInInitializerError). */
+    private void logCauseChain(String what, Throwable error) {
+        int depth = 0;
+        for (Throwable cause = error.getCause(); cause != null && depth++ < 12; cause = cause.getCause()) {
+            logger.log(Level.SEVERE, what + ": caused by "
+                    + cause.getClass().getName() + ": " + cause.getMessage(), cause);
+        }
+    }
+
     void runLifecycleDatapacks(String owner, LifecycleEventHandler<?> handler) {
         try {
             callHandler(handler, new Tags.DiscoveryEvent(new Tags.Registrar(owner)));
         } catch (Throwable t) {
             logger.log(Level.SEVERE, "lifecycle[" + owner + "]: datapack discovery failed", t);
+            // ExceptionInInitializerError иногда теряет исходную причину в логгере;
+            // печатаем цепочку явно, иначе нельзя понять, какой член NMS не найден.
+            int depth = 0;
+            for (Throwable cause = t.getCause(); cause != null && depth++ < 10; cause = cause.getCause()) {
+                logger.log(Level.SEVERE, "lifecycle[" + owner + "]: caused by "
+                        + cause.getClass().getName() + ": " + cause.getMessage(), cause);
+            }
         }
     }
 
