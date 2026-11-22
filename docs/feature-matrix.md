@@ -6659,3 +6659,52 @@ CraftEngineMutating-блоки требуют настоящий слой
 Последние гейты не перезапускались после откатов (код вернулся к
 закоммиченному состоянию): расширенный 79/82, базовый 26/27,
 P2 ok=263 bad=241, PANICS 0.
+
+## BlockReflections: подтверждён внешний контрактный блокер CE
+
+Разобран байткод `BlockReflections.<clinit>` и `ProxyBinder` (CE):
+
+- `ProxyBinder` берёт имя/аргументы/тип возврата из аннотаций прокси
+  (`@MethodInvoker`/`@FieldGetter`) и фильтра `MinecraftPredicate`
+  (`activeIf="max_version=..."`). Версия для фильтра задаётся
+  `BukkitProxy.init(version, flags, lookup)`.
+- С правильным `init("26.3", ["paper"], IMPL_LOOKUP)` версионные ветки
+  выбираются корректно, и `BlockStateBaseProxy`/`BlockStateProxy`
+  связываются.
+- Дальше `BlockReflections` делает `SparrowClass.getDeclaredMethod` на
+  **реальных** классах. Один из лукапов:
+  `BlockBehaviour$BlockStateBase.is(Block)` (аргумент — `Block`, возврат
+  `boolean`), а в NMS 26.3 у `BlockStateBase` есть только
+  `is(TagKey<Block>, Predicate<BlockStateBase>)`.
+  Т.е. инжектор CE рассчитан на другой контракт NMS; заглушками это
+  закрывается только формально (метод можно добавить, но семантика
+  инъекции блоков всё равно неверна).
+
+Вывод: CraftEngine 26.9.2 для этого окружения требует NMS-контракт,
+которого нет в 26.3; это внешний блокер (нужна сборка CE под 26.3 или
+полная реализация NMS). Scoped-слой откачен, `dist` зелёный.
+
+## World API: isChunkLoaded и getEntitiesByClasses
+
+Закрыты ещё две заглушки:
+
+- `World#isChunkLoaded(x, z)` → запрос `chunkloaded <x> <z>` (simulated
+  chunks + уже отправленные колонки);
+- `World#getEntitiesByClasses(Class...)` → фильтр по `getEntities()`.
+
+Предупреждения `World.isChunkLoaded`/`World.getEntitiesByClasses` из лога
+гейта исчезли.
+
+### Гейты после правок
+
+```
+расширенный: 79 of 82 enabled in 60700 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 22495 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```

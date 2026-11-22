@@ -92,6 +92,26 @@ final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implements World
         return chunks.toArray(new org.bukkit.Chunk[0]);
     }
 
+    /** {@code World#isChunkLoaded}: есть ли колонка в активной размерности. */
+    public boolean isChunkLoaded(int x, int z) {
+        return "1".equals(request("chunkloaded " + x + " " + z).trim());
+    }
+
+    /** {@code World#getEntitiesByClasses}: фильтр по классам Bukkit-сущностей. */
+    public java.util.Collection<org.bukkit.entity.Entity> getEntitiesByClasses(
+            Class<?>... classes) {
+        java.util.List<org.bukkit.entity.Entity> out = new java.util.ArrayList<>();
+        for (org.bukkit.entity.Entity entity : getEntities()) {
+            for (Class<?> type : classes) {
+                if (type != null && type.isInstance(entity)) {
+                    out.add(entity);
+                    break;
+                }
+            }
+        }
+        return out;
+    }
+
     public org.bukkit.Chunk getChunkAt(int x, int z) {
         return ChunkImpl.api(this, x, z);
     }

@@ -4788,6 +4788,18 @@ impl PlayPlan {
             dims.sort();
             return dims.iter().map(|d| d.key()).collect::<Vec<_>>().join("\n");
         }
+        // `chunkloaded <x> <z>`: `World.isChunkLoaded` (1/0).
+        if let Some(rest) = line.strip_prefix("chunkloaded ") {
+            let mut it = rest.split_whitespace();
+            let parse = |v: Option<&str>| v.and_then(|v| v.parse::<i32>().ok());
+            let (Some(x), Some(z)) = (parse(it.next()), parse(it.next())) else {
+                return "0".into();
+            };
+            let state = self.dim_state();
+            let loaded = state.simulated.lock().unwrap().contains(&(x, z))
+                || state.chunk_frames.lock().unwrap().contains_key(&(x, z));
+            return if loaded { "1" } else { "0" }.into();
+        }
         // `loadedchunks`: loaded chunk columns in the active dimension.
         if line == "loadedchunks" {
             let state = self.dim_state();
