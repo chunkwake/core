@@ -7349,7 +7349,7 @@ FOLIAPROBE all-schedulers-ok
 Гейт с ним:
 
 ```
-84 of 84 enabled in 62793 ms
+84 of 84 enabled in 62793 ms  (временный FoliaProbe; после интеграции в test-plugin — 83/83)
 FAILED: (пусто); LOADERR: (пусто); SKIPPED: (пусто); PANICS: 0
 базовый: 27 plugin(s) in 37946 ms; PANICS: 0
 ```
@@ -7386,7 +7386,7 @@ FAILED: (пусто); LOADERR: (пусто); SKIPPED: (пусто); PANICS: 0
 ### Ограничения
 
 - 100% совместимость с любыми Paper/Folia-плагинами не доказана; гейт —
-  фиксированный набор + FoliaProbe.
+  фиксированный набор + FoliaProbe в тестовом плагине.
 - `HorizonFrontier` требует MariaDB; для его проверки нужна внешняя БД.
 - `CustomShapes` покрывает типовые носители; экзотические формы (заборы,
   стены, кнопки, сложные inner/outer stairs) пока дают fallback.
