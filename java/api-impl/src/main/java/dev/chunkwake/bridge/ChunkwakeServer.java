@@ -317,6 +317,11 @@ final class ChunkwakeServer {
         if (Bukkit.getServer() == null) {
             Bukkit.setServer(api);
         }
+        try {
+            net.minecraft.core.registries.BuiltInRegistries.populateVanillaItems();
+        } catch (Throwable t) {
+            logger.log(Level.WARNING, "populateVanillaItems failed: " + t);
+        }
         silenceTimings();
         dir.mkdirs();
         File[] jars = dir.listFiles((d, n) -> n.endsWith(".jar"));

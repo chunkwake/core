@@ -82,7 +82,44 @@ public final class BuiltInRegistries {
         net.minecraft.commands.synchronization.ArgumentTypeInfos.register(type, info);
     }
 
+    /** Заполняет ITEM ванильными предметами; вызывается после старта Bukkit. */
+    public static void populateVanillaItems() {
+        if (ITEM.size() > 2) {
+            return;
+        }
+        for (org.bukkit.Material material : org.bukkit.Material.values()) {
+            if (material.isItem()) {
+                ITEM.register(net.minecraft.resources.Identifier.parse(material.getKey().toString()),
+                        new net.minecraft.world.item.Item(material.getKey().toString()));
+            }
+        }
+    }
+
     static {
+        // Компоненты предметов, которые CraftEngine ищет при инициализации.
+        // Реальная логика компонентов живёт в Rust; здесь важен непустой
+        // реестр с каноническими ключами, чтобы DataComponentTypes.<clinit>
+        // не оставил null и не падал на ensureDataComponentType.
+        for (String component : new String[] {
+                "custom_model_data", "custom_name", "item_name", "lore", "damage",
+                "max_damage", "enchantment_glint_override", "enchantments",
+                "stored_enchantments", "unbreakable", "max_stack_size", "equippable",
+                "item_model", "tooltip_style", "jukebox_playable", "trim",
+                "repair_cost", "custom_data", "profile", "dyed_color",
+                "death_protection", "firework_explosion", "bundle_contents",
+                "container", "block_state", "map_id", "use_remainder",
+                "written_book_content", "rarity", "food", "tool", "weapon",
+                "enchantable", "repairable", "attribute_modifiers", "hide_tooltip",
+                "damage_resistant", "glider", "creative_slot_lock", "map_decorations",
+                "note_block_sound", "base_color", "pot_decorations", "charged_projectiles",
+                "intangible_projectile", "provides_trim_material", "provides_banner_patterns",
+                "recipes", "lock", "bees", "debug_stick_state", "entity_data",
+                "bucket_entity_data", "instrument", "ominous_bottle_amplifier",
+                "custom_model_data"}) {
+            DATA_COMPONENT_TYPE.register(
+                    net.minecraft.resources.Identifier.parse("minecraft:" + component),
+                    new net.minecraft.core.component.DataComponentType<>(component));
+        }
         for (org.bukkit.Particle particle : org.bukkit.Particle.values()) {
             PARTICLE_TYPE.register(
                     net.minecraft.resources.Identifier.parse("minecraft:" + particle.getKey().getKey()),

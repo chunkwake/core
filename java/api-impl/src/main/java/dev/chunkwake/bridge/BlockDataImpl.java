@@ -15,17 +15,38 @@ import org.bukkit.block.data.BlockData;
  * Прокси получает интерфейсы по свойствам ({@code facing} → {@code Directional},
  * {@code powered} → {@code Powerable}…), так что приведения плагинов работают.
  */
-final class BlockDataImpl {
+public final class BlockDataImpl {
     private final String name;
     private final Map<String, String> props;
+    private final net.minecraft.world.level.block.state.BlockState state;
 
     private BlockDataImpl(String name, Map<String, String> props) {
+        this(name, props, null);
+    }
+
+    private BlockDataImpl(String name, Map<String, String> props,
+            net.minecraft.world.level.block.state.BlockState state) {
         this.name = name;
         this.props = props;
+        this.state = state;
+    }
+
+    /** BlockData поверх реального NMS-состояния (CE BlockStateBase#asBlockData). */
+    public static BlockData fromState(net.minecraft.world.level.block.state.BlockState state) {
+        if (state == null) {
+            return parse("minecraft:air");
+        }
+        Map<String, String> props = new LinkedHashMap<>();
+        for (Map.Entry<net.minecraft.world.level.block.state.properties.Property<?>, Comparable<?>> entry
+                : state.getValues().entrySet()) {
+            props.put(entry.getKey().getName(),
+                    entry.getValue().toString().toLowerCase(Locale.ROOT));
+        }
+        return new BlockDataImpl(state.getBlock().id(), props, state).api();
     }
 
     /** Из строки моста; пустая строка — воздух. */
-    static BlockData parse(String s) {
+    public static BlockData parse(String s) {
         if (s == null || s.isEmpty()) {
             s = "minecraft:air";
         }
@@ -73,11 +94,23 @@ final class BlockDataImpl {
     }
 
     public net.minecraft.world.level.block.state.BlockState getState() {
-        return new net.minecraft.world.level.block.state.BlockState(
-                new net.minecraft.world.level.block.Block(name));
+        if (state != null) {
+            return state;
+        }
+        net.minecraft.world.level.block.Block block =
+                net.minecraft.core.registries.BuiltInRegistries.BLOCK.getValue(
+                        net.minecraft.resources.Identifier.parse(name));
+        if (block == null) {
+            block = new net.minecraft.world.level.block.Block(name);
+        }
+        return block.defaultBlockState();
     }
 
     public Material getMaterial() {
+        // CE deceive-bukkit-material (config.yml, default: bricks).
+        if (name.startsWith("craftengine:")) {
+            return Material.BRICKS;
+        }
         Material m = Material.matchMaterial(name);
         return m == null ? Material.AIR : m;
     }

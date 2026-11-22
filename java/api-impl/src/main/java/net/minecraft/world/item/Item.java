@@ -48,4 +48,14 @@ public class Item implements ProjectileItem, net.minecraft.world.level.ItemLike 
     public String getId() {
         return this.id;
     }
+
+    @Override
+    public boolean equals(Object other) {
+        return other instanceof Item item && java.util.Objects.equals(this.getId(), item.getId());
+    }
+
+    @Override
+    public int hashCode() {
+        return java.util.Objects.hashCode(this.getId());
+    }
 }

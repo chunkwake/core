@@ -23,6 +23,13 @@ public class IdMapper<T> implements IdMap<T>, Iterable<T> {
         ((ArrayList<T>) this.byId).ensureCapacity(Math.max(0, capacity));
     }
 
+    /** Полная перезагрузка реестра (BlockBootstrap заменяет заглушки реальными id). */
+    public void clear() {
+        this.toId.clear();
+        this.byId.clear();
+        this.nextId = 0;
+    }
+
     public void addMapping(T value, int id) {
         if (id < 0) {
             throw new IllegalArgumentException("id must be >= 0: " + id);

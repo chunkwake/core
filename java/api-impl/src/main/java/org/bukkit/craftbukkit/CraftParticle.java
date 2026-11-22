@@ -8,6 +8,9 @@ public class CraftParticle {
     /** {@code CraftParticle.minecraftToBukkit(ParticleType)} (CraftEngine). */
     public static org.bukkit.Particle minecraftToBukkit(
             net.minecraft.core.particles.ParticleType type) {
+        if (type instanceof org.bukkit.craftbukkit.CraftParticleType craft) {
+            return craft.particle;
+        }
         return null;
     }
 

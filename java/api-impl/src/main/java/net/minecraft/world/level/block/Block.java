@@ -16,6 +16,8 @@ public class Block extends net.minecraft.world.level.block.state.BlockBehaviour 
     private final String name;
     private BlockState defaultBlockState;
     protected StateDefinition<Block, BlockState> stateDefinition;
+    /** Все состояния блока по каноническому ключу свойств. */
+    private final java.util.Map<String, BlockState> statesByKey = new java.util.HashMap<>();
     private Object builtInRegistryHolder;
     // Поля BlockBehaviour, но объявленные здесь: ProxyBinder (CraftEngine)
     // ищет их через getDeclaredField именно у Block.
@@ -35,7 +37,8 @@ public class Block extends net.minecraft.world.level.block.state.BlockBehaviour 
 
     public Block(net.minecraft.world.level.block.state.BlockBehaviour.Properties properties) {
         super(properties);
-        this.name = "minecraft:air";
+        this.name = properties != null && properties.id != null
+                ? properties.id.location().toString() : "minecraft:air";
         this.defaultBlockState = new BlockState(this);
     }
 
@@ -46,10 +49,46 @@ public class Block extends net.minecraft.world.level.block.state.BlockBehaviour 
 
     /** Заполняет состояния блока (вызывается бутстрапом). */
     public void defineStates(List<BlockState> states, BlockState defaultState) {
-        this.stateDefinition = new StateDefinition<>(this, List.of(), states);
+        defineStates(states, defaultState, List.of());
+    }
+
+    /** Заполняет состояния и свойства блока (вызывается BlockBootstrap). */
+    public void defineStates(List<BlockState> states, BlockState defaultState,
+            java.util.Collection<net.minecraft.world.level.block.state.properties.Property<?>> properties) {
+        this.stateDefinition = new StateDefinition<>(this, properties == null ? List.of() : properties, states);
         if (defaultState != null) {
             this.defaultBlockState = defaultState;
         }
+        this.statesByKey.clear();
+        if (states != null) {
+            for (BlockState state : states) {
+                if (state != null) {
+                    this.statesByKey.put(stateKey(state.getValues()), state);
+                }
+            }
+        }
+    }
+
+    /** Состояние по значениям свойств; {@code null}, если комбинации нет. */
+    public BlockState stateFor(java.util.Map<net.minecraft.world.level.block.state.properties.Property<?>, Comparable<?>> values) {
+        return this.statesByKey.get(stateKey(values));
+    }
+
+    /** Канонический ключ: свойства сортируются по имени. */
+    public static String stateKey(
+            java.util.Map<net.minecraft.world.level.block.state.properties.Property<?>, Comparable<?>> values) {
+        if (values == null || values.isEmpty()) {
+            return "";
+        }
+        java.util.List<java.util.Map.Entry<net.minecraft.world.level.block.state.properties.Property<?>, Comparable<?>>> entries =
+                new java.util.ArrayList<>(values.entrySet());
+        entries.sort(java.util.Comparator.comparing(entry -> entry.getKey().getName()));
+        StringBuilder out = new StringBuilder();
+        for (java.util.Map.Entry<net.minecraft.world.level.block.state.properties.Property<?>, Comparable<?>> entry : entries) {
+            out.append(entry.getKey().getName()).append('=')
+                    .append(entry.getValue().toString().toLowerCase(java.util.Locale.ROOT)).append(';');
+        }
+        return out.toString();
     }
 
     public BlockState defaultBlockState() {
@@ -62,6 +101,42 @@ public class Block extends net.minecraft.world.level.block.state.BlockBehaviour 
     }
 
     public String name() {
+        return this.name;
+    }
+
+    /** {@code Block.builtInRegistryHolder} (CraftEngine BlockProxy). */
+    public Object getBuiltInRegistryHolder() {
+        return this.builtInRegistryHolder;
+    }
+
+    public void setBuiltInRegistryHolder(Object holder) {
+        this.builtInRegistryHolder = holder;
+    }
+
+    /** Идентификатор блока: holder (custom/carrier), иначе name. */
+    public String id() {
+        Object holder = this.builtInRegistryHolder;
+        if (holder != null) {
+            try {
+                Object key = holder.getClass().getMethod("key").invoke(holder);
+                if (key != null) {
+                    Object location = key.getClass().getMethod("location").invoke(key);
+                    if (location != null) {
+                        return location.toString();
+                    }
+                }
+            } catch (Throwable ignored) {
+                // fallback на name
+            }
+            try {
+                String registered = (String) holder.getClass().getMethod("getRegisteredName").invoke(holder);
+                if (registered != null && !registered.isEmpty()) {
+                    return registered;
+                }
+            } catch (Throwable ignored) {
+                // fallback на name
+            }
+        }
         return this.name;
     }
 

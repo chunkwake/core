@@ -2,7 +2,9 @@ package net.minecraft.world.level.levelgen.feature;
 
 /** NMS {@code ConfiguredFeature}. */
 public class ConfiguredFeature {
-    public static final com.mojang.serialization.Codec<Object> CODEC = null;
+    public static final com.mojang.serialization.Codec<Object> CODEC =
+            com.mojang.serialization.Codec.STRING.xmap(text -> (Object) new ConfiguredFeature(),
+                    feature -> "configured_feature");
 
     public ConfiguredFeature() {
     }

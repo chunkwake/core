@@ -75,7 +75,7 @@ public class MappedRegistry<T> implements Registry<T>, IdMap<T> {
     @Override
     public Identifier getKey(T value) {
         for (Map.Entry<Identifier, T> entry : this.byKey.entrySet()) {
-            if (entry.getValue() == value) {
+            if (java.util.Objects.equals(entry.getValue(), value)) {
                 return entry.getKey();
             }
         }

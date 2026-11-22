@@ -18,7 +18,7 @@ public class CraftWorld {
      * Алиас, который CraftEngine (CraftWorldProxy) находит по имени:
      * getWorld(World) читает именно поле world.
      */
-    public final net.minecraft.server.level.ServerLevel world = this.handle;
+    public net.minecraft.server.level.ServerLevel world = this.handle;
     /** Алиас для CraftEngine (CraftWorldProxy#getWorldBorder/setWorldBorder). */
     public final net.minecraft.world.level.border.WorldBorder worldBorder =
             new net.minecraft.world.level.border.WorldBorder();
@@ -33,5 +33,18 @@ public class CraftWorld {
     /** `CraftWorld.getName()`: squaremap читает имя мира из NMS-хендла. */
     public String getName() {
         return "world";
+    }
+
+    /** Высота мира для CraftEngine/WorldBorder. */
+    public int getMinHeight() {
+        return -64;
+    }
+
+    public int getMaxHeight() {
+        return 320;
+    }
+
+    public int getHeight() {
+        return this.getMaxHeight() - this.getMinHeight();
     }
 }

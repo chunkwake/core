@@ -415,7 +415,8 @@ public class BlockBehaviour {
         }
 
         public org.bukkit.block.data.BlockData asBlockData() {
-            return null;
+            return dev.chunkwake.bridge.BlockDataImpl.fromState(
+                    (net.minecraft.world.level.block.state.BlockState) (Object) this);
         }
 
         /** NMS {@code BlockBehaviour.BlockStateBase.Cache}. */

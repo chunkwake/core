@@ -204,7 +204,28 @@ public class ServerLevel extends net.minecraft.world.level.Level implements Comm
     /** Блоки: настоящий state id из Rust-мира через мост. */
     @Override
     public net.minecraft.world.level.block.state.BlockState getBlockState(BlockPos pos) {
+        // Сначала Java-оверлей (CraftEngine place), затем реальное состояние Rust.
+        net.minecraft.world.level.block.state.BlockState overlay = super.getBlockState(pos);
+        if (!overlay.isAir()) {
+            return overlay;
+        }
+        // После рестарта custom-блок есть в CustomBlockStore, но не в оверлее.
+        // Восстанавливаем его до возврата состояния, чтобы CE isCustomBlock
+        // видел DelegatingBlockState, а не воздух из Rust.
+        dev.chunkwake.bridge.WorldImpl world = dev.chunkwake.bridge.WorldImpl.of(
+                (org.bukkit.World) this.getWorld());
+        if (world != null) {
+            net.minecraft.world.level.block.state.BlockState restored = world.restoreCustomBlock(pos);
+            if (restored != null && !restored.isAir()) {
+                return restored;
+            }
+        }
         return blockStateAt(this.dimensionKey, pos.getX(), pos.getY(), pos.getZ());
+    }
+
+    /** Состояние только из Java-оверлея, без запроса в Rust и без restore. */
+    public net.minecraft.world.level.block.state.BlockState overlayState(BlockPos pos) {
+        return super.getBlockState(pos);
     }
 
     /** Запрос state id у Rust: `@dim state x y z` -> число. */

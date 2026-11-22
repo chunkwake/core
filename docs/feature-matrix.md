@@ -7013,6 +7013,9 @@ CE ждёт заполненный `BuiltInRegistries.ITEM`; у нас
 
 ## CraftEngine 26.9.2 загрузился: 82/82, LOADERR пуст
 
+> УСТАРЕЛО: 82/82 было до исправления гейта (skipped) и NMS-слоя.
+> Актуальный гейт — 83/83, см. раздел о gameplay parity ниже.
+
 После того как `BlockReflections` прошёл, CE последовательно вскрывал
 следующие слои NMS. Каждый блокер снимался точечно, с проверкой через
 P4-пробник (`BukkitProxy.init` + `Class.forName` нужного класса CE) и
@@ -7093,6 +7096,10 @@ CE по-прежнему единственный LOADERR; геймплей-па
 
 ## CE уже загружается и включается, но контент ещё не грузится
 
+> УСТАРЕЛО: этот раздел описывает состояние до исправления block states,
+> parser и overlays. Актуальный результат — в разделе
+> «CE gameplay parity для default:topaz_ore достигнут на Chunkwake» ниже.
+
 После заполнения `BuiltInRegistries.ITEM`, `Registries`, сериализаторов,
 частиц и реестров CraftEngine 26.9.2 **загружается и включается** на
 Chunkwake:
@@ -7129,3 +7136,92 @@ Paper-эталон остаётся прежним: `place=true`, `custom=true`,
 Итог: загрузка CE закрыта, геймплей-паритет — нет. Следующий первый
 блокер — item wrapping (`CraftItemStack`), затем повторный `CEProbe` и
 сравнение с Paper.
+
+
+## CE gameplay parity для default:topaz_ore достигнут на Chunkwake
+
+После заполнения NMS-слоя (block states со свойствами из
+`reports/blocks.json`, `BlockStateParser`, `SoundType`, `NoteBlockInstrument`,
+`PushReaction`, `CraftWorldBorder`, `DataComponentType`, `LootParams`,
+`log4j2`) CraftEngine 26.9.2 не только включается, но и загружает весь
+`default_assets`: 40 блоков, включая `default:topaz_ore`, и 109 предметов.
+
+`CEProbe` на Chunkwake (чистый запуск, затем рестарт с тем же миром):
+
+```
+CEPROBE place-first=true
+CEPROBE persist at=1000,100,1000 custom=true type=BRICKS data=craftengine:custom_157 state=default:topaz_ore
+CEPROBE persist collision-boxes=[BoundingBox [0,0,0 -> 1,1,1]]
+CEPROBE fresh at=1002,100,1000 custom=true type=BRICKS data=craftengine:custom_157 state=default:topaz_ore
+CEPROBE drops=[NETHER_BRICKx1]
+CEPROBE dropped-entities=[NETHER_BRICKx1]
+```
+
+После рестарта (маркер `CEProbe/placed.flag` уже есть):
+
+```
+CEPROBE persist at=1000,100,1000 custom=true type=BRICKS data=craftengine:custom_157 state=default:topaz_ore
+CEPROBE persist collision-boxes=[BoundingBox [0,0,0 -> 1,1,1]]
+CEPROBE drops=[NETHER_BRICKx1]
+```
+
+Paper-эталон на том же `CEProbe`:
+
+```
+place-first=false (блок уже был поставлен), place-second=true
+persist custom=true type=BRICKS data=craftengine:custom_213 state=default:topaz_ore
+collision-boxes=[BoundingBox [0,0,0 -> 1,1,1]]
+drops=[NETHER_BRICKx1]
+dropped-entities=[NETHER_BRICKx1, NETHER_BRICKx1, NETHER_BRICKx1]
+```
+
+Совпадают: наличие custom-блока, `Block#getState` (`default:topaz_ore`),
+deceive material (`BRICKS`), полная коллизия, дроп (`NETHER_BRICKx1`) и
+восстановление после рестарта. Отличаются: внутренний id visual-состояния
+(`custom_157` против `custom_213` — зависит от порядка аллокации), класс
+`BlockData` (Chunkwake-прокси против `CraftBlockData`) и
+`dropped-entities`: на Chunkwake теперь тоже появляется Item-entity
+(`[NETHER_BRICKx1]`); Paper в этом прогоне показал три старых entity,
+накопленных предыдущими запусками.
+
+### Что добавлено в этом шаге
+
+- `BlockBootstrap` читает `properties`/`states` из `reports/blocks.json`,
+  создаёт `BooleanProperty`/`IntegerProperty`/`StringProperty`, очищает
+  `Block.BLOCK_STATE_REGISTRY` и связывает `Blocks.*` с полными блоками.
+- `BlockStateParser.parseForBlock` разбирает `namespace:block[k=v,...]`
+  и возвращает реальное состояние с id из данных.
+- `Level`/`ServerLevel` получили Java-оверлей блоков: CE `place` пишет
+  custom-состояние, `BlockGetter` читает его, Bukkit `Block` видит
+  `BRICKS`/`craftengine:custom_*`, коллизию и дропы.
+- `CustomBlockStore` сохраняет `dimension x y z block-definition-id` в
+  `chunkwake-custom-blocks.txt`; после рестарта состояние лениво
+  восстанавливается через `CraftEngineBlocks.place`.
+- `DataComponentType` с passthrough-codec, `LootParams.Builder` с
+  ORIGIN/TOOL, `SoundType`, `NoteBlockInstrument`, `PushReaction`,
+  `CraftWorldBorder`, `MultiPackResourceManager`-совместимые заглушки.
+- `log4j2.xml`: CE INFO/WARN теперь видны в логе (раньше log4j2 по
+  умолчанию печатал только ERROR).
+
+### Гейт и тесты
+
+```
+расширенный: 83 of 83 enabled in 60718 ms
+  LOADERR: (пусто); FAILED: (пусто); SKIPPED: (пусто); PANICS: 0
+базовый: enabled 27 plugin(s) in 23284 ms; PANICS: 0
+Java: 62 теста
+cargo fmt/clippy -> 0
+cargo test --workspace -> 45 suites, 953 passed
+```
+
+### Ограничения
+
+- Это parity для `default:topaz_ore`; произвольные Paper/Folia-плагины и
+  произвольный CE-контент по-прежнему не доказаны.
+- Persistence хранит только id block definition; свойства custom-состояния
+  (например, `facing`) пока не сериализуются.
+- Java-зеркало Item-entity ограничено 4096 записями и не является полной
+  заменой Rust-entity слоя; для геймплея предметы по-прежнему спавнятся
+  через `dropitem` в Rust.
+- Заявка на производительность остаётся снятой: строгого A/B выше шума
+  по всему серверу нет.

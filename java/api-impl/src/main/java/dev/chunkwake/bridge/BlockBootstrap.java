@@ -5,9 +5,12 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.io.Reader;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -22,16 +25,21 @@ import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.tags.TagKey;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BooleanProperty;
+import net.minecraft.world.level.block.state.properties.IntegerProperty;
+import net.minecraft.world.level.block.state.properties.Property;
+import net.minecraft.world.level.block.state.properties.StringProperty;
 import net.minecraft.world.level.material.FluidState;
 
 /**
  * Наполняет NMS-реестр блоков из настоящих данных генератора:
- * {@code reports/blocks.json} (id состояний) и
+ * {@code reports/blocks.json} (id и значения свойств состояний) и
  * {@code data/minecraft/tags/block/**.json}.
  *
  * <p>Нужно плагинам, которые читают {@code BuiltInRegistries.BLOCK}
- * напрямую (Orebfuscator), а не через {@code Server.getTag}.
+ * напрямую (CraftEngine, Orebfuscator), а не через {@code Server.getTag}.
  */
 final class BlockBootstrap {
     private BlockBootstrap() {
@@ -46,42 +54,138 @@ final class BlockBootstrap {
             Bridge.log(1, "blocks: blocks.json not found at " + reports);
             return;
         }
-        int blocks = 0;
-        int states = 0;
+        int blockCount = 0;
+        int stateCount = 0;
         try (Reader reader = Files.newBufferedReader(reports)) {
             JsonObject root = JsonParser.parseReader(reader).getAsJsonObject();
+            // В Blocks.<clinit> уже лежат заглушки с id 0..N. Реальные id
+            // начинаются с нуля, поэтому реестр нужно очистить, иначе
+            // состояние с id 0 останется заглушкой air.
+            Block.BLOCK_STATE_REGISTRY.clear();
             for (Map.Entry<String, JsonElement> entry : root.entrySet()) {
                 String name = entry.getKey();
-                JsonArray stateArray = entry.getValue().getAsJsonObject()
-                        .getAsJsonArray("states");
+                JsonObject definition = entry.getValue().getAsJsonObject();
+                JsonArray stateArray = definition.getAsJsonArray("states");
                 if (stateArray == null) {
                     continue;
                 }
+                Map<String, Property<?>> properties = parseProperties(name,
+                        definition.getAsJsonObject("properties"));
                 Block block = new Block(name);
                 List<BlockState> list = new ArrayList<>(stateArray.size());
                 BlockState defaultState = null;
                 for (JsonElement element : stateArray) {
                     JsonObject stateJson = element.getAsJsonObject();
                     int id = stateJson.get("id").getAsInt();
+                    Map<Property<?>, Comparable<?>> values = parseValues(stateJson, properties);
                     boolean air = isAir(name);
                     BlockState state = new BlockState(block, id, air, !air, false,
-                            fluidOf(name));
+                            fluidOf(name), values);
                     Block.BLOCK_STATE_REGISTRY.addMapping(state, id);
                     list.add(state);
-                    states++;
+                    stateCount++;
                     if (defaultState == null || stateJson.has("default")) {
                         defaultState = state;
                     }
                 }
-                block.defineStates(list, defaultState);
+                block.defineStates(list, defaultState, properties.values());
                 BuiltInRegistries.BLOCK.register(Identifier.parse(name), block);
-                blocks++;
+                blockCount++;
             }
+            linkBlocksFields();
             int tags = loadTags(dataDir);
-            Bridge.log(2, "blocks: " + blocks + " blocks, " + states + " states, "
+            Bridge.log(2, "blocks: " + blockCount + " blocks, " + stateCount + " states, "
                     + tags + " tags");
         } catch (Throwable broken) {
             Bridge.log(1, "blocks: bootstrap failed: " + broken);
+        }
+    }
+
+    /** Создаёт Property-объекты по секции {@code properties} из blocks.json. */
+    private static Map<String, Property<?>> parseProperties(String blockName, JsonObject json) {
+        Map<String, Property<?>> out = new LinkedHashMap<>();
+        if (json == null) {
+            return out;
+        }
+        for (Map.Entry<String, JsonElement> entry : json.entrySet()) {
+            String name = entry.getKey();
+            JsonElement value = entry.getValue();
+            if (value == null || !value.isJsonArray()) {
+                continue;
+            }
+            JsonArray array = value.getAsJsonArray();
+            List<String> strings = new ArrayList<>(array.size());
+            for (JsonElement element : array) {
+                strings.add(element.getAsString());
+            }
+            if (strings.size() == 2 && strings.contains("true") && strings.contains("false")) {
+                out.put(name, BooleanProperty.create(name));
+            } else if (!strings.isEmpty() && strings.stream().allMatch(BlockBootstrap::isInteger)) {
+                int min = strings.stream().mapToInt(Integer::parseInt).min().orElse(0);
+                int max = strings.stream().mapToInt(Integer::parseInt).max().orElse(0);
+                out.put(name, IntegerProperty.create(name, min, max));
+            } else {
+                out.put(name, StringProperty.create(name, strings));
+            }
+        }
+        return out;
+    }
+
+    private static Map<Property<?>, Comparable<?>> parseValues(JsonObject stateJson,
+            Map<String, Property<?>> properties) {
+        Map<Property<?>, Comparable<?>> values = new LinkedHashMap<>();
+        JsonObject stateProperties = stateJson.getAsJsonObject("properties");
+        if (stateProperties == null) {
+            return values;
+        }
+        for (Map.Entry<String, JsonElement> entry : stateProperties.entrySet()) {
+            Property<?> property = properties.get(entry.getKey());
+            if (property == null) {
+                continue;
+            }
+            Comparable<?> parsed = parseValue(property, entry.getValue().getAsString());
+            if (parsed != null) {
+                values.put(property, parsed);
+            }
+        }
+        return values;
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static Comparable<?> parseValue(Property<?> property, String text) {
+        return (Comparable<?>) ((Property) property).parseValue(text).orElse(null);
+    }
+
+    private static boolean isInteger(String value) {
+        try {
+            Integer.parseInt(value);
+            return true;
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * Связывает статические поля {@code Blocks} с полными блоками из реестра.
+     * CraftEngine (и другие плагины) берёт {@code Blocks.NOTE_BLOCK} напрямую,
+     * поэтому одного {@code BuiltInRegistries.BLOCK} недостаточно.
+     */
+    private static void linkBlocksFields() {
+        for (Field field : Blocks.class.getDeclaredFields()) {
+            if (field.getType() != Block.class || !Modifier.isStatic(field.getModifiers())) {
+                continue;
+            }
+            String id = "minecraft:" + field.getName().toLowerCase(java.util.Locale.ROOT);
+            Block real = BuiltInRegistries.BLOCK.getValue(Identifier.parse(id));
+            if (real == null) {
+                continue;
+            }
+            try {
+                field.setAccessible(true);
+                field.set(null, real);
+            } catch (Throwable ignored) {
+                // final-поле может быть защищено; реестр всё равно заполнен.
+            }
         }
     }
 

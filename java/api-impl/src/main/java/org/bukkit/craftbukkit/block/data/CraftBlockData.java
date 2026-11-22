@@ -17,6 +17,6 @@ public interface CraftBlockData {
 
     static org.bukkit.block.data.BlockData fromData(
             net.minecraft.world.level.block.state.BlockState state) {
-        return null;
+        return dev.chunkwake.bridge.BlockDataImpl.fromState(state);
     }
 }

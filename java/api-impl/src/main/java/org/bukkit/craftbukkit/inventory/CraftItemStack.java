@@ -64,9 +64,9 @@ public class CraftItemStack extends org.bukkit.inventory.ItemStack {
         return new CraftItemStack(bukkit);
     }
 
-    /** Paper-метод {@code asBukkitMirror}: копия из NMS-стеков. */
+    /** Paper-метод {@code asBukkitMirror}: всегда CraftItemStack. */
     public static org.bukkit.inventory.ItemStack asBukkitMirror(ItemStack stack) {
-        return asBukkitCopy(stack);
+        return asCraftMirror(stack);
     }
 
     public static org.bukkit.inventory.ItemStack asBukkitCopy(ItemStack stack) {

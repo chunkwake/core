@@ -4,7 +4,16 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.state.BlockState;
 
 /** NMS {@code Level} (минимально, но с настоящей иерархией). */
-public class Level implements LevelAccessor, net.minecraft.world.level.LevelHeightAccessor {
+public class Level implements LevelAccessor, net.minecraft.world.level.LevelHeightAccessor,
+        net.minecraft.world.level.LevelWriter {
+    /**
+     * Java-оверлей блоков. CraftEngine ставит custom-состояния через
+     * {@code LevelWriter.setBlock}; Bukkit-блоки читают тот же overlay.
+     * Истинная геометрия/тик по-прежнему в Rust, но для API-контракта
+     * (isCustomBlock/place/getBlockData) нужен видимый NMS-слой.
+     */
+    private final java.util.Map<net.minecraft.core.BlockPos, BlockState> overlay =
+            new java.util.concurrent.ConcurrentHashMap<>();
     /** {@code Level.updateNeighborsAt(BlockPos, Block[, Orientation])} (CraftEngine). */
     public void updateNeighborsAt(net.minecraft.core.BlockPos pos,
             net.minecraft.world.level.block.Block block) {
@@ -63,7 +72,7 @@ public class Level implements LevelAccessor, net.minecraft.world.level.LevelHeig
     }
 
     public boolean removeBlock(net.minecraft.core.BlockPos pos, boolean move) {
-        return false;
+        return this.overlay.remove(pos) != null;
     }
 
     public void removeBlockEntity(net.minecraft.core.BlockPos pos) {
@@ -95,11 +104,34 @@ public class Level implements LevelAccessor, net.minecraft.world.level.LevelHeig
 
     @Override
     public BlockState getBlockState(BlockPos pos) {
-        return net.minecraft.world.level.block.Blocks.AIR.defaultBlockState();
+        if (pos == null) {
+            return net.minecraft.world.level.block.Blocks.AIR.defaultBlockState();
+        }
+        BlockState state = this.overlay.get(pos);
+        return state == null ? net.minecraft.world.level.block.Blocks.AIR.defaultBlockState() : state;
     }
 
     @Override
     public boolean setBlock(BlockPos pos, BlockState state, int flags) {
+        if (pos == null) {
+            return false;
+        }
+        if (state == null || state.isAir()) {
+            this.overlay.remove(pos);
+        } else {
+            this.overlay.put(pos, state);
+        }
+        return true;
+    }
+
+    @Override
+    public boolean setBlock(BlockPos pos, BlockState state, int flags, int recursionLeft) {
+        return this.setBlock(pos, state, flags);
+    }
+
+    @Override
+    public boolean destroyBlock(BlockPos pos, boolean dropBlock,
+            net.minecraft.world.entity.Entity entity, int recursionLeft) {
         return true;
     }
 

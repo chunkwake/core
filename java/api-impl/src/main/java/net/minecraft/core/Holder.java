@@ -88,6 +88,10 @@ public interface Holder<T> {
         public void bindComponents(net.minecraft.core.component.DataComponentMap components) {
         }
 
+        public net.minecraft.resources.ResourceKey<T> key() {
+            return this.key;
+        }
+
         public net.minecraft.resources.ResourceKey<T> getKey() {
             return this.key;
         }

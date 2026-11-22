@@ -28,7 +28,7 @@ public class SimpleRegistry<T> extends MappedRegistry<T> implements Registry<T> 
     @Override
     public Identifier getKey(T value) {
         for (Map.Entry<Identifier, T> entry : this.values.entrySet()) {
-            if (entry.getValue() == value) {
+            if (java.util.Objects.equals(entry.getValue(), value)) {
                 return entry.getKey();
             }
         }

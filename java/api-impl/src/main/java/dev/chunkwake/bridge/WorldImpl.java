@@ -7,6 +7,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.nio.file.Path;
 import java.util.UUID;
 import org.bukkit.Location;
 import org.bukkit.NamespacedKey;
@@ -25,7 +26,7 @@ import org.bukkit.entity.Player;
  * {@code data/paper/metadata.dat} и {@code data/paper/persistent_data_container.dat}
  * каталога измерения: мир с Paper переносится вместе с ними.
  */
-final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implements WorldHandle {
+public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implements WorldHandle {
     static final String OVERWORLD = "minecraft:overworld";
     static final String NETHER = "minecraft:the_nether";
     static final String END = "minecraft:the_end";
@@ -41,17 +42,72 @@ final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implements World
     /** NMS-уровень для плагинов (Orebfuscator: {@code world.getHandle()}). */
     private final net.minecraft.server.level.ServerLevel handle =
             new net.minecraft.server.level.ServerLevel();
+    /** Java-зеркало дропнутых предметов для getEntities/getNearbyEntities. */
+    private final List<BlockEvents.GroundItem> groundItems =
+            new java.util.concurrent.CopyOnWriteArrayList<>();
 
     WorldImpl(ChunkwakeServer server, String dim) {
         this.server = server;
         this.dim = dim;
+        // CE читает поле CraftWorld.world (FieldGetter), а не getHandle();
+        // оба должны указывать на один ServerLevel, иначе CE пишет в один
+        // мир, а Bukkit/BlockImpl читают из другого.
+        this.world = this.handle;
+        ((org.bukkit.craftbukkit.CraftWorld) this.api).world = this.handle;
         this.handle.setWorld((org.bukkit.craftbukkit.CraftWorld) this.api);
         this.handle.setDimension(this.dim);
+        try {
+            Path level = this.server.getLevelDirectory();
+            Path store = (level == null ? Path.of(".") : level)
+                    .resolve("chunkwake-custom-blocks.txt");
+            CustomBlockStore.bind(this.dim, store);
+        } catch (Throwable ignored) {
+            // без каталога мира persistence просто отключён
+        }
     }
 
     @Override
     public net.minecraft.server.level.ServerLevel getHandle() {
         return this.handle;
+    }
+
+    /**
+     * Восстанавливает custom-блок из CustomBlockStore через CE place.
+     * Вызывается лениво из {@code ServerLevel.getBlockState}.
+     */
+    public net.minecraft.world.level.block.state.BlockState restoreCustomBlock(
+            net.minecraft.core.BlockPos pos) {
+        if (CustomBlockStore.restoring()) {
+            return null;
+        }
+        String id = CustomBlockStore.get(this.dim, pos);
+        if (id == null) {
+            return null;
+        }
+        CustomBlockStore.restoring(true);
+        try {
+            org.bukkit.plugin.Plugin plugin =
+                    org.bukkit.Bukkit.getPluginManager().getPlugin("CraftEngine");
+            if (plugin == null) {
+                return null;
+            }
+            ClassLoader loader = plugin.getClass().getClassLoader();
+            Class<?> api = Class.forName(
+                    "net.momirealms.craftengine.bukkit.api.CraftEngineBlocks", true, loader);
+            Class<?> keyClass = Class.forName(
+                    "net.momirealms.craftengine.core.util.Key", true, loader);
+            Object key = keyClass.getMethod("of", String.class).invoke(null, id);
+            org.bukkit.Location location = new org.bukkit.Location(
+                    this.api, pos.getX(), pos.getY(), pos.getZ());
+            api.getMethod("place", org.bukkit.Location.class, keyClass, boolean.class)
+                    .invoke(null, location, key, false);
+            net.minecraft.world.level.block.state.BlockState state = this.handle.overlayState(pos);
+            return state == null || state.isAir() ? null : state;
+        } catch (Throwable ignored) {
+            return null;
+        } finally {
+            CustomBlockStore.restoring(false);
+        }
     }
 
     /** Запрос к миру этого измерения. */
@@ -65,7 +121,7 @@ final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implements World
         return impl != null ? impl.request(line) : Bridge.world("@" + OVERWORLD + " " + line);
     }
 
-    static WorldImpl of(World w) {
+    public static WorldImpl of(World w) {
         if (w instanceof WorldApi api) {
             return api.impl instanceof WorldImpl wi ? wi : null;
         }
@@ -512,6 +568,9 @@ final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implements World
     public List<Entity> getEntities() {
         List<Entity> out = new ArrayList<>(getPlayers());
         out.addAll(MobImpl.all(this));
+        for (BlockEvents.GroundItem item : this.groundItems) {
+            out.add(Stub.of(org.bukkit.entity.Item.class, item));
+        }
         return out;
     }
 
@@ -559,7 +618,13 @@ final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implements World
             throw new IllegalArgumentException("Cannot drop air");
         }
         request("dropitem " + l.getX() + " " + l.getY() + " " + l.getZ() + " " + (natural ? 1 : 0) + " " + line);
-        return Stub.of(org.bukkit.entity.Item.class, new BlockEvents.GroundItem(l.clone(), s.clone()));
+        BlockEvents.GroundItem item = new BlockEvents.GroundItem(l.clone(), s.clone());
+        this.groundItems.add(item);
+        // Не даём Java-зеркалу расти бесконечно на долгоживущем мире.
+        while (this.groundItems.size() > 4096) {
+            this.groundItems.remove(0);
+        }
+        return Stub.of(org.bukkit.entity.Item.class, item);
     }
 
     @Override
