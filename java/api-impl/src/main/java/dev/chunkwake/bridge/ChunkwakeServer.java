@@ -358,6 +358,7 @@ final class ChunkwakeServer {
         // interface, PacketEvents is loaded after it alphabetically).
         java.util.Set<String> loadedNames = new java.util.HashSet<>(plugins.plugins.keySet());
         List<PluginLoader> loaders = new ArrayList<>(order.size());
+        int skipped = 0;
         List<PluginDescriptionFile> descriptions = new ArrayList<>(order.size());
         List<File> loaderJars = new ArrayList<>(order.size());
         for (int i = 0; i < order.size(); i++) {
@@ -386,6 +387,8 @@ final class ChunkwakeServer {
                 if (!Internals.report(logger, jar.getName(), "loading", t)) {
                     logger.log(Level.SEVERE, "Could not load " + jar.getName(), t);
                     logCauseChain(jar.getName(), t);
+                } else {
+                    skipped++;
                 }
             }
         }
@@ -436,6 +439,8 @@ final class ChunkwakeServer {
                 if (!Internals.report(logger, jar.getName(), "loading", t)) {
                     logger.log(Level.SEVERE, "Could not load " + jar.getName(), t);
                     logCauseChain(jar.getName(), t);
+                } else {
+                    skipped++;
                 }
             }
         }
@@ -477,8 +482,9 @@ final class ChunkwakeServer {
         commands.setFallbackCommands();
         help.rebuild(commands.getCommands());
         publishCommands();
-        logger.info("plugins: " + enabled + " of " + loaded.size() + " enabled in "
-                + ms(started) + " ms");
+        logger.info("plugins: " + enabled + " of " + loaded.size() + " enabled"
+                + (skipped > 0 ? ", " + skipped + " skipped (missing server internals)" : "")
+                + " in " + ms(started) + " ms");
         plugins.callEvent(new org.bukkit.event.server.ServerLoadEvent(loadType));
         return enabled;
     }

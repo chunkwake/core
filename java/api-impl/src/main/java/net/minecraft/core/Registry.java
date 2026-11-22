@@ -4,7 +4,7 @@ import java.util.Optional;
 import net.minecraft.resources.Identifier;
 
 /** NMS {@code Registry} — интерфейс (как в 26.x). */
-public interface Registry<T> extends HolderLookup.RegistryLookup<T> {
+public interface Registry<T> extends HolderLookup.RegistryLookup<T>, Iterable<T> {
     void register(Identifier id, T value);
 
     Optional<Holder.Reference<T>> get(Identifier id);

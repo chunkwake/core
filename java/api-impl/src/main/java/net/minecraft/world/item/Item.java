@@ -1,7 +1,7 @@
 package net.minecraft.world.item;
 
 /** Минимальный NMS {@code Item} (id предмета). */
-public class Item {
+public class Item implements ProjectileItem, net.minecraft.world.level.ItemLike {
     /** {@code Item.canBeDepleted()} (CraftEngine). */
     public boolean canBeDepleted() {
         return true;
@@ -35,6 +35,11 @@ public class Item {
     }
 
     private final String id;
+
+    @Override
+    public Item asItem() {
+        return this;
+    }
 
     public Item(String id) {
         this.id = id;

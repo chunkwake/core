@@ -12,7 +12,7 @@ import net.minecraft.server.network.ServerConnectionListener;
  */
 public class MinecraftServer {
     public static final String VERSION = "26.3";
-    public static final MinecraftServer SERVER = new MinecraftServer();
+    public static final MinecraftServer SERVER = new net.minecraft.server.dedicated.DedicatedServer();
 
     public final ServerConnectionListener connection = new ServerConnectionListener();
 
@@ -79,6 +79,19 @@ public class MinecraftServer {
 
     public boolean isRunning() {
         return true;
+    }
+
+    public boolean isUnderSpawnProtection(net.minecraft.server.level.ServerLevel level,
+            net.minecraft.core.BlockPos pos, net.minecraft.world.entity.player.Player player) {
+        return false;
+    }
+
+    public net.minecraft.server.packs.repository.PackRepository getPackRepository() {
+        return new net.minecraft.server.packs.repository.PackRepository();
+    }
+
+    public net.minecraft.server.ReloadableServerRegistries reloadableRegistries() {
+        return null;
     }
 
     /** Ключи измерений (Axiom обходит их каждый тик). */

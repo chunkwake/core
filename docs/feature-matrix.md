@@ -6943,6 +6943,74 @@ cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
 
+## ПОПРАВКА: раздел ниже ошибочен — CE на Chunkwake не загрузился
+
+Раздел «CraftEngine 26.9.2 загрузился» ниже написан по строке гейта
+`82 of 82 enabled`, но она считала только **загруженные** плагины: CE
+падал при загрузке и в это число не входил. Полный гейт на момент
+проверки:
+
+```
+расширенный: 82 of 82 enabled
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar
+  PANICS: 0
+```
+
+То есть CE — по-прежнему LOADERR, а не успешно загруженный плагин.
+
+### Геймплей-паритет: Paper vs Chunkwake
+
+Один и тот же `CEProbe` (CE API `CraftEngineBlocks.place`) на Paper 26.3
+build 248 и Chunkwake 26.3.
+
+Paper (эталон):
+
+```
+CEPROBE place-first=true
+CEPROBE persist custom=true type=BRICKS data=craftengine:custom_213 state=default:topaz_ore
+CEPROBE persist collision-boxes=[BoundingBox [minX=0.0, minY=0.0, minZ=0.0, maxX=1.0, maxY=1.0, maxZ=1.0]]
+CEPROBE fresh custom=true type=BRICKS data=craftengine:custom_213 state=default:topaz_ore
+CEPROBE drops=[NETHER_BRICKx1]
+CEPROBE dropped-entities=[NETHER_BRICKx1]
+```
+
+После рестарта блок остался кастомным (`custom=true`,
+`state=default:topaz_ore`) — персистентность есть.
+
+Chunkwake (факт):
+
+```
+CEPROBE place-first=false
+CEPROBE persist custom=false type=AIR data=minecraft:air state=null
+CEPROBE persist collision-boxes=[]
+CEPROBE fresh custom=false type=AIR data=minecraft:air state=null
+CEPROBE drops=[]
+CEPROBE dropped-entities=[]
+```
+
+Причина — CE не загружается. Цепочка закрытых блокеров: `DefaultDispenseItemBehavior`,
+`ProjectileItem`/`ItemLike`, `HandshakeProtocols`/`StatusProtocols`/
+`LoginProtocols`/`ConfigurationProtocols`/`GameProtocols`,
+`ProtocolInfo.Details`, `MinecraftServer` как `DedicatedServer`,
+`DedicatedServerProperties`, пакетные прокси
+(`HashedStack`/`HashedPatchMap`, `ClientboundSetEntityDataPacket`,
+`ItemStackTemplate`, `SoundEvent`), `FireBlock`, `PackRepository`,
+`ResourceManager`/`FileToIdConverter`, `Registry extends Iterable`,
+`MappedRegistry implements IdMap`.
+
+Текущий первый блокер:
+
+```
+NullPointerException
+  at Objects.requireNonNull
+  at CraftEngine BukkitItemManager.registerAllVanillaItems(BukkitItemManager.java:612)
+```
+
+CE ждёт заполненный `BuiltInRegistries.ITEM`; у нас
+зарегистрированы только `minecraft:air` и `minecraft:bedrock`.
+До заполнения реестра предметов геймплей-паритет на Chunkwake
+недостижим.
+
 ## CraftEngine 26.9.2 загрузился: 82/82, LOADERR пуст
 
 После того как `BlockReflections` прошёл, CE последовательно вскрывал
@@ -7004,3 +7072,20 @@ cargo +1.100.0 test --workspace -- --test-threads=4
 инъекцию блоков/рецептов/раздатчиков. Геймплей кастомных блоков
 (дропы, формы, поведение) на наших no-op NMS-заглушках не проверялся;
 это следующий уровень валидации, а не «CE полностью эквивалентен Paper».
+
+
+### Итог проверки
+
+```
+расширенный: 82 of 82 enabled in 45437 ms
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: enabled 27 plugin(s) in 18153 ms; PANICS: 0
+Java: 62 теста
+cargo fmt/clippy -> 0
+cargo test --workspace -> 45 suites, 953 passed
+```
+
+CE по-прежнему единственный LOADERR; геймплей-паритет на Chunkwake
+не подтверждён. На Paper эталон снят и зафиксирован выше. Следующий шаг —
+заполнить `BuiltInRegistries.ITEM` ванильными предметами (или сделать
+`Registry`/`Item` совместимыми с ожиданиями CE) и повторить `CEProbe`.

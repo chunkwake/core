@@ -83,6 +83,10 @@ public final class BuiltInRegistries {
     }
 
     static {
+        ITEM.register(net.minecraft.resources.Identifier.parse("minecraft:bedrock"),
+                new net.minecraft.world.item.Item("minecraft:bedrock"));
+        ITEM.register(net.minecraft.resources.Identifier.parse("minecraft:air"),
+                new net.minecraft.world.item.Item("minecraft:air"));
         REGISTRY.register(net.minecraft.resources.Identifier.parse("minecraft:command_argument_type"),
                 COMMAND_ARGUMENT_TYPE);
         argument("uuid", net.minecraft.commands.arguments.UuidArgument.class);

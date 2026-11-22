@@ -10,7 +10,7 @@ import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
 
 /** NMS {@code MappedRegistry}: реестр id/ключ -> значение. */
-public class MappedRegistry<T> implements Registry<T> {
+public class MappedRegistry<T> implements Registry<T>, IdMap<T> {
     private final Map<Identifier, T> byKey = new LinkedHashMap<>();
     /** Поле, которое ищет CraftEngine (MappedRegistryProxy#isFrozen). */
     private boolean frozen;

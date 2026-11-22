@@ -32,6 +32,10 @@ public class DedicatedServer extends MinecraftServer {
         return new DedicatedServer();
     }
 
+    public DedicatedServerProperties getProperties() {
+        return this.settings.getProperties();
+    }
+
     /** `DedicatedServer.getCommands()`: диспетчер Brigadier для плагинов. */
     public net.minecraft.commands.Commands getCommands() {
         return this.commands;

@@ -2,6 +2,8 @@ package net.minecraft.sounds;
 
 /** NMS-заглушка {@code SoundEvent} (CommandAPI проверяет наличие). */
 public class SoundEvent {
+    public static final Object DIRECT_STREAM_CODEC = null;
+
     /** Поле, которое ищет CraftEngine (SoundEventProxy#getLocation). */
     private net.minecraft.resources.Identifier location;
     private java.util.Optional<Float> fixedRange = java.util.Optional.empty();

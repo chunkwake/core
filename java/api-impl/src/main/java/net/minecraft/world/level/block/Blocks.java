@@ -596,7 +596,7 @@ public final class Blocks {
     public static final Block FERN = new Block();
     public static final Block FIELD_MASONED_BANNER_PATTERN = new Block();
     public static final Block FILLED_MAP = new Block();
-    public static final Block FIRE = new Block();
+    public static final Block FIRE = new FireBlock();
     public static final Block FIREFLY_BUSH = new Block();
     public static final Block FIREWORK_ROCKET = new Block();
     public static final Block FIREWORK_STAR = new Block();

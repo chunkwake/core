@@ -7,8 +7,4 @@ public interface Position {
     double y();
 
     double z();
-
-    default BlockPos blockPosition() {
-        return BlockPos.containing(this.x(), this.y(), this.z());
-    }
 }

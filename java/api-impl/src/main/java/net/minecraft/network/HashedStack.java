@@ -1,16 +1,21 @@
 package net.minecraft.network;
 
-/** NMS {@code HashedStack} (CraftEngine). */
-public class HashedStack {
-    public HashedStack() {
-    }
+/** NMS {@code HashedStack}. */
+public interface HashedStack {
+    HashedStack EMPTY = new HashedStack() {
+        @Override
+        public boolean matches(net.minecraft.world.item.ItemStack stack,
+                HashedPatchMap.HashGenerator generator) {
+            return true;
+        }
+    };
 
-    public Object getStreamCodec() {
-        return null;
-    }
+    Object STREAM_CODEC = null;
 
-    public static boolean matches(HashedStack stack, net.minecraft.world.item.ItemStack expected,
-            net.minecraft.world.item.ItemStack actual) {
-        return false;
+    boolean matches(net.minecraft.world.item.ItemStack stack, HashedPatchMap.HashGenerator generator);
+
+    static HashedStack create(net.minecraft.world.item.ItemStack stack,
+            HashedPatchMap.HashGenerator generator) {
+        return EMPTY;
     }
 }

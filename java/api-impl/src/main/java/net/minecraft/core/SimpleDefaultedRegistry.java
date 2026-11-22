@@ -19,4 +19,16 @@ public class SimpleDefaultedRegistry<T> extends SimpleRegistry<T> implements Def
     public T defaultValue() {
         return this.getValue(this.defaultKey);
     }
+
+    @Override
+    public int getId(T value) {
+        int id = super.getId(value);
+        return id < 0 ? 0 : id;
+    }
+
+    @Override
+    public T byId(int id) {
+        T value = super.byId(id);
+        return value == null ? defaultValue() : value;
+    }
 }

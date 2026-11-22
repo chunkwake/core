@@ -94,4 +94,9 @@ public class SimpleRegistry<T> extends MappedRegistry<T> implements Registry<T> 
         }
         return null;
     }
+
+    @Override
+    public java.util.Iterator<T> iterator() {
+        return this.values.values().iterator();
+    }
 }

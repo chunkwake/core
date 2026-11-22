@@ -68,7 +68,13 @@ final class BlockDataImpl {
         if (props.containsKey("lit")) ifaces.add(org.bukkit.block.data.Lightable.class);
         if (props.containsKey("power")) ifaces.add(org.bukkit.block.data.AnaloguePowerable.class);
         ifaces.add(BlockData.class);
+        ifaces.add(org.bukkit.craftbukkit.block.data.CraftBlockData.class);
         return (BlockData) Stub.ofAll(ifaces.toArray(new Class<?>[0]), this);
+    }
+
+    public net.minecraft.world.level.block.state.BlockState getState() {
+        return new net.minecraft.world.level.block.state.BlockState(
+                new net.minecraft.world.level.block.Block(name));
     }
 
     public Material getMaterial() {
