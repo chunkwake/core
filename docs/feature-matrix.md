@@ -6752,3 +6752,40 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## Oracle-прогон на Paper 26.3: MiniMOTD и LevelledMobs там включаются
+
+Чтобы отделить баги плагинов от наших дыр, те же jar'ы запущены на
+локальном Paper 26.3 (build 248, `E:\minecraft_server\data\paper-26.3-248.jar`):
+
+```
+[MiniMOTD] Enabling MiniMOTD v2.2.5          -> включился
+[LevelledMobs] Enabling LevelledMobs v4.5.3.2 -> включился
+[ChunkwakeTest] bukkit-version=26.3.build.248-stable version=26.3-248-... (MC: 26.3)
+```
+
+На Chunkwake оба падают (MiniMOTD — свой Nag по версии/платформе,
+LevelledMobs — `EntityType.valueOf("ENDER_CRYSTAL")`). Значит это **наши**
+пробелы, а не «самоотключение плагинов».
+
+### EntityType: у Paper пропатченный runtime-класс
+
+Проверка `EntityType.valueOf("ENDER_CRYSTAL")`:
+
+- paper-api 26.3 build 209 (наш) — `IllegalArgumentException`;
+- paper-api 26.3 build 248 (из libraries Paper) — тоже
+  `IllegalArgumentException`;
+- на живом Paper 26.3 (тот же 248) — **работает**, возвращает `END_CRYSTAL`.
+
+То есть Paper в рантайме использует пропатченный `org.bukkit.entity.EntityType`
+(legacy-алиасы), которого нет в публичном paper-api jar. Аналогично, вероятно,
+патчится `Material`/`ItemStack` (влияет на MiniMOTD-детект платформы).
+
+Следствие: для паритета с Paper нужен слой «paper runtime API patches»
+(минимум `EntityType`/`Material`), а не только paper-api jar. Пробники
+(логирование версии/ItemStack/valueOf) в тестовый плагин добавлялись
+временно и откачены; стенд oracle-прогона — `target\ab` и
+`%TEMP%\opencode\paper-plugins-check`.
+
+Гейты не менялись (код возвращён к закоммиченному): 79/82, 26/27,
+P2 263/241, PANICS 0.
