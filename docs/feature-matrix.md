@@ -7390,3 +7390,76 @@ FAILED: (пусто); LOADERR: (пусто); SKIPPED: (пусто); PANICS: 0
 - `HorizonFrontier` требует MariaDB; для его проверки нужна внешняя БД.
 - `CustomShapes` покрывает типовые носители; экзотические формы (заборы,
   стены, кнопки, сложные inner/outer stairs) пока дают fallback.
+
+
+## Broadened gate: Chunky Folia build + встроенный FoliaProbe
+
+Для проверки Folia-совместимости в гейт добавлен реальный сторонний
+плагин `Chunky-Bukkit 1.5.3` (`folia-supported: true`, без внешней БД) вместо
+Paper-сборки Chunky. Гейт:
+
+```
+83 of 83 enabled in 48433 ms
+FAILED: (пусто); LOADERR: (пусто); SKIPPED: (пусто); PANICS: 0
+```
+
+Chunky загрузился и зарегистрировал API:
+
+```
+[Chunky] Enabling Chunky v1.5.3
+[ChunkwakeTest] service: org.popcraft.chunky.Chunky <- Chunky
+[ChunkwakeTest] service: org.popcraft.chunky.api.ChunkyAPI <- Chunky
+[ChunkyBorder] Enabling ChunkyBorder v1.2.75
+[ChunkwakeTest] service: org.popcraft.chunkyborder.ChunkyBorder <- ChunkyBorder
+```
+
+Базовый гейт с обновлённым тестовым плагином:
+
+```
+27 plugin(s) in 17850 ms; PANICS: 0
+```
+
+### Folia scheduler probe теперь в repo test plugin
+
+`ChunkwakeTestPlugin.foliaProbe()` дополнен счётчиком и проверкой завершения
+global/region/async. Живой прогон:
+
+```
+folia: owned on enable=false global=true
+folia: done region-delayed (1/4)
+folia: done async-delayed (2/4)
+folia: done global-execute (3/4)
+folia: global fixed rate x3, cancel=NEXT_RUNS_CANCELLED
+folia: done global-fixed-rate (4/4)
+folia: all-schedulers-ok
+```
+
+В коротком гейте успевают только region/async (сервер завершает прогон до
+первого global-тика); полный 4/4 подтверждается отдельным 12-секундным
+живым запуском.
+
+### A/B: 5 пар, p99/TPS пока нет
+
+Пять пар Chunkwake/Paper (200/1000 cows + redstone) дали:
+
+- 200 cows: средняя разница +0.22 ms, 3/5 лучше — эффекта нет;
+- 1000 cows: −3.40 ms, **5/5**, sign-test p≈0.031;
+- 1000 cows + redstone: −1.24 ms, 4/5, sign-test p≈0.188.
+
+Это предварительный результат: в сценарии 1000 мобов есть устойчивое
+преимущество, но нет p99/TPS-метрик, нет большего N и нет стабильной
+внешней нагрузки. **Общая заявка «Chunkwake быстрее Paper» не делается.**
+
+### HorizonFrontier
+
+Bootstrap-фаза теперь проходит после добавления
+`RegistryEventTypeProvider`, но плагин требует MariaDB (`mariadb:3306`) и
+без неё не включается. Это внешняя зависимость, а не дефект Chunkwake.
+
+### Ограничения
+
+- Гейт всё ещё фиксированный; 83/83 не означает 100% совместимость с
+  произвольными Paper/Folia-плагинами.
+- `CustomShapes` покрывает stairs/door/slab/trapdoor/barrier; заборы, стены,
+  кнопки и сложные inner/outer stairs — fallback на полный куб.
+- p99/TPS A/B остаётся отдельной задачей.

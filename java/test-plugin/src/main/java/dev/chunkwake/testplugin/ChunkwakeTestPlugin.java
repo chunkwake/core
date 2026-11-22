@@ -921,18 +921,36 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
     private void foliaProbe() {
         getLogger().info("folia: owned on enable=" + getServer().isOwnedByCurrentRegion(getServer().getWorlds().get(0), 0, 0)
                 + " global=" + getServer().isGlobalTickThread());
-        getServer().getGlobalRegionScheduler().execute(this, () -> getLogger().info("folia: global execute"));
+        java.util.concurrent.atomic.AtomicInteger done = new java.util.concurrent.atomic.AtomicInteger();
+        getServer().getGlobalRegionScheduler().execute(this, () -> {
+            getLogger().info("folia: global execute");
+            foliaDone(done, "global-execute");
+        });
         int[] runs = {0};
         getServer().getGlobalRegionScheduler().runAtFixedRate(this, t -> {
             if (++runs[0] == 3) {
                 getLogger().info("folia: global fixed rate x3, cancel=" + t.cancel());
+                foliaDone(done, "global-fixed-rate");
             }
         }, 1, 5);
         getServer().getRegionScheduler().runDelayed(this, getServer().getWorlds().get(0), 0, 0,
-                t -> getLogger().info("folia: region delayed, state=" + t.getExecutionState()), 20);
-        getServer().getAsyncScheduler().runDelayed(this, t -> getLogger().info("folia: async delayed on "
-                + Thread.currentThread().getName() + " owned=" + getServer().isGlobalTickThread()), 500,
-                java.util.concurrent.TimeUnit.MILLISECONDS);
+                t -> {
+                    getLogger().info("folia: region delayed, state=" + t.getExecutionState());
+                    foliaDone(done, "region-delayed");
+                }, 20);
+        getServer().getAsyncScheduler().runDelayed(this, t -> {
+            getLogger().info("folia: async delayed on "
+                    + Thread.currentThread().getName() + " owned=" + getServer().isGlobalTickThread());
+            foliaDone(done, "async-delayed");
+        }, 500, java.util.concurrent.TimeUnit.MILLISECONDS);
+    }
+
+    private void foliaDone(java.util.concurrent.atomic.AtomicInteger done, String name) {
+        int value = done.incrementAndGet();
+        getLogger().info("folia: done " + name + " (" + value + "/4)");
+        if (value == 4) {
+            getLogger().info("folia: all-schedulers-ok");
+        }
     }
     private static final java.util.concurrent.atomic.AtomicInteger REGION_BUSY =
             new java.util.concurrent.atomic.AtomicInteger();
