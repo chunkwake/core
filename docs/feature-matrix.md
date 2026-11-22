@@ -7218,10 +7218,78 @@ cargo test --workspace -> 45 suites, 953 passed
 
 - Это parity для `default:topaz_ore`; произвольные Paper/Folia-плагины и
   произвольный CE-контент по-прежнему не доказаны.
-- Persistence хранит только id block definition; свойства custom-состояния
-  (например, `facing`) пока не сериализуются.
+- Persistence хранит состояние в строковом виде (`id[facing=...,lit=...]`);
+  экзотические значения со спецсимволами/пробелами пока не тестировались.
 - Java-зеркало Item-entity ограничено 4096 записями и не является полной
   заменой Rust-entity слоя; для геймплея предметы по-прежнему спавнятся
   через `dropitem` в Rust.
 - Заявка на производительность остаётся снятой: строгого A/B выше шума
   по всему серверу нет.
+
+
+## Stateful custom-блоки: свойства переживают рестарт
+
+Следующий шаг после `topaz_ore`: `CustomBlockStore` теперь пишет не только
+id block definition, а полное состояние CE (`ImmutableBlockState.toString()`):
+
+```
+minecraft:overworld 1010 100 1010 default:table_lamp[facing=east,lit=true]
+```
+
+При восстановлении `WorldImpl.restoreCustomBlock`:
+
+1. берёт `CraftEngineBlocks.byId(key)`;
+2. получает `defaultState()`;
+3. для каждого свойства вызывает `Property.valueByName(...)` и
+   `ImmutableBlockState.with(property, value)`;
+4. ставит полученное состояние через
+   `CraftEngineBlocks.place(location, immutableState, false)`.
+
+Проверка `CEStateProbe` на `default:table_lamp` с не-дефолтным состоянием
+`facing=east,lit=true`.
+
+### Chunkwake, чистый запуск
+
+```
+CESTATEPROBE desired=default:table_lamp[facing=east,lit=true]
+CESTATEPROBE place-first=true
+CESTATEPROBE persist custom=true state=default:table_lamp[facing=east,lit=true]
+  type=BRICKS data=craftengine:custom_29
+  collision=[BoundingBox [0,0,0 -> 1,1,1]]
+CESTATEPROBE drops=[NETHER_BRICKx1]
+CESTATEPROBE dropped-entities=[NETHER_BRICKx1]
+```
+
+### Chunkwake, рестарт
+
+```
+CESTATEPROBE persist custom=true state=default:table_lamp[facing=east,lit=true]
+  type=BRICKS data=craftengine:custom_29
+  collision=[BoundingBox [0,0,0 -> 1,1,1]]
+CESTATEPROBE drops=[NETHER_BRICKx1]
+CESTATEPROBE dropped-entities=[NETHER_BRICKx1]
+```
+
+### Paper-эталон
+
+```
+CESTATEPROBE persist custom=true state=default:table_lamp[facing=east,lit=true]
+  type=BRICKS data=craftengine:custom_52
+  collision=[BoundingBox [0,0,0 -> 1,1,1]]
+CESTATEPROBE drops=[NETHER_BRICKx1]
+CESTATEPROBE dropped-entities=[NETHER_BRICKx1, NETHER_BRICKx1]
+```
+
+Свойства `facing`/`lit` совпадают на Paper и Chunkwake; отличаются только
+внутренние visual id (`custom_29` против `custom_52`) и количество старых
+item-entity в Paper-мире. Это подтверждает, что persistence больше не
+теряет custom-свойства.
+
+### Гейт
+
+```
+расширенный: 83 of 83 enabled in 55472 ms
+  FAILED: (пусто); LOADERR: (пусто); SKIPPED: (пусто); PANICS: 0
+базовый: enabled 27 plugin(s) in 13883 ms; PANICS: 0
+Java: 62 теста
+```

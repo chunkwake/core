@@ -13,9 +13,9 @@ import net.minecraft.core.BlockPos;
  *
  * <p>CraftEngine пишет custom-состояния в Java-оверлей NMS-мира; Rust-ядро
  * о них не знает. Чтобы блоки переживали рестарт (как на Paper), храним
- * координаты и id block definition в простом файле в каталоге мира и
- * восстанавливаем состояние через {@code CraftEngineBlocks.place} при первом
- * обращении.
+ * координаты и полное состояние (`id[property=value,...]`) в простом файле
+ * в каталоге мира и восстанавливаем его через {@code CraftEngineBlocks.place}
+ * при первом обращении.
  */
 final class CustomBlockStore {
     private static final Map<String, Map<BlockPos, String>> BLOCKS = new ConcurrentHashMap<>();

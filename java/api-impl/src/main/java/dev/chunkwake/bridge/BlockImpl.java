@@ -112,10 +112,10 @@ final class BlockImpl {
         if (impl == null) {
             return;
         }
-        String text = String.valueOf(state);
-        int bracket = text.indexOf('[');
-        String id = bracket > 0 ? text.substring(0, bracket) : text;
-        CustomBlockStore.record(impl.dim, new net.minecraft.core.BlockPos(x, y, z), id);
+        // Храним полное CE-состояние, включая свойства (facing/lit/age...),
+        // а не только id block definition.
+        CustomBlockStore.record(impl.dim, new net.minecraft.core.BlockPos(x, y, z),
+                String.valueOf(state));
     }
 
     private static org.bukkit.block.data.BlockData engineBlockData(Object state) {

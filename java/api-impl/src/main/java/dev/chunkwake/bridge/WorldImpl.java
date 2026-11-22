@@ -80,10 +80,13 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
         if (CustomBlockStore.restoring()) {
             return null;
         }
-        String id = CustomBlockStore.get(this.dim, pos);
-        if (id == null) {
+        String saved = CustomBlockStore.get(this.dim, pos);
+        if (saved == null) {
             return null;
         }
+        int bracket = saved.indexOf('[');
+        String id = bracket < 0 ? saved : saved.substring(0, bracket);
+        String properties = bracket < 0 ? "" : saved.substring(bracket + 1).replace("]", "");
         CustomBlockStore.restoring(true);
         try {
             org.bukkit.plugin.Plugin plugin =
@@ -96,13 +99,44 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
                     "net.momirealms.craftengine.bukkit.api.CraftEngineBlocks", true, loader);
             Class<?> keyClass = Class.forName(
                     "net.momirealms.craftengine.core.util.Key", true, loader);
+            Class<?> immutableClass = Class.forName(
+                    "net.momirealms.craftengine.core.block.ImmutableBlockState", true, loader);
+            Class<?> propertyClass = Class.forName(
+                    "net.momirealms.craftengine.core.block.property.Property", true, loader);
             Object key = keyClass.getMethod("of", String.class).invoke(null, id);
+            Object definition = api.getMethod("byId", keyClass).invoke(null, key);
+            if (definition == null) {
+                return null;
+            }
+            Object state = definition.getClass().getMethod("defaultState").invoke(definition);
+            if (!properties.isBlank()) {
+                for (String pair : properties.split(",")) {
+                    int equals = pair.indexOf('=');
+                    if (equals <= 0) {
+                        continue;
+                    }
+                    String name = pair.substring(0, equals).trim();
+                    String text = pair.substring(equals + 1).trim();
+                    Object property = state.getClass().getMethod("getProperty", String.class)
+                            .invoke(state, name);
+                    if (property == null) {
+                        continue;
+                    }
+                    Object value = property.getClass().getMethod("valueByName", String.class)
+                            .invoke(property, text);
+                    if (value == null) {
+                        continue;
+                    }
+                    state = immutableClass.getMethod("with", propertyClass, Comparable.class)
+                            .invoke(state, property, value);
+                }
+            }
             org.bukkit.Location location = new org.bukkit.Location(
                     this.api, pos.getX(), pos.getY(), pos.getZ());
-            api.getMethod("place", org.bukkit.Location.class, keyClass, boolean.class)
-                    .invoke(null, location, key, false);
-            net.minecraft.world.level.block.state.BlockState state = this.handle.overlayState(pos);
-            return state == null || state.isAir() ? null : state;
+            api.getMethod("place", org.bukkit.Location.class, immutableClass, boolean.class)
+                    .invoke(null, location, state, false);
+            net.minecraft.world.level.block.state.BlockState overlay = this.handle.overlayState(pos);
+            return overlay == null || overlay.isAir() ? null : overlay;
         } catch (Throwable ignored) {
             return null;
         } finally {
