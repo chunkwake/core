@@ -7089,3 +7089,43 @@ CE по-прежнему единственный LOADERR; геймплей-па
 не подтверждён. На Paper эталон снят и зафиксирован выше. Следующий шаг —
 заполнить `BuiltInRegistries.ITEM` ванильными предметами (или сделать
 `Registry`/`Item` совместимыми с ожиданиями CE) и повторить `CEProbe`.
+
+
+## CE уже загружается и включается, но контент ещё не грузится
+
+После заполнения `BuiltInRegistries.ITEM`, `Registries`, сериализаторов,
+частиц и реестров CraftEngine 26.9.2 **загружается и включается** на
+Chunkwake:
+
+```
+plugins: CraftEngine loaded in 2289 ms
+plugins: enabling CraftEngine...
+[CraftEngine] Enabling CraftEngine v26.9.2
+plugins: CraftEngine enabled in 667 ms
+```
+
+Полный гейт: `83 of 83 enabled`, `LOADERR:` пусто, `PANICS: 0`.
+Базовый: `27 of 27 enabled`, `PANICS: 0`.
+
+Но `CEProbe` на Chunkwake всё ещё даёт `place-first=false` и AIR:
+пакеты контента CE падают на преобразовании Bukkit ItemStack:
+
+```
+ClassCastException: org.bukkit.inventory.ItemStack cannot be cast to
+org.bukkit.craftbukkit.inventory.CraftItemStack
+  at CraftEngine ItemStackUtils.unwrap(ItemStackUtils.java:140)
+  at CraftEngine BukkitItemWrapper.<init>
+  at CraftEngine BukkitItemManager.getVanillaItem
+```
+
+То есть CE загрузился как плагин, но `default:topaz_ore` и другие
+кастомные блоки не регистрируются, пока `CraftItemStack.asCraftMirror`
+не вернёт реальный `CraftItemStack` (а не обычный `ItemStack`).
+
+Paper-эталон остаётся прежним: `place=true`, `custom=true`,
+`state=default:topaz_ore`, полная коллизия, дроп `NETHER_BRICKx1`,
+персистентность после рестарта.
+
+Итог: загрузка CE закрыта, геймплей-паритет — нет. Следующий первый
+блокер — item wrapping (`CraftItemStack`), затем повторный `CEProbe` и
+сравнение с Paper.

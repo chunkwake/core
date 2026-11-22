@@ -4,21 +4,39 @@ import net.minecraft.world.item.ItemStack;
 import org.bukkit.Material;
 
 /**
- * Рабочая конвертация Bukkit ↔ NMS {@code ItemStack} (id + количество).
- * Нужна ProtocolLib для {@code MinecraftGenerator} и item-пакетов.
+ * CraftBukkit-совместимый {@code CraftItemStack}.
+ *
+ * <p>CraftEngine проверяет {@code instanceof CraftItemStack} и читает поле
+ * {@code handle}. Поэтому это не просто утилита, а реальный наследник
+ * {@link org.bukkit.inventory.ItemStack} с NMS-зеркалом.
  */
-public final class CraftItemStack extends org.bukkit.inventory.ItemStack {
-    /**
-     * Поле, которое MythicMobs читает рефлексией
-     * ({@code CraftItemStack.handle}). У настоящего CraftItemStack здесь
-     * лежит NMS-стек; у нас Bukkit-представление строит {@code StackImpl},
-     * поэтому поле объявлено для совместимости и остаётся {@code null}.
-     */
-    private final net.minecraft.world.item.ItemStack handle;
+public class CraftItemStack extends org.bukkit.inventory.ItemStack {
+    public ItemStack handle;
 
-    private CraftItemStack() {
-        super(org.bukkit.Material.AIR);
-        this.handle = null;
+    protected CraftItemStack() {
+        // no-arg ItemStack(): craftDelegate ещё null; StackImpl перекрывает
+        // все методы и не пользуется delegate.
+        super();
+        this.handle = new ItemStack("minecraft:air", 0);
+    }
+
+    protected CraftItemStack(Material material, int amount) {
+        // STONE+1 инициализирует craftDelegate, дальше меняем тип/количество.
+        super(Material.STONE, 1);
+        super.setType(material == null ? Material.AIR : material);
+        super.setAmount(Math.max(0, amount));
+        this.handle = new ItemStack(
+                material == null ? "minecraft:air" : material.getKey().toString(), amount);
+    }
+
+    public CraftItemStack(org.bukkit.inventory.ItemStack source) {
+        super(Material.STONE, 1);
+        super.setType(source == null ? Material.AIR : source.getType());
+        super.setAmount(source == null ? 0 : Math.max(0, source.getAmount()));
+        if (source != null && source.hasItemMeta()) {
+            super.setItemMeta(source.getItemMeta());
+        }
+        this.handle = asNMSCopy(source);
     }
 
     public static ItemStack asNMSCopy(org.bukkit.inventory.ItemStack stack) {
@@ -26,21 +44,27 @@ public final class CraftItemStack extends org.bukkit.inventory.ItemStack {
             return new ItemStack("minecraft:air", 0);
         }
         ItemStack nms = new ItemStack(stack.getType().getKey().toString(), stack.getAmount());
-        // Компоненты (display name, lore, PDC, зачарования) переносим
-        // строкой Rust-модели: иначе CODEC сериализует только id+count.
         nms.meta = dev.chunkwake.bridge.ItemBridge.line(stack);
         return nms;
     }
 
-    public static ItemStack asCraftCopy(org.bukkit.inventory.ItemStack stack) {
-        return asNMSCopy(stack);
+    public static org.bukkit.inventory.ItemStack asCraftCopy(
+            org.bukkit.inventory.ItemStack stack) {
+        if (stack instanceof CraftItemStack craft) {
+            return craft;
+        }
+        return new CraftItemStack(stack);
     }
 
     public static org.bukkit.inventory.ItemStack asCraftMirror(ItemStack stack) {
-        return asBukkitCopy(stack);
+        if (stack == null || stack.isEmpty()) {
+            return new org.bukkit.inventory.ItemStack(Material.AIR);
+        }
+        org.bukkit.inventory.ItemStack bukkit = asBukkitCopy(stack);
+        return new CraftItemStack(bukkit);
     }
 
-    /** Paper-метод {@code asBukkitMirror}: копия без клонирования NMS-стека. */
+    /** Paper-метод {@code asBukkitMirror}: копия из NMS-стеков. */
     public static org.bukkit.inventory.ItemStack asBukkitMirror(ItemStack stack) {
         return asBukkitCopy(stack);
     }

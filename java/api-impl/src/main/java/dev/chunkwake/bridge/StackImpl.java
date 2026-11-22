@@ -24,7 +24,7 @@ import org.bukkit.inventory.meta.ItemMeta;
  * описание (плюс непонятые сервером компоненты как есть). В Paper это CraftItemStack;
  * здесь — тот же «делегат», что возвращают {@code ItemStack.of} и {@code ItemType.createItemStack}.
  */
-final class StackImpl extends ItemStack {
+final class StackImpl extends org.bukkit.craftbukkit.inventory.CraftItemStack {
     private Material type;
     private int amount;
     private Data data;

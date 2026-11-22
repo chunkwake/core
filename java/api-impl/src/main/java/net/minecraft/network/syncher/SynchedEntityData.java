@@ -48,6 +48,25 @@ public class SynchedEntityData {
         public T value() {
             return this.value;
         }
+
+        public static <T> DataValue<T> create(EntityDataAccessor<T> accessor, T value) {
+            return new DataValue<>(accessor.getId(), accessor.getSerializer(), value);
+        }
+
+        public int getId() {
+            return this.id;
+        }
+
+        public EntityDataSerializer<T> getSerializer() {
+            return this.serializer;
+        }
+
+        public T getValue() {
+            return this.value;
+        }
+
+        public void setValue(T value) {
+        }
     }
 
     /** Пара accessor→value; {@link #value()} даёт {@link DataValue}. */

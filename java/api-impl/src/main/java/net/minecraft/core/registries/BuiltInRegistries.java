@@ -83,6 +83,11 @@ public final class BuiltInRegistries {
     }
 
     static {
+        for (org.bukkit.Particle particle : org.bukkit.Particle.values()) {
+            PARTICLE_TYPE.register(
+                    net.minecraft.resources.Identifier.parse("minecraft:" + particle.getKey().getKey()),
+                    new org.bukkit.craftbukkit.CraftParticleType(particle));
+        }
         ITEM.register(net.minecraft.resources.Identifier.parse("minecraft:bedrock"),
                 new net.minecraft.world.item.Item("minecraft:bedrock"));
         ITEM.register(net.minecraft.resources.Identifier.parse("minecraft:air"),

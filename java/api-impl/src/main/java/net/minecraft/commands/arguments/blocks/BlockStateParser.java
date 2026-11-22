@@ -7,7 +7,13 @@ public final class BlockStateParser {
 
     /** NMS {@code BlockStateParser.BlockResult}. */
     public static final class BlockResult {
+        public net.minecraft.world.level.block.state.BlockState blockState;
+
         public BlockResult() {
+        }
+
+        public BlockResult(net.minecraft.world.level.block.state.BlockState blockState) {
+            this.blockState = blockState;
         }
     }
 

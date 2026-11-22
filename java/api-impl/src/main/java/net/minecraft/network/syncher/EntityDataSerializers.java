@@ -8,7 +8,21 @@ package net.minecraft.network.syncher;
  * STRING=4, COMPONENT=5, OPTIONAL_COMPONENT=6, ITEM_STACK=7, BLOCK_STATE=8,
  * BOOLEAN=10, VECTOR3=39, QUATERNION=40.
  */
-public final class EntityDataSerializers {
+public final class EntityDataSerializers {    public static final EntityDataSerializer<Object> ARMADILLO_STATE = ser();
+    public static final EntityDataSerializer<Object> HUMANOID_ARM = ser();
+    public static final EntityDataSerializer<Object> OPTIONAL_UUID = ser();
+    public static final EntityDataSerializer<Object> PARTICLES = ser();
+    public static final EntityDataSerializer<Object> WOLF_VARIANT = ser();
+
+    private static EntityDataSerializer<Object> ser() {
+        return new EntityDataSerializer<Object>() {
+            @Override
+            public int id() {
+                return 0;
+            }
+        };
+    }
+
     /** Поле, которое ищет CraftEngine (getPaintingVariant). */
     public static final EntityDataSerializer<Object> particle =
             new EntityDataSerializer<Object>() {
