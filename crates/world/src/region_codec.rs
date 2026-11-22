@@ -136,29 +136,45 @@ fn lz4_read(mut data: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
             return Err("lz4: bad block header".into());
         }
         let method = data[8] & 0xF0;
+        let max_block = 1usize << (10 + (data[8] & 0x0F));
         let (packed, orig, sum) = (
             le(&data[9..13]),
             le(&data[13..17]),
             le(&data[17..21]) as u32,
         );
         data = &data[21..];
+        // Те же проверки, что в LZ4BlockInputStream: до терминатора и аллокаций.
+        if method != METHOD_RAW && method != METHOD_LZ4 {
+            return Err("lz4: bad block method".into());
+        }
+        if orig > max_block
+            || (orig == 0) != (packed == 0)
+            || (method == METHOD_RAW && packed != orig)
+        {
+            return Err("lz4: bad block length".into());
+        }
         if orig == 0 && packed == 0 {
+            if sum != 0 {
+                return Err("lz4: bad final checksum".into());
+            }
             return Ok(());
         }
-        if packed > data.len() || orig > 1 << 25 {
+        if packed > data.len() {
             return Err("lz4: truncated block".into());
         }
         let start = out.len();
-        match method {
-            METHOD_RAW if packed == orig => out.extend_from_slice(&data[..packed]),
-            METHOD_LZ4 => {
-                let block = lz4_flex::block::decompress(&data[..packed], orig)
-                    .map_err(|e| format!("lz4: {e}"))?;
-                out.extend_from_slice(&block);
+        if method == METHOD_RAW {
+            out.extend_from_slice(&data[..packed]);
+        } else {
+            let block = lz4_flex::block::decompress(&data[..packed], orig)
+                .map_err(|e| format!("lz4: {e}"))?;
+            if block.len() != orig {
+                return Err("lz4: decompressed length mismatch".into());
             }
-            _ => return Err("lz4: bad block method".into()),
+            out.extend_from_slice(&block);
         }
         if check(&out[start..]) != sum {
+            out.truncate(start);
             return Err("lz4: checksum mismatch".into());
         }
         data = &data[packed..];
@@ -225,6 +241,138 @@ fn xxh32(data: &[u8], seed: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn block(token: u8, packed: u32, orig: u32, sum: u32, body: &[u8]) -> Vec<u8> {
+        let mut out = MAGIC.to_vec();
+        out.push(token);
+        out.extend_from_slice(&packed.to_le_bytes());
+        out.extend_from_slice(&orig.to_le_bytes());
+        out.extend_from_slice(&sum.to_le_bytes());
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn terminal() -> Vec<u8> {
+        block(METHOD_RAW, 0, 0, 0, &[])
+    }
+
+    #[test]
+    fn lz4_java_fixtures() {
+        assert_eq!(
+            decode(LZ4, include_bytes!("../tests/fixtures/lz4/empty.lz4")).unwrap(),
+            b""
+        );
+        assert_eq!(
+            decode(LZ4, include_bytes!("../tests/fixtures/lz4/mixed.lz4")).unwrap(),
+            include_bytes!("../tests/fixtures/lz4/mixed.nbt")
+        );
+    }
+
+    #[test]
+    fn lz4_rejects_invalid_headers_before_allocating() {
+        let cases = [
+            block(0x30, 0, 0, 0, &[]),
+            block(0x30, 1, 1, 0, &[0]),
+            block(METHOD_RAW, 0, 0, 1, &[]),
+            block(METHOD_LZ4, 0, 1, 0, &[]),
+            block(METHOD_LZ4, 1, 0, 0, &[0]),
+            block(METHOD_RAW, 1, 2, 0, &[0]),
+            block(METHOD_RAW, 1025, 1025, check(&[0; 1025]), &[0; 1025]),
+            block(METHOD_LZ4 | 15, 1, u32::MAX, 0, &[0]),
+            block(METHOD_LZ4, u32::MAX, 1, 0, &[0]),
+        ];
+        for (i, data) in cases.iter().enumerate() {
+            let mut out = vec![42];
+            let capacity = out.capacity();
+            assert!(lz4_read(data, &mut out).is_err(), "случай {i}");
+            assert_eq!(out, [42], "случай {i}");
+            assert_eq!(out.capacity(), capacity, "случай {i}");
+        }
+    }
+
+    #[test]
+    fn lz4_accepts_block_limit_and_both_terminal_methods() {
+        for level in [0, 1, 6] {
+            let raw = vec![7; 1 << (10 + level)];
+            let packed = lz4_flex::block::compress(&raw);
+            for (method, body) in [
+                (METHOD_RAW, raw.as_slice()),
+                (METHOD_LZ4, packed.as_slice()),
+            ] {
+                let mut data = block(
+                    method | level,
+                    body.len() as u32,
+                    raw.len() as u32,
+                    check(&raw),
+                    body,
+                );
+                data.extend(block(method | level, 0, 0, 0, &[]));
+                assert_eq!(decode(LZ4, &data).unwrap(), raw);
+            }
+        }
+        // Максимальный уровень допустим и для маленького блока.
+        let mut data = block(METHOD_RAW | 15, 1, 1, check(&[7]), &[7]);
+        data.extend(terminal());
+        assert_eq!(decode(LZ4, &data).unwrap(), [7]);
+    }
+
+    #[test]
+    fn lz4_rejects_truncation_and_bad_magic() {
+        let raw = b"a short raw block";
+        let mut data = block(
+            METHOD_RAW,
+            raw.len() as u32,
+            raw.len() as u32,
+            check(raw),
+            raw,
+        );
+        data.extend(terminal());
+        for end in 0..data.len() {
+            assert!(decode(LZ4, &data[..end]).is_err(), "обрыв на {end}");
+        }
+        data[0] ^= 1;
+        assert!(decode(LZ4, &data).is_err());
+    }
+
+    #[test]
+    fn lz4_failed_block_does_not_change_output() {
+        let raw = vec![7; 1024];
+        let packed = lz4_flex::block::compress(&raw);
+        let cases = [
+            block(METHOD_RAW, 1024, 1024, check(&raw) ^ 1, &raw),
+            block(
+                METHOD_LZ4,
+                packed.len() as u32,
+                1024,
+                check(&raw) ^ 1,
+                &packed,
+            ),
+            block(METHOD_LZ4, 1, 1, 0, &[0xf0]),
+            // Валидный LZ4, но фактический размер меньше или больше заявленного.
+            block(
+                METHOD_LZ4 | 1,
+                packed.len() as u32,
+                1025,
+                check(&raw),
+                &packed,
+            ),
+            block(METHOD_LZ4, packed.len() as u32, 1023, check(&raw), &packed),
+        ];
+        for (i, data) in cases.iter().enumerate() {
+            let mut out = vec![42];
+            assert!(lz4_read(data, &mut out).is_err(), "случай {i}");
+            assert_eq!(out, [42], "случай {i}");
+        }
+    }
+
+    #[test]
+    fn lz4_keeps_valid_blocks_before_a_failed_block() {
+        let mut data = block(METHOD_RAW, 1, 1, check(&[7]), &[7]);
+        data.extend(block(METHOD_RAW, 1, 1, check(&[8]) ^ 1, &[8]));
+        let mut out = vec![42];
+        assert!(lz4_read(&data, &mut out).is_err());
+        assert_eq!(out, [42, 7]);
+    }
 
     #[test]
     fn xxh32_reference_vectors() {

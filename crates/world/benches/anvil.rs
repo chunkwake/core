@@ -5,10 +5,16 @@
 //! кодирование одного чанка и сохранение региона целиком.
 
 use chunkwake_world::ChunkColumn;
-use chunkwake_world::anvil::{self, Format, Names, RegionStore};
+use chunkwake_world::anvil::{self, Codec, Format, Names, RegionStore};
+use chunkwake_world::nbt::Tag;
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::collections::BTreeMap;
 use std::hint::black_box;
+
+// Тот же приватный кодек без расширения публичного API ради микробенчмарка.
+#[allow(dead_code, unused_imports)]
+#[path = "../src/region_codec.rs"]
+mod region_codec;
 
 /// Имена состояний: 0 — воздух, 1 — камень, 2/3 — трава со свойством.
 struct Test;
@@ -130,5 +136,54 @@ fn save(c: &mut Criterion) {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-criterion_group!(benches, save);
+/// Одинаковые регионы для сравнения декодеров; генерация и запись вне замера.
+fn lz4_load(c: &mut Criterion) {
+    let mut group = c.benchmark_group("anvil_lz4_load");
+    for (name, size, random) in [
+        ("compressible", 32_768, false),
+        ("incompressible", 32_768, true),
+        ("multiblock", 262_144, false),
+    ] {
+        let mut state = 0x1234_5678u32;
+        let payload: Vec<i8> = (0..size)
+            .map(|i| {
+                if random {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    state as i8
+                } else {
+                    (i / 7 % 13) as i8
+                }
+            })
+            .collect();
+        let raw: Vec<u8> = payload.iter().map(|&b| b as u8).collect();
+        let packed = Codec::Lz4.encode(&raw);
+        assert_eq!(region_codec::decode(4, &packed[1..]).unwrap(), raw);
+        group.bench_function(format!("decode_{name}"), |b| {
+            b.iter(|| black_box(region_codec::decode(4, black_box(&packed[1..])).unwrap()));
+        });
+        let column = column();
+        let chunks: Vec<_> = (0..64)
+            .map(|i| {
+                let pos = (i % 8, i / 8);
+                let mut nbt = anvil::chunk_to_nbt(&column, pos, FORMAT, &Test).unwrap();
+                nbt.insert("benchmark".into(), Tag::ByteArray(payload.clone()));
+                (pos, nbt)
+            })
+            .collect();
+        let dir =
+            std::env::temp_dir().join(format!("chunkwake-anvil-lz4-{name}-{}", std::process::id()));
+        let store = RegionStore::new(&dir).with_codec(Codec::Lz4);
+        store.save(&chunks).expect("подготовка LZ4-региона");
+        assert_eq!(store.load_region(0, 0).unwrap().len(), chunks.len());
+        group.bench_function(name, |b| {
+            b.iter(|| black_box(store.load_region(0, 0).expect("LZ4-регион")));
+        });
+        std::fs::remove_dir_all(&dir).expect("удаление временного региона");
+    }
+    group.finish();
+}
+
+criterion_group!(benches, save, lz4_load);
 criterion_main!(benches);
