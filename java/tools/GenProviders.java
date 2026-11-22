@@ -88,13 +88,23 @@ public final class GenProviders {
                     "io.papermc.paper.command.brigadier.argument.VanillaArgumentProvider");
             for (Method m : abstractMethods(type)) {
                 if (argumentProvider
-                        && m.getParameterCount() == 0
-                        && (m.getName().equals("player")
-                                || m.getName().equals("players")
-                                || m.getName().equals("playerProfiles"))) {
+                        && (m.getParameterCount() == 0
+                                ? (m.getName().equals("player")
+                                        || m.getName().equals("players")
+                                        || m.getName().equals("playerProfiles")
+                                        || m.getName().equals("rotation"))
+                                : (m.getName().equals("resource")
+                                        && m.getParameterCount() == 1))) {
                     src.append("\n    @Override\n    public ").append(declaration(m)).append(" {\n");
                     src.append("        return dev.chunkwake.bridge.CommandArguments.")
-                            .append(m.getName()).append("();\n");
+                            .append(m.getName()).append("(");
+                    for (int i = 0; i < m.getParameterCount(); i++) {
+                        if (i > 0) {
+                            src.append(", ");
+                        }
+                        src.append("p").append(i);
+                    }
+                    src.append(");\n");
                     src.append("    }\n");
                     count++;
                     continue;

@@ -19,6 +19,15 @@ final class CommandArgumentsTest {
     }
 
     @Test
+    void parsesRotationAndResources() throws Exception {
+        var rotation = CommandArguments.rotation().parse(new StringReader("90 -45"));
+        var resolved = rotation.resolve(null);
+        org.junit.jupiter.api.Assertions.assertEquals(90.0F, resolved.yaw());
+        org.junit.jupiter.api.Assertions.assertEquals(-45.0F, resolved.pitch());
+
+    }
+
+    @Test
     void rejectsEmptyInput() {
         assertThrows(CommandSyntaxException.class,
                 () -> CommandArguments.player().parse(new StringReader("")));

@@ -39,6 +39,18 @@ public final class CommandArguments {
         return Profiles.INSTANCE;
     }
 
+    /** {@code VanillaArgumentProvider.rotation()} (yaw pitch). */
+    public static ArgumentType<io.papermc.paper.command.brigadier.argument.resolvers.RotationResolver>
+            rotation() {
+        return RotationArgument.INSTANCE;
+    }
+
+    /** {@code VanillaArgumentProvider.resource(RegistryKey)}. */
+    public static <T> ArgumentType<T> resource(
+            io.papermc.paper.registry.RegistryKey<T> registryKey) {
+        return new ResourceArgument<>(registryKey);
+    }
+
     private static String readToken(StringReader reader) throws CommandSyntaxException {
         int start = reader.getCursor();
         int depth = 0;
@@ -148,6 +160,56 @@ public final class CommandArguments {
             return Double.parseDouble(v);
         } catch (NumberFormatException e) {
             return Double.NaN;
+        }
+    }
+
+    private enum RotationArgument
+            implements ArgumentType<io.papermc.paper.command.brigadier.argument.resolvers.RotationResolver> {
+        INSTANCE;
+
+        @Override
+        public io.papermc.paper.command.brigadier.argument.resolvers.RotationResolver parse(
+                StringReader reader) throws CommandSyntaxException {
+            float yaw = reader.readFloat();
+            reader.skipWhitespace();
+            float pitch = reader.readFloat();
+            return source -> io.papermc.paper.math.Rotation.rotation(yaw, pitch);
+        }
+
+        @Override
+        public Collection<String> getExamples() {
+            return List.of("0 0", "90 -45");
+        }
+    }
+
+    private static final class ResourceArgument<T>
+            implements ArgumentType<T> {
+        private final io.papermc.paper.registry.RegistryKey<T> registryKey;
+
+        ResourceArgument(io.papermc.paper.registry.RegistryKey<T> registryKey) {
+            this.registryKey = registryKey;
+        }
+
+        @Override
+        public T parse(StringReader reader) throws CommandSyntaxException {
+            String token = readToken(reader);
+            org.bukkit.NamespacedKey key = org.bukkit.NamespacedKey.fromString(token);
+            @SuppressWarnings({"unchecked", "rawtypes"})
+            org.bukkit.Registry registry =
+                    io.papermc.paper.registry.RegistryAccess.registryAccess()
+                            .getRegistry((io.papermc.paper.registry.RegistryKey) this.registryKey);
+            @SuppressWarnings("unchecked")
+            T value = key == null || registry == null ? null : (T) registry.get(key);
+            if (value == null) {
+                throw CommandSyntaxException.BUILT_IN_EXCEPTIONS.dispatcherUnknownArgument()
+                        .createWithContext(reader);
+            }
+            return value;
+        }
+
+        @Override
+        public Collection<String> getExamples() {
+            return List.of("minecraft:stone");
         }
     }
 

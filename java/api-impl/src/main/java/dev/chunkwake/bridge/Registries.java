@@ -203,6 +203,7 @@ public final class Registries implements RegistryAccess {
 
     private static final Map<NamespacedKey, Boolean> IS_BLOCK = new ConcurrentHashMap<>();
     private static final Map<NamespacedKey, Boolean> IS_SOLID = new ConcurrentHashMap<>();
+    private static final Map<NamespacedKey, Boolean> IS_OCCLUDING = new ConcurrentHashMap<>();
     private static volatile List<NamespacedKey> blockKeys;
 
     static boolean isBlock(NamespacedKey k) {
@@ -215,6 +216,17 @@ public final class Registries implements RegistryAccess {
             try {
                 int flags = Integer.parseInt(world("blockflags " + key).trim());
                 return (flags & 2) != 0;
+            } catch (NumberFormatException e) {
+                return false;
+            }
+        });
+    }
+
+    /** {@code Typed#isOccluding}: полный непрозрачный куб (Rust blockflags). */
+    static boolean isOccluding(NamespacedKey k) {
+        return IS_OCCLUDING.computeIfAbsent(k, key -> {
+            try {
+                return Integer.parseInt(world("occluding " + key).trim()) != 0;
             } catch (NumberFormatException e) {
                 return false;
             }
@@ -407,6 +419,7 @@ public final class Registries implements RegistryAccess {
         public net.kyori.adventure.key.Key key() { return key; }
         public Material asMaterial() { return Material.matchMaterial(key.toString()); }
         public boolean isSolid() { return Registries.isSolid(key); }
+        public boolean isOccluding() { return Registries.isOccluding(key); }
         public int getMaxStackSize() { return ITEM_STACKS.getOrDefault(key, 64); }
         public short getMaxDurability() { return 0; }
         public boolean hasBlockType() { return isBlock(key); }
@@ -462,6 +475,7 @@ public final class Registries implements RegistryAccess {
         }
         public boolean isBlock() { return true; }
         public boolean isSolid() { return Registries.isSolid(key); }
+        public boolean isOccluding() { return Registries.isOccluding(key); }
         public String getTranslationKey() { return "block." + key.getNamespace() + "." + key.getKey(); }
         public String translationKey() { return getTranslationKey(); }
 

@@ -4788,6 +4788,49 @@ impl PlayPlan {
             dims.sort();
             return dims.iter().map(|d| d.key()).collect::<Vec<_>>().join("\n");
         }
+        // `occluding <block>`: `BlockType/Typed#isOccluding` (1/0): полный
+        // непрозрачный куб по данным Rust (все 6 граней + не стекло/листва/лёд).
+        if let Some(rest) = line.strip_prefix("occluding ") {
+            let name = rest.trim();
+            let idx = self
+                .survival
+                .block_names
+                .iter()
+                .position(|n| n == name)
+                .or_else(|| {
+                    self.survival
+                        .block_names
+                        .iter()
+                        .position(|n| n.split('[').next() == Some(name))
+                });
+            let Some(state) = idx else {
+                return "0".into();
+            };
+            let solid =
+                chunkwake_world::state_flags(state as u32) & chunkwake_world::flags::SOLID != 0;
+            let full = (0..6).all(|face| self.survival.placement.sturdy(state as u32, face));
+            let base = name.strip_prefix("minecraft:").unwrap_or(name);
+            let transparent = base.contains("glass")
+                || base.ends_with("_leaves")
+                || matches!(
+                    base,
+                    "water"
+                        | "lava"
+                        | "ice"
+                        | "slime_block"
+                        | "honey_block"
+                        | "barrier"
+                        | "light"
+                        | "spawner"
+                        | "trial_spawner"
+                );
+            return if solid && full && !transparent {
+                "1"
+            } else {
+                "0"
+            }
+            .into();
+        }
         // `chunkloaded <x> <z>`: `World.isChunkLoaded` (1/0).
         if let Some(rest) = line.strip_prefix("chunkloaded ") {
             let mut it = rest.split_whitespace();

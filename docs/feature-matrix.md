@@ -6708,3 +6708,47 @@ cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
 cargo +1.100.0 test --workspace -- --test-threads=4
   45 suites, 953 passed, 0 failed
 ```
+
+## Закрыты последние Paper API-предупреждения гейта
+
+### Typed.isOccluding (ItemType/BlockType)
+
+- Rust `world_request("occluding <block>")`: состояние блока должно быть
+  `SOLID`, все 6 граней `sturdy` (полный куб) и не входить в список
+  прозрачных (glass, *_leaves, water/lava/ice/slime/honey/barrier/light/...);
+- `Registries.isOccluding` с кэшем, `ItemTypeImpl#isOccluding` и
+  `BlockTypeImpl#isOccluding`.
+
+### VanillaArgumentProvider.rotation и resource
+
+- `rotation()` — `ArgumentType<RotationResolver>`, синтаксис `yaw pitch`
+  (`StringReader.readFloat`), резолвер отдаёт
+  `io.papermc.paper.math.Rotation.rotation(yaw, pitch)`;
+- `resource(RegistryKey<T>)` — `ArgumentType<T>`: ключ парсится как
+  `NamespacedKey`, значение берётся из
+  `RegistryAccess.registryAccess().getRegistry(registryKey)` (наш
+  `Registries implements RegistryAccess`);
+- `GenProviders` для `rotation`/`resource` генерирует вызов
+  `CommandArguments.*` вместо Soft-заглушки.
+
+Проверка: `CommandArgumentsTest` расширен парсингом `rotation` (yaw/pitch) —
+`gradlew test` зелёный, Java-тестов теперь 59.
+
+В логе расширенного гейта **не осталось ни одного**
+`api: ... is not implemented`.
+
+### Гейты
+
+```
+расширенный: 79 of 82 enabled in 78648 ms
+  FAILED: MiniMOTD (сам), VoxyServerSide (сам), LevelledMobs (его ENDER_CRYSTAL)
+  LOADERR: craft-engine-paper-plugin-26.9.2.jar; PANICS: 0
+базовый: 26 of 27 enabled in 13170 ms
+  FAILED: только VoxyServerSide; PANICS: 0
+P2: ok=263 bad=241
+Java-тесты: 59
+cargo fmt --all --check -> 0
+cargo +1.100.0 clippy --workspace --all-targets -- -D warnings -> 0
+cargo +1.100.0 test --workspace -- --test-threads=4
+  45 suites, 953 passed, 0 failed
+```
