@@ -14,6 +14,13 @@ public class WeightedList<T> {
         return new WeightedList<>(entries);
     }
 
+    /** {@code WeightedList.nonEmptyCodec(Codec)} (CraftEngine). */
+    public static <T> com.mojang.serialization.Codec<WeightedList<T>> nonEmptyCodec(
+            com.mojang.serialization.Codec<T> codec) {
+        return com.mojang.serialization.Codec.list(codec)
+                .xmap(WeightedList::new, WeightedList::unwrap);
+    }
+
     public boolean isEmpty() {
         return this.entries.isEmpty();
     }
