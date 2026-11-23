@@ -11,9 +11,9 @@ public final class BuiltInRegistries {
     public static final net.minecraft.core.Registry<Object> attribute =
             new net.minecraft.core.SimpleRegistry<>();
     public static final net.minecraft.core.Registry<Object> ATTRIBUTE = attribute;
-    public static final net.minecraft.core.Registry<Object> item =
-            new net.minecraft.core.SimpleRegistry<>();
-    public static final net.minecraft.core.Registry<Object> ITEM = item;
+    public static final DefaultedRegistry<net.minecraft.world.item.Item> item =
+            new SimpleDefaultedRegistry<>(net.minecraft.resources.Identifier.parse("minecraft:air"));
+    public static final DefaultedRegistry<net.minecraft.world.item.Item> ITEM = item;
     public static final net.minecraft.core.Registry<Object> dataComponentType =
             new net.minecraft.core.SimpleRegistry<>();
     public static final net.minecraft.core.Registry<Object> DATA_COMPONENT_TYPE = dataComponentType;

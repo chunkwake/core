@@ -104,8 +104,6 @@ def parse_members(output: str, simple: str, known: set[str]):
 
 
 def generate_class(paper: Path, javap: str, name: str, known: set[str]) -> str | None:
-    if "$" in name:
-        return None
     proc = subprocess.run(
         [javap, "-p", "-s", "-classpath", str(paper), name.replace("/", ".")],
         text=True,
@@ -120,7 +118,7 @@ def generate_class(paper: Path, javap: str, name: str, known: set[str]) -> str |
     if not class_line:
         return None
     interface = " interface " in f" {class_line} "
-    simple = name.rsplit("/", 1)[-1].split("$")[-1]
+    simple = name.rsplit("/", 1)[-1]
     package = name.rsplit("/", 1)[0].replace("/", ".")
     kind = "interface" if interface else "class"
     modifiers = "public "
@@ -129,12 +127,44 @@ def generate_class(paper: Path, javap: str, name: str, known: set[str]) -> str |
         if " abstract " in f" {class_line} ":
             modifiers += "abstract "
 
+    # Preserve Paper's hierarchy where the parent already exists in the API.
+    # This matters for casts like `InjectedShapedRecipe -> Recipe`.
+    tail = class_line.split(" class ", 1)[-1] if not interface else class_line.split(" interface ", 1)[-1]
+    extends_types: list[str] = []
+    implements_types: list[str] = []
+    if " extends " in tail:
+        rest = tail.split(" extends ", 1)[1]
+        rest = rest.split(" implements ", 1)[0]
+        extends_types = [part.strip().rstrip("{").strip().split("<", 1)[0] for part in rest.split(",")]
+    if " implements " in tail:
+        rest = tail.split(" implements ", 1)[1]
+        implements_types = [part.strip().rstrip("{").strip().split("<", 1)[0] for part in rest.split(",")]
+
+    def known_type(type_name: str) -> bool:
+        type_name = type_name.strip().rstrip("{").strip()
+        return type_name.startswith("net.minecraft.") and (
+            type_name in known or type_name.replace(".", "/") in known
+        )
+
+    heritage = ""
+    if interface:
+        parents = [t for t in extends_types if known_type(t)]
+        if parents:
+            heritage = " extends " + ", ".join(parents)
+    else:
+        parents = [t for t in extends_types if known_type(t) and t != "java.lang.Record"]
+        if parents:
+            heritage = " extends " + parents[0]
+        ifaces = [t for t in implements_types if known_type(t)]
+        if ifaces:
+            heritage += " implements " + ", ".join(ifaces)
+
     fields, methods = parse_members(output, simple, known)
     body: list[str] = []
     body.append(f"package {package};")
     body.append("")
     body.append(f"/** Автоматически сгенерированный NMS-стаб для {name}; не редактировать вручную. */")
-    body.append(f"{modifiers}{kind} {simple} {{")
+    body.append(f"{modifiers}{kind} {simple}{heritage} {{")
     for field_name, descriptor, static, final in fields:
         type_name, _ = descriptor_type(descriptor, 0, known)
         mods = "public static" if static else "public"
@@ -143,6 +173,7 @@ def generate_class(paper: Path, javap: str, name: str, known: set[str]) -> str |
         body.append(f"    {mods} {type_name} {field_name}"
                     + (f" = {default_value(type_name)};" if static and final else ";"))
     body.append("")
+    seen_methods: set[tuple[str, tuple[str, ...]]] = set()
     for method_name, descriptor, static, abstract, public in methods:
         if not public:
             continue
@@ -157,12 +188,23 @@ def generate_class(paper: Path, javap: str, name: str, known: set[str]) -> str |
             return_type, _ = descriptor_type(descriptor, end + 1, known)
         else:
             continue
+        signature = (method_name, tuple(params))
+        if signature in seen_methods:
+            continue
+        seen_methods.add(signature)
         mods = "public" + (" static" if static else "")
         if method_name == "__init__":
             body.append(f"    {mods} {simple}({', '.join(params)}) {{")
             body.append("    }")
             continue
-        if abstract or interface:
+        if interface:
+            mods = "public" + (" static" if static else " default")
+            body.append(f"    {mods} {return_type} {method_name}({', '.join(params)}) {{")
+            value = default_value(return_type)
+            if value:
+                body.append(f"        return {value};")
+            body.append("    }")
+        elif abstract:
             body.append(f"    {mods} abstract {return_type} {method_name}({', '.join(params)});")
         else:
             body.append(f"    {mods} {return_type} {method_name}({', '.join(params)}) {{")

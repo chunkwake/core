@@ -3,8 +3,12 @@ package net.minecraft.world.item.crafting;
 /** NMS {@code Recipe} (CraftEngine). */
 public interface Recipe {
     /** {@code Recipe.getId()} (CraftEngine). */
-    net.minecraft.resources.Identifier getId();
+    default net.minecraft.resources.Identifier getId() {
+        return null;
+    }
 
     /** {@code Recipe.getType()} (CraftEngine). */
-    RecipeType<?> getType();
+    default RecipeType<?> getType() {
+        return null;
+    }
 }

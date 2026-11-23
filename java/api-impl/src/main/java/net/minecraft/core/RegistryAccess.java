@@ -9,8 +9,7 @@ import java.util.Map;
  */
 public interface RegistryAccess extends HolderLookup.Provider {
     /** В 26.3 {@code RegistryAccess.EMPTY} имеет тип {@code Frozen}. */
-    RegistryAccess.Frozen EMPTY = new RegistryAccess.Frozen() {
-    };
+    RegistryAccess.Frozen EMPTY = new LayeredRegistryAccess<>(java.util.List.of());
 
     static RegistryAccess EMPTY_REGISTRY_ACCESS() {
         return EMPTY;
