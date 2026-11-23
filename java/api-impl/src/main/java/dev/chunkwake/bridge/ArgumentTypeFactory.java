@@ -35,6 +35,7 @@ public final class ArgumentTypeFactory {
         return (ArgumentType<T>) switch (name) {
             case "player", "players" -> new SelectorType(true);
             case "entity", "entities" -> new SelectorType(false);
+            case "itemStack", "item" -> new ItemStackType();
             default -> new WordType();
         };
     }
@@ -49,6 +50,44 @@ public final class ArgumentTypeFactory {
         @Override
         public Collection<String> getExamples() {
             return List.of("value");
+        }
+    }
+
+    /** {@code ArgumentTypes.itemStack()}: Skript парсит item stack через Brigadier. */
+    private static final class ItemStackType implements ArgumentType<org.bukkit.inventory.ItemStack> {
+        @Override
+        public org.bukkit.inventory.ItemStack parse(StringReader reader) throws CommandSyntaxException {
+            int start = reader.getCursor();
+            int depth = 0;
+            while (reader.canRead()) {
+                char c = reader.peek();
+                if (c == '[') {
+                    depth++;
+                } else if (c == ']' && depth > 0) {
+                    depth--;
+                } else if (Character.isWhitespace(c) && depth == 0) {
+                    break;
+                }
+                reader.skip();
+            }
+            String token = reader.getString().substring(start, reader.getCursor());
+            if (token.isEmpty()) {
+                throw CommandSyntaxException.BUILT_IN_EXCEPTIONS.dispatcherUnknownArgument()
+                        .createWithContext(reader);
+            }
+            int bracket = token.indexOf('[');
+            String id = bracket < 0 ? token : token.substring(0, bracket);
+            org.bukkit.Material material = org.bukkit.Material.matchMaterial(id);
+            if (material == null || !material.isItem()) {
+                throw CommandSyntaxException.BUILT_IN_EXCEPTIONS.dispatcherUnknownArgument()
+                        .createWithContext(reader);
+            }
+            return new org.bukkit.inventory.ItemStack(material);
+        }
+
+        @Override
+        public Collection<String> getExamples() {
+            return List.of("minecraft:stone", "minecraft:diamond_sword");
         }
     }
 

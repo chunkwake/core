@@ -344,6 +344,11 @@ impl PlayPlan {
     }
 
     /// `/time set`: ставит время суток и рассылает всем.
+    pub(crate) fn set_game_time(&self, ticks: i64) {
+        self.game_time
+            .store(ticks.max(0), std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(crate) fn set_day_time(&self, ticks: i64) {
         self.day_time.store(
             ticks.rem_euclid(24_000),

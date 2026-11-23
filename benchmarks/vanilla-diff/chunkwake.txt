@@ -1,0 +1,114 @@
+[2m2026-11-24 00:55:46[0m [32m INFO[0m memory profile: Normal, gen workers 31, Tokio workers 32, blocking 512, proto limit 2048, base columns 16384
+[2m2026-11-24 00:55:46[0m [32m INFO[0m Minecraft 26.3 (protocol 777)
+[2m2026-11-24 00:55:46[0m [32m INFO[0m data: 260 packet ids, 15 registries (boot image in 11 ms)
+[2m2026-11-24 00:55:46[0m [32m INFO[0m prepared 32 synchronized registries and tags for 15 registries (67 KiB)
+[2m2026-11-24 00:55:46[0m [32m INFO[0m listening on 127.0.0.1:25612
+[2m2026-11-24 00:55:46[0m [32m INFO[0m world: seed 1, flat 1×bedrock, 2×dirt, 1×grass_block
+[2m2026-11-24 00:55:46[0m [32m INFO[0m minecraft:end: фичи 5 из 5
+[2m2026-11-24 00:55:46[0m [32m INFO[0m minecraft:end: генератор готов (min_y 0, высота 128, море 0)
+[2m2026-11-24 00:55:46[0m [32m INFO[0m minecraft:nether: фичи 37 из 37
+[2m2026-11-24 00:55:46[0m [32m INFO[0m minecraft:nether: генератор готов (min_y 0, высота 128, море 32)
+[2m2026-11-24 00:55:46[0m [32m INFO[0m enchanting: 43 enchantments (36 on the table), 77 enchantable items
+[2m2026-11-24 00:55:47[0m [32m INFO[0m world: world (world in 886 ms, up in 922 ms)
+[2m2026-11-24 00:55:47[0m [32m INFO[0m chunks: view distance 8, simulation distance 8
+[2m2026-11-24 00:55:47[0m [32m INFO[0m dashboard on http://127.0.0.1:25585/ (metrics on /metrics)
+[2m2026-11-24 00:55:47[0m [32m INFO[0m plugins: starting the JVM (C:\Users\ROG STRIX.DESKTOP-030L0I5\AppData\Roaming\ModrinthApp\meta\java_versions\zulu25.32.21-ca-jre25.0.2-win_x64\bin\java.exe) and enabling plugins...
+[2m2026-11-24 00:55:48[0m [32m INFO[0m protocol: component ids=24
+[2m2026-11-24 00:55:48[0m [33m WARN[0m protocol: init failed: java.lang.NullPointerException: Cannot invoke "org.bukkit.Server.getPluginManager()" because "org.bukkit.Bukkit.server" is null
+[2m2026-11-24 00:55:48[0m [32m INFO[0m blocks: 1286 blocks, 35723 states, 300 tags
+[2m2026-11-24 00:55:48[0m [32m INFO[0m [Chunkwake] This server is running Chunkwake version 26.3 (MC: 26.3) (Implementing API version 26.3-R0.1-SNAPSHOT)
+[2m2026-11-24 00:55:48[0m [32m INFO[0m [Chunkwake] plugins: 1 jar(s) in C:\Users\ROGSTR~1.DES\AppData\Local\Temp\opencode\vanilla-diff\chunkwake\plugins, loading...
+[2m2026-11-24 00:55:48[0m [32m INFO[0m [Chunkwake] plugins: [1/1] chunkwake-test-plugin.jar
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [Chunkwake] plugins: ChunkwakeTest loaded in 6 ms
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [Chunkwake] plugins: enabling ChunkwakeTest...
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] Enabling ChunkwakeTest v1.0
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] onEnable on Chunkwake 26.3-chunkwake (MC: 26.3)
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] resource plugin.yml: true classloader: dev.chunkwake.bridge.PluginLoader
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] world: world minecraft:overworld NORMAL uid=c1ca12de-3363-4842-8d2f-c413becab8b3 path=C:\Users\ROGSTR~1.DES\AppData\Local\Temp\opencode\vanilla-diff\chunkwake\world\dimensions\minecraft\overworld
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] world: world_nether minecraft:the_nether NETHER uid=c04eeeaf-61fa-4e35-a9a7-80bceaa0ac28 path=C:\Users\ROGSTR~1.DES\AppData\Local\Temp\opencode\vanilla-diff\chunkwake\world\dimensions\minecraft\the_nether
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] world: world_the_end minecraft:the_end THE_END uid=15a50c8f-9262-448e-b88c-a61de4028ad5 path=C:\Users\ROGSTR~1.DES\AppData\Local\Temp\opencode\vanilla-diff\chunkwake\world\dimensions\minecraft\the_end
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] default attributes: zombie has=true hp=20.0 attack=3.0 cow hp=10.0
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] enchant offers: minecraft:sharpness/1@6 minecraft:bane_of_arthropods/3@20 minecraft:knockback/2@30
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] materials: transparent=176 errors=0 stone.transparent=false air.transparent=true
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] legacy: stone->STONE grass->GRASS_BLOCK wool15->BLACK_WOOL lily->LILY_PAD
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] block data: minecraft:oak_stairs[facing=north,half=bottom,shape=straight,waterlogged=true] waterlogged=true
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] mannequin: poses=[FALL_FLYING, SLEEPING, SNEAKING, STANDING, SWIMMING] desc=entity.minecraft.mannequin.label skinParts=0/true/true statistic=minecraft.custom:minecraft.deaths
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] item bytes: 103 -> DIAMOND_SWORD x2 sharpness=3
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] mannequin profile: ResolvableProfile{name=null, uuid=null, properties=0}
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] world time: before=41 after=6000 day=true full=6000
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] commandmaps: server=org.bukkit.command.SimpleCommandMap bukkit=org.bukkit.command.SimpleCommandMap error=null known=26
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] folia: owned on enable=false global=true
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] item api: BREAD x3 max 64
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] components2: food=4/2.5 weapon=7 equip=HEAD/chunkwake:test book=A/1 sign=1
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] components: lore=1 ench={minecraft:sharpness=3} color=Color:[argb0xFFFF0000] model=[abc]/[1.5] map=7
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [Chunkwake] plugins: ChunkwakeTest enabled in 237 ms
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [Chunkwake] plugins: 1 of 1 enabled in 270 ms
+[2m2026-11-24 00:55:49[0m [32m INFO[0m plugins: enabled 1 plugin(s) in 1746 ms
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] folia: global execute
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] folia: done global-execute (1/4)
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] folia: region delayed, state=RUNNING
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] folia: done region-delayed (2/4)
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] folia: async delayed on Folia Async Scheduler Thread #0 owned=false
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] folia: done async-delayed (3/4)
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] folia: global fixed rate x3, cancel=NEXT_RUNS_CANCELLED
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] folia: done global-fixed-rate (4/4)
+[2m2026-11-24 00:55:49[0m [32m INFO[0m [ChunkwakeTest] folia: all-schedulers-ok
+[2m2026-11-24 00:55:51[0m [32m INFO[0m [ChunkwakeTest] piston event: extend 3 NORTH
+[2m2026-11-24 00:55:51[0m [32m INFO[0m [ChunkwakeTest] piston event: extend 3 NORTH
+[2m2026-11-24 00:55:51[0m [32m INFO[0m [ChunkwakeTest] dispense: SNOWBALL at 60
+[2m2026-11-24 00:55:51[0m [32m INFO[0m [ChunkwakeTest] move event: ARROW HOPPER -> DISPENSER
+[2m2026-11-24 00:55:52[0m [32m INFO[0m [ChunkwakeTest] redstone: direct=AIR/AIR wire=AIR/AIR
+[2m2026-11-24 00:55:54[0m [32m INFO[0m [ChunkwakeTest] scheduler: 100 ticks
+[2m2026-11-24 00:55:54[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world=0
+[2m2026-11-24 00:55:54[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_nether=0
+[2m2026-11-24 00:55:54[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_the_end=0
+[2m2026-11-24 00:55:55[0m [32m INFO[0m [ChunkwakeTest] hopper: moves=6 pickups=3
+[2m2026-11-24 00:55:55[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=0,0 thread=Folia Region Worker #0 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-24 00:55:55[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=64,64 thread=Folia Region Worker #1 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-24 00:55:56[0m [32m INFO[0m [ChunkwakeTest] dispense: SNOWBALL at 60
+[2m2026-11-24 00:55:56[0m [32m INFO[0m [ChunkwakeTest] fluids: flow=WATER fall=AIR edge=AIR meet=OBSIDIAN logged=WATER/CHEST minecraft:oak_stairs[facing=north,half=bottom,shape=straight,waterlogged=true] waterlogged=true
+[2m2026-11-24 00:55:56[0m [32m INFO[0m [ChunkwakeTest] mob: COW health=10.0/10.0 adult=true sheep=RED living=2 spawned=0
+[2m2026-11-24 00:55:57[0m [32m INFO[0m [ChunkwakeTest] tag-probe: base_stone_overworld -> 6 [ANDESITE, DEEPSLATE, DIORITE]
+[2m2026-11-24 00:55:57[0m [32m INFO[0m [ChunkwakeTest] tag-probe: coal_ores -> 2 [COAL_ORE, DEEPSLATE_COAL_ORE]
+[2m2026-11-24 00:55:57[0m [32m INFO[0m [ChunkwakeTest] tag-probe: diamond_ores -> 2 [DEEPSLATE_DIAMOND_ORE, DIAMOND_ORE]
+[2m2026-11-24 00:55:57[0m [32m INFO[0m [ChunkwakeTest] tag-probe: minecraft:base_stone_overworld -> 6 [ANDESITE, DEEPSLATE, DIORITE]
+[2m2026-11-24 00:55:57[0m [32m INFO[0m [ChunkwakeTest] fly: rear observer x=-1 blocks=0
+[2m2026-11-24 00:55:57[0m [32m INFO[0m [ChunkwakeTest] mob death: COW drops=[BEEF, LEATHER] xp=0
+[2m2026-11-24 00:55:58[0m [32m INFO[0m [ChunkwakeTest] mob dead: true valid=false
+[2m2026-11-24 00:55:59[0m [32m INFO[0m [ChunkwakeTest] scheduler: 200 ticks
+[2m2026-11-24 00:56:03[0m [32m INFO[0m [ChunkwakeTest] mob death: SHEEP drops=[MUTTON, RED_WOOL] xp=0
+[2m2026-11-24 00:56:04[0m [32m INFO[0m [ChunkwakeTest] scheduler: 300 ticks
+[2m2026-11-24 00:56:04[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world=0
+[2m2026-11-24 00:56:04[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_nether=0
+[2m2026-11-24 00:56:04[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_the_end=0
+[2m2026-11-24 00:56:05[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=0,0 thread=Folia Region Worker #0 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-24 00:56:05[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=64,64 thread=Folia Region Worker #1 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-24 00:56:09[0m [32m INFO[0m [ChunkwakeTest] scheduler: 400 ticks
+[2m2026-11-24 00:56:14[0m [32m INFO[0m [ChunkwakeTest] scheduler: 500 ticks
+[2m2026-11-24 00:56:14[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world=0
+[2m2026-11-24 00:56:14[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_nether=0
+[2m2026-11-24 00:56:14[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_the_end=0
+[2m2026-11-24 00:56:15[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=64,64 thread=Folia Region Worker #1 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-24 00:56:15[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=0,0 thread=Folia Region Worker #0 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-24 00:56:19[0m [32m INFO[0m [ChunkwakeTest] scheduler: 600 ticks
+[2m2026-11-24 00:56:24[0m [32m INFO[0m [ChunkwakeTest] scheduler: 700 ticks
+[2m2026-11-24 00:56:24[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world=0
+[2m2026-11-24 00:56:24[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_nether=0
+[2m2026-11-24 00:56:24[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_the_end=0
+[2m2026-11-24 00:56:25[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=0,0 thread=Folia Region Worker #0 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-24 00:56:25[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=64,64 thread=Folia Region Worker #1 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-24 00:56:29[0m [32m INFO[0m [ChunkwakeTest] scheduler: 800 ticks
+[2m2026-11-24 00:56:34[0m [32m INFO[0m [ChunkwakeTest] scheduler: 900 ticks
+[2m2026-11-24 00:56:34[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world=0
+[2m2026-11-24 00:56:34[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_nether=0
+[2m2026-11-24 00:56:34[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_the_end=0
+[2m2026-11-24 00:56:35[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=0,0 thread=Folia Region Worker #0 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-24 00:56:35[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=64,64 thread=Folia Region Worker #1 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-24 00:56:39[0m [32m INFO[0m [ChunkwakeTest] scheduler: 1000 ticks
+[2m2026-11-24 00:56:44[0m [32m INFO[0m [ChunkwakeTest] scheduler: 1100 ticks
+[2m2026-11-24 00:56:44[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world=0
+[2m2026-11-24 00:56:44[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_nether=0
+[2m2026-11-24 00:56:44[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_the_end=0
+[2m2026-11-24 00:56:45[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=0,0 thread=Folia Region Worker #0 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-24 00:56:45[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=64,64 thread=Folia Region Worker #1 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-24 00:56:49[0m [32m INFO[0m [ChunkwakeTest] scheduler: 1200 ticks

@@ -61,23 +61,42 @@ final class Tags {
         String kind = switch (registry) {
             case Tag.REGISTRY_BLOCKS -> "block";
             case Tag.REGISTRY_ITEMS -> "item";
+            case Tag.REGISTRY_ENTITY_TYPES -> "entity_types";
+            case Tag.REGISTRY_FLUIDS -> "fluid";
+            case Tag.REGISTRY_GAME_EVENTS -> "game_event";
             default -> null;
         };
-        if (kind == null || clazz != Material.class) {
-            return null;
+        if (kind == null) {
+            return new SimpleTag<>(key, Collections.emptySet());
         }
         Set<String> ids = resolve(kind, key.toString(), new HashSet<>());
         if (ids == null) {
-            return null;
+            return new SimpleTag<>(key, Collections.emptySet());
         }
-        Set<Material> values = new LinkedHashSet<>();
+        Set<T> values = new LinkedHashSet<>();
         for (String id : ids) {
-            Material m = Material.matchMaterial(id);
-            if (m != null) {
-                values.add(m);
+            T value = convert(id, clazz);
+            if (value != null) {
+                values.add(value);
             }
         }
-        return (Tag<T>) new MaterialTag(key, Collections.unmodifiableSet(values));
+        return new SimpleTag<>(key, Collections.unmodifiableSet(values));
+    }
+
+    private static <T> T convert(String id, Class<T> clazz) {
+        if (clazz == Material.class) {
+            return clazz.cast(Material.matchMaterial(id));
+        }
+        if (clazz == org.bukkit.entity.EntityType.class) {
+            String name = id.contains(":") ? id.substring(id.indexOf(':') + 1) : id;
+            try {
+                return clazz.cast(org.bukkit.entity.EntityType.valueOf(
+                        name.toUpperCase(java.util.Locale.ROOT)));
+            } catch (IllegalArgumentException ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 
     /** Состав тега с раскрытыми вложенными; {@code null} — тега нет нигде. */
@@ -256,9 +275,9 @@ final class Tags {
         @Override public Cause cause() { return Cause.INITIAL; }
     }
 
-    private record MaterialTag(NamespacedKey key, Set<Material> values) implements Tag<Material> {
+    private record SimpleTag<T extends Keyed>(NamespacedKey key, Set<T> values) implements Tag<T> {
         @Override public NamespacedKey getKey() { return key; }
-        @Override public boolean isTagged(Material item) { return values.contains(item); }
-        @Override public Set<Material> getValues() { return values; }
+        @Override public boolean isTagged(T item) { return values.contains(item); }
+        @Override public Set<T> getValues() { return values; }
     }
 }

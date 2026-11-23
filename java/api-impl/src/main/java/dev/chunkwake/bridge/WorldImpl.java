@@ -263,11 +263,14 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
     }
 
     public void setTime(long time) {
-        request("settime " + Math.floorMod(time, 24_000L));
+        long normalized = Math.floorMod(time, 24_000L);
+        request("settime " + normalized);
+        // Bukkit CraftWorld#setTime also advances the full game-time view.
+        request("setgametime " + normalized);
     }
 
     public void setFullTime(long time) {
-        request("settime " + Math.max(0L, time));
+        request("setgametime " + Math.max(0L, time));
     }
 
     public long getSeed() {

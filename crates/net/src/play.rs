@@ -5218,6 +5218,13 @@ impl PlayPlan {
             self.set_day_time(ticks);
             return "1".into();
         }
+        if let Some(rest) = line.strip_prefix("setgametime ") {
+            let Ok(ticks) = rest.trim().parse::<i64>() else {
+                return String::new();
+            };
+            self.set_game_time(ticks);
+            return "1".into();
+        }
         if let Some(rest) = line.strip_prefix("itemfromnbt ") {
             let line = crate::stack_nbt::unhex(rest.trim())
                 .and_then(|bytes| chunkwake_world::nbt::read_root(&bytes).ok())
@@ -5303,6 +5310,8 @@ impl PlayPlan {
             let tags = match rest.split_once(' ') {
                 Some(("block", name)) => self.survival.block_tags.get(name),
                 Some(("item", name)) => self.survival.item_tags.get(name),
+                Some(("entity_types", name)) => self.survival.entity_type_tags.get(name),
+                Some(("damage_type", name)) => self.survival.damage_tags.get(name),
                 _ => None,
             };
             return tags.map_or_else(

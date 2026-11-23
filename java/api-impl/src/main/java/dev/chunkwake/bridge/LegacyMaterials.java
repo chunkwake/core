@@ -20,7 +20,7 @@ final class LegacyMaterials {
 
     /** Точные переименования, которые не выводятся из имени. */
     private static final Map<String, String> RENAMES = Map.ofEntries(
-            Map.entry("GRASS", "SHORT_GRASS"),
+            Map.entry("GRASS", "GRASS_BLOCK"),
             Map.entry("LONG_GRASS", "SHORT_GRASS"),
             Map.entry("YELLOW_FLOWER", "DANDELION"),
             Map.entry("RED_ROSE", "POPPY"),

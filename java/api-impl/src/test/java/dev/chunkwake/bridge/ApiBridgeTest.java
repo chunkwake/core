@@ -205,7 +205,7 @@ class ApiBridgeTest {
         assertEquals(org.bukkit.Material.STONE,
                 LegacyMaterials.modernize(new org.bukkit.material.MaterialData(
                         org.bukkit.Material.LEGACY_STONE), true));
-        assertEquals(org.bukkit.Material.SHORT_GRASS,
+        assertEquals(org.bukkit.Material.GRASS_BLOCK,
                 LegacyMaterials.modernize(new org.bukkit.material.MaterialData(
                         org.bukkit.Material.LEGACY_GRASS), true));
         assertEquals(org.bukkit.Material.LILY_PAD,

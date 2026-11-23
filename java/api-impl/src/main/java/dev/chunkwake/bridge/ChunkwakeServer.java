@@ -1280,6 +1280,17 @@ final class ChunkwakeServer {
         return Tags.get(registry, tag, clazz);
     }
 
+    /** {@code Server.getRegistry(Class)} (Skript/Paper API). */
+    public <T extends org.bukkit.Keyed> org.bukkit.Registry<T> getRegistry(Class<T> type) {
+        return io.papermc.paper.registry.RegistryAccess.registryAccess().getRegistry(type);
+    }
+
+    /** {@code Server.getRegistry(RegistryKey)} (Paper API). */
+    public <T extends org.bukkit.Keyed> org.bukkit.Registry<T> getRegistry(
+            io.papermc.paper.registry.RegistryKey<T> key) {
+        return io.papermc.paper.registry.RegistryAccess.registryAccess().getRegistry(key);
+    }
+
     /** Обработчик типизирован по событию, поэтому зовём через приведение. */
     @SuppressWarnings("unchecked")
     private static void callHandler(LifecycleEventHandler<?> handler, LifecycleEvent event) {

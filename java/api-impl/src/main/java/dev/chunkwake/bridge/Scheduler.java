@@ -160,7 +160,18 @@ final class Scheduler {
 
     private void withSelf(Plugin p, Consumer<? super BukkitTask> c, boolean isSync, long d, long per) {
         BukkitTask[] self = new BukkitTask[1];
-        self[0] = schedule(p, () -> c.accept(self[0]), isSync, d, per);
+        if (isSync) {
+            self[0] = schedule(p, () -> c.accept(self[0]), true, d, per);
+            return;
+        }
+        // Async body can start before schedule() returns. Create the task first,
+        // publish it to the consumer, and only then submit the async runner.
+        if (p == null || !p.isEnabled()) {
+            throw new IllegalArgumentException("Plugin attempted to register task while disabled");
+        }
+        Task t = new Task(p, () -> c.accept(self[0]), false, d, per);
+        self[0] = t;
+        async.submit(() -> runAsync(t));
     }
 
     public int scheduleSyncDelayedTask(Plugin p, Runnable r, long d) { return runTaskLater(p, r, d).getTaskId(); }
