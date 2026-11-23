@@ -21,16 +21,16 @@ public class RecipeMap {
     }
 
     /** {@code RecipeMap.addRecipe(RecipeHolder)} (CraftEngine). */
-    public void addRecipe(Object recipe) {
+    public void addRecipe(RecipeHolder recipe) {
     }
 
     /** {@code RecipeMap.removeRecipe(ResourceKey)} (CraftEngine). */
-    public boolean removeRecipe(Object key) {
+    public boolean removeRecipe(net.minecraft.resources.ResourceKey<?> key) {
         return false;
     }
 
     /** {@code RecipeMap.byKey(ResourceKey)} (CraftEngine). */
-    public Object byKey(Object key, Object recipe) {
+    public Object byKey(net.minecraft.resources.ResourceKey<?> key) {
         return null;
     }
 }
