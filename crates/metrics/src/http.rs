@@ -300,6 +300,21 @@ enum Auth {
     Forbidden,
 }
 
+/// Куда уводить после входа по ссылке.
+///
+/// `//evil.example` — уже не путь, а адрес другого хоста: браузер ушёл бы
+/// туда по `Location`. Управляющие байты в пути в заголовок не пускаем.
+fn redirect_target(path: &str) -> &str {
+    if path.starts_with('/')
+        && !path.starts_with("//")
+        && !path.bytes().any(|b| b.is_ascii_control())
+    {
+        path
+    } else {
+        "/"
+    }
+}
+
 async fn handle(
     mut stream: TcpStream,
     snapshot: Shared,
@@ -354,7 +369,7 @@ async fn handle(
         );
         let response = format!(
             "HTTP/1.1 302 Found\r\nLocation: {}\r\n{cookie}Cache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            req.path
+            redirect_target(&req.path)
         );
         stream.write_all(response.as_bytes()).await?;
         return stream.flush().await;
@@ -1041,6 +1056,28 @@ mod tests {
         assert!(body.contains("Set-Cookie: cw_metrics=0123456789abcdef"));
         assert!(body.contains("HttpOnly"));
         assert!(body.contains("SameSite=Strict"));
+    }
+
+    /// `//host` в `Location` — переход на чужой сайт, а не на страницу
+    /// дашборда: ссылку с верным токеном можно прислать жертве.
+    #[tokio::test]
+    async fn login_redirect_does_not_leave_the_host() {
+        let port = spawn(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            0,
+            shared(),
+            Access::with_token("0123456789abcdef"),
+        )
+        .await
+        .unwrap();
+        let body = request(
+            port,
+            "GET //evil.example/x?token=0123456789abcdef HTTP/1.1\r\nHost: 127.0.0.1",
+        )
+        .await;
+        assert!(body.starts_with("HTTP/1.1 302"), "{}", &body[..40]);
+        assert!(body.contains("Location: /\r\n"), "{body}");
+        assert!(!body.contains("evil.example"), "{body}");
     }
 
     /// Чужой Origin отклоняется даже с верным токеном: иначе страница на

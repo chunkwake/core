@@ -438,6 +438,7 @@ fn replace_from(dir: &Path, id: &str, allow_damaged: bool) -> Result<(), String>
             ".chunkwake-restore-stage",
             ".chunkwake-restore-old",
             LOCK,
+            MARKER,
         ]
         .contains(&name)
         {

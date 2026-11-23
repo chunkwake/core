@@ -2745,6 +2745,52 @@ fn game_mode_change(requested: i32, level: i32, current: u8) -> GameModeChange {
 /// Предел `/give` за раз.
 const MAX_GIVE: i32 = 6400;
 
+/// `ServerGamePacketListenerImpl.dropSpamThrottler`: `TickThrottler(20, 1480)`.
+///
+/// Клиент в креативе может прислать пачку пакетов с выбросом предметов;
+/// без счётчика каждый пакет создавал сущность, которую сервер тикает и
+/// рассылает. Ваниль разрешает всплеск и затем примерно один выброс в тик.
+#[derive(Default)]
+struct CreativeDropThrottle {
+    count: i32,
+    tick: u64,
+}
+
+impl CreativeDropThrottle {
+    const INCREMENT: i32 = 20;
+    const THRESHOLD: i32 = 1480;
+
+    fn allow(&mut self, tick: u64) -> bool {
+        let elapsed = tick.saturating_sub(self.tick).min(i32::MAX as u64) as i32;
+        self.count = (self.count - elapsed).max(0);
+        self.tick = tick;
+        if self.count >= Self::THRESHOLD {
+            return false;
+        }
+        self.count += Self::INCREMENT;
+        true
+    }
+}
+
+#[cfg(test)]
+mod creative_drop_tests {
+    use super::CreativeDropThrottle;
+
+    #[test]
+    fn burst_then_one_per_tick() {
+        let mut throttle = CreativeDropThrottle::default();
+        for _ in 0..74 {
+            assert!(throttle.allow(0));
+        }
+        assert!(!throttle.allow(0), "всплеск ограничен");
+        // Каждый тик снимает один шаг; после всплеска — примерно один выброс
+        // в тик, второй в том же тике снова ждёт.
+        assert!(throttle.allow(1));
+        assert!(!throttle.allow(1));
+        assert!(throttle.allow(21));
+    }
+}
+
 pub struct SurvivalData {
     /// Стол зачарования: чары, предметы, полки.
     pub enchanting: chunkwake_data::enchanting::Enchanting,
@@ -13262,6 +13308,7 @@ impl PlayPlan {
         // Ломка (`ServerPlayerGameMode`): тики сессии, текущий блок и отложенная
         // ломка (клиент закончил раньше, чем позволяет прогресс).
         let mut game_ticks: u64 = 0;
+        let mut creative_drops = CreativeDropThrottle::default();
         let mut environment = crate::environment::State::default();
         let mut burning_visual = false;
         let mut last_environment_pos = me.pos;
@@ -14331,10 +14378,32 @@ impl PlayPlan {
                             continue;
                         }
                         let (slot, stack) = chunkwake_protocol::inventory::read_creative_slot(&mut r)?;
+                        // `handleSetCreativeModeSlot`: слот 1..=45 (0 — результат
+                        // крафта, его клиент не шлёт), предмет из реестра и
+                        // количество не больше максимального. Иначе сервер
+                        // запоминал невидимые и «бесконечные» стопки.
+                        if slot >= 0 && !(1..=45).contains(&slot) {
+                            continue;
+                        }
+                        let stack = match stack {
+                            Some(s) if s.item == 0 => None,
+                            Some(s)
+                                if s.item > 0
+                                    && (s.item as usize) < self.survival.items.len()
+                                    && s.count > 0
+                                    && s.count <= self.max_stack(s.item).max(1) =>
+                            {
+                                Some(s)
+                            }
+                            Some(_) => continue,
+                            None => None,
+                        };
                         {
                             // Слот < 0 — выброс из креатив-меню (`handleSetCreativeModeSlot`).
                             if slot < 0 {
-                                if let (Some(s), Some((feet, yaw, pitch))) = (stack, self.player_at(uuid)) {
+                                if let (Some(s), Some((feet, yaw, pitch))) = (stack, self.player_at(uuid))
+                                    && creative_drops.allow(game_ticks)
+                                {
                                     self.throw(uuid, feet, yaw, pitch, s);
                                 }
                             } else {
