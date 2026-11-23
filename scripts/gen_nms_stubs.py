@@ -43,7 +43,8 @@ def descriptor_type(desc: str, pos: int, known: set[str]) -> tuple[str, int]:
     if desc[pos] == "L":
         end = desc.index(";", pos)
         name = desc[pos + 1:end].replace("/", ".")
-        if name.startswith("net.minecraft.") and name not in known:
+        if name.startswith("net.minecraft.") and name not in known \
+                and name.replace(".", "/") not in known:
             name = "java.lang.Object"
         return name, end + 1
     primitive = {
@@ -205,6 +206,7 @@ def main() -> int:
     javap = find_javap()
     generated = 0
     for name in candidates:
+        known.add(name)
         source = generate_class(args.paper, javap, name, known)
         if source is None:
             print(f"SKIP {name}")
