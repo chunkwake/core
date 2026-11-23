@@ -129,8 +129,7 @@ class ApiBridgeTest {
         assertEquals("minecraft:textures/entity/zombie", patch.body().asString());
         assertTrue(io.papermc.paper.datacomponent.item.ResolvableProfile.SkinPatch.empty().isEmpty());
 
-        assertEquals(net.kyori.adventure.text.Component.translatable(
-                        "entity.minecraft.mannequin.label"),
+        assertEquals(net.kyori.adventure.text.Component.text("NPC"),
                 BRIDGE.defaultMannequinDescription());
 
         assertEquals(java.util.Set.of(
@@ -142,12 +141,12 @@ class ApiBridgeTest {
                 BRIDGE.validMannequinPoses());
 
         var parts = BRIDGE.allSkinParts();
-        assertEquals(0, parts.getRaw());
+        assertEquals(127, parts.getRaw());
         assertTrue(parts.hasCapeEnabled());
         assertTrue(parts.hasHatsEnabled());
         parts.setCapeEnabled(false);
         assertFalse(parts.hasCapeEnabled());
-        assertEquals(1, parts.getRaw());
+        assertEquals(126, parts.getRaw());
         assertTrue(parts.mutableCopy().hasCapeEnabled() == false);
     }
 

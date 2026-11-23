@@ -890,7 +890,14 @@ public final class ItemComponents2 {
             return this;
         }
         @Override public SignText build() {
-            return new SignTextValue(List.copyOf(this.lines), this.color, this.glowing);
+            List<Component> out = new ArrayList<>(this.lines);
+            while (out.size() < 4) {
+                out.add(Component.empty());
+            }
+            if (out.size() > 4) {
+                out = new ArrayList<>(out.subList(0, 4));
+            }
+            return new SignTextValue(List.copyOf(out), this.color, this.glowing);
         }
     }
 

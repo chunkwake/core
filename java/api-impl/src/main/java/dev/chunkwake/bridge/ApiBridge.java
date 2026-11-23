@@ -85,7 +85,7 @@ public final class ApiBridge implements InternalAPIBridge {
     @Override public SkinParts.Mutable allSkinParts() { return new SkinPartsImpl(); }
     @Override public Component defaultMannequinDescription() {
         // Ваниль: `Component.translatable("entity.minecraft.mannequin.label")`.
-        return Component.translatable("entity.minecraft.mannequin.label");
+        return Component.text("NPC");
     }
     @Override
     @SuppressWarnings("unchecked")
@@ -256,7 +256,7 @@ public final class ApiBridge implements InternalAPIBridge {
             return enabled ? this.hidden & ~mask : this.hidden | mask;
         }
 
-        @Override public int getRaw() { return this.hidden; }
+        @Override public int getRaw() { return (~this.hidden) & 0x7F; }
         @Override public SkinParts.Mutable mutableCopy() {
             SkinPartsImpl copy = new SkinPartsImpl();
             copy.hidden = this.hidden;
