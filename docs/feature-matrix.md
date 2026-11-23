@@ -7499,8 +7499,10 @@ Bootstrap-фаза теперь проходит после добавления
   `InjectedWorldBorder` и прокси-CraftEntity больше не падают:
   `CraftWorldBorder` наследует NMS `WorldBorder`, Bukkit-сущности
   реализуют `CraftEntity`, а CE `CraftEntityProxy` получил совместимый
-  shim. Остались `BlockState.blockState()` (нужен только `CEProbe`,
-  не data pack) и warning `Failed to hook entity world tracking`
-  (Spigot entity add/remove callbacks). `CustomShapes` теперь покрывает
-  заборы, стены и кнопки. Генератор NMS-стабов умеет top-level, nested
-  (`Recipe$CommonInfo`) и сохранение наследования (`ShapedRecipe -> Recipe`).
+  shim. `BlockState.blockState()` реализован с return type `Object`, чтобы
+  CE ByteBuddy-инжектор мог подменить его field-accessor'ом; `CEProbe`
+  `state2-immutable` проходит. Добавлен `ServerLevel$EntityCallbacks`, поэтому
+  CE больше не предупреждает про entity world tracking. `CustomShapes`
+  покрывает заборы, стены и кнопки. Генератор NMS-стабов умеет top-level,
+  nested (`Recipe$CommonInfo`) и сохранение наследования
+  (`ShapedRecipe -> Recipe`).

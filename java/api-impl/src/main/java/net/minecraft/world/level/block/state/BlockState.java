@@ -72,6 +72,20 @@ public class BlockState extends BlockBehaviour.BlockStateBase {
         return this.block;
     }
 
+    /**
+     * CraftEngine injects an {@code immutableBlockState} field into a generated
+     * BlockState subclass and intercepts this method. The return type must stay
+     * Object: CE's ImmutableBlockState is not a BlockState subclass.
+     */
+    public Object blockState() {
+        return this;
+    }
+
+    /** Companion accessor for CE's immutable-state probe. */
+    public net.minecraft.core.Holder<Block> owner() {
+        return new net.minecraft.core.Holder.Reference<>(this.block);
+    }
+
     /** Сетевой id состояния ({@code Block.getId}); -1 для заглушек. */
     public int id() {
         return this.id;

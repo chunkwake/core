@@ -37,11 +37,11 @@ JARS: 95
 - Добавлены реальные Folia/Leaf-совместимые плагины: `Chunksmith`,
   `OneBlock`, `SmartSpawner`, `ClearLag++`, `Pl3xMap`, `AdvancedPortals`,
   `PvPManager`.
-- CE включается; data pack загружает 45 recipes и 40 blocks, а
-  `CEProbe`/`CEStateProbe` проходят custom blocks. Остались только
-  probe-only `BlockState.blockState()` и warning про entity world tracking.
-  Этот gate проверяет загрузку/enable плагинов и отсутствие runtime-ошибок,
-  а не полную CE parity.
+- CE включается; data pack загружает 45 recipes и 40 blocks,
+  `CEProbe`/`CEStateProbe` проходят custom blocks, а `BlockState.blockState()`
+  и entity world tracking hook больше не падают. Этот gate проверяет
+  загрузку/enable плагинов и отсутствие runtime-ошибок; полная parity
+  произвольных плагинов им не доказывается.
 - Базовый `load-gate-server` (27/27) этим прогоном не восстанавливался.
 
 ## Воспроизведение
