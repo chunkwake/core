@@ -1,9 +1,14 @@
 package net.minecraft.resources;
 
+import com.mojang.serialization.Codec;
 import java.util.Objects;
 
 /** Минимальный NMS {@code Identifier} (namespace:path). */
 public final class Identifier {
+    /** {@code Identifier.CODEC} (CraftEngine loot codec). */
+    public static final Codec<Identifier> CODEC =
+            Codec.STRING.xmap(Identifier::parse, Identifier::toString);
+
     private final String namespace;
     private final String path;
 

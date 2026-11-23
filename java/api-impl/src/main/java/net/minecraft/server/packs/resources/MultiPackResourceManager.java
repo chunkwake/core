@@ -9,7 +9,7 @@ import net.minecraft.server.packs.PackType;
  * data pack proxy. Ресурсы Chunkwake не читает через NMS ResourceManager,
  * поэтому списки пустые; важно, чтобы класс и конструктор существовали.
  */
-public class MultiPackResourceManager implements ResourceManager {
+public class MultiPackResourceManager implements ResourceManager, AutoCloseable {
     private final PackType type;
     private final List<PackResources> packs;
 
@@ -24,5 +24,9 @@ public class MultiPackResourceManager implements ResourceManager {
 
     public List<PackResources> getPacks() {
         return this.packs;
+    }
+
+    @Override
+    public void close() {
     }
 }

@@ -40,6 +40,15 @@ public class Item implements ProjectileItem, net.minecraft.world.level.ItemLike 
         return net.minecraft.world.InteractionResult.PASS;
     }
 
+    /** {@code Item.getPlayerPOVHitResult(Level, Player, ClipContext.Fluid)} (CraftEngine). */
+    public static net.minecraft.world.phys.BlockHitResult getPlayerPOVHitResult(
+            net.minecraft.world.level.Level level,
+            net.minecraft.world.entity.player.Player player,
+            net.minecraft.world.level.ClipContext.Fluid fluid) {
+        return new net.minecraft.world.phys.BlockHitResult(
+                null, net.minecraft.core.Direction.UP, null, true);
+    }
+
     private final String id;
 
     @Override
