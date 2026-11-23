@@ -7,16 +7,16 @@ test/probe-плагинов.
 ## Результат
 
 ```
-91 of 91 enabled in 82840 ms
+96 of 96 enabled in 52111 ms
 FAILED: (пусто)
 LOADERR: (пусто)
 SKIPPED: (пусто)
 PANICS: 0
-JARS: 95
+JARS: 100
 ```
 
-`JARS: 95` — 91 плагин + библиотечные/зависимые jar-ы, которые Chunkwake
-не считает отдельными плагинами. CommandAPI и Pl3xMap больше не пропускаются:
+`JARS: 100` — 96 плагинов + библиотечные/зависимые jar-ы, которые Chunkwake
+не считает отдельными плагинами. Добавлены ещё 6 реальных Paper/Folia-плагинов: `mob-heads`, `BuildPaste`, `no-enderman-grief`, `instantrestock`, `legacyfreecam`, `EnderChest`. CommandAPI и Pl3xMap больше не пропускаются:
 добавлены `WorldData`, `ServerFunctionLibrary`, `LevelData`, `getSeed`,
 `StreamMemberEncoder` и `CustomPacketPayload.codec`. Конфликт WorldEdit/FAWE
 закрыт порядком зависимостей в `PluginClassGroup`: точное имя плагина

@@ -1,99 +1,121 @@
-# Paper vs Chunkwake: p99 MSPT и TPS (23.11.2026)
+# Paper 26.3 vs Chunkwake: p99 MSPT и TPS (финальная release-сборка, 23.11.2026)
 
-Строгий A/B на одинаковой внешней нагрузке: 5 независимых раундов, свежие
-миры, release-сборка Chunkwake и одинаковый бот-сценарий. Каждый раунд
-содержит три 15-секундных окна:
+Строгий A/B на текущем release-бинаре Chunkwake (`cargo build --release -p
+chunkwake-server`) и Paper 26.3 build 248. 5 раундов, 3 сценария, свежие
+server-директории на каждый запуск, один и тот же bot-скрипт и `PerfProbe`
+1.2 на обеих сторонах.
 
-1. 200 коров;
-2. 1000 коров;
-3. 1000 коров + активная redstone-линия (переключение рычага каждые ~250 мс).
-
-Метрики снимает `PerfProbe` (Paper API `ServerTickEndEvent`): p50/p95/p99
-длительности тика и TPS. TPS считается по `Server.getCurrentTick()`, а не по
-числу Java-событий, поэтому схлопывание очереди тиков не влияет на цифру.
-Сырые samples: [`benchmarks/ab-p99/samples`](../benchmarks/ab-p99/samples).
-Полный отчёт со всеми 30 окнами:
-[`benchmarks/ab-p99/results.md`](../benchmarks/ab-p99/results.md).
-
-## Стенд
+## Условия
 
 - AMD Ryzen 9 7945HX, 16 ядер / 32 потока, 64 GiB RAM.
-- Paper 26.3 build 248, JDK 25, `-Xms2G -Xmx2G`.
-- Chunkwake: `cargo build --release -p chunkwake-server`, JDK 25,
-  встроенный API bundle, `memory-profile=normal`.
-- Один бот, `view-distance=8`, `simulation-distance=8`, плоский мир,
-  `difficulty=peaceful`, `spawn_mobs=false`, `max_entity_cramming=0`.
-- `PerfProbe` 1.2 — единственный плагин на обеих сторонах.
+- JDK 25, Paper `-Xms2G -Xmx2G`.
+- Чтобы не занимать рабочую машину на 100%, оба сервера запускались с
+  `ProcessorAffinity=0xFF` (8 логических ядер) и `PriorityClass=BelowNormal`.
+  Это **paired**-прогон: условия одинаковы для Paper и Chunkwake, но это не
+  максимальный throughput-режим всей машины.
+- Сценарии: `200 cows`, `1000 cows`, `1000 cows + redstone`.
+- Окно измерения: 15 000 мс; TPS считается по `server_ticks` из
+  `Server.getCurrentTick()`, не по числу Java tick events.
+- Команда:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File scripts/ab_p99.ps1 `
+    -Rounds 5 -SampleMs 15000 -AffinityMask 255 -ProcessPriority BelowNormal
+  py -3 scripts/analyze_ab_p99.py
+  ```
 
-## Итоговая таблица
+## Итог
 
-`p99` — pooled по всем сырым тикам; `p99 median` — медиана p99 по пяти
-раундам. `TPS` — сумма `server_ticks` / сумма wall-clock окон. Отрицательная
-дельта p99 означает, что Chunkwake быстрее.
-
-| сценарий | сторона | p99 pooled, ms | p99 median, ms | avg ms | TPS pooled |
-|---|---|---:|---:|---:|---:|
-| 200 коров | Chunkwake | **0.966** | 0.960 | 0.684 | 20.00 |
-| 200 коров | Paper | 3.713 | 3.763 | 2.362 | 19.99 |
-| 1000 коров | Chunkwake | **1.638** | 1.630 | 1.182 | 19.99 |
-| 1000 коров | Paper | 12.018 | 10.645 | 8.478 | 20.00 |
-| 1000 коров + redstone | Chunkwake | **1.650** | 1.646 | 1.197 | 20.00 |
-| 1000 коров + redstone | Paper | 10.534 | 10.049 | 7.639 | 19.99 |
-
-### Парные сравнения
-
-| сценарий | p99 CW лучше | p99 p(CW лучше) | p99 ratio | TPS delta | TPS CW лучше | TPS p(Paper лучше) |
+| сценарий | p99 Chunkwake | p99 Paper | p99 ratio | p99 CW побед | p(CW лучше) | TPS CW / Paper |
 |---|---:|---:|---:|---:|---:|---:|
-| 200 коров | **5/5** | **0.031** | 0.260x | +0.01 | 2/5 | 0.875 |
-| 1000 коров | **5/5** | **0.031** | 0.136x | −0.01 | 2/5 | 0.500 |
-| 1000 коров + redstone | **5/5** | **0.031** | 0.157x | +0.01 | 3/5 | 0.812 |
+| 200 cows | **0.928** | 3.347 | 0.277x | **5/5** | **0.031** | 19.99 / 20.00 |
+| 1000 cows | **1.642** | 18.874 | 0.087x | **5/5** | **0.031** | 20.00 / 20.00 |
+| 1000 cows + redstone | **1.550** | 26.213 | 0.059x | **5/5** | **0.031** | 20.01 / 20.00 |
 
-p — односторонний точный sign-test. При N=5 результат 5/5 даёт минимально
-возможный p=0.031; TPS-разница в пределах ±0.01 тика/с и статистически
-неотличима от нуля.
+p99 — pooled по 5 окнам; TPS — pooled `server_ticks / wall`. В каждом из
+15 парных окон p99 Chunkwake был ниже Paper.
 
-## Вывод
+## Сырые данные
 
-- В этом сценарии Chunkwake стабильно быстрее по p99: 5/5 раундов во всех
-  трёх нагрузках, p=0.031, p99 в 3.8–7.3 раза ниже Paper.
-- TPS у обеих сторон 20.00: после исправления тик-планировщика Chunkwake
-  больше не теряет тики и не уступает Paper по пропускной способности.
-- Это **узкая** заявка: один игрок, ванильные коровы с AI, плоский мир,
-  единственный плагин `PerfProbe`. Она не доказывает преимущество на
-  произвольных плагинах, мирах и редстоун-схемах.
-
-## Что было исправлено по пути
-
-Первый прогон (debug-бинарник, `MissedTickBehavior::Skip`) дал TPS 18–19 и
-слабый p99-выигрыш только на 1000 мобах. Причины:
-
-1. **`Skip` навсегда терял тик**, если тик-луп опаздывал на несколько
-   миллисекунд. Заменено на `Burst`: пропущенные дедлайны догоняются, как в
-   ванильном tick loop. На release-сборке TPS сразу стал 20.0.
-2. **Debug-бинарник** имел MSPT в разы выше release. A/B теперь запускается
-   на `target/release/chunkwake.exe`; `scripts/ab_p99.ps1` проверяет, что
-   бинарник новее API-jar.
-3. `PerfProbe` 1.2 считает `server_ticks` через `Server.getCurrentTick()`;
-   для Chunkwake добавлен downcall `world("tick")` в `TickStats::total()`.
-
-## Воспроизведение
-
-```powershell
-cd java
-gradlew --offline --no-daemon :perf-probe:jar dist
-
-cd ..
-cargo build --release -p chunkwake-server
-powershell -ExecutionPolicy Bypass -File scripts/ab_p99.ps1 -Rounds 5 -SampleMs 15000
-py -3 scripts/analyze_ab_p99.py
-```
+- 30 CSV-файлов: `benchmarks/ab-p99/samples/{chunkwake,paper}/samples-rN-<scenario>.csv`.
+- Полная таблица 30 окон: `benchmarks/ab-p99/results.md`.
+- Логи и PerfProbe-файлы прогона: `target/ab-p99/r1..r5` (рабочая директория).
 
 ## Ограничения
 
-- Длительность тика Chunkwake — Rust-тик плюс Java-часть
-  (`scheduler.tick()` + `ChunkEvents` + `ServerTickEndEvent`) для того же
-  тика. У Paper — полный тик, включая всю Java-работу.
-- N=5 достаточно для направления и даёт p=0.031 при 5/5, но не заменяет
-  длительный многопроцессный benchmark на разных машинах.
-- 100% совместимость с произвольными Paper/Folia-плагинами этим прогоном
-  не проверяется; для неё нужен отдельный расширенный plugin gate.
+- Это нагрузка из мобов и redstone, без игроков, чанков, AI-путей, сущностей
+  сложнее cow и без реального сетевого трафика.
+- TPS в обоих лагерях упирается в 20.00; сравнение по TPS здесь не показывает
+  преимущества, только отсутствие деградации.
+- 100% совместимость с произвольными Paper/Folia-плагинами этим прогоном не
+  доказывается; отдельно существует plugin gate 91/91.
+- Результаты относятся к коммиту `ecc9801` и текущему `target/release/chunkwake.exe`;
+  после изменения Rust/Java-кода их нужно перепроверять.
+
+---
+
+# Paper vs Chunkwake: p99 MSPT / TPS
+
+Raw data: `target\ab-p99`; rounds: [1, 2, 3, 4, 5].
+
+`p99` and all percentiles are computed from raw `ServerTickEndEvent` samples; `TPS` uses `server_ticks` (Server.getCurrentTick delta) divided by wall-clock length of the same window.
+
+## Per-round windows
+
+| round | side | scenario | events | server ticks | p50 ms | p95 ms | p99 ms | max ms | TPS (window) | TPS API |
+|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | Chunkwake | cows200 | 300 | 300 | 0.621 | 0.814 | 0.907 | 3.729 | 19.96 | 20.00 |
+| 1 | Chunkwake | cows1000 | 301 | 301 | 1.130 | 1.515 | 1.847 | 2.354 | 20.00 | 20.00 |
+| 1 | Chunkwake | redstone | 323 | 323 | 1.180 | 1.472 | 1.631 | 1.869 | 20.04 | 20.00 |
+| 1 | Paper | cows200 | 301 | 301 | 2.115 | 2.666 | 3.108 | 3.704 | 20.00 | 19.88 |
+| 1 | Paper | cows1000 | 301 | 301 | 7.370 | 8.890 | 11.459 | 21.833 | 20.01 | 20.00 |
+| 1 | Paper | redstone | 323 | 323 | 7.885 | 14.044 | 38.426 | 91.227 | 20.00 | 20.00 |
+| 2 | Chunkwake | cows200 | 301 | 301 | 0.530 | 0.711 | 0.884 | 0.987 | 20.02 | 20.00 |
+| 2 | Chunkwake | cows1000 | 301 | 301 | 1.142 | 1.428 | 1.638 | 2.035 | 20.00 | 20.00 |
+| 2 | Chunkwake | redstone | 324 | 324 | 1.137 | 1.429 | 1.563 | 1.795 | 20.05 | 20.00 |
+| 2 | Paper | cows200 | 301 | 301 | 2.118 | 3.078 | 4.150 | 47.142 | 20.00 | 19.84 |
+| 2 | Paper | cows1000 | 301 | 301 | 7.555 | 8.641 | 10.455 | 21.978 | 20.00 | 20.00 |
+| 2 | Paper | redstone | 323 | 323 | 8.895 | 17.646 | 28.904 | 56.149 | 20.00 | 20.00 |
+| 3 | Chunkwake | cows200 | 301 | 301 | 0.545 | 0.757 | 0.928 | 1.442 | 19.99 | 20.00 |
+| 3 | Chunkwake | cows1000 | 301 | 301 | 1.020 | 1.302 | 1.473 | 1.729 | 20.00 | 20.00 |
+| 3 | Chunkwake | redstone | 324 | 324 | 1.053 | 1.315 | 1.435 | 1.492 | 19.95 | 20.00 |
+| 3 | Paper | cows200 | 301 | 301 | 1.898 | 2.287 | 2.648 | 3.259 | 20.01 | 19.92 |
+| 3 | Paper | cows1000 | 301 | 301 | 8.774 | 10.339 | 11.073 | 11.606 | 20.00 | 20.00 |
+| 3 | Paper | redstone | 324 | 324 | 8.100 | 9.963 | 10.803 | 28.257 | 20.00 | 20.00 |
+| 4 | Chunkwake | cows200 | 300 | 300 | 0.634 | 0.808 | 0.900 | 1.905 | 19.95 | 20.00 |
+| 4 | Chunkwake | cows1000 | 301 | 301 | 1.133 | 1.383 | 1.460 | 1.655 | 20.00 | 20.00 |
+| 4 | Chunkwake | redstone | 325 | 325 | 1.135 | 1.420 | 1.545 | 1.739 | 20.00 | 20.00 |
+| 4 | Paper | cows200 | 300 | 300 | 2.311 | 2.806 | 3.208 | 3.678 | 19.96 | 19.90 |
+| 4 | Paper | cows1000 | 301 | 301 | 8.236 | 17.275 | 41.582 | 64.211 | 20.00 | 20.00 |
+| 4 | Paper | redstone | 324 | 324 | 8.415 | 10.384 | 12.254 | 28.075 | 20.00 | 20.00 |
+| 5 | Chunkwake | cows200 | 301 | 301 | 0.580 | 0.775 | 0.945 | 6.220 | 20.01 | 20.00 |
+| 5 | Chunkwake | cows1000 | 301 | 301 | 1.100 | 1.392 | 1.563 | 1.949 | 20.02 | 20.00 |
+| 5 | Chunkwake | redstone | 324 | 324 | 1.089 | 1.376 | 1.530 | 2.257 | 19.99 | 20.00 |
+| 5 | Paper | cows200 | 301 | 301 | 2.240 | 3.000 | 3.479 | 4.051 | 20.00 | 19.77 |
+| 5 | Paper | cows1000 | 301 | 301 | 8.341 | 9.550 | 10.285 | 12.185 | 20.01 | 20.00 |
+| 5 | Paper | redstone | 322 | 322 | 7.801 | 9.017 | 10.362 | 28.612 | 19.99 | 20.00 |
+
+## Pooled windows
+
+| scenario | side | rounds | ticks | avg ms | p50 ms | p95 ms | p99 ms | p99 round median | max ms | TPS (pooled window) | TPS min | TPS API mean |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| cows200 | Chunkwake | 5 | 1503 | 0.607 | 0.583 | 0.790 | 0.928 | 0.907 | 6.220 | 19.99 | 19.95 | 20.00 |
+| cows200 | Paper | 5 | 1504 | 2.216 | 2.122 | 2.811 | 3.347 | 3.208 | 47.142 | 20.00 | 19.96 | 19.86 |
+| cows1000 | Chunkwake | 5 | 1505 | 1.126 | 1.106 | 1.411 | 1.642 | 1.563 | 2.354 | 20.00 | 20.00 | 20.00 |
+| cows1000 | Paper | 5 | 1505 | 8.454 | 8.098 | 10.161 | 18.874 | 11.073 | 64.211 | 20.00 | 20.00 | 20.00 |
+| redstone | Chunkwake | 5 | 1620 | 1.137 | 1.117 | 1.419 | 1.550 | 1.545 | 2.257 | 20.01 | 19.95 | 20.00 |
+| redstone | Paper | 5 | 1616 | 8.870 | 8.148 | 11.676 | 26.213 | 12.254 | 91.227 | 20.00 | 19.99 | 20.00 |
+
+## Paired p99 and TPS deltas (Chunkwake - Paper)
+
+| scenario | pairs | p99 delta ms (mean / median) | p99 CW wins | p99 p(CW better) | p99 p(Paper better) | pooled p99 CW / Paper | p99 ratio | TPS delta (mean) | TPS CW wins | TPS p(CW better) | TPS p(Paper better) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| cows200 | 5 | -2.406 / -2.309 | 5/5 | 0.031 | 1.000 | 0.928 / 3.347 | 0.277x | -0.01 | 2/5 | 0.812 | 0.500 |
+| cows1000 | 5 | -15.375 / -9.600 | 5/5 | 0.031 | 1.000 | 1.642 / 18.874 | 0.087x | -0.00 | 1/5 | 0.750 | 0.750 |
+| redstone | 5 | -18.609 / -10.709 | 5/5 | 0.031 | 1.000 | 1.550 / 26.213 | 0.059x | 0.01 | 2/5 | 0.500 | 0.875 |
+
+Negative p99 delta means Chunkwake had lower p99. Ties are excluded from the sign test.
+The table gives both one-sided p-values: `p(CW better)` tests `Chunkwake < Paper`; `p(Paper better)` tests the opposite direction.
+
+`TPS (window)` uses the authoritative `server_ticks` delta from `Server.getCurrentTick()`, not the number of Java tick events. `TPS API` from `Server.getTPS()[0]` is shown as a cross-check (Chunkwake: last-100-tick meter, Paper: 1-minute average).
+
+Chunkwake tick duration = Rust core tick + Java scheduler/plugin tick for the same tick; Paper tick duration is the full server tick measured by Paper.

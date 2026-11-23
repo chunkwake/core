@@ -16,7 +16,10 @@ param(
     [int]$Cows = 200,
     [int]$Cows2 = 1000,
     [int]$SampleMs = 15000,
-    [string]$PaperJar = $env:PAPER_JAR
+    [string]$PaperJar = $env:PAPER_JAR,
+    # Optional low-load mode for shared workstations. 0 = no affinity change.
+    [int]$AffinityMask = 0,
+    [string]$ProcessPriority = ''
 )
 
 $ErrorActionPreference = 'Continue'
@@ -161,6 +164,15 @@ function Setup-Stand([string]$dir, [string]$kind, [int]$port) {
     Set-Content -Path (Join-Path $dir 'server.properties') -Value $props -Encoding ascii
 }
 
+function Set-LoadLimit([System.Diagnostics.Process]$p) {
+    if ($ProcessPriority -ne '') {
+        try { $p.PriorityClass = $ProcessPriority } catch { }
+    }
+    if ($AffinityMask -gt 0) {
+        try { $p.ProcessorAffinity = [IntPtr]$AffinityMask } catch { }
+    }
+}
+
 function Run-One([string]$kind, [int]$round) {
     $base = Join-Path $ab ("r" + $round)
     $stand = Join-Path $base $kind.ToLowerInvariant()
@@ -181,12 +193,14 @@ function Run-One([string]$kind, [int]$round) {
             -ArgumentList ('-Xms2G -Xmx2G -jar "' + $PaperJar + '" --nogui') `
             -WorkingDirectory $stand -RedirectStandardOutput $log `
             -RedirectStandardError ($log + '.err') -WindowStyle Hidden -PassThru
+        Set-LoadLimit $proc
         $ready = Wait-Log $log 'Done \(' 240
     } else {
         $env:PATH = (Join-Path $jdk 'bin') + ';' + $env:PATH
         $proc = Start-Process -FilePath $server `
             -ArgumentList '--dir', ('"' + $stand + '"') -RedirectStandardOutput $log `
             -RedirectStandardError ($log + '.err') -WindowStyle Hidden -PassThru
+        Set-LoadLimit $proc
         $ready = Wait-Log $log 'listening on' 240
     }
     if (-not $ready) {

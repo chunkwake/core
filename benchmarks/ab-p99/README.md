@@ -19,8 +19,15 @@ gradlew --offline --no-daemon :perf-probe:jar dist
 cd ..
 cargo build --release -p chunkwake-server
 powershell -ExecutionPolicy Bypass -File scripts/ab_p99.ps1 -Rounds 5 -SampleMs 15000
+# Low-load mode for a shared workstation:
+powershell -ExecutionPolicy Bypass -File scripts/ab_p99.ps1 -Rounds 5 -SampleMs 15000 `
+  -AffinityMask 255 -ProcessPriority BelowNormal
 py -3 scripts/analyze_ab_p99.py
 ```
+
+The checked-in `results.md` and `samples/` are from the final release build
+(`ecc9801`) and a paired low-load run: both servers used affinity `0xFF` and
+`BelowNormal`, 5 rounds, 15 s windows.
 
 The benchmark runs one `PerfProbe` 1.2 plugin on each side; it is the only
 plugin. Tick duration on Chunkwake includes the Rust tick plus the Java
