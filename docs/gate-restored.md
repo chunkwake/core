@@ -7,15 +7,20 @@ test/probe-плагинов.
 ## Результат
 
 ```
-89 of 89 enabled, 2 skipped (missing server internals) in 41243 ms
+91 of 91 enabled in 82840 ms
 FAILED: (пусто)
 LOADERR: (пусто)
+SKIPPED: (пусто)
 PANICS: 0
 JARS: 95
 ```
 
-`JARS: 95` — 89 плагинов + библиотечные/зависимые jar-ы, которые Chunkwake
-не считает отдельными плагинами.
+`JARS: 95` — 91 плагин + библиотечные/зависимые jar-ы, которые Chunkwake
+не считает отдельными плагинами. CommandAPI и Pl3xMap больше не пропускаются:
+добавлены `WorldData`, `ServerFunctionLibrary`, `LevelData`, `getSeed`,
+`StreamMemberEncoder` и `CustomPacketPayload.codec`. Конфликт WorldEdit/FAWE
+закрыт порядком зависимостей в `PluginClassGroup`: точное имя плагина
+важнее `provides`-алиаса.
 
 Полный список файлов:
 [gate-restored-plugins.txt](gate-restored-plugins.txt).
@@ -32,9 +37,11 @@ JARS: 95
 - Добавлены реальные Folia/Leaf-совместимые плагины: `Chunksmith`,
   `OneBlock`, `SmartSpawner`, `ClearLag++`, `Pl3xMap`, `AdvancedPortals`,
   `PvPManager`.
-- CE по-прежнему включается, но data pack падает на NMS-прокси
-  (`ShapedRecipePattern`, `InjectedWorldBorder`, `BlockState.blockState`).
-  Этот gate проверяет загрузку/enable плагинов, а не CE parity.
+- CE включается; data pack загружает 45 recipes и 40 blocks, а
+  `CEProbe`/`CEStateProbe` проходят custom blocks. Остались только
+  probe-only `BlockState.blockState()` и warning про entity world tracking.
+  Этот gate проверяет загрузку/enable плагинов и отсутствие runtime-ошибок,
+  а не полную CE parity.
 - Базовый `load-gate-server` (27/27) этим прогоном не восстанавливался.
 
 ## Воспроизведение

@@ -966,8 +966,8 @@ public class CraftServer implements org.bukkit.Server {
         return (org.bukkit.entity.EntityFactory) PlayerCalls.call(this.handle, "getEntityFactory", new Class<?>[0], new Object[]{  }, org.bukkit.entity.EntityFactory.class);
     }
 
-    @Override public org.bukkit.command.CommandMap getCommandMap() {
-        return (org.bukkit.command.CommandMap) PlayerCalls.call(this.handle, "getCommandMap", new Class<?>[0], new Object[]{  }, org.bukkit.command.CommandMap.class);
+    @Override public org.bukkit.command.SimpleCommandMap getCommandMap() {
+        return (org.bukkit.command.SimpleCommandMap) PlayerCalls.call(this.handle, "getCommandMap", new Class<?>[0], new Object[]{  }, org.bukkit.command.SimpleCommandMap.class);
     }
 
     @Override public io.papermc.paper.threadedregions.scheduler.GlobalRegionScheduler getGlobalRegionScheduler() {

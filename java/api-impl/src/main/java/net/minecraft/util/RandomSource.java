@@ -24,6 +24,11 @@ public interface RandomSource {
         return new Impl(new Random(seed));
     }
 
+    /** {@code RandomSource.createThreadSafe()} (Pl3xMap). */
+    static RandomSource createThreadSafe() {
+        return new Impl(new Random());
+    }
+
     final class Impl implements RandomSource {
         private final Random random;
 

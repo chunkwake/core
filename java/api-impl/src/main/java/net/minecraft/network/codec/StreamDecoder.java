@@ -1,6 +1,6 @@
 package net.minecraft.network.codec;
 
-/** NMS {@code StreamDecoder}: PacketEvents/GrimAC ищут этот класс. */
-public interface StreamDecoder<T> {
-    T decode(Object input);
+/** NMS {@code StreamDecoder} (Paper 26.x: buffer + value). */
+public interface StreamDecoder<B, T> {
+    T decode(B input);
 }

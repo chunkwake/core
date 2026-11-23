@@ -24,4 +24,9 @@ public class BiomeManager {
     public BiomeManager withDifferentSource(BiomeResolver source) {
         return new BiomeManager(source);
     }
+
+    /** {@code BiomeManager.obfuscateSeed(long)} (Pl3xMap). */
+    public static long obfuscateSeed(long seed) {
+        return seed;
+    }
 }

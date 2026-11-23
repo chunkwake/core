@@ -15,6 +15,13 @@ public class MinecraftServer {
     public static final MinecraftServer SERVER = new net.minecraft.server.dedicated.DedicatedServer();
 
     public final ServerConnectionListener connection = new ServerConnectionListener();
+    /** {@code MinecraftServer.vanillaCommandDispatcher} (CommandAPI). */
+    public final net.minecraft.commands.Commands vanillaCommandDispatcher =
+            new net.minecraft.commands.Commands();
+
+    /** {@code MinecraftServer.storageSource} (Pl3xMap). */
+    public final net.minecraft.world.level.storage.LevelStorageSource$LevelStorageAccess storageSource =
+            new net.minecraft.world.level.storage.LevelStorageSource$LevelStorageAccess();
 
     /**
      * Поля, которые TabTPS ищет рефлексией: тип {@code TickData} и имя,
@@ -88,6 +95,16 @@ public class MinecraftServer {
 
     public net.minecraft.server.packs.repository.PackRepository getPackRepository() {
         return new net.minecraft.server.packs.repository.PackRepository();
+    }
+
+    /** {@code MinecraftServer.getWorldData()} (CommandAPI). */
+    public net.minecraft.world.level.storage.WorldData getWorldData() {
+        return net.minecraft.world.level.storage.WorldData.create();
+    }
+
+    /** {@code MinecraftServer.getCommands()} (CommandAPI). */
+    public net.minecraft.commands.Commands getCommands() {
+        return this.vanillaCommandDispatcher;
     }
 
     public net.minecraft.server.ReloadableServerRegistries reloadableRegistries() {

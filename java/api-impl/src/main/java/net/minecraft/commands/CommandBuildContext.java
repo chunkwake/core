@@ -1,14 +1,13 @@
 package net.minecraft.commands;
 
-/**
- * NMS {@code CommandBuildContext}: контекст сборки аргументов команд.
- *
- * <p>Нужен плагинам, которые строят Brigadier-команды через аргументы,
- * зависящие от реестров (`ComponentArgument.textComponent(context)`).
- * Реестры у нас подняты (`VanillaBootstrap`), поэтому пустого контекста
- * достаточно: сами аргументы в Chunkwake не парсятся NMS-кодом.
- */
-public class CommandBuildContext {
-    public CommandBuildContext() {
+import net.minecraft.core.HolderLookup;
+import net.minecraft.world.flag.FeatureFlagSet;
+
+/** NMS {@code CommandBuildContext} (интерфейс, как в Paper 26.x). */
+public interface CommandBuildContext extends HolderLookup.Provider {
+    static CommandBuildContext simple(HolderLookup.Provider provider, FeatureFlagSet features) {
+        return () -> features;
     }
+
+    FeatureFlagSet enabledFeatures();
 }

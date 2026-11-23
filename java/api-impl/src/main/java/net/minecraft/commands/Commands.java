@@ -43,6 +43,7 @@ public class Commands {
     /** `Commands.createValidationContext(HolderLookup.Provider)`. */
     public static CommandBuildContext createValidationContext(
             net.minecraft.core.HolderLookup.Provider provider) {
-        return new CommandBuildContext();
+        return CommandBuildContext.simple(provider,
+                net.minecraft.world.flag.FeatureFlagSet.of());
     }
 }

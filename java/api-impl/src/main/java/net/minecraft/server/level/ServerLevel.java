@@ -138,7 +138,16 @@ public class ServerLevel extends net.minecraft.world.level.Level implements Comm
         return 0;
     }
 
-    @Override
+    /** {@code ServerLevel.getSeed()} (Pl3xMap). */
+    public long getSeed() {
+        return 1L;
+    }
+
+    /** {@code ServerLevel.getLevelData()} (Pl3xMap). */
+    public net.minecraft.world.level.storage.LevelData getLevelData() {
+        return () -> net.minecraft.world.level.storage.LevelData.RespawnData.DEFAULT;
+    }
+
     public int getSkyDarken() {
         return 15;
     }

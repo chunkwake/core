@@ -22,6 +22,6 @@ public record DiscardedPayload(Identifier id, byte[] data) implements CustomPack
 
     @Override
     public Type<? extends CustomPacketPayload> type() {
-        return new Type<>(this.id, null);
+        return new Type<>(this.id);
     }
 }
