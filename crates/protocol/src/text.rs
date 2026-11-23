@@ -72,10 +72,6 @@ fn read_payload(r: &mut crate::Reader, tag: u8, depth: u32) -> crate::Result<Val
     if depth > 64 {
         return Err(crate::ProtocolError::BadLength(depth as i32));
     }
-    let i32_of = |r: &mut crate::Reader| -> crate::Result<i32> {
-        let b = r.bytes(4)?;
-        Ok(i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-    };
     Ok(match tag {
         1 => match r.u8()? as i8 {
             0 => Value::Bool(false),
@@ -83,14 +79,14 @@ fn read_payload(r: &mut crate::Reader, tag: u8, depth: u32) -> crate::Result<Val
             b => Value::from(b),
         },
         2 => Value::from(r.u16()? as i16),
-        3 => Value::from(i32_of(r)?),
+        3 => Value::from(r.i32()?),
         4 => Value::from(r.i64()?),
         5 => Value::from(r.f32()? as f64),
         6 => Value::from(r.f64()?),
         7 => {
-            let n = i32_of(r)?.max(0) as usize;
+            let len = bounded_len(r, 1)?;
             Value::from(
-                r.bytes(n)?
+                r.bytes(len)?
                     .iter()
                     .map(|&b| b as i8 as i64)
                     .collect::<Vec<_>>(),
@@ -99,8 +95,8 @@ fn read_payload(r: &mut crate::Reader, tag: u8, depth: u32) -> crate::Result<Val
         8 => Value::String(read_nbt_string(r)?),
         9 => {
             let inner = r.u8()?;
-            let n = i32_of(r)?.max(0);
-            let mut out = Vec::new();
+            let n = bounded_len(r, 1)?;
+            let mut out = Vec::with_capacity(n);
             for _ in 0..n {
                 out.push(read_payload(r, inner, depth + 1)?);
             }
@@ -108,10 +104,15 @@ fn read_payload(r: &mut crate::Reader, tag: u8, depth: u32) -> crate::Result<Val
         }
         10 => {
             let mut map = serde_json::Map::new();
+            let mut count = 0usize;
             loop {
                 let t = r.u8()?;
                 if t == TAG_END {
                     break;
+                }
+                count += 1;
+                if count > MAX_COMPONENT_ITEMS {
+                    return Err(crate::ProtocolError::BadLength(count as i32));
                 }
                 let k = read_nbt_string(r)?;
                 map.insert(k, read_payload(r, t, depth + 1)?);
@@ -119,16 +120,16 @@ fn read_payload(r: &mut crate::Reader, tag: u8, depth: u32) -> crate::Result<Val
             Value::Object(map)
         }
         11 => {
-            let n = i32_of(r)?.max(0);
-            let mut out = Vec::new();
+            let n = bounded_len(r, 4)?;
+            let mut out = Vec::with_capacity(n);
             for _ in 0..n {
-                out.push(Value::from(i32_of(r)?));
+                out.push(Value::from(r.i32()?));
             }
             Value::Array(out)
         }
         12 => {
-            let n = i32_of(r)?.max(0);
-            let mut out = Vec::new();
+            let n = bounded_len(r, 8)?;
+            let mut out = Vec::with_capacity(n);
             for _ in 0..n {
                 out.push(Value::from(r.i64()?));
             }
@@ -136,6 +137,27 @@ fn read_payload(r: &mut crate::Reader, tag: u8, depth: u32) -> crate::Result<Val
         }
         t => return Err(crate::ProtocolError::BadLength(t as i32)),
     })
+}
+
+/// Больше этого числа элементов в одном NBT-списке или массиве текстового
+/// компонента не бывает: даже огромная книга или описание укладываются в
+/// сотни. Предел не даёт одному пакету раздуть `Vec<Value>` в сотни мегабайт.
+const MAX_COMPONENT_ITEMS: usize = 1 << 16;
+
+/// Длина массива или списка NBT из пакета.
+///
+/// Каждый элемент занимает хотя бы `width` байт, а весь массив обязан
+/// поместиться в оставшееся тело. Без этого `i32::MAX` в длине заставлял
+/// цикл крутиться до конца пакета и растить `Vec<Value>` на каждый байт.
+fn bounded_len(r: &mut crate::Reader, width: usize) -> crate::Result<usize> {
+    let n = r.i32()?;
+    if n < 0
+        || n as usize > MAX_COMPONENT_ITEMS
+        || (n as usize).saturating_mul(width) > r.remaining().len()
+    {
+        return Err(crate::ProtocolError::BadLength(n));
+    }
+    Ok(n as usize)
 }
 
 fn scalar_text(v: &Value) -> String {
@@ -979,6 +1001,23 @@ mod tests {
     fn plain_string_component() {
         let p = system_chat_json(1, r#""hey""#, true);
         assert_eq!(p, [1, TAG_STRING, 0, 3, b'h', b'e', b'y', 1]);
+    }
+
+    /// Длина списка или массива не может превышать оставшееся тело: иначе
+    /// клиент одним пакетом заставлял сервер аллоцировать миллионы `Value`.
+    #[test]
+    fn component_arrays_are_bounded() {
+        let read = |bytes: &[u8]| read_component(&mut crate::Reader::new(bytes));
+        // Список из двух байт — валиден.
+        let ok = [TAG_LIST, TAG_BYTE, 0, 0, 0, 2, 5, 7];
+        assert_eq!(read(&ok).unwrap(), serde_json::json!([5, 7]));
+        // Отрицательная длина.
+        assert!(read(&[TAG_LIST, TAG_BYTE, 0xff, 0xff, 0xff, 0xff]).is_err());
+        // Длина больше оставшихся байт.
+        assert!(read(&[TAG_LIST, TAG_BYTE, 0, 0, 0, 10, 1, 2]).is_err());
+        // 11 — int array, 12 — long array.
+        assert!(read(&[11, 0, 0, 0, 2, 0, 0, 0, 1]).is_err());
+        assert!(read(&[12, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1]).is_err());
     }
 
     #[test]

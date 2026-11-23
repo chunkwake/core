@@ -114,8 +114,16 @@ pub fn write_root(root: &Compound) -> Vec<u8> {
     out
 }
 
+/// Предел распакованного NBT из файла: `level.dat`, `playerdata` и карты
+/// пишет сам сервер, но импортированный мир может принести gzip-бомбу.
+const MAX_NBT_FILE_BYTES: usize = 64 << 20;
+
 /// Читает gzip-NBT файл (`playerdata`, `level.dat`); нет файла — `None`.
 pub fn read_gzip_file(path: &std::path::Path) -> Result<Option<Compound>, String> {
+    read_gzip_file_capped(path, MAX_NBT_FILE_BYTES)
+}
+
+fn read_gzip_file_capped(path: &std::path::Path, limit: usize) -> Result<Option<Compound>, String> {
     use std::io::Read;
     let raw = match std::fs::read(path) {
         Ok(b) => b,
@@ -124,8 +132,12 @@ pub fn read_gzip_file(path: &std::path::Path) -> Result<Option<Compound>, String
     };
     let mut data = Vec::new();
     flate2::read::GzDecoder::new(&raw[..])
+        .take(limit as u64 + 1)
         .read_to_end(&mut data)
         .map_err(|e| format!("gunzip {}: {e}", path.display()))?;
+    if data.len() > limit {
+        return Err(format!("gunzip {}: NBT is too large", path.display()));
+    }
     read_root(&data)
         .map(Some)
         .map_err(|e| format!("{}: {e}", path.display()))
@@ -361,5 +373,17 @@ mod tests {
         assert_eq!(&bytes[..3], &[10, 0, 0]);
         assert_eq!(read_root(&bytes).unwrap(), root);
         assert!(read_root(&bytes[..bytes.len() - 1]).is_err());
+    }
+
+    /// Файл мира мог прийти извне: распаковка не должна расти без предела.
+    #[test]
+    fn gzip_reader_is_capped() {
+        let dir = std::env::temp_dir().join(format!("chunkwake-nbt-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("level.dat");
+        write_gzip_file(&path, &Compound::new()).unwrap();
+        assert!(read_gzip_file_capped(&path, 1).is_err());
+        assert!(read_gzip_file_capped(&path, 4096).unwrap().is_some());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

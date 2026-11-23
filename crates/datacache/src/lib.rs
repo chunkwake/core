@@ -11,7 +11,7 @@ mod archive;
 pub use archive::{ArchiveError, TOP_LEVEL, is_wanted, pack, pack_with, unpack, unpack_parallel};
 
 use std::io::{Read, Seek};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 /// Пишется последним; меняется при изменении состава кэша.
@@ -534,21 +534,38 @@ fn lang_names<R: Read + Seek>(archive: &zip::ZipArchive<R>) -> Vec<String> {
         .collect()
 }
 
+/// Сколько распакованного файла допустимо для одной записи jar.
+///
+/// Шаблоны структур и языковые файлы малы; предел не даёт сжатой записи
+/// развернуться в гигабайты при чтении чужого `server.jar`.
+const MAX_JAR_ENTRY_BYTES: usize = 64 << 20;
+
 fn read_bytes<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     name: &str,
     jar: &Path,
 ) -> Result<Vec<u8>, CacheError> {
-    let mut file = archive.by_name(name).map_err(|e| CacheError::Format {
+    let file = archive.by_name(name).map_err(|e| CacheError::Format {
         file: jar.display().to_string(),
         msg: format!("{name}: {e}"),
     })?;
+    read_capped_entry(file, jar, name)
+}
+
+fn read_capped_entry(file: impl Read, jar: &Path, name: &str) -> Result<Vec<u8>, CacheError> {
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    file.take(MAX_JAR_ENTRY_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
         .map_err(|e| CacheError::Format {
             file: jar.display().to_string(),
             msg: format!("{name}: {e}"),
         })?;
+    if bytes.len() > MAX_JAR_ENTRY_BYTES {
+        return Err(CacheError::Format {
+            file: jar.display().to_string(),
+            msg: format!("{name}: entry is too large"),
+        });
+    }
     Ok(bytes)
 }
 /// сохраняя путь после префикса. Возвращает число файлов.
@@ -571,18 +588,27 @@ fn write_prefix<R: Read + Seek>(
         CacheError::Io(format!("{what} {}: {e}", p.display()))
     };
     for name in &names {
-        let mut file = archive.by_name(name).map_err(|e| CacheError::Format {
+        let rel = name.trim_start_matches(prefix);
+        // Запись jar — не доверенный путь: `../../x` не должен писать мимо
+        // каталога кэша, даже если server.jar собрали не мы. Проверяем до
+        // чтения, чтобы отбросить запись без лишней распаковки.
+        let relative = Path::new(rel);
+        if relative.components().next().is_none()
+            || !relative
+                .components()
+                .all(|part| matches!(part, Component::Normal(_)))
+        {
+            return Err(CacheError::Format {
+                file: jar.display().to_string(),
+                msg: format!("unsafe path in jar: {name}"),
+            });
+        }
+        let file = archive.by_name(name).map_err(|e| CacheError::Format {
             file: jar.display().to_string(),
             msg: format!("{name}: {e}"),
         })?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(|e| CacheError::Format {
-                file: jar.display().to_string(),
-                msg: format!("{name}: {e}"),
-            })?;
-        let rel = name.trim_start_matches(prefix);
-        let path = dest.join(rel);
+        let bytes = read_capped_entry(file, jar, name)?;
+        let path = dest.join(relative);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| io("create", parent, e))?;
         }
@@ -682,6 +708,39 @@ fn jars(dir: &Path, out: &mut Vec<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `server.jar` мог прийти не от Mojang: запись с `..` не должна писать
+    /// файлы мимо каталога распаковки.
+    #[test]
+    fn extraction_rejects_path_traversal() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!("chunkwake-jar-slip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut bytes = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+            zip.start_file(
+                "data/minecraft/structure/../../escaped.nbt",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(b"x").unwrap();
+            zip.finish().unwrap();
+        }
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let error = write_prefix(
+            &mut archive,
+            "data/minecraft/structure/",
+            ".nbt",
+            &root,
+            Path::new("server.jar"),
+        )
+        .expect_err("path traversal must be rejected");
+        assert!(error.to_string().contains("unsafe path"), "{error}");
+        assert!(!root.join("escaped.nbt").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// Дописывает шаблоны в уже собранный кэш, не снося `reports/`.
     #[test]

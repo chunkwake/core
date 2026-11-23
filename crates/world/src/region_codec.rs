@@ -70,26 +70,54 @@ impl Codec {
     }
 }
 
+/// Сколько распакованного NBT допустимо на один чанк.
+///
+/// Ванильный чанк обычно занимает сотни килобайт; предел в 64 МиБ оставляет
+/// запас для огромных построек, но не даёт сжатому файлу (или `.mcc`)
+/// распаковаться в гигабайты и съесть память.
+pub(crate) const MAX_RAW_CHUNK_BYTES: usize = 64 << 20;
+
 /// Распаковать данные вида `kind` (без бита внешнего файла) в NBT.
 pub(crate) fn decode(kind: u8, data: &[u8]) -> Result<Vec<u8>, String> {
+    decode_capped(kind, data, MAX_RAW_CHUNK_BYTES)
+}
+
+fn decode_capped(kind: u8, data: &[u8], limit: usize) -> Result<Vec<u8>, String> {
     // Запас в четыре сжатых размера покрывает обычный коэффициент чанка:
     // без него буфер растёт реаллокациями.
-    let mut raw = Vec::with_capacity(data.len().saturating_mul(4).max(4096));
+    let mut raw = Vec::with_capacity(
+        data.len()
+            .saturating_mul(4)
+            .max(4096)
+            .min(limit.saturating_add(1)),
+    );
     match kind {
-        ZLIB => ZlibDecoder::new(data)
-            .read_to_end(&mut raw)
-            .map_err(|e| e.to_string())?,
-        GZIP => GzDecoder::new(data)
-            .read_to_end(&mut raw)
-            .map_err(|e| e.to_string())?,
-        RAW => return Ok(data.to_vec()),
-        LZ4 => {
-            lz4_read(data, &mut raw)?;
-            raw.len()
+        ZLIB => read_capped(ZlibDecoder::new(data), &mut raw, limit)?,
+        GZIP => read_capped(GzDecoder::new(data), &mut raw, limit)?,
+        RAW => {
+            if data.len() > limit {
+                return Err("chunk NBT is too large".into());
+            }
+            return Ok(data.to_vec());
         }
+        LZ4 => lz4_read(data, &mut raw, limit)?,
         other => return Err(format!("unknown compression {other}")),
     };
     Ok(raw)
+}
+
+/// Читает не больше `limit + 1` байт: лишний байт показывает, что предел
+/// превышен, и распаковка обрывается до полной бомбы.
+fn read_capped(mut reader: impl Read, out: &mut Vec<u8>, limit: usize) -> Result<(), String> {
+    reader
+        .by_ref()
+        .take(limit as u64 + 1)
+        .read_to_end(out)
+        .map_err(|e| e.to_string())?;
+    if out.len() > limit {
+        return Err("chunk NBT is too large".into());
+    }
+    Ok(())
 }
 
 const MAGIC: &[u8; 8] = b"LZ4Block";
@@ -129,7 +157,7 @@ fn lz4_write(raw: &[u8], out: &mut Vec<u8>) {
     header(out, METHOD_RAW, 0, 0, 0);
 }
 
-fn lz4_read(mut data: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
+fn lz4_read(mut data: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<(), String> {
     let le = |b: &[u8]| u32::from_le_bytes(b.try_into().unwrap()) as usize;
     while !data.is_empty() {
         if data.len() < 21 || &data[..8] != MAGIC {
@@ -147,6 +175,9 @@ fn lz4_read(mut data: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
         }
         if packed > data.len() || orig > 1 << 25 {
             return Err("lz4: truncated block".into());
+        }
+        if out.len().saturating_add(orig) > limit {
+            return Err("chunk NBT is too large".into());
         }
         let start = out.len();
         match method {
@@ -251,5 +282,16 @@ mod tests {
     fn lz4_needs_the_final_block() {
         let p = Codec::Lz4.encode(b"hello hello hello hello");
         assert!(decode(LZ4, &p[1..p.len() - 21]).is_err());
+    }
+
+    /// Сжатый чанк не должен распаковываться в гигабайты: предел проверяется
+    /// до полной распаковки (иначе один файл мира съедал память процесса).
+    #[test]
+    fn decompression_is_capped() {
+        let mut z = ZlibEncoder::new(Vec::new(), Compression::best());
+        z.write_all(&vec![0u8; 4096]).unwrap();
+        let packed = z.finish().unwrap();
+        assert!(decode_capped(ZLIB, &packed, 1024).is_err());
+        assert_eq!(decode_capped(ZLIB, &packed, 4096).unwrap().len(), 4096);
     }
 }
