@@ -167,9 +167,6 @@ impl Extra {
 struct Table {
     list: Vec<Arc<Extra>>,
     index: HashMap<Arc<Extra>, u32>,
-    /// Приблизительный объём уже сохранённых наборов: строки, массивы и
-    /// накладные расходы таблицы.
-    bytes: usize,
 }
 
 fn table() -> &'static RwLock<Table> {
@@ -177,19 +174,8 @@ fn table() -> &'static RwLock<Table> {
     T.get_or_init(Default::default)
 }
 
-/// Сколько памяти разрешено держать общему словарю компонентов.
-///
-/// `Stack` — `Copy`, поэтому наборы живут в общей таблице до конца процесса.
-/// Креативный клиент может присылать бесконечно много уникальных имён и
-/// NBT; без предела словарь рос бы, пока сервер не упадёт по памяти.
-const MAX_INTERN_BYTES: usize = 64 << 20;
-
 /// Номер набора компонентов (одинаковые наборы — один номер); пустой — 0.
-pub fn intern(e: Extra) -> u32 {
-    intern_capped(e, MAX_INTERN_BYTES)
-}
-
-fn intern_capped(mut e: Extra, budget: usize) -> u32 {
+pub fn intern(mut e: Extra) -> u32 {
     if e.is_empty() {
         return 0;
     }
@@ -212,59 +198,15 @@ fn intern_capped(mut e: Extra, budget: usize) -> u32 {
     if let Some(&id) = table().read().unwrap().index.get(&e) {
         return id;
     }
-    let size = extra_bytes(&e);
     let mut t = table().write().unwrap();
     if let Some(&id) = t.index.get(&e) {
         return id;
-    }
-    if t.bytes.saturating_add(size) > budget {
-        return 0;
     }
     let e = Arc::new(e);
     t.list.push(e.clone());
     let id = t.list.len() as u32;
     t.index.insert(e, id);
-    t.bytes = t.bytes.saturating_add(size);
     id
-}
-
-/// Оценка памяти набора: достаточно для предела, точность до байта не нужна.
-fn extra_bytes(e: &Extra) -> usize {
-    use std::mem::size_of;
-    fn string(s: &Option<String>) -> usize {
-        s.as_ref().map_or(0, String::capacity)
-    }
-    fn pairs(v: &[(i32, i32)]) -> usize {
-        std::mem::size_of_val(v)
-    }
-    fn strings(v: &[String]) -> usize {
-        v.iter().map(String::capacity).sum()
-    }
-    let mut n = size_of::<Extra>() + 2 * size_of::<Arc<Extra>>() + 64;
-    n += pairs(&e.enchantments) + pairs(&e.stored) + pairs(&e.banner_patterns);
-    n += string(&e.custom_name) + string(&e.item_name) + string(&e.item_model);
-    n += string(&e.tooltip_style) + string(&e.rest);
-    n += strings(&e.lore) + e.lore.len() * size_of::<String>();
-    n += e.raw.as_ref().map_or(0, Vec::capacity);
-    n += e.custom_data.as_ref().map_or(0, Vec::capacity);
-    n += e.charged.len() * size_of::<Stack>();
-    n += e.container.len() * size_of::<Slot>();
-    if let Some(book) = &e.book {
-        n += size_of::<Book>() + book.pages.len() * size_of::<Filterable>();
-        for (raw, filtered) in &book.pages {
-            n += raw.capacity() + filtered.as_ref().map_or(0, String::capacity);
-        }
-        n += book.title.0.capacity()
-            + book.title.1.as_ref().map_or(0, String::capacity)
-            + book.author.capacity();
-    }
-    if let Some(fireworks) = &e.fireworks {
-        n += size_of::<Fireworks>() + fireworks.explosions.len() * size_of::<Explosion>();
-        for explosion in &fireworks.explosions {
-            n += (explosion.colors.len() + explosion.fade.len()) * size_of::<i32>();
-        }
-    }
-    n
 }
 
 /// Набор по номеру; для 0 — пустой.
@@ -474,19 +416,5 @@ mod tests {
         assert_eq!(intern(e), a);
         assert_eq!(get(a).level(3), 5);
         assert_eq!(intern(Extra::default()), 0);
-    }
-
-    /// Словарь не растёт без предела: новый набор сверх бюджета теряет
-    /// компоненты, но уже выданный номер продолжает работать.
-    #[test]
-    fn intern_respects_budget() {
-        let e = Extra {
-            custom_name: Some(format!("budget-test-{}", std::process::id())),
-            ..Default::default()
-        };
-        assert_eq!(intern_capped(e.clone(), 1), 0);
-        let id = intern_capped(e.clone(), MAX_INTERN_BYTES);
-        assert_ne!(id, 0);
-        assert_eq!(intern_capped(e, 1), id, "номер уже существует");
     }
 }
