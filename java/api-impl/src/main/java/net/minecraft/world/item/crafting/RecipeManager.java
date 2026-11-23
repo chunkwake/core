@@ -13,4 +13,17 @@ public class RecipeManager {
     public net.minecraft.world.flag.FeatureFlagSet getEnabledFlags() {
         return null;
     }
+
+    /** {@code RecipeManager.finalizeRecipeLoading(FeatureFlagSet)} (CraftEngine). */
+    public void finalizeRecipeLoading(net.minecraft.world.flag.FeatureFlagSet flags) {
+    }
+
+    /** {@code RecipeManager.addRecipe(RecipeHolder)} (CraftEngine). */
+    public void addRecipe(RecipeHolder recipe) {
+    }
+
+    /** {@code RecipeManager.removeRecipe(ResourceKey)} (CraftEngine). */
+    public boolean removeRecipe(net.minecraft.resources.ResourceKey<?> key) {
+        return false;
+    }
 }
