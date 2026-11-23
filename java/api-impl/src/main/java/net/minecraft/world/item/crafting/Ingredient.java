@@ -14,4 +14,14 @@ public class Ingredient {
     public static Ingredient of(java.util.stream.Stream<net.minecraft.world.item.ItemStack> stacks) {
         return new Ingredient();
     }
+
+    /** {@code Ingredient.of(ItemLike...)} (CraftEngine). */
+    public static Ingredient of(net.minecraft.world.level.ItemLike... items) {
+        return new Ingredient();
+    }
+
+    /** {@code Ingredient.test(ItemStack)} (CraftEngine). */
+    public boolean test(net.minecraft.world.item.ItemStack stack) {
+        return false;
+    }
 }

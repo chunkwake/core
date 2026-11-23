@@ -11,7 +11,7 @@ import net.minecraft.world.phys.Vec3;
 public class Entity implements net.minecraft.network.syncher.SyncedDataHolder {
     private static int nextId = 1;
     private final int id = nextId++;
-    private final UUID uuid;
+    private UUID uuid;
     private EntityType<?> type;
     protected Level level;
     private double x;
@@ -59,13 +59,17 @@ public class Entity implements net.minecraft.network.syncher.SyncedDataHolder {
     }
 
     public Entity(EntityType<?> type, Level level) {
-        this.uuid = UUID.randomUUID();
+        this(type, level, UUID.randomUUID());
+    }
+
+    public Entity(EntityType<?> type, Level level, UUID uuid) {
+        this.uuid = uuid == null ? UUID.randomUUID() : uuid;
         this.type = type;
         this.level = level;
     }
 
     /** Конструктор с заданным UUID (CraftPlayer должен иметь UUID игрока). */
-    protected Entity(UUID uuid) {
+    public Entity(UUID uuid) {
         this.uuid = uuid == null ? UUID.randomUUID() : uuid;
     }
 
@@ -73,7 +77,7 @@ public class Entity implements net.minecraft.network.syncher.SyncedDataHolder {
         return this.id;
     }
 
-    private final net.minecraft.network.syncher.SynchedEntityData entityData =
+    private net.minecraft.network.syncher.SynchedEntityData entityData =
             new net.minecraft.network.syncher.SynchedEntityData();
 
     /** {@code Entity.getEntityData()} (LevelledMobs). */

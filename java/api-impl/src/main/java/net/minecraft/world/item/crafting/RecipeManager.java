@@ -29,4 +29,10 @@ public class RecipeManager {
     public boolean removeRecipe(net.minecraft.resources.ResourceKey<?> key) {
         return false;
     }
+
+    /** {@code RecipeManager.getRecipeFor(RecipeType, RecipeInput, Level, ResourceKey)} (CraftEngine). */
+    public java.util.Optional<RecipeHolder> getRecipeFor(RecipeType<?> type, RecipeInput input,
+            net.minecraft.world.level.Level level, net.minecraft.resources.ResourceKey<?> key) {
+        return java.util.Optional.empty();
+    }
 }

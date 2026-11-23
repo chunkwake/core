@@ -10,7 +10,7 @@ package org.bukkit.craftbukkit.entity;
  * дескриптором, поэтому базовый класс обязан объявлять именно его.
  */
 public class CraftEntityBase implements CraftEntity {
-    protected final Object handle;
+    protected Object handle;
     /**
      * Алиас, который CraftEngine (CraftEntityProxy) находит по имени
      * {@code entity}; тип обязан быть NMS Entity.
@@ -32,5 +32,10 @@ public class CraftEntityBase implements CraftEntity {
 
     public net.minecraft.world.entity.Entity getHandle() {
         return this.handle instanceof net.minecraft.world.entity.Entity entity ? entity : null;
+    }
+
+    @Override
+    public void setHandle(Object handle) {
+        this.handle = handle;
     }
 }

@@ -6,6 +6,9 @@ public interface CraftEntity {
         return null;
     }
 
+    default void setHandle(Object handle) {
+    }
+
     default org.bukkit.persistence.PersistentDataContainer getPersistentDataContainer() {
         return null;
     }

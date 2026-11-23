@@ -42,6 +42,12 @@ final class CustomShapes {
         if (path.endsWith("_fence")) {
             return fence(values);
         }
+        if (path.endsWith("_wall")) {
+            return wall(values);
+        }
+        if (path.endsWith("_button")) {
+            return button(values);
+        }
         // barrier, note_block, mushroom_block, ore и прочие полные носители.
         return List.of(new BoundingBox(0, 0, 0, 1, 1, 1));
     }
@@ -146,6 +152,68 @@ final class CustomShapes {
             boxes.add(new BoundingBox(8 * px, 6 * px, 7 * px, 1, 15 * px, 9 * px));
         }
         return boxes;
+    }
+
+    /**
+     * Стена: столб 8x8 (4/16..12/16) высотой 24/16 и плечи 6/16
+     * (5/16..11/16) длиной 11/16, как {@code WallBlock.makeShapes(24, 24)}.
+     */
+    static List<BoundingBox> wall(Map<String, String> values) {
+        List<BoundingBox> boxes = new ArrayList<>(5);
+        boxes.add(new BoundingBox(4.0 / 16.0, 0, 4.0 / 16.0,
+                12.0 / 16.0, 24.0 / 16.0, 12.0 / 16.0));
+        if (isConnected(values, "north")) {
+            boxes.add(new BoundingBox(5.0 / 16.0, 0, 0,
+                    11.0 / 16.0, 24.0 / 16.0, 11.0 / 16.0));
+        }
+        if (isConnected(values, "east")) {
+            boxes.add(new BoundingBox(5.0 / 16.0, 0, 5.0 / 16.0,
+                    1, 24.0 / 16.0, 11.0 / 16.0));
+        }
+        if (isConnected(values, "south")) {
+            boxes.add(new BoundingBox(5.0 / 16.0, 0, 5.0 / 16.0,
+                    11.0 / 16.0, 24.0 / 16.0, 1));
+        }
+        if (isConnected(values, "west")) {
+            boxes.add(new BoundingBox(0, 0, 5.0 / 16.0,
+                    11.0 / 16.0, 24.0 / 16.0, 11.0 / 16.0));
+        }
+        return boxes;
+    }
+
+    /** WallSide {@code low}/{@code tall} и CE-значение {@code true}. */
+    private static boolean isConnected(Map<String, String> values, String key) {
+        String value = values.get(key);
+        return value != null && !"false".equals(value) && !"none".equals(value)
+                && !"null".equals(value);
+    }
+
+    /**
+     * Кнопка: пластина 6/16 x 4/16 x 2/16 у соответствующей грани.
+     * В 26.3 состояние задаётся {@code face=floor|wall|ceiling} и
+     * {@code facing=north|east|south|west}.
+     */
+    static List<BoundingBox> button(Map<String, String> values) {
+        String face = values.getOrDefault("face", "wall");
+        String facing = values.getOrDefault("facing", "north");
+        if ("floor".equals(face)) {
+            return List.of(new BoundingBox(5.0 / 16.0, 0, 5.0 / 16.0,
+                    11.0 / 16.0, 2.0 / 16.0, 11.0 / 16.0));
+        }
+        if ("ceiling".equals(face)) {
+            return List.of(new BoundingBox(5.0 / 16.0, 14.0 / 16.0, 5.0 / 16.0,
+                    11.0 / 16.0, 1, 11.0 / 16.0));
+        }
+        return switch (facing) {
+            case "east" -> List.of(new BoundingBox(14.0 / 16.0, 5.0 / 16.0, 5.0 / 16.0,
+                    1, 11.0 / 16.0, 11.0 / 16.0));
+            case "west" -> List.of(new BoundingBox(0, 5.0 / 16.0, 5.0 / 16.0,
+                    2.0 / 16.0, 11.0 / 16.0, 11.0 / 16.0));
+            case "south" -> List.of(new BoundingBox(5.0 / 16.0, 5.0 / 16.0, 14.0 / 16.0,
+                    11.0 / 16.0, 11.0 / 16.0, 1));
+            default -> List.of(new BoundingBox(5.0 / 16.0, 5.0 / 16.0, 0,
+                    11.0 / 16.0, 11.0 / 16.0, 2.0 / 16.0));
+        };
     }
 
     private static boolean isTrue(Map<String, String> values, String key) {

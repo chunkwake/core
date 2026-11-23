@@ -161,6 +161,30 @@ final class MobImpl {
     public EntityType getType() { return EntityType.valueOf(species.toUpperCase(Locale.ROOT)); }
     public World getWorld() { return world.api; }
 
+    /** NMS-представление сущности для CraftEngine/CraftBukkit-прокси. */
+    private net.minecraft.world.entity.Entity handle;
+
+    public net.minecraft.world.entity.Entity getHandle() {
+        if (this.handle == null) {
+            net.minecraft.resources.Identifier id =
+                    net.minecraft.resources.Identifier.parse("minecraft:" + this.species);
+            Object registered = net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getValue(id);
+            net.minecraft.world.entity.EntityType<?> type;
+            if (registered instanceof net.minecraft.world.entity.EntityType<?> existing) {
+                type = existing;
+            } else {
+                type = new net.minecraft.world.entity.EntityType<>(id.toString());
+                net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.register(id, type);
+            }
+            this.handle = new net.minecraft.world.entity.Entity(type, null, getUniqueId());
+        }
+        return this.handle;
+    }
+
+    public void setHandle(Object value) {
+        this.handle = value instanceof net.minecraft.world.entity.Entity entity ? entity : null;
+    }
+
     private volatile PdcImpl pdc;
 
     /** {@code Entity#getScoreboardTags}: NBT {@code Tags}. */

@@ -44,6 +44,67 @@ class CustomShapesTest {
     }
 
     @Test
+    void wallWithoutConnectionsIsOnlyTheTallPost() {
+        List<BoundingBox> boxes = CustomShapes.wall(Map.of());
+        assertEquals(1, boxes.size());
+        BoundingBox post = boxes.getFirst();
+        assertEquals(0.25, post.getMinX(), 1e-9);
+        assertEquals(0.25, post.getMinZ(), 1e-9);
+        assertEquals(0.75, post.getMaxX(), 1e-9);
+        assertEquals(1.5, post.getMaxY(), 1e-9);
+        assertEquals(0.75, post.getMaxZ(), 1e-9);
+    }
+
+    @Test
+    void wallAddsArmsForLowAndTallSides() {
+        List<BoundingBox> boxes = CustomShapes.wall(Map.of(
+                "north", "tall",
+                "east", "low",
+                "south", "none",
+                "west", "false"));
+        assertEquals(3, boxes.size());
+
+        BoundingBox north = boxes.get(1);
+        assertEquals(0.3125, north.getMinX(), 1e-9);
+        assertEquals(0.0, north.getMinZ(), 1e-9);
+        assertEquals(0.6875, north.getMaxX(), 1e-9);
+        assertEquals(0.6875, north.getMaxZ(), 1e-9);
+        assertEquals(1.5, north.getMaxY(), 1e-9);
+
+        BoundingBox east = boxes.get(2);
+        assertEquals(0.3125, east.getMinX(), 1e-9);
+        assertEquals(1.0, east.getMaxX(), 1e-9);
+        assertEquals(0.3125, east.getMinZ(), 1e-9);
+        assertEquals(0.6875, east.getMaxZ(), 1e-9);
+    }
+
+    @Test
+    void wallMountedButtonUsesThinPlate() {
+        List<BoundingBox> boxes = CustomShapes.button(Map.of(
+                "face", "wall",
+                "facing", "north"));
+        assertEquals(1, boxes.size());
+        BoundingBox plate = boxes.getFirst();
+        assertEquals(0.3125, plate.getMinX(), 1e-9);
+        assertEquals(0.3125, plate.getMinY(), 1e-9);
+        assertEquals(0.0, plate.getMinZ(), 1e-9);
+        assertEquals(0.6875, plate.getMaxX(), 1e-9);
+        assertEquals(0.6875, plate.getMaxY(), 1e-9);
+        assertEquals(0.125, plate.getMaxZ(), 1e-9);
+    }
+
+    @Test
+    void floorAndCeilingButtonsUseHorizontalPlates() {
+        BoundingBox floor = CustomShapes.button(Map.of("face", "floor")).getFirst();
+        assertEquals(0.0, floor.getMinY(), 1e-9);
+        assertEquals(0.125, floor.getMaxY(), 1e-9);
+
+        BoundingBox ceiling = CustomShapes.button(Map.of("face", "ceiling")).getFirst();
+        assertEquals(0.875, ceiling.getMinY(), 1e-9);
+        assertEquals(1.0, ceiling.getMaxY(), 1e-9);
+    }
+
+    @Test
     void fenceEastAndWestArmsUseTheRightAxis() {
         List<BoundingBox> boxes = CustomShapes.fence(Map.of(
                 "north", "false",

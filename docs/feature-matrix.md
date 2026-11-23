@@ -7493,9 +7493,14 @@ Bootstrap-фаза теперь проходит после добавления
 - `/execute if entity` закрыт для терминального условия и `run`; остальные
   терминальные условия (`if block`, `if score`, `if data`, ...) ещё нужно
   проверить живыми тестами.
-- CE: data pack снова загружается; `CEProbe`/`CEStateProbe` проходят
+- CE: data pack загружается; `CEProbe`/`CEStateProbe` проходят
   `default:topaz_ore`, `default:palm_stairs`, `default:palm_door`
-  (state/collision/drops/persist). Остались `InjectedWorldBorder` cast,
-  прокси-CraftEntity и `BlockState.blockState()` (последний нужен probe,
-  а не data pack). Генератор NMS-стабов теперь умеет top-level, nested
+  (state/collision/drops/persist), recipes (45) и blocks (40).
+  `InjectedWorldBorder` и прокси-CraftEntity больше не падают:
+  `CraftWorldBorder` наследует NMS `WorldBorder`, Bukkit-сущности
+  реализуют `CraftEntity`, а CE `CraftEntityProxy` получил совместимый
+  shim. Остались `BlockState.blockState()` (нужен только `CEProbe`,
+  не data pack) и warning `Failed to hook entity world tracking`
+  (Spigot entity add/remove callbacks). `CustomShapes` теперь покрывает
+  заборы, стены и кнопки. Генератор NMS-стабов умеет top-level, nested
   (`Recipe$CommonInfo`) и сохранение наследования (`ShapedRecipe -> Recipe`).

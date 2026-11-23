@@ -5,6 +5,16 @@ public abstract class NormalCraftingRecipe implements net.minecraft.world.item.c
     public net.minecraft.world.item.crafting.Recipe$CommonInfo commonInfo;
     public net.minecraft.world.item.crafting.CraftingRecipe$CraftingBookInfo bookInfo;
 
+    protected NormalCraftingRecipe() {
+        this(null, null);
+    }
+
+    protected NormalCraftingRecipe(net.minecraft.world.item.crafting.Recipe$CommonInfo commonInfo,
+            net.minecraft.world.item.crafting.CraftingRecipe$CraftingBookInfo bookInfo) {
+        this.commonInfo = commonInfo;
+        this.bookInfo = bookInfo;
+    }
+
     public abstract net.minecraft.world.item.crafting.RecipeSerializer getSerializer();
     public java.lang.String group() {
         return null;

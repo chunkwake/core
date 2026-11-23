@@ -14,4 +14,14 @@ public class RecipeHolder {
         this.id = id;
         this.value = recipe;
     }
+
+    /** {@code RecipeHolder.id()} (CraftEngine). */
+    public net.minecraft.resources.ResourceKey<?> id() {
+        return (net.minecraft.resources.ResourceKey<?>) this.id;
+    }
+
+    /** {@code RecipeHolder.value()} (CraftEngine). */
+    public Recipe value() {
+        return (Recipe) this.value;
+    }
 }
