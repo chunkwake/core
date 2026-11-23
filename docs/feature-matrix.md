@@ -7493,8 +7493,9 @@ Bootstrap-фаза теперь проходит после добавления
 - `/execute if entity` закрыт для терминального условия и `run`; остальные
   терминальные условия (`if block`, `if score`, `if data`, ...) ещё нужно
   проверить живыми тестами.
-- CE: после чистого API bundle CraftEngine 6/6 включается, но data pack
-  proxies падают на отсутствующих NMS-стабах (`MultiPackResourceManager`,
-  `Item#useOn`, `CraftWorld#getUID`). Старый CE-стенд с рабочим API был
-  перезаписан новым bundle, поэтому CE-parity нужно восстанавливать
-  отдельным rebuild CE-специфичных стабов.
+- CE: data pack снова загружается; `CEProbe`/`CEStateProbe` проходят
+  `default:topaz_ore`, `default:palm_stairs`, `default:palm_door`
+  (state/collision/drops/persist). Остались `InjectedWorldBorder` cast,
+  прокси-CraftEntity и `BlockState.blockState()` (последний нужен probe,
+  а не data pack). Генератор NMS-стабов теперь умеет top-level, nested
+  (`Recipe$CommonInfo`) и сохранение наследования (`ShapedRecipe -> Recipe`).
