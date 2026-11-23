@@ -2,6 +2,9 @@ package net.minecraft.world.item.crafting;
 
 /** NMS-заглушка {@code RecipeManager} (CommandAPI проверяет наличие). */
 public class RecipeManager {
+    /** Поля, которые CraftEngine читает через FieldGetter. */
+    private final net.minecraft.world.flag.FeatureFlagSet enabledFlags = null;
+    private final java.util.Map<Object, Object> byType = new java.util.HashMap<>();
     /** Поле, которое ищет CraftEngine (getByName). */
     private final java.util.Map<Object, Object> byName = new java.util.HashMap<>();
     /** Поле, которое ищет CraftEngine (getRecipes). */
