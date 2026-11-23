@@ -117,6 +117,9 @@ pub fn write_root(root: &Compound) -> Vec<u8> {
 /// Предел распакованного NBT из файла: `level.dat`, `playerdata` и карты
 /// пишет сам сервер, но импортированный мир может принести gzip-бомбу.
 const MAX_NBT_FILE_BYTES: usize = 64 << 20;
+/// Предел самого сжатого файла: читать гигабайты в память до распаковки
+/// незачем.
+const MAX_NBT_GZIP_BYTES: u64 = 64 << 20;
 
 /// Читает gzip-NBT файл (`playerdata`, `level.dat`); нет файла — `None`.
 pub fn read_gzip_file(path: &std::path::Path) -> Result<Option<Compound>, String> {
@@ -125,11 +128,18 @@ pub fn read_gzip_file(path: &std::path::Path) -> Result<Option<Compound>, String
 
 fn read_gzip_file_capped(path: &std::path::Path, limit: usize) -> Result<Option<Compound>, String> {
     use std::io::Read;
-    let raw = match std::fs::read(path) {
-        Ok(b) => b,
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("read {}: {e}", path.display())),
+        Err(e) => return Err(format!("open {}: {e}", path.display())),
     };
+    let mut raw = Vec::new();
+    file.take(MAX_NBT_GZIP_BYTES + 1)
+        .read_to_end(&mut raw)
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    if raw.len() as u64 > MAX_NBT_GZIP_BYTES {
+        return Err(format!("read {}: file is too large", path.display()));
+    }
     let mut data = Vec::new();
     flate2::read::GzDecoder::new(&raw[..])
         .take(limit as u64 + 1)
