@@ -10,6 +10,15 @@ import net.minecraft.sounds.SoundEvent;
  * сигнатура должна совпадать с Paper, а не принимать {@code Object}.
  */
 public class SoundType {
+    /** Непустой sound type: CE читает звуки у каждого visual block state. */
+    public static final SoundType DEFAULT = new SoundType(
+            1.0F, 1.0F,
+            new SoundEvent(net.minecraft.resources.Identifier.parse("minecraft:block.stone.break")),
+            new SoundEvent(net.minecraft.resources.Identifier.parse("minecraft:block.stone.step")),
+            new SoundEvent(net.minecraft.resources.Identifier.parse("minecraft:block.stone.place")),
+            new SoundEvent(net.minecraft.resources.Identifier.parse("minecraft:block.stone.hit")),
+            new SoundEvent(net.minecraft.resources.Identifier.parse("minecraft:block.stone.fall")));
+
     private final float volume;
     private final float pitch;
     private SoundEvent breakSound;

@@ -35,6 +35,11 @@ public class SoundEvent {
         return new SoundEvent(location, java.util.Optional.of(range));
     }
 
+    /** {@code SoundEvent.getLocation()} (CraftEngine SoundEventProxy). */
+    public net.minecraft.resources.Identifier getLocation() {
+        return this.location;
+    }
+
     public java.util.Optional<Float> fixedRange() {
         return this.fixedRange;
     }

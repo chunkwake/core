@@ -347,7 +347,7 @@ public class BlockBehaviour {
         }
 
         public net.minecraft.world.level.block.SoundType getSoundType() {
-            return null;
+            return net.minecraft.world.level.block.SoundType.DEFAULT;
         }
 
         public boolean isPathfindable(net.minecraft.world.level.pathfinder.PathComputationType type) {
