@@ -16959,7 +16959,7 @@ impl PlayPlan {
                                             tracing::warn!(
                                                 "{}: {}",
                                                 me.entry.name,
-                                                self.command_text(&msg)
+                                                log_line(&self.command_text(&msg))
                                             );
                                         }
                                         conn.send(&text::system_chat_json(

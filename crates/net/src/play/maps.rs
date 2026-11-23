@@ -11,6 +11,11 @@ use crate::maps::{MapData, MapFrame, Sample, mode_color};
 /// `MapColor.FIRE`: цвет лавы на карте.
 const LAVA_COLOR: u8 = 4;
 
+/// Сколько номеров карт помнить как отсутствующие. Клиент в креативе может
+/// подставить в предмет любой `map_id`; без предела `missing` рос бы на
+/// каждый уникальный номер до конца сессии.
+const MAX_MISSING_MAPS: usize = 4096;
+
 #[derive(Default)]
 pub(super) struct MapStore {
     maps: FastMap<i32, MapData>,
@@ -67,7 +72,7 @@ impl PlayPlan {
         f: impl FnOnce(&mut MapData) -> R,
     ) -> Option<R> {
         if !store.maps.contains_key(&id) {
-            if store.missing.contains(&id) {
+            if store.missing.contains(&id) || store.missing.len() >= MAX_MISSING_MAPS {
                 return None;
             }
             let loaded = self.maps_dir.get().and_then(|dir| {
