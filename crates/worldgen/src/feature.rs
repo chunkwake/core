@@ -1434,9 +1434,9 @@ impl Features {
         let mut r = Worldgen::new(0);
         let seed = r.set_decoration_seed(self.seed, ox, oz);
         // `CHUNKWAKE_PROF=1` — время по шагам декорации в stderr.
-        let prof = std::env::var_os("CHUNKWAKE_PROF").is_some();
+        let prof = crate::prof();
         // `CHUNKWAKE_FEATURE_TRACE=1` — какой индекс и сид у фичи.
-        let trace = std::env::var_os("CHUNKWAKE_FEATURE_TRACE").is_some();
+        let trace = crate::feature_trace();
         for step in 0..self.steps.len().min(DECORATION_STEPS) {
             // Куски структур шага пишутся до его фич (крепость Ада — шаг 7,
             // `underground_decoration`). У каждой структуры свой `setFeatureSeed`.
@@ -1811,7 +1811,7 @@ impl Features {
             Feature::Iceberg(i) => {
                 // `CHUNKWAKE_ICE_TRACE=1` — какой айсберг и где: по имени
                 // состояния видно, `packed` это или `blue`.
-                if std::env::var_os("CHUNKWAKE_ICE_TRACE").is_some() {
+                if crate::ice_trace() {
                     eprintln!("iceberg {} at {pos:?}", i.state_name());
                 }
                 i.place(self, level, r, pos)

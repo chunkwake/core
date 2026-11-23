@@ -884,6 +884,13 @@ final class ChunkwakeServer {
         double tps = tickNumber("TPS:", 20.0);
         return new double[] {tps, tps, tps};
     }
+    public int getCurrentTick() {
+        try {
+            return Integer.parseInt(Bridge.world("tick").trim());
+        } catch (RuntimeException error) {
+            return 0;
+        }
+    }
     public double getAverageTickTime() { return tickNumber("MSPT:", 0.0); }
 
     /** `Server.getTickTimes()`: наносекунды последних тиков (tps-hud). */

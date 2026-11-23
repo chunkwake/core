@@ -36,6 +36,19 @@ pub fn threads() -> usize {
     pool().current_num_threads()
 }
 
+/// Регионный тик вместо кусков: `CHUNKWAKE_TICK_REGIONS=1` (по умолчанию
+/// куски). Спрашивается один раз: тик идёт двадцать раз в секунду.
+pub fn regions_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CHUNKWAKE_TICK_REGIONS").as_deref() == Ok("1"))
+}
+
+/// Печать раскладки регионов: `CHUNKWAKE_TICK_DEBUG=1`.
+fn tick_debug() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CHUNKWAKE_TICK_DEBUG").as_deref() == Ok("1"))
+}
+
 /// Делит `items` на подряд идущие куски не короче `min_chunk`, считает `f`
 /// по кускам параллельно и возвращает результаты в порядке кусков. Мало
 /// элементов или один поток — один вызов `f` на текущем потоке, без пула.
@@ -145,7 +158,7 @@ pub fn regions<T: Send, R: Send>(
         rest = tail;
         region = end_region;
     }
-    if std::env::var("CHUNKWAKE_TICK_DEBUG").as_deref() == Ok("1") {
+    if tick_debug() {
         use std::sync::atomic::{AtomicU64, Ordering};
         static CALLS: AtomicU64 = AtomicU64::new(0);
         if CALLS.fetch_add(1, Ordering::Relaxed).is_multiple_of(64) {

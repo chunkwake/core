@@ -23,6 +23,37 @@ use std::path::Path;
 use std::sync::Arc;
 use volume::Volume;
 
+// Флаги отладки генерации: `CHUNKWAKE_*` читаются один раз.
+//
+// Условия стоят внутри прото-чанка и декорации, то есть десятки раз на
+// чанк, а `env::var_os` — скан окружения; на форсированном прогоне
+// (`CHUNKWAKE_PROF`) он попадает в тот же замер, который печатает.
+// После первого вызова остаётся одна атомарная загрузка.
+
+/// `CHUNKWAKE_PROF=1` — замеры фаз генерации в stderr.
+pub(crate) fn prof() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CHUNKWAKE_PROF").is_some())
+}
+
+/// `CHUNKWAKE_FEATURE_TRACE=1` — какой индекс и сид у фичи.
+pub(crate) fn feature_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CHUNKWAKE_FEATURE_TRACE").is_some())
+}
+
+/// `CHUNKWAKE_ICE_TRACE=1` — какой айсберг и где.
+pub(crate) fn ice_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CHUNKWAKE_ICE_TRACE").is_some())
+}
+
+/// `CHUNKWAKE_NO_SURFACE=1` — сверка без стадии поверхности.
+pub(crate) fn no_surface() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CHUNKWAKE_NO_SURFACE").is_some())
+}
+
 /// Блок стартовой платформы `the_void` (`VoidStartPlatformFeature`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VoidPlatformBlock {
@@ -726,7 +757,7 @@ impl Generator {
                 }
             }
         }
-        if std::env::var_os("CHUNKWAKE_PROF").is_some() {
+        if prof() {
             let total = t0.elapsed().as_secs_f64() * 1000.0;
             let corners = density::CORNERS.with(|c| c.replace(0.0));
             eprintln!(

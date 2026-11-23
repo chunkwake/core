@@ -612,7 +612,7 @@ impl<'a> Stage<'a> {
         if self.densities.is_empty() {
             return Vec::new();
         }
-        let prof = std::env::var_os("CHUNKWAKE_PROF").is_some();
+        let prof = crate::prof();
         let t = std::time::Instant::now();
         let volume =
             crate::volume::Volume::blocks([16, self.height, 16], [cx * 16, self.min_y, cz * 16]);

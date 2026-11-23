@@ -50,8 +50,8 @@ impl FrameCodec {
         let frame = buf.split_to(len as usize);
 
         let Some(threshold) = self.threshold else {
-            // Пакет без сжатия забираем прямо из буфера: `split_to` уже
-            // отдал владение, копия не нужна.
+            // `split_to` отдал владение кадром, но `to_vec` всё равно копирует:
+            // копия одна на пакет и дешевле, чем `Bytes` в сигнатуре `decode`.
             return Ok(Some(frame.to_vec()));
         };
         let mut r = Reader::new(&frame);

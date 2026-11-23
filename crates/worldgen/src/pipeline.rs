@@ -978,7 +978,7 @@ impl Overworld {
     }
 
     fn proto_at(&self, cx: i32, cz: i32, features: Option<&Features>) -> Blocks {
-        let prof = std::env::var_os("CHUNKWAKE_PROF").is_some();
+        let prof = crate::prof();
         let t0 = std::time::Instant::now();
         let structures = features.and_then(|f| f.structures.clone());
         let beard = if let Some(structures) = &structures {
@@ -1032,7 +1032,7 @@ impl Overworld {
         // `CHUNKWAKE_NO_SURFACE=1` — сверка без стадии поверхности: видно,
         // что именно она меняет, отдельно от рельефа и акуифера.
         if let Some(s) = &self.surface
-            && std::env::var_os("CHUNKWAKE_NO_SURFACE").is_none()
+            && !crate::no_surface()
         {
             let mut chunk = self.view(&mut states, cx, cz, own, &memo);
             s.stage(noise, &preliminary, &random)

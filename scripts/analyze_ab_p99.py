@@ -20,6 +20,7 @@ SIDES = ("Chunkwake", "Paper")
 
 SAMPLE_RE = re.compile(
     r"PERFPROBE SAMPLE label=(?P<label>\S+) n=(?P<n>\d+) ticks=(?P<ticks>\d+) "
+    r"(?:server_ticks=(?P<server_ticks>\d+) )?"
     r"wall=(?P<wall>[\d.]+) tps=(?P<tps>[\d.]+)(?: tps_api=(?P<tps_api>[\d.]+))? "
     r"avg=(?P<avg>[\d.]+) p50=(?P<p50>[\d.]+) p95=(?P<p95>[\d.]+) "
     r"p99=(?P<p99>[\d.]+) max=(?P<max>[\d.]+)"
@@ -33,6 +34,7 @@ class Window:
     side: str
     n: int
     ticks: int
+    server_ticks: int
     wall: float
     tps: float
     tps_api: float | None
@@ -113,6 +115,7 @@ def load() -> list[Window]:
                         side=side,
                         n=len(samples),
                         ticks=int(summary["ticks"]),
+                        server_ticks=int(summary.get("server_ticks") or summary["ticks"]),
                         wall=float(summary["wall"]),
                         tps=float(summary["tps"]),
                         tps_api=float(summary["tps_api"]) if summary.get("tps_api") else None,
@@ -131,7 +134,7 @@ def pooled(windows: list[Window]) -> dict[str, float]:
         index = max(0, min(n - 1, math.ceil(n * fraction) - 1))
         return ordered[index]
 
-    total_ticks = sum(window.ticks for window in windows)
+    total_ticks = sum(window.server_ticks for window in windows)
     total_wall = sum(window.wall for window in windows)
     tps_values = [window.tps for window in windows]
     api_values = [window.tps_api for window in windows if window.tps_api is not None]
@@ -182,17 +185,18 @@ def main() -> int:
     lines.append(f"Raw data: `{AB.relative_to(ROOT)}`; rounds: {rounds}.")
     lines.append("")
     lines.append("`p99` and all percentiles are computed from raw `ServerTickEndEvent` samples; "
-                 "`TPS` is ticks divided by the wall-clock length of the same window.")
+                 "`TPS` uses `server_ticks` (Server.getCurrentTick delta) divided by wall-clock "
+                 "length of the same window.")
     lines.append("")
 
     lines.append("## Per-round windows")
     lines.append("")
-    lines.append("| round | side | scenario | ticks | p50 ms | p95 ms | p99 ms | max ms | TPS (window) | TPS API |")
-    lines.append("|---:|---|---|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("| round | side | scenario | events | server ticks | p50 ms | p95 ms | p99 ms | max ms | TPS (window) | TPS API |")
+    lines.append("|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|")
     for window in windows:
         api = fmt(window.tps_api, 2) if window.tps_api is not None else "-"
         lines.append(
-            f"| {window.round} | {window.side} | {window.scenario} | {window.n} | "
+            f"| {window.round} | {window.side} | {window.scenario} | {window.n} | {window.server_ticks} | "
             f"{fmt(window.p50)} | {fmt(window.p95)} | {fmt(window.p99)} | "
             f"{fmt(window.maximum)} | {fmt(window.tps, 2)} | {api} |"
         )
@@ -267,10 +271,10 @@ def main() -> int:
     lines.append("The table gives both one-sided p-values: `p(CW better)` tests "
                  "`Chunkwake < Paper`; `p(Paper better)` tests the opposite direction.")
     lines.append("")
-    lines.append("`TPS (window)` is computed from the ticks observed by PerfProbe in that window. "
-                 "On Paper this is one event per server tick. On Chunkwake the Java tick queue can "
-                 "coalesce events, so its window TPS is a conservative lower bound; `TPS API` comes "
-                 "from `Server.getTPS()[0]` (Chunkwake: last-100-tick meter, Paper: 1-minute average).")
+    lines.append("`TPS (window)` uses the authoritative `server_ticks` delta from "
+                 "`Server.getCurrentTick()`, not the number of Java tick events. "
+                 "`TPS API` from `Server.getTPS()[0]` is shown as a cross-check "
+                 "(Chunkwake: last-100-tick meter, Paper: 1-minute average).")
     lines.append("")
     lines.append("Chunkwake tick duration = Rust core tick + Java scheduler/plugin tick for the same tick; "
                  "Paper tick duration is the full server tick measured by Paper.")

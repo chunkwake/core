@@ -13,6 +13,15 @@ type Hands<'a> = ([f64; 3], [Option<&'a str>; 2], u128);
 /// заставлять сервер крутить цикл на произвольное число сущностей.
 const MAX_SLIME_SPLIT: i32 = 128;
 
+/// Обход быстрого пути эффектов: `CHUNKWAKE_NO_FX_FASTPATH=1` — A/B.
+///
+/// Спрашивается один раз: условие стоит в теле цикла по мобам, а `env::var`
+/// — это скан окружения и аллокация `String` на каждого моба каждый тик.
+fn no_fx_fastpath() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CHUNKWAKE_NO_FX_FASTPATH").as_deref() == Ok("1"))
+}
+
 /// Моб и то, что о нём уже знают клиенты.
 pub(super) struct MobEntry {
     pub mob: Mob,
@@ -1170,17 +1179,16 @@ impl PlayPlan {
                             // Зелья: регенерация лечит, яд и иссушение бьют раз в
                             // `25 >> amp` / `40 >> amp` тиков (`LivingEntity.tickEffects`).
                             let fx = e.mob.tick_effects(self.effect_kinds());
-                            let effect_meta =
-                                if std::env::var("CHUNKWAKE_NO_FX_FASTPATH").as_deref() != Ok("1")
-                                    && e.mob.effects.is_empty()
-                                    && e.effect_meta.0.is_empty()
-                                {
-                                    // Быстрый путь: у моба нет эффектов и кэш пуст —
-                                    // не создаём Vec каждый тик.
-                                    e.effect_meta.clone()
-                                } else {
-                                    self.effect_particles(&e.mob.effects)
-                                };
+                            let effect_meta = if !no_fx_fastpath()
+                                && e.mob.effects.is_empty()
+                                && e.effect_meta.0.is_empty()
+                            {
+                                // Быстрый путь: у моба нет эффектов и кэш пуст —
+                                // не создаём Vec каждый тик.
+                                e.effect_meta.clone()
+                            } else {
+                                self.effect_particles(&e.mob.effects)
+                            };
                             if effect_meta != e.effect_meta {
                                 e.effect_meta = effect_meta;
                                 let (colors, ambient) = &e.effect_meta;
@@ -1396,12 +1404,11 @@ impl PlayPlan {
                     let p = e.mob.pos;
                     ((p[0].floor() as i32) >> 4, (p[2].floor() as i32) >> 4)
                 };
-                // A/B: `CHUNKWAKE_TICK_REGIONS=0` — старые произвольные куски
-                // по 64 сущности; 1 (по умолчанию) — 8x8-регионы.
-                // Дефолт — куски: синтетический A/B (200 NoAI-свиней, без
-                // плагинов) стабильно дал куски не медленнее регионов.
-                // Регионный тик остаётся opt-in: CHUNKWAKE_TICK_REGIONS=1.
-                let parts = if std::env::var("CHUNKWAKE_TICK_REGIONS").as_deref() == Ok("1") {
+                // A/B: `CHUNKWAKE_TICK_REGIONS=1` — 8x8-регионы, по умолчанию
+                // куски по 64 сущности: синтетический A/B (200 NoAI-свиней,
+                // без плагинов) стабильно дал куски не медленнее регионов,
+                // поэтому регионный тик остаётся opt-in.
+                let parts = if crate::par::regions_enabled() {
                     crate::par::regions(&mut entries, chunk, run)
                 } else {
                     crate::par::chunks(&mut entries, 64, run)
@@ -1581,6 +1588,11 @@ impl PlayPlan {
                     mobs.remove(id);
                 }
             }
+            let mut causes = self.love_cause.lock().unwrap();
+            for id in &despawned {
+                causes.remove(id);
+            }
+            drop(causes);
             self.hub.remove_tracked(&despawned);
         }
         for (species, target, from, damage) in strikes {
@@ -1927,6 +1939,10 @@ impl PlayPlan {
     }
 
     fn mob_loot(&self, id: i32, e: &MobEntry) {
+        // Моб умер в режиме размножения: его запись в `love_cause` больше
+        // никому не нужна. ID не переиспользуются, без этого каждая смерть
+        // оставляла в карте запись навсегда.
+        self.love_cause.lock().unwrap().remove(&id);
         let m = &e.mob;
         // `CopperGolem` antenna: `setGuaranteedDrop` — выпадает всегда.
         if let Some(antenna) = m.antenna {

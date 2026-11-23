@@ -22,3 +22,9 @@ opt-level = 3
 
 [profile.dev.package.chunkwake-world]
 opt-level = 3
+
+# Тик, мобы и механики — тоже горячий путь, и их тоже не проходят пошагово.
+# Без этого `target/debug/chunkwake` был в разы медленнее релиза, а стенд
+# A/B (docs/ab-p99.md) снимался именно с debug-бинарника.
+[profile.dev.package.chunkwake-net]
+opt-level = 3

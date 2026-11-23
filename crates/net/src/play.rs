@@ -236,7 +236,9 @@ pub struct PlayPlan {
     /// Оверворлд — «своё» измерение для всех старых вызовов `block`/`set_block`:
     /// так 300 обращений не пришлось переписывать, а Ад и Край адресуются
     /// явно через `*_in`.
-    active: Mutex<Dimension>,
+    /// `AtomicU8` вместо мьютекса: значение читается на каждом `sim()` —
+    /// `Release`/`Acquire` дают ту же видимость, что и замок, но без него.
+    active: AtomicU8,
     /// Тело чанка (одинаковое для всех координат плоского мира).
     chunk_body: Vec<u8>,
     /// Чанк генератора (плоский мир); изменённые чанки — в `edited`.
@@ -1721,6 +1723,15 @@ fn folia_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("CHUNKWAKE_FOLIA").as_deref() == Ok("1"))
 }
 
+/// Измерения тикаются одновременно: `CHUNKWAKE_PARALLEL_DIMS=1`.
+///
+/// Спрашивается один раз: `env::var` — это скан окружения и аллокация
+/// `String`, а тик идёт двадцать раз в секунду.
+fn parallel_dims() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CHUNKWAKE_PARALLEL_DIMS").as_deref() == Ok("1"))
+}
+
 pub(crate) fn with_dim<R>(dim: Dimension, f: impl FnOnce() -> R) -> R {
     struct Restore(Option<Dimension>);
     impl Drop for Restore {
@@ -1758,6 +1769,25 @@ impl Dimension {
             "minecraft:the_end" | "the_end" | "end" => Self::End,
             _ => return None,
         })
+    }
+
+    /// Номер для `PlayPlan::active`: активное измерение читается на каждом
+    /// `sim()`/`dim_state()`, то есть сотни раз за тик, и мьютекс там дороже
+    /// самого значения.
+    fn slot(self) -> u8 {
+        match self {
+            Self::Overworld => 0,
+            Self::Nether => 1,
+            Self::End => 2,
+        }
+    }
+
+    fn from_slot(slot: u8) -> Self {
+        match slot {
+            1 => Self::Nether,
+            2 => Self::End,
+            _ => Self::Overworld,
+        }
     }
 
     /// Во сколько раз меняются координаты при переходе в Ад и обратно.
@@ -3184,7 +3214,7 @@ impl PlayPlan {
                 }
                 types
             },
-            active: Mutex::new(Dimension::Overworld),
+            active: AtomicU8::new(Dimension::Overworld.slot()),
             dragon_fight: Mutex::new(DragonFight::default()),
             raids: Mutex::new(Vec::new()),
             trees,
@@ -5200,6 +5230,10 @@ impl PlayPlan {
         if line == "tps" {
             return self.tick_meter_line();
         }
+        // `tick` - число серверных тиков для `Server.getCurrentTick()`.
+        if line == "tick" {
+            return self.ticks.lock().unwrap().total().to_string();
+        }
         // `mspt`: работа тика за 5 с, 10 с и 1 мин — по тройке avg min max
         // через пробел (Paper `/mspt`), `?` — замеров ещё нет.
         if line == "mspt" {
@@ -6452,7 +6486,7 @@ impl PlayPlan {
         if let Ok(dim) = SESSION_DIM.try_with(|c| c.get()) {
             return dim;
         }
-        *self.active.lock().unwrap()
+        Dimension::from_slot(self.active.load(Ordering::Acquire))
     }
 
     fn border_at(&self, now: i64) -> commands::state::WorldBorder {
@@ -7131,7 +7165,7 @@ impl PlayPlan {
         let uuid = me.entry.uuid;
         if start_dim != Dimension::Overworld {
             // Тик идёт в мире последнего вошедшего туда, как при переходе.
-            *self.active.lock().unwrap() = start_dim;
+            self.active.store(start_dim.slot(), Ordering::Release);
         }
         // Подписка до вставки в список: ни одно событие после снимка не теряется.
         let rx = self.hub.tx.subscribe();
@@ -7168,7 +7202,7 @@ impl PlayPlan {
             ),
         }
         if !player.channels.is_empty() {
-            let names = player.channels.join(" ");
+            let names = player.channels.join("\0");
             self.plugin_message(uuid, "minecraft:register", names.as_bytes());
         }
 
@@ -7198,6 +7232,9 @@ impl PlayPlan {
         // (`i64::MAX` никогда не истекает).
         self.client_loading.lock().unwrap().remove(uuid);
         self.mob_hits.lock().unwrap().remove(&uuid);
+        // Срок кулдауна портала без игрока никого не ограничивает (в ванили
+        // `portalCooldown` живёт в сущности игрока и не сохраняется).
+        self.portal_cooldown.lock().unwrap().remove(&uuid);
         // Немедленно запрашиваем автосохранение, оставляя снимок до подтверждения записи.
         self.snapshot(uuid, &state);
         if let Some(source) = self.players_source.get() {
@@ -10252,7 +10289,7 @@ impl PlayPlan {
         // блоками идёт через него: `set_block`, генерация и поток чанков.
         // У игрока измерение уже своё (`Online::dimension`), но код мира
         // однопоточный — пока в Аду один игрок, этого достаточно.
-        *self.active.lock().unwrap() = to;
+        self.active.store(to.slot(), Ordering::Release);
         self.push_control(uuid, Control::DimensionChange(to, pos, look));
         self.changed_world(uuid, from, to);
         if let Some(before) = before {
@@ -12521,6 +12558,10 @@ impl PlayPlan {
         if !self.profiling.load(Ordering::Relaxed) {
             if self.idle() {
                 self.advance_time();
+                // Простой не замеряется, но отметку интервала всё равно
+                // сдвигаем: иначе его длительность припишется первому
+                // рабочему тику и попадёт в `gap` — в `/tps`, `late` и worst gap.
+                self.ticks.lock().unwrap().last_interval_ms(started);
                 return;
             }
             self.run_phases(None, started);
@@ -12564,8 +12605,7 @@ impl PlayPlan {
         // отключается. Порядок захвата блокировок в тик-пути канонический
         // (docs/lock-order.md), поэтому измерения можно тикать одновременно.
         let dims = self.ticking_dims();
-        let parallel =
-            std::env::var("CHUNKWAKE_PARALLEL_DIMS").as_deref() == Ok("1") && dims.len() > 1;
+        let parallel = parallel_dims() && dims.len() > 1;
         if parallel {
             watch = None;
             std::thread::scope(|scope| {
@@ -12778,7 +12818,10 @@ impl PlayPlan {
         tokio::spawn(async move {
             let mut interval = TICK;
             let mut tick = tokio::time::interval(interval);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Догоняем пропущенные дедлайны, как ванильный tick loop: `Skip`
+            // навсегда терял тик при опоздании на несколько миллисекунд и
+            // ронял TPS под нагрузкой.
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
             let mut rate = 20.0;
             loop {
                 tick.tick().await;
@@ -12794,7 +12837,7 @@ impl PlayPlan {
                     rate = new_rate;
                     interval = Duration::from_secs_f64(1.0 / rate);
                     tick = tokio::time::interval(interval);
-                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
                 }
                 if frozen && !step {
                     continue;
@@ -19331,7 +19374,6 @@ impl PlayPlan {
     /// и только те, где действительно лежит нить.
     fn scan_tripwires(&self) {
         // Быстрый выход: никто не двигается — нечего обходить.
-        // Быстрый выход: если никого нет — ничего не делаем.
         // `hub.players` отпускаем до `live`: порядок `hub.players` -> `live`
         // нарушил бы канонический (`live` раньше), дав deadlock в параллели.
         let collecting: Vec<(Uuid, [f64; 3])> = {
@@ -25902,7 +25944,7 @@ impl PlayPlan {
         if changed {
             *client_dim = dim;
             let _ = SESSION_DIM.try_with(|c| c.set(dim));
-            *self.active.lock().unwrap() = dim;
+            self.active.store(dim.slot(), Ordering::Release);
         }
         conn.send(&chunkwake_protocol::inventory::respawn(
             self.ids.respawn,

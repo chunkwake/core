@@ -34,6 +34,12 @@ public class Item implements ProjectileItem, net.minecraft.world.level.ItemLike 
         return net.minecraft.world.InteractionResult.PASS;
     }
 
+    /** {@code Item.useOn(UseOnContext)} (CraftEngine ItemProxy#useOn). */
+    public net.minecraft.world.InteractionResult useOn(
+            net.minecraft.world.item.context.UseOnContext context) {
+        return net.minecraft.world.InteractionResult.PASS;
+    }
+
     private final String id;
 
     @Override

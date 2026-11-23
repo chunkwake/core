@@ -26,6 +26,16 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// старт, нужный сразу многим потокам, собирает один, остальные ждут его.
 type LayoutCache = Mutex<HashMap<(usize, i32, i32), Arc<OnceLock<Option<Arc<Layout>>>>>>;
 
+/// `CHUNKWAKE_PIECES=sx,sz` — печать коробок кусков старта.
+///
+/// Тоже спрашивается один раз: раньше переменная читалась и форматировалась
+/// в `"sx,sz"` при каждом старте, даже когда она не задана.
+fn pieces_filter() -> Option<&'static str> {
+    static ON: OnceLock<Option<String>> = OnceLock::new();
+    ON.get_or_init(|| std::env::var("CHUNKWAKE_PIECES").ok())
+        .as_deref()
+}
+
 /// Столбцы мира для высоты старта и проверки биома. Высота — без бороды
 /// и без карверов (`getBaseHeight`).
 pub(crate) trait Columns {
@@ -1108,7 +1118,7 @@ impl Structures {
     fn build(&self, si: usize, sx: i32, sz: i32, columns: &dyn Columns) -> Option<Arc<Layout>> {
         let t = std::time::Instant::now();
         let built = self.build_layout(si, sx, sz, columns);
-        if std::env::var_os("CHUNKWAKE_PROF").is_some() {
+        if crate::prof() {
             let name = self.sets[si].kinds.first().map_or("?", |k| k.name.as_str());
             let jig = template::JIG.with(|c| c.replace(0.0));
             eprintln!(
@@ -1118,7 +1128,7 @@ impl Structures {
             );
         }
         // Отладка: `CHUNKWAKE_PIECES=sx,sz` печатает коробки кусков старта.
-        if let (Some(layout), Ok(want)) = (&built, std::env::var("CHUNKWAKE_PIECES"))
+        if let (Some(layout), Some(want)) = (&built, pieces_filter())
             && want == format!("{sx},{sz}")
         {
             for (i, p) in layout.pieces.iter().enumerate() {

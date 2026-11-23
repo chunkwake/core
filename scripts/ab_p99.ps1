@@ -1,4 +1,4 @@
-# Strict Paper vs Chunkwake A/B: p99 MSPT, TPS and raw tick samples.
+﻿# Strict Paper vs Chunkwake A/B: p99 MSPT, TPS and raw tick samples.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts/ab_p99.ps1 -Rounds 5
 #
@@ -35,7 +35,7 @@ $java = Join-Path $jdk 'bin\java.exe'
 $bot = Join-Path $root 'target\release\examples\opcmd_probe.exe'
 $packets = Join-Path $root 'target\release\generated\26.3\reports\packets.json'
 $probe = Join-Path $root 'java\perf-probe\build\libs\chunkwake-perf-probe.jar'
-$server = Join-Path $root 'target\debug\chunkwake.exe'
+$server = Join-Path $root 'target\release\chunkwake.exe'
 $apiJar = Join-Path $root 'java\dist\chunkwake-api.jar'
 $ab = Join-Path $root 'target\ab-p99'
 $player = 'boater'
@@ -44,7 +44,7 @@ foreach ($path in @($java, $bot, $packets, $probe, $server, $apiJar)) {
     if (-not (Test-Path $path)) { throw "missing benchmark dependency: $path" }
 }
 if ((Get-Item $server).LastWriteTime -lt (Get-Item $apiJar).LastWriteTime) {
-    throw "chunkwake.exe is older than java/dist/chunkwake-api.jar; run cargo build -p chunkwake-server"
+    throw "chunkwake.exe is older than java/dist/chunkwake-api.jar; run cargo build --release -p chunkwake-server"
 }
 
 # Only touch Java processes that belong to this benchmark. Never kill a random

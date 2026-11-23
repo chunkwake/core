@@ -30,6 +30,15 @@ public class CraftWorld {
         return this.handle;
     }
 
+    /**
+     * {@code CraftWorld.getUID()}: CraftEngine резолвит метод на классе
+     * CraftWorld, а реальные миры (`WorldImpl`) переопределяют его.
+     */
+    public java.util.UUID getUID() {
+        return java.util.UUID.nameUUIDFromBytes(
+                ("chunkwake:" + getName()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
     /** `CraftWorld.getName()`: squaremap читает имя мира из NMS-хендла. */
     public String getName() {
         return "world";

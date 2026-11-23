@@ -39,6 +39,9 @@ final class CustomShapes {
         if (path.endsWith("_trapdoor")) {
             return trapdoor(values);
         }
+        if (path.endsWith("_fence")) {
+            return fence(values);
+        }
         // barrier, note_block, mushroom_block, ore и прочие полные носители.
         return List.of(new BoundingBox(0, 0, 0, 1, 1, 1));
     }
@@ -117,6 +120,36 @@ final class CustomShapes {
                     : List.of(new BoundingBox(0, 0, 0, 1, 0.1875, 1));
         }
         return List.of(new BoundingBox(0, 0, 0.8125, 1, 1, 1));
+    }
+
+    /**
+     * Коллизия забора: столб 6/16..10/16 высотой 1 блок и перекладины
+     * 7/16..9/16 на высоте 6/16..15/16 к подключённым сторонам.
+     *
+     * <p>Это collision-форма {@code CrossCollisionBlock.makeShapes(4, 16, 2, 6, 15)},
+     * а не visual-форма высотой 1.5 блока.
+     */
+    static List<BoundingBox> fence(Map<String, String> values) {
+        double px = 1.0 / 16.0;
+        List<BoundingBox> boxes = new ArrayList<>(5);
+        boxes.add(new BoundingBox(6 * px, 0, 6 * px, 10 * px, 1, 10 * px));
+        if (isTrue(values, "north")) {
+            boxes.add(new BoundingBox(7 * px, 6 * px, 0, 9 * px, 15 * px, 8 * px));
+        }
+        if (isTrue(values, "south")) {
+            boxes.add(new BoundingBox(7 * px, 6 * px, 8 * px, 9 * px, 15 * px, 1));
+        }
+        if (isTrue(values, "west")) {
+            boxes.add(new BoundingBox(0, 6 * px, 7 * px, 8 * px, 15 * px, 9 * px));
+        }
+        if (isTrue(values, "east")) {
+            boxes.add(new BoundingBox(8 * px, 6 * px, 7 * px, 1, 15 * px, 9 * px));
+        }
+        return boxes;
+    }
+
+    private static boolean isTrue(Map<String, String> values, String key) {
+        return "true".equals(values.getOrDefault(key, "false"));
     }
 
     private static List<BoundingBox> dedupe(List<BoundingBox> boxes) {

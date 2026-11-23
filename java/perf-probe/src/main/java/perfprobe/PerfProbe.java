@@ -28,6 +28,7 @@ public final class PerfProbe extends JavaPlugin implements Listener {
     private final List<Double> samples = new ArrayList<>();
     private long windowStartNanos;
     private int windowTicks;
+    private int startTick;
 
     @Override
     public void onEnable() {
@@ -77,6 +78,7 @@ public final class PerfProbe extends JavaPlugin implements Listener {
         samples.clear();
         windowTicks = 0;
         windowStartNanos = System.nanoTime();
+        startTick = getServer().getCurrentTick();
     }
 
     private void sample(String rawLabel) {
@@ -97,13 +99,15 @@ public final class PerfProbe extends JavaPlugin implements Listener {
         double p95 = percentile(sorted, 0.95);
         double p99 = percentile(sorted, 0.99);
         double max = sorted.get(count - 1);
-        double tps = windowTicks / wall;
+        int endTick = getServer().getCurrentTick();
+        int serverTicks = Math.max(0, endTick - startTick);
+        double tps = serverTicks / wall;
         double apiTps = getServer().getTPS()[0];
         String label = safe(rawLabel);
 
         getLogger().info(String.format(Locale.ROOT,
-                "PERFPROBE SAMPLE label=%s n=%d ticks=%d wall=%.3f tps=%.2f tps_api=%.2f avg=%.3f p50=%.3f p95=%.3f p99=%.3f max=%.3f",
-                label, count, windowTicks, wall, tps, apiTps, avg, p50, p95, p99, max));
+                "PERFPROBE SAMPLE label=%s n=%d ticks=%d server_ticks=%d wall=%.3f tps=%.2f tps_api=%.2f avg=%.3f p50=%.3f p95=%.3f p99=%.3f max=%.3f",
+                label, count, windowTicks, serverTicks, wall, tps, apiTps, avg, p50, p95, p99, max));
         writeCsv(label);
         reset();
     }
