@@ -27,6 +27,16 @@ public final class JSONValue {
         }
     }
 
+    /** json-simple {@code parseWithException(String)}. */
+    public static Object parseWithException(String text)
+            throws org.json.simple.parser.ParseException {
+        Object value = parse(text);
+        if (value == null && text != null && !text.trim().equals("null") && !text.isBlank()) {
+            throw new org.json.simple.parser.ParseException("Unexpected token", 0);
+        }
+        return value;
+    }
+
     public static Object parse(java.io.Reader reader) {
         try {
             StringBuilder text = new StringBuilder();

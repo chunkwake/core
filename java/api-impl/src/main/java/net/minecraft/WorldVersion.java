@@ -8,6 +8,14 @@ public interface WorldVersion {
 
     int protocolVersion();
 
+    /** Paper 26.3: resource/data pack format for the current version. */
+    default net.minecraft.server.packs.metadata.pack.PackFormat packVersion(
+            net.minecraft.server.packs.PackType type) {
+        return type == net.minecraft.server.packs.PackType.SERVER_DATA
+                ? net.minecraft.server.packs.metadata.pack.PackFormat.of(121, 0)
+                : net.minecraft.server.packs.metadata.pack.PackFormat.of(97, 1);
+    }
+
     default String getName() {
         return this.name();
     }
