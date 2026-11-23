@@ -36,7 +36,7 @@ final class MobImpl {
         this.world = world;
         this.id = id;
         this.species = species;
-        this.api = (LivingEntity) Stub.of(iface(species), this);
+        this.api = (LivingEntity) Stub.ofAll(new Class<?>[] {iface(species), org.bukkit.craftbukkit.entity.CraftEntity.class}, this);
     }
 
     static Class<? extends LivingEntity> iface(String species) {

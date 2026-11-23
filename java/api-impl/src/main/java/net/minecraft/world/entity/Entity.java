@@ -213,7 +213,7 @@ public class Entity implements net.minecraft.network.syncher.SyncedDataHolder {
 
     /** Paper: {@code Entity.getBukkitEntity()} возвращает CraftEntity. */
     public org.bukkit.craftbukkit.entity.CraftEntity getBukkitEntity() {
-        return new org.bukkit.craftbukkit.entity.CraftEntity(this);
+        return new org.bukkit.craftbukkit.entity.CraftEntityBase(this);
     }
 
     public void saveWithoutId(ValueOutput output) {

@@ -5,10 +5,11 @@ package org.bukkit.craftbukkit;
  * {@code InjectedWorldBorder}, чтобы получить доступ к мирам через
  * Bukkit-объект. Полная реализация WorldBorder живёт в Rust-ядре.
  */
-public class CraftWorldBorder {
+public class CraftWorldBorder extends net.minecraft.world.level.border.WorldBorder {
     protected final CraftWorld world;
 
     public CraftWorldBorder(CraftWorld world) {
+        super();
         this.world = world;
     }
 

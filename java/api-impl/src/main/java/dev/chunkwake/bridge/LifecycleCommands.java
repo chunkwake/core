@@ -145,7 +145,7 @@ final class LifecycleCommands implements Commands {
 
         Source(CommandSender sender, Location location, Entity executor) {
             super(sender, executor instanceof org.bukkit.craftbukkit.entity.CraftEntity craft
-                    ? craft.getHandle() : null);
+                    ? (net.minecraft.world.entity.Entity) craft.getHandle() : null);
             this.sender = sender;
             this.location = location;
             this.executor = executor;

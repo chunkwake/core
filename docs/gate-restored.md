@@ -7,14 +7,14 @@ test/probe-плагинов.
 ## Результат
 
 ```
-83 of 83 enabled, 1 skipped (missing server internals) in 36754 ms
+89 of 89 enabled, 2 skipped (missing server internals) in 41243 ms
 FAILED: (пусто)
 LOADERR: (пусто)
 PANICS: 0
-JARS: 88
+JARS: 95
 ```
 
-`JARS: 88` — 83 плагина + 5 библиотечных/зависимых jar-ов, которые Chunkwake
+`JARS: 95` — 89 плагинов + библиотечные/зависимые jar-ы, которые Chunkwake
 не считает отдельными плагинами.
 
 Полный список файлов:
@@ -27,8 +27,11 @@ JARS: 88
   более новыми сборками.
 - `journeymap` (клиентский мод), `QuickShop-Hikari` (конфликт WorldEdit),
   `EconomyShopGUI`, `ClickVillagers`, `FreedomChat`, `NexusCore`,
-  `NexusAuctionHouse`, `DonutAuctionHouse`, `BKCommonLib` были исключены:
-  они падали на этом стенде.
+  `NexusAuctionHouse`, `DonutAuctionHouse`, `BKCommonLib`, `Sit`,
+  `CrazyEnchantments` и `LagFixer` были исключены: они падали на этом стенде.
+- Добавлены реальные Folia/Leaf-совместимые плагины: `Chunksmith`,
+  `OneBlock`, `SmartSpawner`, `ClearLag++`, `Pl3xMap`, `AdvancedPortals`,
+  `PvPManager`.
 - CE по-прежнему включается, но data pack падает на NMS-прокси
   (`ShapedRecipePattern`, `InjectedWorldBorder`, `BlockState.blockState`).
   Этот gate проверяет загрузку/enable плагинов, а не CE parity.
