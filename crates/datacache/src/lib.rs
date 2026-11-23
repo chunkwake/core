@@ -721,6 +721,12 @@ mod tests {
         {
             let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
             zip.start_file(
+                "data/minecraft/structure/ok.nbt",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(b"ok").unwrap();
+            zip.start_file(
                 "data/minecraft/structure/../../escaped.nbt",
                 zip::write::SimpleFileOptions::default(),
             )
@@ -738,6 +744,7 @@ mod tests {
         )
         .expect_err("path traversal must be rejected");
         assert!(error.to_string().contains("unsafe path"), "{error}");
+        assert_eq!(std::fs::read(root.join("ok.nbt")).unwrap(), b"ok");
         assert!(!root.join("escaped.nbt").exists());
         let _ = std::fs::remove_dir_all(&root);
     }

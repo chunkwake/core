@@ -154,6 +154,29 @@ fn collect(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) -> Result
     Ok(())
 }
 
+/// Сколько распакованного допустимо для одной записи архива. Ванильные
+/// данные малы; предел защищает от zip-бомбы в пользовательском бандле.
+const MAX_ENTRY_BYTES: usize = 64 << 20;
+
+fn read_entry_capped<R: Read>(
+    entry: &mut R,
+    buffer: &mut Vec<u8>,
+    limit: usize,
+) -> Result<(), ArchiveError> {
+    buffer.clear();
+    entry
+        .take(limit as u64 + 1)
+        .read_to_end(buffer)
+        .map_err(ArchiveError::from)?;
+    if buffer.len() > limit {
+        return Err(ArchiveError::Format {
+            file: "archive".into(),
+            msg: "entry is too large".into(),
+        });
+    }
+    Ok(())
+}
+
 /// Распаковывает архив в `dest`. Пути вне `dest` отклоняются.
 /// Возвращает число записей.
 pub fn unpack<R: Read + Seek>(reader: R, dest: &Path) -> Result<usize, ArchiveError> {
@@ -177,8 +200,7 @@ pub fn unpack<R: Read + Seek>(reader: R, dest: &Path) -> Result<usize, ArchiveEr
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        buffer.clear();
-        entry.read_to_end(&mut buffer)?;
+        read_entry_capped(&mut entry, &mut buffer, MAX_ENTRY_BYTES)?;
         std::fs::write(&path, &buffer)?;
         count += 1;
     }
@@ -248,8 +270,7 @@ fn write_files(bytes: &[u8], files: &[(usize, std::path::PathBuf)]) -> Result<us
     let mut buffer = Vec::new();
     for (index, path) in files {
         let mut entry = archive.by_index(*index)?;
-        buffer.clear();
-        entry.read_to_end(&mut buffer)?;
+        read_entry_capped(&mut entry, &mut buffer, MAX_ENTRY_BYTES)?;
         std::fs::write(path, &buffer)?;
     }
     Ok(files.len())
@@ -353,5 +374,16 @@ mod tests {
         assert!(is_wanted("version.json"));
         assert!(!is_wanted("chunkwake-derived-v1/boot.v1.bin"));
         assert!(!is_wanted(".work/libraries/x.jar"));
+    }
+
+    #[test]
+    fn entry_read_is_capped() {
+        let data = vec![7u8; 100];
+        let mut input = std::io::Cursor::new(&data[..]);
+        let mut out = Vec::new();
+        assert!(read_entry_capped(&mut input, &mut out, 10).is_err());
+        let mut input = std::io::Cursor::new(&data[..]);
+        read_entry_capped(&mut input, &mut out, 100).unwrap();
+        assert_eq!(out, data);
     }
 }

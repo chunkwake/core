@@ -1257,6 +1257,12 @@ fn eye_of(feet: [f64; 3]) -> [f64; 3] {
     [feet[0], feet[1] + 1.62, feet[2]]
 }
 
+/// Текст чата или команды для журнала: перевод строки в сообщении клиента
+/// создавал бы поддельную запись лога. Сам текст команды не меняется.
+fn log_line(text: &str) -> String {
+    text.replace("\r\n", "\\n").replace(['\r', '\n'], "\\n")
+}
+
 /// `spawn-protection`: чебышёв от блока спавна строго меньше радиуса.
 fn in_spawn(spawn: [f64; 3], radius: i32, pos: [i32; 3]) -> bool {
     if radius <= 0 {
@@ -14558,7 +14564,9 @@ impl PlayPlan {
                     if id == ids.sb_custom_payload {
                         let channel = r.string(32767)?.to_owned();
                         let data = r.remaining();
-                        if data.len() <= crate::payload::MAX_SERVERBOUND {
+                        if data.len() <= crate::payload::MAX_SERVERBOUND
+                            && crate::payload::valid_channel(&channel)
+                        {
                             self.plugin_message(uuid, &channel, data);
                         }
                         continue;
@@ -14677,6 +14685,24 @@ impl PlayPlan {
                     }
                     if id == ids.sb_interact {
                         let it = play::read_interact(&mut r)?;
+                        // `handleInteract`: сущность должна быть рядом. Без
+                        // общей проверки клиент мог дёргать торговлю жителя,
+                        // сундук вагонетки или рамку с другого конца карты.
+                        let range = self.entity_interaction_range(uuid) + 3.0;
+                        if let (Some((feet, _, _)), Some(center)) =
+                            (self.player_at(uuid), self.interact_entity_center(it.entity))
+                        {
+                            let eye = eye_of(feet);
+                            let d2: f64 = (0..3).map(|i| (center[i] - eye[i]).powi(2)).sum();
+                            if d2 > range * range {
+                                continue;
+                            }
+                        }
+                        if !(0..=1).contains(&it.hand)
+                            || !it.at.iter().all(|v| v.is_finite())
+                        {
+                            continue;
+                        }
                         // `LeadItem`/`Leashable`: поводок на моба, лодку или узел.
                         if !state.vitals.dead && login.spawn.game_mode != 3
                             && let Some(slot) = Self::hand_index(&state.inv, it.hand)
@@ -15077,6 +15103,9 @@ impl PlayPlan {
                     if id == ids.sb_use_item {
                         let hand = r.var_int()?;
                         let sequence = r.var_int()?;
+                        if !(0..=1).contains(&hand) {
+                            continue;
+                        }
                         // `handleUseItem`: взгляд из пакета (`absSnapRotationTo`),
                         // луч бутылки и ведра идёт уже по нему.
                         if let (Ok(yaw), Ok(pitch)) = (r.f32(), r.f32())
@@ -15605,9 +15634,18 @@ impl PlayPlan {
                         }
                         match a.action {
                             play::START_DESTROY_BLOCK | play::ABORT_DESTROY_BLOCK | play::STOP_DESTROY_BLOCK => {
+                                // `handlePlayerAction` проверяет досягаемость до
+                                // `PlayerInteractEvent` и звука блока: иначе
+                                // клиент дёргал колокол и события с другого
+                                // конца загруженного мира.
+                                let mode = login.spawn.game_mode;
+                                let reach = if mode == 1 { 5.0 } else { 4.5 };
+                                let in_reach = self.player_at(uuid).is_some_and(|(p, _, _)| {
+                                    block_reach(eye_of(p), a.pos, reach)
+                                });
                                 let block = self.block(a.pos).unwrap_or(AIR);
                                 let held = state.inv.held();
-                                if a.action == play::START_DESTROY_BLOCK {
+                                if a.action == play::START_DESTROY_BLOCK && in_reach {
                                     let face = FACES.get(a.face as usize).copied().unwrap_or("UP");
                                     // `NoteBlock.attack`: удар играет ноту, не меняя её.
                                     // Ванила делает это до ломки, поэтому и здесь — до
@@ -15634,11 +15672,6 @@ impl PlayPlan {
                                 }
                                 // `handleBlockBreakAction`: креатив ломает сразу, приключение
                                 // и наблюдатель не ломают, выживание — по прогрессу.
-                                let mode = login.spawn.game_mode;
-                                let reach = if mode == 1 { 5.0 } else { 4.5 };
-                                let in_reach = self.player_at(uuid).is_some_and(|(p, _, _)| {
-                                    block_reach(eye_of(p), a.pos, reach)
-                                });
                                 let mut resync = false;
                                 let protected = self.spawn_blocked(uuid, a.pos);
                                 if (!in_reach || protected) && a.action != play::ABORT_DESTROY_BLOCK {
@@ -15780,6 +15813,30 @@ impl PlayPlan {
                     }
                     if id == ids.sb_use_item_on {
                         let u = play::read_use_item_on(&mut r)?;
+                        // `handleUseItemOn`: битую грань и точку попадания дальше
+                        // блока не принимаем. Иначе клиент мог врать курсором
+                        // (направление установки) или слать взаимодействия
+                        // с блоками на другом конце карты.
+                        if !(0..=5).contains(&u.face)
+                            || !(0..=1).contains(&u.hand)
+                            || !u
+                                .cursor
+                                .iter()
+                                .all(|c| c.is_finite() && (-0.0001..=1.0001).contains(c))
+                        {
+                            continue;
+                        }
+                        // Как `isWithinBlockInteractionRange(pos, 1.0)`: запас
+                        // на лаг клиента, но не на блок с другого конца мира.
+                        let reach = (if login.spawn.game_mode == 1 { 5.0 } else { 4.5 }) + 1.0;
+                        if !self
+                            .player_at(uuid)
+                            .is_some_and(|(p, _, _)| block_reach(eye_of(p), u.pos, reach))
+                        {
+                            conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence))
+                                .await?;
+                            continue;
+                        }
                         let face = FACES.get(u.face as usize).copied().unwrap_or("UP");
                         let hand = if u.hand == 0 { "HAND" } else { "OFF_HAND" };
                         if !state.vitals.dead && self.cancelled(Event::Interact, uuid, || {
@@ -16872,7 +16929,7 @@ impl PlayPlan {
                     }
                     if id == ids.sb_chat_command || id == ids.sb_chat_command_signed {
                         let mut line = r.string(32767)?.to_owned();
-                        tracing::info!("{} issued server command: /{line}", me.entry.name);
+                        tracing::info!("{} issued server command: /{}", me.entry.name, log_line(&line));
                         // `PlayerCommandPreprocessEvent`: отмена или подмена строки.
                         if let Some(reply) = self.plugin_event(Event::CommandPreprocess, uuid, || line.clone()).await {
                             let reply = reply.trim();
@@ -16933,7 +16990,7 @@ impl PlayPlan {
                             None => false,
                         };
                         if !known {
-                            tracing::warn!("{}: Unknown command: /{line}", me.entry.name);
+                            tracing::warn!("{}: Unknown command: /{}", me.entry.name, log_line(&line));
                             let msg = serde_json::json!({"text": format!("Unknown command: /{line}"), "color": "red"});
                             conn.send(&text::system_chat_json(ids.system_chat, &msg.to_string(), false)).await?;
                         }
@@ -16984,7 +17041,7 @@ impl PlayPlan {
                             Some("c") => {}
                             Some(json) if !json.is_empty() => {
                                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
-                                    tracing::info!("{}", text::plain_text(&v));
+                                    tracing::info!("{}", log_line(&text::plain_text(&v)));
                                     let now = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .map_or(0, |d| d.as_millis() as i64);
@@ -17007,7 +17064,7 @@ impl PlayPlan {
                                 }
                             }
                             _ => {
-                                tracing::info!("<{}> {text}", me.entry.name);
+                                tracing::info!("<{}> {}", me.entry.name, log_line(&text));
                                 // Ванильный путь: player chat (unsigned) вместо
                                 // system chat, чтобы плагины видели PLAYER_CHAT.
                                 let now = std::time::SystemTime::now()
@@ -17220,6 +17277,53 @@ impl PlayPlan {
             name => name,
         };
         self.item_id(name)
+    }
+
+    /// Центр сущности, с которой клиент просит взаимодействовать.
+    ///
+    /// `None` — это не сущность, которую ведёт Rust; такие пакеты обработчики
+    /// всё равно молча пропускают, поэтому не отсекаем их заранее.
+    fn interact_entity_center(&self, target: i32) -> Option<[f64; 3]> {
+        if let Some(player) = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .values()
+            .find(|p| p.entity_id == target)
+        {
+            return Some(player.pos);
+        }
+        if let Some(m) = self.sim().mobs.lock().unwrap().get(&target) {
+            return Some(m.mob.pos);
+        }
+        if let Some(v) = self.sim().villagers.lock().unwrap().get(&target) {
+            return Some(v.pos);
+        }
+        if let Some(b) = self.sim().boats.lock().unwrap().get(&target) {
+            return Some(b.pos);
+        }
+        if let Some(c) = self.sim().minecarts.lock().unwrap().get(&target) {
+            return Some(c.cart.pos);
+        }
+        if let Some(f) = self.sim().item_frames.lock().unwrap().get(&target) {
+            return Some([
+                f.pos[0] as f64 + 0.5,
+                f.pos[1] as f64 + 0.5,
+                f.pos[2] as f64 + 0.5,
+            ]);
+        }
+        if let Some(p) = self.sim().paintings.lock().unwrap().get(&target) {
+            return Some([
+                p.pos[0] as f64 + 0.5,
+                p.pos[1] as f64 + 0.5,
+                p.pos[2] as f64 + 0.5,
+            ]);
+        }
+        if let Some(s) = self.sim().armor_stands.lock().unwrap().get(&target) {
+            return Some(s.pos);
+        }
+        self.sim().knots.lock().unwrap().get(&target).map(|k| k.pos)
     }
 
     /// `handlePickItemFromEntity`: по ID берётся `getPickResult` сущности и
@@ -26980,6 +27084,11 @@ mod tests {
             0x80 | 0x08 | 0x02 | 0x01
         );
         assert_eq!(super::player_flags(true, true, false, false) & 0x80, 0);
+    }
+
+    #[test]
+    fn log_text_cannot_forge_lines() {
+        assert_eq!(super::log_line("hello\nop @a\r\n"), "hello\\nop @a\\n");
     }
 
     #[test]

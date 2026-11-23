@@ -16,6 +16,14 @@ pub const MAX_CHANNELS: usize = 128;
 /// Предел длины имени канала (`Messenger.MAX_CHANNEL_SIZE`).
 pub const MAX_CHANNEL_NAME: usize = 64;
 
+/// Имя канала плагина приходит от клиента и уходит строкой в JVM.
+///
+/// Пробелы и управляющие байты ломали бы разбор ответа моста (канал и данные
+/// разделены пробелом); не-ASCII имена каналов в протоколе не встречаются.
+pub fn valid_channel(name: &str) -> bool {
+    !name.is_empty() && name.len() <= MAX_CHANNEL_NAME && name.bytes().all(|b| b.is_ascii_graphic())
+}
+
 /// Имена каналов из тела `minecraft:register`. Тело сверх предела пакета,
 /// слишком длинные имена и каналы сверх `MAX_CHANNELS` отбрасываются: иначе
 /// один пакет на 8 МиБ давал миллионы строк, которые сервер хранил до выхода.
@@ -24,7 +32,9 @@ pub fn register_names(data: &[u8]) -> Vec<String> {
         return Vec::new();
     }
     data.split(|&b| b == 0)
-        .filter(|n| !n.is_empty() && n.len() <= MAX_CHANNEL_NAME)
+        .filter(|n| {
+            !n.is_empty() && n.len() <= MAX_CHANNEL_NAME && n.iter().all(|b| b.is_ascii_graphic())
+        })
         .take(MAX_CHANNELS)
         .filter_map(|n| std::str::from_utf8(n).ok())
         .map(str::to_owned)
@@ -78,6 +88,12 @@ mod tests {
         let long = "x".repeat(MAX_CHANNEL_NAME + 1);
         assert!(register_names(long.as_bytes()).is_empty());
         assert!(register_names(&vec![b'a'; MAX_SERVERBOUND + 1]).is_empty());
+        // Пробел и перевод строки разделили бы канал и данные в мосте.
+        assert!(register_names(b"bad channel\0ok:channel\n\0").is_empty());
+        assert_eq!(
+            register_names(b"ok:channel\0"),
+            vec!["ok:channel".to_owned()]
+        );
     }
 
     #[test]
