@@ -10,6 +10,10 @@ public class RecipeMap {
     private final Map<Object, Object> byKey;
     private final Map<Object, Object> byName;
 
+    public RecipeMap() {
+        this(com.google.common.collect.LinkedHashMultimap.create(), new LinkedHashMap<>());
+    }
+
     public RecipeMap(Multimap<?, ?> byType, Map<?, ?> byName) {
         this.byType = (Multimap<Object, Object>) byType;
         this.byName = (Map<Object, Object>) byName;

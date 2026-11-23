@@ -7478,9 +7478,10 @@ Bootstrap-фаза теперь проходит после добавления
   --all-targets -- -D warnings` = 0, 45 suites / 955 tests passed.
 - Java: `gradlew --offline --no-daemon cleanTest test :test-plugin:jar
   :perf-probe:jar dist` = BUILD SUCCESSFUL, 65 tests, 0 failures.
-- Полный plugin gate 83/83 после последних изменений не перепрогнан:
-  стенд `load-gate-extra` был удалён, чтобы освободить диск C:. Последний
-  известный результат 83/83 относится к более ранней ревизии.
+- Plugin gate восстановлен заново: **83 of 83 enabled, 1 skipped,
+  FAILED/LOADERR/PANICS = 0** на release-сборке. Это новый набор из
+  доступных 26.3-плагинов, а не побайтно старый стенд; подробности и список
+  файлов — [gate-restored.md](gate-restored.md).
 
 ### Ограничения
 
