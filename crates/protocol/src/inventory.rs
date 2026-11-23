@@ -489,7 +489,7 @@ fn read_stack_at(r: &mut Reader, depth: u8) -> Result<Slot> {
         return Ok(None);
     }
     let item = r.var_int()?;
-    read_stack_tail(r, item, count, depth)
+    read_stack_tail(r, item, count.min(99), depth)
 }
 
 /// `ItemStackTemplate`: `item`, `count`, затем тот же patch компонентов.
@@ -503,7 +503,7 @@ pub fn read_stack_template(r: &mut Reader, depth: u8) -> Result<Slot> {
     if count <= 0 {
         return Ok(None);
     }
-    read_stack_tail(r, item, count, depth)
+    read_stack_tail(r, item, count.min(99), depth)
 }
 
 /// Значение `minecraft:container`: список optional `ItemStackTemplate`.
@@ -534,6 +534,9 @@ fn read_stack_tail(r: &mut Reader, item: i32, count: i32, depth: u8) -> Result<S
     let patch = r.remaining().to_vec();
     let added = r.var_int()?;
     let removed = r.var_int()?;
+    if !(0..=256).contains(&added) || !(0..=256).contains(&removed) {
+        return Err(crate::ProtocolError::BadLength(added));
+    }
     let mut known = true;
     for _ in 0..added {
         let t = r.var_int()?;
@@ -624,11 +627,20 @@ fn read_hashed_stack(r: &mut Reader) -> Result<Slot> {
     let item = r.var_int()?;
     let count = r.var_int()?;
     // Добавленные компоненты: (тип, хэш int), удалённые: типы.
-    for _ in 0..r.var_int()? {
+    // Предел не даёт клиенту крутить цикл до конца 8-МиБ пакета.
+    let added = r.var_int()?;
+    if !(0..=256).contains(&added) {
+        return Err(crate::ProtocolError::BadLength(added));
+    }
+    for _ in 0..added {
         r.var_int()?;
         r.bytes(4)?;
     }
-    for _ in 0..r.var_int()? {
+    let removed = r.var_int()?;
+    if !(0..=256).contains(&removed) {
+        return Err(crate::ProtocolError::BadLength(removed));
+    }
+    for _ in 0..removed {
         r.var_int()?;
     }
     Ok((count > 0).then_some(Stack::new(item, count)))
@@ -1533,6 +1545,20 @@ mod tests {
                 extra: 0
             })
         );
+    }
+
+    #[test]
+    fn hashed_stack_component_count_is_bounded() {
+        let mut w = Writer::new();
+        w.bool(true).var_int(1).var_int(1).var_int(1000);
+        assert!(read_hashed_stack(&mut Reader::new(&w.buf)).is_err());
+    }
+
+    #[test]
+    fn stack_component_count_is_bounded() {
+        let mut w = Writer::new();
+        w.var_int(1).var_int(1).var_int(1000).var_int(0);
+        assert!(read_stack_at(&mut Reader::new(&w.buf), 0).is_err());
     }
 
     #[test]

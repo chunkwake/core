@@ -15629,7 +15629,7 @@ impl PlayPlan {
                     }
                     if id == ids.sb_player_action {
                         let a = play::read_player_action(&mut r)?;
-                        if state.vitals.dead {
+                        if state.vitals.dead || a.face > 5 {
                             continue;
                         }
                         match a.action {
