@@ -19,4 +19,18 @@ public class RecipeMap {
     public RecipeMap(Multimap<?, ?> byType, LinkedHashMap<?, ?> byName) {
         this(byType, (Map<?, ?>) byName);
     }
+
+    /** {@code RecipeMap.addRecipe(RecipeHolder)} (CraftEngine). */
+    public void addRecipe(Object recipe) {
+    }
+
+    /** {@code RecipeMap.removeRecipe(ResourceKey)} (CraftEngine). */
+    public boolean removeRecipe(Object key) {
+        return false;
+    }
+
+    /** {@code RecipeMap.byKey(ResourceKey)} (CraftEngine). */
+    public Object byKey(Object key, Object recipe) {
+        return null;
+    }
 }
