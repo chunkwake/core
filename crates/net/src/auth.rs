@@ -11,6 +11,9 @@ pub struct GameProfile {
     pub uuid: Uuid,
     pub name: String,
     pub properties: Vec<ProfileProperty>,
+    /// Адрес игрока, если прокси прислал его с подписью (Velocity).
+    /// `None` — брать адрес TCP-соединения.
+    pub address: Option<std::net::IpAddr>,
 }
 
 #[derive(Deserialize)]
@@ -71,5 +74,6 @@ pub async fn has_joined(
                 signature: p.signature,
             })
             .collect(),
+        address: None,
     })
 }

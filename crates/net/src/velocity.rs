@@ -38,9 +38,15 @@ pub fn parse(secret: &[u8], data: &[u8]) -> Result<GameProfile, String> {
     if !(1..=MAX_VERSION).contains(&version) {
         return Err(format!("unsupported velocity forwarding version {version}"));
     }
-    // Адрес в профиле нужен прокси для проверки; серверу он не нужен, но
-    // поле обязательное и входит в подпись.
-    let _address = r.string(255).map_err(protocol)?;
+    // Адрес в профиле нужен прокси для проверки; сервер использует его для
+    // бан-листов и событий входа, поэтому сохраняем, если он разбирается.
+    let address = r.string(255).map_err(protocol)?;
+    let address = address.parse::<std::net::IpAddr>().ok().or_else(|| {
+        address
+            .parse::<std::net::SocketAddr>()
+            .ok()
+            .map(|addr| addr.ip())
+    });
     let uuid = r.uuid().map_err(protocol)?;
     let name = r.string(16).map_err(protocol)?;
     if !valid_name(name) {
@@ -72,6 +78,7 @@ pub fn parse(secret: &[u8], data: &[u8]) -> Result<GameProfile, String> {
         uuid,
         name: name.to_owned(),
         properties,
+        address,
     })
 }
 
@@ -167,6 +174,11 @@ mod tests {
             let profile = parse(b"secret", &packet(b"secret", &body)).unwrap();
             assert_eq!(profile.uuid, uuid);
             assert_eq!(profile.name, "Steve");
+            assert_eq!(
+                profile.address,
+                Some("203.0.113.7".parse().unwrap()),
+                "подписанный адрес игрока"
+            );
             assert_eq!(profile.properties.len(), 1);
             assert_eq!(profile.properties[0].value, "dGV4");
             assert_eq!(profile.properties[0].signature.as_deref(), Some("c2ln"));

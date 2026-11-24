@@ -377,20 +377,28 @@ impl Server {
                 .await?;
             return Ok(None);
         }
-        let (name, uuid, properties) = if let Some(secret) = &self.config.velocity_secret {
+        let (name, uuid, properties, addr) = if let Some(secret) = &self.config.velocity_secret {
             match self.forward_velocity(&mut conn, secret).await? {
-                Some(profile) => (profile.name, profile.uuid, profile.properties),
+                Some(profile) => {
+                    // Подписанный адрес прокси — это адрес игрока, а не
+                    // адрес TCP-соединения с самим прокси. Бан-листы и
+                    // события входа должны видеть настоящий.
+                    let addr = profile
+                        .address
+                        .map_or(addr, |ip| SocketAddr::new(ip, addr.port()));
+                    (profile.name, profile.uuid, profile.properties, addr)
+                }
                 None => return Ok(None),
             }
         } else {
             match &self.key {
                 Some(key) => match self.authenticate(&mut conn, key, &name).await? {
-                    Some(profile) => (profile.name, profile.uuid, profile.properties),
+                    Some(profile) => (profile.name, profile.uuid, profile.properties, addr),
                     None => return Ok(None),
                 },
                 None => {
                     let uuid = packets::offline_uuid(&name);
-                    (name, uuid, Vec::new())
+                    (name, uuid, Vec::new(), addr)
                 }
             }
         };

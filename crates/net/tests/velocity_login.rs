@@ -109,6 +109,10 @@ async fn velocity_forwarding_logs_in() {
     let player = players.recv().await.unwrap();
     assert_eq!(player.uuid, UUID);
     assert_eq!(player.name, "Steve");
+    assert_eq!(
+        player.addr.ip(),
+        "203.0.113.7".parse::<std::net::IpAddr>().unwrap()
+    );
     assert_eq!(player.properties.len(), 1);
 }
 
