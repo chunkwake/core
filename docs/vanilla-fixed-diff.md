@@ -17,9 +17,10 @@
 | hopper | `moves=3 pickups=1` | same |
 | fluids | `flow=WATER fall=WATER edge=WATER meet=OBSIDIAN logged=WATER/WATER` | same |
 | mob drops | `[BEEF, LEATHER]` (12 смертей, множество типов) | same |
-| fly | `rear=113 blocks=8 extends=28` | `rear=112 blocks=8 extends=25` |
+| fly | `rear=113 blocks=8 extends=28` | `rear=112 blocks=8 extends=26` |
 | `Chunk.getEntities` | `loaded=true found-sheep=true` | same (living 2/1 — старые сущности стенда) |
 | `Chunk.getTileEntities` | `[CHEST, HOPPER]` | same |
+| `Chunk.getChunkSnapshot` | `WATER/STONE water[level=0] sky=14 emit=0 highest=200 temp=0.7389735/0.4889735 sea=-63 plains empty0=false empty20=true` | same (кроме `Biome.toString`) |
 
 `fly`-трейс показывает одинаковый цикл (observer → sticky pull → piston push):
 
@@ -49,6 +50,15 @@ Chunkwake 104→139 за 380 тиков (~1 блок на 10.6 тика у об�
 - `Chunk.getTileEntities()` больше не заглушка: отдаёт block entity колонки
   (`blockentities` в bridge) и поддерживает predicate-фильтр. Проверка:
   `[CHEST, HOPPER]` в чанке `(1,0)` совпадает с Paper.
+- `Chunk.getChunkSnapshot()` реализован end-to-end: Rust отдаёт сжатый бинарный
+  снимок (block states с палитрой, биомы 4×4×4, `MOTION_BLOCKING` heightmap,
+  sky/block light, температуры), Java собирает `ChunkSnapshot`. Совпадают
+  блоки, `BlockData`, свет (`sky=14`, `emit=0`), высота (`200`), биомы,
+  `contains`, пустые секции, `getCaptureFullTime` и температуры
+  (`0.7389735` на y=0 и `0.4889735` на y=200). Попутно исправлен
+  `World.getSeaLevel()`/`Login`: в flat-мире уровень моря `-63`, а не `63`.
+  Для отсутствующих в снимке данных методы теперь кидают
+  `IllegalStateException`, как Paper.
 - `World.save()` и `/save-all [flush]` стали синхронными: плагин (BlueMap,
   бэкапы) получает готовые файлы сразу после возврата. Раньше `World.save()`
   был no-op, а `/save-all` только поднимал флаг для фонового autosave.

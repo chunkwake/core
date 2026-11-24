@@ -1139,7 +1139,7 @@ impl ChunkColumn {
 
     /// Три клиентские карты: поверхность, движение, движение без листвы.
     /// Без таблицы классов лист считается землёй, и миникарта рисует пещеру.
-    fn client_heightmaps(&self) -> [Vec<u32>; 3] {
+    pub fn client_heightmaps(&self) -> [Vec<u32>; 3] {
         if let Some(class) = HEIGHT_CLASS.get() {
             return self
                 .classified_heightmaps(|state| class.get(state as usize).copied().unwrap_or(0));

@@ -128,7 +128,21 @@ final class ChunkImpl {
     public long getInhabitedTime() { return 0L; }
     public ChunkSnapshot getChunkSnapshot(boolean includeMaxBlockY, boolean includeBiome,
             boolean includeBiomeTempRain, boolean includeLightData) {
-        return null;
+        int flags = (includeMaxBlockY ? 0b1 : 0)
+                | (includeBiome ? 0b10 : 0)
+                | (includeBiomeTempRain ? 0b100 : 0)
+                | (includeLightData ? 0b1000 : 0);
+        String hex = this.world.requestLarge(
+                "chunksnapshot " + this.x + " " + this.z + " " + flags);
+        if (hex.isEmpty()) {
+            return null;
+        }
+        try {
+            byte[] compressed = java.util.HexFormat.of().parseHex(hex);
+            return ChunkSnapshotImpl.parse(this.world, this.x, this.z, flags, compressed);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException("chunk snapshot: " + e.getMessage(), e);
+        }
     }
 
     static Chunk api(WorldImpl world, int x, int z) {

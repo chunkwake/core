@@ -204,7 +204,12 @@ pub fn build_play_plan(
         });
         let overworld = (|| -> Result<_, String> {
             Ok(match &level.kind {
-                level::Kind::Flat(_) => (None, None, None, None, None, None, 63, true),
+                level::Kind::Flat(_) => {
+                    // Ванильный `FlatLevelGeneratorSettings.seaLevel` — на 1
+                    // выше нижней секции (для 1.18+ это -63, не 63).
+                    let sea = dim.min_y + 1;
+                    (None, None, None, None, None, None, sea, true)
+                }
                 level::Kind::Noise(noise) => {
                     let mut loaded = chunkwake_worldgen::Generator::load_settings(
                         data_dir,

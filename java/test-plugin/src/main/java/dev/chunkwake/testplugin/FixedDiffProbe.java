@@ -281,6 +281,27 @@ final class FixedDiffProbe implements Listener {
                         .map(s -> s.getType().name())
                         .sorted()
                         .toList());
+        var snapshot = w.getChunkAt(2, 0).getChunkSnapshot(true, true, true);
+        this.plugin.getLogger().info("VANILLADIFF chunk-snapshot"
+                + " block200=" + snapshot.getBlockType(1, 200, 0)
+                + " block199=" + snapshot.getBlockType(1, 199, 0)
+                + " data=" + snapshot.getBlockData(1, 200, 0).getAsString()
+                + " sky=" + snapshot.getBlockSkyLight(1, 200, 0)
+                + " emit=" + snapshot.getBlockEmittedLight(1, 200, 0)
+                + " highest=" + snapshot.getHighestBlockYAt(1, 0)
+                + " biome2=" + snapshot.getBiome(1, 0)
+                + " biome3=" + snapshot.getBiome(1, 200, 0)
+                + " temp=" + snapshot.getRawBiomeTemperature(1, 0)
+                + " t0=" + snapshot.getRawBiomeTemperature(1, 0, 0)
+                + " t200=" + snapshot.getRawBiomeTemperature(1, 200, 0)
+                + " sea=" + w.getSeaLevel()
+                + " blockSky=" + w.getBlockAt(33, 200, 0).getLightFromSky()
+                + " blockEmit=" + w.getBlockAt(33, 200, 0).getLightFromBlocks()
+                + " time=" + snapshot.getCaptureFullTime() + "/" + w.getFullTime()
+                + " water=" + snapshot.contains(Material.WATER.createBlockData())
+                + " plains=" + snapshot.contains(org.bukkit.block.Biome.PLAINS)
+                + " empty0=" + snapshot.isSectionEmpty(0)
+                + " empty20=" + snapshot.isSectionEmpty(20));
         this.plugin.getLogger().info("VANILLADIFF fluids flow="
                 + w.getBlockAt(33, 200, 2).getType() + " fall="
                 + w.getBlockAt(33, 199, 5).getType() + " edge="

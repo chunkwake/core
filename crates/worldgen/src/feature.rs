@@ -324,6 +324,16 @@ pub(crate) fn temperature(climate: &[Climate], biome: u32, pos: [i32; 3], sea_le
     }
 }
 
+/// `Biome.getTemperature(BlockPos, seaLevel)` для одного биома.
+pub fn height_adjusted_temperature(base: f32, frozen: bool, pos: [i32; 3], sea_level: i32) -> f32 {
+    let climate = [Climate {
+        temperature: base,
+        frozen,
+        precipitation: true,
+    }];
+    temperature(&climate, 0, pos, sea_level)
+}
+
 /// `Biome.coldEnoughToSnow`.
 pub(crate) fn cold_enough_to_snow(
     climate: &[Climate],

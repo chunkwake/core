@@ -149,6 +149,12 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
         return Bridge.world("@" + dim + " " + line);
     }
 
+    /** Запрос с большим ответом (hex-снимок чанка). */
+    String requestLarge(String line) {
+        byte[] bytes = Bridge.worldBytes("@" + dim + " " + line, 4 << 20);
+        return new String(bytes, java.nio.charset.StandardCharsets.US_ASCII);
+    }
+
     /** Запрос к миру, которому принадлежит {@code w} (чужой {@link World} — как к оверворлду). */
     static String request(World w, String line) {
         WorldImpl impl = of(w);
@@ -298,7 +304,10 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
         return switch (dim) {
             case NETHER -> 32;
             case END -> 0;
-            default -> 63;
+            default -> {
+                String value = request("sealevel").trim();
+                yield value.isEmpty() ? 63 : Integer.parseInt(value);
+            }
         };
     }
 

@@ -6,6 +6,8 @@ use std::path::Path;
 pub struct BiomeWeather {
     pub temperature: f64,
     pub has_precipitation: bool,
+    /// `temperature_modifier: frozen` — `Biome.TemperatureModifier.FROZEN`.
+    pub frozen: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +49,7 @@ pub fn load_biomes(data_dir: &Path, names: &[String]) -> Vec<BiomeWeather> {
             BiomeWeather {
                 temperature: value["temperature"].as_f64().unwrap_or(0.5),
                 has_precipitation: value["has_precipitation"].as_bool().unwrap_or(false),
+                frozen: value["temperature_modifier"].as_str() == Some("frozen"),
             }
         })
         .collect()
@@ -61,14 +64,17 @@ mod tests {
         let desert = BiomeWeather {
             temperature: 2.0,
             has_precipitation: false,
+            frozen: false,
         };
         let plains = BiomeWeather {
             temperature: 0.8,
             has_precipitation: true,
+            frozen: false,
         };
         let mountains = BiomeWeather {
             temperature: 0.2,
             has_precipitation: true,
+            frozen: false,
         };
         assert_eq!(desert.at(64), Precipitation::None);
         assert_eq!(plains.at(64), Precipitation::Rain);

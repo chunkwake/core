@@ -422,6 +422,22 @@ public final class Bridge {
         }
     }
 
+    /** Большой ответ мира (hex-снимок чанка): байты без UTF-8 перекодирования. */
+    static byte[] worldBytes(String line, int cap) {
+        try (Arena a = Arena.ofConfined()) {
+            byte[] b = line.getBytes(StandardCharsets.UTF_8);
+            MemorySegment out = a.allocate(cap);
+            int n = (int) world.invokeExact(a.allocateFrom(java.lang.foreign.ValueLayout.JAVA_BYTE, b), b.length,
+                    out, cap);
+            if (n <= 0) {
+                return new byte[0];
+            }
+            return out.asSlice(0, n).toArray(java.lang.foreign.ValueLayout.JAVA_BYTE);
+        } catch (Throwable t) {
+            throw new IllegalStateException(t);
+        }
+    }
+
     /** Сырой пакет игроку (NMS-мост: DecentHolograms/TAB). */
     static boolean sendPacket(UUID id, byte[] data) {
         if (data == null || data.length == 0) {

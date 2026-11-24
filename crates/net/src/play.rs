@@ -3413,6 +3413,159 @@ impl PlayPlan {
             .contains_key(&(x, z))
     }
 
+    /// `Chunk.getChunkSnapshot(...)`: полный снимок загруженной колонки.
+    ///
+    /// Формат (little-endian): `CWS1`, x/z/minY/height, fullTime, flags,
+    /// палитра block states + индексы, палитра биомов (имя + температура) +
+    /// индексы, свет (sky/block по 2048 на секцию) и heightmap.
+    fn chunk_snapshot(&self, cx: i32, cz: i32, flags: u8) -> Option<Vec<u8>> {
+        let state = self.dim_state();
+        let world = state.edited.read().unwrap();
+        let (column, _) = world.get(&(cx, cz))?;
+        let min_y = self.min_y_of(self.active_dim());
+        let height = column.height() as i32;
+        let sections = height as usize / 16;
+        let mut out = Vec::with_capacity(1 << 18);
+        out.extend_from_slice(b"CWS1");
+        out.extend_from_slice(&cx.to_le_bytes());
+        out.extend_from_slice(&cz.to_le_bytes());
+        out.extend_from_slice(&min_y.to_le_bytes());
+        out.extend_from_slice(&height.to_le_bytes());
+        out.extend_from_slice(&self.game_time.load(Ordering::Relaxed).to_le_bytes());
+        out.extend_from_slice(&(flags as u32).to_le_bytes());
+
+        // Block states: палитра + u16-индексы (сжатие всё равно уберёт повтор).
+        let mut palette: Vec<u32> = Vec::new();
+        let mut palette_index: HashMap<u32, u16> = HashMap::new();
+        let mut indices: Vec<u16> = Vec::with_capacity(height as usize * 256);
+        for ry in 0..height {
+            for z in 0..16 {
+                for x in 0..16 {
+                    let s = column.block(x, ry as usize, z);
+                    let i = *palette_index.entry(s).or_insert_with(|| {
+                        let i = palette.len() as u16;
+                        palette.push(s);
+                        i
+                    });
+                    indices.push(i);
+                }
+            }
+        }
+        out.extend_from_slice(&(palette.len() as u16).to_le_bytes());
+        for &s in &palette {
+            let name = self.state_string(s);
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+        }
+        for &i in &indices {
+            out.extend_from_slice(&i.to_le_bytes());
+        }
+
+        // Биомы: 4x4x4 на секцию; палитра содержит имя и temperature.
+        let mut biomes: Vec<u32> = Vec::new();
+        let mut biome_index: HashMap<u32, u16> = HashMap::new();
+        let mut biome_cells: Vec<u16> = Vec::with_capacity(sections * 64);
+        if flags & 0b110 != 0 {
+            for section in column.sections.iter().take(sections) {
+                for cy in 0..4 {
+                    for cz in 0..4 {
+                        for cx in 0..4 {
+                            let id = section.biome_at(cx, cy, cz);
+                            let i = *biome_index.entry(id).or_insert_with(|| {
+                                let i = biomes.len() as u16;
+                                biomes.push(id);
+                                i
+                            });
+                            biome_cells.push(i);
+                        }
+                    }
+                }
+            }
+        }
+        out.extend_from_slice(&(biomes.len() as u16).to_le_bytes());
+        for &id in &biomes {
+            let name = self
+                .survival
+                .biome_names
+                .get(id as usize)
+                .cloned()
+                .unwrap_or_else(|| "minecraft:plains".into());
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+            let temp = self
+                .survival
+                .weather_biomes
+                .get(id as usize)
+                .map_or(0.5, |w| w.temperature);
+            out.extend_from_slice(&(temp as f32).to_le_bytes());
+        }
+        for &i in &biome_cells {
+            out.extend_from_slice(&i.to_le_bytes());
+        }
+
+        // `getRawBiomeTemperature` — температура конкретного блока с
+        // высотной поправкой (`Biome.getTemperature`), не базовая температура.
+        if flags & 0b110 != 0 {
+            let sea_level = self.login.spawn.sea_level;
+            for ry in 0..height {
+                let section = column.sections.get(ry as usize / 16);
+                for z in 0..16 {
+                    for x in 0..16 {
+                        let biome =
+                            section.map_or(0, |s| s.biome_at(x / 4, (ry as usize % 16) / 4, z / 4));
+                        let weather = self
+                            .survival
+                            .weather_biomes
+                            .get(biome as usize)
+                            .copied()
+                            .unwrap_or_default();
+                        let t = chunkwake_worldgen::feature::height_adjusted_temperature(
+                            weather.temperature as f32,
+                            weather.frozen,
+                            [cx * 16 + x as i32, min_y + ry, cz * 16 + z as i32],
+                            sea_level,
+                        );
+                        out.extend_from_slice(&t.to_le_bytes());
+                    }
+                }
+            }
+        }
+
+        // Свет: ванильный порядок `(y%16)*256 + z*16 + x`, две заявки в байт.
+        if flags & 0b1000 != 0 {
+            for si in 0..sections {
+                let sky = column.sky_light.get(si);
+                let block = column.block_light.get(si);
+                for i in (0..4096).step_by(2) {
+                    let lo = sky.map_or(15, |l| l.get(i)) & 15;
+                    let hi = sky.map_or(15, |l| l.get(i + 1)) & 15;
+                    out.push(lo | (hi << 4));
+                }
+                for i in (0..4096).step_by(2) {
+                    let lo = block.map_or(0, |l| l.get(i)) & 15;
+                    let hi = block.map_or(0, |l| l.get(i + 1)) & 15;
+                    out.push(lo | (hi << 4));
+                }
+            }
+        }
+
+        // Heightmap: `Heightmap.MOTION_BLOCKING.getHighestTaken` = first - 1.
+        if flags & 0b1 != 0 {
+            let maps = column.client_heightmaps();
+            let blocking = &maps[1];
+            for z in 0..16 {
+                for x in 0..16 {
+                    let h = blocking[z * 16 + x];
+                    let y = if h == 0 { -1 } else { min_y + h as i32 - 1 };
+                    out.extend_from_slice(&(y as i16).to_le_bytes());
+                }
+            }
+        }
+
+        let encoded = chunkwake_world::anvil::Codec::Deflate.encode(&out);
+        Some(encoded[1..].to_vec())
+    }
+
     /// Сжатый кадр чанка из кэша (кодируется при первом запросе).
     fn chunk_frame(&self, x: i32, z: i32) -> Frame {
         if let Some(f) = self.dim_state().chunk_frames.lock().unwrap().get(&(x, z)) {
@@ -4988,6 +5141,33 @@ impl PlayPlan {
             }
             return out;
         }
+        // `chunksnapshot <chunkX> <chunkZ> <flags>`: сжатый снимок колонки,
+        // hex-строка (big responses принимает `Bridge.worldBytes`).
+        if let Some(rest) = line.strip_prefix("chunksnapshot ") {
+            let mut it = rest.split_whitespace();
+            let parse = |v: Option<&str>| v.and_then(|v| v.parse::<i32>().ok());
+            let (Some(x), Some(z)) = (parse(it.next()), parse(it.next())) else {
+                return String::new();
+            };
+            let flags = it
+                .next()
+                .and_then(|v| v.parse::<u8>().ok())
+                .unwrap_or(0b1111);
+            let Some(bytes) = self.chunk_snapshot(x, z, flags) else {
+                return String::new();
+            };
+            if bytes.len() > 1_500_000 {
+                tracing::warn!(bytes = bytes.len(), "chunk snapshot is too large");
+                return String::new();
+            }
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut hex = String::with_capacity(bytes.len() * 2);
+            for &b in &bytes {
+                hex.push(HEX[(b >> 4) as usize] as char);
+                hex.push(HEX[(b & 15) as usize] as char);
+            }
+            return hex;
+        }
         // `chunkloaded <x> <z>`: `World.isChunkLoaded` (1/0).
         if let Some(rest) = line.strip_prefix("chunkloaded ") {
             let mut it = rest.split_whitespace();
@@ -5418,6 +5598,11 @@ impl PlayPlan {
         }
         if line == "seed" {
             return self.seed.to_string();
+        }
+        // `sealevel`: `World.getSeaLevel()` - уровень моря генератора
+        // (в flat-мирах это minY+1, а не 63).
+        if line == "sealevel" {
+            return self.login.spawn.sea_level.to_string();
         }
         // `dropitem x y z разброс предмет`: `World.dropItem(Naturally)`.
         if let Some(rest) = line.strip_prefix("dropitem ") {
