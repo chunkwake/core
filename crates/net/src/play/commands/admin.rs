@@ -165,6 +165,14 @@ fn ban_common(ctx: &Context<'_>, call: &Call<'_>, list: AccessList) -> Outcome {
     };
     let reason = args::message(input.rest());
     let target = if list == AccessList::BannedIps {
+        // Как ваниль: `/ban-ip` принимает адрес или *онлайн-игрока*. Офлайн
+        // ник в ванили не превращается в адрес, и наша карта известных IP
+        // не должна делать команду шире ванильной.
+        if name.parse::<std::net::IpAddr>().is_err()
+            && ctx.plan.command_targets_named(name).is_none()
+        {
+            return Outcome::Feedback(translate("commands.banip.failed", Vec::new()));
+        }
         let Some(ip) = resolve_ip(ctx.vars(), name) else {
             return Outcome::Feedback(translate("commands.banip.failed", Vec::new()));
         };
@@ -265,7 +273,10 @@ fn pardon_common(ctx: &Context<'_>, call: &Call<'_>, list: AccessList) -> Outcom
         return usage("/pardon <name>");
     };
     let target = if list == AccessList::BannedIps {
-        resolve_ip(ctx.vars(), name).unwrap_or_else(|| name.to_owned())
+        // `/pardon-ip` в ванили принимает только адрес, не ник.
+        name.parse::<std::net::IpAddr>()
+            .ok()
+            .map_or_else(|| name.to_owned(), |ip| canonical_ip(ip).to_string())
     } else {
         name.to_owned()
     };
