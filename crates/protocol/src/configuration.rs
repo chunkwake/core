@@ -192,23 +192,48 @@ pub(crate) fn write_nbt_string_root(w: &mut Writer, s: &str) {
 
 /// Java modified UTF-8: NUL как 2 байта, символы вне BMP — суррогатными парами.
 pub(crate) fn modified_utf8(s: &str) -> Vec<u8> {
+    let units: Vec<u16> = s.encode_utf16().collect();
     let mut out = Vec::with_capacity(s.len());
-    for unit in s.encode_utf16() {
-        match unit {
-            0x0001..=0x007f => out.push(unit as u8),
-            0x0000 | 0x0080..=0x07ff => {
-                out.push(0xc0 | (unit >> 6) as u8);
-                out.push(0x80 | (unit & 0x3f) as u8);
-            }
-            _ => {
-                out.push(0xe0 | (unit >> 12) as u8);
-                out.push(0x80 | ((unit >> 6) & 0x3f) as u8);
-                out.push(0x80 | (unit & 0x3f) as u8);
-            }
+    let mut i = 0;
+    while i < units.len() {
+        let unit = units[i];
+        let pair = (0xd800..=0xdbff).contains(&unit)
+            && units
+                .get(i + 1)
+                .is_some_and(|u| (0xdc00..=0xdfff).contains(u));
+        let len = match unit {
+            0x0001..=0x007f => 1,
+            0x0000 | 0x0080..=0x07ff => 2,
+            _ => 3,
+        };
+        // Длина NBT-строки — u16. Обрезать посреди суррогатной пары нельзя:
+        // Java прочитает такую строку как битую.
+        if out.len() + len + if pair { 3 } else { 0 } > u16::MAX as usize {
+            break;
+        }
+        write_modified_unit(&mut out, unit);
+        if pair {
+            write_modified_unit(&mut out, units[i + 1]);
+            i += 1;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn write_modified_unit(out: &mut Vec<u8>, unit: u16) {
+    match unit {
+        0x0001..=0x007f => out.push(unit as u8),
+        0x0000 | 0x0080..=0x07ff => {
+            out.push(0xc0 | (unit >> 6) as u8);
+            out.push(0x80 | (unit & 0x3f) as u8);
+        }
+        _ => {
+            out.push(0xe0 | (unit >> 12) as u8);
+            out.push(0x80 | ((unit >> 6) & 0x3f) as u8);
+            out.push(0x80 | (unit & 0x3f) as u8);
         }
     }
-    out.truncate(u16::MAX as usize);
-    out
 }
 
 #[cfg(test)]
@@ -245,6 +270,14 @@ mod tests {
         let buf = disconnect(2, "hi\0");
         assert_eq!(buf, [2, 8, 0, 4, b'h', b'i', 0xc0, 0x80]);
         assert_eq!(modified_utf8("😀").len(), 6);
+
+        // Строка NBT не длиннее u16, но обрезать суррогатную пару нельзя.
+        let exact = format!("{}😀", "a".repeat(u16::MAX as usize - 6));
+        let bytes = modified_utf8(&exact);
+        assert_eq!(bytes.len(), u16::MAX as usize);
+        assert_eq!(&bytes[bytes.len() - 6..], [0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80]);
+        let over = format!("{}😀", "a".repeat(u16::MAX as usize - 5));
+        assert_eq!(modified_utf8(&over).len(), u16::MAX as usize - 5);
     }
 
     #[test]
