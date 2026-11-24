@@ -120,7 +120,7 @@ impl PlayerFiles {
             "DataVersion": self.data_version,
         });
         let bytes = serde_json::to_vec(&root).map_err(|e| format!("stats json: {e}"))?;
-        std::fs::write(self.stats_path(uuid), bytes)
+        chunkwake_net::write_atomic(&self.stats_path(uuid), &bytes)
             .map_err(|e| format!("write {}: {e}", self.stats_path(uuid).display()))
     }
 
@@ -205,7 +205,7 @@ impl PlayerFiles {
         );
         let bytes = serde_json::to_vec(&serde_json::Value::Object(map))
             .map_err(|e| format!("advancements json: {e}"))?;
-        std::fs::write(self.advancements_path(uuid), bytes)
+        chunkwake_net::write_atomic(&self.advancements_path(uuid), &bytes)
             .map_err(|e| format!("write {}: {e}", self.advancements_path(uuid).display()))
     }
 

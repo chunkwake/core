@@ -934,7 +934,7 @@ pub mod velocity;
 /// посреди записи оставляли бы `ops.json`/`gamerules.json` пустыми, то есть
 /// теряли бы всех операторов или все правила. Переименование подменяет файл
 /// целиком; при ошибке временный удаляется, старый остаётся.
-pub(crate) fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let tmp = path.with_extension("tmp");
