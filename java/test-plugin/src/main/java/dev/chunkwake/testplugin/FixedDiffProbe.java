@@ -20,7 +20,7 @@ final class FixedDiffProbe implements Listener {
     private final AtomicInteger moves = new AtomicInteger();
     private final AtomicInteger pickups = new AtomicInteger();
     private final AtomicInteger pistonExtends = new AtomicInteger();
-    private String death = "none";
+    private final java.util.Set<String> death = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     private FixedDiffProbe(JavaPlugin plugin) {
         this.plugin = plugin;
@@ -67,9 +67,11 @@ final class FixedDiffProbe implements Listener {
         }
         w.getBlockAt(10, 200, -1).setType(Material.STONE);
         w.getBlockAt(10, 200, 0).setType(Material.PISTON);
-        w.getBlockAt(11, 200, 0).setType(Material.REDSTONE_WIRE);
-        w.getBlockAt(12, 200, 0).setType(Material.REDSTONE_WIRE);
+        // Place the power source before the dust so both servers process the
+        // same neighbour-update order.
         w.getBlockAt(13, 200, 0).setType(Material.REDSTONE_BLOCK);
+        w.getBlockAt(12, 200, 0).setType(Material.REDSTONE_WIRE);
+        w.getBlockAt(11, 200, 0).setType(Material.REDSTONE_WIRE);
 
         // Hopper
         w.getBlockAt(20, 199, 0).setType(Material.CHEST);
@@ -114,15 +116,19 @@ final class FixedDiffProbe implements Listener {
     private void mob() {
         World w = this.plugin.getServer().getWorlds().get(0);
         load(w, 0, 30);
-        var cow = (org.bukkit.entity.Cow) w.spawnEntity(
-                new org.bukkit.Location(w, 0.5, 200, 30.5),
-                org.bukkit.entity.EntityType.COW);
         var sheep = w.spawn(new org.bukkit.Location(w, 3.5, 200, 30.5),
                 org.bukkit.entity.Sheep.class, s -> s.setColor(org.bukkit.DyeColor.RED));
-        this.plugin.getLogger().info("VANILLADIFF mob-state type=" + cow.getType()
-                + " hp=" + cow.getHealth() + "/" + cow.getMaxHealth()
-                + " sheep=" + sheep.getColor());
-        cow.damage(20);
+        for (int i = 0; i < 12; i++) {
+            var cow = (org.bukkit.entity.Cow) w.spawnEntity(
+                    new org.bukkit.Location(w, 0.5 + i * 1.2, 200, 30.5 + i * 0.4),
+                    org.bukkit.entity.EntityType.COW);
+            if (i == 0) {
+                this.plugin.getLogger().info("VANILLADIFF mob-state type=" + cow.getType()
+                        + " hp=" + cow.getHealth() + "/" + cow.getMaxHealth()
+                        + " sheep=" + sheep.getColor());
+            }
+            cow.damage(20);
+        }
     }
 
     private void report() {
@@ -157,7 +163,8 @@ final class FixedDiffProbe implements Listener {
         }
         this.plugin.getLogger().info("VANILLADIFF fly rear=" + rear + " blocks=" + blocks
                 + " extends=" + this.pistonExtends.get());
-        this.plugin.getLogger().info("VANILLADIFF mob-death=" + this.death);
+        this.plugin.getLogger().info("VANILLADIFF mob-death=" + this.death.stream()
+                .sorted().toList());
     }
 
     private static void fly(World w, Material material, int x, int z, BlockFace face) {
@@ -184,9 +191,7 @@ final class FixedDiffProbe implements Listener {
     @EventHandler
     public void onDeath(EntityDeathEvent event) {
         if (event.getEntity() instanceof org.bukkit.entity.Cow) {
-            this.death = event.getDrops().stream()
-                    .map(i -> i.getType().name())
-                    .sorted().toList().toString();
+            event.getDrops().stream().map(i -> i.getType().name()).forEach(this.death::add);
         }
     }
 }

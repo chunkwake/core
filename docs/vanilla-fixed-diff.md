@@ -4,37 +4,33 @@
 `CHUNKWAKE_FIXED_DIFF=1`. Чанки удерживаются plugin chunk tickets, все проверки
 выполняются через фиксированный счётчик тиков, без привязки к wall-clock.
 
-## Прогон
+## Текущий прогон
 
 | сценарий | Paper 26.3 | Chunkwake |
 |---|---|---|
 | setup | `minY=-64 maxY=320 redstone=REDSTONE_BLOCK water=WATER fly=OBSERVER` | same |
 | mob-state | `COW hp=10.0/10.0 sheep=RED` | same |
 | redstone | `direct=STONE/PISTON_HEAD wire=STONE/STONE` | `direct=STONE/PISTON_HEAD wire=STONE/PISTON_HEAD` |
-| hopper | `moves=3 pickups=1` | `moves=3 pickups=1` |
+| hopper | `moves=3 pickups=1` | same |
 | fluids | `flow=WATER fall=WATER edge=WATER meet=OBSIDIAN logged=WATER/WATER` | same |
 | fly | `rear=123 blocks=16 extends=29` | `rear=100 blocks=17 extends=2` |
-| mob drops | `[BEEF]` | `[BEEF, LEATHER]` |
+| mob drops | `[BEEF, LEATHER]` | same |
 
 ## Что исправлено
 
-До этого `Chunk.load()`/`addPluginChunkTicket()` были no-op, из-за чего
-тестовые чанки выгружались и блоки redstone/fluids/fly исчезали. Добавлен
-bridge-команда `forceload <x> <z> add|remove` и реальные plugin chunk tickets.
-После этого redstone (direct) и fluids совпадают с Paper, hopper тоже.
+- `Chunk.load()`/`addPluginChunkTicket()` были no-op; добавлены реальные
+  plugin chunk tickets и bridge-команда `forceload <x> <z> add|remove`.
+- После этого совпали redstone direct, hopper и fluids.
+- Cow drop теперь проверяется по **множеству типов** на 12 смертях, поэтому
+  случайный `leather 0..2` больше не даёт ложный diff; обе стороны дают
+  `[BEEF, LEATHER]`.
 
 ## Открытые расхождения
 
-- **fly**: Paper перемещает observer-цепочку (`rear=123`, 29 piston extends),
-  Chunkwake оставляет её на месте (`rear=100`, 2 extends). Нужна отдельная
-  доработка piston/observer flying-machine физики.
-- **redstone wire**: прямое питание совпадает, но wire-ветка у Paper не
-  выдвигает piston, у Chunkwake — выдвигает. Требуется сверка состояния
-  redstone wire/connectivity.
-- **mob drops**: cow leather имеет случайный count `0..2`; в одном прогоне
-  Paper выпал только `BEEF`, в Chunkwake — `BEEF+LEATHER`. Для строгого
-  сравнения нужен либо фиксированный seed, либо несколько смертей и
-  сравнение множества типов.
-
-Полный `CHUNKWAKE_FIXED_DIFF`-лог: `target/fixed-paper.log` и
-`target/fixed-cw.log` (рабочая директория).
+- **fly**: Paper перемещает observer/piston-цепочку (`rear=123`, 29 extends),
+  Chunkwake оставляет её на месте (`rear=100`, 2 extends). Нужна
+  piston/observer flying-machine физика.
+- **redstone wire**: прямое питание совпадает; wire-ветка у Chunkwake
+  выдвигает piston, у Paper — нет. Нужна сверка connectivity/update порядка.
+- Полный gate и A/B не заменяют эти сценарии; 100% vanilla parity не
+  доказан.
