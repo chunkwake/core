@@ -2168,6 +2168,12 @@ impl PlayPlan {
             loop {
                 let mut pass = false;
                 for def in &self.survival.advancements {
+                    // Событие чаще всего не относится к этому достижению:
+                    // без дешёвой проверки триггера мы бы заводили запись в
+                    // карте прогресса и клонировали id на каждое событие.
+                    if !def.criteria.iter().any(|c| c.trigger == trigger) {
+                        continue;
+                    }
                     if !self.adv_parent_done(progress, def.parent.as_deref()) {
                         continue;
                     }
