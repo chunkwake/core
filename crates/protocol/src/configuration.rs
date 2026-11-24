@@ -275,7 +275,10 @@ mod tests {
         let exact = format!("{}😀", "a".repeat(u16::MAX as usize - 6));
         let bytes = modified_utf8(&exact);
         assert_eq!(bytes.len(), u16::MAX as usize);
-        assert_eq!(&bytes[bytes.len() - 6..], [0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80]);
+        assert_eq!(
+            &bytes[bytes.len() - 6..],
+            [0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80]
+        );
         let over = format!("{}😀", "a".repeat(u16::MAX as usize - 5));
         assert_eq!(modified_utf8(&over).len(), u16::MAX as usize - 5);
     }
