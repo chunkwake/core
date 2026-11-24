@@ -303,13 +303,13 @@ impl WorldStorage {
         // Сущности — по своему измерению, плюс очистка устаревших чанков.
         for (dim, _, _) in plan.dimension_layouts() {
             let mut mobs = plan.unsaved_entities_in(dim);
-            let current: std::collections::HashSet<(i32, i32)> = mobs
-                .iter()
-                .filter(|(_, list)| !list.is_empty())
-                .map(|(pos, _)| *pos)
-                .collect();
+            // Позиции всех уже подготовленных чанков: проверка через `any`
+            // по всему списку делала этот проход квадратичным на больших
+            // мирах (тысячи чанков с сущностями × тысячи записанных).
+            let mut known: std::collections::HashSet<(i32, i32)> =
+                mobs.iter().map(|(pos, _)| *pos).collect();
             for pos in plan.entity_chunks_written_in(dim) {
-                if !current.contains(&pos) && !mobs.iter().any(|(p, _)| *p == pos) {
+                if known.insert(pos) {
                     mobs.push((pos, Vec::new()));
                 }
             }
