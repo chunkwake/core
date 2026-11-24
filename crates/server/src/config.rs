@@ -334,6 +334,26 @@ impl Properties {
         {
             return Err("level-name: use one directory name without separators or ..".to_owned());
         }
+        // Служебные файлы и каталоги сервера не должны оказаться миром:
+        // иначе `plugins/` смешается с миром, а бэкап/восстановление
+        // затрагивает собственные данные сервера. Сравнение без регистра:
+        // на Windows `Backups` — тот же каталог, что `backups`.
+        let reserved = level_name.trim_end_matches(|c| c == ' ' || c == '.');
+        if [
+            "backups",
+            "plugins",
+            "server.properties",
+            "ops.json",
+            ".chunkwake.lock",
+            ".chunkwake-restore.json",
+            ".chunkwake-restore-stage",
+            ".chunkwake-restore-old",
+        ]
+        .iter()
+        .any(|name| reserved.eq_ignore_ascii_case(name))
+        {
+            return Err("level-name: conflicts with a server directory or file".into());
+        }
         let distance = |key: &str| -> Result<u8, String> {
             let text = value(key);
             let n = text
@@ -737,6 +757,10 @@ mod tests {
             "level-name=../outside",
             "level-name=/absolute/world",
             "level-name=nested/world",
+            "level-name=backups",
+            "level-name=Backups.",
+            "level-name=plugins",
+            "level-name=server.properties",
         ] {
             assert!(Properties::parse(text).is_err(), "{text}");
         }
