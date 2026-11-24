@@ -252,17 +252,29 @@ fn percent_decode(text: &str) -> String {
 /// меняется. Отдельно проверяем `Origin`: иначе чужая страница может
 /// дёрнуть дашборд из браузера жертвы и прочитать ответ через rebound-DNS.
 fn authorize(req: &Request, access: &Access, peer_loopback: bool) -> Auth {
-    if peer_loopback && access.token.is_empty() {
-        return Auth::Ok;
-    }
     // Origin, если он есть, должен указывать на тот же хост: иначе чужая
     // страница дёргает дашборд из браузера жертвы. Порт сверять не нужно —
     // браузер шлёт `Origin` с портом, а `Host` может прийти без него.
+    //
+    // Проверка стоит до послабления для loopback: без неё страница на чужом
+    // сайте могла бы читать дашборд через DNS rebinding или просто сделать
+    // запрос от имени браузера жертвы.
     if let Some(origin) = req.header("origin") {
         let host = req.header("host").unwrap_or("");
         if !host.is_empty() && host_only(origin_host(origin)) != host_only(host) {
             return Auth::Forbidden;
         }
+    }
+    if peer_loopback && access.token.is_empty() {
+        // `Host` тоже должен быть loopback: иначе DNS rebinding приводит
+        // чужое имя на 127.0.0.1, и браузер видит обычный же хост.
+        if req
+            .header("host")
+            .is_some_and(|host| !is_loopback_host(host))
+        {
+            return Auth::Forbidden;
+        }
+        return Auth::Ok;
     }
     match req.presented_token() {
         Some(token) if access.matches(&token) => Auth::Ok,
@@ -286,6 +298,24 @@ fn host_only(authority: &str) -> &str {
     match authority.rsplit_once(':') {
         Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => host,
         _ => authority,
+    }
+}
+
+/// `Host` указывает на эту же машину: `localhost`, `127.0.0.1` или `[::1]`.
+///
+/// Нужен только для доступа без токена: иначе DNS rebinding превращает
+/// `evil.example` в `127.0.0.1`, и браузер жертвы читает локальный дашборд.
+fn is_loopback_host(authority: &str) -> bool {
+    let host = host_only(authority).trim_matches(|c| c == '[' || c == ']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback(),
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
+        Err(_) => false,
     }
 }
 
@@ -707,7 +737,7 @@ mod tests {
     /// Один запрос к серверу: возвращает весь ответ целиком.
     async fn get(port: u16, path: &str) -> String {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-        let request = format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n");
+        let request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
         stream.write_all(request.as_bytes()).await.unwrap();
         let mut body = String::new();
         stream.read_to_string(&mut body).await.unwrap();
@@ -814,7 +844,7 @@ mod tests {
         .unwrap();
         let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         stream
-            .write_all(b"GET /api/events HTTP/1.1\r\nHost: x\r\n\r\n")
+            .write_all(b"GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
             .await
             .unwrap();
 
@@ -992,6 +1022,35 @@ mod tests {
         .unwrap();
         let body = get(port, "/api/snapshot").await;
         assert!(body.starts_with("HTTP/1.1 200"));
+
+        let localhost = request(port, "GET /api/snapshot HTTP/1.1\r\nHost: localhost").await;
+        assert!(localhost.starts_with("HTTP/1.1 200"));
+        let ipv6 = request(port, "GET /api/snapshot HTTP/1.1\r\nHost: [::1]:25585").await;
+        assert!(ipv6.starts_with("HTTP/1.1 200"));
+    }
+
+    /// DNS rebinding: чужое имя приводит браузер на 127.0.0.1, но `Host`
+    /// остаётся чужим. Без токена такой запрос не должен видеть дашборд.
+    #[tokio::test]
+    async fn tokenless_loopback_rejects_foreign_host() {
+        let port = spawn(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            0,
+            shared(),
+            Access::local(),
+        )
+        .await
+        .unwrap();
+
+        let rebound = request(port, "GET /api/snapshot HTTP/1.1\r\nHost: evil.example").await;
+        assert!(rebound.starts_with("HTTP/1.1 403"), "{}", &rebound[..40]);
+
+        let csrf = request(
+            port,
+            "GET /api/snapshot HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://evil.example",
+        )
+        .await;
+        assert!(csrf.starts_with("HTTP/1.1 403"), "{}", &csrf[..40]);
     }
 
     /// С токеном: без него 401 и форма входа, с ним — данные.
@@ -1121,13 +1180,13 @@ mod tests {
         .await
         .unwrap();
 
-        let plain = request(port, "GET / HTTP/1.1\r\nHost: x").await;
+        let plain = request(port, "GET / HTTP/1.1\r\nHost: 127.0.0.1").await;
         assert!(!plain.contains("Content-Encoding"));
 
         let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         stream
             .write_all(
-                b"GET / HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip, deflate\r\nConnection: close\r\n\r\n",
+                b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept-Encoding: gzip, deflate\r\nConnection: close\r\n\r\n",
             )
             .await
             .unwrap();
