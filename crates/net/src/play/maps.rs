@@ -547,12 +547,12 @@ impl PlayPlan {
             ])
         };
         let mut failed = Vec::new();
-        for (id, data) in &dirty {
-            if let Err(e) = chunkwake_world::nbt::write_gzip_file(
-                &dir.join(format!("{id}.dat")),
-                &wrap(data.clone()),
-            ) {
-                failed.push(*id);
+        let dirty_len = dirty.len();
+        for (id, data) in dirty {
+            if let Err(e) =
+                chunkwake_world::nbt::write_gzip_file(&dir.join(format!("{id}.dat")), &wrap(data))
+            {
+                failed.push(id);
                 tracing::warn!("map {id}: {e}");
             }
         }
@@ -574,7 +574,7 @@ impl PlayPlan {
             }
             return Err(format!("{} maps failed", failed.len()));
         }
-        Ok(dirty.len())
+        Ok(dirty_len)
     }
 }
 
