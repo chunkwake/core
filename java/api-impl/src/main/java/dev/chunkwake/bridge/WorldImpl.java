@@ -203,6 +203,8 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
     }
 
     public org.bukkit.Chunk getChunkAt(int x, int z) {
+        // Bukkit `World#getChunkAt` загружает чанк (а не просто отдаёт дескриптор).
+        request("loadchunk " + x + " " + z);
         return ChunkImpl.api(this, x, z);
     }
 

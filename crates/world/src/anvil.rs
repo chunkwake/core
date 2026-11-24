@@ -170,6 +170,29 @@ pub fn chunk_to_nbt(
         })
         .collect();
     root.insert("block_entities".into(), Tag::List(block_entities));
+    // `LevelChunkTicks.save`: запланированные тики переживают перезапуск.
+    let min_y = f.min_section * 16;
+    let block_ticks = c
+        .saved_ticks
+        .iter()
+        .filter_map(|&([x, y, z], delay)| {
+            let ry = y - min_y;
+            if ry < 0 || ry as usize >= c.height() {
+                return None;
+            }
+            let state = c.block((x & 15) as usize, ry as usize, (z & 15) as usize);
+            let (name, _) = names.block_name(state)?;
+            let mut t = Compound::new();
+            t.insert("i".into(), string(name));
+            t.insert("x".into(), Tag::Int(x));
+            t.insert("y".into(), Tag::Int(y));
+            t.insert("z".into(), Tag::Int(z));
+            t.insert("t".into(), Tag::Int(delay.min(i32::MAX as u64) as i32));
+            t.insert("p".into(), Tag::Int(0));
+            Some(Tag::Compound(t))
+        })
+        .collect();
+    root.insert("block_ticks".into(), Tag::List(block_ticks));
     Ok(root)
 }
 
@@ -272,6 +295,7 @@ pub fn chunk_from_nbt(
         block_entities: std::collections::BTreeMap::new(),
         fluid_posts: Vec::new(),
         block_ticks: Vec::new(),
+        saved_ticks: Vec::new(),
     };
     // Свет из файла только у чанков, сохранённых со светом (`isLightOn`).
     let mut lit = root.get("isLightOn").and_then(Tag::as_i64) == Some(1);
@@ -393,6 +417,20 @@ pub fn chunk_from_nbt(
                 nbt,
             },
         );
+    }
+    for tick in root
+        .get("block_ticks")
+        .and_then(Tag::as_list)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(Tag::as_compound)
+    {
+        let int = |k: &str| tick.get(k).and_then(Tag::as_i64).map(|v| v as i32);
+        let (Some(x), Some(y), Some(z)) = (int("x"), int("y"), int("z")) else {
+            continue;
+        };
+        let delay = int("t").unwrap_or(0).max(0) as u64;
+        c.saved_ticks.push(([x, y, z], delay));
     }
     Ok((c, lit))
 }
@@ -984,6 +1022,22 @@ mod tests {
         assert!(lit);
         assert_eq!(back.sky_light, c.sky_light);
         assert_eq!(back.block_light, c.block_light);
+    }
+
+    #[test]
+    fn saved_block_ticks_roundtrip() {
+        let mut c = sample();
+        c.saved_ticks.push(([5, -61, 7], 2));
+        let nbt = chunk_to_nbt(&c, (0, 0), F, &Test).unwrap();
+        let ticks = nbt["block_ticks"].as_list().unwrap();
+        assert_eq!(ticks.len(), 1);
+        let tick = ticks[0].as_compound().unwrap();
+        assert_eq!(tick["i"], Tag::String("minecraft:grass_block".into()));
+        assert_eq!(tick["x"], Tag::Int(5));
+        assert_eq!(tick["y"], Tag::Int(-61));
+        assert_eq!(tick["t"], Tag::Int(2));
+        let (back, _) = chunk_from_nbt(&nbt, &c, F, &Test).unwrap();
+        assert_eq!(back.saved_ticks, vec![([5, -61, 7], 2)]);
     }
 
     #[test]

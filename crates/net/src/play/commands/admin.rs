@@ -245,8 +245,12 @@ fn pardon_common(ctx: &Context<'_>, call: &Call<'_>, list: AccessList) -> Outcom
 
 /// `/save-all [flush]`.
 pub(super) fn save_all(ctx: &Context<'_>, _call: &Call<'_>) -> Outcome {
-    ctx.plan.request_save();
-    Outcome::Feedback(translate("commands.save.success", Vec::new()))
+    // Ванильный `/save-all` блокируется до записи; `flush` лишь отключает
+    // фоновую очередь в vanilla, у нас сейв и так синхронный.
+    match ctx.plan.save_now() {
+        Some(Ok(_)) | None => Outcome::Feedback(translate("commands.save.success", Vec::new())),
+        Some(Err(e)) => Outcome::error(e),
+    }
 }
 
 /// `/save-off`.

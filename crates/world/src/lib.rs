@@ -943,6 +943,9 @@ pub struct ChunkColumn {
     /// Блоки, которым генерация поставила тик (`scheduleTick` фичи
     /// `simple_block` с `schedule_tick`): сервер тикнет их через 1 тик.
     pub block_ticks: Vec<[i32; 3]>,
+    /// Запланированные block ticks, попавшие в сохранение (`LevelChunkTicks`):
+    /// позиция и остаток тиков до срабатывания.
+    pub saved_ticks: Vec<([i32; 3], u64)>,
 }
 
 const AIR: u32 = 0;
@@ -1020,6 +1023,7 @@ impl ChunkColumn {
             block_entities: BTreeMap::new(),
             fluid_posts: Vec::new(),
             block_ticks: Vec::new(),
+            saved_ticks: Vec::new(),
         }
     }
 
@@ -1084,6 +1088,7 @@ impl ChunkColumn {
             block_entities: BTreeMap::new(),
             fluid_posts: Vec::new(),
             block_ticks: Vec::new(),
+            saved_ticks: Vec::new(),
         }
     }
 

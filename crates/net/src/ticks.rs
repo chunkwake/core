@@ -31,6 +31,11 @@ impl TickQueue {
         self.at.contains_key(&pos)
     }
 
+    /// Все запланированные тики: `(позиция, абсолютный тик)`.
+    pub fn iter(&self) -> impl Iterator<Item = ([i32; 3], u64)> + '_ {
+        self.at.iter().map(|(&pos, &at)| (pos, at))
+    }
+
     /// Снимает запланированный тик: блок сломали, воронку убрали. Устаревшая
     /// запись в `by_time` безвредна — её отсеет `take_due*` по `at`.
     pub fn remove(&mut self, pos: [i32; 3]) {

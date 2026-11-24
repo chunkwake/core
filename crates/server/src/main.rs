@@ -279,6 +279,11 @@ async fn serve(dir: &Path) -> Result<(), String> {
     play.set_maps_dir(dir.join(&props.level_name).join("data/minecraft/maps"));
     // Генерация чанков — на своих потоках, чтобы тик не ждал счёта.
     play.set_self_weak();
+    // `World.save()` и `/save-all flush` должны дождаться записи на диск.
+    play.set_save_hook({
+        let storage = storage.clone();
+        std::sync::Arc::new(move |plan: &chunkwake_net::play::PlayPlan| storage.save(plan))
+    });
     play.set_gen_pool(chunkwake_net::chunkgen::GenPool::new(budget.gen_workers));
     play.set_ops(chunkwake_net::ops::OpList::load(dir.join("ops.json"))?);
     play.set_spawn_protection(props.spawn_protection as i32);

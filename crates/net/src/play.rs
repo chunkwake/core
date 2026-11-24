@@ -222,6 +222,9 @@ struct Ids {
     map_item_data: i32,
 }
 
+/// `World.save()` / `/save-all flush`: блокирующий сейв, который ставит сервер.
+pub type SaveHook = dyn Fn(&PlayPlan) -> Result<usize, String> + Send + Sync;
+
 pub struct PlayPlan {
     ids: Ids,
     /// id пакета play/clientbound -> имя из packets.json (для ProtocolLib).
@@ -419,6 +422,8 @@ pub struct PlayPlan {
     pub(crate) default_game_mode: std::sync::atomic::AtomicU8,
     /// Просьба сохранить мир (`/save-all`).
     pub(crate) save_requested: AtomicBool,
+    /// Синхронный сейв для `World.save()`: ставится сервером при старте.
+    save_hook: Mutex<Option<Arc<SaveHook>>>,
     /// Белый список включён (`/whitelist on`).
     pub(crate) whitelist_enabled: AtomicBool,
     /// `allow-flight`: выживание и приключение тоже могут летать.
@@ -3347,6 +3352,7 @@ impl PlayPlan {
             sleepers: Mutex::new(HashMap::new()),
             default_game_mode: std::sync::atomic::AtomicU8::new(login_game_mode),
             save_requested: AtomicBool::new(false),
+            save_hook: Mutex::new(None),
             whitelist_enabled: AtomicBool::new(false),
             allow_flight: AtomicBool::new(false),
             reload_dir: None,
@@ -3380,16 +3386,28 @@ impl PlayPlan {
         })
     }
 
+    /// Загружает колонку из региона (или генератора) в `edited`.
+    /// `true` - колонка доступна для чтения и тика.
+    pub(crate) fn ensure_chunk(&self, x: i32, z: i32) -> bool {
+        // Рельеф уже вставлен волной. Мобы — после него, не на плоском шаблоне.
+        self.ensure_region(x, z);
+        self.populate_chunk(x, z);
+        // Платформа void не в общем шаблоне: после диска, чтобы сохранённый чанк победил.
+        self.materialize_void(x, z);
+        self.dim_state()
+            .edited
+            .read()
+            .unwrap()
+            .contains_key(&(x, z))
+    }
+
     /// Сжатый кадр чанка из кэша (кодируется при первом запросе).
     fn chunk_frame(&self, x: i32, z: i32) -> Frame {
         if let Some(f) = self.dim_state().chunk_frames.lock().unwrap().get(&(x, z)) {
             return f.clone();
         }
         // Рельеф уже вставлен волной. Мобы — после него, не на плоском шаблоне.
-        self.ensure_region(x, z);
-        self.populate_chunk(x, z);
-        // Платформа void не в общем шаблоне: после диска, чтобы сохранённый чанк победил.
-        self.materialize_void(x, z);
+        self.ensure_chunk(x, z);
         // Под блокировкой — только дешёвый клон (секции за Arc);
         // кодирование и сжатие — вне её.
         let read = || {
@@ -4870,6 +4888,17 @@ impl PlayPlan {
             dims.sort();
             return dims.iter().map(|d| d.key()).collect::<Vec<_>>().join("\n");
         }
+        // `save`: Bukkit `World.save()` - синхронно, до возврата из плагина.
+        if line == "save" {
+            return match self.save_now() {
+                Some(Ok(n)) => n.to_string(),
+                Some(Err(e)) => {
+                    tracing::error!("world save: {e}");
+                    String::new()
+                }
+                None => String::new(),
+            };
+        }
         // `occluding <block>`: `BlockType/Typed#isOccluding` (1/0): полный
         // непрозрачный куб по данным Rust (все 6 граней + не стекло/листва/лёд).
         if let Some(rest) = line.strip_prefix("occluding ") {
@@ -4912,6 +4941,16 @@ impl PlayPlan {
                 "0"
             }
             .into();
+        }
+        // `loadchunk <x> <z>`: `World.getChunkAt`/`Chunk.load` - загрузить
+        // колонку из региона даже без игроков рядом (1/0).
+        if let Some(rest) = line.strip_prefix("loadchunk ") {
+            let mut it = rest.split_whitespace();
+            let parse = |v: Option<&str>| v.and_then(|v| v.parse::<i32>().ok());
+            let (Some(x), Some(z)) = (parse(it.next()), parse(it.next())) else {
+                return "0".into();
+            };
+            return u8::from(self.ensure_chunk(x, z)).to_string();
         }
         // `chunkloaded <x> <z>`: `World.isChunkLoaded` (1/0).
         if let Some(rest) = line.strip_prefix("chunkloaded ") {
@@ -5937,6 +5976,18 @@ impl PlayPlan {
         let _ = self.self_weak.set(Arc::downgrade(self));
     }
 
+    /// `World.save()`: сервер передаёт синхронный сейв, чтобы плагины
+    /// (BlueMap, бэкапы) получали готовые файлы сразу после вызова.
+    pub fn set_save_hook(&self, hook: Arc<SaveHook>) {
+        *self.save_hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Выполняет сейв до возврата; `None` - сервер не подключил хранилище.
+    pub fn save_now(&self) -> Option<Result<usize, String>> {
+        let hook = self.save_hook.lock().unwrap().clone();
+        hook.map(|hook| hook(self))
+    }
+
     /// Гарантирует, что регион чанка `(x, z)` прочитан с диска.
     ///
     /// Вызывается только с потоков генерации (задачи пула) и загрузки чанков,
@@ -6003,6 +6054,11 @@ impl PlayPlan {
         let mut found = Vec::new();
         let mut hoppers = Vec::new();
         let mut fresh = Vec::new();
+        // `PistonMovingBlockEntity`: восстановить недоехавшие поршни после
+        // загрузки чанка (в т. ч. после крэша), как ванильный block entity tick.
+        let mut piston_restore: Moves = Vec::new();
+        // `LevelChunkTicks`: тики, сохранённые в чанке (observer/repeater).
+        let mut saved_ticks: Vec<([i32; 3], u64)> = Vec::new();
         // Сохранённые чанки уже сгенерированы: мобов при генерации им не положено.
         self.sim()
             .populated
@@ -6010,7 +6066,7 @@ impl PlayPlan {
             .unwrap()
             .extend(columns.iter().map(|(pos, _)| *pos));
         let mut saved = self.dim_state().saved.lock().unwrap();
-        for (pos, c) in columns {
+        for (pos, mut c) in columns {
             // Столбец уже в памяти (правка до загрузки или не выгружен):
             // диск его не затирает, и живые печи, проигрыватели не регистрируются заново.
             if world.contains_key(&pos) {
@@ -6061,6 +6117,39 @@ impl PlayPlan {
                     .filter(|(_, be)| be.id == "minecraft:conduit")
                     .map(|(p, _)| *p),
             );
+            let min_y = self.min_y_of(self.active_dim());
+            for (p, be) in c
+                .block_entities
+                .iter()
+                .filter(|(_, be)| be.id == "minecraft:piston")
+            {
+                let ry = p[1] - min_y;
+                if ry < 0 || ry as usize >= c.height() {
+                    continue;
+                }
+                let local = c.block((p[0] & 15) as usize, ry as usize, (p[2] & 15) as usize);
+                if self.state_name(local) != "minecraft:moving_piston" {
+                    continue;
+                }
+                let Some(Tag::String(spec)) = be.nbt.get("chunkwake:state") else {
+                    continue;
+                };
+                let Some(state) = self.parse_state(spec) else {
+                    continue;
+                };
+                let carried = match (
+                    be.nbt.get("chunkwake:carried_id"),
+                    be.nbt.get("chunkwake:carried"),
+                ) {
+                    (Some(Tag::String(id)), Some(Tag::Compound(nbt))) => Some(BlockEntity {
+                        id: id.clone(),
+                        nbt: nbt.clone(),
+                    }),
+                    _ => None,
+                };
+                piston_restore.push((*p, state, carried));
+            }
+            saved_ticks.extend(std::mem::take(&mut c.saved_ticks));
             fresh.push(pos);
             world.insert(pos, (c, 0));
             cache.remove(&pos);
@@ -6068,6 +6157,18 @@ impl PlayPlan {
         drop(saved);
         drop(world);
         drop(cache);
+        if !piston_restore.is_empty() {
+            let due = self.server_ticks.load(std::sync::atomic::Ordering::Relaxed) + 1;
+            self.sim()
+                .piston_moves
+                .lock()
+                .unwrap()
+                .push((due, piston_restore));
+            self.mark_work();
+        }
+        for (pos, delay) in saved_ticks {
+            self.schedule(pos, delay);
+        }
         // Скан точек интереса — уже под замком на запись это значило бы
         // останавливать тик на 98 тыс. блоков каждого региона с диска.
         // Здесь достаточно чтения: столбцы уже вставлены, и читатели друг
@@ -6352,21 +6453,37 @@ impl PlayPlan {
         let Some(state) = self.dims.get(&dim) else {
             return Vec::new();
         };
+        // Снимок очереди block ticks до блокировок чанков (без инверсии).
+        let now = self.server_ticks.load(std::sync::atomic::Ordering::Relaxed);
+        let ticks: Vec<([i32; 3], u64)> = state
+            .sim
+            .redstone_ticks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, at)| *at > now)
+            .collect();
         let world = state.edited.read().unwrap();
         let saved = state.saved.lock().unwrap();
         let dirty = state.dirty.lock().unwrap();
         let playing = state.sim.jukeboxes.lock().unwrap();
         // Только правленые после записи, а не все загруженные с диска.
-        dirty
+        let out: Vec<_> = dirty
             .iter()
             .filter_map(|pos| Some((pos, world.get(pos)?)))
             .filter(|(pos, (_, rev))| saved.get(*pos) != Some(rev) && *rev != 0)
             .map(|(pos, (c, rev))| {
                 let mut c = c.clone();
+                for &(p, at) in &ticks {
+                    if (p[0] >> 4, p[2] >> 4) == *pos {
+                        c.saved_ticks.push((p, at - now));
+                    }
+                }
                 jukebox::stamp_ticks(&mut c, &playing);
                 (*pos, c, *rev)
             })
-            .collect()
+            .collect();
+        out
     }
 
     pub fn set_player_source(&self, source: Arc<dyn PlayerSource>) {
@@ -20766,17 +20883,20 @@ impl PlayPlan {
             );
             self.piston_move(&plan, f, f, ty, &mut finals);
             self.claim(&[head]);
-            if let Some(h) = self.moving_state(f, ty) {
-                self.set_block(head, h);
-            }
-            if let Some(h) = self
+            let head_final = self
                 .survival
                 .block_defaults
                 .get("minecraft:piston_head")
                 .and_then(|&d| pl.with_prop(d, "facing", crate::redstone::DIRS[f]))
                 .and_then(|d| pl.with_prop(d, "type", ty))
-                .and_then(|d| pl.with_prop(d, "short", "false"))
-            {
+                .and_then(|d| pl.with_prop(d, "short", "false"));
+            if let Some(h) = self.moving_state(f, ty) {
+                self.set_block(head, h);
+                if let Some(hf) = head_final {
+                    self.set_block_entity(head, Some(self.moving_be(hf, None)));
+                }
+            }
+            if let Some(h) = head_final {
                 finals.push((head, h, None));
             }
             if let Some(e) = pl.with_prop(s, "extended", "true") {
@@ -20803,10 +20923,14 @@ impl PlayPlan {
                 play::block_event(self.ids.block_event, p, 1, f as u8, block),
             );
             self.claim(&[p]);
+            let base_final = pl.with_prop(s, "extended", "false");
             if let Some(m) = self.moving_state(f, ty) {
                 self.set_block(p, m);
+                if let Some(bf) = base_final {
+                    self.set_block_entity(p, Some(self.moving_be(bf, None)));
+                }
             }
-            if let Some(e) = pl.with_prop(s, "extended", "false") {
+            if let Some(e) = base_final {
                 finals.push((p, e, None));
             }
             if at(head) != AIR && self.state_name(at(head)) == "minecraft:piston_head" {
@@ -20840,6 +20964,31 @@ impl PlayPlan {
             .get("minecraft:moving_piston")?;
         pl.with_prop(d, "facing", crate::redstone::DIRS[f])
             .and_then(|d| pl.with_prop(d, "type", ty))
+    }
+
+    /// NBT `PistonMovingBlockEntity` с конечным состоянием (и переносимым
+    /// block entity): по нему чанк восстанавливает `moving_piston` после
+    /// сохранения/перезапуска.
+    fn moving_be(&self, state: u32, carried: Option<&BlockEntity>) -> BlockEntity {
+        let mut nbt = Compound::new();
+        nbt.insert(
+            "chunkwake:state".into(),
+            Tag::String(self.state_string(state)),
+        );
+        if let Some(carried) = carried {
+            nbt.insert(
+                "chunkwake:carried_id".into(),
+                Tag::String(carried.id.clone()),
+            );
+            nbt.insert(
+                "chunkwake:carried".into(),
+                Tag::Compound(carried.nbt.clone()),
+            );
+        }
+        BlockEntity {
+            id: "minecraft:piston".into(),
+            nbt,
+        }
     }
 
     /// `moveBlocks`: ломает хрупкие, освобождает старые места, ставит `moving_piston`
@@ -20881,6 +21030,9 @@ impl PlayPlan {
         for (i, &d) in dests.iter().enumerate() {
             if let Some(m) = moving {
                 self.set_block(d, m);
+                // Полный NBT `PistonMovingBlockEntity` пишем сами: иначе после
+                // сохранения и загрузки чанка `moving_piston` останется навсегда.
+                self.set_block_entity(d, Some(self.moving_be(states[i], carried[i].as_ref())));
             }
             finals.push((d, states[i], carried[i].clone()));
         }

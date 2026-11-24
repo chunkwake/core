@@ -27,9 +27,108 @@ final class FixedDiffProbe implements Listener {
     }
 
     static void run(JavaPlugin plugin) {
+        String midSave = System.getenv("CHUNKWAKE_PISTON_MIDSAVE");
+        if (midSave != null) {
+            runMidSave(plugin, Integer.parseInt(midSave));
+            return;
+        }
+        if (System.getenv("CHUNKWAKE_PISTON_CHECK") != null) {
+            runCheck(plugin);
+            return;
+        }
         FixedDiffProbe probe = new FixedDiffProbe(plugin);
         plugin.getServer().getPluginManager().registerEvents(probe, plugin);
         plugin.getServer().getScheduler().runTaskTimer(plugin, probe::step, 1, 1);
+    }
+
+    /** Saves the world in the middle of a piston move, then hard-kills the JVM. */
+    private static void runMidSave(JavaPlugin plugin, int at) {
+        AtomicInteger now = new AtomicInteger();
+        World w = plugin.getServer().getWorlds().get(0);
+        plugin.getServer().getScheduler().runTaskTimer(plugin, () -> {
+            int t = now.incrementAndGet();
+            if (t == 20) {
+                for (int cx = 5; cx <= 9; cx++) {
+                    for (int cz = -1; cz <= 1; cz++) {
+                        w.getChunkAt(cx, cz).load(true);
+                        w.getChunkAt(cx, cz).addPluginChunkTicket(plugin);
+                    }
+                }
+                for (int x = 95; x <= 140; x++) {
+                    for (int y = 209; y <= 211; y++) {
+                        for (int z = -1; z <= 2; z++) {
+                            w.getBlockAt(x, y, z).setType(Material.AIR, false);
+                        }
+                    }
+                }
+                flySetup(w);
+            }
+            if (t == at) {
+                var moves = 0;
+                for (int x = 95; x <= 140; x++) {
+                    for (int z = 0; z <= 1; z++) {
+                        if (w.getBlockAt(x, 210, z).getType() == Material.MOVING_PISTON) {
+                            moves++;
+                        }
+                    }
+                }
+                plugin.getLogger().info("VANILLADIFF midsave t=" + t + " moving=" + moves);
+                w.save();
+                plugin.getLogger().info("VANILLADIFF midsave saved");
+                Runtime.getRuntime().halt(0);
+            }
+        }, 1, 1);
+    }
+
+    /** After restart: lists any moving pistons that were not restored. */
+    private static void runCheck(JavaPlugin plugin) {
+        AtomicInteger now = new AtomicInteger();
+        World w = plugin.getServer().getWorlds().get(0);
+        for (int cx = 5; cx <= 9; cx++) {
+            for (int cz = -1; cz <= 1; cz++) {
+                w.getChunkAt(cx, cz).load(true);
+                w.getChunkAt(cx, cz).addPluginChunkTicket(plugin);
+            }
+        }
+        plugin.getServer().getScheduler().runTaskTimer(plugin, () -> {
+            int t = now.incrementAndGet();
+            if (t < 20 || t % 20 != 0) {
+                return;
+            }
+            int moves = 0;
+            int rear = -1;
+            for (int x = 95; x <= 155; x++) {
+                for (int z = 0; z <= 1; z++) {
+                    Material m = w.getBlockAt(x, 210, z).getType();
+                    if (m == Material.MOVING_PISTON) {
+                        moves++;
+                    }
+                    if (m == Material.OBSERVER && z == 0) {
+                        rear = x;
+                    }
+                }
+            }
+            StringBuilder z0 = new StringBuilder();
+            StringBuilder z1 = new StringBuilder();
+            for (int x = 90; x <= 150; x++) {
+                z0.append(glyph(w.getBlockAt(x, 210, 0)));
+                z1.append(glyph(w.getBlockAt(x, 210, 1)));
+            }
+            plugin.getLogger().info("VANILLADIFF check t=" + t + " moving=" + moves
+                    + " rear0=" + rear + " z0=" + z0 + " z1=" + z1);
+        }, 1, 1);
+    }
+
+    private static void flySetup(World w) {
+        fly(w, Material.OBSERVER, 100, 0, BlockFace.WEST);
+        fly(w, Material.PISTON, 101, 0, BlockFace.EAST);
+        w.getBlockAt(100, 210, 1).setType(Material.SLIME_BLOCK);
+        w.getBlockAt(101, 210, 1).setType(Material.SLIME_BLOCK);
+        w.getBlockAt(103, 210, 0).setType(Material.SLIME_BLOCK);
+        w.getBlockAt(104, 210, 0).setType(Material.SLIME_BLOCK);
+        fly(w, Material.STICKY_PISTON, 103, 1, BlockFace.WEST);
+        fly(w, Material.OBSERVER, 104, 1, BlockFace.EAST);
+        w.getBlockAt(105, 210, 1).setType(Material.STONE);
     }
 
     private void step() {
@@ -40,6 +139,9 @@ final class FixedDiffProbe implements Listener {
             mob();
         } else if (now == 150) {
             report();
+        }
+        if (now >= 20 && now <= 80 && now % 4 == 0) {
+            trace(now);
         }
     }
 
@@ -57,6 +159,21 @@ final class FixedDiffProbe implements Listener {
         World w = this.plugin.getServer().getWorlds().get(0);
         for (int x : new int[] {0, 10, 20, 33, 40, 50, 100, 101, 103, 104, 105}) {
             load(w, x, 0);
+        }
+        // Wipe the fly and wire areas so a previous run cannot leave debris.
+        for (int x = 95; x <= 140; x++) {
+            for (int y = 209; y <= 211; y++) {
+                for (int z = -1; z <= 2; z++) {
+                    w.getBlockAt(x, y, z).setType(Material.AIR, false);
+                }
+            }
+        }
+        for (int x = 6; x <= 14; x++) {
+            for (int y = 198; y <= 202; y++) {
+                for (int z = -3; z <= 2; z++) {
+                    w.getBlockAt(x, y, z).setType(Material.AIR, false);
+                }
+            }
         }
         // Redstone
         w.getBlockAt(0, 200, -1).setType(Material.STONE);
@@ -97,15 +214,7 @@ final class FixedDiffProbe implements Listener {
         w.getBlockAt(52, 200, 0).setType(Material.WATER);
 
         // Fly
-        fly(w, Material.OBSERVER, 100, 0, BlockFace.WEST);
-        fly(w, Material.PISTON, 101, 0, BlockFace.EAST);
-        w.getBlockAt(100, 210, 1).setType(Material.SLIME_BLOCK);
-        w.getBlockAt(101, 210, 1).setType(Material.SLIME_BLOCK);
-        w.getBlockAt(103, 210, 0).setType(Material.SLIME_BLOCK);
-        w.getBlockAt(104, 210, 0).setType(Material.SLIME_BLOCK);
-        fly(w, Material.STICKY_PISTON, 103, 1, BlockFace.WEST);
-        fly(w, Material.OBSERVER, 104, 1, BlockFace.EAST);
-        w.getBlockAt(105, 210, 1).setType(Material.STONE);
+        flySetup(w);
         this.plugin.getLogger().info("VANILLADIFF setup minY=" + w.getMinHeight()
                 + " maxY=" + w.getMaxHeight()
                 + " redstone=" + w.getBlockAt(0, 200, 1).getType()
@@ -138,6 +247,10 @@ final class FixedDiffProbe implements Listener {
                 + w.getBlockAt(0, 200, -1).getType() + " wire="
                 + w.getBlockAt(10, 200, -2).getType() + "/"
                 + w.getBlockAt(10, 200, -1).getType());
+        this.plugin.getLogger().info("VANILLADIFF wire-data w11="
+                + w.getBlockAt(11, 200, 0).getBlockData().getAsString()
+                + " w12=" + w.getBlockAt(12, 200, 0).getBlockData().getAsString()
+                + " piston=" + w.getBlockAt(10, 200, 0).getBlockData().getAsString());
         this.plugin.getLogger().info("VANILLADIFF hopper moves=" + this.moves.get()
                 + " pickups=" + this.pickups.get());
         this.plugin.getLogger().info("VANILLADIFF fluids flow="
@@ -165,6 +278,39 @@ final class FixedDiffProbe implements Listener {
                 + " extends=" + this.pistonExtends.get());
         this.plugin.getLogger().info("VANILLADIFF mob-death=" + this.death.stream()
                 .sorted().toList());
+    }
+
+    private void trace(int now) {
+        World w = this.plugin.getServer().getWorlds().get(0);
+        StringBuilder a = new StringBuilder();
+        StringBuilder b = new StringBuilder();
+        for (int x = 98; x <= 118; x++) {
+            a.append(glyph(w.getBlockAt(x, 210, 0)));
+            b.append(glyph(w.getBlockAt(x, 210, 1)));
+        }
+        String obs = "";
+        for (int x : new int[] {100, 104, 123}) {
+            Material m = w.getBlockAt(x, 210, 0).getType();
+            if (m == Material.OBSERVER) {
+                obs += x + "=" + w.getBlockAt(x, 210, 0).getBlockData().getAsString() + " ";
+            }
+        }
+        this.plugin.getLogger().info("VANILLADIFF fly-trace t=" + now + " z0=" + a
+                + " z1=" + b + " obs=" + obs.trim());
+    }
+
+    private static char glyph(org.bukkit.block.Block b) {
+        return switch (b.getType()) {
+            case OBSERVER -> b.getBlockData().getAsString().contains("powered=true") ? 'o' : 'O';
+            case PISTON -> 'P';
+            case STICKY_PISTON -> 'T';
+            case PISTON_HEAD -> 'H';
+            case MOVING_PISTON -> 'M';
+            case SLIME_BLOCK -> 'S';
+            case STONE -> '#';
+            case AIR, CAVE_AIR -> '.';
+            default -> '?';
+        };
     }
 
     private static void fly(World w, Material material, int x, int z, BlockFace face) {

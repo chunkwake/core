@@ -39,9 +39,17 @@ final class ChunkImpl {
     }
 
     public boolean isGenerated() { return true; }
-    public boolean isLoaded() { return true; }
-    public boolean load(boolean generate) { return true; }
-    public boolean load() { return true; }
+    public boolean isLoaded() {
+        return "1".equals(this.world.request("chunkloaded " + this.x + " " + this.z).trim());
+    }
+
+    public boolean load(boolean generate) {
+        return "1".equals(this.world.request("loadchunk " + this.x + " " + this.z).trim());
+    }
+
+    public boolean load() {
+        return load(true);
+    }
     public boolean unload(boolean save) { return false; }
     public boolean unload() { return false; }
     public boolean isSlimeChunk() { return false; }
