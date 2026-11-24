@@ -4960,15 +4960,18 @@ impl PlayPlan {
                 return "0".into();
             };
             let state = self.dim_state();
-            let loaded = state.simulated.lock().unwrap().contains(&(x, z))
+            // `World.isChunkLoaded`: колонка в памяти (`edited`), в наборе
+            // симуляции или уже закодирована в кадр.
+            let loaded = state.edited.read().unwrap().contains_key(&(x, z))
+                || state.simulated.lock().unwrap().contains(&(x, z))
                 || state.chunk_frames.lock().unwrap().contains_key(&(x, z));
             return if loaded { "1" } else { "0" }.into();
         }
         // `loadedchunks`: loaded chunk columns in the active dimension.
         if line == "loadedchunks" {
             let state = self.dim_state();
-            let mut keys: Vec<(i32, i32)> =
-                state.simulated.lock().unwrap().iter().copied().collect();
+            let mut keys: Vec<(i32, i32)> = state.edited.read().unwrap().keys().copied().collect();
+            keys.extend(state.simulated.lock().unwrap().iter().copied());
             keys.extend(state.chunk_frames.lock().unwrap().keys().copied());
             keys.sort_unstable();
             keys.dedup();

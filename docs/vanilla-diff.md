@@ -74,6 +74,15 @@ Raw logs: `benchmarks/vanilla-diff/paper.log` and `benchmarks/vanilla-diff/chunk
 Они требуют отдельного детерминированного сценария с фиксированным
 порядком тиков.
 
+## Fixed-tick сценарии (закрыто)
+
+Timing-наблюдения из этого отчёта для `redstone`, `hopper`, `fluids`, `fly` и
+`mob drops` заменены детерминированным сценарием `CHUNKWAKE_FIXED_DIFF=1`
+(`java/test-plugin/.../FixedDiffProbe.java`). Итоговое сравнение и найденные
+поведенческие дыры: `docs/vanilla-fixed-diff.md`. После очистки зон стенда
+redstone/wire, hopper, fluids и дропы совпадают; летающая машина едет с той же
+скоростью (остаётся фазовый сдвиг ±2–4 тика на фиксированном тике).
+
 ## Interpretation
 
 The diff is a list of **open observations**, not a claim that every difference is a bug: some checks depend on chunk load order, world generation timing, or server-only formatting. It is intended as a reproducible baseline for the next vanilla-parity fixes.
