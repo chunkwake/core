@@ -26,7 +26,7 @@ py -3 scripts/analyze_ab_p99.py
 ```
 
 The checked-in `results.md` and `samples/` are from the final release build
-(`5f386ee`) and a paired low-load run: both servers used affinity `0xFF` and
+(`172406d`) and a paired low-load run: both servers used affinity `0xFF` and
 `BelowNormal`, 5 rounds, 15 s windows. Paper `cache/` and `versions/` are
 pre-copied into every fresh stand so Paperclip network failures cannot abort a
 round.
