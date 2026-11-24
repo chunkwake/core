@@ -84,6 +84,11 @@ final class FixedDiffProbe implements Listener {
     private static void runCheck(JavaPlugin plugin) {
         AtomicInteger now = new AtomicInteger();
         World w = plugin.getServer().getWorlds().get(0);
+        boolean before = w.isChunkLoaded(6, 0);
+        boolean loaded = w.getChunkAt(6, 0).load(true);
+        plugin.getLogger().info("VANILLADIFF chunk-api before=" + before
+                + " load=" + loaded + " after=" + w.isChunkLoaded(6, 0)
+                + " block=" + w.getBlockAt(105, 210, 1).getType());
         for (int cx = 5; cx <= 9; cx++) {
             for (int cz = -1; cz <= 1; cz++) {
                 w.getChunkAt(cx, cz).load(true);
