@@ -5228,7 +5228,8 @@ impl PlayPlan {
         // `forceload <blockX> <blockZ> add|remove` -> Bukkit chunk tickets.
         if let Some(rest) = line.strip_prefix("forceload ") {
             let mut parts = rest.split_whitespace();
-            let (Some(x), Some(z), Some(action)) = (parts.next(), parts.next(), parts.next()) else {
+            let (Some(x), Some(z), Some(action)) = (parts.next(), parts.next(), parts.next())
+            else {
                 return String::new();
             };
             let (Ok(x), Ok(z)) = (x.parse::<i32>(), z.parse::<i32>()) else {
