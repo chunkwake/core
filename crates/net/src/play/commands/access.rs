@@ -1051,7 +1051,7 @@ impl PlayPlan {
         // `/forceload add` грузит чанк сразу, даже без игроков (vanilla
         // `ServerChunkCache.addRegionTicket`), иначе он не тикает.
         if add {
-            self.ensure_chunk(chunk.0, chunk.1, true);
+            self.load_chunk(chunk.0, chunk.1, true);
         }
         // Чанк под forceload — это работа и без игроков рядом: иначе тик
         // остался бы «простаивающим» и не пересчитал бы набор симуляции.

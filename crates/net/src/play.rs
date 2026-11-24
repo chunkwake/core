@@ -3392,16 +3392,17 @@ impl PlayPlan {
     pub(crate) fn ensure_chunk(&self, x: i32, z: i32, generate: bool) -> bool {
         // Рельеф уже вставлен волной. Мобы — после него, не на плоском шаблоне.
         self.ensure_region(x, z);
-        if !generate
-            && self.terrain().is_some()
-            && !self
-                .dim_state()
-                .edited
-                .read()
-                .unwrap()
-                .contains_key(&(x, z))
-        {
-            return false;
+        let missing = !self
+            .dim_state()
+            .edited
+            .read()
+            .unwrap()
+            .contains_key(&(x, z));
+        if missing && self.terrain().is_some() {
+            if !generate {
+                return false;
+            }
+            self.generate_chunk(x, z);
         }
         self.populate_chunk(x, z);
         // Платформа void не в общем шаблоне: после диска, чтобы сохранённый чанк победил.
@@ -3418,6 +3419,21 @@ impl PlayPlan {
     /// Формат (little-endian): `CWS1`, x/z/minY/height, fullTime, flags,
     /// палитра block states + индексы, палитра биомов (имя + температура) +
     /// индексы, свет (sky/block по 2048 на секцию) и heightmap.
+    pub(crate) fn load_chunk(&self, x: i32, z: i32, generate: bool) -> bool {
+        if self.terrain().is_none() {
+            let template = self.template().clone();
+            let mut world = self.dim_state().edited.write().unwrap();
+            world.entry((x, z)).or_insert((template, 0));
+            drop(world);
+            self.dim_state()
+                .chunk_frames
+                .lock()
+                .unwrap()
+                .remove(&(x, z));
+        }
+        self.ensure_chunk(x, z, generate)
+    }
+
     fn chunk_snapshot(&self, cx: i32, cz: i32, flags: u8) -> Option<Vec<u8>> {
         let state = self.dim_state();
         let world = state.edited.read().unwrap();
@@ -3852,6 +3868,11 @@ impl PlayPlan {
             let old = column.set_block(lx, ry as usize, lz, state);
             if old == state {
                 return Some(old);
+            }
+            // `LevelChunk.setBlockState`: блок сменил тип — старый block entity
+            // (сундук/печь/табличка) больше не принадлежит этому блоку.
+            if self.state_name(old) != self.state_name(state) {
+                column.block_entities.remove(&[x, y, z]);
             }
             *rev += 1;
             self.dim_state().dirty.lock().unwrap().insert(key);
@@ -4497,6 +4518,9 @@ impl PlayPlan {
                 if old == state {
                     continue;
                 }
+                if self.state_name(old) != self.state_name(state) {
+                    column.block_entities.remove(&[x, y, z]);
+                }
                 if fresh {
                     inserted.insert(key);
                 }
@@ -5116,7 +5140,7 @@ impl PlayPlan {
                 return "0".into();
             };
             let generate = it.next() != Some("0");
-            return u8::from(self.ensure_chunk(x, z, generate)).to_string();
+            return u8::from(self.load_chunk(x, z, generate)).to_string();
         }
         // `blockentities <chunkX> <chunkZ>`: `Chunk.getTileEntities()` -
         // позиции block entity в загруженной колонке, по строке на запись.
@@ -5167,6 +5191,40 @@ impl PlayPlan {
                 hex.push(HEX[(b & 15) as usize] as char);
             }
             return hex;
+        }
+        // `unloadchunk <x> <z> <save>`: `Chunk.unload()` — выгружает колонку,
+        // если она не в наборе симуляции/forceload (1/0).
+        if let Some(rest) = line.strip_prefix("unloadchunk ") {
+            let mut it = rest.split_whitespace();
+            let parse = |v: Option<&str>| v.and_then(|v| v.parse::<i32>().ok());
+            let (Some(x), Some(z)) = (parse(it.next()), parse(it.next())) else {
+                return "0".into();
+            };
+            let save = it.next() != Some("0");
+            let key = (x, z);
+            let state = self.dim_state();
+            if state.simulated.lock().unwrap().contains(&key)
+                || self.sim().forced.lock().unwrap().contains(&key)
+            {
+                return "0".into();
+            }
+            if !state.edited.read().unwrap().contains_key(&key) {
+                return "0".into();
+            }
+            if save {
+                let _ = self.save_now();
+            }
+            state.edited.write().unwrap().remove(&key);
+            state.chunk_frames.lock().unwrap().remove(&key);
+            state.dirty.lock().unwrap().remove(&key);
+            state.pois.lock().unwrap().remove(&key);
+            state
+                .poi_claims
+                .lock()
+                .unwrap()
+                .retain(|p, _| (p[0] >> 4, p[2] >> 4) != key);
+            self.mark_work();
+            return "1".into();
         }
         // `chunkloaded <x> <z>`: `World.isChunkLoaded` (1/0).
         if let Some(rest) = line.strip_prefix("chunkloaded ") {

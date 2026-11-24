@@ -21,6 +21,7 @@ final class FixedDiffProbe implements Listener {
     private final AtomicInteger pickups = new AtomicInteger();
     private final AtomicInteger pistonExtends = new AtomicInteger();
     private final java.util.Set<String> death = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private org.bukkit.Chunk farChunk;
 
     private FixedDiffProbe(JavaPlugin plugin) {
         this.plugin = plugin;
@@ -142,6 +143,8 @@ final class FixedDiffProbe implements Listener {
             setup();
         } else if (now == 60) {
             mob();
+        } else if (now == 140) {
+            this.farChunk = this.plugin.getServer().getWorlds().get(0).getChunkAt(200, 200);
         } else if (now == 150) {
             report();
         }
@@ -281,6 +284,20 @@ final class FixedDiffProbe implements Listener {
                         .map(s -> s.getType().name())
                         .sorted()
                         .toList());
+        this.plugin.getLogger().info("VANILLADIFF slime="
+                + w.getChunkAt(0, 0).isSlimeChunk() + "/"
+                + w.getChunkAt(1, 0).isSlimeChunk() + "/"
+                + w.getChunkAt(0, 1).isSlimeChunk() + "/"
+                + w.getChunkAt(2, 0).isSlimeChunk());
+        w.getBlockAt(20, 199, 0).setType(Material.STONE);
+        this.plugin.getLogger().info("VANILLADIFF be-stale after="
+                + java.util.Arrays.stream(w.getChunkAt(1, 0).getTileEntities())
+                        .map(s -> s.getType().name())
+                        .sorted()
+                        .toList());
+        boolean unloaded = this.farChunk != null && this.farChunk.unload(false);
+        this.plugin.getLogger().info("VANILLADIFF unload=" + unloaded
+                + " loaded=" + w.isChunkLoaded(200, 200));
         var snapshot = w.getChunkAt(2, 0).getChunkSnapshot(true, true, true);
         this.plugin.getLogger().info("VANILLADIFF chunk-snapshot"
                 + " block200=" + snapshot.getBlockType(1, 200, 0)

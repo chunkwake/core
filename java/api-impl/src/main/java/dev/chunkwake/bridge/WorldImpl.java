@@ -193,6 +193,15 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
         return "1".equals(request("chunkloaded " + x + " " + z).trim());
     }
 
+    public boolean unloadChunk(int x, int z) {
+        return unloadChunk(x, z, true);
+    }
+
+    public boolean unloadChunk(int x, int z, boolean save) {
+        return "1".equals(request("unloadchunk " + x + " " + z
+                + (save ? " 1" : " 0")).trim());
+    }
+
     /** {@code World#getEntitiesByClasses}: фильтр по классам Bukkit-сущностей. */
     public java.util.Collection<org.bukkit.entity.Entity> getEntitiesByClasses(
             Class<?>... classes) {

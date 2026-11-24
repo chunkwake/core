@@ -17,9 +17,12 @@
 | hopper | `moves=3 pickups=1` | same |
 | fluids | `flow=WATER fall=WATER edge=WATER meet=OBSIDIAN logged=WATER/WATER` | same |
 | mob drops | `[BEEF, LEATHER]` (12 смертей, множество типов) | same |
-| fly | `rear=113 blocks=8 extends=28` | `rear=112 blocks=8 extends=26` |
+| fly | `rear=113 blocks=8 extends=28` | `rear=112 blocks=8 extends=25` |
 | `Chunk.getEntities` | `loaded=true found-sheep=true` | same (living 2/1 — старые сущности стенда) |
 | `Chunk.getTileEntities` | `[CHEST, HOPPER]` | same |
+| stale block entity | после замены сундука камнем `[HOPPER]` | same |
+| `Chunk.isSlimeChunk` | `false/false/false/false` | same |
+| `Chunk.unload(false)` | `true`, `loaded=false` | same |
 | `Chunk.getChunkSnapshot` | `WATER/STONE water[level=0] sky=14 emit=0 highest=200 temp=0.7389735/0.4889735 sea=-63 plains empty0=false empty20=true` | same (кроме `Biome.toString`) |
 
 `fly`-трейс показывает одинаковый цикл (observer → sticky pull → piston push):
@@ -59,6 +62,16 @@ Chunkwake 104→139 за 380 тиков (~1 блок на 10.6 тика у об�
   `World.getSeaLevel()`/`Login`: в flat-мире уровень моря `-63`, а не `63`.
   Для отсутствующих в снимке данных методы теперь кидают
   `IllegalStateException`, как Paper.
+- `Chunk.unload()` больше не заглушка: `unloadchunk` сохраняет (если `save=true`)
+  и выгружает колонку, если она не входит в simulation/forceload. Проверка после
+  загрузки дальнего чанка: Paper `unload=true loaded=false`, Chunkwake так же.
+- `Chunk.isSlimeChunk()` реализован по `WorldgenRandom.seedSlimeChunk` и Spigot
+  `slimeSeed=987234911`; значения на четырёх тестовых чанках совпали.
+- `Chunk.load()`/`World.getChunkAt` теперь материализуют flat-чанк в `edited`
+  (`load_chunk`), поэтому `isChunkLoaded` и `unload` ведут себя как у Paper.
+- При смене типа блока (`chest` → `stone` и т. п.) старый block entity
+  удаляется; `getTileEntities()` после замены сундука выдаёт `[HOPPER]`, как
+  Paper.
 - `World.save()` и `/save-all [flush]` стали синхронными: плагин (BlueMap,
   бэкапы) получает готовые файлы сразу после возврата. Раньше `World.save()`
   был no-op, а `/save-all` только поднимал флаг для фонового autosave.

@@ -89,9 +89,25 @@ final class ChunkImpl {
     public boolean load() {
         return load(true);
     }
-    public boolean unload(boolean save) { return false; }
-    public boolean unload() { return false; }
-    public boolean isSlimeChunk() { return false; }
+    public boolean unload(boolean save) {
+        return "1".equals(this.world.request("unloadchunk " + this.x + " " + this.z
+                + (save ? " 1" : " 0")).trim());
+    }
+
+    public boolean unload() {
+        return unload(true);
+    }
+
+    public boolean isSlimeChunk() {
+        // `WorldgenRandom.seedSlimeChunk` + Spigot `slimeSeed` (987234911).
+        long seed = this.world.api.getSeed()
+                + (long) this.x * this.x * 4987142L
+                + (long) this.x * 5947611L
+                + (long) this.z * this.z * 4392871L
+                + (long) this.z * 389711L;
+        seed ^= 987234911L;
+        return new java.util.Random(seed).nextInt(10) == 0;
+    }
     public boolean isForceLoaded() { return this.forceLoaded || !this.tickets.isEmpty(); }
 
     private void forceload(boolean add) {
