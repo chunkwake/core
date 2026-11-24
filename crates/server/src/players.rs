@@ -120,8 +120,7 @@ impl PlayerFiles {
             "DataVersion": self.data_version,
         });
         let bytes = serde_json::to_vec(&root).map_err(|e| format!("stats json: {e}"))?;
-        chunkwake_net::write_atomic(&self.stats_path(uuid), &bytes)
-            .map_err(|e| format!("write {}: {e}", self.stats_path(uuid).display()))
+        write_json_if_changed(&self.stats_path(uuid), &bytes)
     }
 
     fn advancements_path(&self, uuid: Uuid) -> PathBuf {
@@ -205,8 +204,7 @@ impl PlayerFiles {
         );
         let bytes = serde_json::to_vec(&serde_json::Value::Object(map))
             .map_err(|e| format!("advancements json: {e}"))?;
-        chunkwake_net::write_atomic(&self.advancements_path(uuid), &bytes)
-            .map_err(|e| format!("write {}: {e}", self.advancements_path(uuid).display()))
+        write_json_if_changed(&self.advancements_path(uuid), &bytes)
     }
 
     pub fn save(&self, uuid: Uuid, s: &PlayerSave) -> Result<(), String> {
@@ -235,6 +233,16 @@ impl PlayerFiles {
         self.write_advancements(uuid, &s.advancements)?;
         nbt::write_gzip_file(&self.path(uuid), &root)
     }
+}
+
+fn write_json_if_changed(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    // Автосейв идёт каждые 30 секунд, а счётчики и достижения у стоящего
+    // игрока не меняются. Чтение маленького файла из кеша дешевле его
+    // перезаписи с временным файлом и переименованием.
+    if std::fs::read(path).is_ok_and(|old| old.as_slice() == bytes) {
+        return Ok(());
+    }
+    chunkwake_net::write_atomic(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 /// `active_effects` ванилы (`MobEffectInstance.CODEC`).
