@@ -160,6 +160,15 @@ function Setup-Stand([string]$dir, [string]$kind, [int]$port) {
         $props += 'velocity-enabled=false'
     } else {
         Set-Content -Path (Join-Path $dir 'eula.txt') -Value 'eula=true' -Encoding ascii
+        # Paperclip downloads Mojang/Paper jars into cache/versions on first
+        # start. A network hiccup must not abort a multi-round benchmark.
+        $paperData = 'E:\minecraft_server\data'
+        foreach ($cached in @('cache', 'versions')) {
+            $source = Join-Path $paperData $cached
+            if (Test-Path $source) {
+                Copy-Item $source $dir -Recurse -Force
+            }
+        }
     }
     Set-Content -Path (Join-Path $dir 'server.properties') -Value $props -Encoding ascii
 }

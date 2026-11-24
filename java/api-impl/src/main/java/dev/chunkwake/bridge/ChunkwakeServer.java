@@ -517,6 +517,56 @@ final class ChunkwakeServer {
         for (Command c : PaperCommands.all(() -> Bridge.world("mspt"))) {
             commands.register("bukkit", c);
         }
+        registerVanillaCommandNames();
+    }
+
+    /**
+     * Paper exposes the whole vanilla command tree through
+     * {@code Server.getCommandMap()}. Chunkwake executes the tree in Rust, so
+     * register API-visible stubs for names that are not already provided by a
+     * plugin. Dispatch remains handled by the Rust command layer.
+     */
+    private void registerVanillaCommandNames() {
+        try (var in = ChunkwakeServer.class.getResourceAsStream("/vanilla-command-names.txt")) {
+            if (in == null) {
+                return;
+            }
+            for (String line : new String(in.readAllBytes(), java.nio.charset.StandardCharsets.US_ASCII)
+                    .split("\\R")) {
+                String name = line.trim();
+                if (name.isEmpty()
+                        || commands.getCommand(name) != null
+                        || commands.getCommand("minecraft:" + name) != null) {
+                    continue;
+                }
+                commands.register("minecraft", vanillaCommand(name));
+            }
+        } catch (java.io.IOException ignored) {
+            Bridge.log(2, "vanilla command names unavailable");
+        }
+        // Paper/Bukkit aliases that are part of CraftCommandMap but not of the
+        // Mojang command report.
+        java.util.Map<String, org.bukkit.command.Command> known = commands.getKnownCommands();
+        for (String name : java.util.List.of(
+                "minecraft:version", "paper", "reload", "restart", "spark", "spigot", "timings")) {
+            known.putIfAbsent(name, vanillaCommand(name));
+        }
+    }
+
+    private static org.bukkit.command.Command vanillaCommand(String name) {
+        return new org.bukkit.command.Command(name) {
+            @Override
+            public boolean execute(org.bukkit.command.CommandSender sender, String label,
+                    String[] args) {
+                return false;
+            }
+
+            @Override
+            public java.util.List<String> tabComplete(org.bukkit.command.CommandSender sender,
+                    String alias, String[] args) {
+                return java.util.List.of();
+            }
+        };
     }
 
     /**

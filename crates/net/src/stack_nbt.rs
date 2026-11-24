@@ -52,6 +52,7 @@ pub fn named_nbt(
         return None;
     }
     let mut c = Compound::from([
+        ("DataVersion".into(), Tag::Int(5023)),
         ("id".into(), Tag::String(name.to_owned())),
         ("count".into(), Tag::Int(s.count)),
     ]);
