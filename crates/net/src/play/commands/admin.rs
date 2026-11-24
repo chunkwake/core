@@ -6,7 +6,7 @@ use super::Context;
 use super::args;
 use super::dispatch::{Call, Outcome, translate};
 use super::entity::usage;
-use super::state::AccessList;
+use super::state::{AccessList, canonical_ip};
 use serde_json::{Value, json};
 
 /// `/op <targets>`.
@@ -164,7 +164,15 @@ fn ban_common(ctx: &Context<'_>, call: &Call<'_>, list: AccessList) -> Outcome {
         return usage("/ban <target> [reason]");
     };
     let reason = args::message(input.rest());
-    let changed = ctx.vars().update_access(list, name, Some(true));
+    let target = if list == AccessList::BannedIps {
+        let Some(ip) = resolve_ip(ctx.vars(), name) else {
+            return Outcome::Feedback(translate("commands.banip.failed", Vec::new()));
+        };
+        ip
+    } else {
+        name.to_owned()
+    };
+    let changed = ctx.vars().update_access(list, &target, Some(true));
     if !changed {
         let key = if list == AccessList::BannedIps {
             "commands.banip.failed"
@@ -192,8 +200,17 @@ fn ban_common(ctx: &Context<'_>, call: &Call<'_>, list: AccessList) -> Outcome {
     };
     Outcome::Feedback(translate(
         key,
-        vec![json!({"text": name}), json!({"text": reason})],
+        vec![json!({"text": target}), json!({"text": reason})],
     ))
+}
+
+/// `/ban-ip <игрок|адрес>`: ник превращается в последний известный адрес,
+/// адрес — в канонический вид без IPv4-mapped IPv6.
+fn resolve_ip(vars: &super::state::ServerVars, name: &str) -> Option<String> {
+    if let Ok(ip) = name.parse::<std::net::IpAddr>() {
+        return Some(canonical_ip(ip).to_string());
+    }
+    vars.known_ip(name).map(|ip| ip.to_string())
 }
 
 /// `/banlist [players|ips]`: подкоманда — литерал дерева, поэтому берётся из
@@ -233,14 +250,19 @@ fn pardon_common(ctx: &Context<'_>, call: &Call<'_>, list: AccessList) -> Outcom
     let Some(name) = input.word() else {
         return usage("/pardon <name>");
     };
-    let changed = ctx.vars().update_access(list, name, Some(false));
+    let target = if list == AccessList::BannedIps {
+        resolve_ip(ctx.vars(), name).unwrap_or_else(|| name.to_owned())
+    } else {
+        name.to_owned()
+    };
+    let changed = ctx.vars().update_access(list, &target, Some(false));
     let key = match (list, changed) {
         (AccessList::BannedIps, true) => "commands.unbanip.success",
         (AccessList::BannedIps, false) => "commands.unbanip.failed",
         (_, true) => "commands.unban.success",
         (_, false) => "commands.unban.failed",
     };
-    Outcome::Feedback(translate(key, vec![json!({"text": name})]))
+    Outcome::Feedback(translate(key, vec![json!({"text": target})]))
 }
 
 /// `/save-all [flush]`.
@@ -447,4 +469,21 @@ fn args_group(
     handler: super::dispatch::Handler,
 ) -> super::dispatch::Spec {
     super::dispatch::Spec::arg(name, level, parser, Vec::new()).with_handler(handler)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_ip_uses_last_login_and_canonical_address() {
+        let vars = super::super::state::ServerVars::ephemeral();
+        vars.ensure_known_ip("Steve", "203.0.113.7".parse().unwrap());
+        assert_eq!(resolve_ip(&vars, "steve"), Some("203.0.113.7".into()));
+        assert_eq!(
+            resolve_ip(&vars, "::ffff:203.0.113.7"),
+            Some("203.0.113.7".into())
+        );
+        assert_eq!(resolve_ip(&vars, "unknown"), None);
+    }
 }

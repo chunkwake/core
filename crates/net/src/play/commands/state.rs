@@ -8,6 +8,7 @@
 use crate::play::Dimension;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::sync::Mutex;
 
 /// Значение геймрула: ванила хранит числа, флаги и строки.
@@ -154,6 +155,9 @@ pub struct ServerVars {
     idle_timeout: Mutex<i64>,
     /// Белый список (`white-list` + `/whitelist`).
     whitelist: Mutex<AccessLists>,
+    /// Последний адрес входа по имени: `/ban-ip <игрок>` банит адрес, как
+    /// ваниль, а не строку с ником.
+    known_ips: Mutex<BTreeMap<String, IpAddr>>,
     /// `save-off` — автосейв приостановлен.
     saving: Mutex<bool>,
     /// Открыт ли сервер в LAN (`/publish`).
@@ -187,6 +191,14 @@ pub struct AccessLists {
     pub banned_players: Vec<String>,
     #[serde(default)]
     pub banned_ips: Vec<String>,
+}
+
+/// Адрес без IPv4-mapped обёртки: `::ffff:127.0.0.1` -> `127.0.0.1`.
+pub fn canonical_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        IpAddr::V4(_) => ip,
+    }
 }
 
 /// Диаметр ванильной границы: `WorldBorder.MAX_SIZE`.
@@ -483,6 +495,7 @@ impl ServerVars {
             weather: Mutex::new(Weather::default()),
             idle_timeout: Mutex::new(0),
             whitelist: Mutex::new(AccessLists::default()),
+            known_ips: Mutex::new(BTreeMap::new()),
             saving: Mutex::new(true),
             published: Mutex::new(None),
             borders: Mutex::new(default_borders()),
@@ -551,6 +564,7 @@ impl ServerVars {
             weather: Mutex::new(Weather::default()),
             idle_timeout: Mutex::new(0),
             whitelist: Mutex::new(access),
+            known_ips: Mutex::new(BTreeMap::new()),
             saving: Mutex::new(true),
             published: Mutex::new(None),
             borders: Mutex::new(borders),
@@ -706,6 +720,24 @@ impl ServerVars {
             self.save();
         }
         changed
+    }
+
+    /// IPv4-mapped IPv6 (`::ffff:127.0.0.1`) банится тем же адресом, что
+    /// пришёл по IPv4: иначе `/ban-ip` обходится сменой стека.
+    pub fn ensure_known_ip(&self, name: &str, ip: IpAddr) {
+        self.known_ips
+            .lock()
+            .unwrap()
+            .insert(name.to_ascii_lowercase(), canonical_ip(ip));
+    }
+
+    /// Адрес последнего входа игрока с таким именем.
+    pub fn known_ip(&self, name: &str) -> Option<IpAddr> {
+        self.known_ips
+            .lock()
+            .unwrap()
+            .get(&name.to_ascii_lowercase())
+            .copied()
     }
 
     pub fn is_allowed(&self, list: AccessList, name: &str) -> bool {
@@ -1162,6 +1194,20 @@ mod tests {
         let second = vars.tick_weather().unwrap();
         assert!(second.rain);
         assert!(second.thunder);
+    }
+
+    #[test]
+    fn known_ip_is_canonical_and_case_insensitive() {
+        let vars = ServerVars::ephemeral();
+        vars.ensure_known_ip("Steve", "::ffff:127.0.0.1".parse().unwrap());
+        assert_eq!(
+            vars.known_ip("steve"),
+            Some("127.0.0.1".parse::<IpAddr>().unwrap())
+        );
+        assert_eq!(
+            canonical_ip("::1".parse().unwrap()),
+            "::1".parse::<IpAddr>().unwrap()
+        );
     }
 
     #[test]

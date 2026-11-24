@@ -528,6 +528,8 @@ impl PlayPlan {
         properties: &[chunkwake_protocol::packets::ProfileProperty],
         full: bool,
     ) -> Option<String> {
+        // `/ban-ip <игрок>` банит адрес, с которого он пришёл, а не ник.
+        self.vars.ensure_known_ip(name, addr.ip());
         let head = format!("{name} {uuid} {} {}", addr.ip(), addr.port());
         // Свойства профиля строками `имя значение [подпись]`, каждая с `\n` впереди.
         let props: String = properties
@@ -572,10 +574,10 @@ impl PlayPlan {
         addr: std::net::SocketAddr,
         full: bool,
     ) -> Option<(&'static str, String)> {
-        use super::state::AccessList;
+        use super::state::{AccessList, canonical_ip};
         // Вид отказа — `PlayerLoginEvent.Result`, как у `PlayerList.LoginResult` Paper.
         let text = |t: &str| serde_json::json!({ "text": t }).to_string();
-        let ip = addr.ip().to_string();
+        let ip = canonical_ip(addr.ip()).to_string();
         if self.vars.is_allowed(AccessList::BannedIps, &ip) {
             return Some((
                 "KICK_BANNED",
