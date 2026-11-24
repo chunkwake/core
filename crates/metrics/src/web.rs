@@ -50,8 +50,11 @@ pub fn index_raw() -> &'static [u8] {
 }
 
 /// Страница, сжатая gzip.
-pub fn index_gzip() -> Vec<u8> {
-    INDEX_GZIP.get_or_init(|| gzip(index_raw())).clone()
+///
+/// Возвращается срез кеша: копия на каждый запрос — лишние 22 КБ и
+/// аллокация, а страница неизменна на всё время работы.
+pub fn index_gzip() -> &'static [u8] {
+    INDEX_GZIP.get_or_init(|| gzip(index_raw()))
 }
 
 /// gzip через `flate2`: та же библиотека, что в протоколе и мире.

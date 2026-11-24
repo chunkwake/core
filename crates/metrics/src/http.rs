@@ -446,7 +446,7 @@ async fn handle(
             // ставим `Content-Encoding`.
             return match gzip {
                 true => {
-                    respond_gzip(&mut stream, "text/html; charset=utf-8", &web::index_gzip()).await
+                    respond_gzip(&mut stream, "text/html; charset=utf-8", web::index_gzip()).await
                 }
                 false => {
                     respond(
