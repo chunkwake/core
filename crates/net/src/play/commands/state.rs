@@ -724,11 +724,19 @@ impl ServerVars {
 
     /// IPv4-mapped IPv6 (`::ffff:127.0.0.1`) банится тем же адресом, что
     /// пришёл по IPv4: иначе `/ban-ip` обходится сменой стека.
+    ///
+    /// Карта помнит только последние адреса: имя приходит от клиента, и без
+    /// предела уникальные ники на открытом offline-сервере росли бы в памяти
+    /// бесконечно. Старые записи вытесняются; для бана всегда можно указать
+    /// сам адрес.
     pub fn ensure_known_ip(&self, name: &str, ip: IpAddr) {
-        self.known_ips
-            .lock()
-            .unwrap()
-            .insert(name.to_ascii_lowercase(), canonical_ip(ip));
+        const MAX: usize = 4096;
+        let key = name.to_ascii_lowercase();
+        let mut ips = self.known_ips.lock().unwrap();
+        if !ips.contains_key(&key) && ips.len() >= MAX {
+            ips.pop_first();
+        }
+        ips.insert(key, canonical_ip(ip));
     }
 
     /// Адрес последнего входа игрока с таким именем.
@@ -1208,6 +1216,16 @@ mod tests {
             canonical_ip("::1".parse().unwrap()),
             "::1".parse::<IpAddr>().unwrap()
         );
+    }
+
+    #[test]
+    fn known_ips_are_bounded() {
+        let vars = ServerVars::ephemeral();
+        for i in 0..=4096 {
+            vars.ensure_known_ip(&format!("n{i:04}"), "203.0.113.7".parse().unwrap());
+        }
+        assert_eq!(vars.known_ip("n0000"), None, "самый старый вытеснен");
+        assert!(vars.known_ip("n4096").is_some());
     }
 
     #[test]

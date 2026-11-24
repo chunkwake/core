@@ -528,8 +528,6 @@ impl PlayPlan {
         properties: &[chunkwake_protocol::packets::ProfileProperty],
         full: bool,
     ) -> Option<String> {
-        // `/ban-ip <игрок>` банит адрес, с которого он пришёл, а не ник.
-        self.vars.ensure_known_ip(name, addr.ip());
         let head = format!("{name} {uuid} {} {}", addr.ip(), addr.port());
         // Свойства профиля строками `имя значение [подпись]`, каждая с `\n` впереди.
         let props: String = properties
@@ -559,11 +557,18 @@ impl PlayPlan {
             h.event(crate::live::Event::Login, uuid, arg)
                 .and_then(|rx| crate::play::block_on_reply(rx, super::super::PLUGIN_TIMEOUT))
         });
-        match reply.as_deref() {
+        let denied = match reply.as_deref() {
             Some("a") => None,
             Some(r) if r.starts_with("k ") => Some(r[2..].to_owned()),
             _ => vanilla.map(|(_, json)| json),
+        };
+        if denied.is_none() {
+            // `/ban-ip <игрок>` банит адрес, с которого он пришёл, а не ник.
+            // Пишем только после успешного допуска: иначе отказ по бану или
+            // белому списку позволял бы перезаписать адрес чужого ника.
+            self.vars.ensure_known_ip(name, addr.ip());
         }
+        denied
     }
 
     /// Ванильный отказ: бан IP, бан игрока, белый список (оператор проходит), нет мест.
