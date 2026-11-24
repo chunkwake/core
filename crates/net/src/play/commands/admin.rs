@@ -189,9 +189,23 @@ fn ban_common(ctx: &Context<'_>, call: &Call<'_>, list: AccessList) -> Outcome {
         ("multiplayer.disconnect.banned", "BANNED")
     };
     let message = json!({"translate": key}).to_string();
-    let targets = ctx.plan.command_targets_named(name).unwrap_or_default();
+    let mut targets = ctx.plan.command_targets_named(name).unwrap_or_default();
+    if list == AccessList::BannedIps
+        && let Ok(ip) = target.parse::<std::net::IpAddr>()
+    {
+        // `/ban-ip <адрес>` выгоняет всех, кто сидит на нём, а не только
+        // игрока с ником, совпавшим с аргументом (у адреса ника нет).
+        for known in ctx.vars().names_with_ip(ip) {
+            if let Some(more) = ctx.plan.command_targets_named(&known) {
+                targets.extend(more);
+            }
+        }
+    }
+    let mut kicked = std::collections::HashSet::new();
     for target in &targets {
-        ctx.plan.kick(target.uuid, &message, cause);
+        if kicked.insert(target.uuid) {
+            ctx.plan.kick(target.uuid, &message, cause);
+        }
     }
     let key = if list == AccessList::BannedIps {
         "commands.banip.success"

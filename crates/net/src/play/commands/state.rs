@@ -725,10 +725,8 @@ impl ServerVars {
     /// IPv4-mapped IPv6 (`::ffff:127.0.0.1`) банится тем же адресом, что
     /// пришёл по IPv4: иначе `/ban-ip` обходится сменой стека.
     ///
-    /// Карта помнит только последние адреса: имя приходит от клиента, и без
-    /// предела уникальные ники на открытом offline-сервере росли бы в памяти
-    /// бесконечно. Старые записи вытесняются; для бана всегда можно указать
-    /// сам адрес.
+    /// Карта ограничена 4096 именами: при переполнении вытесняется запись
+    /// с наименьшим именем. Для бана всегда можно указать сам адрес.
     pub fn ensure_known_ip(&self, name: &str, ip: IpAddr) {
         const MAX: usize = 4096;
         let key = name.to_ascii_lowercase();
@@ -746,6 +744,19 @@ impl ServerVars {
             .unwrap()
             .get(&name.to_ascii_lowercase())
             .copied()
+    }
+
+    /// Имена, последний вход которых был с этого адреса. Нужно `/ban-ip`
+    /// по адресу: в ванили он выгоняет всех, кто сейчас сидит на нём.
+    pub fn names_with_ip(&self, ip: IpAddr) -> Vec<String> {
+        let ip = canonical_ip(ip);
+        self.known_ips
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, &known)| known == ip)
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     pub fn is_allowed(&self, list: AccessList, name: &str) -> bool {
@@ -1219,12 +1230,23 @@ mod tests {
     }
 
     #[test]
+    fn names_with_ip_is_canonical_and_case_insensitive() {
+        let vars = ServerVars::ephemeral();
+        vars.ensure_known_ip("Steve", "::ffff:203.0.113.7".parse().unwrap());
+        vars.ensure_known_ip("Alex", "203.0.113.7".parse().unwrap());
+        assert_eq!(
+            vars.names_with_ip("203.0.113.7".parse().unwrap()),
+            vec!["alex", "steve"]
+        );
+    }
+
+    #[test]
     fn known_ips_are_bounded() {
         let vars = ServerVars::ephemeral();
         for i in 0..=4096 {
             vars.ensure_known_ip(&format!("n{i:04}"), "203.0.113.7".parse().unwrap());
         }
-        assert_eq!(vars.known_ip("n0000"), None, "самый старый вытеснен");
+        assert_eq!(vars.known_ip("n0000"), None, "первая запись вытеснена");
         assert!(vars.known_ip("n4096").is_some());
     }
 
