@@ -13,6 +13,8 @@ final class ChunkImpl {
     private final WorldImpl world;
     private final int x;
     private final int z;
+    private final java.util.Set<Plugin> tickets = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private boolean forceLoaded;
 
     ChunkImpl(WorldImpl world, int x, int z) {
         this.world = world;
@@ -43,11 +45,39 @@ final class ChunkImpl {
     public boolean unload(boolean save) { return false; }
     public boolean unload() { return false; }
     public boolean isSlimeChunk() { return false; }
-    public boolean isForceLoaded() { return false; }
-    public void setForceLoaded(boolean force) { }
-    public boolean addPluginChunkTicket(Plugin plugin) { return false; }
-    public boolean removePluginChunkTicket(Plugin plugin) { return false; }
-    public java.util.Collection<Plugin> getPluginChunkTickets() { return java.util.List.of(); }
+    public boolean isForceLoaded() { return this.forceLoaded || !this.tickets.isEmpty(); }
+
+    private void forceload(boolean add) {
+        this.world.request("forceload " + (this.x << 4) + " " + (this.z << 4)
+                + (add ? " add" : " remove"));
+    }
+
+    public void setForceLoaded(boolean force) {
+        if (this.forceLoaded != force) {
+            this.forceLoaded = force;
+            this.forceload(force);
+        }
+    }
+
+    public boolean addPluginChunkTicket(Plugin plugin) {
+        boolean added = this.tickets.add(plugin);
+        if (added && this.tickets.size() == 1) {
+            this.forceload(true);
+        }
+        return added;
+    }
+
+    public boolean removePluginChunkTicket(Plugin plugin) {
+        boolean removed = this.tickets.remove(plugin);
+        if (removed && this.tickets.isEmpty() && !this.forceLoaded) {
+            this.forceload(false);
+        }
+        return removed;
+    }
+
+    public java.util.Collection<Plugin> getPluginChunkTickets() {
+        return java.util.Set.copyOf(this.tickets);
+    }
     public long getInhabitedTime() { return 0L; }
     public ChunkSnapshot getChunkSnapshot(boolean includeMaxBlockY, boolean includeBiome,
             boolean includeBiomeTempRain, boolean includeLightData) {

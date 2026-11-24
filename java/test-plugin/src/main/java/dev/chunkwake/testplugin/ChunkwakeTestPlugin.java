@@ -30,6 +30,10 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             getLogger().info("world: " + w.getName() + " " + w.getKey() + " " + w.getEnvironment() + " uid=" + w.getUID()
                     + " path=" + w.getWorldPath());
         }
+        if (System.getenv("CHUNKWAKE_FIXED_DIFF") != null) {
+            FixedDiffProbe.run(this);
+            return;
+        }
         String bench = System.getenv("CHUNKWAKE_BENCH_MOBS");
         if (bench != null) {
             benchMobs(Integer.parseInt(bench));

@@ -5225,6 +5225,20 @@ impl PlayPlan {
             self.set_game_time(ticks);
             return "1".into();
         }
+        // `forceload <blockX> <blockZ> add|remove` -> Bukkit chunk tickets.
+        if let Some(rest) = line.strip_prefix("forceload ") {
+            let mut parts = rest.split_whitespace();
+            let (Some(x), Some(z), Some(action)) = (parts.next(), parts.next(), parts.next()) else {
+                return String::new();
+            };
+            let (Ok(x), Ok(z)) = (x.parse::<i32>(), z.parse::<i32>()) else {
+                return String::new();
+            };
+            let add = action == "add";
+            return self
+                .force_load_here([x as f64, 0.0, z as f64], add)
+                .to_string();
+        }
         if let Some(rest) = line.strip_prefix("itemfromnbt ") {
             let line = crate::stack_nbt::unhex(rest.trim())
                 .and_then(|bytes| chunkwake_world::nbt::read_root(&bytes).ok())
