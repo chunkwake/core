@@ -1029,12 +1029,14 @@ pub fn teleport_entity(
 
 /// `ServerboundMoveVehiclePacket`: позиция, поворот и «на земле».
 pub fn read_move_vehicle(r: &mut Reader) -> Result<([f64; 3], f32, f32, bool)> {
-    Ok((
-        [r.f64()?, r.f64()?, r.f64()?],
-        r.f32()?,
-        r.f32()?,
-        r.bool()?,
-    ))
+    let pos = [r.f64()?, r.f64()?, r.f64()?];
+    let (yaw, pitch) = (r.f32()?, r.f32()?);
+    if !pos.iter().all(|v| v.is_finite()) || !yaw.is_finite() || !pitch.is_finite() {
+        return Err(crate::ProtocolError::InvalidValue(
+            "vehicle movement is not finite",
+        ));
+    }
+    Ok((pos, yaw, pitch, r.bool()?))
 }
 
 pub fn rotate_head(id: i32, entity_id: i32, yaw: f32) -> Vec<u8> {
@@ -1170,6 +1172,19 @@ mod move_tests {
         let mut w = Writer::new();
         w.f64(1.0).f64(2.0).f64(3.0).u8(1);
         assert!(read_move(&mut Reader::new(&w.buf), true, false).is_ok());
+    }
+
+    #[test]
+    fn non_finite_vehicle_movement_is_rejected() {
+        let mut w = Writer::new();
+        w.f64(0.0).f64(f64::NAN).f64(0.0).f32(0.0).f32(0.0).bool(true);
+        assert!(read_move_vehicle(&mut Reader::new(&w.buf)).is_err());
+        let mut w = Writer::new();
+        w.f64(0.0).f64(0.0).f64(0.0).f32(f32::INFINITY).f32(0.0).bool(true);
+        assert!(read_move_vehicle(&mut Reader::new(&w.buf)).is_err());
+        let mut w = Writer::new();
+        w.f64(1.0).f64(2.0).f64(3.0).f32(90.0).f32(0.0).bool(true);
+        assert!(read_move_vehicle(&mut Reader::new(&w.buf)).is_ok());
     }
 }
 
