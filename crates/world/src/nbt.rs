@@ -273,6 +273,38 @@ fn decode_utf(bytes: &[u8]) -> String {
                     | (third & 0x3f) as u16,
             );
             i += 3;
+        } else if first & 0xf8 == 0xf0 {
+            // Старые сборки Chunkwake писали обычный UTF-8. Modified UTF-8
+            // четырёхбайтных последовательностей не содержит, поэтому такой
+            // байт можно принять за эмодзи из прежнего мира.
+            let Some(&second) = bytes.get(i + 1) else {
+                units.push(0xfffd);
+                break;
+            };
+            let Some(&third) = bytes.get(i + 2) else {
+                units.push(0xfffd);
+                break;
+            };
+            let Some(&fourth) = bytes.get(i + 3) else {
+                units.push(0xfffd);
+                break;
+            };
+            let code = (((first & 0x07) as u32) << 18)
+                | (((second & 0x3f) as u32) << 12)
+                | (((third & 0x3f) as u32) << 6)
+                | (fourth & 0x3f) as u32;
+            if let Some(ch) = (0x10000..=0x10ffff)
+                .contains(&code)
+                .then(|| char::from_u32(code))
+                .flatten()
+            {
+                let mut buf = [0u16; 2];
+                units.extend_from_slice(ch.encode_utf16(&mut buf));
+                i += 4;
+            } else {
+                units.push(0xfffd);
+                i += 1;
+            }
         } else {
             units.push(0xfffd);
             i += 1;
@@ -498,6 +530,9 @@ mod tests {
         let mut out = Vec::new();
         write_str(&mut out, "\0");
         assert_eq!(out, [0, 2, 0xC0, 0x80]);
+        // Прежние сборки писали обычный UTF-8; такие миры тоже читаются.
+        let raw = [0u8, 4, 0xF0, 0x9F, 0x98, 0x80];
+        assert_eq!(read_str(&mut &raw[..]).unwrap(), "\u{1F600}");
     }
 
     /// Файл мира мог прийти извне: распаковка не должна расти без предела.
