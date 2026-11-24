@@ -65,7 +65,7 @@ fn one_component(value: &str) -> Result<&str, String> {
 fn reserved_root(name: &str) -> bool {
     // Windows отбрасывает хвостовые точки и пробелы: `Backups.` — тот же
     // каталог, что `backups`, и проверка по сырой строке его пропускала.
-    let name = name.trim_end_matches(|c| c == ' ' || c == '.');
+    let name = name.trim_end_matches([' ', '.']);
     [
         "backups",
         ".chunkwake-restore-stage",
@@ -83,7 +83,7 @@ fn reserved_root(name: &str) -> bool {
 fn reserved_world(name: &str) -> bool {
     reserved_root(name)
         || name
-            .trim_end_matches(|c| c == ' ' || c == '.')
+            .trim_end_matches([' ', '.'])
             .eq_ignore_ascii_case("plugins")
 }
 

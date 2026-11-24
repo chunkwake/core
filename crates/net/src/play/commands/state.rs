@@ -754,7 +754,7 @@ impl ServerVars {
             .lock()
             .unwrap()
             .iter()
-            .filter(|(_, &known)| known == ip)
+            .filter(|(_, known)| **known == ip)
             .map(|(name, _)| name.clone())
             .collect()
     }
