@@ -1177,10 +1177,20 @@ mod move_tests {
     #[test]
     fn non_finite_vehicle_movement_is_rejected() {
         let mut w = Writer::new();
-        w.f64(0.0).f64(f64::NAN).f64(0.0).f32(0.0).f32(0.0).bool(true);
+        w.f64(0.0)
+            .f64(f64::NAN)
+            .f64(0.0)
+            .f32(0.0)
+            .f32(0.0)
+            .bool(true);
         assert!(read_move_vehicle(&mut Reader::new(&w.buf)).is_err());
         let mut w = Writer::new();
-        w.f64(0.0).f64(0.0).f64(0.0).f32(f32::INFINITY).f32(0.0).bool(true);
+        w.f64(0.0)
+            .f64(0.0)
+            .f64(0.0)
+            .f32(f32::INFINITY)
+            .f32(0.0)
+            .bool(true);
         assert!(read_move_vehicle(&mut Reader::new(&w.buf)).is_err());
         let mut w = Writer::new();
         w.f64(1.0).f64(2.0).f64(3.0).f32(90.0).f32(0.0).bool(true);

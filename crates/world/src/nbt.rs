@@ -473,13 +473,7 @@ mod tests {
 
     #[test]
     fn modified_utf8_roundtrip() {
-        for text in [
-            "Steve",
-            "Привет",
-            "\u{1F600}",
-            "a\0b",
-            "Привет \u{1F600}\0",
-        ] {
+        for text in ["Steve", "Привет", "\u{1F600}", "a\0b", "Привет \u{1F600}\0"] {
             let mut out = Vec::new();
             write_str(&mut out, text);
             let mut slice = out.as_slice();

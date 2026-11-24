@@ -327,9 +327,7 @@ impl Properties {
         if level_path.components().count() != 1
             || !matches!(level_path.components().next(), Some(Component::Normal(_)))
         {
-            return Err(
-                "level-name: use one directory name without separators or ..".to_owned(),
-            );
+            return Err("level-name: use one directory name without separators or ..".to_owned());
         }
         let distance = |key: &str| -> Result<u8, String> {
             let text = value(key);
