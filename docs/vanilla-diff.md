@@ -4,7 +4,7 @@ Both servers loaded the same `ChunkwakeTest` plugin and ran its built-in Bukkit/
 
 - Paper observations: **31**
 - Chunkwake observations: **35**
-- Diff lines: **53**
+- Diff lines: **52**
 
 Raw logs: `benchmarks/vanilla-diff/paper.log` and `benchmarks/vanilla-diff/chunkwake.log`.
 
@@ -23,8 +23,7 @@ Raw logs: `benchmarks/vanilla-diff/paper.log` and `benchmarks/vanilla-diff/chunk
  legacy: stone->STONE grass->GRASS_BLOCK wool15->BLACK_WOOL lily->LILY_PAD
  block data: minecraft:oak_stairs[facing=north,half=bottom,shape=straight,waterlogged=true] waterlogged=true
  mannequin: poses=[FALL_FLYING, SLEEPING, SNEAKING, STANDING, SWIMMING] desc=NPC skinParts=127/true/true statistic=minecraft.custom:minecraft.deaths
--item bytes: 121 -> DIAMOND_SWORD x2 sharpness=3
-+item bytes: 122 -> DIAMOND_SWORD x2 sharpness=3
+ item bytes: 121 -> DIAMOND_SWORD x2 sharpness=3
  world time: before=<ticks> after=6000 day=true full=6000
  commandmaps: server=<CommandMap> bukkit=<CommandMap> error=null known=219
 -folia: owned on enable=true global=true
@@ -40,13 +39,13 @@ Raw logs: `benchmarks/vanilla-diff/paper.log` and `benchmarks/vanilla-diff/chunk
 -redstone: direct=AIR/STONE wire=AIR/STONE
 -hopper: moves=0 pickups=0
 -fluids: flow=AIR fall=AIR edge=AIR meet=OBSIDIAN logged=AIR/CHEST minecraft:oak_stairs[facing=north,half=bottom,shape=straight,waterlogged=true] waterlogged=true
-+piston event: extend 9 NORTH
-+piston event: extend 9 NORTH
++piston event: extend 12 NORTH
++piston event: extend 12 NORTH
 +dispense: ARROW at 60
 +move event: ARROW HOPPER -> DISPENSER
 +redstone: direct=AIR/AIR wire=AIR/AIR
 +hopper: moves=6 pickups=3
-+dispense: SNOWBALL at 60
++dispense: ARROW at 60
 +fluids: flow=WATER fall=AIR edge=AIR meet=OBSIDIAN logged=WATER/CHEST minecraft:oak_stairs[facing=north,half=bottom,shape=straight,waterlogged=true] waterlogged=true
  mob: COW health=10.0/10.0 adult=true sheep=RED living=<n> spawned=<n>
 -damage: Cow CUSTOM 20.0
@@ -70,19 +69,18 @@ Raw logs: `benchmarks/vanilla-diff/paper.log` and `benchmarks/vanilla-diff/chunk
 
 Один и тот же `ChunkwakeTest` на обеих сторонах:
 
-- `commandmaps`: Paper `known=219`, Chunkwake `known=219` — ванильные имена
-  из `reports/commands.json` и Paper/Bukkit-алиасы зарегистрированы.
-- `components`: формат `CraftEnchantment{...}` и `SignText` (4 строки)
-  совпадает с Paper.
-- `mannequin`: `desc=NPC`, `skinParts=127/true/true` совпадает.
-- `world time`: `full=6000` после `setTime(6000)` совпадает.
+- `commandmaps`: Paper `known=219`, Chunkwake `known=219`;
+- `components`: формат `CraftEnchantment{...}` и `SignText` (4 строки) совпадает;
+- `mannequin`: `desc=NPC`, `skinParts=127/true/true`;
+- `world time`: `full=6000`;
+- `ItemStack.serializeAsBytes()`: **121 B на обеих сторонах** после
+  `DataVersion=5023` и Paper-порядка ключей NBT.
 
-Остаются два числовых расхождения:
+Остаётся одно числовое расхождение:
 
 | проверка | Paper | Chunkwake | причина |
 |---|---:|---:|---|
-| `materials.transparent` | 127 | 176 | все 49 лишних — `LEGACY_*`; современные материалы совпадают. `Material.asBlockType()` в paper-api build 209 конвертирует legacy в современный блок, Paper build 248 — нет |
-| `ItemStack.serializeAsBytes()` | 121 B | 122 B | NBT raw одинаков (130 B), `DataVersion=5023` добавлен; разница gzip из-за порядка ключей |
+| `materials.transparent` | 127 | 176 | все 49 лишних — `LEGACY_*`; современные материалы совпадают. `Material.asBlockType()`/`isTransparent()` для legacy ведут себя по-разному, хотя runtime использует paper-api build 248 |
 
 ## Interpretation
 

@@ -88,7 +88,7 @@ final class StackImpl extends org.bukkit.craftbukkit.inventory.CraftItemStack {
         if (hex.isEmpty()) {
             throw new IllegalStateException("cannot serialize " + getType());
         }
-        byte[] raw = Hex.decode(hex);
+        byte[] raw = NbtOrder.reorderRoot(Hex.decode(hex));
         try (var out = new java.io.ByteArrayOutputStream();
                 var gz = new java.util.zip.GZIPOutputStream(out)) {
             gz.write(raw);
