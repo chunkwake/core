@@ -181,6 +181,13 @@ final class FixedDiffProbe implements Listener {
             }
         }
         // Redstone
+        for (int x = -3; x <= 3; x++) {
+            for (int y = 198; y <= 202; y++) {
+                for (int z = -3; z <= 3; z++) {
+                    w.getBlockAt(x, y, z).setType(Material.AIR, false);
+                }
+            }
+        }
         w.getBlockAt(0, 200, -1).setType(Material.STONE);
         w.getBlockAt(0, 200, 0).setType(Material.PISTON);
         w.getBlockAt(0, 200, 1).setType(Material.REDSTONE_BLOCK);
@@ -243,6 +250,16 @@ final class FixedDiffProbe implements Listener {
             }
             cow.damage(20);
         }
+        var chunk = w.getChunkAt(0, 1);
+        var listed = chunk.getEntities();
+        long living = java.util.Arrays.stream(listed)
+                .filter(e -> e instanceof org.bukkit.entity.LivingEntity)
+                .count();
+        boolean foundSheep = java.util.Arrays.stream(listed)
+                .anyMatch(e -> e.getUniqueId().equals(sheep.getUniqueId()));
+        this.plugin.getLogger().info("VANILLADIFF chunk-entities loaded="
+                + chunk.isEntitiesLoaded() + " found-sheep=" + foundSheep
+                + " living=" + living);
     }
 
     private void report() {

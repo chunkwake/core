@@ -17,7 +17,8 @@
 | hopper | `moves=3 pickups=1` | same |
 | fluids | `flow=WATER fall=WATER edge=WATER meet=OBSIDIAN logged=WATER/WATER` | same |
 | mob drops | `[BEEF, LEATHER]` (12 смертей, множество типов) | same |
-| fly | `rear=113 blocks=8 extends=28` | `rear=112 blocks=10 extends=26` |
+| fly | `rear=113 blocks=8 extends=28` | `rear=112 blocks=8 extends=25` |
+| `Chunk.getEntities` | `loaded=true found-sheep=true` | same (living 2/1 — старые сущности стенда) |
 
 `fly`-трейс показывает одинаковый цикл (observer → sticky pull → piston push):
 
@@ -39,7 +40,11 @@ Chunkwake 104→139 за 380 тиков (~1 блок на 10.6 тика у об�
   `forceload`, а `forceload add` **сразу грузит колонку** (`ensure_chunk`), даже
   без игроков. Это же исправляет `/forceload` и `Chunk.load()`.
 - `World.getChunkAt(x, z)` теперь загружает чанк (Bukkit-контракт), а не просто
-  отдаёт дескриптор.
+  отдаёт дескриптор; `Chunk.load(false)` не генерирует отсутствующий чанк.
+- `Chunk.getEntities()` больше не заглушка: возвращает игроков, мобов и
+  предметы своей колонки, `isEntitiesLoaded()` отражает реальную загрузку.
+  Живая проверка: овца в чанке `(0,1)` находится и в Paper, и в Chunkwake
+  (`found-sheep=true`).
 - `World.save()` и `/save-all [flush]` стали синхронными: плагин (BlueMap,
   бэкапы) получает готовые файлы сразу после возврата. Раньше `World.save()`
   был no-op, а `/save-all` только поднимал флаг для фонового autosave.

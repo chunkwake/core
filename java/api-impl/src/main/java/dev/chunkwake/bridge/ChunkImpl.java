@@ -30,8 +30,18 @@ final class ChunkImpl {
         return this.world.getBlockAt((this.x << 4) + bx, by, (this.z << 4) + bz);
     }
 
-    public boolean isEntitiesLoaded() { return true; }
-    public Entity[] getEntities() { return new Entity[0]; }
+    public boolean isEntitiesLoaded() { return isLoaded(); }
+
+    public Entity[] getEntities() {
+        java.util.List<Entity> out = new java.util.ArrayList<>();
+        for (Entity entity : this.world.getEntities()) {
+            org.bukkit.Location at = entity.getLocation();
+            if ((at.getBlockX() >> 4) == this.x && (at.getBlockZ() >> 4) == this.z) {
+                out.add(entity);
+            }
+        }
+        return out.toArray(new Entity[0]);
+    }
     public BlockState[] getTileEntities(boolean useSnapshot) { return new BlockState[0]; }
     public java.util.Collection<BlockState> getTileEntities(
             java.util.function.Predicate<? super Block> predicate, boolean useSnapshot) {
@@ -44,7 +54,8 @@ final class ChunkImpl {
     }
 
     public boolean load(boolean generate) {
-        return "1".equals(this.world.request("loadchunk " + this.x + " " + this.z).trim());
+        return "1".equals(this.world.request("loadchunk " + this.x + " " + this.z
+                + (generate ? " 1" : " 0")).trim());
     }
 
     public boolean load() {

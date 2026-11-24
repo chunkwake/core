@@ -7,7 +7,7 @@ test/probe-плагинов.
 ## Результат
 
 ```
-100 of 100 enabled in 55806 ms
+100 of 100 enabled in 63160 ms
 FAILED: (пусто)
 LOADERR: (пусто)
 SKIPPED: (пусто)

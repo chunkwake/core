@@ -3387,10 +3387,22 @@ impl PlayPlan {
     }
 
     /// Загружает колонку из региона (или генератора) в `edited`.
+    /// `generate: false` не создаёт отсутствующий чанк (`Chunk.load(false)`).
     /// `true` - колонка доступна для чтения и тика.
-    pub(crate) fn ensure_chunk(&self, x: i32, z: i32) -> bool {
+    pub(crate) fn ensure_chunk(&self, x: i32, z: i32, generate: bool) -> bool {
         // Рельеф уже вставлен волной. Мобы — после него, не на плоском шаблоне.
         self.ensure_region(x, z);
+        if !generate
+            && self.terrain().is_some()
+            && !self
+                .dim_state()
+                .edited
+                .read()
+                .unwrap()
+                .contains_key(&(x, z))
+        {
+            return false;
+        }
         self.populate_chunk(x, z);
         // Платформа void не в общем шаблоне: после диска, чтобы сохранённый чанк победил.
         self.materialize_void(x, z);
@@ -3407,7 +3419,7 @@ impl PlayPlan {
             return f.clone();
         }
         // Рельеф уже вставлен волной. Мобы — после него, не на плоском шаблоне.
-        self.ensure_chunk(x, z);
+        self.ensure_chunk(x, z, true);
         // Под блокировкой — только дешёвый клон (секции за Arc);
         // кодирование и сжатие — вне её.
         let read = || {
@@ -4942,15 +4954,16 @@ impl PlayPlan {
             }
             .into();
         }
-        // `loadchunk <x> <z>`: `World.getChunkAt`/`Chunk.load` - загрузить
-        // колонку из региона даже без игроков рядом (1/0).
+        // `loadchunk <x> <z> [generate]`: `World.getChunkAt`/`Chunk.load` -
+        // загрузить колонку из региона даже без игроков рядом (1/0).
         if let Some(rest) = line.strip_prefix("loadchunk ") {
             let mut it = rest.split_whitespace();
             let parse = |v: Option<&str>| v.and_then(|v| v.parse::<i32>().ok());
             let (Some(x), Some(z)) = (parse(it.next()), parse(it.next())) else {
                 return "0".into();
             };
-            return u8::from(self.ensure_chunk(x, z)).to_string();
+            let generate = it.next() != Some("0");
+            return u8::from(self.ensure_chunk(x, z, generate)).to_string();
         }
         // `chunkloaded <x> <z>`: `World.isChunkLoaded` (1/0).
         if let Some(rest) = line.strip_prefix("chunkloaded ") {
