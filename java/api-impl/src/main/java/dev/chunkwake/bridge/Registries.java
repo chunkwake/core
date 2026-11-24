@@ -623,6 +623,7 @@ public final class Registries implements RegistryAccess {
         }
         @Override public boolean isTreasure() { return treasure; }
         @Override public boolean isCursed() { return curse; }
+
         private java.util.Set<String> supported, exclusive;
 
         private synchronized void info() {
@@ -714,7 +715,11 @@ public final class Registries implements RegistryAccess {
 
         @Override
         public String toString() {
-            return key.toString();
+            String name = key.getKey();
+            String display = name.isEmpty() ? name
+                    : Character.toUpperCase(name.charAt(0)) + name.substring(1);
+            return "CraftEnchantment{holder=Reference{ResourceKey[minecraft:enchantment / "
+                    + key + "]=Enchantment " + display + "}}";
         }
     }
 

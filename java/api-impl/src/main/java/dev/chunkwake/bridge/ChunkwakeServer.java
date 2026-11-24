@@ -548,7 +548,8 @@ final class ChunkwakeServer {
         // Mojang command report.
         java.util.Map<String, org.bukkit.command.Command> known = commands.getKnownCommands();
         for (String name : java.util.List.of(
-                "minecraft:version", "paper", "reload", "restart", "spark", "spigot", "timings")) {
+                "minecraft:version", "paper", "paper:mspt", "reload", "restart",
+                "spark", "spigot", "timings", "tps")) {
             known.putIfAbsent(name, vanillaCommand(name));
         }
     }

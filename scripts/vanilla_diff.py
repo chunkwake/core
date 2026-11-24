@@ -34,6 +34,10 @@ NORMALIZE = (
     (re.compile(r"world time: before=\d+"), "world time: before=<ticks>"),
     (re.compile(r"mob: (.*?) living=\d+ spawned=\d+"), r"mob: \1 living=<n> spawned=<n>"),
     (re.compile(r"tag-probe: (.*?) -> \d+ \[(.*?)\]"), r"tag-probe: \1 -> <n> [\2]"),
+    # CraftBukkit and Chunkwake use different CommandMap implementations; the
+    # observable key count is what matters here.
+    (re.compile(r"commandmaps: server=\S+ bukkit=\S+"),
+     "commandmaps: server=<CommandMap> bukkit=<CommandMap>"),
 )
 
 
