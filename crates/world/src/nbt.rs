@@ -182,6 +182,17 @@ fn write_str(out: &mut Vec<u8>, s: &str) {
     // NBT пишется Java `DataOutput.writeUTF`: modified UTF-8, где NUL —
     // `C0 80`, а символы вне BMP — пара суррогатов по три байта. Сырой
     // UTF-8 с эмодзи Java прочитает как мусор, а NUL оборвёт строку.
+    //
+    // Имена блоков, ключи и почти все строки — ASCII: для них modified
+    // UTF-8 совпадает с байтами строки, и лишние Vec на каждый ключ чанка
+    // не нужны.
+    if s.bytes().all(|b| b.is_ascii() && b != 0) {
+        let bytes = s.as_bytes();
+        let len = bytes.len().min(u16::MAX as usize);
+        out.extend_from_slice(&(len as u16).to_be_bytes());
+        out.extend_from_slice(&bytes[..len]);
+        return;
+    }
     let units: Vec<u16> = s.encode_utf16().collect();
     let mut bytes = Vec::with_capacity(s.len());
     let mut i = 0;
