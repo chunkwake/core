@@ -275,6 +275,12 @@ final class FixedDiffProbe implements Listener {
                 + " piston=" + w.getBlockAt(10, 200, 0).getBlockData().getAsString());
         this.plugin.getLogger().info("VANILLADIFF hopper moves=" + this.moves.get()
                 + " pickups=" + this.pickups.get());
+        var tileEntities = w.getChunkAt(1, 0).getTileEntities();
+        this.plugin.getLogger().info("VANILLADIFF tile-entities="
+                + java.util.Arrays.stream(tileEntities)
+                        .map(s -> s.getType().name())
+                        .sorted()
+                        .toList());
         this.plugin.getLogger().info("VANILLADIFF fluids flow="
                 + w.getBlockAt(33, 200, 2).getType() + " fall="
                 + w.getBlockAt(33, 199, 5).getType() + " edge="

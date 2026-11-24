@@ -19,6 +19,7 @@
 | mob drops | `[BEEF, LEATHER]` (12 смертей, множество типов) | same |
 | fly | `rear=113 blocks=8 extends=28` | `rear=112 blocks=8 extends=25` |
 | `Chunk.getEntities` | `loaded=true found-sheep=true` | same (living 2/1 — старые сущности стенда) |
+| `Chunk.getTileEntities` | `[CHEST, HOPPER]` | same |
 
 `fly`-трейс показывает одинаковый цикл (observer → sticky pull → piston push):
 
@@ -45,6 +46,9 @@ Chunkwake 104→139 за 380 тиков (~1 блок на 10.6 тика у об�
   предметы своей колонки, `isEntitiesLoaded()` отражает реальную загрузку.
   Живая проверка: овца в чанке `(0,1)` находится и в Paper, и в Chunkwake
   (`found-sheep=true`).
+- `Chunk.getTileEntities()` больше не заглушка: отдаёт block entity колонки
+  (`blockentities` в bridge) и поддерживает predicate-фильтр. Проверка:
+  `[CHEST, HOPPER]` в чанке `(1,0)` совпадает с Paper.
 - `World.save()` и `/save-all [flush]` стали синхронными: плагин (BlueMap,
   бэкапы) получает готовые файлы сразу после возврата. Раньше `World.save()`
   был no-op, а `/save-all` только поднимал флаг для фонового autosave.

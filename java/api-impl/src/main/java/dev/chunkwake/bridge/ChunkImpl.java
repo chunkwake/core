@@ -42,10 +42,38 @@ final class ChunkImpl {
         }
         return out.toArray(new Entity[0]);
     }
-    public BlockState[] getTileEntities(boolean useSnapshot) { return new BlockState[0]; }
+    public BlockState[] getTileEntities(boolean useSnapshot) {
+        java.util.List<BlockState> out = new java.util.ArrayList<>();
+        String page = this.world.request("blockentities " + this.x + " " + this.z);
+        for (String line : page.split("\n")) {
+            if (line.isEmpty()) {
+                continue;
+            }
+            String[] f = line.split(" ");
+            if (f.length < 3) {
+                continue;
+            }
+            try {
+                int bx = Integer.parseInt(f[0]);
+                int by = Integer.parseInt(f[1]);
+                int bz = Integer.parseInt(f[2]);
+                out.add(this.world.getBlockAt(bx, by, bz).getState());
+            } catch (NumberFormatException ignored) {
+                // Битый ответ Rust — пропускаем строку.
+            }
+        }
+        return out.toArray(new BlockState[0]);
+    }
+
     public java.util.Collection<BlockState> getTileEntities(
             java.util.function.Predicate<? super Block> predicate, boolean useSnapshot) {
-        return java.util.List.of();
+        java.util.List<BlockState> out = new java.util.ArrayList<>();
+        for (BlockState state : getTileEntities(useSnapshot)) {
+            if (predicate == null || predicate.test(state.getBlock())) {
+                out.add(state);
+            }
+        }
+        return out;
     }
 
     public boolean isGenerated() { return true; }

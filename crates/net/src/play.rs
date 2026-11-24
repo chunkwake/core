@@ -4965,6 +4965,29 @@ impl PlayPlan {
             let generate = it.next() != Some("0");
             return u8::from(self.ensure_chunk(x, z, generate)).to_string();
         }
+        // `blockentities <chunkX> <chunkZ>`: `Chunk.getTileEntities()` -
+        // позиции block entity в загруженной колонке, по строке на запись.
+        if let Some(rest) = line.strip_prefix("blockentities ") {
+            let mut it = rest.split_whitespace();
+            let parse = |v: Option<&str>| v.and_then(|v| v.parse::<i32>().ok());
+            let (Some(x), Some(z)) = (parse(it.next()), parse(it.next())) else {
+                return String::new();
+            };
+            let state = self.dim_state();
+            let world = state.edited.read().unwrap();
+            let Some((column, _)) = world.get(&(x, z)) else {
+                return String::new();
+            };
+            let mut out = String::new();
+            for ([bx, by, bz], be) in &column.block_entities {
+                let line = format!("{bx} {by} {bz} {}\n", be.id);
+                if out.len() + line.len() > 7000 {
+                    break;
+                }
+                out.push_str(&line);
+            }
+            return out;
+        }
         // `chunkloaded <x> <z>`: `World.isChunkLoaded` (1/0).
         if let Some(rest) = line.strip_prefix("chunkloaded ") {
             let mut it = rest.split_whitespace();
