@@ -575,7 +575,8 @@ pub fn effective_value(text: &str, key: &str) -> String {
 }
 
 pub fn save(path: &Path, text: &str) -> Result<(), String> {
-    std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
+    chunkwake_net::write_atomic(path, text.as_bytes())
+        .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 fn parse_kv(text: &str) -> HashMap<&str, &str> {
