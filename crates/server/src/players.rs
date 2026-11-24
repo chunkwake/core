@@ -101,9 +101,6 @@ impl PlayerFiles {
     }
 
     fn write_stats(&self, uuid: Uuid, stats: &[((String, String), i32)]) -> Result<(), String> {
-        if stats.is_empty() {
-            return Ok(());
-        }
         std::fs::create_dir_all(&self.stats_dir)
             .map_err(|e| format!("create {}: {e}", self.stats_dir.display()))?;
         let mut map = serde_json::Map::new();
@@ -175,9 +172,6 @@ impl PlayerFiles {
         uuid: Uuid,
         data: &[(String, Vec<(String, i64)>)],
     ) -> Result<(), String> {
-        if data.is_empty() {
-            return Ok(());
-        }
         std::fs::create_dir_all(&self.advancements_dir)
             .map_err(|e| format!("create {}: {e}", self.advancements_dir.display()))?;
         let mut map = serde_json::Map::new();
@@ -725,5 +719,36 @@ mod tests {
         assert_eq!(old.spawn, Some([8, 64, -2]));
         assert!(old.spawn_forced);
         assert_eq!(old.spawn_dimension, None);
+    }
+
+    #[test]
+    fn empty_progress_overwrites_old_files_like_vanilla() {
+        let dir = std::env::temp_dir().join(format!(
+            "chunkwake-players-{}-{}",
+            std::process::id(),
+            rand::random::<u32>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = PlayerFiles::new(&dir, 4000, HashMap::new(), HashMap::new());
+        let uuid = Uuid::from_u128(0x1234);
+
+        files
+            .write_stats(uuid, &[(("minecraft:custom".into(), "x".into()), 1)])
+            .unwrap();
+        files.write_stats(uuid, &[]).unwrap();
+        let stats: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(files.stats_path(uuid)).unwrap()).unwrap();
+        assert!(stats["stats"].as_object().unwrap().is_empty());
+
+        files
+            .write_advancements(uuid, &[("story/root".into(), vec![("done".into(), 1)])])
+            .unwrap();
+        files.write_advancements(uuid, &[]).unwrap();
+        let advancements: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(files.advancements_path(uuid)).unwrap()).unwrap();
+        assert_eq!(advancements.as_object().unwrap().len(), 1);
+        assert!(advancements.get("DataVersion").is_some());
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
