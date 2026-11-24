@@ -26,8 +26,10 @@ py -3 scripts/analyze_ab_p99.py
 ```
 
 The checked-in `results.md` and `samples/` are from the final release build
-(`ecc9801`) and a paired low-load run: both servers used affinity `0xFF` and
-`BelowNormal`, 5 rounds, 15 s windows.
+(`5f386ee`) and a paired low-load run: both servers used affinity `0xFF` and
+`BelowNormal`, 5 rounds, 15 s windows. Paper `cache/` and `versions/` are
+pre-copied into every fresh stand so Paperclip network failures cannot abort a
+round.
 
 The benchmark runs one `PerfProbe` 1.2 plugin on each side; it is the only
 plugin. Tick duration on Chunkwake includes the Rust tick plus the Java
