@@ -542,26 +542,34 @@ pub fn latest_valid(dir: &Path) -> Option<String> {
         .find(|id| verify(dir, id).is_ok())
 }
 
-/// Все каталоги регионов мира: оверворлд, старые `DIM-1`/`DIM1` и
-/// `dimensions/<namespace>/<path>/region` из `level.dat`.
-fn region_dirs(world: &Path) -> Result<Vec<PathBuf>, String> {
+/// Все каталоги данных регионов мира: оверворлд, старые `DIM-1`/`DIM1` и
+/// `dimensions/<namespace>/<path>/...`. Кроме чанков (`region`) проверяются
+/// `entities` и `poi`: испорченный файл сущностей иначе проходил проверку
+/// бэкапа, потому что лежит в соседнем каталоге.
+fn data_dirs(world: &Path) -> Result<Vec<PathBuf>, String> {
     let mut dirs = Vec::new();
-    for name in ["region", "DIM-1/region", "DIM1/region"] {
-        let path = world.join(name);
-        if path.exists() {
-            dirs.push(path);
+    for dimension in ["", "DIM-1", "DIM1"] {
+        for kind in ["region", "entities", "poi"] {
+            let path = if dimension.is_empty() {
+                world.join(kind)
+            } else {
+                world.join(dimension).join(kind)
+            };
+            if path.exists() {
+                dirs.push(path);
+            }
         }
     }
     let dimensions = world.join("dimensions");
     if dimensions.exists() {
-        collect_region_dirs(&dimensions, &mut dirs, 0)?;
+        collect_data_dirs(&dimensions, &mut dirs, 0)?;
     }
     dirs.sort();
     dirs.dedup();
     Ok(dirs)
 }
 
-fn collect_region_dirs(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Result<(), String> {
+fn collect_data_dirs(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Result<(), String> {
     if depth > 6 {
         return Ok(());
     }
@@ -572,10 +580,13 @@ fn collect_region_dirs(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Resu
             continue;
         }
         let path = entry.path();
-        if entry.file_name() == "region" {
+        if matches!(
+            entry.file_name().to_str(),
+            Some("region" | "entities" | "poi")
+        ) {
             out.push(path);
         } else {
-            collect_region_dirs(&path, out, depth + 1)?;
+            collect_data_dirs(&path, out, depth + 1)?;
         }
     }
     Ok(())
@@ -625,7 +636,7 @@ pub fn scan_data(dir: &Path) -> Result<Vec<String>, String> {
     {
         problems.push(format!("{}: {error}", level_dat.display()));
     }
-    for region_dir in region_dirs(&world)? {
+    for region_dir in data_dirs(&world)? {
         if !region_dir.is_dir() {
             problems.push(format!("{}: expected a directory", region_dir.display()));
             continue;
@@ -829,6 +840,7 @@ mod tests {
         for region in [
             "world/DIM-1/region",
             "world/dimensions/minecraft/custom/region",
+            "world/entities",
         ] {
             fs::create_dir_all(dir.join(region)).unwrap();
             fs::write(dir.join(region).join("r.0.0.mca"), b"truncated").unwrap();
@@ -838,6 +850,10 @@ mod tests {
         assert!(problems.iter().any(|p| p.contains("DIM-1")), "{problems:?}");
         assert!(
             problems.iter().any(|p| p.contains("custom")),
+            "{problems:?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("entities")),
             "{problems:?}"
         );
         assert!(
