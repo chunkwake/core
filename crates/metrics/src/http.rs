@@ -337,6 +337,9 @@ enum Auth {
 fn redirect_target(path: &str) -> &str {
     if path.starts_with('/')
         && !path.starts_with("//")
+        // Браузер считает `\` тем же разделителем, что `/`: `/\evil.example`
+        // уводит на чужой хост, как `//evil.example`.
+        && !path.contains('\\')
         && !path.bytes().any(|b| b.is_ascii_control())
     {
         path
@@ -1210,6 +1213,17 @@ mod tests {
             raw.len() < web::index_raw().len(),
             "сжатие должно уменьшать"
         );
+    }
+
+    /// `Location` остаётся путём на этом же хосте: `//` и `\` браузер
+    /// превращает в адрес чужого сайта.
+    #[test]
+    fn redirect_target_stays_on_host() {
+        assert_eq!(redirect_target("/"), "/");
+        assert_eq!(redirect_target("/index.html"), "/index.html");
+        assert_eq!(redirect_target("//evil.example/x"), "/");
+        assert_eq!(redirect_target("/\\evil.example/x"), "/");
+        assert_eq!(redirect_target("/ok\r\nInjected: 1"), "/");
     }
 
     /// Сравнение токена не выдаёт длину совпадения по времени.
