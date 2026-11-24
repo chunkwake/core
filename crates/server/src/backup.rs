@@ -619,6 +619,12 @@ pub fn scan_data(dir: &Path) -> Result<Vec<String>, String> {
         problems.push(format!("{}: expected a world directory", world.display()));
         return Ok(problems);
     }
+    let level_dat = world.join("level.dat");
+    if level_dat.exists()
+        && let Err(error) = chunkwake_world::nbt::read_gzip_file(&level_dat)
+    {
+        problems.push(format!("{}: {error}", level_dat.display()));
+    }
     for region_dir in region_dirs(&world)? {
         if !region_dir.is_dir() {
             problems.push(format!("{}: expected a directory", region_dir.display()));
@@ -827,13 +833,15 @@ mod tests {
             fs::create_dir_all(dir.join(region)).unwrap();
             fs::write(dir.join(region).join("r.0.0.mca"), b"truncated").unwrap();
         }
+        fs::write(dir.join("world/level.dat"), b"not gzip").unwrap();
         let problems = scan_data(&dir).unwrap();
+        assert!(problems.iter().any(|p| p.contains("DIM-1")), "{problems:?}");
         assert!(
-            problems.iter().any(|p| p.contains("DIM-1")),
+            problems.iter().any(|p| p.contains("custom")),
             "{problems:?}"
         );
         assert!(
-            problems.iter().any(|p| p.contains("custom")),
+            problems.iter().any(|p| p.contains("level.dat")),
             "{problems:?}"
         );
         fs::remove_dir_all(dir).unwrap();
