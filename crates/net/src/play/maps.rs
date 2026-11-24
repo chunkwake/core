@@ -539,7 +539,18 @@ impl PlayPlan {
         if dirty.is_empty() && last.is_none() {
             return Ok(0);
         }
-        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            let mut store = self.maps.lock().unwrap();
+            for (id, _) in &dirty {
+                if let Some(m) = store.maps.get_mut(id) {
+                    m.dirty = true;
+                }
+            }
+            if last.is_some() {
+                store.last_id_dirty = true;
+            }
+            return Err(format!("create {}: {e}", dir.display()));
+        }
         let wrap = |data: Compound| {
             Compound::from([
                 ("data".into(), Tag::Compound(data)),
@@ -556,6 +567,18 @@ impl PlayPlan {
                 tracing::warn!("map {id}: {e}");
             }
         }
+        if !failed.is_empty() {
+            let mut store = self.maps.lock().unwrap();
+            for id in &failed {
+                if let Some(m) = store.maps.get_mut(id) {
+                    m.dirty = true;
+                }
+            }
+            if last.is_some() {
+                store.last_id_dirty = true;
+            }
+            return Err(format!("{} maps failed", failed.len()));
+        }
         if let Some(last) = last {
             let data = Compound::from([("map".into(), Tag::Int(last))]);
             if let Err(e) =
@@ -564,15 +587,6 @@ impl PlayPlan {
                 self.maps.lock().unwrap().last_id_dirty = true;
                 return Err(e);
             }
-        }
-        if !failed.is_empty() {
-            let mut store = self.maps.lock().unwrap();
-            for id in &failed {
-                if let Some(m) = store.maps.get_mut(id) {
-                    m.dirty = true;
-                }
-            }
-            return Err(format!("{} maps failed", failed.len()));
         }
         Ok(dirty_len)
     }
