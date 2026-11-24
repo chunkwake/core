@@ -954,7 +954,7 @@ impl ServerVars {
         };
         match serde_json::to_string_pretty(&saved) {
             Ok(text) => {
-                if let Err(e) = std::fs::write(path, text) {
+                if let Err(e) = crate::write_atomic(path, text.as_bytes()) {
                     tracing::error!("write {}: {e}", path.display());
                 }
             }

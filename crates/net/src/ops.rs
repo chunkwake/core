@@ -103,8 +103,15 @@ impl OpList {
 
     fn save(&self) {
         let Some(path) = &self.path else { return };
-        let text = serde_json::to_string_pretty(&*self.entries.lock().unwrap()).unwrap_or_default();
-        if let Err(e) = std::fs::write(path, text) {
+        let text = match serde_json::to_string_pretty(&*self.entries.lock().unwrap()) {
+            Ok(text) => text,
+            Err(e) => {
+                // Пустая строка вместо списка стёрла бы всех операторов.
+                tracing::error!("ops: {e}");
+                return;
+            }
+        };
+        if let Err(e) = crate::write_atomic(path, text.as_bytes()) {
             tracing::error!("write {}: {e}", path.display());
         }
     }

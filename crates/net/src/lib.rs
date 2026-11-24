@@ -928,6 +928,26 @@ pub mod transform;
 pub mod translate;
 pub mod velocity;
 
+/// Запись небольшого JSON-файла через временный файл и переименование.
+///
+/// `std::fs::write` сначала обрезает старый файл: падение или нехватка места
+/// посреди записи оставляли бы `ops.json`/`gamerules.json` пустыми, то есть
+/// теряли бы всех операторов или все правила. Переименование подменяет файл
+/// целиком; при ошибке временный удаляется, старый остаётся.
+pub(crate) fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, bytes)?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(error)
+        }
+    }
+}
+
 #[cfg(test)]
 mod admission_tests {
     use super::*;
