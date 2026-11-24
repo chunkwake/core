@@ -27,6 +27,8 @@ pub enum ProtocolError {
     UnknownPacket { id: i32, state: &'static str },
     #[error("unknown next state {0}")]
     BadNextState(i32),
+    #[error("invalid value: {0}")]
+    InvalidValue(&'static str),
     #[error("decompression failed: {0}")]
     Decompress(#[from] std::io::Error),
 }

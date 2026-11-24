@@ -1062,12 +1062,26 @@ pub struct Move {
 
 pub fn read_move(r: &mut Reader, has_pos: bool, has_rot: bool) -> Result<Move> {
     let pos = if has_pos {
-        Some([r.f64()?, r.f64()?, r.f64()?])
+        let pos = [r.f64()?, r.f64()?, r.f64()?];
+        // NaN и бесконечность ломают позицию игрока, сравнения границ и
+        // вычисление чанков; ванильный сервер такие пакеты не принимает.
+        if !pos.iter().all(|v| v.is_finite()) {
+            return Err(crate::ProtocolError::InvalidValue(
+                "movement position is not finite",
+            ));
+        }
+        Some(pos)
     } else {
         None
     };
     let rot = if has_rot {
-        Some((r.f32()?, r.f32()?))
+        let (yaw, pitch) = (r.f32()?, r.f32()?);
+        if !yaw.is_finite() || !pitch.is_finite() {
+            return Err(crate::ProtocolError::InvalidValue(
+                "movement rotation is not finite",
+            ));
+        }
+        Some((yaw, pitch))
     } else {
         None
     };
@@ -1133,6 +1147,29 @@ mod move_tests {
         );
         let p = move_entity_pos_rot(0x33, 7, [1, -1, 0], 90.0, 0.0, true);
         assert_eq!(p, [0x33, 7, 1, 0, 1, 0xff, 0xff, 0, 0, 64, 0]);
+    }
+
+    #[test]
+    fn non_finite_movement_is_rejected() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut w = Writer::new();
+            w.f64(bad).f64(0.0).f64(0.0).u8(1);
+            assert!(
+                read_move(&mut Reader::new(&w.buf), true, false).is_err(),
+                "position {bad} must be rejected"
+            );
+        }
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut w = Writer::new();
+            w.f32(bad).f32(0.0).u8(1);
+            assert!(
+                read_move(&mut Reader::new(&w.buf), false, true).is_err(),
+                "rotation {bad} must be rejected"
+            );
+        }
+        let mut w = Writer::new();
+        w.f64(1.0).f64(2.0).f64(3.0).u8(1);
+        assert!(read_move(&mut Reader::new(&w.buf), true, false).is_ok());
     }
 }
 
