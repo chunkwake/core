@@ -19,6 +19,7 @@ MARKER = "[ChunkwakeTest]"
 # Lines that are expected to differ between servers or depend on wall-clock
 # timing. They are not useful as behaviour assertions.
 IGNORE = (
+    "Loading server plugin ",
     "onEnable on ",
     "resource plugin.yml:",
     "world: world",
@@ -51,6 +52,10 @@ def extract(path: Path) -> list[str]:
             continue
         for pattern, replacement in NORMALIZE:
             text = pattern.sub(replacement, text)
+        tag = re.match(r"tag-probe: (.*?) -> <n> \[(.*?)\]$", text)
+        if tag:
+            values = sorted(part.strip() for part in tag.group(2).split(",") if part.strip())
+            text = f"tag-probe: {tag.group(1)} -> <n> [{', '.join(values)}]"
         out.append(text)
     return out
 

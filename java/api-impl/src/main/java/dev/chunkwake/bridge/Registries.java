@@ -312,6 +312,46 @@ public final class Registries implements RegistryAccess {
         } catch (Throwable t) {
             Bridge.log(2, "registries: GameRule init failed: " + t);
         }
+        trimLegacyMaterials();
+    }
+
+    /**
+     * CraftLegacy removes legacy constants from {@code Material.values()}.
+     * The legacy fields remain for {@code valueOf}/{@code fromLegacy}, but
+     * plugins iterating values must see the same 1815 modern entries as Paper.
+     */
+    private static void trimLegacyMaterials() {
+        try {
+            java.lang.reflect.Field values = org.bukkit.Material.class.getDeclaredField("$VALUES");
+            values.setAccessible(true);
+            org.bukkit.Material[] all = (org.bukkit.Material[]) values.get(null);
+            org.bukkit.Material[] modern = java.util.Arrays.stream(all)
+                    .filter(material -> !material.isLegacy())
+                    .toArray(org.bukkit.Material[]::new);
+            values.set(null, modern);
+        } catch (Throwable direct) {
+            // Java 17+ forbids Field.set on static final enum $VALUES.
+            try {
+                Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
+                java.lang.reflect.Field theUnsafe = unsafeClass.getDeclaredField("theUnsafe");
+                theUnsafe.setAccessible(true);
+                Object unsafe = theUnsafe.get(null);
+                java.lang.reflect.Field values = org.bukkit.Material.class.getDeclaredField("$VALUES");
+                values.setAccessible(true);
+                org.bukkit.Material[] all = (org.bukkit.Material[]) values.get(null);
+                org.bukkit.Material[] modern = java.util.Arrays.stream(all)
+                        .filter(material -> !material.isLegacy())
+                        .toArray(org.bukkit.Material[]::new);
+                Object base = unsafeClass.getMethod("staticFieldBase", java.lang.reflect.Field.class)
+                        .invoke(unsafe, values);
+                long offset = (Long) unsafeClass.getMethod("staticFieldOffset", java.lang.reflect.Field.class)
+                        .invoke(unsafe, values);
+                unsafeClass.getMethod("putObject", Object.class, long.class, Object.class)
+                        .invoke(unsafe, base, offset, modern);
+            } catch (Throwable t) {
+                Bridge.log(2, "registries: Material.values trim failed: " + t);
+            }
+        }
     }
 
     /** Тип значений реестра — из объявления поля {@code RegistryKey<T>}. */

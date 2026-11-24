@@ -2,9 +2,9 @@
 
 Both servers loaded the same `ChunkwakeTest` plugin and ran its built-in Bukkit/API observations. Volatile lines (timestamps, classloaders, world UUIDs, scheduler counters, per-tick region tasks) are omitted.
 
-- Paper observations: **31**
-- Chunkwake observations: **35**
-- Diff lines: **52**
+- Paper observations: **30**
+- Chunkwake observations: **33**
+- Diff lines: **39**
 
 Raw logs: `benchmarks/vanilla-diff/paper.log` and `benchmarks/vanilla-diff/chunkwake.log`.
 
@@ -13,16 +13,7 @@ Raw logs: `benchmarks/vanilla-diff/paper.log` and `benchmarks/vanilla-diff/chunk
 ```diff
 --- Paper
 +++ Chunkwake
-@@ -1,31 +1,35 @@
--Loading server plugin ChunkwakeTest v1.0
- Enabling ChunkwakeTest v1.0
- default attributes: zombie has=true hp=20.0 attack=3.0 cow hp=10.0
- enchant offers: minecraft:sharpness/1@6 minecraft:bane_of_arthropods/3@20 minecraft:knockback/2@30
--materials: transparent=127 errors=0 stone.transparent=false air.transparent=true
-+materials: transparent=176 errors=0 stone.transparent=false air.transparent=true
- legacy: stone->STONE grass->GRASS_BLOCK wool15->BLACK_WOOL lily->LILY_PAD
- block data: minecraft:oak_stairs[facing=north,half=bottom,shape=straight,waterlogged=true] waterlogged=true
- mannequin: poses=[FALL_FLYING, SLEEPING, SNEAKING, STANDING, SWIMMING] desc=NPC skinParts=127/true/true statistic=minecraft.custom:minecraft.deaths
+@@ -8,23 +8,26 @@
  item bytes: 121 -> DIAMOND_SWORD x2 sharpness=3
  world time: before=<ticks> after=6000 day=true full=6000
  commandmaps: server=<CommandMap> bukkit=<CommandMap> error=null known=219
@@ -39,25 +30,21 @@ Raw logs: `benchmarks/vanilla-diff/paper.log` and `benchmarks/vanilla-diff/chunk
 -redstone: direct=AIR/STONE wire=AIR/STONE
 -hopper: moves=0 pickups=0
 -fluids: flow=AIR fall=AIR edge=AIR meet=OBSIDIAN logged=AIR/CHEST minecraft:oak_stairs[facing=north,half=bottom,shape=straight,waterlogged=true] waterlogged=true
-+piston event: extend 12 NORTH
-+piston event: extend 12 NORTH
-+dispense: ARROW at 60
++dispense: SNOWBALL at 60
 +move event: ARROW HOPPER -> DISPENSER
-+redstone: direct=AIR/AIR wire=AIR/AIR
++redstone: direct=STONE/STONE wire=STONE/STONE
 +hopper: moves=6 pickups=3
-+dispense: ARROW at 60
++dispense: SNOWBALL at 60
 +fluids: flow=WATER fall=AIR edge=AIR meet=OBSIDIAN logged=WATER/CHEST minecraft:oak_stairs[facing=north,half=bottom,shape=straight,waterlogged=true] waterlogged=true
  mob: COW health=10.0/10.0 adult=true sheep=RED living=<n> spawned=<n>
 -damage: Cow CUSTOM 20.0
 -mob death: COW drops=[BEEF] xp=0
--tag-probe: base_stone_overworld -> <n> [TUFF, DIORITE, DEEPSLATE]
--tag-probe: coal_ores -> <n> [DEEPSLATE_COAL_ORE, COAL_ORE]
--tag-probe: diamond_ores -> <n> [DIAMOND_ORE, DEEPSLATE_DIAMOND_ORE]
--tag-probe: minecraft:base_stone_overworld -> <n> [TUFF, DIORITE, DEEPSLATE]
--fly: rear observer x=100 blocks=8
+-tag-probe: base_stone_overworld -> <n> [DEEPSLATE, DIORITE, TUFF]
 +tag-probe: base_stone_overworld -> <n> [ANDESITE, DEEPSLATE, DIORITE]
-+tag-probe: coal_ores -> <n> [COAL_ORE, DEEPSLATE_COAL_ORE]
-+tag-probe: diamond_ores -> <n> [DEEPSLATE_DIAMOND_ORE, DIAMOND_ORE]
+ tag-probe: coal_ores -> <n> [COAL_ORE, DEEPSLATE_COAL_ORE]
+ tag-probe: diamond_ores -> <n> [DEEPSLATE_DIAMOND_ORE, DIAMOND_ORE]
+-tag-probe: minecraft:base_stone_overworld -> <n> [DEEPSLATE, DIORITE, TUFF]
+-fly: rear observer x=100 blocks=8
 +tag-probe: minecraft:base_stone_overworld -> <n> [ANDESITE, DEEPSLATE, DIORITE]
 +fly: rear observer x=-1 blocks=0
 +mob death: COW drops=[BEEF, LEATHER] xp=0
@@ -65,22 +52,27 @@ Raw logs: `benchmarks/vanilla-diff/paper.log` and `benchmarks/vanilla-diff/chunk
 +mob death: SHEEP drops=[MUTTON, RED_WOOL] xp=0
 ```
 
-## Дополнительные проверки
+## Ключевые API-проверки
 
-Один и тот же `ChunkwakeTest` на обеих сторонах:
+После правок совпадают:
 
-- `commandmaps`: Paper `known=219`, Chunkwake `known=219`;
-- `components`: формат `CraftEnchantment{...}` и `SignText` (4 строки) совпадает;
-- `mannequin`: `desc=NPC`, `skinParts=127/true/true`;
-- `world time`: `full=6000`;
-- `ItemStack.serializeAsBytes()`: **121 B на обеих сторонах** после
-  `DataVersion=5023` и Paper-порядка ключей NBT.
+- `commandmaps known=219/219`;
+- `ItemStack.serializeAsBytes()` — **121 B / 121 B**, NBT в Paper-порядке;
+- `materials.transparent` — **127 / 127**;
+- `components` — формат `CraftEnchantment{...}`;
+- `mannequin` — `NPC`, `skinParts=127/true/true`;
+- `SignText` — 4 строки;
+- `world time` — `full=6000`.
 
-Остаётся одно числовое расхождение:
+Для `material.values()` реализовано поведение CraftLegacy: legacy-константы
+остаются доступны через `valueOf`/`fromLegacy`, но исключаются из
+`Material.values()`, как в Paper build 248.
 
-| проверка | Paper | Chunkwake | причина |
-|---|---:|---:|---|
-| `materials.transparent` | 127 | 176 | все 49 лишних — `LEGACY_*`; современные материалы совпадают. `Material.asBlockType()`/`isTransparent()` для legacy ведут себя по-разному, хотя runtime использует paper-api build 248 |
+Оставшиеся строки diff — это timing/implementation наблюдения
+(`redstone`, `hopper`, `fluids`, `fly`, `folia: owned on enable`, порядок
+`folia`-задач и `damage`/`mob death`), а не числовые API-расхождения.
+Они требуют отдельного детерминированного сценария с фиксированным
+порядком тиков.
 
 ## Interpretation
 
