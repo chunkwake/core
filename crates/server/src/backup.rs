@@ -542,6 +542,63 @@ pub fn latest_valid(dir: &Path) -> Option<String> {
         .find(|id| verify(dir, id).is_ok())
 }
 
+/// Все каталоги регионов мира: оверворлд, старые `DIM-1`/`DIM1` и
+/// `dimensions/<namespace>/<path>/region` из `level.dat`.
+fn region_dirs(world: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut dirs = Vec::new();
+    for name in ["region", "DIM-1/region", "DIM1/region"] {
+        let path = world.join(name);
+        if path.exists() {
+            dirs.push(path);
+        }
+    }
+    let dimensions = world.join("dimensions");
+    if dimensions.exists() {
+        collect_region_dirs(&dimensions, &mut dirs, 0)?;
+    }
+    dirs.sort();
+    dirs.dedup();
+    Ok(dirs)
+}
+
+fn collect_region_dirs(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Result<(), String> {
+    if depth > 6 {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+        if file_type.is_symlink() || !file_type.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        if entry.file_name() == "region" {
+            out.push(path);
+        } else {
+            collect_region_dirs(&path, out, depth + 1)?;
+        }
+    }
+    Ok(())
+}
+
+fn scan_region_dir(dir: &Path, problems: &mut Vec<String>) -> Result<(), String> {
+    let store = chunkwake_world::anvil::RegionStore::new(dir.to_owned());
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let parts: Vec<&str> = name.split('.').collect();
+        if parts.len() == 4
+            && parts[0] == "r"
+            && parts[3] == "mca"
+            && let (Ok(x), Ok(z)) = (parts[1].parse(), parts[2].parse())
+            && let Err(error) = store.load_region(x, z)
+        {
+            problems.push(format!("{}: {error}", entry.path().display()));
+        }
+    }
+    Ok(())
+}
+
 /// Проверяет сохранённые NBT без запуска игрового мира.
 pub fn scan_data(dir: &Path) -> Result<Vec<String>, String> {
     let mut problems = Vec::new();
@@ -562,25 +619,12 @@ pub fn scan_data(dir: &Path) -> Result<Vec<String>, String> {
         problems.push(format!("{}: expected a world directory", world.display()));
         return Ok(problems);
     }
-    let region_dir = world.join("region");
-    if region_dir.exists() && !region_dir.is_dir() {
-        problems.push(format!("{}: expected a directory", region_dir.display()));
-    }
-    if region_dir.is_dir() {
-        let store = chunkwake_world::anvil::RegionStore::new(region_dir.clone());
-        for entry in fs::read_dir(&region_dir).map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let parts: Vec<&str> = name.split('.').collect();
-            if parts.len() == 4
-                && parts[0] == "r"
-                && parts[3] == "mca"
-                && let (Ok(x), Ok(z)) = (parts[1].parse(), parts[2].parse())
-                && let Err(error) = store.load_region(x, z)
-            {
-                problems.push(format!("{}: {error}", entry.path().display()));
-            }
+    for region_dir in region_dirs(&world)? {
+        if !region_dir.is_dir() {
+            problems.push(format!("{}: expected a directory", region_dir.display()));
+            continue;
         }
+        scan_region_dir(&region_dir, &mut problems)?;
     }
     let players = world.join("playerdata");
     if players.exists() && !players.is_dir() {
@@ -770,6 +814,28 @@ mod tests {
                 .any(|p| p.contains("truncated region header"))
         );
         assert_eq!(latest_valid(&dir), Some(id));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn doctor_scan_checks_nether_and_custom_dimensions() {
+        let dir = fixture();
+        for region in [
+            "world/DIM-1/region",
+            "world/dimensions/minecraft/custom/region",
+        ] {
+            fs::create_dir_all(dir.join(region)).unwrap();
+            fs::write(dir.join(region).join("r.0.0.mca"), b"truncated").unwrap();
+        }
+        let problems = scan_data(&dir).unwrap();
+        assert!(
+            problems.iter().any(|p| p.contains("DIM-1")),
+            "{problems:?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("custom")),
+            "{problems:?}"
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
