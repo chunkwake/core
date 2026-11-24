@@ -3,7 +3,7 @@
 use chunkwake_net::{GameVersion, NetConfig};
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub const DEFAULT_PROPERTIES: &str = "\
 # Chunkwake server properties
@@ -317,8 +317,19 @@ impl Properties {
             "trace" => tracing_subscriber::filter::LevelFilter::TRACE,
             _ => return Err("log-level: choose error, warn, info, debug, or trace".into()),
         };
-        if value("level-name").is_empty() {
+        let level_name = value("level-name");
+        if level_name.is_empty() {
             return Err("level-name: enter a world name".into());
+        }
+        // Мир создаётся как `--dir/<level-name>`; `..`, абсолютный путь или
+        // вложенный каталог увели бы запись за пределы каталога сервера.
+        let level_path = Path::new(level_name);
+        if level_path.components().count() != 1
+            || !matches!(level_path.components().next(), Some(Component::Normal(_)))
+        {
+            return Err(
+                "level-name: use one directory name without separators or ..".to_owned(),
+            );
         }
         let distance = |key: &str| -> Result<u8, String> {
             let text = value(key);
@@ -712,6 +723,10 @@ mod tests {
             "spawn-protection=-1",
             "log-level=verbose",
             "memory-profile=tiny",
+            "level-name=",
+            "level-name=../outside",
+            "level-name=/absolute/world",
+            "level-name=nested/world",
         ] {
             assert!(Properties::parse(text).is_err(), "{text}");
         }
