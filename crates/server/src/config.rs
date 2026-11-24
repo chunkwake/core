@@ -373,6 +373,11 @@ impl Properties {
         let spawn_protection = value("spawn-protection")
             .parse::<u32>()
             .map_err(|_| "spawn-protection: enter a non-negative integer".to_owned())?;
+        // Дальше радиус хранится в `i32`; больший `u32` стал бы отрицательным
+        // и молча отключил защиту спавна.
+        if spawn_protection > i32::MAX as u32 {
+            return Err("spawn-protection: enter a value up to 2147483647".into());
+        }
         let metrics_enabled = value("metrics-enabled")
             .parse::<bool>()
             .map_err(|_| "metrics-enabled: use true or false".to_owned())?;
@@ -724,6 +729,7 @@ mod tests {
             "difficulty=unknown",
             "hardcore=yes",
             "spawn-protection=-1",
+            "spawn-protection=2147483648",
             "log-level=verbose",
             "memory-profile=tiny",
             "level-name=",
