@@ -57,18 +57,41 @@ fn one_component(value: &str) -> Result<&str, String> {
     }
 }
 
+/// Каталог, который бэкап не имеет права заменять или обходить.
+///
+/// Сравнение без учёта регистра: на Windows `Backups` — тот же каталог, что
+/// `backups`, и иначе бэкап складывал бы в себя прошлые бэкапы, а restore мог
+/// бы удалить сам каталог бэкапов.
+fn reserved_root(name: &str) -> bool {
+    // Windows отбрасывает хвостовые точки и пробелы: `Backups.` — тот же
+    // каталог, что `backups`, и проверка по сырой строке его пропускала.
+    let name = name.trim_end_matches(|c| c == ' ' || c == '.');
+    [
+        "backups",
+        ".chunkwake-restore-stage",
+        ".chunkwake-restore-old",
+        LOCK,
+        MARKER,
+    ]
+    .iter()
+    .copied()
+    .any(|reserved| name.eq_ignore_ascii_case(reserved))
+}
+
+/// `level-name` не должен совпадать с каталогом плагинов: иначе мир и
+/// плагины делят одну папку, а бэкап дважды обходит её как два корня.
+fn reserved_world(name: &str) -> bool {
+    reserved_root(name)
+        || name
+            .trim_end_matches(|c| c == ' ' || c == '.')
+            .eq_ignore_ascii_case("plugins")
+}
+
 fn roots(dir: &Path) -> Result<Vec<String>, String> {
     let props = Properties::load(&dir.join("server.properties"))?;
     let world = one_component(&props.level_name)?.to_owned();
-    if [
-        "backups",
-        "plugins",
-        ".chunkwake-restore-stage",
-        ".chunkwake-restore-old",
-    ]
-    .contains(&world.as_str())
-    {
-        return Err("level-name conflicts with a reserved server directory".into());
+    if reserved_world(&world) {
+        return Err("level-name conflicts with a server directory".into());
     }
     Ok(vec![
         "server.properties".into(),
@@ -243,15 +266,7 @@ fn create_from_roots(
 ) -> Result<String, String> {
     for root in &roots {
         one_component(root)?;
-        if [
-            "backups",
-            ".chunkwake-restore-stage",
-            ".chunkwake-restore-old",
-            LOCK,
-            MARKER,
-        ]
-        .contains(&root.as_str())
-        {
+        if reserved_root(root) {
             return Err(format!("reserved backup root {root}"));
         }
     }
@@ -433,15 +448,7 @@ fn replace_from(dir: &Path, id: &str, allow_damaged: bool) -> Result<(), String>
     for root in roots {
         let name = root.as_str().ok_or("invalid root")?;
         one_component(name)?;
-        if [
-            "backups",
-            ".chunkwake-restore-stage",
-            ".chunkwake-restore-old",
-            LOCK,
-            MARKER,
-        ]
-        .contains(&name)
-        {
+        if reserved_root(name) {
             return Err("backup contains a reserved root".into());
         }
         let current = dir.join(name);
@@ -691,6 +698,25 @@ mod tests {
         fs::create_dir_all(dir.join("generated")).unwrap();
         fs::write(dir.join("generated/data"), b"excluded").unwrap();
         dir
+    }
+
+    #[test]
+    fn reserved_roots_are_case_insensitive() {
+        assert!(reserved_root("BACKUPS"));
+        assert!(reserved_root("backups."));
+        assert!(reserved_root(".Chunkwake-Restore-Stage"));
+        assert!(!reserved_root("plugins"));
+        let dir = fixture();
+        for name in ["Backups", "Backups.", "PLUGINS", ".chunkwake.lock"] {
+            fs::write(
+                dir.join("server.properties"),
+                format!("level-name={name}\nserver-port=25565\n"),
+            )
+            .unwrap();
+            let error = create(&dir).unwrap_err();
+            assert!(error.contains("conflicts"), "{name}: {error}");
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
