@@ -279,6 +279,16 @@ const FIELDS: [Field; 26] = [
     },
 ];
 
+/// Значение для экрана проверки: токены и пароли не показываем даже админу,
+/// иначе они остаются на терминале и в записи сессии.
+fn shown_value<'a>(field: &Field, value: &'a str) -> &'a str {
+    if config::is_secret(field.key) && !value.is_empty() {
+        "<hidden>"
+    } else {
+        value
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Browse,
@@ -737,7 +747,7 @@ fn display_value(app: &App, index: usize) -> Line<'static> {
         ]);
     }
     Line::from(Span::styled(
-        app.values[index].clone(),
+        shown_value(&FIELDS[index], &app.values[index]).to_owned(),
         Style::default().fg(if app.selected == index { TEXT } else { MUTED }),
     ))
 }
@@ -823,12 +833,12 @@ fn draw_compact(frame: &mut Frame, app: &App, area: Rect) {
                     if app.initial[*index].is_empty() {
                         "—"
                     } else {
-                        &app.initial[*index]
+                        shown_value(&FIELDS[*index], &app.initial[*index])
                     },
                     if app.values[*index].is_empty() {
                         "—"
                     } else {
-                        &app.values[*index]
+                        shown_value(&FIELDS[*index], &app.values[*index])
                     }
                 ))
                 .style(Style::default().fg(TEXT)),
@@ -1157,12 +1167,12 @@ fn draw(frame: &mut Frame, app: &App) {
                     if app.initial[*index].is_empty() {
                         "—"
                     } else {
-                        &app.initial[*index]
+                        shown_value(&FIELDS[*index], &app.initial[*index])
                     },
                     if app.values[*index].is_empty() {
                         "—"
                     } else {
-                        &app.values[*index]
+                        shown_value(&FIELDS[*index], &app.values[*index])
                     }
                 ))
                 .style(Style::default().fg(TEXT)),
@@ -1660,6 +1670,21 @@ mod tests {
     }
 
     /// Поля дашборда есть в TUI и пишутся в черновик конфига.
+    #[test]
+    fn review_hides_secrets() {
+        let token = FIELDS
+            .iter()
+            .find(|field| field.key == "metrics-token")
+            .expect("metrics-token");
+        assert_eq!(shown_value(token, "0123456789abcdef"), "<hidden>");
+        assert_eq!(shown_value(token, ""), "");
+        let port = FIELDS
+            .iter()
+            .find(|field| field.key == "server-port")
+            .expect("server-port");
+        assert_eq!(shown_value(port, "25565"), "25565");
+    }
+
     #[test]
     fn metrics_fields_are_editable_and_saved() {
         let mut app = app(config::DEFAULT_PROPERTIES);

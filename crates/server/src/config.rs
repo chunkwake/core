@@ -48,6 +48,11 @@ metrics-port=25585
 metrics-token=
 ";
 
+/// Ключи, значения которых нельзя печатать: это пароли к внешним сервисам.
+pub fn is_secret(key: &str) -> bool {
+    matches!(key, "velocity-secret" | "metrics-token")
+}
+
 pub const KEYS: &[&str] = &[
     "server-ip",
     "server-port",

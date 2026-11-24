@@ -712,7 +712,15 @@ fn print_summary<W: Write>(text: &str, output: &mut W) -> io::Result<()> {
         if *key == "level-name" {
             writeln!(output, "\n# Saved for future versions; no effect yet")?;
         }
-        writeln!(output, "{key}={}", config::effective_value(text, key))?;
+        let value = config::effective_value(text, key);
+        // `config show` часто попадает в логи и CI: секреты в открытом виде
+        // оттуда утекают. Показываем только факт, что значение задано.
+        let shown = if config::is_secret(key) && !value.is_empty() {
+            "<hidden>"
+        } else {
+            value.as_str()
+        };
+        writeln!(output, "{key}={shown}")?;
     }
     Ok(())
 }
@@ -922,6 +930,18 @@ mod tests {
             assert!(error.contains("vanilla-jar"), "{error}");
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn config_summary_hides_secrets() {
+        let text = "velocity-secret=super-secret\nmetrics-token=0123456789abcdef\n";
+        let mut out = Vec::new();
+        print_summary(text, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("velocity-secret=<hidden>"), "{out}");
+        assert!(out.contains("metrics-token=<hidden>"), "{out}");
+        assert!(!out.contains("super-secret"), "{out}");
+        assert!(!out.contains("0123456789abcdef"), "{out}");
     }
 
     #[test]
