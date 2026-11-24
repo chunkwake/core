@@ -179,9 +179,95 @@ pub fn read_root(mut data: &[u8]) -> Result<Compound, String> {
 }
 
 fn write_str(out: &mut Vec<u8>, s: &str) {
-    // Имена и значения у нас ASCII; modified UTF-8 совпадает с UTF-8 без NUL и вне BMP.
-    out.extend_from_slice(&(s.len() as u16).to_be_bytes());
-    out.extend_from_slice(s.as_bytes());
+    // NBT пишется Java `DataOutput.writeUTF`: modified UTF-8, где NUL —
+    // `C0 80`, а символы вне BMP — пара суррогатов по три байта. Сырой
+    // UTF-8 с эмодзи Java прочитает как мусор, а NUL оборвёт строку.
+    let units: Vec<u16> = s.encode_utf16().collect();
+    let mut bytes = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < units.len() {
+        let unit = units[i];
+        let next = if (0xd800..=0xdbff).contains(&unit)
+            && units
+                .get(i + 1)
+                .is_some_and(|u| (0xdc00..=0xdfff).contains(u))
+        {
+            Some(units[i + 1])
+        } else {
+            None
+        };
+        let len = match unit {
+            0x0001..=0x007f => 1,
+            0x0000 | 0x0080..=0x07ff => 2,
+            _ => 3,
+        };
+        // Длина NBT-строки — u16. Режем по границе символа: половину
+        // суррогатной пары записывать нельзя.
+        if bytes.len() + len + next.map_or(0, |_| 3) > u16::MAX as usize {
+            break;
+        }
+        write_utf_unit(&mut bytes, unit);
+        if let Some(low) = next {
+            write_utf_unit(&mut bytes, low);
+            i += 1;
+        }
+        i += 1;
+    }
+    out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+    out.extend_from_slice(&bytes);
+}
+
+fn write_utf_unit(out: &mut Vec<u8>, unit: u16) {
+    match unit {
+        0x0001..=0x007f => out.push(unit as u8),
+        0x0000 | 0x0080..=0x07ff => {
+            out.push(0xc0 | (unit >> 6) as u8);
+            out.push(0x80 | (unit & 0x3f) as u8);
+        }
+        _ => {
+            out.push(0xe0 | (unit >> 12) as u8);
+            out.push(0x80 | ((unit >> 6) & 0x3f) as u8);
+            out.push(0x80 | (unit & 0x3f) as u8);
+        }
+    }
+}
+
+fn decode_utf(bytes: &[u8]) -> String {
+    let mut units = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let first = bytes[i];
+        if first & 0x80 == 0 {
+            units.push(first as u16);
+            i += 1;
+        } else if first & 0xe0 == 0xc0 {
+            let Some(&second) = bytes.get(i + 1) else {
+                units.push(0xfffd);
+                break;
+            };
+            units.push((((first & 0x1f) as u16) << 6) | (second & 0x3f) as u16);
+            i += 2;
+        } else if first & 0xf0 == 0xe0 {
+            let Some(&second) = bytes.get(i + 1) else {
+                units.push(0xfffd);
+                break;
+            };
+            let Some(&third) = bytes.get(i + 2) else {
+                units.push(0xfffd);
+                break;
+            };
+            units.push(
+                (((first & 0x0f) as u16) << 12)
+                    | (((second & 0x3f) as u16) << 6)
+                    | (third & 0x3f) as u16,
+            );
+            i += 3;
+        } else {
+            units.push(0xfffd);
+            i += 1;
+        }
+    }
+    String::from_utf16_lossy(&units)
 }
 
 /// `ListTag.isWrapper`: словарь из одного ключа `""`.
@@ -273,7 +359,7 @@ fn read_len(r: &mut &[u8]) -> Result<usize, String> {
 
 fn read_str(r: &mut &[u8]) -> Result<String, String> {
     let n = u16::from_be_bytes(be(r)?) as usize;
-    Ok(String::from_utf8_lossy(take(r, n)?).into_owned())
+    Ok(decode_utf(take(r, n)?))
 }
 
 const MAX_DEPTH: usize = 512;
@@ -383,6 +469,30 @@ mod tests {
         assert_eq!(&bytes[..3], &[10, 0, 0]);
         assert_eq!(read_root(&bytes).unwrap(), root);
         assert!(read_root(&bytes[..bytes.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn modified_utf8_roundtrip() {
+        for text in [
+            "Steve",
+            "Привет",
+            "\u{1F600}",
+            "a\0b",
+            "Привет \u{1F600}\0",
+        ] {
+            let mut out = Vec::new();
+            write_str(&mut out, text);
+            let mut slice = out.as_slice();
+            assert_eq!(read_str(&mut slice).unwrap(), text, "{text:?}");
+        }
+        // Java `writeUTF` для U+1F600: пара суррогатов, каждый по 3 байта.
+        let mut out = Vec::new();
+        write_str(&mut out, "\u{1F600}");
+        assert_eq!(out, [0, 6, 0xED, 0xA0, 0xBD, 0xED, 0xB8, 0x80]);
+        // NUL в modified UTF-8 — два байта, а не нулевой байт.
+        let mut out = Vec::new();
+        write_str(&mut out, "\0");
+        assert_eq!(out, [0, 2, 0xC0, 0x80]);
     }
 
     /// Файл мира мог прийти извне: распаковка не должна расти без предела.
