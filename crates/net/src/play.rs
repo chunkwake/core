@@ -5985,10 +5985,17 @@ impl PlayPlan {
         *self.save_hook.lock().unwrap() = Some(hook);
     }
 
-    /// Выполняет сейв до возврата; `None` - сервер не подключил хранилище.
+    /// Выполняет сейв до возврата; `None` - сервер не подключил хранилище
+    /// (тогда остаётся фоновый autosave по `save_requested`).
     pub fn save_now(&self) -> Option<Result<usize, String>> {
         let hook = self.save_hook.lock().unwrap().clone();
-        hook.map(|hook| hook(self))
+        match hook {
+            Some(hook) => Some(hook(self)),
+            None => {
+                self.request_save();
+                None
+            }
+        }
     }
 
     /// Гарантирует, что регион чанка `(x, z)` прочитан с диска.
