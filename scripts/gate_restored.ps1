@@ -82,7 +82,10 @@ $probeFail = @()
 if ($needFolia -and -not $foliaProbeOk) { $probeFail += 'FoliaProbe 7/7' }
 if ($needCw -and -not $cwFoliaOk) { $probeFail += 'ChunkwakeTest folia 4/4' }
 Start-Sleep -Seconds 1
-Get-Process chunkwake -ErrorAction SilentlyContinue | Stop-Process -Force
+if (-not $p.HasExited) {
+    $p.Kill()
+    $p.WaitForExit(10000)
+}
 Write-Output ('SUMMARY: ' + $summary)
 Write-Output ('FAILED: ' + $failed)
 Write-Output ('LOADERR: ' + $loaderr)

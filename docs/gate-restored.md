@@ -7,7 +7,7 @@ test/probe-плагинов.
 ## Результат
 
 ```
-plugins: enabled 100 plugin(s) in 42911 ms
+plugins: enabled 100 plugin(s) in 52782 ms
 FAILED: (пусто)
 LOADERR: (пусто)
 SKIPPED: (пусто)
@@ -48,6 +48,12 @@ PROBE-FAIL: (пусто)
   Chunkwake, 28/28 ключевых наблюдений совпали (BlockData, state, collision,
   drops, persist/fresh для `topaz_ore`, `table_lamp`, `palm_stairs`,
   `palm_door`). См. `docs/ce-parity.md` и `benchmarks/ce-parity/`.
+- Console-command parity: 10 команд WorldEdit, Multiverse-Core, PlaceholderAPI,
+  Chunky, BlueMap, ViaVersion, Plan, Skript, LuckPerms, TAB — 10/10 распознаны
+  и вернули ожидаемый ответ на Paper и Chunkwake. Попутно исправлен
+  `CommandSender.spigot()` у консоли (`Console.spigot()` теперь пересылает
+  `BaseComponent` в лог, BlueMap больше не падает с NPE). См.
+  `docs/plugin-commands.md` и `benchmarks/plugin-commands/`.
 - Базовый `load-gate-server` (27/27) этим прогоном не восстанавливался.
 
 ## Воспроизведение
