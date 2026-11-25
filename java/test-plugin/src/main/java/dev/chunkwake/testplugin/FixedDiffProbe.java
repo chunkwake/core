@@ -286,6 +286,22 @@ final class FixedDiffProbe implements Listener {
             period = String.format(java.util.Locale.ROOT, "%.2f",
                     (double) (last - first) / (this.extendTicks.size() - 1));
         }
+        String period200 = "n/a";
+        int first200 = -1;
+        int count200 = 0;
+        for (int t : this.extendTicks) {
+            if (t >= 200) {
+                if (first200 < 0) {
+                    first200 = t;
+                }
+                count200++;
+            }
+        }
+        if (count200 >= 2) {
+            int last = this.extendTicks.get(this.extendTicks.size() - 1);
+            period200 = String.format(java.util.Locale.ROOT, "%.2f",
+                    (double) (last - first200) / (count200 - 1));
+        }
         int rear = -1;
         int blocks = 0;
         World w = this.plugin.getServer().getWorlds().get(0);
@@ -302,7 +318,8 @@ final class FixedDiffProbe implements Listener {
         }
         this.plugin.getLogger().info("VANILLADIFF fly-long rear=" + rear
                 + " blocks=" + blocks + " extends=" + this.pistonExtends.get()
-                + " period=" + period + " chunk8=" + w.isChunkLoaded(8, 0)
+                + " period=" + period + " period200=" + period200
+                + " extends200=" + count200 + " chunk8=" + w.isChunkLoaded(8, 0)
                 + " chunk9=" + w.isChunkLoaded(9, 0));
     }
 

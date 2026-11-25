@@ -6,7 +6,7 @@
 Перед сценарием области redstone/hopper/fluids/fly очищаются (fly — `x=95..220`),
 чтобы прошлый прогон не оставлял `moving_piston`/камни в зоне проверки.
 
-## Финальный прогон (release, 25.11.2026, бинарь `e45ffa3`)
+## Финальный прогон (release, 25.11.2026, бинарь `e45ffa3`; `d095970` добавляет только onEnable region ownership)
 
 | сценарий | Paper 26.3 | Chunkwake |
 |---|---|---|
@@ -19,6 +19,7 @@
 | mob drops | `[BEEF, LEATHER]` (12 смертей, множество типов) | same |
 | fly | `rear=113 blocks=8 extends=28 period=4.70 window=16` | `rear=113 blocks=10 extends=28 period=4.78 window=16` |
 | fly, длинное окно t=400 | `rear=138 blocks=8 extends=78 period=4.90` | `rear=138 blocks=8 extends=77..78 period=4.92..4.95` |
+| fly, устойчивый участок t>=200 | `period200=5.03 extends200=40` | `period200=5.05 extends200=40` |
 | `Chunk.getEntities` | `loaded=true found-sheep=true living=1` | same |
 | `Chunk.getTileEntities` | `[CHEST, HOPPER]` | same |
 | stale block entity | после замены сундука камнем `[HOPPER]` | same |
@@ -39,8 +40,9 @@ CW    t=32 z0=...OM.SS z1=...SS.TO#
 Обе машины едут непрерывно; после правки `finalTick`/observer задержки
 позиция на t=150 совпадает (`rear=113`), окно extends t=60..140 — `16/16`.
 На длинном окне t=400 позиция совпала (`rear=138`) в двух чистых прогонах;
-число extends — `78/78` и `77/78`; средний период `4.92–4.95` против Paper
-`4.90` (0.4–1%).
+число extends — `78/78` и `77/78`. Средний период по всему окну (`4.90`
+против `4.92–4.95`) включает старт; на устойчивом участке t>=200 —
+`5.03` у Paper и `5.05` у Chunkwake (0.4%), по 40 extends у обоих.
 Короткое окно чувствительно к фазе старта (4.78 против 4.70), длинное — нет.
 `blocks` на снимке может отличаться на 1–2: в момент отчёта одна из машин
 находится в середине хода (`moving_piston`/`piston_head`), это не разная физика.
@@ -88,7 +90,8 @@ CW    t=32 z0=...OM.SS z1=...SS.TO#
 - Fly-машина: `PistonMovingBlockEntity.finalTick` для observer теперь
   использует чередующуюся задержку 1/2 тика вместо постоянных 2. Позиция на
   t=150 совпала (`rear=113`), окно extends t=60..140 — `16/16`; на длинном
-  окне t=400 — `rear=138`, `extends=77..78`, период `4.92..4.95` против `4.90`.
+  окне t=400 — `rear=138`, `extends=77..78`; устойчивый период t>=200 —
+`5.05` против `5.03` у Paper.
 - `Chunk.unload()` больше не заглушка: `unloadchunk` сохраняет (если `save=true`)
   и выгружает колонку, если она не входит в simulation/forceload. Проверка после
   загрузки дальнего чанка: Paper `unload=true loaded=false`, Chunkwake так же.
@@ -118,12 +121,15 @@ CW    t=32 z0=...OM.SS z1=...SS.TO#
 
 ## Ограничения
 
-- Остаточный период fly — `4.92..4.95` против `4.90` на длинном окне
-  (0.4–1%); позиция (`rear=138`) совпадает, extends может отличаться на 1
-  из-за фазы старта. На коротком окне
+- Остаточный устойчивый период fly — `5.05` против `5.03` (около 0.4%)
+  на участке t>=200; позиция (`rear=138`) и число extends (`78`) совпадают.
+  Публикуемые `4.90`/`4.92–4.95` по всему окну включают стартовый разгон. На коротком окне
   абсолютная фаза зависит от порядка «плагинная задача vs redstone tick».
 - `Biome.toString()` в Paper — внутренний identity-формат
-  (`CraftBiome{holder=Reference{...Biome@hash}}`); differential сравнивает
-  `Biome.getKey()`, который совпадает (`minecraft:plains`).
+  (`CraftBiome{holder=Reference{ResourceKey[minecraft:worldgen/biome /
+  minecraft:plains]=net.minecraft.world.level.biome.Biome@hash}}`), причём hash
+  меняется от запуска к запуску (в логах: `66733990`, `2b3a5442`, `5a3d38e7`).
+  Differential сравнивает `Biome.getKey()`, который совпадает
+  (`minecraft:plains`).
 - 100% совместимость с произвольными Paper/Folia-плагинами этим сценарием не
   доказывается; это только закрывает конкретные поведенческие дыры.
