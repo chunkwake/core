@@ -74,6 +74,9 @@ final class ChunkwakeServer {
     final World world = overworld.api;
     /** Главный счётчик — состояние Rust; {@link #getScoreboardManager()}. */
     private final ScoreboardManagerImpl scoreboards = new ScoreboardManagerImpl(this);
+    /** Файловые списки банов `banned-players.json`/`banned-ips.json`. */
+    private final java.util.Map<org.bukkit.BanList.Type, BanListImpl> banLists =
+            new java.util.EnumMap<>(org.bukkit.BanList.Type.class);
     /** Миры по ключу измерения, порядок как у Paper: оверворлд, Ад, Край. */
     private volatile Map<String, WorldImpl> worlds;
     private final Metadata metadata = new Metadata();
@@ -1386,6 +1389,39 @@ final class ChunkwakeServer {
             org.bukkit.OfflinePlayer player = accessPlayer(entry);
             if (player != null) {
                 out.add(player);
+            }
+        }
+        return out;
+    }
+
+    /** `Server.getBanList`: NAME/IP; PROFILE обслуживает тот же файл имён. */
+    public org.bukkit.BanList<?> getBanList(org.bukkit.BanList.Type type) {
+        if (type == null) {
+            return null;
+        }
+        org.bukkit.BanList.Type key = type == org.bukkit.BanList.Type.PROFILE
+                ? org.bukkit.BanList.Type.NAME : type;
+        return banLists.computeIfAbsent(key, kind -> new BanListImpl(this, kind));
+    }
+
+    public java.util.Set<org.bukkit.OfflinePlayer> getBannedPlayers() {
+        java.util.Set<org.bukkit.OfflinePlayer> out = new java.util.LinkedHashSet<>();
+        org.bukkit.BanList<?> bans = getBanList(org.bukkit.BanList.Type.NAME);
+        if (bans == null) {
+            return out;
+        }
+        for (Object raw : bans.getEntries()) {
+            if (!(raw instanceof org.bukkit.BanEntry entry)) {
+                continue;
+            }
+            String target = entry.getTarget();
+            if (target == null || target.isBlank()) {
+                continue;
+            }
+            try {
+                out.add(getOfflinePlayer(UUID.fromString(target)));
+            } catch (IllegalArgumentException ignored) {
+                out.add(getOfflinePlayer(target));
             }
         }
         return out;
