@@ -1327,6 +1327,70 @@ final class ChunkwakeServer {
         return out.toArray(new org.bukkit.OfflinePlayer[0]);
     }
 
+    /** Записи `ops.json`/`whitelist.json` из корня сервера (без Rust). */
+    private java.util.List<com.google.gson.JsonObject> accessEntries(String name) {
+        java.nio.file.Path root = levelDirectory == null ? null : levelDirectory.getParent();
+        java.nio.file.Path file = root == null ? null : root.resolve(name);
+        if (file == null || !java.nio.file.Files.isRegularFile(file)) {
+            return java.util.List.of();
+        }
+        try {
+            com.google.gson.JsonElement parsed = com.google.gson.JsonParser.parseString(
+                    java.nio.file.Files.readString(file, java.nio.charset.StandardCharsets.UTF_8));
+            if (!parsed.isJsonArray()) {
+                return java.util.List.of();
+            }
+            java.util.List<com.google.gson.JsonObject> out = new java.util.ArrayList<>();
+            for (com.google.gson.JsonElement e : parsed.getAsJsonArray()) {
+                if (e.isJsonObject()) {
+                    out.add(e.getAsJsonObject());
+                }
+            }
+            return out;
+        } catch (Exception e) {
+            return java.util.List.of();
+        }
+    }
+
+    private org.bukkit.OfflinePlayer accessPlayer(com.google.gson.JsonObject entry) {
+        String name = entry.has("name") ? entry.get("name").getAsString() : null;
+        if (entry.has("uuid")) {
+            try {
+                UUID id = UUID.fromString(entry.get("uuid").getAsString());
+                return new OfflinePlayerImpl(this, id, name).api;
+            } catch (IllegalArgumentException ignored) {
+                // битая запись — пробуем по имени ниже
+            }
+        }
+        return name == null ? null : getOfflinePlayer(name);
+    }
+
+    public java.util.Set<org.bukkit.OfflinePlayer> getOperators() {
+        java.util.Set<org.bukkit.OfflinePlayer> out = new java.util.LinkedHashSet<>();
+        for (com.google.gson.JsonObject entry : accessEntries("ops.json")) {
+            int level = entry.has("level") ? entry.get("level").getAsInt() : 4;
+            if (level <= 0) {
+                continue;
+            }
+            org.bukkit.OfflinePlayer player = accessPlayer(entry);
+            if (player != null) {
+                out.add(player);
+            }
+        }
+        return out;
+    }
+
+    public java.util.Set<org.bukkit.OfflinePlayer> getWhitelistedPlayers() {
+        java.util.Set<org.bukkit.OfflinePlayer> out = new java.util.LinkedHashSet<>();
+        for (com.google.gson.JsonObject entry : accessEntries("whitelist.json")) {
+            org.bukkit.OfflinePlayer player = accessPlayer(entry);
+            if (player != null) {
+                out.add(player);
+            }
+        }
+        return out;
+    }
+
     /** Имя по UUID из кэша входов (для `OfflinePlayer.getName`). */
     String nameOf(UUID id) {
         PlayerImpl p = online.get(id);

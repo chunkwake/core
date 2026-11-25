@@ -1,5 +1,6 @@
 package dev.chunkwake.bridge;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -22,8 +23,17 @@ final class AccessFilesTest {
             player.setWhitelisted(true);
             assertTrue(player.isWhitelisted());
             assertTrue(Files.readString(root.resolve("whitelist.json")).contains(id.toString()));
+            assertTrue(server.getWhitelistedPlayers().stream()
+                    .anyMatch(p -> id.equals(p.getUniqueId())));
             player.setWhitelisted(false);
             assertFalse(player.isWhitelisted());
+
+            Files.writeString(root.resolve("ops.json"),
+                    "[{\"uuid\":\"" + id + "\",\"name\":\"Tester\",\"level\":4},"
+                            + "{\"uuid\":\"33333333-4444-5555-6666-777777777777\","
+                            + "\"name\":\"NoOp\",\"level\":0}]");
+            assertEquals(1, server.getOperators().size());
+            assertTrue(server.getOperators().iterator().next().getUniqueId().equals(id));
 
             UUID banned = UUID.fromString("22222222-3333-4444-5555-666666666666");
             Files.writeString(root.resolve("banned-players.json"),
