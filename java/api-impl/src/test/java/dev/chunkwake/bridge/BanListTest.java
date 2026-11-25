@@ -40,6 +40,7 @@ final class BanListTest {
             BanList ips = (BanList) server.getBanList(BanList.Type.IP);
             ips.addBan("192.0.2.7", "proxy", Date.from(Instant.now().plusSeconds(60)), "console");
             assertTrue(ips.isBanned("192.0.2.7"));
+            assertTrue(server.getIPBans().contains("192.0.2.7"));
             assertTrue(Files.readString(root.resolve("banned-ips.json")).contains("192.0.2.7"));
             ips.pardon("192.0.2.7");
             assertFalse(ips.isBanned("192.0.2.7"));

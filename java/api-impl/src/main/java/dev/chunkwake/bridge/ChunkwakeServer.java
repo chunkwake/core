@@ -1404,6 +1404,21 @@ final class ChunkwakeServer {
         return banLists.computeIfAbsent(key, kind -> new BanListImpl(this, kind));
     }
 
+    /** `Server.getIPBans`: цели из `banned-ips.json` (просроченные остаются до pardon). */
+    public java.util.Set<String> getIPBans() {
+        java.util.Set<String> out = new java.util.LinkedHashSet<>();
+        org.bukkit.BanList<?> bans = getBanList(org.bukkit.BanList.Type.IP);
+        if (bans == null) {
+            return out;
+        }
+        for (Object raw : bans.getEntries()) {
+            if (raw instanceof org.bukkit.BanEntry entry && entry.getTarget() != null) {
+                out.add(entry.getTarget());
+            }
+        }
+        return out;
+    }
+
     public java.util.Set<org.bukkit.OfflinePlayer> getBannedPlayers() {
         java.util.Set<org.bukkit.OfflinePlayer> out = new java.util.LinkedHashSet<>();
         org.bukkit.BanList<?> bans = getBanList(org.bukkit.BanList.Type.NAME);
