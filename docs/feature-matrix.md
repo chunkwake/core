@@ -400,6 +400,8 @@ impl или по identity прокси). После этого `//pos` → `//si
 падал `NullPointerException` на `getItemInHand(...).getType()` при правом
 клике пустой рукой. Проверка — `inventory_open_probe` при открытии сундука:
 `open_screen=1`, `BEHAVIOR inv-open type=CHEST`; ошибок `EventBus` в логе нет.
+Обратный `adapt(BaseItemStack)` тоже реализован (тип и количество без NBT):
+живая проверка `BEHAVIOR_WE_ADAPT` дала `stone=STONE x2`, `air=AIR x0`.
 
 Свойства блоков: `getProperties(BlockType)` строит карту из Bukkit
 `BlockData` — имена/значения разбираются из `getAsString()`, а домены

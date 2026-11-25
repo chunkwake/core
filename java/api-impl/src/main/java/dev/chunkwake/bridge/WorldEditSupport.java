@@ -229,6 +229,11 @@ final class WorldEditSupport {
                             && args[0] instanceof org.bukkit.inventory.ItemStack stack) {
                         return adaptItem(stack);
                     }
+                    if (args != null && args.length == 1 && args[0] != null
+                            && args[0].getClass().getName()
+                                    .equals("com.sk89q.worldedit.blocks.BaseItemStack")) {
+                        return adaptBaseItem(args[0]);
+                    }
                     break;
                 case "toString":
                     return "ChunkwakeWorldEditAdapter";
@@ -406,6 +411,20 @@ final class WorldEditSupport {
                 return state.getClass().getMethod("toBaseBlock").invoke(state);
             } catch (Throwable broken) {
                 return null;
+            }
+        }
+
+        /** {@code BukkitAdapter.adapt(BaseItemStack)}: обратно в Bukkit ItemStack. */
+        private Object adaptBaseItem(Object base) {
+            try {
+                Object type = base.getClass().getMethod("getType").invoke(base);
+                String id = (String) type.getClass().getMethod("id").invoke(type);
+                int amount = (int) base.getClass().getMethod("getAmount").invoke(base);
+                Material material = Material.matchMaterial(id);
+                return new org.bukkit.inventory.ItemStack(
+                        material == null ? Material.AIR : material, Math.max(0, amount));
+            } catch (Throwable broken) {
+                return new org.bukkit.inventory.ItemStack(Material.AIR);
             }
         }
 
