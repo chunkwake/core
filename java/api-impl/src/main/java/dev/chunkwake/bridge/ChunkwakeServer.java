@@ -1074,7 +1074,9 @@ final class ChunkwakeServer {
         }
     }
     public List<World> getWorlds() {
-        return worlds().values().stream().map(w -> w.api).toList();
+        return worlds().values().stream()
+                .filter(w -> !w.isUnloaded())
+                .map(w -> w.api).toList();
     }
 
     /** `CraftServer.createWorld` -> `WorldCreator.createWorld`. */
@@ -1096,7 +1098,13 @@ final class ChunkwakeServer {
             return null;
         }
         try {
-            java.nio.file.Files.createDirectories(created.getWorldPath());
+            java.nio.file.Path folder = created.getWorldPath();
+            java.nio.file.Files.createDirectories(folder);
+            java.nio.file.Path source = levelDirectory.resolve("level.dat");
+            if (java.nio.file.Files.isRegularFile(source)) {
+                java.nio.file.Files.copy(source, folder.resolve("level.dat"),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (java.io.IOException e) {
             logger.warning("createWorld: не создан каталог " + created.getWorldPath() + ": " + e);
         }
@@ -1118,9 +1126,10 @@ final class ChunkwakeServer {
         }
         boolean ok = "1".equals(Bridge.world("unloadworld " + impl.dim).trim());
         if (ok) {
-            synchronized (this) {
-                worlds = null;
-            }
+            // Оставляем объект в UID-таблице: Multiverse валидирует папку
+            // удаляемого мира через Bukkit.getWorld(uid) уже после unload.
+            // getWorld(String)/getWorlds() его скрывают.
+            impl.markUnloaded();
         }
         return ok;
     }
@@ -1144,7 +1153,7 @@ final class ChunkwakeServer {
 
     public World getWorld(String name) {
         for (WorldImpl w : worlds().values()) {
-            if (w.getName().equals(name)) {
+            if (!w.isUnloaded() && w.getName().equals(name)) {
                 return w.api;
             }
         }
@@ -1162,12 +1171,12 @@ final class ChunkwakeServer {
 
     public World getWorld(org.bukkit.NamespacedKey key) {
         WorldImpl w = key == null ? null : worlds().get(key.toString());
-        return w == null ? null : w.api;
+        return w == null || w.isUnloaded() ? null : w.api;
     }
 
     public World getWorld(net.kyori.adventure.key.Key key) {
         WorldImpl w = key == null ? null : worlds().get(key.asString());
-        return w == null ? null : w.api;
+        return w == null || w.isUnloaded() ? null : w.api;
     }
 
     public Collection<? extends Player> getOnlinePlayers() {

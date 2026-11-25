@@ -35,6 +35,7 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
     private final ChunkwakeServer server;
     /** Ключ измерения, например {@code minecraft:the_nether}. */
     final String dim;
+    private volatile boolean unloaded;
     private volatile UUID uid;
     private volatile PdcImpl pdc;
     private volatile WorldBorderImpl border;
@@ -242,8 +243,7 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
     }
 
     public String getName() {
-        if (!dim.equals(OVERWORLD) && !dim.equals(NETHER) && !dim.equals(END)) {
-            int colon = dim.indexOf(':');
+        if (!dim.equals(OVERWORLD) && !dim.equals(NETHER) && !dim.equals(END)) {            int colon = dim.indexOf(':');
             return colon < 0 ? dim : dim.substring(colon + 1);
         }
         String base = server.levelDirectory().getFileName().toString();
@@ -254,6 +254,10 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
             default -> base + "_" + dim.replace(':', '_');
         };
     }
+
+    void markUnloaded() { this.unloaded = true; }
+
+    boolean isUnloaded() { return this.unloaded; }
 
     public NamespacedKey getKey() { return NamespacedKey.fromString(dim); }
     public net.kyori.adventure.key.Key key() { return getKey(); }
@@ -387,7 +391,10 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
                 long least = (long) a.get(2).getAsInt() << 32 | a.get(3).getAsInt() & 0xFFFFFFFFL;
                 uid = new UUID(most, least);
             } else {
-                uid = Bridge.table == null ? UUID.nameUUIDFromBytes(dim.getBytes()) : UUID.randomUUID();
+                boolean custom = !dim.equals(OVERWORLD) && !dim.equals(NETHER) && !dim.equals(END);
+                uid = (custom || Bridge.table == null)
+                        ? UUID.nameUUIDFromBytes(dim.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                        : UUID.randomUUID();
                 JsonObject out = new JsonObject();
                 JsonObject ia = new JsonObject();
                 var arr = new com.google.gson.JsonArray();

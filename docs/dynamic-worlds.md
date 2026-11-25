@@ -35,7 +35,8 @@ BEHAVIOR worldedit placed=16 verified=16
 BEHAVIOR bukkit-world created=true
 BEHAVIOR worldinfo name=behaviorprobe key=minecraft:behaviorprobe
 BEHAVIOR dynamic-edit verified=16 isolated=true
-BEHAVIOR multiverse created=true loaded=true normal=true deleted=false
+BEHAVIOR multiverse created=true loaded=true normal=true deleted=true delete-reason=ok
+BEHAVIOR after-delete world=null
 ```
 
 `dynamic-edit isolated=true` — WorldEdit-правка в новом мире не изменила
@@ -45,12 +46,12 @@ BEHAVIOR multiverse created=true loaded=true normal=true deleted=false
 
 - Мир использует генератор/сид оверворлда; независимый seed, generator,
   biome provider и `WorldCreator`-настройки пока не применяются.
-- Нет сохранения динамического мира между рестартами (каталог создаётся, но
-  `WorldStorage` для произвольного `Dimension::Custom` ещё не пишет
-  полноценный `level.dat`/регионы).
-- Multiverse `deleteWorld` на Chunkwake возвращает `deleted=false`:
-  создание, загрузка, environment и правки работают, удаление — отдельный
-  follow-up (Multiverse резолвит папку удаляемого мира иначе, чем
-  `World.getWorldFolder`).
+- Нет полноценного сохранения динамического мира между рестартами:
+  `level.dat` копируется для валидности каталога, но `WorldStorage` для
+  `Dimension::Custom` ещё не пишет/читает независимые регионы и уровень.
+- Multiverse `deleteWorld` теперь возвращает `deleted=true`: в каталог
+  мира копируется `level.dat` (иначе `WorldNameChecker` не считает папку
+  миром), а `unloadWorld` скрывает мир из `getWorld(String)`/`getWorlds`,
+  но оставляет его в UID-таблице до завершения удаления.
 - Слотов 8; после исчерпания `WorldCreator.createWorld` вернёт `null`, пока
   слот не освободят.
