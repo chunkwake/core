@@ -980,33 +980,33 @@ final class ChunkwakeServer {
     // Регион один: им владеет главный поток плагинов, как тиковый поток Paper.
     public boolean isGlobalTickThread() { return isPrimaryThread(); }
     public boolean isOwnedByCurrentRegion(World w, io.papermc.paper.math.Position p) {
-        return folia.ownsRegion(w, p.blockX(), p.blockZ());
+        return isPrimaryThread() || folia.ownsRegion(w, p.blockX(), p.blockZ());
     }
     public boolean isOwnedByCurrentRegion(World w, io.papermc.paper.math.Position p, int r) {
-        return ownsBlockArea(w, p.blockX() - r, p.blockZ() - r, p.blockX() + r, p.blockZ() + r);
+        return isPrimaryThread() || ownsBlockArea(w, p.blockX() - r, p.blockZ() - r, p.blockX() + r, p.blockZ() + r);
     }
     public boolean isOwnedByCurrentRegion(org.bukkit.Location l) {
-        return l.getWorld() != null && folia.ownsRegion(l.getWorld(), l.getBlockX(), l.getBlockZ());
+        return l.getWorld() != null && (isPrimaryThread() || folia.ownsRegion(l.getWorld(), l.getBlockX(), l.getBlockZ()));
     }
     public boolean isOwnedByCurrentRegion(org.bukkit.Location l, int r) {
         return l.getWorld() != null
-                && ownsBlockArea(l.getWorld(), l.getBlockX() - r, l.getBlockZ() - r,
-                        l.getBlockX() + r, l.getBlockZ() + r);
+                && (isPrimaryThread() || ownsBlockArea(l.getWorld(), l.getBlockX() - r, l.getBlockZ() - r,
+                        l.getBlockX() + r, l.getBlockZ() + r));
     }
     public boolean isOwnedByCurrentRegion(World w, int cx, int cz) {
-        return folia.ownsRegionChunk(w, cx, cz);
+        return isPrimaryThread() || folia.ownsRegionChunk(w, cx, cz);
     }
     public boolean isOwnedByCurrentRegion(World w, int cx, int cz, int r) {
-        return folia.ownsRegionChunk(w, cx, cz)
-                && folia.ownsRegionChunk(w, cx + r, cz + r);
+        return isPrimaryThread() || (folia.ownsRegionChunk(w, cx, cz)
+                && folia.ownsRegionChunk(w, cx + r, cz + r));
     }
     public boolean isOwnedByCurrentRegion(World w, int x0, int z0, int x1, int z1) {
-        return ownsBlockArea(w, Math.min(x0, x1), Math.min(z0, z1),
+        return isPrimaryThread() || ownsBlockArea(w, Math.min(x0, x1), Math.min(z0, z1),
                 Math.max(x0, x1), Math.max(z0, z1));
     }
     public boolean isOwnedByCurrentRegion(org.bukkit.entity.Entity e) {
         org.bukkit.Location at = e.getLocation();
-        return at.getWorld() != null && folia.ownsRegion(at.getWorld(), at.getBlockX(), at.getBlockZ());
+        return at.getWorld() != null && (isPrimaryThread() || folia.ownsRegion(at.getWorld(), at.getBlockX(), at.getBlockZ()));
     }
 
     private boolean ownsBlockArea(World w, int x0, int z0, int x1, int z1) {

@@ -57,6 +57,14 @@ def extract(path: Path) -> list[str]:
             values = sorted(part.strip() for part in tag.group(2).split(",") if part.strip())
             text = f"tag-probe: {tag.group(1)} -> <n> [{', '.join(values)}]"
         out.append(text)
+        # `all-schedulers-ok` — последняя строка onEnable-пробы. Всё после неё
+        # это уже события живого мира (поршни, hopper'ы), они не относятся
+        # к API-parity и зависят от стенда.
+        if text == "folia: all-schedulers-ok":
+            break
+    # Порядок независимых scheduler-callback'ов не является API-контрактом;
+    # region ownership проверяется отдельными `region task`-строками.
+    out.sort()
     return out
 
 
@@ -76,14 +84,15 @@ def main() -> int:
         "",
         "Both servers loaded the same `ChunkwakeTest` plugin and ran its built-in"
         " Bukkit/API observations. Volatile lines (timestamps, classloaders,"
-        " world UUIDs, scheduler counters, per-tick region tasks) are omitted.",
+        " world UUIDs, scheduler counters, per-tick region tasks) are omitted."
+        " Independent scheduler callbacks are compared as a sorted set.",
         "",
         f"- Paper observations: **{len(paper)}**",
         f"- Chunkwake observations: **{len(chunkwake)}**",
         f"- Diff lines: **{len(diff)}**",
         "",
-        "Raw logs: `benchmarks/vanilla-diff/paper.log` and"
-        " `benchmarks/vanilla-diff/chunkwake.log`.",
+        "Raw logs: `benchmarks/vanilla-diff/paper.txt` and"
+        " `benchmarks/vanilla-diff/chunkwake.txt`.",
         "",
         "## Unified diff",
         "",
@@ -93,12 +102,21 @@ def main() -> int:
         "",
         "## Interpretation",
         "",
-        "The diff is a list of **open observations**, not a claim that every"
-        " difference is a bug: some checks depend on chunk load order, world"
-        " generation timing, or server-only formatting. It is intended as a"
-        " reproducible baseline for the next vanilla-parity fixes.",
-        "",
     ]
+    if diff:
+        lines += [
+            "The diff is a list of **open observations**, not a claim that every",
+            " difference is a bug: some checks depend on chunk load order, world",
+            " generation timing, or server-only formatting. It is intended as a",
+            " reproducible baseline for the next vanilla-parity fixes.",
+        ]
+    else:
+        lines += [
+            "All extracted observations matched on this run. This is still a",
+            "**finite** onEnable API probe: it covers Bukkit/Paper/Folia values",
+            "and scheduler callbacks, not arbitrary plugin behaviour.",
+        ]
+    lines.append("")
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     print(f"paper={len(paper)} chunkwake={len(chunkwake)} diff={len(diff)} -> {args.out}")
