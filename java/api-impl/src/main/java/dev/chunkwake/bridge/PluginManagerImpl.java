@@ -241,6 +241,9 @@ final class PluginManagerImpl {
         if (has(org.bukkit.event.inventory.InventoryClickEvent.getHandlerList())) {
             mask |= Bridge.listenBit(Bridge.EVENT_INVENTORY_CLICK);
         }
+        if (has(org.bukkit.event.inventory.InventoryOpenEvent.getHandlerList())) {
+            mask |= Bridge.listenBit(Bridge.EVENT_INVENTORY_OPEN);
+        }
         // Закрытие окна плагина нужно и мосту: по нему сбрасывается открытый вид.
         mask |= Bridge.listenBit(Bridge.EVENT_INVENTORY_CLOSE);
         if (has(org.bukkit.event.entity.EntityShootBowEvent.getHandlerList())) {

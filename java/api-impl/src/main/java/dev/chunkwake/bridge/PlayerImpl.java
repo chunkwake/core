@@ -979,6 +979,8 @@ public final class PlayerImpl {
     /** Открытое окно плагина (null — своё окно игрока или окно блока). */
     private volatile ViewImpl openView;
     private volatile PluginInventory openInv;
+    /** id окна Rust для ванильного контейнера; -1 — окно плагина/закрыто. */
+    private volatile int openWindowId = -1;
 
     public org.bukkit.inventory.InventoryView openInventory(org.bukkit.inventory.Inventory inv) {
         if (!(Stub.impl(inv) instanceof PluginInventory pi)) {
@@ -996,6 +998,7 @@ public final class PlayerImpl {
         Component title = e.titleOverride() != null ? e.titleOverride() : pi.title;
         openView = view;
         openInv = pi;
+        openWindowId = -1;
         pi.viewers.add(api);
         control("open " + pi.id + " " + GsonComponentSerializer.gson().serialize(title));
         return view.api;
@@ -1012,10 +1015,49 @@ public final class PlayerImpl {
     }
 
     /** Вид для события клика: открытое окно плагина, если клик в нём. */
-    ViewImpl viewFor(int pluginInv) {
+    ViewImpl viewFor(int windowId) {
         ViewImpl v = openView;
+        if (v == null) {
+            return null;
+        }
         PluginInventory pi = openInv;
-        return v != null && pi != null && pi.id == pluginInv ? v : null;
+        if (pi != null) {
+            return pi.id == windowId ? v : null;
+        }
+        return openWindowId == windowId ? v : null;
+    }
+
+    /** Ванильный контейнер открыт: {@code InventoryOpenEvent} до open_screen. */
+    boolean inventoryOpened(String arg) {
+        String[] f = arg.split(" ", 4);
+        if (f.length < 4) {
+            return false;
+        }
+        org.bukkit.event.inventory.InventoryType type;
+        int id, size;
+        try {
+            type = org.bukkit.event.inventory.InventoryType.valueOf(f[0]);
+            id = Integer.parseInt(f[1]);
+            size = Integer.parseInt(f[2]);
+        } catch (RuntimeException e) {
+            return false;
+        }
+        Component title;
+        try {
+            title = GsonComponentSerializer.gson().deserialize(f[3]);
+        } catch (RuntimeException e) {
+            title = Component.translatable("container." + type.name().toLowerCase(java.util.Locale.ROOT));
+        }
+        ViewImpl view = new ViewImpl(this, ViewImpl.blockTop(this, type, size), type, title);
+        var event = new org.bukkit.event.inventory.InventoryOpenEvent(view.api);
+        server.api.getPluginManager().callEvent(event);
+        if (event.isCancelled()) {
+            return false;
+        }
+        openView = view;
+        openInv = null;
+        openWindowId = id;
+        return true;
     }
 
     public void closeInventory() { control("closewin"); }
@@ -1024,13 +1066,20 @@ public final class PlayerImpl {
     /** Rust закрыл окно плагина {@code id}: событие и сброс вида. */
     void inventoryClosed(int id) {
         ViewImpl v = openView;
+        if (v == null) {
+            return;
+        }
         PluginInventory pi = openInv;
-        if (v == null || pi == null || pi.id != id) {
+        int current = pi != null ? pi.id : openWindowId;
+        if (current != id) {
             return;
         }
         openView = null;
         openInv = null;
-        pi.viewers.remove(api);
+        openWindowId = -1;
+        if (pi != null) {
+            pi.viewers.remove(api);
+        }
         server.api.getPluginManager().callEvent(new org.bukkit.event.inventory.InventoryCloseEvent(v.api));
     }
     public ItemStack getItemOnCursor() { return new StackImpl(org.bukkit.Material.AIR, 0); }

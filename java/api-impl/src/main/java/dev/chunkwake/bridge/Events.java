@@ -91,6 +91,7 @@ final class Events {
                 yield e.isCancelled() ? "c" : "";
             }
             case Bridge.EVENT_INVENTORY_CLICK -> inventoryClick(plugins, p, arg);
+            case Bridge.EVENT_INVENTORY_OPEN -> p.inventoryOpened(arg) ? "" : "c";
             case Bridge.EVENT_INVENTORY_CLOSE -> {
                 p.inventoryClosed(Integer.parseInt(arg.trim()));
                 yield "";

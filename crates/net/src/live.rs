@@ -485,8 +485,11 @@ pub enum Event {
     /// `InventoryClickEvent`: `тип окно размер слот кнопка режим\nтекущий\nкурсор`
     /// (окно — id инвентаря плагина или -1, стопки — строки или `-`) → `c` или пусто.
     InventoryClick = 26,
-    /// `InventoryCloseEvent` окна плагина: `id` (без ответа).
+    /// `InventoryCloseEvent` окна: `id` (без ответа).
     InventoryClose = 27,
+    /// `InventoryOpenEvent` ванильного контейнера: `ТИП id размер <json title>`
+    /// → `c` или пусто.
+    InventoryOpen = 53,
     /// `EntityDamageByEntityEvent` (игрок бьёт моба): `id вид урон крит(1|0)` → `c`, пусто или `d урон`.
     MobDamage = 28,
     /// `EntityDeathEvent` моба: `id вид x y z опыт\nпредмет…` → пусто или `опыт\nпредмет…`.

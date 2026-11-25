@@ -13315,6 +13315,57 @@ impl PlayPlan {
         )
     }
 
+    /// Имя типа окна для `InventoryOpenEvent`/`InventoryClickEvent`.
+    fn window_type(kind: Kind) -> &'static str {
+        match kind {
+            Kind::Chest(5) => "HOPPER",
+            Kind::Chest(9) => "DISPENSER",
+            Kind::Chest(_) => "CHEST",
+            Kind::EnderChest => "ENDER_CHEST",
+            Kind::Crafting => "WORKBENCH",
+            Kind::Furnace => "FURNACE",
+            Kind::Enchanting => "ENCHANTING",
+            Kind::Grindstone => "GRINDSTONE",
+            Kind::Anvil => "ANVIL",
+            Kind::Smithing => "SMITHING",
+            Kind::Loom => "LOOM",
+            Kind::Lectern => "LECTERN",
+            Kind::Stonecutter => "STONECUTTER",
+            Kind::Brewing => "BREWING",
+            Kind::Cartography => "CARTOGRAPHY",
+            Kind::Beacon => "BEACON",
+            Kind::Crafter(_) => "CRAFTER",
+            Kind::Merchant => "MERCHANT",
+            Kind::Player => "CRAFTING",
+        }
+    }
+
+    /// `InventoryOpenEvent` до `open_screen`: `false` — плагин отменил.
+    async fn inventory_open_allowed(
+        &self,
+        uuid: Uuid,
+        window: &Window,
+        title: &serde_json::Value,
+    ) -> bool {
+        if !self
+            .hooks()
+            .is_some_and(|h| h.listens(Event::InventoryOpen))
+        {
+            return true;
+        }
+        let title = serde_json::to_string(title).unwrap_or_default();
+        !self
+            .cancelled(Event::InventoryOpen, uuid, || {
+                format!(
+                    "{} {} {} {title}",
+                    Self::window_type(window.kind),
+                    window.id,
+                    window.slots.len()
+                )
+            })
+            .await
+    }
+
     /// `InventoryClickEvent` до применения клика; `true` — плагин отменил.
     async fn click_cancelled(
         &self,
@@ -13379,11 +13430,11 @@ impl PlayPlan {
         .await
     }
 
-    /// Закрыть окно; для окна плагина — `InventoryCloseEvent`.
+    /// Закрыть окно; плагинам — `InventoryCloseEvent` (id окна или плагина).
     async fn close_with_event(&self, inv: &mut Inventory, window: &mut Option<Window>, uuid: Uuid) {
-        if let Some(pid) = window.as_ref().and_then(|w| plugin_of(w.pos)) {
-            self.plugin_event(Event::InventoryClose, uuid, || pid.to_string())
-                .await;
+        if let Some(w) = window.as_ref() {
+            let arg = plugin_of(w.pos).map_or_else(|| w.id.to_string(), |pid| pid.to_string());
+            self.plugin_event(Event::InventoryClose, uuid, || arg).await;
         }
         self.close_window(inv, window, uuid);
     }
@@ -15575,6 +15626,9 @@ impl PlayPlan {
                             let w = Window { id: next_window, kind: Kind::Merchant, pos, second: None, slots: vec![None; 3], data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10], merchant: Some(villagers::MerchantWindow { villager: it.entity, selected: None }) };
                             let menu = self.survival.menu_merchant;
                             let title = self.villager_title(it.entity);
+                            if !self.inventory_open_allowed(uuid, &w, &title).await {
+                                continue;
+                            }
                             conn.send(&chunkwake_protocol::inventory::open_screen(ids.open_screen, w.id, menu, &title))
                                 .await?;
                             self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
@@ -15620,6 +15674,9 @@ impl PlayPlan {
                                     let pos = cart_pos(it.entity);
                                     let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10], merchant: None };
                                     w.slots = self.window_slots(&w);
+                                    if !self.inventory_open_allowed(uuid, &w, &title).await {
+                                        continue;
+                                    }
                                     conn.send(&chunkwake_protocol::inventory::open_screen(ids.open_screen, w.id, menu, &title)).await?;
                                     self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
                                     window = Some(w);
@@ -15704,6 +15761,9 @@ impl PlayPlan {
                                     let pos = boat_pos(it.entity);
                                     let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10], merchant: None };
                                     w.slots = self.window_slots(&w);
+                                    if !self.inventory_open_allowed(uuid, &w, &title).await {
+                                        continue;
+                                    }
                                     conn.send(&chunkwake_protocol::inventory::open_screen(
                                         ids.open_screen,
                                         w.id,
@@ -17285,7 +17345,11 @@ impl PlayPlan {
                             } else {
                                 w.slots = self.window_slots(&w);
                             }
-                            conn.send(&chunkwake_protocol::inventory::open_screen(ids.open_screen, w.id, menu, &serde_json::json!({"translate": title}))).await?;
+                            let title = serde_json::json!({"translate": title});
+                            if !self.inventory_open_allowed(uuid, &w, &title).await {
+                                continue;
+                            }
+                            conn.send(&chunkwake_protocol::inventory::open_screen(ids.open_screen, w.id, menu, &title)).await?;
                             self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
                             let open_stat = match clicked.as_str() {
                                 "minecraft:ender_chest" => Some("minecraft:open_enderchest"),
