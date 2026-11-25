@@ -1,0 +1,130 @@
+Starting org.bukkit.craftbukkit.Main
+[16:03:02 INFO]: [bootstrap] Running Java 25 (OpenJDK 64-Bit Server VM 25.0.4.1+1-LTS; Eclipse Adoptium Temurin-25.0.4.1+1) on Windows 11 10.0 (amd64)
+[16:03:02 INFO]: [bootstrap] Loading Paper 26.3-248-main@0727243 (2026-11-10T11:35:52Z) for Minecraft 26.3
+[16:03:02 INFO]: [PluginInitializerManager] Initializing plugins...
+[16:03:02 INFO]: [PluginInitializerManager] Initialized 4 plugins
+[16:03:02 INFO]: [PluginInitializerManager] Paper plugins (1):
+ - CraftEngine (26.9.2)
+[16:03:02 INFO]: [PluginInitializerManager] Bukkit plugins (3):
+ - CEProbe (1.0), CEStateProbe (1.0), PerfProbe (1.0)
+[16:03:03 WARN]: [CraftEngine] translations/ru_ru.yml not exists, using en.yml as default locale.
+[16:03:04 INFO]: [CraftEngine] Moonrise lifecycle chunk cache hooks installed
+[16:03:08 INFO]: [ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry] Initialising converters for DataConverter...
+[16:03:08 INFO]: [com.destroystokyo.paper.profile.PaperServicesDiscoveryService] Environment: Environment[discoveryUrl=https://discovery.minecraftservices.com/minecraft/client, name=PROD]
+[16:03:08 INFO]: [ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry] Finished initialising converters for DataConverter in 600,4ms
+[16:03:08 INFO]: [CraftEngine] Initializing registries...
+[16:03:11 INFO]: Loaded 1866 advancements
+[16:03:11 INFO]: Starting minecraft server version 26.3
+[16:03:11 INFO]: Loading properties
+[16:03:11 INFO]: This server is running Paper version 26.3-248-main@0727243 (2026-11-10T11:35:52Z) (Implementing API version 26.3.build.248-stable)
+[16:03:11 INFO]: [spark] This server bundles the spark profiler. For more information please visit https://docs.papermc.io/paper/profiling
+[16:03:11 INFO]: Server Ping Player Sample Count: 12
+[16:03:11 INFO]: Using 4 threads for Netty based IO
+[16:03:11 INFO]: [MoonriseCommon] Paper is using 8 worker threads, 1 I/O threads
+[16:03:11 INFO]: [ca.spottedleaf.moonrise.common.util.FMA] FMA supported: true as determined by performance comparison test
+[16:03:11 INFO]: Default game type: SURVIVAL
+[16:03:11 INFO]: Generating keypair
+[16:03:11 INFO]: Starting Minecraft server on *:25621
+[16:03:11 INFO]: Paper: Using Java compression from Velocity.
+[16:03:11 INFO]: Paper: Using Java cipher from Velocity.
+[16:03:12 INFO]: [PerfProbe] Loading server plugin PerfProbe v1.0
+[16:03:12 INFO]: [CraftEngine] Loading server plugin CraftEngine v26.9.2
+[16:03:12 INFO]: [net.momirealms.craftengine.libraries.hikari.HikariDataSource] craftengine-storage - Starting...
+[16:03:12 INFO]: [net.momirealms.craftengine.libraries.hikari.pool.HikariPool] craftengine-storage - Added connection org.sqlite.jdbc4.JDBC4Connection@1251aedc
+[16:03:12 INFO]: [net.momirealms.craftengine.libraries.hikari.HikariDataSource] craftengine-storage - Start completed.
+[16:03:12 INFO]: [net.momirealms.craftengine.libraries.flywaydb.core.FlywayExecutor] Database: jdbc:sqlite:******** (SQLite 3.49)
+[16:03:12 INFO]: [net.momirealms.craftengine.libraries.flywaydb.core.internal.command.DbValidate] Successfully validated 1 migration (execution time 00:00.015s)
+[16:03:12 INFO]: [net.momirealms.craftengine.libraries.flywaydb.core.internal.command.DbMigrate] Current version of schema "main": 1
+[16:03:12 INFO]: [net.momirealms.craftengine.libraries.flywaydb.core.internal.command.DbMigrate] Schema "main" is up to date. No migration necessary.
+[16:03:13 INFO]: [CEStateProbe] Loading server plugin CEStateProbe v1.0
+[16:03:13 INFO]: [CEProbe] Loading server plugin CEProbe v1.0
+[16:03:13 INFO]: [CraftEngine] Enabling CraftEngine v26.9.2
+[16:03:13 WARN]: **** SERVER IS RUNNING IN OFFLINE/INSECURE MODE!
+[16:03:13 WARN]: The server will make no attempt to authenticate usernames. Beware.
+[16:03:13 WARN]: While this makes the game possible to play without internet access, it also opens up the ability for hackers to connect with any username they choose.
+[16:03:13 WARN]: To change this, set "online-mode" to "true" in the server.properties file.
+[16:03:13 INFO]: Preparing level "world"
+[16:03:14 INFO]: Loading 0 persistent chunks for level 'minecraft:overworld'...
+[16:03:14 INFO]: Prepared spawn area in 2 ms
+[16:03:14 INFO]: Loading 0 persistent chunks for level 'minecraft:the_nether'...
+[16:03:14 INFO]: Prepared spawn area in 1 ms
+[16:03:14 INFO]: Loading 0 persistent chunks for level 'minecraft:the_end'...
+[16:03:14 INFO]: Prepared spawn area in 1 ms
+[16:03:14 INFO]: Done preparing level "world" (0.276s)
+[16:03:14 INFO]: [PerfProbe] Enabling PerfProbe v1.0
+[16:03:14 INFO]: [PerfProbe] PERFPROBE enabled
+[16:03:14 INFO]: [CEStateProbe] Enabling CEStateProbe v1.0
+[16:03:14 INFO]: [CEProbe] Enabling CEProbe v1.0
+[16:03:14 INFO]: [spark] Starting background profiler...
+[16:03:14 INFO]: [spark] The async-profiler engine is not supported for your os/arch (windows11/amd64), so the built-in Java engine will be used instead.
+[16:03:14 INFO]: [PerfProbe] PERFPROBE server-load=STARTUP
+[16:03:14 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:overworld
+[16:03:14 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:the_nether
+[16:03:14 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:the_end
+[16:03:14 INFO]: Running delayed init tasks
+[16:03:14 WARN]: [CraftEngine] translations/ru_ru.yml not exists, using en.yml as default locale.
+[16:03:15 INFO]: [CraftEngine] Loaded pack: default_assets. Default namespace: default
+[16:03:15 INFO]: [CraftEngine] Loaded pack: default_feature_populator. Default namespace: default
+[16:03:15 INFO]: [CraftEngine] Loaded pack: default_templates. Default namespace: default
+[16:03:15 INFO]: [CraftEngine] Loaded pack: internal. Default namespace: internal
+[16:03:15 INFO]: [CraftEngine] Loaded pack: legacy_armor. Default namespace: minecraft
+[16:03:15 INFO]: [CraftEngine] Loaded pack: remove_shulker_head. Default namespace: minecraft
+[16:03:15 INFO]: [CraftEngine] Loaded templates in 69,19ms (75)
+[16:03:15 INFO]: [CraftEngine] Loaded config factories in 4,06ms (3)
+[16:03:15 INFO]: [CraftEngine] Loaded translations in 3,48ms (127)
+[16:03:15 INFO]: [CraftEngine] Loaded equipments in 4,43ms (2)
+[16:03:15 INFO]: [CraftEngine] Loaded loot sources in 25,48ms (1)
+[16:03:15 INFO]: [CraftEngine] Loaded images in 43,58ms (55)
+[16:03:15 INFO]: [CraftEngine] Loaded emojis in 15,47ms (16)
+[16:03:15 INFO]: [CraftEngine] Loaded items in 219,49ms (109)
+[16:03:15 INFO]: [CraftEngine] Loaded block state mappings in 243,36ms (4280)
+[16:03:15 INFO]: [CraftEngine] Loaded categories in 6,15ms (5)
+[16:03:15 INFO]: [CraftEngine] Loaded lang in 206,95ms (630)
+[16:03:15 INFO]: [CraftEngine] Loaded furniture in 32,91ms (6)
+[16:03:15 INFO]: [CraftEngine] Loaded blocks in 253,42ms (40)
+[16:03:15 INFO]: [CraftEngine] Loaded configured features in 4,10ms (1)
+[16:03:16 INFO]: [CraftEngine] Loaded recipes in 320,28ms (45)
+[16:03:16 INFO]: Done (15.122s)! For help, type "help"
+[16:03:17 INFO]: *** Currently you are 14 builds behind ***
+[16:03:17 INFO]: *** It is highly recommended to download the latest build from https://papermc.io/downloads/paper ***
+[16:03:26 INFO]: [PerfProbe] PERFPROBE ticks=200 tps=16.33 avg=0.700 p50=0.506 p99=3.074
+[16:03:36 INFO]: [PerfProbe] PERFPROBE ticks=400 tps=40.00 avg=0.373 p50=0.333 p99=0.719
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:table_lamp default=default:table_lamp[facing=north,lit=false] props={EnumProperty{clazz=class net.momirealms.craftengine.core.util.Direction, name='facing', values=[NORTH, EAST, SOUTH, WEST]}, BooleanProperty{clazz=class java.lang.Boolean, name='lit', values=[true, false]}}
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:table_lamp desired=default:table_lamp[facing=east,lit=true]
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:table_lamp persist at=1010,100,1010 custom=true state=default:table_lamp[facing=east,lit=true] type=BRICKS data=craftengine:custom_52 collision=[BoundingBox [minX=0.0, minY=0.0, minZ=0.0, maxX=1.0, maxY=1.0, maxZ=1.0]]
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:table_lamp place-second=true
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:table_lamp fresh at=1012,100,1010 custom=true state=default:table_lamp[facing=east,lit=true] type=BRICKS data=craftengine:custom_52 collision=[BoundingBox [minX=0.0, minY=0.0, minZ=0.0, maxX=1.0, maxY=1.0, maxZ=1.0]]
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:table_lamp drops=[NETHER_BRICKx1]
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:table_lamp dropped-entities=[NETHER_BRICKx1, NETHER_BRICKx1, NETHER_BRICKx1, NETHER_BRICKx1, NETHER_BRICKx1]
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:palm_stairs default=default:palm_stairs[facing=north,half=bottom,shape=straight,waterlogged=false] props={EnumProperty{clazz=class net.momirealms.craftengine.core.util.Direction, name='facing', values=[NORTH, EAST, SOUTH, WEST]}, EnumProperty{clazz=class net.momirealms.craftengine.core.block.property.type.SingleBlockHalf, name='half', values=[BOTTOM, TOP]}, EnumProperty{clazz=class net.momirealms.craftengine.core.block.property.type.StairsShape, name='shape', values=[STRAIGHT, INNER_LEFT, INNER_RIGHT, OUTER_LEFT, OUTER_RIGHT]}, BooleanProperty{clazz=class java.lang.Boolean, name='waterlogged', values=[true, false]}}
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:palm_stairs desired=default:palm_stairs[facing=east,half=top,shape=straight,waterlogged=true]
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:palm_stairs persist at=1020,100,1010 custom=true state=default:palm_stairs[facing=east,half=top,shape=straight,waterlogged=true] type=BRICKS data=craftengine:custom_332 collision=[BoundingBox [minX=0.5, minY=0.0, minZ=0.0, maxX=1.0, maxY=1.0, maxZ=1.0], BoundingBox [minX=0.0, minY=0.5, minZ=0.0, maxX=0.5, maxY=1.0, maxZ=1.0]]
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:palm_stairs place-second=true
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:palm_stairs fresh at=1022,100,1010 custom=true state=default:palm_stairs[facing=east,half=top,shape=straight,waterlogged=true] type=BRICKS data=craftengine:custom_332 collision=[BoundingBox [minX=0.5, minY=0.0, minZ=0.0, maxX=1.0, maxY=1.0, maxZ=1.0], BoundingBox [minX=0.0, minY=0.5, minZ=0.0, maxX=0.5, maxY=1.0, maxZ=1.0]]
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:palm_stairs drops=[NETHER_BRICKx1]
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:palm_stairs dropped-entities=[NETHER_BRICKx1, NETHER_BRICKx1, NETHER_BRICKx1]
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:palm_door default=default:palm_door[facing=north,half=upper,hinge=left,open=false,powered=false] props={EnumProperty{clazz=class net.momirealms.craftengine.core.util.Direction, name='facing', values=[NORTH, EAST, SOUTH, WEST]}, EnumProperty{clazz=class net.momirealms.craftengine.core.block.property.type.DoubleBlockHalf, name='half', values=[UPPER, LOWER]}, EnumProperty{clazz=class net.momirealms.craftengine.core.block.property.type.DoorHinge, name='hinge', values=[LEFT, RIGHT]}, BooleanProperty{clazz=class java.lang.Boolean, name='open', values=[true, false]}, BooleanProperty{clazz=class java.lang.Boolean, name='powered', values=[true, false]}}
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:palm_door desired=default:palm_door[facing=east,half=upper,hinge=right,open=true,powered=true]
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:palm_door persist at=1030,100,1010 custom=true state=default:palm_door[facing=east,half=upper,hinge=right,open=true,powered=true] type=BRICKS data=craftengine:custom_377 collision=[BoundingBox [minX=0.0, minY=0.0, minZ=0.8125, maxX=1.0, maxY=1.0, maxZ=1.0]]
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:palm_door place-second=true
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:palm_door fresh at=1032,100,1010 custom=true state=default:palm_door[facing=east,half=upper,hinge=right,open=true,powered=true] type=BRICKS data=craftengine:custom_377 collision=[BoundingBox [minX=0.0, minY=0.0, minZ=0.8125, maxX=1.0, maxY=1.0, maxZ=1.0]]
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:palm_door drops=[]
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE default:palm_door dropped-entities=[]
+[16:03:44 INFO]: [CEStateProbe] CESTATEPROBE done
+[16:03:44 INFO]: [CEProbe] CEPROBE loaded-blocks={default:palm_log=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@1dbe9386, default:solid_gunpowder_block=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@5406913a, default:chinese_lantern=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@c3e5792, default:palm_slab=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@44d52f18, default:copper_coil=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@2d1eb6a7, default:palm_wood=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@4df17d7f, default:pebble=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@338d3194, default:amethyst_wall_torch=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@5e4d6512, default:fairy_flower=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@63e5bf2, default:palm_sapling=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@40e2c4cf, default:topaz_ore=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@1a394cd6, default:attached_hami_melon_stem=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@2fe9df76, default:chessboard_block=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@5bfce0b2, default:gunpowder_block=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@dee93be, default:flame_cane=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@5d612129, default:safe_block=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@3c92579c, default:drawer_block=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@d7c9cc, default:stripped_palm_log=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@795dd90b, default:palm_fence_gate=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@2d61c760, default:togglable_light_block=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@3614be7, default:palm_trapdoor=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@3d466bee, default:table_lamp=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@2ac478cc, default:palm_door=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@93de033, default:netherite_anvil=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@8abc80, default:deepslate_topaz_ore=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@e9dbe64, default:palm_pressure_plate=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@796a563, default:sleeper_sofa=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@61cce1da, default:sofa=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@34f73fdf, default:palm_planks=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@577ac9bb, default:reed=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@6575d38a, default:stripped_palm_wood=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@63b12ccf, default:hami_melon_stem=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@6e35eea1, default:magma_plant=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@6f03d5cd, default:palm_stairs=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@2421a224, default:palm_fence=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@4e1c253b, default:palm_leaves=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@f1d9abf, default:ender_pearl_flower=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@7e419b2c, default:palm_button=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@57582642, default:amethyst_torch=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@7842e46f, default:hami_melon=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@1be941ba}
+[16:03:44 INFO]: [CEProbe] CEPROBE place-first=false
+[16:03:44 INFO]: [CEProbe] CEPROBE persist at=1000,100,1000 custom=true type=BRICKS data=craftengine:custom_213 state=default:topaz_ore
+[16:03:44 INFO]: [CEProbe] CEPROBE persist data-class=org.bukkit.craftbukkit.block.data.CraftBlockData asString=craftengine:custom_213
+[16:03:44 INFO]: [CEProbe] CEPROBE persist collision-boxes=[BoundingBox [minX=0.0, minY=0.0, minZ=0.0, maxX=1.0, maxY=1.0, maxZ=1.0]]
+[16:03:44 INFO]: [CEProbe] CEPROBE place-second=true
+[16:03:44 INFO]: [CEProbe] CEPROBE fresh at=1002,100,1000 custom=true type=BRICKS data=craftengine:custom_213 state=default:topaz_ore
+[16:03:44 INFO]: [CEProbe] CEPROBE fresh data-class=org.bukkit.craftbukkit.block.data.CraftBlockData asString=craftengine:custom_213
+[16:03:44 INFO]: [CEProbe] CEPROBE fresh collision-boxes=[BoundingBox [minX=0.0, minY=0.0, minZ=0.0, maxX=1.0, maxY=1.0, maxZ=1.0]]
+[16:03:44 INFO]: [CEProbe] CEPROBE drops=[NETHER_BRICKx1]
+[16:03:44 INFO]: [CEProbe] CEPROBE dropped-entities=[NETHER_BRICKx1, NETHER_BRICKx1, NETHER_BRICKx1, NETHER_BRICKx1, NETHER_BRICKx1, NETHER_BRICKx1, NETHER_BRICKx1, NETHER_BRICKx1]
+[16:03:44 INFO]: [CEProbe] CEPROBE done
+[16:03:46 INFO]: [PerfProbe] PERFPROBE ticks=600 tps=58.25 avg=3.225 p50=0.212 p99=2.098
+[16:03:56 INFO]: [PerfProbe] PERFPROBE ticks=800 tps=80.00 avg=0.218 p50=0.201 p99=0.436
+[16:04:06 INFO]: [PerfProbe] PERFPROBE ticks=1000 tps=100.01 avg=0.219 p50=0.202 p99=0.435
+[16:04:16 INFO]: [PerfProbe] PERFPROBE ticks=1200 tps=120.00 avg=0.199 p50=0.183 p99=0.441
+[16:04:26 INFO]: [PerfProbe] PERFPROBE ticks=1400 tps=140.00 avg=0.194 p50=0.178 p99=0.374

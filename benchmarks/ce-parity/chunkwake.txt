@@ -1,0 +1,274 @@
+[2m2026-11-25 16:04:29[0m [32m INFO[0m memory profile: Normal, gen workers 31, Tokio workers 32, blocking 512, proto limit 2048, base columns 16384
+[2m2026-11-25 16:04:29[0m [32m INFO[0m Minecraft 26.3 (protocol 777)
+[2m2026-11-25 16:04:29[0m [32m INFO[0m data: 260 packet ids, 15 registries (boot image in 10 ms)
+[2m2026-11-25 16:04:29[0m [32m INFO[0m prepared 32 synchronized registries and tags for 15 registries (67 KiB)
+[2m2026-11-25 16:04:29[0m [32m INFO[0m listening on 127.0.0.1:25620
+[2m2026-11-25 16:04:29[0m [32m INFO[0m world: seed -3886386999023095198, flat 1×bedrock, 2×dirt, 1×grass_block
+[2m2026-11-25 16:04:29[0m [32m INFO[0m minecraft:end: фичи 5 из 5
+[2m2026-11-25 16:04:29[0m [32m INFO[0m minecraft:end: генератор готов (min_y 0, высота 128, море 0)
+[2m2026-11-25 16:04:29[0m [32m INFO[0m minecraft:nether: фичи 37 из 37
+[2m2026-11-25 16:04:29[0m [32m INFO[0m minecraft:nether: генератор готов (min_y 0, высота 128, море 32)
+[2m2026-11-25 16:04:29[0m [32m INFO[0m enchanting: 43 enchantments (36 on the table), 77 enchantable items
+[2m2026-11-25 16:04:29[0m [32m INFO[0m world: world (world in 920 ms, up in 954 ms)
+[2m2026-11-25 16:04:29[0m [32m INFO[0m chunks: view distance 4, simulation distance 4
+[2m2026-11-25 16:04:29[0m [32m INFO[0m dashboard on http://127.0.0.1:25585/ (metrics on /metrics)
+[2m2026-11-25 16:04:30[0m [32m INFO[0m plugins: starting the JVM (C:\Users\ROG STRIX.DESKTOP-030L0I5\AppData\Roaming\ModrinthApp\meta\java_versions\zulu25.32.21-ca-jre25.0.2-win_x64\bin\java.exe) and enabling plugins...
+[2m2026-11-25 16:04:30[0m [32m INFO[0m protocol: component ids=24
+[2m2026-11-25 16:04:30[0m [33m WARN[0m protocol: init failed: java.lang.NullPointerException: Cannot invoke "org.bukkit.Server.getPluginManager()" because "org.bukkit.Bukkit.server" is null
+[2m2026-11-25 16:04:30[0m [32m INFO[0m blocks: 1286 blocks, 35723 states, 300 tags
+[2m2026-11-25 16:04:31[0m [32m INFO[0m [Chunkwake] This server is running Chunkwake version 26.3 (MC: 26.3) (Implementing API version 26.3-R0.1-SNAPSHOT)
+[2m2026-11-25 16:04:31[0m [32m INFO[0m [Chunkwake] plugins: 6 jar(s) in C:\Users\ROGSTR~1.DES\AppData\Local\Temp\opencode\ce-parity-cw\plugins, loading...
+[2m2026-11-25 16:04:31[0m [32m INFO[0m [Chunkwake] plugins: [1/6] CEProbe.jar
+[2m2026-11-25 16:04:31[0m [32m INFO[0m [Chunkwake] plugins: [2/6] CEStateProbe.jar
+[2m2026-11-25 16:04:31[0m [32m INFO[0m [Chunkwake] plugins: [3/6] chunkwake-test-plugin.jar
+[2m2026-11-25 16:04:31[0m [32m INFO[0m [Chunkwake] plugins: [4/6] craft-engine-paper-plugin-26.9.2.jar
+[2m2026-11-25 16:04:31[0m [32m INFO[0m [Chunkwake] plugins: [5/6] FoliaProbe.jar
+[2m2026-11-25 16:04:31[0m [32m INFO[0m [Chunkwake] plugins: [6/6] PerfProbe.jar
+[2m2026-11-25 16:04:31[0m [32m INFO[0m [Chunkwake] plugins: CEProbe loaded in 7 ms
+[2m2026-11-25 16:04:31[0m [32m INFO[0m [Chunkwake] plugins: CEStateProbe loaded in 1 ms
+[2m2026-11-25 16:04:31[0m [32m INFO[0m [Chunkwake] plugins: ChunkwakeTest loaded in 3 ms
+2026-11-25 16:04:32.860 [main] INFO  CraftEngine - Initializing registries...
+2026-11-25 16:04:33.632 [main] INFO  HikariDataSource - craftengine-storage - Starting...
+2026-11-25 16:04:33.805 [main] INFO  HikariPool - craftengine-storage - Added connection org.sqlite.jdbc4.JDBC4Connection@7506e95a
+2026-11-25 16:04:33.806 [main] INFO  HikariDataSource - craftengine-storage - Start completed.
+2026-11-25 16:04:34.099 [main] INFO  FlywayExecutor - Database: jdbc:sqlite:******** (SQLite 3.45)
+2026-11-25 16:04:34.144 [main] INFO  DbValidate - Successfully validated 1 migration (execution time 00:00.014s)
+2026-11-25 16:04:34.150 [main] INFO  DbMigrate - Current version of schema "main": 1
+2026-11-25 16:04:34.153 [main] INFO  DbMigrate - Schema "main" is up to date. No migration necessary.
+2026-11-25 16:04:34.215 [main] WARN  CraftEngine - Lifecycle chunk cache unavailable: requires Paper 1.21.4+, cache-system=true and async-read=true; using timed caching for this startup
+2026-11-25 16:04:34.800 [main] WARN  CraftEngine - Could not find vanilla's merchant item matching method; custom items can still be used in unconstrained vanilla trades
+2026-11-25 16:04:34.861 [main] WARN  CraftEngine - Could not find vanilla's equipment change method; equipment changes cannot be tracked on this server
+[2m2026-11-25 16:04:34[0m [32m INFO[0m [Chunkwake] plugins: CraftEngine loaded in 3316 ms
+[2m2026-11-25 16:04:34[0m [32m INFO[0m [Chunkwake] plugins: FoliaProbe loaded in 0 ms
+[2m2026-11-25 16:04:34[0m [32m INFO[0m [Chunkwake] plugins: PerfProbe loaded in 0 ms
+[2m2026-11-25 16:04:34[0m [32m INFO[0m [Chunkwake] plugins: enabling CEProbe...
+[2m2026-11-25 16:04:34[0m [32m INFO[0m [CEProbe] Enabling CEProbe v1.0
+[2m2026-11-25 16:04:34[0m [32m INFO[0m [Chunkwake] plugins: CEProbe enabled in 17 ms
+[2m2026-11-25 16:04:34[0m [32m INFO[0m [Chunkwake] plugins: enabling CEStateProbe...
+[2m2026-11-25 16:04:34[0m [32m INFO[0m [CEStateProbe] Enabling CEStateProbe v1.0
+[2m2026-11-25 16:04:34[0m [32m INFO[0m [Chunkwake] plugins: CEStateProbe enabled in 1 ms
+[2m2026-11-25 16:04:34[0m [32m INFO[0m [Chunkwake] plugins: enabling ChunkwakeTest...
+[2m2026-11-25 16:04:34[0m [32m INFO[0m [ChunkwakeTest] Enabling ChunkwakeTest v1.0
+[2m2026-11-25 16:04:34[0m [32m INFO[0m [ChunkwakeTest] onEnable on Chunkwake 26.3-chunkwake (MC: 26.3)
+[2m2026-11-25 16:04:34[0m [32m INFO[0m [ChunkwakeTest] resource plugin.yml: true classloader: dev.chunkwake.bridge.PluginLoader
+[2m2026-11-25 16:04:34[0m [32m INFO[0m [ChunkwakeTest] world: world minecraft:overworld NORMAL uid=f30b6c10-92e3-4693-9be3-750db2a850db path=C:\Users\ROGSTR~1.DES\AppData\Local\Temp\opencode\ce-parity-cw\world\dimensions\minecraft\overworld
+[2m2026-11-25 16:04:34[0m [32m INFO[0m [ChunkwakeTest] world: world_nether minecraft:the_nether NETHER uid=ddcbda67-93f5-40dc-9898-6a128cd7870b path=C:\Users\ROGSTR~1.DES\AppData\Local\Temp\opencode\ce-parity-cw\world\dimensions\minecraft\the_nether
+[2m2026-11-25 16:04:34[0m [32m INFO[0m [ChunkwakeTest] world: world_the_end minecraft:the_end THE_END uid=b3f69dd5-20bd-4ffd-b05e-f3d8d8da5eb9 path=C:\Users\ROGSTR~1.DES\AppData\Local\Temp\opencode\ce-parity-cw\world\dimensions\minecraft\the_end
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [ChunkwakeTest] default attributes: zombie has=true hp=20.0 attack=3.0 cow hp=10.0
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [ChunkwakeTest] enchant offers: minecraft:sharpness/1@6 minecraft:bane_of_arthropods/3@20 minecraft:knockback/2@30
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [ChunkwakeTest] materials: transparent=127 errors=0 stone.transparent=false air.transparent=true
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [ChunkwakeTest] legacy: stone->STONE grass->GRASS_BLOCK wool15->BLACK_WOOL lily->LILY_PAD
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [ChunkwakeTest] block data: minecraft:oak_stairs[facing=north,half=bottom,shape=straight,waterlogged=true] waterlogged=true
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [ChunkwakeTest] mannequin: poses=[FALL_FLYING, SLEEPING, SNEAKING, STANDING, SWIMMING] desc=NPC skinParts=127/true/true statistic=minecraft.custom:minecraft.deaths
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [ChunkwakeTest] item bytes: 121 -> DIAMOND_SWORD x2 sharpness=3
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [ChunkwakeTest] mannequin profile: ResolvableProfile{name=null, uuid=null, properties=0}
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [ChunkwakeTest] world time: before=103 after=6000 day=true full=6000
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [ChunkwakeTest] commandmaps: server=org.bukkit.command.SimpleCommandMap bukkit=org.bukkit.command.SimpleCommandMap error=null known=219
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [ChunkwakeTest] folia: owned on enable=true global=true
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [ChunkwakeTest] item api: BREAD x3 max 64
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [ChunkwakeTest] folia: region delayed, state=RUNNING
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [ChunkwakeTest] folia: done region-delayed (1/4)
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [ChunkwakeTest] components2: food=4/2.5 weapon=7 equip=HEAD/chunkwake:test book=A/1 sign=4
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [ChunkwakeTest] components: lore=1 ench={CraftEnchantment{holder=Reference{ResourceKey[minecraft:enchantment / minecraft:sharpness]=Enchantment Sharpness}}=3} color=Color:[argb0xFFFF0000] model=[abc]/[1.5] map=7
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [Chunkwake] plugins: ChunkwakeTest enabled in 261 ms
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [Chunkwake] plugins: enabling CraftEngine...
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [CraftEngine] Enabling CraftEngine v26.9.2
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [ChunkwakeTest] folia: async delayed on Folia Async Scheduler Thread #0 owned=false
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [ChunkwakeTest] folia: done async-delayed (2/4)
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [Chunkwake] plugins: CraftEngine enabled in 614 ms
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [Chunkwake] plugins: enabling FoliaProbe...
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [FoliaProbe] Enabling FoliaProbe v1.0
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [FoliaProbe] FOLIAPROBE done async-now (1/7)
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [Chunkwake] plugins: FoliaProbe enabled in 3 ms
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [Chunkwake] plugins: enabling PerfProbe...
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [PerfProbe] Enabling PerfProbe v1.0
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [PerfProbe] PERFPROBE enabled
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [Chunkwake] plugins: PerfProbe enabled in 3 ms
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [FoliaProbe] FOLIAPROBE done region-execute (2/7)
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [FoliaProbe] FOLIAPROBE done region-delayed (3/7)
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [Chunkwake] plugins: 6 of 6 enabled in 4302 ms
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [PerfProbe] PERFPROBE server-load=STARTUP
+[2m2026-11-25 16:04:35[0m [32m INFO[0m plugins: enabled 6 plugin(s) in 5824 ms
+[2m2026-11-25 16:04:35[0m [32m INFO[0m [FoliaProbe] FOLIAPROBE done async-delayed (4/7)
+2026-11-25 16:04:36.571 [main] INFO  CraftEngine - Loaded pack: default_assets. Default namespace: default
+2026-11-25 16:04:36.574 [main] INFO  CraftEngine - Loaded pack: default_feature_populator. Default namespace: default
+2026-11-25 16:04:36.575 [main] INFO  CraftEngine - Loaded pack: default_templates. Default namespace: default
+2026-11-25 16:04:36.576 [main] INFO  CraftEngine - Loaded pack: internal. Default namespace: internal
+2026-11-25 16:04:36.578 [main] INFO  CraftEngine - Loaded pack: legacy_armor. Default namespace: minecraft
+2026-11-25 16:04:36.579 [main] INFO  CraftEngine - Loaded pack: remove_shulker_head. Default namespace: minecraft
+2026-11-25 16:04:37.015 [craft-engine-common-worker-7] INFO  CraftEngine - Loaded templates in 55.06ms (75)
+2026-11-25 16:04:37.021 [craft-engine-common-worker-7] INFO  CraftEngine - Loaded config factories in 4.33ms (3)
+2026-11-25 16:04:37.025 [craft-engine-common-worker-1] INFO  CraftEngine - Loaded translations in 2.04ms (127)
+2026-11-25 16:04:37.059 [craft-engine-common-worker-2] INFO  CraftEngine - Loaded equipments in 22.66ms (2)
+2026-11-25 16:04:37.069 [craft-engine-common-worker-0] INFO  CraftEngine - Loaded images in 46.48ms (55)
+2026-11-25 16:04:37.098 [craft-engine-common-worker-0] INFO  CraftEngine - Loaded emojis in 24.89ms (16)
+2026-11-25 16:04:37.159 [craft-engine-common-worker-5] INFO  CraftEngine - Loaded loot sources in 135.94ms (1)
+2026-11-25 16:04:37.195 [craft-engine-common-worker-6] INFO  CraftEngine - Loaded lang in 121.34ms (630)
+2026-11-25 16:04:37.200 [craft-engine-common-worker-2] INFO  CraftEngine - Loaded items in 136.45ms (109)
+2026-11-25 16:04:37.206 [craft-engine-common-worker-1] INFO  CraftEngine - Loaded categories in 6.14ms (5)
+2026-11-25 16:04:37.231 [craft-engine-common-worker-6] INFO  CraftEngine - Loaded recipes in 29.56ms (45)
+2026-11-25 16:04:37.231 [craft-engine-common-worker-2] INFO  CraftEngine - Loaded furniture in 30.28ms (6)
+2026-11-25 16:04:37.309 [craft-engine-common-worker-7] INFO  CraftEngine - Loaded block state mappings in 286.95ms (4280)
+2026-11-25 16:04:37.442 [craft-engine-common-worker-7] INFO  CraftEngine - Loaded blocks in 132.57ms (40)
+2026-11-25 16:04:37.562 [main] WARN  CraftEngine - Failed to load world world
+java.lang.ExceptionInInitializerError
+	at craft-engine-paper-plugin-26.9.2.jar//net.momirealms.craftengine.bukkit.world.BukkitWorldManager.handleChunkLoad(BukkitWorldManager.java:637)
+	at craft-engine-paper-plugin-26.9.2.jar//net.momirealms.craftengine.bukkit.world.BukkitWorldManager.handleWorldLoad(BukkitWorldManager.java:362)
+	at craft-engine-paper-plugin-26.9.2.jar//net.momirealms.craftengine.bukkit.world.BukkitWorldManager.delayedInit(BukkitWorldManager.java:167)
+	at craft-engine-paper-plugin-26.9.2.jar//net.momirealms.craftengine.core.plugin.CraftEngine.lambda$onPluginEnable$1(CraftEngine.java:520)
+	at dev.chunkwake.bridge.Scheduler$Task.run(Scheduler.java:61)
+	at dev.chunkwake.bridge.Scheduler.tick(Scheduler.java:128)
+	at dev.chunkwake.bridge.Bridge.tick(Bridge.java:284)
+Caused by: java.lang.NullPointerException: Constructor not found for proxy interface net.momirealms.craftengine.proxy.bukkit.craftbukkit.CraftChunkProxy#newInstance
+	at java.base/java.util.Objects.requireNonNull(Unknown Source)
+	at net.momirealms.craftengine.libraries.reflection.proxy.ProxyBinder.resolveConstructorInvoker(ProxyBinder.java:187)
+	at net.momirealms.craftengine.libraries.reflection.proxy.ProxyBinder.resolveBinding(ProxyBinder.java:102)
+	at net.momirealms.craftengine.libraries.reflection.proxy.ProxyBinder.collectBindings(ProxyBinder.java:75)
+	at net.momirealms.craftengine.libraries.reflection.proxy.ProxyBinder.bind(ProxyBinder.java:44)
+	at net.momirealms.craftengine.libraries.reflection.proxy.ProxyGenerator.create(ProxyGenerator.java:17)
+	at net.momirealms.craftengine.libraries.reflection.proxy.ASMProxyFactory.create(ASMProxyFactory.java:8)
+	at net.momirealms.craftengine.proxy.bukkit.craftbukkit.CraftChunkProxy.<clinit>(CraftChunkProxy.java:10)
+	... 7 more
+[2m2026-11-25 16:04:37[0m [32m INFO[0m [ChunkwakeTest] folia: global execute
+[2m2026-11-25 16:04:37[0m [32m INFO[0m [ChunkwakeTest] folia: done global-execute (3/4)
+[2m2026-11-25 16:04:37[0m [32m INFO[0m [FoliaProbe] FOLIAPROBE done global-execute (5/7)
+[2m2026-11-25 16:04:37[0m [32m INFO[0m [FoliaProbe] FOLIAPROBE done global-delayed (6/7)
+[2m2026-11-25 16:04:37[0m [32m INFO[0m [FoliaProbe] FOLIAPROBE done global-repeating (7/7)
+[2m2026-11-25 16:04:37[0m [32m INFO[0m [FoliaProbe] FOLIAPROBE all-schedulers-ok
+[2m2026-11-25 16:04:38[0m [32m INFO[0m [ChunkwakeTest] folia: global fixed rate x3, cancel=NEXT_RUNS_CANCELLED
+[2m2026-11-25 16:04:38[0m [32m INFO[0m [ChunkwakeTest] folia: done global-fixed-rate (4/4)
+[2m2026-11-25 16:04:38[0m [32m INFO[0m [ChunkwakeTest] folia: all-schedulers-ok
+[2m2026-11-25 16:04:39[0m [32m INFO[0m [ChunkwakeTest] dispense: ARROW at 60
+[2m2026-11-25 16:04:39[0m [32m INFO[0m [ChunkwakeTest] move event: ARROW HOPPER -> DISPENSER
+[2m2026-11-25 16:04:40[0m [32m INFO[0m [ChunkwakeTest] redstone: direct=AIR/AIR wire=AIR/AIR
+[2m2026-11-25 16:04:42[0m [32m INFO[0m [ChunkwakeTest] scheduler: 100 ticks
+[2m2026-11-25 16:04:42[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world=0
+[2m2026-11-25 16:04:42[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_nether=0
+[2m2026-11-25 16:04:42[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_the_end=0
+[2m2026-11-25 16:04:43[0m [32m INFO[0m [ChunkwakeTest] hopper: moves=6 pickups=3
+[2m2026-11-25 16:04:43[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=0,0 thread=Folia Region Worker #0 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-25 16:04:43[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=64,64 thread=Folia Region Worker #1 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-25 16:04:44[0m [32m INFO[0m [ChunkwakeTest] dispense: ARROW at 60
+[2m2026-11-25 16:04:44[0m [32m INFO[0m [ChunkwakeTest] fluids: flow=WATER fall=AIR edge=WATER meet=OBSIDIAN logged=WATER/CHEST minecraft:oak_stairs[facing=north,half=bottom,shape=straight,waterlogged=true] waterlogged=true
+[2m2026-11-25 16:04:45[0m [32m INFO[0m [ChunkwakeTest] mob: COW health=10.0/10.0 adult=true sheep=RED living=2 spawned=0
+[2m2026-11-25 16:04:45[0m [32m INFO[0m [ChunkwakeTest] tag-probe: base_stone_overworld -> 6 [ANDESITE, DEEPSLATE, DIORITE]
+[2m2026-11-25 16:04:45[0m [32m INFO[0m [ChunkwakeTest] tag-probe: coal_ores -> 2 [COAL_ORE, DEEPSLATE_COAL_ORE]
+[2m2026-11-25 16:04:45[0m [32m INFO[0m [ChunkwakeTest] tag-probe: diamond_ores -> 2 [DEEPSLATE_DIAMOND_ORE, DIAMOND_ORE]
+[2m2026-11-25 16:04:45[0m [32m INFO[0m [ChunkwakeTest] tag-probe: minecraft:base_stone_overworld -> 6 [ANDESITE, DEEPSLATE, DIORITE]
+[2m2026-11-25 16:04:45[0m [32m INFO[0m [ChunkwakeTest] mob death: COW drops=[BEEF, LEATHER] xp=0
+[2m2026-11-25 16:04:46[0m [32m INFO[0m [ChunkwakeTest] fly: rear observer x=-1 blocks=0
+[2m2026-11-25 16:04:46[0m [32m INFO[0m [ChunkwakeTest] mob dead: true valid=false
+[2m2026-11-25 16:04:47[0m [32m INFO[0m [PerfProbe] PERFPROBE ticks=200 tps=17.26 avg=9.154 p50=0.122 p99=21.758
+[2m2026-11-25 16:04:47[0m [32m INFO[0m [ChunkwakeTest] scheduler: 200 ticks
+[2m2026-11-25 16:04:51[0m [32m INFO[0m [ChunkwakeTest] mob death: SHEEP drops=[MUTTON, RED_WOOL] xp=0
+[2m2026-11-25 16:04:52[0m [32m INFO[0m [ChunkwakeTest] scheduler: 300 ticks
+[2m2026-11-25 16:04:52[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world=0
+[2m2026-11-25 16:04:52[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_nether=0
+[2m2026-11-25 16:04:52[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_the_end=0
+[2m2026-11-25 16:04:53[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=64,64 thread=Folia Region Worker #1 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-25 16:04:53[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=0,0 thread=Folia Region Worker #0 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-25 16:04:57[0m [32m INFO[0m [PerfProbe] PERFPROBE ticks=400 tps=40.01 avg=0.123 p50=0.098 p99=0.448
+[2m2026-11-25 16:04:57[0m [32m INFO[0m [ChunkwakeTest] scheduler: 400 ticks
+[2m2026-11-25 16:05:02[0m [32m INFO[0m [ChunkwakeTest] scheduler: 500 ticks
+[2m2026-11-25 16:05:02[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world=0
+[2m2026-11-25 16:05:02[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_nether=0
+[2m2026-11-25 16:05:02[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_the_end=0
+[2m2026-11-25 16:05:03[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=64,64 thread=Folia Region Worker #1 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-25 16:05:03[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=0,0 thread=Folia Region Worker #0 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-25 16:05:04[0m [33m WARN[0m [Chunkwake] Loaded class net.momirealms.craftengine.bukkit.api.CraftEngineBlocks from CraftEngine v26.9.2 which is not a depend or softdepend of CEProbe v1.0 (this may cause issues if it is enabled later)
+[2m2026-11-25 16:05:04[0m [33m WARN[0m [CEProbe] CEPROBE BR-debug failed
+java.lang.IllegalAccessException: class ceprobe.CEProbe cannot access a member of class net.momirealms.craftengine.bukkit.plugin.injector.BlockReflections with modifiers "public static final"
+	at java.base/jdk.internal.reflect.Reflection.newIllegalAccessException(Unknown Source)
+	at java.base/java.lang.reflect.AccessibleObject.checkAccess(Unknown Source)
+	at java.base/java.lang.reflect.Field.checkAccess(Unknown Source)
+	at java.base/java.lang.reflect.Field.get(Unknown Source)
+	at CEProbe.jar//ceprobe.CEProbe.probeOnMain(CEProbe.java:50)
+	at dev.chunkwake.bridge.Scheduler$Task.run(Scheduler.java:61)
+	at dev.chunkwake.bridge.Scheduler.tick(Scheduler.java:128)
+	at dev.chunkwake.bridge.Bridge.tick(Bridge.java:284)
+
+[2m2026-11-25 16:05:04[0m [32m INFO[0m [CEProbe] CEPROBE world-id=474170199 world-class=dev.chunkwake.bridge.WorldApi world-field=net.minecraft.server.level.ServerLevel@1237c432 id=305644594 handle=net.minecraft.server.level.ServerLevel@1237c432 handle-id=305644594
+[2m2026-11-25 16:05:04[0m [32m INFO[0m [CEProbe] CEPROBE nms-state=minecraft:air class=net.minecraft.world.level.block.state.BlockState
+[2m2026-11-25 16:05:04[0m [32m INFO[0m [CEProbe] CEPROBE loaded-blocks={default:palm_log=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@6ea40f83, default:solid_gunpowder_block=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@1a37d95f, default:chinese_lantern=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@5352fcf1, default:palm_slab=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@7189b189, default:copper_coil=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@3f9f702c, default:palm_wood=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@1b46bba1, default:pebble=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@5fb7694c, default:amethyst_wall_torch=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@638e8eca, default:fairy_flower=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@27d49c87, default:palm_sapling=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@9e1a06f, default:topaz_ore=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@6d785516, default:attached_hami_melon_stem=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@7a177ead, default:chessboard_block=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@7924f5cc, default:gunpowder_block=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@7dc2d05f, default:flame_cane=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@52bdfa14, default:safe_block=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@131e04f8, default:drawer_block=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@4d4a19c2, default:stripped_palm_log=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@26e1681c, default:palm_fence_gate=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@1b315b8e, default:togglable_light_block=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@78ebb5d4, default:palm_trapdoor=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@65f23702, default:table_lamp=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@487e0228, default:palm_door=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@5982dd82, default:netherite_anvil=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@7ce29673, default:deepslate_topaz_ore=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@8dce4ca, default:palm_pressure_plate=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@308bd8bb, default:sofa=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@7f2a6de5, default:sleeper_sofa=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@17933d7d, default:palm_planks=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@780661f1, default:reed=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@16a6304a, default:stripped_palm_wood=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@3acf323e, default:hami_melon_stem=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@34b998cf, default:magma_plant=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@7f7b7e40, default:palm_stairs=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@58782585, default:palm_fence=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@1b65a276, default:palm_leaves=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@63e22e35, default:ender_pearl_flower=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@474fd577, default:palm_button=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@5e028416, default:amethyst_torch=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@68c2ebb2, default:hami_melon=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@1a23e319}
+[2m2026-11-25 16:05:04[0m [33m WARN[0m api: World.playSound is not implemented, returning an empty value
+[2m2026-11-25 16:05:04[0m [32m INFO[0m [CEProbe] CEPROBE place-first=true
+[2m2026-11-25 16:05:04[0m [32m INFO[0m [CEProbe] CEPROBE state2=craftengine:custom_157 class=net.momirealms.craftengine.bukkit.plugin.injector.CraftEngineBlockState
+[2m2026-11-25 16:05:04[0m [32m INFO[0m [CEProbe] CEPROBE state2-block=craftengine:custom_157 class=net.momirealms.craftengine.bukkit.plugin.injector.CraftEngineBlock name=craftengine:custom_157
+[2m2026-11-25 16:05:04[0m [32m INFO[0m [CEProbe] CEPROBE state2-values={}
+[2m2026-11-25 16:05:04[0m [32m INFO[0m [CEProbe] CEPROBE state2-superfield CODEC=String[xmapped]
+[2m2026-11-25 16:05:04[0m [32m INFO[0m [CEProbe] CEPROBE state2-superfield block=craftengine:custom_157
+[2m2026-11-25 16:05:04[0m [32m INFO[0m [CEProbe] CEPROBE state2-superfield id=-1
+[2m2026-11-25 16:05:04[0m [32m INFO[0m [CEProbe] CEPROBE state2-superfield air=false
+[2m2026-11-25 16:05:04[0m [32m INFO[0m [CEProbe] CEPROBE state2-superfield solidRender=true
+[2m2026-11-25 16:05:04[0m [32m INFO[0m [CEProbe] CEPROBE state2-superfield blockEntity=false
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE state2-superfield fluid=net.minecraft.world.level.material.FluidState@44c37ea
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE state2-superfield values={}
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE state2-field immutableBlockState=default:topaz_ore
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE state2-field blockOwner=craftengine:custom_157
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE state2-field delegate$3d7r940=net.momirealms.craftengine.bukkit.plugin.injector.BlockStateGenerator$IsBlockInterceptor@65a381ce
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE state2-field delegate$56sg741=net.momirealms.craftengine.bukkit.plugin.injector.BlockStateGenerator$SetPropertyValueInterceptor@44798d81
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE state2-field delegate$g6r7fv0=net.momirealms.craftengine.bukkit.plugin.injector.BlockStateGenerator$GetPropertyValueInterceptor@2b3c7194
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE state2-field delegate$vqc51o1=net.momirealms.craftengine.bukkit.plugin.injector.BlockStateGenerator$HasPropertyInterceptor@557734a
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE state2-field delegate$7igdj21=net.momirealms.craftengine.bukkit.plugin.injector.BlockStateGenerator$GetDropsInterceptor@281b0f38
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE state2-immutable=default:topaz_ore def=net.momirealms.craftengine.bukkit.block.BukkitBlockDefinition@6d785516 id=default:topaz_ore
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE block-field net.momirealms.craftengine.bukkit.plugin.injector.CraftEngineBlock#behaviorHolder=net.momirealms.craftengine.core.util.ObjectHolder@4fcce3d
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE block-field net.momirealms.craftengine.bukkit.plugin.injector.CraftEngineBlock#shapeHolder=net.momirealms.craftengine.core.util.ObjectHolder@61ea5a2f
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE block-field net.momirealms.craftengine.bukkit.plugin.injector.CraftEngineBlock#isClientSideNoteBlock=false
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE block-field net.momirealms.craftengine.bukkit.plugin.injector.CraftEngineBlock#isClientSideTripwire=false
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE block-field net.minecraft.world.level.block.Block#name=craftengine:custom_157
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE block-field net.minecraft.world.level.block.Block#builtInRegistryHolder=null
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE block-field net.minecraft.world.level.block.Block#descriptionId=
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE block-field net.minecraft.world.level.block.state.BlockBehaviour#properties=net.minecraft.world.level.block.state.BlockBehaviour$Properties@b8471c9
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE block-field net.minecraft.world.level.block.state.BlockBehaviour#descriptionId=
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE block-holder=null
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE block-id=craftengine:custom_157
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE persist at=1000,100,1000 custom=true type=BRICKS data=craftengine:custom_157 state=default:topaz_ore
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE persist data-class=jdk.proxy1.$Proxy63 asString=craftengine:custom_157
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE persist collision-boxes=[BoundingBox [minX=0.0, minY=0.0, minZ=0.0, maxX=1.0, maxY=1.0, maxZ=1.0]]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE place-second=true
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE fresh at=1002,100,1000 custom=true type=BRICKS data=craftengine:custom_157 state=default:topaz_ore
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE fresh data-class=jdk.proxy1.$Proxy63 asString=craftengine:custom_157
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE fresh collision-boxes=[BoundingBox [minX=0.0, minY=0.0, minZ=0.0, maxX=1.0, maxY=1.0, maxZ=1.0]]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE drops=[NETHER_BRICKx1]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE dropped-entities=[NETHER_BRICKx1]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEProbe] CEPROBE done
+[2m2026-11-25 16:05:05[0m [33m WARN[0m [Chunkwake] Loaded class net.momirealms.craftengine.bukkit.api.CraftEngineBlocks from CEProbe v1.0 which is not a depend or softdepend of CEStateProbe v1.0 (this may cause issues if it is enabled later)
+[2m2026-11-25 16:05:05[0m [33m WARN[0m [Chunkwake] Loaded class net.momirealms.craftengine.core.block.ImmutableBlockState from CraftEngine v26.9.2 which is not a depend or softdepend of CEStateProbe v1.0 (this may cause issues if it is enabled later)
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:table_lamp default=default:table_lamp[facing=north,lit=false] props={EnumProperty{clazz=class net.momirealms.craftengine.core.util.Direction, name='facing', values=[NORTH, EAST, SOUTH, WEST]}, BooleanProperty{clazz=class java.lang.Boolean, name='lit', values=[true, false]}}
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:table_lamp desired=default:table_lamp[facing=east,lit=true]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:table_lamp persist at=1010,100,1010 custom=true state=default:table_lamp[facing=east,lit=true] type=BRICKS data=craftengine:custom_29 collision=[BoundingBox [minX=0.0, minY=0.0, minZ=0.0, maxX=1.0, maxY=1.0, maxZ=1.0]]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:table_lamp place-second=true
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:table_lamp fresh at=1012,100,1010 custom=true state=default:table_lamp[facing=east,lit=true] type=BRICKS data=craftengine:custom_29 collision=[BoundingBox [minX=0.0, minY=0.0, minZ=0.0, maxX=1.0, maxY=1.0, maxZ=1.0]]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:table_lamp drops=[NETHER_BRICKx1]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:table_lamp dropped-entities=[NETHER_BRICKx1]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:palm_stairs default=default:palm_stairs[facing=north,half=bottom,shape=straight,waterlogged=false] props={EnumProperty{clazz=class net.momirealms.craftengine.core.util.Direction, name='facing', values=[NORTH, EAST, SOUTH, WEST]}, EnumProperty{clazz=class net.momirealms.craftengine.core.block.property.type.SingleBlockHalf, name='half', values=[BOTTOM, TOP]}, EnumProperty{clazz=class net.momirealms.craftengine.core.block.property.type.StairsShape, name='shape', values=[STRAIGHT, INNER_LEFT, INNER_RIGHT, OUTER_LEFT, OUTER_RIGHT]}, BooleanProperty{clazz=class java.lang.Boolean, name='waterlogged', values=[true, false]}}
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:palm_stairs desired=default:palm_stairs[facing=east,half=top,shape=straight,waterlogged=true]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:palm_stairs persist at=1020,100,1010 custom=true state=default:palm_stairs[facing=east,half=top,shape=straight,waterlogged=true] type=BRICKS data=craftengine:custom_309 collision=[BoundingBox [minX=0.5, minY=0.0, minZ=0.0, maxX=1.0, maxY=1.0, maxZ=1.0], BoundingBox [minX=0.0, minY=0.5, minZ=0.0, maxX=0.5, maxY=1.0, maxZ=1.0]]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:palm_stairs place-second=true
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:palm_stairs fresh at=1022,100,1010 custom=true state=default:palm_stairs[facing=east,half=top,shape=straight,waterlogged=true] type=BRICKS data=craftengine:custom_309 collision=[BoundingBox [minX=0.5, minY=0.0, minZ=0.0, maxX=1.0, maxY=1.0, maxZ=1.0], BoundingBox [minX=0.0, minY=0.5, minZ=0.0, maxX=0.5, maxY=1.0, maxZ=1.0]]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:palm_stairs drops=[NETHER_BRICKx1]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:palm_stairs dropped-entities=[NETHER_BRICKx1]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:palm_door default=default:palm_door[facing=north,half=upper,hinge=left,open=false,powered=false] props={EnumProperty{clazz=class net.momirealms.craftengine.core.util.Direction, name='facing', values=[NORTH, EAST, SOUTH, WEST]}, EnumProperty{clazz=class net.momirealms.craftengine.core.block.property.type.DoubleBlockHalf, name='half', values=[UPPER, LOWER]}, EnumProperty{clazz=class net.momirealms.craftengine.core.block.property.type.DoorHinge, name='hinge', values=[LEFT, RIGHT]}, BooleanProperty{clazz=class java.lang.Boolean, name='open', values=[true, false]}, BooleanProperty{clazz=class java.lang.Boolean, name='powered', values=[true, false]}}
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:palm_door desired=default:palm_door[facing=east,half=upper,hinge=right,open=true,powered=true]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:palm_door persist at=1030,100,1010 custom=true state=default:palm_door[facing=east,half=upper,hinge=right,open=true,powered=true] type=BRICKS data=craftengine:custom_288 collision=[BoundingBox [minX=0.0, minY=0.0, minZ=0.8125, maxX=1.0, maxY=1.0, maxZ=1.0]]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:palm_door place-second=true
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:palm_door fresh at=1032,100,1010 custom=true state=default:palm_door[facing=east,half=upper,hinge=right,open=true,powered=true] type=BRICKS data=craftengine:custom_288 collision=[BoundingBox [minX=0.0, minY=0.0, minZ=0.8125, maxX=1.0, maxY=1.0, maxZ=1.0]]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:palm_door drops=[]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE default:palm_door dropped-entities=[]
+[2m2026-11-25 16:05:05[0m [32m INFO[0m [CEStateProbe] CESTATEPROBE done
+[2m2026-11-25 16:05:07[0m [32m INFO[0m [PerfProbe] PERFPROBE ticks=600 tps=59.99 avg=0.377 p50=0.085 p99=0.453
+[2m2026-11-25 16:05:07[0m [32m INFO[0m [ChunkwakeTest] scheduler: 600 ticks
+[2m2026-11-25 16:05:12[0m [32m INFO[0m [ChunkwakeTest] scheduler: 700 ticks
+[2m2026-11-25 16:05:12[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world=0
+[2m2026-11-25 16:05:12[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_nether=0
+[2m2026-11-25 16:05:12[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_the_end=0
+[2m2026-11-25 16:05:13[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=0,0 thread=Folia Region Worker #0 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-25 16:05:13[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=64,64 thread=Folia Region Worker #1 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-25 16:05:17[0m [32m INFO[0m [PerfProbe] PERFPROBE ticks=800 tps=80.02 avg=0.101 p50=0.089 p99=0.243
+[2m2026-11-25 16:05:17[0m [32m INFO[0m [ChunkwakeTest] scheduler: 800 ticks
+[2m2026-11-25 16:05:22[0m [32m INFO[0m [ChunkwakeTest] scheduler: 900 ticks
+[2m2026-11-25 16:05:22[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world=0
+[2m2026-11-25 16:05:22[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_nether=0
+[2m2026-11-25 16:05:22[0m [32m INFO[0m [ChunkwakeTest] loaded chunks: world_the_end=0
+[2m2026-11-25 16:05:23[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=0,0 thread=Folia Region Worker #0 ownsSelf=true ownsOther=false overlap=2
+[2m2026-11-25 16:05:23[0m [32m INFO[0m [ChunkwakeTest] region task: chunk=64,64 thread=Folia Region Worker #1 ownsSelf=true ownsOther=false overlap=2

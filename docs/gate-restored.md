@@ -44,6 +44,10 @@ PROBE-FAIL: (пусто)
   и entity world tracking hook больше не падают. Этот gate проверяет
   загрузку/enable плагинов, выполнение Folia/async probe-задач и отсутствие
   runtime-ошибок; полная parity произвольных плагинов им не доказывается.
+- Отдельный CraftEngine parity-прогон: `CEProbe`/`CEStateProbe` на Paper и
+  Chunkwake, 28/28 ключевых наблюдений совпали (BlockData, state, collision,
+  drops, persist/fresh для `topaz_ore`, `table_lamp`, `palm_stairs`,
+  `palm_door`). См. `docs/ce-parity.md` и `benchmarks/ce-parity/`.
 - Базовый `load-gate-server` (27/27) этим прогоном не восстанавливался.
 
 ## Воспроизведение
