@@ -1,0 +1,270 @@
+### CMD worldedit version
+[2m2026-11-25 16:46:29[0m [32m INFO[0m [Chunkwake] §dWorldEdit version 7.4.6
+[2m2026-11-25 16:46:29[0m [32m INFO[0m [Chunkwake] §dhttps://github.com/EngineHub/WorldEdit/
+[2m2026-11-25 16:46:29[0m [32m INFO[0m [Chunkwake] §7§m------------------§r Platforms §7§m------------------§r
+§7* Bukkit-Official(7.4.6+7648-00664b0)§r
+
+[2m2026-11-25 16:46:29[0m [32m INFO[0m [Chunkwake] §7§m----------------§r Capabilities §7§m----------------§r
+§7GAME_HOOKS: Bukkit-Official§r
+§7CONFIGURATION: Bukkit-Official§r
+§7USER_COMMANDS: Bukkit-Official§r
+§7PERMISSIONS: Bukkit-Official§r
+§7WORLDEDIT_CUI: Bukkit-Official§r
+§7WORLD_EDITING: Bukkit-Official§r
+
+
+### CMD mv list
+[2m2026-11-25 16:46:31[0m [32m INFO[0m [Chunkwake] §c§6====[ Multiverse World List ]====
+[2m2026-11-25 16:46:31[0m [32m INFO[0m [Chunkwake] §9world - §aNORMAL
+[2m2026-11-25 16:46:31[0m [32m INFO[0m [Chunkwake] §9world_nether - §cNETHER
+[2m2026-11-25 16:46:31[0m [32m INFO[0m [Chunkwake] §9world_the_end - §bTHE_END
+
+### CMD papi list
+[2m2026-11-25 16:46:34[0m [32m INFO[0m [Chunkwake] §7A total of §f2§7 placeholder hook(s) are active: §a
+multiverse-core§7, §aplan
+
+### CMD chunky
+[2m2026-11-25 16:46:36[0m [32m INFO[0m [Chunkwake] Chunky Commands
+chunky start - Start a new chunk generation task
+chunky pause - Pause current tasks and save progress
+chunky continue - Continue current or saved tasks
+chunky cancel - Stop and delete current or saved tasks
+chunky world <world> - Set the world target
+chunky worldborder - Use the world border center & radius
+chunky center <x> <z> - Set the center block location
+chunky spawn - Set the center to the spawn point
+chunky radius <radius> - Set the radius
+chunky corners <x1> <z1> <x2> <z2> - Set by corners
+chunky shape <shape> - Set the shape to generate
+chunky pattern <pattern> - Set the generation pattern
+chunky silent - Toggle displaying update messages
+chunky quiet <interval> - Set the quiet interval
+chunky limit <rate> - Set the max chunks per second
+chunky trim - Delete chunks outside selection
+chunky selection - Display the current selection
+chunky progress - Displays current task progress
+chunky reload - Reload configuration
+
+### CMD bluemap
+[2m2026-11-25 16:46:39[0m [32m INFO[0m [Chunkwake] 
+? BlueMap is not loaded!
+Check your server-console for errors or warnings and try using /bluemap reload.
+
+
+### CMD viaversion
+[2m2026-11-25 16:46:41[0m [32m INFO[0m [Chunkwake] §aViaVersion §c5.12.3-SNAPSHOT
+[2m2026-11-25 16:46:41[0m [32m INFO[0m [Chunkwake] §6Commands:
+[2m2026-11-25 16:46:41[0m [32m INFO[0m [Chunkwake] §2/viaversion list §7- §6Shows lists of the versions from logged in players.
+[2m2026-11-25 16:46:41[0m [32m INFO[0m [Chunkwake] §2/viaversion player <name|*> §7- §6Shows connection information about one or all players.
+[2m2026-11-25 16:46:41[0m [32m INFO[0m [Chunkwake] §2/viaversion dump §7- §6Dump information about your platform implementation, this is helpful if you report bugs.
+[2m2026-11-25 16:46:41[0m [32m INFO[0m [Chunkwake] §2/viaversion reload §7- §6Reload the config from the disk.
+[2m2026-11-25 16:46:41[0m [32m INFO[0m [Chunkwake] §2/viaversion autoteam §7- §6Toggle automatically teaming to prevent colliding.
+[2m2026-11-25 16:46:41[0m [32m INFO[0m [Chunkwake] §2/viaversion dontbugme §7- §6Toggle checking for updates.
+[2m2026-11-25 16:46:41[0m [32m INFO[0m [Chunkwake] §2/viaversion debug [clear|pre|post], or debug <add|remove> <packet> §7- §6Toggle various debug modes.
+[2m2026-11-25 16:46:41[0m [32m INFO[0m [Chunkwake] §2/viaversion pps §7- §6Shows the packets per second of online players.
+[2m2026-11-25 16:46:41[0m [32m INFO[0m [Chunkwake] §2/viaversion displayleaks [level] §7- §6Try to hunt memory leaks!
+
+### CMD plan
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] > 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] /plan Help
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan server [server]             
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] View the Server Page                
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan servers                     
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] List servers in Database            
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan network                     
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] View the Network Page               
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan player [name/uuid]          
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] View a Player Page                  
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan players                     
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] View the Players Page               
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan search <name/uuid>          
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] Search for a player name            
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan ingame [name/uuid]          
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] View Player info in game            
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan json [name/uuid]            
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] View json of Player's raw data.     
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan register [--code ${code}]   
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] Register a user for Plan website    
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan unregister [username]       
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] Unregister a user of Plan website   
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan logout <username>           
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] Log out other users from the panel. 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan users                       
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] List all web users                  
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan groups                      
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] List web permission groups.         
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan setgroup <username> <group> 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] Change users web permission group.  
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan info                        
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] Information about the plugin        
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan reload                      
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] Restart Plan                        
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan disable [feature]           
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] Disable the plugin or part of it    
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan db [subcommand]             
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] Manage Plan database                
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan export [export kind]        
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] Export html or json files manually  
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] plan import [import kind]        
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] Import data                         
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] 
+[2m2026-11-25 16:46:44[0m [32m INFO[0m [Chunkwake] Hover over command or arguments or use '/plan ?' to learn more about them.
+
+### CMD skript info
+[2m2026-11-25 16:46:47[0m [32m INFO[0m [Chunkwake] [Skript] Skript's aliases can be found here: https://github.com/SkriptLang/skript-aliases
+[2m2026-11-25 16:46:47[0m [32m INFO[0m [Chunkwake] [Skript] Skript's documentation can be found here: https://docs.skriptlang.org/
+[2m2026-11-25 16:46:47[0m [32m INFO[0m [Chunkwake] [Skript] Skript's tutorials can be found here: https://docs.skriptlang.org/tutorials
+[2m2026-11-25 16:46:47[0m [32m INFO[0m [Chunkwake] [Skript] Server Version: Chunkwake 26.3
+[2m2026-11-25 16:46:47[0m [32m INFO[0m [Chunkwake] [Skript] Skript Version: 2.17.1 (skriptlang-github)
+[2m2026-11-25 16:46:47[0m [32m INFO[0m [Chunkwake] [Skript] Installed Skript Addons: None
+[2m2026-11-25 16:46:47[0m [32m INFO[0m [Chunkwake] [Skript] Installed dependencies: None
+
+### CMD lp info
+[2m2026-11-25 16:46:49[0m [32m INFO[0m [Chunkwake] [LP] Running LuckPerms v5.5.71 by Luck.
+[2m2026-11-25 16:46:49[0m [32m INFO[0m [Chunkwake] [LP] -  Platform: Bukkit
+[2m2026-11-25 16:46:49[0m [32m INFO[0m [Chunkwake] [LP] -  Server Brand: Chunkwake
+[2m2026-11-25 16:46:49[0m [32m INFO[0m [Chunkwake] [LP] -  Server Version:
+[2m2026-11-25 16:46:49[0m [32m INFO[0m [Chunkwake] [LP]      26.3-chunkwake (MC: 26.3) - 26.3-R0.1-SNAPSHOT
+[2m2026-11-25 16:46:49[0m [32m INFO[0m [Chunkwake] [LP] -  Storage:
+[2m2026-11-25 16:46:49[0m [32m INFO[0m [Chunkwake] [LP]      Type: H2
+[2m2026-11-25 16:46:49[0m [32m INFO[0m [Chunkwake] [LP]      File Size: 0.04MB
+[2m2026-11-25 16:46:49[0m [32m INFO[0m [Chunkwake] [LP] -  Extensions:
+[2m2026-11-25 16:46:49[0m [32m INFO[0m [Chunkwake] [LP]      None
+[2m2026-11-25 16:46:49[0m [32m INFO[0m [Chunkwake] [LP] -  Messaging: None
+[2m2026-11-25 16:46:49[0m [32m INFO[0m [Chunkwake] [LP] -  Instance:
+[2m2026-11-25 16:46:49[0m [32m INFO[0m [Chunkwake] [LP]      Static contexts: None
+[2m2026-11-25 16:46:49[0m [32m INFO[0m [Chunkwake] [LP]      Online Players: 0 (0 unique)
+[2m2026-11-25 16:46:49[0m [32m INFO[0m [Chunkwake] [LP]      Uptime: 43s
+[2m2026-11-25 16:46:49[0m [32m INFO[0m [Chunkwake] [LP]      Local Data: 0 users, 1 groups, 0 tracks
+
+### CMD tab
+[2m2026-11-25 16:46:52[0m [32m INFO[0m [Chunkwake] [TAB] §x§F§F§F§F§F§F§x§0§0§A§A§A§ATAB v6.2.1
+[2m2026-11-25 16:46:52[0m [32m INFO[0m [Chunkwake] [TAB] §x§F§F§F§F§F§F§m                                                                                
+[2m2026-11-25 16:46:52[0m [32m INFO[0m [Chunkwake] [TAB] §x§F§F§F§F§F§F §x§5§5§5§5§5§5>> §x§0§0§A§A§A§A§l/tab reload
+[2m2026-11-25 16:46:52[0m [32m INFO[0m [Chunkwake] [TAB] §x§F§F§F§F§F§F      - §x§A§A§A§A§A§AReloads plugin and config
+[2m2026-11-25 16:46:52[0m [32m INFO[0m [Chunkwake] [TAB] §x§F§F§F§F§F§F §x§5§5§5§5§5§5>> §x§0§0§A§A§A§A§l/tab §x§5§5§5§5§F§Fgroup§x§0§0§A§A§A§A/§x§5§5§5§5§F§Fplayer §x§0§0§A§A§A§A<name> §x§5§5§5§5§F§F<property> §x§0§0§A§A§A§A<value...>
+[2m2026-11-25 16:46:52[0m [32m INFO[0m [Chunkwake] [TAB] §x§F§F§F§F§F§F      - §x§A§A§A§A§A§ADo §x§5§5§5§5§5§5/tab group/player §x§A§A§A§A§A§Ato show properties
+[2m2026-11-25 16:46:52[0m [32m INFO[0m [Chunkwake] [TAB] §x§F§F§F§F§F§F §x§5§5§5§5§5§5>> §x§0§0§A§A§A§A§l/tab parse <player> <placeholder> 
+[2m2026-11-25 16:46:52[0m [32m INFO[0m [Chunkwake] [TAB] §x§F§F§F§F§F§F      - §x§A§A§A§A§A§ATest if a placeholder works
+[2m2026-11-25 16:46:52[0m [32m INFO[0m [Chunkwake] [TAB] §x§F§F§F§F§F§F §x§5§5§5§5§5§5>> §x§0§0§A§A§A§A§l/tab dump <player>
+[2m2026-11-25 16:46:52[0m [32m INFO[0m [Chunkwake] [TAB] §x§F§F§F§F§F§F      - §x§A§A§A§A§A§ADumps information about player and server
+[2m2026-11-25 16:46:52[0m [32m INFO[0m [Chunkwake] [TAB] §x§F§F§F§F§F§F §x§5§5§5§5§5§5>> §x§0§0§A§A§A§A§l/tab cpu
+[2m2026-11-25 16:46:52[0m [32m INFO[0m [Chunkwake] [TAB] §x§F§F§F§F§F§F      - §x§A§A§A§A§A§Ashows CPU usage of the plugin
+[2m2026-11-25 16:46:52[0m [32m INFO[0m [Chunkwake] [TAB] §x§F§F§F§F§F§F §x§5§5§5§5§5§5>> §x§0§0§A§A§A§A§l/tab group/player <name> remove
+[2m2026-11-25 16:46:52[0m [32m INFO[0m [Chunkwake] [TAB] §x§F§F§F§F§F§F      - §x§A§A§A§A§A§AClears all data about player/group
+[2m2026-11-25 16:46:52[0m [32m INFO[0m [Chunkwake] [TAB] §x§F§F§F§F§F§F§m                                                                                
+

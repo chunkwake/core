@@ -1,0 +1,137 @@
+### CMD worldedit version
+[16:45:33] [Server thread/INFO]: Версия WorldEdit 7.4.6
+[16:45:33] [Server thread/INFO]: https://github.com/EngineHub/WorldEdit/
+[16:45:33] [Server thread/INFO]: ------------------ Platforms ------------------
+* Bukkit-Official(7.4.6+7648-00664b0)
+
+[16:45:33] [Server thread/INFO]: ---------------- Capabilities ----------------
+GAME_HOOKS: Bukkit-Official
+CONFIGURATION: Bukkit-Official
+USER_COMMANDS: Bukkit-Official
+PERMISSIONS: Bukkit-Official
+WORLDEDIT_CUI: Bukkit-Official
+WORLD_EDITING: Bukkit-Official
+
+
+### CMD mv list
+[16:45:36] [Server thread/INFO]: ====[ Multiverse World List ]====
+[16:45:36] [Server thread/INFO]: world - NORMAL
+[16:45:36] [Server thread/INFO]: world_nether - NETHER
+[16:45:36] [Server thread/INFO]: world_the_end - THE_END
+
+### CMD papi list
+[16:45:38] [Server thread/INFO]: A total of 2 placeholder hook(s) are active: 
+multiverse-core, plan
+
+### CMD chunky
+[16:45:41] [Server thread/INFO]: Chunky Commands
+chunky start - Start a new chunk generation task
+chunky pause - Pause current tasks and save progress
+chunky continue - Continue current or saved tasks
+chunky cancel - Stop and delete current or saved tasks
+chunky world <world> - Set the world target
+chunky worldborder - Use the world border center & radius
+chunky center <x> <z> - Set the center block location
+chunky spawn - Set the center to the spawn point
+chunky radius <radius> - Set the radius
+chunky corners <x1> <z1> <x2> <z2> - Set by corners
+chunky shape <shape> - Set the shape to generate
+chunky pattern <pattern> - Set the generation pattern
+chunky silent - Toggle displaying update messages
+chunky quiet <interval> - Set the quiet interval
+chunky limit <rate> - Set the max chunks per second
+chunky trim - Delete chunks outside selection
+chunky selection - Display the current selection
+chunky progress - Displays current task progress
+chunky reload - Reload configuration
+
+### CMD bluemap
+[16:45:43] [Server thread/INFO]: 
+? BlueMap is not loaded!
+Check your server-console for errors or warnings and try using /bluemap reload.
+
+
+### CMD viaversion
+[16:45:46] [Server thread/INFO]: ViaVersion 5.12.3-SNAPSHOT
+[16:45:46] [Server thread/INFO]: Commands:
+[16:45:46] [Server thread/INFO]: /viaversion dontbugme - Toggle checking for updates.
+[16:45:46] [Server thread/INFO]: /viaversion displayleaks [level] - Try to hunt memory leaks!
+[16:45:46] [Server thread/INFO]: /viaversion reload - Reload the config from the disk.
+[16:45:46] [Server thread/INFO]: /viaversion list - Shows lists of the versions from logged in players.
+[16:45:46] [Server thread/INFO]: /viaversion debug [clear|pre|post], or debug <add|remove> <packet> - Toggle various debug modes.
+[16:45:46] [Server thread/INFO]: /viaversion dump - Dump information about your platform implementation, this is helpful if you report bugs.
+[16:45:46] [Server thread/INFO]: /viaversion player <name|*> - Shows connection information about one or all players.
+[16:45:46] [Server thread/INFO]: /viaversion pps - Shows the packets per second of online players.
+[16:45:46] [Server thread/INFO]: /viaversion autoteam - Toggle automatically teaming to prevent colliding.
+
+### CMD plan
+[16:45:48] [Craft Scheduler Thread - 8 - Plan/INFO]: > /plan Help
+
+plan server [server]             View the Server Page                
+plan servers                     List servers in Database            
+plan network                     View the Network Page               
+plan player [name/uuid]          View a Player Page                  
+plan players                     View the Players Page               
+plan search <name/uuid>          Search for a player name            
+plan ingame [name/uuid]          View Player info in game            
+plan json [name/uuid]            View json of Player's raw data.     
+plan register [--code ${code}]   Register a user for Plan website    
+plan unregister [username]       Unregister a user of Plan website   
+plan logout <username>           Log out other users from the panel. 
+plan users                       List all web users                  
+plan groups                      List web permission groups.         
+plan setgroup <username> <group> Change users web permission group.  
+plan info                        Information about the plugin        
+plan reload                      Restart Plan                        
+plan disable [feature]           Disable the plugin or part of it    
+plan db [subcommand]             Manage Plan database                
+plan export [export kind]        Export html or json files manually  
+plan import [import kind]        Import data                         
+
+
+Hover over command or arguments or use '/plan ?' to learn more about them.
+
+### CMD skript info
+[16:45:51] [Server thread/INFO]: [Skript] Skript's aliases can be found here: https://github.com/SkriptLang/skript-aliases
+[16:45:51] [Server thread/INFO]: [Skript] Skript's documentation can be found here: https://docs.skriptlang.org/
+[16:45:51] [Server thread/INFO]: [Skript] Skript's tutorials can be found here: https://docs.skriptlang.org/tutorials
+[16:45:51] [Server thread/INFO]: [Skript] Server Version: Paper 26.3 #248 (0727243)
+[16:45:51] [Server thread/INFO]: [Skript] Skript Version: 2.17.1 (skriptlang-github)
+[16:45:51] [Server thread/INFO]: [Skript] Installed Skript Addons: None
+[16:45:51] [Server thread/INFO]: [Skript] Installed dependencies: None
+
+### CMD lp info
+[16:45:53] [luckperms-command-executor/INFO]: [LP] Работает на LuckPerms v5.5.71 by Luck.
+[16:45:53] [luckperms-command-executor/INFO]: [LP] -  Платформа: Bukkit
+[16:45:53] [luckperms-command-executor/INFO]: [LP] -  Вендор платформы: Paper
+[16:45:53] [luckperms-command-executor/INFO]: [LP] -  Версия ядра:
+[16:45:53] [luckperms-command-executor/INFO]: [LP]      26.3-248-0727243 (MC: 26.3) - 26.3.build.248-stable
+[16:45:53] [luckperms-command-executor/INFO]: [LP] -  Хранилище:
+[16:45:53] [luckperms-command-executor/INFO]: [LP]      Тип: H2
+[16:45:53] [luckperms-command-executor/INFO]: [LP]      Размер: 0,04MB
+[16:45:53] [luckperms-command-executor/INFO]: [LP] -  Расширения:
+[16:45:53] [luckperms-command-executor/INFO]: [LP]      нет
+[16:45:53] [luckperms-command-executor/INFO]: [LP] -  Сообщения: нет
+[16:45:53] [luckperms-command-executor/INFO]: [LP] -  Экземпляр:
+[16:45:53] [luckperms-command-executor/INFO]: [LP]      Статические контексты: нет
+[16:45:53] [luckperms-command-executor/INFO]: [LP]      Игроки в сети: 0 (0 уникальных)
+[16:45:53] [luckperms-command-executor/INFO]: [LP]      Время работы: 58сек
+[16:45:53] [luckperms-command-executor/INFO]: [LP]      Локальные данные: 0 пользователей, 1 групп, 0 треков
+
+### CMD tab
+[16:45:56] [Server thread/INFO]: [TAB] TAB v6.2.1
+[16:45:56] [Server thread/INFO]: [TAB]                                                                                 
+[16:45:56] [Server thread/INFO]: [TAB]  >> /tab reload
+[16:45:56] [Server thread/INFO]: [TAB]       - Reloads plugin and config
+[16:45:56] [Server thread/INFO]: [TAB]  >> /tab group/player <name> <property> <value...>
+[16:45:56] [Server thread/INFO]: [TAB]       - Do /tab group/player to show properties
+[16:45:56] [Server thread/INFO]: [TAB]  >> /tab parse <player> <placeholder> 
+[16:45:56] [Server thread/INFO]: [TAB]       - Test if a placeholder works
+[16:45:56] [Server thread/INFO]: [TAB]  >> /tab dump <player>
+[16:45:56] [Server thread/INFO]: [TAB]       - Dumps information about player and server
+[16:45:56] [Server thread/INFO]: [TAB]  >> /tab cpu
+[16:45:56] [Server thread/INFO]: [TAB]       - shows CPU usage of the plugin
+[16:45:56] [Server thread/INFO]: [TAB]  >> /tab group/player <name> remove
+[16:45:56] [Server thread/INFO]: [TAB]       - Clears all data about player/group
+[16:45:56] [Server thread/INFO]: [TAB]                                                                                 
+

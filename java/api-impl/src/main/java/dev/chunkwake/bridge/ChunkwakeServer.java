@@ -1399,6 +1399,7 @@ final class ChunkwakeServer {
     /** Консоль: сообщения уходят в лог. */
     static final class Console {
         private final ChunkwakeServer server;
+        private final Spigot spigot = new Spigot();
 
         Console(ChunkwakeServer server) {
             this.server = server;
@@ -1423,6 +1424,29 @@ final class ChunkwakeServer {
 
         public void sendMessage(Component c) {
             server.logger.info(plain(c));
+        }
+
+        /** {@code CommandSender.spigot()}: BlueMap и другие Spigot-плагины шлют BaseComponent. */
+        public org.bukkit.command.CommandSender.Spigot spigot() {
+            return spigot;
+        }
+
+        final class Spigot extends org.bukkit.command.CommandSender.Spigot {
+            @Override
+            public void sendMessage(net.md_5.bungee.api.chat.BaseComponent component) {
+                if (component != null) {
+                    server.logger.info(component.toPlainText());
+                }
+            }
+
+            @Override
+            public void sendMessage(net.md_5.bungee.api.chat.BaseComponent... components) {
+                if (components != null) {
+                    for (net.md_5.bungee.api.chat.BaseComponent component : components) {
+                        sendMessage(component);
+                    }
+                }
+            }
         }
     }
 

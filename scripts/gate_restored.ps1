@@ -9,6 +9,12 @@ $stand = Join-Path $tmp 'load-gate-extra'
 $plugins = Join-Path $stand 'plugins'
 New-Item -ItemType Directory -Force -Path $plugins | Out-Null
 $server = if ($Server -ne '') { $Server } else { Join-Path $root 'target\release\chunkwake.exe' }
+# JDK 25: `java` в PATH может быть старее и не читать классы API.
+$jdk = (Get-ChildItem "$env:USERPROFILE\.gradle\jdks" -Directory |
+    Where-Object { $_.Name -like '*25*' } | Select-Object -First 1).FullName
+if ($jdk) {
+    $env:CHUNKWAKE_JAVA = Join-Path $jdk 'bin\java.exe'
+}
 
 # Local probes and the repository test plugin.
 Copy-Item (Join-Path $tmp 'ce-parity-cw\plugins\chunkwake-test-plugin.jar') $plugins -Force -ErrorAction SilentlyContinue
