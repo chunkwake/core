@@ -22,6 +22,13 @@ final class BlockImpl {
         this.key = key;
     }
 
+    private void ensureChunk() {
+        WorldImpl impl = WorldImpl.of(world);
+        if (impl != null) {
+            impl.ensureChunk(x, z);
+        }
+    }
+
     public int getX() { return x; }
     public int getY() { return y; }
     public int getZ() { return z; }
@@ -34,6 +41,7 @@ final class BlockImpl {
     }
 
     public Material getType() {
+        ensureChunk();
         Object custom = customState();
         if (custom != null) {
             org.bukkit.block.data.BlockData data = engineBlockData(custom);
@@ -144,10 +152,12 @@ final class BlockImpl {
         if (!type.isBlock()) {
             throw new IllegalArgumentException("Material " + type + " is not a block");
         }
+        ensureChunk();
         WorldImpl.request(world, "set " + x + " " + y + " " + z + " " + type.getKey() + (physics ? " 1" : " 0"));
     }
 
     public org.bukkit.block.data.BlockData getBlockData() {
+        ensureChunk();
         Object custom = customState();
         if (custom != null) {
             org.bukkit.block.data.BlockData data = engineBlockData(custom);
@@ -318,6 +328,7 @@ final class BlockImpl {
     public void setBlockData(org.bukkit.block.data.BlockData data) { setBlockData(data, true); }
 
     public void setBlockData(org.bukkit.block.data.BlockData data, boolean physics) {
+        ensureChunk();
         WorldImpl.request(world, "set " + x + " " + y + " " + z + " " + data.getAsString() + (physics ? " 1" : " 0"));
     }
 

@@ -36,6 +36,7 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
     /** Ключ измерения, например {@code minecraft:the_nether}. */
     final String dim;
     private volatile boolean unloaded;
+    private final java.util.Set<Long> loadedChunks = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private volatile UUID uid;
     private volatile PdcImpl pdc;
     private volatile WorldBorderImpl border;
@@ -218,8 +219,23 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
         return out;
     }
 
+    private static long chunkKey(int cx, int cz) {
+        return ((long) cx << 32) ^ (cz & 0xFFFFFFFFL);
+    }
+
+    /** Динамический мир: `getBlockAt` должен подгрузить сохранённый чанк. */
+    void ensureChunk(int x, int z) {
+        if (dim.equals(OVERWORLD) || dim.equals(NETHER) || dim.equals(END)) {
+            return;
+        }
+        if (loadedChunks.add(chunkKey(x >> 4, z >> 4))) {
+            request("loadchunk " + (x >> 4) + " " + (z >> 4));
+        }
+    }
+
     public org.bukkit.Chunk getChunkAt(int x, int z) {
         // Bukkit `World#getChunkAt` загружает чанк (а не просто отдаёт дескриптор).
+        loadedChunks.add(chunkKey(x, z));
         request("loadchunk " + x + " " + z);
         return ChunkImpl.api(this, x, z);
     }
