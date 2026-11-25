@@ -4,7 +4,8 @@
 param(
     [int]$Rounds = 5,
     [int]$AffinityMask = 15,
-    [string]$ProcessPriority = 'BelowNormal'
+    [string]$ProcessPriority = 'BelowNormal',
+    [string]$Server = ''
 )
 $ErrorActionPreference = 'Continue'
 $root = 'E:\paper_rust'
@@ -12,7 +13,9 @@ $paperJar = 'E:\minecraft_server\data\paper-26.3-248.jar'
 $jdk = (Get-ChildItem "$env:USERPROFILE\.gradle\jdks" -Directory |
     Where-Object { $_.Name -like '*25*' } | Select-Object -First 1).FullName
 $java = Join-Path $jdk 'bin\java.exe'
-$server = Join-Path $root 'target\final-checks\chunkwake-270674c.exe'
+$server = if ($Server -ne '') { $Server } else {
+    Join-Path $root 'target\release\chunkwake.exe'
+}
 $bot = Join-Path $root 'target\release\examples\opcmd_probe.exe'
 $packets = Join-Path $root 'target\release\generated\26.3\reports\packets.json'
 $probe = Join-Path $root 'java\perf-probe\build\libs\chunkwake-perf-probe.jar'

@@ -152,8 +152,13 @@ final class FixedDiffProbe implements Listener {
             this.farChunk = this.plugin.getServer().getWorlds().get(0).getChunkAt(200, 200);
         } else if (now == 150) {
             report();
+        } else if (now == 400) {
+            flyLongReport();
         }
         if (now >= 20 && now <= 80 && now % 4 == 0) {
+            trace(now);
+        }
+        if (now >= 160 && now <= 400 && now % 20 == 0) {
             trace(now);
         }
     }
@@ -174,7 +179,7 @@ final class FixedDiffProbe implements Listener {
             load(w, x, 0);
         }
         // Wipe the fly and wire areas so a previous run cannot leave debris.
-        for (int x = 95; x <= 140; x++) {
+        for (int x = 95; x <= 220; x++) {
             for (int y = 209; y <= 211; y++) {
                 for (int z = -1; z <= 2; z++) {
                     w.getBlockAt(x, y, z).setType(Material.AIR, false);
@@ -273,6 +278,34 @@ final class FixedDiffProbe implements Listener {
                 + " living=" + living);
     }
 
+    private void flyLongReport() {
+        String period = "n/a";
+        if (this.extendTicks.size() >= 2) {
+            int first = this.extendTicks.get(0);
+            int last = this.extendTicks.get(this.extendTicks.size() - 1);
+            period = String.format(java.util.Locale.ROOT, "%.2f",
+                    (double) (last - first) / (this.extendTicks.size() - 1));
+        }
+        int rear = -1;
+        int blocks = 0;
+        World w = this.plugin.getServer().getWorlds().get(0);
+        for (int x = 90; x <= 230; x++) {
+            for (int z = 0; z <= 1; z++) {
+                Material m = w.getBlockAt(x, 210, z).getType();
+                if (isMachine(m)) {
+                    blocks++;
+                    if (rear < 0 || x < rear) {
+                        rear = x;
+                    }
+                }
+            }
+        }
+        this.plugin.getLogger().info("VANILLADIFF fly-long rear=" + rear
+                + " blocks=" + blocks + " extends=" + this.pistonExtends.get()
+                + " period=" + period + " chunk8=" + w.isChunkLoaded(8, 0)
+                + " chunk9=" + w.isChunkLoaded(9, 0));
+    }
+
     private void report() {
         World w = this.plugin.getServer().getWorlds().get(0);
         this.plugin.getLogger().info("VANILLADIFF redstone direct="
@@ -367,21 +400,36 @@ final class FixedDiffProbe implements Listener {
 
     private void trace(int now) {
         World w = this.plugin.getServer().getWorlds().get(0);
+        int start = 98;
+        for (int x = 90; x <= 230; x++) {
+            Material a = w.getBlockAt(x, 210, 0).getType();
+            Material b = w.getBlockAt(x, 210, 1).getType();
+            if (isMachine(a) || isMachine(b)) {
+                start = x;
+                break;
+            }
+        }
         StringBuilder a = new StringBuilder();
         StringBuilder b = new StringBuilder();
-        for (int x = 98; x <= 118; x++) {
+        for (int x = start - 2; x <= start + 10; x++) {
             a.append(glyph(w.getBlockAt(x, 210, 0)));
             b.append(glyph(w.getBlockAt(x, 210, 1)));
         }
         String obs = "";
-        for (int x : new int[] {100, 104, 123}) {
+        for (int x = start - 2; x <= start + 10; x++) {
             Material m = w.getBlockAt(x, 210, 0).getType();
             if (m == Material.OBSERVER) {
                 obs += x + "=" + w.getBlockAt(x, 210, 0).getBlockData().getAsString() + " ";
             }
         }
-        this.plugin.getLogger().info("VANILLADIFF fly-trace t=" + now + " z0=" + a
-                + " z1=" + b + " obs=" + obs.trim());
+        this.plugin.getLogger().info("VANILLADIFF fly-trace t=" + now + " x=" + start
+                + " z0=" + a + " z1=" + b + " obs=" + obs.trim());
+    }
+
+    private static boolean isMachine(Material m) {
+        return m == Material.OBSERVER || m == Material.SLIME_BLOCK
+                || m == Material.PISTON || m == Material.STICKY_PISTON
+                || m == Material.MOVING_PISTON || m == Material.PISTON_HEAD;
     }
 
     private static char glyph(org.bukkit.block.Block b) {

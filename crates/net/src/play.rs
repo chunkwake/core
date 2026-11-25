@@ -2081,6 +2081,11 @@ pub(crate) struct DimState {
     generated: std::sync::Condvar,
     /// Чанки, которые тикают (симуляция рядом с игроками этого измерения).
     simulated: Mutex<Arc<FastSet<(i32, i32)>>>,
+    /// Чанки, где тикают блоки, но не сущности: кольцо вокруг `simulated`
+    /// (`FullChunkStatus.BLOCK_TICKING`, уровень 32). У ванили тикет
+    /// `ENTITY_TICKING` (уровень 31) поднимает соседей до 32, поэтому поршни,
+    /// observer'ы и redstone на границе симуляции продолжают работать.
+    block_ticking: Mutex<Arc<FastSet<(i32, i32)>>>,
     /// Сущности и тики этого измерения.
     sim: DimSim,
 }
@@ -2111,6 +2116,7 @@ impl DimState {
             generating: Mutex::new(FastSet::default()),
             generated: std::sync::Condvar::new(),
             simulated: Mutex::new(Arc::new(FastSet::default())),
+            block_ticking: Mutex::new(Arc::new(FastSet::default())),
             sim: DimSim::default(),
         }
     }
@@ -5206,6 +5212,7 @@ impl PlayPlan {
             let key = (x, z);
             let state = self.dim_state();
             if state.simulated.lock().unwrap().contains(&key)
+                || state.block_ticking.lock().unwrap().contains(&key)
                 || self.sim().forced.lock().unwrap().contains(&key)
             {
                 return "0".into();
@@ -5240,6 +5247,7 @@ impl PlayPlan {
             // симуляции или уже закодирована в кадр.
             let loaded = state.edited.read().unwrap().contains_key(&(x, z))
                 || state.simulated.lock().unwrap().contains(&(x, z))
+                || state.block_ticking.lock().unwrap().contains(&(x, z))
                 || state.chunk_frames.lock().unwrap().contains_key(&(x, z));
             return if loaded { "1" } else { "0" }.into();
         }
@@ -5248,6 +5256,7 @@ impl PlayPlan {
             let state = self.dim_state();
             let mut keys: Vec<(i32, i32)> = state.edited.read().unwrap().keys().copied().collect();
             keys.extend(state.simulated.lock().unwrap().iter().copied());
+            keys.extend(state.block_ticking.lock().unwrap().iter().copied());
             keys.extend(state.chunk_frames.lock().unwrap().keys().copied());
             keys.sort_unstable();
             keys.dedup();
@@ -6939,13 +6948,13 @@ impl PlayPlan {
                 return Some(column.block(lx, ry as usize, lz));
             }
         }
-        if state.terrain.is_some() {
-            if self.wait_lent(state, (x >> 4, z >> 4)) {
-                let columns = state.edited.read().unwrap();
-                return columns
-                    .get(&(x >> 4, z >> 4))
-                    .map(|(c, _)| c.block(lx, ry as usize, lz));
+        if self.wait_lent(state, (x >> 4, z >> 4)) {
+            let columns = state.edited.read().unwrap();
+            if let Some((column, _)) = columns.get(&(x >> 4, z >> 4)) {
+                return Some(column.block(lx, ry as usize, lz));
             }
+        }
+        if state.terrain.is_some() {
             return None;
         }
         Some(Self::flat_in(
@@ -7275,7 +7284,15 @@ impl PlayPlan {
         set.extend(forced.iter().copied());
         *last = Some((r, key, forced));
         drop(last);
+        // `ChunkLevel`: тикет 31 (entity ticking) даёт соседям уровень 32
+        // (block ticking). Без кольца redstone/поршни/observer'ы на границе
+        // симуляции замирают, хотя у Paper работают.
+        let mut block = set.clone();
+        for &(cx, cz) in set.iter() {
+            chunk_square((cx, cz), 1, &mut block);
+        }
         *self.dim_state().simulated.lock().unwrap() = Arc::new(set);
+        *self.dim_state().block_ticking.lock().unwrap() = Arc::new(block);
     }
 
     /// `ChunkMap.isPositionTicking` для отложенных тиков: чанк тикает, если
@@ -7287,7 +7304,7 @@ impl PlayPlan {
     /// Держит `edited` на чтение, пока живёт: брать раньше замка очереди и
     /// отпускать до самих тиков (они пишут в мир).
     fn ticking_check(&self) -> impl FnMut((i32, i32)) -> bool + '_ {
-        let simulated = self.simulated_set();
+        let simulated = self.block_ticking_set();
         // Плоский и пустой мир: чанка может не быть в `edited`, но он есть.
         let flat = self.terrain().is_none();
         let world = self.dim_state().edited.read().unwrap();
@@ -7322,6 +7339,11 @@ impl PlayPlan {
         self.dim_state().simulated.lock().unwrap().clone()
     }
 
+    /// Чанки с тикающими блоками: `simulated` плюс кольцо соседей.
+    fn block_ticking_set(&self) -> Arc<FastSet<(i32, i32)>> {
+        self.dim_state().block_ticking.lock().unwrap().clone()
+    }
+
     /// Сколько чанков в наборе — для тестов и `/tps`.
     pub fn simulated_chunks(&self) -> usize {
         self.dim_state().simulated.lock().unwrap().len()
@@ -7333,7 +7355,12 @@ impl PlayPlan {
     /// запустил бы подсистемы (лаборатория и тесты не имеют игроков).
     pub fn set_simulated(&self, chunks: impl IntoIterator<Item = (i32, i32)>) {
         let set: FastSet<(i32, i32)> = chunks.into_iter().collect();
+        let mut block = set.clone();
+        for &(cx, cz) in set.iter() {
+            chunk_square((cx, cz), 1, &mut block);
+        }
         *self.dim_state().simulated.lock().unwrap() = Arc::new(set);
+        *self.dim_state().block_ticking.lock().unwrap() = Arc::new(block);
         // Прямая установка обходит `refresh_simulated`, поэтому ключ состава
         // сбрасывается: иначе следующий тик решил бы, что набор уже верный.
         *self.sim().simulated_key.lock().unwrap() = None;
@@ -11004,7 +11031,7 @@ impl PlayPlan {
         if speed == 0 {
             return;
         }
-        let simulated = self.simulated_set();
+        let simulated = self.block_ticking_set();
         if simulated.is_empty() {
             return;
         }
@@ -11120,7 +11147,7 @@ impl PlayPlan {
         if !self.vars.weather().rain || self.game_time.load(Ordering::Relaxed) % 16 != 0 {
             return;
         }
-        let simulated = self.simulated_set();
+        let simulated = self.block_ticking_set();
         let mut surfaces = Vec::new();
         {
             let world = self.dim_state().edited.read().unwrap();
@@ -12119,7 +12146,7 @@ impl PlayPlan {
         }
         let now = self.game_time.load(Ordering::Relaxed);
         let border = self.border_at(now);
-        let simulated = self.simulated_set();
+        let simulated = self.block_ticking_set();
         let mut moved = Vec::new();
         let mut due = Vec::new();
         {
@@ -19789,7 +19816,7 @@ impl PlayPlan {
     }
 
     fn tick_brewing(&self) {
-        let simulated = self.simulated_set();
+        let simulated = self.block_ticking_set();
         let positions: Vec<_> = {
             let world = self.dim_state().edited.read().unwrap();
             simulated
@@ -19868,7 +19895,7 @@ impl PlayPlan {
             .server_ticks
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        let simulated = self.simulated_set();
+        let simulated = self.block_ticking_set();
         let deferred = std::mem::take(&mut *self.sim().deferred_updates.lock().unwrap());
         self.run_block_regions(deferred, move |p| {
             // Правка плагина в нетикающем чанке подождёт своей симуляции.
@@ -23308,7 +23335,7 @@ impl PlayPlan {
                 self.with_campfire(pos, |_| ());
             }
         }
-        let simulated = self.simulated_set();
+        let simulated = self.block_ticking_set();
         let positions: Vec<[i32; 3]> = self
             .sim()
             .campfires
@@ -23434,7 +23461,7 @@ impl PlayPlan {
             if map.is_empty() {
                 return;
             }
-            let simulated = self.simulated_set();
+            let simulated = self.block_ticking_set();
             map.retain(|&pos, e| {
                 // Печь вне симуляции стоит: без топлива время не идёт.
                 if !simulated.is_empty() && !simulated.contains(&(pos[0] >> 4, pos[2] >> 4)) {
@@ -24445,7 +24472,7 @@ impl PlayPlan {
             return;
         }
         let chance = 1.0 - (1.0_f32 - 0.05688889 / 4096.0).powi(speed.min(i32::MAX as i64) as i32);
-        let simulated = self.simulated_set();
+        let simulated = self.block_ticking_set();
         let candidates: Vec<_> = {
             let world = self.dim_state().edited.read().unwrap();
             simulated
