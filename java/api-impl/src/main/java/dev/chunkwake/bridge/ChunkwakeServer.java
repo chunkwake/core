@@ -1077,6 +1077,54 @@ final class ChunkwakeServer {
         return worlds().values().stream().map(w -> w.api).toList();
     }
 
+    /** `CraftServer.createWorld` -> `WorldCreator.createWorld`. */
+    public World createWorld(org.bukkit.WorldCreator creator) {
+        if (creator == null || creator.name() == null || creator.name().isBlank()) {
+            return null;
+        }
+        String key = Bridge.world("createworld " + creator.name());
+        if (key == null || key.isBlank()) {
+            logger.warning("createWorld: Rust не выдал слот для " + creator.name());
+            return null;
+        }
+        synchronized (this) {
+            worlds = null;
+        }
+        WorldImpl created = worlds().get(key);
+        if (created == null) {
+            logger.warning("createWorld: мир " + key + " не появился в worlds");
+            return null;
+        }
+        try {
+            java.nio.file.Files.createDirectories(created.getWorldPath());
+        } catch (java.io.IOException e) {
+            logger.warning("createWorld: не создан каталог " + created.getWorldPath() + ": " + e);
+        }
+        return created.api;
+    }
+
+    public boolean unloadWorld(String name, boolean save) {
+        WorldImpl target = worlds().values().stream()
+                .filter(w -> w.getName().equals(name))
+                .findFirst()
+                .orElse(null);
+        return target != null && unloadWorld(target.api, save);
+    }
+
+    public boolean unloadWorld(World world, boolean save) {
+        WorldImpl impl = WorldImpl.of(world);
+        if (impl == null) {
+            return false;
+        }
+        boolean ok = "1".equals(Bridge.world("unloadworld " + impl.dim).trim());
+        if (ok) {
+            synchronized (this) {
+                worlds = null;
+            }
+        }
+        return ok;
+    }
+
     /**
      * Каталог мира (в 26.3 `Server.getWorldContainer()` устарел в пользу этого):
      * BlueMap читает отсюда `level.dat` и `region/`.

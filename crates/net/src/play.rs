@@ -1761,6 +1761,54 @@ pub enum Dimension {
     Overworld,
     Nether,
     End,
+    /// Динамический мир (`WorldCreator`): слот 3..; имя хранится в реестре.
+    Custom(u8),
+}
+
+/// Сколько динамических миров можно создать без перестройки `PlayPlan`.
+pub const CUSTOM_SLOTS: usize = 8;
+/// Первый слот динамического мира (0..2 заняты ванильными).
+pub const CUSTOM_FIRST: u8 = 3;
+
+/// Имена динамических миров: `None` — слот ещё не создан.
+static CUSTOM_NAMES: Mutex<Vec<Option<&'static str>>> = Mutex::new(Vec::new());
+
+/// Выделить слоты под динамические миры (идемпотентно).
+pub(crate) fn init_custom_slots() {
+    let mut names = CUSTOM_NAMES.lock().unwrap();
+    if names.len() < CUSTOM_SLOTS {
+        names.resize(CUSTOM_SLOTS, None);
+    }
+}
+
+/// Имя динамического мира по слоту.
+pub(crate) fn custom_name(slot: u8) -> Option<&'static str> {
+    let names = CUSTOM_NAMES.lock().unwrap();
+    names.get(slot as usize).copied().flatten()
+}
+
+fn set_custom_name(slot: u8, key: &'static str) {
+    init_custom_slots();
+    let mut names = CUSTOM_NAMES.lock().unwrap();
+    if let Some(entry) = names.get_mut(slot as usize) {
+        *entry = Some(key);
+    }
+}
+
+fn clear_custom_name(slot: u8) {
+    let mut names = CUSTOM_NAMES.lock().unwrap();
+    if let Some(entry) = names.get_mut(slot as usize) {
+        *entry = None;
+    }
+}
+
+fn free_custom_slot() -> Option<u8> {
+    init_custom_slots();
+    let names = CUSTOM_NAMES.lock().unwrap();
+    names
+        .iter()
+        .position(|name| name.is_none())
+        .map(|i| i as u8 + CUSTOM_FIRST)
 }
 
 impl Dimension {
@@ -1770,6 +1818,7 @@ impl Dimension {
             Self::Overworld => "minecraft:overworld",
             Self::Nether => "minecraft:the_nether",
             Self::End => "minecraft:the_end",
+            Self::Custom(slot) => custom_name(slot).unwrap_or("chunkwake:dynamic"),
         }
     }
 
@@ -1778,7 +1827,14 @@ impl Dimension {
             "minecraft:overworld" | "overworld" => Self::Overworld,
             "minecraft:the_nether" | "the_nether" | "nether" => Self::Nether,
             "minecraft:the_end" | "the_end" | "end" => Self::End,
-            _ => return None,
+            _ => {
+                let names = CUSTOM_NAMES.lock().unwrap();
+                let slot = names
+                    .iter()
+                    .position(|name| *name == Some(key))
+                    .map(|i| i as u8 + CUSTOM_FIRST)?;
+                Self::Custom(slot)
+            }
         })
     }
 
@@ -1790,6 +1846,7 @@ impl Dimension {
             Self::Overworld => 0,
             Self::Nether => 1,
             Self::End => 2,
+            Self::Custom(slot) => slot,
         }
     }
 
@@ -1797,7 +1854,8 @@ impl Dimension {
         match slot {
             1 => Self::Nether,
             2 => Self::End,
-            _ => Self::Overworld,
+            0..=2 => Self::Overworld,
+            _ => Self::Custom(slot),
         }
     }
 
@@ -2086,12 +2144,15 @@ pub(crate) struct DimState {
     /// `ENTITY_TICKING` (уровень 31) поднимает соседей до 32, поэтому поршни,
     /// observer'ы и redstone на границе симуляции продолжают работать.
     block_ticking: Mutex<Arc<FastSet<(i32, i32)>>>,
+    /// Динамический мир создан (`WorldCreator`). Предвыделенные слоты
+    /// выключены, пока плагин не создаст мир с этим именем.
+    enabled: std::sync::atomic::AtomicBool,
     /// Сущности и тики этого измерения.
     sim: DimSim,
 }
 
 impl DimState {
-    fn from_spec(spec: DimSpec) -> Self {
+    fn from_spec(spec: DimSpec, enabled: bool) -> Self {
         Self {
             template: spec.template,
             terrain: spec.terrain,
@@ -2117,12 +2178,43 @@ impl DimState {
             generated: std::sync::Condvar::new(),
             simulated: Mutex::new(Arc::new(FastSet::default())),
             block_ticking: Mutex::new(Arc::new(FastSet::default())),
+            enabled: std::sync::atomic::AtomicBool::new(enabled),
             sim: DimSim::default(),
         }
+    }
+
+    /// Очистить предвыделенный слот перед выдачей плагину (`WorldCreator`).
+    fn reset_custom(&self) {
+        self.clear_custom_state();
+        self.enabled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Выгрузить динамический мир: имя слота освобождается, состояние чистится.
+    fn disable_custom(&self) {
+        self.clear_custom_state();
+        self.enabled
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    fn clear_custom_state(&self) {
+        self.edited.write().unwrap().clear();
+        self.saved.lock().unwrap().clear();
+        self.dirty.lock().unwrap().clear();
+        self.pois.lock().unwrap().clear();
+        self.poi_claims.lock().unwrap().clear();
+        self.regions.lock().unwrap().clear();
+        self.evicted.lock().unwrap().clear();
+        self.chunk_frames.lock().unwrap().clear();
+        self.lent.lock().unwrap().clear();
+        self.generating.lock().unwrap().clear();
+        *self.simulated.lock().unwrap() = Arc::new(FastSet::default());
+        *self.block_ticking.lock().unwrap() = Arc::new(FastSet::default());
     }
 }
 
 /// Что нужно одному измерению при сборке плана.
+#[derive(Clone)]
 pub struct DimSpec {
     /// Сетевой id в реестре `dimension_type` (`minecraft:the_nether`).
     pub dimension_type: i32,
@@ -3052,6 +3144,7 @@ impl PlayPlan {
         world: WorldSpec,
         compression_threshold: i32,
     ) -> Result<Self, DataError> {
+        init_custom_slots();
         let WorldSpec {
             template,
             trees,
@@ -3257,17 +3350,20 @@ impl PlayPlan {
                 for (dim, spec) in dimensions.iter() {
                     map.insert(
                         *dim,
-                        DimState::from_spec(DimSpec {
-                            dimension_type: spec.dimension_type,
-                            template: spec.template.clone(),
-                            terrain: spec.terrain.clone(),
-                            trim_idle: spec.trim_idle.clone(),
-                            locate_biome: spec.locate_biome.clone(),
-                            locate_structure: spec.locate_structure.clone(),
-                            structures_at: spec.structures_at.clone(),
-                            void_platform: spec.void_platform,
-                            min_y: spec.min_y,
-                        }),
+                        DimState::from_spec(
+                            DimSpec {
+                                dimension_type: spec.dimension_type,
+                                template: spec.template.clone(),
+                                terrain: spec.terrain.clone(),
+                                trim_idle: spec.trim_idle.clone(),
+                                locate_biome: spec.locate_biome.clone(),
+                                locate_structure: spec.locate_structure.clone(),
+                                structures_at: spec.structures_at.clone(),
+                                void_platform: spec.void_platform,
+                                min_y: spec.min_y,
+                            },
+                            !matches!(dim, Dimension::Custom(_)),
+                        ),
                     );
                 }
                 map
@@ -5070,6 +5166,18 @@ impl PlayPlan {
     /// `effects` → эффекты по порядку ID (строки), `isblock имя` → `1`/`0`,
     /// `blocks с` → имена блоков по порядку начиная с номера `с` (кусок до 7 КБ).
     pub fn world_request(&self, line: &str) -> String {
+        // `createworld <name>`: занять динамический слот (`WorldCreator`).
+        if let Some(name) = line.strip_prefix("createworld ") {
+            return self.create_world(name.trim()).unwrap_or_default();
+        }
+        if let Some(key) = line.strip_prefix("unloadworld ") {
+            return if self.unload_world(key.trim()) {
+                "1"
+            } else {
+                "0"
+            }
+            .into();
+        }
         // `@<ключ измерения> <запрос>`: запрос в мире плагина (`World` Nether/End),
         // а не в измерении текущей работы. Нет такого мира — пусто.
         if let Some(rest) = line.strip_prefix('@') {
@@ -5081,7 +5189,15 @@ impl PlayPlan {
         }
         // `worlds`: ключи загруженных измерений по строке (`Server.getWorlds`).
         if line == "worlds" {
-            let mut dims: Vec<Dimension> = self.dims.keys().copied().collect();
+            let mut dims: Vec<Dimension> = self
+                .dims
+                .iter()
+                .filter(|(dim, state)| {
+                    !matches!(dim, Dimension::Custom(_))
+                        || state.enabled.load(std::sync::atomic::Ordering::Acquire)
+                })
+                .map(|(dim, _)| *dim)
+                .collect();
             dims.sort();
             return dims.iter().map(|d| d.key()).collect::<Vec<_>>().join("\n");
         }
@@ -6312,7 +6428,11 @@ impl PlayPlan {
         // Измерение входит в ключ: тот же регион Ада — другой файл.
         let state = self.dim_state();
         let epoch = state.region_epoch.load(Ordering::Acquire);
-        let me = (self as *const Self as usize + dim as usize, key, epoch);
+        let me = (
+            self as *const Self as usize + dim.slot() as usize,
+            key,
+            epoch,
+        );
         if LAST_REGION.with(|c| c.get() == Some(me)) {
             return;
         }
@@ -7028,6 +7148,51 @@ impl PlayPlan {
     /// Есть ли измерение.
     pub fn has_dimension(&self, dim: Dimension) -> bool {
         self.dims.contains_key(&dim)
+    }
+
+    /// `WorldCreator.createWorld`: занять предвыделенный слот, очистить его и
+    /// вернуть ключ измерения (`chunkwake:<name>`). `None` — слоты кончились.
+    pub fn create_world(&self, name: &str) -> Option<String> {
+        let clean: String = name
+            .to_ascii_lowercase()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let clean = if clean.is_empty() {
+            "world"
+        } else {
+            clean.as_str()
+        };
+        let key = format!("minecraft:{clean}");
+        let slot = free_custom_slot()?;
+        let dim = Dimension::Custom(slot);
+        let state = self.dims.get(&dim)?;
+        let leaked: &'static str = Box::leak(key.clone().into_boxed_str());
+        set_custom_name(slot, leaked);
+        state.reset_custom();
+        Some(key)
+    }
+
+    /// `Bukkit.unloadWorld`: погасить динамический мир и освободить слот.
+    pub fn unload_world(&self, key: &str) -> bool {
+        let Some(dim) = Dimension::from_key(key) else {
+            return false;
+        };
+        let Dimension::Custom(slot) = dim else {
+            return false;
+        };
+        let Some(state) = self.dims.get(&dim) else {
+            return false;
+        };
+        state.disable_custom();
+        clear_custom_name(slot);
+        true
     }
 
     /// Нормализует любую половину целой кровати к изголовью и изножью.
@@ -13167,9 +13332,10 @@ impl PlayPlan {
             .dims
             .iter()
             .filter(|(dim, state)| {
-                **dim == Dimension::Overworld
-                    || occupied.contains(dim)
-                    || !state.sim.forced.lock().unwrap().is_empty()
+                state.enabled.load(std::sync::atomic::Ordering::Acquire)
+                    && (**dim == Dimension::Overworld
+                        || occupied.contains(dim)
+                        || !state.sim.forced.lock().unwrap().is_empty())
             })
             .map(|(dim, _)| *dim)
             .collect();

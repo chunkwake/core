@@ -242,6 +242,10 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
     }
 
     public String getName() {
+        if (!dim.equals(OVERWORLD) && !dim.equals(NETHER) && !dim.equals(END)) {
+            int colon = dim.indexOf(':');
+            return colon < 0 ? dim : dim.substring(colon + 1);
+        }
         String base = server.levelDirectory().getFileName().toString();
         return switch (dim) {
             case OVERWORLD -> base;

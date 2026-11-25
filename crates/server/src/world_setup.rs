@@ -460,27 +460,36 @@ pub fn build_play_plan(
     let world = WorldSpec {
         template: chunk.clone(),
         dimensions: {
-            let mut list = vec![(
-                chunkwake_net::play::Dimension::Overworld,
-                chunkwake_net::play::DimSpec {
-                    dimension_type: registries
-                        .network_id("dimension_type", "minecraft:overworld")
-                        .map_err(s)?,
-                    template: chunk.clone(),
-                    terrain,
-                    trim_idle,
-                    locate_biome,
-                    locate_structure,
-                    structures_at,
-                    void_platform: void_blocks,
-                    min_y: dim.min_y,
-                },
-            )];
+            let overworld = chunkwake_net::play::DimSpec {
+                dimension_type: registries
+                    .network_id("dimension_type", "minecraft:overworld")
+                    .map_err(s)?,
+                template: chunk.clone(),
+                terrain,
+                trim_idle,
+                locate_biome,
+                locate_structure,
+                structures_at,
+                void_platform: void_blocks,
+                min_y: dim.min_y,
+            };
+            let mut list = vec![(chunkwake_net::play::Dimension::Overworld, overworld.clone())];
             if let Some(nether) = nether_dim {
                 list.push((chunkwake_net::play::Dimension::Nether, nether));
             }
             if let Some(end) = end_dim {
                 list.push((chunkwake_net::play::Dimension::End, end));
+            }
+            // Слоты под `WorldCreator`: тот же шаблон/генератор, но своя
+            // `DimState` (независимые блоки). Пока плагин не создал мир,
+            // слот выключен и не тикает.
+            for slot in 0..chunkwake_net::play::CUSTOM_SLOTS {
+                list.push((
+                    chunkwake_net::play::Dimension::Custom(
+                        chunkwake_net::play::CUSTOM_FIRST + slot as u8,
+                    ),
+                    overworld.clone(),
+                ));
             }
             list
         },
