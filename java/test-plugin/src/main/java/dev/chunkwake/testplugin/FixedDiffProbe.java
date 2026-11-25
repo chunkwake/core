@@ -227,6 +227,9 @@ final class FixedDiffProbe implements Listener {
         w.getBlockAt(50, 200, 0).setType(Material.OAK_STAIRS);
         w.getBlockAt(50, 200, 1).setType(Material.WATER);
         w.getBlockAt(52, 200, 0).setType(Material.WATER);
+        w.getBlockAt(34, 200, 0).setBlockData(org.bukkit.Bukkit.createBlockData(
+                "minecraft:oak_stairs[facing=east,half=top,shape=straight,waterlogged=false]"),
+                false);
 
         // Fly
         flySetup(w);
@@ -303,6 +306,7 @@ final class FixedDiffProbe implements Listener {
                 + " block200=" + snapshot.getBlockType(1, 200, 0)
                 + " block199=" + snapshot.getBlockType(1, 199, 0)
                 + " data=" + snapshot.getBlockData(1, 200, 0).getAsString()
+                + " data2=" + snapshot.getData(2, 200, 0)
                 + " sky=" + snapshot.getBlockSkyLight(1, 200, 0)
                 + " emit=" + snapshot.getBlockEmittedLight(1, 200, 0)
                 + " highest=" + snapshot.getHighestBlockYAt(1, 0)

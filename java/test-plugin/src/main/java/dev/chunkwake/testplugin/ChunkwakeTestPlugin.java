@@ -21,6 +21,61 @@ import org.bukkit.plugin.java.JavaPlugin;
 public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
     private long ticks;
 
+    /** Dump Paper `CraftMagicNumbers.toLegacyData` для всех block states. */
+    private void dumpLegacyData() {
+        try {
+            Class<?> registryClass = Class.forName("net.minecraft.core.Registry");
+            Object registry = Class.forName("net.minecraft.core.registries.BuiltInRegistries")
+                    .getField("BLOCK").get(null);
+            java.lang.reflect.Method getKey = registryClass.getMethod("getKey", Object.class);
+            java.lang.reflect.Method getStateDefinition = Class
+                    .forName("net.minecraft.world.level.block.Block")
+                    .getMethod("getStateDefinition");
+            java.lang.reflect.Method getPossibleStates = Class
+                    .forName("net.minecraft.world.level.block.state.StateDefinition")
+                    .getMethod("getPossibleStates");
+            Class<?> stateClass = Class
+                    .forName("net.minecraft.world.level.block.state.BlockState");
+            java.lang.reflect.Method getValues = stateClass.getMethod("getValues");
+            java.lang.reflect.Method toLegacy = Class
+                    .forName("org.bukkit.craftbukkit.util.CraftMagicNumbers")
+                    .getMethod("toLegacyData", stateClass);
+            StringBuilder out = new StringBuilder(1 << 21);
+            int count = 0;
+            for (Object block : (Iterable<?>) registry) {
+                Object key = getKey.invoke(registry, block);
+                Object definition = getStateDefinition.invoke(block);
+                for (Object state : (Iterable<?>) getPossibleStates.invoke(definition)) {
+                    java.util.List<?> values =
+                            ((java.util.stream.Stream<?>) getValues.invoke(state)).toList();
+                    java.util.TreeMap<String, String> props = new java.util.TreeMap<>();
+                    for (Object pv : values) {
+                        Object property = pv.getClass().getMethod("property").invoke(pv);
+                        String name = (String) property.getClass()
+                                .getMethod("getName").invoke(property);
+                        Object value = pv.getClass().getMethod("value").invoke(pv);
+                        props.put(name, String.valueOf(value)
+                                .toLowerCase(java.util.Locale.ROOT));
+                    }
+                    String spec = key.toString();
+                    if (!props.isEmpty()) {
+                        spec += "[" + String.join(",", props.entrySet().stream()
+                                .map(e -> e.getKey() + "=" + e.getValue()).toList()) + "]";
+                    }
+                    int data = ((Number) toLegacy.invoke(null, state)).intValue() & 15;
+                    out.append(spec).append('\t').append(data).append('\n');
+                    count++;
+                }
+            }
+            java.nio.file.Path path = getDataFolder().toPath().resolve("legacy_data.tsv");
+            java.nio.file.Files.createDirectories(path.getParent());
+            java.nio.file.Files.writeString(path, out, java.nio.charset.StandardCharsets.UTF_8);
+            getLogger().info("legacy-data: " + count + " states -> " + path);
+        } catch (Throwable t) {
+            getLogger().log(java.util.logging.Level.SEVERE, "legacy-data dump failed", t);
+        }
+    }
+
     @Override
     public void onEnable() {
         getLogger().info("onEnable on " + getServer().getName() + " " + getServer().getVersion());
@@ -29,6 +84,10 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
         for (org.bukkit.World w : getServer().getWorlds()) {
             getLogger().info("world: " + w.getName() + " " + w.getKey() + " " + w.getEnvironment() + " uid=" + w.getUID()
                     + " path=" + w.getWorldPath());
+        }
+        if (System.getenv("CHUNKWAKE_LEGACY_DUMP") != null) {
+            dumpLegacyData();
+            return;
         }
         if (System.getenv("CHUNKWAKE_FIXED_DIFF") != null) {
             FixedDiffProbe.run(this);

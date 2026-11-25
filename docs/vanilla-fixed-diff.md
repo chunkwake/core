@@ -24,6 +24,7 @@
 | `Chunk.isSlimeChunk` | `false/false/false/false` | same |
 | `Chunk.unload(false)` | `true`, `loaded=false` | same |
 | `Chunk.getChunkSnapshot` | `WATER/STONE water[level=0] sky=14 emit=0 highest=200 temp=0.7389735/0.4889735 sea=-63 plains empty0=false empty20=true` | same (кроме `Biome.toString`) |
+| `ChunkSnapshot.getData` | oak stairs top/east → `4` | same |
 
 `fly`-трейс показывает одинаковый цикл (observer → sticky pull → piston push):
 
@@ -62,6 +63,11 @@ Chunkwake 104→139 за 380 тиков (~1 блок на 10.6 тика у об�
   `World.getSeaLevel()`/`Login`: в flat-мире уровень моря `-63`, а не `63`.
   Для отсутствующих в снимке данных методы теперь кидают
   `IllegalStateException`, как Paper.
+- `ChunkSnapshot.getData()`: сгенерирована таблица `legacy_data.tsv` на 35 723
+  состояния через Paper `CraftMagicNumbers.toLegacyData`; lookup идёт по
+  канонизированному `BlockData` (сортированные свойства). Проверка:
+  `oak_stairs[facing=east,half=top,shape=straight,waterlogged=false]` → `4` в
+  Paper и Chunkwake.
 - `Chunk.unload()` больше не заглушка: `unloadchunk` сохраняет (если `save=true`)
   и выгружает колонку, если она не входит в simulation/forceload. Проверка после
   загрузки дальнего чанка: Paper `unload=true loaded=false`, Chunkwake так же.

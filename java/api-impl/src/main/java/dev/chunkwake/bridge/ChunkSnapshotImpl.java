@@ -1,11 +1,15 @@
 package dev.chunkwake.bridge;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
@@ -17,6 +21,33 @@ import org.bukkit.block.data.BlockData;
 /** Снимок чанка, собранный из бинарного ответа Rust (`chunksnapshot`). */
 final class ChunkSnapshotImpl implements org.bukkit.ChunkSnapshot {
     private static final int MAGIC = 0x31535743; // "CWS1" little-endian
+    private static final Map<String, Integer> LEGACY_DATA = loadLegacyData();
+
+    /** `CraftMagicNumbers.toLegacyData`: таблица снята с Paper 26.3 build 248. */
+    private static Map<String, Integer> loadLegacyData() {
+        try (var in = ChunkSnapshotImpl.class.getResourceAsStream("/legacy_data.tsv")) {
+            if (in == null) {
+                return Map.of();
+            }
+            Map<String, Integer> out = new HashMap<>(40000);
+            BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                int tab = line.lastIndexOf('\t');
+                if (tab <= 0) {
+                    continue;
+                }
+                try {
+                    out.put(line.substring(0, tab), Integer.parseInt(line.substring(tab + 1)));
+                } catch (NumberFormatException ignored) {
+                    // Битый ресурс — пропускаем строку.
+                }
+            }
+            return out;
+        } catch (Exception e) {
+            return Map.of();
+        }
+    }
 
     private final WorldImpl world;
     private final int x;
@@ -228,7 +259,7 @@ final class ChunkSnapshotImpl implements org.bukkit.ChunkSnapshot {
 
     @Override public int getData(int x, int y, int z) {
         offset(x, y, z);
-        return 0;
+        return LEGACY_DATA.getOrDefault(canonical(block(x, y, z)), 0);
     }
 
     @Override public int getBlockSkyLight(int x, int y, int z) {
