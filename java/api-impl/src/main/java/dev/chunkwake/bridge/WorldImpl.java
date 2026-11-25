@@ -205,9 +205,9 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
     }
 
     /**
-     * {@code World#getEntity(UUID)}: игроки, живые мобы и выпавшие предметы
-     * этого измерения. Снаряды, лодки и вагонетки пока в {@code getEntities}
-     * не входят — для них UUID-поиск вернёт {@code null}, как и раньше.
+     * {@code World#getEntity(UUID)}: игроки, живые мобы, поддерживаемые
+     * немобовые сущности (стрелы, лодки, вагонетки, ТНТ, сферы, облака,
+     * глаза Края) и выпавшие предметы этого измерения.
      */
     public org.bukkit.entity.Entity getEntity(UUID uuid) {
         if (uuid == null) {
@@ -624,10 +624,13 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
 
     public Entity spawnEntity(Location l, org.bukkit.entity.EntityType type) {
         String s = MobImpl.species(type);
-        if (s == null) {
-            throw new UnsupportedOperationException("chunkwake: spawnEntity " + type);
+        if (s != null) {
+            return MobImpl.spawn(this, l, s);
         }
-        return MobImpl.spawn(this, l, s);
+        if (NonMobImpl.supported(type)) {
+            return NonMobImpl.spawn(this, l, type);
+        }
+        throw new UnsupportedOperationException("chunkwake: spawnEntity " + type);
     }
 
     public Entity spawnEntity(Location l, org.bukkit.entity.EntityType type, boolean randomize) {
@@ -639,6 +642,16 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
         return spawnEntity(l, type);
     }
 
+    public Entity spawnEntity(Location l, org.bukkit.entity.EntityType type,
+            org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason reason,
+            java.util.function.Consumer<? super Entity> init) {
+        Entity e = spawnEntity(l, type);
+        if (init != null) {
+            init.accept(e);
+        }
+        return e;
+    }
+
     public <T extends Entity> T spawn(Location l, Class<T> type) {
         return spawn(l, type, (java.util.function.Consumer<? super T>) null);
     }
@@ -648,16 +661,45 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
         return spawn(l, type, c);
     }
 
+    public <T extends Entity> T spawn(Location l, Class<T> type,
+            org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason reason) {
+        return spawn(l, type, (java.util.function.Consumer<? super T>) null);
+    }
+
+    public <T extends Entity> T spawn(Location l, Class<T> type,
+            org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason reason,
+            java.util.function.Consumer<? super T> init) {
+        return spawn(l, type, init);
+    }
+
+    public <T extends Entity> T spawn(Location l, Class<T> type,
+            java.util.function.Consumer<? super T> init,
+            org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason reason) {
+        return spawn(l, type, init);
+    }
+
+    public <T extends Entity> T spawn(Location l, Class<T> type, boolean randomize,
+            java.util.function.Consumer<? super T> init) {
+        return spawn(l, type, init);
+    }
+
     public <T extends Entity> T spawn(Location l, Class<T> type, java.util.function.Consumer<? super T> init) {
+        Entity e;
         String s = MobImpl.species(type);
-        if (s == null) {
-            throw new UnsupportedOperationException("chunkwake: spawn " + type.getSimpleName());
+        if (s != null) {
+            e = MobImpl.spawn(this, l, s);
+        } else {
+            org.bukkit.entity.EntityType et = NonMobImpl.type(type);
+            if (et == null) {
+                throw new UnsupportedOperationException("chunkwake: spawn " + type.getSimpleName());
+            }
+            e = NonMobImpl.spawn(this, l, et);
         }
-        T e = type.cast(MobImpl.spawn(this, l, s));
+        T result = type.cast(e);
         if (init != null) {
-            init.accept(e);
+            init.accept(result);
         }
-        return e;
+        return result;
     }
 
     /** Игроки этого мира, как {@code CraftWorld.getPlayers}. */
@@ -676,6 +718,7 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
     public List<Entity> getEntities() {
         List<Entity> out = new ArrayList<>(getPlayers());
         out.addAll(MobImpl.all(this));
+        out.addAll(NonMobImpl.all(this));
         for (BlockEvents.GroundItem item : this.groundItems) {
             out.add(Stub.of(org.bukkit.entity.Item.class, item));
         }

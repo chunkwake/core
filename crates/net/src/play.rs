@@ -2820,6 +2820,7 @@ pub mod commands;
 mod conduits;
 mod crafter;
 mod dragon;
+mod entities;
 mod fishing;
 mod game_events;
 mod item_frames;
@@ -5365,7 +5366,8 @@ impl PlayPlan {
 
     /// Запрос плагина к миру: `get x y z` → имя блока, `set x y z имя` → `1`/`0`,
     /// `effects` → эффекты по порядку ID (строки), `isblock имя` → `1`/`0`,
-    /// `blocks с` → имена блоков по порядку начиная с номера `с` (кусок до 7 КБ).
+    /// `blocks с` → имена блоков по порядку начиная с номера `с` (кусок до 7 КБ),
+    /// `entity …` → немобовые сущности (формат — `play/entities.rs`).
     pub fn world_request(&self, line: &str) -> String {
         // `sb …`: scoreboard плагинов (Bukkit `Scoreboard`/`Objective`/`Score`).
         // Счёт общий для измерений, префикс `@<мир>` для него не нужен.
@@ -5949,6 +5951,9 @@ impl PlayPlan {
         }
         if let Some(rest) = line.strip_prefix("mob ") {
             return self.mob_request(rest);
+        }
+        if let Some(rest) = line.strip_prefix("entity ") {
+            return self.entity_request(rest);
         }
         if let Some(rest) = line.strip_prefix("attr ") {
             return self.plugin_attribute(rest);

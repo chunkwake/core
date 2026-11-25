@@ -98,6 +98,10 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             FixedDiffProbe.run(this);
             return;
         }
+        if (System.getenv("CHUNKWAKE_NONMOB_PROBE") != null) {
+            NonMobProbe.run(this);
+            return;
+        }
         String bench = System.getenv("CHUNKWAKE_BENCH_MOBS");
         if (bench != null) {
             benchMobs(Integer.parseInt(bench));
