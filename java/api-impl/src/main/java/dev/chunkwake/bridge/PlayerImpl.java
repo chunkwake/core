@@ -393,6 +393,12 @@ public final class PlayerImpl {
                 + " " + x + " " + y + " " + z + " " + volume + " " + pitch);
     }
 
+    /** Позиционный звук от имени мира: мир сам решает, каким игрокам его отправить. */
+    void worldSound(Object sound, Object source, double x, double y, double z,
+            float volume, float pitch) {
+        playSoundAt(sound, source, x, y, z, volume, pitch);
+    }
+
     public void playSound(org.bukkit.Location location, org.bukkit.Sound sound,
             org.bukkit.SoundCategory source, float volume, float pitch) {
         if (location != null && sound != null) {

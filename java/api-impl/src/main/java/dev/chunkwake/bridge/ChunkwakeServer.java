@@ -1237,6 +1237,11 @@ final class ChunkwakeServer {
         return online.values().stream().map(p -> p.api).toList();
     }
 
+    /** {@link PlayerImpl} по API-объекту: {@code CraftPlayer} — не Proxy, {@link Stub#impl} его не видит. */
+    PlayerImpl playerImpl(Player player) {
+        return player == null ? null : online.get(player.getUniqueId());
+    }
+
     /** Как {@code CraftServer.createProfile}: профиль онлайн-игрока берёт его свойства. */
     public com.destroystokyo.paper.profile.PlayerProfile createProfile(UUID id) {
         return createProfile(id, null);

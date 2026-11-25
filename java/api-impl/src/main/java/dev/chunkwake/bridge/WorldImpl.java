@@ -715,6 +715,175 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
 
     public int getPlayerCount() { return getPlayers().size(); }
 
+    // --- звуки мира: Bukkit/Paper World.playSound/stopSound ---
+
+    /** Ванильный радиус позиционного звука: 16 блоков, при volume > 1 — 16*volume. */
+    private static double soundRange(float volume) {
+        return volume > 1.0F ? 16.0D * volume : 16.0D;
+    }
+
+    private void playWorldSound(Object sound, Object source, double x, double y, double z,
+            float volume, float pitch) {
+        if (sound == null || source == null) {
+            return;
+        }
+        double range = soundRange(volume);
+        double rangeSq = range * range;
+        for (Player p : getPlayers()) {
+            Location at = p.getLocation();
+            double dx = at.getX() - x;
+            double dy = at.getY() - y;
+            double dz = at.getZ() - z;
+            PlayerImpl impl = server.playerImpl(p);
+            if (impl != null && dx * dx + dy * dy + dz * dz <= rangeSq) {
+                impl.worldSound(sound, source, x, y, z, volume, pitch);
+            }
+        }
+    }
+
+    /**
+     * Звук сущности: Paper шлёт его трекерам сущности; в Java-мосте трекеров нет,
+     * поэтому берём 48 блоков (радиус большинства сущностей) либо больше при volume > 1.
+     */
+    private void playEntitySound(Entity entity, Object sound, Object source,
+            float volume, float pitch) {
+        if (entity == null || sound == null || source == null || entity.getWorld() != api) {
+            return;
+        }
+        Location at = entity.getLocation();
+        double range = Math.max(48.0D, soundRange(volume));
+        double rangeSq = range * range;
+        for (Player p : getPlayers()) {
+            PlayerImpl impl = server.playerImpl(p);
+            if (impl != null && p.getLocation().distanceSquared(at) <= rangeSq) {
+                impl.worldSound(sound, source, at.getX(), at.getY(), at.getZ(), volume, pitch);
+            }
+        }
+    }
+
+    public void playSound(Location loc, org.bukkit.Sound sound, float volume, float pitch) {
+        playSound(loc, sound, org.bukkit.SoundCategory.MASTER, volume, pitch);
+    }
+
+    public void playSound(Location loc, String sound, float volume, float pitch) {
+        playSound(loc, sound, org.bukkit.SoundCategory.MASTER, volume, pitch);
+    }
+
+    public void playSound(Location loc, org.bukkit.Sound sound,
+            org.bukkit.SoundCategory category, float volume, float pitch) {
+        playSound(loc, sound, category, volume, pitch, 0L);
+    }
+
+    public void playSound(Location loc, String sound,
+            org.bukkit.SoundCategory category, float volume, float pitch) {
+        playSound(loc, sound, category, volume, pitch, 0L);
+    }
+
+    public void playSound(Location loc, org.bukkit.Sound sound,
+            org.bukkit.SoundCategory category, float volume, float pitch, long seed) {
+        if (loc != null) {
+            playWorldSound(sound, category, loc.getX(), loc.getY(), loc.getZ(), volume, pitch);
+        }
+    }
+
+    public void playSound(Location loc, String sound,
+            org.bukkit.SoundCategory category, float volume, float pitch, long seed) {
+        if (loc != null) {
+            playWorldSound(sound, category, loc.getX(), loc.getY(), loc.getZ(), volume, pitch);
+        }
+    }
+
+    public void playSound(Entity entity, org.bukkit.Sound sound, float volume, float pitch) {
+        playSound(entity, sound, org.bukkit.SoundCategory.MASTER, volume, pitch);
+    }
+
+    public void playSound(Entity entity, String sound, float volume, float pitch) {
+        playSound(entity, sound, org.bukkit.SoundCategory.MASTER, volume, pitch);
+    }
+
+    public void playSound(Entity entity, org.bukkit.Sound sound,
+            org.bukkit.SoundCategory category, float volume, float pitch) {
+        playSound(entity, sound, category, volume, pitch, 0L);
+    }
+
+    public void playSound(Entity entity, String sound,
+            org.bukkit.SoundCategory category, float volume, float pitch) {
+        playSound(entity, sound, category, volume, pitch, 0L);
+    }
+
+    public void playSound(Entity entity, org.bukkit.Sound sound,
+            org.bukkit.SoundCategory category, float volume, float pitch, long seed) {
+        playEntitySound(entity, sound, category, volume, pitch);
+    }
+
+    public void playSound(Entity entity, String sound,
+            org.bukkit.SoundCategory category, float volume, float pitch, long seed) {
+        playEntitySound(entity, sound, category, volume, pitch);
+    }
+
+    public void playSound(net.kyori.adventure.sound.Sound sound) {
+        if (sound == null) {
+            return;
+        }
+        for (Player p : getPlayers()) {
+            PlayerImpl impl = server.playerImpl(p);
+            if (impl != null) {
+                Location at = p.getLocation();
+                impl.worldSound(sound, sound.source(), at.getX(), at.getY(), at.getZ(),
+                        sound.volume(), sound.pitch());
+            }
+        }
+    }
+
+    public void playSound(net.kyori.adventure.sound.Sound sound, double x, double y, double z) {
+        if (sound == null) {
+            return;
+        }
+        playWorldSound(sound, sound.source(), x, y, z, sound.volume(), sound.pitch());
+    }
+
+    public void playSound(net.kyori.adventure.sound.Sound sound,
+            io.papermc.paper.math.Position position) {
+        if (sound != null && position != null) {
+            playSound(sound, position.x(), position.y(), position.z());
+        }
+    }
+
+    public void playSound(net.kyori.adventure.sound.Sound sound,
+            net.kyori.adventure.sound.Sound.Emitter emitter) {
+        if (sound == null) {
+            return;
+        }
+        if (emitter == net.kyori.adventure.sound.Sound.Emitter.self()) {
+            playSound(sound);
+            return;
+        }
+        if (emitter instanceof Entity entity) {
+            playEntitySound(entity, sound, sound.source(), sound.volume(), sound.pitch());
+            return;
+        }
+        throw new IllegalArgumentException(
+                "Sound emitter must be an Entity or self(), but was: " + emitter);
+    }
+
+    public void stopSound(net.kyori.adventure.sound.SoundStop stop) {
+        if (stop == null) {
+            return;
+        }
+        for (Player p : getPlayers()) {
+            p.stopSound(stop);
+        }
+    }
+
+    public void stopSound(net.kyori.adventure.sound.Sound sound) {
+        if (sound == null) {
+            return;
+        }
+        for (Player p : getPlayers()) {
+            p.stopSound(sound);
+        }
+    }
+
     public List<Entity> getEntities() {
         List<Entity> out = new ArrayList<>(getPlayers());
         out.addAll(MobImpl.all(this));

@@ -102,6 +102,10 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             NonMobProbe.run(this);
             return;
         }
+        if (System.getenv("CHUNKWAKE_WORLD_SOUND_PROBE") != null) {
+            getServer().getPluginManager().registerEvents(new WorldSoundProbe(this), this);
+            return;
+        }
         String bench = System.getenv("CHUNKWAKE_BENCH_MOBS");
         if (bench != null) {
             benchMobs(Integer.parseInt(bench));

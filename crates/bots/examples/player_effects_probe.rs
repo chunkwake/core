@@ -65,6 +65,25 @@ async fn main() {
     for name in names {
         println!("{name}={}", counts.get(name).copied().unwrap_or(0));
     }
+    if std::env::var("SOUND_DETAILS").is_ok() {
+        for (id, payload) in &c.captured_by {
+            if by_id.get(id) != Some(&"sound") {
+                continue;
+            }
+            let mut r = Reader::new(payload);
+            let sound = r.var_int();
+            let source = r.var_int();
+            let x = r.i32();
+            let y = r.i32();
+            let z = r.i32();
+            let volume = r.f32();
+            let pitch = r.f32();
+            println!(
+                "sound_raw sound={sound:?} source={source:?} x={x:?} y={y:?} z={z:?} \
+                 vol={volume:?} pitch={pitch:?}"
+            );
+        }
+    }
     for (id, payload) in &c.captured_by {
         if by_id.get(id) != Some(&"block_update") {
             continue;
