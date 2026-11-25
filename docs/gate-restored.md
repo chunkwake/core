@@ -7,7 +7,7 @@ test/probe-плагинов.
 ## Результат
 
 ```
-plugins: enabled 100 plugin(s) in 52782 ms
+plugins: enabled 100 plugin(s) in 68896 ms
 FAILED: (пусто)
 LOADERR: (пусто)
 SKIPPED: (пусто)
@@ -16,6 +16,11 @@ JARS: 104
 PROBES: folia=True cw-folia=True
 PROBE-FAIL: (пусто)
 ```
+
+Контрольный прогон на финальном бинаре с dynamic worlds, player effects и
+mob species — 25.11.2026 22:35, 100/100. Время плавает от сетевых проверок
+плагинов (Geyser и др.): соседний прогон в 21:50 занял 136521 ms с тем же
+результатом 100/100.
 
 `JARS: 104` — 100 плагинов + библиотечные/зависимые jar-ы, которые Chunkwake
 не считает отдельными плагинами. Финальный прогон 25.11.2026: 100/100, без failed/loaderr/skipped/panics. Гейт теперь **дожидается выполнения probe-задач** после enable: `FoliaProbe` должен пройти все 7 планировщиков (`all-schedulers-ok`), `ChunkwakeTest` — `folia: done global-fixed-rate (4/4)`. Если маркер не появился за 120 с, скрипт печатает `PROBE-FAIL` и возвращает exit 1. Раньше сервер убивался сразу после `enabled`, и FoliaProbe успевал только до `4/7` — часть Folia-планировщиков вообще не проверялась. Для GravesX в тестовом стенде отключён update-check (он зависает на сетевой загрузке библиотек). Добавлены ещё 4 тяжёлых NMS/API-плагина: `Skript`, `ProtocolLib`, `Orebfuscator`, `AxiomPaper`. Ранее были добавлены 6 реальных Paper/Folia-плагинов: `mob-heads`, `BuildPaste`, `no-enderman-grief`, `instantrestock`, `legacyfreecam`, `EnderChest`. CommandAPI и Pl3xMap больше не пропускаются:

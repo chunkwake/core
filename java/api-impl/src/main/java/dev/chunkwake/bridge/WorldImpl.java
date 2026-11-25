@@ -204,6 +204,23 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
                 + (save ? " 1" : " 0")).trim());
     }
 
+    /**
+     * {@code World#getEntity(UUID)}: игроки, живые мобы и выпавшие предметы
+     * этого измерения. Снаряды, лодки и вагонетки пока в {@code getEntities}
+     * не входят — для них UUID-поиск вернёт {@code null}, как и раньше.
+     */
+    public org.bukkit.entity.Entity getEntity(UUID uuid) {
+        if (uuid == null) {
+            return null;
+        }
+        for (org.bukkit.entity.Entity entity : getEntities()) {
+            if (uuid.equals(entity.getUniqueId())) {
+                return entity;
+            }
+        }
+        return null;
+    }
+
     /** {@code World#getEntitiesByClasses}: фильтр по классам Bukkit-сущностей. */
     public java.util.Collection<org.bukkit.entity.Entity> getEntitiesByClasses(
             Class<?>... classes) {
@@ -275,6 +292,11 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
 
     boolean isUnloaded() { return this.unloaded; }
 
+    /** Динамический мир (`WorldCreator`), а не оверворлд/Ад/Край. */
+    boolean isDynamic() {
+        return !dim.equals(OVERWORLD) && !dim.equals(NETHER) && !dim.equals(END);
+    }
+
     public NamespacedKey getKey() { return NamespacedKey.fromString(dim); }
     public net.kyori.adventure.key.Key key() { return getKey(); }
 
@@ -315,7 +337,9 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
     }
 
     public long getSeed() {
-        String seed = Bridge.world("seed").trim();
+        // `@<ключ> seed`: у динамического мира (`WorldCreator.seed`) свой сид,
+        // у оверворлда/Ада/Края — сид базового уровня.
+        String seed = request("seed").trim();
         return seed.isEmpty() ? 0L : Long.parseLong(seed);
     }
 

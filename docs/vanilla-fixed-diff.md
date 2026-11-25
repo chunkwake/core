@@ -6,7 +6,7 @@
 Перед сценарием области redstone/hopper/fluids/fly очищаются (fly — `x=95..220`),
 чтобы прошлый прогон не оставлял `moving_piston`/камни в зоне проверки.
 
-## Финальный прогон (release, 25.11.2026, включая Biome.toString fix)
+## Финальный прогон (release, 25.11.2026, dynamic worlds + player effects + mob species)
 
 | сценарий | Paper 26.3 | Chunkwake |
 |---|---|---|
@@ -17,9 +17,9 @@
 | hopper | `moves=3 pickups=1` | same |
 | fluids | `flow=WATER fall=WATER edge=WATER meet=OBSIDIAN logged=WATER/WATER` | same |
 | mob drops | `[BEEF, LEATHER]` (12 смертей, множество типов) | same |
-| fly | `rear=113 blocks=8 extends=28 period=4.70 window=16` | `rear=113 blocks=10 extends=28 period=4.78 window=16` |
-| fly, длинное окно t=400 | `rear=138 blocks=8 extends=78 period=4.90` | `rear=138 blocks=8 extends=77..78 period=4.92..4.95` |
-| fly, устойчивый участок t>=200 | `period200=5.03 extends200=40` | `period200=5.05 extends200=40` |
+| fly | `rear=113 blocks=8 extends=28 period=4.70 window=16` | `rear=113 blocks=8 extends=28 period=4.78 window=16` |
+| fly, длинное окно t=400 | `rear=138 blocks=8 extends=78 period=4.90` | `rear=138 blocks=10 extends=78 period=4.91` |
+| fly, устойчивый участок t>=200 | `period200=5.03 extends200=40` | `period200=5.03 extends200=40` |
 | `Chunk.getEntities` | `loaded=true found-sheep=true living=1` | same |
 | `Chunk.getTileEntities` | `[CHEST, HOPPER]` | same |
 | stale block entity | после замены сундука камнем `[HOPPER]` | same |

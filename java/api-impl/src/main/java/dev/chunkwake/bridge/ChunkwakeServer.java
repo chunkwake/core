@@ -1079,12 +1079,31 @@ final class ChunkwakeServer {
                 .map(w -> w.api).toList();
     }
 
+    /** {@code Server#getEntity(UUID)}: ищет по загруженным измерениям. */
+    public org.bukkit.entity.Entity getEntity(UUID uuid) {
+        if (uuid == null) {
+            return null;
+        }
+        for (World world : getWorlds()) {
+            WorldImpl impl = WorldImpl.of(world);
+            org.bukkit.entity.Entity entity = impl == null ? null : impl.getEntity(uuid);
+            if (entity != null) {
+                return entity;
+            }
+        }
+        return null;
+    }
+
     /** `CraftServer.createWorld` -> `WorldCreator.createWorld`. */
     public World createWorld(org.bukkit.WorldCreator creator) {
         if (creator == null || creator.name() == null || creator.name().isBlank()) {
             return null;
         }
-        String key = Bridge.world("createworld " + creator.name());
+        // Явный сид уходит в Rust: динамический мир получает свой генератор.
+        // Без сида Rust выводит стабильный сид из имени мира.
+        Long seed = creator.seed();
+        String key = Bridge.world("createworld " + creator.name()
+                + (seed == null ? "" : " " + seed));
         if (key == null || key.isBlank()) {
             logger.warning("createWorld: Rust не выдал слот для " + creator.name());
             return null;
@@ -1108,7 +1127,29 @@ final class ChunkwakeServer {
         } catch (java.io.IOException e) {
             logger.warning("createWorld: не создан каталог " + created.getWorldPath() + ": " + e);
         }
+        // Paper: `WorldInitEvent` и `WorldLoadEvent` после того, как мир и его
+        // каталог готовы. События идут в потоке плагина, вызвавшего createWorld.
+        fireWorldLoad(created);
         return created.api;
+    }
+
+    /** Paper-события создания мира: `WorldInitEvent`, затем `WorldLoadEvent`. */
+    void fireWorldLoad(WorldImpl created) {
+        callWorldEvent(new org.bukkit.event.world.WorldInitEvent(created.api));
+        callWorldEvent(new org.bukkit.event.world.WorldLoadEvent(created.api));
+    }
+
+    /**
+     * Вызов события мира: ошибки слушателей логируются и не прерывают
+     * выгрузку/создание, как в {@code SimplePluginManager.callEvent}.
+     */
+    private void callWorldEvent(org.bukkit.event.Event event) {
+        try {
+            plugins.callEvent(event);
+        } catch (Throwable t) {
+            logger.log(java.util.logging.Level.SEVERE,
+                    "Could not pass event " + event.getEventName(), t);
+        }
     }
 
     public boolean unloadWorld(String name, boolean save) {
@@ -1121,7 +1162,15 @@ final class ChunkwakeServer {
 
     public boolean unloadWorld(World world, boolean save) {
         WorldImpl impl = WorldImpl.of(world);
-        if (impl == null) {
+        // Оверворлд/Ад/Край Rust не выгружает: событие им не шлём.
+        if (impl == null || impl.isUnloaded() || !impl.isDynamic()) {
+            return false;
+        }
+        // Paper: `WorldUnloadEvent` до выгрузки, отмена оставляет мир загруженным.
+        org.bukkit.event.world.WorldUnloadEvent event =
+                new org.bukkit.event.world.WorldUnloadEvent(impl.api);
+        callWorldEvent(event);
+        if (event.isCancelled()) {
             return false;
         }
         boolean ok = "1".equals(Bridge.world("unloadworld " + impl.dim).trim());

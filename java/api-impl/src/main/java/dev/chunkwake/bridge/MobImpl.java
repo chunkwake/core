@@ -75,16 +75,34 @@ final class MobImpl {
         return LivingEntity.class;
     }
 
+    /**
+     * Все виды, которые умеет Rust (`Species::ALL`). `end_crystal` сюда не
+     * входит: это не живая сущность, и `MobImpl` не может её создать.
+     */
+    private static final String[] SPECIES = {
+        "cow", "pig", "sheep", "chicken", "zombie", "creeper", "skeleton",
+        "spider", "slime", "drowned", "piglin", "wolf", "cod", "iron_golem",
+        "phantom", "pillager", "vindicator", "evoker", "vex", "witch",
+        "ravager", "wither", "snow_golem", "copper_golem", "ender_dragon",
+        "parrot", "warden", "cat",
+    };
+
     /** Вид для {@link EntityType}; {@code null} — такого моба сервер не умеет. */
     static String species(EntityType type) {
-        return switch (type) {
-            case COW, PIG, SHEEP, CHICKEN, ZOMBIE, CREEPER, SKELETON, SPIDER, SLIME -> type.name().toLowerCase(Locale.ROOT);
-            default -> null;
-        };
+        if (type == null) {
+            return null;
+        }
+        String name = type.name().toLowerCase(Locale.ROOT);
+        for (String species : SPECIES) {
+            if (species.equals(name)) {
+                return species;
+            }
+        }
+        return null;
     }
 
     static String species(Class<?> type) {
-        for (String s : new String[] {"cow", "pig", "sheep", "chicken", "zombie", "creeper", "skeleton", "spider", "slime"}) {
+        for (String s : SPECIES) {
             if (type.isAssignableFrom(iface(s)) && iface(s).isAssignableFrom(type)) {
                 return s;
             }

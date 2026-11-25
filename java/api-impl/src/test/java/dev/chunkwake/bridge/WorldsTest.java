@@ -6,10 +6,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.StringReader;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.bukkit.NamespacedKey;
 import org.bukkit.World;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.HandlerList;
+import org.bukkit.event.Listener;
+import org.bukkit.event.world.WorldLoadEvent;
+import org.bukkit.event.world.WorldUnloadEvent;
 import org.bukkit.metadata.FixedMetadataValue;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.Plugin;
@@ -61,5 +68,40 @@ class WorldsTest {
         assertEquals(42, pdc.api.get(key, PersistentDataType.INTEGER));
         pdc.api.remove(key);
         assertTrue(last[0].isEmpty());
+    }
+
+    /** `WorldLoadEvent` после создания и отменяемый `WorldUnloadEvent` до выгрузки. */
+    @Test
+    void worldLifecycleEventsFollowPaper() {
+        WorldImpl dynamic = new WorldImpl(server, "minecraft:eventworld");
+        List<String> seen = new ArrayList<>();
+        Listener listener = new Listener() {
+            @EventHandler
+            public void onLoad(WorldLoadEvent e) {
+                seen.add("load:" + e.getWorld().getName());
+            }
+
+            @EventHandler
+            public void onUnload(WorldUnloadEvent e) {
+                seen.add("unload:" + e.getWorld().getName());
+                e.setCancelled(true);
+            }
+        };
+        server.plugins.registerEvents(listener, plugin);
+        try {
+            server.fireWorldLoad(dynamic);
+            assertEquals(List.of("load:eventworld"), seen);
+
+            // Отмена оставляет мир загруженным: Rust unloadworld не вызывается.
+            assertFalse(server.unloadWorld(dynamic.api, true));
+            assertEquals(List.of("load:eventworld", "unload:eventworld"), seen);
+            assertFalse(dynamic.isUnloaded());
+
+            // Ванильные измерения не выгружаются и событие не получают.
+            assertFalse(server.unloadWorld(server.world, true));
+            assertEquals(2, seen.size());
+        } finally {
+            HandlerList.unregisterAll(plugin);
+        }
     }
 }

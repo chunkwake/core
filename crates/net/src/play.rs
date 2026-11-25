@@ -247,6 +247,9 @@ pub struct PlayPlan {
     /// Чанк генератора (плоский мир); изменённые чанки — в `edited`.
     /// Нормальный мир: столбцы, которых нет на диске. Плоский мир — `None`.
     trees: Arc<chunkwake_worldgen::feature::RuntimeTrees>,
+    /// Фабрика генераторов динамических миров (`WorldCreator.seed`).
+    /// `None` — мир плоский: у него генератор не нужен.
+    dynamic_factory: Option<DynamicFactoryFn>,
     /// Тег точки интереса (`minecraft:village`) → типы.
     poi_tags: HashMap<String, HashSet<String>>,
     /// Id и `#теги` `worldgen/structure` для tab-complete. Клиенту этот реестр не шлётся.
@@ -477,6 +480,22 @@ pub type TerrainTrimFn = Arc<dyn Fn() + Send + Sync>;
 pub type LocateFn = Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync>;
 /// `StructureManager.getStructureAt`: имена структур в точке (радиус кусков).
 pub type StructuresAtFn = Arc<dyn Fn([i32; 3]) -> HashSet<String> + Send + Sync>;
+
+/// Генератор динамического мира (`WorldCreator`), собранный под его сид.
+///
+/// Хранится отдельно от `DimSpec`: слоты предвыделены, но тяжёлый генератор
+/// строится только при создании мира и освобождается при выгрузке.
+pub struct DynamicGen {
+    pub seed: i64,
+    pub terrain: Option<TerrainFn>,
+    pub trim_idle: Option<TerrainTrimFn>,
+    pub locate_biome: Option<LocateFn>,
+    pub locate_structure: Option<LocateFn>,
+    pub structures_at: Option<StructuresAtFn>,
+}
+
+/// Собирает [`DynamicGen`] по сиду: тот же тип мира, что у базового уровня.
+pub type DynamicFactoryFn = Arc<dyn Fn(i64) -> Result<DynamicGen, String> + Send + Sync>;
 /// `EyeOfEnder.DATA_ITEM_STACK`: индекс после данных `Entity`.
 const EYE_ITEM_META: u8 = 8;
 
@@ -1788,32 +1807,99 @@ pub(crate) fn custom_name(slot: u8) -> Option<&'static str> {
     names.get(index).copied().flatten()
 }
 
-fn set_custom_name(slot: u8, key: &'static str) {
+/// Занять свободный слот и сразу записать в него имя: между выбором слота и
+/// записью имени другой поток не должен получить тот же слот.
+fn reserve_custom_slot(key: &str) -> Option<u8> {
     init_custom_slots();
     let mut names = CUSTOM_NAMES.lock().unwrap();
-    if let Some(index) = slot.checked_sub(CUSTOM_FIRST).map(|s| s as usize) {
-        if let Some(entry) = names.get_mut(index) {
-            *entry = Some(key);
+    let index = names.iter().position(|name| name.is_none())?;
+    // `'static` — только у занятого слота: неудачный вызов не течёт.
+    names[index] = Some(Box::leak(key.to_owned().into_boxed_str()));
+    Some(index as u8 + CUSTOM_FIRST)
+}
+
+/// Аргументы `createworld <имя> [сид]`. Старый формат — одно имя.
+fn dynamic_world_args(rest: &str) -> (&str, Option<i64>) {
+    let rest = rest.trim();
+    match rest.rsplit_once(' ') {
+        Some((name, seed)) if !name.trim().is_empty() => match seed.parse::<i64>() {
+            Ok(seed) => (name.trim(), Some(seed)),
+            Err(_) => (rest, None),
+        },
+        _ => (rest, None),
+    }
+}
+
+/// Сид динамического мира без `WorldCreator.seed()`: FNV-1a от имени.
+///
+/// Не `RandomState`: тот солится при старте, и после перезапуска тот же мир
+/// получил бы другой рельеф.
+fn derived_seed(name: &str) -> i64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in name.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash as i64
+}
+
+/// Тело [`PlayPlan::create_world`]: вынести из плана, чтобы слоты и фабрику
+/// можно было проверить без сборки пакетов.
+fn create_dynamic_world(
+    dims: &FastMap<Dimension, DimState>,
+    factory: Option<&DynamicFactoryFn>,
+    name: &str,
+    seed: Option<i64>,
+) -> Option<String> {
+    let clean: String = name
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let clean = if clean.is_empty() {
+        "world"
+    } else {
+        clean.as_str()
+    };
+    let key = format!("minecraft:{clean}");
+    let seed = seed.unwrap_or_else(|| derived_seed(clean));
+    let slot = reserve_custom_slot(&key)?;
+    let dim = Dimension::Custom(slot);
+    let Some(state) = dims.get(&dim) else {
+        clear_custom_name(slot);
+        return None;
+    };
+    state.reset_custom();
+    state.set_seed(seed);
+    if let Some(factory) = factory {
+        match factory(seed) {
+            Ok(generator) => state.install_generator(generator),
+            Err(e) => {
+                // Без генератора мир молча получил бы рельеф оверворлда:
+                // лучше вернуть `null`, как `createWorld` при ошибке загрузки.
+                tracing::warn!("dynamic world {key} (seed {seed}): {e}");
+                state.disable_custom();
+                clear_custom_name(slot);
+                return None;
+            }
         }
     }
+    Some(key)
 }
 
 fn clear_custom_name(slot: u8) {
     let mut names = CUSTOM_NAMES.lock().unwrap();
-    if let Some(index) = slot.checked_sub(CUSTOM_FIRST).map(|s| s as usize) {
-        if let Some(entry) = names.get_mut(index) {
-            *entry = None;
-        }
+    if let Some(index) = slot.checked_sub(CUSTOM_FIRST).map(|s| s as usize)
+        && let Some(entry) = names.get_mut(index)
+    {
+        *entry = None;
     }
-}
-
-fn free_custom_slot() -> Option<u8> {
-    init_custom_slots();
-    let names = CUSTOM_NAMES.lock().unwrap();
-    names
-        .iter()
-        .position(|name| name.is_none())
-        .map(|i| i as u8 + CUSTOM_FIRST)
 }
 
 impl Dimension {
@@ -2099,6 +2185,15 @@ pub(crate) struct DimState {
     template: ChunkColumn,
     /// Нормальный мир: сгенерировать недостающий чанк. Плоский — `None`.
     terrain: Option<TerrainFn>,
+    /// Генератор динамического мира поверх базового (`WorldCreator.seed`).
+    ///
+    /// `RwLock`, потому что генератор ставится и снимается во время работы, а
+    /// не только при сборке плана. Замок берётся лишь при генерации чанка;
+    /// горячий путь чтения блока смотрит на `gen_override`.
+    custom_gen: std::sync::RwLock<Option<DynamicGen>>,
+    /// У динамического мира есть свой генератор (`custom_gen`): атомарный
+    /// быстрый ответ для `block_in`, без чтения `custom_gen`.
+    gen_override: std::sync::atomic::AtomicBool,
     trim_idle: Option<TerrainTrimFn>,
     /// `/locate biome` в этом измерении.
     locate_biome: Option<LocateFn>,
@@ -2109,6 +2204,8 @@ pub(crate) struct DimState {
     /// Плоский `the_void`: камень и булыжник платформы.
     void_platform: Option<(u32, u32)>,
     min_y: i32,
+    /// Сид измерения для `World.getSeed`; у динамического мира — свой.
+    seed: std::sync::atomic::AtomicI64,
     /// Изменённые столбцы и номер их правки.
     edited: std::sync::RwLock<Columns>,
     /// Номер правки, записанный на диск.
@@ -2161,12 +2258,15 @@ impl DimState {
         Self {
             template: spec.template,
             terrain: spec.terrain,
+            custom_gen: std::sync::RwLock::new(None),
+            gen_override: std::sync::atomic::AtomicBool::new(false),
             trim_idle: spec.trim_idle,
             locate_biome: spec.locate_biome,
             locate_structure: spec.locate_structure,
             structures_at: spec.structures_at,
             void_platform: spec.void_platform,
             min_y: spec.min_y,
+            seed: std::sync::atomic::AtomicI64::new(spec.seed),
             edited: std::sync::RwLock::new(Columns::default()),
             saved: Mutex::new(FastMap::default()),
             dirty: Mutex::new(FastSet::default()),
@@ -2190,6 +2290,7 @@ impl DimState {
 
     /// Очистить предвыделенный слот перед выдачей плагину (`WorldCreator`).
     fn reset_custom(&self) {
+        self.clear_generator();
         self.clear_custom_state();
         self.enabled
             .store(true, std::sync::atomic::Ordering::Release);
@@ -2197,9 +2298,96 @@ impl DimState {
 
     /// Выгрузить динамический мир: имя слота освобождается, состояние чистится.
     fn disable_custom(&self) {
+        self.clear_generator();
         self.clear_custom_state();
         self.enabled
             .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Поставить генератор динамического мира (`create_world`).
+    fn install_generator(&self, generator: DynamicGen) {
+        self.seed
+            .store(generator.seed, std::sync::atomic::Ordering::Relaxed);
+        *self.custom_gen.write().unwrap() = Some(generator);
+        // Публикуем генератор только после записи: читатель не увидит флаг
+        // без готового `custom_gen`.
+        self.gen_override
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Снять генератор динамического мира: `unload_world` и повторное создание.
+    fn clear_generator(&self) {
+        // Сначала снимаем флаг: новые читатели пойдут по базовому генератору,
+        // затем забираем `Arc` — последние держатели доживают в своих задачах.
+        self.gen_override
+            .store(false, std::sync::atomic::Ordering::Release);
+        let old = self.custom_gen.write().unwrap().take();
+        drop(old);
+    }
+
+    fn set_seed(&self, seed: i64) {
+        self.seed.store(seed, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Генератор столбца с учётом `WorldCreator.seed`.
+    fn terrain_fn(&self) -> Option<TerrainFn> {
+        if self.gen_override.load(std::sync::atomic::Ordering::Acquire)
+            && let Some(generator) = self.custom_gen.read().unwrap().as_ref()
+        {
+            return generator.terrain.clone();
+        }
+        self.terrain.clone()
+    }
+
+    /// `/locate biome` с учётом `WorldCreator.seed`.
+    fn locate_biome_fn(&self) -> Option<LocateFn> {
+        if self.gen_override.load(std::sync::atomic::Ordering::Acquire)
+            && let Some(generator) = self.custom_gen.read().unwrap().as_ref()
+        {
+            return generator.locate_biome.clone();
+        }
+        self.locate_biome.clone()
+    }
+
+    /// `/locate structure` с учётом `WorldCreator.seed`.
+    fn locate_structure_fn(&self) -> Option<LocateFn> {
+        if self.gen_override.load(std::sync::atomic::Ordering::Acquire)
+            && let Some(generator) = self.custom_gen.read().unwrap().as_ref()
+        {
+            return generator.locate_structure.clone();
+        }
+        self.locate_structure.clone()
+    }
+
+    /// `StructureManager.getStructureAt` с учётом `WorldCreator.seed`.
+    fn structures_at_fn(&self) -> Option<StructuresAtFn> {
+        if self.gen_override.load(std::sync::atomic::Ordering::Acquire)
+            && let Some(generator) = self.custom_gen.read().unwrap().as_ref()
+        {
+            return generator.structures_at.clone();
+        }
+        self.structures_at.clone()
+    }
+
+    /// Есть ли у измерения генерация (для `block_in`): без замка в hot path.
+    fn has_terrain(&self) -> bool {
+        self.gen_override.load(std::sync::atomic::Ordering::Acquire) || self.terrain.is_some()
+    }
+
+    /// Почистить кэши генератора, если он простаивает (см. `trim_idle_generators`).
+    fn trim_idle_generator(&self) {
+        let custom = if self.gen_override.load(std::sync::atomic::Ordering::Acquire) {
+            self.custom_gen
+                .read()
+                .unwrap()
+                .as_ref()
+                .and_then(|generator| generator.trim_idle.clone())
+        } else {
+            None
+        };
+        if let Some(trim) = custom.or_else(|| self.trim_idle.clone()) {
+            trim();
+        }
     }
 
     fn clear_custom_state(&self) {
@@ -2231,6 +2419,8 @@ pub struct DimSpec {
     pub structures_at: Option<StructuresAtFn>,
     pub void_platform: Option<(u32, u32)>,
     pub min_y: i32,
+    /// Сид этого измерения (`World.getSeed`); у динамического мира — свой.
+    pub seed: i64,
 }
 
 /// Мир и данные, нужные сессиям.
@@ -2240,6 +2430,8 @@ pub struct WorldSpec {
     /// Шаблон оверворлда: нужен для `chunk_body` (одинаков для координат).
     pub template: ChunkColumn,
     pub trees: Arc<chunkwake_worldgen::feature::RuntimeTrees>,
+    /// Фабрика генераторов динамических миров; `None` — плоский мир.
+    pub dynamic_factory: Option<DynamicFactoryFn>,
     /// Теги `point_of_interest_type` из датапака.
     pub poi_tags: HashMap<String, HashSet<String>>,
     /// Id и `#теги` структур для `/locate structure`.
@@ -2639,6 +2831,7 @@ mod minecarts;
 mod minerals;
 mod mobs;
 mod paintings;
+mod player_effects;
 mod poi;
 mod raids;
 mod recipe_book;
@@ -3153,6 +3346,7 @@ impl PlayPlan {
         let WorldSpec {
             template,
             trees,
+            dynamic_factory,
             poi_tags,
             structure_names,
             item_blocks,
@@ -3366,6 +3560,7 @@ impl PlayPlan {
                                 structures_at: spec.structures_at.clone(),
                                 void_platform: spec.void_platform,
                                 min_y: spec.min_y,
+                                seed: spec.seed,
                             },
                             !matches!(dim, Dimension::Custom(_)),
                         ),
@@ -3384,6 +3579,7 @@ impl PlayPlan {
             dragon_fight: Mutex::new(DragonFight::default()),
             raids: Mutex::new(Vec::new()),
             trees,
+            dynamic_factory,
             poi_tags,
             structure_names,
             pending_blocks: Mutex::new(FastMap::default()),
@@ -3507,7 +3703,7 @@ impl PlayPlan {
             .read()
             .unwrap()
             .contains_key(&(x, z));
-        if missing && self.terrain().is_some() {
+        if missing && self.has_terrain() {
             if !generate {
                 return false;
             }
@@ -3531,7 +3727,7 @@ impl PlayPlan {
     pub(crate) fn load_chunk(&self, x: i32, z: i32, generate: bool) -> bool {
         // Сначала диск: flat-чанк мог быть сохранён плагином/WorldEdit.
         self.ensure_region(x, z);
-        if self.terrain().is_none() {
+        if !self.has_terrain() {
             let template = self.template().clone();
             let mut world = self.dim_state().edited.write().unwrap();
             world.entry((x, z)).or_insert((template, 0));
@@ -3719,7 +3915,7 @@ impl PlayPlan {
         }
         // Выгрузка могла снять столбец после проверки региона: регион
         // помечен, повторный запрос прочтёт его с диска.
-        if snapshot.is_none() && self.terrain().is_some() {
+        if snapshot.is_none() && self.has_terrain() {
             self.generate_chunk(x, z);
             snapshot = read();
         }
@@ -3727,7 +3923,7 @@ impl PlayPlan {
         let (body, rev) = match &edited {
             Some((body, rev)) => (body.as_slice(), *rev),
             None => {
-                if self.terrain().is_some() {
+                if self.has_terrain() {
                     // Шаблон в шумовом мире — пустой столбец: клиент увидит
                     // дыру. Кэшировать такой кадр нельзя (ниже), а в журнал —
                     // чтобы гонку было видно.
@@ -3752,7 +3948,7 @@ impl PlayPlan {
         // гонки, и из кэша он уходил бы снова и снова.
         let cacheable = match (&edited, world.get(&(x, z))) {
             (Some(_), Some(e)) => e.1 == rev,
-            (None, None) => self.terrain().is_none(),
+            (None, None) => !self.has_terrain(),
             _ => false,
         };
         if cacheable {
@@ -3964,7 +4160,7 @@ impl PlayPlan {
         // Чанк шума появится при отправке игроку, а не из тика.
         // В шумовом мире чанк появляется при первом обращении: `/setblock` и
         // портал должны работать до того, как чанк дойдёт до игрока.
-        if self.terrain().is_some() && !self.dim_state().edited.read().unwrap().contains_key(&key) {
+        if self.has_terrain() && !self.dim_state().edited.read().unwrap().contains_key(&key) {
             self.generate_chunk(key.0, key.1);
             if !self.dim_state().edited.read().unwrap().contains_key(&key) {
                 return None;
@@ -4041,7 +4237,7 @@ impl PlayPlan {
                 .map_or_else(|| self.template().height(), |c| c.0.height());
             let mut access = WorldLight {
                 world: &mut world,
-                fallback: self.terrain().is_none().then_some(template),
+                fallback: (!self.has_terrain()).then_some(template),
                 touched: FastSet::default(),
                 last: None,
                 special: platform.is_some().then_some(&make as _),
@@ -4596,9 +4792,7 @@ impl PlayPlan {
         for key in keys {
             self.wait_lent(self.dim_state(), key);
             self.ensure_region(key.0, key.1);
-            if self.terrain().is_some()
-                && !self.dim_state().edited.read().unwrap().contains_key(&key)
-            {
+            if self.has_terrain() && !self.dim_state().edited.read().unwrap().contains_key(&key) {
                 self.generate_chunk(key.0, key.1);
                 if !self.dim_state().edited.read().unwrap().contains_key(&key) {
                     continue;
@@ -4675,7 +4869,7 @@ impl PlayPlan {
             if !lit.is_empty() {
                 let mut access = WorldLight {
                     world: &mut world,
-                    fallback: self.terrain().is_none().then_some(template),
+                    fallback: (!self.has_terrain()).then_some(template),
                     touched: FastSet::default(),
                     last: None,
                     special: platform.is_some().then_some(&make as _),
@@ -5173,9 +5367,15 @@ impl PlayPlan {
     /// `effects` → эффекты по порядку ID (строки), `isblock имя` → `1`/`0`,
     /// `blocks с` → имена блоков по порядку начиная с номера `с` (кусок до 7 КБ).
     pub fn world_request(&self, line: &str) -> String {
-        // `createworld <name>`: занять динамический слот (`WorldCreator`).
-        if let Some(name) = line.strip_prefix("createworld ") {
-            return self.create_world(name.trim()).unwrap_or_default();
+        // `player <uuid> …`: пакеты только одному игроку (звук, title, блок).
+        if let Some(reply) = self.player_effect_request(line) {
+            return reply;
+        }
+        // `createworld <name> [seed]`: занять динамический слот (`WorldCreator`).
+        // Старый формат без сида тоже принимается: сид выводится из имени.
+        if let Some(rest) = line.strip_prefix("createworld ") {
+            let (name, seed) = dynamic_world_args(rest);
+            return self.create_world(name, seed).unwrap_or_default();
         }
         if let Some(key) = line.strip_prefix("unloadworld ") {
             return if self.unload_world(key.trim()) {
@@ -5789,7 +5989,7 @@ impl PlayPlan {
             );
         }
         if line == "seed" {
-            return self.seed.to_string();
+            return self.active_seed().to_string();
         }
         // `sealevel`: `World.getSeaLevel()` - уровень моря генератора
         // (в flat-мирах это minY+1, а не 63).
@@ -6727,7 +6927,7 @@ impl PlayPlan {
     #[cfg(test)]
     #[allow(dead_code)]
     fn spread_commit(&self, x: i32, z: i32) -> Vec<(i32, i32)> {
-        if self.terrain().is_none() {
+        if !self.has_terrain() {
             return Vec::new();
         }
         // Сосед с диска должен быть в памяти, иначе грань останется тёмной.
@@ -6786,6 +6986,18 @@ impl PlayPlan {
         self.min_y_of(self.active_dim())
     }
 
+    /// Сид активного измерения: у динамического мира свой, у ванильных —
+    /// общий сид уровня (`/seed` и `World.getSeed`).
+    fn active_seed(&self) -> i64 {
+        match self.active_dim() {
+            Dimension::Custom(_) => self
+                .dim_state()
+                .seed
+                .load(std::sync::atomic::Ordering::Relaxed),
+            _ => self.seed,
+        }
+    }
+
     /// Платформа void активного измерения.
     fn void_platform(&self) -> Option<(u32, u32)> {
         self.dim_state().void_platform
@@ -6793,17 +7005,22 @@ impl PlayPlan {
 
     /// Генератор активного измерения.
     fn terrain(&self) -> Option<TerrainFn> {
-        self.dim_state().terrain.clone()
+        self.dim_state().terrain_fn()
+    }
+
+    /// Есть ли у активного измерения генерация: без замка в горячем пути.
+    fn has_terrain(&self) -> bool {
+        self.dim_state().has_terrain()
     }
 
     /// `/locate biome` активного измерения.
     fn locate_biome_fn(&self) -> Option<LocateFn> {
-        self.dim_state().locate_biome.clone()
+        self.dim_state().locate_biome_fn()
     }
 
     /// `/locate structure` активного измерения.
     fn locate_structure_fn(&self) -> Option<LocateFn> {
-        self.dim_state().locate_structure.clone()
+        self.dim_state().locate_structure_fn()
     }
 
     /// Минимум по Y конкретного измерения.
@@ -6825,10 +7042,8 @@ impl PlayPlan {
             .map(|p| p.dimension)
             .collect();
         for (dim, state) in &self.dims {
-            if !occupied.contains(dim)
-                && let Some(trim) = &state.trim_idle
-            {
-                trim();
+            if !occupied.contains(dim) {
+                state.trim_idle_generator();
             }
         }
     }
@@ -7081,7 +7296,7 @@ impl PlayPlan {
                 return Some(column.block(lx, ry as usize, lz));
             }
         }
-        if state.terrain.is_some() {
+        if state.has_terrain() {
             return None;
         }
         Some(Self::flat_in(
@@ -7157,33 +7372,14 @@ impl PlayPlan {
         self.dims.contains_key(&dim)
     }
 
-    /// `WorldCreator.createWorld`: занять предвыделенный слот, очистить его и
-    /// вернуть ключ измерения (`chunkwake:<name>`). `None` — слоты кончились.
-    pub fn create_world(&self, name: &str) -> Option<String> {
-        let clean: String = name
-            .to_ascii_lowercase()
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        let clean = if clean.is_empty() {
-            "world"
-        } else {
-            clean.as_str()
-        };
-        let key = format!("minecraft:{clean}");
-        let slot = free_custom_slot()?;
-        let dim = Dimension::Custom(slot);
-        let state = self.dims.get(&dim)?;
-        let leaked: &'static str = Box::leak(key.clone().into_boxed_str());
-        set_custom_name(slot, leaked);
-        state.reset_custom();
-        Some(key)
+    /// `WorldCreator.createWorld`: занять предвыделенный слот, очистить его,
+    /// собрать генератор под `seed` и вернуть ключ измерения
+    /// (`minecraft:<name>`). `None` — слоты кончились или генератор не собрался.
+    ///
+    /// `seed == None` — стабильный производный сид из имени: мир после
+    /// перезапуска и повторного создания получает тот же рельеф.
+    pub fn create_world(&self, name: &str, seed: Option<i64>) -> Option<String> {
+        create_dynamic_world(&self.dims, self.dynamic_factory.as_ref(), name, seed)
     }
 
     /// `Bukkit.unloadWorld`: погасить динамический мир и освободить слот.
@@ -7413,7 +7609,7 @@ impl PlayPlan {
             columns: &columns,
             template: self.template(),
             min_y: self.min_y(),
-            flat: self.terrain().is_none(),
+            flat: !self.has_terrain(),
             void_platform: self.void_platform(),
         };
         f(&view)
@@ -7478,7 +7674,7 @@ impl PlayPlan {
     fn ticking_check(&self) -> impl FnMut((i32, i32)) -> bool + '_ {
         let simulated = self.block_ticking_set();
         // Плоский и пустой мир: чанка может не быть в `edited`, но он есть.
-        let flat = self.terrain().is_none();
+        let flat = !self.has_terrain();
         let world = self.dim_state().edited.read().unwrap();
         let mut memo: FastMap<(i32, i32), bool> = FastMap::default();
         move |c: (i32, i32)| {
@@ -24869,7 +25065,7 @@ impl PlayPlan {
         // Диск не читается: это вызывается и из тика.
         match world.get(&key) {
             Some(e) => e.0.block_entities.get(&pos).cloned(),
-            None if self.terrain().is_none() => self.template().block_entities.get(&pos).cloned(),
+            None if !self.has_terrain() => self.template().block_entities.get(&pos).cloned(),
             None => None,
         }
     }
@@ -24878,7 +25074,7 @@ impl PlayPlan {
     fn set_block_entity(&self, pos: [i32; 3], be: Option<BlockEntity>) {
         let key = (pos[0] >> 4, pos[2] >> 4);
         self.wait_lent(self.dim_state(), key);
-        if self.terrain().is_some() && !self.dim_state().edited.read().unwrap().contains_key(&key) {
+        if self.has_terrain() && !self.dim_state().edited.read().unwrap().contains_key(&key) {
             return;
         }
         self.materialize_void(key.0, key.1);
@@ -27067,10 +27263,11 @@ fn chunks_around(c: (i32, i32), r: i32, skip: Option<((i32, i32), i32)>) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::{
-        CHEST_SINGLE, ChestState, ClientLoading, FastMap, GameModeChange, LOAD_GATED_PACKETS,
+        CHEST_SINGLE, CUSTOM_FIRST, ChestState, ClientLoading, DimSpec, Dimension,
+        DynamicFactoryFn, DynamicGen, FastMap, GameModeChange, LOAD_GATED_PACKETS,
         acknowledge_player_save, add_banner_pattern, chunks_around, container_entity,
-        dominant_axis, game_mode_change, in_view, lectern_page_request, update_container_viewers,
-        within_pick_range,
+        create_dynamic_world, derived_seed, dominant_axis, dynamic_world_args, game_mode_change,
+        in_view, lectern_page_request, update_container_viewers, within_pick_range,
     };
     use crate::survival::PlayerState;
     use uuid::Uuid;
@@ -27840,5 +28037,104 @@ mod tests {
         assert!(super::in_spawn(spawn, 16, [23, 64, 8]));
         assert!(!super::in_spawn(spawn, 16, [24, 64, 8]));
         assert!(!super::in_spawn(spawn, 0, [8, 64, 8]));
+    }
+
+    /// Динамические миры получают свой генератор: разные сиды — разный рельеф,
+    /// выгрузка снимает генератор, слот можно занять снова.
+    #[test]
+    fn dynamic_worlds_get_their_own_generator() {
+        let template = chunkwake_world::ChunkColumn::flat(&[(1, 1)], 1, 0, 15, 6, true);
+        let make_spec = || DimSpec {
+            dimension_type: 0,
+            template: template.clone(),
+            // Базовый генератор слота: без своего мира слот ведёт себя как раньше.
+            terrain: Some(std::sync::Arc::new(|_, _| {
+                Some(chunkwake_world::ChunkColumn::flat(
+                    &[(7, 1)],
+                    1,
+                    0,
+                    15,
+                    6,
+                    true,
+                ))
+            })),
+            trim_idle: None,
+            locate_biome: None,
+            locate_structure: None,
+            structures_at: None,
+            void_platform: None,
+            min_y: 0,
+            seed: 42,
+        };
+        let first = Dimension::Custom(CUSTOM_FIRST);
+        let second = Dimension::Custom(CUSTOM_FIRST + 1);
+        let mut dims: FastMap<Dimension, super::DimState> = FastMap::default();
+        dims.insert(first, super::DimState::from_spec(make_spec(), false));
+        dims.insert(second, super::DimState::from_spec(make_spec(), false));
+
+        let factory: DynamicFactoryFn = std::sync::Arc::new(|seed| {
+            let state = if seed == 1 { 101 } else { 202 };
+            Ok(DynamicGen {
+                seed,
+                terrain: Some(std::sync::Arc::new(move |_, _| {
+                    Some(chunkwake_world::ChunkColumn::flat(
+                        &[(state, 1)],
+                        1,
+                        0,
+                        15,
+                        6,
+                        true,
+                    ))
+                })),
+                trim_idle: None,
+                locate_biome: None,
+                locate_structure: None,
+                structures_at: None,
+            })
+        });
+        let block = |dim: Dimension| {
+            dims.get(&dim)
+                .expect("слот есть")
+                .terrain_fn()
+                .expect("генератор есть")(0, 0)
+            .expect("чанк новый")
+            .block(0, 0, 0)
+        };
+
+        let key_a =
+            create_dynamic_world(&dims, Some(&factory), "dynamic-test-a", Some(1)).expect("мир a");
+        let key_b =
+            create_dynamic_world(&dims, Some(&factory), "dynamic-test-b", Some(2)).expect("мир b");
+        assert_eq!(Dimension::from_key(&key_a), Some(first));
+        assert_eq!(Dimension::from_key(&key_b), Some(second));
+        assert_eq!(block(first), 101);
+        assert_eq!(block(second), 202);
+
+        // Выгрузка отпускает генератор, слот можно занять снова.
+        dims.get(&first).unwrap().disable_custom();
+        super::clear_custom_name(CUSTOM_FIRST);
+        let key_c =
+            create_dynamic_world(&dims, Some(&factory), "dynamic-test-c", Some(1)).expect("мир c");
+        assert_eq!(Dimension::from_key(&key_c), Some(first));
+        assert_eq!(block(first), 101);
+
+        // После выгрузки остаётся базовый генератор слота.
+        dims.get(&first).unwrap().disable_custom();
+        assert_eq!(block(first), 7);
+        dims.get(&second).unwrap().disable_custom();
+        super::clear_custom_name(CUSTOM_FIRST);
+        super::clear_custom_name(CUSTOM_FIRST + 1);
+    }
+
+    #[test]
+    fn dynamic_world_args_keep_the_old_single_name_form() {
+        assert_eq!(dynamic_world_args("world 123"), ("world", Some(123)));
+        assert_eq!(dynamic_world_args("my world"), ("my world", None));
+        assert_eq!(dynamic_world_args("world"), ("world", None));
+        assert_eq!(dynamic_world_args("-42"), ("-42", None));
+        // Отрицательный сид — тоже сид, а не имя.
+        assert_eq!(dynamic_world_args("world -42"), ("world", Some(-42)));
+        assert_eq!(derived_seed("world"), derived_seed("world"));
+        assert_ne!(derived_seed("world"), derived_seed("other"));
     }
 }

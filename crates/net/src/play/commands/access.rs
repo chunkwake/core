@@ -121,8 +121,8 @@ impl PlayPlan {
     }
 
     /// `StructureManager.getStructureAt` из генератора мира.
-    pub(crate) fn structures_at_fn(&self) -> Option<&crate::play::StructuresAtFn> {
-        self.dim_state().structures_at.as_ref()
+    pub(crate) fn structures_at_fn(&self) -> Option<crate::play::StructuresAtFn> {
+        self.dim_state().structures_at_fn()
     }
 
     /// Все цели мира для селекторов: игроки, мобы, выпавшие предметы, стрелы.
@@ -330,9 +330,10 @@ impl PlayPlan {
         self.login.max_players.max(0) as usize
     }
 
-    /// Зерно мира для `/seed`.
+    /// Зерно мира для `/seed`: у динамического мира — своё, у ванильных —
+    /// общий сид уровня.
     pub(crate) fn seed(&self) -> i64 {
-        self.seed
+        self.active_seed()
     }
 
     pub(crate) fn day_time(&self) -> i64 {

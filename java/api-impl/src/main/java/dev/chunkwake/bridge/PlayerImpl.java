@@ -208,6 +208,336 @@ public final class PlayerImpl {
         sendMessage(message.asComponent());
     }
 
+    // --- заголовки, action bar, звуки и клиентские блоки ---
+
+    private void playerEffect(String line) {
+        if (online) {
+            Bridge.world("player " + id + " " + line);
+        }
+    }
+
+    private void titlePart(String part, Component component) {
+        if (component != null) {
+            playerEffect("title " + part + " "
+                    + GsonComponentSerializer.gson().serialize(component));
+        }
+    }
+
+    private void titleTimes(int fadeIn, int stay, int fadeOut) {
+        playerEffect("times " + fadeIn + " " + stay + " " + fadeOut);
+    }
+
+    public void sendActionBar(String message) {
+        sendActionBar(ChunkwakeServer.legacy(message));
+    }
+
+    public void sendActionBar(char alternateChar, String message) {
+        sendActionBar(message);
+    }
+
+    public void sendActionBar(Component message) {
+        titlePart("actionbar", message);
+    }
+
+    public void sendActionBar(ComponentLike message) {
+        sendActionBar(message.asComponent());
+    }
+
+    public void sendActionBar(net.md_5.bungee.api.chat.BaseComponent[] message) {
+        sendActionBar(ChunkwakeServer.legacy(
+                net.md_5.bungee.api.chat.TextComponent.toLegacyText(message)));
+    }
+
+    public void sendTitle(String title, String subtitle) {
+        sendTitle(title, subtitle, 10, 70, 20);
+    }
+
+    public void sendTitle(String title, String subtitle, int fadeIn, int stay, int fadeOut) {
+        if (title != null) {
+            titlePart("title", ChunkwakeServer.legacy(title));
+        }
+        if (subtitle != null) {
+            titlePart("subtitle", ChunkwakeServer.legacy(subtitle));
+        }
+        titleTimes(fadeIn, stay, fadeOut);
+    }
+
+    public void showTitle(com.destroystokyo.paper.Title title) {
+        if (title != null) {
+            sendTitle(net.md_5.bungee.api.chat.TextComponent.toLegacyText(title.getTitle()),
+                    net.md_5.bungee.api.chat.TextComponent.toLegacyText(title.getSubtitle()),
+                    title.getFadeIn(), title.getStay(), title.getFadeOut());
+        }
+    }
+
+    public void showTitle(net.md_5.bungee.api.chat.BaseComponent title) {
+        sendTitle(net.md_5.bungee.api.chat.TextComponent.toLegacyText(title), null);
+    }
+
+    public void showTitle(net.md_5.bungee.api.chat.BaseComponent[] title) {
+        sendTitle(net.md_5.bungee.api.chat.TextComponent.toLegacyText(title), null);
+    }
+
+    public void showTitle(net.md_5.bungee.api.chat.BaseComponent title,
+            net.md_5.bungee.api.chat.BaseComponent subtitle, int fadeIn, int stay, int fadeOut) {
+        sendTitle(net.md_5.bungee.api.chat.TextComponent.toLegacyText(title),
+                net.md_5.bungee.api.chat.TextComponent.toLegacyText(subtitle),
+                fadeIn, stay, fadeOut);
+    }
+
+    public void showTitle(net.md_5.bungee.api.chat.BaseComponent[] title,
+            net.md_5.bungee.api.chat.BaseComponent[] subtitle, int fadeIn, int stay, int fadeOut) {
+        sendTitle(net.md_5.bungee.api.chat.TextComponent.toLegacyText(title),
+                net.md_5.bungee.api.chat.TextComponent.toLegacyText(subtitle),
+                fadeIn, stay, fadeOut);
+    }
+
+    public void showTitle(net.kyori.adventure.title.Title title) {
+        if (title == null) {
+            return;
+        }
+        titlePart("title", title.title());
+        titlePart("subtitle", title.subtitle());
+        net.kyori.adventure.title.Title.Times times = title.times();
+        if (times != null) {
+            titleTimes((int) (times.fadeIn().toMillis() / 50),
+                    (int) (times.stay().toMillis() / 50),
+                    (int) (times.fadeOut().toMillis() / 50));
+        }
+    }
+
+    public void clearTitle() {
+        playerEffect("cleartitle 0");
+    }
+
+    public void resetTitle() {
+        playerEffect("cleartitle 1");
+    }
+
+    public void sendTitlePart(net.kyori.adventure.title.TitlePart<?> part, Object value) {
+        if (part == net.kyori.adventure.title.TitlePart.TITLE) {
+            titlePart("title", asComponent(value));
+        } else if (part == net.kyori.adventure.title.TitlePart.SUBTITLE) {
+            titlePart("subtitle", asComponent(value));
+        } else if (part == net.kyori.adventure.title.TitlePart.TIMES
+                && value instanceof net.kyori.adventure.title.Title.Times times) {
+            titleTimes((int) (times.fadeIn().toMillis() / 50),
+                    (int) (times.stay().toMillis() / 50),
+                    (int) (times.fadeOut().toMillis() / 50));
+        }
+    }
+
+    private static Component asComponent(Object value) {
+        if (value instanceof Component component) {
+            return component;
+        }
+        if (value instanceof ComponentLike like) {
+            return like.asComponent();
+        }
+        return value == null ? null : Component.text(value.toString());
+    }
+
+    private static String soundName(Object sound) {
+        if (sound instanceof org.bukkit.Sound bukkit) {
+            return bukkit.getKey().toString();
+        }
+        if (sound instanceof net.kyori.adventure.sound.Sound adventure) {
+            return adventure.name().asString();
+        }
+        String name = String.valueOf(sound);
+        return name.contains(":") ? name : "minecraft:" + name;
+    }
+
+    private static String soundSource(Object source) {
+        if (source == null) {
+            return "MASTER";
+        }
+        if (source instanceof org.bukkit.SoundCategory category) {
+            return category.name();
+        }
+        return source.toString().toUpperCase(java.util.Locale.ROOT);
+    }
+
+    private void playSoundAt(Object sound, Object source, double x, double y, double z,
+            float volume, float pitch) {
+        playerEffect("sound " + soundName(sound) + " " + soundSource(source)
+                + " " + x + " " + y + " " + z + " " + volume + " " + pitch);
+    }
+
+    public void playSound(org.bukkit.Location location, org.bukkit.Sound sound,
+            org.bukkit.SoundCategory source, float volume, float pitch) {
+        if (location != null && sound != null) {
+            playSoundAt(sound, source, location.getX(), location.getY(), location.getZ(), volume, pitch);
+        }
+    }
+
+    public void playSound(org.bukkit.Location location, String sound, float volume, float pitch) {
+        if (location != null && sound != null) {
+            playSoundAt(sound, null, location.getX(), location.getY(), location.getZ(), volume, pitch);
+        }
+    }
+
+    public void playSound(org.bukkit.Location location, org.bukkit.Sound sound,
+            float volume, float pitch) {
+        playSound(location, sound, org.bukkit.SoundCategory.MASTER, volume, pitch);
+    }
+
+    public void playSound(org.bukkit.Location location, String sound,
+            org.bukkit.SoundCategory source, float volume, float pitch) {
+        if (location != null && sound != null) {
+            playSoundAt(sound, source, location.getX(), location.getY(), location.getZ(), volume, pitch);
+        }
+    }
+
+    public void playSound(org.bukkit.Location location, org.bukkit.Sound sound,
+            org.bukkit.SoundCategory source, float volume, float pitch, long seed) {
+        playSound(location, sound, source, volume, pitch);
+    }
+
+    public void playSound(org.bukkit.Location location, String sound,
+            org.bukkit.SoundCategory source, float volume, float pitch, long seed) {
+        playSound(location, sound, source, volume, pitch);
+    }
+
+    public void playSound(org.bukkit.entity.Entity entity, org.bukkit.Sound sound,
+            float volume, float pitch) {
+        playSound(entity == null ? null : entity.getLocation(), sound, volume, pitch);
+    }
+
+    public void playSound(org.bukkit.entity.Entity entity, String sound,
+            float volume, float pitch) {
+        playSound(entity == null ? null : entity.getLocation(), sound, volume, pitch);
+    }
+
+    public void playSound(org.bukkit.entity.Entity entity, org.bukkit.Sound sound,
+            org.bukkit.SoundCategory source, float volume, float pitch) {
+        playSound(entity == null ? null : entity.getLocation(), sound, source, volume, pitch);
+    }
+
+    public void playSound(org.bukkit.entity.Entity entity, String sound,
+            org.bukkit.SoundCategory source, float volume, float pitch) {
+        playSound(entity == null ? null : entity.getLocation(), sound, source, volume, pitch);
+    }
+
+    public void playSound(org.bukkit.entity.Entity entity, org.bukkit.Sound sound,
+            org.bukkit.SoundCategory source, float volume, float pitch, long seed) {
+        playSound(entity, sound, source, volume, pitch);
+    }
+
+    public void playSound(org.bukkit.entity.Entity entity, String sound,
+            org.bukkit.SoundCategory source, float volume, float pitch, long seed) {
+        playSound(entity, sound, source, volume, pitch);
+    }
+
+    public void playSound(net.kyori.adventure.sound.Sound sound, double x, double y, double z) {
+        if (sound != null) {
+            playSoundAt(sound, sound.source(), x, y, z, sound.volume(), sound.pitch());
+        }
+    }
+
+    public void playSound(net.kyori.adventure.sound.Sound sound) {
+        if (sound != null) {
+            org.bukkit.Location at = getLocation();
+            playSound(sound, at.getX(), at.getY(), at.getZ());
+        }
+    }
+
+    public void playSound(net.kyori.adventure.sound.Sound sound,
+            io.papermc.paper.math.Position position) {
+        if (sound != null && position != null) {
+            playSound(sound, position.x(), position.y(), position.z());
+        }
+    }
+
+    public void playSound(net.kyori.adventure.sound.Sound sound,
+            net.kyori.adventure.sound.Sound.Emitter emitter) {
+        if (sound == null) {
+            return;
+        }
+        if (emitter instanceof org.bukkit.entity.Entity entity) {
+            org.bukkit.Location at = entity.getLocation();
+            playSound(sound, at.getX(), at.getY(), at.getZ());
+        } else {
+            playSound(sound);
+        }
+    }
+
+    public void stopSound(String sound) {
+        if (sound != null) {
+            playerEffect("stopsound " + soundName(sound) + " *");
+        }
+    }
+
+    public void stopSound(org.bukkit.Sound sound) {
+        if (sound != null) {
+            stopSound(sound.getKey().toString());
+        }
+    }
+
+    public void stopSound(org.bukkit.SoundCategory source) {
+        playerEffect("stopsound * " + soundSource(source));
+    }
+
+    public void stopSound(String sound, org.bukkit.SoundCategory source) {
+        if (sound != null) {
+            playerEffect("stopsound " + soundName(sound) + " " + soundSource(source));
+        }
+    }
+
+    public void stopSound(org.bukkit.Sound sound, org.bukkit.SoundCategory source) {
+        if (sound != null) {
+            playerEffect("stopsound " + sound.getKey() + " " + soundSource(source));
+        }
+    }
+
+    public void stopSound(net.kyori.adventure.sound.Sound sound) {
+        if (sound != null) {
+            stopSound(sound.name().asString(), org.bukkit.SoundCategory.valueOf(
+                    sound.source().name()));
+        }
+    }
+
+    public void stopSound(net.kyori.adventure.sound.SoundStop stop) {
+        if (stop == null) {
+            return;
+        }
+        net.kyori.adventure.key.Key key = stop.sound();
+        net.kyori.adventure.sound.Sound.Source source = stop.source();
+        playerEffect("stopsound " + (key == null ? "*" : key.asString())
+                + " " + (source == null ? "*" : source.name()));
+    }
+
+    public void sendBlockChange(org.bukkit.Location location,
+            org.bukkit.block.data.BlockData data) {
+        if (location != null && data != null) {
+            playerEffect("block " + location.getBlockX() + " " + location.getBlockY()
+                    + " " + location.getBlockZ() + " " + data.getAsString());
+        }
+    }
+
+    public void sendBlockChange(org.bukkit.Location location,
+            org.bukkit.Material material, byte data) {
+        if (location != null && material != null && material.isBlock()) {
+            sendBlockChange(location, material.createBlockData());
+        }
+    }
+
+    public void sendBlockChanges(Collection<org.bukkit.block.BlockState> blocks) {
+        sendBlockChanges(blocks, true);
+    }
+
+    public void sendBlockChanges(Collection<org.bukkit.block.BlockState> blocks,
+            boolean suppressLightUpdates) {
+        if (blocks == null) {
+            return;
+        }
+        for (org.bukkit.block.BlockState block : blocks) {
+            if (block != null) {
+                sendBlockChange(block.getLocation(), block.getBlockData());
+            }
+        }
+    }
+
     // --- состояние из Rust-сессии ---
 
     /** Снимок игрока: здоровье, голод, режим, инвентарь в индексах Bukkit. */
