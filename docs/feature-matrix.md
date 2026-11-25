@@ -393,6 +393,12 @@ impl или по identity прокси). После этого `//pos` → `//si
 `previous == null`; для записи включается `unsupportedVersionEditing`
 (Bukkit-путь WorldEdit без NMS).
 
+`BukkitImplAdapter.adapt(ItemStack)` реализован и возвращает `BaseItemStack`
+с типом/количеством, включая `AIR`: без этого `PlatformManager.handleBlockInteract`
+падал `NullPointerException` на `getItemInHand(...).getType()` при правом
+клике пустой рукой. Проверка — `inventory_open_probe` при открытии сундука:
+`open_screen=1`, `BEHAVIOR inv-open type=CHEST`; ошибок `EventBus` в логе нет.
+
 Свойства блоков: `getProperties(BlockType)` строит карту из Bukkit
 `BlockData` — имена/значения разбираются из `getAsString()`, а домены
 (`BooleanProperty`/`IntegerProperty`/`EnumProperty`) берутся из таблицы

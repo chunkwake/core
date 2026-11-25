@@ -222,6 +222,14 @@ final class WorldEditSupport {
                         return state == null ? null : toBaseBlock(state);
                     }
                     break;
+                case "adapt":
+                    // WorldEdit ждёт BaseItemStack даже для воздуха:
+                    // PlatformManager.handleBlockInteract зовёт getType().
+                    if (args != null && args.length == 1
+                            && args[0] instanceof org.bukkit.inventory.ItemStack stack) {
+                        return adaptItem(stack);
+                    }
+                    break;
                 case "toString":
                     return "ChunkwakeWorldEditAdapter";
                 case "hashCode":
@@ -396,6 +404,27 @@ final class WorldEditSupport {
         private static Object toBaseBlock(Object state) {
             try {
                 return state.getClass().getMethod("toBaseBlock").invoke(state);
+            } catch (Throwable broken) {
+                return null;
+            }
+        }
+
+        /** {@code BukkitAdapter.adapt(ItemStack)}: тип и количество без NMS. */
+        private Object adaptItem(org.bukkit.inventory.ItemStack stack) {
+            try {
+                Class<?> itemTypes = Class.forName(
+                        "com.sk89q.worldedit.world.item.ItemTypes", true, loader);
+                Object type = itemTypes.getMethod("get", String.class).invoke(
+                        null, stack.getType().getKey().toString());
+                if (type == null) {
+                    return null;
+                }
+                Class<?> itemType = Class.forName(
+                        "com.sk89q.worldedit.world.item.ItemType", true, loader);
+                Class<?> base = Class.forName(
+                        "com.sk89q.worldedit.blocks.BaseItemStack", true, loader);
+                return base.getConstructor(itemType, int.class)
+                        .newInstance(type, Math.max(0, stack.getAmount()));
             } catch (Throwable broken) {
                 return null;
             }
