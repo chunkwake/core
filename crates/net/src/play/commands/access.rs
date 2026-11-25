@@ -11,6 +11,7 @@ use crate::live::Control;
 use crate::play::PlayPlan;
 use chunkwake_world::BlockEntity;
 use chunkwake_world::nbt::{Compound, Tag};
+use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
 /// `replace <filter>`: имя блока или `#тег` из каталога блоков.
@@ -2533,6 +2534,285 @@ impl PlayPlan {
             ),
         );
         true
+    }
+
+    /// Снимает цель со слота (`Scoreboard.clearSlot`); клиенту уходит пустое имя.
+    pub(crate) fn clear_objective_display(&self, slot: &str) -> bool {
+        let removed = self
+            .scoreboard
+            .lock()
+            .unwrap()
+            .display
+            .remove(slot)
+            .is_some();
+        if removed {
+            self.hub.send(
+                None,
+                chunkwake_protocol::play::set_display_objective(
+                    self.ids.set_display_objective,
+                    slot,
+                    "",
+                ),
+            );
+        }
+        removed
+    }
+
+    /// Запрос плагина к scoreboard (`sb …`): строки с полями через табуляцию.
+    ///
+    /// Счёт живёт в мире и общий для всех измерений, поэтому вызов не зависит
+    /// от `@<измерение>`. Пустой ответ — операции нет или объект не найден;
+    /// `1`/`0` — результат изменения. Табуляция выбрана потому, что держатель
+    /// счёта и JSON-компонент могут содержать пробелы.
+    pub(crate) fn scoreboard_request(&self, line: &str) -> String {
+        use super::scoreboard::{Criterion, Objective};
+        use chunkwake_protocol::play::NumberFormat;
+
+        fn format_value(kind: &str, payload: &str) -> Option<Option<NumberFormat>> {
+            Some(match kind {
+                "" => None,
+                "blank" => Some(NumberFormat::Blank),
+                "fixed" => Some(NumberFormat::Fixed(
+                    serde_json::from_str(payload).unwrap_or_else(|_| json!({ "text": payload })),
+                )),
+                "styled" => Some(NumberFormat::Styled(
+                    serde_json::from_str(payload).unwrap_or_else(|_| json!({})),
+                )),
+                _ => return None,
+            })
+        }
+
+        let mut fields = line.split('\t');
+        let Some(kind) = fields.next() else {
+            return String::new();
+        };
+        match kind {
+            "objectives" => {
+                let board = self.scoreboard.lock().unwrap();
+                let mut out = String::new();
+                for objective in board.objectives.values() {
+                    let display = serde_json::to_string(&objective.display_name)
+                        .unwrap_or_else(|_| "{\"text\":\"\"}".to_owned());
+                    let line = format!(
+                        "{}\t{}\t{}\t{}\n",
+                        objective.name, objective.criteria, objective.render_type, display
+                    );
+                    // Буфер моста — 8 КиБ; лучше отдать меньше целей, чем
+                    // обрезать строку JSON посередине.
+                    if out.len() + line.len() > 7800 {
+                        break;
+                    }
+                    out.push_str(&line);
+                }
+                out
+            }
+            "display" => match fields.next() {
+                Some("list") => {
+                    let board = self.scoreboard.lock().unwrap();
+                    board
+                        .display
+                        .iter()
+                        .map(|(slot, objective)| format!("{slot}\t{objective}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+                Some("set") => {
+                    let (Some(slot), Some(objective)) = (fields.next(), fields.next()) else {
+                        return "0".into();
+                    };
+                    u8::from(self.set_objective_display(slot, objective)).to_string()
+                }
+                Some("clear") => {
+                    let Some(slot) = fields.next() else {
+                        return "0".into();
+                    };
+                    u8::from(self.clear_objective_display(slot)).to_string()
+                }
+                _ => String::new(),
+            },
+            "objective" => match fields.next() {
+                Some("add") => {
+                    let (Some(name), Some(criteria), Some(render), Some(display)) =
+                        (fields.next(), fields.next(), fields.next(), fields.next())
+                    else {
+                        return "0".into();
+                    };
+                    let display = serde_json::from_str(display)
+                        .unwrap_or_else(|_| json!({ "text": display }));
+                    let render_type = render.parse::<i32>().unwrap_or(0);
+                    let criterion = Criterion::parse(criteria).unwrap_or(Criterion::Other);
+                    let criteria = criteria
+                        .strip_prefix("minecraft:")
+                        .unwrap_or(criteria)
+                        .to_owned();
+                    let added = self.add_objective(Objective {
+                        name: name.to_owned(),
+                        display_name: display,
+                        criterion,
+                        criteria,
+                        render_type,
+                        number_format: None,
+                    });
+                    u8::from(added).to_string()
+                }
+                Some("remove") => {
+                    let Some(name) = fields.next() else {
+                        return "0".into();
+                    };
+                    u8::from(self.remove_objective(name)).to_string()
+                }
+                Some("display") => {
+                    let (Some(name), Some(display)) = (fields.next(), fields.next()) else {
+                        return "0".into();
+                    };
+                    let display = serde_json::from_str(display)
+                        .unwrap_or_else(|_| json!({ "text": display }));
+                    u8::from(self.modify_objective(name, Some(display), None)).to_string()
+                }
+                Some("render") => {
+                    let (Some(name), Some(render)) = (fields.next(), fields.next()) else {
+                        return "0".into();
+                    };
+                    let Ok(render) = render.parse::<i32>() else {
+                        return "0".into();
+                    };
+                    u8::from(self.modify_objective(name, None, Some(render))).to_string()
+                }
+                Some("format") => {
+                    let Some(name) = fields.next() else {
+                        return "0".into();
+                    };
+                    let kind = fields.next().unwrap_or("");
+                    let payload = fields.next().unwrap_or("");
+                    let Some(format) = format_value(kind, payload) else {
+                        return "0".into();
+                    };
+                    u8::from(self.set_objective_format(name, format)).to_string()
+                }
+                _ => String::new(),
+            },
+            "score" => match fields.next() {
+                Some("get") => {
+                    let (Some(holder), Some(objective)) = (fields.next(), fields.next()) else {
+                        return String::new();
+                    };
+                    self.score(holder, objective)
+                        .map(|value| value.to_string())
+                        .unwrap_or_default()
+                }
+                Some("set") => {
+                    let (Some(holder), Some(objective), Some(value)) =
+                        (fields.next(), fields.next(), fields.next())
+                    else {
+                        return "0".into();
+                    };
+                    let Ok(value) = value.parse::<i32>() else {
+                        return "0".into();
+                    };
+                    u8::from(self.set_score(holder, objective, Some(value))).to_string()
+                }
+                Some("reset") => {
+                    let (Some(holder), Some(objective)) = (fields.next(), fields.next()) else {
+                        return "0".into();
+                    };
+                    u8::from(self.set_score(holder, objective, None)).to_string()
+                }
+                Some("clear") => {
+                    let Some(holder) = fields.next() else {
+                        return "0".into();
+                    };
+                    let scores = self.score_list(holder);
+                    let mut changed = 0;
+                    for (objective, _) in scores {
+                        if self.set_score(holder, &objective, None) {
+                            changed += 1;
+                        }
+                    }
+                    changed.to_string()
+                }
+                Some("format") => {
+                    let (Some(holder), Some(objective), Some(kind)) =
+                        (fields.next(), fields.next(), fields.next())
+                    else {
+                        return "0".into();
+                    };
+                    let payload = fields.next().unwrap_or("");
+                    let Some(format) = format_value(kind, payload) else {
+                        return "0".into();
+                    };
+                    u8::from(self.set_score_format(holder, objective, format)).to_string()
+                }
+                _ => String::new(),
+            },
+            "scores" => {
+                let Some(holder) = fields.next() else {
+                    return String::new();
+                };
+                self.score_list(holder)
+                    .into_iter()
+                    .map(|(objective, value)| format!("{objective}\t{value}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            "holders" => {
+                let Some(objective) = fields.next() else {
+                    return String::new();
+                };
+                let board = self.scoreboard.lock().unwrap();
+                board
+                    .scores
+                    .get(objective)
+                    .map(|scores| scores.keys().cloned().collect::<Vec<_>>().join("\n"))
+                    .unwrap_or_default()
+            }
+            "entries" => {
+                let board = self.scoreboard.lock().unwrap();
+                let mut entries: Vec<String> = board
+                    .scores
+                    .values()
+                    .flat_map(|scores| scores.keys().cloned())
+                    .collect();
+                entries.sort();
+                entries.dedup();
+                entries.join("\n")
+            }
+            "trigger" => match fields.next() {
+                Some("get") => {
+                    let (Some(holder), Some(objective)) = (fields.next(), fields.next()) else {
+                        return "0".into();
+                    };
+                    let board = self.scoreboard.lock().unwrap();
+                    u8::from(
+                        board
+                            .primed
+                            .contains(&(holder.to_owned(), objective.to_owned())),
+                    )
+                    .to_string()
+                }
+                Some("set") => {
+                    let (Some(holder), Some(objective), Some(value)) =
+                        (fields.next(), fields.next(), fields.next())
+                    else {
+                        return "0".into();
+                    };
+                    match value {
+                        "1" => u8::from(matches!(self.enable_trigger(holder, objective), Ok(true)))
+                            .to_string(),
+                        _ => {
+                            let removed = self
+                                .scoreboard
+                                .lock()
+                                .unwrap()
+                                .primed
+                                .remove(&(holder.to_owned(), objective.to_owned()));
+                            u8::from(removed).to_string()
+                        }
+                    }
+                }
+                _ => String::new(),
+            },
+            _ => String::new(),
+        }
     }
 }
 

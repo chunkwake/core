@@ -68,6 +68,35 @@ public final class PlayerImpl {
     public boolean isOnline() { return online; }
     public boolean isConnected() { return online; }
 
+    /** Активный счётчик: по умолчанию главный (состояние Rust). */
+    private org.bukkit.scoreboard.Scoreboard scoreboard;
+    private boolean warnedScoreboard;
+
+    /**
+     * {@code Player.getScoreboard()}: главный счётчик, если плагин не подменил.
+     *
+     * <p>Счётчик из {@code getNewScoreboard()} хранится только в Java и
+     * клиенту пока не отправляется; подмена не мешает главному состоянию.
+     */
+    public org.bukkit.scoreboard.Scoreboard getScoreboard() {
+        return this.scoreboard != null ? this.scoreboard : server.mainScoreboard();
+    }
+
+    public void setScoreboard(org.bukkit.scoreboard.Scoreboard board) {
+        if (board == null) {
+            throw new IllegalArgumentException("Scoreboard cannot be null");
+        }
+        this.scoreboard = board;
+        if (!this.warnedScoreboard && board != server.mainScoreboard()) {
+            this.warnedScoreboard = true;
+            server.logger.warning("Player " + name + " uses a per-player scoreboard; "
+                    + "Chunkwake currently sends only the main scoreboard to clients");
+        }
+    }
+
+    /** {@code ScoreHolder.getScoreboardName()} для Bukkit scoreboard-записей. */
+    public String getScoreboardEntryName() { return name; }
+
     /** {@code OfflinePlayer#getPlayer}: для онлайн-игрока — он сам. */
     public Player getPlayer() { return this.api; }
     public boolean isOp() { return Bridge.opLevel(id) > 0; }

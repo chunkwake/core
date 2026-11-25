@@ -72,6 +72,8 @@ final class ChunkwakeServer {
     /** Оверворлд: события без мира (тик блоков и мобов) идут сюда. */
     final WorldImpl overworld = new WorldImpl(this, WorldImpl.OVERWORLD);
     final World world = overworld.api;
+    /** Главный счётчик — состояние Rust; {@link #getScoreboardManager()}. */
+    private final ScoreboardManagerImpl scoreboards = new ScoreboardManagerImpl(this);
     /** Миры по ключу измерения, порядок как у Paper: оверворлд, Ад, Край. */
     private volatile Map<String, WorldImpl> worlds;
     private final Metadata metadata = new Metadata();
@@ -1254,6 +1256,20 @@ final class ChunkwakeServer {
             throw new IllegalArgumentException("Name and ID cannot both be null");
         }
         return new ProfileImpl(id, name);
+    }
+
+    public org.bukkit.scoreboard.ScoreboardManager getScoreboardManager() {
+        return this.scoreboards.api;
+    }
+
+    /** {@code Bukkit.getScoreboardCriteria(name)}: имя критерия и его свойства. */
+    public org.bukkit.scoreboard.Criteria getScoreboardCriteria(String name) {
+        return CriteriaImpl.of(name);
+    }
+
+    /** Главный счётчик для {@code Player.getScoreboard()} и тестов. */
+    ScoreboardImpl mainScoreboard() {
+        return this.scoreboards.mainImpl();
     }
 
     public Player getPlayer(UUID id) {

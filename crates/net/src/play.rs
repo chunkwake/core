@@ -5367,6 +5367,11 @@ impl PlayPlan {
     /// `effects` → эффекты по порядку ID (строки), `isblock имя` → `1`/`0`,
     /// `blocks с` → имена блоков по порядку начиная с номера `с` (кусок до 7 КБ).
     pub fn world_request(&self, line: &str) -> String {
+        // `sb …`: scoreboard плагинов (Bukkit `Scoreboard`/`Objective`/`Score`).
+        // Счёт общий для измерений, префикс `@<мир>` для него не нужен.
+        if let Some(rest) = line.strip_prefix("sb ") {
+            return self.scoreboard_request(rest);
+        }
         // `player <uuid> …`: пакеты только одному игроку (звук, title, блок).
         if let Some(reply) = self.player_effect_request(line) {
             return reply;

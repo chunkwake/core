@@ -44,6 +44,11 @@ pub struct Objective {
     pub name: String,
     pub display_name: Value,
     pub criterion: Criterion,
+    /// Имя критерия как его передал плагин или команда (`dummy`, `health`, …).
+    ///
+    /// [`Criterion`] хранит только способ хранения; Bukkit-плагинам нужен
+    /// исходный критерий целиком, включая незнакомые ваниле имена.
+    pub criteria: String,
     /// `integer` или `hearts` — как число рисует клиент.
     pub render_type: i32,
     /// Формат числа. `None` — клиент рисует обычное число.
@@ -242,7 +247,7 @@ pub(super) fn objectives(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
             let (Some(name), Some(criterion)) = (input.word(), input.word()) else {
                 return usage("/scoreboard objectives add <objective> <criterion> [displayName]");
             };
-            let Some(criterion) = Criterion::parse(criterion) else {
+            let Some(parsed) = Criterion::parse(criterion) else {
                 return Outcome::Feedback(translate(
                     "commands.scoreboard.objectives.criterion.invalid",
                     vec![json!({"text": criterion})],
@@ -252,10 +257,15 @@ pub(super) fn objectives(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
                 Some(raw) => serde_json::from_str(raw).unwrap_or_else(|_| json!({"text": raw})),
                 None => json!({"text": name}),
             };
+            let criteria = criterion
+                .strip_prefix("minecraft:")
+                .unwrap_or(criterion)
+                .to_owned();
             let objective = Objective {
                 name: name.to_owned(),
                 display_name: display,
-                criterion,
+                criterion: parsed,
+                criteria,
                 render_type: 0,
                 number_format: None,
             };
@@ -823,6 +833,7 @@ mod tests {
             name: "kills".into(),
             display_name: json!({"text": "Kills"}),
             criterion: Criterion::Dummy,
+            criteria: "dummy".into(),
             render_type: 0,
             number_format: None,
         });
@@ -851,6 +862,7 @@ mod tests {
             name: "kills".into(),
             display_name: json!({"text": "Kills"}),
             criterion: Criterion::Dummy,
+            criteria: "dummy".into(),
             render_type: 0,
             number_format: None,
         }));
@@ -885,6 +897,7 @@ mod tests {
             name: "trig".into(),
             display_name: json!({"text": "trig"}),
             criterion: Criterion::Trigger,
+            criteria: "trigger".into(),
             render_type: 0,
             number_format: None,
         });
