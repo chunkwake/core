@@ -7,7 +7,7 @@ test/probe-плагинов.
 ## Результат
 
 ```
-plugins: enabled 100 plugin(s) in 44723 ms
+plugins: enabled 100 plugin(s) in 42911 ms
 FAILED: (пусто)
 LOADERR: (пусто)
 SKIPPED: (пусто)
