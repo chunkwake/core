@@ -42,13 +42,25 @@ BEHAVIOR after-delete world=null
 `dynamic-edit isolated=true` — WorldEdit-правка в новом мире не изменила
 оверворлд.
 
+Persistence (отдельный прогон, один и тот же стенд):
+
+```text
+BEHAVIOR persist mode=write edited=16
+BEHAVIOR persist mode=check block=STONE
+```
+
+Чанки пишутся в `world/dimensions/minecraft/<name>/region` и читаются обратно
+при загрузке чанка (`getChunkAt`/`loadchunk`). `getBlockAt` сам чанк не
+подгружает — как и раньше, сначала нужен `getChunkAt`.
+
 ## Ограничения
 
 - Мир использует генератор/сид оверворлда; независимый seed, generator,
   biome provider и `WorldCreator`-настройки пока не применяются.
-- Нет полноценного сохранения динамического мира между рестартами:
-  `level.dat` копируется для валидности каталога, но `WorldStorage` для
-  `Dimension::Custom` ещё не пишет/читает независимые регионы и уровень.
+- Persistence работает для загруженных чанков: регионы пишутся под
+  `minecraft:<name>`, читаются при `getChunkAt`/`loadchunk`. Полного
+  `level.dat`/spawn/entity-состояния и автоматической подгрузки в
+  `getBlockAt` пока нет.
 - Multiverse `deleteWorld` теперь возвращает `deleted=true`: в каталог
   мира копируется `level.dat` (иначе `WorldNameChecker` не считает папку
   миром), а `unloadWorld` скрывает мир из `getWorld(String)`/`getWorlds`,

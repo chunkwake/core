@@ -1784,21 +1784,26 @@ pub(crate) fn init_custom_slots() {
 /// Имя динамического мира по слоту.
 pub(crate) fn custom_name(slot: u8) -> Option<&'static str> {
     let names = CUSTOM_NAMES.lock().unwrap();
-    names.get(slot as usize).copied().flatten()
+    let index = slot.checked_sub(CUSTOM_FIRST)? as usize;
+    names.get(index).copied().flatten()
 }
 
 fn set_custom_name(slot: u8, key: &'static str) {
     init_custom_slots();
     let mut names = CUSTOM_NAMES.lock().unwrap();
-    if let Some(entry) = names.get_mut(slot as usize) {
-        *entry = Some(key);
+    if let Some(index) = slot.checked_sub(CUSTOM_FIRST).map(|s| s as usize) {
+        if let Some(entry) = names.get_mut(index) {
+            *entry = Some(key);
+        }
     }
 }
 
 fn clear_custom_name(slot: u8) {
     let mut names = CUSTOM_NAMES.lock().unwrap();
-    if let Some(entry) = names.get_mut(slot as usize) {
-        *entry = None;
+    if let Some(index) = slot.checked_sub(CUSTOM_FIRST).map(|s| s as usize) {
+        if let Some(entry) = names.get_mut(index) {
+            *entry = None;
+        }
     }
 }
 
@@ -3524,6 +3529,8 @@ impl PlayPlan {
     /// палитра block states + индексы, палитра биомов (имя + температура) +
     /// индексы, свет (sky/block по 2048 на секцию) и heightmap.
     pub(crate) fn load_chunk(&self, x: i32, z: i32, generate: bool) -> bool {
+        // Сначала диск: flat-чанк мог быть сохранён плагином/WorldEdit.
+        self.ensure_region(x, z);
         if self.terrain().is_none() {
             let template = self.template().clone();
             let mut world = self.dim_state().edited.write().unwrap();
