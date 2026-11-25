@@ -18,8 +18,8 @@
 | fluids | `flow=WATER fall=WATER edge=WATER meet=OBSIDIAN logged=WATER/WATER` | same |
 | mob drops | `[BEEF, LEATHER]` (12 смертей, множество типов) | same |
 | fly | `rear=113 blocks=8 extends=28 period=4.70 window=16` | `rear=113 blocks=10 extends=28 period=4.78 window=16` |
-| fly, длинное окно t=400 | `rear=138 blocks=8 extends=78 period=4.90` | `rear=138 blocks=10 extends=78 period=4.92` |
-| `Chunk.getEntities` | `loaded=true found-sheep=true` | same (living 2/1 — старые сущности стенда) |
+| fly, длинное окно t=400 | `rear=138 blocks=8 extends=78 period=4.90` | `rear=138 blocks=8 extends=77..78 period=4.92..4.95` |
+| `Chunk.getEntities` | `loaded=true found-sheep=true living=1` | same |
 | `Chunk.getTileEntities` | `[CHEST, HOPPER]` | same |
 | stale block entity | после замены сундука камнем `[HOPPER]` | same |
 | `Chunk.isSlimeChunk` | `false/false/false/false` | same |
@@ -38,8 +38,9 @@ CW    t=32 z0=...OM.SS z1=...SS.TO#
 
 Обе машины едут непрерывно; после правки `finalTick`/observer задержки
 позиция на t=150 совпадает (`rear=113`), окно extends t=60..140 — `16/16`.
-На длинном окне t=400 позиции и число extends тоже совпали: `rear=138`,
-`extends=78`; средний период `4.92` против Paper `4.90` (0.4%).
+На длинном окне t=400 позиция совпала (`rear=138`) в двух чистых прогонах;
+число extends — `78/78` и `77/78`; средний период `4.92–4.95` против Paper
+`4.90` (0.4–1%).
 Короткое окно чувствительно к фазе старта (4.78 против 4.70), длинное — нет.
 `blocks` на снимке может отличаться на 1–2: в момент отчёта одна из машин
 находится в середине хода (`moving_piston`/`piston_head`), это не разная физика.
@@ -87,7 +88,7 @@ CW    t=32 z0=...OM.SS z1=...SS.TO#
 - Fly-машина: `PistonMovingBlockEntity.finalTick` для observer теперь
   использует чередующуюся задержку 1/2 тика вместо постоянных 2. Позиция на
   t=150 совпала (`rear=113`), окно extends t=60..140 — `16/16`; на длинном
-  окне t=400 — `rear=138`, `extends=78`, период `4.92` против `4.90`.
+  окне t=400 — `rear=138`, `extends=77..78`, период `4.92..4.95` против `4.90`.
 - `Chunk.unload()` больше не заглушка: `unloadchunk` сохраняет (если `save=true`)
   и выгружает колонку, если она не входит в simulation/forceload. Проверка после
   загрузки дальнего чанка: Paper `unload=true loaded=false`, Chunkwake так же.
@@ -117,8 +118,9 @@ CW    t=32 z0=...OM.SS z1=...SS.TO#
 
 ## Ограничения
 
-- Остаточный период fly — `4.92` против `4.90` на длинном окне (~0.4%);
-  позиция (`rear=138`) и число extends (`78`) совпадают. На коротком окне
+- Остаточный период fly — `4.92..4.95` против `4.90` на длинном окне
+  (0.4–1%); позиция (`rear=138`) совпадает, extends может отличаться на 1
+  из-за фазы старта. На коротком окне
   абсолютная фаза зависит от порядка «плагинная задача vs redstone tick».
 - `Biome.toString()` в Paper — внутренний identity-формат
   (`CraftBiome{holder=Reference{...Biome@hash}}`); differential сравнивает
