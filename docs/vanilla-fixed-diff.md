@@ -6,7 +6,7 @@
 Перед сценарием области redstone/hopper/fluids/fly очищаются (fly — `x=95..220`),
 чтобы прошлый прогон не оставлял `moving_piston`/камни в зоне проверки.
 
-## Финальный прогон (release, 25.11.2026, бинарь `d095970`)
+## Финальный прогон (release, 25.11.2026, включая Biome.toString fix)
 
 | сценарий | Paper 26.3 | Chunkwake |
 |---|---|---|
@@ -27,6 +27,7 @@
 | `Chunk.unload(false)` | `true`, `loaded=false` | same |
 | `Chunk.getChunkSnapshot` | `WATER/STONE water[level=0] sky=14 emit=0 highest=200 temp=0.7389735/0.4889735 sea=-63 biome2key=minecraft:plains empty0=false empty20=true` | same |
 | `ChunkSnapshot.getData` | oak stairs top/east → `4` | same |
+| `Biome.toString` (hash normalized) | `CraftBiome{holder=Reference{ResourceKey[...plains]=...Biome@hash}}` | same |
 
 `fly`-трейс показывает одинаковый цикл (observer → sticky pull → piston push):
 
@@ -70,6 +71,10 @@ CW    t=32 z0=...OM.SS z1=...SS.TO#
   `World.getSeaLevel()`/`Login`: в flat-мире уровень моря `-63`, а не `63`.
   Для отсутствующих в снимке данных методы теперь кидают
   `IllegalStateException`, как Paper.
+- `Biome.toString()`: вместо ключа `minecraft:plains` теперь Paper-формат
+  `CraftBiome{holder=Reference{...Biome@hash}}`; hash остаётся identity,
+  но формат и ключ совпадают с Paper. Проверка в fixed differential:
+  `biome2str`/`biome3str` после нормализации `@hash`.
 - `ChunkSnapshot.getData()`: сгенерирована таблица `legacy_data.tsv` на 35 723
   состояния через Paper `CraftMagicNumbers.toLegacyData`; lookup идёт по
   канонизированному `BlockData` (сортированные свойства). Проверка:
@@ -125,11 +130,11 @@ CW    t=32 z0=...OM.SS z1=...SS.TO#
   на участке t>=200; позиция (`rear=138`) и число extends (`78`) совпадают.
   Публикуемые `4.90`/`4.92–4.95` по всему окну включают стартовый разгон. На коротком окне
   абсолютная фаза зависит от порядка «плагинная задача vs redstone tick».
-- `Biome.toString()` в Paper — внутренний identity-формат
-  (`CraftBiome{holder=Reference{ResourceKey[minecraft:worldgen/biome /
-  minecraft:plains]=net.minecraft.world.level.biome.Biome@hash}}`), причём hash
-  меняется от запуска к запуску (в логах: `66733990`, `2b3a5442`, `5a3d38e7`).
-  Differential сравнивает `Biome.getKey()`, который совпадает
-  (`minecraft:plains`).
+- `Biome.toString()` теперь печатает Paper-формат
+  `CraftBiome{holder=Reference{ResourceKey[minecraft:worldgen/biome /
+  minecraft:plains]=net.minecraft.world.level.biome.Biome@hash}}`. Hash —
+  identity объекта и меняется от запуска к запуску (Paper `172e9d26`,
+  Chunkwake `49ce89ec`), поэтому differential нормализует `@hash` и отдельно
+  сверяет `Biome.getKey()` (`minecraft:plains`).
 - 100% совместимость с произвольными Paper/Folia-плагинами этим сценарием не
   доказывается; это только закрывает конкретные поведенческие дыры.

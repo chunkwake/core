@@ -367,6 +367,8 @@ final class FixedDiffProbe implements Listener {
                 + " highest=" + snapshot.getHighestBlockYAt(1, 0)
                 + " biome2key=" + snapshot.getBiome(1, 0).getKey()
                 + " biome3key=" + snapshot.getBiome(1, 200, 0).getKey()
+                + " biome2str=" + snapshot.getBiome(1, 0).toString().replace(' ', '_')
+                + " biome3str=" + snapshot.getBiome(1, 200, 0).toString().replace(' ', '_')
                 + " temp=" + snapshot.getRawBiomeTemperature(1, 0)
                 + " t0=" + snapshot.getRawBiomeTemperature(1, 0, 0)
                 + " t200=" + snapshot.getRawBiomeTemperature(1, 200, 0)

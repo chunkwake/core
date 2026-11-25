@@ -127,6 +127,9 @@ final class RegistryValues {
         if (type == org.bukkit.attribute.Attribute.class) {
             return (k, i) -> Stub.of(org.bukkit.attribute.Attribute.class, new AttributeValue(k, i, path));
         }
+        if (type == org.bukkit.block.Biome.class) {
+            return (k, i) -> Stub.of(org.bukkit.block.Biome.class, new BiomeValue(k, i, path));
+        }
         if (type.isInterface()) {
             return (k, i) -> (Keyed) Stub.of((Class) type, new KeyedValue(k, i, path));
         }
@@ -199,6 +202,24 @@ final class RegistryValues {
         @Override
         public String toString() {
             return key.toString();
+        }
+    }
+
+    /**
+     * {@link org.bukkit.block.Biome}: Paper печатает
+     * {@code CraftBiome{holder=Reference{ResourceKey[...]=Biome@hash}}}. Hash —
+     * identity объекта, поэтому он не воспроизводим побайтно; формат — да.
+     */
+    static final class BiomeValue extends KeyedValue {
+        BiomeValue(NamespacedKey key, int ordinal, String registry) {
+            super(key, ordinal, registry);
+        }
+
+        @Override
+        public String toString() {
+            return "CraftBiome{holder=Reference{ResourceKey[minecraft:worldgen/biome / "
+                    + key + "]=net.minecraft.world.level.biome.Biome@"
+                    + Integer.toHexString(System.identityHashCode(this)) + "}}";
         }
     }
 
