@@ -85,6 +85,11 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             getLogger().info("world: " + w.getName() + " " + w.getKey() + " " + w.getEnvironment() + " uid=" + w.getUID()
                     + " path=" + w.getWorldPath());
         }
+        String abLoad = System.getenv("CHUNKWAKE_AB_LOAD");
+        if (abLoad != null) {
+            AbLoadProbe.run(this, Integer.parseInt(abLoad));
+            return;
+        }
         if (System.getenv("CHUNKWAKE_LEGACY_DUMP") != null) {
             dumpLegacyData();
             return;

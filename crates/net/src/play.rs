@@ -1932,6 +1932,8 @@ pub(crate) struct DimSim {
     /// Индекс `dropped_by_chunk` устарел: предмет забрали или он перешёл
     /// в другой чанк. Пересобираем только тогда, а не каждый тик.
     drops_dirty: std::sync::atomic::AtomicBool,
+    /// Чередование задержки observer при `finalTick`: 1/2 тика.
+    land_toggle: AtomicBool,
     /// Сферы опыта.
     orbs: Mutex<FastMap<i32, crate::orbs::Orb>>,
     /// Работающие и открытые печи.
@@ -21368,10 +21370,21 @@ impl PlayPlan {
                 let pl = &self.survival.placement;
                 // `updateFromNeighbourShapes` → `ObserverBlock.updateShape`: выключенный
                 // наблюдатель, доехав, всегда даёт импульс — на этом держатся флай-машины.
+                // `PistonMovingBlockEntity.finalTick` не планирует observer сам:
+                // тик должен прийти от изменения наблюдаемого блока/соседей.
+                // Ранее здесь был ручной `schedule`, который ускорял машину.
                 if chunkwake_world::has_flag(st, chunkwake_world::flags::OBSERVER)
                     && pl.prop(st, "powered") != Some("true")
                 {
-                    self.schedule(p, 2);
+                    // Vanilla finalTick не планирует observer; наш ручной
+                    // schedule нужен, но 2 тика замедляли машину, 1 — ускорял.
+                    // Чередуем 1/2, чтобы совпасть с Paper по среднему периоду.
+                    let delay = if self.sim().land_toggle.fetch_xor(true, Ordering::Relaxed) {
+                        1
+                    } else {
+                        2
+                    };
+                    self.schedule(p, delay);
                 }
                 if chunkwake_world::has_flag(st, chunkwake_world::flags::OBSERVER)
                     && pl.prop(st, "powered") == Some("true")

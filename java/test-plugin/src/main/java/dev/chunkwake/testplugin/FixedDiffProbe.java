@@ -22,6 +22,9 @@ final class FixedDiffProbe implements Listener {
     private final AtomicInteger pistonExtends = new AtomicInteger();
     private final java.util.Set<String> death = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private org.bukkit.Chunk farChunk;
+    private int flyStartExtends = -1;
+    private int flyEndExtends = -1;
+    private final java.util.List<Integer> extendTicks = new java.util.ArrayList<>();
 
     private FixedDiffProbe(JavaPlugin plugin) {
         this.plugin = plugin;
@@ -143,7 +146,9 @@ final class FixedDiffProbe implements Listener {
             setup();
         } else if (now == 60) {
             mob();
+            this.flyStartExtends = this.pistonExtends.get();
         } else if (now == 140) {
+            this.flyEndExtends = this.pistonExtends.get();
             this.farChunk = this.plugin.getServer().getWorlds().get(0).getChunkAt(200, 200);
         } else if (now == 150) {
             report();
@@ -310,8 +315,8 @@ final class FixedDiffProbe implements Listener {
                 + " sky=" + snapshot.getBlockSkyLight(1, 200, 0)
                 + " emit=" + snapshot.getBlockEmittedLight(1, 200, 0)
                 + " highest=" + snapshot.getHighestBlockYAt(1, 0)
-                + " biome2=" + snapshot.getBiome(1, 0)
-                + " biome3=" + snapshot.getBiome(1, 200, 0)
+                + " biome2key=" + snapshot.getBiome(1, 0).getKey()
+                + " biome3key=" + snapshot.getBiome(1, 200, 0).getKey()
                 + " temp=" + snapshot.getRawBiomeTemperature(1, 0)
                 + " t0=" + snapshot.getRawBiomeTemperature(1, 0, 0)
                 + " t200=" + snapshot.getRawBiomeTemperature(1, 200, 0)
@@ -344,8 +349,18 @@ final class FixedDiffProbe implements Listener {
                 }
             }
         }
+        int flyWindow = this.flyStartExtends < 0 || this.flyEndExtends < 0
+                ? -1 : this.flyEndExtends - this.flyStartExtends;
+        String flyPeriod = "n/a";
+        if (this.extendTicks.size() >= 2) {
+            int first = this.extendTicks.get(0);
+            int last = this.extendTicks.get(this.extendTicks.size() - 1);
+            flyPeriod = String.format(java.util.Locale.ROOT, "%.2f",
+                    (double) (last - first) / (this.extendTicks.size() - 1));
+        }
         this.plugin.getLogger().info("VANILLADIFF fly rear=" + rear + " blocks=" + blocks
-                + " extends=" + this.pistonExtends.get());
+                + " extends=" + this.pistonExtends.get() + " window=" + flyWindow
+                + " period=" + flyPeriod);
         this.plugin.getLogger().info("VANILLADIFF mob-death=" + this.death.stream()
                 .sorted().toList());
     }
@@ -402,6 +417,7 @@ final class FixedDiffProbe implements Listener {
     @EventHandler
     public void onPiston(BlockPistonExtendEvent event) {
         this.pistonExtends.incrementAndGet();
+        this.extendTicks.add(this.tick.get());
     }
 
     @EventHandler

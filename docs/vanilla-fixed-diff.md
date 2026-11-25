@@ -17,13 +17,13 @@
 | hopper | `moves=3 pickups=1` | same |
 | fluids | `flow=WATER fall=WATER edge=WATER meet=OBSIDIAN logged=WATER/WATER` | same |
 | mob drops | `[BEEF, LEATHER]` (12 смертей, множество типов) | same |
-| fly | `rear=113 blocks=8 extends=28` | `rear=112 blocks=8 extends=25` |
+| fly | `rear=113 blocks=8 extends=28 period=4.70 window=16` | `rear=113 blocks=10 extends=28 period=4.78 window=16` |
 | `Chunk.getEntities` | `loaded=true found-sheep=true` | same (living 2/1 — старые сущности стенда) |
 | `Chunk.getTileEntities` | `[CHEST, HOPPER]` | same |
 | stale block entity | после замены сундука камнем `[HOPPER]` | same |
 | `Chunk.isSlimeChunk` | `false/false/false/false` | same |
 | `Chunk.unload(false)` | `true`, `loaded=false` | same |
-| `Chunk.getChunkSnapshot` | `WATER/STONE water[level=0] sky=14 emit=0 highest=200 temp=0.7389735/0.4889735 sea=-63 plains empty0=false empty20=true` | same (кроме `Biome.toString`) |
+| `Chunk.getChunkSnapshot` | `WATER/STONE water[level=0] sky=14 emit=0 highest=200 temp=0.7389735/0.4889735 sea=-63 biome2key=minecraft:plains empty0=false empty20=true` | same |
 | `ChunkSnapshot.getData` | oak stairs top/east → `4` | same |
 
 `fly`-трейс показывает одинаковый цикл (observer → sticky pull → piston push):
@@ -35,10 +35,11 @@ Paper t=28 z0=...oPMMM z1=...SS.MMM
 CW    t=32 z0=...OM.SS z1=...SS.TO#
 ```
 
-Обе машины едут непрерывно; на 130 тиках разница 1 блок — это фазовый сдвиг
-старта (плагинная задача выполняется в разном порядке относительно тика
-redstone), а не разная скорость. На длинном окне: Paper 104→122 за 180 тиков,
-Chunkwake 104→139 за 380 тиков (~1 блок на 10.6 тика у обоих).
+Обе машины едут непрерывно; после правки `finalTick`/observer задержки
+позиция на t=150 совпадает (`rear=113`), окно extends t=60..140 — `16/16`.
+Средний период extends: Paper `4.70`, Chunkwake `4.78` (остаточные ~1.7%).
+`blocks` на снимке может отличаться на 1–2: в момент отчёта одна из машин
+находится в середине хода (`moving_piston`), это не разная физика.
 
 ## Что исправлено в этом раунде
 
@@ -68,6 +69,10 @@ Chunkwake 104→139 за 380 тиков (~1 блок на 10.6 тика у об�
   канонизированному `BlockData` (сортированные свойства). Проверка:
   `oak_stairs[facing=east,half=top,shape=straight,waterlogged=false]` → `4` в
   Paper и Chunkwake.
+- Fly-машина: `PistonMovingBlockEntity.finalTick` для observer теперь
+  использует чередующуюся задержку 1/2 тика вместо постоянных 2. Позиция на
+  t=150 совпала (`rear=113`), окно extends t=60..140 — `16/16`; средний период
+  `4.78` против Paper `4.70` (остаток ~1.7%).
 - `Chunk.unload()` больше не заглушка: `unloadchunk` сохраняет (если `save=true`)
   и выгружает колонку, если она не входит в simulation/forceload. Проверка после
   загрузки дальнего чанка: Paper `unload=true loaded=false`, Chunkwake так же.
@@ -97,8 +102,10 @@ Chunkwake 104→139 за 380 тиков (~1 блок на 10.6 тика у об�
 
 ## Ограничения
 
-- Фазовый сдвиг летающей машины на фиксированном тике (±2–4 тика) остаётся:
-  скорость и состояния совпадают, абсолютная фаза зависит от порядка
-  выполнения плагинной задачи и тика redstone.
+- Остаточный период fly — `4.78` против `4.70` (~1.7%); позиция и окно
+  совпадают, абсолютная фаза на фиксированном плагинном тике может отличаться.
+- `Biome.toString()` в Paper — внутренний identity-формат
+  (`CraftBiome{holder=Reference{...Biome@hash}}`); differential сравнивает
+  `Biome.getKey()`, который совпадает (`minecraft:plains`).
 - 100% совместимость с произвольными Paper/Folia-плагинами этим сценарием не
   доказывается; это только закрывает конкретные поведенческие дыры.
