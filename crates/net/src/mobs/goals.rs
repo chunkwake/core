@@ -1663,8 +1663,11 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
                 Selector::new(vec![nearest(1, false)]),
             );
         }
-        // Рыба и летучая мышь: без целей (движение — отдельной строкой).
-        Species::Cod | Species::Bat => return (Selector::default(), Selector::default()),
+        // Рыба, светящийся спрут и летучая мышь: без целей (движение —
+        // отдельной строкой).
+        Species::Cod | Species::Salmon | Species::GlowSquid | Species::Bat => {
+            return (Selector::default(), Selector::default());
+        }
         // `Piglin`/`Wolf`: для проб и взаимодействия достаточно прогулки.
         Species::Piglin
         | Species::Wolf

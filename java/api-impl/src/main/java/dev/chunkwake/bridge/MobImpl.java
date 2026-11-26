@@ -84,7 +84,7 @@ final class MobImpl {
         "spider", "slime", "drowned", "piglin", "wolf", "cod", "iron_golem",
         "phantom", "pillager", "vindicator", "evoker", "vex", "witch",
         "ravager", "wither", "snow_golem", "copper_golem", "ender_dragon",
-        "parrot", "warden", "cat", "bat",
+        "parrot", "warden", "cat", "bat", "salmon", "glow_squid",
     };
 
     /** Вид для {@link EntityType}; {@code null} — такого моба сервер не умеет. */

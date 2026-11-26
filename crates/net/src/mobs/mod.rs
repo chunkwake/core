@@ -297,6 +297,8 @@ pub enum Species {
     Warden,
     Cat,
     Bat,
+    Salmon,
+    GlowSquid,
 }
 
 /// Всё о виде в одном месте. Встроенные значения — запасные: при старте
@@ -369,7 +371,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 30] = [
+const BUILTIN: [SpeciesInfo; 32] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -778,6 +780,32 @@ const BUILTIN: [SpeciesInfo; 30] = [
             "minecraft:entities/bat",
         )
     },
+    SpeciesInfo {
+        category: Category::WaterAmbient,
+        size: (0.7, 0.4),
+        eye_height: 0.26,
+        max_health: 3.0,
+        speed: 0.7,
+        follow_range: 16.0,
+        ..base(
+            "minecraft:salmon",
+            "minecraft:entity.salmon",
+            "minecraft:entities/salmon",
+        )
+    },
+    SpeciesInfo {
+        category: Category::UndergroundWaterCreature,
+        size: (0.8, 0.8),
+        eye_height: 0.4,
+        max_health: 10.0,
+        speed: 0.7,
+        follow_range: 16.0,
+        ..base(
+            "minecraft:glow_squid",
+            "minecraft:entity.glow_squid",
+            "minecraft:entities/glow_squid",
+        )
+    },
 ];
 
 static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
@@ -811,7 +839,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 30] = [
+    pub const ALL: [Species; 32] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -842,6 +870,8 @@ impl Species {
         Species::Warden,
         Species::Cat,
         Species::Bat,
+        Species::Salmon,
+        Species::GlowSquid,
     ];
 
     /// Данные вида: выгрузка, если она установлена, иначе встроенные.
@@ -4317,6 +4347,11 @@ mod tests {
         );
         assert_eq!(Species::Bat.category(), Category::Ambient);
         assert_eq!(Species::Cod.category(), Category::WaterCreature);
+        assert_eq!(Species::Salmon.category(), Category::WaterAmbient);
+        assert_eq!(
+            Species::GlowSquid.category(),
+            Category::UndergroundWaterCreature
+        );
         // Соседние игроки делят квадраты: 17 × 18, а не 2 × 289.
         assert_eq!(spawn_cap_chunks(&[(0, 0), (1, 0)]), 306);
         assert_eq!(spawn_cap_chunks(&[]), 0);

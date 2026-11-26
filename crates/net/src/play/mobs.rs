@@ -6061,7 +6061,7 @@ impl PlayPlan {
         }
         // `SpawnPlacementTypes.IN_WATER`: другая ветка правил, без опоры.
         if species.category().is_water() {
-            return self.water_spawn_fits(w, species, pos);
+            return self.water_spawn_fits(w, species, pos, light);
         }
         let below = [pos[0], pos[1] - 1, pos[2]];
         let Some(floor) = w.block(below) else {
@@ -6158,24 +6158,52 @@ impl PlayPlan {
 
     /// `WaterAnimal.checkSurfaceWaterAnimalSpawnRules` + `IN_WATER`: y в
     /// `[sea-13, sea]`, вода в клетке и снизу, над клеткой — вода, рамка свободна.
-    fn water_spawn_fits(&self, w: &WorldView<'_>, species: Species, pos: [i32; 3]) -> bool {
+    /// Светящийся спрут — отдельное правило: ниже `sea−33`, абсолютная тьма.
+    fn water_spawn_fits(
+        &self,
+        w: &WorldView<'_>,
+        species: Species,
+        pos: [i32; 3],
+        light: SpawnLight,
+    ) -> bool {
         let sea = self.login.spawn.sea_level;
-        if pos[1] < sea - 13 || pos[1] > sea {
-            return false;
-        }
         let water = |p: [i32; 3]| {
             self.block(p)
                 .and_then(|s| crate::fluids::state_fluid(&self.survival.placement, s))
                 .is_some_and(|f| f.kind == crate::fluids::Kind::Water)
         };
-        if !water(pos) || !water([pos[0], pos[1] - 1, pos[2]]) {
-            return false;
-        }
-        if self
-            .block([pos[0], pos[1] + 1, pos[2]])
-            .is_none_or(|s| self.state_name(s) != "minecraft:water")
-        {
-            return false;
+        if species.category() == mb::Category::UndergroundWaterCreature {
+            if pos[1] > sea - 33 {
+                return false;
+            }
+            let sky = w.sky_light_at(pos).unwrap_or(0);
+            let block = w.block_light_at(pos).unwrap_or(0);
+            if i32::from(mb::raw_brightness(sky, block, light.darken)) != 0 {
+                return false;
+            }
+            if !water(pos) {
+                return false;
+            }
+            let above = [pos[0], pos[1] + 1, pos[2]];
+            if self
+                .block(above)
+                .is_some_and(|s| mb::full_block(self.shape_at(Some(s), above)))
+            {
+                return false;
+            }
+        } else {
+            if pos[1] < sea - 13 || pos[1] > sea {
+                return false;
+            }
+            if !water(pos) || !water([pos[0], pos[1] - 1, pos[2]]) {
+                return false;
+            }
+            if self
+                .block([pos[0], pos[1] + 1, pos[2]])
+                .is_none_or(|s| self.state_name(s) != "minecraft:water")
+            {
+                return false;
+            }
         }
         let feet = [
             f64::from(pos[0]) + 0.5,
