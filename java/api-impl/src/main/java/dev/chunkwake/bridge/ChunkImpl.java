@@ -14,6 +14,9 @@ final class ChunkImpl {
     private final int x;
     private final int z;
     private final java.util.Set<Plugin> tickets = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** PDC чанков: пока in-memory, ключ — UUID мира + координаты. */
+    private static final java.util.concurrent.ConcurrentHashMap<String, PdcImpl> PDCS =
+            new java.util.concurrent.ConcurrentHashMap<>();
     private boolean forceLoaded;
 
     ChunkImpl(WorldImpl world, int x, int z) {
@@ -141,6 +144,11 @@ final class ChunkImpl {
     public java.util.Collection<Plugin> getPluginChunkTickets() {
         return java.util.Set.copyOf(this.tickets);
     }
+    public org.bukkit.persistence.PersistentDataContainer getPersistentDataContainer() {
+        String key = world.getUID() + ":" + x + ":" + z;
+        return PDCS.computeIfAbsent(key, ignored -> new PdcImpl(new java.util.LinkedHashMap<>())).api;
+    }
+
     public long getInhabitedTime() { return 0L; }
     public ChunkSnapshot getChunkSnapshot(boolean includeMaxBlockY, boolean includeBiome,
             boolean includeBiomeTempRain, boolean includeLightData) {

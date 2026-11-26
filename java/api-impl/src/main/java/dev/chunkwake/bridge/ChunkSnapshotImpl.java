@@ -257,9 +257,14 @@ final class ChunkSnapshotImpl implements org.bukkit.ChunkSnapshot {
         return block(x, y, z);
     }
 
+    /** Legacy data byte состояния (CraftMagicNumbers.toLegacyData). */
+    static int legacyData(BlockData data) {
+        return data == null ? 0 : LEGACY_DATA.getOrDefault(canonical(data), 0);
+    }
+
     @Override public int getData(int x, int y, int z) {
         offset(x, y, z);
-        return LEGACY_DATA.getOrDefault(canonical(block(x, y, z)), 0);
+        return legacyData(block(x, y, z));
     }
 
     @Override public int getBlockSkyLight(int x, int y, int z) {

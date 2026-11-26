@@ -147,6 +147,12 @@ final class BlockImpl {
 
     public org.bukkit.Chunk getChunk() { return world.getChunkAt(x >> 4, z >> 4); }
 
+    /** Устаревший legacy data byte (CraftMagicNumbers). */
+    @Deprecated
+    public byte getData() {
+        return (byte) ChunkSnapshotImpl.legacyData(getBlockData());
+    }
+
     public org.bukkit.block.Biome getBiome() {
         String key = WorldImpl.request(world, "biome " + x + " " + y + " " + z).trim();
         if (key.isEmpty()) {
