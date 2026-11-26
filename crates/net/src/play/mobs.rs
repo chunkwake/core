@@ -4735,7 +4735,7 @@ pub(super) fn mob_to_nbt(
         }
         // `Creeper.addAdditionalSaveData`.
         // `TameableAnimal.addAdditionalSaveData`: `Tame`/`Owner`.
-        Species::Wolf => {
+        Species::Wolf | Species::Cat | Species::Parrot => {
             c.insert("Tame".into(), Tag::Byte(i8::from(m.tamed)));
             c.insert("Sitting".into(), Tag::Byte(i8::from(m.sitting)));
             if let Some(owner) = m.owner {
@@ -4877,7 +4877,7 @@ pub(super) fn mob_from_nbt(
         }
         m.ignited = byte("ignited").is_some_and(|b| b != 0);
     }
-    if species == Species::Wolf {
+    if matches!(species, Species::Wolf | Species::Cat | Species::Parrot) {
         m.tamed = byte("Tame").is_some_and(|b| b != 0);
         m.sitting = byte("Sitting").is_some_and(|b| b != 0);
         if let Some(Tag::IntArray(a)) = c.get("Owner")
@@ -5351,6 +5351,31 @@ impl PlayPlan {
                     m.custom_name.as_deref().unwrap_or("")
                 )
             }
+            Some("tamed") => {
+                let Some(id) = f.get(1).and_then(|v| v.parse::<i32>().ok()) else {
+                    return String::new();
+                };
+                let mobs = self.sim().mobs.lock().unwrap();
+                let Some(e) = mobs.get(&id) else {
+                    return String::new();
+                };
+                format!(
+                    "{} {}",
+                    u8::from(e.mob.tamed),
+                    e.mob.owner.map_or_else(
+                        || "-".to_owned(),
+                        |owner| Uuid::from_u128(owner).to_string()
+                    )
+                )
+            }
+            Some("sitting") => {
+                let Some(id) = f.get(1).and_then(|v| v.parse::<i32>().ok()) else {
+                    return String::new();
+                };
+                let mobs = self.sim().mobs.lock().unwrap();
+                mobs.get(&id)
+                    .map_or_else(String::new, |e| u8::from(e.mob.sitting).to_string())
+            }
             Some("set") => {
                 let Some(id) = f.get(1).and_then(|v| v.parse::<i32>().ok()) else {
                     return "0".into();
@@ -5412,6 +5437,26 @@ impl PlayPlan {
                             let name = f[3..].join(" ");
                             m.custom_name = (!name.is_empty()).then_some(name);
                         }
+                        Some("tamed") => {
+                            m.tamed = f.get(3) == Some(&"1");
+                            if !m.tamed {
+                                m.owner = None;
+                            }
+                        }
+                        Some("sitting") => m.sitting = f.get(3) == Some(&"1"),
+                        Some("owner") => match f.get(3).copied() {
+                            Some("-") | None => {
+                                m.owner = None;
+                                m.tamed = false;
+                            }
+                            Some(owner) => {
+                                let Ok(owner) = Uuid::parse_str(owner) else {
+                                    return "0".into();
+                                };
+                                m.owner = Some(owner.as_u128());
+                                m.tamed = true;
+                            }
+                        },
                         _ => return "0".into(),
                     }
                 }

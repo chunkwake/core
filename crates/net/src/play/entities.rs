@@ -139,6 +139,85 @@ impl PlayPlan {
                 self.plugin_entity(id)
                     .map_or_else(String::new, |e| e.line().trim_end().to_owned())
             }
+            Some("shooter") => {
+                let Some(id) = f.get(1).and_then(|v| v.parse::<i32>().ok()) else {
+                    return String::new();
+                };
+                let arrows = self.sim().arrows.lock().unwrap();
+                let Some(arrow) = arrows.get(&id) else {
+                    return String::new();
+                };
+                arrow.owner.map_or_else(String::new, |owner| {
+                    format!("{owner} {}", u8::from(arrow.left_owner))
+                })
+            }
+            Some("setshooter") => {
+                let (Some(id), Some(owner)) = (
+                    f.get(1).and_then(|v| v.parse::<i32>().ok()),
+                    f.get(2).copied(),
+                ) else {
+                    return "0".into();
+                };
+                let owner = match owner {
+                    "-" => None,
+                    owner => match Uuid::parse_str(owner) {
+                        Ok(uuid) => Some(uuid),
+                        Err(_) => return "0".into(),
+                    },
+                };
+                let mut arrows = self.sim().arrows.lock().unwrap();
+                let Some(arrow) = arrows.get_mut(&id) else {
+                    return "0".into();
+                };
+                arrow.owner = owner;
+                arrow.left_owner = owner.is_none();
+                "1".into()
+            }
+            Some("setleftshooter") => {
+                let (Some(id), Some(left)) = (
+                    f.get(1).and_then(|v| v.parse::<i32>().ok()),
+                    f.get(2).copied(),
+                ) else {
+                    return "0".into();
+                };
+                let mut arrows = self.sim().arrows.lock().unwrap();
+                let Some(arrow) = arrows.get_mut(&id) else {
+                    return "0".into();
+                };
+                arrow.left_owner = left == "1";
+                "1".into()
+            }
+            Some("xp") => {
+                let Some(id) = f.get(1).and_then(|v| v.parse::<i32>().ok()) else {
+                    return String::new();
+                };
+                self.sim()
+                    .orbs
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .map_or_else(String::new, |orb| format!("{} {}", orb.value, orb.count))
+            }
+            Some("setxp") => {
+                let Some(id) = f.get(1).and_then(|v| v.parse::<i32>().ok()) else {
+                    return "0".into();
+                };
+                let Some(value) = f.get(2).and_then(|v| v.parse::<i32>().ok()) else {
+                    return "0".into();
+                };
+                let count = f
+                    .get(3)
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(1)
+                    .clamp(1, i32::MAX as u32);
+                let mut orbs = self.sim().orbs.lock().unwrap();
+                let Some(orb) = orbs.get_mut(&id) else {
+                    return "0".into();
+                };
+                orb.value = value.max(0);
+                orb.count = count;
+                "1".into()
+            }
             Some("remove") => {
                 let Some(id) = f.get(1).and_then(|v| v.parse::<i32>().ok()) else {
                     return "0".into();

@@ -283,6 +283,97 @@ final class NonMobImpl {
                 + v.getX() + " " + v.getY() + " " + v.getZ());
     }
 
+    private String[] shooter() {
+        return world.request("entity shooter " + id).trim().split(" ");
+    }
+
+    public org.bukkit.projectiles.ProjectileSource getShooter() {
+        String[] f = shooter();
+        if (f.length < 1 || f[0].isEmpty()) {
+            return null;
+        }
+        try {
+            return Bridge.server.getPlayer(UUID.fromString(f[0]));
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    public java.util.UUID getOwnerUniqueId() {
+        String[] f = shooter();
+        if (f.length < 1 || f[0].isEmpty()) {
+            return null;
+        }
+        try {
+            return UUID.fromString(f[0]);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    public void setShooter(org.bukkit.projectiles.ProjectileSource source) {
+        if (source == null) {
+            world.request("entity setshooter " + id + " -");
+            return;
+        }
+        if (source instanceof org.bukkit.entity.Player player) {
+            world.request("entity setshooter " + id + " " + player.getUniqueId());
+            return;
+        }
+        throw new IllegalArgumentException("chunkwake: unsupported shooter " + source);
+    }
+
+    public boolean hasLeftShooter() {
+        String[] f = shooter();
+        return f.length >= 2 && f[1].equals("1");
+    }
+
+    public void setHasLeftShooter(boolean left) {
+        world.request("entity setleftshooter " + id + " " + (left ? "1" : "0"));
+    }
+
+    public boolean doesBounce() { return false; }
+    public void setBounce(boolean bounce) {}
+    public boolean hasBeenShot() { return true; }
+    public void setHasBeenShot(boolean shot) {}
+    public boolean canHitEntity(Entity entity) { return true; }
+    public void hitEntity(Entity entity) {}
+    public void hitEntity(Entity entity, org.bukkit.util.Vector velocity) {}
+
+    public int getExperience() {
+        String[] f = world.request("entity xp " + id).trim().split(" ");
+        try {
+            return f.length > 0 ? Integer.parseInt(f[0]) : 0;
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    public void setExperience(int experience) {
+        world.request("entity setxp " + id + " " + Math.max(0, experience) + " "
+                + Math.max(1, getCount()));
+    }
+
+    public int getCount() {
+        String[] f = world.request("entity xp " + id).trim().split(" ");
+        try {
+            return f.length > 1 ? Integer.parseInt(f[1]) : 1;
+        } catch (NumberFormatException e) {
+            return 1;
+        }
+    }
+
+    public void setCount(int count) {
+        world.request("entity setxp " + id + " " + getExperience() + " "
+                + Math.max(1, count));
+    }
+
+    public java.util.UUID getTriggerEntityId() { return null; }
+    public java.util.UUID getSourceEntityId() { return null; }
+    public org.bukkit.entity.ExperienceOrb.SpawnReason getSpawnReason() {
+        return org.bukkit.entity.ExperienceOrb.SpawnReason.UNKNOWN;
+    }
+
     public Location getLocation(Location into) {
         Location l = getLocation();
         if (into != null) {

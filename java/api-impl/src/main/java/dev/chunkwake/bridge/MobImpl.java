@@ -350,6 +350,48 @@ final class MobImpl {
         }
         set("health " + h);
     }
+
+    private String[] tameState() {
+        return world.request("mob tamed " + id).trim().split(" ");
+    }
+
+    public boolean isTamed() {
+        String[] f = tameState();
+        return f.length > 0 && f[0].equals("1");
+    }
+
+    public void setTamed(boolean tamed) {
+        set("tamed " + (tamed ? "1" : "0"));
+    }
+
+    public java.util.UUID getOwnerUniqueId() {
+        String[] f = tameState();
+        if (f.length < 2 || f[1].equals("-")) {
+            return null;
+        }
+        try {
+            return java.util.UUID.fromString(f[1]);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    public org.bukkit.entity.AnimalTamer getOwner() {
+        java.util.UUID owner = getOwnerUniqueId();
+        return owner == null ? null : Bridge.server.getOfflinePlayer(owner);
+    }
+
+    public void setOwner(org.bukkit.entity.AnimalTamer owner) {
+        set(owner == null ? "owner -" : "owner " + owner.getUniqueId());
+    }
+
+    public boolean isSitting() {
+        return world.request("mob sitting " + id).trim().equals("1");
+    }
+
+    public void setSitting(boolean sitting) {
+        set("sitting " + (sitting ? "1" : "0"));
+    }
     public double getMaxHealth() { return num(8); }
     public void damage(double amount) { set("damage " + amount); }
     public void damage(double amount, Entity source) { damage(amount); }
