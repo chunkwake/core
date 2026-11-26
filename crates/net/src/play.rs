@@ -135,6 +135,7 @@ struct Ids {
     move_entity_pos_rot: i32,
     block_update: i32,
     block_entity_data: i32,
+    tag_query: i32,
     block_destruction: i32,
     section_blocks_update: i32,
     block_changed_ack: i32,
@@ -144,6 +145,7 @@ struct Ids {
     sb_pick_item_from_block: i32,
     sb_pick_item_from_entity: i32,
     sb_teleport_to_entity: i32,
+    sb_block_entity_tag_query: i32,
     sb_change_game_mode: i32,
     sb_set_carried_item: i32,
     sb_set_beacon: i32,
@@ -3487,6 +3489,7 @@ impl PlayPlan {
                 move_entity_pos_rot: cb("move_entity_pos_rot")?,
                 block_update: cb("block_update")?,
                 block_entity_data: cb("block_entity_data")?,
+                tag_query: cb("tag_query")?,
                 block_destruction: cb("block_destruction")?,
                 section_blocks_update: cb("section_blocks_update")?,
                 block_changed_ack: cb("block_changed_ack")?,
@@ -3496,6 +3499,7 @@ impl PlayPlan {
                 sb_pick_item_from_block: sb("pick_item_from_block")?,
                 sb_pick_item_from_entity: sb("pick_item_from_entity")?,
                 sb_teleport_to_entity: sb("teleport_to_entity")?,
+                sb_block_entity_tag_query: sb("block_entity_tag_query")?,
                 sb_change_game_mode: sb("change_game_mode")?,
                 sb_set_carried_item: sb("set_carried_item")?,
                 sb_set_beacon: sb("set_beacon")?,
@@ -15751,6 +15755,24 @@ impl PlayPlan {
                             } else {
                                 self.switch_player_dimension_look(uuid, dim, pos, (yaw, pitch));
                             }
+                        }
+                        continue;
+                    }
+                    if id == ids.sb_block_entity_tag_query {
+                        // `ServerboundBlockEntityTagQueryPacket`: F3+I, только
+                        // уровень прав 2. Нет блок-сущности — пустой ответ.
+                        let transaction = r.var_int()?;
+                        let pos = play::unpack_block_pos(r.i64()?);
+                        if self.op_level(uuid) >= 2 {
+                            let bytes = self
+                                .block_entity(pos)
+                                .map(|be| chunkwake_world::nbt::write_network(&be.nbt));
+                            conn.send(&play::tag_query(
+                                ids.tag_query,
+                                transaction,
+                                bytes.as_deref(),
+                            ))
+                            .await?;
                         }
                         continue;
                     }

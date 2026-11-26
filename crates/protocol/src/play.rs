@@ -1242,6 +1242,20 @@ pub fn block_entity_data(id: i32, pos: [i32; 3], kind: i32, nbt: &[u8]) -> Vec<u
     w.buf
 }
 
+/// `ClientboundTagQueryPacket`: ответ на F3+I. `None` — блока/сущности нет,
+/// `writeNbt(null)` пишет END.
+pub fn tag_query(id: i32, transaction: i32, nbt: Option<&[u8]>) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(transaction);
+    match nbt {
+        Some(bytes) => w.buf.extend_from_slice(bytes),
+        None => {
+            w.u8(0);
+        }
+    }
+    w.buf
+}
+
 /// `ClientboundOpenSignEditorPacket`: редактор таблички у клиента (`is_front_text`).
 pub fn open_sign_editor(id: i32, pos: [i32; 3], front: bool) -> Vec<u8> {
     let mut w = Writer::new();

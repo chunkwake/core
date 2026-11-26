@@ -14,7 +14,6 @@ use std::collections::BTreeSet;
 /// дыры поведения (`entity_tag_query`).
 /// Матрица: `docs/feature-matrix.md`, строка «Пакеты клиента».
 const UNHANDLED: &[&str] = &[
-    "block_entity_tag_query",
     "bundle_item_selected",
     "change_difficulty",
     "chat_ack",
