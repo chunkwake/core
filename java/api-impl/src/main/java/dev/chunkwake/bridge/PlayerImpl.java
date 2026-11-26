@@ -37,6 +37,8 @@ public final class PlayerImpl {
     private org.bukkit.Location respawn;
     /** `Player.setFallDistance`: витрина (Rust считает свою физику). */
     private float fallDistance;
+    /** Последняя заданная скорость: клиент авторитетен, getVelocity возвращает её. */
+    private volatile org.bukkit.util.Vector velocity = new org.bukkit.util.Vector();
     /** `Player.setSleepingIgnored`: не мешать спать (Essentials). */
     private boolean sleepingIgnored;
     /** `Player.getLocale`: клиентский язык (по умолчанию `en_us`). */
@@ -1409,6 +1411,16 @@ public final class PlayerImpl {
     }
 
     public org.bukkit.Location getEyeLocation() { return getLocation().add(0, 1.62, 0); }
+
+    public org.bukkit.util.Vector getVelocity() { return velocity.clone(); }
+
+    public void setVelocity(org.bukkit.util.Vector v) {
+        if (v == null) {
+            throw new IllegalArgumentException("Velocity cannot be null");
+        }
+        velocity = v.clone();
+        control("velocity " + v.getX() + " " + v.getY() + " " + v.getZ());
+    }
 
     public java.util.List<org.bukkit.entity.Entity> getNearbyEntities(double x, double y, double z) {
         java.util.List<org.bukkit.entity.Entity> out = new java.util.ArrayList<>();

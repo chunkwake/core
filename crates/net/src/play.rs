@@ -14436,6 +14436,9 @@ impl PlayPlan {
                                 self.send_inventory(conn, &mut state.inv).await?;
                             }
                         }
+                        Control::Velocity(v) => {
+                            conn.send(&play::set_entity_motion(ids.set_entity_motion, me.entity_id, v)).await?;
+                        }
                         Control::Furnace(pos, data, items) => {
                             if let Some(w) = window.as_mut().filter(|w| w.pos == pos) {
                                 for (i, (&v, old)) in data.iter().zip(w.data.iter_mut()).enumerate() {

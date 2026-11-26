@@ -283,6 +283,28 @@ final class MobImpl {
         return scheduler;
     }
 
+    public org.bukkit.util.Vector getVelocity() {
+        String reply = world.request("entity velocity " + id).trim();
+        String[] f = reply.split(" ");
+        if (f.length < 3) {
+            return new org.bukkit.util.Vector();
+        }
+        try {
+            return new org.bukkit.util.Vector(Double.parseDouble(f[0]),
+                    Double.parseDouble(f[1]), Double.parseDouble(f[2]));
+        } catch (NumberFormatException e) {
+            return new org.bukkit.util.Vector();
+        }
+    }
+
+    public void setVelocity(org.bukkit.util.Vector v) {
+        if (v == null) {
+            throw new IllegalArgumentException("Velocity cannot be null");
+        }
+        world.request("entity setvelocity " + id + " "
+                + v.getX() + " " + v.getY() + " " + v.getZ());
+    }
+
     public Location getLocation() {
         String[] s = state();
         if (s == null) {

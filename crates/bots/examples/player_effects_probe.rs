@@ -41,6 +41,7 @@ async fn main() {
         "block_update",
         "container_set_content",
         "level_particles",
+        "set_entity_motion",
     ];
     let mut capture = Vec::new();
     let mut by_id = BTreeMap::new();

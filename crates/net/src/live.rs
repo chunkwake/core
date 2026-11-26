@@ -157,6 +157,8 @@ pub enum Control {
     Selected(usize),
     /// Переслать игроку актуальный инвентарь (`Player.updateInventory`).
     Inventory,
+    /// Задать скорость игрока (`Player.setVelocity`): `set_entity_motion`.
+    Velocity([f64; 3]),
     /// Телепорт: позиция, поворот.
     Teleport([f64; 3], f32, f32),
     /// Переход в другое измерение: `respawn` клиенту и новый поток чанков.
@@ -324,6 +326,14 @@ impl Control {
             }
             "held" => Control::Selected(it.next()?.parse::<usize>().ok().filter(|&s| s <= 8)?),
             "inventory" => Control::Inventory,
+            "velocity" => {
+                let mut n = || {
+                    it.next()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .filter(|v| v.is_finite())
+                };
+                Control::Velocity([n()?, n()?, n()?])
+            }
             "slot" => {
                 let window = bukkit_to_window(it.next()?.parse().ok()?)?;
                 // Остаток строки после номера — стопка (`-` — пусто).
@@ -356,6 +366,7 @@ impl Control {
             Control::Slot(w, s) => live.slots[w] = s,
             Control::Selected(s) => live.selected = s,
             Control::Inventory => {}
+            Control::Velocity(_) => {}
             Control::Teleport(p, yaw, pitch) => {
                 live.pos = p;
                 live.yaw = yaw;

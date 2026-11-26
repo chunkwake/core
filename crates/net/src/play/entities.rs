@@ -97,6 +97,24 @@ impl PlayPlan {
                 id.map_or_else(String::new, |id| format!("{id} {}", plugin_uuid(id)))
             }
             // `list после`: сущности с ID больше `после` по возрастанию, кусок до 7 КБ.
+            Some("velocity") => {
+                let Some(id) = f.get(1).and_then(|v| v.parse::<i32>().ok()) else {
+                    return String::new();
+                };
+                self.plugin_velocity(id)
+                    .map_or_else(String::new, |v| format!("{} {} {}", v[0], v[1], v[2]))
+            }
+            Some("setvelocity") => {
+                let (Some(id), Some(vx), Some(vy), Some(vz)) = (
+                    f.get(1).and_then(|v| v.parse::<i32>().ok()),
+                    num(2),
+                    num(3),
+                    num(4),
+                ) else {
+                    return "0".into();
+                };
+                u8::from(self.set_plugin_velocity(id, [vx, vy, vz])).to_string()
+            }
             Some("list") => {
                 let after = f
                     .get(1)
@@ -228,6 +246,83 @@ impl PlayPlan {
     }
 
     /// Одна поддерживаемая сущность по ID: без сборки всего списка.
+    /// Скорость поддерживаемой сущности (`Entity.getVelocity`).
+    fn plugin_velocity(&self, id: i32) -> Option<[f64; 3]> {
+        {
+            let arrows = self.sim().arrows.lock().unwrap();
+            if let Some(a) = arrows.get(&id) {
+                if matches!(a.entity_name(), "minecraft:arrow" | "minecraft:trident") {
+                    return Some(a.vel);
+                }
+            }
+        }
+        if let Some(b) = self.sim().boats.lock().unwrap().get(&id) {
+            return Some(b.vel);
+        }
+        if let Some(c) = self.sim().minecarts.lock().unwrap().get(&id) {
+            return Some(c.cart.vel);
+        }
+        if let Some(t) = self.sim().tnt.lock().unwrap().get(&id) {
+            return Some(t.vel);
+        }
+        if let Some(o) = self.sim().orbs.lock().unwrap().get(&id) {
+            return Some(o.vel);
+        }
+        if let Some(e) = self.sim().eyes.lock().unwrap().get(&id) {
+            return Some(e.vel);
+        }
+        if let Some(m) = self.sim().mobs.lock().unwrap().get(&id) {
+            return Some(m.mob.vel);
+        }
+        None
+    }
+
+    /// Задать скорость и разослать `set_entity_motion`.
+    fn set_plugin_velocity(&self, id: i32, vel: [f64; 3]) -> bool {
+        let mut found = false;
+        {
+            let mut arrows = self.sim().arrows.lock().unwrap();
+            if let Some(a) = arrows.get_mut(&id) {
+                if matches!(a.entity_name(), "minecraft:arrow" | "minecraft:trident") {
+                    a.vel = vel;
+                    found = true;
+                }
+            }
+        }
+        if !found && let Some(b) = self.sim().boats.lock().unwrap().get_mut(&id) {
+            b.vel = vel;
+            found = true;
+        }
+        if !found && let Some(c) = self.sim().minecarts.lock().unwrap().get_mut(&id) {
+            c.cart.vel = vel;
+            found = true;
+        }
+        if !found && let Some(t) = self.sim().tnt.lock().unwrap().get_mut(&id) {
+            t.vel = vel;
+            found = true;
+        }
+        if !found && let Some(o) = self.sim().orbs.lock().unwrap().get_mut(&id) {
+            o.vel = vel;
+            found = true;
+        }
+        if !found && let Some(e) = self.sim().eyes.lock().unwrap().get_mut(&id) {
+            e.vel = vel;
+            found = true;
+        }
+        if !found && let Some(m) = self.sim().mobs.lock().unwrap().get_mut(&id) {
+            m.mob.vel = vel;
+            found = true;
+        }
+        if found {
+            self.hub.send(
+                None,
+                play::set_entity_motion(self.ids.set_entity_motion, id, vel),
+            );
+            self.mark_work();
+        }
+        found
+    }
+
     fn plugin_entity(&self, id: i32) -> Option<PluginEntity> {
         if let Some(arrow) = self.sim().arrows.lock().unwrap().get(&id) {
             let kind = arrow.entity_name();
